@@ -1,0 +1,12 @@
+# Kiro skill artifacts (code-review, refactor, steering-maintenance, judgement)
+**/.code-review/
+**/.judgement/
+**/.refactor/
+**/.steering-maintenance/
+
+# Local env file for compose interpolation (keeps API keys out of git)
+.env
+*.env
+
+# go.work is committed (documents the local arrapi replace); go.work.sum is not
+go.work.sum

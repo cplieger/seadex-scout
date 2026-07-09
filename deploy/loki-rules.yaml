@@ -1,0 +1,18 @@
+# Reference Loki ruler alert for seadex-scout, keyed on the structured log line
+# it emits (Alloy ships the container stdout to Loki). Copy into your Loki
+# ruler and route it to your notifier. The Mimir gauge alert (mimir-rules.yaml)
+# covers the same signal from the metrics side; use whichever your stack rules
+# on. seadex-scout ships no notifier of its own by design.
+groups:
+  - name: seadex-scout-logs
+    rules:
+      # A new "better release available" finding was logged in the last hour.
+      - alert: SeadexScoutBetterReleaseLogged
+        expr: |
+          sum(count_over_time({container="seadex-scout"} | json | msg=`better release available` [1h])) > 0
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "seadex-scout logged a better-release finding"
+          description: 'Query {container="seadex-scout"} | json | msg=`better release available` for titles and release links.'

@@ -1,0 +1,143 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+  modules-download-mode: readonly
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - noctx
+    - gosec
+    - gocritic
+    - revive
+    - goconst
+    - gocyclo
+    - gocognit
+    - unconvert
+    - unparam
+    - prealloc
+    - wastedassign
+    - intrange
+    - modernize
+    - usestdlibvars
+    - usetesting
+    - perfsprint
+    - misspell
+    - durationcheck
+    - errname
+    - nolintlint
+    - sloglint
+  settings:
+    errcheck:
+      check-type-assertions: true
+    govet:
+      enable-all: true
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+    gocyclo:
+      # Cyclomatic complexity ~= the minimum number of test cases needed to
+      # cover every path, so it doubles as a "how much test does this need"
+      # signal. Tightened 18 -> 15 toward McCabe's limit (10), pragmatically
+      # raised for Go since each `if err != nil` adds a path.
+      min-complexity: 15
+    gocognit:
+      # Cognitive complexity (SonarQube's standard ceiling of 15) measures how
+      # hard a function is to understand, the better defect-density signal.
+      # Flat switches and sequential error checks that inflate gocyclo stay low
+      # here; a genuinely path-heavy-but-flat function may carry an explained
+      # //nolint:gocyclo (nolintlint requires the explanation).
+      min-complexity: 15
+    goconst:
+      ignore-tests: true
+    perfsprint:
+      strconcat: false
+    sloglint:
+      kv-only: true
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+  exclusions:
+    presets:
+      # `comments` preset removed: revive's `exported` (every exported symbol
+      # needs a doc comment starting with its name) and `package-comments`
+      # (every package needs a doc comment) are now enforced org-wide.
+      # All consumer repos were updated before this change was propagated.
+      - std-error-handling
+      - common-false-positives
+      - legacy
+    paths:
+      - node_modules
+    rules:
+      # Tests are exempt from style/correctness linters (placeholder secrets,
+      # deliberate error-ignores, repeated literals) AND from complexity
+      # (gocyclo + gocognit). Both over-fire on idiomatic Go test code: a
+      # thorough table-driven / property / fuzz test is a loop + t.Run closures
+      # + per-case assertion guards, which gocognit's nesting model scores high
+      # without that being a smell. A 2026-06 audit put clean gold-standard
+      # libraries' flagship tests at cognitive 36-72 (atomicfile TestPendingFile
+      # is 72) and ~320 test funcs org-wide over 15; gating those would force
+      # ~320 //nolint or the splitting of cohesive table tests, degrading the
+      # suites. golangci also can't set a test-only threshold (min-complexity is
+      # global), so the prod gate of 15 can't coexist with a lenient test bar.
+      # Test complexity is judged in context instead: the test-review agent's
+      # smell catalog (Eager Test, Conditional Test Logic) plus human review.
+      - path: _test\.go
+        linters:
+          - gocyclo
+          - gocognit
+          - errcheck
+          - gosec
+          - goconst
+          - gocritic
+          - govet
+          - prealloc
+          - perfsprint
+          - errname
+          - sloglint
+          - unparam
+          - usetesting
+          - noctx
+          - revive
+      - path: _test\.go
+        text: "string .* has .* occurrences"
+        linters:
+          - goconst
+
+# Formatters (golangci-lint v2). `golangci-lint run` reports unformatted
+# files as issues (exit 1), so the existing lint step enforces these — no
+# extra workflow step / version bump needed; the config propagates via
+# sync.yaml. `golangci-lint fmt` applies them.
+formatters:
+  enable:
+    - gofumpt
+    - gci
+  settings:
+    gofumpt:
+      # Strictest: the `-extra` rules (group adjacent same-type params,
+      # forbid naked returns) on top of gofumpt's strict superset of
+      # gofmt. module-path is auto-detected from each repo's go.mod when
+      # left empty.
+      extra-rules: true
+    gci:
+      # Deterministic import grouping: standard -> third-party -> local
+      # module (folded by gofumpt into the third-party group). A separate
+      # gci `localmodule`/`prefix` section is intentionally NOT used: gofumpt
+      # never emits a distinct local-import group, so it would never converge.
+      # goimports is intentionally NOT enabled: it conflicts with gci on
+      # ordering, and its only unique capability (add/remove imports) is
+      # moot in CI — the Go compiler already rejects unused/missing
+      # imports, and editors handle it via gopls.
+      sections:
+        - standard
+        - default
+      custom-order: true
+  exclusions:
+    # Generated files are auto-excluded (default generated: lax).
+    paths:
+      - node_modules
