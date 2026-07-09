@@ -1,0 +1,13 @@
+# Example compose for seadex-scout. See the README for all configuration options and hardening.
+services:
+  seadex-scout:
+    image: ghcr.io/cplieger/seadex-scout:latest
+    container_name: seadex-scout
+    restart: unless-stopped
+    user: "1000:1000"  # match your host user (owns ./config)
+
+    # All configuration lives in ./config/config.yaml. On first boot with no
+    # config, seadex-scout writes a starter there and exits with a warning; edit
+    # it (set your Sonarr/Radarr url + api_key) and restart.
+    volumes:
+      - "./config:/config"  # config.yaml + state + mapping cache; report.md/.json land here

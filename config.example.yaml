@@ -1,0 +1,67 @@
+# ---------------------------------------------------------------------------
+# seadex-scout - compares your Sonarr/Radarr anime library against SeaDex
+# (releases.moe) and logs when a better release is recommended. Report-only.
+#
+# This file is the single settings surface. Values can be written directly, or
+# pulled from the environment with ${VAR} - handy for secrets: keep an API key
+# in an .env / Docker secret and reference it here. Only SONARR_*, RADARR_*, and
+# SEADEX_SCOUT_* environment variables are expanded.
+#
+# On first boot with no config, seadex-scout writes this template to
+# /config/config.yaml and exits with a warning; edit it and restart.
+# ---------------------------------------------------------------------------
+
+# At least one arr (sonarr or radarr) must be enabled with a url + api_key.
+sonarr:
+  enabled: true
+  url: "http://sonarr:8989" # internal URL seadex-scout queries
+  api_key: "" # required when enabled; Settings > General (or ${SONARR_API_KEY})
+  public_url: "" # browser URL for report deep-links; falls back to url
+
+radarr:
+  enabled: false
+  url: "http://radarr:7878" # internal URL seadex-scout queries
+  api_key: "" # required when enabled (or ${RADARR_API_KEY})
+  public_url: "" # browser URL for report deep-links; falls back to url
+
+# daemon = poll on a schedule and log better releases; report = one-shot audit then exit.
+mode: "daemon"
+
+poll_interval: "12h" # daemon cadence (a cycle also runs on start); "off" / "disabled" / "0" = resident-idle: no internal timer, trigger cycles externally via `poll` (e.g. Ofelia)
+season_scoping: false # compare per-season instead of series-level
+
+filters:
+  allow_remux: false # count remuxes as recommendations
+  min_resolution: "1080p" # lowest recommended resolution; "" disables the floor
+  require_dual_audio: false # drop releases that are not dual-audio
+  trackers: [] # preferred indexers, e.g. ["animebytes", "nyaa"]; [] = all
+  remux_groups: [] # release groups to always treat as remux
+  notify_unavailable_tracker: true # still flag a better release found only on a non-listed tracker
+  include_specials: true # include OVA/ONA/special entries
+
+tags:
+  include: [] # only scan arr items carrying these tags; [] = all
+  exclude: [] # skip arr items carrying these tags
+
+report:
+  path: "/config/report.md" # report mode writes here (a .json is written alongside)
+
+seadex:
+  base_url: "https://releases.moe"
+  page_delay: "2s" # politeness delay between SeaDex pages
+
+mapping:
+  # Fribb anime-lists: the AniList <-> arr ID bridge.
+  url: "https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-mini.json"
+  refresh: "24h" # conditional re-download cadence
+  overrides_path: "/config/overrides.json" # local AniList->arr ID pins
+
+anilist:
+  url: "https://graphql.anilist.co" # title/format fallback for unmapped entries
+  rate: 30 # max requests per minute
+
+state_path: "/config/state.json" # atomic cache: library snapshot, mapping cache, dedupe
+
+log:
+  level: "info" # debug | info | warn | error
+  format: "json" # json | text

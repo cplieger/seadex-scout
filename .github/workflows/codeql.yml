@@ -1,0 +1,19 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  codeql:
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    uses: cplieger/ci/.github/workflows/codeql.yaml@1b09083ca7977dcb8a26b63940026b95310a69ea # v2
