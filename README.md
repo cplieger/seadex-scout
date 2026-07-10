@@ -62,7 +62,7 @@ The `mode` setting (or a subcommand) picks one of two modes:
 
 ### Scheduling
 
-The daemon follows the fleet's `*_INTERVAL` shape:
+The daemon follows the standard `*_INTERVAL` scheduling shape:
 
 - **Built-in** (default): `poll_interval` is a Go duration (`12h`, `6h`, `30m`); a
   cycle runs on start, then every interval.
@@ -242,13 +242,38 @@ Observability is slog-only: there is no metrics endpoint and no HTTP surface.
   `info`. Each cycle closes with a `cycle complete` line carrying the counts,
   mapping coverage, and AniList usage; report mode emits one `report item` line
   per anime.
-- **Alert rules.** seadex-scout ships no notifier of its own. Reference Loki
-  log-alert rules are in [`deploy/loki-rules.yaml`](deploy/loki-rules.yaml) (alert
-  on the finding line, or on the absence of a recent `cycle complete` line for
-  staleness). Wire them into your log-alerting stack.
+- **Alert rules.** seadex-scout ships no notifier of its own; see
+  [Alerting](#alerting) for reference Loki ruler rules you can copy (a cycle
+  fault, a poll-loop deadman, and an informational better-release rule).
 - **Health.** The distroless image's Docker `HEALTHCHECK` uses the
   `seadex-scout health` subcommand (a `/tmp/.healthy` file marker), so no shell or
   port is needed; the marker reflects the last cycle's library-ingest outcome.
+
+## Alerting
+
+seadex-scout ships no notifier of its own; its operational state is in its logs
+(there is no metrics endpoint). Ship the container's logs to Loki (Grafana
+Alloy's Docker log discovery does this with no configuration) and evaluate the
+rules in [`alerts.yaml`](alerts.yaml) with
+[Loki's ruler](https://grafana.com/docs/loki/latest/alert/); firing alerts
+deliver through your Alertmanager like any Prometheus metric alert. They cover:
+
+| Alert | Fires when | Severity |
+| --- | --- | --- |
+| `SeadexScoutCycleError` | a cycle logs an error, e.g. the Sonarr/Radarr library walk failed and the cycle is marked unhealthy | warning |
+| `SeadexScoutScanStalled` | no `cycle complete` line in 24h, i.e. the daemon poll loop is wedged | warning |
+| `SeadexScoutBetterReleaseLogged` | SeaDex recommended a better release than the one on disk (informational, not a fault) | info |
+
+Thresholds and the `severity` labels are starting points. Adjust the `container`
+selector (or `job` / `service`, depending on your log collector) to your
+deployment and the stall window to your `poll_interval` (default 12h). In
+resident-idle (`poll_interval: off`) or report mode each cycle runs via a
+`docker exec` child (the `poll` / `report` subcommand), so its logs go to the
+trigger rather than the container's log stream and the log rules cannot fire;
+alert on your external scheduler's own job result instead. The rules assume
+the default JSON log handler; for `log.format: text`, swap the
+`| json | level="ERROR"` parser stage for a `|= "level=ERROR"` line filter. Route
+by whatever labels your Alertmanager uses.
 
 ## Deployment
 

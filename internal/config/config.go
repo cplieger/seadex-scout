@@ -22,6 +22,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cplieger/scheduler"
+	"github.com/cplieger/slogx"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -294,23 +296,20 @@ func (fc *fileConfig) toConfig() Config {
 }
 
 // parseInterval reads the poll_interval value into a built-in cadence or the
-// external (resident-idle) mode, following the fleet `*_INTERVAL` convention:
-// off/disabled/0 -> external (no internal timer, cycles triggered via `poll`);
-// empty -> the default; a valid Go duration -> built-in (clamped); anything
-// else -> the default with a warning.
-func parseInterval(raw string) (d time.Duration, external bool) {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "off", "disabled", "0", "0s":
+// external (resident-idle) mode, following the fleet `*_INTERVAL` convention.
+// It delegates to scheduler.ParseInterval (WithBounds clamps a built-in cadence
+// to [minPollInterval, maxPollInterval]): off/disabled/0/0s -> external (no
+// internal timer, cycles triggered via `poll`); empty -> the default; a valid
+// positive duration -> built-in (clamped); a negative or unparseable value ->
+// the default with a warning.
+func parseInterval(raw string) (time.Duration, bool) {
+	s := scheduler.ParseInterval(raw, DefaultPollInterval,
+		scheduler.WithBounds(minPollInterval, maxPollInterval),
+		scheduler.WithName("poll_interval"))
+	if s.Mode == scheduler.ModeExternal {
 		return 0, true
-	case "":
-		return DefaultPollInterval, false
 	}
-	parsed, err := time.ParseDuration(strings.TrimSpace(raw))
-	if err != nil {
-		slog.Warn("invalid poll_interval, using default", "value", raw, "default", DefaultPollInterval.String())
-		return DefaultPollInterval, false
-	}
-	return clampDuration("poll_interval", parsed, minPollInterval, maxPollInterval), false
+	return s.Interval, false
 }
 
 // SonarrEnabled reports whether a complete Sonarr pair (URL + key) is set.
@@ -453,13 +452,11 @@ func normalizeResolution(s string) string {
 	return s
 }
 
-// parseLogLevel converts a level string to slog.Level (case-insensitive),
-// falling back to Info for an empty or unrecognized value.
+// parseLogLevel converts a level string to slog.Level via slogx.ParseLevel
+// (case-insensitive, trims, accepts the long-form "warning" alias and slog
+// offset syntax), falling back to Info for an empty or unrecognized value.
 func parseLogLevel(s string) slog.Level {
-	var lvl slog.Level
-	if err := lvl.UnmarshalText([]byte(strings.TrimSpace(s))); err != nil {
-		return slog.LevelInfo
-	}
+	lvl, _ := slogx.ParseLevel(s, slog.LevelInfo)
 	return lvl
 }
 

@@ -27,7 +27,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"math/rand/v2"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -37,6 +36,7 @@ import (
 	"time"
 
 	"github.com/cplieger/health"
+	"github.com/cplieger/scheduler"
 	"github.com/cplieger/seadex-scout/internal/config"
 	"github.com/cplieger/seadex-scout/internal/scout"
 )
@@ -233,18 +233,9 @@ func run(cfg *config.Config) error {
 // jitter until ctx is cancelled. The first iteration fires immediately so a
 // cycle runs promptly on boot; the marker is set to each cycle's health.
 func runScheduler(ctx context.Context, interval time.Duration, sc *scout.Scout, marker *health.Marker) {
-	delay := time.Duration(0)
-	for {
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return
-		case <-timer.C:
-			marker.Set(runCycle(ctx, sc))
-		}
-		delay = jitteredDelay(interval)
-	}
+	scheduler.RunLoop(ctx, func(ctx context.Context) {
+		marker.Set(runCycle(ctx, sc))
+	}, scheduler.LoopOptions{Interval: interval, FireOnStart: true, Jitter: 0.10})
 }
 
 // runCycle runs one cycle, recovering from a panic so a single bad cycle cannot
@@ -259,22 +250,17 @@ func runCycle(ctx context.Context, sc *scout.Scout) (healthy bool) {
 	return sc.Cycle(ctx)
 }
 
-// jitteredDelay returns interval drawn uniformly from [interval-interval/10,
-// interval+interval/10), so restarts do not synchronize into a predictable
-// hammer on SeaDex and the arr APIs.
-func jitteredDelay(interval time.Duration) time.Duration {
-	jitterMax := max(1, int(interval/5))
-	jitter := time.Duration(rand.IntN(jitterMax)) //nolint:gosec // G404: scheduling jitter, not crypto
-	return interval - interval/10 + jitter
-}
-
 // logConfig logs the effective configuration at startup. API keys are never
 // logged, only whether each is present.
 func logConfig(cfg *config.Config) {
+	pollInterval := cfg.PollInterval.String()
+	if cfg.PollExternal {
+		pollInterval = "external"
+	}
 	slog.Info("configuration loaded",
 		"sonarr_enabled", cfg.SonarrEnabled(),
 		"radarr_enabled", cfg.RadarrEnabled(),
-		"poll_interval", cfg.PollInterval.String(),
+		"poll_interval", pollInterval,
 		"seadex_base_url", cfg.SeaDexBaseURL,
 		"mapping_refresh", cfg.MappingRefresh.String(),
 		"anilist_rate", cfg.AniListRate,

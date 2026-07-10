@@ -1,7 +1,0 @@
-go 1.26.5
-
-use .
-
-// Local dev against arrapi's ResolveTagIDs (pending arrapi release + go.mod bump).
-// Delete this replace and bump the go.mod require once the arrapi tag ships.
-replace github.com/cplieger/arrapi => ../arrapi

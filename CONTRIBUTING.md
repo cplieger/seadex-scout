@@ -89,12 +89,10 @@ GOTOOLCHAIN=auto go build ./...
 
 seadex-scout is the first consumer of [`arrapi`](https://github.com/cplieger/arrapi)
 and uses its `ResolveTagIDs` API plus `Series.TitleSlug` and the `WebURL`
-deep-link helpers. Until the arrapi release carrying those ships, the repo
-carries a [`go.work`](go.work) with a `replace github.com/cplieger/arrapi =>
-../arrapi` so a local checkout of both repos builds; the published image build
-(which uses `go.mod`/`go.sum`, not the workspace) is gated on that arrapi
-release. When it ships, bump the `go.mod` require and delete the `go.work`
-replace.
+deep-link helpers. These shipped in arrapi `v1.5.0` (`WebURL`; the others
+earlier), which `go.mod` now requires — so the published image build (which uses
+`go.mod`/`go.sum`) builds directly. The interim `go.work` replace to a local
+arrapi checkout has been removed.
 
 ## Running checks
 
@@ -110,7 +108,7 @@ A few house rules the linters enforce that are easy to trip on:
 
 - **`sloglint` kv-only**: plain key/value pairs in `slog` calls, not attribute
   constructors.
-- **Logs are UTC**: a `utcTimeAttr` slog `ReplaceAttr` forces every record's
+- **Logs are UTC**: the `slogx` library (its `UTCTime` `ReplaceAttr`) forces every record's
   timestamp to UTC, so the image needs no `TZ` and embeds no `time/tzdata`.
 - **`fieldalignment`**: order struct fields to minimise padding. The
   `fieldalignment -fix` tool reorders them for you but strips field comments, so
