@@ -1,0 +1,71 @@
+# Recommended alert rules for seadex-scout. Loki ruler (LogQL) rule group:
+# seadex-scout is slog-only (it has no metrics endpoint), so ship the container's
+# logs to Loki (Grafana Alloy's Docker log discovery does this with no
+# configuration) and evaluate this group with Loki's ruler; firing alerts deliver
+# through your Alertmanager like any Prometheus alert. The rules assume the
+# default JSON log handler (log.format: json); for log.format: text, swap the
+# "| json | level=`ERROR`" parser stage for a "|= `level=ERROR`" line filter.
+# Thresholds and the severity labels are starting points; adjust the container
+# selector (or job/service, depending on your log collector) to your deployment
+# and the stall window to your poll_interval.
+groups:
+  - name: seadex-scout
+    rules:
+      # Fault: a compare cycle logged an error. The primary case is a failed
+      # Sonarr/Radarr library walk, which marks the cycle unhealthy; a failed
+      # state save/load or a panicked cycle also log at ERROR. SeaDex, mapping,
+      # and AniList outages log at WARN by design (the cycle stays healthy and
+      # keeps prior findings), so this rule does not fire on an upstream blip.
+      - alert: SeadexScoutCycleError
+        expr: |
+          sum by (container) (count_over_time(
+            {container="seadex-scout"} | json | level=`ERROR` [15m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "seadex-scout logged an error"
+          description: >
+            A compare cycle logged an error in the last 15m. The usual cause is a
+            failed Sonarr/Radarr library walk (message "library walk failed;
+            cycle unhealthy"), which marks the cycle unhealthy and stops findings
+            from updating. Check the arr url and api_key and the /config volume.
+      # Deadman (daemon mode): the poll loop emits a `cycle complete` line every
+      # poll_interval, so its absence means the watcher is wedged and silent.
+      - alert: SeadexScoutScanStalled
+        expr: |
+          absent_over_time({container="seadex-scout"} |= `cycle complete` [24h])
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "seadex-scout has not completed a cycle in 24h"
+          description: >
+            seadex-scout (daemon mode) logs a `cycle complete` line every
+            poll_interval (default 12h). None in 24h while the container is up
+            means the poll loop is wedged and better-release findings have
+            silently stopped; restart the container. Adjust the window to your
+            poll_interval. This rule applies to built-in (daemon) mode only: in
+            resident-idle (poll_interval: off) or report mode each cycle runs
+            via a docker exec child, so `cycle complete` never reaches the
+            collector and this deadman cannot fire; alert on the external
+            scheduler's job result instead.
+      # Informational, not a fault: SeaDex recommends a better release than the
+      # one on disk. This is the app's activity signal; keep it at severity info
+      # or drop it. It is not page-worthy.
+      - alert: SeadexScoutBetterReleaseLogged
+        expr: |
+          sum(count_over_time(
+            {container="seadex-scout"} | json | msg=`better release available` [1h]
+          )) > 0
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "seadex-scout found a better release"
+          description: >
+            SeaDex recommends a better release than the one on disk for at least
+            one title. Query {container="seadex-scout"} | json |
+            msg=`better release available` for the titles and release links, then
+            decide what to fetch. Informational, not an operational fault.

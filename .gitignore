@@ -8,5 +8,6 @@
 .env
 *.env
 
-# go.work is committed (documents the local arrapi replace); go.work.sum is not
+# go.work / go.work.sum are local-dev only (never committed)
+go.work
 go.work.sum
