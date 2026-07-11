@@ -65,10 +65,6 @@ Once on start and then every `poll_interval`, seadex-scout runs one cycle:
 4. Compares the surviving recommendation against what you have and, when SeaDex
    has something better, emits a `warn` log line.
 
-It is cheap to run and observable: it caches the library walk and the ID map,
-keeps AniList traffic near zero, and logs mapping coverage each cycle so misses
-are visible rather than silent.
-
 ## Run modes
 
 The `mode` setting (or a subcommand) picks the run mode:
@@ -104,8 +100,7 @@ The daemon follows the standard `*_INTERVAL` scheduling shape:
   ```
 
   Any scheduler works — `docker exec seadex-scout /seadex-scout poll` is the whole
-  contract. This mirrors github-scout, docker-rsync-scheduler, and the other
-  fleet schedulers.
+  contract.
 
 ### The report
 
@@ -128,8 +123,9 @@ Every row carries three kinds of link: the Sonarr/Radarr deep-link to the item
 is written three ways, so it is both human- and machine-readable: a Markdown file
 grouped by verdict, a JSON file alongside it, and one `report item` slog line per
 anime (queryable in Loki like the daemon findings). Each run writes a timestamped
-`report-<UTC time>.md` + `.json` pair into `report.dir` (default
-`/config/reports`), so successive reports never overwrite one another.
+`report-<UTC date+time>.md` + `.json` pair into `report.dir` (default
+`/config/reports`) — e.g. `report-2026-07-11T15-04-05Z.md` — so successive
+reports never overwrite one another.
 
 While the daemon runs, produce a fresh report without stopping it by running the
 `report` subcommand in the container:
@@ -152,41 +148,27 @@ unlike the report-only findings, it lets the arrs grab. Point your arrs at it
 (directly or through Prowlarr) and they parse, match, and grab through their own
 engines, profiles, and history, exactly as for any other indexer.
 
-Rather than synthesize release data, the feed **proxies Prowlarr** and filters to
-SeaDex's curation. On each query it asks Prowlarr's per-indexer Torznab endpoints
-for **Nyaa** and **AnimeBytes**, keeps only the results SeaDex tracks (matched by
-the tracker id in each release's page URL, with the info hash as a fallback), and
-passes their real data straight through — real title, seeders, size, and
-Prowlarr's own proxied download link. Because the download link is Prowlarr's,
-**no tracker passkey lives here**: Prowlarr proxies the grab using the AnimeBytes
-credentials it already holds. The one thing the feed adds is a
-**download-volume-factor marker**: SeaDex's _best_ release is tagged `0.75` (which
-the arrs read as AnimeBytes Freeleech25) and an _alt_ `0.25` (Freeleech75) — the
-signal you map to a Custom Format (below).
+The feed **proxies Prowlarr** rather than synthesizing data: on each query it asks
+Prowlarr's Nyaa and AnimeBytes Torznab endpoints, keeps only the results SeaDex
+curates, and passes their real title, seeders, size, and Prowlarr-proxied download
+link straight through. Because the download link is Prowlarr's, **no tracker
+passkey lives here** — Prowlarr grabs with the AnimeBytes credentials it already
+holds. The one signal the feed adds is a **download-volume-factor marker**:
+SeaDex's _best_ release is tagged `0.75` (which the arrs read as AnimeBytes
+Freeleech25) and an _alt_ `0.25` (Freeleech75) — the signal you map to a Custom
+Format (below). Its advertised categories are TV/Anime (`5070`) and Movies
+(`2000`).
 
-Its advertised capabilities mirror the Nyaa and AnimeBytes indexer definitions:
-`q`-based search (`t=search`, `t=tvsearch` with `season`/`ep`, `t=movie`; neither
-tracker supports id-based search), and the TV/Anime (`5070`) and Movies (`2000`)
-categories.
-
-**It answers season searches, not per-episode ones.** Sonarr searches an anime
-season both as a whole season _and_ episode by episode (per Sonarr's
-`NewznabRequestGenerator`), and SeaDex tracks season packs — so the feed answers
-the season search (returning the pack) and deliberately returns **empty, without
-contacting any tracker, for a per-episode query** (a `tvsearch` with an `ep`, or a
-`search` whose title ends in an absolute episode number like `Frieren 01`). That
-spares the trackers a query per episode per title alias, and makes a manual
-single-episode search free. Specials and movies are single releases, so they are
-always answered. The SeaDex catalogue of _what_ is curated is cached and refreshed
-in the background; the endpoint comes up immediately, so an arr's "Test"
-(`t=caps`) succeeds while the first SeaDex fetch warms up.
+**It answers whole-season searches, not per-episode ones.** SeaDex tracks season
+packs, so the feed answers a season search with the pack and returns nothing —
+without contacting a tracker — for a per-episode query. That spares the trackers a
+query per episode and makes a manual single-episode search free; specials and
+movies are single releases and are always answered.
 
 > **Setup requirement:** because the feed relies on the season search, enable
-> **Anime Standard Format Search** on the seadex-scout indexer in Sonarr
-> (Settings → Indexers → the indexer → Anime Standard Format Search). That option
-> is what makes Sonarr issue the `q={title}&season={s}` season query for
-> Anime-type series; without it Sonarr only sends per-episode queries, which the
-> feed does not answer.
+> **Anime Standard Format Search** on the seadex-scout indexer in Sonarr (Settings
+> → Indexers → the indexer). Without it, Sonarr sends only per-episode queries,
+> which the feed does not answer.
 
 ### Enabling it — step by step
 
@@ -201,12 +183,13 @@ Prowlarr → Settings → General. Fill in the `indexer` section and restart:
 
 ```yaml
 indexer:
-  listen: ":9118"                                   # host:port to bind; keep it LAN-only
-  api_key: "a-random-string"                        # the arrs send this; the feed checks it
+  feed_api_key: "a-random-string"                   # generate with: openssl rand -hex 16
   nyaa_torznab_url: "http://prowlarr:9696/1/api"    # "" disables Nyaa
   ab_torznab_url: "http://prowlarr:9696/2/api"      # "" disables AnimeBytes
   prowlarr_api_key: "${SEADEX_SCOUT_PROWLARR_KEY}"  # secret, never logged
 ```
+
+The port is fixed at `:9118` (published by your compose port mapping, not a config key).
 
 The download links the feed serves are Prowlarr's own proxy URLs, so **no tracker
 passkey lives here** — Prowlarr grabs with the AnimeBytes credentials it already
@@ -216,7 +199,7 @@ holds.
 (Custom):
 
 - **URL:** `http://seadex-scout:9118/api`
-- **API Key:** the `indexer.api_key` from step 1
+- **API Key:** the `indexer.feed_api_key` from step 1
 - **Categories:** `5070` (Anime) in Sonarr, `2000` (Movies) in Radarr
 - **☑ Anime Standard Format Search — required.** This is what makes Sonarr issue
   the whole-season query the feed answers. Without it Sonarr sends only
@@ -246,23 +229,9 @@ non-SeaDex release. **Scoping the scores to the anime profile matters:** it keep
 the markers from colliding with genuine AnimeBytes Freeleech25/75 releases in your
 non-anime libraries.
 
-By design, AnimeBytes sees the feed's season query in addition to the arr's own
-direct query — one extra search per season. Per-episode searches are answered
-from nothing, without a tracker query, so they add no load.
-
-### Why a download-volume-factor marker (not a title tag)
-
-The marker is the one SeaDex-specific signal the feed injects, and the choice is
-deliberate. A tag in the release _title_ would not survive: the arrs rewrite the
-release name on import (SceneName), so a title marker is lost and the release
-stops being recognizable, which can trigger re-grab loops. `downloadvolumefactor`
-instead becomes an **indexer flag** the arrs persist on the grabbed file's
-history — so the Custom Format keeps matching for the life of the file, with no
-loop.
-
 ### Security
 
-The feed is gated by `api_key` (a request without the matching `apikey` gets
+The feed is gated by `feed_api_key` (a request without the matching `apikey` gets
 `401`). The download links it serves are Prowlarr proxy URLs, so treat the
 endpoint as sensitive — **bind it to your LAN and never expose it publicly** (no
 public reverse-proxy hostname). The Prowlarr API key is sent to Prowlarr in a
@@ -298,22 +267,32 @@ silently dropped.
 
 The comparison is **group-centric**: an item is aligned when a recommended
 release group is already present on it. This sidesteps most multi-cour and
-batch-vs-per-season breakage. Filters (all optional):
+batch-vs-per-season breakage.
 
-- `filters.allow_remux` (default false): when false, releases classified `remux`
-  never count as a recommendation. `unknown` is never auto-dropped.
-- `filters.min_resolution` and `filters.require_dual_audio` gate quality.
-- `filters.animebytes` (default false) is the one tracker knob. SeaDex lists
-  releases on just two trackers: public **Nyaa** and private **AnimeBytes**. The
-  public trackers (Nyaa, AnimeTosho, RuTracker) are always considered; AnimeBytes
-  is included only when you turn this on, i.e. you have an account. Off, AB
-  releases are invisible; on, a finding carries every source, so a release on
-  both Nyaa and AB shows both links. Because seadex-scout only links (never
-  downloads), an AB link is just the torrent page you open as a member: no
-  tracker API keys or credentials are needed.
-- `filters.include_specials` (default on): include OVA/ONA/special entries; turn
-  it off to drop them from findings and the report.
-- `tags.include` / `tags.exclude` (arr-side).
+These filters shape the **report/alert engine only** — the daemon's `better
+release` findings and the report. The [indexer](#indexer-torznab-feed) feed
+applies none of them; there the arrs filter through their own quality profile and
+Custom Formats. All are optional:
+
+- `filters.exclude_remux` (default false): when true, releases classified
+  `remux` never count as a recommendation. The default keeps them — on SeaDex a
+  remux is often the best release — and `unknown` is never auto-dropped.
+- `filters.require_dual_audio` (default false): drop releases that are not
+  dual-audio.
+- `filters.exclude_specials` (default false): when true, drop OVA/ONA/special
+  entries from findings and the report.
+- `animebytes` (default false; top-level, since it is tracker access rather than
+  a content filter) is the one tracker knob. SeaDex lists releases on just two
+  trackers: public **Nyaa** and private **AnimeBytes**. The public trackers
+  (Nyaa, AnimeTosho, RuTracker) are always considered; AnimeBytes is included
+  only when you turn this on, i.e. you have an account. Off, AB releases are
+  invisible; on, a finding carries every source, so a release on both Nyaa and AB
+  shows both links. Because seadex-scout only links (never downloads), an AB link
+  is just the torrent page you open as a member: no tracker API keys or
+  credentials are needed.
+- `arr_tags.include` / `arr_tags.exclude` (arr-side): scan only items carrying an
+  include tag, and never items carrying an exclude tag — an exclude wins when an
+  item has both.
 
 ## Configuration
 
@@ -339,28 +318,25 @@ radarr:
 
 mode: "daemon"                    # daemon (scheduled) | report (one-shot, exit)
 poll_interval: "12h"              # Go duration; off/disabled/0 = external trigger via `poll`
-season_scoping: false             # compare per-season instead of series-level
+
+animebytes: false                 # true if you have an AnimeBytes account: adds AB releases + links
 
 filters:
-  allow_remux: false
-  min_resolution: "1080p"         # e.g. 1080p, 720p; "" = no floor
+  exclude_remux: false            # true drops remuxes (default keeps them)
   require_dual_audio: false
-  animebytes: false               # true if you have an AnimeBytes account: adds AB releases + links
-  remux_groups: []
-  include_specials: true
+  exclude_specials: false         # true drops OVA/ONA/specials
 
-tags:
+arr_tags:
   include: []                     # only scan arr items with these tags; [] = all
-  exclude: []
+  exclude: []                     # never scan arr items with these tags (an exclude wins)
 
 report:
-  dir: "/config/reports"          # timestamped report-<UTC time>.md + .json written here
+  dir: "/config/reports"          # timestamped report-<UTC date+time>.md + .json written here
 
-indexer:                          # only used by the `indexer` subcommand
-  listen: ":9118"                 # host:port for the Torznab feed; keep it LAN-only
-  api_key: ""                     # the arrs send this; the feed checks it
-  nyaa_torznab_url: ""            # Prowlarr Nyaa Torznab URL (e.g. http://prowlarr:9696/1/api)
-  ab_torznab_url: ""              # Prowlarr AnimeBytes Torznab URL
+indexer:                          # the daemon serves the feed whenever a Torznab URL is set below
+  feed_api_key: ""                # the arrs send this; the feed checks it (openssl rand -hex 16)
+  nyaa_torznab_url: ""            # Prowlarr Nyaa Torznab URL, e.g. http://prowlarr:9696/1/api ("" = off)
+  ab_torznab_url: ""              # Prowlarr AnimeBytes Torznab URL ("" = off)
   prowlarr_api_key: ""            # Prowlarr API key; secret, never logged
 
 log:
@@ -383,7 +359,7 @@ you actually tune. To pin a mapping Fribb gets wrong, drop a
 
 Observability is slog-only: no metrics endpoint, and no HTTP surface unless you
 configure the [indexer](#indexer-torznab-feed) feed — the only thing that binds a
-port (`indexer.listen`). An alert-only deployment stays socket-less.
+port (fixed at `:9118`). An alert-only deployment stays socket-less.
 
 - **slog to Loki.** A JSON handler writes to stdout; Alloy (or any collector)
   ships it to Loki. A finding is one line at `warn` (`msg="better release
@@ -446,21 +422,18 @@ the host owner of the mounted directory); it holds `config.yaml`, the state
 cache, and the report output. By default the container exposes no network
 port — observability is slog-only and health is the file-marker `health`
 subcommand. It binds a port only when you configure the
-[indexer](#indexer-torznab-feed) feed, which serves on `indexer.listen` (default
-`:9118`); publish that port only on your LAN.
+[indexer](#indexer-torznab-feed) feed, which serves on a fixed `:9118`; publish
+that port only on your LAN.
 
 ## Report-only, on purpose
 
-seadexarr's value proposition is the opposite of this one: it grabs, hands-free,
-into a download client. seadex-scout keeps a human in the loop deliberately.
-SeaDex recommendations are curation judgments that interact with storage budget,
-tracker access, and per-show taste; a nudge you act on beats an automated grab.
-Every finding carries the exact SeaDex and tracker links so acting on it is easy.
-Direct auto-grab — seadex-scout pushing to a download client, as seadexarr does —
-remains out of scope. The opt-in [indexer](#indexer-torznab-feed) takes the
-middle path instead: it hands the releases to Sonarr/Radarr as a feed and lets
-them grab through their own engine, profiles, and history, so nothing bypasses
-the tooling you already trust.
+The monitoring and report engines never grab — they surface an actionable finding
+with the SeaDex and tracker links, and you decide. SeaDex recommendations are
+curation judgments that interact with storage budget, tracker access, and per-show
+taste, so a human-in-the-loop nudge beats a blind auto-grab. The opt-in
+[indexer](#indexer-torznab-feed) is the middle path: it hands releases to
+Sonarr/Radarr and lets them grab through their own engine, so nothing bypasses the
+tooling you already trust.
 
 ## License
 

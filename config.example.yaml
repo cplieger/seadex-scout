@@ -1,55 +1,50 @@
-# seadex-scout config. Full docs: README. First boot with no config writes this
-# template to /config/config.yaml and exits with a WARN; edit and restart.
-# ${VAR} refs are expanded (SONARR_/RADARR_/SEADEX_SCOUT_ only) so secrets can stay in env.
+# seadex-scout config.
 
+# ----------------------------------------------------------------------------
+# Connections & schedule
+# ----------------------------------------------------------------------------
 # At least one arr must be enabled with a url + api_key.
 sonarr:
   enabled: true
-  url: "http://sonarr:8989"
+  url: "http://sonarr:8989" # where seadex-scout reaches Sonarr (internal is fine)
   api_key: "" # required when enabled
-  public_url: "" # browser URL for report deep-links; falls back to url
+  public_url: "" # browser base for the report's deep-links; empty = use url
 radarr:
   enabled: false
   url: "http://radarr:7878"
-  api_key: "" # required when enabled
+  api_key: ""
   public_url: ""
 
 mode: "daemon" # daemon (scheduled) | report (one-shot, exit)
-poll_interval: "12h" # Go duration; also runs on start. off/disabled/0 = external trigger via `poll`
-season_scoping: false # compare per-season instead of series-level
-
-filters:
-  allow_remux: false # count remuxes as recommendations
-  min_resolution: "1080p" # e.g. 1080p, 720p; "" = no floor
-  require_dual_audio: false
-  animebytes: false # true if you have an AnimeBytes account: adds AB releases + links
-  remux_groups: [] # groups to always treat as remux
-  include_specials: true # include OVA/ONA/specials
-
-tags:
-  include: [] # only scan arr items with these tags; [] = all
-  exclude: []
-
-report:
-  dir: "/config/reports" # report mode writes timestamped report-<UTC time>.md + .json here
-
-# indexer: an optional Torznab feed of SeaDex releases for Sonarr/Radarr. The
-# daemon serves it automatically whenever a Prowlarr Torznab URL is set below
-# (leave both URLs empty and the daemon binds no HTTP port at all). It sources
-# real release data (title, seeders, size, download link) from Prowlarr's
-# per-indexer Torznab endpoints for Nyaa + AnimeBytes, keeps only what SeaDex
-# curates, and tags each with downloadvolumefactor 0.75 (best = AB Freeleech25) or
-# 0.25 (alt = Freeleech75) - map that to a Custom Format applied ONLY to your
-# anime quality profile. Copy the two Torznab URLs from Prowlarr (each indexer's
-# page has one); no tracker passkey is needed - Prowlarr proxies the downloads.
-# Add this feed to your arrs (or to Prowlarr) directly.
-indexer:
-  listen: ":9118" # host:port to bind; keep it LAN-only
-  api_key: "" # the arrs send this and the feed checks it; empty = ungated (set a random string)
-  nyaa_torznab_url: "" # Prowlarr Nyaa Torznab URL, e.g. http://prowlarr:9696/1/api ("" disables Nyaa)
-  ab_torznab_url: "" # Prowlarr AnimeBytes Torznab URL, e.g. http://prowlarr:9696/2/api ("" disables AB)
-  prowlarr_api_key: "" # Prowlarr API key (Prowlarr Settings > General); secret, never logged
+poll_interval: "12h" # also runs on start; off/disabled/0 = external `poll` trigger
 
 log:
   level: "info" # debug | info | warn | error
   format: "json" # json | text
+
+# ----------------------------------------------------------------------------
+# Report / alert engine — shapes the findings + report, NOT the indexer
+# ----------------------------------------------------------------------------
+animebytes: false # true if you have an AnimeBytes account (adds AB releases + links)
+
+filters:
+  exclude_remux: false # true drops remuxes (default keeps them)
+  require_dual_audio: false # true drops non-dual-audio releases
+  exclude_specials: false # true drops OVA/ONA/specials
+
+arr_tags:
+  include: [] # scan only items with one of these tags; [] = all
+  exclude: [] # skip items with any of these tags (wins over include)
+
+report:
+  dir: "/config/reports" # report-<UTC date+time>.md + .json written here
+
+# ----------------------------------------------------------------------------
+# Indexer engine — optional Torznab feed; the arrs filter it (profiles + CFs)
+# ----------------------------------------------------------------------------
+# Served by the daemon whenever a Torznab URL is set (both empty = off, no port).
+indexer:
+  feed_api_key: "" # the arrs send this, the feed checks it (openssl rand -hex 16)
+  nyaa_torznab_url: "" # Prowlarr Nyaa Torznab URL, e.g. http://prowlarr:9696/1/api ("" = off)
+  ab_torznab_url: "" # Prowlarr AnimeBytes Torznab URL ("" = off)
+  prowlarr_api_key: "" # Prowlarr API key; secret, never logged

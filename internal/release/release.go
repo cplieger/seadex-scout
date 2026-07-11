@@ -57,16 +57,14 @@ type Release struct {
 // Input is the raw material for Classify. Names are the release/file names to
 // parse; Notes is the SeaDex entry notes (empty for a library file); Group and
 // Tracker come from the source; VideoCodec is the arr MediaInfo codec (empty
-// for SeaDex); DualAudio is an explicit hint; RemuxGroups pins groups the
-// operator knows to be remux.
+// for SeaDex); DualAudio is an explicit hint.
 type Input struct {
-	RemuxGroups map[string]bool
-	Notes       string
-	Group       string
-	Tracker     string
-	VideoCodec  string
-	Names       []string
-	DualAudio   bool
+	Notes      string
+	Group      string
+	Tracker    string
+	VideoCodec string
+	Names      []string
+	DualAudio  bool
 }
 
 var (
@@ -103,7 +101,7 @@ var (
 func Classify(in *Input) Release {
 	text := strings.ToLower(strings.Join(in.Names, " ") + " " + in.Notes)
 	codec := detectCodec(text, in.VideoCodec)
-	kind, reason := classifyKind(text, in.Group, in.RemuxGroups, codec)
+	kind, reason := classifyKind(text, codec)
 
 	return Release{
 		Group:       strings.TrimSpace(in.Group),
@@ -118,13 +116,13 @@ func Classify(in *Input) Release {
 }
 
 // classifyKind applies the ordered remux -> encode -> unknown rules and returns
-// the kind and a short reason for observability.
-func classifyKind(text, group string, remuxGroups map[string]bool, codec string) (kind Kind, reason string) {
+// the kind and a short reason for observability. The remux decision is purely
+// name-and-notes based: SeaDex states "remux" in the release name or the entry
+// notes, and the substring match also catches "BDRemux"/"BD-Remux", so no
+// operator-supplied group list is needed.
+func classifyKind(text, codec string) (kind Kind, reason string) {
 	if strings.Contains(text, "remux") {
 		return KindRemux, "name/notes marker: remux"
-	}
-	if remuxGroups[normalizeGroup(group)] {
-		return KindRemux, "group pinned as remux"
 	}
 	switch {
 	case codec != "":

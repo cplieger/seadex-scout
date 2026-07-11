@@ -66,7 +66,6 @@ func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
 			Sonarr:      sonarrClient(sonarr),
 			Radarr:      radarrClient(radarr),
 			Logger:      log,
-			RemuxGroups: cfg.RemuxGroups,
 			SonarrURL:   cfg.SonarrWebBase(),
 			RadarrURL:   cfg.RadarrWebBase(),
 			IncludeTags: cfg.IncludeTags,
@@ -77,16 +76,13 @@ func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
 		Matcher: match.NewMatcher(anilistClient, log),
 		Comparer: compare.NewComparer(compare.Config{
 			Logger:          log,
-			RemuxGroups:     cfg.RemuxGroups,
 			Filter:          filterOptions(cfg),
-			SeasonScoping:   cfg.SeasonScoping,
-			IncludeSpecials: cfg.IncludeSpecials,
+			ExcludeSpecials: cfg.ExcludeSpecials,
 		}),
 		Auditor: audit.NewAuditor(audit.Config{
 			Logger:          log,
-			RemuxGroups:     cfg.RemuxGroups,
 			SeaDexBaseURL:   config.DefaultSeaDexBaseURL,
-			IncludeSpecials: cfg.IncludeSpecials,
+			ExcludeSpecials: cfg.ExcludeSpecials,
 			AnimeBytes:      cfg.AnimeBytes,
 		}),
 		Reporter: report.NewReporter(log),
@@ -131,7 +127,6 @@ func buildIndexer(cfg *config.Config) builtIndexer {
 	prowlarrHTTP := httpx.NewClient(indexerUpstreamTimeout)
 
 	ix := indexer.New(&indexer.Config{
-		Listen:         cfg.IndexerListen,
 		APIKey:         cfg.IndexerAPIKey,
 		NyaaTorznabURL: cfg.IndexerNyaaTorznabURL,
 		ABTorznabURL:   cfg.IndexerABTorznabURL,
@@ -194,8 +189,7 @@ func pingArrs(ctx context.Context, sonarr *arrapi.Sonarr, radarr *arrapi.Radarr)
 // filterOptions builds the release filter policy from config.
 func filterOptions(cfg *config.Config) filter.Options {
 	return filter.Options{
-		MinResolution:    cfg.MinResolution,
-		AllowRemux:       cfg.AllowRemux,
+		ExcludeRemux:     cfg.ExcludeRemux,
 		RequireDualAudio: cfg.RequireDualAudio,
 		AnimeBytes:       cfg.AnimeBytes,
 	}

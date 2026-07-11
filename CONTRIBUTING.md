@@ -42,8 +42,7 @@ YAML config (writing a starter on first boot), and runs the daemon (built-in
 interval or resident-idle, plus the Torznab feed when configured), a one-shot
 report, or a single `poll` cycle; `build.go` wires every component together
 (including the feed via `buildIndexer`/`startIndexer`). They contain no business
-logic;
-everything testable lives under `internal/`, with dependencies flowing one
+logic; everything testable lives under `internal/`, with dependencies flowing one
 direction (leaves have no internal imports):
 
 - `internal/config` — YAML config-file loading (with `${ENV}` expansion for
@@ -101,13 +100,6 @@ git clone https://github.com/cplieger/seadex-scout
 cd seadex-scout
 GOTOOLCHAIN=auto go build ./...
 ```
-
-seadex-scout is the first consumer of [`arrapi`](https://github.com/cplieger/arrapi)
-and uses its `ResolveTagIDs` API plus `Series.TitleSlug` and the `WebURL`
-deep-link helpers. These shipped in arrapi `v1.5.0` (`WebURL`; the others
-earlier), which `go.mod` now requires — so the published image build (which uses
-`go.mod`/`go.sum`) builds directly. The interim `go.work` replace to a local
-arrapi checkout has been removed.
 
 ## Running checks
 
