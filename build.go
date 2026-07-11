@@ -131,6 +131,7 @@ func buildIndexer(cfg *config.Config) builtIndexer {
 		NyaaTorznabURL: cfg.IndexerNyaaTorznabURL,
 		ABTorznabURL:   cfg.IndexerABTorznabURL,
 		ProwlarrAPIKey: cfg.IndexerProwlarrAPIKey,
+		ABPasskey:      cfg.IndexerABPasskey,
 	}, indexer.Deps{
 		SeaDex: seadex.NewClient(seadexHTTP, config.DefaultSeaDexBaseURL, config.DefaultSeaDexPageDelay, log),
 		HTTP:   prowlarrHTTP,

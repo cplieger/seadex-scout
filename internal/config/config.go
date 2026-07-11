@@ -96,16 +96,21 @@ type fileConfig struct {
 }
 
 // indexerFile configures the optional Torznab feed the daemon serves alongside
-// the compare loop. The feed sources real release data from Prowlarr's
-// per-indexer Torznab endpoints (Nyaa + AnimeBytes) and filters them to SeaDex's
-// curation, so no tracker credentials live here - only the Prowlarr API key.
-// An empty Nyaa/AnimeBytes URL disables that upstream; both empty disables the
-// feed entirely (the daemon then binds no HTTP port).
+// the compare loop. Searches proxy Prowlarr's per-indexer Torznab endpoints
+// (Nyaa + AnimeBytes) filtered to SeaDex's curation, so they need only the
+// Prowlarr API key. The periodic RSS feed is synthesized from the SeaDex list
+// with directly-built download links; AnimeBytes links need the operator's
+// passkey (ab_passkey), the one tracker credential here - public Nyaa links need
+// none. An empty Nyaa/AnimeBytes URL disables that upstream; both empty disables
+// the feed entirely (the daemon then binds no HTTP port). An empty ab_passkey
+// leaves the AnimeBytes RSS feed without grabbable links (search still works via
+// Prowlarr).
 type indexerFile struct {
 	FeedAPIKey     string `yaml:"feed_api_key"`
 	NyaaTorznabURL string `yaml:"nyaa_torznab_url"`
 	ABTorznabURL   string `yaml:"ab_torznab_url"`
 	ProwlarrAPIKey string `yaml:"prowlarr_api_key"`
+	ABPasskey      string `yaml:"ab_passkey"`
 }
 
 type arrFile struct {
@@ -167,14 +172,17 @@ type Config struct {
 
 	LogFormat string
 
-	// Indexer (Torznab feed) settings. IndexerAPIKey (the feed's own gate) and
-	// IndexerProwlarrAPIKey are secrets and are never logged. The feed proxies
-	// Prowlarr's per-indexer Torznab endpoints for Nyaa and AnimeBytes; an empty
-	// URL disables that upstream.
+	// Indexer (Torznab feed) settings. IndexerAPIKey (the feed's own gate),
+	// IndexerProwlarrAPIKey, and IndexerABPasskey are secrets and are never
+	// logged. Searches proxy Prowlarr's per-indexer Torznab endpoints for Nyaa
+	// and AnimeBytes (an empty URL disables that upstream); the RSS feed is
+	// synthesized from SeaDex, and IndexerABPasskey builds its AnimeBytes
+	// download links (empty leaves the AB RSS feed without grabbable links).
 	IndexerAPIKey         string
 	IndexerNyaaTorznabURL string
 	IndexerABTorznabURL   string
 	IndexerProwlarrAPIKey string
+	IndexerABPasskey      string
 
 	IncludeTags []string
 	ExcludeTags []string
@@ -240,6 +248,7 @@ func (fc *fileConfig) toConfig() Config {
 		IndexerNyaaTorznabURL: strings.TrimSpace(fc.Indexer.NyaaTorznabURL),
 		IndexerABTorznabURL:   strings.TrimSpace(fc.Indexer.ABTorznabURL),
 		IndexerProwlarrAPIKey: strings.TrimSpace(fc.Indexer.ProwlarrAPIKey),
+		IndexerABPasskey:      strings.TrimSpace(fc.Indexer.ABPasskey),
 	}
 	if fc.Sonarr.Enabled {
 		c.SonarrURL = strings.TrimSpace(fc.Sonarr.URL)

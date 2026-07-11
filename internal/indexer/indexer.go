@@ -1,15 +1,30 @@
 // Package indexer serves a Torznab feed of SeaDex releases for Sonarr/Radarr.
 //
-// It does not synthesize releases or talk to the trackers: it proxies Prowlarr's
-// per-indexer Torznab endpoints for Nyaa and AnimeBytes, keeps only the results
-// SeaDex curates (matched by tracker id / info hash against a cached SeaDex set),
-// passes their real title/seeders/size/download URL straight through, and adds
-// one SeaDex-specific signal - the download-volume-factor marker: best -> 0.75
-// (Freeleech25), alt -> 0.25 (Freeleech75) - which the operator maps to a Custom
-// Format on their anime profile. Because the download URLs are Prowlarr's own
-// proxy links, no tracker credentials live here; the endpoint is apikey-gated
-// and meant to bind LAN-only. The catalogue of what SeaDex curates is cached and
-// refreshed in the background.
+// It answers two request kinds two different ways:
+//
+//   - A SEARCH (the arr's automatic/interactive search, which carries a query)
+//     is proxied to Prowlarr's per-indexer Torznab endpoint for that tracker and
+//     filtered to the releases SeaDex curates (matched by info hash / tracker id
+//     against a cached SeaDex set), passing their real title/seeders/size/
+//     download URL straight through - so a search rides Prowlarr's own tracker
+//     parse and credentials, and needs no passkey here.
+//
+//   - A periodic RSS check (an empty-query "latest releases" fetch, which Sonarr
+//     and Radarr issue on their sync interval) is answered from a synthesized
+//     per-tracker feed of the whole SeaDex curation set, built in the background
+//     from the SeaDex catalogue: one item per curated torrent, its title derived
+//     from the release's file names, its size summed from them, and a real
+//     download link built directly - a public Nyaa .torrent, or AnimeBytes via
+//     the operator's passkey. Synthesis is the only way to serve the SeaDex list
+//     on RSS: an empty-query proxy would return the tracker's newest uploads, not
+//     what SeaDex curates.
+//
+// Every item - search or RSS - carries the SeaDex download-volume-factor marker:
+// best -> 0.75 (Freeleech25), alt -> 0.25 (Freeleech75), which the operator maps
+// to a Custom Format on their anime profile. The AnimeBytes RSS link embeds the
+// operator's passkey, so it is a secret; the endpoint is apikey-gated and meant
+// to bind LAN-only. The curation set and the two synthesized feeds are cached and
+// refreshed together in the background.
 //
 // The feed is served per-tracker only, addressable by path or by subdomain:
 // /nyaa (or a nyaa.* host) serves the Nyaa-sourced curated releases, /ab (or an
@@ -63,14 +78,18 @@ const (
 	upstreamAB   = "ab"
 )
 
-// Config is the indexer's runtime settings. APIKey (the feed's own gate) and
-// ProwlarrAPIKey are secrets and are never logged. An empty Nyaa/AnimeBytes URL
-// disables that upstream.
+// Config is the indexer's runtime settings. APIKey (the feed's own gate),
+// ProwlarrAPIKey, and ABPasskey are secrets and are never logged. An empty
+// Nyaa/AnimeBytes URL disables that upstream. ABPasskey is the operator's
+// AnimeBytes passkey, appended to synthesized AB RSS download links (search
+// links go through Prowlarr and need no passkey); empty leaves the AB RSS feed
+// without grabbable links.
 type Config struct {
 	APIKey         string
 	NyaaTorznabURL string
 	ABTorznabURL   string
 	ProwlarrAPIKey string
+	ABPasskey      string
 }
 
 // Deps are the assembled clients the indexer needs: SeaDex for the curation set,
@@ -106,16 +125,18 @@ func (c *curation) lookup(hash, infoURL, guid string) (isBest, matched bool) {
 	return false, false
 }
 
-// empty reports whether the curation set has not been populated yet.
-func (c *curation) empty() bool { return len(c.byHash) == 0 && len(c.byKey) == 0 }
-
-// Indexer proxies Prowlarr, filtered to SeaDex's curation, over a Torznab feed.
+// Indexer serves searches by proxying Prowlarr filtered to SeaDex's curation,
+// and periodic RSS checks from the two synthesized per-tracker feeds. set (the
+// search match index), nyaaFeed, and abFeed are rebuilt together on refresh and
+// read under mu.
 type Indexer struct {
 	set       curation
 	seadex    *seadex.Client
 	log       *slog.Logger
 	cfg       Config
 	upstreams []*upstream
+	nyaaFeed  []Item
+	abFeed    []Item
 	mu        sync.RWMutex
 }
 
@@ -176,9 +197,11 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	return nil
 }
 
-// Refresh fetches the SeaDex catalogue and rebuilds the curation set (info
-// hashes and tracker keys of every tracked release, and whether each is best).
-// A SeaDex fetch failure returns the error and leaves the previous set in place.
+// Refresh fetches the SeaDex catalogue and rebuilds both what searches match
+// against (the curation set: info hashes and tracker keys of every tracked
+// release, and whether each is best) and what periodic RSS checks serve (the two
+// synthesized per-tracker feeds). A SeaDex fetch failure returns the error and
+// leaves the previous set and feeds in place.
 func (ix *Indexer) Refresh(ctx context.Context) error {
 	entries, err := ix.seadex.FetchEntries(ctx)
 	if err != nil {
@@ -198,11 +221,21 @@ func (ix *Indexer) Refresh(ctx context.Context) error {
 			}
 		}
 	}
+	nyaaFeed, abFeed, abSkippedNoPasskey := buildFeeds(entries, ix.cfg.ABPasskey)
+
 	ix.mu.Lock()
 	ix.set = set
+	ix.nyaaFeed = nyaaFeed
+	ix.abFeed = abFeed
 	ix.mu.Unlock()
+
 	ix.log.Info("indexer curation set refreshed",
-		"entries", len(entries), "torrents", torrents, "hashes", len(set.byHash), "keys", len(set.byKey))
+		"entries", len(entries), "torrents", torrents, "hashes", len(set.byHash), "keys", len(set.byKey),
+		"nyaa_feed", len(nyaaFeed), "ab_feed", len(abFeed))
+	if abSkippedNoPasskey > 0 {
+		ix.log.Warn("ab RSS feed empty of grabbable links: set indexer.ab_passkey to serve AnimeBytes releases",
+			"ab_releases_skipped", abSkippedNoPasskey)
+	}
 	return nil
 }
 
@@ -262,9 +295,11 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, renderFeed(items))
 	// One INFO line per request: the incoming Torznab params plus a result
 	// summary. `answered` is false when the feed deliberately skips a per-episode
-	// query (so an empty result reads as a skip, not a no-match); `upstream` is
-	// how many results the tracker returned via Prowlarr, `curated` how many
-	// matched SeaDex, `returned` the final count after the category filter.
+	// query (so an empty result reads as a skip, not a no-match); `feed` is true
+	// for an empty-q RSS check served from the synthesized SeaDex feed; `upstream`
+	// is how many results the tracker returned via Prowlarr for a search,
+	// `curated` how many items were returned after curation/synthesis, `returned`
+	// the final count after the category filter.
 	ix.log.Info("indexer request",
 		"scope", scope,
 		"t", q.Get("t"),
@@ -273,35 +308,60 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 		"ep", q.Get("ep"),
 		"cat", q.Get("cat"),
 		"answered", stats.answered,
+		"feed", stats.feed,
 		"upstream", stats.upstream,
 		"curated", stats.curated,
 		"returned", len(items))
 }
 
 // queryStats summarizes one request for the per-request log line: whether the
-// upstream was actually queried (servesQuery), how many raw results the
-// tracker(s) returned via Prowlarr, and how many of those matched SeaDex's
-// curation set.
+// feed answered it (answered), whether it was served from the synthesized RSS
+// feed (feed - an empty-q periodic check) rather than a proxied search, how many
+// raw results the tracker(s) returned via Prowlarr (search only), and how many
+// items were returned after curation or synthesis (curated).
 type queryStats struct {
 	answered bool
+	feed     bool
 	upstream int
 	curated  int
 }
 
-// query returns the feed items for a request (restricted to scope's upstream,
-// see scopeFromPath) plus a queryStats summary for logging. It answers season,
-// movie, special, and RSS queries by proxying that upstream filtered to SeaDex's
-// curation, and deliberately returns nothing (without contacting a tracker) for
-// a per-episode query: Sonarr searches an anime season episode by episode AND as
-// a whole season (see NewznabRequestGenerator), so answering only the season
-// search still delivers the pack while sparing the trackers a query per episode
-// - a manual single-episode search then costs nothing.
+// query returns the feed items for a request (restricted to scope's tracker)
+// plus a queryStats summary for logging.
+//
+// An empty-q request (Prowlarr's caps/save test, or an RSS "latest" fetch) is
+// served from the synthesized per-tracker SeaDex feed - the whole curation set
+// rendered as grabbable items - without contacting a tracker. This is the
+// periodic new-release check: the arr parses each synthesized title and grabs
+// what matches its library.
+//
+// A search (non-empty q) is proxied to that tracker's Prowlarr endpoint and
+// filtered to SeaDex's curation, passing real titles/seeders/links through. A
+// per-episode query is deliberately answered with nothing (without contacting a
+// tracker): Sonarr searches an anime season episode by episode AND as a whole
+// season (see NewznabRequestGenerator), so answering only the season search
+// still delivers the pack while sparing the trackers a query per episode.
 func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]Item, queryStats) {
 	if !servesQuery(q) {
 		return nil, queryStats{}
 	}
-	items, raw := ix.fetchAndFilter(ctx, upstreamParams(q), scope)
-	stats := queryStats{answered: true, upstream: raw, curated: len(items)}
+
+	var (
+		items []Item
+		stats queryStats
+	)
+	if strings.TrimSpace(q.Get("q")) == "" {
+		items = ix.feedFor(scope)
+		stats = queryStats{answered: true, feed: true, curated: len(items)}
+	} else {
+		raw := ix.fetchRaw(ctx, upstreamParams(q), scope)
+		ix.mu.RLock()
+		set := ix.set
+		ix.mu.RUnlock()
+		items = markAndDedupe(raw, &set)
+		stats = queryStats{answered: true, upstream: len(raw), curated: len(items)}
+	}
+
 	items = filterByCats(items, parseCats(q.Get("cat")))
 	if len(items) > maxItems {
 		items = items[:maxItems]
@@ -309,17 +369,33 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]Ite
 	return items, stats
 }
 
-// fetchAndFilter queries the scope's upstream in parallel, then keeps and marks
-// the results SeaDex curates. It returns the curated items plus the raw upstream
-// result count (for the request log), and nil/0 before the curation set is warm.
-func (ix *Indexer) fetchAndFilter(ctx context.Context, params url.Values, scope string) (curated []Item, rawCount int) {
+// feedFor returns the synthesized RSS feed for a tracker scope (nyaa or ab),
+// read under the lock since Refresh replaces the slices in the background. The
+// returned slice is read-only for callers (query only sub-slices/filters a copy
+// of the header via filterByCats, which allocates).
+func (ix *Indexer) feedFor(scope string) []Item {
 	ix.mu.RLock()
-	set := ix.set
+	defer ix.mu.RUnlock()
+	switch scope {
+	case upstreamNyaa:
+		return ix.nyaaFeed
+	case upstreamAB:
+		return ix.abFeed
+	default:
+		return nil
+	}
+}
+
+// fetchRaw queries the scope's upstream(s) in parallel and returns the raw
+// results, before any curation filtering. Returns nil when no upstream is
+// configured for the scope.
+func (ix *Indexer) fetchRaw(ctx context.Context, params url.Values, scope string) []Item {
+	ix.mu.RLock()
 	ups := upstreamsForScope(ix.upstreams, scope)
 	ix.mu.RUnlock()
 
-	if set.empty() || len(ups) == 0 {
-		return nil, 0
+	if len(ups) == 0 {
+		return nil
 	}
 
 	var (
@@ -343,7 +419,7 @@ func (ix *Indexer) fetchAndFilter(ctx context.Context, params url.Values, scope 
 	}
 	wg.Wait()
 
-	return markAndDedupe(raw, &set), len(raw)
+	return raw
 }
 
 // markAndDedupe keeps the curated releases, stamps each with the best/alt
