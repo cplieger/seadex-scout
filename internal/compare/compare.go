@@ -1,12 +1,15 @@
 // Package compare turns matched SeaDex entries into findings. For each entry in
 // the library it classifies the SeaDex "best" releases, keeps those that pass
-// the content filters (remux/resolution/dual-audio) AND are obtainable (on a
-// public tracker, or on AnimeBytes when the operator enables it), and compares
-// the surviving recommended release groups against the groups present on the
-// library item (series-level by default, per-season behind a flag). An item
-// that already has a recommended group is aligned and produces no finding; a
-// recommended release the operator cannot obtain is simply absent, never a
-// finding.
+// the content filters (remux/dual-audio) AND are obtainable (on a public
+// tracker, or on AnimeBytes when the operator enables it), and compares the
+// surviving recommended release groups against the groups present on the
+// library item. The comparison is season-scoped: a SeaDex entry (one AniList
+// ID = one cour) is checked against just that TVDB season's groups when the
+// entry maps to a season, falling back to the whole-item group set otherwise -
+// so a later season that needs a better release is not masked by an earlier
+// season that already has it. An item that already has a recommended group is
+// aligned and produces no finding; a recommended release the operator cannot
+// obtain is simply absent, never a finding.
 package compare
 
 import (
@@ -79,22 +82,18 @@ type Finding struct {
 	AniListID         int           `json:"al_id"`
 }
 
-// Comparer produces findings from matches under a fixed filter/scoping policy.
+// Comparer produces findings from matches under a fixed filter policy.
 type Comparer struct {
 	log             *slog.Logger
-	remuxGroups     map[string]bool
 	opts            filter.Options
-	seasonScoping   bool
-	includeSpecials bool
+	excludeSpecials bool
 }
 
 // Config configures a Comparer.
 type Config struct {
 	Logger          *slog.Logger
-	RemuxGroups     map[string]bool
 	Filter          filter.Options
-	SeasonScoping   bool
-	IncludeSpecials bool
+	ExcludeSpecials bool
 }
 
 // NewComparer builds a Comparer from cfg.
@@ -105,10 +104,8 @@ func NewComparer(cfg Config) *Comparer {
 	}
 	return &Comparer{
 		log:             log,
-		remuxGroups:     cfg.RemuxGroups,
 		opts:            cfg.Filter,
-		seasonScoping:   cfg.SeasonScoping,
-		includeSpecials: cfg.IncludeSpecials,
+		excludeSpecials: cfg.ExcludeSpecials,
 	}
 }
 
@@ -122,7 +119,7 @@ func (c *Comparer) Compare(matches []match.Match) []Finding {
 		if !m.InLibrary() {
 			continue
 		}
-		if !c.includeSpecials && m.Record.IsSpecial() {
+		if c.excludeSpecials && m.Record.IsSpecial() {
 			continue
 		}
 		if f := c.compareOne(m); f != nil {
@@ -181,12 +178,11 @@ func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
 			continue
 		}
 		rel := release.Classify(&release.Input{
-			Names:       fileNames(t.Files),
-			RemuxGroups: c.remuxGroups,
-			Notes:       entry.Notes,
-			Group:       t.ReleaseGroup,
-			Tracker:     t.Tracker,
-			DualAudio:   t.DualAudio,
+			Names:     fileNames(t.Files),
+			Notes:     entry.Notes,
+			Group:     t.ReleaseGroup,
+			Tracker:   t.Tracker,
+			DualAudio: t.DualAudio,
 		})
 		if ok, _ := filter.KeepNonTracker(&rel, c.opts); !ok {
 			continue
@@ -215,10 +211,13 @@ func emptyResult(entry *seadex.Entry, base *Finding) *Finding {
 }
 
 // currentGroups returns the library groups to compare against: the specific
-// season's groups when season-scoping is enabled and the entry maps to a
-// season, else the whole-item group set.
+// TVDB season's groups when the entry maps to a season present on disk, else
+// the whole-item group set. Scoping to the season is always applied (there is
+// no knob): a SeaDex entry keys one cour, so comparing it against just that
+// season's groups is strictly more accurate, and the fall-back to the whole
+// item covers the cases where no reliable season mapping exists.
 func (c *Comparer) currentGroups(item *library.Item, rec *mapping.Record) []string {
-	if c.seasonScoping && rec.SeasonTvdb > 0 {
+	if rec.SeasonTvdb > 0 {
 		if g, ok := item.SeasonGroups[rec.SeasonTvdb]; ok {
 			return g
 		}

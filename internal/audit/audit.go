@@ -77,18 +77,16 @@ type Report struct {
 // Config configures an Auditor.
 type Config struct {
 	Logger          *slog.Logger
-	RemuxGroups     map[string]bool
 	SeaDexBaseURL   string
-	IncludeSpecials bool
+	ExcludeSpecials bool
 	AnimeBytes      bool
 }
 
 // Auditor builds alignment reports from matches.
 type Auditor struct {
 	log               *slog.Logger
-	remuxGroups       map[string]bool
 	seadexBaseURL     string
-	includeSpecials   bool
+	excludeSpecials   bool
 	includeAnimeBytes bool
 }
 
@@ -100,9 +98,8 @@ func NewAuditor(cfg Config) *Auditor {
 	}
 	return &Auditor{
 		log:               log,
-		remuxGroups:       cfg.RemuxGroups,
 		seadexBaseURL:     cfg.SeaDexBaseURL,
-		includeSpecials:   cfg.IncludeSpecials,
+		excludeSpecials:   cfg.ExcludeSpecials,
 		includeAnimeBytes: cfg.AnimeBytes,
 	}
 }
@@ -117,7 +114,7 @@ func (a *Auditor) Audit(matches []match.Match) Report {
 		if !m.InLibrary() {
 			continue
 		}
-		if !a.includeSpecials && m.Record.IsSpecial() {
+		if a.excludeSpecials && m.Record.IsSpecial() {
 			continue
 		}
 		row := a.assess(m)
@@ -201,12 +198,11 @@ func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 			continue
 		}
 		rel := release.Classify(&release.Input{
-			Names:       torrentFileNames(t.Files),
-			RemuxGroups: a.remuxGroups,
-			Notes:       entry.Notes,
-			Group:       t.ReleaseGroup,
-			Tracker:     t.Tracker,
-			DualAudio:   t.DualAudio,
+			Names:     torrentFileNames(t.Files),
+			Notes:     entry.Notes,
+			Group:     t.ReleaseGroup,
+			Tracker:   t.Tracker,
+			DualAudio: t.DualAudio,
 		})
 		out = append(out, Release{
 			Tracker: t.Tracker,

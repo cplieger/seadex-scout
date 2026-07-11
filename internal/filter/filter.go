@@ -1,8 +1,8 @@
 // Package filter decides which SeaDex candidate releases an operator could use.
-// It separates the content filters (remux policy, resolution floor, dual-audio)
-// from tracker obtainability: a recommended release must both pass the content
-// filters (KeepNonTracker) and sit on an obtainable tracker (Obtainable) - any
-// public tracker, or AnimeBytes when the operator has enabled it. A release on a
+// It separates the content filters (remux policy, dual-audio) from tracker
+// obtainability: a recommended release must both pass the content filters
+// (KeepNonTracker) and sit on an obtainable tracker (Obtainable) - any public
+// tracker, or AnimeBytes when the operator has enabled it. A release on a
 // tracker the operator cannot use is simply absent, never flagged. Arr-side tag
 // include/exclude happens earlier, in the library walk.
 package filter
@@ -11,14 +11,13 @@ import (
 	"github.com/cplieger/seadex-scout/internal/release"
 )
 
-// Options are the operator's release filters. A zero Options keeps everything
-// except that AllowRemux defaults false, so remuxes are dropped unless enabled.
+// Options are the operator's release filters. A zero Options keeps everything:
+// ExcludeRemux and RequireDualAudio default false, and AnimeBytes off only
+// hides the one private tracker.
 type Options struct {
-	// MinResolution is the lowest resolution to keep (e.g. "1080p"); empty
-	// disables the floor.
-	MinResolution string
-	// AllowRemux keeps releases classified remux when true.
-	AllowRemux bool
+	// ExcludeRemux drops releases classified remux when true. Default false, so
+	// remuxes (often the best release) are kept unless the operator opts out.
+	ExcludeRemux bool
 	// RequireDualAudio drops releases that are not dual-audio when true.
 	RequireDualAudio bool
 	// AnimeBytes includes AnimeBytes (private tracker) releases; the public
@@ -33,17 +32,12 @@ type Dropped struct {
 }
 
 // KeepNonTracker reports whether a release passes the content filters (remux
-// policy, resolution floor, dual-audio), ignoring the tracker, and the drop
-// reason otherwise. Tracker obtainability is applied separately via Obtainable.
-// An unknown-kind release is never dropped by the remux policy, and a release
-// whose resolution could not be parsed is never dropped by the resolution floor.
+// policy, dual-audio), ignoring the tracker, and the drop reason otherwise.
+// Tracker obtainability is applied separately via Obtainable. An unknown-kind
+// release is never dropped by the remux policy.
 func KeepNonTracker(r *release.Release, opts Options) (keep bool, reason string) {
-	if r.Kind == release.KindRemux && !opts.AllowRemux {
-		return false, "remux excluded (allow_remux is false)"
-	}
-	if opts.MinResolution != "" && r.Resolution != "" &&
-		release.ResolutionRank(r.Resolution) < release.ResolutionRank(opts.MinResolution) {
-		return false, "below minimum resolution " + opts.MinResolution
+	if r.Kind == release.KindRemux && opts.ExcludeRemux {
+		return false, "remux excluded (exclude_remux is true)"
 	}
 	if opts.RequireDualAudio && !r.DualAudio {
 		return false, "not dual-audio"

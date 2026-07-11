@@ -42,12 +42,16 @@ const (
 
 	shutdownGrace     = 10 * time.Second
 	readHeaderTimeout = 15 * time.Second
+	// listenAddr is the fixed LAN bind address for the Torznab feed server. The
+	// port is an internal detail (the container/compose port mapping publishes
+	// it), not an operator-tuned setting, so it is hardcoded rather than a key.
+	listenAddr = ":9118"
 )
 
 // Config is the indexer's runtime settings. APIKey (the feed's own gate) and
-// ProwlarrAPIKey are secrets and are never logged.
+// ProwlarrAPIKey are secrets and are never logged. An empty Nyaa/AnimeBytes URL
+// disables that upstream.
 type Config struct {
-	Listen         string
 	APIKey         string
 	NyaaTorznabURL string
 	ABTorznabURL   string
@@ -112,6 +116,9 @@ func New(cfg *Config, deps Deps) *Indexer {
 		log:    log,
 		cfg:    *cfg,
 	}
+	// One upstream per configured Prowlarr Torznab URL. An empty URL means that
+	// tracker is off: it is simply not wired, so the feed never queries it. (The
+	// daemon only starts the feed at all when at least one URL is set.)
 	if cfg.NyaaTorznabURL != "" {
 		ix.upstreams = append(ix.upstreams, &upstream{
 			http: deps.HTTP, log: log, name: "nyaa", feed: cfg.NyaaTorznabURL, apiKey: cfg.ProwlarrAPIKey,
@@ -134,7 +141,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	go ix.refreshLoop(ctx)
 
 	srv := &http.Server{
-		Addr:              ix.cfg.Listen,
+		Addr:              listenAddr,
 		Handler:           ix.handler(),
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
@@ -146,7 +153,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	}()
 
 	ix.log.Info("seadex-scout indexer listening",
-		"addr", ix.cfg.Listen, "apikey_set", ix.cfg.APIKey != "", "upstreams", len(ix.upstreams))
+		"addr", listenAddr, "apikey_set", ix.cfg.APIKey != "", "upstreams", len(ix.upstreams))
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("indexer server: %w", err)
 	}

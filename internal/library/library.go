@@ -83,7 +83,6 @@ type Walker struct {
 	sonarr      SonarrClient
 	radarr      RadarrClient
 	log         *slog.Logger
-	remuxGroups map[string]bool
 	sonarrURL   string
 	radarrURL   string
 	includeTags []string
@@ -97,7 +96,6 @@ type Config struct {
 	Sonarr      SonarrClient
 	Radarr      RadarrClient
 	Logger      *slog.Logger
-	RemuxGroups map[string]bool
 	SonarrURL   string
 	RadarrURL   string
 	IncludeTags []string
@@ -114,7 +112,6 @@ func NewWalker(cfg *Config) *Walker {
 		sonarr:      cfg.Sonarr,
 		radarr:      cfg.Radarr,
 		log:         log,
-		remuxGroups: cfg.RemuxGroups,
 		sonarrURL:   cfg.SonarrURL,
 		radarrURL:   cfg.RadarrURL,
 		includeTags: cfg.IncludeTags,
@@ -317,11 +314,10 @@ func (w *Walker) movieItem(m *arrapi.Movie) Item {
 // classifier, so the library and SeaDex sides compare in one vocabulary.
 func (w *Walker) fingerprint(fi *fileInfo) release.Release {
 	return release.Classify(&release.Input{
-		Names:       nonEmpty(fi.sceneName, fi.relPath),
-		Group:       fi.group,
-		VideoCodec:  fi.videoCodec,
-		DualAudio:   isDualAudio(fi.audioLanguages),
-		RemuxGroups: w.remuxGroups,
+		Names:      nonEmpty(fi.sceneName, fi.relPath),
+		Group:      fi.group,
+		VideoCodec: fi.videoCodec,
+		DualAudio:  isDualAudio(fi.audioLanguages),
 	})
 }
 
