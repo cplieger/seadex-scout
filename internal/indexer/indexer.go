@@ -11,15 +11,16 @@
 // and meant to bind LAN-only. The catalogue of what SeaDex curates is cached and
 // refreshed in the background.
 //
-// The feed is served per-tracker as well as combined, addressable by path or by
-// subdomain: the root (or /api) serves both trackers, /nyaa or a nyaa.* host
-// serves only the Nyaa-sourced curated releases, and /ab or an ab.* host only the
-// AnimeBytes ones. Adding the per-tracker feeds as separate indexers in
-// Sonarr/Radarr lets each arr gate a tracker's RSS/automatic/interactive use via
-// that indexer's own flags - the arr is the only component that knows the search
-// type (it is never carried in the Torznab request), so it owns that policy. The
-// subdomain form lets a reverse proxy map per-tracker hostnames to the one port
-// without rewriting paths, for when seadex-scout runs apart from the arrs.
+// The feed is served per-tracker only, addressable by path or by subdomain:
+// /nyaa (or a nyaa.* host) serves the Nyaa-sourced curated releases, /ab (or an
+// ab.* host) the AnimeBytes ones, and any other path or host is 404 - there is
+// no combined feed. Adding the two per-tracker feeds as separate indexers in
+// Prowlarr/Sonarr/Radarr lets each carry its own sync profile and gate that
+// tracker's RSS/automatic/interactive use independently - the arr is the only
+// component that knows the search type (it is never carried in the Torznab
+// request), so it owns that policy. The subdomain form lets a reverse proxy map
+// per-tracker hostnames to the one port without rewriting paths, for when
+// seadex-scout runs apart from the arrs.
 package indexer
 
 import (
@@ -232,53 +233,93 @@ func (ix *Indexer) handler() http.Handler {
 	return mux
 }
 
-// serve handles the Torznab endpoint: t=caps returns capabilities, everything
-// else proxies Prowlarr filtered to SeaDex's curation.
+// serve handles the Torznab endpoint. Every request must address a specific
+// tracker feed - /nyaa or /ab by path, or a nyaa.*/ab.* host; an unscoped
+// request is 404 (there is no combined feed). t=caps returns capabilities,
+// everything else proxies that tracker's Prowlarr endpoint filtered to SeaDex's
+// curation.
 func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if ix.cfg.APIKey != "" && q.Get("apikey") != ix.cfg.APIKey {
+		ix.log.Info("indexer request rejected", "reason", "bad apikey", "path", r.URL.Path)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	scope := scopeFor(r.Host, r.URL.Path)
+	if scope == "" {
+		ix.log.Info("indexer request rejected", "reason", "no tracker scope", "path", r.URL.Path, "host", r.Host)
+		http.Error(w, "not found: address a tracker feed at /nyaa or /ab", http.StatusNotFound)
 		return
 	}
 	if q.Get("t") == "caps" {
 		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 		_, _ = io.WriteString(w, renderCaps())
+		ix.log.Info("indexer request", "scope", scope, "t", "caps")
 		return
 	}
+	items, stats := ix.query(r.Context(), q, scope)
 	w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
-	_, _ = io.WriteString(w, renderFeed(ix.query(r.Context(), q, scopeFor(r.Host, r.URL.Path))))
+	_, _ = io.WriteString(w, renderFeed(items))
+	// One INFO line per request: the incoming Torznab params plus a result
+	// summary. `answered` is false when the feed deliberately skips a per-episode
+	// query (so an empty result reads as a skip, not a no-match); `upstream` is
+	// how many results the tracker returned via Prowlarr, `curated` how many
+	// matched SeaDex, `returned` the final count after the category filter.
+	ix.log.Info("indexer request",
+		"scope", scope,
+		"t", q.Get("t"),
+		"q", q.Get("q"),
+		"season", q.Get("season"),
+		"ep", q.Get("ep"),
+		"cat", q.Get("cat"),
+		"answered", stats.answered,
+		"upstream", stats.upstream,
+		"curated", stats.curated,
+		"returned", len(items))
 }
 
-// query returns the feed items for a request, restricted to scope's upstream(s)
-// (see scopeFromPath). It answers season, movie, special, and RSS queries by
-// proxying those upstreams filtered to SeaDex's curation, and deliberately
-// returns nothing (without contacting a tracker) for a per-episode query: Sonarr
-// searches an anime season episode by episode AND as a whole season (see
-// NewznabRequestGenerator), so answering only the season search still delivers
-// the pack while sparing the trackers a query per episode - a manual
-// single-episode search then costs nothing.
-func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) []Item {
+// queryStats summarizes one request for the per-request log line: whether the
+// upstream was actually queried (servesQuery), how many raw results the
+// tracker(s) returned via Prowlarr, and how many of those matched SeaDex's
+// curation set.
+type queryStats struct {
+	answered bool
+	upstream int
+	curated  int
+}
+
+// query returns the feed items for a request (restricted to scope's upstream,
+// see scopeFromPath) plus a queryStats summary for logging. It answers season,
+// movie, special, and RSS queries by proxying that upstream filtered to SeaDex's
+// curation, and deliberately returns nothing (without contacting a tracker) for
+// a per-episode query: Sonarr searches an anime season episode by episode AND as
+// a whole season (see NewznabRequestGenerator), so answering only the season
+// search still delivers the pack while sparing the trackers a query per episode
+// - a manual single-episode search then costs nothing.
+func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]Item, queryStats) {
 	if !servesQuery(q) {
-		return nil
+		return nil, queryStats{}
 	}
-	items := ix.fetchAndFilter(ctx, upstreamParams(q), scope)
+	items, raw := ix.fetchAndFilter(ctx, upstreamParams(q), scope)
+	stats := queryStats{answered: true, upstream: raw, curated: len(items)}
 	items = filterByCats(items, parseCats(q.Get("cat")))
 	if len(items) > maxItems {
 		items = items[:maxItems]
 	}
-	return items
+	return items, stats
 }
 
-// fetchAndFilter queries the scope's upstreams in parallel, then keeps and marks
-// the results SeaDex curates. It returns nil before the curation set is warm.
-func (ix *Indexer) fetchAndFilter(ctx context.Context, params url.Values, scope string) []Item {
+// fetchAndFilter queries the scope's upstream in parallel, then keeps and marks
+// the results SeaDex curates. It returns the curated items plus the raw upstream
+// result count (for the request log), and nil/0 before the curation set is warm.
+func (ix *Indexer) fetchAndFilter(ctx context.Context, params url.Values, scope string) (curated []Item, rawCount int) {
 	ix.mu.RLock()
 	set := ix.set
 	ups := upstreamsForScope(ix.upstreams, scope)
 	ix.mu.RUnlock()
 
 	if set.empty() || len(ups) == 0 {
-		return nil
+		return nil, 0
 	}
 
 	var (
@@ -302,7 +343,7 @@ func (ix *Indexer) fetchAndFilter(ctx context.Context, params url.Values, scope 
 	}
 	wg.Wait()
 
-	return markAndDedupe(raw, &set)
+	return markAndDedupe(raw, &set), len(raw)
 }
 
 // markAndDedupe keeps the curated releases, stamps each with the best/alt
@@ -347,10 +388,11 @@ func upstreamParams(q url.Values) url.Values {
 
 // scopeFor resolves which tracker's results a request targets: the URL path
 // first (scopeFromPath), the Host subdomain as a fallback (scopeFromHost), or ""
-// for all trackers. Serving per-tracker lets an arr treat the feed as two
-// indexers and gate each tracker's RSS/automatic/interactive use with that
-// indexer's own flags - the arr is the only component that knows the search type
-// (it is never carried in the Torznab request), so it owns that decision. Two
+// when neither names a tracker - which serve treats as 404, since there is no
+// combined feed. Serving per-tracker lets an arr treat the feed as two indexers
+// and gate each tracker's RSS/automatic/interactive use with that indexer's own
+// flags - the arr is the only component that knows the search type (it is never
+// carried in the Torznab request), so it owns that decision. Two
 // addressing styles are supported so it works whether seadex-scout shares a host
 // with the arrs or sits behind a reverse proxy: a path (.../nyaa, .../ab) for
 // direct use, or a subdomain (nyaa.example.com, ab.example.com) a proxy can map
@@ -363,8 +405,8 @@ func scopeFor(host, path string) string {
 }
 
 // scopeFromPath maps the URL path to a tracker via its first segment: "/nyaa..."
-// -> nyaa, "/ab..." -> ab, anything else (including "/" and the default "/api")
-// -> "" (all trackers).
+// -> nyaa, "/ab..." -> ab, anything else (including "/" and a bare "/api") -> ""
+// (no tracker; serve 404s it).
 func scopeFromPath(p string) string {
 	switch firstSegment(p) {
 	case upstreamNyaa:
@@ -378,9 +420,10 @@ func scopeFromPath(p string) string {
 
 // scopeFromHost maps a request Host to a tracker via its leading DNS label:
 // nyaa.example.com -> nyaa, ab.example.com -> ab, anything else (a bare internal
-// name like seadex-scout:9118, or an aggregate host) -> "". This lets a reverse
-// proxy route per-tracker subdomains to the one port with no path rewrite; the
-// Host must reach the app unmodified (the default for a Caddy/nginx reverse proxy).
+// name like seadex-scout:9118, or any non-tracker host) -> "". This lets a
+// reverse proxy route per-tracker subdomains to the one port with no path
+// rewrite; the Host must reach the app unmodified (the default for a Caddy/nginx
+// reverse proxy).
 func scopeFromHost(host string) string {
 	label, _, _ := strings.Cut(host, ".")
 	switch strings.ToLower(label) {
@@ -402,12 +445,11 @@ func firstSegment(p string) string {
 	return strings.ToLower(p)
 }
 
-// upstreamsForScope selects the upstreams a scope targets: all when scope is
-// empty, else just the one whose name matches (nyaa or ab).
+// upstreamsForScope returns the single upstream a scope targets (nyaa or ab),
+// or none when no configured upstream matches. Scope is always a specific
+// tracker here (serve rejects an unscoped request), so there is no
+// all-trackers case.
 func upstreamsForScope(all []*upstream, scope string) []*upstream {
-	if scope == "" {
-		return all
-	}
 	out := make([]*upstream, 0, 1)
 	for _, u := range all {
 		if u.name == scope {

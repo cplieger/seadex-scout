@@ -172,9 +172,12 @@ func TestIndexerEndToEnd(t *testing.T) {
 		t.Fatalf("Refresh: %v", err)
 	}
 
-	items := ix.query(context.Background(), url.Values{"t": {"search"}}, "")
+	items, stats := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
 	if len(items) != 1 {
 		t.Fatalf("got %d items, want 1", len(items))
+	}
+	if !stats.answered || stats.upstream != 1 || stats.curated != 1 {
+		t.Errorf("stats = %+v, want answered/upstream 1/curated 1", stats)
 	}
 	if items[0].DownloadVolumeFactor != dvfBest {
 		t.Errorf("marker = %q, want %q (best)", items[0].DownloadVolumeFactor, dvfBest)
@@ -188,17 +191,17 @@ func TestIndexerEndToEnd(t *testing.T) {
 
 	// Per-tracker scoping: the nyaa scope hits the (only) configured upstream;
 	// the ab scope has no upstream here, so it serves nothing.
-	if got := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
+	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
 		t.Errorf("nyaa scope returned %d items, want 1", len(got))
 	}
-	if got := ix.query(context.Background(), url.Values{"t": {"search"}}, "ab"); len(got) != 0 {
+	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "ab"); len(got) != 0 {
 		t.Errorf("ab scope returned %d items, want 0 (no ab upstream)", len(got))
 	}
 
 	// A query for a series not curated by SeaDex still returns a valid (empty)
 	// result once we point the curation set elsewhere.
 	ix.set = curation{byHash: map[string]bool{}, byKey: map[string]bool{}}
-	if got := ix.query(context.Background(), url.Values{"t": {"tvsearch"}}, ""); len(got) != 0 {
+	if got, _ := ix.query(context.Background(), url.Values{"t": {"tvsearch"}}, "nyaa"); len(got) != 0 {
 		t.Errorf("uncurated query returned %d items, want 0", len(got))
 	}
 }
@@ -261,8 +264,8 @@ func TestServesQuery(t *testing.T) {
 
 func TestScopeFromPath(t *testing.T) {
 	tests := []struct{ path, want string }{
-		{"/", ""},         // aggregate (both trackers)
-		{"/api", ""},      // default arr API path -> aggregate
+		{"/", ""},         // no tracker segment -> 404
+		{"/api", ""},      // bare API path, no tracker -> 404
 		{"", ""},          // empty
 		{"/nyaa", "nyaa"}, // per-tracker base path
 		{"/nyaa/api", "nyaa"},
@@ -283,8 +286,8 @@ func TestUpstreamsForScope(t *testing.T) {
 	ab := &upstream{name: "ab"}
 	all := []*upstream{nyaa, ab}
 
-	if got := upstreamsForScope(all, ""); len(got) != 2 {
-		t.Errorf("scope all: got %d upstreams, want 2", len(got))
+	if got := upstreamsForScope(all, ""); len(got) != 0 {
+		t.Errorf("empty scope: got %d upstreams, want 0 (no combined feed)", len(got))
 	}
 	if got := upstreamsForScope(all, "nyaa"); len(got) != 1 || got[0] != nyaa {
 		t.Errorf("scope nyaa: got %v, want [nyaa]", got)
@@ -300,7 +303,7 @@ func TestScopeFromHost(t *testing.T) {
 		{"nyaa.cplieger.com:443", "nyaa"}, // port ignored
 		{"AB.example.com", "ab"},          // case-insensitive
 		{"ab.example.com", "ab"},
-		{"seadex.cplieger.com", ""}, // aggregate subdomain
+		{"seadex.cplieger.com", ""}, // non-tracker subdomain -> 404
 		{"seadex-scout:9118", ""},   // internal docker name + port
 		{"seadex-scout", ""},        // internal docker name
 		{"", ""},
@@ -316,7 +319,7 @@ func TestScopeFor(t *testing.T) {
 	tests := []struct{ host, path, want string }{
 		{"seadex-scout:9118", "/nyaa/api", "nyaa"},   // path (internal direct use)
 		{"seadex-scout:9118", "/ab", "ab"},           // path
-		{"seadex-scout:9118", "/api", ""},            // neither -> all
+		{"seadex-scout:9118", "/api", ""},            // neither names a tracker -> 404
 		{"nyaa.cplieger.com", "/api", "nyaa"},        // host fallback (proxy subdomain)
 		{"ab.cplieger.com", "/api", "ab"},            // host fallback
 		{"seadex.cplieger.com", "/nyaa/api", "nyaa"}, // path over aggregate host
