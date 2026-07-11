@@ -198,7 +198,10 @@ holds.
 **2. Add the feed to Sonarr/Radarr.** Settings → Indexers → Add → **Torznab**
 (Custom):
 
-- **URL:** `http://seadex-scout:9118/api`
+- **URL:** `http://seadex-scout:9118/api` — both trackers combined. To gate Nyaa
+  and AnimeBytes separately (see [Per-tracker search
+  gating](#per-tracker-search-gating)), add two indexers pointed at `…/nyaa` and
+  `…/ab` instead.
 - **API Key:** the `indexer.feed_api_key` from step 1
 - **Categories:** `5070` (Anime) in Sonarr, `2000` (Movies) in Radarr
 - **☑ Anime Standard Format Search — required.** This is what makes Sonarr issue
@@ -228,6 +231,30 @@ Sonarr/Radarr now prefer — and upgrade to — SeaDex's pick over an equivalent
 non-SeaDex release. **Scoping the scores to the anime profile matters:** it keeps
 the markers from colliding with genuine AnimeBytes Freeleech25/75 releases in your
 non-anime libraries.
+
+### Per-tracker search gating
+
+You may want a tracker used only for some search types — e.g. Nyaa (public) on
+manual searches only, AnimeBytes on everything. The arr already enforces
+per-indexer **Enable RSS / Enable Automatic Search / Enable Interactive Search**
+flags, and it is the only component that can: the search _type_ is never carried
+in a Torznab request (only RSS, the no-query "recent" feed, is distinguishable —
+confirmed in Sonarr's `NewznabRequestGenerator`). So the feed exposes each tracker
+on its own path and lets the arr decide when to hit each:
+
+| Path | Serves |
+| --- | --- |
+| `…/api` (or `/`) | both trackers combined |
+| `…/nyaa` | only Nyaa-sourced SeaDex releases |
+| `…/ab` | only AnimeBytes-sourced SeaDex releases |
+
+Add the per-tracker paths as **two** Torznab indexers (each still needs Anime
+Standard Format Search on), then set their flags in Sonarr/Radarr (Settings →
+Indexers): to make Nyaa manual-only, untick **Enable RSS** and **Enable Automatic
+Search** on the `…/nyaa` indexer and leave the `…/ab` one fully enabled. Adding
+them through Prowlarr with a sync profile works too — the flags just have to end
+up on the indexer as the arr sees it. If you don't need this, the single `…/api`
+indexer is all you need.
 
 ### Security
 

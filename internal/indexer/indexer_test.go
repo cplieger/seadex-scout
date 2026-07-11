@@ -172,7 +172,7 @@ func TestIndexerEndToEnd(t *testing.T) {
 		t.Fatalf("Refresh: %v", err)
 	}
 
-	items := ix.query(context.Background(), url.Values{"t": {"search"}})
+	items := ix.query(context.Background(), url.Values{"t": {"search"}}, "")
 	if len(items) != 1 {
 		t.Fatalf("got %d items, want 1", len(items))
 	}
@@ -186,10 +186,19 @@ func TestIndexerEndToEnd(t *testing.T) {
 		t.Errorf("upstream X-Api-Key = %q, want prowlarr-key", gotAPIKey)
 	}
 
+	// Per-tracker scoping: the nyaa scope hits the (only) configured upstream;
+	// the ab scope has no upstream here, so it serves nothing.
+	if got := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
+		t.Errorf("nyaa scope returned %d items, want 1", len(got))
+	}
+	if got := ix.query(context.Background(), url.Values{"t": {"search"}}, "ab"); len(got) != 0 {
+		t.Errorf("ab scope returned %d items, want 0 (no ab upstream)", len(got))
+	}
+
 	// A query for a series not curated by SeaDex still returns a valid (empty)
 	// result once we point the curation set elsewhere.
 	ix.set = curation{byHash: map[string]bool{}, byKey: map[string]bool{}}
-	if got := ix.query(context.Background(), url.Values{"t": {"tvsearch"}}); len(got) != 0 {
+	if got := ix.query(context.Background(), url.Values{"t": {"tvsearch"}}, ""); len(got) != 0 {
 		t.Errorf("uncurated query returned %d items, want 0", len(got))
 	}
 }
@@ -247,5 +256,40 @@ func TestServesQuery(t *testing.T) {
 		if servesQuery(q) {
 			t.Errorf("servesQuery(%v) = true, want false (per-episode query)", q)
 		}
+	}
+}
+
+func TestScopeFromPath(t *testing.T) {
+	tests := []struct{ path, want string }{
+		{"/", ""},         // aggregate (both trackers)
+		{"/api", ""},      // default arr API path -> aggregate
+		{"", ""},          // empty
+		{"/nyaa", "nyaa"}, // per-tracker base path
+		{"/nyaa/api", "nyaa"},
+		{"/NYAA", "nyaa"}, // case-insensitive
+		{"/ab", "ab"},
+		{"/ab/api", "ab"},
+		{"/about", ""}, // not the "ab" segment
+	}
+	for _, tc := range tests {
+		if got := scopeFromPath(tc.path); got != tc.want {
+			t.Errorf("scopeFromPath(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestUpstreamsForScope(t *testing.T) {
+	nyaa := &upstream{name: "nyaa"}
+	ab := &upstream{name: "ab"}
+	all := []*upstream{nyaa, ab}
+
+	if got := upstreamsForScope(all, ""); len(got) != 2 {
+		t.Errorf("scope all: got %d upstreams, want 2", len(got))
+	}
+	if got := upstreamsForScope(all, "nyaa"); len(got) != 1 || got[0] != nyaa {
+		t.Errorf("scope nyaa: got %v, want [nyaa]", got)
+	}
+	if got := upstreamsForScope(all, "ab"); len(got) != 1 || got[0] != ab {
+		t.Errorf("scope ab: got %v, want [ab]", got)
 	}
 }
