@@ -125,6 +125,7 @@ func buildIndexer(cfg *config.Config) builtIndexer {
 	log := slog.Default().With("component", "indexer")
 	seadexHTTP := httpx.NewClient(seadexTimeout)
 	prowlarrHTTP := httpx.NewClient(indexerUpstreamTimeout)
+	mappingHTTP := httpx.NewClient(mappingTimeout)
 
 	ix := indexer.New(&indexer.Config{
 		APIKey:         cfg.IndexerAPIKey,
@@ -133,13 +134,15 @@ func buildIndexer(cfg *config.Config) builtIndexer {
 		ProwlarrAPIKey: cfg.IndexerProwlarrAPIKey,
 		ABPasskey:      cfg.IndexerABPasskey,
 	}, indexer.Deps{
-		SeaDex: seadex.NewClient(seadexHTTP, config.DefaultSeaDexBaseURL, config.DefaultSeaDexPageDelay, log),
-		HTTP:   prowlarrHTTP,
-		Logger: log,
+		SeaDex:  seadex.NewClient(seadexHTTP, config.DefaultSeaDexBaseURL, config.DefaultSeaDexPageDelay, log),
+		HTTP:    prowlarrHTTP,
+		Mapping: mapping.NewLoader(mappingHTTP, config.DefaultMappingURL, config.DefaultMappingOverrides, config.DefaultMappingRefresh, log),
+		Logger:  log,
 	})
 	cleanup := func() {
 		httpx.Close(seadexHTTP)
 		httpx.Close(prowlarrHTTP)
+		httpx.Close(mappingHTTP)
 	}
 	return builtIndexer{indexer: ix, cleanup: cleanup}
 }

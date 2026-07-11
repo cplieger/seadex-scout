@@ -148,16 +148,25 @@ unlike the report-only findings, it lets the arrs grab. Point your arrs at it
 (directly or through Prowlarr) and they parse, match, and grab through their own
 engines, profiles, and history, exactly as for any other indexer.
 
-The feed **proxies Prowlarr** rather than synthesizing data: on each query it asks
-Prowlarr's Nyaa and AnimeBytes Torznab endpoints, keeps only the results SeaDex
-curates, and passes their real title, seeders, size, and Prowlarr-proxied download
-link straight through. Because the download link is Prowlarr's, **no tracker
-passkey lives here** — Prowlarr grabs with the AnimeBytes credentials it already
-holds. The one signal the feed adds is a **download-volume-factor marker**:
-SeaDex's _best_ release is tagged `0.75` (which the arrs read as AnimeBytes
-Freeleech25) and an _alt_ `0.25` (Freeleech75) — the signal you map to a Custom
-Format (below). Its advertised categories are TV/Anime (`5070`) and Movies
-(`2000`).
+The feed handles its two request kinds two different ways. A **search** (the arr's
+automatic or interactive search, which carries a query) is **proxied to Prowlarr**:
+it asks Prowlarr's Nyaa and AnimeBytes Torznab endpoints, keeps only the results
+SeaDex curates, and passes their real title, seeders, size, and Prowlarr-proxied
+download link straight through — so a search needs no tracker passkey here
+(Prowlarr grabs with the AnimeBytes credentials it holds). A **periodic RSS check**
+(the no-query "recent releases" fetch the arrs run on their sync interval) has no
+query to match against, so the feed instead **synthesizes the SeaDex list itself**:
+one item per curated release, its title taken from SeaDex's own file names, with a
+download link built directly — a public Nyaa `.torrent`, or an AnimeBytes link
+built from your `ab_passkey` (see below).
+
+Every item, either way, carries a **download-volume-factor marker**: SeaDex's
+_best_ release is tagged `0.75` (which the arrs read as AnimeBytes Freeleech25) and
+an _alt_ `0.25` (Freeleech75) — the signal you map to a Custom Format (below). Each
+item's category is the entry's real media type, resolved from the anime-list
+mapping rather than guessed from the file name: a film is `2000` (Movies → Radarr),
+while a series, OVA, or special is `5070` (Anime → Sonarr), so a single-file
+special is never mistaken for a movie.
 
 **It answers whole-season searches, not per-episode ones.** SeaDex tracks season
 packs, so the feed answers a season search with the pack and returns nothing —
@@ -187,21 +196,28 @@ indexer:
   nyaa_torznab_url: "http://prowlarr:9696/1/api"    # "" disables Nyaa
   ab_torznab_url: "http://prowlarr:9696/2/api"      # "" disables AnimeBytes
   prowlarr_api_key: "${SEADEX_SCOUT_PROWLARR_KEY}"  # secret, never logged
+  ab_passkey: "${SEADEX_SCOUT_AB_PASSKEY}"          # AnimeBytes passkey; required for the AB RSS feed, "" leaves it off
 ```
 
 The port is fixed at `:9118` (published by your compose port mapping, not a config key).
 
-The download links the feed serves are Prowlarr's own proxy URLs, so **no tracker
-passkey lives here** — Prowlarr grabs with the AnimeBytes credentials it already
-holds.
+For **searches**, the download links are Prowlarr's own proxy URLs, so no passkey
+is needed — Prowlarr grabs with the credentials it holds. The **AnimeBytes RSS
+feed** is the one exception: SeaDex never publishes AB download links, so the feed
+builds them from your `ab_passkey` (the token in your AnimeBytes RSS/announce URL).
+Leave it empty and the `/ab` feed has nothing grabbable to serve, so it returns a
+clear error and Prowlarr's save-test fails until you set it — Nyaa is public and
+needs nothing. The passkey rides in the AB feed's links, so keep the endpoint on
+your LAN (see [Security](#security)).
 
 **2. Add the feed to Sonarr/Radarr.** Settings → Indexers → Add → **Torznab**
 (Custom):
 
-- **URL:** `http://seadex-scout:9118/api` — both trackers combined. To gate Nyaa
-  and AnimeBytes separately (see [Per-tracker search
-  gating](#per-tracker-search-gating)), add two indexers pointed at `…/nyaa` and
-  `…/ab` instead.
+- **URL:** the feed is **per-tracker** — add Nyaa as
+  `http://seadex-scout:9118/nyaa` and AnimeBytes as `http://seadex-scout:9118/ab`,
+  as two Torznab indexers. There is no combined endpoint; serving each tracker on
+  its own path is what lets you gate their search types independently (see
+  [Per-tracker search gating](#per-tracker-search-gating)).
 - **API Key:** the `indexer.feed_api_key` from step 1
 - **Categories:** `5070` (Anime) in Sonarr, `2000` (Movies) in Radarr
 - **☑ Anime Standard Format Search — required.** This is what makes Sonarr issue
@@ -244,17 +260,15 @@ on its own path and lets the arr decide when to hit each:
 
 | Feed | Path | Or subdomain |
 | --- | --- | --- |
-| both trackers | `…/api` (or `/`) | `seadex.example.com` |
-| Nyaa only | `…/nyaa` | `nyaa.example.com` |
-| AnimeBytes only | `…/ab` | `ab.example.com` |
+| Nyaa | `…/nyaa` | `nyaa.example.com` |
+| AnimeBytes | `…/ab` | `ab.example.com` |
 
 Add the per-tracker feeds as **two** Torznab indexers (each still needs Anime
 Standard Format Search on), then set their flags in Sonarr/Radarr (Settings →
 Indexers): to make Nyaa manual-only, untick **Enable RSS** and **Enable Automatic
 Search** on the Nyaa indexer and leave the AB one fully enabled. Adding them
 through Prowlarr with a sync profile works too — the flags just have to end up on
-the indexer as the arr sees it. If you don't need this, the single `…/api` indexer
-is all you need.
+the indexer as the arr sees it.
 
 If seadex-scout runs apart from the arrs behind a reverse proxy, the subdomain
 form is cleaner than the path: point `nyaa.example.com` and `ab.example.com` at
@@ -265,7 +279,8 @@ default for Caddy/nginx `reverse_proxy`).
 ### Security
 
 The feed is gated by `feed_api_key` (a request without the matching `apikey` gets
-`401`). The download links it serves are Prowlarr proxy URLs, so treat the
+`401`). Its links are Prowlarr proxy URLs (for searches) and, for the AnimeBytes
+RSS feed, direct AnimeBytes links that embed your `ab_passkey` — so treat the
 endpoint as sensitive: keep it on your LAN — behind an internal reverse proxy is
 fine (that is what the per-tracker subdomain routing is for), just don't put it on
 the public internet. The Prowlarr API key is sent to Prowlarr in a request header

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
@@ -398,7 +399,10 @@ func TestBuildFeeds(t *testing.T) {
 		},
 	}}
 
-	nyaa, ab, abSkipped := buildFeeds(entries, "PASSKEY123")
+	// Frieren is a TV series, so classify every entry as anime (the category
+	// itself is exercised by TestMovieClassifier).
+	classifyAnime := func(int) []int { return []int{catAnime} }
+	nyaa, ab, abSkipped := buildFeeds(entries, "PASSKEY123", classifyAnime)
 	if len(nyaa) != 2 || len(ab) != 2 {
 		t.Fatalf("feeds: got nyaa=%d ab=%d, want 2 and 2", len(nyaa), len(ab))
 	}
@@ -465,7 +469,7 @@ func TestBuildFeeds(t *testing.T) {
 
 	// Without a passkey the AB feed carries nothing grabbable, and both AB
 	// releases are counted for the operator nudge; Nyaa is unaffected.
-	nyaa2, ab2, abSkipped2 := buildFeeds(entries, "")
+	nyaa2, ab2, abSkipped2 := buildFeeds(entries, "", classifyAnime)
 	if len(nyaa2) != 2 {
 		t.Errorf("nyaa feed without passkey = %d, want 2", len(nyaa2))
 	}
@@ -532,29 +536,71 @@ func TestFeedTitle(t *testing.T) {
 	}
 }
 
-func TestFeedCategories(t *testing.T) {
-	anime := feedCategories(&seadex.Torrent{Files: []seadex.File{
-		{Name: "Show - S01E01 (BD 1080p) [Grp].mkv"},
-	}})
-	if len(anime) != 1 || anime[0] != catAnime {
-		t.Errorf("episode file categories = %v, want [%d]", anime, catAnime)
+// TestMovieClassifier verifies the RSS category comes from the entry's real
+// media type (Fribb), not a guess from the file name: a movie routes to Radarr
+// (Movies), while a TV series, an OVA, a special, and an unmapped entry all
+// route to Sonarr (Anime). The OVA/special cases are the ones a file-name
+// heuristic gets wrong - a single-file special is indistinguishable from a film
+// by name - so classifying them as anime is the behavior that matters here.
+func TestMovieClassifier(t *testing.T) {
+	recs := map[int]mapping.Record{
+		1: {AniListID: 1, Type: "MOVIE"},
+		2: {AniListID: 2, Type: "OVA"},
+		3: {AniListID: 3, Type: "SPECIAL"},
+		4: {AniListID: 4, Type: "TV"},
+	}
+	classify := movieClassifier(func(alID int) (mapping.Record, bool) {
+		r, ok := recs[alID]
+		return r, ok
+	})
+	tests := []struct {
+		name string
+		alID int
+		want int
+	}{
+		{"movie routes to Radarr", 1, catMovies},
+		{"OVA is not a movie (Sonarr)", 2, catAnime},
+		{"special is not a movie (Sonarr)", 3, catAnime},
+		{"tv routes to Sonarr", 4, catAnime},
+		{"unmapped defaults to Sonarr", 999, catAnime},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classify(tc.alID)
+			if len(got) != 1 || got[0] != tc.want {
+				t.Errorf("classify(%d) = %v, want [%d]", tc.alID, got, tc.want)
+			}
+		})
 	}
 
-	movie := feedCategories(&seadex.Torrent{Files: []seadex.File{
-		{Name: "A Silent Voice (2016) (BD 1080p) [Grp].mkv"},
-	}})
-	if len(movie) != 1 || movie[0] != catMovies {
-		t.Errorf("single movie file categories = %v, want [%d]", movie, catMovies)
+	// A nil lookup (no mapping configured) is safe and defaults to anime.
+	if got := movieClassifier((*mapping.Index)(nil).Lookup)(1); len(got) != 1 || got[0] != catAnime {
+		t.Errorf("nil-mapping classify = %v, want [%d]", got, catAnime)
+	}
+}
+
+// TestABFeedRequiresPasskey verifies the /ab feed rejects an empty-q request
+// (Prowlarr's save-test or an RSS check) with a Torznab <error> when no passkey
+// is set, so the AnimeBytes indexer cannot be saved without one; the /nyaa feed
+// and an AB request once a passkey is set are unaffected.
+func TestABFeedRequiresPasskey(t *testing.T) {
+	serve := func(ix *Indexer, target string) string {
+		rec := httptest.NewRecorder()
+		ix.serve(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		return rec.Body.String()
 	}
 
-	// Multiple video files with no episode token still read as a series pack,
-	// not a movie.
-	multi := feedCategories(&seadex.Torrent{Files: []seadex.File{
-		{Name: "[Grp] Show - 01 (1080p).mkv"},
-		{Name: "[Grp] Show - 02 (1080p).mkv"},
-	}})
-	if len(multi) != 1 || multi[0] != catAnime {
-		t.Errorf("multi-file no-episode categories = %v, want [%d]", multi, catAnime)
+	noKey := New(&Config{}, Deps{})
+	if body := serve(noKey, "/ab?t=search"); !strings.Contains(body, "<error") || !strings.Contains(body, "passkey") {
+		t.Errorf("ab empty-q without passkey: body = %q, want a Torznab <error> mentioning the passkey", body)
+	}
+	if body := serve(noKey, "/nyaa?t=search"); strings.Contains(body, "<error") {
+		t.Errorf("nyaa empty-q must not error: %q", body)
+	}
+
+	withKey := New(&Config{ABPasskey: "PASSKEY"}, Deps{})
+	if body := serve(withKey, "/ab?t=search"); strings.Contains(body, "<error") {
+		t.Errorf("ab empty-q with passkey must not error: %q", body)
 	}
 }
 

@@ -48,7 +48,4 @@ indexer:
   nyaa_torznab_url: "" # Prowlarr Nyaa Torznab URL, e.g. http://prowlarr:9696/1/api ("" = off)
   ab_torznab_url: "" # Prowlarr AnimeBytes Torznab URL ("" = off)
   prowlarr_api_key: "" # Prowlarr API key; secret, never logged
-  # AnimeBytes passkey, appended to the RSS feed's AB download links so the arrs
-  # can grab them (searches go through Prowlarr and don't need it). Secret, never
-  # logged; empty = AB RSS feed lists nothing grabbable. Public Nyaa needs none.
-  ab_passkey: ""
+  ab_passkey: "" # AnimeBytes passkey for the AB RSS feed download links ("" = AB RSS off; Nyaa needs none)

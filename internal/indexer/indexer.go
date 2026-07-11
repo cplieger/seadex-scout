@@ -52,6 +52,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
@@ -93,11 +94,16 @@ type Config struct {
 }
 
 // Deps are the assembled clients the indexer needs: SeaDex for the curation set,
-// and an HTTP client for the Prowlarr Torznab endpoints.
+// an HTTP client for the Prowlarr Torznab endpoints, and the Fribb mapping
+// loader used to tag each synthesized RSS item's category (movie vs series) by
+// the entry's real media type, since a file name cannot tell a film from a
+// single-file OVA/special. Mapping may be nil (every item is then treated as
+// anime/series, the safe default that never mis-routes a special to Radarr).
 type Deps struct {
-	SeaDex *seadex.Client
-	HTTP   *http.Client
-	Logger *slog.Logger
+	SeaDex  *seadex.Client
+	HTTP    *http.Client
+	Mapping *mapping.Loader
+	Logger  *slog.Logger
 }
 
 // curation is the set of SeaDex-tracked releases, keyed by info hash and by
@@ -132,6 +138,8 @@ func (c *curation) lookup(hash, infoURL, guid string) (isBest, matched bool) {
 type Indexer struct {
 	set       curation
 	seadex    *seadex.Client
+	mapping   *mapping.Loader
+	mapCache  mapping.Cache
 	log       *slog.Logger
 	cfg       Config
 	upstreams []*upstream
@@ -148,9 +156,10 @@ func New(cfg *Config, deps Deps) *Indexer {
 		log = slog.Default()
 	}
 	ix := &Indexer{
-		seadex: deps.SeaDex,
-		log:    log,
-		cfg:    *cfg,
+		seadex:  deps.SeaDex,
+		mapping: deps.Mapping,
+		log:     log,
+		cfg:     *cfg,
 	}
 	// One upstream per configured Prowlarr Torznab URL. An empty URL means that
 	// tracker is off: it is simply not wired, so the feed never queries it. (The
@@ -200,8 +209,11 @@ func (ix *Indexer) Run(ctx context.Context) error {
 // Refresh fetches the SeaDex catalogue and rebuilds both what searches match
 // against (the curation set: info hashes and tracker keys of every tracked
 // release, and whether each is best) and what periodic RSS checks serve (the two
-// synthesized per-tracker feeds). A SeaDex fetch failure returns the error and
-// leaves the previous set and feeds in place.
+// synthesized per-tracker feeds). The Fribb mapping is loaded alongside to tag
+// each synthesized item's category by the entry's real media type (movie vs
+// series). A SeaDex fetch failure returns the error and leaves the previous set
+// and feeds in place; a mapping failure only degrades categorization (items fall
+// back to anime/series), never the whole refresh.
 func (ix *Indexer) Refresh(ctx context.Context) error {
 	entries, err := ix.seadex.FetchEntries(ctx)
 	if err != nil {
@@ -221,7 +233,8 @@ func (ix *Indexer) Refresh(ctx context.Context) error {
 			}
 		}
 	}
-	nyaaFeed, abFeed, abSkippedNoPasskey := buildFeeds(entries, ix.cfg.ABPasskey)
+	idx := ix.loadMapping(ctx)
+	nyaaFeed, abFeed, abSkippedNoPasskey := buildFeeds(entries, ix.cfg.ABPasskey, movieClassifier(idx.Lookup))
 
 	ix.mu.Lock()
 	ix.set = set
@@ -237,6 +250,41 @@ func (ix *Indexer) Refresh(ctx context.Context) error {
 			"ab_releases_skipped", abSkippedNoPasskey)
 	}
 	return nil
+}
+
+// loadMapping returns the Fribb mapping index used to categorize synthesized
+// feed items, reusing the in-memory cache across refreshes (a conditional GET on
+// the slow Fribb cadence). It is safe to call with no mapping configured (nil
+// loader -> nil index -> every item categorized as anime/series). A load failure
+// is logged and the (stale or empty) index is used, so categorization degrades
+// without failing the refresh. Called only from the single refresh goroutine.
+func (ix *Indexer) loadMapping(ctx context.Context) *mapping.Index {
+	if ix.mapping == nil {
+		return nil
+	}
+	cache, idx, err := ix.mapping.Load(ctx, &ix.mapCache)
+	ix.mapCache = cache
+	if err != nil {
+		ix.log.Warn("indexer mapping load degraded; categorizing with available data", "error", err)
+	}
+	return idx
+}
+
+// movieClassifier returns the category function buildFeeds stamps onto each
+// entry's items. It routes a Fribb-typed movie to the Movies category (Radarr)
+// and everything else - TV, OVA, ONA, SPECIAL, or an unmapped entry - to Anime
+// (Sonarr). Defaulting the unknown/unmapped case to anime is deliberate: a
+// single-file OVA/special looks just like a movie by file name, so the failure
+// that matters (a special mis-routed to Radarr, where it can never match) is
+// avoided at the cost of a rare unmapped film not surfacing on Radarr's RSS. The
+// lookup is mapping.Index.Lookup, which is nil-safe.
+func movieClassifier(lookup func(alID int) (mapping.Record, bool)) func(alID int) []int {
+	return func(alID int) []int {
+		if rec, ok := lookup(alID); ok && rec.IsMovie() {
+			return []int{catMovies}
+		}
+		return []int{catAnime}
+	}
 }
 
 // refreshLoop refreshes the curation set once immediately, then on
@@ -288,6 +336,19 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 		_, _ = io.WriteString(w, renderCaps())
 		ix.log.Info("indexer request", "scope", scope, "t", "caps")
+		return
+	}
+	// The AnimeBytes RSS feed needs the operator's passkey to build grabbable
+	// links, so without it the /ab feed has nothing to serve a periodic RSS check
+	// (an empty-q request). Answer that with a Torznab error rather than an empty
+	// feed, so Prowlarr's save-test fails with a clear reason and the operator
+	// sets the passkey. An AB search (non-empty q) is unaffected: it proxies
+	// Prowlarr, whose own link needs no passkey.
+	if scope == upstreamAB && ix.cfg.ABPasskey == "" && strings.TrimSpace(q.Get("q")) == "" {
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		_, _ = io.WriteString(w, renderError(errCodeIncorrectCredentials,
+			"AnimeBytes passkey not configured: set indexer.ab_passkey in seadex-scout to serve the AnimeBytes feed"))
+		ix.log.Info("indexer request rejected", "scope", scope, "reason", "ab passkey not configured")
 		return
 	}
 	items, stats := ix.query(r.Context(), q, scope)

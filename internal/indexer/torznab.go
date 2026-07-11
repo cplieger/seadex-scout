@@ -20,6 +20,12 @@ const (
 // torznabNS is the Torznab feed namespace the arrs key their attr parsing on.
 const torznabNS = "http://torznab.com/schemas/2015/feed"
 
+// errCodeIncorrectCredentials is the Newznab/Torznab error code for missing or
+// incorrect credentials (100), the closest fit for a required-but-unset secret.
+// Prowlarr surfaces the <error> element's description on the indexer's test, so
+// the operator sees why the save failed.
+const errCodeIncorrectCredentials = 100
+
 // Item is one feed release: the real fields parsed from a Prowlarr Torznab
 // result, plus the SeaDex download-volume-factor marker this feed adds.
 type Item struct {
@@ -68,6 +74,17 @@ func renderCaps() string {
 	fmt.Fprintf(&b, `<category id="%d" name="Movies"/>`, catMovies)
 	b.WriteString("</categories>")
 	b.WriteString("</caps>")
+	return b.String()
+}
+
+// renderError returns a Newznab/Torznab <error> document. The arrs and Prowlarr
+// treat a response carrying this element as a failed request and show the
+// description, so it is how the feed reports a misconfiguration (a required
+// secret not set) on the indexer's save-test rather than returning empty.
+func renderError(code int, description string) string {
+	var b strings.Builder
+	b.WriteString(xml.Header)
+	fmt.Fprintf(&b, `<error code="%d" description="%s"/>`, code, esc(description))
 	return b.String()
 }
 
