@@ -35,9 +35,16 @@ const seaDexEntryURL = "https://releases.moe/"
 // can nudge the operator once, rather than emitting link-less items an arr would
 // fail to grab. Trackers other than Nyaa/AB (a negligible SeaDex tail) are
 // dropped. Both feeds are sorted newest-first and capped at feedWindow.
-func buildFeeds(entries []seadex.Entry, abPasskey string) (nyaaFeed, abFeed []Item, abSkippedNoPasskey int) {
+//
+// classify sets each item's Torznab category from the entry's AniList id: a
+// SeaDex file name cannot reliably tell a movie from a single-file OVA/special,
+// so the caller resolves the real media type (Fribb/AniList) and returns the
+// category (Movies for a film -> Radarr, Anime for everything else -> Sonarr).
+// It is called once per entry (all of an entry's torrents share its category).
+func buildFeeds(entries []seadex.Entry, abPasskey string, classify func(alID int) []int) (nyaaFeed, abFeed []Item, abSkippedNoPasskey int) {
 	for i := range entries {
 		e := &entries[i]
+		cats := classify(e.AniListID)
 		for j := range e.Torrents {
 			it, scope, ok, noPasskey := feedItemFor(e, &e.Torrents[j], abPasskey)
 			if noPasskey {
@@ -46,6 +53,7 @@ func buildFeeds(entries []seadex.Entry, abPasskey string) (nyaaFeed, abFeed []It
 			if !ok {
 				continue
 			}
+			it.Categories = cats
 			switch scope {
 			case upstreamNyaa:
 				nyaaFeed = append(nyaaFeed, it)
@@ -79,7 +87,8 @@ func feedItemFor(e *seadex.Entry, t *seadex.Torrent, abPasskey string) (it Item,
 // them, the info URL points at the SeaDex entry page, and the SeaDex marker is
 // stamped (best -> 0.75 Freeleech25, alt -> 0.25 Freeleech75). The GUID is the
 // tracker page URL (unique per torrent). Seeders are left 0 (the render floors
-// to 1) since a synthesized item has no live swarm count.
+// to 1) since a synthesized item has no live swarm count. The category is left
+// unset here and stamped by buildFeeds from the entry's resolved media type.
 func synthItem(e *seadex.Entry, t *seadex.Torrent, dl string) Item {
 	dvf := dvfAlt
 	if t.IsBest {
@@ -92,7 +101,6 @@ func synthItem(e *seadex.Entry, t *seadex.Torrent, dl string) Item {
 		DownloadURL:          dl,
 		InfoHash:             validInfoHash(t.InfoHash),
 		DownloadVolumeFactor: dvf,
-		Categories:           feedCategories(t),
 		Size:                 totalSize(t.Files),
 		PubDate:              e.Updated,
 	}
@@ -151,38 +159,11 @@ func representativeFile(files []seadex.File) string {
 	return files[0].Name
 }
 
-// feedCategories picks the Torznab category for a synthesized item. With no
-// AniList format available here, it infers from the files: a season+episode
-// token or more than one video file means a series (Anime, 5070); a lone video
-// file with no episode marker is treated as a movie (Movies, 2000) so Radarr can
-// pick up anime films via RSS. The ambiguous single-file special is the known
-// edge (it may mis-tag as a movie; the arr simply ignores an unmatched item).
-func feedCategories(t *seadex.Torrent) []int {
-	if episodeToken.MatchString(representativeFile(t.Files)) {
-		return []int{catAnime}
-	}
-	if videoFileCount(t.Files) <= 1 {
-		return []int{catMovies}
-	}
-	return []int{catAnime}
-}
-
-// mediaExts are the video container extensions used to tell episode files from
-// sidecar files (subtitles, samples) when counting/scanning a torrent's files.
+// mediaExts are the video container extensions used to tell an episode/movie
+// file from a sidecar file (subtitles, samples) when scanning a torrent's files.
 var mediaExts = map[string]bool{
 	".mkv": true, ".mp4": true, ".avi": true, ".m2ts": true,
 	".ts": true, ".ogm": true, ".mov": true, ".wmv": true, ".webm": true,
-}
-
-// videoFileCount counts the torrent's files with a known video extension.
-func videoFileCount(files []seadex.File) int {
-	n := 0
-	for i := range files {
-		if mediaExts[strings.ToLower(path.Ext(files[i].Name))] {
-			n++
-		}
-	}
-	return n
 }
 
 // stripExt drops a trailing known video extension from a file name, leaving any
