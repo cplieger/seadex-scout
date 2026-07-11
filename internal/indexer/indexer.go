@@ -11,12 +11,15 @@
 // and meant to bind LAN-only. The catalogue of what SeaDex curates is cached and
 // refreshed in the background.
 //
-// The feed is served per-tracker as well as combined: the root path serves both
-// trackers, /nyaa serves only the Nyaa-sourced curated releases, and /ab only
-// the AnimeBytes ones. Adding the per-tracker paths as separate indexers in
+// The feed is served per-tracker as well as combined, addressable by path or by
+// subdomain: the root (or /api) serves both trackers, /nyaa or a nyaa.* host
+// serves only the Nyaa-sourced curated releases, and /ab or an ab.* host only the
+// AnimeBytes ones. Adding the per-tracker feeds as separate indexers in
 // Sonarr/Radarr lets each arr gate a tracker's RSS/automatic/interactive use via
 // that indexer's own flags - the arr is the only component that knows the search
-// type (it is never carried in the Torznab request), so it owns that policy.
+// type (it is never carried in the Torznab request), so it owns that policy. The
+// subdomain form lets a reverse proxy map per-tracker hostnames to the one port
+// without rewriting paths, for when seadex-scout runs apart from the arrs.
 package indexer
 
 import (
@@ -243,7 +246,7 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
-	_, _ = io.WriteString(w, renderFeed(ix.query(r.Context(), q, scopeFromPath(r.URL.Path))))
+	_, _ = io.WriteString(w, renderFeed(ix.query(r.Context(), q, scopeFor(r.Host, r.URL.Path))))
 }
 
 // query returns the feed items for a request, restricted to scope's upstream(s)
@@ -342,15 +345,45 @@ func upstreamParams(q url.Values) url.Values {
 	return out
 }
 
-// scopeFromPath maps the request path to the tracker whose results to serve, or
-// "" for all. The first path segment selects it: "/nyaa..." -> nyaa, "/ab..." ->
-// ab, anything else (including "/" and the default "/api") -> all trackers.
-// Serving per-tracker lets an arr add the feed as two indexers (base path /nyaa
-// and /ab) and gate each tracker's RSS/automatic/interactive use with that
+// scopeFor resolves which tracker's results a request targets: the URL path
+// first (scopeFromPath), the Host subdomain as a fallback (scopeFromHost), or ""
+// for all trackers. Serving per-tracker lets an arr treat the feed as two
+// indexers and gate each tracker's RSS/automatic/interactive use with that
 // indexer's own flags - the arr is the only component that knows the search type
-// (it is never carried in the Torznab request), so it owns that decision.
+// (it is never carried in the Torznab request), so it owns that decision. Two
+// addressing styles are supported so it works whether seadex-scout shares a host
+// with the arrs or sits behind a reverse proxy: a path (.../nyaa, .../ab) for
+// direct use, or a subdomain (nyaa.example.com, ab.example.com) a proxy can map
+// to the single port without rewriting the path.
+func scopeFor(host, path string) string {
+	if s := scopeFromPath(path); s != "" {
+		return s
+	}
+	return scopeFromHost(host)
+}
+
+// scopeFromPath maps the URL path to a tracker via its first segment: "/nyaa..."
+// -> nyaa, "/ab..." -> ab, anything else (including "/" and the default "/api")
+// -> "" (all trackers).
 func scopeFromPath(p string) string {
 	switch firstSegment(p) {
+	case upstreamNyaa:
+		return upstreamNyaa
+	case upstreamAB:
+		return upstreamAB
+	default:
+		return ""
+	}
+}
+
+// scopeFromHost maps a request Host to a tracker via its leading DNS label:
+// nyaa.example.com -> nyaa, ab.example.com -> ab, anything else (a bare internal
+// name like seadex-scout:9118, or an aggregate host) -> "". This lets a reverse
+// proxy route per-tracker subdomains to the one port with no path rewrite; the
+// Host must reach the app unmodified (the default for a Caddy/nginx reverse proxy).
+func scopeFromHost(host string) string {
+	label, _, _ := strings.Cut(host, ".")
+	switch strings.ToLower(label) {
 	case upstreamNyaa:
 		return upstreamNyaa
 	case upstreamAB:

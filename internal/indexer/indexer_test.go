@@ -293,3 +293,38 @@ func TestUpstreamsForScope(t *testing.T) {
 		t.Errorf("scope ab: got %v, want [ab]", got)
 	}
 }
+
+func TestScopeFromHost(t *testing.T) {
+	tests := []struct{ host, want string }{
+		{"nyaa.cplieger.com", "nyaa"},
+		{"nyaa.cplieger.com:443", "nyaa"}, // port ignored
+		{"AB.example.com", "ab"},          // case-insensitive
+		{"ab.example.com", "ab"},
+		{"seadex.cplieger.com", ""}, // aggregate subdomain
+		{"seadex-scout:9118", ""},   // internal docker name + port
+		{"seadex-scout", ""},        // internal docker name
+		{"", ""},
+	}
+	for _, tc := range tests {
+		if got := scopeFromHost(tc.host); got != tc.want {
+			t.Errorf("scopeFromHost(%q) = %q, want %q", tc.host, got, tc.want)
+		}
+	}
+}
+
+func TestScopeFor(t *testing.T) {
+	tests := []struct{ host, path, want string }{
+		{"seadex-scout:9118", "/nyaa/api", "nyaa"},   // path (internal direct use)
+		{"seadex-scout:9118", "/ab", "ab"},           // path
+		{"seadex-scout:9118", "/api", ""},            // neither -> all
+		{"nyaa.cplieger.com", "/api", "nyaa"},        // host fallback (proxy subdomain)
+		{"ab.cplieger.com", "/api", "ab"},            // host fallback
+		{"seadex.cplieger.com", "/nyaa/api", "nyaa"}, // path over aggregate host
+		{"nyaa.cplieger.com", "/ab/api", "ab"},       // explicit path wins over host
+	}
+	for _, tc := range tests {
+		if got := scopeFor(tc.host, tc.path); got != tc.want {
+			t.Errorf("scopeFor(%q,%q) = %q, want %q", tc.host, tc.path, got, tc.want)
+		}
+	}
+}
