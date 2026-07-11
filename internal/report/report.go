@@ -101,9 +101,21 @@ func findingKVs(f *compare.Finding) []any {
 		"kind", f.Kind,
 		"classification_reason", f.Reason,
 		"release_url", f.ReleaseURL,
+		"release_urls", joinLinks(f.Links),
 		"info_hash", f.InfoHash,
 		"status", string(f.Status),
 	}
+}
+
+// joinLinks renders every obtainable source for the recommended release as a
+// space-separated "tracker=url" list, so a finding carries both a Nyaa and an
+// AnimeBytes link when the release exists on both, not just the headline one.
+func joinLinks(links []compare.ReleaseLink) string {
+	parts := make([]string, 0, len(links))
+	for i := range links {
+		parts = append(parts, links[i].Tracker+"="+links[i].URL)
+	}
+	return strings.Join(parts, " ")
 }
 
 // message returns the human-facing log message for a finding status.
@@ -111,16 +123,12 @@ func message(status compare.Status) string {
 	switch status {
 	case compare.StatusBetter:
 		return "better release available"
-	case compare.StatusUnavailableTracker:
-		return "better release available, but not on your selected trackers"
 	case compare.StatusMixedGroup:
 		return "series spans multiple release groups, manual review"
 	case compare.StatusIncomplete:
 		return "SeaDex entry is incomplete"
 	case compare.StatusTheoretical:
 		return "SeaDex lists a theoretical best only"
-	case compare.StatusPrivateOnly:
-		return "recommended release only on an excluded tracker"
 	default:
 		return "seadex finding"
 	}

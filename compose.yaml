@@ -10,4 +10,4 @@ services:
     # config, seadex-scout writes a starter there and exits with a warning; edit
     # it (set your Sonarr/Radarr url + api_key) and restart.
     volumes:
-      - "./config:/config"  # config.yaml + state + mapping cache; report.md/.json land here
+      - "./config:/config"  # holds config.yaml, state, and the reports dir
