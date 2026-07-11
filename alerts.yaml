@@ -35,16 +35,17 @@ groups:
       # poll_interval, so its absence means the watcher is wedged and silent.
       - alert: SeadexScoutScanStalled
         expr: |
-          absent_over_time({container="seadex-scout"} |= `cycle complete` [24h])
+          absent_over_time({container="seadex-scout"} |= `cycle complete` [26h])
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "seadex-scout has not completed a cycle in 24h"
+          summary: "seadex-scout has not completed a cycle in 26h"
           description: >
             seadex-scout (daemon mode) logs a `cycle complete` line every
-            poll_interval (default 12h). None in 24h while the container is up
-            means the poll loop is wedged and better-release findings have
+            poll_interval (default 12h). None in 26h while the container is up
+            (about two missed cycles, allowing for jitter) means the poll loop is
+            wedged and better-release findings have
             silently stopped; restart the container. Adjust the window to your
             poll_interval. This rule applies to built-in (daemon) mode only: in
             resident-idle (poll_interval: off) or report mode each cycle runs
@@ -54,7 +55,7 @@ groups:
       # Informational, not a fault: SeaDex recommends a better release than the
       # one on disk. This is the app's activity signal; keep it at severity info
       # or drop it. It is not page-worthy.
-      - alert: SeadexScoutBetterReleaseLogged
+      - alert: SeadexScoutBetterReleaseFound
         expr: |
           sum(count_over_time(
             {container="seadex-scout"} | json | msg=`better release available` [1h]

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -105,9 +106,17 @@ func (r *Report) Log(log *slog.Logger) {
 	}
 }
 
-// WriteFiles renders and atomically writes the Markdown report to mdPath and the
-// JSON report to jsonPath, creating parent directories as needed.
-func (r *Report) WriteFiles(ctx context.Context, mdPath, jsonPath string, log *slog.Logger) error {
+// reportStampLayout is the UTC timestamp embedded in report filenames: sortable,
+// filesystem-safe (no colons), second precision.
+const reportStampLayout = "2006-01-02T15-04-05Z"
+
+// WriteFiles renders the report and atomically writes a timestamped Markdown +
+// JSON pair into dir (report-<UTC timestamp>.md and .json), creating dir as
+// needed. The timestamp (the report's GeneratedAt) keeps successive reports
+// from overwriting one another.
+func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) error {
+	base := filepath.Join(dir, "report-"+r.GeneratedAt.UTC().Format(reportStampLayout))
+	mdPath, jsonPath := base+".md", base+".json"
 	if err := writeAtomic(ctx, mdPath, []byte(RenderMarkdown(r)), log); err != nil {
 		return fmt.Errorf("audit: write markdown %s: %w", mdPath, err)
 	}
