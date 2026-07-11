@@ -87,10 +87,13 @@ func renderFeed(items []Item) string {
 	return b.String()
 }
 
-// writeItem renders one release as an <item>: the real title, size, seeders,
-// and Prowlarr download URL passed through, plus the SeaDex marker. Seeders are
-// floored to 1 (never 0, so the arrs' minimum-seeders check cannot reject a
-// curated release when the swarm count is momentarily 0/unknown).
+// writeItem renders one release as an <item>: its title, size, seeders, and
+// download URL (Prowlarr's proxy link for a search, a directly-built tracker
+// link for a synthesized RSS item), plus the SeaDex marker. The enclosure is
+// omitted when there is no download URL, so a link-less item never renders an
+// empty enclosure. Seeders are floored to 1 (never 0, so the arrs' minimum-
+// seeders check cannot reject a curated release when the swarm count is
+// momentarily 0/unknown or synthesized).
 func writeItem(b *strings.Builder, it *Item) {
 	b.WriteString("<item>")
 	writeText(b, "title", it.Title)
@@ -101,7 +104,9 @@ func writeItem(b *strings.Builder, it *Item) {
 	if !it.PubDate.IsZero() {
 		writeText(b, "pubDate", it.PubDate.UTC().Format(time.RFC1123Z))
 	}
-	fmt.Fprintf(b, `<enclosure url="%s" length="%d" type="application/x-bittorrent"/>`, esc(it.DownloadURL), it.Size)
+	if it.DownloadURL != "" {
+		fmt.Fprintf(b, `<enclosure url="%s" length="%d" type="application/x-bittorrent"/>`, esc(it.DownloadURL), it.Size)
+	}
 
 	cats := it.Categories
 	if len(cats) == 0 {
@@ -116,8 +121,12 @@ func writeItem(b *strings.Builder, it *Item) {
 	}
 	// The marker: best -> downloadvolumefactor 0.75 (Freeleech25), alt -> 0.25
 	// (Freeleech75). uploadvolumefactor 1 keeps it from also flagging DoubleUpload.
-	writeAttr(b, "downloadvolumefactor", it.DownloadVolumeFactor)
-	writeAttr(b, "uploadvolumefactor", "1")
+	// Pass-through (empty-q/RSS) items are not curated and carry no marker, so
+	// the attrs are omitted and the arr treats them as normal (factor 1).
+	if it.DownloadVolumeFactor != "" {
+		writeAttr(b, "downloadvolumefactor", it.DownloadVolumeFactor)
+		writeAttr(b, "uploadvolumefactor", "1")
+	}
 
 	seeders := max(it.Seeders, 1)
 	leechers := max(it.Leechers, 0)

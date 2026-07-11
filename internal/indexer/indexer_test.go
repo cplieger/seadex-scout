@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
@@ -141,10 +143,12 @@ func TestMarkAndDedupe(t *testing.T) {
 // Prowlarr Torznab endpoint, exercising the full path: SeaDex fetch -> curation
 // set -> upstream query -> parse -> match -> mark -> query result.
 func TestIndexerEndToEnd(t *testing.T) {
-	// Mock SeaDex: one entry with a best Nyaa torrent matching the sample feed.
+	// Mock SeaDex: one entry with a best Nyaa torrent matching the sample feed
+	// (with a file name so the synthesized RSS feed has a real title to derive).
 	seadexBody := `{"items":[{"alID":123,"incomplete":false,"expand":{"trs":[` +
 		`{"tracker":"Nyaa","url":"https://nyaa.si/view/1234567",` +
-		`"infoHash":"ABCDEF1234567890abcdef1234567890abcdef12","isBest":true}]}}],"totalPages":1}`
+		`"infoHash":"ABCDEF1234567890abcdef1234567890abcdef12","isBest":true,"releaseGroup":"PMR",` +
+		`"files":[{"length":100,"name":"Some Anime - S01E01 (BD Remux 1080p) [PMR].mkv"}]}]}}],"totalPages":1}`
 	seadexSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, seadexBody)
@@ -172,12 +176,15 @@ func TestIndexerEndToEnd(t *testing.T) {
 		t.Fatalf("Refresh: %v", err)
 	}
 
-	items, stats := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
+	// A real search (non-empty q) filters to the curation set: the sample item
+	// matches by info hash, gets the best marker, and its real seeders pass
+	// through.
+	items, stats := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Some Anime"}}, "nyaa")
 	if len(items) != 1 {
 		t.Fatalf("got %d items, want 1", len(items))
 	}
-	if !stats.answered || stats.upstream != 1 || stats.curated != 1 {
-		t.Errorf("stats = %+v, want answered/upstream 1/curated 1", stats)
+	if !stats.answered || stats.feed || stats.upstream != 1 || stats.curated != 1 {
+		t.Errorf("stats = %+v, want answered, not feed, upstream 1, curated 1", stats)
 	}
 	if items[0].DownloadVolumeFactor != dvfBest {
 		t.Errorf("marker = %q, want %q (best)", items[0].DownloadVolumeFactor, dvfBest)
@@ -189,20 +196,39 @@ func TestIndexerEndToEnd(t *testing.T) {
 		t.Errorf("upstream X-Api-Key = %q, want prowlarr-key", gotAPIKey)
 	}
 
-	// Per-tracker scoping: the nyaa scope hits the (only) configured upstream;
-	// the ab scope has no upstream here, so it serves nothing.
-	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
+	// Per-tracker scoping (real search): the nyaa scope hits the only configured
+	// upstream; the ab scope has none, so it serves nothing.
+	if got, _ := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Some Anime"}}, "nyaa"); len(got) != 1 {
 		t.Errorf("nyaa scope returned %d items, want 1", len(got))
 	}
-	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "ab"); len(got) != 0 {
+	if got, _ := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Some Anime"}}, "ab"); len(got) != 0 {
 		t.Errorf("ab scope returned %d items, want 0 (no ab upstream)", len(got))
 	}
 
-	// A query for a series not curated by SeaDex still returns a valid (empty)
-	// result once we point the curation set elsewhere.
+	// The synthesized RSS feed is independent of the search curation set: clear
+	// the set, and an empty-q request (an RSS "latest" fetch, or Prowlarr's save
+	// test) is still served from the pre-built feed - the curated Nyaa release,
+	// its title collapsed to the season, a directly-built .torrent link, and the
+	// best marker.
 	ix.set = curation{byHash: map[string]bool{}, byKey: map[string]bool{}}
-	if got, _ := ix.query(context.Background(), url.Values{"t": {"tvsearch"}}, "nyaa"); len(got) != 0 {
-		t.Errorf("uncurated query returned %d items, want 0", len(got))
+	got, st := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
+	if len(got) != 1 || !st.feed {
+		t.Fatalf("empty-q feed returned %d items (feed=%v), want 1 synthesized item", len(got), st.feed)
+	}
+	if got[0].Title != "Some Anime - S01 (BD Remux 1080p) [PMR]" {
+		t.Errorf("synthesized title = %q, want the season-collapsed title", got[0].Title)
+	}
+	if got[0].DownloadURL != "https://nyaa.si/download/1234567.torrent" {
+		t.Errorf("synthesized download URL = %q, want the public Nyaa .torrent link", got[0].DownloadURL)
+	}
+	if got[0].DownloadVolumeFactor != dvfBest {
+		t.Errorf("synthesized marker = %q, want %q (best)", got[0].DownloadVolumeFactor, dvfBest)
+	}
+
+	// A real search for a series not in the (now empty) curation set returns
+	// nothing.
+	if got, _ := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Nonexistent"}}, "nyaa"); len(got) != 0 {
+		t.Errorf("uncurated search returned %d items, want 0", len(got))
 	}
 }
 
@@ -328,6 +354,240 @@ func TestScopeFor(t *testing.T) {
 	for _, tc := range tests {
 		if got := scopeFor(tc.host, tc.path); got != tc.want {
 			t.Errorf("scopeFor(%q,%q) = %q, want %q", tc.host, tc.path, got, tc.want)
+		}
+	}
+}
+
+// findByGUID returns the feed item with the given guid (its tracker page URL),
+// or nil. Feed order is by update time, so tests look items up by identity.
+func findByGUID(items []Item, guid string) *Item {
+	for i := range items {
+		if items[i].GUID == guid {
+			return &items[i]
+		}
+	}
+	return nil
+}
+
+// TestBuildFeeds synthesizes the per-tracker RSS feeds from a real SeaDex entry
+// shape (Frieren, alID 154587: PMR best + LostYears alt, each on Nyaa and AB),
+// covering the tracker split, season-title collapse, best/alt markers, direct
+// download links (public Nyaa .torrent, AB via passkey), the dropped redacted AB
+// info hash, and the missing-passkey skip count.
+func TestBuildFeeds(t *testing.T) {
+	updated := time.Date(2025, 7, 26, 15, 5, 59, 0, time.UTC)
+	pmrFiles := []seadex.File{
+		// An extra (creditless) file first, to prove representativeFile skips it
+		// for a real episode when deriving the title.
+		{Length: 400_000_000, Name: "NCED 01 (BD Remux 1080p AVC FLAC) [PMR].mkv"},
+		{Length: 7_500_699_108, Name: "Frieren Beyond Journey's End - S01E01 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR].mkv"},
+		{Length: 7_497_267_058, Name: "Frieren Beyond Journey's End - S01E02 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR].mkv"},
+	}
+	lostYearsFiles := []seadex.File{
+		{Length: 3_506_804_569, Name: "[LostYears] Frieren Beyond Journey's End - S01E01 (WEB 1080p x265 10-bit AAC Opus) [0F7F64F6].mkv"},
+		{Length: 3_535_154_954, Name: "[LostYears] Frieren Beyond Journey's End - S01E02 (WEB 1080p x265 10-bit AAC Opus) [E5ECA664].mkv"},
+	}
+	entries := []seadex.Entry{{
+		AniListID: 154587,
+		Updated:   updated,
+		Torrents: []seadex.Torrent{
+			{Tracker: "Nyaa", URL: "https://nyaa.si/view/1961373", InfoHash: "143ed15e5e3df072ae91adaeb149973a887590dd", IsBest: true, ReleaseGroup: "PMR", Files: pmrFiles},
+			{Tracker: "AB", URL: "/torrents.php?id=86576&torrentid=1167293", InfoHash: "<redacted>", IsBest: true, ReleaseGroup: "PMR", Files: pmrFiles},
+			{Tracker: "AB", URL: "/torrents.php?id=86576&torrentid=1162986", InfoHash: "<redacted>", IsBest: false, ReleaseGroup: "LostYears", Files: lostYearsFiles},
+			{Tracker: "Nyaa", URL: "https://nyaa.si/view/1998171", InfoHash: "fb9ce1e001837de7662bd72b3fb79b3fea13d03f", IsBest: false, ReleaseGroup: "LostYears", Files: lostYearsFiles},
+		},
+	}}
+
+	nyaa, ab, abSkipped := buildFeeds(entries, "PASSKEY123")
+	if len(nyaa) != 2 || len(ab) != 2 {
+		t.Fatalf("feeds: got nyaa=%d ab=%d, want 2 and 2", len(nyaa), len(ab))
+	}
+	if abSkipped != 0 {
+		t.Errorf("abSkippedNoPasskey = %d, want 0 (passkey provided)", abSkipped)
+	}
+
+	// Nyaa best (PMR): season-collapsed title (extras skipped), public .torrent
+	// link, best marker, real info hash, anime category, SeaDex entry info URL,
+	// summed pack size, entry update time.
+	pmrNyaa := findByGUID(nyaa, "https://nyaa.si/view/1961373")
+	if pmrNyaa == nil {
+		t.Fatal("PMR nyaa item missing")
+	}
+	if want := "Frieren Beyond Journey's End - S01 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR]"; pmrNyaa.Title != want {
+		t.Errorf("PMR nyaa title = %q, want %q", pmrNyaa.Title, want)
+	}
+	if pmrNyaa.DownloadURL != "https://nyaa.si/download/1961373.torrent" {
+		t.Errorf("PMR nyaa download = %q", pmrNyaa.DownloadURL)
+	}
+	if pmrNyaa.DownloadVolumeFactor != dvfBest {
+		t.Errorf("PMR nyaa dvf = %q, want %q", pmrNyaa.DownloadVolumeFactor, dvfBest)
+	}
+	if pmrNyaa.InfoHash != "143ed15e5e3df072ae91adaeb149973a887590dd" {
+		t.Errorf("PMR nyaa infohash = %q", pmrNyaa.InfoHash)
+	}
+	if len(pmrNyaa.Categories) != 1 || pmrNyaa.Categories[0] != catAnime {
+		t.Errorf("PMR nyaa categories = %v, want [%d]", pmrNyaa.Categories, catAnime)
+	}
+	if pmrNyaa.InfoURL != "https://releases.moe/154587" {
+		t.Errorf("PMR nyaa infoURL = %q", pmrNyaa.InfoURL)
+	}
+	if pmrNyaa.Size != 400_000_000+7_500_699_108+7_497_267_058 {
+		t.Errorf("PMR nyaa size = %d, want summed pack size", pmrNyaa.Size)
+	}
+	if !pmrNyaa.PubDate.Equal(updated) {
+		t.Errorf("PMR nyaa pubDate = %v, want %v", pmrNyaa.PubDate, updated)
+	}
+
+	// AB best (PMR): passkey download link, best marker, redacted info hash
+	// dropped, guid is the usable (prefixed) AB page URL.
+	pmrAB := findByGUID(ab, "https://animebytes.tv/torrents.php?id=86576&torrentid=1167293")
+	if pmrAB == nil {
+		t.Fatal("PMR ab item missing")
+	}
+	if pmrAB.DownloadURL != "https://animebytes.tv/torrent/1167293/download/PASSKEY123" {
+		t.Errorf("PMR ab download = %q", pmrAB.DownloadURL)
+	}
+	if pmrAB.InfoHash != "" {
+		t.Errorf("PMR ab infohash = %q, want empty (redacted dropped)", pmrAB.InfoHash)
+	}
+
+	// AB alt (LostYears): alt marker + its own passkey link.
+	lyAB := findByGUID(ab, "https://animebytes.tv/torrents.php?id=86576&torrentid=1162986")
+	if lyAB == nil {
+		t.Fatal("LostYears ab item missing")
+	}
+	if lyAB.DownloadVolumeFactor != dvfAlt {
+		t.Errorf("LostYears ab dvf = %q, want %q (alt)", lyAB.DownloadVolumeFactor, dvfAlt)
+	}
+	if lyAB.DownloadURL != "https://animebytes.tv/torrent/1162986/download/PASSKEY123" {
+		t.Errorf("LostYears ab download = %q", lyAB.DownloadURL)
+	}
+
+	// Without a passkey the AB feed carries nothing grabbable, and both AB
+	// releases are counted for the operator nudge; Nyaa is unaffected.
+	nyaa2, ab2, abSkipped2 := buildFeeds(entries, "")
+	if len(nyaa2) != 2 {
+		t.Errorf("nyaa feed without passkey = %d, want 2", len(nyaa2))
+	}
+	if len(ab2) != 0 {
+		t.Errorf("ab feed without passkey = %d, want 0", len(ab2))
+	}
+	if abSkipped2 != 2 {
+		t.Errorf("abSkippedNoPasskey without passkey = %d, want 2", abSkipped2)
+	}
+}
+
+func TestFeedTitle(t *testing.T) {
+	tests := []struct {
+		name  string
+		files []seadex.File
+		group string
+		want  string
+	}{
+		{
+			name:  "season pack collapses SxxExx to season",
+			files: []seadex.File{{Name: "Frieren Beyond Journey's End - S01E07 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR].mkv"}},
+			want:  "Frieren Beyond Journey's End - S01 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR]",
+		},
+		{
+			name:  "leading group with versioned episode",
+			files: []seadex.File{{Name: "[LostYears] Frieren Beyond Journey's End - S01E15v2 (WEB 1080p x265 10-bit AAC Opus) [3564C0AD].mkv"}},
+			want:  "[LostYears] Frieren Beyond Journey's End - S01 (WEB 1080p x265 10-bit AAC Opus) [3564C0AD]",
+		},
+		{
+			name: "creditless extras skipped for a real episode",
+			files: []seadex.File{
+				{Name: "NCED 01 (BD Remux 1080p AVC FLAC) [PMR].mkv"},
+				{Name: "Show Title - S02E01 (BD 1080p) [Grp].mkv"},
+			},
+			want: "Show Title - S02 (BD 1080p) [Grp]",
+		},
+		{
+			name:  "single movie file used verbatim",
+			files: []seadex.File{{Name: "A Silent Voice (2016) (BD 1080p x264 FLAC) [Group].mkv"}},
+			want:  "A Silent Voice (2016) (BD 1080p x264 FLAC) [Group]",
+		},
+		{
+			name: "absolute-numbered pack drops the episode number",
+			files: []seadex.File{
+				{Name: "[Grp] Some Show - 07 (1080p).mkv"},
+				{Name: "[Grp] Some Show - 08 (1080p).mkv"},
+			},
+			want: "[Grp] Some Show (1080p)",
+		},
+		{
+			name:  "no files falls back to release group",
+			files: nil,
+			group: "PMR",
+			want:  "PMR",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := feedTitle(&seadex.Torrent{Files: tc.files, ReleaseGroup: tc.group})
+			if got != tc.want {
+				t.Errorf("feedTitle = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFeedCategories(t *testing.T) {
+	anime := feedCategories(&seadex.Torrent{Files: []seadex.File{
+		{Name: "Show - S01E01 (BD 1080p) [Grp].mkv"},
+	}})
+	if len(anime) != 1 || anime[0] != catAnime {
+		t.Errorf("episode file categories = %v, want [%d]", anime, catAnime)
+	}
+
+	movie := feedCategories(&seadex.Torrent{Files: []seadex.File{
+		{Name: "A Silent Voice (2016) (BD 1080p) [Grp].mkv"},
+	}})
+	if len(movie) != 1 || movie[0] != catMovies {
+		t.Errorf("single movie file categories = %v, want [%d]", movie, catMovies)
+	}
+
+	// Multiple video files with no episode token still read as a series pack,
+	// not a movie.
+	multi := feedCategories(&seadex.Torrent{Files: []seadex.File{
+		{Name: "[Grp] Show - 01 (1080p).mkv"},
+		{Name: "[Grp] Show - 02 (1080p).mkv"},
+	}})
+	if len(multi) != 1 || multi[0] != catAnime {
+		t.Errorf("multi-file no-episode categories = %v, want [%d]", multi, catAnime)
+	}
+}
+
+// TestRenderSynthesizedItem checks a synthesized RSS item renders in the live
+// AnimeBytes Torznab item shape: an enclosure with the direct .torrent link, the
+// anime category, the SeaDex freeleech marker (downloadvolumefactor 0.75 +
+// uploadvolumefactor 1), a floored seeders count, the SeaDex entry as comments,
+// and the info hash.
+func TestRenderSynthesizedItem(t *testing.T) {
+	out := renderFeed([]Item{{
+		Title:                "Frieren Beyond Journey's End - S01 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR]",
+		GUID:                 "https://nyaa.si/view/1961373",
+		InfoURL:              "https://releases.moe/154587",
+		DownloadURL:          "https://nyaa.si/download/1961373.torrent",
+		InfoHash:             "143ed15e5e3df072ae91adaeb149973a887590dd",
+		DownloadVolumeFactor: dvfBest,
+		Categories:           []int{catAnime},
+		Size:                 22497965274,
+	}})
+
+	want := []string{
+		"<title>Frieren Beyond Journey&#39;s End - S01 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR]</title>",
+		`<enclosure url="https://nyaa.si/download/1961373.torrent" length="22497965274" type="application/x-bittorrent"/>`,
+		`<comments>https://releases.moe/154587</comments>`,
+		`<torznab:attr name="category" value="5070"/>`,
+		`<torznab:attr name="infohash" value="143ed15e5e3df072ae91adaeb149973a887590dd"/>`,
+		`<torznab:attr name="downloadvolumefactor" value="0.75"/>`,
+		`<torznab:attr name="uploadvolumefactor" value="1"/>`,
+		`<torznab:attr name="seeders" value="1"/>`,
+	}
+	for _, w := range want {
+		if !strings.Contains(out, w) {
+			t.Errorf("rendered feed missing %q\nfull output:\n%s", w, out)
 		}
 	}
 }

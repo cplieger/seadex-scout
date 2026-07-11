@@ -9,17 +9,34 @@ import "strings"
 // line up regardless of title or info-hash availability. The info hash is used
 // as a secondary key when present.
 
+// trackerScope classifies a tracker name (as SeaDex spells it, "Nyaa" or "AB",
+// with "animebytes" accepted as an alias) into the feed scope it maps to:
+// upstreamNyaa, upstreamAB, or "" for any other tracker (a negligible SeaDex
+// tail). It is the single place those spellings are matched, so id extraction,
+// key building, download-link building, and feed routing all agree on what
+// counts as Nyaa or AnimeBytes.
+func trackerScope(tracker string) string {
+	switch strings.ToLower(strings.TrimSpace(tracker)) {
+	case upstreamNyaa:
+		return upstreamNyaa
+	case upstreamAB, "animebytes":
+		return upstreamAB
+	default:
+		return ""
+	}
+}
+
 // trackerKey builds the match key for a SeaDex torrent from its tracker name
 // and stored URL, or "" when the tracker is unknown or the id is missing.
 func trackerKey(tracker, sourceURL string) string {
-	switch strings.ToLower(strings.TrimSpace(tracker)) {
-	case "nyaa":
+	switch trackerScope(tracker) {
+	case upstreamNyaa:
 		if id := extractID(sourceURL, "/view/"); id != "" {
-			return "nyaa:" + id
+			return upstreamNyaa + ":" + id
 		}
-	case "ab", "animebytes":
+	case upstreamAB:
 		if id := animeBytesID(sourceURL); id != "" {
-			return "ab:" + id
+			return upstreamAB + ":" + id
 		}
 	}
 	return ""
