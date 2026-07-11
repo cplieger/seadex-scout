@@ -12,28 +12,37 @@ load-bearing patterns.
 
 ## What seadex-scout is (and isn't)
 
-It does one thing: compare a Sonarr/Radarr anime library against SeaDex and
-report, per title, when SeaDex recommends a better release than the one on disk.
-It is **report-only**: it never downloads, grabs, or touches a torrent client,
-and it ships no notifier of its own (alerting is the observability stack's job;
-the repo ships reference Loki/Mimir rules in [`deploy/`](deploy)). Auto-grab and
-a rescan nudge are deliberately out of scope for v1. Keep that focus when
-proposing changes: "surface an actionable finding" fits; "grab it for me" does
-not.
+It has a tight scope: compare a Sonarr/Radarr anime library against SeaDex and
+surface where they diverge. It does that three ways — a **monitoring daemon**
+that logs a finding whenever SeaDex has a better release (for Loki alerting), an
+on-demand **season-level report**, and an optional **Torznab feed** Sonarr/Radarr
+grab from. The first two are **report-only**: they never download, grab, or touch
+a torrent client, and the app ships no notifier of its own (alerting is the
+observability stack's job; the repo ships reference Loki-ruler rules in
+[`alerts.yaml`](alerts.yaml)). The feed is the one automation path, and even it
+does not grab — it hands releases to the arrs so they grab through their own
+engine; seadex-scout never pushes to a download client. Keep that boundary when
+proposing changes: "surface an actionable finding" and "let the arrs act on
+SeaDex's picks" fit; "push it to qBittorrent for me" does not.
 
 ## Architecture
 
-seadex-scout is a single Go binary that runs one compare cycle on start and then
-every `poll_interval` (or, when `poll_interval` is `off`, sits resident-idle
-while an external scheduler triggers cycles via the `poll` subcommand), emitting
-findings as JSON to stdout (slog, shipped to Loki). It has no HTTP surface. The only cross-cycle state is a single atomic JSON
-file (library snapshot, cached ID map, AniList memo, finding dedupe).
+seadex-scout is a single Go binary. The daemon runs one compare cycle on start
+and then every `poll_interval` (or, when `poll_interval` is `off`, sits
+resident-idle while an external scheduler triggers cycles via the `poll`
+subcommand), emitting findings as JSON to stdout (slog, shipped to Loki), and —
+when a Prowlarr Torznab URL is configured — also serves the Torznab feed in the
+same process. It binds no HTTP port unless that feed is configured. The only
+cross-cycle state is a single atomic JSON file (library snapshot, cached ID map,
+AniList memo, finding dedupe).
 
 `main.go` + `build.go` are the **composition root**: `main.go` installs logging,
 handles the `health`/`report`/`poll`/`daemon` subcommands, loads/validates the
 YAML config (writing a starter on first boot), and runs the daemon (built-in
-interval or resident-idle), a one-shot report, or a single `poll` cycle;
-`build.go` wires every component together. They contain no business logic;
+interval or resident-idle, plus the Torznab feed when configured), a one-shot
+report, or a single `poll` cycle; `build.go` wires every component together
+(including the feed via `buildIndexer`/`startIndexer`). They contain no business
+logic;
 everything testable lives under `internal/`, with dependencies flowing one
 direction (leaves have no internal imports):
 
@@ -54,7 +63,8 @@ direction (leaves have no internal imports):
   remux-vs-encode). It imports no domain packages so both the SeaDex and library
   sides classify into one vocabulary.
 - `internal/filter` — the operator's release filters (remux policy, resolution
-  floor, tracker allowlist, dual-audio).
+  floor, the AnimeBytes on/off toggle, dual-audio), split from tracker
+  obtainability.
 - `internal/match` — links a SeaDex entry to a library item (ID via the map, then
   the AniList title fallback) and reports mapping coverage.
 - `internal/compare` — the group-centric comparison producing `Finding`s (aligned
@@ -65,6 +75,11 @@ direction (leaves have no internal imports):
   (observability is slog-only; no metrics).
 - `internal/state` — the atomic JSON cache load/save (via `atomicfile`).
 - `internal/scout` — the cycle orchestrator that wires the above into one cycle.
+- `internal/indexer` — the Torznab feed server the daemon runs when a Prowlarr
+  Torznab URL is configured. It proxies Prowlarr's Nyaa + AnimeBytes endpoints,
+  filters the results to SeaDex's curation (matched by tracker id / info hash),
+  and adds the download-volume-factor marker. It depends only on `internal/seadex`
+  (for the curation set) and an HTTP client — no arr, mapping, or scout wiring.
 
 ## Health and degradation semantics
 

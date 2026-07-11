@@ -181,6 +181,17 @@ func classifyTracker(tracker string) TrackerType {
 	}
 }
 
+// animeBytesNames are the SeaDex tracker strings (lowercased) for AnimeBytes;
+// SeaDex uses "AB", but "animebytes" is accepted defensively.
+var animeBytesNames = map[string]bool{"ab": true, "animebytes": true}
+
+// IsAnimeBytes reports whether the tracker name is AnimeBytes. It is the one
+// private tracker seadex-scout gates behind an opt-in toggle (the operator has
+// an account), so obtainability can single it out from other private trackers.
+func IsAnimeBytes(tracker string) bool {
+	return animeBytesNames[strings.ToLower(strings.TrimSpace(tracker))]
+}
+
 // normalizeGroup lowercases and trims a release-group name for override and
 // comparison lookups (SeaDex and arr casing differ).
 func normalizeGroup(group string) string {

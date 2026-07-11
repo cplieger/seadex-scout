@@ -1,66 +1,54 @@
-# ---------------------------------------------------------------------------
-# seadex-scout - compares your Sonarr/Radarr anime library against SeaDex
-# (releases.moe) and logs when a better release is recommended. Report-only.
-#
-# This file is the single settings surface. Values can be written directly, or
-# pulled from the environment with ${VAR} - handy for secrets: keep an API key
-# in an .env / Docker secret and reference it here. Only SONARR_*, RADARR_*, and
-# SEADEX_SCOUT_* environment variables are expanded.
-#
-# On first boot with no config, seadex-scout writes this template to
-# /config/config.yaml and exits with a warning; edit it and restart.
-# ---------------------------------------------------------------------------
+# seadex-scout config. Full docs: README. First boot with no config writes this
+# template to /config/config.yaml and exits with a WARN; edit and restart.
+# ${VAR} refs are expanded (SONARR_/RADARR_/SEADEX_SCOUT_ only) so secrets can stay in env.
 
-# At least one arr (sonarr or radarr) must be enabled with a url + api_key.
+# At least one arr must be enabled with a url + api_key.
 sonarr:
   enabled: true
-  url: "http://sonarr:8989" # internal URL seadex-scout queries
-  api_key: "" # required when enabled; Settings > General (or ${SONARR_API_KEY})
+  url: "http://sonarr:8989"
+  api_key: "" # required when enabled
   public_url: "" # browser URL for report deep-links; falls back to url
-
 radarr:
   enabled: false
-  url: "http://radarr:7878" # internal URL seadex-scout queries
-  api_key: "" # required when enabled (or ${RADARR_API_KEY})
-  public_url: "" # browser URL for report deep-links; falls back to url
+  url: "http://radarr:7878"
+  api_key: "" # required when enabled
+  public_url: ""
 
-# daemon = poll on a schedule and log better releases; report = one-shot audit then exit.
-mode: "daemon"
-
-poll_interval: "12h" # daemon cadence (a cycle also runs on start); "off" / "disabled" / "0" = resident-idle: no internal timer, trigger cycles externally via `poll` (e.g. Ofelia)
+mode: "daemon" # daemon (scheduled) | report (one-shot, exit)
+poll_interval: "12h" # Go duration; also runs on start. off/disabled/0 = external trigger via `poll`
 season_scoping: false # compare per-season instead of series-level
 
 filters:
   allow_remux: false # count remuxes as recommendations
-  min_resolution: "1080p" # lowest recommended resolution; "" disables the floor
-  require_dual_audio: false # drop releases that are not dual-audio
-  trackers: [] # preferred indexers, e.g. ["animebytes", "nyaa"]; [] = all
-  remux_groups: [] # release groups to always treat as remux
-  notify_unavailable_tracker: true # still flag a better release found only on a non-listed tracker
-  include_specials: true # include OVA/ONA/special entries
+  min_resolution: "1080p" # e.g. 1080p, 720p; "" = no floor
+  require_dual_audio: false
+  animebytes: false # true if you have an AnimeBytes account: adds AB releases + links
+  remux_groups: [] # groups to always treat as remux
+  include_specials: true # include OVA/ONA/specials
 
 tags:
-  include: [] # only scan arr items carrying these tags; [] = all
-  exclude: [] # skip arr items carrying these tags
+  include: [] # only scan arr items with these tags; [] = all
+  exclude: []
 
 report:
-  path: "/config/report.md" # report mode writes here (a .json is written alongside)
+  dir: "/config/reports" # report mode writes timestamped report-<UTC time>.md + .json here
 
-seadex:
-  base_url: "https://releases.moe"
-  page_delay: "2s" # politeness delay between SeaDex pages
-
-mapping:
-  # Fribb anime-lists: the AniList <-> arr ID bridge.
-  url: "https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-mini.json"
-  refresh: "24h" # conditional re-download cadence
-  overrides_path: "/config/overrides.json" # local AniList->arr ID pins
-
-anilist:
-  url: "https://graphql.anilist.co" # title/format fallback for unmapped entries
-  rate: 30 # max requests per minute
-
-state_path: "/config/state.json" # atomic cache: library snapshot, mapping cache, dedupe
+# indexer: an optional Torznab feed of SeaDex releases for Sonarr/Radarr. The
+# daemon serves it automatically whenever a Prowlarr Torznab URL is set below
+# (leave both URLs empty and the daemon binds no HTTP port at all). It sources
+# real release data (title, seeders, size, download link) from Prowlarr's
+# per-indexer Torznab endpoints for Nyaa + AnimeBytes, keeps only what SeaDex
+# curates, and tags each with downloadvolumefactor 0.75 (best = AB Freeleech25) or
+# 0.25 (alt = Freeleech75) - map that to a Custom Format applied ONLY to your
+# anime quality profile. Copy the two Torznab URLs from Prowlarr (each indexer's
+# page has one); no tracker passkey is needed - Prowlarr proxies the downloads.
+# Add this feed to your arrs (or to Prowlarr) directly.
+indexer:
+  listen: ":9118" # host:port to bind; keep it LAN-only
+  api_key: "" # the arrs send this and the feed checks it; empty = ungated (set a random string)
+  nyaa_torznab_url: "" # Prowlarr Nyaa Torznab URL, e.g. http://prowlarr:9696/1/api ("" disables Nyaa)
+  ab_torznab_url: "" # Prowlarr AnimeBytes Torznab URL, e.g. http://prowlarr:9696/2/api ("" disables AB)
+  prowlarr_api_key: "" # Prowlarr API key (Prowlarr Settings > General); secret, never logged
 
 log:
   level: "info" # debug | info | warn | error

@@ -4,10 +4,14 @@
 // variables via ${VAR} expansion, so secrets can stay in an .env or Docker
 // secret rather than in the file.
 //
-// The on-disk shape (fileConfig) is a grouped, commented document; it is loaded
-// onto a defaults baseline, ${VAR}-expanded, then flattened into the runtime
-// Config the rest of the app reads. Call Validate to check the result is
-// runnable. There is no hot reload: the file is read once at startup.
+// The file exposes only user-facing settings (arrs, mode, schedule, filters,
+// tags, report dir, logging). Internal machinery - the upstream endpoints, the
+// politeness/refresh/rate cadences, and the /config file paths (state,
+// overrides, reports) - are fixed package constants, not file keys. The on-disk
+// shape (fileConfig) is loaded onto a defaults baseline, ${VAR}-expanded, then
+// flattened into the runtime Config the rest of the app reads. Call Validate to
+// check the result is runnable. There is no hot reload: the file is read once
+// at startup.
 package config
 
 import (
@@ -33,7 +37,11 @@ const DefaultConfigPath = "/config/config.yaml"
 // maxConfigBytes bounds the config file read (it is a small document).
 const maxConfigBytes = 1 << 20
 
-// Default endpoints, paths, and cadences applied before the YAML overlay.
+// Fixed endpoints, cadences, and /config file paths. These are internal
+// machinery wired at build time, deliberately NOT exposed as config-file keys:
+// the user should never need to point the app at a different SeaDex/Fribb/
+// AniList, retune the politeness delays, or relocate the state/report files
+// (everything lives under the single /config mount).
 const (
 	// DefaultSeaDexBaseURL is the SeaDex (releases.moe) API base.
 	DefaultSeaDexBaseURL = "https://releases.moe"
@@ -41,12 +49,17 @@ const (
 	DefaultMappingURL = "https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-mini.json"
 	// DefaultAniListURL is the AniList GraphQL endpoint (title/format fallback).
 	DefaultAniListURL = "https://graphql.anilist.co"
-	// DefaultMappingOverrides is the local alID->IDs override file.
+	// DefaultMappingOverrides is the local alID->IDs override file: drop one in
+	// at this path to pin mappings; absent is fine.
 	DefaultMappingOverrides = "/config/overrides.json"
 	// DefaultStatePath is the atomic JSON cache/state file.
 	DefaultStatePath = "/config/state.json"
-	// DefaultReportPath is where report mode writes the Markdown report.
-	DefaultReportPath = "/config/report.md"
+	// DefaultReportDir is the directory report mode writes timestamped report
+	// pairs into (report-<UTC timestamp>.md / .json).
+	DefaultReportDir = "/config/reports"
+	// DefaultIndexerListen is the default LAN bind address for the Torznab feed
+	// server (the `indexer` subcommand).
+	DefaultIndexerListen = ":9118"
 	// DefaultMinResolution is the recommendation resolution floor.
 	DefaultMinResolution = "1080p"
 
@@ -65,51 +78,36 @@ const (
 	DefaultAniListRate = 30
 )
 
-// Clamp bounds guarding against nonsense configuration.
+// Clamp bounds for poll_interval, the only file-provided duration.
 const (
-	minPollInterval    = time.Hour
-	maxPollInterval    = 30 * 24 * time.Hour
-	maxSeaDexPageDelay = 60 * time.Second
-	minMappingRefresh  = time.Hour
-	maxMappingRefresh  = 30 * 24 * time.Hour
-	minAniListRate     = 1
-	maxAniListRate     = 90
+	minPollInterval = time.Hour
+	maxPollInterval = 30 * 24 * time.Hour
 )
 
-// Duration is a YAML string duration ("12h", "2s") decoded via time.ParseDuration.
-type Duration struct {
-	D time.Duration
-}
-
-// UnmarshalYAML decodes a duration string into D.
-func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
-	var s string
-	if err := value.Decode(&s); err != nil {
-		return err
-	}
-	parsed, err := time.ParseDuration(strings.TrimSpace(s))
-	if err != nil {
-		return fmt.Errorf("invalid duration %q: %w", s, err)
-	}
-	d.D = parsed
-	return nil
-}
-
-// fileConfig is the on-disk YAML shape.
+// fileConfig is the on-disk YAML shape: only the user-facing settings.
 type fileConfig struct {
+	Indexer       indexerFile `yaml:"indexer"`
 	Log           logFile     `yaml:"log"`
-	PollInterval  string      `yaml:"poll_interval"`
-	StatePath     string      `yaml:"state_path"`
 	Report        reportFile  `yaml:"report"`
+	PollInterval  string      `yaml:"poll_interval"`
 	Mode          string      `yaml:"mode"`
 	Radarr        arrFile     `yaml:"radarr"`
 	Sonarr        arrFile     `yaml:"sonarr"`
 	Tags          tagsFile    `yaml:"tags"`
-	Mapping       mappingFile `yaml:"mapping"`
-	AniList       anilistFile `yaml:"anilist"`
-	SeaDex        seadexFile  `yaml:"seadex"`
 	Filters       filtersFile `yaml:"filters"`
 	SeasonScoping bool        `yaml:"season_scoping"`
+}
+
+// indexerFile configures the `indexer` subcommand: a Torznab feed of SeaDex
+// releases for Sonarr/Radarr. The feed sources real release data from Prowlarr's
+// per-indexer Torznab endpoints (Nyaa + AnimeBytes) and filters them to SeaDex's
+// curation, so no tracker credentials live here - only the Prowlarr API key.
+type indexerFile struct {
+	Listen         string `yaml:"listen"`
+	APIKey         string `yaml:"api_key"`
+	NyaaTorznabURL string `yaml:"nyaa_torznab_url"`
+	ABTorznabURL   string `yaml:"ab_torznab_url"`
+	ProwlarrAPIKey string `yaml:"prowlarr_api_key"`
 }
 
 type arrFile struct {
@@ -120,13 +118,12 @@ type arrFile struct {
 }
 
 type filtersFile struct {
-	MinResolution            string   `yaml:"min_resolution"`
-	Trackers                 []string `yaml:"trackers"`
-	RemuxGroups              []string `yaml:"remux_groups"`
-	AllowRemux               bool     `yaml:"allow_remux"`
-	RequireDualAudio         bool     `yaml:"require_dual_audio"`
-	NotifyUnavailableTracker bool     `yaml:"notify_unavailable_tracker"`
-	IncludeSpecials          bool     `yaml:"include_specials"`
+	MinResolution    string   `yaml:"min_resolution"`
+	RemuxGroups      []string `yaml:"remux_groups"`
+	AllowRemux       bool     `yaml:"allow_remux"`
+	RequireDualAudio bool     `yaml:"require_dual_audio"`
+	AnimeBytes       bool     `yaml:"animebytes"`
+	IncludeSpecials  bool     `yaml:"include_specials"`
 }
 
 type tagsFile struct {
@@ -135,23 +132,7 @@ type tagsFile struct {
 }
 
 type reportFile struct {
-	Path string `yaml:"path"`
-}
-
-type seadexFile struct {
-	BaseURL   string   `yaml:"base_url"`
-	PageDelay Duration `yaml:"page_delay"`
-}
-
-type mappingFile struct {
-	URL           string   `yaml:"url"`
-	OverridesPath string   `yaml:"overrides_path"`
-	Refresh       Duration `yaml:"refresh"`
-}
-
-type anilistFile struct {
-	URL  string `yaml:"url"`
-	Rate int    `yaml:"rate"`
+	Dir string `yaml:"dir"`
 }
 
 type logFile struct {
@@ -167,31 +148,26 @@ func defaultFileConfig() fileConfig {
 		Radarr: arrFile{URL: "http://radarr:7878"},
 		Mode:   RunModeDaemon,
 		Filters: filtersFile{
-			MinResolution:            DefaultMinResolution,
-			NotifyUnavailableTracker: true,
-			IncludeSpecials:          true,
+			MinResolution:   DefaultMinResolution,
+			IncludeSpecials: true,
 		},
-		Report:       reportFile{Path: DefaultReportPath},
-		SeaDex:       seadexFile{BaseURL: DefaultSeaDexBaseURL, PageDelay: Duration{D: DefaultSeaDexPageDelay}},
-		Mapping:      mappingFile{URL: DefaultMappingURL, OverridesPath: DefaultMappingOverrides, Refresh: Duration{D: DefaultMappingRefresh}},
-		AniList:      anilistFile{URL: DefaultAniListURL, Rate: DefaultAniListRate},
+		Report:       reportFile{Dir: DefaultReportDir},
+		Indexer:      indexerFile{Listen: DefaultIndexerListen},
 		Log:          logFile{Level: "info", Format: "json"},
-		StatePath:    DefaultStatePath,
 		PollInterval: "12h",
 	}
 }
 
-// Config is the effective runtime configuration after loading. Fields are
-// ordered largest-alignment-first for govet fieldalignment.
+// Config is the effective runtime configuration after loading. It holds only
+// the user-configurable settings; the fixed endpoints, cadences, and /config
+// file paths are package constants (see the const block), wired in build.go.
+// Fields are ordered largest-alignment-first for govet fieldalignment.
 type Config struct {
-	// Trackers is the preferred-tracker allowlist keyed lowercase; empty = all.
-	Trackers map[string]bool
 	// RemuxGroups pins release groups treated as remux, keyed lowercase.
 	RemuxGroups map[string]bool
 
-	StatePath  string // atomic JSON cache/state file.
-	RunMode    string // "daemon" (default) or "report" (one-shot audit).
-	ReportPath string // Markdown report path (a .json is written alongside).
+	RunMode   string // "daemon" (default) or "report" (one-shot audit).
+	ReportDir string // directory for timestamped report-<ts>.md / .json pairs.
 
 	SonarrURL       string // Sonarr instance URL the app queries.
 	SonarrAPIKey    string
@@ -200,28 +176,31 @@ type Config struct {
 	RadarrAPIKey    string
 	RadarrPublicURL string
 
-	SeaDexBaseURL    string
-	MappingURL       string
-	MappingOverrides string
-	MinResolution    string
-	LogFormat        string
-	AniListURL       string
+	MinResolution string
+	LogFormat     string
+
+	// Indexer (Torznab feed) settings. IndexerAPIKey/IndexerProwlarrAPIKey are
+	// secrets and are never logged. The feed proxies Prowlarr's per-indexer
+	// Torznab endpoints for Nyaa and AnimeBytes.
+	IndexerListen         string
+	IndexerAPIKey         string
+	IndexerNyaaTorznabURL string
+	IndexerABTorznabURL   string
+	IndexerProwlarrAPIKey string
 
 	IncludeTags []string
 	ExcludeTags []string
 
-	PollInterval    time.Duration
-	SeaDexPageDelay time.Duration
-	MappingRefresh  time.Duration
+	PollInterval time.Duration
+	LogLevel     slog.Level
 
-	AniListRate int
-	LogLevel    slog.Level
-
-	AllowRemux               bool
-	RequireDualAudio         bool
-	SeasonScoping            bool
-	NotifyUnavailableTracker bool
-	IncludeSpecials          bool
+	AllowRemux       bool
+	RequireDualAudio bool
+	SeasonScoping    bool
+	// AnimeBytes includes AnimeBytes (private tracker) releases and links; the
+	// public trackers (Nyaa, AnimeTosho, RuTracker) are always included.
+	AnimeBytes      bool
+	IncludeSpecials bool
 	// PollExternal is set when poll_interval is off/disabled/0: no internal
 	// timer, cycles are triggered out-of-band via the `poll` subcommand.
 	PollExternal bool
@@ -253,33 +232,29 @@ func Load(path string) (Config, error) {
 	return fc.toConfig(), nil
 }
 
-// toConfig flattens the on-disk shape into the runtime Config, applying clamps,
-// normalization, and the enabled toggles (a disabled arr leaves its URL/key
+// toConfig flattens the on-disk shape into the runtime Config, applying
+// normalization and the enabled toggles (a disabled arr leaves its URL/key
 // empty, so it is simply skipped downstream).
 func (fc *fileConfig) toConfig() Config {
 	c := Config{
-		Trackers:                 setFromList(fc.Filters.Trackers),
-		RemuxGroups:              setFromList(fc.Filters.RemuxGroups),
-		StatePath:                fc.StatePath,
-		RunMode:                  strings.ToLower(strings.TrimSpace(fc.Mode)),
-		ReportPath:               fc.Report.Path,
-		SeaDexBaseURL:            fc.SeaDex.BaseURL,
-		MappingURL:               fc.Mapping.URL,
-		MappingOverrides:         fc.Mapping.OverridesPath,
-		MinResolution:            normalizeResolution(fc.Filters.MinResolution),
-		LogFormat:                strings.ToLower(strings.TrimSpace(fc.Log.Format)),
-		AniListURL:               fc.AniList.URL,
-		IncludeTags:              trimList(fc.Tags.Include),
-		ExcludeTags:              trimList(fc.Tags.Exclude),
-		SeaDexPageDelay:          clampDuration("seadex.page_delay", fc.SeaDex.PageDelay.D, 0, maxSeaDexPageDelay),
-		MappingRefresh:           clampDuration("mapping.refresh", fc.Mapping.Refresh.D, minMappingRefresh, maxMappingRefresh),
-		AniListRate:              clampInt("anilist.rate", fc.AniList.Rate, minAniListRate, maxAniListRate),
-		LogLevel:                 parseLogLevel(fc.Log.Level),
-		AllowRemux:               fc.Filters.AllowRemux,
-		RequireDualAudio:         fc.Filters.RequireDualAudio,
-		SeasonScoping:            fc.SeasonScoping,
-		NotifyUnavailableTracker: fc.Filters.NotifyUnavailableTracker,
-		IncludeSpecials:          fc.Filters.IncludeSpecials,
+		RemuxGroups:           setFromList(fc.Filters.RemuxGroups),
+		RunMode:               strings.ToLower(strings.TrimSpace(fc.Mode)),
+		ReportDir:             strings.TrimSpace(fc.Report.Dir),
+		MinResolution:         normalizeResolution(fc.Filters.MinResolution),
+		LogFormat:             strings.ToLower(strings.TrimSpace(fc.Log.Format)),
+		IncludeTags:           trimList(fc.Tags.Include),
+		ExcludeTags:           trimList(fc.Tags.Exclude),
+		LogLevel:              parseLogLevel(fc.Log.Level),
+		AllowRemux:            fc.Filters.AllowRemux,
+		RequireDualAudio:      fc.Filters.RequireDualAudio,
+		SeasonScoping:         fc.SeasonScoping,
+		AnimeBytes:            fc.Filters.AnimeBytes,
+		IncludeSpecials:       fc.Filters.IncludeSpecials,
+		IndexerListen:         cmp.Or(strings.TrimSpace(fc.Indexer.Listen), DefaultIndexerListen),
+		IndexerAPIKey:         strings.TrimSpace(fc.Indexer.APIKey),
+		IndexerNyaaTorznabURL: strings.TrimSpace(fc.Indexer.NyaaTorznabURL),
+		IndexerABTorznabURL:   strings.TrimSpace(fc.Indexer.ABTorznabURL),
+		IndexerProwlarrAPIKey: strings.TrimSpace(fc.Indexer.ProwlarrAPIKey),
 	}
 	if fc.Sonarr.Enabled {
 		c.SonarrURL = strings.TrimSpace(fc.Sonarr.URL)
@@ -290,6 +265,9 @@ func (fc *fileConfig) toConfig() Config {
 		c.RadarrURL = strings.TrimSpace(fc.Radarr.URL)
 		c.RadarrAPIKey = strings.TrimSpace(fc.Radarr.APIKey)
 		c.RadarrPublicURL = strings.TrimSpace(fc.Radarr.PublicURL)
+	}
+	if c.ReportDir == "" {
+		c.ReportDir = DefaultReportDir
 	}
 	c.PollInterval, c.PollExternal = parseInterval(fc.PollInterval)
 	return c
@@ -325,15 +303,6 @@ func (c *Config) SonarrWebBase() string { return cmp.Or(c.SonarrPublicURL, c.Son
 // RadarrWebBase is the base URL for Radarr report deep-links.
 func (c *Config) RadarrWebBase() string { return cmp.Or(c.RadarrPublicURL, c.RadarrURL) }
 
-// ReportJSONPath returns the sibling JSON path for the Markdown ReportPath
-// (report.md -> report.json), else appends ".json".
-func (c *Config) ReportJSONPath() string {
-	if base, ok := strings.CutSuffix(c.ReportPath, ".md"); ok {
-		return base + ".json"
-	}
-	return c.ReportPath + ".json"
-}
-
 // Validate reports the first configuration problem that would stop the app from
 // running, or nil when runnable.
 func (c *Config) Validate() error {
@@ -348,15 +317,6 @@ func (c *Config) Validate() error {
 	}
 	if !c.SonarrEnabled() && !c.RadarrEnabled() {
 		return errors.New("no arr configured: enable sonarr and/or radarr with a url + api_key")
-	}
-	for _, e := range []struct{ name, raw string }{
-		{"seadex.base_url", c.SeaDexBaseURL},
-		{"anilist.url", c.AniListURL},
-		{"mapping.url", c.MappingURL},
-	} {
-		if err := validateHTTPSURL(e.name, e.raw); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -378,18 +338,6 @@ func (c *Config) validateArrPair(name, rawURL, key string) error {
 	}
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return fmt.Errorf("%s.url must be an absolute http(s) URL with a host, got %q", name, rawURL)
-	}
-	return nil
-}
-
-// validateHTTPSURL requires raw to be an absolute https URL with a host.
-func validateHTTPSURL(name, raw string) error {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return fmt.Errorf("%s is not a valid URL: %w", name, err)
-	}
-	if u.Scheme != "https" || u.Host == "" {
-		return fmt.Errorf("%s must be an absolute https URL with a host, got %q", name, raw)
 	}
 	return nil
 }
@@ -458,22 +406,4 @@ func normalizeResolution(s string) string {
 func parseLogLevel(s string) slog.Level {
 	lvl, _ := slogx.ParseLevel(s, slog.LevelInfo)
 	return lvl
-}
-
-// clampDuration clamps d into [lo, hi], logging when it adjusts the value.
-func clampDuration(key string, d, lo, hi time.Duration) time.Duration {
-	clamped := max(lo, min(d, hi))
-	if clamped != d {
-		slog.Warn("duration clamped", "key", key, "requested", d.String(), "clamped_to", clamped.String())
-	}
-	return clamped
-}
-
-// clampInt clamps v into [lo, hi], logging when it adjusts the value.
-func clampInt(key string, v, lo, hi int) int {
-	clamped := max(lo, min(v, hi))
-	if clamped != v {
-		slog.Warn("value clamped", "key", key, "requested", v, "clamped_to", clamped)
-	}
-	return clamped
 }

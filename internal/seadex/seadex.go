@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cplieger/httpx/v2"
@@ -59,6 +60,7 @@ type Torrent struct {
 
 // Entry is a SeaDex entry: one anime (by AniList ID) and its tracked releases.
 type Entry struct {
+	Updated         time.Time
 	Notes           string
 	Comparison      string
 	TheoreticalBest string
@@ -105,6 +107,7 @@ type pbEntry struct {
 	Notes           string   `json:"notes"`
 	Comparison      string   `json:"comparison"`
 	TheoreticalBest string   `json:"theoreticalBest"`
+	Updated         string   `json:"updated"`
 	Expand          pbExpand `json:"expand"`
 	AlID            int      `json:"alID"`
 	Incomplete      bool     `json:"incomplete"`
@@ -122,9 +125,29 @@ func (r *pbEntry) toEntry() Entry {
 		Notes:           r.Notes,
 		Comparison:      r.Comparison,
 		TheoreticalBest: r.TheoreticalBest,
+		Updated:         parsePBTime(r.Updated),
 		AniListID:       r.AlID,
 		Incomplete:      r.Incomplete,
 	}
+}
+
+// pbTimeLayouts are the PocketBase datetime formats seen on the `updated`
+// field (space-separated with optional fractional seconds, or RFC3339).
+var pbTimeLayouts = []string{"2006-01-02 15:04:05.000Z", "2006-01-02 15:04:05Z", time.RFC3339}
+
+// parsePBTime parses a PocketBase timestamp, returning the zero time on failure
+// (which sorts oldest, so an unparseable record just falls to the feed's tail).
+func parsePBTime(s string) time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}
+	}
+	for _, layout := range pbTimeLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }
 
 // FetchEntries pages through the entire entries collection with torrents
@@ -158,6 +181,7 @@ func (c *Client) fetchPage(ctx context.Context, page int) (pbList, error) {
 		"expand":  {"trs"},
 		"page":    {strconv.Itoa(page)},
 		"perPage": {strconv.Itoa(perPage)},
+		"sort":    {"-updated"},
 	}
 	reqURL := c.baseURL + entriesPath + "?" + q.Encode()
 

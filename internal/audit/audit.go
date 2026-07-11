@@ -80,14 +80,16 @@ type Config struct {
 	RemuxGroups     map[string]bool
 	SeaDexBaseURL   string
 	IncludeSpecials bool
+	AnimeBytes      bool
 }
 
 // Auditor builds alignment reports from matches.
 type Auditor struct {
-	log             *slog.Logger
-	remuxGroups     map[string]bool
-	seadexBaseURL   string
-	includeSpecials bool
+	log               *slog.Logger
+	remuxGroups       map[string]bool
+	seadexBaseURL     string
+	includeSpecials   bool
+	includeAnimeBytes bool
 }
 
 // NewAuditor builds an Auditor from cfg.
@@ -97,10 +99,11 @@ func NewAuditor(cfg Config) *Auditor {
 		log = slog.Default()
 	}
 	return &Auditor{
-		log:             log,
-		remuxGroups:     cfg.RemuxGroups,
-		seadexBaseURL:   cfg.SeaDexBaseURL,
-		includeSpecials: cfg.IncludeSpecials,
+		log:               log,
+		remuxGroups:       cfg.RemuxGroups,
+		seadexBaseURL:     cfg.SeaDexBaseURL,
+		includeSpecials:   cfg.IncludeSpecials,
+		includeAnimeBytes: cfg.AnimeBytes,
 	}
 }
 
@@ -187,10 +190,16 @@ func scope(m *match.Match) (groups []string, scoped, hasFile bool) {
 
 // classifyReleases turns every SeaDex torrent into a report Release (group
 // normalized via the shared classifier, tracker, usable URL, best flag).
+// AnimeBytes torrents are dropped when the operator has AnimeBytes off, so the
+// report never surfaces AB releases or links they cannot use (and cannot leak
+// them), mirroring the daemon's obtainability rule.
 func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 	out := make([]Release, 0, len(entry.Torrents))
 	for i := range entry.Torrents {
 		t := &entry.Torrents[i]
+		if !a.includeAnimeBytes && release.IsAnimeBytes(t.Tracker) {
+			continue
+		}
 		rel := release.Classify(&release.Input{
 			Names:       torrentFileNames(t.Files),
 			RemuxGroups: a.remuxGroups,

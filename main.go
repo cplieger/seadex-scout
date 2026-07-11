@@ -1,22 +1,22 @@
-// Package main is seadex-scout: a report-only watcher that compares a
-// Sonarr/Radarr anime library against SeaDex (releases.moe) and emits a
-// structured slog line whenever SeaDex recommends a better release than the one
-// on disk. It never downloads or touches a torrent client; it tells the operator
-// what to go get. Observability is slog-only; there is no HTTP surface.
+// Package main is seadex-scout: a watcher that compares a Sonarr/Radarr anime
+// library against SeaDex (releases.moe) and emits a structured slog line
+// whenever SeaDex recommends a better release than the one on disk. It never
+// downloads or touches a torrent client; it tells the operator what to go get.
 //
 // main.go is the composition root: it installs logging, handles the distroless
 // `health` subcommand, loads and validates the YAML config (CONFIG_PATH,
 // default /config/config.yaml; a starter is written on first boot), builds the
-// scout (build.go), and runs the poll loop. All logic lives in internal/*.
+// scout (build.go), and runs the daemon. All logic lives in internal/*.
 //
-// Run modes: the daemon (no argument, or mode: daemon) runs a compare cycle on
-// start and every poll_interval, or sits resident-idle when poll_interval is
-// off/disabled/0 (an external scheduler drives cycles via the `poll`
-// subcommand); the one-shot report (the `report` subcommand or mode: report)
-// writes a SeaDex-alignment report and exits; the `poll` subcommand runs one
-// cycle; and the `health` subcommand backs the Docker healthcheck. Both `poll`
-// and `report` run via `docker exec <container> /seadex-scout <cmd>` while the
-// daemon idles.
+// Two run modes: the daemon (no argument, or mode: daemon) runs a compare cycle
+// on start and every poll_interval - or sits resident-idle when poll_interval is
+// off/disabled/0, with an external scheduler driving cycles via the `poll`
+// subcommand - and, when a Prowlarr Torznab URL is configured, also serves the
+// Torznab feed of SeaDex releases (both features in one process, no toggle); the
+// one-shot report (the `report` subcommand or mode: report) writes a
+// SeaDex-alignment report and exits. The `poll` subcommand runs one compare
+// cycle and the `health` subcommand backs the Docker healthcheck; both run via
+// `docker exec <container> /seadex-scout <cmd>` while the daemon idles.
 package main
 
 import (
@@ -91,30 +91,28 @@ func main() {
 		slog.Error("invalid invocation", "error", err)
 		os.Exit(2)
 	}
-	if err := cfg.Validate(); err != nil {
-		slog.Error("invalid configuration", "error", err)
+
+	if err := dispatch(mode, &cfg); err != nil {
+		slog.Error("seadex-scout failed", "mode", mode, "error", err)
 		os.Exit(1)
 	}
+}
 
-	// Each body lives in a helper so its defers (signal stop, health-marker
-	// cleanup, client cleanup) always execute; os.Exit is confined to main so it
-	// never skips a pending defer.
+// dispatch validates the config, then runs the resolved mode. Each run body
+// lives in a helper so its defers (signal stop, health-marker cleanup, client
+// cleanup) always execute; os.Exit stays in main so it never skips a pending
+// defer.
+func dispatch(mode string, cfg *config.Config) error {
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid configuration: %w", err)
+	}
 	switch mode {
 	case config.RunModeReport:
-		if err := runReport(&cfg); err != nil {
-			slog.Error("report failed", "error", err)
-			os.Exit(1)
-		}
+		return runReport(cfg)
 	case modePoll:
-		if err := runPoll(&cfg); err != nil {
-			slog.Error("poll failed", "error", err)
-			os.Exit(1)
-		}
+		return runPoll(cfg)
 	default:
-		if err := run(&cfg); err != nil {
-			slog.Error("seadex-scout failed to start", "error", err)
-			os.Exit(1)
-		}
+		return run(cfg)
 	}
 }
 
@@ -166,7 +164,7 @@ func runReport(cfg *config.Config) error {
 		return err
 	}
 	rep.Log(slog.Default())
-	return rep.WriteFiles(ctx, cfg.ReportPath, cfg.ReportJSONPath(), slog.Default())
+	return rep.WriteFiles(ctx, cfg.ReportDir, slog.Default())
 }
 
 // runPoll runs one compare cycle for an external scheduler (poll_interval: off).
@@ -207,12 +205,22 @@ func run(cfg *config.Config) error {
 	}
 	defer b.cleanup()
 
+	// The Torznab feed runs alongside the compare loop in the same process, so
+	// one daemon serves both features with no on/off knob. It starts only when a
+	// Prowlarr Torznab URL is configured (else the daemon binds no HTTP port),
+	// owns no health marker (the compare loop does), and its failure is logged
+	// without affecting the compare loop. stopIndexer waits for its graceful
+	// shutdown before releasing its clients.
+	stopIndexer := startIndexer(ctx, cfg)
+	defer stopIndexer()
+
 	// Resident-idle (poll_interval: off): no internal timer; healthy on boot and
 	// cycles are triggered out-of-band via the `poll` subcommand (e.g. an Ofelia
 	// job-exec). Matches the fleet scheduler shape (github-scout, rsync, fclones).
 	if cfg.PollExternal {
 		marker.Set(true)
-		slog.Info("seadex-scout started (resident-idle; trigger a cycle with the `poll` subcommand)")
+		slog.Info("seadex-scout started (resident-idle; trigger a cycle with the `poll` subcommand)",
+			"indexer", indexerConfigured(cfg))
 		<-ctx.Done()
 		slog.Info("shutdown complete", "cause", context.Cause(ctx))
 		return nil
@@ -222,11 +230,33 @@ func run(cfg *config.Config) error {
 	// first iteration (immediately), so a slow first cycle never gates startup
 	// health. The marker thereafter reflects each cycle's library-ingest outcome.
 	marker.Set(true)
-	slog.Info("seadex-scout started", "poll_interval", cfg.PollInterval.String())
+	slog.Info("seadex-scout started", "poll_interval", cfg.PollInterval.String(), "indexer", indexerConfigured(cfg))
 
 	runScheduler(ctx, cfg.PollInterval, b.scout, marker)
 	slog.Info("shutdown complete", "cause", context.Cause(ctx))
 	return nil
+}
+
+// startIndexer launches the Torznab feed in a goroutine when it is configured,
+// returning a func that waits for its graceful shutdown (once ctx is cancelled)
+// and then releases its clients. When no Prowlarr Torznab URL is set it starts
+// nothing - the daemon binds no HTTP port - and returns a no-op.
+func startIndexer(ctx context.Context, cfg *config.Config) func() {
+	if !indexerConfigured(cfg) {
+		return func() {}
+	}
+	bi := buildIndexer(cfg)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := bi.indexer.Run(ctx); err != nil {
+			slog.Error("indexer feed stopped", "error", err)
+		}
+	}()
+	return func() {
+		<-done
+		bi.cleanup()
+	}
 }
 
 // runScheduler runs a cycle on each tick of a POLL_INTERVAL timer with ±10%
@@ -261,16 +291,12 @@ func logConfig(cfg *config.Config) {
 		"sonarr_enabled", cfg.SonarrEnabled(),
 		"radarr_enabled", cfg.RadarrEnabled(),
 		"poll_interval", pollInterval,
-		"seadex_base_url", cfg.SeaDexBaseURL,
-		"mapping_refresh", cfg.MappingRefresh.String(),
-		"anilist_rate", cfg.AniListRate,
 		"allow_remux", cfg.AllowRemux,
 		"min_resolution", cfg.MinResolution,
 		"require_dual_audio", cfg.RequireDualAudio,
 		"season_scoping", cfg.SeasonScoping,
-		"tracker_allowlist", len(cfg.Trackers),
+		"animebytes", cfg.AnimeBytes,
 		"include_tags", len(cfg.IncludeTags),
 		"exclude_tags", len(cfg.ExcludeTags),
-		"state_path", cfg.StatePath,
 		"run_mode", cfg.RunMode)
 }

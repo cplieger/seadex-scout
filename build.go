@@ -13,6 +13,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/config"
 	"github.com/cplieger/seadex-scout/internal/filter"
+	"github.com/cplieger/seadex-scout/internal/indexer"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
@@ -27,6 +28,9 @@ const (
 	seadexTimeout  = 90 * time.Second  // large paged responses
 	mappingTimeout = 180 * time.Second // multi-MB Fribb file
 	anilistTimeout = 30 * time.Second  // small GraphQL replies
+	// indexerUpstreamTimeout bounds a Prowlarr Torznab query (which searches the
+	// trackers live), used by the daemon's Torznab feed.
+	indexerUpstreamTimeout = 60 * time.Second
 	// arrMaxAttempts / arrBaseDelay bound arr request retries.
 	arrMaxAttempts = 3
 	arrBaseDelay   = 5 * time.Second
@@ -53,11 +57,11 @@ func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
 	}
 	pingArrs(ctx, sonarr, radarr)
 
-	anilistClient := anilist.NewClient(anilistHTTP, cfg.AniListURL, cfg.AniListRate, log)
+	anilistClient := anilist.NewClient(anilistHTTP, config.DefaultAniListURL, config.DefaultAniListRate, log)
 
 	sc := scout.New(&scout.Deps{
 		Logger: log,
-		Store:  state.NewStore(cfg.StatePath, log),
+		Store:  state.NewStore(config.DefaultStatePath, log),
 		Library: library.NewWalker(&library.Config{
 			Sonarr:      sonarrClient(sonarr),
 			Radarr:      radarrClient(radarr),
@@ -68,22 +72,22 @@ func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
 			IncludeTags: cfg.IncludeTags,
 			ExcludeTags: cfg.ExcludeTags,
 		}),
-		Mapping: mapping.NewLoader(mappingHTTP, cfg.MappingURL, cfg.MappingOverrides, cfg.MappingRefresh, log),
-		SeaDex:  seadex.NewClient(seadexHTTP, cfg.SeaDexBaseURL, cfg.SeaDexPageDelay, log),
+		Mapping: mapping.NewLoader(mappingHTTP, config.DefaultMappingURL, config.DefaultMappingOverrides, config.DefaultMappingRefresh, log),
+		SeaDex:  seadex.NewClient(seadexHTTP, config.DefaultSeaDexBaseURL, config.DefaultSeaDexPageDelay, log),
 		Matcher: match.NewMatcher(anilistClient, log),
 		Comparer: compare.NewComparer(compare.Config{
-			Logger:                   log,
-			RemuxGroups:              cfg.RemuxGroups,
-			Filter:                   filterOptions(cfg),
-			SeasonScoping:            cfg.SeasonScoping,
-			NotifyUnavailableTracker: cfg.NotifyUnavailableTracker,
-			IncludeSpecials:          cfg.IncludeSpecials,
+			Logger:          log,
+			RemuxGroups:     cfg.RemuxGroups,
+			Filter:          filterOptions(cfg),
+			SeasonScoping:   cfg.SeasonScoping,
+			IncludeSpecials: cfg.IncludeSpecials,
 		}),
 		Auditor: audit.NewAuditor(audit.Config{
 			Logger:          log,
 			RemuxGroups:     cfg.RemuxGroups,
-			SeaDexBaseURL:   cfg.SeaDexBaseURL,
+			SeaDexBaseURL:   config.DefaultSeaDexBaseURL,
 			IncludeSpecials: cfg.IncludeSpecials,
+			AnimeBytes:      cfg.AnimeBytes,
 		}),
 		Reporter: report.NewReporter(log),
 		AniList:  anilistClient,
@@ -101,6 +105,47 @@ func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
 		}
 	}
 	return built{scout: sc, cleanup: cleanup}, nil
+}
+
+// indexerConfigured reports whether the Torznab feed has an upstream to proxy.
+// The daemon starts the feed server only when at least one Prowlarr Torznab URL
+// is set, so an alert-only deployment binds no HTTP port (keeping the
+// socket-less posture) without needing an explicit on/off knob.
+func indexerConfigured(cfg *config.Config) bool {
+	return cfg.IndexerNyaaTorznabURL != "" || cfg.IndexerABTorznabURL != ""
+}
+
+// builtIndexer holds the assembled Torznab feed and the resources to release.
+type builtIndexer struct {
+	indexer *indexer.Indexer
+	cleanup func()
+}
+
+// buildIndexer wires the Torznab feed the daemon runs alongside the compare
+// loop: a SeaDex client for the curation set and an HTTP client for Prowlarr's
+// per-indexer Torznab endpoints. Its logger carries component=indexer so its
+// lines are easy to separate from the compare findings in a shared slog stream.
+func buildIndexer(cfg *config.Config) builtIndexer {
+	log := slog.Default().With("component", "indexer")
+	seadexHTTP := httpx.NewClient(seadexTimeout)
+	prowlarrHTTP := httpx.NewClient(indexerUpstreamTimeout)
+
+	ix := indexer.New(&indexer.Config{
+		Listen:         cfg.IndexerListen,
+		APIKey:         cfg.IndexerAPIKey,
+		NyaaTorznabURL: cfg.IndexerNyaaTorznabURL,
+		ABTorznabURL:   cfg.IndexerABTorznabURL,
+		ProwlarrAPIKey: cfg.IndexerProwlarrAPIKey,
+	}, indexer.Deps{
+		SeaDex: seadex.NewClient(seadexHTTP, config.DefaultSeaDexBaseURL, config.DefaultSeaDexPageDelay, log),
+		HTTP:   prowlarrHTTP,
+		Logger: log,
+	})
+	cleanup := func() {
+		httpx.Close(seadexHTTP)
+		httpx.Close(prowlarrHTTP)
+	}
+	return builtIndexer{indexer: ix, cleanup: cleanup}
 }
 
 // newArrClients constructs the enabled arr clients from config.
@@ -150,9 +195,9 @@ func pingArrs(ctx context.Context, sonarr *arrapi.Sonarr, radarr *arrapi.Radarr)
 func filterOptions(cfg *config.Config) filter.Options {
 	return filter.Options{
 		MinResolution:    cfg.MinResolution,
-		Trackers:         cfg.Trackers,
 		AllowRemux:       cfg.AllowRemux,
 		RequireDualAudio: cfg.RequireDualAudio,
+		AnimeBytes:       cfg.AnimeBytes,
 	}
 }
 
