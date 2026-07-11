@@ -242,19 +242,25 @@ in a Torznab request (only RSS, the no-query "recent" feed, is distinguishable �
 confirmed in Sonarr's `NewznabRequestGenerator`). So the feed exposes each tracker
 on its own path and lets the arr decide when to hit each:
 
-| Path | Serves |
-| --- | --- |
-| `…/api` (or `/`) | both trackers combined |
-| `…/nyaa` | only Nyaa-sourced SeaDex releases |
-| `…/ab` | only AnimeBytes-sourced SeaDex releases |
+| Feed | Path | Or subdomain |
+| --- | --- | --- |
+| both trackers | `…/api` (or `/`) | `seadex.example.com` |
+| Nyaa only | `…/nyaa` | `nyaa.example.com` |
+| AnimeBytes only | `…/ab` | `ab.example.com` |
 
-Add the per-tracker paths as **two** Torznab indexers (each still needs Anime
+Add the per-tracker feeds as **two** Torznab indexers (each still needs Anime
 Standard Format Search on), then set their flags in Sonarr/Radarr (Settings →
 Indexers): to make Nyaa manual-only, untick **Enable RSS** and **Enable Automatic
-Search** on the `…/nyaa` indexer and leave the `…/ab` one fully enabled. Adding
-them through Prowlarr with a sync profile works too — the flags just have to end
-up on the indexer as the arr sees it. If you don't need this, the single `…/api`
-indexer is all you need.
+Search** on the Nyaa indexer and leave the AB one fully enabled. Adding them
+through Prowlarr with a sync profile works too — the flags just have to end up on
+the indexer as the arr sees it. If you don't need this, the single `…/api` indexer
+is all you need.
+
+If seadex-scout runs apart from the arrs behind a reverse proxy, the subdomain
+form is cleaner than the path: point `nyaa.example.com` and `ab.example.com` at
+the one `:9118` and the feed picks the tracker from the hostname — no path rewrite
+and no second port. The proxy must pass the `Host` header through unchanged (the
+default for Caddy/nginx `reverse_proxy`).
 
 ### Security
 
