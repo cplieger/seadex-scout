@@ -11,10 +11,10 @@
 groups:
   - name: seadex-scout
     rules:
-      # Fault: a compare cycle logged an error. The primary case is a failed
-      # Sonarr/Radarr library walk, which marks the cycle unhealthy; a failed
-      # state save/load or a panicked cycle also log at ERROR. SeaDex, mapping,
-      # and AniList outages log at WARN by design (the cycle stays healthy and
+      # Fault: a daemon run logged an error. The primary case is a failed
+      # Sonarr/Radarr library walk, which marks the run unhealthy; a failed
+      # state save/load or a panicked run also log at ERROR. SeaDex, mapping,
+      # and AniList outages log at WARN by design (the run stays healthy and
       # keeps prior findings), so this rule does not fire on an upstream blip.
       - alert: SeadexScoutCycleError
         expr: |
@@ -27,16 +27,19 @@ groups:
         annotations:
           summary: "seadex-scout logged an error"
           description: >
-            A compare cycle logged an error in the last 15m. The usual cause is a
-            failed Sonarr/Radarr library walk (message "library walk failed;
-            cycle unhealthy"), which marks the cycle unhealthy and stops findings
-            from updating. Check the arr url and api_key and the /config volume.
+            A seadex-scout daemon run logged an error in the last 15m. The usual
+            cause is a failed Sonarr/Radarr library walk (logged as "library walk
+            failed; cycle unhealthy"), which stops findings from updating. Check
+            the arr url and api_key and the /config volume.
       # Deadman (daemon mode): the poll loop emits a `cycle complete` line every
-      # poll_interval, so its absence means the watcher is wedged and silent.
+      # poll_interval, so its absence means the watcher is wedged and silent. The
+      # for: 1h grace avoids a false fire on first boot, where no cycle has
+      # completed yet and a cold first run (Fribb map download + AniList
+      # fallback) can take several minutes.
       - alert: SeadexScoutScanStalled
         expr: |
           absent_over_time({container="seadex-scout"} |= `cycle complete` [26h])
-        for: 10m
+        for: 1h
         labels:
           severity: warning
         annotations:
@@ -53,20 +56,47 @@ groups:
             collector and this deadman cannot fire; alert on the external
             scheduler's job result instead.
       # Informational, not a fault: SeaDex recommends a better release than the
-      # one on disk. This is the app's activity signal; keep it at severity info
-      # or drop it. It is not page-worthy.
+      # one on disk — the app's activity signal; keep it at severity info or drop
+      # it, it is not page-worthy. Grouped by the finding's identifying labels so
+      # each alert names one title with clickable links: the app emits arr_url,
+      # nyaa_url, ab_url, season and seadex_tags for exactly this. The markdown
+      # links render in Discord/Slack; simplify the annotation for a plain-text
+      # receiver. Note: receivers that echo an alert's labels (a generic footer)
+      # will list the grouped labels — render seadex_tags via an annotation-only
+      # template if you want just the tag line shown.
       - alert: SeadexScoutBetterReleaseFound
         expr: |
-          sum(count_over_time(
-            {container="seadex-scout"} | json | msg=`better release available` [1h]
-          )) > 0
+          sum by (title, al_id, arr, arr_url, nyaa_url, ab_url, season, recommended_group, seadex_tags) (
+            count_over_time(
+              {container="seadex-scout"} | json | msg=`better release available` [1h]
+            )
+          ) > 0
         for: 5m
         labels:
           severity: info
         annotations:
-          summary: "seadex-scout found a better release"
+          summary: '{{ $labels.title }}: new SeaDex release'
+          description: >-
+            [New release](https://releases.moe/{{ $labels.al_id }}) for
+            {{ if $labels.arr_url }}[{{ $labels.title }}]({{ $labels.arr_url }}){{ else }}{{ $labels.title }}{{ end }}{{ if and $labels.season (ne $labels.season "0") }} Season {{ $labels.season }}{{ end }}
+            ({{ $labels.recommended_group }}).
+            {{ if $labels.nyaa_url }}[Nyaa]({{ $labels.nyaa_url }}){{ end }}{{ if $labels.ab_url }}{{ if $labels.nyaa_url }} · {{ end }}[AB]({{ $labels.ab_url }}){{ end }}
+            — {{ $labels.seadex_tags }}
+      # Informational: report mode wrote a season-level alignment report. Report
+      # mode is a one-shot (docker exec /seadex-scout report, or mode: report),
+      # so this fires once per run. If an external runner captures the child's
+      # stdout under a different container/job label, point the selector there.
+      - alert: SeadexScoutReportWritten
+        expr: |
+          sum by (anime) (count_over_time(
+            {container="seadex-scout"} | json | msg=`report written` [1h]
+          )) > 0
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "seadex-scout report generated"
           description: >
-            SeaDex recommends a better release than the one on disk for at least
-            one title. Query {container="seadex-scout"} | json |
-            msg=`better release available` for the titles and release links, then
-            decide what to fetch. Informational, not an operational fault.
+            A seadex-scout season-level alignment report was written
+            ({{ $labels.anime }} anime). Read the timestamped report-<UTC>.md and
+            .json pair from the report.dir volume.

@@ -1,8 +1,8 @@
 // Package state persists seadex-scout's cross-cycle cache as a single JSON file
 // written atomically: the last library snapshot (for diffing), the cached Fribb
-// map plus its HTTP validators, the AniList fallback memo, and the finding
-// dedupe records. A missing file loads as an empty state (a cold start), never
-// an error.
+// map plus its HTTP validators, the AniList fallback memo, the finding dedupe
+// records, and a flag marking that the dedupe table has been seeded. A missing
+// file loads as an empty state (a cold start), never an error.
 package state
 
 import (
@@ -30,11 +30,16 @@ const (
 )
 
 // State is the persisted cross-cycle cache. Findings is keyed by dedupe key.
+// Baselined records that the first successful compare has seeded the finding
+// dedupe table, so a cold start (a fresh install or a lost cache) baselines the
+// pre-existing backlog silently instead of alerting on every misaligned title
+// at once.
 type State struct {
-	Findings map[string]report.Alerted `json:"findings,omitempty"`
-	Memo     match.Memo                `json:"anilist_memo"`
-	Mapping  mapping.Cache             `json:"mapping"`
-	Library  library.Snapshot          `json:"library"`
+	Findings  map[string]report.Alerted `json:"findings,omitempty"`
+	Memo      match.Memo                `json:"anilist_memo"`
+	Mapping   mapping.Cache             `json:"mapping"`
+	Library   library.Snapshot          `json:"library"`
+	Baselined bool                      `json:"baselined,omitempty"`
 }
 
 // Store loads and saves the state file at a fixed path.

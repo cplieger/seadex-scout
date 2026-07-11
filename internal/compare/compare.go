@@ -74,12 +74,15 @@ type Finding struct {
 	Severity          Severity      `json:"severity"`
 	Codec             string        `json:"codec,omitempty"`
 	ReleaseURL        string        `json:"release_url,omitempty"`
+	ArrURL            string        `json:"arr_url,omitempty"`
 	InfoHash          string        `json:"info_hash,omitempty"`
 	DedupeKey         string        `json:"dedupe_key"`
 	Status            Status        `json:"status"`
 	RecommendedGroups []string      `json:"recommended_groups,omitempty"`
 	Links             []ReleaseLink `json:"links,omitempty"`
 	AniListID         int           `json:"al_id"`
+	Season            int           `json:"season,omitempty"`
+	DualAudio         bool          `json:"dual_audio,omitempty"`
 }
 
 // Comparer produces findings from matches under a fixed filter policy.
@@ -230,8 +233,10 @@ func (c *Comparer) baseFinding(m *match.Match) Finding {
 	return Finding{
 		Title:        m.Item.Title,
 		Arr:          m.Arr,
+		ArrURL:       m.Item.ArrURL,
 		CurrentGroup: currentGroup(m.Item),
 		AniListID:    m.Entry.AniListID,
+		Season:       m.Record.SeasonTvdb,
 	}
 }
 
@@ -256,6 +261,7 @@ func fillFromCandidate(f *Finding, cand *candidate) {
 	f.Reason = cand.rel.Reason
 	f.InfoHash = cand.torrent.InfoHash
 	f.ReleaseURL = cand.torrent.UsableURL()
+	f.DualAudio = cand.rel.DualAudio
 }
 
 // obtainableLinks returns the distinct (tracker, URL) links across the pool,
