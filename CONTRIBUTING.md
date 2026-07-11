@@ -61,9 +61,9 @@ direction (leaves have no internal imports):
   a normalized `Release` (group, tracker kind, resolution, codec, dual-audio,
   remux-vs-encode). It imports no domain packages so both the SeaDex and library
   sides classify into one vocabulary.
-- `internal/filter` — the operator's release filters (remux policy, resolution
-  floor, the AnimeBytes on/off toggle, dual-audio), split from tracker
-  obtainability.
+- `internal/filter` — the operator's release filters (remux policy, the
+  AnimeBytes on/off toggle, dual-audio), split from tracker obtainability. These
+  shape the report/alert engine only; the indexer feed applies none of them.
 - `internal/match` — links a SeaDex entry to a library item (ID via the map, then
   the AniList title fallback) and reports mapping coverage.
 - `internal/compare` — the group-centric comparison producing `Finding`s (aligned
@@ -77,8 +77,11 @@ direction (leaves have no internal imports):
 - `internal/indexer` — the Torznab feed server the daemon runs when a Prowlarr
   Torznab URL is configured. It proxies Prowlarr's Nyaa + AnimeBytes endpoints,
   filters the results to SeaDex's curation (matched by tracker id / info hash),
-  and adds the download-volume-factor marker. It depends only on `internal/seadex`
-  (for the curation set) and an HTTP client — no arr, mapping, or scout wiring.
+  and adds the download-volume-factor marker. It serves each tracker on its own
+  path (`/nyaa`, `/ab`) or subdomain as well as combined, so an arr can gate a
+  tracker's search-type use through that indexer's own flags. It depends only on
+  `internal/seadex` (for the curation set) and an HTTP client — no arr, mapping,
+  or scout wiring.
 
 ## Health and degradation semantics
 

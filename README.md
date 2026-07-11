@@ -61,7 +61,7 @@ Once on start and then every `poll_interval`, seadex-scout runs one cycle:
    [Fribb anime-lists](https://github.com/Fribb/anime-lists) ID bridge, with an
    **AniList title fallback** for the entries that do not map.
 3. Classifies and filters SeaDex's recommended releases by your preferences
-   (remux policy, resolution floor, AnimeBytes on/off, dual-audio).
+   (remux policy, AnimeBytes on/off, dual-audio).
 4. Compares the surviving recommendation against what you have and, when SeaDex
    has something better, emits a `warn` log line.
 
@@ -266,9 +266,10 @@ default for Caddy/nginx `reverse_proxy`).
 
 The feed is gated by `feed_api_key` (a request without the matching `apikey` gets
 `401`). The download links it serves are Prowlarr proxy URLs, so treat the
-endpoint as sensitive — **bind it to your LAN and never expose it publicly** (no
-public reverse-proxy hostname). The Prowlarr API key is sent to Prowlarr in a
-request header (never in a logged URL) and is never written to the logs.
+endpoint as sensitive: keep it on your LAN — behind an internal reverse proxy is
+fine (that is what the per-tracker subdomain routing is for), just don't put it on
+the public internet. The Prowlarr API key is sent to Prowlarr in a request header
+(never in a logged URL) and is never written to the logs.
 
 ## How matching works
 
