@@ -160,8 +160,8 @@ passes their real data straight through — real title, seeders, size, and
 Prowlarr's own proxied download link. Because the download link is Prowlarr's,
 **no tracker passkey lives here**: Prowlarr proxies the grab using the AnimeBytes
 credentials it already holds. The one thing the feed adds is a
-**download-volume-factor marker**: SeaDex's *best* release is tagged `0.75` (which
-the arrs read as AnimeBytes Freeleech25) and an *alt* `0.25` (Freeleech75) — the
+**download-volume-factor marker**: SeaDex's _best_ release is tagged `0.75` (which
+the arrs read as AnimeBytes Freeleech25) and an _alt_ `0.25` (Freeleech75) — the
 signal you map to a Custom Format (below).
 
 Its advertised capabilities mirror the Nyaa and AnimeBytes indexer definitions:
@@ -170,14 +170,14 @@ tracker supports id-based search), and the TV/Anime (`5070`) and Movies (`2000`)
 categories.
 
 **It answers season searches, not per-episode ones.** Sonarr searches an anime
-season both as a whole season *and* episode by episode (per Sonarr's
+season both as a whole season _and_ episode by episode (per Sonarr's
 `NewznabRequestGenerator`), and SeaDex tracks season packs — so the feed answers
 the season search (returning the pack) and deliberately returns **empty, without
 contacting any tracker, for a per-episode query** (a `tvsearch` with an `ep`, or a
 `search` whose title ends in an absolute episode number like `Frieren 01`). That
 spares the trackers a query per episode per title alias, and makes a manual
 single-episode search free. Specials and movies are single releases, so they are
-always answered. The SeaDex catalogue of *what* is curated is cached and refreshed
+always answered. The SeaDex catalogue of _what_ is curated is cached and refreshed
 in the background; the endpoint comes up immediately, so an arr's "Test"
 (`t=caps`) succeeds while the first SeaDex fetch warms up.
 
