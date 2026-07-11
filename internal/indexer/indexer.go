@@ -9,8 +9,14 @@
 // Format on their anime profile. Because the download URLs are Prowlarr's own
 // proxy links, no tracker credentials live here; the endpoint is apikey-gated
 // and meant to bind LAN-only. The catalogue of what SeaDex curates is cached and
-// refreshed in the background; per-request upstream results are briefly cached
-// to soften the extra Prowlarr/AnimeBytes query load.
+// refreshed in the background.
+//
+// The feed is served per-tracker as well as combined: the root path serves both
+// trackers, /nyaa serves only the Nyaa-sourced curated releases, and /ab only
+// the AnimeBytes ones. Adding the per-tracker paths as separate indexers in
+// Sonarr/Radarr lets each arr gate a tracker's RSS/automatic/interactive use via
+// that indexer's own flags - the arr is the only component that knows the search
+// type (it is never carried in the Torznab request), so it owns that policy.
 package indexer
 
 import (
@@ -46,6 +52,11 @@ const (
 	// port is an internal detail (the container/compose port mapping publishes
 	// it), not an operator-tuned setting, so it is hardcoded rather than a key.
 	listenAddr = ":9118"
+	// upstreamNyaa / upstreamAB name the two proxied Prowlarr indexers. They
+	// double as the per-tracker path segments the feed serves (see scopeFromPath)
+	// and as the scope values upstreamsForScope matches on.
+	upstreamNyaa = "nyaa"
+	upstreamAB   = "ab"
 )
 
 // Config is the indexer's runtime settings. APIKey (the feed's own gate) and
@@ -121,12 +132,12 @@ func New(cfg *Config, deps Deps) *Indexer {
 	// daemon only starts the feed at all when at least one URL is set.)
 	if cfg.NyaaTorznabURL != "" {
 		ix.upstreams = append(ix.upstreams, &upstream{
-			http: deps.HTTP, log: log, name: "nyaa", feed: cfg.NyaaTorznabURL, apiKey: cfg.ProwlarrAPIKey,
+			http: deps.HTTP, log: log, name: upstreamNyaa, feed: cfg.NyaaTorznabURL, apiKey: cfg.ProwlarrAPIKey,
 		})
 	}
 	if cfg.ABTorznabURL != "" {
 		ix.upstreams = append(ix.upstreams, &upstream{
-			http: deps.HTTP, log: log, name: "ab", feed: cfg.ABTorznabURL, apiKey: cfg.ProwlarrAPIKey,
+			http: deps.HTTP, log: log, name: upstreamAB, feed: cfg.ABTorznabURL, apiKey: cfg.ProwlarrAPIKey,
 		})
 	}
 	return ix
@@ -232,21 +243,22 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
-	_, _ = io.WriteString(w, renderFeed(ix.query(r.Context(), q)))
+	_, _ = io.WriteString(w, renderFeed(ix.query(r.Context(), q, scopeFromPath(r.URL.Path))))
 }
 
-// query returns the feed items for a request. It answers season, movie, special,
-// and RSS queries by proxying the upstreams filtered to SeaDex's curation, and
-// deliberately returns nothing (without contacting a tracker) for a per-episode
-// query: Sonarr searches an anime season episode by episode AND as a whole season
-// (see NewznabRequestGenerator), so answering only the season search still
-// delivers the pack while sparing the trackers a query per episode - a manual
+// query returns the feed items for a request, restricted to scope's upstream(s)
+// (see scopeFromPath). It answers season, movie, special, and RSS queries by
+// proxying those upstreams filtered to SeaDex's curation, and deliberately
+// returns nothing (without contacting a tracker) for a per-episode query: Sonarr
+// searches an anime season episode by episode AND as a whole season (see
+// NewznabRequestGenerator), so answering only the season search still delivers
+// the pack while sparing the trackers a query per episode - a manual
 // single-episode search then costs nothing.
-func (ix *Indexer) query(ctx context.Context, q url.Values) []Item {
+func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) []Item {
 	if !servesQuery(q) {
 		return nil
 	}
-	items := ix.fetchAndFilter(ctx, upstreamParams(q))
+	items := ix.fetchAndFilter(ctx, upstreamParams(q), scope)
 	items = filterByCats(items, parseCats(q.Get("cat")))
 	if len(items) > maxItems {
 		items = items[:maxItems]
@@ -254,12 +266,12 @@ func (ix *Indexer) query(ctx context.Context, q url.Values) []Item {
 	return items
 }
 
-// fetchAndFilter queries every upstream in parallel, then keeps and marks the
-// results SeaDex curates. It returns nil before the curation set is warm.
-func (ix *Indexer) fetchAndFilter(ctx context.Context, params url.Values) []Item {
+// fetchAndFilter queries the scope's upstreams in parallel, then keeps and marks
+// the results SeaDex curates. It returns nil before the curation set is warm.
+func (ix *Indexer) fetchAndFilter(ctx context.Context, params url.Values, scope string) []Item {
 	ix.mu.RLock()
 	set := ix.set
-	ups := ix.upstreams
+	ups := upstreamsForScope(ix.upstreams, scope)
 	ix.mu.RUnlock()
 
 	if set.empty() || len(ups) == 0 {
@@ -326,6 +338,48 @@ func upstreamParams(q url.Values) url.Values {
 	}
 	if out.Get("t") == "" {
 		out.Set("t", "search")
+	}
+	return out
+}
+
+// scopeFromPath maps the request path to the tracker whose results to serve, or
+// "" for all. The first path segment selects it: "/nyaa..." -> nyaa, "/ab..." ->
+// ab, anything else (including "/" and the default "/api") -> all trackers.
+// Serving per-tracker lets an arr add the feed as two indexers (base path /nyaa
+// and /ab) and gate each tracker's RSS/automatic/interactive use with that
+// indexer's own flags - the arr is the only component that knows the search type
+// (it is never carried in the Torznab request), so it owns that decision.
+func scopeFromPath(p string) string {
+	switch firstSegment(p) {
+	case upstreamNyaa:
+		return upstreamNyaa
+	case upstreamAB:
+		return upstreamAB
+	default:
+		return ""
+	}
+}
+
+// firstSegment returns the first non-empty path segment, lowercased.
+func firstSegment(p string) string {
+	p = strings.TrimLeft(p, "/")
+	if i := strings.IndexByte(p, '/'); i >= 0 {
+		p = p[:i]
+	}
+	return strings.ToLower(p)
+}
+
+// upstreamsForScope selects the upstreams a scope targets: all when scope is
+// empty, else just the one whose name matches (nyaa or ab).
+func upstreamsForScope(all []*upstream, scope string) []*upstream {
+	if scope == "" {
+		return all
+	}
+	out := make([]*upstream, 0, 1)
+	for _, u := range all {
+		if u.name == scope {
+			out = append(out, u)
+		}
 	}
 	return out
 }
