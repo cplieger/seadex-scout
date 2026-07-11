@@ -82,7 +82,21 @@ func (s *Scout) Cycle(ctx context.Context) (healthy bool) {
 
 	result := s.deps.Matcher.Match(ctx, entries, &snap, idx, st.Memo)
 	findings := s.deps.Comparer.Compare(result.Matches)
-	newFindings := s.deps.Reporter.Report(findings, st.Findings, time.Now())
+
+	// A cold start (a fresh install, or a lost/reset cache) has no dedupe table
+	// yet: baseline the current findings silently so the whole pre-existing
+	// backlog is not dumped as notifications at once. Steady-state emission
+	// resumes next cycle via Report. The len(Findings) guard keeps an upgrade of
+	// an already-running instance (state predating the flag but already holding
+	// findings) on the normal emit path, so it never silently swallows a
+	// finding. The full list is always available on demand via report mode.
+	var newFindings map[string]report.Alerted
+	if !st.Baselined && len(st.Findings) == 0 {
+		newFindings = s.deps.Reporter.Baseline(findings, time.Now())
+	} else {
+		newFindings = s.deps.Reporter.Report(findings, st.Findings, time.Now())
+	}
+	st.Baselined = true
 
 	diff := library.DiffSnapshots(&st.Library, &snap)
 	aniStats := s.deps.AniList.Stats()
