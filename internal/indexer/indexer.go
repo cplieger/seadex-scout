@@ -597,14 +597,18 @@ func upstreamsForScope(all []*upstream, scope string) []*upstream {
 }
 
 // servesQuery reports whether the feed answers a request by querying the
-// trackers, or returns empty without contacting them. It answers movie searches,
-// season searches (`tvsearch` with no `ep`) and bare/RSS searches, and
-// special/generic text searches - but NOT a per-episode query: a `tvsearch` with
-// an `ep`, or a `t=search` whose `q` ends in the absolute episode number Sonarr
-// appends (e.g. "Frieren 01"). Sonarr issues a season search too, which returns
-// the pack, so dropping the per-episode queries loses nothing for a series while
-// sparing the trackers one query per episode per scene-title alias. Specials and
-// movies are single releases (not packs), so they are always answered.
+// trackers, or returns empty without contacting them. It answers movie searches
+// (`t=movie`, or a `t=search` carrying the Movies category), season searches
+// (`tvsearch` with no `ep`) and bare/RSS searches, and special/generic text
+// searches - but NOT a per-episode query: a `tvsearch` with an `ep`, or a
+// `t=search` whose `q` ends in the absolute episode number Sonarr appends (e.g.
+// "Frieren 01"). Sonarr issues a season search too, which returns the pack, so
+// dropping the per-episode queries loses nothing for a series while sparing the
+// trackers one query per episode per scene-title alias. Specials and movies are
+// single releases (not packs), so they are always answered - a film search comes
+// through as `t=search` with the movie's year in `q`, so it is recognized by its
+// Movies category rather than the trailing-number heuristic (which the year
+// would otherwise trip).
 //
 // NOTE: this relies on Sonarr issuing the season search. For an Anime-type series
 // that requires the indexer's "Anime Standard Format Search" option to be on (it
@@ -616,8 +620,26 @@ func servesQuery(q url.Values) bool {
 	case "tvsearch", "tv-search":
 		return strings.TrimSpace(q.Get("ep")) == ""
 	default: // "search", "", specials, generic, RSS
+		// A Movies-category search is a film (single release), always answered. It
+		// must not fall through to the anime episode-skip below: a movie query
+		// ends in its year (e.g. "From Up on Poppy Hill 2011"), which the
+		// trailingEpisode regex would otherwise misread as a per-episode number.
+		if requestsMovies(q.Get("cat")) {
+			return true
+		}
 		return !trailingEpisode.MatchString(strings.TrimSpace(q.Get("q")))
 	}
+}
+
+// requestsMovies reports whether the Torznab category list targets Movies
+// (2000-2999) - a film search, which is a single release and always answered.
+func requestsMovies(cat string) bool {
+	for c := range parseCats(cat) {
+		if c >= catMovies && c < catMovies+1000 {
+			return true
+		}
+	}
+	return false
 }
 
 // trailingEpisode matches the absolute episode number Sonarr appends to an anime

@@ -263,13 +263,14 @@ func TestAnimeBytesMatching(t *testing.T) {
 
 func TestServesQuery(t *testing.T) {
 	serves := []url.Values{
-		{"t": {"movie"}, "q": {"Totoro"}},                      // movie
-		{"t": {"tvsearch"}, "q": {"Frieren"}, "season": {"1"}}, // season pack search
-		{"t": {"tvsearch"}},                                    // bare tvsearch / RSS
-		{"t": {"search"}},                                      // RSS (empty q)
-		{"t": {"search"}, "q": {"Frieren"}},                    // generic series search
-		{"t": {"search"}, "q": {"Frieren OVA"}},                // special
-		{"t": {"caps"}},                                        // (query() not called for caps, but classifies as serve)
+		{"t": {"movie"}, "q": {"Totoro"}},                                       // movie
+		{"t": {"search"}, "q": {"From Up on Poppy Hill 2011"}, "cat": {"2000"}}, // movie search (Movies cat) ending in a year
+		{"t": {"tvsearch"}, "q": {"Frieren"}, "season": {"1"}},                  // season pack search
+		{"t": {"tvsearch"}},                     // bare tvsearch / RSS
+		{"t": {"search"}},                       // RSS (empty q)
+		{"t": {"search"}, "q": {"Frieren"}},     // generic series search
+		{"t": {"search"}, "q": {"Frieren OVA"}}, // special
+		{"t": {"caps"}},                         // (query() not called for caps, but classifies as serve)
 	}
 	for _, q := range serves {
 		if !servesQuery(q) {
