@@ -237,23 +237,44 @@ func (li *libIndex) addTitle(title string, it *library.Item) {
 	}
 }
 
-// findByID looks up a library item by the arr IDs in a mapping record.
+// findByID looks up a library item by the arr IDs in a mapping record. The
+// match must be arr-consistent: a MOVIE record resolves only to a Radarr movie
+// and a series record only to a Sonarr series. This guards against a shared-ID
+// collision in the pooled TMDB/IMDb indexes — a movie whose Fribb record carries
+// a TV themoviedb_id (or an IMDb id TVDB reuses for the parent series) must not
+// silently link to the same-named Sonarr series (it would produce an
+// unscopable, meaningless row).
 func (li *libIndex) findByID(rec *mapping.Record) *library.Item {
 	if rec.IsMovie() {
-		for _, id := range rec.TmdbMovies {
-			if it := li.byTmdb[id]; it != nil {
-				return it
-			}
-		}
-		for _, imdb := range rec.IMDbIDs {
-			if it := li.byImdb[imdb]; it != nil {
-				return it
-			}
-		}
-		return nil
+		return li.findMovie(rec)
 	}
 	if rec.TvdbID != 0 {
-		return li.byTvdb[rec.TvdbID]
+		return arrItem(li.byTvdb[rec.TvdbID], library.ArrSonarr)
+	}
+	return nil
+}
+
+// findMovie resolves a MOVIE record to a Radarr movie by TMDB movie id, then by
+// IMDb id. Only Radarr items match (arr-consistency, see findByID).
+func (li *libIndex) findMovie(rec *mapping.Record) *library.Item {
+	for _, id := range rec.TmdbMovies {
+		if it := arrItem(li.byTmdb[id], library.ArrRadarr); it != nil {
+			return it
+		}
+	}
+	for _, imdb := range rec.IMDbIDs {
+		if it := arrItem(li.byImdb[imdb], library.ArrRadarr); it != nil {
+			return it
+		}
+	}
+	return nil
+}
+
+// arrItem returns it only when it is non-nil and belongs to arr, enforcing
+// arr-consistency on an ID lookup.
+func arrItem(it *library.Item, arr string) *library.Item {
+	if it != nil && it.Arr == arr {
+		return it
 	}
 	return nil
 }
