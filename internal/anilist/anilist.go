@@ -17,7 +17,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -43,6 +45,15 @@ var ErrNotFound = errors.New("anilist: media not found")
 
 // query fetches the fields needed for a title fallback match.
 const query = `query ($id: Int) { Media(id: $id, type: ANIME) { format seasonYear startDate { year } title { romaji english native } } }`
+
+// batchQuery fetches the same fields for many ids in one request via Page.media,
+// which still counts as a single request against AniList's per-minute budget -
+// so a cold cycle's hundreds of id-less lookups collapse to a handful of calls.
+const batchQuery = `query ($ids: [Int]) { Page(perPage: 50) { media(id_in: $ids, type: ANIME) { id format seasonYear startDate { year } title { romaji english native } } } }`
+
+// batchSize is AniList's Page perPage maximum; FetchMany resolves up to this
+// many ids per request.
+const batchSize = 50
 
 // Media is the subset of an AniList entry used for title matching.
 type Media struct {
@@ -112,6 +123,43 @@ func (c *Client) Fetch(ctx context.Context, aniListID int) (Media, error) {
 		return Media{}, err
 	}
 	return parseMedia(raw)
+}
+
+// FetchMany resolves many AniList ids in batched requests (up to batchSize ids
+// each, every batch throttled and retried like Fetch), returning the media that
+// exist keyed by id. An id AniList has no anime for is simply absent from the
+// result (the caller treats an absent id as not-found). On a request error it
+// returns the media gathered so far together with the error, so the caller can
+// fall back to a per-id Fetch for the remainder rather than losing the batch.
+func (c *Client) FetchMany(ctx context.Context, ids []int) (map[int]Media, error) {
+	out := make(map[int]Media, len(ids))
+	for chunk := range slices.Chunk(ids, batchSize) {
+		if err := c.throttle.wait(ctx); err != nil {
+			return out, err
+		}
+		c.calls.Add(1)
+
+		body, err := json.Marshal(map[string]any{
+			"query":     batchQuery,
+			"variables": map[string]any{"ids": chunk},
+		})
+		if err != nil {
+			return out, fmt.Errorf("anilist: marshal batch request: %w", err)
+		}
+
+		raw, err := httpx.RetryWithBackoff(ctx, maxAttempts, baseDelay, "anilist",
+			func(ctx context.Context) ([]byte, error) { return c.do(ctx, body) })
+		if err != nil {
+			return out, err
+		}
+
+		page, err := parseMediaPage(raw)
+		if err != nil {
+			return out, err
+		}
+		maps.Copy(out, page)
+	}
+	return out, nil
 }
 
 // do performs one GraphQL POST attempt, translating a 429 into a transient
@@ -213,6 +261,57 @@ func parseMedia(raw []byte) (Media, error) {
 		Format: m.Format,
 		Year:   year,
 	}, nil
+}
+
+// gqlPageResponse is the GraphQL envelope for the batched Page(media) query.
+type gqlPageResponse struct {
+	Data struct {
+		Page struct {
+			Media []struct {
+				Title struct {
+					Romaji  string `json:"romaji"`
+					English string `json:"english"`
+					Native  string `json:"native"`
+				} `json:"title"`
+				Format    string `json:"format"`
+				StartDate struct {
+					Year int `json:"year"`
+				} `json:"startDate"`
+				ID         int `json:"id"`
+				SeasonYear int `json:"seasonYear"`
+			} `json:"media"`
+		} `json:"Page"`
+	} `json:"data"`
+	Errors []struct {
+		Message string `json:"message"`
+	} `json:"errors"`
+}
+
+// parseMediaPage decodes a batched Page(media) response into a map keyed by
+// AniList id. A GraphQL-level error fails the batch; ids absent from the media
+// array are simply not in the map (the caller treats them as not-found).
+func parseMediaPage(raw []byte) (map[int]Media, error) {
+	var r gqlPageResponse
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return nil, fmt.Errorf("anilist: decode batch response: %w", err)
+	}
+	if len(r.Errors) > 0 {
+		return nil, fmt.Errorf("anilist: batch query error: %s", r.Errors[0].Message)
+	}
+	out := make(map[int]Media, len(r.Data.Page.Media))
+	for i := range r.Data.Page.Media {
+		md := &r.Data.Page.Media[i]
+		year := md.SeasonYear
+		if year == 0 {
+			year = md.StartDate.Year
+		}
+		out[md.ID] = Media{
+			Titles: dedupeTitles(md.Title.Romaji, md.Title.English, md.Title.Native),
+			Format: md.Format,
+			Year:   year,
+		}
+	}
+	return out, nil
 }
 
 // dedupeTitles returns the non-empty titles in order, without duplicates.

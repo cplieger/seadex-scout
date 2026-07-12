@@ -20,6 +20,16 @@ func (f fakeAniList) Fetch(_ context.Context, id int) (anilist.Media, error) {
 	return anilist.Media{}, anilist.ErrNotFound
 }
 
+func (f fakeAniList) FetchMany(_ context.Context, ids []int) (map[int]anilist.Media, error) {
+	out := make(map[int]anilist.Media, len(ids))
+	for _, id := range ids {
+		if m, ok := f.media[id]; ok {
+			out[id] = m
+		}
+	}
+	return out, nil
+}
+
 // TestFindByIDArrConsistency covers the arr-gate: a MOVIE record must resolve
 // only to a Radarr movie and a series record only to a Sonarr series, so a movie
 // whose Fribb record shares an IMDb id with a same-named Sonarr series (TVDB
@@ -87,6 +97,11 @@ func (c *countingAniList) Fetch(_ context.Context, _ int) (anilist.Media, error)
 	return anilist.Media{}, anilist.ErrNotFound
 }
 
+func (c *countingAniList) FetchMany(_ context.Context, ids []int) (map[int]anilist.Media, error) {
+	c.calls++
+	return map[int]anilist.Media{}, nil
+}
+
 // TestMatchNoTitleFallbackWhenRecordHasArrID verifies the AniList title fallback
 // is reserved for id-less records: a record that carries an arr id but whose
 // anime is not in the library resolves to unmapped WITHOUT an AniList call, so a
@@ -110,5 +125,78 @@ func TestMatchNoTitleFallbackWhenRecordHasArrID(t *testing.T) {
 	}
 	if fake.calls != 0 {
 		t.Errorf("AniList queried %d times; a record with an arr id must not trigger the title fallback", fake.calls)
+	}
+}
+
+// batchCountingAniList records batched vs single AniList calls (and batch sizes)
+// to prove the matcher pre-warms the memo in one batch rather than one request
+// per id-less entry. Fetch/FetchMany resolve ids from the canned media map.
+type batchCountingAniList struct {
+	media      map[int]anilist.Media
+	batchSizes []int
+	fetchCalls int
+	batchCalls int
+}
+
+func (b *batchCountingAniList) Fetch(_ context.Context, id int) (anilist.Media, error) {
+	b.fetchCalls++
+	if m, ok := b.media[id]; ok {
+		return m, nil
+	}
+	return anilist.Media{}, anilist.ErrNotFound
+}
+
+func (b *batchCountingAniList) FetchMany(_ context.Context, ids []int) (map[int]anilist.Media, error) {
+	b.batchCalls++
+	b.batchSizes = append(b.batchSizes, len(ids))
+	out := make(map[int]anilist.Media, len(ids))
+	for _, id := range ids {
+		if m, ok := b.media[id]; ok {
+			out[id] = m
+		}
+	}
+	return out, nil
+}
+
+// TestMatchBatchesAniListLookups verifies the cold-cycle path: several id-less
+// records that need the AniList title fallback are resolved with ONE batched
+// request (pre-warming the memo), so the per-entry pass makes zero single
+// Fetch calls and every entry still title-matches its library item.
+func TestMatchBatchesAniListLookups(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrRadarr, ArrID: 1, Title: "Movie A", TmdbID: 100, Year: 2020},
+		{Arr: library.ArrRadarr, ArrID: 2, Title: "Movie B", TmdbID: 200, Year: 2021},
+		{Arr: library.ArrRadarr, ArrID: 3, Title: "Movie C", TmdbID: 300, Year: 2022},
+	}}
+	// Three id-less MOVIE records (split mapping: no tmdb/imdb on the record).
+	idx := mapping.NewIndex([]mapping.Record{
+		{AniListID: 11, Type: "MOVIE"},
+		{AniListID: 22, Type: "MOVIE"},
+		{AniListID: 33, Type: "MOVIE"},
+	})
+	fake := &batchCountingAniList{media: map[int]anilist.Media{
+		11: {Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020},
+		22: {Titles: []string{"Movie B"}, Format: "MOVIE", Year: 2021},
+		33: {Titles: []string{"Movie C"}, Format: "MOVIE", Year: 2022},
+	}}
+	m := NewMatcher(fake, nil)
+
+	res := m.Match(context.Background(),
+		[]seadex.Entry{{AniListID: 11}, {AniListID: 22}, {AniListID: 33}}, snap, idx, Memo{})
+
+	if fake.batchCalls != 1 {
+		t.Errorf("want 1 batched AniList request, got %d (batch sizes %v)", fake.batchCalls, fake.batchSizes)
+	}
+	if fake.fetchCalls != 0 {
+		t.Errorf("want 0 single Fetch calls (the batch pre-warms the memo), got %d", fake.fetchCalls)
+	}
+	matched := 0
+	for i := range res.Matches {
+		if res.Matches[i].InLibrary() && res.Matches[i].Source == SourceTitle {
+			matched++
+		}
+	}
+	if matched != 3 {
+		t.Errorf("want 3 title-matched entries, got %d", matched)
 	}
 }
