@@ -115,8 +115,18 @@ func (m *Matcher) matchEntry(ctx context.Context, e *seadex.Entry, lib *libIndex
 	if rec, ok := idx.Lookup(e.AniListID); ok {
 		arr := recordArr(&rec)
 		cov.Hits[arr]++
-		item := lib.findByID(&rec)
-		return Match{Item: item, Entry: *e, Record: rec, Arr: arr, Source: sourceFor(item)}
+		if item := lib.findByID(&rec); item != nil {
+			return Match{Item: item, Entry: *e, Record: rec, Arr: arr, Source: SourceID}
+		}
+		// Fribb knows this AniList entry but its record carries no usable arr id
+		// (a split AniList<->arr mapping, common for films/OVAs whose arr id sits
+		// on a separate id-less record). Fall through to the AniList title match,
+		// restricted to the record's arr, before treating it as unmapped — so the
+		// entry still links to the arr item it belongs to.
+		if item := m.titleMatch(ctx, e, memo, lib, arr); item != nil {
+			return Match{Item: item, Entry: *e, Record: rec, Arr: arr, Source: SourceTitle}
+		}
+		return Match{Entry: *e, Record: rec, Arr: arr, Source: SourceUnmapped}
 	}
 
 	media, ok := m.lookupAniList(ctx, e.AniListID, memo)
@@ -156,14 +166,17 @@ func (m *Matcher) lookupAniList(ctx context.Context, aniListID int, memo *Memo) 
 	return media, true
 }
 
-// sourceFor reports the match source for an ID-resolved entry: SourceID when a
-// library item was found, SourceUnmapped when it resolved but is not in the
-// library.
-func sourceFor(item *library.Item) Source {
-	if item != nil {
-		return SourceID
+// titleMatch resolves the entry through the AniList fallback and matches it to a
+// library item by normalized title + year, restricted to arr. It returns nil on
+// any miss (AniList failure, no candidate, or an ambiguous set). It bridges the
+// case where Fribb has the entry but no usable arr id, so the AniList title is
+// the only remaining link to the arr item.
+func (m *Matcher) titleMatch(ctx context.Context, e *seadex.Entry, memo *Memo, lib *libIndex, arr string) *library.Item {
+	media, ok := m.lookupAniList(ctx, e.AniListID, memo)
+	if !ok {
+		return nil
 	}
-	return SourceUnmapped
+	return lib.findByTitle(media.Titles, media.Year, arr, m.log)
 }
 
 // recordArr routes a mapping record to its arr (MOVIE -> Radarr, else Sonarr).
