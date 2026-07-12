@@ -55,18 +55,6 @@ func TestScope(t *testing.T) {
 			rec:        mapping.Record{Type: "OVA"},
 			wantGroups: nil, wantFile: false,
 		},
-		{
-			name:       "absolute-numbered single-group series falls back to whole series (exact)",
-			item:       library.Item{Arr: library.ArrSonarr, Groups: []string{"jysze"}, HasFile: true},
-			rec:        mapping.Record{Type: "TV"},
-			wantGroups: []string{"jysze"}, wantFile: true, wantApprox: false,
-		},
-		{
-			name:       "absolute-numbered multi-group series is approximate",
-			item:       library.Item{Arr: library.ArrSonarr, Groups: []string{"a&c", "kitsune"}, HasFile: true},
-			rec:        mapping.Record{Type: "TV"},
-			wantGroups: []string{"a&c", "kitsune"}, wantFile: true, wantApprox: true,
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -184,5 +172,38 @@ func TestAuditNoGroupMatchesBest(t *testing.T) {
 	}
 	if got != VerdictBest {
 		t.Errorf("group-less item vs group-less SeaDex best = %q, want %q", got, VerdictBest)
+	}
+}
+
+// TestWholeSeriesVerdict covers the conservative per-season aggregation for an
+// absolute-numbered / whole-series entry: have_best only when every real season
+// carries a best group, downgrading otherwise, with season 0 excluded.
+func TestWholeSeriesVerdict(t *testing.T) {
+	best := []string{"a&c"}
+	alt := []string{"kh"}
+	tests := []struct {
+		name    string
+		seasons map[int][]string
+		want    Verdict
+		approx  bool
+	}{
+		{"all seasons best", map[int][]string{1: {"a&c"}, 2: {"a&c"}}, VerdictBest, true},
+		{"best plus unlisted downgrades to unlisted", map[int][]string{1: {"a&c"}, 2: {"kitsune"}}, VerdictUnlisted, true},
+		{"best plus alt downgrades to alt", map[int][]string{1: {"a&c"}, 2: {"kh"}}, VerdictAlt, true},
+		{"season 0 is excluded", map[int][]string{0: {"kitsune"}, 1: {"a&c"}}, VerdictBest, false},
+		{"single season is not approx", map[int][]string{1: {"a&c"}}, VerdictBest, false},
+		{"only season 0 on disk is no_file", map[int][]string{0: {"a&c"}}, VerdictNoFile, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: tt.seasons, HasFile: true}
+			got, _, approx := wholeSeriesVerdict(item, best, alt)
+			if got != tt.want {
+				t.Errorf("verdict = %q, want %q", got, tt.want)
+			}
+			if approx != tt.approx {
+				t.Errorf("approx = %v, want %v", approx, tt.approx)
+			}
+		})
 	}
 }

@@ -234,23 +234,28 @@ func (c *catalogue) has(it *library.Item) bool {
 func (a *Auditor) assess(m *match.Match) Row {
 	releases := a.classifyReleases(&m.Entry)
 	best, alt := groupSets(releases)
-	current, hasFile, approx := scope(m)
 
 	row := Row{
-		CurrentGroups: current,
-		Releases:      releases,
-		Title:         m.Item.Title,
-		Arr:           m.Arr,
-		ArrURL:        m.Item.ArrURL,
-		SeaDexURL:     a.seadexURL(m.Entry.AniListID),
-		MatchSource:   string(m.Source),
-		AniListID:     m.Entry.AniListID,
-		Season:        m.Record.SeasonTvdb,
-		Special:       m.Record.IsSpecial(),
-		Incomplete:    m.Entry.Incomplete,
-		Approx:        approx,
+		Releases:    releases,
+		Title:       m.Item.Title,
+		Arr:         m.Arr,
+		ArrURL:      m.Item.ArrURL,
+		SeaDexURL:   a.seadexURL(m.Entry.AniListID),
+		MatchSource: string(m.Source),
+		AniListID:   m.Entry.AniListID,
+		Season:      m.Record.SeasonTvdb,
+		Special:     m.Record.IsSpecial(),
+		Incomplete:  m.Entry.Incomplete,
 	}
-	row.Verdict = verdict(hasFile, current, best, alt)
+	if wholeSeries(m) {
+		// Absolute-numbered run / title-only match: apply the single whole-series
+		// recommendation to each real season (season 0 excluded), conservatively.
+		row.Verdict, row.CurrentGroups, row.Approx = wholeSeriesVerdict(m.Item, best, alt)
+	} else {
+		current, hasFile, approx := scope(m)
+		row.CurrentGroups, row.Approx = current, approx
+		row.Verdict = verdict(hasFile, current, best, alt)
+	}
 	return row
 }
 
@@ -276,38 +281,81 @@ func verdict(hasFile bool, current, best, alt []string) Verdict {
 const specialSeason = 0
 
 // scope returns the on-disk release groups to compare for this entry, whether
-// the scoped unit has any file, and whether the comparison is approximate (a
-// coarse multi-group bucket).
+// the scoped unit has any file, and whether the comparison is approximate.
 //
-// Movies scope to the movie's group. A series with a positive Fribb TVDB season
-// scopes to that season's groups (exact). A special with no positive season
-// scopes to the season-0 specials bucket Sonarr lumps them into. Any other
-// series with no season mapping (an absolute-numbered long run, or a title-only
-// match with no record) falls back to the whole-series group set. The season-0
-// and whole-series buckets are approximate when they hold more than one group,
-// since a single entry cannot be attributed to one of them.
+// It handles the three single-unit scopes: a movie (the movie's group), a
+// series with a positive Fribb TVDB season (that season's groups, exact), and a
+// special (the season-0 bucket Sonarr lumps specials into, approximate when it
+// holds more than one group). A Sonarr series with no Fribb season and not a
+// special is compared against the whole series by wholeSeriesVerdict, so assess
+// routes it there rather than here.
 func scope(m *match.Match) (groups []string, hasFile, approx bool) {
 	item := m.Item
-	if item.Arr == library.ArrRadarr {
+	switch {
+	case item.Arr == library.ArrRadarr:
 		return item.Groups, item.HasFile, false
-	}
-	if season := m.Record.SeasonTvdb; season > 0 {
-		g, ok := item.SeasonGroups[season]
-		if !ok {
-			return nil, false, false // season is mapped but not present on disk
-		}
-		return g, len(g) > 0, false
-	}
-	if m.Record.IsSpecial() {
+	case m.Record.SeasonTvdb > 0:
+		g, ok := item.SeasonGroups[m.Record.SeasonTvdb]
+		return g, ok && len(g) > 0, false
+	default: // a special: compare against the season-0 specials bucket
 		g, ok := item.SeasonGroups[specialSeason]
-		if !ok {
-			return nil, false, false // no specials present on disk
-		}
-		return g, len(g) > 0, len(g) > 1
+		return g, ok && len(g) > 0, ok && len(g) > 1
 	}
-	// No TVDB season (absolute-numbered run or title-only match): fall back to the
-	// whole-series group set.
-	return item.Groups, item.HasFile, len(item.Groups) > 1
+}
+
+// wholeSeries reports whether the match must be compared against the whole
+// series: a Sonarr item with no Fribb TVDB season and not a special (an
+// absolute-numbered run like One Piece, or a title-only match). SeaDex carries
+// one whole-series recommendation for these with no per-season mapping.
+func wholeSeries(m *match.Match) bool {
+	return m.Item.Arr == library.ArrSonarr && m.Record.SeasonTvdb <= 0 && !m.Record.IsSpecial()
+}
+
+// wholeSeriesVerdict applies the entry's single recommendation to each real
+// season (season 0 specials excluded) and returns the most conservative
+// verdict: have_best only when every on-disk season carries a best group,
+// have_alt when all are best-or-alt with at least one alt, and have_unlisted
+// when any season matches neither. It also returns the union of those seasons'
+// groups for display and marks the comparison approximate when more than one
+// season is compared. With no real season on disk it is no_file.
+func wholeSeriesVerdict(item *library.Item, best, alt []string) (Verdict, []string, bool) {
+	var union []string
+	seen := make(map[string]struct{})
+	seasons := 0
+	var anyAlt, anyUnlisted bool
+	for season, groups := range item.SeasonGroups {
+		if season == specialSeason || len(groups) == 0 {
+			continue
+		}
+		seasons++
+		for _, g := range groups {
+			if _, dup := seen[g]; !dup {
+				seen[g] = struct{}{}
+				union = append(union, g)
+			}
+		}
+		switch {
+		case intersects(groups, best):
+			// this season carries a best group
+		case intersects(groups, alt):
+			anyAlt = true
+		default:
+			anyUnlisted = true
+		}
+	}
+	if seasons == 0 {
+		return VerdictNoFile, nil, false
+	}
+	sort.Strings(union)
+	approx := seasons > 1
+	switch {
+	case anyUnlisted:
+		return VerdictUnlisted, union, approx
+	case anyAlt:
+		return VerdictAlt, union, approx
+	default:
+		return VerdictBest, union, approx
+	}
 }
 
 // classifyReleases turns every SeaDex torrent into a report Release (group
