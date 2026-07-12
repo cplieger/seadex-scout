@@ -10,6 +10,7 @@ package scout
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -112,9 +113,7 @@ func (s *Scout) Cycle(ctx context.Context) (healthy bool) {
 		"duration", time.Since(start).Round(time.Millisecond).String())
 
 	st.Library, st.Mapping, st.Memo, st.Findings = snap, mapCache, result.Memo, newFindings
-	if err := s.deps.Store.Save(ctx, &st); err != nil {
-		s.log.Error("state save failed", "error", err)
-	}
+	s.save(ctx, &st)
 	return true
 }
 
@@ -169,7 +168,30 @@ func (s *Scout) loadState(ctx context.Context) state.State {
 func (s *Scout) degradedSave(ctx context.Context, st *state.State, snap library.Snapshot, mapCache *mapping.Cache) {
 	st.Library = snap
 	st.Mapping = *mapCache
-	if err := s.deps.Store.Save(ctx, st); err != nil {
+	s.save(ctx, st)
+}
+
+// saveGrace bounds the detached shutdown save. It must stay well inside the
+// container's stop grace period (compose stop_grace_period: 20s) so the write
+// completes before SIGKILL.
+const saveGrace = 5 * time.Second
+
+// save persists state, tolerating a shutdown mid-cycle. When the run context is
+// cancelled (SIGTERM during a redeploy), the atomic write fails with
+// context.Canceled and the caches are lost — so a cancellation is retried once
+// with a detached, briefly-bounded context (context.WithoutCancel keeps the
+// values, drops the cancellation), letting the write finish so the expensive
+// AniList memo survives the restart. A cancellation is not a fault (a redeploy
+// is routine), so only a genuine write failure is logged at ERROR — which keeps
+// it off the cycle-error alert.
+func (s *Scout) save(ctx context.Context, st *state.State) {
+	err := s.deps.Store.Save(ctx, st)
+	if err != nil && (errors.Is(err, context.Canceled) || ctx.Err() != nil) {
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), saveGrace)
+		defer cancel()
+		err = s.deps.Store.Save(dctx, st)
+	}
+	if err != nil {
 		s.log.Error("state save failed", "error", err)
 	}
 }
