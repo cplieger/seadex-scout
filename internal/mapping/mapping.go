@@ -95,19 +95,18 @@ func (i *Index) Len() int {
 	return len(i.byAniList)
 }
 
-// Records returns the indexed mapping records in unspecified order. It backs the
-// report's reverse (arr-ID) catalogue, used to tell a library item that is
-// recognized anime (present in the Fribb map) but absent from SeaDex apart from
-// arbitrary non-anime library entries.
-func (i *Index) Records() []Record {
+// ForEachRecord calls fn once per indexed record, in unspecified order. It backs
+// the report's reverse (arr-ID) catalogue — used to tell a library item that is
+// recognized anime (present in the Fribb map) but absent from SeaDex from an
+// arbitrary non-anime library entry — without materializing a slice copy of all
+// ~40k records, which keeps the memory-tight report path lean.
+func (i *Index) ForEachRecord(fn func(Record)) {
 	if i == nil {
-		return nil
+		return
 	}
-	out := make([]Record, 0, len(i.byAniList))
 	for _, r := range i.byAniList {
-		out = append(out, r)
+		fn(r)
 	}
-	return out
 }
 
 // NewIndex builds an index over records already decoded elsewhere, keyed by
