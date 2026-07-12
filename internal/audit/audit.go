@@ -192,7 +192,7 @@ type catalogue struct {
 // yields an empty catalogue (nothing is considered catalogued).
 func newCatalogue(idx *mapping.Index) *catalogue {
 	c := &catalogue{tvdb: map[int]struct{}{}, tmdb: map[int]struct{}{}, imdb: map[string]struct{}{}}
-	for _, r := range idx.Records() {
+	idx.ForEachRecord(func(r mapping.Record) {
 		if r.TvdbID != 0 {
 			c.tvdb[r.TvdbID] = struct{}{}
 		}
@@ -202,7 +202,7 @@ func newCatalogue(idx *mapping.Index) *catalogue {
 		for _, im := range r.IMDbIDs {
 			c.imdb[im] = struct{}{}
 		}
-	}
+	})
 	return c
 }
 
