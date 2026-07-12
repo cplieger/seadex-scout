@@ -122,25 +122,61 @@ var multiSpace = regexp.MustCompile(`\s{2,}`)
 
 // feedTitle synthesizes an arr-parseable release title from a torrent's file
 // names - the core RSS gap, since SeaDex stores file names, not clean titles.
-// It uses a representative episode file and collapses the episode marker to the
-// season (S01E07 -> S01) so a pack is grabbed as a full season; an absolute-
-// numbered pack has the number dropped; a single-file release (movie/OVA) is
-// used verbatim. With no files it falls back to the release group. The result
-// carries the group + quality/source tokens the file name already encodes, which
-// is what the arr parses to match a monitored series and quality.
+// A real season pack (files spanning more than one episode) collapses the
+// episode marker to the season (S01E07 -> S01) so the arr grabs it as a whole
+// season; a single-episode torrent keeps its SxxExx so the arr grabs it as that
+// episode. This distinction matters because SeaDex tracks a complete-but-unpacked
+// season as one torrent PER episode: collapsing those would mislabel, say, 24
+// episodes as 24 copies of the season. A movie / single OVA (no episode marker)
+// is used verbatim, and with no files the title falls back to the release group.
+// The feed deliberately does NOT filter packs vs episodes - it lists both and
+// lets Sonarr's FullSeason preference + already-grabbed dedupe pick (see the
+// indexer package doc); this function only has to LABEL each release correctly.
 func feedTitle(t *seadex.Torrent) string {
 	name := representativeFile(t.Files)
 	if name == "" {
 		return strings.TrimSpace(t.ReleaseGroup)
 	}
 	base := stripExt(name)
+	if !isPack(t) {
+		// A single episode, movie, or single OVA: the file name is already the
+		// release title the arr should parse (do not collapse its episode).
+		return strings.TrimSpace(base)
+	}
 	if episodeToken.MatchString(base) {
 		return strings.TrimSpace(episodeToken.ReplaceAllString(base, "${1}"))
 	}
-	if len(t.Files) > 1 && absoluteEpisode.MatchString(base) {
+	if absoluteEpisode.MatchString(base) {
 		return strings.TrimSpace(multiSpace.ReplaceAllString(absoluteEpisode.ReplaceAllString(base, " "), " "))
 	}
 	return strings.TrimSpace(base)
+}
+
+// isPack reports whether a torrent bundles more than one episode (a real season
+// pack) rather than a single episode. SeaDex stores a complete season that was
+// never packed as one torrent per episode - each a single-file release - so the
+// file count is what separates a pack from a lone episode. The file list ships
+// in the SeaDex record, so this needs no torrent fetch.
+func isPack(t *seadex.Torrent) bool {
+	return coveredEpisodes(t.Files) > 1
+}
+
+// coveredEpisodes counts the distinct episodes a torrent's files span, keying on
+// the SxxExx token first and the " - NN" absolute-episode form as a fallback.
+// Creditless extras (NCED/NCOP) and other sidecars carry neither token and are
+// not counted, so an episode bundled with its creditless files still reads as a
+// single episode.
+func coveredEpisodes(files []seadex.File) int {
+	seen := make(map[string]struct{})
+	for i := range files {
+		switch {
+		case episodeToken.MatchString(files[i].Name):
+			seen["e"+strings.ToUpper(episodeToken.FindString(files[i].Name))] = struct{}{}
+		case absoluteEpisode.MatchString(files[i].Name):
+			seen["a"+strings.TrimSpace(absoluteEpisode.FindString(files[i].Name))] = struct{}{}
+		}
+	}
+	return len(seen)
 }
 
 // representativeFile picks the file name a title is derived from: the first file

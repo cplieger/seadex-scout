@@ -144,12 +144,15 @@ func TestMarkAndDedupe(t *testing.T) {
 // Prowlarr Torznab endpoint, exercising the full path: SeaDex fetch -> curation
 // set -> upstream query -> parse -> match -> mark -> query result.
 func TestIndexerEndToEnd(t *testing.T) {
-	// Mock SeaDex: one entry with a best Nyaa torrent matching the sample feed
-	// (with a file name so the synthesized RSS feed has a real title to derive).
+	// Mock SeaDex: one entry with a best Nyaa torrent matching the sample feed.
+	// It is a multi-episode season pack (two episode files), so the synthesized
+	// RSS feed collapses its title to the season (a single-file torrent would be
+	// kept at episode granularity instead).
 	seadexBody := `{"items":[{"alID":123,"incomplete":false,"expand":{"trs":[` +
 		`{"tracker":"Nyaa","url":"https://nyaa.si/view/1234567",` +
 		`"infoHash":"ABCDEF1234567890abcdef1234567890abcdef12","isBest":true,"releaseGroup":"PMR",` +
-		`"files":[{"length":100,"name":"Some Anime - S01E01 (BD Remux 1080p) [PMR].mkv"}]}]}}],"totalPages":1}`
+		`"files":[{"length":100,"name":"Some Anime - S01E01 (BD Remux 1080p) [PMR].mkv"},` +
+		`{"length":100,"name":"Some Anime - S01E02 (BD Remux 1080p) [PMR].mkv"}]}]}}],"totalPages":1}`
 	seadexSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, seadexBody)
@@ -490,22 +493,33 @@ func TestFeedTitle(t *testing.T) {
 		want  string
 	}{
 		{
-			name:  "season pack collapses SxxExx to season",
-			files: []seadex.File{{Name: "Frieren Beyond Journey's End - S01E07 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR].mkv"}},
-			want:  "Frieren Beyond Journey's End - S01 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR]",
+			name: "season pack (multi-file) collapses SxxExx to the season",
+			files: []seadex.File{
+				{Name: "Frieren Beyond Journey's End - S01E07 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR].mkv"},
+				{Name: "Frieren Beyond Journey's End - S01E08 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR].mkv"},
+			},
+			want: "Frieren Beyond Journey's End - S01 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR]",
 		},
 		{
-			name:  "leading group with versioned episode",
-			files: []seadex.File{{Name: "[LostYears] Frieren Beyond Journey's End - S01E15v2 (WEB 1080p x265 10-bit AAC Opus) [3564C0AD].mkv"}},
-			want:  "[LostYears] Frieren Beyond Journey's End - S01 (WEB 1080p x265 10-bit AAC Opus) [3564C0AD]",
+			name:  "single-episode torrent keeps its SxxExx (complete-but-unpacked season)",
+			files: []seadex.File{{Name: "Scum.of.the.Brave.S01E05.A.Brave.Sensei.1080p.CR.WEB-DL.AAC2.0.H.264-VARYG.mkv"}},
+			want:  "Scum.of.the.Brave.S01E05.A.Brave.Sensei.1080p.CR.WEB-DL.AAC2.0.H.264-VARYG",
 		},
 		{
-			name: "creditless extras skipped for a real episode",
+			name: "versioned episode in a pack still collapses to the season",
+			files: []seadex.File{
+				{Name: "[LostYears] Frieren Beyond Journey's End - S01E15v2 (WEB 1080p x265 10-bit AAC Opus) [3564C0AD].mkv"},
+				{Name: "[LostYears] Frieren Beyond Journey's End - S01E16 (WEB 1080p x265 10-bit AAC Opus) [06E8039D].mkv"},
+			},
+			want: "[LostYears] Frieren Beyond Journey's End - S01 (WEB 1080p x265 10-bit AAC Opus) [3564C0AD]",
+		},
+		{
+			name: "creditless extras skipped; a lone episode keeps its SxxExx",
 			files: []seadex.File{
 				{Name: "NCED 01 (BD Remux 1080p AVC FLAC) [PMR].mkv"},
 				{Name: "Show Title - S02E01 (BD 1080p) [Grp].mkv"},
 			},
-			want: "Show Title - S02 (BD 1080p) [Grp]",
+			want: "Show Title - S02E01 (BD 1080p) [Grp]",
 		},
 		{
 			name:  "single movie file used verbatim",
@@ -519,6 +533,11 @@ func TestFeedTitle(t *testing.T) {
 				{Name: "[Grp] Some Show - 08 (1080p).mkv"},
 			},
 			want: "[Grp] Some Show (1080p)",
+		},
+		{
+			name:  "single absolute-numbered episode keeps its number",
+			files: []seadex.File{{Name: "[Grp] Some Show - 07 (1080p).mkv"}},
+			want:  "[Grp] Some Show - 07 (1080p)",
 		},
 		{
 			name:  "no files falls back to release group",
