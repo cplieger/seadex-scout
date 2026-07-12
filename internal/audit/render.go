@@ -25,11 +25,12 @@ const (
 
 // verdictDesc is the one-line explanation shown under each verdict section.
 var verdictDesc = map[Verdict]string{
-	VerdictUnlisted:   "You have a release SeaDex does not list as best or alt.",
-	VerdictAlt:        "You have a listed alt; SeaDex marks a different release best.",
-	VerdictUnverified: "Matched to a series but not resolved to a season, so no release validation was done.",
-	VerdictNoFile:     "The mapped season or movie has no file on disk.",
-	VerdictBest:       "You already have SeaDex's best release.",
+	VerdictUnlisted:    "You have a release SeaDex does not list as best or alt.",
+	VerdictAlt:         "You have a listed alt; SeaDex marks a different release best.",
+	VerdictUnverified:  "Files are present but no release group could be identified, so no comparison was possible.",
+	VerdictNoFile:      "The mapped season or movie has no file on disk.",
+	VerdictBest:        "You already have SeaDex's best release.",
+	VerdictNotOnSeaDex: "In your library and recognized as anime (Fribb-mapped) but SeaDex lists no entry, so there is no recommendation to compare against.",
 }
 
 // RenderJSON renders the report as indented JSON (the machine-ingestible copy).
@@ -42,8 +43,14 @@ func RenderJSON(r *Report) ([]byte, error) {
 func RenderMarkdown(r *Report) string {
 	var b strings.Builder
 	b.WriteString("# SeaDex alignment report\n\n")
-	fmt.Fprintf(&b, "Generated %s. %d anime with a SeaDex match.\n\n",
-		r.GeneratedAt.UTC().Format(time.RFC3339), len(r.Rows))
+	notOnSeaDex := r.Totals[string(VerdictNotOnSeaDex)]
+	matched := len(r.Rows) - notOnSeaDex
+	fmt.Fprintf(&b, "Generated %s. %d anime with a SeaDex match",
+		r.GeneratedAt.UTC().Format(time.RFC3339), matched)
+	if notOnSeaDex > 0 {
+		fmt.Fprintf(&b, "; %d more in your library that SeaDex does not list", notOnSeaDex)
+	}
+	b.WriteString(".\n\n")
 
 	b.WriteString("## Summary\n\n| Verdict | Count |\n| --- | --- |\n")
 	for _, v := range verdictOrder {
@@ -74,7 +81,7 @@ func RenderMarkdown(r *Report) string {
 func writeRow(b *strings.Builder, row *Row) {
 	fmt.Fprintf(b, "| %s | %s | %s | %s | %s |\n",
 		escapeCell(row.Title),
-		scopeLabel(row),
+		scopeCell(row),
 		escapeCell(orEmpty(strings.Join(row.CurrentGroups, ", "))),
 		escapeCell(orEmpty(strings.Join(displayBestGroups(row.Releases), ", "))),
 		links(row))
@@ -84,12 +91,13 @@ func writeRow(b *strings.Builder, row *Row) {
 // the report is queryable in Loki alongside the human-readable Markdown.
 func (r *Report) Log(log *slog.Logger) {
 	log.Info("report generated",
-		"anime", len(r.Rows),
+		"rows", len(r.Rows),
 		"have_best", r.Totals[string(VerdictBest)],
 		"have_alt", r.Totals[string(VerdictAlt)],
 		"have_unlisted", r.Totals[string(VerdictUnlisted)],
 		"no_file", r.Totals[string(VerdictNoFile)],
-		"unverified", r.Totals[string(VerdictUnverified)])
+		"unverified", r.Totals[string(VerdictUnverified)],
+		"not_on_seadex", r.Totals[string(VerdictNotOnSeaDex)])
 	for i := range r.Rows {
 		row := &r.Rows[i]
 		log.Info("report item",
@@ -98,6 +106,7 @@ func (r *Report) Log(log *slog.Logger) {
 			"arr", row.Arr,
 			"verdict", string(row.Verdict),
 			"scope", scopeLabel(row),
+			"approx", row.Approx,
 			"current_group", strings.Join(row.CurrentGroups, ","),
 			"seadex_best", strings.Join(displayBestGroups(row.Releases), ","),
 			"arr_url", row.ArrURL,
@@ -146,8 +155,18 @@ func writeAtomic(ctx context.Context, path string, data []byte, log *slog.Logger
 	return nil
 }
 
+// scopeCell renders the scope for the Markdown table, appending "(approx)" when
+// the comparison used a coarse multi-group bucket.
+func scopeCell(row *Row) string {
+	if row.Approx {
+		return scopeLabel(row) + " (approx)"
+	}
+	return scopeLabel(row)
+}
+
 // scopeLabel renders the comparison scope: "movie", "special", the TVDB season
-// ("S2"), or empty when the entry was not resolved to a season.
+// ("S2"), or "series" for a whole-series comparison (an absolute-numbered run, a
+// title-only match, or a not-on-SeaDex library item).
 func scopeLabel(row *Row) string {
 	switch {
 	case row.Arr == library.ArrRadarr:
@@ -157,7 +176,7 @@ func scopeLabel(row *Row) string {
 	case row.Season > 0:
 		return "S" + strconv.Itoa(row.Season)
 	default:
-		return emptyCell
+		return "series"
 	}
 }
 
