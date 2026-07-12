@@ -16,6 +16,9 @@ groups:
       # state save/load or a panicked run also log at ERROR. SeaDex, mapping,
       # and AniList outages log at WARN by design (the run stays healthy and
       # keeps prior findings), so this rule does not fire on an upstream blip.
+      # "An error was logged" is a one-time event, so route it to a
+      # `send_resolved: false` receiver — the 15m count window clearing means
+      # errors merely stopped, not a real recovery worth announcing as RESOLVED.
       - alert: SeadexScoutCycleError
         expr: |
           sum by (container) (count_over_time(
@@ -35,7 +38,9 @@ groups:
       # poll_interval, so its absence means the watcher is wedged and silent. The
       # for: 1h grace avoids a false fire on first boot, where no cycle has
       # completed yet and a cold first run (Fribb map download + AniList
-      # fallback) can take several minutes.
+      # fallback) can take several minutes. Unlike the other three (one-time
+      # events), this is a condition/deadman — keep it on a `send_resolved: true`
+      # receiver so you are told when the watcher recovers.
       - alert: SeadexScoutScanStalled
         expr: |
           absent_over_time({container="seadex-scout"} |= `cycle complete` [26h])
@@ -57,7 +62,11 @@ groups:
             scheduler's job result instead.
       # Informational, not a fault: SeaDex recommends a better release than the
       # one on disk — the app's activity signal; keep it at severity info or drop
-      # it, it is not page-worthy. Grouped by the finding's identifying labels so
+      # it, it is not page-worthy. It is a one-time activity event, so route it to
+      # a receiver with `send_resolved: false` — otherwise Alertmanager emits a
+      # phantom RESOLVED ~1h later when the count-over-time window clears, and a
+      # "new release available" event has nothing to resolve. Grouped by the
+      # finding's identifying labels so
       # each alert names one title with clickable links: the app emits arr_url,
       # nyaa_url, ab_url, season and seadex_tags for exactly this. The markdown
       # links render in Discord/Slack; simplify the annotation for a plain-text
@@ -84,7 +93,9 @@ groups:
             — {{ $labels.seadex_tags }}
       # Informational: report mode wrote a season-level alignment report. Report
       # mode is a one-shot (docker exec /seadex-scout report, or mode: report),
-      # so this fires once per run. If an external runner captures the child's
+      # so this fires once per run. Like the better-release alert, it is a
+      # one-time event — route it to a `send_resolved: false` receiver so it does
+      # not emit a phantom RESOLVED. If an external runner captures the child's
       # stdout under a different container/job label, point the selector there.
       - alert: SeadexScoutReportWritten
         expr: |
