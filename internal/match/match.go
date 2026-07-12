@@ -34,9 +34,12 @@ const (
 	SourceUnmapped Source = "unmapped"
 )
 
-// AniListClient is the AniList fallback surface the matcher needs.
+// AniListClient is the AniList fallback surface the matcher needs: a single
+// lookup for the per-entry path and a batched lookup the matcher uses to
+// pre-warm the memo for a whole cycle in a handful of requests.
 type AniListClient interface {
 	Fetch(ctx context.Context, aniListID int) (anilist.Media, error)
+	FetchMany(ctx context.Context, ids []int) (map[int]anilist.Media, error)
 }
 
 // Match is the result of linking one SeaDex entry.
@@ -102,12 +105,83 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 	if memo.Entries == nil {
 		memo.Entries = make(map[int]MemoEntry)
 	}
+	m.prefetch(ctx, entries, idx, lib, &memo)
 	cov := Coverage{Hits: make(map[string]int), Unmapped: make(map[string]int)}
 	matches := make([]Match, 0, len(entries))
 	for i := range entries {
 		matches = append(matches, m.matchEntry(ctx, &entries[i], lib, idx, &memo, &cov))
 	}
 	return Result{Coverage: cov, Memo: memo, Matches: matches}
+}
+
+// prefetch batch-fetches into the memo every AniList id the per-entry pass will
+// consult but has not cached, so a cold cycle costs a handful of batched AniList
+// requests instead of one request per id-less entry. It is best-effort: an id a
+// failed or partial batch does not return is left uncached and falls through to
+// matchEntry's single Fetch, so batching never changes the match result, only
+// the request count.
+func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *mapping.Index, lib *libIndex, memo *Memo) {
+	ids := pendingAniListIDs(entries, idx, lib, memo)
+	if len(ids) == 0 {
+		return
+	}
+	fetched, err := m.anilist.FetchMany(ctx, ids)
+	if err != nil {
+		m.log.Warn("anilist batch prefetch incomplete; remaining ids fall back to per-id fetch",
+			"requested", len(ids), "fetched", len(fetched), "error", err)
+	}
+	for _, id := range ids {
+		if media, ok := fetched[id]; ok {
+			memo.Entries[id] = MemoEntry{Titles: media.Titles, Format: media.Format, Year: media.Year}
+			continue
+		}
+		if err == nil {
+			// The batch completed without returning this id: AniList has no such
+			// media. Memoize the negative so it is not re-fetched this run.
+			memo.Entries[id] = MemoEntry{NotFound: true}
+		}
+		// err != nil and id not returned: leave uncached so matchEntry retries it
+		// via the single Fetch.
+	}
+}
+
+// pendingAniListIDs returns the distinct AniList ids the match will look up but
+// has not memoized: an entry whose Fribb record is id-less (no arr id, so the
+// title fallback runs) or that has no Fribb record at all. It deliberately
+// mirrors matchEntry's AniList trigger so the batch fetches exactly what the
+// per-entry pass needs - no more (which would re-introduce the not-in-library
+// lookups hasArrID removed) and no less.
+func pendingAniListIDs(entries []seadex.Entry, idx *mapping.Index, lib *libIndex, memo *Memo) []int {
+	seen := make(map[int]struct{})
+	var ids []int
+	add := func(alID int) {
+		if alID <= 0 {
+			return
+		}
+		if _, done := memo.Entries[alID]; done {
+			return
+		}
+		if _, dup := seen[alID]; dup {
+			return
+		}
+		seen[alID] = struct{}{}
+		ids = append(ids, alID)
+	}
+	for i := range entries {
+		e := &entries[i]
+		rec, ok := idx.Lookup(e.AniListID)
+		if !ok {
+			add(e.AniListID) // no Fribb record: matchEntry resolves via AniList
+			continue
+		}
+		if lib.findByID(&rec) != nil {
+			continue // resolved by id: no AniList lookup
+		}
+		if !hasArrID(&rec) {
+			add(e.AniListID) // id-less record: the title fallback needs AniList
+		}
+	}
+	return ids
 }
 
 // matchEntry links one entry: ID resolution first, AniList title fallback next.
