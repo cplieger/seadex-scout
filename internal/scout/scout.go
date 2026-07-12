@@ -144,7 +144,7 @@ func (s *Scout) Report(ctx context.Context) (audit.Report, error) {
 	}
 
 	result := s.deps.Matcher.Match(ctx, entries, &snap, idx, st.Memo)
-	rep := s.deps.Auditor.Audit(result.Matches)
+	rep := s.deps.Auditor.Audit(result.Matches, &snap, idx)
 	s.log.Info("report generated",
 		"seadex_entries", len(entries),
 		"library_items", len(snap.Items),

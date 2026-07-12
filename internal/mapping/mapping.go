@@ -95,6 +95,28 @@ func (i *Index) Len() int {
 	return len(i.byAniList)
 }
 
+// Records returns the indexed mapping records in unspecified order. It backs the
+// report's reverse (arr-ID) catalogue, used to tell a library item that is
+// recognized anime (present in the Fribb map) but absent from SeaDex apart from
+// arbitrary non-anime library entries.
+func (i *Index) Records() []Record {
+	if i == nil {
+		return nil
+	}
+	out := make([]Record, 0, len(i.byAniList))
+	for _, r := range i.byAniList {
+		out = append(out, r)
+	}
+	return out
+}
+
+// NewIndex builds an index over records already decoded elsewhere, keyed by
+// AniList ID. Production code obtains an Index from Loader.Load; this exists for
+// callers (and tests) that already hold a record set.
+func NewIndex(records []Record) *Index {
+	return buildIndex(records)
+}
+
 // buildIndex keys records by AniList ID. A later record with the same AniList
 // ID overwrites an earlier one (overrides are applied on top afterwards).
 func buildIndex(records []Record) *Index {
