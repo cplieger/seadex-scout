@@ -155,3 +155,34 @@ func TestAuditNotOnSeaDex(t *testing.T) {
 		t.Errorf("not_on_seadex total = %d, want 2", n)
 	}
 }
+
+// TestAuditNoGroupMatchesBest proves the NoGroup fallback end to end: a
+// group-less on-disk release compares equal to a group-less SeaDex best (both
+// resolve to NOGRP), yielding have_best rather than an unresolved row.
+func TestAuditNoGroupMatchesBest(t *testing.T) {
+	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"})
+	snap := &library.Snapshot{Items: []library.Item{{
+		Arr: library.ArrSonarr, ArrID: 9, Title: "Groupless", TvdbID: 900,
+		SeasonGroups: map[int][]string{1: {"nogrp"}}, Groups: []string{"nogrp"}, HasFile: true,
+	}}}
+	idx := mapping.NewIndex([]mapping.Record{{AniListID: 9, Type: "TV", TvdbID: 900}})
+	matches := []match.Match{{
+		Item:   &snap.Items[0],
+		Arr:    library.ArrSonarr,
+		Source: match.SourceID,
+		Entry:  seadex.Entry{AniListID: 9, Torrents: []seadex.Torrent{{Tracker: "Nyaa", IsBest: true}}},
+		Record: mapping.Record{Type: "TV", TvdbID: 900, SeasonTvdb: 1},
+	}}
+
+	rep := a.Audit(matches, snap, idx)
+
+	var got Verdict
+	for i := range rep.Rows {
+		if rep.Rows[i].AniListID == 9 {
+			got = rep.Rows[i].Verdict
+		}
+	}
+	if got != VerdictBest {
+		t.Errorf("group-less item vs group-less SeaDex best = %q, want %q", got, VerdictBest)
+	}
+}

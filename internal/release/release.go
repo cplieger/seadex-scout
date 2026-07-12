@@ -104,7 +104,7 @@ func Classify(in *Input) Release {
 	kind, reason := classifyKind(text, codec)
 
 	return Release{
-		Group:       strings.TrimSpace(in.Group),
+		Group:       groupOrNoGroup(in.Group),
 		Tracker:     strings.TrimSpace(in.Tracker),
 		Resolution:  reResolution.FindString(text),
 		Codec:       codec,
@@ -190,10 +190,31 @@ func IsAnimeBytes(tracker string) bool {
 	return animeBytesNames[strings.ToLower(strings.TrimSpace(tracker))]
 }
 
+// NoGroup is the placeholder release group for a release that specifies none.
+// SeaDex already tags some group-less releases with the literal "NOGRP", so
+// falling back to it makes a group-less library file, a group-less SeaDex
+// release, and a SeaDex "NOGRP" release all compare as the same group instead of
+// vanishing from the comparison.
+const NoGroup = "NOGRP"
+
+// groupOrNoGroup trims a release group, falling back to NoGroup when none is
+// given, so a group-less release is a first-class comparable value rather than
+// an empty string that gets skipped.
+func groupOrNoGroup(group string) string {
+	if g := strings.TrimSpace(group); g != "" {
+		return g
+	}
+	return NoGroup
+}
+
 // normalizeGroup lowercases and trims a release-group name for override and
-// comparison lookups (SeaDex and arr casing differ).
+// comparison lookups (SeaDex and arr casing differ). An empty group normalizes
+// to NoGroup so a missing group compares equal on both sides.
 func normalizeGroup(group string) string {
-	return strings.ToLower(strings.TrimSpace(group))
+	if g := strings.ToLower(strings.TrimSpace(group)); g != "" {
+		return g
+	}
+	return strings.ToLower(NoGroup)
 }
 
 // NormalizeGroup is the exported form of the group normalizer, so the compare
