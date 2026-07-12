@@ -118,13 +118,18 @@ func (m *Matcher) matchEntry(ctx context.Context, e *seadex.Entry, lib *libIndex
 		if item := lib.findByID(&rec); item != nil {
 			return Match{Item: item, Entry: *e, Record: rec, Arr: arr, Source: SourceID}
 		}
-		// Fribb knows this AniList entry but its record carries no usable arr id
-		// (a split AniList<->arr mapping, common for films/OVAs whose arr id sits
-		// on a separate id-less record). Fall through to the AniList title match,
-		// restricted to the record's arr, before treating it as unmapped — so the
-		// entry still links to the arr item it belongs to.
-		if item := m.titleMatch(ctx, e, memo, lib, arr); item != nil {
-			return Match{Item: item, Entry: *e, Record: rec, Arr: arr, Source: SourceTitle}
+		// The AniList title fallback is only for an id-less record: a split
+		// AniList<->arr mapping (common for films/OVAs whose arr id sits on a
+		// separate id-less record) leaves the title as the only link to the arr
+		// item. A record that HAS its arr id but missed findByID simply is not in
+		// the library, so skip the rate-limited AniList lookup (it would only
+		// confirm the miss) and treat the entry as unmapped directly. This keeps
+		// the fallback off the ~thousands of SeaDex entries the operator does not
+		// have, which otherwise dominate a cold cycle's AniList traffic.
+		if !hasArrID(&rec) {
+			if item := m.titleMatch(ctx, e, memo, lib, arr); item != nil {
+				return Match{Item: item, Entry: *e, Record: rec, Arr: arr, Source: SourceTitle}
+			}
 		}
 		return Match{Entry: *e, Record: rec, Arr: arr, Source: SourceUnmapped}
 	}
@@ -185,6 +190,18 @@ func recordArr(r *mapping.Record) string {
 		return library.ArrRadarr
 	}
 	return library.ArrSonarr
+}
+
+// hasArrID reports whether a record carries the arr id its type resolves by (a
+// movie by TMDB-movie/IMDb id, a series by TVDB id). A findByID miss on such a
+// record means the anime is not in the library, so the AniList title fallback
+// would be wasted; an id-less record (no such id) still needs the fallback to
+// link a film/OVA whose arr id sits on a separate record.
+func hasArrID(r *mapping.Record) bool {
+	if r.IsMovie() {
+		return len(r.TmdbMovies) > 0 || len(r.IMDbIDs) > 0
+	}
+	return r.TvdbID != 0
 }
 
 // formatArr routes an AniList format to its arr (MOVIE -> Radarr, else Sonarr).
