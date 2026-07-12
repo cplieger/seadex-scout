@@ -77,3 +77,38 @@ func TestMatchTitleFallbackOnIdlessRecord(t *testing.T) {
 		t.Errorf("source = %q, want %q", got.Source, SourceTitle)
 	}
 }
+
+// countingAniList records how many times Fetch is called (always returning
+// not-found), to prove which match paths consult AniList.
+type countingAniList struct{ calls int }
+
+func (c *countingAniList) Fetch(_ context.Context, _ int) (anilist.Media, error) {
+	c.calls++
+	return anilist.Media{}, anilist.ErrNotFound
+}
+
+// TestMatchNoTitleFallbackWhenRecordHasArrID verifies the AniList title fallback
+// is reserved for id-less records: a record that carries an arr id but whose
+// anime is not in the library resolves to unmapped WITHOUT an AniList call, so a
+// cold cycle does not query AniList for every SeaDex entry the operator lacks.
+func TestMatchNoTitleFallbackWhenRecordHasArrID(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 1, Title: "In Library", TvdbID: 111},
+	}}
+	// The record carries a TVDB id (555) that is absent from the library.
+	idx := mapping.NewIndex([]mapping.Record{{AniListID: 999, Type: "TV", TvdbID: 555}})
+	fake := &countingAniList{}
+	m := NewMatcher(fake, nil)
+
+	res := m.Match(context.Background(), []seadex.Entry{{AniListID: 999}}, snap, idx, Memo{})
+
+	if len(res.Matches) != 1 {
+		t.Fatalf("want 1 match, got %d", len(res.Matches))
+	}
+	if got := res.Matches[0]; got.InLibrary() || got.Source != SourceUnmapped {
+		t.Errorf("want an unmapped miss, got source=%q inLibrary=%v", got.Source, got.InLibrary())
+	}
+	if fake.calls != 0 {
+		t.Errorf("AniList queried %d times; a record with an arr id must not trigger the title fallback", fake.calls)
+	}
+}
