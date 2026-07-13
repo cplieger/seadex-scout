@@ -5,9 +5,11 @@
 //
 // Matching is season-level: a SeaDex entry (one AniList ID = one cour/movie/
 // special) is scoped to its TVDB season via the Fribb mapping and compared
-// against that season's on-disk release groups. An item matched to a series but
-// not resolvable to a season (no season mapping, or a title-only fallback) is
-// reported as an unverified likely-match with no release validation.
+// against that season's on-disk release groups. Specials without a positive
+// TVDB season compare against Sonarr's season-0 bucket, and seasonless
+// non-special series are compared conservatively across the real seasons on
+// disk. A row is unverified only when files are present but no comparable
+// release group can be identified.
 package audit
 
 import (
@@ -17,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cplieger/seadex-scout/internal/align"
+	"github.com/cplieger/seadex-scout/internal/classify"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
@@ -247,12 +251,12 @@ func (a *Auditor) assess(m *match.Match) Row {
 		Special:     m.Record.IsSpecial(),
 		Incomplete:  m.Entry.Incomplete,
 	}
-	if wholeSeries(m) {
+	if align.WholeSeries(m.Item, &m.Record) {
 		// Absolute-numbered run / title-only match: apply the single whole-series
 		// recommendation to each real season (season 0 excluded), conservatively.
 		row.Verdict, row.CurrentGroups, row.Approx = wholeSeriesVerdict(m.Item, best, alt)
 	} else {
-		current, hasFile, approx := scope(m)
+		current, hasFile, approx := align.Scope(m.Item, &m.Record)
 		row.CurrentGroups, row.Approx = current, approx
 		row.Verdict = verdict(hasFile, current, best, alt)
 	}
@@ -268,47 +272,13 @@ func verdict(hasFile bool, current, best, alt []string) Verdict {
 		return VerdictNoFile
 	case len(current) == 0:
 		return VerdictUnverified
-	case intersects(current, best):
+	case release.GroupsIntersect(current, best):
 		return VerdictBest
-	case intersects(current, alt):
+	case release.GroupsIntersect(current, alt):
 		return VerdictAlt
 	default:
 		return VerdictUnlisted
 	}
-}
-
-// specialSeason is the TVDB season number Sonarr files specials under.
-const specialSeason = 0
-
-// scope returns the on-disk release groups to compare for this entry, whether
-// the scoped unit has any file, and whether the comparison is approximate.
-//
-// It handles the three single-unit scopes: a movie (the movie's group), a
-// series with a positive Fribb TVDB season (that season's groups, exact), and a
-// special (the season-0 bucket Sonarr lumps specials into, approximate when it
-// holds more than one group). A Sonarr series with no Fribb season and not a
-// special is compared against the whole series by wholeSeriesVerdict, so assess
-// routes it there rather than here.
-func scope(m *match.Match) (groups []string, hasFile, approx bool) {
-	item := m.Item
-	switch {
-	case item.Arr == library.ArrRadarr:
-		return item.Groups, item.HasFile, false
-	case m.Record.SeasonTvdb > 0:
-		g, ok := item.SeasonGroups[m.Record.SeasonTvdb]
-		return g, ok && len(g) > 0, false
-	default: // a special: compare against the season-0 specials bucket
-		g, ok := item.SeasonGroups[specialSeason]
-		return g, ok && len(g) > 0, ok && len(g) > 1
-	}
-}
-
-// wholeSeries reports whether the match must be compared against the whole
-// series: a Sonarr item with no Fribb TVDB season and not a special (an
-// absolute-numbered run like One Piece, or a title-only match). SeaDex carries
-// one whole-series recommendation for these with no per-season mapping.
-func wholeSeries(m *match.Match) bool {
-	return m.Item.Arr == library.ArrSonarr && m.Record.SeasonTvdb <= 0 && !m.Record.IsSpecial()
 }
 
 // wholeSeriesVerdict applies the entry's single recommendation to each real
@@ -319,42 +289,18 @@ func wholeSeries(m *match.Match) bool {
 // groups for display and marks the comparison approximate when more than one
 // season is compared. With no real season on disk it is no_file.
 func wholeSeriesVerdict(item *library.Item, best, alt []string) (Verdict, []string, bool) {
-	var union []string
-	seen := make(map[string]struct{})
-	seasons := 0
-	var anyAlt, anyUnlisted bool
-	for season, groups := range item.SeasonGroups {
-		if season == specialSeason || len(groups) == 0 {
-			continue
-		}
-		seasons++
-		for _, g := range groups {
-			if _, dup := seen[g]; !dup {
-				seen[g] = struct{}{}
-				union = append(union, g)
-			}
-		}
-		switch {
-		case intersects(groups, best):
-			// this season carries a best group
-		case intersects(groups, alt):
-			anyAlt = true
-		default:
-			anyUnlisted = true
-		}
-	}
-	if seasons == 0 {
+	s := align.SummarizeWholeSeries(item, best, alt)
+	if s.Seasons == 0 {
 		return VerdictNoFile, nil, false
 	}
-	sort.Strings(union)
-	approx := seasons > 1
+	approx := s.Seasons > 1
 	switch {
-	case anyUnlisted:
-		return VerdictUnlisted, union, approx
-	case anyAlt:
-		return VerdictAlt, union, approx
+	case s.AnyUnlisted:
+		return VerdictUnlisted, s.Groups, approx
+	case s.AnyAlt:
+		return VerdictAlt, s.Groups, approx
 	default:
-		return VerdictBest, union, approx
+		return VerdictBest, s.Groups, approx
 	}
 }
 
@@ -370,13 +316,7 @@ func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 		if !a.includeAnimeBytes && release.IsAnimeBytes(t.Tracker) {
 			continue
 		}
-		rel := release.Classify(&release.Input{
-			Names:     torrentFileNames(t.Files),
-			Notes:     entry.Notes,
-			Group:     t.ReleaseGroup,
-			Tracker:   t.Tracker,
-			DualAudio: t.DualAudio,
-		})
+		rel := classify.Torrent(entry, t)
 		out = append(out, Release{
 			Tracker: t.Tracker,
 			Group:   rel.Group,
@@ -420,20 +360,6 @@ func addUnique(seen map[string]struct{}, out *[]string, g string) {
 	*out = append(*out, g)
 }
 
-// intersects reports whether any of a is present in b (both normalized).
-func intersects(a, b []string) bool {
-	set := make(map[string]struct{}, len(b))
-	for _, g := range b {
-		set[release.NormalizeGroup(g)] = struct{}{}
-	}
-	for _, g := range a {
-		if _, ok := set[release.NormalizeGroup(g)]; ok {
-			return true
-		}
-	}
-	return false
-}
-
 // sortRows orders rows by verdict actionability, then title.
 func sortRows(rows []Row) {
 	rank := make(map[Verdict]int, len(verdictOrder))
@@ -446,15 +372,4 @@ func sortRows(rows []Row) {
 		}
 		return strings.ToLower(rows[i].Title) < strings.ToLower(rows[j].Title)
 	})
-}
-
-// torrentFileNames returns the non-empty file names of a torrent.
-func torrentFileNames(files []seadex.File) []string {
-	names := make([]string, 0, len(files))
-	for i := range files {
-		if files[i].Name != "" {
-			names = append(names, files[i].Name)
-		}
-	}
-	return names
 }

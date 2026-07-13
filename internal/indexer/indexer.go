@@ -40,25 +40,27 @@ package indexer
 
 import (
 	"context"
+	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/cplieger/seadex-scout/internal/mapping"
-	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/atomicfile/v2"
+	"github.com/cplieger/webhttp"
 )
 
 const (
-	// refreshInterval is how often the SeaDex curation set is re-fetched.
-	refreshInterval = 3 * time.Hour
 	// maxItems caps a rendered feed as a safety bound.
 	maxItems = 1000
 	// dvfBest / dvfAlt are the download-volume-factor markers: 0.75 -> Freeleech25
@@ -68,6 +70,8 @@ const (
 
 	shutdownGrace     = 10 * time.Second
 	readHeaderTimeout = 15 * time.Second
+	readTimeout       = 30 * time.Second
+	idleTimeout       = 120 * time.Second
 	// listenAddr is the fixed LAN bind address for the Torznab feed server. The
 	// port is an internal detail (the container/compose port mapping publishes
 	// it), not an operator-tuned setting, so it is hardcoded rather than a key.
@@ -93,17 +97,14 @@ type Config struct {
 	ABPasskey      string
 }
 
-// Deps are the assembled clients the indexer needs: SeaDex for the curation set,
-// an HTTP client for the Prowlarr Torznab endpoints, and the Fribb mapping
-// loader used to tag each synthesized RSS item's category (movie vs series) by
-// the entry's real media type, since a file name cannot tell a film from a
-// single-file OVA/special. Mapping may be nil (every item is then treated as
-// anime/series, the safe default that never mis-routes a special to Radarr).
+// Deps are the clients the indexer server needs: an HTTP client for the Prowlarr
+// per-indexer Torznab endpoints a search proxies. The curation set and the
+// synthesized RSS feeds are not built here - the compare cycle builds and
+// persists them (see FeedWriter) and the server reads that snapshot - so the
+// server needs no SeaDex or Fribb client of its own.
 type Deps struct {
-	SeaDex  *seadex.Client
-	HTTP    *http.Client
-	Mapping *mapping.Loader
-	Logger  *slog.Logger
+	HTTP   *http.Client
+	Logger *slog.Logger
 }
 
 // curation is the set of SeaDex-tracked releases, keyed by info hash and by
@@ -132,34 +133,35 @@ func (c *curation) lookup(hash, infoURL, guid string) (isBest, matched bool) {
 }
 
 // Indexer serves searches by proxying Prowlarr filtered to SeaDex's curation,
-// and periodic RSS checks from the two synthesized per-tracker feeds. set (the
-// search match index), nyaaFeed, and abFeed are rebuilt together on refresh and
-// read under mu.
+// and periodic RSS checks from the two synthesized per-tracker feeds. Both come
+// from snap, the materialized feed the compare cycle builds and persists (see
+// FeedWriter); the server loads it on start and reloads it when the file changes
+// (a cycle - in this process or the `poll` subcommand - rewrote it), reading it
+// under mu. The server never fetches SeaDex or Fribb itself.
 type Indexer struct {
-	set       curation
-	seadex    *seadex.Client
-	mapping   *mapping.Loader
-	mapCache  mapping.Cache
-	log       *slog.Logger
 	cfg       Config
+	snap      snapshot
+	log       *slog.Logger
+	path      string
+	snapMod   time.Time
 	upstreams []*upstream
-	nyaaFeed  []Item
-	abFeed    []Item
 	mu        sync.RWMutex
 }
 
-// New builds an Indexer from cfg and deps, wiring one upstream per configured
-// Prowlarr Torznab URL.
-func New(cfg *Config, deps Deps) *Indexer {
+// New builds the Torznab feed server from cfg and deps, wiring one upstream per
+// configured Prowlarr Torznab URL. snapshotPath is where the compare cycle
+// persists the materialized feed (config.DefaultIndexerFeedPath in production);
+// it is loaded now so a restart serves the last feed immediately, and reloaded
+// on change while running. An empty path serves an empty feed (used in tests).
+func New(cfg *Config, deps Deps, snapshotPath string) *Indexer {
 	log := deps.Logger
 	if log == nil {
 		log = slog.Default()
 	}
 	ix := &Indexer{
-		seadex:  deps.SeaDex,
-		mapping: deps.Mapping,
-		log:     log,
-		cfg:     *cfg,
+		log:  log,
+		path: snapshotPath,
+		cfg:  *cfg,
 	}
 	// One upstream per configured Prowlarr Torznab URL. An empty URL means that
 	// tracker is off: it is simply not wired, so the feed never queries it. (The
@@ -174,137 +176,119 @@ func New(cfg *Config, deps Deps) *Indexer {
 			http: deps.HTTP, log: log, name: upstreamAB, feed: cfg.ABTorznabURL, apiKey: cfg.ProwlarrAPIKey,
 		})
 	}
+	// Warm the feed from the last persisted snapshot so a restart serves
+	// immediately rather than empty until the next cycle.
+	ix.reload(context.Background())
 	return ix
 }
 
-// Run starts the background curation refresh and serves the Torznab endpoint
-// until ctx is cancelled. The endpoint listens immediately (so an arr's caps
-// Test succeeds right away) while the first SeaDex fetch warms up; the feed is
-// empty until the curation set is populated. It owns no health marker - the
-// daemon that runs it does - so a feed failure never flips container health.
+// Run serves the Torznab endpoint from the persisted feed snapshot until ctx is
+// cancelled. The endpoint listens immediately (so an arr's caps Test succeeds
+// right away); it serves whatever feed the last compare cycle persisted (empty
+// until the first cycle on a fresh install) and reloads the snapshot when a
+// cycle rewrites it. It owns no health marker - the daemon that runs it does -
+// so a feed failure never flips container health.
 func (ix *Indexer) Run(ctx context.Context) error {
-	go ix.refreshLoop(ctx)
-
-	srv := &http.Server{
-		Addr:              listenAddr,
-		Handler:           ix.handler(),
-		ReadHeaderTimeout: readHeaderTimeout,
+	// Bind up front so a port-in-use error surfaces synchronously here and is
+	// returned to the daemon's startIndexer, which logs it. The feed owns no
+	// health marker (the compare loop does), so a bind failure never flips
+	// container health.
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", listenAddr)
+	if err != nil {
+		return fmt.Errorf("indexer listen on %s: %w", listenAddr, err)
 	}
-	go func() {
-		<-ctx.Done()
-		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownGrace)
-		defer cancel()
-		_ = srv.Shutdown(sctx)
-	}()
 
+	// The HTTP surface rides the shared webhttp plumbing (server bootstrap +
+	// graceful shutdown). Recoverer turns a handler panic into a logged 500
+	// rendered as a Torznab <error> via torznabErrorResponder - not net/http's
+	// bare connection close, and not webhttp's default JSON envelope, which is the
+	// wrong wire shape for this XML endpoint. WriteTimeout stays unset (NewServer's
+	// streaming-safe default): a search proxies an upstream Prowlarr query of
+	// unbounded latency, so a fixed write deadline would truncate a slow search
+	// mid-response.
+	handler := webhttp.Chain(ix.handler(),
+		webhttp.Recoverer(
+			webhttp.WithRecoverLogger(ix.log),
+			webhttp.WithRecoverResponder(torznabErrorResponder),
+		),
+	)
+	srv := webhttp.NewServer(handler,
+		webhttp.WithReadHeaderTimeout(readHeaderTimeout),
+		webhttp.WithReadTimeout(readTimeout),
+		webhttp.WithIdleTimeout(idleTimeout),
+	)
+
+	// Defense-in-depth, normally unreachable: config.Validate (validateIndexer)
+	// rejects a configured feed with an empty feed_api_key, and startIndexer only
+	// runs the feed when a Torznab URL is set, so APIKey is non-empty here on the
+	// daemon path. It still guards a direct indexer.New+Run (e.g. a test) from
+	// silently serving an unauthenticated feed that can leak ab_passkey.
+	if ix.cfg.APIKey == "" {
+		ix.log.Warn("indexer feed served without an API key: the Torznab feed is UNAUTHENTICATED to anyone who can reach the port; the AnimeBytes RSS feed embeds ab_passkey in its download links. Set indexer.feed_api_key and keep the port LAN-only.",
+			"ab_passkey_set", ix.cfg.ABPasskey != "")
+	}
 	ix.log.Info("seadex-scout indexer listening",
 		"addr", listenAddr, "apikey_set", ix.cfg.APIKey != "", "upstreams", len(ix.upstreams))
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+
+	if err := webhttp.Run(ctx, srv, ln, nil, webhttp.WithShutdownGrace(shutdownGrace)); err != nil {
 		return fmt.Errorf("indexer server: %w", err)
 	}
 	ix.log.Info("indexer shutdown complete", "cause", context.Cause(ctx))
 	return nil
 }
 
-// Refresh fetches the SeaDex catalogue and rebuilds both what searches match
-// against (the curation set: info hashes and tracker keys of every tracked
-// release, and whether each is best) and what periodic RSS checks serve (the two
-// synthesized per-tracker feeds). The Fribb mapping is loaded alongside to tag
-// each synthesized item's category by the entry's real media type (movie vs
-// series). A SeaDex fetch failure returns the error and leaves the previous set
-// and feeds in place; a mapping failure only degrades categorization (items fall
-// back to anime/series), never the whole refresh.
-func (ix *Indexer) Refresh(ctx context.Context) error {
-	entries, err := ix.seadex.FetchEntries(ctx)
-	if err != nil {
-		return fmt.Errorf("fetch seadex entries: %w", err)
-	}
-	set := curation{byHash: make(map[string]bool), byKey: make(map[string]bool)}
-	torrents := 0
-	for i := range entries {
-		for j := range entries[i].Torrents {
-			t := &entries[i].Torrents[j]
-			torrents++
-			if h := strings.ToLower(strings.TrimSpace(t.InfoHash)); h != "" {
-				set.byHash[h] = set.byHash[h] || t.IsBest
-			}
-			if k := trackerKey(t.Tracker, t.URL); k != "" {
-				set.byKey[k] = set.byKey[k] || t.IsBest
-			}
-		}
-	}
-	idx := ix.loadMapping(ctx)
-	nyaaFeed, abFeed, abSkippedNoPasskey := buildFeeds(entries, ix.cfg.ABPasskey, movieClassifier(idx.Lookup))
+// torznabErrorResponder is the webhttp Recoverer ErrorResponder for the Torznab
+// feed: it renders a recovered panic's 500 as a Torznab <error> document on the
+// XML content type the arrs expect, in place of webhttp's default JSON envelope.
+// Recoverer already logged the panic and only calls this when the response has
+// not been committed; this just writes the body.
+func torznabErrorResponder(w http.ResponseWriter, _ *http.Request, status int, _, msg string) {
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, renderError(errCodeUnknown, msg))
+}
 
+// reload refreshes the served feed from the persisted snapshot when the file on
+// disk is newer than the loaded copy (or nothing is loaded yet). A compare cycle
+// - in this process (the daemon loop) or another (the `poll` subcommand) -
+// rewrites the snapshot atomically, so a cheap mtime check per request picks up
+// a new feed without the server ever fetching SeaDex itself. A missing file
+// leaves the current (possibly empty) feed in place; a malformed or unreadable
+// file is logged and ignored, so a bad write never blanks a live feed.
+func (ix *Indexer) reload(ctx context.Context) {
+	if ix.path == "" {
+		return
+	}
+	info, err := os.Stat(ix.path)
+	if err != nil {
+		return
+	}
+	ix.mu.RLock()
+	loaded := ix.snapMod
+	ix.mu.RUnlock()
+	if !info.ModTime().After(loaded) {
+		return
+	}
+	data, err := atomicfile.ReadBounded(ctx, ix.path, maxFeedBytes)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			ix.log.Warn("indexer feed snapshot unreadable; keeping current feed", "path", ix.path, "error", err)
+		}
+		return
+	}
+	var snap snapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		ix.log.Warn("indexer feed snapshot malformed; keeping current feed", "path", ix.path, "error", err)
+		return
+	}
 	ix.mu.Lock()
-	ix.set = set
-	ix.nyaaFeed = nyaaFeed
-	ix.abFeed = abFeed
+	ix.snap = snap
+	ix.snapMod = info.ModTime()
 	ix.mu.Unlock()
-
-	ix.log.Info("indexer curation set refreshed",
-		"entries", len(entries), "torrents", torrents, "hashes", len(set.byHash), "keys", len(set.byKey),
-		"nyaa_feed", len(nyaaFeed), "ab_feed", len(abFeed))
-	if abSkippedNoPasskey > 0 {
-		ix.log.Warn("ab RSS feed empty of grabbable links: set indexer.ab_passkey to serve AnimeBytes releases",
-			"ab_releases_skipped", abSkippedNoPasskey)
-	}
-	return nil
-}
-
-// loadMapping returns the Fribb mapping index used to categorize synthesized
-// feed items, reusing the in-memory cache across refreshes (a conditional GET on
-// the slow Fribb cadence). It is safe to call with no mapping configured (nil
-// loader -> nil index -> every item categorized as anime/series). A load failure
-// is logged and the (stale or empty) index is used, so categorization degrades
-// without failing the refresh. Called only from the single refresh goroutine.
-func (ix *Indexer) loadMapping(ctx context.Context) *mapping.Index {
-	if ix.mapping == nil {
-		return nil
-	}
-	cache, idx, err := ix.mapping.Load(ctx, &ix.mapCache)
-	ix.mapCache = cache
-	if err != nil {
-		ix.log.Warn("indexer mapping load degraded; categorizing with available data", "error", err)
-	}
-	return idx
-}
-
-// movieClassifier returns the category function buildFeeds stamps onto each
-// entry's items. It routes a Fribb-typed movie to the Movies category (Radarr)
-// and everything else - TV, OVA, ONA, SPECIAL, or an unmapped entry - to Anime
-// (Sonarr). Defaulting the unknown/unmapped case to anime is deliberate: a
-// single-file OVA/special looks just like a movie by file name, so the failure
-// that matters (a special mis-routed to Radarr, where it can never match) is
-// avoided at the cost of a rare unmapped film not surfacing on Radarr's RSS. The
-// lookup is mapping.Index.Lookup, which is nil-safe.
-func movieClassifier(lookup func(alID int) (mapping.Record, bool)) func(alID int) []int {
-	return func(alID int) []int {
-		if rec, ok := lookup(alID); ok && rec.IsMovie() {
-			return []int{catMovies}
-		}
-		return []int{catAnime}
-	}
-}
-
-// refreshLoop refreshes the curation set once immediately, then on
-// refreshInterval until ctx is done.
-func (ix *Indexer) refreshLoop(ctx context.Context) {
-	if err := ix.Refresh(ctx); err != nil {
-		ix.log.Warn("curation refresh failed; keeping previous set", "error", err)
-	}
-	t := time.NewTicker(refreshInterval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			if err := ix.Refresh(ctx); err != nil {
-				ix.log.Warn("curation refresh failed; keeping previous set", "error", err)
-			}
-		}
-	}
+	ix.log.Debug("indexer feed snapshot loaded",
+		"path", ix.path, "hashes", len(snap.ByHash), "keys", len(snap.ByKey),
+		"nyaa_feed", len(snap.NyaaFeed), "ab_feed", len(snap.ABFeed))
 }
 
 // handler builds the HTTP mux (a single Torznab endpoint).
@@ -321,7 +305,7 @@ func (ix *Indexer) handler() http.Handler {
 // curation.
 func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	if ix.cfg.APIKey != "" && q.Get("apikey") != ix.cfg.APIKey {
+	if ix.cfg.APIKey != "" && subtle.ConstantTimeCompare([]byte(q.Get("apikey")), []byte(ix.cfg.APIKey)) != 1 {
 		ix.log.Info("indexer request rejected", "reason", "bad apikey", "path", r.URL.Path)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -402,13 +386,16 @@ type queryStats struct {
 // tracker): Sonarr searches an anime season episode by episode AND as a whole
 // season (see NewznabRequestGenerator), so answering only the season search
 // still delivers the pack while sparing the trackers a query per episode.
-func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]Item, queryStats) {
+func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]item, queryStats) {
 	if !servesQuery(q) {
 		return nil, queryStats{}
 	}
+	// Pick up a newer feed snapshot a cycle may have written (this process's
+	// daemon loop, or the `poll` subcommand in another process) before serving.
+	ix.reload(ctx)
 
 	var (
-		items []Item
+		items []item
 		stats queryStats
 	)
 	if strings.TrimSpace(q.Get("q")) == "" {
@@ -417,7 +404,7 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]Ite
 	} else {
 		raw := ix.fetchRaw(ctx, upstreamParams(q), scope)
 		ix.mu.RLock()
-		set := ix.set
+		set := curation{byHash: ix.snap.ByHash, byKey: ix.snap.ByKey}
 		ix.mu.RUnlock()
 		items = markAndDedupe(raw, &set)
 		stats = queryStats{answered: true, upstream: len(raw), curated: len(items)}
@@ -431,17 +418,17 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]Ite
 }
 
 // feedFor returns the synthesized RSS feed for a tracker scope (nyaa or ab),
-// read under the lock since Refresh replaces the slices in the background. The
-// returned slice is read-only for callers (query only sub-slices/filters a copy
-// of the header via filterByCats, which allocates).
-func (ix *Indexer) feedFor(scope string) []Item {
+// read under the lock since reload replaces the snapshot when a cycle rewrites
+// it. The returned slice is read-only for callers (query only sub-slices/filters
+// a copy of the header via filterByCats, which allocates).
+func (ix *Indexer) feedFor(scope string) []item {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 	switch scope {
 	case upstreamNyaa:
-		return ix.nyaaFeed
+		return ix.snap.NyaaFeed
 	case upstreamAB:
-		return ix.abFeed
+		return ix.snap.ABFeed
 	default:
 		return nil
 	}
@@ -450,7 +437,7 @@ func (ix *Indexer) feedFor(scope string) []Item {
 // fetchRaw queries the scope's upstream(s) in parallel and returns the raw
 // results, before any curation filtering. Returns nil when no upstream is
 // configured for the scope.
-func (ix *Indexer) fetchRaw(ctx context.Context, params url.Values, scope string) []Item {
+func (ix *Indexer) fetchRaw(ctx context.Context, params url.Values, scope string) []item {
 	ix.mu.RLock()
 	ups := upstreamsForScope(ix.upstreams, scope)
 	ix.mu.RUnlock()
@@ -462,7 +449,7 @@ func (ix *Indexer) fetchRaw(ctx context.Context, params url.Values, scope string
 	var (
 		wg  sync.WaitGroup
 		mu  sync.Mutex
-		raw []Item
+		raw []item
 	)
 	for _, u := range ups {
 		wg.Add(1)
@@ -470,6 +457,12 @@ func (ix *Indexer) fetchRaw(ctx context.Context, params url.Values, scope string
 			defer wg.Done()
 			items, err := u.search(ctx, params)
 			if err != nil {
+				if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, ctx.Err())) {
+					// Caller (the arr) went away or its request deadline
+					// fired; not an upstream fault. A Prowlarr HTTP
+					// client timeout leaves ctx.Err() nil and should warn.
+					return
+				}
 				ix.log.Warn("upstream query failed", "upstream", u.name, "error", err)
 				return
 			}
@@ -485,9 +478,9 @@ func (ix *Indexer) fetchRaw(ctx context.Context, params url.Values, scope string
 
 // markAndDedupe keeps the curated releases, stamps each with the best/alt
 // marker, and drops duplicates (same release from two upstreams) by guid.
-func markAndDedupe(raw []Item, set *curation) []Item {
+func markAndDedupe(raw []item, set *curation) []item {
 	seen := make(map[string]struct{}, len(raw))
-	out := make([]Item, 0, len(raw))
+	out := make([]item, 0, len(raw))
 	for i := range raw {
 		it := raw[i]
 		isBest, matched := set.lookup(it.InfoHash, it.InfoURL, it.GUID)
@@ -651,11 +644,11 @@ var trailingEpisode = regexp.MustCompile(`\s+\d{2,4}$`)
 // filterByCats keeps items whose category is requested (an anime item satisfies
 // a request for its TV parent). An empty request keeps everything; an item with
 // no categories is kept (Prowlarr already applied the forwarded cat filter).
-func filterByCats(items []Item, cats map[int]bool) []Item {
+func filterByCats(items []item, cats map[int]bool) []item {
 	if len(cats) == 0 {
 		return items
 	}
-	out := make([]Item, 0, len(items))
+	out := make([]item, 0, len(items))
 	for i := range items {
 		if categoryMatch(items[i].Categories, cats) {
 			out = append(out, items[i])

@@ -65,6 +65,10 @@ Once on start and then every `poll_interval`, seadex-scout runs one cycle:
 4. Compares the surviving recommendation against what you have and, when SeaDex
    has something better, emits a `warn` log line.
 
+When the [Torznab feed](#indexer-torznab-feed) is configured, the same cycle also
+rebuilds it from that one SeaDex fetch, so a finding and what the arrs can grab
+from the feed always reflect the same refresh.
+
 ## Run modes
 
 The `mode` setting (or a subcommand) picks the run mode:
@@ -84,18 +88,21 @@ The `mode` setting (or a subcommand) picks the run mode:
 
 The daemon follows the standard `*_INTERVAL` scheduling shape:
 
-- **Built-in** (default): `poll_interval` is a Go duration (`12h`, `6h`, `30m`); a
-  cycle runs on start, then every interval.
+- **Built-in** (default): `poll_interval` is a Go duration (`3h` default, `6h`,
+  `30m`); a cycle runs on start, then every interval. It is the single cadence for
+  both the alert loop and the Torznab feed.
 - **External / resident-idle**: set `poll_interval: off` (or `disabled` / `0`).
   There is no internal timer; the container idles healthy and an external
   scheduler drives each cycle via the `poll` subcommand — which runs one cycle,
-  updates the health marker, and exits `0`/`1`. With
+  updates the health marker, and exits `0`/`1`. The Torznab feed, when configured,
+  refreshes on that same `poll` (it is served from the last cycle's snapshot, so it
+  is empty until the first `poll` runs). With
   [Ofelia](https://github.com/mcuadros/ofelia), label the service:
 
   ```yaml
       labels:
         ofelia.enabled: "true"
-        ofelia.job-exec.seadex-poll.schedule: "@every 12h"
+        ofelia.job-exec.seadex-poll.schedule: "@every 3h"
         ofelia.job-exec.seadex-poll.command: "/seadex-scout poll"
   ```
 
@@ -114,8 +121,13 @@ groups. Each row gets a verdict:
 - `have_alt`: you have a listed alt; SeaDex marks a different release best.
 - `have_unlisted`: you have a release SeaDex does not list.
 - `no_file`: the mapped season or movie has no file on disk.
-- `unverified`: matched to a series but not resolvable to a season (a likely
-  match, no release validation).
+- `unverified`: files are present but no release group could be identified (rare;
+  the specials and absolute-numbered runs that once landed here now resolve to a
+  season).
+
+After the per-match verdicts, a trailing **`not_on_seadex`** section lists library
+items recognized as anime (through the Fribb catalogue) that SeaDex does not list
+at all, so you can see which of your titles SeaDex has not curated.
 
 Every row carries three kinds of link: the Sonarr/Radarr deep-link to the item
 (Sonarr via its title slug, Radarr via its TMDB id), the SeaDex entry
@@ -293,8 +305,8 @@ seadex-scout bridges them:
 
 - **ID mapping.** The Fribb `anime-list-mini.json` dataset maps `anilist_id` to
   `type` (TV vs movie), `tvdb_id`, `themoviedb_id`, and `imdb_id`. It is fetched
-  with a conditional GET on a slow cadence and cached, so an unchanged multi-MB
-  file is never re-downloaded. The `type` decides which arr and which ID field
+  with a conditional GET each cycle and cached, so an unchanged multi-MB file is a
+  cheap `304` and is never re-downloaded. The `type` decides which arr and which ID field
   to use.
 - **Overrides.** Drop a `/config/overrides.json` (a JSON array of records keyed
   by `anilist_id`) beside the config to pin the entries Fribb misses; it is
@@ -366,7 +378,7 @@ radarr:
   api_key: ""
 
 mode: "daemon"                    # daemon (scheduled) | report (one-shot, exit)
-poll_interval: "12h"              # Go duration; off/disabled/0 = external trigger via `poll`
+poll_interval: "3h"               # cadence for BOTH alerts + Torznab feed; off/disabled/0 = external trigger via `poll`
 
 animebytes: false                 # true if you have an AnimeBytes account: adds AB releases + links
 
@@ -387,6 +399,7 @@ indexer:                          # the daemon serves the feed whenever a Torzna
   nyaa_torznab_url: ""            # Prowlarr Nyaa Torznab URL, e.g. http://prowlarr:9696/1/api ("" = off)
   ab_torznab_url: ""              # Prowlarr AnimeBytes Torznab URL ("" = off)
   prowlarr_api_key: ""            # Prowlarr API key; secret, never logged
+  ab_passkey: ""                  # AnimeBytes passkey for the AB RSS feed download links ("" = AB RSS off; Nyaa needs none)
 
 log:
   level: "info"                   # debug | info | warn | error
@@ -444,7 +457,7 @@ deliver through your Alertmanager like any Prometheus metric alert. They cover:
 
 Thresholds and the `severity` labels are starting points. Adjust the `container`
 selector (or `job` / `service`, depending on your log collector) to your
-deployment and the stall window to your `poll_interval` (default 12h). In
+deployment and the stall window to your `poll_interval` (default 3h). In
 resident-idle (`poll_interval: off`) or report mode each cycle runs via a
 `docker exec` child (the `poll` / `report` subcommand), so its logs go to the
 trigger rather than the container's log stream and the log rules cannot fire;

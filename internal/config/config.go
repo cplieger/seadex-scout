@@ -53,6 +53,13 @@ const (
 	DefaultMappingOverrides = "/config/overrides.json"
 	// DefaultStatePath is the atomic JSON cache/state file.
 	DefaultStatePath = "/config/state.json"
+	// DefaultIndexerFeedPath is the atomic JSON file the compare cycle writes the
+	// indexer's materialized feed to (the search curation set plus the two
+	// synthesized per-tracker RSS feeds) and the indexer HTTP server reads. One
+	// data engine (the cycle) produces both the findings and this feed, and
+	// persisting it lets a cycle run by the `poll` subcommand refresh a resident
+	// daemon's feed across the process boundary.
+	DefaultIndexerFeedPath = "/config/feed.json"
 	// DefaultReportDir is the directory report mode writes timestamped report
 	// pairs into (report-<UTC timestamp>.md / .json).
 	DefaultReportDir = "/config/reports"
@@ -62,12 +69,22 @@ const (
 	// RunModeReport is the one-shot audit: scan once, write the report, exit.
 	RunModeReport = "report"
 
-	// DefaultPollInterval is the gap between compare cycles (also runs on start).
-	DefaultPollInterval = 12 * time.Hour
+	// DefaultPollInterval is the gap between cycles (also runs on start). One
+	// cycle drives both halves: the compare/findings pass and, when the Torznab
+	// feed is configured, its curation set + RSS feed rebuild - so a notification
+	// and what the arrs see in the feed come from the same fetch.
+	DefaultPollInterval = 3 * time.Hour
 	// DefaultSeaDexPageDelay is the politeness delay between SeaDex pages.
 	DefaultSeaDexPageDelay = 2 * time.Second
-	// DefaultMappingRefresh is the conditional re-download cadence for the map.
-	DefaultMappingRefresh = 24 * time.Hour
+	// DefaultMappingRefresh is the reuse-if-fresh window for the Fribb map. 0
+	// revalidates every cycle: each cycle issues a conditional GET
+	// (ETag/If-Modified-Since), so an unchanged map (the common case, since Fribb
+	// updates ~weekly) is a cheap 304 with no re-download, while a change is picked
+	// up within one cycle instead of lagging a fixed cadence. A failed
+	// revalidation is harmless (the persisted cache is reused stale-on-error and
+	// the next cycle retries), and the full ~5.9 MB download still happens only
+	// when Fribb actually changes, so per-cycle revalidation stays cheap.
+	DefaultMappingRefresh = 0
 	// DefaultAniListRate is the AniList request/minute ceiling.
 	DefaultAniListRate = 30
 )
@@ -151,7 +168,7 @@ func defaultFileConfig() fileConfig {
 		Mode:         RunModeDaemon,
 		Report:       reportFile{Dir: DefaultReportDir},
 		Log:          logFile{Level: "info", Format: "json"},
-		PollInterval: "12h",
+		PollInterval: "3h",
 	}
 }
 
@@ -314,7 +331,26 @@ func (c *Config) Validate() error {
 	if !c.SonarrEnabled() && !c.RadarrEnabled() {
 		return errors.New("no arr configured: enable sonarr and/or radarr with a url + api_key")
 	}
-	return nil
+	return c.validateIndexer()
+}
+
+// validateIndexer rejects an enabled Torznab feed with no feed API key. The
+// feed is the only HTTP surface; it authenticates callers by the apikey query
+// param against IndexerAPIKey, so an empty key would leave it unauthenticated
+// (and able to leak the AnimeBytes passkey embedded in synthesized RSS download
+// links). The feed is enabled when either upstream Torznab URL is set; a
+// no-indexer config is unaffected.
+func (c *Config) validateIndexer() error {
+	if c.IndexerNyaaTorznabURL == "" && c.IndexerABTorznabURL == "" {
+		return nil
+	}
+	if c.IndexerAPIKey == "" {
+		return errors.New("indexer.feed_api_key is required when indexer.nyaa_torznab_url or indexer.ab_torznab_url is set")
+	}
+	if err := validateHTTPURL("indexer.nyaa_torznab_url", c.IndexerNyaaTorznabURL); err != nil {
+		return err
+	}
+	return validateHTTPURL("indexer.ab_torznab_url", c.IndexerABTorznabURL)
 }
 
 // validateArrPair rejects a half-configured enabled arr (a URL with no key or a
@@ -328,12 +364,23 @@ func (c *Config) validateArrPair(name, rawURL, key string) error {
 	case key == "":
 		return fmt.Errorf("%s.url is set but %s.api_key is empty", name, name)
 	}
+	return validateHTTPURL(name+".url", rawURL)
+}
+
+// validateHTTPURL rejects a non-empty rawURL that is not an absolute http(s) URL
+// with a host; an empty rawURL passes (the caller decides whether the field is
+// required). Shared by the arr-pair and indexer Torznab-URL validators so a
+// malformed URL fails at config load rather than at first request.
+func validateHTTPURL(name, rawURL string) error {
+	if rawURL == "" {
+		return nil
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("%s.url is not a valid URL: %w", name, err)
+		return fmt.Errorf("%s is not a valid URL: %w", name, err)
 	}
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return fmt.Errorf("%s.url must be an absolute http(s) URL with a host, got %q", name, rawURL)
+		return fmt.Errorf("%s must be an absolute http(s) URL with a host, got %q", name, rawURL)
 	}
 	return nil
 }

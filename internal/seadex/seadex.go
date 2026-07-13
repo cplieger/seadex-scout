@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/cplieger/httpx/v2"
+	"github.com/cplieger/seadex-scout/internal/appinfo"
 )
 
 const (
@@ -30,11 +31,13 @@ const (
 	// maxPages caps pagination so a misbehaving API cannot loop forever
 	// (~6 pages expected at perPage=500).
 	maxPages = 200
+	// maxEntries caps total accumulated entries so a compromised or misbehaving
+	// upstream cannot accumulate unbounded memory across maxPages pages
+	// (~a few thousand entries expected).
+	maxEntries = 200_000
 	// maxPageBytes bounds one page (500 entries with expanded torrents) before
 	// decode, guarding against an oversized or malicious payload.
 	maxPageBytes = 48 << 20
-	// userAgent identifies seadex-scout to the community service.
-	userAgent = "seadex-scout (+https://github.com/cplieger/seadex-scout)"
 	// maxAttempts / baseDelay bound the per-page retry.
 	maxAttempts = 3
 	baseDelay   = time.Second
@@ -156,6 +159,7 @@ func parsePBTime(s string) time.Time {
 // a caller never compares against a truncated SeaDex view.
 func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 	var all []Entry
+	completed := false
 	for page := 1; page <= maxPages; page++ {
 		list, err := c.fetchPage(ctx, page)
 		if err != nil {
@@ -164,12 +168,20 @@ func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 		for i := range list.Items {
 			all = append(all, list.Items[i].toEntry())
 		}
+		if len(all) > maxEntries {
+			return nil, fmt.Errorf("seadex: entry count exceeded cap %d (upstream misbehaving)", maxEntries)
+		}
 		if page >= list.TotalPages || len(list.Items) == 0 {
+			completed = true
 			break
 		}
 		if err := httpx.SleepCtx(ctx, c.pageDelay); err != nil {
 			return nil, fmt.Errorf("seadex: interrupted between pages: %w", err)
 		}
+	}
+	if !completed {
+		return nil, fmt.Errorf("seadex: pagination exceeded max %d pages (upstream reported more); "+
+			"refusing to compare against a truncated view", maxPages)
 	}
 	c.log.Debug("seadex entries fetched", "entries", len(all))
 	return all, nil
@@ -206,6 +218,6 @@ func (c *Client) fetchPage(ctx context.Context, page int) (pbList, error) {
 // setHeaders sets the descriptive User-Agent and JSON Accept header on each
 // SeaDex request.
 func setHeaders(req *http.Request) {
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", appinfo.UserAgent)
 	req.Header.Set("Accept", "application/json")
 }

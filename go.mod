@@ -7,6 +7,7 @@ require (
 	github.com/cplieger/atomicfile/v2 v2.1.2
 	github.com/cplieger/health v1.1.6
 	github.com/cplieger/httpx/v2 v2.4.0
+	github.com/cplieger/webhttp v1.3.0
 )
 
 require go.yaml.in/yaml/v3 v3.0.4

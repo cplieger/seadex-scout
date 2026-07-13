@@ -4,8 +4,10 @@
 // tracker, or on AnimeBytes when the operator enables it), and compares the
 // surviving recommended release groups against the groups present on the
 // library item. The comparison is season-scoped: a SeaDex entry (one AniList
-// ID = one cour) is checked against just that TVDB season's groups when the
-// entry maps to a season, falling back to the whole-item group set otherwise -
+// ID = one cour) is compared as the audit report scopes it (via internal/align):
+// a mapped TVDB season against that season's groups, a special against Sonarr's
+// season-0 bucket, a movie against its groups, and an absolute-numbered or
+// title-only run against every real season conservatively -
 // so a later season that needs a better release is not masked by an earlier
 // season that already has it. An item that already has a recommended group is
 // aligned and produces no finding; a recommended release the operator cannot
@@ -18,9 +20,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cplieger/seadex-scout/internal/align"
+	"github.com/cplieger/seadex-scout/internal/classify"
 	"github.com/cplieger/seadex-scout/internal/filter"
-	"github.com/cplieger/seadex-scout/internal/library"
-	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
@@ -142,26 +144,78 @@ type candidate struct {
 // compareOne compares one matched, in-library entry and returns a finding, or
 // nil when the item is aligned (already has a recommended group).
 func (c *Comparer) compareOne(m *match.Match) *Finding {
-	item := m.Item
 	entry := &m.Entry
 	recommended := c.recommended(entry)
 
-	base := c.baseFinding(m)
+	// A Sonarr absolute-numbered run / title-only match has no per-season Fribb
+	// mapping, so its single whole-series recommendation is compared against every
+	// real season on disk, conservatively (compareWholeSeries) - exactly as the
+	// audit report does.
+	if align.WholeSeries(m.Item, &m.Record) {
+		return c.compareWholeSeries(m, recommended)
+	}
+
+	// Scope the on-disk groups the same way the audit report does (movie / the
+	// mapped TVDB season / the season-0 specials bucket), via the shared
+	// internal/align, so a daemon finding never disagrees with the report.
+	currentGroups, hasFile, _ := align.Scope(m.Item, &m.Record)
+	base := c.baseFinding(m, currentGroups)
 	if len(recommended) == 0 {
 		return emptyResult(entry, &base)
 	}
+	if !hasFile {
+		// The mapped season/movie/special is not on disk, so there is nothing the
+		// operator has for a better release to replace. The audit records this as
+		// no_file; the daemon stays quiet.
+		return nil
+	}
 
 	recGroups := groupSet(recommended)
-	if item.MixedGroups {
+	// Use the scoped group count, not the whole-item group set, so a season that
+	// carries a single group is not misreported as mixed_group_manual.
+	if len(currentGroups) > 1 {
 		fillBest(&base, recommended, recGroups)
 		return finalize(&base, StatusMixedGroup, SevInfo)
 	}
-	if intersects(recGroups, c.currentGroups(item, &m.Record)) {
+	if release.GroupsIntersect(recGroups, currentGroups) {
 		return nil // aligned: a recommended group is already present
 	}
 
 	// Not aligned: a better release the operator can obtain and lacks. An
 	// incomplete entry is a non-actionable info nudge (nothing complete to grab).
+	status, sev := StatusBetter, SevWarn
+	if entry.Incomplete {
+		status, sev = StatusIncomplete, SevInfo
+	}
+	fillBest(&base, recommended, recGroups)
+	return finalize(&base, status, sev)
+}
+
+// compareWholeSeries compares a Sonarr whole-series entry (an absolute-numbered
+// run or title-only match, with no per-season Fribb mapping) against every real
+// season on disk (season 0 excluded), conservatively: the item is aligned only
+// when every on-disk season already carries a recommended group, matching the
+// audit report's whole-series verdict via the shared align.SummarizeWholeSeries.
+// It stays silent when no real season is on disk.
+func (c *Comparer) compareWholeSeries(m *match.Match, recommended []candidate) *Finding {
+	entry := &m.Entry
+	recGroups := groupSet(recommended)
+	// nil alt: the daemon only distinguishes best-vs-not, so an on-disk season
+	// lacking a recommended group surfaces as AnyUnlisted.
+	summary := align.SummarizeWholeSeries(m.Item, recGroups, nil)
+	base := c.baseFinding(m, summary.Groups)
+
+	if len(recommended) == 0 {
+		return emptyResult(entry, &base)
+	}
+	if summary.Seasons == 0 {
+		return nil // no real season on disk: nothing for a better release to replace
+	}
+	if !summary.AnyUnlisted {
+		return nil // every on-disk season already carries a recommended group
+	}
+
+	// At least one on-disk season lacks a recommended group.
 	status, sev := StatusBetter, SevWarn
 	if entry.Incomplete {
 		status, sev = StatusIncomplete, SevInfo
@@ -180,13 +234,7 @@ func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
 		if !t.IsBest {
 			continue
 		}
-		rel := release.Classify(&release.Input{
-			Names:     fileNames(t.Files),
-			Notes:     entry.Notes,
-			Group:     t.ReleaseGroup,
-			Tracker:   t.Tracker,
-			DualAudio: t.DualAudio,
-		})
+		rel := classify.Torrent(entry, t)
 		if ok, _ := filter.KeepNonTracker(&rel, c.opts); !ok {
 			continue
 		}
@@ -213,28 +261,15 @@ func emptyResult(entry *seadex.Entry, base *Finding) *Finding {
 	}
 }
 
-// currentGroups returns the library groups to compare against: the specific
-// TVDB season's groups when the entry maps to a season present on disk, else
-// the whole-item group set. Scoping to the season is always applied (there is
-// no knob): a SeaDex entry keys one cour, so comparing it against just that
-// season's groups is strictly more accurate, and the fall-back to the whole
-// item covers the cases where no reliable season mapping exists.
-func (c *Comparer) currentGroups(item *library.Item, rec *mapping.Record) []string {
-	if rec.SeasonTvdb > 0 {
-		if g, ok := item.SeasonGroups[rec.SeasonTvdb]; ok {
-			return g
-		}
-	}
-	return item.Groups
-}
-
-// baseFinding seeds a finding with the item identity fields.
-func (c *Comparer) baseFinding(m *match.Match) Finding {
+// baseFinding seeds a finding with the item identity fields, using the
+// season-scoped current groups already resolved by the caller so the finding's
+// CurrentGroup and dedupe key never leak whole-series groups.
+func (c *Comparer) baseFinding(m *match.Match, groups []string) Finding {
 	return Finding{
 		Title:        m.Item.Title,
 		Arr:          m.Arr,
 		ArrURL:       m.Item.ArrURL,
-		CurrentGroup: currentGroup(m.Item),
+		CurrentGroup: strings.Join(groups, ","),
 		AniListID:    m.Entry.AniListID,
 		Season:       m.Record.SeasonTvdb,
 	}
@@ -308,12 +343,6 @@ func dedupeKey(f *Finding) string {
 	}, "|")
 }
 
-// currentGroup renders the item's current group(s) for display: the single
-// group, or a comma-joined list when the item spans several.
-func currentGroup(item *library.Item) string {
-	return strings.Join(item.Groups, ",")
-}
-
 // representative picks the headline recommended release: highest resolution,
 // then a public tracker, then the first. It assumes len(pool) > 0.
 func representative(pool []candidate) candidate {
@@ -353,30 +382,4 @@ func groupSet(cands []candidate) []string {
 	}
 	sort.Strings(groups)
 	return groups
-}
-
-// intersects reports whether any recommended group is present in the current
-// group set (both normalized).
-func intersects(recommended, current []string) bool {
-	have := make(map[string]struct{}, len(current))
-	for _, g := range current {
-		have[release.NormalizeGroup(g)] = struct{}{}
-	}
-	for _, g := range recommended {
-		if _, ok := have[release.NormalizeGroup(g)]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-// fileNames returns the names of a torrent's files, for classification.
-func fileNames(files []seadex.File) []string {
-	names := make([]string, 0, len(files))
-	for i := range files {
-		if files[i].Name != "" {
-			names = append(names, files[i].Name)
-		}
-	}
-	return names
 }

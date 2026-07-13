@@ -11,6 +11,7 @@ package library
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sort"
 	"strconv"
@@ -152,7 +153,10 @@ func (w *Walker) walkSonarr(ctx context.Context) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	includeIDs, excludeIDs := w.resolveTags(ctx, w.sonarr.ResolveTagIDs)
+	includeIDs, excludeIDs, err := w.resolveTags(ctx, w.sonarr.ResolveTagIDs)
+	if err != nil {
+		return nil, err
+	}
 
 	var kept []arrapi.Series
 	for i := range series {
@@ -161,7 +165,7 @@ func (w *Walker) walkSonarr(ctx context.Context) ([]Item, error) {
 		}
 	}
 
-	items := make([]Item, len(kept))
+	results := make([]*Item, len(kept))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, episodeConcurrency)
 	for i := range kept {
@@ -170,21 +174,37 @@ func (w *Walker) walkSonarr(ctx context.Context) ([]Item, error) {
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			s := &kept[i]
-			eps, epErr := w.sonarr.GetEpisodes(ctx, s.ID)
-			if epErr != nil {
-				w.log.Warn("skipping series: episode fetch failed", "series", s.Title, "id", s.ID, "error", epErr)
-				items[i] = w.seriesItem(s, nil)
-				return
-			}
-			items[i] = w.seriesItem(s, eps)
+			results[i] = w.fetchSeriesItem(ctx, &kept[i])
 		}()
 	}
 	wg.Wait()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	items := make([]Item, 0, len(results))
+	for _, item := range results {
+		if item != nil {
+			items = append(items, *item)
+		}
+	}
 	return items, nil
+}
+
+// fetchSeriesItem fetches one series' episodes and builds its Item. A
+// cancelled or timed-out context returns nil without a warning (Walk reports
+// the cancellation); any other episode-fetch failure is logged and returns
+// nil so the series is skipped.
+func (w *Walker) fetchSeriesItem(ctx context.Context, s *arrapi.Series) *Item {
+	eps, err := w.sonarr.GetEpisodes(ctx, s.ID)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			return nil
+		}
+		w.log.Warn("skipping series: episode fetch failed", "series", s.Title, "id", s.ID, "error", err)
+		return nil
+	}
+	item := w.seriesItem(s, eps)
+	return &item
 }
 
 // walkRadarr lists movies, applies tag filters, and builds an item per movie.
@@ -193,13 +213,19 @@ func (w *Walker) walkRadarr(ctx context.Context) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	includeIDs, excludeIDs := w.resolveTags(ctx, w.radarr.ResolveTagIDs)
+	includeIDs, excludeIDs, err := w.resolveTags(ctx, w.radarr.ResolveTagIDs)
+	if err != nil {
+		return nil, err
+	}
 
 	var items []Item
 	for i := range movies {
 		if keepByTags(movies[i].Tags, includeIDs, excludeIDs) {
 			items = append(items, w.movieItem(&movies[i]))
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return items, nil
 }
@@ -209,10 +235,16 @@ func (w *Walker) walkRadarr(ctx context.Context) ([]Item, error) {
 // disables that side's filter (fail-open) rather than aborting the walk.
 func (w *Walker) resolveTags(ctx context.Context,
 	resolve func(context.Context, ...string) (map[int]struct{}, []string, error),
-) (includeIDs, excludeIDs map[int]struct{}) {
-	includeIDs = w.resolveOne(ctx, resolve, "INCLUDE_TAGS", w.includeTags)
-	excludeIDs = w.resolveOne(ctx, resolve, "EXCLUDE_TAGS", w.excludeTags)
-	return includeIDs, excludeIDs
+) (includeIDs, excludeIDs map[int]struct{}, err error) {
+	includeIDs, err = w.resolveOne(ctx, resolve, "INCLUDE_TAGS", w.includeTags)
+	if err != nil {
+		return nil, nil, err
+	}
+	excludeIDs, err = w.resolveOne(ctx, resolve, "EXCLUDE_TAGS", w.excludeTags)
+	if err != nil {
+		return nil, nil, err
+	}
+	return includeIDs, excludeIDs, nil
 }
 
 // resolveOne resolves a single label set, logging unmatched labels and
@@ -220,28 +252,31 @@ func (w *Walker) resolveTags(ctx context.Context,
 func (w *Walker) resolveOne(ctx context.Context,
 	resolve func(context.Context, ...string) (map[int]struct{}, []string, error),
 	which string, labels []string,
-) map[int]struct{} {
+) (map[int]struct{}, error) {
 	if len(labels) == 0 {
-		return nil
+		return nil, nil
 	}
 	ids, unmatched, err := resolve(ctx, labels...)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
 		w.log.Warn("tag resolution failed; filter disabled for this cycle", "which", which, "error", err)
-		return nil
+		return nil, nil
 	}
 	if len(unmatched) > 0 {
 		w.log.Warn("configured tags matched no arr tag", "which", which, "unmatched", strings.Join(unmatched, ","))
 	}
-	return ids
+	return ids, nil
 }
 
 // keepByTags applies include-then-exclude tag filtering. Include (when set)
 // requires a match; exclude (when set) rejects a match.
 func keepByTags(itemTags []int, includeIDs, excludeIDs map[int]struct{}) bool {
-	if len(includeIDs) > 0 && !arrapi.HasAnyTag(itemTags, includeIDs) {
+	if includeIDs != nil && !arrapi.HasAnyTag(itemTags, includeIDs) {
 		return false
 	}
-	if len(excludeIDs) > 0 && arrapi.HasAnyTag(itemTags, excludeIDs) {
+	if excludeIDs != nil && arrapi.HasAnyTag(itemTags, excludeIDs) {
 		return false
 	}
 	return true
