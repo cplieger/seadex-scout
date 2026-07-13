@@ -41,7 +41,7 @@ const seaDexEntryURL = "https://releases.moe/"
 // so the caller resolves the real media type (Fribb/AniList) and returns the
 // category (Movies for a film -> Radarr, Anime for everything else -> Sonarr).
 // It is called once per entry (all of an entry's torrents share its category).
-func buildFeeds(entries []seadex.Entry, abPasskey string, classify func(alID int) []int) (nyaaFeed, abFeed []Item, abSkippedNoPasskey int) {
+func buildFeeds(entries []seadex.Entry, abPasskey string, classify func(alID int) []int) (nyaaFeed, abFeed []item, abSkippedNoPasskey int) {
 	for i := range entries {
 		e := &entries[i]
 		cats := classify(e.AniListID)
@@ -70,14 +70,14 @@ func buildFeeds(entries []seadex.Entry, abPasskey string, classify func(alID int
 // grabbable link; noPasskey flags the specific case of an AB release that only
 // lacks the passkey (a parseable id, no configured passkey), so the caller can
 // nudge the operator once rather than emitting link-less items.
-func feedItemFor(e *seadex.Entry, t *seadex.Torrent, abPasskey string) (it Item, scope string, ok, noPasskey bool) {
+func feedItemFor(e *seadex.Entry, t *seadex.Torrent, abPasskey string) (it item, scope string, ok, noPasskey bool) {
 	scope = trackerScope(t.Tracker)
 	if scope == "" {
-		return Item{}, "", false, false
+		return item{}, "", false, false
 	}
 	dl, resolved := downloadURL(t.Tracker, t.URL, abPasskey)
 	if !resolved {
-		return Item{}, scope, false, scope == upstreamAB && abPasskey == "" && animeBytesID(t.URL) != ""
+		return item{}, scope, false, scope == upstreamAB && abPasskey == "" && animeBytesID(t.URL) != ""
 	}
 	return synthItem(e, t, dl), scope, true, false
 }
@@ -89,12 +89,12 @@ func feedItemFor(e *seadex.Entry, t *seadex.Torrent, abPasskey string) (it Item,
 // tracker page URL (unique per torrent). Seeders are left 0 (the render floors
 // to 1) since a synthesized item has no live swarm count. The category is left
 // unset here and stamped by buildFeeds from the entry's resolved media type.
-func synthItem(e *seadex.Entry, t *seadex.Torrent, dl string) Item {
+func synthItem(e *seadex.Entry, t *seadex.Torrent, dl string) item {
 	dvf := dvfAlt
 	if t.IsBest {
 		dvf = dvfBest
 	}
-	return Item{
+	return item{
 		Title:                feedTitle(t),
 		GUID:                 t.UsableURL(),
 		InfoURL:              entryURL(e.AniListID),
@@ -116,6 +116,10 @@ var episodeToken = regexp.MustCompile(`(?i)(S\d{1,2})E\d{1,4}(?:-E?\d{1,4})?(?:v
 // (optional version suffix), used only to keep a multi-file pack from reading as
 // episode 7 when there is no SxxExx token to collapse.
 var absoluteEpisode = regexp.MustCompile(`\s-\s\d{1,4}(?:v\d+)?(?:\s|$)`)
+
+// creditlessExtra matches bonus OP/ED files that may carry absolute-looking
+// numbers but should not count as episode files or drive the synthesized title.
+var creditlessExtra = regexp.MustCompile(`(?i)\b(?:NCOP|NCED|creditless)\b`)
 
 // multiSpace collapses runs of whitespace left after removing a token.
 var multiSpace = regexp.MustCompile(`\s{2,}`)
@@ -169,6 +173,9 @@ func isPack(t *seadex.Torrent) bool {
 func coveredEpisodes(files []seadex.File) int {
 	seen := make(map[string]struct{})
 	for i := range files {
+		if creditlessExtra.MatchString(files[i].Name) {
+			continue
+		}
 		switch {
 		case episodeToken.MatchString(files[i].Name):
 			seen["e"+strings.ToUpper(episodeToken.FindString(files[i].Name))] = struct{}{}
@@ -188,7 +195,21 @@ func representativeFile(files []seadex.File) string {
 		return ""
 	}
 	for i := range files {
+		if creditlessExtra.MatchString(files[i].Name) {
+			continue
+		}
 		if episodeToken.MatchString(files[i].Name) {
+			return files[i].Name
+		}
+	}
+	// No SxxExx file: prefer an absolute-numbered episode ("[Grp] Show - 07")
+	// over a leading creditless/extra (NCED/NCOP) file, so an absolute-numbered
+	// pack derives its title from a real episode rather than an extra.
+	for i := range files {
+		if creditlessExtra.MatchString(files[i].Name) {
+			continue
+		}
+		if absoluteEpisode.MatchString(files[i].Name) {
 			return files[i].Name
 		}
 	}
@@ -249,8 +270,8 @@ func validInfoHash(h string) string {
 
 // sortAndCap orders a feed newest-first (by SeaDex entry update time) and trims
 // it to feedWindow.
-func sortAndCap(items []Item) []Item {
-	slices.SortStableFunc(items, func(a, b Item) int {
+func sortAndCap(items []item) []item {
+	slices.SortStableFunc(items, func(a, b item) int {
 		return b.PubDate.Compare(a.PubDate)
 	})
 	if len(items) > feedWindow {

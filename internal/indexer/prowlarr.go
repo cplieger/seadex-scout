@@ -9,11 +9,10 @@ import (
 	"time"
 
 	"github.com/cplieger/httpx/v2"
+	"github.com/cplieger/seadex-scout/internal/appinfo"
 )
 
 const (
-	// upstreamUserAgent identifies the feed to Prowlarr.
-	upstreamUserAgent = "seadex-scout (+https://github.com/cplieger/seadex-scout)"
 	// upstreamMaxAttempts / upstreamBaseDelay bound the per-query retry.
 	upstreamMaxAttempts = 3
 	upstreamBaseDelay   = time.Second
@@ -35,7 +34,7 @@ type upstream struct {
 // search queries the Torznab endpoint with the forwarded params and returns the
 // parsed items. The Prowlarr API key is sent as the X-Api-Key header (not a
 // query param), so it never appears in a logged request URL.
-func (u *upstream) search(ctx context.Context, params url.Values) ([]Item, error) {
+func (u *upstream) search(ctx context.Context, params url.Values) ([]item, error) {
 	reqURL := u.feed
 	if enc := params.Encode(); enc != "" {
 		if strings.Contains(reqURL, "?") {
@@ -60,7 +59,7 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]Item, error
 
 // setHeaders sets the User-Agent, Accept, and the Prowlarr API key header.
 func (u *upstream) setHeaders(req *http.Request) {
-	req.Header.Set("User-Agent", upstreamUserAgent)
+	req.Header.Set("User-Agent", appinfo.UserAgent)
 	req.Header.Set("Accept", "application/rss+xml, application/xml")
 	if u.apiKey != "" {
 		req.Header.Set("X-Api-Key", u.apiKey)

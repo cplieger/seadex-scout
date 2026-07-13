@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -22,10 +21,10 @@ import (
 
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/httpx/v2"
+	"github.com/cplieger/seadex-scout/internal/appinfo"
 )
 
 const (
-	userAgent = "seadex-scout (+https://github.com/cplieger/seadex-scout)"
 	// maxMapBytes bounds the Fribb download before decode.
 	maxMapBytes = 64 << 20
 	// maxOverrideBytes bounds the local overrides file.
@@ -53,8 +52,10 @@ func (r *Record) IsMovie() bool { return r.Type == typeMovie }
 
 // IsSpecial reports whether the entry is an OVA/ONA/special/music video rather
 // than a standard TV season or movie, so it can be excluded when the operator
-// turns specials off. Title-fallback matches (no type) are treated as
-// non-special.
+// turns specials off. A match with no type (an entry that resolved to no arr
+// item, or one whose AniList format was empty) is treated as non-special; the
+// AniList title fallback now sets Type from the AniList format, so a
+// title-matched OVA/ONA/special IS filtered when specials are off.
 func (r *Record) IsSpecial() bool {
 	switch r.Type {
 	case "OVA", "ONA", "SPECIAL", "MUSIC":
@@ -183,6 +184,9 @@ func (l *Loader) refreshCache(ctx context.Context, prev *Cache) (Cache, error) {
 		return *prev, fmt.Errorf("mapping: initial fetch failed and no cache available: %w", err)
 	}
 	if res.notModified {
+		if len(prev.Records) == 0 {
+			return *prev, errors.New("mapping: not modified but no cache available")
+		}
 		l.log.Debug("mapping: not modified, reusing cache", "records", len(prev.Records))
 		refreshed := *prev
 		refreshed.FetchedAt = time.Now()
@@ -195,6 +199,12 @@ func (l *Loader) refreshCache(ctx context.Context, prev *Cache) (Cache, error) {
 			return *prev, fmt.Errorf("mapping: parse failed, using stale map (%d records): %w", len(prev.Records), err)
 		}
 		return *prev, fmt.Errorf("mapping: parse failed and no cache available: %w", err)
+	}
+	if len(records) == 0 {
+		if len(prev.Records) > 0 {
+			return *prev, fmt.Errorf("mapping: refresh returned zero records, using stale map (%d records)", len(prev.Records))
+		}
+		return *prev, errors.New("mapping: refresh returned zero records and no cache available")
 	}
 	l.log.Info("mapping: refreshed", "records", len(records))
 	return Cache{
@@ -223,7 +233,7 @@ func (l *Loader) conditionalGet(ctx context.Context, prev *Cache) (fetchResult, 
 			if err != nil {
 				return fetchResult{}, err
 			}
-			resp, err := l.http.Do(req) //nolint:bodyclose // drained and closed via httpx.DrainClose in readResponse
+			resp, err := l.http.Do(req) //nolint:bodyclose // closed in readResponse (ReadLimitedBody on 200, DrainClose otherwise)
 			if err != nil {
 				return fetchResult{}, err
 			}
@@ -237,12 +247,17 @@ func (l *Loader) buildRequest(ctx context.Context, prev *Cache) (*http.Request, 
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", userAgent)
-	if prev.ETag != "" {
-		req.Header.Set("If-None-Match", prev.ETag)
-	}
-	if prev.LastModified != "" {
-		req.Header.Set("If-Modified-Since", prev.LastModified)
+	req.Header.Set("User-Agent", appinfo.UserAgent)
+	// Only send conditional-GET validators when there is a usable cached record
+	// set; a validator-only empty cache must force a full 200 download rather
+	// than being eligible for a 304 that would reuse zero records.
+	if len(prev.Records) > 0 {
+		if prev.ETag != "" {
+			req.Header.Set("If-None-Match", prev.ETag)
+		}
+		if prev.LastModified != "" {
+			req.Header.Set("If-Modified-Since", prev.LastModified)
+		}
 	}
 	return req, nil
 }
@@ -251,12 +266,14 @@ func (l *Loader) buildRequest(ctx context.Context, prev *Cache) (*http.Request, 
 // body. A 304 is notModified; a 200 returns the bounded body and validators;
 // anything else is an error (transient 5xx retried by the caller).
 func readResponse(resp *http.Response) (fetchResult, error) {
-	defer httpx.DrainClose(resp.Body)
 	switch resp.StatusCode {
 	case http.StatusNotModified:
+		httpx.DrainClose(resp.Body)
 		return fetchResult{notModified: true}, nil
 	case http.StatusOK:
-		body, err := io.ReadAll(httpx.LimitedBody(resp, maxMapBytes))
+		// ReadLimitedBody fails closed on an over-cap body (ResponseTooLargeError)
+		// instead of silently truncating it, and always closes resp.Body itself.
+		body, err := httpx.ReadLimitedBody(resp.Body, maxMapBytes)
 		if err != nil {
 			return fetchResult{}, err
 		}
@@ -266,6 +283,7 @@ func readResponse(resp *http.Response) (fetchResult, error) {
 			lastModified: resp.Header.Get("Last-Modified"),
 		}, nil
 	default:
+		httpx.DrainClose(resp.Body)
 		if statusErr := httpx.CheckHTTPStatus(resp); statusErr != nil {
 			return fetchResult{}, statusErr
 		}
@@ -283,6 +301,9 @@ func (l *Loader) applyOverrides(ctx context.Context, idx *Index) {
 	}
 	data, err := atomicfile.ReadBounded(ctx, l.overridesPath, maxOverrideBytes)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
 		if !errors.Is(err, fs.ErrNotExist) {
 			l.log.Warn("mapping: overrides unreadable, ignoring", "path", l.overridesPath, "error", err)
 		}

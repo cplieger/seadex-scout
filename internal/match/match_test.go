@@ -200,3 +200,65 @@ func TestMatchBatchesAniListLookups(t *testing.T) {
 		t.Errorf("want 3 title-matched entries, got %d", matched)
 	}
 }
+
+// degradedAniList fails every lookup with a transient (non-not-found) error,
+// modelling an AniList outage or rate-limit exhaustion.
+type degradedAniList struct{}
+
+func (degradedAniList) Fetch(context.Context, int) (anilist.Media, error) {
+	return anilist.Media{}, context.DeadlineExceeded
+}
+
+func (degradedAniList) FetchMany(context.Context, []int) (map[int]anilist.Media, error) {
+	return nil, context.DeadlineExceeded
+}
+
+// TestMatchAniListTransientErrorDegrades covers the degraded path: when a needed
+// AniList fallback lookup fails transiently (not ErrNotFound), Match flags the
+// result Degraded so the caller preserves prior findings instead of resolving
+// them, leaves the entry unmapped, and does NOT memoize the id (so it is retried
+// next cycle rather than cached as a permanent miss).
+func TestMatchAniListTransientErrorDegrades(t *testing.T) {
+	snap := &library.Snapshot{}
+	idx := mapping.NewIndex(nil) // no Fribb record: the entry resolves via AniList
+	m := NewMatcher(degradedAniList{}, nil)
+
+	res := m.Match(context.Background(), []seadex.Entry{{AniListID: 42}}, snap, idx, Memo{})
+
+	if !res.Degraded {
+		t.Error("Degraded = false, want true when a needed AniList lookup fails transiently")
+	}
+	if len(res.Matches) != 1 || res.Matches[0].Source != SourceUnmapped {
+		t.Errorf("entry should be unmapped on a transient failure, got %+v", res.Matches)
+	}
+	if _, cached := res.Memo.Entries[42]; cached {
+		t.Error("a transient failure must not memoize the id (it must be retried next cycle)")
+	}
+}
+
+// TestMatchTitleFallbackAmbiguousIsUnmapped covers the conservative-match
+// invariant plus the no-Fribb-record resolution path: an entry with no mapping
+// record is resolved through the AniList title fallback (exercising matchEntry's
+// record-miss branch and formatArr), and when the normalized title matches more
+// than one library item in the same arr the ambiguous set is treated as a miss
+// (findByTitle's default branch) rather than guessed.
+func TestMatchTitleFallbackAmbiguousIsUnmapped(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 1, Title: "Clannad"},
+		{Arr: library.ArrSonarr, ArrID: 2, Title: "Clannad"},
+	}}
+	idx := mapping.NewIndex(nil) // no record: matchEntry resolves via AniList
+	fake := fakeAniList{media: map[int]anilist.Media{
+		500: {Titles: []string{"Clannad"}, Format: "TV"},
+	}}
+	m := NewMatcher(fake, nil)
+
+	res := m.Match(context.Background(), []seadex.Entry{{AniListID: 500}}, snap, idx, Memo{})
+
+	if len(res.Matches) != 1 {
+		t.Fatalf("want 1 match, got %d", len(res.Matches))
+	}
+	if got := res.Matches[0]; got.InLibrary() || got.Source != SourceUnmapped {
+		t.Errorf("an ambiguous title set must be unmapped, got source=%q inLibrary=%v", got.Source, got.InLibrary())
+	}
+}

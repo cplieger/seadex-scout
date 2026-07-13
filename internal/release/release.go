@@ -72,6 +72,9 @@ var (
 	reBitrate    = regexp.MustCompile(`(?i)\b\d+\s?(kbps|mbps)\b`)
 	// reCRF matches an x264/x265 CRF tag such as "crf18" or "crf 20".
 	reCRF = regexp.MustCompile(`(?i)\bcrf\s?\d+\b`)
+	// reDualAudio matches a dual-audio marker as a whole token, so an ordinary
+	// word such as "individual" is not misread as a dual-audio release.
+	reDualAudio = regexp.MustCompile(`(?i)\bdual(?:[\s._-]*audio)?\b`)
 )
 
 // Canonical codec families the classifier normalizes video codecs to.
@@ -111,7 +114,7 @@ func Classify(in *Input) Release {
 		Kind:        kind,
 		TrackerType: classifyTracker(in.Tracker),
 		Reason:      reason,
-		DualAudio:   in.DualAudio || strings.Contains(text, "dual"),
+		DualAudio:   in.DualAudio || reDualAudio.MatchString(text),
 	}
 }
 
@@ -220,6 +223,24 @@ func normalizeGroup(group string) string {
 // NormalizeGroup is the exported form of the group normalizer, so the compare
 // layer keys group-membership sets the same way Classify keys overrides.
 func NormalizeGroup(group string) string { return normalizeGroup(group) }
+
+// GroupsIntersect reports whether any group in a is present in b, comparing
+// both sides normalized (normalizeGroup). It is the shared group-set overlap
+// test the compare and audit layers key alignment on, so the "is a recommended
+// group already present" decision lives in exactly one place. It operates only
+// on []string, keeping release a pure, seadex-free leaf.
+func GroupsIntersect(a, b []string) bool {
+	set := make(map[string]struct{}, len(b))
+	for _, g := range b {
+		set[normalizeGroup(g)] = struct{}{}
+	}
+	for _, g := range a {
+		if _, ok := set[normalizeGroup(g)]; ok {
+			return true
+		}
+	}
+	return false
+}
 
 // ResolutionRank returns a comparable rank for a resolution string (its height
 // in pixels; higher is better). An empty or unrecognized resolution ranks 0, so

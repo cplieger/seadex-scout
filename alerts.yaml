@@ -43,15 +43,15 @@ groups:
       # receiver so you are told when the watcher recovers.
       - alert: SeadexScoutScanStalled
         expr: |
-          absent_over_time({container="seadex-scout"} |= `cycle complete` [26h])
+          absent_over_time({container="seadex-scout"} |= `cycle complete` [7h])
         for: 1h
         labels:
           severity: warning
         annotations:
-          summary: "seadex-scout has not completed a cycle in 26h"
+          summary: "seadex-scout has not completed a cycle in 7h"
           description: >
             seadex-scout (daemon mode) logs a `cycle complete` line every
-            poll_interval (default 12h). None in 26h while the container is up
+            poll_interval (default 3h). None in 7h while the container is up
             (about two missed cycles, allowing for jitter) means the poll loop is
             wedged and better-release findings have
             silently stopped; restart the container. Adjust the window to your

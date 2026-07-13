@@ -32,9 +32,10 @@ and then every `poll_interval` (or, when `poll_interval` is `off`, sits
 resident-idle while an external scheduler triggers cycles via the `poll`
 subcommand), emitting findings as JSON to stdout (slog, shipped to Loki), and —
 when a Prowlarr Torznab URL is configured — also serves the Torznab feed in the
-same process. It binds no HTTP port unless that feed is configured. The only
-cross-cycle state is a single atomic JSON file (library snapshot, cached ID map,
-AniList memo, finding dedupe).
+same process. It binds no HTTP port unless that feed is configured. Cross-cycle state is a
+single atomic JSON file (library snapshot, cached ID map, AniList memo, finding
+dedupe); when the feed is configured, the cycle also persists the materialized
+feed snapshot as a second atomic JSON file the server reads.
 
 `main.go` + `build.go` are the **composition root**: `main.go` installs logging,
 handles the `health`/`report`/`poll`/`daemon` subcommands, loads/validates the
@@ -66,6 +67,13 @@ direction (leaves have no internal imports):
   shape the report/alert engine only; the indexer feed applies none of them.
 - `internal/match` — links a SeaDex entry to a library item (ID via the map, then
   the AniList title fallback) and reports mapping coverage.
+- `internal/align` — the shared season-scope resolver (mapped TVDB season /
+  special season-0 bucket / movie / whole-series-per-season), consumed by both
+  `compare` and `audit` so the daemon alerts and the report scope a SeaDex entry
+  identically.
+- `internal/classify` — the shared SeaDex-torrent to `release.Release` adapter,
+  the one place a `seadex.Torrent` is classified, so `compare` and `audit` build
+  an identical release and `release` stays a seadex-free pure leaf.
 - `internal/compare` — the group-centric comparison producing `Finding`s (aligned
   items emit nothing; the rest are warn/info findings, each with a dedupe key).
 - `internal/audit` — the season-level report generator for report mode: a verdict
@@ -77,11 +85,14 @@ direction (leaves have no internal imports):
 - `internal/indexer` — the Torznab feed server the daemon runs when a Prowlarr
   Torznab URL is configured. It proxies Prowlarr's Nyaa + AnimeBytes endpoints,
   filters the results to SeaDex's curation (matched by tracker id / info hash),
-  and adds the download-volume-factor marker. It serves each tracker on its own
-  path (`/nyaa`, `/ab`) or subdomain as well as combined, so an arr can gate a
-  tracker's search-type use through that indexer's own flags. It depends only on
-  `internal/seadex` (for the curation set) and an HTTP client — no arr, mapping,
-  or scout wiring.
+  and adds the download-volume-factor marker; a periodic RSS check is served from
+  the synthesized SeaDex feed instead. It serves each tracker on its own path
+  (`/nyaa`, `/ab`) or subdomain (there is no combined feed), so an arr can gate a
+  tracker's search-type use through that indexer's own flags. It is a pure reader:
+  the curation set and synthesized feeds come from a snapshot the compare cycle
+  builds and persists (the indexer's `FeedWriter`), which the server loads and
+  reloads on change, so it needs only an HTTP client for the Prowlarr proxy, with
+  no seadex, mapping, arr, or scout wiring of its own.
 
 ## Health and degradation semantics
 
