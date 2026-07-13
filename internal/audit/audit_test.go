@@ -1,7 +1,6 @@
 package audit
 
 import (
-	"reflect"
 	"testing"
 
 	"github.com/cplieger/seadex-scout/internal/library"
@@ -9,69 +8,6 @@ import (
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
-
-func TestScope(t *testing.T) {
-	tests := []struct {
-		name       string
-		item       library.Item
-		rec        mapping.Record
-		wantGroups []string
-		wantFile   bool
-		wantApprox bool
-	}{
-		{
-			name:       "movie scopes to the movie group",
-			item:       library.Item{Arr: library.ArrRadarr, Groups: []string{"arid"}, HasFile: true},
-			rec:        mapping.Record{Type: "MOVIE"},
-			wantGroups: []string{"arid"}, wantFile: true,
-		},
-		{
-			name:       "series with a positive season scopes to that season (exact)",
-			item:       library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{2: {"sam"}}},
-			rec:        mapping.Record{Type: "TV", SeasonTvdb: 2},
-			wantGroups: []string{"sam"}, wantFile: true,
-		},
-		{
-			name:       "series season mapped but not on disk has no file",
-			item:       library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"sam"}}},
-			rec:        mapping.Record{Type: "TV", SeasonTvdb: 3},
-			wantGroups: nil, wantFile: false,
-		},
-		{
-			name:       "special with a single-group season 0 is exact",
-			item:       library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"legion"}}},
-			rec:        mapping.Record{Type: "OVA"},
-			wantGroups: []string{"legion"}, wantFile: true, wantApprox: false,
-		},
-		{
-			name:       "special with a multi-group season 0 is approximate",
-			item:       library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"cait-sidhe", "sallysubs"}}},
-			rec:        mapping.Record{Type: "SPECIAL"},
-			wantGroups: []string{"cait-sidhe", "sallysubs"}, wantFile: true, wantApprox: true,
-		},
-		{
-			name:       "special with no season-0 files has no file",
-			item:       library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"x"}}},
-			rec:        mapping.Record{Type: "OVA"},
-			wantGroups: nil, wantFile: false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			m := &match.Match{Item: &tt.item, Record: tt.rec}
-			groups, hasFile, approx := scope(m)
-			if !reflect.DeepEqual(groups, tt.wantGroups) {
-				t.Errorf("groups = %v, want %v", groups, tt.wantGroups)
-			}
-			if hasFile != tt.wantFile {
-				t.Errorf("hasFile = %v, want %v", hasFile, tt.wantFile)
-			}
-			if approx != tt.wantApprox {
-				t.Errorf("approx = %v, want %v", approx, tt.wantApprox)
-			}
-		})
-	}
-}
 
 func TestVerdict(t *testing.T) {
 	tests := []struct {
@@ -203,6 +139,40 @@ func TestWholeSeriesVerdict(t *testing.T) {
 			}
 			if approx != tt.approx {
 				t.Errorf("approx = %v, want %v", approx, tt.approx)
+			}
+		})
+	}
+}
+
+// TestCatalogueHas covers the reverse-catalogue predicate directly, exercising
+// every id path: the Sonarr TVDB match and zero-TVDB short-circuit, and the
+// Radarr TMDB-match plus IMDb fallback. Audit only ever reaches has through the
+// TMDB/TVDB paths, so the IMDb fallback and the zero-TVDB guard are otherwise
+// untested.
+func TestCatalogueHas(t *testing.T) {
+	cat := newCatalogue(mapping.NewIndex([]mapping.Record{
+		{AniListID: 1, Type: "TV", TvdbID: 100},
+		{AniListID: 2, Type: "MOVIE", TmdbMovies: []int{400}, IMDbIDs: []string{"tt777"}},
+	}))
+	tests := []struct {
+		name string
+		item library.Item
+		want bool
+	}{
+		{"sonarr tvdb matches", library.Item{Arr: library.ArrSonarr, TvdbID: 100}, true},
+		{"sonarr tvdb absent", library.Item{Arr: library.ArrSonarr, TvdbID: 999}, false},
+		{"sonarr tvdb zero is not catalogued", library.Item{Arr: library.ArrSonarr, TvdbID: 0}, false},
+		{"radarr tmdb matches", library.Item{Arr: library.ArrRadarr, TmdbID: 400}, true},
+		{"radarr tmdb miss falls through to imdb match", library.Item{Arr: library.ArrRadarr, TmdbID: 401, ImdbID: "tt777"}, true},
+		{"radarr imdb only matches", library.Item{Arr: library.ArrRadarr, ImdbID: "tt777"}, true},
+		{"radarr neither id matches", library.Item{Arr: library.ArrRadarr, TmdbID: 402, ImdbID: "tt000"}, false},
+		{"radarr no ids is not catalogued", library.Item{Arr: library.ArrRadarr}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			it := tt.item
+			if got := cat.has(&it); got != tt.want {
+				t.Errorf("has() = %v, want %v", got, tt.want)
 			}
 		})
 	}

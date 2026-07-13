@@ -75,11 +75,15 @@ type Memo struct {
 }
 
 // Result bundles the per-entry matches, the coverage counts, and the updated
-// memo to persist.
+// memo to persist. Degraded is set when a needed AniList fallback lookup could
+// not be completed because of a transient/upstream error (not a definitive
+// not-found), so the caller can preserve prior findings rather than treat the
+// missing matches as resolved.
 type Result struct {
 	Coverage Coverage
 	Memo     Memo
 	Matches  []Match
+	Degraded bool
 }
 
 // Matcher links entries using the mapping index and the AniList fallback.
@@ -108,10 +112,11 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 	m.prefetch(ctx, entries, idx, lib, &memo)
 	cov := Coverage{Hits: make(map[string]int), Unmapped: make(map[string]int)}
 	matches := make([]Match, 0, len(entries))
+	var degraded bool
 	for i := range entries {
-		matches = append(matches, m.matchEntry(ctx, &entries[i], lib, idx, &memo, &cov))
+		matches = append(matches, m.matchEntry(ctx, &entries[i], lib, idx, &memo, &cov, &degraded))
 	}
-	return Result{Coverage: cov, Memo: memo, Matches: matches}
+	return Result{Coverage: cov, Memo: memo, Matches: matches, Degraded: degraded}
 }
 
 // prefetch batch-fetches into the memo every AniList id the per-entry pass will
@@ -185,7 +190,7 @@ func pendingAniListIDs(entries []seadex.Entry, idx *mapping.Index, lib *libIndex
 }
 
 // matchEntry links one entry: ID resolution first, AniList title fallback next.
-func (m *Matcher) matchEntry(ctx context.Context, e *seadex.Entry, lib *libIndex, idx *mapping.Index, memo *Memo, cov *Coverage) Match {
+func (m *Matcher) matchEntry(ctx context.Context, e *seadex.Entry, lib *libIndex, idx *mapping.Index, memo *Memo, cov *Coverage, deg *bool) Match {
 	if rec, ok := idx.Lookup(e.AniListID); ok {
 		arr := recordArr(&rec)
 		cov.Hits[arr]++
@@ -201,14 +206,14 @@ func (m *Matcher) matchEntry(ctx context.Context, e *seadex.Entry, lib *libIndex
 		// the fallback off the ~thousands of SeaDex entries the operator does not
 		// have, which otherwise dominate a cold cycle's AniList traffic.
 		if !hasArrID(&rec) {
-			if item := m.titleMatch(ctx, e, memo, lib, arr); item != nil {
+			if item := m.titleMatch(ctx, e, memo, lib, arr, deg); item != nil {
 				return Match{Item: item, Entry: *e, Record: rec, Arr: arr, Source: SourceTitle}
 			}
 		}
 		return Match{Entry: *e, Record: rec, Arr: arr, Source: SourceUnmapped}
 	}
 
-	media, ok := m.lookupAniList(ctx, e.AniListID, memo)
+	media, ok := m.lookupAniList(ctx, e.AniListID, memo, deg)
 	if !ok {
 		cov.Unmapped[arrUnknown]++
 		return Match{Entry: *e, Arr: arrUnknown, Source: SourceUnmapped}
@@ -219,13 +224,13 @@ func (m *Matcher) matchEntry(ctx context.Context, e *seadex.Entry, lib *libIndex
 	if item == nil {
 		return Match{Entry: *e, Arr: arr, Source: SourceUnmapped}
 	}
-	return Match{Item: item, Entry: *e, Arr: arr, Source: SourceTitle}
+	return Match{Item: item, Entry: *e, Record: mapping.Record{Type: strings.ToUpper(strings.TrimSpace(media.Format))}, Arr: item.Arr, Source: SourceTitle}
 }
 
 // lookupAniList consults the memo, then AniList. A not-found result is memoized
 // (negatively) so it is not re-fetched; a transient error is not memoized so it
 // is retried next cycle.
-func (m *Matcher) lookupAniList(ctx context.Context, aniListID int, memo *Memo) (anilist.Media, bool) {
+func (m *Matcher) lookupAniList(ctx context.Context, aniListID int, memo *Memo, deg *bool) (anilist.Media, bool) {
 	if ent, ok := memo.Entries[aniListID]; ok {
 		if ent.NotFound {
 			return anilist.Media{}, false
@@ -237,6 +242,12 @@ func (m *Matcher) lookupAniList(ctx context.Context, aniListID int, memo *Memo) 
 		if errors.Is(err, anilist.ErrNotFound) {
 			memo.Entries[aniListID] = MemoEntry{NotFound: true}
 		} else {
+			// A transient/upstream error (network, context cancellation, rate-limit
+			// exhaustion) means this needed fallback lookup could not be completed.
+			// Flag the cycle degraded so the caller preserves prior findings rather
+			// than treating the missing match as a resolved finding, and leave the
+			// id un-memoized so it is retried next cycle.
+			*deg = true
 			m.log.Warn("anilist fallback failed", "al_id", aniListID, "error", err)
 		}
 		return anilist.Media{}, false
@@ -250,8 +261,8 @@ func (m *Matcher) lookupAniList(ctx context.Context, aniListID int, memo *Memo) 
 // any miss (AniList failure, no candidate, or an ambiguous set). It bridges the
 // case where Fribb has the entry but no usable arr id, so the AniList title is
 // the only remaining link to the arr item.
-func (m *Matcher) titleMatch(ctx context.Context, e *seadex.Entry, memo *Memo, lib *libIndex, arr string) *library.Item {
-	media, ok := m.lookupAniList(ctx, e.AniListID, memo)
+func (m *Matcher) titleMatch(ctx context.Context, e *seadex.Entry, memo *Memo, lib *libIndex, arr string, deg *bool) *library.Item {
+	media, ok := m.lookupAniList(ctx, e.AniListID, memo, deg)
 	if !ok {
 		return nil
 	}

@@ -29,12 +29,12 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/health"
 	"github.com/cplieger/scheduler"
 	"github.com/cplieger/seadex-scout/internal/config"
@@ -68,7 +68,7 @@ func main() {
 	}
 
 	configPath := cmp.Or(strings.TrimSpace(os.Getenv("CONFIG_PATH")), config.DefaultConfigPath)
-	//nolint:gosec // G703: CONFIG_PATH is an operator-supplied path, not user input
+	//nolint:gosec // G304: CONFIG_PATH is an operator-supplied path, not user input
 	if _, err := os.Stat(configPath); errors.Is(err, fs.ErrNotExist) {
 		if werr := writeStarterConfig(configPath); werr != nil {
 			slog.Error("no config found and could not write a starter", "path", configPath, "error", werr)
@@ -119,12 +119,13 @@ func dispatch(mode string, cfg *config.Config) error {
 // writeStarterConfig writes the embedded example config to path, creating the
 // parent directory, so a fresh deployment gets an editable starter.
 func writeStarterConfig(path string) error {
-	//nolint:gosec // G703: CONFIG_PATH is an operator-supplied path, not user input
-	if err := os.MkdirAll(filepath.Dir(path), starterDirMode); err != nil {
-		return fmt.Errorf("create config dir: %w", err)
-	}
-	//nolint:gosec // G703: CONFIG_PATH is an operator-supplied path, not user input
-	if err := os.WriteFile(path, exampleConfig, starterFileMode); err != nil {
+	// Written atomically (temp file + rename, parent dir created via
+	// WithMkdirMode) through atomicfile, matching the report and state writers,
+	// so a crash or power loss mid-write cannot leave a truncated starter config.
+	// CONFIG_PATH is an operator-supplied path, not user input.
+	if _, err := atomicfile.WriteFile(context.Background(), path, exampleConfig,
+		atomicfile.WithMkdirMode(starterDirMode),
+		atomicfile.WithMode(starterFileMode)); err != nil {
 		return fmt.Errorf("write starter config: %w", err)
 	}
 	return nil
@@ -249,6 +250,11 @@ func startIndexer(ctx context.Context, cfg *config.Config) func() {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("indexer feed panicked", "panic", r, "stack", string(debug.Stack()))
+			}
+		}()
 		if err := bi.indexer.Run(ctx); err != nil {
 			slog.Error("indexer feed stopped", "error", err)
 		}

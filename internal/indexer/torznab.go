@@ -26,9 +26,13 @@ const torznabNS = "http://torznab.com/schemas/2015/feed"
 // the operator sees why the save failed.
 const errCodeIncorrectCredentials = 100
 
-// Item is one feed release: the real fields parsed from a Prowlarr Torznab
+// errCodeUnknown is the Newznab/Torznab "unknown error" code (900), used for an
+// unexpected internal failure such as a recovered handler panic.
+const errCodeUnknown = 900
+
+// item is one feed release: the real fields parsed from a Prowlarr Torznab
 // result, plus the SeaDex download-volume-factor marker this feed adds.
-type Item struct {
+type item struct {
 	PubDate              time.Time
 	Title                string
 	GUID                 string
@@ -43,7 +47,7 @@ type Item struct {
 }
 
 // guid returns a stable unique id for the item.
-func (it *Item) guid() string {
+func (it *item) guid() string {
 	switch {
 	case it.GUID != "":
 		return it.GUID
@@ -91,7 +95,7 @@ func renderError(code int, description string) string {
 // renderFeed returns the Torznab RSS feed for items. It is written by hand so
 // the `torznab:` prefixed attribute elements come out exactly as the arrs
 // expect, without the namespace rewriting encoding/xml would apply on output.
-func renderFeed(items []Item) string {
+func renderFeed(items []item) string {
 	var b strings.Builder
 	b.WriteString(xml.Header)
 	fmt.Fprintf(&b, `<rss version="2.0" xmlns:torznab="%s">`, torznabNS)
@@ -111,7 +115,7 @@ func renderFeed(items []Item) string {
 // empty enclosure. Seeders are floored to 1 (never 0, so the arrs' minimum-
 // seeders check cannot reject a curated release when the swarm count is
 // momentarily 0/unknown or synthesized).
-func writeItem(b *strings.Builder, it *Item) {
+func writeItem(b *strings.Builder, it *item) {
 	b.WriteString("<item>")
 	writeText(b, "title", it.Title)
 	writeText(b, "guid", it.guid())
@@ -207,12 +211,12 @@ type attrXML struct {
 }
 
 // parseTorznab decodes a Prowlarr Torznab response into feed items.
-func parseTorznab(body []byte) ([]Item, error) {
+func parseTorznab(body []byte) ([]item, error) {
 	var feed feedXML
 	if err := xml.Unmarshal(body, &feed); err != nil {
 		return nil, fmt.Errorf("parse torznab feed: %w", err)
 	}
-	items := make([]Item, 0, len(feed.Channel.Items))
+	items := make([]item, 0, len(feed.Channel.Items))
 	for i := range feed.Channel.Items {
 		items = append(items, feed.Channel.Items[i].toItem())
 	}
@@ -221,7 +225,7 @@ func parseTorznab(body []byte) ([]Item, error) {
 
 // toItem converts a decoded Torznab item into an Item, reading size, info hash,
 // seeders/peers, and categories from the torznab:attr elements.
-func (x *itemXML) toItem() Item {
+func (x *itemXML) toItem() item {
 	attrs := make(map[string]string, len(x.Attrs))
 	var cats []int
 	for _, a := range x.Attrs {
@@ -254,7 +258,7 @@ func (x *itemXML) toItem() Item {
 		}
 	}
 
-	return Item{
+	return item{
 		Title:       strings.TrimSpace(x.Title),
 		GUID:        strings.TrimSpace(x.GUID),
 		InfoURL:     strings.TrimSpace(x.Comments),

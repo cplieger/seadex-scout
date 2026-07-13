@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -122,7 +123,7 @@ func TestMarkAndDedupe(t *testing.T) {
 		byHash: map[string]bool{"abcdef1234567890abcdef1234567890abcdef12": true},
 		byKey:  map[string]bool{"ab:1143533": false},
 	}
-	raw := []Item{
+	raw := []item{
 		{Title: "best by hash", InfoHash: "abcdef1234567890abcdef1234567890abcdef12", GUID: "g1"},
 		{Title: "alt by key", InfoURL: "https://animebytes.tv/torrents.php?id=1&torrentid=1143533", GUID: "g2"},
 		{Title: "not curated", InfoURL: "https://nyaa.si/view/999", GUID: "g3"},
@@ -140,24 +141,35 @@ func TestMarkAndDedupe(t *testing.T) {
 	}
 }
 
-// TestIndexerEndToEnd wires the Indexer against a mock SeaDex API and a mock
-// Prowlarr Torznab endpoint, exercising the full path: SeaDex fetch -> curation
-// set -> upstream query -> parse -> match -> mark -> query result.
+// TestIndexerEndToEnd exercises the writer/server split end to end: the compare
+// cycle (FeedWriter) builds + persists the feed snapshot from a SeaDex entry,
+// and the server loads it and answers both a real search (proxy Prowlarr ->
+// parse -> match against the loaded curation set -> mark) and an empty-q RSS
+// check (served from the loaded synthesized feed).
 func TestIndexerEndToEnd(t *testing.T) {
-	// Mock SeaDex: one entry with a best Nyaa torrent matching the sample feed.
-	// It is a multi-episode season pack (two episode files), so the synthesized
-	// RSS feed collapses its title to the season (a single-file torrent would be
-	// kept at episode granularity instead).
-	seadexBody := `{"items":[{"alID":123,"incomplete":false,"expand":{"trs":[` +
-		`{"tracker":"Nyaa","url":"https://nyaa.si/view/1234567",` +
-		`"infoHash":"ABCDEF1234567890abcdef1234567890abcdef12","isBest":true,"releaseGroup":"PMR",` +
-		`"files":[{"length":100,"name":"Some Anime - S01E01 (BD Remux 1080p) [PMR].mkv"},` +
-		`{"length":100,"name":"Some Anime - S01E02 (BD Remux 1080p) [PMR].mkv"}]}]}}],"totalPages":1}`
-	seadexSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, seadexBody)
-	}))
-	defer seadexSrv.Close()
+	// One SeaDex entry with a best Nyaa torrent matching the sample feed's info
+	// hash. A multi-episode season pack (two episode files), so the synthesized
+	// RSS feed collapses its title to the season.
+	entries := []seadex.Entry{{
+		AniListID: 123,
+		Torrents: []seadex.Torrent{{
+			Tracker:      "Nyaa",
+			URL:          "https://nyaa.si/view/1234567",
+			InfoHash:     "ABCDEF1234567890abcdef1234567890abcdef12",
+			IsBest:       true,
+			ReleaseGroup: "PMR",
+			Files: []seadex.File{
+				{Length: 100, Name: "Some Anime - S01E01 (BD Remux 1080p) [PMR].mkv"},
+				{Length: 100, Name: "Some Anime - S01E02 (BD Remux 1080p) [PMR].mkv"},
+			},
+		}},
+	}}
+
+	// The compare cycle builds + persists the feed snapshot; the server reads it.
+	path := filepath.Join(t.TempDir(), "feed.json")
+	if err := NewFeedWriter("", path, nil).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
 
 	// Mock Prowlarr Torznab: returns the sample feed regardless of query.
 	var gotAPIKey string
@@ -171,18 +183,11 @@ func TestIndexerEndToEnd(t *testing.T) {
 	ix := New(&Config{
 		NyaaTorznabURL: torznabSrv.URL,
 		ProwlarrAPIKey: "prowlarr-key",
-	}, Deps{
-		SeaDex: seadex.NewClient(seadexSrv.Client(), seadexSrv.URL, 0, nil),
-		HTTP:   torznabSrv.Client(),
-	})
+	}, Deps{HTTP: torznabSrv.Client()}, path)
 
-	if err := ix.Refresh(context.Background()); err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-
-	// A real search (non-empty q) filters to the curation set: the sample item
-	// matches by info hash, gets the best marker, and its real seeders pass
-	// through.
+	// A real search (non-empty q) filters to the curation set loaded from the
+	// snapshot: the sample item matches by info hash, gets the best marker, and
+	// its real seeders pass through.
 	items, stats := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Some Anime"}}, "nyaa")
 	if len(items) != 1 {
 		t.Fatalf("got %d items, want 1", len(items))
@@ -209,12 +214,10 @@ func TestIndexerEndToEnd(t *testing.T) {
 		t.Errorf("ab scope returned %d items, want 0 (no ab upstream)", len(got))
 	}
 
-	// The synthesized RSS feed is independent of the search curation set: clear
-	// the set, and an empty-q request (an RSS "latest" fetch, or Prowlarr's save
-	// test) is still served from the pre-built feed - the curated Nyaa release,
-	// its title collapsed to the season, a directly-built .torrent link, and the
-	// best marker.
-	ix.set = curation{byHash: map[string]bool{}, byKey: map[string]bool{}}
+	// The synthesized RSS feed is served from the loaded snapshot, independent of
+	// the live search path: an empty-q request (an RSS "latest" fetch, or
+	// Prowlarr's save test) returns the curated Nyaa release, its title collapsed
+	// to the season, a directly-built .torrent link, and the best marker.
 	got, st := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
 	if len(got) != 1 || !st.feed {
 		t.Fatalf("empty-q feed returned %d items (feed=%v), want 1 synthesized item", len(got), st.feed)
@@ -228,11 +231,41 @@ func TestIndexerEndToEnd(t *testing.T) {
 	if got[0].DownloadVolumeFactor != dvfBest {
 		t.Errorf("synthesized marker = %q, want %q (best)", got[0].DownloadVolumeFactor, dvfBest)
 	}
+	// (Dropping an uncurated Prowlarr result is covered directly by
+	// TestMarkAndDedupe; the mock here returns the curated item for any query.)
+}
 
-	// A real search for a series not in the (now empty) curation set returns
-	// nothing.
-	if got, _ := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Nonexistent"}}, "nyaa"); len(got) != 0 {
-		t.Errorf("uncurated search returned %d items, want 0", len(got))
+// TestFeedWriterReload verifies the server picks up a newer snapshot the writer
+// persists after the server started (the cross-process poll -> resident daemon
+// path): an initially-absent snapshot serves an empty feed, and once the writer
+// writes one the server reloads it on the next request.
+func TestFeedWriterReload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, Deps{}, path)
+
+	// No snapshot yet: the empty-q feed serves nothing.
+	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
+		t.Fatalf("pre-write feed = %d items, want 0", len(got))
+	}
+
+	// A cycle (here, the writer) persists a snapshot; the next request reloads it.
+	entries := []seadex.Entry{{
+		AniListID: 7,
+		Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://nyaa.si/view/42", InfoHash: "aa" + strings.Repeat("b", 38),
+			IsBest: true, ReleaseGroup: "GRP",
+			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [GRP].mkv"}},
+		}},
+	}}
+	if err := NewFeedWriter("", path, nil).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	got, st := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
+	if len(got) != 1 || !st.feed {
+		t.Fatalf("post-write feed = %d items (feed=%v), want 1 reloaded item", len(got), st.feed)
+	}
+	if got[0].DownloadURL != "https://nyaa.si/download/42.torrent" {
+		t.Errorf("reloaded item download = %q", got[0].DownloadURL)
 	}
 }
 
@@ -257,7 +290,7 @@ func TestAnimeBytesMatching(t *testing.T) {
 
 	// End to end: an AB item (no info hash) matches the SeaDex set by tracker key.
 	set := &curation{byHash: map[string]bool{}, byKey: map[string]bool{"ab:1167293": true}}
-	raw := []Item{{Title: "[Momonoki] Frieren S01", InfoURL: prowlarrComments, GUID: prowlarrGUID}}
+	raw := []item{{Title: "[Momonoki] Frieren S01", InfoURL: prowlarrComments, GUID: prowlarrGUID}}
 	out := markAndDedupe(raw, set)
 	if len(out) != 1 || out[0].DownloadVolumeFactor != dvfBest {
 		t.Fatalf("AB item did not match/mark best: %+v", out)
@@ -365,7 +398,7 @@ func TestScopeFor(t *testing.T) {
 
 // findByGUID returns the feed item with the given guid (its tracker page URL),
 // or nil. Feed order is by update time, so tests look items up by identity.
-func findByGUID(items []Item, guid string) *Item {
+func findByGUID(items []item, guid string) *item {
 	for i := range items {
 		if items[i].GUID == guid {
 			return &items[i]
@@ -610,7 +643,7 @@ func TestABFeedRequiresPasskey(t *testing.T) {
 		return rec.Body.String()
 	}
 
-	noKey := New(&Config{}, Deps{})
+	noKey := New(&Config{}, Deps{}, "")
 	if body := serve(noKey, "/ab?t=search"); !strings.Contains(body, "<error") || !strings.Contains(body, "passkey") {
 		t.Errorf("ab empty-q without passkey: body = %q, want a Torznab <error> mentioning the passkey", body)
 	}
@@ -618,7 +651,7 @@ func TestABFeedRequiresPasskey(t *testing.T) {
 		t.Errorf("nyaa empty-q must not error: %q", body)
 	}
 
-	withKey := New(&Config{ABPasskey: "PASSKEY"}, Deps{})
+	withKey := New(&Config{ABPasskey: "PASSKEY"}, Deps{}, "")
 	if body := serve(withKey, "/ab?t=search"); strings.Contains(body, "<error") {
 		t.Errorf("ab empty-q with passkey must not error: %q", body)
 	}
@@ -630,7 +663,7 @@ func TestABFeedRequiresPasskey(t *testing.T) {
 // uploadvolumefactor 1), a floored seeders count, the SeaDex entry as comments,
 // and the info hash.
 func TestRenderSynthesizedItem(t *testing.T) {
-	out := renderFeed([]Item{{
+	out := renderFeed([]item{{
 		Title:                "Frieren Beyond Journey's End - S01 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR]",
 		GUID:                 "https://nyaa.si/view/1961373",
 		InfoURL:              "https://releases.moe/154587",
@@ -655,5 +688,80 @@ func TestRenderSynthesizedItem(t *testing.T) {
 		if !strings.Contains(out, w) {
 			t.Errorf("rendered feed missing %q\nfull output:\n%s", w, out)
 		}
+	}
+}
+
+// TestServe_requiresAPIKeyBeforeServingCaps verifies the API-key gate rejects a
+// missing or wrong apikey before any capabilities document is served, and that a
+// correct key yields the exact caps shape the arrs expect.
+func TestServe_requiresAPIKeyBeforeServingCaps(t *testing.T) {
+	ix := New(&Config{APIKey: "secret"}, Deps{}, "")
+
+	bad := httptest.NewRecorder()
+	ix.serve(bad, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=wrong", nil))
+	if bad.Code != http.StatusUnauthorized {
+		t.Fatalf("bad apikey status = %d, want %d", bad.Code, http.StatusUnauthorized)
+	}
+	if strings.Contains(bad.Body.String(), "<caps>") {
+		t.Errorf("bad apikey body contains caps response: %q", bad.Body.String())
+	}
+
+	missing := httptest.NewRecorder()
+	ix.serve(missing, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps", nil))
+	if missing.Code != http.StatusUnauthorized {
+		t.Fatalf("missing apikey status = %d, want %d", missing.Code, http.StatusUnauthorized)
+	}
+
+	good := httptest.NewRecorder()
+	ix.serve(good, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=secret", nil))
+	if good.Code != http.StatusOK {
+		t.Fatalf("good apikey status = %d, want %d; body=%q", good.Code, http.StatusOK, good.Body.String())
+	}
+	if ct := good.Header().Get("Content-Type"); ct != "application/xml; charset=utf-8" {
+		t.Errorf("caps content type = %q, want application/xml; charset=utf-8", ct)
+	}
+	body := good.Body.String()
+	for _, want := range []string{
+		"<caps>",
+		`<search available="yes" supportedParams="q"/>`,
+		`<tv-search available="yes" supportedParams="q,season,ep"/>`,
+		`<movie-search available="yes" supportedParams="q"/>`,
+		`<category id="5000" name="TV"><subcat id="5070" name="Anime"/></category>`,
+		`<category id="2000" name="Movies"/>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("caps response missing %q\nfull body:\n%s", want, body)
+		}
+	}
+}
+
+// TestFilterByCats_appliesTorznabCategorySemantics pins the Torznab category
+// filter contract: an Anime item satisfies a TV-parent request, Movies excludes
+// Anime, and an uncategorized item always passes through (Prowlarr already
+// applied the upstream category filter).
+func TestFilterByCats_appliesTorznabCategorySemantics(t *testing.T) {
+	items := []item{
+		{Title: "anime", Categories: []int{catAnime}},
+		{Title: "movie", Categories: []int{catMovies}},
+		{Title: "uncategorized"},
+	}
+
+	if got := filterByCats(items, nil); len(got) != 3 {
+		t.Fatalf("empty category filter returned %d items, want 3", len(got))
+	}
+
+	anime := filterByCats(items, map[int]bool{catAnime: true})
+	if len(anime) != 2 || anime[0].Title != "anime" || anime[1].Title != "uncategorized" {
+		t.Fatalf("anime filter returned %#v, want anime plus uncategorized passthrough", anime)
+	}
+
+	tv := filterByCats(items, map[int]bool{catTV: true})
+	if len(tv) != 2 || tv[0].Title != "anime" || tv[1].Title != "uncategorized" {
+		t.Fatalf("TV parent filter returned %#v, want anime subcategory plus uncategorized passthrough", tv)
+	}
+
+	movies := filterByCats(items, map[int]bool{catMovies: true})
+	if len(movies) != 2 || movies[0].Title != "movie" || movies[1].Title != "uncategorized" {
+		t.Fatalf("movies filter returned %#v, want movie plus uncategorized passthrough", movies)
 	}
 }

@@ -26,6 +26,16 @@ import (
 	"github.com/cplieger/seadex-scout/internal/state"
 )
 
+// FeedWriter rebuilds and persists the indexer's Torznab feed from the cycle's
+// shared SeaDex snapshot, so the findings and the RSS feed the arrs grab from
+// are produced by one data engine from a single fetch. The indexer's feed writer
+// implements it; Deps.Feed is nil when no Torznab feed is configured and the
+// cycle then does no feed work. Because Rebuild persists the feed, a cycle run
+// by the `poll` subcommand refreshes a resident daemon's feed too.
+type FeedWriter interface {
+	Rebuild(ctx context.Context, entries []seadex.Entry, idx *mapping.Index) error
+}
+
 // Deps are the assembled components a Scout runs a cycle with.
 type Deps struct {
 	Logger   *slog.Logger
@@ -38,6 +48,10 @@ type Deps struct {
 	Auditor  *audit.Auditor
 	Reporter *report.Reporter
 	AniList  *anilist.Client
+	// Feed rebuilds and persists the indexer's Torznab feed from each cycle's
+	// SeaDex snapshot. Nil when no Torznab feed is configured (the cycle then
+	// skips all feed work).
+	Feed FeedWriter
 }
 
 // Scout runs compare cycles from its assembled dependencies.
@@ -63,25 +77,66 @@ func (s *Scout) Cycle(ctx context.Context) (healthy bool) {
 	start := time.Now()
 	st := s.loadState(ctx)
 
-	snap, err := s.deps.Library.Walk(ctx)
-	if err != nil {
-		s.log.Error("library walk failed; cycle unhealthy", "error", err)
-		return false
+	snap, walkErr := s.deps.Library.Walk(ctx)
+	if walkErr != nil {
+		s.log.Error("library walk failed; cycle unhealthy", "error", walkErr)
+		// Alert-only (no Torznab feed): a failed walk is unhealthy and there is
+		// nothing else to do, so skip the SeaDex/Fribb fetch (the pre-fold
+		// behaviour). With a feed configured, fall through to refresh it - it
+		// needs only SeaDex + Fribb, not the arrs - before returning unhealthy.
+		if s.deps.Feed == nil {
+			return false
+		}
 	}
 
+	// The shared SeaDex + Fribb snapshot feeds BOTH halves: the Torznab feed
+	// (arr-independent) and the compare pass below. Fetching once here is what
+	// keeps a notification and what the arrs see in the feed on the same data.
 	mapCache, idx, mapErr := s.deps.Mapping.Load(ctx, &st.Mapping)
 	if mapErr != nil {
 		s.log.Warn("mapping degraded", "error", mapErr, "usable_records", idx.Len())
 	}
+	entries, seaErr := s.deps.SeaDex.FetchEntries(ctx)
 
-	entries, err := s.deps.SeaDex.FetchEntries(ctx)
-	if err != nil {
+	// Rebuild the Torznab feed from the shared snapshot, independent of the arr
+	// walk (see rebuildFeed): a notification and what the arrs see in the feed
+	// come from this one fetch.
+	s.rebuildFeed(ctx, entries, idx, seaErr)
+
+	// From here the compare pass is gated on the arr walk (the health signal): a
+	// failed walk is unhealthy and leaves findings untouched (no save), while the
+	// feed above was still refreshed.
+	if walkErr != nil {
+		return false
+	}
+	if mapErr != nil && idx.Len() == 0 {
+		// No usable map at all (not even a stale cache) means every entry would
+		// fail to resolve and the reporter would falsely mark all prior findings
+		// resolved. Preserve findings and save only the refreshed library
+		// snapshot. A stale-but-usable map (idx.Len() > 0) is still
+		// degraded-but-comparable and flows into the normal cycle below.
 		s.degradedSave(ctx, &st, snap, &mapCache)
-		s.log.Warn("seadex fetch failed; skipping comparison, findings preserved", "error", err)
+		s.log.Warn("mapping unusable; skipping comparison, findings preserved", "error", mapErr)
+		return true
+	}
+	if seaErr != nil {
+		s.degradedSave(ctx, &st, snap, &mapCache)
+		s.log.Warn("seadex fetch failed; skipping comparison, findings preserved", "error", seaErr)
 		return true
 	}
 
 	result := s.deps.Matcher.Match(ctx, entries, &snap, idx, st.Memo)
+	if result.Degraded {
+		// A transient AniList outage left needed fallback lookups incomplete, so
+		// some entries are missing matches they would normally resolve. Comparing
+		// now would treat those absent findings as resolved. Save the refreshed
+		// library/mapping/memo (the memo keeps the lookups that did succeed) but
+		// leave the finding dedupe table untouched.
+		st.Library, st.Mapping, st.Memo = snap, mapCache, result.Memo
+		s.save(ctx, &st)
+		s.log.Warn("anilist degraded; skipping comparison, findings preserved")
+		return true
+	}
 	findings := s.deps.Comparer.Compare(result.Matches)
 
 	// A cold start (a fresh install, or a lost/reset cache) has no dedupe table
@@ -115,6 +170,20 @@ func (s *Scout) Cycle(ctx context.Context) (healthy bool) {
 	st.Library, st.Mapping, st.Memo, st.Findings = snap, mapCache, result.Memo, newFindings
 	s.save(ctx, &st)
 	return true
+}
+
+// rebuildFeed refreshes the indexer's Torznab feed from the cycle's shared
+// SeaDex snapshot, independent of the arr walk (the feed needs only SeaDex +
+// Fribb, so an arr outage must not freeze it). It is a no-op when no feed is
+// configured or the SeaDex fetch failed - the last-good feed is then kept; a
+// nil/empty map degrades only categorization (items fall back to anime).
+func (s *Scout) rebuildFeed(ctx context.Context, entries []seadex.Entry, idx *mapping.Index, seaErr error) {
+	if s.deps.Feed == nil || seaErr != nil || len(entries) == 0 {
+		return
+	}
+	if err := s.deps.Feed.Rebuild(ctx, entries, idx); err != nil {
+		s.log.Warn("indexer feed rebuild failed; keeping previous feed", "error", err)
+	}
 }
 
 // Report runs a one-shot SeaDex-alignment audit over the current library and

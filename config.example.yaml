@@ -16,7 +16,10 @@ radarr:
   public_url: ""
 
 mode: "daemon" # daemon (scheduled) | report (one-shot, exit)
-poll_interval: "12h" # also runs on start; off/disabled/0 = external `poll` trigger
+# One cadence for BOTH the alert engine and the Torznab feed, so a notification
+# and what the arrs grab from the feed come from the same refresh. Runs on start;
+# off/disabled/0 = no internal timer, trigger each cycle with the `poll` subcommand.
+poll_interval: "3h"
 
 log:
   level: "info" # debug | info | warn | error
@@ -43,6 +46,7 @@ report:
 # Indexer engine — optional Torznab feed; the arrs filter it (profiles + CFs)
 # ----------------------------------------------------------------------------
 # Served by the daemon whenever a Torznab URL is set (both empty = off, no port).
+# Its curation set + RSS feed rebuild together with the alert loop on poll_interval.
 indexer:
   feed_api_key: "" # the arrs send this, the feed checks it (openssl rand -hex 16)
   nyaa_torznab_url: "" # Prowlarr Nyaa Torznab URL, e.g. http://prowlarr:9696/1/api ("" = off)

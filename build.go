@@ -87,6 +87,7 @@ func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
 		}),
 		Reporter: report.NewReporter(log),
 		AniList:  anilistClient,
+		Feed:     feedWriter(cfg, log),
 	})
 
 	cleanup := func() {
@@ -111,21 +112,35 @@ func indexerConfigured(cfg *config.Config) bool {
 	return cfg.IndexerNyaaTorznabURL != "" || cfg.IndexerABTorznabURL != ""
 }
 
-// builtIndexer holds the assembled Torznab feed and the resources to release.
+// feedWriter returns the indexer feed writer the compare cycle drives when the
+// Torznab feed is configured, else nil (the cycle then does no feed work). It
+// persists the materialized feed snapshot (curation set + synthesized RSS feeds)
+// the indexer HTTP server reads, so one cycle feeds both the findings and the
+// feed from a single SeaDex fetch. It holds no clients: the cycle owns the
+// shared SeaDex + Fribb fetch and hands the results to Rebuild.
+func feedWriter(cfg *config.Config, log *slog.Logger) scout.FeedWriter {
+	if !indexerConfigured(cfg) {
+		return nil
+	}
+	return indexer.NewFeedWriter(cfg.IndexerABPasskey, config.DefaultIndexerFeedPath, log.With("component", "indexer"))
+}
+
+// builtIndexer holds the assembled Torznab feed server and the resources to
+// release.
 type builtIndexer struct {
 	indexer *indexer.Indexer
 	cleanup func()
 }
 
-// buildIndexer wires the Torznab feed the daemon runs alongside the compare
-// loop: a SeaDex client for the curation set and an HTTP client for Prowlarr's
-// per-indexer Torznab endpoints. Its logger carries component=indexer so its
-// lines are easy to separate from the compare findings in a shared slog stream.
+// buildIndexer wires the Torznab feed server the daemon runs alongside the
+// compare loop. It needs only an HTTP client for Prowlarr's per-indexer Torznab
+// endpoints (a search proxies them); the curation set and RSS feeds it serves
+// come from the snapshot the compare cycle persists (see feedWriter), which it
+// reads from config.DefaultIndexerFeedPath. Its logger carries component=indexer
+// so its lines separate cleanly from the compare findings in a shared slog stream.
 func buildIndexer(cfg *config.Config) builtIndexer {
 	log := slog.Default().With("component", "indexer")
-	seadexHTTP := httpx.NewClient(seadexTimeout)
 	prowlarrHTTP := httpx.NewClient(indexerUpstreamTimeout)
-	mappingHTTP := httpx.NewClient(mappingTimeout)
 
 	ix := indexer.New(&indexer.Config{
 		APIKey:         cfg.IndexerAPIKey,
@@ -134,15 +149,11 @@ func buildIndexer(cfg *config.Config) builtIndexer {
 		ProwlarrAPIKey: cfg.IndexerProwlarrAPIKey,
 		ABPasskey:      cfg.IndexerABPasskey,
 	}, indexer.Deps{
-		SeaDex:  seadex.NewClient(seadexHTTP, config.DefaultSeaDexBaseURL, config.DefaultSeaDexPageDelay, log),
-		HTTP:    prowlarrHTTP,
-		Mapping: mapping.NewLoader(mappingHTTP, config.DefaultMappingURL, config.DefaultMappingOverrides, config.DefaultMappingRefresh, log),
-		Logger:  log,
-	})
+		HTTP:   prowlarrHTTP,
+		Logger: log,
+	}, config.DefaultIndexerFeedPath)
 	cleanup := func() {
-		httpx.Close(seadexHTTP)
 		httpx.Close(prowlarrHTTP)
-		httpx.Close(mappingHTTP)
 	}
 	return builtIndexer{indexer: ix, cleanup: cleanup}
 }

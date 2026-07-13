@@ -26,10 +26,10 @@ import (
 	"time"
 
 	"github.com/cplieger/httpx/v2"
+	"github.com/cplieger/seadex-scout/internal/appinfo"
 )
 
 const (
-	userAgent    = "seadex-scout (+https://github.com/cplieger/seadex-scout)"
 	maxBodyBytes = 1 << 20
 	maxAttempts  = 3
 	baseDelay    = time.Second
@@ -38,6 +38,11 @@ const (
 	lowRemaining = 2
 	// defaultRetryAfter is used when a 429 carries no Retry-After header.
 	defaultRetryAfter = 5 * time.Second
+	// maxRetryAfter caps a server-supplied Retry-After (or reset-window) wait so a
+	// pathological/hostile header cannot stall the AniList fallback and, via penalize,
+	// every subsequent lookup. httpx.RetryWithBackoff and the throttle use the hint
+	// verbatim, so the cap must be applied here.
+	maxRetryAfter = time.Minute
 )
 
 // ErrNotFound reports that AniList has no media for the requested ID.
@@ -172,7 +177,7 @@ func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", appinfo.UserAgent)
 
 	resp, err := c.http.Do(req) //nolint:bodyclose // drained and closed via httpx.DrainClose below
 	if err != nil {
@@ -185,6 +190,9 @@ func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 		wait := httpx.ParseRetryAfter(resp.Header.Get("Retry-After"))
 		if wait <= 0 {
 			wait = defaultRetryAfter
+		}
+		if wait > maxRetryAfter {
+			wait = maxRetryAfter
 		}
 		c.throttle.penalize(wait)
 		return nil, &rateLimitedError{retryAfter: wait}
@@ -213,6 +221,10 @@ func (c *Client) observeRateHeaders(resp *http.Response) {
 			wait = until
 		}
 	}
+	if wait > maxRetryAfter {
+		wait = maxRetryAfter
+	}
+	c.rlWaits.Add(1)
 	c.log.Debug("anilist: low rate budget, backing off", "remaining", remaining, "wait", wait.Round(time.Second))
 	c.throttle.penalize(wait)
 }
