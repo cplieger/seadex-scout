@@ -16,7 +16,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/cplieger/atomicfile/v2"
@@ -25,8 +24,8 @@ import (
 )
 
 const (
-	// maxMapBytes bounds the Fribb download before decode.
-	maxMapBytes = 64 << 20
+	// maxMapBytes bounds the Fribb download before decode (~2.7x the real ~5.9MB body).
+	maxMapBytes = 16 << 20
 	// maxOverrideBytes bounds the local overrides file.
 	maxOverrideBytes = 4 << 20
 	maxAttempts      = 3
@@ -168,6 +167,20 @@ func (l *Loader) Load(ctx context.Context, prev *Cache) (Cache, *Index, error) {
 	return next, idx, err
 }
 
+// staleOrFail returns the stale cache when prev holds records (wrapping cause
+// when non-nil), otherwise the no-cache error. It collapses refreshCache's
+// repeated degrade-to-stale-or-fail branches into one call so each failure site
+// stays flat.
+func staleOrFail(prev *Cache, staleMsg string, cause, noCache error) (Cache, error) {
+	if len(prev.Records) > 0 {
+		if cause != nil {
+			return *prev, fmt.Errorf("mapping: %s, using stale map (%d records): %w", staleMsg, len(prev.Records), cause)
+		}
+		return *prev, fmt.Errorf("mapping: %s, using stale map (%d records)", staleMsg, len(prev.Records))
+	}
+	return *prev, noCache
+}
+
 // refreshCache decides whether to reuse, re-validate, or re-download the Fribb
 // map and returns the cache to persist.
 func (l *Loader) refreshCache(ctx context.Context, prev *Cache) (Cache, error) {
@@ -178,10 +191,8 @@ func (l *Loader) refreshCache(ctx context.Context, prev *Cache) (Cache, error) {
 
 	res, err := l.conditionalGet(ctx, prev)
 	if err != nil {
-		if len(prev.Records) > 0 {
-			return *prev, fmt.Errorf("mapping: refresh failed, using stale map (%d records): %w", len(prev.Records), err)
-		}
-		return *prev, fmt.Errorf("mapping: initial fetch failed and no cache available: %w", err)
+		return staleOrFail(prev, "refresh failed", err,
+			fmt.Errorf("mapping: initial fetch failed and no cache available: %w", err))
 	}
 	if res.notModified {
 		if len(prev.Records) == 0 {
@@ -195,16 +206,22 @@ func (l *Loader) refreshCache(ctx context.Context, prev *Cache) (Cache, error) {
 
 	records, err := parseFribb(res.body, l.log)
 	if err != nil {
-		if len(prev.Records) > 0 {
-			return *prev, fmt.Errorf("mapping: parse failed, using stale map (%d records): %w", len(prev.Records), err)
-		}
-		return *prev, fmt.Errorf("mapping: parse failed and no cache available: %w", err)
+		return staleOrFail(prev, "parse failed", err,
+			fmt.Errorf("mapping: parse failed and no cache available: %w", err))
 	}
 	if len(records) == 0 {
-		if len(prev.Records) > 0 {
-			return *prev, fmt.Errorf("mapping: refresh returned zero records, using stale map (%d records)", len(prev.Records))
-		}
-		return *prev, errors.New("mapping: refresh returned zero records and no cache available")
+		return staleOrFail(prev, "refresh returned zero records", nil,
+			errors.New("mapping: refresh returned zero records and no cache available"))
+	}
+	// The tolerant per-record decoders in fribb.go deliberately zero individual
+	// odd fields, so a wholesale upstream loss of the arr-ID fields can decode as
+	// a full set of otherwise-valid records that no longer map to any Sonarr or
+	// Radarr item. Accepting that as a successful refresh would replace a usable
+	// stale map with useless records; require at least one arr identifier and
+	// otherwise keep the stale cache (like the zero-record branch above).
+	if !hasAnyArrIdentifier(records) {
+		return staleOrFail(prev, "refresh returned no records with an arr identifier", nil,
+			errors.New("mapping: refresh returned no records with an arr identifier and no cache available"))
 	}
 	l.log.Info("mapping: refreshed", "records", len(records))
 	return Cache{
@@ -213,6 +230,21 @@ func (l *Loader) refreshCache(ctx context.Context, prev *Cache) (Cache, error) {
 		ETag:         res.etag,
 		LastModified: res.lastModified,
 	}, nil
+}
+
+// hasAnyArrIdentifier reports whether at least one record retains an arr
+// identifier (TVDB, TMDB TV/movie, or IMDb). It backs refreshCache's acceptance
+// guard: the tolerant Fribb decoders never fail a record for a missing id, so a
+// refresh can only be trusted to map to the arrs when some record still carries
+// one.
+func hasAnyArrIdentifier(records []Record) bool {
+	for i := range records {
+		r := &records[i]
+		if r.TvdbID != 0 || r.TmdbTV != 0 || len(r.TmdbMovies) > 0 || len(r.IMDbIDs) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // fetchResult is one conditional-GET outcome.
@@ -333,7 +365,7 @@ func parseOverrides(data []byte) ([]Record, error) {
 		return nil, err
 	}
 	for i := range records {
-		records[i].Type = strings.ToUpper(strings.TrimSpace(records[i].Type))
+		records[i].Type = NormalizeType(records[i].Type)
 	}
 	return records, nil
 }

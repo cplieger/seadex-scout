@@ -4,7 +4,9 @@ ENV GOTOOLCHAIN=auto
 
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go mod download
 COPY *.go ./
 COPY config.example.yaml ./
 COPY internal/ internal/

@@ -171,7 +171,11 @@ func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 		if len(all) > maxEntries {
 			return nil, fmt.Errorf("seadex: entry count exceeded cap %d (upstream misbehaving)", maxEntries)
 		}
-		if page >= list.TotalPages || len(list.Items) == 0 {
+		done, err := pageComplete(page, len(list.Items), list.TotalPages)
+		if err != nil {
+			return nil, err
+		}
+		if done {
 			completed = true
 			break
 		}
@@ -185,6 +189,19 @@ func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 	}
 	c.log.Debug("seadex entries fetched", "entries", len(all))
 	return all, nil
+}
+
+// pageComplete reports whether pagination is done after a page, or an error
+// when the page is empty before the reported total (a truncated view).
+func pageComplete(page, itemCount, totalPages int) (done bool, err error) {
+	if itemCount == 0 {
+		if page < totalPages {
+			return false, fmt.Errorf("seadex: page %d empty before reported total %d pages; "+
+				"refusing to compare against a truncated view", page, totalPages)
+		}
+		return true, nil
+	}
+	return page >= totalPages, nil
 }
 
 // fetchPage fetches and decodes a single page of entries.

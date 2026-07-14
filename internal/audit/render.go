@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -209,9 +210,42 @@ func links(row *Row) string {
 	return strings.Join(parts, linkSep)
 }
 
-// mdLink builds a Markdown link with a table-cell-safe label.
-func mdLink(label, url string) string {
-	return "[" + escapeCell(label) + "](" + url + ")"
+// escapeLinkURL percent-encodes the characters in a URL that would break out
+// of a Markdown link's ](...) destination or the surrounding table cell/row:
+// parentheses, angle brackets, pipes, and every ASCII whitespace form (space,
+// tab, vertical tab, form feed, CR, LF). An ordinary URL is unchanged.
+func escapeLinkURL(u string) string {
+	r := strings.NewReplacer(
+		" ", "%20",
+		"\t", "%09",
+		"\v", "%0B",
+		"\f", "%0C",
+		"(", "%28",
+		")", "%29",
+		"<", "%3C",
+		">", "%3E",
+		"|", "%7C",
+		"\n", "%0A",
+		"\r", "%0D",
+	)
+	return r.Replace(u)
+}
+
+// mdLink builds a Markdown link with a table-cell-safe label and a
+// metacharacter-escaped destination. It emits a link only when the destination
+// parses as an http/https URL; any other scheme (javascript:, data:, …) or an
+// unparseable destination degrades to the escaped label as plain text, so an
+// untrusted tracker URL cannot inject an active non-http link.
+func mdLink(label, rawURL string) string {
+	safeLabel := escapeCell(label)
+	trimmed := strings.TrimSpace(rawURL)
+	if u, err := url.Parse(trimmed); err == nil {
+		switch strings.ToLower(u.Scheme) {
+		case "http", "https":
+			return "[" + safeLabel + "](" + escapeLinkURL(trimmed) + ")"
+		}
+	}
+	return safeLabel
 }
 
 // displayBestGroups returns the distinct best-release groups in their original
@@ -245,11 +279,28 @@ func rowsWithVerdict(rows []Row, v Verdict) []Row {
 	return out
 }
 
-// escapeCell makes a string safe inside a Markdown table cell (escape pipes,
-// flatten newlines).
+// escapeCell makes a string safe inside a Markdown table cell. It uses HTML
+// numeric/character entities instead of backslash escapes so a pre-existing
+// backslash in the text cannot cancel an inserted escape (\] or \| could
+// otherwise break out of a link label or table cell). It neutralizes the raw
+// HTML metacharacters (& < >) so untrusted text such as <img ...> cannot
+// survive as raw Markdown HTML, encodes the table/link delimiters (| [ ]) and
+// the backslash itself, and flattens CR/LF. strings.NewReplacer performs a
+// single non-overlapping left-to-right pass and never re-scans its replacement
+// output, so encoding & first does not double-encode the entities it inserts.
 func escapeCell(s string) string {
-	s = strings.ReplaceAll(s, "|", "\\|")
-	return strings.ReplaceAll(s, "\n", " ")
+	r := strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+		"\\", "&#92;",
+		"|", "&#124;",
+		"[", "&#91;",
+		"]", "&#93;",
+		"\n", " ",
+		"\r", " ",
+	)
+	return r.Replace(s)
 }
 
 // orEmpty returns the empty-cell marker for a blank string.

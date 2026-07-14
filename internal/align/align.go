@@ -12,7 +12,7 @@
 package align
 
 import (
-	"sort"
+	"slices"
 
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
@@ -91,7 +91,7 @@ func SummarizeWholeSeries(item *library.Item, best, alt []string) Summary {
 			s.AnyUnlisted = true
 		}
 	}
-	sort.Strings(s.Groups)
+	slices.Sort(s.Groups)
 	return s
 }
 

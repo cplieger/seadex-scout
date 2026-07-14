@@ -137,15 +137,23 @@ func findingKVs(f *compare.Finding) []any {
 // first non-AnimeBytes link is treated as the public/Nyaa source (Nyaa is by
 // far the dominant public tracker on SeaDex).
 func trackerURLs(links []compare.ReleaseLink) (nyaa, ab string) {
+	var firstPublic string
 	for i := range links {
 		switch {
 		case release.IsAnimeBytes(links[i].Tracker):
 			if ab == "" {
 				ab = links[i].URL
 			}
-		case nyaa == "":
-			nyaa = links[i].URL
+		case strings.EqualFold(strings.TrimSpace(links[i].Tracker), "nyaa"):
+			if nyaa == "" {
+				nyaa = links[i].URL
+			}
+		case firstPublic == "":
+			firstPublic = links[i].URL
 		}
+	}
+	if nyaa == "" {
+		nyaa = firstPublic
 	}
 	return nyaa, ab
 }

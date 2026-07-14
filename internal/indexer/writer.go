@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/seadex-scout/internal/mapping"
@@ -13,8 +12,11 @@ import (
 )
 
 const (
-	feedDirMode  = 0o755
-	feedFileMode = 0o644
+	feedDirMode = 0o755
+	// feed.json can embed the AB passkey in synthesized AnimeBytes download
+	// URLs, so it is owner-only. The daemon and the `poll` subcommand both run
+	// as the same container user, so 0o600 stays read/write-compatible.
+	feedFileMode = 0o600
 	// maxFeedBytes bounds the persisted feed snapshot on read.
 	maxFeedBytes = 64 << 20
 )
@@ -89,7 +91,7 @@ func buildSnapshot(entries []seadex.Entry, abPasskey string, classify func(alID 
 	for i := range entries {
 		for j := range entries[i].Torrents {
 			t := &entries[i].Torrents[j]
-			if h := strings.ToLower(strings.TrimSpace(t.InfoHash)); h != "" {
+			if h := validInfoHash(t.InfoHash); h != "" {
 				set.byHash[h] = set.byHash[h] || t.IsBest
 			}
 			if k := trackerKey(t.Tracker, t.URL); k != "" {

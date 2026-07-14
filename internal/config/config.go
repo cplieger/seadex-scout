@@ -16,15 +16,17 @@ package config
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/scheduler"
 	"github.com/cplieger/slogx"
 	"go.yaml.in/yaml/v3"
@@ -163,12 +165,11 @@ type logFile struct {
 // here.
 func defaultFileConfig() fileConfig {
 	return fileConfig{
-		Sonarr:       arrFile{URL: "http://sonarr:8989"},
-		Radarr:       arrFile{URL: "http://radarr:7878"},
-		Mode:         RunModeDaemon,
-		Report:       reportFile{Dir: DefaultReportDir},
-		Log:          logFile{Level: "info", Format: "json"},
-		PollInterval: "3h",
+		Sonarr: arrFile{URL: "http://sonarr:8989"},
+		Radarr: arrFile{URL: "http://radarr:7878"},
+		Mode:   RunModeDaemon,
+		Report: reportFile{Dir: DefaultReportDir},
+		Log:    logFile{Level: "info", Format: "json"},
 	}
 }
 
@@ -224,21 +225,22 @@ type Config struct {
 // runtime Config. It returns an error on a missing/oversized file or invalid
 // YAML; call Validate for semantic checks.
 func Load(path string) (Config, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return Config{}, fmt.Errorf("open config %s: %w", path, err)
-	}
-	defer f.Close()
-
-	data, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
+	// Read through the shared atomicfile bounded reader (the same primitive
+	// writeStarterConfig and internal/state use), which enforces the size cap and
+	// returns the atomicfile.ErrFileTooLarge sentinel on an oversized file.
+	// Config load is a synchronous startup step with no cancellation point, so it
+	// passes context.Background(), matching writeStarterConfig.
+	data, err := atomicfile.ReadBounded(context.Background(), path, maxConfigBytes)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config %s: %w", path, err)
 	}
-	if len(data) > maxConfigBytes {
-		return Config{}, fmt.Errorf("config %s exceeds %d bytes", path, maxConfigBytes)
-	}
 
 	expanded := os.Expand(string(data), expandEnvSafe)
+	if refs := unresolvedAllowlistedRefs(expanded); len(refs) > 0 {
+		slog.Warn("config references environment variables that are not set; "+
+			"the literal ${VAR} is kept and will likely fail authentication",
+			"vars", strings.Join(refs, ","))
+	}
 	fc := defaultFileConfig()
 	if err := yaml.Unmarshal([]byte(expanded), &fc); err != nil {
 		return Config{}, fmt.Errorf("parse config %s: %w", path, err)
@@ -322,10 +324,10 @@ func (c *Config) Validate() error {
 	if c.RunMode != RunModeDaemon && c.RunMode != RunModeReport {
 		return fmt.Errorf("mode must be %q or %q, got %q", RunModeDaemon, RunModeReport, c.RunMode)
 	}
-	if err := c.validateArrPair("sonarr", c.SonarrURL, c.SonarrAPIKey); err != nil {
+	if err := validateArrPair("sonarr", c.SonarrURL, c.SonarrAPIKey); err != nil {
 		return err
 	}
-	if err := c.validateArrPair("radarr", c.RadarrURL, c.RadarrAPIKey); err != nil {
+	if err := validateArrPair("radarr", c.RadarrURL, c.RadarrAPIKey); err != nil {
 		return err
 	}
 	if !c.SonarrEnabled() && !c.RadarrEnabled() {
@@ -350,12 +352,25 @@ func (c *Config) validateIndexer() error {
 	if err := validateHTTPURL("indexer.nyaa_torznab_url", c.IndexerNyaaTorznabURL); err != nil {
 		return err
 	}
-	return validateHTTPURL("indexer.ab_torznab_url", c.IndexerABTorznabURL)
+	if err := validateHTTPURL("indexer.ab_torznab_url", c.IndexerABTorznabURL); err != nil {
+		return err
+	}
+	// A search proxies Prowlarr using indexer.prowlarr_api_key in the X-Api-Key
+	// header. An empty key is accepted rather than rejected (it is valid when
+	// Prowlarr has auth "Disabled for Local Addresses"), but the common case is a
+	// misconfiguration: Prowlarr then returns 401 for every search and the feed
+	// silently serves nothing from a search. Warn so the operator gets a
+	// config-time signal without breaking the legitimate no-auth deployment.
+	if c.IndexerProwlarrAPIKey == "" {
+		slog.Warn("indexer.prowlarr_api_key is empty; searches proxy Prowlarr with no API key and " +
+			"will fail (401) unless Prowlarr auth is disabled for local addresses")
+	}
+	return nil
 }
 
 // validateArrPair rejects a half-configured enabled arr (a URL with no key or a
 // URL that is not an absolute http(s) URL with a host).
-func (c *Config) validateArrPair(name, rawURL, key string) error {
+func validateArrPair(name, rawURL, key string) error {
 	switch {
 	case rawURL == "" && key == "":
 		return nil
@@ -394,6 +409,24 @@ func isAllowedEnvVar(key string) bool {
 		strings.HasPrefix(key, "SEADEX_SCOUT_")
 }
 
+// allowlistedRefRe matches an allowlisted ${VAR} reference (the SONARR_/RADARR_/
+// SEADEX_SCOUT_ names expandEnvSafe expands).
+var allowlistedRefRe = regexp.MustCompile(`\$\{((?:SONARR_|RADARR_|SEADEX_SCOUT_)[A-Za-z0-9_]*)\}`)
+
+// unresolvedAllowlistedRefs returns allowlisted ${VAR} names still literal after
+// expansion (an app env var the operator referenced but never set).
+func unresolvedAllowlistedRefs(s string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range allowlistedRefRe.FindAllStringSubmatch(s, -1) {
+		if !seen[m[1]] {
+			seen[m[1]] = true
+			out = append(out, m[1])
+		}
+	}
+	return out
+}
+
 // expandEnvSafe expands an allowlisted, set env var, leaving anything else as
 // the literal ${key} so os.Expand does not blank out unknown references.
 func expandEnvSafe(key string) string {
@@ -421,6 +454,12 @@ func trimList(items []string) []string {
 // (case-insensitive, trims, accepts the long-form "warning" alias and slog
 // offset syntax), falling back to Info for an empty or unrecognized value.
 func parseLogLevel(s string) slog.Level {
-	lvl, _ := slogx.ParseLevel(s, slog.LevelInfo)
+	// ParseLevel returns ok=true for an empty value (an unset level is not an
+	// error), so ok=false is specifically a non-empty unrecognized level worth a
+	// warning rather than a silent fallback to Info.
+	lvl, ok := slogx.ParseLevel(s, slog.LevelInfo)
+	if !ok {
+		slog.Warn("unrecognized log.level; defaulting to info", "value", s)
+	}
 	return lvl
 }

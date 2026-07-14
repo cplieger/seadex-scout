@@ -16,7 +16,7 @@ package compare
 
 import (
 	"log/slog"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -332,8 +332,8 @@ func finalize(f *Finding, status Status, sev Severity) *Finding {
 // group, and SeaDex info hash, so a same-group quality swap (new info hash) or a
 // changed library state re-surfaces while an unchanged finding is suppressed.
 func dedupeKey(f *Finding) string {
-	groups := append([]string(nil), f.RecommendedGroups...)
-	sort.Strings(groups)
+	groups := slices.Clone(f.RecommendedGroups)
+	slices.Sort(groups)
 	return strings.Join([]string{
 		strconv.Itoa(f.AniListID),
 		string(f.Status),
@@ -380,6 +380,6 @@ func groupSet(cands []candidate) []string {
 		seen[g] = struct{}{}
 		groups = append(groups, g)
 	}
-	sort.Strings(groups)
+	slices.Sort(groups)
 	return groups
 }
