@@ -63,6 +63,8 @@ import (
 const (
 	// maxItems caps a rendered feed as a safety bound.
 	maxItems = 1000
+	// defaultCapsLimit is the default result count advertised in t=caps.
+	defaultCapsLimit = 100
 	// dvfBest / dvfAlt are the download-volume-factor markers: 0.75 -> Freeleech25
 	// (SeaDex best), 0.25 -> Freeleech75 (SeaDex alt).
 	dvfBest = "0.75"
@@ -283,6 +285,13 @@ func (ix *Indexer) reload(ctx context.Context) {
 		return
 	}
 	ix.mu.Lock()
+	// Re-check under the write lock: a concurrent reload may have installed a
+	// newer snapshot between our stat and here, so only install ours when it is
+	// still newer, never rewinding to an older read.
+	if !info.ModTime().After(ix.snapMod) {
+		ix.mu.Unlock()
+		return
+	}
 	ix.snap = snap
 	ix.snapMod = info.ModTime()
 	ix.mu.Unlock()
@@ -419,8 +428,10 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 
 // feedFor returns the synthesized RSS feed for a tracker scope (nyaa or ab),
 // read under the lock since reload replaces the snapshot when a cycle rewrites
-// it. The returned slice is read-only for callers (query only sub-slices/filters
-// a copy of the header via filterByCats, which allocates).
+// it. The returned slice is safe to use after the lock is released: reload
+// installs a fresh snapshot with new backing arrays and never mutates the old
+// ones, so a slice handed out here stays immutable even across a swap. Callers
+// must only read it (never append/write in place).
 func (ix *Indexer) feedFor(scope string) []item {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
@@ -636,9 +647,14 @@ func requestsMovies(cat string) bool {
 }
 
 // trailingEpisode matches the absolute episode number Sonarr appends to an anime
-// title query (a space then a 2-4 digit, zero-padded number, e.g. "Frieren 01"),
-// which marks a per-episode search the feed does not answer. A title that ends in
-// a number ("Mob Psycho 100") is unaffected unless an episode is also appended.
+// title query (a space then a 2-4 digit number, e.g. "Frieren 01"), which marks a
+// per-episode search the feed does not answer on the basic-search (t=search) path.
+// NOTE: this regex cannot tell an appended episode from a title that itself ends in
+// a 2-4 digit number, so "Mob Psycho 100" also matches and is skipped on the
+// t=search path (a 1-digit tail like "Steins;Gate 0" does NOT match). That is safe
+// for the whole-season grab: Sonarr issues the season search as t=tvsearch (the
+// tvsearch case above, always answered), which delivers the pack; this heuristic
+// only governs the basic-search fallback, where a per-episode barrage is the risk.
 var trailingEpisode = regexp.MustCompile(`\s+\d{2,4}$`)
 
 // filterByCats keeps items whose category is requested (an anime item satisfies

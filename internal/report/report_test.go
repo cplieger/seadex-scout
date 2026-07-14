@@ -131,3 +131,27 @@ func countMessages(records []capturedRecord, msg string) int {
 	}
 	return count
 }
+
+// TestMessage maps every finding status to its human-facing slog message,
+// pinning the msg= text that Loki alert rules key on. The default arm covers
+// an unmapped status.
+func TestMessage(t *testing.T) {
+	cases := []struct {
+		name   string
+		status compare.Status
+		want   string
+	}{
+		{name: "better", status: compare.StatusBetter, want: "better release available"},
+		{name: "mixed group", status: compare.StatusMixedGroup, want: "series spans multiple release groups, manual review"},
+		{name: "incomplete", status: compare.StatusIncomplete, want: "SeaDex entry is incomplete"},
+		{name: "theoretical", status: compare.StatusTheoretical, want: "SeaDex lists a theoretical best only"},
+		{name: "unmapped status", status: compare.Status("unmapped_status"), want: "seadex finding"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := message(tc.status); got != tc.want {
+				t.Errorf("message(%q) = %q, want %q", tc.status, got, tc.want)
+			}
+		})
+	}
+}

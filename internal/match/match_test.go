@@ -262,3 +262,16 @@ func TestMatchTitleFallbackAmbiguousIsUnmapped(t *testing.T) {
 		t.Errorf("an ambiguous title set must be unmapped, got source=%q inLibrary=%v", got.Source, got.InLibrary())
 	}
 }
+
+// TestMatchTitleFallbackRejectsWrongYear pins the conservative title+year
+// contract: when a year is supplied, it is a hard constraint. A lone library
+// item whose normalized title matches but whose year differs must NOT be
+// accepted (it would link an id-less entry to the wrong remake/movie); the
+// entry stays unmapped instead.
+func TestMatchTitleFallbackRejectsWrongYear(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{{Arr: library.ArrSonarr, ArrID: 1, Title: "Clannad", Year: 2007}}}
+	li := buildLibIndex(snap)
+	if got := li.findByTitle([]string{"Clannad"}, 2008, library.ArrSonarr, nil); got != nil {
+		t.Fatalf("wrong-year title fallback matched %+v; want nil", got)
+	}
+}

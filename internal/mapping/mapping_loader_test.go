@@ -37,7 +37,7 @@ func TestLoader_refreshCache_reusesFreshCache(t *testing.T) {
 func TestLoader_refreshCache_refreshesOn200(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("ETag", "v-new")
-		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv"}]`))
+		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
 	}))
 	defer ts.Close()
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, nopLogger())
@@ -164,6 +164,33 @@ func TestLoader_refreshCache_emptyRefreshKeepsStale(t *testing.T) {
 	}
 }
 
+// TestLoader_refreshCache_noArrIdentifierKeepsStale covers the acceptance guard:
+// a refresh whose records carry only anilist_id/type (a wholesale upstream loss
+// of the arr-ID fields, which the tolerant decoders zero rather than reject)
+// must be treated like the zero-record branch and retain the usable stale map.
+func TestLoader_refreshCache_noArrIdentifierKeepsStale(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"anilist_id":1,"type":"tv"},{"anilist_id":2,"type":"movie"}]`))
+	}))
+	defer ts.Close()
+
+	prev := &Cache{
+		FetchedAt: time.Now().Add(-2 * time.Hour),
+		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, nopLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	if err == nil {
+		t.Fatal("refresh with no arr identifiers returned nil error, want degraded error")
+	}
+	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
+		t.Fatalf("no-arr-id refresh records = %+v, want stale record id 1", next.Records)
+	}
+	if next.Records[0].TvdbID != 100 {
+		t.Errorf("no-arr-id refresh stale TvdbID = %d, want 100", next.Records[0].TvdbID)
+	}
+}
+
 func TestLoader_refreshCache_httpErrorKeepsStale(t *testing.T) {
 	const lastModified = "Mon, 02 Jan 2006 15:04:05 GMT"
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -230,16 +257,16 @@ func TestLoader_refreshCache_notModifiedEmptyCacheErrors(t *testing.T) {
 // falling through to a nil-error success.
 func TestLoader_refreshCache_noCacheAvailableErrors(t *testing.T) {
 	tests := []struct {
-		name    string
 		handler http.HandlerFunc
+		name    string
 	}{
-		{"parse fail", func(w http.ResponseWriter, r *http.Request) {
+		{name: "parse fail", handler: func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(`{ not-an-array`))
 		}},
-		{"zero records", func(w http.ResponseWriter, r *http.Request) {
+		{name: "zero records", handler: func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(`[]`))
 		}},
-		{"fetch fail", func(w http.ResponseWriter, r *http.Request) {
+		{name: "fetch fail", handler: func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "boom", http.StatusNotFound)
 		}},
 	}
@@ -256,5 +283,36 @@ func TestLoader_refreshCache_noCacheAvailableErrors(t *testing.T) {
 				t.Errorf("%s with no prior cache produced %d records, want 0", tc.name, len(next.Records))
 			}
 		})
+	}
+}
+
+func TestLoader_Load_degradedRefreshStillAppliesOverrides(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	dir := t.TempDir()
+	overrides := filepath.Join(dir, "overrides.json")
+	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":1,"type":"movie","tmdb_movies":[42]}]`), 0o644); err != nil {
+		t.Fatalf("write overrides: %v", err)
+	}
+
+	prev := &Cache{
+		FetchedAt: time.Now().Add(-2 * time.Hour),
+		ETag:      "v1",
+		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+	}
+	l := NewLoader(ts.Client(), ts.URL, overrides, time.Hour, nopLogger())
+	_, idx, err := l.Load(context.Background(), prev)
+	if err == nil {
+		t.Fatal("Load with a failed refresh returned nil error, want a degraded error")
+	}
+	rec, ok := idx.Lookup(1)
+	if !ok {
+		t.Fatal("degraded Load lost the stale record for id 1")
+	}
+	if rec.Type != "MOVIE" || len(rec.TmdbMovies) != 1 || rec.TmdbMovies[0] != 42 {
+		t.Errorf("degraded Load did not overlay overrides: got %+v, want Type MOVIE / TmdbMovies [42]", rec)
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"io"
 	"log/slog"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -39,6 +41,43 @@ func TestParseFribb(t *testing.T) {
 func TestParseFribb_nonArrayErrors(t *testing.T) {
 	if _, err := parseFribb([]byte(`{"anilist_id":1}`), discardLogger()); err == nil {
 		t.Fatal("parseFribb(object) = nil error, want error")
+	}
+}
+
+// TestParseFribb_recordCap pins the hard acceptance cap: a list exceeding
+// maxFribbRecords is rejected (so refreshCache keeps the stale cache) rather
+// than amplifying an upstream-controlled body into a huge in-memory record set,
+// while a below-cap list the size of the real ~40k-record Fribb file is still
+// accepted in full.
+func TestParseFribb_recordCap(t *testing.T) {
+	build := func(n int) []byte {
+		var b strings.Builder
+		b.WriteByte('[')
+		for i := range n {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			// Tiny but valid records with a non-zero AniList ID so they survive
+			// toRecord (the amplification path the cap defends against).
+			b.WriteString(`{"anilist_id":`)
+			b.WriteString(strconv.Itoa(i + 1))
+			b.WriteByte('}')
+		}
+		b.WriteByte(']')
+		return []byte(b.String())
+	}
+
+	if _, err := parseFribb(build(maxFribbRecords+1), discardLogger()); err == nil {
+		t.Fatalf("parseFribb(%d records) = nil error, want over-cap error", maxFribbRecords+1)
+	}
+
+	const below = 40000 // ~ the real Fribb file size, comfortably under the cap
+	records, err := parseFribb(build(below), discardLogger())
+	if err != nil {
+		t.Fatalf("parseFribb(%d records) returned error: %v", below, err)
+	}
+	if len(records) != below {
+		t.Fatalf("parseFribb kept %d records, want %d (real-size body must be accepted in full)", len(records), below)
 	}
 }
 
@@ -122,16 +161,16 @@ func TestStringList_UnmarshalJSON(t *testing.T) {
 
 func TestTmdbID_UnmarshalJSON(t *testing.T) {
 	tests := []struct {
+		wantMovie []int
 		name      string
 		in        string
 		wantTV    int
-		wantMovie []int
 	}{
-		{"tv object", `{"tv":5}`, 5, nil},
-		{"movie array", `{"movie":[7,8]}`, 0, []int{7, 8}},
-		{"bare number tolerated", `123`, 0, nil},
-		{"string tolerated", `"unknown"`, 0, nil},
-		{"null", `null`, 0, nil},
+		{name: "tv object", in: `{"tv":5}`, wantTV: 5},
+		{name: "movie array", in: `{"movie":[7,8]}`, wantMovie: []int{7, 8}},
+		{name: "bare number tolerated", in: `123`},
+		{name: "string tolerated", in: `"unknown"`},
+		{name: "null", in: `null`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

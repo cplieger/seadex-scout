@@ -1,8 +1,11 @@
 package config
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -158,5 +161,125 @@ func TestLoadExpandsAllowlistedEnv(t *testing.T) {
 	}
 	if err := c.Validate(); err != nil {
 		t.Errorf("Validate on loaded config: %v", err)
+	}
+}
+
+func TestLoadErrors(t *testing.T) {
+	dir := t.TempDir()
+
+	invalid := filepath.Join(dir, "invalid.yaml")
+	if err := os.WriteFile(invalid, []byte("sonarr: {enabled: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oversized := filepath.Join(dir, "oversized.yaml")
+	if err := os.WriteFile(oversized, make([]byte, maxConfigBytes+1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"missing file", filepath.Join(dir, "does-not-exist.yaml")},
+		{"invalid yaml", invalid},
+		{"oversized file", oversized},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := Load(tt.path); err == nil {
+				t.Errorf("Load(%s) = nil error, want error", tt.name)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsMalformedURLs(t *testing.T) {
+	base := func() Config {
+		return Config{RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k"}
+	}
+	tests := []struct {
+		mutate func(*Config)
+		name   string
+	}{
+		{func(c *Config) { c.SonarrURL = "http://[::1" }, "unparseable sonarr url"},
+		{func(c *Config) {
+			c.IndexerAPIKey = "fk"
+			c.IndexerNyaaTorznabURL = "http://[::1"
+		}, "unparseable nyaa indexer url"},
+		{func(c *Config) {
+			c.IndexerAPIKey = "fk"
+			c.IndexerABTorznabURL = "http://[::1"
+		}, "unparseable ab indexer url"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := base()
+			tt.mutate(&c)
+			if err := c.Validate(); err == nil {
+				t.Errorf("Validate() = nil error, want error for %s", tt.name)
+			}
+		})
+	}
+}
+
+func TestToConfigRadarrEnabledAndReportDirFallback(t *testing.T) {
+	fc := defaultFileConfig()
+	fc.Radarr = arrFile{Enabled: true, URL: " http://radarr:7878 ", APIKey: " rk ", PublicURL: " https://radarr.example.com "}
+	fc.Report = reportFile{Dir: "   "}
+
+	c := fc.toConfig()
+
+	if c.RadarrURL != "http://radarr:7878" || c.RadarrAPIKey != "rk" {
+		t.Errorf("enabled radarr not trimmed: url=%q key=%q", c.RadarrURL, c.RadarrAPIKey)
+	}
+	if c.RadarrPublicURL != "https://radarr.example.com" {
+		t.Errorf("radarr public_url = %q, want trimmed", c.RadarrPublicURL)
+	}
+	if c.ReportDir != DefaultReportDir {
+		t.Errorf("blank report dir should fall back to default, got %q", c.ReportDir)
+	}
+}
+
+func captureDefaultSlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+
+	var buf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &buf
+}
+
+func TestLoadWarnsOnUnresolvedAllowlistedEnv(t *testing.T) {
+	buf := captureDefaultSlog(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "sonarr:\n  enabled: true\n  url: http://sonarr:8989\n  api_key: ${SONARR_MISSING}\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SonarrAPIKey != "${SONARR_MISSING}" {
+		t.Errorf("SonarrAPIKey = %q, want unresolved literal", cfg.SonarrAPIKey)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "config references environment variables") || !strings.Contains(got, "SONARR_MISSING") {
+		t.Errorf("Load unresolved-env warning = %q, want message and variable name", got)
+	}
+}
+
+func TestParseLogLevelWarnsOnUnrecognizedValue(t *testing.T) {
+	buf := captureDefaultSlog(t)
+
+	if got := parseLogLevel("verbose"); got != slog.LevelInfo {
+		t.Errorf("parseLogLevel() = %v, want info fallback", got)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "unrecognized log.level") || !strings.Contains(got, "verbose") {
+		t.Errorf("parseLogLevel warning = %q, want message and rejected value", got)
 	}
 }

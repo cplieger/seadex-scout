@@ -1,6 +1,9 @@
 package indexer
 
-import "strings"
+import (
+	"net/url"
+	"strings"
+)
 
 // The indexer matches a Prowlarr result back to a SeaDex release by a stable
 // per-tracker key: the numeric id in the release's tracker page URL. SeaDex
@@ -46,15 +49,19 @@ func trackerKey(tracker, sourceURL string) string {
 // Prowlarr item's page URL) by detecting the tracker from the host, so it keys
 // the same way trackerKey does for the SeaDex side.
 func trackerKeyFromURL(raw string) string {
-	lower := strings.ToLower(raw)
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
 	switch {
-	case strings.Contains(lower, "nyaa"):
+	case host == "nyaa.si" || strings.HasSuffix(host, ".nyaa.si"):
 		if id := extractID(raw, "/view/"); id != "" {
-			return "nyaa:" + id
+			return upstreamNyaa + ":" + id
 		}
-	case strings.Contains(lower, "animebytes"):
+	case host == "animebytes.tv" || strings.HasSuffix(host, ".animebytes.tv"):
 		if id := animeBytesID(raw); id != "" {
-			return "ab:" + id
+			return upstreamAB + ":" + id
 		}
 	}
 	return ""
@@ -65,19 +72,19 @@ func trackerKeyFromURL(raw string) string {
 // Torznab items use the permalink form (`/torrent/{id}/group`) - the same id in
 // both. AnimeBytes exposes no info hash in Torznab, so this id is the only key
 // available for matching an AB release.
-func animeBytesID(url string) string {
-	if id := extractID(url, "/torrent/"); id != "" {
+func animeBytesID(rawURL string) string {
+	if id := extractID(rawURL, "/torrent/"); id != "" {
 		return id
 	}
-	return extractID(url, "torrentid=")
+	return extractID(rawURL, "torrentid=")
 }
 
-// extractID returns the token in url immediately after needle, up to the next
-// URL delimiter (?, #, /, &). It returns "" unless the token is a non-empty run
-// of ASCII digits, so a malformed or unexpected URL never yields a bogus key
-// (adopted from seadexerr's id extraction).
-func extractID(url, needle string) string {
-	_, after, found := strings.Cut(url, needle)
+// extractID returns the token in rawURL immediately after needle, up to the
+// next URL delimiter (?, #, /, &). It returns "" unless the token is a
+// non-empty run of ASCII digits, so a malformed or unexpected URL never yields
+// a bogus key (adopted from seadexerr's id extraction).
+func extractID(rawURL, needle string) string {
+	_, after, found := strings.Cut(rawURL, needle)
 	if !found {
 		return ""
 	}

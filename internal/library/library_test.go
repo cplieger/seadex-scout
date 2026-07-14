@@ -1,11 +1,13 @@
 package library
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -576,5 +578,176 @@ func TestWalkSonarrSeriesItemAggregatesGroupsSeasonsAndFingerprint(t *testing.T)
 	}
 	if it.Current.Codec != "x265" || it.Current.Resolution != "1080p" || !it.Current.DualAudio {
 		t.Errorf("Current = %+v, want x265/1080p/dual-audio from the episode MediaInfo", it.Current)
+	}
+}
+
+func TestWalkSonarrSeriesWithNoFilesHasNoGroups(t *testing.T) {
+	fs := &fakeSonarr{
+		series: []arrapi.Series{{ID: 1, Title: "Monitored NoFiles", TvdbID: 42}},
+		episodes: map[int][]arrapi.Episode{
+			1: {
+				{SeasonNumber: 1, EpisodeFile: nil},
+				{SeasonNumber: 2, EpisodeFile: nil},
+			},
+		},
+	}
+	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
+
+	snap, err := w.Walk(context.Background())
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	if len(snap.Items) != 1 {
+		t.Fatalf("items = %d, want 1", len(snap.Items))
+	}
+	it := snap.Items[0]
+	if it.HasFile {
+		t.Error("HasFile = true, want false for a series with no episode files")
+	}
+	if len(it.Groups) != 0 {
+		t.Errorf("Groups = %v, want empty for a series with no files", it.Groups)
+	}
+	if it.SeasonGroups != nil {
+		t.Errorf("SeasonGroups = %v, want nil for a series with no files", it.SeasonGroups)
+	}
+	if it.MixedGroups {
+		t.Error("MixedGroups = true, want false")
+	}
+	if it.Current.Group != "NOGRP" {
+		t.Errorf("Current.Group = %q, want NOGRP (group-less fallback)", it.Current.Group)
+	}
+}
+
+func TestWalkSonarrUnmatchedIncludeTagLogsWarning(t *testing.T) {
+	fs := &fakeSonarr{
+		series: []arrapi.Series{
+			{ID: 1, Title: "Kept", Tags: []int{7}},
+			{ID: 2, Title: "Dropped", Tags: []int{3}},
+		},
+		episodes: map[int][]arrapi.Episode{
+			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
+		},
+		tagIDs:    map[int]struct{}{7: {}},
+		unmatched: []string{"nonexistent"},
+	}
+	handler := &recordingHandler{}
+	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime", "nonexistent"}, Logger: slog.New(handler)})
+
+	snap, err := w.Walk(context.Background())
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	if len(snap.Items) != 1 || snap.Items[0].ArrID != 1 {
+		t.Fatalf("items = %+v, want only the tag-included series (id 1)", snap.Items)
+	}
+	if !handler.sawWarn() {
+		t.Error("no warning logged, want a warning that a configured tag matched no arr tag")
+	}
+}
+
+func TestWalkRadarrContextCancellationAfterListIsFatal(t *testing.T) {
+	fr := &fakeRadarr{movies: []arrapi.Movie{{ID: 1, Title: "Movie", HasFile: false}}}
+	w := NewWalker(&Config{Radarr: fr, Logger: discardLogger()})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := w.Walk(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Walk error = %v, want context.Canceled surfaced by the post-walk guard", err)
+	}
+}
+
+func TestWalkRadarrMovieWithoutFileHasNoGroups(t *testing.T) {
+	fr := &fakeRadarr{
+		movies: []arrapi.Movie{
+			{ID: 10, Title: "No File Movie", TmdbID: 99, HasFile: false},
+			{ID: 20, Title: "Flagged But Nil File", HasFile: true, MovieFile: nil},
+		},
+	}
+	w := NewWalker(&Config{Radarr: fr, Logger: discardLogger()})
+
+	snap, err := w.Walk(context.Background())
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	if len(snap.Items) != 2 {
+		t.Fatalf("items = %d, want 2", len(snap.Items))
+	}
+	for _, it := range snap.Items {
+		if it.HasFile {
+			t.Errorf("%s HasFile = true, want false for a movie with no file", it.Title)
+		}
+		if len(it.Groups) != 0 {
+			t.Errorf("%s Groups = %v, want empty", it.Title, it.Groups)
+		}
+		if it.Current.Group != "" {
+			t.Errorf("%s Current.Group = %q, want empty (fingerprint skipped for a fileless movie)", it.Title, it.Current.Group)
+		}
+	}
+}
+
+// TestWalkRadarrTopLevelListErrorIsFatal covers the Radarr side of the
+// health semantic: a failed top-level movie list fails the whole walk
+// (mirrors TestWalkTopLevelListErrorIsFatal for Sonarr).
+func TestWalkRadarrTopLevelListErrorIsFatal(t *testing.T) {
+	fr := &fakeRadarr{listErr: errors.New("radarr unreachable")}
+	w := NewWalker(&Config{Radarr: fr, Logger: discardLogger()})
+	if _, err := w.Walk(context.Background()); err == nil {
+		t.Fatal("Walk returned nil error, want the GetMovies failure propagated")
+	}
+}
+
+// TestWalkSonarrLogsLiveContextTimeout pins the per-request-timeout behavior:
+// arrapi wraps each request in its own context.WithTimeout, so a slow
+// GetEpisodes surfaces as context.DeadlineExceeded while the walk context is
+// still live. That is a real fetch failure, so the series is omitted AND the
+// per-series warning is logged with the series identity - not silently swallowed
+// as shutdown noise. The walk as a whole still succeeds (a partial snapshot).
+func TestWalkSonarrLogsLiveContextTimeout(t *testing.T) {
+	var buf bytes.Buffer
+	fs := &fakeSonarr{
+		series: []arrapi.Series{
+			{ID: 1, Title: "Alpha"},
+			{ID: 2, Title: "Bravo"},
+		},
+		episodes: map[int][]arrapi.Episode{
+			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
+		},
+		epErr: map[int]error{2: context.DeadlineExceeded},
+	}
+	w := NewWalker(&Config{Sonarr: fs, Logger: slog.New(slog.NewTextHandler(&buf, nil))})
+
+	snap, err := w.Walk(context.Background())
+	if err != nil {
+		t.Fatalf("Walk returned error, want nil (a live-context per-request timeout is not fatal): %v", err)
+	}
+	if len(snap.Items) != 1 {
+		t.Fatalf("items = %d, want 1 (the timed-out series is omitted)", len(snap.Items))
+	}
+	got := buf.String()
+	if !strings.Contains(got, "skipping series: episode fetch failed") || !strings.Contains(got, "Bravo") {
+		t.Errorf("log = %q, want a per-series episode-fetch-failed warning naming Bravo", got)
+	}
+}
+
+// TestWalkSonarrSilentOnContextCancel is the companion: when the walk context
+// itself is cancelled (a shutdown/redeploy), a series whose fetch returns the
+// cancellation is omitted WITHOUT a per-series warning (the walk-level
+// cancellation is propagated by Walk instead), so a redeploy does not spam one
+// warning per in-flight series.
+func TestWalkSonarrSilentOnContextCancel(t *testing.T) {
+	var buf bytes.Buffer
+	fs := &fakeSonarr{
+		series: []arrapi.Series{{ID: 1, Title: "Alpha"}},
+		epErr:  map[int]error{1: context.Canceled},
+	}
+	w := NewWalker(&Config{Sonarr: fs, Logger: slog.New(slog.NewTextHandler(&buf, nil))})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := w.Walk(ctx); err == nil {
+		t.Fatal("Walk returned nil error, want the walk-context cancellation propagated")
+	}
+	if got := buf.String(); strings.Contains(got, "skipping series: episode fetch failed") {
+		t.Errorf("log = %q, want no per-series warning on walk-context cancellation", got)
 	}
 }

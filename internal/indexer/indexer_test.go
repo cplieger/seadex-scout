@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -115,6 +116,15 @@ func TestTrackerKey(t *testing.T) {
 	}
 	if got := trackerKeyFromURL("https://example.com/x/1"); got != "" {
 		t.Errorf("unknown host trackerKeyFromURL = %q, want empty", got)
+	}
+	// Misleading hosts that embed a tracker name as a substring must NOT be
+	// keyed: a host-substring match would have accepted these and let a
+	// tracker-controlled URL bypass the SeaDex curation gate.
+	if got := trackerKeyFromURL("https://notnyaa.example/view/1234567"); got != "" {
+		t.Errorf("misleading nyaa host trackerKeyFromURL = %q, want empty", got)
+	}
+	if got := trackerKeyFromURL("https://example.com/torrent/1167293/group?tracker=animebytes"); got != "" {
+		t.Errorf("misleading animebytes URL trackerKeyFromURL = %q, want empty", got)
 	}
 }
 
@@ -763,5 +773,167 @@ func TestFilterByCats_appliesTorznabCategorySemantics(t *testing.T) {
 	movies := filterByCats(items, map[int]bool{catMovies: true})
 	if len(movies) != 2 || movies[0].Title != "movie" || movies[1].Title != "uncategorized" {
 		t.Fatalf("movies filter returned %#v, want movie plus uncategorized passthrough", movies)
+	}
+}
+
+// TestReloadKeepsFeedOnMalformedSnapshot verifies reload's resilience contract: once a
+// good feed is loaded, a later malformed snapshot write (a partial/corrupt cycle write) is
+// logged and ignored, never blanking the live feed. A cross-process poll writes the file
+// non-atomically only in the failure case; the server must not serve an empty feed then.
+func TestReloadKeepsFeedOnMalformedSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	entries := []seadex.Entry{{
+		AniListID: 7,
+		Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://nyaa.si/view/42", IsBest: true,
+			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
+		}},
+	}}
+	if err := NewFeedWriter("", path, nil).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, Deps{}, path)
+	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
+		t.Fatalf("initial feed = %d items, want 1", len(got))
+	}
+	if err := os.WriteFile(path, []byte("{not valid json"), 0o644); err != nil {
+		t.Fatalf("corrupt write: %v", err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
+		t.Errorf("after malformed rewrite feed = %d items, want 1 (a bad write must not blank a live feed)", len(got))
+	}
+}
+
+// TestBuildFeedsCompleteUnpackedSeason pins the v1.7.2 behavior at the buildFeeds level: a
+// season SeaDex tracks as one torrent PER episode (each a single-file release) yields one
+// feed item per episode, each keeping its SxxExx - never collapsed to the season (which
+// would let the arr grab a single episode believing it was the whole season) and never
+// deduped away.
+func TestBuildFeedsCompleteUnpackedSeason(t *testing.T) {
+	entries := []seadex.Entry{{
+		AniListID: 187989,
+		Torrents: []seadex.Torrent{
+			{Tracker: "Nyaa", URL: "https://nyaa.si/view/1", IsBest: true, Files: []seadex.File{{Length: 1, Name: "Scum of the Brave - S01E01 (WEB 1080p) [G].mkv"}}},
+			{Tracker: "Nyaa", URL: "https://nyaa.si/view/2", IsBest: true, Files: []seadex.File{{Length: 1, Name: "Scum of the Brave - S01E02 (WEB 1080p) [G].mkv"}}},
+			{Tracker: "Nyaa", URL: "https://nyaa.si/view/3", IsBest: true, Files: []seadex.File{{Length: 1, Name: "Scum of the Brave - S01E03 (WEB 1080p) [G].mkv"}}},
+		},
+	}}
+	nyaa, _, _ := buildFeeds(entries, "", func(int) []int { return []int{catAnime} })
+	if len(nyaa) != 3 {
+		t.Fatalf("got %d items, want 3 (one per episode torrent, not collapsed/deduped)", len(nyaa))
+	}
+	titles := map[string]bool{}
+	for i := range nyaa {
+		titles[nyaa[i].Title] = true
+	}
+	for _, want := range []string{
+		"Scum of the Brave - S01E01 (WEB 1080p) [G]",
+		"Scum of the Brave - S01E02 (WEB 1080p) [G]",
+		"Scum of the Brave - S01E03 (WEB 1080p) [G]",
+	} {
+		if !titles[want] {
+			t.Errorf("missing per-episode title %q; got %v", want, titles)
+		}
+	}
+}
+
+// TestDownloadURL pins the download-link builder that produces the AnimeBytes secret link:
+// Nyaa builds a public .torrent, AB embeds the operator passkey, and every un-grabbable
+// case (unknown tracker, missing id, AB without a passkey) is rejected with ok=false so no
+// bogus or link-less item is emitted.
+func TestDownloadURL(t *testing.T) {
+	tests := []struct {
+		name, tracker, src, passkey, wantURL string
+		wantOK                               bool
+	}{
+		{"nyaa builds public torrent link", "Nyaa", "https://nyaa.si/view/1961373", "", "https://nyaa.si/download/1961373.torrent", true},
+		{"nyaa missing id rejected", "Nyaa", "https://nyaa.si/view/abc", "", "", false},
+		{"ab embeds passkey", "AB", "/torrents.php?id=1&torrentid=1167293", "PK", "https://animebytes.tv/torrent/1167293/download/PK", true},
+		{"ab without passkey rejected", "AB", "/torrents.php?id=1&torrentid=1167293", "", "", false},
+		{"ab missing id rejected", "AB", "/torrents.php?id=1", "PK", "", false},
+		{"unknown tracker rejected", "AnimeTosho", "https://animetosho.org/view/1", "PK", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotURL, gotOK := downloadURL(tc.tracker, tc.src, tc.passkey)
+			if gotURL != tc.wantURL || gotOK != tc.wantOK {
+				t.Errorf("downloadURL(%q, %q, passkey) = (%q, %v), want (%q, %v)", tc.tracker, tc.src, gotURL, gotOK, tc.wantURL, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestValidInfoHash pins the info-hash gate that keeps a bogus value out of the feed's
+// infohash attr: a real 40-char SHA-1 hex is lowercased and trimmed, and anything else -
+// SeaDex's literal "<redacted>" for private trackers, a wrong length, or a 40-char string
+// with a non-hex byte - is dropped.
+func TestValidInfoHash(t *testing.T) {
+	const valid = "143ed15e5e3df072ae91adaeb149973a887590dd"
+	tests := []struct{ name, in, want string }{
+		{"valid lowercase kept", valid, valid},
+		{"uppercase normalized", "143ED15E5E3DF072AE91ADAEB149973A887590DD", valid},
+		{"whitespace trimmed", "  " + valid + "  ", valid},
+		{"redacted dropped", "<redacted>", ""},
+		{"wrong length dropped", "abc", ""},
+		{"forty chars with a non-hex byte dropped", "g43ed15e5e3df072ae91adaeb149973a887590dd", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := validInfoHash(tc.in); got != tc.want {
+				t.Errorf("validInfoHash(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestReloadDoesNotRewindToOlderSnapshot pins reload's anti-rewind invariant:
+// a newer snapshot already served in memory is never overwritten by an older
+// snapshot on disk. reload's freshness guard installs only when the file's
+// mtime is strictly newer than the loaded snapshot, so pointing the server at a
+// strictly-older on-disk file and reloading must leave the newer in-memory feed
+// and its mtime untouched. Driven single-threaded: the pre-install holds the
+// write lock exactly as a real cycle would, and the lone reload runs after it,
+// so there is no shared-state access outside the lock.
+func TestReloadDoesNotRewindToOlderSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	oldTime := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	newerTime := oldTime.Add(time.Hour)
+	oldJSON := `{"by_hash":{},"by_key":{},"nyaa_feed":[{"Title":"old","GUID":"old","DownloadURL":"old"}],"ab_feed":[]}`
+	if err := os.WriteFile(path, []byte(oldJSON), 0o600); err != nil {
+		t.Fatalf("write old snapshot: %v", err)
+	}
+	if err := os.Chtimes(path, oldTime, oldTime); err != nil {
+		t.Fatalf("set old snapshot mtime: %v", err)
+	}
+
+	ix := New(&Config{}, Deps{}, "")
+	ix.path = path
+
+	// Pre-install a newer snapshot the way a fresher cycle would, holding the
+	// write lock exactly as reload's install path does.
+	ix.mu.Lock()
+	ix.snap = snapshot{
+		ByHash:   map[string]bool{},
+		ByKey:    map[string]bool{},
+		NyaaFeed: []item{{Title: "new", GUID: "new", DownloadURL: "new"}},
+	}
+	ix.snapMod = newerTime
+	ix.mu.Unlock()
+
+	// Reloading against a strictly-older on-disk file must not rewind: the
+	// freshness guard skips the install because the file is not newer than the
+	// loaded snapshot.
+	ix.reload(context.Background())
+
+	got := ix.feedFor(upstreamNyaa)
+	if len(got) != 1 || got[0].Title != "new" {
+		t.Fatalf("feed after reloading an older snapshot = %#v, want the newer in-memory snapshot", got)
+	}
+	if !ix.snapMod.Equal(newerTime) {
+		t.Fatalf("snapMod after reloading an older snapshot = %v, want %v", ix.snapMod, newerTime)
 	}
 }

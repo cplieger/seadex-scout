@@ -224,7 +224,7 @@ func (m *Matcher) matchEntry(ctx context.Context, e *seadex.Entry, lib *libIndex
 	if item == nil {
 		return Match{Entry: *e, Arr: arr, Source: SourceUnmapped}
 	}
-	return Match{Item: item, Entry: *e, Record: mapping.Record{Type: strings.ToUpper(strings.TrimSpace(media.Format))}, Arr: item.Arr, Source: SourceTitle}
+	return Match{Item: item, Entry: *e, Record: mapping.Record{Type: mapping.NormalizeType(media.Format)}, Arr: item.Arr, Source: SourceTitle}
 }
 
 // lookupAniList consults the memo, then AniList. A not-found result is memoized
@@ -289,17 +289,15 @@ func hasArrID(r *mapping.Record) bool {
 	return r.TvdbID != 0
 }
 
-// formatArr routes an AniList format to its arr (MOVIE -> Radarr, else Sonarr).
-// An empty format is unknown.
+// formatArr routes an AniList format to its arr (MOVIE -> Radarr, else Sonarr)
+// by building a Record and reusing the mapping-owned decision, so the "MOVIE"
+// token lives only in mapping. An empty format is unknown.
 func formatArr(format string) string {
-	switch strings.ToUpper(strings.TrimSpace(format)) {
-	case "":
+	norm := mapping.NormalizeType(format)
+	if norm == "" {
 		return arrUnknown
-	case "MOVIE":
-		return library.ArrRadarr
-	default:
-		return library.ArrSonarr
 	}
+	return recordArr(&mapping.Record{Type: norm})
 }
 
 // libIndex indexes a library snapshot by external ID and normalized title.
@@ -401,9 +399,11 @@ func arrItem(it *library.Item, arr string) *library.Item {
 func (li *libIndex) findByTitle(titles []string, year int, arr string, log *slog.Logger) *library.Item {
 	candidates := li.titleCandidates(titles, arr)
 	if year != 0 {
-		if narrowed := filterByYear(candidates, year); len(narrowed) > 0 {
-			candidates = narrowed
+		narrowed := filterByYear(candidates, year)
+		if len(narrowed) == 0 {
+			return nil
 		}
+		candidates = narrowed
 	}
 	switch len(candidates) {
 	case 1:
