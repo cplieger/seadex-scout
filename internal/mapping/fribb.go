@@ -3,6 +3,7 @@ package mapping
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -12,8 +13,17 @@ import (
 // type routes to Sonarr (TVDB).
 const typeMovie = "MOVIE"
 
+// NormalizeType canonicalizes a raw Fribb/AniList type/format string to the
+// upper-cased, trimmed form Record.Type invariants (IsMovie/IsSpecial) rely on.
+func NormalizeType(s string) string { return strings.ToUpper(strings.TrimSpace(s)) }
+
 // nullLiteral is the JSON null token, checked before decoding tolerant fields.
 const nullLiteral = "null"
+
+// isNullOrEmpty reports whether b (already trimmed) is empty or the JSON null token.
+func isNullOrEmpty(b []byte) bool {
+	return len(b) == 0 || string(b) == nullLiteral
+}
 
 // fribbRecord mirrors one element of the Fribb anime-list-mini.json array. The
 // fields whose upstream shape varies (an id that may be a number or a string,
@@ -40,7 +50,7 @@ func (r *fribbRecord) toRecord() (Record, bool) {
 	return Record{
 		IMDbIDs:    r.IMDbID,
 		TmdbMovies: intSlice(r.TmdbID.Movie),
-		Type:       strings.ToUpper(strings.TrimSpace(r.Type)),
+		Type:       NormalizeType(r.Type),
 		AniListID:  int(r.AniListID),
 		TvdbID:     int(r.TvdbID),
 		TmdbTV:     int(r.TmdbID.TV),
@@ -49,13 +59,25 @@ func (r *fribbRecord) toRecord() (Record, bool) {
 	}, true
 }
 
+// maxFribbRecords is a hard acceptance cap on the number of top-level Fribb
+// array elements, not merely a preallocation hint. The 16MB body limit still
+// admits ~1M tiny valid records, so without this guard an upstream-controlled
+// body could amplify into a much larger in-memory record set. Real Fribb has
+// ~40k records, leaving ample headroom below ~65k.
+const maxFribbRecords = 1 << 16
+
 // parseFribb decodes the Fribb list resiliently: it reads the top-level array
 // as raw messages, then decodes each element on its own so a single malformed
-// record is skipped (counted) rather than failing the whole map.
+// record is skipped (counted) rather than failing the whole map. A list that
+// exceeds maxFribbRecords is rejected outright so the caller keeps the stale
+// cache rather than admitting an amplified record set.
 func parseFribb(data []byte, log *slog.Logger) ([]Record, error) {
 	var raw []json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
+	}
+	if len(raw) > maxFribbRecords {
+		return nil, fmt.Errorf("mapping: Fribb list has %d records, exceeds cap %d", len(raw), maxFribbRecords)
 	}
 	records := make([]Record, 0, len(raw))
 	skipped := 0
@@ -102,7 +124,7 @@ type tmdbID struct {
 // UnmarshalJSON decodes the object form and tolerates any other shape as empty.
 func (t *tmdbID) UnmarshalJSON(b []byte) error {
 	b = bytes.TrimSpace(b)
-	if len(b) == 0 || string(b) == nullLiteral || b[0] != '{' {
+	if isNullOrEmpty(b) || b[0] != '{' {
 		return nil
 	}
 	type alias tmdbID
@@ -122,7 +144,7 @@ type flexInt int
 // UnmarshalJSON implements the tolerant number-or-string decode.
 func (f *flexInt) UnmarshalJSON(b []byte) error {
 	b = bytes.TrimSpace(b)
-	if len(b) == 0 || string(b) == nullLiteral {
+	if isNullOrEmpty(b) {
 		return nil
 	}
 	if b[0] == '"' {
@@ -151,7 +173,7 @@ type stringList []string
 // UnmarshalJSON implements the array-or-scalar decode.
 func (s *stringList) UnmarshalJSON(b []byte) error {
 	b = bytes.TrimSpace(b)
-	if len(b) == 0 || string(b) == nullLiteral {
+	if isNullOrEmpty(b) {
 		return nil
 	}
 	if b[0] == '[' {

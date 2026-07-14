@@ -213,3 +213,32 @@ func TestCompareSkipsNotInLibraryAndSpecials(t *testing.T) {
 		t.Errorf("not-in-library and excluded specials must be skipped, got %+v", got)
 	}
 }
+
+func TestCompareAnimeBytesRecommendationRequiresOptIn(t *testing.T) {
+	item := &library.Item{Title: "Private Tracker Show", Groups: []string{"erai-raws"}, SeasonGroups: map[int][]string{1: {"erai-raws"}}}
+	entry := seadex.Entry{AniListID: 303, Torrents: []seadex.Torrent{
+		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "AB", URL: "/torrents.php?id=9&torrentid=10"},
+	}}
+	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+
+	if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+		t.Fatalf("AnimeBytes off must make AB-only recommendations silent, got %+v", got)
+	}
+
+	got := comparer(filter.Options{AnimeBytes: true}, false).Compare([]match.Match{m})
+	if len(got) != 1 {
+		t.Fatalf("AnimeBytes on should surface the AB recommendation, got %d", len(got))
+	}
+	if got[0].Status != StatusBetter || got[0].Severity != SevWarn {
+		t.Errorf("status/severity = %q/%q, want better_release/warn", got[0].Status, got[0].Severity)
+	}
+	if got[0].Tracker != "AB" {
+		t.Errorf("Tracker = %q, want AB", got[0].Tracker)
+	}
+	if got[0].ReleaseURL != "https://animebytes.tv/torrents.php?id=9&torrentid=10" {
+		t.Errorf("ReleaseURL = %q, want AnimeBytes absolute URL", got[0].ReleaseURL)
+	}
+	if len(got[0].Links) != 1 || got[0].Links[0].URL != got[0].ReleaseURL {
+		t.Errorf("Links = %+v, want the same obtainable AB release URL", got[0].Links)
+	}
+}

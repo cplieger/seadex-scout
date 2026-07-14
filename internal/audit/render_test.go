@@ -67,8 +67,46 @@ func TestGroupSets(t *testing.T) {
 }
 
 func TestEscapeCell(t *testing.T) {
-	if got := escapeCell("a|b\nc"); got != "a\\|b c" {
-		t.Errorf("escapeCell() = %q, want %q", got, "a\\|b c")
+	// Pipes/brackets/backslashes become HTML entities (not backslash escapes,
+	// which a pre-existing backslash could otherwise cancel); CR/LF flatten.
+	if got := escapeCell("a|b\nc"); got != "a&#124;b c" {
+		t.Errorf("escapeCell() = %q, want %q", got, "a&#124;b c")
+	}
+	// A crafted backslash cannot cancel the delimiter escape.
+	if got := escapeCell("x\\]y\\|z"); got != "x&#92;&#93;y&#92;&#124;z" {
+		t.Errorf("escapeCell() = %q, want %q", got, "x&#92;&#93;y&#92;&#124;z")
+	}
+	// Raw HTML metacharacters are neutralized so markup cannot survive.
+	if got := escapeCell("<img src=x>&"); got != "&lt;img src=x&gt;&amp;" {
+		t.Errorf("escapeCell() = %q, want %q", got, "&lt;img src=x&gt;&amp;")
+	}
+}
+
+func TestMdLinkAllowsOnlyHTTPSchemes(t *testing.T) {
+	// http/https destinations render as a Markdown link.
+	if got := mdLink("nyaa", "https://nyaa.si/view/1"); got != "[nyaa](https://nyaa.si/view/1)" {
+		t.Errorf("mdLink(https) = %q", got)
+	}
+	// Active non-http schemes and relative/unparseable destinations degrade to
+	// the escaped label as plain text (no active link injected).
+	for _, bad := range []string{"javascript:alert(1)", "data:text/html,<script>", "/torrents.php?id=1"} {
+		got := mdLink("label", bad)
+		if strings.Contains(got, "](") {
+			t.Errorf("mdLink(%q) = %q, must not emit a link", bad, got)
+		}
+		if got != "label" {
+			t.Errorf("mdLink(%q) = %q, want plain escaped label %q", bad, got, "label")
+		}
+	}
+}
+
+func TestEscapeLinkURLEncodesWhitespace(t *testing.T) {
+	got := escapeLinkURL("https://x/a\tb\vc\fd e")
+	if strings.ContainsAny(got, "\t\v\f \n\r") {
+		t.Errorf("escapeLinkURL left raw whitespace: %q", got)
+	}
+	if want := "https://x/a%09b%0Bc%0Cd%20e"; got != want {
+		t.Errorf("escapeLinkURL() = %q, want %q", got, want)
 	}
 }
 

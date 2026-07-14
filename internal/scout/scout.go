@@ -105,24 +105,11 @@ func (s *Scout) Cycle(ctx context.Context) (healthy bool) {
 
 	// From here the compare pass is gated on the arr walk (the health signal): a
 	// failed walk is unhealthy and leaves findings untouched (no save), while the
-	// feed above was still refreshed.
-	if walkErr != nil {
-		return false
-	}
-	if mapErr != nil && idx.Len() == 0 {
-		// No usable map at all (not even a stale cache) means every entry would
-		// fail to resolve and the reporter would falsely mark all prior findings
-		// resolved. Preserve findings and save only the refreshed library
-		// snapshot. A stale-but-usable map (idx.Len() > 0) is still
-		// degraded-but-comparable and flows into the normal cycle below.
-		s.degradedSave(ctx, &st, snap, &mapCache)
-		s.log.Warn("mapping unusable; skipping comparison, findings preserved", "error", mapErr)
-		return true
-	}
-	if seaErr != nil {
-		s.degradedSave(ctx, &st, snap, &mapCache)
-		s.log.Warn("seadex fetch failed; skipping comparison, findings preserved", "error", seaErr)
-		return true
+	// feed above was still refreshed. The pre-compare degradation gate (failed
+	// walk, unusable map, failed/empty SeaDex fetch) is factored into a helper so
+	// Cycle reads as the top-down happy path.
+	if handled, healthy := s.handlePreCompareGate(ctx, &st, snap, &mapCache, idx, entries, walkErr, mapErr, seaErr); handled {
+		return healthy
 	}
 
 	result := s.deps.Matcher.Match(ctx, entries, &snap, idx, st.Memo)
@@ -186,6 +173,37 @@ func (s *Scout) rebuildFeed(ctx context.Context, entries []seadex.Entry, idx *ma
 	}
 }
 
+// handlePreCompareGate applies the pre-compare degradation gate: it reports
+// whether the cycle should stop before the compare pass (handled) and, when it
+// should, the health outcome to return. A failed arr walk is unhealthy and
+// leaves findings untouched (no save). An unusable map (no stale cache either),
+// a failed SeaDex fetch, or a successful-but-empty fetch are each degraded but
+// healthy: they preserve prior findings and save only the refreshed library
+// snapshot/map so a transient upstream outage does not falsely resolve live
+// findings. A stale-but-usable map (idx.Len() > 0) is degraded-but-comparable
+// and flows into the normal compare path (handled=false).
+func (s *Scout) handlePreCompareGate(ctx context.Context, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, idx *mapping.Index, entries []seadex.Entry, walkErr, mapErr, seaErr error) (handled, healthy bool) {
+	if walkErr != nil {
+		return true, false
+	}
+	if mapErr != nil && idx.Len() == 0 {
+		s.degradedSave(ctx, st, snap, mapCache)
+		s.log.Warn("mapping unusable; skipping comparison, findings preserved", "error", mapErr)
+		return true, true
+	}
+	if seaErr != nil {
+		s.degradedSave(ctx, st, snap, mapCache)
+		s.log.Warn("seadex fetch failed; skipping comparison, findings preserved", "error", seaErr)
+		return true, true
+	}
+	if len(entries) == 0 {
+		s.degradedSave(ctx, st, snap, mapCache)
+		s.log.Warn("seadex returned zero entries; skipping comparison, findings preserved")
+		return true, true
+	}
+	return false, true
+}
+
 // Report runs a one-shot SeaDex-alignment audit over the current library and
 // returns the report. It is read-only on persisted state (it loads the mapping
 // cache and AniList memo to avoid needless refetching, but never saves), so it
@@ -240,9 +258,11 @@ func (s *Scout) degradedSave(ctx context.Context, st *state.State, snap library.
 	s.save(ctx, st)
 }
 
-// saveGrace bounds the detached shutdown save. It must stay well inside the
-// container's stop grace period (compose stop_grace_period: 20s) so the write
-// completes before SIGKILL.
+// saveGrace bounds the detached shutdown save. It stays inside Docker's default
+// 10s stop grace (the public compose example sets no stop_grace_period), so the
+// write completes before SIGKILL. atomicfile's temp+rename means a SIGKILL
+// mid-write cannot corrupt state - the only cost of a missed save is losing the
+// AniList memo, which self-heals over one cold cycle.
 const saveGrace = 5 * time.Second
 
 // save persists state, tolerating a shutdown mid-cycle. When the run context is

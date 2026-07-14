@@ -88,8 +88,9 @@ The `mode` setting (or a subcommand) picks the run mode:
 
 The daemon follows the standard `*_INTERVAL` scheduling shape:
 
-- **Built-in** (default): `poll_interval` is a Go duration (`3h` default, `6h`,
-  `30m`); a cycle runs on start, then every interval. It is the single cadence for
+- **Built-in** (default): `poll_interval` is a Go duration (`3h` default, `6h`;
+  minimum `1h`, shorter values are clamped up to `1h`); a cycle runs on start,
+  then every interval. It is the single cadence for
   both the alert loop and the Torznab feed.
 - **External / resident-idle**: set `poll_interval: off` (or `disabled` / `0`).
   There is no internal timer; the container idles healthy and an external

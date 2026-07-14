@@ -143,7 +143,7 @@ func (w *Walker) Walk(ctx context.Context) (Snapshot, error) {
 
 	w.log.Info("library walk complete", "items", len(items),
 		"sonarr", w.sonarr != nil, "radarr", w.radarr != nil)
-	return Snapshot{TakenAt: time.Now(), Items: items}, nil
+	return Snapshot{TakenAt: time.Now().UTC(), Items: items}, nil
 }
 
 // walkSonarr lists series, applies tag filters, and builds an item per kept
@@ -169,13 +169,11 @@ func (w *Walker) walkSonarr(ctx context.Context) ([]Item, error) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, episodeConcurrency)
 	for i := range kept {
-		wg.Add(1)
 		sem <- struct{}{}
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() { <-sem }()
 			results[i] = w.fetchSeriesItem(ctx, &kept[i])
-		}()
+		})
 	}
 	wg.Wait()
 	if err := ctx.Err(); err != nil {
@@ -187,17 +185,27 @@ func (w *Walker) walkSonarr(ctx context.Context) ([]Item, error) {
 			items = append(items, *item)
 		}
 	}
+	if skipped := len(kept) - len(items); skipped > 0 {
+		w.log.Warn("sonarr series skipped after episode-fetch failures; snapshot is partial",
+			"skipped", skipped, "kept", len(kept))
+	}
 	return items, nil
 }
 
-// fetchSeriesItem fetches one series' episodes and builds its Item. A
-// cancelled or timed-out context returns nil without a warning (Walk reports
-// the cancellation); any other episode-fetch failure is logged and returns
-// nil so the series is skipped.
+// fetchSeriesItem fetches one series' episodes and builds its Item. When the
+// walk context itself is cancelled or expired (a shutdown/redeploy) it returns
+// nil without a warning (Walk reports the cancellation); any other
+// episode-fetch failure - including a per-request timeout while the walk
+// context is still live - is logged and returns nil so the series is skipped.
 func (w *Walker) fetchSeriesItem(ctx context.Context, s *arrapi.Series) *Item {
 	eps, err := w.sonarr.GetEpisodes(ctx, s.ID)
 	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+		// Stay quiet only when the walk context itself is done (a shutdown): that
+		// error is expected and Walk reports it. arrapi wraps each request in its
+		// own context.WithTimeout, so a slow GetEpisodes surfaces as
+		// DeadlineExceeded while ctx is still live - a real fetch failure worth the
+		// per-series warning below, not shutdown noise.
+		if ctx.Err() != nil {
 			return nil
 		}
 		w.log.Warn("skipping series: episode fetch failed", "series", s.Title, "id", s.ID, "error", err)
@@ -365,32 +373,29 @@ type fileInfo struct {
 	audioLanguages string
 }
 
-// fileFromEpisode extracts fileInfo from a Sonarr episode file.
-func fileFromEpisode(f *arrapi.EpisodeFile) fileInfo {
+// fileInfoFrom builds a fileInfo from the release-relevant
+// fields common to a Sonarr episode file and a Radarr movie file.
+func fileInfoFrom(group, sceneName, relPath string, mi *arrapi.MediaInfo) fileInfo {
 	fi := fileInfo{
-		group:     release.NormalizeGroup(f.ReleaseGroup),
-		sceneName: f.SceneName,
-		relPath:   f.RelativePath,
+		group:     release.NormalizeGroup(group),
+		sceneName: sceneName,
+		relPath:   relPath,
 	}
-	if f.MediaInfo != nil {
-		fi.videoCodec = f.MediaInfo.VideoCodec
-		fi.audioLanguages = f.MediaInfo.AudioLanguages
+	if mi != nil {
+		fi.videoCodec = mi.VideoCodec
+		fi.audioLanguages = mi.AudioLanguages
 	}
 	return fi
 }
 
+// fileFromEpisode extracts fileInfo from a Sonarr episode file.
+func fileFromEpisode(f *arrapi.EpisodeFile) fileInfo {
+	return fileInfoFrom(f.ReleaseGroup, f.SceneName, f.RelativePath, f.MediaInfo)
+}
+
 // fileFromMovie extracts fileInfo from a Radarr movie file.
 func fileFromMovie(f *arrapi.MovieFile) fileInfo {
-	fi := fileInfo{
-		group:     release.NormalizeGroup(f.ReleaseGroup),
-		sceneName: f.SceneName,
-		relPath:   f.RelativePath,
-	}
-	if f.MediaInfo != nil {
-		fi.videoCodec = f.MediaInfo.VideoCodec
-		fi.audioLanguages = f.MediaInfo.AudioLanguages
-	}
-	return fi
+	return fileInfoFrom(f.ReleaseGroup, f.SceneName, f.RelativePath, f.MediaInfo)
 }
 
 // representative returns the file whose group is the most common on the item

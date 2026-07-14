@@ -67,7 +67,7 @@ func renderCaps() string {
 	b.WriteString(xml.Header)
 	b.WriteString("<caps>")
 	b.WriteString(`<server title="seadex-scout"/>`)
-	b.WriteString(`<limits max="1000" default="100"/>`)
+	fmt.Fprintf(&b, `<limits max="%d" default="%d"/>`, maxItems, defaultCapsLimit)
 	b.WriteString("<searching>")
 	b.WriteString(`<search available="yes" supportedParams="q"/>`)
 	b.WriteString(`<tv-search available="yes" supportedParams="q,season,ep"/>`)
@@ -142,8 +142,9 @@ func writeItem(b *strings.Builder, it *item) {
 	}
 	// The marker: best -> downloadvolumefactor 0.75 (Freeleech25), alt -> 0.25
 	// (Freeleech75). uploadvolumefactor 1 keeps it from also flagging DoubleUpload.
-	// Pass-through (empty-q/RSS) items are not curated and carry no marker, so
-	// the attrs are omitted and the arr treats them as normal (factor 1).
+	// Search results and synthesized RSS items that were matched to SeaDex carry
+	// this marker. When DownloadVolumeFactor is empty, omit both factor attrs so
+	// the arr treats the item as normal (factor 1).
 	if it.DownloadVolumeFactor != "" {
 		writeAttr(b, "downloadvolumefactor", it.DownloadVolumeFactor)
 		writeAttr(b, "uploadvolumefactor", "1")
