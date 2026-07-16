@@ -550,3 +550,21 @@ func TestSanitizeDisplayTextReplacesC0AndDELPreservesCRLF(t *testing.T) {
 		})
 	}
 }
+
+// TestRenderJSONNilRowsIsEmptyArray pins the JSON shape of a nil-Rows Report:
+// "rows" renders as [] (the pre-existing contract; Rows has no omitempty),
+// never null - sanitizeOutput's slices.Clone of a nil slice is nil, which
+// would otherwise marshal as null and change the machine-readable contract.
+func TestRenderJSONNilRowsIsEmptyArray(t *testing.T) {
+	r := &Report{GeneratedAt: time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC)}
+	data, err := renderJSON(r)
+	if err != nil {
+		t.Fatalf("renderJSON: %v", err)
+	}
+	if !strings.Contains(string(data), `"rows": []`) {
+		t.Errorf("renderJSON of a nil-Rows report = %s, want \"rows\": []", data)
+	}
+	if strings.Contains(string(data), `"rows": null`) {
+		t.Errorf("renderJSON of a nil-Rows report rendered null rows: %s", data)
+	}
+}

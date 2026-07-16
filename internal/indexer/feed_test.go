@@ -201,3 +201,60 @@ func TestBuildFeedsDedupesSharedTorrentByGUID(t *testing.T) {
 		t.Errorf("pubdate = %v, want %v (newest entry update, independent of which entry is best)", got.PubDate, newer)
 	}
 }
+
+// TestBuildFeedsEmptyGUIDsDoNotMerge pins dedupeByGUID's identity key to the
+// item's rendered identity (item.guid(): stored GUID, falling back to InfoHash
+// then DownloadURL), not the raw stored GUID: a Nyaa torrent whose SeaDex
+// source URL sits on a foreign host still resolves a canonical nyaa.si
+// download link (nyaaID reads /view/{id} without host validation) while
+// UsableURL rejects the host and leaves the stored GUID empty. Two such
+// distinct releases (different /view/{id} ids, so distinct DownloadURLs) must
+// stay two items — a raw-GUID key would merge them on "" and drop one — while
+// two copies of the SAME foreign-host id share a DownloadURL and merge via the
+// fallback identity.
+func TestBuildFeedsEmptyGUIDsDoNotMerge(t *testing.T) {
+	classify := func(int) []int { return []int{catAnime} }
+	distinct := []seadex.Entry{{
+		AniListID: 9,
+		Torrents: []seadex.Torrent{
+			{
+				Tracker: "Nyaa", URL: "https://evil.example/view/111", IsBest: true,
+				Files: []seadex.File{{Length: 1, Name: "Show A - S01E01 (1080p) [G].mkv"}},
+			},
+			{
+				Tracker: "Nyaa", URL: "https://evil.example/view/222",
+				Files: []seadex.File{{Length: 1, Name: "Show B - S01E01 (1080p) [G].mkv"}},
+			},
+		},
+	}}
+	nyaa, _, _, _ := buildFeeds(distinct, "", classify)
+	if len(nyaa) != 2 {
+		t.Fatalf("nyaa feed has %d items, want 2 (distinct empty-GUID releases must not merge)", len(nyaa))
+	}
+	for i := range nyaa {
+		if nyaa[i].GUID != "" {
+			t.Errorf("item %d stored GUID = %q, want empty (UsableURL must reject the foreign host)", i, nyaa[i].GUID)
+		}
+	}
+	if nyaa[0].DownloadURL == nyaa[1].DownloadURL {
+		t.Errorf("both items share download URL %q, want distinct canonical links", nyaa[0].DownloadURL)
+	}
+
+	same := []seadex.Entry{
+		{AniListID: 10, Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://evil.example/view/333", IsBest: true,
+			Files: []seadex.File{{Length: 1, Name: "Show C - S01E01 (1080p) [G].mkv"}},
+		}}},
+		{AniListID: 11, Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://evil.example/view/333",
+			Files: []seadex.File{{Length: 1, Name: "Show C - S01E01 (1080p) [G].mkv"}},
+		}}},
+	}
+	merged, _, _, _ := buildFeeds(same, "", classify)
+	if len(merged) != 1 {
+		t.Fatalf("nyaa feed has %d items, want 1 (same fallback identity must merge)", len(merged))
+	}
+	if merged[0].DownloadVolumeFactor != dvfBest {
+		t.Errorf("merged marker = %q, want %q (best-wins across the merged pair)", merged[0].DownloadVolumeFactor, dvfBest)
+	}
+}

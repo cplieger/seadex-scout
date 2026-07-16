@@ -10,6 +10,7 @@ import (
 
 	"github.com/cplieger/httpx/v2"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
+	"github.com/cplieger/seadex-scout/internal/release"
 )
 
 const (
@@ -90,12 +91,16 @@ func (u *upstream) filterDownloadURLs(items []item) []item {
 		// URL that parses to no tracker key skips the curation gate entirely,
 		// so a tampered upstream could attach a javascript:/data: or
 		// foreign-host link to a legitimately curated item. Blank (never
-		// drop) anything that is not an absolute http(s) URL: a healthy
-		// Prowlarr always hands out absolute tracker page URLs here, and
-		// curation matching is unaffected (a non-http URL could never
-		// produce a tracker key).
-		items[i].InfoURL = sanitizeDisplayURL(items[i].InfoURL)
-		items[i].GUID = sanitizeDisplayURL(items[i].GUID)
+		// drop) anything that is not a userinfo-free absolute http(s) URL on
+		// this upstream's own tracker host: a healthy Prowlarr always hands
+		// out the served tracker's canonical page URLs here. Display
+		// sanitization is independent of key extraction - a URL that fails
+		// this gate is blanked even when a tracker key could still be
+		// derived from it (e.g. a scheme-relative //host/... form), leaving
+		// such an item to match by info hash alone, which fails closed for
+		// a URL shape a healthy Prowlarr never emits.
+		items[i].InfoURL = sanitizeDisplayURL(u.name, items[i].InfoURL)
+		items[i].GUID = sanitizeDisplayURL(u.name, items[i].GUID)
 		out = append(out, items[i])
 	}
 	if dropped > 0 {
@@ -119,19 +124,36 @@ func sameHTTPOrigin(raw string, origin *url.URL) bool {
 	return strings.EqualFold(scheme, origin.Scheme) && strings.EqualFold(parsed.Host, origin.Host)
 }
 
-// sanitizeDisplayURL returns raw when it is an absolute http(s) URL with a
-// host, else "" - the item survives with the field blanked (writeItem omits an
-// empty <comments> and item.guid() falls back to InfoHash/DownloadURL). Used
-// on the passthrough display-URL fields (InfoURL, GUID) that neither the
-// origin filter (fetch targets only) nor the curation gate (key-bearing URLs
-// only) constrains.
-func sanitizeDisplayURL(raw string) string {
+// sanitizeDisplayURL returns raw when it is an absolute http(s) URL, free of
+// userinfo, whose host belongs to the scope's own tracker (release.IsNyaaHost
+// for the nyaa upstream, release.IsAnimeBytesHost for AB), else "" - the item
+// survives with the field blanked (writeItem omits an empty <comments> and
+// item.guid() falls back to InfoHash/DownloadURL). Used on the passthrough
+// display-URL fields (InfoURL, GUID) that neither the origin filter (fetch
+// targets only) nor the curation gate (key-bearing URLs only) constrains.
+// Healthy Prowlarr output carries the served tracker's canonical page URLs
+// here, so a foreign-host or userinfo-bearing link (a phishing target a
+// tampered upstream could attach to a curated item) is blanked rather than
+// rendered clickable.
+func sanitizeDisplayURL(scope, raw string) string {
 	u, err := url.Parse(raw)
-	if err != nil {
+	if err != nil || u.User != nil {
 		return ""
 	}
 	s := strings.ToLower(u.Scheme)
-	if (s != "http" && s != "https") || u.Host == "" {
+	if s != "http" && s != "https" {
+		return ""
+	}
+	switch scope {
+	case upstreamNyaa:
+		if !release.IsNyaaHost(u.Hostname()) {
+			return ""
+		}
+	case upstreamAB:
+		if !release.IsAnimeBytesHost(u.Hostname()) {
+			return ""
+		}
+	default:
 		return ""
 	}
 	return raw

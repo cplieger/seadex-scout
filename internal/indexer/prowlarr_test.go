@@ -106,3 +106,39 @@ func TestFilterDownloadURLsFailsClosedOnUnparseableFeedURL(t *testing.T) {
 		t.Fatalf("unparseable feed URL passed %d items, want 0 (fail closed)", len(got))
 	}
 }
+
+// TestSanitizeDisplayURL pins the display-URL gate on the passthrough
+// InfoURL/GUID fields: only an absolute http(s) URL, free of userinfo, on the
+// served upstream's own tracker host survives. Non-http schemes
+// (javascript:/data:), relative forms, foreign hosts, userinfo tricks, and a
+// cross-tracker host are all blanked; the tracker's exact host and a
+// dot-delimited subdomain pass, and an unknown scope always blanks.
+func TestSanitizeDisplayURL(t *testing.T) {
+	tests := []struct {
+		name, scope, raw, want string
+	}{
+		{"nyaa exact host kept", upstreamNyaa, "https://nyaa.si/view/1234567", "https://nyaa.si/view/1234567"},
+		{"nyaa subdomain kept", upstreamNyaa, "https://sukebei.nyaa.si/view/7", "https://sukebei.nyaa.si/view/7"},
+		{"ab exact host kept", upstreamAB, "https://animebytes.tv/torrent/1167293/group", "https://animebytes.tv/torrent/1167293/group"},
+		{"javascript scheme blanked", upstreamNyaa, "javascript:alert(1)", ""},
+		{"data scheme blanked", upstreamNyaa, "data:text/html,x", ""},
+		{"relative path blanked", upstreamNyaa, "/view/1234567", ""},
+		{"scheme-relative blanked", upstreamNyaa, "//nyaa.si/view/1234567", ""},
+		{"foreign host blanked", upstreamNyaa, "https://evil.example/phish", ""},
+		{"userinfo trick blanked", upstreamNyaa, "https://nyaa.si@evil.example/phish", ""},
+		{"userinfo on canonical host blanked", upstreamNyaa, "https://trusted@nyaa.si/view/1", ""},
+		{"cross-tracker host blanked under nyaa", upstreamNyaa, "https://animebytes.tv/torrent/1/group", ""},
+		{"cross-tracker host blanked under ab", upstreamAB, "https://nyaa.si/view/1", ""},
+		{"suffix-confusion host blanked", upstreamNyaa, "https://evilnyaa.si/view/1", ""},
+		{"unknown scope blanks a canonical host", "other", "https://nyaa.si/view/1", ""},
+		{"empty input blanked", upstreamNyaa, "", ""},
+		{"unparseable blanked", upstreamNyaa, "http://[::1", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sanitizeDisplayURL(tc.scope, tc.raw); got != tc.want {
+				t.Errorf("sanitizeDisplayURL(%q, %q) = %q, want %q", tc.scope, tc.raw, got, tc.want)
+			}
+		})
+	}
+}

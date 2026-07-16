@@ -479,6 +479,11 @@ func sanitizeDisplayText(s string) string {
 func sanitizeOutput(r *Report) *Report {
 	out := *r
 	out.Rows = slices.Clone(r.Rows)
+	if out.Rows == nil {
+		// Preserve the pre-review empty-array JSON shape ("rows": []) for a
+		// nil-rows Report: slices.Clone(nil) is nil, which would render null.
+		out.Rows = []Row{}
+	}
 	for i := range out.Rows {
 		row := &out.Rows[i]
 		row.Title = sanitizeDisplayText(row.Title)

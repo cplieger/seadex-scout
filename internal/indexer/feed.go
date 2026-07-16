@@ -87,20 +87,25 @@ func buildFeeds(entries []seadex.Entry, abPasskey string, classify func(alID int
 	return sortAndCap(dedupeByGUID(acc.nyaa)), sortAndCap(dedupeByGUID(acc.ab)), acc.abSkippedNoPasskey, acc.unresolvable
 }
 
-// dedupeByGUID merges feed items sharing a GUID (the same torrent attached to
-// several SeaDex entries) into one item: best-wins on the marker (mirroring the
-// OR-accumulation buildSnapshot applies to the same identity in the search
-// curation set), categories unioned, and the newest entry update kept as
-// pubdate — so a torrent best on one entry and alt on another cannot render as
-// two same-GUID items with conflicting markers, where which one Sonarr's
-// GUID dedupe keeps would be feed-order arbitrary.
+// dedupeByGUID merges feed items sharing a stable identity (the same torrent
+// attached to several SeaDex entries) into one item: best-wins on the marker
+// (mirroring the OR-accumulation buildSnapshot applies to the same identity in
+// the search curation set), categories unioned, and the newest entry update
+// kept as pubdate — so a torrent best on one entry and alt on another cannot
+// render as two same-guid items with conflicting markers, where which one
+// Sonarr's GUID dedupe keeps would be feed-order arbitrary. The key is the
+// item's rendered identity, item.guid() — the stored GUID, falling back to
+// InfoHash then DownloadURL — matching what writeItem emits, so two distinct
+// releases whose stored GUIDs are both empty (UsableURL rejected their source
+// URLs) never wrongly merge on the empty string.
 func dedupeByGUID(items []item) []item {
 	idx := make(map[string]int, len(items))
 	out := items[:0]
 	for i := range items {
-		j, dup := idx[items[i].GUID]
+		key := items[i].guid()
+		j, dup := idx[key]
 		if !dup {
-			idx[items[i].GUID] = len(out)
+			idx[key] = len(out)
 			out = append(out, items[i])
 			continue
 		}

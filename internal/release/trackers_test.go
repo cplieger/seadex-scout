@@ -1,6 +1,9 @@
 package release
 
-import "testing"
+import (
+	"net/url"
+	"testing"
+)
 
 // TestLookupTrackerByHostFailClosed pins the fail-closed guards of the
 // URL-host tracker resolver consumed by the seadex link-safety gate
@@ -72,5 +75,27 @@ func TestLookupTrackerByHostPinsHostSet(t *testing.T) {
 	}
 	if _, ok := LookupTrackerByHost("example.com"); ok {
 		t.Error("LookupTrackerByHost(example.com) found, want not found")
+	}
+}
+
+// TestTrackerTableBaseURLsAreHTTPS pins the shape of every canonical table
+// entry's BaseURL: it must parse, carry the https scheme, and yield a
+// non-empty hostname. The BaseURLs seed both the host allowlist
+// (trackerByHost) and the link/download-URL builders, so a table edit that
+// downgrades a tracker to http or breaks its URL would silently weaken every
+// consumer; the host-set pin above does not guard the scheme.
+func TestTrackerTableBaseURLsAreHTTPS(t *testing.T) {
+	for _, tr := range trackerTable {
+		u, err := url.Parse(tr.BaseURL)
+		if err != nil {
+			t.Errorf("tracker %s BaseURL %q does not parse: %v", tr.Name, tr.BaseURL, err)
+			continue
+		}
+		if u.Scheme != "https" {
+			t.Errorf("tracker %s BaseURL %q scheme = %q, want https", tr.Name, tr.BaseURL, u.Scheme)
+		}
+		if u.Hostname() == "" {
+			t.Errorf("tracker %s BaseURL %q has an empty hostname", tr.Name, tr.BaseURL)
+		}
 	}
 }
