@@ -34,8 +34,7 @@ type TrackerType string
 const (
 	// TrackerPublic is an openly accessible tracker (Nyaa).
 	TrackerPublic TrackerType = "public"
-	// TrackerPrivate is a private tracker requiring membership (AnimeBytes,
-	// BeyondHD, ...).
+	// TrackerPrivate is a private tracker requiring membership (AnimeBytes).
 	TrackerPrivate TrackerType = "private"
 	// TrackerUnknown is an unrecognized tracker.
 	TrackerUnknown TrackerType = "unknown"
@@ -72,9 +71,18 @@ var (
 	reBitrate    = regexp.MustCompile(`(?i)\b\d+\s?(kbps|mbps)\b`)
 	// reCRF matches an x264/x265 CRF tag such as "crf18" or "crf 20".
 	reCRF = regexp.MustCompile(`(?i)\bcrf\s?\d+\b`)
-	// reDualAudio matches a dual-audio marker as a whole token, so an ordinary
-	// word such as "individual" is not misread as a dual-audio release.
-	reDualAudio = regexp.MustCompile(`(?i)\bdual(?:[\s._-]*audio)?\b`)
+	// reDualAudio matches an explicit dual-audio marker ("dual audio",
+	// "dual-audio", "dualaudio") as a whole token. A bare "dual" token is
+	// deliberately NOT a marker: a series title containing the word "Dual"
+	// (e.g. "Dual! Parallel Trouble Adventure") is not a dual-audio release,
+	// and an ordinary word such as "individual" is likewise not misread.
+	reDualAudio = regexp.MustCompile(`(?i)\bdual[\s._-]*audio\b`)
+	// reRemux matches a remux marker as a delimiter-bounded token ("remux",
+	// "BDRemux", "BD-Remux"), never a bare substring inside a longer word.
+	// "PREMUX" is included deliberately: SeaDex uses it for pre-muxed
+	// releases, and token-bounding alone would lose it (no word boundary
+	// between the "p" and "remux").
+	reRemux = regexp.MustCompile(`(?i)\b(?:bd[\s._-]?remux|premux|remux)\b`)
 )
 
 // Canonical codec families the classifier normalizes video codecs to.
@@ -84,27 +92,21 @@ const (
 )
 
 // x265Tokens / x264Tokens are the codec markers detected in names.
+// The x265 family takes precedence when input contains markers from both families.
 var (
 	x265Tokens = []string{codecX265, "h265", "h.265", "hevc"}
 	x264Tokens = []string{codecX264, "h264", "h.264", "avc"}
 )
 
-// publicTrackers / privateTrackers classify a tracker name (lowercased).
-var (
-	publicTrackers  = map[string]bool{"nyaa": true, "animetosho": true, "rutracker": true}
-	privateTrackers = map[string]bool{
-		"ab": true, "animebytes": true, "beyondhd": true, "bhd": true,
-		"passthepopcorn": true, "ptp": true, "broadcasthenet": true, "btn": true,
-		"hdbits": true, "blutopia": true, "aither": true,
-	}
-)
-
 // Classify converts raw release material into a normalized Release. It never
 // errors: an unclassifiable release is KindUnknown with a recorded reason.
 func Classify(in *Input) Release {
-	text := strings.ToLower(strings.Join(in.Names, " ") + " " + in.Notes)
+	nameText := strings.ToLower(strings.Join(in.Names, " "))
+	notesText := strings.ToLower(in.Notes)
+	text := nameText + " " + notesText
 	codec := detectCodec(text, in.VideoCodec)
-	kind, reason := classifyKind(text, codec)
+	kind, reason := classifyKind(nameText, notesText,
+		detectCodec(nameText, in.VideoCodec), detectCodec(notesText, ""))
 
 	return Release{
 		Group:       groupOrNoGroup(in.Group),
@@ -118,13 +120,26 @@ func Classify(in *Input) Release {
 	}
 }
 
-// classifyKind applies the ordered remux -> encode -> unknown rules and returns
-// the kind and a short reason for observability. The remux decision is purely
-// name-and-notes based: SeaDex states "remux" in the release name or the entry
-// notes, and the substring match also catches "BDRemux"/"BD-Remux", so no
+// classifyKind applies per-file-evidence-first scoping to the remux -> encode
+// -> unknown rules. The release names (plus the per-file MediaInfo codec) are
+// classified first and win for this release; the entry-wide SeaDex notes only
+// fill the gap when the names and MediaInfo carry no marker, so a notes-level
+// remux note cannot override a contradicting per-file encode marker. The remux
+// decision stays name-and-notes based (never size/bitrate inference), so no
 // operator-supplied group list is needed.
-func classifyKind(text, codec string) (kind Kind, reason string) {
-	if strings.Contains(text, "remux") {
+func classifyKind(nameText, notesText, nameCodec, notesCodec string) (kind Kind, reason string) {
+	if kind, reason := kindFromText(nameText, nameCodec); kind != KindUnknown {
+		return kind, reason
+	}
+	return kindFromText(notesText, notesCodec)
+}
+
+// kindFromText classifies one text source (names or notes) in isolation: a
+// delimiter-bounded remux token (reRemux) wins, then an encoder marker (codec,
+// CRF tag, bitrate), else unknown. It returns the kind and a short reason for
+// observability.
+func kindFromText(text, codec string) (kind Kind, reason string) {
+	if reRemux.MatchString(text) {
 		return KindRemux, "name/notes marker: remux"
 	}
 	switch {
@@ -167,30 +182,34 @@ func canonicalCodec(s string) string {
 	}
 }
 
-// classifyTracker maps a tracker name to its obtainability class.
+// classifyTracker maps a tracker name to its obtainability class via the
+// canonical tracker table (LookupTracker).
 func classifyTracker(tracker string) TrackerType {
-	t := strings.ToLower(strings.TrimSpace(tracker))
-	switch {
-	case t == "":
-		return TrackerUnknown
-	case publicTrackers[t]:
-		return TrackerPublic
-	case privateTrackers[t]:
-		return TrackerPrivate
-	default:
+	t, ok := LookupTracker(tracker)
+	if !ok {
 		return TrackerUnknown
 	}
+	return t.Type
 }
 
-// animeBytesNames are the SeaDex tracker strings (lowercased) for AnimeBytes;
-// SeaDex uses "AB", but "animebytes" is accepted defensively.
-var animeBytesNames = map[string]bool{"ab": true, "animebytes": true}
-
-// IsAnimeBytes reports whether the tracker name is AnimeBytes. It is the one
-// private tracker seadex-scout gates behind an opt-in toggle (the operator has
-// an account), so obtainability can single it out from other private trackers.
+// IsAnimeBytes reports whether the tracker name is AnimeBytes (SeaDex uses
+// "AB"; "animebytes" is accepted defensively via the table aliases). It is the
+// one private tracker seadex-scout gates behind an opt-in toggle (the operator
+// has an account), so obtainability can single it out from other private
+// trackers.
 func IsAnimeBytes(tracker string) bool {
-	return animeBytesNames[strings.ToLower(strings.TrimSpace(tracker))]
+	t, ok := LookupTracker(tracker)
+	return ok && t.Name == TrackerNameAnimeBytes
+}
+
+// IsAnimeBytesHost reports whether a lowercased URL host is the AnimeBytes
+// site host or one of its dot-delimited subdomains. It is the URL-host twin
+// of IsAnimeBytes (the tracker-name check), so the AB classification rule has
+// one home. A DNS-root trailing dot ("animebytes.tv.", which resolves to the
+// same site) is trimmed before comparing so the FQDN form cannot slip past.
+func IsAnimeBytesHost(host string) bool {
+	host = strings.TrimSuffix(host, ".")
+	return host == "animebytes.tv" || strings.HasSuffix(host, ".animebytes.tv")
 }
 
 // NoGroup is the placeholder release group for a release that specifies none.
@@ -210,14 +229,24 @@ func groupOrNoGroup(group string) string {
 	return NoGroup
 }
 
+// noGroupVariants are the spellings of "no release group" (lowercased) that
+// normalizeGroup folds onto the canonical NoGroup, so a SeaDex side or library
+// side using any variant compares equal to a group-less release.
+var noGroupVariants = map[string]bool{
+	"nogrp": true, "nogroup": true, "no-group": true, "no_group": true, "no group": true,
+}
+
 // normalizeGroup lowercases and trims a release-group name for override and
-// comparison lookups (SeaDex and arr casing differ). An empty group normalizes
-// to NoGroup so a missing group compares equal on both sides.
+// comparison lookups (SeaDex and arr casing differ). An empty group and every
+// no-group spelling variant (NOGRP, NoGroup, no-group, ...) normalize to
+// NoGroup so a missing group compares equal on both sides regardless of how it
+// was spelled.
 func normalizeGroup(group string) string {
-	if g := strings.ToLower(strings.TrimSpace(group)); g != "" {
-		return g
+	g := strings.ToLower(strings.TrimSpace(group))
+	if g == "" || noGroupVariants[g] {
+		return strings.ToLower(NoGroup)
 	}
-	return strings.ToLower(NoGroup)
+	return g
 }
 
 // NormalizeGroup is the exported form of the group normalizer, so the compare

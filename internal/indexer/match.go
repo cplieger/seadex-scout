@@ -3,6 +3,8 @@ package indexer
 import (
 	"net/url"
 	"strings"
+
+	"github.com/cplieger/seadex-scout/internal/release"
 )
 
 // The indexer matches a Prowlarr result back to a SeaDex release by a stable
@@ -12,35 +14,60 @@ import (
 // line up regardless of title or info-hash availability. The info hash is used
 // as a secondary key when present.
 
-// trackerScope classifies a tracker name (as SeaDex spells it, "Nyaa" or "AB",
-// with "animebytes" accepted as an alias) into the feed scope it maps to:
-// upstreamNyaa, upstreamAB, or "" for any other tracker (a negligible SeaDex
-// tail). It is the single place those spellings are matched, so id extraction,
-// key building, download-link building, and feed routing all agree on what
-// counts as Nyaa or AnimeBytes.
+// trackerScope classifies a tracker name (as SeaDex spells it, "Nyaa" or "AB")
+// into the feed scope it maps to: upstreamNyaa, upstreamAB, or "" for any other
+// tracker (a negligible SeaDex tail). The tracker vocabulary (which aliases
+// denote which tracker) is owned by the canonical release tracker table
+// (release.LookupTracker), so id extraction, key building, download-link
+// building, feed routing, and the alert/report path all agree on what counts
+// as AnimeBytes.
 func trackerScope(tracker string) string {
-	switch strings.ToLower(strings.TrimSpace(tracker)) {
-	case upstreamNyaa:
-		return upstreamNyaa
-	case upstreamAB, "animebytes":
-		return upstreamAB
-	default:
+	t, ok := release.LookupTracker(tracker)
+	if !ok {
 		return ""
 	}
+	switch t.Name {
+	case release.TrackerNameNyaa:
+		return upstreamNyaa
+	case release.TrackerNameAnimeBytes:
+		return upstreamAB
+	}
+	return ""
+}
+
+// trackerID extracts the tracker's numeric torrent id from a SeaDex source
+// URL for a scope: Nyaa's /view/{id}, AnimeBytes' torrentid=/permalink forms.
+// It is the single home of the scope->id-extraction pairing, shared by
+// trackerKey and downloadURL.
+func trackerID(scope, sourceURL string) string {
+	switch scope {
+	case upstreamNyaa:
+		return nyaaID(sourceURL)
+	case upstreamAB:
+		return animeBytesID(sourceURL)
+	}
+	return ""
+}
+
+// nyaaID extracts the Nyaa torrent id from a URL's /view/{id} path component.
+// Parsing first and scanning only the path keeps an id embedded in a query
+// value or fragment (e.g. ?next=/view/123) from being read as the torrent id,
+// so a curation key is only ever derived from the URL component that actually
+// identifies the torrent.
+func nyaaID(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return extractID(u.EscapedPath(), "/view/")
 }
 
 // trackerKey builds the match key for a SeaDex torrent from its tracker name
 // and stored URL, or "" when the tracker is unknown or the id is missing.
 func trackerKey(tracker, sourceURL string) string {
-	switch trackerScope(tracker) {
-	case upstreamNyaa:
-		if id := extractID(sourceURL, "/view/"); id != "" {
-			return upstreamNyaa + ":" + id
-		}
-	case upstreamAB:
-		if id := animeBytesID(sourceURL); id != "" {
-			return upstreamAB + ":" + id
-		}
+	scope := trackerScope(tracker)
+	if id := trackerID(scope, sourceURL); id != "" {
+		return scope + ":" + id
 	}
 	return ""
 }
@@ -56,10 +83,10 @@ func trackerKeyFromURL(raw string) string {
 	host := strings.ToLower(u.Hostname())
 	switch {
 	case host == "nyaa.si" || strings.HasSuffix(host, ".nyaa.si"):
-		if id := extractID(raw, "/view/"); id != "" {
+		if id := nyaaID(raw); id != "" {
 			return upstreamNyaa + ":" + id
 		}
-	case host == "animebytes.tv" || strings.HasSuffix(host, ".animebytes.tv"):
+	case release.IsAnimeBytesHost(host):
 		if id := animeBytesID(raw); id != "" {
 			return upstreamAB + ":" + id
 		}
@@ -71,12 +98,23 @@ func trackerKeyFromURL(raw string) string {
 // stores the site form (`/torrents.php?...torrentid={id}`), while Prowlarr's
 // Torznab items use the permalink form (`/torrent/{id}/group`) - the same id in
 // both. AnimeBytes exposes no info hash in Torznab, so this id is the only key
-// available for matching an AB release.
+// available for matching an AB release. The permalink id is read only from the
+// URL path and the site-form id only from the torrentid query parameter, so an
+// id smuggled inside an unrelated query value (e.g. ?next=/torrent/123/group)
+// never yields a key.
 func animeBytesID(rawURL string) string {
-	if id := extractID(rawURL, "/torrent/"); id != "" {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	if id := extractID(u.EscapedPath(), "/torrent/"); id != "" {
 		return id
 	}
-	return extractID(rawURL, "torrentid=")
+	id := strings.TrimSpace(u.Query().Get("torrentid"))
+	if !isAllDigits(id) {
+		return ""
+	}
+	return id
 }
 
 // extractID returns the token in rawURL immediately after needle, up to the

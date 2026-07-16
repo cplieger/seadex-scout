@@ -34,11 +34,32 @@ func TestTorrentBuildsSharedReleaseInput(t *testing.T) {
 	if got.Codec != "x265" {
 		t.Errorf("Torrent() codec = %q, want x265", got.Codec)
 	}
-	if got.Kind != release.KindRemux {
-		t.Errorf("Torrent() kind = %q, want remux from entry notes", got.Kind)
+	// Notes scoping: the SeaDex entry notes say "remux", but the per-file name
+	// carries an HEVC encode marker, and per-file evidence wins for the file
+	// (entry-wide notes only fill gaps).
+	if got.Kind != release.KindEncode {
+		t.Errorf("Torrent() kind = %q, want encode (per-file HEVC marker beats the entry-notes remux)", got.Kind)
 	}
 	if !got.DualAudio {
 		t.Error("Torrent() must preserve the SeaDex dual-audio flag")
+	}
+}
+
+// TestTorrentNotesFillGapWhenFilesCarryNoMarker pins the gap-filling half of
+// the notes-scoping contract: when the torrent's file names carry no remux or
+// encode marker, the entry-wide SeaDex notes classify the release.
+func TestTorrentNotesFillGapWhenFilesCarryNoMarker(t *testing.T) {
+	entry := &seadex.Entry{Notes: "BD remux noted by SeaDex"}
+	torrent := &seadex.Torrent{
+		ReleaseGroup: "PMR",
+		Tracker:      "Nyaa",
+		Files:        []seadex.File{{Name: "Frieren - 01 (1080p).mkv"}},
+	}
+
+	got := Torrent(entry, torrent)
+
+	if got.Kind != release.KindRemux {
+		t.Errorf("Torrent() kind = %q, want remux from entry notes when the file names carry no marker", got.Kind)
 	}
 }
 
@@ -49,9 +70,9 @@ func TestTorrentFileNamesDropsEmptyNamesPreservesOrder(t *testing.T) {
 		{Name: "episode 02.mkv"},
 	}
 
-	got := TorrentFileNames(files)
+	got := torrentFileNames(files)
 	want := []string{"episode 01.mkv", "episode 02.mkv"}
 	if !slices.Equal(got, want) {
-		t.Errorf("TorrentFileNames() = %v, want %v", got, want)
+		t.Errorf("torrentFileNames() = %v, want %v", got, want)
 	}
 }

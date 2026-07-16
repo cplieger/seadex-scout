@@ -3,20 +3,24 @@
 // representative release fingerprint. It applies arr-side tag include/exclude
 // and can diff two snapshots to report what changed on the arr side.
 //
-// A per-series episode fetch failure is logged and the series skipped (the
-// snapshot is partial but usable); only a failure of the top-level series/movie
-// list, or a cancelled context, fails the whole walk. This mirrors the
-// "ingest succeeded == healthy" semantic the scout uses.
+// A per-series episode fetch failure is logged and the series kept as a
+// Failed placeholder item (the snapshot is partial but usable); a failure of
+// the top-level series/movie list, a tag-resolution failure, a cancelled
+// context, or per-series failures hitting the walk failure budget fail the
+// whole walk. This mirrors the "ingest succeeded == healthy" semantic the
+// scout uses.
 package library
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"log/slog"
-	"sort"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cplieger/arrapi"
@@ -31,6 +35,15 @@ const (
 
 // episodeConcurrency bounds concurrent per-series episode fetches.
 const episodeConcurrency = 6
+
+// episodeFailureBudget caps per-series episode-fetch failures per walk. arrapi
+// retries every request with long timeouts, so a Sonarr outage mid-walk would
+// otherwise grind through EVERY kept series (hours) before the walk finished;
+// once this many series have failed the fault is the arr, not a per-series
+// blip, so the remaining fan-out is cancelled and the walk fails as a whole
+// (ingest failure, so the cycle is unhealthy). 5 tolerates isolated per-series
+// oddities (the partial-snapshot path) while tripping fast on an outage.
+const episodeFailureBudget = 5
 
 // SonarrClient is the arrapi Sonarr surface the walker needs (consumer-side
 // interface; *arrapi.Sonarr satisfies it).
@@ -55,21 +68,29 @@ type Item struct {
 	Title        string           `json:"title"`
 	ArrURL       string           `json:"arr_url,omitempty"`
 	Current      release.Release  `json:"current"`
-	Tags         []int            `json:"tags,omitempty"`
 	AltTitles    []string         `json:"alt_titles,omitempty"`
 	Groups       []string         `json:"groups,omitempty"`
 	ArrID        int              `json:"arr_id"`
 	TvdbID       int              `json:"tvdb_id,omitempty"`
 	TmdbID       int              `json:"tmdb_id,omitempty"`
 	Year         int              `json:"year,omitempty"`
-	MixedGroups  bool             `json:"mixed_groups,omitempty"`
 	HasFile      bool             `json:"has_file"`
+	// Failed marks a series whose episode fetch failed this walk: the item
+	// carries its arr identity (so consumers can tell WHICH items the partial
+	// walk is missing) but no file data. Consumers must not read a Failed
+	// item's absent groups as a real no-file library state.
+	Failed bool `json:"failed,omitempty"`
 }
 
 // Snapshot is one library walk.
 type Snapshot struct {
 	TakenAt time.Time `json:"taken_at"`
 	Items   []Item    `json:"items,omitempty"`
+	// Partial reports that at least one series' episode fetch failed: those
+	// items are present with Failed=true and no file data, so the snapshot is
+	// usable but not a complete library view, and consumers must not treat an
+	// absent or Failed item as removed.
+	Partial bool `json:"partial,omitempty"`
 }
 
 // Diff summarizes what changed between two snapshots (by arr + arr id).
@@ -125,13 +146,15 @@ func NewWalker(cfg *Config) *Walker {
 // failures are skipped with a warning.
 func (w *Walker) Walk(ctx context.Context) (Snapshot, error) {
 	var items []Item
+	partial := false
 
 	if w.sonarr != nil {
-		series, err := w.walkSonarr(ctx)
+		series, skipped, err := w.walkSonarr(ctx)
 		if err != nil {
 			return Snapshot{}, err
 		}
 		items = append(items, series...)
+		partial = skipped > 0
 	}
 	if w.radarr != nil {
 		movies, err := w.walkRadarr(ctx)
@@ -141,21 +164,32 @@ func (w *Walker) Walk(ctx context.Context) (Snapshot, error) {
 		items = append(items, movies...)
 	}
 
-	w.log.Info("library walk complete", "items", len(items),
+	// Final cancellation guard: when both sides are disabled (or the last side
+	// returned just before cancellation), neither helper observed ctx, so an
+	// already-cancelled walk must not publish a snapshot labelled complete.
+	if err := ctx.Err(); err != nil {
+		return Snapshot{}, err
+	}
+
+	w.log.Info("library walk complete", "items", len(items), "partial", partial,
 		"sonarr", w.sonarr != nil, "radarr", w.radarr != nil)
-	return Snapshot{TakenAt: time.Now().UTC(), Items: items}, nil
+	return Snapshot{TakenAt: time.Now().UTC(), Items: items, Partial: partial}, nil
 }
 
 // walkSonarr lists series, applies tag filters, and builds an item per kept
-// series with its episode files fetched concurrently (bounded).
-func (w *Walker) walkSonarr(ctx context.Context) ([]Item, error) {
+// series with its episode files fetched concurrently (bounded). A per-series
+// episode-fetch failure keeps the series' arr identity as a Failed placeholder
+// item (the snapshot is partial); once episodeFailureBudget failures
+// accumulate, the remaining fan-out is cancelled and the walk fails as a whole
+// (an arr outage, not per-series blips).
+func (w *Walker) walkSonarr(ctx context.Context) ([]Item, int, error) {
 	series, err := w.sonarr.GetSeries(ctx)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	includeIDs, excludeIDs, err := w.resolveTags(ctx, w.sonarr.ResolveTagIDs)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	var kept []arrapi.Series
@@ -165,19 +199,12 @@ func (w *Walker) walkSonarr(ctx context.Context) ([]Item, error) {
 		}
 	}
 
-	results := make([]*Item, len(kept))
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, episodeConcurrency)
-	for i := range kept {
-		sem <- struct{}{}
-		wg.Go(func() {
-			defer func() { <-sem }()
-			results[i] = w.fetchSeriesItem(ctx, &kept[i])
-		})
-	}
-	wg.Wait()
+	results, skipped := w.fetchEpisodeItems(ctx, kept)
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	if skipped >= episodeFailureBudget {
+		return nil, 0, fmt.Errorf("sonarr episode fetches: %d series failed, hitting the walk failure budget of %d", skipped, episodeFailureBudget)
 	}
 	items := make([]Item, 0, len(results))
 	for _, item := range results {
@@ -185,34 +212,74 @@ func (w *Walker) walkSonarr(ctx context.Context) ([]Item, error) {
 			items = append(items, *item)
 		}
 	}
-	if skipped := len(kept) - len(items); skipped > 0 {
+	if skipped > 0 {
 		w.log.Warn("sonarr series skipped after episode-fetch failures; snapshot is partial",
 			"skipped", skipped, "kept", len(kept))
 	}
-	return items, nil
+	return items, skipped, nil
+}
+
+// fetchEpisodeItems runs the bounded episode-fetch fan-out over the kept
+// series, returning the per-series results (nil where a fetch was cancelled or
+// skipped) and the failure count. The fan-out context is cancelled once the
+// failure budget is hit, so in-flight fetches stop and queued ones skip
+// instead of spending arrapi's per-request retries against a down Sonarr,
+// series after series; the caller turns a budget-hitting count into a walk
+// failure.
+func (w *Walker) fetchEpisodeItems(ctx context.Context, kept []arrapi.Series) (results []*Item, failed int) {
+	fanCtx, cancelFan := context.WithCancel(ctx)
+	defer cancelFan()
+	var failures atomic.Int64
+	results = make([]*Item, len(kept))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, episodeConcurrency)
+	for i := range kept {
+		sem <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-sem }()
+			if fanCtx.Err() != nil {
+				return // budget tripped (or shutdown): skip without fetching
+			}
+			item, failed := w.fetchSeriesItem(fanCtx, &kept[i])
+			results[i] = item
+			if failed && failures.Add(1) >= episodeFailureBudget {
+				cancelFan()
+			}
+		})
+	}
+	wg.Wait()
+	return results, int(failures.Load())
 }
 
 // fetchSeriesItem fetches one series' episodes and builds its Item. When the
-// walk context itself is cancelled or expired (a shutdown/redeploy) it returns
-// nil without a warning (Walk reports the cancellation); any other
-// episode-fetch failure - including a per-request timeout while the walk
-// context is still live - is logged and returns nil so the series is skipped.
-func (w *Walker) fetchSeriesItem(ctx context.Context, s *arrapi.Series) *Item {
+// fan-out context is cancelled or expired (a shutdown/redeploy, or the walk
+// failure budget tripping) it returns (nil, false) without a warning (Walk
+// reports the cancellation or the budget); any other episode-fetch failure -
+// including a per-request timeout while the walk context is still live - is
+// logged and returns the series' identity as a Failed placeholder plus
+// failed=true, so the snapshot records WHICH items the partial walk is missing
+// and walkSonarr can count the failure against the budget.
+func (w *Walker) fetchSeriesItem(ctx context.Context, s *arrapi.Series) (*Item, bool) {
 	eps, err := w.sonarr.GetEpisodes(ctx, s.ID)
 	if err != nil {
-		// Stay quiet only when the walk context itself is done (a shutdown): that
-		// error is expected and Walk reports it. arrapi wraps each request in its
-		// own context.WithTimeout, so a slow GetEpisodes surfaces as
-		// DeadlineExceeded while ctx is still live - a real fetch failure worth the
-		// per-series warning below, not shutdown noise.
+		// Stay quiet only when the fan-out context itself is done (a shutdown, or
+		// the failure budget already tripped): that error is expected and Walk
+		// reports it. arrapi wraps each request in its own context.WithTimeout,
+		// so a slow GetEpisodes surfaces as DeadlineExceeded while ctx is still
+		// live - a real fetch failure worth the per-series warning below, not
+		// shutdown noise.
 		if ctx.Err() != nil {
-			return nil
+			return nil, false
 		}
 		w.log.Warn("skipping series: episode fetch failed", "series", s.Title, "id", s.ID, "error", err)
-		return nil
+		// seriesItem with no episodes yields the identity fields and no file
+		// data - exactly the Failed placeholder shape.
+		item := w.seriesItem(s, nil)
+		item.Failed = true
+		return &item, true
 	}
 	item := w.seriesItem(s, eps)
-	return &item
+	return &item, false
 }
 
 // walkRadarr lists movies, applies tag filters, and builds an item per movie.
@@ -239,24 +306,30 @@ func (w *Walker) walkRadarr(ctx context.Context) ([]Item, error) {
 }
 
 // resolveTags resolves the include and exclude tag labels to ID sets, logging
-// any label that matched no tag. A resolution failure logs a warning and
-// disables that side's filter (fail-open) rather than aborting the walk.
+// any label that matched no tag. Any resolution failure aborts the walk (fail
+// closed; see resolveOne).
 func (w *Walker) resolveTags(ctx context.Context,
 	resolve func(context.Context, ...string) (map[int]struct{}, []string, error),
 ) (includeIDs, excludeIDs map[int]struct{}, err error) {
-	includeIDs, err = w.resolveOne(ctx, resolve, "INCLUDE_TAGS", w.includeTags)
+	includeIDs, err = w.resolveOne(ctx, resolve, "arr_tags.include", w.includeTags)
 	if err != nil {
 		return nil, nil, err
 	}
-	excludeIDs, err = w.resolveOne(ctx, resolve, "EXCLUDE_TAGS", w.excludeTags)
+	excludeIDs, err = w.resolveOne(ctx, resolve, "arr_tags.exclude", w.excludeTags)
 	if err != nil {
 		return nil, nil, err
 	}
 	return includeIDs, excludeIDs, nil
 }
 
-// resolveOne resolves a single label set, logging unmatched labels and
-// fail-opening (nil set) on error.
+// resolveOne resolves a single label set, logging unmatched labels. Any
+// resolution error fails the walk (fail closed): silently disabling the filter
+// would admit every item past the configured arr_tags scoping for the cycle -
+// a mass-resolve / report-noise blast radius from one transient tag-endpoint
+// failure - and silently emptying the library would be just as wrong. A
+// tag-resolution failure is an ingest failure (the cycle is unhealthy), and a
+// cancellation keeps its existing semantics: it propagates and Walk reports
+// the shutdown.
 func (w *Walker) resolveOne(ctx context.Context,
 	resolve func(context.Context, ...string) (map[int]struct{}, []string, error),
 	which string, labels []string,
@@ -266,11 +339,7 @@ func (w *Walker) resolveOne(ctx context.Context,
 	}
 	ids, unmatched, err := resolve(ctx, labels...)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, err
-		}
-		w.log.Warn("tag resolution failed; filter disabled for this cycle", "which", which, "error", err)
-		return nil, nil
+		return nil, fmt.Errorf("resolving %s: %w", which, err)
 	}
 	if len(unmatched) > 0 {
 		w.log.Warn("configured tags matched no arr tag", "which", which, "unmatched", strings.Join(unmatched, ","))
@@ -291,7 +360,9 @@ func keepByTags(itemTags []int, includeIDs, excludeIDs map[int]struct{}) bool {
 }
 
 // seriesItem builds a library Item from a series and its episodes, aggregating
-// the distinct release groups present and a representative fingerprint.
+// the distinct release groups present and a representative fingerprint. A
+// series with no episode files keeps the zero fingerprint (Current.Group ""),
+// matching the fileless-movie shape.
 func (w *Walker) seriesItem(s *arrapi.Series, eps []arrapi.Episode) Item {
 	var files []fileInfo
 	groupCounts := make(map[string]int)
@@ -303,18 +374,14 @@ func (w *Walker) seriesItem(s *arrapi.Series, eps []arrapi.Episode) Item {
 		}
 		fi := fileFromEpisode(f)
 		files = append(files, fi)
-		if fi.group != "" {
-			groupCounts[fi.group]++
-			addSeasonGroup(seasonCounts, eps[i].SeasonNumber, fi.group)
-		}
+		// fi.group is never empty: fileInfoFrom normalizes it via
+		// release.NormalizeGroup, which falls back to NOGRP for group-less files.
+		groupCounts[fi.group]++
+		addSeasonGroup(seasonCounts, eps[i].SeasonNumber, fi.group)
 	}
-	groups := sortedKeys(groupCounts)
-	rep := representative(files, groupCounts)
-	return Item{
-		Current:      w.fingerprint(&rep),
+	item := Item{
 		SeasonGroups: seasonGroups(seasonCounts),
-		Groups:       groups,
-		Tags:         s.Tags,
+		Groups:       sortedKeys(groupCounts),
 		AltTitles:    altTitles(s.AlternateTitles),
 		Arr:          ArrSonarr,
 		Title:        s.Title,
@@ -324,15 +391,23 @@ func (w *Walker) seriesItem(s *arrapi.Series, eps []arrapi.Episode) Item {
 		TvdbID:       s.TvdbID,
 		TmdbID:       s.TmdbID,
 		Year:         s.Year,
-		MixedGroups:  len(groups) > 1,
 		HasFile:      len(files) > 0,
 	}
+	if item.HasFile {
+		// A genuinely fileless series carries no comparable fingerprint: the
+		// zero Current (Group "") mirrors the fileless-movie shape, and the
+		// compare/audit paths read file presence before any group. Only a
+		// PRESENT file with an unparseable group falls back to NOGRP (via
+		// release.NormalizeGroup in fileInfoFrom).
+		rep := representative(files, groupCounts)
+		item.Current = fingerprint(&rep)
+	}
+	return item
 }
 
 // movieItem builds a library Item from a movie and its file.
 func (w *Walker) movieItem(m *arrapi.Movie) Item {
 	item := Item{
-		Tags:      m.Tags,
 		AltTitles: altTitles(m.AlternateTitles),
 		Arr:       ArrRadarr,
 		Title:     m.Title,
@@ -345,17 +420,17 @@ func (w *Walker) movieItem(m *arrapi.Movie) Item {
 	}
 	if item.HasFile {
 		fi := fileFromMovie(m.MovieFile)
-		if fi.group != "" {
-			item.Groups = []string{fi.group}
-		}
-		item.Current = w.fingerprint(&fi)
+		// fi.group is never empty: fileInfoFrom normalizes it via
+		// release.NormalizeGroup, which falls back to NOGRP for group-less files.
+		item.Groups = []string{fi.group}
+		item.Current = fingerprint(&fi)
 	}
 	return item
 }
 
 // fingerprint classifies a library file into a release.Release using the shared
 // classifier, so the library and SeaDex sides compare in one vocabulary.
-func (w *Walker) fingerprint(fi *fileInfo) release.Release {
+func fingerprint(fi *fileInfo) release.Release {
 	return release.Classify(&release.Input{
 		Names:      nonEmpty(fi.sceneName, fi.relPath),
 		Group:      fi.group,
@@ -448,17 +523,10 @@ func seasonGroups(counts map[int]map[string]int) map[int][]string {
 	return out
 }
 
-// sortedKeys returns the map keys sorted, for a stable groups slice.
+// sortedKeys returns the map keys sorted (nil when the map is empty), for a
+// stable groups slice.
 func sortedKeys(m map[string]int) []string {
-	if len(m) == 0 {
-		return nil
-	}
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
+	return slices.Sorted(maps.Keys(m))
 }
 
 // altTitles extracts the non-empty alternate-title strings from arr metadata,
@@ -485,7 +553,12 @@ func nonEmpty(vals ...string) []string {
 }
 
 // DiffSnapshots reports what changed between prev and cur, keyed by arr + id.
-// An item is Changed when its group set or current fingerprint differs.
+// An item is Changed when its group set, per-season group attribution, or
+// current fingerprint differs. Per the Snapshot.Partial contract, a Sonarr
+// item absent from a partial snapshot is not treated as removed (partial cur)
+// or added (partial prev); Partial is set only by Sonarr episode-fetch
+// failures, so Radarr additions/removals still count during a partial
+// transition, and changes to items present in both always count.
 func DiffSnapshots(prev, cur *Snapshot) Diff {
 	prevByKey := indexByKey(prev)
 	curByKey := indexByKey(cur)
@@ -493,14 +566,14 @@ func DiffSnapshots(prev, cur *Snapshot) Diff {
 	for k, c := range curByKey {
 		p, ok := prevByKey[k]
 		switch {
-		case !ok:
+		case !ok && (!prev.Partial || c.Arr != ArrSonarr):
 			d.Added++
-		case !sameItem(p, c):
+		case ok && !sameItem(p, c):
 			d.Changed++
 		}
 	}
-	for k := range prevByKey {
-		if _, ok := curByKey[k]; !ok {
+	for k, p := range prevByKey {
+		if _, ok := curByKey[k]; !ok && (!cur.Partial || p.Arr != ArrSonarr) {
 			d.Removed++
 		}
 	}
@@ -508,26 +581,28 @@ func DiffSnapshots(prev, cur *Snapshot) Diff {
 }
 
 // indexByKey keys a snapshot's items by "arr:id" (values point into the
-// snapshot's backing array, avoiding per-item copies).
+// snapshot's backing array, avoiding per-item copies). Failed placeholder
+// items are skipped: they carry no comparable file state (they exist so the
+// compare pass can scope finding resolution), so the diff treats them exactly
+// as the pre-marking walks did - absent, with the Partial suppression rules
+// deciding added/removed.
 func indexByKey(s *Snapshot) map[string]*Item {
 	m := make(map[string]*Item, len(s.Items))
 	for i := range s.Items {
 		it := &s.Items[i]
+		if it.Failed {
+			continue
+		}
 		m[it.Arr+":"+strconv.Itoa(it.ArrID)] = it
 	}
 	return m
 }
 
 // sameItem reports whether two items have the same current release state
-// (group set and fingerprint), for diff change detection.
+// (file presence, group set, per-season group attribution, and fingerprint),
+// for diff change detection.
 func sameItem(a, b *Item) bool {
-	if a.HasFile != b.HasFile || a.Current != b.Current || len(a.Groups) != len(b.Groups) {
-		return false
-	}
-	for i := range a.Groups {
-		if a.Groups[i] != b.Groups[i] {
-			return false
-		}
-	}
-	return true
+	return a.HasFile == b.HasFile && a.Current == b.Current &&
+		slices.Equal(a.Groups, b.Groups) &&
+		maps.EqualFunc(a.SeasonGroups, b.SeasonGroups, slices.Equal)
 }

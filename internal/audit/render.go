@@ -3,15 +3,19 @@ package audit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/cplieger/atomicfile/v2"
+	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/library"
 )
 
@@ -29,7 +33,7 @@ var verdictDesc = map[Verdict]string{
 	VerdictUnlisted:    "You have a release SeaDex does not list as best or alt.",
 	VerdictAlt:         "You have a listed alt; SeaDex marks a different release best.",
 	VerdictUnverified:  "Files are present but no release group could be identified, so no comparison was possible.",
-	VerdictNoFile:      "The mapped season or movie has no file on disk.",
+	VerdictNoFile:      "The mapped season or movie has no file on disk, or a whole-series comparison found no real season with files.",
 	VerdictBest:        "You already have SeaDex's best release.",
 	VerdictNotOnSeaDex: "In your library and recognized as anime (Fribb-mapped) but SeaDex lists no entry, so there is no recommendation to compare against.",
 }
@@ -89,9 +93,14 @@ func writeRow(b *strings.Builder, row *Row) {
 }
 
 // Log emits the report to slog: a summary line then one INFO line per row, so
-// the report is queryable in Loki alongside the human-readable Markdown.
+// the report is queryable in Loki alongside the human-readable Markdown. The
+// summary's msg is "report summary", deliberately distinct from Scout.Report's
+// "report generated" completion line, so a Loki query or counter keyed on
+// either message never double-counts a report run.
 func (r *Report) Log(log *slog.Logger) {
-	log.Info("report generated",
+	stamp := r.GeneratedAt.UTC().Format(time.RFC3339)
+	log.Info("report summary",
+		"generated_at", stamp,
 		"rows", len(r.Rows),
 		"have_best", r.Totals[string(VerdictBest)],
 		"have_alt", r.Totals[string(VerdictAlt)],
@@ -102,15 +111,17 @@ func (r *Report) Log(log *slog.Logger) {
 	for i := range r.Rows {
 		row := &r.Rows[i]
 		log.Info("report item",
+			"generated_at", stamp,
 			"title", row.Title,
 			"al_id", row.AniListID,
 			"arr", row.Arr,
 			"verdict", string(row.Verdict),
+			"qualifier", string(row.Qualifier),
 			"scope", scopeLabel(row),
 			"approx", row.Approx,
 			"current_group", strings.Join(row.CurrentGroups, ","),
 			"seadex_best", strings.Join(displayBestGroups(row.Releases), ","),
-			"arr_url", row.ArrURL,
+			"arr_url", library.SafeLogURL(row.ArrURL),
 			"seadex_url", row.SeaDexURL,
 			"match_source", row.MatchSource)
 	}
@@ -120,22 +131,65 @@ func (r *Report) Log(log *slog.Logger) {
 // filesystem-safe (no colons), second precision.
 const reportStampLayout = "2006-01-02T15-04-05Z"
 
-// WriteFiles renders the report and atomically writes a timestamped Markdown +
-// JSON pair into dir (report-<UTC timestamp>.md and .json), creating dir as
-// needed. The timestamp (the report's GeneratedAt) keeps successive reports
+// reportLockName is the flock target inside the report dir that serializes
+// report runs (see AcquireReportLock).
+const reportLockName = "report.lock"
+
+// ErrReportRunning is returned by AcquireReportLock when another report run
+// already holds the report lock. The report subcommand refuses to run rather
+// than racing the other run onto the same timestamped filename pair.
+var ErrReportRunning = errors.New("another report is already running")
+
+// AcquireReportLock takes an exclusive, non-blocking flock on report.lock in
+// dir (creating dir as needed) and returns a release func. It is held for a
+// report run's whole generate+write, so two concurrent report runs - which
+// could finish within the same UTC second and target the same
+// report-<timestamp>.{md,json} pair - cannot interleave: the second run gets
+// ErrReportRunning and refuses (never blocks or waits). A strictly-sequential
+// same-second rerun overwriting the same pair is accepted by design (the same
+// GeneratedAt second means the same content basis). The lock file is left in
+// place on release; unlinking it would open a window where two runs flock
+// different inodes and both proceed.
+func AcquireReportLock(dir string) (func(), error) {
+	if err := os.MkdirAll(dir, reportDirMode); err != nil {
+		return nil, fmt.Errorf("audit: create report dir %s: %w", dir, err)
+	}
+	path := filepath.Join(dir, reportLockName)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, reportFileMode)
+	if err != nil {
+		return nil, fmt.Errorf("audit: open report lock %s: %w", path, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, ErrReportRunning
+		}
+		return nil, fmt.Errorf("audit: lock %s: %w", path, err)
+	}
+	// Closing the file releases the flock; the closure also keeps f reachable
+	// so a finalizer cannot close the descriptor (and drop the lock) early.
+	return func() { _ = f.Close() }, nil
+}
+
+// WriteFiles renders the report and atomically writes a timestamped JSON +
+// Markdown pair into dir (report-<UTC timestamp>.json and .md), creating dir
+// as needed. The timestamp (the report's GeneratedAt) keeps successive reports
 // from overwriting one another.
 func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) error {
 	base := filepath.Join(dir, "report-"+r.GeneratedAt.UTC().Format(reportStampLayout))
 	mdPath, jsonPath := base+".md", base+".json"
-	if err := writeAtomic(ctx, mdPath, []byte(RenderMarkdown(r)), log); err != nil {
-		return fmt.Errorf("audit: write markdown %s: %w", mdPath, err)
-	}
+	// The JSON half is written FIRST, deliberately: a run interrupted between
+	// the two writes can leave a .json without its .md, but never a dangling
+	// .md without its machine-readable pair.
 	data, err := RenderJSON(r)
 	if err != nil {
 		return fmt.Errorf("audit: encode json: %w", err)
 	}
 	if err := writeAtomic(ctx, jsonPath, data, log); err != nil {
 		return fmt.Errorf("audit: write json %s: %w", jsonPath, err)
+	}
+	if err := writeAtomic(ctx, mdPath, []byte(RenderMarkdown(r)), log); err != nil {
+		return fmt.Errorf("audit: write markdown %s: %w", mdPath, err)
 	}
 	log.Info("report written", "markdown", mdPath, "json", jsonPath, "anime", len(r.Rows))
 	return nil
@@ -156,26 +210,38 @@ func writeAtomic(ctx context.Context, path string, data []byte, log *slog.Logger
 	return nil
 }
 
-// scopeCell renders the scope for the Markdown table, appending "(approx)" when
-// the comparison used a coarse multi-group bucket.
+// scopeCell renders the scope for the Markdown table, appending the comparison
+// annotations in parentheses: "approx" when the comparison used a coarse
+// multi-group bucket, and the daemon-vocabulary qualifier
+// (mixed/theoretical/incomplete) when one applies - e.g. "S2 (approx, mixed)".
 func scopeCell(row *Row) string {
+	var notes []string
 	if row.Approx {
-		return scopeLabel(row) + " (approx)"
+		notes = append(notes, "approx")
 	}
-	return scopeLabel(row)
+	if row.Qualifier != "" {
+		notes = append(notes, string(row.Qualifier))
+	}
+	if len(notes) == 0 {
+		return scopeLabel(row)
+	}
+	return scopeLabel(row) + " (" + strings.Join(notes, ", ") + ")"
 }
 
-// scopeLabel renders the comparison scope: "movie", "special", the TVDB season
-// ("S2"), or "series" for a whole-series comparison (an absolute-numbered run, a
-// title-only match, or a not-on-SeaDex library item).
+// scopeLabel renders the comparison scope recorded on the row at build time:
+// "movie", "special", the TVDB season ("S2"), or "series" for a whole-series
+// comparison (an absolute-numbered run, a title-only match, or a not-on-SeaDex
+// library item). It is a pure reader of Row.scope — the classification itself
+// is the align.Scope decision recorded on the Row, so the label cannot drift
+// from the comparison actually performed.
 func scopeLabel(row *Row) string {
-	switch {
-	case row.Arr == library.ArrRadarr:
+	switch row.scope {
+	case align.ScopeMovie:
 		return "movie"
-	case row.Special:
-		return "special"
-	case row.Season > 0:
+	case align.ScopeSeason:
 		return "S" + strconv.Itoa(row.Season)
+	case align.ScopeSpecial:
+		return "special"
 	default:
 		return "series"
 	}
@@ -210,25 +276,31 @@ func links(row *Row) string {
 	return strings.Join(parts, linkSep)
 }
 
+// linkURLEscaper backs escapeLinkURL; built once, safe for concurrent use.
+var linkURLEscaper = strings.NewReplacer(
+	" ", "%20",
+	"\t", "%09",
+	"\\", "%5C",
+	"`", "%60",
+	"\v", "%0B",
+	"\f", "%0C",
+	"(", "%28",
+	")", "%29",
+	"<", "%3C",
+	">", "%3E",
+	"|", "%7C",
+	"\n", "%0A",
+	"\r", "%0D",
+)
+
 // escapeLinkURL percent-encodes the characters in a URL that would break out
 // of a Markdown link's ](...) destination or the surrounding table cell/row:
-// parentheses, angle brackets, pipes, and every ASCII whitespace form (space,
-// tab, vertical tab, form feed, CR, LF). An ordinary URL is unchanged.
+// parentheses, angle brackets, pipes, backslash and backtick (the CommonMark
+// inline metacharacters still active inside a link destination), and every
+// ASCII whitespace form (space, tab, vertical tab, form feed, CR, LF). An
+// ordinary URL is unchanged.
 func escapeLinkURL(u string) string {
-	r := strings.NewReplacer(
-		" ", "%20",
-		"\t", "%09",
-		"\v", "%0B",
-		"\f", "%0C",
-		"(", "%28",
-		")", "%29",
-		"<", "%3C",
-		">", "%3E",
-		"|", "%7C",
-		"\n", "%0A",
-		"\r", "%0D",
-	)
-	return r.Replace(u)
+	return linkURLEscaper.Replace(u)
 }
 
 // mdLink builds a Markdown link with a table-cell-safe label and a
@@ -279,6 +351,40 @@ func rowsWithVerdict(rows []Row, v Verdict) []Row {
 	return out
 }
 
+// cellEscaper backs escapeCell; built once, safe for concurrent use.
+var cellEscaper = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+	"\\", "&#92;",
+	"|", "&#124;",
+	"[", "&#91;",
+	"]", "&#93;",
+	"\n", " ",
+	"\r", " ",
+)
+
+// stripControl replaces C0 control characters, DEL, and the Unicode
+// bidirectional override/isolate characters with a space, so untrusted
+// text cannot smuggle terminal escape sequences or visual reordering
+// into the rendered Markdown report. CR/LF are already flattened by
+// cellEscaper; this catches the rest.
+func stripControl(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r < 0x20 && r != '\n' && r != '\r':
+			return ' '
+		case r == 0x7f:
+			return ' '
+		case r >= 0x202a && r <= 0x202e: // LRE/RLE/PDF/LRO/RLO
+			return ' '
+		case r >= 0x2066 && r <= 0x2069: // LRI/RLI/FSI/PDI
+			return ' '
+		}
+		return r
+	}, s)
+}
+
 // escapeCell makes a string safe inside a Markdown table cell. It uses HTML
 // numeric/character entities instead of backslash escapes so a pre-existing
 // backslash in the text cannot cancel an inserted escape (\] or \| could
@@ -288,19 +394,11 @@ func rowsWithVerdict(rows []Row, v Verdict) []Row {
 // the backslash itself, and flattens CR/LF. strings.NewReplacer performs a
 // single non-overlapping left-to-right pass and never re-scans its replacement
 // output, so encoding & first does not double-encode the entities it inserts.
+// A stripControl pre-pass removes the remaining C0/DEL control characters and
+// the Unicode bidi override/isolate characters (terminal-escape and visual
+// reordering smuggling).
 func escapeCell(s string) string {
-	r := strings.NewReplacer(
-		"&", "&amp;",
-		"<", "&lt;",
-		">", "&gt;",
-		"\\", "&#92;",
-		"|", "&#124;",
-		"[", "&#91;",
-		"]", "&#93;",
-		"\n", " ",
-		"\r", " ",
-	)
-	return r.Replace(s)
+	return cellEscaper.Replace(stripControl(s))
 }
 
 // orEmpty returns the empty-cell marker for a blank string.

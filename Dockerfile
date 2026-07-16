@@ -8,6 +8,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go mod download
 COPY *.go ./
+# embedded by main.go (//go:embed) as the first-boot starter config
 COPY config.example.yaml ./
 COPY internal/ internal/
 RUN --mount=type=cache,target=/go/pkg/mod \

@@ -152,6 +152,13 @@ read them directly. A report never writes the state cache, so it is safe to run
 alongside a daemon cycle. To produce reports on a schedule, use the same
 Ofelia `job-exec` pattern as above with `/seadex-scout report`.
 
+Two details of the write are worth knowing. Report runs are serialized through
+a `report.lock` file in `report.dir`: a second run started while one is in
+flight refuses with `another report is already running` and exits `1`, rather
+than racing the first onto the same timestamped filenames. And each pair is
+written JSON first, so a run interrupted mid-write can leave a `.json` without
+its `.md`, but never a Markdown file without its machine-readable pair.
+
 ## Indexer (Torznab feed)
 
 When a Prowlarr Torznab URL is configured, the daemon serves a
@@ -166,7 +173,10 @@ automatic or interactive search, which carries a query) is **proxied to Prowlarr
 it asks Prowlarr's Nyaa and AnimeBytes Torznab endpoints, keeps only the results
 SeaDex curates, and passes their real title, seeders, size, and Prowlarr-proxied
 download link straight through — so a search needs no tracker passkey here
-(Prowlarr grabs with the AnimeBytes credentials it holds). A **periodic RSS check**
+(Prowlarr grabs with the AnimeBytes credentials it holds). If every upstream
+query fails (Prowlarr unreachable), the search answers with a Torznab
+`<error code="900">` document rather than an empty feed, so the arr records a
+failed search instead of concluding there were no results. A **periodic RSS check**
 (the no-query "recent releases" fetch the arrs run on their sync interval) has no
 query to match against, so the feed instead **synthesizes the SeaDex list itself**:
 one item per curated release, its title taken from SeaDex's own file names, with a
@@ -213,6 +223,14 @@ indexer:
 ```
 
 The port is fixed at `:9118` (published by your compose port mapping, not a config key).
+
+One Prowlarr setting is worth changing while you are there: on the **Nyaa**
+indexer, set **Sort requested from site** (under the indexer's advanced
+settings) to `seeders` instead of the default created/date. Nyaa returns
+effectively a single page of results and Prowlarr never requests the pages
+behind it, so date-sorted results bury older well-seeded BD and batch releases
+beyond that first page; sorting by seeders surfaces exactly those, which
+materially improves how many SeaDex picks a search can return for older shows.
 
 For **searches**, the download links are Prowlarr's own proxy URLs, so no passkey
 is needed — Prowlarr grabs with the credentials it holds. The **AnimeBytes RSS
@@ -311,7 +329,14 @@ seadex-scout bridges them:
   to use.
 - **Overrides.** Drop a `/config/overrides.json` (a JSON array of records keyed
   by `anilist_id`) beside the config to pin the entries Fribb misses; it is
-  applied ahead of Fribb. Absent is fine.
+  applied ahead of Fribb. Absent is fine. Fields per record: `anilist_id`
+  (required), `type` (`movie` routes to Radarr, anything else to Sonarr),
+  `tvdb_id`, `tmdb_movies` (array of ints), `imdb_ids` (array of strings),
+  `season_tvdb` — note these are NOT the upstream Fribb field names
+  (`imdb_id`, `themoviedb_id`, `season`), which are silently ignored. An
+  override **replaces** the whole mapping record for its `anilist_id` (no
+  field-by-field merge), so when correcting an entry Fribb already has,
+  restate every field the entry needs.
 - **Title fallback.** When an entry maps through neither, seadex-scout fetches
   its titles and format from AniList and attempts a conservative normalized
   title-plus-year match against the library (exact match, single candidate
@@ -408,7 +433,10 @@ log:
 ```
 
 At least one arr must be `enabled` with a `url` + `api_key`; an enabled arr
-missing either is a configuration error. `public_url` is the browser-facing base
+missing either is a configuration error. Unknown or misplaced keys are also
+rejected at startup with an error naming the key (e.g. `unknown configuration
+key "anime_bytes"`), so a typo fails fast instead of being silently ignored.
+`public_url` is the browser-facing base
 used only for the report's deep-links (leave empty to reuse `url`), so an
 internal Docker hostname in `url` still yields working links.
 
@@ -431,12 +459,14 @@ port (fixed at `:9118`). An alert-only deployment stays socket-less.
   a headline `release_url`, and `release_urls` (every obtainable source, so a
   release on both Nyaa and AnimeBytes carries both). Informational cases
   (`incomplete`, `theoretical_best`, `mixed_group_manual`) log at `info`. Each
-  cycle closes with a `cycle complete` line carrying the counts, mapping
-  coverage, and AniList usage; report mode emits one `report item` line
-  per anime.
+  cycle closes with a completion line: `cycle complete` (carrying the counts,
+  mapping coverage, and AniList usage) when healthy, or `cycle degraded` at
+  `warn` with a `reason` when an upstream outage or a safety guard skipped the
+  comparison; report mode emits one `report item` line per anime.
 - **Alert rules.** seadex-scout ships no notifier of its own; see
   [Alerting](#alerting) for reference Loki ruler rules you can copy (a cycle
-  fault, a poll-loop deadman, and an informational better-release rule).
+  fault, a poll-loop deadman, and informational better-release and
+  report-written rules).
 - **Health.** The distroless image's Docker `HEALTHCHECK` uses the
   `seadex-scout health` subcommand (a `/tmp/.healthy` file marker), so no shell or
   port is needed; the marker reflects the last cycle's library-ingest outcome.
@@ -452,9 +482,10 @@ deliver through your Alertmanager like any Prometheus metric alert. They cover:
 
 | Alert | Fires when | Severity |
 | --- | --- | --- |
-| `SeadexScoutCycleError` | a cycle logs an error, e.g. the Sonarr/Radarr library walk failed and the cycle is marked unhealthy | warning |
-| `SeadexScoutScanStalled` | no `cycle complete` line in 26h, i.e. the daemon poll loop is wedged | warning |
+| `SeadexScoutCycleError` | a cycle logs an error: the Sonarr/Radarr library walk failed, or a library-shrink / mapping-refresh guard escalated after 8 consecutive degraded cycles | warning |
+| `SeadexScoutScanStalled` | no cycle completion line (`cycle complete` or `cycle degraded`) in 7h, i.e. the daemon poll loop is wedged | warning |
 | `SeadexScoutBetterReleaseFound` | SeaDex recommended a better release than the one on disk (informational, not a fault) | info |
+| `SeadexScoutReportWritten` | a report run wrote a season-level alignment report (informational) | info |
 
 Thresholds and the `severity` labels are starting points. Adjust the `container`
 selector (or `job` / `service`, depending on your log collector) to your

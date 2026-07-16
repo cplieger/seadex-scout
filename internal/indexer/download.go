@@ -1,5 +1,11 @@
 package indexer
 
+import (
+	"net/url"
+
+	"github.com/cplieger/seadex-scout/internal/release"
+)
+
 // downloadURL resolves a grabbable .torrent download URL for a SeaDex torrent
 // from its tracker and SeaDex source URL. It reports ok=false when the release
 // cannot be turned into a download the arr can fetch: an unknown tracker, a
@@ -10,22 +16,23 @@ package indexer
 // AB download URL embeds the passkey, so it is a secret and callers must not
 // log it.
 func downloadURL(tracker, sourceURL, abPasskey string) (string, bool) {
-	switch trackerScope(tracker) {
+	scope := trackerScope(tracker)
+	id := trackerID(scope, sourceURL)
+	if id == "" {
+		return "", false
+	}
+	// The site hosts come from the canonical release tracker table; only the
+	// download-endpoint path shapes are indexer knowledge.
+	switch scope {
 	case upstreamNyaa:
-		id := extractID(sourceURL, "/view/")
-		if id == "" {
-			return "", false
-		}
-		return "https://nyaa.si/download/" + id + ".torrent", true
+		nyaa, _ := release.LookupTracker(release.TrackerNameNyaa)
+		return nyaa.BaseURL + "/download/" + id + ".torrent", true
 	case upstreamAB:
 		if abPasskey == "" {
 			return "", false
 		}
-		id := animeBytesID(sourceURL)
-		if id == "" {
-			return "", false
-		}
-		return "https://animebytes.tv/torrent/" + id + "/download/" + abPasskey, true
+		ab, _ := release.LookupTracker(release.TrackerNameAnimeBytes)
+		return ab.BaseURL + "/torrent/" + id + "/download/" + url.PathEscape(abPasskey), true
 	default:
 		return "", false
 	}

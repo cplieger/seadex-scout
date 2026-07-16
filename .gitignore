@@ -8,6 +8,10 @@
 .env
 *.env
 
+# Bind-mounted runtime config from the compose example (generated config.yaml
+# can hold API keys; state/feed/reports are runtime data) — never commit it
+/config/
+
 # go.work / go.work.sum are local-dev only (never committed)
 go.work
 go.work.sum

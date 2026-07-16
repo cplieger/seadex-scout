@@ -1,8 +1,6 @@
 package mapping
 
 import (
-	"io"
-	"log/slog"
 	"strings"
 	"testing"
 )
@@ -15,7 +13,7 @@ import (
 // every returned record is keyed (non-zero AniListID), type-normalized, and
 // carries only trimmed non-empty imdb ids and non-zero tmdb movie ids.
 func FuzzParseFribb(f *testing.F) {
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	log := discardLogger()
 	f.Add([]byte(`[{"anilist_id":1,"type":"tv","tvdb_id":"100","imdb_id":"tt1","themoviedb_id":{"tv":5}}]`))
 	f.Add([]byte(`[{"anilist_id":"2","type":"MOVIE","imdb_id":["tt2","tt3"],"themoviedb_id":{"movie":[7,8]}}]`))
 	f.Add([]byte(`[{"anilist_id":0}]`))
@@ -23,6 +21,9 @@ func FuzzParseFribb(f *testing.F) {
 	f.Add([]byte(`null`))
 	f.Add([]byte(`{}`))
 	f.Add([]byte(`[]`))
+	f.Add([]byte(`[{"anilist_id":1}`))
+	f.Add([]byte(`[{"anilist_id":1},!!!]`))
+	f.Add([]byte(`[{"anilist_id":1}] {"extra":true}`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		records, err := parseFribb(data, log)
 		if err != nil {

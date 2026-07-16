@@ -38,6 +38,11 @@ const (
 	// maxPageBytes bounds one page (500 entries with expanded torrents) before
 	// decode, guarding against an oversized or malicious payload.
 	maxPageBytes = 48 << 20
+	// maxTotalBytes caps cumulative page bytes across the whole fetch so a
+	// compromised upstream serving few-but-huge items per page (under the
+	// entry-count cap) cannot accumulate maxPages*maxPageBytes of memory.
+	// The honest catalogue is a few tens of MB; 512 MB is generous headroom.
+	maxTotalBytes = 512 << 20
 	// maxAttempts / baseDelay bound the per-page retry.
 	maxAttempts = 3
 	baseDelay   = time.Second
@@ -65,7 +70,6 @@ type Torrent struct {
 type Entry struct {
 	Updated         time.Time
 	Notes           string
-	Comparison      string
 	TheoreticalBest string
 	Torrents        []Torrent
 	AniListID       int
@@ -102,13 +106,13 @@ func NewClient(httpClient *http.Client, baseURL string, pageDelay time.Duration,
 // pbList is the PocketBase list-response envelope for the entries collection.
 type pbList struct {
 	Items      []pbEntry `json:"items"`
+	TotalItems int       `json:"totalItems"`
 	TotalPages int       `json:"totalPages"`
 }
 
 // pbEntry mirrors an entries record with the torrents relation expanded.
 type pbEntry struct {
 	Notes           string   `json:"notes"`
-	Comparison      string   `json:"comparison"`
 	TheoreticalBest string   `json:"theoreticalBest"`
 	Updated         string   `json:"updated"`
 	Expand          pbExpand `json:"expand"`
@@ -126,7 +130,6 @@ func (r *pbEntry) toEntry() Entry {
 	return Entry{
 		Torrents:        r.Expand.Trs,
 		Notes:           r.Notes,
-		Comparison:      r.Comparison,
 		TheoreticalBest: r.TheoreticalBest,
 		Updated:         parsePBTime(r.Updated),
 		AniListID:       r.AlID,
@@ -156,43 +159,83 @@ func parsePBTime(s string) time.Time {
 // FetchEntries pages through the entire entries collection with torrents
 // expanded and returns every entry. It sleeps pageDelay between pages. A page
 // fetch failure aborts and returns the error; partial results are discarded so
-// a caller never compares against a truncated SeaDex view.
+// a caller never compares against a truncated SeaDex view. A catalogue that
+// completes with ZERO entries is an error, never a success: SeaDex is never
+// legitimately empty for this app's use, and accepting one would make every
+// library item read as having no SeaDex coverage. A completed catalogue whose
+// entry count disagrees with the API's reported totalItems is logged (WARN)
+// but still returned - pagination raciness over a live collection can
+// legitimately shift counts mid-fetch.
 func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 	var all []Entry
-	completed := false
+	var totalBytes, reportedTotal int
 	for page := 1; page <= maxPages; page++ {
-		list, err := c.fetchPage(ctx, page)
-		if err != nil {
-			return nil, fmt.Errorf("seadex: fetch page %d: %w", page, err)
+		if page > 1 {
+			if err := httpx.SleepCtx(ctx, c.pageDelay); err != nil {
+				return nil, fmt.Errorf("seadex: interrupted between pages: %w", err)
+			}
 		}
-		for i := range list.Items {
-			all = append(all, list.Items[i].toEntry())
-		}
-		if len(all) > maxEntries {
-			return nil, fmt.Errorf("seadex: entry count exceeded cap %d (upstream misbehaving)", maxEntries)
-		}
-		done, err := pageComplete(page, len(list.Items), list.TotalPages)
+		var done bool
+		var err error
+		all, done, err = c.fetchAndAppend(ctx, page, all, &totalBytes, &reportedTotal)
 		if err != nil {
 			return nil, err
 		}
 		if done {
-			completed = true
-			break
-		}
-		if err := httpx.SleepCtx(ctx, c.pageDelay); err != nil {
-			return nil, fmt.Errorf("seadex: interrupted between pages: %w", err)
+			return c.finishFetch(all, reportedTotal)
 		}
 	}
-	if !completed {
-		return nil, fmt.Errorf("seadex: pagination exceeded max %d pages (upstream reported more); "+
-			"refusing to compare against a truncated view", maxPages)
+	return nil, fmt.Errorf("seadex: pagination exceeded max %d pages (upstream reported more); "+
+		"refusing to compare against a truncated view", maxPages)
+}
+
+// finishFetch validates a completed catalogue before returning it: zero
+// collected entries is an error (SeaDex is never legitimately empty for this
+// app's use, whether the API reported zero totals or served empty pages), and
+// a collected count disagreeing with the API's reported totalItems logs the
+// alert-stable count-mismatch WARN but still returns the entries.
+func (c *Client) finishFetch(all []Entry, reportedTotal int) ([]Entry, error) {
+	if len(all) == 0 {
+		return nil, fmt.Errorf("seadex: returned an empty catalogue (totalItems=%d); "+
+			"SeaDex is never legitimately empty, refusing to compare against it", reportedTotal)
+	}
+	if len(all) != reportedTotal {
+		c.log.Warn("seadex catalogue count mismatch", "got", len(all), "want", reportedTotal)
 	}
 	c.log.Debug("seadex entries fetched", "entries", len(all))
 	return all, nil
 }
 
+// fetchAndAppend fetches one page, appends its entries, updates the running
+// byte total and the API's reported item total, enforces the cumulative-byte
+// and entry-count caps, and reports whether pagination is complete.
+func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, totalBytes, reportedTotal *int) (out []Entry, done bool, err error) {
+	list, n, err := c.fetchPage(ctx, page)
+	if err != nil {
+		return all, false, fmt.Errorf("seadex: fetch page %d: %w", page, err)
+	}
+	*totalBytes += n
+	*reportedTotal = list.TotalItems
+	if *totalBytes > maxTotalBytes {
+		return all, false, fmt.Errorf("seadex: cumulative page bytes exceeded cap %d (upstream misbehaving); "+
+			"refusing to compare against a truncated view", maxTotalBytes)
+	}
+	for i := range list.Items {
+		all = append(all, list.Items[i].toEntry())
+	}
+	if len(all) > maxEntries {
+		return all, false, fmt.Errorf("seadex: entry count exceeded cap %d (upstream misbehaving)", maxEntries)
+	}
+	done, err = pageComplete(page, len(list.Items), list.TotalPages)
+	return all, done, err
+}
+
 // pageComplete reports whether pagination is done after a page, or an error
-// when the page is empty before the reported total (a truncated view).
+// when the page is empty before the reported total (a truncated view) or the
+// pagination metadata is invalid for a non-empty page. totalPages is an
+// unvalidated upstream field (a missing value decodes to zero), so a non-empty
+// page with totalPages < 1, or a page past the reported total, must not be
+// accepted as a complete catalogue.
 func pageComplete(page, itemCount, totalPages int) (done bool, err error) {
 	if itemCount == 0 {
 		if page < totalPages {
@@ -201,16 +244,25 @@ func pageComplete(page, itemCount, totalPages int) (done bool, err error) {
 		}
 		return true, nil
 	}
+	if totalPages < 1 || page > totalPages {
+		return false, fmt.Errorf("seadex: page %d with invalid pagination metadata (totalPages %d); "+
+			"refusing to compare against a truncated view", page, totalPages)
+	}
 	return page >= totalPages, nil
 }
 
-// fetchPage fetches and decodes a single page of entries.
-func (c *Client) fetchPage(ctx context.Context, page int) (pbList, error) {
+// fetchPage fetches and decodes a single page of entries, also returning the
+// raw body size so the caller can bound cumulative bytes across pages.
+func (c *Client) fetchPage(ctx context.Context, page int) (pbList, int, error) {
 	q := url.Values{
 		"expand":  {"trs"},
 		"page":    {strconv.Itoa(page)},
 		"perPage": {strconv.Itoa(perPage)},
-		"sort":    {"-updated"},
+		// Sort on immutable fields: with offset pagination over a live
+		// collection, sorting on `updated` lets a mid-pagination entry update
+		// shift records across already-fetched pages (one entry missed, another
+		// duplicated, for this cycle). created,id is stable under updates.
+		"sort": {"created,id"},
 	}
 	reqURL := c.baseURL + entriesPath + "?" + q.Encode()
 
@@ -222,14 +274,14 @@ func (c *Client) fetchPage(ctx context.Context, page int) (pbList, error) {
 		httpx.WithLogger(c.log),
 	)
 	if err != nil {
-		return pbList{}, err
+		return pbList{}, 0, err
 	}
 
 	var list pbList
 	if err := json.Unmarshal(body, &list); err != nil {
-		return pbList{}, fmt.Errorf("decode page: %w", err)
+		return pbList{}, 0, fmt.Errorf("decode page: %w", err)
 	}
-	return list, nil
+	return list, len(body), nil
 }
 
 // setHeaders sets the descriptive User-Agent and JSON Accept header on each

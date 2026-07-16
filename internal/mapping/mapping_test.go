@@ -27,6 +27,49 @@ func TestRecord_IsSpecial(t *testing.T) {
 	}
 }
 
+// TestRecord_HasArrIdentifier pins the arr-routed identifier predicate: only
+// the fields the record's routed arr consumes count (TMDB-movie/IMDb for
+// movies, TVDB for series), so a wrong-arm identifier can neither satisfy the
+// refresh coverage floor nor catalogue an item for the opposite arr.
+func TestRecord_HasArrIdentifier(t *testing.T) {
+	tests := []struct {
+		name string
+		rec  Record
+		want bool
+	}{
+		{"series with tvdb", Record{Type: "TV", TvdbID: 100}, true},
+		{"series with only movie ids", Record{Type: "TV", TmdbMovies: []int{4}, IMDbIDs: []string{"tt1"}}, false},
+		{"movie with tmdb", Record{Type: "MOVIE", TmdbMovies: []int{4}}, true},
+		{"movie with imdb", Record{Type: "MOVIE", IMDbIDs: []string{"tt1"}}, true},
+		{"movie with only tvdb", Record{Type: "MOVIE", TvdbID: 100}, false},
+		{"no ids", Record{Type: "TV"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.rec.HasArrIdentifier(); got != tt.want {
+				t.Errorf("HasArrIdentifier() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestArrIdentifierCountIgnoresWrongArmIdentifiers pins the refresh coverage
+// guard to the same arr-routed predicate the matcher uses: a TV record
+// carrying only movie ids (or a MOVIE record carrying only a TVDB id) cannot
+// count toward the acceptance floor, because findByID would never consume
+// those fields for that record's arr.
+func TestArrIdentifierCountIgnoresWrongArmIdentifiers(t *testing.T) {
+	records := []Record{
+		{AniListID: 1, Type: "TV", TmdbMovies: []int{4}, IMDbIDs: []string{"tt1"}},
+		{AniListID: 2, Type: "MOVIE", TvdbID: 100},
+		{AniListID: 3, Type: "TV", TvdbID: 100},
+		{AniListID: 4, Type: "MOVIE", IMDbIDs: []string{"tt2"}},
+	}
+	if got := arrIdentifierCount(records); got != 2 {
+		t.Errorf("arrIdentifierCount = %d, want 2 (wrong-arm identifiers must not count)", got)
+	}
+}
+
 func TestBuildIndex_dedupAndZeroSkip(t *testing.T) {
 	idx := buildIndex([]Record{
 		{AniListID: 1, Type: "TV"},

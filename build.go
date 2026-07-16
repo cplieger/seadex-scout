@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -122,7 +123,8 @@ func feedWriter(cfg *config.Config, log *slog.Logger) scout.FeedWriter {
 	if !indexerConfigured(cfg) {
 		return nil
 	}
-	return indexer.NewFeedWriter(cfg.IndexerABPasskey, config.DefaultIndexerFeedPath, log.With("component", "indexer"))
+	abConfigured := cfg.IndexerABTorznabURL != ""
+	return indexer.NewFeedWriter(cfg.IndexerABPasskey, abConfigured, config.DefaultIndexerFeedPath, log.With("component", "indexer"))
 }
 
 // builtIndexer holds the assembled Torznab feed server and the resources to
@@ -186,18 +188,23 @@ func newArrClients(cfg *config.Config) (*arrapi.Sonarr, *arrapi.Radarr, error) {
 // temporarily-down arr should not stop the daemon from starting.
 func pingArrs(ctx context.Context, sonarr *arrapi.Sonarr, radarr *arrapi.Radarr) {
 	if sonarr != nil {
-		if err := sonarr.Ping(ctx); err != nil {
-			slog.Warn("sonarr ping failed at startup", "error", err)
-		} else {
-			slog.Info("sonarr reachable")
-		}
+		logPing("sonarr", sonarr.Ping(ctx))
 	}
 	if radarr != nil {
-		if err := radarr.Ping(ctx); err != nil {
-			slog.Warn("radarr ping failed at startup", "error", err)
-		} else {
-			slog.Info("radarr reachable")
-		}
+		logPing("radarr", radarr.Ping(ctx))
+	}
+}
+
+// logPing logs one arr's startup reachability, classifying a context
+// cancellation (shutdown mid-startup) as routine rather than an arr fault.
+func logPing(arr string, err error) {
+	switch {
+	case err == nil:
+		slog.Info(arr + " reachable")
+	case errors.Is(err, context.Canceled):
+		slog.Debug(arr+" startup ping cancelled by shutdown", "error", err)
+	default:
+		slog.Warn(arr+" ping failed at startup", "error", err)
 	}
 }
 

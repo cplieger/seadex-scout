@@ -12,19 +12,20 @@ import (
 func TestWholeSeries(t *testing.T) {
 	tests := []struct {
 		name string
-		item library.Item
 		rec  mapping.Record
+		item library.Item
 		want bool
 	}{
-		{"sonarr seasonless non-special is whole-series", library.Item{Arr: library.ArrSonarr}, mapping.Record{Type: "TV", SeasonTvdb: 0}, true},
-		{"sonarr with a positive season is not whole-series", library.Item{Arr: library.ArrSonarr}, mapping.Record{Type: "TV", SeasonTvdb: 2}, false},
-		{"sonarr special is not whole-series", library.Item{Arr: library.ArrSonarr}, mapping.Record{Type: "OVA", SeasonTvdb: 0}, false},
-		{"radarr is never whole-series", library.Item{Arr: library.ArrRadarr}, mapping.Record{Type: "MOVIE", SeasonTvdb: 0}, false},
+		{"sonarr seasonless non-special is whole-series", mapping.Record{Type: "TV", SeasonTvdb: 0}, library.Item{Arr: library.ArrSonarr}, true},
+		{"sonarr with a positive season is not whole-series", mapping.Record{Type: "TV", SeasonTvdb: 2}, library.Item{Arr: library.ArrSonarr}, false},
+		{"sonarr special is not whole-series", mapping.Record{Type: "OVA", SeasonTvdb: 0}, library.Item{Arr: library.ArrSonarr}, false},
+		{"radarr is never whole-series", mapping.Record{Type: "MOVIE", SeasonTvdb: 0}, library.Item{Arr: library.ArrRadarr}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := align.WholeSeries(&tt.item, &tt.rec); got != tt.want {
-				t.Errorf("WholeSeries() = %v, want %v", got, tt.want)
+			got := align.Scope(&tt.item, &tt.rec).Kind == align.ScopeWholeSeries
+			if got != tt.want {
+				t.Errorf("Scope().Kind == ScopeWholeSeries = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -62,6 +63,21 @@ func TestSummarizeWholeSeriesNilAltTreatsBestLessSeasonAsUnlisted(t *testing.T) 
 	}
 	if s.AnyAlt {
 		t.Error("AnyAlt = true, want false (nil alt can never match)")
+	}
+}
+
+// TestSummarizeWholeSeriesDeduplicatesGroupsAcrossSeasons pins the seen-group
+// dedupe in the whole-series aggregate: a group present in several seasons
+// appears once in Groups, not once per season (l-f3).
+func TestSummarizeWholeSeriesDeduplicatesGroupsAcrossSeasons(t *testing.T) {
+	item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{
+		1: {"shared", "alpha"},
+		2: {"shared", "beta"},
+	}}
+	got := align.SummarizeWholeSeries(item, []string{"shared"}, nil)
+	want := []string{"alpha", "beta", "shared"}
+	if !reflect.DeepEqual(got.Groups, want) {
+		t.Errorf("Groups = %v, want deduplicated sorted groups %v", got.Groups, want)
 	}
 }
 

@@ -12,11 +12,14 @@ groups:
   - name: seadex-scout
     rules:
       # Fault: a daemon run logged an error. The primary case is a failed
-      # Sonarr/Radarr library walk, which marks the run unhealthy; a failed
-      # state save/load or a panicked run also log at ERROR. SeaDex, mapping,
-      # and AniList outages log at WARN by design (the run stays healthy and
-      # keeps prior findings), so this rule does not fire on an upstream blip.
-      # "An error was logged" is a one-time event, so route it to a
+      # Sonarr/Radarr library walk (an arr connection, API, or tag-resolution
+      # failure), which marks the run unhealthy; a failed state save/load or a
+      # panicked run also log at ERROR. SeaDex, mapping, and AniList outages
+      # log at WARN by design (the run stays healthy and keeps prior findings),
+      # so this rule does not fire on an upstream blip — but a degradation that
+      # persists escalates: a suspicious library shrink or a rejected mapping
+      # refresh repeated for 8 consecutive cycles re-logs at ERROR and fires
+      # this rule. "An error was logged" is a one-time event, so route it to a
       # `send_resolved: false` receiver — the 15m count window clearing means
       # errors merely stopped, not a real recovery worth announcing as RESOLVED.
       - alert: SeadexScoutCycleError
@@ -32,10 +35,19 @@ groups:
           description: >
             A seadex-scout daemon run logged an error in the last 15m. The usual
             cause is a failed Sonarr/Radarr library walk (logged as "library walk
-            failed; cycle unhealthy"), which stops findings from updating. Check
-            the arr url and api_key and the /config volume.
-      # Deadman (daemon mode): the poll loop emits a `cycle complete` line every
-      # poll_interval, so its absence means the watcher is wedged and silent. The
+            failed; cycle unhealthy"), which stops findings from updating; check
+            the arr url and api_key and the /config volume. A persistent
+            degradation also lands here: a library walk that stays shrunken below
+            half the prior snapshot, or a mapping refresh the acceptance guards
+            keep rejecting, escalates from WARN to ERROR after 8 consecutive
+            cycles; inspect the arrs and arr_tags (or the mapping upstream), or
+            remove state.json to accept the change if it is legitimate.
+      # Deadman (daemon mode): the poll loop closes every cycle with a
+      # completion line — `cycle complete` when healthy, `cycle degraded` (with
+      # a reason attribute) when an upstream outage or a safety guard degraded
+      # it — so the absence of BOTH means the watcher is wedged and silent.
+      # Counting the degraded line too keeps this deadman satisfied through a
+      # long upstream outage instead of firing as if the daemon died. The
       # for: 1h grace avoids a false fire on first boot, where no cycle has
       # completed yet and a cold first run (Fribb map download + AniList
       # fallback) can take several minutes. Unlike the other three (one-time
@@ -43,21 +55,22 @@ groups:
       # receiver so you are told when the watcher recovers.
       - alert: SeadexScoutScanStalled
         expr: |
-          absent_over_time({container="seadex-scout"} |= `cycle complete` [7h])
+          absent_over_time({container="seadex-scout"} |~ `cycle (complete|degraded)` [7h])
         for: 1h
         labels:
           severity: warning
         annotations:
           summary: "seadex-scout has not completed a cycle in 7h"
           description: >
-            seadex-scout (daemon mode) logs a `cycle complete` line every
-            poll_interval (default 3h). None in 7h while the container is up
-            (about two missed cycles, allowing for jitter) means the poll loop is
-            wedged and better-release findings have
+            seadex-scout (daemon mode) closes every cycle with a `cycle complete`
+            line, or a `cycle degraded` line when an upstream outage or a safety
+            guard skipped the comparison; both count here. Neither in 7h while
+            the container is up (about two missed cycles, allowing for jitter)
+            means the poll loop is wedged and better-release findings have
             silently stopped; restart the container. Adjust the window to your
             poll_interval. This rule applies to built-in (daemon) mode only: in
             resident-idle (poll_interval: off) or report mode each cycle runs
-            via a docker exec child, so `cycle complete` never reaches the
+            via a docker exec child, so the completion lines never reach the
             collector and this deadman cannot fire; alert on the external
             scheduler's job result instead.
       # Informational, not a fault: SeaDex recommends a better release than the
@@ -87,9 +100,12 @@ groups:
           summary: '{{ $labels.title }}: new SeaDex release'
           description: >-
             [New release](https://releases.moe/{{ $labels.al_id }}) for
-            {{ if $labels.arr_url }}[{{ $labels.title }}]({{ $labels.arr_url }}){{ else }}{{ $labels.title }}{{ end }}{{ if and $labels.season (ne $labels.season "0") }} Season {{ $labels.season }}{{ end }}
+            {{ if $labels.arr_url }}[{{ $labels.title }}]({{ $labels.arr_url }})
+            {{- else }}{{ $labels.title }}{{ end }}
+            {{- if and $labels.season (ne $labels.season "0") }} Season {{ $labels.season }}{{ end }}
             ({{ $labels.recommended_group }}).
-            {{ if $labels.nyaa_url }}[Nyaa]({{ $labels.nyaa_url }}){{ end }}{{ if $labels.ab_url }}{{ if $labels.nyaa_url }} · {{ end }}[AB]({{ $labels.ab_url }}){{ end }}
+            {{ if $labels.nyaa_url }}[Nyaa]({{ $labels.nyaa_url }}){{ end }}
+            {{- if $labels.ab_url }}{{ if $labels.nyaa_url }} · {{ end }}[AB]({{ $labels.ab_url }}){{ end }}
             — {{ $labels.seadex_tags }}
       # Informational: report mode wrote a season-level alignment report. Report
       # mode is a one-shot (docker exec /seadex-scout report, or mode: report),

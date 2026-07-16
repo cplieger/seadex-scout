@@ -31,19 +31,23 @@ const errCodeIncorrectCredentials = 100
 const errCodeUnknown = 900
 
 // item is one feed release: the real fields parsed from a Prowlarr Torznab
-// result, plus the SeaDex download-volume-factor marker this feed adds.
+// result, plus the SeaDex download-volume-factor marker this feed adds. The
+// json tags pin the persisted feed.json snapshot contract (see writer.go's
+// snapshot): they mirror the historical field names, so renaming a Go field
+// never silently changes the on-disk format a resident daemon or an upgraded
+// binary reads back.
 type item struct {
-	PubDate              time.Time
-	Title                string
-	GUID                 string
-	InfoURL              string
-	DownloadURL          string
-	InfoHash             string
-	DownloadVolumeFactor string
-	Categories           []int
-	Size                 int64
-	Seeders              int
-	Leechers             int
+	PubDate              time.Time `json:"PubDate"`
+	Title                string    `json:"Title"`
+	GUID                 string    `json:"GUID"`
+	InfoURL              string    `json:"InfoURL"`
+	DownloadURL          string    `json:"DownloadURL"`
+	InfoHash             string    `json:"InfoHash"`
+	DownloadVolumeFactor string    `json:"DownloadVolumeFactor"`
+	Categories           []int     `json:"Categories"`
+	Size                 int64     `json:"Size"`
+	Seeders              int       `json:"Seeders"`
+	Leechers             int       `json:"Leechers"`
 }
 
 // guid returns a stable unique id for the item.
@@ -264,7 +268,7 @@ func (x *itemXML) toItem() item {
 		GUID:        strings.TrimSpace(x.GUID),
 		InfoURL:     strings.TrimSpace(x.Comments),
 		DownloadURL: strings.TrimSpace(dl),
-		InfoHash:    strings.ToLower(strings.TrimSpace(attrs["infohash"])),
+		InfoHash:    validInfoHash(attrs["infohash"]),
 		Categories:  cats,
 		PubDate:     parsePubDate(x.PubDate),
 		Size:        size,

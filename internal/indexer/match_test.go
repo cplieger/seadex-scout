@@ -1,7 +1,6 @@
 package indexer
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -31,31 +30,28 @@ func TestTrackerScope(t *testing.T) {
 	}
 }
 
-// FuzzExtractID_alwaysDigitsOrEmpty pins the security-relevant invariant of the id
-// extraction that runs on Prowlarr-supplied (tracker-controlled) URL strings: every id
-// it returns is a non-empty run of ASCII digits, or it returns "" - a bogus tracker key
-// (a non-numeric id) must never reach the curation match set. The seed corpus covers the
-// Nyaa /view, AnimeBytes permalink, and AnimeBytes torrentid= forms plus a non-numeric id.
-func FuzzExtractID_alwaysDigitsOrEmpty(f *testing.F) {
-	f.Add("https://nyaa.si/view/1234567")
-	f.Add("https://animebytes.tv/torrent/1167293/group?nh=709E38EC")
-	f.Add("/torrents.php?id=70543&torrentid=1143533")
-	f.Add("https://nyaa.si/view/12a45")
-	f.Add("")
-	f.Fuzz(func(t *testing.T, raw string) {
-		for _, needle := range []string{"/view/", "/torrent/", "torrentid="} {
-			if id := extractID(raw, needle); id != "" && !isAllDigits(id) {
-				t.Fatalf("extractID(%q, %q) = %q, want all digits or empty", raw, needle, id)
-			}
-		}
-		if id := animeBytesID(raw); id != "" && !isAllDigits(id) {
-			t.Fatalf("animeBytesID(%q) = %q, want all digits or empty", raw, id)
-		}
-		if k := trackerKeyFromURL(raw); k != "" {
-			_, id, found := strings.Cut(k, ":")
-			if !found || !isAllDigits(id) {
-				t.Fatalf("trackerKeyFromURL(%q) = %q, want scope:<digits>", raw, k)
-			}
-		}
-	})
+// TestTrackerKeyRejectsUnknownAndUnparseable pins the empty-key fallbacks the
+// happy-path tests skip: an unknown tracker and a tracker URL without its id
+// both yield no key (the release simply cannot be matched), and an unparseable
+// URL yields no key from the Prowlarr-side extractor rather than an error or a
+// bogus match.
+func TestTrackerKeyRejectsUnknownAndUnparseable(t *testing.T) {
+	if got := trackerKey("AnimeTosho", "https://animetosho.org/view/123"); got != "" {
+		t.Errorf("unknown tracker key = %q, want empty", got)
+	}
+	if got := trackerKey("Nyaa", "https://nyaa.si/about"); got != "" {
+		t.Errorf("nyaa URL without an id key = %q, want empty", got)
+	}
+	if got := trackerKey("AB", "/torrents.php?id=1"); got != "" {
+		t.Errorf("ab URL without a torrentid key = %q, want empty", got)
+	}
+	if got := trackerKeyFromURL("http://nyaa.si/view/1%zz"); got != "" {
+		t.Errorf("unparseable URL key = %q, want empty", got)
+	}
+	if got := trackerKey("Nyaa", "http://nyaa.si/view/1%zz"); got != "" {
+		t.Errorf("nyaa unparseable URL key = %q, want empty", got)
+	}
+	if got := trackerKey("AB", "http://animebytes.tv/torrent/1%zz"); got != "" {
+		t.Errorf("ab unparseable URL key = %q, want empty", got)
+	}
 }

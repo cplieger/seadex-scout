@@ -1,25 +1,32 @@
 package audit
 
 import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/library"
+	"github.com/cplieger/seadex-scout/internal/mapping"
+	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
 func TestScopeLabel(t *testing.T) {
 	tests := []struct {
 		name string
-		row  Row
 		want string
+		row  Row
 	}{
-		{"movie", Row{Arr: library.ArrRadarr}, "movie"},
-		{"special", Row{Arr: library.ArrSonarr, Special: true}, "special"},
-		{"numbered season", Row{Arr: library.ArrSonarr, Season: 2}, "S2"},
-		{"whole series", Row{Arr: library.ArrSonarr}, "series"},
+		{"movie", "movie", Row{scope: align.ScopeMovie}},
+		{"special", "special", Row{scope: align.ScopeSpecial}},
+		{"numbered season", "S2", Row{scope: align.ScopeSeason, Season: 2}},
+		{"whole series", "series", Row{scope: align.ScopeWholeSeries}},
+		{"zero value defaults to series", "series", Row{}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -30,12 +37,18 @@ func TestScopeLabel(t *testing.T) {
 	}
 }
 
-func TestScopeCellMarksApprox(t *testing.T) {
-	if got := scopeCell(&Row{Arr: library.ArrSonarr, Season: 2, Approx: true}); got != "S2 (approx)" {
+func TestScopeCellMarksApproxAndQualifier(t *testing.T) {
+	if got := scopeCell(&Row{scope: align.ScopeSeason, Season: 2, Approx: true}); got != "S2 (approx)" {
 		t.Errorf("scopeCell() = %q, want \"S2 (approx)\"", got)
 	}
-	if got := scopeCell(&Row{Arr: library.ArrSonarr, Season: 2}); got != "S2" {
+	if got := scopeCell(&Row{scope: align.ScopeSeason, Season: 2}); got != "S2" {
 		t.Errorf("scopeCell() = %q, want \"S2\"", got)
+	}
+	if got := scopeCell(&Row{scope: align.ScopeSeason, Season: 2, Qualifier: QualifierMixed}); got != "S2 (mixed)" {
+		t.Errorf("scopeCell() = %q, want \"S2 (mixed)\"", got)
+	}
+	if got := scopeCell(&Row{scope: align.ScopeSeason, Season: 2, Approx: true, Qualifier: QualifierTheoretical}); got != "S2 (approx, theoretical)" {
+		t.Errorf("scopeCell() = %q, want \"S2 (approx, theoretical)\"", got)
 	}
 }
 
@@ -110,6 +123,25 @@ func TestEscapeLinkURLEncodesWhitespace(t *testing.T) {
 	}
 }
 
+func TestEscapeLinkURLEncodesBackslashAndBacktick(t *testing.T) {
+	// A trailing backslash would escape the emitted closing ')' in CommonMark,
+	// so the destination must carry %5C instead.
+	got := escapeLinkURL(`https://x/path\`)
+	if want := "https://x/path%5C"; got != want {
+		t.Errorf("escapeLinkURL(trailing backslash) = %q, want %q", got, want)
+	}
+	link := mdLink("nyaa", `https://x/path\`)
+	if want := "[nyaa](https://x/path%5C)"; link != want {
+		t.Errorf("mdLink(trailing backslash) = %q, want %q", link, want)
+	}
+	// A backtick could open a code span across the ']( ' boundary; it must be
+	// percent-encoded in the destination.
+	got = escapeLinkURL("https://x/a`b")
+	if want := "https://x/a%60b"; got != want {
+		t.Errorf("escapeLinkURL(backtick) = %q, want %q", got, want)
+	}
+}
+
 func TestClassifyReleasesGatesAnimeBytes(t *testing.T) {
 	entry := &seadex.Entry{Torrents: []seadex.Torrent{
 		{Tracker: "Nyaa", ReleaseGroup: "SubsPlease", IsBest: true, URL: "https://nyaa.si/view/1"},
@@ -176,5 +208,161 @@ func TestRenderMarkdownAndJSON(t *testing.T) {
 	}
 	if _, err := RenderJSON(r); err != nil {
 		t.Errorf("RenderJSON: %v", err)
+	}
+}
+
+func TestRenderMarkdownScopePrecedence(t *testing.T) {
+	// Build the rows through assess so the test pins the real classification
+	// precedence (movie beats season beats special), not just the label map.
+	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"})
+	movie := &library.Item{
+		Arr: library.ArrRadarr, Title: "Movie",
+		Groups: []string{"g"}, HasFile: true,
+	}
+	series := &library.Item{
+		Arr: library.ArrSonarr, Title: "Mapped OVA",
+		SeasonGroups: map[int][]string{2: {"g"}}, HasFile: true,
+	}
+	r := &Report{
+		GeneratedAt: time.Unix(0, 0).UTC(),
+		Totals:      map[string]int{string(VerdictUnlisted): 2},
+		Rows: []Row{
+			// A Radarr item scopes as a movie even with a special, seasoned record.
+			a.assess(&match.Match{
+				Item:   movie,
+				Arr:    library.ArrRadarr,
+				Record: mapping.Record{Type: "OVA", SeasonTvdb: 2},
+			}),
+			// A positive Fribb TVDB season wins over the record being a special.
+			a.assess(&match.Match{
+				Item:   series,
+				Arr:    library.ArrSonarr,
+				Record: mapping.Record{Type: "OVA", SeasonTvdb: 2},
+			}),
+		},
+	}
+
+	got := RenderMarkdown(r)
+	if !strings.Contains(got, "| Movie | movie |") {
+		t.Errorf("RenderMarkdown() did not give movie scope precedence: %s", got)
+	}
+	if !strings.Contains(got, "| Mapped OVA | S2 |") {
+		t.Errorf("RenderMarkdown() did not give mapped season scope precedence: %s", got)
+	}
+}
+
+func TestReportLogEmitsSummaryAndPerRowLines(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, nil))
+	r := &Report{
+		GeneratedAt: time.Unix(0, 0).UTC(),
+		Totals:      map[string]int{string(VerdictBest): 1, string(VerdictNoFile): 2},
+		Rows: []Row{{
+			Title: "Frieren", Arr: library.ArrSonarr, Verdict: VerdictBest, AniListID: 154587,
+			Qualifier: QualifierMixed,
+			Season:    1, scope: align.ScopeSeason, Approx: true, CurrentGroups: []string{"subsplease", "erai-raws"},
+			Releases:    []Release{{Group: "SubsPlease", Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}},
+			ArrURL:      "http://sonarr/series/frieren",
+			SeaDexURL:   "https://releases.moe/154587",
+			MatchSource: "id",
+		}},
+	}
+
+	r.Log(log)
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("Log emitted %d lines, want 2 (summary + one per row)", len(lines))
+	}
+	var summary, item map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &summary); err != nil {
+		t.Fatalf("summary line does not parse: %v", err)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &item); err != nil {
+		t.Fatalf("row line does not parse: %v", err)
+	}
+	if summary["msg"] != "report summary" {
+		t.Errorf("summary msg = %v, want %q", summary["msg"], "report summary")
+	}
+	if summary["rows"] != float64(1) || summary["have_best"] != float64(1) || summary["no_file"] != float64(2) {
+		t.Errorf("summary counts = rows:%v have_best:%v no_file:%v, want 1/1/2", summary["rows"], summary["have_best"], summary["no_file"])
+	}
+	if item["msg"] != "report item" {
+		t.Errorf("row msg = %v, want %q", item["msg"], "report item")
+	}
+	want := map[string]any{
+		"title":         "Frieren",
+		"al_id":         float64(154587),
+		"arr":           library.ArrSonarr,
+		"verdict":       string(VerdictBest),
+		"qualifier":     string(QualifierMixed),
+		"scope":         "S1",
+		"approx":        true,
+		"current_group": "subsplease,erai-raws",
+		"seadex_best":   "SubsPlease",
+		"arr_url":       "http://sonarr/series/frieren",
+		"seadex_url":    "https://releases.moe/154587",
+		"match_source":  "id",
+	}
+	for k, v := range want {
+		if item[k] != v {
+			t.Errorf("row attr %q = %v, want %v", k, item[k], v)
+		}
+	}
+}
+
+func TestRenderMarkdownCountsNotOnSeaDexSeparately(t *testing.T) {
+	r := &Report{
+		GeneratedAt: time.Unix(0, 0).UTC(),
+		Totals:      map[string]int{string(VerdictBest): 1, string(VerdictNotOnSeaDex): 2},
+		Rows: []Row{
+			{Title: "Matched", Arr: library.ArrSonarr, Verdict: VerdictBest},
+			{Title: "GapA", Arr: library.ArrSonarr, Verdict: VerdictNotOnSeaDex},
+			{Title: "GapB", Arr: library.ArrSonarr, Verdict: VerdictNotOnSeaDex},
+		},
+	}
+
+	md := RenderMarkdown(r)
+
+	if !strings.Contains(md, "1 anime with a SeaDex match") {
+		t.Errorf("header must count only matched rows, got: %s", md[:120])
+	}
+	if !strings.Contains(md, "2 more in your library that SeaDex does not list") {
+		t.Errorf("header must mention the not_on_seadex count, got: %s", md[:200])
+	}
+}
+
+func TestLinksDedupesRepeatedBestAndLabelsUnnamedTracker(t *testing.T) {
+	row := &Row{Releases: []Release{
+		{Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
+		{Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
+		{Best: true, Tracker: "  ", URL: "https://example.org/t"},
+	}}
+
+	got := links(row)
+
+	if strings.Count(got, "https://nyaa.si/view/1") != 1 {
+		t.Errorf("repeated (tracker, URL) best link must appear once, got %q", got)
+	}
+	if !strings.Contains(got, "[link](https://example.org/t)") {
+		t.Errorf("a blank tracker must fall back to the %q label, got %q", "link", got)
+	}
+}
+
+// TestRenderMarkdownOmitsNotOnSeaDexClauseWhenZero pins the header's other
+// half: with no not_on_seadex rows the "; N more in your library" clause must
+// be absent entirely (a boundary mutation of the notOnSeaDex > 0 guard would
+// emit "; 0 more in your library that SeaDex does not list").
+func TestRenderMarkdownOmitsNotOnSeaDexClauseWhenZero(t *testing.T) {
+	r := &Report{
+		GeneratedAt: time.Unix(0, 0).UTC(),
+		Totals:      map[string]int{string(VerdictBest): 1},
+		Rows:        []Row{{Title: "Matched", Arr: "sonarr", Verdict: VerdictBest}},
+	}
+
+	md := RenderMarkdown(r)
+
+	if strings.Contains(md, "more in your library") {
+		t.Errorf("header must omit the not_on_seadex clause when the count is zero, got: %s", md[:200])
 	}
 }

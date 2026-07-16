@@ -37,9 +37,9 @@ func TestFetchEntriesPaginatesAndDecodes(t *testing.T) {
 		}
 		switch page {
 		case 1:
-			fmt.Fprint(w, `{"totalPages":2,"items":[{"alID":154587,"updated":"2026-01-02 03:04:05.000Z","notes":"note","comparison":"cmp","theoreticalBest":"","incomplete":true,"expand":{"trs":[{"releaseGroup":"SubsPlease","tracker":"Nyaa","infoHash":"abc","url":"https://nyaa.si/view/1","isBest":true,"dualAudio":true,"tags":["best"],"files":[{"name":"Frieren.mkv","length":123}] }]}}]}`)
+			fmt.Fprint(w, `{"totalItems":2,"totalPages":2,"items":[{"alID":154587,"updated":"2026-01-02 03:04:05.000Z","notes":"note","comparison":"cmp","theoreticalBest":"","incomplete":true,"expand":{"trs":[{"releaseGroup":"SubsPlease","tracker":"Nyaa","infoHash":"abc","url":"https://nyaa.si/view/1","isBest":true,"dualAudio":true,"tags":["best"],"files":[{"name":"Frieren.mkv","length":123}] }]}}]}`)
 		case 2:
-			fmt.Fprint(w, `{"totalPages":2,"items":[{"alID":200,"updated":"2026-01-03T04:05:06Z","expand":{"trs":[]}}]}`)
+			fmt.Fprint(w, `{"totalItems":2,"totalPages":2,"items":[{"alID":200,"updated":"2026-01-03T04:05:06Z","expand":{"trs":[]}}]}`)
 		default:
 			t.Errorf("unexpected page %d", page)
 		}
@@ -105,19 +105,76 @@ func TestFetchEntriesPaginationCapErrors(t *testing.T) {
 func TestTorrentUsableURL(t *testing.T) {
 	tests := []struct {
 		name string
-		in   Torrent
 		want string
+		in   Torrent
 	}{
 		{name: "blank", in: Torrent{Tracker: "Nyaa", URL: "   "}, want: ""},
 		{name: "absolute", in: Torrent{Tracker: "AB", URL: " https://example.test/t/1 "}, want: "https://example.test/t/1"},
 		{name: "animebytes relative", in: Torrent{Tracker: "AB", URL: "/torrents.php?id=1"}, want: "https://animebytes.tv/torrents.php?id=1"},
 		{name: "relative without slash", in: Torrent{Tracker: "Nyaa", URL: "view/1"}, want: "https://nyaa.si/view/1"},
-		{name: "unknown tracker relative", in: Torrent{Tracker: "unknown", URL: "/local/path"}, want: "/local/path"},
+		{name: "unknown tracker relative drops", in: Torrent{Tracker: "unknown", URL: "/local/path"}, want: ""},
+		{name: "unknown tracker absolute passes through", in: Torrent{Tracker: "unknown", URL: "https://example.test/t/9"}, want: "https://example.test/t/9"},
+		{name: "stripped tracker relative drops", in: Torrent{Tracker: "beyondhd", URL: "/torrents/1"}, want: ""},
+		{name: "rutracker relative", in: Torrent{Tracker: "RuTracker", URL: "forum/viewtopic.php?t=1"}, want: "https://rutracker.org/forum/viewtopic.php?t=1"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.in.UsableURL(); got != tc.want {
 				t.Errorf("UsableURL() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFetchEntriesUsesStableSort pins the immutable-field pagination ordering
+// (sort=created,id): with offset pagination over a live collection, sorting on
+// a mutable field lets a mid-pagination update shift records across pages (one
+// entry missed, another duplicated), so losing this query silently reopens that
+// truncation class.
+func TestFetchEntriesUsesStableSort(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("sort"); got != "created,id" {
+			t.Errorf("sort query = %q, want created,id", got)
+		}
+		fmt.Fprint(w, `{"totalItems":1,"totalPages":1,"items":[{"alID":1,"expand":{"trs":[]}}]}`)
+	}))
+	defer server.Close()
+
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	if err != nil {
+		t.Fatalf("FetchEntries returned error: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("entries = %d, want 1", len(entries))
+	}
+}
+
+// TestTorrentUsableURLRejectsUnsafeSchemes pins the unsafe-scheme and
+// malformed-URL gate on the untrusted upstream URL: javascript:, data:, and
+// file: values must never be converted into clickable tracker links, and a
+// malformed absolute value (hostless, unparseable escape, whitespace in the
+// host, backslash authority) must drop to the empty-URL case rather than be
+// published as a link a human cannot follow.
+func TestTorrentUsableURLRejectsUnsafeSchemes(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{name: "javascript", url: "javascript:alert(1)"},
+		{name: "data", url: "data:text/html,<script>alert(1)</script>"},
+		{name: "file", url: "file:///etc/passwd"},
+		{name: "hostless https", url: "https://"},
+		{name: "invalid escape", url: "https://example.test/%zz"},
+		{name: "whitespace in host", url: "https://bad host/path"},
+		{name: "backslash authority", url: `\\evil.example/path`},
+		{name: "query-only with colon", url: "?x:y"},
+		{name: "fragment-only with colon", url: "#a:b"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := (&Torrent{Tracker: "Nyaa", URL: tc.url}).UsableURL()
+			if got != "" {
+				t.Errorf("UsableURL(%q) = %q, want empty for unsafe scheme", tc.url, got)
 			}
 		})
 	}

@@ -32,14 +32,38 @@ func TestDedupeKey(t *testing.T) {
 	if dedupeKey(&swap) == got {
 		t.Error("a new infoHash (same-group quality swap) must produce a different dedupe key")
 	}
-}
 
-func TestIntersects(t *testing.T) {
-	if !release.GroupsIntersect([]string{"SubsPlease"}, []string{"subsplease"}) {
-		t.Error("GroupsIntersect must be case-insensitive via NormalizeGroup")
+	// SeaDex redacts AB info hashes: two AB-only replacement torrents differing
+	// only in their torrent page URL must not share a key, or the later
+	// replacement would be suppressed as already alerted.
+	abA := *f
+	abA.InfoHash = "<redacted>"
+	abA.ReleaseURL = "https://animebytes.tv/torrents.php?id=9&torrentid=10"
+	abA.Links = []ReleaseLink{{Tracker: "AB", URL: abA.ReleaseURL}}
+	abB := abA
+	abB.ReleaseURL = "https://animebytes.tv/torrents.php?id=9&torrentid=11"
+	abB.Links = []ReleaseLink{{Tracker: "AB", URL: abB.ReleaseURL}}
+	if dedupeKey(&abA) == dedupeKey(&abB) {
+		t.Error("redacted AB-only findings with different ReleaseURLs must produce different dedupe keys")
 	}
-	if release.GroupsIntersect([]string{"a"}, []string{"b"}) {
-		t.Error("disjoint group sets must not intersect")
+
+	// Enabling AnimeBytes adds an AB link beside an unchanged public
+	// representative: the key must change so the new source re-surfaces.
+	publicOnly := *f
+	publicOnly.Links = []ReleaseLink{{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}}
+	withAB := publicOnly
+	withAB.Links = []ReleaseLink{
+		{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
+		{Tracker: "AB", URL: "https://animebytes.tv/torrents.php?id=9&torrentid=10"},
+	}
+	if dedupeKey(&publicOnly) == dedupeKey(&withAB) {
+		t.Error("adding an AnimeBytes link must change the dedupe key")
+	}
+
+	// A public-only finding (non-redacted hash, no AB links) keeps the exact
+	// pre-AB-aware key shape, so existing persisted dedupe state stays valid.
+	if k := dedupeKey(&publicOnly); k != want {
+		t.Errorf("public-only dedupeKey() = %q, want unchanged %q", k, want)
 	}
 }
 
@@ -157,7 +181,6 @@ func TestCompareSeasonScopedSingleGroupNotMixed(t *testing.T) {
 		Title:        "Split Group Show",
 		Groups:       []string{"lostyears", "pmr"},
 		SeasonGroups: map[int][]string{1: {"pmr"}},
-		MixedGroups:  true,
 	}
 	entry := seadex.Entry{AniListID: 201, Torrents: []seadex.Torrent{
 		{IsBest: true, ReleaseGroup: "PMR", Tracker: "Nyaa", URL: "https://nyaa.si/view/201"},
@@ -191,12 +214,27 @@ func TestCompareSeasonScopedRecommendationNotMaskedByOtherSeason(t *testing.T) {
 }
 
 func TestCompareTheoreticalBestIsInfo(t *testing.T) {
-	item := &library.Item{Title: "X", Groups: []string{"whatever"}}
+	// A real season must be on disk: file presence is checked before the
+	// recommendation-emptiness nudge, so a fileless item stays silent.
+	item := &library.Item{Title: "X", Arr: library.ArrSonarr, Groups: []string{"whatever"}, SeasonGroups: map[int][]string{1: {"whatever"}}}
 	entry := seadex.Entry{AniListID: 1, TheoreticalBest: "a stated remux"}
 	m := match.Match{Item: item, Arr: "sonarr", Entry: entry, Record: mapping.Record{}}
 	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
 	if len(got) != 1 || got[0].Status != StatusTheoretical || got[0].Severity != SevInfo {
 		t.Fatalf("expected one theoretical_best/info finding, got %+v", got)
+	}
+}
+
+func TestCompareSeasonNotOnDiskTheoreticalIsSilent(t *testing.T) {
+	// File presence comes before the recommendation-emptiness check: a
+	// theoretical-best-only entry whose mapped season is not on disk has
+	// nothing the nudge could apply to, so the daemon stays quiet (the audit
+	// records the same scope as no_file).
+	item := &library.Item{Title: "Short", Groups: []string{"a"}, SeasonGroups: map[int][]string{1: {"a"}}}
+	entry := seadex.Entry{AniListID: 404, TheoreticalBest: "a stated remux"}
+	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 3}}
+	if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+		t.Errorf("a theoretical-only entry for a season with no file must be silent, got %+v", got)
 	}
 }
 
@@ -240,5 +278,145 @@ func TestCompareAnimeBytesRecommendationRequiresOptIn(t *testing.T) {
 	}
 	if len(got[0].Links) != 1 || got[0].Links[0].URL != got[0].ReleaseURL {
 		t.Errorf("Links = %+v, want the same obtainable AB release URL", got[0].Links)
+	}
+}
+
+func TestCompareMixedGroupSeasonIsInfoNudge(t *testing.T) {
+	// A mapped season whose episodes span two groups: the daemon cannot attribute
+	// one current group, so it emits a mixed_group_manual info nudge with the
+	// recommended fields filled for the manual review.
+	item := &library.Item{Title: "Mixed", Groups: []string{"a", "b"}, SeasonGroups: map[int][]string{1: {"a", "b"}}}
+	entry := seadex.Entry{AniListID: 400, Torrents: []seadex.Torrent{
+		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/400"},
+	}}
+	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	if len(got) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %+v", len(got), got)
+	}
+	if got[0].Status != StatusMixedGroup || got[0].Severity != SevInfo {
+		t.Errorf("status/severity = %q/%q, want mixed_group_manual/info", got[0].Status, got[0].Severity)
+	}
+	if got[0].RecommendedGroup != "SubsPlease" {
+		t.Errorf("RecommendedGroup = %q, want SubsPlease (fillBest must run for the nudge)", got[0].RecommendedGroup)
+	}
+}
+
+func TestCompareAlignedMixedGroupSeasonIsSilent(t *testing.T) {
+	// Alignment wins over the mixed-group nudge: a season that spans two groups
+	// but already carries a recommended one is aligned, so it must not nag as
+	// mixed_group_manual (the audit reports the same row as have_best).
+	item := &library.Item{Title: "Aligned Mixed", Groups: []string{"subsplease", "erai-raws"}, SeasonGroups: map[int][]string{1: {"subsplease", "erai-raws"}}}
+	entry := seadex.Entry{AniListID: 405, Torrents: []seadex.Torrent{
+		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/405"},
+	}}
+	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+	if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+		t.Errorf("an aligned multi-group season must produce no finding, got %+v", got)
+	}
+}
+
+func TestCompareSeasonNotOnDiskIsSilent(t *testing.T) {
+	// SeaDex maps the entry to season 3 but only season 1 is on disk: there is
+	// nothing on disk a better release would replace, so the daemon stays quiet
+	// (the audit report records this as no_file).
+	item := &library.Item{Title: "Short", Groups: []string{"a"}, SeasonGroups: map[int][]string{1: {"a"}}}
+	entry := seadex.Entry{AniListID: 401, Torrents: []seadex.Torrent{
+		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/401"},
+	}}
+	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 3}}
+	if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+		t.Errorf("a mapped season with no file must produce no finding, got %+v", got)
+	}
+}
+
+func TestCompareIncompleteSeasonEntryIsInfo(t *testing.T) {
+	// Season-scoped path (not whole-series): an incomplete SeaDex entry whose
+	// recommendation the item lacks downgrades better_release to incomplete/info.
+	item := &library.Item{Title: "Incomplete", Groups: []string{"erai-raws"}, SeasonGroups: map[int][]string{1: {"erai-raws"}}}
+	entry := seadex.Entry{AniListID: 402, Incomplete: true, Torrents: []seadex.Torrent{
+		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/402"},
+	}}
+	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	if len(got) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(got))
+	}
+	if got[0].Status != StatusIncomplete || got[0].Severity != SevInfo {
+		t.Errorf("status/severity = %q/%q, want incomplete/info", got[0].Status, got[0].Severity)
+	}
+}
+
+func TestRecommendedSkipsNonBestAndContentFiltered(t *testing.T) {
+	// A non-best torrent is never a recommendation, and a remux best is dropped
+	// by the content filter when exclude_remux is on. With nothing surviving and
+	// the entry neither incomplete nor theoretical-best, the daemon is silent (a
+	// release the operator filtered out is absent, never a finding).
+	item := &library.Item{Title: "Filtered", Groups: []string{"erai-raws"}, SeasonGroups: map[int][]string{1: {"erai-raws"}}}
+	entry := seadex.Entry{AniListID: 403, Notes: "BD remux", Torrents: []seadex.Torrent{
+		{IsBest: false, ReleaseGroup: "AltGrp", Tracker: "Nyaa", URL: "https://nyaa.si/view/403"},
+		{IsBest: true, ReleaseGroup: "RemuxGrp", Tracker: "Nyaa", URL: "https://nyaa.si/view/404"},
+	}}
+	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+	got := comparer(filter.Options{ExcludeRemux: true}, false).Compare([]match.Match{m})
+	if len(got) != 0 {
+		t.Errorf("non-best and remux-filtered releases must yield no finding, got %+v", got)
+	}
+}
+
+func TestCompareMislabeledAnimeBytesURLRequiresOptIn(t *testing.T) {
+	// The tracker label is untrusted upstream data: a torrent claiming "Nyaa"
+	// but carrying an animebytes.tv URL - absolute, schemeless, or host:port -
+	// must be invisible while the AnimeBytes toggle is off (URL-aware guard on
+	// the RAW upstream URL), and surface only when it is on.
+	const absURL = "https://animebytes.tv/torrents.php?id=9&torrentid=10"
+	for _, sneakyURL := range []string{
+		absURL,
+		"animebytes.tv/torrents.php?id=9&torrentid=10",
+		"animebytes.tv:443/torrents.php?id=9&torrentid=10",
+	} {
+		t.Run(sneakyURL, func(t *testing.T) {
+			item := &library.Item{Title: "Mislabeled", Groups: []string{"erai-raws"}, SeasonGroups: map[int][]string{1: {"erai-raws"}}}
+			entry := seadex.Entry{AniListID: 500, Torrents: []seadex.Torrent{
+				{IsBest: true, ReleaseGroup: "Sneaky", Tracker: "Nyaa", URL: sneakyURL},
+			}}
+			m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+
+			if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+				t.Fatalf("AnimeBytes off must hide a mislabeled AB-URL recommendation, got %+v", got)
+			}
+			got := comparer(filter.Options{AnimeBytes: true}, false).Compare([]match.Match{m})
+			if len(got) != 1 {
+				t.Fatalf("AnimeBytes on should surface the recommendation, got %d", len(got))
+			}
+			if sneakyURL == absURL && got[0].ReleaseURL != absURL {
+				t.Errorf("ReleaseURL = %q, want the AB URL", got[0].ReleaseURL)
+			}
+		})
+	}
+}
+
+func TestCompareUnknownTrackerRecommendationIsSilent(t *testing.T) {
+	item := &library.Item{Title: "Unknown Tracker Show", Groups: []string{"erai-raws"}, SeasonGroups: map[int][]string{1: {"erai-raws"}}}
+	entry := seadex.Entry{AniListID: 600, Torrents: []seadex.Torrent{
+		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "SomePrivateTracker", URL: "https://tracker.example/view/1"},
+	}}
+	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+
+	if got := comparer(filter.Options{AnimeBytes: true}, false).Compare([]match.Match{m}); len(got) != 0 {
+		t.Errorf("an unknown-tracker recommendation is unobtainable and must be silent, got %+v", got)
+	}
+}
+
+func TestObtainableLinksSkipsEmptyURL(t *testing.T) {
+	cands := []candidate{
+		{rel: release.Release{Tracker: "Nyaa"}, torrent: seadex.Torrent{Tracker: "Nyaa"}},
+		{rel: release.Release{Tracker: "Nyaa"}, torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/2"}},
+	}
+
+	links := obtainableLinks(cands)
+
+	if len(links) != 1 || links[0].URL != "https://nyaa.si/view/2" {
+		t.Errorf("obtainableLinks() = %+v, want only the URL-carrying link", links)
 	}
 }

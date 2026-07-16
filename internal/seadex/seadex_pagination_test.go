@@ -8,6 +8,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/cplieger/slogx/capture"
 )
 
 // TestFetchEntriesDiscardsPartialOnMidPaginationError pins the "never compare
@@ -65,5 +68,103 @@ func TestFetchEntriesErrorsOnEmptyIntermediatePage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "empty before reported total") {
 		t.Errorf("error = %q, want empty-intermediate-page context", err.Error())
+	}
+}
+
+// TestFetchEntriesCancelledBetweenPagesAborts pins the shutdown arm of the
+// "never compare against a truncated view" contract: a context that expires
+// during the inter-page politeness sleep must abort the fetch with an
+// interrupted error and a nil slice, never return the pages accumulated so far.
+func TestFetchEntriesCancelledBetweenPagesAborts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"totalPages":2,"items":[{"alID":1,"expand":{"trs":[]}}]}`)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	// The page delay far exceeds the context deadline, so the sleep between
+	// page 1 and page 2 is where the cancellation lands.
+	client := NewClient(server.Client(), server.URL, time.Minute, nil)
+
+	entries, err := client.FetchEntries(ctx)
+	if err == nil {
+		t.Fatal("FetchEntries returned nil error, want interrupted-between-pages error")
+	}
+	if entries != nil {
+		t.Fatalf("entries = %+v, want nil (partial pages discarded on interruption)", entries)
+	}
+	if !strings.Contains(err.Error(), "interrupted between pages") {
+		t.Errorf("error = %q, want interrupted-between-pages context", err.Error())
+	}
+}
+
+// TestFetchEntriesHTTPStatusErrorAborts pins the transport arm of the "never
+// compare against a truncated view" contract: an HTTP status failure from the
+// page fetch (a non-retryable 404 here) must abort FetchEntries with an error
+// naming the failed page and a nil slice, never be treated as a complete
+// (empty) catalogue.
+func TestFetchEntriesHTTPStatusErrorAborts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	if err == nil {
+		t.Fatal("FetchEntries returned nil error, want HTTP status error")
+	}
+	if entries != nil {
+		t.Fatalf("entries = %+v, want nil on HTTP failure", entries)
+	}
+	if !strings.Contains(err.Error(), "fetch page 1") {
+		t.Errorf("error = %q, want it to name the failed page 1", err.Error())
+	}
+}
+
+// TestFetchEntriesEmptyCatalogueErrors pins the empty-catalogue guard: a first
+// response reporting zero items ({"totalItems":0,"totalPages":0,"items":[]})
+// completes pagination but must surface as an ERROR, never a successful empty
+// slice - SeaDex is never legitimately empty, and accepting an empty catalogue
+// would make the caller report every library item as having no SeaDex coverage.
+func TestFetchEntriesEmptyCatalogueErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"totalItems":0,"totalPages":0,"items":[]}`)
+	}))
+	defer server.Close()
+
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	if err == nil {
+		t.Fatal("FetchEntries returned nil error, want empty-catalogue error")
+	}
+	if entries != nil {
+		t.Fatalf("entries = %+v, want nil on an empty catalogue", entries)
+	}
+	if !strings.Contains(err.Error(), "empty catalogue") {
+		t.Errorf("error = %q, want empty-catalogue context", err.Error())
+	}
+}
+
+// TestFetchEntriesCountMismatchWarnsButSucceeds pins the count-mismatch
+// contract: a completed catalogue whose collected entry count disagrees with
+// the API's reported totalItems logs the single alert-stable WARN line but
+// still returns the entries, since offset pagination over a live collection
+// can legitimately shift counts mid-fetch.
+func TestFetchEntriesCountMismatchWarnsButSucceeds(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"totalItems":5,"totalPages":1,"items":[{"alID":1,"expand":{"trs":[]}},{"alID":2,"expand":{"trs":[]}}]}`)
+	}))
+	defer server.Close()
+
+	logger, recorder := capture.New()
+	entries, err := NewClient(server.Client(), server.URL, 0, logger).FetchEntries(context.Background())
+	if err != nil {
+		t.Fatalf("FetchEntries returned error: %v (a count mismatch must not fail the fetch)", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(entries))
+	}
+	if got := recorder.CountExact("seadex catalogue count mismatch"); got != 1 {
+		t.Errorf("count-mismatch WARN count = %d, want 1", got)
 	}
 }
