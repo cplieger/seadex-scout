@@ -18,12 +18,17 @@ func SafeLogURL(rawURL string) string {
 		return ""
 	}
 	u, err := url.Parse(rawURL)
-	if err != nil || u.Opaque != "" {
+	if err != nil || u.Opaque != "" ||
+		(u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		// An opaque (non-hierarchical) URL - e.g. a scheme-less credentialed
 		// base like "user:pass@host/..." parsed as scheme "user" with the
 		// userinfo inside Opaque - keeps its credential where the strips
-		// below cannot reach it. Such a value is never a valid arr
-		// deep-link, so it is dropped like an unparseable URL.
+		// below cannot reach it. Malformed hierarchical forms (e.g. the
+		// single-slash "https:/user:pass@host/..." or the four-slash
+		// "https:////user:pass@host/...") parse with an empty Host and carry
+		// the credential text in Path, equally out of reach. Neither is ever
+		// a valid arr deep-link (which is always absolute http(s) with a
+		// host), so both are dropped like an unparseable URL.
 		return ""
 	}
 	u.User = nil

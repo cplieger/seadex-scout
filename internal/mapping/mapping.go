@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/cplieger/atomicfile/v2"
@@ -405,7 +406,7 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 
 // validateRefreshedRecords is acceptRefresh's acceptance invariant for a fresh
 // 200 body: it rejects a zero-record refresh and one below the arr-identifier
-// coverage floor. The tolerant per-record decoders in fribb.go deliberately
+// or type coverage floors. The tolerant per-record decoders in fribb.go deliberately
 // zero individual odd fields, so a wholesale upstream loss of the arr-ID
 // fields can decode as a full set of otherwise-valid records that no longer
 // map to any Sonarr or Radarr item. Accepting that as a successful refresh
@@ -540,6 +541,19 @@ func overlayRecords(idx *Index, records []Record) int {
 	return applied
 }
 
+// knownOverrideKey reports whether key names an overrideKeys entry under the
+// same case-insensitive matching encoding/json applies when decoding into
+// Record, so a case-variant canonical key (e.g. "TYPE") that the typed decode
+// accepts is never misreported as unknown and ignored.
+func knownOverrideKey(key string) bool {
+	for canonical := range overrideKeys {
+		if strings.EqualFold(key, canonical) {
+			return true
+		}
+	}
+	return false
+}
+
 // unknownOverrideKeys scans the raw overrides JSON for keys outside
 // overrideKeys and returns them sorted and de-duplicated; a raw-unmarshal
 // error yields nil (the typed decode in parseOverrides reports real errors).
@@ -552,7 +566,7 @@ func unknownOverrideKeys(data []byte) []string {
 	var unknown []string
 	for _, m := range raw {
 		for k := range m {
-			if _, ok := overrideKeys[k]; ok {
+			if knownOverrideKey(k) {
 				continue
 			}
 			if _, dup := seen[k]; dup {

@@ -5,9 +5,11 @@ import (
 	"net/http"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
+	"unicode/utf8"
 )
 
 func TestDedupeTitles(t *testing.T) {
@@ -237,5 +239,49 @@ func TestRateLimitedErrorMessage(t *testing.T) {
 	err := &rateLimitedError{retryAfter: time.Second}
 	if got, want := err.Error(), "anilist: rate limited (429)"; got != want {
 		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+// TestSanitizeUpstreamMessage pins the log-forging boundary on untrusted
+// upstream error messages: short clean text passes unchanged; C0/C1 controls,
+// DEL, line/paragraph separators, and bidi override/isolate runes become
+// spaces; and the 200-byte cap cuts on a rune boundary so the result stays
+// valid UTF-8 even when the boundary lands inside a multibyte rune.
+func TestSanitizeUpstreamMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"short clean text unchanged", "Media not found.", "Media not found."},
+		{"C0 newline and DEL cleaned", "line1\nline2\x7f", "line1 line2 "},
+		{"C1 CSI and OSC cleaned", "a\u009bb\u009dc", "a b c"},
+		{"line and paragraph separators cleaned", "a\u2028b\u2029c", "a b c"},
+		{"bidi overrides and isolates cleaned", "a\u202eb\u2066c\u2069d", "a b c d"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sanitizeUpstreamMessage(tt.in); got != tt.want {
+				t.Errorf("sanitizeUpstreamMessage(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSanitizeUpstreamMessageRuneBoundaryCut pins the cap's UTF-8 safety: a
+// clean message whose 200-byte boundary falls inside a multibyte rune is cut
+// back to the rune start, stays valid UTF-8, and remains bounded.
+func TestSanitizeUpstreamMessageRuneBoundaryCut(t *testing.T) {
+	// 199 ASCII bytes then a 3-byte rune: the 200-byte boundary lands inside it.
+	in := strings.Repeat("a", 199) + "\u4e16\u754c"
+	got := sanitizeUpstreamMessage(in)
+	if !utf8.ValidString(got) {
+		t.Errorf("sanitizeUpstreamMessage() = %q is not valid UTF-8", got)
+	}
+	if want := strings.Repeat("a", 199) + "..."; got != want {
+		t.Errorf("sanitizeUpstreamMessage() = %q, want the cut moved back to the rune start (%q)", got, want)
+	}
+	if len(got) > 200+len("...") {
+		t.Errorf("len = %d, want bounded by 203", len(got))
 	}
 }

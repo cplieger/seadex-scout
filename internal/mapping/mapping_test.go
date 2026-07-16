@@ -148,3 +148,21 @@ func TestParseOverridesReportsUnknownKeys(t *testing.T) {
 		t.Errorf("unknown keys = %v, want %v (sorted, deduped)", unknown, want)
 	}
 }
+
+// TestParseOverridesAcceptsCaseVariantKeys pins the diagnostic's key matching
+// to encoding/json's: a case-variant canonical key (e.g. "ANILIST_ID", "TYPE")
+// is decoded and applied by the typed unmarshal, so it must not be reported as
+// unknown and "ignored" - that would tell the operator an accepted field was
+// discarded.
+func TestParseOverridesAcceptsCaseVariantKeys(t *testing.T) {
+	recs, unknown, err := parseOverrides([]byte(`[{"ANILIST_ID":5,"TYPE":"movie"}]`))
+	if err != nil {
+		t.Fatalf("parseOverrides error: %v", err)
+	}
+	if len(recs) != 1 || recs[0].AniListID != 5 || recs[0].Type != "MOVIE" {
+		t.Fatalf("parseOverrides = %+v, want one record with AniListID 5 and Type MOVIE", recs)
+	}
+	if len(unknown) != 0 {
+		t.Errorf("unknown keys = %v, want none for case-variant canonical keys (encoding/json accepts them)", unknown)
+	}
+}

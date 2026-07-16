@@ -93,7 +93,7 @@ func TestToConfigEnabledToggleAndTrim(t *testing.T) {
 // TestToConfigInfoOnDisabledArrWithKey pins the half-configuration signal: a
 // disabled arr whose api_key is set (always operator-written) logs an Info at
 // flatten time, while the defaults baseline (disabled, key-less) stays silent
-// so a plain config boots without noise (l-f63).
+// so a plain config boots without noise.
 func TestToConfigInfoOnDisabledArrWithKey(t *testing.T) {
 	t.Run("disabled arr with key logs info", func(t *testing.T) {
 		rec := capture.Default(t)
@@ -570,7 +570,7 @@ func TestValidateIndexerProwlarrKeyWarning(t *testing.T) {
 }
 
 // TestValidateIndexerShortFeedKeyWarning pins the warn-only strength floor on
-// indexer.feed_api_key (l-f64): a key under 16 characters warns (it gates the
+// indexer.feed_api_key: a key under 16 characters warns (it gates the
 // AnimeBytes-passkey-bearing feed), a strong key stays silent, and the key
 // value never rides the log record (field-name-only posture).
 func TestValidateIndexerShortFeedKeyWarning(t *testing.T) {

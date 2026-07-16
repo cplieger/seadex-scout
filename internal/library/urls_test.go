@@ -21,6 +21,8 @@ func TestSafeLogURL(t *testing.T) {
 		{"userinfo stripped", "https://user:pass@host/movie/1", "https://host/movie/1"},
 		{"query token stripped", "https://host/movie/1?apikey=secret", "https://host/movie/1"},
 		{"opaque credentialed URL dropped", "user:pass@host/series/x", ""},
+		{"malformed single-slash credentialed URL dropped", "https:/user:pass@host/series/x", ""},
+		{"malformed four-slash credentialed URL dropped", "https:////user:pass@host/series/x", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

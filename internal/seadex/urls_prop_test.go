@@ -11,9 +11,10 @@ import (
 // TestUsableURLSafeOutputProperty is the every-PR property companion to
 // FuzzTorrentUsableURL (whose coverage-guided exploration only runs in the
 // weekly fuzz job): for ANY input URL and tracker, a non-empty UsableURL
-// result parses as an absolute http(s) URL with a non-empty host (the
-// link-safety gate: no javascript:/data:/file:, no protocol-relative form,
-// no bare path), and the result is a fixed point (feeding a usable link back
+// result parses as an absolute http(s) URL with a non-empty host and no
+// userinfo (the link-safety gate: no javascript:/data:/file:, no
+// protocol-relative form, no bare path, no credential-bearing authority),
+// and the result is a fixed point (feeding a usable link back
 // in returns it unchanged, so an already-usable link is never re-mangled).
 func TestUsableURLSafeOutputProperty(t *testing.T) {
 	trackers := []string{"Nyaa", "AB", "AnimeTosho", "RuTracker", "unknown", ""}
@@ -34,6 +35,9 @@ func TestUsableURLSafeOutputProperty(t *testing.T) {
 		}
 		if parsed.Host == "" {
 			rt.Fatalf("UsableURL(%q, tracker %q) = %q has no host", raw, tracker, out)
+		}
+		if parsed.User != nil {
+			rt.Fatalf("UsableURL(%q, tracker %q) = %q retains userinfo authority", raw, tracker, out)
 		}
 		if again := (&Torrent{URL: out, Tracker: tracker}).UsableURL(); again != out {
 			rt.Fatalf("UsableURL not a fixed point for tracker %q: %q -> %q -> %q", tracker, raw, out, again)

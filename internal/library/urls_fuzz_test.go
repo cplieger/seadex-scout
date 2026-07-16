@@ -43,5 +43,16 @@ func FuzzSafeLogURL(f *testing.F) {
 				t.Errorf("SafeLogURL(%q) = %q leaks %q across the logging trust boundary", bare, got, secret)
 			}
 		}
+		// The malformed-hierarchical arm: a single-slash scheme form like
+		// "https:/user:pass@host/..." parses with an empty Host and the whole
+		// credentialed authority inside Path, where the userinfo strip cannot
+		// reach it; the host-required guard must drop it, not pass it through.
+		malformed := "https:/user:SCRTpass@" + host + "/" + path + "?apikey=SCRTquery#SCRTfrag"
+		got = SafeLogURL(malformed)
+		for _, secret := range []string{"SCRTpass", "SCRTquery", "SCRTfrag"} {
+			if strings.Contains(got, secret) {
+				t.Errorf("SafeLogURL(%q) = %q leaks %q across the logging trust boundary", malformed, got, secret)
+			}
+		}
 	})
 }

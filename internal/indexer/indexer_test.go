@@ -895,6 +895,53 @@ func TestReloadKeepsFeedOnMalformedSnapshot(t *testing.T) {
 	}
 }
 
+// TestReloadRetriesPreservedMtimeReplacementAfterFailure pins the failed-file
+// memo to file IDENTITY, not just mtime: after a malformed snapshot fails to
+// load at mtime T, a repaired valid snapshot installed on a NEW inode whose
+// mtime is reset to the same T (an atomic rename or backup restore preserving
+// timestamps) must be retried and installed - a mtime-only watermark would skip
+// it and wedge the server on the old feed until restart. Only the unchanged bad
+// inode itself stays memoized.
+func TestReloadRetriesPreservedMtimeReplacementAfterFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "feed.json")
+	if err := os.WriteFile(path, []byte("{not valid json"), 0o644); err != nil {
+		t.Fatalf("malformed write: %v", err)
+	}
+	failedAt := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(path, failedAt, failedAt); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	// New's warm-up reload reads the malformed file and memoizes it as failed.
+	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, Deps{}, path)
+	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
+		t.Fatalf("initial feed = %d items, want 0 (malformed snapshot must not load)", len(got))
+	}
+	// Repair: a valid snapshot on a NEW inode, renamed over the bad file with
+	// the failed mtime preserved.
+	repaired := filepath.Join(dir, "feed-repaired.json")
+	entries := []seadex.Entry{{
+		AniListID: 7,
+		Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://nyaa.si/view/42", IsBest: true,
+			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
+		}},
+	}}
+	if err := NewFeedWriter("", false, repaired, nil).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if err := os.Rename(repaired, path); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if err := os.Chtimes(path, failedAt, failedAt); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	ix.reload(context.Background())
+	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
+		t.Errorf("after preserved-mtime repair feed = %d items, want 1 (a new inode at the failed mtime must be retried)", len(got))
+	}
+}
+
 // TestBuildFeedsCompleteUnpackedSeason pins the v1.7.2 behavior at the buildFeeds level: a
 // season SeaDex tracks as one torrent PER episode (each a single-file release) yields one
 // feed item per episode, each keeping its SxxExx - never collapsed to the season (which

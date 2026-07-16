@@ -368,28 +368,45 @@ func finalize(f *Finding, status Status, sev Severity) *Finding {
 // is appended when present (animeBytesLinkKey), so enabling AnimeBytes on an
 // existing public-tracker finding re-surfaces the newly obtainable AB source.
 // The untrusted components (group names, the current group, and the release
-// identity - all parsed from SeaDex data or library file names) are
-// strconv-quoted before joining, so a value that itself contains the ',' or '|'
-// delimiter cannot collide two distinct findings onto one key (which would
-// suppress the second as already alerted).
+// identity - all parsed from SeaDex data or library file names) have their
+// delimiter characters escaped (escapeDedupePart) before joining, so a value
+// that itself contains the ',' or '|' delimiter cannot collide two distinct
+// findings onto one key (which would suppress the second as already alerted),
+// while a delimiter-free value keeps its legacy representation and existing
+// persisted dedupe state stays valid.
 func dedupeKey(f *Finding) string {
 	groups := slices.Clone(f.RecommendedGroups)
 	slices.Sort(groups)
 	for i := range groups {
-		groups[i] = strconv.Quote(groups[i])
+		groups[i] = escapeDedupePart(groups[i])
 	}
 	key := strings.Join([]string{
 		strconv.Itoa(f.AniListID),
 		string(f.Status),
 		strings.Join(groups, ","),
-		strconv.Quote(f.CurrentGroup),
-		strconv.Quote(releaseIdentity(f)),
+		escapeDedupePart(f.CurrentGroup),
+		escapeDedupePart(releaseIdentity(f)),
 	}, "|")
 	if abLinks := animeBytesLinkKey(f.Links); abLinks != "" {
 		key += "|ab=" + abLinks
 	}
 	return key
 }
+
+// dedupePartEscaper escapes the characters that participate in the dedupe-key
+// grammar (the '|' field and ',' list delimiters, plus the '\' escape itself,
+// escaped first so the mapping stays injective). Escaping only the reserved
+// characters keeps every delimiter-free component byte-identical to its legacy
+// unescaped form, so persisted dedupe keys from earlier versions remain valid.
+var dedupePartEscaper = strings.NewReplacer(
+	`\`, `\\`,
+	",", `\,`,
+	"|", `\|`,
+)
+
+// escapeDedupePart makes an untrusted dedupe-key component safe to join with
+// the ',' and '|' delimiters (see dedupePartEscaper).
+func escapeDedupePart(s string) string { return dedupePartEscaper.Replace(s) }
 
 // releaseIdentity returns the stable torrent identity used by finding dedupe.
 // SeaDex redacts AnimeBytes info hashes (the literal "<redacted>"), so use the
@@ -405,14 +422,14 @@ func releaseIdentity(f *Finding) string {
 
 // animeBytesLinkKey returns the sorted AnimeBytes link URLs of a finding as a
 // single comma-joined string, or "" when the finding carries no AB link, so
-// the dedupe key changes when the AB source set changes. Each URL is
-// strconv-quoted before joining, matching dedupeKey's collision-proofing: a
-// SeaDex-supplied URL containing ',' or '|' cannot collide two link sets.
+// the dedupe key changes when the AB source set changes. Each URL has its
+// delimiters escaped before joining, matching dedupeKey's collision-proofing:
+// a SeaDex-supplied URL containing ',' or '|' cannot collide two link sets.
 func animeBytesLinkKey(links []ReleaseLink) string {
 	var urls []string
 	for i := range links {
 		if release.IsAnimeBytes(links[i].Tracker) {
-			urls = append(urls, strconv.Quote(strings.TrimSpace(links[i].URL)))
+			urls = append(urls, escapeDedupePart(strings.TrimSpace(links[i].URL)))
 		}
 	}
 	slices.Sort(urls)

@@ -1,6 +1,7 @@
 package seadex
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -42,6 +43,16 @@ func FuzzTorrentUsableURL(f *testing.F) {
 		}
 		if out == "" {
 			return
+		}
+		parsed, err := url.Parse(out)
+		if err != nil {
+			t.Errorf("UsableURL(%q, tracker %q) = %q, not parseable: %v", rawURL, tracker, out, err)
+			return
+		}
+		// Security invariant: a usable link never retains a userinfo
+		// authority (https://trusted@evil.example/x must be rejected).
+		if parsed.User != nil {
+			t.Errorf("UsableURL(%q, tracker %q) = %q retains userinfo authority", rawURL, tracker, out)
 		}
 		lower := strings.ToLower(out)
 		// Security invariant: any scheme on the output must be http or https.
