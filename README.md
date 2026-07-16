@@ -143,8 +143,10 @@ own logs instead). Each run writes a timestamped
 `report-<UTC date+time>.md` + `.json` pair into `report.dir` (default
 `/config/reports`) — e.g. `report-2026-07-11T15-04-05Z.md` — so successive
 reports never overwrite one another. Reports are never deleted by the app; if
-you schedule them, prune old pairs yourself, e.g. an Ofelia/cron job running
-`find /config/reports -name 'report-*' -mtime +90 -delete`.
+you schedule them, prune old pairs yourself. Run
+`find /config/reports -name 'report-*' -mtime +90 -delete` from a helper container that
+has `find` and mounts the same config volume at `/config`, or use host cron against the
+host-side `./config/reports` path. The seadex-scout image is distroless and has no `find`.
 
 > When you run `report` as the container's command (rather than `docker exec`
 > into the running daemon), disable the image's baked healthcheck for that
@@ -352,8 +354,8 @@ seadex-scout bridges them:
   (required), `type` (`movie` routes to Radarr, anything else to Sonarr),
   `tvdb_id`, `tmdb_movies` (array of ints), `imdb_ids` (array of strings),
   `season_tvdb` — note these are NOT the upstream Fribb field names
-  (`imdb_id`, `themoviedb_id`, `season`), which are ignored with a startup
-  warning naming the key. An
+  (`imdb_id`, `themoviedb_id`, `season`), which are ignored with a warning
+  naming the key whenever the mapping is loaded. An
   override **replaces** the whole mapping record for its `anilist_id` (no
   field-by-field merge), so when correcting an entry Fribb already has,
   restate every field the entry needs.

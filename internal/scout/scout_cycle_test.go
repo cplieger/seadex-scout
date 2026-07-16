@@ -106,6 +106,46 @@ func TestCycleMappingUnusablePreservesFindings(t *testing.T) {
 	}
 }
 
+// TestCycleDegradedSavePersistsSanitizedArrURL pins the persistence trust
+// boundary on the degraded path: a degraded cycle (unusable map here) still
+// saves the refreshed library snapshot, and that snapshot must pass
+// SanitizedForStorage exactly like the successful-cycle saves - a credentialed
+// public_url-derived ArrURL never lands raw in state.json, while the rest of
+// the item survives intact.
+func TestCycleDegradedSavePersistsSanitizedArrURL(t *testing.T) {
+	mapSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer mapSrv.Close()
+
+	logger := scoutTestLogger()
+	store := &fakeStore{st: state.State{Baselined: true}}
+	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TitleSlug: "frieren", TvdbID: 123, Year: 2023}}}
+	s := New(&Deps{
+		Logger: logger,
+		Store:  store,
+		Library: library.NewWalker(&library.Config{
+			Sonarr: sonarr, Logger: logger, SonarrURL: "https://user:pass@sonarr.example",
+		}),
+		Mapping: mapping.NewLoader(mapSrv.Client(), mapSrv.URL, filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 154587}}},
+	})
+
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("Cycle healthy=false, want true when the map is unusable (degraded, not unhealthy)")
+	}
+	if len(store.st.Library.Items) != 1 {
+		t.Fatalf("saved library items = %d, want 1", len(store.st.Library.Items))
+	}
+	it := store.st.Library.Items[0]
+	if it.ArrURL != "https://sonarr.example/series/frieren" {
+		t.Errorf("saved ArrURL = %q, want the credential stripped (degradedSave must sanitize like the cycle-completion saves)", it.ArrURL)
+	}
+	if it.Title != "Frieren" || it.Arr != library.ArrSonarr || it.ArrID != 7 {
+		t.Errorf("saved item = %+v, want Title/Arr/ArrID untouched by sanitization", it)
+	}
+}
+
 // TestCycleAniListDegradedPreservesFindings pins the AniList-degraded branch:
 // when a needed AniList fallback lookup fails transiently the match Result is
 // Degraded, so the cycle preserves prior findings (comparing would falsely

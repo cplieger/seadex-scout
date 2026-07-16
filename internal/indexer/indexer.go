@@ -166,12 +166,15 @@ type Indexer struct {
 	log     *slog.Logger
 	path    string
 	snapMod time.Time
-	// failedMod is the mtime of the last snapshot file that failed to load
-	// (unreadable or malformed), so an unchanged bad file is not re-read and
-	// re-warned on every request; cleared on a successful load. Guarded by
-	// reloadMu (set/cleared only inside reload).
-	failedMod time.Time
-	upstreams []*upstream // wired once in New; immutable afterwards (not guarded by mu)
+	// failedFile identifies (mtime + os.SameFile identity) the last snapshot
+	// file that failed to load (unreadable or malformed), so an unchanged bad
+	// file is not re-read and re-warned on every request; cleared on a
+	// successful load. Identity matters, not just mtime: an atomic rename or
+	// backup restore can install a repaired file that preserves the failed
+	// file's timestamp, and that replacement must be retried, not skipped.
+	// Guarded by reloadMu (set/cleared only inside reload).
+	failedFile os.FileInfo
+	upstreams  []*upstream // wired once in New; immutable afterwards (not guarded by mu)
 	// reloadMu coalesces concurrent snapshot refreshes: only one request runs
 	// reload's stat/read/unmarshal at a time; the rest serve the current
 	// immutable snapshot (see reload). mu still guards the published snapshot.
@@ -341,24 +344,26 @@ func (ix *Indexer) reload(ctx context.Context) {
 	if info.ModTime().Equal(loaded) {
 		return
 	}
-	// An identical mtime on the same path means the same file content (any
-	// rewrite changes the mtime), so re-reading a file that already failed to
-	// load could only fail again: skip it until it is rewritten, instead of
-	// re-reading up to maxFeedBytes and re-warning on every request.
-	if info.ModTime().Equal(ix.failedMod) {
+	// An identical mtime on the SAME file (os.SameFile: same inode, not just
+	// the same timestamp) means unchanged content, so re-reading a file that
+	// already failed to load could only fail again: skip it until it changes.
+	// A different inode with a preserved mtime - an atomic rename or a backup
+	// restore that repaired the file - must be retried, exactly like the
+	// preserved-mtime replacements the installed-snapshot check above accepts.
+	if ix.failedFile != nil && info.ModTime().Equal(ix.failedFile.ModTime()) && os.SameFile(info, ix.failedFile) {
 		return
 	}
 	snap, ok := ix.readSnapshot(ctx)
 	if !ok {
-		// Remember the bad file's mtime so the next request skips it (see
+		// Remember the bad file's identity so the next request skips it (see
 		// above) - but not on a shutdown cancellation, where the file was
 		// never actually read and a retry could succeed.
 		if ctx.Err() == nil {
-			ix.failedMod = info.ModTime()
+			ix.failedFile = info
 		}
 		return
 	}
-	ix.failedMod = time.Time{}
+	ix.failedFile = nil
 	ix.mu.Lock()
 	// Re-check under the write lock. reloadMu already serializes the whole
 	// stat/read/install sequence, so no concurrent reload can install between

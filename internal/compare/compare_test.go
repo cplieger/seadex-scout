@@ -22,7 +22,7 @@ func TestDedupeKey(t *testing.T) {
 		InfoHash:          "hash1",
 	}
 	got := dedupeKey(f)
-	want := `42|better_release|"a","b"|"x"|"hash1"`
+	want := `42|better_release|a,b|x|hash1`
 	if got != want {
 		t.Errorf("dedupeKey() = %q, want %q", got, want)
 	}
@@ -61,10 +61,53 @@ func TestDedupeKey(t *testing.T) {
 	}
 
 	// A public-only finding (non-redacted hash, no AB links) keeps the exact
-	// quoted key shape, so a delimiter inside a group name or identity cannot
-	// collide two distinct findings onto one key.
+	// pre-AB-aware, unescaped key shape for delimiter-free values, so existing
+	// persisted dedupe state stays valid across upgrades.
 	if k := dedupeKey(&publicOnly); k != want {
 		t.Errorf("public-only dedupeKey() = %q, want unchanged %q", k, want)
+	}
+}
+
+// TestDedupeKeyEscapesDelimiters pins the collision-proofing: an untrusted
+// component containing the key grammar's ',' or '|' delimiters (or the '\'
+// escape itself) cannot make two distinct findings share a key, which would
+// suppress the second as already alerted.
+func TestDedupeKeyEscapesDelimiters(t *testing.T) {
+	base := Finding{AniListID: 42, Status: StatusBetter, InfoHash: "hash1"}
+
+	// One group named "a,b" vs two groups "a" and "b": identical naive join.
+	oneGroup := base
+	oneGroup.RecommendedGroups = []string{"a,b"}
+	twoGroups := base
+	twoGroups.RecommendedGroups = []string{"a", "b"}
+	if dedupeKey(&oneGroup) == dedupeKey(&twoGroups) {
+		t.Error(`group "a,b" and groups "a","b" must not share a dedupe key`)
+	}
+
+	// A '|' inside a component must not shift the field boundary: group "x"
+	// with identity "h|y" naively joins identically to group "x|h" with
+	// identity "y".
+	pipeInHash := base
+	pipeInHash.CurrentGroup = "x"
+	pipeInHash.InfoHash = "h|y"
+	pipeInGroup := base
+	pipeInGroup.CurrentGroup = "x|h"
+	pipeInGroup.InfoHash = "y"
+	if dedupeKey(&pipeInHash) == dedupeKey(&pipeInGroup) {
+		t.Error(`("x", "h|y") and ("x|h", "y") must not share a dedupe key`)
+	}
+
+	// The escape character itself must be escaped or the mapping is not
+	// injective: with delimiter-only escaping, ("x\", "y") and ("x", "|y")
+	// both join to x\|y.
+	trailingBackslash := base
+	trailingBackslash.CurrentGroup = `x\`
+	trailingBackslash.InfoHash = "y"
+	leadingPipe := base
+	leadingPipe.CurrentGroup = "x"
+	leadingPipe.InfoHash = "|y"
+	if dedupeKey(&trailingBackslash) == dedupeKey(&leadingPipe) {
+		t.Error(`("x\", "y") and ("x", "|y") must not share a dedupe key (backslash must be escaped)`)
 	}
 }
 
@@ -168,8 +211,8 @@ func TestCompareSeasonScopedFindingSeed(t *testing.T) {
 	if got[0].CurrentGroup != "erai-raws" {
 		t.Errorf("CurrentGroup = %q, want season-scoped %q (not whole-series subsplease,erai-raws)", got[0].CurrentGroup, "erai-raws")
 	}
-	if !strings.Contains(got[0].DedupeKey, `|"erai-raws"|`) {
-		t.Errorf("DedupeKey = %q, want it to carry the season-scoped current group |\"erai-raws\"|", got[0].DedupeKey)
+	if !strings.Contains(got[0].DedupeKey, `|erai-raws|`) {
+		t.Errorf("DedupeKey = %q, want it to carry the season-scoped current group |erai-raws|", got[0].DedupeKey)
 	}
 }
 

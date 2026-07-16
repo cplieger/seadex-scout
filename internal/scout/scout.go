@@ -637,7 +637,7 @@ func (s *Scout) loadState(ctx context.Context) state.State {
 // dedupe untouched so a degraded upstream (unusable map, failed or empty
 // SeaDex fetch) or a shutdown mid-cycle cannot falsely resolve live findings.
 func (s *Scout) degradedSave(ctx context.Context, st *state.State, snap library.Snapshot, mapCache *mapping.Cache) {
-	st.Library = snap
+	st.Library = snap.SanitizedForStorage()
 	st.Mapping = *mapCache
 	s.save(ctx, st)
 }

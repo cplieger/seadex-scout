@@ -24,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cplieger/httpx/v2"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
@@ -311,17 +312,30 @@ type gqlResponse struct {
 }
 
 // sanitizeUpstreamMessage bounds and cleans an untrusted upstream error
-// message before it is wrapped into an error that reaches the logs.
+// message before it is wrapped into an error that reaches the logs: C0/C1
+// controls (terminal escape and CSI/OSC introducers), DEL, Unicode line and
+// paragraph separators, and bidi override/isolate runes become spaces so the
+// message cannot forge log lines or reorder rendered text, and the result is
+// capped at 200 bytes on a rune boundary so a long message stays valid UTF-8.
 func sanitizeUpstreamMessage(s string) string {
 	const maxLen = 200
 	s = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
+		switch {
+		case r < 0x20 || r == 0x7f, // C0 controls and DEL
+			r >= 0x80 && r <= 0x9f,         // C1 controls (CSI/OSC introducers)
+			r == '\u2028' || r == '\u2029', // line / paragraph separators
+			r >= '\u202a' && r <= '\u202e', // bidi embeddings and overrides
+			r >= '\u2066' && r <= '\u2069': // bidi isolates
 			return ' '
 		}
 		return r
 	}, s)
 	if len(s) > maxLen {
-		s = s[:maxLen] + "..."
+		cut := maxLen
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut] + "..."
 	}
 	return s
 }
