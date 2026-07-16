@@ -67,14 +67,21 @@ func NewStore(path string, logger *slog.Logger) *Store {
 }
 
 // Load reads and decodes the state file. A missing file returns a zero State
-// and no error (cold start); a present but corrupt file returns the decode
-// error so the caller can decide (the scout logs it and starts cold).
+// and no error (cold start); a present but corrupt or oversized file is
+// quarantined and returns the error so the caller can decide (the scout logs
+// it and starts cold).
 func (s *Store) Load(ctx context.Context) (State, error) {
 	data, err := atomicfile.ReadBounded(ctx, s.path, maxStateBytes)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			s.log.Info("no state file, starting cold", "path", s.path)
 			return State{}, nil
+		}
+		if errors.Is(err, atomicfile.ErrFileTooLarge) {
+			// Save enforces maxStateBytes, so an oversized file can only be
+			// foreign or corrupt; preserve it like any other corruption.
+			s.quarantine()
+			return State{}, fmt.Errorf("state: read %s: %w", s.path, err)
 		}
 		return State{}, fmt.Errorf("state: read %s: %w", s.path, err)
 	}
@@ -118,6 +125,9 @@ func (s *Store) quarantine() {
 // needed. It returns an error only when the data did not reach disk; a
 // non-durable (unsynced) write is logged, not failed.
 func (s *Store) Save(ctx context.Context, st *State) error {
+	if st == nil {
+		return errors.New("state: encode: nil state (Save never writes a non-object state file)")
+	}
 	data, err := json.Marshal(st)
 	if err != nil {
 		return fmt.Errorf("state: encode: %w", err)

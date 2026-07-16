@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -241,9 +242,7 @@ func (c *Client) rateLimitError(resp *http.Response) error {
 	if wait <= 0 {
 		wait = defaultRetryAfter
 	}
-	if wait > maxRetryAfter {
-		wait = maxRetryAfter
-	}
+	wait = min(wait, maxRetryAfter)
 	c.log.Warn("anilist rate limited (429); backing off", "retry_after", wait.Round(time.Second))
 	c.throttle.penalize(wait)
 	return &rateLimitedError{retryAfter: wait}
@@ -260,9 +259,7 @@ func (c *Client) observeRateHeaders(resp *http.Response) {
 	if wait == 0 {
 		wait = time.Minute
 	}
-	if wait > maxRetryAfter {
-		wait = maxRetryAfter
-	}
+	wait = min(wait, maxRetryAfter)
 	c.rlWaits.Add(1)
 	c.log.Warn("anilist low rate budget; backing off", "remaining", remaining, "wait", wait.Round(time.Second))
 	c.throttle.penalize(wait)
@@ -300,14 +297,33 @@ func (m *gqlMedia) toMedia() Media {
 	}
 }
 
+// gqlError is the GraphQL error object shared by both response envelopes.
+type gqlError struct {
+	Message string `json:"message"`
+}
+
 // gqlResponse is the GraphQL envelope for the media query.
 type gqlResponse struct {
 	Data struct {
 		Media *gqlMedia `json:"Media"`
 	} `json:"data"`
-	Errors []struct {
-		Message string `json:"message"`
-	} `json:"errors"`
+	Errors []gqlError `json:"errors"`
+}
+
+// sanitizeUpstreamMessage bounds and cleans an untrusted upstream error
+// message before it is wrapped into an error that reaches the logs.
+func sanitizeUpstreamMessage(s string) string {
+	const maxLen = 200
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
+	if len(s) > maxLen {
+		s = s[:maxLen] + "..."
+	}
+	return s
 }
 
 // parseMedia decodes the GraphQL envelope into a Media, returning ErrNotFound
@@ -319,7 +335,7 @@ func parseMedia(raw []byte) (Media, error) {
 	}
 	if r.Data.Media == nil {
 		if len(r.Errors) > 0 {
-			return Media{}, fmt.Errorf("%w: %s", ErrNotFound, r.Errors[0].Message)
+			return Media{}, fmt.Errorf("%w: %s", ErrNotFound, sanitizeUpstreamMessage(r.Errors[0].Message))
 		}
 		return Media{}, ErrNotFound
 	}
@@ -338,9 +354,7 @@ type gqlPageResponse struct {
 	Data struct {
 		Page *gqlPage `json:"Page"`
 	} `json:"data"`
-	Errors []struct {
-		Message string `json:"message"`
-	} `json:"errors"`
+	Errors []gqlError `json:"errors"`
 }
 
 // parseMediaPage decodes a batched Page(media) response into a map keyed by
@@ -353,7 +367,7 @@ func parseMediaPage(raw []byte) (map[int]Media, error) {
 		return nil, fmt.Errorf("anilist: decode batch response: %w", err)
 	}
 	if len(r.Errors) > 0 {
-		return nil, fmt.Errorf("anilist: batch query error: %s", r.Errors[0].Message)
+		return nil, fmt.Errorf("anilist: batch query error: %s", sanitizeUpstreamMessage(r.Errors[0].Message))
 	}
 	if r.Data.Page == nil {
 		return nil, errors.New("anilist: batch response missing Page")
@@ -361,6 +375,9 @@ func parseMediaPage(raw []byte) (map[int]Media, error) {
 	out := make(map[int]Media, len(r.Data.Page.Media))
 	for i := range r.Data.Page.Media {
 		md := &r.Data.Page.Media[i]
+		if md.ID <= 0 {
+			return nil, fmt.Errorf("anilist: batch response media record %d missing id", i)
+		}
 		out[md.ID] = md.toMedia()
 	}
 	return out, nil

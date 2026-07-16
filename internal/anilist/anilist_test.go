@@ -199,3 +199,43 @@ func TestNewClientCoercesNonPositiveRate(t *testing.T) {
 		})
 	}
 }
+
+func TestObserveRateHeadersMissingResetDefaultsToMinute(t *testing.T) {
+	client := NewClient(http.DefaultClient, "https://example.invalid/graphql", 30, nil)
+	resp := &http.Response{Header: make(http.Header)}
+	resp.Header.Set("X-RateLimit-Remaining", "1")
+
+	client.observeRateHeaders(resp)
+
+	wait := client.throttle.reserve()
+	if wait > time.Minute {
+		t.Errorf("low-budget wait with no reset header = %v, want at most %v", wait, time.Minute)
+	}
+	if wait < time.Minute-2*time.Second {
+		t.Errorf("low-budget wait with no reset header = %v, want the %v default", wait, time.Minute)
+	}
+	if got := client.Stats().RateLimitWaits; got != 1 {
+		t.Errorf("Stats().RateLimitWaits = %d, want 1", got)
+	}
+}
+
+func TestObserveRateHeadersMalformedResetDefaultsToMinute(t *testing.T) {
+	client := NewClient(http.DefaultClient, "https://example.invalid/graphql", 30, nil)
+	resp := &http.Response{Header: make(http.Header)}
+	resp.Header.Set("X-RateLimit-Remaining", "0")
+	resp.Header.Set("X-RateLimit-Reset", "not-a-timestamp")
+
+	client.observeRateHeaders(resp)
+
+	wait := client.throttle.reserve()
+	if wait < time.Minute-2*time.Second || wait > time.Minute {
+		t.Errorf("low-budget wait with malformed reset = %v, want the %v default", wait, time.Minute)
+	}
+}
+
+func TestRateLimitedErrorMessage(t *testing.T) {
+	err := &rateLimitedError{retryAfter: time.Second}
+	if got, want := err.Error(), "anilist: rate limited (429)"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}

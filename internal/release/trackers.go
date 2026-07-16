@@ -51,7 +51,7 @@ var trackerByAlias = func() map[string]Tracker {
 	for _, t := range trackerTable {
 		m[strings.ToLower(t.Name)] = t
 		for _, a := range t.Aliases {
-			m[a] = t
+			m[strings.ToLower(a)] = t
 		}
 	}
 	return m

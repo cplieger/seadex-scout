@@ -3,6 +3,7 @@ package scout
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,7 +14,9 @@ import (
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
+	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/state"
+	"github.com/cplieger/slogx/capture"
 )
 
 // TestReportGeneratesRowsAndNeverWritesState pins the one-shot report path: a
@@ -63,20 +66,6 @@ func TestReportGeneratesRowsAndNeverWritesState(t *testing.T) {
 	if store.saves != 0 {
 		t.Errorf("Report saved state %d times; the one-shot report must be read-only on state", store.saves)
 	}
-}
-
-// flakySonarr wraps fakeSonarr but fails GetEpisodes for the listed series
-// IDs, so a walk succeeds while marking the snapshot partial.
-type flakySonarr struct {
-	failEpisodes map[int]bool
-	fakeSonarr
-}
-
-func (f *flakySonarr) GetEpisodes(ctx context.Context, seriesID int) ([]arrapi.Episode, error) {
-	if f.failEpisodes[seriesID] {
-		return nil, errors.New("episode fetch failed")
-	}
-	return f.fakeSonarr.GetEpisodes(ctx, seriesID)
 }
 
 // TestReportPartialSnapshotErrors pins Report's completeness gate: a walk that
@@ -186,4 +175,137 @@ func TestReportSeaDexFailureErrors(t *testing.T) {
 	if !strings.Contains(err.Error(), "seadex fetch") {
 		t.Errorf("error = %q, want seadex-fetch context", err.Error())
 	}
+}
+
+// TestReportMappingUnusableErrors pins Report's mapping-usability gate: a
+// mapping load failure with no usable cached index (NOT a StaleMapError) must
+// fail the one-shot report with an error naming the map - ID matching, season
+// scoping, and the not_on_seadex catalogue all depend on it, so publishing
+// would contradict the whole-library audit contract.
+func TestReportMappingUnusableErrors(t *testing.T) {
+	logger := scoutTestLogger()
+	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+	s := New(&Deps{
+		Logger: logger,
+		// Empty state + unreachable Fribb: the load fails with nothing stale
+		// to fall back on, so the map is unusable (not a StaleMapError).
+		Store:   &fakeStore{},
+		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
+	})
+
+	_, err := s.Report(context.Background())
+	if err == nil {
+		t.Fatal("Report returned nil error, want a mapping-unusable error")
+	}
+	if !strings.Contains(err.Error(), "mapping unusable") {
+		t.Errorf("error = %q, want mapping-unusable context", err.Error())
+	}
+}
+
+// TestReportStaleMapWarnsAndStillAudits pins Report's stale-but-usable-map
+// arm: a refresh failure that falls back to cached records (a StaleMapError)
+// is degraded-but-auditable, so Report must succeed on the cached index while
+// logging exactly one "report: mapping degraded" WARN carrying the structured
+// stale_reason attribute (StaleMapError.LogAttrs) for Loki.
+func TestReportStaleMapWarnsAndStillAudits(t *testing.T) {
+	logger, recorder := capture.New()
+	// Records present but fetched beyond the 1h refresh window, with the
+	// Fribb URL unreachable: Load returns the cached index wrapped in a
+	// *mapping.StaleMapError.
+	store := &fakeStore{st: state.State{
+		Mapping: mapping.Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+	}}
+	sonarr := &fakeSonarr{
+		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
+		episodes: map[int][]arrapi.Episode{
+			7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+		},
+	}
+	s := New(&Deps{
+		Logger:  logger,
+		Store:   store,
+		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
+		Matcher: match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
+		Auditor: audit.NewAuditor(audit.Config{Logger: scoutTestLogger(), SeaDexBaseURL: "https://releases.moe"}),
+	})
+
+	rep, err := s.Report(context.Background())
+	if err != nil {
+		t.Fatalf("Report with a stale-but-usable map returned error: %v", err)
+	}
+	if len(rep.Rows) == 0 {
+		t.Error("Report produced 0 rows, want the matched row audited from the stale cached map")
+	}
+	if n := recorder.CountExact("report: mapping degraded"); n != 1 {
+		t.Errorf("'report: mapping degraded' WARN count = %d, want 1", n)
+	}
+	staleAttr := false
+	for _, r := range recorder.Records() {
+		if r.Message != "report: mapping degraded" {
+			continue
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "stale_reason" {
+				staleAttr = true
+				return false
+			}
+			return true
+		})
+	}
+	if !staleAttr {
+		t.Error("\"report: mapping degraded\" WARN carries no stale_reason attribute; StaleMapError.LogAttrs was not appended")
+	}
+}
+
+// TestReportDegradedMatchingErrors pins Report's match-completeness gate: an
+// incomplete match result must fail the one-shot report - naming AniList when
+// the degradation is a transient upstream failure, and naming the shutdown
+// interruption (not AniList) when the context was cancelled mid-match.
+func TestReportDegradedMatchingErrors(t *testing.T) {
+	t.Run("anilist transiently degraded", func(t *testing.T) {
+		logger := scoutTestLogger()
+		sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+		s := New(&Deps{
+			Logger:  logger,
+			Store:   &fakeStore{st: state.State{Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}}}},
+			Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+			Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+			SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
+			Matcher: match.NewMatcher(degradedMatcherAniList{}, logger),
+		})
+
+		_, err := s.Report(context.Background())
+		if err == nil {
+			t.Fatal("Report returned nil error, want an anilist-degraded error")
+		}
+		if !strings.Contains(err.Error(), "anilist lookups degraded") {
+			t.Errorf("error = %q, want anilist-degraded context", err.Error())
+		}
+	})
+	t.Run("shutdown during matching", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		logger := scoutTestLogger()
+		sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+		s := New(&Deps{
+			Logger:  logger,
+			Store:   &fakeStore{st: state.State{Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}}}},
+			Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+			Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+			SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
+			Matcher: match.NewMatcher(&ctxCancellingAniList{cancel: cancel}, logger),
+		})
+
+		_, err := s.Report(ctx)
+		if err == nil {
+			t.Fatal("Report returned nil error, want a report-interrupted error")
+		}
+		if !strings.Contains(err.Error(), "report interrupted") {
+			t.Errorf("error = %q, want report-interrupted context", err.Error())
+		}
+	})
 }

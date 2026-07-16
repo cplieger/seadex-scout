@@ -38,14 +38,14 @@ var verdictDesc = map[Verdict]string{
 	VerdictNotOnSeaDex: "In your library and recognized as anime (Fribb-mapped) but SeaDex lists no entry, so there is no recommendation to compare against.",
 }
 
-// RenderJSON renders the report as indented JSON (the machine-ingestible copy).
-func RenderJSON(r *Report) ([]byte, error) {
+// renderJSON renders the report as indented JSON (the machine-ingestible copy).
+func renderJSON(r *Report) ([]byte, error) {
 	return json.MarshalIndent(r, "", "  ")
 }
 
-// RenderMarkdown renders the report as human-readable Markdown, grouped into a
+// renderMarkdown renders the report as human-readable Markdown, grouped into a
 // section per verdict (most actionable first) with a compact links column.
-func RenderMarkdown(r *Report) string {
+func renderMarkdown(r *Report) string {
 	var b strings.Builder
 	b.WriteString("# SeaDex alignment report\n\n")
 	notOnSeaDex := r.Totals[string(VerdictNotOnSeaDex)]
@@ -181,14 +181,14 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	// The JSON half is written FIRST, deliberately: a run interrupted between
 	// the two writes can leave a .json without its .md, but never a dangling
 	// .md without its machine-readable pair.
-	data, err := RenderJSON(r)
+	data, err := renderJSON(r)
 	if err != nil {
 		return fmt.Errorf("audit: encode json: %w", err)
 	}
 	if err := writeAtomic(ctx, jsonPath, data, log); err != nil {
 		return fmt.Errorf("audit: write json %s: %w", jsonPath, err)
 	}
-	if err := writeAtomic(ctx, mdPath, []byte(RenderMarkdown(r)), log); err != nil {
+	if err := writeAtomic(ctx, mdPath, []byte(renderMarkdown(r)), log); err != nil {
 		return fmt.Errorf("audit: write markdown %s: %w", mdPath, err)
 	}
 	log.Info("report written", "markdown", mdPath, "json", jsonPath, "anime", len(r.Rows))
@@ -297,10 +297,29 @@ var linkURLEscaper = strings.NewReplacer(
 // of a Markdown link's ](...) destination or the surrounding table cell/row:
 // parentheses, angle brackets, pipes, backslash and backtick (the CommonMark
 // inline metacharacters still active inside a link destination), and every
-// ASCII whitespace form (space, tab, vertical tab, form feed, CR, LF). An
-// ordinary URL is unchanged.
+// ASCII whitespace form (space, tab, vertical tab, form feed, CR, LF). It also
+// percent-encodes the non-ASCII control ranges url.Parse accepts but a
+// terminal or Markdown viewer must never receive raw: C1 controls
+// (U+0080-U+009F, terminal-escape introducers), the Unicode bidi
+// override/isolate runes (U+202A-U+202E, U+2066-U+2069, visual reordering of
+// the rendered links cell), and the U+2028/U+2029 line separators.
+// Percent-encoding is semantically transparent for a URL, so an ordinary
+// destination is unchanged.
 func escapeLinkURL(u string) string {
-	return linkURLEscaper.Replace(u)
+	u = linkURLEscaper.Replace(u)
+	var b strings.Builder
+	for _, r := range u {
+		switch {
+		case (r >= 0x80 && r <= 0x9f) || (r >= 0x202a && r <= 0x202e) ||
+			(r >= 0x2066 && r <= 0x2069) || r == 0x2028 || r == 0x2029:
+			for _, byt := range []byte(string(r)) {
+				fmt.Fprintf(&b, "%%%02X", byt)
+			}
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // mdLink builds a Markdown link with a table-cell-safe label and a
@@ -364,7 +383,8 @@ var cellEscaper = strings.NewReplacer(
 	"\r", " ",
 )
 
-// stripControl replaces C0 control characters, DEL, and the Unicode
+// stripControl replaces C0 control characters, DEL, the C1 control range
+// (U+0080-U+009F, single-rune terminal-escape introducers), and the Unicode
 // bidirectional override/isolate characters with a space, so untrusted
 // text cannot smuggle terminal escape sequences or visual reordering
 // into the rendered Markdown report. CR/LF are already flattened by
@@ -375,6 +395,8 @@ func stripControl(s string) string {
 		case r < 0x20 && r != '\n' && r != '\r':
 			return ' '
 		case r == 0x7f:
+			return ' '
+		case r >= 0x80 && r <= 0x9f: // C1 controls (CSI U+009B, OSC U+009D, DCS U+0090): single-rune terminal-escape introducers some UTF-8 terminals honor
 			return ' '
 		case r >= 0x202a && r <= 0x202e: // LRE/RLE/PDF/LRO/RLO
 			return ' '
@@ -394,8 +416,8 @@ func stripControl(s string) string {
 // the backslash itself, and flattens CR/LF. strings.NewReplacer performs a
 // single non-overlapping left-to-right pass and never re-scans its replacement
 // output, so encoding & first does not double-encode the entities it inserts.
-// A stripControl pre-pass removes the remaining C0/DEL control characters and
-// the Unicode bidi override/isolate characters (terminal-escape and visual
+// A stripControl pre-pass removes the remaining C0/DEL/C1 control characters
+// and the Unicode bidi override/isolate characters (terminal-escape and visual
 // reordering smuggling).
 func escapeCell(s string) string {
 	return cellEscaper.Replace(stripControl(s))

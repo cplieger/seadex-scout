@@ -39,3 +39,30 @@ func TestPrefetchNegativelyMemoizesOnCompleteBatch(t *testing.T) {
 		t.Errorf("match = %+v, want a single unmapped entry", res.Matches)
 	}
 }
+
+// TestMatchNoRecordEntryRidesBatchPrefetch pins that an entry with NO Fribb
+// record (the other batch trigger, beside the id-less record
+// TestMatchBatchesAniListLookups pins) is resolved through the batch prefetch:
+// one FetchMany pre-warms the memo and the per-entry pass makes zero single
+// Fetch calls while still title-matching the entry to its library item.
+func TestMatchNoRecordEntryRidesBatchPrefetch(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 5, Title: "Clannad", TvdbID: 700, Year: 2007},
+	}}
+	idx := mapping.NewIndex(nil) // no Fribb record at all: the no-record trigger
+	fake := &batchCountingAniList{media: map[int]anilist.Media{
+		600: {Titles: []string{"Clannad"}, Format: "TV", Year: 2007},
+	}}
+
+	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 600}}, snap, idx, Memo{})
+
+	if fake.batchCalls != 1 {
+		t.Errorf("batch calls = %d, want 1 (a no-record entry must ride the batch prefetch)", fake.batchCalls)
+	}
+	if fake.fetchCalls != 0 {
+		t.Errorf("single Fetch calls = %d, want 0 (the batch pre-warms the memo)", fake.fetchCalls)
+	}
+	if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != SourceTitle {
+		t.Errorf("matches = %+v, want one title match to the Sonarr series", res.Matches)
+	}
+}

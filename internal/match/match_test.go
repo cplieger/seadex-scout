@@ -497,3 +497,52 @@ func TestFormatArr(t *testing.T) {
 		}
 	}
 }
+
+// TestMatchEmptyFormatTitleFallbackSearchesBothArrs pins that an AniList media
+// with an empty format (arr unknown) leaves the title search arr-UNRESTRICTED:
+// the entry still title-matches the lone library candidate, its coverage is
+// counted under "unknown", and the match's Arr comes from the matched item.
+func TestMatchEmptyFormatTitleFallbackSearchesBothArrs(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 4, Title: "Clannad", TvdbID: 555, Year: 2007},
+	}}
+	idx := mapping.NewIndex(nil) // no record: matchEntry resolves via AniList
+	fake := fakeAniList{media: map[int]anilist.Media{
+		610: {Titles: []string{"Clannad"}, Format: "", Year: 2007},
+	}}
+
+	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 610}}, snap, idx, Memo{})
+
+	if len(res.Matches) != 1 {
+		t.Fatalf("matches = %d, want 1", len(res.Matches))
+	}
+	got := res.Matches[0]
+	if !got.InLibrary() || got.Item.ArrID != 4 {
+		t.Fatalf("match item = %+v, want the Sonarr series despite the unknown format", got.Item)
+	}
+	if got.Source != SourceTitle {
+		t.Errorf("source = %q, want %q", got.Source, SourceTitle)
+	}
+	if got.Arr != library.ArrSonarr {
+		t.Errorf("arr = %q, want %q (taken from the matched item)", got.Arr, library.ArrSonarr)
+	}
+	if res.Coverage.Unmapped[arrUnknown] != 1 {
+		t.Errorf("unknown unmapped coverage = %d, want 1", res.Coverage.Unmapped[arrUnknown])
+	}
+}
+
+// TestBuildLibIndexNilSnapshot pins the defensive nil-snapshot guard: a nil
+// snapshot yields an empty but usable index whose lookups all miss instead of
+// panicking.
+func TestBuildLibIndexNilSnapshot(t *testing.T) {
+	li := buildLibIndex(nil)
+	if li == nil {
+		t.Fatal("buildLibIndex(nil) = nil, want an empty index")
+	}
+	if it := li.findByID(&mapping.Record{Type: "TV", TvdbID: 10}); it != nil {
+		t.Errorf("findByID on an empty index = %+v, want nil", it)
+	}
+	if got := li.findByTitle([]string{"Clannad"}, 0, library.ArrSonarr, slog.New(slog.DiscardHandler)); got != nil {
+		t.Errorf("findByTitle on an empty index = %+v, want nil", got)
+	}
+}

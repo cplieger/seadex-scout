@@ -120,7 +120,9 @@ func TestClassifyKind(t *testing.T) {
 
 // TestClassifyCodec covers detectCodec/canonicalCodec: x265/HEVC and x264/AVC
 // tokens normalize to the canonical family, the authoritative MediaInfo codec
-// wins over a conflicting name token, and an absent marker yields "".
+// wins over a conflicting name token, a name marker wins over a conflicting
+// entry-wide notes marker (matching the Kind reason's precedence), the notes
+// fill the gap when the name carries no marker, and an absent marker yields "".
 func TestClassifyCodec(t *testing.T) {
 	tests := []struct {
 		name string
@@ -132,6 +134,8 @@ func TestClassifyCodec(t *testing.T) {
 		{name: "x264 from name", in: Input{Names: []string{"Show 720p x264"}}, want: "x264"},
 		{name: "avc token maps to x264", in: Input{Names: []string{"Show AVC"}}, want: "x264"},
 		{name: "mediainfo codec wins over name", in: Input{Names: []string{"Show x264"}, VideoCodec: "HEVC"}, want: "x265"},
+		{name: "name marker wins over conflicting notes", in: Input{Names: []string{"Show 1080p x264"}, Notes: "an x265 encode also exists"}, want: "x264"},
+		{name: "notes fill the gap when name has no marker", in: Input{Names: []string{"Show 1080p"}, Notes: "x265 encode"}, want: "x265"},
 		{name: "no codec marker", in: Input{Names: []string{"Show 1080p"}}, want: ""},
 	}
 	for _, tc := range tests {
@@ -317,5 +321,37 @@ func TestNormalizeGroupFoldsNoGroupVariants(t *testing.T) {
 	}
 	if got := NormalizeGroup(" SubsPlease "); got != "subsplease" {
 		t.Errorf("NormalizeGroup(SubsPlease) = %q, want subsplease (real groups only fold case/space)", got)
+	}
+}
+
+// TestClassifyResolution pins the Resolution extraction Classify performs via
+// reResolution: each known height is extracted from the release name, the
+// value is normalized to lowercase (the match runs on lowered text), the notes
+// fill the gap when the names carry no resolution, the names win when both
+// carry one (first match in name-then-notes order), and a release with no
+// marker or only an unbounded substring yields "".
+func TestClassifyResolution(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+		in   Input
+	}{
+		{name: "2160p from name", in: Input{Names: []string{"Show 2160p HEVC"}}, want: "2160p"},
+		{name: "1440p from name", in: Input{Names: []string{"Show 1440p"}}, want: "1440p"},
+		{name: "1080p from name", in: Input{Names: []string{"Show 1080p"}}, want: "1080p"},
+		{name: "720p from name", in: Input{Names: []string{"Show 720p"}}, want: "720p"},
+		{name: "480p from name", in: Input{Names: []string{"Show 480p"}}, want: "480p"},
+		{name: "uppercase input normalizes to lowercase", in: Input{Names: []string{"Show 1080P"}}, want: "1080p"},
+		{name: "notes fill the gap", in: Input{Names: []string{"Show"}, Notes: "720p encode"}, want: "720p"},
+		{name: "name wins over notes", in: Input{Names: []string{"Show 1080p"}, Notes: "the 720p is better"}, want: "1080p"},
+		{name: "no resolution marker", in: Input{Names: []string{"Show HEVC"}}, want: ""},
+		{name: "resolution inside a longer token is not a marker", in: Input{Names: []string{"Show x1080py"}}, want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Classify(&tc.in).Resolution; got != tc.want {
+				t.Errorf("Resolution = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

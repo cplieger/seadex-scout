@@ -192,6 +192,37 @@ func TestLoader_refreshCache_noArrIdentifierKeepsStale(t *testing.T) {
 	}
 }
 
+// TestLoader_refreshCache_noTypeKeepsStale covers the type-coverage floor: a
+// refresh whose records kept their arr ids but wholesale lost the type field
+// (an upstream shape change flexString tolerantly zeroes per record) would
+// mis-route every MOVIE record to Sonarr while passing the arr-identifier
+// floor, so it must be rejected in favour of the usable stale map.
+func TestLoader_refreshCache_noTypeKeepsStale(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"anilist_id":1,"type":1,"tvdb_id":100},{"anilist_id":2,"type":2,"tvdb_id":200}]`))
+	}))
+	defer ts.Close()
+
+	prev := &Cache{
+		FetchedAt: time.Now().Add(-2 * time.Hour),
+		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	if err == nil {
+		t.Fatal("refresh with no typed records returned nil error, want degraded error")
+	}
+	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
+		t.Fatalf("no-type refresh records = %+v, want stale record id 1", next.Records)
+	}
+	if next.Records[0].Type != "TV" {
+		t.Errorf("no-type refresh stale Type = %q, want %q", next.Records[0].Type, "TV")
+	}
+	if next.RejectedRefreshes != 1 {
+		t.Errorf("no-type refresh RejectedRefreshes = %d, want 1 (the type floor is an acceptance-guard rejection)", next.RejectedRefreshes)
+	}
+}
+
 // TestLoader_refreshCache_lowArrIdentifierCoverageKeepsStale covers the
 // coverage floor: a refresh where only 1 of 200+ records retains an arr
 // identifier is a wholesale degradation (below the 1% floor) and must keep the
@@ -630,5 +661,29 @@ func TestLoader_refreshCache_fetchFailureKeepsRejectionStreak(t *testing.T) {
 	}
 	if stale.ConsecutiveRejections() != 0 {
 		t.Errorf("fetch-failure ConsecutiveRejections = %d, want 0 (not a guard rejection)", stale.ConsecutiveRejections())
+	}
+}
+
+// TestLoader_refreshCache_futureFetchedAtForcesFetch pins the clock-skew guard
+// in the fresh-reuse condition (age >= 0): a cache stamped in the future
+// (clock skew or a corrupt state file) is never treated as fresh, so the
+// loader revalidates against upstream instead of trusting the bad timestamp
+// until it drifts back into range.
+func TestLoader_refreshCache_futureFetchedAtForcesFetch(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
+	}))
+	defer ts.Close()
+	prev := &Cache{
+		FetchedAt: time.Now().Add(2 * time.Hour), // future: skew or a corrupt state file
+		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	if err != nil {
+		t.Fatalf("refreshCache with future FetchedAt error: %v", err)
+	}
+	if len(next.Records) != 1 || next.Records[0].AniListID != 42 {
+		t.Fatalf("future-FetchedAt cache was reused as fresh: records = %+v, want fetched record id 42", next.Records)
 	}
 }

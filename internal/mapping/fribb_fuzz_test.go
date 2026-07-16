@@ -24,6 +24,9 @@ func FuzzParseFribb(f *testing.F) {
 	f.Add([]byte(`[{"anilist_id":1}`))
 	f.Add([]byte(`[{"anilist_id":1},!!!]`))
 	f.Add([]byte(`[{"anilist_id":1}] {"extra":true}`))
+	f.Add([]byte(`[{"anilist_id":5,"type":"tv","season":{"tvdb":2},"episode_offset":{"tvdb":12}}]`))
+	f.Add([]byte(`[{"anilist_id":6,"tvdb_id":"2147483648","imdb_id":["tt1",5,null]}]`))
+	f.Add([]byte(`[{"anilist_id":7,"themoviedb_id":{"movie":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33]}}]`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		records, err := parseFribb(data, log)
 		if err != nil {

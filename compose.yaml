@@ -14,5 +14,7 @@ services:
       RADARR_API_KEY: "${RADARR_API_KEY:-}"
       SEADEX_SCOUT_PROWLARR_KEY: "${SEADEX_SCOUT_PROWLARR_KEY:-}"
       SEADEX_SCOUT_AB_PASSKEY: "${SEADEX_SCOUT_AB_PASSKEY:-}"
+    # The optional Torznab feed listens on a fixed :9118 once configured -
+    # publish or network that port yourself; see README "Indexer (Torznab feed)".
     volumes:
       - "./config:/config"  # holds config.yaml, state, and the reports dir

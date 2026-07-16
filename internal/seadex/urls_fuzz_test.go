@@ -20,6 +20,7 @@ func FuzzTorrentUsableURL(f *testing.F) {
 	f.Add("javascript:alert(1)", "")
 	f.Add("data:text/html,x", "sometracker")
 	f.Add("file:///etc/passwd", "")
+	f.Add("https://trusted@evil.example/x", "Nyaa")
 	f.Add("view/1", "nyaa")
 	f.Add("  HTTPS://Example.test/T/1  ", "unknown")
 	f.Add("", "")

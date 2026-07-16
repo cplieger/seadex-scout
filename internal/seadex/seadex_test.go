@@ -167,6 +167,7 @@ func TestTorrentUsableURLRejectsUnsafeSchemes(t *testing.T) {
 		{name: "invalid escape", url: "https://example.test/%zz"},
 		{name: "whitespace in host", url: "https://bad host/path"},
 		{name: "backslash authority", url: `\\evil.example/path`},
+		{name: "userinfo authority confusion", url: "https://animebytes.tv@evil.example/torrent"},
 		{name: "query-only with colon", url: "?x:y"},
 		{name: "fragment-only with colon", url: "#a:b"},
 	}

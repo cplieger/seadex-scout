@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -12,12 +13,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cplieger/arrapi"
 	"github.com/cplieger/health"
 	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/config"
 	"github.com/cplieger/slogx"
+	"github.com/cplieger/slogx/capture"
 )
 
 // TestResolveMode covers the subcommand-vs-config mode resolution: no argument
@@ -52,7 +55,8 @@ func TestResolveMode(t *testing.T) {
 }
 
 // TestIndexerConfigured covers the daemon's HTTP-surface gate: the Torznab feed
-// starts iff at least one Prowlarr Torznab URL is set.
+// starts iff at least one Prowlarr Torznab URL is set (the shared
+// config.IndexerConfigured decision the composition root and validation read).
 func TestIndexerConfigured(t *testing.T) {
 	tests := []struct {
 		name string
@@ -68,8 +72,8 @@ func TestIndexerConfigured(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := &config.Config{IndexerNyaaTorznabURL: tt.nyaa, IndexerABTorznabURL: tt.ab}
-			if got := indexerConfigured(cfg); got != tt.want {
-				t.Errorf("indexerConfigured(nyaa=%q, ab=%q) = %v, want %v", tt.nyaa, tt.ab, got, tt.want)
+			if got := cfg.IndexerConfigured(); got != tt.want {
+				t.Errorf("IndexerConfigured(nyaa=%q, ab=%q) = %v, want %v", tt.nyaa, tt.ab, got, tt.want)
 			}
 		})
 	}
@@ -390,10 +394,7 @@ func TestBuildScout(t *testing.T) {
 // with httptest (arrapi.Ping GETs /api/v3/system/status). Serial (swaps
 // slog.Default).
 func TestPingArrs(t *testing.T) {
-	prev := slog.Default()
-	defer slog.SetDefault(prev)
-	var buf bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	rec := capture.Default(t)
 
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{}`))
@@ -417,12 +418,11 @@ func TestPingArrs(t *testing.T) {
 
 	pingArrs(context.Background(), s, r)
 
-	out := buf.String()
-	if !strings.Contains(out, "sonarr reachable") {
-		t.Errorf("missing sonarr reachable info line: %s", out)
+	if !rec.Contains("sonarr reachable") {
+		t.Errorf("missing sonarr reachable info line: %v", rec.Messages())
 	}
-	if !strings.Contains(out, "radarr ping failed at startup") {
-		t.Errorf("missing radarr ping-failed warn line: %s", out)
+	if !rec.Contains("radarr ping failed at startup") {
+		t.Errorf("missing radarr ping-failed warn line: %v", rec.Messages())
 	}
 }
 
@@ -517,6 +517,35 @@ func TestPollCycleUninterrupted(t *testing.T) {
 	})
 }
 
+// TestRunSchedulerShutdownMidCycle pins the daemon twin of pollCycle's
+// interruption contract: a shutdown-interrupted unhealthy cycle must not
+// overwrite the health marker (the guard `if !healthy && ctx.Err() != nil`),
+// while a cycle that still completed healthy during shutdown records its
+// outcome. A regression here would flip the container unhealthy on every
+// redeploy.
+func TestRunSchedulerShutdownMidCycle(t *testing.T) {
+	t.Run("interrupted unhealthy cycle leaves the marker", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
+		marker.Set(true)
+		runScheduler(ctx, time.Hour, cancelCycler{cancel: cancel}, marker)
+		if !marker.Healthy() {
+			t.Error("marker unhealthy after a shutdown-interrupted cycle")
+		}
+	})
+	t.Run("healthy cycle finished during shutdown still records", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
+		marker.Set(false)
+		runScheduler(ctx, time.Hour, cancelCycler{cancel: cancel, healthy: true}, marker)
+		if !marker.Healthy() {
+			t.Error("marker not healthy after a healthy cycle")
+		}
+	})
+}
+
 // TestLogIndexerStopClassifiesShutdownAndFault pins the indexer feed's stop
 // log contract: during a shutdown, an expired graceful-shutdown budget
 // (DeadlineExceeded from webhttp.Run, meaning in-flight Torznab requests were
@@ -524,9 +553,6 @@ func TestPollCycleUninterrupted(t *testing.T) {
 // WARN, and any error outside a shutdown stays the ERROR fault line. Serial
 // (swaps slog.Default).
 func TestLogIndexerStopClassifiesShutdownAndFault(t *testing.T) {
-	prev := slog.Default()
-	defer slog.SetDefault(prev)
-
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -535,29 +561,28 @@ func TestLogIndexerStopClassifiesShutdownAndFault(t *testing.T) {
 		ctx       context.Context
 		err       error
 		wantMsg   string
-		wantLevel string
+		wantLevel slog.Level
 	}{
-		{"budget expired during shutdown", canceled, context.DeadlineExceeded, "indexer shutdown budget expired; in-flight requests aborted", "WARN"},
-		{"clean stop during shutdown", canceled, context.Canceled, "indexer feed stopped during shutdown", "WARN"},
-		{"fault outside shutdown", context.Background(), errors.New("bind failed"), "indexer feed stopped", "ERROR"},
-		{"deadline exceeded outside shutdown stays a fault", context.Background(), context.DeadlineExceeded, "indexer feed stopped", "ERROR"},
+		{"budget expired during shutdown", canceled, context.DeadlineExceeded, "indexer shutdown budget expired; in-flight requests aborted", slog.LevelWarn},
+		{"clean stop during shutdown", canceled, context.Canceled, "indexer feed stopped during shutdown", slog.LevelWarn},
+		{"fault outside shutdown", context.Background(), errors.New("bind failed"), "indexer feed stopped", slog.LevelError},
+		{"deadline exceeded outside shutdown stays a fault", context.Background(), context.DeadlineExceeded, "indexer feed stopped", slog.LevelError},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var buf bytes.Buffer
-			slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+			rec := capture.Default(t)
 
 			logIndexerStop(tt.ctx, tt.err)
 
-			var rec map[string]any
-			if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &rec); err != nil {
-				t.Fatalf("log line does not parse: %v (%s)", err, buf.String())
+			records := rec.Records()
+			if len(records) != 1 {
+				t.Fatalf("captured %d records, want 1 (%v)", len(records), rec.Messages())
 			}
-			if rec["msg"] != tt.wantMsg {
-				t.Errorf("msg = %v, want %q", rec["msg"], tt.wantMsg)
+			if records[0].Message != tt.wantMsg {
+				t.Errorf("msg = %q, want %q", records[0].Message, tt.wantMsg)
 			}
-			if rec["level"] != tt.wantLevel {
-				t.Errorf("level = %v, want %s", rec["level"], tt.wantLevel)
+			if records[0].Level != tt.wantLevel {
+				t.Errorf("level = %v, want %v", records[0].Level, tt.wantLevel)
 			}
 		})
 	}
@@ -580,4 +605,89 @@ func TestRunReportRefusesWhenLockHeld(t *testing.T) {
 	if !errors.Is(err, audit.ErrReportRunning) {
 		t.Fatalf("runReport with the lock held = %v, want ErrReportRunning", err)
 	}
+}
+
+// TestLogPingClassifiesShutdownCancellation pins the shutdown-classification
+// branch of logPing: a context-cancelled startup ping is a routine shutdown
+// (DEBUG), not the operator-visible WARN arr-fault line. Serial (swaps
+// slog.Default).
+func TestLogPingClassifiesShutdownCancellation(t *testing.T) {
+	prev := slog.Default()
+	defer slog.SetDefault(prev)
+	var buf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	logPing("sonarr", fmt.Errorf("ping: %w", context.Canceled))
+
+	var rec map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &rec); err != nil {
+		t.Fatalf("log line does not parse: %v (%s)", err, buf.String())
+	}
+	if rec["level"] != "DEBUG" {
+		t.Errorf("level = %v, want DEBUG", rec["level"])
+	}
+	if rec["msg"] != "sonarr startup ping cancelled by shutdown" {
+		t.Errorf("msg = %v, want the cancelled-by-shutdown line", rec["msg"])
+	}
+}
+
+// TestDispatchRoutesReportMode pins the mode-routing switch: a valid
+// report-mode config reaches runReport (proved hermetically by holding the
+// report lock first, so runReport refuses with ErrReportRunning before any
+// network I/O).
+func TestDispatchRoutesReportMode(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "reports")
+	release, err := audit.AcquireReportLock(dir)
+	if err != nil {
+		t.Fatalf("holding the report lock: %v", err)
+	}
+	defer release()
+
+	cfg := &config.Config{
+		RunMode:   config.RunModeReport,
+		SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k",
+		ReportDir: dir,
+	}
+	err = dispatch(config.RunModeReport, cfg)
+	if !errors.Is(err, audit.ErrReportRunning) {
+		t.Fatalf("dispatch(report, valid config) = %v, want ErrReportRunning", err)
+	}
+}
+
+// TestRunReportReleasesLockOnBuildFailure pins the deferred lock release: a
+// failed buildScout (invalid sonarr URL, no network I/O) must not leak the
+// report lock, or every subsequent report would refuse with ErrReportRunning
+// until restart.
+func TestRunReportReleasesLockOnBuildFailure(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "reports")
+	cfg := &config.Config{ReportDir: dir, SonarrURL: "not-a-url", SonarrAPIKey: "k"}
+
+	err := runReport(cfg)
+	if err == nil {
+		t.Fatal("runReport(invalid sonarr URL) = nil, want a build error")
+	}
+	if errors.Is(err, audit.ErrReportRunning) {
+		t.Fatalf("err = %v, want a build error, not a lock refusal", err)
+	}
+
+	release, err := audit.AcquireReportLock(dir)
+	if err != nil {
+		t.Fatalf("report lock still held after the failed run: %v", err)
+	}
+	release()
+}
+
+// TestBuildIndexer pins the Torznab feed server wiring hermetically: a
+// configured feed builds a non-nil server (warm-loading the absent feed
+// snapshot is the documented fresh-install no-op) and cleanup is callable.
+func TestBuildIndexer(t *testing.T) {
+	cfg := &config.Config{
+		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api",
+		IndexerAPIKey:         "feed-key",
+	}
+	bi := buildIndexer(cfg)
+	if bi.indexer == nil {
+		t.Fatal("indexer = nil, want a wired Torznab feed server")
+	}
+	bi.cleanup()
 }

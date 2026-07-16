@@ -48,3 +48,32 @@ func torrentFileNames(files []seadex.File) []string {
 	}
 	return names
 }
+
+// EntryFallback classifies an entry that lists no recommended releases.
+// Theoretical beats incomplete - the one precedence compare's emptyResult
+// and audit's rowQualifier must share.
+type EntryFallback int
+
+const (
+	// FallbackNone means the entry warrants no fallback classification.
+	FallbackNone EntryFallback = iota
+	// FallbackTheoretical means the entry names only a theoretical best.
+	FallbackTheoretical
+	// FallbackIncomplete means the entry is incomplete with nothing recommended.
+	FallbackIncomplete
+)
+
+// Fallback derives the shared fallback classification for an entry whose
+// recommended-release set is empty: a theoretical-best-only entry outranks an
+// incomplete one. Both compare (StatusTheoretical/StatusIncomplete) and audit
+// (QualifierTheoretical/QualifierIncomplete) map their vocabulary from this
+// one precedence, so the two flows cannot silently drift.
+func Fallback(entry *seadex.Entry) EntryFallback {
+	switch {
+	case entry.HasTheoreticalBest():
+		return FallbackTheoretical
+	case entry.Incomplete:
+		return FallbackIncomplete
+	}
+	return FallbackNone
+}

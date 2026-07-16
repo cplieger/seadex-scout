@@ -104,9 +104,17 @@ func Classify(in *Input) Release {
 	nameText := strings.ToLower(strings.Join(in.Names, " "))
 	notesText := strings.ToLower(in.Notes)
 	text := nameText + " " + notesText
-	codec := detectCodec(text, in.VideoCodec)
-	kind, reason := classifyKind(nameText, notesText,
-		detectCodec(nameText, in.VideoCodec), detectCodec(notesText, ""))
+	// The Codec field uses the same name-first precedence classifyKind applies:
+	// per-file evidence (names + MediaInfo) wins, the entry-wide notes only
+	// fill the gap, so the logged codec cannot contradict the Kind reason when
+	// the notes mention an alternative encode.
+	nameCodec := detectCodec(nameText, in.VideoCodec)
+	notesCodec := detectCodec(notesText, "")
+	codec := nameCodec
+	if codec == "" {
+		codec = notesCodec
+	}
+	kind, reason := classifyKind(nameText, notesText, nameCodec, notesCodec)
 
 	return Release{
 		Group:       groupOrNoGroup(in.Group),
@@ -212,6 +220,15 @@ func IsAnimeBytesHost(host string) bool {
 	return host == "animebytes.tv" || strings.HasSuffix(host, ".animebytes.tv")
 }
 
+// IsNyaaHost reports whether a lowercased URL host is the Nyaa site host or
+// one of its dot-delimited subdomains. It is the URL-host twin of the
+// tracker-name lookup, mirroring IsAnimeBytesHost (including the DNS-root
+// trailing-dot trim) so the host-classification rule has one home.
+func IsNyaaHost(host string) bool {
+	host = strings.TrimSuffix(host, ".")
+	return host == "nyaa.si" || strings.HasSuffix(host, ".nyaa.si")
+}
+
 // NoGroup is the placeholder release group for a release that specifies none.
 // SeaDex already tags some group-less releases with the literal "NOGRP", so
 // falling back to it makes a group-less library file, a group-less SeaDex
@@ -230,18 +247,19 @@ func groupOrNoGroup(group string) string {
 }
 
 // noGroupVariants are the spellings of "no release group" (lowercased) that
-// normalizeGroup folds onto the canonical NoGroup, so a SeaDex side or library
+// NormalizeGroup folds onto the canonical NoGroup, so a SeaDex side or library
 // side using any variant compares equal to a group-less release.
 var noGroupVariants = map[string]bool{
 	"nogrp": true, "nogroup": true, "no-group": true, "no_group": true, "no group": true,
 }
 
-// normalizeGroup lowercases and trims a release-group name for override and
-// comparison lookups (SeaDex and arr casing differ). An empty group and every
-// no-group spelling variant (NOGRP, NoGroup, no-group, ...) normalize to
-// NoGroup so a missing group compares equal on both sides regardless of how it
-// was spelled.
-func normalizeGroup(group string) string {
+// NormalizeGroup lowercases and trims a release-group name for override and
+// comparison lookups (SeaDex and arr casing differ), so the compare layer keys
+// group-membership sets the same way Classify keys overrides. An empty group
+// and every no-group spelling variant (NOGRP, NoGroup, no-group, ...)
+// normalizes to NoGroup so a missing group compares equal on both sides
+// regardless of how it was spelled.
+func NormalizeGroup(group string) string {
 	g := strings.ToLower(strings.TrimSpace(group))
 	if g == "" || noGroupVariants[g] {
 		return strings.ToLower(NoGroup)
@@ -249,22 +267,18 @@ func normalizeGroup(group string) string {
 	return g
 }
 
-// NormalizeGroup is the exported form of the group normalizer, so the compare
-// layer keys group-membership sets the same way Classify keys overrides.
-func NormalizeGroup(group string) string { return normalizeGroup(group) }
-
 // GroupsIntersect reports whether any group in a is present in b, comparing
-// both sides normalized (normalizeGroup). It is the shared group-set overlap
+// both sides normalized (NormalizeGroup). It is the shared group-set overlap
 // test the compare and audit layers key alignment on, so the "is a recommended
 // group already present" decision lives in exactly one place. It operates only
 // on []string, keeping release a pure, seadex-free leaf.
 func GroupsIntersect(a, b []string) bool {
 	set := make(map[string]struct{}, len(b))
 	for _, g := range b {
-		set[normalizeGroup(g)] = struct{}{}
+		set[NormalizeGroup(g)] = struct{}{}
 	}
 	for _, g := range a {
-		if _, ok := set[normalizeGroup(g)]; ok {
+		if _, ok := set[NormalizeGroup(g)]; ok {
 			return true
 		}
 	}

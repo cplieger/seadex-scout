@@ -2,7 +2,9 @@ package state
 
 import (
 	"context"
+	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/report"
+	"github.com/cplieger/slogx/capture"
 )
 
 func testLogger() *slog.Logger {
@@ -128,7 +131,7 @@ func assertQuarantined(t *testing.T, path, wantBody string) {
 	if string(got) != wantBody {
 		t.Errorf("quarantined bytes = %q, want original %q", got, wantBody)
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("live state path still present after quarantine (stat err = %v), want renamed away", err)
 	}
 }
@@ -180,6 +183,16 @@ func TestStoreLoadOversizedReturnsError(t *testing.T) {
 	_, err = NewStore(path, testLogger()).Load(context.Background())
 	if err == nil {
 		t.Fatal("Load oversized state returned nil error, want bounded-read error")
+	}
+	// Save enforces the same maxStateBytes cap, so an oversized file is
+	// definitionally foreign/corrupt and must be quarantined like the decode
+	// gates (assertQuarantined's byte-equality is skipped: the body is a
+	// 128MB+ sparse file, so existence + the live path renamed away suffice).
+	if _, statErr := os.Stat(path + ".corrupt"); statErr != nil {
+		t.Errorf("oversized state was not quarantined (stat err = %v), want %s.corrupt preserved", statErr, path)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Errorf("live state path still present after quarantine (stat err = %v), want renamed away", statErr)
 	}
 }
 
@@ -249,5 +262,34 @@ func TestNewStoreNilLoggerDefaults(t *testing.T) {
 	}
 	if err := store.Save(context.Background(), &State{Baselined: true}); err != nil {
 		t.Fatalf("Save with nil logger returned error: %v", err)
+	}
+}
+
+// TestStoreQuarantineRenameFailureWarnsAndKeepsFile pins quarantine's
+// best-effort contract: when the corrupt file cannot be renamed aside (the
+// .corrupt destination is occupied by a directory, a root-safe injection),
+// Load still returns the decode error, the corrupt file stays at the live
+// path, and the failure is logged at Warn once - never escalated.
+func TestStoreQuarantineRenameFailureWarnsAndKeepsFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte("null"), 0o644); err != nil {
+		t.Fatalf("write corrupt state: %v", err)
+	}
+	if err := os.Mkdir(path+".corrupt", 0o755); err != nil {
+		t.Fatalf("create rename blocker: %v", err)
+	}
+	logger, recorder := capture.New()
+	_, err := NewStore(path, logger).Load(context.Background())
+	if err == nil {
+		t.Fatal("Load corrupt state returned nil error, want decode error")
+	}
+	if !strings.Contains(err.Error(), "decode") {
+		t.Errorf("error = %q, want decode context", err.Error())
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Errorf("corrupt file missing from live path after failed quarantine (stat err = %v), want kept in place", statErr)
+	}
+	if got := recorder.CountExact("could not preserve corrupt state file"); got != 1 {
+		t.Errorf("rename-failure WARN count = %d, want 1", got)
 	}
 }

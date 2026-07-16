@@ -1,14 +1,15 @@
 package mapping
 
 import (
-	"bytes"
 	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
+	"strconv"
 	"testing"
 	"time"
+
+	"github.com/cplieger/slogx/capture"
 )
 
 // TestLoader_Load_logsSkippedOverrideCount pins the operator-visible skipped
@@ -20,17 +21,77 @@ func TestLoader_Load_logsSkippedOverrideCount(t *testing.T) {
 	if err := os.WriteFile(overrides, data, 0o644); err != nil {
 		t.Fatalf("write overrides: %v", err)
 	}
-	var logs bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	logger, rec := capture.New()
 	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
 	if _, _, err := l.Load(context.Background(), freshCache()); err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
-	got := logs.String()
-	if !strings.Contains(got, `"msg":"mapping: overrides missing anilist_id skipped"`) {
-		t.Fatalf("Load logs = %s, want skipped-overrides warning", got)
+	if rec.CountExact("mapping: overrides missing anilist_id skipped") != 1 {
+		t.Fatalf("Load logs = %v, want one skipped-overrides warning", rec.Messages())
 	}
-	if !strings.Contains(got, `"skipped":2`) {
-		t.Errorf("Load skipped count log = %s, want skipped=2", got)
+	if !skippedCountIs(rec, 2) {
+		t.Errorf("Load skipped count logs = %v, want skipped=2", rec.Messages())
 	}
+}
+
+// skippedCountIs reports whether any captured record carries a "skipped"
+// attribute equal to want (capture.Recorder.Contains matches messages only;
+// the count rides in attrs).
+func skippedCountIs(rec *capture.Recorder, want int) bool {
+	for _, r := range rec.Records() {
+		found := false
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "skipped" && a.Value.String() == strconv.Itoa(want) {
+				found = true
+				return false
+			}
+			return true
+		})
+		if found {
+			return true
+		}
+	}
+	return false
+}
+
+// TestLoader_Load_warnsOnUnknownOverrideKeys pins the unknown-key diagnostic:
+// an override written with the upstream Fribb field name (imdb_id) instead of
+// the override name (imdb_ids) still applies, but a WARN naming the unknown
+// key is logged so the silent-drop trap is visible.
+func TestLoader_Load_warnsOnUnknownOverrideKeys(t *testing.T) {
+	overrides := filepath.Join(t.TempDir(), "overrides.json")
+	data := []byte(`[{"anilist_id":2,"type":"movie","imdb_id":"tt0000002"}]`)
+	if err := os.WriteFile(overrides, data, 0o644); err != nil {
+		t.Fatalf("write overrides: %v", err)
+	}
+	logger, rec := capture.New()
+	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
+	if _, _, err := l.Load(context.Background(), freshCache()); err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if rec.CountExact("mapping: overrides contain unknown keys, ignored") != 1 {
+		t.Fatalf("Load logs = %v, want one unknown-keys warning", rec.Messages())
+	}
+	if !unknownKeysAre(rec, "[imdb_id]") {
+		t.Errorf("Load unknown-keys logs = %v, want keys=[imdb_id]", rec.Messages())
+	}
+}
+
+// unknownKeysAre reports whether any captured record carries a "keys"
+// attribute whose rendered value equals want.
+func unknownKeysAre(rec *capture.Recorder, want string) bool {
+	for _, r := range rec.Records() {
+		found := false
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "keys" && a.Value.String() == want {
+				found = true
+				return false
+			}
+			return true
+		})
+		if found {
+			return true
+		}
+	}
+	return false
 }

@@ -39,7 +39,6 @@ import (
 	"github.com/cplieger/scheduler"
 	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/config"
-	"github.com/cplieger/seadex-scout/internal/scout"
 )
 
 // exampleConfig is the starter written to CONFIG_PATH on first boot; it is also
@@ -84,10 +83,10 @@ func main() {
 	// configuration, so it is handled before config load.
 	if len(args) == 1 && args[0] == "health" {
 		health.RunProbe(health.DefaultPath)
-		// health.RunProbe terminates via os.Exit(0/1); this guard makes the
-		// invariant explicit instead of depending on the callee never
-		// returning (health is a separately versioned dependency).
-		os.Exit(0)
+		// health.RunProbe terminates via os.Exit(0/1); if it ever returns
+		// (a contract change in the separately versioned health dependency),
+		// fail closed: report unhealthy rather than a silently-green probe.
+		os.Exit(1)
 	}
 
 	configPath := cmp.Or(strings.TrimSpace(os.Getenv("CONFIG_PATH")), config.DefaultConfigPath)
@@ -305,7 +304,7 @@ func run(cfg *config.Config) error {
 	if cfg.PollExternal {
 		marker.Set(true)
 		slog.Info("seadex-scout started (resident-idle; trigger a cycle with the `poll` subcommand)",
-			"indexer", indexerConfigured(cfg))
+			"indexer", cfg.IndexerConfigured())
 		<-ctx.Done()
 		normalShutdown = true
 		return nil
@@ -315,7 +314,7 @@ func run(cfg *config.Config) error {
 	// first iteration (immediately), so a slow first cycle never gates startup
 	// health. The marker thereafter reflects each cycle's library-ingest outcome.
 	marker.Set(true)
-	slog.Info("seadex-scout started", "poll_interval", cfg.PollInterval.String(), "indexer", indexerConfigured(cfg))
+	slog.Info("seadex-scout started", "poll_interval", cfg.PollInterval.String(), "indexer", cfg.IndexerConfigured())
 
 	runScheduler(ctx, cfg.PollInterval, b.scout, marker)
 	normalShutdown = true
@@ -327,7 +326,7 @@ func run(cfg *config.Config) error {
 // and then releases its clients. When no Prowlarr Torznab URL is set it starts
 // nothing - the daemon binds no HTTP port - and returns a no-op.
 func startIndexer(ctx context.Context, cfg *config.Config) func() {
-	if !indexerConfigured(cfg) {
+	if !cfg.IndexerConfigured() {
 		return func() {}
 	}
 	bi := buildIndexer(cfg)
@@ -372,7 +371,7 @@ func logIndexerStop(ctx context.Context, err error) {
 // runScheduler runs a cycle on each tick of a POLL_INTERVAL timer with ±10%
 // jitter until ctx is cancelled. The first iteration fires immediately so a
 // cycle runs promptly on boot; the marker is set to each cycle's health.
-func runScheduler(ctx context.Context, interval time.Duration, sc *scout.Scout, marker *health.Marker) {
+func runScheduler(ctx context.Context, interval time.Duration, sc cycler, marker *health.Marker) {
 	scheduler.RunLoop(ctx, func(ctx context.Context) {
 		healthy := runCycle(ctx, sc)
 		if !healthy && ctx.Err() != nil {

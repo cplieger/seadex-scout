@@ -39,9 +39,6 @@ const DefaultConfigPath = "/config/config.yaml"
 // maxConfigBytes bounds the config file read (it is a small document).
 const maxConfigBytes = 1 << 20
 
-// formatJSON is the canonical and default log.format value.
-const formatJSON = "json"
-
 // Fixed endpoints, cadences, and /config file paths. These are internal
 // machinery wired at build time, deliberately NOT exposed as config-file keys:
 // the user should never need to point the app at a different SeaDex/Fribb/
@@ -173,7 +170,7 @@ func defaultFileConfig() fileConfig {
 		Radarr: arrFile{URL: "http://radarr:7878"},
 		Mode:   RunModeDaemon,
 		Report: reportFile{Dir: DefaultReportDir},
-		Log:    logFile{Level: "info", Format: formatJSON},
+		Log:    logFile{Level: "info", Format: "json"},
 	}
 }
 
@@ -345,7 +342,7 @@ func sanitizeYAMLError(err error) string {
 // for it (such an entry starts with the unmarshal shape, not a bare "line N",
 // so it falls through to the redacting branches instead).
 func sanitizeTypeErrorEntry(entry string) string {
-	if k := strings.Index(entry, yamlDupKeyMarker); k >= 0 {
+	if k := strings.Index(entry, yamlDupKeyMarker); k >= 0 && isLinePrefix(entry[:k]) {
 		if at := strings.LastIndex(entry, yamlDupKeyDefinedAt); at > k {
 			return entry[:k] + ": mapping key <redacted>" + entry[at:]
 		}
@@ -370,10 +367,11 @@ func sanitizeTypeErrorEntry(entry string) string {
 
 // isLinePrefix reports whether s is exactly "line <digits>", the prefix a
 // genuine yaml.v3 TypeError entry carries before its first marker. It guards
-// the unknown-key rebuild - the one branch that keeps text from between its
-// markers - against a wrong-type scalar excerpt embedding the same marker
-// pair: that entry's prefix is the unmarshal shape ("line N: cannot unmarshal
-// !!str `..."), never a bare "line N".
+// BOTH rebuilds that keep text from outside their markers - the duplicate-key
+// branch (keeps entry[:k] and entry[at:]) and the unknown-key branch (keeps
+// the key name between its markers) - against a wrong-type scalar excerpt
+// embedding the same marker pair: that entry's prefix is the unmarshal shape
+// ("line N: cannot unmarshal !!str `..."), never a bare "line N".
 func isLinePrefix(s string) bool {
 	digits, ok := strings.CutPrefix(s, "line ")
 	if !ok || digits == "" {
@@ -412,11 +410,19 @@ func (fc *fileConfig) toConfig() Config {
 		c.SonarrURL = strings.TrimSpace(fc.Sonarr.URL)
 		c.SonarrAPIKey = strings.TrimSpace(fc.Sonarr.APIKey)
 		c.SonarrPublicURL = strings.TrimSpace(fc.Sonarr.PublicURL)
+	} else if strings.TrimSpace(fc.Sonarr.APIKey) != "" {
+		// A set api_key is always operator-written (the defaults baseline
+		// carries none), so this is a half-configuration signal: the arr is
+		// filled in but the enabled toggle was left off. Info, not Warn - the
+		// deliberate temporary-disable case must not raise Loki alert noise.
+		slog.Info("sonarr.api_key is set but sonarr.enabled is false; sonarr will not be scanned")
 	}
 	if fc.Radarr.Enabled {
 		c.RadarrURL = strings.TrimSpace(fc.Radarr.URL)
 		c.RadarrAPIKey = strings.TrimSpace(fc.Radarr.APIKey)
 		c.RadarrPublicURL = strings.TrimSpace(fc.Radarr.PublicURL)
+	} else if strings.TrimSpace(fc.Radarr.APIKey) != "" {
+		slog.Info("radarr.api_key is set but radarr.enabled is false; radarr will not be scanned")
 	}
 	if c.ReportDir == "" {
 		c.ReportDir = DefaultReportDir
@@ -460,6 +466,14 @@ func (c *Config) SonarrWebBase() string { return cmp.Or(c.SonarrPublicURL, c.Son
 // RadarrWebBase is the base URL for Radarr report deep-links (see SonarrWebBase).
 func (c *Config) RadarrWebBase() string { return cmp.Or(c.RadarrPublicURL, c.RadarrURL) }
 
+// IndexerConfigured reports whether the Torznab feed has an upstream to
+// proxy: at least one Prowlarr Torznab URL is set. It is the single home of
+// the feed-enablement decision, shared by config validation (validateIndexer)
+// and the composition root.
+func (c *Config) IndexerConfigured() bool {
+	return c.IndexerNyaaTorznabURL != "" || c.IndexerABTorznabURL != ""
+}
+
 // Validate reports the first configuration problem that would stop the app from
 // running, or nil when runnable.
 func (c *Config) Validate() error {
@@ -500,17 +514,41 @@ func (c *Config) Validate() error {
 // links). The feed is enabled when either upstream Torznab URL is set; a
 // no-indexer config is unaffected.
 func (c *Config) validateIndexer() error {
-	if c.IndexerNyaaTorznabURL == "" && c.IndexerABTorznabURL == "" {
+	if !c.IndexerConfigured() {
 		return nil
 	}
 	if c.IndexerAPIKey == "" {
 		return errors.New("indexer.feed_api_key is required when indexer.nyaa_torznab_url or indexer.ab_torznab_url is set")
+	}
+	// Presence is required above; strength is warn-only defense-in-depth. The
+	// key is the only gate on the passkey-bearing /ab feed, so a trivially
+	// guessable hand-typed key deserves a config-time signal without rejecting
+	// a config that runs today. Field-name-only (never echo the key).
+	if len(c.IndexerAPIKey) < 16 {
+		slog.Warn("indexer.feed_api_key is shorter than 16 characters; it gates the " +
+			"AnimeBytes-passkey-bearing feed - generate a strong key (openssl rand -hex 16)")
 	}
 	if err := validateHTTPURL("indexer.nyaa_torznab_url", c.IndexerNyaaTorznabURL); err != nil {
 		return err
 	}
 	if err := validateHTTPURL("indexer.ab_torznab_url", c.IndexerABTorznabURL); err != nil {
 		return err
+	}
+	// The header-based Prowlarr key posture (X-Api-Key, never in a logged URL)
+	// is defeated when the operator pastes a Jackett-style URL with an embedded
+	// credential: upstream failures log the request URL, shipping the pasted
+	// key to the WARN log on every failed search. Warn field-name-only (never
+	// echo the URL), matching the public_url warn-only posture.
+	for _, tu := range []struct{ name, val string }{
+		{"indexer.nyaa_torznab_url", c.IndexerNyaaTorznabURL},
+		{"indexer.ab_torznab_url", c.IndexerABTorznabURL},
+	} {
+		if urlEmbedsCredential(tu.val) {
+			slog.Warn("torznab url embeds a credential-like query parameter or userinfo; "+
+				"move the key to indexer.prowlarr_api_key (sent as a header, never logged) "+
+				"or it will appear in upstream-failure logs",
+				"field", tu.name)
+		}
 	}
 	// A search proxies Prowlarr using indexer.prowlarr_api_key in the X-Api-Key
 	// header. An empty key is accepted rather than rejected (it is valid when
@@ -560,6 +598,30 @@ func validateHTTPURL(name, rawURL string) error {
 		return fmt.Errorf("%s must be an absolute http(s) URL with a host", name)
 	}
 	return nil
+}
+
+// urlEmbedsCredential reports whether rawURL carries a credential in userinfo
+// or a credential-like query parameter (apikey/api_key/passkey/token). Such a
+// URL survives validation but leaks the credential to upstream-failure logs,
+// which wrap the full request URL; validateIndexer warns on it field-name-only.
+func urlEmbedsCredential(rawURL string) bool {
+	if rawURL == "" {
+		return false
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	if u.User != nil {
+		return true
+	}
+	for k := range u.Query() {
+		switch strings.ToLower(k) {
+		case "apikey", "api_key", "passkey", "token":
+			return true
+		}
+	}
+	return false
 }
 
 // isAllowedEnvVar reports whether an env var name is safe to expand in the

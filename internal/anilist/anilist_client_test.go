@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -197,7 +198,7 @@ func TestFetchManyChunksBatchesAndMergesResults(t *testing.T) {
 	}
 
 	wantBatches := []int{50, 50, 20}
-	if len(batchSizes) != 3 || batchSizes[0] != 50 || batchSizes[1] != 50 || batchSizes[2] != 20 {
+	if !slices.Equal(batchSizes, wantBatches) {
 		t.Errorf("batch sizes = %v, want %v", batchSizes, wantBatches)
 	}
 	if len(out) != 120 {

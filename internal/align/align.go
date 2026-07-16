@@ -106,6 +106,11 @@ type Summary struct {
 	Seasons     int
 	AnyAlt      bool
 	AnyUnlisted bool
+	// Approx marks the comparison approximate when the aggregate spans more
+	// than one season or more than one release group: the whole-series arm of
+	// the same coarseness rule as ScopeResult.Approx (the single whole-series
+	// recommendation then applies to a coarse aggregate).
+	Approx bool
 }
 
 // SummarizeWholeSeries walks the item's real seasons (season 0 excluded), unions
@@ -135,6 +140,7 @@ func SummarizeWholeSeries(item *library.Item, best, alt []string) Summary {
 		}
 	}
 	slices.Sort(s.Groups)
+	s.Approx = s.Seasons > 1 || len(s.Groups) > 1
 	return s
 }
 

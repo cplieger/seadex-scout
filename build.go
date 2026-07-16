@@ -48,14 +48,14 @@ type built struct {
 func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
 	log := slog.Default()
 
-	seadexHTTP := httpx.NewClient(seadexTimeout)
-	mappingHTTP := httpx.NewClient(mappingTimeout)
-	anilistHTTP := httpx.NewClient(anilistTimeout)
-
 	sonarr, radarr, err := newArrClients(cfg)
 	if err != nil {
 		return built{}, err
 	}
+
+	seadexHTTP := httpx.NewClient(seadexTimeout)
+	mappingHTTP := httpx.NewClient(mappingTimeout)
+	anilistHTTP := httpx.NewClient(anilistTimeout)
 	pingArrs(ctx, sonarr, radarr)
 
 	anilistClient := anilist.NewClient(anilistHTTP, config.DefaultAniListURL, config.DefaultAniListRate, log)
@@ -105,14 +105,6 @@ func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
 	return built{scout: sc, cleanup: cleanup}, nil
 }
 
-// indexerConfigured reports whether the Torznab feed has an upstream to proxy.
-// The daemon starts the feed server only when at least one Prowlarr Torznab URL
-// is set, so an alert-only deployment binds no HTTP port (keeping the
-// socket-less posture) without needing an explicit on/off knob.
-func indexerConfigured(cfg *config.Config) bool {
-	return cfg.IndexerNyaaTorznabURL != "" || cfg.IndexerABTorznabURL != ""
-}
-
 // feedWriter returns the indexer feed writer the compare cycle drives when the
 // Torznab feed is configured, else nil (the cycle then does no feed work). It
 // persists the materialized feed snapshot (curation set + synthesized RSS feeds)
@@ -120,7 +112,7 @@ func indexerConfigured(cfg *config.Config) bool {
 // feed from a single SeaDex fetch. It holds no clients: the cycle owns the
 // shared SeaDex + Fribb fetch and hands the results to Rebuild.
 func feedWriter(cfg *config.Config, log *slog.Logger) scout.FeedWriter {
-	if !indexerConfigured(cfg) {
+	if !cfg.IndexerConfigured() {
 		return nil
 	}
 	abConfigured := cfg.IndexerABTorznabURL != ""

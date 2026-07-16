@@ -141,9 +141,11 @@ func NewWalker(cfg *Config) *Walker {
 	}
 }
 
-// Walk ingests both arr sides into a single snapshot. It returns an error only
-// when a top-level list call fails or ctx is cancelled; per-series episode
-// failures are skipped with a warning.
+// Walk ingests both arr sides into a single snapshot. It returns an error when
+// a top-level list call fails, tag resolution fails (fail closed), ctx is
+// cancelled, or per-series episode failures hit the walk failure budget;
+// sub-budget per-series failures are kept as Failed placeholder items with a
+// warning (the snapshot is partial).
 func (w *Walker) Walk(ctx context.Context) (Snapshot, error) {
 	var items []Item
 	partial := false
@@ -240,9 +242,9 @@ func (w *Walker) fetchEpisodeItems(ctx context.Context, kept []arrapi.Series) (r
 			if fanCtx.Err() != nil {
 				return // budget tripped (or shutdown): skip without fetching
 			}
-			item, failed := w.fetchSeriesItem(fanCtx, &kept[i])
+			item, fetchFailed := w.fetchSeriesItem(fanCtx, &kept[i])
 			results[i] = item
-			if failed && failures.Add(1) >= episodeFailureBudget {
+			if fetchFailed && failures.Add(1) >= episodeFailureBudget {
 				cancelFan()
 			}
 		})

@@ -168,7 +168,7 @@ func parsePBTime(s string) time.Time {
 // legitimately shift counts mid-fetch.
 func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 	var all []Entry
-	var totalBytes, reportedTotal int
+	var totalBytes, reportedTotal, unparsedTimes int
 	for page := 1; page <= maxPages; page++ {
 		if page > 1 {
 			if err := httpx.SleepCtx(ctx, c.pageDelay); err != nil {
@@ -177,12 +177,12 @@ func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 		}
 		var done bool
 		var err error
-		all, done, err = c.fetchAndAppend(ctx, page, all, &totalBytes, &reportedTotal)
+		all, done, err = c.fetchAndAppend(ctx, page, all, &totalBytes, &reportedTotal, &unparsedTimes)
 		if err != nil {
 			return nil, err
 		}
 		if done {
-			return c.finishFetch(all, reportedTotal)
+			return c.finishFetch(all, reportedTotal, unparsedTimes)
 		}
 	}
 	return nil, fmt.Errorf("seadex: pagination exceeded max %d pages (upstream reported more); "+
@@ -193,8 +193,11 @@ func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 // collected entries is an error (SeaDex is never legitimately empty for this
 // app's use, whether the API reported zero totals or served empty pages), and
 // a collected count disagreeing with the API's reported totalItems logs the
-// alert-stable count-mismatch WARN but still returns the entries.
-func (c *Client) finishFetch(all []Entry, reportedTotal int) ([]Entry, error) {
+// alert-stable count-mismatch WARN but still returns the entries. Entries
+// whose non-empty updated timestamp failed to parse (zeroed, sorting to the
+// feed's tail) are surfaced as one aggregate WARN so an upstream format drift
+// that zeroes the whole catalogue is alertable without per-record noise.
+func (c *Client) finishFetch(all []Entry, reportedTotal, unparsedTimes int) ([]Entry, error) {
 	if len(all) == 0 {
 		return nil, fmt.Errorf("seadex: returned an empty catalogue (totalItems=%d); "+
 			"SeaDex is never legitimately empty, refusing to compare against it", reportedTotal)
@@ -202,14 +205,19 @@ func (c *Client) finishFetch(all []Entry, reportedTotal int) ([]Entry, error) {
 	if len(all) != reportedTotal {
 		c.log.Warn("seadex catalogue count mismatch", "got", len(all), "want", reportedTotal)
 	}
+	if unparsedTimes > 0 {
+		c.log.Warn("seadex updated timestamps unparseable; feed newest-first ordering degraded",
+			"count", unparsedTimes, "entries", len(all))
+	}
 	c.log.Debug("seadex entries fetched", "entries", len(all))
 	return all, nil
 }
 
 // fetchAndAppend fetches one page, appends its entries, updates the running
-// byte total and the API's reported item total, enforces the cumulative-byte
-// and entry-count caps, and reports whether pagination is complete.
-func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, totalBytes, reportedTotal *int) (out []Entry, done bool, err error) {
+// byte total, the API's reported item total, and the unparseable-updated
+// counter, enforces the cumulative-byte and entry-count caps, and reports
+// whether pagination is complete.
+func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, totalBytes, reportedTotal, unparsedTimes *int) (out []Entry, done bool, err error) {
 	list, n, err := c.fetchPage(ctx, page)
 	if err != nil {
 		return all, false, fmt.Errorf("seadex: fetch page %d: %w", page, err)
@@ -221,7 +229,11 @@ func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, tota
 			"refusing to compare against a truncated view", maxTotalBytes)
 	}
 	for i := range list.Items {
-		all = append(all, list.Items[i].toEntry())
+		e := list.Items[i].toEntry()
+		if e.Updated.IsZero() && strings.TrimSpace(list.Items[i].Updated) != "" {
+			*unparsedTimes++
+		}
+		all = append(all, e)
 	}
 	if len(all) > maxEntries {
 		return all, false, fmt.Errorf("seadex: entry count exceeded cap %d (upstream misbehaving)", maxEntries)
@@ -231,13 +243,23 @@ func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, tota
 }
 
 // pageComplete reports whether pagination is done after a page, or an error
-// when the page is empty before the reported total (a truncated view) or the
-// pagination metadata is invalid for a non-empty page. totalPages is an
+// when the page is empty before the reported total (a truncated view), the
+// pagination metadata is invalid for a non-empty page, or a page past the
+// first is empty with zeroed metadata (a degenerate `{}` response). totalPages is an
 // unvalidated upstream field (a missing value decodes to zero), so a non-empty
 // page with totalPages < 1, or a page past the reported total, must not be
 // accepted as a complete catalogue.
 func pageComplete(page, itemCount, totalPages int) (done bool, err error) {
 	if itemCount == 0 {
+		// Page 1 is only reached with no accumulated entries, and finishFetch's
+		// empty-catalogue guard owns that outcome. A LATER page decoding to zero
+		// items AND zero/invalid totalPages (a degenerate `{}` body) contradicts
+		// the earlier pages' metadata that promised more, and must not complete
+		// a catalogue that would falsely resolve findings for the missing pages.
+		if page > 1 && totalPages < 1 {
+			return false, fmt.Errorf("seadex: page %d empty with invalid pagination metadata (totalPages %d); "+
+				"refusing to compare against a truncated view", page, totalPages)
+		}
 		if page < totalPages {
 			return false, fmt.Errorf("seadex: page %d empty before reported total %d pages; "+
 				"refusing to compare against a truncated view", page, totalPages)

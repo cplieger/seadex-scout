@@ -122,6 +122,17 @@ func ABVisible(tracker, rawURL string, animeBytes bool) bool {
 		}
 		host = strings.ToLower(hostRel.Hostname())
 	}
+	for i := range len(host) {
+		if host[i] >= 0x80 {
+			// A non-ASCII host is homoglyph territory: browsers apply UTS46
+			// host mapping (fullwidth U+FF0E / ideographic U+3002 dots become
+			// '.', fullwidth letters fold to ASCII), so a host spelled
+			// "animebytes<U+FF0E>tv" navigates to animebytes.tv while the
+			// byte-wise suffix check cannot see it. Every legitimate SeaDex
+			// tracker host is ASCII, so hide conservatively like a parse failure.
+			return false
+		}
+	}
 	return !release.IsAnimeBytesHost(host)
 }
 

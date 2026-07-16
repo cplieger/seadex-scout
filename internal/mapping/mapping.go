@@ -18,6 +18,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/cplieger/atomicfile/v2"
@@ -33,6 +34,8 @@ const (
 	maxAttempts      = 3
 	baseDelay        = time.Second
 )
+
+// --- Record: the per-entry mapping and its arr-routing predicates ---
 
 // Record is the resolved mapping for one AniList entry: its media type and the
 // arr IDs it corresponds to. Fields are ordered for govet fieldalignment.
@@ -95,6 +98,8 @@ func (r *Record) IsSpecial() bool {
 // silently forever. The remedy is operator-driven: inspect upstream, and if
 // the change is legitimate remove state.json to cold-start onto the new map.
 const RejectionEscalationThreshold = 8
+
+// --- Cache + Index: persisted state and the AniList-ID lookup ---
 
 // Cache is the persisted mapping state: the parsed Fribb records plus the HTTP
 // validators and timestamp needed for the next conditional GET.
@@ -186,6 +191,8 @@ func buildIndex(records []Record) *Index {
 	}
 	return &Index{byAniList: byAniList}
 }
+
+// --- Loader: conditional fetch, acceptance guards, stale-map degradation ---
 
 // Loader fetches and caches the Fribb map and overlays the overrides file.
 type Loader struct {
@@ -417,7 +424,30 @@ func validateRefreshedRecords(records []Record) error {
 	if covered := arrIdentifierCount(records); covered < minimum {
 		return fmt.Errorf("arr identifier coverage %d/%d is below minimum %d", covered, len(records), minimum)
 	}
+	// A wholesale upstream loss of the type field (flexString zeroes any
+	// non-string shape) re-routes every MOVIE record to Sonarr via its parent
+	// tvdb_id while still passing the arr-identifier floor and the shrink
+	// guard; effectively all real Fribb records carry a type, so a refresh
+	// below the same 1% floor is a wholesale degradation, not a real update.
+	if typed := typedRecordCount(records); typed < minimum {
+		return fmt.Errorf("type coverage %d/%d is below minimum %d", typed, len(records), minimum)
+	}
 	return nil
+}
+
+// typedRecordCount returns how many records carry a non-empty normalized
+// type. It backs the type-coverage acceptance floor: routing (IsMovie /
+// RoutedIDs / IsSpecial) keys entirely on Type, so a refresh whose records
+// wholesale lost the field cannot be trusted to route to the right arr even
+// when its id fields survive.
+func typedRecordCount(records []Record) int {
+	n := 0
+	for i := range records {
+		if records[i].Type != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // arrIdentifierCount returns how many records retain an arr identifier the
@@ -458,6 +488,8 @@ func (l *Loader) conditionalGet(ctx context.Context, prev *Cache) (httpx.Conditi
 		})
 }
 
+// --- Overrides: the operator overlay file ---
+
 // applyOverrides reads the operator overrides file (if present) and overlays
 // each record onto the index, keyed by AniList ID. A missing file is not an
 // error; a malformed file is logged and ignored so a bad override never blocks
@@ -476,10 +508,13 @@ func (l *Loader) applyOverrides(ctx context.Context, idx *Index) {
 		}
 		return
 	}
-	overrides, err := parseOverrides(data)
+	overrides, unknown, err := parseOverrides(data)
 	if err != nil {
 		l.log.Warn("mapping: overrides malformed, ignoring", "path", l.overridesPath, "error", err)
 		return
+	}
+	if len(unknown) > 0 {
+		l.log.Warn("mapping: overrides contain unknown keys, ignored", "keys", unknown, "path", l.overridesPath)
 	}
 	applied := overlayRecords(idx, overrides)
 	if skipped := len(overrides) - applied; skipped > 0 {
@@ -505,16 +540,50 @@ func overlayRecords(idx *Index, records []Record) int {
 	return applied
 }
 
+// unknownOverrideKeys scans the raw overrides JSON for keys outside
+// overrideKeys and returns them sorted and de-duplicated; a raw-unmarshal
+// error yields nil (the typed decode in parseOverrides reports real errors).
+func unknownOverrideKeys(data []byte) []string {
+	var raw []map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var unknown []string
+	for _, m := range raw {
+		for k := range m {
+			if _, ok := overrideKeys[k]; ok {
+				continue
+			}
+			if _, dup := seen[k]; dup {
+				continue
+			}
+			seen[k] = struct{}{}
+			unknown = append(unknown, k)
+		}
+	}
+	slices.Sort(unknown)
+	return unknown
+}
+
 // parseOverrides decodes the overrides file: a JSON array of Record objects,
 // each keyed by its AniList ID. The Type is normalized to upper case so an
-// operator can write "movie" or "tv".
-func parseOverrides(data []byte) ([]Record, error) {
+// operator can write "movie" or "tv". It also returns the sorted set of
+// unknown keys found in any record (e.g. upstream Fribb spellings like
+// "imdb_id"), so the caller can warn instead of silently dropping them.
+func parseOverrides(data []byte) ([]Record, []string, error) {
 	var records []Record
 	if err := json.Unmarshal(data, &records); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	unknown := unknownOverrideKeys(data)
 	for i := range records {
 		records[i].Type = NormalizeType(records[i].Type)
 	}
-	return records, nil
+	return records, unknown, nil
+}
+
+// overrideKeys is the set of keys an overrides record may carry (Record's JSON tags).
+var overrideKeys = map[string]struct{}{
+	"anilist_id": {}, "type": {}, "tvdb_id": {}, "tmdb_movies": {}, "imdb_ids": {}, "season_tvdb": {},
 }

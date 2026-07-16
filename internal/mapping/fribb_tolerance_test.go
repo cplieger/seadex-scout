@@ -186,3 +186,42 @@ func TestTmdbID_badInteriorTolerated(t *testing.T) {
 		t.Errorf("tmdbID({movie:x}) = %+v, want empty (bad interior tolerated)", got)
 	}
 }
+
+// TestOffsetPair_malformedObjectTolerated pins the object branch's tolerance:
+// syntactically broken object bytes decode to a zero offsetPair (SeasonTvdb 0,
+// the whole-series/season-0 fallback) with a nil error rather than failing.
+func TestOffsetPair_malformedObjectTolerated(t *testing.T) {
+	var o offsetPair
+	if err := o.UnmarshalJSON([]byte(`{"tvdb":`)); err != nil {
+		t.Fatalf("UnmarshalJSON(malformed object) error: %v", err)
+	}
+	if o.tvdbOrZero() != 0 {
+		t.Errorf("offsetPair(malformed object).tvdbOrZero() = %d, want 0", o.tvdbOrZero())
+	}
+}
+
+// TestFlexString_malformedStringErrors pins that the string branch propagates
+// a JSON syntax error (an unterminated string) instead of tolerating it,
+// matching the sibling flexInt string-branch contract.
+func TestFlexString_malformedStringErrors(t *testing.T) {
+	var s flexString
+	if err := s.UnmarshalJSON([]byte(`"unterminated`)); err == nil {
+		t.Error("UnmarshalJSON(unterminated string) = nil error, want syntax error")
+	}
+	if s != "" {
+		t.Errorf("flexString(unterminated) = %q, want empty (no partial value retained)", string(s))
+	}
+}
+
+// TestStringList_malformedArrayTolerated pins the array branch's outer
+// tolerance: syntactically broken array bytes decode to an empty list with a
+// nil error rather than failing the record.
+func TestStringList_malformedArrayTolerated(t *testing.T) {
+	var s stringList
+	if err := s.UnmarshalJSON([]byte(`["tt1"`)); err != nil {
+		t.Fatalf("UnmarshalJSON(malformed array) error: %v", err)
+	}
+	if s != nil {
+		t.Errorf("stringList(malformed array) = %v, want nil", []string(s))
+	}
+}

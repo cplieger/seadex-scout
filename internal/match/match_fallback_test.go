@@ -193,3 +193,67 @@ func TestMatchTotalBatchOutageSkipsPerIDFallback(t *testing.T) {
 		t.Errorf("memo = %+v, want empty (outage-failed ids must be retried next cycle)", res.Memo.Entries)
 	}
 }
+
+// midBatchOutageAniList models an AniList outage that begins AFTER the first
+// prefetch chunk succeeds: FetchMany returns the first requested id's media
+// together with an error (a PARTIAL batch failure), and every subsequent
+// single Fetch fails transiently.
+type midBatchOutageAniList struct {
+	fetchCalls int
+	batchCalls int
+}
+
+func (o *midBatchOutageAniList) Fetch(context.Context, int) (anilist.Media, error) {
+	o.fetchCalls++
+	return anilist.Media{}, errors.New("anilist 500")
+}
+
+func (o *midBatchOutageAniList) FetchMany(_ context.Context, ids []int) (map[int]anilist.Media, error) {
+	o.batchCalls++
+	return map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}}, errors.New("anilist 500")
+}
+
+// TestMatchMidBatchOutageTripsFastFailBreaker pins the consecutive-failure
+// breaker: an outage that begins mid-batch looks like a PARTIAL failure to
+// prefetch, so the per-entry pass starts retrying uncached ids one by one -
+// but after transientFailureCap consecutive transient failures the breaker
+// trips and every remaining uncached id fails fast (no further per-id
+// requests: no unbounded futile tail), through the existing degradation
+// accounting (Degraded set, failed ids un-memoized so next cycle retries).
+func TestMatchMidBatchOutageTripsFastFailBreaker(t *testing.T) {
+	snap := &library.Snapshot{}
+	idx := mapping.NewIndex(nil) // no records: every entry needs the AniList lookup
+	fake := &midBatchOutageAniList{}
+	entries := []seadex.Entry{
+		{AniListID: 10}, // returned by the partial batch: memoized, no per-id retry
+		{AniListID: 20}, // transient failure 1
+		{AniListID: 30}, // transient failure 2
+		{AniListID: 40}, // transient failure 3: trips the breaker
+		{AniListID: 50}, // breaker tripped: fails fast, no request
+		{AniListID: 60}, // breaker tripped: fails fast, no request
+	}
+
+	res := NewMatcher(fake, nil).Match(context.Background(), entries, snap, idx, Memo{})
+
+	if fake.batchCalls != 1 {
+		t.Errorf("batch calls = %d, want 1", fake.batchCalls)
+	}
+	if fake.fetchCalls != transientFailureCap {
+		t.Errorf("single Fetch calls = %d, want %d (the breaker must stop the futile per-id tail)",
+			fake.fetchCalls, transientFailureCap)
+	}
+	if !res.Degraded {
+		t.Error("Degraded = false, want true: needed lookups failed against the outage")
+	}
+	if len(res.Memo.Entries) != 1 {
+		t.Errorf("memo = %+v, want only the batch-returned id memoized (failed ids retried next cycle)", res.Memo.Entries)
+	}
+	if ent, ok := res.Memo.Entries[10]; !ok || ent.NotFound {
+		t.Errorf("memo[10] = %+v (present=%v), want the positive batch-returned entry", ent, ok)
+	}
+	for i := range res.Matches {
+		if res.Matches[i].InLibrary() {
+			t.Errorf("match %d = %+v, want unmapped (empty library)", i, res.Matches[i])
+		}
+	}
+}

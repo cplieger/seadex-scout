@@ -22,7 +22,7 @@ func TestDedupeKey(t *testing.T) {
 		InfoHash:          "hash1",
 	}
 	got := dedupeKey(f)
-	want := "42|better_release|a,b|x|hash1"
+	want := `42|better_release|"a","b"|"x"|"hash1"`
 	if got != want {
 		t.Errorf("dedupeKey() = %q, want %q", got, want)
 	}
@@ -61,7 +61,8 @@ func TestDedupeKey(t *testing.T) {
 	}
 
 	// A public-only finding (non-redacted hash, no AB links) keeps the exact
-	// pre-AB-aware key shape, so existing persisted dedupe state stays valid.
+	// quoted key shape, so a delimiter inside a group name or identity cannot
+	// collide two distinct findings onto one key.
 	if k := dedupeKey(&publicOnly); k != want {
 		t.Errorf("public-only dedupeKey() = %q, want unchanged %q", k, want)
 	}
@@ -167,8 +168,8 @@ func TestCompareSeasonScopedFindingSeed(t *testing.T) {
 	if got[0].CurrentGroup != "erai-raws" {
 		t.Errorf("CurrentGroup = %q, want season-scoped %q (not whole-series subsplease,erai-raws)", got[0].CurrentGroup, "erai-raws")
 	}
-	if !strings.Contains(got[0].DedupeKey, "|erai-raws|") {
-		t.Errorf("DedupeKey = %q, want it to carry the season-scoped current group |erai-raws|", got[0].DedupeKey)
+	if !strings.Contains(got[0].DedupeKey, `|"erai-raws"|`) {
+		t.Errorf("DedupeKey = %q, want it to carry the season-scoped current group |\"erai-raws\"|", got[0].DedupeKey)
 	}
 }
 
@@ -418,5 +419,44 @@ func TestObtainableLinksSkipsEmptyURL(t *testing.T) {
 
 	if len(links) != 1 || links[0].URL != "https://nyaa.si/view/2" {
 		t.Errorf("obtainableLinks() = %+v, want only the URL-carrying link", links)
+	}
+}
+
+func TestCompareFindingCarriesClassifiedReleaseFields(t *testing.T) {
+	item := &library.Item{Title: "Payload", Groups: []string{"erai-raws"}, SeasonGroups: map[int][]string{1: {"erai-raws"}}}
+	entry := seadex.Entry{AniListID: 700, Torrents: []seadex.Torrent{{
+		IsBest:       true,
+		ReleaseGroup: "SubsPlease",
+		Tracker:      "Nyaa",
+		URL:          "https://nyaa.si/view/700",
+		InfoHash:     "deadbeef",
+		DualAudio:    true,
+		Files:        []seadex.File{{Name: "[SubsPlease] Payload - 01 [1080p][HEVC].mkv"}},
+	}}}
+	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+
+	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+
+	if len(got) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(got))
+	}
+	f := got[0]
+	if f.Resolution != "1080p" {
+		t.Errorf("Resolution = %q, want 1080p", f.Resolution)
+	}
+	if f.Codec != "x265" {
+		t.Errorf("Codec = %q, want x265 (HEVC normalizes to x265)", f.Codec)
+	}
+	if f.Kind != string(release.KindEncode) {
+		t.Errorf("Kind = %q, want %q", f.Kind, release.KindEncode)
+	}
+	if !f.DualAudio {
+		t.Error("DualAudio must carry the SeaDex dual-audio flag onto the finding")
+	}
+	if f.InfoHash != "deadbeef" {
+		t.Errorf("InfoHash = %q, want deadbeef", f.InfoHash)
+	}
+	if f.Reason == "" {
+		t.Error("classification reason must be filled")
 	}
 }

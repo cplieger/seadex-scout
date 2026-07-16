@@ -90,6 +90,41 @@ func TestToConfigEnabledToggleAndTrim(t *testing.T) {
 	}
 }
 
+// TestToConfigInfoOnDisabledArrWithKey pins the half-configuration signal: a
+// disabled arr whose api_key is set (always operator-written) logs an Info at
+// flatten time, while the defaults baseline (disabled, key-less) stays silent
+// so a plain config boots without noise (l-f63).
+func TestToConfigInfoOnDisabledArrWithKey(t *testing.T) {
+	t.Run("disabled arr with key logs info", func(t *testing.T) {
+		rec := capture.Default(t)
+		fc := defaultFileConfig()
+		fc.Sonarr = arrFile{Enabled: true, URL: "http://sonarr:8989", APIKey: "sk"}
+		fc.Radarr = arrFile{Enabled: false, URL: "http://radarr:7878", APIKey: "rk"}
+
+		c := fc.toConfig()
+
+		if c.RadarrURL != "" || c.RadarrAPIKey != "" {
+			t.Errorf("disabled radarr should still be dropped, got url=%q key=%q", c.RadarrURL, c.RadarrAPIKey)
+		}
+		if !rec.Contains("radarr.api_key is set but radarr.enabled is false") {
+			t.Errorf("toConfig log = %v, want the disabled-radarr-with-key info", rec.Messages())
+		}
+	})
+	t.Run("default key-less disabled arr stays silent", func(t *testing.T) {
+		rec := capture.Default(t)
+		fc := defaultFileConfig()
+		fc.Sonarr = arrFile{Enabled: true, URL: "http://sonarr:8989", APIKey: "sk"}
+
+		fc.toConfig()
+
+		for _, msg := range rec.Messages() {
+			if strings.Contains(msg, "will not be scanned") {
+				t.Errorf("toConfig logged %q for a default key-less disabled arr", msg)
+			}
+		}
+	})
+}
+
 func TestWebBaseFallsBackToInternalURL(t *testing.T) {
 	withPublic := Config{SonarrURL: "http://internal:8989", SonarrPublicURL: "https://sonarr.example.com"}
 	if got := withPublic.SonarrWebBase(); got != "https://sonarr.example.com" {
@@ -254,6 +289,9 @@ func TestLoadDecodeErrorOmitsExpandedSecret(t *testing.T) {
 	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "super-s") {
 		t.Errorf("Load() error = %q, leaks expanded secret", err)
 	}
+	if !strings.Contains(err.Error(), "cannot unmarshal !!str <redacted> into bool") {
+		t.Errorf("Load() error = %q, want the redacted wrong-type entry shape", err)
+	}
 }
 
 // TestLoadDecodeErrorOmitsBacktickSecret pins the value-independent redaction:
@@ -280,6 +318,9 @@ func TestLoadDecodeErrorOmitsBacktickSecret(t *testing.T) {
 		if strings.Contains(corpus, frag) {
 			t.Errorf("decode-error corpus leaks secret fragment %q: %q", frag, corpus)
 		}
+	}
+	if !strings.Contains(err.Error(), "cannot unmarshal !!str <redacted> into bool") {
+		t.Errorf("Load() error = %q, want the redacted wrong-type entry shape", err)
 	}
 }
 
@@ -524,6 +565,45 @@ func TestValidateIndexerProwlarrKeyWarning(t *testing.T) {
 		}
 		if rec.Contains("prowlarr_api_key") {
 			t.Errorf("Validate() log = %v, want no prowlarr_api_key warning", rec.Messages())
+		}
+	})
+}
+
+// TestValidateIndexerShortFeedKeyWarning pins the warn-only strength floor on
+// indexer.feed_api_key (l-f64): a key under 16 characters warns (it gates the
+// AnimeBytes-passkey-bearing feed), a strong key stays silent, and the key
+// value never rides the log record (field-name-only posture).
+func TestValidateIndexerShortFeedKeyWarning(t *testing.T) {
+	base := Config{
+		RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k",
+		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api", IndexerProwlarrAPIKey: "pk",
+	}
+
+	t.Run("short key warns without value", func(t *testing.T) {
+		const shortKey = "hunter2"
+		rec := capture.Default(t)
+		c := base
+		c.IndexerAPIKey = shortKey
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if !rec.Contains("feed_api_key is shorter than 16 characters") {
+			t.Errorf("Validate() log = %v, want the short feed_api_key warning", rec.Messages())
+		}
+		corpus := strings.Join(rec.Messages(), "\n")
+		if strings.Contains(corpus, shortKey) || recordHasAttr(rec, "value", shortKey) {
+			t.Errorf("Validate() log leaks the key value: %v", rec.Messages())
+		}
+	})
+	t.Run("32-char key does not warn", func(t *testing.T) {
+		rec := capture.Default(t)
+		c := base
+		c.IndexerAPIKey = strings.Repeat("a", 32)
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if rec.Contains("feed_api_key is shorter") {
+			t.Errorf("Validate() log = %v, want no short-key warning", rec.Messages())
 		}
 	})
 }
@@ -800,6 +880,24 @@ func TestSanitizeYAMLErrorFallbacks(t *testing.T) {
 		}
 	})
 
+	t.Run("dup-key markers inside a scalar excerpt stay redacted", func(t *testing.T) {
+		// A wrong-type excerpt embedding the duplicate-key marker pair must not
+		// be mistaken for a duplicate-key entry (whose rebuild keeps the text
+		// before its first and after its last marker): its prefix is the
+		// unmarshal shape, not a bare "line N", so it takes the redacting
+		// wrong-type branch instead.
+		typeErr := &yaml.TypeError{Errors: []string{
+			"line 4: cannot unmarshal !!str `" + secret + ": mapping key x already defined at line 9-" + secret + "` into bool",
+		}}
+		got := sanitizeYAMLError(typeErr)
+		if strings.Contains(got, secret) {
+			t.Errorf("sanitizeYAMLError(dup-key colliding excerpt) leaks excerpt content: %q", got)
+		}
+		if !strings.Contains(got, "line 4: cannot unmarshal !!str <redacted> into bool") {
+			t.Errorf("sanitizeYAMLError(dup-key colliding excerpt) = %q, want the wrong-type redaction", got)
+		}
+	})
+
 	t.Run("into-marker before unmarshal-marker falls back", func(t *testing.T) {
 		got := sanitizeTypeErrorEntry(" into bool then cannot unmarshal !!str " + secret)
 		want := "configuration contains a value of the wrong type"
@@ -856,5 +954,32 @@ func TestLoadLeavesMappingKeysLiteral(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), `unknown configuration key "${SEADEX_SCOUT_KEY}"`) {
 		t.Errorf("Load() error = %q, want the literal ${SEADEX_SCOUT_KEY} rejected as an unknown key", err)
+	}
+}
+
+// TestIsLinePrefix pins the boundary cases of the "line <digits>" guard that
+// gates the unknown-key rebuild in sanitizeTypeErrorEntry: only an exact bare
+// "line N" prefix qualifies; empty input, a missing/non-numeric number, and an
+// unmarshal-shaped prefix all fail.
+func TestIsLinePrefix(t *testing.T) {
+	tests := []struct {
+		in   string
+		want bool
+	}{
+		{"line 4", true},
+		{"line 123", true},
+		{"", false},
+		{"line", false},
+		{"line ", false},
+		{"line 4x", false},
+		{"line x", false},
+		{"LINE 4", false},
+		{" line 4", false},
+		{"line 4: cannot unmarshal !!str `x`", false},
+	}
+	for _, tt := range tests {
+		if got := isLinePrefix(tt.in); got != tt.want {
+			t.Errorf("isLinePrefix(%q) = %v, want %v", tt.in, got, tt.want)
+		}
 	}
 }

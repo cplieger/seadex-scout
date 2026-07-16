@@ -135,10 +135,23 @@ Every row carries three kinds of link: the Sonarr/Radarr deep-link to the item
 (`releases.moe/{alID}`), and the indexer link for each best release. The report
 is written three ways, so it is both human- and machine-readable: a Markdown file
 grouped by verdict, a JSON file alongside it, and one `report item` slog line per
-anime (queryable in Loki like the daemon findings). Each run writes a timestamped
+anime (queryable in Loki like the daemon findings when the report runs as the
+container command — `mode: report` or the `report` container arg; a
+`docker exec` run's output goes to the exec session, not the container log
+stream, so Alloy/Loki never see it — Ofelia captures job-exec output in its
+own logs instead). Each run writes a timestamped
 `report-<UTC date+time>.md` + `.json` pair into `report.dir` (default
 `/config/reports`) — e.g. `report-2026-07-11T15-04-05Z.md` — so successive
-reports never overwrite one another.
+reports never overwrite one another. Reports are never deleted by the app; if
+you schedule them, prune old pairs yourself, e.g. an Ofelia/cron job running
+`find /config/reports -name 'report-*' -mtime +90 -delete`.
+
+> When you run `report` as the container's command (rather than `docker exec`
+> into the running daemon), disable the image's baked healthcheck for that
+> one-shot container (compose: `healthcheck: { disable: true }`; docker run:
+> `--no-healthcheck`). The health marker belongs to the daemon's poll loop, so
+> a report-only container would read unhealthy while the report is still
+> generating, and an unhealthy-restart watchdog could kill it mid-run.
 
 While the daemon runs, produce a fresh report without stopping it by running the
 `report` subcommand in the container:
@@ -317,6 +330,12 @@ fine (that is what the per-tracker subdomain routing is for), just don't put it 
 the public internet. The Prowlarr API key is sent to Prowlarr in a request header
 (never in a logged URL) and is never written to the logs.
 
+The synthesized feed is also persisted on disk between cycles as
+`/config/feed.json`, and its AnimeBytes items embed the `ab_passkey` in their
+download links — the file is written owner-only (0600), but treat it as
+secret-bearing: a `/config` backup captures the passkey even when your
+`config.yaml` only references it via `${SEADEX_SCOUT_AB_PASSKEY}`.
+
 ## How matching works
 
 SeaDex keys everything on AniList IDs; Sonarr keys on TVDB, Radarr on TMDB/IMDb.
@@ -333,7 +352,8 @@ seadex-scout bridges them:
   (required), `type` (`movie` routes to Radarr, anything else to Sonarr),
   `tvdb_id`, `tmdb_movies` (array of ints), `imdb_ids` (array of strings),
   `season_tvdb` — note these are NOT the upstream Fribb field names
-  (`imdb_id`, `themoviedb_id`, `season`), which are silently ignored. An
+  (`imdb_id`, `themoviedb_id`, `season`), which are ignored with a startup
+  warning naming the key. An
   override **replaces** the whole mapping record for its `anilist_id` (no
   field-by-field merge), so when correcting an entry Fribb already has,
   restate every field the entry needs.

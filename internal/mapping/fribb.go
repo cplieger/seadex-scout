@@ -97,7 +97,7 @@ func parseFribb(data []byte, log *slog.Logger) ([]Record, error) {
 		return nil, err
 	}
 	if d, ok := tok.(json.Delim); !ok || d != '[' {
-		return nil, fmt.Errorf("mapping: Fribb list is not a JSON array (got %v)", tok)
+		return nil, fmt.Errorf("mapping: Fribb list is not a JSON array (got %T)", tok)
 	}
 	records, skipped, dropped, firstErr, err := decodeFribbRecords(dec)
 	if err != nil {

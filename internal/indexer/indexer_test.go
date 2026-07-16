@@ -111,6 +111,9 @@ func TestTrackerKey(t *testing.T) {
 	if got := trackerKeyFromURL("https://nyaa.si/view/1234567"); got != "nyaa:1234567" {
 		t.Errorf("nyaa trackerKeyFromURL = %q", got)
 	}
+	if got := trackerKeyFromURL("https://nyaa.si./view/1234567"); got != "nyaa:1234567" {
+		t.Errorf("nyaa FQDN trailing-dot trackerKeyFromURL = %q, want nyaa:1234567", got)
+	}
 	if got := trackerKeyFromURL("https://animebytes.tv/torrents.php?id=70543&torrentid=1143533"); got != "ab:1143533" {
 		t.Errorf("ab trackerKeyFromURL = %q", got)
 	}
@@ -191,6 +194,20 @@ func TestMarkAndDedupeRejectsConflictingIdentity(t *testing.T) {
 	}
 	if out := markAndDedupe(raw, set); len(out) != 0 {
 		t.Fatalf("got %d items, want 0 (conflicting identity signals must drop the item)", len(out))
+	}
+}
+
+// TestMarkAndDedupeRejectsUncuratedHash pins the miss leg of the curation
+// gate's info-hash arm: an item carrying a structurally valid 40-hex info hash
+// that is NOT in the SeaDex curation set must be dropped, never admitted or marked.
+func TestMarkAndDedupeRejectsUncuratedHash(t *testing.T) {
+	set := &curation{
+		byHash: map[string]bool{"abcdef1234567890abcdef1234567890abcdef12": true},
+		byKey:  map[string]bool{},
+	}
+	raw := []item{{Title: "uncurated hash", InfoHash: "0123456789012345678901234567890123456789", GUID: "g1"}}
+	if out := markAndDedupe(raw, set); len(out) != 0 {
+		t.Fatalf("got %d items, want 0 (a valid but uncurated info hash must not match)", len(out))
 	}
 }
 
@@ -723,16 +740,16 @@ func TestABFeedRequiresPasskey(t *testing.T) {
 		return rec.Body.String()
 	}
 
-	noKey := New(&Config{}, Deps{}, "")
-	if body := serve(noKey, "/ab?t=search"); !strings.Contains(body, "<error") || !strings.Contains(body, "passkey") {
+	noKey := New(&Config{APIKey: "k"}, Deps{}, "")
+	if body := serve(noKey, "/ab?t=search&apikey=k"); !strings.Contains(body, "<error") || !strings.Contains(body, "passkey") {
 		t.Errorf("ab empty-q without passkey: body = %q, want a Torznab <error> mentioning the passkey", body)
 	}
-	if body := serve(noKey, "/nyaa?t=search"); strings.Contains(body, "<error") {
+	if body := serve(noKey, "/nyaa?t=search&apikey=k"); strings.Contains(body, "<error") {
 		t.Errorf("nyaa empty-q must not error: %q", body)
 	}
 
-	withKey := New(&Config{ABPasskey: "PASSKEY"}, Deps{}, "")
-	if body := serve(withKey, "/ab?t=search"); strings.Contains(body, "<error") {
+	withKey := New(&Config{APIKey: "k", ABPasskey: "PASSKEY"}, Deps{}, "")
+	if body := serve(withKey, "/ab?t=search&apikey=k"); strings.Contains(body, "<error") {
 		t.Errorf("ab empty-q with passkey must not error: %q", body)
 	}
 }

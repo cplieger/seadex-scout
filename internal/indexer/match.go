@@ -82,7 +82,7 @@ func trackerKeyFromURL(raw string) string {
 	}
 	host := strings.ToLower(u.Hostname())
 	switch {
-	case host == "nyaa.si" || strings.HasSuffix(host, ".nyaa.si"):
+	case release.IsNyaaHost(host):
 		if id := nyaaID(raw); id != "" {
 			return upstreamNyaa + ":" + id
 		}
