@@ -21,29 +21,6 @@ const feedWindow = 300
 // is curated.
 const seaDexEntryURL = "https://releases.moe/"
 
-// buildFeeds synthesizes the two per-tracker RSS feeds from the SeaDex catalogue.
-//
-// Unlike a search (which proxies Prowlarr's real tracker parse), the periodic
-// RSS check has no query to match, so the feed must BE the SeaDex list: one item
-// per curated torrent, addressed to its tracker's feed. Each item's download
-// link is built directly - public Nyaa needs no credential; AnimeBytes embeds
-// the operator's passkey - because there is no Prowlarr round-trip here.
-//
-// A torrent is included only when a grabbable link can be formed: a Nyaa/AB URL
-// with a parseable id, and (for AB) a configured passkey. An AB release skipped
-// solely for a missing passkey is counted in abSkippedNoPasskey so the caller
-// can nudge the operator once, rather than emitting link-less items an arr would
-// fail to grab. An in-scope Nyaa/AB torrent whose stored URL yields no parseable
-// id is dropped and counted in unresolvable, so an upstream URL-shape change
-// surfaces on the snapshot log line instead of silently shrinking the feed.
-// Trackers other than Nyaa/AB (a negligible SeaDex tail) are
-// dropped. Both feeds are sorted newest-first and capped at feedWindow.
-//
-// classify sets each item's Torznab category from the entry's AniList id: a
-// SeaDex file name cannot reliably tell a movie from a single-file OVA/special,
-// so the caller resolves the real media type (Fribb/AniList) and returns the
-// category (Movies for a film -> Radarr, Anime for everything else -> Sonarr).
-// It is called once per entry (all of an entry's torrents share its category).
 // feedAccumulator collects the two per-tracker feeds and the skip counters
 // as buildFeeds walks the catalogue.
 type feedAccumulator struct {
@@ -73,6 +50,29 @@ func (acc *feedAccumulator) add(e *seadex.Entry, t *seadex.Torrent, cats []int, 
 	}
 }
 
+// buildFeeds synthesizes the two per-tracker RSS feeds from the SeaDex catalogue.
+//
+// Unlike a search (which proxies Prowlarr's real tracker parse), the periodic
+// RSS check has no query to match, so the feed must BE the SeaDex list: one item
+// per curated torrent, addressed to its tracker's feed. Each item's download
+// link is built directly - public Nyaa needs no credential; AnimeBytes embeds
+// the operator's passkey - because there is no Prowlarr round-trip here.
+//
+// A torrent is included only when a grabbable link can be formed: a Nyaa/AB URL
+// with a parseable id, and (for AB) a configured passkey. An AB release skipped
+// solely for a missing passkey is counted in abSkippedNoPasskey so the caller
+// can nudge the operator once, rather than emitting link-less items an arr would
+// fail to grab. An in-scope Nyaa/AB torrent whose stored URL yields no parseable
+// id is dropped and counted in unresolvable, so an upstream URL-shape change
+// surfaces on the snapshot log line instead of silently shrinking the feed.
+// Trackers other than Nyaa/AB (a negligible SeaDex tail) are
+// dropped. Both feeds are sorted newest-first and capped at feedWindow.
+//
+// classify sets each item's Torznab category from the entry's AniList id: a
+// SeaDex file name cannot reliably tell a movie from a single-file OVA/special,
+// so the caller resolves the real media type (Fribb/AniList) and returns the
+// category (Movies for a film -> Radarr, Anime for everything else -> Sonarr).
+// It is called once per entry (all of an entry's torrents share its category).
 func buildFeeds(entries []seadex.Entry, abPasskey string, classify func(alID int) []int) (nyaaFeed, abFeed []item, abSkippedNoPasskey, unresolvable int) {
 	var acc feedAccumulator
 	for i := range entries {

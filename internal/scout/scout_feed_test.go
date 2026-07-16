@@ -121,16 +121,16 @@ func TestCycleFeedRebuildErrorIsNonFatal(t *testing.T) {
 		},
 	}
 	s := New(&Deps{
-		Logger:   logger,
-		Store:    store,
-		Library:  library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
-		Mapping:  mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
-		SeaDex:   &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher:  match.NewMatcher(notFoundAniList{}, logger),
-		Comparer: compare.NewComparer(compare.Config{Logger: logger}),
-		Reporter: report.NewReporter(logger),
-		AniList:  anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger),
-		Feed:     feed,
+		Logger:       logger,
+		Store:        store,
+		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
+		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
+		Comparer:     compare.NewComparer(compare.Config{Logger: logger}),
+		Reporter:     report.NewReporter(logger),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
+		Feed:         feed,
 	})
 
 	if healthy := s.Cycle(context.Background()); !healthy {

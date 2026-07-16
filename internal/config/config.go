@@ -28,7 +28,7 @@ import (
 
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/envx/yamlenv"
-	"github.com/cplieger/scheduler"
+	"github.com/cplieger/scheduler/v2"
 	"github.com/cplieger/slogx"
 	"go.yaml.in/yaml/v3"
 )
@@ -241,7 +241,11 @@ func Load(path string) (Config, error) {
 
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return Config{}, fmt.Errorf("parse config %s: %w", path, err)
+		// Same fail-closed sanitizer as the decode errors below: a parse error
+		// can embed operator-written text adjacent to a secret (e.g. an
+		// unquoted literal secret read as an alias yields "unknown anchor
+		// '<secret>' referenced"), and main logs this error at startup.
+		return Config{}, fmt.Errorf("parse config %s: %s", path, sanitizeYAMLError(err))
 	}
 	if err := checkUnknownKeys(data); err != nil {
 		return Config{}, fmt.Errorf("parse config %s: %s", path, sanitizeYAMLError(err))
@@ -341,17 +345,28 @@ func sanitizeYAMLError(err error) string {
 // scalar excerpt that happens to embed both of its markers is never mistaken
 // for it (such an entry starts with the unmarshal shape, not a bare "line N",
 // so it falls through to the redacting branches instead).
-func sanitizeTypeErrorEntry(entry string) string {
-	if k := strings.Index(entry, yamlDupKeyMarker); k >= 0 && isLinePrefix(entry[:k]) {
-		if at := strings.LastIndex(entry, yamlDupKeyDefinedAt); at > k {
-			return entry[:k] + ": mapping key <redacted>" + entry[at:]
-		}
+// lineEntryBounds locates one structured TypeError entry shape: startMarker
+// must appear after a bare "line N" prefix (the isLinePrefix guard - a
+// wrong-type scalar excerpt embedding the same marker pair starts with the
+// unmarshal shape instead, so it never matches) and endMarker must follow it.
+// It is the single home of the boundary validation both structured-entry
+// branches of sanitizeTypeErrorEntry share.
+func lineEntryBounds(entry, startMarker, endMarker string) (start, end int, ok bool) {
+	start = strings.Index(entry, startMarker)
+	if start < 0 || !isLinePrefix(entry[:start]) {
+		return 0, 0, false
 	}
-	if k := strings.Index(entry, yamlUnknownKeyMarker); k >= 0 && isLinePrefix(entry[:k]) {
-		if at := strings.LastIndex(entry, yamlUnknownKeyInType); at > k {
-			return fmt.Sprintf("%s: unknown configuration key %q",
-				entry[:k], entry[k+len(yamlUnknownKeyMarker):at])
-		}
+	end = strings.LastIndex(entry, endMarker)
+	return start, end, end > start
+}
+
+func sanitizeTypeErrorEntry(entry string) string {
+	if k, at, ok := lineEntryBounds(entry, yamlDupKeyMarker, yamlDupKeyDefinedAt); ok {
+		return entry[:k] + ": mapping key <redacted>" + entry[at:]
+	}
+	if k, at, ok := lineEntryBounds(entry, yamlUnknownKeyMarker, yamlUnknownKeyInType); ok {
+		return fmt.Sprintf("%s: unknown configuration key %q",
+			entry[:k], entry[k+len(yamlUnknownKeyMarker):at])
 	}
 	start := strings.Index(entry, yamlUnmarshalMarker)
 	end := strings.LastIndex(entry, yamlIntoMarker)
@@ -449,6 +464,32 @@ func parseInterval(raw string) (time.Duration, bool) {
 		return 0, true
 	}
 	return s.Interval, false
+}
+
+// PollIntervalFromFile reads ONLY the poll_interval key from the YAML
+// config at path and returns the effective cycle interval (0 = external
+// mode), applying the same parse+clamp rules Load uses. Every failure
+// (missing file, oversized, invalid YAML) also returns 0: the health
+// probe derives its freshness deadline from this and must never fail
+// because configuration is absent or malformed — the daemon itself
+// surfaces those loudly at startup. Unknown keys are deliberately
+// tolerated here (no checkUnknownKeys): strictness is Load's job.
+func PollIntervalFromFile(path string) time.Duration {
+	data, err := atomicfile.ReadBounded(context.Background(), path, maxConfigBytes)
+	if err != nil {
+		return 0
+	}
+	var probe struct {
+		PollInterval string `yaml:"poll_interval"`
+	}
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		return 0
+	}
+	interval, external := parseInterval(probe.PollInterval)
+	if external {
+		return 0
+	}
+	return interval
 }
 
 // SonarrEnabled reports whether a complete Sonarr pair (URL + key) is set.
@@ -591,7 +632,7 @@ func validateHTTPURL(name, rawURL string) error {
 		// which would ship an embedded basic-auth password to the startup log.
 		return fmt.Errorf("%s is not a valid URL", name)
 	}
-	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 		// Field-name-only, matching the parse-error branch: u.Redacted() masks only
 		// a userinfo password, so echoing the URL would still ship a username-only
 		// token or a query-string apikey to the startup log.

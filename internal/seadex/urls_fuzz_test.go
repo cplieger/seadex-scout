@@ -6,14 +6,15 @@ import (
 	"testing"
 )
 
-// FuzzTorrentUsableURL fuzzes the unsafe-scheme gate over the untrusted
-// upstream (SeaDex-supplied) torrent URL and tracker name. Invariants: a
-// protocol-relative URL (//host/...) is always rejected (empty result); a
-// non-empty result never carries a non-http(s) scheme (javascript:, data:,
-// file: must never become clickable links in findings/reports/feeds); an
-// absolute http(s) input is returned unchanged apart from trimming; and the
-// function is idempotent (re-running on its own output is a fixed point, so a
-// link already made usable is never re-mangled).
+// FuzzTorrentUsableURL fuzzes the unsafe-scheme and host-binding gate over the
+// untrusted upstream (SeaDex-supplied) torrent URL and tracker name.
+// Invariants: a protocol-relative URL (//host/...) is always rejected (empty
+// result); a non-empty result never carries a non-http(s) scheme (javascript:,
+// data:, file: must never become clickable links in findings/reports/feeds);
+// an absolute http(s) input that survives the tracker host-binding gate is
+// returned unchanged apart from trimming; and the function is idempotent
+// (re-running on its own output is a fixed point, so a link already made
+// usable is never re-mangled).
 func FuzzTorrentUsableURL(f *testing.F) {
 	f.Add("https://nyaa.si/view/1", "Nyaa")
 	f.Add("/torrents.php?id=1&torrentid=2", "AB")
@@ -22,6 +23,10 @@ func FuzzTorrentUsableURL(f *testing.F) {
 	f.Add("data:text/html,x", "sometracker")
 	f.Add("file:///etc/passwd", "")
 	f.Add("https://trusted@evil.example/x", "Nyaa")
+	f.Add("https://evil.example/x", "Nyaa")
+	f.Add("https://sukebei.nyaa.si/view/1", "Nyaa")
+	f.Add("https://nyaa.si./view/1", "Nyaa")
+	f.Add("https://nyaa.si.evil.example/view/1", "Nyaa")
 	f.Add("view/1", "nyaa")
 	f.Add("  HTTPS://Example.test/T/1  ", "unknown")
 	f.Add("", "")

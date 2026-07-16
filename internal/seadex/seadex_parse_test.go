@@ -36,10 +36,11 @@ func TestParsePBTime(t *testing.T) {
 
 // TestPageComplete pins the pagination-completeness decision table, including
 // the arm the HTTP-level tests never reach in-package: an empty FINAL page (or
-// an empty page when the API reports zero total pages) completes cleanly, while
-// an empty page before the reported total is a truncated-view error, and a
-// NON-empty page with invalid metadata (totalPages < 1, or a page past the
-// reported total) errors rather than being accepted as a complete catalogue.
+// an empty FIRST page when the API reports zero total pages) completes cleanly,
+// while an empty page before the reported total is a truncated-view error, and
+// ANY page with invalid metadata (totalPages < 1 past page 1, or a page — empty
+// or not — past the reported total) errors rather than being accepted as a
+// complete catalogue.
 func TestPageComplete(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -57,6 +58,7 @@ func TestPageComplete(t *testing.T) {
 		{name: "later empty page with zero total errors", page: 2, itemCount: 0, totalPages: 0, wantErr: true},
 		{name: "later empty page with negative total errors", page: 2, itemCount: 0, totalPages: -1, wantErr: true},
 		{name: "empty page before total errors", page: 2, itemCount: 0, totalPages: 3, wantErr: true},
+		{name: "empty page past reported total errors", page: 3, itemCount: 0, totalPages: 2, wantErr: true},
 		{name: "non-empty page with zero total errors", page: 1, itemCount: 500, totalPages: 0, wantErr: true},
 		{name: "non-empty page with negative total errors", page: 1, itemCount: 500, totalPages: -1, wantErr: true},
 		{name: "non-empty page past reported total errors", page: 4, itemCount: 5, totalPages: 3, wantErr: true},

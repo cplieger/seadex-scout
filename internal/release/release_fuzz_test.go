@@ -108,3 +108,37 @@ func FuzzIsAnimeBytesHost(f *testing.F) {
 		}
 	})
 }
+
+// FuzzIsNyaaHost fuzzes the Nyaa host classifier (an untrusted-URL-host gate
+// used by indexer routing) with the same metamorphic and bounded-output
+// invariants as its AnimeBytes twin: an explicit ".nyaa.si" label boundary
+// always matches; a dotless prefix never bypasses the suffix rule; a DNS-root
+// trailing dot never changes the answer; and a matching host at least ends in
+// "nyaa.si" after the root-dot trim.
+func FuzzIsNyaaHost(f *testing.F) {
+	f.Add("nyaa.si")
+	f.Add("www.nyaa.si")
+	f.Add("nyaa.si.")
+	f.Add("maliciousnyaa.si")
+	f.Add("nyaa.si.evil.com")
+	f.Add(".nyaa.si")
+	f.Add("")
+	f.Fuzz(func(t *testing.T, host string) {
+		got := IsNyaaHost(host)
+
+		if !IsNyaaHost(host + ".nyaa.si") {
+			t.Errorf("IsNyaaHost(%q) = false, want true: an explicit .nyaa.si label boundary always matches", host+".nyaa.si")
+		}
+		if !got && !strings.HasPrefix(host, ".") && IsNyaaHost("evil"+host) {
+			t.Errorf("IsNyaaHost(%q) = true for a dotless-prefix variant of non-matching host %q: suffix rule bypassed", "evil"+host, host)
+		}
+		if !strings.HasSuffix(host, ".") {
+			if dotted := IsNyaaHost(host + "."); dotted != got {
+				t.Errorf("IsNyaaHost(%q) = %v but IsNyaaHost(%q) = %v: DNS-root trailing dot must not change the answer", host, got, host+".", dotted)
+			}
+		}
+		if got && !strings.HasSuffix(strings.TrimSuffix(host, "."), "nyaa.si") {
+			t.Errorf("IsNyaaHost(%q) = true but the host does not even end in nyaa.si", host)
+		}
+	})
+}

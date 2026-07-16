@@ -53,6 +53,8 @@ func TestConfigValidate(t *testing.T) {
 		{"radarr key without url", Config{RunMode: RunModeDaemon, RadarrAPIKey: "k"}, true},
 		{"non-http scheme rejected", Config{RunMode: RunModeDaemon, SonarrURL: "ftp://sonarr", SonarrAPIKey: "k"}, true},
 		{"url with no host rejected", Config{RunMode: RunModeDaemon, SonarrURL: "not-a-url", SonarrAPIKey: "k"}, true},
+		{"sonarr port-only authority rejected", Config{RunMode: RunModeDaemon, SonarrURL: "http://:8989", SonarrAPIKey: "k"}, true},
+		{"indexer port-only authority rejected", Config{RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k", IndexerNyaaTorznabURL: "http://:9696/22/api", IndexerAPIKey: "feedkey"}, true},
 		{"nyaa indexer url without feed key rejected", Config{RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k", IndexerNyaaTorznabURL: "http://prowlarr/22/api"}, true},
 		{"ab indexer url without feed key rejected", Config{RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k", IndexerABTorznabURL: "http://prowlarr/2/api"}, true},
 		{"indexer url with feed key ok", Config{RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k", IndexerNyaaTorznabURL: "http://prowlarr/22/api", IndexerAPIKey: "feedkey"}, false},
@@ -819,6 +821,34 @@ func TestLoadExpandsEnvInSequenceValues(t *testing.T) {
 	}
 	if len(c.IncludeTags) != 1 || c.IncludeTags[0] != "anime" {
 		t.Errorf("IncludeTags = %v, want the expanded [anime]", c.IncludeTags)
+	}
+}
+
+// TestLoadParseErrorOmitsSecretAlias pins the fail-closed posture of Load's
+// FIRST yaml.Unmarshal error (h-f18): a literal secret pasted unquoted where a
+// string was expected can be read as a YAML alias, and yaml.v3's parse error
+// ("unknown anchor 'X' referenced") embeds it verbatim. main logs Load's error
+// at startup, so neither the returned error nor the captured log corpus may
+// carry any fragment of the secret; the parse error must route through
+// sanitizeYAMLError like the decode errors.
+func TestLoadParseErrorOmitsSecretAlias(t *testing.T) {
+	const secret = "LEAK-SENTINEL-a1b2"
+	rec := capture.Default(t)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := "sonarr:\n  enabled: true\n  url: http://sonarr:8989\n  api_key: *" + secret + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() = nil error, want unknown-anchor parse error")
+	}
+	corpus := err.Error() + "\n" + strings.Join(rec.Messages(), "\n")
+	for _, frag := range []string{secret, "LEAK", "SENTINEL", "a1b2"} {
+		if strings.Contains(corpus, frag) {
+			t.Errorf("parse-error corpus leaks secret fragment %q: %q", frag, corpus)
+		}
 	}
 }
 

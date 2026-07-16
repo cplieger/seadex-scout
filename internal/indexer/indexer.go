@@ -124,8 +124,11 @@ type curation struct {
 // the best/alt value; a signal that misses the curation set, or one that
 // contradicts an earlier signal, rejects the whole item. This keeps an
 // untrusted Torznab item from pairing a curated info hash with the page URL or
-// download link of a different (alt or uncurated) torrent.
-func (c *curation) lookup(hash, infoURL, guid string) (isBest, matched bool) {
+// download link of a different (alt or uncurated) torrent. scope binds tracker
+// identity: a tracker key parsed from the item's URLs must belong to the
+// endpoint being served, so a swapped upstream (or a cross-tracker item) cannot
+// pass /ab an accepted Nyaa key or vice versa.
+func (c *curation) lookup(scope, hash, infoURL, guid string) (isBest, matched bool) {
 	accept := func(candidate, ok bool) bool {
 		if !ok || (matched && candidate != isBest) {
 			return false
@@ -141,17 +144,40 @@ func (c *curation) lookup(hash, infoURL, guid string) (isBest, matched bool) {
 			return false, false
 		}
 	}
-	for _, raw := range []string{infoURL, guid} {
+	scopedKey, ok := c.acceptScopedKeys(scope, []string{infoURL, guid}, accept)
+	if !ok {
+		return false, false
+	}
+	// AnimeBytes exposes no info hash in Torznab, so a scoped tracker key is
+	// mandatory there; Nyaa may still match a hash-only item.
+	if scope == upstreamAB && !scopedKey {
+		return false, false
+	}
+	return isBest, matched
+}
+
+// acceptScopedKeys applies lookup's tracker-key arm: every tracker key parsed
+// from the given page URLs must belong to scope (a key for a different
+// tracker rejects the item outright) and must pass accept (curated, agreeing
+// on best/alt). It reports whether any scoped key was seen (scopedKey - the
+// signal lookup's AB rule needs) and whether the item survives (ok).
+func (c *curation) acceptScopedKeys(scope string, urls []string, accept func(candidate, ok bool) bool) (scopedKey, ok bool) {
+	for _, raw := range urls {
 		k := trackerKeyFromURL(raw)
 		if k == "" {
 			continue
 		}
-		b, ok := c.byKey[k]
-		if !accept(b, ok) {
-			return false, false
+		keyScope, _, found := strings.Cut(k, ":")
+		if !found || keyScope != scope {
+			return scopedKey, false
+		}
+		scopedKey = true
+		b, curated := c.byKey[k]
+		if !accept(b, curated) {
+			return scopedKey, false
 		}
 	}
-	return isBest, matched
+	return scopedKey, true
 }
 
 // Indexer serves searches by proxying Prowlarr filtered to SeaDex's curation,
@@ -166,13 +192,22 @@ type Indexer struct {
 	log     *slog.Logger
 	path    string
 	snapMod time.Time
+	// snapInfo is the os.FileInfo of the successfully loaded snapshot file,
+	// installed together with snap/snapMod (guarded by mu). The last-good skip
+	// needs identity (os.SameFile), not just mtime: an atomic rename or a
+	// backup restore can install a DIFFERENT file that preserves the loaded
+	// timestamp, and that replacement must install, not be skipped.
+	snapInfo os.FileInfo
 	// failedFile identifies (mtime + os.SameFile identity) the last snapshot
-	// file that failed to load (unreadable or malformed), so an unchanged bad
+	// file whose CONTENT failed to decode (malformed JSON), so an unchanged bad
 	// file is not re-read and re-warned on every request; cleared on a
-	// successful load. Identity matters, not just mtime: an atomic rename or
-	// backup restore can install a repaired file that preserves the failed
-	// file's timestamp, and that replacement must be retried, not skipped.
-	// Guarded by reloadMu (set/cleared only inside reload).
+	// successful load. Only deterministic content failures are memoized: a
+	// read failure (EIO, EACCES) can recover without changing inode or mtime
+	// (a chmod, a transient filesystem repair), so it stays retryable.
+	// Identity matters, not just mtime: an atomic rename or backup restore can
+	// install a repaired file that preserves the failed file's timestamp, and
+	// that replacement must be retried, not skipped. Guarded by reloadMu
+	// (set/cleared only inside reload).
 	failedFile os.FileInfo
 	upstreams  []*upstream // wired once in New; immutable afterwards (not guarded by mu)
 	// reloadMu coalesces concurrent snapshot refreshes: only one request runs
@@ -335,74 +370,91 @@ func (ix *Indexer) reload(ctx context.Context) {
 		}
 		return
 	}
-	ix.mu.RLock()
-	loaded := ix.snapMod
-	ix.mu.RUnlock()
-	// Any mtime CHANGE triggers the reload (see the doc comment): inequality
-	// rather than After, so a backup-restored or preserved-older-mtime
-	// replacement installs instead of wedging the server on the loaded copy.
-	if info.ModTime().Equal(loaded) {
+	if ix.shouldSkipSnapshot(info) {
 		return
 	}
-	// An identical mtime on the SAME file (os.SameFile: same inode, not just
-	// the same timestamp) means unchanged content, so re-reading a file that
-	// already failed to load could only fail again: skip it until it changes.
-	// A different inode with a preserved mtime - an atomic rename or a backup
-	// restore that repaired the file - must be retried, exactly like the
-	// preserved-mtime replacements the installed-snapshot check above accepts.
-	if ix.failedFile != nil && info.ModTime().Equal(ix.failedFile.ModTime()) && os.SameFile(info, ix.failedFile) {
-		return
-	}
-	snap, ok := ix.readSnapshot(ctx)
+	snap, ok, memoize := ix.readSnapshot(ctx)
 	if !ok {
-		// Remember the bad file's identity so the next request skips it (see
-		// above) - but not on a shutdown cancellation, where the file was
-		// never actually read and a retry could succeed.
-		if ctx.Err() == nil {
+		// Only malformed bytes are deterministic for an unchanged file. Read
+		// failures can recover after chmod or transient filesystem repair
+		// without changing inode or mtime, so they must remain retryable -
+		// and a shutdown cancellation never memoizes (the file was never
+		// actually read; a retry could succeed).
+		if ctx.Err() == nil && memoize {
 			ix.failedFile = info
+		} else {
+			ix.failedFile = nil
 		}
 		return
 	}
 	ix.failedFile = nil
-	ix.mu.Lock()
-	// Re-check under the write lock. reloadMu already serializes the whole
-	// stat/read/install sequence, so no concurrent reload can install between
-	// our stat and here today; this guard is defense in depth (never
-	// re-installing a copy of what is already loaded) should the TryLock
-	// coalescing above ever change. Same inequality comparison as the outer
-	// check: any mtime CHANGE - including an older one from a backup restore
-	// or a preserved-mtime replace - installs; only equality skips.
-	if info.ModTime().Equal(ix.snapMod) {
-		ix.mu.Unlock()
+	if !ix.installSnapshot(info, snap) {
 		return
 	}
-	ix.snap = snap
-	ix.snapMod = info.ModTime()
-	ix.mu.Unlock()
 	ix.log.Info("indexer feed snapshot loaded",
 		"path", ix.path, "hashes", len(snap.ByHash), "keys", len(snap.ByKey),
 		"nyaa_feed", len(snap.NyaaFeed), "ab_feed", len(snap.ABFeed))
+}
+
+// shouldSkipSnapshot reports whether the stat'ed snapshot file needs no
+// reload: it is the already-loaded snapshot, or the memoized malformed file,
+// unchanged by the same test - an equal mtime AND os.SameFile identity. Both
+// legs require identity, not just the timestamp (see reload's doc comment):
+// an equal mtime on a DIFFERENT inode is a preserved-timestamp replacement
+// (an atomic rename, a backup restore) and must install or be retried, while
+// any mtime CHANGE - including an older one - always reloads.
+func (ix *Indexer) shouldSkipSnapshot(info os.FileInfo) bool {
+	ix.mu.RLock()
+	loadedMod, loadedInfo := ix.snapMod, ix.snapInfo
+	ix.mu.RUnlock()
+	if info.ModTime().Equal(loadedMod) && loadedInfo != nil && os.SameFile(info, loadedInfo) {
+		return true
+	}
+	return ix.failedFile != nil && info.ModTime().Equal(ix.failedFile.ModTime()) && os.SameFile(info, ix.failedFile)
+}
+
+// installSnapshot publishes snap as the served feed under mu, recording the
+// file's mtime + identity for the next reload's skip check, and reports
+// whether it installed. The re-check under the write lock is defense in depth:
+// reloadMu already serializes the whole stat/read/install sequence, so no
+// concurrent reload can install in between today, but never re-installing a
+// copy of what is already loaded holds even if the TryLock coalescing changes.
+// Same test as shouldSkipSnapshot's loaded leg: only an equal mtime on the
+// SAME file (os.SameFile identity) skips.
+func (ix *Indexer) installSnapshot(info os.FileInfo, snap snapshot) bool {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	if info.ModTime().Equal(ix.snapMod) && ix.snapInfo != nil && os.SameFile(info, ix.snapInfo) {
+		return false
+	}
+	ix.snap = snap
+	ix.snapMod = info.ModTime()
+	ix.snapInfo = info
+	return true
 }
 
 // readSnapshot is reload's read/decode error policy: it bounded-reads and
 // decodes the persisted feed snapshot, reporting ok=false on any failure so
 // the caller keeps the current feed. A shutdown cancellation is silent; an
 // unreadable or malformed file is logged (a bad write must never blank a live
-// feed).
-func (ix *Indexer) readSnapshot(ctx context.Context) (snapshot, bool) {
+// feed). The third result means "memoize unchanged bytes": true only for
+// malformed JSON, the one failure that is deterministic for an unchanged
+// file - a read failure (EIO, a fixable EACCES) can recover without changing
+// inode or mtime, so it must stay retryable.
+func (ix *Indexer) readSnapshot(ctx context.Context) (snapshot, bool, bool) {
 	data, err := atomicfile.ReadBounded(ctx, ix.path, maxFeedBytes)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			ix.log.Warn("indexer feed snapshot unreadable; keeping current feed", "path", ix.path, "error", err)
 		}
-		return snapshot{}, false
+		return snapshot{}, false, false
 	}
 	var snap snapshot
 	if err := json.Unmarshal(data, &snap); err != nil {
 		ix.log.Warn("indexer feed snapshot malformed; keeping current feed", "path", ix.path, "error", err)
-		return snapshot{}, false
+		return snapshot{}, false, true
 	}
-	return snap, true
+	return snap, true, false
 }
 
 // handler builds the HTTP mux (a single Torznab endpoint).
@@ -560,7 +612,7 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 		// (the same invariant feedFor documents for the feed slices).
 		set := curation{byHash: ix.snap.ByHash, byKey: ix.snap.ByKey}
 		ix.mu.RUnlock()
-		items = markAndDedupe(raw, &set)
+		items = markAndDedupe(raw, &set, scope)
 		stats = queryStats{answered: true, upstreamFailed: failed, upstream: len(raw), curated: len(items)}
 	}
 
@@ -648,12 +700,12 @@ func (ix *Indexer) fetchRaw(ctx context.Context, params url.Values, scope string
 // markAndDedupe keeps the curated releases, stamps each with the best/alt
 // marker, and drops intra-upstream duplicates by guid (a torrent listed under
 // several title aliases carries distinct guids and is deliberately kept).
-func markAndDedupe(raw []item, set *curation) []item {
+func markAndDedupe(raw []item, set *curation, scope string) []item {
 	seen := make(map[string]struct{}, len(raw))
 	out := make([]item, 0, len(raw))
 	for i := range raw {
 		it := raw[i]
-		isBest, matched := set.lookup(it.InfoHash, it.InfoURL, it.GUID)
+		isBest, matched := set.lookup(scope, it.InfoHash, it.InfoURL, it.GUID)
 		if !matched {
 			continue
 		}

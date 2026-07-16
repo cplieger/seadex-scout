@@ -15,7 +15,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/library"
@@ -72,7 +71,13 @@ type Deps struct {
 	Comparer *compare.Comparer
 	Auditor  *audit.Auditor
 	Reporter *report.Reporter
-	AniList  *anilist.Client
+	// AniListStats reports the AniList client's cumulative request counters
+	// (calls, rate-limit waits) for the cycle completion logs. The scout only
+	// needs these two counters, so it takes a narrow callback instead of the
+	// concrete client (build.go injects a closure over the client's Stats);
+	// nil when no AniList client is wired (the early-return degradation paths
+	// and unit tests) - the daemon always wires it.
+	AniListStats func() (calls, rateLimitWaits int64)
 	// Feed rebuilds and persists the indexer's Torznab feed from each cycle's
 	// SeaDex snapshot. Nil when no Torznab feed is configured (the cycle then
 	// skips all feed work).
@@ -164,7 +169,7 @@ func (s *Scout) Cycle(ctx context.Context) bool {
 	if result.Degraded {
 		return s.finishDegradedMatch(ctx, start, startStats, &st, snap, &mapCache, result)
 	}
-	return s.finishSuccessfulCycle(ctx, start, startStats, &st, snap, &mapCache, entries, result)
+	return s.finishSuccessfulCycle(ctx, start, startStats, &st, snap, &mapCache, entries, result, mapErr)
 }
 
 // stopAfterWalkFailure logs a failed library walk and reports whether Cycle
@@ -221,8 +226,8 @@ func (s *Scout) loadMapping(ctx context.Context, st *state.State) (mapping.Cache
 	return mapCache, idx, mapErr
 }
 
-// mappingDegradedAttrs builds the attribute set shared by the two
-// mapping-degraded WARNs: the existing error and usable_records attributes,
+// mappingDegradedAttrs builds the attribute set shared by the cycle and report
+// mapping-degraded log sites: the existing error and usable_records attributes,
 // plus StaleMapError's structured degradation fields (stale_reason,
 // stale_age_seconds, stale_records) when the error carries them, so Loki can
 // query the rejection class and stale age without parsing the message text.
@@ -234,15 +239,22 @@ func mappingDegradedAttrs(mapErr error, usableRecords int) []any {
 	return attrs
 }
 
+// aniListStats snapshots the AniList request counters (via Deps.AniListStats)
+// at a point in the cycle, so the completion line can log per-cycle deltas.
+type aniListStats struct {
+	calls          int64
+	rateLimitWaits int64
+}
+
 // aniListCycleAttrs returns the cumulative and per-cycle AniList counters both
 // cycle completion paths log.
-func (s *Scout) aniListCycleAttrs(startStats anilist.Stats) []any {
+func (s *Scout) aniListCycleAttrs(startStats aniListStats) []any {
 	aniStats := s.aniStats()
 	return []any{
-		"anilist_calls", aniStats.Calls,
-		"anilist_calls_cycle", aniStats.Calls - startStats.Calls,
-		"anilist_waits", aniStats.RateLimitWaits,
-		"anilist_waits_cycle", aniStats.RateLimitWaits - startStats.RateLimitWaits,
+		"anilist_calls", aniStats.calls,
+		"anilist_calls_cycle", aniStats.calls - startStats.calls,
+		"anilist_waits", aniStats.rateLimitWaits,
+		"anilist_waits_cycle", aniStats.rateLimitWaits - startStats.rateLimitWaits,
 	}
 }
 
@@ -253,7 +265,7 @@ func (s *Scout) aniListCycleAttrs(startStats anilist.Stats) []any {
 // library/mapping/memo (the memo keeps the lookups that did succeed) but leave
 // the finding dedupe table untouched. Always healthy: an upstream outage is
 // not an ingest fault.
-func (s *Scout) finishDegradedMatch(ctx context.Context, start time.Time, startStats anilist.Stats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, result match.Result) bool {
+func (s *Scout) finishDegradedMatch(ctx context.Context, start time.Time, startStats aniListStats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, result match.Result) bool {
 	st.Library, st.Mapping, st.Memo = snap.SanitizedForStorage(), *mapCache, result.Memo
 	s.save(ctx, st)
 	attrs := append(s.aniListCycleAttrs(startStats),
@@ -275,13 +287,13 @@ func (s *Scout) finishDegradedMatch(ctx context.Context, start time.Time, startS
 
 // finishSuccessfulCycle runs the compare over the completed match result,
 // emits (or cold-start baselines) the findings, logs the completion line
-// ("cycle complete", or "cycle degraded" for a partial walk), and persists the
-// full refreshed state. On a partial walk the compare runs on the items that
-// walked cleanly only: matches linked to Failed items are excluded (their file
-// state is missing, not empty), and finding resolution is scoped so those
-// items' prior findings are preserved rather than falsely resolved. Always
-// healthy.
-func (s *Scout) finishSuccessfulCycle(ctx context.Context, start time.Time, startStats anilist.Stats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, result match.Result) bool {
+// ("cycle complete", or "cycle degraded" for a partial walk or a
+// stale-but-usable map), and persists the full refreshed state. On a partial
+// walk the compare runs on the items that walked cleanly only: matches linked
+// to Failed items are excluded (their file state is missing, not empty), and
+// finding resolution is scoped so those items' prior findings are preserved
+// rather than falsely resolved. Always healthy.
+func (s *Scout) finishSuccessfulCycle(ctx context.Context, start time.Time, startStats aniListStats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, result match.Result, mapErr error) bool {
 	cleanMatches, failedItems := splitFailedMatches(result.Matches)
 	findings := s.deps.Comparer.Compare(cleanMatches)
 
@@ -299,11 +311,22 @@ func (s *Scout) finishSuccessfulCycle(ctx context.Context, start time.Time, star
 	// demand via report mode.
 	var newFindings map[string]report.Alerted
 	if !st.Baselined && len(st.Findings) == 0 {
-		newFindings = s.deps.Reporter.Baseline(findings, time.Now())
+		if snap.Partial {
+			// A cold-start baseline must cover the complete library: baselining
+			// only the clean subset of a partial first walk would mark
+			// Baselined=true, and the failed items' pre-existing findings would
+			// burst as "new" when they recover on the next complete cycle. Keep
+			// the unseeded state until a complete walk can establish the
+			// baseline.
+			newFindings = st.Findings
+		} else {
+			newFindings = s.deps.Reporter.Baseline(findings, time.Now())
+			st.Baselined = true
+		}
 	} else {
 		newFindings = s.deps.Reporter.Report(findings, st.Findings, failedItems, time.Now())
+		st.Baselined = true
 	}
-	st.Baselined = true
 
 	diff := library.DiffSnapshots(&st.Library, &snap)
 	attrs := make([]any, 0, 26)
@@ -318,12 +341,19 @@ func (s *Scout) finishSuccessfulCycle(ctx context.Context, start time.Time, star
 	attrs = append(attrs,
 		"added", diff.Added, "removed", diff.Removed, "changed", diff.Changed,
 		"duration", time.Since(start).Round(time.Millisecond).String())
-	if snap.Partial {
+	switch {
+	case snap.Partial:
 		// A partial walk compared only the clean items, so the cycle closed
 		// degraded: report the degraded coverage on the completion line the
 		// deadman alert counts alongside "cycle complete".
 		s.cycleDegraded("partial-walk", append([]any{"failed_items", len(failedItems)}, attrs...)...)
-	} else {
+	case mapErr != nil:
+		// Only a stale-but-usable mapping error reaches this point; unusable and
+		// cancelled loads returned at the pre-compare gate. The compare ran on
+		// the cached map, but the cycle is still upstream-degraded, so it must
+		// not read as fully successful.
+		s.cycleDegraded("mapping-stale", attrs...)
+	default:
 		s.log.Info("cycle complete", attrs...)
 	}
 
@@ -536,6 +566,42 @@ func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap li
 	return false, true
 }
 
+// reportSnapshot walks the library for a one-shot report, failing on a walk
+// error or a partial snapshot: auditing an incomplete snapshot would publish a
+// successful, timestamped report that silently omits the skipped series,
+// contradicting the whole-library audit contract.
+func (s *Scout) reportSnapshot(ctx context.Context) (library.Snapshot, error) {
+	snap, err := s.deps.Library.Walk(ctx)
+	if err != nil {
+		return library.Snapshot{}, fmt.Errorf("library walk: %w", err)
+	}
+	if snap.Partial {
+		// The walk skipped series after episode-fetch failures - fail instead,
+		// like a failed walk.
+		return library.Snapshot{}, errors.New("library walk: partial snapshot after episode-fetch failures")
+	}
+	return snap, nil
+}
+
+// reportMapping loads the Fribb map for a one-shot report. An unusable map
+// (no stale cache either) fails the report: ID matching, season scoping, and
+// the not_on_seadex catalogue all depend on it, so publishing would contradict
+// the whole-library audit contract (the daemon gate refuses to compare on this
+// too). A stale-but-usable map proceeds with a single degraded WARN. A
+// cancelled load is the shutdown, not a Fribb fault (the SeaDex fetch after
+// this then fails with the cancellation and Report returns it).
+func (s *Scout) reportMapping(ctx context.Context, st *state.State) (*mapping.Index, error) {
+	_, idx, mapErr := s.deps.Mapping.Load(ctx, &st.Mapping)
+	if mapErr == nil || ctx.Err() != nil {
+		return idx, nil
+	}
+	if !mapUsable(mapErr) {
+		return nil, fmt.Errorf("mapping unusable: %w", mapErr)
+	}
+	s.log.Warn("report: mapping degraded", mappingDegradedAttrs(mapErr, idx.Len())...)
+	return idx, nil
+}
+
 // Report runs a one-shot SeaDex-alignment audit over the current library and
 // returns the report. It is read-only on persisted state (it loads the mapping
 // cache and AniList memo to avoid needless refetching, but never saves), so it
@@ -547,30 +613,14 @@ func (s *Scout) Report(ctx context.Context) (audit.Report, error) {
 	start := time.Now()
 	st := s.loadState(ctx)
 
-	snap, err := s.deps.Library.Walk(ctx)
+	snap, err := s.reportSnapshot(ctx)
 	if err != nil {
-		return audit.Report{}, fmt.Errorf("library walk: %w", err)
-	}
-	if snap.Partial {
-		// The walk skipped series after episode-fetch failures. Auditing an
-		// incomplete snapshot would publish a successful, timestamped report
-		// that silently omits the skipped series, contradicting the
-		// whole-library audit contract - fail instead, like a failed walk.
-		return audit.Report{}, errors.New("library walk: partial snapshot after episode-fetch failures")
+		return audit.Report{}, err
 	}
 
-	_, idx, mapErr := s.deps.Mapping.Load(ctx, &st.Mapping)
-	if mapErr != nil && ctx.Err() == nil {
-		if !mapUsable(mapErr) {
-			// No usable map at all: ID matching, season scoping, and the
-			// not_on_seadex catalogue all depend on it, so publishing would
-			// contradict the whole-library audit contract - fail like a
-			// failed walk (the daemon gate refuses to compare on this too).
-			return audit.Report{}, fmt.Errorf("mapping unusable: %w", mapErr)
-		}
-		// A cancelled load is the shutdown, not a Fribb fault (the SeaDex fetch
-		// below then fails with the cancellation and Report returns it).
-		s.log.Warn("report: mapping degraded", mappingDegradedAttrs(mapErr, idx.Len())...)
+	idx, err := s.reportMapping(ctx, &st)
+	if err != nil {
+		return audit.Report{}, err
 	}
 
 	entries, err := s.deps.SeaDex.FetchEntries(ctx)
@@ -605,14 +655,15 @@ func (s *Scout) Report(ctx context.Context) (audit.Report, error) {
 	return rep, nil
 }
 
-// aniStats returns the AniList client's cumulative stats, or zero stats when
-// no AniList client is wired (the early-return degradation paths and unit
-// tests build Deps without one; the daemon always wires it).
-func (s *Scout) aniStats() anilist.Stats {
-	if s.deps.AniList == nil {
-		return anilist.Stats{}
+// aniStats returns the AniList client's cumulative stats via the injected
+// callback, or zero stats when none is wired (the early-return degradation
+// paths and unit tests build Deps without one; the daemon always wires it).
+func (s *Scout) aniStats() aniListStats {
+	if s.deps.AniListStats == nil {
+		return aniListStats{}
 	}
-	return s.deps.AniList.Stats()
+	calls, waits := s.deps.AniListStats()
+	return aniListStats{calls: calls, rateLimitWaits: waits}
 }
 
 // loadState loads persisted state, falling back to an empty state on error.

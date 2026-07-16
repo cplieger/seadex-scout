@@ -293,3 +293,40 @@ func TestStoreQuarantineRenameFailureWarnsAndKeepsFile(t *testing.T) {
 		t.Errorf("rename-failure WARN count = %d, want 1", got)
 	}
 }
+
+// TestStoreLoadCanceledReturnsErrorWithoutQuarantine pins Load's generic
+// bounded-read error path: a pre-canceled context propagates context.Canceled
+// without quarantining or deleting the valid state file.
+func TestStoreLoadCanceledReturnsErrorWithoutQuarantine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(`{"baselined":true}`), 0o644); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := NewStore(path, testLogger()).Load(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Load canceled context error = %v, want context.Canceled", err)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Errorf("live state file after cancellation: %v, want preserved", statErr)
+	}
+	if _, statErr := os.Stat(path + ".corrupt"); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("corrupt quarantine after cancellation stat error = %v, want not exist", statErr)
+	}
+}
+
+// TestStoreSaveNilReturnsErrorWithoutWriting pins Save's nil-state guard:
+// without it json.Marshal accepts the nil pointer as literal null, writing a
+// state file Load immediately treats as corruption (discarding the previous
+// cache), so Save(nil) must reject and leave no file behind.
+func TestStoreSaveNilReturnsErrorWithoutWriting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	err := NewStore(path, testLogger()).Save(context.Background(), nil)
+	if err == nil {
+		t.Fatal("Save(nil) returned nil error, want rejection")
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("state file after Save(nil) stat error = %v, want not exist", statErr)
+	}
+}

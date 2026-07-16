@@ -104,6 +104,7 @@ func TestABVisible(t *testing.T) {
 		{"schemeless URL with space-userinfo failing reparse hidden when off", "Nyaa", "foo bar@animebytes.tv/x", false, false},
 		{"backslash protocol-relative AB URL hidden when off", "Nyaa", `/\animebytes.tv/x`, false, false},
 		{"double-backslash AB URL hidden when off", "Nyaa", `\\animebytes.tv/x`, false, false},
+		{"multi-slash protocol-relative AB URL hidden when off", "Nyaa", "///animebytes.tv/x", false, false},
 		{"unicode fullwidth-dot AB host hidden when off", "Nyaa", "https://animebytes\uFF0Etv/torrents.php?id=1", false, false},
 		{"unicode ideographic-dot AB host hidden when off", "Nyaa", "https://animebytes\u3002tv/torrents.php?id=1", false, false},
 		{"unicode fullwidth-letter AB host hidden when off", "Nyaa", "https://animebyte\uFF53.tv/torrents.php?id=1", false, false},

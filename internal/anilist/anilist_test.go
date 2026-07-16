@@ -64,6 +64,44 @@ func TestParseMediaNotFoundCarriesMessage(t *testing.T) {
 	}
 }
 
+// TestParseMediaNotFoundClassification pins the negative-memoization boundary:
+// only an explicit Media null with no error, or AniList's verified not-found
+// error shape (status 404 / message "Not Found."), may satisfy
+// errors.Is(err, ErrNotFound). An HTTP-200 GraphQL failure or a malformed
+// envelope must NOT — the matcher persists ErrNotFound as NotFound:true, so
+// misclassifying a transient failure would silently suppress the id forever.
+func TestParseMediaNotFoundClassification(t *testing.T) {
+	tests := []struct {
+		name         string
+		raw          string
+		wantErr      bool
+		wantNotFound bool
+	}{
+		{name: "empty envelope", raw: `{}`, wantErr: true, wantNotFound: false},
+		{name: "missing Media field", raw: `{"data":{}}`, wantErr: true, wantNotFound: false},
+		{name: "null Media with non-not-found error", raw: `{"data":{"Media":null},"errors":[{"message":"Internal Server Error"}]}`, wantErr: true, wantNotFound: false},
+		{name: "missing data with error", raw: `{"errors":[{"message":"bad request"}]}`, wantErr: true, wantNotFound: false},
+		{name: "explicit null no error", raw: `{"data":{"Media":null}}`, wantErr: true, wantNotFound: true},
+		{name: "null Media with status 404", raw: `{"data":{"Media":null},"errors":[{"message":"Something went wrong","status":404}]}`, wantErr: true, wantNotFound: true},
+		{name: "null Media with Not Found message", raw: `{"data":{"Media":null},"errors":[{"message":"Not Found."}]}`, wantErr: true, wantNotFound: true},
+		{name: "media present", raw: `{"data":{"Media":{"format":"TV","seasonYear":2023,"title":{"romaji":"A"}}}}`, wantErr: false, wantNotFound: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseMedia([]byte(tt.raw))
+			if tt.wantErr && err == nil {
+				t.Fatal("want error, got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("parseMedia: %v", err)
+			}
+			if got := errors.Is(err, ErrNotFound); got != tt.wantNotFound {
+				t.Errorf("errors.Is(err, ErrNotFound) = %v (err = %v), want %v", got, err, tt.wantNotFound)
+			}
+		})
+	}
+}
+
 func TestParseMediaPage(t *testing.T) {
 	raw := []byte(`{"data":{"Page":{"media":[` +
 		`{"id":1,"format":"TV","seasonYear":2023,"title":{"romaji":"A"}},` +
@@ -103,6 +141,8 @@ func TestParseMediaPageNullableEnvelope(t *testing.T) {
 		{name: "missing data", raw: `{}`, wantErr: true},
 		{name: "null Page", raw: `{"data":{"Page":null}}`, wantErr: true},
 		{name: "missing Page", raw: `{"data":{}}`, wantErr: true},
+		{name: "missing media", raw: `{"data":{"Page":{}}}`, wantErr: true},
+		{name: "null media", raw: `{"data":{"Page":{"media":null}}}`, wantErr: true},
 		{name: "empty media array", raw: `{"data":{"Page":{"media":[]}}}`, wantErr: false},
 	}
 	for _, tt := range tests {
@@ -258,6 +298,7 @@ func TestSanitizeUpstreamMessage(t *testing.T) {
 		{"C1 CSI and OSC cleaned", "a\u009bb\u009dc", "a b c"},
 		{"line and paragraph separators cleaned", "a\u2028b\u2029c", "a b c"},
 		{"bidi overrides and isolates cleaned", "a\u202eb\u2066c\u2069d", "a b c d"},
+		{"bidi ALM LRM RLM marks cleaned", "a\u061cb\u200ec\u200fd", "a b c d"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -269,8 +310,10 @@ func TestSanitizeUpstreamMessage(t *testing.T) {
 }
 
 // TestSanitizeUpstreamMessageRuneBoundaryCut pins the cap's UTF-8 safety: a
-// clean message whose 200-byte boundary falls inside a multibyte rune is cut
-// back to the rune start, stays valid UTF-8, and remains bounded.
+// clean message whose 200-byte retained-message boundary falls inside a
+// multibyte rune is cut back to the rune start, stays valid UTF-8, and remains
+// bounded by the 200-byte retained cap plus the three-byte "..." ellipsis
+// (203 bytes total).
 func TestSanitizeUpstreamMessageRuneBoundaryCut(t *testing.T) {
 	// 199 ASCII bytes then a 3-byte rune: the 200-byte boundary lands inside it.
 	in := strings.Repeat("a", 199) + "\u4e16\u754c"

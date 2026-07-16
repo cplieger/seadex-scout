@@ -63,38 +63,22 @@ func Obtainable(r *release.Release, rawURL string, opts Options) bool {
 	}
 }
 
-// ABVisible reports whether a release on the given tracker may surface to the
-// operator: always true when the operator has enabled AnimeBytes, and
-// otherwise false when either the tracker label is AnimeBytes OR the release's
-// raw upstream URL (as SeaDex supplied it, never a normalized/rewritten link)
-// points at the AnimeBytes host (or a dot-delimited subdomain). The URL
-// cross-check exists because the tracker label is untrusted upstream data: a
-// torrent labeled "Nyaa" carrying an animebytes.tv URL must not surface as a
-// clickable AnimeBytes link while the toggle is off. A malformed URL - a parse
-// failure, or a successful parse carrying a scheme but no host (which has
-// swallowed its host evidence) - is treated conservatively as hidden rather
-// than host-inferred from the unparsed string; an empty URL carries no link
-// and passes. It is the single home of the animebytes toggle's drop rule,
-// shared by the daemon's obtainability filter and the audit report's release
-// listing.
-func ABVisible(tracker, rawURL string, animeBytes bool) bool {
-	if animeBytes {
-		return true
-	}
-	if release.IsAnimeBytes(tracker) {
-		return false
-	}
+// hostFromRawURL extracts normalized host evidence from a release's raw
+// upstream URL. The boolean is false when malformed or ambiguous input must be
+// hidden conservatively; an empty host with ok=true means the URL carries no
+// host evidence at all (an empty string, or a rooted relative path).
+func hostFromRawURL(rawURL string) (string, bool) {
 	// Browsers (WHATWG URL parser) treat '\' as '/', so canonicalize the
 	// host-evidence copy the same way; a '/\animebytes.tv/x' form is
 	// protocol-relative in a browser and must not read as a host-less rooted
 	// path.
 	u := strings.ReplaceAll(strings.TrimSpace(rawURL), `\`, "/")
 	if u == "" {
-		return true
+		return "", true
 	}
 	parsed, err := url.Parse(u)
 	if err != nil {
-		return false
+		return "", false
 	}
 	// Hostname() already drops the port and userinfo and ToLower folds case;
 	// the FQDN trailing-dot form is handled inside the shared predicate.
@@ -105,11 +89,17 @@ func ABVisible(tracker, rawURL string, animeBytes bool) bool {
 		// and "animebytes.tv:443/..." parses as an opaque non-empty scheme.
 		// Neither is reparse-recoverable below (the reparse fires only for the
 		// truly schemeless form), so hide conservatively like a parse failure.
-		return false
+		return "", false
+	}
+	if host == "" && strings.HasPrefix(u, "//") {
+		// Go parses three-or-more leading slashes as a rooted path, while
+		// browsers resolve them as a network-path authority. Hide the
+		// ambiguous form conservatively rather than losing host evidence.
+		return "", false
 	}
 	if host == "" && !strings.HasPrefix(u, "/") {
 		// A schemeless absolute URL ("animebytes.tv/torrents.php?...") parses as
-		// a bare path with no host, which would bypass the host check below;
+		// a bare path with no host, which would bypass the caller's host check;
 		// re-parse it host-relative so the AnimeBytes host is still recognized.
 		// A rooted relative path ("/local/path") is left alone.
 		hostRel, herr := url.Parse("//" + u)
@@ -118,9 +108,35 @@ func ABVisible(tracker, rawURL string, animeBytes bool) bool {
 			// before an "@"): the string's host evidence is unrecoverable, so
 			// hide conservatively like a first-parse failure rather than
 			// letting an unverifiable link surface while the toggle is off.
-			return false
+			return "", false
 		}
 		host = strings.ToLower(hostRel.Hostname())
+	}
+	return host, true
+}
+
+// ABVisible reports whether a release on the given tracker may surface to the
+// operator: always true when the operator has enabled AnimeBytes, and
+// otherwise false when either the tracker label is AnimeBytes OR the release's
+// raw upstream URL (as SeaDex supplied it, never a normalized/rewritten link)
+// points at the AnimeBytes host (or a dot-delimited subdomain). The URL
+// cross-check exists because the tracker label is untrusted upstream data: a
+// torrent labeled "Nyaa" carrying an animebytes.tv URL must not surface as a
+// clickable AnimeBytes link while the toggle is off. The URL-to-host evidence
+// extraction (including the conservative hide of malformed or ambiguous
+// forms) lives in hostFromRawURL; this function is the policy decision. It is
+// the single home of the animebytes toggle's drop rule, shared by the
+// daemon's obtainability filter and the audit report's release listing.
+func ABVisible(tracker, rawURL string, animeBytes bool) bool {
+	if animeBytes {
+		return true
+	}
+	if release.IsAnimeBytes(tracker) {
+		return false
+	}
+	host, ok := hostFromRawURL(rawURL)
+	if !ok {
+		return false
 	}
 	for i := range len(host) {
 		if host[i] >= 0x80 {

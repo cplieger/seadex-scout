@@ -296,13 +296,16 @@ func (e *StaleMapError) ConsecutiveRejections() int { return e.rejections }
 // staleOrFail returns the stale cache wrapped in a *StaleMapError when prev
 // holds records (carrying cause when non-nil), otherwise the no-cache error.
 // It collapses refreshCache's repeated degrade-to-stale-or-fail branches into
-// one call so each failure site stays flat.
+// one call so each failure site stays flat. The age is clamped to zero: a
+// future FetchedAt (clock skew or a corrupt state file) correctly forces
+// revalidation, and when that fetch fails the degradation telemetry must not
+// report a misleading negative age ("fetched -2h ago").
 func staleOrFail(prev *Cache, staleMsg string, cause, noCache error) (Cache, error) {
 	if len(prev.Records) > 0 {
 		return *prev, &StaleMapError{
 			cause:   cause,
 			msg:     staleMsg,
-			age:     time.Since(prev.FetchedAt).Round(time.Second),
+			age:     max(time.Duration(0), time.Since(prev.FetchedAt).Round(time.Second)),
 			records: len(prev.Records),
 		}
 	}
@@ -379,7 +382,7 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 	// size-comparing the raw row count would let a body that repeats one ID
 	// thousands of times pass every guard and then index to almost nothing.
 	records = deduplicateRecords(records)
-	if validationErr := validateRefreshedRecords(records); validationErr != nil {
+	if validationErr := validateRefreshedRecords(prev.Records, records); validationErr != nil {
 		return rejectRefresh(prev, "refresh validation failed", validationErr,
 			fmt.Errorf("mapping: %w and no cache available", validationErr))
 	}
@@ -417,7 +420,7 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 // computed as a ceiling
 // so e.g. 1/199 stays below the documented floor. maxMapBytes bounds the
 // decoded body (and thus len(records)), so the +99 cannot overflow.
-func validateRefreshedRecords(records []Record) error {
+func validateRefreshedRecords(previous, records []Record) error {
 	if len(records) == 0 {
 		return errors.New("refresh returned zero records")
 	}
@@ -428,9 +431,16 @@ func validateRefreshedRecords(records []Record) error {
 	// A wholesale upstream loss of the type field (flexString zeroes any
 	// non-string shape) re-routes every MOVIE record to Sonarr via its parent
 	// tvdb_id while still passing the arr-identifier floor and the shrink
-	// guard; effectively all real Fribb records carry a type, so a refresh
-	// below the same 1% floor is a wholesale degradation, not a real update.
-	if typed := typedRecordCount(records); typed < minimum {
+	// guard — but only a LOSS is a degradation. fribb.go's tolerant contract
+	// lets an absent/odd type survive as the safe non-movie (Sonarr) default,
+	// so the floor is relative to the previously accepted cache: it fires only
+	// when that cache was itself type-rich (met the same 1% floor). An
+	// established type-sparse cache or a first boot against a type-sparse
+	// catalogue is the catalogue's valid shape, not a regression to reject.
+	previous = deduplicateRecords(previous)
+	previousMinimum := max(1, (len(previous)+99)/100)
+	previousMetFloor := len(previous) > 0 && typedRecordCount(previous) >= previousMinimum
+	if typed := typedRecordCount(records); previousMetFloor && typed < minimum {
 		return fmt.Errorf("type coverage %d/%d is below minimum %d", typed, len(records), minimum)
 	}
 	return nil
@@ -491,6 +501,14 @@ func (l *Loader) conditionalGet(ctx context.Context, prev *Cache) (httpx.Conditi
 
 // --- Overrides: the operator overlay file ---
 
+// maxLoggedUnknownKeys bounds how many unknown override keys the diagnostic
+// WARN names. A malformed but accepted-size overrides file can carry enough
+// unique keys to render a multi-megabyte log record every cycle, which
+// downstream Docker/Alloy/Loki limits may truncate or reject — hiding the
+// diagnostic while amplifying log volume. The full count still rides in
+// unknown_key_count, with keys_truncated marking an elided tail.
+const maxLoggedUnknownKeys = 20
+
 // applyOverrides reads the operator overrides file (if present) and overlays
 // each record onto the index, keyed by AniList ID. A missing file is not an
 // error; a malformed file is logged and ignored so a bad override never blocks
@@ -499,23 +517,9 @@ func (l *Loader) applyOverrides(ctx context.Context, idx *Index) {
 	if l.overridesPath == "" {
 		return
 	}
-	data, err := atomicfile.ReadBounded(ctx, l.overridesPath, maxOverrideBytes)
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return
-		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			l.log.Warn("mapping: overrides unreadable, ignoring", "path", l.overridesPath, "error", err)
-		}
+	overrides, ok := l.readOverrides(ctx)
+	if !ok {
 		return
-	}
-	overrides, unknown, err := parseOverrides(data)
-	if err != nil {
-		l.log.Warn("mapping: overrides malformed, ignoring", "path", l.overridesPath, "error", err)
-		return
-	}
-	if len(unknown) > 0 {
-		l.log.Warn("mapping: overrides contain unknown keys, ignored", "keys", unknown, "path", l.overridesPath)
 	}
 	applied := overlayRecords(idx, overrides)
 	if skipped := len(overrides) - applied; skipped > 0 {
@@ -524,6 +528,40 @@ func (l *Loader) applyOverrides(ctx context.Context, idx *Index) {
 	if applied > 0 {
 		l.log.Info("mapping: applied overrides", "count", applied)
 	}
+}
+
+// readOverrides reads and parses the overrides file, returning ok=false for
+// every ignored outcome: a cancelled read, a missing file (silently), an
+// unreadable or malformed file (logged). Unknown keys are diagnosed with a
+// bounded WARN but never reject the file.
+func (l *Loader) readOverrides(ctx context.Context) ([]Record, bool) {
+	data, err := atomicfile.ReadBounded(ctx, l.overridesPath, maxOverrideBytes)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, false
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			l.log.Warn("mapping: overrides unreadable, ignoring", "path", l.overridesPath, "error", err)
+		}
+		return nil, false
+	}
+	overrides, unknown, err := parseOverrides(data)
+	if err != nil {
+		l.log.Warn("mapping: overrides malformed, ignoring", "path", l.overridesPath, "error", err)
+		return nil, false
+	}
+	if len(unknown) > 0 {
+		logged := unknown
+		if len(logged) > maxLoggedUnknownKeys {
+			logged = logged[:maxLoggedUnknownKeys]
+		}
+		l.log.Warn("mapping: overrides contain unknown keys, ignored",
+			"keys", logged,
+			"unknown_key_count", len(unknown),
+			"keys_truncated", len(unknown) > maxLoggedUnknownKeys,
+			"path", l.overridesPath)
+	}
+	return overrides, true
 }
 
 // overlayRecords overlays each record with a non-zero AniList ID onto the

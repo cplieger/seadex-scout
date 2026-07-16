@@ -301,12 +301,16 @@ func (m *gqlMedia) toMedia() Media {
 // gqlError is the GraphQL error object shared by both response envelopes.
 type gqlError struct {
 	Message string `json:"message"`
+	Status  int    `json:"status"`
 }
 
-// gqlResponse is the GraphQL envelope for the media query.
+// gqlResponse is the GraphQL envelope for the media query. Media is a
+// json.RawMessage so parseMedia can distinguish a missing Media field (a
+// malformed or failed response) from an explicit null (AniList's genuine
+// not-found), which a typed pointer alone cannot.
 type gqlResponse struct {
-	Data struct {
-		Media *gqlMedia `json:"Media"`
+	Data *struct {
+		Media json.RawMessage `json:"Media"`
 	} `json:"data"`
 	Errors []gqlError `json:"errors"`
 }
@@ -314,9 +318,11 @@ type gqlResponse struct {
 // sanitizeUpstreamMessage bounds and cleans an untrusted upstream error
 // message before it is wrapped into an error that reaches the logs: C0/C1
 // controls (terminal escape and CSI/OSC introducers), DEL, Unicode line and
-// paragraph separators, and bidi override/isolate runes become spaces so the
-// message cannot forge log lines or reorder rendered text, and the result is
-// capped at 200 bytes on a rune boundary so a long message stays valid UTF-8.
+// paragraph separators, and every Bidi_Control rune (the ALM/LRM/RLM marks
+// plus bidi embeddings, overrides, and isolates) become spaces so the message
+// cannot forge log lines or reorder rendered text, and the retained message
+// is capped at 200 bytes on a rune boundary (truncated output appends "...",
+// for a 203-byte maximum) so a long message stays valid UTF-8.
 func sanitizeUpstreamMessage(s string) string {
 	const maxLen = 200
 	s = strings.Map(func(r rune) rune {
@@ -324,6 +330,8 @@ func sanitizeUpstreamMessage(s string) string {
 		case r < 0x20 || r == 0x7f, // C0 controls and DEL
 			r >= 0x80 && r <= 0x9f,         // C1 controls (CSI/OSC introducers)
 			r == '\u2028' || r == '\u2029', // line / paragraph separators
+			r == '\u061c',                  // arabic letter mark (Bidi_Control)
+			r == '\u200e' || r == '\u200f', // LTR / RTL marks (Bidi_Control)
 			r >= '\u202a' && r <= '\u202e', // bidi embeddings and overrides
 			r >= '\u2066' && r <= '\u2069': // bidi isolates
 			return ' '
@@ -340,27 +348,47 @@ func sanitizeUpstreamMessage(s string) string {
 	return s
 }
 
-// parseMedia decodes the GraphQL envelope into a Media, returning ErrNotFound
-// when AniList returned no media object.
+// parseMedia decodes the GraphQL envelope into a Media. Only an explicit
+// Media null with no error, or AniList's verified not-found error shape
+// (status 404 / message "Not Found."), is classified as ErrNotFound — the
+// matcher negative-memoizes ErrNotFound, so an HTTP-200 GraphQL failure or a
+// malformed envelope must surface as a plain error (degraded, retried next
+// cycle) rather than permanently suppressing the id.
 func parseMedia(raw []byte) (Media, error) {
 	var r gqlResponse
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return Media{}, fmt.Errorf("anilist: decode response: %w", err)
 	}
-	if r.Data.Media == nil {
+	if r.Data == nil || len(r.Data.Media) == 0 {
 		if len(r.Errors) > 0 {
-			return Media{}, fmt.Errorf("%w: %s", ErrNotFound, sanitizeUpstreamMessage(r.Errors[0].Message))
+			return Media{}, fmt.Errorf("anilist: query error: %s", sanitizeUpstreamMessage(r.Errors[0].Message))
 		}
-		return Media{}, ErrNotFound
+		return Media{}, errors.New("anilist: response missing Media")
 	}
-	return r.Data.Media.toMedia(), nil
+	mediaRaw := bytes.TrimSpace(r.Data.Media)
+	if bytes.Equal(mediaRaw, []byte("null")) {
+		if len(r.Errors) == 0 {
+			return Media{}, ErrNotFound
+		}
+		message := sanitizeUpstreamMessage(r.Errors[0].Message)
+		normalized := strings.TrimSuffix(strings.TrimSpace(message), ".")
+		if r.Errors[0].Status == http.StatusNotFound || strings.EqualFold(normalized, "not found") {
+			return Media{}, fmt.Errorf("%w: %s", ErrNotFound, message)
+		}
+		return Media{}, fmt.Errorf("anilist: query error: %s", message)
+	}
+	var media gqlMedia
+	if err := json.Unmarshal(mediaRaw, &media); err != nil {
+		return Media{}, fmt.Errorf("anilist: decode Media: %w", err)
+	}
+	return media.toMedia(), nil
 }
 
-// gqlPage is the nullable Page object of the batched query; a pointer in the
-// envelope distinguishes an explicit empty media array (valid, nothing found)
-// from a missing/null Page (malformed response).
+// gqlPage is the nullable Page object of the batched query; pointers in the
+// envelope distinguish an explicit empty media array (valid, nothing found)
+// from a missing/null Page or media field (malformed response).
 type gqlPage struct {
-	Media []gqlMedia `json:"media"`
+	Media *[]gqlMedia `json:"media"`
 }
 
 // gqlPageResponse is the GraphQL envelope for the batched Page(media) query.
@@ -372,9 +400,9 @@ type gqlPageResponse struct {
 }
 
 // parseMediaPage decodes a batched Page(media) response into a map keyed by
-// AniList id. A GraphQL-level error or a missing/null Page fails the batch;
-// ids absent from the media array are simply not in the map (the caller
-// treats them as not-found).
+// AniList id. A GraphQL-level error or a missing/null Page or media field
+// fails the batch; ids absent from the media array are simply not in the map
+// (the caller treats them as not-found).
 func parseMediaPage(raw []byte) (map[int]Media, error) {
 	var r gqlPageResponse
 	if err := json.Unmarshal(raw, &r); err != nil {
@@ -386,9 +414,13 @@ func parseMediaPage(raw []byte) (map[int]Media, error) {
 	if r.Data.Page == nil {
 		return nil, errors.New("anilist: batch response missing Page")
 	}
-	out := make(map[int]Media, len(r.Data.Page.Media))
-	for i := range r.Data.Page.Media {
-		md := &r.Data.Page.Media[i]
+	if r.Data.Page.Media == nil {
+		return nil, errors.New("anilist: batch response missing media")
+	}
+	media := *r.Data.Page.Media
+	out := make(map[int]Media, len(media))
+	for i := range media {
+		md := &media[i]
 		if md.ID <= 0 {
 			return nil, fmt.Errorf("anilist: batch response media record %d missing id", i)
 		}

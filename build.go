@@ -87,8 +87,11 @@ func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
 			AnimeBytes:      cfg.AnimeBytes,
 		}),
 		Reporter: report.NewReporter(log),
-		AniList:  anilistClient,
-		Feed:     feedWriter(cfg, log),
+		AniListStats: func() (calls, rateLimitWaits int64) {
+			st := anilistClient.Stats()
+			return st.Calls, st.RateLimitWaits
+		},
+		Feed: feedWriter(cfg, log),
 	})
 
 	cleanup := func() {
@@ -168,6 +171,9 @@ func newArrClients(cfg *config.Config) (*arrapi.Sonarr, *arrapi.Radarr, error) {
 		r, err := arrapi.NewRadarr(cfg.RadarrURL, cfg.RadarrAPIKey,
 			arrapi.WithMaxAttempts(arrMaxAttempts), arrapi.WithBaseDelay(arrBaseDelay))
 		if err != nil {
+			if sonarr != nil {
+				sonarr.Close()
+			}
 			return nil, nil, fmt.Errorf("radarr client: %w", err)
 		}
 		radarr = r

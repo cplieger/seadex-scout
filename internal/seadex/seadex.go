@@ -243,31 +243,26 @@ func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, tota
 }
 
 // pageComplete reports whether pagination is done after a page, or an error
-// when the page is empty before the reported total (a truncated view), the
-// pagination metadata is invalid for a non-empty page, or a page past the
-// first is empty with zeroed metadata (a degenerate `{}` response). totalPages is an
-// unvalidated upstream field (a missing value decodes to zero), so a non-empty
-// page with totalPages < 1, or a page past the reported total, must not be
-// accepted as a complete catalogue.
+// when the pagination metadata is invalid (totalPages < 1, or a page past the
+// reported total — empty or not) or the page is empty before the reported
+// total (a truncated view). totalPages is an unvalidated upstream field (a
+// missing value decodes to zero), so the only invalid-metadata exception is an
+// empty FIRST response with zeroed metadata (a degenerate `{}` body), which
+// finishFetch's empty-catalogue guard converts into an error. Every LATER page
+// was only requested because an earlier page promised it existed, so an empty
+// page 3 reporting totalPages=2 signals records shifted across already-read
+// pages (a deletion mid-pagination) and must not complete the catalogue —
+// FetchEntries' contract is to never return a possibly-truncated view.
 func pageComplete(page, itemCount, totalPages int) (done bool, err error) {
-	if itemCount == 0 {
-		// Page 1 is only reached with no accumulated entries, and finishFetch's
-		// empty-catalogue guard owns that outcome. A LATER page decoding to zero
-		// items AND zero/invalid totalPages (a degenerate `{}` body) contradicts
-		// the earlier pages' metadata that promised more, and must not complete
-		// a catalogue that would falsely resolve findings for the missing pages.
-		if page > 1 && totalPages < 1 {
-			return false, fmt.Errorf("seadex: page %d empty with invalid pagination metadata (totalPages %d); "+
-				"refusing to compare against a truncated view", page, totalPages)
-		}
-		if page < totalPages {
-			return false, fmt.Errorf("seadex: page %d empty before reported total %d pages; "+
-				"refusing to compare against a truncated view", page, totalPages)
-		}
+	if page == 1 && itemCount == 0 && totalPages <= 0 {
 		return true, nil
 	}
 	if totalPages < 1 || page > totalPages {
 		return false, fmt.Errorf("seadex: page %d with invalid pagination metadata (totalPages %d); "+
+			"refusing to compare against a truncated view", page, totalPages)
+	}
+	if itemCount == 0 && page < totalPages {
+		return false, fmt.Errorf("seadex: page %d empty before reported total %d pages; "+
 			"refusing to compare against a truncated view", page, totalPages)
 	}
 	return page >= totalPages, nil

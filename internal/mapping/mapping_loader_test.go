@@ -223,6 +223,49 @@ func TestLoader_refreshCache_noTypeKeepsStale(t *testing.T) {
 	}
 }
 
+// TestLoader_refreshCache_typeSparsePreviousCacheAcceptsUntypedRefresh pins
+// the type floor's relative contract: fribb.go tolerantly decodes an absent
+// type as the safe non-movie default, so when the previously accepted cache is
+// itself type-sparse (never met the floor), an equally type-sparse but
+// otherwise valid refresh is the catalogue's established shape and must be
+// accepted — not rejected on an absolute schema requirement the decoder does
+// not impose (which would keep the stale map forever and escalate to ERROR).
+func TestLoader_refreshCache_typeSparsePreviousCacheAcceptsUntypedRefresh(t *testing.T) {
+	const n = 200
+	var b strings.Builder
+	b.WriteString("[")
+	prevRecords := make([]Record, 0, n)
+	for i := 1; i <= n; i++ {
+		if i > 1 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, `{"anilist_id":%d,"tvdb_id":%d}`, i, i+1000)
+		prevRecords = append(prevRecords, Record{AniListID: i, TvdbID: i + 1000})
+	}
+	b.WriteString("]")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(b.String()))
+	}))
+	defer ts.Close()
+
+	prev := &Cache{
+		FetchedAt:         time.Now().Add(-2 * time.Hour),
+		Records:           prevRecords,
+		RejectedRefreshes: 3,
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	if err != nil {
+		t.Fatalf("type-sparse refresh over a type-sparse cache returned error %v, want accepted", err)
+	}
+	if len(next.Records) != n {
+		t.Fatalf("accepted refresh records = %d, want %d", len(next.Records), n)
+	}
+	if next.RejectedRefreshes != 0 {
+		t.Errorf("accepted refresh RejectedRefreshes = %d, want 0 (acceptance resets the streak)", next.RejectedRefreshes)
+	}
+}
+
 // TestLoader_refreshCache_lowArrIdentifierCoverageKeepsStale covers the
 // coverage floor: a refresh where only 1 of 200+ records retains an arr
 // identifier is a wholesale degradation (below the 1% floor) and must keep the
@@ -685,5 +728,37 @@ func TestLoader_refreshCache_futureFetchedAtForcesFetch(t *testing.T) {
 	}
 	if len(next.Records) != 1 || next.Records[0].AniListID != 42 {
 		t.Fatalf("future-FetchedAt cache was reused as fresh: records = %+v, want fetched record id 42", next.Records)
+	}
+}
+
+// TestLoader_refreshCache_futureFetchedAtFailedFetchClampsStaleAge pins the
+// stale-age clamp on the degradation telemetry: when a future FetchedAt
+// (clock skew or a corrupt state file) forces revalidation and that fetch
+// fails, the StaleMapError must report a non-negative age in both LogAttrs
+// and the error text instead of a misleading "fetched -2h0m0s ago".
+func TestLoader_refreshCache_futureFetchedAtFailedFetchClampsStaleAge(t *testing.T) {
+	prev := &Cache{
+		FetchedAt: time.Now().Add(2 * time.Hour), // future: skew or a corrupt state file
+		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+	}
+	l := NewLoader(&http.Client{Transport: errTransport{}}, "http://unused.invalid", "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	if len(next.Records) != 1 {
+		t.Fatalf("future-FetchedAt failed refresh records = %+v, want stale record kept", next.Records)
+	}
+	stale, ok := errors.AsType[*StaleMapError](err)
+	if !ok {
+		t.Fatalf("future-FetchedAt failed refresh error = %v, want *StaleMapError", err)
+	}
+	if strings.Contains(stale.Error(), "fetched -") {
+		t.Errorf("StaleMapError text = %q, want non-negative age", stale.Error())
+	}
+	attrs := stale.LogAttrs()
+	for i := 0; i+1 < len(attrs); i += 2 {
+		if attrs[i] == "stale_age_seconds" {
+			if secs, isFloat := attrs[i+1].(float64); !isFloat || secs < 0 {
+				t.Errorf("LogAttrs stale_age_seconds = %v, want non-negative float64", attrs[i+1])
+			}
+		}
 	}
 }

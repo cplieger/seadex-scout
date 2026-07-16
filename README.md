@@ -142,7 +142,9 @@ stream, so Alloy/Loki never see it — Ofelia captures job-exec output in its
 own logs instead). Each run writes a timestamped
 `report-<UTC date+time>.md` + `.json` pair into `report.dir` (default
 `/config/reports`) — e.g. `report-2026-07-11T15-04-05Z.md` — so successive
-reports never overwrite one another. Reports are never deleted by the app; if
+reports never overwrite one another (two reports generated within the same
+UTC second get a deterministic `-2`/`-3`/... suffix on the later pair).
+Reports are never deleted by the app; if
 you schedule them, prune old pairs yourself. Run
 `find /config/reports -name 'report-*' -mtime +90 -delete` from a helper container that
 has `find` and mounts the same config volume at `/config`, or use host cron against the

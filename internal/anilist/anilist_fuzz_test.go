@@ -25,7 +25,9 @@ func FuzzParseMedia(f *testing.F) {
 }
 
 // FuzzParseMediaPage exercises the batched Page(media) decoder against arbitrary
-// bytes, asserting the same title invariant across every returned id.
+// bytes, asserting the same title invariant across every returned id plus the
+// id guard callers rely on: parseMediaPage rejects non-positive media IDs, so
+// every key in the returned map must be positive.
 func FuzzParseMediaPage(f *testing.F) {
 	f.Add([]byte(`{"data":{"Page":{"media":[{"id":1,"title":{"romaji":"A","english":"A"}}]}}}`))
 	f.Add([]byte(`{"data":{"Page":{"media":[]}}}`))
@@ -33,13 +35,18 @@ func FuzzParseMediaPage(f *testing.F) {
 	f.Add([]byte(``))
 	f.Add([]byte(`{bad`))
 	f.Add([]byte(`{"data":{"Page":null}}`))
+	f.Add([]byte(`{"data":{"Page":{"media":[{"id":0,"title":{"romaji":"missing"}}]}}}`))
+	f.Add([]byte(`{"data":{"Page":{"media":[{"id":-1,"title":{"romaji":"negative"}}]}}}`))
 	f.Add([]byte(`{"data":{"Page":{"media":[{"id":2,"format":"MOVIE","startDate":{"year":2019},"title":{"romaji":"B","english":"B"}}]}}}`))
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		out, err := parseMediaPage(raw)
 		if err != nil {
 			return
 		}
-		for _, m := range out {
+		for id, m := range out {
+			if id <= 0 {
+				t.Errorf("parseMediaPage(%q) returned non-positive id %d", raw, id)
+			}
 			assertTitlesClean(t, m.Titles, raw)
 		}
 	})

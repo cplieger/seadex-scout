@@ -165,7 +165,7 @@ func (a *Auditor) Audit(matches []match.Match, snap *library.Snapshot, idx *mapp
 		if !m.InLibrary() {
 			continue
 		}
-		covered[itemKey(m.Item)] = struct{}{}
+		covered[m.Item.Key()] = struct{}{}
 		if filter.ExcludeSpecial(m.Record.IsSpecial(), a.excludeSpecials) {
 			continue
 		}
@@ -181,11 +181,6 @@ func (a *Auditor) Audit(matches []match.Match, snap *library.Snapshot, idx *mapp
 	return Report{GeneratedAt: time.Now().UTC(), Totals: totals, Rows: rows}
 }
 
-// itemKey identifies a library item by arr and arr id.
-func itemKey(it *library.Item) string {
-	return it.Arr + ":" + strconv.Itoa(it.ArrID)
-}
-
 // uncoveredRows lists library items that are recognized anime (present in the
 // Fribb map) but were not covered by any SeaDex match. The Fribb catalogue
 // filter is what keeps this to genuine anime gaps rather than every non-anime
@@ -198,7 +193,7 @@ func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[strin
 	var rows []Row
 	for i := range snap.Items {
 		it := &snap.Items[i]
-		if _, ok := covered[itemKey(it)]; ok {
+		if _, ok := covered[it.Key()]; ok {
 			continue
 		}
 		if !cat.has(it) {

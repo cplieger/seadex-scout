@@ -50,7 +50,54 @@ func TestWriteFilesWritesTimestampedPair(t *testing.T) {
 	}
 }
 
-func TestWriteFilesReportsJSONWriteError(t *testing.T) {
+// TestWriteFilesRedactsArrURLCredentials pins the persistence-sink URL
+// sanitization: a credentialed arr deep-link (URL userinfo password plus a
+// credential-like query token) never lands in either half of the 0644 report
+// pair, while the clean host/path link survives clickable and the canonical
+// report stays unmutated.
+func TestWriteFilesRedactsArrURLCredentials(t *testing.T) {
+	dir := t.TempDir()
+	credURL := "https://admin:hunter2@sonarr.example/series/frieren?apikey=tok3n"
+	r := &Report{
+		GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC),
+		Totals:      map[string]int{string(VerdictBest): 1},
+		Rows: []Row{{
+			Title:   "Frieren",
+			Arr:     "sonarr",
+			Verdict: VerdictBest,
+			ArrURL:  credURL,
+		}},
+	}
+
+	if err := r.WriteFiles(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+		t.Fatalf("WriteFiles: %v", err)
+	}
+
+	base := filepath.Join(dir, "report-2026-07-11T15-04-05Z")
+	for _, ext := range []string{".json", ".md"} {
+		data, err := os.ReadFile(base + ext)
+		if err != nil {
+			t.Fatalf("read %s half: %v", ext, err)
+		}
+		for _, secret := range []string{"hunter2", "tok3n"} {
+			if strings.Contains(string(data), secret) {
+				t.Errorf("%s report contains credential %q", ext, secret)
+			}
+		}
+		if !strings.Contains(string(data), "https://sonarr.example/series/frieren") {
+			t.Errorf("%s report is missing the sanitized host/path deep-link", ext)
+		}
+	}
+	if r.Rows[0].ArrURL != credURL {
+		t.Errorf("WriteFiles mutated the canonical report's ArrURL to %q", r.Rows[0].ArrURL)
+	}
+}
+
+// TestWriteFilesSurfacesProbePathError pins reportPairStem's error contract:
+// a non-NotExist stat error while probing the pair stem (here ENOTDIR from a
+// dir path that is an existing file) is surfaced instead of risking an
+// overwrite, and nothing is written.
+func TestWriteFilesSurfacesProbePathError(t *testing.T) {
 	parent := t.TempDir()
 	dirAsFile := filepath.Join(parent, "reports")
 	if err := os.WriteFile(dirAsFile, []byte("x"), 0o644); err != nil {
@@ -66,33 +113,35 @@ func TestWriteFilesReportsJSONWriteError(t *testing.T) {
 	if err == nil {
 		t.Fatal("WriteFiles must fail when the report dir path is an existing file")
 	}
-	// JSON is written first, so the dir-as-file failure surfaces on it.
-	if !strings.Contains(err.Error(), "write json") {
-		t.Errorf("error = %q, want it wrapped with the write-json context", err)
+	if !strings.Contains(err.Error(), "probe report path") {
+		t.Errorf("error = %q, want it wrapped with the probe-report-path context", err)
 	}
 }
 
 // TestWriteFilesJSONFailureSkipsMarkdown pins one half of the deliberate
-// json-then-md write order: when the JSON half cannot be committed, the
-// Markdown half is never attempted, so a failed run cannot leave a dangling
-// .md without its machine-readable pair.
+// json-then-md write order plus the write-json error wrap: when the JSON half
+// cannot be committed (an unwritable report dir; the stem probe itself
+// succeeds since neither half exists), the Markdown half is never attempted,
+// so a failed run cannot leave a dangling .md without its machine-readable
+// pair.
 func TestWriteFilesJSONFailureSkipsMarkdown(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions")
+	}
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 	r := &Report{
 		GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC),
 		Totals:      map[string]int{},
-	}
-	// Occupy the deterministic .json target with a directory so the JSON
-	// commit fails first.
-	jsonPath := filepath.Join(dir, "report-2026-07-11T15-04-05Z.json")
-	if err := os.MkdirAll(jsonPath, 0o755); err != nil {
-		t.Fatal(err)
 	}
 
 	err := r.WriteFiles(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	if err == nil {
-		t.Fatal("WriteFiles must fail when the JSON target cannot be committed")
+		t.Fatal("WriteFiles must fail when the JSON half cannot be committed")
 	}
 	if !strings.Contains(err.Error(), "write json") {
 		t.Errorf("error = %q, want it wrapped with the write-json context", err)
@@ -102,32 +151,73 @@ func TestWriteFilesJSONFailureSkipsMarkdown(t *testing.T) {
 	}
 }
 
-// TestWriteFilesWritesJSONBeforeMarkdown pins the other half of the write
-// order: when the Markdown half fails, the JSON half was already committed, so
-// an interrupted run leaves a .json without .md but never the reverse.
-func TestWriteFilesWritesJSONBeforeMarkdown(t *testing.T) {
+// TestWriteFilesProbesSuffixWhenEitherHalfExists pins the stem probe's
+// either-half rule: a pre-existing .md half at the deterministic stem (e.g.
+// left by an interrupted earlier run) pushes the whole new pair to the -2
+// suffix, leaving the existing file untouched and never pairing a fresh .json
+// with a stale .md.
+func TestWriteFilesProbesSuffixWhenEitherHalfExists(t *testing.T) {
 	dir := t.TempDir()
 	r := &Report{
 		GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC),
 		Totals:      map[string]int{},
 	}
-	// Occupy the deterministic .md target with a directory so the Markdown
-	// commit fails after the JSON write.
 	mdPath := filepath.Join(dir, "report-2026-07-11T15-04-05Z.md")
-	if err := os.MkdirAll(mdPath, 0o755); err != nil {
+	if err := os.WriteFile(mdPath, []byte("stale half"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	err := r.WriteFiles(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := r.WriteFiles(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+		t.Fatalf("WriteFiles: %v", err)
+	}
 
-	if err == nil {
-		t.Fatal("WriteFiles must fail when the Markdown target cannot be committed")
+	stale, err := os.ReadFile(mdPath)
+	if err != nil || string(stale) != "stale half" {
+		t.Errorf("pre-existing md half must be untouched, got %q, %v", stale, err)
 	}
-	if !strings.Contains(err.Error(), "write markdown") {
-		t.Errorf("error = %q, want it wrapped with the write-markdown context", err)
+	if _, statErr := os.Stat(filepath.Join(dir, "report-2026-07-11T15-04-05Z.json")); statErr == nil {
+		t.Error("the new json must not land beside the stale md at the unsuffixed stem")
 	}
-	if _, statErr := os.Stat(filepath.Join(dir, "report-2026-07-11T15-04-05Z.json")); statErr != nil {
-		t.Errorf("the JSON half must be committed before the Markdown failure: %v", statErr)
+	for _, ext := range []string{".json", ".md"} {
+		path := filepath.Join(dir, "report-2026-07-11T15-04-05Z-2"+ext)
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Errorf("suffixed pair half %s missing: %v", path, statErr)
+		}
+	}
+}
+
+// TestWriteFilesSameSecondRerunKeepsBothPairs pins the README's
+// never-overwrite contract at second granularity: two strictly-sequential
+// reports sharing the same UTC-second GeneratedAt produce two complete pairs
+// (the second at the -2 suffix) instead of the second silently replacing the
+// first.
+func TestWriteFilesSameSecondRerunKeepsBothPairs(t *testing.T) {
+	dir := t.TempDir()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	stamp := time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC)
+	first := &Report{GeneratedAt: stamp, Totals: map[string]int{}, Rows: []Row{{Title: "First", Arr: "sonarr", Verdict: VerdictBest}}}
+	second := &Report{GeneratedAt: stamp, Totals: map[string]int{}, Rows: []Row{{Title: "Second", Arr: "sonarr", Verdict: VerdictBest}}}
+
+	if err := first.WriteFiles(context.Background(), dir, log); err != nil {
+		t.Fatalf("first WriteFiles: %v", err)
+	}
+	if err := second.WriteFiles(context.Background(), dir, log); err != nil {
+		t.Fatalf("second WriteFiles: %v", err)
+	}
+
+	base := filepath.Join(dir, "report-2026-07-11T15-04-05Z")
+	for _, path := range []string{base + ".json", base + ".md", base + "-2.json", base + "-2.md"} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("expected complete pair half %s: %v", path, err)
+		}
+	}
+	md1, _ := os.ReadFile(base + ".md")
+	if !strings.Contains(string(md1), "First") {
+		t.Error("first report's markdown was overwritten by the same-second rerun")
+	}
+	md2, _ := os.ReadFile(base + "-2.md")
+	if !strings.Contains(string(md2), "Second") {
+		t.Error("second report's markdown missing from the suffixed pair")
 	}
 }
 
@@ -178,19 +268,16 @@ func TestAcquireReportLockReportsMkdirError(t *testing.T) {
 }
 
 func TestAcquireReportLockReportsOpenError(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory write permissions")
-	}
-	dir := filepath.Join(t.TempDir(), "reports")
-	if err := os.MkdirAll(dir, 0o555); err != nil {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, reportLockName)
+	if err := os.Mkdir(lockPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 
 	_, err := AcquireReportLock(dir)
 
 	if err == nil {
-		t.Fatal("AcquireReportLock must fail when the lock file cannot be created")
+		t.Fatal("AcquireReportLock must fail when report.lock is a directory")
 	}
 	if !strings.Contains(err.Error(), "open report lock") {
 		t.Errorf("error = %q, want it wrapped with the open-report-lock context", err)

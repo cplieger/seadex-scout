@@ -166,3 +166,29 @@ func TestParseOverridesAcceptsCaseVariantKeys(t *testing.T) {
 		t.Errorf("unknown keys = %v, want none for case-variant canonical keys (encoding/json accepts them)", unknown)
 	}
 }
+
+// TestNewIndex_ignoresZeroAndKeepsLastDuplicate pins the public NewIndex
+// contract consumers rely on: zero AniList IDs are omitted (unkeyable) and
+// the last duplicate wins, so upstream ordering cannot silently retain a
+// stale record.
+func TestNewIndex_ignoresZeroAndKeepsLastDuplicate(t *testing.T) {
+	idx := NewIndex([]Record{
+		{AniListID: 0, Type: "TV", TvdbID: 99},
+		{AniListID: 42, Type: "TV", TvdbID: 100},
+		{AniListID: 42, Type: "TV", TvdbID: 200},
+	})
+
+	if got := idx.Len(); got != 1 {
+		t.Errorf("NewIndex length = %d, want 1", got)
+	}
+	got, ok := idx.Lookup(42)
+	if !ok {
+		t.Fatal("NewIndex lookup 42 missing")
+	}
+	if got.TvdbID != 200 {
+		t.Errorf("NewIndex duplicate TVDB ID = %d, want last value 200", got.TvdbID)
+	}
+	if _, ok := idx.Lookup(0); ok {
+		t.Error("NewIndex retained zero AniList ID")
+	}
+}

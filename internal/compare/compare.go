@@ -82,9 +82,15 @@ type Finding struct {
 	Status            Status        `json:"status"`
 	RecommendedGroups []string      `json:"recommended_groups,omitempty"`
 	Links             []ReleaseLink `json:"links,omitempty"`
-	AniListID         int           `json:"al_id"`
-	Season            int           `json:"season,omitempty"`
-	DualAudio         bool          `json:"dual_audio,omitempty"`
+	// currentGroups preserves the scoped on-disk group set with its element
+	// boundaries for dedupe-key generation: CurrentGroup is the flattened
+	// display join, where ["a,b","c"] and ["a","b,c"] are indistinguishable.
+	// Unexported (never serialized); nil on manually constructed findings,
+	// which fall back to the flattened CurrentGroup in dedupeKey.
+	currentGroups []string
+	AniListID     int  `json:"al_id"`
+	Season        int  `json:"season,omitempty"`
+	DualAudio     bool `json:"dual_audio,omitempty"`
 }
 
 // Comparer produces findings from matches under a fixed filter policy.
@@ -298,12 +304,13 @@ func emptyResult(entry *seadex.Entry, base *Finding) *Finding {
 // finding's CurrentGroup and dedupe key never leak whole-series groups.
 func (c *Comparer) baseFinding(m *match.Match, groups []string) Finding {
 	return Finding{
-		Title:        m.Item.Title,
-		Arr:          m.Arr,
-		ArrURL:       m.Item.ArrURL,
-		CurrentGroup: strings.Join(groups, ","),
-		AniListID:    m.Entry.AniListID,
-		Season:       max(0, m.Record.SeasonTvdb),
+		Title:         m.Item.Title,
+		Arr:           m.Arr,
+		ArrURL:        m.Item.ArrURL,
+		CurrentGroup:  strings.Join(groups, ","),
+		currentGroups: slices.Clone(groups),
+		AniListID:     m.Entry.AniListID,
+		Season:        max(0, m.Record.SeasonTvdb),
 	}
 }
 
@@ -333,21 +340,24 @@ func fillFromCandidate(f *Finding, cand *candidate) {
 
 // obtainableLinks returns the distinct (tracker, URL) links across the pool,
 // deduped, preserving pool order. This is what lets a finding surface both a
-// Nyaa and an AnimeBytes link for the same recommended release.
+// Nyaa and an AnimeBytes link for the same recommended release. The dedupe
+// keys on the ReleaseLink value itself (a comparable struct), so a crafted
+// tracker or URL containing a would-be delimiter cannot collide two distinct
+// pairs.
 func obtainableLinks(pool []candidate) []ReleaseLink {
-	seen := make(map[string]struct{}, len(pool))
+	seen := make(map[ReleaseLink]struct{}, len(pool))
 	var links []ReleaseLink
 	for i := range pool {
 		u := pool[i].torrent.UsableURL()
 		if u == "" {
 			continue
 		}
-		key := pool[i].rel.Tracker + "|" + u
-		if _, dup := seen[key]; dup {
+		link := ReleaseLink{Tracker: pool[i].rel.Tracker, URL: u}
+		if _, dup := seen[link]; dup {
 			continue
 		}
-		seen[key] = struct{}{}
-		links = append(links, ReleaseLink{Tracker: pool[i].rel.Tracker, URL: u})
+		seen[link] = struct{}{}
+		links = append(links, link)
 	}
 	return links
 }
@@ -377,20 +387,44 @@ func finalize(f *Finding, status Status, sev Severity) *Finding {
 func dedupeKey(f *Finding) string {
 	groups := slices.Clone(f.RecommendedGroups)
 	slices.Sort(groups)
-	for i := range groups {
-		groups[i] = escapeDedupePart(groups[i])
-	}
 	key := strings.Join([]string{
 		strconv.Itoa(f.AniListID),
 		string(f.Status),
-		strings.Join(groups, ","),
-		escapeDedupePart(f.CurrentGroup),
+		escapeJoinParts(groups),
+		currentGroupKey(f),
 		escapeDedupePart(releaseIdentity(f)),
 	}, "|")
 	if abLinks := animeBytesLinkKey(f.Links); abLinks != "" {
 		key += "|ab=" + abLinks
 	}
 	return key
+}
+
+// escapeJoinParts escapes each part with escapeDedupePart BEFORE comma-joining,
+// so element boundaries survive in the encoding: a part that itself contains a
+// comma is escaped while the joining commas stay raw, making ["a,b"] and
+// ["a","b"] encode differently. Delimiter-free parts stay byte-identical to
+// their naive join.
+func escapeJoinParts(parts []string) string {
+	escaped := make([]string, len(parts))
+	for i, p := range parts {
+		escaped[i] = escapeDedupePart(p)
+	}
+	return strings.Join(escaped, ",")
+}
+
+// currentGroupKey encodes the finding's current-group component for the dedupe
+// key. When the structured group slice is present (production findings built
+// by baseFinding), each element is escaped before joining so distinct group
+// sets whose display joins collide (["a,b","c"] vs ["a","b,c"], or ["A","B"]
+// vs the literal ["A,B"]) keep distinct keys. A manually constructed finding
+// (nil currentGroups) falls back to escaping the flattened CurrentGroup;
+// delimiter-free production keys are byte-identical either way.
+func currentGroupKey(f *Finding) string {
+	if f.currentGroups != nil {
+		return escapeJoinParts(f.currentGroups)
+	}
+	return escapeDedupePart(f.CurrentGroup)
 }
 
 // dedupePartEscaper escapes the characters that participate in the dedupe-key
@@ -420,15 +454,19 @@ func releaseIdentity(f *Finding) string {
 	return hash
 }
 
-// animeBytesLinkKey returns the sorted AnimeBytes link URLs of a finding as a
-// single comma-joined string, or "" when the finding carries no AB link, so
-// the dedupe key changes when the AB source set changes. Each URL has its
-// delimiters escaped before joining, matching dedupeKey's collision-proofing:
-// a SeaDex-supplied URL containing ',' or '|' cannot collide two link sets.
+// animeBytesLinkKey returns the sorted toggle-gated (AnimeBytes) link URLs of
+// a finding as a single comma-joined string, or "" when the finding carries no
+// such link, so the dedupe key changes when the AB source set changes. A link
+// is toggle-gated when the URL-aware filter.ABVisible invariant - the same
+// boundary candidate filtering uses - would hide it with the toggle off, so a
+// mislabeled AB URL still keys the same as a correctly labeled one. Each URL
+// has its delimiters escaped before joining, matching dedupeKey's
+// collision-proofing: a SeaDex-supplied URL containing ',' or '|' cannot
+// collide two link sets.
 func animeBytesLinkKey(links []ReleaseLink) string {
 	var urls []string
 	for i := range links {
-		if release.IsAnimeBytes(links[i].Tracker) {
+		if !filter.ABVisible(links[i].Tracker, links[i].URL, false) {
 			urls = append(urls, escapeDedupePart(strings.TrimSpace(links[i].URL)))
 		}
 	}

@@ -82,6 +82,14 @@ type Item struct {
 	Failed bool `json:"failed,omitempty"`
 }
 
+// Key identifies the item by its arr source and arr ID ("arr:id") - the
+// item's semantic identity across snapshots and packages. Snapshot diffing
+// (indexByKey) and the audit's covered-item map both key on it, so the
+// identity rule is written once here in the package that owns Item.
+func (it *Item) Key() string {
+	return it.Arr + ":" + strconv.Itoa(it.ArrID)
+}
+
 // Snapshot is one library walk.
 type Snapshot struct {
 	TakenAt time.Time `json:"taken_at"`
@@ -178,6 +186,18 @@ func (w *Walker) Walk(ctx context.Context) (Snapshot, error) {
 	return Snapshot{TakenAt: time.Now().UTC(), Items: items, Partial: partial}, nil
 }
 
+// filterSeriesByTags returns the series that pass the include/exclude tag
+// filters, in input order (the pure filtering step of the Sonarr walk).
+func filterSeriesByTags(series []arrapi.Series, includeIDs, excludeIDs map[int]struct{}) []arrapi.Series {
+	kept := make([]arrapi.Series, 0, len(series))
+	for i := range series {
+		if keepByTags(series[i].Tags, includeIDs, excludeIDs) {
+			kept = append(kept, series[i])
+		}
+	}
+	return kept
+}
+
 // walkSonarr lists series, applies tag filters, and builds an item per kept
 // series with its episode files fetched concurrently (bounded). A per-series
 // episode-fetch failure keeps the series' arr identity as a Failed placeholder
@@ -194,12 +214,7 @@ func (w *Walker) walkSonarr(ctx context.Context) ([]Item, int, error) {
 		return nil, 0, err
 	}
 
-	var kept []arrapi.Series
-	for i := range series {
-		if keepByTags(series[i].Tags, includeIDs, excludeIDs) {
-			kept = append(kept, series[i])
-		}
-	}
+	kept := filterSeriesByTags(series, includeIDs, excludeIDs)
 
 	results, skipped := w.fetchEpisodeItems(ctx, kept)
 	if err := ctx.Err(); err != nil {
@@ -554,6 +569,16 @@ func nonEmpty(vals ...string) []string {
 	return out
 }
 
+// countsPresenceChange reports whether an item present in only one snapshot
+// counts as added/removed under the partial-transition policy: a Sonarr item
+// absent from a partial snapshot is suppressed (Partial is set only by Sonarr
+// episode-fetch failures), while Radarr items always count. This is the
+// blanket Sonarr suppression documented on DiffSnapshots, extracted verbatim
+// so the policy is written once instead of inside both directional scans.
+func countsPresenceChange(partial bool, item *Item) bool {
+	return !partial || item.Arr != ArrSonarr
+}
+
 // DiffSnapshots reports what changed between prev and cur, keyed by arr + id.
 // An item is Changed when its group set, per-season group attribution, or
 // current fingerprint differs. Per the Snapshot.Partial contract, a Sonarr
@@ -567,15 +592,18 @@ func DiffSnapshots(prev, cur *Snapshot) Diff {
 	var d Diff
 	for k, c := range curByKey {
 		p, ok := prevByKey[k]
-		switch {
-		case !ok && (!prev.Partial || c.Arr != ArrSonarr):
-			d.Added++
-		case ok && !sameItem(p, c):
+		if !ok {
+			if countsPresenceChange(prev.Partial, c) {
+				d.Added++
+			}
+			continue
+		}
+		if !sameItem(p, c) {
 			d.Changed++
 		}
 	}
 	for k, p := range prevByKey {
-		if _, ok := curByKey[k]; !ok && (!cur.Partial || p.Arr != ArrSonarr) {
+		if _, ok := curByKey[k]; !ok && countsPresenceChange(cur.Partial, p) {
 			d.Removed++
 		}
 	}
@@ -595,7 +623,7 @@ func indexByKey(s *Snapshot) map[string]*Item {
 		if it.Failed {
 			continue
 		}
-		m[it.Arr+":"+strconv.Itoa(it.ArrID)] = it
+		m[it.Key()] = it
 	}
 	return m
 }

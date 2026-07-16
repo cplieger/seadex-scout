@@ -29,9 +29,9 @@ type Tracker struct {
 	BaseURL string
 	// Type is the tracker's obtainability class.
 	Type TrackerType
-	// Aliases are additional accepted spellings (lowercased); the canonical
-	// Name is always accepted case-insensitively and is not repeated here.
-	Aliases []string
+	// aliases are additional accepted spellings; the canonical Name is
+	// always accepted case-insensitively and is not repeated here.
+	aliases []string
 }
 
 // trackerTable is the canonical table, limited to the trackers SeaDex actually
@@ -39,7 +39,7 @@ type Tracker struct {
 // AnimeTosho and RuTracker are a negligible tail).
 var trackerTable = []Tracker{
 	{Name: TrackerNameNyaa, Type: TrackerPublic, BaseURL: "https://nyaa.si"},
-	{Name: TrackerNameAnimeBytes, Aliases: []string{"ab"}, Type: TrackerPrivate, BaseURL: "https://animebytes.tv"},
+	{Name: TrackerNameAnimeBytes, aliases: []string{"ab"}, Type: TrackerPrivate, BaseURL: "https://animebytes.tv"},
 	{Name: TrackerNameAnimeTosho, Type: TrackerPublic, BaseURL: "https://animetosho.org"},
 	{Name: TrackerNameRuTracker, Type: TrackerPublic, BaseURL: "https://rutracker.org"},
 }
@@ -50,7 +50,7 @@ var trackerByAlias = func() map[string]Tracker {
 	m := make(map[string]Tracker, len(trackerTable)*2)
 	for _, t := range trackerTable {
 		m[strings.ToLower(t.Name)] = t
-		for _, a := range t.Aliases {
+		for _, a := range t.aliases {
 			m[strings.ToLower(a)] = t
 		}
 	}
@@ -63,4 +63,16 @@ var trackerByAlias = func() map[string]Tracker {
 func LookupTracker(name string) (Tracker, bool) {
 	t, ok := trackerByAlias[strings.ToLower(strings.TrimSpace(name))]
 	return t, ok
+}
+
+// TrackerBaseURLs returns the canonical site base URLs of every tracker in
+// the table, for consumers that validate an absolute URL's host against the
+// known tracker sites (the tracker label is untrusted upstream data, so the
+// URL host is the evidence such consumers key on).
+func TrackerBaseURLs() []string {
+	urls := make([]string, 0, len(trackerTable))
+	for _, t := range trackerTable {
+		urls = append(urls, t.BaseURL)
+	}
+	return urls
 }

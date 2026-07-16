@@ -198,15 +198,15 @@ func TestCycleColdStartBaselinesSilently(t *testing.T) {
 		},
 	}
 	s := New(&Deps{
-		Logger:   logger,
-		Store:    store,
-		Library:  library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
-		Mapping:  mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
-		SeaDex:   &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher:  match.NewMatcher(notFoundAniList{}, logger),
-		Comparer: compare.NewComparer(compare.Config{Logger: logger}),
-		Reporter: reporter,
-		AniList:  anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger),
+		Logger:       logger,
+		Store:        store,
+		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
+		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
+		Comparer:     compare.NewComparer(compare.Config{Logger: logger}),
+		Reporter:     reporter,
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
 	})
 
 	if healthy := s.Cycle(context.Background()); !healthy {
@@ -253,15 +253,15 @@ func TestCycleEmptySeaDexEntriesPreservesFindings(t *testing.T) {
 	}}
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
 	s := New(&Deps{
-		Logger:   logger,
-		Store:    store,
-		Library:  library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
-		Mapping:  mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
-		SeaDex:   &fakeSeaDex{},
-		Matcher:  match.NewMatcher(notFoundAniList{}, logger),
-		Comparer: compare.NewComparer(compare.Config{Logger: logger}),
-		Reporter: reporter,
-		AniList:  anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger),
+		Logger:       logger,
+		Store:        store,
+		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		SeaDex:       &fakeSeaDex{},
+		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
+		Comparer:     compare.NewComparer(compare.Config{Logger: logger}),
+		Reporter:     reporter,
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
 	})
 
 	if healthy := s.Cycle(context.Background()); !healthy {
@@ -354,15 +354,15 @@ func TestCyclePartialWalkComparesCleanAndPreservesFailedItemsFindings(t *testing
 		}},
 	})
 	s := New(&Deps{
-		Logger:   logger,
-		Store:    store,
-		Library:  library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
-		Mapping:  mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
-		SeaDex:   &fakeSeaDex{entries: entries},
-		Matcher:  match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Comparer: compare.NewComparer(compare.Config{Logger: scoutTestLogger()}),
-		Reporter: report.NewReporter(logger),
-		AniList:  anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger()),
+		Logger:       logger,
+		Store:        store,
+		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		SeaDex:       &fakeSeaDex{entries: entries},
+		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
+		Comparer:     compare.NewComparer(compare.Config{Logger: scoutTestLogger()}),
+		Reporter:     report.NewReporter(logger),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 	})
 
 	if healthy := s.Cycle(context.Background()); !healthy {
@@ -399,6 +399,91 @@ func TestCyclePartialWalkComparesCleanAndPreservesFailedItemsFindings(t *testing
 	}
 	if len(loaded.Library.Items) != 2 || !failedPersisted {
 		t.Errorf("persisted library = %+v, want both items with the failed one marked", loaded.Library.Items)
+	}
+}
+
+// TestCyclePartialColdStartDefersBaselineUntilCompleteWalk pins the cold-start
+// baseline's completeness contract: a fresh install whose FIRST completed walk
+// is partial must NOT baseline the clean subset (which would set Baselined and
+// later burst the recovered items' pre-existing findings as new alerts). The
+// state stays unseeded until a complete walk establishes the baseline, which
+// then seeds every current finding silently.
+func TestCyclePartialColdStartDefersBaselineUntilCompleteWalk(t *testing.T) {
+	logger, recorder := capture.New()
+	store := &fakeStore{st: state.State{
+		Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{
+			{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1},
+			{AniListID: 222, Type: "TV", TvdbID: 124, SeasonTvdb: 1},
+		}},
+	}}
+	sonarr := &flakySonarr{
+		fakeSonarr: fakeSonarr{
+			series: []arrapi.Series{
+				{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
+				{ID: 8, Title: "Broken Series", TvdbID: 124, Year: 2024},
+			},
+			episodes: map[int][]arrapi.Episode{
+				7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+				8: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+			},
+		},
+		failEpisodes: map[int]bool{8: true},
+	}
+	entries := append(seadexFrierenEntry(), seadex.Entry{
+		AniListID: 222,
+		Torrents: []seadex.Torrent{{
+			ReleaseGroup: "SubsPlease",
+			Tracker:      "Nyaa",
+			InfoHash:     "def",
+			URL:          "https://nyaa.si/view/2",
+			IsBest:       true,
+			Files:        []seadex.File{{Name: "Broken Series S01E01 1080p.mkv", Length: 1}},
+		}},
+	})
+	s := New(&Deps{
+		Logger:       scoutTestLogger(),
+		Store:        store,
+		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		SeaDex:       &fakeSeaDex{entries: entries},
+		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
+		Comparer:     compare.NewComparer(compare.Config{Logger: scoutTestLogger()}),
+		Reporter:     report.NewReporter(logger),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
+	})
+
+	// Cycle one: partial first walk (series 8's episode fetch fails). The
+	// clean subset must NOT be baselined and nothing may notify.
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("cycle one healthy=false, want true (a partial walk is degraded, not unhealthy)")
+	}
+	if store.st.Baselined {
+		t.Error("state Baselined=true after a partial cold-start walk, want false (baseline deferred)")
+	}
+	if len(store.st.Findings) != 0 {
+		t.Errorf("persisted findings after partial cold start = %d, want 0 (unseeded)", len(store.st.Findings))
+	}
+	if n := recorder.CountExact("better release available"); n != 0 {
+		t.Errorf("partial cold-start cycle emitted %d finding notifications, want 0", n)
+	}
+
+	// Cycle two: the failed series recovers, the walk is complete. The full
+	// library baselines once, silently seeding both current findings.
+	sonarr.failEpisodes = nil
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("cycle two healthy=false, want true on a complete walk")
+	}
+	if !store.st.Baselined {
+		t.Error("state Baselined=false after the complete walk, want true")
+	}
+	if len(store.st.Findings) != 2 {
+		t.Errorf("baselined findings = %d, want 2 (both current findings seeded)", len(store.st.Findings))
+	}
+	if n := recorder.CountExact("cold start: findings baselined without notifying"); n != 1 {
+		t.Errorf("cold-start baseline summary count = %d, want 1 (Baseline runs exactly once)", n)
+	}
+	if n := recorder.CountExact("better release available"); n != 0 {
+		t.Errorf("baseline cycle emitted %d finding notifications, want 0 (seeded silently)", n)
 	}
 }
 
@@ -495,15 +580,15 @@ func TestCycleRecoveredWalkResetsShrunkStreak(t *testing.T) {
 		},
 	}
 	s := New(&Deps{
-		Logger:   logger,
-		Store:    store,
-		Library:  library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
-		Mapping:  mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
-		SeaDex:   &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher:  match.NewMatcher(notFoundAniList{}, logger),
-		Comparer: compare.NewComparer(compare.Config{Logger: logger}),
-		Reporter: report.NewReporter(logger),
-		AniList:  anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger),
+		Logger:       logger,
+		Store:        store,
+		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
+		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
+		Comparer:     compare.NewComparer(compare.Config{Logger: logger}),
+		Reporter:     report.NewReporter(logger),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
 	})
 
 	if healthy := s.Cycle(context.Background()); !healthy {
@@ -536,15 +621,15 @@ func TestCycleSteadyStateReportsAndSaves(t *testing.T) {
 		},
 	}
 	s := New(&Deps{
-		Logger:   logger,
-		Store:    store,
-		Library:  library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
-		Mapping:  mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
-		SeaDex:   &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher:  match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Comparer: compare.NewComparer(compare.Config{Logger: scoutTestLogger()}),
-		Reporter: report.NewReporter(logger),
-		AniList:  anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger()),
+		Logger:       logger,
+		Store:        store,
+		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
+		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
+		Comparer:     compare.NewComparer(compare.Config{Logger: scoutTestLogger()}),
+		Reporter:     report.NewReporter(logger),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 	})
 
 	if healthy := s.Cycle(context.Background()); !healthy {
@@ -770,16 +855,16 @@ func TestCycleStaleMapStillComparesAndRebuildsFeed(t *testing.T) {
 		},
 	}
 	s := New(&Deps{
-		Logger:   logger,
-		Store:    store,
-		Library:  library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
-		Mapping:  mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
-		SeaDex:   &fakeSeaDex{entries: seadexFrierenEntry()},
-		Matcher:  match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Comparer: compare.NewComparer(compare.Config{Logger: scoutTestLogger()}),
-		Reporter: report.NewReporter(logger),
-		AniList:  anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger()),
-		Feed:     feed,
+		Logger:       logger,
+		Store:        store,
+		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
+		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
+		Comparer:     compare.NewComparer(compare.Config{Logger: scoutTestLogger()}),
+		Reporter:     report.NewReporter(logger),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
+		Feed:         feed,
 	})
 
 	if healthy := s.Cycle(context.Background()); !healthy {
@@ -793,6 +878,28 @@ func TestCycleStaleMapStillComparesAndRebuildsFeed(t *testing.T) {
 	}
 	if n := recorder.CountExact("better release available"); n != 1 {
 		t.Errorf("finding notification count = %d, want 1", n)
+	}
+	if n := recorder.CountExact("cycle degraded"); n != 1 {
+		t.Errorf("'cycle degraded' count = %d, want 1 (a stale-map cycle completes degraded)", n)
+	}
+	if n := recorder.CountExact("cycle complete"); n != 0 {
+		t.Errorf("'cycle complete' count = %d, want 0 (a stale-map cycle must not read as fully successful)", n)
+	}
+	degradedReason := ""
+	for _, r := range recorder.Records() {
+		if r.Message != "cycle degraded" {
+			continue
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "reason" {
+				degradedReason = a.Value.String()
+				return false
+			}
+			return true
+		})
+	}
+	if degradedReason != "mapping-stale" {
+		t.Errorf("'cycle degraded' reason = %q, want %q", degradedReason, "mapping-stale")
 	}
 	staleAttr := false
 	for _, r := range recorder.Records() {

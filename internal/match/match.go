@@ -232,14 +232,14 @@ func aniListNeed(alID int, idx *mapping.Index, lib *libIndex) (rec mapping.Recor
 	if found := lib.findByID(&rec); found != nil {
 		return rec, true, found, false
 	}
-	return rec, true, nil, !hasArrID(&rec)
+	return rec, true, nil, !rec.HasArrIdentifier()
 }
 
 // pendingAniListIDs returns the distinct AniList ids the match will look up but
 // has not memoized: exactly the entries aniListNeed - the shared trigger
 // matchEntry also consults - classifies as needing a lookup, so the batch
-// fetches no more (which would re-introduce the not-in-library lookups hasArrID
-// removed) and no less than the per-entry pass needs.
+// fetches no more (which would re-introduce the not-in-library lookups the
+// HasArrIdentifier gate removed) and no less than the per-entry pass needs.
 func pendingAniListIDs(entries []seadex.Entry, idx *mapping.Index, lib *libIndex, memo *Memo) []int {
 	seen := make(map[int]struct{})
 	var ids []int
@@ -419,15 +419,6 @@ func recordArr(r *mapping.Record) string {
 		return library.ArrRadarr
 	}
 	return library.ArrSonarr
-}
-
-// hasArrID reports whether a record carries the arr id its type resolves by (a
-// movie by TMDB-movie/IMDb id, a series by TVDB id). A findByID miss on such a
-// record means the anime is not in the library, so the AniList title fallback
-// would be wasted; an id-less record (no such id) still needs the fallback to
-// link a film/OVA whose arr id sits on a separate record.
-func hasArrID(r *mapping.Record) bool {
-	return r.HasArrIdentifier()
 }
 
 // formatArr routes an AniList format to its arr (MOVIE -> Radarr, else Sonarr)

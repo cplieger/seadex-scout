@@ -225,3 +225,76 @@ func TestStringList_malformedArrayTolerated(t *testing.T) {
 		t.Errorf("stringList(malformed array) = %v, want nil", []string(s))
 	}
 }
+
+// TestTolerantDecoders_resetOnReuse pins the duplicate-key reset invariant on
+// each tolerant decoder directly: encoding/json processes duplicate object
+// keys in order against the SAME field receiver, so a later tolerated-odd
+// value must clear the earlier decode, not silently retain it.
+func TestTolerantDecoders_resetOnReuse(t *testing.T) {
+	var f flexInt
+	if err := f.UnmarshalJSON([]byte(`7`)); err != nil || int(f) != 7 {
+		t.Fatalf("flexInt first decode = %d, %v, want 7, nil", int(f), err)
+	}
+	if err := f.UnmarshalJSON([]byte(`false`)); err != nil || int(f) != 0 {
+		t.Errorf("flexInt reused with odd value = %d, %v, want reset to 0, nil", int(f), err)
+	}
+
+	var s flexString
+	if err := s.UnmarshalJSON([]byte(`"MOVIE"`)); err != nil || string(s) != "MOVIE" {
+		t.Fatalf("flexString first decode = %q, %v, want MOVIE, nil", string(s), err)
+	}
+	if err := s.UnmarshalJSON([]byte(`7`)); err != nil || string(s) != "" {
+		t.Errorf("flexString reused with odd value = %q, %v, want reset to empty, nil", string(s), err)
+	}
+
+	var l stringList
+	if err := l.UnmarshalJSON([]byte(`["tt1"]`)); err != nil || len(l) != 1 {
+		t.Fatalf("stringList first decode = %v, %v, want [tt1], nil", []string(l), err)
+	}
+	if err := l.UnmarshalJSON([]byte(`false`)); err != nil || l != nil {
+		t.Errorf("stringList reused with odd value = %v, %v, want reset to nil, nil", []string(l), err)
+	}
+
+	var tm tmdbID
+	if err := tm.UnmarshalJSON([]byte(`{"movie":[9]}`)); err != nil || len(tm.Movie) != 1 {
+		t.Fatalf("tmdbID first decode = %+v, %v, want one movie id, nil", tm, err)
+	}
+	if err := tm.UnmarshalJSON([]byte(`3`)); err != nil || len(tm.Movie) != 0 {
+		t.Errorf("tmdbID reused with odd value = %+v, %v, want reset to empty, nil", tm, err)
+	}
+
+	var o offsetPair
+	if err := o.UnmarshalJSON([]byte(`{"tvdb":3}`)); err != nil || o.tvdbOrZero() != 3 {
+		t.Fatalf("offsetPair first decode = %+v, %v, want tvdb 3, nil", o, err)
+	}
+	if err := o.UnmarshalJSON([]byte(`4`)); err != nil || o.tvdbOrZero() != 0 {
+		t.Errorf("offsetPair reused with odd value = %+v, %v, want reset to zero, nil", o, err)
+	}
+}
+
+// TestParseFribb_duplicateKeysLaterOddValueWins pins the documented per-field
+// tolerance semantics under duplicate JSON keys end-to-end: a later odd
+// anilist_id zeroes the key and drops the record, and later odd type/tvdb_id
+// values decode as empty/zero instead of retaining the earlier valid values.
+func TestParseFribb_duplicateKeysLaterOddValueWins(t *testing.T) {
+	data := []byte(`[
+		{"anilist_id":1,"anilist_id":false,"type":"MOVIE","tvdb_id":42},
+		{"anilist_id":2,"type":"MOVIE","type":7,"tvdb_id":42,"tvdb_id":false}
+	]`)
+	records, err := parseFribb(data, discardLogger())
+	if err != nil {
+		t.Fatalf("parseFribb: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("parseFribb kept %d records, want 1 (later odd anilist_id drops its record)", len(records))
+	}
+	if records[0].AniListID != 2 {
+		t.Fatalf("surviving record AniListID = %d, want 2", records[0].AniListID)
+	}
+	if records[0].Type != "" {
+		t.Errorf("duplicate-key Type = %q, want empty (later odd value wins)", records[0].Type)
+	}
+	if records[0].TvdbID != 0 {
+		t.Errorf("duplicate-key TvdbID = %d, want 0 (later odd value wins)", records[0].TvdbID)
+	}
+}

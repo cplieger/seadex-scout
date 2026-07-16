@@ -1,6 +1,8 @@
 package audit
 
 import (
+	"bytes"
+	"fmt"
 	"log/slog"
 	"reflect"
 	"strings"
@@ -343,6 +345,12 @@ func TestLinksDedupesRepeatedBestAndLabelsUnnamedTracker(t *testing.T) {
 		{Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
 		{Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
 		{Best: true, Tracker: "  ", URL: "https://example.org/t"},
+		// A delimiter-bearing pair: with a string-concatenated dedupe key these
+		// two distinct (tracker, URL) tuples collide ("Nyaa|https://x/a" +
+		// "https://one.example" == "Nyaa" + "https://x/a|https://one.example")
+		// and one link is silently dropped; the structural key keeps both.
+		{Best: true, Tracker: "Nyaa|https://x/a", URL: "https://one.example"},
+		{Best: true, Tracker: "Nyaa", URL: "https://x/a|https://one.example"},
 	}}
 
 	got := links(row)
@@ -352,6 +360,120 @@ func TestLinksDedupesRepeatedBestAndLabelsUnnamedTracker(t *testing.T) {
 	}
 	if !strings.Contains(got, "[link](https://example.org/t)") {
 		t.Errorf("a blank tracker must fall back to the %q label, got %q", "link", got)
+	}
+	// Both delimiter-bearing tuples survive as distinct links: the plain URL
+	// as its own destination, and the pipe-bearing URL with the pipe
+	// percent-encoded by escapeLinkURL.
+	if !strings.Contains(got, "](https://one.example)") {
+		t.Errorf("distinct tuple with the delimiter in the tracker was dropped, got %q", got)
+	}
+	if !strings.Contains(got, "](https://x/a%7Chttps://one.example)") {
+		t.Errorf("distinct tuple with the delimiter in the URL was dropped, got %q", got)
+	}
+}
+
+// craftedReport builds a report whose untrusted strings carry C1 terminal
+// escape introducers (CSI U+009B, OSC U+009D, ST U+009C) and Unicode bidi
+// controls, for the machine-readable output sanitization tests.
+func craftedReport() *Report {
+	return &Report{
+		GeneratedAt: time.Unix(0, 0).UTC(),
+		Totals:      map[string]int{string(VerdictUnlisted): 1},
+		Rows: []Row{{
+			Title:         "Evil\u009bShow\u202e",
+			Arr:           "sonarr",
+			Verdict:       VerdictUnlisted,
+			ArrURL:        "http://sonarr/series/x\u009d",
+			SeaDexURL:     "https://releases.moe/1\u200f",
+			MatchSource:   "id\u061c",
+			CurrentGroups: []string{"grp\u009c"},
+			Releases:      []Release{{Group: "g\u0090", Tracker: "trk\u200e", URL: "https://x/\u2028a", Best: true}},
+		}},
+	}
+}
+
+// unsafeOutputRunes are the runes no machine-readable output may carry raw:
+// C1 terminal-escape introducers, bidi controls, and line separators.
+var unsafeOutputRunes = []rune{'\u009b', '\u009c', '\u009d', '\u0090', '\u202e', '\u200e', '\u200f', '\u061c', '\u2028'}
+
+// TestRenderJSONSanitizesControlAndBidiRunes pins the JSON copy's output
+// encoding: encoding/json passes C1 and bidi runes through raw, so renderJSON
+// must serialize a sanitized copy — and must not mutate the canonical report.
+func TestRenderJSONSanitizesControlAndBidiRunes(t *testing.T) {
+	r := craftedReport()
+
+	data, err := renderJSON(r)
+	if err != nil {
+		t.Fatalf("renderJSON: %v", err)
+	}
+
+	for _, bad := range unsafeOutputRunes {
+		if strings.ContainsRune(string(data), bad) {
+			t.Errorf("renderJSON output carries raw unsafe rune U+%04X", bad)
+		}
+	}
+	if r.Rows[0].Title != "Evil\u009bShow\u202e" || r.Rows[0].CurrentGroups[0] != "grp\u009c" || r.Rows[0].Releases[0].Group != "g\u0090" {
+		t.Error("renderJSON mutated the canonical report; it must sanitize a copy")
+	}
+}
+
+// TestReportLogSanitizesControlAndBidiRunes pins the slog path's output
+// encoding: the JSONHandler escapes C0 but emits C1/bidi runes raw, so every
+// row-derived string logged by Report.Log must be sanitized first.
+func TestReportLogSanitizesControlAndBidiRunes(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, nil))
+	r := craftedReport()
+
+	r.Log(log)
+
+	out := buf.String()
+	if !strings.Contains(out, "report item") {
+		t.Fatalf("Log emitted no report item line: %q", out)
+	}
+	for _, bad := range unsafeOutputRunes {
+		if strings.ContainsRune(out, bad) {
+			t.Errorf("Report.Log output carries raw unsafe rune U+%04X", bad)
+		}
+	}
+}
+
+// TestSanitizersCoverBidiAndSeparatorRunes pins the complete unsafe-format-
+// rune set on both Markdown sanitizers: every Unicode Bidi_Control character
+// (including the U+061C/U+200E/U+200F singleton marks the contiguous ranges
+// miss) and the U+2028/U+2029 line separators must be replaced with a space in
+// cell text and link labels (escapeCell) and percent-encoded byte-by-byte in
+// link destinations (escapeLinkURL) — never emitted raw, where they could
+// reorder rendered text or break a table row.
+func TestSanitizersCoverBidiAndSeparatorRunes(t *testing.T) {
+	runes := []rune{
+		'\u061c',                                         // ALM (singleton bidi mark)
+		'\u200e',                                         // LRM (singleton bidi mark)
+		'\u200f',                                         // RLM (singleton bidi mark)
+		'\u202a', '\u202b', '\u202c', '\u202d', '\u202e', // LRE/RLE/PDF/LRO/RLO
+		'\u2066', '\u2067', '\u2068', '\u2069', // LRI/RLI/FSI/PDI
+		'\u2028', '\u2029', // line/paragraph separators (row-boundary break)
+	}
+	for _, r := range runes {
+		t.Run(fmt.Sprintf("U+%04X", r), func(t *testing.T) {
+			// Cell text (the same path sanitizes link labels via mdLink).
+			in := "a" + string(r) + "b"
+			if got := escapeCell(in); got != "a b" {
+				t.Errorf("escapeCell(%q) = %q, want %q (unsafe rune replaced with a space)", in, got, "a b")
+			}
+			// Link destination: the rune's UTF-8 bytes percent-encoded.
+			got := escapeLinkURL("https://x/a" + string(r) + "b")
+			if strings.ContainsRune(got, r) {
+				t.Errorf("escapeLinkURL left U+%04X raw: %q", r, got)
+			}
+			var enc strings.Builder
+			for _, byt := range []byte(string(r)) {
+				fmt.Fprintf(&enc, "%%%02X", byt)
+			}
+			if want := "https://x/a" + enc.String() + "b"; got != want {
+				t.Errorf("escapeLinkURL(U+%04X) = %q, want %q", r, got, want)
+			}
+		})
 	}
 }
 

@@ -134,11 +134,10 @@ func decodeFribbRecords(dec *json.Decoder) (records []Record, skipped, dropped i
 			return nil, 0, 0, nil, fmt.Errorf("mapping: Fribb list exceeds cap %d records", maxFribbRecords)
 		}
 		seen++
-		var msg json.RawMessage
-		if err := dec.Decode(&msg); err != nil {
-			return nil, 0, 0, nil, err
+		rec, ok, decodeErr, streamErr := decodeNextFribbRecord(dec)
+		if streamErr != nil {
+			return nil, 0, 0, nil, streamErr
 		}
-		rec, ok, decodeErr := decodeFribbRecord(msg)
 		if decodeErr != nil {
 			skipped++
 			if firstErr == nil {
@@ -153,6 +152,20 @@ func decodeFribbRecords(dec *json.Decoder) (records []Record, skipped, dropped i
 		}
 	}
 	return records, skipped, dropped, firstErr, nil
+}
+
+// decodeNextFribbRecord reads the next array element off the stream and
+// decodes it. The two error results separate the tolerance boundary: the
+// first (decodeErr) is a tolerated per-record decode failure the caller skips
+// and counts; the second (streamErr) is a fatal RawMessage stream-decode
+// failure that rejects the whole document.
+func decodeNextFribbRecord(dec *json.Decoder) (rec Record, ok bool, decodeErr, streamErr error) {
+	var msg json.RawMessage
+	if err := dec.Decode(&msg); err != nil {
+		return Record{}, false, nil, err
+	}
+	rec, ok, decodeErr = decodeFribbRecord(msg)
+	return rec, ok, decodeErr, nil
 }
 
 // decodeFribbRecord validates and decodes one raw Fribb array element. An
@@ -172,21 +185,25 @@ func decodeFribbRecord(msg json.RawMessage) (Record, bool, error) {
 	return rec, ok, nil
 }
 
-// offsetPair is the {tvdb, tmdb} shape of the season field (the upstream
-// episode_offset field shares it but is not decoded - no consumer reads it).
+// offsetPair decodes the tvdb member of the season object; encoding/json
+// intentionally ignores the unused tmdb member (the upstream episode_offset
+// field shares the shape but is likewise not decoded - no consumer reads it).
 // It sits inside the record's tolerance boundary: the object itself decodes
-// tolerantly and the interior ids reuse flexInt, so an odd upstream season
+// tolerantly and the interior id reuses flexInt, so an odd upstream season
 // shape (a bare number, a quoted interior value, a float) zeroes the field -
 // SeasonTvdb 0 falls back to whole-series/season-0 scoping - while the record
 // survives.
 type offsetPair struct {
 	Tvdb flexInt `json:"tvdb"`
-	Tmdb flexInt `json:"tmdb"`
 }
 
 // UnmarshalJSON decodes the object form and tolerates any other shape as
-// absent (the interior flexInt fields already tolerate odd id shapes).
+// absent (the interior flexInt fields already tolerate odd id shapes). The
+// receiver is reset first: encoding/json reuses the same field receiver for
+// duplicate object keys, so a later tolerated-odd value must clear an earlier
+// decode rather than silently retain it.
 func (o *offsetPair) UnmarshalJSON(b []byte) error {
+	*o = offsetPair{}
 	b = bytes.TrimSpace(b)
 	if isNullOrEmpty(b) || b[0] != '{' {
 		return nil
@@ -208,8 +225,11 @@ func (o offsetPair) tvdbOrZero() int { return int(o.Tvdb) }
 // Fribb type routes the record as a non-movie series, the safe default.
 type flexString string
 
-// UnmarshalJSON implements the tolerant string decode.
+// UnmarshalJSON implements the tolerant string decode. The receiver is reset
+// first so a duplicate key's later odd value clears an earlier decode (see
+// offsetPair.UnmarshalJSON).
 func (s *flexString) UnmarshalJSON(b []byte) error {
+	*s = ""
 	b = bytes.TrimSpace(b)
 	if isNullOrEmpty(b) || b[0] != '"' {
 		return nil
@@ -233,8 +253,11 @@ type tmdbID struct {
 	Movie []flexInt `json:"movie"`
 }
 
-// UnmarshalJSON decodes the object form and tolerates any other shape as empty.
+// UnmarshalJSON decodes the object form and tolerates any other shape as
+// empty. The receiver is reset first so a duplicate key's later odd value
+// clears an earlier decode (see offsetPair.UnmarshalJSON).
 func (t *tmdbID) UnmarshalJSON(b []byte) error {
+	*t = tmdbID{}
 	b = bytes.TrimSpace(b)
 	if isNullOrEmpty(b) || b[0] != '{' {
 		return nil
@@ -260,8 +283,11 @@ func (t *tmdbID) UnmarshalJSON(b []byte) error {
 // odd value does not break the record or masquerade as a valid id.
 type flexInt int
 
-// UnmarshalJSON implements the tolerant number-or-string decode.
+// UnmarshalJSON implements the tolerant number-or-string decode. The receiver
+// is reset first so a duplicate key's later odd value clears an earlier decode
+// (see offsetPair.UnmarshalJSON).
 func (f *flexInt) UnmarshalJSON(b []byte) error {
+	*f = 0
 	b = bytes.TrimSpace(b)
 	if isNullOrEmpty(b) {
 		return nil
@@ -305,40 +331,61 @@ func (f *flexInt) setNumber(n float64) {
 // entries and drops the rest, so an odd entry never fails the whole record.
 type stringList []string
 
-// UnmarshalJSON implements the array-or-scalar decode.
+// UnmarshalJSON implements the array-or-scalar decode. The receiver is reset
+// first so a duplicate key's later odd value clears an earlier decode (see
+// offsetPair.UnmarshalJSON).
 func (s *stringList) UnmarshalJSON(b []byte) error {
+	*s = nil
 	b = bytes.TrimSpace(b)
 	if isNullOrEmpty(b) {
 		return nil
 	}
 	if b[0] == '[' {
-		var arr []json.RawMessage
-		if err := json.Unmarshal(b, &arr); err != nil {
-			return nil //nolint:nilerr // tolerate an odd imdb_id array rather than fail the record
+		out, err := decodeStringArray(b)
+		if err != nil {
+			return err
 		}
-		// The transient decode above is bounded by maxFribbRecordBytes; the cap
-		// here bounds what is RETAINED, rejecting the record so a hostile body
-		// cannot accumulate huge per-record identifier sets.
-		if len(arr) > maxFribbIdentifiers {
-			return fmt.Errorf("imdb_id list exceeds cap %d", maxFribbIdentifiers)
-		}
-		out := make([]string, 0, len(arr))
-		for _, el := range arr {
-			var v string
-			if err := json.Unmarshal(el, &v); err != nil {
-				continue // drop a non-string entry, keep the valid siblings
-			}
-			out = append(out, v)
-		}
-		*s = trimmed(out)
+		*s = out
 		return nil
 	}
+	*s = decodeStringScalar(b)
+	return nil
+}
+
+// decodeStringArray decodes the array form tolerantly: a malformed array
+// yields nil (never an error), a non-string entry is dropped while its valid
+// siblings survive, and a list over maxFribbIdentifiers errors so the record
+// is rejected.
+func decodeStringArray(b []byte) ([]string, error) {
+	var arr []json.RawMessage
+	if err := json.Unmarshal(b, &arr); err != nil {
+		return nil, nil //nolint:nilerr // tolerate an odd imdb_id array rather than fail the record
+	}
+	// The transient decode above is bounded by maxFribbRecordBytes; the cap
+	// here bounds what is RETAINED, rejecting the record so a hostile body
+	// cannot accumulate huge per-record identifier sets.
+	if len(arr) > maxFribbIdentifiers {
+		return nil, fmt.Errorf("imdb_id list exceeds cap %d", maxFribbIdentifiers)
+	}
+	out := make([]string, 0, len(arr))
+	for _, el := range arr {
+		var v string
+		if err := json.Unmarshal(el, &v); err != nil {
+			continue // drop a non-string entry, keep the valid siblings
+		}
+		out = append(out, v)
+	}
+	return trimmed(out), nil
+}
+
+// decodeStringScalar decodes the tolerant single-string form; a malformed
+// scalar yields nil rather than failing the record.
+func decodeStringScalar(b []byte) []string {
 	var one string
 	if err := json.Unmarshal(b, &one); err != nil {
 		return nil //nolint:nilerr // tolerate an odd imdb_id shape rather than fail the record
 	}
-	*s = trimmed([]string{one})
-	return nil
+	return trimmed([]string{one})
 }
 
 // trimmed returns in with entries trimmed and blanks dropped.

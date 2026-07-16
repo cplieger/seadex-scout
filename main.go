@@ -36,7 +36,7 @@ import (
 
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/health"
-	"github.com/cplieger/scheduler"
+	"github.com/cplieger/scheduler/v2"
 	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/config"
 )
@@ -80,9 +80,17 @@ func main() {
 	}
 
 	// The health subcommand backs the Docker healthcheck and must not require
-	// configuration, so it is handled before config load.
+	// configuration, so it is handled before config load. It does read the
+	// config best-effort (never failing on absence or parse errors) to derive
+	// the freshness deadline: in scheduled mode each cycle refreshes the
+	// marker, so a marker older than 3 poll intervals means a wedged compare
+	// loop and a restart fixes it. External mode (poll_interval: off) and any
+	// config-read failure disable the deadline (WithMaxAge(0) is a no-op):
+	// idle-until-poll is healthy.
 	if len(args) == 1 && args[0] == "health" {
-		health.RunProbe(health.DefaultPath)
+		probeConfigPath := cmp.Or(strings.TrimSpace(os.Getenv("CONFIG_PATH")), config.DefaultConfigPath)
+		health.RunProbe(health.DefaultPath,
+			health.WithMaxAge(3*config.PollIntervalFromFile(probeConfigPath)))
 		// health.RunProbe terminates via os.Exit(0/1); if it ever returns
 		// (a contract change in the separately versioned health dependency),
 		// fail closed: report unhealthy rather than a silently-green probe.
@@ -322,9 +330,11 @@ func run(cfg *config.Config) error {
 }
 
 // startIndexer launches the Torznab feed in a goroutine when it is configured,
-// returning a func that waits for its graceful shutdown (once ctx is cancelled)
-// and then releases its clients. When no Prowlarr Torznab URL is set it starts
-// nothing - the daemon binds no HTTP port - and returns a no-op.
+// returning a func that waits for its graceful shutdown (once ctx is
+// cancelled). The goroutine releases its clients itself on every exit path -
+// a Run return or a recovered panic - so the transport is freed immediately
+// even if the daemon keeps running. When no Prowlarr Torznab URL is set it
+// starts nothing - the daemon binds no HTTP port - and returns a no-op.
 func startIndexer(ctx context.Context, cfg *config.Config) func() {
 	if !cfg.IndexerConfigured() {
 		return func() {}
@@ -333,6 +343,7 @@ func startIndexer(ctx context.Context, cfg *config.Config) func() {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		defer bi.cleanup()
 		defer func() {
 			if r := recover(); r != nil {
 				slog.Error("indexer feed panicked", "panic", r, "stack", string(debug.Stack()))
@@ -342,10 +353,7 @@ func startIndexer(ctx context.Context, cfg *config.Config) func() {
 			logIndexerStop(ctx, err)
 		}
 	}()
-	return func() {
-		<-done
-		bi.cleanup()
-	}
+	return func() { <-done }
 }
 
 // logIndexerStop classifies the indexer feed's Run error for the shared slog

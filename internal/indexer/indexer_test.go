@@ -8,7 +8,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -149,15 +151,15 @@ func TestTrackerKey(t *testing.T) {
 func TestMarkAndDedupe(t *testing.T) {
 	set := &curation{
 		byHash: map[string]bool{"abcdef1234567890abcdef1234567890abcdef12": true},
-		byKey:  map[string]bool{"ab:1143533": false},
+		byKey:  map[string]bool{"nyaa:1143533": false},
 	}
 	raw := []item{
 		{Title: "best by hash", InfoHash: "abcdef1234567890abcdef1234567890abcdef12", GUID: "g1"},
-		{Title: "alt by key", InfoURL: "https://animebytes.tv/torrents.php?id=1&torrentid=1143533", GUID: "g2"},
+		{Title: "alt by key", InfoURL: "https://nyaa.si/view/1143533", GUID: "g2"},
 		{Title: "not curated", InfoURL: "https://nyaa.si/view/999", GUID: "g3"},
 		{Title: "dup of best", InfoHash: "abcdef1234567890abcdef1234567890abcdef12", GUID: "g1"},
 	}
-	out := markAndDedupe(raw, set)
+	out := markAndDedupe(raw, set, upstreamNyaa)
 	if len(out) != 2 {
 		t.Fatalf("got %d items, want 2 (best + alt, dup dropped, uncurated dropped)", len(out))
 	}
@@ -178,13 +180,13 @@ func TestMarkAndDedupe(t *testing.T) {
 func TestMarkAndDedupeRejectsConflictingIdentity(t *testing.T) {
 	set := &curation{
 		byHash: map[string]bool{"abcdef1234567890abcdef1234567890abcdef12": true},
-		byKey:  map[string]bool{"ab:1143533": false},
+		byKey:  map[string]bool{"nyaa:1143533": false},
 	}
 	raw := []item{
 		{
 			Title: "best hash + alt key", GUID: "g1",
 			InfoHash: "abcdef1234567890abcdef1234567890abcdef12",
-			InfoURL:  "https://animebytes.tv/torrents.php?id=1&torrentid=1143533",
+			InfoURL:  "https://nyaa.si/view/1143533",
 		},
 		{
 			Title: "best hash + uncurated key", GUID: "g2",
@@ -192,8 +194,33 @@ func TestMarkAndDedupeRejectsConflictingIdentity(t *testing.T) {
 			InfoURL:  "https://nyaa.si/view/999",
 		},
 	}
-	if out := markAndDedupe(raw, set); len(out) != 0 {
+	if out := markAndDedupe(raw, set, upstreamNyaa); len(out) != 0 {
 		t.Fatalf("got %d items, want 0 (conflicting identity signals must drop the item)", len(out))
+	}
+}
+
+// TestMarkAndDedupeRejectsCrossScopeKey pins lookup's tracker-scope binding: a
+// tracker key parsed from an item's page URL must belong to the endpoint being
+// served, so a curated Nyaa item is rejected under the /ab scope (a swapped
+// upstream or cross-tracker item must not surface under the wrong per-tracker
+// indexer). It also pins the AB-specific rule that a scoped tracker key is
+// mandatory: AnimeBytes exposes no info hash in Torznab, so a hash-only item
+// cannot match under /ab even when its hash is curated.
+func TestMarkAndDedupeRejectsCrossScopeKey(t *testing.T) {
+	set := &curation{
+		byHash: map[string]bool{"abcdef1234567890abcdef1234567890abcdef12": true},
+		byKey:  map[string]bool{"nyaa:1143533": false, "ab:1143533": false},
+	}
+	raw := []item{
+		{Title: "nyaa key under ab scope", InfoURL: "https://nyaa.si/view/1143533", GUID: "g1"},
+		{Title: "curated hash only under ab scope", InfoHash: "abcdef1234567890abcdef1234567890abcdef12", GUID: "g2"},
+	}
+	if out := markAndDedupe(raw, set, upstreamAB); len(out) != 0 {
+		t.Fatalf("got %d items, want 0 (cross-scope key and hash-only items must not match under /ab)", len(out))
+	}
+	abOnly := []item{{Title: "ab key under nyaa scope", InfoURL: "https://animebytes.tv/torrents.php?id=1&torrentid=1143533", GUID: "g3"}}
+	if out := markAndDedupe(abOnly, set, upstreamNyaa); len(out) != 0 {
+		t.Fatalf("got %d items, want 0 (an AnimeBytes key must not match under /nyaa)", len(out))
 	}
 }
 
@@ -206,7 +233,7 @@ func TestMarkAndDedupeRejectsUncuratedHash(t *testing.T) {
 		byKey:  map[string]bool{},
 	}
 	raw := []item{{Title: "uncurated hash", InfoHash: "0123456789012345678901234567890123456789", GUID: "g1"}}
-	if out := markAndDedupe(raw, set); len(out) != 0 {
+	if out := markAndDedupe(raw, set, upstreamNyaa); len(out) != 0 {
 		t.Fatalf("got %d items, want 0 (a valid but uncurated info hash must not match)", len(out))
 	}
 }
@@ -365,7 +392,7 @@ func TestAnimeBytesMatching(t *testing.T) {
 	// End to end: an AB item (no info hash) matches the SeaDex set by tracker key.
 	set := &curation{byHash: map[string]bool{}, byKey: map[string]bool{"ab:1167293": true}}
 	raw := []item{{Title: "[Momonoki] Frieren S01", InfoURL: prowlarrComments, GUID: prowlarrGUID}}
-	out := markAndDedupe(raw, set)
+	out := markAndDedupe(raw, set, upstreamAB)
 	if len(out) != 1 || out[0].DownloadVolumeFactor != dvfBest {
 		t.Fatalf("AB item did not match/mark best: %+v", out)
 	}
@@ -939,6 +966,150 @@ func TestReloadRetriesPreservedMtimeReplacementAfterFailure(t *testing.T) {
 	ix.reload(context.Background())
 	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
 		t.Errorf("after preserved-mtime repair feed = %d items, want 1 (a new inode at the failed mtime must be retried)", len(got))
+	}
+}
+
+// nyaaTestEntries builds n distinct single-torrent Nyaa SeaDex entries, the
+// minimal input for a synthesized feed of n items in reload tests.
+func nyaaTestEntries(n int) []seadex.Entry {
+	entries := make([]seadex.Entry, 0, n)
+	for i := range n {
+		entries = append(entries, seadex.Entry{
+			AniListID: 7 + i,
+			Torrents: []seadex.Torrent{{
+				Tracker: "Nyaa", URL: "https://nyaa.si/view/" + strconv.Itoa(42+i), IsBest: true,
+				Files: []seadex.File{{Length: 1, Name: "Show " + strconv.Itoa(i) + " - S01E01 (1080p) [G].mkv"}},
+			}},
+		})
+	}
+	return entries
+}
+
+// TestReloadInstallsPreservedMtimeReplacementAfterSuccess pins the last-good
+// gate to file IDENTITY, not just mtime: after a snapshot loads successfully at
+// mtime T, a DIFFERENT valid snapshot installed on a new inode with its mtime
+// reset to the same T (an atomic rename or backup restore preserving
+// timestamps) must still install - a mtime-only last-good check would return
+// early and leave the old feed served until an unrelated write or a restart.
+func TestReloadInstallsPreservedMtimeReplacementAfterSuccess(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "feed.json")
+	if err := NewFeedWriter("", false, path, nil).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	loadedAt := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(path, loadedAt, loadedAt); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	ix := New(&Config{}, Deps{}, path)
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+		t.Fatalf("initial feed = %d items, want 1", len(got))
+	}
+
+	// A different snapshot on a NEW inode, renamed over the loaded file with
+	// the loaded mtime preserved.
+	replacement := filepath.Join(dir, "feed-replacement.json")
+	if err := NewFeedWriter("", false, replacement, nil).Rebuild(context.Background(), nyaaTestEntries(2), nil); err != nil {
+		t.Fatalf("Rebuild replacement: %v", err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if err := os.Chtimes(path, loadedAt, loadedAt); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	ix.reload(context.Background())
+	if got := ix.feedFor(upstreamNyaa); len(got) != 2 {
+		t.Errorf("after preserved-mtime replacement feed = %d items, want 2 (a new inode at the loaded mtime must install)", len(got))
+	}
+}
+
+// TestReloadRetriesTransientReadFailureOnSameInode pins the failed-file memo to
+// DETERMINISTIC failures only: a snapshot whose read fails (here an oversized
+// file the bounded read rejects - a root-safe stand-in for a transient EIO or
+// a later-chmodded EACCES) must NOT be memoized, so a subsequent in-place
+// repair that changes neither inode nor mtime is still retried and installs.
+// Memoizing the read failure would skip the unchanged-identity file forever.
+func TestReloadRetriesTransientReadFailureOnSameInode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "feed.json")
+	// A sparse file one byte over the bound: os.Stat succeeds, the bounded
+	// read fails.
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := f.Truncate(maxFeedBytes + 1); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	failedAt := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(path, failedAt, failedAt); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	// New's warm-up reload hits the read failure; it must stay retryable.
+	ix := New(&Config{}, Deps{}, path)
+	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
+		t.Fatalf("initial feed = %d items, want 0 (oversized snapshot must not load)", len(got))
+	}
+
+	// Repair IN PLACE (same inode: build a valid snapshot beside it, then
+	// rewrite the original file's bytes) and restore the failed mtime.
+	repaired := filepath.Join(dir, "feed-repaired.json")
+	if err := NewFeedWriter("", false, repaired, nil).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	valid, err := os.ReadFile(repaired)
+	if err != nil {
+		t.Fatalf("read repaired: %v", err)
+	}
+	if err := os.WriteFile(path, valid, 0o644); err != nil {
+		t.Fatalf("in-place repair: %v", err)
+	}
+	if err := os.Chtimes(path, failedAt, failedAt); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	ix.reload(context.Background())
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+		t.Errorf("after same-inode repair feed = %d items, want 1 (a read failure must stay retryable)", len(got))
+	}
+}
+
+// TestReloadConcurrentCallers exercises reload's coalescing under concurrency
+// (run with -race): many requests observing a rewritten snapshot at once must
+// never race on the published snapshot fields, and the new feed must be
+// installed once the dust settles.
+func TestReloadConcurrentCallers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	if err := NewFeedWriter("", false, path, nil).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	ix := New(&Config{}, Deps{}, path)
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+		t.Fatalf("initial feed = %d items, want 1", len(got))
+	}
+	if err := NewFeedWriter("", false, path, nil).Rebuild(context.Background(), nyaaTestEntries(2), nil); err != nil {
+		t.Fatalf("Rebuild newer: %v", err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			ix.reload(context.Background())
+			_ = ix.feedFor(upstreamNyaa)
+		})
+	}
+	wg.Wait()
+	// TryLock losers return without installing; one more serial reload
+	// guarantees the newer snapshot is in.
+	ix.reload(context.Background())
+	if got := ix.feedFor(upstreamNyaa); len(got) != 2 {
+		t.Errorf("after concurrent reloads feed = %d items, want 2", len(got))
 	}
 }
 

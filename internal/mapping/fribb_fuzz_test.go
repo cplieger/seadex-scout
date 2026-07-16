@@ -1,6 +1,8 @@
 package mapping
 
 import (
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -49,6 +51,34 @@ func FuzzParseFribb(f *testing.F) {
 					t.Errorf("parseFribb IMDbIDs entry not trimmed/non-empty: %q", s)
 				}
 			}
+		}
+	})
+}
+
+// FuzzParseFribb_numericIDFormsEquivalent pins a cross-representation
+// property on the number-or-string flexInt decoder sitting on the externally
+// supplied Fribb JSON path: every int32 AniList/TVDB id must produce the same
+// records whether upstream sends JSON numbers or numeric strings (including
+// ids the validity invariant rejects, which must drop identically from both
+// forms).
+func FuzzParseFribb_numericIDFormsEquivalent(f *testing.F) {
+	f.Add(int32(0))
+	f.Add(int32(1))
+	f.Add(int32(-1))
+	f.Add(int32(2147483647))
+
+	log := discardLogger()
+	f.Fuzz(func(t *testing.T, id int32) {
+		numberJSON := fmt.Appendf(nil, `[{"anilist_id":%d,"tvdb_id":%d,"type":"tv"}]`, id, id)
+		stringJSON := fmt.Appendf(nil, `[{"anilist_id":%q,"tvdb_id":%q,"type":"tv"}]`, fmt.Sprint(id), fmt.Sprint(id))
+
+		numberRecords, numberErr := parseFribb(numberJSON, log)
+		stringRecords, stringErr := parseFribb(stringJSON, log)
+		if numberErr != nil || stringErr != nil {
+			t.Fatalf("parseFribb equivalent numeric forms: number error=%v, string error=%v", numberErr, stringErr)
+		}
+		if !reflect.DeepEqual(numberRecords, stringRecords) {
+			t.Errorf("parseFribb numeric form = %#v, string form = %#v for id %d", numberRecords, stringRecords, id)
 		}
 	})
 }

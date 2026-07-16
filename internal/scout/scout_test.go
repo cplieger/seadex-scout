@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cplieger/arrapi"
+	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
@@ -151,6 +152,15 @@ func noNetworkClient() *http.Client {
 	return &http.Client{Transport: errTransport{}}
 }
 
+// aniStatsFn adapts an AniList client's Stats to the Deps.AniListStats
+// callback, mirroring the composition root's wiring.
+func aniStatsFn(c *anilist.Client) func() (int64, int64) {
+	return func() (int64, int64) {
+		st := c.Stats()
+		return st.Calls, st.RateLimitWaits
+	}
+}
+
 // TestLoadStateCanceledContextIsNotAFault pins loadState's shutdown handling:
 // a SIGTERM already visible while state loads is the redeploy, not a state
 // corruption or read fault, so no ERROR record may be emitted (the shipped
@@ -248,5 +258,31 @@ func TestNewNilLoggerFallsBackToDefault(t *testing.T) {
 
 	if n := recorder.CountExact("state load failed; starting from empty state"); n != 1 {
 		t.Errorf("state-load failure logged through the default logger %d times, want 1", n)
+	}
+}
+
+// TestSave_retriesCanceledContextWithDetachedDeadline pins the
+// cancellation-safe state persistence contract: a save whose context was
+// already cancelled (a redeploy SIGTERM landing mid-cycle) must still persist
+// state via the detached context.WithoutCancel retry, or the AniList memo and
+// finding dedupe state would be discarded on every routine shutdown.
+func TestSave_retriesCanceledContextWithDetachedDeadline(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
+	s := &Scout{deps: Deps{Store: store}, log: logger}
+	want := state.State{Baselined: true}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.save(ctx, &want)
+
+	got, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load() after save with canceled context: %v", err)
+	}
+	if !got.Baselined {
+		t.Errorf("Load().Baselined = false, want true")
 	}
 }

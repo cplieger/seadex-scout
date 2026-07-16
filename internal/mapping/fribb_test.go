@@ -392,3 +392,30 @@ func TestParseFribb_identifierSlicesCapped(t *testing.T) {
 		}
 	}
 }
+
+// TestParseFribb_toleratesVariantRecords characterizes the tolerant decode of
+// one record mixing every upstream shape variant at once: padded string ids,
+// a padded type, a scalar imdb_id, a tv-keyed themoviedb_id (ignored — only
+// the movie half feeds a lookup), and a season object; beside it, an array
+// imdb_id with blanks, a movie-array themoviedb_id with a quoted number and
+// an "unknown" placeholder, and an unkeyable record (odd anilist_id) that is
+// omitted.
+func TestParseFribb_toleratesVariantRecords(t *testing.T) {
+	data := []byte(`[
+		{"anilist_id":" 42 ","tvdb_id":101,"type":" tv ","imdb_id":" tt001 ","themoviedb_id":{"tv":"202"},"season":{"tvdb":3},"episode_offset":{"tvdb":12}},
+		{"anilist_id":43,"type":"movie","imdb_id":["tt002","  "," tt003 "],"themoviedb_id":{"movie":[303,"404","unknown"]}},
+		{"anilist_id":{"unexpected":true},"type":"TV"}
+	]`)
+
+	got, err := parseFribb(data, discardLogger())
+	if err != nil {
+		t.Fatalf("parseFribb: %v", err)
+	}
+	want := []Record{
+		{Type: "TV", IMDbIDs: []string{"tt001"}, AniListID: 42, TvdbID: 101, SeasonTvdb: 3},
+		{Type: "MOVIE", IMDbIDs: []string{"tt002", "tt003"}, TmdbMovies: []int{303, 404}, AniListID: 43},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("parseFribb variant records = %#v, want %#v", got, want)
+	}
+}

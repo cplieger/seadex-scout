@@ -257,3 +257,43 @@ func TestMatchMidBatchOutageTripsFastFailBreaker(t *testing.T) {
 		}
 	}
 }
+
+// recoveringAniList models an upstream that recovers mid-outage: the batch
+// prefetch is PARTIAL (first id returned + error), per-id Fetch fails
+// transiently for every id except 40, which succeeds.
+type recoveringAniList struct{ fetchCalls int }
+
+func (a *recoveringAniList) Fetch(_ context.Context, id int) (anilist.Media, error) {
+	a.fetchCalls++
+	if id == 40 {
+		return anilist.Media{Titles: []string{"Recovered"}, Format: "TV"}, nil
+	}
+	return anilist.Media{}, errors.New("anilist 500")
+}
+
+func (*recoveringAniList) FetchMany(_ context.Context, ids []int) (map[int]anilist.Media, error) {
+	return map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}}, errors.New("anilist 500")
+}
+
+// TestMatchSuccessfulLookupResetsFailureBreaker pins recordSuccess's streak
+// reset: a successful per-id lookup after two transient failures must reset
+// the consecutive-failure breaker, so a recovered upstream does not trip it
+// early. With the reset removed, id 40's success leaves the streak at 2, id 50
+// trips the breaker (streak 3), and id 60 fails fast - 4 Fetch calls instead
+// of the 5 a resetting breaker allows.
+func TestMatchSuccessfulLookupResetsFailureBreaker(t *testing.T) {
+	fake := &recoveringAniList{}
+	entries := []seadex.Entry{{AniListID: 10}, {AniListID: 20}, {AniListID: 30}, {AniListID: 40}, {AniListID: 50}, {AniListID: 60}}
+
+	res := NewMatcher(fake, nil).Match(context.Background(), entries, &library.Snapshot{}, mapping.NewIndex(nil), Memo{})
+
+	if fake.fetchCalls != 5 {
+		t.Errorf("single Fetch calls = %d, want 5: success after two failures must reset the breaker streak", fake.fetchCalls)
+	}
+	if _, ok := res.Memo.Entries[40]; !ok {
+		t.Error("successful recovery was not memoized")
+	}
+	if !res.Degraded {
+		t.Error("Degraded = false, want true because transient failures occurred")
+	}
+}

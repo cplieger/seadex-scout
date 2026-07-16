@@ -109,6 +109,29 @@ func TestDedupeKeyEscapesDelimiters(t *testing.T) {
 	if dedupeKey(&trailingBackslash) == dedupeKey(&leadingPipe) {
 		t.Error(`("x\", "y") and ("x", "|y") must not share a dedupe key (backslash must be escaped)`)
 	}
+
+	// The structured current-group set must survive flattening: distinct
+	// two-group states ["a,b","c"] and ["a","b,c"] share the display join
+	// "a,b,c", and a two-group ["A","B"] shares it with the one-group literal
+	// ["A,B"]; the element-wise escaped encoding keeps their keys distinct.
+	splitAB := base
+	splitAB.currentGroups = []string{"a,b", "c"}
+	splitAB.CurrentGroup = "a,b,c"
+	splitBC := base
+	splitBC.currentGroups = []string{"a", "b,c"}
+	splitBC.CurrentGroup = "a,b,c"
+	if dedupeKey(&splitAB) == dedupeKey(&splitBC) {
+		t.Error(`current groups ["a,b","c"] and ["a","b,c"] must not share a dedupe key`)
+	}
+	oneLiteral := base
+	oneLiteral.currentGroups = []string{"A,B"}
+	oneLiteral.CurrentGroup = "A,B"
+	twoGroupsCur := base
+	twoGroupsCur.currentGroups = []string{"A", "B"}
+	twoGroupsCur.CurrentGroup = "A,B"
+	if dedupeKey(&oneLiteral) == dedupeKey(&twoGroupsCur) {
+		t.Error(`current group literal ["A,B"] and groups ["A","B"] must not share a dedupe key`)
+	}
 }
 
 func TestRepresentativePrefersResolutionThenPublic(t *testing.T) {
@@ -147,13 +170,26 @@ func TestObtainableLinksDedupesAndPrefixesPrivateURL(t *testing.T) {
 		{rel: release.Release{Tracker: "Nyaa"}, torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}},
 		{rel: release.Release{Tracker: "AB"}, torrent: seadex.Torrent{Tracker: "AB", URL: "/torrents.php?id=1"}},
 		{rel: release.Release{Tracker: "Nyaa"}, torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}},
+		// A delimiter-bearing pair: with a string-concatenated dedupe key these
+		// two distinct (tracker, URL) tuples collide ("Nyaa|https://nyaa.si/a"
+		// + "https://nyaa.si/b" == "Nyaa" + "https://nyaa.si/a|https://nyaa.si/b");
+		// the struct key keeps both. Both URLs stay on the tracker's canonical
+		// host so UsableURL passes them through.
+		{rel: release.Release{Tracker: "Nyaa|https://nyaa.si/a"}, torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/b"}},
+		{rel: release.Release{Tracker: "Nyaa"}, torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/a|https://nyaa.si/b"}},
 	}
 	links := obtainableLinks(cands)
-	if len(links) != 2 {
-		t.Fatalf("expected 2 distinct links, got %d: %+v", len(links), links)
+	if len(links) != 4 {
+		t.Fatalf("expected 4 distinct links, got %d: %+v", len(links), links)
 	}
 	if links[1].URL != "https://animebytes.tv/torrents.php?id=1" {
 		t.Errorf("AB relative URL not prefixed, got %q", links[1].URL)
+	}
+	if links[2] == links[3] {
+		t.Errorf("delimiter-bearing tuples must stay distinct, both = %+v", links[2])
+	}
+	if links[2].URL != "https://nyaa.si/b" || links[3].URL != "https://nyaa.si/a|https://nyaa.si/b" {
+		t.Errorf("delimiter-bearing tuples mangled: %+v, %+v", links[2], links[3])
 	}
 }
 
@@ -437,6 +473,33 @@ func TestCompareMislabeledAnimeBytesURLRequiresOptIn(t *testing.T) {
 				t.Errorf("ReleaseURL = %q, want the AB URL", got[0].ReleaseURL)
 			}
 		})
+	}
+}
+
+func TestCompareMislabeledAnimeBytesURLChangesDedupeKey(t *testing.T) {
+	// The dedupe key must classify links by the same toggle boundary the
+	// candidate filter uses (URL-aware, label untrusted): a same-group best on
+	// animebytes.tv mislabeled "Nyaa" is invisible with AnimeBytes off, and
+	// enabling the toggle must CHANGE the finding's dedupe key so the newly
+	// obtainable source re-surfaces instead of staying suppressed as already
+	// alerted.
+	item := &library.Item{Title: "Mislabeled Key", Groups: []string{"erai-raws"}, SeasonGroups: map[int][]string{1: {"erai-raws"}}}
+	entry := seadex.Entry{AniListID: 501, Torrents: []seadex.Torrent{
+		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/501"},
+		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://animebytes.tv/torrents.php?id=9&torrentid=501"},
+	}}
+	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+
+	off := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	if len(off) != 1 {
+		t.Fatalf("AnimeBytes off should still surface the public recommendation, got %d", len(off))
+	}
+	on := comparer(filter.Options{AnimeBytes: true}, false).Compare([]match.Match{m})
+	if len(on) != 1 {
+		t.Fatalf("AnimeBytes on should surface the recommendation, got %d", len(on))
+	}
+	if off[0].DedupeKey == on[0].DedupeKey {
+		t.Errorf("dedupe key must change when the toggle surfaces a mislabeled AB link, got %q both ways", on[0].DedupeKey)
 	}
 }
 
