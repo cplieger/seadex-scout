@@ -1,6 +1,9 @@
 package release
 
-import "strings"
+import (
+	"net/url"
+	"strings"
+)
 
 // Canonical tracker names: the Tracker.Name values of the table entries.
 // Consumers that branch on a specific tracker compare LookupTracker's
@@ -65,14 +68,37 @@ func LookupTracker(name string) (Tracker, bool) {
 	return t, ok
 }
 
-// TrackerBaseURLs returns the canonical site base URLs of every tracker in
-// the table, for consumers that validate an absolute URL's host against the
-// known tracker sites (the tracker label is untrusted upstream data, so the
-// URL host is the evidence such consumers key on).
-func TrackerBaseURLs() []string {
-	urls := make([]string, 0, len(trackerTable))
+// trackerByHost indexes the table by canonical lowercased site hostname
+// (derived from BaseURL, so the table stays the single home of the hosts).
+// An entry whose BaseURL does not parse to a hostname is omitted, so a
+// malformed table entry fails closed instead of matching arbitrary hosts.
+var trackerByHost = func() map[string]Tracker {
+	m := make(map[string]Tracker, len(trackerTable))
 	for _, t := range trackerTable {
-		urls = append(urls, t.BaseURL)
+		if u, err := url.Parse(t.BaseURL); err == nil && u.Hostname() != "" {
+			m[strings.ToLower(u.Hostname())] = t
+		}
 	}
-	return urls
+	return m
+}()
+
+// LookupTrackerByHost resolves a URL hostname (case-insensitively; one
+// DNS-root trailing dot tolerated) to the tracker whose canonical site host
+// it equals or is a dot-delimited subdomain of, reporting whether one
+// matched. The tracker label is untrusted upstream data, so consumers that
+// validate an absolute URL's host key on this evidence instead; an empty or
+// unknown host matches nothing, and neither a suffix-confusion host
+// ("evilnyaa.si") nor a parent-domain spoof ("nyaa.si.evil.example")
+// survives the dot-delimited comparison.
+func LookupTrackerByHost(host string) (Tracker, bool) {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if host == "" {
+		return Tracker{}, false
+	}
+	for canonical, t := range trackerByHost {
+		if host == canonical || strings.HasSuffix(host, "."+canonical) {
+			return t, true
+		}
+	}
+	return Tracker{}, false
 }

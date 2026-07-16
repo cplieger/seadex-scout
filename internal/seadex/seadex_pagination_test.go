@@ -213,3 +213,52 @@ func TestFetchEntriesUnparseableUpdatedWarnsOnce(t *testing.T) {
 		t.Error("unparseable-updated WARN does not carry count=2 (only the two bogus timestamps; the empty/valid ones must not count)")
 	}
 }
+
+// TestFetchEntriesUnusableTorrentURLWarnsOnce pins the link-drop signal: a
+// torrent whose non-empty URL is dropped to "" by UsableURL (a foreign host
+// under a trusted tracker label, or an unknown tracker) is counted, and the
+// fetch surfaces ONE aggregate WARN carrying the count - a tracker host
+// migration that strips every release link must be alertable from Loki - while
+// the fetch itself still succeeds. An empty URL and a usable canonical-host
+// URL must not count.
+func TestFetchEntriesUnusableTorrentURLWarnsOnce(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"totalItems":2,"totalPages":1,"items":[`+
+			`{"alID":1,"expand":{"trs":[`+
+			`{"tracker":"Nyaa","url":"https://evil.example/view/1"},`+
+			`{"tracker":"SomeRandomTracker","url":"https://example.com/x"},`+
+			`{"tracker":"Nyaa","url":""}]}},`+
+			`{"alID":2,"expand":{"trs":[`+
+			`{"tracker":"Nyaa","url":"https://nyaa.si/view/123"}]}}]}`)
+	}))
+	defer server.Close()
+
+	logger, recorder := capture.New()
+	entries, err := NewClient(server.Client(), server.URL, 0, logger).FetchEntries(context.Background())
+	if err != nil {
+		t.Fatalf("FetchEntries returned error: %v (unusable torrent URLs must not fail the fetch)", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(entries))
+	}
+	const msg = "seadex torrent URLs unusable; affected findings and feed items carry no release link"
+	if got := recorder.CountExact(msg); got != 1 {
+		t.Errorf("unusable-URL WARN count = %d, want 1 aggregate line", got)
+	}
+	warned := false
+	for _, r := range recorder.Records() {
+		if r.Message != msg {
+			continue
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "count" && a.Value.Int64() == 2 {
+				warned = true
+				return false
+			}
+			return true
+		})
+	}
+	if !warned {
+		t.Error("unusable-URL WARN does not carry count=2 (only the foreign-host and unknown-tracker URLs; the empty and usable ones must not count)")
+	}
+}

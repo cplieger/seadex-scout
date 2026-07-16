@@ -66,3 +66,39 @@ func TestMdLinkPropertyOnlyHTTPLinks(t *testing.T) {
 		}
 	})
 }
+
+// TestSanitizeDisplayTextPropertyBoundedAndIdempotent is the per-PR randomized
+// net for the JSON/slog sanitizer, mirroring the escapeCell property: for any
+// input the output carries no C0 control other than CR/LF, no DEL, no C1
+// control, no Unicode bidi control (ranges hardcoded independently of the
+// production textsafe.IsBidiControl classifier), and no U+2028/U+2029 separator; and
+// sanitizing is idempotent (it is a normalizer).
+func TestSanitizeDisplayTextPropertyBoundedAndIdempotent(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		s := rapid.String().Draw(t, "s")
+		got := sanitizeDisplayText(s)
+		for _, r := range got {
+			if (r < 0x20 && r != '\n' && r != '\r') || r == 0x7f || (r >= 0x80 && r <= 0x9f) ||
+				r == '\u061c' || r == '\u200e' || r == '\u200f' ||
+				(r >= '\u202a' && r <= '\u202e') || (r >= '\u2066' && r <= '\u2069') ||
+				r == '\u2028' || r == '\u2029' {
+				t.Errorf("sanitizeDisplayText(%q) = %q, contains unsafe rune %U", s, got, r)
+			}
+		}
+		if again := sanitizeDisplayText(got); again != got {
+			t.Errorf("sanitizeDisplayText not idempotent: %q -> %q -> %q", s, got, again)
+		}
+		if !strings.ContainsFunc(s, isUnsafeForDisplay) && got != s {
+			t.Errorf("sanitizeDisplayText(%q) = %q, changed a fully-safe string", s, got)
+		}
+	})
+}
+
+// isUnsafeForDisplay mirrors the property's hardcoded unsafe-rune set for the
+// safe-string-unchanged check.
+func isUnsafeForDisplay(r rune) bool {
+	return (r < 0x20 && r != '\n' && r != '\r') || r == 0x7f || (r >= 0x80 && r <= 0x9f) ||
+		r == '\u061c' || r == '\u200e' || r == '\u200f' ||
+		(r >= '\u202a' && r <= '\u202e') || (r >= '\u2066' && r <= '\u2069') ||
+		r == '\u2028' || r == '\u2029'
+}

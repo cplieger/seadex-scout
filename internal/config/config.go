@@ -23,6 +23,7 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -221,6 +222,10 @@ type Config struct {
 	// PollExternal is set when poll_interval is off/disabled/0: no internal
 	// timer, cycles are triggered out-of-band via the `poll` subcommand.
 	PollExternal bool
+	// SonarrWanted / RadarrWanted record the file's enabled toggles so
+	// Validate can reject an enabled arr left with neither url nor api_key.
+	SonarrWanted bool
+	RadarrWanted bool
 }
 
 // Load reads, ${VAR}-expands, and parses the YAML config at path into the
@@ -229,18 +234,11 @@ type Config struct {
 // loudly at startup rather than being silently ignored); call Validate for
 // semantic checks.
 func Load(path string) (Config, error) {
-	// Read through the shared atomicfile bounded reader (the same primitive
-	// writeStarterConfig and internal/state use), which enforces the size cap and
-	// returns the atomicfile.ErrFileTooLarge sentinel on an oversized file.
-	// Config load is a synchronous startup step with no cancellation point, so it
-	// passes context.Background(), matching writeStarterConfig.
-	data, err := atomicfile.ReadBounded(context.Background(), path, maxConfigBytes)
+	doc, refs, data, err := loadExpandedDoc(path)
 	if err != nil {
-		return Config{}, fmt.Errorf("read config %s: %w", path, err)
-	}
-
-	var doc yaml.Node
-	if err := yaml.Unmarshal(data, &doc); err != nil {
+		if data == nil {
+			return Config{}, fmt.Errorf("read config %s: %w", path, err)
+		}
 		// Same fail-closed sanitizer as the decode errors below: a parse error
 		// can embed operator-written text adjacent to a secret (e.g. an
 		// unquoted literal secret read as an alias yields "unknown anchor
@@ -250,7 +248,7 @@ func Load(path string) (Config, error) {
 	if err := checkUnknownKeys(data); err != nil {
 		return Config{}, fmt.Errorf("parse config %s: %s", path, sanitizeYAMLError(err))
 	}
-	if refs := yamlenv.Expand(&doc, isAllowedEnvVar); len(refs) > 0 {
+	if len(refs) > 0 {
 		slog.Warn("config references environment variables that are not set; "+
 			"the literal ${VAR} is kept and will likely fail authentication",
 			"vars", strings.Join(refs, ","))
@@ -260,6 +258,30 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("parse config %s: %s", path, sanitizeYAMLError(err))
 	}
 	return fc.toConfig(), nil
+}
+
+// loadExpandedDoc reads the bounded config file at path and applies the
+// allowlisted ${VAR} expansion, returning the expanded document node, the
+// unresolved allowlisted refs, and the raw pre-expansion bytes (nil raw
+// signals a read failure; non-nil raw alongside an error signals a parse
+// failure). It is the single home of the read+expand pipeline shared by Load
+// (strict) and PollIntervalFromFile (best-effort).
+func loadExpandedDoc(path string) (doc *yaml.Node, refs []string, raw []byte, err error) {
+	// Read through the shared atomicfile bounded reader (the same primitive
+	// writeStarterConfig and internal/state use), which enforces the size cap and
+	// returns the atomicfile.ErrFileTooLarge sentinel on an oversized file.
+	// Config load is a synchronous startup step with no cancellation point, so it
+	// passes context.Background(), matching writeStarterConfig.
+	raw, err = atomicfile.ReadBounded(context.Background(), path, maxConfigBytes)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	var node yaml.Node
+	if err := yaml.Unmarshal(raw, &node); err != nil {
+		return nil, nil, raw, err
+	}
+	refs = yamlenv.Expand(&node, isAllowedEnvVar)
+	return &node, refs, raw, nil
 }
 
 // checkUnknownKeys re-decodes the raw document with KnownFields(true) into a
@@ -308,6 +330,10 @@ const (
 	yamlUnknownKeyInType = " not found in type "
 )
 
+// yamlParseLineRe matches the value-independent "yaml: line N: " prefix a
+// yaml.v3 syntax error carries; only the digits are kept, never the message.
+var yamlParseLineRe = regexp.MustCompile(`^yaml: line (\d+): `)
+
 // sanitizeYAMLError rewrites a yaml decode error so an expanded secret never
 // reaches the startup log; line numbers and target types are kept
 // (field-name-only, the same posture as validateHTTPURL errors). The decode
@@ -318,11 +344,16 @@ const (
 // backtick defeats a delimiter regex and leaks a prefix. Instead each
 // *yaml.TypeError entry is rebuilt from its value-independent structure, and
 // an unrecognized error shape falls back to a generic message rather than
-// risking a partial leak.
+// risking a partial leak - keeping only the "yaml: line N:" locator a syntax
+// error carries (structural parser output whose digits cannot embed a value).
 func sanitizeYAMLError(err error) string {
 	var typeErr *yaml.TypeError
 	if !errors.As(err, &typeErr) {
-		return "configuration could not be decoded (details withheld: they may embed an expanded secret)"
+		const withheld = "configuration could not be decoded (details withheld: they may embed an expanded secret)"
+		if m := yamlParseLineRe.FindStringSubmatch(err.Error()); m != nil {
+			return "line " + m[1] + ": " + withheld
+		}
+		return withheld
 	}
 	entries := make([]string, 0, len(typeErr.Errors))
 	for _, e := range typeErr.Errors {
@@ -420,6 +451,8 @@ func (fc *fileConfig) toConfig() Config {
 		IndexerABTorznabURL:   strings.TrimSpace(fc.Indexer.ABTorznabURL),
 		IndexerProwlarrAPIKey: strings.TrimSpace(fc.Indexer.ProwlarrAPIKey),
 		IndexerABPasskey:      strings.TrimSpace(fc.Indexer.ABPasskey),
+		SonarrWanted:          fc.Sonarr.Enabled,
+		RadarrWanted:          fc.Radarr.Enabled,
 	}
 	if fc.Sonarr.Enabled {
 		c.SonarrURL = strings.TrimSpace(fc.Sonarr.URL)
@@ -468,21 +501,23 @@ func parseInterval(raw string) (time.Duration, bool) {
 
 // PollIntervalFromFile reads ONLY the poll_interval key from the YAML
 // config at path and returns the effective cycle interval (0 = external
-// mode), applying the same parse+clamp rules Load uses. Every failure
-// (missing file, oversized, invalid YAML) also returns 0: the health
-// probe derives its freshness deadline from this and must never fail
-// because configuration is absent or malformed — the daemon itself
-// surfaces those loudly at startup. Unknown keys are deliberately
-// tolerated here (no checkUnknownKeys): strictness is Load's job.
+// mode), applying the same allowlisted ${VAR} expansion and the same
+// parse+clamp rules Load uses (so an env-referenced interval yields the
+// expanded value, not the literal ${VAR}). Every failure (missing file,
+// oversized, invalid YAML) also returns 0: the health probe derives its
+// freshness deadline from this and must never fail because configuration
+// is absent or malformed — the daemon itself surfaces those loudly at
+// startup. Unknown keys are deliberately tolerated here (no
+// checkUnknownKeys): strictness is Load's job.
 func PollIntervalFromFile(path string) time.Duration {
-	data, err := atomicfile.ReadBounded(context.Background(), path, maxConfigBytes)
+	doc, _, _, err := loadExpandedDoc(path)
 	if err != nil {
 		return 0
 	}
 	var probe struct {
 		PollInterval string `yaml:"poll_interval"`
 	}
-	if err := yaml.Unmarshal(data, &probe); err != nil {
+	if err := doc.Decode(&probe); err != nil {
 		return 0
 	}
 	interval, external := parseInterval(probe.PollInterval)
@@ -515,6 +550,14 @@ func (c *Config) IndexerConfigured() bool {
 	return c.IndexerNyaaTorznabURL != "" || c.IndexerABTorznabURL != ""
 }
 
+// IndexerABConfigured reports whether the AnimeBytes upstream is
+// configured (its Prowlarr Torznab URL is set). Single home of the
+// AB-enablement decision, consumed by the composition root's feed
+// writer wiring (build.go).
+func (c *Config) IndexerABConfigured() bool {
+	return c.IndexerABTorznabURL != ""
+}
+
 // Validate reports the first configuration problem that would stop the app from
 // running, or nil when runnable.
 func (c *Config) Validate() error {
@@ -529,6 +572,12 @@ func (c *Config) Validate() error {
 	}
 	if err := validateArrPair("radarr", c.RadarrURL, c.RadarrAPIKey); err != nil {
 		return err
+	}
+	if c.SonarrWanted && c.SonarrURL == "" && c.SonarrAPIKey == "" {
+		return errors.New("sonarr.enabled is true but sonarr.url and sonarr.api_key are both empty")
+	}
+	if c.RadarrWanted && c.RadarrURL == "" && c.RadarrAPIKey == "" {
+		return errors.New("radarr.enabled is true but radarr.url and radarr.api_key are both empty")
 	}
 	if !c.SonarrEnabled() && !c.RadarrEnabled() {
 		return errors.New("no arr configured: enable sonarr and/or radarr with a url + api_key")

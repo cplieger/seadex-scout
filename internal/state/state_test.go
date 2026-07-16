@@ -104,6 +104,42 @@ func TestStoreSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+// TestStoreSaveSanitizesLibrarySnapshot pins Save's ownership of the
+// sanitize-on-persist invariant: a credentialed ArrURL handed to Save never
+// lands in state.json (the caller no longer sanitizes), the rest of the item
+// survives, and the caller's in-memory State is left untouched (Save works on
+// a shallow copy).
+func TestStoreSaveSanitizesLibrarySnapshot(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "state.json"), testLogger())
+	st := &State{Library: library.Snapshot{Items: []library.Item{{
+		Arr:    library.ArrSonarr,
+		Title:  "Frieren",
+		ArrID:  7,
+		ArrURL: "https://user:pass@sonarr.example/series/frieren",
+	}}}}
+
+	if err := store.Save(context.Background(), st); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	got, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load after Save returned error: %v", err)
+	}
+	if len(got.Library.Items) != 1 {
+		t.Fatalf("loaded library items = %d, want 1", len(got.Library.Items))
+	}
+	it := got.Library.Items[0]
+	if it.ArrURL != "https://sonarr.example/series/frieren" {
+		t.Errorf("persisted ArrURL = %q, want the credential stripped by Save", it.ArrURL)
+	}
+	if it.Title != "Frieren" || it.Arr != library.ArrSonarr || it.ArrID != 7 {
+		t.Errorf("persisted item = %+v, want Title/Arr/ArrID untouched by sanitization", it)
+	}
+	if st.Library.Items[0].ArrURL != "https://user:pass@sonarr.example/series/frieren" {
+		t.Errorf("caller's State mutated by Save: ArrURL = %q, want original", st.Library.Items[0].ArrURL)
+	}
+}
+
 func TestStoreLoadCorruptReturnsDecodeError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	if err := os.WriteFile(path, []byte("{"), 0o644); err != nil {

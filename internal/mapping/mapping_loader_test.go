@@ -805,3 +805,35 @@ func TestLoader_refreshCache_futureFetchedAtFailedFetchClampsStaleAge(t *testing
 		}
 	}
 }
+
+// TestLoader_refreshCache_zeroRefreshAlwaysRevalidates pins the deployed
+// configuration's contract (the app wires DefaultMappingRefresh = 0): a zero
+// refresh window disables the fresh-reuse fast path entirely, so even a
+// just-fetched cache revalidates against upstream every cycle (an unchanged
+// upstream is a cheap 304) instead of being reused until the timestamp ages.
+// Guards against the fleet's opposite convention leaking in (scheduler treats
+// 0 as "off"; here 0 must mean "always revalidate", never "never refresh").
+func TestLoader_refreshCache_zeroRefreshAlwaysRevalidates(t *testing.T) {
+	var requests atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer ts.Close()
+	prev := &Cache{
+		FetchedAt: time.Now(), // just fetched: any positive window would reuse it
+		ETag:      "v1",
+		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", 0, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	if err != nil {
+		t.Fatalf("zero-refresh revalidation error: %v", err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("zero-refresh loader made %d upstream requests, want 1 (must revalidate every cycle)", got)
+	}
+	if len(next.Records) != 1 {
+		t.Errorf("zero-refresh 304 kept %d records, want 1", len(next.Records))
+	}
+}

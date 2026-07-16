@@ -231,12 +231,12 @@ func TestClassifyUnrecognizedVideoCodecFallsBackToText(t *testing.T) {
 }
 
 // TestIsAnimeBytesHost pins the AB host gate consumed by the AnimeBytes link
-// hider (filter.HideUnobtainableLink) and the indexer's tracker-key routing
+// hider (filter.ABVisible) and the indexer's tracker-key routing
 // (trackerKeyFromURL): the exact site host, its dot-delimited subdomains, and
 // the DNS-root trailing-dot form match; a suffix-confusion host, a
-// parent-domain spoof, and any other tracker do not. The function contract
-// takes an already-lowercased host (callers fold case via
-// strings.ToLower(u.Hostname())), so a mixed-case input does not match.
+// parent-domain spoof, and any other tracker do not. The gate resolves
+// through the canonical tracker table (LookupTrackerByHost), which folds
+// case, so a mixed-case host matches too.
 func TestIsAnimeBytesHost(t *testing.T) {
 	tests := []struct {
 		host string
@@ -252,7 +252,7 @@ func TestIsAnimeBytesHost(t *testing.T) {
 		{host: "animebytes.tv.evil.com", want: false},
 		{host: "animebytes.tv..", want: false},
 		{host: "nyaa.si", want: false},
-		{host: "AnimeBytes.tv", want: false},
+		{host: "AnimeBytes.tv", want: true},
 		{host: "", want: false},
 	}
 	for _, tc := range tests {

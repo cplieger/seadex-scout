@@ -2,6 +2,7 @@ package report
 
 import (
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -323,5 +324,70 @@ func TestNewReporterNilLoggerFallsBackToDefault(t *testing.T) {
 
 	if got := recorder.CountExact("cold start: findings baselined without notifying"); got != 1 {
 		t.Errorf("baseline summary on default logger = %d, want 1", got)
+	}
+}
+
+// TestReporterEmitSanitizesControlAndBidiRunes mirrors the audit report's
+// slog-path pin (TestReportLogSanitizesControlAndBidiRunes) against the
+// daemon finding emitter: slog's JSONHandler escapes C0 controls but emits C1
+// controls and bidi controls raw, so every untrusted attribute emitted by
+// emit and emitResolved must ride through textsafe.SanitizeLogText first. A
+// finding whose upstream-derived fields embed a C1 CSI (U+009B), an RLO bidi
+// override (U+202E), and a C0 escape introducer must log spaces in their
+// place on both the finding line and the resolution line.
+func TestReporterEmitSanitizesControlAndBidiRunes(t *testing.T) {
+	const dirty = "a\u009bb\u202ec\x1bd" // C1 CSI, RLO override, C0 ESC
+	const clean = "a b c d"
+	reporter, recorder := newCapturedReporter()
+	finding := testFinding("dirty", dirty)
+	finding.CurrentGroup = dirty
+	finding.RecommendedGroup = dirty
+	finding.ReleaseURL = dirty
+	finding.InfoHash = dirty
+
+	prior := reporter.Report([]compare.Finding{finding}, nil, nil, time.Now())
+	reporter.Report(nil, prior, nil, time.Now()) // resolve it via emitResolved
+
+	want := map[string]map[string]string{
+		"better release available": {
+			"title":             clean,
+			"current_group":     clean,
+			"recommended_group": clean,
+			"release_url":       clean,
+			"info_hash":         clean,
+		},
+		"finding resolved": {
+			"title":             clean,
+			"current_group":     clean,
+			"recommended_group": clean,
+		},
+	}
+	seen := map[string]bool{}
+	for _, rec := range recorder.Records() {
+		expected, ok := want[rec.Message]
+		if !ok {
+			continue
+		}
+		seen[rec.Message] = true
+		rec.Attrs(func(a slog.Attr) bool {
+			s, isStr := a.Value.Any().(string)
+			if !isStr {
+				return true
+			}
+			for _, bad := range []rune{'\u009b', '\u202e', '\x1b'} {
+				if strings.ContainsRune(s, bad) {
+					t.Errorf("%s attr %q carries raw unsafe rune %U: %q", rec.Message, a.Key, bad, s)
+				}
+			}
+			if w, pinned := expected[a.Key]; pinned && s != w {
+				t.Errorf("%s attr %q = %q, want %q", rec.Message, a.Key, s, w)
+			}
+			return true
+		})
+	}
+	for msg := range want {
+		if !seen[msg] {
+			t.Errorf("expected a %q line, none emitted", msg)
+		}
 	}
 }

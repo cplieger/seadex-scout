@@ -62,11 +62,13 @@ func (acc *feedAccumulator) add(e *seadex.Entry, t *seadex.Torrent, cats []int, 
 // with a parseable id, and (for AB) a configured passkey. An AB release skipped
 // solely for a missing passkey is counted in abSkippedNoPasskey so the caller
 // can nudge the operator once, rather than emitting link-less items an arr would
-// fail to grab. An in-scope Nyaa/AB torrent whose stored URL yields no parseable
-// id is dropped and counted in unresolvable, so an upstream URL-shape change
-// surfaces on the snapshot log line instead of silently shrinking the feed.
-// Trackers other than Nyaa/AB (a negligible SeaDex tail) are
-// dropped. Both feeds are sorted newest-first and capped at feedWindow.
+// fail to grab. An in-scope Nyaa/AB torrent with no grabbable link (its stored
+// URL yields no parseable id) or no parseable title (no episode files and no
+// release group) is dropped and counted in unresolvable, so an upstream
+// URL-shape change surfaces on the snapshot log line instead of silently
+// shrinking the feed. Trackers other than Nyaa/AB (a negligible SeaDex tail) are
+// dropped. Both feeds are deduped by GUID (best-wins; a torrent attached to
+// several entries emits one item), sorted newest-first, and capped at feedWindow.
 //
 // classify sets each item's Torznab category from the entry's AniList id: a
 // SeaDex file name cannot reliably tell a movie from a single-file OVA/special,
@@ -82,7 +84,39 @@ func buildFeeds(entries []seadex.Entry, abPasskey string, classify func(alID int
 			acc.add(e, &e.Torrents[j], cats, abPasskey)
 		}
 	}
-	return sortAndCap(acc.nyaa), sortAndCap(acc.ab), acc.abSkippedNoPasskey, acc.unresolvable
+	return sortAndCap(dedupeByGUID(acc.nyaa)), sortAndCap(dedupeByGUID(acc.ab)), acc.abSkippedNoPasskey, acc.unresolvable
+}
+
+// dedupeByGUID merges feed items sharing a GUID (the same torrent attached to
+// several SeaDex entries) into one item: best-wins on the marker (mirroring the
+// OR-accumulation buildSnapshot applies to the same identity in the search
+// curation set), categories unioned, and the newest entry update kept as
+// pubdate — so a torrent best on one entry and alt on another cannot render as
+// two same-GUID items with conflicting markers, where which one Sonarr's
+// GUID dedupe keeps would be feed-order arbitrary.
+func dedupeByGUID(items []item) []item {
+	idx := make(map[string]int, len(items))
+	out := items[:0]
+	for i := range items {
+		j, dup := idx[items[i].GUID]
+		if !dup {
+			idx[items[i].GUID] = len(out)
+			out = append(out, items[i])
+			continue
+		}
+		if items[i].DownloadVolumeFactor == dvfBest {
+			out[j].DownloadVolumeFactor = dvfBest
+		}
+		for _, c := range items[i].Categories {
+			if !slices.Contains(out[j].Categories, c) {
+				out[j].Categories = append(out[j].Categories, c)
+			}
+		}
+		if items[i].PubDate.After(out[j].PubDate) {
+			out[j].PubDate = items[i].PubDate
+		}
+	}
+	return out
 }
 
 // feedItemFor resolves one SeaDex torrent into a feed item and the scope it
@@ -99,7 +133,13 @@ func feedItemFor(e *seadex.Entry, t *seadex.Torrent, abPasskey string) (it item,
 	if !resolved {
 		return item{}, scope, false, scope == upstreamAB && abPasskey == "" && animeBytesID(t.URL) != ""
 	}
-	return synthItem(e, t, dl), scope, true, false
+	it = synthItem(e, t, dl)
+	if it.Title == "" {
+		// No episode files and no release group: an arr cannot parse or
+		// match a title-less item, so drop it (counted as unresolvable).
+		return item{}, scope, false, false
+	}
+	return it, scope, true, false
 }
 
 // synthItem builds one feed Item for a SeaDex torrent with an already-resolved

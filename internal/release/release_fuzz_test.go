@@ -80,7 +80,9 @@ func FuzzClassify(f *testing.F) {
 // onto any host always matches; gluing a dotless prefix onto a non-matching
 // host never creates a match (the suffix rule cannot be bypassed without a
 // label boundary); a single trailing dot never changes the answer; and a
-// matching host must at least end in "animebytes.tv" after the root-dot trim.
+// matching host must at least end in "animebytes.tv" after the gate's own
+// case/whitespace fold and root-dot trim (the gate resolves through
+// LookupTrackerByHost, which folds case and trims whitespace).
 func FuzzIsAnimeBytesHost(f *testing.F) {
 	f.Add("animebytes.tv")
 	f.Add("www.animebytes.tv")
@@ -88,6 +90,8 @@ func FuzzIsAnimeBytesHost(f *testing.F) {
 	f.Add("maliciousanimebytes.tv")
 	f.Add("animebytes.tv.evil.com")
 	f.Add(".animebytes.tv")
+	f.Add("ANIMEBYTES.TV")
+	f.Add("animebytes.tv ")
 	f.Add("")
 	f.Fuzz(func(t *testing.T, host string) {
 		got := IsAnimeBytesHost(host)
@@ -98,12 +102,16 @@ func FuzzIsAnimeBytesHost(f *testing.F) {
 		if !got && !strings.HasPrefix(host, ".") && IsAnimeBytesHost("evil"+host) {
 			t.Errorf("IsAnimeBytesHost(%q) = true for a dotless-prefix variant of non-matching host %q: suffix rule bypassed", "evil"+host, host)
 		}
-		if !strings.HasSuffix(host, ".") {
-			if dotted := IsAnimeBytesHost(host + "."); dotted != got {
-				t.Errorf("IsAnimeBytesHost(%q) = %v but IsAnimeBytesHost(%q) = %v: DNS-root trailing dot must not change the answer", host, got, host+".", dotted)
+		// The gate trims surrounding whitespace itself, so the trailing-dot
+		// metamorphic check appends the dot to the trimmed host (a dot after
+		// trailing whitespace is not a DNS-root dot).
+		if trimmed := strings.TrimSpace(host); !strings.HasSuffix(trimmed, ".") {
+			if dotted := IsAnimeBytesHost(trimmed + "."); dotted != got {
+				t.Errorf("IsAnimeBytesHost(%q) = %v but IsAnimeBytesHost(%q) = %v: DNS-root trailing dot must not change the answer", host, got, trimmed+".", dotted)
 			}
 		}
-		if got && !strings.HasSuffix(strings.TrimSuffix(host, "."), "animebytes.tv") {
+		norm := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+		if got && !strings.HasSuffix(norm, "animebytes.tv") {
 			t.Errorf("IsAnimeBytesHost(%q) = true but the host does not even end in animebytes.tv", host)
 		}
 	})
@@ -115,7 +123,9 @@ func FuzzIsAnimeBytesHost(f *testing.F) {
 // without the DNS-root dot) always matches; an explicit ".nyaa.si" label
 // boundary always matches; a dotless prefix never bypasses the suffix rule; a
 // DNS-root trailing dot never changes the answer; and a matching host at
-// least ends in "nyaa.si" after the root-dot trim.
+// least ends in "nyaa.si" after the gate's own case/whitespace fold and
+// root-dot trim (the gate resolves through LookupTrackerByHost, which folds
+// case and trims whitespace).
 func FuzzIsNyaaHost(f *testing.F) {
 	f.Add("nyaa.si")
 	f.Add("www.nyaa.si")
@@ -123,6 +133,8 @@ func FuzzIsNyaaHost(f *testing.F) {
 	f.Add("maliciousnyaa.si")
 	f.Add("nyaa.si.evil.com")
 	f.Add(".nyaa.si")
+	f.Add("NYAA.SI")
+	f.Add("nyaa.si ")
 	f.Add("")
 	f.Fuzz(func(t *testing.T, host string) {
 		got := IsNyaaHost(host)
@@ -136,12 +148,16 @@ func FuzzIsNyaaHost(f *testing.F) {
 		if !got && !strings.HasPrefix(host, ".") && IsNyaaHost("evil"+host) {
 			t.Errorf("IsNyaaHost(%q) = true for a dotless-prefix variant of non-matching host %q: suffix rule bypassed", "evil"+host, host)
 		}
-		if !strings.HasSuffix(host, ".") {
-			if dotted := IsNyaaHost(host + "."); dotted != got {
-				t.Errorf("IsNyaaHost(%q) = %v but IsNyaaHost(%q) = %v: DNS-root trailing dot must not change the answer", host, got, host+".", dotted)
+		// The gate trims surrounding whitespace itself, so the trailing-dot
+		// metamorphic check appends the dot to the trimmed host (a dot after
+		// trailing whitespace is not a DNS-root dot).
+		if trimmed := strings.TrimSpace(host); !strings.HasSuffix(trimmed, ".") {
+			if dotted := IsNyaaHost(trimmed + "."); dotted != got {
+				t.Errorf("IsNyaaHost(%q) = %v but IsNyaaHost(%q) = %v: DNS-root trailing dot must not change the answer", host, got, trimmed+".", dotted)
 			}
 		}
-		if got && !strings.HasSuffix(strings.TrimSuffix(host, "."), "nyaa.si") {
+		norm := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+		if got && !strings.HasSuffix(norm, "nyaa.si") {
 			t.Errorf("IsNyaaHost(%q) = true but the host does not even end in nyaa.si", host)
 		}
 	})

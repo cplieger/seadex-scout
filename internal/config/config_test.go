@@ -59,6 +59,8 @@ func TestConfigValidate(t *testing.T) {
 		{"ab indexer url without feed key rejected", Config{RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k", IndexerABTorznabURL: "http://prowlarr/2/api"}, true},
 		{"indexer url with feed key ok", Config{RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k", IndexerNyaaTorznabURL: "http://prowlarr/22/api", IndexerAPIKey: "feedkey"}, false},
 		{"no indexer url unaffected", Config{RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k"}, false},
+		{"enabled sonarr with url and key both empty rejected", Config{RunMode: RunModeDaemon, SonarrWanted: true, RadarrURL: "http://radarr:7878", RadarrAPIKey: "k"}, true},
+		{"enabled radarr with url and key both empty rejected", Config{RunMode: RunModeDaemon, RadarrWanted: true, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k"}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -869,6 +871,14 @@ func TestSanitizeYAMLErrorFallbacks(t *testing.T) {
 		}
 	})
 
+	t.Run("syntax error keeps the line locator and withholds the message", func(t *testing.T) {
+		got := sanitizeYAMLError(errors.New("yaml: line 7: found character that cannot start any token near " + secret))
+		want := "line 7: configuration could not be decoded (details withheld: they may embed an expanded secret)"
+		if got != want {
+			t.Errorf("sanitizeYAMLError(syntax error) = %q, want %q", got, want)
+		}
+	})
+
 	t.Run("wrapped TypeError is still recognized and sanitized", func(t *testing.T) {
 		typeErr := &yaml.TypeError{Errors: []string{
 			"line 3: cannot unmarshal !!str `" + secret + "` into bool",
@@ -1011,5 +1021,177 @@ func TestIsLinePrefix(t *testing.T) {
 		if got := isLinePrefix(tt.in); got != tt.want {
 			t.Errorf("isLinePrefix(%q) = %v, want %v", tt.in, got, tt.want)
 		}
+	}
+}
+
+// TestPollIntervalFromFile pins the health probe's freshness-deadline source:
+// the effective interval (parse+clamp) from a well-formed config, 0 (deadline
+// disabled) for external mode and for EVERY read or parse failure, the Load
+// default when the key is absent, tolerance of unknown keys (strictness is
+// Load's job, per the function's contract), and the same allowlisted ${VAR}
+// expansion Load applies (an env-referenced interval must yield the expanded
+// value, not the unparseable literal).
+func TestPollIntervalFromFile(t *testing.T) {
+	write := func(t *testing.T, content string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	tests := []struct {
+		name    string
+		content string
+		want    time.Duration
+	}{
+		{"scheduled interval is returned", "poll_interval: \"6h\"\n", 6 * time.Hour},
+		{"below-minimum interval is clamped like Load", "poll_interval: \"30m\"\n", minPollInterval},
+		{"external mode disables the deadline", "poll_interval: \"off\"\n", 0},
+		{"disabled sentinel disables the deadline", "poll_interval: \"disabled\"\n", 0},
+		{"absent key falls back to the default interval", "mode: \"daemon\"\n", DefaultPollInterval},
+		{"empty file falls back to the default interval", "", DefaultPollInterval},
+		{"unknown keys are tolerated", "not_a_real_key: 1\npoll_interval: \"6h\"\n", 6 * time.Hour},
+		{"malformed YAML disables the deadline", "poll_interval: [\n", 0},
+		{"wrong value type disables the deadline", "poll_interval: {h: 3}\n", 0},
+		{"oversized file disables the deadline", "poll_interval: \"6h\"\n#" + strings.Repeat("x", maxConfigBytes) + "\n", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := PollIntervalFromFile(write(t, tt.content)); got != tt.want {
+				t.Errorf("PollIntervalFromFile = %v, want %v", got, tt.want)
+			}
+		})
+	}
+	t.Run("missing file disables the deadline", func(t *testing.T) {
+		if got := PollIntervalFromFile(filepath.Join(t.TempDir(), "absent.yaml")); got != 0 {
+			t.Errorf("PollIntervalFromFile(absent) = %v, want 0", got)
+		}
+	})
+	t.Run("allowlisted ${VAR} reference is expanded like Load", func(t *testing.T) {
+		t.Setenv("SEADEX_SCOUT_POLL_INTERVAL", "6h")
+		path := write(t, "poll_interval: \"${SEADEX_SCOUT_POLL_INTERVAL}\"\n")
+		got := PollIntervalFromFile(path)
+		if got != 6*time.Hour {
+			t.Errorf("PollIntervalFromFile = %v, want 6h from the expanded env value", got)
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got != cfg.PollInterval {
+			t.Errorf("PollIntervalFromFile = %v, Load().PollInterval = %v; the probe must apply the same expansion Load does", got, cfg.PollInterval)
+		}
+	})
+	t.Run("expanded env value off disables the deadline", func(t *testing.T) {
+		t.Setenv("SEADEX_SCOUT_POLL_INTERVAL", "off")
+		path := write(t, "poll_interval: \"${SEADEX_SCOUT_POLL_INTERVAL}\"\n")
+		if got := PollIntervalFromFile(path); got != 0 {
+			t.Errorf("PollIntervalFromFile = %v, want 0 for an env-provided external mode", got)
+		}
+	})
+}
+
+// TestURLEmbedsCredential pins the sole trigger of the credential-leak config
+// warning: userinfo (with or without a password), each credential-like query
+// parameter, the case-insensitive fold, and the silent parse-failure and
+// clean-URL negatives.
+func TestURLEmbedsCredential(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{"empty", "", false},
+		{"clean", "http://prowlarr:9696/22/api", false},
+		{"benign query", "http://prowlarr:9696/22/api?t=caps", false},
+		{"userinfo", "http://user:pw@prowlarr:9696/22/api", true},
+		{"username-only userinfo", "http://token@prowlarr:9696/22/api", true},
+		{"apikey", "http://prowlarr:9696/22/api?apikey=k", true},
+		{"api_key", "http://prowlarr:9696/22/api?api_key=k", true},
+		{"passkey", "http://prowlarr:9696/22/api?passkey=k", true},
+		{"token", "http://prowlarr:9696/22/api?token=k", true},
+		{"uppercase APIKEY", "http://prowlarr:9696/22/api?APIKEY=k", true},
+		{"unparseable", "http://[::1", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := urlEmbedsCredential(tt.url); got != tt.want {
+				t.Errorf("urlEmbedsCredential(%q) = %v, want %v", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestValidateWarnsOnCredentialBearingTorznabURL pins validateIndexer's
+// credential-embedding torznab-URL diagnostic: a credential-like query
+// parameter or userinfo in either torznab URL fires the warning naming ONLY
+// the field (never the credential-bearing URL, which the warning exists to
+// keep out of logs), and clean URLs stay silent.
+func TestValidateWarnsOnCredentialBearingTorznabURL(t *testing.T) {
+	base := func() Config {
+		return Config{
+			RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k",
+			IndexerAPIKey:         strings.Repeat("a", 16),
+			IndexerProwlarrAPIKey: "pk",
+			IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api",
+			IndexerABTorznabURL:   "http://prowlarr:9696/2/api",
+		}
+	}
+	const warnMsg = "torznab url embeds a credential-like query parameter or userinfo"
+
+	t.Run("apikey query param warns naming the nyaa field", func(t *testing.T) {
+		const cred = "leaked-cred-sentinel"
+		rec := capture.Default(t)
+		c := base()
+		c.IndexerNyaaTorznabURL = "http://prowlarr:9696/22/api?apikey=" + cred
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if !rec.Contains(warnMsg) || !recordHasAttr(rec, "field", "indexer.nyaa_torznab_url") {
+			t.Errorf("Validate() log = %v, want the credential warning naming indexer.nyaa_torznab_url", rec.Messages())
+		}
+		corpus := strings.Join(rec.Messages(), "\n")
+		if strings.Contains(corpus, cred) || recordHasAttr(rec, "field", cred) {
+			t.Errorf("Validate() log leaks the credential value: %v", rec.Messages())
+		}
+	})
+	t.Run("userinfo credential warns naming the ab field", func(t *testing.T) {
+		rec := capture.Default(t)
+		c := base()
+		c.IndexerABTorznabURL = "http://user:pw-sentinel@prowlarr:9696/2/api"
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if !rec.Contains(warnMsg) || !recordHasAttr(rec, "field", "indexer.ab_torznab_url") {
+			t.Errorf("Validate() log = %v, want the credential warning naming indexer.ab_torznab_url", rec.Messages())
+		}
+	})
+	t.Run("clean torznab urls stay silent", func(t *testing.T) {
+		rec := capture.Default(t)
+		c := base()
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if rec.Contains(warnMsg) {
+			t.Errorf("Validate() log = %v, want no credential warning for clean urls", rec.Messages())
+		}
+	})
+}
+
+// TestToConfigInfoOnDisabledSonarrWithKey mirrors the radarr variant above for
+// the sonarr half-configuration signal: a disabled sonarr with an api_key set
+// logs the Info line and its URL/key are dropped from the runtime Config.
+func TestToConfigInfoOnDisabledSonarrWithKey(t *testing.T) {
+	rec := capture.Default(t)
+	fc := defaultFileConfig()
+	fc.Sonarr = arrFile{Enabled: false, URL: "http://sonarr:8989", APIKey: "sk"}
+	fc.Radarr = arrFile{Enabled: true, URL: "http://radarr:7878", APIKey: "rk"}
+	c := fc.toConfig()
+	if c.SonarrURL != "" || c.SonarrAPIKey != "" {
+		t.Errorf("disabled sonarr should be dropped, got url=%q key=%q", c.SonarrURL, c.SonarrAPIKey)
+	}
+	if !rec.Contains("sonarr.api_key is set but sonarr.enabled is false") {
+		t.Errorf("toConfig log = %v, want the disabled-sonarr-with-key info", rec.Messages())
 	}
 }

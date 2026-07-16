@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"github.com/cplieger/seadex-scout/internal/compare"
+	"github.com/cplieger/seadex-scout/internal/filter"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/release"
+	"github.com/cplieger/seadex-scout/internal/textsafe"
 )
 
 // labelArr is the arr key shared by the finding log lines.
@@ -78,7 +80,7 @@ func (r *Reporter) Report(findings []compare.Finding, prior map[string]Alerted, 
 		}
 		a := prior[key]
 		if _, failed := failedItems[a.Finding.AniListID]; failed {
-			current[key] = a
+			current[key] = Alerted{AlertedAt: a.AlertedAt, Finding: storedFinding(&a.Finding)}
 			preserved++
 			continue
 		}
@@ -118,57 +120,66 @@ func (r *Reporter) emit(f *compare.Finding) {
 }
 
 // emitResolved logs a single info line when a prior finding no longer applies.
+// The untrusted upstream strings (title, groups) ride through
+// textsafe.SanitizeLogText, matching findingKVs' policy.
 func (r *Reporter) emitResolved(f *compare.Finding) {
 	r.log.Info("finding resolved",
-		"title", f.Title,
+		"title", textsafe.SanitizeLogText(f.Title),
 		"al_id", f.AniListID,
 		labelArr, f.Arr,
 		"season", f.Season,
-		"current_group", f.CurrentGroup,
+		"current_group", textsafe.SanitizeLogText(f.CurrentGroup),
 		"status", string(f.Status),
-		"recommended_group", f.RecommendedGroup)
+		"recommended_group", textsafe.SanitizeLogText(f.RecommendedGroup))
 }
 
 // findingKVs builds the structured key-value attributes for a finding line.
 // It carries the arr deep-link, the split Nyaa/AnimeBytes URLs, the season, and
 // a compact seadex_tags line so an alert can render a self-contained,
-// clickable notification straight from the labels.
+// clickable notification straight from the labels. Every attribute derived
+// from untrusted upstream data (SeaDex/tracker titles, groups, URLs, hashes)
+// is passed through textsafe.SanitizeLogText — the same policy the audit
+// report's slog path applies — because slog's JSONHandler escapes C0 controls
+// but emits C1 controls and bidi controls raw. Fixed-pattern app values
+// (resolution, codec, kind, season, al_id, arr, status) stay raw.
 func findingKVs(f *compare.Finding) []any {
 	nyaaURL, abURL := trackerURLs(f.Links)
 	return []any{
-		"title", f.Title,
+		"title", textsafe.SanitizeLogText(f.Title),
 		"al_id", f.AniListID,
 		labelArr, f.Arr,
-		"arr_url", library.SafeLogURL(f.ArrURL),
+		"arr_url", textsafe.SanitizeLogText(library.SafeLogURL(f.ArrURL)),
 		"season", f.Season,
-		"current_group", f.CurrentGroup,
-		"recommended_group", f.RecommendedGroup,
-		"recommended_groups", strings.Join(f.RecommendedGroups, ","),
-		"tracker", f.Tracker,
+		"current_group", textsafe.SanitizeLogText(f.CurrentGroup),
+		"recommended_group", textsafe.SanitizeLogText(f.RecommendedGroup),
+		"recommended_groups", textsafe.SanitizeLogText(strings.Join(f.RecommendedGroups, ",")),
+		"tracker", textsafe.SanitizeLogText(f.Tracker),
 		"resolution", f.Resolution,
 		"codec", f.Codec,
 		"kind", f.Kind,
-		"classification_reason", f.Reason,
-		"release_url", f.ReleaseURL,
-		"release_urls", joinLinks(f.Links),
-		"nyaa_url", nyaaURL,
-		"ab_url", abURL,
-		"info_hash", f.InfoHash,
+		"classification_reason", textsafe.SanitizeLogText(f.Reason),
+		"release_url", textsafe.SanitizeLogText(f.ReleaseURL),
+		"release_urls", textsafe.SanitizeLogText(joinLinks(f.Links)),
+		"nyaa_url", textsafe.SanitizeLogText(nyaaURL),
+		"ab_url", textsafe.SanitizeLogText(abURL),
+		"info_hash", textsafe.SanitizeLogText(f.InfoHash),
 		"seadex_tags", seadexTags(f),
 		"status", string(f.Status),
 	}
 }
 
 // trackerURLs splits a finding's obtainable links into the public (Nyaa) and
-// AnimeBytes URLs, so an alert can render a distinct Nyaa link and AB link. The
-// first non-AnimeBytes link is treated as the public/Nyaa source (Nyaa is by
-// far the dominant public tracker on SeaDex).
+// AnimeBytes URLs, so an alert can render a distinct Nyaa link and AB link.
+// AB routing is URL-aware via filter.ABVisible (label OR animebytes.tv URL
+// host), matching the obtainability filter and the dedupe key. The first
+// non-AnimeBytes link is treated as the public/Nyaa source (Nyaa is by far
+// the dominant public tracker on SeaDex).
 func trackerURLs(links []compare.ReleaseLink) (nyaa, ab string) {
 	var firstPublic string
 	for i := range links {
 		t, known := release.LookupTracker(links[i].Tracker)
 		switch {
-		case known && t.Name == release.TrackerNameAnimeBytes:
+		case !filter.ABVisible(links[i].Tracker, links[i].URL, false):
 			if ab == "" {
 				ab = links[i].URL
 			}

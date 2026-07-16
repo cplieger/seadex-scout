@@ -210,23 +210,24 @@ func IsAnimeBytes(tracker string) bool {
 	return ok && t.Name == TrackerNameAnimeBytes
 }
 
-// IsAnimeBytesHost reports whether a lowercased URL host is the AnimeBytes
-// site host or one of its dot-delimited subdomains. It is the URL-host twin
-// of IsAnimeBytes (the tracker-name check), so the AB classification rule has
-// one home. A DNS-root trailing dot ("animebytes.tv.", which resolves to the
-// same site) is trimmed before comparing so the FQDN form cannot slip past.
+// IsAnimeBytesHost reports whether a URL host (case-insensitively; one
+// DNS-root trailing dot tolerated) is the AnimeBytes site host or one of its
+// dot-delimited subdomains, resolved through the canonical tracker table
+// (LookupTrackerByHost). It is the URL-host twin of IsAnimeBytes (the
+// tracker-name check), so the AB classification rule has one home.
 func IsAnimeBytesHost(host string) bool {
-	host = strings.TrimSuffix(host, ".")
-	return host == "animebytes.tv" || strings.HasSuffix(host, ".animebytes.tv")
+	t, ok := LookupTrackerByHost(host)
+	return ok && t.Name == TrackerNameAnimeBytes
 }
 
-// IsNyaaHost reports whether a lowercased URL host is the Nyaa site host or
-// one of its dot-delimited subdomains. It is the URL-host twin of the
-// tracker-name lookup, mirroring IsAnimeBytesHost (including the DNS-root
-// trailing-dot trim) so the host-classification rule has one home.
+// IsNyaaHost reports whether a URL host (case-insensitively; one DNS-root
+// trailing dot tolerated) is the Nyaa site host or one of its dot-delimited
+// subdomains, resolved through the canonical tracker table
+// (LookupTrackerByHost), mirroring IsAnimeBytesHost so the
+// host-classification rule has one home.
 func IsNyaaHost(host string) bool {
-	host = strings.TrimSuffix(host, ".")
-	return host == "nyaa.si" || strings.HasSuffix(host, ".nyaa.si")
+	t, ok := LookupTrackerByHost(host)
+	return ok && t.Name == TrackerNameNyaa
 }
 
 // NoGroup is the placeholder release group for a release that specifies none.

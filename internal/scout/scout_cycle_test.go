@@ -47,25 +47,6 @@ func (notFoundAniList) FetchMany(context.Context, []int) (map[int]anilist.Media,
 	return map[int]anilist.Media{}, nil
 }
 
-// TestSaveRetriesDetachedOnCancelledContext pins the SIGTERM save-retry: the
-// first Save fails with context.Canceled on a cancelled cycle context and does
-// not write, so save must retry once with a detached context so the state (the
-// expensive AniList memo) survives a redeploy.
-func TestSaveRetriesDetachedOnCancelledContext(t *testing.T) {
-	logger := scoutTestLogger()
-	store := &fakeStore{}
-	s := New(&Deps{Logger: logger, Store: store})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	s.save(ctx, &state.State{Baselined: true})
-
-	if store.saves != 1 || !store.st.Baselined {
-		t.Fatalf("saves = %d, saved state = %+v; the detached-context retry did not run", store.saves, store.st)
-	}
-}
-
 // TestCycleMappingUnusablePreservesFindings pins the unusable-map degrade
 // branch: when the mapping refresh yields zero usable records (idx.Len()==0)
 // the cycle is degraded-but-healthy, saves only the refreshed library snapshot,
@@ -108,8 +89,8 @@ func TestCycleMappingUnusablePreservesFindings(t *testing.T) {
 
 // TestCycleDegradedSavePersistsSanitizedArrURL pins the persistence trust
 // boundary on the degraded path: a degraded cycle (unusable map here) still
-// saves the refreshed library snapshot, and that snapshot must pass
-// SanitizedForStorage exactly like the successful-cycle saves - a credentialed
+// saves the refreshed library snapshot through the real state.Store.Save -
+// which owns the sanitize-on-persist invariant - so a credentialed
 // public_url-derived ArrURL never lands raw in state.json, while the rest of
 // the item survives intact.
 func TestCycleDegradedSavePersistsSanitizedArrURL(t *testing.T) {
@@ -119,7 +100,10 @@ func TestCycleDegradedSavePersistsSanitizedArrURL(t *testing.T) {
 	defer mapSrv.Close()
 
 	logger := scoutTestLogger()
-	store := &fakeStore{st: state.State{Baselined: true}}
+	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
+	if err := store.Save(context.Background(), &state.State{Baselined: true}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TitleSlug: "frieren", TvdbID: 123, Year: 2023}}}
 	s := New(&Deps{
 		Logger: logger,
@@ -134,12 +118,16 @@ func TestCycleDegradedSavePersistsSanitizedArrURL(t *testing.T) {
 	if healthy := s.Cycle(context.Background()); !healthy {
 		t.Fatal("Cycle healthy=false, want true when the map is unusable (degraded, not unhealthy)")
 	}
-	if len(store.st.Library.Items) != 1 {
-		t.Fatalf("saved library items = %d, want 1", len(store.st.Library.Items))
+	saved, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load after degraded cycle: %v", err)
 	}
-	it := store.st.Library.Items[0]
+	if len(saved.Library.Items) != 1 {
+		t.Fatalf("saved library items = %d, want 1", len(saved.Library.Items))
+	}
+	it := saved.Library.Items[0]
 	if it.ArrURL != "https://sonarr.example/series/frieren" {
-		t.Errorf("saved ArrURL = %q, want the credential stripped (degradedSave must sanitize like the cycle-completion saves)", it.ArrURL)
+		t.Errorf("saved ArrURL = %q, want the credential stripped (Store.Save must sanitize the degraded save like the cycle-completion saves)", it.ArrURL)
 	}
 	if it.Title != "Frieren" || it.Arr != library.ArrSonarr || it.ArrID != 7 {
 		t.Errorf("saved item = %+v, want Title/Arr/ArrID untouched by sanitization", it)
@@ -1147,5 +1135,58 @@ func TestCycleDegradedEarlyReturnsEmitCycleDegraded(t *testing.T) {
 				t.Errorf("degraded reasons = %v, want [%s]", reasons, tc.wantReason)
 			}
 		})
+	}
+}
+
+// TestCycleUpgradeWithPriorFindingsTakesReportPath pins the upgrade-compat
+// cell of the cold-start gate: a state predating the Baselined flag
+// (Baselined=false) that already holds findings must stay on the normal
+// Report path - re-baselining would silently swallow the cycle's
+// notifications and resolutions.
+func TestCycleUpgradeWithPriorFindingsTakesReportPath(t *testing.T) {
+	logger, recorder := capture.New()
+	stale := report.Alerted{
+		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		Finding:   compare.Finding{Title: "Gone Title", DedupeKey: "stale", Status: compare.StatusBetter, AniListID: 111},
+	}
+	store := &fakeStore{st: state.State{
+		Mapping:  mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+		Findings: map[string]report.Alerted{"stale": stale},
+	}}
+	sonarr := &fakeSonarr{
+		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
+		episodes: map[int][]arrapi.Episode{
+			7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+		},
+	}
+	s := New(&Deps{
+		Logger:       logger,
+		Store:        store,
+		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
+		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
+		Comparer:     compare.NewComparer(compare.Config{Logger: scoutTestLogger()}),
+		Reporter:     report.NewReporter(logger),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
+	})
+
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("Cycle healthy=false, want true on a successful upgrade cycle")
+	}
+	if n := recorder.CountExact("cold start: findings baselined without notifying"); n != 0 {
+		t.Errorf("upgrade cycle took the Baseline path %d times, want 0 (prior findings must keep the Report path)", n)
+	}
+	if n := recorder.CountExact("findings reported"); n != 1 {
+		t.Errorf("'findings reported' count = %d, want 1 (the Report path)", n)
+	}
+	if n := recorder.CountExact("better release available"); n != 1 {
+		t.Errorf("new finding notification count = %d, want 1 (re-baselining would swallow it)", n)
+	}
+	if n := recorder.CountExact("finding resolved"); n != 1 {
+		t.Errorf("resolved notification count = %d, want 1 (the stale prior finding must resolve)", n)
+	}
+	if !store.st.Baselined {
+		t.Error("Baselined = false after the upgrade cycle, want true")
 	}
 }

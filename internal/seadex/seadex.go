@@ -156,6 +156,14 @@ func parsePBTime(s string) time.Time {
 	return time.Time{}
 }
 
+// fetchTotals accumulates the cross-page counters of one FetchEntries run.
+type fetchTotals struct {
+	bytes         int
+	reportedTotal int
+	unparsedTimes int
+	unusableURLs  int
+}
+
 // FetchEntries pages through the entire entries collection with torrents
 // expanded and returns every entry. It sleeps pageDelay between pages. A page
 // fetch failure aborts and returns the error; partial results are discarded so
@@ -168,7 +176,7 @@ func parsePBTime(s string) time.Time {
 // legitimately shift counts mid-fetch.
 func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 	var all []Entry
-	var totalBytes, reportedTotal, unparsedTimes int
+	var tot fetchTotals
 	for page := 1; page <= maxPages; page++ {
 		if page > 1 {
 			if err := httpx.SleepCtx(ctx, c.pageDelay); err != nil {
@@ -177,12 +185,12 @@ func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 		}
 		var done bool
 		var err error
-		all, done, err = c.fetchAndAppend(ctx, page, all, &totalBytes, &reportedTotal, &unparsedTimes)
+		all, done, err = c.fetchAndAppend(ctx, page, all, &tot)
 		if err != nil {
 			return nil, err
 		}
 		if done {
-			return c.finishFetch(all, reportedTotal, unparsedTimes)
+			return c.finishFetch(all, tot.reportedTotal, tot.unparsedTimes, tot.unusableURLs)
 		}
 	}
 	return nil, fmt.Errorf("seadex: pagination exceeded max %d pages (upstream reported more); "+
@@ -197,7 +205,11 @@ func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 // whose non-empty updated timestamp failed to parse (zeroed, sorting to the
 // feed's tail) are surfaced as one aggregate WARN so an upstream format drift
 // that zeroes the whole catalogue is alertable without per-record noise.
-func (c *Client) finishFetch(all []Entry, reportedTotal, unparsedTimes int) ([]Entry, error) {
+// Torrents whose non-empty URL is unusable (dropped to "" by UsableURL: a
+// foreign host under a trusted label, an unknown tracker, a malformed URL)
+// are likewise surfaced as one aggregate WARN, so a tracker host migration
+// that strips every release link is alertable instead of silent.
+func (c *Client) finishFetch(all []Entry, reportedTotal, unparsedTimes, unusableURLs int) ([]Entry, error) {
 	if len(all) == 0 {
 		return nil, fmt.Errorf("seadex: returned an empty catalogue (totalItems=%d); "+
 			"SeaDex is never legitimately empty, refusing to compare against it", reportedTotal)
@@ -209,29 +221,38 @@ func (c *Client) finishFetch(all []Entry, reportedTotal, unparsedTimes int) ([]E
 		c.log.Warn("seadex updated timestamps unparseable; feed newest-first ordering degraded",
 			"count", unparsedTimes, "entries", len(all))
 	}
+	if unusableURLs > 0 {
+		c.log.Warn("seadex torrent URLs unusable; affected findings and feed items carry no release link",
+			"count", unusableURLs, "entries", len(all))
+	}
 	c.log.Debug("seadex entries fetched", "entries", len(all))
 	return all, nil
 }
 
 // fetchAndAppend fetches one page, appends its entries, updates the running
-// byte total, the API's reported item total, and the unparseable-updated
-// counter, enforces the cumulative-byte and entry-count caps, and reports
-// whether pagination is complete.
-func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, totalBytes, reportedTotal, unparsedTimes *int) (out []Entry, done bool, err error) {
+// totals (cumulative bytes, the API's reported item total, and the
+// unparseable-updated and unusable-URL counters), enforces the cumulative-byte
+// and entry-count caps, and reports whether pagination is complete.
+func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, tot *fetchTotals) (out []Entry, done bool, err error) {
 	list, n, err := c.fetchPage(ctx, page)
 	if err != nil {
 		return all, false, fmt.Errorf("seadex: fetch page %d: %w", page, err)
 	}
-	*totalBytes += n
-	*reportedTotal = list.TotalItems
-	if *totalBytes > maxTotalBytes {
+	tot.bytes += n
+	tot.reportedTotal = list.TotalItems
+	if tot.bytes > maxTotalBytes {
 		return all, false, fmt.Errorf("seadex: cumulative page bytes exceeded cap %d (upstream misbehaving); "+
 			"refusing to compare against a truncated view", maxTotalBytes)
 	}
 	for i := range list.Items {
 		e := list.Items[i].toEntry()
 		if e.Updated.IsZero() && strings.TrimSpace(list.Items[i].Updated) != "" {
-			*unparsedTimes++
+			tot.unparsedTimes++
+		}
+		for j := range e.Torrents {
+			if strings.TrimSpace(e.Torrents[j].URL) != "" && e.Torrents[j].UsableURL() == "" {
+				tot.unusableURLs++
+			}
 		}
 		all = append(all, e)
 	}

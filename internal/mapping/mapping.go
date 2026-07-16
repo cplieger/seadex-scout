@@ -447,7 +447,7 @@ func validateRefreshedRecords(previous, records []Record) error {
 	previousMetFloor := len(previous) > 0 && previousTyped >= previousMinimum
 	typed := typedRecordCount(records)
 	if previousMetFloor && typed < minimum && typed < previousTyped {
-		return fmt.Errorf("type coverage %d/%d is below minimum %d", typed, len(records), minimum)
+		return fmt.Errorf("type coverage %d/%d is below minimum %d (previous cache carried %d typed records)", typed, len(records), minimum, previousTyped)
 	}
 	return nil
 }
@@ -515,6 +515,10 @@ func (l *Loader) conditionalGet(ctx context.Context, prev *Cache) (httpx.Conditi
 // unknown_key_count, with keys_truncated marking an elided tail.
 const maxLoggedUnknownKeys = 20
 
+// maxLoggedKeyBytes bounds one displayed unknown-key name; the full
+// count still rides in unknown_key_count.
+const maxLoggedKeyBytes = 64
+
 // applyOverrides reads the operator overrides file (if present) and overlays
 // each record onto the index, keyed by AniList ID. A missing file is not an
 // error; a malformed file is logged and ignored so a bad override never blocks
@@ -557,14 +561,20 @@ func (l *Loader) readOverrides(ctx context.Context) ([]Record, bool) {
 		return nil, false
 	}
 	if len(unknown) > 0 {
-		logged := unknown
-		if len(logged) > maxLoggedUnknownKeys {
-			logged = logged[:maxLoggedUnknownKeys]
+		shown := min(len(unknown), maxLoggedUnknownKeys)
+		logged := make([]string, 0, shown)
+		shortened := false
+		for _, k := range unknown[:shown] {
+			if len(k) > maxLoggedKeyBytes {
+				k = k[:maxLoggedKeyBytes] + "..."
+				shortened = true
+			}
+			logged = append(logged, k)
 		}
 		l.log.Warn("mapping: overrides contain unknown keys, ignored",
 			"keys", logged,
 			"unknown_key_count", len(unknown),
-			"keys_truncated", len(unknown) > maxLoggedUnknownKeys,
+			"keys_truncated", len(unknown) > maxLoggedUnknownKeys || shortened,
 			"path", l.overridesPath)
 	}
 	return overrides, true

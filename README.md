@@ -485,8 +485,10 @@ port (fixed at `:9118`). An alert-only deployment stays socket-less.
   (`incomplete`, `theoretical_best`, `mixed_group_manual`) log at `info`. Each
   cycle closes with a completion line: `cycle complete` (carrying the counts,
   mapping coverage, and AniList usage) when healthy, or `cycle degraded` at
-  `warn` with a `reason` when an upstream outage or a safety guard skipped the
-  comparison; report mode emits one `report item` line per anime.
+  `warn` with a `reason` when an upstream outage or a safety guard skipped or
+  degraded the comparison (a partial walk or a stale-but-usable ID map still
+  compares, but the cycle closes degraded); report mode emits one
+  `report item` line per anime.
 - **Alert rules.** seadex-scout ships no notifier of its own; see
   [Alerting](#alerting) for reference Loki ruler rules you can copy (a cycle
   fault, a poll-loop deadman, and informational better-release and

@@ -251,6 +251,9 @@ func (w *Walker) fetchEpisodeItems(ctx context.Context, kept []arrapi.Series) (r
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, episodeConcurrency)
 	for i := range kept {
+		if fanCtx.Err() != nil {
+			break // budget tripped (or shutdown): stop feeding; remaining results stay nil (skipped)
+		}
 		sem <- struct{}{}
 		wg.Go(func() {
 			defer func() { <-sem }()
@@ -310,7 +313,7 @@ func (w *Walker) walkRadarr(ctx context.Context) ([]Item, error) {
 		return nil, err
 	}
 
-	var items []Item
+	items := make([]Item, 0, len(movies))
 	for i := range movies {
 		if keepByTags(movies[i].Tags, includeIDs, excludeIDs) {
 			items = append(items, w.movieItem(&movies[i]))

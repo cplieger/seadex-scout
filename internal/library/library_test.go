@@ -1164,3 +1164,104 @@ func TestDiffSnapshotsSkipsFailedPlaceholders(t *testing.T) {
 		}
 	})
 }
+
+// budgetSonarr blocks each GetEpisodes until released, then fails it, so a
+// test can trip the walk failure budget one fetch at a time and observe how
+// many fetches ever started.
+type budgetSonarr struct {
+	started chan int
+	release chan struct{}
+	series  []arrapi.Series
+}
+
+func (f *budgetSonarr) GetSeries(context.Context) ([]arrapi.Series, error) {
+	return f.series, nil
+}
+
+func (f *budgetSonarr) GetEpisodes(ctx context.Context, seriesID int) ([]arrapi.Episode, error) {
+	select {
+	case f.started <- seriesID:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	select {
+	case <-f.release:
+		return nil, errors.New("sonarr down")
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (f *budgetSonarr) ResolveTagIDs(context.Context, ...string) (map[int]struct{}, []string, error) {
+	return nil, nil, nil
+}
+
+// TestWalkSonarrBudgetTripSkipsQueuedFetches pins the cancel-on-budget
+// behavior of fetchEpisodeItems: once episodeFailureBudget fetches have
+// failed, the fan-out context is cancelled, so queued series never reach
+// GetEpisodes. Exactly episodeConcurrency fetches start up front; each
+// released failure lets one more start, except the last, which trips the
+// budget — so the total started is episodeConcurrency + episodeFailureBudget
+// - 1 and the walk fails with the budget error. Deleting the cancelFan() call
+// on the budget branch (or mutating >= to >) leaves an extra fetch blocked
+// forever, which synctest detects as a durable deadlock.
+func TestWalkSonarrBudgetTripSkipsQueuedFetches(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		seriesCount := episodeConcurrency + 10
+		fs := &budgetSonarr{
+			started: make(chan int, seriesCount),
+			release: make(chan struct{}),
+		}
+		for id := 1; id <= seriesCount; id++ {
+			fs.series = append(fs.series, arrapi.Series{ID: id, Title: "Series"})
+		}
+		w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := w.Walk(context.Background())
+			done <- err
+		}()
+
+		synctest.Wait()
+		if got := len(fs.started); got != episodeConcurrency {
+			t.Fatalf("started episode fetches = %d, want %d before any release", got, episodeConcurrency)
+		}
+
+		// Fail exactly episodeFailureBudget fetches, one at a time.
+		for range episodeFailureBudget {
+			fs.release <- struct{}{}
+			synctest.Wait()
+		}
+
+		err := <-done
+		if err == nil || !strings.Contains(err.Error(), "failure budget") {
+			t.Fatalf("Walk error = %v, want the walk failure budget error", err)
+		}
+		want := episodeConcurrency + episodeFailureBudget - 1
+		if got := len(fs.started); got != want {
+			t.Errorf("started episode fetches = %d, want %d (queued series skipped after the budget trip)", got, want)
+		}
+	})
+}
+
+func TestWalkSonarrExactBudgetFailureCountFailsWalk(t *testing.T) {
+	fs := &fakeSonarr{episodes: map[int][]arrapi.Episode{}, epErr: map[int]error{}}
+	total := episodeFailureBudget + 1
+	for id := 1; id <= total; id++ {
+		fs.series = append(fs.series, arrapi.Series{ID: id, Title: "Series"})
+		if id <= episodeFailureBudget {
+			fs.epErr[id] = errors.New("sonarr down")
+		} else {
+			fs.episodes[id] = []arrapi.Episode{{SeasonNumber: 1, EpisodeFile: epFile("PMR")}}
+		}
+	}
+	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
+	snap, err := w.Walk(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "failure budget") {
+		t.Fatalf("Walk error = %v, want the walk failure budget error", err)
+	}
+	if len(snap.Items) != 0 {
+		t.Errorf("items = %d, want the zero Snapshot on a budget failure", len(snap.Items))
+	}
+}

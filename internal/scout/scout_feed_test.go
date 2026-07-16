@@ -280,3 +280,59 @@ func TestCycleWalkFailShutdownDuringSeaDexFetchStaysSilent(t *testing.T) {
 		t.Errorf("feed-kept WARN fired %d times during a shutdown, want 0", n)
 	}
 }
+
+// cancellingFeed cancels the shared cycle context from inside Rebuild and
+// then fails it, modelling a SIGTERM/redeploy landing while the feed rebuild
+// is writing.
+type cancellingFeed struct{ cancel context.CancelFunc }
+
+func (c *cancellingFeed) Rebuild(context.Context, []seadex.Entry, func(alID int) bool) error {
+	c.cancel()
+	return context.Canceled
+}
+
+// TestCycleShutdownDuringFeedRebuildStaysSilent pins the shutdown arm of
+// rebuildFeed's failure log: a Rebuild that failed because the cycle context
+// was cancelled mid-write (a redeploy) must NOT emit the "indexer feed
+// rebuild failed" WARN - that would misattribute a routine shutdown to a feed
+// fault (the same contract every other shutdown arm in this suite pins). The
+// cycle then closes via the shutdown-during-matching WARN, healthy, with
+// prior findings preserved.
+func TestCycleShutdownDuringFeedRebuildStaysSilent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger, recorder := capture.New()
+	feed := &cancellingFeed{cancel: cancel}
+	prior := report.Alerted{
+		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		Finding:   compare.Finding{Title: "Existing", DedupeKey: "prior", Status: compare.StatusBetter, AniListID: 154587},
+	}
+	store := &fakeStore{st: state.State{
+		Mapping:   mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}},
+		Findings:  map[string]report.Alerted{"prior": prior},
+		Baselined: true,
+	}}
+	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+	s := New(&Deps{
+		Logger:  logger,
+		Store:   store,
+		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
+		Matcher: match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
+		Feed:    feed,
+	})
+
+	if healthy := s.Cycle(ctx); !healthy {
+		t.Fatal("Cycle healthy=false, want true (a shutdown mid-feed-rebuild is not an ingest failure)")
+	}
+	if n := recorder.CountExact("indexer feed rebuild failed; keeping previous feed"); n != 0 {
+		t.Errorf("feed-failure WARN fired %d times during a shutdown, want 0 (a cancelled rebuild is the shutdown, not a feed fault)", n)
+	}
+	if n := recorder.CountExact("cycle interrupted by shutdown during matching"); n != 1 {
+		t.Errorf("shutdown WARN count = %d, want 1", n)
+	}
+	if _, ok := store.st.Findings["prior"]; !ok {
+		t.Errorf("prior finding not preserved on shutdown mid-cycle: %+v", store.st.Findings)
+	}
+}

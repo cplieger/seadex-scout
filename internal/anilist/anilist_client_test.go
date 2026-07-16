@@ -445,3 +445,26 @@ func TestDo429WithHostileResetHeaderIsCapped(t *testing.T) {
 		t.Errorf("throttle wait after the 429 = %v, want capped at %v", wait, maxRetryAfter)
 	}
 }
+
+// TestDoTransportErrorPropagatesAndCountsAttempt pins the transport-failure
+// branch of do and the documented Stats contract on it: a connection-level
+// failure surfaces as a plain transport error (never ErrNotFound), and
+// Stats().Calls still counts the attempt because the counter tracks outbound
+// HTTP attempts, not completed responses.
+func TestDoTransportErrorPropagatesAndCountsAttempt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	client := srv.Client()
+	srv.Close() // connection refused from here on
+
+	c := NewClient(client, srv.URL, 100000, nil)
+	_, err := c.do(context.Background(), []byte(`{}`))
+	if err == nil {
+		t.Fatal("do() against a closed server = nil error, want a transport error")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Errorf("do() transport error = %v, must not classify as ErrNotFound", err)
+	}
+	if got := c.Stats().Calls; got != 1 {
+		t.Errorf("Stats().Calls = %d, want 1 (a failed transport attempt still counts)", got)
+	}
+}

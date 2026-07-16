@@ -81,7 +81,6 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 			// Save enforces maxStateBytes, so an oversized file can only be
 			// foreign or corrupt; preserve it like any other corruption.
 			s.quarantine()
-			return State{}, fmt.Errorf("state: read %s: %w", s.path, err)
 		}
 		return State{}, fmt.Errorf("state: read %s: %w", s.path, err)
 	}
@@ -123,12 +122,18 @@ func (s *Store) quarantine() {
 
 // Save atomically writes the state file, creating the parent directory if
 // needed. It returns an error only when the data did not reach disk; a
-// non-durable (unsynced) write is logged, not failed.
+// non-durable (unsynced) write is logged, not failed. Save owns the
+// sanitize-on-persist invariant: the library snapshot is passed through
+// SanitizedForStorage here, at the persistence boundary, so a credentialed
+// ArrURL can never land in state.json regardless of which caller saves
+// (SafeLogURL is idempotent, so an already-sanitized snapshot is unchanged).
 func (s *Store) Save(ctx context.Context, st *State) error {
 	if st == nil {
 		return errors.New("state: encode: nil state (Save never writes a non-object state file)")
 	}
-	data, err := json.Marshal(st)
+	sanitized := *st
+	sanitized.Library = st.Library.SanitizedForStorage()
+	data, err := json.Marshal(&sanitized)
 	if err != nil {
 		return fmt.Errorf("state: encode: %w", err)
 	}

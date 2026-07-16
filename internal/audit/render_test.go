@@ -521,3 +521,32 @@ func TestRenderMarkdownEscapesUntrustedRowText(t *testing.T) {
 		}
 	}
 }
+
+// TestSanitizeDisplayTextReplacesC0AndDELPreservesCRLF pins the documented
+// contract of the machine-readable-output sanitizer on the branches the C1/
+// bidi tests do not reach: every C0 control except CR/LF (which both encoders
+// escape) and DEL are replaced with a space, CR/LF pass through, and plain
+// text is unchanged.
+func TestSanitizeDisplayTextReplacesC0AndDELPreservesCRLF(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"C0 escape introducer", "a\x1b[2Jb", "a [2Jb"},
+		{"C0 NUL", "a\x00b", "a b"},
+		{"C0 BEL", "a\x07b", "a b"},
+		{"tab", "a\tb", "a b"},
+		{"DEL", "a\x7fb", "a b"},
+		{"LF preserved", "a\nb", "a\nb"},
+		{"CR preserved", "a\rb", "a\rb"},
+		{"plain text unchanged", "Frieren: Beyond Journey's End", "Frieren: Beyond Journey's End"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sanitizeDisplayText(tt.in); got != tt.want {
+				t.Errorf("sanitizeDisplayText(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}

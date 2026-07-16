@@ -1,6 +1,10 @@
 package anilist
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
 
 // FuzzParseMedia exercises the single-media GraphQL decoder against arbitrary
 // bytes (the AniList response is an untrusted network boundary). Beyond
@@ -64,4 +68,55 @@ func assertTitlesClean(t *testing.T, titles []string, raw []byte) {
 		}
 		seen[title] = struct{}{}
 	}
+}
+
+// FuzzSanitizeUpstreamMessage exercises the log-forging sanitizer against
+// arbitrary upstream error messages (attacker-controllable via JSON \u escapes
+// in a GraphQL error envelope). Invariants: output is always valid UTF-8, is
+// bounded by the 200-byte retained cap plus the 3-byte ellipsis, retains none
+// of the rune classes the sanitizer exists to strip, and passes a short clean
+// message through unchanged.
+func FuzzSanitizeUpstreamMessage(f *testing.F) {
+	f.Add("Media not found.")
+	f.Add("line1\nline2\x7f")
+	f.Add("a\u009bb\u009dc")
+	f.Add("a\u202eb\u2066c\u2069d")
+	f.Add("a\u061cb\u200ec\u200fd")
+	f.Add(strings.Repeat("a", 199) + "\u4e16\u754c")
+	f.Add(strings.Repeat("\u00e9", 150))
+	f.Add("")
+	f.Fuzz(func(t *testing.T, in string) {
+		out := sanitizeUpstreamMessage(in)
+		if !utf8.ValidString(out) {
+			t.Errorf("sanitizeUpstreamMessage(%q) = %q is not valid UTF-8", in, out)
+		}
+		if len(out) > 203 {
+			t.Errorf("sanitizeUpstreamMessage(%q) length = %d, want <= 203 (200-byte cap + ellipsis)", in, len(out))
+		}
+		for _, r := range out {
+			if isForbiddenLogRune(r) {
+				t.Errorf("sanitizeUpstreamMessage(%q) retained forbidden rune %U", in, r)
+			}
+		}
+		if utf8.ValidString(in) && len(in) <= 200 && !strings.ContainsFunc(in, isForbiddenLogRune) && out != in {
+			t.Errorf("sanitizeUpstreamMessage(%q) = %q, want a short clean message passed through unchanged", in, out)
+		}
+	})
+}
+
+// isForbiddenLogRune restates the sanitizer's security contract: the rune
+// classes that must never survive into a logged upstream message (C0/C1
+// controls, DEL, line and paragraph separators, and every Bidi_Control rune).
+func isForbiddenLogRune(r rune) bool {
+	switch {
+	case r < 0x20 || r == 0x7f,
+		r >= 0x80 && r <= 0x9f,
+		r == '\u2028' || r == '\u2029',
+		r == '\u061c',
+		r == '\u200e' || r == '\u200f',
+		r >= '\u202a' && r <= '\u202e',
+		r >= '\u2066' && r <= '\u2069':
+		return true
+	}
+	return false
 }

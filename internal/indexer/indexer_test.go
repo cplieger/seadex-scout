@@ -1394,3 +1394,130 @@ func TestParsePubDate(t *testing.T) {
 		})
 	}
 }
+
+// TestServeFailsClosedWithoutConfiguredAPIKey pins serve's independent
+// fail-closed guard for an unconfigured feed_api_key: Run refuses to bind in
+// that state, but any other construction path reaching serve must get a 503,
+// never a served feed - an absent apikey param also hashes to sha256(""), so
+// skipping straight to the constant-time compare would OPEN the gate and serve
+// the passkey-bearing feed unauthenticated.
+func TestServeFailsClosedWithoutConfiguredAPIKey(t *testing.T) {
+	ix := New(&Config{}, Deps{}, "")
+	for _, target := range []string{
+		"/nyaa?t=caps",
+		"/nyaa?t=caps&apikey=",
+		"/ab?t=search&apikey=x",
+	} {
+		rec := httptest.NewRecorder()
+		ix.serve(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Errorf("serve(%q) with unconfigured feed_api_key = %d, want 503", target, rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), "<caps>") {
+			t.Errorf("serve(%q) leaked a caps response despite unconfigured feed_api_key", target)
+		}
+	}
+}
+
+// TestInstallSnapshotSkipsAlreadyInstalledFile pins installSnapshot's
+// under-lock re-check: re-installing the same unchanged file (equal mtime AND
+// os.SameFile identity) returns false and leaves the published snapshot
+// untouched. reloadMu already serializes reloads today, but the comment
+// declares this defense-in-depth invariant must hold even if the TryLock
+// coalescing changes, so it is pinned by direct call.
+func TestInstallSnapshotSkipsAlreadyInstalledFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	info1, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	info2, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	ix := New(&Config{}, Deps{}, "")
+	if !ix.installSnapshot(info1, snapshot{NyaaFeed: []item{{Title: "first"}}}) {
+		t.Fatal("first installSnapshot = false, want true")
+	}
+	if ix.installSnapshot(info2, snapshot{NyaaFeed: []item{{Title: "second"}}}) {
+		t.Fatal("second installSnapshot with same unchanged file = true, want false")
+	}
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
+		t.Fatalf("served feed = %+v, want the originally installed snapshot", got)
+	}
+}
+
+// TestSearchUsesConfiguredABUpstream is the AB-side behavioral mirror of
+// TestIndexerEndToEnd's Nyaa search: an AB-only config must actually wire the
+// AnimeBytes upstream in New, so an /ab search proxies Prowlarr, matches the
+// curated AB torrent by tracker key (AB exposes no info hash in Torznab), and
+// marks it best - while the unconfigured nyaa scope serves nothing without an
+// upstream failure. Kills the lived CONDITIONALS_NEGATION mutant on New's AB
+// wiring conditional (with the wiring negated, /ab returns 0 items).
+func TestSearchUsesConfiguredABUpstream(t *testing.T) {
+	// The compare cycle rebuilds the curation set from a SeaDex AB entry
+	// (torrentid 1167293, best). No passkey is needed: a search matches by
+	// tracker key and rides Prowlarr's own download link.
+	entries := []seadex.Entry{{
+		AniListID: 154587,
+		Torrents: []seadex.Torrent{{
+			Tracker: "AB", URL: "/torrents.php?id=86576&torrentid=1167293", InfoHash: "<redacted>",
+			IsBest: true, ReleaseGroup: "PMR",
+			Files: []seadex.File{{Length: 1, Name: "Frieren - S01E01 (BD Remux 1080p) [PMR].mkv"}},
+		}},
+	}}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	if err := NewFeedWriter("", false, path, nil).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+
+	// Mock Prowlarr AB Torznab: one item whose guid/comments carry the
+	// /torrent/1167293/group permalink (the live AB shape), no info hash.
+	const abFeed = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <title>AnimeBytes</title>
+    <item>
+      <title>[PMR] Frieren S01 [BD Remux 1080p]</title>
+      <guid>https://animebytes.tv/torrent/1167293/group?nh=709E38EC</guid>
+      <comments>https://animebytes.tv/torrent/1167293/group</comments>
+      <size>22497965274</size>
+      <link>http://prowlarr:9696/2/download?apikey=x&amp;link=abc</link>
+      <enclosure url="http://prowlarr:9696/2/download?apikey=x&amp;link=abc" length="22497965274" type="application/x-bittorrent"/>
+      <torznab:attr name="category" value="5070"/>
+      <torznab:attr name="seeders" value="7"/>
+    </item>
+  </channel>
+</rss>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		// Rewrite the fixture's download link onto this mock endpoint's own
+		// origin: search drops items whose download URL is off the configured
+		// Prowlarr origin, and a real Prowlarr hands out its own proxy links.
+		_, _ = io.WriteString(w, strings.ReplaceAll(abFeed, "http://prowlarr:9696", "http://"+r.Host))
+	}))
+	defer srv.Close()
+
+	ix := New(&Config{ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}, Deps{HTTP: srv.Client()}, path)
+
+	items, stats := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "ab")
+	if len(items) != 1 {
+		t.Fatalf("ab search returned %d items, want 1 (the AB upstream must be wired)", len(items))
+	}
+	if items[0].DownloadVolumeFactor != dvfBest {
+		t.Errorf("marker = %q, want %q (best)", items[0].DownloadVolumeFactor, dvfBest)
+	}
+	if !stats.answered || stats.upstreamFailed || stats.upstream != 1 || stats.curated != 1 {
+		t.Errorf("ab stats = %+v, want answered, no upstream failure, upstream 1, curated 1", stats)
+	}
+
+	// The nyaa scope has no configured upstream: an empty result (a standing
+	// misconfiguration), never reported as an upstream failure.
+	nyaaItems, nyaaStats := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "nyaa")
+	if len(nyaaItems) != 0 || nyaaStats.upstreamFailed {
+		t.Errorf("nyaa scope = %d items (upstreamFailed=%v), want 0 items and no failure", len(nyaaItems), nyaaStats.upstreamFailed)
+	}
+}

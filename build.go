@@ -118,7 +118,7 @@ func feedWriter(cfg *config.Config, log *slog.Logger) scout.FeedWriter {
 	if !cfg.IndexerConfigured() {
 		return nil
 	}
-	abConfigured := cfg.IndexerABTorznabURL != ""
+	abConfigured := cfg.IndexerABConfigured()
 	return indexer.NewFeedWriter(cfg.IndexerABPasskey, abConfigured, config.DefaultIndexerFeedPath, log.With("component", "indexer"))
 }
 

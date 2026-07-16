@@ -85,8 +85,10 @@ type Deps struct {
 }
 
 // libraryShrinkFactor sets the library shrink guard's trigger fraction: a
-// fully-successful walk returning fewer than 1/libraryShrinkFactor of the
-// prior snapshot's items (below half, at the default 2) is treated as
+// non-failed walk (partial included - Failed placeholders keep the item
+// count, so a shrink means the arr's series list itself shrank) returning
+// fewer than 1/libraryShrinkFactor of the prior snapshot's items (below
+// half, at the default 2) is treated as
 // suspicious (a misconfigured arr_tags filter, an emptied or fresh arr) rather
 // than a real library change, mirroring the mapping loader's below-half-size
 // refresh guard. The zero-items case is the extreme of the same shrink.
@@ -111,8 +113,9 @@ type Scout struct {
 
 // cycleDegraded emits the degraded-cycle completion line. Every
 // degraded-but-healthy early return (unusable map, failed or empty SeaDex
-// fetch, AniList degradation, the library shrink guard) and the partial-walk
-// compare path end the cycle with this single WARN, so the cycle-deadman
+// fetch, AniList degradation, the library shrink guard) and the two degraded
+// compare paths (a partial walk, a stale-but-usable map) end the cycle with
+// this single WARN, so the cycle-deadman
 // alert (which counts completion lines) stays satisfied during a long
 // upstream outage instead of firing as if the daemon died. reason
 // distinguishes the gate; the healthy path keeps "cycle complete" as-is, and
@@ -249,12 +252,12 @@ type aniListStats struct {
 // aniListCycleAttrs returns the cumulative and per-cycle AniList counters both
 // cycle completion paths log.
 func (s *Scout) aniListCycleAttrs(startStats aniListStats) []any {
-	aniStats := s.aniStats()
+	cur := s.aniStats()
 	return []any{
-		"anilist_calls", aniStats.calls,
-		"anilist_calls_cycle", aniStats.calls - startStats.calls,
-		"anilist_waits", aniStats.rateLimitWaits,
-		"anilist_waits_cycle", aniStats.rateLimitWaits - startStats.rateLimitWaits,
+		"anilist_calls", cur.calls,
+		"anilist_calls_cycle", cur.calls - startStats.calls,
+		"anilist_waits", cur.rateLimitWaits,
+		"anilist_waits_cycle", cur.rateLimitWaits - startStats.rateLimitWaits,
 	}
 }
 
@@ -266,7 +269,7 @@ func (s *Scout) aniListCycleAttrs(startStats aniListStats) []any {
 // the finding dedupe table untouched. Always healthy: an upstream outage is
 // not an ingest fault.
 func (s *Scout) finishDegradedMatch(ctx context.Context, start time.Time, startStats aniListStats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, result match.Result) bool {
-	st.Library, st.Mapping, st.Memo = snap.SanitizedForStorage(), *mapCache, result.Memo
+	st.Library, st.Mapping, st.Memo = snap, *mapCache, result.Memo
 	s.save(ctx, st)
 	attrs := append(s.aniListCycleAttrs(startStats),
 		"duration", time.Since(start).Round(time.Millisecond).String())
@@ -357,7 +360,7 @@ func (s *Scout) finishSuccessfulCycle(ctx context.Context, start time.Time, star
 		s.log.Info("cycle complete", attrs...)
 	}
 
-	st.Library, st.Mapping, st.Memo, st.Findings = snap.SanitizedForStorage(), *mapCache, result.Memo, newFindings
+	st.Library, st.Mapping, st.Memo, st.Findings = snap, *mapCache, result.Memo, newFindings
 	s.save(ctx, st)
 	return true
 }
@@ -458,7 +461,7 @@ func (s *Scout) handlePreCompareGate(ctx context.Context, st *state.State, snap 
 // handleLibraryGate gates the compare pass on the library ingest. A failed arr
 // walk is unhealthy and persists only the refreshed mapping cache (findings,
 // memo, and the prior library snapshot ride along untouched). A
-// fully-successful walk that shrank below half the prior snapshot's items
+// non-failed walk (partial included) that shrank below half the prior snapshot's items
 // (libraryShrinkFactor; zero items is the extreme case) is degraded but
 // healthy: it persists ONLY the refreshed mapping cache plus the consecutive
 // shrunk-walk streak, so a shrunken snapshot can never replace st.Library and
@@ -486,7 +489,7 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap lib
 		return true, false
 	}
 	if len(st.Library.Items) > 0 && len(snap.Items)*libraryShrinkFactor < len(st.Library.Items) {
-		// A fully-successful walk that shrank far below the prior snapshot
+		// A non-failed walk that shrank far below the prior snapshot
 		// (zero items, or a misconfigured arr_tags.include leaving a handful)
 		// would mass-resolve most findings. Do NOT degradedSave here:
 		// persisting the shrunken snapshot would make this a one-cycle ratchet
@@ -688,7 +691,7 @@ func (s *Scout) loadState(ctx context.Context) state.State {
 // dedupe untouched so a degraded upstream (unusable map, failed or empty
 // SeaDex fetch) or a shutdown mid-cycle cannot falsely resolve live findings.
 func (s *Scout) degradedSave(ctx context.Context, st *state.State, snap library.Snapshot, mapCache *mapping.Cache) {
-	st.Library = snap.SanitizedForStorage()
+	st.Library = snap
 	st.Mapping = *mapCache
 	s.save(ctx, st)
 }

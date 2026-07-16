@@ -11,8 +11,9 @@
 //
 //   - A periodic RSS check (an empty-query "latest releases" fetch, which Sonarr
 //     and Radarr issue on their sync interval) is answered from a synthesized
-//     per-tracker feed of the whole SeaDex curation set, built in the background
-//     from the SeaDex catalogue: one item per curated torrent, its title derived
+//     per-tracker feed of the whole SeaDex curation set, built by the compare
+//     cycle from its SeaDex fetch and persisted as a snapshot this server reads
+//     (see FeedWriter): one item per curated torrent, its title derived
 //     from the release's file names, its size summed from them, and a real
 //     download link built directly - a public Nyaa .torrent, or AnimeBytes via
 //     the operator's passkey. Synthesis is the only way to serve the SeaDex list
@@ -23,8 +24,10 @@
 // best -> 0.75 (Freeleech25), alt -> 0.25 (Freeleech75), which the operator maps
 // to a Custom Format on their anime profile. The AnimeBytes RSS link embeds the
 // operator's passkey, so it is a secret; the endpoint is apikey-gated and meant
-// to bind LAN-only. The curation set and the two synthesized feeds are cached and
-// refreshed together in the background.
+// to bind LAN-only. The curation set and the two synthesized feeds are produced
+// together by the compare cycle (one SeaDex fetch feeds both the findings and
+// the feed), persisted atomically (see FeedWriter), and reloaded by the server
+// when the snapshot file changes - the server never fetches SeaDex itself.
 //
 // The feed is served per-tracker only, addressable by path or by subdomain:
 // /nyaa (or a nyaa.* host) serves the Nyaa-sourced curated releases, /ab (or an
@@ -760,16 +763,7 @@ func scopeFor(host, path string) string {
 // scopeFromPath maps the URL path to a tracker via its first segment: "/nyaa..."
 // -> nyaa, "/ab..." -> ab, anything else (including "/" and a bare "/api") -> ""
 // (no tracker; serve 404s it).
-func scopeFromPath(p string) string {
-	switch firstSegment(p) {
-	case upstreamNyaa:
-		return upstreamNyaa
-	case upstreamAB:
-		return upstreamAB
-	default:
-		return ""
-	}
-}
+func scopeFromPath(p string) string { return scopeFromToken(firstSegment(p)) }
 
 // scopeFromHost maps a request Host to a tracker via its leading DNS label:
 // nyaa.example.com -> nyaa, ab.example.com -> ab, anything else (a bare internal
@@ -779,14 +773,19 @@ func scopeFromPath(p string) string {
 // reverse proxy).
 func scopeFromHost(host string) string {
 	label, _, _ := strings.Cut(host, ".")
-	switch strings.ToLower(label) {
+	return scopeFromToken(strings.ToLower(label))
+}
+
+// scopeFromToken maps a lowercased tracker token (a path segment or DNS
+// label) to its feed scope, or "" for any non-tracker token.
+func scopeFromToken(s string) string {
+	switch s {
 	case upstreamNyaa:
 		return upstreamNyaa
 	case upstreamAB:
 		return upstreamAB
-	default:
-		return ""
 	}
+	return ""
 }
 
 // firstSegment returns the first non-empty path segment, lowercased.

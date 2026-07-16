@@ -64,9 +64,12 @@ func (t *Torrent) UsableURL() string {
 // prefixing the tracker's canonical base URL, preserving UsableURL's relative
 // rejections in order. A protocol-relative URL ("//host/path") carries no
 // scheme, yet a renderer resolves it against the ambient scheme and navigates
-// off-site; it has no legitimate use as a tracker link. A colon-prefixed value
-// that did not parse as a scheme (e.g. "1a:b") is equally unusable as a
-// relative path. A scheme-less relative path parses host-free and still passes
+// off-site; it has no legitimate use as a tracker link. A relative value whose
+// first colon precedes any slash (a query- or fragment-leading colon such as
+// "?x:y" or "#a:b") is equally unusable as a relative path; a colon in the
+// first path segment (e.g. "1a:b") never reaches here because url.Parse
+// already rejects it in UsableURL. A scheme-less relative path parses
+// host-free and still passes
 // through (tracker-relative AB paths are unaffected), prefixed with one slash
 // when absent.
 func usableRelative(raw string, parsed *url.URL, baseURL string) string {
@@ -85,10 +88,13 @@ func usableRelative(raw string, parsed *url.URL, baseURL string) string {
 // usableAbsolute reports whether an already-absolute parsed URL is a safe
 // clickable link: http(s) scheme, no userinfo authority, and a hostname bound
 // to a canonical tracker host from the release tracker table (equal to one or
-// a dot-delimited subdomain of one). Hostname() (the parsed host component)
-// is checked rather than Host (the serialized authority), which is non-empty
-// for a port-only authority like "https://:443/path" even though no host
-// exists.
+// a dot-delimited subdomain of one, via release.LookupTrackerByHost).
+// Hostname() (the parsed host component) is checked rather than Host (the
+// serialized authority), which is non-empty for a port-only authority like
+// "https://:443/path" even though no host exists. Non-ASCII hostnames are
+// rejected before the table lookup: an IDN lookalike of a tracker host (a
+// homograph such as a Cyrillic "nyаa.si") has no legitimate use in SeaDex
+// data.
 func usableAbsolute(parsed *url.URL) bool {
 	if !strings.EqualFold(parsed.Scheme, "http") &&
 		!strings.EqualFold(parsed.Scheme, "https") {
@@ -97,40 +103,12 @@ func usableAbsolute(parsed *url.URL) bool {
 	if parsed.User != nil {
 		return false
 	}
-	for _, base := range release.TrackerBaseURLs() {
-		if hostMatchesTracker(parsed.Hostname(), base) {
-			return true
-		}
-	}
-	return false
-}
-
-// hostMatchesTracker reports whether an absolute URL's hostname belongs to the
-// tracker whose canonical base URL is baseURL: after lowercasing and removing
-// one trailing dot (the fully-qualified form browsers treat as the same host),
-// the hostname must be non-empty ASCII and either equal the canonical hostname
-// or be one of its dot-delimited subdomains. Non-ASCII hostnames are rejected
-// outright: an IDN lookalike of a tracker host (a homograph such as a Cyrillic
-// "nyаa.si") has no legitimate use in SeaDex data, and neither suffix tricks
-// ("evilnyaa.si") nor prefix tricks ("nyaa.si.evil.example") survive the
-// dot-delimited comparison.
-func hostMatchesTracker(host, baseURL string) bool {
-	base, err := url.Parse(baseURL)
-	if err != nil {
-		return false
-	}
-	canonical := strings.ToLower(base.Hostname())
-	if canonical == "" {
-		return false
-	}
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	if host == "" {
-		return false
-	}
+	host := parsed.Hostname()
 	for i := range len(host) {
 		if host[i] >= utf8.RuneSelf {
 			return false
 		}
 	}
-	return host == canonical || strings.HasSuffix(host, "."+canonical)
+	_, ok := release.LookupTrackerByHost(host)
+	return ok
 }

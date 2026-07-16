@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -612,22 +611,19 @@ func TestRunReportRefusesWhenLockHeld(t *testing.T) {
 // (DEBUG), not the operator-visible WARN arr-fault line. Serial (swaps
 // slog.Default).
 func TestLogPingClassifiesShutdownCancellation(t *testing.T) {
-	prev := slog.Default()
-	defer slog.SetDefault(prev)
-	var buf bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	rec := capture.Default(t)
 
 	logPing("sonarr", fmt.Errorf("ping: %w", context.Canceled))
 
-	var rec map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &rec); err != nil {
-		t.Fatalf("log line does not parse: %v (%s)", err, buf.String())
+	records := rec.Records()
+	if len(records) != 1 {
+		t.Fatalf("captured %d records, want 1 (%v)", len(records), rec.Messages())
 	}
-	if rec["level"] != "DEBUG" {
-		t.Errorf("level = %v, want DEBUG", rec["level"])
+	if records[0].Level != slog.LevelDebug {
+		t.Errorf("level = %v, want DEBUG", records[0].Level)
 	}
-	if rec["msg"] != "sonarr startup ping cancelled by shutdown" {
-		t.Errorf("msg = %v, want the cancelled-by-shutdown line", rec["msg"])
+	if records[0].Message != "sonarr startup ping cancelled by shutdown" {
+		t.Errorf("msg = %q, want the cancelled-by-shutdown line", records[0].Message)
 	}
 }
 
@@ -690,4 +686,22 @@ func TestBuildIndexer(t *testing.T) {
 		t.Fatal("indexer = nil, want a wired Torznab feed server")
 	}
 	bi.cleanup()
+}
+
+// TestStartIndexerUnconfiguredIsNoOp pins the socket-less contract: with no
+// Prowlarr Torznab URL configured, startIndexer builds no indexer and starts
+// no goroutine (no log record from an indexer Run/stop path), and the
+// returned stop func returns immediately instead of waiting on a goroutine.
+// Serial (capture swaps slog.Default).
+func TestStartIndexerUnconfiguredIsNoOp(t *testing.T) {
+	rec := capture.Default(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	stop := startIndexer(ctx, &config.Config{})
+	stop()
+
+	if msgs := rec.Messages(); len(msgs) != 0 {
+		t.Errorf("startIndexer(unconfigured) logged %v, want no indexer activity", msgs)
+	}
 }

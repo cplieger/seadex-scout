@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/cplieger/slogx/capture"
 )
 
 func discardLogger() *slog.Logger {
@@ -418,4 +420,70 @@ func TestParseFribb_toleratesVariantRecords(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("parseFribb variant records = %#v, want %#v", got, want)
 	}
+}
+
+// TestParseFribb_logsSkippedAndDroppedCounts pins the operator-facing decode
+// diagnostics, the only observable signal for malformed upstream records: the
+// WARN carries the skipped count, the surviving parsed count, and the FIRST
+// per-record decode error (not a later one), and the zero-id drop count rides
+// a separate Debug line.
+func TestParseFribb_logsSkippedAndDroppedCounts(t *testing.T) {
+	logger, rec := capture.New()
+	// Element order: a type-mismatch element (the first, retained error), an
+	// over-cap record (a later, different error), a zero-id drop, a survivor.
+	var big strings.Builder
+	big.WriteString(`{"anilist_id":9,"imdb_id":[`)
+	for i := 0; big.Len() <= maxFribbRecordBytes; i++ {
+		if i > 0 {
+			big.WriteByte(',')
+		}
+		big.WriteString(`"tt` + strconv.Itoa(i) + `"`)
+	}
+	big.WriteString(`]}`)
+	data := []byte(`[5,` + big.String() + `,{"anilist_id":0},{"anilist_id":1,"type":"tv","tvdb_id":100}]`)
+
+	records, err := parseFribb(data, logger)
+	if err != nil {
+		t.Fatalf("parseFribb error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("parseFribb kept %d records, want 1", len(records))
+	}
+	if rec.CountExact("mapping: skipped malformed records") != 1 {
+		t.Fatalf("logs = %v, want one skipped-records warning", rec.Messages())
+	}
+	if !attrRendered(rec, "skipped", "2") {
+		t.Errorf("skipped-records logs = %v, want skipped=2", rec.Messages())
+	}
+	if !attrRendered(rec, "parsed", "1") {
+		t.Errorf("skipped-records logs = %v, want parsed=1", rec.Messages())
+	}
+	if !attrContains(rec, "error", "cannot unmarshal") {
+		t.Errorf("skipped-records logs = %v, want the FIRST decode error (a type mismatch), not the later over-cap error", rec.Messages())
+	}
+	if rec.CountExact("mapping: dropped records without anilist_id") != 1 {
+		t.Fatalf("logs = %v, want one dropped-records debug line", rec.Messages())
+	}
+	if !attrRendered(rec, "dropped", "1") {
+		t.Errorf("dropped-records logs = %v, want dropped=1", rec.Messages())
+	}
+}
+
+// attrContains reports whether any captured record carries an attribute with
+// the given key whose rendered value contains want.
+func attrContains(rec *capture.Recorder, key, want string) bool {
+	for _, r := range rec.Records() {
+		found := false
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == key && strings.Contains(a.Value.String(), want) {
+				found = true
+				return false
+			}
+			return true
+		})
+		if found {
+			return true
+		}
+	}
+	return false
 }

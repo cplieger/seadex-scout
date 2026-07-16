@@ -87,17 +87,16 @@ func main() {
 	// loop and a restart fixes it. External mode (poll_interval: off) and any
 	// config-read failure disable the deadline (WithMaxAge(0) is a no-op):
 	// idle-until-poll is healthy.
+	configPath := cmp.Or(strings.TrimSpace(os.Getenv("CONFIG_PATH")), config.DefaultConfigPath)
 	if len(args) == 1 && args[0] == "health" {
-		probeConfigPath := cmp.Or(strings.TrimSpace(os.Getenv("CONFIG_PATH")), config.DefaultConfigPath)
 		health.RunProbe(health.DefaultPath,
-			health.WithMaxAge(3*config.PollIntervalFromFile(probeConfigPath)))
+			health.WithMaxAge(3*config.PollIntervalFromFile(configPath)))
 		// health.RunProbe terminates via os.Exit(0/1); if it ever returns
 		// (a contract change in the separately versioned health dependency),
 		// fail closed: report unhealthy rather than a silently-green probe.
 		os.Exit(1)
 	}
 
-	configPath := cmp.Or(strings.TrimSpace(os.Getenv("CONFIG_PATH")), config.DefaultConfigPath)
 	//nolint:gosec // G304: CONFIG_PATH is an operator-supplied path, not user input
 	if _, err := os.Stat(configPath); errors.Is(err, fs.ErrNotExist) {
 		if werr := writeStarterConfig(configPath); werr != nil {
@@ -219,6 +218,13 @@ func runReport(cfg *config.Config) error {
 	return rep.WriteFiles(ctx, cfg.ReportDir, slog.Default())
 }
 
+// pollInterrupted wraps the shutdown cancellation cause with poll's uniform
+// interruption message, so main classifies it as a routine-shutdown WARN and
+// the marker-untouched contract reads identically from every phase.
+func pollInterrupted(ctx context.Context) error {
+	return fmt.Errorf("poll interrupted; health marker left unchanged: %w", context.Cause(ctx))
+}
+
 // runPoll runs one compare cycle for an external scheduler (poll_interval: off).
 // It updates the health marker to the cycle's outcome, leaving it in place (no
 // Cleanup) so the container healthcheck reads the last poll, and exits non-zero
@@ -239,7 +245,7 @@ func runPoll(cfg *config.Config) error {
 			// Shutdown cancelled startup (pre-cycle phase of the uniform
 			// interruption contract): wrap the cancellation cause so main
 			// classifies it WARN, and never touch the marker.
-			return fmt.Errorf("poll interrupted; health marker left unchanged: %w", context.Cause(ctx))
+			return pollInterrupted(ctx)
 		}
 		return err
 	}
@@ -259,7 +265,7 @@ func runPoll(cfg *config.Config) error {
 func pollCycle(ctx context.Context, sc cycler, marker *health.Marker) error {
 	healthy := runCycle(ctx, sc)
 	if ctx.Err() != nil {
-		return fmt.Errorf("poll interrupted; health marker left unchanged: %w", context.Cause(ctx))
+		return pollInterrupted(ctx)
 	}
 	marker.Set(healthy)
 	if !healthy {

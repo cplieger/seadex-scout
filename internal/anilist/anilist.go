@@ -28,6 +28,7 @@ import (
 
 	"github.com/cplieger/httpx/v2"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
+	"github.com/cplieger/seadex-scout/internal/textsafe"
 )
 
 const (
@@ -257,7 +258,7 @@ func (c *Client) observeRateHeaders(resp *http.Response) {
 		return
 	}
 	wait := resetWait(resp)
-	if wait == 0 {
+	if wait <= 0 {
 		wait = time.Minute
 	}
 	wait = min(wait, maxRetryAfter)
@@ -316,24 +317,18 @@ type gqlResponse struct {
 }
 
 // sanitizeUpstreamMessage bounds and cleans an untrusted upstream error
-// message before it is wrapped into an error that reaches the logs: C0/C1
-// controls (terminal escape and CSI/OSC introducers), DEL, Unicode line and
-// paragraph separators, and every Bidi_Control rune (the ALM/LRM/RLM marks
-// plus bidi embeddings, overrides, and isolates) become spaces so the message
-// cannot forge log lines or reorder rendered text, and the retained message
-// is capped at 200 bytes on a rune boundary (truncated output appends "...",
-// for a 203-byte maximum) so a long message stays valid UTF-8.
+// message before it is wrapped into an error that reaches the logs. The
+// unsafe-rune classification is the shared textsafe policy (C0/C1 controls,
+// DEL, Unicode line and paragraph separators, and every Bidi_Control rune),
+// applied here with CR/LF also stripped (keepCRLF=false) because the message
+// lands inline in a single log line, where a raw newline could forge log
+// lines. Each unsafe rune becomes a space, and the retained message is capped
+// at 200 bytes on a rune boundary (truncated output appends "...", for a
+// 203-byte maximum) so a long message stays valid UTF-8.
 func sanitizeUpstreamMessage(s string) string {
 	const maxLen = 200
 	s = strings.Map(func(r rune) rune {
-		switch {
-		case r < 0x20 || r == 0x7f, // C0 controls and DEL
-			r >= 0x80 && r <= 0x9f,         // C1 controls (CSI/OSC introducers)
-			r == '\u2028' || r == '\u2029', // line / paragraph separators
-			r == '\u061c',                  // arabic letter mark (Bidi_Control)
-			r == '\u200e' || r == '\u200f', // LTR / RTL marks (Bidi_Control)
-			r >= '\u202a' && r <= '\u202e', // bidi embeddings and overrides
-			r >= '\u2066' && r <= '\u2069': // bidi isolates
+		if textsafe.IsUnsafe(r, false) {
 			return ' '
 		}
 		return r

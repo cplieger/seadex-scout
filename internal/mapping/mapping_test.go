@@ -71,24 +71,6 @@ func TestArrIdentifierCountIgnoresWrongArmIdentifiers(t *testing.T) {
 	}
 }
 
-func TestBuildIndex_dedupAndZeroSkip(t *testing.T) {
-	idx := buildIndex([]Record{
-		{AniListID: 1, Type: "TV"},
-		{AniListID: 0, Type: "TV"},
-		{AniListID: 1, Type: "MOVIE"},
-	})
-	if idx.Len() != 1 {
-		t.Fatalf("buildIndex Len = %d, want 1 (zero-id skipped, dup collapsed)", idx.Len())
-	}
-	rec, ok := idx.Lookup(1)
-	if !ok {
-		t.Fatal("Lookup(1) not found")
-	}
-	if rec.Type != "MOVIE" {
-		t.Errorf("Lookup(1).Type = %q, want MOVIE (last write wins)", rec.Type)
-	}
-}
-
 func TestIndex_nilSafe(t *testing.T) {
 	var idx *Index
 	if _, ok := idx.Lookup(1); ok {
@@ -190,5 +172,17 @@ func TestNewIndex_ignoresZeroAndKeepsLastDuplicate(t *testing.T) {
 	}
 	if _, ok := idx.Lookup(0); ok {
 		t.Error("NewIndex retained zero AniList ID")
+	}
+}
+
+// TestUnknownOverrideKeys_partialRawDecodeYieldsNil pins the documented
+// raw-unmarshal error contract: encoding/json fills the decodable prefix of a
+// partially decodable array before reporting the type error, so without the
+// error guard the scan would report the prefix's keys ([weird]) for a file the
+// typed decode rejects anyway. The guard must yield nil and leave error
+// reporting to parseOverrides' typed decode.
+func TestUnknownOverrideKeys_partialRawDecodeYieldsNil(t *testing.T) {
+	if got := unknownOverrideKeys([]byte(`[{"weird":1},5]`)); got != nil {
+		t.Errorf("unknownOverrideKeys(partially decodable array) = %v, want nil", got)
 	}
 }

@@ -261,12 +261,12 @@ func TestNewNilLoggerFallsBackToDefault(t *testing.T) {
 	}
 }
 
-// TestSave_retriesCanceledContextWithDetachedDeadline pins the
+// TestSaveRetriesDetachedOnCancelledContext pins the
 // cancellation-safe state persistence contract: a save whose context was
 // already cancelled (a redeploy SIGTERM landing mid-cycle) must still persist
 // state via the detached context.WithoutCancel retry, or the AniList memo and
 // finding dedupe state would be discarded on every routine shutdown.
-func TestSave_retriesCanceledContextWithDetachedDeadline(t *testing.T) {
+func TestSaveRetriesDetachedOnCancelledContext(t *testing.T) {
 	t.Parallel()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

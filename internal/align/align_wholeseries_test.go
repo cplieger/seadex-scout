@@ -94,3 +94,30 @@ func TestSummarizeWholeSeriesSkipsEmptySeasons(t *testing.T) {
 		t.Error("AnyUnlisted = true, want false (only the best season counted)")
 	}
 }
+
+// TestSummarizeWholeSeriesApprox pins the coarseness rule on the whole-series
+// aggregate: the comparison is approximate exactly when it spans more than one
+// real season or more than one release group, and season 0 / empty seasons
+// never contribute to that count.
+func TestSummarizeWholeSeriesApprox(t *testing.T) {
+	tests := []struct {
+		name    string
+		seasons map[int][]string
+		want    bool
+	}{
+		{"one season with one group is exact", map[int][]string{1: {"a&c"}}, false},
+		{"two seasons sharing one group are approximate", map[int][]string{1: {"a&c"}, 2: {"a&c"}}, true},
+		{"one season with two groups is approximate", map[int][]string{1: {"a&c", "kh"}}, true},
+		{"season 0 groups never make it approximate", map[int][]string{0: {"x", "y"}, 1: {"a&c"}}, false},
+		{"an empty season never makes it approximate", map[int][]string{1: {"a&c"}, 2: {}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: tt.seasons}
+			got := align.SummarizeWholeSeries(item, []string{"a&c"}, nil)
+			if got.Approx != tt.want {
+				t.Errorf("SummarizeWholeSeries(%v).Approx = %v, want %v", tt.seasons, got.Approx, tt.want)
+			}
+		})
+	}
+}

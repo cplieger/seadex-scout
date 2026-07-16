@@ -65,7 +65,9 @@ func NewFeedWriter(abPasskey string, abConfigured bool, path string, logger *slo
 // writes the snapshot atomically. It is the single producer of the feed the
 // server serves; isMovie may be nil (every item is then categorized as
 // anime/series, the safe default). The caller skips a failed SeaDex fetch, so
-// this only errors when the write itself fails.
+// this errors only on the persist side: an encode failure, a snapshot exceeding
+// maxFeedBytes (kept out so the reader never rejects what a rebuild wrote), or
+// the atomic write itself failing.
 func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, isMovie func(alID int) bool) error {
 	snap, abSkippedNoPasskey, unresolvable := buildSnapshot(entries, w.abPasskey, movieClassifier(isMovie))
 	data, err := json.Marshal(&snap)

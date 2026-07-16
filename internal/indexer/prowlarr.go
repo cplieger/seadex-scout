@@ -85,6 +85,17 @@ func (u *upstream) filterDownloadURLs(items []item) []item {
 			dropped++
 			continue
 		}
+		// The two passthrough display-URL fields are not fetch targets, but
+		// the arr renders <comments> as the item's clickable info link and a
+		// URL that parses to no tracker key skips the curation gate entirely,
+		// so a tampered upstream could attach a javascript:/data: or
+		// foreign-host link to a legitimately curated item. Blank (never
+		// drop) anything that is not an absolute http(s) URL: a healthy
+		// Prowlarr always hands out absolute tracker page URLs here, and
+		// curation matching is unaffected (a non-http URL could never
+		// produce a tracker key).
+		items[i].InfoURL = sanitizeDisplayURL(items[i].InfoURL)
+		items[i].GUID = sanitizeDisplayURL(items[i].GUID)
 		out = append(out, items[i])
 	}
 	if dropped > 0 {
@@ -106,6 +117,24 @@ func sameHTTPOrigin(raw string, origin *url.URL) bool {
 		return false
 	}
 	return strings.EqualFold(scheme, origin.Scheme) && strings.EqualFold(parsed.Host, origin.Host)
+}
+
+// sanitizeDisplayURL returns raw when it is an absolute http(s) URL with a
+// host, else "" - the item survives with the field blanked (writeItem omits an
+// empty <comments> and item.guid() falls back to InfoHash/DownloadURL). Used
+// on the passthrough display-URL fields (InfoURL, GUID) that neither the
+// origin filter (fetch targets only) nor the curation gate (key-bearing URLs
+// only) constrains.
+func sanitizeDisplayURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	s := strings.ToLower(u.Scheme)
+	if (s != "http" && s != "https") || u.Host == "" {
+		return ""
+	}
+	return raw
 }
 
 // setHeaders sets the User-Agent, Accept, and the Prowlarr API key header.

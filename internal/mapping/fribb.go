@@ -60,6 +60,8 @@ func (r *fribbRecord) toRecord() (Record, bool) {
 	}, true
 }
 
+// --- Streaming parse: caps and the per-record tolerance boundary ---
+
 // maxFribbRecords is a hard acceptance cap on the number of top-level Fribb
 // array elements, not merely a preallocation hint. The 16MB body limit still
 // admits ~1M tiny valid records, so without this guard an upstream-controlled
@@ -184,6 +186,8 @@ func decodeFribbRecord(msg json.RawMessage) (Record, bool, error) {
 	rec, ok := fr.toRecord()
 	return rec, ok, nil
 }
+
+// --- Tolerant field decoders (shape-variant upstream fields) ---
 
 // offsetPair decodes the tvdb member of the season object; encoding/json
 // intentionally ignores the unused tmdb member (the upstream episode_offset
@@ -387,6 +391,8 @@ func decodeStringScalar(b []byte) []string {
 	}
 	return trimmed([]string{one})
 }
+
+// --- Small conversion helpers ---
 
 // trimmed returns in with entries trimmed and blanks dropped.
 func trimmed(in []string) []string {

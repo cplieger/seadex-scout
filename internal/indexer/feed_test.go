@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -153,5 +154,50 @@ func TestBuildFeedsIdlessABNotCountedAsPasskeySkip(t *testing.T) {
 	}
 	if skipped != 0 {
 		t.Errorf("abSkippedNoPasskey = %d, want 0 (no parseable id, so a passkey would not help)", skipped)
+	}
+}
+
+// TestBuildFeedsDedupesSharedTorrentByGUID pins the feed-side identity merge: a
+// torrent attached to two SeaDex entries (same GUID) emits ONE feed item with
+// best-wins on the marker (mirroring buildSnapshot's OR-accumulation for the
+// search curation set), the categories of both entries unioned, and the newest
+// entry update as pubdate. The alt-marked, newer entry is listed FIRST so a
+// first-wins or last-wins merge would fail the marker or pubdate assertion.
+func TestBuildFeedsDedupesSharedTorrentByGUID(t *testing.T) {
+	shared := seadex.Torrent{
+		Tracker: "Nyaa", URL: "https://nyaa.si/view/1234567",
+		Files: []seadex.File{{Length: 7, Name: "Show - S01E01 (1080p) [G].mkv"}},
+	}
+	older := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	newer := older.Add(48 * time.Hour)
+	alt := shared
+	best := shared
+	best.IsBest = true
+	entries := []seadex.Entry{
+		{AniListID: 1, Updated: newer, Torrents: []seadex.Torrent{alt}},
+		{AniListID: 2, Updated: older, Torrents: []seadex.Torrent{best}},
+	}
+	classify := func(alID int) []int {
+		if alID == 1 {
+			return []int{catAnime}
+		}
+		return []int{catMovies}
+	}
+	nyaa, ab, skipped, unresolvable := buildFeeds(entries, "", classify)
+	if len(ab) != 0 || skipped != 0 || unresolvable != 0 {
+		t.Fatalf("ab=%d skipped=%d unresolvable=%d, want all 0", len(ab), skipped, unresolvable)
+	}
+	if len(nyaa) != 1 {
+		t.Fatalf("nyaa feed has %d items, want 1 (same-GUID items merged)", len(nyaa))
+	}
+	got := nyaa[0]
+	if got.DownloadVolumeFactor != dvfBest {
+		t.Errorf("marker = %q, want %q (best-wins even when the alt entry is listed first)", got.DownloadVolumeFactor, dvfBest)
+	}
+	if len(got.Categories) != 2 || !slices.Contains(got.Categories, catAnime) || !slices.Contains(got.Categories, catMovies) {
+		t.Errorf("categories = %v, want the union {%d, %d}", got.Categories, catAnime, catMovies)
+	}
+	if !got.PubDate.Equal(newer) {
+		t.Errorf("pubdate = %v, want %v (newest entry update, independent of which entry is best)", got.PubDate, newer)
 	}
 }
