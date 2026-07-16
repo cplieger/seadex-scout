@@ -1,8 +1,6 @@
 package audit
 
 import (
-	"bytes"
-	"encoding/json"
 	"log/slog"
 	"reflect"
 	"strings"
@@ -14,6 +12,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/slogx/capture"
 )
 
 func TestScopeLabel(t *testing.T) {
@@ -200,14 +199,14 @@ func TestRenderMarkdownAndJSON(t *testing.T) {
 			Releases:      []Release{{Group: "SubsPlease", Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}},
 		}},
 	}
-	md := RenderMarkdown(r)
+	md := renderMarkdown(r)
 	for _, want := range []string{"# SeaDex alignment report", "Frieren", string(VerdictBest)} {
 		if !strings.Contains(md, want) {
 			t.Errorf("markdown missing %q", want)
 		}
 	}
-	if _, err := RenderJSON(r); err != nil {
-		t.Errorf("RenderJSON: %v", err)
+	if _, err := renderJSON(r); err != nil {
+		t.Errorf("renderJSON: %v", err)
 	}
 }
 
@@ -242,18 +241,29 @@ func TestRenderMarkdownScopePrecedence(t *testing.T) {
 		},
 	}
 
-	got := RenderMarkdown(r)
+	got := renderMarkdown(r)
 	if !strings.Contains(got, "| Movie | movie |") {
-		t.Errorf("RenderMarkdown() did not give movie scope precedence: %s", got)
+		t.Errorf("renderMarkdown() did not give movie scope precedence: %s", got)
 	}
 	if !strings.Contains(got, "| Mapped OVA | S2 |") {
-		t.Errorf("RenderMarkdown() did not give mapped season scope precedence: %s", got)
+		t.Errorf("renderMarkdown() did not give mapped season scope precedence: %s", got)
 	}
 }
 
+// recordAttrs collects a record's direct attributes into a map of typed values
+// (slog.Value.Any preserves int64/bool/string, unlike a JSON round-trip's
+// float64 coercion).
+func recordAttrs(r slog.Record) map[string]any {
+	out := make(map[string]any, r.NumAttrs())
+	r.Attrs(func(a slog.Attr) bool {
+		out[a.Key] = a.Value.Any()
+		return true
+	})
+	return out
+}
+
 func TestReportLogEmitsSummaryAndPerRowLines(t *testing.T) {
-	var buf bytes.Buffer
-	log := slog.New(slog.NewJSONHandler(&buf, nil))
+	log, rec := capture.New()
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
 		Totals:      map[string]int{string(VerdictBest): 1, string(VerdictNoFile): 2},
@@ -270,29 +280,25 @@ func TestReportLogEmitsSummaryAndPerRowLines(t *testing.T) {
 
 	r.Log(log)
 
-	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("Log emitted %d lines, want 2 (summary + one per row)", len(lines))
+	if rec.Len() != 2 {
+		t.Fatalf("Log emitted %d records, want 2 (summary + one per row)", rec.Len())
 	}
-	var summary, item map[string]any
-	if err := json.Unmarshal([]byte(lines[0]), &summary); err != nil {
-		t.Fatalf("summary line does not parse: %v", err)
+	recs := rec.Records()
+	summary, row := recs[0], recs[1]
+	if summary.Message != "report summary" {
+		t.Errorf("summary msg = %q, want %q", summary.Message, "report summary")
 	}
-	if err := json.Unmarshal([]byte(lines[1]), &item); err != nil {
-		t.Fatalf("row line does not parse: %v", err)
+	sAttrs := recordAttrs(summary)
+	if sAttrs["rows"] != int64(1) || sAttrs["have_best"] != int64(1) || sAttrs["no_file"] != int64(2) {
+		t.Errorf("summary counts = rows:%v have_best:%v no_file:%v, want 1/1/2", sAttrs["rows"], sAttrs["have_best"], sAttrs["no_file"])
 	}
-	if summary["msg"] != "report summary" {
-		t.Errorf("summary msg = %v, want %q", summary["msg"], "report summary")
+	if row.Message != "report item" {
+		t.Errorf("row msg = %q, want %q", row.Message, "report item")
 	}
-	if summary["rows"] != float64(1) || summary["have_best"] != float64(1) || summary["no_file"] != float64(2) {
-		t.Errorf("summary counts = rows:%v have_best:%v no_file:%v, want 1/1/2", summary["rows"], summary["have_best"], summary["no_file"])
-	}
-	if item["msg"] != "report item" {
-		t.Errorf("row msg = %v, want %q", item["msg"], "report item")
-	}
+	rAttrs := recordAttrs(row)
 	want := map[string]any{
 		"title":         "Frieren",
-		"al_id":         float64(154587),
+		"al_id":         int64(154587),
 		"arr":           library.ArrSonarr,
 		"verdict":       string(VerdictBest),
 		"qualifier":     string(QualifierMixed),
@@ -305,8 +311,8 @@ func TestReportLogEmitsSummaryAndPerRowLines(t *testing.T) {
 		"match_source":  "id",
 	}
 	for k, v := range want {
-		if item[k] != v {
-			t.Errorf("row attr %q = %v, want %v", k, item[k], v)
+		if rAttrs[k] != v {
+			t.Errorf("row attr %q = %v, want %v", k, rAttrs[k], v)
 		}
 	}
 }
@@ -322,7 +328,7 @@ func TestRenderMarkdownCountsNotOnSeaDexSeparately(t *testing.T) {
 		},
 	}
 
-	md := RenderMarkdown(r)
+	md := renderMarkdown(r)
 
 	if !strings.Contains(md, "1 anime with a SeaDex match") {
 		t.Errorf("header must count only matched rows, got: %s", md[:120])
@@ -360,9 +366,36 @@ func TestRenderMarkdownOmitsNotOnSeaDexClauseWhenZero(t *testing.T) {
 		Rows:        []Row{{Title: "Matched", Arr: "sonarr", Verdict: VerdictBest}},
 	}
 
-	md := RenderMarkdown(r)
+	md := renderMarkdown(r)
 
 	if strings.Contains(md, "more in your library") {
 		t.Errorf("header must omit the not_on_seadex clause when the count is zero, got: %s", md[:200])
+	}
+}
+
+func TestRenderMarkdownEscapesUntrustedRowText(t *testing.T) {
+	r := &Report{
+		GeneratedAt: time.Unix(0, 0).UTC(),
+		Totals:      map[string]int{string(VerdictUnlisted): 1},
+		Rows: []Row{{
+			Title:         "Evil|Show <img src=x>",
+			Arr:           "sonarr",
+			Verdict:       VerdictUnlisted,
+			CurrentGroups: []string{"bad|group"},
+			Releases:      []Release{{Group: "best[grp]", Best: true}},
+		}},
+	}
+
+	md := renderMarkdown(r)
+
+	for _, raw := range []string{"Evil|Show", "<img", "bad|group", "best[grp]"} {
+		if strings.Contains(md, raw) {
+			t.Errorf("renderMarkdown() leaked unescaped untrusted text %q", raw)
+		}
+	}
+	for _, want := range []string{"Evil&#124;Show &lt;img src=x&gt;", "bad&#124;group", "best&#91;grp&#93;"} {
+		if !strings.Contains(md, want) {
+			t.Errorf("renderMarkdown() missing escaped form %q", want)
+		}
 	}
 }

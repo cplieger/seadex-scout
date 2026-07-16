@@ -14,6 +14,7 @@ func FuzzParseMedia(f *testing.F) {
 	f.Add([]byte(`{"data":{"Media":{"title":{"romaji":"A","english":"A"}}}}`))
 	f.Add([]byte(``))
 	f.Add([]byte(`{bad`))
+	f.Add([]byte(`{"data":{"Media":{"format":"MOVIE","startDate":{"year":2020},"title":{"romaji":"A"}}}}`))
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		m, err := parseMedia(raw)
 		if err != nil {
@@ -30,6 +31,9 @@ func FuzzParseMediaPage(f *testing.F) {
 	f.Add([]byte(`{"data":{"Page":{"media":[]}}}`))
 	f.Add([]byte(`{"errors":[{"message":"x"}]}`))
 	f.Add([]byte(``))
+	f.Add([]byte(`{bad`))
+	f.Add([]byte(`{"data":{"Page":null}}`))
+	f.Add([]byte(`{"data":{"Page":{"media":[{"id":2,"format":"MOVIE","startDate":{"year":2019},"title":{"romaji":"B","english":"B"}}]}}}`))
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		out, err := parseMediaPage(raw)
 		if err != nil {

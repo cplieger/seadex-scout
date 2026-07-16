@@ -156,3 +156,46 @@ func TestAcquireReportLockRefusesConcurrentRun(t *testing.T) {
 	}
 	release2()
 }
+
+func TestAcquireReportLockReportsMkdirError(t *testing.T) {
+	parent := t.TempDir()
+	blocker := filepath.Join(parent, "reports")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := AcquireReportLock(filepath.Join(blocker, "sub"))
+
+	if err == nil {
+		t.Fatal("AcquireReportLock must fail when the report dir cannot be created")
+	}
+	if !strings.Contains(err.Error(), "create report dir") {
+		t.Errorf("error = %q, want it wrapped with the create-report-dir context", err)
+	}
+	if errors.Is(err, ErrReportRunning) {
+		t.Error("a mkdir failure must not be reported as a concurrent-run refusal")
+	}
+}
+
+func TestAcquireReportLockReportsOpenError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions")
+	}
+	dir := filepath.Join(t.TempDir(), "reports")
+	if err := os.MkdirAll(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	_, err := AcquireReportLock(dir)
+
+	if err == nil {
+		t.Fatal("AcquireReportLock must fail when the lock file cannot be created")
+	}
+	if !strings.Contains(err.Error(), "open report lock") {
+		t.Errorf("error = %q, want it wrapped with the open-report-lock context", err)
+	}
+	if errors.Is(err, ErrReportRunning) {
+		t.Error("an open failure must not be reported as a concurrent-run refusal")
+	}
+}

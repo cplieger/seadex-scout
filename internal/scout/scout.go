@@ -45,6 +45,9 @@ type SeaDexSource interface {
 	FetchEntries(ctx context.Context) ([]seadex.Entry, error)
 }
 
+// The concrete PocketBase client must keep satisfying the cycle's seam.
+var _ SeaDexSource = (*seadex.Client)(nil)
+
 // StateStore loads and saves the persisted cross-cycle state a cycle reads and
 // writes. It is the consumer-side seam over the concrete *state.Store (which
 // implements it; build.go injects it), so orchestration tests can drive state
@@ -231,6 +234,18 @@ func mappingDegradedAttrs(mapErr error, usableRecords int) []any {
 	return attrs
 }
 
+// aniListCycleAttrs returns the cumulative and per-cycle AniList counters both
+// cycle completion paths log.
+func (s *Scout) aniListCycleAttrs(startStats anilist.Stats) []any {
+	aniStats := s.aniStats()
+	return []any{
+		"anilist_calls", aniStats.Calls,
+		"anilist_calls_cycle", aniStats.Calls - startStats.Calls,
+		"anilist_waits", aniStats.RateLimitWaits,
+		"anilist_waits_cycle", aniStats.RateLimitWaits - startStats.RateLimitWaits,
+	}
+}
+
 // finishDegradedMatch closes a cycle whose matching came back degraded: a
 // transient AniList outage left needed fallback lookups incomplete, so some
 // entries are missing matches they would normally resolve. Comparing now would
@@ -239,16 +254,10 @@ func mappingDegradedAttrs(mapErr error, usableRecords int) []any {
 // the finding dedupe table untouched. Always healthy: an upstream outage is
 // not an ingest fault.
 func (s *Scout) finishDegradedMatch(ctx context.Context, start time.Time, startStats anilist.Stats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, result match.Result) bool {
-	st.Library, st.Mapping, st.Memo = snap, *mapCache, result.Memo
+	st.Library, st.Mapping, st.Memo = snap.SanitizedForStorage(), *mapCache, result.Memo
 	s.save(ctx, st)
-	aniStats := s.aniStats()
-	attrs := []any{
-		"anilist_calls", aniStats.Calls,
-		"anilist_calls_cycle", aniStats.Calls - startStats.Calls,
-		"anilist_waits", aniStats.RateLimitWaits,
-		"anilist_waits_cycle", aniStats.RateLimitWaits - startStats.RateLimitWaits,
-		"duration", time.Since(start).Round(time.Millisecond).String(),
-	}
+	attrs := append(s.aniListCycleAttrs(startStats),
+		"duration", time.Since(start).Round(time.Millisecond).String())
 	if ctx.Err() != nil {
 		// A shutdown/redeploy cancelled the cycle mid-matching: Matcher flags
 		// the result degraded so findings stay preserved, but the cause is
@@ -297,20 +306,18 @@ func (s *Scout) finishSuccessfulCycle(ctx context.Context, start time.Time, star
 	st.Baselined = true
 
 	diff := library.DiffSnapshots(&st.Library, &snap)
-	aniStats := s.aniStats()
-	attrs := []any{
+	attrs := make([]any, 0, 26)
+	attrs = append(attrs,
 		"seadex_entries", len(entries),
 		"library_items", len(snap.Items),
 		"findings", len(findings),
 		"mapped", sumCounts(result.Coverage.Hits),
 		"unmapped", sumCounts(result.Coverage.Unmapped),
-		"anilist_calls", aniStats.Calls,
-		"anilist_calls_cycle", aniStats.Calls - startStats.Calls,
-		"anilist_waits", aniStats.RateLimitWaits,
-		"anilist_waits_cycle", aniStats.RateLimitWaits - startStats.RateLimitWaits,
+	)
+	attrs = append(attrs, s.aniListCycleAttrs(startStats)...)
+	attrs = append(attrs,
 		"added", diff.Added, "removed", diff.Removed, "changed", diff.Changed,
-		"duration", time.Since(start).Round(time.Millisecond).String(),
-	}
+		"duration", time.Since(start).Round(time.Millisecond).String())
 	if snap.Partial {
 		// A partial walk compared only the clean items, so the cycle closed
 		// degraded: report the degraded coverage on the completion line the
@@ -320,7 +327,7 @@ func (s *Scout) finishSuccessfulCycle(ctx context.Context, start time.Time, star
 		s.log.Info("cycle complete", attrs...)
 	}
 
-	st.Library, st.Mapping, st.Memo, st.Findings = snap, *mapCache, result.Memo, newFindings
+	st.Library, st.Mapping, st.Memo, st.Findings = snap.SanitizedForStorage(), *mapCache, result.Memo, newFindings
 	s.save(ctx, st)
 	return true
 }
@@ -349,6 +356,17 @@ func splitFailedMatches(matches []match.Match) (clean []match.Match, failedItems
 	return clean, failedItems
 }
 
+// mapUsable reports whether a compare or feed rebuild can proceed on the loaded
+// map: a nil load error, or a stale-but-usable cache (*mapping.StaleMapError,
+// which carries the cached index). Any other load error means no usable map.
+func mapUsable(mapErr error) bool {
+	if mapErr == nil {
+		return true
+	}
+	_, stale := errors.AsType[*mapping.StaleMapError](mapErr)
+	return stale
+}
+
 // rebuildFeed refreshes the indexer's Torznab feed from the cycle's shared
 // SeaDex snapshot, independent of the arr walk (the feed needs only SeaDex +
 // Fribb, so an arr outage must not freeze it). It is a no-op when no feed is
@@ -359,8 +377,7 @@ func splitFailedMatches(matches []match.Match) (clean []match.Match, failedItems
 // map (mapErr matches mapping.StaleMapError, which carries a usable cached
 // index) still rebuilds, exactly like the pre-compare gate's discrimination.
 func (s *Scout) rebuildFeed(ctx context.Context, entries []seadex.Entry, idx *mapping.Index, mapErr, seaErr error) {
-	_, stale := errors.AsType[*mapping.StaleMapError](mapErr)
-	if s.deps.Feed == nil || seaErr != nil || len(entries) == 0 || (mapErr != nil && !stale) {
+	if s.deps.Feed == nil || seaErr != nil || len(entries) == 0 || !mapUsable(mapErr) {
 		return
 	}
 	// The feed writer consumes exactly one bit of the Fribb map (movie or not),
@@ -498,7 +515,7 @@ func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap li
 			"cause", context.Cause(ctx))
 		return true, true
 	}
-	if _, stale := errors.AsType[*mapping.StaleMapError](mapErr); mapErr != nil && !stale {
+	if !mapUsable(mapErr) {
 		s.degradedSave(ctx, st, snap, mapCache)
 		s.log.Warn("mapping unusable; skipping comparison, findings preserved", "error", mapErr)
 		s.cycleDegraded("mapping-unusable", "error", mapErr)
@@ -544,7 +561,7 @@ func (s *Scout) Report(ctx context.Context) (audit.Report, error) {
 
 	_, idx, mapErr := s.deps.Mapping.Load(ctx, &st.Mapping)
 	if mapErr != nil && ctx.Err() == nil {
-		if _, stale := errors.AsType[*mapping.StaleMapError](mapErr); !stale {
+		if !mapUsable(mapErr) {
 			// No usable map at all: ID matching, season scoping, and the
 			// not_on_seadex catalogue all depend on it, so publishing would
 			// contradict the whole-library audit contract - fail like a

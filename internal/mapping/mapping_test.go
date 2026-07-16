@@ -2,6 +2,7 @@ package mapping
 
 import (
 	"reflect"
+	"slices"
 	"sort"
 	"testing"
 )
@@ -114,14 +115,36 @@ func TestIndex_ForEachRecordAndNewIndex(t *testing.T) {
 }
 
 func TestParseOverrides(t *testing.T) {
-	recs, err := parseOverrides([]byte(`[{"anilist_id":5,"type":"  movie  "}]`))
+	recs, unknown, err := parseOverrides([]byte(`[{"anilist_id":5,"type":"  movie  "}]`))
 	if err != nil {
 		t.Fatalf("parseOverrides error: %v", err)
 	}
 	if len(recs) != 1 || recs[0].Type != "MOVIE" {
 		t.Fatalf("parseOverrides = %+v, want one record with Type MOVIE", recs)
 	}
-	if _, err := parseOverrides([]byte(`{bad`)); err == nil {
+	if len(unknown) != 0 {
+		t.Errorf("unknown keys = %v, want none for a well-formed override", unknown)
+	}
+	if _, _, err := parseOverrides([]byte(`{bad`)); err == nil {
 		t.Error("parseOverrides(malformed) = nil error, want error")
+	}
+}
+
+// TestParseOverridesReportsUnknownKeys pins the unknown-key detection: an
+// operator writing the upstream Fribb field names (imdb_id, themoviedb_id,
+// season) instead of the override names gets them reported (sorted, deduped)
+// while the records still parse.
+func TestParseOverridesReportsUnknownKeys(t *testing.T) {
+	data := []byte(`[{"anilist_id":5,"imdb_id":"tt1","season":1},{"anilist_id":6,"imdb_id":"tt2","themoviedb_id":9}]`)
+	recs, unknown, err := parseOverrides(data)
+	if err != nil {
+		t.Fatalf("parseOverrides error: %v", err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("records = %d, want 2 (unknown keys do not reject the record)", len(recs))
+	}
+	want := []string{"imdb_id", "season", "themoviedb_id"}
+	if !slices.Equal(unknown, want) {
+		t.Errorf("unknown keys = %v, want %v (sorted, deduped)", unknown, want)
 	}
 }

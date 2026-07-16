@@ -55,3 +55,35 @@ func FuzzFeedTitle_singleVideoPreservesName(f *testing.F) {
 		}
 	})
 }
+
+// FuzzValidInfoHash_normalizedShapeAndIdempotent exercises the info-hash
+// sanitizer on arbitrary untrusted input (SeaDex record InfoHash fields and
+// Prowlarr torznab:attr values). Invariants: every non-empty result is exactly
+// 40 lowercase-hex bytes, and the sanitizer is idempotent - so a value can
+// never normalize differently between snapshot build (buildSnapshot) and
+// lookup, which would silently break hash matching.
+func FuzzValidInfoHash_normalizedShapeAndIdempotent(f *testing.F) {
+	f.Add("143ed15e5e3df072ae91adaeb149973a887590dd")
+	f.Add("143ED15E5E3DF072AE91ADAEB149973A887590DD")
+	f.Add("  143ed15e5e3df072ae91adaeb149973a887590dd  ")
+	f.Add("<redacted>")
+	f.Add("g43ed15e5e3df072ae91adaeb149973a887590dd")
+	f.Add("")
+	f.Fuzz(func(t *testing.T, h string) {
+		got := validInfoHash(h)
+		if got != "" {
+			if len(got) != 40 {
+				t.Fatalf("validInfoHash(%q) = %q (len %d), want empty or 40 bytes", h, got, len(got))
+			}
+			for i := range len(got) {
+				c := got[i]
+				if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+					t.Fatalf("validInfoHash(%q) = %q, contains non-lowercase-hex byte %q", h, got, c)
+				}
+			}
+		}
+		if again := validInfoHash(got); again != got {
+			t.Fatalf("validInfoHash not idempotent: validInfoHash(%q) = %q, re-applying gives %q", h, got, again)
+		}
+	})
+}

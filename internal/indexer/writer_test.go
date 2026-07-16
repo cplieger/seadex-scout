@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/slogx/capture"
 )
 
 // TestRebuildWarnsWhenABPasskeyMissing pins the operator nudge: a rebuild whose
@@ -18,8 +19,7 @@ import (
 // so the operator learns why the AB RSS feed has nothing grabbable. The logger
 // is injected via NewFeedWriter, so no slog.Default swap is needed.
 func TestRebuildWarnsWhenABPasskeyMissing(t *testing.T) {
-	var buf bytes.Buffer
-	log := slog.New(slog.NewTextHandler(&buf, nil))
+	log, rec := capture.New()
 	path := filepath.Join(t.TempDir(), "feed.json")
 	entries := []seadex.Entry{{
 		AniListID: 9,
@@ -37,12 +37,20 @@ func TestRebuildWarnsWhenABPasskeyMissing(t *testing.T) {
 	if err := NewFeedWriter("", true, path, log).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
-	out := buf.String()
-	if !strings.Contains(out, "ab RSS feed empty of grabbable links") {
-		t.Errorf("missing passkey warning not logged; log output:\n%s", out)
+	if !rec.Contains("ab RSS feed empty of grabbable links") {
+		t.Errorf("missing passkey warning not logged; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
-	if !strings.Contains(out, "ab_releases_skipped=1") {
-		t.Errorf("warning does not carry ab_releases_skipped=1; log output:\n%s", out)
+	skipped := int64(-1)
+	for _, r := range rec.Records() {
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "ab_releases_skipped" {
+				skipped = a.Value.Int64()
+			}
+			return true
+		})
+	}
+	if skipped != 1 {
+		t.Errorf("warning does not carry ab_releases_skipped=1 (got %d); log output:\n%s", skipped, strings.Join(rec.Messages(), "\n"))
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("snapshot not written despite AB skip: %v", err)
@@ -54,8 +62,7 @@ func TestRebuildWarnsWhenABPasskeyMissing(t *testing.T) {
 // missing-passkey nudge even though the catalogue carries AB releases, so the
 // per-cycle log does not nag about a tracker the operator opted out of.
 func TestRebuildNoPasskeyWarnWithoutABIntent(t *testing.T) {
-	var buf bytes.Buffer
-	log := slog.New(slog.NewTextHandler(&buf, nil))
+	log, rec := capture.New()
 	path := filepath.Join(t.TempDir(), "feed.json")
 	entries := []seadex.Entry{{
 		AniListID: 9,
@@ -67,8 +74,8 @@ func TestRebuildNoPasskeyWarnWithoutABIntent(t *testing.T) {
 	if err := NewFeedWriter("", false, path, log).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
-	if out := buf.String(); strings.Contains(out, "ab RSS feed empty of grabbable links") {
-		t.Errorf("passkey warning logged without AB intent; log output:\n%s", out)
+	if rec.Contains("ab RSS feed empty of grabbable links") {
+		t.Errorf("passkey warning logged without AB intent; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }
 

@@ -166,12 +166,13 @@ func findingKVs(f *compare.Finding) []any {
 func trackerURLs(links []compare.ReleaseLink) (nyaa, ab string) {
 	var firstPublic string
 	for i := range links {
+		t, known := release.LookupTracker(links[i].Tracker)
 		switch {
-		case release.IsAnimeBytes(links[i].Tracker):
+		case known && t.Name == release.TrackerNameAnimeBytes:
 			if ab == "" {
 				ab = links[i].URL
 			}
-		case strings.EqualFold(strings.TrimSpace(links[i].Tracker), "nyaa"):
+		case known && t.Name == release.TrackerNameNyaa:
 			if nyaa == "" {
 				nyaa = links[i].URL
 			}

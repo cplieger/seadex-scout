@@ -33,5 +33,15 @@ func FuzzSafeLogURL(f *testing.F) {
 				t.Errorf("SafeLogURL(%q) = %q leaks %q across the logging trust boundary", raw, got, secret)
 			}
 		}
+		// The scheme-less arm: "user:pass@host/..." parses as an OPAQUE URL
+		// (scheme "user", the credential inside u.Opaque where the userinfo
+		// strip cannot reach it), which must be dropped, not passed through.
+		bare := "user:SCRTpass@" + host + "/" + path + "?apikey=SCRTquery#SCRTfrag"
+		got = SafeLogURL(bare)
+		for _, secret := range []string{"SCRTpass", "SCRTquery", "SCRTfrag"} {
+			if strings.Contains(got, secret) {
+				t.Errorf("SafeLogURL(%q) = %q leaks %q across the logging trust boundary", bare, got, secret)
+			}
+		}
 	})
 }

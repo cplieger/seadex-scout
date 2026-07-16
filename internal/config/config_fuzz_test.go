@@ -45,3 +45,23 @@ func FuzzValidateHTTPURL(f *testing.F) {
 		}
 	})
 }
+
+// FuzzSanitizeTypeErrorEntry generalizes the value-independence contract of the
+// decode-error redaction: a sentinel planted in the scalar-excerpt position of a
+// wrong-type TypeError entry must never survive sanitization.
+func FuzzSanitizeTypeErrorEntry(f *testing.F) {
+	f.Add("", "")
+	f.Add("x", "y")
+	f.Add(": mapping key x", " already defined at line 9")
+	f.Add(": field oops", " not found in type config.fileConfig")
+	f.Add("cannot unmarshal !!str `nested`", " into bool")
+	f.Add("line 3", "")
+	f.Add("`", "`")
+	f.Fuzz(func(t *testing.T, pre, post string) {
+		const sentinel = "EXCERPT-SENTINEL-9c2f"
+		entry := "line 4: cannot unmarshal !!str `" + pre + sentinel + post + "` into bool"
+		if got := sanitizeTypeErrorEntry(entry); strings.Contains(got, sentinel) {
+			t.Errorf("sanitizeTypeErrorEntry(%q) leaks the excerpt sentinel: %q", entry, got)
+		}
+	})
+}

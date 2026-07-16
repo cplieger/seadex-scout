@@ -161,11 +161,16 @@ func (c *curation) lookup(hash, infoURL, guid string) (isBest, matched bool) {
 // (a cycle - in this process or the `poll` subcommand - rewrote it), reading it
 // under mu. The server never fetches SeaDex or Fribb itself.
 type Indexer struct {
-	cfg       Config
-	snap      snapshot
-	log       *slog.Logger
-	path      string
-	snapMod   time.Time
+	cfg     Config
+	snap    snapshot
+	log     *slog.Logger
+	path    string
+	snapMod time.Time
+	// failedMod is the mtime of the last snapshot file that failed to load
+	// (unreadable or malformed), so an unchanged bad file is not re-read and
+	// re-warned on every request; cleared on a successful load. Guarded by
+	// reloadMu (set/cleared only inside reload).
+	failedMod time.Time
 	upstreams []*upstream // wired once in New; immutable afterwards (not guarded by mu)
 	// reloadMu coalesces concurrent snapshot refreshes: only one request runs
 	// reload's stat/read/unmarshal at a time; the rest serve the current
@@ -336,10 +341,24 @@ func (ix *Indexer) reload(ctx context.Context) {
 	if info.ModTime().Equal(loaded) {
 		return
 	}
-	snap, ok := ix.readSnapshot(ctx)
-	if !ok {
+	// An identical mtime on the same path means the same file content (any
+	// rewrite changes the mtime), so re-reading a file that already failed to
+	// load could only fail again: skip it until it is rewritten, instead of
+	// re-reading up to maxFeedBytes and re-warning on every request.
+	if info.ModTime().Equal(ix.failedMod) {
 		return
 	}
+	snap, ok := ix.readSnapshot(ctx)
+	if !ok {
+		// Remember the bad file's mtime so the next request skips it (see
+		// above) - but not on a shutdown cancellation, where the file was
+		// never actually read and a retry could succeed.
+		if ctx.Err() == nil {
+			ix.failedMod = info.ModTime()
+		}
+		return
+	}
+	ix.failedMod = time.Time{}
 	ix.mu.Lock()
 	// Re-check under the write lock. reloadMu already serializes the whole
 	// stat/read/install sequence, so no concurrent reload can install between
@@ -395,17 +414,26 @@ func (ix *Indexer) handler() http.Handler {
 // curation.
 func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	if ix.cfg.APIKey != "" {
-		// Hash both values to fixed-length digests before the constant-time
-		// compare: ConstantTimeCompare short-circuits on differing lengths,
-		// which would otherwise leak the configured key's length (CWE-208).
-		provided := sha256.Sum256([]byte(q.Get("apikey")))
-		expected := sha256.Sum256([]byte(ix.cfg.APIKey))
-		if subtle.ConstantTimeCompare(provided[:], expected[:]) != 1 {
-			ix.log.Info("indexer request rejected", "reason", "bad apikey", "path", r.URL.Path)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
+	if ix.cfg.APIKey == "" {
+		// Fail closed at the handler too: Run already refuses to bind with an
+		// empty feed_api_key, so this branch is unreachable in production, but
+		// a second independent guard keeps any future construction path from
+		// serving the passkey-bearing feed unauthenticated. (Skipping straight
+		// to the compare would OPEN the gate: an absent apikey param also
+		// hashes to sha256(""), so the constant-time compare would pass.)
+		ix.log.Error("indexer request rejected", "reason", "feed_api_key not configured", "path", r.URL.Path)
+		http.Error(w, "service unavailable: feed_api_key not configured", http.StatusServiceUnavailable)
+		return
+	}
+	// Hash both values to fixed-length digests before the constant-time
+	// compare: ConstantTimeCompare short-circuits on differing lengths,
+	// which would otherwise leak the configured key's length (CWE-208).
+	provided := sha256.Sum256([]byte(q.Get("apikey")))
+	expected := sha256.Sum256([]byte(ix.cfg.APIKey))
+	if subtle.ConstantTimeCompare(provided[:], expected[:]) != 1 {
+		ix.log.Info("indexer request rejected", "reason", "bad apikey", "path", r.URL.Path)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
 	}
 	// Every authenticated caps/error/feed response is marked non-cacheable up
 	// front: the /ab RSS body embeds the operator's AnimeBytes passkey in its
@@ -419,7 +447,7 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found: address a tracker feed at /nyaa or /ab", http.StatusNotFound)
 		return
 	}
-	if q.Get("t") == "caps" {
+	if strings.EqualFold(strings.TrimSpace(q.Get("t")), "caps") {
 		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 		_, _ = io.WriteString(w, renderCaps())
 		ix.log.Info("indexer request", "scope", scope, "t", "caps")
@@ -457,7 +485,7 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 	// summary. `answered` is false when the feed deliberately skips a per-episode
 	// query (so an empty result reads as a skip, not a no-match); `feed` is true
 	// for an empty-q RSS check served from the synthesized SeaDex feed; `upstream`
-	// is how many results the tracker returned via Prowlarr for a search,
+	// is how many upstream results survived the Prowlarr fetch (post origin-filter) for a search,
 	// `curated` how many items were returned after curation/synthesis, `returned`
 	// the final count after the category filter.
 	ix.log.Info("indexer request",
@@ -478,8 +506,8 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 // feed answered it (answered), whether it was served from the synthesized RSS
 // feed (feed - an empty-q periodic check) rather than a proxied search, whether
 // the search's queried upstream(s) ALL failed (upstreamFailed - serve renders a
-// Torznab <error> instead of an empty feed then), how many raw results the
-// tracker(s) returned via Prowlarr (search only), and how many items were
+// Torznab <error> instead of an empty feed then), how many upstream results
+// survived the Prowlarr fetch's download-URL origin filter (search only), and how many items were
 // returned after curation or synthesis (curated).
 type queryStats struct {
 	answered       bool

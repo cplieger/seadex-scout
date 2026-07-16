@@ -30,10 +30,10 @@ func (t *Torrent) UsableURL() string {
 	}
 	if parsed.IsAbs() {
 		// An absolute URL is returned unchanged, but only in http(s) with a real
-		// host; any other scheme (javascript:, data:, file:) is untrusted
-		// upstream data with no legitimate use in a clickable link.
-		if (!strings.EqualFold(parsed.Scheme, "http") &&
-			!strings.EqualFold(parsed.Scheme, "https")) || parsed.Host == "" {
+		// host and no userinfo; any other scheme (javascript:, data:, file:) or a
+		// user@host authority (visual spoofing: "https://trusted@evil/") is
+		// untrusted upstream data with no legitimate use in a clickable link.
+		if !usableAbsolute(parsed) {
 			return ""
 		}
 		return u
@@ -58,4 +58,14 @@ func (t *Torrent) UsableURL() string {
 		u = "/" + u
 	}
 	return tr.BaseURL + u
+}
+
+// usableAbsolute reports whether an already-absolute parsed URL is a safe
+// clickable link: http(s) scheme, a real host, and no userinfo authority.
+func usableAbsolute(parsed *url.URL) bool {
+	if !strings.EqualFold(parsed.Scheme, "http") &&
+		!strings.EqualFold(parsed.Scheme, "https") {
+		return false
+	}
+	return parsed.Host != "" && parsed.User == nil
 }

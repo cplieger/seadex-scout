@@ -1,7 +1,6 @@
 package library
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -13,6 +12,7 @@ import (
 	"testing/synctest"
 
 	"github.com/cplieger/arrapi"
+	"github.com/cplieger/slogx/capture"
 )
 
 func discardLogger() *slog.Logger {
@@ -55,7 +55,9 @@ func epFile(group string) *arrapi.EpisodeFile {
 // semantic: a sub-budget per-series episode-fetch failure keeps the series as
 // a Failed placeholder (identity only, no file data, so a transient fetch
 // failure is not misread as a real no-file item) while the walk as a whole
-// succeeds and the other series carry their groups. Run under -race, it also
+// succeeds and the other series carry their groups. The Partial assertion also
+// pins the producer side of the Snapshot.Partial contract internal/scout's
+// pre-compare gate depends on. Run under -race, it also
 // exercises the bounded-concurrency episode fetch.
 func TestWalkSonarrPartialEpisodeFailure(t *testing.T) {
 	fs := &fakeSonarr{
@@ -407,30 +409,38 @@ func TestWalkSonarrBoundsEpisodeFetchConcurrency(t *testing.T) {
 	})
 }
 
-// recordingHandler captures the levels of every log record so a test can assert
-// no WARN was emitted.
-type recordingHandler struct {
-	levels []slog.Level
-	mu     sync.Mutex
+// sawWarn reports whether any captured record was logged at WARN, so a test
+// can assert no warning was emitted.
+func sawWarn(rec *capture.Recorder) bool {
+	for _, r := range rec.Records() {
+		if r.Level == slog.LevelWarn {
+			return true
+		}
+	}
+	return false
 }
 
-func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
-
-func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.levels = append(h.levels, r.Level)
-	return nil
-}
-
-func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
-
-func (h *recordingHandler) WithGroup(string) slog.Handler { return h }
-
-func (h *recordingHandler) sawWarn() bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return slices.Contains(h.levels, slog.LevelWarn)
+// recordHasAttr reports whether any captured record whose Message contains
+// msgSub carries an attribute with the given key whose rendered value equals
+// want, so tests assert on structured records instead of rendered logfmt.
+func recordHasAttr(rec *capture.Recorder, msgSub, key, want string) bool {
+	for _, r := range rec.Records() {
+		if !strings.Contains(r.Message, msgSub) {
+			continue
+		}
+		found := false
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == key && a.Value.String() == want {
+				found = true
+				return false
+			}
+			return true
+		})
+		if found {
+			return true
+		}
+	}
+	return false
 }
 
 // cancelingSonarr cancels the walk context from inside GetEpisodes, simulating a
@@ -460,14 +470,14 @@ func TestWalkSonarrEpisodeCancellationIsFatalWithoutWarn(t *testing.T) {
 		series: []arrapi.Series{{ID: 1, Title: "Alpha"}},
 		cancel: cancel,
 	}
-	handler := &recordingHandler{}
-	w := NewWalker(&Config{Sonarr: fs, Logger: slog.New(handler)})
+	logger, rec := capture.New()
+	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
 
 	_, err := w.Walk(ctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Walk error = %v, want context.Canceled", err)
 	}
-	if handler.sawWarn() {
+	if sawWarn(rec) {
 		t.Fatal("Walk logged a warning for context cancellation; want cancellation treated as shutdown, not an arr fault")
 	}
 }
@@ -733,8 +743,8 @@ func TestWalkSonarrUnmatchedIncludeTagLogsWarning(t *testing.T) {
 		tagIDs:    map[int]struct{}{7: {}},
 		unmatched: []string{"nonexistent"},
 	}
-	handler := &recordingHandler{}
-	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime", "nonexistent"}, Logger: slog.New(handler)})
+	logger, rec := capture.New()
+	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime", "nonexistent"}, Logger: logger})
 
 	snap, err := w.Walk(context.Background())
 	if err != nil {
@@ -743,7 +753,7 @@ func TestWalkSonarrUnmatchedIncludeTagLogsWarning(t *testing.T) {
 	if len(snap.Items) != 1 || snap.Items[0].ArrID != 1 {
 		t.Fatalf("items = %+v, want only the tag-included series (id 1)", snap.Items)
 	}
-	if !handler.sawWarn() {
+	if !sawWarn(rec) {
 		t.Error("no warning logged, want a warning that a configured tag matched no arr tag")
 	}
 }
@@ -807,7 +817,6 @@ func TestWalkRadarrTopLevelListErrorIsFatal(t *testing.T) {
 // not silently swallowed as shutdown noise. The walk as a whole still succeeds
 // (a partial snapshot).
 func TestWalkSonarrLogsLiveContextTimeout(t *testing.T) {
-	var buf bytes.Buffer
 	fs := &fakeSonarr{
 		series: []arrapi.Series{
 			{ID: 1, Title: "Alpha"},
@@ -818,7 +827,8 @@ func TestWalkSonarrLogsLiveContextTimeout(t *testing.T) {
 		},
 		epErr: map[int]error{2: context.DeadlineExceeded},
 	}
-	w := NewWalker(&Config{Sonarr: fs, Logger: slog.New(slog.NewTextHandler(&buf, nil))})
+	logger, rec := capture.New()
+	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
 
 	snap, err := w.Walk(context.Background())
 	if err != nil {
@@ -827,9 +837,11 @@ func TestWalkSonarrLogsLiveContextTimeout(t *testing.T) {
 	if len(snap.Items) != 2 {
 		t.Fatalf("items = %d, want 2 (the timed-out series stays as a Failed placeholder)", len(snap.Items))
 	}
-	got := buf.String()
-	if !strings.Contains(got, "skipping series: episode fetch failed") || !strings.Contains(got, "Bravo") {
-		t.Errorf("log = %q, want a per-series episode-fetch-failed warning naming Bravo", got)
+	if !rec.Contains("skipping series: episode fetch failed") {
+		t.Errorf("messages = %q, want a per-series episode-fetch-failed warning", rec.Messages())
+	}
+	if !recordHasAttr(rec, "skipping series: episode fetch failed", "series", "Bravo") {
+		t.Error("episode-fetch-failed warning does not name Bravo in its series attr")
 	}
 }
 
@@ -839,20 +851,20 @@ func TestWalkSonarrLogsLiveContextTimeout(t *testing.T) {
 // cancellation is propagated by Walk instead), so a redeploy does not spam one
 // warning per in-flight series.
 func TestWalkSonarrSilentOnContextCancel(t *testing.T) {
-	var buf bytes.Buffer
 	fs := &fakeSonarr{
 		series: []arrapi.Series{{ID: 1, Title: "Alpha"}},
 		epErr:  map[int]error{1: context.Canceled},
 	}
-	w := NewWalker(&Config{Sonarr: fs, Logger: slog.New(slog.NewTextHandler(&buf, nil))})
+	logger, rec := capture.New()
+	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := w.Walk(ctx); err == nil {
 		t.Fatal("Walk returned nil error, want the walk-context cancellation propagated")
 	}
-	if got := buf.String(); strings.Contains(got, "skipping series: episode fetch failed") {
-		t.Errorf("log = %q, want no per-series warning on walk-context cancellation", got)
+	if rec.Contains("skipping series: episode fetch failed") {
+		t.Errorf("messages = %q, want no per-series warning on walk-context cancellation", rec.Messages())
 	}
 }
 
@@ -890,33 +902,10 @@ func TestWalkPreCancelledContextIsFatalWithNoArrs(t *testing.T) {
 	}
 }
 
-// TestWalkSonarrSetsPartialAfterEpisodeFetchFailure pins the producer side of
-// the Snapshot.Partial contract that internal/scout's pre-compare gate depends
-// on: a skipped Sonarr series must set Partial=true.
-func TestWalkSonarrSetsPartialAfterEpisodeFetchFailure(t *testing.T) {
-	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Kept"}, {ID: 2, Title: "Skipped"}},
-		episodes: map[int][]arrapi.Episode{
-			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
-		},
-		epErr: map[int]error{2: errors.New("episode fetch boom")},
-	}
-	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
-
-	snap, err := w.Walk(context.Background())
-	if err != nil {
-		t.Fatalf("Walk: %v", err)
-	}
-	if !snap.Partial {
-		t.Error("Snapshot.Partial = false, want true after a series is skipped")
-	}
-}
-
 // TestWalkSonarrPartialFailureLogsAggregateSkipWarning asserts the aggregate
 // "snapshot is partial" warning carries the skipped/kept counts when several
 // series fail their episode fetch.
 func TestWalkSonarrPartialFailureLogsAggregateSkipWarning(t *testing.T) {
-	var buf bytes.Buffer
 	fs := &fakeSonarr{
 		series: []arrapi.Series{
 			{ID: 1, Title: "Alpha"},
@@ -931,7 +920,8 @@ func TestWalkSonarrPartialFailureLogsAggregateSkipWarning(t *testing.T) {
 			3: errors.New("boom three"),
 		},
 	}
-	w := NewWalker(&Config{Sonarr: fs, Logger: slog.New(slog.NewTextHandler(&buf, nil))})
+	logger, rec := capture.New()
+	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
 	snap, err := w.Walk(context.Background())
 	if err != nil {
 		t.Fatalf("Walk returned error, want nil (partial failure is not fatal): %v", err)
@@ -939,9 +929,14 @@ func TestWalkSonarrPartialFailureLogsAggregateSkipWarning(t *testing.T) {
 	if len(snap.Items) != 3 {
 		t.Fatalf("items = %d, want 3 (one clean item plus two Failed placeholders)", len(snap.Items))
 	}
-	got := buf.String()
-	if !strings.Contains(got, "snapshot is partial") || !strings.Contains(got, "skipped=2") || !strings.Contains(got, "kept=3") {
-		t.Errorf("log = %q, want an aggregate partial-snapshot warning with skipped=2 kept=3", got)
+	if !rec.Contains("snapshot is partial") {
+		t.Fatalf("messages = %q, want an aggregate partial-snapshot warning", rec.Messages())
+	}
+	if !recordHasAttr(rec, "snapshot is partial", "skipped", "2") {
+		t.Error("partial-snapshot warning skipped attr != 2")
+	}
+	if !recordHasAttr(rec, "snapshot is partial", "kept", "3") {
+		t.Error("partial-snapshot warning kept attr != 3")
 	}
 }
 
@@ -1145,4 +1140,27 @@ func TestWalkCombinesBothArrsIntoOneSnapshot(t *testing.T) {
 	if arrs[ArrSonarr] != 1 || arrs[ArrRadarr] != 1 {
 		t.Errorf("arr distribution = %v, want one sonarr and one radarr item", arrs)
 	}
+}
+
+// TestDiffSnapshotsSkipsFailedPlaceholders pins indexByKey's Failed-placeholder
+// skip: a Failed item carries no comparable file state, so the diff treats it
+// as absent, with the Partial suppression rules deciding added/removed.
+func TestDiffSnapshotsSkipsFailedPlaceholders(t *testing.T) {
+	item := func(arr string, id int, groups ...string) Item {
+		return Item{Arr: arr, ArrID: id, Groups: groups, HasFile: len(groups) > 0}
+	}
+	t.Run("failed placeholder in cur is not a change or removal", func(t *testing.T) {
+		prev := &Snapshot{Items: []Item{item(ArrSonarr, 1, "pmr")}}
+		cur := &Snapshot{Partial: true, Items: []Item{{Arr: ArrSonarr, ArrID: 1, Failed: true}}}
+		if d := DiffSnapshots(prev, cur); d != (Diff{}) {
+			t.Errorf("diff = %+v, want zero Diff (a Failed placeholder carries no comparable state)", d)
+		}
+	})
+	t.Run("failed placeholder in prev is not an addition when the series returns", func(t *testing.T) {
+		prev := &Snapshot{Partial: true, Items: []Item{{Arr: ArrSonarr, ArrID: 1, Failed: true}}}
+		cur := &Snapshot{Items: []Item{item(ArrSonarr, 1, "pmr")}}
+		if d := DiffSnapshots(prev, cur); d != (Diff{}) {
+			t.Errorf("diff = %+v, want zero Diff (a returning series after a Failed walk is not added)", d)
+		}
+	})
 }

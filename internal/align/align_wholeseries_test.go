@@ -68,7 +68,7 @@ func TestSummarizeWholeSeriesNilAltTreatsBestLessSeasonAsUnlisted(t *testing.T) 
 
 // TestSummarizeWholeSeriesDeduplicatesGroupsAcrossSeasons pins the seen-group
 // dedupe in the whole-series aggregate: a group present in several seasons
-// appears once in Groups, not once per season (l-f3).
+// appears once in Groups, not once per season.
 func TestSummarizeWholeSeriesDeduplicatesGroupsAcrossSeasons(t *testing.T) {
 	item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{
 		1: {"shared", "alpha"},

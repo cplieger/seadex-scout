@@ -1,14 +1,12 @@
 package scout
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -40,6 +38,20 @@ func (f *fakeSonarr) ResolveTagIDs(context.Context, ...string) (map[int]struct{}
 	return nil, nil, nil
 }
 
+// flakySonarr wraps fakeSonarr but fails GetEpisodes for the listed series
+// IDs, so a walk succeeds while marking the snapshot partial.
+type flakySonarr struct {
+	failEpisodes map[int]bool
+	fakeSonarr
+}
+
+func (f *flakySonarr) GetEpisodes(ctx context.Context, seriesID int) ([]arrapi.Episode, error) {
+	if f.failEpisodes[seriesID] {
+		return nil, errors.New("episode fetch failed")
+	}
+	return f.fakeSonarr.GetEpisodes(ctx, seriesID)
+}
+
 // fakeSeaDex is an in-package SeaDexSource: it returns fixed entries or an
 // error so orchestration tests drive cycle outcomes directly, without the
 // PocketBase adapter or an httptest server (the seadex package's own suite
@@ -51,6 +63,19 @@ type fakeSeaDex struct {
 
 func (f *fakeSeaDex) FetchEntries(context.Context) ([]seadex.Entry, error) {
 	return f.entries, f.err
+}
+
+// fakeFeed records FeedWriter.Rebuild calls, optionally failing them.
+type fakeFeed struct {
+	err     error
+	calls   int
+	entries int
+}
+
+func (f *fakeFeed) Rebuild(_ context.Context, entries []seadex.Entry, _ func(alID int) bool) error {
+	f.calls++
+	f.entries = len(entries)
+	return f.err
 }
 
 // fakeStore is an in-package StateStore: it holds State in memory so
@@ -132,8 +157,7 @@ func noNetworkClient() *http.Client {
 // Loki rule alerts on every ERROR) - the following context-aware cycle stage
 // reports the shutdown once at WARN.
 func TestLoadStateCanceledContextIsNotAFault(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	logger, recorder := capture.New()
 	store := &fakeStore{st: state.State{Baselined: true}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -144,8 +168,8 @@ func TestLoadStateCanceledContextIsNotAFault(t *testing.T) {
 	if st.Baselined {
 		t.Error("loadState under a canceled context returned loaded state, want empty state")
 	}
-	if strings.Contains(buf.String(), "state load failed") {
-		t.Errorf("canceled state load was logged as a fault:\n%s", buf.String())
+	if n := recorder.CountExact("state load failed; starting from empty state"); n != 0 {
+		t.Errorf("canceled state load was logged as a fault %d times, want 0", n)
 	}
 }
 

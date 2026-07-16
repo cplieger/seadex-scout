@@ -279,12 +279,13 @@ func betterResult(entry *seadex.Entry, base *Finding, recommended []candidate, r
 // emptyResult decides the finding when no recommended release survives the
 // content and obtainability filters: a theoretical-best-only or incomplete
 // entry is an info nudge, everything else (nothing the operator can get) is
-// silent.
+// silent. The precedence lives in classify.Fallback, shared with the audit
+// report's rowQualifier so the two flows cannot drift.
 func emptyResult(entry *seadex.Entry, base *Finding) *Finding {
-	switch {
-	case entry.HasTheoreticalBest():
+	switch classify.Fallback(entry) {
+	case classify.FallbackTheoretical:
 		return finalize(base, StatusTheoretical, SevInfo)
-	case entry.Incomplete:
+	case classify.FallbackIncomplete:
 		return finalize(base, StatusIncomplete, SevInfo)
 	default:
 		return nil
@@ -302,7 +303,7 @@ func (c *Comparer) baseFinding(m *match.Match, groups []string) Finding {
 		ArrURL:       m.Item.ArrURL,
 		CurrentGroup: strings.Join(groups, ","),
 		AniListID:    m.Entry.AniListID,
-		Season:       m.Record.SeasonTvdb,
+		Season:       max(0, m.Record.SeasonTvdb),
 	}
 }
 
@@ -366,16 +367,23 @@ func finalize(f *Finding, status Status, sev Severity) *Finding {
 // identity falls back to the release URL (releaseIdentity), and the AB link set
 // is appended when present (animeBytesLinkKey), so enabling AnimeBytes on an
 // existing public-tracker finding re-surfaces the newly obtainable AB source.
-// A public-only finding's key is unchanged from the pre-AB-aware form.
+// The untrusted components (group names, the current group, and the release
+// identity - all parsed from SeaDex data or library file names) are
+// strconv-quoted before joining, so a value that itself contains the ',' or '|'
+// delimiter cannot collide two distinct findings onto one key (which would
+// suppress the second as already alerted).
 func dedupeKey(f *Finding) string {
 	groups := slices.Clone(f.RecommendedGroups)
 	slices.Sort(groups)
+	for i := range groups {
+		groups[i] = strconv.Quote(groups[i])
+	}
 	key := strings.Join([]string{
 		strconv.Itoa(f.AniListID),
 		string(f.Status),
 		strings.Join(groups, ","),
-		f.CurrentGroup,
-		releaseIdentity(f),
+		strconv.Quote(f.CurrentGroup),
+		strconv.Quote(releaseIdentity(f)),
 	}, "|")
 	if abLinks := animeBytesLinkKey(f.Links); abLinks != "" {
 		key += "|ab=" + abLinks
@@ -397,12 +405,14 @@ func releaseIdentity(f *Finding) string {
 
 // animeBytesLinkKey returns the sorted AnimeBytes link URLs of a finding as a
 // single comma-joined string, or "" when the finding carries no AB link, so
-// the dedupe key changes when the AB source set changes.
+// the dedupe key changes when the AB source set changes. Each URL is
+// strconv-quoted before joining, matching dedupeKey's collision-proofing: a
+// SeaDex-supplied URL containing ',' or '|' cannot collide two link sets.
 func animeBytesLinkKey(links []ReleaseLink) string {
 	var urls []string
 	for i := range links {
 		if release.IsAnimeBytes(links[i].Tracker) {
-			urls = append(urls, strings.TrimSpace(links[i].URL))
+			urls = append(urls, strconv.Quote(strings.TrimSpace(links[i].URL)))
 		}
 	}
 	slices.Sort(urls)

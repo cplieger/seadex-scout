@@ -109,23 +109,48 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 	if memo.Entries == nil {
 		memo.Entries = make(map[int]MemoEntry)
 	}
-	outage := m.prefetch(ctx, entries, idx, lib, &memo)
 	cov := Coverage{Hits: make(map[string]int), Unmapped: make(map[string]int)}
+	run := &matchRun{
+		m:    m,
+		lib:  lib,
+		idx:  idx,
+		memo: &memo,
+		cov:  &cov,
+		gate: &lookupGate{outage: m.prefetch(ctx, entries, idx, lib, &memo)},
+	}
 	matches := make([]Match, 0, len(entries))
-	var degraded bool
 	for i := range entries {
 		if ctx.Err() != nil {
 			// A cancelled cycle (routine shutdown SIGTERM) is not an AniList
 			// fault: skip the remaining entries instead of failing each one's
 			// lookup with context.Canceled, and flag the cycle degraded so the
 			// caller preserves prior findings.
-			degraded = true
+			run.degraded = true
 			m.log.Debug("match interrupted; remaining entries skipped", "matched", len(matches), "total", len(entries))
 			break
 		}
-		matches = append(matches, m.matchEntry(ctx, &entries[i], lib, idx, &memo, &cov, &degraded, outage))
+		matches = append(matches, run.matchEntry(ctx, &entries[i]))
 	}
-	return Result{Coverage: cov, Memo: memo, Matches: matches, Degraded: degraded}
+	return Result{Coverage: cov, Memo: memo, Matches: matches, Degraded: run.degraded}
+}
+
+// matchRun carries one Match call's shared state so the per-entry helpers do
+// not thread seven parameters (two of them out-params) through every call.
+type matchRun struct {
+	m    *Matcher
+	lib  *libIndex
+	idx  *mapping.Index
+	memo *Memo
+	cov  *Coverage
+	// gate carries the fast-fail state for per-id AniList lookups: ids covered
+	// by a totally-failed batch prefetch and, once the consecutive-failure
+	// breaker trips, every remaining uncached id fail fast instead of
+	// re-hitting the down upstream.
+	gate *lookupGate
+	// degraded is set when a needed AniList fallback lookup could not be
+	// completed because of a transient/upstream error; Match surfaces it as
+	// Result.Degraded.
+	degraded bool
 }
 
 // prefetch batch-fetches into the memo every AniList id the per-entry pass will
@@ -187,19 +212,38 @@ func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *map
 	return nil
 }
 
+// aniListNeed classifies an entry's AniList-lookup need - the ONE definition
+// of the trigger BOTH pendingAniListIDs (the batch prefetch) and matchEntry
+// (the per-entry pass) consult, so the two cannot drift. item != nil means
+// resolved by id (no lookup). needsLookup means AniList must be consulted:
+// either no Fribb record exists at all, or the record is id-less (a split
+// AniList<->arr mapping) so the title is the only remaining link. A record
+// that HAS its arr id but missed findByID simply is not in the library, so
+// no lookup (it would only confirm the miss); a non-positive id never
+// resolves, so no lookup either.
+func aniListNeed(alID int, idx *mapping.Index, lib *libIndex) (rec mapping.Record, recOK bool, item *library.Item, needsLookup bool) {
+	if alID <= 0 {
+		return mapping.Record{}, false, nil, false
+	}
+	rec, recOK = idx.Lookup(alID)
+	if !recOK {
+		return rec, false, nil, true
+	}
+	if found := lib.findByID(&rec); found != nil {
+		return rec, true, found, false
+	}
+	return rec, true, nil, !hasArrID(&rec)
+}
+
 // pendingAniListIDs returns the distinct AniList ids the match will look up but
-// has not memoized: an entry whose Fribb record is id-less (no arr id, so the
-// title fallback runs) or that has no Fribb record at all. It deliberately
-// mirrors matchEntry's AniList trigger so the batch fetches exactly what the
-// per-entry pass needs - no more (which would re-introduce the not-in-library
-// lookups hasArrID removed) and no less.
+// has not memoized: exactly the entries aniListNeed - the shared trigger
+// matchEntry also consults - classifies as needing a lookup, so the batch
+// fetches no more (which would re-introduce the not-in-library lookups hasArrID
+// removed) and no less than the per-entry pass needs.
 func pendingAniListIDs(entries []seadex.Entry, idx *mapping.Index, lib *libIndex, memo *Memo) []int {
 	seen := make(map[int]struct{})
 	var ids []int
 	add := func(alID int) {
-		if alID <= 0 {
-			return
-		}
 		if _, done := memo.Entries[alID]; done {
 			return
 		}
@@ -210,63 +254,95 @@ func pendingAniListIDs(entries []seadex.Entry, idx *mapping.Index, lib *libIndex
 		ids = append(ids, alID)
 	}
 	for i := range entries {
-		e := &entries[i]
-		rec, ok := idx.Lookup(e.AniListID)
-		if !ok {
-			add(e.AniListID) // no Fribb record: matchEntry resolves via AniList
-			continue
-		}
-		if lib.findByID(&rec) != nil {
-			continue // resolved by id: no AniList lookup
-		}
-		if !hasArrID(&rec) {
-			add(e.AniListID) // id-less record: the title fallback needs AniList
+		if _, _, _, needsLookup := aniListNeed(entries[i].AniListID, idx, lib); needsLookup {
+			add(entries[i].AniListID)
 		}
 	}
 	return ids
 }
 
+// transientFailureCap is the consecutive transient per-id AniList failure
+// streak at which the matcher stops issuing further lookups for the cycle: an
+// outage that begins after the first prefetch chunk succeeds looks like a
+// PARTIAL batch failure to prefetch, so without this breaker every remaining
+// uncached id regresses to one doomed (internally retried) request each - the
+// same futile tail the total-outage fast-fail exists to avoid.
+const transientFailureCap = 3
+
+// lookupGate gates per-id AniList lookups for one Match pass: ids covered by a
+// totally failed batch prefetch fail fast, and a streak of consecutive
+// transient per-id failures trips the same fast-fail for every remaining
+// uncached id.
+type lookupGate struct {
+	outage  map[int]struct{}
+	streak  int
+	tripped bool
+}
+
+// down reports whether the id must fail fast (outage-covered or breaker tripped).
+func (g *lookupGate) down(id int) bool {
+	if g.tripped {
+		return true
+	}
+	_, down := g.outage[id]
+	return down
+}
+
+// recordFailure counts a consecutive transient failure; it returns true on the
+// call that trips the breaker.
+func (g *lookupGate) recordFailure() bool {
+	g.streak++
+	if g.streak == transientFailureCap {
+		g.tripped = true
+		return true
+	}
+	return false
+}
+
+// recordSuccess resets the streak (a definitive answer - media or not-found -
+// proves the upstream is answering).
+func (g *lookupGate) recordSuccess() { g.streak = 0 }
+
 // matchEntry links one entry: ID resolution first, AniList title fallback next.
-// outage is the (possibly nil) set of ids a totally-failed batch prefetch
-// covered; their lookups fail fast instead of re-hitting the down upstream.
-func (m *Matcher) matchEntry(ctx context.Context, e *seadex.Entry, lib *libIndex, idx *mapping.Index, memo *Memo, cov *Coverage, deg *bool, outage map[int]struct{}) Match {
-	// Mirror prefetch's alID guard: a missing or garbage AniList id can never
-	// resolve, so do not spend a rate-limited AniList request confirming it
-	// (or degrade the whole cycle when that request fails transiently).
-	if e.AniListID <= 0 {
-		cov.Unmapped[arrUnknown]++
+// The lookup trigger is aniListNeed, shared with the batch prefetch. r.gate
+// fast-fails per-id AniList lookups doomed by an outage (see matchRun).
+func (r *matchRun) matchEntry(ctx context.Context, e *seadex.Entry) Match {
+	rec, recOK, item, needsLookup := aniListNeed(e.AniListID, r.idx, r.lib)
+	if !recOK && !needsLookup {
+		// Non-positive AniList id: it can never resolve, so do not spend a
+		// rate-limited AniList request confirming it (or degrade the whole
+		// cycle when that request fails transiently).
+		r.cov.Unmapped[arrUnknown]++
 		return Match{Entry: *e, Arr: arrUnknown, Source: SourceUnmapped}
 	}
-	if rec, ok := idx.Lookup(e.AniListID); ok {
+	if recOK {
 		arr := recordArr(&rec)
-		cov.Hits[arr]++
-		if item := lib.findByID(&rec); item != nil {
+		r.cov.Hits[arr]++
+		if item != nil {
 			return Match{Item: item, Entry: *e, Record: rec, Arr: arr, Source: SourceID}
 		}
-		// The AniList title fallback is only for an id-less record: a split
-		// AniList<->arr mapping (common for films/OVAs whose arr id sits on a
-		// separate id-less record) leaves the title as the only link to the arr
-		// item. A record that HAS its arr id but missed findByID simply is not in
-		// the library, so skip the rate-limited AniList lookup (it would only
-		// confirm the miss) and treat the entry as unmapped directly. This keeps
-		// the fallback off the ~thousands of SeaDex entries the operator does not
-		// have, which otherwise dominate a cold cycle's AniList traffic.
-		if !hasArrID(&rec) {
-			if item := m.titleMatch(ctx, e, memo, lib, arr, deg, outage); item != nil {
-				return Match{Item: item, Entry: *e, Record: rec, Arr: arr, Source: SourceTitle}
+		// needsLookup here means the record is id-less (see aniListNeed): the
+		// title is the only remaining link to the arr item, so consult AniList.
+		// A record that carries its arr id but missed findByID is simply not in
+		// the library and is unmapped directly - this keeps the fallback off
+		// the ~thousands of SeaDex entries the operator does not have, which
+		// otherwise dominate a cold cycle's AniList traffic.
+		if needsLookup {
+			if matched := r.titleMatch(ctx, e, arr); matched != nil {
+				return Match{Item: matched, Entry: *e, Record: rec, Arr: arr, Source: SourceTitle}
 			}
 		}
 		return Match{Entry: *e, Record: rec, Arr: arr, Source: SourceUnmapped}
 	}
 
-	media, ok := m.lookupAniList(ctx, e.AniListID, memo, deg, outage)
+	media, ok := r.lookupAniList(ctx, e.AniListID)
 	if !ok {
-		cov.Unmapped[arrUnknown]++
+		r.cov.Unmapped[arrUnknown]++
 		return Match{Entry: *e, Arr: arrUnknown, Source: SourceUnmapped}
 	}
 	arr := formatArr(media.Format)
-	cov.Unmapped[arr]++
-	item := lib.findByTitle(media.Titles, media.Year, arr, m.log)
+	r.cov.Unmapped[arr]++
+	item = r.lib.findByTitle(media.Titles, media.Year, arr, r.m.log)
 	if item == nil {
 		return Match{Entry: *e, Arr: arr, Source: SourceUnmapped}
 	}
@@ -275,45 +351,52 @@ func (m *Matcher) matchEntry(ctx context.Context, e *seadex.Entry, lib *libIndex
 
 // lookupAniList consults the memo, then AniList. A not-found result is memoized
 // (negatively) so it is not re-fetched; a transient error is not memoized so it
-// is retried next cycle. An id covered by a totally-failed batch prefetch
-// (outage) fails fast without a per-id request: the same outage would doom it,
+// is retried next cycle. An id the gate reports down (covered by a
+// totally-failed batch prefetch, or the consecutive-transient-failure breaker
+// tripped) fails fast without a per-id request: the same outage would doom it,
 // and the id stays un-memoized so it is retried next cycle.
-func (m *Matcher) lookupAniList(ctx context.Context, aniListID int, memo *Memo, deg *bool, outage map[int]struct{}) (anilist.Media, bool) {
-	if ent, ok := memo.Entries[aniListID]; ok {
+func (r *matchRun) lookupAniList(ctx context.Context, aniListID int) (anilist.Media, bool) {
+	if ent, ok := r.memo.Entries[aniListID]; ok {
 		if ent.NotFound {
 			return anilist.Media{}, false
 		}
 		return anilist.Media{Titles: ent.Titles, Format: ent.Format, Year: ent.Year}, true
 	}
-	if _, down := outage[aniListID]; down {
+	if r.gate.down(aniListID) {
 		// Degrade fast through the existing accounting (the prefetch already
 		// logged the single outage WARN): the cycle preserves prior findings
 		// rather than treating the missing match as resolved.
-		*deg = true
+		r.degraded = true
 		return anilist.Media{}, false
 	}
-	media, err := m.anilist.Fetch(ctx, aniListID)
+	media, err := r.m.anilist.Fetch(ctx, aniListID)
 	if err != nil {
 		if errors.Is(err, anilist.ErrNotFound) {
-			memo.Entries[aniListID] = MemoEntry{NotFound: true}
+			r.gate.recordSuccess()
+			r.memo.Entries[aniListID] = MemoEntry{NotFound: true}
 		} else {
 			// A transient/upstream error (network, context cancellation, rate-limit
 			// exhaustion) means this needed fallback lookup could not be completed.
 			// Flag the cycle degraded so the caller preserves prior findings rather
 			// than treating the missing match as a resolved finding, and leave the
 			// id un-memoized so it is retried next cycle.
-			*deg = true
+			r.degraded = true
 			if errors.Is(err, context.Canceled) {
 				// A cancellation is not a fault (same contract as Scout.save):
 				// log at Debug so a redeploy is not attributed to an AniList outage.
-				m.log.Debug("anilist fallback cancelled", "al_id", aniListID)
+				r.m.log.Debug("anilist fallback cancelled", "al_id", aniListID)
 			} else {
-				m.log.Warn("anilist fallback failed", "al_id", aniListID, "error", err)
+				r.m.log.Warn("anilist fallback failed", "al_id", aniListID, "error", err)
+				if r.gate.recordFailure() {
+					r.m.log.Warn("anilist fallback failing repeatedly; failing remaining lookups fast this cycle",
+						"consecutive_failures", transientFailureCap)
+				}
 			}
 		}
 		return anilist.Media{}, false
 	}
-	memo.Entries[aniListID] = MemoEntry{Titles: media.Titles, Format: media.Format, Year: media.Year}
+	r.gate.recordSuccess()
+	r.memo.Entries[aniListID] = MemoEntry{Titles: media.Titles, Format: media.Format, Year: media.Year}
 	return media, true
 }
 
@@ -322,12 +405,12 @@ func (m *Matcher) lookupAniList(ctx context.Context, aniListID int, memo *Memo, 
 // any miss (AniList failure, no candidate, or an ambiguous set). It bridges the
 // case where Fribb has the entry but no usable arr id, so the AniList title is
 // the only remaining link to the arr item.
-func (m *Matcher) titleMatch(ctx context.Context, e *seadex.Entry, memo *Memo, lib *libIndex, arr string, deg *bool, outage map[int]struct{}) *library.Item {
-	media, ok := m.lookupAniList(ctx, e.AniListID, memo, deg, outage)
+func (r *matchRun) titleMatch(ctx context.Context, e *seadex.Entry, arr string) *library.Item {
+	media, ok := r.lookupAniList(ctx, e.AniListID)
 	if !ok {
 		return nil
 	}
-	return lib.findByTitle(media.Titles, media.Year, arr, m.log)
+	return r.lib.findByTitle(media.Titles, media.Year, arr, r.m.log)
 }
 
 // recordArr routes a mapping record to its arr (MOVIE -> Radarr, else Sonarr).

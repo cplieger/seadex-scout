@@ -297,7 +297,7 @@ func (a *Auditor) assess(m *match.Match) Row {
 		SeaDexURL:   a.seadexURL(m.Entry.AniListID),
 		MatchSource: string(m.Source),
 		AniListID:   m.Entry.AniListID,
-		Season:      m.Record.SeasonTvdb,
+		Season:      max(0, m.Record.SeasonTvdb),
 		Special:     m.Record.IsSpecial(),
 		Incomplete:  m.Entry.Incomplete,
 	}
@@ -318,18 +318,18 @@ func (a *Auditor) assess(m *match.Match) Row {
 // rowQualifier derives the daemon-vocabulary qualifier for a row, so the report
 // distinguishes the states the daemon's compare pass distinguishes. With no
 // best release listed at all, a theoretical-best-only entry is "theoretical"
-// and an incomplete one "incomplete" (mirroring the daemon's emptyResult
-// precedence) - the row's verdict would otherwise imply an unlisted-better
-// state that does not exist. With best releases listed, a not-aligned row
-// (have_alt / have_unlisted) whose scoped groups span more than one group is
-// "mixed", where the daemon emits mixed_group_manual. An aligned row is never
-// mixed, matching the daemon's alignment-wins ordering.
+// and an incomplete one "incomplete" (the classify.Fallback precedence shared
+// with the daemon's emptyResult) - the row's verdict would otherwise imply an
+// unlisted-better state that does not exist. With best releases listed, a
+// not-aligned row (have_alt / have_unlisted) whose scoped groups span more
+// than one group is "mixed", where the daemon emits mixed_group_manual. An
+// aligned row is never mixed, matching the daemon's alignment-wins ordering.
 func rowQualifier(entry *seadex.Entry, best []string, v Verdict, current []string) Qualifier {
 	if len(best) == 0 {
-		switch {
-		case entry.HasTheoreticalBest():
+		switch classify.Fallback(entry) {
+		case classify.FallbackTheoretical:
 			return QualifierTheoretical
-		case entry.Incomplete:
+		case classify.FallbackIncomplete:
 			return QualifierIncomplete
 		}
 		return ""
@@ -372,14 +372,13 @@ func wholeSeriesVerdict(item *library.Item, best, alt []string) (Verdict, []stri
 	if s.Seasons == 0 {
 		return VerdictNoFile, nil, false
 	}
-	approx := s.Seasons > 1 || len(s.Groups) > 1
 	switch {
 	case s.AnyUnlisted:
-		return VerdictUnlisted, s.Groups, approx
+		return VerdictUnlisted, s.Groups, s.Approx
 	case s.AnyAlt:
-		return VerdictAlt, s.Groups, approx
+		return VerdictAlt, s.Groups, s.Approx
 	default:
-		return VerdictBest, s.Groups, approx
+		return VerdictBest, s.Groups, s.Approx
 	}
 }
 

@@ -39,6 +39,7 @@ func FuzzABVisible(f *testing.F) {
 	f.Add("Nyaa", `a\b@animebytes.tv/x`)
 	f.Add("Nyaa", `/\animebytes.tv/x`)
 	f.Add("Nyaa", `\\animebytes.tv/x`)
+	f.Add("Nyaa", "https://animebytes\uFF0Etv/torrents.php?id=1")
 	f.Add("unknown", "/local/path")
 	f.Fuzz(func(t *testing.T, tracker, rawURL string) {
 		// Toggle on shows everything: the operator has AB access, nothing hides.

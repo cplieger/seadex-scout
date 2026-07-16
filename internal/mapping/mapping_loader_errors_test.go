@@ -24,8 +24,9 @@ func TestNewLoader_nilLoggerDefaults(t *testing.T) {
 	}
 }
 
-// TestLoader_refreshCache_badURLErrors pins buildRequest's error path: an
-// unparseable URL fails the conditional GET, surfacing the no-cache-available
+// TestLoader_refreshCache_badURLErrors pins conditionalGet's request-build
+// error path (http.NewRequestWithContext): an unparseable URL fails the
+// conditional GET, surfacing the no-cache-available
 // error on first boot.
 func TestLoader_refreshCache_badURLErrors(t *testing.T) {
 	l := NewLoader(&http.Client{}, "://not-a-url", "", time.Hour, discardLogger())
@@ -34,9 +35,9 @@ func TestLoader_refreshCache_badURLErrors(t *testing.T) {
 	}
 }
 
-// TestLoader_refreshCache_unexpectedStatusKeepsStale pins readResponse's
-// fallback branch: a status that is neither 200/304 nor >=400 (a 204, for
-// which httpx.CheckHTTPStatus returns nil) maps to the explicit
+// TestLoader_refreshCache_unexpectedStatusKeepsStale pins httpx.DoConditional's
+// unexpected-status classification: a status that is neither 200/304 nor >=400 (a 204)
+// surfaces as an error from the conditional GET and maps to the explicit
 // "unexpected status" error and the stale map is kept.
 func TestLoader_refreshCache_unexpectedStatusKeepsStale(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

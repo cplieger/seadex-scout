@@ -19,19 +19,6 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
-// fakeFeed records FeedWriter.Rebuild calls, optionally failing them.
-type fakeFeed struct {
-	err     error
-	calls   int
-	entries int
-}
-
-func (f *fakeFeed) Rebuild(_ context.Context, entries []seadex.Entry, _ func(alID int) bool) error {
-	f.calls++
-	f.entries = len(entries)
-	return f.err
-}
-
 // TestCycleWalkFailureWithFeedStillRebuildsFeed pins the feed-vs-health split:
 // with a Torznab feed configured, a failed arr walk still refreshes the feed
 // (it needs only SeaDex + Fribb, so an arr outage must not freeze what the arrs

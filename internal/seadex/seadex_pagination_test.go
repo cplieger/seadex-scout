@@ -3,6 +3,7 @@ package seadex
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -54,7 +55,7 @@ func TestFetchEntriesErrorsOnEmptyIntermediatePage(t *testing.T) {
 		case 2:
 			fmt.Fprint(w, `{"totalPages":3,"items":[]}`)
 		default:
-			t.Fatalf("unexpected request for page %d after empty intermediate page", page)
+			t.Errorf("unexpected request for page %d after empty intermediate page", page)
 		}
 	}))
 	defer server.Close()
@@ -166,5 +167,49 @@ func TestFetchEntriesCountMismatchWarnsButSucceeds(t *testing.T) {
 	}
 	if got := recorder.CountExact("seadex catalogue count mismatch"); got != 1 {
 		t.Errorf("count-mismatch WARN count = %d, want 1", got)
+	}
+}
+
+// TestFetchEntriesUnparseableUpdatedWarnsOnce pins the timestamp-drift signal:
+// entries whose non-empty updated value fails every known PocketBase layout
+// are zeroed (sorting to the feed's tail), and the fetch surfaces ONE
+// aggregate WARN carrying the failure count - an upstream format drift that
+// zeroes the whole catalogue must be alertable from Loki without per-record
+// noise, while the fetch itself still succeeds.
+func TestFetchEntriesUnparseableUpdatedWarnsOnce(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"totalItems":3,"totalPages":1,"items":[`+
+			`{"alID":1,"updated":"not-a-timestamp","expand":{"trs":[]}},`+
+			`{"alID":2,"updated":"31/12/2025","expand":{"trs":[]}},`+
+			`{"alID":3,"updated":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}}]}`)
+	}))
+	defer server.Close()
+
+	logger, recorder := capture.New()
+	entries, err := NewClient(server.Client(), server.URL, 0, logger).FetchEntries(context.Background())
+	if err != nil {
+		t.Fatalf("FetchEntries returned error: %v (unparseable timestamps must not fail the fetch)", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("entries = %d, want 3", len(entries))
+	}
+	if got := recorder.CountExact("seadex updated timestamps unparseable; feed newest-first ordering degraded"); got != 1 {
+		t.Errorf("unparseable-updated WARN count = %d, want 1 aggregate line", got)
+	}
+	warned := false
+	for _, r := range recorder.Records() {
+		if r.Message != "seadex updated timestamps unparseable; feed newest-first ordering degraded" {
+			continue
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "count" && a.Value.Int64() == 2 {
+				warned = true
+				return false
+			}
+			return true
+		})
+	}
+	if !warned {
+		t.Error("unparseable-updated WARN does not carry count=2 (only the two bogus timestamps; the empty/valid ones must not count)")
 	}
 }

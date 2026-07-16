@@ -1,10 +1,8 @@
 package indexer
 
 import (
-	"bytes"
 	"context"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -16,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/slogx/capture"
 )
 
 // TestServeRejectsUnscopedRequest pins the no-combined-feed contract at the
@@ -136,8 +135,7 @@ func TestQueryTotalUpstreamFailureSetsUpstreamFailed(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	var buf bytes.Buffer
-	log := slog.New(slog.NewTextHandler(&buf, nil))
+	log, rec := capture.New()
 	ix := New(&Config{ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}, Deps{HTTP: srv.Client(), Logger: log}, "")
 
 	items, stats := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "ab")
@@ -150,8 +148,8 @@ func TestQueryTotalUpstreamFailureSetsUpstreamFailed(t *testing.T) {
 	if !stats.upstreamFailed {
 		t.Errorf("stats.upstreamFailed = false, want true (a total upstream failure must render a Torznab <error>, not an empty feed)")
 	}
-	if !strings.Contains(buf.String(), "upstream query failed") {
-		t.Errorf("upstream failure not warned; log output:\n%s", buf.String())
+	if !rec.Contains("upstream query failed") {
+		t.Errorf("upstream failure not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }
 
@@ -233,8 +231,7 @@ func TestReloadKeepsFeedOnUnreadableSnapshot(t *testing.T) {
 	if err := NewFeedWriter("", false, path, nil).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
-	var buf bytes.Buffer
-	log := slog.New(slog.NewTextHandler(&buf, nil))
+	log, rec := capture.New()
 	ix := New(&Config{}, Deps{Logger: log}, path)
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
@@ -256,8 +253,8 @@ func TestReloadKeepsFeedOnUnreadableSnapshot(t *testing.T) {
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Errorf("feed after unreadable snapshot = %d items, want 1 (a bad read must not blank a live feed)", len(got))
 	}
-	if !strings.Contains(buf.String(), "indexer feed snapshot unreadable") {
-		t.Errorf("unreadable snapshot not warned; log output:\n%s", buf.String())
+	if !rec.Contains("indexer feed snapshot unreadable") {
+		t.Errorf("unreadable snapshot not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }
 
@@ -274,8 +271,7 @@ func TestQueryCallerCancellationIsNotWarnedAsUpstreamFault(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	var buf bytes.Buffer
-	log := slog.New(slog.NewTextHandler(&buf, nil))
+	log, rec := capture.New()
 	ix := New(&Config{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}, Deps{HTTP: srv.Client(), Logger: log}, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -290,7 +286,46 @@ func TestQueryCallerCancellationIsNotWarnedAsUpstreamFault(t *testing.T) {
 	if stats.upstreamFailed {
 		t.Errorf("stats.upstreamFailed = true on caller cancellation, want false (a client disconnect must not render a Torznab <error>)")
 	}
-	if strings.Contains(buf.String(), "upstream query failed") {
-		t.Errorf("caller cancellation warned as an upstream fault; log output:\n%s", buf.String())
+	if rec.Contains("upstream query failed") {
+		t.Errorf("caller cancellation warned as an upstream fault; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestReloadWarnsOnStatFailure pins the stat-error visibility leg of reload:
+// an os.Stat failure other than fs.ErrNotExist (here ENOTDIR via a
+// regular-file parent, the same root-safe injection
+// TestReloadKeepsFeedOnUnreadableSnapshot uses for reads) must be warned
+// about - a silent stat failure would invisibly freeze the served feed - while
+// the current (empty) feed is kept.
+func TestReloadWarnsOnStatFailure(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	log, rec := capture.New()
+	ix := New(&Config{}, Deps{Logger: log}, filepath.Join(blocker, "feed.json"))
+	if !rec.Contains("indexer feed snapshot stat failed") {
+		t.Errorf("stat failure (ENOTDIR) not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
+		t.Errorf("feed = %d items, want 0 (current feed kept on stat failure)", len(got))
+	}
+}
+
+// TestHandlerRoutesTorznabEndpoint pins the mux wiring Run actually serves:
+// the catch-all "/" route hands every path to serve, so a scoped Torznab path
+// like /nyaa reaches serve (200 caps) and an unscoped path 404s at serve, not
+// at the mux.
+func TestHandlerRoutesTorznabEndpoint(t *testing.T) {
+	h := New(&Config{APIKey: "k"}, Deps{}, "").handler()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=k", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "<caps>") {
+		t.Fatalf("handler /nyaa caps = %d %q, want 200 with a caps document", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/other?apikey=k", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("handler /other = %d, want 404 (no tracker scope)", rec.Code)
 	}
 }

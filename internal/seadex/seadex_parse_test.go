@@ -54,6 +54,8 @@ func TestPageComplete(t *testing.T) {
 		{name: "single page completes", page: 1, itemCount: 7, totalPages: 1, wantDone: true},
 		{name: "empty final page completes", page: 1, itemCount: 0, totalPages: 1, wantDone: true},
 		{name: "empty page with zero total completes", page: 1, itemCount: 0, totalPages: 0, wantDone: true},
+		{name: "later empty page with zero total errors", page: 2, itemCount: 0, totalPages: 0, wantErr: true},
+		{name: "later empty page with negative total errors", page: 2, itemCount: 0, totalPages: -1, wantErr: true},
 		{name: "empty page before total errors", page: 2, itemCount: 0, totalPages: 3, wantErr: true},
 		{name: "non-empty page with zero total errors", page: 1, itemCount: 500, totalPages: 0, wantErr: true},
 		{name: "non-empty page with negative total errors", page: 1, itemCount: 500, totalPages: -1, wantErr: true},
@@ -69,5 +71,17 @@ func TestPageComplete(t *testing.T) {
 				t.Errorf("pageComplete(%d, %d, %d) done = %v, want %v", tc.page, tc.itemCount, tc.totalPages, done, tc.wantDone)
 			}
 		})
+	}
+}
+
+// TestEntryHasTheoreticalBest pins the theoretical-best predicate both
+// consumers branch on (compare's theoretical_best info finding and audit's
+// theoretical qualifier): a named theoretical best reports true, empty false.
+func TestEntryHasTheoreticalBest(t *testing.T) {
+	if (&Entry{}).HasTheoreticalBest() {
+		t.Error("HasTheoreticalBest() = true for empty TheoreticalBest, want false")
+	}
+	if !(&Entry{TheoreticalBest: "a stated remux"}).HasTheoreticalBest() {
+		t.Error("HasTheoreticalBest() = false with TheoreticalBest set, want true")
 	}
 }

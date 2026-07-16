@@ -18,7 +18,7 @@ func (errTransport) RoundTrip(*http.Request) (*http.Response, error) {
 
 // TestLoader_refreshCache_transportErrorKeepsStale pins conditionalGet's
 // http.Do error branch: a request that fails at the transport (no response at
-// all, as opposed to buildRequest failing or an HTTP error status) degrades to
+// all, as opposed to request construction failing or an HTTP error status) degrades to
 // the stale map with an error rather than losing the cached records.
 func TestLoader_refreshCache_transportErrorKeepsStale(t *testing.T) {
 	prev := &Cache{

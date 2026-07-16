@@ -250,3 +250,78 @@ func TestReporterEmitLevelFollowsSeverity(t *testing.T) {
 		t.Fatalf("expected both finding lines emitted, saw warn=%v info=%v", sawWarn, sawInfo)
 	}
 }
+
+// TestFindingLineCarriesDocumentedAttrs pins the finding line's attribute
+// contract: the README and steering doc document the exact keys the Loki
+// dashboards and alert annotations key on (title, al_id, arr, current_group,
+// recommended_group, tracker, resolution, kind, classification_reason,
+// release_url, release_urls, plus the split nyaa_url/ab_url, info_hash,
+// seadex_tags, and status). A silently renamed or dropped key breaks every
+// dashboard without failing a test; this asserts the full rendered set for
+// one warn finding, which also gives joinLinks its behavioral assertion.
+func TestFindingLineCarriesDocumentedAttrs(t *testing.T) {
+	reporter, recorder := newCapturedReporter()
+	reporter.Report([]compare.Finding{testFinding("k1", "Frieren")}, nil, nil, time.Now())
+
+	want := map[string]string{
+		"title":                 "Frieren",
+		"arr":                   "sonarr",
+		"current_group":         "erai-raws",
+		"recommended_group":     "SubsPlease",
+		"tracker":               "Nyaa",
+		"resolution":            "1080p",
+		"codec":                 "x265",
+		"kind":                  "encode",
+		"classification_reason": "encoder marker: x265",
+		"release_url":           "https://nyaa.si/view/1",
+		"release_urls":          "Nyaa=https://nyaa.si/view/1 AB=https://animebytes.tv/torrents.php?id=1",
+		"nyaa_url":              "https://nyaa.si/view/1",
+		"ab_url":                "https://animebytes.tv/torrents.php?id=1",
+		"info_hash":             "hash-k1",
+		"seadex_tags":           "best · encode · 1080p · dual-audio",
+		"status":                "better_release",
+	}
+	got := map[string]string{}
+	var alID int64
+	for _, rec := range recorder.Records() {
+		if rec.Message != "better release available" {
+			continue
+		}
+		rec.Attrs(func(a slog.Attr) bool {
+			if a.Key == "al_id" {
+				alID = a.Value.Int64()
+				return true
+			}
+			if s, ok := a.Value.Any().(string); ok {
+				got[a.Key] = s
+			}
+			return true
+		})
+	}
+	if alID != 154587 {
+		t.Errorf("al_id = %d, want 154587", alID)
+	}
+	for key, w := range want {
+		if got[key] != w {
+			t.Errorf("attr %q = %q, want %q", key, got[key], w)
+		}
+	}
+}
+
+// TestNewReporterNilLoggerFallsBackToDefault pins the documented "logger may
+// be nil" contract: a nil logger falls back to slog.Default() rather than
+// panicking, and the reporter's lines land on the default logger. The default
+// logger is process-global, so this test must not run in parallel.
+func TestNewReporterNilLoggerFallsBackToDefault(t *testing.T) {
+	logger, recorder := capture.New()
+	prev := slog.Default()
+	slog.SetDefault(logger)
+	defer slog.SetDefault(prev)
+
+	reporter := NewReporter(nil)
+	reporter.Baseline([]compare.Finding{testFinding("k", "Frieren")}, time.Now())
+
+	if got := recorder.CountExact("cold start: findings baselined without notifying"); got != 1 {
+		t.Errorf("baseline summary on default logger = %d, want 1", got)
+	}
+}
