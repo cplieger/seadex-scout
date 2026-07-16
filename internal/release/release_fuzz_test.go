@@ -111,10 +111,11 @@ func FuzzIsAnimeBytesHost(f *testing.F) {
 
 // FuzzIsNyaaHost fuzzes the Nyaa host classifier (an untrusted-URL-host gate
 // used by indexer routing) with the same metamorphic and bounded-output
-// invariants as its AnimeBytes twin: an explicit ".nyaa.si" label boundary
-// always matches; a dotless prefix never bypasses the suffix rule; a DNS-root
-// trailing dot never changes the answer; and a matching host at least ends in
-// "nyaa.si" after the root-dot trim.
+// invariants as its AnimeBytes twin: the canonical host itself (with or
+// without the DNS-root dot) always matches; an explicit ".nyaa.si" label
+// boundary always matches; a dotless prefix never bypasses the suffix rule; a
+// DNS-root trailing dot never changes the answer; and a matching host at
+// least ends in "nyaa.si" after the root-dot trim.
 func FuzzIsNyaaHost(f *testing.F) {
 	f.Add("nyaa.si")
 	f.Add("www.nyaa.si")
@@ -126,6 +127,9 @@ func FuzzIsNyaaHost(f *testing.F) {
 	f.Fuzz(func(t *testing.T, host string) {
 		got := IsNyaaHost(host)
 
+		if (host == "nyaa.si" || host == "nyaa.si.") && !got {
+			t.Errorf("IsNyaaHost(%q) = false, want true for the canonical Nyaa host", host)
+		}
 		if !IsNyaaHost(host + ".nyaa.si") {
 			t.Errorf("IsNyaaHost(%q) = false, want true: an explicit .nyaa.si label boundary always matches", host+".nyaa.si")
 		}

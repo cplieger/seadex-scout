@@ -350,10 +350,11 @@ func sanitizeUpstreamMessage(s string) string {
 
 // parseMedia decodes the GraphQL envelope into a Media. Only an explicit
 // Media null with no error, or AniList's verified not-found error shape
-// (status 404 / message "Not Found."), is classified as ErrNotFound — the
-// matcher negative-memoizes ErrNotFound, so an HTTP-200 GraphQL failure or a
-// malformed envelope must surface as a plain error (degraded, retried next
-// cycle) rather than permanently suppressing the id.
+// (a sole error with status 404 / message "Not Found."), is classified as
+// ErrNotFound — the matcher negative-memoizes ErrNotFound, so an HTTP-200
+// GraphQL failure, a mixed error envelope, or a malformed envelope must
+// surface as a plain error (degraded, retried next cycle) rather than
+// permanently suppressing the id.
 func parseMedia(raw []byte) (Media, error) {
 	var r gqlResponse
 	if err := json.Unmarshal(raw, &r); err != nil {
@@ -372,7 +373,7 @@ func parseMedia(raw []byte) (Media, error) {
 		}
 		message := sanitizeUpstreamMessage(r.Errors[0].Message)
 		normalized := strings.TrimSuffix(strings.TrimSpace(message), ".")
-		if r.Errors[0].Status == http.StatusNotFound || strings.EqualFold(normalized, "not found") {
+		if len(r.Errors) == 1 && (r.Errors[0].Status == http.StatusNotFound || strings.EqualFold(normalized, "not found")) {
 			return Media{}, fmt.Errorf("%w: %s", ErrNotFound, message)
 		}
 		return Media{}, fmt.Errorf("anilist: query error: %s", message)

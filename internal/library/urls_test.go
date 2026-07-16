@@ -23,6 +23,7 @@ func TestSafeLogURL(t *testing.T) {
 		{"opaque credentialed URL dropped", "user:pass@host/series/x", ""},
 		{"malformed single-slash credentialed URL dropped", "https:/user:pass@host/series/x", ""},
 		{"malformed four-slash credentialed URL dropped", "https:////user:pass@host/series/x", ""},
+		{"port-only-authority credentialed URL dropped", "https://:443/user:pass@sonarr.example/series/x", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

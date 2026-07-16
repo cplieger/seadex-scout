@@ -334,18 +334,19 @@ func noCacheHeaders(h http.Header) {
 	h.Set("Pragma", "no-cache")
 }
 
-// reload refreshes the served feed from the persisted snapshot when the file on
-// disk carries a different mtime than the loaded copy (or nothing is loaded
-// yet). A compare cycle - in this process (the daemon loop) or another (the
-// `poll` subcommand) - rewrites the snapshot atomically, so a cheap mtime check
-// per request picks up a new feed without the server ever fetching SeaDex
-// itself. The comparison is inequality, not strictly-newer: a /config volume
-// restored from backup, or a file replaced by an atomic rename that preserves
-// an OLDER mtime, must still install (a strictly-After guard would wedge the
-// server on the stale in-memory snapshot until restart); an unchanged mtime
-// still skips. A missing file leaves the current (possibly empty) feed in
-// place; a malformed or unreadable file is logged and ignored, so a bad write
-// never blanks a live feed.
+// reload refreshes the served feed from the persisted snapshot when the file
+// on disk differs from the loaded copy by mtime or file identity (or nothing
+// is loaded yet). A compare cycle - in this process (the daemon loop) or
+// another (the `poll` subcommand) - rewrites the snapshot atomically, so a
+// cheap stat check per request picks up a new feed without the server ever
+// fetching SeaDex itself. Any mtime change triggers a reload, including an
+// older restored timestamp. When the mtime is equal, os.SameFile
+// distinguishes the unchanged file (skip) from a replacement inode whose
+// timestamp was preserved (reload), preventing an atomic rename or backup
+// restore from wedging the server on stale in-memory data. A missing file
+// leaves the current (possibly empty) feed in place; a malformed or
+// unreadable file is logged and ignored, so a bad write never blanks a live
+// feed.
 //
 // Concurrent calls coalesce: after a cycle rewrites the snapshot, every
 // in-flight request observes the newer mtime at once, and without coalescing

@@ -434,13 +434,19 @@ func validateRefreshedRecords(previous, records []Record) error {
 	// guard — but only a LOSS is a degradation. fribb.go's tolerant contract
 	// lets an absent/odd type survive as the safe non-movie (Sonarr) default,
 	// so the floor is relative to the previously accepted cache: it fires only
-	// when that cache was itself type-rich (met the same 1% floor). An
-	// established type-sparse cache or a first boot against a type-sparse
-	// catalogue is the catalogue's valid shape, not a regression to reject.
+	// when that cache was itself type-rich (met the same 1% floor) AND the
+	// candidate carries fewer typed records than the cache did — an additive
+	// refresh that merely grows the record count (raising the ceiling-derived
+	// minimum) without losing any typed record is the catalogue growing, not
+	// type data degrading. An established type-sparse cache or a first boot
+	// against a type-sparse catalogue is the catalogue's valid shape, not a
+	// regression to reject.
 	previous = deduplicateRecords(previous)
+	previousTyped := typedRecordCount(previous)
 	previousMinimum := max(1, (len(previous)+99)/100)
-	previousMetFloor := len(previous) > 0 && typedRecordCount(previous) >= previousMinimum
-	if typed := typedRecordCount(records); previousMetFloor && typed < minimum {
+	previousMetFloor := len(previous) > 0 && previousTyped >= previousMinimum
+	typed := typedRecordCount(records)
+	if previousMetFloor && typed < minimum && typed < previousTyped {
 		return fmt.Errorf("type coverage %d/%d is below minimum %d", typed, len(records), minimum)
 	}
 	return nil

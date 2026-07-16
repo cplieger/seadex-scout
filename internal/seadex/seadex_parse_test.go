@@ -38,9 +38,9 @@ func TestParsePBTime(t *testing.T) {
 // the arm the HTTP-level tests never reach in-package: an empty FINAL page (or
 // an empty FIRST page when the API reports zero total pages) completes cleanly,
 // while an empty page before the reported total is a truncated-view error, and
-// ANY page with invalid metadata (totalPages < 1 past page 1, or a page — empty
-// or not — past the reported total) errors rather than being accepted as a
-// complete catalogue.
+// ANY page with invalid metadata (totalPages < 1 — the empty first page being
+// the one exception — or a page, empty or not, past the reported total) errors
+// rather than being accepted as a complete catalogue.
 func TestPageComplete(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -54,5 +54,17 @@ func FuzzSafeLogURL(f *testing.F) {
 				t.Errorf("SafeLogURL(%q) = %q leaks %q across the logging trust boundary", malformed, got, secret)
 			}
 		}
+		// The port-only-authority arm: "https://:443/user:pass@host/..."
+		// parses with a NON-empty Host (":443") but an empty Hostname and the
+		// credentialed text inside Path, where the userinfo strip cannot
+		// reach it; the hostname-required guard must drop it, not pass it
+		// through.
+		portOnly := "https://:443/user:SCRTpass@" + host + "/" + path + "?apikey=SCRTquery#SCRTfrag"
+		got = SafeLogURL(portOnly)
+		for _, secret := range []string{"SCRTpass", "SCRTquery", "SCRTfrag"} {
+			if strings.Contains(got, secret) {
+				t.Errorf("SafeLogURL(%q) = %q leaks %q across the logging trust boundary", portOnly, got, secret)
+			}
+		}
 	})
 }

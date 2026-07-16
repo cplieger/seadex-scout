@@ -266,6 +266,49 @@ func TestLoader_refreshCache_typeSparsePreviousCacheAcceptsUntypedRefresh(t *tes
 	}
 }
 
+// TestLoader_refreshCache_additiveGrowthKeepsTypedFloor pins the type floor's
+// loss requirement: a previous cache of 100 records with exactly one typed
+// record meets its own 1% floor (minimum 1), and a legitimate additive refresh
+// of 101 records that RETAINS that same typed record raises the ceiling-derived
+// minimum to 2 without losing any type data. The floor must not fire on growth
+// alone — rejecting it would keep the stale map every cycle, advance
+// RejectedRefreshes, and escalate to ERROR indefinitely.
+func TestLoader_refreshCache_additiveGrowthKeepsTypedFloor(t *testing.T) {
+	const prevN = 100
+	var b strings.Builder
+	b.WriteString(`[{"anilist_id":1,"type":"tv","tvdb_id":1001}`)
+	prevRecords := []Record{{AniListID: 1, Type: "TV", TvdbID: 1001}}
+	for i := 2; i <= prevN; i++ {
+		fmt.Fprintf(&b, `,{"anilist_id":%d,"tvdb_id":%d}`, i, i+1000)
+		prevRecords = append(prevRecords, Record{AniListID: i, TvdbID: i + 1000})
+	}
+	// The candidate retains every previous record (including the one typed
+	// record) and adds one valid untyped record: 101 records, 1 typed.
+	fmt.Fprintf(&b, `,{"anilist_id":%d,"tvdb_id":%d}`, prevN+1, prevN+1001)
+	b.WriteString("]")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(b.String()))
+	}))
+	defer ts.Close()
+
+	prev := &Cache{
+		FetchedAt:         time.Now().Add(-2 * time.Hour),
+		Records:           prevRecords,
+		RejectedRefreshes: 3,
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	if err != nil {
+		t.Fatalf("additive refresh retaining all typed records returned error %v, want accepted", err)
+	}
+	if len(next.Records) != prevN+1 {
+		t.Fatalf("accepted refresh records = %d, want %d", len(next.Records), prevN+1)
+	}
+	if next.RejectedRefreshes != 0 {
+		t.Errorf("accepted refresh RejectedRefreshes = %d, want 0 (acceptance resets the streak)", next.RejectedRefreshes)
+	}
+}
+
 // TestLoader_refreshCache_lowArrIdentifierCoverageKeepsStale covers the
 // coverage floor: a refresh where only 1 of 200+ records retains an arr
 // identifier is a wholesale degradation (below the 1% floor) and must keep the

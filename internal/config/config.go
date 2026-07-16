@@ -331,20 +331,6 @@ func sanitizeYAMLError(err error) string {
 	return "unmarshal errors: " + strings.Join(entries, "; ")
 }
 
-// sanitizeTypeErrorEntry rebuilds one TypeError entry keeping only its
-// value-independent parts: the "line N: cannot unmarshal !!<tag>" prefix and
-// the " into <type>" suffix. strings.LastIndex locates the suffix so backticks
-// or newlines inside the scalar excerpt are irrelevant. A duplicate-mapping-key
-// entry ("line N: mapping key "x" already defined at line M") is a second
-// value-independent shape and keeps both line numbers; only the key excerpt is
-// redacted (a misindented paste can put a secret in key position, so stay
-// field-name-only like the rest of the file). The unknown-key entry from the
-// strict checkUnknownKeys pre-decode ("line N: field X not found in type T")
-// is a third shape: the key name is kept - it is the diagnostic the operator
-// needs to fix the typo - and the isLinePrefix guard ensures a wrong-type
-// scalar excerpt that happens to embed both of its markers is never mistaken
-// for it (such an entry starts with the unmarshal shape, not a bare "line N",
-// so it falls through to the redacting branches instead).
 // lineEntryBounds locates one structured TypeError entry shape: startMarker
 // must appear after a bare "line N" prefix (the isLinePrefix guard - a
 // wrong-type scalar excerpt embedding the same marker pair starts with the
@@ -360,6 +346,20 @@ func lineEntryBounds(entry, startMarker, endMarker string) (start, end int, ok b
 	return start, end, end > start
 }
 
+// sanitizeTypeErrorEntry rebuilds one TypeError entry keeping only its
+// value-independent parts: the "line N: cannot unmarshal !!<tag>" prefix and
+// the " into <type>" suffix. strings.LastIndex locates the suffix so backticks
+// or newlines inside the scalar excerpt are irrelevant. A duplicate-mapping-key
+// entry ("line N: mapping key "x" already defined at line M") is a second
+// value-independent shape and keeps both line numbers; only the key excerpt is
+// redacted (a misindented paste can put a secret in key position, so stay
+// field-name-only like the rest of the file). The unknown-key entry from the
+// strict checkUnknownKeys pre-decode ("line N: field X not found in type T")
+// is a third shape: the key name is kept - it is the diagnostic the operator
+// needs to fix the typo - and the isLinePrefix guard ensures a wrong-type
+// scalar excerpt that happens to embed both of its markers is never mistaken
+// for it (such an entry starts with the unmarshal shape, not a bare "line N",
+// so it falls through to the redacting branches instead).
 func sanitizeTypeErrorEntry(entry string) string {
 	if k, at, ok := lineEntryBounds(entry, yamlDupKeyMarker, yamlDupKeyDefinedAt); ok {
 		return entry[:k] + ": mapping key <redacted>" + entry[at:]
