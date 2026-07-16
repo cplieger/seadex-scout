@@ -16,7 +16,6 @@ require github.com/cplieger/slogx v1.2.0
 
 require github.com/cplieger/scheduler v1.2.0
 
-require (
-	github.com/cplieger/envx v1.1.0
-	pgregory.net/rapid v1.3.0
-)
+require pgregory.net/rapid v1.3.0
+
+require github.com/cplieger/envx/yamlenv v1.0.0
