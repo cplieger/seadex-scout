@@ -1,0 +1,57 @@
+package indexer
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/cplieger/seadex-scout/internal/seadex"
+)
+
+// FuzzFeedTitle_boundedAndTrimmed exercises the title synthesis on arbitrary
+// SeaDex-supplied file names and release groups (untrusted upstream strings the
+// regex pipeline parses). Invariants: it never panics, the result carries no
+// leading/trailing whitespace (every return path trims), and the result never
+// exceeds the longest input (the title is derived from one file name or the
+// group, and every transformation - extension strip, episode collapse,
+// whitespace collapse - only shrinks). A violation would mean the synthesized
+// RSS title leaked padding or grew unboundedly from hostile catalogue data.
+func FuzzFeedTitle_boundedAndTrimmed(f *testing.F) {
+	f.Add("Frieren Beyond Journey's End - S01E07 (BD Remux 1080p) [PMR].mkv", "Frieren Beyond Journey's End - S01E08 (BD Remux 1080p) [PMR].mkv", "PMR")
+	f.Add("[Grp] Some Show - 07 (1080p).mkv", "[Grp] Some Show - 08 (1080p).mkv", "")
+	f.Add("NCED 01 (BD Remux 1080p AVC FLAC) [PMR].mkv", "Show Title - S02E01 (BD 1080p) [Grp].mkv", "Grp")
+	f.Add("A Silent Voice (2016) (BD 1080p x264 FLAC) [Group].mkv", "", "Group")
+	f.Add("", "", "  spaced group  ")
+	f.Add("Scum.of.the.Brave.S01E05.1080p.CR.WEB-DL-VARYG.mkv", "", "VARYG")
+	f.Add("[LostYears] Frieren - S01E15v2 (WEB 1080p) [3564C0AD].mkv", "[LostYears] Frieren - S01E16 (WEB 1080p) [06E8039D].mkv", "LostYears")
+	f.Add("Show - 07.mkv", "Show - 08.mkv", "")
+	f.Fuzz(func(t *testing.T, name1, name2, group string) {
+		tor := &seadex.Torrent{
+			ReleaseGroup: group,
+			Files:        []seadex.File{{Name: name1}, {Name: name2}},
+		}
+		got := feedTitle(tor)
+		if got != strings.TrimSpace(got) {
+			t.Errorf("feedTitle(%q, %q, group %q) = %q, not trimmed", name1, name2, group, got)
+		}
+		if maxIn := max(len(name1), len(name2), len(group)); len(got) > maxIn {
+			t.Errorf("feedTitle(%q, %q, group %q) = %q (len %d), exceeds longest input (len %d)",
+				name1, name2, group, got, len(got), maxIn)
+		}
+	})
+}
+
+// FuzzFeedTitle_singleVideoPreservesName pins the single-video oracle the
+// bounded/trimmed target above cannot: for a torrent holding exactly one
+// recognized video file, the synthesized title is the trimmed base name, so a
+// degenerate implementation that always returns "" cannot pass.
+func FuzzFeedTitle_singleVideoPreservesName(f *testing.F) {
+	f.Add("Show - S01E01 (1080p) [Grp]")
+	f.Add("  Movie Title (2026)  ")
+	f.Fuzz(func(t *testing.T, base string) {
+		got := feedTitle(&seadex.Torrent{Files: []seadex.File{{Name: base + ".mkv"}}})
+		want := strings.TrimSpace(base)
+		if got != want {
+			t.Errorf("feedTitle(single video %q) = %q, want %q", base, got, want)
+		}
+	})
+}

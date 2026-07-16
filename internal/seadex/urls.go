@@ -1,45 +1,61 @@
 package seadex
 
-import "strings"
+import (
+	"net/url"
+	"strings"
 
-// trackerBaseURLs maps a lowercase tracker name to its site base URL, used to
-// turn the relative torrent paths private trackers return (for example
-// AnimeBytes "/torrents.php?id=..") into a usable link.
-var trackerBaseURLs = map[string]string{ //nolint:gosec // G101 false positive: tracker site names/URLs, not credentials
-	"nyaa":           "https://nyaa.si",
-	"animetosho":     "https://animetosho.org",
-	"ab":             "https://animebytes.tv",
-	"animebytes":     "https://animebytes.tv",
-	"beyondhd":       "https://beyond-hd.me",
-	"bhd":            "https://beyond-hd.me",
-	"hdbits":         "https://hdbits.org",
-	"passthepopcorn": "https://passthepopcorn.me",
-	"ptp":            "https://passthepopcorn.me",
-	"broadcasthenet": "https://broadcasthe.net",
-	"btn":            "https://broadcasthe.net",
-	"blutopia":       "https://blutopia.cc",
-	"aither":         "https://aither.cc",
-}
+	"github.com/cplieger/seadex-scout/internal/release"
+)
 
 // UsableURL returns a link a human can follow for the torrent. An absolute URL
 // is returned unchanged; a relative path (as private trackers return) is
-// prefixed with the tracker's base URL when known, so a finding or report never
-// emits a broken bare path. An unknown tracker's relative path is returned
-// as-is.
+// prefixed with the tracker's base URL from the canonical release tracker
+// table, so a finding or report never emits a broken bare path. An unknown
+// tracker's relative path drops to "" like every other unusable form (no base
+// URL exists to make it followable).
 func (t *Torrent) UsableURL() string {
 	u := strings.TrimSpace(t.URL)
 	if u == "" {
 		return ""
 	}
-	if strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
+	// Parse rather than prefix-match so a malformed absolute value (a bare
+	// "https://", an invalid escape, whitespace in the host, a backslash
+	// authority) becomes the already-supported empty-URL case - dropping only
+	// the unusable link - instead of a published link a human cannot follow.
+	// Backslashes are rejected outright: browsers treat "\\host" as an
+	// authority even though url.Parse does not.
+	parsed, err := url.Parse(u)
+	if err != nil || strings.Contains(u, `\`) {
+		return ""
+	}
+	if parsed.IsAbs() {
+		// An absolute URL is returned unchanged, but only in http(s) with a real
+		// host; any other scheme (javascript:, data:, file:) is untrusted
+		// upstream data with no legitimate use in a clickable link.
+		if (!strings.EqualFold(parsed.Scheme, "http") &&
+			!strings.EqualFold(parsed.Scheme, "https")) || parsed.Host == "" {
+			return ""
+		}
 		return u
 	}
-	base, ok := trackerBaseURLs[strings.ToLower(strings.TrimSpace(t.Tracker))]
-	if !ok {
-		return u
+	// A protocol-relative URL ("//host/path") carries no scheme, yet a renderer
+	// resolves it against the ambient scheme and navigates off-site; it has no
+	// legitimate use as a tracker link. A colon-prefixed value that did not
+	// parse as a scheme (e.g. "1a:b") is equally unusable as a relative path.
+	// A scheme-less relative path parses host-free and still passes through
+	// (tracker-relative AB paths are unaffected).
+	if parsed.Host != "" || strings.HasPrefix(u, "//") {
+		return ""
+	}
+	if i := strings.Index(u, ":"); i >= 0 && !strings.Contains(u[:i], "/") {
+		return ""
+	}
+	tr, ok := release.LookupTracker(t.Tracker)
+	if !ok || tr.BaseURL == "" {
+		return ""
 	}
 	if !strings.HasPrefix(u, "/") {
 		u = "/" + u
 	}
-	return base + u
+	return tr.BaseURL + u
 }

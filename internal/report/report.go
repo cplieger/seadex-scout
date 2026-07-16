@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cplieger/seadex-scout/internal/compare"
+	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/release"
 )
 
@@ -28,6 +29,16 @@ type Reporter struct {
 	log *slog.Logger
 }
 
+// storedFinding returns a copy of f safe to persist in state.json: the arr
+// deep-link is sanitized the same way the log path sanitizes it, so a
+// credentialed public_url never lands on disk. No consumer reads the
+// persisted ArrURL, so this is behavior-preserving.
+func storedFinding(f *compare.Finding) compare.Finding {
+	c := *f
+	c.ArrURL = library.SafeLogURL(c.ArrURL)
+	return c
+}
+
 // NewReporter builds a Reporter. logger may be nil.
 func NewReporter(logger *slog.Logger) *Reporter {
 	if logger == nil {
@@ -39,31 +50,45 @@ func NewReporter(logger *slog.Logger) *Reporter {
 // Report emits new findings, suppresses ones already alerted (carrying their
 // original alert time forward), logs a one-line resolution for any prior finding
 // no longer present, and returns the new dedupe state to persist.
-func (r *Reporter) Report(findings []compare.Finding, prior map[string]Alerted, now time.Time) map[string]Alerted {
+//
+// failedItems scopes resolution on a partial library walk: a prior finding
+// whose AniList ID is in failedItems belongs to an item whose episode fetch
+// failed this cycle, so its absence from findings is missing data, not
+// evidence of alignment - it is carried forward unresolved (original alert
+// time kept, no "finding resolved" line) instead of being falsely resolved.
+// Pass nil when every item walked cleanly.
+func (r *Reporter) Report(findings []compare.Finding, prior map[string]Alerted, failedItems map[int]struct{}, now time.Time) map[string]Alerted {
 	current := make(map[string]Alerted, len(findings))
 	newCount := 0
 	for i := range findings {
 		f := &findings[i]
 		if a, ok := prior[f.DedupeKey]; ok {
-			current[f.DedupeKey] = Alerted{AlertedAt: a.AlertedAt, Finding: *f}
+			current[f.DedupeKey] = Alerted{AlertedAt: a.AlertedAt, Finding: storedFinding(f)}
 			continue
 		}
 		r.emit(f)
 		newCount++
-		current[f.DedupeKey] = Alerted{AlertedAt: now, Finding: *f}
+		current[f.DedupeKey] = Alerted{AlertedAt: now, Finding: storedFinding(f)}
 	}
 
-	resolved := 0
+	resolved, preserved := 0, 0
 	for key := range prior {
-		if _, ok := current[key]; !ok {
-			f := prior[key].Finding
-			r.emitResolved(&f)
-			resolved++
+		if _, ok := current[key]; ok {
+			continue
 		}
+		a := prior[key]
+		if _, failed := failedItems[a.Finding.AniListID]; failed {
+			current[key] = a
+			preserved++
+			continue
+		}
+		r.emitResolved(&a.Finding)
+		resolved++
 	}
 
 	r.log.Info("findings reported",
-		"total", len(findings), "new", newCount, "resolved", resolved, "suppressed", len(findings)-newCount)
+		"total", len(findings), "new", newCount, "resolved", resolved,
+		"preserved", preserved, "suppressed", len(findings)-newCount)
 	return current
 }
 
@@ -76,7 +101,7 @@ func (r *Reporter) Baseline(findings []compare.Finding, now time.Time) map[strin
 	current := make(map[string]Alerted, len(findings))
 	for i := range findings {
 		f := &findings[i]
-		current[f.DedupeKey] = Alerted{AlertedAt: now, Finding: *f}
+		current[f.DedupeKey] = Alerted{AlertedAt: now, Finding: storedFinding(f)}
 	}
 	r.log.Info("cold start: findings baselined without notifying", "total", len(findings))
 	return current
@@ -98,6 +123,8 @@ func (r *Reporter) emitResolved(f *compare.Finding) {
 		"title", f.Title,
 		"al_id", f.AniListID,
 		labelArr, f.Arr,
+		"season", f.Season,
+		"current_group", f.CurrentGroup,
 		"status", string(f.Status),
 		"recommended_group", f.RecommendedGroup)
 }
@@ -112,7 +139,7 @@ func findingKVs(f *compare.Finding) []any {
 		"title", f.Title,
 		"al_id", f.AniListID,
 		labelArr, f.Arr,
-		"arr_url", f.ArrURL,
+		"arr_url", library.SafeLogURL(f.ArrURL),
 		"season", f.Season,
 		"current_group", f.CurrentGroup,
 		"recommended_group", f.RecommendedGroup,

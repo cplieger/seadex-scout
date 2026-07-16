@@ -126,6 +126,21 @@ func TestTrackerKey(t *testing.T) {
 	if got := trackerKeyFromURL("https://example.com/torrent/1167293/group?tracker=animebytes"); got != "" {
 		t.Errorf("misleading animebytes URL trackerKeyFromURL = %q, want empty", got)
 	}
+	// Component-aware extraction: a curated id embedded in a query value or
+	// fragment of a trusted host's URL identifies nothing - only the path
+	// (Nyaa /view, AB permalink) or the torrentid query parameter may key.
+	if got := trackerKeyFromURL("https://nyaa.si/?next=/view/1234567"); got != "" {
+		t.Errorf("nyaa query-embedded id trackerKeyFromURL = %q, want empty", got)
+	}
+	if got := trackerKeyFromURL("https://animebytes.tv/?next=/torrent/1167293/group"); got != "" {
+		t.Errorf("ab query-embedded id trackerKeyFromURL = %q, want empty", got)
+	}
+	if got := trackerKeyFromURL("https://nyaa.si/#/view/1234567"); got != "" {
+		t.Errorf("nyaa fragment-embedded id trackerKeyFromURL = %q, want empty", got)
+	}
+	if got := trackerKeyFromURL("https://animebytes.tv/torrent/1167293/group"); got != "ab:1167293" {
+		t.Errorf("ab permalink trackerKeyFromURL = %q, want ab:1167293", got)
+	}
 }
 
 func TestMarkAndDedupe(t *testing.T) {
@@ -148,6 +163,34 @@ func TestMarkAndDedupe(t *testing.T) {
 	}
 	if out[1].DownloadVolumeFactor != dvfAlt {
 		t.Errorf("alt marker = %q, want %q", out[1].DownloadVolumeFactor, dvfAlt)
+	}
+}
+
+// TestMarkAndDedupeRejectsConflictingIdentity pins lookup's identity
+// consistency rule: every structurally valid identity signal an untrusted
+// Torznab item carries must resolve to curated entries agreeing on best/alt.
+// An item pairing a curated best info hash with the page URL of a different
+// torrent (an alt entry, or a structurally valid but uncurated one) must be
+// dropped, never admitted on the first matching signal.
+func TestMarkAndDedupeRejectsConflictingIdentity(t *testing.T) {
+	set := &curation{
+		byHash: map[string]bool{"abcdef1234567890abcdef1234567890abcdef12": true},
+		byKey:  map[string]bool{"ab:1143533": false},
+	}
+	raw := []item{
+		{
+			Title: "best hash + alt key", GUID: "g1",
+			InfoHash: "abcdef1234567890abcdef1234567890abcdef12",
+			InfoURL:  "https://animebytes.tv/torrents.php?id=1&torrentid=1143533",
+		},
+		{
+			Title: "best hash + uncurated key", GUID: "g2",
+			InfoHash: "abcdef1234567890abcdef1234567890abcdef12",
+			InfoURL:  "https://nyaa.si/view/999",
+		},
+	}
+	if out := markAndDedupe(raw, set); len(out) != 0 {
+		t.Fatalf("got %d items, want 0 (conflicting identity signals must drop the item)", len(out))
 	}
 }
 
@@ -177,7 +220,7 @@ func TestIndexerEndToEnd(t *testing.T) {
 
 	// The compare cycle builds + persists the feed snapshot; the server reads it.
 	path := filepath.Join(t.TempDir(), "feed.json")
-	if err := NewFeedWriter("", path, nil).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter("", false, path, nil).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 
@@ -186,7 +229,11 @@ func TestIndexerEndToEnd(t *testing.T) {
 	torznabSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAPIKey = r.Header.Get("X-Api-Key")
 		w.Header().Set("Content-Type", "application/rss+xml")
-		_, _ = io.WriteString(w, sampleFeed)
+		// Rewrite the fixture's download link onto this mock endpoint's own
+		// origin: search now drops items whose download URL is not on the
+		// configured Prowlarr origin, and a real Prowlarr hands out proxy
+		// links on its own host.
+		_, _ = io.WriteString(w, strings.ReplaceAll(sampleFeed, "http://prowlarr:9696", "http://"+r.Host))
 	}))
 	defer torznabSrv.Close()
 
@@ -267,7 +314,7 @@ func TestFeedWriterReload(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [GRP].mkv"}},
 		}},
 	}}
-	if err := NewFeedWriter("", path, nil).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter("", false, path, nil).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	got, st := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
@@ -317,6 +364,7 @@ func TestServesQuery(t *testing.T) {
 		{"t": {"search"}, "q": {"Frieren"}},     // generic series search
 		{"t": {"search"}, "q": {"Frieren OVA"}}, // special
 		{"t": {"caps"}},                         // (query() not called for caps, but classifies as serve)
+		{"t": {"search"}, "q": {"Some Film 2011"}, "cat": {"2999"}}, // top of the Movies range still reads as a film
 	}
 	for _, q := range serves {
 		if !servesQuery(q) {
@@ -328,6 +376,7 @@ func TestServesQuery(t *testing.T) {
 		{"t": {"tvsearch"}, "q": {"Frieren"}, "season": {"1"}, "ep": {"1"}}, // per-episode (season+ep)
 		{"t": {"search"}, "q": {"Frieren 01"}},                              // anime absolute episode
 		{"t": {"search"}, "q": {"One Piece 1085"}},                          // 4-digit absolute episode
+		{"t": {"search"}, "q": {"Frieren 01"}, "cat": {"3000"}},             // 3000 is past the Movies range; the episode skip applies
 	}
 	for _, q := range skips {
 		if servesQuery(q) {
@@ -355,19 +404,19 @@ func TestScopeFromPath(t *testing.T) {
 	}
 }
 
-func TestUpstreamsForScope(t *testing.T) {
+func TestUpstreamForScope(t *testing.T) {
 	nyaa := &upstream{name: "nyaa"}
 	ab := &upstream{name: "ab"}
 	all := []*upstream{nyaa, ab}
 
-	if got := upstreamsForScope(all, ""); len(got) != 0 {
-		t.Errorf("empty scope: got %d upstreams, want 0 (no combined feed)", len(got))
+	if got := upstreamForScope(all, ""); got != nil {
+		t.Errorf("empty scope: got %v, want nil (no combined feed)", got)
 	}
-	if got := upstreamsForScope(all, "nyaa"); len(got) != 1 || got[0] != nyaa {
-		t.Errorf("scope nyaa: got %v, want [nyaa]", got)
+	if got := upstreamForScope(all, "nyaa"); got != nyaa {
+		t.Errorf("scope nyaa: got %v, want nyaa", got)
 	}
-	if got := upstreamsForScope(all, "ab"); len(got) != 1 || got[0] != ab {
-		t.Errorf("scope ab: got %v, want [ab]", got)
+	if got := upstreamForScope(all, "ab"); got != ab {
+		t.Errorf("scope ab: got %v, want ab", got)
 	}
 }
 
@@ -449,7 +498,7 @@ func TestBuildFeeds(t *testing.T) {
 	// Frieren is a TV series, so classify every entry as anime (the category
 	// itself is exercised by TestMovieClassifier).
 	classifyAnime := func(int) []int { return []int{catAnime} }
-	nyaa, ab, abSkipped := buildFeeds(entries, "PASSKEY123", classifyAnime)
+	nyaa, ab, abSkipped, _ := buildFeeds(entries, "PASSKEY123", classifyAnime)
 	if len(nyaa) != 2 || len(ab) != 2 {
 		t.Fatalf("feeds: got nyaa=%d ab=%d, want 2 and 2", len(nyaa), len(ab))
 	}
@@ -516,7 +565,7 @@ func TestBuildFeeds(t *testing.T) {
 
 	// Without a passkey the AB feed carries nothing grabbable, and both AB
 	// releases are counted for the operator nudge; Nyaa is unaffected.
-	nyaa2, ab2, abSkipped2 := buildFeeds(entries, "", classifyAnime)
+	nyaa2, ab2, abSkipped2, _ := buildFeeds(entries, "", classifyAnime)
 	if len(nyaa2) != 2 {
 		t.Errorf("nyaa feed without passkey = %d, want 2", len(nyaa2))
 	}
@@ -531,9 +580,9 @@ func TestBuildFeeds(t *testing.T) {
 func TestFeedTitle(t *testing.T) {
 	tests := []struct {
 		name  string
-		files []seadex.File
 		group string
 		want  string
+		files []seadex.File
 	}{
 		{
 			name: "season pack (multi-file) collapses SxxExx to the season",
@@ -555,6 +604,14 @@ func TestFeedTitle(t *testing.T) {
 				{Name: "[LostYears] Frieren Beyond Journey's End - S01E16 (WEB 1080p x265 10-bit AAC Opus) [06E8039D].mkv"},
 			},
 			want: "[LostYears] Frieren Beyond Journey's End - S01 (WEB 1080p x265 10-bit AAC Opus) [3564C0AD]",
+		},
+		{
+			name: "a v2 revision of the same episode is one episode, not a pack",
+			files: []seadex.File{
+				{Name: "Show - S01E01 (1080p) [G].mkv"},
+				{Name: "Show - S01E01v2 (1080p) [G].mkv"},
+			},
+			want: "Show - S01E01 (1080p) [G]",
 		},
 		{
 			name: "creditless extras skipped; a lone episode keeps its SxxExx",
@@ -588,6 +645,19 @@ func TestFeedTitle(t *testing.T) {
 			group: "PMR",
 			want:  "PMR",
 		},
+		{
+			name:  "episode-range token in a single file is one release, kept verbatim",
+			files: []seadex.File{{Name: "Show - S01E01-E13 (1080p) [G].mkv"}},
+			want:  "Show - S01E01-E13 (1080p) [G]",
+		},
+		{
+			name: "pack of episode-range files collapses to the season",
+			files: []seadex.File{
+				{Name: "Show - S01E01-E02 (1080p) [G].mkv"},
+				{Name: "Show - S01E03-E04 (1080p) [G].mkv"},
+			},
+			want: "Show - S01 (1080p) [G]",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -612,9 +682,9 @@ func TestMovieClassifier(t *testing.T) {
 		3: {AniListID: 3, Type: "SPECIAL"},
 		4: {AniListID: 4, Type: "TV"},
 	}
-	classify := movieClassifier(func(alID int) (mapping.Record, bool) {
+	classify := movieClassifier(func(alID int) bool {
 		r, ok := recs[alID]
-		return r, ok
+		return ok && r.IsMovie()
 	})
 	tests := []struct {
 		name string
@@ -636,8 +706,8 @@ func TestMovieClassifier(t *testing.T) {
 		})
 	}
 
-	// A nil lookup (no mapping configured) is safe and defaults to anime.
-	if got := movieClassifier((*mapping.Index)(nil).Lookup)(1); len(got) != 1 || got[0] != catAnime {
+	// A nil classifier (no mapping configured) is safe and defaults to anime.
+	if got := movieClassifier(nil)(1); len(got) != 1 || got[0] != catAnime {
 		t.Errorf("nil-mapping classify = %v, want [%d]", got, catAnime)
 	}
 }
@@ -789,7 +859,7 @@ func TestReloadKeepsFeedOnMalformedSnapshot(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
 		}},
 	}}
-	if err := NewFeedWriter("", path, nil).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter("", false, path, nil).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, Deps{}, path)
@@ -822,7 +892,7 @@ func TestBuildFeedsCompleteUnpackedSeason(t *testing.T) {
 			{Tracker: "Nyaa", URL: "https://nyaa.si/view/3", IsBest: true, Files: []seadex.File{{Length: 1, Name: "Scum of the Brave - S01E03 (WEB 1080p) [G].mkv"}}},
 		},
 	}}
-	nyaa, _, _ := buildFeeds(entries, "", func(int) []int { return []int{catAnime} })
+	nyaa, _, _, _ := buildFeeds(entries, "", func(int) []int { return []int{catAnime} })
 	if len(nyaa) != 3 {
 		t.Fatalf("got %d items, want 3 (one per episode torrent, not collapsed/deduped)", len(nyaa))
 	}
@@ -890,50 +960,202 @@ func TestValidInfoHash(t *testing.T) {
 	}
 }
 
-// TestReloadDoesNotRewindToOlderSnapshot pins reload's anti-rewind invariant:
-// a newer snapshot already served in memory is never overwritten by an older
-// snapshot on disk. reload's freshness guard installs only when the file's
-// mtime is strictly newer than the loaded snapshot, so pointing the server at a
-// strictly-older on-disk file and reloading must leave the newer in-memory feed
-// and its mtime untouched. Driven single-threaded: the pre-install holds the
-// write lock exactly as a real cycle would, and the lone reload runs after it,
-// so there is no shared-state access outside the lock.
-func TestReloadDoesNotRewindToOlderSnapshot(t *testing.T) {
+// TestReloadInstallsOlderMtimeSnapshot pins reload's inequality freshness
+// guard: an on-disk snapshot whose mtime is OLDER than the loaded copy's still
+// installs. A /config volume restored from backup, or a file replaced by an
+// atomic rename preserving an older mtime, is the current truth on disk; the
+// former strictly-After guard never installed it and wedged the server on the
+// stale in-memory snapshot until restart. Any mtime CHANGE reloads; only
+// equality skips (TestReloadSkipsUnchangedMtime). Driven single-threaded: the
+// pre-install holds the write lock exactly as a real cycle would, and the lone
+// reload runs after it, so there is no shared-state access outside the lock.
+func TestReloadInstallsOlderMtimeSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	oldTime := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	newerTime := oldTime.Add(time.Hour)
-	oldJSON := `{"by_hash":{},"by_key":{},"nyaa_feed":[{"Title":"old","GUID":"old","DownloadURL":"old"}],"ab_feed":[]}`
-	if err := os.WriteFile(path, []byte(oldJSON), 0o600); err != nil {
-		t.Fatalf("write old snapshot: %v", err)
+	restoredJSON := `{"by_hash":{},"by_key":{},"nyaa_feed":[{"Title":"restored","GUID":"restored","DownloadURL":"restored"}],"ab_feed":[]}`
+	if err := os.WriteFile(path, []byte(restoredJSON), 0o600); err != nil {
+		t.Fatalf("write restored snapshot: %v", err)
 	}
 	if err := os.Chtimes(path, oldTime, oldTime); err != nil {
-		t.Fatalf("set old snapshot mtime: %v", err)
+		t.Fatalf("set restored snapshot mtime: %v", err)
 	}
 
 	ix := New(&Config{}, Deps{}, "")
 	ix.path = path
 
-	// Pre-install a newer snapshot the way a fresher cycle would, holding the
-	// write lock exactly as reload's install path does.
+	// Pre-install a newer-mtime snapshot the way a pre-restore cycle would,
+	// holding the write lock exactly as reload's install path does.
 	ix.mu.Lock()
 	ix.snap = snapshot{
 		ByHash:   map[string]bool{},
 		ByKey:    map[string]bool{},
-		NyaaFeed: []item{{Title: "new", GUID: "new", DownloadURL: "new"}},
+		NyaaFeed: []item{{Title: "stale", GUID: "stale", DownloadURL: "stale"}},
 	}
 	ix.snapMod = newerTime
 	ix.mu.Unlock()
 
-	// Reloading against a strictly-older on-disk file must not rewind: the
-	// freshness guard skips the install because the file is not newer than the
-	// loaded snapshot.
+	// Reloading against the older-mtime on-disk file must install it: the
+	// mtime differs from the loaded snapshot's, and the file is the truth.
 	ix.reload(context.Background())
 
 	got := ix.feedFor(upstreamNyaa)
-	if len(got) != 1 || got[0].Title != "new" {
-		t.Fatalf("feed after reloading an older snapshot = %#v, want the newer in-memory snapshot", got)
+	if len(got) != 1 || got[0].Title != "restored" {
+		t.Fatalf("feed after reloading an older-mtime snapshot = %#v, want the restored on-disk snapshot", got)
 	}
-	if !ix.snapMod.Equal(newerTime) {
-		t.Fatalf("snapMod after reloading an older snapshot = %v, want %v", ix.snapMod, newerTime)
+	if ix.snapMod.Equal(newerTime) {
+		t.Fatalf("snapMod after reloading an older-mtime snapshot = %v, want the on-disk mtime, not the stale %v", ix.snapMod, newerTime)
+	}
+}
+
+// TestReloadSkipsUnchangedMtime pins the equality leg of reload's freshness
+// guard: when the on-disk mtime equals the loaded snapshot's, reload leaves the
+// served feed untouched - even if the bytes changed - so the per-request mtime
+// check stays a cheap stat, never a read/unmarshal.
+func TestReloadSkipsUnchangedMtime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	when := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	firstJSON := `{"by_hash":{},"by_key":{},"nyaa_feed":[{"Title":"first","GUID":"first","DownloadURL":"first"}],"ab_feed":[]}`
+	if err := os.WriteFile(path, []byte(firstJSON), 0o600); err != nil {
+		t.Fatalf("write first snapshot: %v", err)
+	}
+	if err := os.Chtimes(path, when, when); err != nil {
+		t.Fatalf("set first snapshot mtime: %v", err)
+	}
+	ix := New(&Config{}, Deps{}, path)
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
+		t.Fatalf("initial feed = %#v, want the first snapshot", got)
+	}
+
+	// Rewrite the content but restore the identical mtime: reload must skip.
+	secondJSON := `{"by_hash":{},"by_key":{},"nyaa_feed":[{"Title":"second","GUID":"second","DownloadURL":"second"}],"ab_feed":[]}`
+	if err := os.WriteFile(path, []byte(secondJSON), 0o600); err != nil {
+		t.Fatalf("write second snapshot: %v", err)
+	}
+	if err := os.Chtimes(path, when, when); err != nil {
+		t.Fatalf("restore mtime: %v", err)
+	}
+	ix.reload(context.Background())
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
+		t.Fatalf("feed after unchanged-mtime rewrite = %#v, want the loaded first snapshot (equality skips)", got)
+	}
+}
+
+// TestReloadCoalescesConcurrentRefreshes pins reload's coalescing contract:
+// while one request holds the refresh (reloadMu, as a winning reload does for
+// its whole stat/read/unmarshal), a sibling reload returns immediately without
+// duplicating the read - it does not block and does not install the on-disk
+// snapshot itself - and feedFor keeps serving the current snapshot unblocked.
+// Once the refresh is released, the next reload installs the new snapshot.
+func TestReloadCoalescesConcurrentRefreshes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	newJSON := `{"by_hash":{},"by_key":{},"nyaa_feed":[{"Title":"new","GUID":"new","DownloadURL":"new"}],"ab_feed":[]}`
+	if err := os.WriteFile(path, []byte(newJSON), 0o600); err != nil {
+		t.Fatalf("write snapshot: %v", err)
+	}
+	ix := New(&Config{}, Deps{}, "")
+	ix.path = path
+
+	// Simulate a refresh in progress: hold reloadMu exactly as the winning
+	// request does across its stat/read/unmarshal.
+	ix.reloadMu.Lock()
+
+	// A sibling reload must return immediately rather than queue behind the
+	// in-progress refresh or perform a duplicate read.
+	done := make(chan struct{})
+	go func() {
+		ix.reload(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		ix.reloadMu.Unlock()
+		t.Fatal("sibling reload blocked behind an in-progress refresh; want an immediate return")
+	}
+	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
+		ix.reloadMu.Unlock()
+		t.Fatalf("sibling reload installed the snapshot itself = %#v; want the install left to the refresh holder", got)
+	}
+
+	// Once the winning request releases the refresh, the next reload installs
+	// the new snapshot as usual.
+	ix.reloadMu.Unlock()
+	ix.reload(context.Background())
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "new" {
+		t.Fatalf("reload after the refresh released = %#v, want the new snapshot installed", got)
+	}
+}
+
+// TestApplyPaging pins the synthesized feed's Torznab paging contract (t=caps
+// advertises limit/offset): limit trims the window, offset advances it, an
+// offset past the end yields an empty page, and absent params leave the feed
+// untouched.
+func TestApplyPaging(t *testing.T) {
+	feed := []item{{GUID: "a"}, {GUID: "b"}, {GUID: "c"}}
+	tests := []struct {
+		name  string
+		query string
+		want  []string
+	}{
+		{"no params leaves the feed unpaged", "", []string{"a", "b", "c"}},
+		{"limit trims the window", "limit=2", []string{"a", "b"}},
+		{"offset advances the window", "offset=2", []string{"c"}},
+		{"offset+limit page", "offset=1&limit=1", []string{"b"}},
+		{"offset past the end is an empty page", "offset=10", nil},
+		{"invalid params are ignored", "offset=x&limit=-1", []string{"a", "b", "c"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			q, err := url.ParseQuery(tc.query)
+			if err != nil {
+				t.Fatalf("ParseQuery(%q): %v", tc.query, err)
+			}
+			got := applyPaging(feed, q)
+			if len(got) != len(tc.want) {
+				t.Fatalf("applyPaging(%q) returned %d items, want %d", tc.query, len(got), len(tc.want))
+			}
+			for i := range got {
+				if got[i].GUID != tc.want[i] {
+					t.Errorf("applyPaging(%q)[%d].GUID = %q, want %q", tc.query, i, got[i].GUID, tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestParsePubDate pins the Torznab <pubDate> parser on the untrusted upstream
+// date string: each supported layout parses to the same instant, and any empty,
+// whitespace-only, or unparseable value yields the zero time (the failure signal
+// writeItem keys on to omit the pubDate element). Today only TestParseTorznab's
+// single RFC1123Z sample and the round-trip fuzz seed exercise this, so the
+// alternate layouts and the failure branch (the uncovered path, 85.7%) are
+// otherwise unpinned.
+func TestParsePubDate(t *testing.T) {
+	want := time.Date(2026, time.July, 6, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct{ name, in string }{
+		{"RFC1123Z", "Mon, 06 Jul 2026 12:00:00 +0000"},
+		{"RFC1123", "Mon, 06 Jul 2026 12:00:00 GMT"},
+		{"RFC822Z", "06 Jul 26 12:00 +0000"},
+		{"RFC822", "06 Jul 26 12:00 GMT"},
+		{"RFC3339", "2026-07-06T12:00:00Z"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parsePubDate(tc.in); !got.Equal(want) {
+				t.Errorf("parsePubDate(%q) = %v, want %v", tc.in, got, want)
+			}
+		})
+	}
+	for _, tc := range []struct{ name, in string }{
+		{"empty", ""},
+		{"whitespace only", "   "},
+		{"unparseable", "not a date"},
+		{"wrong shape", "2026/07/06 12:00"},
+	} {
+		t.Run("zero on "+tc.name, func(t *testing.T) {
+			if got := parsePubDate(tc.in); !got.IsZero() {
+				t.Errorf("parsePubDate(%q) = %v, want the zero time", tc.in, got)
+			}
+		})
 	}
 }

@@ -1,7 +1,6 @@
 package mapping
 
 import (
-	"io"
 	"log/slog"
 	"reflect"
 	"strconv"
@@ -10,7 +9,7 @@ import (
 )
 
 func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+	return slog.New(slog.DiscardHandler)
 }
 
 func TestParseFribb(t *testing.T) {
@@ -81,6 +80,30 @@ func TestParseFribb_recordCap(t *testing.T) {
 	}
 }
 
+// TestParseFribb_overCapStopsEarly pins that the record cap is enforced while
+// STREAMING: an over-cap array of tiny elements is rejected before the rest of
+// the body is consumed or materialized. The tail after the cap point is
+// deliberately invalid JSON — a decoder that materialized the whole top-level
+// array first would surface a syntax error instead of the over-cap error.
+func TestParseFribb_overCapStopsEarly(t *testing.T) {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := 0; i <= maxFribbRecords; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(`{}`)
+	}
+	b.WriteString(`,!!!not-json`)
+	_, err := parseFribb([]byte(b.String()), discardLogger())
+	if err == nil {
+		t.Fatal("parseFribb(over-cap tiny elements) = nil error, want over-cap error")
+	}
+	if !strings.Contains(err.Error(), "cap") {
+		t.Errorf("parseFribb over-cap error = %v, want the record-cap error, not a syntax error", err)
+	}
+}
+
 func TestFribbRecord_toRecord(t *testing.T) {
 	if _, ok := (&fribbRecord{}).toRecord(); ok {
 		t.Error("toRecord with zero AniListID returned ok=true, want false")
@@ -90,7 +113,7 @@ func TestFribbRecord_toRecord(t *testing.T) {
 		AniListID: 7,
 		TvdbID:    12,
 		IMDbID:    stringList{"tt9"},
-		TmdbID:    tmdbID{TV: 5, Movie: []flexInt{0, 8}},
+		TmdbID:    tmdbID{Movie: []flexInt{0, 8}},
 	}
 	rec, ok := fr.toRecord()
 	if !ok {
@@ -98,9 +121,6 @@ func TestFribbRecord_toRecord(t *testing.T) {
 	}
 	if rec.Type != "OVA" {
 		t.Errorf("toRecord Type = %q, want OVA", rec.Type)
-	}
-	if rec.TmdbTV != 5 {
-		t.Errorf("toRecord TmdbTV = %d, want 5", rec.TmdbTV)
 	}
 	if !reflect.DeepEqual(rec.TmdbMovies, []int{8}) {
 		t.Errorf("toRecord TmdbMovies = %v, want [8] (zero dropped)", rec.TmdbMovies)
@@ -118,8 +138,10 @@ func TestFlexInt_UnmarshalJSON(t *testing.T) {
 		{"padded string", `"  78  "`, 78},
 		{"null", `null`, 0},
 		{"unknown string", `"unknown"`, 0},
-		{"float truncates", `9.9`, 9},
-		{"negative", `-5`, -5},
+		{"fractional treated absent", `9.9`, 0},
+		{"negative treated absent", `-5`, 0},
+		{"out of range", `1e300`, 0},
+		{"quoted out of range", `"2147483648"`, 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -161,12 +183,11 @@ func TestStringList_UnmarshalJSON(t *testing.T) {
 
 func TestTmdbID_UnmarshalJSON(t *testing.T) {
 	tests := []struct {
-		wantMovie []int
 		name      string
 		in        string
-		wantTV    int
+		wantMovie []int
 	}{
-		{name: "tv object", in: `{"tv":5}`, wantTV: 5},
+		{name: "tv object ignored", in: `{"tv":5}`},
 		{name: "movie array", in: `{"movie":[7,8]}`, wantMovie: []int{7, 8}},
 		{name: "bare number tolerated", in: `123`},
 		{name: "string tolerated", in: `"unknown"`},
@@ -177,9 +198,6 @@ func TestTmdbID_UnmarshalJSON(t *testing.T) {
 			var got tmdbID
 			if err := got.UnmarshalJSON([]byte(tc.in)); err != nil {
 				t.Fatalf("UnmarshalJSON(%s) error: %v", tc.in, err)
-			}
-			if int(got.TV) != tc.wantTV {
-				t.Errorf("tmdbID(%s).TV = %d, want %d", tc.in, int(got.TV), tc.wantTV)
 			}
 			if !reflect.DeepEqual(intSlice(got.Movie), tc.wantMovie) {
 				t.Errorf("tmdbID(%s).Movie = %v, want %v", tc.in, intSlice(got.Movie), tc.wantMovie)
@@ -197,11 +215,13 @@ func TestIntSliceAndTrimmed(t *testing.T) {
 	}
 }
 
-// TestParseFribb_seasonAndOffsetDecoded pins the season.tvdb / episode_offset
-// decode path: offsetPair.tvdbOr's non-nil branch and Record.SeasonTvdb /
-// OffsetTvdb, which existing parseFribb tests never populate. SeasonTvdb is
-// load-bearing for the audit season-scoping logic.
-func TestParseFribb_seasonAndOffsetDecoded(t *testing.T) {
+// TestParseFribb_seasonDecoded pins the season.tvdb decode path:
+// offsetPair.tvdbOrZero's non-nil branch and Record.SeasonTvdb, which existing
+// parseFribb tests never populate. SeasonTvdb is load-bearing for the audit
+// season-scoping logic. The upstream episode_offset field is deliberately not
+// decoded (no consumer reads it); it rides along here to prove an unknown
+// field is ignored.
+func TestParseFribb_seasonDecoded(t *testing.T) {
 	data := []byte(`[{"anilist_id":5,"type":"tv","season":{"tvdb":2},"episode_offset":{"tvdb":12}}]`)
 	records, err := parseFribb(data, discardLogger())
 	if err != nil {
@@ -213,7 +233,162 @@ func TestParseFribb_seasonAndOffsetDecoded(t *testing.T) {
 	if records[0].SeasonTvdb != 2 {
 		t.Errorf("SeasonTvdb = %d, want 2", records[0].SeasonTvdb)
 	}
-	if records[0].OffsetTvdb != 12 {
-		t.Errorf("OffsetTvdb = %d, want 12", records[0].OffsetTvdb)
+}
+
+// TestFlexInt_rangeClampBoundaries pins the inclusive validity endpoints of
+// the tolerant number decode: 0 and the int32 maximum decode as themselves,
+// while any negative value and anything above the int32 maximum are treated
+// as absent (0). Real AniList/TVDB/TMDB ids are never negative, and a
+// negative value must not count toward the arr-identifier acceptance floor.
+func TestFlexInt_rangeClampBoundaries(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want int
+	}{
+		{name: "zero accepted", in: `0`, want: 0},
+		{name: "negative one treated absent", in: `-1`, want: 0},
+		{name: "int32 minimum treated absent", in: `-2147483648`, want: 0},
+		{name: "maximum accepted", in: `2147483647`, want: 2147483647},
+		{name: "above maximum treated absent", in: `2147483648`, want: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var got flexInt
+			if err := got.UnmarshalJSON([]byte(tc.in)); err != nil {
+				t.Fatalf("UnmarshalJSON(%s) error: %v", tc.in, err)
+			}
+			if int(got) != tc.want {
+				t.Errorf("flexInt(%s) = %d, want %d", tc.in, int(got), tc.want)
+			}
+		})
+	}
+}
+
+// TestFlexInt_nonNumericJSONTolerated pins the non-string sibling of the
+// placeholder policy: valid JSON of a non-numeric type (a boolean) is
+// tolerated as 0 rather than surfacing the decode error.
+func TestFlexInt_nonNumericJSONTolerated(t *testing.T) {
+	var got flexInt
+	if err := got.UnmarshalJSON([]byte(`true`)); err != nil {
+		t.Fatalf("UnmarshalJSON(true) error: %v", err)
+	}
+	if int(got) != 0 {
+		t.Errorf("flexInt(true) = %d, want 0 (non-numeric placeholder tolerated)", int(got))
+	}
+}
+
+// TestParseFribb_malformedDocumentErrors pins the strict document-level
+// boundary of the otherwise tolerant decoder: per-record shape oddities are
+// skipped, but a document-level defect (empty input, a garbage first token, an
+// unterminated array, an invalid token mid-array, or trailing data after the
+// closing bracket) fails the whole parse so refreshCache keeps the stale map.
+func TestParseFribb_malformedDocumentErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+	}{
+		{name: "empty input", in: ``},
+		{name: "garbage first token", in: `!!!`},
+		{name: "unterminated array", in: `[{"anilist_id":1}`},
+		{name: "invalid token mid-array", in: `[{"anilist_id":1},!!!]`},
+		{name: "trailing data after array", in: `[{"anilist_id":1}] {"extra":true}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := parseFribb([]byte(tc.in), discardLogger()); err == nil {
+				t.Fatalf("parseFribb(%q) = nil error, want document-level error", tc.in)
+			}
+		})
+	}
+}
+
+// TestParseFribb_oversizedRecordSkipped pins the per-record amplification
+// guards: a record whose encoded form exceeds maxFribbRecordBytes, and a
+// small record whose nested identifier list exceeds maxFribbIdentifiers, are
+// each skipped as malformed while sibling records survive - so a hostile body
+// below maxMapBytes cannot amplify nested arrays into an unbounded decoded
+// working set.
+func TestParseFribb_oversizedRecordSkipped(t *testing.T) {
+	// A record over the byte cap: one imdb_id array whose encoded size alone
+	// exceeds maxFribbRecordBytes.
+	var big strings.Builder
+	big.WriteString(`{"anilist_id":2,"imdb_id":[`)
+	for i := 0; big.Len() <= maxFribbRecordBytes; i++ {
+		if i > 0 {
+			big.WriteByte(',')
+		}
+		big.WriteString(`"tt` + strconv.Itoa(i) + `"`)
+	}
+	big.WriteString(`]}`)
+
+	// A record well under the byte cap but over the identifier cap.
+	var wide strings.Builder
+	wide.WriteString(`{"anilist_id":3,"themoviedb_id":{"movie":[`)
+	for i := range maxFribbIdentifiers + 1 {
+		if i > 0 {
+			wide.WriteByte(',')
+		}
+		wide.WriteString(strconv.Itoa(i + 1))
+	}
+	wide.WriteString(`]}}`)
+
+	data := []byte(`[{"anilist_id":1,"tvdb_id":100},` + big.String() + `,` + wide.String() + `,{"anilist_id":4,"tvdb_id":400}]`)
+	if len(data) >= maxMapBytes {
+		t.Fatalf("test body is %d bytes, must stay under maxMapBytes %d", len(data), maxMapBytes)
+	}
+	records, err := parseFribb(data, discardLogger())
+	if err != nil {
+		t.Fatalf("parseFribb error: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("parseFribb kept %d records, want 2 (oversized records skipped, siblings survive)", len(records))
+	}
+	if records[0].AniListID != 1 || records[1].AniListID != 4 {
+		t.Errorf("surviving records = %d, %d, want 1 and 4", records[0].AniListID, records[1].AniListID)
+	}
+}
+
+// TestParseFribb_identifierSlicesCapped pins the aggregate bound: across a
+// many-record body every identifier slice a caller receives is at or below
+// maxFribbIdentifiers - at-cap lists are retained in full, over-cap lists
+// reject their record.
+func TestParseFribb_identifierSlicesCapped(t *testing.T) {
+	const n = 64
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := range n {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		ids := maxFribbIdentifiers // at the cap: retained in full
+		if i%4 == 0 {
+			ids = maxFribbIdentifiers + 1 // over the cap: record skipped
+		}
+		b.WriteString(`{"anilist_id":` + strconv.Itoa(i+1) + `,"imdb_id":[`)
+		for j := range ids {
+			if j > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(`"tt` + strconv.Itoa(j) + `"`)
+		}
+		b.WriteString(`]}`)
+	}
+	b.WriteByte(']')
+	records, err := parseFribb([]byte(b.String()), discardLogger())
+	if err != nil {
+		t.Fatalf("parseFribb error: %v", err)
+	}
+	want := n - n/4 // every i%4==0 record is over-cap and skipped
+	if len(records) != want {
+		t.Fatalf("parseFribb kept %d records, want %d", len(records), want)
+	}
+	for _, rec := range records {
+		if len(rec.IMDbIDs) > maxFribbIdentifiers {
+			t.Fatalf("record %d retained %d imdb ids, want <= %d", rec.AniListID, len(rec.IMDbIDs), maxFribbIdentifiers)
+		}
+		if len(rec.IMDbIDs) != maxFribbIdentifiers {
+			t.Fatalf("record %d retained %d imdb ids, want the full at-cap %d", rec.AniListID, len(rec.IMDbIDs), maxFribbIdentifiers)
+		}
 	}
 }

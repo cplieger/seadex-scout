@@ -33,7 +33,10 @@ const seaDexEntryURL = "https://releases.moe/"
 // with a parseable id, and (for AB) a configured passkey. An AB release skipped
 // solely for a missing passkey is counted in abSkippedNoPasskey so the caller
 // can nudge the operator once, rather than emitting link-less items an arr would
-// fail to grab. Trackers other than Nyaa/AB (a negligible SeaDex tail) are
+// fail to grab. An in-scope Nyaa/AB torrent whose stored URL yields no parseable
+// id is dropped and counted in unresolvable, so an upstream URL-shape change
+// surfaces on the snapshot log line instead of silently shrinking the feed.
+// Trackers other than Nyaa/AB (a negligible SeaDex tail) are
 // dropped. Both feeds are sorted newest-first and capped at feedWindow.
 //
 // classify sets each item's Torznab category from the entry's AniList id: a
@@ -41,28 +44,45 @@ const seaDexEntryURL = "https://releases.moe/"
 // so the caller resolves the real media type (Fribb/AniList) and returns the
 // category (Movies for a film -> Radarr, Anime for everything else -> Sonarr).
 // It is called once per entry (all of an entry's torrents share its category).
-func buildFeeds(entries []seadex.Entry, abPasskey string, classify func(alID int) []int) (nyaaFeed, abFeed []item, abSkippedNoPasskey int) {
+// feedAccumulator collects the two per-tracker feeds and the skip counters
+// as buildFeeds walks the catalogue.
+type feedAccumulator struct {
+	nyaa, ab                         []item
+	abSkippedNoPasskey, unresolvable int
+}
+
+// add resolves one SeaDex torrent into a feed item, routes it to its
+// tracker feed, and updates the skip counters.
+func (acc *feedAccumulator) add(e *seadex.Entry, t *seadex.Torrent, cats []int, abPasskey string) {
+	it, scope, ok, noPasskey := feedItemFor(e, t, abPasskey)
+	if noPasskey {
+		acc.abSkippedNoPasskey++
+	}
+	if !ok {
+		if scope != "" && !noPasskey {
+			acc.unresolvable++
+		}
+		return
+	}
+	it.Categories = cats
+	switch scope {
+	case upstreamNyaa:
+		acc.nyaa = append(acc.nyaa, it)
+	case upstreamAB:
+		acc.ab = append(acc.ab, it)
+	}
+}
+
+func buildFeeds(entries []seadex.Entry, abPasskey string, classify func(alID int) []int) (nyaaFeed, abFeed []item, abSkippedNoPasskey, unresolvable int) {
+	var acc feedAccumulator
 	for i := range entries {
 		e := &entries[i]
 		cats := classify(e.AniListID)
 		for j := range e.Torrents {
-			it, scope, ok, noPasskey := feedItemFor(e, &e.Torrents[j], abPasskey)
-			if noPasskey {
-				abSkippedNoPasskey++
-			}
-			if !ok {
-				continue
-			}
-			it.Categories = cats
-			switch scope {
-			case upstreamNyaa:
-				nyaaFeed = append(nyaaFeed, it)
-			case upstreamAB:
-				abFeed = append(abFeed, it)
-			}
+			acc.add(e, &e.Torrents[j], cats, abPasskey)
 		}
 	}
-	return sortAndCap(nyaaFeed), sortAndCap(abFeed), abSkippedNoPasskey
+	return sortAndCap(acc.nyaa), sortAndCap(acc.ab), acc.abSkippedNoPasskey, acc.unresolvable
 }
 
 // feedItemFor resolves one SeaDex torrent into a feed item and the scope it
@@ -117,9 +137,13 @@ var episodeToken = regexp.MustCompile(`(?i)(S\d{1,2})E\d{1,4}(?:-E?\d{1,4})?(?:v
 // episode 7 when there is no SxxExx token to collapse.
 var absoluteEpisode = regexp.MustCompile(`\s-\s\d{1,4}(?:v\d+)?(?:\s|$)`)
 
+// episodeVersion strips a trailing vN revision from an episode token so a v2
+// replacement of the same episode never counts as a second episode.
+var episodeVersion = regexp.MustCompile(`(?i)v\d+$`)
+
 // creditlessExtra matches bonus OP/ED files that may carry absolute-looking
 // numbers but should not count as episode files or drive the synthesized title.
-var creditlessExtra = regexp.MustCompile(`(?i)\b(?:NCOP|NCED|creditless)\b`)
+var creditlessExtra = regexp.MustCompile(`(?i)\b(?:NCOP|NCED|creditless)\d*(?:v\d+)?\b`)
 
 // multiSpace collapses runs of whitespace left after removing a token.
 var multiSpace = regexp.MustCompile(`\s{2,}`)
@@ -148,7 +172,12 @@ func feedTitle(t *seadex.Torrent) string {
 		return strings.TrimSpace(base)
 	}
 	if episodeToken.MatchString(base) {
-		return strings.TrimSpace(episodeToken.ReplaceAllString(base, "${1}"))
+		// Collapse only the LAST episode token: scene naming puts the marker
+		// after the title, so a title that itself contains an SxxExx-shaped
+		// substring is preserved verbatim.
+		locs := episodeToken.FindAllStringSubmatchIndex(base, -1)
+		l := locs[len(locs)-1]
+		return strings.TrimSpace(base[:l[0]] + base[l[2]:l[3]] + base[l[1]:])
 	}
 	if absoluteEpisode.MatchString(base) {
 		return strings.TrimSpace(multiSpace.ReplaceAllString(absoluteEpisode.ReplaceAllString(base, " "), " "))
@@ -173,14 +202,22 @@ func isPack(t *seadex.Torrent) bool {
 func coveredEpisodes(files []seadex.File) int {
 	seen := make(map[string]struct{})
 	for i := range files {
-		if creditlessExtra.MatchString(files[i].Name) {
+		if !isContentMediaFile(files[i].Name) {
 			continue
 		}
+		base := stripExt(files[i].Name)
 		switch {
-		case episodeToken.MatchString(files[i].Name):
-			seen["e"+strings.ToUpper(episodeToken.FindString(files[i].Name))] = struct{}{}
-		case absoluteEpisode.MatchString(files[i].Name):
-			seen["a"+strings.TrimSpace(absoluteEpisode.FindString(files[i].Name))] = struct{}{}
+		case episodeToken.MatchString(base):
+			// Key on the LAST token: scene naming puts the episode marker
+			// after the title, so a title containing an SxxExx-shaped
+			// substring must not shadow the real episode marker.
+			all := episodeToken.FindAllString(base, -1)
+			tok := strings.ToUpper(all[len(all)-1])
+			seen["e"+episodeVersion.ReplaceAllString(tok, "")] = struct{}{}
+		case absoluteEpisode.MatchString(base):
+			all := absoluteEpisode.FindAllString(base, -1)
+			tok := strings.TrimSpace(all[len(all)-1])
+			seen["a"+episodeVersion.ReplaceAllString(tok, "")] = struct{}{}
 		}
 	}
 	return len(seen)
@@ -194,26 +231,57 @@ func representativeFile(files []seadex.File) string {
 	if len(files) == 0 {
 		return ""
 	}
-	for i := range files {
-		if creditlessExtra.MatchString(files[i].Name) {
-			continue
-		}
-		if episodeToken.MatchString(files[i].Name) {
-			return files[i].Name
-		}
+	// Prefer a real episode file (skipping creditless extras/sidecars): first an
+	// SxxExx token, then an absolute-numbered episode, so the title derives from a
+	// real episode rather than an extra. The two predicates are deliberately
+	// asymmetric: episodeToken matches the RAW name (its E-digit body has no trailing
+	// anchor, so it matches with the extension still present), but absoluteEpisode ends
+	// in (?:\s|$) and an absolute number can abut the extension ("Show - 07.mkv"), so it
+	// must run on stripExt(n) to match. Do not unify them onto one input - dropping
+	// stripExt here breaks absolute-episode detection.
+	if name := firstEpisodeFile(files, episodeToken.MatchString); name != "" {
+		return name
 	}
-	// No SxxExx file: prefer an absolute-numbered episode ("[Grp] Show - 07")
-	// over a leading creditless/extra (NCED/NCOP) file, so an absolute-numbered
-	// pack derives its title from a real episode rather than an extra.
+	if name := firstEpisodeFile(files, func(n string) bool {
+		return absoluteEpisode.MatchString(stripExt(n))
+	}); name != "" {
+		return name
+	}
+	// No episode-marked media file: fall back to the first media file (a movie/
+	// single release), then to the first file at all (a sidecar-only list).
 	for i := range files {
-		if creditlessExtra.MatchString(files[i].Name) {
-			continue
-		}
-		if absoluteEpisode.MatchString(files[i].Name) {
+		if isContentMediaFile(files[i].Name) {
 			return files[i].Name
 		}
 	}
 	return files[0].Name
+}
+
+// firstEpisodeFile returns the name of the first real media file (not a creditless
+// extra or sidecar) whose name satisfies match, or "" when none match.
+func firstEpisodeFile(files []seadex.File, match func(string) bool) string {
+	for i := range files {
+		if !isContentMediaFile(files[i].Name) {
+			continue
+		}
+		if match(files[i].Name) {
+			return files[i].Name
+		}
+	}
+	return ""
+}
+
+// isContentMediaFile reports whether name is eligible to identify the release
+// content: it must be a video file and not a creditless extra.
+func isContentMediaFile(name string) bool {
+	return isMediaFile(name) && !creditlessExtra.MatchString(name)
+}
+
+// isMediaFile reports whether a file name carries a known video container
+// extension, so title synthesis derives from a real episode/movie file rather
+// than a sidecar (subtitles, fonts) that happens to carry the episode token.
+func isMediaFile(name string) bool {
+	return mediaExts[strings.ToLower(path.Ext(name))]
 }
 
 // mediaExts are the video container extensions used to tell an episode/movie

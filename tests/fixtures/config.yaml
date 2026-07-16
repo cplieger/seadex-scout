@@ -1,7 +1,9 @@
 # Minimal valid config for the image-smoke test, bind-mounted read-only at
 # /config. poll_interval: off = resident-idle: main() sets the health marker
-# healthy on boot and idles with no cycle, so the dummy Sonarr url is never
-# dialed (the startup pingArrs is non-fatal and no compare cycle runs).
+# healthy on boot and idles with no cycle. The dummy Sonarr url below is
+# dialed only once, by the non-fatal startup ping (arrapi Ping: short
+# timeout, no retry; 127.0.0.1:1 refuses instantly), never by a cycle -
+# keep it an instantly-refusing address so the ping cannot delay boot.
 # Validation only needs one arr enabled with a url + api_key.
 sonarr:
   enabled: true

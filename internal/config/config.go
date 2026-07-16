@@ -15,18 +15,19 @@
 package config
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
-	"os"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/cplieger/atomicfile/v2"
+	"github.com/cplieger/envx/yamlenv"
 	"github.com/cplieger/scheduler"
 	"github.com/cplieger/slogx"
 	"go.yaml.in/yaml/v3"
@@ -37,6 +38,9 @@ const DefaultConfigPath = "/config/config.yaml"
 
 // maxConfigBytes bounds the config file read (it is a small document).
 const maxConfigBytes = 1 << 20
+
+// formatJSON is the canonical and default log.format value.
+const formatJSON = "json"
 
 // Fixed endpoints, cadences, and /config file paths. These are internal
 // machinery wired at build time, deliberately NOT exposed as config-file keys:
@@ -169,7 +173,7 @@ func defaultFileConfig() fileConfig {
 		Radarr: arrFile{URL: "http://radarr:7878"},
 		Mode:   RunModeDaemon,
 		Report: reportFile{Dir: DefaultReportDir},
-		Log:    logFile{Level: "info", Format: "json"},
+		Log:    logFile{Level: "info", Format: formatJSON},
 	}
 }
 
@@ -188,8 +192,6 @@ type Config struct {
 	RadarrAPIKey    string
 	RadarrPublicURL string
 
-	LogFormat string
-
 	// Indexer (Torznab feed) settings. IndexerAPIKey (the feed's own gate),
 	// IndexerProwlarrAPIKey, and IndexerABPasskey are secrets and are never
 	// logged. Searches proxy Prowlarr's per-indexer Torznab endpoints for Nyaa
@@ -207,6 +209,9 @@ type Config struct {
 
 	PollInterval time.Duration
 	LogLevel     slog.Level
+	// LogFormat is the typed slogx handler encoding (JSON default), parsed from
+	// log.format by parseLogFormat.
+	LogFormat slogx.Format
 
 	// ExcludeRemux drops releases classified remux (default false: remuxes kept).
 	ExcludeRemux     bool
@@ -222,8 +227,10 @@ type Config struct {
 }
 
 // Load reads, ${VAR}-expands, and parses the YAML config at path into the
-// runtime Config. It returns an error on a missing/oversized file or invalid
-// YAML; call Validate for semantic checks.
+// runtime Config. It returns an error on a missing/oversized file, invalid
+// YAML, or an unknown configuration key (a misspelled or misplaced key fails
+// loudly at startup rather than being silently ignored); call Validate for
+// semantic checks.
 func Load(path string) (Config, error) {
 	// Read through the shared atomicfile bounded reader (the same primitive
 	// writeStarterConfig and internal/state use), which enforces the size cap and
@@ -235,17 +242,149 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("read config %s: %w", path, err)
 	}
 
-	expanded := os.Expand(string(data), expandEnvSafe)
-	if refs := unresolvedAllowlistedRefs(expanded); len(refs) > 0 {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return Config{}, fmt.Errorf("parse config %s: %w", path, err)
+	}
+	if err := checkUnknownKeys(data); err != nil {
+		return Config{}, fmt.Errorf("parse config %s: %s", path, sanitizeYAMLError(err))
+	}
+	if refs := yamlenv.Expand(&doc, isAllowedEnvVar); len(refs) > 0 {
 		slog.Warn("config references environment variables that are not set; "+
 			"the literal ${VAR} is kept and will likely fail authentication",
 			"vars", strings.Join(refs, ","))
 	}
 	fc := defaultFileConfig()
-	if err := yaml.Unmarshal([]byte(expanded), &fc); err != nil {
-		return Config{}, fmt.Errorf("parse config %s: %w", path, err)
+	if err := doc.Decode(&fc); err != nil {
+		return Config{}, fmt.Errorf("parse config %s: %s", path, sanitizeYAMLError(err))
 	}
 	return fc.toConfig(), nil
+}
+
+// checkUnknownKeys re-decodes the raw document with KnownFields(true) into a
+// throwaway fileConfig so a key the on-disk shape does not declare fails the
+// load ("line N: field X not found in type ..."), instead of being silently
+// ignored (e.g. a top-level anime_bytes or a filters.animebytes leaving the
+// real animebytes toggle false). It runs on the pre-expansion bytes - Load's
+// yaml.Node path has no KnownFields switch - so line numbers point at the file
+// the operator wrote, and expansion (string values only, keys stay literal)
+// cannot change which keys exist. Any accompanying type-error entries carry
+// the literal ${VAR}, not an expanded secret, and every entry still passes
+// through sanitizeYAMLError at the Load call site.
+func checkUnknownKeys(data []byte) error {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	var probe fileConfig
+	if err := dec.Decode(&probe); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
+}
+
+// Value-independent markers of a yaml.v3 TypeError entry ("line N: cannot
+// unmarshal !!str `...` into bool"): everything between the source tag and the
+// final destination-type marker is the scalar excerpt and is dropped.
+const (
+	yamlUnmarshalMarker = "cannot unmarshal !!"
+	yamlIntoMarker      = " into "
+)
+
+// Value-independent markers of the duplicate-key TypeError entry
+// ("line N: mapping key "x" already defined at line M"): the key excerpt
+// between them is dropped, the two line numbers are kept.
+const (
+	yamlDupKeyMarker    = ": mapping key "
+	yamlDupKeyDefinedAt = " already defined at line "
+)
+
+// Value-independent markers of the strict-decode unknown-key entry
+// ("line N: field X not found in type config.fileConfig", from
+// checkUnknownKeys): the key name between them is kept - it IS the diagnostic
+// the operator needs to fix the typo - and the Go type name after the second
+// marker is dropped.
+const (
+	yamlUnknownKeyMarker = ": field "
+	yamlUnknownKeyInType = " not found in type "
+)
+
+// sanitizeYAMLError rewrites a yaml decode error so an expanded secret never
+// reaches the startup log; line numbers and target types are kept
+// (field-name-only, the same posture as validateHTTPURL errors). The decode
+// runs after ${VAR} expansion, so the excerpt yaml.v3 embeds can carry a
+// prefix of an expanded secret (an api key placed in a non-string field by a
+// config typo). Backtick-pair matching was rejected: yaml.v3 truncates the
+// excerpt with any embedded backtick unchanged, so a secret containing a
+// backtick defeats a delimiter regex and leaks a prefix. Instead each
+// *yaml.TypeError entry is rebuilt from its value-independent structure, and
+// an unrecognized error shape falls back to a generic message rather than
+// risking a partial leak.
+func sanitizeYAMLError(err error) string {
+	var typeErr *yaml.TypeError
+	if !errors.As(err, &typeErr) {
+		return "configuration could not be decoded (details withheld: they may embed an expanded secret)"
+	}
+	entries := make([]string, 0, len(typeErr.Errors))
+	for _, e := range typeErr.Errors {
+		entries = append(entries, sanitizeTypeErrorEntry(e))
+	}
+	return "unmarshal errors: " + strings.Join(entries, "; ")
+}
+
+// sanitizeTypeErrorEntry rebuilds one TypeError entry keeping only its
+// value-independent parts: the "line N: cannot unmarshal !!<tag>" prefix and
+// the " into <type>" suffix. strings.LastIndex locates the suffix so backticks
+// or newlines inside the scalar excerpt are irrelevant. A duplicate-mapping-key
+// entry ("line N: mapping key "x" already defined at line M") is a second
+// value-independent shape and keeps both line numbers; only the key excerpt is
+// redacted (a misindented paste can put a secret in key position, so stay
+// field-name-only like the rest of the file). The unknown-key entry from the
+// strict checkUnknownKeys pre-decode ("line N: field X not found in type T")
+// is a third shape: the key name is kept - it is the diagnostic the operator
+// needs to fix the typo - and the isLinePrefix guard ensures a wrong-type
+// scalar excerpt that happens to embed both of its markers is never mistaken
+// for it (such an entry starts with the unmarshal shape, not a bare "line N",
+// so it falls through to the redacting branches instead).
+func sanitizeTypeErrorEntry(entry string) string {
+	if k := strings.Index(entry, yamlDupKeyMarker); k >= 0 {
+		if at := strings.LastIndex(entry, yamlDupKeyDefinedAt); at > k {
+			return entry[:k] + ": mapping key <redacted>" + entry[at:]
+		}
+	}
+	if k := strings.Index(entry, yamlUnknownKeyMarker); k >= 0 && isLinePrefix(entry[:k]) {
+		if at := strings.LastIndex(entry, yamlUnknownKeyInType); at > k {
+			return fmt.Sprintf("%s: unknown configuration key %q",
+				entry[:k], entry[k+len(yamlUnknownKeyMarker):at])
+		}
+	}
+	start := strings.Index(entry, yamlUnmarshalMarker)
+	end := strings.LastIndex(entry, yamlIntoMarker)
+	if start < 0 || end < start {
+		return "configuration contains a value of the wrong type"
+	}
+	tagEnd := start + len(yamlUnmarshalMarker)
+	for tagEnd < len(entry) && entry[tagEnd] != ' ' {
+		tagEnd++
+	}
+	return entry[:tagEnd] + " <redacted>" + entry[end:]
+}
+
+// isLinePrefix reports whether s is exactly "line <digits>", the prefix a
+// genuine yaml.v3 TypeError entry carries before its first marker. It guards
+// the unknown-key rebuild - the one branch that keeps text from between its
+// markers - against a wrong-type scalar excerpt embedding the same marker
+// pair: that entry's prefix is the unmarshal shape ("line N: cannot unmarshal
+// !!str `..."), never a bare "line N".
+func isLinePrefix(s string) bool {
+	digits, ok := strings.CutPrefix(s, "line ")
+	if !ok || digits == "" {
+		return false
+	}
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // toConfig flattens the on-disk shape into the runtime Config, applying
@@ -255,7 +394,7 @@ func (fc *fileConfig) toConfig() Config {
 	c := Config{
 		RunMode:               strings.ToLower(strings.TrimSpace(fc.Mode)),
 		ReportDir:             strings.TrimSpace(fc.Report.Dir),
-		LogFormat:             strings.ToLower(strings.TrimSpace(fc.Log.Format)),
+		LogFormat:             parseLogFormat(fc.Log.Format),
 		IncludeTags:           trimList(fc.ArrTags.Include),
 		ExcludeTags:           trimList(fc.ArrTags.Exclude),
 		LogLevel:              parseLogLevel(fc.Log.Level),
@@ -292,11 +431,14 @@ func (fc *fileConfig) toConfig() Config {
 // to [minPollInterval, maxPollInterval]): off/disabled/0/0s -> external (no
 // internal timer, cycles triggered via `poll`); empty -> the default; a valid
 // positive duration -> built-in (clamped); a negative or unparseable value ->
-// the default with a warning.
+// the default with a warning. WithRedactedValue keeps every scheduler warning
+// field-name-only, because an expanded ${VAR} secret placed in poll_interval
+// by a config typo must never reach the startup log.
 func parseInterval(raw string) (time.Duration, bool) {
 	s := scheduler.ParseInterval(raw, DefaultPollInterval,
 		scheduler.WithBounds(minPollInterval, maxPollInterval),
-		scheduler.WithName("poll_interval"))
+		scheduler.WithName("poll_interval"),
+		scheduler.WithRedactedValue())
 	if s.Mode == scheduler.ModeExternal {
 		return 0, true
 	}
@@ -322,7 +464,10 @@ func (c *Config) RadarrWebBase() string { return cmp.Or(c.RadarrPublicURL, c.Rad
 // running, or nil when runnable.
 func (c *Config) Validate() error {
 	if c.RunMode != RunModeDaemon && c.RunMode != RunModeReport {
-		return fmt.Errorf("mode must be %q or %q, got %q", RunModeDaemon, RunModeReport, c.RunMode)
+		// Field-name-only (do not echo the supplied mode): the value may be an
+		// expanded ${VAR} secret placed here by a config typo, and this error
+		// reaches the startup log.
+		return fmt.Errorf("mode must be %q or %q", RunModeDaemon, RunModeReport)
 	}
 	if err := validateArrPair("sonarr", c.SonarrURL, c.SonarrAPIKey); err != nil {
 		return err
@@ -332,6 +477,18 @@ func (c *Config) Validate() error {
 	}
 	if !c.SonarrEnabled() && !c.RadarrEnabled() {
 		return errors.New("no arr configured: enable sonarr and/or radarr with a url + api_key")
+	}
+	// public_url only feeds report deep-links, so a malformed value warns (the
+	// links will be broken) but still loads; a hard rejection would newly reject
+	// configs that load today.
+	for _, pu := range []struct{ name, val string }{
+		{"sonarr.public_url", c.SonarrPublicURL},
+		{"radarr.public_url", c.RadarrPublicURL},
+	} {
+		if err := validateHTTPURL(pu.name, pu.val); err != nil {
+			slog.Warn("public_url is malformed; report deep-links will be broken",
+				"error", err)
+		}
 	}
 	return c.validateIndexer()
 }
@@ -392,51 +549,28 @@ func validateHTTPURL(name, rawURL string) error {
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("%s is not a valid URL: %w", name, err)
+		// Do not wrap err: url.Error embeds the full raw URL (and any userinfo),
+		// which would ship an embedded basic-auth password to the startup log.
+		return fmt.Errorf("%s is not a valid URL", name)
 	}
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return fmt.Errorf("%s must be an absolute http(s) URL with a host, got %q", name, rawURL)
+		// Field-name-only, matching the parse-error branch: u.Redacted() masks only
+		// a userinfo password, so echoing the URL would still ship a username-only
+		// token or a query-string apikey to the startup log.
+		return fmt.Errorf("%s must be an absolute http(s) URL with a host", name)
 	}
 	return nil
 }
 
 // isAllowedEnvVar reports whether an env var name is safe to expand in the
 // config: only the app's own SONARR_*, RADARR_*, and SEADEX_SCOUT_* names, so a
-// stray ${HOME} or ${PATH} in the file is left literal.
+// stray ${HOME} or ${PATH} in the file is left literal. It is the allowlist
+// policy Load hands to yamlenv.Expand (the shared post-parse, string-values-only
+// expansion engine).
 func isAllowedEnvVar(key string) bool {
 	return strings.HasPrefix(key, "SONARR_") ||
 		strings.HasPrefix(key, "RADARR_") ||
 		strings.HasPrefix(key, "SEADEX_SCOUT_")
-}
-
-// allowlistedRefRe matches an allowlisted ${VAR} reference (the SONARR_/RADARR_/
-// SEADEX_SCOUT_ names expandEnvSafe expands).
-var allowlistedRefRe = regexp.MustCompile(`\$\{((?:SONARR_|RADARR_|SEADEX_SCOUT_)[A-Za-z0-9_]*)\}`)
-
-// unresolvedAllowlistedRefs returns allowlisted ${VAR} names still literal after
-// expansion (an app env var the operator referenced but never set).
-func unresolvedAllowlistedRefs(s string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, m := range allowlistedRefRe.FindAllStringSubmatch(s, -1) {
-		if !seen[m[1]] {
-			seen[m[1]] = true
-			out = append(out, m[1])
-		}
-	}
-	return out
-}
-
-// expandEnvSafe expands an allowlisted, set env var, leaving anything else as
-// the literal ${key} so os.Expand does not blank out unknown references.
-func expandEnvSafe(key string) string {
-	if !isAllowedEnvVar(key) {
-		return "${" + key + "}"
-	}
-	if v, ok := os.LookupEnv(key); ok {
-		return v
-	}
-	return "${" + key + "}"
 }
 
 // trimList trims entries and drops blanks, preserving order and case.
@@ -450,6 +584,19 @@ func trimList(items []string) []string {
 	return out
 }
 
+// parseLogFormat normalizes log.format via slogx.ParseFormat into the typed
+// slogx.Format the logger setup consumes, warning on an unrecognized value and
+// falling back to JSON (the same diagnostic parseLogLevel gives log.level).
+func parseLogFormat(s string) slogx.Format {
+	f, ok := slogx.ParseFormat(s, slogx.JSON)
+	if !ok {
+		// Field-name-only: the rejected value may be an expanded ${VAR} secret
+		// placed here by a config typo and must never reach the startup log.
+		slog.Warn("unrecognized log.format; defaulting to json")
+	}
+	return f
+}
+
 // parseLogLevel converts a level string to slog.Level via slogx.ParseLevel
 // (case-insensitive, trims, accepts the long-form "warning" alias and slog
 // offset syntax), falling back to Info for an empty or unrecognized value.
@@ -459,7 +606,9 @@ func parseLogLevel(s string) slog.Level {
 	// warning rather than a silent fallback to Info.
 	lvl, ok := slogx.ParseLevel(s, slog.LevelInfo)
 	if !ok {
-		slog.Warn("unrecognized log.level; defaulting to info", "value", s)
+		// Field-name-only: the rejected value may be an expanded ${VAR} secret
+		// placed here by a config typo and must never reach the startup log.
+		slog.Warn("unrecognized log.level; defaulting to info")
 	}
 	return lvl
 }

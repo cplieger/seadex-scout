@@ -37,6 +37,7 @@ import (
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/health"
 	"github.com/cplieger/scheduler"
+	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/config"
 	"github.com/cplieger/seadex-scout/internal/scout"
 )
@@ -48,8 +49,11 @@ import (
 var exampleConfig []byte
 
 // starterFileMode / starterDirMode are applied to a generated starter config.
+// The config file is where the operator may paste arr API keys and the AB
+// passkey (see README), and an in-place edit keeps the creation mode, so it is
+// owner-only like the indexer feed snapshot (internal/indexer/writer.go).
 const (
-	starterFileMode = 0o644
+	starterFileMode = 0o600
 	starterDirMode  = 0o755
 )
 
@@ -57,13 +61,32 @@ const (
 // scheduler (paired with poll_interval: off). Not a valid config `mode`.
 const modePoll = "poll"
 
+// validArgsHint lists the accepted invocations; shared by the two
+// invalid-invocation error messages so they cannot drift when a
+// subcommand is added or removed.
+const validArgsHint = "(valid: health, daemon, report, poll, or no argument)"
+
 func main() {
 	installLogger()
 
+	// Reject malformed invocations with trailing arguments (e.g. `poll typo`,
+	// `health typo`) before the health fast path, so a typo can never run a
+	// real poll or report healthy. Exit 2 = invalid invocation, matching the
+	// resolveMode contract below.
+	args := os.Args[1:]
+	if len(args) > 1 {
+		slog.Error("invalid invocation", "error",
+			fmt.Errorf("too many arguments %q %s", args, validArgsHint))
+		os.Exit(2)
+	}
+
 	// The health subcommand backs the Docker healthcheck and must not require
 	// configuration, so it is handled before config load.
-	if len(os.Args) > 1 && os.Args[1] == "health" {
+	if len(args) == 1 && args[0] == "health" {
 		health.RunProbe(health.DefaultPath)
+		// health.RunProbe terminates via os.Exit(0/1); this guard makes the
+		// invariant explicit instead of depending on the callee never
+		// returning (health is a separately versioned dependency).
 		os.Exit(0)
 	}
 
@@ -86,14 +109,22 @@ func main() {
 	configureLogger(cfg.LogLevel, cfg.LogFormat)
 	logConfig(&cfg)
 
-	mode, err := resolveMode(os.Args[1:], &cfg)
+	mode, err := resolveMode(args, &cfg)
 	if err != nil {
 		slog.Error("invalid invocation", "error", err)
 		os.Exit(2)
 	}
 
 	if err := dispatch(mode, &cfg); err != nil {
-		slog.Error("seadex-scout failed", "mode", mode, "error", err)
+		if errors.Is(err, context.Canceled) {
+			// A shutdown signal interrupted the run (signal.NotifyContext
+			// cancels with context.Canceled): routine, not a fault, so keep it
+			// off the level=ERROR cycle-error alert. A DeadlineExceeded is a
+			// genuine operation timeout and falls through to ERROR.
+			slog.Warn("seadex-scout interrupted by shutdown", "mode", mode, "error", err)
+		} else {
+			slog.Error("seadex-scout failed", "mode", mode, "error", err)
+		}
 		os.Exit(1)
 	}
 }
@@ -135,6 +166,8 @@ func writeStarterConfig(path string) error {
 // (daemon | report | poll) or, with no subcommand, the config's `mode`
 // (daemon | report). `poll` runs one compare cycle for an external scheduler
 // (used with poll_interval: off). The health subcommand is handled earlier.
+// main rejects multi-argument invocations before the health fast path, so
+// args holds at most one subcommand here.
 func resolveMode(args []string, cfg *config.Config) (mode string, err error) {
 	if len(args) == 0 {
 		return cfg.RunMode, nil
@@ -143,16 +176,27 @@ func resolveMode(args []string, cfg *config.Config) (mode string, err error) {
 	case config.RunModeDaemon, config.RunModeReport, modePoll:
 		return args[0], nil
 	default:
-		return "", fmt.Errorf("unknown subcommand %q (valid: health, daemon, report, poll, or no argument)", args[0])
+		return "", fmt.Errorf("unknown subcommand %q %s", args[0], validArgsHint)
 	}
 }
 
 // runReport runs the one-shot audit: build components, generate the report,
-// emit it to slog, and write the Markdown + JSON files. It never writes state,
+// emit it to slog, and write the JSON + Markdown files. It never writes state,
 // so a one-shot report cannot clobber a running daemon's cache.
 func runReport(cfg *config.Config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// The whole generate+write is serialized on an exclusive flock in the
+	// report dir: two report runs finishing within the same UTC second would
+	// target the same report-<timestamp>.{md,json} pair, so a concurrent
+	// second run refuses with ErrReportRunning (exit 1) instead of racing.
+	// The report is read-only on state, so the lock guards only the report dir.
+	release, err := audit.AcquireReportLock(cfg.ReportDir)
+	if err != nil {
+		return err
+	}
+	defer release()
 
 	b, err := buildScout(ctx, cfg)
 	if err != nil {
@@ -172,18 +216,45 @@ func runReport(cfg *config.Config) error {
 // It updates the health marker to the cycle's outcome, leaving it in place (no
 // Cleanup) so the container healthcheck reads the last poll, and exits non-zero
 // on an unhealthy cycle so the scheduler (Ofelia job-exec, cron) sees the fail.
+//
+// Interruption contract (uniform across every phase of poll): a shutdown
+// cancellation observed at any point - during startup, mid-cycle, or after the
+// cycle body (including the state save) - exits non-zero with the shared health
+// marker untouched, classified as a routine shutdown (WARN, not the level=ERROR
+// cycle-error alert) via the context.Canceled wrap main inspects.
 func runPoll(cfg *config.Config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	b, err := buildScout(ctx, cfg)
 	if err != nil {
+		if ctx.Err() != nil {
+			// Shutdown cancelled startup (pre-cycle phase of the uniform
+			// interruption contract): wrap the cancellation cause so main
+			// classifies it WARN, and never touch the marker.
+			return fmt.Errorf("poll interrupted; health marker left unchanged: %w", context.Cause(ctx))
+		}
 		return err
 	}
 	defer b.cleanup()
 
-	healthy := runCycle(ctx, b.scout)
-	health.NewMarker(health.DefaultPath).Set(healthy)
+	return pollCycle(ctx, b.scout, health.NewMarker(health.DefaultPath))
+}
+
+// pollCycle runs poll's one cycle and applies the uniform interruption
+// contract documented on runPoll: a cancellation observed at any point - even
+// when the cycle still managed to complete healthy (e.g. the signal landed
+// during the end-of-cycle save) - exits non-zero and leaves the shared marker
+// at the daemon's last real state, since an interrupted run's outcome is not a
+// trustworthy health verdict. Wrapping the cancellation cause lets main
+// classify the interruption as a routine shutdown (WARN, not the level=ERROR
+// cycle-error alert).
+func pollCycle(ctx context.Context, sc cycler, marker *health.Marker) error {
+	healthy := runCycle(ctx, sc)
+	if ctx.Err() != nil {
+		return fmt.Errorf("poll interrupted; health marker left unchanged: %w", context.Cause(ctx))
+	}
+	marker.Set(healthy)
 	if !healthy {
 		return errors.New("compare cycle failed (library ingest)")
 	}
@@ -195,6 +266,19 @@ func runPoll(cfg *config.Config) error {
 func run(cfg *config.Config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// The process-level completion record is registered before the cleanup
+	// defers below, so (defers run LIFO) it logs only after the indexer's
+	// graceful drain, the client cleanup, and the health-marker removal have
+	// all finished - "shutdown complete" then truthfully reports shutdown
+	// progress to Loki. normalShutdown guards it so a startup-error return
+	// does not log a successful shutdown.
+	normalShutdown := false
+	defer func() {
+		if normalShutdown {
+			slog.Info("shutdown complete", "cause", context.Cause(ctx))
+		}
+	}()
 
 	marker := health.NewMarker(health.DefaultPath)
 	marker.Set(false)
@@ -223,7 +307,7 @@ func run(cfg *config.Config) error {
 		slog.Info("seadex-scout started (resident-idle; trigger a cycle with the `poll` subcommand)",
 			"indexer", indexerConfigured(cfg))
 		<-ctx.Done()
-		slog.Info("shutdown complete", "cause", context.Cause(ctx))
+		normalShutdown = true
 		return nil
 	}
 
@@ -234,7 +318,7 @@ func run(cfg *config.Config) error {
 	slog.Info("seadex-scout started", "poll_interval", cfg.PollInterval.String(), "indexer", indexerConfigured(cfg))
 
 	runScheduler(ctx, cfg.PollInterval, b.scout, marker)
-	slog.Info("shutdown complete", "cause", context.Cause(ctx))
+	normalShutdown = true
 	return nil
 }
 
@@ -256,7 +340,7 @@ func startIndexer(ctx context.Context, cfg *config.Config) func() {
 			}
 		}()
 		if err := bi.indexer.Run(ctx); err != nil {
-			slog.Error("indexer feed stopped", "error", err)
+			logIndexerStop(ctx, err)
 		}
 	}()
 	return func() {
@@ -265,18 +349,49 @@ func startIndexer(ctx context.Context, cfg *config.Config) func() {
 	}
 }
 
+// logIndexerStop classifies the indexer feed's Run error for the shared slog
+// stream. Both shutdown-path cases are routine on a redeploy (WARN, kept off
+// the level=ERROR cycle-error alert, matching the walk/matching/save
+// classification), but they carry distinct messages: webhttp.Run returns
+// DeadlineExceeded specifically when its graceful-shutdown budget expired,
+// meaning in-flight Torznab requests were cut off - information worth its own
+// log line rather than vanishing into the clean-shutdown message. Any error
+// outside a shutdown is a fault and stays ERROR.
+func logIndexerStop(ctx context.Context, err error) {
+	switch {
+	case ctx.Err() != nil && errors.Is(err, context.DeadlineExceeded):
+		slog.Warn("indexer shutdown budget expired; in-flight requests aborted", "error", err, "cause", context.Cause(ctx))
+	case ctx.Err() != nil && errors.Is(err, context.Canceled):
+		// Bind cancelled mid-startup, or a clean graceful drain: routine.
+		slog.Warn("indexer feed stopped during shutdown", "error", err, "cause", context.Cause(ctx))
+	default:
+		slog.Error("indexer feed stopped", "error", err)
+	}
+}
+
 // runScheduler runs a cycle on each tick of a POLL_INTERVAL timer with ±10%
 // jitter until ctx is cancelled. The first iteration fires immediately so a
 // cycle runs promptly on boot; the marker is set to each cycle's health.
 func runScheduler(ctx context.Context, interval time.Duration, sc *scout.Scout, marker *health.Marker) {
 	scheduler.RunLoop(ctx, func(ctx context.Context) {
-		marker.Set(runCycle(ctx, sc))
+		healthy := runCycle(ctx, sc)
+		if !healthy && ctx.Err() != nil {
+			return // shutdown mid-cycle: cancellation is not an ingest fault
+		}
+		marker.Set(healthy)
 	}, scheduler.LoopOptions{Interval: interval, FireOnStart: true, Jitter: 0.10})
+}
+
+// cycler runs one compare cycle, reporting whether the library ingest was
+// healthy. Satisfied by *scout.Scout; a consumer-side seam so the daemon's
+// panic shield is testable without a real Scout.
+type cycler interface {
+	Cycle(ctx context.Context) bool
 }
 
 // runCycle runs one cycle, recovering from a panic so a single bad cycle cannot
 // crash the long-lived daemon. A panic is reported as an unhealthy cycle.
-func runCycle(ctx context.Context, sc *scout.Scout) (healthy bool) {
+func runCycle(ctx context.Context, sc cycler) (healthy bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("cycle panicked", "panic", r, "stack", string(debug.Stack()))
@@ -293,6 +408,14 @@ func logConfig(cfg *config.Config) {
 	if cfg.PollExternal {
 		pollInterval = "external"
 	}
+	runMode := cfg.RunMode
+	if runMode != config.RunModeDaemon && runMode != config.RunModeReport {
+		// logConfig runs before Validate rejects an unrecognized mode, and the
+		// raw value may be an expanded ${VAR} secret placed here by a config
+		// typo - emit a fixed marker, never the value (Validate's error is
+		// field-name-only for the same reason).
+		runMode = "invalid"
+	}
 	slog.Info("configuration loaded",
 		"sonarr_enabled", cfg.SonarrEnabled(),
 		"radarr_enabled", cfg.RadarrEnabled(),
@@ -303,5 +426,5 @@ func logConfig(cfg *config.Config) {
 		"animebytes", cfg.AnimeBytes,
 		"include_tags", len(cfg.IncludeTags),
 		"exclude_tags", len(cfg.ExcludeTags),
-		"run_mode", cfg.RunMode)
+		"run_mode", runMode)
 }

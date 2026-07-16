@@ -21,6 +21,7 @@ import (
 
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/classify"
+	"github.com/cplieger/seadex-scout/internal/filter"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
@@ -55,6 +56,29 @@ const (
 // last: it is informational (no SeaDex recommendation exists to act on).
 var verdictOrder = []Verdict{VerdictUnlisted, VerdictAlt, VerdictUnverified, VerdictNoFile, VerdictBest, VerdictNotOnSeaDex}
 
+// Qualifier annotates a row's verdict with the daemon's finding vocabulary for
+// the same (item, entry), so the report and the daemon's compare pass tell one
+// story. A qualifier annotates; it never forks the verdict enum - the verdict
+// stays what the group comparison said.
+type Qualifier string
+
+const (
+	// QualifierMixed marks a row where the daemon would emit
+	// mixed_group_manual: the scoped on-disk groups span more than one group
+	// and none of them is a SeaDex best, so the row is a manual review rather
+	// than a clean single-group divergence.
+	QualifierMixed Qualifier = "mixed"
+	// QualifierTheoretical marks a row whose SeaDex entry names only a
+	// theoretical best (no isBest torrents), so its verdict means "SeaDex
+	// lists nothing concrete to compare against", not "you have something
+	// better than what SeaDex lists" - the daemon's theoretical_best.
+	QualifierTheoretical Qualifier = "theoretical"
+	// QualifierIncomplete marks a row whose SeaDex entry is incomplete and
+	// lists no isBest torrents at all (nothing recommended) - the daemon's
+	// incomplete status.
+	QualifierIncomplete Qualifier = "incomplete"
+)
+
 // Release is one SeaDex torrent in a report row (best or alt), with a usable link.
 type Release struct {
 	Tracker string `json:"tracker"`
@@ -65,22 +89,30 @@ type Release struct {
 
 // Row is one anime's alignment record.
 type Row struct {
-	Title         string    `json:"title"`
-	Arr           string    `json:"arr"`
-	ArrURL        string    `json:"arr_url,omitempty"`
-	SeaDexURL     string    `json:"seadex_url"`
-	Verdict       Verdict   `json:"verdict"`
+	Title     string  `json:"title"`
+	Arr       string  `json:"arr"`
+	ArrURL    string  `json:"arr_url,omitempty"`
+	SeaDexURL string  `json:"seadex_url"`
+	Verdict   Verdict `json:"verdict"`
+	// Qualifier is the daemon-vocabulary annotation for the row
+	// (mixed/theoretical/incomplete), empty when none applies.
+	Qualifier     Qualifier `json:"qualifier,omitempty"`
 	MatchSource   string    `json:"match_source"`
 	CurrentGroups []string  `json:"current_groups,omitempty"`
 	Releases      []Release `json:"releases,omitempty"`
 	AniListID     int       `json:"al_id"`
 	Season        int       `json:"season,omitempty"`
-	Special       bool      `json:"special,omitempty"`
-	Incomplete    bool      `json:"incomplete,omitempty"`
-	// Approx marks a coarse comparison: the on-disk groups came from the season-0
-	// specials bucket or the whole-series fallback and hold more than one group,
-	// so the verdict reflects "this group is present somewhere in the series/
-	// specials" rather than an exact per-season/per-special attribution.
+	// scope is the comparison scope align.Scope resolved, recorded at build
+	// time and read by the renderer (align.ScopeWholeSeries, the zero value,
+	// renders as "series"). Unexported: in-process only, absent from the JSON
+	// wire shape.
+	scope      align.ScopeKind
+	Special    bool `json:"special,omitempty"`
+	Incomplete bool `json:"incomplete,omitempty"`
+	// Approx marks a coarse comparison: the season-0 specials bucket held more
+	// than one group, or the whole-series fallback compared more than one real
+	// season, so the verdict reflects "this group is present somewhere in the
+	// series/specials" rather than an exact per-season/per-special attribution.
 	Approx bool `json:"approx,omitempty"`
 }
 
@@ -134,19 +166,19 @@ func (a *Auditor) Audit(matches []match.Match, snap *library.Snapshot, idx *mapp
 			continue
 		}
 		covered[itemKey(m.Item)] = struct{}{}
-		if a.excludeSpecials && m.Record.IsSpecial() {
+		if filter.ExcludeSpecial(m.Record.IsSpecial(), a.excludeSpecials) {
 			continue
 		}
 		rows = append(rows, a.assess(m))
 	}
-	rows = append(rows, uncoveredRows(snap, idx, covered)...)
+	rows = append(rows, uncoveredRows(snap, idx, covered, a.excludeSpecials)...)
 
 	totals := make(map[string]int, len(verdictOrder))
 	for i := range rows {
 		totals[string(rows[i].Verdict)]++
 	}
 	sortRows(rows)
-	return Report{GeneratedAt: time.Now(), Totals: totals, Rows: rows}
+	return Report{GeneratedAt: time.Now().UTC(), Totals: totals, Rows: rows}
 }
 
 // itemKey identifies a library item by arr and arr id.
@@ -158,11 +190,11 @@ func itemKey(it *library.Item) string {
 // Fribb map) but were not covered by any SeaDex match. The Fribb catalogue
 // filter is what keeps this to genuine anime gaps rather than every non-anime
 // item in the arrs.
-func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[string]struct{}) []Row {
+func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[string]struct{}, excludeSpecials bool) []Row {
 	if snap == nil {
 		return nil
 	}
-	cat := newCatalogue(idx)
+	cat := newCatalogue(idx, excludeSpecials)
 	var rows []Row
 	for i := range snap.Items {
 		it := &snap.Items[i]
@@ -172,12 +204,18 @@ func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[strin
 		if !cat.has(it) {
 			continue
 		}
+		// An uncovered item has no Fribb record, so its scope label resolves
+		// through the shared align.Scope dispatch with the zero record (Radarr
+		// -> movie; a seasonless non-special Sonarr series -> whole-series),
+		// rather than re-deriving that arm choice locally where it could drift
+		// from the protocol align owns.
 		rows = append(rows, Row{
 			Title:         it.Title,
 			Arr:           it.Arr,
 			ArrURL:        it.ArrURL,
 			Verdict:       VerdictNotOnSeaDex,
 			CurrentGroups: it.Groups,
+			scope:         align.Scope(it, &mapping.Record{}).Kind,
 		})
 	}
 	return rows
@@ -193,17 +231,29 @@ type catalogue struct {
 }
 
 // newCatalogue builds the reverse ID sets from the mapping records. A nil index
-// yields an empty catalogue (nothing is considered catalogued).
-func newCatalogue(idx *mapping.Index) *catalogue {
+// yields an empty catalogue (nothing is considered catalogued). When
+// excludeSpecials is on, special (OVA/ONA/SPECIAL) records are skipped, so a
+// specials-only item is not catalogued and cannot surface as not_on_seadex —
+// mirroring the matched-rows arm's specials filter. A mixed series stays
+// catalogued through its non-special records sharing the same TVDB id.
+func newCatalogue(idx *mapping.Index, excludeSpecials bool) *catalogue {
 	c := &catalogue{tvdb: map[int]struct{}{}, tmdb: map[int]struct{}{}, imdb: map[string]struct{}{}}
 	idx.ForEachRecord(func(r mapping.Record) {
-		if r.TvdbID != 0 {
-			c.tvdb[r.TvdbID] = struct{}{}
+		if filter.ExcludeSpecial(r.IsSpecial(), excludeSpecials) {
+			return
 		}
-		for _, id := range r.TmdbMovies {
+		// Insert only the identifiers the record's routed arr consumes
+		// (mapping.Record.RoutedIDs): a MOVIE record must not catalogue a
+		// Sonarr item through a stray TVDB id, nor a series record a Radarr
+		// item through its movie ids.
+		tvdb, tmdbMovies, imdbIDs := r.RoutedIDs()
+		if tvdb != 0 {
+			c.tvdb[tvdb] = struct{}{}
+		}
+		for _, id := range tmdbMovies {
 			c.tmdb[id] = struct{}{}
 		}
-		for _, im := range r.IMDbIDs {
+		for _, im := range imdbIDs {
 			c.imdb[im] = struct{}{}
 		}
 	})
@@ -251,16 +301,43 @@ func (a *Auditor) assess(m *match.Match) Row {
 		Special:     m.Record.IsSpecial(),
 		Incomplete:  m.Entry.Incomplete,
 	}
-	if align.WholeSeries(m.Item, &m.Record) {
+	scoped := align.Scope(m.Item, &m.Record)
+	row.scope = scoped.Kind
+	if scoped.Kind == align.ScopeWholeSeries {
 		// Absolute-numbered run / title-only match: apply the single whole-series
 		// recommendation to each real season (season 0 excluded), conservatively.
 		row.Verdict, row.CurrentGroups, row.Approx = wholeSeriesVerdict(m.Item, best, alt)
 	} else {
-		current, hasFile, approx := align.Scope(m.Item, &m.Record)
-		row.CurrentGroups, row.Approx = current, approx
-		row.Verdict = verdict(hasFile, current, best, alt)
+		row.CurrentGroups, row.Approx = scoped.Groups, scoped.Approx
+		row.Verdict = verdict(scoped.HasFile, scoped.Groups, best, alt)
 	}
+	row.Qualifier = rowQualifier(&m.Entry, best, row.Verdict, row.CurrentGroups)
 	return row
+}
+
+// rowQualifier derives the daemon-vocabulary qualifier for a row, so the report
+// distinguishes the states the daemon's compare pass distinguishes. With no
+// best release listed at all, a theoretical-best-only entry is "theoretical"
+// and an incomplete one "incomplete" (mirroring the daemon's emptyResult
+// precedence) - the row's verdict would otherwise imply an unlisted-better
+// state that does not exist. With best releases listed, a not-aligned row
+// (have_alt / have_unlisted) whose scoped groups span more than one group is
+// "mixed", where the daemon emits mixed_group_manual. An aligned row is never
+// mixed, matching the daemon's alignment-wins ordering.
+func rowQualifier(entry *seadex.Entry, best []string, v Verdict, current []string) Qualifier {
+	if len(best) == 0 {
+		switch {
+		case entry.HasTheoreticalBest():
+			return QualifierTheoretical
+		case entry.Incomplete:
+			return QualifierIncomplete
+		}
+		return ""
+	}
+	if (v == VerdictAlt || v == VerdictUnlisted) && len(current) > 1 {
+		return QualifierMixed
+	}
+	return ""
 }
 
 // verdict derives the alignment verdict from the scoped group set. No file is
@@ -286,14 +363,16 @@ func verdict(hasFile bool, current, best, alt []string) Verdict {
 // verdict: have_best only when every on-disk season carries a best group,
 // have_alt when all are best-or-alt with at least one alt, and have_unlisted
 // when any season matches neither. It also returns the union of those seasons'
-// groups for display and marks the comparison approximate when more than one
-// season is compared. With no real season on disk it is no_file.
+// groups for display and marks the comparison approximate when it spans more
+// than one season or more than one release group (either way the single
+// whole-series recommendation applies to a coarse aggregate). With no real
+// season on disk it is no_file.
 func wholeSeriesVerdict(item *library.Item, best, alt []string) (Verdict, []string, bool) {
 	s := align.SummarizeWholeSeries(item, best, alt)
 	if s.Seasons == 0 {
 		return VerdictNoFile, nil, false
 	}
-	approx := s.Seasons > 1
+	approx := s.Seasons > 1 || len(s.Groups) > 1
 	switch {
 	case s.AnyUnlisted:
 		return VerdictUnlisted, s.Groups, approx
@@ -306,14 +385,19 @@ func wholeSeriesVerdict(item *library.Item, best, alt []string) (Verdict, []stri
 
 // classifyReleases turns every SeaDex torrent into a report Release (group
 // normalized via the shared classifier, tracker, usable URL, best flag).
-// AnimeBytes torrents are dropped when the operator has AnimeBytes off, so the
-// report never surfaces AB releases or links they cannot use (and cannot leak
-// them), mirroring the daemon's obtainability rule.
+// AnimeBytes torrents are dropped when the operator has AnimeBytes off —
+// whether identified by the tracker label OR by the URL host, since the label
+// is untrusted upstream data — so the report never surfaces AB releases or
+// links they cannot use (and cannot leak them), mirroring the daemon's
+// obtainability rule.
 func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 	out := make([]Release, 0, len(entry.Torrents))
 	for i := range entry.Torrents {
 		t := &entry.Torrents[i]
-		if !a.includeAnimeBytes && release.IsAnimeBytes(t.Tracker) {
+		// AB guard on the raw upstream URL; the invariant lives in
+		// classify.ABVisible (the rendered Release below still carries the
+		// usable link).
+		if !classify.ABVisible(t, a.includeAnimeBytes) {
 			continue
 		}
 		rel := classify.Torrent(entry, t)
@@ -339,9 +423,6 @@ func groupSets(releases []Release) (best, alt []string) {
 	bestSeen, altSeen := map[string]struct{}{}, map[string]struct{}{}
 	for i := range releases {
 		g := release.NormalizeGroup(releases[i].Group)
-		if g == "" {
-			continue
-		}
 		if releases[i].Best {
 			addUnique(bestSeen, &best, g)
 		} else {

@@ -50,9 +50,10 @@ func TestStoreSaveLoadRoundTrip(t *testing.T) {
 			}},
 		},
 		Mapping: mapping.Cache{
-			FetchedAt: now,
-			ETag:      "etag-1",
-			Records:   []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}},
+			FetchedAt:         now,
+			ETag:              "etag-1",
+			Records:           []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}},
+			RejectedRefreshes: 3,
 		},
 		Memo: match.Memo{Entries: map[int]match.MemoEntry{
 			154587: {Titles: []string{"Frieren"}, Format: "TV", Year: 2023},
@@ -88,6 +89,9 @@ func TestStoreSaveLoadRoundTrip(t *testing.T) {
 	if len(got.Mapping.Records) != 1 || got.Mapping.Records[0].AniListID != 154587 || !got.Mapping.FetchedAt.Equal(now) {
 		t.Errorf("Mapping round trip = %+v, want AniList 154587 fetched at %s", got.Mapping, now)
 	}
+	if got.Mapping.RejectedRefreshes != 3 {
+		t.Errorf("Mapping.RejectedRefreshes round trip = %d, want 3 (the rejection streak must survive restarts)", got.Mapping.RejectedRefreshes)
+	}
 	if got.Memo.Entries[154587].Year != 2023 {
 		t.Errorf("Memo year = %d, want 2023", got.Memo.Entries[154587].Year)
 	}
@@ -109,6 +113,56 @@ func TestStoreLoadCorruptReturnsDecodeError(t *testing.T) {
 	if !strings.Contains(err.Error(), "decode") {
 		t.Errorf("error = %q, want decode context", err.Error())
 	}
+	assertQuarantined(t, path, "{")
+}
+
+// assertQuarantined asserts the decode-failure quarantine contract: the corrupt
+// payload is preserved at path+".corrupt" with its original bytes, and the live
+// path is gone so the next Save recreates it cleanly.
+func assertQuarantined(t *testing.T, path, wantBody string) {
+	t.Helper()
+	got, err := os.ReadFile(path + ".corrupt")
+	if err != nil {
+		t.Fatalf("corrupt state was not quarantined: %v", err)
+	}
+	if string(got) != wantBody {
+		t.Errorf("quarantined bytes = %q, want original %q", got, wantBody)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("live state path still present after quarantine (stat err = %v), want renamed away", err)
+	}
+}
+
+// TestStoreLoadNullReturnsDecodeError pins the envelope check: a state file
+// holding literal JSON null is syntactically valid (json.Unmarshal accepts
+// null into a struct) but can never be produced by Save, so loading it must
+// surface the corruption as a decode error rather than a silently-empty state
+// that fake-cold-starts and re-baselines every finding.
+func TestStoreLoadNullReturnsDecodeError(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"literal null", "null"},
+		{"null with whitespace", "  null\n"},
+		{"non-object array", "[]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			if err := os.WriteFile(path, []byte(tt.body), 0o644); err != nil {
+				t.Fatalf("write state: %v", err)
+			}
+			_, err := NewStore(path, testLogger()).Load(context.Background())
+			if err == nil {
+				t.Fatal("Load returned nil error, want decode error for a non-object state file")
+			}
+			if !strings.Contains(err.Error(), "decode") {
+				t.Errorf("error = %q, want decode context", err.Error())
+			}
+			assertQuarantined(t, path, tt.body)
+		})
+	}
 }
 
 func TestStoreLoadOversizedReturnsError(t *testing.T) {
@@ -126,5 +180,74 @@ func TestStoreLoadOversizedReturnsError(t *testing.T) {
 	_, err = NewStore(path, testLogger()).Load(context.Background())
 	if err == nil {
 		t.Fatal("Load oversized state returned nil error, want bounded-read error")
+	}
+}
+
+// TestStoreSaveOverCapReturnsErrorAndKeepsPreviousFile pins the writer side of
+// the shared maxStateBytes invariant: a state whose encoding exceeds what Load
+// is contractually able to read must be rejected BEFORE the atomic replacement
+// starts, leaving the last readable state file unchanged and loadable (writing
+// it would silently discard the whole cache next cycle).
+func TestStoreSaveOverCapReturnsErrorAndKeepsPreviousFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := NewStore(path, testLogger())
+	if err := store.Save(context.Background(), &State{Baselined: true}); err != nil {
+		t.Fatalf("seed valid state: %v", err)
+	}
+
+	huge := &State{Findings: map[string]report.Alerted{
+		"huge": {Finding: compare.Finding{Title: strings.Repeat("a", maxStateBytes+1)}},
+	}}
+	err := store.Save(context.Background(), huge)
+	if err == nil {
+		t.Fatal("Save returned nil error, want over-cap rejection")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("error = %q, want size-cap context", err.Error())
+	}
+
+	got, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load after rejected Save returned error: %v", err)
+	}
+	if !got.Baselined {
+		t.Error("previous state was not preserved after the rejected over-cap Save")
+	}
+}
+
+// TestStoreSaveWriteFailureReturnsError pins Save's write-error contract: when
+// the atomic write cannot reach disk (here the parent "directory" is a regular
+// file, a root-safe injection), Save must return a wrapped error naming the
+// path so the caller (scout.save) can log it, never swallow the failure.
+func TestStoreSaveWriteFailureReturnsError(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatalf("create blocker file: %v", err)
+	}
+	store := NewStore(filepath.Join(blocker, "state.json"), testLogger())
+
+	err := store.Save(context.Background(), &State{Baselined: true})
+	if err == nil {
+		t.Fatal("Save returned nil error, want write failure")
+	}
+	if !strings.Contains(err.Error(), "state: write") {
+		t.Errorf("error = %q, want 'state: write' context", err.Error())
+	}
+}
+
+// TestNewStoreNilLoggerDefaults pins NewStore's documented "logger may be
+// nil" contract: a nil logger must fall back to slog.Default, so Load (which
+// logs the cold start) and Save work without panicking on a nil *slog.Logger.
+func TestNewStoreNilLoggerDefaults(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "state.json"), nil)
+	st, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load with nil logger returned error: %v", err)
+	}
+	if st.Baselined || len(st.Findings) != 0 {
+		t.Errorf("Load = %+v, want zero state", st)
+	}
+	if err := store.Save(context.Background(), &State{Baselined: true}); err != nil {
+		t.Fatalf("Save with nil logger returned error: %v", err)
 	}
 }

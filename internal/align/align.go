@@ -19,38 +19,81 @@ import (
 	"github.com/cplieger/seadex-scout/internal/release"
 )
 
-// SpecialSeason is the TVDB season number Sonarr files specials under.
-const SpecialSeason = 0
+// specialSeason is the TVDB season number Sonarr files specials under.
+const specialSeason = 0
 
-// Scope returns the on-disk release groups to compare a matched entry against,
-// whether the scoped unit has any file on disk, and whether the comparison is
-// approximate. It handles the three single-unit scopes: a movie (the movie's
-// groups), a series with a positive Fribb TVDB season (that season's groups,
-// exact), and a special (the season-0 bucket Sonarr lumps specials into,
-// approximate when it holds more than one group).
+// ScopeKind names the semantic comparison scope Scope resolved for an item:
+// which branch of the movie / season / special / whole-series dispatch fired.
+// It travels with the resolved groups in ScopeResult so consumers (compare's
+// findings and audit's rendered Scope column) branch and label from the one
+// decision instead of re-deriving it. ScopeWholeSeries is the zero value, so
+// an unset kind reads as the conservative whole-series label.
+type ScopeKind int
+
+const (
+	// ScopeWholeSeries is a whole-series comparison: a Sonarr item with no
+	// positive Fribb TVDB season and not a special (an absolute-numbered run
+	// like One Piece, or a title-only match). It has no single-unit scope; the
+	// caller resolves it with SummarizeWholeSeries.
+	ScopeWholeSeries ScopeKind = iota
+	// ScopeMovie is a Radarr movie compared against its own groups.
+	ScopeMovie
+	// ScopeSeason is a series scoped to a positive Fribb TVDB season (exact).
+	ScopeSeason
+	// ScopeSpecial is a special compared against the season-0 bucket Sonarr
+	// lumps specials into.
+	ScopeSpecial
+)
+
+// ScopeResult is the single scoping decision returned by Scope: the semantic
+// Kind, the on-disk release groups to compare against, whether the scoped unit
+// has any file on disk, and whether the comparison is approximate (the
+// season-0 specials bucket held more than one group).
+type ScopeResult struct {
+	Groups  []string
+	Kind    ScopeKind
+	HasFile bool
+	Approx  bool
+}
+
+// Scope resolves the comparison scope of a matched entry once, for every
+// consumer: the semantic Kind plus the on-disk release groups, file presence,
+// and approximation flag that go with it. It handles the three single-unit
+// scopes: a movie (the movie's groups), a series with a positive Fribb TVDB
+// season (that season's groups, exact), and a special (the season-0 bucket
+// Sonarr lumps specials into, approximate when it holds more than one group).
 //
-// A Sonarr series with no positive Fribb season and not a special is a
-// whole-series comparison (WholeSeries reports true for it); resolve that with
-// SummarizeWholeSeries instead of Scope.
-func Scope(item *library.Item, rec *mapping.Record) (groups []string, hasFile, approx bool) {
+// A Sonarr series with no positive Fribb season and not a special has no
+// single-unit scope: Scope classifies it as ScopeWholeSeries (nil groups) and
+// the caller resolves it with SummarizeWholeSeries, so a consumer cannot
+// silently mis-scope such an item against the specials bucket.
+func Scope(item *library.Item, rec *mapping.Record) ScopeResult {
 	switch {
 	case item.Arr == library.ArrRadarr:
-		return item.Groups, item.HasFile, false
+		return ScopeResult{Kind: ScopeMovie, Groups: item.Groups, HasFile: item.HasFile}
 	case rec.SeasonTvdb > 0:
-		g, ok := item.SeasonGroups[rec.SeasonTvdb]
-		return g, ok && len(g) > 0, false
+		// Group presence doubles as file presence here and in the specials
+		// branch below: release.Classify falls back to the literal NOGRP
+		// (release.NoGroup) for a group-less file, so a season with any file
+		// on disk always carries at least one group.
+		g := item.SeasonGroups[rec.SeasonTvdb]
+		return ScopeResult{Kind: ScopeSeason, Groups: g, HasFile: len(g) > 0}
+	case wholeSeries(item, rec):
+		// A whole-series comparison has no single-unit scope; the caller
+		// resolves it with SummarizeWholeSeries.
+		return ScopeResult{Kind: ScopeWholeSeries}
 	default: // a special: compare against the season-0 specials bucket
-		g, ok := item.SeasonGroups[SpecialSeason]
-		return g, ok && len(g) > 0, ok && len(g) > 1
+		g := item.SeasonGroups[specialSeason]
+		return ScopeResult{Kind: ScopeSpecial, Groups: g, HasFile: len(g) > 0, Approx: len(g) > 1}
 	}
 }
 
-// WholeSeries reports whether the item must be compared against the whole series
+// wholeSeries reports whether the item must be compared against the whole series
 // rather than a single unit: a Sonarr item with no positive Fribb TVDB season
 // and not a special (an absolute-numbered run like One Piece, or a title-only
 // match). SeaDex carries one whole-series recommendation for these, with no
-// per-season mapping.
-func WholeSeries(item *library.Item, rec *mapping.Record) bool {
+// per-season mapping. Consumers read the classification via Scope's Kind.
+func wholeSeries(item *library.Item, rec *mapping.Record) bool {
 	return item.Arr == library.ArrSonarr && rec.SeasonTvdb <= 0 && !rec.IsSpecial()
 }
 
@@ -77,7 +120,7 @@ func SummarizeWholeSeries(item *library.Item, best, alt []string) Summary {
 	seen := make(map[string]struct{})
 	var s Summary
 	for season, groups := range item.SeasonGroups {
-		if season == SpecialSeason || len(groups) == 0 {
+		if season == specialSeason || len(groups) == 0 {
 			continue
 		}
 		s.Seasons++

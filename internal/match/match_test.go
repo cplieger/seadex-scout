@@ -2,6 +2,7 @@ package match
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 
 	"github.com/cplieger/seadex-scout/internal/anilist"
@@ -57,6 +58,39 @@ func TestFindByIDArrConsistency(t *testing.T) {
 	series := &mapping.Record{Type: "TV", TvdbID: 10}
 	if it := li.findByID(series); it == nil || it.Arr != library.ArrSonarr {
 		t.Errorf("series record should match the Sonarr series, got %v", it)
+	}
+}
+
+// TestFindByIDNoWrongArrShadowing covers the index-build side of the arr gate:
+// when a Sonarr series and a Radarr movie share the same TMDB id (disjoint
+// TV/movie namespaces over one key space) or the same IMDb id (TVDB reuses the
+// movie's id on the parent series), the movie record must resolve the Radarr
+// movie regardless of snapshot item order - the wrong-arr item must not shadow
+// the right-arr one in the pooled index.
+func TestFindByIDNoWrongArrShadowing(t *testing.T) {
+	movie := library.Item{Arr: library.ArrRadarr, ArrID: 2, Title: "Some Movie", TmdbID: 20, ImdbID: "tt2222222"}
+	series := library.Item{Arr: library.ArrSonarr, ArrID: 1, Title: "Some Series", TvdbID: 10, TmdbID: 20, ImdbID: "tt2222222"}
+	orders := map[string][]library.Item{
+		"movie first":  {movie, series},
+		"series first": {series, movie},
+	}
+	for name, items := range orders {
+		t.Run(name, func(t *testing.T) {
+			li := buildLibIndex(&library.Snapshot{Items: items})
+
+			byTmdb := &mapping.Record{Type: "MOVIE", TmdbMovies: []int{20}}
+			if it := li.findByID(byTmdb); it == nil || it.Arr != library.ArrRadarr {
+				t.Errorf("TMDB movie lookup = %v, want the Radarr movie (series must not shadow it)", it)
+			}
+			byImdb := &mapping.Record{Type: "MOVIE", IMDbIDs: []string{"tt2222222"}}
+			if it := li.findByID(byImdb); it == nil || it.Arr != library.ArrRadarr {
+				t.Errorf("IMDb movie lookup = %v, want the Radarr movie (series must not shadow it)", it)
+			}
+			bySeries := &mapping.Record{Type: "TV", TvdbID: 10}
+			if it := li.findByID(bySeries); it == nil || it.Arr != library.ArrSonarr {
+				t.Errorf("TVDB series lookup = %v, want the Sonarr series", it)
+			}
+		})
 	}
 }
 
@@ -271,7 +305,195 @@ func TestMatchTitleFallbackAmbiguousIsUnmapped(t *testing.T) {
 func TestMatchTitleFallbackRejectsWrongYear(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{{Arr: library.ArrSonarr, ArrID: 1, Title: "Clannad", Year: 2007}}}
 	li := buildLibIndex(snap)
-	if got := li.findByTitle([]string{"Clannad"}, 2008, library.ArrSonarr, nil); got != nil {
+	if got := li.findByTitle([]string{"Clannad"}, 2008, library.ArrSonarr, slog.New(slog.DiscardHandler)); got != nil {
 		t.Fatalf("wrong-year title fallback matched %+v; want nil", got)
+	}
+}
+
+// TestMatchCancelledContextStopsBeforeEntries pins the pre-cancelled context
+// arm: a shutdown mid-cycle must stop before any entry is matched and flag the
+// result degraded so the caller preserves prior findings, without spending any
+// AniList request.
+func TestMatchCancelledContextStopsBeforeEntries(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	snap := &library.Snapshot{Items: []library.Item{{Arr: library.ArrSonarr, TvdbID: 123, Title: "Frieren"}}}
+	idx := mapping.NewIndex([]mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123}})
+	fake := &countingAniList{}
+	res := NewMatcher(fake, nil).Match(ctx, []seadex.Entry{{AniListID: 154587}}, snap, idx, Memo{})
+	if !res.Degraded {
+		t.Error("Degraded = false, want true when matching is interrupted by cancellation")
+	}
+	if len(res.Matches) != 0 {
+		t.Errorf("matches = %d, want 0 when context is already cancelled", len(res.Matches))
+	}
+	if fake.calls != 0 {
+		t.Errorf("AniList calls = %d, want 0 after cancellation", fake.calls)
+	}
+}
+
+// TestMatchInvalidAniListIDSkipsLookupWithoutDegrading pins the non-positive
+// AniList ID guard: garbage upstream data must not spend a rate-limited lookup,
+// must not be memoized, and must not degrade the cycle.
+func TestMatchInvalidAniListIDSkipsLookupWithoutDegrading(t *testing.T) {
+	fake := &countingAniList{}
+	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 0}}, &library.Snapshot{}, mapping.NewIndex(nil), Memo{})
+	if res.Degraded {
+		t.Error("Degraded = true, want false for a non-positive AniList ID")
+	}
+	if len(res.Matches) != 1 || res.Matches[0].Source != SourceUnmapped || res.Matches[0].Arr != arrUnknown {
+		t.Errorf("matches = %+v, want one unknown/unmapped entry", res.Matches)
+	}
+	if got := res.Coverage.Unmapped[arrUnknown]; got != 1 {
+		t.Errorf("unknown unmapped coverage = %d, want 1", got)
+	}
+	if fake.calls != 0 {
+		t.Errorf("AniList calls = %d, want 0 for a non-positive ID", fake.calls)
+	}
+	if _, cached := res.Memo.Entries[0]; cached {
+		t.Error("invalid ID 0 was memoized, want it ignored")
+	}
+}
+
+// TestMatchResolvesByIDWithoutAniList pins the primary happy path through
+// Matcher.Match: an entry whose Fribb record carries the arr id resolves to the
+// library item as SourceID, counts a coverage hit for its arr, and spends zero
+// AniList requests (neither batch nor single).
+func TestMatchResolvesByIDWithoutAniList(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 7, Title: "Frieren", TvdbID: 123},
+	}}
+	idx := mapping.NewIndex([]mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123}})
+	fake := &countingAniList{}
+
+	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 154587}}, snap, idx, Memo{})
+
+	if len(res.Matches) != 1 {
+		t.Fatalf("matches = %d, want 1", len(res.Matches))
+	}
+	got := res.Matches[0]
+	if !got.InLibrary() || got.Item.ArrID != 7 {
+		t.Fatalf("match item = %+v, want the Sonarr series ArrID 7", got.Item)
+	}
+	if got.Source != SourceID {
+		t.Errorf("source = %q, want %q", got.Source, SourceID)
+	}
+	if got.Arr != library.ArrSonarr {
+		t.Errorf("arr = %q, want %q", got.Arr, library.ArrSonarr)
+	}
+	if res.Coverage.Hits[library.ArrSonarr] != 1 {
+		t.Errorf("coverage hits[sonarr] = %d, want 1", res.Coverage.Hits[library.ArrSonarr])
+	}
+	if fake.calls != 0 {
+		t.Errorf("AniList calls = %d, want 0 for an ID-resolved entry", fake.calls)
+	}
+	if res.Degraded {
+		t.Error("Degraded = true, want false on a clean ID match")
+	}
+}
+
+// TestMatchTitleFallbackSucceedsWithoutRecord pins the no-Fribb-record success
+// path: an entry with no mapping record resolves through the AniList lookup and
+// links to the single title+year library candidate as SourceTitle, with the arr
+// taken from the matched item and the record type normalized from the AniList
+// format.
+func TestMatchTitleFallbackSucceedsWithoutRecord(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 3, Title: "Clannad", TvdbID: 555, Year: 2007},
+	}}
+	idx := mapping.NewIndex(nil) // no Fribb record: matchEntry resolves via AniList
+	fake := fakeAniList{media: map[int]anilist.Media{
+		600: {Titles: []string{"Clannad"}, Format: "TV", Year: 2007},
+	}}
+
+	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 600}}, snap, idx, Memo{})
+
+	if len(res.Matches) != 1 {
+		t.Fatalf("matches = %d, want 1", len(res.Matches))
+	}
+	got := res.Matches[0]
+	if !got.InLibrary() || got.Item.ArrID != 3 {
+		t.Fatalf("match item = %+v, want the Sonarr series ArrID 3", got.Item)
+	}
+	if got.Source != SourceTitle {
+		t.Errorf("source = %q, want %q", got.Source, SourceTitle)
+	}
+	if got.Arr != library.ArrSonarr {
+		t.Errorf("arr = %q, want %q (the matched item's arr)", got.Arr, library.ArrSonarr)
+	}
+	if got.Record.Type != "TV" {
+		t.Errorf("record type = %q, want TV (normalized from the AniList format)", got.Record.Type)
+	}
+	if res.Coverage.Unmapped[library.ArrSonarr] != 1 {
+		t.Errorf("coverage unmapped[sonarr] = %d, want 1 (no ID mapping existed)", res.Coverage.Unmapped[library.ArrSonarr])
+	}
+}
+
+// TestMatchAltTitleFallbackFiltersArrAndDedupes pins the title-index corners in
+// one flow: an id-less series record (TvdbID 0, so findByID returns nil for a
+// non-movie) falls to the title fallback; the library item is found via its
+// ALTERNATE title; an unnormalizable AniList title ("!!!") is skipped; a
+// same-titled item in the WRONG arr is filtered out; and the item matched under
+// two of the AniList titles is deduplicated to a single unambiguous candidate.
+func TestMatchAltTitleFallbackFiltersArrAndDedupes(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 9, Title: "Frieren: Beyond Journey's End", AltTitles: []string{"Sousou no Frieren"}, Year: 2023},
+		{Arr: library.ArrRadarr, ArrID: 10, Title: "Sousou no Frieren", Year: 2023}, // wrong arr: must be filtered
+	}}
+	idx := mapping.NewIndex([]mapping.Record{{AniListID: 154587, Type: "TV"}}) // id-less series record
+	fake := fakeAniList{media: map[int]anilist.Media{
+		154587: {Titles: []string{"!!!", "Sousou no Frieren", "Frieren: Beyond Journey's End"}, Format: "TV", Year: 2023},
+	}}
+
+	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 154587}}, snap, idx, Memo{})
+
+	if len(res.Matches) != 1 {
+		t.Fatalf("matches = %d, want 1", len(res.Matches))
+	}
+	got := res.Matches[0]
+	if !got.InLibrary() || got.Item.ArrID != 9 {
+		t.Fatalf("match item = %+v, want the Sonarr series ArrID 9 via its alternate title", got.Item)
+	}
+	if got.Source != SourceTitle {
+		t.Errorf("source = %q, want %q", got.Source, SourceTitle)
+	}
+}
+
+// TestFindMovieResolvesByIMDbWhenTmdbMisses pins findMovie's IMDb fallback: a
+// MOVIE record whose TMDB movie ids all miss the library must still resolve
+// through its IMDb id to the Radarr movie.
+func TestFindMovieResolvesByIMDbWhenTmdbMisses(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrRadarr, ArrID: 2, Title: "Some Movie", TmdbID: 20, ImdbID: "tt2222222"},
+	}}
+	li := buildLibIndex(snap)
+	rec := &mapping.Record{Type: "MOVIE", TmdbMovies: []int{999}, IMDbIDs: []string{"tt2222222"}}
+
+	it := li.findByID(rec)
+	if it == nil || it.ArrID != 2 || it.Arr != library.ArrRadarr {
+		t.Fatalf("findByID = %+v, want the Radarr movie resolved via the IMDb fallback", it)
+	}
+}
+
+// TestFormatArr pins the AniList-format-to-arr routing used by the no-record
+// fallback path: MOVIE routes to Radarr, any other non-empty format to Sonarr,
+// and an empty format is unknown (so its coverage is counted under "unknown"
+// and the title search is not arr-restricted).
+func TestFormatArr(t *testing.T) {
+	tests := []struct {
+		format string
+		want   string
+	}{
+		{format: "MOVIE", want: library.ArrRadarr},
+		{format: "movie", want: library.ArrRadarr},
+		{format: "TV", want: library.ArrSonarr},
+		{format: "OVA", want: library.ArrSonarr},
+		{format: "", want: arrUnknown},
+		{format: "   ", want: arrUnknown},
+	}
+	for _, tc := range tests {
+		if got := formatArr(tc.format); got != tc.want {
+			t.Errorf("formatArr(%q) = %q, want %q", tc.format, got, tc.want)
+		}
 	}
 }

@@ -27,8 +27,10 @@ func TestGroupNoGroupFallback(t *testing.T) {
 }
 
 // TestClassifyDualAudioMarker covers the dual-audio marker detection: an
-// explicit flag, a "[Dual Audio]" tag, and a bare "dual" token all classify as
-// dual-audio, while an ordinary word such as "individual" does not.
+// explicit flag and the explicit "dual audio"/"dual-audio"/"dualaudio" forms
+// classify as dual-audio, while a bare "dual" token (a series title such as
+// "Dual! Parallel Trouble Adventure") and an ordinary word such as
+// "individual" do not.
 func TestClassifyDualAudioMarker(t *testing.T) {
 	tests := []struct {
 		name string
@@ -37,7 +39,10 @@ func TestClassifyDualAudioMarker(t *testing.T) {
 	}{
 		{name: "explicit flag", in: Input{DualAudio: true}, want: true},
 		{name: "dual audio tag", in: Input{Names: []string{"Show [Dual Audio]"}}, want: true},
-		{name: "dual token", in: Input{Notes: "dual"}, want: true},
+		{name: "hyphenated dual-audio", in: Input{Names: []string{"Show [Dual-Audio] 1080p"}}, want: true},
+		{name: "joined dualaudio", in: Input{Notes: "dualaudio release"}, want: true},
+		{name: "bare dual token is not dual audio", in: Input{Notes: "dual"}, want: false},
+		{name: "title containing bare Dual", in: Input{Names: []string{"Dual! Parallel Trouble Adventure 1080p"}}, want: false},
 		{name: "individual is not dual audio", in: Input{Names: []string{"Individual Circumstances 1080p"}}, want: false},
 	}
 	for _, tt := range tests {
@@ -74,20 +79,27 @@ func TestGroupsIntersectNormalizesAndHandlesNoGroup(t *testing.T) {
 	}
 }
 
-// TestClassifyKind covers the ordered remux -> encode -> unknown classification
-// in classifyKind: a name/notes "remux" marker wins, then an encoder marker
-// (codec token, CRF, or bitrate), else unknown. The remux-vs-encode decision is
-// name-and-notes based, so these are the branches the daemon and report both key
-// alignment on.
+// TestClassifyKind covers the per-file-evidence-first remux -> encode ->
+// unknown classification in classifyKind: within one text source a
+// delimiter-bounded remux token (remux/BDRemux/BD-Remux/PREMUX) wins, then an
+// encoder marker (codec token, CRF, or bitrate); the release names win for the
+// file and the entry-wide notes only fill the gap when the names carry no
+// marker, so a notes remux cannot override a per-file encode marker. These are
+// the branches the daemon and report both key alignment on.
 func TestClassifyKind(t *testing.T) {
 	tests := []struct {
 		name       string
-		in         Input
 		wantKind   Kind
 		wantReason string
+		in         Input
 	}{
 		{name: "remux from name", in: Input{Names: []string{"Show 1080p BDRemux"}}, wantKind: KindRemux, wantReason: "name/notes marker: remux"},
+		{name: "remux from hyphenated bd-remux", in: Input{Names: []string{"Show 1080p BD-Remux"}}, wantKind: KindRemux, wantReason: "name/notes marker: remux"},
+		{name: "remux from premux marker", in: Input{Names: []string{"Show S01 PREMUX 1080p"}}, wantKind: KindRemux, wantReason: "name/notes marker: remux"},
 		{name: "remux from notes", in: Input{Notes: "best remux available"}, wantKind: KindRemux, wantReason: "name/notes marker: remux"},
+		{name: "remux inside a longer word is not a marker", in: Input{Names: []string{"Show DreamRemuxer 1080p"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
+		{name: "per-file encode marker wins over notes remux", in: Input{Names: []string{"Show 1080p x265"}, Notes: "grab the remux"}, wantKind: KindEncode, wantReason: "encoder marker: x265"},
+		{name: "notes fill the gap when the name carries no marker", in: Input{Names: []string{"Show 1080p"}, Notes: "crf 18 encode"}, wantKind: KindEncode, wantReason: "encoder marker: crf"},
 		{name: "encode from codec token", in: Input{Names: []string{"Show 1080p x265"}}, wantKind: KindEncode, wantReason: "encoder marker: x265"},
 		{name: "encode from crf", in: Input{Names: []string{"Show CRF18"}}, wantKind: KindEncode, wantReason: "encoder marker: crf"},
 		{name: "encode from bitrate", in: Input{Names: []string{"Show 4500 kbps"}}, wantKind: KindEncode, wantReason: "encoder marker: bitrate"},
@@ -112,8 +124,8 @@ func TestClassifyKind(t *testing.T) {
 func TestClassifyCodec(t *testing.T) {
 	tests := []struct {
 		name string
-		in   Input
 		want string
+		in   Input
 	}{
 		{name: "x265 from name", in: Input{Names: []string{"Show 1080p x265"}}, want: "x265"},
 		{name: "hevc token maps to x265", in: Input{Names: []string{"Show HEVC"}}, want: "x265"},
@@ -141,10 +153,13 @@ func TestClassifyTrackerAndAnimeBytes(t *testing.T) {
 	}{
 		{tracker: "Nyaa", want: TrackerPublic},
 		{tracker: "AnimeTosho", want: TrackerPublic},
+		{tracker: "RuTracker", want: TrackerPublic},
 		{tracker: "AB", want: TrackerPrivate},
 		{tracker: "AnimeBytes", want: TrackerPrivate},
 		{tracker: "  ", want: TrackerUnknown},
 		{tracker: "SomeRandomTracker", want: TrackerUnknown},
+		{tracker: "beyondhd", want: TrackerUnknown},
+		{tracker: "ptp", want: TrackerUnknown},
 	}
 	for _, tc := range trackerTests {
 		if got := Classify(&Input{Tracker: tc.tracker}).TrackerType; got != tc.want {
@@ -188,5 +203,119 @@ func TestResolutionRank(t *testing.T) {
 		if got := ResolutionRank(tc.res); got != tc.want {
 			t.Errorf("ResolutionRank(%q) = %d, want %d", tc.res, got, tc.want)
 		}
+	}
+}
+
+// TestClassifyUnrecognizedVideoCodecFallsBackToText pins canonicalCodec's
+// default arm: a non-empty MediaInfo codec outside the known x264/x265 families
+// (AV1, VP9) must not short-circuit codec detection — the classifier falls back
+// to the name/notes text, and with no text marker either the codec stays empty
+// (KindUnknown, never a wrong guess).
+func TestClassifyUnrecognizedVideoCodecFallsBackToText(t *testing.T) {
+	got := Classify(&Input{Names: []string{"Show 1080p x265"}, VideoCodec: "AV1"})
+	if got.Codec != "x265" {
+		t.Errorf("Codec = %q, want x265 (unrecognized MediaInfo codec must fall back to name detection)", got.Codec)
+	}
+
+	got = Classify(&Input{Names: []string{"Show 1080p"}, VideoCodec: "VP9"})
+	if got.Codec != "" {
+		t.Errorf("Codec = %q, want empty for an unrecognized codec with no name marker", got.Codec)
+	}
+	if got.Kind != KindUnknown {
+		t.Errorf("Kind = %q, want %q when no codec or remux marker is present", got.Kind, KindUnknown)
+	}
+}
+
+// TestIsAnimeBytesHost pins the AB host gate consumed by the AnimeBytes link
+// hider (filter.HideUnobtainableLink) and the indexer's tracker-key routing
+// (trackerKeyFromURL): the exact site host, its dot-delimited subdomains, and
+// the DNS-root trailing-dot form match; a suffix-confusion host, a
+// parent-domain spoof, and any other tracker do not. The function contract
+// takes an already-lowercased host (callers fold case via
+// strings.ToLower(u.Hostname())), so a mixed-case input does not match.
+func TestIsAnimeBytesHost(t *testing.T) {
+	tests := []struct {
+		host string
+		want bool
+	}{
+		{host: "animebytes.tv", want: true},
+		{host: "www.animebytes.tv", want: true},
+		{host: "tracker.animebytes.tv", want: true},
+		{host: "animebytes.tv.", want: true},
+		{host: "www.animebytes.tv.", want: true},
+		{host: "maliciousanimebytes.tv", want: false},
+		{host: "evil-animebytes.tv", want: false},
+		{host: "animebytes.tv.evil.com", want: false},
+		{host: "animebytes.tv..", want: false},
+		{host: "nyaa.si", want: false},
+		{host: "AnimeBytes.tv", want: false},
+		{host: "", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.host, func(t *testing.T) {
+			if got := IsAnimeBytesHost(tc.host); got != tc.want {
+				t.Errorf("IsAnimeBytesHost(%q) = %v, want %v", tc.host, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLookupTracker pins the canonical tracker table contract every consumer
+// (classification, seadex link building, indexer feed routing) resolves
+// through: canonical names and aliases resolve case- and whitespace-
+// insensitively to one entry with a non-empty base URL, and empty, unknown,
+// or deliberately-stripped tracker names are not found.
+func TestLookupTracker(t *testing.T) {
+	found := []struct {
+		in       string
+		wantName string
+		wantType TrackerType
+	}{
+		{in: "Nyaa", wantName: TrackerNameNyaa, wantType: TrackerPublic},
+		{in: "nyaa", wantName: TrackerNameNyaa, wantType: TrackerPublic},
+		{in: " AB ", wantName: TrackerNameAnimeBytes, wantType: TrackerPrivate},
+		{in: "animebytes", wantName: TrackerNameAnimeBytes, wantType: TrackerPrivate},
+		{in: "AnimeTosho", wantName: TrackerNameAnimeTosho, wantType: TrackerPublic},
+		{in: "RuTracker", wantName: TrackerNameRuTracker, wantType: TrackerPublic},
+	}
+	for _, tc := range found {
+		got, ok := LookupTracker(tc.in)
+		if !ok {
+			t.Errorf("LookupTracker(%q) not found, want %q", tc.in, tc.wantName)
+			continue
+		}
+		if got.Name != tc.wantName || got.Type != tc.wantType {
+			t.Errorf("LookupTracker(%q) = %q/%q, want %q/%q", tc.in, got.Name, got.Type, tc.wantName, tc.wantType)
+		}
+		if got.BaseURL == "" {
+			t.Errorf("LookupTracker(%q) has an empty BaseURL; every table entry carries one", tc.in)
+		}
+	}
+	for _, in := range []string{"", "   ", "beyondhd", "bhd", "passthepopcorn", "ptp", "broadcasthenet", "btn", "hdbits", "blutopia", "aither", "SomeRandomTracker"} {
+		if _, ok := LookupTracker(in); ok {
+			t.Errorf("LookupTracker(%q) found, want not found", in)
+		}
+	}
+}
+
+// TestNormalizeGroupFoldsNoGroupVariants pins the no-group spelling fold: every
+// documented variant (NOGRP, NoGroup, no-group, no_group, "no group", any
+// casing) normalizes to the same value as the canonical NoGroup, so a SeaDex
+// side and a library side spelling "no group" differently still compare equal;
+// a real group is only lowercased and trimmed.
+func TestNormalizeGroupFoldsNoGroupVariants(t *testing.T) {
+	want := NormalizeGroup(NoGroup)
+	variants := []string{
+		"NOGRP", "nogrp", "NoGroup", "nogroup", "NOGROUP",
+		"no-group", "No-Group", "no_group", "NO_GROUP", "no group", "No Group",
+		" NOGRP ", "",
+	}
+	for _, v := range variants {
+		if got := NormalizeGroup(v); got != want {
+			t.Errorf("NormalizeGroup(%q) = %q, want %q", v, got, want)
+		}
+	}
+	if got := NormalizeGroup(" SubsPlease "); got != "subsplease" {
+		t.Errorf("NormalizeGroup(SubsPlease) = %q, want subsplease (real groups only fold case/space)", got)
 	}
 }

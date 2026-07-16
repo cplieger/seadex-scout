@@ -2,19 +2,17 @@ package mapping
 
 import (
 	"context"
-	"io"
-	"log/slog"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
-
-func nopLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
 
 func freshCache() *Cache {
 	return &Cache{
@@ -24,7 +22,7 @@ func freshCache() *Cache {
 }
 
 func TestLoader_refreshCache_reusesFreshCache(t *testing.T) {
-	l := NewLoader(nil, "http://unused.invalid", "", time.Hour, nopLogger())
+	l := NewLoader(nil, "http://unused.invalid", "", time.Hour, discardLogger())
 	next, err := l.refreshCache(context.Background(), freshCache())
 	if err != nil {
 		t.Fatalf("refreshCache error: %v", err)
@@ -40,7 +38,7 @@ func TestLoader_refreshCache_refreshesOn200(t *testing.T) {
 		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
 	}))
 	defer ts.Close()
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, nopLogger())
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
 	next, err := l.refreshCache(context.Background(), &Cache{})
 	if err != nil {
 		t.Fatalf("refreshCache error: %v", err)
@@ -67,7 +65,7 @@ func TestLoader_refreshCache_notModifiedBumpsTimestamp(t *testing.T) {
 		ETag:      "v1",
 		Records:   []Record{{AniListID: 1, Type: "TV"}},
 	}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, nopLogger())
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
 	next, err := l.refreshCache(context.Background(), prev)
 	if err != nil {
 		t.Fatalf("refreshCache error: %v", err)
@@ -89,7 +87,7 @@ func TestLoader_refreshCache_parseFailKeepsStale(t *testing.T) {
 		FetchedAt: time.Now().Add(-2 * time.Hour),
 		Records:   []Record{{AniListID: 1, Type: "TV"}},
 	}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, nopLogger())
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
 	next, err := l.refreshCache(context.Background(), prev)
 	if err == nil {
 		t.Fatal("parse failure returned nil error, want degraded error")
@@ -105,7 +103,7 @@ func TestLoader_Load_overrideWinsOverFribb(t *testing.T) {
 	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":1,"type":"movie","tmdb_movies":[42]}]`), 0o644); err != nil {
 		t.Fatalf("write overrides: %v", err)
 	}
-	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, nopLogger())
+	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, discardLogger())
 	_, idx, err := l.Load(context.Background(), freshCache())
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
@@ -122,7 +120,7 @@ func TestLoader_Load_overrideWinsOverFribb(t *testing.T) {
 func TestLoader_Load_missingAndMalformedOverridesIgnored(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "nope.json")
-	l := NewLoader(nil, "http://unused.invalid", missing, time.Hour, nopLogger())
+	l := NewLoader(nil, "http://unused.invalid", missing, time.Hour, discardLogger())
 	_, idx, err := l.Load(context.Background(), freshCache())
 	if err != nil {
 		t.Fatalf("Load with missing overrides error: %v", err)
@@ -135,7 +133,7 @@ func TestLoader_Load_missingAndMalformedOverridesIgnored(t *testing.T) {
 	if err := os.WriteFile(bad, []byte(`{ not valid`), 0o644); err != nil {
 		t.Fatalf("write bad overrides: %v", err)
 	}
-	l2 := NewLoader(nil, "http://unused.invalid", bad, time.Hour, nopLogger())
+	l2 := NewLoader(nil, "http://unused.invalid", bad, time.Hour, discardLogger())
 	if _, _, err := l2.Load(context.Background(), freshCache()); err != nil {
 		t.Fatalf("Load with malformed overrides returned error, want ignored: %v", err)
 	}
@@ -151,7 +149,7 @@ func TestLoader_refreshCache_emptyRefreshKeepsStale(t *testing.T) {
 		FetchedAt: time.Now().Add(-2 * time.Hour),
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, nopLogger())
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
 	next, err := l.refreshCache(context.Background(), prev)
 	if err == nil {
 		t.Fatal("empty refresh returned nil error, want degraded error")
@@ -178,7 +176,7 @@ func TestLoader_refreshCache_noArrIdentifierKeepsStale(t *testing.T) {
 		FetchedAt: time.Now().Add(-2 * time.Hour),
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, nopLogger())
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
 	next, err := l.refreshCache(context.Background(), prev)
 	if err == nil {
 		t.Fatal("refresh with no arr identifiers returned nil error, want degraded error")
@@ -188,6 +186,42 @@ func TestLoader_refreshCache_noArrIdentifierKeepsStale(t *testing.T) {
 	}
 	if next.Records[0].TvdbID != 100 {
 		t.Errorf("no-arr-id refresh stale TvdbID = %d, want 100", next.Records[0].TvdbID)
+	}
+	if next.RejectedRefreshes != 1 {
+		t.Errorf("no-arr-id refresh RejectedRefreshes = %d, want 1 (the validation floor is an acceptance-guard rejection)", next.RejectedRefreshes)
+	}
+}
+
+// TestLoader_refreshCache_lowArrIdentifierCoverageKeepsStale covers the
+// coverage floor: a refresh where only 1 of 200+ records retains an arr
+// identifier is a wholesale degradation (below the 1% floor) and must keep the
+// usable stale map rather than accepting the near-useless record set.
+func TestLoader_refreshCache_lowArrIdentifierCoverageKeepsStale(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(`[{"anilist_id":1,"type":"tv","tvdb_id":100}`)
+	for i := 2; i <= 250; i++ {
+		fmt.Fprintf(&b, `,{"anilist_id":%d,"type":"tv"}`, i)
+	}
+	b.WriteByte(']')
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(b.String()))
+	}))
+	defer ts.Close()
+
+	prev := &Cache{
+		FetchedAt: time.Now().Add(-2 * time.Hour),
+		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	if err == nil {
+		t.Fatal("refresh with 1/250 arr-identifier coverage returned nil error, want degraded error")
+	}
+	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
+		t.Fatalf("low-coverage refresh records = %+v, want stale record id 1", next.Records)
+	}
+	if next.Records[0].TvdbID != 100 {
+		t.Errorf("low-coverage refresh stale TvdbID = %d, want 100", next.Records[0].TvdbID)
 	}
 }
 
@@ -210,7 +244,7 @@ func TestLoader_refreshCache_httpErrorKeepsStale(t *testing.T) {
 		LastModified: lastModified,
 		Records:      []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, nopLogger())
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
 	next, err := l.refreshCache(context.Background(), prev)
 	if err == nil {
 		t.Fatal("HTTP error refresh returned nil error, want degraded error")
@@ -238,7 +272,7 @@ func TestLoader_refreshCache_notModifiedEmptyCacheErrors(t *testing.T) {
 	defer ts.Close()
 
 	prev := &Cache{ETag: "v1", LastModified: "Mon, 02 Jan 2006 15:04:05 GMT"}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, nopLogger())
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
 	next, err := l.refreshCache(context.Background(), prev)
 	if err == nil {
 		t.Fatal("304 with a record-less cache returned nil error, want a no-cache-available error")
@@ -274,7 +308,7 @@ func TestLoader_refreshCache_noCacheAvailableErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ts := httptest.NewServer(tc.handler)
 			defer ts.Close()
-			l := NewLoader(ts.Client(), ts.URL, "", time.Hour, nopLogger())
+			l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
 			next, err := l.refreshCache(context.Background(), &Cache{})
 			if err == nil {
 				t.Fatalf("%s with no prior cache returned nil error, want a degraded no-cache-available error", tc.name)
@@ -303,7 +337,7 @@ func TestLoader_Load_degradedRefreshStillAppliesOverrides(t *testing.T) {
 		ETag:      "v1",
 		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
-	l := NewLoader(ts.Client(), ts.URL, overrides, time.Hour, nopLogger())
+	l := NewLoader(ts.Client(), ts.URL, overrides, time.Hour, discardLogger())
 	_, idx, err := l.Load(context.Background(), prev)
 	if err == nil {
 		t.Fatal("Load with a failed refresh returned nil error, want a degraded error")
@@ -314,5 +348,287 @@ func TestLoader_Load_degradedRefreshStillAppliesOverrides(t *testing.T) {
 	}
 	if rec.Type != "MOVIE" || len(rec.TmdbMovies) != 1 || rec.TmdbMovies[0] != 42 {
 		t.Errorf("degraded Load did not overlay overrides: got %+v, want Type MOVIE / TmdbMovies [42]", rec)
+	}
+}
+
+// TestLoader_refreshCache_acceptsArrIdentifierCoverageFloor pins the accepting
+// side of the arr-identifier coverage guard: a first boot whose body carries
+// exactly max(1, len(records)/100) records with an arr identifier (1 of 100)
+// must be accepted, not rejected with the no-cache error.
+func TestLoader_refreshCache_acceptsArrIdentifierCoverageFloor(t *testing.T) {
+	var bodyBuilder strings.Builder
+	bodyBuilder.WriteString(`[{"anilist_id":1,"type":"tv","tvdb_id":100}`)
+	for i := 2; i <= 100; i++ {
+		fmt.Fprintf(&bodyBuilder, `,{"anilist_id":%d,"type":"tv"}`, i)
+	}
+	bodyBuilder.WriteByte(']')
+	body := bodyBuilder.String()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), &Cache{})
+	if err != nil {
+		t.Fatalf("refresh with exactly 1/100 arr identifiers returned error: %v", err)
+	}
+	if len(next.Records) != 100 {
+		t.Errorf("refresh with exactly 1/100 arr identifiers kept %d records, want 100", len(next.Records))
+	}
+}
+
+// TestLoader_refreshCache_coverageFloorCeiling pins the ceiling arithmetic of
+// the arr-identifier coverage minimum: for 199 records the documented 1% floor
+// is 2 (ceiling), so 1/199 must be rejected while 2/199 is accepted — floor
+// division would wrongly admit 1/199.
+func TestLoader_refreshCache_coverageFloorCeiling(t *testing.T) {
+	tests := []struct {
+		name       string
+		covered    int
+		total      int
+		wantAccept bool
+	}{
+		{name: "1 of 199 rejected", covered: 1, total: 199, wantAccept: false},
+		{name: "2 of 199 accepted", covered: 2, total: 199, wantAccept: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var b strings.Builder
+			b.WriteByte('[')
+			for i := 1; i <= tc.total; i++ {
+				if i > 1 {
+					b.WriteByte(',')
+				}
+				if i <= tc.covered {
+					fmt.Fprintf(&b, `{"anilist_id":%d,"type":"tv","tvdb_id":%d}`, i, i)
+				} else {
+					fmt.Fprintf(&b, `{"anilist_id":%d,"type":"tv"}`, i)
+				}
+			}
+			b.WriteByte(']')
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(b.String()))
+			}))
+			defer ts.Close()
+
+			l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+			next, err := l.refreshCache(context.Background(), &Cache{})
+			if tc.wantAccept {
+				if err != nil {
+					t.Fatalf("refresh with %d/%d arr identifiers returned error: %v", tc.covered, tc.total, err)
+				}
+				if len(next.Records) != tc.total {
+					t.Errorf("refresh with %d/%d arr identifiers kept %d records, want %d", tc.covered, tc.total, len(next.Records), tc.total)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("refresh with %d/%d arr identifiers returned nil error, want below-minimum rejection", tc.covered, tc.total)
+			}
+			if len(next.Records) != 0 {
+				t.Errorf("rejected refresh with no prior cache produced %d records, want 0", len(next.Records))
+			}
+		})
+	}
+}
+
+// TestLoader_refreshCache_truncatedRefreshKeepsStale covers the below-half-size
+// acceptance guard: a syntactically valid refresh that shrinks the map to less
+// than half the previous record count (here 1 valid mapped record replacing 4)
+// must degrade to the stale cache with an error, not replace it.
+func TestLoader_refreshCache_truncatedRefreshKeepsStale(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"anilist_id":9,"type":"tv","tvdb_id":900}]`))
+	}))
+	defer ts.Close()
+
+	prevRecords := []Record{
+		{AniListID: 1, Type: "TV", TvdbID: 100},
+		{AniListID: 2, Type: "TV", TvdbID: 200},
+		{AniListID: 3, Type: "TV", TvdbID: 300},
+		{AniListID: 4, Type: "TV", TvdbID: 400},
+	}
+	prev := &Cache{
+		FetchedAt: time.Now().Add(-2 * time.Hour),
+		Records:   prevRecords,
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	if err == nil {
+		t.Fatal("truncated refresh (1 record replacing 4) returned nil error, want degraded error")
+	}
+	if len(next.Records) != len(prevRecords) {
+		t.Fatalf("truncated refresh kept %d records, want the %d stale records unchanged", len(next.Records), len(prevRecords))
+	}
+	for i, want := range prevRecords {
+		got := next.Records[i]
+		if got.AniListID != want.AniListID || got.TvdbID != want.TvdbID || got.Type != want.Type {
+			t.Errorf("truncated refresh record[%d] = %+v, want unchanged %+v", i, got, want)
+		}
+	}
+}
+
+// TestLoader_refreshCache_duplicateIDCollapseKeepsStale pins that cache
+// acceptance measures the effective AniList-keyed dataset, not the transport
+// row count: a 200 whose mapped rows all repeat one AniList ID collapses to a
+// single effective record, which the below-half-size guard must reject against
+// a 4-record stale cache instead of persisting a refresh that indexes to
+// length one.
+func TestLoader_refreshCache_duplicateIDCollapseKeepsStale(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[` +
+			`{"anilist_id":9,"type":"tv","tvdb_id":900},` +
+			`{"anilist_id":9,"type":"tv","tvdb_id":901},` +
+			`{"anilist_id":9,"type":"tv","tvdb_id":902},` +
+			`{"anilist_id":9,"type":"tv","tvdb_id":903}]`))
+	}))
+	defer ts.Close()
+
+	prevRecords := []Record{
+		{AniListID: 1, Type: "TV", TvdbID: 100},
+		{AniListID: 2, Type: "TV", TvdbID: 200},
+		{AniListID: 3, Type: "TV", TvdbID: 300},
+		{AniListID: 4, Type: "TV", TvdbID: 400},
+	}
+	prev := &Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: prevRecords}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	var stale *StaleMapError
+	if !errors.As(err, &stale) {
+		t.Fatalf("duplicate-collapse refresh error = %v, want a *StaleMapError", err)
+	}
+	if len(next.Records) != len(prevRecords) {
+		t.Fatalf("duplicate-collapse refresh kept %d records, want the %d stale records unchanged", len(next.Records), len(prevRecords))
+	}
+	for i, want := range prevRecords {
+		got := next.Records[i]
+		if got.AniListID != want.AniListID || got.TvdbID != want.TvdbID {
+			t.Errorf("duplicate-collapse refresh record[%d] = %+v, want unchanged %+v", i, got, want)
+		}
+	}
+}
+
+// TestLoader_Load_noOverridesPathServesFribbUnmodified pins applyOverrides'
+// empty-path early return: a loader constructed with no overrides file
+// configured serves the Fribb map untouched (no read attempt, no overlay).
+func TestLoader_Load_noOverridesPathServesFribbUnmodified(t *testing.T) {
+	l := NewLoader(nil, "http://unused.invalid", "", time.Hour, discardLogger())
+	_, idx, err := l.Load(context.Background(), freshCache())
+	if err != nil {
+		t.Fatalf("Load with no overrides path error: %v", err)
+	}
+	if idx.Len() != 1 {
+		t.Fatalf("Load with no overrides path indexed %d records, want 1", idx.Len())
+	}
+	if rec, ok := idx.Lookup(1); !ok || rec.Type != "TV" || rec.TvdbID != 100 {
+		t.Errorf("Load with no overrides path record = %+v ok=%v, want unmodified TV/100", rec, ok)
+	}
+}
+
+// TestLoader_refreshCache_rejectionStreakCountsAndResets pins the
+// consecutive-rejection streak: each acceptance-guard rejection (here the
+// below-half-size shrink guard) advances the persisted Cache.RejectedRefreshes
+// and carries the streak on the *StaleMapError (ConsecutiveRejections), and an
+// eventually accepted refresh resets the streak to zero.
+func TestLoader_refreshCache_rejectionStreakCountsAndResets(t *testing.T) {
+	var accept atomic.Bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if accept.Load() {
+			_, _ = w.Write([]byte(`[{"anilist_id":1,"type":"tv","tvdb_id":100},{"anilist_id":2,"type":"tv","tvdb_id":200},{"anilist_id":3,"type":"tv","tvdb_id":300},{"anilist_id":4,"type":"tv","tvdb_id":400}]`))
+			return
+		}
+		// One record replacing four trips the below-half-size shrink guard.
+		_, _ = w.Write([]byte(`[{"anilist_id":9,"type":"tv","tvdb_id":900}]`))
+	}))
+	defer ts.Close()
+
+	prev := &Cache{
+		FetchedAt: time.Now().Add(-2 * time.Hour),
+		Records: []Record{
+			{AniListID: 1, Type: "TV", TvdbID: 100},
+			{AniListID: 2, Type: "TV", TvdbID: 200},
+			{AniListID: 3, Type: "TV", TvdbID: 300},
+			{AniListID: 4, Type: "TV", TvdbID: 400},
+		},
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	for i := 1; i <= RejectionEscalationThreshold; i++ {
+		next, err := l.refreshCache(context.Background(), prev)
+		var stale *StaleMapError
+		if !errors.As(err, &stale) {
+			t.Fatalf("rejection %d error = %v, want a *StaleMapError", i, err)
+		}
+		if next.RejectedRefreshes != i {
+			t.Fatalf("RejectedRefreshes after %d rejections = %d, want %d", i, next.RejectedRefreshes, i)
+		}
+		if stale.ConsecutiveRejections() != i {
+			t.Fatalf("ConsecutiveRejections after %d rejections = %d, want %d", i, stale.ConsecutiveRejections(), i)
+		}
+		*prev = next
+	}
+
+	accept.Store(true)
+	next, err := l.refreshCache(context.Background(), prev)
+	if err != nil {
+		t.Fatalf("accepted refresh after rejections returned error: %v", err)
+	}
+	if next.RejectedRefreshes != 0 {
+		t.Errorf("accepted refresh RejectedRefreshes = %d, want 0 (acceptance resets the streak)", next.RejectedRefreshes)
+	}
+	if len(next.Records) != 4 {
+		t.Errorf("accepted refresh kept %d records, want 4", len(next.Records))
+	}
+}
+
+// TestLoader_refreshCache_notModifiedResetsRejectionStreak pins the 304 reset:
+// upstream affirming that the cached map is current ends any acceptance-guard
+// rejection streak.
+func TestLoader_refreshCache_notModifiedResetsRejectionStreak(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer ts.Close()
+	prev := &Cache{
+		FetchedAt:         time.Now().Add(-2 * time.Hour),
+		ETag:              "v1",
+		Records:           []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+		RejectedRefreshes: 3,
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	if err != nil {
+		t.Fatalf("304 refresh returned error: %v", err)
+	}
+	if next.RejectedRefreshes != 0 {
+		t.Errorf("304 RejectedRefreshes = %d, want 0 (a 304 resets the streak)", next.RejectedRefreshes)
+	}
+}
+
+// TestLoader_refreshCache_fetchFailureKeepsRejectionStreak pins that a
+// transient outage is not a guard rejection: a fetch failure neither advances
+// the persisted streak nor resets it, and its *StaleMapError reports zero
+// consecutive rejections (so the scout never escalates on an outage).
+func TestLoader_refreshCache_fetchFailureKeepsRejectionStreak(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusNotFound)
+	}))
+	defer ts.Close()
+	prev := &Cache{
+		FetchedAt:         time.Now().Add(-2 * time.Hour),
+		Records:           []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+		RejectedRefreshes: 3,
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	var stale *StaleMapError
+	if !errors.As(err, &stale) {
+		t.Fatalf("fetch-failure error = %v, want a *StaleMapError", err)
+	}
+	if next.RejectedRefreshes != 3 {
+		t.Errorf("fetch-failure RejectedRefreshes = %d, want 3 (outages neither advance nor reset the streak)", next.RejectedRefreshes)
+	}
+	if stale.ConsecutiveRejections() != 0 {
+		t.Errorf("fetch-failure ConsecutiveRejections = %d, want 0 (not a guard rejection)", stale.ConsecutiveRejections())
 	}
 }

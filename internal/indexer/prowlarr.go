@@ -54,7 +54,58 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, error
 	if err != nil {
 		return nil, err
 	}
-	return parseTorznab(body)
+	items, err := parseTorznab(body)
+	if err != nil {
+		return nil, err
+	}
+	return u.filterDownloadURLs(items), nil
+}
+
+// filterDownloadURLs drops items whose download URL is not an absolute http(s)
+// URL on the same origin as the configured Prowlarr Torznab endpoint. The
+// curation lookup only proves an identifier is in the SeaDex snapshot; it does
+// not bind the download target, so a tampered Prowlarr response could
+// otherwise pair a curated id with an internal or attacker-controlled URL the
+// arr then fetches as a curated release (SSRF / arbitrary download, CWE-918).
+// A healthy Prowlarr hands out its own proxy links on the queried endpoint's
+// origin, so same-origin is the safe default; the rejected URL itself is never
+// logged.
+func (u *upstream) filterDownloadURLs(items []item) []item {
+	feedURL, err := url.Parse(u.feed)
+	if err != nil {
+		// An unparseable configured endpoint cannot anchor the origin check;
+		// fail closed rather than passing unvalidated download targets through.
+		u.log.Warn("upstream feed URL unparseable; dropping all items", "upstream", u.name)
+		return nil
+	}
+	out := make([]item, 0, len(items))
+	dropped := 0
+	for i := range items {
+		if !sameHTTPOrigin(items[i].DownloadURL, feedURL) {
+			dropped++
+			continue
+		}
+		out = append(out, items[i])
+	}
+	if dropped > 0 {
+		u.log.Warn("upstream items dropped: download URL not on the Prowlarr endpoint origin",
+			"upstream", u.name, "dropped", dropped, "kept", len(out))
+	}
+	return out
+}
+
+// sameHTTPOrigin reports whether raw is an absolute http or https URL, free of
+// userinfo, whose scheme and host (including port) match origin's.
+func sameHTTPOrigin(raw string, origin *url.URL) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.User != nil {
+		return false
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return false
+	}
+	return strings.EqualFold(scheme, origin.Scheme) && strings.EqualFold(parsed.Host, origin.Host)
 }
 
 // setHeaders sets the User-Agent, Accept, and the Prowlarr API key header.
