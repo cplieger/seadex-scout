@@ -55,13 +55,13 @@ const episodeFailureBudget = 5
 type SonarrClient interface {
 	GetSeries(ctx context.Context) ([]arrapi.Series, error)
 	GetEpisodes(ctx context.Context, seriesID int) ([]arrapi.Episode, error)
-	ResolveTagIDs(ctx context.Context, labels ...string) (map[int]struct{}, []string, error)
+	GetTags(ctx context.Context) ([]arrapi.Tag, error)
 }
 
 // RadarrClient is the arrapi Radarr surface the walker needs.
 type RadarrClient interface {
 	GetMovies(ctx context.Context) ([]arrapi.Movie, error)
-	ResolveTagIDs(ctx context.Context, labels ...string) (map[int]struct{}, []string, error)
+	GetTags(ctx context.Context) ([]arrapi.Tag, error)
 }
 
 // Item is one library entry (series or movie) in a snapshot. Fields are ordered
@@ -219,7 +219,7 @@ func (w *Walker) walkSonarr(ctx context.Context) ([]Item, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	includeIDs, excludeIDs, err := w.resolveTags(ctx, w.sonarr.ResolveTagIDs)
+	includeIDs, excludeIDs, err := w.resolveTags(ctx, w.sonarr.GetTags)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -328,7 +328,7 @@ func (w *Walker) walkRadarr(ctx context.Context) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	includeIDs, excludeIDs, err := w.resolveTags(ctx, w.radarr.ResolveTagIDs)
+	includeIDs, excludeIDs, err := w.resolveTags(ctx, w.radarr.GetTags)
 	if err != nil {
 		return nil, err
 	}
@@ -345,48 +345,46 @@ func (w *Walker) walkRadarr(ctx context.Context) ([]Item, error) {
 	return items, nil
 }
 
-// resolveTags resolves the include and exclude tag labels to ID sets, logging
-// any label that matched no tag. Any resolution failure aborts the walk (fail
-// closed; see resolveOne).
+// resolveTags fetches the arr's tag list once per walk and resolves the
+// include and exclude label sets against it locally (arrapi.TagIDs /
+// UnmatchedLabels), logging any label that matched no tag. With neither set
+// configured no fetch is issued. A tag-list fetch failure aborts the walk
+// (fail closed): silently disabling the filter would admit every item past
+// the configured arr_tags scoping for the cycle - a mass-resolve /
+// report-noise blast radius from one transient tag-endpoint failure - and
+// silently emptying the library would be just as wrong. A tag fetch failure
+// is an ingest failure (the cycle is unhealthy), and a cancellation keeps its
+// existing semantics: it propagates and Walk reports the shutdown.
 func (w *Walker) resolveTags(ctx context.Context,
-	resolve func(context.Context, ...string) (map[int]struct{}, []string, error),
+	getTags func(context.Context) ([]arrapi.Tag, error),
 ) (includeIDs, excludeIDs map[int]struct{}, err error) {
-	includeIDs, err = w.resolveOne(ctx, resolve, "arr_tags.include", w.includeTags)
-	if err != nil {
-		return nil, nil, err
+	if len(w.includeTags) == 0 && len(w.excludeTags) == 0 {
+		return nil, nil, nil
 	}
-	excludeIDs, err = w.resolveOne(ctx, resolve, "arr_tags.exclude", w.excludeTags)
+	tags, err := getTags(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("resolving arr_tags: %w", err)
 	}
+	includeIDs = w.resolveOne(tags, "arr_tags.include", w.includeTags)
+	excludeIDs = w.resolveOne(tags, "arr_tags.exclude", w.excludeTags)
 	return includeIDs, excludeIDs, nil
 }
 
-// resolveOne resolves a single label set, logging a count-only warning for
-// unmatched labels (values withheld: they pass through ${VAR} expansion and
-// could carry a secret - see the credential-safety test). Any
-// resolution error fails the walk (fail closed): silently disabling the filter
-// would admit every item past the configured arr_tags scoping for the cycle -
-// a mass-resolve / report-noise blast radius from one transient tag-endpoint
-// failure - and silently emptying the library would be just as wrong. A
-// tag-resolution failure is an ingest failure (the cycle is unhealthy), and a
-// cancellation keeps its existing semantics: it propagates and Walk reports
-// the shutdown.
-func (w *Walker) resolveOne(ctx context.Context,
-	resolve func(context.Context, ...string) (map[int]struct{}, []string, error),
-	which string, labels []string,
-) (map[int]struct{}, error) {
+// resolveOne resolves a single label set against an already-fetched tag list,
+// logging a count-only warning for unmatched labels (values withheld: they
+// pass through ${VAR} expansion and could carry a secret - see the
+// credential-safety test). It returns nil for an unconfigured set (keepByTags
+// reads nil as "filter off") and a non-nil - possibly empty - set for a
+// configured one, so a configured include list matching no tag still drops
+// everything rather than admitting everything.
+func (w *Walker) resolveOne(tags []arrapi.Tag, which string, labels []string) map[int]struct{} {
 	if len(labels) == 0 {
-		return nil, nil
+		return nil
 	}
-	ids, unmatched, err := resolve(ctx, labels...)
-	if err != nil {
-		return nil, fmt.Errorf("resolving %s: %w", which, err)
-	}
-	if len(unmatched) > 0 {
+	if unmatched := arrapi.UnmatchedLabels(tags, labels...); len(unmatched) > 0 {
 		w.log.Warn("configured tags matched no arr tag", "which", which, "unmatched_count", len(unmatched))
 	}
-	return ids, nil
+	return arrapi.TagIDs(tags, labels...)
 }
 
 // keepByTags applies include-then-exclude tag filtering. Include (when set)

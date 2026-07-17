@@ -17,6 +17,8 @@ import (
 // bound under the journal's feedJournalMaxAge prune (see journal.go): the
 // journal rarely approaches it, but a burst of new curation can never bloat
 // the rendered XML or the persisted snapshot past this many items per tracker.
+// The render path applies its own final cap, maxItems (indexer.go), to the
+// same rendered feed.
 const feedWindow = 300
 
 // seaDexEntryURL is the SeaDex entry page base; the per-item info URL (the feed

@@ -14,12 +14,16 @@ groups:
       # Fault: a daemon run logged an error. The primary case is a failed
       # Sonarr/Radarr library walk (an arr connection, API, or tag-resolution
       # failure), which marks the run unhealthy; a failed state save/load or a
-      # panicked run also log at ERROR. SeaDex, mapping, and AniList outages
+      # panicked run also log at ERROR. The rule counts every level=ERROR line,
+      # so an indexer (Torznab feed) fault trips it too: a feed that stops
+      # outside shutdown (e.g. its :9118 bind fails at startup) or a panicked
+      # feed goroutine logs at ERROR, even though neither touches container
+      # health. SeaDex, mapping, and AniList outages
       # log at WARN by design (the run stays healthy and keeps prior findings),
       # so this rule does not fire on an upstream blip — but a degradation that
-      # persists escalates: a suspicious library shrink or a rejected mapping
-      # refresh repeated for 8 consecutive cycles re-logs at ERROR and fires
-      # this rule. "An error was logged" is a one-time event, so route it to a
+      # persists escalates: a suspicious library shrink, a rejected mapping
+      # refresh, or a failed SeaDex fetch repeated for 8 consecutive cycles
+      # re-logs at ERROR and fires this rule. "An error was logged" is a one-time event, so route it to a
       # `send_resolved: false` receiver — the 15m count window clearing means
       # errors merely stopped, not a real recovery worth announcing as RESOLVED.
       - alert: SeadexScoutCycleError
@@ -114,8 +118,12 @@ groups:
       # mode is a one-shot (docker exec /seadex-scout report, or mode: report),
       # so this fires once per run. Like the better-release alert, it is a
       # one-time event — route it to a `send_resolved: false` receiver so it does
-      # not emit a phantom RESOLVED. If an external runner captures the child's
-      # stdout under a different container/job label, point the selector there.
+      # not emit a phantom RESOLVED. The default {container="seadex-scout"}
+      # selector observes container-command reports ONLY (mode: report, or
+      # `report` as the container arg): a `docker exec` run's output goes to the
+      # exec session, never the container's log stream, and an Ofelia job-exec
+      # captures it in Ofelia's own logs — for those, point the selector at the
+      # runner's stream (e.g. {container="ofelia"}) or skip this rule.
       - alert: SeadexScoutReportWritten
         expr: |
           sum by (anime) (count_over_time(

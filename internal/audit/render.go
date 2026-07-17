@@ -50,7 +50,10 @@ func renderJSON(r *Report) ([]byte, error) {
 }
 
 // renderMarkdown renders the report as human-readable Markdown, grouped into a
-// section per verdict (most actionable first) with a compact links column.
+// section per verdict (most actionable first) with a compact links column. A
+// degraded run additionally carries the completeness caveat in the header and
+// the incomplete-mapping section after the verdict sections; a fully resolved
+// run renders byte-identically to the pre-caveat format.
 func renderMarkdown(r *Report) string {
 	var b strings.Builder
 	b.WriteString("# SeaDex alignment report\n\n")
@@ -62,6 +65,7 @@ func renderMarkdown(r *Report) string {
 		fmt.Fprintf(&b, "; %d more in your library that SeaDex does not list", notOnSeaDex)
 	}
 	b.WriteString(".\n\n")
+	writeIncompleteCaveat(&b, len(r.Incomplete))
 
 	b.WriteString("## Summary\n\n| Verdict | Count |\n| --- | --- |\n")
 	for _, v := range verdictOrder {
@@ -85,7 +89,45 @@ func renderMarkdown(r *Report) string {
 		}
 		b.WriteByte('\n')
 	}
+	writeIncompleteSection(&b, r.Incomplete)
 	return b.String()
+}
+
+// incompleteHeader is the incomplete-mapping section's Markdown heading text,
+// also named by the header caveat so a reader can find the section.
+const incompleteHeader = "incomplete (transient AniList failure)"
+
+// writeIncompleteCaveat states the completeness caveat in the report header
+// when the run left SeaDex entries unmapped, so a reader cannot take a
+// degraded report for a complete audit. Silent on a fully resolved run.
+func writeIncompleteCaveat(b *strings.Builder, n int) {
+	if n == 0 {
+		return
+	}
+	noun := "entries"
+	if n == 1 {
+		noun = "entry"
+	}
+	fmt.Fprintf(b, "**Caveat: this report is incomplete.** %d SeaDex %s could not be mapped to the library this run because of a transient AniList failure; the affected rows may be missing or misfiled. See the %q section below.\n\n",
+		n, noun, incompleteHeader)
+}
+
+// writeIncompleteSection renders the incomplete-mapping section: one row per
+// SeaDex entry whose library mapping could not be resolved this run, listed by
+// AniList id with its releases.moe link. Omitted entirely on a fully resolved
+// run (matching the JSON key's omitempty), so a total AniList outage that
+// affected no entry - or a healthy run - renders no section.
+func writeIncompleteSection(b *strings.Builder, incomplete []IncompleteEntry) {
+	if len(incomplete) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "## %s (%d)\n\n", incompleteHeader, len(incomplete))
+	b.WriteString("These SeaDex entries could not be mapped to the library this run: the AniList lookup that would link them failed transiently. Whether they align is unknown; re-run the report once AniList recovers.\n\n")
+	b.WriteString("| AniList ID | SeaDex |\n| --- | --- |\n")
+	for i := range incomplete {
+		fmt.Fprintf(b, "| %d | %s |\n", incomplete[i].AniListID, mdLink("seadex", incomplete[i].SeaDexURL))
+	}
+	b.WriteByte('\n')
 }
 
 // writeRow writes one Markdown table row for a report row.
@@ -117,7 +159,8 @@ func (r *Report) Log(log *slog.Logger) {
 		"have_unlisted", r.Totals[string(VerdictUnlisted)],
 		"no_file", r.Totals[string(VerdictNoFile)],
 		"unverified", r.Totals[string(VerdictUnverified)],
-		"not_on_seadex", r.Totals[string(VerdictNotOnSeaDex)])
+		"not_on_seadex", r.Totals[string(VerdictNotOnSeaDex)],
+		"incomplete_mappings", len(r.Incomplete))
 	for i := range r.Rows {
 		row := &r.Rows[i]
 		log.Info("report item",
@@ -333,7 +376,11 @@ func links(row *Row) string {
 	seen := make(map[releaseLinkKey]struct{}, len(row.Releases))
 	for i := range row.Releases {
 		rel := &row.Releases[i]
-		if !rel.Best || rel.URL == "" {
+		// A curation-warned best is not offered as a grab link: the links
+		// cell is an action affordance, and SeaDex's own curators warn
+		// against the release (it is annotated in the SeaDex-best column
+		// instead; the daemon and the Torznab feed exclude it the same way).
+		if !rel.Best || rel.URL == "" || len(rel.Warnings) > 0 {
 			continue
 		}
 		key := releaseLinkKey{tracker: rel.Tracker, url: rel.URL}
@@ -413,21 +460,32 @@ func mdLink(label, rawURL string) string {
 }
 
 // displayBestGroups returns the distinct best-release groups in their original
-// case (deduped case-insensitively), for display.
+// case (deduped case-insensitively), for display. A curation-warned best is
+// annotated with its canonical warning tags - "PMR (broken)" - so the column
+// stays complete (the report shows raw SeaDex data) while explaining why the
+// verdict did not count the release. Unwarned bests are collected first and
+// win the dedupe, so a group genuinely available as an unwarned best never
+// displays warned.
 func displayBestGroups(releases []Release) []string {
 	var out []string
 	seen := make(map[string]struct{}, len(releases))
-	for i := range releases {
-		g := releases[i].Group
-		if !releases[i].Best || g == "" {
-			continue
+	for _, warnedPass := range []bool{false, true} {
+		for i := range releases {
+			rel := &releases[i]
+			if !rel.Best || rel.Group == "" || (len(rel.Warnings) > 0) != warnedPass {
+				continue
+			}
+			key := strings.ToLower(rel.Group)
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			label := rel.Group
+			if warnedPass {
+				label += " (" + strings.Join(rel.Warnings, ", ") + ")"
+			}
+			out = append(out, label)
 		}
-		key := strings.ToLower(g)
-		if _, dup := seen[key]; dup {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, g)
 	}
 	return out
 }
@@ -468,11 +526,12 @@ func sanitizeDisplayText(s string) string {
 }
 
 // sanitizeOutput returns a deep-enough copy of the report with every untrusted
-// string (row text, group lists, release fields) passed through
-// sanitizeDisplayText, for the machine-readable outputs. The canonical Report
-// is never mutated: its rows and nested slices are copied before sanitizing.
-// Verdict and Qualifier are app-defined enums, not upstream data, and stay
-// as-is.
+// string (row text, group lists, release fields, incomplete-mapping links)
+// passed through sanitizeDisplayText, for the machine-readable outputs. The
+// canonical Report is never mutated: its rows and nested slices are copied
+// before sanitizing. Verdict, Qualifier, and release Warnings are app-defined
+// vocabularies (CurationWarnings returns canonical constants, never raw
+// upstream tag bytes), not upstream data, and stay as-is.
 func sanitizeOutput(r *Report) *Report {
 	out := *r
 	out.Rows = slices.Clone(r.Rows)
@@ -504,6 +563,13 @@ func sanitizeOutput(r *Report) *Report {
 			}
 			row.Releases = rels
 		}
+	}
+	if len(out.Incomplete) > 0 {
+		inc := slices.Clone(r.Incomplete)
+		for i := range inc {
+			inc[i].SeaDexURL = sanitizeDisplayText(inc[i].SeaDexURL)
+		}
+		out.Incomplete = inc
 	}
 	return &out
 }

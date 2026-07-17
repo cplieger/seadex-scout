@@ -133,12 +133,20 @@ type Memo struct {
 // memo to persist. Degraded is set when a needed AniList fallback lookup could
 // not be completed because of a transient/upstream error (not a definitive
 // not-found), so the caller can preserve prior findings rather than treat the
-// missing matches as resolved.
+// missing matches as resolved. IncompleteIDs scopes that degradation: it holds
+// exactly the AniList ids whose needed lookup failed transiently this pass, so
+// the caller can preserve the affected entries' prior findings while handling
+// the unaffected majority normally. An id served from the memo or answered
+// with a definitive not-found is complete, never in the set; a pass cut short
+// by context cancellation is Degraded with the ids it never attempted absent
+// from the set (the caller treats a shutdown as a whole-cycle event). With a
+// live context, Degraded is true exactly when IncompleteIDs is non-empty.
 type Result struct {
-	Coverage Coverage
-	Memo     Memo
-	Matches  []Match
-	Degraded bool
+	Coverage      Coverage
+	Memo          Memo
+	IncompleteIDs map[int]struct{}
+	Matches       []Match
+	Degraded      bool
 }
 
 // Matcher links entries using the mapping index and the AniList fallback.
@@ -207,7 +215,9 @@ func pruneExpired(memo *Memo, now time.Time) {
 // entries are migrated onto the expiry policy, renewed lookups are re-stamped,
 // and entries still expired at the end of the pass are pruned, so every save
 // persists a pruned memo. It never fails as a whole: an AniList fallback error
-// for one entry is logged and that entry is left unmatched.
+// for one entry is logged, that entry is left unmatched, and its id is
+// reported in Result.IncompleteIDs so the caller can scope its degradation
+// handling to the affected entries.
 func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *library.Snapshot, idx *mapping.Index, memo Memo) Result {
 	lib := buildLibIndex(snap)
 	if memo.Entries == nil {
@@ -239,7 +249,7 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 		matches = append(matches, run.matchEntry(ctx, &entries[i]))
 	}
 	pruneExpired(&memo, now)
-	return Result{Coverage: cov, Memo: memo, Matches: matches, Degraded: run.degraded}
+	return Result{Coverage: cov, Memo: memo, Matches: matches, Degraded: run.degraded, IncompleteIDs: run.incomplete}
 }
 
 // matchRun carries one Match call's shared state so the per-entry helpers do
@@ -255,6 +265,10 @@ type matchRun struct {
 	// breaker trips, every remaining uncached id fail fast instead of
 	// re-hitting the down upstream.
 	gate *lookupGate
+	// incomplete accumulates the AniList ids whose needed lookup failed
+	// transiently this pass (see markIncomplete); Match surfaces it as
+	// Result.IncompleteIDs. Nil until the first failure.
+	incomplete map[int]struct{}
 	// now is the run's single clock reading: every expiry comparison and stamp
 	// in one Match pass uses it, so a slow (rate-limited) pass cannot straddle
 	// an expiry mid-run and prune agrees with the lookups.
@@ -263,6 +277,18 @@ type matchRun struct {
 	// completed because of a transient/upstream error; Match surfaces it as
 	// Result.Degraded.
 	degraded bool
+}
+
+// markIncomplete flags the pass degraded and records the AniList id whose
+// needed lookup failed transiently, so Result.IncompleteIDs carries exactly
+// the entries whose library mapping is unknown this pass (never the memoized
+// or definitively answered ones).
+func (r *matchRun) markIncomplete(aniListID int) {
+	r.degraded = true
+	if r.incomplete == nil {
+		r.incomplete = make(map[int]struct{})
+	}
+	r.incomplete[aniListID] = struct{}{}
 }
 
 // entryExpiry draws one fresh jittered expiry from the run's clock. Each memo
@@ -507,9 +533,9 @@ func (r *matchRun) lookupAniList(ctx context.Context, aniListID int) (anilist.Me
 	}
 	if r.gate.down(aniListID) {
 		// Degrade fast through the existing accounting (the prefetch already
-		// logged the single outage WARN): the cycle preserves prior findings
-		// rather than treating the missing match as resolved.
-		r.degraded = true
+		// logged the single outage WARN): the affected entry's prior findings
+		// are preserved rather than the missing match read as resolved.
+		r.markIncomplete(aniListID)
 		return anilist.Media{}, false
 	}
 	media, err := r.m.anilist.Fetch(ctx, aniListID)
@@ -520,10 +546,11 @@ func (r *matchRun) lookupAniList(ctx context.Context, aniListID int) (anilist.Me
 		} else {
 			// A transient/upstream error (network, context cancellation, rate-limit
 			// exhaustion) means this needed fallback lookup could not be completed.
-			// Flag the cycle degraded so the caller preserves prior findings rather
-			// than treating the missing match as a resolved finding, and leave the
+			// Record the id as incomplete (flagging the cycle degraded) so the
+			// caller preserves the affected entry's prior findings rather than
+			// treating the missing match as a resolved finding, and leave the
 			// id un-memoized so it is retried next cycle.
-			r.degraded = true
+			r.markIncomplete(aniListID)
 			if errors.Is(err, context.Canceled) {
 				// A cancellation is not a fault (same contract as Scout.save):
 				// log at Debug so a redeploy is not attributed to an AniList outage.

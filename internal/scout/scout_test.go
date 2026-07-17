@@ -36,8 +36,8 @@ func (f *fakeSonarr) GetEpisodes(_ context.Context, seriesID int) ([]arrapi.Epis
 	return f.episodes[seriesID], nil
 }
 
-func (f *fakeSonarr) ResolveTagIDs(context.Context, ...string) (map[int]struct{}, []string, error) {
-	return nil, nil, nil
+func (f *fakeSonarr) GetTags(context.Context) ([]arrapi.Tag, error) {
+	return nil, nil
 }
 
 // flakySonarr wraps fakeSonarr but fails GetEpisodes for the listed series
@@ -221,9 +221,8 @@ func TestCycleSeaDexFailureIsHealthyAndPreservesFindings(t *testing.T) {
 	logger := scoutTestLogger()
 	prior := report.Alerted{
 		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Finding: compare.Finding{
+		Finding: report.StoredFinding{
 			Title:     "Existing finding",
-			DedupeKey: "prior",
 			Status:    compare.StatusBetter,
 			AniListID: 154587,
 		},

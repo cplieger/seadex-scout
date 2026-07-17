@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/library"
@@ -263,9 +264,10 @@ func (degradedAniList) FetchMany(context.Context, []int) (map[int]anilist.Media,
 
 // TestMatchAniListTransientErrorDegrades covers the degraded path: when a needed
 // AniList fallback lookup fails transiently (not ErrNotFound), Match flags the
-// result Degraded so the caller preserves prior findings instead of resolving
-// them, leaves the entry unmapped, and does NOT memoize the id (so it is retried
-// next cycle rather than cached as a permanent miss).
+// result Degraded and reports the id in IncompleteIDs so the caller preserves
+// the affected entry's prior findings instead of resolving them, leaves the
+// entry unmapped, and does NOT memoize the id (so it is retried next cycle
+// rather than cached as a permanent miss).
 func TestMatchAniListTransientErrorDegrades(t *testing.T) {
 	snap := &library.Snapshot{}
 	idx := mapping.NewIndex(nil) // no Fribb record: the entry resolves via AniList
@@ -275,6 +277,9 @@ func TestMatchAniListTransientErrorDegrades(t *testing.T) {
 
 	if !res.Degraded {
 		t.Error("Degraded = false, want true when a needed AniList lookup fails transiently")
+	}
+	if _, ok := res.IncompleteIDs[42]; !ok || len(res.IncompleteIDs) != 1 {
+		t.Errorf("IncompleteIDs = %v, want exactly {42} (the transiently failed lookup)", res.IncompleteIDs)
 	}
 	if len(res.Matches) != 1 || res.Matches[0].Source != SourceUnmapped {
 		t.Errorf("entry should be unmapped on a transient failure, got %+v", res.Matches)
@@ -543,6 +548,114 @@ func TestMatchEmptyFormatTitleFallbackSearchesBothArrs(t *testing.T) {
 	if res.Coverage.Unmapped[arrUnknown] != 1 {
 		t.Errorf("unknown unmapped coverage = %d, want 1", res.Coverage.Unmapped[arrUnknown])
 	}
+}
+
+// TestMatchMemoizedSteadyStateSurvivesOutage pins the memo's degradation
+// shield (test b of mc-degradation-scoping): with every needed id served by a
+// live memo entry, a TOTAL AniList outage triggers no lookup, no degradation,
+// and no incomplete ids - the memoized steady state is outage-immune, so a
+// long-running daemon does not degrade its cycles over an upstream it never
+// needed to consult.
+func TestMatchMemoizedSteadyStateSurvivesOutage(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrRadarr, ArrID: 1, Title: "Movie A", TmdbID: 100, Year: 2020},
+	}}
+	idx := mapping.NewIndex([]mapping.Record{{AniListID: 11, Type: "MOVIE"}}) // id-less: the lookup is needed
+	memo := Memo{Entries: map[int]MemoEntry{
+		11: {Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020, Expiry: time.Now().Add(time.Hour)},
+	}}
+
+	res := NewMatcher(degradedAniList{}, nil).Match(context.Background(), []seadex.Entry{{AniListID: 11}}, snap, idx, memo)
+
+	if res.Degraded {
+		t.Error("Degraded = true, want false: the live memo served every needed lookup")
+	}
+	if len(res.IncompleteIDs) != 0 {
+		t.Errorf("IncompleteIDs = %v, want none for a memo-served pass", res.IncompleteIDs)
+	}
+	if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != SourceTitle {
+		t.Errorf("matches = %+v, want the one memo-served title match", res.Matches)
+	}
+}
+
+// TestMatchIncompleteIDsScope pins Result.IncompleteIDs' membership rule: the
+// set carries exactly the AniList ids whose NEEDED lookup failed transiently
+// this pass. An id resolved by the ID bridge (no lookup), one answered by the
+// batch prefetch, and one answered with a definitive not-found are complete
+// and stay out; a total batch outage puts every pending id in through the
+// fast-fail gate.
+func TestMatchIncompleteIDsScope(t *testing.T) {
+	t.Run("partial outage marks only the per-id transient failure", func(t *testing.T) {
+		snap := &library.Snapshot{Items: []library.Item{
+			{Arr: library.ArrSonarr, ArrID: 1, Title: "In Library", TvdbID: 111},
+		}}
+		idx := mapping.NewIndex([]mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 111}})
+		// FetchMany returns 40's media with an error (a failed later chunk):
+		// a PARTIAL batch failure, so 41 and 42 fall to the per-id Fetch,
+		// where 41 gets a definitive not-found and 42 a transient failure.
+		fake := &partialThenPerIDAniList{media: map[int]anilist.Media{
+			40: {Titles: []string{"Returned"}, Format: "TV"},
+		}}
+
+		res := NewMatcher(fake, nil).Match(context.Background(),
+			[]seadex.Entry{{AniListID: 154587}, {AniListID: 40}, {AniListID: 41}, {AniListID: 42}},
+			snap, idx, Memo{})
+
+		if !res.Degraded {
+			t.Error("Degraded = false, want true: one needed lookup failed transiently")
+		}
+		if _, ok := res.IncompleteIDs[42]; !ok || len(res.IncompleteIDs) != 1 {
+			t.Errorf("IncompleteIDs = %v, want exactly {42}: the ID-resolved, batch-answered, and not-found ids are complete", res.IncompleteIDs)
+		}
+		if ent, ok := res.Memo.Entries[41]; !ok || !ent.NotFound {
+			t.Errorf("memo[41] = %+v (present=%v), want the definitive not-found memoized", ent, ok)
+		}
+		if _, cached := res.Memo.Entries[42]; cached {
+			t.Error("the transiently failed id 42 must stay un-memoized for next cycle's retry")
+		}
+	})
+	t.Run("total outage marks every pending id", func(t *testing.T) {
+		snap := &library.Snapshot{}
+		idx := mapping.NewIndex(nil)
+
+		res := NewMatcher(degradedAniList{}, nil).Match(context.Background(),
+			[]seadex.Entry{{AniListID: 41}, {AniListID: 42}}, snap, idx, Memo{})
+
+		if !res.Degraded {
+			t.Error("Degraded = false, want true on a total AniList outage")
+		}
+		if len(res.IncompleteIDs) != 2 {
+			t.Errorf("IncompleteIDs = %v, want both pending ids (the outage fast-fail affects each needed entry)", res.IncompleteIDs)
+		}
+		for _, id := range []int{41, 42} {
+			if _, ok := res.IncompleteIDs[id]; !ok {
+				t.Errorf("IncompleteIDs missing %d: %v", id, res.IncompleteIDs)
+			}
+		}
+	})
+}
+
+// partialThenPerIDAniList models a partial AniList incident for the
+// IncompleteIDs scope test: FetchMany answers the ids present in media but
+// fails the batch (a failed later chunk), and the per-id Fetch answers 41
+// with a definitive not-found while everything else fails transiently.
+type partialThenPerIDAniList struct{ media map[int]anilist.Media }
+
+func (p *partialThenPerIDAniList) Fetch(_ context.Context, id int) (anilist.Media, error) {
+	if id == 41 {
+		return anilist.Media{}, anilist.ErrNotFound
+	}
+	return anilist.Media{}, context.DeadlineExceeded
+}
+
+func (p *partialThenPerIDAniList) FetchMany(_ context.Context, ids []int) (map[int]anilist.Media, error) {
+	out := make(map[int]anilist.Media)
+	for _, id := range ids {
+		if m, ok := p.media[id]; ok {
+			out[id] = m
+		}
+	}
+	return out, context.DeadlineExceeded
 }
 
 // TestBuildLibIndexNilSnapshot pins the defensive nil-snapshot guard: a nil

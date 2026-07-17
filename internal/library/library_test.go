@@ -21,16 +21,17 @@ func discardLogger() *slog.Logger {
 }
 
 // fakeSonarr is a scripted SonarrClient: GetSeries returns series (or listErr),
-// GetEpisodes returns episodes[id] (or epErr[id]), ResolveTagIDs returns the
-// canned tag set.
+// GetEpisodes returns episodes[id] (or epErr[id]), GetTags returns the canned
+// tag list (or tagErr) and counts its calls so tests can pin the
+// one-fetch-per-walk tag-resolution contract.
 type fakeSonarr struct {
-	episodes  map[int][]arrapi.Episode
-	epErr     map[int]error
-	tagIDs    map[int]struct{}
-	listErr   error
-	tagErr    error
-	series    []arrapi.Series
-	unmatched []string
+	episodes map[int][]arrapi.Episode
+	epErr    map[int]error
+	listErr  error
+	tagErr   error
+	series   []arrapi.Series
+	tags     []arrapi.Tag
+	tagCalls int
 }
 
 func (f *fakeSonarr) GetSeries(context.Context) ([]arrapi.Series, error) {
@@ -44,8 +45,9 @@ func (f *fakeSonarr) GetEpisodes(_ context.Context, seriesID int) ([]arrapi.Epis
 	return f.episodes[seriesID], nil
 }
 
-func (f *fakeSonarr) ResolveTagIDs(context.Context, ...string) (map[int]struct{}, []string, error) {
-	return f.tagIDs, f.unmatched, f.tagErr
+func (f *fakeSonarr) GetTags(context.Context) ([]arrapi.Tag, error) {
+	f.tagCalls++
+	return f.tags, f.tagErr
 }
 
 func epFile(group string) *arrapi.EpisodeFile {
@@ -196,7 +198,7 @@ func TestWalkAppliesIncludeTagFilter(t *testing.T) {
 		episodes: map[int][]arrapi.Episode{
 			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
 		},
-		tagIDs: map[int]struct{}{7: {}},
+		tags: []arrapi.Tag{{ID: 7, Label: "anime"}},
 	}
 	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: discardLogger()})
 
@@ -207,6 +209,70 @@ func TestWalkAppliesIncludeTagFilter(t *testing.T) {
 	if len(snap.Items) != 1 || snap.Items[0].ArrID != 1 {
 		t.Fatalf("items = %+v, want only the tag-included series (id 1)", snap.Items)
 	}
+}
+
+// TestWalkResolvesTagsWithOneFetchPerArr pins the single-fetch tag-resolution
+// contract: the include AND exclude label sets resolve against ONE tag-list
+// fetch per arr per walk (resolved locally via arrapi.TagIDs /
+// UnmatchedLabels), and a walker with no tag filters configured never fetches
+// the tag list at all.
+func TestWalkResolvesTagsWithOneFetchPerArr(t *testing.T) {
+	t.Run("include and exclude share one fetch per arr", func(t *testing.T) {
+		fs := &fakeSonarr{
+			series: []arrapi.Series{
+				{ID: 1, Title: "Kept", Tags: []int{7}},
+				{ID: 2, Title: "Excluded", Tags: []int{7, 9}},
+			},
+			episodes: map[int][]arrapi.Episode{
+				1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
+			},
+			tags: []arrapi.Tag{{ID: 7, Label: "anime"}, {ID: 9, Label: "skip"}},
+		}
+		fr := &fakeRadarr{
+			movies: []arrapi.Movie{{ID: 10, Title: "Kept Movie", Tags: []int{7}}},
+			tags:   []arrapi.Tag{{ID: 7, Label: "anime"}, {ID: 9, Label: "skip"}},
+		}
+		w := NewWalker(&Config{
+			Sonarr:      fs,
+			Radarr:      fr,
+			IncludeTags: []string{"anime"},
+			ExcludeTags: []string{"skip"},
+			Logger:      discardLogger(),
+		})
+
+		snap, err := w.Walk(context.Background())
+		if err != nil {
+			t.Fatalf("Walk: %v", err)
+		}
+		if fs.tagCalls != 1 {
+			t.Errorf("sonarr tag-list fetches = %d, want exactly 1 for both label sets", fs.tagCalls)
+		}
+		if fr.tagCalls != 1 {
+			t.Errorf("radarr tag-list fetches = %d, want exactly 1 for both label sets", fr.tagCalls)
+		}
+		if len(snap.Items) != 2 {
+			t.Fatalf("items = %+v, want the include-tagged series and movie only", snap.Items)
+		}
+		for _, it := range snap.Items {
+			if it.Arr == ArrSonarr && it.ArrID == 2 {
+				t.Error("excluded series (id 2) present, want it dropped by the exclude set from the shared fetch")
+			}
+		}
+	})
+	t.Run("no configured tag filters means no fetch", func(t *testing.T) {
+		fs := &fakeSonarr{
+			series:   []arrapi.Series{{ID: 1, Title: "Alpha"}},
+			episodes: map[int][]arrapi.Episode{1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}}},
+		}
+		fr := &fakeRadarr{movies: []arrapi.Movie{{ID: 2, Title: "Movie"}}}
+		w := NewWalker(&Config{Sonarr: fs, Radarr: fr, Logger: discardLogger()})
+		if _, err := w.Walk(context.Background()); err != nil {
+			t.Fatalf("Walk: %v", err)
+		}
+		if fs.tagCalls != 0 || fr.tagCalls != 0 {
+			t.Errorf("tag-list fetches = sonarr %d / radarr %d, want 0/0 with no tag filters configured", fs.tagCalls, fr.tagCalls)
+		}
+	})
 }
 
 func TestIsDualAudio(t *testing.T) {
@@ -390,8 +456,8 @@ func (f *boundedSonarr) GetEpisodes(ctx context.Context, seriesID int) ([]arrapi
 	}
 }
 
-func (f *boundedSonarr) ResolveTagIDs(context.Context, ...string) (map[int]struct{}, []string, error) {
-	return nil, nil, nil
+func (f *boundedSonarr) GetTags(context.Context) ([]arrapi.Tag, error) {
+	return nil, nil
 }
 
 func (f *boundedSonarr) max() int {
@@ -499,8 +565,8 @@ func (f *cancelingSonarr) GetEpisodes(ctx context.Context, _ int) ([]arrapi.Epis
 	return nil, ctx.Err()
 }
 
-func (f *cancelingSonarr) ResolveTagIDs(context.Context, ...string) (map[int]struct{}, []string, error) {
-	return nil, nil, nil
+func (f *cancelingSonarr) GetTags(context.Context) ([]arrapi.Tag, error) {
+	return nil, nil
 }
 
 func TestWalkSonarrEpisodeCancellationIsFatalWithoutWarn(t *testing.T) {
@@ -521,21 +587,23 @@ func TestWalkSonarrEpisodeCancellationIsFatalWithoutWarn(t *testing.T) {
 	}
 }
 
-// fakeRadarr is a scripted RadarrClient.
+// fakeRadarr is a scripted RadarrClient. GetTags counts its calls so tests can
+// pin the one-fetch-per-walk tag-resolution contract.
 type fakeRadarr struct {
-	tagIDs    map[int]struct{}
-	listErr   error
-	tagErr    error
-	movies    []arrapi.Movie
-	unmatched []string
+	listErr  error
+	tagErr   error
+	movies   []arrapi.Movie
+	tags     []arrapi.Tag
+	tagCalls int
 }
 
 func (f *fakeRadarr) GetMovies(context.Context) ([]arrapi.Movie, error) {
 	return f.movies, f.listErr
 }
 
-func (f *fakeRadarr) ResolveTagIDs(context.Context, ...string) (map[int]struct{}, []string, error) {
-	return f.tagIDs, f.unmatched, f.tagErr
+func (f *fakeRadarr) GetTags(context.Context) ([]arrapi.Tag, error) {
+	f.tagCalls++
+	return f.tags, f.tagErr
 }
 
 func TestWalkRadarrAppliesExcludeTagsAndBuildsMovieItem(t *testing.T) {
@@ -558,7 +626,7 @@ func TestWalkRadarrAppliesExcludeTagsAndBuildsMovieItem(t *testing.T) {
 			},
 			{ID: 20, Title: "Dropped Movie", Tags: []int{9}, HasFile: true, MovieFile: &arrapi.MovieFile{ReleaseGroup: "Other"}},
 		},
-		tagIDs: map[int]struct{}{9: {}},
+		tags: []arrapi.Tag{{ID: 9, Label: "skip"}},
 	}
 	w := NewWalker(&Config{Radarr: fr, ExcludeTags: []string{"skip"}, RadarrURL: "https://radarr.example", Logger: discardLogger()})
 
@@ -613,8 +681,8 @@ func TestDiffSnapshotsDetectsFingerprintChangeWithSameGroup(t *testing.T) {
 }
 
 // TestWalkSonarrTagResolutionCancellationIsFatal proves that a context
-// cancellation surfaced by ResolveTagIDs aborts the whole walk rather than
-// fail-opening the filter.
+// cancellation surfaced by the tag-list fetch aborts the whole walk rather
+// than fail-opening the filter.
 func TestWalkSonarrTagResolutionCancellationIsFatal(t *testing.T) {
 	fs := &fakeSonarr{
 		series: []arrapi.Series{{ID: 1, Title: "Alpha"}},
@@ -662,16 +730,18 @@ func TestWalkSonarrTagResolutionErrorFailsClosed(t *testing.T) {
 	if !errors.Is(err, boom) {
 		t.Fatalf("Walk error = %v, want the tag-resolution failure propagated (fail closed)", err)
 	}
-	if !strings.Contains(err.Error(), "arr_tags.include") {
-		t.Errorf("error = %q, want it to name the failing label set", err.Error())
+	// The tag list is fetched once for both label sets, so the error names the
+	// arr_tags resolution step rather than a single label set.
+	if !strings.Contains(err.Error(), "arr_tags") {
+		t.Errorf("error = %q, want it to name the arr_tags resolution step", err.Error())
 	}
 }
 
 // TestWalkSonarrTagResolutionLiveTimeoutFailsClosed pins the
 // per-request-timeout contract: arrapi wraps each request in its own
-// context.WithTimeout, so a DeadlineExceeded surfaced by ResolveTagIDs while
-// the walk context is still live is a real resolution failure and fails the
-// walk closed like any other tag error.
+// context.WithTimeout, so a DeadlineExceeded surfaced by the tag-list fetch
+// while the walk context is still live is a real resolution failure and fails
+// the walk closed like any other tag error.
 func TestWalkSonarrTagResolutionLiveTimeoutFailsClosed(t *testing.T) {
 	fs := &fakeSonarr{
 		series:   []arrapi.Series{{ID: 1, Title: "Alpha", Tags: []int{1}}},
@@ -779,8 +849,7 @@ func TestWalkSonarrUnmatchedIncludeTagLogsWarning(t *testing.T) {
 		episodes: map[int][]arrapi.Episode{
 			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
 		},
-		tagIDs:    map[int]struct{}{7: {}},
-		unmatched: []string{"nonexistent"},
+		tags: []arrapi.Tag{{ID: 7, Label: "anime"}},
 	}
 	logger, rec := capture.New()
 	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime", "nonexistent"}, Logger: logger})
@@ -813,8 +882,7 @@ func TestWalkUnmatchedTagWarningNeverEmitsTagValues(t *testing.T) {
 		episodes: map[int][]arrapi.Episode{
 			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
 		},
-		tagIDs:    map[int]struct{}{7: {}},
-		unmatched: []string{secret},
+		tags: []arrapi.Tag{{ID: 7, Label: "anime"}},
 	}
 	logger, rec := capture.New()
 	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime", secret}, Logger: logger})
@@ -1287,8 +1355,8 @@ func (f *budgetSonarr) GetEpisodes(ctx context.Context, seriesID int) ([]arrapi.
 	}
 }
 
-func (f *budgetSonarr) ResolveTagIDs(context.Context, ...string) (map[int]struct{}, []string, error) {
-	return nil, nil, nil
+func (f *budgetSonarr) GetTags(context.Context) ([]arrapi.Tag, error) {
+	return nil, nil
 }
 
 // TestWalkSonarrBudgetTripSkipsQueuedFetches pins the cancel-on-budget

@@ -1,6 +1,7 @@
 package report
 
 import (
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"testing"
@@ -40,6 +41,13 @@ func testFinding(key, title string) compare.Finding {
 	}
 }
 
+// storedTestFinding is testFinding projected onto the persisted dedupe
+// record, for building prior-state maps the way a previous cycle would have.
+func storedTestFinding(key, title string) StoredFinding {
+	f := testFinding(key, title)
+	return storedFinding(&f)
+}
+
 func TestReporterBaselineSeedsWithoutFindingNotification(t *testing.T) {
 	reporter, recorder := newCapturedReporter()
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -70,8 +78,8 @@ func TestReporterReportSuppressesExistingAndEmitsNewAndResolved(t *testing.T) {
 	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	prior := map[string]Alerted{
-		"same": {AlertedAt: oldTime, Finding: testFinding("same", "Frieren")},
-		"old":  {AlertedAt: oldTime, Finding: testFinding("old", "Old Title")},
+		"same": {AlertedAt: oldTime, Finding: storedTestFinding("same", "Frieren")},
+		"old":  {AlertedAt: oldTime, Finding: storedTestFinding("old", "Old Title")},
 	}
 
 	current := reporter.Report([]compare.Finding{
@@ -116,8 +124,8 @@ func TestReporterReportPreservesFailedItemsFindings(t *testing.T) {
 	resolvable := testFinding("clean-gone", "Aligned Now")
 	resolvable.AniListID = 333
 	prior := map[string]Alerted{
-		"failed-item": {AlertedAt: oldTime, Finding: failedFinding},
-		"clean-gone":  {AlertedAt: oldTime, Finding: resolvable},
+		"failed-item": {AlertedAt: oldTime, Finding: storedFinding(&failedFinding)},
+		"clean-gone":  {AlertedAt: oldTime, Finding: storedFinding(&resolvable)},
 	}
 
 	current := reporter.Report(nil, prior, map[int]struct{}{222: {}}, time.Now())
@@ -165,32 +173,97 @@ func TestFindingLogSanitizesArrURL(t *testing.T) {
 	}
 }
 
-// TestStoredFindingSanitizesArrURL pins the persistence trust boundary on the
-// arr deep-link (mirroring TestFindingLogSanitizesArrURL's log boundary): the
-// dedupe records Report and Baseline return - which the caller persists to
-// state.json - must never carry a credentialed public_url. All three storage
-// sites are covered: a new finding, a suppressed (already-alerted) finding,
-// and a cold-start baseline.
-func TestStoredFindingSanitizesArrURL(t *testing.T) {
+// TestStoredFindingTrimsToResolutionFields pins the dedupe record's
+// persistence contract: the record persists exactly the fields the resolution
+// path reads back (emitResolved's line plus the failed-item preservation
+// keyed on AniListID), so everything else in a Finding - including a
+// credentialed ArrURL, whose on-disk sanitization the trim made moot - never
+// lands in state.json. All three storage sites project identically: a new
+// finding, a suppressed (already-alerted) finding, and a cold-start baseline.
+func TestStoredFindingTrimsToResolutionFields(t *testing.T) {
 	reporter, _ := newCapturedReporter()
 	finding := testFinding("cred", "Frieren")
 	finding.ArrURL = "https://user:password@sonarr.example/series/frieren?token=secret#frag"
-	const want = "https://sonarr.example/series/frieren"
+	finding.Season = 2
 	now := time.Now()
+	want := StoredFinding{
+		Arr:              "sonarr",
+		CurrentGroup:     "erai-raws",
+		RecommendedGroup: "SubsPlease",
+		Title:            "Frieren",
+		Status:           compare.StatusBetter,
+		AniListID:        154587,
+		Season:           2,
+	}
 
 	current := reporter.Report([]compare.Finding{finding}, nil, nil, now)
-	if got := current["cred"].Finding.ArrURL; got != want {
-		t.Errorf("new-finding stored ArrURL = %q, want %q", got, want)
+	if got := current["cred"].Finding; got != want {
+		t.Errorf("new-finding stored record = %+v, want %+v", got, want)
 	}
 
 	suppressed := reporter.Report([]compare.Finding{finding}, current, nil, now)
-	if got := suppressed["cred"].Finding.ArrURL; got != want {
-		t.Errorf("suppressed-finding stored ArrURL = %q, want %q", got, want)
+	if got := suppressed["cred"].Finding; got != want {
+		t.Errorf("suppressed-finding stored record = %+v, want %+v", got, want)
 	}
 
 	baseline := reporter.Baseline([]compare.Finding{finding}, now)
-	if got := baseline["cred"].Finding.ArrURL; got != want {
-		t.Errorf("baselined stored ArrURL = %q, want %q", got, want)
+	if got := baseline["cred"].Finding; got != want {
+		t.Errorf("baselined stored record = %+v, want %+v", got, want)
+	}
+}
+
+// TestAlertedDecodesLegacyFullFindingRecord pins the trimmed record's
+// state-file compatibility: a dedupe record persisted BEFORE the trim carries
+// the full sanitized Finding (arr_url, links, dedupe_key, severity, ...), and
+// decoding it into the trimmed StoredFinding must succeed with every
+// read-back field intact and the extra fields ignored - an upgrade keeps
+// dedupe continuity (keys and alert times) without a state reset. A json tag
+// drifting from compare.Finding's would silently blank a resolution field on
+// every upgraded install; this fails instead.
+func TestAlertedDecodesLegacyFullFindingRecord(t *testing.T) {
+	legacy := `{
+		"alerted_at": "2026-01-01T00:00:00Z",
+		"finding": {
+			"kind": "encode",
+			"classification_reason": "encoder marker: x265",
+			"arr": "sonarr",
+			"current_group": "erai-raws",
+			"recommended_group": "SubsPlease",
+			"tracker": "Nyaa",
+			"title": "Frieren",
+			"resolution": "1080p",
+			"severity": "warn",
+			"codec": "x265",
+			"release_url": "https://nyaa.si/view/1",
+			"arr_url": "https://sonarr.example/series/frieren",
+			"info_hash": "hash-1",
+			"dedupe_key": "legacy-key",
+			"status": "better_release",
+			"recommended_groups": ["SubsPlease"],
+			"links": [{"tracker": "Nyaa", "url": "https://nyaa.si/view/1"}],
+			"al_id": 154587,
+			"season": 2,
+			"dual_audio": true
+		}
+	}`
+	var got Alerted
+	if err := json.Unmarshal([]byte(legacy), &got); err != nil {
+		t.Fatalf("decoding a pre-trim dedupe record: %v", err)
+	}
+	want := StoredFinding{
+		Arr:              "sonarr",
+		CurrentGroup:     "erai-raws",
+		RecommendedGroup: "SubsPlease",
+		Title:            "Frieren",
+		Status:           compare.StatusBetter,
+		AniListID:        154587,
+		Season:           2,
+	}
+	if got.Finding != want {
+		t.Errorf("decoded record = %+v, want %+v", got.Finding, want)
+	}
+	if wantAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC); !got.AlertedAt.Equal(wantAt) {
+		t.Errorf("decoded AlertedAt = %s, want %s", got.AlertedAt, wantAt)
 	}
 }
 

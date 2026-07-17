@@ -261,12 +261,15 @@ func TestReportStaleMapWarnsAndStillAudits(t *testing.T) {
 	}
 }
 
-// TestReportDegradedMatchingErrors pins Report's match-completeness gate: an
-// incomplete match result must fail the one-shot report - naming AniList when
-// the degradation is a transient upstream failure, and naming the shutdown
-// interruption (not AniList) when the context was cancelled mid-match.
-func TestReportDegradedMatchingErrors(t *testing.T) {
-	t.Run("anilist transiently degraded", func(t *testing.T) {
+// TestReportDegradedMatching pins report mode's two degraded-match arms
+// (test c of mc-degradation-scoping): a transient AniList failure no longer
+// aborts the one-shot report - it renders the audit with the affected entries
+// listed in the incomplete-mapping section (the unaffected rows still audit,
+// and the run exits through the normal success path) - while a shutdown
+// mid-match still errors, since a truncated match set has no complete audit
+// to render.
+func TestReportDegradedMatching(t *testing.T) {
+	t.Run("anilist transiently degraded renders incomplete section", func(t *testing.T) {
 		logger := scoutTestLogger()
 		sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
 		s := New(&Deps{
@@ -276,17 +279,26 @@ func TestReportDegradedMatchingErrors(t *testing.T) {
 			Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
 			SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
 			Matcher: match.NewMatcher(degradedMatcherAniList{}, logger),
+			Auditor: audit.NewAuditor(audit.Config{SeaDexBaseURL: "https://releases.moe"}),
 		})
 
-		_, err := s.Report(context.Background())
-		if err == nil {
-			t.Fatal("Report returned nil error, want an anilist-degraded error")
+		rep, err := s.Report(context.Background())
+		if err != nil {
+			t.Fatalf("Report with a transient AniList failure returned error %v, want a rendered report with the incomplete section", err)
 		}
-		if !strings.Contains(err.Error(), "anilist lookups degraded") {
-			t.Errorf("error = %q, want anilist-degraded context", err.Error())
+		if len(rep.Incomplete) != 1 || rep.Incomplete[0].AniListID != 999 {
+			t.Fatalf("rep.Incomplete = %+v, want the one affected entry (al_id 999)", rep.Incomplete)
+		}
+		if rep.Incomplete[0].SeaDexURL != "https://releases.moe/999" {
+			t.Errorf("incomplete entry SeaDexURL = %q, want the releases.moe link", rep.Incomplete[0].SeaDexURL)
+		}
+		// The unaffected majority still audits: the Fribb-catalogued library
+		// item (covered by no SeaDex match) renders as its not_on_seadex row.
+		if len(rep.Rows) != 1 || rep.Rows[0].Verdict != audit.VerdictNotOnSeaDex {
+			t.Errorf("rows = %+v, want the one not_on_seadex row for the unaffected library item", rep.Rows)
 		}
 	})
-	t.Run("shutdown during matching", func(t *testing.T) {
+	t.Run("shutdown during matching still errors", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		logger := scoutTestLogger()

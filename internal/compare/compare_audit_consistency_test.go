@@ -147,7 +147,7 @@ func TestCompareAuditConsistency(t *testing.T) {
 				}
 			}
 
-			rep := audit.NewAuditor(audit.Config{SeaDexBaseURL: "https://releases.moe"}).Audit([]match.Match{m}, nil, nil)
+			rep := audit.NewAuditor(audit.Config{SeaDexBaseURL: "https://releases.moe"}).Audit([]match.Match{m}, nil, nil, nil)
 			if len(rep.Rows) != 1 {
 				t.Fatalf("audit rows = %d, want 1", len(rep.Rows))
 			}

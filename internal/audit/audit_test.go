@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -56,7 +57,7 @@ func TestAuditNotOnSeaDex(t *testing.T) {
 		Record: mapping.Record{Type: "TV", TvdbID: 100, SeasonTvdb: 1},
 	}}
 
-	rep := a.Audit(matches, snap, idx)
+	rep := a.Audit(matches, snap, idx, nil)
 
 	got := map[string]bool{}
 	for i := range rep.Rows {
@@ -99,7 +100,7 @@ func TestAuditNotOnSeaDexHonorsExcludeSpecials(t *testing.T) {
 
 	rowsFor := func(exclude bool) map[string]bool {
 		a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe", ExcludeSpecials: exclude})
-		rep := a.Audit(nil, snap, idx)
+		rep := a.Audit(nil, snap, idx, nil)
 		got := map[string]bool{}
 		for i := range rep.Rows {
 			if rep.Rows[i].Verdict == VerdictNotOnSeaDex {
@@ -140,7 +141,7 @@ func TestAuditNoGroupMatchesBest(t *testing.T) {
 		Record: mapping.Record{Type: "TV", TvdbID: 900, SeasonTvdb: 1},
 	}}
 
-	rep := a.Audit(matches, snap, idx)
+	rep := a.Audit(matches, snap, idx, nil)
 
 	var got Verdict
 	for i := range rep.Rows {
@@ -222,7 +223,7 @@ func TestAuditRoutesWholeSeriesAndSkips(t *testing.T) {
 		},
 	}
 
-	rep := a.Audit(matches, nil, nil)
+	rep := a.Audit(matches, nil, nil, nil)
 
 	if len(rep.Rows) != 1 {
 		t.Fatalf("rows = %d, want 1 (not-in-library and excluded special skipped; nil snapshot adds nothing)", len(rep.Rows))
@@ -276,7 +277,7 @@ func TestAuditMislabeledAnimeBytesURLHiddenWhenOff(t *testing.T) {
 		} {
 			t.Run(sneakyURL+" "+tt.name, func(t *testing.T) {
 				a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe", AnimeBytes: tt.animeBytes})
-				rep := a.Audit(matches, snap, mapping.NewIndex(nil))
+				rep := a.Audit(matches, snap, mapping.NewIndex(nil), nil)
 				var row *Row
 				for i := range rep.Rows {
 					if rep.Rows[i].AniListID == 11 {
@@ -343,6 +344,32 @@ func TestSortRowsOrdersByVerdictThenTitle(t *testing.T) {
 	}
 }
 
+// TestAuditIncompleteMappings pins the incomplete-mapping section's data
+// shape: the transiently-unresolved AniList ids render as IncompleteEntry
+// rows sorted by id, each carrying its releases.moe link, and a fully
+// resolved run (nil or empty set) carries none - so the section (and the
+// JSON key, via omitempty) only ever appears when something actually failed.
+func TestAuditIncompleteMappings(t *testing.T) {
+	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"})
+
+	rep := a.Audit(nil, nil, nil, map[int]struct{}{99: {}, 7: {}})
+
+	want := []IncompleteEntry{
+		{SeaDexURL: "https://releases.moe/7", AniListID: 7},
+		{SeaDexURL: "https://releases.moe/99", AniListID: 99},
+	}
+	if !reflect.DeepEqual(rep.Incomplete, want) {
+		t.Errorf("Incomplete = %+v, want %+v (sorted by AniList id with releases.moe links)", rep.Incomplete, want)
+	}
+
+	if got := a.Audit(nil, nil, nil, nil).Incomplete; got != nil {
+		t.Errorf("Incomplete on a fully resolved run = %+v, want nil", got)
+	}
+	if got := a.Audit(nil, nil, nil, map[int]struct{}{}).Incomplete; got != nil {
+		t.Errorf("Incomplete on an empty set = %+v, want nil", got)
+	}
+}
+
 // TestRowQualifier pins the daemon-vocabulary qualifier over the shared
 // decision: theoretical/incomplete when SeaDex lists no best at all
 // (theoretical taking precedence, the classify.Fallback order shared with the
@@ -383,4 +410,71 @@ func TestRowQualifier(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAuditCurationWarnedReleaseAnnotatedNotCounted pins the report-path
+// curation-warning contract: a warned release stays LISTED (the report
+// enumerates raw SeaDex data) carrying its canonical warning tags, but it
+// counts as neither best nor alt for the verdict - an on-disk group matching
+// only a Broken best reads have_unlisted, never have_best, mirroring the
+// daemon's exclusion - while an unwarned best still classifies as usual.
+func TestAuditCurationWarnedReleaseAnnotatedNotCounted(t *testing.T) {
+	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"})
+	rowFor := func(t *testing.T, torrents []seadex.Torrent) Row {
+		t.Helper()
+		item := &library.Item{
+			Arr: library.ArrSonarr, ArrID: 1, Title: "Warned", TvdbID: 100,
+			SeasonGroups: map[int][]string{1: {"pmr"}}, Groups: []string{"pmr"}, HasFile: true,
+		}
+		matches := []match.Match{{
+			Item:   item,
+			Arr:    library.ArrSonarr,
+			Source: match.SourceID,
+			Entry:  seadex.Entry{AniListID: 10, Torrents: torrents},
+			Record: mapping.Record{Type: "TV", TvdbID: 100, SeasonTvdb: 1},
+		}}
+		rep := a.Audit(matches, nil, nil, nil)
+		if len(rep.Rows) != 1 {
+			t.Fatalf("rows = %d, want 1", len(rep.Rows))
+		}
+		return rep.Rows[0]
+	}
+
+	t.Run("warned best neither aligns nor recommends", func(t *testing.T) {
+		row := rowFor(t, []seadex.Torrent{{
+			Tracker: "Nyaa", ReleaseGroup: "PMR", URL: "https://nyaa.si/view/1",
+			IsBest: true, Tags: []string{"Broken"},
+		}})
+		if row.Verdict != VerdictUnlisted {
+			t.Errorf("verdict = %q, want %q (a Broken best must not count as best)", row.Verdict, VerdictUnlisted)
+		}
+		if len(row.Releases) != 1 {
+			t.Fatalf("releases = %d, want 1 (a warned release stays listed)", len(row.Releases))
+		}
+		if got := row.Releases[0].Warnings; !reflect.DeepEqual(got, []string{"broken"}) {
+			t.Errorf("release warnings = %v, want the canonical [broken]", got)
+		}
+	})
+
+	t.Run("warned alt does not classify as alt", func(t *testing.T) {
+		row := rowFor(t, []seadex.Torrent{
+			{Tracker: "Nyaa", ReleaseGroup: "PMR", URL: "https://nyaa.si/view/2", Tags: []string{"Incomplete"}},
+			{Tracker: "Nyaa", ReleaseGroup: "SEV", URL: "https://nyaa.si/view/3", IsBest: true},
+		})
+		if row.Verdict != VerdictUnlisted {
+			t.Errorf("verdict = %q, want %q (a warned alt must not count as alt)", row.Verdict, VerdictUnlisted)
+		}
+	})
+
+	t.Run("unwarned best still classifies", func(t *testing.T) {
+		row := rowFor(t, []seadex.Torrent{{
+			Tracker: "Nyaa", ReleaseGroup: "PMR", URL: "https://nyaa.si/view/4", IsBest: true,
+		}})
+		if row.Verdict != VerdictBest {
+			t.Errorf("verdict = %q, want %q (an unwarned best is unaffected)", row.Verdict, VerdictBest)
+		}
+		if len(row.Releases) != 1 || row.Releases[0].Warnings != nil {
+			t.Errorf("releases = %+v, want one unwarned release with nil warnings", row.Releases)
+		}
+	})
 }

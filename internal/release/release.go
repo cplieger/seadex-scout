@@ -96,6 +96,16 @@ var (
 	// releases, and token-bounding alone would lose it (no word boundary
 	// between the "p" and "remux").
 	reRemux = regexp.MustCompile(`(?i)\b(?:bd[\s._-]?remux|premux|remux)\b`)
+	// reEncode matches a generic encode marker ("encode", "encoded", "BDRip")
+	// with reRemux's delimiter-bounded token style, so a bare substring inside
+	// a longer word ("reencoded", "encoder") is never a marker. It is the
+	// weakest encoder-marker rung in kindFromText — checked after the remux
+	// token and the codec/CRF/bitrate markers, so it only ever moves a release
+	// from unknown to encode, never off remux. Live SeaDex data motivates it:
+	// many isBest encodes state "encode"/"BDRip" in their name or notes
+	// without any codec, CRF, or bitrate marker and previously classified
+	// unknown.
+	reEncode = regexp.MustCompile(`(?i)\b(?:bdrip|encoded|encode)\b`)
 )
 
 // Canonical codec families the classifier normalizes video codecs to.
@@ -182,8 +192,8 @@ func classifyKind(nameText, notesText, nameCodec, notesCodec string) (kind Kind,
 
 // kindFromText classifies one text source (names or notes) in isolation: a
 // delimiter-bounded remux token (reRemux) wins, then an encoder marker (codec,
-// CRF tag, bitrate), else unknown. It returns the kind and a short reason for
-// observability.
+// CRF tag, bitrate, or a generic encode token — reEncode, the weakest rung),
+// else unknown. It returns the kind and a short reason for observability.
 func kindFromText(text, codec string) (kind Kind, reason string) {
 	if reRemux.MatchString(text) {
 		return KindRemux, "name/notes marker: remux"
@@ -195,6 +205,8 @@ func kindFromText(text, codec string) (kind Kind, reason string) {
 		return KindEncode, "encoder marker: crf"
 	case reBitrate.MatchString(text):
 		return KindEncode, "encoder marker: bitrate"
+	case reEncode.MatchString(text):
+		return KindEncode, "encoder marker: encode"
 	}
 	return KindUnknown, "no remux or encode marker"
 }

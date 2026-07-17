@@ -11,14 +11,18 @@ import (
 	"time"
 
 	"github.com/cplieger/atomicfile/v2"
+	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
 const (
 	feedDirMode = 0o755
-	// feed.json can embed the AB passkey in synthesized AnimeBytes download
-	// URLs, so it is owner-only. The daemon and the `poll` subcommand both run
-	// as the same container user, so 0o600 stays read/write-compatible.
+	// feed.json is persisted GUID-only - AB items carry no passkey-bearing
+	// download URL (see stripABDownloadURLs) - but it stays owner-only as
+	// defense in depth for that invariant, and a legacy snapshot may still
+	// embed a passkey until the first rebuild scrubs it. The daemon and the
+	// `poll` subcommand both run as the same container user, so 0o600 stays
+	// read/write-compatible.
 	feedFileMode = 0o600
 	// maxFeedBytes bounds the persisted feed snapshot, enforced on write and
 	// read alike so a rebuild can never persist a snapshot the server's reload
@@ -48,13 +52,15 @@ type snapshot struct {
 }
 
 // FeedWriterConfig configures NewFeedWriter. Path is where the snapshot is
-// persisted (config.DefaultIndexerFeedPath in production). ABPasskey builds
-// the AnimeBytes RSS download links (a secret; empty leaves AnimeBytes
-// without grabbable RSS links). The Torznab URLs and Prowlarr key mirror the
-// server's Config: an empty URL is that tracker's off switch (its journal is
-// neither built nor persisted), and the configured upstreams also power the
-// title harvest (see harvest.go), so the writer queries exactly the trackers
-// the server proxies.
+// persisted (config.DefaultIndexerFeedPath in production). ABPasskey gates
+// which AnimeBytes releases are journalable (a secret; empty leaves
+// AnimeBytes without grabbable RSS links) - the writer never persists it: AB
+// items are stored GUID-only and the server derives their served download
+// links from its own configured passkey (see rebuildABDownloadURLs). The
+// Torznab URLs and Prowlarr key mirror the server's Config: an empty URL is
+// that tracker's off switch (its journal is neither built nor persisted), and
+// the configured upstreams also power the title harvest (see harvest.go), so
+// the writer queries exactly the trackers the server proxies.
 type FeedWriterConfig struct {
 	Path           string
 	ABPasskey      string
@@ -109,26 +115,32 @@ func NewFeedWriter(cfg *FeedWriterConfig, deps Deps) *FeedWriter {
 // Rebuild refreshes the persisted feed snapshot from the SeaDex entries
 // (categorized and titled via info, the per-show metadata closure the cycle
 // builds over its persisted state; nil is valid and falls back to file-name
-// synthesis). It rebuilds the search curation set from the whole catalogue,
-// then advances the RSS journal: newly curated torrents (absent from the seen
-// ledger) enter with a first-seen timestamp, carried items re-render from
-// current data, items older than feedJournalMaxAge age out, and the title
-// harvest upgrades synthesized titles to real tracker titles within its query
-// budget (a harvest failure degrades to synthesized titles, never fails the
-// rebuild). On the first run, after a schema upgrade, or over a malformed
-// previous snapshot it baselines: the entire current curation set is recorded
-// as seen and the journal starts empty, growing only from genuinely new
-// curation (backfill is search's job). The caller skips a failed SeaDex
-// fetch, so this errors only on a previous-snapshot read failure (transient;
-// the last-good feed stays served) or on the persist side: an encode failure,
-// a snapshot exceeding maxFeedBytes (kept out so the reader never rejects
-// what a rebuild wrote), or the atomic write itself failing.
+// synthesis). Curation-warned torrents (SeaDex tags them Broken/Incomplete)
+// are excluded first - from the search curation set, the seen ledger, and the
+// journal alike - and a previously journaled item whose torrent has since
+// been warned is dropped, so the arrs can never grab a release the curators
+// warn against (see splitCurationWarned). It rebuilds the search curation set
+// from the whole catalogue, then advances the RSS journal: newly curated
+// torrents (absent from the seen ledger) enter with a first-seen timestamp,
+// carried items re-render from current data, items older than
+// feedJournalMaxAge age out, and the title harvest upgrades synthesized
+// titles to real tracker titles within its query budget (a harvest failure
+// degrades to synthesized titles, never fails the rebuild). On the first run,
+// after a schema upgrade, or over a malformed previous snapshot it baselines:
+// the entire current curation set is recorded as seen and the journal starts
+// empty, growing only from genuinely new curation (backfill is search's job).
+// The caller skips a failed SeaDex fetch, so this errors only on a
+// previous-snapshot read failure (transient; the last-good feed stays served)
+// or on the persist side: an encode failure, a snapshot exceeding
+// maxFeedBytes (kept out so the reader never rejects what a rebuild wrote),
+// or the atomic write itself failing.
 func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info func(alID int) EntryInfo) error {
 	infoFor := entryInfoFunc(info)
 	prev, err := w.loadPrevious(ctx)
 	if err != nil {
 		return err
 	}
+	entries, warned := splitCurationWarned(entries)
 	set := buildCuration(entries)
 	now := w.now()
 
@@ -141,8 +153,8 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info f
 			"reason", prev.reason, "seen", len(seen))
 	} else {
 		cur := indexCurated(entries)
-		nyaa = w.carryJournal(prev.nyaaFeed, cur, infoFor, now, &js)
-		ab = w.carryJournal(prev.abFeed, cur, infoFor, now, &js)
+		nyaa = w.carryJournal(prev.nyaaFeed, cur, warned, infoFor, now, &js)
+		ab = w.carryJournal(prev.abFeed, cur, warned, infoFor, now, &js)
 		newNyaa, newAB := w.growJournal(entries, cur, seen, infoFor, now, &js)
 		nyaa = append(nyaa, newNyaa...)
 		ab = append(ab, newAB...)
@@ -164,7 +176,9 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info f
 	w.log.Info("indexer feed snapshot written",
 		"entries", len(entries), "hashes", len(snap.ByHash), "keys", len(snap.ByKey),
 		"nyaa_feed", len(snap.NyaaFeed), "ab_feed", len(snap.ABFeed),
+		"warned_excluded", len(warned),
 		"journal_new", js.added, "journal_pruned", js.pruned, "journal_dropped", js.dropped,
+		"journal_warned_dropped", js.warned,
 		"skipped_unresolvable", js.unresolvable,
 		"harvest_queries", hs.queries, "harvest_matched", hs.matched, "harvest_pending", hs.pending)
 	if js.abSkippedNoPasskey > 0 && w.abConfigured {
@@ -176,8 +190,11 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info f
 
 // persist atomically writes the snapshot, mirroring the reader's size bound
 // before committing: a snapshot the reload would reject must not replace the
-// last-good file, or the next restart starts with an empty feed.
+// last-good file, or the next restart starts with an empty feed. It first
+// strips the AB feed's download URLs so no passkey is ever serialized (see
+// stripABDownloadURLs).
 func (w *FeedWriter) persist(ctx context.Context, snap *snapshot) error {
+	stripABDownloadURLs(snap.ABFeed)
 	data, err := json.Marshal(snap)
 	if err != nil {
 		return fmt.Errorf("indexer: encode feed snapshot: %w", err)
@@ -190,6 +207,21 @@ func (w *FeedWriter) persist(ctx context.Context, snap *snapshot) error {
 		return fmt.Errorf("indexer: write feed snapshot %s: %w", w.path, err)
 	}
 	return nil
+}
+
+// stripABDownloadURLs blanks every AnimeBytes feed item's download URL before
+// persistence: an AB download link embeds the operator's passkey, and the
+// snapshot must stay GUID-only so /config/feed.json never holds that
+// credential at rest. Nothing is lost - the server re-derives each served AB
+// link from the item's non-secret tracker page URL (the GUID) and the
+// currently configured passkey on every load (see rebuildABDownloadURLs) -
+// and running at the persist choke point also scrubs a legacy snapshot whose
+// carried items still embed a passkey on the first rebuild over it. Nyaa
+// items live in their own feed and keep their public .torrent links.
+func stripABDownloadURLs(feed []item) {
+	for i := range feed {
+		feed[i].DownloadURL = ""
+	}
 }
 
 // previousJournal is the journal bookkeeping loaded from the previous
@@ -241,6 +273,54 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 		seen:     snap.Seen,
 		titles:   titles,
 	}, nil
+}
+
+// splitCurationWarned partitions the catalogue for the feed: it returns a
+// copy of entries with every curation-warned torrent (release.CurationWarned
+// over the SeaDex tags: Broken/Incomplete) removed, plus the warned torrents'
+// journal keys, which carryJournal uses to drop a previously journaled item
+// whose torrent has since been warned. Filtering at the source keeps every
+// downstream consumer honest at once: the search curation set never marks a
+// warned release (a Prowlarr result matching one is purged as uncurated), the
+// journal never grows one, and the seen ledger never records one - so when a
+// warning is lifted the torrent becomes grabbable curation for the first time
+// and journals as new (a torrent journaled BEFORE it was warned stays in the
+// persisted ledger, so un-warning it never re-broadcasts it). The input is
+// never mutated: the cycle shares the entries slice with the compare pass, so
+// an entry containing a warned torrent gets a fresh filtered Torrents slice.
+func splitCurationWarned(entries []seadex.Entry) (kept []seadex.Entry, warned map[string]struct{}) {
+	warned = make(map[string]struct{})
+	kept = make([]seadex.Entry, len(entries))
+	for i := range entries {
+		kept[i] = entries[i]
+		ts := entries[i].Torrents
+		if !anyCurationWarned(ts) {
+			continue
+		}
+		unwarned := make([]seadex.Torrent, 0, len(ts))
+		for j := range ts {
+			if release.CurationWarned(ts[j].Tags) {
+				if k := journalKey(&ts[j]); k != "" {
+					warned[k] = struct{}{}
+				}
+				continue
+			}
+			unwarned = append(unwarned, ts[j])
+		}
+		kept[i].Torrents = unwarned
+	}
+	return kept, warned
+}
+
+// anyCurationWarned reports whether any torrent carries a curation-warning
+// tag, so splitCurationWarned only copies the torrent slices it must filter.
+func anyCurationWarned(ts []seadex.Torrent) bool {
+	for i := range ts {
+		if release.CurationWarned(ts[i].Tags) {
+			return true
+		}
+	}
+	return false
 }
 
 // buildCuration builds the search curation index over the whole SeaDex

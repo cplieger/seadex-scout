@@ -10,9 +10,16 @@
 // non-special series are compared conservatively across the real seasons on
 // disk. A row is unverified only when files are present but no comparable
 // release group can be identified.
+//
+// A run degraded by a transient AniList failure is not withheld: the report
+// renders with an explicit incomplete-mapping section listing the affected
+// entries by AniList id (Report.Incomplete) and a completeness caveat in the
+// Markdown header, so the unaffected majority still audits.
 package audit
 
 import (
+	"cmp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -84,7 +91,14 @@ type Release struct {
 	Tracker string `json:"tracker"`
 	Group   string `json:"group,omitempty"`
 	URL     string `json:"url,omitempty"`
-	Best    bool   `json:"best"`
+	// Warnings carries the canonical curation-warning tags (broken,
+	// incomplete) SeaDex curators put on the release, when any. A warned
+	// release stays listed - the report enumerates raw SeaDex data - but it
+	// is excluded from the verdict's best/alt group sets and from the grab
+	// links, rendering with the warning marker instead (see groupSets and
+	// the render layer).
+	Warnings []string `json:"warnings,omitempty"`
+	Best     bool     `json:"best"`
 }
 
 // Row is one anime's alignment record.
@@ -116,11 +130,28 @@ type Row struct {
 	Approx bool `json:"approx,omitempty"`
 }
 
+// IncompleteEntry is one SeaDex entry whose library mapping could not be
+// resolved this run: the AniList lookup that would link it to a library item
+// failed transiently, so whether (and where) it maps into the library is
+// unknown. It renders in the report's incomplete-mapping section; a row for it
+// may be missing from (or misfiled in) the verdict sections.
+type IncompleteEntry struct {
+	SeaDexURL string `json:"seadex_url"`
+	AniListID int    `json:"al_id"`
+}
+
 // Report is the full audit result.
 type Report struct {
 	GeneratedAt time.Time      `json:"generated_at"`
 	Totals      map[string]int `json:"totals"`
 	Rows        []Row          `json:"rows"`
+	// Incomplete lists the SeaDex entries whose library mapping could not be
+	// resolved this run (a transient AniList failure), sorted by AniList id.
+	// Non-empty, it is the machine-readable completeness caveat: the verdict
+	// rows cover everything else, but these entries' alignment is unknown.
+	// Empty on a fully resolved run, and omitted from the JSON so a healthy
+	// report's shape is unchanged.
+	Incomplete []IncompleteEntry `json:"incomplete_mappings,omitempty"`
 }
 
 // Config configures an Auditor.
@@ -149,8 +180,11 @@ func NewAuditor(cfg Config) *Auditor {
 // Audit produces the report: one row per in-library SeaDex match (specials
 // skipped when disabled), plus one not_on_seadex row per library item that is
 // recognized anime (in the Fribb map) but has no SeaDex entry. snap and idx may
-// be nil, in which case the not_on_seadex section is empty.
-func (a *Auditor) Audit(matches []match.Match, snap *library.Snapshot, idx *mapping.Index) Report {
+// be nil, in which case the not_on_seadex section is empty. incompleteIDs
+// carries the AniList ids whose needed lookup failed transiently this run
+// (match.Result.IncompleteIDs); they render as the report's incomplete-mapping
+// section. Nil or empty on a fully resolved run, leaving the section absent.
+func (a *Auditor) Audit(matches []match.Match, snap *library.Snapshot, idx *mapping.Index, incompleteIDs map[int]struct{}) Report {
 	rows := make([]Row, 0, len(matches))
 	covered := make(map[string]struct{})
 	for i := range matches {
@@ -171,7 +205,23 @@ func (a *Auditor) Audit(matches []match.Match, snap *library.Snapshot, idx *mapp
 		totals[string(rows[i].Verdict)]++
 	}
 	sortRows(rows)
-	return Report{GeneratedAt: time.Now().UTC(), Totals: totals, Rows: rows}
+	return Report{GeneratedAt: time.Now().UTC(), Totals: totals, Rows: rows, Incomplete: a.incompleteEntries(incompleteIDs)}
+}
+
+// incompleteEntries renders the transiently-unresolved AniList ids as the
+// report's incomplete-mapping section, sorted by id for a stable render, each
+// carrying its releases.moe link. Nil on a fully resolved run so the section
+// (and the JSON key) is omitted entirely.
+func (a *Auditor) incompleteEntries(ids map[int]struct{}) []IncompleteEntry {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]IncompleteEntry, 0, len(ids))
+	for id := range ids {
+		out = append(out, IncompleteEntry{AniListID: id, SeaDexURL: a.seadexURL(id)})
+	}
+	slices.SortFunc(out, func(x, y IncompleteEntry) int { return cmp.Compare(x.AniListID, y.AniListID) })
+	return out
 }
 
 // uncoveredRows lists library items that are recognized anime (present in the
@@ -350,12 +400,16 @@ func rowQualifier(entry *seadex.Entry, d *align.Decision) Qualifier {
 }
 
 // classifyReleases turns every SeaDex torrent into a report Release (group
-// normalized via the shared classifier, tracker, usable URL, best flag).
-// AnimeBytes torrents are dropped when the operator has AnimeBytes off —
-// whether identified by the tracker label OR by the URL host, since the label
-// is untrusted upstream data — so the report never surfaces AB releases or
-// links they cannot use (and cannot leak them), mirroring the daemon's
-// obtainability rule.
+// normalized via the shared classifier, tracker, usable URL, best flag,
+// curation warnings). AnimeBytes torrents are dropped when the operator has
+// AnimeBytes off — whether identified by the tracker label OR by the URL
+// host, since the label is untrusted upstream data — so the report never
+// surfaces AB releases or links they cannot use (and cannot leak them),
+// mirroring the daemon's obtainability rule. A curation-warned release
+// (SeaDex tags it Broken/Incomplete) stays listed but annotated: the report
+// enumerates raw SeaDex data by design, so hiding it would misrepresent the
+// entry, while groupSets and the render layer keep it out of the verdict and
+// the grab links.
 func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 	out := make([]Release, 0, len(entry.Torrents))
 	for i := range entry.Torrents {
@@ -368,10 +422,11 @@ func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 		}
 		rel := classify.Torrent(entry, t)
 		out = append(out, Release{
-			Tracker: t.Tracker,
-			Group:   rel.Group,
-			URL:     t.UsableURL(),
-			Best:    t.IsBest,
+			Tracker:  t.Tracker,
+			Group:    rel.Group,
+			URL:      t.UsableURL(),
+			Best:     t.IsBest,
+			Warnings: release.CurationWarnings(t.Tags),
 		})
 	}
 	return out
@@ -384,10 +439,17 @@ func (a *Auditor) seadexURL(aniListID int) string {
 }
 
 // groupSets returns the distinct normalized groups among the best and the alt
-// releases.
+// releases. A curation-warned release contributes to neither set: counting it
+// would let a release SeaDex tags Broken/Incomplete drive the verdict (read
+// as a best to have or to want), where the daemon's compare pass excludes it
+// - the two flows must tell one story. It stays visible in the row's release
+// list, annotated.
 func groupSets(releases []Release) (best, alt []string) {
 	bestSeen, altSeen := map[string]struct{}{}, map[string]struct{}{}
 	for i := range releases {
+		if len(releases[i].Warnings) > 0 {
+			continue
+		}
 		g := release.NormalizeGroup(releases[i].Group)
 		if releases[i].Best {
 			addUnique(bestSeen, &best, g)

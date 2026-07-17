@@ -60,7 +60,7 @@ func TestCycleMappingUnusablePreservesFindings(t *testing.T) {
 	logger := scoutTestLogger()
 	prior := report.Alerted{
 		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Finding:   compare.Finding{Title: "Existing", DedupeKey: "prior", Status: compare.StatusBetter, AniListID: 154587},
+		Finding:   report.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
 	}
 	store := &fakeStore{st: state.State{
 		Findings:  map[string]report.Alerted{"prior": prior},
@@ -134,36 +134,150 @@ func TestCycleDegradedSavePersistsSanitizedArrURL(t *testing.T) {
 	}
 }
 
-// TestCycleAniListDegradedPreservesFindings pins the AniList-degraded branch:
-// when a needed AniList fallback lookup fails transiently the match Result is
-// Degraded, so the cycle preserves prior findings (comparing would falsely
-// resolve them) yet stays healthy.
-func TestCycleAniListDegradedPreservesFindings(t *testing.T) {
-	logger := scoutTestLogger()
+// TestCycleAniListDegradedComparesMajorityAndPreservesAffected pins the
+// scoped AniList degradation contract (test a of mc-degradation-scoping): one
+// transient lookup failure among N entries no longer suppresses the whole
+// cycle's findings. The ID-resolved majority (which needs no lookup) compares
+// and emits normally, the affected entry's prior finding is carried forward
+// un-resolved with its original alert time (its absence from the compare is
+// missing data, not alignment), and the cycle closes healthy with the "cycle
+// degraded" completion line (reason anilist-degraded) the deployed deadman
+// counts - never "cycle complete".
+func TestCycleAniListDegradedComparesMajorityAndPreservesAffected(t *testing.T) {
+	logger, recorder := capture.New()
+	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	prior := report.Alerted{
-		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Finding:   compare.Finding{Title: "Existing", DedupeKey: "prior", Status: compare.StatusBetter, AniListID: 154587},
+		AlertedAt: oldTime,
+		Finding:   report.StoredFinding{Title: "Idless Show", Status: compare.StatusBetter, AniListID: 222},
 	}
 	store := &fakeStore{st: state.State{
-		Mapping:   mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}},
-		Findings:  map[string]report.Alerted{"prior": prior},
+		Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{
+			{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1},
+			// Id-less record (a split AniList<->arr mapping): the entry NEEDS
+			// the AniList title lookup, which fails transiently this cycle.
+			{AniListID: 222, Type: "TV"},
+		}},
+		Findings:  map[string]report.Alerted{"prior-idless": prior},
 		Baselined: true,
 	}}
-	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+	sonarr := &fakeSonarr{
+		series: []arrapi.Series{
+			{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
+			{ID: 8, Title: "Idless Show", TvdbID: 124, Year: 2024},
+		},
+		episodes: map[int][]arrapi.Episode{
+			7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+			8: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+		},
+	}
+	entries := append(seadexFrierenEntry(), seadex.Entry{
+		AniListID: 222,
+		Torrents: []seadex.Torrent{{
+			ReleaseGroup: "SubsPlease",
+			Tracker:      "Nyaa",
+			InfoHash:     "def",
+			URL:          "https://nyaa.si/view/2",
+			IsBest:       true,
+			Files:        []seadex.File{{Name: "Idless Show S01E01 1080p.mkv", Length: 1}},
+		}},
+	})
 	s := New(&Deps{
-		Logger:  logger,
-		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
-		SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
-		Matcher: match.NewMatcher(degradedMatcherAniList{}, logger),
+		Logger:       logger,
+		Store:        store,
+		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		SeaDex:       &fakeSeaDex{entries: entries},
+		Matcher:      match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
+		Comparer:     compare.NewComparer(compare.Config{}),
+		Reporter:     report.NewReporter(logger),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 	})
 
 	if healthy := s.Cycle(context.Background()); !healthy {
 		t.Fatal("Cycle healthy=false, want true when AniList is transiently degraded")
 	}
-	if _, ok := store.st.Findings["prior"]; !ok {
-		t.Errorf("prior finding not preserved on AniList-degraded cycle: %+v", store.st.Findings)
+	// The unaffected majority's finding (Frieren, resolved by ID with no
+	// AniList lookup) must emit normally instead of being suppressed.
+	if n := recorder.CountExact("better release available"); n != 1 {
+		t.Errorf("majority finding notification count = %d, want 1 (the compare must run on the unaffected entries)", n)
+	}
+	// The affected entry's prior finding must be preserved, never resolved.
+	if n := recorder.CountExact("finding resolved"); n != 0 {
+		t.Errorf("resolved count = %d, want 0 (the affected entry's absence is missing data, not alignment)", n)
+	}
+	preserved, ok := store.st.Findings["prior-idless"]
+	if !ok {
+		t.Fatalf("affected entry's prior finding was dropped: %+v", store.st.Findings)
+	}
+	if !preserved.AlertedAt.Equal(oldTime) {
+		t.Errorf("preserved AlertedAt = %s, want the original %s", preserved.AlertedAt, oldTime)
+	}
+	if len(store.st.Findings) != 2 {
+		t.Errorf("persisted findings = %d, want 2 (the majority's new finding plus the preserved one)", len(store.st.Findings))
+	}
+	// Completion-line contract: the deployed deadman counts "cycle degraded"
+	// with its reason attr; the vocabulary must not change.
+	if n := recorder.CountExact("cycle degraded"); n != 1 {
+		t.Errorf("'cycle degraded' count = %d, want 1", n)
+	}
+	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "anilist-degraded" {
+		t.Errorf("degraded reasons = %v, want [anilist-degraded]", reasons)
+	}
+	if n := recorder.CountExact("cycle complete"); n != 0 {
+		t.Errorf("'cycle complete' count = %d, want 0 on a degraded cycle", n)
+	}
+}
+
+// TestCycleAniListDegradedColdStartSeedsIncompleteBaseline pins the baseline
+// completeness flag for the scoped AniList degradation: a cold start whose
+// first match is AniList-degraded seeds silently and records the baseline as
+// incomplete (the affected entries' would-be findings are missing from the
+// seed and must not burst as fresh notifications when the upstream recovers)
+// - the same window a partial first walk opens - and the first complete
+// cycle closes it.
+func TestCycleAniListDegradedColdStartSeedsIncompleteBaseline(t *testing.T) {
+	logger := scoutTestLogger()
+	store := &fakeStore{st: state.State{
+		Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}},
+	}}
+	sonarr := &fakeSonarr{
+		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
+		episodes: map[int][]arrapi.Episode{
+			7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+		},
+	}
+	deps := func(matcher *match.Matcher) *Deps {
+		return &Deps{
+			Logger:       logger,
+			Store:        store,
+			Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+			Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+			SeaDex:       &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
+			Matcher:      matcher,
+			Comparer:     compare.NewComparer(compare.Config{}),
+			Reporter:     report.NewReporter(logger),
+			AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
+		}
+	}
+
+	// Cycle one: the entry's needed lookup fails transiently, so the seed is
+	// incomplete and the window opens.
+	if healthy := New(deps(match.NewMatcher(degradedMatcherAniList{}, logger))).Cycle(context.Background()); !healthy {
+		t.Fatal("degraded cold-start cycle healthy=false, want true")
+	}
+	if !store.st.Baselined || !store.st.BaselineIncomplete {
+		t.Errorf("state after AniList-degraded cold start: Baselined=%v BaselineIncomplete=%v, want true/true",
+			store.st.Baselined, store.st.BaselineIncomplete)
+	}
+
+	// Cycle two: AniList answers definitively (not-found), the cycle
+	// completes, and the window closes.
+	if healthy := New(deps(match.NewMatcher(notFoundAniList{}, logger))).Cycle(context.Background()); !healthy {
+		t.Fatal("recovered cycle healthy=false, want true")
+	}
+	if !store.st.Baselined || store.st.BaselineIncomplete {
+		t.Errorf("state after the recovered cycle: Baselined=%v BaselineIncomplete=%v, want true/false",
+			store.st.Baselined, store.st.BaselineIncomplete)
 	}
 }
 
@@ -232,7 +346,7 @@ func TestCycleEmptySeaDexEntriesPreservesFindings(t *testing.T) {
 	logger := scoutTestLogger()
 	prior := report.Alerted{
 		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Finding:   compare.Finding{Title: "Existing", DedupeKey: "prior", Status: compare.StatusBetter, AniListID: 154587},
+		Finding:   report.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
 	}
 	store := &fakeStore{st: state.State{
 		Mapping: mapping.Cache{
@@ -279,7 +393,7 @@ func TestCycleEmptySeaDexEntriesPreservesFindings(t *testing.T) {
 // persisting the empty snapshot (the one-cycle ratchet).
 func TestHandlePreCompareGateEmptyWalkPreservesPriorSnapshot(t *testing.T) {
 	logger := scoutTestLogger()
-	prior := report.Alerted{AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Finding: compare.Finding{Title: "Existing", DedupeKey: "prior"}}
+	prior := report.Alerted{AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Finding: report.StoredFinding{Title: "Existing"}}
 	st := state.State{Library: library.Snapshot{Items: []library.Item{{ArrID: 7, Title: "Frieren"}}}, Findings: map[string]report.Alerted{"prior": prior}, Baselined: true}
 	store := &fakeStore{st: st}
 	s := New(&Deps{Logger: logger, Store: store})
@@ -311,7 +425,7 @@ func TestCyclePartialWalkComparesCleanAndPreservesFailedItemsFindings(t *testing
 	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	prior := report.Alerted{
 		AlertedAt: oldTime,
-		Finding:   compare.Finding{Title: "Broken Series", DedupeKey: "prior-failed", Status: compare.StatusBetter, AniListID: 222},
+		Finding:   report.StoredFinding{Title: "Broken Series", Status: compare.StatusBetter, AniListID: 222},
 	}
 	store := &fakeStore{st: state.State{
 		Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{
@@ -536,7 +650,7 @@ func TestHandlePreCompareGateShrunkWalkEscalatesAfterRepeatedShrinks(t *testing.
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			logger, recorder := capture.New()
-			prior := report.Alerted{AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Finding: compare.Finding{Title: "Existing", DedupeKey: "prior"}}
+			prior := report.Alerted{AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Finding: report.StoredFinding{Title: "Existing"}}
 			st := state.State{
 				Library: library.Snapshot{Items: []library.Item{
 					{ArrID: 1, Title: "A"}, {ArrID: 2, Title: "B"}, {ArrID: 3, Title: "C"}, {ArrID: 4, Title: "D"},
@@ -629,6 +743,121 @@ func TestCycleRecoveredWalkResetsShrunkStreak(t *testing.T) {
 	}
 }
 
+// TestCycleSeaDexFailureEscalatesAfterRepeatedFailures pins the WARN-to-ERROR
+// escalation of the single seadex-fetch-failed log site (mirroring the
+// shrunk-walk and mapping guards'): below the threshold a failed SeaDex fetch
+// logs at WARN; on the 8th consecutive failure (the persisted streak reaching
+// seadexFailureEscalationThreshold) the same site logs at ERROR (firing the
+// existing SeadexScoutCycleError Loki rule) - exactly one line either way,
+// with the streak persisted, prior findings preserved, and the "cycle
+// degraded" completion line unchanged.
+func TestCycleSeaDexFailureEscalatesAfterRepeatedFailures(t *testing.T) {
+	tests := []struct {
+		name        string
+		priorStreak int
+		wantError   bool
+	}{
+		{name: "below threshold stays WARN", priorStreak: seadexFailureEscalationThreshold - 2, wantError: false},
+		{name: "8th consecutive failure escalates to ERROR", priorStreak: seadexFailureEscalationThreshold - 1, wantError: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			logger, recorder := capture.New()
+			prior := report.Alerted{
+				AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+				Finding:   report.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
+			}
+			store := &fakeStore{st: state.State{
+				Mapping: mapping.Cache{
+					FetchedAt: time.Now(),
+					Records:   []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}},
+				},
+				Findings:       map[string]report.Alerted{"prior": prior},
+				SeadexFailures: tc.priorStreak,
+				Baselined:      true,
+			}}
+			sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+			s := New(&Deps{
+				Logger:  logger,
+				Store:   store,
+				Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+				Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+				SeaDex:  &fakeSeaDex{err: errors.New("seadex down")},
+			})
+
+			if healthy := s.Cycle(context.Background()); !healthy {
+				t.Fatal("Cycle healthy=false, want true (a SeaDex outage is degraded, not unhealthy)")
+			}
+			if got := store.st.SeadexFailures; got != tc.priorStreak+1 {
+				t.Errorf("persisted SeadexFailures = %d, want %d (the streak must increment and persist)", got, tc.priorStreak+1)
+			}
+			if _, ok := store.st.Findings["prior"]; !ok {
+				t.Errorf("persisted findings = %+v, want prior finding preserved", store.st.Findings)
+			}
+			var warns, errs int
+			for _, r := range recorder.Records() {
+				switch {
+				case r.Level == slog.LevelError && strings.HasPrefix(r.Message, "seadex fetch failed"):
+					errs++
+				case r.Level == slog.LevelWarn && strings.HasPrefix(r.Message, "seadex fetch failed"):
+					warns++
+				}
+			}
+			if tc.wantError {
+				if errs != 1 || warns != 0 {
+					t.Errorf("escalated log counts: ERROR=%d WARN=%d, want exactly one ERROR and no WARN (single log site)", errs, warns)
+				}
+			} else if warns != 1 || errs != 0 {
+				t.Errorf("below-threshold log counts: WARN=%d ERROR=%d, want exactly one WARN and no ERROR", warns, errs)
+			}
+			if n := recorder.CountExact("cycle degraded"); n != 1 {
+				t.Errorf("'cycle degraded' count = %d, want 1 (the failed-fetch completion line)", n)
+			}
+			if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "seadex-fetch-failed" {
+				t.Errorf("degraded reasons = %v, want [seadex-fetch-failed]", reasons)
+			}
+		})
+	}
+}
+
+// TestCycleSuccessfulSeaDexFetchResetsFailureStreak pins the SeaDex failure
+// streak's recovery rule: a cycle whose fetch succeeds resets the persisted
+// consecutive-failure streak to zero (persisted by the cycle's closing save,
+// no operator action), so a later outage starts a fresh streak instead of
+// escalating on its first failed fetch.
+func TestCycleSuccessfulSeaDexFetchResetsFailureStreak(t *testing.T) {
+	logger := scoutTestLogger()
+	store := &fakeStore{st: state.State{
+		Mapping:        mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+		SeadexFailures: 3,
+		Baselined:      true,
+	}}
+	sonarr := &fakeSonarr{
+		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
+		episodes: map[int][]arrapi.Episode{
+			7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+		},
+	}
+	s := New(&Deps{
+		Logger:       logger,
+		Store:        store,
+		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
+		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
+		Comparer:     compare.NewComparer(compare.Config{}),
+		Reporter:     report.NewReporter(logger),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
+	})
+
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("Cycle healthy=false, want true on a successful cycle")
+	}
+	if store.st.SeadexFailures != 0 {
+		t.Errorf("persisted SeadexFailures = %d, want 0 after a successful SeaDex fetch", store.st.SeadexFailures)
+	}
+}
+
 // TestCycleSteadyStateReportsAndSaves pins the daemon's steady-state operating
 // mode end to end: an already-baselined instance must take the Report path (not
 // Baseline), emit the new finding, resolve the stale prior finding, close with
@@ -637,7 +866,7 @@ func TestCycleSteadyStateReportsAndSaves(t *testing.T) {
 	logger, recorder := capture.New()
 	stale := report.Alerted{
 		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Finding:   compare.Finding{Title: "Gone Title", DedupeKey: "stale", Status: compare.StatusBetter, AniListID: 111},
+		Finding:   report.StoredFinding{Title: "Gone Title", Status: compare.StatusBetter, AniListID: 111},
 	}
 	store := &fakeStore{st: state.State{
 		Mapping:   mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
@@ -720,8 +949,8 @@ func (c *cancellingSonarr) GetEpisodes(context.Context, int) ([]arrapi.Episode, 
 	return nil, nil
 }
 
-func (c *cancellingSonarr) ResolveTagIDs(context.Context, ...string) (map[int]struct{}, []string, error) {
-	return nil, nil, nil
+func (c *cancellingSonarr) GetTags(context.Context) ([]arrapi.Tag, error) {
+	return nil, nil
 }
 
 // TestCycleShutdownDuringWalkWarnsNotErrors pins the redeploy log contract for
@@ -770,16 +999,18 @@ func (c *ctxCancellingAniList) FetchMany(context.Context, []int) (map[int]anilis
 
 // TestCycleShutdownDuringMatchingWarnsShutdownNotAniList pins the mid-matching
 // shutdown log contract: when the degradation is caused by the cycle context
-// being cancelled (a redeploy), the cycle must log "cycle interrupted by
-// shutdown during matching" instead of "anilist degraded" (which would blame a
-// healthy upstream), stay healthy, and preserve prior findings.
+// being cancelled (a redeploy), the cycle must keep the whole-cycle skip (the
+// truncated match set has nothing safe to compare) and log "cycle interrupted
+// by shutdown during matching" - never the "cycle degraded" anilist-degraded
+// completion line, which would blame a healthy upstream and count an
+// interrupted cycle as completed - stay healthy, and preserve prior findings.
 func TestCycleShutdownDuringMatchingWarnsShutdownNotAniList(t *testing.T) {
 	logger, recorder := capture.New()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	prior := report.Alerted{
 		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Finding:   compare.Finding{Title: "Existing", DedupeKey: "prior", Status: compare.StatusBetter, AniListID: 154587},
+		Finding:   report.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
 	}
 	store := &fakeStore{st: state.State{
 		Mapping:   mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}},
@@ -802,8 +1033,8 @@ func TestCycleShutdownDuringMatchingWarnsShutdownNotAniList(t *testing.T) {
 	if n := recorder.CountExact("cycle interrupted by shutdown during matching"); n != 1 {
 		t.Errorf("shutdown WARN count = %d, want 1", n)
 	}
-	if n := recorder.CountExact("anilist degraded; skipping comparison, findings preserved"); n != 0 {
-		t.Errorf("shutdown misattributed to an AniList outage %d times, want 0", n)
+	if n := recorder.CountExact("cycle degraded"); n != 0 {
+		t.Errorf("'cycle degraded' count = %d, want 0 (an interrupted cycle did not complete; emitting it would misattribute the shutdown to AniList)", n)
 	}
 	if _, ok := store.st.Findings["prior"]; !ok {
 		t.Errorf("prior finding not preserved on shutdown mid-matching: %+v", store.st.Findings)
@@ -832,7 +1063,7 @@ func TestCycleShutdownDuringSeaDexFetchWarnsShutdownNotSeaDex(t *testing.T) {
 	logger, recorder := capture.New()
 	prior := report.Alerted{
 		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Finding:   compare.Finding{Title: "Existing", DedupeKey: "prior", Status: compare.StatusBetter, AniListID: 154587},
+		Finding:   report.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
 	}
 	store := &fakeStore{st: state.State{
 		Mapping:   mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}},
@@ -1083,8 +1314,9 @@ func degradedReasons(recorder *capture.Recorder) []string {
 }
 
 // TestCycleDegradedEarlyReturnsEmitCycleDegraded pins the degraded completion
-// line: every degraded-but-healthy early return (unusable map, failed SeaDex
-// fetch, empty SeaDex result, AniList degradation) must emit exactly one
+// line: every degraded-but-healthy gate (unusable map, failed SeaDex fetch,
+// empty SeaDex result, and the scoped AniList degradation, which now compares
+// the unaffected majority instead of returning early) must emit exactly one
 // "cycle degraded" WARN with a reason attr naming the gate, and never "cycle
 // complete" - so the cycle-deadman alert (which counts completion lines) does
 // not fire as if the daemon died during a long upstream outage.
@@ -1151,13 +1383,18 @@ func TestCycleDegradedEarlyReturnsEmitCycleDegraded(t *testing.T) {
 			wantReason: "anilist-degraded",
 			deps: func(t *testing.T, logger *slog.Logger) *Deps {
 				t.Helper()
+				// The scoped degradation runs the compare (on the unaffected
+				// majority), so the compare/report deps are wired here unlike
+				// the true early-return gates above.
 				return &Deps{
-					Store:   &fakeStore{st: state.State{Mapping: freshMapping()}},
-					Library: library.NewWalker(&library.Config{Sonarr: sonarrOK(), Logger: scoutTestLogger()}),
-					Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
-					SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
-					Matcher: match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
-					Logger:  logger,
+					Store:    &fakeStore{st: state.State{Mapping: freshMapping()}},
+					Library:  library.NewWalker(&library.Config{Sonarr: sonarrOK(), Logger: scoutTestLogger()}),
+					Mapping:  mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+					SeaDex:   &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
+					Matcher:  match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
+					Comparer: compare.NewComparer(compare.Config{}),
+					Reporter: report.NewReporter(scoutTestLogger()),
+					Logger:   logger,
 				}
 			},
 		},
@@ -1192,7 +1429,7 @@ func TestCycleUpgradeWithPriorFindingsTakesReportPath(t *testing.T) {
 	logger, recorder := capture.New()
 	stale := report.Alerted{
 		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Finding:   compare.Finding{Title: "Gone Title", DedupeKey: "stale", Status: compare.StatusBetter, AniListID: 111},
+		Finding:   report.StoredFinding{Title: "Gone Title", Status: compare.StatusBetter, AniListID: 111},
 	}
 	store := &fakeStore{st: state.State{
 		Mapping:  mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},

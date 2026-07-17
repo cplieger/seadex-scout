@@ -65,10 +65,9 @@ func TestStoreSaveLoadRoundTrip(t *testing.T) {
 		Findings: map[string]report.Alerted{
 			"dedupe": {
 				AlertedAt: now,
-				Finding: compare.Finding{
+				Finding: report.StoredFinding{
 					Title:     "Frieren",
 					Arr:       library.ArrSonarr,
-					DedupeKey: "dedupe",
 					Status:    compare.StatusBetter,
 					AniListID: 154587,
 				},
@@ -254,7 +253,7 @@ func TestStoreSaveOverCapReturnsErrorAndKeepsPreviousFile(t *testing.T) {
 	}
 
 	huge := &State{Findings: map[string]report.Alerted{
-		"huge": {Finding: compare.Finding{Title: strings.Repeat("a", maxStateBytes+1)}},
+		"huge": {Finding: report.StoredFinding{Title: strings.Repeat("a", maxStateBytes+1)}},
 	}}
 	err := store.Save(context.Background(), huge)
 	if err == nil {
@@ -287,9 +286,14 @@ func TestStoreSaveExactCapBoundaryAccepted(t *testing.T) {
 	}
 
 	padded := func(n int) *State {
-		return &State{Findings: map[string]report.Alerted{
-			"huge": {Finding: compare.Finding{Title: strings.Repeat("a", n)}},
-		}}
+		// Version mirrors the SchemaVersion stamp Save applies to the copy it
+		// writes, so the json.Marshal probe below measures the on-disk shape.
+		return &State{
+			Findings: map[string]report.Alerted{
+				"huge": {Finding: report.StoredFinding{Title: strings.Repeat("a", n)}},
+			},
+			Version: SchemaVersion,
+		}
 	}
 	base, err := json.Marshal(padded(0))
 	if err != nil {
@@ -419,21 +423,125 @@ func TestStoreSaveNilReturnsErrorWithoutWriting(t *testing.T) {
 	}
 }
 
-// TestStoreSaveLoadPreservesShrunkWalks pins the restart persistence of the
-// library-shrink escalation streak through the real Store disk path: a json
-// tag drift or a persistence projection omission would silently reset the
-// streak after every restart.
-func TestStoreSaveLoadPreservesShrunkWalks(t *testing.T) {
+// TestStoreSaveLoadPreservesEscalationStreaks pins the restart persistence of
+// the scout's two escalation streaks (the library-shrink walk streak and the
+// consecutive SeaDex-failure streak) through the real Store disk path: a json
+// tag drift or a persistence projection omission would silently reset a
+// streak after every restart, deferring its WARN-to-ERROR escalation forever.
+func TestStoreSaveLoadPreservesEscalationStreaks(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "state.json"), testLogger())
-	const want = 7
-	if err := store.Save(context.Background(), &State{ShrunkWalks: want}); err != nil {
+	const wantShrunk, wantSeadex = 7, 5
+	if err := store.Save(context.Background(), &State{ShrunkWalks: wantShrunk, SeadexFailures: wantSeadex}); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
 	got, err := store.Load(context.Background())
 	if err != nil {
 		t.Fatalf("Load after Save returned error: %v", err)
 	}
-	if got.ShrunkWalks != want {
-		t.Errorf("ShrunkWalks after disk round trip = %d, want %d", got.ShrunkWalks, want)
+	if got.ShrunkWalks != wantShrunk {
+		t.Errorf("ShrunkWalks after disk round trip = %d, want %d", got.ShrunkWalks, wantShrunk)
+	}
+	if got.SeadexFailures != wantSeadex {
+		t.Errorf("SeadexFailures after disk round trip = %d, want %d", got.SeadexFailures, wantSeadex)
+	}
+}
+
+// TestStoreSaveStampsSchemaVersion pins the envelope versioning contract:
+// Save stamps SchemaVersion into every file it writes (round-tripping through
+// Load), the stamp lands on the copy Save writes - never the caller's State -
+// and a legacy pre-version file (no version field) loads without error as
+// version zero, changing no behavior today.
+func TestStoreSaveStampsSchemaVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := NewStore(path, testLogger())
+	st := &State{Baselined: true}
+	if err := store.Save(context.Background(), st); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	got, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load after Save returned error: %v", err)
+	}
+	if got.Version != SchemaVersion {
+		t.Errorf("Version after disk round trip = %d, want the stamped SchemaVersion %d", got.Version, SchemaVersion)
+	}
+	if st.Version != 0 {
+		t.Errorf("caller's State mutated by Save: Version = %d, want 0 (the stamp belongs on the written copy)", st.Version)
+	}
+
+	// A legacy envelope written before versioning carries no version field:
+	// it must load cleanly as version zero (tolerated, no migration today).
+	if err := os.WriteFile(path, []byte(`{"baselined":true}`), 0o644); err != nil {
+		t.Fatalf("write legacy state: %v", err)
+	}
+	legacy, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load of a legacy pre-version file returned error: %v", err)
+	}
+	if legacy.Version != 0 || !legacy.Baselined {
+		t.Errorf("legacy load = Version %d Baselined %v, want 0/true (absent version tolerated)", legacy.Version, legacy.Baselined)
+	}
+}
+
+// TestStoreLoadLogsLibrarySnapshotAge pins the snapshot-age diagnostic on the
+// "state loaded" line: the persisted snapshot's TakenAt is read back at load
+// and surfaced as a library_age attribute (the indexer feed's title synthesis
+// runs over this snapshot, so stale-title diagnostics need its age), while a
+// snapshot that never recorded a walk (zero TakenAt) omits the attribute
+// instead of logging a nonsensical epoch-sized age.
+func TestStoreLoadLogsLibrarySnapshotAge(t *testing.T) {
+	libraryAge := func(recorder *capture.Recorder) (string, bool) {
+		for _, r := range recorder.Records() {
+			if r.Message != "state loaded" {
+				continue
+			}
+			age, found := "", false
+			r.Attrs(func(a slog.Attr) bool {
+				if a.Key == "library_age" {
+					age, _ = a.Value.Any().(string)
+					found = true
+					return false
+				}
+				return true
+			})
+			return age, found
+		}
+		t.Fatal("no \"state loaded\" record captured")
+		return "", false
+	}
+
+	logger, recorder := capture.New()
+	store := NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
+	taken := time.Now().Add(-90 * time.Minute).UTC()
+	if err := store.Save(context.Background(), &State{Library: library.Snapshot{TakenAt: taken}}); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	if _, err := store.Load(context.Background()); err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	age, found := libraryAge(recorder)
+	if !found {
+		t.Fatal("\"state loaded\" carries no library_age attribute for a walked snapshot")
+	}
+	d, err := time.ParseDuration(age)
+	if err != nil {
+		t.Fatalf("library_age = %q, want a parseable duration: %v", age, err)
+	}
+	if d < 89*time.Minute || d > 92*time.Minute {
+		t.Errorf("library_age = %s, want ~90m (the persisted TakenAt's age)", d)
+	}
+
+	// A snapshot with the zero TakenAt (legacy state, or one persisted before
+	// any walk succeeded) must omit the attribute.
+	zeroLogger, zeroRecorder := capture.New()
+	zeroStore := NewStore(filepath.Join(t.TempDir(), "state.json"), zeroLogger)
+	if err := zeroStore.Save(context.Background(), &State{Baselined: true}); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	if _, err := zeroStore.Load(context.Background()); err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if _, found := libraryAge(zeroRecorder); found {
+		t.Error("\"state loaded\" carries a library_age attribute for a zero TakenAt, want it omitted")
 	}
 }

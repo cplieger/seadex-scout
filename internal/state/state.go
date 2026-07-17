@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/seadex-scout/internal/library"
@@ -39,6 +40,13 @@ const (
 	fileMode = 0o644
 )
 
+// SchemaVersion is the schema version Save stamps into State.Version on every
+// write. Bump it when a persisted member moves or is renamed incompatibly, so
+// a future loader can detect the old shape and migrate (or refuse) explicitly
+// instead of silently zero-loading it. A file whose version field is absent or
+// zero is a legacy envelope written before versioning and loads unchanged.
+const SchemaVersion = 1
+
 // State is the persisted cross-cycle cache. Findings is keyed by dedupe key.
 // Baselined records that the first successful compare has seeded the finding
 // dedupe table, so a cold start (a fresh install or a lost cache) baselines the
@@ -55,14 +63,31 @@ type State struct {
 	// and restarts, resets to 0 on any walk that passes the guard, and mirrors
 	// mapping.Cache.RejectedRefreshes so the scout can escalate its single
 	// shrunk-walk log site after a sustained streak.
-	ShrunkWalks int  `json:"shrunk_walks,omitempty"`
-	Baselined   bool `json:"baselined,omitempty"`
-	// BaselineIncomplete marks a baseline seeded from a partial walk (Failed
-	// placeholder items were excluded from the compare, so the seed covers only
-	// the items that walked cleanly). While set, every successful cycle keeps
-	// seeding silently instead of reporting - otherwise the failed items'
+	ShrunkWalks int `json:"shrunk_walks,omitempty"`
+	// SeadexFailures counts consecutive cycles the scout's upstream gate
+	// skipped the compare after a failed SeaDex fetch, preserving findings.
+	// It persists across cycles and restarts, resets to 0 on any successful
+	// fetch, and mirrors ShrunkWalks (and mapping.Cache.RejectedRefreshes) so
+	// the scout can escalate its single seadex-fetch-failed log site after a
+	// sustained outage instead of degrading at WARN forever.
+	SeadexFailures int `json:"seadex_failures,omitempty"`
+	// Version is the persisted envelope's schema version, stamped with
+	// SchemaVersion by every Save (on the shallow copy it writes; the
+	// caller's State is never mutated). It drives no behavior today - a file
+	// with the field absent or zero loads as a legacy pre-version envelope,
+	// exactly like any other missing field - and exists so a future member
+	// move or rename can detect an old shape and migrate (or refuse)
+	// explicitly instead of silently zero-loading it.
+	Version   int  `json:"version,omitempty"`
+	Baselined bool `json:"baselined,omitempty"`
+	// BaselineIncomplete marks a baseline seeded from an incomplete cycle: a
+	// partial walk (Failed placeholder items were excluded from the compare)
+	// or an AniList-degraded match (transiently unresolved entries were
+	// missing from the seed), so the seed covers only the items that walked
+	// cleanly and mapped completely. While set, every successful cycle keeps
+	// seeding silently instead of reporting - otherwise the affected items'
 	// pre-existing backlog would burst as fresh notifications when they recover
-	// - until the first complete walk seeds the whole library and clears the
+	// - until the first complete cycle seeds the whole library and clears the
 	// flag. It distinguishes an incomplete baseline (both flags set) from a
 	// complete one (Baselined alone) and from a legacy pre-flag state file
 	// (findings present, no flags), which must stay on the normal Report path.
@@ -115,12 +140,23 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 		s.quarantine()
 		return State{}, fmt.Errorf("state: decode %s: %w", s.path, err)
 	}
-	s.log.Debug("state loaded",
+	attrs := []any{
 		"path", s.path,
 		"library_items", len(st.Library.Items),
 		"mapping_records", len(st.Mapping.Records),
 		"memo_entries", len(st.Memo.Entries),
-		"findings", len(st.Findings))
+		"findings", len(st.Findings),
+	}
+	if !st.Library.TakenAt.IsZero() {
+		// Surface the persisted snapshot's age: the indexer feed's title
+		// synthesis reads this snapshot (arr-independent, never a fresh
+		// walk), so diagnosing a stale synthesized title needs to see how old
+		// the snapshot backing it is. A legacy or walk-less state carries the
+		// zero TakenAt and skips the attribute rather than logging a
+		// nonsensical multi-century age.
+		attrs = append(attrs, "library_age", time.Since(st.Library.TakenAt).Round(time.Second).String())
+	}
+	s.log.Debug("state loaded", attrs...)
 	return st, nil
 }
 
@@ -175,6 +211,8 @@ func (bw *boundedWriter) Write(p []byte) (int, error) {
 // SanitizedForStorage here, at the persistence boundary, so a credentialed
 // ArrURL can never land in state.json regardless of which caller saves
 // (SafeLogURL is idempotent, so an already-sanitized snapshot is unchanged).
+// Save also stamps SchemaVersion into the envelope's version field. Both
+// happen on a shallow copy, so the caller's State is never mutated.
 // A context already cancelled on entry fails fast — before the sanitize and
 // encode work — so scout.save's detached shutdown retry runs immediately
 // instead of after a doomed full serialization of the same state.
@@ -187,6 +225,7 @@ func (s *Store) Save(ctx context.Context, st *State) error {
 	}
 	sanitized := *st
 	sanitized.Library = st.Library.SanitizedForStorage()
+	sanitized.Version = SchemaVersion
 	pf, err := atomicfile.NewPendingFile(ctx, s.path,
 		atomicfile.WithMkdirMode(dirMode),
 		atomicfile.WithMode(fileMode))

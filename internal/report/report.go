@@ -19,11 +19,33 @@ import (
 // labelArr is the arr key shared by the finding log lines.
 const labelArr = "arr"
 
-// Alerted is a persisted dedupe record: the finding that was alerted and when,
-// keyed in the state by the finding's dedupe key.
+// Alerted is a persisted dedupe record: when the finding was first alerted
+// plus the trimmed subset of it the resolution path reads back, keyed in the
+// state by the finding's dedupe key.
 type Alerted struct {
-	AlertedAt time.Time       `json:"alerted_at"`
-	Finding   compare.Finding `json:"finding"`
+	AlertedAt time.Time     `json:"alerted_at"`
+	Finding   StoredFinding `json:"finding"`
+}
+
+// StoredFinding is the subset of a compare.Finding the dedupe record
+// persists: exactly the fields read back across cycles - emitResolved's
+// resolution line (title, al_id, arr, season, current_group, status,
+// recommended_group) and Report's failed-item preservation scope, keyed on
+// AniListID. The record used to persist the full sanitized Finding, but
+// everything beyond this set was write-only ballast in state.json (including
+// the ArrURL whose on-disk sanitization the trim makes moot: no URL is
+// persisted at all). The JSON tags mirror compare.Finding's, so a state file
+// written before the trim decodes cleanly (its extra fields are ignored);
+// the dedupe key stays the state map's key, so dedupe continuity and
+// resolution semantics are unchanged.
+type StoredFinding struct {
+	Arr              string         `json:"arr"`
+	CurrentGroup     string         `json:"current_group,omitempty"`
+	RecommendedGroup string         `json:"recommended_group,omitempty"`
+	Title            string         `json:"title"`
+	Status           compare.Status `json:"status"`
+	AniListID        int            `json:"al_id"`
+	Season           int            `json:"season,omitempty"`
 }
 
 // Reporter emits findings as slog events with cross-cycle dedupe.
@@ -31,14 +53,19 @@ type Reporter struct {
 	log *slog.Logger
 }
 
-// storedFinding returns a copy of f safe to persist in state.json: the arr
-// deep-link is sanitized the same way the log path sanitizes it, so a
-// credentialed public_url never lands on disk. No consumer reads the
-// persisted ArrURL, so this is behavior-preserving.
-func storedFinding(f *compare.Finding) compare.Finding {
-	c := *f
-	c.ArrURL = library.SafeLogURL(c.ArrURL)
-	return c
+// storedFinding projects f onto the trimmed record the dedupe state persists
+// (see StoredFinding). Raw upstream strings are stored as-is: sanitization
+// stays a log-time concern (emitResolved), matching the emit path's policy.
+func storedFinding(f *compare.Finding) StoredFinding {
+	return StoredFinding{
+		Arr:              f.Arr,
+		CurrentGroup:     f.CurrentGroup,
+		RecommendedGroup: f.RecommendedGroup,
+		Title:            f.Title,
+		Status:           f.Status,
+		AniListID:        f.AniListID,
+		Season:           f.Season,
+	}
 }
 
 // NewReporter builds a Reporter. logger may be nil.
@@ -86,7 +113,7 @@ func (r *Reporter) Report(findings []compare.Finding, prior map[string]Alerted, 
 		}
 		a := prior[key]
 		if _, failed := failedItems[a.Finding.AniListID]; failed {
-			current[key] = Alerted{AlertedAt: a.AlertedAt, Finding: storedFinding(&a.Finding)}
+			current[key] = Alerted{AlertedAt: a.AlertedAt, Finding: a.Finding}
 			preserved++
 			continue
 		}
@@ -125,10 +152,11 @@ func (r *Reporter) emit(f *compare.Finding) {
 	r.log.Log(context.Background(), level, message(f.Status), findingKVs(f)...)
 }
 
-// emitResolved logs a single info line when a prior finding no longer applies.
-// The untrusted upstream strings (title, groups) ride through
-// textsafe.SanitizeLogText, matching findingKVs' policy.
-func (r *Reporter) emitResolved(f *compare.Finding) {
+// emitResolved logs a single info line when a prior finding no longer applies,
+// reading the trimmed record the dedupe state persisted. The untrusted
+// upstream strings (title, groups) ride through textsafe.SanitizeLogText,
+// matching findingKVs' policy.
+func (r *Reporter) emitResolved(f *StoredFinding) {
 	r.log.Info("finding resolved",
 		"title", textsafe.SanitizeLogText(f.Title),
 		"al_id", f.AniListID,

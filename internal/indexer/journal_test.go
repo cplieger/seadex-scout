@@ -16,7 +16,8 @@ import (
 
 // newTestWriter builds a FeedWriter for path with no harvest upstreams (the
 // common shape of the journal tests). abConfigured wires a fake AB Torznab URL
-// (the tracker's on switch); abPasskey builds the AB download links.
+// (the tracker's on switch); abPasskey makes AB releases journalable (persisted
+// GUID-only; the server derives the served links).
 func newTestWriter(path, abPasskey string, abConfigured bool) *FeedWriter {
 	cfg := &FeedWriterConfig{Path: path, ABPasskey: abPasskey}
 	if abConfigured {
@@ -451,10 +452,11 @@ func TestRebuildUnpackedSeasonListsPerEpisode(t *testing.T) {
 
 // TestRebuildJournalItemShape pins the journaled item fields on the real
 // Frieren catalogue shape (PMR best + LostYears alt, each on Nyaa and AB):
-// tracker split, per-tracker download links (public Nyaa .torrent, AB via
-// passkey), best/alt markers, the dropped redacted AB info hash, the SeaDex
-// entry info URL, the summed pack size, the synthesized title from the show
-// metadata, and PubDate mirroring FirstSeen (not the SeaDex entry update).
+// tracker split, per-tracker download links (public Nyaa .torrent persisted;
+// AB persisted GUID-only, its passkey link derived by the reader), best/alt
+// markers, the dropped redacted AB info hash, the SeaDex entry info URL, the
+// summed pack size, the synthesized title from the show metadata, and PubDate
+// mirroring FirstSeen (not the SeaDex entry update).
 func TestRebuildJournalItemShape(t *testing.T) {
 	updated := time.Date(2025, 7, 26, 15, 5, 59, 0, time.UTC)
 	pmrFiles := []seadex.File{
@@ -527,8 +529,8 @@ func TestRebuildJournalItemShape(t *testing.T) {
 	if !ok {
 		t.Fatal("PMR ab item missing")
 	}
-	if pmrAB.DownloadURL != "https://animebytes.tv/torrent/1167293/download/PASSKEY123" {
-		t.Errorf("PMR ab download = %q", pmrAB.DownloadURL)
+	if pmrAB.DownloadURL != "" {
+		t.Errorf("PMR ab persisted download = %q, want empty (GUID-only; the reader derives the passkey link)", pmrAB.DownloadURL)
 	}
 	if pmrAB.InfoHash != "" {
 		t.Errorf("PMR ab infohash = %q, want empty (redacted dropped)", pmrAB.InfoHash)

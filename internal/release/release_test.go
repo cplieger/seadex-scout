@@ -83,10 +83,14 @@ func TestGroupsIntersectNormalizesAndHandlesNoGroup(t *testing.T) {
 // TestClassifyKind covers the per-file-evidence-first remux -> encode ->
 // unknown classification in classifyKind: within one text source a
 // delimiter-bounded remux token (remux/BDRemux/BD-Remux/PREMUX) wins, then an
-// encoder marker (codec token, CRF, or bitrate); the release names win for the
+// encoder marker (codec token, CRF, bitrate, or a generic encode token —
+// encode/encoded/BDRip, the weakest rung); the release names win for the
 // file and the entry-wide notes only fill the gap when the names carry no
-// marker, so a notes remux cannot override a per-file encode marker. These are
-// the branches the daemon and report both key alignment on.
+// marker, so a notes remux cannot override a per-file encode marker. The
+// generic encode tokens are delimiter-bounded like the remux tokens, so a
+// bare substring inside a longer word (reencode/reencoded/encoder) is never
+// a marker. These are the branches the daemon and report both key alignment
+// on.
 func TestClassifyKind(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -104,10 +108,19 @@ func TestClassifyKind(t *testing.T) {
 		{name: "encode from codec token", in: Input{Names: []string{"Show 1080p x265"}}, wantKind: KindEncode, wantReason: "encoder marker: x265"},
 		{name: "encode from crf", in: Input{Names: []string{"Show CRF18"}}, wantKind: KindEncode, wantReason: "encoder marker: crf"},
 		{name: "encode from bitrate", in: Input{Names: []string{"Show 4500 kbps"}}, wantKind: KindEncode, wantReason: "encoder marker: bitrate"},
+		{name: "encode from generic encode token", in: Input{Names: []string{"Show S01 1080p encode"}}, wantKind: KindEncode, wantReason: "encoder marker: encode"},
+		{name: "encode from encoded token", in: Input{Names: []string{"Show 1080p [Encoded]"}}, wantKind: KindEncode, wantReason: "encoder marker: encode"},
+		{name: "encode from bdrip token", in: Input{Names: []string{"Show BDRip 1080p"}}, wantKind: KindEncode, wantReason: "encoder marker: encode"},
+		{name: "notes fill the gap with a generic encode token", in: Input{Names: []string{"Show 1080p"}, Notes: "a solid encode"}, wantKind: KindEncode, wantReason: "encoder marker: encode"},
+		{name: "remux token wins over a generic encode token", in: Input{Names: []string{"Show BD-Remux encode 1080p"}}, wantKind: KindRemux, wantReason: "name/notes marker: remux"},
+		{name: "reencode is not an encode marker", in: Input{Names: []string{"Show reencode 1080p"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
+		{name: "reencoded is not an encode marker", in: Input{Names: []string{"Show reencoded 1080p"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
+		{name: "encoder is not an encode marker", in: Input{Names: []string{"Show 1080p encoder notes"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
 		{name: "underscore-delimited bdremux", in: Input{Names: []string{"Show_1080p_BDRemux"}}, wantKind: KindRemux, wantReason: "name/notes marker: remux"},
 		{name: "underscore-delimited premux", in: Input{Names: []string{"Show_S01_PREMUX"}}, wantKind: KindRemux, wantReason: "name/notes marker: remux"},
 		{name: "underscore-delimited crf", in: Input{Names: []string{"Show_CRF18"}}, wantKind: KindEncode, wantReason: "encoder marker: crf"},
 		{name: "underscore-delimited bitrate", in: Input{Names: []string{"Show_4500_kbps"}}, wantKind: KindEncode, wantReason: "encoder marker: bitrate"},
+		{name: "underscore-delimited bdrip", in: Input{Names: []string{"Show_1080p_BDRip"}}, wantKind: KindEncode, wantReason: "encoder marker: encode"},
 		{name: "unknown when no marker", in: Input{Names: []string{"Show 1080p"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
 	}
 	for _, tc := range tests {

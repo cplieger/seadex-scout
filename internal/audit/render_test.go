@@ -568,3 +568,170 @@ func TestRenderJSONNilRowsIsEmptyArray(t *testing.T) {
 		t.Errorf("renderJSON of a nil-Rows report rendered null rows: %s", data)
 	}
 }
+
+// TestRenderIncompleteSectionAndCaveat pins the degraded report's rendered
+// shape (test c of mc-degradation-scoping): the Markdown header carries the
+// completeness caveat, the affected entries render under the "incomplete
+// (transient AniList failure)" header with their AniList ids and releases.moe
+// links, and the JSON carries the same list under incomplete_mappings.
+func TestRenderIncompleteSectionAndCaveat(t *testing.T) {
+	r := &Report{
+		GeneratedAt: time.Unix(0, 0).UTC(),
+		Totals:      map[string]int{string(VerdictBest): 1},
+		Rows:        []Row{{Title: "Matched", Arr: "sonarr", Verdict: VerdictBest}},
+		Incomplete: []IncompleteEntry{
+			{SeaDexURL: "https://releases.moe/20791", AniListID: 20791},
+			{SeaDexURL: "https://releases.moe/99999", AniListID: 99999},
+		},
+	}
+
+	md := renderMarkdown(r)
+	if !strings.Contains(md, "**Caveat: this report is incomplete.** 2 SeaDex entries could not be mapped") {
+		t.Errorf("markdown header is missing the completeness caveat:\n%s", md[:400])
+	}
+	if !strings.Contains(md, "## incomplete (transient AniList failure) (2)") {
+		t.Errorf("markdown is missing the incomplete-mapping section header:\n%s", md)
+	}
+	for _, want := range []string{"| 20791 | [seadex](https://releases.moe/20791) |", "| 99999 | [seadex](https://releases.moe/99999) |"} {
+		if !strings.Contains(md, want) {
+			t.Errorf("markdown incomplete section missing row %q:\n%s", want, md)
+		}
+	}
+	// The matched rows still render: incompleteness annotates, never withholds.
+	if !strings.Contains(md, "Matched") {
+		t.Error("markdown lost the verdict rows on a degraded report")
+	}
+
+	data, err := renderJSON(r)
+	if err != nil {
+		t.Fatalf("renderJSON: %v", err)
+	}
+	if !strings.Contains(string(data), `"incomplete_mappings"`) {
+		t.Errorf("JSON is missing the incomplete_mappings key: %s", data)
+	}
+	if !strings.Contains(string(data), `"al_id": 20791`) {
+		t.Errorf("JSON incomplete_mappings is missing the affected al_id: %s", data)
+	}
+}
+
+// TestRenderSingularIncompleteCaveat pins the caveat's singular form so a
+// one-entry degradation does not read "1 SeaDex entries".
+func TestRenderSingularIncompleteCaveat(t *testing.T) {
+	r := &Report{
+		GeneratedAt: time.Unix(0, 0).UTC(),
+		Totals:      map[string]int{},
+		Incomplete:  []IncompleteEntry{{SeaDexURL: "https://releases.moe/7", AniListID: 7}},
+	}
+	md := renderMarkdown(r)
+	if !strings.Contains(md, "1 SeaDex entry could not be mapped") {
+		t.Errorf("markdown caveat missing the singular form:\n%s", md[:300])
+	}
+}
+
+// TestRenderCompleteReportOmitsIncompleteSection pins the healthy path's
+// unchanged-output contract (test d of mc-degradation-scoping; the package
+// keeps no golden file, so absence is pinned directly): with no incomplete
+// mappings the Markdown carries neither the caveat nor the section header and
+// the JSON omits the incomplete_mappings key entirely, so a fully healthy
+// report renders byte-identically to the pre-section format - and a total
+// AniList outage that affected no entry (an empty set) renders the same.
+func TestRenderCompleteReportOmitsIncompleteSection(t *testing.T) {
+	r := &Report{
+		GeneratedAt: time.Unix(0, 0).UTC(),
+		Totals:      map[string]int{string(VerdictBest): 1},
+		Rows:        []Row{{Title: "Matched", Arr: "sonarr", Verdict: VerdictBest}},
+	}
+
+	md := renderMarkdown(r)
+	for _, absent := range []string{"Caveat", "incomplete (transient AniList failure)"} {
+		if strings.Contains(md, absent) {
+			t.Errorf("healthy report markdown must not contain %q:\n%s", absent, md)
+		}
+	}
+
+	data, err := renderJSON(r)
+	if err != nil {
+		t.Fatalf("renderJSON: %v", err)
+	}
+	if strings.Contains(string(data), "incomplete_mappings") {
+		t.Errorf("healthy report JSON must omit the incomplete_mappings key: %s", data)
+	}
+}
+
+// TestRenderJSONSanitizesIncompleteEntries extends the machine-readable
+// sanitization contract to the incomplete-mapping section: a crafted URL
+// carrying C1/bidi runes is sanitized in the JSON copy without mutating the
+// canonical report.
+func TestRenderJSONSanitizesIncompleteEntries(t *testing.T) {
+	crafted := "https://releases.moe/1\u009b\u202e"
+	r := &Report{
+		GeneratedAt: time.Unix(0, 0).UTC(),
+		Totals:      map[string]int{},
+		Incomplete:  []IncompleteEntry{{SeaDexURL: crafted, AniListID: 1}},
+	}
+
+	data, err := renderJSON(r)
+	if err != nil {
+		t.Fatalf("renderJSON: %v", err)
+	}
+	for _, bad := range []rune{'\u009b', '\u202e'} {
+		if strings.ContainsRune(string(data), bad) {
+			t.Errorf("renderJSON incomplete_mappings carries raw unsafe rune U+%04X", bad)
+		}
+	}
+	if r.Incomplete[0].SeaDexURL != crafted {
+		t.Error("renderJSON mutated the canonical report's incomplete entries; it must sanitize a copy")
+	}
+}
+
+// TestDisplayBestGroupsAnnotatesWarned pins the SeaDex-best column's warning
+// marker: a curation-warned best renders annotated with its canonical tags,
+// an unwarned best of the same group wins the dedupe (a group genuinely
+// available as best never displays warned), and multiple warnings join in
+// canonical order.
+func TestDisplayBestGroupsAnnotatesWarned(t *testing.T) {
+	rels := []Release{
+		{Group: "PMR", Best: true, Warnings: []string{"broken"}},
+		{Group: "pmr", Best: true},
+		{Group: "SEV", Best: true, Warnings: []string{"broken", "incomplete"}},
+	}
+	got := displayBestGroups(rels)
+	want := []string{"pmr", "SEV (broken, incomplete)"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("displayBestGroups() = %v, want %v", got, want)
+	}
+}
+
+// TestRenderMarkdownWarnedBestAnnotatedNotLinked pins the rendered contract
+// for a curation-warned best: the SeaDex-best column carries the warning
+// marker ("PMR (broken)") so the row stays complete and self-explanatory,
+// while the links cell does NOT offer the warned release as a grab link (the
+// releases.moe link still renders).
+func TestRenderMarkdownWarnedBestAnnotatedNotLinked(t *testing.T) {
+	rep := &Report{
+		GeneratedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+		Totals:      map[string]int{string(VerdictUnlisted): 1},
+		Rows: []Row{{
+			Title:         "Warned Show",
+			Arr:           "sonarr",
+			SeaDexURL:     "https://releases.moe/10",
+			Verdict:       VerdictUnlisted,
+			CurrentGroups: []string{"pmr"},
+			Releases: []Release{{
+				Tracker: "Nyaa", Group: "PMR", URL: "https://nyaa.si/view/900",
+				Best: true, Warnings: []string{"broken"},
+			}},
+			AniListID: 10,
+		}},
+	}
+	md := renderMarkdown(rep)
+	if !strings.Contains(md, "PMR (broken)") {
+		t.Errorf("markdown lacks the warned-best annotation \"PMR (broken)\":\n%s", md)
+	}
+	if strings.Contains(md, "https://nyaa.si/view/900") {
+		t.Errorf("markdown offers the warned release as a grab link:\n%s", md)
+	}
+	if !strings.Contains(md, "https://releases.moe/10") {
+		t.Errorf("markdown lost the SeaDex entry link:\n%s", md)
+	}
+}

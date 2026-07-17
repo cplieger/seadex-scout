@@ -174,13 +174,23 @@ func (c *Comparer) compareOne(m *match.Match) *Finding {
 }
 
 // recommended classifies the entry's SeaDex "best" torrents and returns those
-// the operator could act on: passing the content filters (remux policy,
-// dual-audio) AND obtainable (a public tracker, or AnimeBytes when enabled).
+// the operator could act on: not curation-warned (a torrent SeaDex tags
+// Broken/Incomplete is warned against, never recommended), passing the
+// content filters (remux policy, dual-audio) AND obtainable (a public
+// tracker, or AnimeBytes when enabled).
 func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
 	var out []candidate
 	for i := range entry.Torrents {
 		t := &entry.Torrents[i]
 		if !t.IsBest {
+			continue
+		}
+		// A curation-warned release (SeaDex tags it Broken/Incomplete) is
+		// never recommended: the curators themselves warn against grabbing
+		// it, so like an unobtainable release it is absent, never a finding.
+		// An entry whose every best is warned flows through emptyResult (the
+		// theoretical/incomplete nudge or silence) unchanged.
+		if release.CurationWarned(t.Tags) {
 			continue
 		}
 		// AB guard before classification; the raw-URL invariant lives in

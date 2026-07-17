@@ -160,7 +160,11 @@ host-side `./config/reports` path. The seadex-scout image is distroless and has 
 > one-shot container (compose: `healthcheck: { disable: true }`; docker run:
 > `--no-healthcheck`). The health marker belongs to the daemon's poll loop, so
 > a report-only container would read unhealthy while the report is still
-> generating, and an unhealthy-restart watchdog could kill it mid-run.
+> generating, and an unhealthy-restart watchdog could kill it mid-run. And give
+> it no restart policy (`restart: "no"`): `mode: report` is a one-shot that
+> exits when the report is written, so a restart-policied container loops it —
+> every restart runs another full library audit and writes another timestamped
+> `report-<UTC>.md`+`.json` pair, indefinitely.
 
 While the daemon runs, produce a fresh report without stopping it by running the
 `report` subcommand in the container:
@@ -201,7 +205,7 @@ query fails (Prowlarr unreachable), the search answers with a Torznab
 failed search instead of concluding there were no results. A **periodic RSS check**
 (the no-query "recent releases" fetch the arrs run on their sync interval) is
 served from an **incremental journal of newly curated releases**: a release
-appears in the RSS feed when it is *new to SeaDex's curation* — present in the
+appears in the RSS feed when it is _new to SeaDex's curation_ — present in the
 current curation set, absent from every set seen before (the tracker's post
 date is deliberately not the trigger: SeaDex routinely curates old torrents) —
 and stays listed for 14 days before aging out, plenty for RSS polls that run on
@@ -209,7 +213,11 @@ a minutes-scale interval and enough to ride out a week-long arr outage. On the
 very first cycle (and after this schema's upgrade) the whole current curation
 set is recorded as already-seen and the RSS feed starts **empty**, growing only
 as SeaDex curates new releases — catching up an existing library is what
-searches and [the report](#the-report) are for. Each journal item carries a
+searches and [the report](#the-report) are for. The flip side: a release
+curated before the journal began, or one that has aged past the 14-day window,
+surfaces **only** through a search. A deployment that relies on RSS alone — or
+one that leaves **Anime Standard Format Search** off, so the feed never answers
+Sonarr's queries — quietly misses that long tail. Each journal item carries a
 download link built directly: a public Nyaa `.torrent`, or an AnimeBytes link
 built from your `ab_passkey` (see below).
 
@@ -229,6 +237,14 @@ or info hash, and caches each matched title permanently — so items upgrade fro
 a synthesized title to the tracker's real one, usually within a cycle or two,
 while the synthesized title remains a fully working fallback. GUIDs never
 change with a title upgrade, so the arrs never re-grab.
+
+One rendering caveat: a synthesized RSS item always reports `seeders=1` — the
+feed has no live swarm data, and the floor keeps the arrs' minimum-seeders
+check from rejecting a curated release outright. That means a torrent that is
+actually dead still looks grabbable in the RSS feed, and a grab from it can sit
+stalled in the download queue. Minimum-seeder rejection only has real data to
+work with on **search** results, which pass the tracker's live seeder counts
+through.
 
 Every item, either way, carries a **download-volume-factor marker**: SeaDex's
 _best_ release is tagged `0.75` (which the arrs read as AnimeBytes Freeleech25) and
@@ -379,7 +395,7 @@ seadex-scout bridges them:
   to use.
 - **Overrides.** Drop a `/config/overrides.json` (a JSON array of records keyed
   by `anilist_id`) beside the config to pin the entries Fribb misses; it is
-  applied ahead of Fribb. Absent is fine. Fields per record: `anilist_id`
+  applied on top of Fribb (operator records win). Absent is fine. Fields per record: `anilist_id`
   (required), `type` (`movie` routes to Radarr, anything else to Sonarr),
   `tvdb_id`, `tmdb_movies` (array of ints), `imdb_ids` (array of strings),
   `season_tvdb` — note these are NOT the upstream Fribb field names
@@ -388,11 +404,15 @@ seadex-scout bridges them:
   override **replaces** the whole mapping record for its `anilist_id` (no
   field-by-field merge), so when correcting an entry Fribb already has,
   restate every field the entry needs.
-- **Title fallback.** When an entry maps through neither, seadex-scout fetches
-  its titles and format from AniList and attempts a conservative normalized
-  title-plus-year match against the library (exact match, single candidate
-  required; ambiguous matches are skipped, not guessed). Mapped items never hit
-  AniList, so steady-state AniList traffic is near zero.
+- **Title fallback.** When an entry maps through neither source — and also when
+  Fribb _has_ the entry but its record carries no arr identifier the entry's
+  type routes to (an id-less record: no TVDB id for a series, no TMDB/IMDb
+  movie id for a film) — seadex-scout fetches its titles and format from
+  AniList and attempts a conservative normalized title-plus-year match against
+  the library (exact match, single candidate required; ambiguous matches are
+  skipped, not guessed). A record that does carry its arr id but simply isn't
+  in the library is not title-matched, so mapped items never hit AniList and
+  steady-state AniList traffic is near zero.
 
 ## Release classification and filters
 
@@ -545,9 +565,16 @@ selector (or `job` / `service`, depending on your log collector) to your
 deployment and the stall window to your `poll_interval` (default 3h). In
 resident-idle (`poll_interval: off`) or report mode each cycle runs via a
 `docker exec` child (the `poll` / `report` subcommand), so its logs go to the
-trigger rather than the container's log stream and the log rules cannot fire;
-alert on your external scheduler's own job result instead. The rules assume
-the default JSON log handler; for `log.format: text`, swap the
+trigger rather than the container's log stream. That blinds the count-based
+rules (`SeadexScoutCycleError`, `SeadexScoutBetterReleaseFound`,
+`SeadexScoutReportWritten` — they can never see their lines and never fire),
+but it does **not** silence the deadman: `SeadexScoutScanStalled` watches for
+the _absence_ of cycle-completion lines, which now never reach the stream, so
+it **false-fires** once its window (7h + 1h `for`) elapses. When running
+external mode, drop the deadman or retarget its selector at the stream that
+does carry the completion lines (your runner's log stream, if the collector
+ships it), and alert on your external scheduler's own job result instead. The
+rules assume the default JSON log handler; for `log.format: text`, swap the
 `| json | level="ERROR"` parser stage for a `|= "level=ERROR"` line filter. Route
 by whatever labels your Alertmanager uses.
 

@@ -137,6 +137,7 @@ type journalStats struct {
 	added              int
 	pruned             int
 	dropped            int
+	warned             int
 	unresolvable       int
 	abSkippedNoPasskey int
 }
@@ -148,12 +149,15 @@ type journalStats struct {
 // after the harvest) with its FirstSeen preserved; one whose torrent left the
 // curation set keeps its stored render (a curated-then-replaced torrent is
 // still a valid release). An item older than feedJournalMaxAge leaves the
-// journal (its cached title is dropped by the caller's retainTitles); a
-// pre-journal item with no Key or FirstSeen (unreachable after a baseline,
+// journal (its cached title is dropped by the caller's retainTitles); an item
+// whose torrent has become curation-warned (its key is in warned) is dropped
+// - unlike a curated-then-replaced torrent, SeaDex's curators now warn
+// against it, so serving it would hand the arrs a Broken/Incomplete release;
+// a pre-journal item with no Key or FirstSeen (unreachable after a baseline,
 // defensive against hand-edited snapshots) and a carried AnimeBytes item whose
-// download link can no longer be built (the passkey was removed - a stale
-// credential must never be re-persisted) are dropped.
-func (w *FeedWriter) carryJournal(prevFeed []item, cur map[string][]curatedRef, infoFor func(alID int) EntryInfo, now time.Time, js *journalStats) []item {
+// download link can no longer be built (the passkey was removed - the release
+// is no longer grabbable, so serving it would be dead weight) are dropped.
+func (w *FeedWriter) carryJournal(prevFeed []item, cur map[string][]curatedRef, warned map[string]struct{}, infoFor func(alID int) EntryInfo, now time.Time, js *journalStats) []item {
 	kept := make([]item, 0, len(prevFeed))
 	for i := range prevFeed {
 		it := prevFeed[i]
@@ -163,6 +167,10 @@ func (w *FeedWriter) carryJournal(prevFeed []item, cur map[string][]curatedRef, 
 		}
 		if now.Sub(it.FirstSeen) > feedJournalMaxAge {
 			js.pruned++
+			continue
+		}
+		if _, bad := warned[it.Key]; bad {
+			js.warned++
 			continue
 		}
 		refs, curated := cur[it.Key]

@@ -924,13 +924,14 @@ func TestReloadKeepsFeedOnZeroSnapshot(t *testing.T) {
 }
 
 // TestReloadRebuildsABDownloadURLsFromCurrentPasskey pins the credential
-// policy for the persisted AB feed: FeedWriter materializes the passkey into
-// each item's DownloadURL, so after an ab_passkey rotation and restart the
-// snapshot still embeds the PREVIOUS secret. The reload must re-derive every
-// AB download URL from the item's non-secret tracker page URL (GUID) and the
-// CURRENT passkey - never serve the persisted credential verbatim - drop an
-// item whose URL cannot be re-derived, and clear the AB feed entirely when no
-// passkey is configured.
+// policy for the persisted AB feed: FeedWriter persists AB items GUID-only
+// (no passkey-bearing download URL lands in feed.json), so the reload MUST
+// derive every AB download URL from the item's non-secret tracker page URL
+// (GUID) and the CURRENT passkey or the feed has no grabbable links at all.
+// The same derivation makes an ab_passkey rotation take effect on the next
+// load, never serves a legacy snapshot's persisted credential verbatim, drops
+// an item whose URL cannot be derived, and clears the AB feed entirely when
+// no passkey is configured.
 func TestReloadRebuildsABDownloadURLsFromCurrentPasskey(t *testing.T) {
 	entries := []seadex.Entry{{
 		AniListID: 154587,

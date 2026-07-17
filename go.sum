@@ -10,6 +10,8 @@ github.com/cplieger/httpx/v2 v2.6.0 h1:KPBxno0EY/KcwXiB1Vi94bE4NFNaXxFyqnp02XBn9
 github.com/cplieger/httpx/v2 v2.6.0/go.mod h1:Q3ulXhfiO40EGxIVofnz2KdJY1X3MSKZTwYhv/pL9W0=
 github.com/cplieger/httpx/v3 v3.0.0 h1:9bXuJaKzJWO0fjCAPsJG7YsbgATdycozDkYZ2wXUhbc=
 github.com/cplieger/httpx/v3 v3.0.0/go.mod h1:aITrLHd0nPnJ5+Gu76xhRyOChC0KZEBCwslCELPHk+s=
+github.com/cplieger/jsonx v1.0.0 h1:JBtTt6RhoxzHRF1r5V+APOygnzLKXsDIHISyC/qYgmg=
+github.com/cplieger/jsonx v1.0.0/go.mod h1:6EoDR/SptVUcpEx+YyZcvGym6Je9vBPmhEwG/BwAVv8=
 github.com/cplieger/scheduler/v2 v2.0.0 h1:SuMKuywcxAGdlBIvMEoGK7debBWnYwbpPlkw3n4QrMI=
 github.com/cplieger/scheduler/v2 v2.0.0/go.mod h1:+uGxZnD7/hftimflPJgOmNY3jqShKFhUZuBEpNgc1dA=
 github.com/cplieger/slogx v1.2.0 h1:z9+DdEsg0JHMv9LJK5pz82Iw1Q/Qfjrrc0dVFH5gmKg=

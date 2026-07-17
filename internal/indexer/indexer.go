@@ -69,7 +69,9 @@ import (
 )
 
 const (
-	// maxItems caps a rendered feed as a safety bound.
+	// maxItems caps a rendered feed as a safety bound. It bounds the same
+	// rendered feed as feedWindow (feed.go), which already caps each
+	// synthesized per-tracker feed at persistence.
 	maxItems = 1000
 	// defaultCapsLimit is the default result count advertised in t=caps.
 	defaultCapsLimit = 100
@@ -528,18 +530,17 @@ func (ix *Indexer) readSnapshot(ctx context.Context) (snapshot, bool, bool) {
 	return snap, true, false
 }
 
-// rebuildABDownloadURLs re-derives each persisted AnimeBytes feed item's
-// download URL from its non-secret tracker page URL (the GUID) and the
-// CURRENTLY configured passkey, instead of serving the credential the snapshot
-// persisted. FeedWriter materializes ix.cfg.ABPasskey into item.DownloadURL
-// before persistence, so after the operator rotates indexer.ab_passkey and
-// restarts, feed.json still embeds the PREVIOUS passkey - serving it verbatim
-// would expose the rotated credential (and an unusable link) until the next
-// successful cycle rewrites the snapshot, indefinitely while rebuilds fail.
-// An empty configured passkey clears the AB feed (serve already answers the
-// /ab RSS check with a Torznab <error> then); an item whose current URL cannot
-// be derived (no parseable AB id in its GUID) is dropped rather than served
-// with a stale credential.
+// rebuildABDownloadURLs derives each persisted AnimeBytes feed item's download
+// URL from its non-secret tracker page URL (the GUID) and the CURRENTLY
+// configured passkey. FeedWriter persists AB items GUID-only - never a
+// passkey-bearing download URL (see stripABDownloadURLs) - so this derivation
+// is what makes the loaded AB feed servable at all; it also means a rotated
+// indexer.ab_passkey takes effect on the next load, and a LEGACY snapshot
+// that still embeds a (possibly rotated) passkey URL is overwritten rather
+// than served verbatim. An empty configured passkey clears the AB feed (serve
+// already answers the /ab RSS check with a Torznab <error> then); an item
+// whose current URL cannot be derived (no parseable AB id in its GUID) is
+// dropped rather than served link-less.
 func (ix *Indexer) rebuildABDownloadURLs(feed []item) []item {
 	if len(feed) == 0 {
 		return feed

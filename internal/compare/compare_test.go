@@ -566,3 +566,69 @@ func TestCompareFindingCarriesClassifiedReleaseFields(t *testing.T) {
 		t.Error("classification reason must be filled")
 	}
 }
+
+// TestCompareCurationWarnedBestExcluded pins the curation-warning gate on the
+// findings path: a SeaDex best tagged Broken/Incomplete (case-insensitive,
+// exact) is never recommended - an entry whose only best is warned emits
+// nothing (or its theoretical-best nudge, unchanged), and a warned best
+// beside an unwarned one recommends only the unwarned release.
+func TestCompareCurationWarnedBestExcluded(t *testing.T) {
+	newItem := func() *library.Item {
+		return &library.Item{Title: "Warned", Groups: []string{"erai-raws"}, SeasonGroups: map[int][]string{1: {"erai-raws"}}}
+	}
+
+	t.Run("warned-only best is silent", func(t *testing.T) {
+		for _, tag := range []string{"Broken", "BROKEN", "Incomplete"} {
+			entry := seadex.Entry{AniListID: 800, Torrents: []seadex.Torrent{
+				{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/800", Tags: []string{"dual", tag}},
+			}}
+			m := match.Match{Item: newItem(), Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+			if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+				t.Errorf("tag %q: a warned-only best must produce no finding, got %+v", tag, got)
+			}
+		}
+	})
+
+	t.Run("warned-only best keeps theoretical fallback", func(t *testing.T) {
+		entry := seadex.Entry{AniListID: 801, TheoreticalBest: "a stated remux", Torrents: []seadex.Torrent{
+			{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/801", Tags: []string{"Broken"}},
+		}}
+		m := match.Match{Item: newItem(), Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+		got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+		if len(got) != 1 || got[0].Status != StatusTheoretical || got[0].Severity != SevInfo {
+			t.Fatalf("expected the theoretical_best/info nudge with every best warned, got %+v", got)
+		}
+	})
+
+	t.Run("unwarned best beside a warned one is recommended alone", func(t *testing.T) {
+		entry := seadex.Entry{AniListID: 802, Torrents: []seadex.Torrent{
+			{IsBest: true, ReleaseGroup: "BrokenGrp", Tracker: "Nyaa", URL: "https://nyaa.si/view/802", Tags: []string{"Broken"}},
+			{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/803"},
+		}}
+		m := match.Match{Item: newItem(), Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+		got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+		if len(got) != 1 {
+			t.Fatalf("expected 1 finding, got %d", len(got))
+		}
+		if !reflect.DeepEqual(got[0].RecommendedGroups, []string{"subsplease"}) {
+			t.Errorf("RecommendedGroups = %v, want only the unwarned [subsplease]", got[0].RecommendedGroups)
+		}
+		if len(got[0].Links) != 1 || got[0].Links[0].URL != "https://nyaa.si/view/803" {
+			t.Errorf("Links = %+v, want only the unwarned release's link", got[0].Links)
+		}
+	})
+
+	t.Run("warned group already on disk is not aligned", func(t *testing.T) {
+		// The library holds the warned best's own group: with the warned best
+		// excluded there is no recommendation at all, so the daemon stays
+		// silent (report-by-exception) rather than reading the item aligned.
+		item := &library.Item{Title: "HasWarned", Groups: []string{"brokengrp"}, SeasonGroups: map[int][]string{1: {"brokengrp"}}}
+		entry := seadex.Entry{AniListID: 804, Torrents: []seadex.Torrent{
+			{IsBest: true, ReleaseGroup: "BrokenGrp", Tracker: "Nyaa", URL: "https://nyaa.si/view/804", Tags: []string{"Broken"}},
+		}}
+		m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+		if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
+			t.Errorf("an entry with only a warned best must stay silent, got %+v", got)
+		}
+	})
+}

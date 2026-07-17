@@ -553,12 +553,15 @@ func (c *Config) validateIndexer() error {
 	// A search proxies Prowlarr using indexer.prowlarr_api_key in the X-Api-Key
 	// header. An empty key is accepted rather than rejected (it is valid when
 	// Prowlarr has auth "Disabled for Local Addresses"), but the common case is a
-	// misconfiguration: Prowlarr then returns 401 for every search and the feed
-	// silently serves nothing from a search. Warn so the operator gets a
-	// config-time signal without breaking the legitimate no-auth deployment.
+	// misconfiguration: Prowlarr then answers 401 for every proxied search, and
+	// the feed reports each one to the arr as a Torznab <error code="900">
+	// document (upstream query failed) rather than results. Warn so the operator
+	// gets a config-time signal without breaking the legitimate no-auth
+	// deployment.
 	if c.IndexerProwlarrAPIKey == "" {
-		slog.Warn("indexer.prowlarr_api_key is empty; searches proxy Prowlarr with no API key and " +
-			"will fail (401) unless Prowlarr auth is disabled for local addresses")
+		slog.Warn("indexer.prowlarr_api_key is empty; searches proxy Prowlarr with no API key - " +
+			"unless Prowlarr auth is disabled for local addresses they fail upstream (401) and " +
+			"every search answers the arr with a Torznab <error code=\"900\"> instead of results")
 	}
 	return nil
 }

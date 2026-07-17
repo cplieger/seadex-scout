@@ -330,7 +330,7 @@ func TestCycleShutdownDuringFeedRebuildStaysSilent(t *testing.T) {
 	feed := &cancellingFeed{cancel: cancel}
 	prior := report.Alerted{
 		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Finding:   compare.Finding{Title: "Existing", DedupeKey: "prior", Status: compare.StatusBetter, AniListID: 154587},
+		Finding:   report.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
 	}
 	store := &fakeStore{st: state.State{
 		Mapping:   mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}},
