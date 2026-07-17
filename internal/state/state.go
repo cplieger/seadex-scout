@@ -1,8 +1,9 @@
 // Package state persists seadex-scout's cross-cycle cache as a single JSON file
 // written atomically: the last library snapshot (for diffing), the cached Fribb
 // map plus its HTTP validators, the AniList fallback memo, the finding dedupe
-// records, and a flag marking that the dedupe table has been seeded. A missing
-// file loads as an empty state (a cold start), never an error.
+// records, and the flags marking that (and how completely) the dedupe table has
+// been seeded. A missing file loads as an empty state (a cold start), never an
+// error.
 package state
 
 import (
@@ -56,6 +57,16 @@ type State struct {
 	// shrunk-walk log site after a sustained streak.
 	ShrunkWalks int  `json:"shrunk_walks,omitempty"`
 	Baselined   bool `json:"baselined,omitempty"`
+	// BaselineIncomplete marks a baseline seeded from a partial walk (Failed
+	// placeholder items were excluded from the compare, so the seed covers only
+	// the items that walked cleanly). While set, every successful cycle keeps
+	// seeding silently instead of reporting - otherwise the failed items'
+	// pre-existing backlog would burst as fresh notifications when they recover
+	// - until the first complete walk seeds the whole library and clears the
+	// flag. It distinguishes an incomplete baseline (both flags set) from a
+	// complete one (Baselined alone) and from a legacy pre-flag state file
+	// (findings present, no flags), which must stay on the normal Report path.
+	BaselineIncomplete bool `json:"baseline_incomplete,omitempty"`
 }
 
 // Store loads and saves the state file at a fixed path.

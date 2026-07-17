@@ -97,7 +97,9 @@ func TestFindByIDNoWrongArrShadowing(t *testing.T) {
 // TestMatchTitleFallbackOnIdlessRecord covers the gap-fill fallthrough: when
 // Fribb has the AniList entry but its record carries no arr id (a split
 // mapping), the matcher falls back to the AniList title match and still links
-// the entry to the library item.
+// the entry to the library item - yet the entry counts as Unmapped coverage,
+// not a Hit: the ID bridge by definition could not resolve an arr id, so
+// "mapped" must not claim it.
 func TestMatchTitleFallbackOnIdlessRecord(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 1, Title: "Heaven's Feel I", TmdbID: 283984, Year: 2017},
@@ -119,6 +121,12 @@ func TestMatchTitleFallbackOnIdlessRecord(t *testing.T) {
 	}
 	if got.Source != SourceTitle {
 		t.Errorf("source = %q, want %q", got.Source, SourceTitle)
+	}
+	if res.Coverage.Unmapped[library.ArrRadarr] != 1 {
+		t.Errorf("coverage unmapped[radarr] = %d, want 1 (an id-less record is an ID-bridge miss even when the title fallback links it)", res.Coverage.Unmapped[library.ArrRadarr])
+	}
+	if len(res.Coverage.Hits) != 0 {
+		t.Errorf("coverage hits = %v, want none (no arr id was resolved by the ID mapping)", res.Coverage.Hits)
 	}
 }
 
@@ -159,6 +167,12 @@ func TestMatchNoTitleFallbackWhenRecordHasArrID(t *testing.T) {
 	}
 	if fake.calls != 0 {
 		t.Errorf("AniList queried %d times; a record with an arr id must not trigger the title fallback", fake.calls)
+	}
+	if res.Coverage.Hits[library.ArrSonarr] != 1 {
+		t.Errorf("coverage hits[sonarr] = %d, want 1 (the ID mapping resolved an arr id; the item is merely absent from the library)", res.Coverage.Hits[library.ArrSonarr])
+	}
+	if len(res.Coverage.Unmapped) != 0 {
+		t.Errorf("coverage unmapped = %v, want none for a resolved-but-absent record", res.Coverage.Unmapped)
 	}
 }
 

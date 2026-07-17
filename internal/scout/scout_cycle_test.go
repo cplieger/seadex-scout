@@ -213,6 +213,9 @@ func TestCycleColdStartBaselinesSilently(t *testing.T) {
 	if !loaded.Baselined {
 		t.Error("state Baselined=false after cold start, want true")
 	}
+	if loaded.BaselineIncomplete {
+		t.Error("state BaselineIncomplete=true after a complete cold-start walk, want false")
+	}
 	if len(loaded.Findings) == 0 {
 		t.Error("cold start did not baseline the current finding into the dedupe table")
 	}
@@ -390,18 +393,20 @@ func TestCyclePartialWalkComparesCleanAndPreservesFailedItemsFindings(t *testing
 	}
 }
 
-// TestCyclePartialColdStartDefersBaselineUntilCompleteWalk pins the cold-start
-// baseline's completeness contract: a fresh install whose FIRST completed walk
-// is partial must NOT baseline the clean subset (which would set Baselined and
-// later burst the recovered items' pre-existing findings as new alerts). The
-// state stays unseeded until a complete walk establishes the baseline, which
-// then seeds every current finding silently.
-func TestCyclePartialColdStartDefersBaselineUntilCompleteWalk(t *testing.T) {
+// TestCyclePartialColdStartSeedsIncompleteBaseline pins the cold-start
+// baseline's completeness contract across the incomplete-baseline window: a
+// fresh install whose FIRST completed walk is partial seeds the clean subset
+// silently and records the baseline as incomplete (state.BaselineIncomplete),
+// so the next complete walk seeds the previously-failed series' pre-existing
+// backlog silently too (no notification burst) and clears the flag - and only
+// then does normal reporting resume, with a genuinely new finding notifying.
+func TestCyclePartialColdStartSeedsIncompleteBaseline(t *testing.T) {
 	logger, recorder := capture.New()
 	store := &fakeStore{st: state.State{
 		Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{
 			{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1},
 			{AniListID: 222, Type: "TV", TvdbID: 124, SeasonTvdb: 1},
+			{AniListID: 333, Type: "TV", TvdbID: 125, SeasonTvdb: 1},
 		}},
 	}}
 	sonarr := &flakySonarr{
@@ -409,15 +414,17 @@ func TestCyclePartialColdStartDefersBaselineUntilCompleteWalk(t *testing.T) {
 			series: []arrapi.Series{
 				{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
 				{ID: 8, Title: "Broken Series", TvdbID: 124, Year: 2024},
+				{ID: 9, Title: "Third Show", TvdbID: 125, Year: 2025},
 			},
 			episodes: map[int][]arrapi.Episode{
 				7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
 				8: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+				9: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
 			},
 		},
 		failEpisodes: map[int]bool{8: true},
 	}
-	entries := append(seadexFrierenEntry(), seadex.Entry{
+	seaDex := &fakeSeaDex{entries: append(seadexFrierenEntry(), seadex.Entry{
 		AniListID: 222,
 		Torrents: []seadex.Torrent{{
 			ReleaseGroup: "SubsPlease",
@@ -427,13 +434,13 @@ func TestCyclePartialColdStartDefersBaselineUntilCompleteWalk(t *testing.T) {
 			IsBest:       true,
 			Files:        []seadex.File{{Name: "Broken Series S01E01 1080p.mkv", Length: 1}},
 		}},
-	})
+	})}
 	s := New(&Deps{
 		Logger:       scoutTestLogger(),
 		Store:        store,
 		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
-		SeaDex:       &fakeSeaDex{entries: entries},
+		SeaDex:       seaDex,
 		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
 		Comparer:     compare.NewComparer(compare.Config{}),
 		Reporter:     report.NewReporter(logger),
@@ -441,37 +448,72 @@ func TestCyclePartialColdStartDefersBaselineUntilCompleteWalk(t *testing.T) {
 	})
 
 	// Cycle one: partial first walk (series 8's episode fetch fails). The
-	// clean subset must NOT be baselined and nothing may notify.
+	// clean subset seeds silently and the baseline is recorded incomplete.
 	if healthy := s.Cycle(context.Background()); !healthy {
 		t.Fatal("cycle one healthy=false, want true (a partial walk is degraded, not unhealthy)")
 	}
-	if store.st.Baselined {
-		t.Error("state Baselined=true after a partial cold-start walk, want false (baseline deferred)")
+	if !store.st.Baselined || !store.st.BaselineIncomplete {
+		t.Errorf("state after partial cold start: Baselined=%v BaselineIncomplete=%v, want true/true (seeded, recorded incomplete)",
+			store.st.Baselined, store.st.BaselineIncomplete)
 	}
-	if len(store.st.Findings) != 0 {
-		t.Errorf("persisted findings after partial cold start = %d, want 0 (unseeded)", len(store.st.Findings))
+	if len(store.st.Findings) != 1 {
+		t.Errorf("seeded findings after partial cold start = %d, want 1 (the clean item)", len(store.st.Findings))
 	}
 	if n := recorder.CountExact("better release available"); n != 0 {
 		t.Errorf("partial cold-start cycle emitted %d finding notifications, want 0", n)
 	}
 
-	// Cycle two: the failed series recovers, the walk is complete. The full
-	// library baselines once, silently seeding both current findings.
+	// Cycle two: the failed series recovers, the walk is complete. Its
+	// pre-existing backlog seeds silently (NOT a notification burst) and the
+	// completing walk clears the incomplete flag.
 	sonarr.failEpisodes = nil
 	if healthy := s.Cycle(context.Background()); !healthy {
 		t.Fatal("cycle two healthy=false, want true on a complete walk")
 	}
-	if !store.st.Baselined {
-		t.Error("state Baselined=false after the complete walk, want true")
+	if !store.st.Baselined || store.st.BaselineIncomplete {
+		t.Errorf("state after the completing walk: Baselined=%v BaselineIncomplete=%v, want true/false (baseline complete)",
+			store.st.Baselined, store.st.BaselineIncomplete)
 	}
 	if len(store.st.Findings) != 2 {
-		t.Errorf("baselined findings = %d, want 2 (both current findings seeded)", len(store.st.Findings))
-	}
-	if n := recorder.CountExact("cold start: findings baselined without notifying"); n != 1 {
-		t.Errorf("cold-start baseline summary count = %d, want 1 (Baseline runs exactly once)", n)
+		t.Errorf("baselined findings after the completing walk = %d, want 2 (the recovered backlog seeded)", len(store.st.Findings))
 	}
 	if n := recorder.CountExact("better release available"); n != 0 {
-		t.Errorf("baseline cycle emitted %d finding notifications, want 0 (seeded silently)", n)
+		t.Errorf("completing walk emitted %d finding notifications, want 0 (the recovered series' backlog must seed silently)", n)
+	}
+	if n := recorder.CountExact("finding resolved"); n != 0 {
+		t.Errorf("baseline window emitted %d resolved lines, want 0 (nothing was ever emitted to resolve)", n)
+	}
+	if n := recorder.CountExact("findings reported"); n != 0 {
+		t.Errorf("baseline window took the Report path %d times, want 0", n)
+	}
+	if n := recorder.CountExact("cold start: findings baselined without notifying"); n != 2 {
+		t.Errorf("baseline summary count = %d, want 2 (the partial seed and the completing seed)", n)
+	}
+
+	// Cycle three: steady state. A genuinely new finding (a new SeaDex entry
+	// for an item already in the library) must now notify via Report.
+	seaDex.entries = append(seaDex.entries, seadex.Entry{
+		AniListID: 333,
+		Torrents: []seadex.Torrent{{
+			ReleaseGroup: "SubsPlease",
+			Tracker:      "Nyaa",
+			InfoHash:     "ghi",
+			URL:          "https://nyaa.si/view/3",
+			IsBest:       true,
+			Files:        []seadex.File{{Name: "Third Show S01E01 1080p.mkv", Length: 1}},
+		}},
+	})
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("cycle three healthy=false, want true on a steady-state cycle")
+	}
+	if n := recorder.CountExact("findings reported"); n != 1 {
+		t.Errorf("'findings reported' count = %d, want 1 (normal reporting resumes after the baseline completes)", n)
+	}
+	if n := recorder.CountExact("better release available"); n != 1 {
+		t.Errorf("new finding notification count = %d, want 1 (only the genuinely new finding emits)", n)
+	}
+	if len(store.st.Findings) != 3 {
+		t.Errorf("persisted findings after the steady-state cycle = %d, want 3", len(store.st.Findings))
 	}
 }
 
@@ -1191,5 +1233,8 @@ func TestCycleUpgradeWithPriorFindingsTakesReportPath(t *testing.T) {
 	}
 	if !store.st.Baselined {
 		t.Error("Baselined = false after the upgrade cycle, want true")
+	}
+	if store.st.BaselineIncomplete {
+		t.Error("BaselineIncomplete = true after the upgrade cycle, want false (a legacy state never enters the incomplete-baseline window)")
 	}
 }

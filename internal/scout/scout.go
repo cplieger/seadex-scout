@@ -306,37 +306,35 @@ func (s *Scout) finishDegradedMatch(ctx context.Context, start time.Time, startS
 // walk the compare runs on the items that walked cleanly only: matches linked
 // to Failed items are excluded (their file state is missing, not empty), and
 // finding resolution is scoped so those items' prior findings are preserved
-// rather than falsely resolved. Always healthy.
+// rather than falsely resolved; during the cold-start window a partial walk
+// seeds an incomplete baseline instead (see the gate below). Always healthy.
 func (s *Scout) finishSuccessfulCycle(ctx context.Context, start time.Time, startStats aniListStats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, result match.Result, mapErr error) bool {
 	cleanMatches, failedItems := splitFailedMatches(result.Matches)
 	findings := s.deps.Comparer.Compare(cleanMatches)
 
 	// A cold start (a fresh install, or a lost/reset cache) has no dedupe table
 	// yet: baseline the current findings silently so the whole pre-existing
-	// backlog is not dumped as notifications at once. Steady-state emission
-	// resumes next cycle via Report. The len(Findings) guard keeps an upgrade of
-	// an already-running instance (state predating the flag but already holding
+	// backlog is not dumped as notifications at once. A partial first walk
+	// seeds the same way but records the baseline as incomplete
+	// (state.BaselineIncomplete): the seed covers only the items that walked
+	// cleanly, so every following successful cycle keeps seeding silently -
+	// the failed items' pre-existing backlog must not burst as fresh
+	// notifications when they recover - until the first complete walk seeds
+	// the whole library and clears the flag. Steady-state emission then
+	// resumes via Report. The len(Findings) guard keeps an upgrade of an
+	// already-running instance (state predating the flags but already holding
 	// findings) on the normal emit path. One cell stays conservative: a state
-	// with no findings and Baselined unset (an upgraded fully-aligned instance,
+	// with no findings and no flags set (an upgraded fully-aligned instance,
 	// or an install whose first cycles were all degraded) is indistinguishable
 	// from a cold start and baselines, preferring a one-cycle silent seed over
 	// bursting a whole backlog - a finding first appearing in exactly that
 	// cycle is seeded, not emitted. The full list is always available on
 	// demand via report mode.
 	var newFindings map[string]report.Alerted
-	if !st.Baselined && len(st.Findings) == 0 {
-		if snap.Partial {
-			// A cold-start baseline must cover the complete library: baselining
-			// only the clean subset of a partial first walk would mark
-			// Baselined=true, and the failed items' pre-existing findings would
-			// burst as "new" when they recover on the next complete cycle. Keep
-			// the unseeded state until a complete walk can establish the
-			// baseline.
-			newFindings = st.Findings
-		} else {
-			newFindings = s.deps.Reporter.Baseline(findings, time.Now())
-			st.Baselined = true
-		}
+	if st.BaselineIncomplete || (!st.Baselined && len(st.Findings) == 0) {
+		newFindings = s.deps.Reporter.Baseline(findings, time.Now())
+		st.Baselined = true
+		st.BaselineIncomplete = snap.Partial
 	} else {
 		newFindings = s.deps.Reporter.Report(findings, st.Findings, failedItems, time.Now())
 		st.Baselined = true

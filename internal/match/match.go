@@ -54,7 +54,13 @@ type Match struct {
 // InLibrary reports whether the entry was matched to a library item.
 func (m *Match) InLibrary() bool { return m.Item != nil }
 
-// Coverage counts ID-mapping outcomes per arr for the coverage metrics.
+// Coverage counts ID-mapping outcomes per arr for the cycle-complete coverage
+// log line. Hits counts entries whose Fribb record carries a usable arr id -
+// the ID bridge actually resolved an arr id - whether or not the item is in
+// the library (a resolved id absent from the library is a missing item, not a
+// mapping gap). Unmapped counts every entry the ID bridge could not resolve:
+// no Fribb record at all, a record without a usable arr id (counted here even
+// when the AniList title fallback links it), or an unusable AniList id.
 type Coverage struct {
 	Hits     map[string]int
 	Unmapped map[string]int
@@ -317,21 +323,30 @@ func (r *matchRun) matchEntry(ctx context.Context, e *seadex.Entry) Match {
 	}
 	if recOK {
 		arr := recordArr(&rec)
+		if needsLookup {
+			// needsLookup under a present record means the record is id-less
+			// (see aniListNeed): the ID bridge by definition could not resolve
+			// an arr id, so the entry counts as Unmapped even when the AniList
+			// title fallback below links it - keeping the cycle line's "mapped"
+			// an honest count of actual ID-bridge resolutions. The title is the
+			// only remaining link to the arr item, so consult AniList.
+			r.cov.Unmapped[arr]++
+			if matched := r.titleMatch(ctx, e, arr); matched != nil {
+				return Match{Item: matched, Entry: *e, Record: rec, Arr: arr, Source: SourceTitle}
+			}
+			return Match{Entry: *e, Record: rec, Arr: arr, Source: SourceUnmapped}
+		}
+		// The record carries a usable arr id: the ID mapping resolved, so this
+		// is a coverage hit whether or not the item is in the library.
 		r.cov.Hits[arr]++
 		if item != nil {
 			return Match{Item: item, Entry: *e, Record: rec, Arr: arr, Source: SourceID}
 		}
-		// needsLookup here means the record is id-less (see aniListNeed): the
-		// title is the only remaining link to the arr item, so consult AniList.
 		// A record that carries its arr id but missed findByID is simply not in
-		// the library and is unmapped directly - this keeps the fallback off
-		// the ~thousands of SeaDex entries the operator does not have, which
-		// otherwise dominate a cold cycle's AniList traffic.
-		if needsLookup {
-			if matched := r.titleMatch(ctx, e, arr); matched != nil {
-				return Match{Item: matched, Entry: *e, Record: rec, Arr: arr, Source: SourceTitle}
-			}
-		}
+		// the library and is unmatched directly, with no AniList lookup - this
+		// keeps the fallback off the ~thousands of SeaDex entries the operator
+		// does not have, which otherwise dominate a cold cycle's AniList
+		// traffic.
 		return Match{Entry: *e, Record: rec, Arr: arr, Source: SourceUnmapped}
 	}
 

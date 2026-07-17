@@ -74,7 +74,8 @@ func TestStoreSaveLoadRoundTrip(t *testing.T) {
 				},
 			},
 		},
-		Baselined: true,
+		Baselined:          true,
+		BaselineIncomplete: true,
 	}
 
 	if err := store.Save(context.Background(), want); err != nil {
@@ -86,6 +87,9 @@ func TestStoreSaveLoadRoundTrip(t *testing.T) {
 	}
 	if !got.Baselined {
 		t.Error("Baselined = false, want true")
+	}
+	if !got.BaselineIncomplete {
+		t.Error("BaselineIncomplete = false, want true (the incomplete-baseline window must survive restarts)")
 	}
 	if len(got.Library.Items) != 1 || got.Library.Items[0].Title != "Frieren" || got.Library.Items[0].SeasonGroups[1][0] != "subsplease" {
 		t.Errorf("Library round trip = %+v, want Frieren with season group", got.Library)
