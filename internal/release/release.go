@@ -8,6 +8,13 @@
 // size or bitrate inference: on SeaDex a remux is stated in the release name or
 // the entry notes, which is what makes name parsing reliable here. An
 // unclassifiable release is Unknown, never silently dropped.
+//
+// Dual-audio, by contrast, is never derived from name or notes text. SeaDex
+// entry notes are entry-wide — they describe every release in the entry and
+// can even negate a marker ("lacks dual audio"), so a text mention is
+// unreliable evidence for any single release. Input.DualAudio, the caller's
+// structured per-release metadata (SeaDex's per-torrent dualAudio flag, the
+// arr's MediaInfo audio languages), is the only source.
 package release
 
 import (
@@ -56,7 +63,11 @@ type Release struct {
 // Input is the raw material for Classify. Names are the release/file names to
 // parse; Notes is the SeaDex entry notes (empty for a library file); Group and
 // Tracker come from the source; VideoCodec is the arr MediaInfo codec (empty
-// for SeaDex); DualAudio is an explicit hint.
+// for SeaDex); DualAudio is the source's structured per-release dual-audio
+// metadata (SeaDex's per-torrent dualAudio flag, or the arr's MediaInfo audio
+// languages) and is passed through as-is — Classify never derives dual-audio
+// from Names or Notes text (entry-wide notes are unreliable per-release
+// evidence; see the package doc).
 type Input struct {
 	Notes      string
 	Group      string
@@ -79,12 +90,6 @@ var (
 	reBitrate    = regexp.MustCompile(`(?i)\b\d+\s?(kbps|mbps)\b`)
 	// reCRF matches an x264/x265 CRF tag such as "crf18" or "crf 20".
 	reCRF = regexp.MustCompile(`(?i)\bcrf\s?\d+\b`)
-	// reDualAudio matches an explicit dual-audio marker ("dual audio",
-	// "dual-audio", "dualaudio") as a whole token. A bare "dual" token is
-	// deliberately NOT a marker: a series title containing the word "Dual"
-	// (e.g. "Dual! Parallel Trouble Adventure") is not a dual-audio release,
-	// and an ordinary word such as "individual" is likewise not misread.
-	reDualAudio = regexp.MustCompile(`(?i)\bdual[\s._-]*audio\b`)
 	// reRemux matches a remux marker as a delimiter-bounded token ("remux",
 	// "BDRemux", "BD-Remux"), never a bare substring inside a longer word.
 	// "PREMUX" is included deliberately: SeaDex uses it for pre-muxed
@@ -109,16 +114,18 @@ var (
 // normalizeEvidence lowercases evidence text and replaces underscore
 // delimiters with spaces before the token regexes run. Go regexp treats "_"
 // as a word character, so an underscore-delimited scene name such as
-// Show_1080p_BDRemux_Dual_Audio would otherwise hide every marker family
-// (resolution, remux/kind, dual-audio, CRF, bitrate) behind a missing word
-// boundary. SeaDex/arr names use underscores as delimiters, never inside a
-// marker token, so the replacement is safe.
+// Show_1080p_BDRemux would otherwise hide every marker family (resolution,
+// remux/kind, CRF, bitrate) behind a missing word boundary. SeaDex/arr names
+// use underscores as delimiters, never inside a marker token, so the
+// replacement is safe.
 func normalizeEvidence(text string) string {
 	return strings.ToLower(strings.ReplaceAll(text, "_", " "))
 }
 
 // Classify converts raw release material into a normalized Release. It never
 // errors: an unclassifiable release is KindUnknown with a recorded reason.
+// DualAudio passes through from the structured input flag untouched — text is
+// never evidence for it (see the Input and package docs).
 func Classify(in *Input) Release {
 	nameText := normalizeEvidence(strings.Join(in.Names, " "))
 	notesText := normalizeEvidence(in.Notes)
@@ -143,7 +150,7 @@ func Classify(in *Input) Release {
 		Kind:        kind,
 		TrackerType: classifyTracker(in.Tracker),
 		Reason:      reason,
-		DualAudio:   in.DualAudio || reDualAudio.MatchString(text),
+		DualAudio:   in.DualAudio,
 	}
 }
 

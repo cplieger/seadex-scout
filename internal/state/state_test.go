@@ -60,7 +60,7 @@ func TestStoreSaveLoadRoundTrip(t *testing.T) {
 			RejectedRefreshes: 3,
 		},
 		Memo: match.Memo{Entries: map[int]match.MemoEntry{
-			154587: {Titles: []string{"Frieren"}, Format: "TV", Year: 2023},
+			154587: {Titles: []string{"Frieren"}, Format: "TV", Year: 2023, Expiry: now.Add(300 * time.Hour)},
 		}},
 		Findings: map[string]report.Alerted{
 			"dedupe": {
@@ -102,6 +102,10 @@ func TestStoreSaveLoadRoundTrip(t *testing.T) {
 	}
 	if got.Memo.Entries[154587].Year != 2023 {
 		t.Errorf("Memo year = %d, want 2023", got.Memo.Entries[154587].Year)
+	}
+	if want := now.Add(300 * time.Hour); !got.Memo.Entries[154587].Expiry.Equal(want) {
+		t.Errorf("Memo expiry round trip = %s, want %s (the jittered-TTL stamp must survive restarts)",
+			got.Memo.Entries[154587].Expiry, want)
 	}
 	alert, ok := got.Findings["dedupe"]
 	if !ok || alert.Finding.Title != "Frieren" || !alert.AlertedAt.Equal(now) {

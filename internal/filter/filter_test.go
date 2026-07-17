@@ -33,6 +33,37 @@ func TestKeepNonTracker(t *testing.T) {
 	}
 }
 
+// TestRequireDualAudioKeysOnStructuredFlag pins require_dual_audio to the
+// classifier's structured dual-audio sourcing end to end: a release whose
+// structured flag is set passes whatever the text says, while a release whose
+// text merely mentions "dual audio" (a name tag, or the entry-wide SeaDex
+// notes — which can even negate: "lacks dual audio") is dropped, because text
+// is never dual-audio evidence.
+func TestRequireDualAudioKeysOnStructuredFlag(t *testing.T) {
+	opts := Options{RequireDualAudio: true}
+
+	flagged := release.Classify(&release.Input{DualAudio: true, Notes: "lacks dual audio"})
+	if keep, reason := KeepNonTracker(&flagged, opts); !keep {
+		t.Errorf("structured dual-audio release dropped (%q); the flag must pass require_dual_audio", reason)
+	}
+
+	for _, tt := range []struct {
+		name string
+		in   release.Input
+	}{
+		{name: "notes mention", in: release.Input{Notes: "this release is dual audio"}},
+		{name: "negated notes mention", in: release.Input{Notes: "lacks dual audio"}},
+		{name: "name tag", in: release.Input{Names: []string{"Show - 01 [1080p][Dual Audio].mkv"}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rel := release.Classify(&tt.in)
+			if keep, _ := KeepNonTracker(&rel, opts); keep {
+				t.Error("text-only dual-audio mention passed require_dual_audio; the structured flag is the only evidence")
+			}
+		})
+	}
+}
+
 func TestObtainable(t *testing.T) {
 	tests := []struct {
 		name string

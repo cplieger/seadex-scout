@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/library"
@@ -79,22 +80,28 @@ func TestMatchMemoizesNotFoundAfterFailedBatch(t *testing.T) {
 
 // TestPendingAniListIDsDedupesAndSkipsInvalid pins the batch worklist guards:
 // a duplicate AniList id is requested once, a non-positive id is never
-// requested, and an already-memoized id (positive or negative) is skipped.
+// requested, an already-memoized LIVE id (positive or negative) is skipped,
+// and an EXPIRED memoized id counts as pending again so the batch renews it.
 func TestPendingAniListIDsDedupesAndSkipsInvalid(t *testing.T) {
 	idx := mapping.NewIndex(nil)
 	lib := buildLibIndex(&library.Snapshot{})
-	memo := Memo{Entries: map[int]MemoEntry{88: {NotFound: true}}}
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	memo := Memo{Entries: map[int]MemoEntry{
+		88: {NotFound: true, Expiry: now.Add(time.Hour)},  // live: skipped
+		99: {NotFound: true, Expiry: now.Add(-time.Hour)}, // expired: pending again
+	}}
 	entries := []seadex.Entry{
 		{AniListID: 77},
 		{AniListID: 77}, // duplicate: requested once
 		{AniListID: 0},  // non-positive: never requested
-		{AniListID: 88}, // memoized: skipped
+		{AniListID: 88}, // memoized and live: skipped
+		{AniListID: 99}, // memoized but expired: renewed via the batch
 	}
 
-	got := pendingAniListIDs(entries, idx, lib, &memo)
+	got := pendingAniListIDs(entries, idx, lib, &memo, now)
 
-	if len(got) != 1 || got[0] != 77 {
-		t.Errorf("pendingAniListIDs = %v, want [77]", got)
+	if len(got) != 2 || got[0] != 77 || got[1] != 99 {
+		t.Errorf("pendingAniListIDs = %v, want [77 99]", got)
 	}
 }
 

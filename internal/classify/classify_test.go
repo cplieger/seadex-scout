@@ -65,6 +65,42 @@ func TestTorrentNotesFillGapWhenFilesCarryNoMarker(t *testing.T) {
 	}
 }
 
+// TestTorrentDualAudioStructuredFieldOnly pins the dual-audio sourcing at the
+// adapter: the structured per-torrent SeaDex field is the only evidence — a
+// flagged torrent classifies dual-audio whatever the text says, and an
+// unflagged torrent never picks it up from the entry-wide notes or a file
+// name, because notes describe every release in the entry and can even negate
+// the marker ("lacks dual audio").
+func TestTorrentDualAudioStructuredFieldOnly(t *testing.T) {
+	tests := []struct {
+		name    string
+		notes   string
+		file    string
+		flagged bool
+		want    bool
+	}{
+		{name: "flagged torrent with no text marker", notes: "", file: "Show - 01 [1080p].mkv", flagged: true, want: true},
+		{name: "flagged torrent with negating notes", notes: "lacks dual audio", file: "Show - 01 [1080p].mkv", flagged: true, want: true},
+		{name: "unflagged torrent with dual audio notes", notes: "this release is dual audio", file: "Show - 01 [1080p].mkv", flagged: false, want: false},
+		{name: "unflagged torrent with negating notes", notes: "lacks dual audio", file: "Show - 01 [1080p].mkv", flagged: false, want: false},
+		{name: "unflagged torrent with dual audio file name", notes: "", file: "Show - 01 [1080p][Dual Audio].mkv", flagged: false, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry := &seadex.Entry{Notes: tt.notes}
+			torrent := &seadex.Torrent{
+				ReleaseGroup: "PMR",
+				Tracker:      "Nyaa",
+				DualAudio:    tt.flagged,
+				Files:        []seadex.File{{Name: tt.file}},
+			}
+			if got := Torrent(entry, torrent).DualAudio; got != tt.want {
+				t.Errorf("Torrent() DualAudio = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTorrentFileNamesDropsEmptyNamesPreservesOrder(t *testing.T) {
 	files := []seadex.File{
 		{Name: "episode 01.mkv"},

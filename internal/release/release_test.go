@@ -26,25 +26,25 @@ func TestGroupNoGroupFallback(t *testing.T) {
 	}
 }
 
-// TestClassifyDualAudioMarker covers the dual-audio marker detection: an
-// explicit flag and the explicit "dual audio"/"dual-audio"/"dualaudio" forms
-// classify as dual-audio, while a bare "dual" token (a series title such as
-// "Dual! Parallel Trouble Adventure") and an ordinary word such as
-// "individual" do not.
-func TestClassifyDualAudioMarker(t *testing.T) {
+// TestClassifyDualAudioStructuredOnly pins the dual-audio sourcing contract:
+// the structured Input.DualAudio flag is the only evidence, passed through
+// regardless of what the text says. A "dual audio" mention in the names or
+// the entry-wide notes never sets it — SeaDex notes describe every release in
+// the entry and can even negate the marker ("lacks dual audio"), so text is
+// unreliable per-release evidence.
+func TestClassifyDualAudioStructuredOnly(t *testing.T) {
 	tests := []struct {
 		name string
 		in   Input
 		want bool
 	}{
-		{name: "explicit flag", in: Input{DualAudio: true}, want: true},
-		{name: "dual audio tag", in: Input{Names: []string{"Show [Dual Audio]"}}, want: true},
-		{name: "hyphenated dual-audio", in: Input{Names: []string{"Show [Dual-Audio] 1080p"}}, want: true},
-		{name: "joined dualaudio", in: Input{Notes: "dualaudio release"}, want: true},
-		{name: "underscore-delimited Dual_Audio", in: Input{Names: []string{"Show_1080p_Dual_Audio"}}, want: true},
-		{name: "bare dual token is not dual audio", in: Input{Notes: "dual"}, want: false},
-		{name: "title containing bare Dual", in: Input{Names: []string{"Dual! Parallel Trouble Adventure 1080p"}}, want: false},
-		{name: "individual is not dual audio", in: Input{Names: []string{"Individual Circumstances 1080p"}}, want: false},
+		{name: "structured flag with no text", in: Input{DualAudio: true}, want: true},
+		{name: "structured flag wins over negating notes", in: Input{DualAudio: true, Notes: "lacks dual audio"}, want: true},
+		{name: "name tag alone is not evidence", in: Input{Names: []string{"Show [Dual Audio]"}}, want: false},
+		{name: "hyphenated name tag alone is not evidence", in: Input{Names: []string{"Show [Dual-Audio] 1080p"}}, want: false},
+		{name: "notes mention alone is not evidence", in: Input{Notes: "dualaudio release"}, want: false},
+		{name: "negated notes mention is not evidence", in: Input{Notes: "lacks dual audio"}, want: false},
+		{name: "underscore-delimited name tag is not evidence", in: Input{Names: []string{"Show_1080p_Dual_Audio"}}, want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -374,7 +374,9 @@ func TestClassifyResolution(t *testing.T) {
 // across the full fingerprint at once: a raw scene name delimited entirely by
 // underscores (the shape Go regexp word boundaries cannot tokenize) must
 // yield the same Release an equivalent space-delimited name does — resolution,
-// kind, reason, and dual-audio together, not merely no-panic behavior.
+// kind, and reason together, not merely no-panic behavior. The Dual_Audio name
+// tag stays inert: dual-audio is sourced only from the structured input flag,
+// never from text.
 func TestClassifyUnderscoreDelimitedName(t *testing.T) {
 	got := Classify(&Input{Names: []string{"Show_1080p_BDRemux_Dual_Audio"}})
 	if got.Resolution != "1080p" {
@@ -386,7 +388,7 @@ func TestClassifyUnderscoreDelimitedName(t *testing.T) {
 	if got.Reason != "name/notes marker: remux" {
 		t.Errorf("Reason = %q, want name/notes marker: remux", got.Reason)
 	}
-	if !got.DualAudio {
-		t.Error("DualAudio = false, want true for the Dual_Audio marker")
+	if got.DualAudio {
+		t.Error("DualAudio = true, want false: a name tag is not structured dual-audio evidence")
 	}
 }

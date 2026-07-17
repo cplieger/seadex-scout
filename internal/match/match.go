@@ -2,16 +2,35 @@
 // AniList ID to arr IDs through the Fribb mapping (overrides already applied),
 // and on a miss falls back to an AniList title lookup plus a conservative
 // normalized-title-plus-year match against the library. It also reports
-// ID-mapping coverage and maintains a memo so a given AniList ID is fetched at
-// most once (titles and format do not change).
+// ID-mapping coverage and maintains a memo of AniList lookups (positive
+// answers and not-found negatives) so each id is fetched at most once per
+// expiry window.
+//
+// Memo entries expire because AniList data is not immutable: entries are
+// created and English titles added after licensing, so a permanent memo would
+// hold a stale answer forever (a show added to AniList later would stay
+// not-found; a later-added title would never be seen). Every memo write
+// stamps the entry with an explicit expiry - now plus a uniform random TTL in
+// [memoTTLMin, memoTTLMax) (mean two weeks, ±25% jitter) - so entries written
+// together renew spread out instead of in lockstep. Expiry is lazy: an
+// expired entry is a lookup miss that re-enters the existing batched prefetch
+// (or the per-entry fetch) and is re-stamped on renewal, and entries still
+// expired when a Match pass ends are pruned from the returned memo. Legacy
+// entries persisted before the policy (no expiry field) are stamped on first
+// load from the wider [memoMigrationMin, memoTTLMax) window, spreading the
+// accumulated backlog's first renewal with no day-one stampede. The batched
+// prefetch (up to 50 ids per request) amortizes renewals, so a few expiries
+// per day cost effectively nothing.
 package match
 
 import (
 	"context"
 	"errors"
 	"log/slog"
+	"math/rand/v2"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/library"
@@ -66,16 +85,46 @@ type Coverage struct {
 	Unmapped map[string]int
 }
 
+// memoTTLMin and memoTTLMax bound the uniform random TTL stamped on every
+// memo write: mean 14 days with ±25% jitter, so entries written together (a
+// cold cycle's whole batch) expire spread across a week instead of in
+// lockstep. The policy is time-based, not run-based, so it is independent of
+// poll_interval.
+const (
+	memoTTLMin = 252 * time.Hour // 10.5 days (14d − 25%)
+	memoTTLMax = 420 * time.Hour // 17.5 days (14d + 25%)
+	// memoMigrationMin is the migration window's lower bound: a legacy entry
+	// (persisted before the expiry policy, so it loads with a zero Expiry) is
+	// stamped on first load with a TTL in [memoMigrationMin, memoTTLMax),
+	// spreading the whole backlog's first renewal across ~17 days with no
+	// day-one re-fetch stampede.
+	memoMigrationMin = 24 * time.Hour
+)
+
 // MemoEntry is a cached AniList lookup (titles/format/year), or a negative
-// result, keyed by AniList ID in a Memo.
+// result, keyed by AniList ID in a Memo. Expiry is the instant the entry
+// stops being served (stamped at write time with a jittered TTL; see the
+// package comment): an expired entry is a lookup miss, re-fetched and
+// re-stamped on its next use, and pruned when a Match pass ends without
+// renewing it. A zero Expiry marks a legacy entry persisted before the
+// policy; Match stamps it on first load.
 type MemoEntry struct {
-	Format   string   `json:"format,omitempty"`
-	Titles   []string `json:"titles,omitempty"`
-	Year     int      `json:"year,omitempty"`
-	NotFound bool     `json:"not_found,omitempty"`
+	Expiry   time.Time `json:"expiry,omitzero"`
+	Format   string    `json:"format,omitempty"`
+	Titles   []string  `json:"titles,omitempty"`
+	Year     int       `json:"year,omitempty"`
+	NotFound bool      `json:"not_found,omitempty"`
 }
 
-// Memo persists AniList fallback lookups across cycles.
+// expired reports whether the entry's expiry has passed at now. A zero Expiry
+// (a legacy entry) also reads as expired, defensively; Match migrates legacy
+// entries to a real expiry before any lookup consults them.
+func (e *MemoEntry) expired(now time.Time) bool { return !e.Expiry.After(now) }
+
+// Memo persists AniList fallback lookups across cycles. Entries carry
+// per-entry jittered expiries so stale answers age out (AniList data changes:
+// entries and titles are added after licensing) with renewals staggered
+// across cycles rather than expiring in lockstep.
 type Memo struct {
 	Entries map[int]MemoEntry `json:"entries,omitempty"`
 }
@@ -96,6 +145,11 @@ type Result struct {
 type Matcher struct {
 	anilist AniListClient
 	log     *slog.Logger
+	// now and rand feed the memo-expiry policy (the run clock and the TTL
+	// jitter draw). NewMatcher fixes them to time.Now and rand.Float64; tests
+	// override the fields for deterministic, sleep-free expiry coverage.
+	now  func() time.Time
+	rand func() float64
 }
 
 // NewMatcher builds a Matcher. logger may be nil.
@@ -103,18 +157,64 @@ func NewMatcher(anilistClient AniListClient, logger *slog.Logger) *Matcher {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Matcher{anilist: anilistClient, log: logger}
+	return &Matcher{
+		anilist: anilistClient,
+		log:     logger,
+		now:     time.Now,
+		rand:    rand.Float64,
+	}
+}
+
+// jitteredTTL draws one uniform random TTL from [minTTL, memoTTLMax): the
+// per-entry stagger that keeps memo renewals spread across cycles. Every memo
+// write draws its own TTL, so even entries written by the same batch renew
+// apart.
+func (m *Matcher) jitteredTTL(minTTL time.Duration) time.Duration {
+	return minTTL + time.Duration(m.rand()*float64(memoTTLMax-minTTL))
+}
+
+// migrateMemo stamps every legacy entry (a zero Expiry, persisted before the
+// expiry policy) with an expiry drawn from the wider [memoMigrationMin,
+// memoTTLMax) window, so the accumulated backlog's first renewal spreads
+// across the whole window instead of stampeding on one day (or, without any
+// stamp, living forever). A migrated entry is live until its drawn expiry, so
+// migration itself never triggers a fetch.
+func (m *Matcher) migrateMemo(memo *Memo, now time.Time) {
+	for id, ent := range memo.Entries {
+		if ent.Expiry.IsZero() {
+			ent.Expiry = now.Add(m.jitteredTTL(memoMigrationMin))
+			memo.Entries[id] = ent
+		}
+	}
+}
+
+// pruneExpired drops every entry still expired at the run's clock: renewals
+// were re-stamped with a future expiry during the pass, so what remains
+// expired was either not consulted this cycle or could not be renewed (an
+// outage), and both read as misses anyway — next cycle's batched prefetch
+// re-fetches whichever ids are still needed. Pruning keeps state.json from
+// accumulating dead entries for ids the match no longer consults.
+func pruneExpired(memo *Memo, now time.Time) {
+	for id, ent := range memo.Entries {
+		if ent.expired(now) {
+			delete(memo.Entries, id)
+		}
+	}
 }
 
 // Match links every entry to a library item (where present), returning the
-// matches, ID-mapping coverage, and the updated memo. It never fails as a
-// whole: an AniList fallback error for one entry is logged and that entry is
-// left unmatched.
+// matches, ID-mapping coverage, and the updated memo to persist: legacy
+// entries are migrated onto the expiry policy, renewed lookups are re-stamped,
+// and entries still expired at the end of the pass are pruned, so every save
+// persists a pruned memo. It never fails as a whole: an AniList fallback error
+// for one entry is logged and that entry is left unmatched.
 func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *library.Snapshot, idx *mapping.Index, memo Memo) Result {
 	lib := buildLibIndex(snap)
 	if memo.Entries == nil {
 		memo.Entries = make(map[int]MemoEntry)
 	}
+	now := m.now()
+	m.migrateMemo(&memo, now)
 	cov := Coverage{Hits: make(map[string]int), Unmapped: make(map[string]int)}
 	run := &matchRun{
 		m:    m,
@@ -122,7 +222,8 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 		idx:  idx,
 		memo: &memo,
 		cov:  &cov,
-		gate: &lookupGate{outage: m.prefetch(ctx, entries, idx, lib, &memo)},
+		now:  now,
+		gate: &lookupGate{outage: m.prefetch(ctx, entries, idx, lib, &memo, now)},
 	}
 	matches := make([]Match, 0, len(entries))
 	for i := range entries {
@@ -137,6 +238,7 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 		}
 		matches = append(matches, run.matchEntry(ctx, &entries[i]))
 	}
+	pruneExpired(&memo, now)
 	return Result{Coverage: cov, Memo: memo, Matches: matches, Degraded: run.degraded}
 }
 
@@ -153,29 +255,41 @@ type matchRun struct {
 	// breaker trips, every remaining uncached id fail fast instead of
 	// re-hitting the down upstream.
 	gate *lookupGate
+	// now is the run's single clock reading: every expiry comparison and stamp
+	// in one Match pass uses it, so a slow (rate-limited) pass cannot straddle
+	// an expiry mid-run and prune agrees with the lookups.
+	now time.Time
 	// degraded is set when a needed AniList fallback lookup could not be
 	// completed because of a transient/upstream error; Match surfaces it as
 	// Result.Degraded.
 	degraded bool
 }
 
+// entryExpiry draws one fresh jittered expiry from the run's clock. Each memo
+// write calls it separately, so entries renewed in the same pass still expire
+// staggered.
+func (r *matchRun) entryExpiry() time.Time { return r.now.Add(r.m.jitteredTTL(memoTTLMin)) }
+
 // prefetch batch-fetches into the memo every AniList id the per-entry pass will
-// consult but has not cached, so a cold cycle costs a handful of batched AniList
-// requests instead of one request per id-less entry. A PARTIAL batch failure is
+// consult but has no live (unexpired) entry for, so a cold cycle costs a
+// handful of batched AniList requests instead of one request per id-less entry
+// — and an expired entry renews through the same batch, since pendingAniListIDs
+// counts it as pending. Every write (positive or negative) is stamped with a
+// fresh jittered expiry. A PARTIAL batch failure is
 // best-effort: an id a partial batch does not return is left uncached and falls
 // through to matchEntry's single Fetch, so batching never changes the match
 // result, only the request count. A TOTAL batch failure (no chunk succeeded -
 // an AniList outage) instead returns the pending ids so the per-entry pass
 // fails them fast: every per-id lookup would be doomed against the same outage,
 // and the unbounded futile tail of requests would only stall the cycle.
-func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *mapping.Index, lib *libIndex, memo *Memo) map[int]struct{} {
+func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *mapping.Index, lib *libIndex, memo *Memo, now time.Time) map[int]struct{} {
 	if ctx.Err() != nil {
 		// Mirror the per-entry loop's cancellation guard: a batch issued on an
 		// already-cancelled cycle can only fail with context.Canceled, and the
 		// loop below breaks (and flags the cycle degraded) before using it.
 		return nil
 	}
-	ids := pendingAniListIDs(entries, idx, lib, memo)
+	ids := pendingAniListIDs(entries, idx, lib, memo, now)
 	if len(ids) == 0 {
 		return nil
 	}
@@ -204,13 +318,20 @@ func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *map
 	}
 	for _, id := range ids {
 		if media, ok := fetched[id]; ok {
-			memo.Entries[id] = MemoEntry{Titles: media.Titles, Format: media.Format, Year: media.Year}
+			memo.Entries[id] = MemoEntry{
+				Titles: media.Titles,
+				Format: media.Format,
+				Year:   media.Year,
+				Expiry: now.Add(m.jitteredTTL(memoTTLMin)),
+			}
 			continue
 		}
 		if err == nil {
 			// The batch completed without returning this id: AniList has no such
-			// media. Memoize the negative so it is not re-fetched this run.
-			memo.Entries[id] = MemoEntry{NotFound: true}
+			// media. Memoize the negative so it is not re-fetched this run; the
+			// expiry gives the negative the same lifetime policy as a positive,
+			// so a show created on AniList later is eventually seen.
+			memo.Entries[id] = MemoEntry{NotFound: true, Expiry: now.Add(m.jitteredTTL(memoTTLMin))}
 		}
 		// err != nil and id not returned: leave uncached so matchEntry retries it
 		// via the single Fetch.
@@ -242,15 +363,18 @@ func aniListNeed(alID int, idx *mapping.Index, lib *libIndex) (rec mapping.Recor
 }
 
 // pendingAniListIDs returns the distinct AniList ids the match will look up but
-// has not memoized: exactly the entries aniListNeed - the shared trigger
-// matchEntry also consults - classifies as needing a lookup, so the batch
-// fetches no more (which would re-introduce the not-in-library lookups the
-// HasArrIdentifier gate removed) and no less than the per-entry pass needs.
-func pendingAniListIDs(entries []seadex.Entry, idx *mapping.Index, lib *libIndex, memo *Memo) []int {
+// has no live memo entry for: exactly the entries aniListNeed - the shared
+// trigger matchEntry also consults - classifies as needing a lookup, so the
+// batch fetches no more (which would re-introduce the not-in-library lookups
+// the HasArrIdentifier gate removed) and no less than the per-entry pass needs.
+// An EXPIRED entry counts as pending — the same rule that makes it a miss in
+// lookupAniList — so renewals ride the batch instead of one per-id request
+// each.
+func pendingAniListIDs(entries []seadex.Entry, idx *mapping.Index, lib *libIndex, memo *Memo, now time.Time) []int {
 	seen := make(map[int]struct{})
 	var ids []int
 	add := func(alID int) {
-		if _, done := memo.Entries[alID]; done {
+		if ent, done := memo.Entries[alID]; done && !ent.expired(now) {
 			return
 		}
 		if _, dup := seen[alID]; dup {
@@ -364,14 +488,18 @@ func (r *matchRun) matchEntry(ctx context.Context, e *seadex.Entry) Match {
 	return Match{Item: item, Entry: *e, Record: mapping.Record{Type: mapping.NormalizeType(media.Format)}, Arr: item.Arr, Source: SourceTitle}
 }
 
-// lookupAniList consults the memo, then AniList. A not-found result is memoized
-// (negatively) so it is not re-fetched; a transient error is not memoized so it
-// is retried next cycle. An id the gate reports down (covered by a
-// totally-failed batch prefetch, or the consecutive-transient-failure breaker
-// tripped) fails fast without a per-id request: the same outage would doom it,
-// and the id stays un-memoized so it is retried next cycle.
+// lookupAniList consults the memo, then AniList. An expired memo entry is a
+// miss: it falls through to a fresh fetch and is re-stamped on renewal, so a
+// stale answer (a show created on AniList after the negative was cached, a
+// title added after the positive was) ages out. A not-found result is memoized
+// (negatively) so it is not re-fetched before its expiry; a transient error is
+// not memoized so it is retried next cycle. An id the gate reports down
+// (covered by a totally-failed batch prefetch, or the
+// consecutive-transient-failure breaker tripped) fails fast without a per-id
+// request: the same outage would doom it, and the id stays un-memoized so it
+// is retried next cycle.
 func (r *matchRun) lookupAniList(ctx context.Context, aniListID int) (anilist.Media, bool) {
-	if ent, ok := r.memo.Entries[aniListID]; ok {
+	if ent, ok := r.memo.Entries[aniListID]; ok && !ent.expired(r.now) {
 		if ent.NotFound {
 			return anilist.Media{}, false
 		}
@@ -388,7 +516,7 @@ func (r *matchRun) lookupAniList(ctx context.Context, aniListID int) (anilist.Me
 	if err != nil {
 		if errors.Is(err, anilist.ErrNotFound) {
 			r.gate.recordSuccess()
-			r.memo.Entries[aniListID] = MemoEntry{NotFound: true}
+			r.memo.Entries[aniListID] = MemoEntry{NotFound: true, Expiry: r.entryExpiry()}
 		} else {
 			// A transient/upstream error (network, context cancellation, rate-limit
 			// exhaustion) means this needed fallback lookup could not be completed.
@@ -411,7 +539,12 @@ func (r *matchRun) lookupAniList(ctx context.Context, aniListID int) (anilist.Me
 		return anilist.Media{}, false
 	}
 	r.gate.recordSuccess()
-	r.memo.Entries[aniListID] = MemoEntry{Titles: media.Titles, Format: media.Format, Year: media.Year}
+	r.memo.Entries[aniListID] = MemoEntry{
+		Titles: media.Titles,
+		Format: media.Format,
+		Year:   media.Year,
+		Expiry: r.entryExpiry(),
+	}
 	return media, true
 }
 

@@ -12,7 +12,9 @@ import (
 // never empty (the NOGRP fallback), the classified group always intersects its
 // own raw group under NormalizeGroup, NormalizeGroup is idempotent, a bounded
 // remux token in the release name always classifies remux (per-file evidence
-// wins), and a parsed resolution always ranks above 0 in ResolutionRank.
+// wins), a parsed resolution always ranks above 0 in ResolutionRank, and no
+// text can ever set DualAudio (the structured input flag, unset here, is its
+// only source).
 func FuzzClassify(f *testing.F) {
 	f.Add("Show 1080p BDRemux [Dual Audio]", "best remux available", "PMR", "Nyaa", "")
 	f.Add("Show x265 crf18", "", "", "AB", "HEVC")
@@ -51,6 +53,9 @@ func FuzzClassify(f *testing.F) {
 		}
 		if rel.Reason == "" {
 			t.Error("Reason is empty; every classification must record why")
+		}
+		if rel.DualAudio {
+			t.Errorf("DualAudio = true from text alone (name %q, notes %q); the structured input flag is the only source", name, notes)
 		}
 
 		ng := NormalizeGroup(rel.Group)

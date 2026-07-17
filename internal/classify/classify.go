@@ -26,7 +26,11 @@ func ABVisible(t *seadex.Torrent, includeAnimeBytes bool) bool {
 // Torrent classifies one SeaDex torrent, in the context of its entry (for the
 // shared notes), into a normalized release.Release. This is the one place the
 // release.Input for a SeaDex torrent is built, so compare and audit classify
-// the same release identically.
+// the same release identically. DualAudio is the structured per-torrent SeaDex
+// field passed through as-is — the same structured source as isBest — never
+// sniffed from the entry notes, which are entry-wide (they describe every
+// release in the entry and can even negate: "lacks dual audio") and so are
+// unreliable per-release evidence.
 func Torrent(entry *seadex.Entry, t *seadex.Torrent) release.Release {
 	return release.Classify(&release.Input{
 		Names:     torrentFileNames(t.Files),
