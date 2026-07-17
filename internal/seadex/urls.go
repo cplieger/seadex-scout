@@ -4,7 +4,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/cplieger/seadex-scout/internal/release"
 )
@@ -89,13 +88,14 @@ func usableRelative(raw string, parsed *url.URL, baseURL string) string {
 // usableAbsolute reports whether an already-absolute parsed URL is a safe
 // clickable link: http(s) scheme, no userinfo authority, and a hostname bound
 // to a canonical tracker host from the release tracker table (equal to one or
-// a dot-delimited subdomain of one, via release.LookupTrackerByHost).
+// a real dot-delimited subdomain of one, via release.LookupTrackerByHost).
 // Hostname() (the parsed host component) is checked rather than Host (the
 // serialized authority), which is non-empty for a port-only authority like
-// "https://:443/path" even though no host exists. Non-ASCII hostnames are
-// rejected before the table lookup: an IDN lookalike of a tracker host (a
-// homograph such as a Cyrillic "nyаa.si") has no legitimate use in SeaDex
-// data.
+// "https://:443/path" even though no host exists. Non-ASCII and empty-labeled
+// hostnames are rejected by the shared predicate itself: an IDN lookalike of
+// a tracker host (a homograph such as a Cyrillic "nyаa.si") has no legitimate
+// use in SeaDex data, and this gate's fail direction (unclassifiable = drop
+// the link) is exactly the predicate's.
 func usableAbsolute(parsed *url.URL) bool {
 	if !strings.EqualFold(parsed.Scheme, "http") &&
 		!strings.EqualFold(parsed.Scheme, "https") {
@@ -104,17 +104,11 @@ func usableAbsolute(parsed *url.URL) bool {
 	if parsed.User != nil {
 		return false
 	}
-	host := parsed.Hostname()
-	for i := range len(host) {
-		if host[i] >= utf8.RuneSelf {
-			return false
-		}
-	}
 	if port := parsed.Port(); port != "" {
 		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
 			return false
 		}
 	}
-	_, ok := release.LookupTrackerByHost(host)
+	_, ok := release.LookupTrackerByHost(parsed.Hostname())
 	return ok
 }

@@ -44,16 +44,19 @@ type fribbRecord struct {
 }
 
 // toRecord converts a decoded Fribb record into a public Record, normalizing
-// the type to upper case. It returns ok=false when the record has no AniList
-// ID (nothing to key the SeaDex lookup on).
+// the type to upper case and consuming a bare-number themoviedb_id as the
+// movie TMDB id when the record's own type is MOVIE (see tmdbID.movieIDs). It
+// returns ok=false when the record has no AniList ID (nothing to key the
+// SeaDex lookup on).
 func (r *fribbRecord) toRecord() (Record, bool) {
 	if r.AniListID == 0 {
 		return Record{}, false
 	}
+	typ := NormalizeType(string(r.Type))
 	return Record{
 		IMDbIDs:    r.IMDbID,
-		TmdbMovies: intSlice(r.TmdbID.Movie),
-		Type:       NormalizeType(string(r.Type)),
+		TmdbMovies: r.TmdbID.movieIDs(typ == typeMovie),
+		Type:       typ,
 		AniListID:  int(r.AniListID),
 		TvdbID:     int(r.TvdbID),
 		SeasonTvdb: r.Season.tvdbOrZero(),
@@ -68,6 +71,15 @@ func (r *fribbRecord) toRecord() (Record, bool) {
 // body could amplify into a much larger in-memory record set. Real Fribb has
 // ~40k records, leaving ample headroom below ~65k.
 const maxFribbRecords = 1 << 16
+
+// errRecordCapExceeded rejects a Fribb list exceeding maxFribbRecords. It is
+// a sentinel (errors.Is-matched in acceptRefresh) because a permanently
+// over-cap upstream list is a persistent guard refusal, not a transient parse
+// failure: it re-downloads the multi-MB body and rejects it every cycle,
+// never self-healing, so acceptRefresh routes it through rejectRefresh — the
+// consecutive-rejection streak advances and the scout escalates at
+// RejectionEscalationThreshold instead of degrading at WARN forever.
+var errRecordCapExceeded = fmt.Errorf("mapping: Fribb list exceeds cap %d records", maxFribbRecords)
 
 // maxFribbRecordBytes bounds one encoded Fribb record before its tolerant
 // decode. The document-level maxMapBytes cap plus maxFribbRecords still admit
@@ -88,10 +100,12 @@ const maxFribbIdentifiers = 32
 // bounded body of tiny elements cannot amplify into a huge transient
 // allocation), decoding each element on its own so a single malformed record
 // is skipped (counted) rather than failing the whole map. A list that exceeds
-// maxFribbRecords is rejected outright — before the excess elements are ever
-// decoded — so the caller keeps the stale cache rather than admitting an
-// amplified record set. Trailing data after the closing bracket is rejected,
-// matching the strictness of a whole-document json.Unmarshal.
+// maxFribbRecords is rejected outright with the errRecordCapExceeded sentinel
+// — before the excess elements are ever decoded — so the caller keeps the
+// stale cache rather than admitting an amplified record set (and can tell the
+// cap breach apart from a transient parse failure). Trailing data after the
+// closing bracket is rejected, matching the strictness of a whole-document
+// json.Unmarshal.
 func parseFribb(data []byte, log *slog.Logger) ([]Record, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	tok, err := dec.Token()
@@ -126,14 +140,14 @@ func parseFribb(data []byte, log *slog.Logger) ([]Record, error) {
 
 // decodeFribbRecords streams the array body element-by-element, decoding each
 // on its own so one malformed record is skipped (counted) rather than failing
-// the whole map, and rejecting a list that exceeds maxFribbRecords before the
-// excess elements are decoded. It leaves the decoder positioned on the array's
-// closing token.
+// the whole map, and rejecting a list that exceeds maxFribbRecords (the
+// errRecordCapExceeded sentinel) before the excess elements are decoded. It
+// leaves the decoder positioned on the array's closing token.
 func decodeFribbRecords(dec *json.Decoder) (records []Record, skipped, dropped int, firstErr, err error) {
 	seen := 0
 	for dec.More() {
 		if seen == maxFribbRecords {
-			return nil, 0, 0, nil, fmt.Errorf("mapping: Fribb list exceeds cap %d records", maxFribbRecords)
+			return nil, 0, 0, nil, errRecordCapExceeded
 		}
 		seen++
 		rec, ok, decodeErr, streamErr := decodeNextFribbRecord(dec)
@@ -248,23 +262,36 @@ func (s *flexString) UnmarshalJSON(b []byte) error {
 
 // tmdbID decodes the themoviedb_id field, which is a {"tv":int} or
 // {"movie":[int]} object in the merged list; only the movie half feeds a
-// lookup path (the unknown "tv" key is ignored on decode). A non-object shape
-// (a bare number or the "unknown" string that appears in some upstream rows)
-// is tolerated and left empty, since it cannot be disambiguated into a
-// tv-vs-movie id; such an entry still matches via tvdb_id (TV) or imdb_id
-// (movie).
+// lookup path (the unknown "tv" key is ignored on decode). A bare-number (or
+// quoted-numeric) scalar, which some upstream rows carry instead of the
+// object, is retained as the untyped Scalar: the number alone cannot be
+// disambiguated into a tv-vs-movie id, but a MOVIE-typed record's own type
+// does disambiguate it (a movie's tmdb id is necessarily a movie id), so
+// movieIDs consumes it for MOVIE records — otherwise it is discarded (a
+// series' scalar would be a TMDB tv id no lookup consumes; such an entry
+// still matches via tvdb_id). Any other shape (the "unknown" string that
+// appears in some upstream rows) is tolerated and left empty.
 type tmdbID struct {
 	Movie []flexInt `json:"movie"`
+	// Scalar is the retained bare-number form; consumed only via movieIDs.
+	Scalar flexInt `json:"-"`
 }
 
-// UnmarshalJSON decodes the object form and tolerates any other shape as
-// empty. The receiver is reset first so a duplicate key's later odd value
-// clears an earlier decode (see offsetPair.UnmarshalJSON).
+// UnmarshalJSON decodes the object form, retains a numeric scalar as Scalar
+// (see the type comment), and tolerates any other shape as empty. The
+// receiver is reset first so a duplicate key's later odd value clears an
+// earlier decode (see offsetPair.UnmarshalJSON).
 func (t *tmdbID) UnmarshalJSON(b []byte) error {
 	*t = tmdbID{}
 	b = bytes.TrimSpace(b)
-	if isNullOrEmpty(b) || b[0] != '{' {
+	if isNullOrEmpty(b) {
 		return nil
+	}
+	if b[0] != '{' {
+		// The tolerant flexInt decode keeps a bare or quoted number and
+		// zeroes every other scalar shape, so an "unknown" placeholder
+		// stays empty.
+		return t.Scalar.UnmarshalJSON(b)
 	}
 	type alias tmdbID
 	var a alias
@@ -281,14 +308,33 @@ func (t *tmdbID) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// movieIDs returns the movie TMDB ids a record contributes: the object form's
+// movie list, or — only when the record's own type is MOVIE (isMovie) — the
+// retained untyped Scalar, which the type disambiguates into a movie id. A
+// non-movie record's scalar stays discarded. The two forms are mutually
+// exclusive (UnmarshalJSON resets the receiver per decode), so the list wins
+// merely by being checked first.
+func (t tmdbID) movieIDs(isMovie bool) []int {
+	if ids := intSlice(t.Movie); len(ids) > 0 {
+		return ids
+	}
+	if isMovie && t.Scalar != 0 {
+		return []int{int(t.Scalar)}
+	}
+	return nil
+}
+
 // flexInt decodes a JSON number or numeric string into an int. A null, empty,
 // "unknown", non-numeric, fractional, or negative value decodes to 0 rather
 // than erroring or truncating (see setNumber), so an upstream placeholder or
 // odd value does not break the record or masquerade as a valid id.
 type flexInt int
 
-// UnmarshalJSON implements the tolerant number-or-string decode. The receiver
-// is reset first so a duplicate key's later odd value clears an earlier decode
+// UnmarshalJSON implements the tolerant number-or-string decode. Both forms
+// funnel through setNumber, so a quoted numeric string decodes exactly like
+// the same bare JSON number ("9.0" → 9, "1e3" → 1000, "1.5" → 0) — the
+// number/string equivalence the Fribb id fields rely on. The receiver is
+// reset first so a duplicate key's later odd value clears an earlier decode
 // (see offsetPair.UnmarshalJSON).
 func (f *flexInt) UnmarshalJSON(b []byte) error {
 	*f = 0
@@ -301,8 +347,8 @@ func (f *flexInt) UnmarshalJSON(b []byte) error {
 		if err := json.Unmarshal(b, &s); err != nil {
 			return err
 		}
-		if n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64); err == nil {
-			f.setNumber(float64(n))
+		if n, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil {
+			f.setNumber(n)
 		}
 		return nil
 	}

@@ -12,8 +12,8 @@ import (
 // TestStaleMapError_ErrorMessage pins the documented message-text contract of
 // both Error() branches: with a wrapped cause the message carries the cause
 // text, and the shrunk-refresh guard's cause-less form omits the trailing
-// colon-cause segment. The doc comment promises the pre-typed-error message
-// text is unchanged, so log content depends on this exact shape.
+// colon-cause segment. The message shape is a pinned log contract (see the
+// Error doc comment), so log content depends on this exact shape.
 func TestStaleMapError_ErrorMessage(t *testing.T) {
 	withCause := &StaleMapError{
 		cause:   errors.New("boom"),

@@ -44,10 +44,12 @@ groups:
             remove state.json to accept the change if it is legitimate.
       # Deadman (daemon mode): the poll loop closes every cycle with a
       # completion line — `cycle complete` when healthy, `cycle degraded` (with
-      # a reason attribute) when an upstream outage or a safety guard degraded
-      # it — so the absence of BOTH means the watcher is wedged and silent.
+      # a reason attribute) when a failed arr walk, an upstream outage, or a
+      # safety guard degraded it — so the absence of BOTH means the watcher is
+      # wedged and silent.
       # Counting the degraded line too keeps this deadman satisfied through a
-      # long upstream outage instead of firing as if the daemon died. The
+      # long arr or upstream outage instead of firing as if the daemon died
+      # (the walk failure itself alerts via SeadexScoutCycleError). The
       # for: 1h grace avoids a false fire on first boot, where no cycle has
       # completed yet and a cold first run (Fribb map download + AniList
       # fallback) can take several minutes. Unlike the other three (one-time
@@ -63,8 +65,9 @@ groups:
           summary: "seadex-scout has not completed a cycle in 7h"
           description: >
             seadex-scout (daemon mode) closes every cycle with a `cycle complete`
-            line, or a `cycle degraded` line when an upstream outage or a safety
-            guard skipped the comparison; both count here. Neither in 7h while
+            line, or a `cycle degraded` line when a failed arr walk, an upstream
+            outage, or a safety guard skipped the comparison; both count here.
+            Neither in 7h while
             the container is up (about two missed cycles, allowing for jitter)
             means the poll loop is wedged and better-release findings have
             silently stopped; restart the container. Adjust the window to your

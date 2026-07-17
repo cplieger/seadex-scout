@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/httpx/v2"
+	"github.com/cplieger/httpx/v3"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/release"
 )
@@ -41,10 +41,10 @@ type upstream struct {
 // body read, AND the Torznab decode - so a transient truncated or malformed
 // 200 response participates in the same bounded budget as a failed request
 // (the query is an idempotent GET). Exactly one layer owns multiple attempts:
-// the outer RetryWithBackoff runs upstreamMaxAttempts total, and fetchAndParse
+// the outer Do runs upstreamMaxAttempts total, and fetchAndParse
 // performs exactly one bounded GET per call, so there is no nested retry
 // explosion. A 429's capped Retry-After survives as a RetryAfterHint on the
-// transient error, so RetryWithBackoff waits the upstream-requested delay
+// transient error, so Do waits the upstream-requested delay
 // instead of its jittered backoff.
 func (u *upstream) search(ctx context.Context, params url.Values) ([]item, error) {
 	reqURL := u.feed
@@ -56,10 +56,17 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, error
 		}
 	}
 
-	items, err := httpx.RetryWithBackoff(ctx, upstreamMaxAttempts, upstreamBaseDelay, "torznab "+u.name,
+	items, err := httpx.Do(ctx,
 		func(ctx context.Context) ([]item, error) {
 			return u.fetchAndParse(ctx, reqURL)
-		})
+		},
+		httpx.WithMaxAttempts(upstreamMaxAttempts),
+		httpx.WithBaseDelay(upstreamBaseDelay),
+		httpx.WithLabel("torznab "+u.name),
+		// Route the retry loop's own Debug/Warn lines through the upstream's
+		// component logger so they carry component=indexer instead of
+		// falling through to slog.Default().
+		httpx.WithLogger(u.log))
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +74,7 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, error
 }
 
 // fetchAndParse performs ONE search attempt: a single bounded HTTP fetch
-// followed by the Torznab decode. Errors the enclosing RetryWithBackoff should
+// followed by the Torznab decode. Errors the enclosing Do should
 // retry are marked transient: a 429/5xx status (with the 429's capped
 // Retry-After carried as the transient error's RetryAfterHint, so the outer
 // loop honors the upstream-requested delay) and a parse failure of a 2xx
@@ -76,12 +83,12 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, error
 // httpx.IsTransient through the returned chain; anything else (a 4xx, an
 // unparseable URL) stays terminal.
 func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
 	u.setHeaders(req)
-	resp, err := u.http.Do(req)
+	resp, err := u.http.Do(req) //nolint:bodyclose // closed on every path: DrainClose (non-2xx statuses) or ReadLimitedBody's own close (2xx)
 	if err != nil {
 		// LogSafeError reduces a URL-embedding *url.Error to its cause
 		// (preserving errors.Is/As, so IsTransient still classifies it),
@@ -109,11 +116,11 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 }
 
 // transientUpstreamError marks an upstream failure retryable for
-// httpx.RetryWithBackoff (via the httpx.Transient interface): a retryable
+// httpx.Do (via the httpx.Transient interface): a retryable
 // status or a malformed successful body, neither of which IsTransient
 // classifies on its own. retryAfter, when positive, is the 429's parsed and
 // capped Retry-After (via httpx.ParseRetryAfter, so it can never exceed
-// httpx.RetryAfterCap), exposed through RetryAfterHint so RetryWithBackoff
+// httpx.RetryAfterCap), exposed through RetryAfterHint so Do
 // waits the upstream-requested delay instead of its jittered backoff.
 type transientUpstreamError struct {
 	err        error

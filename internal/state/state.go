@@ -25,9 +25,14 @@ import (
 
 const (
 	// maxStateBytes bounds the state file on read AND write (Save refuses to
-	// persist what Load would reject). The mapping cache (tens of thousands
-	// of records) dominates; 128 MB is generous headroom.
-	maxStateBytes = 128 << 20
+	// persist what Load would reject). An honest state file (library snapshot
+	// + mapping cache + memo + dedupe records) runs ~10-20 MB, so 32 MB keeps
+	// real headroom while fitting the 256 MiB deployment container: Load
+	// holds the raw JSON and the decoded State simultaneously, so the cap
+	// must leave room for both — a larger bound would let a valid at-cap file
+	// OOM-kill the container during Load instead of degrading to the intended
+	// clean cold start.
+	maxStateBytes = 32 << 20
 	// dirMode / fileMode are applied to the created state directory and file.
 	dirMode  = 0o755
 	fileMode = 0o644

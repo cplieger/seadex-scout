@@ -9,7 +9,7 @@ import (
 )
 
 // errTransport fails every request with a plain (non-transient) error, so
-// httpx.RetryWithBackoff returns after the first attempt without sleeping.
+// httpx.Do returns after the first attempt without sleeping.
 type errTransport struct{}
 
 func (errTransport) RoundTrip(*http.Request) (*http.Response, error) {

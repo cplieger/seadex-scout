@@ -3,6 +3,7 @@ package library
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"slices"
@@ -135,6 +136,45 @@ func TestWalkSonarrFailureBudgetFailsWalk(t *testing.T) {
 	}
 }
 
+// TestWalkSonarrTotalEpisodeFailureFailsWalk pins the sub-budget total-failure
+// rule: a library whose kept series count is below episodeFailureBudget can
+// never trip the absolute budget, so when EVERY kept series' episode fetch
+// fails (a total episode-endpoint outage: GetSeries ok, each per-series fetch
+// failing) the walk must fail as a whole - an ingest failure, so the cycle
+// goes unhealthy - instead of publishing a "partial" snapshot with zero
+// usable file data that would read healthy through the outage.
+func TestWalkSonarrTotalEpisodeFailureFailsWalk(t *testing.T) {
+	tests := []struct {
+		name   string
+		series int
+	}{
+		{name: "single kept series", series: 1},
+		{name: "several kept series below budget", series: episodeFailureBudget - 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := &fakeSonarr{epErr: map[int]error{}}
+			for id := 1; id <= tc.series; id++ {
+				fs.series = append(fs.series, arrapi.Series{ID: id, Title: "Series"})
+				fs.epErr[id] = errors.New("episode endpoint down")
+			}
+			w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
+
+			snap, err := w.Walk(context.Background())
+			if err == nil {
+				t.Fatal("Walk returned nil error, want the total episode-failure error")
+			}
+			want := fmt.Sprintf("all %d kept series failed", tc.series)
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %q, want it to contain %q", err.Error(), want)
+			}
+			if len(snap.Items) != 0 || !snap.TakenAt.IsZero() {
+				t.Errorf("snapshot = %+v, want the zero Snapshot on a total failure", snap)
+			}
+		})
+	}
+}
+
 // TestWalkTopLevelListErrorIsFatal covers the other half of the health
 // semantic: a failed top-level series list fails the whole walk.
 func TestWalkTopLevelListErrorIsFatal(t *testing.T) {
@@ -242,69 +282,68 @@ func TestDiffSnapshots(t *testing.T) {
 	}
 }
 
-// TestDiffSnapshotsPartialAware pins the Snapshot.Partial contract on the diff
-// itself: an item absent from a partial snapshot must not be counted as removed
-// (partial cur) or added (partial prev), while changes to items present in both
-// snapshots still count.
+// TestDiffSnapshotsPartialAware pins the per-key partial suppression on the
+// diff: only a key that is a Failed placeholder (in cur for removals, in prev
+// for additions) is suppressed, while an item genuinely absent from a Partial
+// snapshot still diffs - a published partial walk keeps every failed series
+// as a placeholder, so absence means the arr no longer lists it. The blanket
+// "partial suppresses every Sonarr addition/removal" behavior is retired: it
+// permanently masked real removals and additions once partial walks started
+// retaining Failed placeholders.
 func TestDiffSnapshotsPartialAware(t *testing.T) {
 	item := func(arr string, id int, groups ...string) Item {
 		return Item{Arr: arr, ArrID: id, Groups: groups, HasFile: len(groups) > 0}
 	}
-	t.Run("partial cur suppresses removals but keeps changes", func(t *testing.T) {
+	failed := func(arr string, id int) Item {
+		return Item{Arr: arr, ArrID: id, Failed: true}
+	}
+	t.Run("failed placeholder in cur suppresses only its own removal", func(t *testing.T) {
+		// Series A's episode fetch failed this walk (a Failed placeholder);
+		// series B is truly gone from Sonarr. B reports removed even though
+		// cur is Partial; A does not, and a change on a clean item counts.
 		prev := &Snapshot{Items: []Item{
-			item(ArrSonarr, 1, "pmr"),
-			item(ArrSonarr, 2, "grp"), // skipped in the partial current walk
+			item(ArrSonarr, 1, "pmr"),  // A: fetch failed this walk
+			item(ArrSonarr, 2, "grp"),  // B: genuinely removed
+			item(ArrSonarr, 3, "seed"), // C: group changed
 		}}
 		cur := &Snapshot{Partial: true, Items: []Item{
-			item(ArrSonarr, 1, "lostyears"), // group changed
+			failed(ArrSonarr, 1),
+			item(ArrSonarr, 3, "lostyears"),
 		}}
 		d := DiffSnapshots(prev, cur)
-		if d.Removed != 0 || d.Changed != 1 || d.Added != 0 {
-			t.Errorf("diff = %+v, want Removed=0 Changed=1 Added=0 for a partial cur", d)
+		if d.Removed != 1 || d.Changed != 1 || d.Added != 0 {
+			t.Errorf("diff = %+v, want Removed=1 (only the truly gone series) Changed=1 Added=0", d)
 		}
 	})
-	t.Run("partial prev suppresses additions on the next complete walk", func(t *testing.T) {
+	t.Run("failed placeholder in prev suppresses only its own addition", func(t *testing.T) {
 		prev := &Snapshot{Partial: true, Items: []Item{
 			item(ArrSonarr, 1, "pmr"),
+			failed(ArrSonarr, 2), // recovers this walk
 		}}
 		cur := &Snapshot{Items: []Item{
 			item(ArrSonarr, 1, "pmr"),
-			item(ArrSonarr, 2, "grp"), // returning series, only absent because prev was partial
-		}}
-		d := DiffSnapshots(prev, cur)
-		if d.Added != 0 || d.Removed != 0 || d.Changed != 0 {
-			t.Errorf("diff = %+v, want no counts when the item was only missing from a partial prev", d)
-		}
-	})
-	t.Run("partial cur still counts a radarr removal", func(t *testing.T) {
-		// Partial is set only by Sonarr episode-fetch failures, so a Radarr
-		// movie genuinely gone from a partial current walk is a real removal;
-		// the co-missing Sonarr item stays suppressed.
-		prev := &Snapshot{Items: []Item{
-			item(ArrSonarr, 1, "pmr"),
-			item(ArrSonarr, 2, "grp"),    // skipped in the partial current walk
-			item(ArrRadarr, 3, "movgrp"), // genuinely removed
-		}}
-		cur := &Snapshot{Partial: true, Items: []Item{
-			item(ArrSonarr, 1, "pmr"),
-		}}
-		d := DiffSnapshots(prev, cur)
-		if d.Removed != 1 || d.Added != 0 || d.Changed != 0 {
-			t.Errorf("diff = %+v, want Removed=1 (radarr) with the sonarr absence suppressed", d)
-		}
-	})
-	t.Run("partial prev still counts a radarr addition", func(t *testing.T) {
-		prev := &Snapshot{Partial: true, Items: []Item{
-			item(ArrSonarr, 1, "pmr"),
-		}}
-		cur := &Snapshot{Items: []Item{
-			item(ArrSonarr, 1, "pmr"),
-			item(ArrSonarr, 2, "grp"),    // returning series, only absent because prev was partial
-			item(ArrRadarr, 3, "movgrp"), // genuinely added
+			item(ArrSonarr, 2, "grp"),    // recovered, not an arrival
+			item(ArrSonarr, 4, "newgrp"), // genuinely added
 		}}
 		d := DiffSnapshots(prev, cur)
 		if d.Added != 1 || d.Removed != 0 || d.Changed != 0 {
-			t.Errorf("diff = %+v, want Added=1 (radarr) with the sonarr return suppressed", d)
+			t.Errorf("diff = %+v, want Added=1 (only the genuinely new series) with the recovery suppressed", d)
+		}
+	})
+	t.Run("radarr transitions count during a sonarr partial", func(t *testing.T) {
+		// Partial is set only by Sonarr episode-fetch failures and Radarr
+		// items never carry Failed, so their presence changes always count.
+		prev := &Snapshot{Items: []Item{
+			item(ArrSonarr, 1, "pmr"),
+			item(ArrRadarr, 3, "movgrp"), // genuinely removed
+		}}
+		cur := &Snapshot{Partial: true, Items: []Item{
+			failed(ArrSonarr, 1),
+			item(ArrRadarr, 4, "newmov"), // genuinely added
+		}}
+		d := DiffSnapshots(prev, cur)
+		if d.Added != 1 || d.Removed != 1 || d.Changed != 0 {
+			t.Errorf("diff = %+v, want Added=1 Removed=1 (radarr transitions) with the sonarr failure suppressed", d)
 		}
 	})
 }
@@ -1197,9 +1236,10 @@ func TestWalkCombinesBothArrsIntoOneSnapshot(t *testing.T) {
 	}
 }
 
-// TestDiffSnapshotsSkipsFailedPlaceholders pins indexByKey's Failed-placeholder
-// skip: a Failed item carries no comparable file state, so the diff treats it
-// as absent, with the Partial suppression rules deciding added/removed.
+// TestDiffSnapshotsSkipsFailedPlaceholders pins the Failed keys' exclusion
+// from comparison: a Failed placeholder carries no comparable file state, so
+// its key is never Changed, its own removal is suppressed while it is Failed
+// in cur, and its recovery is not an addition when it was Failed in prev.
 func TestDiffSnapshotsSkipsFailedPlaceholders(t *testing.T) {
 	item := func(arr string, id int, groups ...string) Item {
 		return Item{Arr: arr, ArrID: id, Groups: groups, HasFile: len(groups) > 0}

@@ -230,9 +230,9 @@ type Config struct {
 
 // Load reads, ${VAR}-expands, and parses the YAML config at path into the
 // runtime Config. It returns an error on a missing/oversized file, invalid
-// YAML, or an unknown configuration key (a misspelled or misplaced key fails
-// loudly at startup rather than being silently ignored); call Validate for
-// semantic checks.
+// YAML, a file containing more than one YAML document, or an unknown
+// configuration key (a misspelled or misplaced key fails loudly at startup
+// rather than being silently ignored); call Validate for semantic checks.
 func Load(path string) (Config, error) {
 	doc, refs, data, err := loadExpandedDoc(path)
 	if err != nil {
@@ -244,6 +244,9 @@ func Load(path string) (Config, error) {
 		// unquoted literal secret read as an alias yields "unknown anchor
 		// '<secret>' referenced"), and main logs this error at startup.
 		return Config{}, fmt.Errorf("parse config %s: %s", path, sanitizeYAMLError(err))
+	}
+	if err := checkSingleDocument(data); err != nil {
+		return Config{}, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	if err := checkUnknownKeys(data); err != nil {
 		return Config{}, fmt.Errorf("parse config %s: %s", path, sanitizeYAMLError(err))
@@ -300,6 +303,31 @@ func checkUnknownKeys(data []byte) error {
 	var probe fileConfig
 	if err := dec.Decode(&probe); err != nil && !errors.Is(err, io.EOF) {
 		return err
+	}
+	return nil
+}
+
+// checkSingleDocument rejects a config file containing more than one YAML
+// document: Load's yaml.Unmarshal and checkUnknownKeys both consume only the
+// first document, so everything below a stray "---" separator would otherwise
+// be silently ignored — the opposite of the loader's fail-loud posture. Like
+// checkUnknownKeys it runs on the raw pre-expansion bytes (expansion is
+// post-parse and string-values only, so it cannot change how many documents
+// exist). The error is fully static — it embeds no file content — so the Load
+// call site returns it without sanitizeYAMLError.
+func checkSingleDocument(data []byte) error {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	var doc yaml.Node
+	if err := dec.Decode(&doc); err != nil {
+		// Empty or unparseable first document: the parse and decode steps own
+		// those diagnostics; this check owns only document multiplicity.
+		return nil
+	}
+	if err := dec.Decode(&doc); !errors.Is(err, io.EOF) {
+		// Anything but EOF — a second document (even the empty one a trailing
+		// separator produces) or a syntax error inside it — means the file
+		// carries content beyond the first document.
+		return errors.New("config contains multiple YAML documents; remove the '---' separator")
 	}
 	return nil
 }
@@ -507,8 +535,8 @@ func parseInterval(raw string) (time.Duration, bool) {
 // oversized, invalid YAML) also returns 0: the health probe derives its
 // freshness deadline from this and must never fail because configuration
 // is absent or malformed — the daemon itself surfaces those loudly at
-// startup. Unknown keys are deliberately tolerated here (no
-// checkUnknownKeys): strictness is Load's job.
+// startup. Unknown keys and extra YAML documents are deliberately tolerated
+// here (no checkUnknownKeys / checkSingleDocument): strictness is Load's job.
 func PollIntervalFromFile(path string) time.Duration {
 	doc, _, _, err := loadExpandedDoc(path)
 	if err != nil {
@@ -694,6 +722,12 @@ func validateHTTPURL(name, rawURL string) error {
 // or a credential-like query parameter (apikey/api_key/passkey/token). Such a
 // URL survives validation but leaks the credential to upstream-failure logs,
 // which wrap the full request URL; validateIndexer warns on it field-name-only.
+// The query is scanned twice: u.Query() matches percent-decoded names in
+// well-formed pairs, but drops any malformed pair wholesale (an unescaped ';'
+// in "?apikey=SECRET;foo=x" discards the entire pair while the secret stays in
+// RawQuery for outgoing requests and logs), so a raw scan splitting on both
+// '&' and ';' catches the credential names the parsed scan lost. Both match
+// field names only, never values.
 func urlEmbedsCredential(rawURL string) bool {
 	if rawURL == "" {
 		return false
@@ -706,10 +740,25 @@ func urlEmbedsCredential(rawURL string) bool {
 		return true
 	}
 	for k := range u.Query() {
-		switch strings.ToLower(k) {
-		case "apikey", "api_key", "passkey", "token":
+		if isCredentialParam(k) {
 			return true
 		}
+	}
+	for pair := range strings.FieldsFuncSeq(u.RawQuery, func(r rune) bool { return r == '&' || r == ';' }) {
+		if name, _, _ := strings.Cut(pair, "="); isCredentialParam(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// isCredentialParam reports whether a query-parameter name is credential-like
+// (apikey/api_key/passkey/token, case-insensitive) — the single key set both
+// query scans of urlEmbedsCredential match against.
+func isCredentialParam(name string) bool {
+	switch strings.ToLower(name) {
+	case "apikey", "api_key", "passkey", "token":
+		return true
 	}
 	return false
 }

@@ -13,13 +13,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/httpx/v2"
+	"github.com/cplieger/httpx/v3"
 )
 
 // TestDoCapsHostileRetryAfterAndPenalizesThrottle proves a pathological
 // server-supplied Retry-After cannot stall the fallback: the 429 becomes a
-// transient rateLimitedError whose hint is capped at maxRetryAfter, and the
-// throttle is penalized so subsequent lookups wait the capped window too.
+// *httpx.RateLimitError whose RetryAfter hint is capped at maxRetryAfter (the
+// same ceiling request's WithRateLimitRetry applies), and the throttle is
+// penalized so subsequent lookups wait the capped window too.
 func TestDoCapsHostileRetryAfterAndPenalizesThrottle(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Retry-After", "86400") // a hostile day-long stall
@@ -30,15 +31,12 @@ func TestDoCapsHostileRetryAfterAndPenalizesThrottle(t *testing.T) {
 	c := NewClient(srv.Client(), srv.URL, 60, nil)
 	_, err := c.do(context.Background(), []byte(`{}`))
 
-	var rle *rateLimitedError
+	var rle *httpx.RateLimitError
 	if !errors.As(err, &rle) {
-		t.Fatalf("do() err = %v, want *rateLimitedError", err)
+		t.Fatalf("do() err = %v, want *httpx.RateLimitError", err)
 	}
-	if !rle.IsTransient() {
-		t.Error("a 429 must classify transient so RetryWithBackoff retries it")
-	}
-	if hint := rle.RetryAfterHint(); hint != maxRetryAfter {
-		t.Errorf("RetryAfterHint() = %v, want capped at %v", hint, maxRetryAfter)
+	if rle.RetryAfter != maxRetryAfter {
+		t.Errorf("RetryAfter = %v, want capped at %v", rle.RetryAfter, maxRetryAfter)
 	}
 	if wait := c.throttle.reserve(); wait < maxRetryAfter-2*time.Second {
 		t.Errorf("throttle wait after the 429 = %v, want pushed out to ~%v", wait, maxRetryAfter)
@@ -49,7 +47,8 @@ func TestDoCapsHostileRetryAfterAndPenalizesThrottle(t *testing.T) {
 }
 
 // TestDo429WithoutRetryAfterUsesDefault pins the fallback wait when the 429
-// carries no Retry-After header.
+// carries no Retry-After header, and the stable error message the retry loop
+// and degraded-lookup logs carry.
 func TestDo429WithoutRetryAfterUsesDefault(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -59,19 +58,22 @@ func TestDo429WithoutRetryAfterUsesDefault(t *testing.T) {
 	c := NewClient(srv.Client(), srv.URL, 60, nil)
 	_, err := c.do(context.Background(), []byte(`{}`))
 
-	var rle *rateLimitedError
+	var rle *httpx.RateLimitError
 	if !errors.As(err, &rle) {
-		t.Fatalf("do() err = %v, want *rateLimitedError", err)
+		t.Fatalf("do() err = %v, want *httpx.RateLimitError", err)
 	}
-	if hint := rle.RetryAfterHint(); hint != defaultRetryAfter {
-		t.Errorf("RetryAfterHint() = %v, want the %v default", hint, defaultRetryAfter)
+	if rle.RetryAfter != defaultRetryAfter {
+		t.Errorf("RetryAfter = %v, want the %v default", rle.RetryAfter, defaultRetryAfter)
+	}
+	if got, want := rle.Error(), "anilist: rate limited (429)"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
 	}
 }
 
 // TestDoHonorsValidRetryAfterHeader pins the ordinary-header path between the
 // missing-header default and the hostile-value cap: a valid delta-seconds
-// Retry-After survives parsing into the rateLimitedError hint instead of being
-// discarded for the default.
+// Retry-After survives parsing into the rate-limit error's RetryAfter hint
+// instead of being discarded for the default.
 func TestDoHonorsValidRetryAfterHeader(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Retry-After", "17")
@@ -82,12 +84,12 @@ func TestDoHonorsValidRetryAfterHeader(t *testing.T) {
 	c := NewClient(srv.Client(), srv.URL, 60, nil)
 	_, err := c.do(context.Background(), []byte(`{}`))
 
-	var rle *rateLimitedError
+	var rle *httpx.RateLimitError
 	if !errors.As(err, &rle) {
-		t.Fatalf("do() err = %v, want *rateLimitedError", err)
+		t.Fatalf("do() err = %v, want *httpx.RateLimitError", err)
 	}
-	if got := rle.RetryAfterHint(); got != 17*time.Second {
-		t.Errorf("RetryAfterHint() = %v, want 17s from Retry-After", got)
+	if got := rle.RetryAfter; got != 17*time.Second {
+		t.Errorf("RetryAfter = %v, want 17s from Retry-After", got)
 	}
 }
 
@@ -106,13 +108,13 @@ func TestDo429WithoutRetryAfterUsesResetHeader(t *testing.T) {
 	c := NewClient(srv.Client(), srv.URL, 60, nil)
 	_, err := c.do(context.Background(), []byte(`{}`))
 
-	var rle *rateLimitedError
+	var rle *httpx.RateLimitError
 	if !errors.As(err, &rle) {
-		t.Fatalf("do() err = %v, want *rateLimitedError", err)
+		t.Fatalf("do() err = %v, want *httpx.RateLimitError", err)
 	}
-	hint := rle.RetryAfterHint()
+	hint := rle.RetryAfter
 	if hint <= defaultRetryAfter || hint > 31*time.Second {
-		t.Errorf("RetryAfterHint() = %v, want ~30s from X-RateLimit-Reset (not the %v default)", hint, defaultRetryAfter)
+		t.Errorf("RetryAfter = %v, want ~30s from X-RateLimit-Reset (not the %v default)", hint, defaultRetryAfter)
 	}
 }
 
@@ -129,12 +131,12 @@ func TestDo429WithPastResetFallsBackToDefault(t *testing.T) {
 	c := NewClient(srv.Client(), srv.URL, 60, nil)
 	_, err := c.do(context.Background(), []byte(`{}`))
 
-	var rle *rateLimitedError
+	var rle *httpx.RateLimitError
 	if !errors.As(err, &rle) {
-		t.Fatalf("do() err = %v, want *rateLimitedError", err)
+		t.Fatalf("do() err = %v, want *httpx.RateLimitError", err)
 	}
-	if hint := rle.RetryAfterHint(); hint != defaultRetryAfter {
-		t.Errorf("RetryAfterHint() = %v, want the %v default for a past reset", hint, defaultRetryAfter)
+	if rle.RetryAfter != defaultRetryAfter {
+		t.Errorf("RetryAfter = %v, want the %v default for a past reset", rle.RetryAfter, defaultRetryAfter)
 	}
 }
 
@@ -434,12 +436,12 @@ func TestDo429WithHostileResetHeaderIsCapped(t *testing.T) {
 	c := NewClient(srv.Client(), srv.URL, 60, nil)
 	_, err := c.do(context.Background(), []byte(`{}`))
 
-	var rle *rateLimitedError
+	var rle *httpx.RateLimitError
 	if !errors.As(err, &rle) {
-		t.Fatalf("do() err = %v, want *rateLimitedError", err)
+		t.Fatalf("do() err = %v, want *httpx.RateLimitError", err)
 	}
-	if hint := rle.RetryAfterHint(); hint != maxRetryAfter {
-		t.Errorf("RetryAfterHint() = %v, want capped at %v (a hostile reset window must not stall the fallback)", hint, maxRetryAfter)
+	if rle.RetryAfter != maxRetryAfter {
+		t.Errorf("RetryAfter = %v, want capped at %v (a hostile reset window must not stall the fallback)", rle.RetryAfter, maxRetryAfter)
 	}
 	if wait := c.throttle.reserve(); wait > maxRetryAfter {
 		t.Errorf("throttle wait after the 429 = %v, want capped at %v", wait, maxRetryAfter)

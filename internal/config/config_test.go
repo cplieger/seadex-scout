@@ -781,6 +781,58 @@ func TestLoadRejectsMistypedKeys(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsMultiDocumentConfig pins the single-document contract of
+// Load (l-f66): yaml.Unmarshal and the strict unknown-key pre-decode both
+// consume only the first YAML document, so a stray "---" separator used to
+// silently drop every section below it. Load must reject a multi-document
+// file loudly — including the empty trailing document a stray end-of-file
+// separator produces — while trailing whitespace/comments and a leading
+// document-start marker (both still single-document files) keep loading.
+func TestLoadRejectsMultiDocumentConfig(t *testing.T) {
+	const arr = "sonarr:\n  enabled: true\n  url: http://sonarr:8989\n  api_key: k\n"
+	const wantMsg = "config contains multiple YAML documents; remove the '---' separator"
+	write := func(t *testing.T, content string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	rejected := map[string]string{
+		"second document":    arr + "---\nradarr:\n  enabled: true\n  url: http://radarr:7878\n  api_key: rk\n",
+		"trailing separator": arr + "---\n",
+	}
+	for name, content := range rejected {
+		t.Run(name+" rejected", func(t *testing.T) {
+			_, err := Load(write(t, content))
+			if err == nil {
+				t.Fatal("Load() = nil error, want multi-document rejection")
+			}
+			if !strings.Contains(err.Error(), wantMsg) {
+				t.Errorf("Load() error = %q, want it to contain %q", err, wantMsg)
+			}
+		})
+	}
+
+	loaded := map[string]string{
+		"trailing whitespace and comments": arr + "\n\n# trailing comment\n   \n",
+		"leading document-start marker":    "---\n" + arr,
+	}
+	for name, content := range loaded {
+		t.Run(name+" still loads", func(t *testing.T) {
+			c, err := Load(write(t, content))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if c.SonarrAPIKey != "k" {
+				t.Errorf("SonarrAPIKey = %q, want %q (first document must load intact)", c.SonarrAPIKey, "k")
+			}
+		})
+	}
+}
+
 // TestToConfigTrimsIndexerFields asserts the five indexer settings - secrets
 // and URLs pasted into YAML - are trimmed like the arr fields.
 func TestToConfigTrimsIndexerFields(t *testing.T) {
@@ -1100,8 +1152,9 @@ func TestPollIntervalFromFile(t *testing.T) {
 
 // TestURLEmbedsCredential pins the sole trigger of the credential-leak config
 // warning: userinfo (with or without a password), each credential-like query
-// parameter, the case-insensitive fold, and the silent parse-failure and
-// clean-URL negatives.
+// parameter, the case-insensitive fold, the raw-query scan that still flags a
+// credential in a malformed pair u.Query() drops (d-gpt-u4-1), and the silent
+// parse-failure and clean-URL negatives.
 func TestURLEmbedsCredential(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1118,6 +1171,11 @@ func TestURLEmbedsCredential(t *testing.T) {
 		{"passkey", "http://prowlarr:9696/22/api?passkey=k", true},
 		{"token", "http://prowlarr:9696/22/api?token=k", true},
 		{"uppercase APIKEY", "http://prowlarr:9696/22/api?APIKEY=k", true},
+		{"malformed semicolon pair keeps apikey flagged", "http://prowlarr:9696/22/api?apikey=k;foo=x", true},
+		{"credential after semicolon in malformed pair", "http://prowlarr:9696/22/api?foo=x;passkey=k", true},
+		{"uppercase credential in malformed pair", "http://prowlarr:9696/22/api?APIKEY=k;foo=x", true},
+		{"malformed pair without credential", "http://prowlarr:9696/22/api?foo=x;bar=y", false},
+		{"credential name in value position", "http://prowlarr:9696/22/api?mode=apikey", false},
 		{"unparseable", "http://[::1", false},
 	}
 	for _, tt := range tests {

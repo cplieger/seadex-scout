@@ -38,41 +38,51 @@ func TestParsePBTime(t *testing.T) {
 
 // TestPageComplete pins the pagination-completeness decision table, including
 // the arm the HTTP-level tests never reach in-package: an empty FINAL page (or
-// an empty FIRST page when the API reports zero total pages) completes cleanly,
-// while an empty page before the reported total is a truncated-view error, and
-// ANY page with invalid metadata (totalPages < 1 — the empty first page being
-// the one exception — or a page, empty or not, past the reported total) errors
-// rather than being accepted as a complete catalogue.
+// an empty FIRST page when the API reports zero total pages) completes cleanly
+// only while the reported totalItems is already satisfied — an empty page with
+// entries still outstanding is a truncated-view error, as is an empty page
+// before the reported total, and ANY page with invalid metadata (totalPages
+// < 1 — the empty first page being the one exception — or a page, empty or
+// not, past the reported total) errors rather than being accepted as a
+// complete catalogue.
 func TestPageComplete(t *testing.T) {
 	tests := []struct {
-		name       string
-		page       int
-		itemCount  int
-		totalPages int
-		wantDone   bool
-		wantErr    bool
+		name          string
+		page          int
+		itemCount     int
+		totalPages    int
+		fetched       int
+		reportedTotal int
+		wantDone      bool
+		wantErr       bool
 	}{
-		{name: "mid page continues", page: 1, itemCount: 500, totalPages: 3, wantDone: false},
-		{name: "final page with items completes", page: 3, itemCount: 12, totalPages: 3, wantDone: true},
-		{name: "single page completes", page: 1, itemCount: 7, totalPages: 1, wantDone: true},
-		{name: "empty final page completes", page: 1, itemCount: 0, totalPages: 1, wantDone: true},
+		{name: "mid page continues", page: 1, itemCount: 500, totalPages: 3, fetched: 500, reportedTotal: 1500, wantDone: false},
+		{name: "final page with items completes", page: 3, itemCount: 12, totalPages: 3, fetched: 1012, reportedTotal: 1012, wantDone: true},
+		{name: "final page with items and count mismatch completes", page: 3, itemCount: 12, totalPages: 3, fetched: 1012, reportedTotal: 1013, wantDone: true},
+		{name: "single page completes", page: 1, itemCount: 7, totalPages: 1, fetched: 7, reportedTotal: 7, wantDone: true},
+		{name: "empty final page with satisfied total completes", page: 2, itemCount: 0, totalPages: 2, fetched: 500, reportedTotal: 500, wantDone: true},
+		{name: "empty final page with outstanding items errors", page: 2, itemCount: 0, totalPages: 2, fetched: 500, reportedTotal: 501, wantErr: true},
+		{name: "empty single page with zero totals completes", page: 1, itemCount: 0, totalPages: 1, wantDone: true},
+		{name: "empty first page with outstanding items errors", page: 1, itemCount: 0, totalPages: 1, reportedTotal: 3, wantErr: true},
 		{name: "empty page with zero total completes", page: 1, itemCount: 0, totalPages: 0, wantDone: true},
-		{name: "later empty page with zero total errors", page: 2, itemCount: 0, totalPages: 0, wantErr: true},
-		{name: "later empty page with negative total errors", page: 2, itemCount: 0, totalPages: -1, wantErr: true},
-		{name: "empty page before total errors", page: 2, itemCount: 0, totalPages: 3, wantErr: true},
-		{name: "empty page past reported total errors", page: 3, itemCount: 0, totalPages: 2, wantErr: true},
-		{name: "non-empty page with zero total errors", page: 1, itemCount: 500, totalPages: 0, wantErr: true},
-		{name: "non-empty page with negative total errors", page: 1, itemCount: 500, totalPages: -1, wantErr: true},
-		{name: "non-empty page past reported total errors", page: 4, itemCount: 5, totalPages: 3, wantErr: true},
+		{name: "later empty page with zero total errors", page: 2, itemCount: 0, totalPages: 0, fetched: 500, reportedTotal: 500, wantErr: true},
+		{name: "later empty page with negative total errors", page: 2, itemCount: 0, totalPages: -1, fetched: 500, reportedTotal: 500, wantErr: true},
+		{name: "empty page before total errors", page: 2, itemCount: 0, totalPages: 3, fetched: 500, reportedTotal: 1500, wantErr: true},
+		{name: "empty page past reported total errors", page: 3, itemCount: 0, totalPages: 2, fetched: 1000, reportedTotal: 1000, wantErr: true},
+		{name: "non-empty page with zero total errors", page: 1, itemCount: 500, totalPages: 0, fetched: 500, reportedTotal: 500, wantErr: true},
+		{name: "non-empty page with negative total errors", page: 1, itemCount: 500, totalPages: -1, fetched: 500, reportedTotal: 500, wantErr: true},
+		{name: "non-empty page past reported total errors", page: 4, itemCount: 5, totalPages: 3, fetched: 1505, reportedTotal: 1505, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			done, err := pageComplete(tc.page, tc.itemCount, tc.totalPages)
+			done, err := pageComplete(tc.page, tc.itemCount, tc.totalPages, tc.fetched, tc.reportedTotal)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("pageComplete(%d, %d, %d) error = %v, wantErr %v", tc.page, tc.itemCount, tc.totalPages, err, tc.wantErr)
+				t.Fatalf("pageComplete(%d, %d, %d, %d, %d) error = %v, wantErr %v",
+					tc.page, tc.itemCount, tc.totalPages, tc.fetched, tc.reportedTotal, err, tc.wantErr)
 			}
 			if err == nil && done != tc.wantDone {
-				t.Errorf("pageComplete(%d, %d, %d) done = %v, want %v", tc.page, tc.itemCount, tc.totalPages, done, tc.wantDone)
+				t.Errorf("pageComplete(%d, %d, %d, %d, %d) done = %v, want %v",
+					tc.page, tc.itemCount, tc.totalPages, tc.fetched, tc.reportedTotal, done, tc.wantDone)
 			}
 		})
 	}
@@ -89,7 +99,6 @@ func TestEntryHasTheoreticalBest(t *testing.T) {
 		t.Error("HasTheoreticalBest() = false with TheoreticalBest set, want true")
 	}
 }
-
 
 // TestDecodePageCaseInsensitiveKeysMatchUnmarshal is a json.Unmarshal oracle
 // for the token-level decoder's field matching: encoding/json accepts a

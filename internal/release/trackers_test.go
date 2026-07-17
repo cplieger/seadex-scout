@@ -8,11 +8,12 @@ import (
 // TestLookupTrackerByHostFailClosed pins the fail-closed guards of the
 // URL-host tracker resolver consumed by the seadex link-safety gate
 // (usableAbsolute) and the host twins (IsAnimeBytesHost/IsNyaaHost): an
-// empty host, a bare DNS-root dot, and whitespace-only input never match,
-// and neither a suffix-confusion host nor a parent-domain spoof survives the
-// dot-delimited comparison. Positive cases pin the documented tolerance:
-// exact host, dot-delimited subdomain, case folding, and one DNS-root
-// trailing dot.
+// empty host, a bare DNS-root dot, whitespace-only input, an empty-labeled
+// host (a leading dot or an inner ".." - no resolvable DNS name has an empty
+// label), and a non-ASCII homograph label never match, and neither a
+// suffix-confusion host nor a parent-domain spoof survives the dot-delimited
+// comparison. Positive cases pin the documented tolerance: exact host,
+// real dot-delimited subdomain, case folding, and one DNS-root trailing dot.
 func TestLookupTrackerByHostFailClosed(t *testing.T) {
 	tests := []struct {
 		host     string
@@ -26,6 +27,7 @@ func TestLookupTrackerByHostFailClosed(t *testing.T) {
 		// Exact / subdomain / trailing-dot / case-insensitive matches.
 		{host: "nyaa.si", wantName: TrackerNameNyaa, wantOK: true},
 		{host: "sub.nyaa.si", wantName: TrackerNameNyaa, wantOK: true},
+		{host: "sukebei.nyaa.si", wantName: TrackerNameNyaa, wantOK: true},
 		{host: "NYAA.SI", wantName: TrackerNameNyaa, wantOK: true},
 		{host: "nyaa.si.", wantName: TrackerNameNyaa, wantOK: true},
 		{host: "animebytes.tv", wantName: TrackerNameAnimeBytes, wantOK: true},
@@ -33,6 +35,15 @@ func TestLookupTrackerByHostFailClosed(t *testing.T) {
 		{host: "evil-nyaa.si", wantOK: false},
 		{host: "evilnyaa.si", wantOK: false},
 		{host: "nyaa.si.evil.com", wantOK: false},
+		// Fail-closed empty labels: plain suffix matching would accept these,
+		// but no resolvable DNS name carries an empty label.
+		{host: ".nyaa.si", wantOK: false},
+		{host: "a..nyaa.si", wantOK: false},
+		{host: ".animebytes.tv", wantOK: false},
+		// Fail-closed non-ASCII: a homograph label under a tracker domain and
+		// a fullwidth-dot spelling of the domain itself never classify.
+		{host: "x\u00e9.nyaa.si", wantOK: false},
+		{host: "animebytes\uff0etv", wantOK: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.host, func(t *testing.T) {

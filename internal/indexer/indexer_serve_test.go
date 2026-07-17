@@ -197,10 +197,12 @@ func TestQuerySkipsPerEpisodeQuery(t *testing.T) {
 }
 
 // TestQueryCapsResults pins the maxItems safety bound: a synthesized feed
-// larger than the cap is truncated so a rendered response can never grow
-// unboundedly.
+// larger than the cap is truncated - even when the request's explicit limit
+// exceeds it - so a rendered response can never grow unboundedly. (A
+// limit-less request is trimmed to defaultCapsLimit before this cap can bite;
+// see TestQueryFeedDefaultLimit.)
 func TestQueryCapsResults(t *testing.T) {
-	ix := New(&Config{}, Deps{}, "")
+	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, Deps{}, "")
 	feed := make([]item, maxItems+5)
 	for i := range feed {
 		feed[i] = item{Title: "t", GUID: strconv.Itoa(i)}
@@ -208,9 +210,43 @@ func TestQueryCapsResults(t *testing.T) {
 	ix.mu.Lock()
 	ix.snap.NyaaFeed = feed
 	ix.mu.Unlock()
-	items, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
+	items, _ := ix.query(context.Background(), url.Values{"t": {"search"}, "limit": {strconv.Itoa(maxItems + 5)}}, "nyaa")
 	if len(items) != maxItems {
 		t.Fatalf("got %d items, want the maxItems cap %d", len(items), maxItems)
+	}
+}
+
+// TestQueryFeedDefaultLimit pins the advertised caps default (t=caps declares
+// limits default=defaultCapsLimit) on the synthesized-feed path: an empty-q
+// request with NO explicit limit returns exactly defaultCapsLimit newest items
+// when the feed holds more - never the whole window - so the caps document is
+// honest. The window stays anchored at the newest item (the feed is sorted
+// newest-first), and an explicit limit still wins over the default.
+func TestQueryFeedDefaultLimit(t *testing.T) {
+	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, Deps{}, "")
+	feed := make([]item, defaultCapsLimit+50)
+	for i := range feed {
+		feed[i] = item{Title: "t", GUID: strconv.Itoa(i)}
+	}
+	ix.mu.Lock()
+	ix.snap.NyaaFeed = feed
+	ix.mu.Unlock()
+
+	items, stats := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
+	if !stats.feed {
+		t.Fatal("empty-q query not served from the synthesized feed")
+	}
+	if len(items) != defaultCapsLimit {
+		t.Fatalf("limit-less feed request returned %d items, want the advertised default %d", len(items), defaultCapsLimit)
+	}
+	if items[0].GUID != "0" || items[defaultCapsLimit-1].GUID != strconv.Itoa(defaultCapsLimit-1) {
+		t.Errorf("default window = GUIDs %s..%s, want 0..%d (anchored at the newest item)",
+			items[0].GUID, items[defaultCapsLimit-1].GUID, defaultCapsLimit-1)
+	}
+
+	explicit, _ := ix.query(context.Background(), url.Values{"t": {"search"}, "limit": {"7"}}, "nyaa")
+	if len(explicit) != 7 {
+		t.Errorf("explicit limit=7 returned %d items, want 7 (an explicit limit wins over the default)", len(explicit))
 	}
 }
 
@@ -232,7 +268,7 @@ func TestReloadKeepsFeedOnUnreadableSnapshot(t *testing.T) {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	log, rec := capture.New()
-	ix := New(&Config{}, Deps{Logger: log}, path)
+	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, Deps{Logger: log}, path)
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}

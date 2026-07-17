@@ -144,6 +144,10 @@ func TestFlexInt_UnmarshalJSON(t *testing.T) {
 		{"negative treated absent", `-5`, 0},
 		{"out of range", `1e300`, 0},
 		{"quoted out of range", `"2147483648"`, 0},
+		{"quoted integral float", `"9.0"`, 9},
+		{"quoted exponent", `"1e3"`, 1000},
+		{"quoted fractional treated absent", `"1.5"`, 0},
+		{"quoted negative treated absent", `"-5"`, 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -185,14 +189,16 @@ func TestStringList_UnmarshalJSON(t *testing.T) {
 
 func TestTmdbID_UnmarshalJSON(t *testing.T) {
 	tests := []struct {
-		name      string
-		in        string
-		wantMovie []int
+		name       string
+		in         string
+		wantMovie  []int
+		wantScalar int
 	}{
 		{name: "tv object ignored", in: `{"tv":5}`},
 		{name: "movie array", in: `{"movie":[7,8]}`, wantMovie: []int{7, 8}},
-		{name: "bare number tolerated", in: `123`},
-		{name: "string tolerated", in: `"unknown"`},
+		{name: "bare number retained as scalar", in: `123`, wantScalar: 123},
+		{name: "quoted number retained as scalar", in: `"123"`, wantScalar: 123},
+		{name: "unknown string tolerated", in: `"unknown"`},
 		{name: "null", in: `null`},
 	}
 	for _, tc := range tests {
@@ -203,6 +209,54 @@ func TestTmdbID_UnmarshalJSON(t *testing.T) {
 			}
 			if !reflect.DeepEqual(intSlice(got.Movie), tc.wantMovie) {
 				t.Errorf("tmdbID(%s).Movie = %v, want %v", tc.in, intSlice(got.Movie), tc.wantMovie)
+			}
+			if int(got.Scalar) != tc.wantScalar {
+				t.Errorf("tmdbID(%s).Scalar = %d, want %d", tc.in, int(got.Scalar), tc.wantScalar)
+			}
+		})
+	}
+}
+
+// TestParseFribb_bareNumberTmdbIDDisambiguatedByType pins the scalar
+// themoviedb_id path end-to-end: a bare-number (or quoted-numeric)
+// themoviedb_id carries no tv-vs-movie discrimination of its own, but a
+// MOVIE-typed record's own type disambiguates it — a movie's tmdb id is
+// necessarily a movie id — so the scalar becomes the record's movie TMDB id
+// (without it, a MOVIE record with no imdb_id would lose its only arr
+// identifier and could never resolve to Radarr). A non-movie or untyped
+// record still discards the scalar, and the object form is unchanged.
+func TestParseFribb_bareNumberTmdbIDDisambiguatedByType(t *testing.T) {
+	tests := []struct {
+		name string
+		rec  string
+		want []int
+	}{
+		{name: "movie with bare number sets movie id", rec: `{"anilist_id":1,"type":"movie","themoviedb_id":603}`, want: []int{603}},
+		{name: "movie with quoted number sets movie id", rec: `{"anilist_id":1,"type":" Movie ","themoviedb_id":"603"}`, want: []int{603}},
+		{name: "tv with bare number still discarded", rec: `{"anilist_id":1,"type":"tv","themoviedb_id":603}`},
+		{name: "ova with bare number still discarded", rec: `{"anilist_id":1,"type":"ova","themoviedb_id":603}`},
+		{name: "untyped with bare number still discarded", rec: `{"anilist_id":1,"themoviedb_id":603}`},
+		{name: "movie object form unchanged", rec: `{"anilist_id":1,"type":"movie","themoviedb_id":{"movie":[7,8]}}`, want: []int{7, 8}},
+		{name: "movie tv-object form still empty", rec: `{"anilist_id":1,"type":"movie","themoviedb_id":{"tv":5}}`},
+		{name: "movie unknown placeholder still empty", rec: `{"anilist_id":1,"type":"movie","themoviedb_id":"unknown"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			records, err := parseFribb([]byte(`[`+tc.rec+`]`), discardLogger())
+			if err != nil {
+				t.Fatalf("parseFribb error: %v", err)
+			}
+			if len(records) != 1 {
+				t.Fatalf("parseFribb kept %d records, want 1", len(records))
+			}
+			if !reflect.DeepEqual(records[0].TmdbMovies, tc.want) {
+				t.Errorf("TmdbMovies = %v, want %v", records[0].TmdbMovies, tc.want)
+			}
+			// No record above carries any other id, so the arr-identifier
+			// predicate must key entirely on the consumed movie ids: true
+			// exactly when the scalar (or object form) was consumed.
+			if got, want := records[0].HasArrIdentifier(), len(tc.want) > 0; got != want {
+				t.Errorf("HasArrIdentifier = %v, want %v", got, want)
 			}
 		})
 	}

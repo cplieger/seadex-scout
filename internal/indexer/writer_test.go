@@ -3,6 +3,7 @@ package indexer
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -76,6 +77,57 @@ func TestRebuildNoPasskeyWarnWithoutABIntent(t *testing.T) {
 	}
 	if rec.Contains("ab RSS feed empty of grabbable links") {
 		t.Errorf("passkey warning logged without AB intent; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestRebuildUnconfiguredABPersistsNoABFeed pins the write side of the
+// README's per-tracker off switch: with AnimeBytes unconfigured
+// (abConfigured=false, an empty ab_torznab_url) but a passkey still set, a
+// rebuild must persist NO AnimeBytes feed - the passkey must not land on disk
+// in synthesized download links for a tracker the operator turned off - while
+// the curation set and the Nyaa feed are unaffected. The construction-time
+// WARN names the mismatched fields so the half-configured intent surfaces.
+func TestRebuildUnconfiguredABPersistsNoABFeed(t *testing.T) {
+	log, rec := capture.New()
+	path := filepath.Join(t.TempDir(), "feed.json")
+	entries := []seadex.Entry{{
+		AniListID: 9,
+		Torrents: []seadex.Torrent{
+			{
+				Tracker: "AB", URL: "/torrents.php?id=1&torrentid=123", IsBest: true,
+				Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
+			},
+			{
+				Tracker: "Nyaa", URL: "https://nyaa.si/view/42", IsBest: true,
+				Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
+			},
+		},
+	}}
+	if err := NewFeedWriter("SECRETPASSKEY", false, path, log).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	if bytes.Contains(data, []byte("SECRETPASSKEY")) {
+		t.Error("snapshot persists the passkey for an unconfigured AB tracker")
+	}
+	var snap snapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
+	}
+	if len(snap.ABFeed) != 0 {
+		t.Errorf("ab_feed = %d items, want 0 (unconfigured tracker's feed must not be built)", len(snap.ABFeed))
+	}
+	if len(snap.NyaaFeed) != 1 {
+		t.Errorf("nyaa_feed = %d items, want 1 (the configured tracker is unaffected)", len(snap.NyaaFeed))
+	}
+	if len(snap.ByKey) == 0 {
+		t.Error("curation set empty: the search index must still cover AB releases (search rides Prowlarr, no passkey)")
+	}
+	if !rec.Contains("indexer.ab_passkey is set but indexer.ab_torznab_url is empty") {
+		t.Errorf("half-configured AB intent not warned at construction; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }
 

@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/httpx/v2"
+	"github.com/cplieger/httpx/v3"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 )
 
@@ -44,8 +44,12 @@ const (
 	// maxTotalBytes caps cumulative page bytes across the whole fetch so a
 	// compromised upstream serving few-but-huge items per page (under the
 	// entry-count cap) cannot accumulate maxPages*maxPageBytes of memory.
-	// The honest catalogue is a few tens of MB; 512 MB is generous headroom.
-	maxTotalBytes = 512 << 20
+	// The honest catalogue is a few tens of MB (3x+ headroom at 128 MB), and
+	// retained decoded entries grow roughly with cumulative body bytes, so
+	// the cap must sit below the 256 MiB deployment container limit for the
+	// guard to fire (clean degradation) before the kernel OOM-kills the
+	// process.
+	maxTotalBytes = 128 << 20
 	// maxAttempts / baseDelay bound the per-page retry.
 	maxAttempts = 3
 	baseDelay   = time.Second
@@ -210,7 +214,11 @@ type fetchTotals struct {
 // library item read as having no SeaDex coverage. A completed catalogue whose
 // entry count disagrees with the API's reported totalItems is logged (WARN)
 // but still returned - pagination raciness over a live collection can
-// legitimately shift counts mid-fetch.
+// legitimately shift counts mid-fetch. That leniency requires the final page
+// to have carried entries: an EMPTY page while the collected count is still
+// below the reported totalItems aborts with an error (pageComplete), since
+// the API itself says entries remain and completing would falsely resolve
+// findings against a truncated view.
 func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 	var all []Entry
 	var tot fetchTotals
@@ -303,22 +311,29 @@ func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, tot 
 		}
 		all = append(all, e)
 	}
-	done, err = pageComplete(page, len(list.Items), list.TotalPages)
+	done, err = pageComplete(page, len(list.Items), list.TotalPages, len(all), tot.reportedTotal)
 	return all, done, err
 }
 
 // pageComplete reports whether pagination is done after a page, or an error
 // when the pagination metadata is invalid (totalPages < 1, or a page past the
-// reported total — empty or not) or the page is empty before the reported
-// total (a truncated view). totalPages is an unvalidated upstream field (a
-// missing value decodes to zero), so the only invalid-metadata exception is an
-// empty FIRST response with zeroed metadata (a degenerate `{}` body), which
-// finishFetch's empty-catalogue guard converts into an error. Every LATER page
-// was only requested because an earlier page promised it existed, so an empty
-// page 3 reporting totalPages=2 signals records shifted across already-read
-// pages (a deletion mid-pagination) and must not complete the catalogue —
-// FetchEntries' contract is to never return a possibly-truncated view.
-func pageComplete(page, itemCount, totalPages int) (done bool, err error) {
+// reported total — empty or not), the page is empty before the reported total
+// (a truncated view), or the page is empty while fetched (the entries
+// collected so far) is still below the reported totalItems — the API itself
+// says entries remain, so completing would hand downstream a truncated view
+// that falsely resolves findings; failing instead degrades the cycle, the
+// fail-safe direction that preserves existing findings. A NON-empty terminal
+// page with a count mismatch stays finishFetch's WARN (offset pagination over
+// a live collection can legitimately shift counts mid-fetch). totalPages is
+// an unvalidated upstream field (a missing value decodes to zero), so the
+// only invalid-metadata exception is an empty FIRST response with zeroed
+// metadata (a degenerate `{}` body), which finishFetch's empty-catalogue
+// guard converts into an error. Every LATER page was only requested because
+// an earlier page promised it existed, so an empty page 3 reporting
+// totalPages=2 signals records shifted across already-read pages (a deletion
+// mid-pagination) and must not complete the catalogue — FetchEntries'
+// contract is to never return a possibly-truncated view.
+func pageComplete(page, itemCount, totalPages, fetched, reportedTotal int) (done bool, err error) {
 	if page == 1 && itemCount == 0 && totalPages <= 0 {
 		return true, nil
 	}
@@ -329,6 +344,10 @@ func pageComplete(page, itemCount, totalPages int) (done bool, err error) {
 	if itemCount == 0 && page < totalPages {
 		return false, fmt.Errorf("seadex: page %d empty before reported total %d pages; "+
 			"refusing to compare against a truncated view", page, totalPages)
+	}
+	if itemCount == 0 && fetched < reportedTotal {
+		return false, fmt.Errorf("seadex: page %d empty with %d of %d reported entries fetched; "+
+			"refusing to compare against a truncated view", page, fetched, reportedTotal)
 	}
 	return page >= totalPages, nil
 }
@@ -355,7 +374,7 @@ func (c *Client) fetchPage(ctx context.Context, page int, wireLimit int64) (pbLi
 	}
 	reqURL := c.baseURL + entriesPath + "?" + q.Encode()
 
-	body, err := httpx.Retry(ctx, c.http, reqURL,
+	body, err := httpx.GetBytes(ctx, c.http, reqURL,
 		httpx.WithMaxAttempts(maxAttempts),
 		httpx.WithBaseDelay(baseDelay),
 		httpx.WithMaxBodyBytes(wireLimit),

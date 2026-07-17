@@ -26,7 +26,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/cplieger/httpx/v2"
+	"github.com/cplieger/httpx/v3"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/textsafe"
 )
@@ -42,8 +42,9 @@ const (
 	defaultRetryAfter = 5 * time.Second
 	// maxRetryAfter caps a server-supplied Retry-After (or reset-window) wait so a
 	// pathological/hostile header cannot stall the AniList fallback and, via penalize,
-	// every subsequent lookup. httpx.RetryWithBackoff and the throttle use the hint
-	// verbatim, so the cap must be applied here.
+	// every subsequent lookup. It doubles as the WithRateLimitRetry ceiling on
+	// request's retry loop; the throttle consumes the wait verbatim, so the cap
+	// must be applied here before penalize.
 	maxRetryAfter = time.Minute
 )
 
@@ -117,21 +118,29 @@ func (c *Client) Stats() Stats {
 // is claimed INSIDE the retry closure so every actual HTTP attempt reserves
 // its own rate slot: a transient 5xx/transport retry would otherwise re-fire
 // after only the backoff delay, exceeding the configured requests-per-minute
-// ceiling. On a 429, RetryWithBackoff's capped hint and throttle.penalize
-// converge on the same wait; the extra per-attempt wait is effectively zero
-// once the hint expires, while later callers retain the penalty.
+// ceiling. WithRateLimitRetry makes the 429's *httpx.RateLimitError retryable
+// (httpx classifies it non-transient by default) and bounds its wait at
+// maxRetryAfter; rateLimitError caps the hint to the same ceiling before
+// throttle.penalize, so the retry wait and the penalty converge on one value —
+// the extra per-attempt wait is effectively zero once the hint expires, while
+// later callers retain the penalty.
 func (c *Client) request(ctx context.Context, gql string, variables any) ([]byte, error) {
 	body, err := json.Marshal(map[string]any{"query": gql, "variables": variables})
 	if err != nil {
 		return nil, fmt.Errorf("anilist: marshal request: %w", err)
 	}
-	return httpx.RetryWithBackoff(ctx, maxAttempts, baseDelay, "anilist",
+	return httpx.Do(ctx,
 		func(ctx context.Context) ([]byte, error) {
 			if err := c.throttle.wait(ctx); err != nil {
 				return nil, err
 			}
 			return c.do(ctx, body)
-		})
+		},
+		httpx.WithMaxAttempts(maxAttempts),
+		httpx.WithBaseDelay(baseDelay),
+		httpx.WithLabel("anilist"),
+		httpx.WithLogger(c.log),
+		httpx.WithRateLimitRetry(maxRetryAfter))
 }
 
 // Fetch returns the AniList media for the given ID, or ErrNotFound when AniList
@@ -168,9 +177,10 @@ func (c *Client) FetchMany(ctx context.Context, ids []int) (map[int]Media, error
 	return out, nil
 }
 
-// do performs one GraphQL POST attempt, translating a 429 into a transient
-// rate-limit error (carrying a capped Retry-After hint) and reading the rate
-// headers to pre-empt the next 429.
+// do performs one GraphQL POST attempt, translating a 429 into a
+// *httpx.RateLimitError carrying a capped Retry-After hint (retried by
+// request's WithRateLimitRetry mode) and reading the rate headers to pre-empt
+// the next 429.
 func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(body))
 	if err != nil {
@@ -230,7 +240,8 @@ func resetWait(resp *http.Response) time.Duration {
 
 // rateLimitError handles a 429 response: it derives a capped wait from
 // Retry-After (or X-RateLimit-Reset, or the default), penalizes the throttle,
-// and returns the transient rate-limit error carrying that hint.
+// and returns the *httpx.RateLimitError carrying that wait as its RetryAfter
+// hint, which request's WithRateLimitRetry mode retries.
 func (c *Client) rateLimitError(resp *http.Response) error {
 	c.rlWaits.Add(1)
 	wait := httpx.ParseRetryAfter(resp.Header.Get("Retry-After"))
@@ -247,7 +258,7 @@ func (c *Client) rateLimitError(resp *http.Response) error {
 	wait = min(wait, maxRetryAfter)
 	c.log.Warn("anilist rate limited (429); backing off", "retry_after", wait.Round(time.Second))
 	c.throttle.penalize(wait)
-	return &rateLimitedError{retryAfter: wait}
+	return &httpx.RateLimitError{Msg: "anilist: rate limited (429)", RetryAfter: wait}
 }
 
 // observeRateHeaders slows the throttle when the remaining budget is low,
@@ -511,25 +522,7 @@ func hasMatchableTitle(titles []string) bool {
 	return false
 }
 
-// --- rate-limit error + adaptive throttle ---
-
-// rateLimitedError must satisfy httpx's retry-classification interfaces, or
-// RetryWithBackoff silently stops retrying 429s / honoring the capped hint.
-var (
-	_ httpx.Transient      = (*rateLimitedError)(nil)
-	_ httpx.RetryAfterHint = (*rateLimitedError)(nil)
-)
-
-// rateLimitedError is a transient error carrying a capped Retry-After hint, so
-// httpx.RetryWithBackoff waits that duration and retries (httpx's own
-// RateLimitError is classified non-transient, so a distinct type is used).
-type rateLimitedError struct {
-	retryAfter time.Duration
-}
-
-func (e *rateLimitedError) Error() string                 { return "anilist: rate limited (429)" }
-func (e *rateLimitedError) IsTransient() bool             { return true }
-func (e *rateLimitedError) RetryAfterHint() time.Duration { return e.retryAfter }
+// --- adaptive throttle ---
 
 // throttle spaces requests to a minimum interval, with a penalty hook for
 // backing off when the budget is low or a 429 was seen.

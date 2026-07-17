@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/cplieger/atomicfile/v2"
-	"github.com/cplieger/httpx/v2"
+	"github.com/cplieger/httpx/v3"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 )
 
@@ -110,12 +110,16 @@ type Cache struct {
 	LastModified string    `json:"last_modified,omitempty"`
 	Records      []Record  `json:"records,omitempty"`
 	// RejectedRefreshes counts consecutive fresh-200 refreshes the acceptance
-	// guards (the validation floor, the below-half-size shrink guard)
-	// rejected in favour of the stale map. It persists across cycles and
-	// restarts, resets to 0 on any accepted refresh or 304, and rides on the
-	// *StaleMapError (ConsecutiveRejections) so the scout can escalate its
-	// degraded-mapping log at RejectionEscalationThreshold. Transient fetch
-	// or parse failures neither advance nor reset it.
+	// guards (the validation floor, the below-half-size shrink guard, the
+	// parse-time record cap) rejected in favour of the stale map. It persists
+	// across cycles and restarts, resets to 0 on any accepted refresh or 304,
+	// and rides on the *StaleMapError (ConsecutiveRejections) so the scout
+	// can escalate its degraded-mapping log at RejectionEscalationThreshold.
+	// Transient fetch or parse failures neither advance nor reset it — with
+	// one exception: a record-cap breach (errRecordCapExceeded) surfaces as a
+	// parse error but is a persistent guard refusal (an over-cap upstream
+	// list never self-heals), so it advances the streak like any other guard
+	// rejection.
 	RejectedRefreshes int `json:"rejected_refreshes,omitempty"`
 }
 
@@ -278,8 +282,9 @@ type StaleMapError struct {
 	rejections int
 }
 
-// Error reproduces the pre-typed-error message text so log content is
-// unchanged.
+// Error renders the degradation facts as the single prose line the degraded
+// cycle logs. The exact message shape is a pinned log contract
+// (stale_map_error_test.go locks it), so edits here change log content.
 func (e *StaleMapError) Error() string {
 	if e.cause != nil {
 		return fmt.Sprintf("mapping: %s, using stale map (%d records, fetched %s ago): %v", e.msg, e.records, e.age, e.cause)
@@ -391,11 +396,21 @@ func (l *Loader) reuseCachedRecords(prev *Cache) (Cache, error) {
 }
 
 // acceptRefresh parses a fresh 200 body and runs the cache-acceptance
-// invariants (deduplication, the validation floor, and the shrink guard),
-// degrading to the stale map when any step rejects the refresh.
+// invariants (the parse-time record cap, deduplication, the validation floor,
+// and the shrink guard), degrading to the stale map when any step rejects the
+// refresh.
 func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache, error) {
 	records, err := parseFribb(res.Body, l.log)
 	if err != nil {
+		if errors.Is(err, errRecordCapExceeded) {
+			// A record-cap breach is a guard rejection, not a transient parse
+			// failure: a permanently over-cap upstream list re-downloads the
+			// multi-MB body and rejects it every cycle, never self-healing, so
+			// the streak must advance for the scout to escalate at
+			// RejectionEscalationThreshold instead of degrading at WARN forever.
+			return rejectRefresh(prev, "refresh exceeded record cap", err,
+				fmt.Errorf("%w and no cache available", err))
+		}
 		return staleOrFail(prev, "parse failed", err,
 			fmt.Errorf("mapping: parse failed and no cache available: %w", err))
 	}
@@ -553,7 +568,7 @@ func (l *Loader) conditionalGet(ctx context.Context, prev *Cache) (httpx.Conditi
 	if cacheUsable(prev.Records) {
 		validators = httpx.Validators{ETag: prev.ETag, LastModified: prev.LastModified}
 	}
-	return httpx.RetryWithBackoff(ctx, maxAttempts, baseDelay, "mapping",
+	return httpx.Do(ctx,
 		func(ctx context.Context) (httpx.ConditionalResult, error) {
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, l.url, http.NoBody)
 			if err != nil {
@@ -561,7 +576,11 @@ func (l *Loader) conditionalGet(ctx context.Context, prev *Cache) (httpx.Conditi
 			}
 			req.Header.Set("User-Agent", appinfo.UserAgent)
 			return httpx.DoConditional(l.http, req, validators, maxMapBytes)
-		})
+		},
+		httpx.WithMaxAttempts(maxAttempts),
+		httpx.WithBaseDelay(baseDelay),
+		httpx.WithLabel("mapping"),
+		httpx.WithLogger(l.log))
 }
 
 // --- Overrides: the operator overlay file ---

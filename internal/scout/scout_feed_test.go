@@ -22,9 +22,11 @@ import (
 // TestCycleWalkFailureWithFeedStillRebuildsFeed pins the feed-vs-health split:
 // with a Torznab feed configured, a failed arr walk still refreshes the feed
 // (it needs only SeaDex + Fribb, so an arr outage must not freeze what the arrs
-// grab) while the cycle itself stays unhealthy.
+// grab) while the cycle itself stays unhealthy - logging the walk-failure
+// ERROR and still closing with exactly one "cycle degraded" completion line
+// (reason walk-failed) so the cycle deadman stays fed through an arr outage.
 func TestCycleWalkFailureWithFeedStillRebuildsFeed(t *testing.T) {
-	logger := scoutTestLogger()
+	logger, recorder := capture.New()
 	feed := &fakeFeed{}
 	// Seed a fresh mapping cache so the map loads usable within the loader's
 	// refresh window: this test pins the walk-failure arm, and an unusable map
@@ -35,8 +37,8 @@ func TestCycleWalkFailureWithFeedStillRebuildsFeed(t *testing.T) {
 	s := New(&Deps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: logger}),
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
+		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Feed:    feed,
 	})
@@ -49,6 +51,15 @@ func TestCycleWalkFailureWithFeedStillRebuildsFeed(t *testing.T) {
 	}
 	if feed.entries != 1 {
 		t.Errorf("feed rebuilt with %d entries, want the 1 fetched SeaDex entry", feed.entries)
+	}
+	if n := recorder.CountExact("library walk failed; cycle unhealthy"); n != 1 {
+		t.Errorf("walk-failure ERROR count = %d, want 1", n)
+	}
+	if n := recorder.CountExact("cycle degraded"); n != 1 {
+		t.Errorf("'cycle degraded' count = %d, want 1 (the failed-walk cycle still completed after the feed refresh)", n)
+	}
+	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "walk-failed" {
+		t.Errorf("degraded reasons = %v, want [walk-failed]", reasons)
 	}
 }
 
@@ -188,6 +199,12 @@ func TestCycleWalkAndSeaDexBothFailWarnsFeedKept(t *testing.T) {
 			if n := recorder.CountExact(tc.wantWarn); n != 1 {
 				t.Errorf("%q count = %d, want 1", tc.wantWarn, n)
 			}
+			if n := recorder.CountExact("cycle degraded"); n != 1 {
+				t.Errorf("'cycle degraded' count = %d, want exactly 1 (the double outage still closes the cycle once)", n)
+			}
+			if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "walk-failed" {
+				t.Errorf("degraded reasons = %v, want [walk-failed]", reasons)
+			}
 		})
 	}
 }
@@ -278,6 +295,9 @@ func TestCycleWalkFailShutdownDuringSeaDexFetchStaysSilent(t *testing.T) {
 	}
 	if n := recorder.CountExact("seadex fetch failed; indexer feed kept previous feed"); n != 0 {
 		t.Errorf("feed-kept WARN fired %d times during a shutdown, want 0", n)
+	}
+	if n := recorder.CountExact("cycle degraded"); n != 0 {
+		t.Errorf("'cycle degraded' count = %d, want 0 (a shutdown after the walk failure interrupted the cycle; no completion line)", n)
 	}
 }
 

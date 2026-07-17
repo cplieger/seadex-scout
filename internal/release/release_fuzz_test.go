@@ -74,13 +74,32 @@ func FuzzClassify(f *testing.F) {
 	})
 }
 
+// fuzzLabel shapes arbitrary fuzz input into a guaranteed-valid single DNS
+// label (letters and digits only, never empty), so the glue invariants below
+// can assert the always-matches direction without reimplementing the
+// label-chain rules the gate itself enforces.
+func fuzzLabel(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() == 0 {
+		return "sub"
+	}
+	return b.String()
+}
+
 // FuzzIsAnimeBytesHost fuzzes the AB host gate over arbitrary host strings
 // with metamorphic and bounded-output invariants (never a reimplementation of
-// the dot-boundary rule): gluing an explicit ".animebytes.tv" label boundary
-// onto any host always matches; gluing a dotless prefix onto a non-matching
-// host never creates a match (the suffix rule cannot be bypassed without a
-// label boundary); a single trailing dot never changes the answer; and a
-// matching host must at least end in "animebytes.tv" after the gate's own
+// the dot-boundary rule): gluing a valid label onto an explicit
+// ".animebytes.tv" boundary always matches; gluing an EMPTY label
+// ("..animebytes.tv") never matches, whatever precedes it (no resolvable DNS
+// name has an empty label); gluing a dotless prefix onto a non-matching host
+// never creates a match (the suffix rule cannot be bypassed without a label
+// boundary); a single trailing dot never changes the answer; and a matching
+// host must at least end in "animebytes.tv" after the gate's own
 // case/whitespace fold and root-dot trim (the gate resolves through
 // LookupTrackerByHost, which folds case and trims whitespace).
 func FuzzIsAnimeBytesHost(f *testing.F) {
@@ -90,16 +109,21 @@ func FuzzIsAnimeBytesHost(f *testing.F) {
 	f.Add("maliciousanimebytes.tv")
 	f.Add("animebytes.tv.evil.com")
 	f.Add(".animebytes.tv")
+	f.Add("a..animebytes.tv")
+	f.Add("x\u00e9.animebytes.tv")
 	f.Add("ANIMEBYTES.TV")
 	f.Add("animebytes.tv ")
 	f.Add("")
 	f.Fuzz(func(t *testing.T, host string) {
 		got := IsAnimeBytesHost(host)
 
-		if !IsAnimeBytesHost(host + ".animebytes.tv") {
-			t.Errorf("IsAnimeBytesHost(%q) = false, want true: an explicit .animebytes.tv label boundary always matches", host+".animebytes.tv")
+		if glued := fuzzLabel(host) + ".animebytes.tv"; !IsAnimeBytesHost(glued) {
+			t.Errorf("IsAnimeBytesHost(%q) = false, want true: a valid label on an explicit .animebytes.tv boundary always matches", glued)
 		}
-		if !got && !strings.HasPrefix(host, ".") && IsAnimeBytesHost("evil"+host) {
+		if IsAnimeBytesHost(host + "..animebytes.tv") {
+			t.Errorf("IsAnimeBytesHost(%q) = true, want false: an empty label is never a real subdomain boundary", host+"..animebytes.tv")
+		}
+		if !got && !strings.HasPrefix(strings.TrimSpace(host), ".") && IsAnimeBytesHost("evil"+host) {
 			t.Errorf("IsAnimeBytesHost(%q) = true for a dotless-prefix variant of non-matching host %q: suffix rule bypassed", "evil"+host, host)
 		}
 		// The gate trims surrounding whitespace itself, so the trailing-dot
@@ -120,12 +144,13 @@ func FuzzIsAnimeBytesHost(f *testing.F) {
 // FuzzIsNyaaHost fuzzes the Nyaa host classifier (an untrusted-URL-host gate
 // used by indexer routing) with the same metamorphic and bounded-output
 // invariants as its AnimeBytes twin: the canonical host itself (with or
-// without the DNS-root dot) always matches; an explicit ".nyaa.si" label
-// boundary always matches; a dotless prefix never bypasses the suffix rule; a
-// DNS-root trailing dot never changes the answer; and a matching host at
-// least ends in "nyaa.si" after the gate's own case/whitespace fold and
-// root-dot trim (the gate resolves through LookupTrackerByHost, which folds
-// case and trims whitespace).
+// without the DNS-root dot) always matches; a valid label on an explicit
+// ".nyaa.si" boundary always matches while an empty label never does; a
+// dotless prefix never bypasses the suffix rule; a DNS-root trailing dot
+// never changes the answer; and a matching host at least ends in "nyaa.si"
+// after the gate's own case/whitespace fold and root-dot trim (the gate
+// resolves through LookupTrackerByHost, which folds case and trims
+// whitespace).
 func FuzzIsNyaaHost(f *testing.F) {
 	f.Add("nyaa.si")
 	f.Add("www.nyaa.si")
@@ -133,6 +158,8 @@ func FuzzIsNyaaHost(f *testing.F) {
 	f.Add("maliciousnyaa.si")
 	f.Add("nyaa.si.evil.com")
 	f.Add(".nyaa.si")
+	f.Add("a..nyaa.si")
+	f.Add("x\u00e9.nyaa.si")
 	f.Add("NYAA.SI")
 	f.Add("nyaa.si ")
 	f.Add("")
@@ -142,10 +169,13 @@ func FuzzIsNyaaHost(f *testing.F) {
 		if (host == "nyaa.si" || host == "nyaa.si.") && !got {
 			t.Errorf("IsNyaaHost(%q) = false, want true for the canonical Nyaa host", host)
 		}
-		if !IsNyaaHost(host + ".nyaa.si") {
-			t.Errorf("IsNyaaHost(%q) = false, want true: an explicit .nyaa.si label boundary always matches", host+".nyaa.si")
+		if glued := fuzzLabel(host) + ".nyaa.si"; !IsNyaaHost(glued) {
+			t.Errorf("IsNyaaHost(%q) = false, want true: a valid label on an explicit .nyaa.si boundary always matches", glued)
 		}
-		if !got && !strings.HasPrefix(host, ".") && IsNyaaHost("evil"+host) {
+		if IsNyaaHost(host + "..nyaa.si") {
+			t.Errorf("IsNyaaHost(%q) = true, want false: an empty label is never a real subdomain boundary", host+"..nyaa.si")
+		}
+		if !got && !strings.HasPrefix(strings.TrimSpace(host), ".") && IsNyaaHost("evil"+host) {
 			t.Errorf("IsNyaaHost(%q) = true for a dotless-prefix variant of non-matching host %q: suffix rule bypassed", "evil"+host, host)
 		}
 		// The gate trims surrounding whitespace itself, so the trailing-dot

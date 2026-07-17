@@ -50,12 +50,20 @@ type FeedWriter struct {
 // NewFeedWriter returns a FeedWriter that persists the feed snapshot to path
 // (config.DefaultIndexerFeedPath in production). abPasskey builds the AnimeBytes
 // RSS download links (empty leaves the AB feed without grabbable links).
-// abConfigured signals AnimeBytes intent (an AB Torznab URL is set): it gates
-// the missing-passkey nudge, so a Nyaa-only deployment is not warned every
-// cycle about a tracker it opted out of. logger may be nil.
+// abConfigured signals AnimeBytes intent (an AB Torznab URL is set): with it
+// false the AnimeBytes feed is not built at all - an empty ab_torznab_url is
+// the README's off switch for the tracker, so no passkey-embedded links are
+// persisted for it - and the missing-passkey nudge is skipped, so a Nyaa-only
+// deployment is not warned every cycle about a tracker it opted out of. The
+// inverse mismatch (a passkey set for that off tracker) is warned once here,
+// field names only, so a half-configured AnimeBytes intent surfaces at boot.
+// logger may be nil.
 func NewFeedWriter(abPasskey string, abConfigured bool, path string, logger *slog.Logger) *FeedWriter {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if abPasskey != "" && !abConfigured {
+		logger.Warn("indexer.ab_passkey is set but indexer.ab_torznab_url is empty; the AnimeBytes feed stays off")
 	}
 	return &FeedWriter{log: logger, path: path, abPasskey: abPasskey, abConfigured: abConfigured}
 }
@@ -70,6 +78,16 @@ func NewFeedWriter(abPasskey string, abConfigured bool, path string, logger *slo
 // the atomic write itself failing.
 func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, isMovie func(alID int) bool) error {
 	snap, abSkippedNoPasskey, unresolvable := buildSnapshot(entries, w.abPasskey, movieClassifier(isMovie))
+	// An unconfigured AnimeBytes tracker (no ab_torznab_url - the README's
+	// per-tracker off switch) gets no synthesized feed: the snapshot must not
+	// persist passkey-embedded download links for a tracker the operator
+	// turned off. The server's feedFor refuses to serve an unconfigured
+	// scope's feed too; dropping it here keeps the credential off disk as
+	// well. (The Nyaa feed carries no secret and is gated serve-side only -
+	// the writer is not told whether Nyaa is configured.)
+	if !w.abConfigured {
+		snap.ABFeed = nil
+	}
 	data, err := json.Marshal(&snap)
 	if err != nil {
 		return fmt.Errorf("indexer: encode feed snapshot: %w", err)

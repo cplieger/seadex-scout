@@ -223,8 +223,8 @@ func TestStoreLoadOversizedReturnsError(t *testing.T) {
 	}
 	// Save enforces the same maxStateBytes cap, so an oversized file is
 	// definitionally foreign/corrupt and must be quarantined like the decode
-	// gates (assertQuarantined's byte-equality is skipped: the body is a
-	// 128MB+ sparse file, so existence + the live path renamed away suffice).
+	// gates (assertQuarantined's byte-equality is skipped: the body is an
+	// over-cap sparse file, so existence + the live path renamed away suffice).
 	if _, statErr := os.Stat(path + ".corrupt"); statErr != nil {
 		t.Errorf("oversized state was not quarantined (stat err = %v), want %s.corrupt preserved", statErr, path)
 	}

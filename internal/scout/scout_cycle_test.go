@@ -706,6 +706,9 @@ func TestCycleShutdownDuringWalkWarnsNotErrors(t *testing.T) {
 	if n := recorder.CountExact("library walk failed; cycle unhealthy"); n != 0 {
 		t.Errorf("walk-failure ERROR logged %d times on a shutdown, want 0 (it trips the cycle-error alert)", n)
 	}
+	if n := recorder.CountExact("cycle degraded"); n != 0 {
+		t.Errorf("'cycle degraded' count = %d, want 0 (an interrupted cycle did not complete, degraded or not)", n)
+	}
 }
 
 // ctxCancellingAniList cancels the shared cycle context on its first use and

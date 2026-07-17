@@ -322,13 +322,6 @@ func TestObserveRateHeadersMalformedResetDefaultsToMinute(t *testing.T) {
 	}
 }
 
-func TestRateLimitedErrorMessage(t *testing.T) {
-	err := &rateLimitedError{retryAfter: time.Second}
-	if got, want := err.Error(), "anilist: rate limited (429)"; got != want {
-		t.Errorf("Error() = %q, want %q", got, want)
-	}
-}
-
 // TestSanitizeUpstreamMessage pins the log-forging boundary on untrusted
 // upstream error messages: short clean text passes unchanged; C0/C1 controls,
 // DEL, line/paragraph separators, and bidi override/isolate runes become

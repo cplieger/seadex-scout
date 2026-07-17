@@ -183,17 +183,36 @@ func TestLoadStateCanceledContextIsNotAFault(t *testing.T) {
 	}
 }
 
+// TestCycleLibraryWalkFailureIsUnhealthy pins the failed-walk log contract
+// for an alert-only deployment (no feed): the cycle is unhealthy, logs the
+// walk-failure ERROR (the SeadexScoutCycleError signal), AND still closes
+// with exactly one "cycle degraded" completion line (reason walk-failed) so
+// the cycle deadman does not false-fire during an arr outage longer than its
+// window - the two alerts stay orthogonal: ERROR = arr fault, missing
+// completion line = wedged loop.
 func TestCycleLibraryWalkFailureIsUnhealthy(t *testing.T) {
-	logger := scoutTestLogger()
+	logger, recorder := capture.New()
 	store := &fakeStore{}
 	s := New(&Deps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: logger}),
+		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
 	})
 
 	if healthy := s.Cycle(context.Background()); healthy {
 		t.Fatal("Cycle returned healthy=true, want false when the library walk fails")
+	}
+	if n := recorder.CountExact("library walk failed; cycle unhealthy"); n != 1 {
+		t.Errorf("walk-failure ERROR count = %d, want 1", n)
+	}
+	if n := recorder.CountExact("cycle degraded"); n != 1 {
+		t.Errorf("'cycle degraded' count = %d, want 1 (the failed-walk cycle still completed; the deadman counts completion lines)", n)
+	}
+	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "walk-failed" {
+		t.Errorf("degraded reasons = %v, want [walk-failed]", reasons)
+	}
+	if n := recorder.CountExact("cycle complete"); n != 0 {
+		t.Errorf("'cycle complete' count = %d, want 0 on a failed walk", n)
 	}
 }
 

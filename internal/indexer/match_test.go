@@ -55,3 +55,27 @@ func TestTrackerKeyRejectsUnknownAndUnparseable(t *testing.T) {
 		t.Errorf("ab unparseable URL key = %q, want empty", got)
 	}
 }
+
+// TestTrackerKeyFromURLRejectsForgedTrackerHosts pins the protection
+// trackerKeyFromURL inherits from the shared tracker predicate
+// (release.LookupTrackerByHost): a non-ASCII homograph label under a tracker
+// domain and an empty-labeled host must never yield a curation key, so a
+// tracker-controlled URL cannot smuggle an item into the curation match on a
+// host no real tracker page can live on.
+func TestTrackerKeyFromURLRejectsForgedTrackerHosts(t *testing.T) {
+	tests := []struct{ name, url string }{
+		{"homograph label under nyaa.si", "https://x\u00e9.nyaa.si/view/1234567"},
+		{"homograph label under animebytes.tv", "https://x\u00e9.animebytes.tv/torrent/1167293/group"},
+		{"fullwidth-dot nyaa host", "https://nyaa\uff0esi/view/1234567"},
+		{"empty-label nyaa host", "https://.nyaa.si/view/1234567"},
+		{"inner-empty-label nyaa host", "https://a..nyaa.si/view/1234567"},
+		{"empty-label animebytes host", "https://.animebytes.tv/torrent/1167293/group"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := trackerKeyFromURL(tc.url); got != "" {
+				t.Errorf("trackerKeyFromURL(%q) = %q, want empty (forged tracker host must not key)", tc.url, got)
+			}
+		})
+	}
+}

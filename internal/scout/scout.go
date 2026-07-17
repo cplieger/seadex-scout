@@ -111,13 +111,15 @@ type Scout struct {
 	log  *slog.Logger
 }
 
-// cycleDegraded emits the degraded-cycle completion line. Every
-// degraded-but-healthy early return (unusable map, failed or empty SeaDex
-// fetch, AniList degradation, the library shrink guard) and the two degraded
-// compare paths (a partial walk, a stale-but-usable map) end the cycle with
-// this single WARN, so the cycle-deadman
-// alert (which counts completion lines) stays satisfied during a long
-// upstream outage instead of firing as if the daemon died. reason
+// cycleDegraded emits the degraded-cycle completion line. Every cycle that
+// ran to its end without full success closes with this single WARN: the
+// degraded-but-healthy early returns (unusable map, failed or empty SeaDex
+// fetch, AniList degradation, the library shrink guard), the two degraded
+// compare paths (a partial walk, a stale-but-usable map), and the unhealthy
+// failed-walk arm (whose fault keeps its own ERROR line). The cycle-deadman
+// alert counts completion lines, so it stays satisfied during a long arr or
+// upstream outage instead of firing as if the daemon died - its absence then
+// means only "loop wedged", matching its restart runbook. reason
 // distinguishes the gate; the healthy path keeps "cycle complete" as-is, and
 // a shutdown-interrupted cycle emits neither (it did not complete).
 func (s *Scout) cycleDegraded(reason string, attrs ...any) {
@@ -177,11 +179,13 @@ func (s *Scout) Cycle(ctx context.Context) bool {
 
 // stopAfterWalkFailure logs a failed library walk and reports whether Cycle
 // should stop immediately. A shutdown-cancelled walk is logged at WARN (a
-// redeploy is routine, not an arr fault) and always stops. A genuine walk
+// redeploy is routine, not an arr fault) and always stops without a completion
+// line (the cycle did not complete). A genuine walk
 // failure is unhealthy; an alert-only deployment (no Torznab feed) stops right
-// away since nothing else remains to do, while a configured feed falls through
+// away since nothing else remains to do - emitting the "cycle degraded"
+// completion line beside the ERROR - while a configured feed falls through
 // so the arr-independent feed rebuild still runs (the pre-compare gate then
-// returns unhealthy).
+// returns unhealthy and emits the completion line).
 func (s *Scout) stopAfterWalkFailure(ctx context.Context, walkErr error) bool {
 	if walkErr == nil {
 		return false
@@ -197,9 +201,16 @@ func (s *Scout) stopAfterWalkFailure(ctx context.Context, walkErr error) bool {
 	s.log.Error("library walk failed; cycle unhealthy", "error", walkErr)
 	// Alert-only (no Torznab feed): a failed walk is unhealthy and there is
 	// nothing else to do, so skip the SeaDex/Fribb fetch (the pre-fold
-	// behaviour). With a feed configured, fall through to refresh it - it
-	// needs only SeaDex + Fribb, not the arrs - before returning unhealthy.
-	return s.deps.Feed == nil
+	// behaviour) - the cycle ends here, so emit its completion line now (the
+	// ERROR above carries the fault; this keeps the cycle deadman fed during
+	// an arr outage). With a feed configured, fall through to refresh it - it
+	// needs only SeaDex + Fribb, not the arrs - before returning unhealthy
+	// (the library gate then emits the completion line).
+	if s.deps.Feed == nil {
+		s.cycleDegraded("walk-failed", "error", walkErr)
+		return true
+	}
+	return false
 }
 
 // loadMapping refreshes the Fribb map from the persisted cache, logging a
@@ -486,6 +497,16 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap lib
 		// making this persist a no-op then).
 		st.Mapping = *mapCache
 		s.save(ctx, st)
+		// The cycle ran to its degraded end (the feed refresh above was the
+		// remaining work), so emit the completion line the cycle deadman
+		// counts; the walk's ERROR already carries the fault, so the deadman
+		// stays quiet during an arr outage and fires only on a wedged loop.
+		// A shutdown that landed after the walk failure (cancelling the
+		// SeaDex fetch or mapping load) keeps the no-completion-line rule:
+		// an interrupted cycle did not complete, degraded or not.
+		if ctx.Err() == nil {
+			s.cycleDegraded("walk-failed", "error", walkErr)
+		}
 		return true, false
 	}
 	if len(st.Library.Items) > 0 && len(snap.Items)*libraryShrinkFactor < len(st.Library.Items) {

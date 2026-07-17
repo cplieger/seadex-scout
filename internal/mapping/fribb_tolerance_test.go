@@ -5,9 +5,12 @@ import (
 	"testing"
 )
 
-// TestFlexInt_nonIntegerStringDecodesZero pins the string branch's Atoi
-// fallback: a validly-quoted but non-integer numeric string ("12.5") decodes
-// to 0 (a tolerated placeholder) rather than erroring or truncating to 12.
+// TestFlexInt_nonIntegerStringDecodesZero pins the string branch's
+// ParseFloat-into-setNumber funnel on the rejecting side: a validly-quoted
+// fractional string ("12.5") parses but fails setNumber's integrality
+// invariant, decoding to 0 (a tolerated placeholder) rather than erroring or
+// truncating to 12 — exactly like the bare JSON number 12.5 (the accepting
+// side of the same funnel, "9.0" → 9, is pinned in TestFlexInt_UnmarshalJSON).
 func TestFlexInt_nonIntegerStringDecodesZero(t *testing.T) {
 	var f flexInt
 	if err := f.UnmarshalJSON([]byte(`"12.5"`)); err != nil {

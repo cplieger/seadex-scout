@@ -615,12 +615,15 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The AnimeBytes RSS feed needs the operator's passkey to build grabbable
-	// links, so without it the /ab feed has nothing to serve a periodic RSS check
-	// (an empty-q request). Answer that with a Torznab error rather than an empty
-	// feed, so Prowlarr's save-test fails with a clear reason and the operator
-	// sets the passkey. An AB search (non-empty q) is unaffected: it proxies
-	// Prowlarr, whose own link needs no passkey.
-	if scope == upstreamAB && ix.cfg.ABPasskey == "" && strings.TrimSpace(q.Get("q")) == "" {
+	// links, so without it a configured /ab feed has nothing to serve a periodic
+	// RSS check (an empty-q request). Answer that with a Torznab error rather
+	// than an empty feed, so Prowlarr's save-test fails with a clear reason and
+	// the operator sets the passkey. An AB search (non-empty q) is unaffected:
+	// it proxies Prowlarr, whose own link needs no passkey. An UNCONFIGURED AB
+	// tracker (empty ab_torznab_url, the README's off switch) is not nudged: it
+	// falls through to the empty feed below, the same shape as a tracker with
+	// no data.
+	if scope == upstreamAB && ix.cfg.ABTorznabURL != "" && ix.cfg.ABPasskey == "" && strings.TrimSpace(q.Get("q")) == "" {
 		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 		_, _ = io.WriteString(w, renderError(errCodeIncorrectCredentials,
 			"AnimeBytes passkey not configured: set indexer.ab_passkey in seadex-scout to serve the AnimeBytes feed"))
@@ -730,10 +733,14 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 	return items, stats
 }
 
-// applyPaging honors an explicit Torznab offset/limit (advertised in t=caps)
-// on the synthesized feed. Absent or invalid params leave the feed unpaged
-// (it is already capped at feedWindow); the proxied search path forwards
-// these params to Prowlarr instead, so it never pages locally.
+// applyPaging honors the Torznab offset/limit params (advertised in t=caps)
+// on the synthesized feed. A request without a usable limit gets the
+// advertised default, defaultCapsLimit, newest-first (the feed is sorted
+// newest-first), so the caps document is honest; the arrs always send an
+// explicit limit, so real consumers are unaffected. An explicit limit behaves
+// as before, an absent or invalid offset leaves the window anchored at the
+// newest item, and the proxied search path forwards these params to Prowlarr
+// instead, so it never pages locally.
 func applyPaging(items []item, q url.Values) []item {
 	if off, err := strconv.Atoi(strings.TrimSpace(q.Get("offset"))); err == nil && off > 0 {
 		if off >= len(items) {
@@ -741,25 +748,41 @@ func applyPaging(items []item, q url.Values) []item {
 		}
 		items = items[off:]
 	}
-	if lim, err := strconv.Atoi(strings.TrimSpace(q.Get("limit"))); err == nil && lim > 0 && lim < len(items) {
-		items = items[:lim]
+	limit := defaultCapsLimit
+	if lim, err := strconv.Atoi(strings.TrimSpace(q.Get("limit"))); err == nil && lim > 0 {
+		limit = lim
+	}
+	if limit < len(items) {
+		items = items[:limit]
 	}
 	return items
 }
 
 // feedFor returns the synthesized RSS feed for a tracker scope (nyaa or ab),
 // read under the lock since reload replaces the snapshot when a cycle rewrites
-// it. The returned slice is safe to use after the lock is released: reload
-// installs a fresh snapshot with new backing arrays and never mutates the old
-// ones, so a slice handed out here stays immutable even across a swap. Callers
-// must only read it (never append/write in place).
+// it. A scope whose Prowlarr Torznab URL is not configured serves nothing,
+// even when the loaded snapshot carries items for it (a stale snapshot written
+// before the operator turned the tracker off): the README documents an empty
+// per-tracker URL as that tracker's off switch, and the /ab feed embeds the
+// operator's passkey, so an off tracker's empty-q response must be the same
+// shape as a tracker with no data - never the credential-bearing feed. The
+// returned slice is safe to use after the lock is released: reload installs a
+// fresh snapshot with new backing arrays and never mutates the old ones, so a
+// slice handed out here stays immutable even across a swap. Callers must only
+// read it (never append/write in place).
 func (ix *Indexer) feedFor(scope string) []item {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 	switch scope {
 	case upstreamNyaa:
+		if ix.cfg.NyaaTorznabURL == "" {
+			return nil
+		}
 		return ix.snap.NyaaFeed
 	case upstreamAB:
+		if ix.cfg.ABTorznabURL == "" {
+			return nil
+		}
 		return ix.snap.ABFeed
 	default:
 		return nil

@@ -750,6 +750,90 @@ func TestLoader_refreshCache_fetchFailureKeepsRejectionStreak(t *testing.T) {
 	}
 }
 
+// TestLoader_refreshCache_recordCapBreachAdvancesRejectionStreak pins the
+// record-cap exception to the "parse failures don't advance the streak" rule:
+// an over-cap body is a persistent guard refusal (an over-cap upstream list
+// re-downloads and rejects every cycle, never self-healing), so acceptRefresh
+// must route it through rejectRefresh — the errors.Is-matchable sentinel
+// survives the *StaleMapError wrap, the stale map is kept, and the persisted
+// streak advances so ConsecutiveRejections reaches
+// RejectionEscalationThreshold (the scout's WARN→ERROR escalation point)
+// instead of degrading at WARN forever.
+func TestLoader_refreshCache_recordCapBreachAdvancesRejectionStreak(t *testing.T) {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := 0; i <= maxFribbRecords; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"anilist_id":%d}`, i+1)
+	}
+	b.WriteByte(']')
+	body := b.String()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	prev := &Cache{
+		FetchedAt:         time.Now().Add(-2 * time.Hour),
+		Records:           []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+		RejectedRefreshes: RejectionEscalationThreshold - 1,
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	stale, ok := errors.AsType[*StaleMapError](err)
+	if !ok {
+		t.Fatalf("cap-breach refresh error = %v, want a *StaleMapError guard rejection", err)
+	}
+	if !errors.Is(err, errRecordCapExceeded) {
+		t.Errorf("cap-breach error does not match errRecordCapExceeded through the StaleMapError wrap: %v", err)
+	}
+	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
+		t.Fatalf("cap-breach refresh records = %+v, want stale record id 1", next.Records)
+	}
+	if next.RejectedRefreshes != RejectionEscalationThreshold {
+		t.Errorf("cap-breach RejectedRefreshes = %d, want %d (a cap breach advances the streak)", next.RejectedRefreshes, RejectionEscalationThreshold)
+	}
+	if stale.ConsecutiveRejections() != RejectionEscalationThreshold {
+		t.Errorf("cap-breach ConsecutiveRejections = %d, want %d (the scout escalates to ERROR at the threshold)", stale.ConsecutiveRejections(), RejectionEscalationThreshold)
+	}
+}
+
+// TestLoader_refreshCache_transientParseFailureKeepsRejectionStreak pins the
+// other side of the record-cap exception: an ordinary malformed body is a
+// transient parse failure (a partial download or upstream hiccup that can
+// self-heal next cycle), so it degrades to the stale map WITHOUT advancing or
+// resetting the persisted streak, and its *StaleMapError reports zero
+// consecutive rejections — the scout must never escalate to ERROR on it.
+func TestLoader_refreshCache_transientParseFailureKeepsRejectionStreak(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"anilist_id":1,`)) // truncated mid-record
+	}))
+	defer ts.Close()
+
+	prev := &Cache{
+		FetchedAt:         time.Now().Add(-2 * time.Hour),
+		Records:           []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+		RejectedRefreshes: 3,
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	stale, ok := errors.AsType[*StaleMapError](err)
+	if !ok {
+		t.Fatalf("parse-failure refresh error = %v, want a *StaleMapError", err)
+	}
+	if errors.Is(err, errRecordCapExceeded) {
+		t.Errorf("parse-failure error wrongly matches errRecordCapExceeded: %v", err)
+	}
+	if next.RejectedRefreshes != 3 {
+		t.Errorf("parse-failure RejectedRefreshes = %d, want 3 (transient parse failures neither advance nor reset the streak)", next.RejectedRefreshes)
+	}
+	if stale.ConsecutiveRejections() != 0 {
+		t.Errorf("parse-failure ConsecutiveRejections = %d, want 0 (not a guard rejection)", stale.ConsecutiveRejections())
+	}
+}
+
 // TestLoader_refreshCache_futureFetchedAtForcesFetch pins the clock-skew guard
 // in the fresh-reuse condition (age >= 0): a cache stamped in the future
 // (clock skew or a corrupt state file) is never treated as fresh, so the

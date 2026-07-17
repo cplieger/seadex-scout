@@ -6,7 +6,8 @@
 // A per-series episode fetch failure is logged and the series kept as a
 // Failed placeholder item (the snapshot is partial but usable); a failure of
 // the top-level series/movie list, a tag-resolution failure, a cancelled
-// context, or per-series failures hitting the walk failure budget fail the
+// context, per-series failures hitting the walk failure budget, or every
+// kept series failing its episode fetch fail the
 // whole walk. This mirrors the "ingest succeeded == healthy" semantic the
 // scout uses.
 package library
@@ -43,6 +44,10 @@ const episodeConcurrency = 6
 // blip, so the remaining fan-out is cancelled and the walk fails as a whole
 // (ingest failure, so the cycle is unhealthy). 5 tolerates isolated per-series
 // oddities (the partial-snapshot path) while tripping fast on an outage.
+// Because the budget is an absolute count, a library with fewer kept series
+// can never trip it - walkSonarr's companion total-failure rule (every kept
+// series failed) covers that gap, so a total episode-endpoint outage is an
+// ingest failure at any library size.
 const episodeFailureBudget = 5
 
 // SonarrClient is the arrapi Sonarr surface the walker needs (consumer-side
@@ -96,8 +101,11 @@ type Snapshot struct {
 	Items   []Item    `json:"items,omitempty"`
 	// Partial reports that at least one series' episode fetch failed: those
 	// items are present with Failed=true and no file data, so the snapshot is
-	// usable but not a complete library view, and consumers must not treat an
-	// absent or Failed item as removed.
+	// usable but not a complete library view. Consumers must not read a
+	// Failed item's missing file state as a real library state. A published
+	// walk never drops a failed series (it keeps the placeholder, or fails
+	// the walk outright), so an item absent from Items is genuinely gone
+	// from the arr, Partial or not.
 	Partial bool `json:"partial,omitempty"`
 }
 
@@ -151,9 +159,10 @@ func NewWalker(cfg *Config) *Walker {
 
 // Walk ingests both arr sides into a single snapshot. It returns an error when
 // a top-level list call fails, tag resolution fails (fail closed), ctx is
-// cancelled, or per-series episode failures hit the walk failure budget;
-// sub-budget per-series failures are kept as Failed placeholder items with a
-// warning (the snapshot is partial).
+// cancelled, per-series episode failures hit the walk failure budget, or
+// every kept series' episode fetch failed (a total outage is an ingest
+// failure at any library size); sub-budget, sub-total per-series failures are
+// kept as Failed placeholder items with a warning (the snapshot is partial).
 func (w *Walker) Walk(ctx context.Context) (Snapshot, error) {
 	var items []Item
 	partial := false
@@ -202,8 +211,9 @@ func filterSeriesByTags(series []arrapi.Series, includeIDs, excludeIDs map[int]s
 // series with its episode files fetched concurrently (bounded). A per-series
 // episode-fetch failure keeps the series' arr identity as a Failed placeholder
 // item (the snapshot is partial); once episodeFailureBudget failures
-// accumulate, the remaining fan-out is cancelled and the walk fails as a whole
-// (an arr outage, not per-series blips).
+// accumulate - or every kept series has failed, whichever a given library
+// size can reach - the walk fails as a whole (an arr outage, not per-series
+// blips), the budget additionally cancelling the remaining fan-out.
 func (w *Walker) walkSonarr(ctx context.Context) ([]Item, int, error) {
 	series, err := w.sonarr.GetSeries(ctx)
 	if err != nil {
@@ -222,6 +232,16 @@ func (w *Walker) walkSonarr(ctx context.Context) ([]Item, int, error) {
 	}
 	if skipped >= episodeFailureBudget {
 		return nil, 0, fmt.Errorf("sonarr episode fetches: %d series failed, hitting the walk failure budget of %d", skipped, episodeFailureBudget)
+	}
+	// Sub-budget total failure: every kept series' episode fetch failed. The
+	// budget above is an absolute count a library with fewer kept series can
+	// never reach, and publishing a "partial" snapshot with zero usable file
+	// data would let the cycle read healthy through a total episode-endpoint
+	// outage - an arr ingest failure whatever the library size (a restart or
+	// config fix could recover it, the app's unhealthy semantic). The ctx
+	// check above keeps a shutdown from masquerading as a total failure.
+	if len(kept) > 0 && skipped == len(kept) {
+		return nil, 0, fmt.Errorf("sonarr episode fetches: all %d kept series failed", skipped)
 	}
 	items := make([]Item, 0, len(results))
 	for _, item := range results {
@@ -574,31 +594,26 @@ func nonEmpty(vals ...string) []string {
 	return out
 }
 
-// countsPresenceChange reports whether an item present in only one snapshot
-// counts as added/removed under the partial-transition policy: a Sonarr item
-// absent from a partial snapshot is suppressed (Partial is set only by Sonarr
-// episode-fetch failures), while Radarr items always count. This is the
-// blanket Sonarr suppression documented on DiffSnapshots, extracted verbatim
-// so the policy is written once instead of inside both directional scans.
-func countsPresenceChange(partial bool, item *Item) bool {
-	return !partial || item.Arr != ArrSonarr
-}
-
 // DiffSnapshots reports what changed between prev and cur, keyed by arr + id.
 // An item is Changed when its group set, per-season group attribution, or
-// current fingerprint differs. Per the Snapshot.Partial contract, a Sonarr
-// item absent from a partial snapshot is not treated as removed (partial cur)
-// or added (partial prev); Partial is set only by Sonarr episode-fetch
-// failures, so Radarr additions/removals still count during a partial
-// transition, and changes to items present in both always count.
+// current fingerprint differs. Partial-walk suppression is scoped to the
+// known-Failed keys: an item that is a Failed placeholder in cur is not
+// counted as removed (its file state is missing, not gone), and an item that
+// was a Failed placeholder in prev is not counted as added when it walks
+// clean again (a recovery, not an arrival). An item genuinely absent from a
+// snapshot diffs as added/removed even when that snapshot is Partial - a
+// published walk keeps every failed series as a placeholder, so absence
+// means the arr itself no longer lists the item. A key that is Failed on
+// either side never counts as Changed (there is no comparable file state to
+// compare).
 func DiffSnapshots(prev, cur *Snapshot) Diff {
-	prevByKey := indexByKey(prev)
-	curByKey := indexByKey(cur)
+	prevByKey, prevFailed := indexByKey(prev)
+	curByKey, curFailed := indexByKey(cur)
 	var d Diff
 	for k, c := range curByKey {
 		p, ok := prevByKey[k]
 		if !ok {
-			if countsPresenceChange(prev.Partial, c) {
+			if _, wasFailed := prevFailed[k]; !wasFailed {
 				d.Added++
 			}
 			continue
@@ -607,30 +622,38 @@ func DiffSnapshots(prev, cur *Snapshot) Diff {
 			d.Changed++
 		}
 	}
-	for k, p := range prevByKey {
-		if _, ok := curByKey[k]; !ok && countsPresenceChange(cur.Partial, p) {
+	for k := range prevByKey {
+		if _, ok := curByKey[k]; ok {
+			continue
+		}
+		if _, isFailed := curFailed[k]; !isFailed {
 			d.Removed++
 		}
 	}
 	return d
 }
 
-// indexByKey keys a snapshot's items by "arr:id" (values point into the
-// snapshot's backing array, avoiding per-item copies). Failed placeholder
-// items are skipped: they carry no comparable file state (they exist so the
-// compare pass can scope finding resolution), so the diff treats them exactly
-// as the pre-marking walks did - absent, with the Partial suppression rules
-// deciding added/removed.
-func indexByKey(s *Snapshot) map[string]*Item {
-	m := make(map[string]*Item, len(s.Items))
+// indexByKey keys a snapshot's comparable items by "arr:id" (values point
+// into the snapshot's backing array, avoiding per-item copies) and returns
+// its Failed placeholders' keys separately: a Failed item carries no
+// comparable file state (it exists so the compare pass and the diff can
+// scope their handling to the keys the partial walk actually missed), so it
+// joins the failed set instead of the comparable index. failed is nil when
+// the snapshot has no placeholders (every complete walk).
+func indexByKey(s *Snapshot) (byKey map[string]*Item, failed map[string]struct{}) {
+	byKey = make(map[string]*Item, len(s.Items))
 	for i := range s.Items {
 		it := &s.Items[i]
 		if it.Failed {
+			if failed == nil {
+				failed = make(map[string]struct{})
+			}
+			failed[it.Key()] = struct{}{}
 			continue
 		}
-		m[it.Key()] = it
+		byKey[it.Key()] = it
 	}
-	return m
+	return byKey, failed
 }
 
 // sameItem reports whether two items have the same current release state

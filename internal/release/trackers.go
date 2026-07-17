@@ -3,6 +3,7 @@ package release
 import (
 	"net/url"
 	"strings"
+	"unicode/utf8"
 )
 
 // Canonical tracker names: the Tracker.Name values of the table entries.
@@ -84,21 +85,66 @@ var trackerByHost = func() map[string]Tracker {
 
 // LookupTrackerByHost resolves a URL hostname (case-insensitively; one
 // DNS-root trailing dot tolerated) to the tracker whose canonical site host
-// it equals or is a dot-delimited subdomain of, reporting whether one
+// it equals or is a real dot-delimited subdomain of, reporting whether one
 // matched. The tracker label is untrusted upstream data, so consumers that
 // validate an absolute URL's host key on this evidence instead; an empty or
 // unknown host matches nothing, and neither a suffix-confusion host
 // ("evilnyaa.si") nor a parent-domain spoof ("nyaa.si.evil.example")
-// survives the dot-delimited comparison.
+// survives the dot-delimited comparison. Two further fail-closed rules live
+// here so every consumer inherits them: a non-ASCII host never matches (see
+// IsASCIIHost - homograph territory), and an empty-labeled host (".nyaa.si",
+// "a..nyaa.si") is not a subdomain - no DNS name has an empty label, so only
+// a non-empty label chain counts (see hostMatchesDomain).
 func LookupTrackerByHost(host string) (Tracker, bool) {
 	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
-	if host == "" {
+	if host == "" || !IsASCIIHost(host) {
 		return Tracker{}, false
 	}
 	for canonical, t := range trackerByHost {
-		if host == canonical || strings.HasSuffix(host, "."+canonical) {
+		if hostMatchesDomain(host, canonical) {
 			return t, true
 		}
 	}
 	return Tracker{}, false
+}
+
+// hostMatchesDomain reports whether host equals domain or is a real
+// dot-delimited subdomain of it: host must end in "."+domain and every label
+// of the subdomain prefix must be non-empty. Plain suffix matching would also
+// accept empty DNS labels (".nyaa.si" via its leading dot, "a..nyaa.si" via
+// the inner one); no resolvable DNS name carries an empty label, so those
+// forms are adversarial and must not classify as the tracker.
+func hostMatchesDomain(host, domain string) bool {
+	if host == domain {
+		return true
+	}
+	prefix, ok := strings.CutSuffix(host, "."+domain)
+	if !ok {
+		return false
+	}
+	for label := range strings.SplitSeq(prefix, ".") {
+		if label == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// IsASCIIHost reports whether every byte of host is ASCII (below
+// utf8.RuneSelf). A non-ASCII host is homograph territory: browsers apply
+// UTS46 host mapping (a fullwidth U+FF0E or ideographic U+3002 dot becomes
+// '.', fullwidth letters fold to ASCII), so a host spelled
+// "animebytes<U+FF0E>tv" navigates to animebytes.tv while a byte-wise
+// comparison cannot see it. Every legitimate tracker host is ASCII, so
+// LookupTrackerByHost (and through it the Is*Host twins) rejects non-ASCII
+// hosts outright; this helper is exported for consumers whose fail direction
+// inverts the lookup (filter.ABVisible hides a release when its host is NOT
+// classifiable) so the ASCII rule keeps one home.
+func IsASCIIHost(host string) bool {
+	for i := range len(host) {
+		if host[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
 }

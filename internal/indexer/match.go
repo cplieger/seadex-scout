@@ -74,7 +74,10 @@ func trackerKey(tracker, sourceURL string) string {
 
 // trackerKeyFromURL builds the match key from an arbitrary release URL (a
 // Prowlarr item's page URL) by detecting the tracker from the host, so it keys
-// the same way trackerKey does for the SeaDex side.
+// the same way trackerKey does for the SeaDex side. Host classification rides
+// the shared tracker predicate (release.LookupTrackerByHost via the Is*Host
+// twins), so a non-ASCII homograph label or an empty-labeled host under a
+// tracker domain never yields a curation key.
 func trackerKeyFromURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {

@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/httpx/v2"
+	"github.com/cplieger/httpx/v3"
 )
 
 // TestUpstreamSearchPreservesExistingQuery pins the URL-join logic of the
@@ -187,11 +187,10 @@ func TestUpstreamSearchRetriesMalformedResponse(t *testing.T) {
 	}
 }
 
-
 // TestFetchAndParseRateLimitCarriesRetryAfterHint pins the status path of the
 // single-attempt fetch: a 429 response's Retry-After survives as a positive
 // RetryAfterHint on the returned transient error (asserted directly, no
-// sleeping), so the enclosing RetryWithBackoff honors the upstream-requested
+// sleeping), so the enclosing Do honors the upstream-requested
 // delay instead of its jittered backoff. The httpx sentinel chain is
 // preserved for the caller's errors.Is classification.
 func TestFetchAndParseRateLimitCarriesRetryAfterHint(t *testing.T) {

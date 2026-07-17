@@ -109,6 +109,8 @@ func TestABVisible(t *testing.T) {
 		{"unicode ideographic-dot AB host hidden when off", "Nyaa", "https://animebytes\u3002tv/torrents.php?id=1", false, false},
 		{"unicode fullwidth-letter AB host hidden when off", "Nyaa", "https://animebyte\uFF53.tv/torrents.php?id=1", false, false},
 		{"unicode fullwidth-dot AB host visible when on", "Nyaa", "https://animebytes\uFF0Etv/torrents.php?id=1", true, true},
+		{"empty-label AB host is not AnimeBytes (unresolvable, visible when off)", "Nyaa", "https://.animebytes.tv/x", false, true},
+		{"inner-empty-label AB host is not AnimeBytes (unresolvable, visible when off)", "Nyaa", "https://a..animebytes.tv/x", false, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

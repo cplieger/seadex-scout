@@ -72,6 +72,43 @@ func TestFetchEntriesErrorsOnEmptyIntermediatePage(t *testing.T) {
 	}
 }
 
+// TestFetchEntriesErrorsOnEmptyTerminalPageWithOutstandingItems pins the
+// truncated-view guard for the empty FINAL page: a page equal to the reported
+// totalPages returning zero items while the collected count is still below
+// the reported totalItems must fail the fetch (the fail-safe direction — a
+// degraded cycle preserves existing findings, while accepting the truncated
+// view would falsely resolve them), with an error naming the fetched vs
+// reported counts, never finishFetch's lenient count-mismatch WARN (which is
+// reserved for terminal pages that carried entries).
+func TestFetchEntriesErrorsOnEmptyTerminalPageWithOutstandingItems(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		switch page {
+		case 1:
+			fmt.Fprint(w, `{"totalItems":2,"totalPages":2,"items":[{"alID":1,"expand":{"trs":[]}}]}`)
+		case 2:
+			fmt.Fprint(w, `{"totalItems":2,"totalPages":2,"items":[]}`)
+		default:
+			t.Errorf("unexpected request for page %d after empty terminal page", page)
+		}
+	}))
+	defer server.Close()
+
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	if err == nil {
+		t.Fatal("FetchEntries returned nil error, want empty-terminal-page error")
+	}
+	if entries != nil {
+		t.Fatalf("entries = %+v, want nil on truncated-view error", entries)
+	}
+	if !strings.Contains(err.Error(), "page 2 empty") {
+		t.Errorf("error = %q, want it to name the empty page 2", err.Error())
+	}
+	if !strings.Contains(err.Error(), "1 of 2 reported entries fetched") {
+		t.Errorf("error = %q, want it to name fetched (1) vs reported (2) counts", err.Error())
+	}
+}
+
 // TestFetchEntriesCancelledBetweenPagesAborts pins the shutdown arm of the
 // "never compare against a truncated view" contract: a context that expires
 // during the inter-page politeness sleep must abort the fetch with an
