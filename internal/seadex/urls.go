@@ -2,6 +2,7 @@ package seadex
 
 import (
 	"net/url"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -106,6 +107,11 @@ func usableAbsolute(parsed *url.URL) bool {
 	host := parsed.Hostname()
 	for i := range len(host) {
 		if host[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	if port := parsed.Port(); port != "" {
+		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
 			return false
 		}
 	}

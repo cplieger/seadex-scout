@@ -758,6 +758,45 @@ func TestWalkSonarrUnmatchedIncludeTagLogsWarning(t *testing.T) {
 	}
 }
 
+// TestWalkUnmatchedTagWarningNeverEmitsTagValues pins the credential-safety
+// contract of the unmatched-tag diagnostic: configured arr_tags values pass
+// through allowlisted ${VAR} expansion, so a typo like ${SONARR_API_KEY} can
+// place a secret in the label set. The warning must therefore carry only a
+// count, never the raw unmatched values.
+func TestWalkUnmatchedTagWarningNeverEmitsTagValues(t *testing.T) {
+	const secret = "sekrit-expanded-api-key-9f8e7d"
+	fs := &fakeSonarr{
+		series: []arrapi.Series{
+			{ID: 1, Title: "Kept", Tags: []int{7}},
+		},
+		episodes: map[int][]arrapi.Episode{
+			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
+		},
+		tagIDs:    map[int]struct{}{7: {}},
+		unmatched: []string{secret},
+	}
+	logger, rec := capture.New()
+	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime", secret}, Logger: logger})
+
+	if _, err := w.Walk(context.Background()); err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	if !recordHasAttr(rec, "configured tags matched no arr tag", "unmatched_count", "1") {
+		t.Error("unmatched-tag warning missing the count-only unmatched_count attribute")
+	}
+	for _, r := range rec.Records() {
+		if strings.Contains(r.Message, secret) {
+			t.Errorf("log message %q leaks the unmatched tag value", r.Message)
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			if strings.Contains(a.Value.String(), secret) {
+				t.Errorf("log attribute %s=%q leaks the unmatched tag value", a.Key, a.Value)
+			}
+			return true
+		})
+	}
+}
+
 func TestWalkRadarrContextCancellationAfterListIsFatal(t *testing.T) {
 	fr := &fakeRadarr{movies: []arrapi.Movie{{ID: 1, Title: "Movie", HasFile: false}}}
 	w := NewWalker(&Config{Radarr: fr, Logger: discardLogger()})

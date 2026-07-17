@@ -4,20 +4,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"pgregory.net/rapid"
 )
 
 // TestDedupeTitles_idempotentAndLossless pins the title-cleaning contract the
-// fuzz targets also assert (no empty, no duplicate titles) plus two properties
-// the tables cannot reach across arbitrary inputs: no non-empty input title is
-// ever lost, and the function is idempotent (re-deduping its own output is a
-// no-op), so a downstream normalized-title match sees a stable, complete list.
+// fuzz targets also assert (no blank, no duplicate titles) plus two properties
+// the tables cannot reach across arbitrary inputs: no usable (non-blank) input
+// title is ever lost, and the function is idempotent (re-deduping its own
+// output is a no-op), so a downstream normalized-title match sees a stable,
+// complete list.
 func TestDedupeTitles_idempotentAndLossless(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		titles := rapid.SliceOfN(
-			rapid.OneOf(rapid.SampledFrom([]string{"", "A", "B", "Frieren"}), rapid.String()),
+			rapid.OneOf(rapid.SampledFrom([]string{"", " ", "A", "B", "Frieren"}), rapid.String()),
 			0, 12,
 		).Draw(t, "titles")
 
@@ -25,8 +27,8 @@ func TestDedupeTitles_idempotentAndLossless(t *testing.T) {
 
 		seen := make(map[string]struct{}, len(out))
 		for _, title := range out {
-			if title == "" {
-				t.Fatalf("dedupeTitles(%q) returned an empty title", titles)
+			if strings.TrimSpace(title) == "" {
+				t.Fatalf("dedupeTitles(%q) returned a blank title", titles)
 			}
 			if _, dup := seen[title]; dup {
 				t.Fatalf("dedupeTitles(%q) returned duplicate title %q", titles, title)
@@ -34,11 +36,11 @@ func TestDedupeTitles_idempotentAndLossless(t *testing.T) {
 			seen[title] = struct{}{}
 		}
 		for _, title := range titles {
-			if title == "" {
+			if strings.TrimSpace(title) == "" {
 				continue
 			}
 			if _, ok := seen[title]; !ok {
-				t.Fatalf("dedupeTitles(%q) lost non-empty input title %q", titles, title)
+				t.Fatalf("dedupeTitles(%q) lost usable input title %q", titles, title)
 			}
 		}
 		if again := dedupeTitles(out...); !slices.Equal(again, out) {

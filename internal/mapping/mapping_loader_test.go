@@ -63,7 +63,7 @@ func TestLoader_refreshCache_notModifiedBumpsTimestamp(t *testing.T) {
 	prev := &Cache{
 		FetchedAt: time.Now().Add(-2 * time.Hour),
 		ETag:      "v1",
-		Records:   []Record{{AniListID: 1, Type: "TV"}},
+		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
 	next, err := l.refreshCache(context.Background(), prev)
@@ -85,7 +85,7 @@ func TestLoader_refreshCache_parseFailKeepsStale(t *testing.T) {
 	defer ts.Close()
 	prev := &Cache{
 		FetchedAt: time.Now().Add(-2 * time.Hour),
-		Records:   []Record{{AniListID: 1, Type: "TV"}},
+		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
 	next, err := l.refreshCache(context.Background(), prev)
@@ -835,5 +835,161 @@ func TestLoader_refreshCache_zeroRefreshAlwaysRevalidates(t *testing.T) {
 	}
 	if len(next.Records) != 1 {
 		t.Errorf("zero-refresh 304 kept %d records, want 1", len(next.Records))
+	}
+}
+
+// TestLoader_refreshCache_unusableCacheFetchFailureErrors pins the
+// cache-usability gate on the fetch-outage degradation path: a JSON-valid
+// state cache whose records index to nothing (records:[{}] — a zero AniList
+// ID buildIndex drops) must NOT enter staleOrFail as a StaleMapError, because
+// scout.mapUsable trusts the error type alone and would proceed into
+// matching against an empty effective map. It must degrade like no cache at
+// all (the no-cache error), so the scout preserves findings.
+func TestLoader_refreshCache_unusableCacheFetchFailureErrors(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	prev := &Cache{
+		FetchedAt: time.Now().Add(-2 * time.Hour),
+		Records:   []Record{{}}, // non-empty slice, zero effective index
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	_, err := l.refreshCache(context.Background(), prev)
+	if err == nil {
+		t.Fatal("fetch failure over an unusable cache returned nil error, want a no-cache-available error")
+	}
+	var stale *StaleMapError
+	if errors.As(err, &stale) {
+		t.Fatalf("fetch failure over an unusable cache returned %v, want the no-cache error (a StaleMapError would make scout compare against an empty map)", err)
+	}
+}
+
+// TestLoader_refreshCache_unusableCacheSendsNoValidatorsAndErrorsOn304 pins
+// the cache-usability gate on the conditional-GET and 304 paths: an unusable
+// non-empty cache (all-zero AniList IDs) must suppress the validators (forcing
+// a full 200 download) and, if a 304 arrives anyway, must error rather than
+// affirm a map that indexes to nothing.
+func TestLoader_refreshCache_unusableCacheSendsNoValidatorsAndErrorsOn304(t *testing.T) {
+	var sawValidators bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "" {
+			sawValidators = true
+		}
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer ts.Close()
+
+	prev := &Cache{
+		FetchedAt:    time.Now().Add(-2 * time.Hour),
+		ETag:         "v1",
+		LastModified: "Mon, 02 Jan 2006 15:04:05 GMT",
+		Records:      []Record{{}}, // non-empty slice, zero effective index
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	_, err := l.refreshCache(context.Background(), prev)
+	if err == nil {
+		t.Fatal("304 over an unusable cache returned nil error, want an error instead of reusing an empty effective map")
+	}
+	if sawValidators {
+		t.Error("conditional GET sent validators despite an unusable cache; they must be suppressed so the server returns a full 200")
+	}
+}
+
+// routingFloorPrevCache returns a previously accepted cache with both routing
+// populations above the 1% floor: two MOVIE records (TMDB-movie ids) and two
+// series records (TVDB ids). Shared by the routing-distribution floor tests.
+func routingFloorPrevCache() *Cache {
+	return &Cache{
+		FetchedAt: time.Now().Add(-2 * time.Hour),
+		Records: []Record{
+			{AniListID: 1, Type: "MOVIE", TmdbMovies: []int{42}},
+			{AniListID: 2, Type: "MOVIE", TmdbMovies: []int{43}},
+			{AniListID: 3, Type: "TV", TvdbID: 300},
+			{AniListID: 4, Type: "TV", TvdbID: 400},
+		},
+	}
+}
+
+// TestLoader_refreshCache_routingCollapseKeepsStale covers the
+// routing-distribution acceptance floor: a fresh body that keeps 100% typed
+// coverage but collapses one routing population must be rejected in favour of
+// the stale map. Both directions are pinned — every movie type renamed to an
+// unrecognized string (FILM: all records route to Sonarr) and every record
+// stamped MOVIE (all records route to Radarr) — since either silently sends an
+// entire side of the catalogue to the wrong arr while passing the typed and
+// arr-identifier floors.
+func TestLoader_refreshCache_routingCollapseKeepsStale(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "movie types renamed to FILM",
+			body: `[{"anilist_id":1,"type":"film","themoviedb_id":{"movie":[42]}},` +
+				`{"anilist_id":2,"type":"film","themoviedb_id":{"movie":[43]}},` +
+				`{"anilist_id":3,"type":"tv","tvdb_id":300},` +
+				`{"anilist_id":4,"type":"tv","tvdb_id":400}]`,
+		},
+		{
+			name: "every record stamped MOVIE",
+			body: `[{"anilist_id":1,"type":"movie","themoviedb_id":{"movie":[42]}},` +
+				`{"anilist_id":2,"type":"movie","themoviedb_id":{"movie":[43]}},` +
+				`{"anilist_id":3,"type":"movie","themoviedb_id":{"movie":[44]}},` +
+				`{"anilist_id":4,"type":"movie","themoviedb_id":{"movie":[45]}}]`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer ts.Close()
+
+			prev := routingFloorPrevCache()
+			l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+			next, err := l.refreshCache(context.Background(), prev)
+			var stale *StaleMapError
+			if !errors.As(err, &stale) {
+				t.Fatalf("routing-collapse refresh error = %v, want a *StaleMapError guard rejection", err)
+			}
+			if len(next.Records) != len(prev.Records) {
+				t.Fatalf("routing-collapse refresh kept %d records, want the %d stale records unchanged", len(next.Records), len(prev.Records))
+			}
+			if next.RejectedRefreshes != 1 {
+				t.Errorf("routing-collapse RejectedRefreshes = %d, want 1 (the routing floor is an acceptance-guard rejection)", next.RejectedRefreshes)
+			}
+		})
+	}
+}
+
+// TestLoader_refreshCache_additiveUpdateKeepsRoutingFloor pins the accepting
+// side of the routing-distribution floor: a normal additive catalogue update
+// that grows both routing populations must be accepted (and reset the
+// rejection streak), not rejected on growth alone.
+func TestLoader_refreshCache_additiveUpdateKeepsRoutingFloor(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"anilist_id":1,"type":"movie","themoviedb_id":{"movie":[42]}},` +
+			`{"anilist_id":2,"type":"movie","themoviedb_id":{"movie":[43]}},` +
+			`{"anilist_id":3,"type":"tv","tvdb_id":300},` +
+			`{"anilist_id":4,"type":"tv","tvdb_id":400},` +
+			`{"anilist_id":5,"type":"movie","themoviedb_id":{"movie":[44]}},` +
+			`{"anilist_id":6,"type":"tv","tvdb_id":600}]`))
+	}))
+	defer ts.Close()
+
+	prev := routingFloorPrevCache()
+	prev.RejectedRefreshes = 3
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	if err != nil {
+		t.Fatalf("additive refresh growing both routing sides returned error %v, want accepted", err)
+	}
+	if len(next.Records) != 6 {
+		t.Fatalf("accepted refresh records = %d, want 6", len(next.Records))
+	}
+	if next.RejectedRefreshes != 0 {
+		t.Errorf("accepted refresh RejectedRefreshes = %d, want 0 (acceptance resets the streak)", next.RejectedRefreshes)
 	}
 }

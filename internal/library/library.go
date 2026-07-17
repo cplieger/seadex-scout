@@ -362,7 +362,7 @@ func (w *Walker) resolveOne(ctx context.Context,
 		return nil, fmt.Errorf("resolving %s: %w", which, err)
 	}
 	if len(unmatched) > 0 {
-		w.log.Warn("configured tags matched no arr tag", "which", which, "unmatched", strings.Join(unmatched, ","))
+		w.log.Warn("configured tags matched no arr tag", "which", which, "unmatched_count", len(unmatched))
 	}
 	return ids, nil
 }

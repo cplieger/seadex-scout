@@ -13,7 +13,7 @@ import (
 )
 
 func TestDedupeTitles(t *testing.T) {
-	got := dedupeTitles("Frieren", "", "Frieren", "Sousou no Frieren")
+	got := dedupeTitles("Frieren", "", " \t", "Frieren", "Sousou no Frieren")
 	want := []string{"Frieren", "Sousou no Frieren"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("dedupeTitles() = %v, want %v", got, want)
@@ -86,6 +86,9 @@ func TestParseMediaNotFoundClassification(t *testing.T) {
 		{name: "null Media with Not Found message", raw: `{"data":{"Media":null},"errors":[{"message":"Not Found."}]}`, wantErr: true, wantNotFound: true},
 		{name: "null Media with Not Found plus second error", raw: `{"data":{"Media":null},"errors":[{"message":"Not Found."},{"message":"Internal Server Error"}]}`, wantErr: true, wantNotFound: false},
 		{name: "non-object Media fails decode", raw: `{"data":{"Media":123}}`, wantErr: true, wantNotFound: false},
+		{name: "partial response with non-null Media and errors", raw: `{"data":{"Media":{"format":"TV","title":{"romaji":"A"}}},"errors":[{"message":"field resolution failed"}]}`, wantErr: true, wantNotFound: false},
+		{name: "empty Media object has no usable title", raw: `{"data":{"Media":{}}}`, wantErr: true, wantNotFound: false},
+		{name: "whitespace-only titles are not usable", raw: `{"data":{"Media":{"title":{"romaji":" ","english":"\t"}}}}`, wantErr: true, wantNotFound: false},
 		{name: "media present", raw: `{"data":{"Media":{"format":"TV","seasonYear":2023,"title":{"romaji":"A"}}}}`, wantErr: false, wantNotFound: false},
 	}
 	for _, tt := range tests {
@@ -134,6 +137,43 @@ func TestParseMediaPageErrorFailsBatch(t *testing.T) {
 	}
 }
 
+// TestParseMediaFieldLimits pins the per-field wire limits on the untrusted
+// AniList boundary in BOTH the single and batch parsers: boundary-sized
+// title/format fields are accepted while max+1 values are rejected outright
+// (never truncated, which could forge a normalized-title match), so a hostile
+// near-body-cap payload cannot inflate the memo or state.json.
+func TestParseMediaFieldLimits(t *testing.T) {
+	okTitle := strings.Repeat("a", maxTitleBytes)
+	bigTitle := strings.Repeat("a", maxTitleBytes+1)
+	okFormat := strings.Repeat("F", maxFormatBytes)
+	bigFormat := strings.Repeat("F", maxFormatBytes+1)
+
+	tests := []struct {
+		name    string
+		fields  string // media object body, without the enclosing braces
+		wantErr bool
+	}{
+		{name: "boundary-sized romaji accepted", fields: `"title":{"romaji":"` + okTitle + `"}`, wantErr: false},
+		{name: "over-limit romaji rejected", fields: `"title":{"romaji":"` + bigTitle + `"}`, wantErr: true},
+		{name: "over-limit english rejected", fields: `"title":{"romaji":"A","english":"` + bigTitle + `"}`, wantErr: true},
+		{name: "over-limit native rejected", fields: `"title":{"romaji":"A","native":"` + bigTitle + `"}`, wantErr: true},
+		{name: "boundary-sized format accepted", fields: `"format":"` + okFormat + `","title":{"romaji":"A"}`, wantErr: false},
+		{name: "over-limit format rejected", fields: `"format":"` + bigFormat + `","title":{"romaji":"A"}`, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			single := []byte(`{"data":{"Media":{` + tt.fields + `}}}`)
+			if _, err := parseMedia(single); (err != nil) != tt.wantErr {
+				t.Errorf("parseMedia err = %v, wantErr %v", err, tt.wantErr)
+			}
+			batch := []byte(`{"data":{"Page":{"media":[{"id":1,` + tt.fields + `}]}}}`)
+			if _, err := parseMediaPage(batch); (err != nil) != tt.wantErr {
+				t.Errorf("parseMediaPage err = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestParseMediaPageNullableEnvelope(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -145,6 +185,8 @@ func TestParseMediaPageNullableEnvelope(t *testing.T) {
 		{name: "missing Page", raw: `{"data":{}}`, wantErr: true},
 		{name: "missing media", raw: `{"data":{"Page":{}}}`, wantErr: true},
 		{name: "null media", raw: `{"data":{"Page":{"media":null}}}`, wantErr: true},
+		{name: "record with whitespace-only title fails batch", raw: `{"data":{"Page":{"media":[{"id":1,"title":{"romaji":" "}}]}}}`, wantErr: true},
+		{name: "record with no title fails batch", raw: `{"data":{"Page":{"media":[{"id":1}]}}}`, wantErr: true},
 		{name: "empty media array", raw: `{"data":{"Page":{"media":[]}}}`, wantErr: false},
 	}
 	for _, tt := range tests {

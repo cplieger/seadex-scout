@@ -120,33 +120,32 @@ func TestWriteFilesSurfacesProbePathError(t *testing.T) {
 
 // TestWriteFilesJSONFailureSkipsMarkdown pins one half of the deliberate
 // json-then-md write order plus the write-json error wrap: when the JSON half
-// cannot be committed (an unwritable report dir; the stem probe itself
-// succeeds since neither half exists), the Markdown half is never attempted,
-// so a failed run cannot leave a dangling .md without its machine-readable
-// pair.
+// cannot be committed, the Markdown half is never attempted, so a failed run
+// cannot leave a dangling .md without its machine-readable pair. A dangling
+// JSON symlink is a root-safe deterministic failure: os.Stat treats the
+// missing target as free during reportPairStem, then atomicfile refuses the
+// symlink target — so this also runs in root-run containers where a chmod
+// 0555 dir would not produce EACCES.
 func TestWriteFilesJSONFailureSkipsMarkdown(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory write permissions")
-	}
 	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o555); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 	r := &Report{
 		GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC),
 		Totals:      map[string]int{},
+	}
+	base := filepath.Join(dir, "report-2026-07-11T15-04-05Z")
+	if err := os.Symlink("missing-target", base+".json"); err != nil {
+		t.Fatal(err)
 	}
 
 	err := r.WriteFiles(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	if err == nil {
-		t.Fatal("WriteFiles must fail when the JSON half cannot be committed")
+		t.Fatal("WriteFiles must fail when the JSON target is a symlink")
 	}
 	if !strings.Contains(err.Error(), "write json") {
 		t.Errorf("error = %q, want it wrapped with the write-json context", err)
 	}
-	if _, statErr := os.Stat(filepath.Join(dir, "report-2026-07-11T15-04-05Z.md")); statErr == nil {
+	if _, statErr := os.Stat(base + ".md"); statErr == nil {
 		t.Error("the markdown half must not be written when the JSON half failed (json-then-md order)")
 	}
 }

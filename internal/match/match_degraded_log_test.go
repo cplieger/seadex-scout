@@ -35,7 +35,7 @@ func (partialOutageAniList) FetchMany(_ context.Context, ids []int) (map[int]ani
 func TestMatchTransientFailuresLogWarn(t *testing.T) {
 	logger, recorder := capture.New()
 	snap := &library.Snapshot{}
-	idx := mapping.NewIndex(nil) // no records: both entries need the AniList lookup
+	idx := mapping.NewIndex(nil)
 
 	res := NewMatcher(partialOutageAniList{}, logger).Match(context.Background(),
 		[]seadex.Entry{{AniListID: 41}, {AniListID: 42}}, snap, idx, Memo{})
@@ -43,11 +43,15 @@ func TestMatchTransientFailuresLogWarn(t *testing.T) {
 	if !res.Degraded {
 		t.Error("Degraded = false, want true when a needed AniList lookup fails transiently")
 	}
-	if got := recorder.CountExact("anilist batch prefetch incomplete; remaining ids fall back to per-id fetch"); got != 1 {
-		t.Errorf("batch-prefetch WARN count = %d, want 1: a non-cancelled partial batch failure must warn, not hide in the Debug cancellation arm", got)
+	records := recorder.Records()
+	if len(records) != 2 {
+		t.Fatalf("records = %d, want 2", len(records))
 	}
-	if got := recorder.CountExact("anilist fallback failed"); got != 1 {
-		t.Errorf("per-id fallback WARN count = %d, want 1: a non-cancelled Fetch failure must warn, not hide in the Debug cancellation arm", got)
+	if records[0].Message != "anilist batch prefetch incomplete; remaining ids fall back to per-id fetch" || records[0].Level.String() != "WARN" {
+		t.Errorf("batch record = level %s message %q, want WARN incomplete-prefetch message", records[0].Level, records[0].Message)
+	}
+	if records[1].Message != "anilist fallback failed" || records[1].Level.String() != "WARN" {
+		t.Errorf("fallback record = level %s message %q, want WARN fallback-failed message", records[1].Level, records[1].Message)
 	}
 }
 
@@ -60,7 +64,7 @@ func TestMatchTransientFailuresLogWarn(t *testing.T) {
 func TestMatchTotalOutageLogsSingleWarn(t *testing.T) {
 	logger, recorder := capture.New()
 	snap := &library.Snapshot{}
-	idx := mapping.NewIndex(nil) // no records: both entries need the AniList lookup
+	idx := mapping.NewIndex(nil)
 
 	res := NewMatcher(degradedAniList{}, logger).Match(context.Background(),
 		[]seadex.Entry{{AniListID: 41}, {AniListID: 42}}, snap, idx, Memo{})
@@ -68,10 +72,11 @@ func TestMatchTotalOutageLogsSingleWarn(t *testing.T) {
 	if !res.Degraded {
 		t.Error("Degraded = false, want true on a total AniList outage")
 	}
-	if got := recorder.CountExact("anilist batch prefetch failed; skipping per-id fallback for pending ids"); got != 1 {
-		t.Errorf("total-outage WARN count = %d, want exactly 1", got)
+	records := recorder.Records()
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want 1", len(records))
 	}
-	if got := recorder.CountExact("anilist fallback failed"); got != 0 {
-		t.Errorf("per-id fallback WARN count = %d, want 0 (the doomed per-id tail is skipped)", got)
+	if records[0].Message != "anilist batch prefetch failed; skipping per-id fallback for pending ids" || records[0].Level.String() != "WARN" {
+		t.Errorf("record = level %s message %q, want WARN total-outage message", records[0].Level, records[0].Message)
 	}
 }

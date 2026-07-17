@@ -9,23 +9,20 @@ import (
 	"testing"
 )
 
-// TestFetchEntriesEntryCapErrors pins the memory bound the page cap cannot
-// cover: a misbehaving upstream that stuffs far more than perPage items into
-// each page must trip the total-entry cap (maxEntries) with an error and a nil
-// slice, instead of accumulating unbounded memory across pages.
-func TestFetchEntriesEntryCapErrors(t *testing.T) {
-	item := `{"alID":1,"expand":{"trs":[]}}`
-	var b strings.Builder
-	b.WriteString(`{"totalPages":2,"items":[`)
-	for i := 0; i <= maxEntries; i++ {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(item)
+// repeatJSON joins n copies of one JSON element with commas, for building
+// hostile-cardinality array bodies.
+func repeatJSON(elem string, n int) string {
+	elems := make([]string, n)
+	for i := range elems {
+		elems[i] = elem
 	}
-	b.WriteString(`]}`)
-	page := b.String()
+	return strings.Join(elems, ",")
+}
 
+// fetchHostilePage serves one fixed page body and asserts FetchEntries rejects
+// it with a nil slice and an error carrying wantErr.
+func fetchHostilePage(t *testing.T, page, wantErr string) {
+	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, page)
 	}))
@@ -33,13 +30,111 @@ func TestFetchEntriesEntryCapErrors(t *testing.T) {
 
 	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
 	if err == nil {
-		t.Fatal("FetchEntries returned nil error, want entry-cap error")
+		t.Fatalf("FetchEntries returned nil error, want %q error", wantErr)
 	}
 	if entries != nil {
 		t.Fatalf("entries = %d items, want nil on cap error", len(entries))
 	}
-	if !strings.Contains(err.Error(), "exceeded cap") {
-		t.Errorf("error = %q, want entry-cap context", err.Error())
+	if !strings.Contains(err.Error(), wantErr) {
+		t.Errorf("error = %q, want substring %q", err.Error(), wantErr)
+	}
+}
+
+// TestFetchEntriesDecodeCardinalityCapsError pins the decode-layer allocation
+// bounds json.Unmarshal could not provide: hostile array cardinality (a page
+// stuffing more than the requested perPage items, or one item amplifying
+// through its nested torrents/files/tags arrays) must be rejected DURING the
+// bounded decode - before allocation scales with the hostile input - with an
+// error and a nil slice. The "many tiny items" and "one item with an oversized
+// nested files array" cases are the two amplification shapes the wire-size cap
+// alone cannot stop.
+func TestFetchEntriesDecodeCardinalityCapsError(t *testing.T) {
+	tests := []struct {
+		name    string
+		page    string
+		wantErr string
+	}{
+		{
+			name: "many tiny items exceed perPage",
+			page: `{"totalPages":1,"items":[` +
+				repeatJSON(`{"alID":1,"expand":{"trs":[]}}`, perPage+1) + `]}`,
+			wantErr: fmt.Sprintf("page items exceeded cap %d", perPage),
+		},
+		{
+			name: "oversized torrents array in one item",
+			page: `{"totalPages":1,"items":[{"alID":1,"expand":{"trs":[` +
+				repeatJSON(`{}`, maxTorrentsPerEntry+1) + `]}}]}`,
+			wantErr: fmt.Sprintf("torrents per entry exceeded cap %d", maxTorrentsPerEntry),
+		},
+		{
+			name: "oversized nested files array in one torrent",
+			page: `{"totalPages":1,"items":[{"alID":1,"expand":{"trs":[{"files":[` +
+				repeatJSON(`{}`, maxFilesPerTorrent+1) + `]}]}}]}`,
+			wantErr: fmt.Sprintf("files per torrent exceeded cap %d", maxFilesPerTorrent),
+		},
+		{
+			name: "oversized tags array in one torrent",
+			page: `{"totalPages":1,"items":[{"alID":1,"expand":{"trs":[{"tags":[` +
+				repeatJSON(`""`, maxTagsPerTorrent+1) + `]}]}}]}`,
+			wantErr: fmt.Sprintf("tags per torrent exceeded cap %d", maxTagsPerTorrent),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fetchHostilePage(t, tc.page, tc.wantErr)
+		})
+	}
+}
+
+// TestDecodePageElementBudgetErrors pins the aggregate element budget: the
+// per-parent cardinality caps compose multiplicatively (perPage x torrents x
+// files/tags), so a page of minimal elements staying under every per-parent
+// cap could still decode into hundreds of MB. The decoder must abort once the
+// TOTAL decoded array elements cross maxPageElements, before the remainder is
+// materialized.
+func TestDecodePageElementBudgetErrors(t *testing.T) {
+	// 40 items x 512 torrents x 60 tags = 1+512+30720 elements per item,
+	// 1,249,320 total: over the 1M budget while every per-parent cap holds.
+	torrent := `{"tags":[` + repeatJSON(`""`, 60) + `]}`
+	item := `{"alID":1,"expand":{"trs":[` + repeatJSON(torrent, 512) + `]}}`
+	page := `{"totalPages":1,"items":[` + repeatJSON(item, 40) + `]}`
+
+	_, err := decodePage([]byte(page))
+	if err == nil {
+		t.Fatal("decodePage returned nil error, want element-budget error")
+	}
+	want := fmt.Sprintf("page elements exceeded cap %d", maxPageElements)
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want substring %q", err.Error(), want)
+	}
+}
+
+// TestFetchAndAppendEntryCapBeforeAppend pins the relocated total-entry guard:
+// a page whose items would push the accumulated catalogue past maxEntries is
+// rejected BEFORE any of its items are converted or appended, so the decoded
+// page never amplifies into public Entry structs once the budget is spent.
+func TestFetchAndAppendEntryCapBeforeAppend(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"totalPages":1,"items":[{"alID":1,"expand":{"trs":[]}}]}`)
+	}))
+	defer server.Close()
+
+	c := NewClient(server.Client(), server.URL, 0, nil)
+	all := make([]Entry, maxEntries)
+	var tot fetchTotals
+	out, done, err := c.fetchAndAppend(context.Background(), 1, all, &tot)
+	if err == nil {
+		t.Fatal("fetchAndAppend returned nil error, want entry-cap error")
+	}
+	if done {
+		t.Error("fetchAndAppend done = true, want false on cap error")
+	}
+	if len(out) != maxEntries {
+		t.Errorf("out = %d entries, want the untouched %d (nothing appended past the cap)", len(out), maxEntries)
+	}
+	want := fmt.Sprintf("entry count exceeded cap %d", maxEntries)
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want substring %q", err.Error(), want)
 	}
 }
 
@@ -49,6 +144,9 @@ func TestFetchEntriesEntryCapErrors(t *testing.T) {
 // (maxTotalBytes) with an error and a nil slice, instead of accumulating up to
 // maxPages*maxPageBytes of memory. The bulk rides an unknown JSON field so the
 // test itself stays cheap on retained memory while len(body) is what counts.
+// The budget now caps the wire read itself (fetchPage downloads at most the
+// remaining allowance), so the over-budget page is rejected before decode -
+// same observable contract, earlier enforcement.
 func TestFetchEntriesByteCapErrors(t *testing.T) {
 	// One page just under the per-page cap; the cumulative cap trips after
 	// ceil(maxTotalBytes/pageSize) pages, well before maxPages.

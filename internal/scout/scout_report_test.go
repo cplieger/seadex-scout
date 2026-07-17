@@ -43,7 +43,7 @@ func TestReportGeneratesRowsAndNeverWritesState(t *testing.T) {
 		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher: match.NewMatcher(notFoundAniList{}, logger),
-		Auditor: audit.NewAuditor(audit.Config{Logger: logger, SeaDexBaseURL: "https://releases.moe"}),
+		Auditor: audit.NewAuditor(audit.Config{SeaDexBaseURL: "https://releases.moe"}),
 	})
 
 	rep, err := s.Report(context.Background())
@@ -230,7 +230,7 @@ func TestReportStaleMapWarnsAndStillAudits(t *testing.T) {
 		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher: match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Auditor: audit.NewAuditor(audit.Config{Logger: scoutTestLogger(), SeaDexBaseURL: "https://releases.moe"}),
+		Auditor: audit.NewAuditor(audit.Config{SeaDexBaseURL: "https://releases.moe"}),
 	})
 
 	rep, err := s.Report(context.Background())

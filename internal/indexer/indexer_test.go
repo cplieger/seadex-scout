@@ -82,6 +82,52 @@ func TestParseTorznab(t *testing.T) {
 	}
 }
 
+// TestParseTorznabClampsNegativeCounts pins the numeric-domain normalization
+// of the untrusted Torznab decode (the sibling of totalSize's guard on the
+// SeaDex path): negative size/seeders/leechers values clamp to the feed's
+// zero-as-unknown representation, and a negative peers value cannot inflate
+// the derived leechers count via an unbounded negative seeders subtraction.
+func TestParseTorznabClampsNegativeCounts(t *testing.T) {
+	const feed = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <item>
+      <title>all negative</title>
+      <size>-14352012572</size>
+      <torznab:attr name="seeders" value="-42"/>
+      <torznab:attr name="leechers" value="-3"/>
+    </item>
+    <item>
+      <title>negative seeders with positive peers</title>
+      <torznab:attr name="seeders" value="-5"/>
+      <torznab:attr name="peers" value="1"/>
+    </item>
+    <item>
+      <title>negative enclosure length</title>
+      <enclosure url="http://prowlarr:9696/1/download" length="-5" type="application/x-bittorrent"/>
+      <torznab:attr name="peers" value="-9"/>
+    </item>
+  </channel>
+</rss>`
+	items, err := parseTorznab([]byte(feed))
+	if err != nil {
+		t.Fatalf("parseTorznab: %v", err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("got %d items, want 3", len(items))
+	}
+	if it := items[0]; it.Size != 0 || it.Seeders != 0 || it.Leechers != 0 {
+		t.Errorf("all-negative item = size %d seeders %d leechers %d, want 0/0/0", it.Size, it.Seeders, it.Leechers)
+	}
+	// Clamped seeders (0) with peers 1 derives leechers 1, never 1-(-5)=6.
+	if it := items[1]; it.Seeders != 0 || it.Leechers != 1 {
+		t.Errorf("negative-seeders item = seeders %d leechers %d, want 0/1", it.Seeders, it.Leechers)
+	}
+	if it := items[2]; it.Size != 0 || it.Leechers != 0 {
+		t.Errorf("negative-enclosure item = size %d leechers %d, want 0/0", it.Size, it.Leechers)
+	}
+}
+
 func TestExtractID(t *testing.T) {
 	tests := []struct {
 		url, needle, want string
@@ -196,6 +242,24 @@ func TestMarkAndDedupeRejectsConflictingIdentity(t *testing.T) {
 	}
 	if out := markAndDedupe(raw, set, upstreamNyaa); len(out) != 0 {
 		t.Fatalf("got %d items, want 0 (conflicting identity signals must drop the item)", len(out))
+	}
+
+	// Two curated keys that AGREE on best/alt but name DIFFERENT releases:
+	// healthy Prowlarr emits the same tracker id in comments and guid, so an
+	// item whose InfoURL and GUID resolve to distinct curated torrents is an
+	// invalid untrusted response and must fail closed - the same-marker
+	// coincidence must not admit it.
+	bothBest := &curation{
+		byHash: map[string]bool{},
+		byKey:  map[string]bool{"nyaa:100": true, "nyaa:200": true},
+	}
+	conflicting := []item{{
+		Title:   "two curated best ids",
+		InfoURL: "https://nyaa.si/view/100",
+		GUID:    "https://nyaa.si/view/200",
+	}}
+	if out := markAndDedupe(conflicting, bothBest, upstreamNyaa); len(out) != 0 {
+		t.Fatalf("got %d items, want 0 (distinct tracker identities must drop the item even when both are best)", len(out))
 	}
 }
 
@@ -637,6 +701,14 @@ func TestFeedTitle(t *testing.T) {
 			want: "Frieren Beyond Journey's End - S01 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR]",
 		},
 		{
+			name: "torrent directory is not part of the release title",
+			files: []seadex.File{
+				{Name: "Season 1/Taboo Tattoo S01E01 Tattoo [Bluray-1080p Remux-h264]-LazyRemux.mkv"},
+				{Name: "Season 1/Taboo Tattoo S01E02 Surprise Attack [Bluray-1080p Remux-h264]-LazyRemux.mkv"},
+			},
+			want: "Taboo Tattoo S01 Tattoo [Bluray-1080p Remux-h264]-LazyRemux",
+		},
+		{
 			name:  "single-episode torrent keeps its SxxExx (complete-but-unpacked season)",
 			files: []seadex.File{{Name: "Scum.of.the.Brave.S01E05.A.Brave.Sensei.1080p.CR.WEB-DL.AAC2.0.H.264-VARYG.mkv"}},
 			want:  "Scum.of.the.Brave.S01E05.A.Brave.Sensei.1080p.CR.WEB-DL.AAC2.0.H.264-VARYG",
@@ -919,6 +991,99 @@ func TestReloadKeepsFeedOnMalformedSnapshot(t *testing.T) {
 	}
 	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
 		t.Errorf("after malformed rewrite feed = %d items, want 1 (a bad write must not blank a live feed)", len(got))
+	}
+}
+
+// TestReloadKeepsFeedOnZeroSnapshot extends the malformed-snapshot contract to
+// syntactically valid but structurally empty JSON: `null` and `{}` decode
+// cleanly into a zero snapshot, and installing one would blank both synthesized
+// feeds and both curation maps. The writer always emits non-nil by_hash/by_key
+// maps (even for an empty catalogue), so nil curation maps identify a
+// structurally invalid snapshot the reload must reject, preserving the
+// last-good feed.
+func TestReloadKeepsFeedOnZeroSnapshot(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"null document", "null"},
+		{"empty object", "{}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "feed.json")
+			if err := NewFeedWriter("", false, path, nil).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
+				t.Fatalf("Rebuild: %v", err)
+			}
+			ix := New(&Config{}, Deps{}, path)
+			if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+				t.Fatalf("initial feed = %d items, want 1", len(got))
+			}
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatalf("zero-snapshot write: %v", err)
+			}
+			future := time.Now().Add(time.Hour)
+			if err := os.Chtimes(path, future, future); err != nil {
+				t.Fatalf("chtimes: %v", err)
+			}
+			ix.reload(context.Background())
+			if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+				t.Errorf("after %s rewrite feed = %d items, want 1 (a zero snapshot must not blank a live feed)", tc.name, len(got))
+			}
+		})
+	}
+}
+
+// TestReloadRebuildsABDownloadURLsFromCurrentPasskey pins the credential
+// policy for the persisted AB feed: FeedWriter materializes the passkey into
+// each item's DownloadURL, so after an ab_passkey rotation and restart the
+// snapshot still embeds the PREVIOUS secret. The reload must re-derive every
+// AB download URL from the item's non-secret tracker page URL (GUID) and the
+// CURRENT passkey - never serve the persisted credential verbatim - drop an
+// item whose URL cannot be re-derived, and clear the AB feed entirely when no
+// passkey is configured.
+func TestReloadRebuildsABDownloadURLsFromCurrentPasskey(t *testing.T) {
+	entries := []seadex.Entry{{
+		AniListID: 154587,
+		Torrents: []seadex.Torrent{{
+			Tracker: "AB", URL: "/torrents.php?id=86576&torrentid=1167293", InfoHash: "<redacted>",
+			IsBest: true, ReleaseGroup: "PMR",
+			Files: []seadex.File{{Length: 1, Name: "Frieren - S01E01 (BD Remux 1080p) [PMR].mkv"}},
+		}},
+	}}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	if err := NewFeedWriter("OLD_PASSKEY", true, path, nil).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+
+	// A restart after rotating the passkey: the loaded AB feed must carry only
+	// the NEW credential.
+	ix := New(&Config{APIKey: "k", ABPasskey: "NEW_PASSKEY"}, Deps{}, path)
+	got := ix.feedFor(upstreamAB)
+	if len(got) != 1 {
+		t.Fatalf("ab feed = %d items, want 1", len(got))
+	}
+	if want := "https://animebytes.tv/torrent/1167293/download/NEW_PASSKEY"; got[0].DownloadURL != want {
+		t.Errorf("ab download = %q, want %q (rebuilt from the current passkey)", got[0].DownloadURL, want)
+	}
+	if strings.Contains(got[0].DownloadURL, "OLD_PASSKEY") {
+		t.Errorf("ab download still carries the rotated passkey: %q", got[0].DownloadURL)
+	}
+
+	// With NO passkey configured the persisted credential-bearing links must
+	// not be served at all: the AB feed clears (serve answers the /ab RSS
+	// check with a Torznab <error> in that state); Nyaa is untouched.
+	none := New(&Config{APIKey: "k"}, Deps{}, path)
+	if got := none.feedFor(upstreamAB); len(got) != 0 {
+		t.Errorf("ab feed without a configured passkey = %d items, want 0", len(got))
+	}
+
+	// An AB item whose page URL yields no torrent id cannot have its URL
+	// re-derived: it is dropped rather than served with the stale credential.
+	noID := `{"by_hash":{},"by_key":{},"nyaa_feed":[],"ab_feed":[{"Title":"no id","GUID":"https://animebytes.tv/torrents.php?id=1","DownloadURL":"https://animebytes.tv/torrent/1/download/OLD_PASSKEY"}]}`
+	noIDPath := filepath.Join(t.TempDir(), "feed.json")
+	if err := os.WriteFile(noIDPath, []byte(noID), 0o600); err != nil {
+		t.Fatalf("write no-id snapshot: %v", err)
+	}
+	dropper := New(&Config{APIKey: "k", ABPasskey: "NEW_PASSKEY"}, Deps{}, noIDPath)
+	if got := dropper.feedFor(upstreamAB); len(got) != 0 {
+		t.Errorf("ab feed with an underivable item = %d items, want 0 (dropped, never served with the persisted credential)", len(got))
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -120,6 +121,34 @@ func (s *Store) quarantine() {
 	s.log.Warn("corrupt state file preserved for inspection", "path", dst)
 }
 
+// errStateTooLarge marks a Save encoding that would exceed maxStateBytes. It
+// is returned by boundedWriter's Write and detected by Save (errors.Is) to
+// produce the size-cap rejection while the previous state file stays intact.
+var errStateTooLarge = errors.New("state: encoded state exceeds size limit")
+
+// boundedWriter passes writes through to w while enforcing limit, so Save can
+// stream the JSON encoding into the pending temp file without holding a second
+// full copy of the encoded state and still refuse to persist a file Load is
+// contractually unable to read. A write that would cross the limit is rejected
+// whole — before any byte reaches w — with attempted recording the total the
+// encoder tried to produce, so the temp never holds an over-cap prefix.
+type boundedWriter struct {
+	w         io.Writer
+	limit     int64
+	written   int64
+	attempted int64
+}
+
+func (bw *boundedWriter) Write(p []byte) (int, error) {
+	if bw.written+int64(len(p)) > bw.limit {
+		bw.attempted = bw.written + int64(len(p))
+		return 0, errStateTooLarge
+	}
+	n, err := bw.w.Write(p)
+	bw.written += int64(n)
+	return n, err
+}
+
 // Save atomically writes the state file, creating the parent directory if
 // needed. It returns an error only when the data did not reach disk; a
 // non-durable (unsynced) write is logged, not failed. Save owns the
@@ -127,26 +156,41 @@ func (s *Store) quarantine() {
 // SanitizedForStorage here, at the persistence boundary, so a credentialed
 // ArrURL can never land in state.json regardless of which caller saves
 // (SafeLogURL is idempotent, so an already-sanitized snapshot is unchanged).
+// A context already cancelled on entry fails fast — before the sanitize and
+// encode work — so scout.save's detached shutdown retry runs immediately
+// instead of after a doomed full serialization of the same state.
 func (s *Store) Save(ctx context.Context, st *State) error {
 	if st == nil {
 		return errors.New("state: encode: nil state (Save never writes a non-object state file)")
 	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("state: save %s: %w", s.path, err)
+	}
 	sanitized := *st
 	sanitized.Library = st.Library.SanitizedForStorage()
-	data, err := json.Marshal(&sanitized)
+	pf, err := atomicfile.NewPendingFile(ctx, s.path,
+		atomicfile.WithMkdirMode(dirMode),
+		atomicfile.WithMode(fileMode))
 	if err != nil {
-		return fmt.Errorf("state: encode: %w", err)
+		return fmt.Errorf("state: write %s: %w", s.path, err)
 	}
 	// Enforce the reader's bound on write too: persisting a file Load is
 	// contractually unable to consume would silently discard the whole cache
-	// next cycle (fail-open). Failing before the atomic replacement starts
-	// keeps the last readable state file intact.
-	if len(data) > maxStateBytes {
-		return fmt.Errorf("state: encode: %d bytes exceeds the %d-byte load limit; keeping previous state file", len(data), maxStateBytes)
+	// next cycle (fail-open). The encoder streams into the pending temp
+	// through the bounded writer, which rejects an over-cap encoding before
+	// it lands; Cleanup discards the temp on any encode failure, so the
+	// last readable state file stays intact until Commit replaces it.
+	bw := &boundedWriter{w: pf, limit: maxStateBytes}
+	if encErr := json.NewEncoder(bw).Encode(&sanitized); encErr != nil {
+		if clErr := pf.Cleanup(); clErr != nil {
+			s.log.Warn("could not remove pending state temp file", "path", pf.Name(), "error", clErr)
+		}
+		if errors.Is(encErr, errStateTooLarge) {
+			return fmt.Errorf("state: encode: %d bytes exceeds the %d-byte load limit; keeping previous state file", bw.attempted, maxStateBytes)
+		}
+		return fmt.Errorf("state: encode: %w", encErr)
 	}
-	res, err := atomicfile.WriteFile(ctx, s.path, data,
-		atomicfile.WithMkdirMode(dirMode),
-		atomicfile.WithMode(fileMode))
+	res, err := pf.Commit(ctx)
 	if err != nil {
 		return fmt.Errorf("state: write %s: %w", s.path, err)
 	}

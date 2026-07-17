@@ -37,14 +37,30 @@ func Torrent(entry *seadex.Entry, t *seadex.Torrent) release.Release {
 	})
 }
 
-// torrentFileNames returns the non-empty file names of a SeaDex torrent, the
-// name list the classifier parses.
+// torrentFileNames returns the file names the classifier parses: the primary
+// payload — files at least half the byte length of the torrent's largest file,
+// i.e. the normal episode/movie files — so one small extra (an NCED, a
+// subtitle sidecar, a screenshot) whose name carries a marker such as BDRemux
+// cannot override the main release's classification. When no file carries a
+// positive length (fixtures or upstream records without sizes) every
+// non-empty name is kept, preserving the previous all-names behavior.
 func torrentFileNames(files []seadex.File) []string {
+	var maxLength int64
+	for i := range files {
+		if files[i].Name != "" && files[i].Length > maxLength {
+			maxLength = files[i].Length
+		}
+	}
+	minPrimary := (maxLength + 1) / 2
 	names := make([]string, 0, len(files))
 	for i := range files {
-		if files[i].Name != "" {
-			names = append(names, files[i].Name)
+		if files[i].Name == "" {
+			continue
 		}
+		if maxLength > 0 && files[i].Length < minPrimary {
+			continue
+		}
+		names = append(names, files[i].Name)
 	}
 	return names
 }

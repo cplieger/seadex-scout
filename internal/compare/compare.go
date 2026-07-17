@@ -15,7 +15,6 @@
 package compare
 
 import (
-	"log/slog"
 	"slices"
 	"strconv"
 	"strings"
@@ -95,26 +94,19 @@ type Finding struct {
 
 // Comparer produces findings from matches under a fixed filter policy.
 type Comparer struct {
-	log             *slog.Logger
 	opts            filter.Options
 	excludeSpecials bool
 }
 
 // Config configures a Comparer.
 type Config struct {
-	Logger          *slog.Logger
 	Filter          filter.Options
 	ExcludeSpecials bool
 }
 
 // NewComparer builds a Comparer from cfg.
 func NewComparer(cfg Config) *Comparer {
-	log := cfg.Logger
-	if log == nil {
-		log = slog.Default()
-	}
 	return &Comparer{
-		log:             log,
 		opts:            cfg.Filter,
 		excludeSpecials: cfg.ExcludeSpecials,
 	}

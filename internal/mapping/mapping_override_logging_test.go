@@ -143,3 +143,34 @@ func TestLoader_Load_unknownOverrideKeysLogBounded(t *testing.T) {
 		t.Errorf("keys_truncated logs = %v, want true", rec.Messages())
 	}
 }
+
+// TestLoader_Load_unknownOverrideKeyNameTruncated pins the per-key truncation
+// bound on the unknown-key diagnostic: a single unknown key longer than
+// maxLoggedKeyBytes is logged truncated with an ellipsis marker, so one
+// operator-controlled key name cannot balloon the WARN record.
+func TestLoader_Load_unknownOverrideKeyNameTruncated(t *testing.T) {
+	overrides := filepath.Join(t.TempDir(), "overrides.json")
+	key := strings.Repeat("k", maxLoggedKeyBytes+1)
+	data := fmt.Sprintf(`[{"anilist_id":2,"type":"movie",%q:1}]`, key)
+	if err := os.WriteFile(overrides, []byte(data), 0o644); err != nil {
+		t.Fatalf("write overrides: %v", err)
+	}
+	logger, rec := capture.New()
+	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
+	if _, _, err := l.Load(context.Background(), freshCache()); err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if rec.CountExact("mapping: overrides contain unknown keys, ignored") != 1 {
+		t.Fatalf("Load logs = %v, want one unknown-keys warning", rec.Messages())
+	}
+	wantKeys := "[" + key[:maxLoggedKeyBytes] + "...]"
+	if !unknownKeysAre(rec, wantKeys) {
+		t.Errorf("unknown keys logs = %v, want keys=%s", rec.Messages(), wantKeys)
+	}
+	if !attrRendered(rec, "unknown_key_count", "1") {
+		t.Errorf("unknown_key_count logs = %v, want 1", rec.Messages())
+	}
+	if !attrRendered(rec, "keys_truncated", "true") {
+		t.Errorf("keys_truncated logs = %v, want true", rec.Messages())
+	}
+}

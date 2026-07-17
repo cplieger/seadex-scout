@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -35,6 +36,14 @@ type upstream struct {
 // search queries the Torznab endpoint with the forwarded params and returns the
 // parsed items. The Prowlarr API key is sent as the X-Api-Key header (not a
 // query param), so it never appears in a logged request URL.
+//
+// The retry boundary encloses the WHOLE attempt - transport, status, bounded
+// body read, AND the Torznab decode - so a transient truncated or malformed
+// 200 response participates in the same bounded budget as a failed request
+// (the query is an idempotent GET). Exactly one layer owns multiple attempts:
+// the outer RetryWithBackoff runs upstreamMaxAttempts total, and the inner
+// httpx.Retry is pinned to a single attempt (WithMaxAttempts(1)), so there is
+// no 3x3 retry explosion.
 func (u *upstream) search(ctx context.Context, params url.Values) ([]item, error) {
 	reqURL := u.feed
 	if enc := params.Encode(); enc != "" {
@@ -45,22 +54,54 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, error
 		}
 	}
 
+	items, err := httpx.RetryWithBackoff(ctx, upstreamMaxAttempts, upstreamBaseDelay, "torznab "+u.name,
+		func(ctx context.Context) ([]item, error) {
+			return u.fetchAndParse(ctx, reqURL)
+		})
+	if err != nil {
+		return nil, err
+	}
+	return u.filterDownloadURLs(items), nil
+}
+
+// fetchAndParse performs ONE search attempt: a single bounded HTTP fetch
+// followed by the Torznab decode. Errors the enclosing RetryWithBackoff should
+// retry are marked transient: a 429/5xx status (which httpx.Retry itself would
+// have retried before the loop moved outward) and a parse failure of a 2xx
+// body (transient truncated/garbled output on an idempotent GET). Transient
+// transport errors (timeouts, resets, DNS) already classify via
+// httpx.IsTransient through the wrapped chain; anything else (a 4xx, an
+// unparseable URL) stays terminal.
+func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, error) {
 	body, err := httpx.Retry(ctx, u.http, reqURL,
-		httpx.WithMaxAttempts(upstreamMaxAttempts),
+		httpx.WithMaxAttempts(1),
 		httpx.WithBaseDelay(upstreamBaseDelay),
 		httpx.WithMaxBodyBytes(upstreamMaxBytes),
 		httpx.WithHeaders(u.setHeaders),
 		httpx.WithLogger(u.log),
 	)
 	if err != nil {
+		if errors.Is(err, httpx.ErrRateLimited) || errors.Is(err, httpx.ErrServerError) {
+			return nil, &transientUpstreamError{err: err}
+		}
 		return nil, err
 	}
 	items, err := parseTorznab(body)
 	if err != nil {
-		return nil, err
+		return nil, &transientUpstreamError{err: err}
 	}
-	return u.filterDownloadURLs(items), nil
+	return items, nil
 }
+
+// transientUpstreamError marks an upstream failure retryable for
+// httpx.RetryWithBackoff (via the httpx.Transient interface): a retryable
+// status or a malformed successful body, neither of which IsTransient
+// classifies on its own.
+type transientUpstreamError struct{ err error }
+
+func (e *transientUpstreamError) Error() string     { return e.err.Error() }
+func (e *transientUpstreamError) Unwrap() error     { return e.err }
+func (e *transientUpstreamError) IsTransient() bool { return true }
 
 // filterDownloadURLs drops items whose download URL is not an absolute http(s)
 // URL on the same origin as the configured Prowlarr Torznab endpoint. The

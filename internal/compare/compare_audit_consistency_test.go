@@ -83,6 +83,19 @@ func TestCompareAuditConsistency(t *testing.T) {
 			wantQualifier: audit.QualifierIncomplete,
 		},
 		{
+			name:    "season incomplete with listed best not aligned: daemon and audit both mark incomplete",
+			seasons: map[int][]string{1: {"erai-raws"}},
+			record:  seasonRec,
+			entry: func() seadex.Entry {
+				e := nyaaBest
+				e.Incomplete = true
+				return e
+			}(),
+			wantStatus:    StatusIncomplete,
+			wantVerdict:   audit.VerdictUnlisted,
+			wantQualifier: audit.QualifierIncomplete,
+		},
+		{
 			name:        "whole-series no real season: daemon silent, audit no_file",
 			seasons:     map[int][]string{0: {"subsplease"}},
 			record:      wholeRec,

@@ -173,6 +173,7 @@ func TestTorrentUsableURLRejectsUnsafeSchemes(t *testing.T) {
 		{name: "file", url: "file:///etc/passwd"},
 		{name: "hostless https", url: "https://"},
 		{name: "port-only authority", url: "https://:443/path"},
+		{name: "out-of-range port", url: "https://nyaa.si:65536/path"},
 		{name: "invalid escape", url: "https://example.test/%zz"},
 		{name: "whitespace in host", url: "https://bad host/path"},
 		{name: "backslash authority", url: `\\evil.example/path`},
@@ -187,5 +188,42 @@ func TestTorrentUsableURLRejectsUnsafeSchemes(t *testing.T) {
 				t.Errorf("UsableURL(%q) = %q, want empty for unsafe scheme", tc.url, got)
 			}
 		})
+	}
+}
+
+// TestFetchEntriesDecodesEveryPublishedField pins the wire contract for every
+// entry/torrent field downstream consumers read (matching, feed construction,
+// link rendering, classification, theoretical-best reporting): a mistyped JSON
+// tag or an omission in pbEntry.toEntry must fail here rather than silently
+// zeroing a field.
+func TestFetchEntriesDecodesEveryPublishedField(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"totalItems":1,"totalPages":1,"items":[{"alID":154587,"notes":"curator note","theoreticalBest":"ideal remux","updated":"2026-01-02T03:04:05Z","incomplete":true,"expand":{"trs":[{"releaseGroup":"SubsPlease","tracker":"Nyaa","infoHash":"abc123","url":"https://nyaa.si/view/1","files":[{"name":"Frieren.mkv","length":123}],"tags":["best","dual"],"isBest":true,"dualAudio":true}]}}]}`)
+	}))
+	defer server.Close()
+
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	if err != nil {
+		t.Fatalf("FetchEntries returned error: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	entry := entries[0]
+	if entry.AniListID != 154587 || entry.Notes != "curator note" || entry.TheoreticalBest != "ideal remux" || !entry.Incomplete {
+		t.Errorf("entry = %+v, want every published entry field decoded", entry)
+	}
+	if len(entry.Torrents) != 1 {
+		t.Fatalf("torrents = %d, want 1", len(entry.Torrents))
+	}
+	tor := entry.Torrents[0]
+	if tor.ReleaseGroup != "SubsPlease" || tor.Tracker != "Nyaa" || tor.InfoHash != "abc123" || tor.URL != "https://nyaa.si/view/1" || !tor.IsBest || !tor.DualAudio {
+		t.Errorf("torrent = %+v, want every published torrent field decoded", tor)
+	}
+	if len(tor.Tags) != 2 || tor.Tags[0] != "best" || tor.Tags[1] != "dual" {
+		t.Errorf("torrent tags = %v, want [best dual]", tor.Tags)
+	}
+	if len(tor.Files) != 1 || tor.Files[0].Name != "Frieren.mkv" || tor.Files[0].Length != 123 {
+		t.Errorf("torrent files = %+v, want Frieren.mkv length 123", tor.Files)
 	}
 }

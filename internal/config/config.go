@@ -347,8 +347,8 @@ var yamlParseLineRe = regexp.MustCompile(`^yaml: line (\d+): `)
 // risking a partial leak - keeping only the "yaml: line N:" locator a syntax
 // error carries (structural parser output whose digits cannot embed a value).
 func sanitizeYAMLError(err error) string {
-	var typeErr *yaml.TypeError
-	if !errors.As(err, &typeErr) {
+	typeErr, ok := errors.AsType[*yaml.TypeError](err)
+	if !ok {
 		const withheld = "configuration could not be decoded (details withheld: they may embed an expanded secret)"
 		if m := yamlParseLineRe.FindStringSubmatch(err.Error()); m != nil {
 			return "line " + m[1] + ": " + withheld

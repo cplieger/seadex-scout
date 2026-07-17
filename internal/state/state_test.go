@@ -366,3 +366,22 @@ func TestStoreSaveNilReturnsErrorWithoutWriting(t *testing.T) {
 		t.Errorf("state file after Save(nil) stat error = %v, want not exist", statErr)
 	}
 }
+
+// TestStoreSaveLoadPreservesShrunkWalks pins the restart persistence of the
+// library-shrink escalation streak through the real Store disk path: a json
+// tag drift or a persistence projection omission would silently reset the
+// streak after every restart.
+func TestStoreSaveLoadPreservesShrunkWalks(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "state.json"), testLogger())
+	const want = 7
+	if err := store.Save(context.Background(), &State{ShrunkWalks: want}); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	got, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load after Save returned error: %v", err)
+	}
+	if got.ShrunkWalks != want {
+		t.Errorf("ShrunkWalks after disk round trip = %d, want %d", got.ShrunkWalks, want)
+	}
+}

@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"math"
 	"slices"
 	"strconv"
 	"testing"
@@ -256,5 +257,31 @@ func TestBuildFeedsEmptyGUIDsDoNotMerge(t *testing.T) {
 	}
 	if merged[0].DownloadVolumeFactor != dvfBest {
 		t.Errorf("merged marker = %q, want %q (best-wins across the merged pair)", merged[0].DownloadVolumeFactor, dvfBest)
+	}
+}
+
+// TestTotalSize pins the untrusted-arithmetic domain of the pack-size sum: the
+// lengths come from the SeaDex record with no length constraint, so a negative
+// file length and an int64 overflow across two large lengths both return 0
+// (the feed's existing size-unknown representation) instead of rendering a
+// negative enclosure length to the arrs; normal sums are unaffected.
+func TestTotalSize(t *testing.T) {
+	tests := []struct {
+		name  string
+		files []seadex.File
+		want  int64
+	}{
+		{"sums normal lengths", []seadex.File{{Length: 100}, {Length: 250}}, 350},
+		{"no files is zero", nil, 0},
+		{"negative length rejected", []seadex.File{{Length: 100}, {Length: -1}}, 0},
+		{"overflow across two files rejected", []seadex.File{{Length: math.MaxInt64}, {Length: math.MaxInt64}}, 0},
+		{"exact MaxInt64 sum allowed", []seadex.File{{Length: math.MaxInt64 - 1}, {Length: 1}}, math.MaxInt64},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := totalSize(tc.files); got != tc.want {
+				t.Errorf("totalSize = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }

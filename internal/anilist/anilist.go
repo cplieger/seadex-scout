@@ -285,18 +285,39 @@ type gqlMedia struct {
 	SeasonYear int `json:"seasonYear"`
 }
 
+// Per-field wire limits. The 1 MiB body cap bounds each response, but the
+// decoded strings outlive the request in the matcher's memo and state.json, so
+// a compromised upstream could otherwise inflate state and exhaust memory one
+// near-cap title at a time. Over-limit fields are rejected, never truncated —
+// truncation could forge a false normalized-title match.
+const (
+	maxTitleBytes  = 1024
+	maxFormatBytes = 64
+)
+
 // toMedia converts the wire shape to a Media, preferring seasonYear and
-// falling back to the start-date year.
-func (m *gqlMedia) toMedia() Media {
+// falling back to the start-date year. It rejects a media whose title or
+// format field exceeds the wire limits, or that has no usable (non-blank)
+// title, so a malformed payload degrades and is retried next cycle instead of
+// being memoized as a permanent empty or bloated Media.
+func (m *gqlMedia) toMedia() (Media, error) {
+	for _, t := range []string{m.Title.Romaji, m.Title.English, m.Title.Native} {
+		if len(t) > maxTitleBytes {
+			return Media{}, fmt.Errorf("media title exceeds %d bytes", maxTitleBytes)
+		}
+	}
+	if len(m.Format) > maxFormatBytes {
+		return Media{}, fmt.Errorf("media format exceeds %d bytes", maxFormatBytes)
+	}
 	year := m.SeasonYear
 	if year == 0 {
 		year = m.StartDate.Year
 	}
-	return Media{
-		Titles: dedupeTitles(m.Title.Romaji, m.Title.English, m.Title.Native),
-		Format: m.Format,
-		Year:   year,
+	titles := dedupeTitles(m.Title.Romaji, m.Title.English, m.Title.Native)
+	if len(titles) == 0 {
+		return Media{}, errors.New("media missing usable title")
 	}
+	return Media{Titles: titles, Format: m.Format, Year: year}, nil
 }
 
 // gqlError is the GraphQL error object shared by both response envelopes.
@@ -343,13 +364,36 @@ func sanitizeUpstreamMessage(s string) string {
 	return s
 }
 
+// mediaQueryError wraps an upstream GraphQL error into the plain
+// (non-not-found) query error surfaced to callers.
+func mediaQueryError(e gqlError) error {
+	return fmt.Errorf("anilist: query error: %s", sanitizeUpstreamMessage(e.Message))
+}
+
+// classifyNullMedia maps an explicit Media null plus its error list to the
+// error parseMedia surfaces: ErrNotFound for no error or AniList's verified
+// not-found shape (a sole error with status 404 / message "Not Found."), and a
+// plain query error for anything else.
+func classifyNullMedia(errs []gqlError) error {
+	if len(errs) == 0 {
+		return ErrNotFound
+	}
+	message := sanitizeUpstreamMessage(errs[0].Message)
+	normalized := strings.TrimSuffix(strings.TrimSpace(message), ".")
+	if len(errs) == 1 && (errs[0].Status == http.StatusNotFound || strings.EqualFold(normalized, "not found")) {
+		return fmt.Errorf("%w: %s", ErrNotFound, message)
+	}
+	return fmt.Errorf("anilist: query error: %s", message)
+}
+
 // parseMedia decodes the GraphQL envelope into a Media. Only an explicit
 // Media null with no error, or AniList's verified not-found error shape
 // (a sole error with status 404 / message "Not Found."), is classified as
 // ErrNotFound — the matcher negative-memoizes ErrNotFound, so an HTTP-200
-// GraphQL failure, a mixed error envelope, or a malformed envelope must
-// surface as a plain error (degraded, retried next cycle) rather than
-// permanently suppressing the id.
+// GraphQL failure, a mixed error envelope, a partial response (non-null Media
+// alongside field-resolution errors), or a malformed envelope must surface as
+// a plain error (degraded, retried next cycle) rather than permanently
+// suppressing the id.
 func parseMedia(raw []byte) (Media, error) {
 	var r gqlResponse
 	if err := json.Unmarshal(raw, &r); err != nil {
@@ -357,27 +401,29 @@ func parseMedia(raw []byte) (Media, error) {
 	}
 	if r.Data == nil || len(r.Data.Media) == 0 {
 		if len(r.Errors) > 0 {
-			return Media{}, fmt.Errorf("anilist: query error: %s", sanitizeUpstreamMessage(r.Errors[0].Message))
+			return Media{}, mediaQueryError(r.Errors[0])
 		}
 		return Media{}, errors.New("anilist: response missing Media")
 	}
 	mediaRaw := bytes.TrimSpace(r.Data.Media)
 	if bytes.Equal(mediaRaw, []byte("null")) {
-		if len(r.Errors) == 0 {
-			return Media{}, ErrNotFound
-		}
-		message := sanitizeUpstreamMessage(r.Errors[0].Message)
-		normalized := strings.TrimSuffix(strings.TrimSpace(message), ".")
-		if len(r.Errors) == 1 && (r.Errors[0].Status == http.StatusNotFound || strings.EqualFold(normalized, "not found")) {
-			return Media{}, fmt.Errorf("%w: %s", ErrNotFound, message)
-		}
-		return Media{}, fmt.Errorf("anilist: query error: %s", message)
+		return Media{}, classifyNullMedia(r.Errors)
+	}
+	// A GraphQL partial response carries a non-null Media beside
+	// field-resolution errors; accepting it would memoize incomplete
+	// titles/year, so it fails like any other query error.
+	if len(r.Errors) > 0 {
+		return Media{}, mediaQueryError(r.Errors[0])
 	}
 	var media gqlMedia
 	if err := json.Unmarshal(mediaRaw, &media); err != nil {
 		return Media{}, fmt.Errorf("anilist: decode Media: %w", err)
 	}
-	return media.toMedia(), nil
+	parsed, err := media.toMedia()
+	if err != nil {
+		return Media{}, fmt.Errorf("anilist: invalid Media: %w", err)
+	}
+	return parsed, nil
 }
 
 // gqlPage is the nullable Page object of the batched query; pointers in the
@@ -420,17 +466,23 @@ func parseMediaPage(raw []byte) (map[int]Media, error) {
 		if md.ID <= 0 {
 			return nil, fmt.Errorf("anilist: batch response media record %d missing id", i)
 		}
-		out[md.ID] = md.toMedia()
+		parsed, err := md.toMedia()
+		if err != nil {
+			return nil, fmt.Errorf("anilist: batch response media record %d: %w", i, err)
+		}
+		out[md.ID] = parsed
 	}
 	return out, nil
 }
 
-// dedupeTitles returns the non-empty titles in order, without duplicates.
+// dedupeTitles returns the usable (non-blank) titles in order, without
+// duplicates; a whitespace-only title cannot key a normalized-title match, so
+// it is as unusable as an empty one.
 func dedupeTitles(titles ...string) []string {
 	seen := make(map[string]struct{}, len(titles))
 	var out []string
 	for _, t := range titles {
-		if t == "" {
+		if strings.TrimSpace(t) == "" {
 			continue
 		}
 		if _, ok := seen[t]; ok {

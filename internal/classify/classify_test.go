@@ -1,6 +1,7 @@
 package classify
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 
@@ -74,5 +75,31 @@ func TestTorrentFileNamesDropsEmptyNamesPreservesOrder(t *testing.T) {
 	want := []string{"episode 01.mkv", "episode 02.mkv"}
 	if !slices.Equal(got, want) {
 		t.Errorf("torrentFileNames() = %v, want %v", got, want)
+	}
+}
+
+// TestTorrentPrimaryPayloadIgnoresSmallExtraMarker pins the primary-payload
+// selection: a best BD encode whose payload is twelve similarly-sized HEVC
+// episodes plus one small BDRemux-named NCED extra must classify from the
+// episodes (KindEncode), not let the tiny extra's remux marker override the
+// whole recommendation (which would wrongly drop it under exclude_remux).
+func TestTorrentPrimaryPayloadIgnoresSmallExtraMarker(t *testing.T) {
+	files := make([]seadex.File, 0, 13)
+	for i := 1; i <= 12; i++ {
+		files = append(files, seadex.File{
+			Name:   fmt.Sprintf("Show - %02d [1080p][HEVC].mkv", i),
+			Length: 1_400_000_000 + int64(i)*1_000_000,
+		})
+	}
+	files = append(files, seadex.File{Name: "Show - NCED01 [BDRemux].mkv", Length: 90_000_000})
+	torrent := &seadex.Torrent{ReleaseGroup: "cappybara", Tracker: "Nyaa", Files: files}
+
+	got := Torrent(&seadex.Entry{}, torrent)
+
+	if got.Kind != release.KindEncode {
+		t.Errorf("Torrent() kind = %q, want encode (a small NCED extra's BDRemux marker must not override the episode payload)", got.Kind)
+	}
+	if got.Resolution != "1080p" {
+		t.Errorf("Torrent() resolution = %q, want 1080p from the primary payload", got.Resolution)
 	}
 }

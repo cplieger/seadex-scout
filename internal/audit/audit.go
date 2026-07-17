@@ -13,7 +13,6 @@
 package audit
 
 import (
-	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -73,8 +72,9 @@ const (
 	// lists nothing concrete to compare against", not "you have something
 	// better than what SeaDex lists" - the daemon's theoretical_best.
 	QualifierTheoretical Qualifier = "theoretical"
-	// QualifierIncomplete marks a row whose SeaDex entry is incomplete and
-	// lists no isBest torrents at all (nothing recommended) - the daemon's
+	// QualifierIncomplete marks a row whose SeaDex entry is incomplete: either
+	// it lists no isBest torrents at all (nothing recommended), or a listed
+	// best is not aligned with the single on-disk group - both the daemon's
 	// incomplete status.
 	QualifierIncomplete Qualifier = "incomplete"
 )
@@ -125,7 +125,6 @@ type Report struct {
 
 // Config configures an Auditor.
 type Config struct {
-	Logger          *slog.Logger
 	SeaDexBaseURL   string
 	ExcludeSpecials bool
 	AnimeBytes      bool
@@ -133,7 +132,6 @@ type Config struct {
 
 // Auditor builds alignment reports from matches.
 type Auditor struct {
-	log               *slog.Logger
 	seadexBaseURL     string
 	excludeSpecials   bool
 	includeAnimeBytes bool
@@ -141,12 +139,7 @@ type Auditor struct {
 
 // NewAuditor builds an Auditor from cfg.
 func NewAuditor(cfg Config) *Auditor {
-	log := cfg.Logger
-	if log == nil {
-		log = slog.Default()
-	}
 	return &Auditor{
-		log:               log,
 		seadexBaseURL:     cfg.SeaDexBaseURL,
 		excludeSpecials:   cfg.ExcludeSpecials,
 		includeAnimeBytes: cfg.AnimeBytes,
@@ -317,8 +310,10 @@ func (a *Auditor) assess(m *match.Match) Row {
 // with the daemon's emptyResult) - the row's verdict would otherwise imply an
 // unlisted-better state that does not exist. With best releases listed, a
 // not-aligned row (have_alt / have_unlisted) whose scoped groups span more
-// than one group is "mixed", where the daemon emits mixed_group_manual. An
-// aligned row is never mixed, matching the daemon's alignment-wins ordering.
+// than one group is "mixed", where the daemon emits mixed_group_manual; a
+// not-aligned single-group row of an incomplete entry is "incomplete",
+// mirroring the daemon's betterResult downgrade. An aligned row is never
+// qualified, matching the daemon's alignment-wins ordering.
 func rowQualifier(entry *seadex.Entry, best []string, v Verdict, current []string) Qualifier {
 	if len(best) == 0 {
 		switch classify.Fallback(entry) {
@@ -329,8 +324,13 @@ func rowQualifier(entry *seadex.Entry, best []string, v Verdict, current []strin
 		}
 		return ""
 	}
-	if (v == VerdictAlt || v == VerdictUnlisted) && len(current) > 1 {
-		return QualifierMixed
+	if v == VerdictAlt || v == VerdictUnlisted {
+		if len(current) > 1 {
+			return QualifierMixed
+		}
+		if entry.Incomplete {
+			return QualifierIncomplete
+		}
 	}
 	return ""
 }

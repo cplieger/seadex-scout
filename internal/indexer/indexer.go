@@ -62,6 +62,7 @@ import (
 	"time"
 
 	"github.com/cplieger/atomicfile/v2"
+	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/webhttp"
 )
 
@@ -161,10 +162,15 @@ func (c *curation) lookup(scope, hash, infoURL, guid string) (isBest, matched bo
 
 // acceptScopedKeys applies lookup's tracker-key arm: every tracker key parsed
 // from the given page URLs must belong to scope (a key for a different
-// tracker rejects the item outright) and must pass accept (curated, agreeing
-// on best/alt). It reports whether any scoped key was seen (scopedKey - the
+// tracker rejects the item outright), must agree with every other parsed key
+// on the SAME release identity (healthy Prowlarr emits the same tracker id in
+// comments and guid, so two URLs naming different curated torrents are an
+// invalid untrusted response and fail closed - even when both ids happen to
+// share a best/alt value), and must pass accept (curated, agreeing on
+// best/alt). It reports whether any scoped key was seen (scopedKey - the
 // signal lookup's AB rule needs) and whether the item survives (ok).
 func (c *curation) acceptScopedKeys(scope string, urls []string, accept func(candidate, ok bool) bool) (scopedKey, ok bool) {
+	var identity string
 	for _, raw := range urls {
 		k := trackerKeyFromURL(raw)
 		if k == "" {
@@ -174,6 +180,10 @@ func (c *curation) acceptScopedKeys(scope string, urls []string, accept func(can
 		if !found || keyScope != scope {
 			return scopedKey, false
 		}
+		if identity != "" && k != identity {
+			return scopedKey, false
+		}
+		identity = k
 		scopedKey = true
 		b, curated := c.byKey[k]
 		if !accept(b, curated) {
@@ -190,10 +200,6 @@ func (c *curation) acceptScopedKeys(scope string, urls []string, accept func(can
 // (a cycle - in this process or the `poll` subcommand - rewrote it), reading it
 // under mu. The server never fetches SeaDex or Fribb itself.
 type Indexer struct {
-	cfg     Config
-	snap    snapshot
-	log     *slog.Logger
-	path    string
 	snapMod time.Time
 	// snapInfo is the os.FileInfo of the successfully loaded snapshot file,
 	// installed together with snap/snapMod (guarded by mu). The last-good skip
@@ -212,12 +218,23 @@ type Indexer struct {
 	// that replacement must be retried, not skipped. Guarded by reloadMu
 	// (set/cleared only inside reload).
 	failedFile os.FileInfo
+	log        *slog.Logger
+	cfg        Config
+	path       string
+	snap       snapshot
 	upstreams  []*upstream // wired once in New; immutable afterwards (not guarded by mu)
 	// reloadMu coalesces concurrent snapshot refreshes: only one request runs
 	// reload's stat/read/unmarshal at a time; the rest serve the current
 	// immutable snapshot (see reload). mu still guards the published snapshot.
-	reloadMu sync.Mutex
 	mu       sync.RWMutex
+	reloadMu sync.Mutex
+	// snapMissing records that the snapshot file disappeared AFTER one was
+	// loaded (deleted file, incomplete restore, lost volume), so the
+	// stale-feed WARN fires once per disappearance instead of on every
+	// request; cleared (with one INFO recovery line) on the first successful
+	// stat afterward. A fresh install with no prior snapshot stays silent.
+	// Guarded by reloadMu (set/cleared only inside reload).
+	snapMissing bool
 }
 
 // New builds the Torznab feed server from cfg and deps, wiring one upstream per
@@ -337,6 +354,41 @@ func noCacheHeaders(h http.Header) {
 	h.Set("Pragma", "no-cache")
 }
 
+// statSnapshot stats the snapshot file and applies reload's missing/unreadable
+// policy, returning the file info and whether reload should proceed. A missing
+// file after one was loaded warns once (the feed is now stale); any other stat
+// error (EACCES, EIO) warns and freezes the current feed. On the recovery path
+// it clears snapMissing and logs one INFO line.
+func (ix *Indexer) statSnapshot() (os.FileInfo, bool) {
+	info, err := os.Stat(ix.path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// A missing file is the normal fresh-install case, but after a
+			// snapshot was loaded it means the materialized view can no
+			// longer refresh: every request keeps serving the last in-memory
+			// feed, so warn once that the feed is stale, then stay quiet
+			// until the file reappears.
+			ix.mu.RLock()
+			loaded := ix.snapInfo != nil
+			ix.mu.RUnlock()
+			if loaded && !ix.snapMissing {
+				ix.snapMissing = true
+				ix.log.Warn("indexer feed snapshot missing; serving last loaded feed until it reappears", "path", ix.path)
+			}
+			return nil, false
+		}
+		// Anything else (EACCES, EIO) silently freezes the served feed, so
+		// make it visible.
+		ix.log.Warn("indexer feed snapshot stat failed; keeping current feed", "path", ix.path, "error", err)
+		return nil, false
+	}
+	if ix.snapMissing {
+		ix.snapMissing = false
+		ix.log.Info("indexer feed snapshot reappeared; resuming reloads", "path", ix.path)
+	}
+	return info, true
+}
+
 // reload refreshes the served feed from the persisted snapshot when the file
 // on disk differs from the loaded copy by mtime or file identity (or nothing
 // is loaded yet). A compare cycle - in this process (the daemon loop) or
@@ -365,13 +417,8 @@ func (ix *Indexer) reload(ctx context.Context) {
 		return
 	}
 	defer ix.reloadMu.Unlock()
-	info, err := os.Stat(ix.path)
-	if err != nil {
-		// A missing file is the normal fresh-install case; anything else
-		// (EACCES, EIO) silently freezes the served feed, so make it visible.
-		if !errors.Is(err, fs.ErrNotExist) {
-			ix.log.Warn("indexer feed snapshot stat failed; keeping current feed", "path", ix.path, "error", err)
-		}
+	info, ok := ix.statSnapshot()
+	if !ok {
 		return
 	}
 	if ix.shouldSkipSnapshot(info) {
@@ -458,7 +505,60 @@ func (ix *Indexer) readSnapshot(ctx context.Context) (snapshot, bool, bool) {
 		ix.log.Warn("indexer feed snapshot malformed; keeping current feed", "path", ix.path, "error", err)
 		return snapshot{}, false, true
 	}
+	// Syntactically valid JSON is not yet a usable snapshot: `null` or `{}`
+	// decodes cleanly into a zero value, and installing it would blank both
+	// synthesized feeds and both curation maps. The writer always emits
+	// non-nil by_hash/by_key maps - even for an honestly empty catalogue - so
+	// nil curation maps identify a structurally invalid snapshot without
+	// rejecting a valid empty feed.
+	if snap.ByHash == nil || snap.ByKey == nil {
+		ix.log.Warn("indexer feed snapshot malformed; keeping current feed",
+			"path", ix.path, "reason", "missing required curation maps")
+		return snapshot{}, false, true
+	}
+	snap.ABFeed = ix.rebuildABDownloadURLs(snap.ABFeed)
 	return snap, true, false
+}
+
+// rebuildABDownloadURLs re-derives each persisted AnimeBytes feed item's
+// download URL from its non-secret tracker page URL (the GUID) and the
+// CURRENTLY configured passkey, instead of serving the credential the snapshot
+// persisted. FeedWriter materializes ix.cfg.ABPasskey into item.DownloadURL
+// before persistence, so after the operator rotates indexer.ab_passkey and
+// restarts, feed.json still embeds the PREVIOUS passkey - serving it verbatim
+// would expose the rotated credential (and an unusable link) until the next
+// successful cycle rewrites the snapshot, indefinitely while rebuilds fail.
+// An empty configured passkey clears the AB feed (serve already answers the
+// /ab RSS check with a Torznab <error> then); an item whose current URL cannot
+// be derived (no parseable AB id in its GUID) is dropped rather than served
+// with a stale credential.
+func (ix *Indexer) rebuildABDownloadURLs(feed []item) []item {
+	if len(feed) == 0 {
+		return feed
+	}
+	if ix.cfg.ABPasskey == "" {
+		return nil
+	}
+	out := make([]item, 0, len(feed))
+	dropped := 0
+	for i := range feed {
+		it := feed[i]
+		dl, ok := downloadURL(release.TrackerNameAnimeBytes, it.GUID, ix.cfg.ABPasskey)
+		if !ok {
+			dropped++
+			continue
+		}
+		it.DownloadURL = dl
+		out = append(out, it)
+	}
+	if dropped > 0 {
+		// The GUID (a tracker page URL) is not a secret and names the
+		// undecodable items; the download URL (which embeds the passkey) is
+		// never logged.
+		ix.log.Warn("indexer feed snapshot: AnimeBytes items dropped; no download URL derivable from tracker page URL",
+			"path", ix.path, "dropped", dropped, "kept", len(out))
+	}
+	return out
 }
 
 // handler builds the HTTP mux (a single Torznab endpoint).

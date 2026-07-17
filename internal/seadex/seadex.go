@@ -8,9 +8,12 @@
 package seadex
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -47,6 +50,40 @@ const (
 	maxAttempts = 3
 	baseDelay   = time.Second
 )
+
+// Cardinality caps on one decoded page, enforced by decodePage DURING the
+// token-level decode. json.Unmarshal materializes the whole decoded value
+// before any caller-side count check can run, so compact serialized elements
+// (a page of minimal `{}` objects) could otherwise amplify a bounded body into
+// decoded structs and slice backing arrays far beyond maxPageBytes. The values
+// are generous headroom over the honest catalogue (a handful of torrents per
+// entry, packs of ~1200 files, a few short tags), not tuning knobs; a page
+// crossing one is upstream misbehavior and aborts the fetch.
+const (
+	// maxTorrentsPerEntry bounds one entry's expanded trs relation (honest
+	// data: tens at most, one torrent per episode on unpacked seasons).
+	maxTorrentsPerEntry = 512
+	// maxFilesPerTorrent bounds one torrent's file list (honest data: a
+	// full-series pack tops out around ~1200 files).
+	maxFilesPerTorrent = 8192
+	// maxTagsPerTorrent bounds one torrent's tag list (honest data: a few
+	// short labels like "best" / "dual").
+	maxTagsPerTorrent = 64
+	// maxPageElements bounds the TOTAL decoded array elements (items +
+	// torrents + files + tags) of one page. The per-parent caps alone compose
+	// multiplicatively (perPage x maxTorrentsPerEntry x maxFilesPerTorrent),
+	// so a body of minimal elements could still decode into hundreds of MB;
+	// this cap bounds the aggregate allocation (honest pages run ~tens of
+	// thousands of elements).
+	maxPageElements = 1_000_000
+)
+
+// errCumulativeBytes reports the cumulative-byte budget (maxTotalBytes) being
+// exceeded. It is raised at the wire layer - fetchPage caps each download at
+// the REMAINING budget, so an over-budget page is rejected before decode -
+// which preserves the pre-budget error contract for the same condition.
+var errCumulativeBytes = fmt.Errorf("seadex: cumulative page bytes exceeded cap %d (upstream misbehaving); "+
+	"refusing to compare against a truncated view", maxTotalBytes)
 
 // File is one file inside a SeaDex torrent (its name and byte length).
 type File struct {
@@ -232,17 +269,27 @@ func (c *Client) finishFetch(all []Entry, reportedTotal, unparsedTimes, unusable
 // fetchAndAppend fetches one page, appends its entries, updates the running
 // totals (cumulative bytes, the API's reported item total, and the
 // unparseable-updated and unusable-URL counters), enforces the cumulative-byte
-// and entry-count caps, and reports whether pagination is complete.
+// and entry-count caps, and reports whether pagination is complete. Both caps
+// run BEFORE allocation scales with the hostile input: the cumulative-byte
+// budget caps the wire read itself (fetchPage downloads at most the remaining
+// budget, so tot.bytes can never exceed maxTotalBytes), and the entry-count
+// cap rejects the page before any of its items are converted or appended.
 func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, tot *fetchTotals) (out []Entry, done bool, err error) {
-	list, n, err := c.fetchPage(ctx, page)
+	remaining := int64(maxTotalBytes - tot.bytes)
+	if remaining <= 0 {
+		return all, false, errCumulativeBytes
+	}
+	list, n, err := c.fetchPage(ctx, page, min(int64(maxPageBytes), remaining))
 	if err != nil {
+		if errors.Is(err, errCumulativeBytes) {
+			return all, false, err
+		}
 		return all, false, fmt.Errorf("seadex: fetch page %d: %w", page, err)
 	}
 	tot.bytes += n
 	tot.reportedTotal = list.TotalItems
-	if tot.bytes > maxTotalBytes {
-		return all, false, fmt.Errorf("seadex: cumulative page bytes exceeded cap %d (upstream misbehaving); "+
-			"refusing to compare against a truncated view", maxTotalBytes)
+	if len(list.Items) > maxEntries-len(all) {
+		return all, false, fmt.Errorf("seadex: entry count exceeded cap %d (upstream misbehaving)", maxEntries)
 	}
 	for i := range list.Items {
 		e := list.Items[i].toEntry()
@@ -255,9 +302,6 @@ func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, tot 
 			}
 		}
 		all = append(all, e)
-	}
-	if len(all) > maxEntries {
-		return all, false, fmt.Errorf("seadex: entry count exceeded cap %d (upstream misbehaving)", maxEntries)
 	}
 	done, err = pageComplete(page, len(list.Items), list.TotalPages)
 	return all, done, err
@@ -291,7 +335,14 @@ func pageComplete(page, itemCount, totalPages int) (done bool, err error) {
 
 // fetchPage fetches and decodes a single page of entries, also returning the
 // raw body size so the caller can bound cumulative bytes across pages.
-func (c *Client) fetchPage(ctx context.Context, page int) (pbList, int, error) {
+// wireLimit is the download cap for THIS page: the per-page bound
+// (maxPageBytes) already reduced by the caller to the remaining cumulative
+// budget, so an over-budget page is rejected at the wire layer, before any
+// bytes beyond the budget are held or decoded. A too-large response that
+// tripped a budget-reduced limit (below maxPageBytes) is reported as the
+// cumulative-cap error; one that tripped the full per-page bound is a
+// per-page violation and surfaces as the fetch error itself.
+func (c *Client) fetchPage(ctx context.Context, page int, wireLimit int64) (pbList, int, error) {
 	q := url.Values{
 		"expand":  {"trs"},
 		"page":    {strconv.Itoa(page)},
@@ -307,19 +358,348 @@ func (c *Client) fetchPage(ctx context.Context, page int) (pbList, int, error) {
 	body, err := httpx.Retry(ctx, c.http, reqURL,
 		httpx.WithMaxAttempts(maxAttempts),
 		httpx.WithBaseDelay(baseDelay),
-		httpx.WithMaxBodyBytes(maxPageBytes),
+		httpx.WithMaxBodyBytes(wireLimit),
 		httpx.WithHeaders(setHeaders),
 		httpx.WithLogger(c.log),
 	)
 	if err != nil {
+		var tooLarge *httpx.ResponseTooLargeError
+		if errors.As(err, &tooLarge) && tooLarge.Limit < maxPageBytes {
+			return pbList{}, 0, errCumulativeBytes
+		}
 		return pbList{}, 0, err
 	}
 
-	var list pbList
-	if err := json.Unmarshal(body, &list); err != nil {
+	list, err := decodePage(body)
+	if err != nil {
 		return pbList{}, 0, fmt.Errorf("decode page: %w", err)
 	}
 	return list, len(body), nil
+}
+
+// pageDecoder is a schema-aware bounded decoder for one pbList page. Unlike
+// json.Unmarshal - which materializes the entire decoded value before any
+// caller-side count check can run, letting compact serialized elements amplify
+// a wire-capped body into decoded structs and slice backing arrays far beyond
+// maxPageBytes - it walks the token stream and enforces every cardinality cap
+// (perPage items, maxTorrentsPerEntry, maxFilesPerTorrent, maxTagsPerTorrent,
+// and the aggregate maxPageElements) BEFORE appending each element, so
+// allocation never scales with hostile array cardinality. Scalar values decode
+// via json.Decoder.Decode for stdlib-identical type handling; unknown fields
+// are token-skipped without materializing; a JSON null anywhere a container is
+// expected yields the zero value, matching json.Unmarshal.
+type pageDecoder struct {
+	dec      *json.Decoder
+	elements int
+}
+
+// decodePage decodes one page body under the pageDecoder bounds, rejecting
+// trailing data after the top-level value (matching json.Unmarshal
+// strictness).
+func decodePage(body []byte) (pbList, error) {
+	d := &pageDecoder{dec: json.NewDecoder(bytes.NewReader(body))}
+	list, err := d.decodeList()
+	if err != nil {
+		return pbList{}, err
+	}
+	if _, err := d.dec.Token(); !errors.Is(err, io.EOF) {
+		return pbList{}, errors.New("trailing data after page object")
+	}
+	return list, nil
+}
+
+// count charges one decoded array element against the page's aggregate
+// element budget.
+func (d *pageDecoder) count() error {
+	d.elements++
+	if d.elements > maxPageElements {
+		return fmt.Errorf("page elements exceeded cap %d (upstream misbehaving)", maxPageElements)
+	}
+	return nil
+}
+
+// open consumes the opening delimiter of a container. It reports ok=false
+// (without error) for a JSON null, matching json.Unmarshal's null-into-value
+// no-op, and errors on any other token.
+func (d *pageDecoder) open(delim json.Delim) (ok bool, err error) {
+	t, err := d.dec.Token()
+	if err != nil {
+		return false, err
+	}
+	if t == nil {
+		return false, nil
+	}
+	if got, isDelim := t.(json.Delim); !isDelim || got != delim {
+		return false, fmt.Errorf("expected %q, got %v", delim, t)
+	}
+	return true, nil
+}
+
+// close consumes a container's closing delimiter (the token json.Decoder
+// guarantees once More reports false).
+func (d *pageDecoder) close() error {
+	_, err := d.dec.Token()
+	return err
+}
+
+// key reads the next object key.
+func (d *pageDecoder) key() (string, error) {
+	t, err := d.dec.Token()
+	if err != nil {
+		return "", err
+	}
+	s, isString := t.(string)
+	if !isString {
+		return "", fmt.Errorf("expected object key, got %v", t)
+	}
+	return s, nil
+}
+
+// skip consumes and discards one whole value (scalar or container) without
+// materializing it.
+func (d *pageDecoder) skip() error {
+	depth := 0
+	for {
+		t, err := d.dec.Token()
+		if err != nil {
+			return err
+		}
+		if delim, isDelim := t.(json.Delim); isDelim {
+			switch delim {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+			}
+		}
+		if depth == 0 {
+			return nil
+		}
+	}
+}
+
+// decodeList decodes the pbList envelope.
+func (d *pageDecoder) decodeList() (pbList, error) {
+	var list pbList
+	ok, err := d.open('{')
+	if err != nil || !ok {
+		return list, err
+	}
+	for d.dec.More() {
+		k, err := d.key()
+		if err != nil {
+			return list, err
+		}
+		switch k {
+		case "items":
+			list.Items, err = d.decodeItems()
+		case "totalItems":
+			err = d.dec.Decode(&list.TotalItems)
+		case "totalPages":
+			err = d.dec.Decode(&list.TotalPages)
+		default:
+			err = d.skip()
+		}
+		if err != nil {
+			return list, err
+		}
+	}
+	return list, d.close()
+}
+
+// decodeItems decodes the items array, capped at perPage: the request asks
+// for perPage records, so a page stuffing more is upstream misbehavior and is
+// rejected before the excess is decoded.
+func (d *pageDecoder) decodeItems() ([]pbEntry, error) {
+	ok, err := d.open('[')
+	if err != nil || !ok {
+		return nil, err
+	}
+	var items []pbEntry
+	for d.dec.More() {
+		if len(items) >= perPage {
+			return nil, fmt.Errorf("page items exceeded cap %d (upstream misbehaving)", perPage)
+		}
+		if err := d.count(); err != nil {
+			return nil, err
+		}
+		e, err := d.decodeEntry()
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, e)
+	}
+	return items, d.close()
+}
+
+// decodeEntry decodes one entries record.
+func (d *pageDecoder) decodeEntry() (pbEntry, error) {
+	var e pbEntry
+	ok, err := d.open('{')
+	if err != nil || !ok {
+		return e, err
+	}
+	for d.dec.More() {
+		k, err := d.key()
+		if err != nil {
+			return e, err
+		}
+		switch k {
+		case "notes":
+			err = d.dec.Decode(&e.Notes)
+		case "theoreticalBest":
+			err = d.dec.Decode(&e.TheoreticalBest)
+		case "updated":
+			err = d.dec.Decode(&e.Updated)
+		case "alID":
+			err = d.dec.Decode(&e.AlID)
+		case "incomplete":
+			err = d.dec.Decode(&e.Incomplete)
+		case "expand":
+			e.Expand, err = d.decodeExpand()
+		default:
+			err = d.skip()
+		}
+		if err != nil {
+			return e, err
+		}
+	}
+	return e, d.close()
+}
+
+// decodeExpand decodes the expand relation envelope.
+func (d *pageDecoder) decodeExpand() (pbExpand, error) {
+	var ex pbExpand
+	ok, err := d.open('{')
+	if err != nil || !ok {
+		return ex, err
+	}
+	for d.dec.More() {
+		k, err := d.key()
+		if err != nil {
+			return ex, err
+		}
+		if k == "trs" {
+			ex.Trs, err = d.decodeTorrents()
+		} else {
+			err = d.skip()
+		}
+		if err != nil {
+			return ex, err
+		}
+	}
+	return ex, d.close()
+}
+
+// decodeTorrents decodes one entry's expanded trs relation, capped at
+// maxTorrentsPerEntry.
+func (d *pageDecoder) decodeTorrents() ([]Torrent, error) {
+	ok, err := d.open('[')
+	if err != nil || !ok {
+		return nil, err
+	}
+	var trs []Torrent
+	for d.dec.More() {
+		if len(trs) >= maxTorrentsPerEntry {
+			return nil, fmt.Errorf("torrents per entry exceeded cap %d (upstream misbehaving)", maxTorrentsPerEntry)
+		}
+		if err := d.count(); err != nil {
+			return nil, err
+		}
+		t, err := d.decodeTorrent()
+		if err != nil {
+			return nil, err
+		}
+		trs = append(trs, t)
+	}
+	return trs, d.close()
+}
+
+// decodeTorrent decodes one torrent record.
+func (d *pageDecoder) decodeTorrent() (Torrent, error) {
+	var t Torrent
+	ok, err := d.open('{')
+	if err != nil || !ok {
+		return t, err
+	}
+	for d.dec.More() {
+		k, err := d.key()
+		if err != nil {
+			return t, err
+		}
+		switch k {
+		case "releaseGroup":
+			err = d.dec.Decode(&t.ReleaseGroup)
+		case "tracker":
+			err = d.dec.Decode(&t.Tracker)
+		case "infoHash":
+			err = d.dec.Decode(&t.InfoHash)
+		case "url":
+			err = d.dec.Decode(&t.URL)
+		case "isBest":
+			err = d.dec.Decode(&t.IsBest)
+		case "dualAudio":
+			err = d.dec.Decode(&t.DualAudio)
+		case "files":
+			t.Files, err = d.decodeFiles()
+		case "tags":
+			t.Tags, err = d.decodeTags()
+		default:
+			err = d.skip()
+		}
+		if err != nil {
+			return t, err
+		}
+	}
+	return t, d.close()
+}
+
+// decodeFiles decodes one torrent's file list, capped at maxFilesPerTorrent.
+// A File is flat (two scalar fields), so per-element json.Decoder.Decode
+// cannot amplify beyond the already-capped raw bytes.
+func (d *pageDecoder) decodeFiles() ([]File, error) {
+	ok, err := d.open('[')
+	if err != nil || !ok {
+		return nil, err
+	}
+	var files []File
+	for d.dec.More() {
+		if len(files) >= maxFilesPerTorrent {
+			return nil, fmt.Errorf("files per torrent exceeded cap %d (upstream misbehaving)", maxFilesPerTorrent)
+		}
+		if err := d.count(); err != nil {
+			return nil, err
+		}
+		var f File
+		if err := d.dec.Decode(&f); err != nil {
+			return nil, err
+		}
+		files = append(files, f)
+	}
+	return files, d.close()
+}
+
+// decodeTags decodes one torrent's tag list, capped at maxTagsPerTorrent.
+func (d *pageDecoder) decodeTags() ([]string, error) {
+	ok, err := d.open('[')
+	if err != nil || !ok {
+		return nil, err
+	}
+	var tags []string
+	for d.dec.More() {
+		if len(tags) >= maxTagsPerTorrent {
+			return nil, fmt.Errorf("tags per torrent exceeded cap %d (upstream misbehaving)", maxTagsPerTorrent)
+		}
+		if err := d.count(); err != nil {
+			return nil, err
+		}
+		var s string
+		if err := d.dec.Decode(&s); err != nil {
+			return nil, err
+		}
+		tags = append(tags, s)
+	}
+	return tags, d.close()
 }
 
 // setHeaders sets the descriptive User-Agent and JSON Accept header on each

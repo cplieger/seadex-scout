@@ -41,6 +41,7 @@ func TestClassifyDualAudioMarker(t *testing.T) {
 		{name: "dual audio tag", in: Input{Names: []string{"Show [Dual Audio]"}}, want: true},
 		{name: "hyphenated dual-audio", in: Input{Names: []string{"Show [Dual-Audio] 1080p"}}, want: true},
 		{name: "joined dualaudio", in: Input{Notes: "dualaudio release"}, want: true},
+		{name: "underscore-delimited Dual_Audio", in: Input{Names: []string{"Show_1080p_Dual_Audio"}}, want: true},
 		{name: "bare dual token is not dual audio", in: Input{Notes: "dual"}, want: false},
 		{name: "title containing bare Dual", in: Input{Names: []string{"Dual! Parallel Trouble Adventure 1080p"}}, want: false},
 		{name: "individual is not dual audio", in: Input{Names: []string{"Individual Circumstances 1080p"}}, want: false},
@@ -103,6 +104,10 @@ func TestClassifyKind(t *testing.T) {
 		{name: "encode from codec token", in: Input{Names: []string{"Show 1080p x265"}}, wantKind: KindEncode, wantReason: "encoder marker: x265"},
 		{name: "encode from crf", in: Input{Names: []string{"Show CRF18"}}, wantKind: KindEncode, wantReason: "encoder marker: crf"},
 		{name: "encode from bitrate", in: Input{Names: []string{"Show 4500 kbps"}}, wantKind: KindEncode, wantReason: "encoder marker: bitrate"},
+		{name: "underscore-delimited bdremux", in: Input{Names: []string{"Show_1080p_BDRemux"}}, wantKind: KindRemux, wantReason: "name/notes marker: remux"},
+		{name: "underscore-delimited premux", in: Input{Names: []string{"Show_S01_PREMUX"}}, wantKind: KindRemux, wantReason: "name/notes marker: remux"},
+		{name: "underscore-delimited crf", in: Input{Names: []string{"Show_CRF18"}}, wantKind: KindEncode, wantReason: "encoder marker: crf"},
+		{name: "underscore-delimited bitrate", in: Input{Names: []string{"Show_4500_kbps"}}, wantKind: KindEncode, wantReason: "encoder marker: bitrate"},
 		{name: "unknown when no marker", in: Input{Names: []string{"Show 1080p"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
 	}
 	for _, tc := range tests {
@@ -346,6 +351,11 @@ func TestClassifyResolution(t *testing.T) {
 		{name: "name wins over notes", in: Input{Names: []string{"Show 1080p"}, Notes: "the 720p is better"}, want: "1080p"},
 		{name: "no resolution marker", in: Input{Names: []string{"Show HEVC"}}, want: ""},
 		{name: "resolution inside a longer token is not a marker", in: Input{Names: []string{"Show x1080py"}}, want: ""},
+		{name: "underscore-delimited resolution", in: Input{Names: []string{"Show_1080p_x265"}}, want: "1080p"},
+		{name: "bracketed BD_1080p tag", in: Input{Names: []string{"Show [BD_1080p]"}}, want: "1080p"},
+		{name: "compact BD1080p spelling", in: Input{Names: []string{"Show [BD1080p]"}}, want: "1080p"},
+		{name: "dimension form 1920x1080p", in: Input{Names: []string{"Show 1920x1080p"}}, want: "1080p"},
+		{name: "preceding digit is not a resolution boundary", in: Input{Names: []string{"Show 21080p"}}, want: ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -353,5 +363,26 @@ func TestClassifyResolution(t *testing.T) {
 				t.Errorf("Resolution = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestClassifyUnderscoreDelimitedName pins the underscore-normalization fix
+// across the full fingerprint at once: a raw scene name delimited entirely by
+// underscores (the shape Go regexp word boundaries cannot tokenize) must
+// yield the same Release an equivalent space-delimited name does — resolution,
+// kind, reason, and dual-audio together, not merely no-panic behavior.
+func TestClassifyUnderscoreDelimitedName(t *testing.T) {
+	got := Classify(&Input{Names: []string{"Show_1080p_BDRemux_Dual_Audio"}})
+	if got.Resolution != "1080p" {
+		t.Errorf("Resolution = %q, want 1080p", got.Resolution)
+	}
+	if got.Kind != KindRemux {
+		t.Errorf("Kind = %q, want %q", got.Kind, KindRemux)
+	}
+	if got.Reason != "name/notes marker: remux" {
+		t.Errorf("Reason = %q, want name/notes marker: remux", got.Reason)
+	}
+	if !got.DualAudio {
+		t.Error("DualAudio = false, want true for the Dual_Audio marker")
 	}
 }

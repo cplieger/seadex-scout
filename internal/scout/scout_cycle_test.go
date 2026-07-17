@@ -192,7 +192,7 @@ func TestCycleColdStartBaselinesSilently(t *testing.T) {
 		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
-		Comparer:     compare.NewComparer(compare.Config{Logger: logger}),
+		Comparer:     compare.NewComparer(compare.Config{}),
 		Reporter:     reporter,
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
 	})
@@ -247,7 +247,7 @@ func TestCycleEmptySeaDexEntriesPreservesFindings(t *testing.T) {
 		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
 		SeaDex:       &fakeSeaDex{},
 		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
-		Comparer:     compare.NewComparer(compare.Config{Logger: logger}),
+		Comparer:     compare.NewComparer(compare.Config{}),
 		Reporter:     reporter,
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
 	})
@@ -348,7 +348,7 @@ func TestCyclePartialWalkComparesCleanAndPreservesFailedItemsFindings(t *testing
 		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
 		SeaDex:       &fakeSeaDex{entries: entries},
 		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Comparer:     compare.NewComparer(compare.Config{Logger: scoutTestLogger()}),
+		Comparer:     compare.NewComparer(compare.Config{}),
 		Reporter:     report.NewReporter(logger),
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 	})
@@ -435,7 +435,7 @@ func TestCyclePartialColdStartDefersBaselineUntilCompleteWalk(t *testing.T) {
 		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
 		SeaDex:       &fakeSeaDex{entries: entries},
 		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Comparer:     compare.NewComparer(compare.Config{Logger: scoutTestLogger()}),
+		Comparer:     compare.NewComparer(compare.Config{}),
 		Reporter:     report.NewReporter(logger),
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 	})
@@ -574,7 +574,7 @@ func TestCycleRecoveredWalkResetsShrunkStreak(t *testing.T) {
 		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
-		Comparer:     compare.NewComparer(compare.Config{Logger: logger}),
+		Comparer:     compare.NewComparer(compare.Config{}),
 		Reporter:     report.NewReporter(logger),
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
 	})
@@ -615,7 +615,7 @@ func TestCycleSteadyStateReportsAndSaves(t *testing.T) {
 		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Comparer:     compare.NewComparer(compare.Config{Logger: scoutTestLogger()}),
+		Comparer:     compare.NewComparer(compare.Config{}),
 		Reporter:     report.NewReporter(logger),
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 	})
@@ -849,7 +849,7 @@ func TestCycleStaleMapStillComparesAndRebuildsFeed(t *testing.T) {
 		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Comparer:     compare.NewComparer(compare.Config{Logger: scoutTestLogger()}),
+		Comparer:     compare.NewComparer(compare.Config{}),
 		Reporter:     report.NewReporter(logger),
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 		Feed:         feed,
@@ -1166,7 +1166,7 @@ func TestCycleUpgradeWithPriorFindingsTakesReportPath(t *testing.T) {
 		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Comparer:     compare.NewComparer(compare.Config{Logger: scoutTestLogger()}),
+		Comparer:     compare.NewComparer(compare.Config{}),
 		Reporter:     report.NewReporter(logger),
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 	})

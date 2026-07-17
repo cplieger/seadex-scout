@@ -8,8 +8,8 @@ import "testing"
 func TestRenderFeed_usesStableGUIDFallback(t *testing.T) {
 	const hash = "143ed15e5e3df072ae91adaeb149973a887590dd"
 	tests := map[string]struct {
-		item item
 		want string
+		item item
 	}{
 		"explicit GUID wins": {
 			item: item{GUID: "explicit", InfoHash: hash, DownloadURL: "https://prowlarr.test/download/1"},

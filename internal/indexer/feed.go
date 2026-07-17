@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"math"
 	"path"
 	"regexp"
 	"slices"
@@ -210,7 +211,7 @@ func feedTitle(t *seadex.Torrent) string {
 	if name == "" {
 		return strings.TrimSpace(t.ReleaseGroup)
 	}
-	base := stripExt(name)
+	base := stripExt(path.Base(name))
 	if !isPack(t) {
 		// A single episode, movie, or single OVA: the file name is already the
 		// release title the arr should parse (do not collapse its episode).
@@ -346,11 +347,20 @@ func stripExt(name string) string {
 	return name
 }
 
-// totalSize sums the byte lengths of a torrent's files (the pack size).
+// totalSize sums the byte lengths of a torrent's files (the pack size). The
+// lengths come from the untrusted SeaDex record, so the arithmetic is
+// validated: a negative length, or a sum that would overflow int64 into a
+// negative value, returns 0 - the feed's existing "size unknown"
+// representation - rather than rendering a negative enclosure length to the
+// arrs.
 func totalSize(files []seadex.File) int64 {
 	var n int64
 	for i := range files {
-		n += files[i].Length
+		length := files[i].Length
+		if length < 0 || length > math.MaxInt64-n {
+			return 0
+		}
+		n += length
 	}
 	return n
 }

@@ -391,3 +391,22 @@ func TestReporterEmitSanitizesControlAndBidiRunes(t *testing.T) {
 		}
 	}
 }
+
+// TestReporterReportSuppressesDuplicateCurrentKeys pins in-batch dedupe: the
+// SeaDex fetcher appends every upstream record and the matcher preserves
+// per-entry cardinality, so one current batch can carry the same DedupeKey
+// twice. The returned state collapses them to one record, and the emitted
+// notifications must collapse the same way — one line, not one per copy.
+func TestReporterReportSuppressesDuplicateCurrentKeys(t *testing.T) {
+	reporter, recorder := newCapturedReporter()
+	finding := testFinding("duplicate", "Frieren")
+
+	current := reporter.Report([]compare.Finding{finding, finding}, nil, nil, time.Now())
+
+	if got := recorder.CountExact("better release available"); got != 1 {
+		t.Errorf("duplicate current finding notifications = %d, want 1", got)
+	}
+	if len(current) != 1 {
+		t.Errorf("current dedupe state entries = %d, want 1", len(current))
+	}
+}

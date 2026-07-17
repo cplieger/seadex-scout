@@ -76,12 +76,10 @@ func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
 		SeaDex:  seadex.NewClient(seadexHTTP, config.DefaultSeaDexBaseURL, config.DefaultSeaDexPageDelay, log),
 		Matcher: match.NewMatcher(anilistClient, log),
 		Comparer: compare.NewComparer(compare.Config{
-			Logger:          log,
 			Filter:          filterOptions(cfg),
 			ExcludeSpecials: cfg.ExcludeSpecials,
 		}),
 		Auditor: audit.NewAuditor(audit.Config{
-			Logger:          log,
 			SeaDexBaseURL:   config.DefaultSeaDexBaseURL,
 			ExcludeSpecials: cfg.ExcludeSpecials,
 			AnimeBytes:      cfg.AnimeBytes,

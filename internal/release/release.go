@@ -67,7 +67,15 @@ type Input struct {
 }
 
 var (
-	reResolution = regexp.MustCompile(`(?i)\b(2160p|1440p|1080p|720p|480p)\b`)
+	// reResolution matches a known resolution height with hand-built edges
+	// instead of \b: Go regexp word boundaries require a non-word character
+	// before the first digit, which misses compact spellings such as
+	// "BD1080p" and "1920x1080p" that the live SeaDex catalogue uses. The
+	// left edge rejects only a preceding digit (so "21080p" is not read as
+	// 1080p) and the right edge rejects an alphanumeric continuation (so
+	// "x1080py" stays unmatched); the height itself is captured in group 1
+	// for detectResolution.
+	reResolution = regexp.MustCompile(`(?i)(?:^|[^0-9])(2160p|1440p|1080p|720p|480p)(?:$|[^[:alnum:]])`)
 	reBitrate    = regexp.MustCompile(`(?i)\b\d+\s?(kbps|mbps)\b`)
 	// reCRF matches an x264/x265 CRF tag such as "crf18" or "crf 20".
 	reCRF = regexp.MustCompile(`(?i)\bcrf\s?\d+\b`)
@@ -98,11 +106,22 @@ var (
 	x264Tokens = []string{codecX264, "h264", "h.264", "avc"}
 )
 
+// normalizeEvidence lowercases evidence text and replaces underscore
+// delimiters with spaces before the token regexes run. Go regexp treats "_"
+// as a word character, so an underscore-delimited scene name such as
+// Show_1080p_BDRemux_Dual_Audio would otherwise hide every marker family
+// (resolution, remux/kind, dual-audio, CRF, bitrate) behind a missing word
+// boundary. SeaDex/arr names use underscores as delimiters, never inside a
+// marker token, so the replacement is safe.
+func normalizeEvidence(text string) string {
+	return strings.ToLower(strings.ReplaceAll(text, "_", " "))
+}
+
 // Classify converts raw release material into a normalized Release. It never
 // errors: an unclassifiable release is KindUnknown with a recorded reason.
 func Classify(in *Input) Release {
-	nameText := strings.ToLower(strings.Join(in.Names, " "))
-	notesText := strings.ToLower(in.Notes)
+	nameText := normalizeEvidence(strings.Join(in.Names, " "))
+	notesText := normalizeEvidence(in.Notes)
 	text := nameText + " " + notesText
 	// The Codec field uses the same name-first precedence classifyKind applies:
 	// per-file evidence (names + MediaInfo) wins, the entry-wide notes only
@@ -119,13 +138,25 @@ func Classify(in *Input) Release {
 	return Release{
 		Group:       groupOrNoGroup(in.Group),
 		Tracker:     strings.TrimSpace(in.Tracker),
-		Resolution:  reResolution.FindString(text),
+		Resolution:  detectResolution(text),
 		Codec:       codec,
 		Kind:        kind,
 		TrackerType: classifyTracker(in.Tracker),
 		Reason:      reason,
 		DualAudio:   in.DualAudio || reDualAudio.MatchString(text),
 	}
+}
+
+// detectResolution extracts the normalized resolution height from evidence
+// text via reResolution's capture group (the edge characters the pattern
+// consumes around it are not part of the value), or "" when no marker is
+// present.
+func detectResolution(text string) string {
+	match := reResolution.FindStringSubmatch(text)
+	if len(match) < 2 {
+		return ""
+	}
+	return strings.ToLower(match[1])
 }
 
 // classifyKind applies per-file-evidence-first scoping to the remux -> encode

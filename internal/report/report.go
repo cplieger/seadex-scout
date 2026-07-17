@@ -64,6 +64,12 @@ func (r *Reporter) Report(findings []compare.Finding, prior map[string]Alerted, 
 	newCount := 0
 	for i := range findings {
 		f := &findings[i]
+		if a, ok := current[f.DedupeKey]; ok {
+			// Preserve the existing last-payload-wins behavior without emitting
+			// the same logical finding more than once in this batch.
+			current[f.DedupeKey] = Alerted{AlertedAt: a.AlertedAt, Finding: storedFinding(f)}
+			continue
+		}
 		if a, ok := prior[f.DedupeKey]; ok {
 			current[f.DedupeKey] = Alerted{AlertedAt: a.AlertedAt, Finding: storedFinding(f)}
 			continue

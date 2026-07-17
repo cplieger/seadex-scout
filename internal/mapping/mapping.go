@@ -193,6 +193,24 @@ func buildIndex(records []Record) *Index {
 	return &Index{byAniList: byAniList}
 }
 
+// cacheUsable reports whether a cached record set is usable as an effective
+// AniList-keyed mapping: after deduplication it must build a non-empty index
+// (buildIndex drops zero AniList IDs, so a JSON-valid state cache such as
+// records:[{}] is not a usable map) and meet the same conservative 1%
+// arr-identifier coverage floor a newly accepted refresh must meet
+// (validateRefreshedRecords), without the previous-relative type and shrink
+// checks. Every cache-state gate (the fresh-cache fast path, staleOrFail,
+// reuseCachedRecords, conditionalGet) keys on this predicate so "has cached
+// bytes" can never diverge from "has a mapping the consumers can use".
+func cacheUsable(records []Record) bool {
+	records = deduplicateRecords(records)
+	if buildIndex(records).Len() == 0 {
+		return false
+	}
+	minimum := max(1, (len(records)+99)/100)
+	return arrIdentifierCount(records) >= minimum
+}
+
 // --- Loader: conditional fetch, acceptance guards, stale-map degradation ---
 
 // Loader fetches and caches the Fribb map and overlays the overrides file.
@@ -294,14 +312,17 @@ func (e *StaleMapError) LogAttrs() []any {
 func (e *StaleMapError) ConsecutiveRejections() int { return e.rejections }
 
 // staleOrFail returns the stale cache wrapped in a *StaleMapError when prev
-// holds records (carrying cause when non-nil), otherwise the no-cache error.
+// holds a usable record set (cacheUsable; carrying cause when non-nil),
+// otherwise the no-cache error — an unusable cache (e.g. a non-empty record
+// set that indexes to nothing) must degrade like no cache at all so the scout
+// preserves findings instead of comparing against an empty map.
 // It collapses refreshCache's repeated degrade-to-stale-or-fail branches into
 // one call so each failure site stays flat. The age is clamped to zero: a
 // future FetchedAt (clock skew or a corrupt state file) correctly forces
 // revalidation, and when that fetch fails the degradation telemetry must not
 // report a misleading negative age ("fetched -2h ago").
 func staleOrFail(prev *Cache, staleMsg string, cause, noCache error) (Cache, error) {
-	if len(prev.Records) > 0 {
+	if cacheUsable(prev.Records) {
 		return *prev, &StaleMapError{
 			cause:   cause,
 			msg:     staleMsg,
@@ -336,7 +357,7 @@ func (l *Loader) refreshCache(ctx context.Context, prev *Cache) (Cache, error) {
 	// age >= 0 rejects a future FetchedAt (clock skew or a corrupt state file):
 	// a negative age is never fresh, forcing a revalidating fetch rather than
 	// trusting the bad timestamp until it drifts back into range.
-	if l.refresh > 0 && age >= 0 && age < l.refresh && len(prev.Records) > 0 {
+	if l.refresh > 0 && age >= 0 && age < l.refresh && cacheUsable(prev.Records) {
 		l.log.Debug("mapping: cache fresh, skipping fetch", "records", len(prev.Records), "age", age.Round(time.Second))
 		return *prev, nil
 	}
@@ -353,10 +374,11 @@ func (l *Loader) refreshCache(ctx context.Context, prev *Cache) (Cache, error) {
 }
 
 // reuseCachedRecords handles a 304: the upstream is unchanged, so the cached
-// records are reused with a bumped timestamp. A validator-only cache with no
-// records is unusable and errors instead.
+// records are reused with a bumped timestamp. A cache with no usable record
+// set (validator-only, or records that index to nothing) errors instead of
+// affirming an unusable map.
 func (l *Loader) reuseCachedRecords(prev *Cache) (Cache, error) {
-	if len(prev.Records) == 0 {
+	if !cacheUsable(prev.Records) {
 		return *prev, errors.New("mapping: not modified but no cache available")
 	}
 	l.log.Debug("mapping: not modified, reusing cache", "records", len(prev.Records))
@@ -449,7 +471,44 @@ func validateRefreshedRecords(previous, records []Record) error {
 	if previousMetFloor && typed < minimum && typed < previousTyped {
 		return fmt.Errorf("type coverage %d/%d is below minimum %d (previous cache carried %d typed records)", typed, len(records), minimum, previousTyped)
 	}
+	// The typed floor above validates syntactic presence of Type, but routing
+	// recognizes only MOVIE and sends every other value to Sonarr — so a
+	// wrong-but-string schema change (all movie types renamed to FILM, or
+	// every record stamped MOVIE) retains 100% typed coverage while silently
+	// routing an entire side of the catalogue to the wrong arr. Guard the
+	// operational invariant instead: preservation of both routing populations
+	// (MOVIE-routed and non-MOVIE), relative to the previously accepted
+	// cache. For each side that met the conservative 1% floor in that cache,
+	// reject a candidate whose side falls below the candidate floor AND below
+	// its prior count — an additive catalogue update that keeps both sides
+	// populated passes, and individual or future non-movie labels stay legal
+	// because every non-MOVIE type counts toward the same side.
+	if len(previous) > 0 {
+		prevMovies, prevOthers := routingCounts(previous)
+		movies, others := routingCounts(records)
+		if prevMovies >= previousMinimum && movies < minimum && movies < prevMovies {
+			return fmt.Errorf("movie-routed coverage %d/%d is below minimum %d (previous cache carried %d movie-routed records)", movies, len(records), minimum, prevMovies)
+		}
+		if prevOthers >= previousMinimum && others < minimum && others < prevOthers {
+			return fmt.Errorf("series-routed coverage %d/%d is below minimum %d (previous cache carried %d series-routed records)", others, len(records), minimum, prevOthers)
+		}
+	}
 	return nil
+}
+
+// routingCounts returns how many records route to each arr side: MOVIE
+// records (Radarr) and everything else (Sonarr, per RoutedIDs' branch). It
+// backs validateRefreshedRecords' routing-distribution floor: consumers rely
+// on both populations surviving a refresh, not on per-record type syntax.
+func routingCounts(records []Record) (movies, others int) {
+	for i := range records {
+		if records[i].IsMovie() {
+			movies++
+		} else {
+			others++
+		}
+	}
+	return movies, others
 }
 
 // typedRecordCount returns how many records carry a non-empty normalized
@@ -486,12 +545,12 @@ func arrIdentifierCount(records []Record) int {
 // conditionalGet issues a GET with the cached ETag / Last-Modified validators
 // via httpx.DoConditional, retrying transient failures. A 304 reports
 // NotModified; a 200 returns the bounded body and fresh validators. Validators
-// are sent only when there is a usable cached record set: a validator-only
-// empty cache must force a full 200 download rather than being eligible for a
-// 304 that would reuse zero records.
+// are sent only when there is a usable cached record set (cacheUsable): a
+// validator-only or effectively-empty cache must force a full 200 download
+// rather than being eligible for a 304 that would reuse an unusable map.
 func (l *Loader) conditionalGet(ctx context.Context, prev *Cache) (httpx.ConditionalResult, error) {
 	validators := httpx.Validators{}
-	if len(prev.Records) > 0 {
+	if cacheUsable(prev.Records) {
 		validators = httpx.Validators{ETag: prev.ETag, LastModified: prev.LastModified}
 	}
 	return httpx.RetryWithBackoff(ctx, maxAttempts, baseDelay, "mapping",

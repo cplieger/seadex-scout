@@ -142,3 +142,43 @@ func TestSanitizeDisplayURL(t *testing.T) {
 		})
 	}
 }
+
+// TestUpstreamSearchRetriesMalformedResponse pins the retry boundary around
+// the WHOLE search attempt: a transient malformed 200 body (truncated/garbled
+// Torznab XML) participates in the same bounded attempt budget as a failed
+// request - the query is an idempotent GET - so one bad response followed by a
+// healthy one succeeds instead of failing the search with two attempts unused.
+func TestUpstreamSearchRetriesMalformedResponse(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/rss+xml")
+		if n == 1 {
+			// A truncated response: 200 status, undecodable body.
+			_, _ = io.WriteString(w, "<rss><channel><item><title>trunc")
+			return
+		}
+		_, _ = io.WriteString(w, strings.ReplaceAll(sampleFeed, "http://prowlarr:9696", "http://"+r.Host))
+	}))
+	defer srv.Close()
+
+	u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
+	items, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
+	if err != nil {
+		t.Fatalf("search after one malformed response: %v (a parse failure must be retried)", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 2 {
+		t.Errorf("upstream called %d times, want 2 (one malformed attempt + one retry)", calls)
+	}
+}

@@ -255,10 +255,15 @@ func (x *itemXML) toItem() item {
 		size, _ = strconv.ParseInt(strings.TrimSpace(attrs["size"]), 10, 64)
 	}
 
-	seeders := attrInt(attrs, "seeders")
-	leechers := attrInt(attrs, "leechers")
+	// The decoded numeric fields are tracker-controlled: normalize every count
+	// to the feed's zero-as-unknown domain so a malformed-but-valid response
+	// cannot render a negative enclosure length/size attr or an inflated peer
+	// count derived from an unbounded negative seeders value.
+	size = max(size, 0)
+	seeders := max(attrInt(attrs, "seeders"), 0)
+	leechers := max(attrInt(attrs, "leechers"), 0)
 	if leechers == 0 {
-		if peers := attrInt(attrs, "peers"); peers > seeders {
+		if peers := max(attrInt(attrs, "peers"), 0); peers > seeders {
 			leechers = peers - seeders
 		}
 	}
