@@ -21,11 +21,11 @@ func discardLogger() *slog.Logger {
 }
 
 // fakeSonarr is a scripted SonarrClient: GetSeries returns series (or listErr),
-// GetEpisodes returns episodes[id] (or epErr[id]), GetTags returns the canned
+// GetEpisodeFiles returns files[id] (or epErr[id]), GetTags returns the canned
 // tag list (or tagErr) and counts its calls so tests can pin the
 // one-fetch-per-walk tag-resolution contract.
 type fakeSonarr struct {
-	episodes map[int][]arrapi.Episode
+	files    map[int][]arrapi.EpisodeFile
 	epErr    map[int]error
 	listErr  error
 	tagErr   error
@@ -38,11 +38,11 @@ func (f *fakeSonarr) GetSeries(context.Context) ([]arrapi.Series, error) {
 	return f.series, f.listErr
 }
 
-func (f *fakeSonarr) GetEpisodes(_ context.Context, seriesID int) ([]arrapi.Episode, error) {
+func (f *fakeSonarr) GetEpisodeFiles(_ context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
 	if err := f.epErr[seriesID]; err != nil {
 		return nil, err
 	}
-	return f.episodes[seriesID], nil
+	return f.files[seriesID], nil
 }
 
 func (f *fakeSonarr) GetTags(context.Context) ([]arrapi.Tag, error) {
@@ -50,8 +50,8 @@ func (f *fakeSonarr) GetTags(context.Context) ([]arrapi.Tag, error) {
 	return f.tags, f.tagErr
 }
 
-func epFile(group string) *arrapi.EpisodeFile {
-	return &arrapi.EpisodeFile{ReleaseGroup: group}
+func epFile(season int, group string) arrapi.EpisodeFile {
+	return arrapi.EpisodeFile{SeasonNumber: season, ReleaseGroup: group}
 }
 
 // TestWalkSonarrPartialEpisodeFailure pins the "ingest succeeded == healthy"
@@ -69,9 +69,9 @@ func TestWalkSonarrPartialEpisodeFailure(t *testing.T) {
 			{ID: 2, Title: "Bravo"},
 			{ID: 3, Title: "Charlie"},
 		},
-		episodes: map[int][]arrapi.Episode{
-			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
-			3: {{SeasonNumber: 1, EpisodeFile: epFile("LostYears")}},
+		files: map[int][]arrapi.EpisodeFile{
+			1: {epFile(1, "PMR")},
+			3: {epFile(1, "LostYears")},
 		},
 		epErr: map[int]error{2: errors.New("episode fetch boom")},
 	}
@@ -195,8 +195,8 @@ func TestWalkAppliesIncludeTagFilter(t *testing.T) {
 			{ID: 1, Title: "Kept", Tags: []int{7}},
 			{ID: 2, Title: "Dropped", Tags: []int{3}},
 		},
-		episodes: map[int][]arrapi.Episode{
-			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
+		files: map[int][]arrapi.EpisodeFile{
+			1: {epFile(1, "PMR")},
 		},
 		tags: []arrapi.Tag{{ID: 7, Label: "anime"}},
 	}
@@ -223,8 +223,8 @@ func TestWalkResolvesTagsWithOneFetchPerArr(t *testing.T) {
 				{ID: 1, Title: "Kept", Tags: []int{7}},
 				{ID: 2, Title: "Excluded", Tags: []int{7, 9}},
 			},
-			episodes: map[int][]arrapi.Episode{
-				1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
+			files: map[int][]arrapi.EpisodeFile{
+				1: {epFile(1, "PMR")},
 			},
 			tags: []arrapi.Tag{{ID: 7, Label: "anime"}, {ID: 9, Label: "skip"}},
 		}
@@ -261,8 +261,8 @@ func TestWalkResolvesTagsWithOneFetchPerArr(t *testing.T) {
 	})
 	t.Run("no configured tag filters means no fetch", func(t *testing.T) {
 		fs := &fakeSonarr{
-			series:   []arrapi.Series{{ID: 1, Title: "Alpha"}},
-			episodes: map[int][]arrapi.Episode{1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}}},
+			series: []arrapi.Series{{ID: 1, Title: "Alpha"}},
+			files:  map[int][]arrapi.EpisodeFile{1: {epFile(1, "PMR")}},
 		}
 		fr := &fakeRadarr{movies: []arrapi.Movie{{ID: 2, Title: "Movie"}}}
 		w := NewWalker(&Config{Sonarr: fs, Radarr: fr, Logger: discardLogger()})
@@ -414,7 +414,7 @@ func TestDiffSnapshotsPartialAware(t *testing.T) {
 	})
 }
 
-// boundedSonarr blocks each GetEpisodes until released, recording the peak
+// boundedSonarr blocks each GetEpisodeFiles until released, recording the peak
 // number of simultaneous in-flight fetches so a test can prove the walker
 // bounds concurrency at episodeConcurrency.
 type boundedSonarr struct {
@@ -430,7 +430,7 @@ func (f *boundedSonarr) GetSeries(context.Context) ([]arrapi.Series, error) {
 	return f.series, nil
 }
 
-func (f *boundedSonarr) GetEpisodes(ctx context.Context, seriesID int) ([]arrapi.Episode, error) {
+func (f *boundedSonarr) GetEpisodeFiles(ctx context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
 	f.mu.Lock()
 	f.active++
 	if f.active > f.maxActive {
@@ -450,7 +450,7 @@ func (f *boundedSonarr) GetEpisodes(ctx context.Context, seriesID int) ([]arrapi
 	}
 	select {
 	case <-f.release:
-		return []arrapi.Episode{{SeasonNumber: 1, EpisodeFile: epFile("PMR")}}, nil
+		return []arrapi.EpisodeFile{epFile(1, "PMR")}, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -548,8 +548,8 @@ func recordHasAttr(rec *capture.Recorder, msgSub, key, want string) bool {
 	return false
 }
 
-// cancelingSonarr cancels the walk context from inside GetEpisodes, simulating a
-// shutdown/timeout during the episode fetch.
+// cancelingSonarr cancels the walk context from inside GetEpisodeFiles,
+// simulating a shutdown/timeout during the episode fetch.
 type cancelingSonarr struct {
 	cancel context.CancelFunc
 	series []arrapi.Series
@@ -559,7 +559,7 @@ func (f *cancelingSonarr) GetSeries(context.Context) ([]arrapi.Series, error) {
 	return f.series, nil
 }
 
-func (f *cancelingSonarr) GetEpisodes(ctx context.Context, _ int) ([]arrapi.Episode, error) {
+func (f *cancelingSonarr) GetEpisodeFiles(ctx context.Context, _ int) ([]arrapi.EpisodeFile, error) {
 	f.cancel()
 	<-ctx.Done()
 	return nil, ctx.Err()
@@ -719,9 +719,9 @@ func TestWalkSonarrTagResolutionErrorFailsClosed(t *testing.T) {
 			{ID: 1, Title: "Alpha", Tags: []int{1}},
 			{ID: 2, Title: "Bravo", Tags: []int{2}},
 		},
-		episodes: map[int][]arrapi.Episode{
-			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
-			2: {{SeasonNumber: 1, EpisodeFile: epFile("LostYears")}},
+		files: map[int][]arrapi.EpisodeFile{
+			1: {epFile(1, "PMR")},
+			2: {epFile(1, "LostYears")},
 		},
 		tagErr: boom,
 	}
@@ -744,9 +744,9 @@ func TestWalkSonarrTagResolutionErrorFailsClosed(t *testing.T) {
 // the walk closed like any other tag error.
 func TestWalkSonarrTagResolutionLiveTimeoutFailsClosed(t *testing.T) {
 	fs := &fakeSonarr{
-		series:   []arrapi.Series{{ID: 1, Title: "Alpha", Tags: []int{1}}},
-		episodes: map[int][]arrapi.Episode{1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}}},
-		tagErr:   context.DeadlineExceeded,
+		series: []arrapi.Series{{ID: 1, Title: "Alpha", Tags: []int{1}}},
+		files:  map[int][]arrapi.EpisodeFile{1: {epFile(1, "PMR")}},
+		tagErr: context.DeadlineExceeded,
 	}
 	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: discardLogger()})
 	if _, err := w.Walk(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
@@ -763,16 +763,17 @@ func TestWalkSonarrTagResolutionLiveTimeoutFailsClosed(t *testing.T) {
 func TestWalkSonarrSeriesItemAggregatesGroupsSeasonsAndFingerprint(t *testing.T) {
 	fs := &fakeSonarr{
 		series: []arrapi.Series{{ID: 1, Title: "Multi", TvdbID: 555, Year: 2023}},
-		episodes: map[int][]arrapi.Episode{
+		files: map[int][]arrapi.EpisodeFile{
 			1: {
-				{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{
+				{
+					SeasonNumber: 1,
 					ReleaseGroup: "PMR",
 					SceneName:    "[PMR] Multi S01E01 [1080p][x265]",
 					MediaInfo:    &arrapi.MediaInfo{VideoCodec: "HEVC", AudioLanguages: "Japanese / English"},
-				}},
-				{SeasonNumber: 1, EpisodeFile: epFile("PMR")},
-				{SeasonNumber: 1, EpisodeFile: epFile("LostYears")},
-				{SeasonNumber: 2, EpisodeFile: epFile("PMR")},
+				},
+				epFile(1, "PMR"),
+				epFile(1, "LostYears"),
+				epFile(2, "PMR"),
 			},
 		},
 	}
@@ -809,12 +810,9 @@ func TestWalkSonarrSeriesItemAggregatesGroupsSeasonsAndFingerprint(t *testing.T)
 func TestWalkSonarrSeriesWithNoFilesHasNoGroups(t *testing.T) {
 	fs := &fakeSonarr{
 		series: []arrapi.Series{{ID: 1, Title: "Monitored NoFiles", TvdbID: 42}},
-		episodes: map[int][]arrapi.Episode{
-			1: {
-				{SeasonNumber: 1, EpisodeFile: nil},
-				{SeasonNumber: 2, EpisodeFile: nil},
-			},
-		},
+		// GetEpisodeFiles lists only episodes with files, so a fileless series
+		// yields an empty list (the fetch itself succeeds).
+		files: map[int][]arrapi.EpisodeFile{1: {}},
 	}
 	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
 
@@ -846,8 +844,8 @@ func TestWalkSonarrUnmatchedIncludeTagLogsWarning(t *testing.T) {
 			{ID: 1, Title: "Kept", Tags: []int{7}},
 			{ID: 2, Title: "Dropped", Tags: []int{3}},
 		},
-		episodes: map[int][]arrapi.Episode{
-			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
+		files: map[int][]arrapi.EpisodeFile{
+			1: {epFile(1, "PMR")},
 		},
 		tags: []arrapi.Tag{{ID: 7, Label: "anime"}},
 	}
@@ -879,8 +877,8 @@ func TestWalkUnmatchedTagWarningNeverEmitsTagValues(t *testing.T) {
 		series: []arrapi.Series{
 			{ID: 1, Title: "Kept", Tags: []int{7}},
 		},
-		episodes: map[int][]arrapi.Episode{
-			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
+		files: map[int][]arrapi.EpisodeFile{
+			1: {epFile(1, "PMR")},
 		},
 		tags: []arrapi.Tag{{ID: 7, Label: "anime"}},
 	}
@@ -973,8 +971,8 @@ func TestWalkRadarrTopLevelListErrorIsFatal(t *testing.T) {
 
 // TestWalkSonarrLogsLiveContextTimeout pins the per-request-timeout behavior:
 // arrapi wraps each request in its own context.WithTimeout, so a slow
-// GetEpisodes surfaces as context.DeadlineExceeded while the walk context is
-// still live. That is a real fetch failure, so the series becomes a Failed
+// GetEpisodeFiles surfaces as context.DeadlineExceeded while the walk context
+// is still live. That is a real fetch failure, so the series becomes a Failed
 // placeholder AND the per-series warning is logged with the series identity -
 // not silently swallowed as shutdown noise. The walk as a whole still succeeds
 // (a partial snapshot).
@@ -984,8 +982,8 @@ func TestWalkSonarrLogsLiveContextTimeout(t *testing.T) {
 			{ID: 1, Title: "Alpha"},
 			{ID: 2, Title: "Bravo"},
 		},
-		episodes: map[int][]arrapi.Episode{
-			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
+		files: map[int][]arrapi.EpisodeFile{
+			1: {epFile(1, "PMR")},
 		},
 		epErr: map[int]error{2: context.DeadlineExceeded},
 	}
@@ -1074,8 +1072,8 @@ func TestWalkSonarrPartialFailureLogsAggregateSkipWarning(t *testing.T) {
 			{ID: 2, Title: "Bravo"},
 			{ID: 3, Title: "Charlie"},
 		},
-		episodes: map[int][]arrapi.Episode{
-			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
+		files: map[int][]arrapi.EpisodeFile{
+			1: {epFile(1, "PMR")},
 		},
 		epErr: map[int]error{
 			2: errors.New("boom two"),
@@ -1108,10 +1106,10 @@ func TestWalkSonarrPartialFailureLogsAggregateSkipWarning(t *testing.T) {
 func TestWalkSonarrRepresentativeTieBreaksToFirstFile(t *testing.T) {
 	fs := &fakeSonarr{
 		series: []arrapi.Series{{ID: 1, Title: "Tie"}},
-		episodes: map[int][]arrapi.Episode{
+		files: map[int][]arrapi.EpisodeFile{
 			1: {
-				{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "AAA", SceneName: "[AAA] Tie S01E01 [1080p][x265]"}},
-				{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "BBB", SceneName: "[BBB] Tie S01E02 [720p][x264]"}},
+				{SeasonNumber: 1, ReleaseGroup: "AAA", SceneName: "[AAA] Tie S01E01 [1080p][x265]"},
+				{SeasonNumber: 1, ReleaseGroup: "BBB", SceneName: "[BBB] Tie S01E02 [720p][x264]"},
 			},
 		},
 	}
@@ -1136,11 +1134,12 @@ func TestWalkSonarrRepresentativeTieBreaksToFirstFile(t *testing.T) {
 func TestWalkSonarrGroupLessEpisodeFileAggregatesAsNoGroup(t *testing.T) {
 	fs := &fakeSonarr{
 		series: []arrapi.Series{{ID: 1, Title: "GroupLess"}},
-		episodes: map[int][]arrapi.Episode{
-			1: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{
+		files: map[int][]arrapi.EpisodeFile{
+			1: {{
+				SeasonNumber: 1,
 				ReleaseGroup: "",
 				RelativePath: "Season 01/GroupLess S01E01 1080p.mkv",
-			}}},
+			}},
 		},
 	}
 	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
@@ -1225,8 +1224,8 @@ func TestWalkSonarrSeriesItemCarriesIdentityFieldsAndDeepLink(t *testing.T) {
 			Year:            2023,
 			AlternateTitles: []arrapi.AlternateTitle{{Title: "Alt Ident"}, {Title: "   "}},
 		}},
-		episodes: map[int][]arrapi.Episode{
-			7: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {epFile(1, "PMR")},
 		},
 	}
 	w := NewWalker(&Config{Sonarr: fs, SonarrURL: "https://sonarr.example", Logger: discardLogger()})
@@ -1260,8 +1259,8 @@ func TestWalkSonarrSeriesItemCarriesIdentityFieldsAndDeepLink(t *testing.T) {
 func TestWalkCleanSonarrWalkIsNotPartial(t *testing.T) {
 	fs := &fakeSonarr{
 		series: []arrapi.Series{{ID: 1, Title: "Alpha"}},
-		episodes: map[int][]arrapi.Episode{
-			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
+		files: map[int][]arrapi.EpisodeFile{
+			1: {epFile(1, "PMR")},
 		},
 	}
 	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
@@ -1280,8 +1279,8 @@ func TestWalkCleanSonarrWalkIsNotPartial(t *testing.T) {
 func TestWalkCombinesBothArrsIntoOneSnapshot(t *testing.T) {
 	fs := &fakeSonarr{
 		series: []arrapi.Series{{ID: 1, Title: "Series"}},
-		episodes: map[int][]arrapi.Episode{
-			1: {{SeasonNumber: 1, EpisodeFile: epFile("PMR")}},
+		files: map[int][]arrapi.EpisodeFile{
+			1: {epFile(1, "PMR")},
 		},
 	}
 	fr := &fakeRadarr{
@@ -1328,7 +1327,7 @@ func TestDiffSnapshotsSkipsFailedPlaceholders(t *testing.T) {
 	})
 }
 
-// budgetSonarr blocks each GetEpisodes until released, then fails it, so a
+// budgetSonarr blocks each GetEpisodeFiles until released, then fails it, so a
 // test can trip the walk failure budget one fetch at a time and observe how
 // many fetches ever started.
 type budgetSonarr struct {
@@ -1341,7 +1340,7 @@ func (f *budgetSonarr) GetSeries(context.Context) ([]arrapi.Series, error) {
 	return f.series, nil
 }
 
-func (f *budgetSonarr) GetEpisodes(ctx context.Context, seriesID int) ([]arrapi.Episode, error) {
+func (f *budgetSonarr) GetEpisodeFiles(ctx context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
 	select {
 	case f.started <- seriesID:
 	case <-ctx.Done():
@@ -1362,7 +1361,7 @@ func (f *budgetSonarr) GetTags(context.Context) ([]arrapi.Tag, error) {
 // TestWalkSonarrBudgetTripSkipsQueuedFetches pins the cancel-on-budget
 // behavior of fetchEpisodeItems: once episodeFailureBudget fetches have
 // failed, the fan-out context is cancelled, so queued series never reach
-// GetEpisodes. Exactly episodeConcurrency fetches start up front; each
+// GetEpisodeFiles. Exactly episodeConcurrency fetches start up front; each
 // released failure lets one more start, except the last, which trips the
 // budget — so the total started is episodeConcurrency + episodeFailureBudget
 // - 1 and the walk fails with the budget error. Deleting the cancelFan() call
@@ -1409,14 +1408,14 @@ func TestWalkSonarrBudgetTripSkipsQueuedFetches(t *testing.T) {
 }
 
 func TestWalkSonarrExactBudgetFailureCountFailsWalk(t *testing.T) {
-	fs := &fakeSonarr{episodes: map[int][]arrapi.Episode{}, epErr: map[int]error{}}
+	fs := &fakeSonarr{files: map[int][]arrapi.EpisodeFile{}, epErr: map[int]error{}}
 	total := episodeFailureBudget + 1
 	for id := 1; id <= total; id++ {
 		fs.series = append(fs.series, arrapi.Series{ID: id, Title: "Series"})
 		if id <= episodeFailureBudget {
 			fs.epErr[id] = errors.New("sonarr down")
 		} else {
-			fs.episodes[id] = []arrapi.Episode{{SeasonNumber: 1, EpisodeFile: epFile("PMR")}}
+			fs.files[id] = []arrapi.EpisodeFile{epFile(1, "PMR")}
 		}
 	}
 	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})

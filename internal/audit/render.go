@@ -18,7 +18,7 @@ import (
 	"github.com/cplieger/scheduler/v2"
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/library"
-	"github.com/cplieger/seadex-scout/internal/textsafe"
+	"github.com/cplieger/textsafe"
 )
 
 const (

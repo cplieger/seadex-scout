@@ -13,7 +13,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/filter"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/release"
-	"github.com/cplieger/seadex-scout/internal/textsafe"
+	"github.com/cplieger/textsafe"
 )
 
 // labelArr is the arr key shared by the finding log lines.

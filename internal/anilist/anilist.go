@@ -28,7 +28,7 @@ import (
 
 	"github.com/cplieger/httpx/v3"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
-	"github.com/cplieger/seadex-scout/internal/textsafe"
+	"github.com/cplieger/textsafe"
 )
 
 const (

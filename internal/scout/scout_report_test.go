@@ -32,8 +32,8 @@ func TestReportGeneratesRowsAndNeverWritesState(t *testing.T) {
 
 	sonarr := &fakeSonarr{
 		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
-		episodes: map[int][]arrapi.Episode{
-			7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
 	s := New(&Deps{
@@ -81,8 +81,8 @@ func TestReportPartialSnapshotErrors(t *testing.T) {
 				{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
 				{ID: 8, Title: "Skipped Series", TvdbID: 124, Year: 2024},
 			},
-			episodes: map[int][]arrapi.Episode{
-				7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+			files: map[int][]arrapi.EpisodeFile{
+				7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 			},
 		},
 		failEpisodes: map[int]bool{8: true},
@@ -219,8 +219,8 @@ func TestReportStaleMapWarnsAndStillAudits(t *testing.T) {
 	}}
 	sonarr := &fakeSonarr{
 		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
-		episodes: map[int][]arrapi.Episode{
-			7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
 	s := New(&Deps{

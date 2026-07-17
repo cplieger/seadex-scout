@@ -23,35 +23,35 @@ import (
 )
 
 type fakeSonarr struct {
-	episodes map[int][]arrapi.Episode
-	listErr  error
-	series   []arrapi.Series
+	files   map[int][]arrapi.EpisodeFile
+	listErr error
+	series  []arrapi.Series
 }
 
 func (f *fakeSonarr) GetSeries(context.Context) ([]arrapi.Series, error) {
 	return f.series, f.listErr
 }
 
-func (f *fakeSonarr) GetEpisodes(_ context.Context, seriesID int) ([]arrapi.Episode, error) {
-	return f.episodes[seriesID], nil
+func (f *fakeSonarr) GetEpisodeFiles(_ context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
+	return f.files[seriesID], nil
 }
 
 func (f *fakeSonarr) GetTags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
 
-// flakySonarr wraps fakeSonarr but fails GetEpisodes for the listed series
+// flakySonarr wraps fakeSonarr but fails GetEpisodeFiles for the listed series
 // IDs, so a walk succeeds while marking the snapshot partial.
 type flakySonarr struct {
 	failEpisodes map[int]bool
 	fakeSonarr
 }
 
-func (f *flakySonarr) GetEpisodes(ctx context.Context, seriesID int) ([]arrapi.Episode, error) {
+func (f *flakySonarr) GetEpisodeFiles(ctx context.Context, seriesID int) ([]arrapi.EpisodeFile, error) {
 	if f.failEpisodes[seriesID] {
 		return nil, errors.New("episode fetch failed")
 	}
-	return f.fakeSonarr.GetEpisodes(ctx, seriesID)
+	return f.fakeSonarr.GetEpisodeFiles(ctx, seriesID)
 }
 
 // fakeSeaDex is an in-package SeaDexSource: it returns fixed entries or an
@@ -237,8 +237,8 @@ func TestCycleSeaDexFailureIsHealthyAndPreservesFindings(t *testing.T) {
 	}}
 	sonarr := &fakeSonarr{
 		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
-		episodes: map[int][]arrapi.Episode{
-			7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
 	s := New(&Deps{

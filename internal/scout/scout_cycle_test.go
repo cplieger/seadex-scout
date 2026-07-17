@@ -165,9 +165,9 @@ func TestCycleAniListDegradedComparesMajorityAndPreservesAffected(t *testing.T) 
 			{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
 			{ID: 8, Title: "Idless Show", TvdbID: 124, Year: 2024},
 		},
-		episodes: map[int][]arrapi.Episode{
-			7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
-			8: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+			8: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
 	entries := append(seadexFrierenEntry(), seadex.Entry{
@@ -242,8 +242,8 @@ func TestCycleAniListDegradedColdStartSeedsIncompleteBaseline(t *testing.T) {
 	}}
 	sonarr := &fakeSonarr{
 		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
-		episodes: map[int][]arrapi.Episode{
-			7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
 	deps := func(matcher *match.Matcher) *Deps {
@@ -295,8 +295,8 @@ func TestCycleColdStartBaselinesSilently(t *testing.T) {
 	}}
 	sonarr := &fakeSonarr{
 		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
-		episodes: map[int][]arrapi.Episode{
-			7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
 	s := New(&Deps{
@@ -441,8 +441,8 @@ func TestCyclePartialWalkComparesCleanAndPreservesFailedItemsFindings(t *testing
 				{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
 				{ID: 8, Title: "Broken Series", TvdbID: 124, Year: 2024},
 			},
-			episodes: map[int][]arrapi.Episode{
-				7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+			files: map[int][]arrapi.EpisodeFile{
+				7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 			},
 		},
 		failEpisodes: map[int]bool{8: true},
@@ -530,10 +530,10 @@ func TestCyclePartialColdStartSeedsIncompleteBaseline(t *testing.T) {
 				{ID: 8, Title: "Broken Series", TvdbID: 124, Year: 2024},
 				{ID: 9, Title: "Third Show", TvdbID: 125, Year: 2025},
 			},
-			episodes: map[int][]arrapi.Episode{
-				7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
-				8: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
-				9: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+			files: map[int][]arrapi.EpisodeFile{
+				7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+				8: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+				9: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 			},
 		},
 		failEpisodes: map[int]bool{8: true},
@@ -719,8 +719,8 @@ func TestCycleRecoveredWalkResetsShrunkStreak(t *testing.T) {
 	}}
 	sonarr := &fakeSonarr{
 		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
-		episodes: map[int][]arrapi.Episode{
-			7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
 	s := New(&Deps{
@@ -834,8 +834,8 @@ func TestCycleSuccessfulSeaDexFetchResetsFailureStreak(t *testing.T) {
 	}}
 	sonarr := &fakeSonarr{
 		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
-		episodes: map[int][]arrapi.Episode{
-			7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
 	s := New(&Deps{
@@ -875,8 +875,8 @@ func TestCycleSteadyStateReportsAndSaves(t *testing.T) {
 	}}
 	sonarr := &fakeSonarr{
 		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
-		episodes: map[int][]arrapi.Episode{
-			7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
 	s := New(&Deps{
@@ -945,7 +945,7 @@ func (c *cancellingSonarr) GetSeries(context.Context) ([]arrapi.Series, error) {
 	return nil, context.Canceled
 }
 
-func (c *cancellingSonarr) GetEpisodes(context.Context, int) ([]arrapi.Episode, error) {
+func (c *cancellingSonarr) GetEpisodeFiles(context.Context, int) ([]arrapi.EpisodeFile, error) {
 	return nil, nil
 }
 
@@ -1114,8 +1114,8 @@ func TestCycleStaleMapStillComparesAndRebuildsFeed(t *testing.T) {
 	}}
 	sonarr := &fakeSonarr{
 		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
-		episodes: map[int][]arrapi.Episode{
-			7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
 	s := New(&Deps{
@@ -1437,8 +1437,8 @@ func TestCycleUpgradeWithPriorFindingsTakesReportPath(t *testing.T) {
 	}}
 	sonarr := &fakeSonarr{
 		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
-		episodes: map[int][]arrapi.Episode{
-			7: {{SeasonNumber: 1, EpisodeFile: &arrapi.EpisodeFile{ReleaseGroup: "Erai-raws"}}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
 	s := New(&Deps{

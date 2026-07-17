@@ -46,15 +46,17 @@ const episodeConcurrency = 6
 // oddities (the partial-snapshot path) while tripping fast on an outage.
 // Because the budget is an absolute count, a library with fewer kept series
 // can never trip it - walkSonarr's companion total-failure rule (every kept
-// series failed) covers that gap, so a total episode-endpoint outage is an
-// ingest failure at any library size.
+// series failed) covers that gap, so a total episode-file-endpoint outage is
+// an ingest failure at any library size.
 const episodeFailureBudget = 5
 
 // SonarrClient is the arrapi Sonarr surface the walker needs (consumer-side
-// interface; *arrapi.Sonarr satisfies it).
+// interface; *arrapi.Sonarr satisfies it). GetEpisodeFiles lists exactly the
+// episodes that have a file on disk - the walker only consumes episodes WITH
+// files, so it needs no episode rows to skip.
 type SonarrClient interface {
 	GetSeries(ctx context.Context) ([]arrapi.Series, error)
-	GetEpisodes(ctx context.Context, seriesID int) ([]arrapi.Episode, error)
+	GetEpisodeFiles(ctx context.Context, seriesID int) ([]arrapi.EpisodeFile, error)
 	GetTags(ctx context.Context) ([]arrapi.Tag, error)
 }
 
@@ -236,10 +238,11 @@ func (w *Walker) walkSonarr(ctx context.Context) ([]Item, int, error) {
 	// Sub-budget total failure: every kept series' episode fetch failed. The
 	// budget above is an absolute count a library with fewer kept series can
 	// never reach, and publishing a "partial" snapshot with zero usable file
-	// data would let the cycle read healthy through a total episode-endpoint
-	// outage - an arr ingest failure whatever the library size (a restart or
-	// config fix could recover it, the app's unhealthy semantic). The ctx
-	// check above keeps a shutdown from masquerading as a total failure.
+	// data would let the cycle read healthy through a total
+	// episode-file-endpoint outage - an arr ingest failure whatever the
+	// library size (a restart or config fix could recover it, the app's
+	// unhealthy semantic). The ctx check above keeps a shutdown from
+	// masquerading as a total failure.
 	if len(kept) > 0 && skipped == len(kept) {
 		return nil, 0, fmt.Errorf("sonarr episode fetches: all %d kept series failed", skipped)
 	}
@@ -291,8 +294,8 @@ func (w *Walker) fetchEpisodeItems(ctx context.Context, kept []arrapi.Series) (r
 	return results, int(failures.Load())
 }
 
-// fetchSeriesItem fetches one series' episodes and builds its Item. When the
-// fan-out context is cancelled or expired (a shutdown/redeploy, or the walk
+// fetchSeriesItem fetches one series' episode files and builds its Item. When
+// the fan-out context is cancelled or expired (a shutdown/redeploy, or the walk
 // failure budget tripping) it returns (nil, false) without a warning (Walk
 // reports the cancellation or the budget); any other episode-fetch failure -
 // including a per-request timeout while the walk context is still live - is
@@ -300,25 +303,25 @@ func (w *Walker) fetchEpisodeItems(ctx context.Context, kept []arrapi.Series) (r
 // failed=true, so the snapshot records WHICH items the partial walk is missing
 // and walkSonarr can count the failure against the budget.
 func (w *Walker) fetchSeriesItem(ctx context.Context, s *arrapi.Series) (*Item, bool) {
-	eps, err := w.sonarr.GetEpisodes(ctx, s.ID)
+	files, err := w.sonarr.GetEpisodeFiles(ctx, s.ID)
 	if err != nil {
 		// Stay quiet only when the fan-out context itself is done (a shutdown, or
 		// the failure budget already tripped): that error is expected and Walk
 		// reports it. arrapi wraps each request in its own context.WithTimeout,
-		// so a slow GetEpisodes surfaces as DeadlineExceeded while ctx is still
-		// live - a real fetch failure worth the per-series warning below, not
-		// shutdown noise.
+		// so a slow GetEpisodeFiles surfaces as DeadlineExceeded while ctx is
+		// still live - a real fetch failure worth the per-series warning below,
+		// not shutdown noise.
 		if ctx.Err() != nil {
 			return nil, false
 		}
 		w.log.Warn("skipping series: episode fetch failed", "series", s.Title, "id", s.ID, "error", err)
-		// seriesItem with no episodes yields the identity fields and no file
+		// seriesItem with no files yields the identity fields and no file
 		// data - exactly the Failed placeholder shape.
 		item := w.seriesItem(s, nil)
 		item.Failed = true
 		return &item, true
 	}
-	item := w.seriesItem(s, eps)
+	item := w.seriesItem(s, files)
 	return &item, false
 }
 
@@ -399,25 +402,23 @@ func keepByTags(itemTags []int, includeIDs, excludeIDs map[int]struct{}) bool {
 	return true
 }
 
-// seriesItem builds a library Item from a series and its episodes, aggregating
-// the distinct release groups present and a representative fingerprint. A
-// series with no episode files keeps the zero fingerprint (Current.Group ""),
-// matching the fileless-movie shape.
-func (w *Walker) seriesItem(s *arrapi.Series, eps []arrapi.Episode) Item {
-	var files []fileInfo
+// seriesItem builds a library Item from a series and its episode files (as
+// listed by GetEpisodeFiles: exactly the episodes with a file on disk, each
+// carrying its own SeasonNumber), aggregating the distinct release groups
+// present and a representative fingerprint. A series with no episode files
+// keeps the zero fingerprint (Current.Group ""), matching the fileless-movie
+// shape.
+func (w *Walker) seriesItem(s *arrapi.Series, epFiles []arrapi.EpisodeFile) Item {
+	files := make([]fileInfo, 0, len(epFiles))
 	groupCounts := make(map[string]int)
 	seasonCounts := make(map[int]map[string]int)
-	for i := range eps {
-		f := eps[i].EpisodeFile
-		if f == nil {
-			continue
-		}
-		fi := fileFromEpisode(f)
+	for i := range epFiles {
+		fi := fileFromEpisode(&epFiles[i])
 		files = append(files, fi)
 		// fi.group is never empty: fileInfoFrom normalizes it via
 		// release.NormalizeGroup, which falls back to NOGRP for group-less files.
 		groupCounts[fi.group]++
-		addSeasonGroup(seasonCounts, eps[i].SeasonNumber, fi.group)
+		addSeasonGroup(seasonCounts, epFiles[i].SeasonNumber, fi.group)
 	}
 	item := Item{
 		SeasonGroups: seasonGroups(seasonCounts),
