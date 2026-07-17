@@ -12,8 +12,8 @@ github.com/cplieger/scheduler v1.2.0 h1:f3iOT8KXvakAWvwWkgrlg/cVBXweLgImIBrpoqgO
 github.com/cplieger/scheduler v1.2.0/go.mod h1:OT/FkHZsRcL7I4oFfeFT6PM9ZhafBfcZWBfakQmBV5I=
 github.com/cplieger/slogx v1.3.0 h1:UXTm85V0ChnnTnAsSVq2Vl4Aywb7dw+FcYaBnzgnVHk=
 github.com/cplieger/slogx v1.3.0/go.mod h1:15KA2NVx725imQe/PYXUmd3oM2oMpYpqwU+hdHtz7Fc=
-github.com/cplieger/webhttp v1.8.0 h1:of3X77giZJaqgWgcc2PcR71o5iNCCtsjilipIRQ4zXQ=
-github.com/cplieger/webhttp v1.8.0/go.mod h1:RYtweYFUohqE5DIOt06Ypr0j9VHXjxSPBLIG3vM0H44=
+github.com/cplieger/webhttp v1.9.0 h1:CucYBDjIK3K0xolqu6bI8etUtMwiBtC+K53xYXUfVqE=
+github.com/cplieger/webhttp v1.9.0/go.mod h1:RYtweYFUohqE5DIOt06Ypr0j9VHXjxSPBLIG3vM0H44=
 go.yaml.in/yaml/v3 v3.0.4 h1:tfq32ie2Jv2UxXFdLJdh3jXuOzWiL1fo0bu/FbuKpbc=
 go.yaml.in/yaml/v3 v3.0.4/go.mod h1:DhzuOOF2ATzADvBadXxruRBLzYTpT36CKvDb3+aBEFg=
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405 h1:yhCVgyC4o1eVCa2tZl7eS0r+SDo693bJlVdllGtEeKM=
