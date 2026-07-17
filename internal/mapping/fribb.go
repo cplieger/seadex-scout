@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
-	"strconv"
 	"strings"
+
+	"github.com/cplieger/jsonx"
 )
 
 // Fribb type strings. MOVIE routes to Radarr (TMDB movie / IMDb); every other
@@ -325,53 +325,30 @@ func (t tmdbID) movieIDs(isMovie bool) []int {
 }
 
 // flexInt decodes a JSON number or numeric string into an int. A null, empty,
-// "unknown", non-numeric, fractional, or negative value decodes to 0 rather
-// than erroring or truncating (see setNumber), so an upstream placeholder or
-// odd value does not break the record or masquerade as a valid id.
+// "unknown", non-numeric, fractional, negative, or out-of-range value decodes
+// to 0 rather than erroring or truncating, so an upstream placeholder or odd
+// value does not break the record or masquerade as a valid id. The decode is
+// a thin shim over jsonx under the TolerantZero policy (which this decoder
+// originated): both wire forms parse identically ("9.0" → 9, "1e3" → 1000,
+// "1.5" → 0) — the number/string equivalence the Fribb id fields rely on —
+// real ids are bounded to [0, MaxInt32], fractional values zero rather than
+// truncate (9.9 truncated to 9 would silently point at a different anime),
+// and only a malformed JSON string propagates an error.
 type flexInt int
 
-// UnmarshalJSON implements the tolerant number-or-string decode. Both forms
-// funnel through setNumber, so a quoted numeric string decodes exactly like
-// the same bare JSON number ("9.0" → 9, "1e3" → 1000, "1.5" → 0) — the
-// number/string equivalence the Fribb id fields rely on. The receiver is
-// reset first so a duplicate key's later odd value clears an earlier decode
-// (see offsetPair.UnmarshalJSON).
+// UnmarshalJSON implements the tolerant number-or-string decode via
+// jsonx.ParseInt64 with jsonx.TolerantZero. The receiver is reset first so a
+// duplicate key's later odd value clears an earlier decode (see
+// offsetPair.UnmarshalJSON), and it stays 0 on error (no partial value) —
+// both invariants are also pinned inside the library (jsonx.TolerantInt).
 func (f *flexInt) UnmarshalJSON(b []byte) error {
 	*f = 0
-	b = bytes.TrimSpace(b)
-	if isNullOrEmpty(b) {
-		return nil
+	n, err := jsonx.ParseInt64(b, jsonx.TolerantZero())
+	if err != nil {
+		return err
 	}
-	if b[0] == '"' {
-		var s string
-		if err := json.Unmarshal(b, &s); err != nil {
-			return err
-		}
-		if n, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil {
-			f.setNumber(n)
-		}
-		return nil
-	}
-	var n float64
-	if err := json.Unmarshal(b, &n); err != nil {
-		return nil //nolint:nilerr // tolerate a non-numeric id placeholder
-	}
-	f.setNumber(n)
+	*f = flexInt(n)
 	return nil
-}
-
-// setNumber applies the shared validity invariant: real AniList/TVDB/TMDB ids
-// are non-negative integers within int32 range, so a NaN, fractional,
-// negative, or out-of-range value is treated as absent (0) rather than
-// truncated or kept - 9.9 truncated to 9 would silently point at a different
-// anime, and a negative id would falsely count toward the arr-identifier
-// acceptance floor. Applies whether the value arrived as a bare number or a
-// quoted numeric string.
-func (f *flexInt) setNumber(n float64) {
-	if math.IsNaN(n) || n != math.Trunc(n) || n < 0 || n > math.MaxInt32 {
-		return
-	}
-	*f = flexInt(int(n))
 }
 
 // stringList decodes a JSON array of strings, a single string, or null into a

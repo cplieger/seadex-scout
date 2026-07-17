@@ -23,7 +23,6 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
@@ -244,13 +243,13 @@ func Load(path string) (Config, error) {
 		// can embed operator-written text adjacent to a secret (e.g. an
 		// unquoted literal secret read as an alias yields "unknown anchor
 		// '<secret>' referenced"), and main logs this error at startup.
-		return Config{}, fmt.Errorf("parse config %s: %s", path, sanitizeYAMLError(err))
+		return Config{}, fmt.Errorf("parse config %s: %w", path, sanitizeYAMLError(err))
 	}
 	if err := checkSingleDocument(data); err != nil {
 		return Config{}, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	if err := checkUnknownKeys(data); err != nil {
-		return Config{}, fmt.Errorf("parse config %s: %s", path, sanitizeYAMLError(err))
+		return Config{}, fmt.Errorf("parse config %s: %w", path, sanitizeYAMLError(err))
 	}
 	if len(refs) > 0 {
 		slog.Warn("config references environment variables that are not set; "+
@@ -259,7 +258,7 @@ func Load(path string) (Config, error) {
 	}
 	fc := defaultFileConfig()
 	if err := doc.Decode(&fc); err != nil {
-		return Config{}, fmt.Errorf("parse config %s: %s", path, sanitizeYAMLError(err))
+		return Config{}, fmt.Errorf("parse config %s: %w", path, sanitizeYAMLError(err))
 	}
 	return fc.toConfig(), nil
 }
@@ -333,131 +332,21 @@ func checkSingleDocument(data []byte) error {
 	return nil
 }
 
-// Value-independent markers of a yaml.v3 TypeError entry ("line N: cannot
-// unmarshal !!str `...` into bool"): everything between the source tag and the
-// final destination-type marker is the scalar excerpt and is dropped.
-const (
-	yamlUnmarshalMarker = "cannot unmarshal !!"
-	yamlIntoMarker      = " into "
-)
-
-// Value-independent markers of the duplicate-key TypeError entry
-// ("line N: mapping key "x" already defined at line M"): the key excerpt
-// between them is dropped, the two line numbers are kept.
-const (
-	yamlDupKeyMarker    = ": mapping key "
-	yamlDupKeyDefinedAt = " already defined at line "
-)
-
-// Value-independent markers of the strict-decode unknown-key entry
-// ("line N: field X not found in type config.fileConfig", from
-// checkUnknownKeys): the key name between them is kept - it IS the diagnostic
-// the operator needs to fix the typo - and the Go type name after the second
-// marker is dropped.
-const (
-	yamlUnknownKeyMarker = ": field "
-	yamlUnknownKeyInType = " not found in type "
-)
-
-// yamlParseLineRe matches the value-independent "yaml: line N: " prefix a
-// yaml.v3 syntax error carries; only the digits are kept, never the message.
-var yamlParseLineRe = regexp.MustCompile(`^yaml: line (\d+): `)
-
-// sanitizeYAMLError rewrites a yaml decode error so an expanded secret never
-// reaches the startup log; line numbers and target types are kept
-// (field-name-only, the same posture as validateHTTPURL errors). The decode
-// runs after ${VAR} expansion, so the excerpt yaml.v3 embeds can carry a
-// prefix of an expanded secret (an api key placed in a non-string field by a
-// config typo). Backtick-pair matching was rejected: yaml.v3 truncates the
-// excerpt with any embedded backtick unchanged, so a secret containing a
-// backtick defeats a delimiter regex and leaks a prefix. Instead each
-// *yaml.TypeError entry is rebuilt from its value-independent structure, and
-// an unrecognized error shape falls back to a generic message rather than
-// risking a partial leak - keeping only the "yaml: line N:" locator a syntax
-// error carries (structural parser output whose digits cannot embed a value).
-func sanitizeYAMLError(err error) string {
-	typeErr, ok := errors.AsType[*yaml.TypeError](err)
-	if !ok {
-		const withheld = "configuration could not be decoded (details withheld: they may embed an expanded secret)"
-		if m := yamlParseLineRe.FindStringSubmatch(err.Error()); m != nil {
-			return "line " + m[1] + ": " + withheld
-		}
-		return withheld
-	}
-	entries := make([]string, 0, len(typeErr.Errors))
-	for _, e := range typeErr.Errors {
-		entries = append(entries, sanitizeTypeErrorEntry(e))
-	}
-	return "unmarshal errors: " + strings.Join(entries, "; ")
-}
-
-// lineEntryBounds locates one structured TypeError entry shape: startMarker
-// must appear after a bare "line N" prefix (the isLinePrefix guard - a
-// wrong-type scalar excerpt embedding the same marker pair starts with the
-// unmarshal shape instead, so it never matches) and endMarker must follow it.
-// It is the single home of the boundary validation both structured-entry
-// branches of sanitizeTypeErrorEntry share.
-func lineEntryBounds(entry, startMarker, endMarker string) (start, end int, ok bool) {
-	start = strings.Index(entry, startMarker)
-	if start < 0 || !isLinePrefix(entry[:start]) {
-		return 0, 0, false
-	}
-	end = strings.LastIndex(entry, endMarker)
-	return start, end, end > start
-}
-
-// sanitizeTypeErrorEntry rebuilds one TypeError entry keeping only its
-// value-independent parts: the "line N: cannot unmarshal !!<tag>" prefix and
-// the " into <type>" suffix. strings.LastIndex locates the suffix so backticks
-// or newlines inside the scalar excerpt are irrelevant. A duplicate-mapping-key
-// entry ("line N: mapping key "x" already defined at line M") is a second
-// value-independent shape and keeps both line numbers; only the key excerpt is
-// redacted (a misindented paste can put a secret in key position, so stay
-// field-name-only like the rest of the file). The unknown-key entry from the
-// strict checkUnknownKeys pre-decode ("line N: field X not found in type T")
-// is a third shape: the key name is kept - it is the diagnostic the operator
-// needs to fix the typo - and the isLinePrefix guard ensures a wrong-type
-// scalar excerpt that happens to embed both of its markers is never mistaken
-// for it (such an entry starts with the unmarshal shape, not a bare "line N",
-// so it falls through to the redacting branches instead).
-func sanitizeTypeErrorEntry(entry string) string {
-	if k, at, ok := lineEntryBounds(entry, yamlDupKeyMarker, yamlDupKeyDefinedAt); ok {
-		return entry[:k] + ": mapping key <redacted>" + entry[at:]
-	}
-	if k, at, ok := lineEntryBounds(entry, yamlUnknownKeyMarker, yamlUnknownKeyInType); ok {
-		return fmt.Sprintf("%s: unknown configuration key %q",
-			entry[:k], entry[k+len(yamlUnknownKeyMarker):at])
-	}
-	start := strings.Index(entry, yamlUnmarshalMarker)
-	end := strings.LastIndex(entry, yamlIntoMarker)
-	if start < 0 || end < start {
-		return "configuration contains a value of the wrong type"
-	}
-	tagEnd := start + len(yamlUnmarshalMarker)
-	for tagEnd < len(entry) && entry[tagEnd] != ' ' {
-		tagEnd++
-	}
-	return entry[:tagEnd] + " <redacted>" + entry[end:]
-}
-
-// isLinePrefix reports whether s is exactly "line <digits>", the prefix a
-// genuine yaml.v3 TypeError entry carries before its first marker. It guards
-// BOTH rebuilds that keep text from outside their markers - the duplicate-key
-// branch (keeps entry[:k] and entry[at:]) and the unknown-key branch (keeps
-// the key name between its markers) - against a wrong-type scalar excerpt
-// embedding the same marker pair: that entry's prefix is the unmarshal shape
-// ("line N: cannot unmarshal !!str `..."), never a bare "line N".
-func isLinePrefix(s string) bool {
-	digits, ok := strings.CutPrefix(s, "line ")
-	if !ok || digits == "" {
-		return false
-	}
-	for _, r := range digits {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
+// sanitizeYAMLError rewrites a yaml parse/decode error via
+// yamlenv.SanitizeDecodeError so an expanded secret never reaches the startup
+// log; line numbers and target types are kept (field-name-only, the same
+// posture as validateHTTPURL errors). The decode runs after ${VAR} expansion,
+// so the excerpt yaml.v3 embeds can carry a prefix of an expanded secret (an
+// api key placed in a non-string field by a config typo); the library rebuilds
+// each *yaml.TypeError entry from its value-independent structure and
+// withholds anything it cannot prove value-free. The one policy choice made
+// here is WithUnknownKeyEcho: the unknown-key name from the strict
+// checkUnknownKeys pre-decode is kept — it IS the diagnostic the operator
+// needs to fix a typo, and that pre-decode runs on the pre-expansion bytes so
+// the name cannot carry an expanded secret — while duplicate-key names and
+// scalar excerpts stay redacted per the library default.
+func sanitizeYAMLError(err error) error {
+	return yamlenv.SanitizeDecodeError(err, yamlenv.WithUnknownKeyEcho())
 }
 
 // toConfig flattens the on-disk shape into the runtime Config, applying

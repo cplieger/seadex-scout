@@ -1,7 +1,6 @@
 package config
 
 import (
-	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -11,7 +10,6 @@ import (
 
 	"github.com/cplieger/slogx"
 	"github.com/cplieger/slogx/capture"
-	"go.yaml.in/yaml/v3"
 )
 
 // The string-level expansion mechanics (braced-only matching, keep-literal on
@@ -912,98 +910,11 @@ func TestLoadParseErrorOmitsSecretAlias(t *testing.T) {
 	}
 }
 
-// TestSanitizeYAMLErrorFallbacks pins the two value-independent fallback
-// branches of the decode-error redaction: an error that is not a
-// *yaml.TypeError, and a TypeError entry that does not match the expected
-// "cannot unmarshal !!<tag> ... into <type>" structure. Both must fall back to
-// a fixed message that cannot embed any fragment of the (potentially
-// secret-bearing) original error text.
-func TestSanitizeYAMLErrorFallbacks(t *testing.T) {
-	const secret = "leaked-secret-sentinel"
-
-	t.Run("non-TypeError falls back to generic message", func(t *testing.T) {
-		got := sanitizeYAMLError(errors.New("decode blew up near " + secret))
-		want := "configuration could not be decoded (details withheld: they may embed an expanded secret)"
-		if got != want {
-			t.Errorf("sanitizeYAMLError(non-TypeError) = %q, want %q", got, want)
-		}
-	})
-
-	t.Run("syntax error keeps the line locator and withholds the message", func(t *testing.T) {
-		got := sanitizeYAMLError(errors.New("yaml: line 7: found character that cannot start any token near " + secret))
-		want := "line 7: configuration could not be decoded (details withheld: they may embed an expanded secret)"
-		if got != want {
-			t.Errorf("sanitizeYAMLError(syntax error) = %q, want %q", got, want)
-		}
-	})
-
-	t.Run("wrapped TypeError is still recognized and sanitized", func(t *testing.T) {
-		typeErr := &yaml.TypeError{Errors: []string{
-			"line 3: cannot unmarshal !!str `" + secret + "` into bool",
-		}}
-		got := sanitizeYAMLError(errors.Join(typeErr))
-		if strings.Contains(got, secret) {
-			t.Errorf("sanitizeYAMLError(wrapped TypeError) leaks the scalar excerpt: %q", got)
-		}
-		if !strings.Contains(got, "line 3: cannot unmarshal !!str <redacted> into bool") {
-			t.Errorf("sanitizeYAMLError(wrapped TypeError) = %q, want redacted line/type info kept", got)
-		}
-	})
-
-	t.Run("marker-less TypeError entry falls back per entry", func(t *testing.T) {
-		typeErr := &yaml.TypeError{Errors: []string{
-			"line 9: some future entry shape mentioning " + secret,
-		}}
-		got := sanitizeYAMLError(typeErr)
-		want := "unmarshal errors: configuration contains a value of the wrong type"
-		if got != want {
-			t.Errorf("sanitizeYAMLError(marker-less entry) = %q, want %q", got, want)
-		}
-	})
-
-	t.Run("unknown-key markers inside a scalar excerpt stay redacted", func(t *testing.T) {
-		// A wrong-type excerpt embedding the unknown-key marker pair must not be
-		// mistaken for an unknown-key entry (whose rebuild keeps the text between
-		// the markers): its prefix is the unmarshal shape, not a bare "line N",
-		// so it takes the redacting wrong-type branch instead.
-		typeErr := &yaml.TypeError{Errors: []string{
-			"line 4: cannot unmarshal !!str `" + secret + ": field oops not found in type x` into bool",
-		}}
-		got := sanitizeYAMLError(typeErr)
-		if strings.Contains(got, secret) || strings.Contains(got, "oops") {
-			t.Errorf("sanitizeYAMLError(colliding excerpt) leaks excerpt content: %q", got)
-		}
-		if !strings.Contains(got, "line 4: cannot unmarshal !!str <redacted> into bool") {
-			t.Errorf("sanitizeYAMLError(colliding excerpt) = %q, want the wrong-type redaction", got)
-		}
-	})
-
-	t.Run("dup-key markers inside a scalar excerpt stay redacted", func(t *testing.T) {
-		// A wrong-type excerpt embedding the duplicate-key marker pair must not
-		// be mistaken for a duplicate-key entry (whose rebuild keeps the text
-		// before its first and after its last marker): its prefix is the
-		// unmarshal shape, not a bare "line N", so it takes the redacting
-		// wrong-type branch instead.
-		typeErr := &yaml.TypeError{Errors: []string{
-			"line 4: cannot unmarshal !!str `" + secret + ": mapping key x already defined at line 9-" + secret + "` into bool",
-		}}
-		got := sanitizeYAMLError(typeErr)
-		if strings.Contains(got, secret) {
-			t.Errorf("sanitizeYAMLError(dup-key colliding excerpt) leaks excerpt content: %q", got)
-		}
-		if !strings.Contains(got, "line 4: cannot unmarshal !!str <redacted> into bool") {
-			t.Errorf("sanitizeYAMLError(dup-key colliding excerpt) = %q, want the wrong-type redaction", got)
-		}
-	})
-
-	t.Run("into-marker before unmarshal-marker falls back", func(t *testing.T) {
-		got := sanitizeTypeErrorEntry(" into bool then cannot unmarshal !!str " + secret)
-		want := "configuration contains a value of the wrong type"
-		if got != want {
-			t.Errorf("sanitizeTypeErrorEntry(reordered markers) = %q, want %q", got, want)
-		}
-	})
-}
+// TestSanitizeYAMLErrorFallbacks and TestIsLinePrefix moved with the
+// sanitizer to github.com/cplieger/envx/yamlenv (SanitizeDecodeError's
+// fallback, collision-guard, and line-prefix tables live there); the
+// Load-level tests above and below pin the app-visible posture end to end,
+// including the WithUnknownKeyEcho policy (TestLoadRejectsUnknownKeys).
 
 // TestLoadDuplicateKeyErrorKeepsLineNumbers pins the duplicate-mapping-key
 // TypeError entry shape through the decode-error redaction: the most common
@@ -1052,33 +963,6 @@ func TestLoadLeavesMappingKeysLiteral(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), `unknown configuration key "${SEADEX_SCOUT_KEY}"`) {
 		t.Errorf("Load() error = %q, want the literal ${SEADEX_SCOUT_KEY} rejected as an unknown key", err)
-	}
-}
-
-// TestIsLinePrefix pins the boundary cases of the "line <digits>" guard that
-// gates the unknown-key rebuild in sanitizeTypeErrorEntry: only an exact bare
-// "line N" prefix qualifies; empty input, a missing/non-numeric number, and an
-// unmarshal-shaped prefix all fail.
-func TestIsLinePrefix(t *testing.T) {
-	tests := []struct {
-		in   string
-		want bool
-	}{
-		{"line 4", true},
-		{"line 123", true},
-		{"", false},
-		{"line", false},
-		{"line ", false},
-		{"line 4x", false},
-		{"line x", false},
-		{"LINE 4", false},
-		{" line 4", false},
-		{"line 4: cannot unmarshal !!str `x`", false},
-	}
-	for _, tt := range tests {
-		if got := isLinePrefix(tt.in); got != tt.want {
-			t.Errorf("isLinePrefix(%q) = %v, want %v", tt.in, got, tt.want)
-		}
 	}
 }
 

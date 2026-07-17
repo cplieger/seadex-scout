@@ -22,3 +22,5 @@ require (
 )
 
 require github.com/cplieger/httpx/v3 v3.0.0
+
+require github.com/cplieger/jsonx v1.0.0

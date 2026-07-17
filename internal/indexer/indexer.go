@@ -47,8 +47,6 @@ package indexer
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -589,19 +587,20 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 		// Fail closed at the handler too: Run already refuses to bind with an
 		// empty feed_api_key, so this branch is unreachable in production, but
 		// a second independent guard keeps any future construction path from
-		// serving the passkey-bearing feed unauthenticated. (Skipping straight
-		// to the compare would OPEN the gate: an absent apikey param also
-		// hashes to sha256(""), so the constant-time compare would pass.)
+		// serving the passkey-bearing feed unauthenticated - and it is what
+		// distinguishes "auth not configured" (this 503, an operator problem)
+		// from "wrong key" (the 401 below). VerifyStaticToken itself fails
+		// CLOSED on an empty configured key, so skipping this guard could
+		// never open the gate; it would just misreport the unconfigured state
+		// as an unauthorized caller.
 		ix.log.Error("indexer request rejected", "reason", "feed_api_key not configured", "path", r.URL.Path)
 		http.Error(w, "service unavailable: feed_api_key not configured", http.StatusServiceUnavailable)
 		return
 	}
-	// Hash both values to fixed-length digests before the constant-time
-	// compare: ConstantTimeCompare short-circuits on differing lengths,
-	// which would otherwise leak the configured key's length (CWE-208).
-	provided := sha256.Sum256([]byte(q.Get("apikey")))
-	expected := sha256.Sum256([]byte(ix.cfg.APIKey))
-	if subtle.ConstantTimeCompare(provided[:], expected[:]) != 1 {
+	// Constant-time verification, with the length side-channel (CWE-208)
+	// closed by comparing fixed-length SHA-256 digests rather than the raw
+	// strings, lives in the shared library: see webhttp.VerifyStaticToken.
+	if !webhttp.VerifyStaticToken(ix.cfg.APIKey, q.Get("apikey")) {
 		ix.log.Info("indexer request rejected", "reason", "bad apikey", "path", r.URL.Path)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
