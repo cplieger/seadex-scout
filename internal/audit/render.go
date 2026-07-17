@@ -12,10 +12,10 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/cplieger/atomicfile/v2"
+	"github.com/cplieger/scheduler/v2"
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/textsafe"
@@ -158,28 +158,25 @@ var ErrReportRunning = errors.New("another report is already running")
 // ErrReportRunning and refuses (never blocks or waits). A strictly-sequential
 // same-second rerun does not overwrite either: WriteFiles probes a
 // deterministic -2/-3/... suffix for its pair stem while the lock is held
-// (see reportPairStem). The lock file is left in place on release; unlinking
-// it would open a window where two runs flock different inodes and both
-// proceed.
+// (see reportPairStem). The flock rides scheduler.TryLock: not-acquired is
+// reported without error (mapped to ErrReportRunning here), the kernel
+// releases the lock if the process dies (no stale-lock state), and the lock
+// file is left in place on release (unlinking it would open a window where
+// two runs flock different inodes and both proceed) holding only the current
+// holder's acquisition timestamp.
 func AcquireReportLock(dir string) (func(), error) {
 	if err := os.MkdirAll(dir, reportDirMode); err != nil {
 		return nil, fmt.Errorf("audit: create report dir %s: %w", dir, err)
 	}
 	path := filepath.Join(dir, reportLockName)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, reportFileMode)
+	lock, ok, err := scheduler.TryLock(path)
 	if err != nil {
-		return nil, fmt.Errorf("audit: open report lock %s: %w", path, err)
+		return nil, fmt.Errorf("audit: report lock %s: %w", path, err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, ErrReportRunning
-		}
-		return nil, fmt.Errorf("audit: lock %s: %w", path, err)
+	if !ok {
+		return nil, ErrReportRunning
 	}
-	// Closing the file releases the flock; the closure also keeps f reachable
-	// so a finalizer cannot close the descriptor (and drop the lock) early.
-	return func() { _ = f.Close() }, nil
+	return lock.Unlock, nil
 }
 
 // WriteFiles renders the report and atomically writes a timestamped JSON +

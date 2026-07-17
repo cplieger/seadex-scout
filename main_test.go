@@ -11,11 +11,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cplieger/arrapi"
 	"github.com/cplieger/health"
+	"github.com/cplieger/scheduler/v2"
 	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/config"
 	"github.com/cplieger/slogx"
@@ -439,26 +441,40 @@ func (c cancelCycler) Cycle(context.Context) bool {
 	return c.healthy
 }
 
+// testCycleExclusive builds a cycle coalescer for tests in a temp dir, wired
+// exactly like production (newCycleExclusive, including the shutdown gate on
+// ctx), so the tests exercise the real gate and lock wiring.
+func testCycleExclusive(t *testing.T, ctx context.Context) *scheduler.Exclusive {
+	t.Helper()
+	ex, err := newCycleExclusive(ctx, t.TempDir())
+	if err != nil {
+		t.Fatalf("newCycleExclusive: %v", err)
+	}
+	return ex
+}
+
 // TestPollCycleUniformInterruption pins poll's uniform interruption contract:
-// a cancellation observed at ANY phase - before the cycle starts, mid-cycle,
-// or after a cycle that still completed healthy (the signal landed during the
-// save) - returns an error wrapping context.Canceled (which main classifies as
-// a routine-shutdown WARN, never ERROR, and maps to exit 1) and never touches
-// the health marker, leaving it at the daemon's last real state.
+// a cancellation observed at ANY phase - before the cycle starts (the shutdown
+// gate refuses the run), mid-cycle, or after a cycle that still completed
+// healthy (the signal landed during the save) - returns an error wrapping
+// context.Canceled (which main classifies as a routine-shutdown WARN, never
+// ERROR, and maps to exit 1) and never touches the health marker, leaving it
+// at the daemon's last real state.
 func TestPollCycleUniformInterruption(t *testing.T) {
 	tests := []struct {
-		name      string
 		cycler    func(cancel context.CancelFunc) cycler
+		name      string
 		preCancel bool
 	}{
-		{"pre-cycle cancellation", func(context.CancelFunc) cycler { return boolCycler(false) }, true},
-		{"mid-cycle cancellation", func(cancel context.CancelFunc) cycler { return cancelCycler{cancel: cancel} }, false},
-		{"post-cycle cancellation after a healthy cycle", func(cancel context.CancelFunc) cycler { return cancelCycler{cancel: cancel, healthy: true} }, false},
+		{func(context.CancelFunc) cycler { return boolCycler(false) }, "pre-cycle cancellation", true},
+		{func(cancel context.CancelFunc) cycler { return cancelCycler{cancel: cancel} }, "mid-cycle cancellation", false},
+		{func(cancel context.CancelFunc) cycler { return cancelCycler{cancel: cancel, healthy: true} }, "post-cycle cancellation after a healthy cycle", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			ex := testCycleExclusive(t, ctx)
 			if tt.preCancel {
 				cancel()
 			}
@@ -469,7 +485,7 @@ func TestPollCycleUniformInterruption(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			err := pollCycle(ctx, tt.cycler(cancel), health.NewMarker(path))
+			err := pollCycle(ctx, ex, tt.cycler(cancel), health.NewMarker(path))
 
 			if err == nil {
 				t.Fatal("pollCycle = nil, want the interruption error (exit 1)")
@@ -494,7 +510,7 @@ func TestPollCycleUniformInterruption(t *testing.T) {
 func TestPollCycleUninterrupted(t *testing.T) {
 	t.Run("healthy cycle sets the marker", func(t *testing.T) {
 		marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
-		if err := pollCycle(context.Background(), boolCycler(true), marker); err != nil {
+		if err := pollCycle(context.Background(), testCycleExclusive(t, context.Background()), boolCycler(true), marker); err != nil {
 			t.Fatalf("pollCycle(healthy) = %v, want nil", err)
 		}
 		if !marker.Healthy() {
@@ -503,7 +519,7 @@ func TestPollCycleUninterrupted(t *testing.T) {
 	})
 	t.Run("unhealthy cycle sets the marker and errors", func(t *testing.T) {
 		marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
-		err := pollCycle(context.Background(), boolCycler(false), marker)
+		err := pollCycle(context.Background(), testCycleExclusive(t, context.Background()), boolCycler(false), marker)
 		if err == nil {
 			t.Fatal("pollCycle(unhealthy) = nil, want the ingest error")
 		}
@@ -521,14 +537,15 @@ func TestPollCycleUninterrupted(t *testing.T) {
 // overwrite the health marker (the guard `if !healthy && ctx.Err() != nil`),
 // while a cycle that still completed healthy during shutdown records its
 // outcome. A regression here would flip the container unhealthy on every
-// redeploy.
+// redeploy. Both paths run through the cycle lock's acquired path, so they
+// also prove a tick executes normally under RunOrSkip.
 func TestRunSchedulerShutdownMidCycle(t *testing.T) {
 	t.Run("interrupted unhealthy cycle leaves the marker", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
 		marker.Set(true)
-		runScheduler(ctx, time.Hour, cancelCycler{cancel: cancel}, marker)
+		runScheduler(ctx, time.Hour, testCycleExclusive(t, ctx), cancelCycler{cancel: cancel}, marker)
 		if !marker.Healthy() {
 			t.Error("marker unhealthy after a shutdown-interrupted cycle")
 		}
@@ -538,11 +555,270 @@ func TestRunSchedulerShutdownMidCycle(t *testing.T) {
 		defer cancel()
 		marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
 		marker.Set(false)
-		runScheduler(ctx, time.Hour, cancelCycler{cancel: cancel, healthy: true}, marker)
+		runScheduler(ctx, time.Hour, testCycleExclusive(t, ctx), cancelCycler{cancel: cancel, healthy: true}, marker)
 		if !marker.Healthy() {
 			t.Error("marker not healthy after a healthy cycle")
 		}
 	})
+}
+
+// mustNotRunCycler fails the test if a cycle executes; it pins the paths where
+// the cycle lock must prevent any run (a busy skip, a queued request).
+type mustNotRunCycler struct{ t *testing.T }
+
+func (c mustNotRunCycler) Cycle(context.Context) bool {
+	c.t.Error("cycle ran, want it not to run")
+	return true
+}
+
+// holdCycleLock seeds a bare flock holder on dir's cycle.lock, simulating a
+// cycle in flight in another process (flock contends per open file
+// description, so an in-process holder exercises the same kernel path).
+func holdCycleLock(t *testing.T, dir string) *scheduler.Lock {
+	t.Helper()
+	holder, ok, err := scheduler.TryLock(filepath.Join(dir, scheduler.ExclusiveLockName))
+	if err != nil || !ok {
+		t.Fatalf("seed TryLock = (ok=%v, err=%v), want (true, nil)", ok, err)
+	}
+	t.Cleanup(holder.Unlock)
+	return holder
+}
+
+// TestRunSchedulerSkipsBusyTick pins the daemon's skip mode: a tick arriving
+// while another process holds the cycle lock is skipped - the cycle never
+// runs, the health marker is untouched, and the library's pinned busy WARN is
+// emitted. Serial (capture swaps slog.Default).
+func TestRunSchedulerSkipsBusyTick(t *testing.T) {
+	rec := capture.Default(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dir := t.TempDir()
+	ex, err := newCycleExclusive(ctx, dir)
+	if err != nil {
+		t.Fatalf("newCycleExclusive: %v", err)
+	}
+	holdCycleLock(t, dir)
+
+	markerPath := filepath.Join(t.TempDir(), ".healthy")
+	if err := os.WriteFile(markerPath, []byte("sentinel-untouched"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// FireOnStart executes the first tick immediately; it skips (the lock is
+	// busy), then the loop waits out the interval until cancelled.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runScheduler(ctx, time.Hour, ex, mustNotRunCycler{t: t}, health.NewMarker(markerPath))
+	}()
+	waitFor(t, func() bool { return rec.Contains("cycle lock busy; skipping tick") })
+	cancel()
+	<-done
+
+	got, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("marker file after skipped tick: %v", err)
+	}
+	if string(got) != "sentinel-untouched" {
+		t.Errorf("marker content = %q, want untouched on a skipped tick", got)
+	}
+}
+
+// waitFor polls cond until it holds or a deadline expires.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not reached within the deadline")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestPollCycleQueuedWhenBusy pins poll's queue mode against a busy cycle
+// lock: the request is queued for the active runner, the cycle does NOT run in
+// this process, the marker stays untouched, and pollCycle exits 0 (nil) with
+// the coalescing log lines. Serial (capture swaps slog.Default).
+func TestPollCycleQueuedWhenBusy(t *testing.T) {
+	rec := capture.Default(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	ex, err := newCycleExclusive(ctx, dir)
+	if err != nil {
+		t.Fatalf("newCycleExclusive: %v", err)
+	}
+	holdCycleLock(t, dir)
+
+	markerPath := filepath.Join(t.TempDir(), ".healthy")
+	if err := os.WriteFile(markerPath, []byte("sentinel-untouched"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pollCycle(ctx, ex, mustNotRunCycler{t: t}, health.NewMarker(markerPath)); err != nil {
+		t.Fatalf("pollCycle(busy) = %v, want nil (queued is success, exit 0)", err)
+	}
+
+	if pending, perr := ex.Pending(); perr != nil || pending != 1 {
+		t.Errorf("Pending = (%d, %v), want (1, nil)", pending, perr)
+	}
+	if !rec.Contains("cycle lock busy; queued rerun request") {
+		t.Errorf("missing the library's queued line: %v", rec.Messages())
+	}
+	if !rec.Contains("compare cycle already in flight; demand queued for the active runner") {
+		t.Errorf("missing poll's own coalescing line: %v", rec.Messages())
+	}
+	got, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("marker file after queued poll: %v", err)
+	}
+	if string(got) != "sentinel-untouched" {
+		t.Errorf("marker content = %q, want untouched on a queued poll", got)
+	}
+}
+
+// TestPollCycleDiscardedWhenQueueFull pins the queue-full path: with a rerun
+// already queued (depth 1), a second busy poll is discarded - still exit 0,
+// no run, marker untouched - because the queued rerun already guarantees a
+// run starts after this request arrived. Serial (capture swaps slog.Default).
+func TestPollCycleDiscardedWhenQueueFull(t *testing.T) {
+	rec := capture.Default(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	ex, err := newCycleExclusive(ctx, dir)
+	if err != nil {
+		t.Fatalf("newCycleExclusive: %v", err)
+	}
+	holdCycleLock(t, dir)
+	marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
+
+	if err := pollCycle(ctx, ex, mustNotRunCycler{t: t}, marker); err != nil {
+		t.Fatalf("first busy pollCycle = %v, want nil (queued)", err)
+	}
+	if err := pollCycle(ctx, ex, mustNotRunCycler{t: t}, marker); err != nil {
+		t.Fatalf("second busy pollCycle = %v, want nil (discarded)", err)
+	}
+
+	if pending, perr := ex.Pending(); perr != nil || pending != 1 {
+		t.Errorf("Pending = (%d, %v), want (1, nil) (discard must not grow the queue)", pending, perr)
+	}
+	if !rec.Contains("cycle lock busy; rerun already queued; discarding request") {
+		t.Errorf("missing the library's discard line: %v", rec.Messages())
+	}
+}
+
+// signalCycler counts cycle executions; the first execution signals started
+// and blocks until release is closed (later executions pass straight
+// through), so a test can deterministically hold a cycle in flight.
+type signalCycler struct {
+	started chan struct{}
+	release chan struct{}
+	runs    *atomic.Int32
+}
+
+func (c *signalCycler) Cycle(context.Context) bool {
+	if c.runs.Add(1) == 1 {
+		close(c.started)
+	}
+	<-c.release
+	return true
+}
+
+// TestPollCycleExecutesQueuedRerun pins the queue-of-1 coalescing end to end
+// within one process: a second poll arriving mid-cycle queues and exits 0
+// immediately (never blocking for the job's duration), and the active runner
+// executes exactly one rerun for it at cycle end - so the queued demand gets
+// a run that started after it arrived. Serial (capture swaps slog.Default).
+func TestPollCycleExecutesQueuedRerun(t *testing.T) {
+	rec := capture.Default(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	ex, err := newCycleExclusive(ctx, dir)
+	if err != nil {
+		t.Fatalf("newCycleExclusive: %v", err)
+	}
+	marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
+
+	sc := &signalCycler{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		runs:    &atomic.Int32{},
+	}
+	holderErr := make(chan error, 1)
+	go func() { holderErr <- pollCycle(ctx, ex, sc, marker) }()
+	<-sc.started // the holder is mid-cycle
+
+	// The overlapping poll queues its demand and returns without running.
+	if err := pollCycle(ctx, ex, mustNotRunCycler{t: t}, marker); err != nil {
+		t.Fatalf("overlapping pollCycle = %v, want nil (queued)", err)
+	}
+
+	close(sc.release) // let the holder finish; its consume loop reruns once
+	if err := <-holderErr; err != nil {
+		t.Fatalf("holder pollCycle = %v, want nil", err)
+	}
+
+	if runs := sc.runs.Load(); runs != 2 {
+		t.Errorf("cycle ran %d times, want 2 (own run + one queued rerun)", runs)
+	}
+	if pending, perr := ex.Pending(); perr != nil || pending != 0 {
+		t.Errorf("Pending after rerun = (%d, %v), want (0, nil)", pending, perr)
+	}
+	if !rec.Contains("running queued cycle request") {
+		t.Errorf("missing the library's rerun line: %v", rec.Messages())
+	}
+	if !marker.Healthy() {
+		t.Error("marker not healthy after the rerun recorded its outcome")
+	}
+}
+
+// TestPollCycleCoordinationFailure pins the infrastructure-failure path:
+// an unusable cycle lock (the lock path is a directory) means nothing ran and
+// no demand was recorded, so pollCycle returns the error (exit 1) and never
+// reads as an interruption.
+func TestPollCycleCoordinationFailure(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	ex, err := newCycleExclusive(ctx, dir)
+	if err != nil {
+		t.Fatalf("newCycleExclusive: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, scheduler.ExclusiveLockName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
+
+	err = pollCycle(ctx, ex, mustNotRunCycler{t: t}, marker)
+
+	if err == nil {
+		t.Fatal("pollCycle(unusable lock) = nil, want the coordination error (exit 1)")
+	}
+	if !strings.Contains(err.Error(), "cycle coordination failed") {
+		t.Errorf("err = %q, want it wrapped as cycle coordination failed", err)
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, must not read as an interruption", err)
+	}
+}
+
+// TestNewCycleExclusiveMkdirError pins the fail-fast contract: an uncreatable
+// lock directory surfaces as a wrapped error (the daemon and poll refuse to
+// start uncoordinated) instead of degrading to per-tick failures.
+func TestNewCycleExclusiveMkdirError(t *testing.T) {
+	parent := t.TempDir()
+	blocker := filepath.Join(parent, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := newCycleExclusive(context.Background(), filepath.Join(blocker, "sub"))
+
+	if err == nil {
+		t.Fatal("newCycleExclusive(uncreatable dir) = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "create cycle lock dir") {
+		t.Errorf("err = %q, want it wrapped as create cycle lock dir", err)
+	}
 }
 
 // TestLogIndexerStopClassifiesShutdownAndFault pins the indexer feed's stop

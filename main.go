@@ -29,6 +29,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"syscall"
@@ -218,6 +219,29 @@ func runReport(cfg *config.Config) error {
 	return rep.WriteFiles(ctx, cfg.ReportDir, slog.Default())
 }
 
+// cycleDirMode is applied when creating the cycle-lock directory (normally
+// /config, which already exists as the mounted volume holding the config and
+// state files this lock guards).
+const cycleDirMode = 0o755
+
+// newCycleExclusive builds the cross-process cycle coalescer shared by every
+// cycle entry point: the daemon's RunLoop ticks (skip mode) and exec'd `poll`
+// subcommands (queue mode) serialize on dir/cycle.lock, closing the
+// last-writer-wins race two concurrent cycles run on state.json (AniList memo
+// and finding-dedupe loss, duplicate alerts) and feed.json. dir is the state
+// directory (filepath.Dir(config.DefaultStatePath)) so the lock lives beside
+// the files it guards; the kernel releases the flock if a process dies, so
+// there is no stale-lock state. The gate stops queued reruns (and a
+// not-yet-started initial run) once shutdown is signalled; an in-flight run
+// is never interrupted by the gate - context cancellation owns that.
+func newCycleExclusive(ctx context.Context, dir string) (*scheduler.Exclusive, error) {
+	if err := os.MkdirAll(dir, cycleDirMode); err != nil {
+		return nil, fmt.Errorf("create cycle lock dir %s: %w", dir, err)
+	}
+	return scheduler.NewExclusive(dir, slog.Default(),
+		scheduler.WithGate(func() bool { return ctx.Err() == nil })), nil
+}
+
 // pollInterrupted wraps the shutdown cancellation cause with poll's uniform
 // interruption message, so main classifies it as a routine-shutdown WARN and
 // the marker-untouched contract reads identically from every phase.
@@ -229,6 +253,9 @@ func pollInterrupted(ctx context.Context) error {
 // It updates the health marker to the cycle's outcome, leaving it in place (no
 // Cleanup) so the container healthcheck reads the last poll, and exits non-zero
 // on an unhealthy cycle so the scheduler (Ofelia job-exec, cron) sees the fail.
+// The cycle runs under the cross-process cycle lock in queue mode: a request
+// arriving while another cycle is in flight (an overlapping poll, or a daemon
+// tick) is queued for the active runner instead of racing it (see pollCycle).
 //
 // Interruption contract (uniform across every phase of poll): a shutdown
 // cancellation observed at any point - during startup, mid-cycle, or after the
@@ -251,18 +278,22 @@ func runPoll(cfg *config.Config) error {
 	}
 	defer b.cleanup()
 
-	return pollCycle(ctx, b.scout, health.NewMarker(health.DefaultPath))
+	ex, err := newCycleExclusive(ctx, filepath.Dir(config.DefaultStatePath))
+	if err != nil {
+		return err
+	}
+	return pollCycle(ctx, ex, b.scout, health.NewMarker(health.DefaultPath))
 }
 
-// pollCycle runs poll's one cycle and applies the uniform interruption
-// contract documented on runPoll: a cancellation observed at any point - even
-// when the cycle still managed to complete healthy (e.g. the signal landed
-// during the end-of-cycle save) - exits non-zero and leaves the shared marker
-// at the daemon's last real state, since an interrupted run's outcome is not a
-// trustworthy health verdict. Wrapping the cancellation cause lets main
-// classify the interruption as a routine shutdown (WARN, not the level=ERROR
-// cycle-error alert).
-func pollCycle(ctx context.Context, sc cycler, marker *health.Marker) error {
+// pollOnce is one execution of poll's cycle body under the cycle lock: run the
+// cycle, apply the interruption contract (a cancellation observed at any point
+// - even when the cycle still managed to complete healthy, e.g. the signal
+// landed during the end-of-cycle save - leaves the shared marker at the
+// daemon's last real state, since an interrupted run's outcome is not a
+// trustworthy health verdict), then record the outcome on the marker. The
+// active runner may execute it again for demand queued by other processes;
+// each execution records its own cycle's health.
+func pollOnce(ctx context.Context, sc cycler, marker *health.Marker) error {
 	healthy := runCycle(ctx, sc)
 	if ctx.Err() != nil {
 		return pollInterrupted(ctx)
@@ -272,6 +303,64 @@ func pollCycle(ctx context.Context, sc cycler, marker *health.Marker) error {
 		return errors.New("compare cycle failed (library ingest)")
 	}
 	return nil
+}
+
+// pollCycle runs poll's one cycle under the cross-process cycle lock (queue
+// mode) and maps the coalescing outcome to poll's exit contract:
+//
+//   - Ran (or ran plus queued reruns): the exit code reflects this
+//     invocation's OWN (first) run - a healthy cycle exits 0, an unhealthy or
+//     interrupted one non-zero (see pollOnce). The closure can run again for
+//     demand queued by OTHER processes; those cycles report through their own
+//     log lines and marker updates, never this process's exit code.
+//   - Queued / Discarded: a cycle is already in flight (an overlapping poll or
+//     a daemon tick); the request was recorded for (or is already covered by)
+//     the active runner, which is owed to start a run after it arrived. That
+//     is success for this process: log and exit 0, marker untouched (the
+//     active runner's cycle records its own outcome).
+//   - Gated: shutdown was signalled before the run started - the uniform
+//     interruption contract applies (exit non-zero, WARN classification,
+//     marker untouched).
+//   - Nothing ran and no demand recorded (a cycle-lock infrastructure
+//     failure): exit non-zero with the error.
+func pollCycle(ctx context.Context, ex *scheduler.Exclusive, sc cycler, marker *health.Marker) error {
+	// Capture the first execution's outcome: it is this invocation's own run.
+	// The closure returns nil to Exclusive so exErr stays purely a
+	// coordination-infrastructure signal (job outcomes must not stop queued
+	// demand or muddy the infra-error accounting below).
+	var own error
+	ran := false
+	outcome, exErr := ex.Run(func() error {
+		err := pollOnce(ctx, sc, marker)
+		if !ran {
+			own, ran = err, true
+		}
+		return nil
+	})
+	switch outcome {
+	case scheduler.OutcomeQueued, scheduler.OutcomeDiscarded:
+		if exErr != nil {
+			slog.Warn("cycle coordination error after queueing; demand stands", "error", exErr)
+		}
+		slog.Info("compare cycle already in flight; demand queued for the active runner",
+			"outcome", outcome.String())
+		return nil
+	case scheduler.OutcomeGated:
+		return pollInterrupted(ctx)
+	case scheduler.OutcomeNone, scheduler.OutcomeRan, scheduler.OutcomeRanQueued, scheduler.OutcomeSkipped:
+		// Fall through to the ran/own accounting below. OutcomeSkipped is
+		// unreachable from queue-mode Run; it is listed for switch completeness.
+	}
+	if !ran {
+		return fmt.Errorf("cycle coordination failed: %w", exErr)
+	}
+	if exErr != nil {
+		// The run itself completed; a queue-file error only degrades the
+		// demand-coalescing bookkeeping, so it is logged rather than failing
+		// the cycle this invocation paid for.
+		slog.Warn("cycle coordination error after run", "error", exErr)
+	}
+	return own
 }
 
 // run wires up the daemon and polls until the context is cancelled. It returns
@@ -327,10 +416,17 @@ func run(cfg *config.Config) error {
 	// Built-in scheduler. Healthy on boot: the first cycle runs as the loop's
 	// first iteration (immediately), so a slow first cycle never gates startup
 	// health. The marker thereafter reflects each cycle's library-ingest outcome.
+	// Ticks run under the cross-process cycle lock in skip mode, so a tick
+	// arriving while an exec'd `poll` cycle is in flight skips instead of
+	// racing it (see runScheduler).
+	ex, err := newCycleExclusive(ctx, filepath.Dir(config.DefaultStatePath))
+	if err != nil {
+		return err
+	}
 	marker.Set(true)
 	slog.Info("seadex-scout started", "poll_interval", cfg.PollInterval.String(), "indexer", cfg.IndexerConfigured())
 
-	runScheduler(ctx, cfg.PollInterval, b.scout, marker)
+	runScheduler(ctx, cfg.PollInterval, ex, b.scout, marker)
 	normalShutdown = true
 	return nil
 }
@@ -385,13 +481,34 @@ func logIndexerStop(ctx context.Context, err error) {
 // runScheduler runs a cycle on each tick of a POLL_INTERVAL timer with ±10%
 // jitter until ctx is cancelled. The first iteration fires immediately so a
 // cycle runs promptly on boot; the marker is set to each cycle's health.
-func runScheduler(ctx context.Context, interval time.Duration, sc cycler, marker *health.Marker) {
+// Each tick body runs under the cross-process cycle lock in skip mode: a tick
+// arriving while a cycle is already in flight (an exec'd `poll` racing the
+// loop) is skipped with a WARN and the marker untouched - the next tick
+// provides freshness, and the in-flight cycle records its own outcome. An
+// acquired tick also executes demand queued by `poll` requests that arrived
+// during it (one rerun per queued request), each recording its own health.
+// A coordination-infrastructure failure (the lock or queue file unusable)
+// means the tick could not run at all and is logged at ERROR - cycles have
+// stopped, which the operator must see (the level=ERROR Loki alert fires).
+func runScheduler(ctx context.Context, interval time.Duration, ex *scheduler.Exclusive, sc cycler, marker *health.Marker) {
 	scheduler.RunLoop(ctx, func(ctx context.Context) {
-		healthy := runCycle(ctx, sc)
-		if !healthy && ctx.Err() != nil {
-			return // shutdown mid-cycle: cancellation is not an ingest fault
+		outcome, err := ex.RunOrSkip(func() error {
+			healthy := runCycle(ctx, sc)
+			if !healthy && ctx.Err() != nil {
+				return nil // shutdown mid-cycle: cancellation is not an ingest fault
+			}
+			marker.Set(healthy)
+			return nil
+		})
+		switch {
+		case err == nil:
+		case outcome == scheduler.OutcomeNone:
+			slog.Error("cycle coordination failed; tick did not run", "error", err)
+		default:
+			// The tick's cycle ran; a queue-file error only degrades the
+			// demand-coalescing bookkeeping.
+			slog.Warn("cycle coordination error after run", "outcome", outcome.String(), "error", err)
 		}
-		marker.Set(healthy)
 	}, scheduler.LoopOptions{Interval: interval, FireOnStart: true, Jitter: 0.10})
 }
 

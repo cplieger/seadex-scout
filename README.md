@@ -95,7 +95,12 @@ The daemon follows the standard `*_INTERVAL` scheduling shape:
 - **External / resident-idle**: set `poll_interval: off` (or `disabled` / `0`).
   There is no internal timer; the container idles healthy and an external
   scheduler drives each cycle via the `poll` subcommand — which runs one cycle,
-  updates the health marker, and exits `0`/`1`. The Torznab feed, when configured,
+  updates the health marker, and exits `0`/`1`. Concurrent cycle requests
+  coalesce on a cross-process cycle lock (`cycle.lock` in `/config`): a `poll`
+  arriving while another cycle is in flight queues one rerun for the active
+  runner (extras are discarded — a queued rerun already guarantees a fresh
+  run) and exits `0` immediately, and in built-in mode a timer tick that lands
+  mid-cycle is skipped with a warning. The Torznab feed, when configured,
   refreshes on that same `poll` (it is served from the last cycle's snapshot, so it
   is empty until the first `poll` runs). With
   [Ofelia](https://github.com/mcuadros/ofelia), label the service:

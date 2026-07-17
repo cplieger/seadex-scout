@@ -278,8 +278,8 @@ func TestAcquireReportLockReportsOpenError(t *testing.T) {
 	if err == nil {
 		t.Fatal("AcquireReportLock must fail when report.lock is a directory")
 	}
-	if !strings.Contains(err.Error(), "open report lock") {
-		t.Errorf("error = %q, want it wrapped with the open-report-lock context", err)
+	if !strings.Contains(err.Error(), "report lock") {
+		t.Errorf("error = %q, want it wrapped with the report-lock context", err)
 	}
 	if errors.Is(err, ErrReportRunning) {
 		t.Error("an open failure must not be reported as a concurrent-run refusal")
