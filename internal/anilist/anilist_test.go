@@ -89,6 +89,8 @@ func TestParseMediaNotFoundClassification(t *testing.T) {
 		{name: "partial response with non-null Media and errors", raw: `{"data":{"Media":{"format":"TV","title":{"romaji":"A"}}},"errors":[{"message":"field resolution failed"}]}`, wantErr: true, wantNotFound: false},
 		{name: "empty Media object has no usable title", raw: `{"data":{"Media":{}}}`, wantErr: true, wantNotFound: false},
 		{name: "whitespace-only titles are not usable", raw: `{"data":{"Media":{"title":{"romaji":" ","english":"\t"}}}}`, wantErr: true, wantNotFound: false},
+		{name: "punctuation-only title normalizes to no match key", raw: `{"data":{"Media":{"format":"TV","title":{"romaji":"!!!"}}}}`, wantErr: true, wantNotFound: false},
+		{name: "decorated title keeps a match key", raw: `{"data":{"Media":{"format":"TV","title":{"romaji":"(A)"}}}}`, wantErr: false, wantNotFound: false},
 		{name: "media present", raw: `{"data":{"Media":{"format":"TV","seasonYear":2023,"title":{"romaji":"A"}}}}`, wantErr: false, wantNotFound: false},
 	}
 	for _, tt := range tests {
@@ -186,6 +188,7 @@ func TestParseMediaPageNullableEnvelope(t *testing.T) {
 		{name: "missing media", raw: `{"data":{"Page":{}}}`, wantErr: true},
 		{name: "null media", raw: `{"data":{"Page":{"media":null}}}`, wantErr: true},
 		{name: "record with whitespace-only title fails batch", raw: `{"data":{"Page":{"media":[{"id":1,"title":{"romaji":" "}}]}}}`, wantErr: true},
+		{name: "record with punctuation-only title fails batch", raw: `{"data":{"Page":{"media":[{"id":1,"title":{"romaji":"!!!"}}]}}}`, wantErr: true},
 		{name: "record with no title fails batch", raw: `{"data":{"Page":{"media":[{"id":1}]}}}`, wantErr: true},
 		{name: "empty media array", raw: `{"data":{"Page":{"media":[]}}}`, wantErr: false},
 	}

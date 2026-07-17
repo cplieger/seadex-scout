@@ -385,9 +385,10 @@ func (c *Client) fetchPage(ctx context.Context, page int, wireLimit int64) (pbLi
 // (perPage items, maxTorrentsPerEntry, maxFilesPerTorrent, maxTagsPerTorrent,
 // and the aggregate maxPageElements) BEFORE appending each element, so
 // allocation never scales with hostile array cardinality. Scalar values decode
-// via json.Decoder.Decode for stdlib-identical type handling; unknown fields
-// are token-skipped without materializing; a JSON null anywhere a container is
-// expected yields the zero value, matching json.Unmarshal.
+// via json.Decoder.Decode for stdlib-identical type handling; known keys
+// match case-insensitively (json.Unmarshal's fallback rule for field names);
+// unknown fields are token-skipped without materializing; a JSON null anywhere
+// a container is expected yields the zero value, matching json.Unmarshal.
 type pageDecoder struct {
 	dec      *json.Decoder
 	elements int
@@ -490,12 +491,12 @@ func (d *pageDecoder) decodeList() (pbList, error) {
 		if err != nil {
 			return list, err
 		}
-		switch k {
-		case "items":
+		switch {
+		case strings.EqualFold(k, "items"):
 			list.Items, err = d.decodeItems()
-		case "totalItems":
+		case strings.EqualFold(k, "totalItems"):
 			err = d.dec.Decode(&list.TotalItems)
-		case "totalPages":
+		case strings.EqualFold(k, "totalPages"):
 			err = d.dec.Decode(&list.TotalPages)
 		default:
 			err = d.skip()
@@ -544,19 +545,27 @@ func (d *pageDecoder) decodeEntry() (pbEntry, error) {
 		if err != nil {
 			return e, err
 		}
-		switch k {
-		case "notes":
+		switch {
+		case strings.EqualFold(k, "notes"):
 			err = d.dec.Decode(&e.Notes)
-		case "theoreticalBest":
+		case strings.EqualFold(k, "theoreticalBest"):
 			err = d.dec.Decode(&e.TheoreticalBest)
-		case "updated":
+		case strings.EqualFold(k, "updated"):
 			err = d.dec.Decode(&e.Updated)
-		case "alID":
+		case strings.EqualFold(k, "alID"):
 			err = d.dec.Decode(&e.AlID)
-		case "incomplete":
+		case strings.EqualFold(k, "incomplete"):
 			err = d.dec.Decode(&e.Incomplete)
-		case "expand":
-			e.Expand, err = d.decodeExpand()
+		case strings.EqualFold(k, "expand"):
+			// json.Unmarshal treats null into a non-pointer struct as a
+			// no-op; only assign when a real object was decoded, so a
+			// duplicate "expand":null cannot wipe an already-decoded value.
+			var expand pbExpand
+			var present bool
+			expand, present, err = d.decodeExpand()
+			if present {
+				e.Expand = expand
+			}
 		default:
 			err = d.skip()
 		}
@@ -567,28 +576,29 @@ func (d *pageDecoder) decodeEntry() (pbEntry, error) {
 	return e, d.close()
 }
 
-// decodeExpand decodes the expand relation envelope.
-func (d *pageDecoder) decodeExpand() (pbExpand, error) {
-	var ex pbExpand
+// decodeExpand decodes the expand relation envelope. present is false for a
+// JSON null (json.Unmarshal's null-into-struct no-op: the caller must leave
+// any previously decoded value in place rather than assign the zero value).
+func (d *pageDecoder) decodeExpand() (ex pbExpand, present bool, err error) {
 	ok, err := d.open('{')
 	if err != nil || !ok {
-		return ex, err
+		return ex, false, err
 	}
 	for d.dec.More() {
 		k, err := d.key()
 		if err != nil {
-			return ex, err
+			return ex, false, err
 		}
-		if k == "trs" {
+		if strings.EqualFold(k, "trs") {
 			ex.Trs, err = d.decodeTorrents()
 		} else {
 			err = d.skip()
 		}
 		if err != nil {
-			return ex, err
+			return ex, false, err
 		}
 	}
-	return ex, d.close()
+	return ex, true, d.close()
 }
 
 // decodeTorrents decodes one entry's expanded trs relation, capped at
@@ -627,22 +637,22 @@ func (d *pageDecoder) decodeTorrent() (Torrent, error) {
 		if err != nil {
 			return t, err
 		}
-		switch k {
-		case "releaseGroup":
+		switch {
+		case strings.EqualFold(k, "releaseGroup"):
 			err = d.dec.Decode(&t.ReleaseGroup)
-		case "tracker":
+		case strings.EqualFold(k, "tracker"):
 			err = d.dec.Decode(&t.Tracker)
-		case "infoHash":
+		case strings.EqualFold(k, "infoHash"):
 			err = d.dec.Decode(&t.InfoHash)
-		case "url":
+		case strings.EqualFold(k, "url"):
 			err = d.dec.Decode(&t.URL)
-		case "isBest":
+		case strings.EqualFold(k, "isBest"):
 			err = d.dec.Decode(&t.IsBest)
-		case "dualAudio":
+		case strings.EqualFold(k, "dualAudio"):
 			err = d.dec.Decode(&t.DualAudio)
-		case "files":
+		case strings.EqualFold(k, "files"):
 			t.Files, err = d.decodeFiles()
-		case "tags":
+		case strings.EqualFold(k, "tags"):
 			t.Tags, err = d.decodeTags()
 		default:
 			err = d.skip()

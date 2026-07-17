@@ -51,7 +51,9 @@ func torrentFileNames(files []seadex.File) []string {
 			maxLength = files[i].Length
 		}
 	}
-	minPrimary := (maxLength + 1) / 2
+	// Overflow-safe ceil-half: (maxLength+1)/2 wraps negative when an
+	// untrusted length is math.MaxInt64, which would let every file survive.
+	minPrimary := maxLength/2 + maxLength%2
 	names := make([]string, 0, len(files))
 	for i := range files {
 		if files[i].Name == "" {

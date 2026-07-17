@@ -126,7 +126,7 @@ func TestMdLinkPropertyHTTPDestinationsStayContained(t *testing.T) {
 			t.Fatalf("mdLink(%q, %q) = %q, want an HTTP Markdown link", label, rawURL, got)
 		}
 		dest := got[idx+2 : len(got)-1]
-		if strings.ContainsAny(dest, " \t\v\f\n\r()<>|") {
+		if strings.ContainsAny(dest, " \t\v\f\n\r()<>|\\`") {
 			t.Errorf("mdLink(%q, %q) destination %q contains a raw URL metacharacter", label, rawURL, dest)
 		}
 		for _, r := range dest {

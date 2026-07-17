@@ -41,9 +41,11 @@ type upstream struct {
 // body read, AND the Torznab decode - so a transient truncated or malformed
 // 200 response participates in the same bounded budget as a failed request
 // (the query is an idempotent GET). Exactly one layer owns multiple attempts:
-// the outer RetryWithBackoff runs upstreamMaxAttempts total, and the inner
-// httpx.Retry is pinned to a single attempt (WithMaxAttempts(1)), so there is
-// no 3x3 retry explosion.
+// the outer RetryWithBackoff runs upstreamMaxAttempts total, and fetchAndParse
+// performs exactly one bounded GET per call, so there is no nested retry
+// explosion. A 429's capped Retry-After survives as a RetryAfterHint on the
+// transient error, so RetryWithBackoff waits the upstream-requested delay
+// instead of its jittered backoff.
 func (u *upstream) search(ctx context.Context, params url.Values) ([]item, error) {
 	reqURL := u.feed
 	if enc := params.Encode(); enc != "" {
@@ -66,24 +68,37 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, error
 
 // fetchAndParse performs ONE search attempt: a single bounded HTTP fetch
 // followed by the Torznab decode. Errors the enclosing RetryWithBackoff should
-// retry are marked transient: a 429/5xx status (which httpx.Retry itself would
-// have retried before the loop moved outward) and a parse failure of a 2xx
+// retry are marked transient: a 429/5xx status (with the 429's capped
+// Retry-After carried as the transient error's RetryAfterHint, so the outer
+// loop honors the upstream-requested delay) and a parse failure of a 2xx
 // body (transient truncated/garbled output on an idempotent GET). Transient
 // transport errors (timeouts, resets, DNS) already classify via
-// httpx.IsTransient through the wrapped chain; anything else (a 4xx, an
+// httpx.IsTransient through the returned chain; anything else (a 4xx, an
 // unparseable URL) stays terminal.
 func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, error) {
-	body, err := httpx.Retry(ctx, u.http, reqURL,
-		httpx.WithMaxAttempts(1),
-		httpx.WithBaseDelay(upstreamBaseDelay),
-		httpx.WithMaxBodyBytes(upstreamMaxBytes),
-		httpx.WithHeaders(u.setHeaders),
-		httpx.WithLogger(u.log),
-	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
-		if errors.Is(err, httpx.ErrRateLimited) || errors.Is(err, httpx.ErrServerError) {
-			return nil, &transientUpstreamError{err: err}
+		return nil, err
+	}
+	u.setHeaders(req)
+	resp, err := u.http.Do(req)
+	if err != nil {
+		// LogSafeError reduces a URL-embedding *url.Error to its cause
+		// (preserving errors.Is/As, so IsTransient still classifies it),
+		// matching the redaction httpx.Retry applied here before.
+		return nil, httpx.LogSafeError(err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		retryAfter := httpx.ParseRetryAfter(resp.Header.Get("Retry-After"))
+		httpx.DrainClose(resp.Body)
+		statusErr := &httpx.StatusError{URL: reqURL, Code: resp.StatusCode}
+		if errors.Is(statusErr, httpx.ErrRateLimited) || errors.Is(statusErr, httpx.ErrServerError) {
+			return nil, &transientUpstreamError{err: statusErr, retryAfter: retryAfter}
 		}
+		return nil, statusErr
+	}
+	body, err := httpx.ReadLimitedBody(resp.Body, upstreamMaxBytes)
+	if err != nil {
 		return nil, err
 	}
 	items, err := parseTorznab(body)
@@ -96,12 +111,19 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 // transientUpstreamError marks an upstream failure retryable for
 // httpx.RetryWithBackoff (via the httpx.Transient interface): a retryable
 // status or a malformed successful body, neither of which IsTransient
-// classifies on its own.
-type transientUpstreamError struct{ err error }
+// classifies on its own. retryAfter, when positive, is the 429's parsed and
+// capped Retry-After (via httpx.ParseRetryAfter, so it can never exceed
+// httpx.RetryAfterCap), exposed through RetryAfterHint so RetryWithBackoff
+// waits the upstream-requested delay instead of its jittered backoff.
+type transientUpstreamError struct {
+	err        error
+	retryAfter time.Duration
+}
 
-func (e *transientUpstreamError) Error() string     { return e.err.Error() }
-func (e *transientUpstreamError) Unwrap() error     { return e.err }
-func (e *transientUpstreamError) IsTransient() bool { return true }
+func (e *transientUpstreamError) Error() string                 { return e.err.Error() }
+func (e *transientUpstreamError) Unwrap() error                 { return e.err }
+func (e *transientUpstreamError) IsTransient() bool             { return true }
+func (e *transientUpstreamError) RetryAfterHint() time.Duration { return e.retryAfter }
 
 // filterDownloadURLs drops items whose download URL is not an absolute http(s)
 // URL on the same origin as the configured Prowlarr Torznab endpoint. The

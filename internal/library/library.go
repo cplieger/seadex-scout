@@ -342,7 +342,9 @@ func (w *Walker) resolveTags(ctx context.Context,
 	return includeIDs, excludeIDs, nil
 }
 
-// resolveOne resolves a single label set, logging unmatched labels. Any
+// resolveOne resolves a single label set, logging a count-only warning for
+// unmatched labels (values withheld: they pass through ${VAR} expansion and
+// could carry a secret - see the credential-safety test). Any
 // resolution error fails the walk (fail closed): silently disabling the filter
 // would admit every item past the configured arr_tags scoping for the cycle -
 // a mass-resolve / report-noise blast radius from one transient tag-endpoint

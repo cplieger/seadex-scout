@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"io/fs"
@@ -261,6 +262,49 @@ func TestStoreSaveOverCapReturnsErrorAndKeepsPreviousFile(t *testing.T) {
 	}
 	if !got.Baselined {
 		t.Error("previous state was not preserved after the rejected over-cap Save")
+	}
+}
+
+// TestStoreSaveExactCapBoundaryAccepted pins the accepted-size boundary of the
+// shared maxStateBytes invariant: a state whose json.Marshal encoding is
+// EXACTLY maxStateBytes must save (json.Encoder's appended trailing newline is
+// the encoder's artifact, not part of the persisted encoding, and must not tip
+// the boundary), the persisted file must be exactly maxStateBytes bytes (no
+// newline, so Load's bound reads it), and Load must round-trip it.
+func TestStoreSaveExactCapBoundaryAccepted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := NewStore(path, testLogger())
+	if err := store.Save(context.Background(), &State{Baselined: true}); err != nil {
+		t.Fatalf("seed valid state: %v", err)
+	}
+
+	padded := func(n int) *State {
+		return &State{Findings: map[string]report.Alerted{
+			"huge": {Finding: compare.Finding{Title: strings.Repeat("a", n)}},
+		}}
+	}
+	base, err := json.Marshal(padded(0))
+	if err != nil {
+		t.Fatalf("marshal boundary probe: %v", err)
+	}
+	exact := padded(maxStateBytes - len(base))
+
+	if err := store.Save(context.Background(), exact); err != nil {
+		t.Fatalf("Save of an exactly-maxStateBytes state was rejected: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat saved state: %v", err)
+	}
+	if info.Size() != maxStateBytes {
+		t.Errorf("saved file is %d bytes, want exactly %d (encoder newline must be truncated away)", info.Size(), maxStateBytes)
+	}
+	got, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load of the boundary-sized state: %v", err)
+	}
+	if gotLen := len(got.Findings["huge"].Finding.Title); gotLen != maxStateBytes-len(base) {
+		t.Errorf("round-tripped title length = %d, want %d", gotLen, maxStateBytes-len(base))
 	}
 }
 

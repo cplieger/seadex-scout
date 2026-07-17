@@ -761,8 +761,10 @@ func TestWalkSonarrUnmatchedIncludeTagLogsWarning(t *testing.T) {
 // TestWalkUnmatchedTagWarningNeverEmitsTagValues pins the credential-safety
 // contract of the unmatched-tag diagnostic: configured arr_tags values pass
 // through allowlisted ${VAR} expansion, so a typo like ${SONARR_API_KEY} can
-// place a secret in the label set. The warning must therefore carry only a
-// count, never the raw unmatched values.
+// place a secret in the label set. The warning is pinned structurally to the
+// count-only shape (exact message, exactly the which + unmatched_count
+// attributes), so any future full OR partial tag-value field fails the test
+// without relying on spotting a particular secret substring.
 func TestWalkUnmatchedTagWarningNeverEmitsTagValues(t *testing.T) {
 	const secret = "sekrit-expanded-api-key-9f8e7d"
 	fs := &fakeSonarr{
@@ -781,19 +783,33 @@ func TestWalkUnmatchedTagWarningNeverEmitsTagValues(t *testing.T) {
 	if _, err := w.Walk(context.Background()); err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
-	if !recordHasAttr(rec, "configured tags matched no arr tag", "unmatched_count", "1") {
-		t.Error("unmatched-tag warning missing the count-only unmatched_count attribute")
-	}
+	warnings := 0
 	for _, r := range rec.Records() {
-		if strings.Contains(r.Message, secret) {
-			t.Errorf("log message %q leaks the unmatched tag value", r.Message)
+		if r.Message != "configured tags matched no arr tag" {
+			continue
+		}
+		warnings++
+		if n := r.NumAttrs(); n != 2 {
+			t.Errorf("unmatched-tag warning carries %d attributes, want exactly 2 (which, unmatched_count)", n)
 		}
 		r.Attrs(func(a slog.Attr) bool {
-			if strings.Contains(a.Value.String(), secret) {
-				t.Errorf("log attribute %s=%q leaks the unmatched tag value", a.Key, a.Value)
+			switch a.Key {
+			case "which":
+				if got := a.Value.String(); got != "arr_tags.include" {
+					t.Errorf("which = %q, want %q", got, "arr_tags.include")
+				}
+			case "unmatched_count":
+				if got := a.Value.String(); got != "1" {
+					t.Errorf("unmatched_count = %q, want %q", got, "1")
+				}
+			default:
+				t.Errorf("unexpected attribute %s=%q on the count-only unmatched-tag warning", a.Key, a.Value)
 			}
 			return true
 		})
+	}
+	if warnings != 1 {
+		t.Fatalf("got %d unmatched-tag warnings, want exactly 1", warnings)
 	}
 }
 

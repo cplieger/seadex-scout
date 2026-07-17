@@ -2,6 +2,7 @@ package classify
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"testing"
 
@@ -75,6 +76,23 @@ func TestTorrentFileNamesDropsEmptyNamesPreservesOrder(t *testing.T) {
 	want := []string{"episode 01.mkv", "episode 02.mkv"}
 	if !slices.Equal(got, want) {
 		t.Errorf("torrentFileNames() = %v, want %v", got, want)
+	}
+}
+
+// TestTorrentFileNamesMaxInt64LengthKeepsOnlyPrimary pins the overflow
+// boundary of the ceil-half threshold: a JSON-valid file length of
+// math.MaxInt64 must not wrap the threshold negative and let a tiny
+// marker-bearing extra survive beside the primary payload.
+func TestTorrentFileNamesMaxInt64LengthKeepsOnlyPrimary(t *testing.T) {
+	files := []seadex.File{
+		{Name: "Show - 01 [1080p][HEVC].mkv", Length: math.MaxInt64},
+		{Name: "NCED [BDRemux].mkv", Length: 50_000_000},
+	}
+
+	got := torrentFileNames(files)
+	want := []string{"Show - 01 [1080p][HEVC].mkv"}
+	if !slices.Equal(got, want) {
+		t.Errorf("torrentFileNames() = %v, want only the primary name %v", got, want)
 	}
 }
 

@@ -127,9 +127,12 @@ func (s *Store) quarantine() {
 var errStateTooLarge = errors.New("state: encoded state exceeds size limit")
 
 // boundedWriter passes writes through to w while enforcing limit, so Save can
-// stream the JSON encoding into the pending temp file without holding a second
-// full copy of the encoded state and still refuse to persist a file Load is
-// contractually unable to read. A write that would cross the limit is rejected
+// refuse to persist a file Load is contractually unable to read before any
+// byte reaches the pending temp. (encoding/json's Encoder still buffers the
+// complete encoding internally before its single Write, so peak encode memory
+// is unchanged from the json.Marshal it replaced; the buffer is pooled and
+// released after Encode rather than held across the atomic replacement.) A
+// write that would cross the limit is rejected
 // whole — before any byte reaches w — with attempted recording the total the
 // encoder tried to produce, so the temp never holds an over-cap prefix.
 type boundedWriter struct {
@@ -176,19 +179,34 @@ func (s *Store) Save(ctx context.Context, st *State) error {
 	}
 	// Enforce the reader's bound on write too: persisting a file Load is
 	// contractually unable to consume would silently discard the whole cache
-	// next cycle (fail-open). The encoder streams into the pending temp
+	// next cycle (fail-open). The encoder writes into the pending temp
 	// through the bounded writer, which rejects an over-cap encoding before
 	// it lands; Cleanup discards the temp on any encode failure, so the
 	// last readable state file stays intact until Commit replaces it.
-	bw := &boundedWriter{w: pf, limit: maxStateBytes}
+	//
+	// The limit admits ONE byte beyond maxStateBytes for the trailing newline
+	// json.Encoder.Encode appends (json.Marshal produces none): a state whose
+	// json.Marshal encoding is exactly maxStateBytes must stay accepted, and
+	// the newline is truncated away below so the persisted file never exceeds
+	// what Load can read. The over-cap error subtracts that byte so the
+	// reported count is the JSON size, comparable to the limit it names.
+	bw := &boundedWriter{w: pf, limit: maxStateBytes + 1}
 	if encErr := json.NewEncoder(bw).Encode(&sanitized); encErr != nil {
 		if clErr := pf.Cleanup(); clErr != nil {
 			s.log.Warn("could not remove pending state temp file", "path", pf.Name(), "error", clErr)
 		}
 		if errors.Is(encErr, errStateTooLarge) {
-			return fmt.Errorf("state: encode: %d bytes exceeds the %d-byte load limit; keeping previous state file", bw.attempted, maxStateBytes)
+			return fmt.Errorf("state: encode: %d bytes exceeds the %d-byte load limit; keeping previous state file", bw.attempted-1, maxStateBytes)
 		}
 		return fmt.Errorf("state: encode: %w", encErr)
+	}
+	// Drop the encoder's guaranteed trailing newline so the persisted size
+	// matches the json.Marshal encoding Load's bound is defined against.
+	if truncErr := pf.Truncate(bw.written - 1); truncErr != nil {
+		if clErr := pf.Cleanup(); clErr != nil {
+			s.log.Warn("could not remove pending state temp file", "path", pf.Name(), "error", clErr)
+		}
+		return fmt.Errorf("state: write %s: %w", s.path, truncErr)
 	}
 	res, err := pf.Commit(ctx)
 	if err != nil {

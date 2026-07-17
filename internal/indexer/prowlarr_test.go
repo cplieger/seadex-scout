@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/cplieger/httpx/v2"
 )
 
 // TestUpstreamSearchPreservesExistingQuery pins the URL-join logic of the
@@ -180,5 +184,40 @@ func TestUpstreamSearchRetriesMalformedResponse(t *testing.T) {
 	defer mu.Unlock()
 	if calls != 2 {
 		t.Errorf("upstream called %d times, want 2 (one malformed attempt + one retry)", calls)
+	}
+}
+
+
+// TestFetchAndParseRateLimitCarriesRetryAfterHint pins the status path of the
+// single-attempt fetch: a 429 response's Retry-After survives as a positive
+// RetryAfterHint on the returned transient error (asserted directly, no
+// sleeping), so the enclosing RetryWithBackoff honors the upstream-requested
+// delay instead of its jittered backoff. The httpx sentinel chain is
+// preserved for the caller's errors.Is classification.
+func TestFetchAndParseRateLimitCarriesRetryAfterHint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "7")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
+	_, err := u.fetchAndParse(context.Background(), srv.URL)
+	if err == nil {
+		t.Fatal("fetchAndParse on a 429 returned nil error")
+	}
+	if !errors.Is(err, httpx.ErrRateLimited) {
+		t.Errorf("errors.Is(err, httpx.ErrRateLimited) = false (err = %v), want the sentinel preserved", err)
+	}
+	var transient httpx.Transient
+	if !errors.As(err, &transient) || !transient.IsTransient() {
+		t.Errorf("429 error is not transient (err = %v), want retryable", err)
+	}
+	var hint httpx.RetryAfterHint
+	if !errors.As(err, &hint) {
+		t.Fatalf("429 error carries no RetryAfterHint (err = %v)", err)
+	}
+	if got := hint.RetryAfterHint(); got != 7*time.Second {
+		t.Errorf("RetryAfterHint() = %v, want 7s from the upstream Retry-After header", got)
 	}
 }

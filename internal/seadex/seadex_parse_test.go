@@ -1,6 +1,8 @@
 package seadex
 
 import (
+	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -85,5 +87,62 @@ func TestEntryHasTheoreticalBest(t *testing.T) {
 	}
 	if !(&Entry{TheoreticalBest: "a stated remux"}).HasTheoreticalBest() {
 		t.Error("HasTheoreticalBest() = false with TheoreticalBest set, want true")
+	}
+}
+
+
+// TestDecodePageCaseInsensitiveKeysMatchUnmarshal is a json.Unmarshal oracle
+// for the token-level decoder's field matching: encoding/json accepts a
+// case-insensitive field-name match when no exact match exists, so an
+// upper-cased envelope from a drifted upstream must decode identically through
+// decodePage instead of silently zeroing every field (an empty catalogue).
+func TestDecodePageCaseInsensitiveKeysMatchUnmarshal(t *testing.T) {
+	body := []byte(`{"TOTALITEMS":1,"TOTALPAGES":1,"ITEMS":[{"ALID":7,"NOTES":"n",` +
+		`"THEORETICALBEST":"tb","INCOMPLETE":true,"EXPAND":{"TRS":[{"RELEASEGROUP":"PMR",` +
+		`"TRACKER":"Nyaa","INFOHASH":"abc","URL":"https://nyaa.si/view/1","ISBEST":true,` +
+		`"DUALAUDIO":true,"FILES":[{"name":"a.mkv","length":1}],"TAGS":["t"]}]}}]}`)
+
+	got, err := decodePage(body)
+	if err != nil {
+		t.Fatalf("decodePage: %v", err)
+	}
+	var want pbList
+	if err := json.Unmarshal(body, &want); err != nil {
+		t.Fatalf("json.Unmarshal oracle: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("decodePage = %+v, want json.Unmarshal parity %+v", got, want)
+	}
+	if len(got.Items) != 1 || got.Items[0].AlID != 7 || len(got.Items[0].Expand.Trs) != 1 {
+		t.Errorf("upper-case envelope lost data: %+v", got)
+	}
+}
+
+// TestDecodePageDuplicateExpandNullMatchesUnmarshal is a json.Unmarshal oracle
+// for duplicate-key null handling: json.Unmarshal treats null into the
+// non-pointer pbExpand struct as a no-op, so a torrent-bearing "expand"
+// followed by a duplicate "expand":null must preserve the decoded torrents
+// instead of silently zeroing them.
+func TestDecodePageDuplicateExpandNullMatchesUnmarshal(t *testing.T) {
+	body := []byte(`{"totalItems":1,"totalPages":1,"items":[{"alID":7,` +
+		`"expand":{"trs":[{"releaseGroup":"PMR","tracker":"Nyaa","isBest":true,` +
+		`"url":"https://nyaa.si/view/1"}]},"expand":null}]}`)
+
+	got, err := decodePage(body)
+	if err != nil {
+		t.Fatalf("decodePage: %v", err)
+	}
+	var want pbList
+	if err := json.Unmarshal(body, &want); err != nil {
+		t.Fatalf("json.Unmarshal oracle: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("decodePage = %+v, want json.Unmarshal parity %+v", got, want)
+	}
+	if len(got.Items) != 1 || len(got.Items[0].Expand.Trs) != 1 {
+		t.Fatalf("duplicate expand:null wiped the decoded torrents: %+v", got)
+	}
+	if got.Items[0].Expand.Trs[0].ReleaseGroup != "PMR" {
+		t.Errorf("torrent group = %q, want PMR preserved", got.Items[0].Expand.Trs[0].ReleaseGroup)
 	}
 }

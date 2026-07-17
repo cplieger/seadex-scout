@@ -314,7 +314,7 @@ func (m *gqlMedia) toMedia() (Media, error) {
 		year = m.StartDate.Year
 	}
 	titles := dedupeTitles(m.Title.Romaji, m.Title.English, m.Title.Native)
-	if len(titles) == 0 {
+	if !hasMatchableTitle(titles) {
 		return Media{}, errors.New("media missing usable title")
 	}
 	return Media{Titles: titles, Format: m.Format, Year: year}, nil
@@ -492,6 +492,23 @@ func dedupeTitles(titles ...string) []string {
 		out = append(out, t)
 	}
 	return out
+}
+
+// hasMatchableTitle reports whether at least one title survives the match
+// package's normalized-title key domain (lowercased [a-z0-9] only, the
+// normalizeTitle contract). A payload whose every title normalizes to an
+// empty key (punctuation-only, or entirely non-ASCII) would parse into a
+// Media that can never match and would be memoized as a permanent false
+// negative; erroring instead lets the lookup degrade and retry next cycle.
+func hasMatchableTitle(titles []string) bool {
+	for _, title := range titles {
+		for _, r := range strings.ToLower(title) {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // --- rate-limit error + adaptive throttle ---
