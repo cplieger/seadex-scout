@@ -9,12 +9,13 @@ import (
 // (release names, entry notes, group, tracker, MediaInfo codec) and asserts the
 // bounded-output and cross-function invariants the compare and audit layers
 // rely on: Kind/TrackerType/Codec/Resolution stay inside their enums, Group is
-// never empty (the NOGRP fallback), the classified group always intersects its
-// own raw group under NormalizeGroup, NormalizeGroup is idempotent, a bounded
-// remux token in the release name always classifies remux (per-file evidence
-// wins), a parsed resolution always ranks above 0 in ResolutionRank, and no
-// text can ever set DualAudio (the structured input flag, unset here, is its
-// only source).
+// never empty (the NOGRP fallback), the classified group is never PROVEN
+// divergent from its own raw group under GroupsOverlap (a known group matches
+// itself; an unknown-evidence group is indeterminate, never None), NormalizeGroup
+// is idempotent, a bounded remux token in the release name always classifies
+// remux (per-file evidence wins), a parsed resolution always ranks above 0 in
+// ResolutionRank, and no text can ever set DualAudio (the structured input
+// flag, unset here, is its only source).
 func FuzzClassify(f *testing.F) {
 	f.Add("Show 1080p BDRemux [Dual Audio]", "best remux available", "PMR", "Nyaa", "")
 	f.Add("Show x265 crf18", "", "", "AB", "HEVC")
@@ -65,8 +66,11 @@ func FuzzClassify(f *testing.F) {
 		if NormalizeGroup(ng) != ng {
 			t.Errorf("NormalizeGroup not idempotent: %q -> %q", ng, NormalizeGroup(ng))
 		}
-		if !GroupsIntersect([]string{rel.Group}, []string{group}) {
-			t.Errorf("classified group %q does not intersect its own raw group %q", rel.Group, group)
+		switch overlap := GroupsOverlap([]string{rel.Group}, []string{group}); {
+		case overlap == OverlapNone:
+			t.Errorf("classified group %q proven divergent from its own raw group %q", rel.Group, group)
+		case overlap == OverlapKnown && ng == noGroupNormalized:
+			t.Errorf("unknown-evidence group %q read as a proven match against %q", rel.Group, group)
 		}
 
 		// Contract: per-file name evidence wins for the file, so a

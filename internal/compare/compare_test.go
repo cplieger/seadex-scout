@@ -226,6 +226,59 @@ func TestCompareBetterRelease(t *testing.T) {
 	}
 }
 
+// TestCompareUnverifiableEvidenceIsInfo pins the tri-state evidence model on
+// the findings path: unknown group evidence (the release.NoGroup sentinel) on
+// either side of the comparison yields ONE informational `unverifiable`
+// finding - never a silent aligned suppression (the former sentinel==sentinel
+// defect) and never a warn-level better_release (the live 26-NOGRP-best-
+// torrents class: SeaDex side unknown, library known). The finding carries
+// the recommendation fields for the manual review, and its dedupe key is
+// stable across cycles so the normal cross-cycle dedupe emits it once per
+// identity.
+func TestCompareUnverifiableEvidenceIsInfo(t *testing.T) {
+	tests := []struct {
+		name      string
+		diskGroup string
+		bestGroup string // "" classifies to the NoGroup sentinel
+	}{
+		{name: "unknown library evidence against a known best", diskGroup: "nogrp", bestGroup: "SubsPlease"},
+		{name: "known library group against a NOGRP-only best", diskGroup: "erai-raws", bestGroup: ""},
+		{name: "sentinel on both sides is not alignment proof", diskGroup: "nogrp", bestGroup: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := &library.Item{Title: "Unknown Evidence", Groups: []string{tt.diskGroup}, SeasonGroups: map[int][]string{1: {tt.diskGroup}}}
+			entry := seadex.Entry{AniListID: 900, Torrents: []seadex.Torrent{
+				{IsBest: true, ReleaseGroup: tt.bestGroup, Tracker: "Nyaa", URL: "https://nyaa.si/view/900"},
+			}}
+			m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+
+			got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+			if len(got) != 1 {
+				t.Fatalf("expected 1 unverifiable finding, got %d: %+v", len(got), got)
+			}
+			f := got[0]
+			if f.Status != StatusUnverifiable || f.Severity != SevInfo {
+				t.Errorf("status/severity = %q/%q, want unverifiable/info", f.Status, f.Severity)
+			}
+			if f.RecommendedGroups == nil || f.ReleaseURL == "" {
+				t.Errorf("recommendation fields must be filled for the manual review, got %+v", f)
+			}
+			if f.CurrentGroup != tt.diskGroup {
+				t.Errorf("CurrentGroup = %q, want the scoped on-disk group %q", f.CurrentGroup, tt.diskGroup)
+			}
+
+			// A second cycle over the same state produces the identical dedupe
+			// key, so the reporter's cross-cycle dedupe suppresses re-emission
+			// exactly like every other finding.
+			again := comparer(filter.Options{}, false).Compare([]match.Match{m})
+			if len(again) != 1 || again[0].DedupeKey != f.DedupeKey {
+				t.Errorf("dedupe key not stable across cycles: %q vs %q", f.DedupeKey, again[0].DedupeKey)
+			}
+		})
+	}
+}
+
 func TestCompareSeasonScopedFindingSeed(t *testing.T) {
 	// A series whose seasons carry different groups: season 1 SubsPlease, season 2
 	// Erai-raws, and item.Groups holds both. A SeaDex season-2 best for SubsPlease

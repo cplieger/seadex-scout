@@ -127,9 +127,11 @@ groups. Each row gets a verdict:
 - `have_alt`: you have a listed alt; SeaDex marks a different release best.
 - `have_unlisted`: you have a release SeaDex does not list.
 - `no_file`: the mapped season or movie has no file on disk.
-- `unverified`: files are present but no release group could be identified (rare;
-  the specials and absolute-numbered runs that once landed here now resolve to a
-  season).
+- `unverified`: the release-group evidence is unknown on one side — an on-disk
+  file with no identifiable group, or a SeaDex release with no group tag (both
+  carried as the `NOGRP` placeholder) — so alignment could be neither proven
+  nor ruled out. Absence of evidence is never read as evidence: such a row is
+  a manual check, not a `have_best` or a `have_unlisted`.
 
 After the per-match verdicts, a trailing **`not_on_seadex`** section lists library
 items recognized as anime (through the Fribb catalogue) that SeaDex does not list
@@ -425,7 +427,12 @@ silently dropped.
 
 The comparison is **group-centric**: an item is aligned when a recommended
 release group is already present on it. This sidesteps most multi-cour and
-batch-vs-per-season breakage.
+batch-vs-per-season breakage. Group evidence parsed from release names is
+three-valued — known group, known different group, or unknown (a group-less
+file or an untagged SeaDex release) — and unknown evidence proves nothing:
+instead of a confident verdict, such a comparison surfaces as the
+informational `unverifiable` finding status and the report's `unverified`
+verdict.
 
 These filters shape the **report/alert engine only** — the daemon's `better
 release` findings and the report. The [indexer](#indexer-torznab-feed) feed
@@ -529,7 +536,9 @@ port (fixed at `:9118`). An alert-only deployment stays socket-less.
   `recommended_group`, `tracker`, `resolution`, `kind`, `classification_reason`,
   a headline `release_url`, and `release_urls` (every obtainable source, so a
   release on both Nyaa and AnimeBytes carries both). Informational cases
-  (`incomplete`, `theoretical_best`, `mixed_group_manual`) log at `info`. Each
+  (`incomplete`, `theoretical_best`, `mixed_group_manual`, and `unverifiable` —
+  the release-group evidence on one side is unknown, so neither alignment nor
+  a better release can honestly be claimed) log at `info`. Each
   cycle closes with a completion line: `cycle complete` (carrying the counts,
   mapping coverage, and AniList usage) when healthy, or `cycle degraded` at
   `warn` with a `reason` when an upstream outage or a safety guard skipped or

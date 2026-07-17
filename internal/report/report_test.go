@@ -267,6 +267,37 @@ func TestAlertedDecodesLegacyFullFindingRecord(t *testing.T) {
 	}
 }
 
+// TestReporterUnverifiableFindingIsInfoNotBetterRelease pins the alert-rule
+// safety of the unverifiable status: the SeadexScoutBetterReleaseFound Loki
+// rule counts only msg="better release available" warn lines, so an
+// unverifiable finding must emit ONE line at INFO with its own message and
+// contribute zero warn-level better-release lines - and, like every finding,
+// it dedupes across cycles by its key (the second Report emits nothing new).
+func TestReporterUnverifiableFindingIsInfoNotBetterRelease(t *testing.T) {
+	reporter, recorder := newCapturedReporter()
+	finding := testFinding("unv", "Unknown Evidence")
+	finding.Severity = compare.SevInfo
+	finding.Status = compare.StatusUnverifiable
+
+	prior := reporter.Report([]compare.Finding{finding}, nil, nil, time.Now())
+	reporter.Report([]compare.Finding{finding}, prior, nil, time.Now())
+
+	if got := recorder.CountExact("release group unverifiable, manual review"); got != 1 {
+		t.Errorf("unverifiable notification count across two cycles = %d, want 1 (dedupe by identity)", got)
+	}
+	if got := recorder.CountExact("better release available"); got != 0 {
+		t.Errorf("better-release line count = %d, want 0 (the alert rule must not fire)", got)
+	}
+	for _, rec := range recorder.Records() {
+		if rec.Message != "release group unverifiable, manual review" {
+			continue
+		}
+		if rec.Level != slog.LevelInfo {
+			t.Errorf("unverifiable finding emitted at %s, want INFO", rec.Level)
+		}
+	}
+}
+
 // TestMessage maps every finding status to its human-facing slog message,
 // pinning the msg= text that Loki alert rules key on. The default arm covers
 // an unmapped status.
@@ -280,6 +311,7 @@ func TestMessage(t *testing.T) {
 		{name: "mixed group", status: compare.StatusMixedGroup, want: "series spans multiple release groups, manual review"},
 		{name: "incomplete", status: compare.StatusIncomplete, want: "SeaDex entry is incomplete"},
 		{name: "theoretical", status: compare.StatusTheoretical, want: "SeaDex lists a theoretical best only"},
+		{name: "unverifiable", status: compare.StatusUnverifiable, want: "release group unverifiable, manual review"},
 		{name: "unmapped status", status: compare.Status("unmapped_status"), want: "seadex finding"},
 	}
 	for _, tc := range cases {

@@ -103,6 +103,11 @@ func TestSeadexTags(t *testing.T) {
 			want:    "mixed-group · dual-audio",
 		},
 		{
+			name:    "unverifiable with resolution",
+			finding: compare.Finding{Status: compare.StatusUnverifiable, Resolution: "1080p"},
+			want:    "unverifiable · 1080p",
+		},
+		{
 			name:    "unknown kind is suppressed",
 			finding: compare.Finding{Status: compare.StatusBetter, Kind: "unknown", Resolution: "720p"},
 			want:    "best · 720p",

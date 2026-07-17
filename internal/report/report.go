@@ -246,6 +246,8 @@ func seadexTags(f *compare.Finding) string {
 		tags = append(tags, "theoretical-best")
 	case compare.StatusMixedGroup:
 		tags = append(tags, "mixed-group")
+	case compare.StatusUnverifiable:
+		tags = append(tags, "unverifiable")
 	}
 	if f.Kind != "" && f.Kind != string(release.KindUnknown) {
 		tags = append(tags, f.Kind)
@@ -281,6 +283,8 @@ func message(status compare.Status) string {
 		return "SeaDex entry is incomplete"
 	case compare.StatusTheoretical:
 		return "SeaDex lists a theoretical best only"
+	case compare.StatusUnverifiable:
+		return "release group unverifiable, manual review"
 	default:
 		return "seadex finding"
 	}

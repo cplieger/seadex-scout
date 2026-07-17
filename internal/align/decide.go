@@ -8,33 +8,46 @@ import (
 
 // Standing is the file-first group-ladder state of the scoped on-disk unit
 // against the SeaDex best and alt group sets: file presence is decided before
-// anything else, then a group-less unit, then best, then alt, then unlisted.
-// The audit report renders it 1:1 as the row verdict; the daemon's compare
-// pass branches on the linearized Outcome instead.
+// anything else, then proven-best, then unverifiable evidence, then alt, then
+// unlisted. Best and alt require PROVEN membership (a known on-disk group
+// matching a known recommended group, release.OverlapKnown); when the group
+// evidence on either side is unknown (the release.NoGroup sentinel) and could
+// hide such a match, the unit is unverified rather than confidently placed.
+// The audit report renders the standing 1:1 as the row verdict; the daemon's
+// compare pass branches on the linearized Outcome instead.
 type Standing int
 
 const (
 	// StandingNoFile means the scoped unit has no file on disk (for a
 	// whole-series comparison: no real season carries files).
 	StandingNoFile Standing = iota
-	// StandingUnverified means files are on disk but carry no comparable
-	// release group. Defensive: the release.NoGroup fallback makes a filed
-	// unit always carry at least one group in practice.
+	// StandingUnverified means files are on disk but the comparison is
+	// unverifiable: the release-group evidence on at least one side is
+	// unknown (a group-less on-disk file or a group-less SeaDex release,
+	// both carried as the release.NoGroup sentinel) and could hide the very
+	// membership being tested, so neither alignment nor divergence is
+	// proven. It also covers the defensive case of a filed unit carrying no
+	// group list at all.
 	StandingUnverified
-	// StandingBest means a best group is present on the scoped unit.
+	// StandingBest means a known best group is proven present on the scoped
+	// unit.
 	StandingBest
-	// StandingAlt means an alt group is present on the scoped unit and no
-	// best group is.
+	// StandingAlt means a known alt group is proven present on the scoped
+	// unit, the best comparison having proven divergent (all evidence known,
+	// no best group on disk).
 	StandingAlt
-	// StandingUnlisted means the unit's groups match neither prepared set.
+	// StandingUnlisted means every group on both sides is known evidence and
+	// the unit's groups match neither prepared set: a proven divergence.
 	StandingUnlisted
 )
 
 // Outcome is the linearized comparison decision shared by the daemon's
 // compare pass and the audit report, in the one branch order both flows
 // follow: file presence before the entry state (no file beats the no-best
-// nudge), the no-best fallback before any group comparison, alignment over
-// the mixed-group nudge, and mixed over the single-group divergence.
+// nudge), the no-best fallback before any group comparison, proven alignment
+// over everything group-shaped, unverifiable evidence before the mixed and
+// diverged claims (an unproven comparison must not surface as either), and
+// mixed over the single-group divergence.
 type Outcome int
 
 const (
@@ -45,15 +58,21 @@ const (
 	// group comparison to act on; the entry state (classify.Fallback) decides
 	// the nudge each consumer emits.
 	OutcomeNoBest
-	// OutcomeAligned means a best group is already present. Alignment wins no
-	// matter how many groups the unit spans: the daemon stays silent and the
-	// audit row is unqualified.
+	// OutcomeAligned means a known best group is proven present. Alignment
+	// wins no matter how many groups the unit spans or what unknown members
+	// ride along: the daemon stays silent and the audit row is unqualified.
 	OutcomeAligned
-	// OutcomeMixed means the unit is not aligned and spans more than one
-	// group, so no single current group can be attributed - a manual-review
-	// nudge rather than a false divergence.
+	// OutcomeUnverifiable means the comparison is indeterminate
+	// (StandingUnverified): unknown group evidence on either side could hide
+	// an alignment, so the daemon emits an informational unverifiable finding
+	// instead of a confident aligned silence or a better-release warning, and
+	// the audit records unverified.
+	OutcomeUnverifiable
+	// OutcomeMixed means the unit is not aligned and its known evidence spans
+	// more than one group, so no single current group can be attributed - a
+	// manual-review nudge rather than a false divergence.
 	OutcomeMixed
-	// OutcomeDiverged means the unit is not aligned with a single
+	// OutcomeDiverged means the unit is provenly not aligned with a single
 	// attributable group state: the actionable divergence (the daemon's
 	// better_release, downgraded by both consumers when the entry is
 	// incomplete).
@@ -92,8 +111,10 @@ func Decide(item *library.Item, rec *mapping.Record, best, alt []string) Decisio
 		// An absolute-numbered run / title-only match has no per-season Fribb
 		// mapping: its single whole-series recommendation is judged against
 		// every real season on disk, conservatively - best only when every
-		// filed season carries a best group - so a later season that needs a
-		// better release is not masked by an earlier season that has it.
+		// filed season provenly carries a best group - so a later season that
+		// needs a better release is not masked by an earlier season that has
+		// it, and a season with unknown evidence cannot make the whole series
+		// read best.
 		s := summarizeWholeSeries(item, best, alt)
 		d.Groups, d.Approx = s.Groups, s.Approx
 		d.Standing = wholeSeriesStanding(s)
@@ -107,28 +128,47 @@ func Decide(item *library.Item, rec *mapping.Record, best, alt []string) Decisio
 
 // unitStanding derives the group-ladder standing of a single-unit scope (a
 // movie, a mapped season, or the season-0 specials bucket): file presence
-// first, then the current groups matched against the best then the alt sets.
+// first, then the current groups matched against the best then the alt sets
+// under the three-valued release.GroupsOverlap. A proven best match wins; an
+// unverifiable best comparison short-circuits to unverified BEFORE the alt
+// rung (when "do you have the best?" is unanswerable, no alt placement may
+// imply you lack it); a proven-divergent best comparison falls to the alt
+// rung under the same rules; and only an all-known, matchless unit is
+// unlisted. A filed unit with no group list at all is unverified defensively.
 func unitStanding(hasFile bool, current, best, alt []string) Standing {
 	switch {
 	case !hasFile:
 		return StandingNoFile
 	case len(current) == 0:
 		return StandingUnverified
-	case release.GroupsIntersect(current, best):
-		return StandingBest
-	case release.GroupsIntersect(current, alt):
-		return StandingAlt
-	default:
-		return StandingUnlisted
 	}
+	switch release.GroupsOverlap(current, best) {
+	case release.OverlapKnown:
+		return StandingBest
+	case release.OverlapUnknown:
+		return StandingUnverified
+	}
+	switch release.GroupsOverlap(current, alt) {
+	case release.OverlapKnown:
+		return StandingAlt
+	case release.OverlapUnknown:
+		return StandingUnverified
+	}
+	return StandingUnlisted
 }
 
 // wholeSeriesStanding collapses the per-real-season aggregate to the most
-// conservative standing: no filed real season is no-file, any unlisted season
-// downgrades the whole series to unlisted, any alt-only season to alt, and
-// best requires every filed season to carry a best group. (With a nil alt -
-// the daemon's inputs - a season lacking a best group reads unlisted, so
-// "aligned" is exactly "no season is unlisted".)
+// conservative standing. The aggregation rule, in order: no filed real season
+// is no-file; any provenly-unlisted season downgrades the whole series to
+// unlisted and any proven alt-only season to alt (a proven divergence
+// somewhere stands regardless of unknown evidence elsewhere - the
+// recommendation is actionable either way); otherwise any season with
+// unverifiable evidence makes the series unverified (an unknown season could
+// hide a divergence, so it blocks the best claim without being able to prove
+// a downgrade); and best requires every filed season to provenly carry a
+// best group. (With a nil alt - the daemon's inputs - a season lacking a
+// best group reads unlisted, so "aligned" is exactly "no season is unlisted
+// or unverifiable".)
 func wholeSeriesStanding(s summary) Standing {
 	switch {
 	case s.Seasons == 0:
@@ -137,16 +177,19 @@ func wholeSeriesStanding(s summary) Standing {
 		return StandingUnlisted
 	case s.AnyAlt:
 		return StandingAlt
+	case s.AnyUnverified:
+		return StandingUnverified
 	default:
 		return StandingBest
 	}
 }
 
 // outcomeOf linearizes a standing into the shared branch order: file presence
-// beats the no-best nudge, no-best beats any group comparison, alignment
-// beats the mixed nudge, and mixed (a not-aligned unit spanning more than one
-// group) beats the single-group divergence. A group-less StandingUnverified
-// unit falls to OutcomeDiverged, never OutcomeMixed.
+// beats the no-best nudge, no-best beats any group comparison, proven
+// alignment beats everything group-shaped, an unverifiable comparison beats
+// both the mixed nudge and the divergence claim (neither may be asserted on
+// unknown evidence), and mixed (a not-aligned unit whose known evidence spans
+// more than one group) beats the single-group divergence.
 func outcomeOf(st Standing, groupCount int, noBest bool) Outcome {
 	switch {
 	case st == StandingNoFile:
@@ -155,6 +198,8 @@ func outcomeOf(st Standing, groupCount int, noBest bool) Outcome {
 		return OutcomeNoBest
 	case st == StandingBest:
 		return OutcomeAligned
+	case st == StandingUnverified:
+		return OutcomeUnverifiable
 	case groupCount > 1 && (st == StandingAlt || st == StandingUnlisted):
 		return OutcomeMixed
 	default:

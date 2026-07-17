@@ -1,11 +1,15 @@
 // Package align resolves which on-disk release groups a SeaDex entry should be
 // compared against (Scope) and owns the shared comparison decision over them
-// (Decide): file presence before entry state, alignment over the mixed-group
-// nudge, mixed only for a not-aligned multi-group unit, and the conservative
-// whole-series aggregation. It is the single source of truth for both,
-// consumed by BOTH the daemon's compare pass (internal/compare) and the audit
-// report (internal/audit) so the two never disagree about the same title -
-// each consumer only projects the one decision into its own vocabulary.
+// (Decide): file presence before entry state, proven alignment over everything
+// group-shaped, unverifiable evidence (release.OverlapUnknown: a NoGroup
+// member that could hide the membership being tested) before the mixed and
+// diverged claims, mixed only for a not-aligned multi-group unit, and the
+// conservative whole-series aggregation in which a proven divergence outranks
+// unverifiability and any unverifiable season blocks the best claim. It is the
+// single source of truth for both, consumed by BOTH the daemon's compare pass
+// (internal/compare) and the audit report (internal/audit) so the two never
+// disagree about the same title - each consumer only projects the one decision
+// into its own vocabulary.
 //
 // It stays a thin, library-aware leaf: it depends only on library, mapping, and
 // the pure release classifier - never on seadex, match, or the consumers - so it
@@ -78,7 +82,9 @@ func Scope(item *library.Item, rec *mapping.Record) ScopeResult {
 		// Group presence doubles as file presence here and in the specials
 		// branch below: release.Classify falls back to the literal NOGRP
 		// (release.NoGroup) for a group-less file, so a season with any file
-		// on disk always carries at least one group.
+		// on disk always carries at least one group member - possibly the
+		// unknown-evidence sentinel, which the decision layer treats as
+		// unverifiable, never as an identity.
 		g := item.SeasonGroups[rec.SeasonTvdb]
 		return ScopeResult{Kind: ScopeSeason, Groups: g, HasFile: len(g) > 0}
 	case wholeSeries(item, rec):
@@ -102,13 +108,19 @@ func wholeSeries(item *library.Item, rec *mapping.Record) bool {
 
 // summary is the per-real-season aggregate summarizeWholeSeries collects: the
 // sorted, deduped union of on-disk groups; how many real seasons (season 0
-// excluded) carried files; and whether any of those seasons matched an alt-only
-// or an unlisted group.
+// excluded) carried files; and whether any of those seasons matched an
+// alt-only group, proved unlisted, or was unverifiable (unknown group
+// evidence on either side of its comparison).
 type summary struct {
 	Groups      []string
 	Seasons     int
 	AnyAlt      bool
 	AnyUnlisted bool
+	// AnyUnverified marks at least one filed real season whose comparison was
+	// indeterminate (release.OverlapUnknown on the best or the alt rung): the
+	// season's evidence could hide an alignment or a divergence, so it blocks
+	// the whole-series best claim without proving a downgrade.
+	AnyUnverified bool
 	// Approx marks the comparison approximate when the aggregate spans more
 	// than one season or more than one release group: the whole-series arm of
 	// the same coarseness rule as ScopeResult.Approx (the single whole-series
@@ -117,13 +129,16 @@ type summary struct {
 }
 
 // summarizeWholeSeries walks the item's real seasons (season 0 excluded), unions
-// their on-disk groups (sorted, deduped), and records whether any real season
-// carried an alt-only or an unlisted group, so Decide can pick the most
-// conservative whole-series standing.
+// their on-disk groups (sorted, deduped), and classifies each filed season
+// under the three-valued release.GroupsOverlap - proven best, unverifiable,
+// proven alt, or unlisted - so wholeSeriesStanding can pick the most
+// conservative whole-series standing (proven downgrades outrank
+// unverifiability; any unverifiable season blocks the best claim).
 //
 // A caller that only distinguishes best-vs-not (the daemon's compare pass) passes
-// a nil alt: a season lacking a best group then surfaces as AnyUnlisted, so
-// "every on-disk season has a best group" is exactly "!AnyUnlisted".
+// a nil alt: a season provenly lacking a best group then surfaces as
+// AnyUnlisted, so "every on-disk season provenly has a best group" is exactly
+// "!AnyUnlisted && !AnyUnverified".
 func summarizeWholeSeries(item *library.Item, best, alt []string) summary {
 	seen := make(map[string]struct{})
 	var s summary
@@ -133,11 +148,18 @@ func summarizeWholeSeries(item *library.Item, best, alt []string) summary {
 		}
 		s.Seasons++
 		s.Groups = appendMissingGroups(s.Groups, seen, groups)
-		switch {
-		case release.GroupsIntersect(groups, best):
-			// this season carries a best group
-		case release.GroupsIntersect(groups, alt):
+		switch release.GroupsOverlap(groups, best) {
+		case release.OverlapKnown:
+			continue // this season provenly carries a best group
+		case release.OverlapUnknown:
+			s.AnyUnverified = true
+			continue
+		}
+		switch release.GroupsOverlap(groups, alt) {
+		case release.OverlapKnown:
 			s.AnyAlt = true
+		case release.OverlapUnknown:
+			s.AnyUnverified = true
 		default:
 			s.AnyUnlisted = true
 		}

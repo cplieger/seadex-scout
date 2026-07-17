@@ -10,9 +10,12 @@
 // season-0 bucket, a movie against its groups, and an absolute-numbered or
 // title-only run against every real season conservatively -
 // so a later season that needs a better release is not masked by an earlier
-// season that already has it. An item that already has a recommended group is
-// aligned and produces no finding; a recommended release the operator cannot
-// obtain is simply absent, never a finding.
+// season that already has it. An item that provenly has a recommended group is
+// aligned and produces no finding; an item whose group evidence is unknown on
+// either side (the release.NoGroup sentinel) is unverifiable and produces an
+// informational finding, never an aligned silence or a better-release warning;
+// a recommended release the operator cannot obtain is simply absent, never a
+// finding.
 package compare
 
 import (
@@ -42,6 +45,13 @@ const (
 	StatusIncomplete Status = "incomplete"
 	// StatusTheoretical means the entry only names a theoretical best (not muxed).
 	StatusTheoretical Status = "theoretical_best"
+	// StatusUnverifiable means the comparison is indeterminate: the release
+	// group evidence on at least one side is unknown (a group-less on-disk
+	// file or a group-less SeaDex release, both carried as the release.NoGroup
+	// sentinel) and could hide an alignment - so neither a confident aligned
+	// silence nor a better_release warning is honest. An informational
+	// manual-review nudge.
+	StatusUnverifiable Status = "unverifiable"
 )
 
 // Severity is the log level a finding maps to.
@@ -146,9 +156,12 @@ type candidate struct {
 // renders); this function only projects the outcome into finding vocabulary:
 // silence for a unit with no file on disk (the audit's no_file - compare has
 // no no-file status, so report-by-exception means the daemon stays quiet) and
-// for an aligned unit, the classify.Fallback nudge when no recommended
-// release survives the filters, a mixed_group_manual nudge for a not-aligned
-// multi-group unit, and a better release otherwise.
+// for a provenly aligned unit, the classify.Fallback nudge when no
+// recommended release survives the filters, an unverifiable info nudge when
+// unknown group evidence makes the comparison indeterminate (never a
+// confident aligned silence, never a better_release warning), a
+// mixed_group_manual nudge for a not-aligned multi-group unit, and a better
+// release otherwise.
 func (c *Comparer) compareOne(m *match.Match) *Finding {
 	entry := &m.Entry
 	recommended := c.recommended(entry)
@@ -165,6 +178,9 @@ func (c *Comparer) compareOne(m *match.Match) *Finding {
 		return emptyResult(entry, &base)
 	case align.OutcomeAligned:
 		return nil
+	case align.OutcomeUnverifiable:
+		fillBest(&base, recommended, recGroups)
+		return finalize(&base, StatusUnverifiable, SevInfo)
 	case align.OutcomeMixed:
 		fillBest(&base, recommended, recGroups)
 		return finalize(&base, StatusMixedGroup, SevInfo)

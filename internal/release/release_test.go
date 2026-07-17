@@ -2,10 +2,13 @@ package release
 
 import "testing"
 
-// TestGroupNoGroupFallback covers the NoGroup fallback: a release with no group
-// classifies and normalizes to NoGroup on both sides, so a group-less library
-// file and a group-less SeaDex release (or SeaDex's own literal "NOGRP") compare
-// as the same group rather than being skipped.
+// TestGroupNoGroupFallback covers the NoGroup fallback at the classification
+// layer: a release with no group classifies and normalizes to the NoGroup
+// sentinel on both sides, so a group-less library file and a group-less SeaDex
+// release (or SeaDex's own literal "NOGRP") serialize as the same first-class
+// token rather than being skipped. What the sentinel MEANS is the decision
+// layer's business: GroupsOverlap treats it as unknown evidence, never as an
+// identity (see TestGroupsOverlap).
 func TestGroupNoGroupFallback(t *testing.T) {
 	if got := Classify(&Input{Group: ""}).Group; got != NoGroup {
 		t.Errorf("Classify empty group = %q, want %q", got, NoGroup)
@@ -55,26 +58,38 @@ func TestClassifyDualAudioStructuredOnly(t *testing.T) {
 	}
 }
 
-// TestGroupsIntersectNormalizesAndHandlesNoGroup pins GroupsIntersect's
-// normalized-overlap contract: case/whitespace insensitivity, the NoGroup
-// fallback for empty groups, and false for disjoint or empty sets.
-func TestGroupsIntersectNormalizesAndHandlesNoGroup(t *testing.T) {
+// TestGroupsOverlap pins the three-valued group-set comparison's contract:
+// a known group shared between the sides (case/whitespace-insensitively) is
+// proven overlap; all-known disjoint sets are proven divergence; an unknown
+// member (the NoGroup sentinel or any of its spelling variants, including the
+// empty string) makes an otherwise matchless comparison indeterminate rather
+// than proving anything - sentinel∩sentinel is Unknown, never Known; a
+// known-known match wins outright even with unknown members alongside; and an
+// empty side is always None (nothing can overlap with an empty set, and an
+// unknown member cannot hide a match against one).
+func TestGroupsOverlap(t *testing.T) {
 	tests := []struct {
 		name string
 		a    []string
 		b    []string
-		want bool
+		want Overlap
 	}{
-		{name: "case and whitespace insensitive", a: []string{" SubsPlease "}, b: []string{"subsplease"}, want: true},
-		{name: "missing group matches NoGroup", a: []string{""}, b: []string{NoGroup}, want: true},
-		{name: "one overlapping normalized group", a: []string{"", "PMR"}, b: []string{"LostYears", " pmr "}, want: true},
-		{name: "disjoint groups do not intersect", a: []string{"PMR"}, b: []string{"LostYears"}, want: false},
-		{name: "empty side does not intersect", a: nil, b: []string{NoGroup}, want: false},
+		{name: "case and whitespace insensitive known match", a: []string{" SubsPlease "}, b: []string{"subsplease"}, want: OverlapKnown},
+		{name: "disjoint known groups are proven divergence", a: []string{"PMR"}, b: []string{"LostYears"}, want: OverlapNone},
+		{name: "sentinel on both sides is unknown, not a match", a: []string{""}, b: []string{NoGroup}, want: OverlapUnknown},
+		{name: "no-group spelling variants are unknown, not a match", a: []string{"no-group"}, b: []string{"nogroup"}, want: OverlapUnknown},
+		{name: "unknown library side against a known set is unknown", a: []string{NoGroup}, b: []string{"LostYears"}, want: OverlapUnknown},
+		{name: "known library side against an unknown set is unknown", a: []string{"SubsPlease"}, b: []string{NoGroup}, want: OverlapUnknown},
+		{name: "unknown member beside a known miss is unknown", a: []string{"SubsPlease", NoGroup}, b: []string{"LostYears"}, want: OverlapUnknown},
+		{name: "known-known match wins over unknown members", a: []string{NoGroup, "PMR"}, b: []string{"LostYears", " pmr "}, want: OverlapKnown},
+		{name: "empty side never overlaps", a: nil, b: []string{"PMR"}, want: OverlapNone},
+		{name: "unknown member against an empty side is none", a: []string{NoGroup}, b: nil, want: OverlapNone},
+		{name: "both sides empty is none", a: nil, b: nil, want: OverlapNone},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := GroupsIntersect(tc.a, tc.b); got != tc.want {
-				t.Errorf("GroupsIntersect(%v, %v) = %v, want %v", tc.a, tc.b, got, tc.want)
+			if got := GroupsOverlap(tc.a, tc.b); got != tc.want {
+				t.Errorf("GroupsOverlap(%v, %v) = %v, want %v", tc.a, tc.b, got, tc.want)
 			}
 		})
 	}

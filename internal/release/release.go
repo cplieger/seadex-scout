@@ -3,6 +3,11 @@
 // resolution, video codec, dual-audio, and remux-vs-encode. It is pure (it
 // operates on strings, not on SeaDex or arr types) so both the SeaDex side and
 // the library side can classify into one shared vocabulary and be compared.
+// It also owns the group vocabulary that comparison rests on: NormalizeGroup
+// (the canonical spelling, with every no-group variant folded onto the NoGroup
+// sentinel) and GroupsOverlap, the three-valued group-set comparison in which
+// a NoGroup member is unknown evidence — it can neither prove an overlap nor
+// permit a divergence proof — rather than an identity token.
 //
 // The remux-vs-encode decision is deliberately name-and-notes based, never a
 // size or bitrate inference: on SeaDex a remux is stated in the release name or
@@ -282,10 +287,17 @@ func IsNyaaHost(host string) bool {
 
 // NoGroup is the placeholder release group for a release that specifies none.
 // SeaDex already tags some group-less releases with the literal "NOGRP", so
-// falling back to it makes a group-less library file, a group-less SeaDex
-// release, and a SeaDex "NOGRP" release all compare as the same group instead of
-// vanishing from the comparison.
+// falling back to it keeps a group-less release a first-class, serializable
+// value — in stored findings, dedupe keys, and report cells — instead of an
+// empty string that gets skipped. It is a serialization and display token
+// carrying UNKNOWN EVIDENCE, never an identity: the decision layer
+// (GroupsOverlap) treats a NoGroup member as "the group could not be
+// determined", so two NoGroup members are never read as the same group.
 const NoGroup = "NOGRP"
+
+// noGroupNormalized is NoGroup in NormalizeGroup's canonical lowercase form:
+// the one token GroupsOverlap classifies as unknown evidence.
+var noGroupNormalized = strings.ToLower(NoGroup)
 
 // groupOrNoGroup trims a release group, falling back to NoGroup when none is
 // given, so a group-less release is a first-class comparable value rather than
@@ -308,32 +320,78 @@ var noGroupVariants = map[string]bool{
 // comparison lookups (SeaDex and arr casing differ), so the compare layer keys
 // group-membership sets the same way Classify keys overrides. An empty group
 // and every no-group spelling variant (NOGRP, NoGroup, no-group, ...)
-// normalizes to NoGroup so a missing group compares equal on both sides
-// regardless of how it was spelled.
+// normalizes to NoGroup, the canonical unknown-evidence token, so a missing
+// group serializes identically however it was spelled.
 func NormalizeGroup(group string) string {
 	g := strings.ToLower(strings.TrimSpace(group))
 	if g == "" || noGroupVariants[g] {
-		return strings.ToLower(NoGroup)
+		return noGroupNormalized
 	}
 	return g
 }
 
-// GroupsIntersect reports whether any group in a is present in b, comparing
-// both sides normalized (NormalizeGroup). It is the shared group-set overlap
-// test the compare and audit layers key alignment on, so the "is a recommended
-// group already present" decision lives in exactly one place. It operates only
-// on []string, keeping release a pure, seadex-free leaf.
-func GroupsIntersect(a, b []string) bool {
-	set := make(map[string]struct{}, len(b))
+// Overlap is the three-valued outcome of comparing two release-group sets.
+// Group evidence parsed from untrusted release names is inherently
+// three-valued — a known group, a known different group, or unknown (the
+// NoGroup sentinel and its spelling variants) — so a set comparison cannot
+// collapse to a boolean without reading absence of evidence as evidence:
+// a known shared group proves overlap, all-known disjoint sets prove
+// divergence, and an unknown member that could hide a shared group proves
+// nothing either way.
+type Overlap int
+
+const (
+	// OverlapNone means every member on both sides is known evidence and no
+	// group is shared: a proven divergence. An empty side is also None —
+	// nothing can overlap with an empty set, and an unknown member cannot
+	// hide a match against it.
+	OverlapNone Overlap = iota
+	// OverlapKnown means a known group on one side is present, known, on the
+	// other: proven common membership. Known evidence wins outright, whatever
+	// unknown members ride along in either set.
+	OverlapKnown
+	// OverlapUnknown means the comparison is indeterminate: no known group is
+	// shared, and at least one side carries an unknown member (NoGroup) while
+	// the other side is non-empty — the unknown member could be any group,
+	// including one that would make the sets overlap, so neither overlap nor
+	// divergence is proven.
+	OverlapUnknown
+)
+
+// GroupsOverlap is the shared three-valued group-set comparison the compare
+// and audit layers key alignment on, comparing both sides normalized
+// (NormalizeGroup) so the overlap decision lives in exactly one place. A
+// member that normalizes to the NoGroup sentinel is unknown evidence, never
+// an identity token: it can neither prove an overlap (sentinel∩sentinel is
+// OverlapUnknown, not a match) nor allow a divergence proof while it could
+// hide a match. It operates only on []string, keeping release a pure,
+// seadex-free leaf.
+func GroupsOverlap(a, b []string) Overlap {
+	knownB := make(map[string]struct{}, len(b))
+	unknownB := false
 	for _, g := range b {
-		set[NormalizeGroup(g)] = struct{}{}
+		n := NormalizeGroup(g)
+		if n == noGroupNormalized {
+			unknownB = true
+			continue
+		}
+		knownB[n] = struct{}{}
 	}
+	unknownA := false
 	for _, g := range a {
-		if _, ok := set[NormalizeGroup(g)]; ok {
-			return true
+		n := NormalizeGroup(g)
+		if n == noGroupNormalized {
+			unknownA = true
+			continue
+		}
+		if _, ok := knownB[n]; ok {
+			return OverlapKnown
 		}
 	}
-	return false
+	if (unknownA && len(b) > 0) || (unknownB && len(a) > 0) {
+		return OverlapUnknown
+	}
+	return OverlapNone
 }
 
 // ResolutionRank returns a comparable rank for a resolution string (its height

@@ -13,14 +13,19 @@ import (
 
 // TestCompareAuditConsistency runs the SAME (item, entry) through both align
 // consumers - the daemon's compare pass and the audit report - and pins that
-// they tell one story across the five states the shared vocabulary covers:
-// no-file, aligned, mixed-group (>1 group, not aligned), theoretical-only, and
-// incomplete. The daemon is report-by-exception (silence is its no-file and
-// aligned outcome); the audit enumerates, carrying the daemon's vocabulary as
-// the row Qualifier.
+// they tell one story across the six states the shared vocabulary covers:
+// no-file, aligned, unverifiable (unknown group evidence on either side),
+// mixed-group (>1 group, not aligned), theoretical-only, and incomplete. The
+// daemon is report-by-exception (silence is its no-file and aligned outcome);
+// the audit enumerates, carrying the daemon's vocabulary as the row Qualifier
+// (an unverifiable comparison needs no qualifier - its verdict, unverified,
+// IS the daemon's story).
 func TestCompareAuditConsistency(t *testing.T) {
 	nyaaBest := seadex.Entry{AniListID: 1, Torrents: []seadex.Torrent{
 		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
+	}}
+	nogrpBest := seadex.Entry{AniListID: 1, Torrents: []seadex.Torrent{
+		{IsBest: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/2"},
 	}}
 	seasonRec := mapping.Record{Type: "TV", SeasonTvdb: 1}
 	wholeRec := mapping.Record{Type: "TV"}
@@ -126,6 +131,38 @@ func TestCompareAuditConsistency(t *testing.T) {
 			wantStatus:    StatusBetter,
 			wantVerdict:   audit.VerdictUnlisted,
 			wantQualifier: "",
+		},
+		{
+			name:        "season unknown library evidence: daemon unverifiable, audit unverified",
+			seasons:     map[int][]string{1: {"nogrp"}},
+			record:      seasonRec,
+			entry:       nyaaBest,
+			wantStatus:  StatusUnverifiable,
+			wantVerdict: audit.VerdictUnverified,
+		},
+		{
+			name:        "season known group against a NOGRP-only best: daemon unverifiable, audit unverified",
+			seasons:     map[int][]string{1: {"erai-raws"}},
+			record:      seasonRec,
+			entry:       nogrpBest,
+			wantStatus:  StatusUnverifiable,
+			wantVerdict: audit.VerdictUnverified,
+		},
+		{
+			name:        "season sentinel both sides: daemon unverifiable, audit unverified, never aligned",
+			seasons:     map[int][]string{1: {"nogrp"}},
+			record:      seasonRec,
+			entry:       nogrpBest,
+			wantStatus:  StatusUnverifiable,
+			wantVerdict: audit.VerdictUnverified,
+		},
+		{
+			name:        "whole-series unknown season blocks have_best: daemon unverifiable, audit unverified",
+			seasons:     map[int][]string{1: {"subsplease"}, 2: {"nogrp"}},
+			record:      wholeRec,
+			entry:       nyaaBest,
+			wantStatus:  StatusUnverifiable,
+			wantVerdict: audit.VerdictUnverified,
 		},
 	}
 	for _, tt := range tests {

@@ -44,10 +44,10 @@ func decideWhole(seasons map[int][]string, best, alt []string) align.Decision {
 
 // TestDecideWholeSeriesConservative pins the conservative per-real-season
 // aggregation (ported from the audit's former wholeSeriesVerdict table, which
-// the shared core replaced): best only when every filed real season carries a
-// best group, downgrading to alt then unlisted otherwise, season 0 excluded,
-// no filed real season reading as no-file, and the approximation flag set
-// exactly when the aggregate spans more than one season or group.
+// the shared core replaced): best only when every filed real season provenly
+// carries a best group, downgrading to alt then unlisted otherwise, season 0
+// excluded, no filed real season reading as no-file, and the approximation
+// flag set exactly when the aggregate spans more than one season or group.
 func TestDecideWholeSeriesConservative(t *testing.T) {
 	best := []string{"a&c"}
 	alt := []string{"kh"}
@@ -107,8 +107,8 @@ func TestDecideWholeSeriesGroupsUnion(t *testing.T) {
 }
 
 // TestDecideWholeSeriesNilAlt pins the daemon-shaped inputs: with a nil alt
-// set, a filed season lacking a best group reads unlisted (never alt), so
-// "aligned" is exactly "no season is unlisted".
+// set, a filed season provenly lacking a best group reads unlisted (never
+// alt), so "aligned" is exactly "no season is unlisted or unverifiable".
 func TestDecideWholeSeriesNilAlt(t *testing.T) {
 	d := decideWhole(map[int][]string{1: {"a&c"}, 2: {"kh"}}, []string{"a&c"}, nil)
 	if d.Standing != align.StandingUnlisted {
@@ -116,6 +116,63 @@ func TestDecideWholeSeriesNilAlt(t *testing.T) {
 	}
 	if d.Outcome != align.OutcomeMixed {
 		t.Errorf("Outcome = %v, want OutcomeMixed (not aligned, two-group aggregate)", d.Outcome)
+	}
+}
+
+// TestDecideWholeSeriesUnknownEvidence pins the conservative propagation of
+// unverifiability through the whole-series aggregation: a season with unknown
+// group evidence (the release.NoGroup sentinel, on either side of its
+// comparison) blocks the have-best claim - the series reads unverified, never
+// best - while a PROVEN downgrade in another season (unlisted or alt) still
+// outranks the unknown: the proof stands regardless of what the unknown
+// season might hold, so the actionable verdict is not hidden behind
+// unverifiability.
+func TestDecideWholeSeriesUnknownEvidence(t *testing.T) {
+	best := []string{"a&c"}
+	alt := []string{"kh"}
+	tests := []struct {
+		name    string
+		seasons map[int][]string
+		best    []string
+		want    align.Standing
+		outcome align.Outcome
+	}{
+		{
+			name:    "an unknown season blocks best: series is unverified",
+			seasons: map[int][]string{1: {"a&c"}, 2: {"nogrp"}},
+			best:    best, want: align.StandingUnverified, outcome: align.OutcomeUnverifiable,
+		},
+		{
+			name:    "sentinel-only series is unverified",
+			seasons: map[int][]string{1: {"nogrp"}},
+			best:    best, want: align.StandingUnverified, outcome: align.OutcomeUnverifiable,
+		},
+		{
+			name:    "an unknown-only best set makes every filed season unverifiable",
+			seasons: map[int][]string{1: {"a&c"}, 2: {"kh"}},
+			best:    []string{"nogrp"}, want: align.StandingUnverified, outcome: align.OutcomeUnverifiable,
+		},
+		{
+			name:    "a proven unlisted season outranks an unknown one",
+			seasons: map[int][]string{1: {"nogrp"}, 2: {"kitsune"}},
+			best:    best, want: align.StandingUnlisted, outcome: align.OutcomeMixed,
+		},
+		{
+			name:    "a proven alt season outranks an unknown one",
+			seasons: map[int][]string{1: {"nogrp"}, 2: {"kh"}},
+			best:    best, want: align.StandingAlt, outcome: align.OutcomeMixed,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := decideWhole(tt.seasons, tt.best, alt)
+			if d.Standing != tt.want {
+				t.Errorf("Standing = %v, want %v", d.Standing, tt.want)
+			}
+			if d.Outcome != tt.outcome {
+				t.Errorf("Outcome = %v, want %v", d.Outcome, tt.outcome)
+			}
+		})
 	}
 }
 

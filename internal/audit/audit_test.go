@@ -123,34 +123,59 @@ func TestAuditNotOnSeaDexHonorsExcludeSpecials(t *testing.T) {
 	}
 }
 
-// TestAuditNoGroupMatchesBest proves the NoGroup fallback end to end: a
-// group-less on-disk release compares equal to a group-less SeaDex best (both
-// resolve to NOGRP), yielding have_best rather than an unresolved row.
-func TestAuditNoGroupMatchesBest(t *testing.T) {
+// TestAuditUnknownGroupEvidenceIsUnverified pins the tri-state evidence model
+// end to end through the audit (deliberately INVERTING the former
+// TestAuditNoGroupMatchesBest, which pinned the sentinel-identity defect): the
+// NoGroup sentinel is unknown evidence, never an identity token, so a
+// group-less on-disk release against a group-less SeaDex best reads
+// unverified - "we could not verify either side" - rather than have_best, and
+// unknown evidence on EITHER side alone (a NOGRP-only library item against a
+// known best, or a known library group against a NOGRP-only best torrent)
+// yields the same unverified verdict instead of have_unlisted.
+func TestAuditUnknownGroupEvidenceIsUnverified(t *testing.T) {
 	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"})
-	snap := &library.Snapshot{Items: []library.Item{{
-		Arr: library.ArrSonarr, ArrID: 9, Title: "Groupless", TvdbID: 900,
-		SeasonGroups: map[int][]string{1: {"nogrp"}}, Groups: []string{"nogrp"}, HasFile: true,
-	}}}
-	idx := mapping.NewIndex([]mapping.Record{{AniListID: 9, Type: "TV", TvdbID: 900}})
-	matches := []match.Match{{
-		Item:   &snap.Items[0],
-		Arr:    library.ArrSonarr,
-		Source: match.SourceID,
-		Entry:  seadex.Entry{AniListID: 9, Torrents: []seadex.Torrent{{Tracker: "Nyaa", IsBest: true}}},
-		Record: mapping.Record{Type: "TV", TvdbID: 900, SeasonTvdb: 1},
-	}}
-
-	rep := a.Audit(matches, snap, idx, nil)
-
-	var got Verdict
-	for i := range rep.Rows {
-		if rep.Rows[i].AniListID == 9 {
-			got = rep.Rows[i].Verdict
-		}
+	tests := []struct {
+		name      string
+		diskGroup string
+		bestGroup string // "" classifies to the NoGroup sentinel
+	}{
+		{name: "sentinel on both sides is not alignment proof", diskGroup: "nogrp", bestGroup: ""},
+		{name: "NOGRP-only library item against a known best", diskGroup: "nogrp", bestGroup: "SEV"},
+		{name: "known library group against a NOGRP-only best", diskGroup: "sev", bestGroup: ""},
 	}
-	if got != VerdictBest {
-		t.Errorf("group-less item vs group-less SeaDex best = %q, want %q", got, VerdictBest)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snap := &library.Snapshot{Items: []library.Item{{
+				Arr: library.ArrSonarr, ArrID: 9, Title: "Groupless", TvdbID: 900,
+				SeasonGroups: map[int][]string{1: {tt.diskGroup}}, Groups: []string{tt.diskGroup}, HasFile: true,
+			}}}
+			idx := mapping.NewIndex([]mapping.Record{{AniListID: 9, Type: "TV", TvdbID: 900}})
+			matches := []match.Match{{
+				Item:   &snap.Items[0],
+				Arr:    library.ArrSonarr,
+				Source: match.SourceID,
+				Entry:  seadex.Entry{AniListID: 9, Torrents: []seadex.Torrent{{Tracker: "Nyaa", ReleaseGroup: tt.bestGroup, IsBest: true}}},
+				Record: mapping.Record{Type: "TV", TvdbID: 900, SeasonTvdb: 1},
+			}}
+
+			rep := a.Audit(matches, snap, idx, nil)
+
+			var row *Row
+			for i := range rep.Rows {
+				if rep.Rows[i].AniListID == 9 {
+					row = &rep.Rows[i]
+				}
+			}
+			if row == nil {
+				t.Fatal("expected a row for the matched entry")
+			}
+			if row.Verdict != VerdictUnverified {
+				t.Errorf("verdict = %q, want %q (unknown evidence proves neither alignment nor divergence)", row.Verdict, VerdictUnverified)
+			}
+			if row.Qualifier != "" {
+				t.Errorf("qualifier = %q, want none (the unverified verdict itself carries the story)", row.Qualifier)
+			}
+		})
 	}
 }
 
@@ -399,6 +424,8 @@ func TestRowQualifier(t *testing.T) {
 		{"not-aligned single group is not mixed", seadex.Entry{}, map[int][]string{1: {"a"}}, []string{"sam"}, nil, ""},
 		{"diverged single group of an incomplete entry is incomplete", seadex.Entry{Incomplete: true}, map[int][]string{1: {"a"}}, []string{"sam"}, nil, QualifierIncomplete},
 		{"no_file with best listed is unqualified", seadex.Entry{}, map[int][]string{2: {"a"}}, []string{"sam"}, nil, ""},
+		{"unverifiable row is unqualified", seadex.Entry{}, map[int][]string{1: {"nogrp"}}, []string{"sam"}, nil, ""},
+		{"unverifiable row of an incomplete entry is still unqualified", seadex.Entry{Incomplete: true}, map[int][]string{1: {"nogrp"}}, []string{"sam"}, nil, ""},
 	}
 	rec := mapping.Record{Type: "TV", SeasonTvdb: 1}
 	for _, tt := range tests {

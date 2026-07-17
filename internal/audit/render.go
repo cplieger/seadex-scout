@@ -34,7 +34,7 @@ const (
 var verdictDesc = map[Verdict]string{
 	VerdictUnlisted:    "You have a release SeaDex does not list as best or alt.",
 	VerdictAlt:         "You have a listed alt; SeaDex marks a different release best.",
-	VerdictUnverified:  "Files are present but no release group could be identified, so no comparison was possible.",
+	VerdictUnverified:  "The release-group evidence is unknown on one side (an unidentifiable file or an untagged SeaDex release), so alignment could not be verified.",
 	VerdictNoFile:      "The mapped season or movie has no file on disk, or a whole-series comparison found no real season with files.",
 	VerdictBest:        "You already have SeaDex's best release.",
 	VerdictNotOnSeaDex: "In your library and recognized as anime (Fribb-mapped) but SeaDex lists no entry, so there is no recommendation to compare against.",

@@ -8,8 +8,9 @@
 // against that season's on-disk release groups. Specials without a positive
 // TVDB season compare against Sonarr's season-0 bucket, and seasonless
 // non-special series are compared conservatively across the real seasons on
-// disk. A row is unverified only when files are present but no comparable
-// release group can be identified.
+// disk. A row is unverified when the comparison is unverifiable: files are
+// present but the release-group evidence on either side is unknown (the
+// release.NoGroup sentinel), so alignment can be neither proven nor refuted.
 //
 // A run degraded by a transient AniList failure is not withheld: the report
 // renders with an explicit incomplete-mapping section listing the affected
@@ -47,10 +48,12 @@ const (
 	VerdictUnlisted Verdict = "have_unlisted"
 	// VerdictNoFile means the item (or the mapped season) has no file on disk.
 	VerdictNoFile Verdict = "no_file"
-	// VerdictUnverified means the item has files on disk but none carried an
-	// identifiable release group, so there was nothing to compare. Most former
-	// unverified rows (specials, absolute-numbered runs) now resolve via the
-	// season-0 and whole-series fallbacks in scope.
+	// VerdictUnverified means the item has files on disk but the comparison
+	// is unverifiable: the release-group evidence on at least one side is
+	// unknown (an on-disk file with no identifiable group, or a SeaDex
+	// release with no group tag - both carried as the release.NoGroup
+	// sentinel) and could hide the very match being tested, so neither
+	// have_best/have_alt nor a divergence can honestly be claimed.
 	VerdictUnverified Verdict = "unverified"
 	// VerdictNotOnSeaDex means the item is in the library and recognized as anime
 	// (present in the Fribb map) but SeaDex lists no entry for it, so there is no
@@ -377,7 +380,9 @@ func verdictFor(s align.Standing) Verdict {
 // "mixed" (where the daemon emits mixed_group_manual), and a diverged
 // alt/unlisted row of an incomplete entry is "incomplete", mirroring the
 // daemon's betterResult downgrade. An aligned row is never qualified -
-// alignment wins.
+// alignment wins - and an unverifiable row is never qualified either: its
+// verdict (unverified) already carries the daemon's story (the info-level
+// unverifiable finding), so no annotation is needed.
 func rowQualifier(entry *seadex.Entry, d *align.Decision) Qualifier {
 	if d.NoBest {
 		switch classify.Fallback(entry) {
