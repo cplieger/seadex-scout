@@ -102,10 +102,10 @@ type Row struct {
 	Releases      []Release `json:"releases,omitempty"`
 	AniListID     int       `json:"al_id"`
 	Season        int       `json:"season,omitempty"`
-	// scope is the comparison scope align.Scope resolved, recorded at build
-	// time and read by the renderer (align.ScopeWholeSeries, the zero value,
-	// renders as "series"). Unexported: in-process only, absent from the JSON
-	// wire shape.
+	// scope is the comparison scope the shared decision resolved (align.Scope
+	// via align.Decide), recorded at build time and read by the renderer
+	// (align.ScopeWholeSeries, the zero value, renders as "series").
+	// Unexported: in-process only, absent from the JSON wire shape.
 	scope      align.ScopeKind
 	Special    bool `json:"special,omitempty"`
 	Incomplete bool `json:"incomplete,omitempty"`
@@ -271,8 +271,10 @@ func (c *catalogue) has(it *library.Item) bool {
 	return ok
 }
 
-// assess builds one row: classify the entry's releases, scope the on-disk
-// groups to the mapped season, and derive the verdict.
+// assess builds one row: classify the entry's releases, resolve the shared
+// comparison decision (align.Decide - the same decision the daemon's compare
+// pass projects, fed here with the raw SeaDex best and alt group sets), and
+// render it as the row's verdict and qualifier.
 func (a *Auditor) assess(m *match.Match) Row {
 	releases := a.classifyReleases(&m.Entry)
 	best, alt := groupSets(releases)
@@ -289,33 +291,45 @@ func (a *Auditor) assess(m *match.Match) Row {
 		Special:     m.Record.IsSpecial(),
 		Incomplete:  m.Entry.Incomplete,
 	}
-	scoped := align.Scope(m.Item, &m.Record)
-	row.scope = scoped.Kind
-	if scoped.Kind == align.ScopeWholeSeries {
-		// Absolute-numbered run / title-only match: apply the single whole-series
-		// recommendation to each real season (season 0 excluded), conservatively.
-		row.Verdict, row.CurrentGroups, row.Approx = wholeSeriesVerdict(m.Item, best, alt)
-	} else {
-		row.CurrentGroups, row.Approx = scoped.Groups, scoped.Approx
-		row.Verdict = verdict(scoped.HasFile, scoped.Groups, best, alt)
-	}
-	row.Qualifier = rowQualifier(&m.Entry, best, row.Verdict, row.CurrentGroups)
+	d := align.Decide(m.Item, &m.Record, best, alt)
+	row.scope = d.Kind
+	row.CurrentGroups, row.Approx = d.Groups, d.Approx
+	row.Verdict = verdictFor(d.Standing)
+	row.Qualifier = rowQualifier(&m.Entry, &d)
 	return row
 }
 
-// rowQualifier derives the daemon-vocabulary qualifier for a row, so the report
-// distinguishes the states the daemon's compare pass distinguishes. With no
-// best release listed at all, a theoretical-best-only entry is "theoretical"
-// and an incomplete one "incomplete" (the classify.Fallback precedence shared
-// with the daemon's emptyResult) - the row's verdict would otherwise imply an
-// unlisted-better state that does not exist. With best releases listed, a
-// not-aligned row (have_alt / have_unlisted) whose scoped groups span more
-// than one group is "mixed", where the daemon emits mixed_group_manual; a
-// not-aligned single-group row of an incomplete entry is "incomplete",
-// mirroring the daemon's betterResult downgrade. An aligned row is never
-// qualified, matching the daemon's alignment-wins ordering.
-func rowQualifier(entry *seadex.Entry, best []string, v Verdict, current []string) Qualifier {
-	if len(best) == 0 {
+// verdictFor renders the shared decision core's group-ladder standing in the
+// report's verdict vocabulary, 1:1.
+func verdictFor(s align.Standing) Verdict {
+	switch s {
+	case align.StandingNoFile:
+		return VerdictNoFile
+	case align.StandingUnverified:
+		return VerdictUnverified
+	case align.StandingBest:
+		return VerdictBest
+	case align.StandingAlt:
+		return VerdictAlt
+	default:
+		return VerdictUnlisted
+	}
+}
+
+// rowQualifier derives the daemon-vocabulary qualifier for a row from the
+// shared decision, so the report distinguishes the states the daemon's
+// compare pass distinguishes. With no best release listed at all (d.NoBest,
+// read independently of the outcome because the report annotates the entry
+// state even on a no-file row the daemon silences), the classify.Fallback
+// precedence shared with the daemon's emptyResult picks "theoretical" or
+// "incomplete" - the row's verdict would otherwise imply an unlisted-better
+// state that does not exist. With best releases listed, a mixed outcome is
+// "mixed" (where the daemon emits mixed_group_manual), and a diverged
+// alt/unlisted row of an incomplete entry is "incomplete", mirroring the
+// daemon's betterResult downgrade. An aligned row is never qualified -
+// alignment wins.
+func rowQualifier(entry *seadex.Entry, d *align.Decision) Qualifier {
+	if d.NoBest {
 		switch classify.Fallback(entry) {
 		case classify.FallbackTheoretical:
 			return QualifierTheoretical
@@ -324,56 +338,14 @@ func rowQualifier(entry *seadex.Entry, best []string, v Verdict, current []strin
 		}
 		return ""
 	}
-	if v == VerdictAlt || v == VerdictUnlisted {
-		if len(current) > 1 {
-			return QualifierMixed
-		}
-		if entry.Incomplete {
-			return QualifierIncomplete
-		}
-	}
-	return ""
-}
-
-// verdict derives the alignment verdict from the scoped group set. No file is
-// no_file; a file with no identifiable group is unverified; otherwise the
-// current group is matched against the best then the alt release groups.
-func verdict(hasFile bool, current, best, alt []string) Verdict {
 	switch {
-	case !hasFile:
-		return VerdictNoFile
-	case len(current) == 0:
-		return VerdictUnverified
-	case release.GroupsIntersect(current, best):
-		return VerdictBest
-	case release.GroupsIntersect(current, alt):
-		return VerdictAlt
+	case d.Outcome == align.OutcomeMixed:
+		return QualifierMixed
+	case d.Outcome == align.OutcomeDiverged && entry.Incomplete &&
+		(d.Standing == align.StandingAlt || d.Standing == align.StandingUnlisted):
+		return QualifierIncomplete
 	default:
-		return VerdictUnlisted
-	}
-}
-
-// wholeSeriesVerdict applies the entry's single recommendation to each real
-// season (season 0 specials excluded) and returns the most conservative
-// verdict: have_best only when every on-disk season carries a best group,
-// have_alt when all are best-or-alt with at least one alt, and have_unlisted
-// when any season matches neither. It also returns the union of those seasons'
-// groups for display and marks the comparison approximate when it spans more
-// than one season or more than one release group (either way the single
-// whole-series recommendation applies to a coarse aggregate). With no real
-// season on disk it is no_file.
-func wholeSeriesVerdict(item *library.Item, best, alt []string) (Verdict, []string, bool) {
-	s := align.SummarizeWholeSeries(item, best, alt)
-	if s.Seasons == 0 {
-		return VerdictNoFile, nil, false
-	}
-	switch {
-	case s.AnyUnlisted:
-		return VerdictUnlisted, s.Groups, s.Approx
-	case s.AnyAlt:
-		return VerdictAlt, s.Groups, s.Approx
-	default:
-		return VerdictBest, s.Groups, s.Approx
+		return ""
 	}
 }
 

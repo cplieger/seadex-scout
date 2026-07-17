@@ -3,9 +3,10 @@
 // the content filters (remux/dual-audio) AND are obtainable (on a public
 // tracker, or on AnimeBytes when the operator enables it), and compares the
 // surviving recommended release groups against the groups present on the
-// library item. The comparison is season-scoped: a SeaDex entry (one AniList
-// ID = one cour) is compared as the audit report scopes it (via internal/align):
-// a mapped TVDB season against that season's groups, a special against Sonarr's
+// library item. The comparison is season-scoped and decided by the shared
+// internal/align decision core (align.Decide) - the same decision the audit
+// report renders, so a daemon finding never disagrees with the report: a
+// mapped TVDB season against that season's groups, a special against Sonarr's
 // season-0 bucket, a movie against its groups, and an absolute-numbered or
 // title-only run against every real season conservatively -
 // so a later season that needs a better release is not masked by an earlier
@@ -140,98 +141,36 @@ type candidate struct {
 }
 
 // compareOne compares one matched, in-library entry and returns a finding, or
-// nil when there is nothing to report: the mapped scope has no file on disk
-// (the audit's no_file; checked first, before anything about the entry), the
-// item is aligned (already has a recommended group), or no recommended release
-// survives the filters and the entry is neither incomplete nor
-// theoretical-best.
+// nil when there is nothing to report. The branch order and decision rules
+// live in the shared align.Decide (the same decision the audit report
+// renders); this function only projects the outcome into finding vocabulary:
+// silence for a unit with no file on disk (the audit's no_file - compare has
+// no no-file status, so report-by-exception means the daemon stays quiet) and
+// for an aligned unit, the classify.Fallback nudge when no recommended
+// release survives the filters, a mixed_group_manual nudge for a not-aligned
+// multi-group unit, and a better release otherwise.
 func (c *Comparer) compareOne(m *match.Match) *Finding {
 	entry := &m.Entry
 	recommended := c.recommended(entry)
-
-	// Scope the on-disk groups the same way the audit report does (movie / the
-	// mapped TVDB season / the season-0 specials bucket), via the shared
-	// internal/align, so a daemon finding never disagrees with the report.
-	scoped := align.Scope(m.Item, &m.Record)
-	if scoped.Kind == align.ScopeWholeSeries {
-		// A Sonarr absolute-numbered run / title-only match has no per-season
-		// Fribb mapping, so its single whole-series recommendation is compared
-		// against every real season on disk, conservatively (compareWholeSeries)
-		// - exactly as the audit report does.
-		return c.compareWholeSeries(m, recommended)
-	}
-	if !scoped.HasFile {
-		// File presence first, before the recommendation-emptiness check: the
-		// mapped season/movie/special is not on disk, so there is nothing the
-		// operator has for any recommendation (or incomplete/theoretical nudge)
-		// to apply to. The audit records this scope as no_file; compare has no
-		// no-file status, so report-by-exception means the daemon stays quiet.
+	recGroups := groupSet(recommended)
+	// The daemon only distinguishes best-vs-not, so alt is nil: an on-disk
+	// unit lacking a recommended group reads as unlisted (not aligned).
+	d := align.Decide(m.Item, &m.Record, recGroups, nil)
+	if d.Outcome == align.OutcomeNoFile {
 		return nil
 	}
-	base := c.baseFinding(m, scoped.Groups)
-	if len(recommended) == 0 {
+	base := c.baseFinding(m, d.Groups)
+	switch d.Outcome {
+	case align.OutcomeNoBest:
 		return emptyResult(entry, &base)
-	}
-
-	recGroups := groupSet(recommended)
-	if release.GroupsIntersect(recGroups, scoped.Groups) {
-		return nil // aligned: a recommended group is already present
-	}
-	// Alignment wins over the mixed-group nudge: a season that already carries a
-	// recommended group is aligned no matter how many groups it spans (exactly
-	// as the audit reports it). Only a NOT-aligned multi-group season needs the
-	// manual review. The scoped group count, not the whole-item group set, so a
-	// season that carries a single group is not misreported as
-	// mixed_group_manual.
-	if len(scoped.Groups) > 1 {
-		fillBest(&base, recommended, recGroups)
-		return finalize(&base, StatusMixedGroup, SevInfo)
-	}
-
-	// Not aligned: a better release the operator can obtain and lacks.
-	return betterResult(entry, &base, recommended, recGroups)
-}
-
-// compareWholeSeries compares a Sonarr whole-series entry (an absolute-numbered
-// run or title-only match, with no per-season Fribb mapping) against every real
-// season on disk (season 0 excluded), conservatively: the item is aligned only
-// when every on-disk season already carries a recommended group, matching the
-// audit report's whole-series verdict via the shared align.SummarizeWholeSeries.
-// It stays silent when no real season is on disk (checked first, before
-// anything about the entry - the audit's no_file), and a not-aligned aggregate
-// spanning more than one group is a mixed_group_manual nudge, exactly as in the
-// season-scoped arm.
-func (c *Comparer) compareWholeSeries(m *match.Match, recommended []candidate) *Finding {
-	entry := &m.Entry
-	recGroups := groupSet(recommended)
-	// nil alt: the daemon only distinguishes best-vs-not, so an on-disk season
-	// lacking a recommended group surfaces as AnyUnlisted.
-	summary := align.SummarizeWholeSeries(m.Item, recGroups, nil)
-	if summary.Seasons == 0 {
-		// File presence first, before the recommendation-emptiness check
-		// (mirroring compareOne): no real season on disk means nothing for any
-		// recommendation (or incomplete/theoretical nudge) to apply to. The
-		// audit records this as no_file; the daemon stays quiet.
+	case align.OutcomeAligned:
 		return nil
-	}
-	base := c.baseFinding(m, summary.Groups)
-	if len(recommended) == 0 {
-		return emptyResult(entry, &base)
-	}
-	if !summary.AnyUnlisted {
-		return nil // aligned: every on-disk season already carries a recommended group
-	}
-	// Alignment wins over the mixed-group nudge, exactly as in compareOne: a
-	// NOT-aligned aggregate spanning more than one group cannot attribute one
-	// current group, so it is a manual-review nudge rather than a false
-	// better_release.
-	if len(summary.Groups) > 1 {
+	case align.OutcomeMixed:
 		fillBest(&base, recommended, recGroups)
 		return finalize(&base, StatusMixedGroup, SevInfo)
+	default: // align.OutcomeDiverged
+		return betterResult(entry, &base, recommended, recGroups)
 	}
-
-	// At least one on-disk season lacks a recommended group.
-	return betterResult(entry, &base, recommended, recGroups)
 }
 
 // recommended classifies the entry's SeaDex "best" torrents and returns those
@@ -262,7 +201,7 @@ func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
 	return out
 }
 
-// betterResult finalizes a not-aligned finding: a better release the operator
+// betterResult finalizes a diverged finding: a better release the operator
 // can obtain and lacks, downgraded to an incomplete info nudge when the entry
 // is incomplete (nothing complete to grab).
 func betterResult(entry *seadex.Entry, base *Finding, recommended []candidate, recGroups []string) *Finding {
@@ -290,9 +229,9 @@ func emptyResult(entry *seadex.Entry, base *Finding) *Finding {
 	}
 }
 
-// baseFinding seeds a finding with the item identity fields, using the scope
-// groups already resolved by the caller - the mapped season's groups, or the
-// whole-series union for a whole-series comparison - so a season-scoped
+// baseFinding seeds a finding with the item identity fields, using the groups
+// the shared decision judged the unit against (align.Decision.Groups: the
+// mapped season's groups, or the whole-series union) - so a season-scoped
 // finding's CurrentGroup and dedupe key never leak whole-series groups.
 func (c *Comparer) baseFinding(m *match.Match, groups []string) Finding {
 	return Finding{

@@ -4,31 +4,31 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
-func TestVerdict(t *testing.T) {
+// TestVerdictFor pins the 1:1 rendering of the shared decision core's
+// group-ladder standing in the report's verdict vocabulary.
+func TestVerdictFor(t *testing.T) {
 	tests := []struct {
-		name    string
-		want    Verdict
-		current []string
-		best    []string
-		alt     []string
-		hasFile bool
+		name     string
+		standing align.Standing
+		want     Verdict
 	}{
-		{"no file is no_file", VerdictNoFile, nil, []string{"a"}, nil, false},
-		{"file but no identifiable group is unverified", VerdictUnverified, nil, []string{"a"}, nil, true},
-		{"current group is best", VerdictBest, []string{"sam"}, []string{"sam"}, nil, true},
-		{"current group is an alt", VerdictAlt, []string{"kh"}, []string{"sam"}, []string{"kh"}, true},
-		{"current group is unlisted", VerdictUnlisted, []string{"zzz"}, []string{"sam"}, []string{"kh"}, true},
+		{"no file", align.StandingNoFile, VerdictNoFile},
+		{"unverified", align.StandingUnverified, VerdictUnverified},
+		{"best", align.StandingBest, VerdictBest},
+		{"alt", align.StandingAlt, VerdictAlt},
+		{"unlisted", align.StandingUnlisted, VerdictUnlisted},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := verdict(tt.hasFile, tt.current, tt.best, tt.alt); got != tt.want {
-				t.Errorf("verdict = %q, want %q", got, tt.want)
+			if got := verdictFor(tt.standing); got != tt.want {
+				t.Errorf("verdictFor(%v) = %q, want %q", tt.standing, got, tt.want)
 			}
 		})
 	}
@@ -150,40 +150,6 @@ func TestAuditNoGroupMatchesBest(t *testing.T) {
 	}
 	if got != VerdictBest {
 		t.Errorf("group-less item vs group-less SeaDex best = %q, want %q", got, VerdictBest)
-	}
-}
-
-// TestWholeSeriesVerdict covers the conservative per-season aggregation for an
-// absolute-numbered / whole-series entry: have_best only when every real season
-// carries a best group, downgrading otherwise, with season 0 excluded.
-func TestWholeSeriesVerdict(t *testing.T) {
-	best := []string{"a&c"}
-	alt := []string{"kh"}
-	tests := []struct {
-		name    string
-		seasons map[int][]string
-		want    Verdict
-		approx  bool
-	}{
-		{"all seasons best", map[int][]string{1: {"a&c"}, 2: {"a&c"}}, VerdictBest, true},
-		{"best plus unlisted downgrades to unlisted", map[int][]string{1: {"a&c"}, 2: {"kitsune"}}, VerdictUnlisted, true},
-		{"best plus alt downgrades to alt", map[int][]string{1: {"a&c"}, 2: {"kh"}}, VerdictAlt, true},
-		{"season 0 is excluded", map[int][]string{0: {"kitsune"}, 1: {"a&c"}}, VerdictBest, false},
-		{"single season is not approx", map[int][]string{1: {"a&c"}}, VerdictBest, false},
-		{"single season spanning two groups is approx", map[int][]string{1: {"a&c", "kh"}}, VerdictBest, true},
-		{"only season 0 on disk is no_file", map[int][]string{0: {"a&c"}}, VerdictNoFile, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: tt.seasons, HasFile: true}
-			got, _, approx := wholeSeriesVerdict(item, best, alt)
-			if got != tt.want {
-				t.Errorf("verdict = %q, want %q", got, tt.want)
-			}
-			if approx != tt.approx {
-				t.Errorf("approx = %v, want %v", approx, tt.approx)
-			}
-		})
 	}
 }
 
@@ -377,32 +343,42 @@ func TestSortRowsOrdersByVerdictThenTitle(t *testing.T) {
 	}
 }
 
-// TestRowQualifier pins the daemon-vocabulary qualifier: theoretical/incomplete
-// when SeaDex lists no best at all (theoretical taking precedence, mirroring
-// the daemon's emptyResult), mixed only on a not-aligned multi-group row, and
-// empty everywhere else (an aligned row is never mixed - alignment wins).
+// TestRowQualifier pins the daemon-vocabulary qualifier over the shared
+// decision: theoretical/incomplete when SeaDex lists no best at all
+// (theoretical taking precedence, the classify.Fallback order shared with the
+// daemon's emptyResult, annotated even on a no-file row the daemon silences),
+// mixed only on a not-aligned multi-group row, incomplete on a diverged row
+// of an incomplete entry, and empty everywhere else (an aligned row is never
+// mixed - alignment wins). Decisions are built through align.Decide from real
+// season/record inputs, so the qualifier is pinned against decisions the
+// production path can actually produce.
 func TestRowQualifier(t *testing.T) {
 	tests := []struct {
 		name    string
 		entry   seadex.Entry
+		seasons map[int][]string
 		best    []string
-		verdict Verdict
-		current []string
+		alt     []string
 		want    Qualifier
 	}{
-		{"theoretical-only entry", seadex.Entry{TheoreticalBest: "remux"}, nil, VerdictUnlisted, []string{"a"}, QualifierTheoretical},
-		{"theoretical wins over incomplete", seadex.Entry{TheoreticalBest: "remux", Incomplete: true}, nil, VerdictUnlisted, []string{"a"}, QualifierTheoretical},
-		{"incomplete with nothing recommended", seadex.Entry{Incomplete: true}, nil, VerdictUnlisted, []string{"a"}, QualifierIncomplete},
-		{"no best and neither flag is unqualified", seadex.Entry{}, nil, VerdictUnlisted, []string{"a"}, ""},
-		{"not-aligned multi-group is mixed", seadex.Entry{}, []string{"sam"}, VerdictUnlisted, []string{"a", "b"}, QualifierMixed},
-		{"not-aligned alt multi-group is mixed", seadex.Entry{}, []string{"sam"}, VerdictAlt, []string{"a", "b"}, QualifierMixed},
-		{"aligned multi-group is not mixed", seadex.Entry{}, []string{"a"}, VerdictBest, []string{"a", "b"}, ""},
-		{"not-aligned single group is not mixed", seadex.Entry{}, []string{"sam"}, VerdictUnlisted, []string{"a"}, ""},
-		{"no_file with best listed is unqualified", seadex.Entry{}, []string{"sam"}, VerdictNoFile, nil, ""},
+		{"theoretical-only entry", seadex.Entry{TheoreticalBest: "remux"}, map[int][]string{1: {"a"}}, nil, nil, QualifierTheoretical},
+		{"theoretical wins over incomplete", seadex.Entry{TheoreticalBest: "remux", Incomplete: true}, map[int][]string{1: {"a"}}, nil, nil, QualifierTheoretical},
+		{"incomplete with nothing recommended", seadex.Entry{Incomplete: true}, map[int][]string{1: {"a"}}, nil, nil, QualifierIncomplete},
+		{"no best and neither flag is unqualified", seadex.Entry{}, map[int][]string{1: {"a"}}, nil, nil, ""},
+		{"no best on a no-file row still annotates the entry state", seadex.Entry{TheoreticalBest: "remux"}, map[int][]string{2: {"a"}}, nil, nil, QualifierTheoretical},
+		{"not-aligned multi-group is mixed", seadex.Entry{}, map[int][]string{1: {"a", "b"}}, []string{"sam"}, nil, QualifierMixed},
+		{"not-aligned alt multi-group is mixed", seadex.Entry{}, map[int][]string{1: {"a", "b"}}, []string{"sam"}, []string{"a"}, QualifierMixed},
+		{"aligned multi-group is not mixed", seadex.Entry{}, map[int][]string{1: {"a", "b"}}, []string{"a"}, nil, ""},
+		{"not-aligned single group is not mixed", seadex.Entry{}, map[int][]string{1: {"a"}}, []string{"sam"}, nil, ""},
+		{"diverged single group of an incomplete entry is incomplete", seadex.Entry{Incomplete: true}, map[int][]string{1: {"a"}}, []string{"sam"}, nil, QualifierIncomplete},
+		{"no_file with best listed is unqualified", seadex.Entry{}, map[int][]string{2: {"a"}}, []string{"sam"}, nil, ""},
 	}
+	rec := mapping.Record{Type: "TV", SeasonTvdb: 1}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := rowQualifier(&tt.entry, tt.best, tt.verdict, tt.current); got != tt.want {
+			item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: tt.seasons, HasFile: true}
+			d := align.Decide(item, &rec, tt.best, tt.alt)
+			if got := rowQualifier(&tt.entry, &d); got != tt.want {
 				t.Errorf("rowQualifier() = %q, want %q", got, tt.want)
 			}
 		})

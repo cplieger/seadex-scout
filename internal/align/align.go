@@ -1,8 +1,11 @@
 // Package align resolves which on-disk release groups a SeaDex entry should be
-// compared against, and summarizes a whole-series comparison. It is the single
-// source of truth for that scoping, consumed by BOTH the daemon's compare pass
-// (internal/compare) and the audit report (internal/audit) so the two never
-// disagree about the same title.
+// compared against (Scope) and owns the shared comparison decision over them
+// (Decide): file presence before entry state, alignment over the mixed-group
+// nudge, mixed only for a not-aligned multi-group unit, and the conservative
+// whole-series aggregation. It is the single source of truth for both,
+// consumed by BOTH the daemon's compare pass (internal/compare) and the audit
+// report (internal/audit) so the two never disagree about the same title -
+// each consumer only projects the one decision into its own vocabulary.
 //
 // It stays a thin, library-aware leaf: it depends only on library, mapping, and
 // the pure release classifier - never on seadex, match, or the consumers - so it
@@ -33,8 +36,8 @@ type ScopeKind int
 const (
 	// ScopeWholeSeries is a whole-series comparison: a Sonarr item with no
 	// positive Fribb TVDB season and not a special (an absolute-numbered run
-	// like One Piece, or a title-only match). It has no single-unit scope; the
-	// caller resolves it with SummarizeWholeSeries.
+	// like One Piece, or a title-only match). It has no single-unit scope;
+	// Decide resolves it with the conservative per-real-season aggregation.
 	ScopeWholeSeries ScopeKind = iota
 	// ScopeMovie is a Radarr movie compared against its own groups.
 	ScopeMovie
@@ -65,8 +68,8 @@ type ScopeResult struct {
 //
 // A Sonarr series with no positive Fribb season and not a special has no
 // single-unit scope: Scope classifies it as ScopeWholeSeries (nil groups) and
-// the caller resolves it with SummarizeWholeSeries, so a consumer cannot
-// silently mis-scope such an item against the specials bucket.
+// Decide resolves it with the conservative per-real-season aggregation, so a
+// consumer cannot silently mis-scope such an item against the specials bucket.
 func Scope(item *library.Item, rec *mapping.Record) ScopeResult {
 	switch {
 	case item.Arr == library.ArrRadarr:
@@ -79,8 +82,8 @@ func Scope(item *library.Item, rec *mapping.Record) ScopeResult {
 		g := item.SeasonGroups[rec.SeasonTvdb]
 		return ScopeResult{Kind: ScopeSeason, Groups: g, HasFile: len(g) > 0}
 	case wholeSeries(item, rec):
-		// A whole-series comparison has no single-unit scope; the caller
-		// resolves it with SummarizeWholeSeries.
+		// A whole-series comparison has no single-unit scope; Decide resolves
+		// it with the conservative per-real-season aggregation.
 		return ScopeResult{Kind: ScopeWholeSeries}
 	default: // a special: compare against the season-0 specials bucket
 		g := item.SeasonGroups[specialSeason]
@@ -97,11 +100,11 @@ func wholeSeries(item *library.Item, rec *mapping.Record) bool {
 	return item.Arr == library.ArrSonarr && rec.SeasonTvdb <= 0 && !rec.IsSpecial()
 }
 
-// Summary is the per-real-season aggregate SummarizeWholeSeries collects: the
+// summary is the per-real-season aggregate summarizeWholeSeries collects: the
 // sorted, deduped union of on-disk groups; how many real seasons (season 0
 // excluded) carried files; and whether any of those seasons matched an alt-only
 // or an unlisted group.
-type Summary struct {
+type summary struct {
 	Groups      []string
 	Seasons     int
 	AnyAlt      bool
@@ -113,17 +116,17 @@ type Summary struct {
 	Approx bool
 }
 
-// SummarizeWholeSeries walks the item's real seasons (season 0 excluded), unions
+// summarizeWholeSeries walks the item's real seasons (season 0 excluded), unions
 // their on-disk groups (sorted, deduped), and records whether any real season
-// carried an alt-only or an unlisted group, so a caller can pick the most
-// conservative whole-series verdict.
+// carried an alt-only or an unlisted group, so Decide can pick the most
+// conservative whole-series standing.
 //
 // A caller that only distinguishes best-vs-not (the daemon's compare pass) passes
 // a nil alt: a season lacking a best group then surfaces as AnyUnlisted, so
 // "every on-disk season has a best group" is exactly "!AnyUnlisted".
-func SummarizeWholeSeries(item *library.Item, best, alt []string) Summary {
+func summarizeWholeSeries(item *library.Item, best, alt []string) summary {
 	seen := make(map[string]struct{})
-	var s Summary
+	var s summary
 	for season, groups := range item.SeasonGroups {
 		if season == specialSeason || len(groups) == 0 {
 			continue

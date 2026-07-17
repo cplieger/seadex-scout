@@ -91,23 +91,27 @@ type Deps struct {
 // libraryShrinkFactor sets the library shrink guard's trigger fraction: a
 // non-failed walk (partial included - Failed placeholders keep the item
 // count, so a shrink means the arr's series list itself shrank) returning
-// fewer than 1/libraryShrinkFactor of the prior snapshot's items (below
-// half, at the default 2) is treated as
-// suspicious (a misconfigured arr_tags filter, an emptied or fresh arr) rather
-// than a real library change, mirroring the mapping loader's below-half-size
-// refresh guard. The zero-items case is the extreme of the same shrink.
-const libraryShrinkFactor = 2
+// fewer than 1/libraryShrinkFactor of the prior snapshot's items (below half
+// at the default 2) is treated as suspicious (a misconfigured arr_tags
+// filter, an emptied or fresh arr) rather than a real library change. The
+// zero-items case is the extreme of the same shrink. It references
+// mapping.ShrinkGuardFactor - the single home of the below-half policy this
+// guard shares with the mapping loader's refresh shrink guard - rather than
+// re-declaring the fraction.
+const libraryShrinkFactor = mapping.ShrinkGuardFactor
 
 // shrunkWalkEscalationThreshold is the consecutive-shrunk-walk streak
 // (state.State.ShrunkWalks) at which the scout escalates its shrunk-walk log
-// from WARN to ERROR (firing the existing SeadexScoutCycleError Loki rule):
-// 8 cycles is about a day at the default 3h cadence - long enough to ride out
+// from WARN to ERROR (firing the existing SeadexScoutCycleError Loki rule).
+// It references mapping.RejectionEscalationThreshold - the single home of the
+// shared escalation policy: tolerate 8 consecutive degraded cycles, about a
+// day at the default 3h cadence, before escalating - long enough to ride out
 // a transient arr oddity, short enough that a persistent misconfiguration
 // (arr_tags leaving one item) alerts instead of silently skipping the compare
-// forever. Mirrors mapping.RejectionEscalationThreshold. The remedy is
-// operator-driven: fix the arr/tags, or remove state.json to accept the
-// smaller library - the guard never auto-accepts a shrunken walk.
-const shrunkWalkEscalationThreshold = 8
+// forever. The remedy is operator-driven: fix the arr/tags, or remove
+// state.json to accept the smaller library - the guard never auto-accepts a
+// shrunken walk.
+const shrunkWalkEscalationThreshold = mapping.RejectionEscalationThreshold
 
 // Scout runs compare cycles from its assembled dependencies.
 type Scout struct {

@@ -8,9 +8,6 @@
 package filter
 
 import (
-	"net/url"
-	"strings"
-
 	"github.com/cplieger/seadex-scout/internal/release"
 )
 
@@ -66,53 +63,40 @@ func Obtainable(r *release.Release, rawURL string, opts Options) bool {
 // hostFromRawURL extracts normalized host evidence from a release's raw
 // upstream URL. The boolean is false when malformed or ambiguous input must be
 // hidden conservatively; an empty host with ok=true means the URL carries no
-// host evidence at all (an empty string, or a rooted relative path).
+// host evidence at all (an empty string, a rooted relative path, or a
+// query/fragment-only form). The structural reading of the raw string lives
+// in the shared release.ClassifyRawURL (which canonicalizes backslashes the
+// way browsers do, so a `/\animebytes.tv/x` form reads protocol-relative, not
+// as a host-less rooted path); this gate applies the extract-evidence-or-hide
+// policy over those facts - the inverse fail direction of the seadex
+// publisher's publish-or-drop over the same classifier.
 func hostFromRawURL(rawURL string) (string, bool) {
-	// Browsers (WHATWG URL parser) treat '\' as '/', so canonicalize the
-	// host-evidence copy the same way; a '/\animebytes.tv/x' form is
-	// protocol-relative in a browser and must not read as a host-less rooted
-	// path.
-	u := strings.ReplaceAll(strings.TrimSpace(rawURL), `\`, "/")
-	if u == "" {
+	f := release.ClassifyRawURL(rawURL)
+	switch f.Class {
+	case release.URLFormEmpty, release.URLFormRelative:
 		return "", true
-	}
-	parsed, err := url.Parse(u)
-	if err != nil {
+	case release.URLFormAbsolute:
+		return f.Host, true
+	case release.URLFormProtocolRelative:
+		// "//host/x" carries real host evidence; the three-or-more-slash form
+		// (a browser authority, a Go rooted path) has none and is ambiguous,
+		// so it hides conservatively rather than losing host evidence.
+		return f.Host, f.Host != ""
+	case release.URLFormSchemelessHost:
+		// A schemeless absolute URL ("animebytes.tv/torrents.php?...") would
+		// bypass a naive host check; the classifier's authority reparse keeps
+		// the AnimeBytes host recognizable. A failed reparse means the host
+		// evidence is unrecoverable: hide conservatively, like a parse
+		// failure, rather than letting an unverifiable link surface while the
+		// toggle is off.
+		return f.Host, !f.HostUnrecoverable
+	default:
+		// URLFormMalformed and URLFormHiddenHost ("https:/animebytes.tv/..."
+		// parses as scheme + path, "animebytes.tv:443/..." as an opaque
+		// scheme, "https://:443/x" as a port-only authority) have hidden or
+		// destroyed their host evidence: hide conservatively.
 		return "", false
 	}
-	// Hostname() already drops the port and userinfo and ToLower folds case;
-	// the FQDN trailing-dot form is handled inside the shared predicate.
-	host := strings.ToLower(parsed.Hostname())
-	if host == "" && parsed.Scheme != "" {
-		// A successful parse with a scheme but no host has hidden its host
-		// evidence: "https:/animebytes.tv/..." parses as scheme https + path,
-		// and "animebytes.tv:443/..." parses as an opaque non-empty scheme.
-		// Neither is reparse-recoverable below (the reparse fires only for the
-		// truly schemeless form), so hide conservatively like a parse failure.
-		return "", false
-	}
-	if host == "" && strings.HasPrefix(u, "//") {
-		// Go parses three-or-more leading slashes as a rooted path, while
-		// browsers resolve them as a network-path authority. Hide the
-		// ambiguous form conservatively rather than losing host evidence.
-		return "", false
-	}
-	if host == "" && !strings.HasPrefix(u, "/") {
-		// A schemeless absolute URL ("animebytes.tv/torrents.php?...") parses as
-		// a bare path with no host, which would bypass the caller's host check;
-		// re-parse it host-relative so the AnimeBytes host is still recognized.
-		// A rooted relative path ("/local/path") is left alone.
-		hostRel, herr := url.Parse("//" + u)
-		if herr != nil {
-			// The authority-form reparse failed (e.g. a backslash or space
-			// before an "@"): the string's host evidence is unrecoverable, so
-			// hide conservatively like a first-parse failure rather than
-			// letting an unverifiable link surface while the toggle is off.
-			return "", false
-		}
-		host = strings.ToLower(hostRel.Hostname())
-	}
-	return host, true
 }
 
 // ABVisible reports whether a release on the given tracker may surface to the

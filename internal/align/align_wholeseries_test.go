@@ -9,6 +9,10 @@ import (
 	"github.com/cplieger/seadex-scout/internal/mapping"
 )
 
+// wholeRec is the record shape that classifies as a whole-series comparison:
+// a Sonarr series with no positive Fribb TVDB season and not a special.
+var wholeRec = mapping.Record{Type: "TV", SeasonTvdb: 0}
+
 func TestWholeSeries(t *testing.T) {
 	tests := []struct {
 		name string
@@ -31,92 +35,110 @@ func TestWholeSeries(t *testing.T) {
 	}
 }
 
-func TestSummarizeWholeSeriesExcludesSeasonZeroAndUnionsGroups(t *testing.T) {
-	item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{
-		0: {"specialgrp"},
-		1: {"a&c"},
-		2: {"kh"},
-	}}
-	s := align.SummarizeWholeSeries(item, []string{"a&c"}, []string{"kh"})
-	if s.Seasons != 2 {
-		t.Errorf("Seasons = %d, want 2 (season 0 excluded)", s.Seasons)
-	}
-	if !s.AnyAlt {
-		t.Error("AnyAlt = false, want true (season 2 carries an alt group)")
-	}
-	if s.AnyUnlisted {
-		t.Error("AnyUnlisted = true, want false")
-	}
-	if want := []string{"a&c", "kh"}; !reflect.DeepEqual(s.Groups, want) {
-		t.Errorf("Groups = %v, want %v (season 0 group excluded, sorted)", s.Groups, want)
-	}
+// decideWhole runs the shared decision for a whole-series item over the given
+// per-season groups.
+func decideWhole(seasons map[int][]string, best, alt []string) align.Decision {
+	item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: seasons, HasFile: true}
+	return align.Decide(item, &wholeRec, best, alt)
 }
 
-func TestSummarizeWholeSeriesNilAltTreatsBestLessSeasonAsUnlisted(t *testing.T) {
-	item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{
-		1: {"a&c"},
-		2: {"kh"},
-	}}
-	s := align.SummarizeWholeSeries(item, []string{"a&c"}, nil)
-	if !s.AnyUnlisted {
-		t.Error("AnyUnlisted = false, want true (nil alt: a best-less season is unlisted)")
-	}
-	if s.AnyAlt {
-		t.Error("AnyAlt = true, want false (nil alt can never match)")
-	}
-}
-
-// TestSummarizeWholeSeriesDeduplicatesGroupsAcrossSeasons pins the seen-group
-// dedupe in the whole-series aggregate: a group present in several seasons
-// appears once in Groups, not once per season.
-func TestSummarizeWholeSeriesDeduplicatesGroupsAcrossSeasons(t *testing.T) {
-	item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{
-		1: {"shared", "alpha"},
-		2: {"shared", "beta"},
-	}}
-	got := align.SummarizeWholeSeries(item, []string{"shared"}, nil)
-	want := []string{"alpha", "beta", "shared"}
-	if !reflect.DeepEqual(got.Groups, want) {
-		t.Errorf("Groups = %v, want deduplicated sorted groups %v", got.Groups, want)
-	}
-}
-
-func TestSummarizeWholeSeriesSkipsEmptySeasons(t *testing.T) {
-	item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{
-		1: {},
-		2: {"a&c"},
-	}}
-	s := align.SummarizeWholeSeries(item, []string{"a&c"}, nil)
-	if s.Seasons != 1 {
-		t.Errorf("Seasons = %d, want 1 (an empty season contributes nothing)", s.Seasons)
-	}
-	if s.AnyUnlisted {
-		t.Error("AnyUnlisted = true, want false (only the best season counted)")
-	}
-}
-
-// TestSummarizeWholeSeriesApprox pins the coarseness rule on the whole-series
-// aggregate: the comparison is approximate exactly when it spans more than one
-// real season or more than one release group, and season 0 / empty seasons
-// never contribute to that count.
-func TestSummarizeWholeSeriesApprox(t *testing.T) {
+// TestDecideWholeSeriesConservative pins the conservative per-real-season
+// aggregation (ported from the audit's former wholeSeriesVerdict table, which
+// the shared core replaced): best only when every filed real season carries a
+// best group, downgrading to alt then unlisted otherwise, season 0 excluded,
+// no filed real season reading as no-file, and the approximation flag set
+// exactly when the aggregate spans more than one season or group.
+func TestDecideWholeSeriesConservative(t *testing.T) {
+	best := []string{"a&c"}
+	alt := []string{"kh"}
 	tests := []struct {
 		name    string
 		seasons map[int][]string
-		want    bool
+		want    align.Standing
+		approx  bool
 	}{
-		{"one season with one group is exact", map[int][]string{1: {"a&c"}}, false},
-		{"two seasons sharing one group are approximate", map[int][]string{1: {"a&c"}, 2: {"a&c"}}, true},
-		{"one season with two groups is approximate", map[int][]string{1: {"a&c", "kh"}}, true},
-		{"season 0 groups never make it approximate", map[int][]string{0: {"x", "y"}, 1: {"a&c"}}, false},
-		{"an empty season never makes it approximate", map[int][]string{1: {"a&c"}, 2: {}}, false},
+		{"all seasons best", map[int][]string{1: {"a&c"}, 2: {"a&c"}}, align.StandingBest, true},
+		{"best plus unlisted downgrades to unlisted", map[int][]string{1: {"a&c"}, 2: {"kitsune"}}, align.StandingUnlisted, true},
+		{"best plus alt downgrades to alt", map[int][]string{1: {"a&c"}, 2: {"kh"}}, align.StandingAlt, true},
+		{"season 0 is excluded", map[int][]string{0: {"kitsune"}, 1: {"a&c"}}, align.StandingBest, false},
+		{"single season is not approx", map[int][]string{1: {"a&c"}}, align.StandingBest, false},
+		{"single season spanning two groups is approx", map[int][]string{1: {"a&c", "kh"}}, align.StandingBest, true},
+		{"an empty season is neither counted nor approx", map[int][]string{1: {"a&c"}, 2: {}}, align.StandingBest, false},
+		{"only season 0 on disk is no-file", map[int][]string{0: {"a&c"}}, align.StandingNoFile, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: tt.seasons}
-			got := align.SummarizeWholeSeries(item, []string{"a&c"}, nil)
-			if got.Approx != tt.want {
-				t.Errorf("SummarizeWholeSeries(%v).Approx = %v, want %v", tt.seasons, got.Approx, tt.want)
+			d := decideWhole(tt.seasons, best, alt)
+			if d.Standing != tt.want {
+				t.Errorf("Standing = %v, want %v", d.Standing, tt.want)
+			}
+			if d.Approx != tt.approx {
+				t.Errorf("Approx = %v, want %v", d.Approx, tt.approx)
+			}
+			if d.Kind != align.ScopeWholeSeries {
+				t.Errorf("Kind = %v, want ScopeWholeSeries", d.Kind)
+			}
+		})
+	}
+}
+
+// TestDecideWholeSeriesGroupsUnion pins the aggregate group set the decision
+// carries for display and dedupe keys: the sorted, per-season-deduped union of
+// every filed real season's groups, season 0 excluded, and nil when no real
+// season is filed.
+func TestDecideWholeSeriesGroupsUnion(t *testing.T) {
+	tests := []struct {
+		name    string
+		seasons map[int][]string
+		want    []string
+	}{
+		{"unions and sorts across seasons, season 0 excluded", map[int][]string{0: {"specialgrp"}, 1: {"a&c"}, 2: {"kh"}}, []string{"a&c", "kh"}},
+		{"deduplicates a group shared across seasons", map[int][]string{1: {"shared", "alpha"}, 2: {"shared", "beta"}}, []string{"alpha", "beta", "shared"}},
+		{"no filed real season carries no groups", map[int][]string{0: {"a&c"}}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := decideWhole(tt.seasons, []string{"a&c"}, nil)
+			if !reflect.DeepEqual(d.Groups, tt.want) {
+				t.Errorf("Groups = %v, want %v", d.Groups, tt.want)
+			}
+		})
+	}
+}
+
+// TestDecideWholeSeriesNilAlt pins the daemon-shaped inputs: with a nil alt
+// set, a filed season lacking a best group reads unlisted (never alt), so
+// "aligned" is exactly "no season is unlisted".
+func TestDecideWholeSeriesNilAlt(t *testing.T) {
+	d := decideWhole(map[int][]string{1: {"a&c"}, 2: {"kh"}}, []string{"a&c"}, nil)
+	if d.Standing != align.StandingUnlisted {
+		t.Errorf("Standing = %v, want StandingUnlisted (nil alt: a best-less season is unlisted)", d.Standing)
+	}
+	if d.Outcome != align.OutcomeMixed {
+		t.Errorf("Outcome = %v, want OutcomeMixed (not aligned, two-group aggregate)", d.Outcome)
+	}
+}
+
+// TestDecideWholeSeriesOutcomes pins the outcome linearization over the
+// aggregate: no filed real season beats the no-best nudge, full alignment is
+// silent however many groups the union spans, and a not-aligned single-group
+// aggregate diverges.
+func TestDecideWholeSeriesOutcomes(t *testing.T) {
+	tests := []struct {
+		name    string
+		seasons map[int][]string
+		best    []string
+		want    align.Outcome
+	}{
+		{"no filed real season wins over no-best", map[int][]string{0: {"x"}}, nil, align.OutcomeNoFile},
+		{"no-best with a filed season", map[int][]string{1: {"a"}}, nil, align.OutcomeNoBest},
+		{"aligned multi-group aggregate is aligned", map[int][]string{1: {"a&c"}, 2: {"a&c", "kh"}}, []string{"a&c"}, align.OutcomeAligned},
+		{"not-aligned single-group aggregate diverges", map[int][]string{1: {"kh"}, 2: {"kh"}}, []string{"a&c"}, align.OutcomeDiverged},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if d := decideWhole(tt.seasons, tt.best, nil); d.Outcome != tt.want {
+				t.Errorf("Outcome = %v, want %v", d.Outcome, tt.want)
 			}
 		})
 	}

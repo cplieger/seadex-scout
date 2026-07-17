@@ -92,13 +92,27 @@ func (r *Record) IsSpecial() bool {
 
 // RejectionEscalationThreshold is the consecutive-rejection streak
 // (Cache.RejectedRefreshes) at which the scout escalates its degraded-mapping
-// log from WARN to ERROR: 8 cycles is about a day at the default 3h cadence -
-// long enough to ride out a transient upstream oddity, short enough that a
-// persistent guard rejection (which re-downloads the ~5.9MB body every cycle
-// against an aging cache and never self-heals) alerts instead of degrading
-// silently forever. The remedy is operator-driven: inspect upstream, and if
-// the change is legitimate remove state.json to cold-start onto the new map.
+// log from WARN to ERROR. It is the single home of the shared escalation
+// policy - tolerate 8 consecutive degraded cycles, about a day at the default
+// 3h cadence, before escalating - which the scout's shrunk-walk threshold
+// (shrunkWalkEscalationThreshold in internal/scout) references rather than
+// re-declaring: long enough to ride out a transient upstream oddity, short
+// enough that a persistent guard rejection (which re-downloads the ~5.9MB
+// body every cycle against an aging cache and never self-heals) alerts
+// instead of degrading silently forever. The remedy is operator-driven:
+// inspect upstream, and if the change is legitimate remove state.json to
+// cold-start onto the new map.
 const RejectionEscalationThreshold = 8
+
+// ShrinkGuardFactor is the shrink guards' trigger fraction: a refreshed data
+// set that would replace the prior one with fewer than 1/ShrinkGuardFactor of
+// its entries - below half, at the default 2 - is treated as a suspicious
+// truncation rather than a real change, keeping the prior data and never
+// auto-accepting. It is the single home of the shared below-half policy,
+// applied by acceptRefresh's mapping shrink guard and referenced by the
+// scout's library shrink guard (libraryShrinkFactor in internal/scout) rather
+// than re-declared there.
+const ShrinkGuardFactor = 2
 
 // --- Cache + Index: persisted state and the AniList-ID lookup ---
 
@@ -425,10 +439,11 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 	}
 	// A syntactically valid but sharply truncated refresh (e.g. one record
 	// replacing ~40k) can pass the coverage floor above yet silently erase most
-	// mappings; treat a below-half-size refresh as part of the cache-acceptance
-	// invariant and keep the stale map (multiplication avoids integer-division
-	// rounding for odd counts).
-	if prevCount := buildIndex(prev.Records).Len(); prevCount > 0 && len(records)*2 < prevCount {
+	// mappings; treat a below-half-size refresh (ShrinkGuardFactor, the shared
+	// below-half policy home) as part of the cache-acceptance invariant and
+	// keep the stale map (multiplication avoids integer-division rounding for
+	// odd counts).
+	if prevCount := buildIndex(prev.Records).Len(); prevCount > 0 && len(records)*ShrinkGuardFactor < prevCount {
 		// The noCache argument is unreachable here (prevCount > 0 guarantees the
 		// stale branch); it exists only to satisfy rejectRefresh's signature.
 		return rejectRefresh(prev,

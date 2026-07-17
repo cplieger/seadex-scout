@@ -1,7 +1,6 @@
 package seadex
 
 import (
-	"net/url"
 	"strconv"
 	"strings"
 
@@ -17,22 +16,24 @@ import (
 // so a finding or report never emits a broken bare path. An unknown tracker's
 // URL drops to "" like every other unusable form (no canonical host exists to
 // vouch for it or make a relative path followable).
+//
+// The structural reading of the raw string - which of the browser-vs-net/url
+// parse-quirk forms it is - lives in the shared release.ClassifyRawURL; this
+// publisher applies the publish-or-drop policy over those facts (where the
+// AnimeBytes toggle gate, filter.ABVisible, applies extract-evidence-or-hide
+// over the same facts). Malformed, hidden-host, and protocol-relative forms
+// have no legitimate use as a clickable tracker link and drop; a
+// protocol-relative URL ("//host/path") carries no scheme, yet a renderer
+// resolves it against the ambient scheme and navigates off-site.
 func (t *Torrent) UsableURL() string {
-	u := strings.TrimSpace(t.URL)
-	if u == "" {
+	f := release.ClassifyRawURL(t.URL)
+	// Backslashes are rejected outright, even where the canonicalized reading
+	// classifies cleanly: browsers treat "\\host" as an authority even though
+	// url.Parse does not, and this publisher emits the raw string.
+	if f.HasBackslash {
 		return ""
 	}
-	// Parse rather than prefix-match so a malformed absolute value (a bare
-	// "https://", an invalid escape, whitespace in the host, a backslash
-	// authority) becomes the already-supported empty-URL case - dropping only
-	// the unusable link - instead of a published link a human cannot follow.
-	// Backslashes are rejected outright: browsers treat "\\host" as an
-	// authority even though url.Parse does not.
-	parsed, err := url.Parse(u)
-	if err != nil || strings.Contains(u, `\`) {
-		return ""
-	}
-	// Resolve the tracker before handling either URL form: the tracker label
+	// Resolve the tracker before handling any usable form: the tracker label
 	// is untrusted upstream data too, and the canonical table entry supplies
 	// both the base URL a relative path needs and the only host an absolute
 	// URL is allowed to point at.
@@ -40,42 +41,32 @@ func (t *Torrent) UsableURL() string {
 	if !ok || tr.BaseURL == "" {
 		return ""
 	}
-	if parsed.IsAbs() {
-		// An absolute URL is returned unchanged, but only in http(s) with no
-		// userinfo and a host bound to a canonical tracker host; any other
-		// scheme (javascript:, data:, file:), a user@host authority (visual
-		// spoofing: "https://trusted@evil/"), or a foreign host under a trusted
-		// tracker label (phishing: a Nyaa-labeled https://evil.example) is
-		// untrusted upstream data with no legitimate use in a clickable link.
-		// The host is checked against the whole canonical table rather than
-		// only the labeled tracker: the label is itself untrusted, and the
-		// URL-aware AB toggle boundary (filter.ABVisible) deliberately keys on
-		// the URL host, so a mislabeled AB URL must stay usable when that
-		// boundary surfaces it.
-		if !usableAbsolute(parsed) {
+	switch f.Class {
+	case release.URLFormAbsolute:
+		if !usableAbsolute(&f) {
 			return ""
 		}
-		return u
+		return f.Trimmed
+	case release.URLFormRelative, release.URLFormSchemelessHost:
+		// In an href context both forms resolve as tracker-relative paths
+		// (the schemeless-host reading applies to address bars, not links),
+		// so they are published base-prefixed - subject to the colon rule.
+		return usableRelative(f.Trimmed, tr.BaseURL)
+	default:
+		// Empty, malformed, hidden-host, and protocol-relative forms drop.
+		return ""
 	}
-	return usableRelative(u, parsed, tr.BaseURL)
 }
 
 // usableRelative converts a tracker-relative path into a followable link by
-// prefixing the tracker's canonical base URL, preserving UsableURL's relative
-// rejections in order. A protocol-relative URL ("//host/path") carries no
-// scheme, yet a renderer resolves it against the ambient scheme and navigates
-// off-site; it has no legitimate use as a tracker link. A relative value whose
-// first colon precedes any slash (a query- or fragment-leading colon such as
-// "?x:y" or "#a:b") is equally unusable as a relative path; a colon in the
-// first path segment (e.g. "1a:b") never reaches here because url.Parse
-// already rejects it in UsableURL. A scheme-less relative path parses
-// host-free and still passes
-// through (tracker-relative AB paths are unaffected), prefixed with one slash
-// when absent.
-func usableRelative(raw string, parsed *url.URL, baseURL string) string {
-	if parsed.Host != "" || strings.HasPrefix(raw, "//") {
-		return ""
-	}
+// prefixing the tracker's canonical base URL. A relative value whose first
+// colon precedes any slash (a query- or fragment-leading colon such as "?x:y"
+// or "#a:b") is unusable as a relative path; a colon in the first path
+// segment (e.g. "1a:b") never reaches here because such a string classifies
+// malformed ("first path segment in URL cannot contain colon") or hidden-host
+// (a valid-scheme parse). A scheme-less path is prefixed with one slash when
+// absent (tracker-relative AB paths are unaffected).
+func usableRelative(raw, baseURL string) string {
 	if i := strings.Index(raw, ":"); i >= 0 && !strings.Contains(raw[:i], "/") {
 		return ""
 	}
@@ -85,30 +76,34 @@ func usableRelative(raw string, parsed *url.URL, baseURL string) string {
 	return baseURL + raw
 }
 
-// usableAbsolute reports whether an already-absolute parsed URL is a safe
-// clickable link: http(s) scheme, no userinfo authority, and a hostname bound
-// to a canonical tracker host from the release tracker table (equal to one or
-// a real dot-delimited subdomain of one, via release.LookupTrackerByHost).
-// Hostname() (the parsed host component) is checked rather than Host (the
-// serialized authority), which is non-empty for a port-only authority like
-// "https://:443/path" even though no host exists. Non-ASCII and empty-labeled
-// hostnames are rejected by the shared predicate itself: an IDN lookalike of
-// a tracker host (a homograph such as a Cyrillic "nyаa.si") has no legitimate
-// use in SeaDex data, and this gate's fail direction (unclassifiable = drop
-// the link) is exactly the predicate's.
-func usableAbsolute(parsed *url.URL) bool {
-	if !strings.EqualFold(parsed.Scheme, "http") &&
-		!strings.EqualFold(parsed.Scheme, "https") {
+// usableAbsolute reports whether an absolute-classified URL is a safe
+// clickable link: http(s) scheme, no userinfo authority (visual spoofing:
+// "https://trusted@evil/"), a numeric 16-bit port when one is present, and a
+// hostname bound to a canonical tracker host from the release tracker table
+// (equal to one or a real dot-delimited subdomain, via
+// release.LookupTrackerByHost). Any other scheme (javascript:, data:, file:)
+// is untrusted upstream data with no legitimate use in a clickable link. The
+// host is checked against the whole canonical table rather than only the
+// labeled tracker: the label is itself untrusted, and the URL-aware AB toggle
+// boundary (filter.ABVisible) deliberately keys on the URL host, so a
+// mislabeled AB URL must stay usable when that boundary surfaces it.
+// Non-ASCII and empty-labeled hostnames are rejected by the shared predicate
+// itself: an IDN lookalike of a tracker host (a homograph such as a Cyrillic
+// "nyаa.si") has no legitimate use in SeaDex data, and this gate's fail
+// direction (unclassifiable = drop the link) is exactly the predicate's.
+func usableAbsolute(f *release.URLForm) bool {
+	if !strings.EqualFold(f.Parsed.Scheme, "http") &&
+		!strings.EqualFold(f.Parsed.Scheme, "https") {
 		return false
 	}
-	if parsed.User != nil {
+	if f.Parsed.User != nil {
 		return false
 	}
-	if port := parsed.Port(); port != "" {
+	if port := f.Parsed.Port(); port != "" {
 		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
 			return false
 		}
 	}
-	_, ok := release.LookupTrackerByHost(parsed.Hostname())
+	_, ok := release.LookupTrackerByHost(f.Host)
 	return ok
 }
