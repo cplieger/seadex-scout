@@ -36,16 +36,27 @@ const errCodeUnknown = 900
 // snapshot): they mirror the historical field names, so renaming a Go field
 // never silently changes the on-disk format a resident daemon or an upgraded
 // binary reads back.
+//
+// FirstSeen, Key, and AniListID are journal bookkeeping carried only by
+// synthesized RSS items (see journal.go): when the release entered the
+// journal (PubDate mirrors it; the prune clock keys on it), the torrent's
+// stable tracker identity (nyaa:{id} / ab:{id} - the harvested-title cache
+// key), and the SeaDex entry's AniList id (the harvest query group). They are
+// zero on proxied search results, which are never persisted, and writeItem
+// does not render them.
 type item struct {
 	PubDate              time.Time `json:"PubDate"`
+	FirstSeen            time.Time `json:"FirstSeen,omitzero"`
 	Title                string    `json:"Title"`
 	GUID                 string    `json:"GUID"`
 	InfoURL              string    `json:"InfoURL"`
 	DownloadURL          string    `json:"DownloadURL"`
 	InfoHash             string    `json:"InfoHash"`
 	DownloadVolumeFactor string    `json:"DownloadVolumeFactor"`
+	Key                  string    `json:"Key,omitempty"`
 	Categories           []int     `json:"Categories"`
 	Size                 int64     `json:"Size"`
+	AniListID            int       `json:"AniListID,omitempty"`
 	Seeders              int       `json:"Seeders"`
 	Leechers             int       `json:"Leechers"`
 }

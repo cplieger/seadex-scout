@@ -58,8 +58,9 @@ const (
 	// DefaultStatePath is the atomic JSON cache/state file.
 	DefaultStatePath = "/config/state.json"
 	// DefaultIndexerFeedPath is the atomic JSON file the compare cycle writes the
-	// indexer's materialized feed to (the search curation set plus the two
-	// synthesized per-tracker RSS feeds) and the indexer HTTP server reads. One
+	// indexer's materialized feed to (the search curation set, the synthesized
+	// per-tracker RSS journals with their seen ledger, and the harvested-title
+	// cache) and the indexer HTTP server reads. One
 	// data engine (the cycle) produces both the findings and this feed, and
 	// persisting it lets a cycle run by the `poll` subcommand refresh a resident
 	// daemon's feed across the process boundary.
@@ -576,14 +577,6 @@ func (c *Config) RadarrWebBase() string { return cmp.Or(c.RadarrPublicURL, c.Rad
 // and the composition root.
 func (c *Config) IndexerConfigured() bool {
 	return c.IndexerNyaaTorznabURL != "" || c.IndexerABTorznabURL != ""
-}
-
-// IndexerABConfigured reports whether the AnimeBytes upstream is
-// configured (its Prowlarr Torznab URL is set). Single home of the
-// AB-enablement decision, consumed by the composition root's feed
-// writer wiring (build.go).
-func (c *Config) IndexerABConfigured() bool {
-	return c.IndexerABTorznabURL != ""
 }
 
 // Validate reports the first configuration problem that would stop the app from

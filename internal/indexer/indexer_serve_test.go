@@ -264,7 +264,7 @@ func TestReloadKeepsFeedOnUnreadableSnapshot(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
 		}},
 	}}
-	if err := NewFeedWriter("", false, path, nil).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := seedRebuild(path, entries); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	log, rec := capture.New()

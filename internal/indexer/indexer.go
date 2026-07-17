@@ -11,14 +11,18 @@
 //
 //   - A periodic RSS check (an empty-query "latest releases" fetch, which Sonarr
 //     and Radarr issue on their sync interval) is answered from a synthesized
-//     per-tracker feed of the whole SeaDex curation set, built by the compare
-//     cycle from its SeaDex fetch and persisted as a snapshot this server reads
-//     (see FeedWriter): one item per curated torrent, its title derived
-//     from the release's file names, its size summed from them, and a real
-//     download link built directly - a public Nyaa .torrent, or AnimeBytes via
-//     the operator's passkey. Synthesis is the only way to serve the SeaDex list
-//     on RSS: an empty-query proxy would return the tracker's newest uploads, not
-//     what SeaDex curates.
+//     per-tracker JOURNAL of newly curated releases, built by the compare cycle
+//     from its SeaDex fetch and persisted as a snapshot this server reads (see
+//     FeedWriter): a release enters when it is new to SeaDex's curation set
+//     (never seen before - the tracker post date is deliberately not the
+//     trigger) and ages out after 14 days. Its title is synthesized from the
+//     show's own arr/AniList title plus the release's real flags - upgraded to
+//     the tracker's real title once the writer's Prowlarr title harvest matches
+//     it - its size summed from the files, and its download link built
+//     directly: a public Nyaa .torrent, or AnimeBytes via the operator's
+//     passkey. A journal is the only sane RSS shape here: an empty-query proxy
+//     would return the tracker's newest uploads (not what SeaDex curates), and
+//     re-broadcasting the whole catalogue would make every poll a firehose.
 //
 // Every item - search or RSS - carries the SeaDex download-volume-factor marker:
 // best -> 0.75 (Freeleech25), alt -> 0.25 (Freeleech75), which the operator maps
@@ -255,20 +259,26 @@ func New(cfg *Config, deps Deps, snapshotPath string) *Indexer {
 	// One upstream per configured Prowlarr Torznab URL. An empty URL means that
 	// tracker is off: it is simply not wired, so the feed never queries it. (The
 	// daemon only starts the feed at all when at least one URL is set.)
-	if cfg.NyaaTorznabURL != "" {
-		ix.upstreams = append(ix.upstreams, &upstream{
-			http: deps.HTTP, log: log, name: upstreamNyaa, feed: cfg.NyaaTorznabURL, apiKey: cfg.ProwlarrAPIKey,
-		})
-	}
-	if cfg.ABTorznabURL != "" {
-		ix.upstreams = append(ix.upstreams, &upstream{
-			http: deps.HTTP, log: log, name: upstreamAB, feed: cfg.ABTorznabURL, apiKey: cfg.ProwlarrAPIKey,
-		})
-	}
+	ix.upstreams = wireUpstreams(deps.HTTP, log, cfg.NyaaTorznabURL, cfg.ABTorznabURL, cfg.ProwlarrAPIKey)
 	// Warm the feed from the last persisted snapshot so a restart serves
 	// immediately rather than empty until the next cycle.
 	ix.reload(context.Background())
 	return ix
+}
+
+// wireUpstreams builds one upstream per configured Prowlarr per-indexer
+// Torznab URL, shared by the server (search proxying) and the feed writer
+// (title harvesting) so both query the exact tracker set the operator
+// configured, with the same client, headers, and retry discipline.
+func wireUpstreams(httpClient *http.Client, log *slog.Logger, nyaaURL, abURL, apiKey string) []*upstream {
+	var ups []*upstream
+	if nyaaURL != "" {
+		ups = append(ups, &upstream{http: httpClient, log: log, name: upstreamNyaa, feed: nyaaURL, apiKey: apiKey})
+	}
+	if abURL != "" {
+		ups = append(ups, &upstream{http: httpClient, log: log, name: upstreamAB, feed: abURL, apiKey: apiKey})
+	}
+	return ups
 }
 
 // Run serves the Torznab endpoint from the persisted feed snapshot until ctx is
@@ -439,7 +449,7 @@ func (ix *Indexer) reload(ctx context.Context) {
 		return
 	}
 	ix.failedFile = nil
-	if !ix.installSnapshot(info, snap) {
+	if !ix.installSnapshot(info, &snap) {
 		return
 	}
 	ix.log.Info("indexer feed snapshot loaded",
@@ -472,13 +482,13 @@ func (ix *Indexer) shouldSkipSnapshot(info os.FileInfo) bool {
 // copy of what is already loaded holds even if the TryLock coalescing changes.
 // Same test as shouldSkipSnapshot's loaded leg: only an equal mtime on the
 // SAME file (os.SameFile identity) skips.
-func (ix *Indexer) installSnapshot(info os.FileInfo, snap snapshot) bool {
+func (ix *Indexer) installSnapshot(info os.FileInfo, snap *snapshot) bool {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 	if info.ModTime().Equal(ix.snapMod) && ix.snapInfo != nil && os.SameFile(info, ix.snapInfo) {
 		return false
 	}
-	ix.snap = snap
+	ix.snap = *snap
 	ix.snapMod = info.ModTime()
 	ix.snapInfo = info
 	return true
@@ -685,10 +695,10 @@ type queryStats struct {
 // plus a queryStats summary for logging.
 //
 // An empty-q request (Prowlarr's caps/save test, or an RSS "latest" fetch) is
-// served from the synthesized per-tracker SeaDex feed - the whole curation set
-// rendered as grabbable items - without contacting a tracker. This is the
-// periodic new-release check: the arr parses each synthesized title and grabs
-// what matches its library.
+// served from the synthesized per-tracker SeaDex journal - the releases newly
+// curated within the journal window, rendered as grabbable items - without
+// contacting a tracker. This is the periodic new-release check: the arr parses
+// each synthesized title and grabs what matches its library.
 //
 // A search (non-empty q) is proxied to that tracker's Prowlarr endpoint and
 // filtered to SeaDex's curation, passing real titles/seeders/links through. A

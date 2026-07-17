@@ -17,6 +17,7 @@ import (
 
 	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/compare"
+	"github.com/cplieger/seadex-scout/internal/indexer"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
@@ -30,9 +31,12 @@ import (
 // are produced by one data engine from a single fetch. The indexer's feed writer
 // implements it; Deps.Feed is nil when no Torznab feed is configured and the
 // cycle then does no feed work. Because Rebuild persists the feed, a cycle run
-// by the `poll` subcommand refreshes a resident daemon's feed too.
+// by the `poll` subcommand refreshes a resident daemon's feed too. info supplies
+// the per-show metadata the writer synthesizes RSS titles from (see
+// feedEntryInfo); it is built over persisted state only, keeping the rebuild
+// arr-independent.
 type FeedWriter interface {
-	Rebuild(ctx context.Context, entries []seadex.Entry, isMovie func(alID int) bool) error
+	Rebuild(ctx context.Context, entries []seadex.Entry, info func(alID int) indexer.EntryInfo) error
 }
 
 // SeaDexSource supplies the SeaDex entries snapshot a cycle compares and
@@ -157,8 +161,9 @@ func (s *Scout) Cycle(ctx context.Context) bool {
 
 	// Rebuild the Torznab feed from the shared snapshot, independent of the arr
 	// walk (see rebuildFeed): a notification and what the arrs see in the feed
-	// come from this one fetch.
-	s.rebuildFeed(ctx, entries, idx, mapErr, seaErr)
+	// come from this one fetch. The persisted state (library titles + AniList
+	// memo) feeds only the title synthesis, never a fresh arr walk.
+	s.rebuildFeed(ctx, entries, idx, &st, mapErr, seaErr)
 
 	// From here the compare pass is gated on the arr walk (the health signal): a
 	// failed walk is unhealthy and leaves findings untouched (only the refreshed
@@ -411,24 +416,22 @@ func mapUsable(mapErr error) bool {
 
 // rebuildFeed refreshes the indexer's Torznab feed from the cycle's shared
 // SeaDex snapshot, independent of the arr walk (the feed needs only SeaDex +
-// Fribb, so an arr outage must not freeze it). It is a no-op when no feed is
-// configured, the SeaDex fetch failed, or the map is unusable (a load error
-// that is NOT a mapping.StaleMapError) - the last-good feed is then kept:
-// rebuilding against an unusable map would categorize every entry as anime and
-// silently drop all SeaDex movies from Radarr's RSS view. A stale-but-usable
-// map (mapErr matches mapping.StaleMapError, which carries a usable cached
-// index) still rebuilds, exactly like the pre-compare gate's discrimination.
-func (s *Scout) rebuildFeed(ctx context.Context, entries []seadex.Entry, idx *mapping.Index, mapErr, seaErr error) {
+// Fribb + persisted state, so an arr outage must not freeze it). It is a no-op
+// when no feed is configured, the SeaDex fetch failed, or the map is unusable
+// (a load error that is NOT a mapping.StaleMapError) - the last-good feed is
+// then kept: rebuilding against an unusable map would categorize every entry as
+// anime and silently drop all SeaDex movies from Radarr's RSS view. A
+// stale-but-usable map (mapErr matches mapping.StaleMapError, which carries a
+// usable cached index) still rebuilds, exactly like the pre-compare gate's
+// discrimination. The per-show metadata closure is built over PERSISTED state
+// (st's library snapshot and AniList memo, loaded at cycle start) - never this
+// cycle's walk - so the title synthesis inherits the same arr-independence.
+func (s *Scout) rebuildFeed(ctx context.Context, entries []seadex.Entry, idx *mapping.Index, st *state.State, mapErr, seaErr error) {
 	if s.deps.Feed == nil || seaErr != nil || len(entries) == 0 || !mapUsable(mapErr) {
 		return
 	}
-	// The feed writer consumes exactly one bit of the Fribb map (movie or not),
-	// so it takes a closure instead of the whole index; Lookup is nil-safe.
-	isMovie := func(alID int) bool {
-		rec, ok := idx.Lookup(alID)
-		return ok && rec.IsMovie()
-	}
-	if err := s.deps.Feed.Rebuild(ctx, entries, isMovie); err != nil && ctx.Err() == nil {
+	info := feedEntryInfo(idx, &st.Library, st.Memo)
+	if err := s.deps.Feed.Rebuild(ctx, entries, info); err != nil && ctx.Err() == nil {
 		// A cancelled rebuild is the shutdown, not a feed fault; the pre-compare
 		// gate logs the interruption (the last-good feed is kept either way).
 		s.log.Warn("indexer feed rebuild failed; keeping previous feed", "error", err)

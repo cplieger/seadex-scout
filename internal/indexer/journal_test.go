@@ -1,0 +1,559 @@
+package indexer
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/slogx/capture"
+)
+
+// newTestWriter builds a FeedWriter for path with no harvest upstreams (the
+// common shape of the journal tests). abConfigured wires a fake AB Torznab URL
+// (the tracker's on switch); abPasskey builds the AB download links.
+func newTestWriter(path, abPasskey string, abConfigured bool) *FeedWriter {
+	cfg := &FeedWriterConfig{Path: path, ABPasskey: abPasskey}
+	if abConfigured {
+		cfg.ABTorznabURL = "http://prowlarr/2/api"
+	}
+	return NewFeedWriter(cfg, Deps{})
+}
+
+// seedEmptyLedger writes a journal-schema snapshot with an EMPTY seen ledger
+// at path, so the next Rebuild treats every curated torrent as newly curated -
+// bypassing the first-run baseline (which would record everything as seen and
+// serve an empty journal).
+func seedEmptyLedger(t *testing.T, path string) {
+	t.Helper()
+	const empty = `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[],"ab_feed":[]}`
+	if err := os.WriteFile(path, []byte(empty), 0o600); err != nil {
+		t.Fatalf("seed empty ledger: %v", err)
+	}
+}
+
+// readSnapshotFile decodes the persisted snapshot for assertions.
+func readSnapshotFile(t *testing.T, path string) snapshot {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	var snap snapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
+	}
+	return snap
+}
+
+// writeSnapshotFile persists a hand-built snapshot for tests that seed journal
+// state directly (titles, first-seen times).
+func writeSnapshotFile(t *testing.T, path string, snap *snapshot) {
+	t.Helper()
+	data, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write snapshot: %v", err)
+	}
+}
+
+// nyaaEntry builds one single-torrent Nyaa SeaDex entry with the given AniList
+// id, view id, and file names.
+func nyaaEntry(alID, viewID int, best bool, names ...string) seadex.Entry {
+	files := make([]seadex.File, 0, len(names))
+	for _, n := range names {
+		files = append(files, seadex.File{Name: n, Length: 1})
+	}
+	return seadex.Entry{
+		AniListID: alID,
+		Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa",
+			URL:     "https://nyaa.si/view/" + strconv.Itoa(viewID),
+			IsBest:  best,
+			Files:   files,
+		}},
+	}
+}
+
+// TestRebuildBaselinesFreshInstall pins the first-run contract: with no
+// previous snapshot the entire current curation set is recorded as seen and
+// the journal is served EMPTY - the feed only grows from curation newer than
+// the baseline (backfill is search's job) - while the search curation set is
+// fully populated from the same catalogue.
+func TestRebuildBaselinesFreshInstall(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
+	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 0 || len(snap.ABFeed) != 0 {
+		t.Errorf("baseline feeds = nyaa %d / ab %d items, want both empty", len(snap.NyaaFeed), len(snap.ABFeed))
+	}
+	if !snap.Seen["nyaa:42"] {
+		t.Errorf("seen ledger missing nyaa:42 after baseline: %v", snap.Seen)
+	}
+	if len(snap.ByKey) != 1 {
+		t.Errorf("search curation keys = %d, want 1 (search must still cover the whole catalogue)", len(snap.ByKey))
+	}
+
+	// A second rebuild over the same catalogue stays empty: nothing is new.
+	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("second Rebuild: %v", err)
+	}
+	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 {
+		t.Errorf("feed after unchanged catalogue = %d items, want 0", len(snap.NyaaFeed))
+	}
+}
+
+// TestRebuildBaselinesPreJournalSchema pins the schema migration: a previous
+// snapshot without a seen ledger (the retired whole-catalogue window model) is
+// treated as absent - the journal baselines empty even though the old snapshot
+// carried feed items, and the old items never re-enter.
+func TestRebuildBaselinesPreJournalSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	old := `{"by_hash":{},"by_key":{"nyaa:42":true},"nyaa_feed":[{"Title":"Show - S01 (1080p) [G]","GUID":"https://nyaa.si/view/42","DownloadURL":"https://nyaa.si/download/42.torrent"}],"ab_feed":[]}`
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatalf("write old-schema snapshot: %v", err)
+	}
+	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
+	log, rec := capture.New()
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 0 {
+		t.Errorf("feed after old-schema migration = %d items, want 0 (baseline-empty)", len(snap.NyaaFeed))
+	}
+	if !snap.Seen["nyaa:42"] {
+		t.Errorf("seen ledger missing the migrated catalogue: %v", snap.Seen)
+	}
+	if !rec.Contains("indexer feed journal baselined") {
+		t.Errorf("baseline not logged; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestRebuildBaselinesMalformedSnapshot pins the corruption posture: a
+// malformed previous snapshot warns and re-baselines (self-healing - the seen
+// ledger rebuilds from the current catalogue) instead of failing the rebuild
+// forever or silently seeding a bogus journal.
+func TestRebuildBaselinesMalformedSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("write malformed snapshot: %v", err)
+	}
+	log, rec := capture.New()
+	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 || !snap.Seen["nyaa:42"] {
+		t.Errorf("malformed snapshot did not re-baseline: feed=%d seen=%v", len(snap.NyaaFeed), snap.Seen)
+	}
+	if !rec.Contains("previous feed snapshot malformed; re-baselining the feed journal") {
+		t.Errorf("malformed snapshot not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestRebuildJournalsNewlyCurated pins the journal growth contract: a torrent
+// newly present in the curation set (absent from the seen ledger) enters the
+// feed ONCE with its first-seen timestamp (PubDate mirrors it), stays in the
+// journal on following rebuilds with FirstSeen unchanged, and an item already
+// baselined never enters.
+func TestRebuildJournalsNewlyCurated(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	w := newTestWriter(path, "", false)
+	t0 := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
+	w.now = func() time.Time { return t0 }
+
+	// Baseline over catalogue A.
+	a := nyaaEntry(7, 42, true, "Show A - S01E01 (1080p) [G].mkv")
+	if err := w.Rebuild(context.Background(), []seadex.Entry{a}, nil); err != nil {
+		t.Fatalf("baseline Rebuild: %v", err)
+	}
+
+	// SeaDex curates B: only B enters the journal, stamped t1.
+	t1 := t0.Add(3 * time.Hour)
+	w.now = func() time.Time { return t1 }
+	b := nyaaEntry(8, 43, true, "Show B - S01E01 (1080p) [G].mkv")
+	if err := w.Rebuild(context.Background(), []seadex.Entry{a, b}, nil); err != nil {
+		t.Fatalf("growth Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 1 {
+		t.Fatalf("feed = %d items, want 1 (only the newly curated torrent)", len(snap.NyaaFeed))
+	}
+	got := snap.NyaaFeed[0]
+	if got.Key != "nyaa:43" {
+		t.Errorf("journaled key = %q, want nyaa:43", got.Key)
+	}
+	if !got.FirstSeen.Equal(t1) {
+		t.Errorf("FirstSeen = %v, want %v", got.FirstSeen, t1)
+	}
+	if !got.PubDate.Equal(t1) {
+		t.Errorf("PubDate = %v, want FirstSeen %v", got.PubDate, t1)
+	}
+
+	// A third rebuild over the same catalogue keeps B (it stays until pruned)
+	// with its original FirstSeen, and adds nothing.
+	t2 := t1.Add(3 * time.Hour)
+	w.now = func() time.Time { return t2 }
+	if err := w.Rebuild(context.Background(), []seadex.Entry{a, b}, nil); err != nil {
+		t.Fatalf("steady-state Rebuild: %v", err)
+	}
+	snap = readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 1 {
+		t.Fatalf("steady-state feed = %d items, want 1 (journal keeps the item until pruned)", len(snap.NyaaFeed))
+	}
+	if !snap.NyaaFeed[0].FirstSeen.Equal(t1) {
+		t.Errorf("steady-state FirstSeen = %v, want the original %v", snap.NyaaFeed[0].FirstSeen, t1)
+	}
+}
+
+// TestRebuildPrunesAgedItemsAndTitles pins the prune contract: an item older
+// than feedJournalMaxAge leaves the journal AND drops its cached harvested
+// title, while the seen ledger keeps its identity - so the pruned item can
+// never re-enter the journal as new even though SeaDex still curates it.
+func TestRebuildPrunesAgedItemsAndTitles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	w := newTestWriter(path, "", false)
+	t0 := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
+	w.now = func() time.Time { return t0 }
+	seedEmptyLedger(t, path)
+	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
+	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	// Hand-cache a harvested title for the journaled item, as a harvest would.
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 1 {
+		t.Fatalf("feed = %d items, want 1", len(snap.NyaaFeed))
+	}
+	snap.Titles = map[string]string{"nyaa:42": "Show S01 1080p BluRay [G]"}
+	writeSnapshotFile(t, path, &snap)
+
+	// Within the window the cached title is served.
+	t1 := t0.Add(24 * time.Hour)
+	w.now = func() time.Time { return t1 }
+	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("within-window Rebuild: %v", err)
+	}
+	snap = readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 1 || snap.NyaaFeed[0].Title != "Show S01 1080p BluRay [G]" {
+		t.Fatalf("within-window feed = %+v, want the cached harvested title served", snap.NyaaFeed)
+	}
+
+	// Past the window the item ages out, its title cache entry goes with it,
+	// and the seen ledger keeps the identity.
+	t2 := t0.Add(feedJournalMaxAge + time.Hour)
+	w.now = func() time.Time { return t2 }
+	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("prune Rebuild: %v", err)
+	}
+	snap = readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 0 {
+		t.Errorf("feed after prune = %d items, want 0", len(snap.NyaaFeed))
+	}
+	if len(snap.Titles) != 0 {
+		t.Errorf("titles after prune = %v, want empty (the aged-out item drops its cached title)", snap.Titles)
+	}
+	if !snap.Seen["nyaa:42"] {
+		t.Errorf("seen ledger lost the pruned identity: %v", snap.Seen)
+	}
+
+	// The torrent is still curated: it must never resurrect as new.
+	t3 := t2.Add(3 * time.Hour)
+	w.now = func() time.Time { return t3 }
+	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("post-prune Rebuild: %v", err)
+	}
+	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 {
+		t.Errorf("feed after post-prune rebuild = %d items, want 0 (pruned items never re-enter)", len(snap.NyaaFeed))
+	}
+}
+
+// TestRebuildSharedTorrentMergesBestWins pins the shared-torrent fold: a
+// torrent attached to two SeaDex entries (same tracker key) journals as ONE
+// item with best-wins on the marker and the categories of both entries
+// unioned - the alt entry is listed first, so a first-wins fold would fail the
+// marker assertion.
+func TestRebuildSharedTorrentMergesBestWins(t *testing.T) {
+	shared := seadex.Torrent{
+		Tracker: "Nyaa", URL: "https://nyaa.si/view/1234567",
+		Files: []seadex.File{{Length: 7, Name: "Show - S01E01 (1080p) [G].mkv"}},
+	}
+	alt := shared
+	best := shared
+	best.IsBest = true
+	entries := []seadex.Entry{
+		{AniListID: 1, Torrents: []seadex.Torrent{alt}},
+		{AniListID: 2, Torrents: []seadex.Torrent{best}},
+	}
+	info := func(alID int) EntryInfo {
+		return EntryInfo{IsMovie: alID == 2}
+	}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, info); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 1 {
+		t.Fatalf("feed = %d items, want 1 (shared torrent merged)", len(snap.NyaaFeed))
+	}
+	got := snap.NyaaFeed[0]
+	if got.DownloadVolumeFactor != dvfBest {
+		t.Errorf("marker = %q, want %q (best-wins even when the alt entry is listed first)", got.DownloadVolumeFactor, dvfBest)
+	}
+	if len(got.Categories) != 2 {
+		t.Errorf("categories = %v, want the union of both entries' categories", got.Categories)
+	}
+}
+
+// TestRebuildDistinctEmptyGUIDItemsStayDistinct pins the journal identity key:
+// two DISTINCT Nyaa torrents whose SeaDex URLs sit on a foreign host resolve
+// canonical download links (nyaaID reads /view/{id} without host validation)
+// while UsableURL rejects the host and leaves their stored GUIDs empty - they
+// must journal as two items keyed nyaa:111 / nyaa:222, never merge on the
+// empty GUID.
+func TestRebuildDistinctEmptyGUIDItemsStayDistinct(t *testing.T) {
+	entries := []seadex.Entry{{
+		AniListID: 9,
+		Torrents: []seadex.Torrent{
+			{
+				Tracker: "Nyaa", URL: "https://evil.example/view/111", IsBest: true,
+				Files: []seadex.File{{Length: 1, Name: "Show A - S01E01 (1080p) [G].mkv"}},
+			},
+			{
+				Tracker: "Nyaa", URL: "https://evil.example/view/222",
+				Files: []seadex.File{{Length: 1, Name: "Show B - S01E01 (1080p) [G].mkv"}},
+			},
+		},
+	}}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 2 {
+		t.Fatalf("feed = %d items, want 2 (distinct empty-GUID torrents must not merge)", len(snap.NyaaFeed))
+	}
+	for i := range snap.NyaaFeed {
+		if snap.NyaaFeed[i].GUID != "" {
+			t.Errorf("item %d stored GUID = %q, want empty (UsableURL must reject the foreign host)", i, snap.NyaaFeed[i].GUID)
+		}
+	}
+	if snap.NyaaFeed[0].DownloadURL == snap.NyaaFeed[1].DownloadURL {
+		t.Errorf("both items share download URL %q, want distinct canonical links", snap.NyaaFeed[0].DownloadURL)
+	}
+}
+
+// TestRebuildDropsUnknownTracker pins the tail-drop: a SeaDex torrent on a
+// tracker other than Nyaa/AB (the negligible AnimeTosho/RuTracker tail) never
+// enters a journal feed and does not trigger the AB passkey nudge.
+func TestRebuildDropsUnknownTracker(t *testing.T) {
+	entries := []seadex.Entry{{
+		AniListID: 5,
+		Torrents: []seadex.Torrent{{
+			Tracker: "AnimeTosho", URL: "https://animetosho.org/view/1", IsBest: true,
+			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
+		}},
+	}}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	log, rec := capture.New()
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, ABPasskey: "PK", ABTorznabURL: "http://prowlarr/2/api"}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 0 || len(snap.ABFeed) != 0 {
+		t.Errorf("unknown tracker leaked into a feed: nyaa=%d ab=%d, want 0 and 0", len(snap.NyaaFeed), len(snap.ABFeed))
+	}
+	if rec.Contains("ab RSS feed empty of grabbable links") {
+		t.Errorf("unknown tracker triggered the AB passkey nudge; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestRebuildIdlessABNotCountedAsPasskeySkip pins the precision of the
+// missing-passkey nudge: an AnimeBytes release whose URL carries no parseable
+// torrent id is un-grabbable regardless of the passkey, so it is excluded from
+// the journal WITHOUT triggering the nudge - the operator warning must only
+// count releases a passkey would actually make grabbable.
+func TestRebuildIdlessABNotCountedAsPasskeySkip(t *testing.T) {
+	entries := []seadex.Entry{{
+		AniListID: 5,
+		Torrents: []seadex.Torrent{{
+			Tracker: "AB", URL: "/torrents.php?id=1", IsBest: true,
+			InfoHash: "aa" + strings.Repeat("b", 38),
+			Files:    []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
+		}},
+	}}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	log, rec := capture.New()
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, ABTorznabURL: "http://prowlarr/2/api"}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.ABFeed) != 0 {
+		t.Errorf("id-less AB release leaked into the feed: %d items, want 0", len(snap.ABFeed))
+	}
+	if rec.Contains("ab RSS feed empty of grabbable links") {
+		t.Errorf("id-less AB release counted as a passkey skip; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestRebuildUnpackedSeasonListsPerEpisode pins the per-episode listing at the
+// journal level: a season SeaDex tracks as one torrent PER episode (each a
+// single-file release) journals one item per episode, each keeping its SxxExx
+// title - never collapsed to the season (which would let the arr grab a single
+// episode believing it was the whole season) and never merged.
+func TestRebuildUnpackedSeasonListsPerEpisode(t *testing.T) {
+	entries := []seadex.Entry{{
+		AniListID: 187989,
+		Torrents: []seadex.Torrent{
+			{Tracker: "Nyaa", URL: "https://nyaa.si/view/1", IsBest: true, Files: []seadex.File{{Length: 1, Name: "Scum of the Brave - S01E01 (WEB 1080p) [G].mkv"}}},
+			{Tracker: "Nyaa", URL: "https://nyaa.si/view/2", IsBest: true, Files: []seadex.File{{Length: 1, Name: "Scum of the Brave - S01E02 (WEB 1080p) [G].mkv"}}},
+			{Tracker: "Nyaa", URL: "https://nyaa.si/view/3", IsBest: true, Files: []seadex.File{{Length: 1, Name: "Scum of the Brave - S01E03 (WEB 1080p) [G].mkv"}}},
+		},
+	}}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 3 {
+		t.Fatalf("feed = %d items, want 3 (one per episode torrent, not collapsed/deduped)", len(snap.NyaaFeed))
+	}
+	titles := map[string]bool{}
+	for i := range snap.NyaaFeed {
+		titles[snap.NyaaFeed[i].Title] = true
+	}
+	for _, want := range []string{
+		"Scum of the Brave - S01E01 (WEB 1080p) [G]",
+		"Scum of the Brave - S01E02 (WEB 1080p) [G]",
+		"Scum of the Brave - S01E03 (WEB 1080p) [G]",
+	} {
+		if !titles[want] {
+			t.Errorf("missing per-episode title %q; got %v", want, titles)
+		}
+	}
+}
+
+// TestRebuildJournalItemShape pins the journaled item fields on the real
+// Frieren catalogue shape (PMR best + LostYears alt, each on Nyaa and AB):
+// tracker split, per-tracker download links (public Nyaa .torrent, AB via
+// passkey), best/alt markers, the dropped redacted AB info hash, the SeaDex
+// entry info URL, the summed pack size, the synthesized title from the show
+// metadata, and PubDate mirroring FirstSeen (not the SeaDex entry update).
+func TestRebuildJournalItemShape(t *testing.T) {
+	updated := time.Date(2025, 7, 26, 15, 5, 59, 0, time.UTC)
+	pmrFiles := []seadex.File{
+		{Length: 400_000_000, Name: "NCED 01 (BD Remux 1080p AVC FLAC) [PMR].mkv"},
+		{Length: 7_500_699_108, Name: "Frieren Beyond Journey's End - S01E01 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR].mkv"},
+		{Length: 7_497_267_058, Name: "Frieren Beyond Journey's End - S01E02 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR].mkv"},
+	}
+	entries := []seadex.Entry{{
+		AniListID: 154587,
+		Updated:   updated,
+		Torrents: []seadex.Torrent{
+			{Tracker: "Nyaa", URL: "https://nyaa.si/view/1961373", InfoHash: "143ed15e5e3df072ae91adaeb149973a887590dd", IsBest: true, ReleaseGroup: "PMR", DualAudio: true, Files: pmrFiles},
+			{Tracker: "AB", URL: "/torrents.php?id=86576&torrentid=1167293", InfoHash: "<redacted>", IsBest: true, ReleaseGroup: "PMR", DualAudio: true, Files: pmrFiles},
+			{Tracker: "AB", URL: "/torrents.php?id=86576&torrentid=1162986", InfoHash: "<redacted>", IsBest: false, ReleaseGroup: "LostYears", Files: pmrFiles},
+		},
+	}}
+	info := func(alID int) EntryInfo {
+		if alID != 154587 {
+			t.Errorf("info called with alID %d, want 154587", alID)
+		}
+		return EntryInfo{Title: "Frieren: Beyond Journey's End", SeasonTvdb: 1}
+	}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, ABPasskey: "PASSKEY123", ABTorznabURL: "http://prowlarr/2/api"}, Deps{})
+	now := time.Date(2026, time.July, 2, 9, 0, 0, 0, time.UTC)
+	w.now = func() time.Time { return now }
+	if err := w.Rebuild(context.Background(), entries, info); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 1 || len(snap.ABFeed) != 2 {
+		t.Fatalf("feeds: nyaa=%d ab=%d, want 1 and 2", len(snap.NyaaFeed), len(snap.ABFeed))
+	}
+
+	pmrNyaa := snap.NyaaFeed[0]
+	if want := "Frieren: Beyond Journey's End S01 1080p Dual Audio [PMR]"; pmrNyaa.Title != want {
+		t.Errorf("PMR nyaa title = %q, want %q", pmrNyaa.Title, want)
+	}
+	if pmrNyaa.DownloadURL != "https://nyaa.si/download/1961373.torrent" {
+		t.Errorf("PMR nyaa download = %q", pmrNyaa.DownloadURL)
+	}
+	if pmrNyaa.DownloadVolumeFactor != dvfBest {
+		t.Errorf("PMR nyaa dvf = %q, want %q", pmrNyaa.DownloadVolumeFactor, dvfBest)
+	}
+	if pmrNyaa.InfoHash != "143ed15e5e3df072ae91adaeb149973a887590dd" {
+		t.Errorf("PMR nyaa infohash = %q", pmrNyaa.InfoHash)
+	}
+	if len(pmrNyaa.Categories) != 1 || pmrNyaa.Categories[0] != catAnime {
+		t.Errorf("PMR nyaa categories = %v, want [%d]", pmrNyaa.Categories, catAnime)
+	}
+	if pmrNyaa.InfoURL != "https://releases.moe/154587" {
+		t.Errorf("PMR nyaa infoURL = %q", pmrNyaa.InfoURL)
+	}
+	if pmrNyaa.Size != 400_000_000+7_500_699_108+7_497_267_058 {
+		t.Errorf("PMR nyaa size = %d, want summed pack size", pmrNyaa.Size)
+	}
+	if !pmrNyaa.PubDate.Equal(now) {
+		t.Errorf("PMR nyaa pubDate = %v, want the journal first-seen %v (not the SeaDex entry update)", pmrNyaa.PubDate, now)
+	}
+	if pmrNyaa.Key != "nyaa:1961373" || pmrNyaa.AniListID != 154587 {
+		t.Errorf("journal bookkeeping = key %q / alID %d, want nyaa:1961373 / 154587", pmrNyaa.Key, pmrNyaa.AniListID)
+	}
+
+	byKey := map[string]item{}
+	for i := range snap.ABFeed {
+		byKey[snap.ABFeed[i].Key] = snap.ABFeed[i]
+	}
+	pmrAB, ok := byKey["ab:1167293"]
+	if !ok {
+		t.Fatal("PMR ab item missing")
+	}
+	if pmrAB.DownloadURL != "https://animebytes.tv/torrent/1167293/download/PASSKEY123" {
+		t.Errorf("PMR ab download = %q", pmrAB.DownloadURL)
+	}
+	if pmrAB.InfoHash != "" {
+		t.Errorf("PMR ab infohash = %q, want empty (redacted dropped)", pmrAB.InfoHash)
+	}
+	if pmrAB.GUID != "https://animebytes.tv/torrents.php?id=86576&torrentid=1167293" {
+		t.Errorf("PMR ab guid = %q, want the usable AB page URL", pmrAB.GUID)
+	}
+	lyAB, ok := byKey["ab:1162986"]
+	if !ok {
+		t.Fatal("LostYears ab item missing")
+	}
+	if lyAB.DownloadVolumeFactor != dvfAlt {
+		t.Errorf("LostYears ab dvf = %q, want %q (alt)", lyAB.DownloadVolumeFactor, dvfAlt)
+	}
+}
+
+// TestCategoriesFor verifies the RSS category comes from the entry's real
+// media typing, not a guess from the file name: a movie routes to Radarr
+// (Movies) and everything else to Sonarr (Anime) - a single-file OVA/special
+// is indistinguishable from a film by name, so the safe default matters.
+func TestCategoriesFor(t *testing.T) {
+	if got := categoriesFor(true); len(got) != 1 || got[0] != catMovies {
+		t.Errorf("categoriesFor(movie) = %v, want [%d]", got, catMovies)
+	}
+	if got := categoriesFor(false); len(got) != 1 || got[0] != catAnime {
+		t.Errorf("categoriesFor(series) = %v, want [%d]", got, catAnime)
+	}
+}

@@ -199,11 +199,36 @@ download link straight through — so a search needs no tracker passkey here
 query fails (Prowlarr unreachable), the search answers with a Torznab
 `<error code="900">` document rather than an empty feed, so the arr records a
 failed search instead of concluding there were no results. A **periodic RSS check**
-(the no-query "recent releases" fetch the arrs run on their sync interval) has no
-query to match against, so the feed instead **synthesizes the SeaDex list itself**:
-one item per curated release, its title taken from SeaDex's own file names, with a
-download link built directly — a public Nyaa `.torrent`, or an AnimeBytes link
+(the no-query "recent releases" fetch the arrs run on their sync interval) is
+served from an **incremental journal of newly curated releases**: a release
+appears in the RSS feed when it is *new to SeaDex's curation* — present in the
+current curation set, absent from every set seen before (the tracker's post
+date is deliberately not the trigger: SeaDex routinely curates old torrents) —
+and stays listed for 14 days before aging out, plenty for RSS polls that run on
+a minutes-scale interval and enough to ride out a week-long arr outage. On the
+very first cycle (and after this schema's upgrade) the whole current curation
+set is recorded as already-seen and the RSS feed starts **empty**, growing only
+as SeaDex curates new releases — catching up an existing library is what
+searches and [the report](#the-report) are for. Each journal item carries a
+download link built directly: a public Nyaa `.torrent`, or an AnimeBytes link
 built from your `ab_passkey` (see below).
+
+Journal items get an **arr-parseable title built from real metadata**, not from
+SeaDex's raw file names alone: the show's own title as your arr knows it (from
+the last library snapshot; the arr is guaranteed to parse its own title back),
+falling back to the AniList canonical title, and only then to a file-name
+derivation. A season pack is labeled with its mapped TVDB season (or the
+dominant real season across the pack's files, so a pack bundling S00 specials
+with S01 episodes reads S01), a single episode keeps its own `SxxExx`/absolute
+marker, a movie reads `Title (Year)`, and the flags the app actually holds are
+suffixed — resolution, `Dual Audio`, the release group bracketed; nothing is
+invented. On top of that the feed **harvests real release titles**: each cycle
+it spends up to 15 Prowlarr queries (one per show, series-level on AnimeBytes,
+season-form with offset paging on Nyaa) matching curated torrents by tracker id
+or info hash, and caches each matched title permanently — so items upgrade from
+a synthesized title to the tracker's real one, usually within a cycle or two,
+while the synthesized title remains a fully working fallback. GUIDs never
+change with a title upgrade, so the arrs never re-grab.
 
 Every item, either way, carries a **download-volume-factor marker**: SeaDex's
 _best_ release is tagged `0.75` (which the arrs read as AnimeBytes Freeleech25) and
@@ -246,13 +271,10 @@ indexer:
 
 The port is fixed at `:9118` (published by your compose port mapping, not a config key).
 
-One Prowlarr setting is worth changing while you are there: on the **Nyaa**
-indexer, set **Sort requested from site** (under the indexer's advanced
-settings) to `seeders` instead of the default created/date. Nyaa returns
-effectively a single page of results and Prowlarr never requests the pages
-behind it, so date-sorted results bury older well-seeded BD and batch releases
-beyond that first page; sorting by seeders surfaces exactly those, which
-materially improves how many SeaDex picks a search can return for older shows.
+Leave the **Nyaa** indexer's **Sort requested from site** (under its advanced
+settings in Prowlarr) at its default (created/date, descending): the feed's
+title harvest pages through results by offset under that ordering to reach
+older curated items, and a different sort would reshuffle the pages it walks.
 
 For **searches**, the download links are Prowlarr's own proxy URLs, so no passkey
 is needed — Prowlarr grabs with the credentials it holds. The **AnimeBytes RSS

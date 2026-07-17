@@ -3,8 +3,12 @@ package indexer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"syscall"
+	"time"
 
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/seadex-scout/internal/seadex"
@@ -22,79 +26,162 @@ const (
 	maxFeedBytes = 64 << 20
 )
 
-// snapshot is the materialized feed a cycle produces and the server serves: the
-// search curation index (info hash / tracker key -> isBest, matched against
-// Prowlarr results) and the two synthesized per-tracker RSS feeds. Persisting it
-// is what lets one data engine (the compare cycle) feed both the findings and
-// the Torznab feed from a single SeaDex fetch, and lets a cycle run by the
-// `poll` subcommand refresh a resident daemon's feed across the process
-// boundary. Field names are the on-disk JSON keys.
+// snapshot is the materialized feed a cycle produces and the server serves:
+// the search curation index (info hash / tracker key -> isBest, matched
+// against Prowlarr results), the two synthesized per-tracker RSS journals
+// (NyaaFeed/ABFeed: the newly-curated releases of the last feedJournalMaxAge,
+// each item carrying its journal bookkeeping - see journal.go), the
+// never-pruned seen ledger novelty is judged against, and the harvested-title
+// cache. Persisting it is what lets one data engine (the compare cycle) feed
+// both the findings and the Torznab feed from a single SeaDex fetch, and lets
+// a cycle run by the `poll` subcommand refresh a resident daemon's feed
+// across the process boundary. Field names are the on-disk JSON keys; a
+// snapshot without a seen ledger is the retired pre-journal schema and
+// re-baselines (see loadPrevious).
 type snapshot struct {
-	ByHash   map[string]bool `json:"by_hash"`
-	ByKey    map[string]bool `json:"by_key"`
-	NyaaFeed []item          `json:"nyaa_feed"`
-	ABFeed   []item          `json:"ab_feed"`
+	ByHash   map[string]bool   `json:"by_hash"`
+	ByKey    map[string]bool   `json:"by_key"`
+	Seen     map[string]bool   `json:"seen,omitempty"`
+	Titles   map[string]string `json:"titles,omitempty"`
+	NyaaFeed []item            `json:"nyaa_feed"`
+	ABFeed   []item            `json:"ab_feed"`
+}
+
+// FeedWriterConfig configures NewFeedWriter. Path is where the snapshot is
+// persisted (config.DefaultIndexerFeedPath in production). ABPasskey builds
+// the AnimeBytes RSS download links (a secret; empty leaves AnimeBytes
+// without grabbable RSS links). The Torznab URLs and Prowlarr key mirror the
+// server's Config: an empty URL is that tracker's off switch (its journal is
+// neither built nor persisted), and the configured upstreams also power the
+// title harvest (see harvest.go), so the writer queries exactly the trackers
+// the server proxies.
+type FeedWriterConfig struct {
+	Path           string
+	ABPasskey      string
+	NyaaTorznabURL string
+	ABTorznabURL   string
+	ProwlarrAPIKey string
 }
 
 // FeedWriter builds the feed snapshot from a SeaDex fetch and persists it
-// atomically for the server to read. It holds no clients of its own: the compare
-// cycle owns the shared SeaDex fetch and Fribb load and hands their results to
-// Rebuild, so the feed is produced from the very snapshot the findings use.
+// atomically for the server to read. It holds no SeaDex/Fribb clients of its
+// own - the compare cycle owns the shared fetch and hands the results to
+// Rebuild - but it does hold the Prowlarr upstreams (the same ones the server
+// proxies searches through) for the title harvest.
 type FeedWriter struct {
 	log          *slog.Logger
+	now          func() time.Time
 	path         string
 	abPasskey    string
+	upstreams    []*upstream
 	abConfigured bool
 }
 
-// NewFeedWriter returns a FeedWriter that persists the feed snapshot to path
-// (config.DefaultIndexerFeedPath in production). abPasskey builds the AnimeBytes
-// RSS download links (empty leaves the AB feed without grabbable links).
-// abConfigured signals AnimeBytes intent (an AB Torznab URL is set): with it
-// false the AnimeBytes feed is not built at all - an empty ab_torznab_url is
-// the README's off switch for the tracker, so no passkey-embedded links are
-// persisted for it - and the missing-passkey nudge is skipped, so a Nyaa-only
-// deployment is not warned every cycle about a tracker it opted out of. The
-// inverse mismatch (a passkey set for that off tracker) is warned once here,
-// field names only, so a half-configured AnimeBytes intent surfaces at boot.
-// logger may be nil.
-func NewFeedWriter(abPasskey string, abConfigured bool, path string, logger *slog.Logger) *FeedWriter {
-	if logger == nil {
-		logger = slog.Default()
+// NewFeedWriter returns a FeedWriter for cfg. deps carries the HTTP client
+// the title harvest queries Prowlarr with (nil disables harvesting - items
+// then keep their synthesized titles) and the logger (nil falls back to
+// slog.Default). An AnimeBytes passkey configured for an unconfigured AB
+// tracker (no ab_torznab_url - the README's off switch) is warned once here,
+// field names only, so a half-configured AnimeBytes intent surfaces at boot;
+// no passkey-embedded links are ever persisted for that off tracker.
+func NewFeedWriter(cfg *FeedWriterConfig, deps Deps) *FeedWriter {
+	log := deps.Logger
+	if log == nil {
+		log = slog.Default()
 	}
-	if abPasskey != "" && !abConfigured {
-		logger.Warn("indexer.ab_passkey is set but indexer.ab_torznab_url is empty; the AnimeBytes feed stays off")
+	abConfigured := cfg.ABTorznabURL != ""
+	if cfg.ABPasskey != "" && !abConfigured {
+		log.Warn("indexer.ab_passkey is set but indexer.ab_torznab_url is empty; the AnimeBytes feed stays off")
 	}
-	return &FeedWriter{log: logger, path: path, abPasskey: abPasskey, abConfigured: abConfigured}
+	w := &FeedWriter{
+		log:          log,
+		now:          time.Now,
+		path:         cfg.Path,
+		abPasskey:    cfg.ABPasskey,
+		abConfigured: abConfigured,
+	}
+	if deps.HTTP != nil {
+		w.upstreams = wireUpstreams(deps.HTTP, log, cfg.NyaaTorznabURL, cfg.ABTorznabURL, cfg.ProwlarrAPIKey)
+	}
+	return w
 }
 
-// Rebuild builds the curation set and the two per-tracker feeds from the SeaDex
-// entries (categorized by isMovie, a closure over the caller's Fribb map) and
-// writes the snapshot atomically. It is the single producer of the feed the
-// server serves; isMovie may be nil (every item is then categorized as
-// anime/series, the safe default). The caller skips a failed SeaDex fetch, so
-// this errors only on the persist side: an encode failure, a snapshot exceeding
-// maxFeedBytes (kept out so the reader never rejects what a rebuild wrote), or
-// the atomic write itself failing.
-func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, isMovie func(alID int) bool) error {
-	snap, abSkippedNoPasskey, unresolvable := buildSnapshot(entries, w.abPasskey, movieClassifier(isMovie))
-	// An unconfigured AnimeBytes tracker (no ab_torznab_url - the README's
-	// per-tracker off switch) gets no synthesized feed: the snapshot must not
-	// persist passkey-embedded download links for a tracker the operator
-	// turned off. The server's feedFor refuses to serve an unconfigured
-	// scope's feed too; dropping it here keeps the credential off disk as
-	// well. (The Nyaa feed carries no secret and is gated serve-side only -
-	// the writer is not told whether Nyaa is configured.)
-	if !w.abConfigured {
-		snap.ABFeed = nil
+// Rebuild refreshes the persisted feed snapshot from the SeaDex entries
+// (categorized and titled via info, the per-show metadata closure the cycle
+// builds over its persisted state; nil is valid and falls back to file-name
+// synthesis). It rebuilds the search curation set from the whole catalogue,
+// then advances the RSS journal: newly curated torrents (absent from the seen
+// ledger) enter with a first-seen timestamp, carried items re-render from
+// current data, items older than feedJournalMaxAge age out, and the title
+// harvest upgrades synthesized titles to real tracker titles within its query
+// budget (a harvest failure degrades to synthesized titles, never fails the
+// rebuild). On the first run, after a schema upgrade, or over a malformed
+// previous snapshot it baselines: the entire current curation set is recorded
+// as seen and the journal starts empty, growing only from genuinely new
+// curation (backfill is search's job). The caller skips a failed SeaDex
+// fetch, so this errors only on a previous-snapshot read failure (transient;
+// the last-good feed stays served) or on the persist side: an encode failure,
+// a snapshot exceeding maxFeedBytes (kept out so the reader never rejects
+// what a rebuild wrote), or the atomic write itself failing.
+func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info func(alID int) EntryInfo) error {
+	infoFor := entryInfoFunc(info)
+	prev, err := w.loadPrevious(ctx)
+	if err != nil {
+		return err
 	}
-	data, err := json.Marshal(&snap)
+	set := buildCuration(entries)
+	now := w.now()
+
+	var js journalStats
+	var nyaa, ab []item
+	seen, titles := prev.seen, prev.titles
+	if prev.baseline {
+		seen, titles = allIdentities(entries), map[string]string{}
+		w.log.Info("indexer feed journal baselined; RSS feed starts empty and grows from newly curated releases",
+			"reason", prev.reason, "seen", len(seen))
+	} else {
+		cur := indexCurated(entries)
+		nyaa = w.carryJournal(prev.nyaaFeed, cur, infoFor, now, &js)
+		ab = w.carryJournal(prev.abFeed, cur, infoFor, now, &js)
+		newNyaa, newAB := w.growJournal(entries, cur, seen, infoFor, now, &js)
+		nyaa = append(nyaa, newNyaa...)
+		ab = append(ab, newAB...)
+	}
+	if !w.abConfigured {
+		ab = nil
+	}
+	feeds := map[string][]item{upstreamNyaa: nyaa, upstreamAB: ab}
+	hs := w.harvestTitles(ctx, feeds, titles, infoFor)
+	applyTitles(nyaa, titles)
+	applyTitles(ab, titles)
+	nyaa, ab = sortAndCap(nyaa), sortAndCap(ab)
+	titles = retainTitles(titles, nyaa, ab)
+
+	snap := snapshot{ByHash: set.byHash, ByKey: set.byKey, Seen: seen, Titles: titles, NyaaFeed: nyaa, ABFeed: ab}
+	if err := w.persist(ctx, &snap); err != nil {
+		return err
+	}
+	w.log.Info("indexer feed snapshot written",
+		"entries", len(entries), "hashes", len(snap.ByHash), "keys", len(snap.ByKey),
+		"nyaa_feed", len(snap.NyaaFeed), "ab_feed", len(snap.ABFeed),
+		"journal_new", js.added, "journal_pruned", js.pruned, "journal_dropped", js.dropped,
+		"skipped_unresolvable", js.unresolvable,
+		"harvest_queries", hs.queries, "harvest_matched", hs.matched, "harvest_pending", hs.pending)
+	if js.abSkippedNoPasskey > 0 && w.abConfigured {
+		w.log.Warn("ab RSS feed empty of grabbable links: set indexer.ab_passkey to serve AnimeBytes releases",
+			"ab_releases_skipped", js.abSkippedNoPasskey)
+	}
+	return nil
+}
+
+// persist atomically writes the snapshot, mirroring the reader's size bound
+// before committing: a snapshot the reload would reject must not replace the
+// last-good file, or the next restart starts with an empty feed.
+func (w *FeedWriter) persist(ctx context.Context, snap *snapshot) error {
+	data, err := json.Marshal(snap)
 	if err != nil {
 		return fmt.Errorf("indexer: encode feed snapshot: %w", err)
 	}
-	// Mirror the reader's size bound before committing: a snapshot the reload
-	// would reject must not replace the last-good file, or the next restart
-	// starts with an empty feed.
 	if int64(len(data)) > maxFeedBytes {
 		return fmt.Errorf("indexer: feed snapshot %d bytes exceeds max %d; keeping previous feed", len(data), maxFeedBytes)
 	}
@@ -102,24 +189,66 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, isMovi
 		atomicfile.WithMkdirMode(feedDirMode), atomicfile.WithMode(feedFileMode)); err != nil {
 		return fmt.Errorf("indexer: write feed snapshot %s: %w", w.path, err)
 	}
-	w.log.Info("indexer feed snapshot written",
-		"entries", len(entries), "hashes", len(snap.ByHash), "keys", len(snap.ByKey),
-		"nyaa_feed", len(snap.NyaaFeed), "ab_feed", len(snap.ABFeed),
-		"skipped_unresolvable", unresolvable)
-	if abSkippedNoPasskey > 0 && w.abConfigured {
-		w.log.Warn("ab RSS feed empty of grabbable links: set indexer.ab_passkey to serve AnimeBytes releases",
-			"ab_releases_skipped", abSkippedNoPasskey)
-	}
 	return nil
 }
 
-// buildSnapshot builds the search curation index and, via buildFeeds, the two
-// synthesized feeds from the SeaDex catalogue. classify resolves each entry's Torznab
-// category from its real media type (see movieClassifier). It returns the count
-// of AnimeBytes releases skipped solely for a missing passkey so the caller can
-// nudge the operator once, and the count of in-scope torrents dropped for an
-// unresolvable download id so the snapshot log line surfaces silent feed shrink.
-func buildSnapshot(entries []seadex.Entry, abPasskey string, classify func(alID int) []int) (snap snapshot, abSkippedNoPasskey, unresolvable int) {
+// previousJournal is the journal bookkeeping loaded from the previous
+// snapshot: the seen ledger, the harvested-title cache, and the two persisted
+// journal feeds. baseline marks that no usable previous journal exists
+// (reason: fresh-install, the retired pre-journal schema, or a malformed
+// file) and the rebuild must baseline instead of growing.
+type previousJournal struct {
+	reason   string
+	seen     map[string]bool
+	titles   map[string]string
+	nyaaFeed []item
+	abFeed   []item
+	baseline bool
+}
+
+// loadPrevious reads the persisted snapshot's journal bookkeeping. A missing
+// file (or a path whose parent is not a directory) is the fresh-install
+// baseline; a decoded snapshot without a seen ledger is the retired
+// whole-catalogue schema and re-baselines (the journal contract: treat it as
+// absent); malformed JSON warns and re-baselines (self-healing - the seen
+// ledger is rebuilt from the current catalogue, so nothing old can re-enter
+// the journal). Any other read failure (EACCES, EIO, an over-cap file) is
+// returned as an error so a TRANSIENT fault cannot blank a live journal: the
+// caller keeps the last-good snapshot and the next cycle retries.
+func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) {
+	data, err := atomicfile.ReadBounded(ctx, w.path, maxFeedBytes)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			return previousJournal{baseline: true, reason: "fresh-install"}, nil
+		}
+		return previousJournal{}, fmt.Errorf("indexer: read previous feed snapshot %s: %w", w.path, err)
+	}
+	var snap snapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		w.log.Warn("previous feed snapshot malformed; re-baselining the feed journal", "path", w.path, "error", err)
+		return previousJournal{baseline: true, reason: "malformed"}, nil
+	}
+	if snap.Seen == nil {
+		return previousJournal{baseline: true, reason: "pre-journal-schema"}, nil
+	}
+	titles := snap.Titles
+	if titles == nil {
+		titles = map[string]string{}
+	}
+	return previousJournal{
+		nyaaFeed: snap.NyaaFeed,
+		abFeed:   snap.ABFeed,
+		seen:     snap.Seen,
+		titles:   titles,
+	}, nil
+}
+
+// buildCuration builds the search curation index over the whole SeaDex
+// catalogue: every torrent's info hash and tracker key mapped to whether any
+// entry marks that release best (OR-accumulated for a torrent attached to
+// several entries). Searches match Prowlarr results against it; unlike the
+// RSS journal it always reflects the full current curation set.
+func buildCuration(entries []seadex.Entry) curation {
 	set := curation{byHash: make(map[string]bool), byKey: make(map[string]bool)}
 	for i := range entries {
 		for j := range entries[i].Torrents {
@@ -132,24 +261,5 @@ func buildSnapshot(entries []seadex.Entry, abPasskey string, classify func(alID 
 			}
 		}
 	}
-	nyaaFeed, abFeed, abSkippedNoPasskey, unresolvable := buildFeeds(entries, abPasskey, classify)
-	return snapshot{ByHash: set.byHash, ByKey: set.byKey, NyaaFeed: nyaaFeed, ABFeed: abFeed}, abSkippedNoPasskey, unresolvable
-}
-
-// movieClassifier returns the category function buildFeeds stamps onto each
-// entry's items. It routes a Fribb-typed movie to the Movies category (Radarr)
-// and everything else - TV, OVA, ONA, SPECIAL, or an unmapped entry - to Anime
-// (Sonarr). Defaulting the unknown/unmapped case to anime is deliberate: a
-// single-file OVA/special looks just like a movie by file name, so the failure
-// that matters (a special mis-routed to Radarr, where it can never match) is
-// avoided at the cost of a rare unmapped film not surfacing on Radarr's RSS.
-// isMovie is the caller's closure over its Fribb map; nil (no mapping) routes
-// everything to anime.
-func movieClassifier(isMovie func(alID int) bool) func(alID int) []int {
-	return func(alID int) []int {
-		if isMovie != nil && isMovie(alID) {
-			return []int{catMovies}
-		}
-		return []int{catAnime}
-	}
+	return set
 }

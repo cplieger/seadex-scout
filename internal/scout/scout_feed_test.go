@@ -10,6 +10,7 @@ import (
 	"github.com/cplieger/arrapi"
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/compare"
+	"github.com/cplieger/seadex-scout/internal/indexer"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
@@ -209,27 +210,28 @@ func TestCycleWalkAndSeaDexBothFailWarnsFeedKept(t *testing.T) {
 	}
 }
 
-// probingFeed records what the isMovie closure Cycle hands to Rebuild reports
+// probingFeed records what the info closure Cycle hands to Rebuild reports
 // for a movie record, a series record, and an id absent from the index.
 type probingFeed struct {
-	got map[int]bool
+	got map[int]indexer.EntryInfo
 }
 
-func (p *probingFeed) Rebuild(_ context.Context, _ []seadex.Entry, isMovie func(alID int) bool) error {
-	p.got = map[int]bool{
-		100: isMovie(100),
-		200: isMovie(200),
-		999: isMovie(999),
+func (p *probingFeed) Rebuild(_ context.Context, _ []seadex.Entry, info func(alID int) indexer.EntryInfo) error {
+	p.got = map[int]indexer.EntryInfo{
+		100: info(100),
+		200: info(200),
+		999: info(999),
 	}
 	return nil
 }
 
-// TestCycleFeedIsMovieClosureClassifiesViaFribbIndex pins the one bit of the
-// Fribb map the feed writer consumes: the isMovie closure must report true for
-// a MOVIE record, false for a TV record, and false for an unmapped id (the
-// safe Anime default). A wrong bit silently moves entries between Radarr's
-// Movies (2000) and Sonarr's Anime (5070) RSS categories.
-func TestCycleFeedIsMovieClosureClassifiesViaFribbIndex(t *testing.T) {
+// TestCycleFeedInfoClassifiesViaFribbIndex pins the per-show metadata closure
+// Cycle hands the feed writer: IsMovie must report true for a MOVIE record,
+// false for a TV record, and false for an unmapped id (the safe Anime
+// default) - a wrong bit silently moves entries between Radarr's Movies
+// (2000) and Sonarr's Anime (5070) RSS categories - and the TV record's
+// mapped TVDB season must ride along for the season marker.
+func TestCycleFeedInfoClassifiesViaFribbIndex(t *testing.T) {
 	logger := scoutTestLogger()
 	feed := &probingFeed{}
 	// A fresh cache (within the refresh window) makes the loader reuse the
@@ -237,7 +239,7 @@ func TestCycleFeedIsMovieClosureClassifiesViaFribbIndex(t *testing.T) {
 	store := &fakeStore{st: state.State{
 		Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{
 			{AniListID: 100, Type: "MOVIE"},
-			{AniListID: 200, Type: "TV", TvdbID: 123},
+			{AniListID: 200, Type: "TV", TvdbID: 123, SeasonTvdb: 2},
 		}},
 	}}
 	s := New(&Deps{
@@ -256,9 +258,12 @@ func TestCycleFeedIsMovieClosureClassifiesViaFribbIndex(t *testing.T) {
 		t.Fatal("feed Rebuild was not called")
 	}
 	for id, wantMovie := range map[int]bool{100: true, 200: false, 999: false} {
-		if feed.got[id] != wantMovie {
-			t.Errorf("isMovie(%d) = %v, want %v", id, feed.got[id], wantMovie)
+		if feed.got[id].IsMovie != wantMovie {
+			t.Errorf("info(%d).IsMovie = %v, want %v", id, feed.got[id].IsMovie, wantMovie)
 		}
+	}
+	if got := feed.got[200].SeasonTvdb; got != 2 {
+		t.Errorf("info(200).SeasonTvdb = %d, want 2 (the Fribb season must reach the season marker)", got)
 	}
 }
 
@@ -306,7 +311,7 @@ func TestCycleWalkFailShutdownDuringSeaDexFetchStaysSilent(t *testing.T) {
 // is writing.
 type cancellingFeed struct{ cancel context.CancelFunc }
 
-func (c *cancellingFeed) Rebuild(context.Context, []seadex.Entry, func(alID int) bool) error {
+func (c *cancellingFeed) Rebuild(context.Context, []seadex.Entry, func(alID int) indexer.EntryInfo) error {
 	c.cancel()
 	return context.Canceled
 }

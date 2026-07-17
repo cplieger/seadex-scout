@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"fmt"
 	"math"
 	"path"
 	"regexp"
@@ -8,13 +9,14 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
-// feedWindow caps each per-tracker synthesized RSS feed. A periodic RSS check
-// only needs the most recent releases; SeaDex tracks a few thousand torrents, so
-// the feed is trimmed to the most-recently-updated entries (sorted desc) to keep
-// the rendered XML small and the arr's RSS scan quick.
+// feedWindow caps each per-tracker synthesized RSS feed. It is the secondary
+// bound under the journal's feedJournalMaxAge prune (see journal.go): the
+// journal rarely approaches it, but a burst of new curation can never bloat
+// the rendered XML or the persisted snapshot past this many items per tracker.
 const feedWindow = 300
 
 // seaDexEntryURL is the SeaDex entry page base; the per-item info URL (the feed
@@ -22,154 +24,158 @@ const feedWindow = 300
 // is curated.
 const seaDexEntryURL = "https://releases.moe/"
 
-// feedAccumulator collects the two per-tracker feeds and the skip counters
-// as buildFeeds walks the catalogue.
-type feedAccumulator struct {
-	nyaa, ab                         []item
-	abSkippedNoPasskey, unresolvable int
+// EntryInfo is the per-show (per-AniList-id) metadata the compare cycle hands
+// the feed writer for title synthesis: the show's own title as its arr knows it
+// (or the AniList canonical title as fallback; empty when neither is known),
+// its release year, the Fribb TVDB season the entry maps to (0 = unmapped or
+// specials), and the Fribb media typing. The cycle builds it from persisted
+// state only (the mapping index, the last library snapshot, the AniList memo),
+// so the feed rebuild stays arr-independent. The zero value is valid: synthesis
+// then falls back to file-name derivation and the anime category.
+type EntryInfo struct {
+	Title      string
+	Year       int
+	SeasonTvdb int
+	IsMovie    bool
+	IsSpecial  bool
 }
 
-// add resolves one SeaDex torrent into a feed item, routes it to its
-// tracker feed, and updates the skip counters.
-func (acc *feedAccumulator) add(e *seadex.Entry, t *seadex.Torrent, cats []int, abPasskey string) {
-	it, scope, ok, noPasskey := feedItemFor(e, t, abPasskey)
-	if noPasskey {
-		acc.abSkippedNoPasskey++
+// entryInfoFunc normalizes a possibly-nil per-show metadata callback to a
+// total function returning the zero EntryInfo (file-name fallback, anime
+// category), so the journal and harvest paths never nil-check it.
+func entryInfoFunc(info func(alID int) EntryInfo) func(alID int) EntryInfo {
+	if info != nil {
+		return info
 	}
-	if !ok {
-		if scope != "" && !noPasskey {
-			acc.unresolvable++
-		}
-		return
-	}
-	it.Categories = cats
-	switch scope {
-	case upstreamNyaa:
-		acc.nyaa = append(acc.nyaa, it)
-	case upstreamAB:
-		acc.ab = append(acc.ab, it)
-	}
+	return func(int) EntryInfo { return EntryInfo{} }
 }
 
-// buildFeeds synthesizes the two per-tracker RSS feeds from the SeaDex catalogue.
+// categoriesFor maps a show's Fribb typing to its Torznab categories: a movie
+// routes to Movies (Radarr) and everything else - TV, OVA, ONA, SPECIAL, or an
+// unmapped entry - to Anime (Sonarr). Defaulting the unknown case to anime is
+// deliberate: a single-file OVA/special looks just like a movie by file name,
+// so the failure that matters (a special mis-routed to Radarr, where it can
+// never match) is avoided at the cost of a rare unmapped film not surfacing on
+// Radarr's RSS view.
+func categoriesFor(isMovie bool) []int {
+	if isMovie {
+		return []int{catMovies}
+	}
+	return []int{catAnime}
+}
+
+// synthesizeTitle builds the served release title for one curated torrent.
 //
-// Unlike a search (which proxies Prowlarr's real tracker parse), the periodic
-// RSS check has no query to match, so the feed must BE the SeaDex list: one item
-// per curated torrent, addressed to its tracker's feed. Each item's download
-// link is built directly - public Nyaa needs no credential; AnimeBytes embeds
-// the operator's passkey - because there is no Prowlarr round-trip here.
+// With a known show title (meta.Title, the arr's own title or the AniList
+// canonical title) the title is assembled, not derived: the show title, a
+// season/episode marker computed from the Fribb season and the full file-list
+// span (see episodeMarker), and the real release flags this app actually holds
+// (see releaseFlags) - so the arr parses back a title built from its own
+// vocabulary. A movie is "{Title} ({Year})" instead of a marker. Without a
+// show title the file-name derivation (feedTitle) is the permanent last
+// resort.
+func synthesizeTitle(t *seadex.Torrent, meta EntryInfo) string {
+	title := strings.TrimSpace(meta.Title)
+	if title == "" {
+		return feedTitle(t)
+	}
+	parts := []string{title}
+	switch {
+	case meta.IsMovie:
+		if meta.Year > 0 {
+			parts[0] = fmt.Sprintf("%s (%d)", title, meta.Year)
+		}
+	default:
+		if marker := episodeMarker(t, meta); marker != "" {
+			parts = append(parts, marker)
+		}
+	}
+	return strings.Join(append(parts, releaseFlags(t)...), " ")
+}
+
+// episodeMarker derives the season/episode token for a synthesized series
+// title from the Fribb season AND the full file-list span:
 //
-// A torrent is included only when a grabbable link can be formed: a Nyaa/AB URL
-// with a parseable id, and (for AB) a configured passkey. An AB release skipped
-// solely for a missing passkey is counted in abSkippedNoPasskey so the caller
-// can nudge the operator once, rather than emitting link-less items an arr would
-// fail to grab. An in-scope Nyaa/AB torrent with no grabbable link (its stored
-// URL yields no parseable id) or no parseable title (no episode files and no
-// release group) is dropped and counted in unresolvable, so an upstream
-// URL-shape change surfaces on the snapshot log line instead of silently
-// shrinking the feed. Trackers other than Nyaa/AB (a negligible SeaDex tail) are
-// dropped. Both feeds are deduped by GUID (best-wins; a torrent attached to
-// several entries emits one item), sorted newest-first, and capped at feedWindow.
-//
-// classify sets each item's Torznab category from the entry's AniList id: a
-// SeaDex file name cannot reliably tell a movie from a single-file OVA/special,
-// so the caller resolves the real media type (Fribb/AniList) and returns the
-// category (Movies for a film -> Radarr, Anime for everything else -> Sonarr).
-// It is called once per entry (all of an entry's torrents share its category).
-func buildFeeds(entries []seadex.Entry, abPasskey string, classify func(alID int) []int) (nyaaFeed, abFeed []item, abSkippedNoPasskey, unresolvable int) {
-	var acc feedAccumulator
-	for i := range entries {
-		e := &entries[i]
-		cats := classify(e.AniListID)
-		for j := range e.Torrents {
-			acc.add(e, &e.Torrents[j], cats, abPasskey)
-		}
+//   - A pack labels by season: the Fribb TVDB season when the entry maps one
+//     (the arr's own season numbering), else the dominant/lowest REAL season
+//     across the file list (so a pack bundling S00 specials with S01 episodes
+//     labels S01, never the specials bucket its first file happens to sit in),
+//     else S00 for a Fribb-typed special, else no marker (an absolute-numbered
+//     pack with no season evidence stays a bare title).
+//   - A single release keeps its own file marker verbatim (SxxExx, or the
+//     fansub "- NN" absolute form) - today's proven arr-parseable shape - and a
+//     marker-less single file (a movie-shaped OVA) gets none.
+func episodeMarker(t *seadex.Torrent, meta EntryInfo) string {
+	if !isPack(t) {
+		return singleEpisodeMarker(t.Files)
 	}
-	return sortAndCap(dedupeByGUID(acc.nyaa)), sortAndCap(dedupeByGUID(acc.ab)), acc.abSkippedNoPasskey, acc.unresolvable
+	if meta.SeasonTvdb > 0 {
+		return fmt.Sprintf("S%02d", meta.SeasonTvdb)
+	}
+	if s, ok := packSeason(t.Files); ok {
+		return fmt.Sprintf("S%02d", s)
+	}
+	if meta.IsSpecial {
+		return "S00"
+	}
+	return ""
 }
 
-// dedupeByGUID merges feed items sharing a stable identity (the same torrent
-// attached to several SeaDex entries) into one item: best-wins on the marker
-// (mirroring the OR-accumulation buildSnapshot applies to the same identity in
-// the search curation set), categories unioned, and the newest entry update
-// kept as pubdate — so a torrent best on one entry and alt on another cannot
-// render as two same-guid items with conflicting markers, where which one
-// Sonarr's GUID dedupe keeps would be feed-order arbitrary. The key is the
-// item's rendered identity, item.guid() — the stored GUID, falling back to
-// InfoHash then DownloadURL — matching what writeItem emits, so two distinct
-// releases whose stored GUIDs are both empty (UsableURL rejected their source
-// URLs) never wrongly merge on the empty string.
-func dedupeByGUID(items []item) []item {
-	idx := make(map[string]int, len(items))
-	out := items[:0]
-	for i := range items {
-		key := items[i].guid()
-		j, dup := idx[key]
-		if !dup {
-			idx[key] = len(out)
-			out = append(out, items[i])
-			continue
-		}
-		if items[i].DownloadVolumeFactor == dvfBest {
-			out[j].DownloadVolumeFactor = dvfBest
-		}
-		for _, c := range items[i].Categories {
-			if !slices.Contains(out[j].Categories, c) {
-				out[j].Categories = append(out[j].Categories, c)
-			}
-		}
-		if items[i].PubDate.After(out[j].PubDate) {
-			out[j].PubDate = items[i].PubDate
-		}
+// singleEpisodeMarker returns a single-episode torrent's own episode token:
+// the last SxxExx token of the representative file (uppercased), or the
+// absolute-episode number in the fansub "- NN" form, or "" when the file
+// carries neither (a movie/single-OVA file).
+func singleEpisodeMarker(files []seadex.File) string {
+	name := representativeFile(files)
+	if name == "" {
+		return ""
 	}
-	return out
+	base := stripExt(path.Base(name))
+	if toks := episodeToken.FindAllString(base, -1); len(toks) > 0 {
+		return strings.ToUpper(toks[len(toks)-1])
+	}
+	if m := absoluteEpisode.FindAllStringSubmatch(base, -1); len(m) > 0 {
+		return "- " + m[len(m)-1][1]
+	}
+	return ""
 }
 
-// feedItemFor resolves one SeaDex torrent into a feed item and the scope it
-// belongs to. ok is false when the torrent is not a Nyaa/AB release or has no
-// grabbable link; noPasskey flags the specific case of an AB release that only
-// lacks the passkey (a parseable id, no configured passkey), so the caller can
-// nudge the operator once rather than emitting link-less items.
-func feedItemFor(e *seadex.Entry, t *seadex.Torrent, abPasskey string) (it item, scope string, ok, noPasskey bool) {
-	scope = trackerScope(t.Tracker)
-	if scope == "" {
-		return item{}, "", false, false
+// releaseFlags returns the real, verifiable release flags in an arr-parseable
+// suffix shape: the resolution when classifiable from the torrent's own file
+// names, "Dual Audio" when SeaDex's structured per-torrent flag is set, and
+// the release group bracketed. Flags this app does not hold are omitted, never
+// guessed - prior art proves parseable boilerplate works (seadexerr ships a
+// hardcoded "{title} S01 Bluray 1080p remux"), and real values beat invented
+// ones.
+func releaseFlags(t *seadex.Torrent) []string {
+	var flags []string
+	if res := fileResolution(t.Files); res != "" {
+		flags = append(flags, res)
 	}
-	dl, resolved := downloadURL(t.Tracker, t.URL, abPasskey)
-	if !resolved {
-		return item{}, scope, false, scope == upstreamAB && abPasskey == "" && animeBytesID(t.URL) != ""
+	if t.DualAudio {
+		flags = append(flags, "Dual Audio")
 	}
-	it = synthItem(e, t, dl)
-	if it.Title == "" {
-		// No episode files and no release group: an arr cannot parse or
-		// match a title-less item, so drop it (counted as unresolvable).
-		return item{}, scope, false, false
+	if g := strings.TrimSpace(t.ReleaseGroup); g != "" {
+		flags = append(flags, "["+g+"]")
 	}
-	return it, scope, true, false
+	return flags
 }
 
-// synthItem builds one feed Item for a SeaDex torrent with an already-resolved
-// download link. The title is derived from the file names, the size summed from
-// them, the info URL points at the SeaDex entry page, and the SeaDex marker is
-// stamped (best -> 0.75 Freeleech25, alt -> 0.25 Freeleech75). The GUID is the
-// tracker page URL (unique per torrent). Seeders are left 0 (the render floors
-// to 1) since a synthesized item has no live swarm count. The category is left
-// unset here and stamped by buildFeeds from the entry's resolved media type.
-func synthItem(e *seadex.Entry, t *seadex.Torrent, dl string) item {
-	dvf := dvfAlt
-	if t.IsBest {
-		dvf = dvfBest
+// fileResolution classifies a torrent's resolution from its media file names
+// alone, via the shared release classifier. The entry notes are deliberately
+// excluded: they are entry-wide and routinely describe sibling releases, so a
+// note mentioning another release's 1080p must not stamp this torrent's title.
+func fileResolution(files []seadex.File) string {
+	names := make([]string, 0, len(files))
+	for i := range files {
+		if isMediaFile(files[i].Name) {
+			names = append(names, files[i].Name)
+		}
 	}
-	return item{
-		Title:                feedTitle(t),
-		GUID:                 t.UsableURL(),
-		InfoURL:              entryURL(e.AniListID),
-		DownloadURL:          dl,
-		InfoHash:             validInfoHash(t.InfoHash),
-		DownloadVolumeFactor: dvf,
-		Size:                 totalSize(t.Files),
-		PubDate:              e.Updated,
+	if len(names) == 0 {
+		return ""
 	}
+	return release.Classify(&release.Input{Names: names}).Resolution
 }
 
 // episodeToken matches a season+episode token (S01E01, S1E1, S01E01-E13,
@@ -178,10 +184,14 @@ func synthItem(e *seadex.Entry, t *seadex.Torrent, dl string) item {
 // grabs the pack rather than treating it as a single episode.
 var episodeToken = regexp.MustCompile(`(?i)(S\d{1,2})E\d{1,4}(?:-E?\d{1,4})?(?:v\d+)?`)
 
-// absoluteEpisode matches an absolute episode number in the " - 07" fansub form
-// (optional version suffix), used only to keep a multi-file pack from reading as
-// episode 7 when there is no SxxExx token to collapse.
-var absoluteEpisode = regexp.MustCompile(`\s-\s\d{1,4}(?:v\d+)?(?:\s|$)`)
+// absoluteEpisode matches an absolute episode number in the fansub "- 07" form
+// (optional version suffix), with the episode number captured in group 1. The
+// delimiters accept underscores as well as spaces: underscore-named releases
+// ("_Show_-_01_") use "_" everywhere a space would sit, and matching only the
+// space-dash form made such packs read as a single episode. Used to keep a
+// multi-file pack from reading as episode 7 when there is no SxxExx token to
+// collapse, and to extract a single absolute episode's number for synthesis.
+var absoluteEpisode = regexp.MustCompile(`[\s_]-[\s_](\d{1,4}(?:v\d+)?)(?:[\s_]|$)`)
 
 // episodeVersion strips a trailing vN revision from an episode token so a v2
 // replacement of the same episode never counts as a second episode.
@@ -195,10 +205,13 @@ var creditlessExtra = regexp.MustCompile(`(?i)\b(?:NCOP|NCED|creditless)\d*(?:v\
 var multiSpace = regexp.MustCompile(`\s{2,}`)
 
 // feedTitle synthesizes an arr-parseable release title from a torrent's file
-// names - the core RSS gap, since SeaDex stores file names, not clean titles.
+// names - the permanent last resort when no show title is known (see
+// synthesizeTitle), since SeaDex stores file names, not clean titles.
 // A real season pack (files spanning more than one episode) collapses the
-// episode marker to the season (S01E07 -> S01) so the arr grabs it as a whole
-// season; a single-episode torrent keeps its SxxExx so the arr grabs it as that
+// episode marker to the pack's season (see packSeason: the dominant/lowest
+// real season across the WHOLE file list, so a pack bundling S00 specials
+// with S01 episodes labels S01 even when its first file is a special); a
+// single-episode torrent keeps its SxxExx so the arr grabs it as that
 // episode. This distinction matters because SeaDex tracks a complete-but-unpacked
 // season as one torrent PER episode: collapsing those would mislabel, say, 24
 // episodes as 24 copies of the season. A movie / single OVA (no episode marker)
@@ -220,15 +233,70 @@ func feedTitle(t *seadex.Torrent) string {
 	if episodeToken.MatchString(base) {
 		// Collapse only the LAST episode token: scene naming puts the marker
 		// after the title, so a title that itself contains an SxxExx-shaped
-		// substring is preserved verbatim.
+		// substring is preserved verbatim. The season label comes from the
+		// whole pack (packSeason), not this one file, so a representative
+		// file from the S00 specials bucket cannot mislabel the pack.
 		locs := episodeToken.FindAllStringSubmatchIndex(base, -1)
 		l := locs[len(locs)-1]
-		return strings.TrimSpace(base[:l[0]] + base[l[2]:l[3]] + base[l[1]:])
+		label := base[l[2]:l[3]]
+		if s, ok := packSeason(t.Files); ok {
+			label = fmt.Sprintf("S%02d", s)
+		}
+		return strings.TrimSpace(base[:l[0]] + label + base[l[1]:])
 	}
 	if absoluteEpisode.MatchString(base) {
 		return strings.TrimSpace(multiSpace.ReplaceAllString(absoluteEpisode.ReplaceAllString(base, " "), " "))
 	}
 	return strings.TrimSpace(base)
+}
+
+// packSeason resolves the season a multi-episode pack is labeled with from the
+// FULL file-list span: the dominant REAL (non-zero) season by episode-file
+// count, ties broken toward the lowest - so a pack bundling S00 specials with
+// an S01 season labels S01, never the specials bucket its first file happens
+// to sit in. A pack whose files are all S00 returns (0, true) (a specials
+// pack); ok is false when no media file carries an SxxExx token (an
+// absolute-numbered pack).
+func packSeason(files []seadex.File) (season int, ok bool) {
+	counts := seasonCounts(files)
+	if len(counts) == 0 {
+		return 0, false
+	}
+	best, bestCount := -1, -1
+	for s, c := range counts {
+		if s == 0 {
+			continue
+		}
+		if c > bestCount || (c == bestCount && s < best) {
+			best, bestCount = s, c
+		}
+	}
+	if best >= 0 {
+		return best, true
+	}
+	return 0, true
+}
+
+// seasonCounts tallies episode files per SxxExx season across the torrent's
+// media files, keying each file on its LAST token (scene naming puts the real
+// marker after the title).
+func seasonCounts(files []seadex.File) map[int]int {
+	counts := make(map[int]int)
+	for i := range files {
+		if !isContentMediaFile(files[i].Name) {
+			continue
+		}
+		toks := episodeToken.FindAllStringSubmatch(stripExt(files[i].Name), -1)
+		if len(toks) == 0 {
+			continue
+		}
+		s, err := strconv.Atoi(toks[len(toks)-1][1][1:])
+		if err != nil {
+			continue
+		}
+		counts[s]++
+	}
+	return counts
 }
 
 // isPack reports whether a torrent bundles more than one episode (a real season
@@ -241,10 +309,10 @@ func isPack(t *seadex.Torrent) bool {
 }
 
 // coveredEpisodes counts the distinct episodes a torrent's files span, keying on
-// the SxxExx token first and the " - NN" absolute-episode form as a fallback.
-// Creditless extras (NCED/NCOP) and other sidecars carry neither token and are
-// not counted, so an episode bundled with its creditless files still reads as a
-// single episode.
+// the SxxExx token first and the "- NN" absolute-episode form (space- or
+// underscore-delimited) as a fallback. Creditless extras (NCED/NCOP) and other
+// sidecars carry neither token and are not counted, so an episode bundled with
+// its creditless files still reads as a single episode.
 func coveredEpisodes(files []seadex.File) int {
 	seen := make(map[string]struct{})
 	for i := range files {
@@ -261,8 +329,8 @@ func coveredEpisodes(files []seadex.File) int {
 			tok := strings.ToUpper(all[len(all)-1])
 			seen["e"+episodeVersion.ReplaceAllString(tok, "")] = struct{}{}
 		case absoluteEpisode.MatchString(base):
-			all := absoluteEpisode.FindAllString(base, -1)
-			tok := strings.TrimSpace(all[len(all)-1])
+			all := absoluteEpisode.FindAllStringSubmatch(base, -1)
+			tok := all[len(all)-1][1]
 			seen["a"+episodeVersion.ReplaceAllString(tok, "")] = struct{}{}
 		}
 	}
@@ -282,7 +350,7 @@ func representativeFile(files []seadex.File) string {
 	// real episode rather than an extra. The two predicates are deliberately
 	// asymmetric: episodeToken matches the RAW name (its E-digit body has no trailing
 	// anchor, so it matches with the extension still present), but absoluteEpisode ends
-	// in (?:\s|$) and an absolute number can abut the extension ("Show - 07.mkv"), so it
+	// in (?:[\s_]|$) and an absolute number can abut the extension ("Show - 07.mkv"), so it
 	// must run on stripExt(n) to match. Do not unify them onto one input - dropping
 	// stripExt here breaks absolute-episode detection.
 	if name := firstEpisodeFile(files, episodeToken.MatchString); name != "" {
@@ -391,11 +459,12 @@ func validInfoHash(h string) string {
 	return h
 }
 
-// sortAndCap orders a feed newest-first (by SeaDex entry update time) and trims
-// it to feedWindow.
+// sortAndCap orders a journal feed newest-first by first-seen time (stable, so
+// items journaled in the same rebuild keep catalogue order) and trims it to
+// feedWindow, the secondary bound under the 14-day journal prune.
 func sortAndCap(items []item) []item {
 	slices.SortStableFunc(items, func(a, b item) int {
-		return b.PubDate.Compare(a.PubDate)
+		return b.FirstSeen.Compare(a.FirstSeen)
 	})
 	if len(items) > feedWindow {
 		items = items[:feedWindow]

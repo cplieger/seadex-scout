@@ -2,7 +2,6 @@ package indexer
 
 import (
 	"math"
-	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -10,46 +9,27 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
-// TestSortAndCap pins the synthesized feed's ordering + window contract: items
-// are sorted newest-first by SeaDex entry update time and the feed is trimmed
-// to feedWindow, dropping the oldest entries beyond the cap.
+// TestSortAndCap pins the journal feed's ordering + window contract: items are
+// sorted newest-first by first-seen time and the feed is trimmed to feedWindow
+// (the secondary bound under the 14-day journal prune), dropping the oldest
+// journal entries beyond the cap.
 func TestSortAndCap(t *testing.T) {
 	base := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	items := make([]item, feedWindow+2)
 	for i := range items {
-		items[i] = item{GUID: strconv.Itoa(i), PubDate: base.Add(time.Duration(i) * time.Minute)}
+		items[i] = item{GUID: strconv.Itoa(i), FirstSeen: base.Add(time.Duration(i) * time.Minute)}
 	}
 	got := sortAndCap(items)
 	if len(got) != feedWindow {
 		t.Fatalf("sortAndCap returned %d items, want %d (capped)", len(got), feedWindow)
 	}
 	newest := base.Add(time.Duration(feedWindow+1) * time.Minute)
-	if !got[0].PubDate.Equal(newest) {
-		t.Errorf("got[0].PubDate = %v, want %v (newest first)", got[0].PubDate, newest)
+	if !got[0].FirstSeen.Equal(newest) {
+		t.Errorf("got[0].FirstSeen = %v, want %v (newest first)", got[0].FirstSeen, newest)
 	}
 	oldestKept := base.Add(2 * time.Minute)
-	if !got[len(got)-1].PubDate.Equal(oldestKept) {
-		t.Errorf("got[last].PubDate = %v, want %v (the two oldest dropped)", got[len(got)-1].PubDate, oldestKept)
-	}
-}
-
-// TestBuildFeedsDropsUnknownTracker pins the tail-drop: a SeaDex torrent on a
-// tracker other than Nyaa/AB (the negligible AnimeTosho/RuTracker tail) is
-// excluded from both synthesized feeds and does not count as an AB passkey skip.
-func TestBuildFeedsDropsUnknownTracker(t *testing.T) {
-	entries := []seadex.Entry{{
-		AniListID: 5,
-		Torrents: []seadex.Torrent{{
-			Tracker: "AnimeTosho", URL: "https://animetosho.org/view/1", IsBest: true,
-			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
-		}},
-	}}
-	nyaa, ab, skipped, _ := buildFeeds(entries, "PK", func(int) []int { return []int{catAnime} })
-	if len(nyaa) != 0 || len(ab) != 0 {
-		t.Errorf("unknown tracker leaked into a feed: nyaa=%d ab=%d, want 0 and 0", len(nyaa), len(ab))
-	}
-	if skipped != 0 {
-		t.Errorf("abSkippedNoPasskey = %d, want 0 (not an AB passkey skip)", skipped)
+	if !got[len(got)-1].FirstSeen.Equal(oldestKept) {
+		t.Errorf("got[last].FirstSeen = %v, want %v (the two oldest dropped)", got[len(got)-1].FirstSeen, oldestKept)
 	}
 }
 
@@ -119,6 +99,31 @@ func TestCoveredEpisodesCountsExtensionAbuttingAbsoluteForm(t *testing.T) {
 	}
 }
 
+// TestCoveredEpisodesRecognizesUnderscoreAbsolutePacks pins the
+// underscore-delimited absolute-order form ("_Show_-_01_"): such packs were
+// previously unrecognized (the regex matched only the space-dash form), so a
+// whole batch read as its first episode. The tokens must count per episode and
+// the pack must collapse.
+func TestCoveredEpisodesRecognizesUnderscoreAbsolutePacks(t *testing.T) {
+	files := []seadex.File{
+		{Name: "[Grp]_Show_-_01_(1080p).mkv"},
+		{Name: "[Grp]_Show_-_02_(1080p).mkv"},
+	}
+	if got := coveredEpisodes(files); got != 2 {
+		t.Errorf("coveredEpisodes = %d, want 2 (underscore-delimited absolute episodes)", got)
+	}
+	if !isPack(&seadex.Torrent{Files: files}) {
+		t.Error("isPack = false, want true (an underscore-named absolute-order pack is a pack)")
+	}
+	// The synthesized-title path labels the pack from the show title; with a
+	// known title the underscore pack gets a clean assembled title instead of
+	// the first file's name.
+	got := synthesizeTitle(&seadex.Torrent{Files: files, ReleaseGroup: "Grp"}, EntryInfo{Title: "Show", SeasonTvdb: 1})
+	if want := "Show S01 1080p [Grp]"; got != want {
+		t.Errorf("synthesizeTitle(underscore pack) = %q, want %q", got, want)
+	}
+}
+
 // TestRepresentativeFileSkipsEpisodeNamedSidecar pins the media-file guard in
 // representativeFile: an episode-named subtitle sidecar listed before the
 // matching video must not become the title source, so the synthesized feed
@@ -136,127 +141,185 @@ func TestRepresentativeFileSkipsEpisodeNamedSidecar(t *testing.T) {
 	}
 }
 
-// TestBuildFeedsIdlessABNotCountedAsPasskeySkip pins the precision of the
-// missing-passkey nudge: an AnimeBytes release whose URL carries no parseable
-// torrent id is un-grabbable regardless of the passkey, so it is excluded from
-// the feed WITHOUT counting toward abSkippedNoPasskey - the operator warning
-// must only count releases a passkey would actually make grabbable.
-func TestBuildFeedsIdlessABNotCountedAsPasskeySkip(t *testing.T) {
-	entries := []seadex.Entry{{
-		AniListID: 5,
-		Torrents: []seadex.Torrent{{
-			Tracker: "AB", URL: "/torrents.php?id=1", IsBest: true,
-			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
-		}},
-	}}
-	nyaa, ab, skipped, _ := buildFeeds(entries, "", func(int) []int { return []int{catAnime} })
-	if len(nyaa) != 0 || len(ab) != 0 {
-		t.Errorf("id-less AB release leaked into a feed: nyaa=%d ab=%d, want 0 and 0", len(nyaa), len(ab))
-	}
-	if skipped != 0 {
-		t.Errorf("abSkippedNoPasskey = %d, want 0 (no parseable id, so a passkey would not help)", skipped)
-	}
-}
-
-// TestBuildFeedsDedupesSharedTorrentByGUID pins the feed-side identity merge: a
-// torrent attached to two SeaDex entries (same GUID) emits ONE feed item with
-// best-wins on the marker (mirroring buildSnapshot's OR-accumulation for the
-// search curation set), the categories of both entries unioned, and the newest
-// entry update as pubdate. The alt-marked, newer entry is listed FIRST so a
-// first-wins or last-wins merge would fail the marker or pubdate assertion.
-func TestBuildFeedsDedupesSharedTorrentByGUID(t *testing.T) {
-	shared := seadex.Torrent{
-		Tracker: "Nyaa", URL: "https://nyaa.si/view/1234567",
-		Files: []seadex.File{{Length: 7, Name: "Show - S01E01 (1080p) [G].mkv"}},
-	}
-	older := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
-	newer := older.Add(48 * time.Hour)
-	alt := shared
-	best := shared
-	best.IsBest = true
-	entries := []seadex.Entry{
-		{AniListID: 1, Updated: newer, Torrents: []seadex.Torrent{alt}},
-		{AniListID: 2, Updated: older, Torrents: []seadex.Torrent{best}},
-	}
-	classify := func(alID int) []int {
-		if alID == 1 {
-			return []int{catAnime}
-		}
-		return []int{catMovies}
-	}
-	nyaa, ab, skipped, unresolvable := buildFeeds(entries, "", classify)
-	if len(ab) != 0 || skipped != 0 || unresolvable != 0 {
-		t.Fatalf("ab=%d skipped=%d unresolvable=%d, want all 0", len(ab), skipped, unresolvable)
-	}
-	if len(nyaa) != 1 {
-		t.Fatalf("nyaa feed has %d items, want 1 (same-GUID items merged)", len(nyaa))
-	}
-	got := nyaa[0]
-	if got.DownloadVolumeFactor != dvfBest {
-		t.Errorf("marker = %q, want %q (best-wins even when the alt entry is listed first)", got.DownloadVolumeFactor, dvfBest)
-	}
-	if len(got.Categories) != 2 || !slices.Contains(got.Categories, catAnime) || !slices.Contains(got.Categories, catMovies) {
-		t.Errorf("categories = %v, want the union {%d, %d}", got.Categories, catAnime, catMovies)
-	}
-	if !got.PubDate.Equal(newer) {
-		t.Errorf("pubdate = %v, want %v (newest entry update, independent of which entry is best)", got.PubDate, newer)
-	}
-}
-
-// TestBuildFeedsEmptyGUIDsDoNotMerge pins dedupeByGUID's identity key to the
-// item's rendered identity (item.guid(): stored GUID, falling back to InfoHash
-// then DownloadURL), not the raw stored GUID: a Nyaa torrent whose SeaDex
-// source URL sits on a foreign host still resolves a canonical nyaa.si
-// download link (nyaaID reads /view/{id} without host validation) while
-// UsableURL rejects the host and leaves the stored GUID empty. Two such
-// distinct releases (different /view/{id} ids, so distinct DownloadURLs) must
-// stay two items — a raw-GUID key would merge them on "" and drop one — while
-// two copies of the SAME foreign-host id share a DownloadURL and merge via the
-// fallback identity.
-func TestBuildFeedsEmptyGUIDsDoNotMerge(t *testing.T) {
-	classify := func(int) []int { return []int{catAnime} }
-	distinct := []seadex.Entry{{
-		AniListID: 9,
-		Torrents: []seadex.Torrent{
-			{
-				Tracker: "Nyaa", URL: "https://evil.example/view/111", IsBest: true,
-				Files: []seadex.File{{Length: 1, Name: "Show A - S01E01 (1080p) [G].mkv"}},
+// TestPackSeason pins the pack season resolution from the FULL file-list span:
+// the dominant real season wins, ties break to the lowest, a specials-only
+// pack is S00, and an absolute-numbered pack has no season evidence.
+func TestPackSeason(t *testing.T) {
+	tests := []struct {
+		name   string
+		files  []seadex.File
+		want   int
+		wantOK bool
+	}{
+		{
+			name: "dominant real season wins over a leading special",
+			files: []seadex.File{
+				{Name: "Show - S00E01 (1080p).mkv"},
+				{Name: "Show - S01E01 (1080p).mkv"},
+				{Name: "Show - S01E02 (1080p).mkv"},
 			},
-			{
-				Tracker: "Nyaa", URL: "https://evil.example/view/222",
-				Files: []seadex.File{{Length: 1, Name: "Show B - S01E01 (1080p) [G].mkv"}},
-			},
+			want: 1, wantOK: true,
 		},
-	}}
-	nyaa, _, _, _ := buildFeeds(distinct, "", classify)
-	if len(nyaa) != 2 {
-		t.Fatalf("nyaa feed has %d items, want 2 (distinct empty-GUID releases must not merge)", len(nyaa))
+		{
+			name: "tie breaks to the lowest real season",
+			files: []seadex.File{
+				{Name: "Show - S02E01.mkv"},
+				{Name: "Show - S01E01.mkv"},
+			},
+			want: 1, wantOK: true,
+		},
+		{
+			name: "specials-only pack is S00",
+			files: []seadex.File{
+				{Name: "Show - S00E01.mkv"},
+				{Name: "Show - S00E02.mkv"},
+			},
+			want: 0, wantOK: true,
+		},
+		{
+			name: "absolute-numbered pack carries no season evidence",
+			files: []seadex.File{
+				{Name: "[Grp] Show - 07 (1080p).mkv"},
+				{Name: "[Grp] Show - 08 (1080p).mkv"},
+			},
+			want: 0, wantOK: false,
+		},
 	}
-	for i := range nyaa {
-		if nyaa[i].GUID != "" {
-			t.Errorf("item %d stored GUID = %q, want empty (UsableURL must reject the foreign host)", i, nyaa[i].GUID)
-		}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := packSeason(tc.files)
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("packSeason = (%d, %v), want (%d, %v)", got, ok, tc.want, tc.wantOK)
+			}
+		})
 	}
-	if nyaa[0].DownloadURL == nyaa[1].DownloadURL {
-		t.Errorf("both items share download URL %q, want distinct canonical links", nyaa[0].DownloadURL)
-	}
+}
 
-	same := []seadex.Entry{
-		{AniListID: 10, Torrents: []seadex.Torrent{{
-			Tracker: "Nyaa", URL: "https://evil.example/view/333", IsBest: true,
-			Files: []seadex.File{{Length: 1, Name: "Show C - S01E01 (1080p) [G].mkv"}},
-		}}},
-		{AniListID: 11, Torrents: []seadex.Torrent{{
-			Tracker: "Nyaa", URL: "https://evil.example/view/333",
-			Files: []seadex.File{{Length: 1, Name: "Show C - S01E01 (1080p) [G].mkv"}},
-		}}},
+// TestFeedTitleMixedSeasonPackLabelsRealSeason pins the S00+S01 fix on the
+// file-name-derived path: a pack bundling an S00 special with S01 episodes
+// must label S01 (the dominant REAL season across the whole file list), not
+// the S00 its representative (first) file happens to carry.
+func TestFeedTitleMixedSeasonPackLabelsRealSeason(t *testing.T) {
+	files := []seadex.File{
+		{Name: "Show - S00E01 (1080p) [Grp].mkv"},
+		{Name: "Show - S01E01 (1080p) [Grp].mkv"},
+		{Name: "Show - S01E02 (1080p) [Grp].mkv"},
 	}
-	merged, _, _, _ := buildFeeds(same, "", classify)
-	if len(merged) != 1 {
-		t.Fatalf("nyaa feed has %d items, want 1 (same fallback identity must merge)", len(merged))
+	if got, want := feedTitle(&seadex.Torrent{Files: files}), "Show - S01 (1080p) [Grp]"; got != want {
+		t.Errorf("feedTitle(S00+S01 pack) = %q, want %q (labeled by the dominant real season)", got, want)
 	}
-	if merged[0].DownloadVolumeFactor != dvfBest {
-		t.Errorf("merged marker = %q, want %q (best-wins across the merged pair)", merged[0].DownloadVolumeFactor, dvfBest)
+}
+
+// TestSynthesizeTitle pins the assembled-title shapes: show title + season/
+// episode marker + the real flags (resolution from file names, Dual Audio from
+// the structured flag, the release group bracketed), a movie as
+// "{Title} ({Year})", and the file-name derivation as the no-title fallback.
+func TestSynthesizeTitle(t *testing.T) {
+	packFiles := []seadex.File{
+		{Name: "Frieren Beyond Journey's End - S01E07 (BD Remux 1080p) [PMR].mkv"},
+		{Name: "Frieren Beyond Journey's End - S01E08 (BD Remux 1080p) [PMR].mkv"},
+	}
+	tests := []struct {
+		name string
+		t    seadex.Torrent
+		meta EntryInfo
+		want string
+	}{
+		{
+			name: "season pack labels the Fribb season with flags",
+			t:    seadex.Torrent{Files: packFiles, ReleaseGroup: "PMR", DualAudio: true},
+			meta: EntryInfo{Title: "Frieren: Beyond Journey's End", SeasonTvdb: 1},
+			want: "Frieren: Beyond Journey's End S01 1080p Dual Audio [PMR]",
+		},
+		{
+			name: "pack without a Fribb season labels the file-derived season",
+			t:    seadex.Torrent{Files: packFiles, ReleaseGroup: "PMR"},
+			meta: EntryInfo{Title: "Frieren"},
+			want: "Frieren S01 1080p [PMR]",
+		},
+		{
+			name: "mixed S00+S01 pack labels the dominant real season",
+			t: seadex.Torrent{Files: []seadex.File{
+				{Name: "Show - S00E01 (1080p).mkv"},
+				{Name: "Show - S01E01 (1080p).mkv"},
+				{Name: "Show - S01E02 (1080p).mkv"},
+			}, ReleaseGroup: "Grp"},
+			meta: EntryInfo{Title: "Show"},
+			want: "Show S01 1080p [Grp]",
+		},
+		{
+			name: "single episode keeps its SxxExx",
+			t: seadex.Torrent{Files: []seadex.File{
+				{Name: "Scum.of.the.Brave.S01E05.1080p.CR.WEB-DL-VARYG.mkv"},
+			}, ReleaseGroup: "VARYG"},
+			meta: EntryInfo{Title: "Scum of the Brave", SeasonTvdb: 1},
+			want: "Scum of the Brave S01E05 1080p [VARYG]",
+		},
+		{
+			name: "single absolute episode keeps its number",
+			t: seadex.Torrent{Files: []seadex.File{
+				{Name: "[Grp] Some Show - 07 (1080p).mkv"},
+			}, ReleaseGroup: "Grp"},
+			meta: EntryInfo{Title: "Some Show"},
+			want: "Some Show - 07 1080p [Grp]",
+		},
+		{
+			name: "movie carries its year",
+			t: seadex.Torrent{Files: []seadex.File{
+				{Name: "A Silent Voice (2016) (BD 1080p x264 FLAC) [Group].mkv"},
+			}, ReleaseGroup: "Group"},
+			meta: EntryInfo{Title: "A Silent Voice", Year: 2016, IsMovie: true},
+			want: "A Silent Voice (2016) 1080p [Group]",
+		},
+		{
+			name: "movie without a year stays a bare title",
+			t:    seadex.Torrent{Files: []seadex.File{{Name: "Movie [Grp].mkv"}}},
+			meta: EntryInfo{Title: "Movie", IsMovie: true},
+			want: "Movie",
+		},
+		{
+			name: "specials pack without a season labels S00",
+			t: seadex.Torrent{Files: []seadex.File{
+				{Name: "Show OVA - 01.mkv"},
+				{Name: "Show OVA - 02.mkv"},
+			}},
+			meta: EntryInfo{Title: "Show OVA", IsSpecial: true},
+			want: "Show OVA S00",
+		},
+		{
+			name: "absolute pack with no season evidence stays a bare title",
+			t: seadex.Torrent{Files: []seadex.File{
+				{Name: "[Grp] Show - 07 (1080p).mkv"},
+				{Name: "[Grp] Show - 08 (1080p).mkv"},
+			}, ReleaseGroup: "Grp"},
+			meta: EntryInfo{Title: "Show"},
+			want: "Show 1080p [Grp]",
+		},
+		{
+			name: "flags omit what is not held",
+			t: seadex.Torrent{Files: []seadex.File{
+				{Name: "Show - S01E01.mkv"},
+				{Name: "Show - S01E02.mkv"},
+			}},
+			meta: EntryInfo{Title: "Show", SeasonTvdb: 1},
+			want: "Show S01",
+		},
+		{
+			name: "no show title falls back to file-name derivation",
+			t: seadex.Torrent{Files: []seadex.File{
+				{Name: "Show - S01E01 (1080p) [G].mkv"},
+				{Name: "Show - S01E02 (1080p) [G].mkv"},
+			}},
+			meta: EntryInfo{},
+			want: "Show - S01 (1080p) [G]",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := synthesizeTitle(&tc.t, tc.meta); got != tc.want {
+				t.Errorf("synthesizeTitle = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

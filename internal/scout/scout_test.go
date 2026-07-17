@@ -13,6 +13,7 @@ import (
 	"github.com/cplieger/arrapi"
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/compare"
+	"github.com/cplieger/seadex-scout/internal/indexer"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/report"
@@ -73,7 +74,7 @@ type fakeFeed struct {
 	entries int
 }
 
-func (f *fakeFeed) Rebuild(_ context.Context, entries []seadex.Entry, _ func(alID int) bool) error {
+func (f *fakeFeed) Rebuild(_ context.Context, entries []seadex.Entry, _ func(alID int) indexer.EntryInfo) error {
 	f.calls++
 	f.entries = len(entries)
 	return f.err

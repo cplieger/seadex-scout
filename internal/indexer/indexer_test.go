@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
@@ -327,8 +326,11 @@ func TestIndexerEndToEnd(t *testing.T) {
 	}}
 
 	// The compare cycle builds + persists the feed snapshot; the server reads it.
+	// The ledger is seeded empty so the pack journals (a fresh install would
+	// baseline and serve an empty journal).
 	path := filepath.Join(t.TempDir(), "feed.json")
-	if err := NewFeedWriter("", false, path, nil).Rebuild(context.Background(), entries, nil); err != nil {
+	seedEmptyLedger(t, path)
+	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 
@@ -413,7 +415,10 @@ func TestFeedWriterReload(t *testing.T) {
 		t.Fatalf("pre-write feed = %d items, want 0", len(got))
 	}
 
-	// A cycle (here, the writer) persists a snapshot; the next request reloads it.
+	// A cycle (here, the writer) persists a snapshot; the next request reloads
+	// it. The pre-write empty-feed assertion above doubles as the fresh-install
+	// journal shape, so the ledger is seeded empty for the rebuild to journal.
+	seedEmptyLedger(t, path)
 	entries := []seadex.Entry{{
 		AniListID: 7,
 		Torrents: []seadex.Torrent{{
@@ -422,7 +427,7 @@ func TestFeedWriterReload(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [GRP].mkv"}},
 		}},
 	}}
-	if err := NewFeedWriter("", false, path, nil).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	got, st := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
@@ -563,128 +568,9 @@ func TestScopeFor(t *testing.T) {
 	}
 }
 
-// findByGUID returns the feed item with the given guid (its tracker page URL),
-// or nil. Feed order is by update time, so tests look items up by identity.
-func findByGUID(items []item, guid string) *item {
-	for i := range items {
-		if items[i].GUID == guid {
-			return &items[i]
-		}
-	}
-	return nil
-}
-
-// TestBuildFeeds synthesizes the per-tracker RSS feeds from a real SeaDex entry
-// shape (Frieren, alID 154587: PMR best + LostYears alt, each on Nyaa and AB),
-// covering the tracker split, season-title collapse, best/alt markers, direct
-// download links (public Nyaa .torrent, AB via passkey), the dropped redacted AB
-// info hash, and the missing-passkey skip count.
-func TestBuildFeeds(t *testing.T) {
-	updated := time.Date(2025, 7, 26, 15, 5, 59, 0, time.UTC)
-	pmrFiles := []seadex.File{
-		// An extra (creditless) file first, to prove representativeFile skips it
-		// for a real episode when deriving the title.
-		{Length: 400_000_000, Name: "NCED 01 (BD Remux 1080p AVC FLAC) [PMR].mkv"},
-		{Length: 7_500_699_108, Name: "Frieren Beyond Journey's End - S01E01 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR].mkv"},
-		{Length: 7_497_267_058, Name: "Frieren Beyond Journey's End - S01E02 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR].mkv"},
-	}
-	lostYearsFiles := []seadex.File{
-		{Length: 3_506_804_569, Name: "[LostYears] Frieren Beyond Journey's End - S01E01 (WEB 1080p x265 10-bit AAC Opus) [0F7F64F6].mkv"},
-		{Length: 3_535_154_954, Name: "[LostYears] Frieren Beyond Journey's End - S01E02 (WEB 1080p x265 10-bit AAC Opus) [E5ECA664].mkv"},
-	}
-	entries := []seadex.Entry{{
-		AniListID: 154587,
-		Updated:   updated,
-		Torrents: []seadex.Torrent{
-			{Tracker: "Nyaa", URL: "https://nyaa.si/view/1961373", InfoHash: "143ed15e5e3df072ae91adaeb149973a887590dd", IsBest: true, ReleaseGroup: "PMR", Files: pmrFiles},
-			{Tracker: "AB", URL: "/torrents.php?id=86576&torrentid=1167293", InfoHash: "<redacted>", IsBest: true, ReleaseGroup: "PMR", Files: pmrFiles},
-			{Tracker: "AB", URL: "/torrents.php?id=86576&torrentid=1162986", InfoHash: "<redacted>", IsBest: false, ReleaseGroup: "LostYears", Files: lostYearsFiles},
-			{Tracker: "Nyaa", URL: "https://nyaa.si/view/1998171", InfoHash: "fb9ce1e001837de7662bd72b3fb79b3fea13d03f", IsBest: false, ReleaseGroup: "LostYears", Files: lostYearsFiles},
-		},
-	}}
-
-	// Frieren is a TV series, so classify every entry as anime (the category
-	// itself is exercised by TestMovieClassifier).
-	classifyAnime := func(int) []int { return []int{catAnime} }
-	nyaa, ab, abSkipped, _ := buildFeeds(entries, "PASSKEY123", classifyAnime)
-	if len(nyaa) != 2 || len(ab) != 2 {
-		t.Fatalf("feeds: got nyaa=%d ab=%d, want 2 and 2", len(nyaa), len(ab))
-	}
-	if abSkipped != 0 {
-		t.Errorf("abSkippedNoPasskey = %d, want 0 (passkey provided)", abSkipped)
-	}
-
-	// Nyaa best (PMR): season-collapsed title (extras skipped), public .torrent
-	// link, best marker, real info hash, anime category, SeaDex entry info URL,
-	// summed pack size, entry update time.
-	pmrNyaa := findByGUID(nyaa, "https://nyaa.si/view/1961373")
-	if pmrNyaa == nil {
-		t.Fatal("PMR nyaa item missing")
-	}
-	if want := "Frieren Beyond Journey's End - S01 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR]"; pmrNyaa.Title != want {
-		t.Errorf("PMR nyaa title = %q, want %q", pmrNyaa.Title, want)
-	}
-	if pmrNyaa.DownloadURL != "https://nyaa.si/download/1961373.torrent" {
-		t.Errorf("PMR nyaa download = %q", pmrNyaa.DownloadURL)
-	}
-	if pmrNyaa.DownloadVolumeFactor != dvfBest {
-		t.Errorf("PMR nyaa dvf = %q, want %q", pmrNyaa.DownloadVolumeFactor, dvfBest)
-	}
-	if pmrNyaa.InfoHash != "143ed15e5e3df072ae91adaeb149973a887590dd" {
-		t.Errorf("PMR nyaa infohash = %q", pmrNyaa.InfoHash)
-	}
-	if len(pmrNyaa.Categories) != 1 || pmrNyaa.Categories[0] != catAnime {
-		t.Errorf("PMR nyaa categories = %v, want [%d]", pmrNyaa.Categories, catAnime)
-	}
-	if pmrNyaa.InfoURL != "https://releases.moe/154587" {
-		t.Errorf("PMR nyaa infoURL = %q", pmrNyaa.InfoURL)
-	}
-	if pmrNyaa.Size != 400_000_000+7_500_699_108+7_497_267_058 {
-		t.Errorf("PMR nyaa size = %d, want summed pack size", pmrNyaa.Size)
-	}
-	if !pmrNyaa.PubDate.Equal(updated) {
-		t.Errorf("PMR nyaa pubDate = %v, want %v", pmrNyaa.PubDate, updated)
-	}
-
-	// AB best (PMR): passkey download link, best marker, redacted info hash
-	// dropped, guid is the usable (prefixed) AB page URL.
-	pmrAB := findByGUID(ab, "https://animebytes.tv/torrents.php?id=86576&torrentid=1167293")
-	if pmrAB == nil {
-		t.Fatal("PMR ab item missing")
-	}
-	if pmrAB.DownloadURL != "https://animebytes.tv/torrent/1167293/download/PASSKEY123" {
-		t.Errorf("PMR ab download = %q", pmrAB.DownloadURL)
-	}
-	if pmrAB.InfoHash != "" {
-		t.Errorf("PMR ab infohash = %q, want empty (redacted dropped)", pmrAB.InfoHash)
-	}
-
-	// AB alt (LostYears): alt marker + its own passkey link.
-	lyAB := findByGUID(ab, "https://animebytes.tv/torrents.php?id=86576&torrentid=1162986")
-	if lyAB == nil {
-		t.Fatal("LostYears ab item missing")
-	}
-	if lyAB.DownloadVolumeFactor != dvfAlt {
-		t.Errorf("LostYears ab dvf = %q, want %q (alt)", lyAB.DownloadVolumeFactor, dvfAlt)
-	}
-	if lyAB.DownloadURL != "https://animebytes.tv/torrent/1162986/download/PASSKEY123" {
-		t.Errorf("LostYears ab download = %q", lyAB.DownloadURL)
-	}
-
-	// Without a passkey the AB feed carries nothing grabbable, and both AB
-	// releases are counted for the operator nudge; Nyaa is unaffected.
-	nyaa2, ab2, abSkipped2, _ := buildFeeds(entries, "", classifyAnime)
-	if len(nyaa2) != 2 {
-		t.Errorf("nyaa feed without passkey = %d, want 2", len(nyaa2))
-	}
-	if len(ab2) != 0 {
-		t.Errorf("ab feed without passkey = %d, want 0", len(ab2))
-	}
-	if abSkipped2 != 2 {
-		t.Errorf("abSkippedNoPasskey without passkey = %d, want 2", abSkipped2)
-	}
-}
-
+// TestFeedTitle exercises the file-name-derived title synthesis (the permanent
+// last resort when no show title is known; see TestSynthesizeTitle for the
+// assembled-title path).
 func TestFeedTitle(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -782,49 +668,6 @@ func TestFeedTitle(t *testing.T) {
 				t.Errorf("feedTitle = %q, want %q", got, tc.want)
 			}
 		})
-	}
-}
-
-// TestMovieClassifier verifies the RSS category comes from the entry's real
-// media type (Fribb), not a guess from the file name: a movie routes to Radarr
-// (Movies), while a TV series, an OVA, a special, and an unmapped entry all
-// route to Sonarr (Anime). The OVA/special cases are the ones a file-name
-// heuristic gets wrong - a single-file special is indistinguishable from a film
-// by name - so classifying them as anime is the behavior that matters here.
-func TestMovieClassifier(t *testing.T) {
-	recs := map[int]mapping.Record{
-		1: {AniListID: 1, Type: "MOVIE"},
-		2: {AniListID: 2, Type: "OVA"},
-		3: {AniListID: 3, Type: "SPECIAL"},
-		4: {AniListID: 4, Type: "TV"},
-	}
-	classify := movieClassifier(func(alID int) bool {
-		r, ok := recs[alID]
-		return ok && r.IsMovie()
-	})
-	tests := []struct {
-		name string
-		alID int
-		want int
-	}{
-		{"movie routes to Radarr", 1, catMovies},
-		{"OVA is not a movie (Sonarr)", 2, catAnime},
-		{"special is not a movie (Sonarr)", 3, catAnime},
-		{"tv routes to Sonarr", 4, catAnime},
-		{"unmapped defaults to Sonarr", 999, catAnime},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := classify(tc.alID)
-			if len(got) != 1 || got[0] != tc.want {
-				t.Errorf("classify(%d) = %v, want [%d]", tc.alID, got, tc.want)
-			}
-		})
-	}
-
-	// A nil classifier (no mapping configured) is safe and defaults to anime.
-	if got := movieClassifier(nil)(1); len(got) != 1 || got[0] != catAnime {
-		t.Errorf("nil-mapping classify = %v, want [%d]", got, catAnime)
 	}
 }
 
@@ -1016,6 +859,7 @@ func TestFilterByCats_appliesTorznabCategorySemantics(t *testing.T) {
 // non-atomically only in the failure case; the server must not serve an empty feed then.
 func TestReloadKeepsFeedOnMalformedSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
 	entries := []seadex.Entry{{
 		AniListID: 7,
 		Torrents: []seadex.Torrent{{
@@ -1023,7 +867,7 @@ func TestReloadKeepsFeedOnMalformedSnapshot(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
 		}},
 	}}
-	if err := NewFeedWriter("", false, path, nil).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, Deps{}, path)
@@ -1056,7 +900,8 @@ func TestReloadKeepsFeedOnZeroSnapshot(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "feed.json")
-			if err := NewFeedWriter("", false, path, nil).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
+			seedEmptyLedger(t, path)
+			if err := newTestWriter(path, "", false).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
 				t.Fatalf("Rebuild: %v", err)
 			}
 			ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, Deps{}, path)
@@ -1096,7 +941,8 @@ func TestReloadRebuildsABDownloadURLsFromCurrentPasskey(t *testing.T) {
 		}},
 	}}
 	path := filepath.Join(t.TempDir(), "feed.json")
-	if err := NewFeedWriter("OLD_PASSKEY", true, path, nil).Rebuild(context.Background(), entries, nil); err != nil {
+	seedEmptyLedger(t, path)
+	if err := newTestWriter(path, "OLD_PASSKEY", true).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 
@@ -1167,7 +1013,7 @@ func TestReloadRetriesPreservedMtimeReplacementAfterFailure(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
 		}},
 	}}
-	if err := NewFeedWriter("", false, repaired, nil).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := seedRebuild(repaired, entries); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if err := os.Rename(repaired, path); err != nil {
@@ -1198,6 +1044,17 @@ func nyaaTestEntries(n int) []seadex.Entry {
 	return entries
 }
 
+// seedRebuild writes a journaled snapshot of entries at path: an empty-ledger
+// seed followed by one Rebuild, so every entry lands in the feed (the reload
+// tests need populated snapshots, not the first-run baseline).
+func seedRebuild(path string, entries []seadex.Entry) error {
+	const empty = `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[],"ab_feed":[]}`
+	if err := os.WriteFile(path, []byte(empty), 0o600); err != nil {
+		return err
+	}
+	return NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{}).Rebuild(context.Background(), entries, nil)
+}
+
 // TestReloadInstallsPreservedMtimeReplacementAfterSuccess pins the last-good
 // gate to file IDENTITY, not just mtime: after a snapshot loads successfully at
 // mtime T, a DIFFERENT valid snapshot installed on a new inode with its mtime
@@ -1207,7 +1064,7 @@ func nyaaTestEntries(n int) []seadex.Entry {
 func TestReloadInstallsPreservedMtimeReplacementAfterSuccess(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "feed.json")
-	if err := NewFeedWriter("", false, path, nil).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
+	if err := seedRebuild(path, nyaaTestEntries(1)); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	loadedAt := time.Now().Add(-time.Hour).Truncate(time.Second)
@@ -1222,7 +1079,7 @@ func TestReloadInstallsPreservedMtimeReplacementAfterSuccess(t *testing.T) {
 	// A different snapshot on a NEW inode, renamed over the loaded file with
 	// the loaded mtime preserved.
 	replacement := filepath.Join(dir, "feed-replacement.json")
-	if err := NewFeedWriter("", false, replacement, nil).Rebuild(context.Background(), nyaaTestEntries(2), nil); err != nil {
+	if err := seedRebuild(replacement, nyaaTestEntries(2)); err != nil {
 		t.Fatalf("Rebuild replacement: %v", err)
 	}
 	if err := os.Rename(replacement, path); err != nil {
@@ -1271,7 +1128,7 @@ func TestReloadRetriesTransientReadFailureOnSameInode(t *testing.T) {
 	// Repair IN PLACE (same inode: build a valid snapshot beside it, then
 	// rewrite the original file's bytes) and restore the failed mtime.
 	repaired := filepath.Join(dir, "feed-repaired.json")
-	if err := NewFeedWriter("", false, repaired, nil).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
+	if err := seedRebuild(repaired, nyaaTestEntries(1)); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	valid, err := os.ReadFile(repaired)
@@ -1296,14 +1153,15 @@ func TestReloadRetriesTransientReadFailureOnSameInode(t *testing.T) {
 // installed once the dust settles.
 func TestReloadConcurrentCallers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	if err := NewFeedWriter("", false, path, nil).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
+	if err := seedRebuild(path, nyaaTestEntries(1)); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, Deps{}, path)
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
-	if err := NewFeedWriter("", false, path, nil).Rebuild(context.Background(), nyaaTestEntries(2), nil); err != nil {
+	// A second cycle over a grown catalogue: entry 1 carries, entry 2 is new.
+	if err := newTestWriter(path, "", false).Rebuild(context.Background(), nyaaTestEntries(2), nil); err != nil {
 		t.Fatalf("Rebuild newer: %v", err)
 	}
 	future := time.Now().Add(time.Hour)
@@ -1323,39 +1181,6 @@ func TestReloadConcurrentCallers(t *testing.T) {
 	ix.reload(context.Background())
 	if got := ix.feedFor(upstreamNyaa); len(got) != 2 {
 		t.Errorf("after concurrent reloads feed = %d items, want 2", len(got))
-	}
-}
-
-// TestBuildFeedsCompleteUnpackedSeason pins the v1.7.2 behavior at the buildFeeds level: a
-// season SeaDex tracks as one torrent PER episode (each a single-file release) yields one
-// feed item per episode, each keeping its SxxExx - never collapsed to the season (which
-// would let the arr grab a single episode believing it was the whole season) and never
-// deduped away.
-func TestBuildFeedsCompleteUnpackedSeason(t *testing.T) {
-	entries := []seadex.Entry{{
-		AniListID: 187989,
-		Torrents: []seadex.Torrent{
-			{Tracker: "Nyaa", URL: "https://nyaa.si/view/1", IsBest: true, Files: []seadex.File{{Length: 1, Name: "Scum of the Brave - S01E01 (WEB 1080p) [G].mkv"}}},
-			{Tracker: "Nyaa", URL: "https://nyaa.si/view/2", IsBest: true, Files: []seadex.File{{Length: 1, Name: "Scum of the Brave - S01E02 (WEB 1080p) [G].mkv"}}},
-			{Tracker: "Nyaa", URL: "https://nyaa.si/view/3", IsBest: true, Files: []seadex.File{{Length: 1, Name: "Scum of the Brave - S01E03 (WEB 1080p) [G].mkv"}}},
-		},
-	}}
-	nyaa, _, _, _ := buildFeeds(entries, "", func(int) []int { return []int{catAnime} })
-	if len(nyaa) != 3 {
-		t.Fatalf("got %d items, want 3 (one per episode torrent, not collapsed/deduped)", len(nyaa))
-	}
-	titles := map[string]bool{}
-	for i := range nyaa {
-		titles[nyaa[i].Title] = true
-	}
-	for _, want := range []string{
-		"Scum of the Brave - S01E01 (WEB 1080p) [G]",
-		"Scum of the Brave - S01E02 (WEB 1080p) [G]",
-		"Scum of the Brave - S01E03 (WEB 1080p) [G]",
-	} {
-		if !titles[want] {
-			t.Errorf("missing per-episode title %q; got %v", want, titles)
-		}
 	}
 }
 
@@ -1673,10 +1498,10 @@ func TestInstallSnapshotSkipsAlreadyInstalledFile(t *testing.T) {
 		t.Fatalf("stat: %v", err)
 	}
 	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, Deps{}, "")
-	if !ix.installSnapshot(info1, snapshot{NyaaFeed: []item{{Title: "first"}}}) {
+	if !ix.installSnapshot(info1, &snapshot{NyaaFeed: []item{{Title: "first"}}}) {
 		t.Fatal("first installSnapshot = false, want true")
 	}
-	if ix.installSnapshot(info2, snapshot{NyaaFeed: []item{{Title: "second"}}}) {
+	if ix.installSnapshot(info2, &snapshot{NyaaFeed: []item{{Title: "second"}}}) {
 		t.Fatal("second installSnapshot with same unchanged file = true, want false")
 	}
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
@@ -1704,7 +1529,7 @@ func TestSearchUsesConfiguredABUpstream(t *testing.T) {
 		}},
 	}}
 	path := filepath.Join(t.TempDir(), "feed.json")
-	if err := NewFeedWriter("", false, path, nil).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := seedRebuild(path, entries); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 

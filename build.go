@@ -30,7 +30,8 @@ const (
 	mappingTimeout = 180 * time.Second // multi-MB Fribb file
 	anilistTimeout = 30 * time.Second  // small GraphQL replies
 	// indexerUpstreamTimeout bounds a Prowlarr Torznab query (which searches the
-	// trackers live), used by the daemon's Torznab feed.
+	// trackers live), used by the daemon's Torznab feed server (search proxying)
+	// and the feed writer's title harvest alike.
 	indexerUpstreamTimeout = 60 * time.Second
 	// arrMaxAttempts / arrBaseDelay bound arr request retries.
 	arrMaxAttempts = 3
@@ -59,6 +60,7 @@ func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
 	pingArrs(ctx, sonarr, radarr)
 
 	anilistClient := anilist.NewClient(anilistHTTP, config.DefaultAniListURL, config.DefaultAniListRate, log)
+	feed, feedCleanup := feedWriter(cfg, log)
 
 	sc := scout.New(&scout.Deps{
 		Logger: log,
@@ -89,13 +91,14 @@ func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
 			st := anilistClient.Stats()
 			return st.Calls, st.RateLimitWaits
 		},
-		Feed: feedWriter(cfg, log),
+		Feed: feed,
 	})
 
 	cleanup := func() {
 		httpx.Close(seadexHTTP)
 		httpx.Close(mappingHTTP)
 		httpx.Close(anilistHTTP)
+		feedCleanup()
 		if sonarr != nil {
 			sonarr.Close()
 		}
@@ -107,17 +110,27 @@ func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
 }
 
 // feedWriter returns the indexer feed writer the compare cycle drives when the
-// Torznab feed is configured, else nil (the cycle then does no feed work). It
-// persists the materialized feed snapshot (curation set + synthesized RSS feeds)
-// the indexer HTTP server reads, so one cycle feeds both the findings and the
-// feed from a single SeaDex fetch. It holds no clients: the cycle owns the
-// shared SeaDex + Fribb fetch and hands the results to Rebuild.
-func feedWriter(cfg *config.Config, log *slog.Logger) scout.FeedWriter {
+// Torznab feed is configured - plus the cleanup releasing its Prowlarr HTTP
+// client - else a nil writer (the cycle then does no feed work) and a no-op.
+// It persists the materialized feed snapshot (curation set + the synthesized
+// RSS journal) the indexer HTTP server reads, so one cycle feeds both the
+// findings and the feed from a single SeaDex fetch. The cycle owns the shared
+// SeaDex + Fribb fetch and hands the results to Rebuild; the writer's own
+// client only serves the title harvest, which queries the same per-indexer
+// Prowlarr Torznab endpoints the server proxies searches through.
+func feedWriter(cfg *config.Config, log *slog.Logger) (fw scout.FeedWriter, cleanup func()) {
 	if !cfg.IndexerConfigured() {
-		return nil
+		return nil, func() {}
 	}
-	abConfigured := cfg.IndexerABConfigured()
-	return indexer.NewFeedWriter(cfg.IndexerABPasskey, abConfigured, config.DefaultIndexerFeedPath, log.With("component", "indexer"))
+	prowlarrHTTP := httpx.NewClient(indexerUpstreamTimeout)
+	writer := indexer.NewFeedWriter(&indexer.FeedWriterConfig{
+		Path:           config.DefaultIndexerFeedPath,
+		ABPasskey:      cfg.IndexerABPasskey,
+		NyaaTorznabURL: cfg.IndexerNyaaTorznabURL,
+		ABTorznabURL:   cfg.IndexerABTorznabURL,
+		ProwlarrAPIKey: cfg.IndexerProwlarrAPIKey,
+	}, indexer.Deps{HTTP: prowlarrHTTP, Logger: log.With("component", "indexer")})
+	return writer, func() { httpx.Close(prowlarrHTTP) }
 }
 
 // builtIndexer holds the assembled Torznab feed server and the resources to

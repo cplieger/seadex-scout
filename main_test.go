@@ -230,14 +230,19 @@ func TestConfigureLoggerAppliesLevel(t *testing.T) {
 }
 
 // TestFeedWriter pins the nil-when-unconfigured contract: the compare cycle
-// does feed work only when the Torznab feed is configured.
+// does feed work only when the Torznab feed is configured, and the returned
+// cleanup is a callable no-op then.
 func TestFeedWriter(t *testing.T) {
 	log := slog.Default()
-	if fw := feedWriter(&config.Config{}, log); fw != nil {
+	fw, cleanup := feedWriter(&config.Config{}, log)
+	cleanup()
+	if fw != nil {
 		t.Errorf("feedWriter(unconfigured) = %v, want nil (cycle must skip feed work)", fw)
 	}
 	cfg := &config.Config{IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api"}
-	if fw := feedWriter(cfg, log); fw == nil {
+	fw, cleanup = feedWriter(cfg, log)
+	defer cleanup()
+	if fw == nil {
 		t.Error("feedWriter(configured) = nil, want a FeedWriter")
 	}
 }
