@@ -21,10 +21,10 @@ import (
 // decodePage leaves an empty JSON array as a nil slice where json.Unmarshal
 // allocates an empty one (normalized before comparing; no consumer
 // distinguishes them), and duplicate fold-equal keys within one object are
-// skipped entirely - json.Unmarshal MERGES a duplicate container element-wise
-// into already-decoded data while decodePage replaces it wholesale, a
-// deliberate hostile-input divergence whose supported case (a duplicate
-// "expand":null) the unit tests pin directly.
+// conservatively skipped to keep the oracle independent of duplicate-key
+// semantics - decodeExpand now merges a duplicate "expand" field-wise like
+// json.Unmarshal (the unit tests pin both the null and object arms directly),
+// so the skip is scope hygiene, not a known divergence.
 func FuzzDecodePage(f *testing.F) {
 	seeds := []string{
 		`{"totalItems":1,"totalPages":1,"items":[{"alID":7,"notes":"n","theoreticalBest":"tb","updated":"2026-01-02 03:04:05.000Z","incomplete":true,"expand":{"trs":[{"releaseGroup":"PMR","tracker":"Nyaa","infoHash":"abc","url":"https://nyaa.si/view/1","isBest":true,"dualAudio":true,"files":[{"name":"a.mkv","length":1}],"tags":["best"]}]}}]}`,

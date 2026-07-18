@@ -235,9 +235,9 @@ func trackerURLs(links []compare.ReleaseLink) (nyaa, ab string) {
 }
 
 // seadexTags renders a compact descriptive tag line for a finding — the SeaDex
-// qualifier (best / incomplete / theoretical-best / mixed-group), the release
-// kind, resolution, and dual-audio — for an alert footer. Only best releases
-// are ever surfaced, so "alt" never appears.
+// qualifier (best / incomplete / theoretical-best / mixed-group / unverifiable),
+// the release kind, resolution, and dual-audio — for an alert footer. Only best
+// releases are ever surfaced, so "alt" never appears.
 func seadexTags(f *compare.Finding) string {
 	var tags []string
 	switch f.Status {

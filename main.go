@@ -320,13 +320,23 @@ func pollOnce(ctx context.Context, sc cycler, marker *health.Marker) error {
 //     a daemon tick); the request was recorded for (or is already covered by)
 //     the active runner, which is owed to start a run after it arrived. That
 //     is success for this process: log and exit 0, marker untouched (the
-//     active runner's cycle records its own outcome).
+//     active runner's cycle records its own outcome) — unless cancellation
+//     was observed by then, in which case the uniform interruption contract
+//     wins (exit non-zero; the recorded demand still stands).
 //   - Gated: shutdown was signalled before the run started - the uniform
 //     interruption contract applies (exit non-zero, WARN classification,
 //     marker untouched).
 //   - Nothing ran and no demand recorded (a cycle-lock infrastructure
 //     failure): exit non-zero with the error.
 func pollCycle(ctx context.Context, ex *scheduler.Exclusive, sc cycler, marker *health.Marker) error {
+	// A pre-cancelled invocation must not enqueue demand: Exclusive's gate
+	// refuses the RUN, not the queue insertion, so with the lock held by
+	// another process a cancelled poll would still queue a rerun and report
+	// success, adding work after shutdown was signalled. The uniform
+	// interruption contract applies instead (exit non-zero, marker untouched).
+	if ctx.Err() != nil {
+		return pollInterrupted(ctx)
+	}
 	// Capture the first execution's outcome: it is this invocation's own run.
 	// The closure returns nil to Exclusive so exErr stays purely a
 	// coordination-infrastructure signal (job outcomes must not stop queued
@@ -344,6 +354,14 @@ func pollCycle(ctx context.Context, ex *scheduler.Exclusive, sc cycler, marker *
 	case scheduler.OutcomeQueued, scheduler.OutcomeDiscarded:
 		if exErr != nil {
 			slog.Warn("cycle coordination error after queueing; demand stands", "error", exErr)
+		}
+		if ctx.Err() != nil {
+			// Cancellation arrived while Run coordinated with the busy owner:
+			// the recorded demand stands for the active runner, but this
+			// invocation still reports the uniform interruption contract
+			// (exit non-zero, WARN classification, marker untouched) rather
+			// than a success observed after shutdown was signalled.
+			return pollInterrupted(ctx)
 		}
 		slog.Info("compare cycle already in flight; demand queued for the active runner",
 			"outcome", outcome.String())

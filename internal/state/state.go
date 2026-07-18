@@ -132,12 +132,11 @@ const staleTempMaxAge = time.Hour
 // quarantined and returns the error so the caller can decide (the scout logs
 // it and starts cold).
 func (s *Store) Load(ctx context.Context) (State, error) {
-	if removed, cleanErr := atomicfile.CleanupStaleTemps(filepath.Dir(s.path), staleTempMaxAge); cleanErr != nil {
-		if !errors.Is(cleanErr, fs.ErrNotExist) {
-			s.log.Warn("could not clean stale atomic-write temp files", "dir", filepath.Dir(s.path), "error", cleanErr)
-		}
-	} else if removed > 0 {
-		s.log.Info("removed stale atomic-write temp files", "dir", filepath.Dir(s.path), "removed", removed)
+	// CleanupStaleTemps maps a missing dir to (0, nil) and logs its own
+	// removal summary at Info through the supplied logger, so Load only
+	// surfaces a readdir failure.
+	if _, cleanErr := atomicfile.CleanupStaleTemps(filepath.Dir(s.path), staleTempMaxAge, atomicfile.WithLogger(s.log)); cleanErr != nil {
+		s.log.Warn("could not clean stale atomic-write temp files", "dir", filepath.Dir(s.path), "error", cleanErr)
 	}
 	data, err := atomicfile.ReadBounded(ctx, s.path, maxStateBytes)
 	if err != nil {

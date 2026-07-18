@@ -509,6 +509,48 @@ func TestPollCycleUniformInterruption(t *testing.T) {
 	}
 }
 
+// TestPollCycleBusyLockPreCancelled pins the queue-insertion side of poll's
+// uniform interruption contract: a poll arriving pre-cancelled while another
+// process holds the cycle lock must NOT enqueue demand or report success —
+// Exclusive's gate refuses the run, not the queue insertion, so without the
+// pre-Run check the cancelled poll would still queue work after shutdown. It
+// returns the interruption error (wrapping context.Canceled, so main
+// classifies it WARN and exits non-zero), never runs a cycle, leaves the
+// health marker untouched, and records no pending rerun for the lock holder.
+func TestPollCycleBusyLockPreCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	dir := t.TempDir()
+	ex, err := newCycleExclusive(ctx, dir)
+	if err != nil {
+		t.Fatalf("newCycleExclusive: %v", err)
+	}
+	holdCycleLock(t, dir)
+	path := filepath.Join(t.TempDir(), ".healthy")
+	if err := os.WriteFile(path, []byte("sentinel-untouched"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err = pollCycle(ctx, ex, mustNotRunCycler{t: t}, health.NewMarker(path))
+
+	if err == nil {
+		t.Fatal("pollCycle = nil, want the interruption error (exit 1)")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want it to wrap context.Canceled (main classifies the interruption WARN, not ERROR)", err)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("marker file after interruption: %v", readErr)
+	}
+	if string(got) != "sentinel-untouched" {
+		t.Errorf("marker content = %q, want the pre-existing state untouched", got)
+	}
+	if pending, perr := ex.Pending(); perr != nil || pending != 0 {
+		t.Errorf("Pending() = (%d, %v), want (0, nil): a cancelled poll must not enqueue demand", pending, perr)
+	}
+}
+
 // TestPollCycleUninterrupted pins poll's normal contract: a healthy cycle sets
 // the marker healthy and exits 0; an unhealthy cycle sets it unhealthy and
 // returns the ingest error (exit 1) without reading as an interruption.

@@ -75,10 +75,14 @@ groups:
             the container is up (about two missed cycles, allowing for jitter)
             means the poll loop is wedged and better-release findings have
             silently stopped; restart the container. Adjust the window to your
-            poll_interval. This rule applies to built-in (daemon) mode only: in
+            poll_interval. This rule is built for built-in (daemon) mode: in
             resident-idle (poll_interval: off) or report mode each cycle runs
-            via a docker exec child, so the completion lines never reach the
-            collector and this deadman cannot fire; alert on the external
+            via a docker exec child, so its completion lines never reach the
+            collector — that blinds the count-based rules, but this
+            absence-based deadman FALSE-FIRES once its window elapses. When
+            running external mode, drop this rule or retarget its selector at
+            the stream that carries the completion lines (your runner's logs,
+            if your collector ships them), and alert on the external
             scheduler's job result instead.
       # Informational, not a fault: SeaDex recommends a better release than the
       # one on disk — the app's activity signal; keep it at severity info or drop

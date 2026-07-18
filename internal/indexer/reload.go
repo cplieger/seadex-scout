@@ -81,7 +81,14 @@ func (ix *Indexer) reload(ctx context.Context) {
 	if !ok {
 		return
 	}
-	if ix.shouldSkipSnapshot(info) {
+	// A degraded reload must not take the unchanged-snapshot fast path: after
+	// a stat fault recovers, the file may be the already-loaded inode at the
+	// same mtime, so skipping here would leave reloadDegraded set forever —
+	// the recovery INFO never emits and the next onset's warning is
+	// suppressed by the stale flag. Forcing one bounded read clears the state
+	// through the recovery block below; a persistent read fault keeps it
+	// degraded without falsely declaring recovery.
+	if ix.shouldSkipSnapshot(info) && !ix.reloadDegraded {
 		return
 	}
 	snap, ok, memoize := ix.readSnapshot(ctx)

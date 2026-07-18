@@ -122,8 +122,9 @@ func NewMatcher(anilistClient AniListClient, logger *slog.Logger) *Matcher {
 // Match links every entry to a library item (where present), returning the
 // matches, ID-mapping coverage, and the updated memo to persist: legacy
 // entries are migrated onto the expiry policy, renewed lookups are re-stamped,
-// and entries still expired at the end of the pass are pruned, so every save
-// persists a pruned memo. It never fails as a whole: an AniList fallback error
+// and entries still expired at the end of a clean pass are pruned. Degraded
+// passes retain expired entries as stale feed-title fallback data. Match never
+// fails as a whole: an AniList fallback error
 // for one entry is logged, that entry is left unmatched, and its id is
 // reported in Result.IncompleteIDs so the caller can scope its degradation
 // handling to the affected entries.

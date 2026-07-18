@@ -306,3 +306,30 @@ func TestMemoEntryExpiryWireFormat(t *testing.T) {
 		t.Errorf("zero-expiry encoding = %s, want the expiry key omitted", zeroOut)
 	}
 }
+
+
+// TestMemoDegradedPassRetainsExpiredEntries pins the prune guard (h-f8): a
+// degraded pass (here a total AniList outage) could not renew what expired,
+// so it must NOT prune the expired entries — the feed's stale-title tier
+// (scout/feedinfo.go) still serves them, and they stay pending for next
+// cycle's batch either way.
+func TestMemoDegradedPassRetainsExpiredEntries(t *testing.T) {
+	idx := mapping.NewIndex([]mapping.Record{{AniListID: 11, Type: "MOVIE"}}) // id-less: needs the lookup
+	m := expiryMatcher(degradedAniList{}, 0.5)
+	memo := Memo{Entries: map[int]MemoEntry{
+		11: {Titles: []string{"Stale Title"}, Format: "MOVIE", Year: 2020, Expiry: memoTestClock.Add(-time.Hour)},
+	}}
+
+	res := m.Match(context.Background(), []seadex.Entry{{AniListID: 11}}, &library.Snapshot{}, idx, memo)
+
+	if !res.Degraded {
+		t.Fatal("Degraded = false, want true on a total AniList outage")
+	}
+	ent, ok := res.Memo.Entries[11]
+	if !ok {
+		t.Fatal("expired entry 11 was pruned on a degraded pass; want it retained for the feed's stale-title tier")
+	}
+	if len(ent.Titles) != 1 || ent.Titles[0] != "Stale Title" {
+		t.Errorf("memo[11] = %+v, want the stale entry retained verbatim", ent)
+	}
+}

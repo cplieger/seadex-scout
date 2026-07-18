@@ -7,15 +7,13 @@ import (
 	"pgregory.net/rapid"
 )
 
-// TestCurationWarningsProperties property-tests the curation-warning gate
-// pair over arbitrary tag lists. CurationWarned and CurationWarnings are two
-// independent scans of the same vocabulary, so their agreement is pinned
-// (CurationWarned(tags) must equal CurationWarnings(tags) != nil) against a
-// one-sided vocabulary or matching-rule drift; the annotation's output is
-// bounded to the four canonical values (nil, [broken], [incomplete],
-// [broken incomplete]) so raw upstream tag bytes can never leak; input tag
-// order never changes the result; and appending a canonical warning tag in
-// any casing always trips both functions.
+// TestCurationWarningsProperties property-tests the curation-warning
+// annotation over arbitrary tag lists. The output is bounded to the four
+// canonical values (nil, [broken], [incomplete], [broken incomplete]) so raw
+// upstream tag bytes can never leak; input tag order never changes the
+// result; and appending a canonical warning tag in any casing always trips
+// both CurationWarnings and the CurationWarned boolean helper (whose full
+// delegated behavior curation_test.go's table pins).
 func TestCurationWarningsProperties(t *testing.T) {
 	tag := rapid.OneOf(
 		rapid.SampledFrom([]string{
@@ -31,9 +29,6 @@ func TestCurationWarningsProperties(t *testing.T) {
 		tags := tagsGen.Draw(t, "tags")
 
 		warns := CurationWarnings(tags)
-		if got, want := CurationWarned(tags), warns != nil; got != want {
-			t.Fatalf("CurationWarned(%q) = %v but CurationWarnings = %v: the two vocabulary scans disagree", tags, got, warns)
-		}
 		bounded := false
 		for _, c := range canonical {
 			if slices.Equal(warns, c) {
