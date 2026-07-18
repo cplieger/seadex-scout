@@ -140,6 +140,7 @@ func TestFetchEntriesCumulativeElementCapErrors(t *testing.T) {
 	}
 }
 
+// TestFetchAndAppendEntryCapBeforeAppend pins the relocated total-entry guard:
 // a page whose items would push the accumulated catalogue past maxEntries is
 // rejected BEFORE any of its items are converted or appended, so the decoded
 // page never amplifies into public Entry structs once the budget is spent.

@@ -91,8 +91,8 @@ func TestWriteFilesMarkdownFailureLeavesJSONAndWrapsError(t *testing.T) {
 
 // TestWriteFilesRedactsArrURLCredentials pins the persistence-sink URL
 // sanitization: a credentialed arr deep-link (URL userinfo password plus a
-// credential-like query token) never lands in either half of the 0644 report
-// pair, while the clean host/path link survives clickable and the canonical
+// credential-like query token) never lands in either half of the owner-only
+// report pair, while the clean host/path link survives clickable and the canonical
 // report stays unmutated.
 func TestWriteFilesRedactsArrURLCredentials(t *testing.T) {
 	dir := t.TempDir()

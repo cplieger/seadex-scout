@@ -155,12 +155,17 @@ func writeRow(b *strings.Builder, row *Row) {
 // between row records (the signal context is one report-wide budget), so a
 // shutdown does not spend its grace period synchronously emitting hundreds of
 // row lines; the returned error wraps context.Cause, keeping a routine SIGTERM
-// off main's ERROR alert. Every row-derived string is
+// off main's ERROR alert. Cancellation is also checked before the summary
+// line, so a shutdown that lands before Log is called never emits a
+// complete-looking summary with no rows behind it. Every row-derived string is
 // passed through sanitizeDisplayText (after URL redaction where applicable):
 // slog's JSONHandler escapes C0 controls but emits C1 controls and bidi
 // controls raw, so untrusted titles/groups/tracker strings could otherwise
 // smuggle terminal escapes or visual reordering into raw log/Loki views.
 func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
+	if err := interrupted(ctx, "report log"); err != nil {
+		return err
+	}
 	stamp := r.GeneratedAt.UTC().Format(time.RFC3339)
 	log.Info("report summary",
 		"generated_at", stamp,

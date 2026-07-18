@@ -167,6 +167,42 @@ func TestDedupeKeyBoundsOversizedComponents(t *testing.T) {
 	}
 }
 
+// TestCandidateStableKeyBoundsOversizedComponents pins the size bound on the
+// headline tie-break key: SeaDex admits arbitrarily long URLs (48 MiB pages,
+// up to 512 torrents per entry) and betterCandidate rebuilds the incumbent's
+// key on every equal-rank comparison, so an oversized component set must
+// reduce to a fixed-size hashed identity (boundedJoinParts) instead of
+// materializing large escaped URL copies per comparison - while distinct
+// oversized candidates still key distinctly and headline selection stays
+// order-independent.
+func TestCandidateStableKeyBoundsOversizedComponents(t *testing.T) {
+	oversized := func(tag string) candidate {
+		return candidate{
+			rel: release.Release{Group: "Grp" + tag, Tracker: "Nyaa", Resolution: "1080p", TrackerType: release.TrackerPublic},
+			torrent: seadex.Torrent{
+				Tracker:  "Nyaa",
+				InfoHash: tag,
+				URL:      "https://nyaa.si/view/" + tag + "?pad=" + strings.Repeat("x", maxKeyComponentBytes),
+			},
+		}
+	}
+	a, b := oversized("aaa"), oversized("bbb")
+	keyA, keyB := candidateStableKey(&a), candidateStableKey(&b)
+	if len(keyA) > 128 {
+		t.Errorf("candidateStableKey over an oversized URL = %d bytes, want bounded (hashed component)", len(keyA))
+	}
+	if keyA == keyB {
+		t.Error("distinct oversized candidates must not share a stable key")
+	}
+	forward := []candidate{a, b}
+	reversed := []candidate{b, a}
+	fwd, rev := representative(forward), representative(reversed)
+	if fwd.torrent.InfoHash != rev.torrent.InfoHash {
+		t.Errorf("representative over oversized candidates depends on upstream order: forward picked %q, reversed picked %q",
+			fwd.torrent.InfoHash, rev.torrent.InfoHash)
+	}
+}
+
 func TestRepresentativePrefersResolutionThenPublic(t *testing.T) {
 	higherRes := []candidate{
 		{rel: release.Release{Resolution: "720p", TrackerType: release.TrackerPublic}},

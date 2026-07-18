@@ -110,7 +110,15 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 	}
 	items, err := parseTorznab(body)
 	if err != nil {
-		return nil, &transientUpstreamError{err: err, malformedBody: true}
+		// A syntactically valid Torznab <error> document (upstreamErrorDoc:
+		// bad credentials, a named indexer failure) is a deliberate
+		// upstream-scoped answer, not a garbled body. It stays transient -
+		// the bounded retry budget is unchanged - but never carries the
+		// malformedBody marker, so after exhaustion the harvest latches the
+		// failed scope instead of treating an upstream-wide auth/config
+		// failure as one show's poison result set.
+		_, isErrorDoc := errors.AsType[*upstreamErrorDoc](err)
+		return nil, &transientUpstreamError{err: err, malformedBody: !isErrorDoc}
 	}
 	return items, nil
 }
@@ -126,7 +134,9 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 // response from the status/transport failures: after retry exhaustion the
 // harvest treats a persistently malformed body as specific to one show's
 // result set (malformedUpstreamBody), never as evidence the upstream itself
-// is down.
+// is down. A valid Torznab <error> document (upstreamErrorDoc) is the one
+// 2xx parse failure that stays UNMARKED: it is an upstream-scoped answer
+// (bad credentials, a named indexer failure), not a garbled body.
 type transientUpstreamError struct {
 	err           error
 	retryAfter    time.Duration
@@ -142,7 +152,9 @@ func (e *transientUpstreamError) RetryAfterHint() time.Duration { return e.retry
 // of a successful upstream response: the query reached the upstream and it
 // answered 2xx, so the failure is scoped to the one result set that would not
 // parse, not to the upstream's availability. Status failures (429/5xx,
-// auth/config 4xx) and transport errors never carry the marker.
+// auth/config 4xx), transport errors, and a valid Torznab <error> document
+// delivered with HTTP 200 (an upstream-scoped answer - see upstreamErrorDoc)
+// never carry the marker.
 func malformedUpstreamBody(err error) bool {
 	tue, ok := errors.AsType[*transientUpstreamError](err)
 	return ok && tue.malformedBody

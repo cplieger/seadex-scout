@@ -538,10 +538,16 @@ func betterCandidate(a, b *candidate) bool {
 // equal-rank headline ties independently of upstream order: the same
 // candidate set always selects the same representative, whatever order
 // PocketBase returned the torrents relation in. Delimiters are escaped
-// element-wise (escapeJoinParts) so a field containing the join delimiter
-// cannot make two distinct candidates compare equal.
+// element-wise so a field containing the join delimiter cannot make two
+// distinct candidates compare equal, and the component set is size-bounded
+// (boundedJoinParts, same as dedupeKey's components): betterCandidate rebuilds
+// the incumbent key on every equal-rank comparison across up to 512 torrents
+// per entry, so an unbounded escaped join of attacker-controlled URLs would
+// recreate the memory amplification the dedupe-key bounding removed
+// (CWE-400). Components within the bound keep the exact escaped
+// representation, so ordinary headline selection is unchanged.
 func candidateStableKey(c *candidate) string {
-	return escapeJoinParts([]string{
+	return boundedJoinParts([]string{
 		release.NormalizeGroup(c.rel.Group),
 		strings.ToLower(strings.TrimSpace(c.rel.Tracker)),
 		strings.ToLower(strings.TrimSpace(c.rel.Resolution)),

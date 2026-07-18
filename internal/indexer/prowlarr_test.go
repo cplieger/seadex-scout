@@ -187,6 +187,52 @@ func TestUpstreamSearchRetriesMalformedResponse(t *testing.T) {
 	}
 }
 
+// TestFetchAndParseClassifiesTorznabErrorDocScopeWide pins the harvest
+// failure classification at the parse boundary: a syntactically valid Torznab
+// <error> document (bad credentials, a named indexer failure - an
+// upstream-wide answer delivered with HTTP 200) must NOT carry the show-local
+// malformedBody marker after fetchAndParse wraps it, so after retry
+// exhaustion the harvest latches the failed scope; a truncated/garbled RSS
+// body remains show-local (marker set). Both stay transient, so the bounded
+// retry budget is unchanged either way.
+func TestFetchAndParseClassifiesTorznabErrorDocScopeWide(t *testing.T) {
+	tests := map[string]struct {
+		body          string
+		wantMalformed bool
+	}{
+		"valid torznab error document stays scope-wide": {
+			body:          `<?xml version="1.0" encoding="UTF-8"?><error code="100" description="Incorrect user credentials"/>`,
+			wantMalformed: false,
+		},
+		"truncated RSS stays show-local": {
+			body:          `<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><item><title>trunc`,
+			wantMalformed: true,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/rss+xml")
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
+			_, err := u.fetchAndParse(context.Background(), srv.URL)
+			if err == nil {
+				t.Fatal("fetchAndParse on an undecodable feed returned nil error")
+			}
+			var transient httpx.Transient
+			if !errors.As(err, &transient) || !transient.IsTransient() {
+				t.Errorf("parse failure is not transient (err = %v), want retryable within the bounded budget", err)
+			}
+			if got := malformedUpstreamBody(err); got != tc.wantMalformed {
+				t.Errorf("malformedUpstreamBody(err) = %v, want %v (err = %v)", got, tc.wantMalformed, err)
+			}
+		})
+	}
+}
+
 // TestFetchAndParseRateLimitCarriesRetryAfterHint pins the status path of the
 // single-attempt fetch: a 429 response's Retry-After survives as a positive
 // RetryAfterHint on the returned transient error (asserted directly, no

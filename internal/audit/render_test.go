@@ -3,6 +3,7 @@ package audit
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"reflect"
@@ -324,6 +325,27 @@ func TestReportLogEmitsSummaryAndPerRowLines(t *testing.T) {
 		if rAttrs[k] != v {
 			t.Errorf("row attr %q = %v, want %v", k, rAttrs[k], v)
 		}
+	}
+}
+
+// TestReportLogAlreadyCanceledEmitsNothing pins the pre-summary cancellation
+// guard: a shutdown that cancels the report context after Scout.Report returns
+// but before Log is called must not emit a complete-looking "report summary"
+// line with no rows behind it - Log returns the interruption (wrapping
+// context.Canceled, so main's shutdown classification keeps a routine SIGTERM
+// off the ERROR alert) before any record is emitted.
+func TestReportLogAlreadyCanceledEmitsNothing(t *testing.T) {
+	log, rec := capture.New()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := craftedReport().Log(ctx, log)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Log error = %v, want context.Canceled", err)
+	}
+	if rec.Len() != 0 {
+		t.Errorf("Log emitted %d records on an already-canceled context, want 0", rec.Len())
 	}
 }
 

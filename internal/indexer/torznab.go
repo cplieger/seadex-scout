@@ -242,13 +242,30 @@ type errorXML struct {
 	Description string   `xml:"description,attr"`
 }
 
+// upstreamErrorDoc is parseTorznab's error for a syntactically VALID Torznab
+// <error> document delivered in place of an RSS feed (the errorXML shape: bad
+// credentials, a named indexer failure). It is a deliberate upstream-scoped
+// answer, not a garbled body: fetchAndParse still wraps it transient (the
+// bounded retry budget is unchanged) but never marks it malformedBody, so
+// after retry exhaustion the harvest latches the failed scope instead of
+// treating an upstream-wide auth/config failure as one show's poison result
+// set.
+type upstreamErrorDoc struct {
+	code        string
+	description string
+}
+
+func (e *upstreamErrorDoc) Error() string {
+	return fmt.Sprintf("upstream torznab error code=%s: %s", e.code, e.description)
+}
+
 // parseTorznab decodes a Prowlarr Torznab response into feed items.
 func parseTorznab(body []byte) ([]item, error) {
 	var feed feedXML
 	if err := xml.Unmarshal(body, &feed); err != nil {
 		var e errorXML
 		if xml.Unmarshal(body, &e) == nil {
-			return nil, fmt.Errorf("upstream torznab error code=%s: %s", e.Code, e.Description)
+			return nil, &upstreamErrorDoc{code: e.Code, description: e.Description}
 		}
 		return nil, fmt.Errorf("parse torznab feed: %w", err)
 	}

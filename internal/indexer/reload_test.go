@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cplieger/slogx/capture"
 )
@@ -118,6 +119,100 @@ func TestReloadRecoversDegradationOnUnchangedSnapshot(t *testing.T) {
 	ix.reload(context.Background())
 	if got := rec.Count("indexer feed snapshot stat failed"); got != 2 {
 		t.Errorf("stat-failure warned %d times across two onsets, want 2 (a cleared flag must re-arm the warning); log output:\n%s",
+			got, strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestReloadMemoizedMalformedSnapshotClearsDegradation pins the interaction
+// of the malformed-file memo with the reloadDegraded state machine: once a
+// deterministic malformed snapshot is memoized (failedFile), a transient stat
+// fault and its recovery must NOT defeat the memo — the recovered stat clears
+// only the degradation flag, without rereading the unchanged bad file,
+// without repeating the malformed WARN per request, and without a false
+// "reload recovered" INFO (nothing was reloaded) — while the next stat-fault
+// onset still warns afresh.
+func TestReloadMemoizedMalformedSnapshotClearsDegradation(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(sub, "feed.json")
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash:   map[string]bool{},
+		ByKey:    map[string]bool{},
+		NyaaFeed: []item{{Title: "first", GUID: "https://nyaa.si/view/1"}},
+	})
+	log, rec := capture.New()
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, path)
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+		t.Fatalf("initial feed = %d items, want 1", len(got))
+	}
+
+	// Replace the good snapshot with malformed JSON at a distinct mtime so
+	// the next reload reads and memoizes it (equal-second mtimes must not
+	// accidentally take the unchanged-loaded fast path).
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("write malformed snapshot: %v", err)
+	}
+	distinct := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(path, distinct, distinct); err != nil {
+		t.Fatal(err)
+	}
+	ix.reload(context.Background())
+	if got := rec.Count("indexer feed snapshot malformed"); got != 1 {
+		t.Fatalf("malformed snapshot warned %d times, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+	}
+
+	// Onset: swap the parent directory for a regular file so os.Stat fails
+	// with ENOTDIR (non-ENOENT, root-safe), then recover by restoring the
+	// directory — the snapshot file keeps its inode and mtime throughout.
+	aside := filepath.Join(dir, "sub-aside")
+	blockDir := func() {
+		if err := os.Rename(sub, aside); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(sub, []byte("blocker"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	restoreDir := func() {
+		if err := os.Remove(sub); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(aside, sub); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	blockDir()
+	ix.reload(context.Background())
+	if got := rec.Count("indexer feed snapshot stat failed"); got != 1 {
+		t.Fatalf("stat-failure warned %d times, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+	}
+
+	// Recovery over the memoized bad file: repeated reloads must neither
+	// reread it (no repeated malformed WARN) nor claim a false recovery.
+	restoreDir()
+	ix.reload(context.Background())
+	ix.reload(context.Background())
+	if got := rec.Count("indexer feed snapshot malformed"); got != 1 {
+		t.Errorf("malformed snapshot warned %d times after the stat fault cleared, want still 1 (the memo must hold, no reread); log output:\n%s",
+			got, strings.Join(rec.Messages(), "\n"))
+	}
+	if got := rec.Count("indexer feed snapshot reload recovered"); got != 0 {
+		t.Errorf("reload recovery logged %d times, want 0 (nothing was successfully reloaded); log output:\n%s",
+			got, strings.Join(rec.Messages(), "\n"))
+	}
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
+		t.Errorf("feed = %+v, want the last good snapshot kept", got)
+	}
+
+	// The cleared flag must re-arm the next onset's warning.
+	blockDir()
+	ix.reload(context.Background())
+	if got := rec.Count("indexer feed snapshot stat failed"); got != 2 {
+		t.Errorf("stat-failure warned %d times across two onsets, want 2 (the recovered stat over the memoized file must re-arm the warning); log output:\n%s",
 			got, strings.Join(rec.Messages(), "\n"))
 	}
 }

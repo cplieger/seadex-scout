@@ -81,14 +81,26 @@ func (ix *Indexer) reload(ctx context.Context) {
 	if !ok {
 		return
 	}
-	// A degraded reload must not take the unchanged-snapshot fast path: after
-	// a stat fault recovers, the file may be the already-loaded inode at the
-	// same mtime, so skipping here would leave reloadDegraded set forever —
-	// the recovery INFO never emits and the next onset's warning is
-	// suppressed by the stale flag. Forcing one bounded read clears the state
-	// through the recovery block below; a persistent read fault keeps it
-	// degraded without falsely declaring recovery.
-	if ix.shouldSkipSnapshot(info) && !ix.reloadDegraded {
+	// The memoized malformed snapshot fails deterministically: unchanged
+	// bytes decode the same way on every read, so rereading it would only
+	// repeat the per-request I/O/JSON work and the malformed WARN. The
+	// successful stat that reached this point already proves file access
+	// recovered from any transient stat/read fault, so clear the degradation
+	// flag directly - re-arming the next onset's warning - without a reread
+	// and without the "reload recovered" INFO (nothing was successfully
+	// reloaded; the file is still bad).
+	if ix.matchesFailedFile(info) {
+		ix.reloadDegraded = false
+		return
+	}
+	// A degraded reload must not take the unchanged-loaded-snapshot fast
+	// path: after a stat fault recovers, the file may be the already-loaded
+	// inode at the same mtime, so skipping here would leave reloadDegraded
+	// set forever — the recovery INFO never emits and the next onset's
+	// warning is suppressed by the stale flag. Forcing one bounded read
+	// clears the state through the recovery block below; a persistent read
+	// fault keeps it degraded without falsely declaring recovery.
+	if ix.loadedSnapshotUnchanged(info) && !ix.reloadDegraded {
 		return
 	}
 	snap, ok, memoize := ix.readSnapshot(ctx)
@@ -118,20 +130,26 @@ func (ix *Indexer) reload(ctx context.Context) {
 		"nyaa_feed", len(snap.NyaaFeed), "ab_feed", len(snap.ABFeed))
 }
 
-// shouldSkipSnapshot reports whether the stat'ed snapshot file needs no
-// reload: it is the already-loaded snapshot, or the memoized malformed file,
-// unchanged by the same test - an equal mtime AND os.SameFile identity. Both
-// legs require identity, not just the timestamp (see reload's doc comment):
-// an equal mtime on a DIFFERENT inode is a preserved-timestamp replacement
-// (an atomic rename, a backup restore) and must install or be retried, while
+// loadedSnapshotUnchanged reports whether the stat'ed snapshot file is the
+// already-loaded snapshot, unchanged - an equal mtime AND os.SameFile
+// identity. Identity is required, not just the timestamp (see reload's doc
+// comment): an equal mtime on a DIFFERENT inode is a preserved-timestamp
+// replacement (an atomic rename, a backup restore) and must install, while
 // any mtime CHANGE - including an older one - always reloads.
-func (ix *Indexer) shouldSkipSnapshot(info os.FileInfo) bool {
+func (ix *Indexer) loadedSnapshotUnchanged(info os.FileInfo) bool {
 	ix.mu.RLock()
 	loadedMod, loadedInfo := ix.snapMod, ix.snapInfo
 	ix.mu.RUnlock()
-	if info.ModTime().Equal(loadedMod) && loadedInfo != nil && os.SameFile(info, loadedInfo) {
-		return true
-	}
+	return info.ModTime().Equal(loadedMod) && loadedInfo != nil && os.SameFile(info, loadedInfo)
+}
+
+// matchesFailedFile reports whether the stat'ed snapshot file is the memoized
+// malformed file, unchanged by the same equal-mtime AND os.SameFile identity
+// test as the loaded leg: an unchanged malformed file fails deterministically,
+// so it is never re-read (reload clears only the transient reloadDegraded
+// flag and returns), while any mtime or identity change means new bytes worth
+// retrying.
+func (ix *Indexer) matchesFailedFile(info os.FileInfo) bool {
 	return ix.failedFile != nil && info.ModTime().Equal(ix.failedFile.ModTime()) && os.SameFile(info, ix.failedFile)
 }
 
@@ -141,7 +159,7 @@ func (ix *Indexer) shouldSkipSnapshot(info os.FileInfo) bool {
 // reloadMu already serializes the whole stat/read/install sequence, so no
 // concurrent reload can install in between today, but never re-installing a
 // copy of what is already loaded holds even if the TryLock coalescing changes.
-// Same test as shouldSkipSnapshot's loaded leg: only an equal mtime on the
+// Same test as loadedSnapshotUnchanged: only an equal mtime on the
 // SAME file (os.SameFile identity) skips.
 func (ix *Indexer) installSnapshot(info os.FileInfo, snap *snapshot) bool {
 	ix.mu.Lock()
