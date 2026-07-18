@@ -67,22 +67,33 @@ const (
 	upstreamAB   = "ab"
 )
 
-// Config is the indexer's runtime settings. APIKey (the feed's own gate),
-// ProwlarrAPIKey, and ABPasskey are secrets and are never logged. An empty
-// Nyaa/AnimeBytes URL disables that upstream. ABPasskey is the operator's
-// AnimeBytes passkey, appended to synthesized AB RSS download links (search
-// links go through Prowlarr and need no passkey); empty leaves the AB RSS feed
-// without grabbable links.
-type Config struct {
-	APIKey         string
+// UpstreamConfig is the Prowlarr upstream wiring shared by the feed server
+// (search proxying) and the feed writer (title harvesting) - the one home for
+// the per-tracker vocabulary both halves configure identically. ProwlarrAPIKey
+// and ABPasskey are secrets and are never logged. An empty Nyaa/AnimeBytes URL
+// disables that upstream. ABPasskey is the operator's AnimeBytes passkey,
+// appended to synthesized AB RSS download links (search links go through
+// Prowlarr and need no passkey); empty leaves the AB RSS feed without grabbable
+// links.
+type UpstreamConfig struct {
 	NyaaTorznabURL string
 	ABTorznabURL   string
 	ProwlarrAPIKey string
 	ABPasskey      string
 }
 
+// Config is the indexer server's runtime settings: the embedded shared
+// upstream wiring plus APIKey, the feed's own gate (a secret, never logged).
+type Config struct {
+	APIKey string
+	UpstreamConfig
+}
+
 // Deps are the clients the indexer server needs: an HTTP client for the Prowlarr
-// per-indexer Torznab endpoints a search proxies. The curation set and the
+// per-indexer Torznab endpoints a search proxies. HTTP must be non-nil when any
+// Torznab URL is configured for the server (New wires the upstreams
+// unconditionally, and a search through a nil client panics); only NewFeedWriter
+// accepts a nil HTTP, treating it as harvest-disabled. The curation set and the
 // synthesized RSS feeds are not built here - the compare cycle builds and
 // persists them (see FeedWriter) and the server reads that snapshot - so the
 // server needs no SeaDex or Fribb client of its own.
@@ -133,6 +144,13 @@ type Indexer struct {
 	// stat afterward. A fresh install with no prior snapshot stays silent.
 	// Guarded by reloadMu (set/cleared only inside reload).
 	snapMissing bool
+	// reloadDegraded records that reloads are failing (a stat error or a
+	// read failure of an unchanged-identity file), so the WARN fires once
+	// per degradation onset instead of on every request; cleared with one
+	// INFO recovery line on the next successful snapshot read. The retry
+	// itself is NOT suppressed (both faults can recover without an mtime
+	// change). Guarded by reloadMu (set/cleared only inside reload).
+	reloadDegraded bool
 }
 
 // New builds the Torznab feed server from cfg and deps, wiring one upstream per
@@ -153,7 +171,7 @@ func New(cfg *Config, deps Deps, snapshotPath string) *Indexer {
 	// One upstream per configured Prowlarr Torznab URL. An empty URL means that
 	// tracker is off: it is simply not wired, so the feed never queries it. (The
 	// daemon only starts the feed at all when at least one URL is set.)
-	ix.upstreams = wireUpstreams(deps.HTTP, log, cfg.NyaaTorznabURL, cfg.ABTorznabURL, cfg.ProwlarrAPIKey)
+	ix.upstreams = wireUpstreams(deps.HTTP, log, cfg.UpstreamConfig)
 	// Warm the feed from the last persisted snapshot so a restart serves
 	// immediately rather than empty until the next cycle.
 	ix.reload(context.Background())
@@ -164,13 +182,13 @@ func New(cfg *Config, deps Deps, snapshotPath string) *Indexer {
 // Torznab URL, shared by the server (search proxying) and the feed writer
 // (title harvesting) so both query the exact tracker set the operator
 // configured, with the same client, headers, and retry discipline.
-func wireUpstreams(httpClient *http.Client, log *slog.Logger, nyaaURL, abURL, apiKey string) []*upstream {
+func wireUpstreams(httpClient *http.Client, log *slog.Logger, cfg UpstreamConfig) []*upstream {
 	var ups []*upstream
-	if nyaaURL != "" {
-		ups = append(ups, &upstream{http: httpClient, log: log, name: upstreamNyaa, feed: nyaaURL, apiKey: apiKey})
+	if cfg.NyaaTorznabURL != "" {
+		ups = append(ups, &upstream{http: httpClient, log: log, name: upstreamNyaa, feed: cfg.NyaaTorznabURL, apiKey: cfg.ProwlarrAPIKey})
 	}
-	if abURL != "" {
-		ups = append(ups, &upstream{http: httpClient, log: log, name: upstreamAB, feed: abURL, apiKey: apiKey})
+	if cfg.ABTorznabURL != "" {
+		ups = append(ups, &upstream{http: httpClient, log: log, name: upstreamAB, feed: cfg.ABTorznabURL, apiKey: cfg.ProwlarrAPIKey})
 	}
 	return ups
 }

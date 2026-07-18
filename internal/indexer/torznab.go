@@ -226,10 +226,23 @@ type attrXML struct {
 	Value string `xml:"value,attr"`
 }
 
+// errorXML mirrors a Newznab/Torznab <error> document an upstream can return
+// in place of an RSS feed (bad credentials, a named indexer failure) - the
+// same shape renderError emits on the serving side.
+type errorXML struct {
+	XMLName     xml.Name `xml:"error"`
+	Code        string   `xml:"code,attr"`
+	Description string   `xml:"description,attr"`
+}
+
 // parseTorznab decodes a Prowlarr Torznab response into feed items.
 func parseTorznab(body []byte) ([]item, error) {
 	var feed feedXML
 	if err := xml.Unmarshal(body, &feed); err != nil {
+		var e errorXML
+		if xml.Unmarshal(body, &e) == nil {
+			return nil, fmt.Errorf("upstream torznab error code=%s: %s", e.Code, e.Description)
+		}
 		return nil, fmt.Errorf("parse torznab feed: %w", err)
 	}
 	items := make([]item, 0, len(feed.Channel.Items))

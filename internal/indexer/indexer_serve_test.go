@@ -41,7 +41,7 @@ func TestServeRejectsUnscopedRequest(t *testing.T) {
 // carries Cache-Control/Pragma headers forbidding any cache from retaining the
 // credential-bearing body beyond the request.
 func TestServeMarksResponsesNonCacheable(t *testing.T) {
-	ix := New(&Config{APIKey: "k", ABPasskey: "pk"}, Deps{}, "")
+	ix := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABPasskey: "pk"}}, Deps{}, "")
 	rec := httptest.NewRecorder()
 	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/ab?apikey=k", nil))
 	if rec.Code != http.StatusOK {
@@ -65,7 +65,7 @@ func TestServeMarksResponsesNonCacheable(t *testing.T) {
 func TestRunRefusesEmptyAPIKey(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := New(&Config{ABPasskey: "pk"}, Deps{}, "").Run(ctx)
+	err := New(&Config{UpstreamConfig: UpstreamConfig{ABPasskey: "pk"}}, Deps{}, "").Run(ctx)
 	if err == nil {
 		t.Fatal("Run with empty APIKey returned nil, want a configuration error")
 	}
@@ -136,7 +136,7 @@ func TestQueryTotalUpstreamFailureSetsUpstreamFailed(t *testing.T) {
 	defer srv.Close()
 
 	log, rec := capture.New()
-	ix := New(&Config{ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}, Deps{HTTP: srv.Client(), Logger: log}, "")
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, Deps{HTTP: srv.Client(), Logger: log}, "")
 
 	items, stats := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "ab")
 	if len(items) != 0 {
@@ -165,7 +165,7 @@ func TestServeTotalUpstreamFailureRendersTorznabError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ix := New(&Config{APIKey: "k", NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "pk"},
+	ix := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "pk"}},
 		Deps{HTTP: srv.Client()}, "")
 	rec := httptest.NewRecorder()
 	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?t=tvsearch&q=Frieren&apikey=k", nil))
@@ -202,7 +202,7 @@ func TestQuerySkipsPerEpisodeQuery(t *testing.T) {
 // limit-less request is trimmed to defaultCapsLimit before this cap can bite;
 // see TestQueryFeedDefaultLimit.)
 func TestQueryCapsResults(t *testing.T) {
-	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, Deps{}, "")
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, "")
 	feed := make([]item, maxItems+5)
 	for i := range feed {
 		feed[i] = item{Title: "t", GUID: strconv.Itoa(i)}
@@ -223,7 +223,7 @@ func TestQueryCapsResults(t *testing.T) {
 // honest. The window stays anchored at the newest item (the feed is sorted
 // newest-first), and an explicit limit still wins over the default.
 func TestQueryFeedDefaultLimit(t *testing.T) {
-	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, Deps{}, "")
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, "")
 	feed := make([]item, defaultCapsLimit+50)
 	for i := range feed {
 		feed[i] = item{Title: "t", GUID: strconv.Itoa(i)}
@@ -268,7 +268,7 @@ func TestReloadKeepsFeedOnUnreadableSnapshot(t *testing.T) {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	log, rec := capture.New()
-	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, Deps{Logger: log}, path)
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, path)
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
@@ -308,7 +308,7 @@ func TestQueryCallerCancellationIsNotWarnedAsUpstreamFault(t *testing.T) {
 	defer srv.Close()
 
 	log, rec := capture.New()
-	ix := New(&Config{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}, Deps{HTTP: srv.Client(), Logger: log}, "")
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, Deps{HTTP: srv.Client(), Logger: log}, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

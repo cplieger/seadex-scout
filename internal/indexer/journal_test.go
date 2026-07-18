@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,12 +20,16 @@ import (
 // (the tracker's on switch); abPasskey makes AB releases journalable (persisted
 // GUID-only; the server derives the served links).
 func newTestWriter(path, abPasskey string, abConfigured bool) *FeedWriter {
-	cfg := &FeedWriterConfig{Path: path, ABPasskey: abPasskey}
+	cfg := &FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: abPasskey}}
 	if abConfigured {
 		cfg.ABTorznabURL = "http://prowlarr/2/api"
 	}
 	return NewFeedWriter(cfg, Deps{})
 }
+
+// emptyLedgerJSON is the minimal journal-schema snapshot (an empty but PRESENT
+// seen ledger), the seed that bypasses the first-run baseline in tests.
+const emptyLedgerJSON = `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[],"ab_feed":[]}`
 
 // seedEmptyLedger writes a journal-schema snapshot with an EMPTY seen ledger
 // at path, so the next Rebuild treats every curated torrent as newly curated -
@@ -32,8 +37,7 @@ func newTestWriter(path, abPasskey string, abConfigured bool) *FeedWriter {
 // serve an empty journal).
 func seedEmptyLedger(t *testing.T, path string) {
 	t.Helper()
-	const empty = `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[],"ab_feed":[]}`
-	if err := os.WriteFile(path, []byte(empty), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(emptyLedgerJSON), 0o600); err != nil {
 		t.Fatalf("seed empty ledger: %v", err)
 	}
 }
@@ -371,7 +375,7 @@ func TestRebuildDropsUnknownTracker(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
 	log, rec := capture.New()
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, ABPasskey: "PK", ABTorznabURL: "http://prowlarr/2/api"}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: "http://prowlarr/2/api"}}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -400,7 +404,7 @@ func TestRebuildIdlessABNotCountedAsPasskeySkip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
 	log, rec := capture.New()
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, ABTorznabURL: "http://prowlarr/2/api"}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -481,7 +485,7 @@ func TestRebuildJournalItemShape(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, ABPasskey: "PASSKEY123", ABTorznabURL: "http://prowlarr/2/api"}, Deps{})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PASSKEY123", ABTorznabURL: "http://prowlarr/2/api"}}, Deps{})
 	now := time.Date(2026, time.July, 2, 9, 0, 0, 0, time.UTC)
 	w.now = func() time.Time { return now }
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
@@ -557,5 +561,175 @@ func TestCategoriesFor(t *testing.T) {
 	}
 	if got := categoriesFor(false); len(got) != 1 || got[0] != catAnime {
 		t.Errorf("categoriesFor(series) = %v, want [%d]", got, catAnime)
+	}
+}
+
+// TestRebuildCarriesUncuratedItemStoredRender pins the carry contract for a
+// curated-then-replaced torrent: a journaled item whose torrent has LEFT the
+// current curation set keeps its stored render verbatim (title, download URL,
+// FirstSeen) - it is still a valid release the arrs may grab - instead of
+// being re-rendered or dropped.
+func TestRebuildCarriesUncuratedItemStoredRender(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	first := time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Second)
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{"nyaa:42": true},
+		NyaaFeed: []item{{
+			Title: "Stored Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42",
+			DownloadURL: "https://nyaa.si/download/42.torrent",
+			Key:         "nyaa:42", AniListID: 7,
+			FirstSeen: first, PubDate: first,
+		}},
+	})
+	if err := newTestWriter(path, "", false).Rebuild(context.Background(), nil, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 1 {
+		t.Fatalf("feed = %d items, want 1 (a curated-then-replaced torrent keeps its stored render)", len(snap.NyaaFeed))
+	}
+	got := snap.NyaaFeed[0]
+	if got.Title != "Stored Show - S01 (1080p) [G]" || got.DownloadURL != "https://nyaa.si/download/42.torrent" {
+		t.Errorf("carried item = %+v, want the stored render unchanged", got)
+	}
+	if !got.FirstSeen.Equal(first) {
+		t.Errorf("FirstSeen = %v, want the original %v", got.FirstSeen, first)
+	}
+}
+
+// TestRebuildDropsCarriedABItemWhenPasskeyRemoved pins the carry-side passkey
+// gate: a previously journaled AnimeBytes item whose download link can no
+// longer be built (the operator removed ab_passkey while the item was in the
+// journal window) is dropped from the persisted AB feed - it is no longer
+// grabbable, so carrying it would be dead weight.
+func TestRebuildDropsCarriedABItemWhenPasskeyRemoved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	first := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{"ab:1167293": true},
+		ABFeed: []item{{
+			Title: "Frieren - S01 (BD Remux 1080p) [PMR]",
+			GUID:  "https://animebytes.tv/torrents.php?id=86576&torrentid=1167293",
+			Key:   "ab:1167293", AniListID: 154587,
+			FirstSeen: first, PubDate: first,
+		}},
+	})
+	entries := []seadex.Entry{{
+		AniListID: 154587,
+		Torrents: []seadex.Torrent{{
+			Tracker: "AB", URL: "/torrents.php?id=86576&torrentid=1167293", InfoHash: "<redacted>",
+			IsBest: true, ReleaseGroup: "PMR",
+			Files: []seadex.File{{Length: 1, Name: "Frieren - S01E01 (BD Remux 1080p) [PMR].mkv"}},
+		}},
+	}}
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, Deps{})
+	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if snap := readSnapshotFile(t, path); len(snap.ABFeed) != 0 {
+		t.Errorf("ab feed = %+v, want empty (no passkey, the carried item is no longer grabbable)", snap.ABFeed)
+	}
+}
+
+// TestRebuildDropsKeylessCarriedItem pins carryJournal's defensive drop of a
+// pre-journal item (no Key / no FirstSeen, e.g. a hand-edited snapshot that
+// kept the seen ledger but stripped an item's bookkeeping): it leaves the
+// journal instead of being carried forever un-prunable.
+func TestRebuildDropsKeylessCarriedItem(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	const seeded = `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Title":"orphan","GUID":"https://nyaa.si/view/9"}],"ab_feed":[]}`
+	if err := os.WriteFile(path, []byte(seeded), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{}).Rebuild(context.Background(), nil, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 {
+		t.Errorf("feed = %+v, want empty (a keyless pre-journal item cannot be carried: it could never be pruned or re-rendered)", snap.NyaaFeed)
+	}
+}
+
+// TestRebuildSkipsTitlelessTorrentAsUnresolvable pins the unresolvable
+// accounting: a newly curated torrent with a parseable tracker key but no
+// files and no release group synthesizes no title at all, so it is excluded
+// from the journal (an arr cannot parse a title-less item), counted on the
+// snapshot log line as skipped_unresolvable (the signal that an upstream
+// data-shape change is shrinking the feed), and its identity still enters the
+// seen ledger so it can never later re-enter as new.
+func TestRebuildSkipsTitlelessTorrentAsUnresolvable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	entries := []seadex.Entry{{
+		AniListID: 7,
+		Torrents:  []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/7", IsBest: true}},
+	}}
+	log, rec := capture.New()
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 0 {
+		t.Errorf("feed = %+v, want empty (a title-less item cannot be parsed by an arr)", snap.NyaaFeed)
+	}
+	if !snap.Seen["nyaa:7"] {
+		t.Errorf("seen ledger missing nyaa:7: %v", snap.Seen)
+	}
+	unresolvable := int64(-1)
+	for _, r := range rec.Records() {
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "skipped_unresolvable" {
+				unresolvable = a.Value.Int64()
+			}
+			return true
+		})
+	}
+	if unresolvable != 1 {
+		t.Errorf("skipped_unresolvable = %d, want 1; log:\n%s", unresolvable, strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestRebuildUnknownTrackerWithHashSilentlyIgnored pins newJournalItem's
+// tail-tracker branch for a torrent that DOES carry a stable identity: an
+// AnimeTosho/RuTracker release with a valid info hash reaches the journal
+// logic (unlike an id-less tail torrent, which has no identity at all), is
+// silently ignored - never counted unresolvable, since the tail is expected -
+// and its hash is still folded into the seen ledger.
+func TestRebuildUnknownTrackerWithHashSilentlyIgnored(t *testing.T) {
+	const hash = "143ed15e5e3df072ae91adaeb149973a887590dd"
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	entries := []seadex.Entry{{
+		AniListID: 5,
+		Torrents: []seadex.Torrent{{
+			Tracker: "AnimeTosho", URL: "https://animetosho.org/view/1", InfoHash: hash, IsBest: true,
+			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
+		}},
+	}}
+	log, rec := capture.New()
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 0 || len(snap.ABFeed) != 0 {
+		t.Errorf("unknown tracker leaked into a feed: nyaa=%d ab=%d", len(snap.NyaaFeed), len(snap.ABFeed))
+	}
+	if !snap.Seen[hash] {
+		t.Errorf("seen ledger missing the hash identity: %v", snap.Seen)
+	}
+	unresolvable := int64(-1)
+	for _, r := range rec.Records() {
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "skipped_unresolvable" {
+				unresolvable = a.Value.Int64()
+			}
+			return true
+		})
+	}
+	if unresolvable != 0 {
+		t.Errorf("skipped_unresolvable = %d, want 0 (the tail is silently ignored, not an upstream fault signal)", unresolvable)
 	}
 }

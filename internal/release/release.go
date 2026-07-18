@@ -119,11 +119,26 @@ const (
 	codecX264 = "x264"
 )
 
-// x265Tokens / x264Tokens are the codec markers detected in names.
+// x265Tokens / x264Tokens are the codec markers accepted in the authoritative
+// MediaInfo codec value (canonicalCodec).
 // The x265 family takes precedence when input contains markers from both families.
 var (
 	x265Tokens = []string{codecX265, "h265", "h.265", "hevc"}
 	x264Tokens = []string{codecX264, "h264", "h.264", "avc"}
+)
+
+// x265TextTokens / x264TextTokens are the codec markers detected in release
+// text by substring (compact spellings such as "BDx265" are real in the live
+// catalogue, so no boundary is applied). The dotted spellings are excluded
+// here and matched by reDottedX265/reDottedX264 instead, which require a
+// non-alphanumeric left boundary: without it a title ending in "h" followed
+// by a dot-delimited episode number ("Bleach.264.1080p") contains the
+// substring "h.264" and misclassifies the release as an x264 encode.
+var (
+	x265TextTokens = []string{codecX265, "h265", "hevc"}
+	x264TextTokens = []string{codecX264, "h264", "avc"}
+	reDottedX265   = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])h\.265`)
+	reDottedX264   = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])h\.264`)
 )
 
 // normalizeEvidence lowercases evidence text and replaces underscore
@@ -222,10 +237,10 @@ func detectCodec(text, videoCodec string) string {
 	if c := canonicalCodec(strings.ToLower(strings.TrimSpace(videoCodec))); c != "" {
 		return c
 	}
-	if containsAny(text, x265Tokens) {
+	if containsAny(text, x265TextTokens) || reDottedX265.MatchString(text) {
 		return codecX265
 	}
-	if containsAny(text, x264Tokens) {
+	if containsAny(text, x264TextTokens) || reDottedX264.MatchString(text) {
 		return codecX264
 	}
 	return ""

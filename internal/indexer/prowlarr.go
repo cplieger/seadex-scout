@@ -175,7 +175,8 @@ func (u *upstream) filterDownloadURLs(items []item) []item {
 	}
 	if dropped > 0 {
 		u.log.Warn("upstream items dropped: download URL not on the Prowlarr endpoint origin",
-			"upstream", u.name, "dropped", dropped, "kept", len(out))
+			"upstream", u.name, "dropped", dropped, "kept", len(out),
+			"expected_origin", feedURL.Scheme+"://"+feedURL.Host)
 	}
 	return out
 }

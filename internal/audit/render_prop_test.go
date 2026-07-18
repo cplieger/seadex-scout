@@ -78,10 +78,7 @@ func TestSanitizeDisplayTextPropertyBoundedAndIdempotent(t *testing.T) {
 		s := rapid.String().Draw(t, "s")
 		got := sanitizeDisplayText(s)
 		for _, r := range got {
-			if (r < 0x20 && r != '\n' && r != '\r') || r == 0x7f || (r >= 0x80 && r <= 0x9f) ||
-				r == '\u061c' || r == '\u200e' || r == '\u200f' ||
-				(r >= '\u202a' && r <= '\u202e') || (r >= '\u2066' && r <= '\u2069') ||
-				r == '\u2028' || r == '\u2029' {
+			if isUnsafeForDisplay(r) {
 				t.Errorf("sanitizeDisplayText(%q) = %q, contains unsafe rune %U", s, got, r)
 			}
 		}
@@ -94,8 +91,9 @@ func TestSanitizeDisplayTextPropertyBoundedAndIdempotent(t *testing.T) {
 	})
 }
 
-// isUnsafeForDisplay mirrors the property's hardcoded unsafe-rune set for the
-// safe-string-unchanged check.
+// isUnsafeForDisplay is the property's hardcoded unsafe-rune set (kept
+// independent of the production textsafe classifier), shared by the
+// bounded-output and safe-string-unchanged checks.
 func isUnsafeForDisplay(r rune) bool {
 	return (r < 0x20 && r != '\n' && r != '\r') || r == 0x7f || (r >= 0x80 && r <= 0x9f) ||
 		r == '\u061c' || r == '\u200e' || r == '\u200f' ||

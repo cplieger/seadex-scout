@@ -98,7 +98,7 @@ func TestHarvestMatchesABByTorrentID(t *testing.T) {
 	info := func(int) EntryInfo { return EntryInfo{Title: "Frieren: Beyond Journey's End", SeasonTvdb: 1} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		Deps{HTTP: srv.Client()})
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -148,7 +148,7 @@ func TestHarvestMatchesNyaaByViewID(t *testing.T) {
 	info := func(int) EntryInfo { return EntryInfo{Title: "Frieren", SeasonTvdb: 1} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		Deps{HTTP: srv.Client()})
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -192,7 +192,7 @@ func TestHarvestCachePersistsAcrossRebuilds(t *testing.T) {
 	info := func(int) EntryInfo { return EntryInfo{Title: "Frieren", SeasonTvdb: 1} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		Deps{HTTP: srv.Client()})
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("first Rebuild: %v", err)
@@ -226,7 +226,7 @@ func TestHarvestBudgetCapEnforced(t *testing.T) {
 	info := func(alID int) EntryInfo { return EntryInfo{Title: fmt.Sprintf("Show %d", alID)} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		Deps{HTTP: srv.Client()})
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -257,12 +257,12 @@ func TestHarvestQueryFailureKeepsSynthetic(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		Deps{HTTP: srv.Client(), Logger: log})
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
-	if !rec.Contains("indexer title harvest query failed; keeping synthesized titles") {
+	if !rec.Contains("indexer title harvest query failed; skipping this upstream's remaining shows this rebuild") {
 		t.Errorf("harvest failure not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 	snap := readSnapshotFile(t, path)
@@ -288,7 +288,7 @@ func TestHarvestUnconfiguredTrackerNeverQueried(t *testing.T) {
 	info := func(int) EntryInfo { return EntryInfo{Title: "Show", SeasonTvdb: 1} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		Deps{HTTP: srv.Client()})
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -323,7 +323,7 @@ func TestHarvestPagesNyaaByOffset(t *testing.T) {
 	info := func(int) EntryInfo { return EntryInfo{Title: "Show", SeasonTvdb: 1} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		Deps{HTTP: srv.Client()})
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -340,5 +340,120 @@ func TestHarvestPagesNyaaByOffset(t *testing.T) {
 	snap := readSnapshotFile(t, path)
 	if snap.Titles["nyaa:42"] != "Show S01 1080p BluRay [G]" {
 		t.Errorf("titles = %v, want the second-page match cached", snap.Titles)
+	}
+}
+
+// TestHarvestMatchesNyaaByInfoHash pins the info-hash arm of the harvest
+// match (the documented secondary identity): a Prowlarr result whose page
+// URLs identify no tracker (a mirror/foreign host) still matches the pending
+// journal item by its torznab infohash attr - normalized through the same
+// validInfoHash the journal side used - and its real title is cached and
+// served.
+func TestHarvestMatchesNyaaByInfoHash(t *testing.T) {
+	const hash = "143ed15e5e3df072ae91adaeb149973a887590dd"
+	_, srv := newHarvestMock(func(int) string {
+		return torznabBody(`<item><title>Show S01 1080p BluRay [G]</title>` +
+			`<guid>https://mirror.example/release/999</guid><comments>https://mirror.example/release/999</comments>` +
+			`<enclosure url="http://prowlarr:9696/1/download?link=abc" length="1" type="application/x-bittorrent"/>` +
+			`<torznab:attr name="infohash" value="` + strings.ToUpper(hash) + `"/></item>`)
+	})
+	defer srv.Close()
+
+	entries := []seadex.Entry{{
+		AniListID: 7,
+		Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://nyaa.si/view/42", InfoHash: hash, IsBest: true, ReleaseGroup: "G",
+			Files: []seadex.File{
+				{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"},
+				{Length: 1, Name: "Show - S01E02 (1080p) [G].mkv"},
+			},
+		}},
+	}}
+	info := func(int) EntryInfo { return EntryInfo{Title: "Show", SeasonTvdb: 1} }
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+		Deps{HTTP: srv.Client()})
+	if err := w.Rebuild(context.Background(), entries, info); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if snap.Titles["nyaa:42"] != "Show S01 1080p BluRay [G]" {
+		t.Errorf("titles = %v, want the hash-matched harvested title under nyaa:42", snap.Titles)
+	}
+	if len(snap.NyaaFeed) != 1 || snap.NyaaFeed[0].Title != "Show S01 1080p BluRay [G]" {
+		t.Errorf("feed = %+v, want the harvested title served", snap.NyaaFeed)
+	}
+}
+
+// TestHarvestSingleShowPagingStopsAtBudget pins the politeness bound on the
+// paging leg: ONE show whose Nyaa search keeps returning full, non-matching
+// pages drains the whole harvestSearchBudget through offset paging and then
+// stops - the global budget bounds pages, not just shows - leaving the item
+// synthetic for the next rebuild to retry.
+func TestHarvestSingleShowPagingStopsAtBudget(t *testing.T) {
+	filler := make([]string, 0, harvestPageSize)
+	for i := range harvestPageSize {
+		filler = append(filler, torznabItem(fmt.Sprintf("Other %d", i), fmt.Sprintf("https://nyaa.si/view/%d", 9000+i)))
+	}
+	mock, srv := newHarvestMock(func(int) string { return torznabBody(filler...) })
+	defer srv.Close()
+
+	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv", "Show - S01E02 (1080p) [G].mkv")}
+	info := func(int) EntryInfo { return EntryInfo{Title: "Show", SeasonTvdb: 1} }
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+		Deps{HTTP: srv.Client()})
+	if err := w.Rebuild(context.Background(), entries, info); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if mock.calls() != harvestSearchBudget {
+		t.Errorf("harvest queries = %d, want the budget %d (paging one show must respect the global budget)", mock.calls(), harvestSearchBudget)
+	}
+	if snap := readSnapshotFile(t, path); len(snap.Titles) != 0 {
+		t.Errorf("titles = %v, want empty (nothing matched)", snap.Titles)
+	}
+}
+
+// TestMatchHarvestSkipsEmptyTitlesAndKeepsFirstTitle pins two guards of the
+// pure match step: a matched result with an empty/whitespace title caches
+// nothing (an empty served title would be worse than the synthesized one),
+// and an already-cached key is never overwritten (torrents are immutable, so
+// the first harvested title stands).
+func TestMatchHarvestSkipsEmptyTitlesAndKeepsFirstTitle(t *testing.T) {
+	index := map[string]string{"nyaa:1": "nyaa:1", "nyaa:2": "nyaa:2"}
+	titles := map[string]string{"nyaa:2": "First Title"}
+	results := []item{
+		{Title: "   ", InfoURL: "https://nyaa.si/view/1"},
+		{Title: "Second Title", InfoURL: "https://nyaa.si/view/2"},
+	}
+	if n := matchHarvest(results, index, titles); n != 0 {
+		t.Errorf("matchHarvest = %d matches, want 0", n)
+	}
+	if _, ok := titles["nyaa:1"]; ok {
+		t.Errorf("empty-title result cached: %v", titles)
+	}
+	if titles["nyaa:2"] != "First Title" {
+		t.Errorf("cached title overwritten: %v (the first harvested title stands)", titles)
+	}
+}
+
+// TestMatchHarvestFailsClosedOnContradictoryIdentity pins resolveHarvestKey's
+// fail-closed rule (the same one the search curation match applies in
+// acceptScopedKeys): a result whose comments and guid page URLs name two
+// DIFFERENT curated releases is an untrusted response and must title nothing -
+// neither journal item may cache its attacker-chosen title.
+func TestMatchHarvestFailsClosedOnContradictoryIdentity(t *testing.T) {
+	index := map[string]string{"nyaa:1": "nyaa:1", "nyaa:2": "nyaa:2"}
+	titles := map[string]string{}
+	results := []item{
+		{Title: "Tampered Title", InfoURL: "https://nyaa.si/view/1", GUID: "https://nyaa.si/view/2"},
+	}
+	if n := matchHarvest(results, index, titles); n != 0 {
+		t.Errorf("matchHarvest = %d matches, want 0 (contradictory identity fails closed)", n)
+	}
+	if len(titles) != 0 {
+		t.Errorf("contradictory-identity result cached a title: %v", titles)
 	}
 }

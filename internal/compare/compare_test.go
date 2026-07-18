@@ -685,3 +685,43 @@ func TestCompareCurationWarnedBestExcluded(t *testing.T) {
 		}
 	})
 }
+
+func TestCompareFindingSeasonField(t *testing.T) {
+	entry := seadex.Entry{AniListID: 210, Torrents: []seadex.Torrent{
+		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/210"},
+	}}
+
+	t.Run("season-scoped finding carries the mapped TVDB season", func(t *testing.T) {
+		item := &library.Item{Title: "Seasoned", Groups: []string{"erai-raws"}, SeasonGroups: map[int][]string{2: {"erai-raws"}}}
+		m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 2}}
+		got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+		if len(got) != 1 {
+			t.Fatalf("expected 1 finding, got %d", len(got))
+		}
+		if got[0].Season != 2 {
+			t.Errorf("Season = %d, want the mapped TVDB season 2", got[0].Season)
+		}
+	})
+
+	t.Run("negative Fribb season clamps to 0", func(t *testing.T) {
+		item := &library.Item{Title: "Negative Season", Arr: library.ArrSonarr, Groups: []string{"erai-raws"}, SeasonGroups: map[int][]string{1: {"erai-raws"}}}
+		m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{Type: "TV", SeasonTvdb: -1}}
+		got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+		if len(got) != 1 {
+			t.Fatalf("expected 1 whole-series finding, got %d", len(got))
+		}
+		if got[0].Season != 0 {
+			t.Errorf("Season = %d, want 0 (a negative season.tvdb must clamp, not leak into the slog field)", got[0].Season)
+		}
+	})
+}
+
+func TestDedupeKeyABLinkOrderIndependent(t *testing.T) {
+	abA := ReleaseLink{Tracker: "AB", URL: "https://animebytes.tv/torrents.php?id=9&torrentid=10"}
+	abB := ReleaseLink{Tracker: "AB", URL: "https://animebytes.tv/torrents.php?id=9&torrentid=11"}
+	forward := &Finding{AniListID: 42, Status: StatusBetter, InfoHash: "hash1", Links: []ReleaseLink{abA, abB}}
+	reversed := &Finding{AniListID: 42, Status: StatusBetter, InfoHash: "hash1", Links: []ReleaseLink{abB, abA}}
+	if dedupeKey(forward) != dedupeKey(reversed) {
+		t.Errorf("dedupe key must not depend on AB link order: %q vs %q", dedupeKey(forward), dedupeKey(reversed))
+	}
+}

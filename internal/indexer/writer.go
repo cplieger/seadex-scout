@@ -52,21 +52,19 @@ type snapshot struct {
 }
 
 // FeedWriterConfig configures NewFeedWriter. Path is where the snapshot is
-// persisted (config.DefaultIndexerFeedPath in production). ABPasskey gates
-// which AnimeBytes releases are journalable (a secret; empty leaves
-// AnimeBytes without grabbable RSS links) - the writer never persists it: AB
-// items are stored GUID-only and the server derives their served download
-// links from its own configured passkey (see rebuildABDownloadURLs). The
-// Torznab URLs and Prowlarr key mirror the server's Config: an empty URL is
-// that tracker's off switch (its journal is neither built nor persisted), and
-// the configured upstreams also power the title harvest (see harvest.go), so
-// the writer queries exactly the trackers the server proxies.
+// persisted (config.DefaultIndexerFeedPath in production). The embedded
+// UpstreamConfig mirrors the server's Config - the shared upstream vocabulary
+// has one home so the writer queries exactly the trackers the server proxies.
+// ABPasskey gates which AnimeBytes releases are journalable (a secret; empty
+// leaves AnimeBytes without grabbable RSS links) - the writer never persists
+// it: AB items are stored GUID-only and the server derives their served
+// download links from its own configured passkey (see rebuildABDownloadURLs).
+// An empty Torznab URL is that tracker's off switch (its journal is neither
+// built nor persisted), and the configured upstreams also power the title
+// harvest (see harvest.go).
 type FeedWriterConfig struct {
-	Path           string
-	ABPasskey      string
-	NyaaTorznabURL string
-	ABTorznabURL   string
-	ProwlarrAPIKey string
+	Path string
+	UpstreamConfig
 }
 
 // FeedWriter builds the feed snapshot from a SeaDex fetch and persists it
@@ -107,7 +105,7 @@ func NewFeedWriter(cfg *FeedWriterConfig, deps Deps) *FeedWriter {
 		abConfigured: abConfigured,
 	}
 	if deps.HTTP != nil {
-		w.upstreams = wireUpstreams(deps.HTTP, log, cfg.NyaaTorznabURL, cfg.ABTorznabURL, cfg.ProwlarrAPIKey)
+		w.upstreams = wireUpstreams(deps.HTTP, log, cfg.UpstreamConfig)
 	}
 	return w
 }

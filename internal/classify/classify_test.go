@@ -157,3 +157,54 @@ func TestTorrentPrimaryPayloadIgnoresSmallExtraMarker(t *testing.T) {
 		t.Errorf("Torrent() resolution = %q, want 1080p from the primary payload", got.Resolution)
 	}
 }
+
+// TestFallbackPrecedence pins the shared empty-recommendation precedence at
+// its defining site: theoretical beats incomplete - the one order compare's
+// emptyResult and audit's rowQualifier both map their vocabulary from.
+func TestFallbackPrecedence(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry seadex.Entry
+		want  EntryFallback
+	}{
+		{"theoretical only", seadex.Entry{TheoreticalBest: "remux"}, FallbackTheoretical},
+		{"theoretical wins over incomplete", seadex.Entry{TheoreticalBest: "remux", Incomplete: true}, FallbackTheoretical},
+		{"incomplete only", seadex.Entry{Incomplete: true}, FallbackIncomplete},
+		{"neither flag", seadex.Entry{}, FallbackNone},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Fallback(&tt.entry); got != tt.want {
+				t.Errorf("Fallback(%+v) = %v, want %v", tt.entry, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestABVisibleAdapterGatesOnRawEvidence pins the adapter's policy surface:
+// the operator toggle admits everything; with the toggle off an AB label or
+// an AB host in the RAW upstream URL hides the torrent, an absolute public
+// URL stays visible, an empty URL carries no host evidence to cross-check
+// (visible), and a hidden-host form hides conservatively.
+func TestABVisibleAdapterGatesOnRawEvidence(t *testing.T) {
+	tests := []struct {
+		name    string
+		torrent seadex.Torrent
+		include bool
+		want    bool
+	}{
+		{"AB label hidden when off", seadex.Torrent{Tracker: "AB", URL: "/torrents.php?id=1&torrentid=2"}, false, false},
+		{"AB label visible when on", seadex.Torrent{Tracker: "AB", URL: "/torrents.php?id=1&torrentid=2"}, true, true},
+		{"mislabeled AB URL hidden when off", seadex.Torrent{Tracker: "Nyaa", URL: "https://animebytes.tv/torrents.php?id=1"}, false, false},
+		{"public tracker with absolute URL visible when off", seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}, false, true},
+		{"empty URL carries no host evidence and stays visible", seadex.Torrent{Tracker: "Nyaa", URL: ""}, false, true},
+		{"hidden-host URL form hidden conservatively when off", seadex.Torrent{Tracker: "Nyaa", URL: "animebytes.tv:443/torrents.php?id=1"}, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ABVisible(&tt.torrent, tt.include); got != tt.want {
+				t.Errorf("ABVisible(%q, %q, %v) = %v, want %v", tt.torrent.Tracker, tt.torrent.URL, tt.include, got, tt.want)
+			}
+		})
+	}
+}

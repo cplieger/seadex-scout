@@ -5,12 +5,12 @@ import (
 	"testing"
 )
 
-// TestFlexInt_nonIntegerStringDecodesZero pins the string branch's
-// ParseFloat-into-setNumber funnel on the rejecting side: a validly-quoted
-// fractional string ("12.5") parses but fails setNumber's integrality
-// invariant, decoding to 0 (a tolerated placeholder) rather than erroring or
+// TestFlexInt_nonIntegerStringDecodesZero pins the tolerant number-or-string
+// decode (jsonx.TolerantZero) on the rejecting side: a validly-quoted
+// fractional string ("12.5") is a valid float form but fails the integrality
+// gate, decoding to 0 (a tolerated placeholder) rather than erroring or
 // truncating to 12 — exactly like the bare JSON number 12.5 (the accepting
-// side of the same funnel, "9.0" → 9, is pinned in TestFlexInt_UnmarshalJSON).
+// side, "9.0" → 9, is pinned in TestFlexInt_UnmarshalJSON).
 func TestFlexInt_nonIntegerStringDecodesZero(t *testing.T) {
 	var f flexInt
 	if err := f.UnmarshalJSON([]byte(`"12.5"`)); err != nil {
@@ -21,8 +21,8 @@ func TestFlexInt_nonIntegerStringDecodesZero(t *testing.T) {
 	}
 }
 
-// TestFlexInt_malformedStringErrors pins that the string branch propagates a
-// JSON syntax error (an unterminated string) instead of tolerating it.
+// TestFlexInt_malformedStringErrors pins that a malformed JSON string
+// propagates a syntax error (an unterminated string) instead of tolerating it.
 func TestFlexInt_malformedStringErrors(t *testing.T) {
 	var f flexInt
 	if err := f.UnmarshalJSON([]byte(`"unterminated`)); err == nil {
@@ -92,7 +92,7 @@ func TestParseFribb_mixedImdbArrayKeepsRecord(t *testing.T) {
 }
 
 // TestParseFribb_fractionalAndNegativeIDsAbsent pins the record-level
-// consequence of setNumber's validity invariant: a fractional id decodes as
+// consequence of the tolerant decode's validity invariant: a fractional id decodes as
 // absent (not truncated - 9.9 truncated to 9 would point at a different
 // anime) and a negative id decodes as absent (it must not count toward the
 // arr-identifier acceptance floor), while both records survive.
@@ -205,7 +205,7 @@ func TestOffsetPair_malformedObjectTolerated(t *testing.T) {
 
 // TestFlexString_malformedStringErrors pins that the string branch propagates
 // a JSON syntax error (an unterminated string) instead of tolerating it,
-// matching the sibling flexInt string-branch contract.
+// matching the sibling flexInt malformed-string contract.
 func TestFlexString_malformedStringErrors(t *testing.T) {
 	var s flexString
 	if err := s.UnmarshalJSON([]byte(`"unterminated`)); err == nil {

@@ -402,7 +402,7 @@ func TestParseLogLevelWarnsOnUnrecognizedValue(t *testing.T) {
 	}
 	// Field-name-only: the rejected value may be an expanded ${VAR} secret and
 	// must never ride the warning (h-f13).
-	if recordHasAttr(rec, "value", "verbose") {
+	if anyAttrContains(rec, "verbose") {
 		t.Errorf("parseLogLevel warning echoes the rejected value: %v", rec.Messages())
 	}
 }
@@ -431,7 +431,7 @@ func TestParseLogFormatWarnsOnUnrecognizedValue(t *testing.T) {
 			}
 			// Field-name-only: the rejected value may be an expanded ${VAR}
 			// secret and must never ride the warning (h-f13).
-			if tt.wantWarn && recordHasAttr(rec, "value", "txt") {
+			if tt.wantWarn && anyAttrContains(rec, "txt") {
 				t.Errorf("parseLogFormat warning echoes the rejected value: %v", rec.Messages())
 			}
 			if !tt.wantWarn && rec.Contains("unrecognized log.format") {
@@ -577,6 +577,37 @@ func TestValidateIndexerProwlarrKeyWarning(t *testing.T) {
 	})
 }
 
+// TestValidateIndexerHalfConfiguredInfo pins the half-configuration signal:
+// indexer secrets set without any torznab URL log an Info naming the missing
+// URLs (the feed would otherwise silently not start), while a fully-empty
+// indexer section stays silent. Info, not Warn - deliberately parked keys
+// must not raise Loki alert noise.
+func TestValidateIndexerHalfConfiguredInfo(t *testing.T) {
+	base := Config{RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k"}
+
+	t.Run("keys without torznab url log info", func(t *testing.T) {
+		rec := capture.Default(t)
+		c := base
+		c.IndexerAPIKey = "fk"
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if !rec.Contains("indexer keys are set but no torznab url is configured") {
+			t.Errorf("Validate() log = %v, want the half-configured indexer info", rec.Messages())
+		}
+	})
+	t.Run("empty indexer section stays silent", func(t *testing.T) {
+		rec := capture.Default(t)
+		c := base
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if rec.Contains("indexer keys are set but no torznab url is configured") {
+			t.Errorf("Validate() log = %v, want no half-configured indexer info", rec.Messages())
+		}
+	})
+}
+
 // TestValidateIndexerShortFeedKeyWarning pins the warn-only strength floor on
 // indexer.feed_api_key: a key under 16 characters warns (it gates the
 // AnimeBytes-passkey-bearing feed), a strong key stays silent, and the key
@@ -599,7 +630,7 @@ func TestValidateIndexerShortFeedKeyWarning(t *testing.T) {
 			t.Errorf("Validate() log = %v, want the short feed_api_key warning", rec.Messages())
 		}
 		corpus := strings.Join(rec.Messages(), "\n")
-		if strings.Contains(corpus, shortKey) || recordHasAttr(rec, "value", shortKey) {
+		if strings.Contains(corpus, shortKey) || anyAttrContains(rec, shortKey) {
 			t.Errorf("Validate() log leaks the key value: %v", rec.Messages())
 		}
 	})
@@ -1132,6 +1163,56 @@ func TestValidateWarnsOnCredentialBearingTorznabURL(t *testing.T) {
 	})
 }
 
+// TestValidateWarnsOnCredentialBearingArrURL pins Validate's credential-embedding
+// arr-URL diagnostic: a credential-like query parameter or userinfo in
+// sonarr.url or radarr.url fires the warning naming ONLY the field (never the
+// credential-bearing URL, which the warning exists to keep out of
+// library-walk-failure logs), and clean URLs stay silent.
+func TestValidateWarnsOnCredentialBearingArrURL(t *testing.T) {
+	const warnMsg = "arr url embeds a credential-like query parameter or userinfo"
+
+	t.Run("apikey query param warns naming the sonarr field", func(t *testing.T) {
+		const cred = "leaked-arr-cred-sentinel"
+		rec := capture.Default(t)
+		c := Config{RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989?apikey=" + cred, SonarrAPIKey: "k"}
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if !rec.Contains(warnMsg) || !recordHasAttr(rec, "field", "sonarr.url") {
+			t.Errorf("Validate() log = %v, want the credential warning naming sonarr.url", rec.Messages())
+		}
+		corpus := strings.Join(rec.Messages(), "\n")
+		if strings.Contains(corpus, cred) || anyAttrContains(rec, cred) {
+			t.Errorf("Validate() log leaks the credential value: %v", rec.Messages())
+		}
+	})
+	t.Run("userinfo credential warns naming the radarr field", func(t *testing.T) {
+		const cred = "arr-userinfo-pw-sentinel"
+		rec := capture.Default(t)
+		c := Config{RunMode: RunModeDaemon, RadarrURL: "http://user:" + cred + "@radarr:7878", RadarrAPIKey: "k"}
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if !rec.Contains(warnMsg) || !recordHasAttr(rec, "field", "radarr.url") {
+			t.Errorf("Validate() log = %v, want the credential warning naming radarr.url", rec.Messages())
+		}
+		corpus := strings.Join(rec.Messages(), "\n")
+		if strings.Contains(corpus, cred) || anyAttrContains(rec, cred) {
+			t.Errorf("Validate() log leaks the userinfo credential value: %v", rec.Messages())
+		}
+	})
+	t.Run("clean arr urls stay silent", func(t *testing.T) {
+		rec := capture.Default(t)
+		c := Config{RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k"}
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if rec.Contains(warnMsg) {
+			t.Errorf("Validate() log = %v, want no credential warning for clean urls", rec.Messages())
+		}
+	})
+}
+
 // anyAttrContains reports whether ANY attribute on ANY captured record - not
 // just one with a known key - carries sub in its string form. recordHasAttr
 // keys on a single attribute name, so a regression that logs a credential
@@ -1168,5 +1249,49 @@ func TestToConfigInfoOnDisabledSonarrWithKey(t *testing.T) {
 	}
 	if !rec.Contains("sonarr.api_key is set but sonarr.enabled is false") {
 		t.Errorf("toConfig log = %v, want the disabled-sonarr-with-key info", rec.Messages())
+	}
+}
+
+// TestLoadEmptyOrCommentOnlyConfig pins Load's contract for a config file
+// that exists but carries no YAML document (an empty file, or comments only):
+// the load succeeds on the pure defaults baseline (RunMode daemon, default
+// poll interval, default report dir) and the failure surfaces at Validate
+// with the no-arr error, so a `touch`ed-but-never-filled config fails loudly
+// with an actionable message instead of a parse error or a silent half-boot.
+// This is the one Load path where the yaml document node is the zero Node
+// (Decoder.Decode returns io.EOF), exercising checkSingleDocument's
+// first-decode-error branch.
+func TestLoadEmptyOrCommentOnlyConfig(t *testing.T) {
+	tests := map[string]string{
+		"empty file":        "",
+		"comment-only file": "# fill me in\n\n# see config.example.yaml\n",
+	}
+	for name, content := range tests {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load() = %v, want nil (a document-less file loads the defaults)", err)
+			}
+			if c.RunMode != RunModeDaemon {
+				t.Errorf("RunMode = %q, want default %q", c.RunMode, RunModeDaemon)
+			}
+			if c.PollInterval != DefaultPollInterval || c.PollExternal {
+				t.Errorf("PollInterval = %v external=%v, want built-in default %v", c.PollInterval, c.PollExternal, DefaultPollInterval)
+			}
+			if c.ReportDir != DefaultReportDir {
+				t.Errorf("ReportDir = %q, want default %q", c.ReportDir, DefaultReportDir)
+			}
+			verr := c.Validate()
+			if verr == nil {
+				t.Fatal("Validate() = nil, want the no-arr rejection")
+			}
+			if !strings.Contains(verr.Error(), "no arr configured") {
+				t.Errorf("Validate() error = %q, want the no-arr-configured message", verr)
+			}
+		})
 	}
 }

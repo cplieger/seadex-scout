@@ -380,9 +380,12 @@ func verdictFor(s align.Standing) Verdict {
 // "mixed" (where the daemon emits mixed_group_manual), and a diverged
 // alt/unlisted row of an incomplete entry is "incomplete", mirroring the
 // daemon's betterResult downgrade. An aligned row is never qualified -
-// alignment wins - and an unverifiable row is never qualified either: its
-// verdict (unverified) already carries the daemon's story (the info-level
-// unverifiable finding), so no annotation is needed.
+// alignment wins - and an unverifiable row of an entry that still lists a
+// best is never qualified either: its verdict (unverified) already carries
+// the daemon's story (the info-level unverifiable finding). When the entry
+// lists NO best, the NoBest annotation above applies even on an unverified
+// row, matching the daemon (emptyResult nudges the same entry regardless
+// of the group ladder).
 func rowQualifier(entry *seadex.Entry, d *align.Decision) Qualifier {
 	if d.NoBest {
 		switch classify.Fallback(entry) {

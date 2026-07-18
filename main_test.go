@@ -377,7 +377,7 @@ func TestWriteStarterConfigError(t *testing.T) {
 // propagates as a build error instead of being swallowed.
 func TestBuildScout(t *testing.T) {
 	t.Run("disabled arrs build hermetically", func(t *testing.T) {
-		b, err := buildScout(context.Background(), &config.Config{})
+		b, err := buildScout(context.Background(), &config.Config{}, false)
 		if err != nil {
 			t.Fatalf("buildScout(zero config) = %v, want nil", err)
 		}
@@ -388,7 +388,7 @@ func TestBuildScout(t *testing.T) {
 	})
 	t.Run("invalid sonarr URL propagates", func(t *testing.T) {
 		cfg := &config.Config{SonarrURL: "not-a-url", SonarrAPIKey: "k"}
-		if _, err := buildScout(context.Background(), cfg); err == nil {
+		if _, err := buildScout(context.Background(), cfg, false); err == nil {
 			t.Fatal("buildScout(invalid sonarr URL) = nil, want error")
 		}
 	})
@@ -984,5 +984,137 @@ func TestStartIndexerUnconfiguredIsNoOp(t *testing.T) {
 
 	if msgs := rec.Messages(); len(msgs) != 0 {
 		t.Errorf("startIndexer(unconfigured) logged %v, want no indexer activity", msgs)
+	}
+}
+
+// TestRunSchedulerCoordinationFailure pins the daemon's infrastructure-failure
+// contract: an unusable cycle lock (the lock path is a directory) means the
+// tick could not run at all, which must be logged at ERROR ("cycle
+// coordination failed; tick did not run") so the level=ERROR Loki alert fires
+// - cycles have stopped - while the cycle never runs and the health marker is
+// untouched. Serial (capture swaps slog.Default).
+func TestRunSchedulerCoordinationFailure(t *testing.T) {
+	rec := capture.Default(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dir := t.TempDir()
+	ex, err := newCycleExclusive(ctx, dir)
+	if err != nil {
+		t.Fatalf("newCycleExclusive: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, scheduler.ExclusiveLockName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	markerPath := filepath.Join(t.TempDir(), ".healthy")
+	if err := os.WriteFile(markerPath, []byte("sentinel-untouched"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runScheduler(ctx, time.Hour, ex, mustNotRunCycler{t: t}, health.NewMarker(markerPath))
+	}()
+	waitFor(t, func() bool { return rec.Contains("cycle coordination failed; tick did not run") })
+	cancel()
+	<-done
+
+	got, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("marker file after the failed tick: %v", err)
+	}
+	if string(got) != "sentinel-untouched" {
+		t.Errorf("marker content = %q, want untouched on a coordination failure", got)
+	}
+}
+
+// TestPollCycleQueueErrorAfterRun pins poll's exit-code contract when the run
+// succeeded but the queue bookkeeping is broken (the queue file is a
+// directory): the cycle this invocation paid for completed healthy, so
+// pollCycle exits 0 and the marker records the outcome, with the coordination
+// error demoted to the after-run WARN instead of failing the poll. Serial
+// (capture swaps slog.Default).
+func TestPollCycleQueueErrorAfterRun(t *testing.T) {
+	rec := capture.Default(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	ex, err := newCycleExclusive(ctx, dir)
+	if err != nil {
+		t.Fatalf("newCycleExclusive: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, scheduler.ExclusiveQueueName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
+
+	if err := pollCycle(ctx, ex, boolCycler(true), marker); err != nil {
+		t.Fatalf("pollCycle(healthy run, broken queue file) = %v, want nil (the paid-for cycle succeeded)", err)
+	}
+	if !marker.Healthy() {
+		t.Error("marker not healthy after the healthy cycle")
+	}
+	if !rec.Contains("cycle coordination error after run") {
+		t.Errorf("missing the after-run coordination WARN: %v", rec.Messages())
+	}
+}
+
+// TestRunSchedulerQueueErrorAfterRun pins the daemon's alert-hygiene twin of
+// poll's after-run demotion: when the tick's cycle ran (the lock was free) but
+// the queue bookkeeping is broken (the queue file is a directory), the
+// coordination error is the after-run WARN - never the ERROR that fires the
+// cycle-error Loki alert on every tick - and the marker records the cycle's
+// health. Serial (capture swaps slog.Default).
+func TestRunSchedulerQueueErrorAfterRun(t *testing.T) {
+	rec := capture.Default(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dir := t.TempDir()
+	ex, err := newCycleExclusive(ctx, dir)
+	if err != nil {
+		t.Fatalf("newCycleExclusive: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, scheduler.ExclusiveQueueName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runScheduler(ctx, time.Hour, ex, boolCycler(true), marker)
+	}()
+	waitFor(t, func() bool { return rec.Contains("cycle coordination error after run") })
+	cancel()
+	<-done
+
+	if !marker.Healthy() {
+		t.Error("marker not healthy after the healthy cycle")
+	}
+	for _, r := range rec.Records() {
+		if r.Level == slog.LevelError {
+			t.Errorf("unexpected ERROR record %q; a queue error after a ran tick must stay WARN", r.Message)
+		}
+	}
+}
+
+// TestNewArrClientsRadarrErrorClosesSonarr pins the partial-construction
+// cleanup contract: when Radarr's constructor fails after Sonarr's succeeded,
+// the error names the radarr client and no half-built client pair escapes
+// (both returned clients are nil; the already-built Sonarr client is closed
+// on this path rather than leaked).
+func TestNewArrClientsRadarrErrorClosesSonarr(t *testing.T) {
+	cfg := &config.Config{
+		SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k1",
+		RadarrURL: "not-a-url", RadarrAPIKey: "k2",
+	}
+	s, r, err := newArrClients(cfg)
+	if err == nil {
+		t.Fatal("err = nil, want error for an invalid radarr URL beside a valid sonarr")
+	}
+	if !strings.Contains(err.Error(), "radarr client") {
+		t.Errorf("err = %q, want it to name the radarr client", err)
+	}
+	if s != nil || r != nil {
+		t.Errorf("clients = (%v, %v), want (nil, nil) on a constructor error", s, r)
 	}
 }

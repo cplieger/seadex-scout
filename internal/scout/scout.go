@@ -520,6 +520,15 @@ func (s *Scout) logFeedOutageOnWalkFail(ctx context.Context, entries []seadex.En
 // mapping.StaleMapError) is degraded-but-comparable and flows into the normal
 // compare path (handled=false).
 func (s *Scout) handlePreCompareGate(ctx context.Context, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, walkErr, mapErr, seaErr error) (handled, healthy bool) {
+	if seaErr == nil {
+		// The SeaDex fetch genuinely succeeded, so the consecutive-failure
+		// streak ends here regardless of which gate closes the cycle - the
+		// walk-failed and shrunk-walk arms save state too, and the documented
+		// contract (state.State.SeadexFailures) is "resets to 0 on any
+		// successful fetch". A cancelled fetch (seaErr != nil) is evidence of
+		// neither an outage nor a recovery and leaves the streak untouched.
+		st.SeadexFailures = 0
+	}
 	if handled, healthy := s.handleLibraryGate(ctx, st, snap, mapCache, entries, walkErr, seaErr); handled {
 		return true, healthy
 	}
@@ -616,7 +625,9 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap lib
 // a persisted consecutive-failure streak (state.State.SeadexFailures) that
 // escalates its single log site from WARN to ERROR at
 // seadexFailureEscalationThreshold, mirroring the shrunk-walk and
-// mapping-rejection guards; a successful fetch resets it. A shutdown
+// mapping-rejection guards; a successful fetch resets it in
+// handlePreCompareGate (beside the fetch-success check), so the library-gate
+// early returns see the reset too. A shutdown
 // cancellation during the load or fetch is attributed to the shutdown, not
 // the upstream.
 func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, mapErr, seaErr error) (handled, healthy bool) {
@@ -632,13 +643,6 @@ func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap li
 		s.log.Warn("cycle interrupted by shutdown before comparison; findings preserved",
 			"cause", context.Cause(ctx))
 		return true, true
-	}
-	if seaErr == nil {
-		// The SeaDex fetch succeeded: any consecutive-failure streak ends
-		// here (a recovered upstream needs no operator action), persisted by
-		// whichever save closes this cycle - each degraded arm below saves,
-		// and the compare path's completion saves do too.
-		st.SeadexFailures = 0
 	}
 	if !mapUsable(mapErr) {
 		s.degradedSave(ctx, st, snap, mapCache)

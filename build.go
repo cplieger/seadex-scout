@@ -45,8 +45,11 @@ type built struct {
 }
 
 // buildScout wires config into every component and returns the runnable scout
-// plus a cleanup func that releases the HTTP and arr clients.
-func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
+// plus a cleanup func that releases the HTTP and arr clients. readOnlyState
+// selects the read-only state store for flows documented never to write (or
+// quarantine) the state file - the one-shot report - so a corrupt state.json
+// is left in place for the daemon's own Load to quarantine and surface.
+func buildScout(ctx context.Context, cfg *config.Config, readOnlyState bool) (built, error) {
 	log := slog.Default()
 
 	sonarr, radarr, err := newArrClients(cfg)
@@ -62,9 +65,14 @@ func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
 	anilistClient := anilist.NewClient(anilistHTTP, config.DefaultAniListURL, config.DefaultAniListRate, log)
 	feed, feedCleanup := feedWriter(cfg, log)
 
+	store := state.NewStore(config.DefaultStatePath, log)
+	if readOnlyState {
+		store = state.NewReadOnlyStore(config.DefaultStatePath, log)
+	}
+
 	sc := scout.New(&scout.Deps{
 		Logger: log,
-		Store:  state.NewStore(config.DefaultStatePath, log),
+		Store:  store,
 		Library: library.NewWalker(&library.Config{
 			Sonarr:      sonarrClient(sonarr),
 			Radarr:      radarrClient(radarr),
@@ -109,6 +117,18 @@ func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
 	return built{scout: sc, cleanup: cleanup}, nil
 }
 
+// upstreamConfig projects the operator config into the indexer's shared
+// Prowlarr upstream wiring - built in one place so the feed writer (title
+// harvest) and the feed server (search proxying) cannot drift apart.
+func upstreamConfig(cfg *config.Config) indexer.UpstreamConfig {
+	return indexer.UpstreamConfig{
+		NyaaTorznabURL: cfg.IndexerNyaaTorznabURL,
+		ABTorznabURL:   cfg.IndexerABTorznabURL,
+		ProwlarrAPIKey: cfg.IndexerProwlarrAPIKey,
+		ABPasskey:      cfg.IndexerABPasskey,
+	}
+}
+
 // feedWriter returns the indexer feed writer the compare cycle drives when the
 // Torznab feed is configured - plus the cleanup releasing its Prowlarr HTTP
 // client - else a nil writer (the cycle then does no feed work) and a no-op.
@@ -125,10 +145,7 @@ func feedWriter(cfg *config.Config, log *slog.Logger) (fw scout.FeedWriter, clea
 	prowlarrHTTP := httpx.NewClient(indexerUpstreamTimeout)
 	writer := indexer.NewFeedWriter(&indexer.FeedWriterConfig{
 		Path:           config.DefaultIndexerFeedPath,
-		ABPasskey:      cfg.IndexerABPasskey,
-		NyaaTorznabURL: cfg.IndexerNyaaTorznabURL,
-		ABTorznabURL:   cfg.IndexerABTorznabURL,
-		ProwlarrAPIKey: cfg.IndexerProwlarrAPIKey,
+		UpstreamConfig: upstreamConfig(cfg),
 	}, indexer.Deps{HTTP: prowlarrHTTP, Logger: log.With("component", "indexer")})
 	return writer, func() { httpx.Close(prowlarrHTTP) }
 }
@@ -152,10 +169,7 @@ func buildIndexer(cfg *config.Config) builtIndexer {
 
 	ix := indexer.New(&indexer.Config{
 		APIKey:         cfg.IndexerAPIKey,
-		NyaaTorznabURL: cfg.IndexerNyaaTorznabURL,
-		ABTorznabURL:   cfg.IndexerABTorznabURL,
-		ProwlarrAPIKey: cfg.IndexerProwlarrAPIKey,
-		ABPasskey:      cfg.IndexerABPasskey,
+		UpstreamConfig: upstreamConfig(cfg),
 	}, indexer.Deps{
 		HTTP:   prowlarrHTTP,
 		Logger: log,

@@ -37,7 +37,7 @@ func TestRebuildWarnsWhenABPasskeyMissing(t *testing.T) {
 			},
 		},
 	}}
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, ABTorznabURL: "http://prowlarr/2/api"}, Deps{Logger: log})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, Deps{Logger: log})
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestRebuildUnconfiguredABPersistsNoABFeed(t *testing.T) {
 			},
 		},
 	}}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, ABPasskey: "SECRETPASSKEY"}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "SECRETPASSKEY"}}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	data, err := os.ReadFile(path)
@@ -162,7 +162,7 @@ func TestRebuildPersistsABItemsGUIDOnly(t *testing.T) {
 			},
 		},
 	}}
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, ABPasskey: passkey, ABTorznabURL: "http://prowlarr/2/api"}, Deps{})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: passkey, ABTorznabURL: "http://prowlarr/2/api"}}, Deps{})
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestRebuildPersistsABItemsGUIDOnly(t *testing.T) {
 	// The reader derives the served AB link from the GUID and its own
 	// configured passkey on load, so the feed serves grabbable links even
 	// though the snapshot holds none.
-	ix := New(&Config{APIKey: "k", ABTorznabURL: "http://prowlarr/2/api", ABPasskey: passkey}, Deps{}, path)
+	ix := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: passkey}}, Deps{}, path)
 	served := ix.feedFor(upstreamAB)
 	if len(served) != 1 {
 		t.Fatalf("served ab feed = %d items, want 1", len(served))

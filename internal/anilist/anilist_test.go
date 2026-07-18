@@ -368,3 +368,46 @@ func TestSanitizeUpstreamMessageRuneBoundaryCut(t *testing.T) {
 		t.Errorf("len = %d, want bounded by 203", len(got))
 	}
 }
+
+// TestObserveRateHeadersThresholdBoundary pins the lowRemaining gate on both
+// sides: a remaining budget AT the threshold (2) backs off for the default
+// minute window, while a budget just above it (3), a missing header, and a
+// malformed header leave the throttle untouched.
+func TestObserveRateHeadersThresholdBoundary(t *testing.T) {
+	tests := []struct {
+		name        string
+		remaining   string
+		wantBackoff bool
+	}{
+		{name: "at threshold backs off", remaining: "2", wantBackoff: true},
+		{name: "just above threshold does not back off", remaining: "3", wantBackoff: false},
+		{name: "missing header does not back off", remaining: "", wantBackoff: false},
+		{name: "malformed header does not back off", remaining: "many", wantBackoff: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := NewClient(http.DefaultClient, "https://example.invalid/graphql", 100000, nil)
+			resp := &http.Response{Header: make(http.Header)}
+			if tt.remaining != "" {
+				resp.Header.Set("X-RateLimit-Remaining", tt.remaining)
+			}
+			client.observeRateHeaders(resp)
+			wait := client.throttle.reserve()
+			if tt.wantBackoff {
+				if wait < time.Minute-2*time.Second || wait > time.Minute {
+					t.Errorf("wait = %v, want the ~%v default backoff at the lowRemaining threshold", wait, time.Minute)
+				}
+				if got := client.Stats().RateLimitWaits; got != 1 {
+					t.Errorf("Stats().RateLimitWaits = %d, want 1", got)
+				}
+			} else {
+				if wait != 0 {
+					t.Errorf("wait = %v, want 0 (no backoff above the threshold)", wait)
+				}
+				if got := client.Stats().RateLimitWaits; got != 0 {
+					t.Errorf("Stats().RateLimitWaits = %d, want 0", got)
+				}
+			}
+		})
+	}
+}

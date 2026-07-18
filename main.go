@@ -205,7 +205,10 @@ func runReport(cfg *config.Config) error {
 	}
 	defer release()
 
-	b, err := buildScout(ctx, cfg)
+	// Read-only state store: the report never saves state, and a corrupt
+	// state.json must be left in place (not quarantined) for the daemon's
+	// own Load to detect and report on the container's log stream.
+	b, err := buildScout(ctx, cfg, true)
 	if err != nil {
 		return err
 	}
@@ -266,7 +269,7 @@ func runPoll(cfg *config.Config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	b, err := buildScout(ctx, cfg)
+	b, err := buildScout(ctx, cfg, false)
 	if err != nil {
 		if ctx.Err() != nil {
 			// Shutdown cancelled startup (pre-cycle phase of the uniform
@@ -386,7 +389,7 @@ func run(cfg *config.Config) error {
 	marker.Set(false)
 	defer marker.Cleanup()
 
-	b, err := buildScout(ctx, cfg)
+	b, err := buildScout(ctx, cfg, false)
 	if err != nil {
 		return err
 	}
@@ -432,8 +435,8 @@ func run(cfg *config.Config) error {
 }
 
 // startIndexer launches the Torznab feed in a goroutine when it is configured,
-// returning a func that waits for its graceful shutdown (once ctx is
-// cancelled). The goroutine releases its clients itself on every exit path -
+// returning a func that stops it (cancelling its context) and waits for its
+// graceful shutdown. The goroutine releases its clients itself on every exit path -
 // a Run return or a recovered panic - so the transport is freed immediately
 // even if the daemon keeps running. When no Prowlarr Torznab URL is set it
 // starts nothing - the daemon binds no HTTP port - and returns a no-op.
@@ -441,6 +444,12 @@ func startIndexer(ctx context.Context, cfg *config.Config) func() {
 	if !cfg.IndexerConfigured() {
 		return func() {}
 	}
+	// The goroutine runs on its own cancellable child context so the
+	// returned stop func can force the feed down even when the parent
+	// signal context is still live (a startup-error return unwinding the
+	// defers before stop() cancels it) - otherwise the wait below would
+	// deadlock the exiting daemon against a still-serving feed.
+	ictx, cancel := context.WithCancel(ctx)
 	bi := buildIndexer(cfg)
 	done := make(chan struct{})
 	go func() {
@@ -451,11 +460,14 @@ func startIndexer(ctx context.Context, cfg *config.Config) func() {
 				slog.Error("indexer feed panicked", "panic", r, "stack", string(debug.Stack()))
 			}
 		}()
-		if err := bi.indexer.Run(ctx); err != nil {
-			logIndexerStop(ctx, err)
+		if err := bi.indexer.Run(ictx); err != nil {
+			logIndexerStop(ictx, err)
 		}
 	}()
-	return func() { <-done }
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 // logIndexerStop classifies the indexer feed's Run error for the shared slog

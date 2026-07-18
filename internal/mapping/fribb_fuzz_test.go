@@ -18,6 +18,8 @@ func FuzzParseFribb(f *testing.F) {
 	log := discardLogger()
 	f.Add([]byte(`[{"anilist_id":1,"type":"tv","tvdb_id":"100","imdb_id":"tt1","themoviedb_id":{"tv":5}}]`))
 	f.Add([]byte(`[{"anilist_id":"2","type":"MOVIE","imdb_id":["tt2","tt3"],"themoviedb_id":{"movie":[7,8]}}]`))
+	f.Add([]byte(`[{"anilist_id":10,"type":"MOVIE","themoviedb_id":603}]`))
+	f.Add([]byte(`[{"anilist_id":11,"type":" movie ","themoviedb_id":"603"}]`))
 	f.Add([]byte(`[{"anilist_id":0}]`))
 	f.Add([]byte(`[[],"x",5,{"anilist_id":9,"themoviedb_id":"unknown"}]`))
 	f.Add([]byte(`null`))

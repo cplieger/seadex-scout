@@ -1325,6 +1325,27 @@ func TestDiffSnapshotsSkipsFailedPlaceholders(t *testing.T) {
 			t.Errorf("diff = %+v, want zero Diff (a returning series after a Failed walk is not added)", d)
 		}
 	})
+	t.Run("failed placeholder gone from cur is a removal", func(t *testing.T) {
+		prev := &Snapshot{Partial: true, Items: []Item{{Arr: ArrSonarr, ArrID: 1, Failed: true}}}
+		cur := &Snapshot{}
+		if d := DiffSnapshots(prev, cur); d != (Diff{Removed: 1}) {
+			t.Errorf("diff = %+v, want Removed=1 (a Failed placeholder still carries arr presence)", d)
+		}
+	})
+	t.Run("key debuting as a failed placeholder is an addition", func(t *testing.T) {
+		prev := &Snapshot{}
+		cur := &Snapshot{Partial: true, Items: []Item{{Arr: ArrSonarr, ArrID: 2, Failed: true}}}
+		if d := DiffSnapshots(prev, cur); d != (Diff{Added: 1}) {
+			t.Errorf("diff = %+v, want Added=1 (a new series whose first fetch failed is still an arrival)", d)
+		}
+	})
+	t.Run("failed placeholder on both sides is no transition", func(t *testing.T) {
+		prev := &Snapshot{Partial: true, Items: []Item{{Arr: ArrSonarr, ArrID: 3, Failed: true}}}
+		cur := &Snapshot{Partial: true, Items: []Item{{Arr: ArrSonarr, ArrID: 3, Failed: true}}}
+		if d := DiffSnapshots(prev, cur); d != (Diff{}) {
+			t.Errorf("diff = %+v, want zero Diff (failed on both sides is no transition)", d)
+		}
+	})
 }
 
 // budgetSonarr blocks each GetEpisodeFiles until released, then fails it, so a

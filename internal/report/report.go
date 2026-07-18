@@ -107,11 +107,10 @@ func (r *Reporter) Report(findings []compare.Finding, prior map[string]Alerted, 
 	}
 
 	resolved, preserved := 0, 0
-	for key := range prior {
+	for key, a := range prior {
 		if _, ok := current[key]; ok {
 			continue
 		}
-		a := prior[key]
 		if _, failed := failedItems[a.Finding.AniListID]; failed {
 			current[key] = Alerted{AlertedAt: a.AlertedAt, Finding: a.Finding}
 			preserved++
@@ -204,16 +203,20 @@ func findingKVs(f *compare.Finding) []any {
 
 // trackerURLs splits a finding's obtainable links into the public (Nyaa) and
 // AnimeBytes URLs, so an alert can render a distinct Nyaa link and AB link.
-// AB routing is URL-aware via filter.ABVisible (label OR animebytes.tv URL
-// host), matching the obtainability filter and the dedupe key. The first
-// non-AnimeBytes link is treated as the public/Nyaa source (Nyaa is by far
-// the dominant public tracker on SeaDex).
+// AB routing is URL-aware via filter.ABGated (label OR animebytes.tv URL
+// host), matching the obtainability filter and the dedupe key. ABGated's
+// conservative fail direction carries over: a link whose raw URL is
+// malformed, unparseable, or has a non-ASCII host is unclassifiable and
+// fills the AB slot, never the public one, so an ambiguous link is never
+// rendered as the clickable public URL. The first non-AnimeBytes link is
+// treated as the public/Nyaa source (Nyaa is by far the dominant public
+// tracker on SeaDex).
 func trackerURLs(links []compare.ReleaseLink) (nyaa, ab string) {
 	var firstPublic string
 	for i := range links {
 		t, known := release.LookupTracker(links[i].Tracker)
 		switch {
-		case !filter.ABVisible(links[i].Tracker, links[i].URL, false):
+		case filter.ABGated(links[i].Tracker, links[i].URL):
 			if ab == "" {
 				ab = links[i].URL
 			}

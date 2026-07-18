@@ -57,7 +57,7 @@ func TestRecord_HasArrIdentifier(t *testing.T) {
 // TestArrIdentifierCountIgnoresWrongArmIdentifiers pins the refresh coverage
 // guard to the same arr-routed predicate the matcher uses: a TV record
 // carrying only movie ids (or a MOVIE record carrying only a TVDB id) cannot
-// count toward the acceptance floor, because findByID would never consume
+// count toward the acceptance floor, because FindByID would never consume
 // those fields for that record's arr.
 func TestArrIdentifierCountIgnoresWrongArmIdentifiers(t *testing.T) {
 	records := []Record{

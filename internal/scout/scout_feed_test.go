@@ -64,6 +64,34 @@ func TestCycleWalkFailureWithFeedStillRebuildsFeed(t *testing.T) {
 	}
 }
 
+// TestCycleWalkFailureWithFeedResetsSeaDexFailureStreak pins the documented
+// SeadexFailures contract ("resets to 0 on any successful fetch") on the
+// walk-failed-with-feed arm: that arm saves state and returns before the
+// upstream gate, so the reset must not be deferred until the next full-compare
+// cycle - a recovery during an arr outage would otherwise leave a stale streak
+// frozen in state.json and falsely escalate the first later blip to ERROR.
+func TestCycleWalkFailureWithFeedResetsSeaDexFailureStreak(t *testing.T) {
+	store := &fakeStore{st: state.State{
+		SeadexFailures: 7,
+		Mapping:        mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+	}}
+	s := New(&Deps{
+		Logger:  scoutTestLogger(),
+		Store:   store,
+		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
+		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
+		Feed:    &fakeFeed{},
+	})
+
+	if healthy := s.Cycle(context.Background()); healthy {
+		t.Fatal("Cycle healthy=true, want false when the library walk fails (feed or not)")
+	}
+	if store.st.SeadexFailures != 0 {
+		t.Errorf("persisted SeadexFailures = %d, want 0 (the fetch succeeded this cycle; the walk-failed save must persist the reset)", store.st.SeadexFailures)
+	}
+}
+
 // TestCycleSeaDexFailureSkipsFeedRebuild pins the keep-last-good-feed arm: when
 // the SeaDex fetch fails there is no snapshot to rebuild from, so Rebuild must
 // not run (the previous persisted feed is kept, never replaced with nothing).

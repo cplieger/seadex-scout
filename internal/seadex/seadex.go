@@ -107,6 +107,31 @@ type Torrent struct {
 	DualAudio    bool     `json:"dualAudio"`
 }
 
+// RedactedInfoHash is the placeholder releases.moe publishes in place of a
+// private-tracker (AnimeBytes) torrent's info hash.
+const RedactedInfoHash = "<redacted>"
+
+// InfoHashRedacted reports whether h is the RedactedInfoHash placeholder.
+func InfoHashRedacted(h string) bool {
+	return strings.EqualFold(strings.TrimSpace(h), RedactedInfoHash)
+}
+
+// ValidInfoHash returns h lowercased when it is a 40-char SHA-1 hex info hash,
+// else "" (covers RedactedInfoHash and any other junk value).
+func ValidInfoHash(h string) string {
+	h = strings.ToLower(strings.TrimSpace(h))
+	if len(h) != 40 {
+		return ""
+	}
+	for i := range len(h) {
+		c := h[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return ""
+		}
+	}
+	return h
+}
+
 // Entry is a SeaDex entry: one anime (by AniList ID) and its tracked releases.
 type Entry struct {
 	Updated         time.Time
@@ -235,7 +260,7 @@ func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 			return nil, err
 		}
 		if done {
-			return c.finishFetch(all, tot.reportedTotal, tot.unparsedTimes, tot.unusableURLs)
+			return c.finishFetch(all, tot)
 		}
 	}
 	return nil, fmt.Errorf("seadex: pagination exceeded max %d pages (upstream reported more); "+
@@ -254,21 +279,21 @@ func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 // foreign host under a trusted label, an unknown tracker, a malformed URL)
 // are likewise surfaced as one aggregate WARN, so a tracker host migration
 // that strips every release link is alertable instead of silent.
-func (c *Client) finishFetch(all []Entry, reportedTotal, unparsedTimes, unusableURLs int) ([]Entry, error) {
+func (c *Client) finishFetch(all []Entry, tot fetchTotals) ([]Entry, error) {
 	if len(all) == 0 {
 		return nil, fmt.Errorf("seadex: returned an empty catalogue (totalItems=%d); "+
-			"SeaDex is never legitimately empty, refusing to compare against it", reportedTotal)
+			"SeaDex is never legitimately empty, refusing to compare against it", tot.reportedTotal)
 	}
-	if len(all) != reportedTotal {
-		c.log.Warn("seadex catalogue count mismatch", "got", len(all), "want", reportedTotal)
+	if len(all) != tot.reportedTotal {
+		c.log.Warn("seadex catalogue count mismatch", "got", len(all), "want", tot.reportedTotal)
 	}
-	if unparsedTimes > 0 {
+	if tot.unparsedTimes > 0 {
 		c.log.Warn("seadex updated timestamps unparseable; feed newest-first ordering degraded",
-			"count", unparsedTimes, "entries", len(all))
+			"count", tot.unparsedTimes, "entries", len(all))
 	}
-	if unusableURLs > 0 {
+	if tot.unusableURLs > 0 {
 		c.log.Warn("seadex torrent URLs unusable; affected findings and feed items carry no release link",
-			"count", unusableURLs, "entries", len(all))
+			"count", tot.unusableURLs, "entries", len(all))
 	}
 	c.log.Debug("seadex entries fetched", "entries", len(all))
 	return all, nil
@@ -576,15 +601,11 @@ func (d *pageDecoder) decodeEntry() (pbEntry, error) {
 		case strings.EqualFold(k, "incomplete"):
 			err = d.dec.Decode(&e.Incomplete)
 		case strings.EqualFold(k, "expand"):
-			// json.Unmarshal treats null into a non-pointer struct as a
-			// no-op; only assign when a real object was decoded, so a
-			// duplicate "expand":null cannot wipe an already-decoded value.
-			var expand pbExpand
-			var present bool
-			expand, present, err = d.decodeExpand()
-			if present {
-				e.Expand = expand
-			}
+			// json.Unmarshal merges duplicate object keys field-wise and
+			// treats null into a non-pointer struct as a no-op; decode into
+			// the existing value so neither a duplicate "expand":null nor a
+			// duplicate/partial "expand":{} can wipe an already-decoded trs.
+			err = d.decodeExpand(&e.Expand)
 		default:
 			err = d.skip()
 		}
@@ -595,18 +616,20 @@ func (d *pageDecoder) decodeEntry() (pbEntry, error) {
 	return e, d.close()
 }
 
-// decodeExpand decodes the expand relation envelope. present is false for a
-// JSON null (json.Unmarshal's null-into-struct no-op: the caller must leave
-// any previously decoded value in place rather than assign the zero value).
-func (d *pageDecoder) decodeExpand() (ex pbExpand, present bool, err error) {
+// decodeExpand decodes the expand relation envelope field-wise into ex,
+// matching json.Unmarshal's struct semantics for duplicate keys: a JSON null
+// is a no-op (any previously decoded value stays), and an object only
+// overwrites the fields it actually carries, so a repeated "expand" that
+// omits "trs" leaves already-decoded torrents in place.
+func (d *pageDecoder) decodeExpand(ex *pbExpand) error {
 	ok, err := d.open('{')
 	if err != nil || !ok {
-		return ex, false, err
+		return err
 	}
 	for d.dec.More() {
 		k, err := d.key()
 		if err != nil {
-			return ex, false, err
+			return err
 		}
 		if strings.EqualFold(k, "trs") {
 			ex.Trs, err = d.decodeTorrents()
@@ -614,10 +637,10 @@ func (d *pageDecoder) decodeExpand() (ex pbExpand, present bool, err error) {
 			err = d.skip()
 		}
 		if err != nil {
-			return ex, false, err
+			return err
 		}
 	}
-	return ex, true, d.close()
+	return d.close()
 }
 
 // decodeTorrents decodes one entry's expanded trs relation, capped at

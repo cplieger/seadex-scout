@@ -10,16 +10,22 @@ import (
 
 // genPropItem generates a library Item over a deliberately small key space so
 // generated snapshots overlap on arr:id keys and all three diff outcomes
-// (added, removed, changed) are reachable.
+// (added, removed, changed) are reachable, plus occasional Sonarr Failed
+// placeholders so the diff's per-key partial suppression is property-covered.
 func genPropItem(t *rapid.T) Item {
+	arr := rapid.SampledFrom([]string{ArrSonarr, ArrRadarr}).Draw(t, "arr")
+	id := rapid.IntRange(1, 6).Draw(t, "id")
+	if arr == ArrSonarr && rapid.Bool().Draw(t, "failed") {
+		return Item{Arr: arr, ArrID: id, Failed: true}
+	}
 	groups := rapid.SliceOfN(rapid.SampledFrom([]string{"pmr", "lostyears", "nogrp", "seed"}), 0, 3).Draw(t, "groups")
 	var sg map[int][]string
 	if len(groups) > 0 && rapid.Bool().Draw(t, "hasSeasons") {
 		sg = map[int][]string{rapid.IntRange(0, 3).Draw(t, "season"): groups}
 	}
 	return Item{
-		Arr:          rapid.SampledFrom([]string{ArrSonarr, ArrRadarr}).Draw(t, "arr"),
-		ArrID:        rapid.IntRange(1, 6).Draw(t, "id"),
+		Arr:          arr,
+		ArrID:        id,
 		Groups:       groups,
 		SeasonGroups: sg,
 		HasFile:      len(groups) > 0,

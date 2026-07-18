@@ -483,6 +483,7 @@ func (c *Config) Validate() error {
 	if err := validateArrPair("radarr", c.RadarrURL, c.RadarrAPIKey); err != nil {
 		return err
 	}
+	c.warnArrURLCredentials()
 	if c.SonarrWanted && c.SonarrURL == "" && c.SonarrAPIKey == "" {
 		return errors.New("sonarr.enabled is true but sonarr.url and sonarr.api_key are both empty")
 	}
@@ -507,6 +508,24 @@ func (c *Config) Validate() error {
 	return c.validateIndexer()
 }
 
+// warnArrURLCredentials warns (field-name-only, never echoing the URL)
+// when an arr url embeds a credential-like userinfo or query parameter,
+// which would otherwise leak into a library-walk-failure *url.Error log.
+// Mirrors the torznab-URL gate in validateIndexer.
+func (c *Config) warnArrURLCredentials() {
+	for _, au := range []struct{ name, val string }{
+		{"sonarr.url", c.SonarrURL},
+		{"radarr.url", c.RadarrURL},
+	} {
+		if urlEmbedsCredential(au.val) {
+			slog.Warn("arr url embeds a credential-like query parameter or userinfo; "+
+				"the api key belongs in api_key (sent as a header, never logged) "+
+				"or it will appear in library-walk-failure logs",
+				"field", au.name)
+		}
+	}
+}
+
 // validateIndexer rejects an enabled Torznab feed with no feed API key. The
 // feed is the only HTTP surface; it authenticates callers by the apikey query
 // param against IndexerAPIKey, so an empty key would leave it unauthenticated
@@ -515,6 +534,15 @@ func (c *Config) Validate() error {
 // no-indexer config is unaffected.
 func (c *Config) validateIndexer() error {
 	if !c.IndexerConfigured() {
+		if c.IndexerAPIKey != "" || c.IndexerProwlarrAPIKey != "" || c.IndexerABPasskey != "" {
+			// Half-configuration signal, mirroring the disabled-arr-with-key
+			// Info in toConfig: indexer secrets are always operator-written,
+			// so keys without a torznab URL almost always mean the operator
+			// expected the feed to start. Info, not Warn - deliberately
+			// parked keys must not raise Loki alert noise.
+			slog.Info("indexer keys are set but no torznab url is configured; " +
+				"the Torznab feed will not start (set indexer.nyaa_torznab_url and/or indexer.ab_torznab_url)")
+		}
 		return nil
 	}
 	if c.IndexerAPIKey == "" {

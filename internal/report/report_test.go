@@ -515,3 +515,123 @@ func TestReporterReportSuppressesDuplicateCurrentKeys(t *testing.T) {
 		t.Errorf("current dedupe state entries = %d, want 1", len(current))
 	}
 }
+
+// TestResolvedLineCarriesDocumentedAttrs pins the resolution line's full
+// attribute contract the way TestFindingLineCarriesDocumentedAttrs pins the
+// finding line: emitResolved reads the trimmed StoredFinding back, and a
+// silently dropped or zeroed key (season, al_id, status) breaks the Loki
+// dashboards without failing any existing test.
+func TestResolvedLineCarriesDocumentedAttrs(t *testing.T) {
+	reporter, recorder := newCapturedReporter()
+	f := testFinding("gone", "Frieren")
+	f.Season = 2
+	prior := map[string]Alerted{
+		"gone": {AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Finding: storedFinding(&f)},
+	}
+
+	reporter.Report(nil, prior, nil, time.Now())
+
+	wantStr := map[string]string{
+		"title":             "Frieren",
+		"arr":               "sonarr",
+		"current_group":     "erai-raws",
+		"recommended_group": "SubsPlease",
+		"status":            "better_release",
+	}
+	gotStr := map[string]string{}
+	var alID, season int64
+	sawLine := false
+	for _, rec := range recorder.Records() {
+		if rec.Message != "finding resolved" {
+			continue
+		}
+		sawLine = true
+		rec.Attrs(func(a slog.Attr) bool {
+			switch a.Key {
+			case "al_id":
+				alID = a.Value.Int64()
+			case "season":
+				season = a.Value.Int64()
+			default:
+				if s, ok := a.Value.Any().(string); ok {
+					gotStr[a.Key] = s
+				}
+			}
+			return true
+		})
+	}
+	if !sawLine {
+		t.Fatal("no finding-resolved line emitted")
+	}
+	if alID != 154587 {
+		t.Errorf("al_id = %d, want 154587", alID)
+	}
+	if season != 2 {
+		t.Errorf("season = %d, want 2", season)
+	}
+	for key, w := range wantStr {
+		if gotStr[key] != w {
+			t.Errorf("attr %q = %q, want %q", key, gotStr[key], w)
+		}
+	}
+}
+
+// TestReporterDuplicateOfPriorFindingKeepsOriginalAlertTime pins the
+// interaction of in-batch dedupe with the prior state: when a batch carries
+// the same DedupeKey twice AND that key was already alerted in a prior cycle,
+// no notification is emitted, the original alert time survives the in-batch
+// duplicate branch, and the stored record follows the documented
+// last-payload-wins rule.
+func TestReporterDuplicateOfPriorFindingKeepsOriginalAlertTime(t *testing.T) {
+	reporter, recorder := newCapturedReporter()
+	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	f := testFinding("dup-prior", "Frieren")
+	updated := testFinding("dup-prior", "Frieren (retitled)")
+	prior := map[string]Alerted{
+		"dup-prior": {AlertedAt: oldTime, Finding: storedFinding(&f)},
+	}
+
+	current := reporter.Report([]compare.Finding{f, updated}, prior, nil, time.Now())
+
+	if got := recorder.CountExact("better release available"); got != 0 {
+		t.Errorf("notifications for an already-alerted duplicated finding = %d, want 0", got)
+	}
+	rec, ok := current["dup-prior"]
+	if !ok {
+		t.Fatal("finding missing from returned state")
+	}
+	if !rec.AlertedAt.Equal(oldTime) {
+		t.Errorf("AlertedAt = %s, want original %s preserved through the in-batch duplicate", rec.AlertedAt, oldTime)
+	}
+	if rec.Finding.Title != "Frieren (retitled)" {
+		t.Errorf("stored title = %q, want last payload %q", rec.Finding.Title, "Frieren (retitled)")
+	}
+}
+
+// TestFindingLineCarriesSeason pins the season attribute on the finding
+// line: TestFindingLineCarriesDocumentedAttrs collects only string-valued
+// attrs, so the int-valued season was the one documented finding-line key a
+// mutation could zero without failing any test.
+func TestFindingLineCarriesSeason(t *testing.T) {
+	reporter, recorder := newCapturedReporter()
+	f := testFinding("s2", "Frieren")
+	f.Season = 2
+
+	reporter.Report([]compare.Finding{f}, nil, nil, time.Now())
+
+	season := int64(-1)
+	for _, rec := range recorder.Records() {
+		if rec.Message != "better release available" {
+			continue
+		}
+		rec.Attrs(func(a slog.Attr) bool {
+			if a.Key == "season" {
+				season = a.Value.Int64()
+			}
+			return true
+		})
+	}
+	if season != 2 {
+		t.Errorf("finding line season = %d, want 2", season)
+	}
+}

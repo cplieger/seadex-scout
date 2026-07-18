@@ -220,3 +220,45 @@ func TestFetchAndParseRateLimitCarriesRetryAfterHint(t *testing.T) {
 		t.Errorf("RetryAfterHint() = %v, want 7s from the upstream Retry-After header", got)
 	}
 }
+
+// TestUpstreamSearchRejectsOversizedResponse pins the bounded-read guard on the
+// untrusted Torznab response: a 200 body past upstreamMaxBytes fails the search
+// with httpx's *ResponseTooLargeError naming the cap, and the deterministic
+// failure is terminal - it must not burn the remaining retry attempts.
+func TestUpstreamSearchRejectsOversizedResponse(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+	chunk := make([]byte, 1<<20)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/rss+xml")
+		for range 17 { // 17 MiB > the 16 MiB upstreamMaxBytes cap
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
+	_, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+	if err == nil {
+		t.Fatal("search with an oversized upstream body returned nil, want *httpx.ResponseTooLargeError")
+	}
+	var tooLarge *httpx.ResponseTooLargeError
+	if !errors.As(err, &tooLarge) {
+		t.Fatalf("error = %v, want *httpx.ResponseTooLargeError", err)
+	}
+	if tooLarge.Limit != upstreamMaxBytes {
+		t.Errorf("ResponseTooLargeError.Limit = %d, want %d", tooLarge.Limit, int64(upstreamMaxBytes))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Errorf("upstream called %d times, want 1 (an oversized body is deterministic, not a transient to retry)", calls)
+	}
+}

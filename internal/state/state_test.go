@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -161,6 +162,32 @@ func TestStoreLoadCorruptReturnsDecodeError(t *testing.T) {
 		t.Errorf("error = %q, want decode context", err.Error())
 	}
 	assertQuarantined(t, path, "{")
+}
+
+// TestReadOnlyStoreLoadCorruptLeavesFileInPlace pins the read-only flow's
+// quarantine posture (the one-shot report is documented read-only on the
+// state file): Load still surfaces the decode error, but the corrupt file
+// stays at the live path - never renamed to .corrupt - so the daemon's own
+// Load detects and reports the corruption on the container's log stream.
+func TestReadOnlyStoreLoadCorruptLeavesFileInPlace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte("{"), 0o644); err != nil {
+		t.Fatalf("write corrupt state: %v", err)
+	}
+	_, err := NewReadOnlyStore(path, testLogger()).Load(context.Background())
+	if err == nil {
+		t.Fatal("Load corrupt state returned nil error, want decode error")
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("live state path unreadable after read-only Load: %v", readErr)
+	}
+	if string(got) != "{" {
+		t.Errorf("live state bytes = %q, want the original untouched", got)
+	}
+	if _, statErr := os.Stat(path + ".corrupt"); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Errorf("read-only Load produced a .corrupt copy (stat err = %v), want none", statErr)
+	}
 }
 
 // assertQuarantined asserts the decode-failure quarantine contract: the corrupt
@@ -449,8 +476,9 @@ func TestStoreSaveLoadPreservesEscalationStreaks(t *testing.T) {
 // TestStoreSaveStampsSchemaVersion pins the envelope versioning contract:
 // Save stamps SchemaVersion into every file it writes (round-tripping through
 // Load), the stamp lands on the copy Save writes - never the caller's State -
-// and a legacy pre-version file (no version field) loads without error as
-// version zero, changing no behavior today.
+// a legacy pre-version file (no version field) loads without error as
+// version zero, and a file stamped by a newer binary is refused and
+// quarantined instead of silently zero-loading moved members.
 func TestStoreSaveStampsSchemaVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := NewStore(path, testLogger())
@@ -481,6 +509,27 @@ func TestStoreSaveStampsSchemaVersion(t *testing.T) {
 	if legacy.Version != 0 || !legacy.Baselined {
 		t.Errorf("legacy load = Version %d Baselined %v, want 0/true (absent version tolerated)", legacy.Version, legacy.Baselined)
 	}
+
+	// A file stamped by a NEWER binary (an image rollback) must be refused,
+	// not field-by-field zero-loaded: its members may have moved, and the
+	// next Save would overwrite the newer-schema file with this binary's
+	// envelope, destroying the newer state. The file is quarantined so
+	// rolling forward again finds it at .corrupt (latest wins).
+	newer := fmt.Sprintf(`{"version":%d,"baselined":true}`, SchemaVersion+1)
+	if err := os.WriteFile(path, []byte(newer), 0o644); err != nil {
+		t.Fatalf("write newer-version state: %v", err)
+	}
+	if _, err := store.Load(context.Background()); err == nil {
+		t.Fatal("Load of a newer-schema file returned nil error, want refusal")
+	} else {
+		wantFile := fmt.Sprintf("schema version %d", SchemaVersion+1)
+		wantSupported := fmt.Sprintf("(%d)", SchemaVersion)
+		if !strings.Contains(err.Error(), wantFile) || !strings.Contains(err.Error(), wantSupported) {
+			t.Errorf("error = %q, want both the file's version (%q) and the supported version (%q) named",
+				err.Error(), wantFile, wantSupported)
+		}
+	}
+	assertQuarantined(t, path, newer)
 }
 
 // TestStoreLoadLogsLibrarySnapshotAge pins the snapshot-age diagnostic on the
@@ -543,5 +592,59 @@ func TestStoreLoadLogsLibrarySnapshotAge(t *testing.T) {
 	}
 	if _, found := libraryAge(zeroRecorder); found {
 		t.Error("\"state loaded\" carries a library_age attribute for a zero TakenAt, want it omitted")
+	}
+}
+
+// TestStoreSaveCanceledFailsFastWithoutWriting pins Save's documented
+// fail-fast contract: a context already cancelled on entry returns before the
+// sanitize and encode work (so scout.save's detached shutdown retry runs
+// immediately), wrapped as "state: save" - distinct from the late
+// "state: write" wrap - and no file is written.
+func TestStoreSaveCanceledFailsFastWithoutWriting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := NewStore(path, testLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := store.Save(ctx, &State{Baselined: true})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Save with pre-canceled context error = %v, want context.Canceled", err)
+	}
+	if !strings.Contains(err.Error(), "state: save") {
+		t.Errorf("error = %q, want the fast-fail 'state: save' wrap (not the late 'state: write')", err.Error())
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("state file after canceled Save stat error = %v, want not exist", statErr)
+	}
+}
+
+// TestStoreSaveCommitFailureReturnsError pins Save's commit-error contract:
+// when the atomic rename cannot land (the target path is occupied by a
+// directory, a root-safe injection), Save must return a wrapped "state: write"
+// error naming the path, and the failed Commit must leave no orphaned temp in
+// the parent directory (atomicfile removes its temp on a failed Commit).
+func TestStoreSaveCommitFailureReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "state.json")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatalf("create rename blocker dir: %v", err)
+	}
+	store := NewStore(target, testLogger())
+
+	err := store.Save(context.Background(), &State{Baselined: true})
+	if err == nil {
+		t.Fatal("Save returned nil error, want commit failure")
+	}
+	if !strings.Contains(err.Error(), "state: write") {
+		t.Errorf("error = %q, want 'state: write' context", err.Error())
+	}
+	entries, readErr := os.ReadDir(dir)
+	if readErr != nil {
+		t.Fatalf("read parent dir: %v", readErr)
+	}
+	for _, e := range entries {
+		if e.Name() != "state.json" {
+			t.Errorf("unexpected leftover entry %q after failed Commit, want temp removed", e.Name())
+		}
 	}
 }

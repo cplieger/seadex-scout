@@ -84,7 +84,7 @@ func TestMatchMemoizesNotFoundAfterFailedBatch(t *testing.T) {
 // and an EXPIRED memoized id counts as pending again so the batch renews it.
 func TestPendingAniListIDsDedupesAndSkipsInvalid(t *testing.T) {
 	idx := mapping.NewIndex(nil)
-	lib := buildLibIndex(&library.Snapshot{})
+	lib := NewLibIndex(&library.Snapshot{})
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	memo := Memo{Entries: map[int]MemoEntry{
 		88: {NotFound: true, Expiry: now.Add(time.Hour)},  // live: skipped

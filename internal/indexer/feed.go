@@ -447,18 +447,10 @@ func entryURL(alID int) string {
 // else "". SeaDex publishes the literal string "<redacted>" for AnimeBytes info
 // hashes (private tracker), so this keeps a bogus value out of the feed's
 // infohash attr; AB items are grabbed via their id-based download URL regardless.
+// The redaction/validity knowledge is the upstream releases.moe contract and
+// lives in internal/seadex (seadex.ValidInfoHash); this is a thin delegate.
 func validInfoHash(h string) string {
-	h = strings.ToLower(strings.TrimSpace(h))
-	if len(h) != 40 {
-		return ""
-	}
-	for i := range len(h) {
-		c := h[i]
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return ""
-		}
-	}
-	return h
+	return seadex.ValidInfoHash(h)
 }
 
 // sortAndCap orders a journal feed newest-first by first-seen time (stable, so

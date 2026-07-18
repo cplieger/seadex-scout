@@ -1475,3 +1475,113 @@ func TestCycleUpgradeWithPriorFindingsTakesReportPath(t *testing.T) {
 		t.Error("BaselineIncomplete = true after the upgrade cycle, want false (a legacy state never enters the incomplete-baseline window)")
 	}
 }
+
+// TestCyclePartialWalkAndAniListDegradedPreservesBothFindingSets pins the
+// combined-degradation preservation scope: a cycle where one series' episode
+// fetch failed (a Failed placeholder, partial walk) AND a different id-less
+// entry's AniList lookup failed transiently must preserve BOTH affected
+// entries' prior findings - the preservation set is the union of the failed
+// items and the incomplete lookups, so neither degradation may mask the
+// other's preservation - while the unaffected majority still compares and
+// emits normally and the cycle closes degraded (reason partial-walk, the
+// switch's first arm).
+func TestCyclePartialWalkAndAniListDegradedPreservesBothFindingSets(t *testing.T) {
+	logger, recorder := capture.New()
+	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	priorFailed := report.Alerted{
+		AlertedAt: oldTime,
+		Finding:   report.StoredFinding{Title: "Broken Series", Status: compare.StatusBetter, AniListID: 222},
+	}
+	priorIdless := report.Alerted{
+		AlertedAt: oldTime,
+		Finding:   report.StoredFinding{Title: "Idless Show", Status: compare.StatusBetter, AniListID: 333},
+	}
+	store := &fakeStore{st: state.State{
+		Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{
+			{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1},
+			{AniListID: 222, Type: "TV", TvdbID: 124, SeasonTvdb: 1},
+			// Id-less record (a split AniList<->arr mapping): the entry NEEDS
+			// the AniList title lookup, which fails transiently this cycle.
+			{AniListID: 333, Type: "TV"},
+		}},
+		Findings:  map[string]report.Alerted{"prior-failed": priorFailed, "prior-idless": priorIdless},
+		Baselined: true,
+	}}
+	sonarr := &flakySonarr{
+		fakeSonarr: fakeSonarr{
+			series: []arrapi.Series{
+				{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
+				{ID: 8, Title: "Broken Series", TvdbID: 124, Year: 2024},
+			},
+			files: map[int][]arrapi.EpisodeFile{
+				7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+			},
+		},
+		failEpisodes: map[int]bool{8: true},
+	}
+	entries := append(seadexFrierenEntry(),
+		seadex.Entry{
+			AniListID: 222,
+			Torrents: []seadex.Torrent{{
+				ReleaseGroup: "SubsPlease",
+				Tracker:      "Nyaa",
+				InfoHash:     "def",
+				URL:          "https://nyaa.si/view/2",
+				IsBest:       true,
+				Files:        []seadex.File{{Name: "Broken Series S01E01 1080p.mkv", Length: 1}},
+			}},
+		},
+		seadex.Entry{
+			AniListID: 333,
+			Torrents: []seadex.Torrent{{
+				ReleaseGroup: "SubsPlease",
+				Tracker:      "Nyaa",
+				InfoHash:     "ghi",
+				URL:          "https://nyaa.si/view/3",
+				IsBest:       true,
+				Files:        []seadex.File{{Name: "Idless Show S01E01 1080p.mkv", Length: 1}},
+			}},
+		})
+	s := New(&Deps{
+		Logger:   logger,
+		Store:    store,
+		Library:  library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping:  mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		SeaDex:   &fakeSeaDex{entries: entries},
+		Matcher:  match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
+		Comparer: compare.NewComparer(compare.Config{}),
+		Reporter: report.NewReporter(logger),
+	})
+
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("Cycle healthy=false, want true (partial walk + transient AniList degradation is degraded, not unhealthy)")
+	}
+	// The unaffected majority still compares and emits.
+	if n := recorder.CountExact("better release available"); n != 1 {
+		t.Errorf("clean item's finding notification count = %d, want 1", n)
+	}
+	// NEITHER affected entry's prior finding may resolve: the preservation
+	// set must union the failed-walk ids with the incomplete-lookup ids.
+	if n := recorder.CountExact("finding resolved"); n != 0 {
+		t.Errorf("resolved count = %d, want 0 (both degradations' findings must be preserved)", n)
+	}
+	for key, want := range map[string]report.Alerted{"prior-failed": priorFailed, "prior-idless": priorIdless} {
+		got, ok := store.st.Findings[key]
+		if !ok {
+			t.Errorf("prior finding %q was dropped, want it preserved: %+v", key, store.st.Findings)
+			continue
+		}
+		if !got.AlertedAt.Equal(want.AlertedAt) {
+			t.Errorf("preserved %q AlertedAt = %s, want the original %s", key, got.AlertedAt, want.AlertedAt)
+		}
+	}
+	if len(store.st.Findings) != 3 {
+		t.Errorf("persisted findings = %d, want 3 (the majority's new finding plus both preserved)", len(store.st.Findings))
+	}
+	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "partial-walk" {
+		t.Errorf("degraded reasons = %v, want [partial-walk] (the switch's first arm wins the combined degradation)", reasons)
+	}
+	if n := recorder.CountExact("cycle complete"); n != 0 {
+		t.Errorf("'cycle complete' count = %d, want 0 on a degraded cycle", n)
+	}
+}

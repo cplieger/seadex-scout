@@ -142,6 +142,17 @@ type journalStats struct {
 	abSkippedNoPasskey int
 }
 
+// recordDrop accounts for a journal item that failed to render: an
+// AB item skipped for a missing passkey is tallied separately from a
+// genuine drop.
+func (js *journalStats) recordDrop(noPasskey bool) {
+	if noPasskey {
+		js.abSkippedNoPasskey++
+		return
+	}
+	js.dropped++
+}
+
 // carryJournal re-renders one scope's previous journal items against the
 // current catalogue and prunes aged-out ones. A carried item whose torrent is
 // still curated is re-synthesized from current data (its title, size, marker,
@@ -178,9 +189,9 @@ func (w *FeedWriter) carryJournal(prevFeed []item, cur map[string][]curatedRef, 
 			kept = append(kept, it)
 			continue
 		}
-		fresh, ok, _ := renderJournalItem(it.Key, refs, infoFor, w.abPasskey)
+		fresh, ok, noPasskey := renderJournalItem(it.Key, refs, infoFor, w.abPasskey)
 		if !ok {
-			js.dropped++
+			js.recordDrop(noPasskey)
 			continue
 		}
 		fresh.FirstSeen = it.FirstSeen

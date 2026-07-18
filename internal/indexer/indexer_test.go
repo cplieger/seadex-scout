@@ -347,10 +347,10 @@ func TestIndexerEndToEnd(t *testing.T) {
 	}))
 	defer torznabSrv.Close()
 
-	ix := New(&Config{
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: torznabSrv.URL,
 		ProwlarrAPIKey: "prowlarr-key",
-	}, Deps{HTTP: torznabSrv.Client()}, path)
+	}}, Deps{HTTP: torznabSrv.Client()}, path)
 
 	// A real search (non-empty q) filters to the curation set loaded from the
 	// snapshot: the sample item matches by info hash, gets the best marker, and
@@ -408,7 +408,7 @@ func TestIndexerEndToEnd(t *testing.T) {
 // writes one the server reloads it on the next request.
 func TestFeedWriterReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, Deps{}, path)
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, Deps{}, path)
 
 	// No snapshot yet: the empty-q feed serves nothing.
 	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
@@ -684,7 +684,7 @@ func TestABFeedRequiresPasskey(t *testing.T) {
 		return rec.Body.String()
 	}
 
-	noKey := New(&Config{APIKey: "k", ABTorznabURL: "http://prowlarr/2/api"}, Deps{}, "")
+	noKey := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, Deps{}, "")
 	if body := serve(noKey, "/ab?t=search&apikey=k"); !strings.Contains(body, "<error") || !strings.Contains(body, "passkey") {
 		t.Errorf("ab empty-q without passkey: body = %q, want a Torznab <error> mentioning the passkey", body)
 	}
@@ -692,7 +692,7 @@ func TestABFeedRequiresPasskey(t *testing.T) {
 		t.Errorf("nyaa empty-q must not error: %q", body)
 	}
 
-	withKey := New(&Config{APIKey: "k", ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "PASSKEY"}, Deps{}, "")
+	withKey := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "PASSKEY"}}, Deps{}, "")
 	if body := serve(withKey, "/ab?t=search&apikey=k"); strings.Contains(body, "<error") {
 		t.Errorf("ab empty-q with passkey must not error: %q", body)
 	}
@@ -722,7 +722,7 @@ func TestServeUnconfiguredABServesNoPasskeyItems(t *testing.T) {
 	}
 
 	t.Run("unconfigured AB serves the empty-feed shape", func(t *testing.T) {
-		off := New(&Config{APIKey: "k", ABPasskey: "SECRETPASSKEY"}, Deps{}, path)
+		off := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABPasskey: "SECRETPASSKEY"}}, Deps{}, path)
 		body := serve(off)
 		if strings.Contains(body, "SECRETPASSKEY") {
 			t.Errorf("unconfigured AB response leaks the passkey: %q", body)
@@ -736,7 +736,7 @@ func TestServeUnconfiguredABServesNoPasskeyItems(t *testing.T) {
 	})
 
 	t.Run("configured AB serves the same snapshot", func(t *testing.T) {
-		on := New(&Config{APIKey: "k", ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "SECRETPASSKEY"}, Deps{}, path)
+		on := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "SECRETPASSKEY"}}, Deps{}, path)
 		body := serve(on)
 		if !strings.Contains(body, "<item>") || !strings.Contains(body, "Frieren - S01 (BD Remux 1080p) [PMR]") {
 			t.Errorf("configured AB did not serve the snapshot item: %q", body)
@@ -870,7 +870,7 @@ func TestReloadKeepsFeedOnMalformedSnapshot(t *testing.T) {
 	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
-	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, Deps{}, path)
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, Deps{}, path)
 	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
@@ -904,7 +904,7 @@ func TestReloadKeepsFeedOnZeroSnapshot(t *testing.T) {
 			if err := newTestWriter(path, "", false).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
 				t.Fatalf("Rebuild: %v", err)
 			}
-			ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, Deps{}, path)
+			ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, path)
 			if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 				t.Fatalf("initial feed = %d items, want 1", len(got))
 			}
@@ -949,7 +949,7 @@ func TestReloadRebuildsABDownloadURLsFromCurrentPasskey(t *testing.T) {
 
 	// A restart after rotating the passkey: the loaded AB feed must carry only
 	// the NEW credential.
-	ix := New(&Config{APIKey: "k", ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "NEW_PASSKEY"}, Deps{}, path)
+	ix := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "NEW_PASSKEY"}}, Deps{}, path)
 	got := ix.feedFor(upstreamAB)
 	if len(got) != 1 {
 		t.Fatalf("ab feed = %d items, want 1", len(got))
@@ -964,7 +964,7 @@ func TestReloadRebuildsABDownloadURLsFromCurrentPasskey(t *testing.T) {
 	// With NO passkey configured the persisted credential-bearing links must
 	// not be served at all: the AB feed clears (serve answers the /ab RSS
 	// check with a Torznab <error> in that state); Nyaa is untouched.
-	none := New(&Config{APIKey: "k", ABTorznabURL: "http://prowlarr/2/api"}, Deps{}, path)
+	none := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, Deps{}, path)
 	if got := none.feedFor(upstreamAB); len(got) != 0 {
 		t.Errorf("ab feed without a configured passkey = %d items, want 0", len(got))
 	}
@@ -976,7 +976,7 @@ func TestReloadRebuildsABDownloadURLsFromCurrentPasskey(t *testing.T) {
 	if err := os.WriteFile(noIDPath, []byte(noID), 0o600); err != nil {
 		t.Fatalf("write no-id snapshot: %v", err)
 	}
-	dropper := New(&Config{APIKey: "k", ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "NEW_PASSKEY"}, Deps{}, noIDPath)
+	dropper := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "NEW_PASSKEY"}}, Deps{}, noIDPath)
 	if got := dropper.feedFor(upstreamAB); len(got) != 0 {
 		t.Errorf("ab feed with an underivable item = %d items, want 0 (dropped, never served with the persisted credential)", len(got))
 	}
@@ -1000,7 +1000,7 @@ func TestReloadRetriesPreservedMtimeReplacementAfterFailure(t *testing.T) {
 		t.Fatalf("chtimes: %v", err)
 	}
 	// New's warm-up reload reads the malformed file and memoizes it as failed.
-	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}, Deps{}, path)
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, Deps{}, path)
 	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
 		t.Fatalf("initial feed = %d items, want 0 (malformed snapshot must not load)", len(got))
 	}
@@ -1049,8 +1049,7 @@ func nyaaTestEntries(n int) []seadex.Entry {
 // seed followed by one Rebuild, so every entry lands in the feed (the reload
 // tests need populated snapshots, not the first-run baseline).
 func seedRebuild(path string, entries []seadex.Entry) error {
-	const empty = `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[],"ab_feed":[]}`
-	if err := os.WriteFile(path, []byte(empty), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(emptyLedgerJSON), 0o600); err != nil {
 		return err
 	}
 	return NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{}).Rebuild(context.Background(), entries, nil)
@@ -1072,7 +1071,7 @@ func TestReloadInstallsPreservedMtimeReplacementAfterSuccess(t *testing.T) {
 	if err := os.Chtimes(path, loadedAt, loadedAt); err != nil {
 		t.Fatalf("chtimes: %v", err)
 	}
-	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, Deps{}, path)
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, path)
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
@@ -1121,7 +1120,7 @@ func TestReloadRetriesTransientReadFailureOnSameInode(t *testing.T) {
 		t.Fatalf("chtimes: %v", err)
 	}
 	// New's warm-up reload hits the read failure; it must stay retryable.
-	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, Deps{}, path)
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, path)
 	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
 		t.Fatalf("initial feed = %d items, want 0 (oversized snapshot must not load)", len(got))
 	}
@@ -1157,7 +1156,7 @@ func TestReloadConcurrentCallers(t *testing.T) {
 	if err := seedRebuild(path, nyaaTestEntries(1)); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
-	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, Deps{}, path)
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, path)
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
@@ -1255,7 +1254,7 @@ func TestReloadInstallsOlderMtimeSnapshot(t *testing.T) {
 		t.Fatalf("set restored snapshot mtime: %v", err)
 	}
 
-	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, Deps{}, "")
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, "")
 	ix.path = path
 
 	// Pre-install a newer-mtime snapshot the way a pre-restore cycle would,
@@ -1296,7 +1295,7 @@ func TestReloadSkipsUnchangedMtime(t *testing.T) {
 	if err := os.Chtimes(path, when, when); err != nil {
 		t.Fatalf("set first snapshot mtime: %v", err)
 	}
-	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, Deps{}, path)
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, path)
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
 		t.Fatalf("initial feed = %#v, want the first snapshot", got)
 	}
@@ -1327,7 +1326,7 @@ func TestReloadCoalescesConcurrentRefreshes(t *testing.T) {
 	if err := os.WriteFile(path, []byte(newJSON), 0o600); err != nil {
 		t.Fatalf("write snapshot: %v", err)
 	}
-	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, Deps{}, "")
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, "")
 	ix.path = path
 
 	// Simulate a refresh in progress: hold reloadMu exactly as the winning
@@ -1498,7 +1497,7 @@ func TestInstallSnapshotSkipsAlreadyInstalledFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	ix := New(&Config{NyaaTorznabURL: "http://prowlarr/1/api"}, Deps{}, "")
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, "")
 	if !ix.installSnapshot(info1, &snapshot{NyaaFeed: []item{{Title: "first"}}}) {
 		t.Fatal("first installSnapshot = false, want true")
 	}
@@ -1561,7 +1560,7 @@ func TestSearchUsesConfiguredABUpstream(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ix := New(&Config{ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}, Deps{HTTP: srv.Client()}, path)
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, Deps{HTTP: srv.Client()}, path)
 
 	items, stats := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "ab")
 	if len(items) != 1 {

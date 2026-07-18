@@ -288,7 +288,7 @@ func TestNewNilLoggerFallsBackToDefault(t *testing.T) {
 func TestSaveRetriesDetachedOnCancelledContext(t *testing.T) {
 	t.Parallel()
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := scoutTestLogger()
 	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
 	s := &Scout{deps: Deps{Store: store}, log: logger}
 	want := state.State{Baselined: true}

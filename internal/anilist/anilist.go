@@ -169,10 +169,10 @@ func (c *Client) FetchMany(ctx context.Context, ids []int) (map[int]Media, error
 		}
 
 		page, err := parseMediaPage(raw)
+		maps.Copy(out, page)
 		if err != nil {
 			return out, err
 		}
-		maps.Copy(out, page)
 	}
 	return out, nil
 }
@@ -394,7 +394,7 @@ func classifyNullMedia(errs []gqlError) error {
 	if len(errs) == 1 && (errs[0].Status == http.StatusNotFound || strings.EqualFold(normalized, "not found")) {
 		return fmt.Errorf("%w: %s", ErrNotFound, message)
 	}
-	return fmt.Errorf("anilist: query error: %s", message)
+	return mediaQueryError(errs[0])
 }
 
 // parseMedia decodes the GraphQL envelope into a Media. Only an explicit
@@ -454,8 +454,13 @@ type gqlPageResponse struct {
 
 // parseMediaPage decodes a batched Page(media) response into a map keyed by
 // AniList id. A GraphQL-level error or a missing/null Page or media field
-// fails the batch; ids absent from the media array are simply not in the map
-// (the caller treats them as not-found).
+// fails the batch; an invalid media record (missing id or rejected fields) is
+// skipped and surfaced via the returned error alongside the chunk's valid
+// records, so one poisoned record cannot discard the chunk or read as a total
+// outage - a skipped id is absent from the map AND covered by the non-nil
+// error, so the caller never negative-memoizes it. Ids absent from the media
+// array of an error-free response are simply not in the map (the caller
+// treats them as not-found).
 func parseMediaPage(raw []byte) (map[int]Media, error) {
 	var r gqlPageResponse
 	if err := json.Unmarshal(raw, &r); err != nil {
@@ -472,18 +477,25 @@ func parseMediaPage(raw []byte) (map[int]Media, error) {
 	}
 	media := *r.Data.Page.Media
 	out := make(map[int]Media, len(media))
+	var recordErr error
 	for i := range media {
 		md := &media[i]
 		if md.ID <= 0 {
-			return nil, fmt.Errorf("anilist: batch response media record %d missing id", i)
+			if recordErr == nil {
+				recordErr = fmt.Errorf("anilist: batch response media record %d missing id", i)
+			}
+			continue
 		}
 		parsed, err := md.toMedia()
 		if err != nil {
-			return nil, fmt.Errorf("anilist: batch response media record %d: %w", i, err)
+			if recordErr == nil {
+				recordErr = fmt.Errorf("anilist: batch response media record %d: %w", i, err)
+			}
+			continue
 		}
 		out[md.ID] = parsed
 	}
-	return out, nil
+	return out, recordErr
 }
 
 // dedupeTitles returns the usable (non-blank) titles in order, without

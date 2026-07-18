@@ -246,7 +246,8 @@ check from rejecting a curated release outright. That means a torrent that is
 actually dead still looks grabbable in the RSS feed, and a grab from it can sit
 stalled in the download queue. Minimum-seeder rejection only has real data to
 work with on **search** results, which pass the tracker's live seeder counts
-through.
+through — subject to the same floor: a live count of 0 also renders as 1, so
+only a minimum-seeders setting above 1 can reject a dead search result.
 
 Every item, either way, carries a **download-volume-factor marker**: SeaDex's
 _best_ release is tagged `0.75` (which the arrs read as AnimeBytes Freeleech25) and
@@ -380,10 +381,13 @@ the public internet. The Prowlarr API key is sent to Prowlarr in a request heade
 (never in a logged URL) and is never written to the logs.
 
 The synthesized feed is also persisted on disk between cycles as
-`/config/feed.json`, and its AnimeBytes items embed the `ab_passkey` in their
-download links — the file is written owner-only (0600), but treat it as
-secret-bearing: a `/config` backup captures the passkey even when your
-`config.yaml` only references it via `${SEADEX_SCOUT_AB_PASSKEY}`.
+`/config/feed.json`. AnimeBytes items are stored GUID-only — the persisted
+snapshot never embeds your `ab_passkey`; the served AB download links are
+derived from the currently configured passkey each time the snapshot is
+loaded (which is also why a rotated passkey takes effect on the next load).
+The file is still written owner-only (0600) as defense in depth, and a
+snapshot written by a pre-journal version may embed a passkey until the
+first rebuild scrubs it.
 
 ## How matching works
 

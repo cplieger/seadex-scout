@@ -25,7 +25,7 @@ func TestWriteFilesWritesTimestampedPair(t *testing.T) {
 		Rows:        []Row{{Title: "Frieren", Arr: "sonarr", Verdict: VerdictBest}},
 	}
 
-	if err := r.WriteFiles(context.Background(), dir, slog.Default()); err != nil {
+	if err := r.WriteFiles(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
 		t.Fatalf("WriteFiles: %v", err)
 	}
 

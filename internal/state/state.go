@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/cplieger/atomicfile/v2"
@@ -73,11 +74,13 @@ type State struct {
 	SeadexFailures int `json:"seadex_failures,omitempty"`
 	// Version is the persisted envelope's schema version, stamped with
 	// SchemaVersion by every Save (on the shallow copy it writes; the
-	// caller's State is never mutated). It drives no behavior today - a file
-	// with the field absent or zero loads as a legacy pre-version envelope,
-	// exactly like any other missing field - and exists so a future member
-	// move or rename can detect an old shape and migrate (or refuse)
-	// explicitly instead of silently zero-loading it.
+	// caller's State is never mutated). A file with the field absent or zero
+	// loads as a legacy pre-version envelope, exactly like any other missing
+	// field; a version NEWER than SchemaVersion is refused by Load (an image
+	// rollback must not silently zero-load moved members and then overwrite
+	// the newer-schema file); and a future member move or rename bumps
+	// SchemaVersion so the old shape can be migrated (or refused) explicitly
+	// instead of silently zero-loaded.
 	Version   int  `json:"version,omitempty"`
 	Baselined bool `json:"baselined,omitempty"`
 	// BaselineIncomplete marks a baseline seeded from an incomplete cycle: a
@@ -96,8 +99,9 @@ type State struct {
 
 // Store loads and saves the state file at a fixed path.
 type Store struct {
-	log  *slog.Logger
-	path string
+	log      *slog.Logger
+	path     string
+	readOnly bool
 }
 
 // NewStore returns a Store for the given state-file path. logger may be nil.
@@ -108,11 +112,33 @@ func NewStore(path string, logger *slog.Logger) *Store {
 	return &Store{log: logger, path: path}
 }
 
+// NewReadOnlyStore returns a Store for flows documented read-only on the
+// state file (the one-shot report): Load reports corruption without
+// quarantining, leaving the file in place for the daemon's own Load to
+// quarantine and surface on the container's log stream.
+func NewReadOnlyStore(path string, logger *slog.Logger) *Store {
+	st := NewStore(path, logger)
+	st.readOnly = true
+	return st
+}
+
+// staleTempMaxAge is how old an orphaned atomic-write temp must be before Load
+// reaps it. A live pending temp is seconds old (Save encodes and commits in one
+// pass), so an hour cannot race a concurrent writer in another process.
+const staleTempMaxAge = time.Hour
+
 // Load reads and decodes the state file. A missing file returns a zero State
 // and no error (cold start); a present but corrupt or oversized file is
 // quarantined and returns the error so the caller can decide (the scout logs
 // it and starts cold).
 func (s *Store) Load(ctx context.Context) (State, error) {
+	if removed, cleanErr := atomicfile.CleanupStaleTemps(filepath.Dir(s.path), staleTempMaxAge); cleanErr != nil {
+		if !errors.Is(cleanErr, fs.ErrNotExist) {
+			s.log.Warn("could not clean stale atomic-write temp files", "dir", filepath.Dir(s.path), "error", cleanErr)
+		}
+	} else if removed > 0 {
+		s.log.Info("removed stale atomic-write temp files", "dir", filepath.Dir(s.path), "removed", removed)
+	}
 	data, err := atomicfile.ReadBounded(ctx, s.path, maxStateBytes)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -122,7 +148,7 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 		if errors.Is(err, atomicfile.ErrFileTooLarge) {
 			// Save enforces maxStateBytes, so an oversized file can only be
 			// foreign or corrupt; preserve it like any other corruption.
-			s.quarantine()
+			s.maybeQuarantine()
 		}
 		return State{}, fmt.Errorf("state: read %s: %w", s.path, err)
 	}
@@ -132,13 +158,21 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 	// baselines findings and discards every cache) instead of surfacing the
 	// corruption. Save can never produce anything but an object.
 	if trimmed := bytes.TrimSpace(data); len(trimmed) == 0 || trimmed[0] != '{' {
-		s.quarantine()
+		s.maybeQuarantine()
 		return State{}, fmt.Errorf("state: decode %s: not a JSON object", s.path)
 	}
 	var st State
 	if err := json.Unmarshal(data, &st); err != nil {
-		s.quarantine()
+		s.maybeQuarantine()
 		return State{}, fmt.Errorf("state: decode %s: %w", s.path, err)
+	}
+	if st.Version > SchemaVersion {
+		// A file stamped by a newer binary (an image rollback): its members may
+		// have moved, so field-by-field zero-loading is exactly the silent
+		// discard SchemaVersion exists to prevent. Preserve the file and start
+		// cold; rolling forward again finds it at .corrupt (latest wins).
+		s.maybeQuarantine()
+		return State{}, fmt.Errorf("state: decode %s: schema version %d is newer than this binary supports (%d)", s.path, st.Version, SchemaVersion)
 	}
 	attrs := []any{
 		"path", s.path,
@@ -158,6 +192,17 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 	}
 	s.log.Debug("state loaded", attrs...)
 	return st, nil
+}
+
+// maybeQuarantine preserves a corrupt state file unless this Store belongs
+// to a read-only flow, which must leave the live path untouched so the
+// daemon's own Load detects and reports the corruption.
+func (s *Store) maybeQuarantine() {
+	if s.readOnly {
+		s.log.Warn("corrupt state file left in place for the daemon to quarantine", "path", s.path)
+		return
+	}
+	s.quarantine()
 }
 
 // quarantine preserves a corrupt state file beside the original so the decode
@@ -232,6 +277,13 @@ func (s *Store) Save(ctx context.Context, st *State) error {
 	if err != nil {
 		return fmt.Errorf("state: write %s: %w", s.path, err)
 	}
+	// Cleanup is a no-op after Commit (success or failure), so deferring it
+	// covers every mid-write error path and a panic without double-removal.
+	defer func() {
+		if clErr := pf.Cleanup(); clErr != nil {
+			s.log.Warn("could not remove pending state temp file", "path", pf.Name(), "error", clErr)
+		}
+	}()
 	// Enforce the reader's bound on write too: persisting a file Load is
 	// contractually unable to consume would silently discard the whole cache
 	// next cycle (fail-open). The encoder writes into the pending temp
@@ -247,9 +299,6 @@ func (s *Store) Save(ctx context.Context, st *State) error {
 	// reported count is the JSON size, comparable to the limit it names.
 	bw := &boundedWriter{w: pf, limit: maxStateBytes + 1}
 	if encErr := json.NewEncoder(bw).Encode(&sanitized); encErr != nil {
-		if clErr := pf.Cleanup(); clErr != nil {
-			s.log.Warn("could not remove pending state temp file", "path", pf.Name(), "error", clErr)
-		}
 		if errors.Is(encErr, errStateTooLarge) {
 			return fmt.Errorf("state: encode: %d bytes exceeds the %d-byte load limit; keeping previous state file", bw.attempted-1, maxStateBytes)
 		}
@@ -258,9 +307,6 @@ func (s *Store) Save(ctx context.Context, st *State) error {
 	// Drop the encoder's guaranteed trailing newline so the persisted size
 	// matches the json.Marshal encoding Load's bound is defined against.
 	if truncErr := pf.Truncate(bw.written - 1); truncErr != nil {
-		if clErr := pf.Cleanup(); clErr != nil {
-			s.log.Warn("could not remove pending state temp file", "path", pf.Name(), "error", clErr)
-		}
 		return fmt.Errorf("state: write %s: %w", s.path, truncErr)
 	}
 	res, err := pf.Commit(ctx)

@@ -35,8 +35,11 @@ func (ix *Indexer) statSnapshot() (os.FileInfo, bool) {
 			return nil, false
 		}
 		// Anything else (EACCES, EIO) silently freezes the served feed, so
-		// make it visible.
-		ix.log.Warn("indexer feed snapshot stat failed; keeping current feed", "path", ix.path, "error", err)
+		// make it visible - once per onset, not once per request.
+		if !ix.reloadDegraded {
+			ix.reloadDegraded = true
+			ix.log.Warn("indexer feed snapshot stat failed; keeping current feed", "path", ix.path, "error", err)
+		}
 		return nil, false
 	}
 	if ix.snapMissing {
@@ -96,6 +99,10 @@ func (ix *Indexer) reload(ctx context.Context) {
 		return
 	}
 	ix.failedFile = nil
+	if ix.reloadDegraded {
+		ix.reloadDegraded = false
+		ix.log.Info("indexer feed snapshot reload recovered", "path", ix.path)
+	}
 	if !ix.installSnapshot(info, &snap) {
 		return
 	}
@@ -152,7 +159,8 @@ func (ix *Indexer) installSnapshot(info os.FileInfo, snap *snapshot) bool {
 func (ix *Indexer) readSnapshot(ctx context.Context) (snapshot, bool, bool) {
 	data, err := atomicfile.ReadBounded(ctx, ix.path, maxFeedBytes)
 	if err != nil {
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !ix.reloadDegraded {
+			ix.reloadDegraded = true
 			ix.log.Warn("indexer feed snapshot unreadable; keeping current feed", "path", ix.path, "error", err)
 		}
 		return snapshot{}, false, false

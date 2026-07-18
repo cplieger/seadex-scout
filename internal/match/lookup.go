@@ -70,6 +70,13 @@ func (m *Matcher) jitteredTTL(minTTL time.Duration) time.Duration {
 	return minTTL + time.Duration(m.rand()*float64(memoTTLMax-minTTL))
 }
 
+// freshExpiry stamps one memo write's expiry: now plus a fresh jittered TTL.
+// Each write calls it separately, so entries written in the same pass (batch
+// or per-id) still expire staggered.
+func (m *Matcher) freshExpiry(now time.Time) time.Time {
+	return now.Add(m.jitteredTTL(memoTTLMin))
+}
+
 // migrateMemo stamps every legacy entry (a zero Expiry, persisted before the
 // expiry policy) with an expiry drawn from the wider [memoMigrationMin,
 // memoTTLMax) window, so the accumulated backlog's first renewal spreads
@@ -86,9 +93,9 @@ func (m *Matcher) migrateMemo(memo *Memo, now time.Time) {
 }
 
 // pruneExpired drops every entry still expired at the run's clock: renewals
-// were re-stamped with a future expiry during the pass, so what remains
-// expired was either not consulted this cycle or could not be renewed (an
-// outage), and both read as misses anyway — next cycle's batched prefetch
+// were re-stamped with a future expiry during the pass, and it only runs on a
+// clean (non-degraded) pass, so what remains expired was simply not consulted
+// this cycle and reads as a miss anyway — next cycle's batched prefetch
 // re-fetches whichever ids are still needed. Pruning keeps state.json from
 // accumulating dead entries for ids the match no longer consults.
 func pruneExpired(memo *Memo, now time.Time) {
@@ -114,7 +121,7 @@ func (r *matchRun) markIncomplete(aniListID int) {
 // entryExpiry draws one fresh jittered expiry from the run's clock. Each memo
 // write calls it separately, so entries renewed in the same pass still expire
 // staggered.
-func (r *matchRun) entryExpiry() time.Time { return r.now.Add(r.m.jitteredTTL(memoTTLMin)) }
+func (r *matchRun) entryExpiry() time.Time { return r.m.freshExpiry(r.now) }
 
 // prefetch batch-fetches into the memo every AniList id the per-entry pass will
 // consult but has no live (unexpired) entry for, so a cold cycle costs a
@@ -128,7 +135,7 @@ func (r *matchRun) entryExpiry() time.Time { return r.now.Add(r.m.jitteredTTL(me
 // an AniList outage) instead returns the pending ids so the per-entry pass
 // fails them fast: every per-id lookup would be doomed against the same outage,
 // and the unbounded futile tail of requests would only stall the cycle.
-func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *mapping.Index, lib *libIndex, memo *Memo, now time.Time) map[int]struct{} {
+func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *mapping.Index, lib *LibIndex, memo *Memo, now time.Time) map[int]struct{} {
 	if ctx.Err() != nil {
 		// Mirror the per-entry loop's cancellation guard: a batch issued on an
 		// already-cancelled cycle can only fail with context.Canceled, and the
@@ -168,7 +175,7 @@ func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *map
 				Titles: media.Titles,
 				Format: media.Format,
 				Year:   media.Year,
-				Expiry: now.Add(m.jitteredTTL(memoTTLMin)),
+				Expiry: m.freshExpiry(now),
 			}
 			continue
 		}
@@ -177,7 +184,7 @@ func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *map
 			// media. Memoize the negative so it is not re-fetched this run; the
 			// expiry gives the negative the same lifetime policy as a positive,
 			// so a show created on AniList later is eventually seen.
-			memo.Entries[id] = MemoEntry{NotFound: true, Expiry: now.Add(m.jitteredTTL(memoTTLMin))}
+			memo.Entries[id] = MemoEntry{NotFound: true, Expiry: m.freshExpiry(now)}
 		}
 		// err != nil and id not returned: leave uncached so matchEntry retries it
 		// via the single Fetch.
@@ -193,7 +200,7 @@ func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *map
 // An EXPIRED entry counts as pending — the same rule that makes it a miss in
 // lookupAniList — so renewals ride the batch instead of one per-id request
 // each.
-func pendingAniListIDs(entries []seadex.Entry, idx *mapping.Index, lib *libIndex, memo *Memo, now time.Time) []int {
+func pendingAniListIDs(entries []seadex.Entry, idx *mapping.Index, lib *LibIndex, memo *Memo, now time.Time) []int {
 	seen := make(map[int]struct{})
 	var ids []int
 	add := func(alID int) {

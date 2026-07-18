@@ -602,7 +602,10 @@ func nonEmpty(vals ...string) []string {
 // clean again (a recovery, not an arrival). An item genuinely absent from a
 // snapshot diffs as added/removed even when that snapshot is Partial - a
 // published walk keeps every failed series as a placeholder, so absence
-// means the arr itself no longer lists the item. A key that is Failed on
+// means the arr itself no longer lists the item. A key that debuts as a
+// Failed placeholder, or that disappears from the arr while Failed, still
+// counts as added/removed - a placeholder asserts arr presence even though
+// its file state is unknown. A key that is Failed on
 // either side never counts as Changed (there is no comparable file state to
 // compare).
 func DiffSnapshots(prev, cur *Snapshot) Diff {
@@ -610,26 +613,44 @@ func DiffSnapshots(prev, cur *Snapshot) Diff {
 	curByKey, curFailed := indexByKey(cur)
 	var d Diff
 	for k, c := range curByKey {
-		p, ok := prevByKey[k]
-		if !ok {
-			if _, wasFailed := prevFailed[k]; !wasFailed {
-				d.Added++
-			}
-			continue
-		}
-		if !sameItem(p, c) {
+		if p, ok := prevByKey[k]; ok && !sameItem(p, c) {
 			d.Changed++
 		}
 	}
-	for k := range prevByKey {
-		if _, ok := curByKey[k]; ok {
-			continue
-		}
-		if _, isFailed := curFailed[k]; !isFailed {
-			d.Removed++
+	d.Added = countAbsent(curByKey, curFailed, prevByKey, prevFailed)
+	d.Removed = countAbsent(prevByKey, prevFailed, curByKey, curFailed)
+	return d
+}
+
+// countAbsent counts keys present on the "from" side (its live index or
+// its Failed placeholders) but absent from the "other" side entirely
+// (neither live nor Failed). A key that debuts as - or disappears while -
+// a Failed placeholder still asserts arr presence, so it counts as a
+// genuine arrival/departure exactly once regardless of which side holds it.
+func countAbsent(fromByKey map[string]*Item, fromFailed map[string]struct{},
+	otherByKey map[string]*Item, otherFailed map[string]struct{}) int {
+	n := 0
+	for k := range fromByKey {
+		if !presentIn(k, otherByKey, otherFailed) {
+			n++
 		}
 	}
-	return d
+	for k := range fromFailed {
+		if !presentIn(k, otherByKey, otherFailed) {
+			n++
+		}
+	}
+	return n
+}
+
+// presentIn reports whether key k appears on a side, counting both its
+// comparable index and its Failed placeholders.
+func presentIn(k string, byKey map[string]*Item, failed map[string]struct{}) bool {
+	if _, ok := byKey[k]; ok {
+		return true
+	}
+	_, ok := failed[k]
+	return ok
 }
 
 // indexByKey keys a snapshot's comparable items by "arr:id" (values point

@@ -348,3 +348,37 @@ func TestTotalSize(t *testing.T) {
 		})
 	}
 }
+
+// TestSynthesizeTitleFilelessAndMarkerlessFallbacks pins the two degenerate
+// single-release shapes of the assembled-title path: a file-less torrent (no
+// marker source at all) assembles from the show title and the flags it still
+// holds, and a marker-less single video file (a movie-shaped OVA under a
+// series typing) gets no episode marker rather than an invented one.
+func TestSynthesizeTitleFilelessAndMarkerlessFallbacks(t *testing.T) {
+	got := synthesizeTitle(&seadex.Torrent{ReleaseGroup: "Grp"}, EntryInfo{Title: "Show"})
+	if want := "Show [Grp]"; got != want {
+		t.Errorf("synthesizeTitle(file-less) = %q, want %q", got, want)
+	}
+	got = synthesizeTitle(&seadex.Torrent{Files: []seadex.File{{Name: "Show Movie.mkv"}}}, EntryInfo{Title: "Show OVA"})
+	if want := "Show OVA"; got != want {
+		t.Errorf("synthesizeTitle(marker-less single file) = %q, want %q", got, want)
+	}
+}
+
+// TestPackSeasonIgnoresEpisodeNamedSidecars pins the media-file guard inside
+// the season tally: episode-token-bearing sidecar files (.ass subtitles) do
+// not vote for the pack's season label, so a pack whose subtitle set spans
+// another season still labels by its video files' season.
+func TestPackSeasonIgnoresEpisodeNamedSidecars(t *testing.T) {
+	files := []seadex.File{
+		{Name: "Show - S01E01 (1080p).mkv"},
+		{Name: "Show - S01E02 (1080p).mkv"},
+		{Name: "Show - S02E01 (1080p).ass"},
+		{Name: "Show - S02E02 (1080p).ass"},
+		{Name: "Show - S02E03 (1080p).ass"},
+	}
+	season, ok := packSeason(files)
+	if season != 1 || !ok {
+		t.Errorf("packSeason = (%d, %v), want (1, true) (sidecar tokens must not outvote media files)", season, ok)
+	}
+}

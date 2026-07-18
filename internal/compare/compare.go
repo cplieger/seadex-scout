@@ -103,6 +103,8 @@ type Finding struct {
 	DualAudio     bool `json:"dual_audio,omitempty"`
 }
 
+// --- Comparison flow ---
+
 // Comparer produces findings from matches under a fixed filter policy.
 type Comparer struct {
 	opts            filter.Options
@@ -327,6 +329,8 @@ func finalize(f *Finding, status Status, sev Severity) *Finding {
 	return f
 }
 
+// --- Dedupe-key encoding ---
+
 // dedupeKey keys a finding by AniList ID, status, recommended-group set, current
 // group, and release identity, so a same-group quality swap (new identity) or a
 // changed library state re-surfaces while an unchanged finding is suppressed.
@@ -400,12 +404,12 @@ var dedupePartEscaper = strings.NewReplacer(
 func escapeDedupePart(s string) string { return dedupePartEscaper.Replace(s) }
 
 // releaseIdentity returns the stable torrent identity used by finding dedupe.
-// SeaDex redacts AnimeBytes info hashes (the literal "<redacted>"), so use the
+// SeaDex redacts AnimeBytes info hashes (seadex.RedactedInfoHash), so use the
 // unique torrent page URL there; otherwise every same-group AB replacement
 // would keep the same key and the later replacement would be suppressed.
 func releaseIdentity(f *Finding) string {
 	hash := strings.TrimSpace(f.InfoHash)
-	if hash == "" || strings.EqualFold(hash, "<redacted>") {
+	if hash == "" || seadex.InfoHashRedacted(hash) {
 		return strings.TrimSpace(f.ReleaseURL)
 	}
 	return hash
@@ -414,8 +418,8 @@ func releaseIdentity(f *Finding) string {
 // animeBytesLinkKey returns the sorted toggle-gated (AnimeBytes) link URLs of
 // a finding as a single comma-joined string, or "" when the finding carries no
 // such link, so the dedupe key changes when the AB source set changes. A link
-// is toggle-gated when the URL-aware filter.ABVisible invariant - the same
-// boundary candidate filtering uses - would hide it with the toggle off, so a
+// is toggle-gated when filter.ABGated - the URL-aware invariant boundary
+// candidate filtering uses - would hide it with the toggle off, so a
 // mislabeled AB URL still keys the same as a correctly labeled one. Each URL
 // has its delimiters escaped before joining, matching dedupeKey's
 // collision-proofing: a SeaDex-supplied URL containing ',' or '|' cannot
@@ -423,13 +427,15 @@ func releaseIdentity(f *Finding) string {
 func animeBytesLinkKey(links []ReleaseLink) string {
 	var urls []string
 	for i := range links {
-		if !filter.ABVisible(links[i].Tracker, links[i].URL, false) {
+		if filter.ABGated(links[i].Tracker, links[i].URL) {
 			urls = append(urls, escapeDedupePart(strings.TrimSpace(links[i].URL)))
 		}
 	}
 	slices.Sort(urls)
 	return strings.Join(urls, ",")
 }
+
+// --- Headline candidate selection ---
 
 // representative picks the headline recommended release: highest resolution,
 // then a public tracker, then the first. It assumes len(pool) > 0.

@@ -35,7 +35,7 @@ var verdictDesc = map[Verdict]string{
 	VerdictUnlisted:    "You have a release SeaDex does not list as best or alt.",
 	VerdictAlt:         "You have a listed alt; SeaDex marks a different release best.",
 	VerdictUnverified:  "The release-group evidence is unknown on one side (an unidentifiable file or an untagged SeaDex release), so alignment could not be verified.",
-	VerdictNoFile:      "The mapped season or movie has no file on disk, or a whole-series comparison found no real season with files.",
+	VerdictNoFile:      "The mapped season, movie, or specials bucket has no file on disk, or a whole-series comparison found no real season with files.",
 	VerdictBest:        "You already have SeaDex's best release.",
 	VerdictNotOnSeaDex: "In your library and recognized as anime (Fribb-mapped) but SeaDex lists no entry, so there is no recommendation to compare against.",
 }
@@ -231,6 +231,16 @@ func AcquireReportLock(dir string) (func(), error) {
 // silently replaced. The caller holds the report lock across the whole
 // generate+write, so the probe cannot race a concurrent writer.
 func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) error {
+	// Reap stale atomicfile temps first: a crash (SIGKILL/OOM/power loss)
+	// between temp create and rename orphans a .atomicfile-<digits>.tmp in
+	// the report dir forever otherwise. The caller holds report.lock, so no
+	// concurrent report writer owns an in-flight temp, and CleanupStaleTemps
+	// matches only the exact temp-name convention - never a report file.
+	if removed, err := atomicfile.CleanupStaleTemps(dir, time.Hour); err != nil {
+		log.Warn("stale report temp cleanup failed", "dir", dir, "error", err)
+	} else if removed > 0 {
+		log.Info("reclaimed stale report temps", "dir", dir, "removed", removed)
+	}
 	base, err := reportPairStem(dir, r.GeneratedAt)
 	if err != nil {
 		return err

@@ -470,3 +470,34 @@ func TestDoTransportErrorPropagatesAndCountsAttempt(t *testing.T) {
 		t.Errorf("Stats().Calls = %d, want 1 (a failed transport attempt still counts)", got)
 	}
 }
+
+// TestFetchManyNoIDsMakesNoRequests pins the empty-input boundary of the
+// batched fetch: no ids means no chunks, no outbound attempts, an empty map,
+// and a nil error.
+func TestFetchManyNoIDsMakesNoRequests(t *testing.T) {
+	c := NewClient(http.DefaultClient, "http://127.0.0.1:1", 60, nil)
+	out, err := c.FetchMany(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("FetchMany(nil): %v", err)
+	}
+	if len(out) != 0 {
+		t.Errorf("FetchMany(nil) = %v, want empty map", out)
+	}
+	if got := c.Stats().Calls; got != 0 {
+		t.Errorf("Stats().Calls = %d, want 0 (no ids, no requests)", got)
+	}
+}
+
+// TestDoRejectsUnparseableURL pins the request-construction error branch: an
+// unparseable client URL surfaces as an error before any outbound attempt, so
+// Stats().Calls stays 0 (the attempt counter tracks outbound HTTP attempts).
+func TestDoRejectsUnparseableURL(t *testing.T) {
+	c := NewClient(http.DefaultClient, "://missing-scheme", 60, nil)
+	_, err := c.do(context.Background(), []byte(`{}`))
+	if err == nil {
+		t.Fatal("do() with an unparseable URL = nil error, want a request-construction error")
+	}
+	if got := c.Stats().Calls; got != 0 {
+		t.Errorf("Stats().Calls = %d, want 0 (a request that cannot be built is never an outbound attempt)", got)
+	}
+}

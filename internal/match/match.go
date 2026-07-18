@@ -128,7 +128,7 @@ func NewMatcher(anilistClient AniListClient, logger *slog.Logger) *Matcher {
 // reported in Result.IncompleteIDs so the caller can scope its degradation
 // handling to the affected entries.
 func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *library.Snapshot, idx *mapping.Index, memo Memo) Result {
-	lib := buildLibIndex(snap)
+	lib := NewLibIndex(snap)
 	if memo.Entries == nil {
 		memo.Entries = make(map[int]MemoEntry)
 	}
@@ -157,7 +157,13 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 		}
 		matches = append(matches, run.matchEntry(ctx, &entries[i]))
 	}
-	pruneExpired(&memo, now)
+	if !run.degraded {
+		// A degraded pass (outage, tripped breaker, shutdown) could not renew
+		// what expired; keep those entries so the feed's stale-title tier
+		// (scout/feedinfo.go) still serves them - they stay pending for next
+		// cycle's batch either way, so retention costs no AniList traffic.
+		pruneExpired(&memo, now)
+	}
 	return Result{Coverage: cov, Memo: memo, Matches: matches, Degraded: run.degraded, IncompleteIDs: run.incomplete}
 }
 
@@ -165,7 +171,7 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 // not thread seven parameters (two of them out-params) through every call.
 type matchRun struct {
 	m    *Matcher
-	lib  *libIndex
+	lib  *LibIndex
 	idx  *mapping.Index
 	memo *Memo
 	cov  *Coverage
@@ -194,10 +200,10 @@ type matchRun struct {
 // resolved by id (no lookup). needsLookup means AniList must be consulted:
 // either no Fribb record exists at all, or the record is id-less (a split
 // AniList<->arr mapping) so the title is the only remaining link. A record
-// that HAS its arr id but missed findByID simply is not in the library, so
+// that HAS its arr id but missed FindByID simply is not in the library, so
 // no lookup (it would only confirm the miss); a non-positive id never
 // resolves, so no lookup either.
-func aniListNeed(alID int, idx *mapping.Index, lib *libIndex) (rec mapping.Record, recOK bool, item *library.Item, needsLookup bool) {
+func aniListNeed(alID int, idx *mapping.Index, lib *LibIndex) (rec mapping.Record, recOK bool, item *library.Item, needsLookup bool) {
 	if alID <= 0 {
 		return mapping.Record{}, false, nil, false
 	}
@@ -205,7 +211,7 @@ func aniListNeed(alID int, idx *mapping.Index, lib *libIndex) (rec mapping.Recor
 	if !recOK {
 		return rec, false, nil, true
 	}
-	if found := lib.findByID(&rec); found != nil {
+	if found := lib.FindByID(&rec); found != nil {
 		return rec, true, found, false
 	}
 	return rec, true, nil, !rec.HasArrIdentifier()
@@ -244,7 +250,7 @@ func (r *matchRun) matchEntry(ctx context.Context, e *seadex.Entry) Match {
 		if item != nil {
 			return Match{Item: item, Entry: *e, Record: rec, Arr: arr, Source: SourceID}
 		}
-		// A record that carries its arr id but missed findByID is simply not in
+		// A record that carries its arr id but missed FindByID is simply not in
 		// the library and is unmatched directly, with no AniList lookup - this
 		// keeps the fallback off the ~thousands of SeaDex entries the operator
 		// does not have, which otherwise dominate a cold cycle's AniList
@@ -298,19 +304,21 @@ func formatArr(format string) string {
 	return recordArr(&mapping.Record{Type: norm})
 }
 
-// --- libIndex: library snapshot lookup indexes (by arr ID and normalized title) ---
+// --- LibIndex: library snapshot lookup indexes (by arr ID and normalized title) ---
 
-// libIndex indexes a library snapshot by external ID and normalized title.
-type libIndex struct {
+// LibIndex indexes a library snapshot by external ID and normalized title;
+// the ID lookup is arr-consistent (see FindByID). Shared by the matcher and
+// the feed-info builder (scout's feedEntryInfo).
+type LibIndex struct {
 	byTvdb  map[int]*library.Item
 	byTmdb  map[int]*library.Item
 	byImdb  map[string]*library.Item
 	byTitle map[string][]*library.Item
 }
 
-// buildLibIndex builds the lookup indexes over a snapshot's items.
-func buildLibIndex(snap *library.Snapshot) *libIndex {
-	li := &libIndex{
+// NewLibIndex builds the lookup indexes over a snapshot's items.
+func NewLibIndex(snap *library.Snapshot) *LibIndex {
+	li := &LibIndex{
 		byTvdb:  make(map[int]*library.Item),
 		byTmdb:  make(map[int]*library.Item),
 		byImdb:  make(map[string]*library.Item),
@@ -322,12 +330,12 @@ func buildLibIndex(snap *library.Snapshot) *libIndex {
 	for i := range snap.Items {
 		it := &snap.Items[i]
 		// Each ID index has exactly one arr-gated consumer (byTvdb only via the
-		// Sonarr branch of findByID, byTmdb/byImdb only via findMovie's Radarr
+		// Sonarr branch of FindByID, byTmdb/byImdb only via findMovie's Radarr
 		// gate), so index each map only with items of the arr that consumes it.
 		// Pooling both arrs added no lookup capability - it only let a wrong-arr
 		// item shadow the right-arr one under a shared key (TMDB movie and TV ids
 		// are disjoint namespaces over the same small-int key space, and TVDB
-		// reuses movie IMDb ids on the parent series), making findByID/findMovie
+		// reuses movie IMDb ids on the parent series), making FindByID/findMovie
 		// falsely miss a library item that IS present, depending on item order.
 		switch it.Arr {
 		case library.ArrSonarr:
@@ -348,7 +356,7 @@ func buildLibIndex(snap *library.Snapshot) *libIndex {
 }
 
 // indexTitles adds an item's primary and alternate titles to the title index.
-func (li *libIndex) indexTitles(it *library.Item) {
+func (li *LibIndex) indexTitles(it *library.Item) {
 	li.addTitle(it.Title, it)
 	for _, t := range it.AltTitles {
 		li.addTitle(t, it)
@@ -356,20 +364,20 @@ func (li *libIndex) indexTitles(it *library.Item) {
 }
 
 // addTitle indexes one title for an item under its normalized key.
-func (li *libIndex) addTitle(title string, it *library.Item) {
+func (li *LibIndex) addTitle(title string, it *library.Item) {
 	if key := normalizeTitle(title); key != "" {
 		li.byTitle[key] = append(li.byTitle[key], it)
 	}
 }
 
-// findByID looks up a library item by the arr IDs in a mapping record. The
+// FindByID looks up a library item by the arr IDs in a mapping record. The
 // match must be arr-consistent: a MOVIE record resolves only to a Radarr movie
-// and a series record only to a Sonarr series. This guards against a shared-ID
-// collision in the pooled TMDB/IMDb indexes — a movie whose Fribb record carries
-// a TV themoviedb_id (or an IMDb id TVDB reuses for the parent series) must not
-// silently link to the same-named Sonarr series (it would produce an
-// unscopable, meaningless row).
-func (li *libIndex) findByID(rec *mapping.Record) *library.Item {
+// and a series record only to a Sonarr series, so a movie whose Fribb record
+// carries a TV themoviedb_id (or an IMDb id TVDB reuses for the parent series)
+// cannot silently link to the same-named Sonarr series. NewLibIndex already
+// indexes each ID map with only the arr that consumes it; the arrItem check
+// restates that invariant at the lookup site as defense in depth.
+func (li *LibIndex) FindByID(rec *mapping.Record) *library.Item {
 	if rec.IsMovie() {
 		return li.findMovie(rec)
 	}
@@ -383,8 +391,8 @@ func (li *libIndex) findByID(rec *mapping.Record) *library.Item {
 // findMovie resolves a MOVIE record to a Radarr movie by TMDB movie id, then by
 // IMDb id (the fields mapping.Record.RoutedIDs enumerates, preserving the
 // TMDB-before-IMDb lookup order). Only Radarr items match (arr-consistency,
-// see findByID).
-func (li *libIndex) findMovie(rec *mapping.Record) *library.Item {
+// see FindByID).
+func (li *LibIndex) findMovie(rec *mapping.Record) *library.Item {
 	_, tmdbMovies, imdbIDs := rec.RoutedIDs()
 	for _, id := range tmdbMovies {
 		if it := arrItem(li.byTmdb[id], library.ArrRadarr); it != nil {
@@ -412,7 +420,7 @@ func arrItem(it *library.Item, arr string) *library.Item {
 // matching any of the titles (restricted to the arr when known), narrows by
 // year when known, and returns a match only when exactly one candidate remains.
 // An ambiguous set is logged and treated as a miss.
-func (li *libIndex) findByTitle(titles []string, year int, arr string, log *slog.Logger) *library.Item {
+func (li *LibIndex) findByTitle(titles []string, year int, arr string, log *slog.Logger) *library.Item {
 	candidates := li.titleCandidates(titles, arr)
 	if year != 0 {
 		narrowed := filterByYear(candidates, year)
@@ -434,7 +442,7 @@ func (li *libIndex) findByTitle(titles []string, year int, arr string, log *slog
 
 // titleCandidates returns the distinct library items whose (normalized) title
 // or alternate title equals any of titles, optionally restricted to arr.
-func (li *libIndex) titleCandidates(titles []string, arr string) []*library.Item {
+func (li *LibIndex) titleCandidates(titles []string, arr string) []*library.Item {
 	seen := make(map[*library.Item]struct{})
 	var candidates []*library.Item
 	for _, t := range titles {
@@ -473,6 +481,11 @@ var reTitleStrip = regexp.MustCompile(`[^a-z0-9]+`)
 // normalizeTitle lowercases a title and strips all non-alphanumeric characters
 // so punctuation, spacing, and separators do not defeat an otherwise exact
 // match. It is deliberately conservative (no transliteration or fuzzy edits).
+//
+// The key domain (lowercase [a-z0-9] only) is mirrored by
+// anilist.hasMatchableTitle, which pre-rejects payloads whose every title
+// normalizes to an empty key (anilist cannot import this package). Change
+// the two in lockstep.
 func normalizeTitle(s string) string {
 	return reTitleStrip.ReplaceAllString(strings.ToLower(s), "")
 }

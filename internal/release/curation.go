@@ -37,13 +37,5 @@ func CurationWarnings(tags []string) []string {
 // classification, and the Torznab feed all exclude it, so a torrent SeaDex
 // marks isBest but tags Broken cannot surface as something to grab.
 func CurationWarned(tags []string) bool {
-	for _, tag := range tags {
-		t := strings.TrimSpace(tag)
-		for _, w := range curationWarningTags {
-			if strings.EqualFold(t, w) {
-				return true
-			}
-		}
-	}
-	return false
+	return CurationWarnings(tags) != nil
 }

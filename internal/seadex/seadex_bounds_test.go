@@ -2,6 +2,7 @@ package seadex
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -168,5 +169,27 @@ func TestFetchEntriesByteCapErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cumulative page bytes exceeded cap") {
 		t.Errorf("error = %q, want cumulative-byte-cap context", err.Error())
+	}
+}
+
+// TestFetchAndAppendExhaustedByteBudgetErrors pins the pre-fetch budget gate:
+// once the cumulative byte budget is spent (tot.bytes == maxTotalBytes), the
+// next fetchAndAppend must return errCumulativeBytes WITHOUT dialing the
+// upstream (the base URL here is unroutable, so any request attempt fails the
+// test with a different error) and without touching the accumulated entries.
+func TestFetchAndAppendExhaustedByteBudgetErrors(t *testing.T) {
+	c := NewClient(&http.Client{}, "http://unreachable.invalid", 0, nil)
+	tot := fetchTotals{bytes: maxTotalBytes}
+	all := []Entry{{AniListID: 1}}
+
+	out, done, err := c.fetchAndAppend(context.Background(), 3, all, &tot)
+	if !errors.Is(err, errCumulativeBytes) {
+		t.Fatalf("fetchAndAppend error = %v, want errCumulativeBytes without any upstream request", err)
+	}
+	if done {
+		t.Error("fetchAndAppend done = true, want false on exhausted budget")
+	}
+	if len(out) != 1 || out[0].AniListID != 1 {
+		t.Errorf("out = %+v, want the accumulated entries untouched", out)
 	}
 }

@@ -39,9 +39,10 @@ func KeepNonTracker(r *release.Release, opts Options) (keep bool, reason string)
 	return true, ""
 }
 
-// Obtainable reports whether the operator could actually get this release: any
-// public tracker (Nyaa, AnimeTosho, RuTracker) is always obtainable; AnimeBytes
-// is obtainable only when the operator enables it (they have an account). Every
+// Obtainable reports whether the operator could actually get this release: a
+// public tracker (Nyaa, AnimeTosho, RuTracker) is obtainable unless the ABVisible
+// cross-check hides it (an AnimeBytes-hosted or malformed URL with the toggle
+// off); AnimeBytes is obtainable only when the operator enables it. Every
 // other tracker (rare on SeaDex, and any unrecognized one) is treated as not
 // obtainable, so a release the operator cannot grab never becomes a finding.
 // Obtainable additionally takes the release's raw upstream URL (exactly as
@@ -133,6 +134,17 @@ func ABVisible(tracker, rawURL string, animeBytes bool) bool {
 		return false
 	}
 	return !release.IsAnimeBytesHost(host)
+}
+
+// ABGated reports whether a release link is AnimeBytes-gated: it would be
+// hidden by the animebytes toggle when off, identified by the tracker label
+// OR the raw upstream URL's host (plus the conservative hides of malformed,
+// ambiguous, or non-ASCII host evidence). It is the single named form of the
+// "would ABVisible hide this with the toggle off" idiom shared by the dedupe
+// key (compare.animeBytesLinkKey) and the alert URL routing
+// (report.trackerURLs).
+func ABGated(tracker, rawURL string) bool {
+	return !ABVisible(tracker, rawURL, false)
 }
 
 // ExcludeSpecial reports whether an entry classified special should be dropped

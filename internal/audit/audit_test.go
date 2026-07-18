@@ -505,3 +505,39 @@ func TestAuditCurationWarnedReleaseAnnotatedNotCounted(t *testing.T) {
 		}
 	})
 }
+
+// TestAuditExcludedSpecialMatchStillCoversItem pins the covered-mark ordering
+// in Audit's row loop: an item whose only SeaDex match is a special dropped
+// by exclude_specials is still marked covered BEFORE the specials filter
+// fires, so it never resurfaces as not_on_seadex - the item IS on SeaDex
+// (via the special entry), so a not_on_seadex row would be wrong even though
+// its verdict row is filtered out. The sibling TV record keeps the item
+// catalogued, so this test fails if the covered mark ever moves below the
+// specials filter.
+func TestAuditExcludedSpecialMatchStillCoversItem(t *testing.T) {
+	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe", ExcludeSpecials: true})
+	snap := &library.Snapshot{Items: []library.Item{{
+		Arr: library.ArrSonarr, ArrID: 1, Title: "SpecialOnly", TvdbID: 700,
+		Groups: []string{"g"}, HasFile: true,
+	}}}
+	idx := mapping.NewIndex([]mapping.Record{
+		{AniListID: 5, Type: "OVA", TvdbID: 700},
+		{AniListID: 6, Type: "TV", TvdbID: 700},
+	})
+	matches := []match.Match{{
+		Item:   &snap.Items[0],
+		Arr:    library.ArrSonarr,
+		Source: match.SourceID,
+		Entry:  seadex.Entry{AniListID: 5},
+		Record: mapping.Record{Type: "OVA", TvdbID: 700},
+	}}
+
+	rep := a.Audit(matches, snap, idx, nil)
+
+	if len(rep.Rows) != 0 {
+		t.Errorf("rows = %+v, want none (the excluded-special match still covers its item, which must not resurface as not_on_seadex)", rep.Rows)
+	}
+	if n := rep.Totals[string(VerdictNotOnSeaDex)]; n != 0 {
+		t.Errorf("not_on_seadex total = %d, want 0", n)
+	}
+}

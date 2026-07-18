@@ -1077,3 +1077,30 @@ func TestLoader_refreshCache_additiveUpdateKeepsRoutingFloor(t *testing.T) {
 		t.Errorf("accepted refresh RejectedRefreshes = %d, want 0 (acceptance resets the streak)", next.RejectedRefreshes)
 	}
 }
+
+// TestLoader_refreshCache_freshUnusableCacheStillFetches pins the
+// cache-usability gate on the fresh-reuse fast path - the first of the four
+// cache-state gates cacheUsable documents, and the only one previously
+// unpinned: a cache inside the refresh window whose records index to nothing
+// (records:[{}] - a zero AniList ID buildIndex drops) must NOT be reused as
+// fresh, because serving it would idle a whole refresh window on an empty
+// effective map; the loader must fall through to the fetch and accept the
+// upstream body.
+func TestLoader_refreshCache_freshUnusableCacheStillFetches(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
+	}))
+	defer ts.Close()
+	prev := &Cache{
+		FetchedAt: time.Now(),   // inside the refresh window: freshness alone would reuse it
+		Records:   []Record{{}}, // non-empty slice, zero effective index
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	if err != nil {
+		t.Fatalf("refreshCache with a fresh-but-unusable cache error: %v", err)
+	}
+	if len(next.Records) != 1 || next.Records[0].AniListID != 42 {
+		t.Fatalf("fresh-but-unusable cache was reused as fresh: records = %+v, want fetched record id 42", next.Records)
+	}
+}

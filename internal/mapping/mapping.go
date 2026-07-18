@@ -36,6 +36,22 @@ const (
 	baseDelay        = time.Second
 )
 
+// maxValidatorBytes bounds one persisted HTTP validator (ETag/Last-Modified).
+// Real validators are well under 1 KiB; Go's transport admits response
+// headers up to ~10 MB, and an unbounded hostile validator would be
+// re-persisted into state.json every cycle (past the state Save cap it
+// blocks the whole state from persisting). An over-long validator is
+// dropped, so the next refresh is simply an unconditional 200.
+const maxValidatorBytes = 1 << 10
+
+// boundedValidator returns v, or empty when it exceeds maxValidatorBytes.
+func boundedValidator(v string) string {
+	if len(v) > maxValidatorBytes {
+		return ""
+	}
+	return v
+}
+
 // --- Record: the per-entry mapping and its arr-routing predicates ---
 
 // Record is the resolved mapping for one AniList entry: its media type and the
@@ -90,6 +106,29 @@ func (r *Record) IsSpecial() bool {
 	}
 }
 
+// --- Cache + Index: persisted state and the AniList-ID lookup ---
+
+// Cache is the persisted mapping state: the parsed Fribb records plus the HTTP
+// validators and timestamp needed for the next conditional GET.
+type Cache struct {
+	FetchedAt    time.Time `json:"fetched_at"`
+	ETag         string    `json:"etag,omitempty"`
+	LastModified string    `json:"last_modified,omitempty"`
+	Records      []Record  `json:"records,omitempty"`
+	// RejectedRefreshes counts consecutive fresh-200 refreshes the acceptance
+	// guards (the validation floor, the below-half-size shrink guard, the
+	// parse-time record cap) rejected in favour of the stale map. It persists
+	// across cycles and restarts, resets to 0 on any accepted refresh or 304,
+	// and rides on the *StaleMapError (ConsecutiveRejections) so the scout
+	// can escalate its degraded-mapping log at RejectionEscalationThreshold.
+	// Transient fetch or parse failures neither advance nor reset it — with
+	// one exception: a record-cap breach (errRecordCapExceeded) surfaces as a
+	// parse error but is a persistent guard refusal (an over-cap upstream
+	// list never self-heals), so it advances the streak like any other guard
+	// rejection.
+	RejectedRefreshes int `json:"rejected_refreshes,omitempty"`
+}
+
 // RejectionEscalationThreshold is the consecutive-rejection streak
 // (Cache.RejectedRefreshes) at which the scout escalates its degraded-mapping
 // log from WARN to ERROR. It is the single home of the shared escalation
@@ -113,29 +152,6 @@ const RejectionEscalationThreshold = 8
 // scout's library shrink guard (libraryShrinkFactor in internal/scout) rather
 // than re-declared there.
 const ShrinkGuardFactor = 2
-
-// --- Cache + Index: persisted state and the AniList-ID lookup ---
-
-// Cache is the persisted mapping state: the parsed Fribb records plus the HTTP
-// validators and timestamp needed for the next conditional GET.
-type Cache struct {
-	FetchedAt    time.Time `json:"fetched_at"`
-	ETag         string    `json:"etag,omitempty"`
-	LastModified string    `json:"last_modified,omitempty"`
-	Records      []Record  `json:"records,omitempty"`
-	// RejectedRefreshes counts consecutive fresh-200 refreshes the acceptance
-	// guards (the validation floor, the below-half-size shrink guard, the
-	// parse-time record cap) rejected in favour of the stale map. It persists
-	// across cycles and restarts, resets to 0 on any accepted refresh or 304,
-	// and rides on the *StaleMapError (ConsecutiveRejections) so the scout
-	// can escalate its degraded-mapping log at RejectionEscalationThreshold.
-	// Transient fetch or parse failures neither advance nor reset it — with
-	// one exception: a record-cap breach (errRecordCapExceeded) surfaces as a
-	// parse error but is a persistent guard refusal (an over-cap upstream
-	// list never self-heals), so it advances the streak like any other guard
-	// rejection.
-	RejectedRefreshes int `json:"rejected_refreshes,omitempty"`
-}
 
 // Index is an AniList-ID-keyed lookup over mapping records.
 type Index struct {
@@ -218,16 +234,20 @@ func buildIndex(records []Record) *Index {
 // arr-identifier coverage floor a newly accepted refresh must meet
 // (validateRefreshedRecords), without the previous-relative type and shrink
 // checks. Every cache-state gate (the fresh-cache fast path, staleOrFail,
-// reuseCachedRecords, conditionalGet) keys on this predicate so "has cached
-// bytes" can never diverge from "has a mapping the consumers can use".
+// reuseCachedRecords, conditionalGet, and acceptRefresh's shrink guard) keys
+// on this predicate so "has cached bytes" can never diverge from "has a
+// mapping the consumers can use".
 func cacheUsable(records []Record) bool {
 	records = deduplicateRecords(records)
 	if buildIndex(records).Len() == 0 {
 		return false
 	}
-	minimum := max(1, (len(records)+99)/100)
-	return arrIdentifierCount(records) >= minimum
+	return arrIdentifierCount(records) >= coverageFloor(len(records))
 }
+
+// coverageFloor returns the conservative 1% acceptance floor (ceiling
+// division, minimum 1) shared by cacheUsable and validateRefreshedRecords.
+func coverageFloor(n int) int { return max(1, (n+99)/100) }
 
 // --- Loader: conditional fetch, acceptance guards, stale-map degradation ---
 
@@ -443,8 +463,8 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 	// below-half policy home) as part of the cache-acceptance invariant and
 	// keep the stale map (multiplication avoids integer-division rounding for
 	// odd counts).
-	if prevCount := buildIndex(prev.Records).Len(); prevCount > 0 && len(records)*ShrinkGuardFactor < prevCount {
-		// The noCache argument is unreachable here (prevCount > 0 guarantees the
+	if prevCount := buildIndex(prev.Records).Len(); cacheUsable(prev.Records) && len(records)*ShrinkGuardFactor < prevCount {
+		// The noCache argument is unreachable here (cacheUsable guarantees the
 		// stale branch); it exists only to satisfy rejectRefresh's signature.
 		return rejectRefresh(prev,
 			fmt.Sprintf("refresh returned %d records, less than half of previous %d", len(records), prevCount),
@@ -454,8 +474,8 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 	return Cache{
 		FetchedAt:    time.Now(),
 		Records:      records,
-		ETag:         res.Validators.ETag,
-		LastModified: res.Validators.LastModified,
+		ETag:         boundedValidator(res.Validators.ETag),
+		LastModified: boundedValidator(res.Validators.LastModified),
 	}, nil
 }
 
@@ -476,7 +496,7 @@ func validateRefreshedRecords(previous, records []Record) error {
 	if len(records) == 0 {
 		return errors.New("refresh returned zero records")
 	}
-	minimum := max(1, (len(records)+99)/100)
+	minimum := coverageFloor(len(records))
 	if covered := arrIdentifierCount(records); covered < minimum {
 		return fmt.Errorf("arr identifier coverage %d/%d is below minimum %d", covered, len(records), minimum)
 	}
@@ -495,7 +515,7 @@ func validateRefreshedRecords(previous, records []Record) error {
 	// regression to reject.
 	previous = deduplicateRecords(previous)
 	previousTyped := typedRecordCount(previous)
-	previousMinimum := max(1, (len(previous)+99)/100)
+	previousMinimum := coverageFloor(len(previous))
 	previousMetFloor := len(previous) > 0 && previousTyped >= previousMinimum
 	typed := typedRecordCount(records)
 	if previousMetFloor && typed < minimum && typed < previousTyped {
@@ -659,7 +679,7 @@ func (l *Loader) readOverrides(ctx context.Context) ([]Record, bool) {
 		shortened := false
 		for _, k := range unknown[:shown] {
 			if len(k) > maxLoggedKeyBytes {
-				k = k[:maxLoggedKeyBytes] + "..."
+				k = strings.ToValidUTF8(k[:maxLoggedKeyBytes], "") + "..."
 				shortened = true
 			}
 			logged = append(logged, k)

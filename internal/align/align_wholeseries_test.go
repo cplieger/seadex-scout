@@ -1,12 +1,14 @@
 package align_test
 
 import (
+	"maps"
 	"reflect"
 	"testing"
 
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
+	"pgregory.net/rapid"
 )
 
 // wholeRec is the record shape that classifies as a whole-series comparison:
@@ -199,4 +201,53 @@ func TestDecideWholeSeriesOutcomes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDecideWholeSeriesUnknownAltEvidence pins the alt-rung unverifiability
+// propagation through the whole-series aggregation: a filed season whose known
+// groups provenly lack the best but whose alt comparison is indeterminate (an
+// unknown-only alt set) marks the season unverifiable, so the series reads
+// unverified - never the confident unlisted divergence the evidence cannot
+// prove.
+func TestDecideWholeSeriesUnknownAltEvidence(t *testing.T) {
+	d := decideWhole(map[int][]string{1: {"kitsune"}}, []string{"a&c"}, []string{"nogrp"})
+	if d.Standing != align.StandingUnverified {
+		t.Errorf("Standing = %v, want StandingUnverified (unknown-only alt: the divergence is unproven)", d.Standing)
+	}
+	if d.Outcome != align.OutcomeUnverifiable {
+		t.Errorf("Outcome = %v, want OutcomeUnverifiable", d.Outcome)
+	}
+}
+
+// TestDecideWholeSeriesMonotoneDowngrade property-checks the conservative
+// aggregation's core invariant: growing a whole-series item by one more filed
+// real season can only hold or downgrade the standing (Best -> Unverified ->
+// Alt -> Unlisted), never upgrade it - the per-season flags only accumulate,
+// so an already-proven downgrade or unverifiability cannot be washed out by
+// adding evidence. A violation would mean one season's verdict masked
+// another's, the exact bug the conservative aggregation exists to prevent.
+func TestDecideWholeSeriesMonotoneDowngrade(t *testing.T) {
+	conservativeness := map[align.Standing]int{
+		align.StandingBest:       0,
+		align.StandingUnverified: 1,
+		align.StandingAlt:        2,
+		align.StandingUnlisted:   3,
+	}
+	groupPool := []string{"a&c", "kh", "kitsune", "nogrp", "sam"}
+	best := []string{"a&c"}
+	alt := []string{"kh"}
+	rapid.Check(t, func(t *rapid.T) {
+		groupsGen := rapid.SliceOfN(rapid.SampledFrom(groupPool), 1, 3)
+		seasons := rapid.MapOfN(rapid.IntRange(1, 6), groupsGen, 1, 4).Draw(t, "seasons")
+		before := decideWhole(seasons, best, alt)
+
+		grown := maps.Clone(seasons)
+		grown[rapid.IntRange(7, 9).Draw(t, "extra_season")] = groupsGen.Draw(t, "extra_groups")
+		after := decideWhole(grown, best, alt)
+
+		if conservativeness[after.Standing] < conservativeness[before.Standing] {
+			t.Fatalf("adding a season upgraded the standing: %v -> %v (seasons %v, grown %v)",
+				before.Standing, after.Standing, seasons, grown)
+		}
+	})
 }

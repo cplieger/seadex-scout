@@ -31,29 +31,9 @@ func TestLoader_Load_logsSkippedOverrideCount(t *testing.T) {
 	if rec.CountExact("mapping: overrides missing anilist_id skipped") != 1 {
 		t.Fatalf("Load logs = %v, want one skipped-overrides warning", rec.Messages())
 	}
-	if !skippedCountIs(rec, 2) {
+	if !attrRendered(rec, "skipped", "2") {
 		t.Errorf("Load skipped count logs = %v, want skipped=2", rec.Messages())
 	}
-}
-
-// skippedCountIs reports whether any captured record carries a "skipped"
-// attribute equal to want (capture.Recorder.Contains matches messages only;
-// the count rides in attrs).
-func skippedCountIs(rec *capture.Recorder, want int) bool {
-	for _, r := range rec.Records() {
-		found := false
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "skipped" && a.Value.String() == strconv.Itoa(want) {
-				found = true
-				return false
-			}
-			return true
-		})
-		if found {
-			return true
-		}
-	}
-	return false
 }
 
 // TestLoader_Load_warnsOnUnknownOverrideKeys pins the unknown-key diagnostic:

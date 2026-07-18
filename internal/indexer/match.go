@@ -83,7 +83,7 @@ func trackerKeyFromURL(raw string) string {
 	if err != nil {
 		return ""
 	}
-	host := strings.ToLower(u.Hostname())
+	host := u.Hostname()
 	switch {
 	case release.IsNyaaHost(host):
 		if id := nyaaID(raw); id != "" {

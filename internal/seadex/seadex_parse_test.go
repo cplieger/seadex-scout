@@ -155,3 +155,32 @@ func TestDecodePageDuplicateExpandNullMatchesUnmarshal(t *testing.T) {
 		t.Errorf("torrent group = %q, want PMR preserved", got.Items[0].Expand.Trs[0].ReleaseGroup)
 	}
 }
+
+// TestDecodePageDuplicateExpandObjectMatchesUnmarshal is the object arm of the
+// duplicate-key oracle: json.Unmarshal decodes a duplicate "expand" object
+// INTO the same struct value, overwriting only the fields it carries, so a
+// torrent-bearing "expand" followed by a duplicate empty "expand":{} must
+// preserve the decoded torrents instead of replacing the whole struct.
+func TestDecodePageDuplicateExpandObjectMatchesUnmarshal(t *testing.T) {
+	body := []byte(`{"totalItems":1,"totalPages":1,"items":[{"alID":7,` +
+		`"expand":{"trs":[{"releaseGroup":"PMR","tracker":"Nyaa","isBest":true,` +
+		`"url":"https://nyaa.si/view/1"}]},"expand":{}}]}`)
+
+	got, err := decodePage(body)
+	if err != nil {
+		t.Fatalf("decodePage: %v", err)
+	}
+	var want pbList
+	if err := json.Unmarshal(body, &want); err != nil {
+		t.Fatalf("json.Unmarshal oracle: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("decodePage = %+v, want json.Unmarshal parity %+v", got, want)
+	}
+	if len(got.Items) != 1 || len(got.Items[0].Expand.Trs) != 1 {
+		t.Fatalf("duplicate expand:{} wiped the decoded torrents: %+v", got)
+	}
+	if got.Items[0].Expand.Trs[0].ReleaseGroup != "PMR" {
+		t.Errorf("torrent group = %q, want PMR preserved", got.Items[0].Expand.Trs[0].ReleaseGroup)
+	}
+}

@@ -170,6 +170,8 @@ func TestClassifyCodec(t *testing.T) {
 		{name: "name marker wins over conflicting notes", in: Input{Names: []string{"Show 1080p x264"}, Notes: "an x265 encode also exists"}, want: "x264"},
 		{name: "notes fill the gap when name has no marker", in: Input{Names: []string{"Show 1080p"}, Notes: "x265 encode"}, want: "x265"},
 		{name: "no codec marker", in: Input{Names: []string{"Show 1080p"}}, want: ""},
+		{name: "dotted episode number is not a codec marker", in: Input{Names: []string{"One.Punch.264.1080p"}}, want: ""},
+		{name: "dotted h.265 token from name", in: Input{Names: []string{"Show 1080p H.265"}}, want: "x265"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -418,5 +420,27 @@ func TestClassifyUnderscoreDelimitedName(t *testing.T) {
 	}
 	if got.DualAudio {
 		t.Error("DualAudio = true, want false: a name tag is not structured dual-audio evidence")
+	}
+}
+
+// TestClassifyTrackerPassthrough pins the Tracker field's passthrough
+// contract in Classify: the raw source tracker label is whitespace-trimmed
+// but otherwise preserved verbatim (casing and unknown names included), since
+// the field is serialized into findings and log attributes as the source
+// spelled it while classification happens separately via TrackerType.
+func TestClassifyTrackerPassthrough(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{in: " Nyaa ", want: "Nyaa"},
+		{in: "AB", want: "AB"},
+		{in: "  ", want: ""},
+		{in: "SomeRandomTracker", want: "SomeRandomTracker"},
+	}
+	for _, tc := range tests {
+		if got := Classify(&Input{Tracker: tc.in}).Tracker; got != tc.want {
+			t.Errorf("Classify(Tracker: %q).Tracker = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }

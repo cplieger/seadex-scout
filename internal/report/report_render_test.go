@@ -121,3 +121,22 @@ func TestSeadexTags(t *testing.T) {
 		})
 	}
 }
+
+// TestTrackerURLsRoutesMislabeledABURLToABSlot pins the URL-aware half of
+// the AB routing rule: the tracker label is untrusted upstream data, so a
+// link labeled "Nyaa" whose URL points at animebytes.tv must land in the AB
+// slot (hidden while the toggle is off), never in the public/Nyaa slot, and
+// the genuine Nyaa link still wins the nyaa slot.
+func TestTrackerURLsRoutesMislabeledABURLToABSlot(t *testing.T) {
+	links := []compare.ReleaseLink{
+		{Tracker: "Nyaa", URL: "https://animebytes.tv/torrents.php?id=9"},
+		{Tracker: "Nyaa", URL: "https://nyaa.si/view/9"},
+	}
+	nyaa, ab := trackerURLs(links)
+	if ab != "https://animebytes.tv/torrents.php?id=9" {
+		t.Errorf("ab = %q, want the mislabeled animebytes.tv URL routed to the AB slot", ab)
+	}
+	if nyaa != "https://nyaa.si/view/9" {
+		t.Errorf("nyaa = %q, want the genuine Nyaa URL", nyaa)
+	}
+}

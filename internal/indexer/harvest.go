@@ -59,15 +59,23 @@ func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]item,
 		return stats
 	}
 	budget := harvestSearchBudget
+	failed := make(map[string]bool, len(w.upstreams))
 	for _, g := range groups {
 		if ctx.Err() != nil || budget == 0 {
 			break
+		}
+		if failed[g.scope] {
+			continue // upstream already failed this rebuild: keep synthesized titles, retry next cycle
 		}
 		u := upstreamForScope(w.upstreams, g.scope)
 		if u == nil {
 			continue // tracker not configured for searches: never queried
 		}
-		budget = w.harvestShow(ctx, u, g, infoFor(g.alID), index, titles, budget, &stats)
+		var ok bool
+		budget, ok = w.harvestShow(ctx, u, g, infoFor(g.alID), index, titles, budget, &stats)
+		if !ok {
+			failed[g.scope] = true
+		}
 	}
 	return stats
 }
@@ -75,8 +83,11 @@ func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]item,
 // harvestShow runs one show's query (plus offset pages while its items remain
 // unmatched, full pages keep coming, and budget remains) against its tracker's
 // upstream, returning the remaining budget. A query failure warns and ends the
-// show's harvest for this rebuild (the next rebuild retries).
-func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGroup, meta EntryInfo, index, titles map[string]string, budget int, stats *harvestStats) int {
+// show's harvest for this rebuild (the next rebuild retries). It additionally
+// reports ok=false when the show's query failed (the upstream is likely down;
+// the caller skips its remaining groups this rebuild - they keep synthesized
+// titles and retry next cycle).
+func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGroup, meta EntryInfo, index, titles map[string]string, budget int, stats *harvestStats) (int, bool) {
 	params := harvestParams(meta, g.scope)
 	for offset := 0; budget > 0 && ctx.Err() == nil; offset += harvestPageSize {
 		budget--
@@ -85,17 +96,17 @@ func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGrou
 		results, err := u.search(ctx, page)
 		if err != nil {
 			if ctx.Err() == nil {
-				w.log.Warn("indexer title harvest query failed; keeping synthesized titles",
+				w.log.Warn("indexer title harvest query failed; skipping this upstream's remaining shows this rebuild",
 					"upstream", u.name, "al_id", g.alID, "error", err)
 			}
-			return budget
+			return budget, false
 		}
 		stats.matched += matchHarvest(results, index, titles)
 		if !groupPending(g, titles) || len(results) < harvestPageSize {
-			return budget
+			return budget, true
 		}
 	}
-	return budget
+	return budget, true
 }
 
 // pendingHarvest collects the journal items lacking a cached title into
@@ -180,11 +191,12 @@ func harvestPage(params url.Values, offset int) url.Values {
 }
 
 // matchHarvest matches one page of Prowlarr results back to pending journal
-// items by every identity the result carries - the tracker id parsed from its
-// page URLs (comments/guid, the same numeric-validated extraction the search
-// curation match uses) and its info hash - caching each matched real title.
-// An already-cached key is never overwritten: torrents are immutable, so the
-// first harvested title stands.
+// items by the single journal key each result's identity signals agree on -
+// the tracker id parsed from its page URLs (comments/guid, the same
+// numeric-validated extraction the search curation match uses) and its info
+// hash; contradictory signals fail closed and title nothing - caching each
+// matched real title. An already-cached key is never overwritten: torrents
+// are immutable, so the first harvested title stands.
 func matchHarvest(results []item, index, titles map[string]string) int {
 	n := 0
 	for i := range results {
@@ -192,17 +204,15 @@ func matchHarvest(results []item, index, titles map[string]string) int {
 		if title == "" {
 			continue
 		}
-		for _, id := range harvestIdentity(&results[i]) {
-			key, ok := index[id]
-			if !ok {
-				continue
-			}
-			if _, done := titles[key]; done {
-				continue
-			}
-			titles[key] = title
-			n++
+		key := resolveHarvestKey(&results[i], index)
+		if key == "" {
+			continue
 		}
+		if _, done := titles[key]; done {
+			continue
+		}
+		titles[key] = title
+		n++
 	}
 	return n
 }
@@ -222,6 +232,32 @@ func harvestIdentity(it *item) []string {
 		ids = append(ids, it.InfoHash)
 	}
 	return ids
+}
+
+// resolveHarvestKey resolves a Prowlarr result to the single journal key its
+// identity signals agree on. It fails closed - returning "" - when the keys
+// parsed from the result's two page URLs name different releases, or when two
+// signals resolve to different journal items: a healthy Prowlarr emits one
+// consistent identity per item, so a contradictory result is an untrusted
+// response that must not title anything (the same fail-closed rule the search
+// curation match applies in acceptScopedKeys).
+func resolveHarvestKey(it *item, index map[string]string) string {
+	kc, kg := trackerKeyFromURL(it.InfoURL), trackerKeyFromURL(it.GUID)
+	if kc != "" && kg != "" && kc != kg {
+		return ""
+	}
+	var key string
+	for _, id := range harvestIdentity(it) {
+		k, ok := index[id]
+		if !ok {
+			continue
+		}
+		if key != "" && k != key {
+			return ""
+		}
+		key = k
+	}
+	return key
 }
 
 // groupPending reports whether any of the group's journal keys still lacks a

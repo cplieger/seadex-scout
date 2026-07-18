@@ -41,23 +41,23 @@ func TestFindByIDArrConsistency(t *testing.T) {
 		{Arr: library.ArrSonarr, ArrID: 1, Title: "Death Parade", TvdbID: 10, ImdbID: "tt4279012"},
 		{Arr: library.ArrRadarr, ArrID: 2, Title: "Some Movie", TmdbID: 20, ImdbID: "tt2222222"},
 	}}
-	li := buildLibIndex(snap)
+	li := NewLibIndex(snap)
 
 	// A movie record whose IMDb id collides with the Sonarr series must not match.
 	movieCollide := &mapping.Record{Type: "MOVIE", IMDbIDs: []string{"tt4279012"}}
-	if it := li.findByID(movieCollide); it != nil {
+	if it := li.FindByID(movieCollide); it != nil {
 		t.Errorf("movie record must not match a Sonarr series, got %q", it.Title)
 	}
 
 	// A movie record with a real Radarr TMDB movie id matches the movie.
 	movieOK := &mapping.Record{Type: "MOVIE", TmdbMovies: []int{20}}
-	if it := li.findByID(movieOK); it == nil || it.Arr != library.ArrRadarr {
+	if it := li.FindByID(movieOK); it == nil || it.Arr != library.ArrRadarr {
 		t.Errorf("movie record should match the Radarr movie, got %v", it)
 	}
 
 	// A series record matches the Sonarr series by TVDB id.
 	series := &mapping.Record{Type: "TV", TvdbID: 10}
-	if it := li.findByID(series); it == nil || it.Arr != library.ArrSonarr {
+	if it := li.FindByID(series); it == nil || it.Arr != library.ArrSonarr {
 		t.Errorf("series record should match the Sonarr series, got %v", it)
 	}
 }
@@ -77,18 +77,18 @@ func TestFindByIDNoWrongArrShadowing(t *testing.T) {
 	}
 	for name, items := range orders {
 		t.Run(name, func(t *testing.T) {
-			li := buildLibIndex(&library.Snapshot{Items: items})
+			li := NewLibIndex(&library.Snapshot{Items: items})
 
 			byTmdb := &mapping.Record{Type: "MOVIE", TmdbMovies: []int{20}}
-			if it := li.findByID(byTmdb); it == nil || it.Arr != library.ArrRadarr {
+			if it := li.FindByID(byTmdb); it == nil || it.Arr != library.ArrRadarr {
 				t.Errorf("TMDB movie lookup = %v, want the Radarr movie (series must not shadow it)", it)
 			}
 			byImdb := &mapping.Record{Type: "MOVIE", IMDbIDs: []string{"tt2222222"}}
-			if it := li.findByID(byImdb); it == nil || it.Arr != library.ArrRadarr {
+			if it := li.FindByID(byImdb); it == nil || it.Arr != library.ArrRadarr {
 				t.Errorf("IMDb movie lookup = %v, want the Radarr movie (series must not shadow it)", it)
 			}
 			bySeries := &mapping.Record{Type: "TV", TvdbID: 10}
-			if it := li.findByID(bySeries); it == nil || it.Arr != library.ArrSonarr {
+			if it := li.FindByID(bySeries); it == nil || it.Arr != library.ArrSonarr {
 				t.Errorf("TVDB series lookup = %v, want the Sonarr series", it)
 			}
 		})
@@ -323,7 +323,7 @@ func TestMatchTitleFallbackAmbiguousIsUnmapped(t *testing.T) {
 // entry stays unmapped instead.
 func TestMatchTitleFallbackRejectsWrongYear(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{{Arr: library.ArrSonarr, ArrID: 1, Title: "Clannad", Year: 2007}}}
-	li := buildLibIndex(snap)
+	li := NewLibIndex(snap)
 	if got := li.findByTitle([]string{"Clannad"}, 2008, library.ArrSonarr, slog.New(slog.DiscardHandler)); got != nil {
 		t.Fatalf("wrong-year title fallback matched %+v; want nil", got)
 	}
@@ -449,7 +449,7 @@ func TestMatchTitleFallbackSucceedsWithoutRecord(t *testing.T) {
 }
 
 // TestMatchAltTitleFallbackFiltersArrAndDedupes pins the title-index corners in
-// one flow: an id-less series record (TvdbID 0, so findByID returns nil for a
+// one flow: an id-less series record (TvdbID 0, so FindByID returns nil for a
 // non-movie) falls to the title fallback; the library item is found via its
 // ALTERNATE title; an unnormalizable AniList title ("!!!") is skipped; a
 // same-titled item in the WRONG arr is filtered out; and the item matched under
@@ -485,12 +485,12 @@ func TestFindMovieResolvesByIMDbWhenTmdbMisses(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 2, Title: "Some Movie", TmdbID: 20, ImdbID: "tt2222222"},
 	}}
-	li := buildLibIndex(snap)
+	li := NewLibIndex(snap)
 	rec := &mapping.Record{Type: "MOVIE", TmdbMovies: []int{999}, IMDbIDs: []string{"tt2222222"}}
 
-	it := li.findByID(rec)
+	it := li.FindByID(rec)
 	if it == nil || it.ArrID != 2 || it.Arr != library.ArrRadarr {
-		t.Fatalf("findByID = %+v, want the Radarr movie resolved via the IMDb fallback", it)
+		t.Fatalf("FindByID = %+v, want the Radarr movie resolved via the IMDb fallback", it)
 	}
 }
 
@@ -658,16 +658,16 @@ func (p *partialThenPerIDAniList) FetchMany(_ context.Context, ids []int) (map[i
 	return out, context.DeadlineExceeded
 }
 
-// TestBuildLibIndexNilSnapshot pins the defensive nil-snapshot guard: a nil
+// TestNewLibIndexNilSnapshot pins the defensive nil-snapshot guard: a nil
 // snapshot yields an empty but usable index whose lookups all miss instead of
 // panicking.
-func TestBuildLibIndexNilSnapshot(t *testing.T) {
-	li := buildLibIndex(nil)
+func TestNewLibIndexNilSnapshot(t *testing.T) {
+	li := NewLibIndex(nil)
 	if li == nil {
-		t.Fatal("buildLibIndex(nil) = nil, want an empty index")
+		t.Fatal("NewLibIndex(nil) = nil, want an empty index")
 	}
-	if it := li.findByID(&mapping.Record{Type: "TV", TvdbID: 10}); it != nil {
-		t.Errorf("findByID on an empty index = %+v, want nil", it)
+	if it := li.FindByID(&mapping.Record{Type: "TV", TvdbID: 10}); it != nil {
+		t.Errorf("FindByID on an empty index = %+v, want nil", it)
 	}
 	if got := li.findByTitle([]string{"Clannad"}, 0, library.ArrSonarr, slog.New(slog.DiscardHandler)); got != nil {
 		t.Errorf("findByTitle on an empty index = %+v, want nil", got)
