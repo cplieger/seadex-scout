@@ -174,18 +174,13 @@ func TestDedupeKeyBoundsOversizedComponents(t *testing.T) {
 // component set - the raw and hashed output domains stay disjoint, so two
 // distinct findings can never share a dedupe key through the prefix.
 func TestDedupeKeyDomainSeparatesRawAndHashed(t *testing.T) {
-	forged := hashedKeyPrefix + strings.Repeat("0", 64)
+	oversized := []string{strings.Repeat("x", maxKeyComponentBytes+1)}
+	forged := hashKeyParts(oversized)
 	if got := boundedPart(forged); got == forged {
 		t.Errorf("boundedPart(%q) returned the raw hashed-identity spelling; raw and hashed domains must be disjoint", forged)
 	}
 	if got := boundedJoinParts([]string{forged}); got == forged {
 		t.Errorf("boundedJoinParts([%q]) returned the raw hashed-identity spelling; raw and hashed domains must be disjoint", forged)
-	}
-	// A forged in-bound component must also differ from the genuine hashed
-	// identity of an oversized set that happens to hash to the forged hex.
-	oversized := []string{strings.Repeat("x", maxKeyComponentBytes+1)}
-	if boundedPart(forged) == hashKeyParts(oversized) {
-		t.Error("forged in-bound component collides with an oversized set's hashed identity")
 	}
 	// Honest legacy components (no hashed-identity prefix) keep their raw
 	// escaped representation, so persisted dedupe state stays valid.

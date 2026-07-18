@@ -56,11 +56,11 @@ type Loader struct {
 }
 
 // boundedValidator returns v, or empty when it exceeds maxValidatorBytes,
-// logging the drop so a persistently oversized upstream validator (which
-// forces an unconditional full re-download every cycle) is observable.
+// logging the drop so degraded conditional revalidation is observable. If no
+// other validator remains, the next refresh is an unconditional full fetch.
 func (l *Loader) boundedValidator(name, v string) string {
 	if len(v) > maxValidatorBytes {
-		l.log.Warn("mapping: dropping oversized HTTP validator, next refresh will be unconditional", "validator", name, "length", len(v))
+		l.log.Warn("mapping: dropping oversized HTTP validator", "validator", name, "length", len(v))
 		return ""
 	}
 	return v

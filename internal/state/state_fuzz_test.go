@@ -12,9 +12,10 @@ import (
 )
 
 // newerSchemaState reports whether data is what Load classifies as valid
-// newer-schema state: a JSON object envelope that decodes cleanly with a
-// Version beyond SchemaVersion (mirroring Load's acceptance steps, so the
-// fuzz oracle and production cannot disagree on which branch fired).
+// newer-schema state: a JSON object envelope whose decoded Version is beyond
+// SchemaVersion, even when another member's older-binary shape produces a
+// type-level decode error (mirroring Load's acceptance steps, so the fuzz
+// oracle and production cannot disagree on which branch fired).
 func newerSchemaState(data []byte) bool {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 || trimmed[0] != '{' {

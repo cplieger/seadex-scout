@@ -59,8 +59,9 @@ func TestDiffSnapshotsPropIdentity(t *testing.T) {
 	})
 }
 
-// TestDiffSnapshotsPropSymmetry pins the diff's direction symmetry for
-// complete snapshots: an addition one way is a removal the other way, and
+// TestDiffSnapshotsPropSymmetry pins the diff's direction symmetry across
+// producer-valid complete and partial snapshots: an addition one way is a
+// removal the other way, and
 // Changed is direction-independent (sameItem is symmetric).
 func TestDiffSnapshotsPropSymmetry(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {

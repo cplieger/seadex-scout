@@ -116,7 +116,7 @@ func TestTrackerTableBaseURLsAreHTTPS(t *testing.T) {
 // without going through LookupTrackerByHost, since its fail direction
 // inverts the lookup): every byte below utf8.RuneSelf is ASCII - 0x7F (DEL),
 // the last ASCII byte, passes - while 0x80 (utf8.RuneSelf itself, the first
-// non-ASCII byte and the lead byte of many UTF-8 homograph encodings) and
+// non-ASCII byte and a UTF-8 continuation-byte value) and
 // any multi-byte sequence are rejected; the empty string is vacuously ASCII
 // (the callers own the empty-host policy).
 func TestIsASCIIHost(t *testing.T) {

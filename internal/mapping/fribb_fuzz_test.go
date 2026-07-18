@@ -45,8 +45,8 @@ func FuzzParseFribb(f *testing.F) {
 				t.Errorf("parseFribb Type = %q, want normalized %q", r.Type, want)
 			}
 			for _, id := range r.TmdbMovies {
-				if id == 0 {
-					t.Errorf("parseFribb TmdbMovies contains zero: %+v", r)
+				if id <= 0 {
+					t.Errorf("parseFribb TmdbMovies contains non-positive id: %+v", r)
 				}
 			}
 			for _, s := range r.IMDbIDs {
