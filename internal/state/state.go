@@ -181,6 +181,19 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 	}
 	var st State
 	if err := json.Unmarshal(data, &st); err != nil {
+		if st.Version > SchemaVersion {
+			// A type-level decode error on a file stamped by a newer binary
+			// is the "moved member" case SchemaVersion exists for:
+			// json.Unmarshal validates syntax first and, on an
+			// UnmarshalTypeError, still populates every decodable field
+			// (including Version) before returning, so the stamp is
+			// trustworthy here. The shape is valid for the newer image;
+			// preserve it and block Save exactly like the clean
+			// newer-version path below instead of quarantining it away
+			// from the roll-forward.
+			s.unsupportedVersion = st.Version
+			return State{}, fmt.Errorf("state: decode %s: schema version %d is newer than this binary supports (%d)", s.path, st.Version, SchemaVersion)
+		}
 		s.maybeQuarantine()
 		return State{}, fmt.Errorf("state: decode %s: %w", s.path, err)
 	}
@@ -219,6 +232,13 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 // to a read-only flow, which must leave the live path untouched so the
 // daemon's own Load detects and reports the corruption.
 func (s *Store) maybeQuarantine() {
+	// Load positively classified the live file as corrupt, so a newer-schema
+	// block remembered from an earlier Load no longer describes the file at
+	// the live path (unsupportedVersion is documented as what the LAST Load
+	// found there); clear it so the next Save is judged against reality. The
+	// generic read-error path keeps the flag: an unreadable file may still
+	// be the newer-schema state.
+	s.unsupportedVersion = 0
 	if s.readOnly {
 		s.log.Warn("corrupt state file left in place for the daemon to quarantine", "path", s.path)
 		return

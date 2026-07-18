@@ -223,3 +223,26 @@ func TestFetchAndAppendExhaustedByteBudgetErrors(t *testing.T) {
 		t.Errorf("out = %+v, want the accumulated entries untouched", out)
 	}
 }
+
+// TestFetchAndAppendExhaustedElementBudgetErrors pins the pre-fetch element
+// budget gate, the element twin of the byte-budget test: once the cumulative
+// decoded-element budget is spent (tot.elements == maxTotalElements), the next
+// fetchAndAppend must return errCumulativeElements WITHOUT dialing the
+// upstream (the base URL here is unroutable, so any request attempt fails the
+// test with a different error) and without touching the accumulated entries.
+func TestFetchAndAppendExhaustedElementBudgetErrors(t *testing.T) {
+	c := NewClient(&http.Client{}, "http://unreachable.invalid", 0, nil)
+	tot := fetchTotals{elements: maxTotalElements}
+	all := []Entry{{AniListID: 1}}
+
+	out, done, err := c.fetchAndAppend(context.Background(), 3, all, &tot)
+	if !errors.Is(err, errCumulativeElements) {
+		t.Fatalf("fetchAndAppend error = %v, want errCumulativeElements without any upstream request", err)
+	}
+	if done {
+		t.Error("fetchAndAppend done = true, want false on exhausted budget")
+	}
+	if len(out) != 1 || out[0].AniListID != 1 {
+		t.Errorf("out = %+v, want the accumulated entries untouched", out)
+	}
+}

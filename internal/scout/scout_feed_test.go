@@ -3,6 +3,7 @@ package scout
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"testing"
 	"time"
@@ -187,7 +188,7 @@ func TestCycleFeedRebuildErrorIsNonFatal(t *testing.T) {
 	}
 	warns := 0
 	for _, r := range recorder.Records() {
-		if r.Message == "indexer feed rebuild failed; keeping previous feed" && r.Level.String() == "WARN" {
+		if r.Message == "indexer feed rebuild failed; keeping previous feed" && r.Level == slog.LevelWarn {
 			warns++
 		}
 	}

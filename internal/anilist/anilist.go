@@ -24,12 +24,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/cplieger/httpx/v3"
+	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/titlekey"
-	"github.com/cplieger/textsafe"
 )
 
 const (
@@ -369,27 +368,18 @@ type gqlResponse struct {
 
 // sanitizeUpstreamMessage bounds and cleans an untrusted upstream error
 // message before it is wrapped into an error that reaches the logs. The
-// unsafe-rune classification is the shared textsafe policy (C0/C1 controls,
-// DEL, Unicode line and paragraph separators, and every Bidi_Control rune),
-// applied here with CR/LF also stripped (keepCRLF=false) because the message
-// lands inline in a single log line, where a raw newline could forge log
-// lines. Each unsafe rune becomes a space, and the retained message is capped
-// at 200 bytes on a rune boundary (truncated output appends "...", for a
-// 203-byte maximum) so a long message stays valid UTF-8.
+// message lands inline in a single log line, so the strict single-line
+// policy applies (runesafe.SanitizeSingleLine: C0 controls including CR/LF,
+// DEL, C1 controls, Unicode line and paragraph separators, and every
+// Bidi_Control rune each become a space), and the retained message is capped
+// at 200 bytes on a rune boundary via runesafe.CapBytes (truncated output
+// appends "...", for a 203-byte maximum) so a long message stays valid
+// UTF-8.
 func sanitizeUpstreamMessage(s string) string {
 	const maxLen = 200
-	s = strings.Map(func(r rune) rune {
-		if textsafe.IsUnsafe(r, false) {
-			return ' '
-		}
-		return r
-	}, s)
+	s = runesafe.SanitizeSingleLine(s)
 	if len(s) > maxLen {
-		cut := maxLen
-		for cut > 0 && !utf8.RuneStart(s[cut]) {
-			cut--
-		}
-		s = s[:cut] + "..."
+		s = runesafe.CapBytes(s, maxLen) + "..."
 	}
 	return s
 }
@@ -509,7 +499,7 @@ func parseMediaPage(raw []byte) (map[int]Media, error) {
 		parsed, err := md.toMedia()
 		if err != nil {
 			if recordErr == nil {
-				recordErr = fmt.Errorf("%w media record %d: %v", errBatchRecord, i, err)
+				recordErr = fmt.Errorf("%w media record %d (id %d): %v", errBatchRecord, i, md.ID, err)
 			}
 			continue
 		}

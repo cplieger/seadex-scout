@@ -54,3 +54,22 @@ func TestEscapeJoinPartsRoundTripProperty(t *testing.T) {
 		}
 	})
 }
+
+// TestHashKeyPartsPreservesElementBoundariesProperty pins the
+// length-prefixed hashing of oversized dedupe-key components: merging two
+// adjacent elements (["a","b"] -> ["ab"]) always changes the hash, so
+// ["a,b"] and ["a","b"] cannot collide in the hashed regime any more than in
+// the escaped one. A naive join-then-hash collapses exactly this boundary
+// and would reintroduce the finding-suppression collision class the bounding
+// exists to keep out of hostile bulk SeaDex data.
+func TestHashKeyPartsPreservesElementBoundariesProperty(t *testing.T) {
+	part := rapid.StringOfN(rapid.RuneFrom([]rune{'a', 'b', ',', '|', '\\'}), 0, 4, -1)
+	gen := rapid.SliceOfN(part, 2, 4)
+	rapid.Check(t, func(t *rapid.T) {
+		parts := gen.Draw(t, "parts")
+		merged := append([]string{parts[0] + parts[1]}, parts[2:]...)
+		if hashKeyParts(parts) == hashKeyParts(merged) {
+			t.Errorf("hashKeyParts collapsed element boundaries: %q and %q share a hash", parts, merged)
+		}
+	})
+}

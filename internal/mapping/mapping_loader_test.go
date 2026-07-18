@@ -1197,3 +1197,50 @@ func TestLoader_refreshCache_firstBootDuplicateAmplificationRejected(t *testing.
 		t.Errorf("rejected first-boot refresh produced %d records, want 0", len(next.Records))
 	}
 }
+
+// TestLoader_refreshCache_acceptedDuplicateKeepsLastRecord pins
+// deduplicateRecords' documented last-record-wins and stable-order semantics
+// on an ACCEPTED refresh: the persisted Cache.Records (and hence the served
+// index) must carry the LAST duplicate's data at the last-occurrence
+// position, matching buildIndex's map-overwrite semantics. The existing
+// duplicate-ID tests only exercise REJECTED refreshes, where which duplicate
+// survives is never observable.
+func TestLoader_refreshCache_acceptedDuplicateKeepsLastRecord(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[` +
+			`{"anilist_id":9,"type":"tv","tvdb_id":900},` +
+			`{"anilist_id":1,"type":"tv","tvdb_id":100},` +
+			`{"anilist_id":9,"type":"tv","tvdb_id":901},` +
+			`{"anilist_id":2,"type":"tv","tvdb_id":200},` +
+			`{"anilist_id":3,"type":"tv","tvdb_id":300}]`))
+	}))
+	defer ts.Close()
+
+	prev := &Cache{
+		FetchedAt: time.Now().Add(-2 * time.Hour),
+		Records: []Record{
+			{AniListID: 1, Type: "TV", TvdbID: 100},
+			{AniListID: 2, Type: "TV", TvdbID: 200},
+			{AniListID: 3, Type: "TV", TvdbID: 300},
+			{AniListID: 4, Type: "TV", TvdbID: 400},
+		},
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	if err != nil {
+		t.Fatalf("refresh with one duplicated ID returned error %v, want accepted (4 effective records against 4 stale)", err)
+	}
+	if len(next.Records) != 4 {
+		t.Fatalf("accepted refresh kept %d records, want 4 (duplicate collapsed to one effective record)", len(next.Records))
+	}
+	wantIDs := []int{1, 9, 2, 3}
+	for i, want := range wantIDs {
+		if next.Records[i].AniListID != want {
+			t.Errorf("accepted refresh record[%d].AniListID = %d, want %d (stable last-occurrence order)", i, next.Records[i].AniListID, want)
+		}
+	}
+	rec9 := next.Records[1]
+	if rec9.AniListID == 9 && rec9.TvdbID != 901 {
+		t.Errorf("duplicated record persisted TvdbID = %d, want 901 (last record wins, matching buildIndex)", rec9.TvdbID)
+	}
+}

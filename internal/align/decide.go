@@ -68,9 +68,11 @@ const (
 	// instead of a confident aligned silence or a better-release warning, and
 	// the audit records unverified.
 	OutcomeUnverifiable
-	// OutcomeMixed means the unit is not aligned and its known evidence spans
-	// more than one group, so no single current group can be attributed - a
-	// manual-review nudge rather than a false divergence.
+	// OutcomeMixed means the unit is not aligned and its group evidence spans
+	// more than one member (in a whole-series aggregate the unknown-evidence
+	// sentinel counts: an unknown season beside a proven divergence still
+	// prevents attributing a single current group), so no single current group
+	// can be attributed - a manual-review nudge rather than a false divergence.
 	OutcomeMixed
 	// OutcomeDiverged means the unit is provenly not aligned with a single
 	// attributable group state: the actionable divergence (the daemon's
@@ -188,8 +190,9 @@ func wholeSeriesStanding(s summary) Standing {
 // beats the no-best nudge, no-best beats any group comparison, proven
 // alignment beats everything group-shaped, an unverifiable comparison beats
 // both the mixed nudge and the divergence claim (neither may be asserted on
-// unknown evidence), and mixed (a not-aligned unit whose known evidence spans
-// more than one group) beats the single-group divergence.
+// unknown evidence), and mixed (a not-aligned unit whose group evidence -
+// including the unknown sentinel in a whole-series union - spans more than
+// one member) beats the single-group divergence.
 func outcomeOf(st Standing, groupCount int, noBest bool) Outcome {
 	switch {
 	case st == StandingNoFile:

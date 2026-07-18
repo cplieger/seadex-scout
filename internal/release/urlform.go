@@ -68,10 +68,11 @@ type URLForm struct {
 	// form, or the authority reparse of a schemeless-host form. Empty when
 	// the string carries none (or the form hides it; see Class).
 	Host string
-	// Scheme is the canonicalized parse's scheme with the source's casing
-	// preserved (url.Parse does NOT lowercase it), so consumers must compare
-	// it case-insensitively; empty when the string carries none or did not
-	// parse.
+	// Scheme is the canonicalized parse's scheme, which url.Parse folds to
+	// lowercase (an "HTTPS://" source reads "https", RFC 3986 canonical
+	// form), so the value is already case-folded; empty when the string
+	// carries none or did not parse. Case-insensitive comparison by consumers
+	// remains correct as defense in depth.
 	Scheme string
 	// Port is the canonicalized parse's port string; empty when none is
 	// present or the string did not parse. net/url only accepts an

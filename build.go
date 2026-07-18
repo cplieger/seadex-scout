@@ -145,6 +145,7 @@ func feedWriter(cfg *config.Config, log *slog.Logger) (fw scout.FeedWriter, clea
 	prowlarrHTTP := httpx.NewClient(indexerUpstreamTimeout)
 	writer := indexer.NewFeedWriter(&indexer.FeedWriterConfig{
 		Path:           config.DefaultIndexerFeedPath,
+		SeaDexBaseURL:  config.DefaultSeaDexBaseURL,
 		UpstreamConfig: upstreamConfig(cfg),
 	}, indexer.Deps{HTTP: prowlarrHTTP, Logger: log.With("component", "indexer")})
 	return writer, func() { httpx.Close(prowlarrHTTP) }

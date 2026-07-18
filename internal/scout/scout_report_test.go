@@ -270,7 +270,7 @@ func TestReportStaleMapWarnsAndStillAudits(t *testing.T) {
 // to render.
 func TestReportDegradedMatching(t *testing.T) {
 	t.Run("anilist transiently degraded renders incomplete section", func(t *testing.T) {
-		logger := scoutTestLogger()
+		logger, recorder := capture.New()
 		sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
 		s := New(&Deps{
 			Logger:  logger,
@@ -296,6 +296,9 @@ func TestReportDegradedMatching(t *testing.T) {
 		// item (covered by no SeaDex match) renders as its not_on_seadex row.
 		if len(rep.Rows) != 1 || rep.Rows[0].Verdict != audit.VerdictNotOnSeaDex {
 			t.Errorf("rows = %+v, want the one not_on_seadex row for the unaffected library item", rep.Rows)
+		}
+		if n := recorder.CountExact("report: anilist degraded; affected entries listed in the incomplete section"); n != 1 {
+			t.Errorf("report anilist-degraded WARN count = %d, want 1", n)
 		}
 	})
 	t.Run("shutdown during matching still errors", func(t *testing.T) {

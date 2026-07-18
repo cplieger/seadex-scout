@@ -126,3 +126,16 @@ func TestFeedEntryInfoFailedPlaceholderStillTitles(t *testing.T) {
 		t.Errorf("info(1).Title = %q, want the Failed placeholder's title", got.Title)
 	}
 }
+
+// TestFeedEntryInfoEmptyMemoTitles pins the memo guard's third clause: a
+// cached, found memo entry whose Titles slice is empty supplies nothing - the
+// closure must return the zero EntryInfo instead of indexing Titles[0].
+func TestFeedEntryInfoEmptyMemoTitles(t *testing.T) {
+	memo := match.Memo{Entries: map[int]match.MemoEntry{
+		1: {Titles: []string{}, Year: 2020},
+	}}
+	got := feedEntryInfo(mapping.NewIndex(nil), &library.Snapshot{}, memo)(1)
+	if got.Title != "" || got.Year != 0 {
+		t.Errorf("info(1) = %+v, want the zero EntryInfo for an empty-titles memo entry", got)
+	}
+}

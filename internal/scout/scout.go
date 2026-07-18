@@ -576,6 +576,11 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap lib
 		return true, false
 	}
 	if len(st.Library.Items) > 0 && len(snap.Items)*libraryShrinkFactor < len(st.Library.Items) {
+		// Like the walk-failed arm above, this gate skips the compare after
+		// rebuildFeed already ran: if SeaDex ALSO failed (or returned
+		// nothing), the previous feed was silently kept - surface it so a
+		// shrink + SeaDex double outage does not read as shrink-only.
+		s.logFeedOutageOnWalkFail(ctx, entries, seaErr)
 		// A non-failed walk that shrank far below the prior snapshot
 		// (zero items, or a misconfigured arr_tags.include leaving a handful)
 		// would mass-resolve most findings. Do NOT degradedSave here:

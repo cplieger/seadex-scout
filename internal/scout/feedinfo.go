@@ -47,9 +47,9 @@ func feedEntryInfo(idx *mapping.Index, lib *library.Snapshot, memo match.Memo) f
 				return info
 			}
 		}
-		if ent, cached := memo.Entries[alID]; cached && !ent.NotFound && len(ent.Titles) > 0 {
-			info.Title = ent.Titles[0]
-			info.Year = ent.Year
+		if title, year, ok := memo.StaleTitle(alID); ok {
+			info.Title = title
+			info.Year = year
 		}
 		return info
 	}

@@ -55,6 +55,32 @@ func TestReloadWarnsOnceOnMissingSnapshotAndRecovers(t *testing.T) {
 	}
 }
 
+// dirFault returns block/restore funcs that swap sub (the snapshot's
+// parent directory) for a regular file - os.Stat on the snapshot then
+// fails ENOTDIR (non-ENOENT, root-safe) - and undo it, leaving the
+// snapshot file's inode and mtime intact throughout.
+func dirFault(t *testing.T, dir, sub string) (block, restore func()) {
+	t.Helper()
+	aside := filepath.Join(dir, "sub-aside")
+	block = func() {
+		if err := os.Rename(sub, aside); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(sub, []byte("blocker"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	restore = func() {
+		if err := os.Remove(sub); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(aside, sub); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return block, restore
+}
+
 // TestReloadRecoversDegradationOnUnchangedSnapshot pins the reloadDegraded
 // state machine across a stat fault whose recovery leaves the snapshot
 // untouched: the file is still the already-loaded inode at the same mtime, so
@@ -81,26 +107,9 @@ func TestReloadRecoversDegradationOnUnchangedSnapshot(t *testing.T) {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
 
-	// Onset: swap the parent directory for a regular file so os.Stat fails
-	// with ENOTDIR (non-ENOENT, root-safe), then recover by restoring the
-	// directory — the snapshot file keeps its inode and mtime throughout.
-	aside := filepath.Join(dir, "sub-aside")
-	blockDir := func() {
-		if err := os.Rename(sub, aside); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(sub, []byte("blocker"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	restoreDir := func() {
-		if err := os.Remove(sub); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Rename(aside, sub); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// Onset: inject the root-safe ENOTDIR stat fault (see dirFault), then
+	// recover — the snapshot file keeps its inode and mtime throughout.
+	blockDir, restoreDir := dirFault(t, dir, sub)
 
 	blockDir()
 	ix.reload(context.Background())
@@ -164,26 +173,9 @@ func TestReloadMemoizedMalformedSnapshotClearsDegradation(t *testing.T) {
 		t.Fatalf("malformed snapshot warned %d times, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
 	}
 
-	// Onset: swap the parent directory for a regular file so os.Stat fails
-	// with ENOTDIR (non-ENOENT, root-safe), then recover by restoring the
-	// directory — the snapshot file keeps its inode and mtime throughout.
-	aside := filepath.Join(dir, "sub-aside")
-	blockDir := func() {
-		if err := os.Rename(sub, aside); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(sub, []byte("blocker"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	restoreDir := func() {
-		if err := os.Remove(sub); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Rename(aside, sub); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// Onset: inject the root-safe ENOTDIR stat fault (see dirFault), then
+	// recover — the snapshot file keeps its inode and mtime throughout.
+	blockDir, restoreDir := dirFault(t, dir, sub)
 
 	blockDir()
 	ix.reload(context.Background())

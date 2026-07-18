@@ -71,7 +71,7 @@ func TestMdLinkPropertyOnlyHTTPLinks(t *testing.T) {
 // net for the JSON/slog sanitizer, mirroring the escapeCell property: for any
 // input the output carries no C0 control other than CR/LF, no DEL, no C1
 // control, no Unicode bidi control (ranges hardcoded independently of the
-// production textsafe.IsBidiControl classifier), and no U+2028/U+2029 separator; and
+// production runesafe.IsBidiControl classifier), and no U+2028/U+2029 separator; and
 // sanitizing is idempotent (it is a normalizer).
 func TestSanitizeDisplayTextPropertyBoundedAndIdempotent(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
@@ -92,7 +92,7 @@ func TestSanitizeDisplayTextPropertyBoundedAndIdempotent(t *testing.T) {
 }
 
 // isUnsafeForDisplay is the property's hardcoded unsafe-rune set (kept
-// independent of the production textsafe classifier), shared by the
+// independent of the production runesafe classifier), shared by the
 // bounded-output and safe-string-unchanged checks.
 func isUnsafeForDisplay(r rune) bool {
 	return (r < 0x20 && r != '\n' && r != '\r') || r == 0x7f || (r >= 0x80 && r <= 0x9f) ||

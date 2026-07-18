@@ -123,7 +123,7 @@ func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGrou
 				"upstream", u.name, "al_id", g.alID, "error", err)
 			return budget, false
 		}
-		stats.matched += matchHarvest(results, index, titles)
+		stats.matched += matchHarvest(results, g.scope, index, titles)
 		if !groupPending(g, titles) || len(results) < harvestPageSize {
 			return budget, true
 		}
@@ -229,22 +229,31 @@ func harvestPage(params url.Values, offset int) url.Values {
 	return page
 }
 
+// harvestMaxTitleLen bounds a cached harvested title: real tracker release
+// titles are well under this, and the titles map is persisted verbatim into
+// the snapshot and rendered into every RSS response, so an oversized title
+// from a tampered/garbled upstream body must never enter the cache.
+const harvestMaxTitleLen = 512
+
 // matchHarvest matches one page of Prowlarr results back to pending journal
 // items by the single journal key each result's identity signals agree on -
 // the tracker id parsed from its page URLs (comments/guid, the same
 // numeric-validated extraction the search curation match uses) and its info
 // hash; contradictory signals fail closed and title nothing - caching each
-// matched real title. An already-cached key is never overwritten: torrents
+// matched real title. A resolved key must belong to the queried tracker's
+// scope: a result from one upstream must never title the other tracker's
+// journal item (the same scope binding the search curation match applies in
+// acceptScopedKeys). An already-cached key is never overwritten: torrents
 // are immutable, so the first harvested title stands.
-func matchHarvest(results []item, index, titles map[string]string) int {
+func matchHarvest(results []item, scope string, index, titles map[string]string) int {
 	n := 0
 	for i := range results {
 		title := strings.TrimSpace(results[i].Title)
-		if title == "" {
+		if title == "" || len(title) > harvestMaxTitleLen {
 			continue
 		}
 		key := resolveHarvestKey(&results[i], index)
-		if key == "" {
+		if key == "" || !strings.HasPrefix(key, scope+":") {
 			continue
 		}
 		if _, done := titles[key]; done {

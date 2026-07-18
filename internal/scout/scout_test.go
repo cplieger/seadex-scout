@@ -290,7 +290,7 @@ func TestSaveRetriesDetachedOnCancelledContext(t *testing.T) {
 
 	logger := scoutTestLogger()
 	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
-	s := &Scout{deps: Deps{Store: store}, log: logger}
+	s := New(&Deps{Logger: logger, Store: store})
 	want := state.State{Baselined: true}
 
 	ctx, cancel := context.WithCancel(context.Background())

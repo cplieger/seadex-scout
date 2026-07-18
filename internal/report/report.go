@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/filter"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/release"
-	"github.com/cplieger/textsafe"
 )
 
 // labelArr is the arr key shared by the finding log lines.
@@ -153,17 +153,17 @@ func (r *Reporter) emit(f *compare.Finding) {
 
 // emitResolved logs a single info line when a prior finding no longer applies,
 // reading the trimmed record the dedupe state persisted. The untrusted
-// upstream strings (title, groups) ride through textsafe.SanitizeLogText,
+// upstream strings (title, groups) ride through runesafe.Sanitize,
 // matching findingKVs' policy.
 func (r *Reporter) emitResolved(f *StoredFinding) {
 	r.log.Info("finding resolved",
-		"title", textsafe.SanitizeLogText(f.Title),
+		"title", runesafe.Sanitize(f.Title),
 		"al_id", f.AniListID,
 		labelArr, f.Arr,
 		"season", f.Season,
-		"current_group", textsafe.SanitizeLogText(f.CurrentGroup),
+		"current_group", runesafe.Sanitize(f.CurrentGroup),
 		"status", string(f.Status),
-		"recommended_group", textsafe.SanitizeLogText(f.RecommendedGroup))
+		"recommended_group", runesafe.Sanitize(f.RecommendedGroup))
 }
 
 // findingKVs builds the structured key-value attributes for a finding line.
@@ -171,31 +171,31 @@ func (r *Reporter) emitResolved(f *StoredFinding) {
 // a compact seadex_tags line so an alert can render a self-contained,
 // clickable notification straight from the labels. Every attribute derived
 // from untrusted upstream data (SeaDex/tracker titles, groups, URLs, hashes)
-// is passed through textsafe.SanitizeLogText — the same policy the audit
+// is passed through runesafe.Sanitize — the same policy the audit
 // report's slog path applies — because slog's JSONHandler escapes C0 controls
 // but emits C1 controls and bidi controls raw. Fixed-pattern app values
 // (resolution, codec, kind, season, al_id, arr, status) stay raw.
 func findingKVs(f *compare.Finding) []any {
 	nyaaURL, abURL := trackerURLs(f.Links)
 	return []any{
-		"title", textsafe.SanitizeLogText(f.Title),
+		"title", runesafe.Sanitize(f.Title),
 		"al_id", f.AniListID,
 		labelArr, f.Arr,
-		"arr_url", textsafe.SanitizeLogText(library.SafeLogURL(f.ArrURL)),
+		"arr_url", runesafe.Sanitize(library.SafeLogURL(f.ArrURL)),
 		"season", f.Season,
-		"current_group", textsafe.SanitizeLogText(f.CurrentGroup),
-		"recommended_group", textsafe.SanitizeLogText(f.RecommendedGroup),
-		"recommended_groups", textsafe.SanitizeLogText(strings.Join(f.RecommendedGroups, ",")),
-		"tracker", textsafe.SanitizeLogText(f.Tracker),
+		"current_group", runesafe.Sanitize(f.CurrentGroup),
+		"recommended_group", runesafe.Sanitize(f.RecommendedGroup),
+		"recommended_groups", runesafe.Sanitize(strings.Join(f.RecommendedGroups, ",")),
+		"tracker", runesafe.Sanitize(f.Tracker),
 		"resolution", f.Resolution,
 		"codec", f.Codec,
 		"kind", f.Kind,
-		"classification_reason", textsafe.SanitizeLogText(f.Reason),
-		"release_url", textsafe.SanitizeLogText(f.ReleaseURL),
-		"release_urls", textsafe.SanitizeLogText(joinLinks(f.Links)),
-		"nyaa_url", textsafe.SanitizeLogText(nyaaURL),
-		"ab_url", textsafe.SanitizeLogText(abURL),
-		"info_hash", textsafe.SanitizeLogText(f.InfoHash),
+		"classification_reason", runesafe.Sanitize(f.Reason),
+		"release_url", runesafe.Sanitize(f.ReleaseURL),
+		"release_urls", runesafe.Sanitize(joinLinks(f.Links)),
+		"nyaa_url", runesafe.Sanitize(nyaaURL),
+		"ab_url", runesafe.Sanitize(abURL),
+		"info_hash", runesafe.Sanitize(f.InfoHash),
 		"seadex_tags", seadexTags(f),
 		"status", string(f.Status),
 	}

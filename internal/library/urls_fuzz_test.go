@@ -26,45 +26,31 @@ func FuzzSafeLogURL(f *testing.F) {
 		if strings.Contains(host+path, "SCRT") {
 			return // the fuzzer injected the marker itself; skip to keep the oracle honest
 		}
-		raw := "https://user:SCRTpass@" + host + "/" + path + "?apikey=SCRTquery#SCRTfrag"
-		got := SafeLogURL(raw)
-		for _, secret := range []string{"SCRTpass", "SCRTquery", "SCRTfrag"} {
-			if strings.Contains(got, secret) {
-				t.Errorf("SafeLogURL(%q) = %q leaks %q across the logging trust boundary", raw, got, secret)
+		checkNoLeak := func(raw string) {
+			t.Helper()
+			got := SafeLogURL(raw)
+			for _, secret := range []string{"SCRTpass", "SCRTquery", "SCRTfrag"} {
+				if strings.Contains(got, secret) {
+					t.Errorf("SafeLogURL(%q) = %q leaks %q across the logging trust boundary", raw, got, secret)
+				}
 			}
 		}
+		suffix := host + "/" + path + "?apikey=SCRTquery#SCRTfrag"
+		checkNoLeak("https://user:SCRTpass@" + suffix)
 		// The scheme-less arm: "user:pass@host/..." parses as an OPAQUE URL
 		// (scheme "user", the credential inside u.Opaque where the userinfo
 		// strip cannot reach it), which must be dropped, not passed through.
-		bare := "user:SCRTpass@" + host + "/" + path + "?apikey=SCRTquery#SCRTfrag"
-		got = SafeLogURL(bare)
-		for _, secret := range []string{"SCRTpass", "SCRTquery", "SCRTfrag"} {
-			if strings.Contains(got, secret) {
-				t.Errorf("SafeLogURL(%q) = %q leaks %q across the logging trust boundary", bare, got, secret)
-			}
-		}
+		checkNoLeak("user:SCRTpass@" + suffix)
 		// The malformed-hierarchical arm: a single-slash scheme form like
 		// "https:/user:pass@host/..." parses with an empty Host and the whole
 		// credentialed authority inside Path, where the userinfo strip cannot
 		// reach it; the host-required guard must drop it, not pass it through.
-		malformed := "https:/user:SCRTpass@" + host + "/" + path + "?apikey=SCRTquery#SCRTfrag"
-		got = SafeLogURL(malformed)
-		for _, secret := range []string{"SCRTpass", "SCRTquery", "SCRTfrag"} {
-			if strings.Contains(got, secret) {
-				t.Errorf("SafeLogURL(%q) = %q leaks %q across the logging trust boundary", malformed, got, secret)
-			}
-		}
+		checkNoLeak("https:/user:SCRTpass@" + suffix)
 		// The port-only-authority arm: "https://:443/user:pass@host/..."
 		// parses with a NON-empty Host (":443") but an empty Hostname and the
 		// credentialed text inside Path, where the userinfo strip cannot
 		// reach it; the hostname-required guard must drop it, not pass it
 		// through.
-		portOnly := "https://:443/user:SCRTpass@" + host + "/" + path + "?apikey=SCRTquery#SCRTfrag"
-		got = SafeLogURL(portOnly)
-		for _, secret := range []string{"SCRTpass", "SCRTquery", "SCRTfrag"} {
-			if strings.Contains(got, secret) {
-				t.Errorf("SafeLogURL(%q) = %q leaks %q across the logging trust boundary", portOnly, got, secret)
-			}
-		}
+		checkNoLeak("https://:443/user:SCRTpass@" + suffix)
 	})
 }

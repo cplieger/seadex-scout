@@ -167,6 +167,33 @@ func TestDedupeKeyBoundsOversizedComponents(t *testing.T) {
 	}
 }
 
+// TestDedupeKeyDomainSeparatesRawAndHashed pins the injectivity of the
+// bounded encoding ACROSS the size boundary: a small upstream-controlled
+// component that literally spells a hashed identity ("sha256:<hex>") must not
+// collide byte-for-byte with the hashed identity of a different, oversized
+// component set - the raw and hashed output domains stay disjoint, so two
+// distinct findings can never share a dedupe key through the prefix.
+func TestDedupeKeyDomainSeparatesRawAndHashed(t *testing.T) {
+	forged := hashedKeyPrefix + strings.Repeat("0", 64)
+	if got := boundedPart(forged); got == forged {
+		t.Errorf("boundedPart(%q) returned the raw hashed-identity spelling; raw and hashed domains must be disjoint", forged)
+	}
+	if got := boundedJoinParts([]string{forged}); got == forged {
+		t.Errorf("boundedJoinParts([%q]) returned the raw hashed-identity spelling; raw and hashed domains must be disjoint", forged)
+	}
+	// A forged in-bound component must also differ from the genuine hashed
+	// identity of an oversized set that happens to hash to the forged hex.
+	oversized := []string{strings.Repeat("x", maxKeyComponentBytes+1)}
+	if boundedPart(forged) == hashKeyParts(oversized) {
+		t.Error("forged in-bound component collides with an oversized set's hashed identity")
+	}
+	// Honest legacy components (no hashed-identity prefix) keep their raw
+	// escaped representation, so persisted dedupe state stays valid.
+	if got := boundedPart("PMR"); got != "PMR" {
+		t.Errorf("boundedPart(\"PMR\") = %q, want the legacy raw form", got)
+	}
+}
+
 // TestCandidateStableKeyBoundsOversizedComponents pins the size bound on the
 // headline tie-break key: SeaDex admits arbitrarily long URLs (48 MiB pages,
 // up to 512 torrents per entry) and betterCandidate rebuilds the incumbent's
@@ -827,5 +854,49 @@ func TestDedupeKeyABLinkOrderIndependent(t *testing.T) {
 	reversed := &Finding{AniListID: 42, Status: StatusBetter, InfoHash: "hash1", Links: []ReleaseLink{abB, abA}}
 	if dedupeKey(forward) != dedupeKey(reversed) {
 		t.Errorf("dedupe key must not depend on AB link order: %q vs %q", dedupeKey(forward), dedupeKey(reversed))
+	}
+}
+
+// TestBoundedPartThreshold pins boundedPart's size-bound boundary: a
+// component at maxKeyComponentBytes keeps the escaped legacy form (persisted
+// dedupe keys from earlier versions stay valid), one byte over reduces to the
+// deterministic fixed-size hashed identity, and distinct oversized components
+// keep distinct identities.
+func TestBoundedPartThreshold(t *testing.T) {
+	atLimit := strings.Repeat("x", maxKeyComponentBytes)
+	if got := boundedPart(atLimit); got != atLimit {
+		t.Errorf("boundedPart at the limit = %d bytes starting %q, want the escaped legacy form", len(got), got[:16])
+	}
+	overLimit := atLimit + "x"
+	got := boundedPart(overLimit)
+	if !strings.HasPrefix(got, "sha256:") {
+		t.Errorf("boundedPart over the limit = %d bytes starting %q, want the hashed identity", len(got), got[:16])
+	}
+	if other := boundedPart(atLimit + "y"); other == got {
+		t.Error("distinct oversized components must not share a hashed identity")
+	}
+	if again := boundedPart(overLimit); again != got {
+		t.Errorf("boundedPart must be deterministic: %q vs %q", got, again)
+	}
+}
+
+// TestBoundedJoinPartsThresholdOnRawSize pins that the size bound checks RAW
+// component sizes, not the escaped join: an honest delimiter-heavy set whose
+// escaped form is ~2x the bound still keeps its exact escaped representation
+// (a persisted key never flips shape because escaping grew), while one raw
+// byte over the bound reduces to the hashed identity.
+func TestBoundedJoinPartsThresholdOnRawSize(t *testing.T) {
+	half := maxKeyComponentBytes / 2
+	parts := []string{strings.Repeat(",", half), strings.Repeat("|", half)}
+	got := boundedJoinParts(parts)
+	if strings.HasPrefix(got, "sha256:") {
+		t.Error("a raw size at the bound must keep the escaped join even when escaping doubles it")
+	}
+	if got != escapeJoinParts(parts) {
+		t.Error("a within-bound set must be byte-identical to its escaped join")
+	}
+	over := []string{strings.Repeat(",", half), strings.Repeat("|", half+1)}
+	if !strings.HasPrefix(boundedJoinParts(over), "sha256:") {
+		t.Error("one raw byte over the bound must reduce to the hashed identity")
 	}
 }

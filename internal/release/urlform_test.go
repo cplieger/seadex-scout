@@ -51,3 +51,50 @@ func TestClassifyRawURL(t *testing.T) {
 		})
 	}
 }
+
+// TestClassifyRawURLSemanticFacts pins the positive extraction of the
+// semantic facts the seadex link publisher's gate (usableAbsolute in
+// internal/seadex/urls.go) keys its rejections on - Scheme, Port, and
+// HasUserInfo - which the class-focused table never asserts non-zero:
+// url.Parse folds the scheme to lowercase (an "HTTPS://" source reads
+// "https"), the port string is extracted unvalidated (65536 passes through;
+// range-checking is deliberately the consumer's job, per the Port doc), and
+// a userinfo authority ("trusted@evil.example", the visual-spoofing vector)
+// sets HasUserInfo on absolute and protocol-relative forms alike.
+func TestClassifyRawURLSemanticFacts(t *testing.T) {
+	tests := []struct {
+		name         string
+		raw          string
+		wantClass    URLFormClass
+		wantHost     string
+		wantScheme   string
+		wantPort     string
+		wantUserInfo bool
+	}{
+		{name: "uppercase scheme folds to lowercase", raw: "HTTPS://nyaa.si/x", wantClass: URLFormAbsolute, wantHost: "nyaa.si", wantScheme: "https"},
+		{name: "port extracted from absolute authority", raw: "https://nyaa.si:8080/x", wantClass: URLFormAbsolute, wantHost: "nyaa.si", wantScheme: "https", wantPort: "8080"},
+		{name: "userinfo spoof authority sets the flag", raw: "https://trusted@evil.example/x", wantClass: URLFormAbsolute, wantHost: "evil.example", wantScheme: "https", wantUserInfo: true},
+		{name: "out-of-range port passes through unvalidated", raw: "https://user:pass@animebytes.tv:65536/x", wantClass: URLFormAbsolute, wantHost: "animebytes.tv", wantScheme: "https", wantPort: "65536", wantUserInfo: true},
+		{name: "userinfo on a protocol-relative form", raw: "//user@animebytes.tv/x", wantClass: URLFormProtocolRelative, wantHost: "animebytes.tv", wantUserInfo: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := ClassifyRawURL(tt.raw)
+			if f.Class != tt.wantClass {
+				t.Errorf("Class = %v, want %v", f.Class, tt.wantClass)
+			}
+			if f.Host != tt.wantHost {
+				t.Errorf("Host = %q, want %q", f.Host, tt.wantHost)
+			}
+			if f.Scheme != tt.wantScheme {
+				t.Errorf("Scheme = %q, want %q", f.Scheme, tt.wantScheme)
+			}
+			if f.Port != tt.wantPort {
+				t.Errorf("Port = %q, want %q", f.Port, tt.wantPort)
+			}
+			if f.HasUserInfo != tt.wantUserInfo {
+				t.Errorf("HasUserInfo = %v, want %v", f.HasUserInfo, tt.wantUserInfo)
+			}
+		})
+	}
+}

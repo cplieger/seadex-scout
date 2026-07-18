@@ -541,3 +541,27 @@ func TestAuditExcludedSpecialMatchStillCoversItem(t *testing.T) {
 		t.Errorf("not_on_seadex total = %d, want 0", n)
 	}
 }
+
+// TestAssessClampsNegativeSeason pins the Season clamp in assess: a Fribb
+// record whose season.tvdb is negative (the -1 convention for an
+// absolute-numbered run) yields Season 0 on the row, so a negative season can
+// never reach the JSON wire shape (omitempty then drops the zero).
+func TestAssessClampsNegativeSeason(t *testing.T) {
+	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"})
+	item := &library.Item{
+		Arr: library.ArrSonarr, ArrID: 1, Title: "Absolute", TvdbID: 100,
+		SeasonGroups: map[int][]string{1: {"g"}}, Groups: []string{"g"}, HasFile: true,
+	}
+
+	row := a.assess(&match.Match{
+		Item:   item,
+		Arr:    library.ArrSonarr,
+		Source: match.SourceID,
+		Entry:  seadex.Entry{AniListID: 1},
+		Record: mapping.Record{Type: "TV", TvdbID: 100, SeasonTvdb: -1},
+	})
+
+	if row.Season != 0 {
+		t.Errorf("Season = %d, want 0 (negative Fribb season.tvdb must clamp to zero)", row.Season)
+	}
+}

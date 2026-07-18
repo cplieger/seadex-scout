@@ -555,7 +555,7 @@ func (c *Config) warnArrURLCredentials() {
 // no-indexer config is unaffected.
 func (c *Config) validateIndexer() error {
 	if !c.IndexerConfigured() {
-		c.warnDisabledIndexerKeys()
+		c.infoDisabledIndexerKeys()
 		return nil
 	}
 	if c.IndexerAPIKey == "" {
@@ -592,12 +592,12 @@ func (c *Config) validateIndexer() error {
 	return nil
 }
 
-// warnDisabledIndexerKeys emits the half-configuration signal for indexer
+// infoDisabledIndexerKeys emits the half-configuration signal for indexer
 // secrets set with no torznab URL, mirroring the disabled-arr-with-key Info
 // in toConfig: indexer secrets are always operator-written, so keys without a
 // torznab URL almost always mean the operator expected the feed to start.
 // Info, not Warn - deliberately parked keys must not raise Loki alert noise.
-func (c *Config) warnDisabledIndexerKeys() {
+func (c *Config) infoDisabledIndexerKeys() {
 	if c.IndexerAPIKey != "" || c.IndexerProwlarrAPIKey != "" || c.IndexerABPasskey != "" {
 		slog.Info("indexer keys are set but no torznab url is configured; " +
 			"the Torznab feed will not start (set indexer.nyaa_torznab_url and/or indexer.ab_torznab_url)")

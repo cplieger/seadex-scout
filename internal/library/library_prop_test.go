@@ -32,14 +32,20 @@ func genPropItem(t *rapid.T) Item {
 	}
 }
 
-// genPropSnapshot generates a complete (non-partial) snapshot of 0-8 items.
+// genPropSnapshot generates a snapshot of 0-8 items, setting Partial whenever
+// a Sonarr Failed placeholder was generated, so generated snapshots honor the
+// producer invariant (Walk publishes Partial=true exactly when a failed
+// series' placeholder is present in Items).
 func genPropSnapshot(t *rapid.T, label string) *Snapshot {
 	n := rapid.IntRange(0, 8).Draw(t, label+"N")
 	items := make([]Item, 0, n)
+	partial := false
 	for range n {
-		items = append(items, genPropItem(t))
+		it := genPropItem(t)
+		partial = partial || it.Failed
+		items = append(items, it)
 	}
-	return &Snapshot{Items: items}
+	return &Snapshot{Items: items, Partial: partial}
 }
 
 // TestDiffSnapshotsPropIdentity pins the diff's reflexivity: diffing any

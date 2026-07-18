@@ -27,4 +27,4 @@ require github.com/cplieger/httpx/v3 v3.0.0
 
 require github.com/cplieger/jsonx v1.0.0
 
-require github.com/cplieger/textsafe v1.0.0
+require github.com/cplieger/runesafe v1.1.0

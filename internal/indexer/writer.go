@@ -50,15 +50,22 @@ type snapshot struct {
 	// gate reads. Persisted without omitempty so a freshly written snapshot
 	// always carries the map (even empty) and only a genuinely legacy
 	// snapshot decodes it nil.
-	ByPair   map[string]bool   `json:"by_pair"`
-	Seen     map[string]bool   `json:"seen,omitempty"`
+	ByPair map[string]bool `json:"by_pair"`
+	// Seen is persisted without omitempty for the same reason as ByPair: its
+	// nil-ness is loadPrevious's pre-journal-schema sentinel, so an honestly
+	// empty ledger must round-trip as {} rather than aliasing the retired
+	// schema and re-baselining every cycle (see loadPrevious).
+	Seen     map[string]bool   `json:"seen"`
 	Titles   map[string]string `json:"titles,omitempty"`
 	NyaaFeed []item            `json:"nyaa_feed"`
 	ABFeed   []item            `json:"ab_feed"`
 }
 
 // FeedWriterConfig configures NewFeedWriter. Path is where the snapshot is
-// persisted (config.DefaultIndexerFeedPath in production). The embedded
+// persisted (config.DefaultIndexerFeedPath in production). SeaDexBaseURL is
+// the releases.moe site base the per-item info links are built under
+// (config.DefaultSeaDexBaseURL in production; empty falls back to the same
+// default). The embedded
 // UpstreamConfig mirrors the server's Config - the shared upstream vocabulary
 // has one home so the writer queries exactly the trackers the server proxies.
 // ABPasskey gates which AnimeBytes releases are journalable (a secret; empty
@@ -69,7 +76,8 @@ type snapshot struct {
 // built nor persisted), and the configured upstreams also power the title
 // harvest (see harvest.go).
 type FeedWriterConfig struct {
-	Path string
+	Path          string
+	SeaDexBaseURL string
 	UpstreamConfig
 }
 
@@ -79,12 +87,13 @@ type FeedWriterConfig struct {
 // Rebuild - but it does hold the Prowlarr upstreams (the same ones the server
 // proxies searches through) for the title harvest.
 type FeedWriter struct {
-	log          *slog.Logger
-	now          func() time.Time
-	path         string
-	abPasskey    string
-	upstreams    []*upstream
-	abConfigured bool
+	log           *slog.Logger
+	now           func() time.Time
+	path          string
+	abPasskey     string
+	seadexBaseURL string
+	upstreams     []*upstream
+	abConfigured  bool
 }
 
 // NewFeedWriter returns a FeedWriter for cfg. deps carries the HTTP client
@@ -103,12 +112,17 @@ func NewFeedWriter(cfg *FeedWriterConfig, deps Deps) *FeedWriter {
 	if cfg.ABPasskey != "" && !abConfigured {
 		log.Warn("indexer.ab_passkey is set but indexer.ab_torznab_url is empty; the AnimeBytes feed stays off")
 	}
+	base := cfg.SeaDexBaseURL
+	if base == "" {
+		base = defaultSeaDexBaseURL
+	}
 	w := &FeedWriter{
-		log:          log,
-		now:          time.Now,
-		path:         cfg.Path,
-		abPasskey:    cfg.ABPasskey,
-		abConfigured: abConfigured,
+		log:           log,
+		now:           time.Now,
+		path:          cfg.Path,
+		abPasskey:     cfg.ABPasskey,
+		seadexBaseURL: base,
+		abConfigured:  abConfigured,
 	}
 	if deps.HTTP != nil {
 		w.upstreams = wireUpstreams(deps.HTTP, log, cfg.UpstreamConfig)

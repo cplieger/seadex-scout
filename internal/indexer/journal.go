@@ -93,19 +93,19 @@ func scopeOfKey(key string) string {
 // release without a passkey - reported via noPasskey so the caller can nudge
 // the operator - or an id-less URL, which journalKey already excludes) or no
 // parseable title at all (no files and no release group).
-func renderJournalItem(key string, refs []curatedRef, infoFor func(alID int) EntryInfo, abPasskey string) (it item, ok, noPasskey bool) {
+func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor func(alID int) EntryInfo) (it item, ok, noPasskey bool) {
 	if len(refs) == 0 {
 		return item{}, false, false
 	}
 	first := refs[0]
-	dl, resolved := downloadURL(first.torrent.Tracker, first.torrent.URL, abPasskey)
+	dl, resolved := downloadURL(first.torrent.Tracker, first.torrent.URL, w.abPasskey)
 	if !resolved {
-		return item{}, false, scopeOfKey(key) == upstreamAB && abPasskey == ""
+		return item{}, false, scopeOfKey(key) == upstreamAB && w.abPasskey == ""
 	}
 	it = item{
 		Title:                synthesizeTitle(first.torrent, infoFor(first.entry.AniListID)),
 		GUID:                 first.torrent.UsableURL(),
-		InfoURL:              entryURL(first.entry.AniListID),
+		InfoURL:              w.entryURL(first.entry.AniListID),
 		DownloadURL:          dl,
 		InfoHash:             validInfoHash(first.torrent.InfoHash),
 		DownloadVolumeFactor: dvfAlt,
@@ -153,6 +153,39 @@ func (js *journalStats) recordDrop(noPasskey bool) {
 	js.dropped++
 }
 
+// carryItem re-renders or prunes one carried journal item, updating js, and
+// reports whether it survives into the rebuilt journal.
+func (w *FeedWriter) carryItem(it *item, cur map[string][]curatedRef, warned map[string]struct{}, infoFor func(alID int) EntryInfo, now time.Time, js *journalStats) (item, bool) {
+	if it.Key == "" || it.FirstSeen.IsZero() {
+		js.dropped++
+		return item{}, false
+	}
+	if now.Sub(it.FirstSeen) > feedJournalMaxAge {
+		js.pruned++
+		return item{}, false
+	}
+	if _, bad := warned[it.Key]; bad {
+		js.warned++
+		return item{}, false
+	}
+	refs, curated := cur[it.Key]
+	if !curated {
+		if scopeOfKey(it.Key) == upstreamAB && w.abPasskey == "" {
+			js.recordDrop(true)
+			return item{}, false
+		}
+		return *it, true
+	}
+	fresh, ok, noPasskey := w.renderJournalItem(it.Key, refs, infoFor)
+	if !ok {
+		js.recordDrop(noPasskey)
+		return item{}, false
+	}
+	fresh.FirstSeen = it.FirstSeen
+	fresh.PubDate = it.FirstSeen
+	return fresh, true
+}
+
 // carryJournal re-renders one scope's previous journal items against the
 // current catalogue and prunes aged-out ones. A carried item whose torrent is
 // still curated is re-synthesized from current data (its title, size, marker,
@@ -171,32 +204,9 @@ func (js *journalStats) recordDrop(noPasskey bool) {
 func (w *FeedWriter) carryJournal(prevFeed []item, cur map[string][]curatedRef, warned map[string]struct{}, infoFor func(alID int) EntryInfo, now time.Time, js *journalStats) []item {
 	kept := make([]item, 0, len(prevFeed))
 	for i := range prevFeed {
-		it := prevFeed[i]
-		if it.Key == "" || it.FirstSeen.IsZero() {
-			js.dropped++
-			continue
-		}
-		if now.Sub(it.FirstSeen) > feedJournalMaxAge {
-			js.pruned++
-			continue
-		}
-		if _, bad := warned[it.Key]; bad {
-			js.warned++
-			continue
-		}
-		refs, curated := cur[it.Key]
-		if !curated {
+		if it, ok := w.carryItem(&prevFeed[i], cur, warned, infoFor, now, js); ok {
 			kept = append(kept, it)
-			continue
 		}
-		fresh, ok, noPasskey := renderJournalItem(it.Key, refs, infoFor, w.abPasskey)
-		if !ok {
-			js.recordDrop(noPasskey)
-			continue
-		}
-		fresh.FirstSeen = it.FirstSeen
-		fresh.PubDate = it.FirstSeen
-		kept = append(kept, fresh)
 	}
 	return kept
 }
@@ -284,7 +294,7 @@ func (w *FeedWriter) newJournalItem(t *seadex.Torrent, cur map[string][]curatedR
 	if scope == upstreamAB && !w.abConfigured {
 		return item{}, "", false
 	}
-	it, ok, noPasskey := renderJournalItem(key, cur[key], infoFor, w.abPasskey)
+	it, ok, noPasskey := w.renderJournalItem(key, cur[key], infoFor)
 	if noPasskey {
 		js.abSkippedNoPasskey++
 	}

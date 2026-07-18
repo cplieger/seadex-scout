@@ -1039,6 +1039,12 @@ func TestCycleShutdownDuringMatchingWarnsShutdownNotAniList(t *testing.T) {
 	if _, ok := store.st.Findings["prior"]; !ok {
 		t.Errorf("prior finding not preserved on shutdown mid-matching: %+v", store.st.Findings)
 	}
+	if store.saves != 1 {
+		t.Errorf("saves = %d, want 1 (the interrupted-match close must persist the refreshed caches via the detached retry, or the AniList memo is lost on every redeploy)", store.saves)
+	}
+	if len(store.st.Library.Items) != 1 {
+		t.Errorf("persisted library items = %d, want 1 (the refreshed walk snapshot must be saved)", len(store.st.Library.Items))
+	}
 }
 
 // cancellingSeaDex cancels the shared cycle context from inside the fetch and
@@ -1093,6 +1099,12 @@ func TestCycleShutdownDuringSeaDexFetchWarnsShutdownNotSeaDex(t *testing.T) {
 	}
 	if _, ok := store.st.Findings["prior"]; !ok {
 		t.Errorf("prior finding not preserved on shutdown mid-fetch: %+v", store.st.Findings)
+	}
+	if store.saves != 1 {
+		t.Errorf("saves = %d, want 1 (degradedSave must persist the refreshed caches via the detached retry on a shutdown)", store.saves)
+	}
+	if len(store.st.Library.Items) != 1 {
+		t.Errorf("persisted library items = %d, want 1 (the refreshed walk snapshot must be saved)", len(store.st.Library.Items))
 	}
 }
 
@@ -1149,21 +1161,8 @@ func TestCycleStaleMapStillComparesAndRebuildsFeed(t *testing.T) {
 	if n := recorder.CountExact("cycle complete"); n != 0 {
 		t.Errorf("'cycle complete' count = %d, want 0 (a stale-map cycle must not read as fully successful)", n)
 	}
-	degradedReason := ""
-	for _, r := range recorder.Records() {
-		if r.Message != "cycle degraded" {
-			continue
-		}
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "reason" {
-				degradedReason = a.Value.String()
-				return false
-			}
-			return true
-		})
-	}
-	if degradedReason != "mapping-stale" {
-		t.Errorf("'cycle degraded' reason = %q, want %q", degradedReason, "mapping-stale")
+	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "mapping-stale" {
+		t.Errorf("degraded reasons = %v, want [mapping-stale]", reasons)
 	}
 	staleAttr := false
 	for _, r := range recorder.Records() {
@@ -1583,5 +1582,64 @@ func TestCyclePartialWalkAndAniListDegradedPreservesBothFindingSets(t *testing.T
 	}
 	if n := recorder.CountExact("cycle complete"); n != 0 {
 		t.Errorf("'cycle complete' count = %d, want 0 on a degraded cycle", n)
+	}
+}
+
+// cancellingMappingTransport cancels the shared cycle context from inside the
+// mapping loader's refresh request and fails it, modelling a SIGTERM/redeploy
+// landing while the Fribb conditional GET is in flight.
+type cancellingMappingTransport struct{ cancel context.CancelFunc }
+
+func (c cancellingMappingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	c.cancel()
+	return nil, context.Canceled
+}
+
+// TestCycleShutdownDuringMappingLoadWarnsShutdownNotFribb pins the mapping arm
+// of the misattribution contract: when the cycle context is cancelled while
+// the Fribb refresh is in flight (a redeploy), the cycle must log the shutdown
+// interruption instead of "mapping degraded" (which would blame a healthy
+// upstream), stay healthy, emit no completion line, and preserve findings.
+func TestCycleShutdownDuringMappingLoadWarnsShutdownNotFribb(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger, recorder := capture.New()
+	prior := report.Alerted{
+		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		Finding:   report.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
+	}
+	store := &fakeStore{st: state.State{
+		// Records fetched beyond the 1h refresh window force a refresh
+		// attempt, whose transport cancels the cycle context mid-flight.
+		Mapping:   mapping.Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}},
+		Findings:  map[string]report.Alerted{"prior": prior},
+		Baselined: true,
+	}}
+	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+	s := New(&Deps{
+		Logger:  logger,
+		Store:   store,
+		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping: mapping.NewLoader(&http.Client{Transport: cancellingMappingTransport{cancel: cancel}}, "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
+	})
+
+	if healthy := s.Cycle(ctx); !healthy {
+		t.Fatal("Cycle healthy=false, want true (a shutdown during the mapping load is not an arr failure)")
+	}
+	if n := recorder.CountExact("mapping degraded"); n != 0 {
+		t.Errorf("'mapping degraded' fired %d times during a shutdown, want 0 (a cancelled load is the shutdown, not a Fribb fault)", n)
+	}
+	if n := recorder.CountExact("mapping unusable; skipping comparison, findings preserved"); n != 0 {
+		t.Errorf("shutdown misattributed to an unusable map %d times, want 0", n)
+	}
+	if n := recorder.CountExact("cycle interrupted by shutdown before comparison; findings preserved"); n != 1 {
+		t.Errorf("shutdown WARN count = %d, want 1", n)
+	}
+	if n := recorder.CountExact("cycle degraded"); n != 0 {
+		t.Errorf("'cycle degraded' count = %d, want 0 (an interrupted cycle did not complete)", n)
+	}
+	if _, ok := store.st.Findings["prior"]; !ok {
+		t.Errorf("prior finding not preserved on shutdown mid-load: %+v", store.st.Findings)
 	}
 }

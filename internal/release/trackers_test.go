@@ -110,3 +110,34 @@ func TestTrackerTableBaseURLsAreHTTPS(t *testing.T) {
 		}
 	}
 }
+
+// TestIsASCIIHost pins the exported ASCII homograph gate's byte-boundary
+// contract directly in its defining package (filter.ABVisible calls it
+// without going through LookupTrackerByHost, since its fail direction
+// inverts the lookup): every byte below utf8.RuneSelf is ASCII - 0x7F (DEL),
+// the last ASCII byte, passes - while 0x80 (utf8.RuneSelf itself, the first
+// non-ASCII byte and the lead byte of many UTF-8 homograph encodings) and
+// any multi-byte sequence are rejected; the empty string is vacuously ASCII
+// (the callers own the empty-host policy).
+func TestIsASCIIHost(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+		want bool
+	}{
+		{name: "plain tracker host", host: "animebytes.tv", want: true},
+		{name: "digits and hyphen", host: "sub-01.nyaa.si", want: true},
+		{name: "empty string is vacuously ASCII", host: "", want: true},
+		{name: "DEL 0x7F is the last ASCII byte", host: "del\x7f.example", want: true},
+		{name: "0x80 the first non-ASCII byte is rejected", host: "a\x80b", want: false},
+		{name: "latin-1 accented label is rejected", host: "x\u00e9.nyaa.si", want: false},
+		{name: "fullwidth dot spelling is rejected", host: "animebytes\uff0etv", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsASCIIHost(tc.host); got != tc.want {
+				t.Errorf("IsASCIIHost(%q) = %v, want %v", tc.host, got, tc.want)
+			}
+		})
+	}
+}

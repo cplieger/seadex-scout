@@ -422,27 +422,40 @@ func escapeDedupePart(s string) string { return dedupePartEscaper.Replace(s) }
 // keys keep their legacy escaped representation and remain valid.
 const maxKeyComponentBytes = 8 << 10
 
+// hashedKeyPrefix marks a hashed component identity; the raw encodings
+// exclude it so the two output domains cannot collide (a small upstream
+// component that literally spells "sha256:<hex>" would otherwise alias the
+// hashed identity of a different, oversized component set).
+const hashedKeyPrefix = "sha256:"
+
 // boundedJoinParts returns escapeJoinParts(parts) when the components' raw
 // size is within maxKeyComponentBytes, else the fixed-size hashed identity of
 // the component set (see hashKeyParts). The threshold checks the raw sizes so
 // an honest set's representation never depends on how many delimiters
-// escaping added.
+// escaping added. An in-bound set whose escaped join itself begins with the
+// hashed-identity prefix is routed through the hash too, keeping the raw and
+// hashed output domains disjoint (injectivity across the size boundary).
 func boundedJoinParts(parts []string) string {
 	total := 0
 	for _, p := range parts {
 		total += len(p)
 	}
 	if total <= maxKeyComponentBytes {
-		return escapeJoinParts(parts)
+		if joined := escapeJoinParts(parts); !strings.HasPrefix(joined, hashedKeyPrefix) {
+			return joined
+		}
 	}
 	return hashKeyParts(parts)
 }
 
 // boundedPart is boundedJoinParts for a single component: the escaped legacy
-// form within the bound, the hashed identity above it.
+// form within the bound, the hashed identity above it (or when the escaped
+// form would spell the hashed-identity prefix, keeping the domains disjoint).
 func boundedPart(s string) string {
 	if len(s) <= maxKeyComponentBytes {
-		return escapeDedupePart(s)
+		if escaped := escapeDedupePart(s); !strings.HasPrefix(escaped, hashedKeyPrefix) {
+			return escaped
+		}
 	}
 	return hashKeyParts([]string{s})
 }
@@ -459,7 +472,7 @@ func hashKeyParts(parts []string) string {
 		_, _ = h.Write(lenBuf[:])
 		_, _ = h.Write([]byte(p))
 	}
-	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+	return hashedKeyPrefix + hex.EncodeToString(h.Sum(nil))
 }
 
 // releaseIdentity returns the stable torrent identity used by finding dedupe.

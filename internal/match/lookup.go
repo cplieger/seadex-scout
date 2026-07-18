@@ -62,6 +62,19 @@ type Memo struct {
 	Entries map[int]MemoEntry `json:"entries,omitempty"`
 }
 
+// StaleTitle returns the memoized AniList title/year for id, deliberately
+// ignoring expiry: the memo's expiry governs re-fetch cadence, and a stale
+// show title still beats a file-name derivation (the feed's title tier).
+// ok is false for an absent entry, a not-found negative, or an entry with
+// no titles.
+func (m Memo) StaleTitle(id int) (title string, year int, ok bool) {
+	ent, cached := m.Entries[id]
+	if !cached || ent.NotFound || len(ent.Titles) == 0 {
+		return "", 0, false
+	}
+	return ent.Titles[0], ent.Year, true
+}
+
 // jitteredTTL draws one uniform random TTL from [minTTL, memoTTLMax): the
 // per-entry stagger that keeps memo renewals spread across cycles. Every memo
 // write draws its own TTL, so even entries written by the same batch renew
@@ -123,6 +136,11 @@ func (r *matchRun) markIncomplete(aniListID int) {
 // staggered.
 func (r *matchRun) entryExpiry() time.Time { return r.m.freshExpiry(r.now) }
 
+// mediaEntry builds a positive memo entry for media stamped with expiry.
+func mediaEntry(media anilist.Media, expiry time.Time) MemoEntry {
+	return MemoEntry{Titles: media.Titles, Format: media.Format, Year: media.Year, Expiry: expiry}
+}
+
 // prefetch batch-fetches into the memo every AniList id the per-entry pass will
 // consult but has no live (unexpired) entry for, so a cold cycle costs a
 // handful of batched AniList requests instead of one request per id-less entry
@@ -173,12 +191,7 @@ func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *map
 	}
 	for _, id := range ids {
 		if media, ok := fetched[id]; ok {
-			memo.Entries[id] = MemoEntry{
-				Titles: media.Titles,
-				Format: media.Format,
-				Year:   media.Year,
-				Expiry: m.freshExpiry(now),
-			}
+			memo.Entries[id] = mediaEntry(media, m.freshExpiry(now))
 			continue
 		}
 		if err == nil {
@@ -317,11 +330,6 @@ func (r *matchRun) lookupAniList(ctx context.Context, aniListID int) (anilist.Me
 		return anilist.Media{}, false
 	}
 	r.gate.recordSuccess()
-	r.memo.Entries[aniListID] = MemoEntry{
-		Titles: media.Titles,
-		Format: media.Format,
-		Year:   media.Year,
-		Expiry: r.entryExpiry(),
-	}
+	r.memo.Entries[aniListID] = mediaEntry(media, r.entryExpiry())
 	return media, true
 }

@@ -212,20 +212,18 @@ func TestParseMediaPageNullableEnvelope(t *testing.T) {
 }
 
 func TestObserveRateHeadersCapsResetWindow(t *testing.T) {
-	client := NewClient(http.DefaultClient, "https://example.invalid/graphql", 30, nil)
-	resp := &http.Response{Header: make(http.Header)}
-	resp.Header.Set("X-RateLimit-Remaining", "1")
-	resp.Header.Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(24*time.Hour).Unix(), 10))
+	synctest.Test(t, func(t *testing.T) {
+		client := NewClient(http.DefaultClient, "https://example.invalid/graphql", 30, nil)
+		resp := &http.Response{Header: make(http.Header)}
+		resp.Header.Set("X-RateLimit-Remaining", "1")
+		resp.Header.Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(24*time.Hour).Unix(), 10))
 
-	client.observeRateHeaders(resp)
+		client.observeRateHeaders(resp)
 
-	wait := client.throttle.reserve()
-	if wait > maxRetryAfter {
-		t.Errorf("low-budget reset wait = %v, want no more than %v", wait, maxRetryAfter)
-	}
-	if wait < maxRetryAfter-2*time.Second {
-		t.Errorf("low-budget reset wait = %v, want close to capped %v", wait, maxRetryAfter)
-	}
+		if wait := client.throttle.reserve(); wait != maxRetryAfter {
+			t.Errorf("low-budget reset wait = %v, want exactly the %v cap", wait, maxRetryAfter)
+		}
+	})
 }
 
 // TestThrottleReserveSpacesRequests pins the spacing math: the first slot is
@@ -290,36 +288,35 @@ func TestNewClientCoercesNonPositiveRate(t *testing.T) {
 }
 
 func TestObserveRateHeadersMissingResetDefaultsToMinute(t *testing.T) {
-	client := NewClient(http.DefaultClient, "https://example.invalid/graphql", 30, nil)
-	resp := &http.Response{Header: make(http.Header)}
-	resp.Header.Set("X-RateLimit-Remaining", "1")
+	synctest.Test(t, func(t *testing.T) {
+		client := NewClient(http.DefaultClient, "https://example.invalid/graphql", 30, nil)
+		resp := &http.Response{Header: make(http.Header)}
+		resp.Header.Set("X-RateLimit-Remaining", "1")
 
-	client.observeRateHeaders(resp)
+		client.observeRateHeaders(resp)
 
-	wait := client.throttle.reserve()
-	if wait > time.Minute {
-		t.Errorf("low-budget wait with no reset header = %v, want at most %v", wait, time.Minute)
-	}
-	if wait < time.Minute-2*time.Second {
-		t.Errorf("low-budget wait with no reset header = %v, want the %v default", wait, time.Minute)
-	}
-	if got := client.Stats().RateLimitWaits; got != 1 {
-		t.Errorf("Stats().RateLimitWaits = %d, want 1", got)
-	}
+		if wait := client.throttle.reserve(); wait != time.Minute {
+			t.Errorf("low-budget wait with no reset header = %v, want exactly the %v default", wait, time.Minute)
+		}
+		if got := client.Stats().RateLimitWaits; got != 1 {
+			t.Errorf("Stats().RateLimitWaits = %d, want 1", got)
+		}
+	})
 }
 
 func TestObserveRateHeadersMalformedResetDefaultsToMinute(t *testing.T) {
-	client := NewClient(http.DefaultClient, "https://example.invalid/graphql", 30, nil)
-	resp := &http.Response{Header: make(http.Header)}
-	resp.Header.Set("X-RateLimit-Remaining", "0")
-	resp.Header.Set("X-RateLimit-Reset", "not-a-timestamp")
+	synctest.Test(t, func(t *testing.T) {
+		client := NewClient(http.DefaultClient, "https://example.invalid/graphql", 30, nil)
+		resp := &http.Response{Header: make(http.Header)}
+		resp.Header.Set("X-RateLimit-Remaining", "0")
+		resp.Header.Set("X-RateLimit-Reset", "not-a-timestamp")
 
-	client.observeRateHeaders(resp)
+		client.observeRateHeaders(resp)
 
-	wait := client.throttle.reserve()
-	if wait < time.Minute-2*time.Second || wait > time.Minute {
-		t.Errorf("low-budget wait with malformed reset = %v, want the %v default", wait, time.Minute)
-	}
+		if wait := client.throttle.reserve(); wait != time.Minute {
+			t.Errorf("low-budget wait with malformed reset = %v, want exactly the %v default", wait, time.Minute)
+		}
+	})
 }
 
 // TestSanitizeUpstreamMessage pins the log-forging boundary on untrusted
@@ -386,28 +383,30 @@ func TestObserveRateHeadersThresholdBoundary(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := NewClient(http.DefaultClient, "https://example.invalid/graphql", 100000, nil)
-			resp := &http.Response{Header: make(http.Header)}
-			if tt.remaining != "" {
-				resp.Header.Set("X-RateLimit-Remaining", tt.remaining)
-			}
-			client.observeRateHeaders(resp)
-			wait := client.throttle.reserve()
-			if tt.wantBackoff {
-				if wait < time.Minute-2*time.Second || wait > time.Minute {
-					t.Errorf("wait = %v, want the ~%v default backoff at the lowRemaining threshold", wait, time.Minute)
+			synctest.Test(t, func(t *testing.T) {
+				client := NewClient(http.DefaultClient, "https://example.invalid/graphql", 100000, nil)
+				resp := &http.Response{Header: make(http.Header)}
+				if tt.remaining != "" {
+					resp.Header.Set("X-RateLimit-Remaining", tt.remaining)
 				}
-				if got := client.Stats().RateLimitWaits; got != 1 {
-					t.Errorf("Stats().RateLimitWaits = %d, want 1", got)
+				client.observeRateHeaders(resp)
+				wait := client.throttle.reserve()
+				if tt.wantBackoff {
+					if wait != time.Minute {
+						t.Errorf("wait = %v, want exactly the %v default backoff at the lowRemaining threshold", wait, time.Minute)
+					}
+					if got := client.Stats().RateLimitWaits; got != 1 {
+						t.Errorf("Stats().RateLimitWaits = %d, want 1", got)
+					}
+				} else {
+					if wait != 0 {
+						t.Errorf("wait = %v, want 0 (no backoff above the threshold)", wait)
+					}
+					if got := client.Stats().RateLimitWaits; got != 0 {
+						t.Errorf("Stats().RateLimitWaits = %d, want 0", got)
+					}
 				}
-			} else {
-				if wait != 0 {
-					t.Errorf("wait = %v, want 0 (no backoff above the threshold)", wait)
-				}
-				if got := client.Stats().RateLimitWaits; got != 0 {
-					t.Errorf("Stats().RateLimitWaits = %d, want 0", got)
-				}
-			}
+			})
 		})
 	}
 }

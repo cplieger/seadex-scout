@@ -251,3 +251,51 @@ func TestDecideWholeSeriesMonotoneDowngrade(t *testing.T) {
 		}
 	})
 }
+
+// TestDecideWholeSeriesMatchesMostConservativeSeason property-checks the
+// whole-series aggregation against an oracle built from the package's OWN
+// single-unit path: the aggregate standing must equal the most conservative
+// (Best < Unverified < Alt < Unlisted) of the standings Decide produces when
+// each filed real season is judged alone as a mapped single season, and
+// no-file exactly when no real season carries files. This is the documented
+// contract ("the most conservative verdict") expressed as a cross-path
+// consistency check, so a drift between summarizeWholeSeries's per-season
+// ladder and unitStanding's - the divergence class the shared package exists
+// to prevent - fails the property.
+func TestDecideWholeSeriesMatchesMostConservativeSeason(t *testing.T) {
+	conservativeness := map[align.Standing]int{
+		align.StandingBest:       0,
+		align.StandingUnverified: 1,
+		align.StandingAlt:        2,
+		align.StandingUnlisted:   3,
+	}
+	groupPool := []string{"a&c", "kh", "kitsune", "nogrp", "sam"}
+	rapid.Check(t, func(t *rapid.T) {
+		groupsGen := rapid.SliceOfN(rapid.SampledFrom(groupPool), 0, 3)
+		seasons := rapid.MapOfN(rapid.IntRange(0, 6), groupsGen, 1, 5).Draw(t, "seasons")
+		best := rapid.SliceOfN(rapid.SampledFrom(groupPool), 1, 2).Draw(t, "best")
+		alt := rapid.SliceOfN(rapid.SampledFrom(groupPool), 0, 2).Draw(t, "alt")
+
+		whole := decideWhole(seasons, best, alt)
+
+		want := align.StandingNoFile
+		filed := false
+		for season, groups := range seasons {
+			if season == 0 || len(groups) == 0 {
+				continue
+			}
+			item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{season: groups}}
+			rec := mapping.Record{Type: "TV", SeasonTvdb: season}
+			single := align.Decide(item, &rec, best, alt)
+			if !filed || conservativeness[single.Standing] > conservativeness[want] {
+				want = single.Standing
+			}
+			filed = true
+		}
+
+		if whole.Standing != want {
+			t.Fatalf("whole-series Standing = %v, want the most conservative per-season standing %v (seasons %v, best %v, alt %v)",
+				whole.Standing, want, seasons, best, alt)
+		}
+	})
+}

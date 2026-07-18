@@ -556,6 +556,31 @@ func testCycleExclusive(t *testing.T, ctx context.Context) *scheduler.Exclusive 
 	return ex
 }
 
+// seedSentinelMarker writes a pre-existing health marker standing in for the
+// daemon's last real state and returns its path; assertMarkerUntouched is its
+// paired check that the code under test never touched it.
+func seedSentinelMarker(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), ".healthy")
+	if err := os.WriteFile(path, []byte("sentinel-untouched"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// assertMarkerUntouched fails the test when the marker content no longer
+// matches the seeded sentinel, i.e. the code under test touched the marker.
+func assertMarkerUntouched(t *testing.T, path string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("marker file: %v", err)
+	}
+	if string(got) != "sentinel-untouched" {
+		t.Errorf("marker content = %q, want the pre-existing state untouched", got)
+	}
+}
+
 // TestPollCycleUniformInterruption pins poll's uniform interruption contract:
 // a cancellation observed at ANY phase - before the cycle starts (the shutdown
 // gate refuses the run), mid-cycle, or after a cycle that still completed
@@ -565,13 +590,15 @@ func testCycleExclusive(t *testing.T, ctx context.Context) *scheduler.Exclusive 
 // at the daemon's last real state.
 func TestPollCycleUniformInterruption(t *testing.T) {
 	tests := []struct {
-		cycler    func(cancel context.CancelFunc) cycler
+		cycler    func(t *testing.T, cancel context.CancelFunc) cycler
 		name      string
 		preCancel bool
 	}{
-		{func(context.CancelFunc) cycler { return boolCycler(false) }, "pre-cycle cancellation", true},
-		{func(cancel context.CancelFunc) cycler { return cancelCycler{cancel: cancel} }, "mid-cycle cancellation", false},
-		{func(cancel context.CancelFunc) cycler { return cancelCycler{cancel: cancel, healthy: true} }, "post-cycle cancellation after a healthy cycle", false},
+		{func(t *testing.T, _ context.CancelFunc) cycler { return mustNotRunCycler{t: t} }, "pre-cycle cancellation", true},
+		{func(_ *testing.T, cancel context.CancelFunc) cycler { return cancelCycler{cancel: cancel} }, "mid-cycle cancellation", false},
+		{func(_ *testing.T, cancel context.CancelFunc) cycler {
+			return cancelCycler{cancel: cancel, healthy: true}
+		}, "post-cycle cancellation after a healthy cycle", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -583,12 +610,9 @@ func TestPollCycleUniformInterruption(t *testing.T) {
 			}
 			// A pre-existing marker stands in for the daemon's last real state;
 			// its content must survive the interrupted poll byte-for-byte.
-			path := filepath.Join(t.TempDir(), ".healthy")
-			if err := os.WriteFile(path, []byte("sentinel-untouched"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			path := seedSentinelMarker(t)
 
-			err := pollCycle(ctx, ex, tt.cycler(cancel), health.NewMarker(path))
+			err := pollCycle(ctx, ex, tt.cycler(t, cancel), health.NewMarker(path))
 
 			if err == nil {
 				t.Fatal("pollCycle = nil, want the interruption error (exit 1)")
@@ -596,13 +620,7 @@ func TestPollCycleUniformInterruption(t *testing.T) {
 			if !errors.Is(err, context.Canceled) {
 				t.Errorf("err = %v, want it to wrap context.Canceled (main classifies the interruption WARN, not ERROR)", err)
 			}
-			got, readErr := os.ReadFile(path)
-			if readErr != nil {
-				t.Fatalf("marker file after interruption: %v", readErr)
-			}
-			if string(got) != "sentinel-untouched" {
-				t.Errorf("marker content = %q, want the pre-existing state untouched", got)
-			}
+			assertMarkerUntouched(t, path)
 		})
 	}
 }
@@ -624,10 +642,7 @@ func TestPollCycleBusyLockPreCancelled(t *testing.T) {
 		t.Fatalf("newCycleExclusive: %v", err)
 	}
 	holdCycleLock(t, dir)
-	path := filepath.Join(t.TempDir(), ".healthy")
-	if err := os.WriteFile(path, []byte("sentinel-untouched"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	path := seedSentinelMarker(t)
 
 	err = pollCycle(ctx, ex, mustNotRunCycler{t: t}, health.NewMarker(path))
 
@@ -637,13 +652,7 @@ func TestPollCycleBusyLockPreCancelled(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v, want it to wrap context.Canceled (main classifies the interruption WARN, not ERROR)", err)
 	}
-	got, readErr := os.ReadFile(path)
-	if readErr != nil {
-		t.Fatalf("marker file after interruption: %v", readErr)
-	}
-	if string(got) != "sentinel-untouched" {
-		t.Errorf("marker content = %q, want the pre-existing state untouched", got)
-	}
+	assertMarkerUntouched(t, path)
 	if pending, perr := ex.Pending(); perr != nil || pending != 0 {
 		t.Errorf("Pending() = (%d, %v), want (0, nil): a cancelled poll must not enqueue demand", pending, perr)
 	}
@@ -744,10 +753,7 @@ func TestRunSchedulerSkipsBusyTick(t *testing.T) {
 	}
 	holdCycleLock(t, dir)
 
-	markerPath := filepath.Join(t.TempDir(), ".healthy")
-	if err := os.WriteFile(markerPath, []byte("sentinel-untouched"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	markerPath := seedSentinelMarker(t)
 
 	// FireOnStart executes the first tick immediately; it skips (the lock is
 	// busy), then the loop waits out the interval until cancelled.
@@ -761,13 +767,7 @@ func TestRunSchedulerSkipsBusyTick(t *testing.T) {
 	if !rec.Contains("cycle lock busy; skipping tick") {
 		t.Errorf("missing the library's busy-skip line: %v", rec.Messages())
 	}
-	got, err := os.ReadFile(markerPath)
-	if err != nil {
-		t.Fatalf("marker file after skipped tick: %v", err)
-	}
-	if string(got) != "sentinel-untouched" {
-		t.Errorf("marker content = %q, want untouched on a skipped tick", got)
-	}
+	assertMarkerUntouched(t, markerPath)
 }
 
 // cancelHandler records logs and cancels the scheduler context after the
@@ -825,10 +825,7 @@ func TestPollCycleQueuedWhenBusy(t *testing.T) {
 	}
 	holdCycleLock(t, dir)
 
-	markerPath := filepath.Join(t.TempDir(), ".healthy")
-	if err := os.WriteFile(markerPath, []byte("sentinel-untouched"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	markerPath := seedSentinelMarker(t)
 
 	if err := pollCycle(ctx, ex, mustNotRunCycler{t: t}, health.NewMarker(markerPath)); err != nil {
 		t.Fatalf("pollCycle(busy) = %v, want nil (queued is success, exit 0)", err)
@@ -843,13 +840,7 @@ func TestPollCycleQueuedWhenBusy(t *testing.T) {
 	if !rec.Contains("compare cycle already in flight; demand queued for the active runner") {
 		t.Errorf("missing poll's own coalescing line: %v", rec.Messages())
 	}
-	got, err := os.ReadFile(markerPath)
-	if err != nil {
-		t.Fatalf("marker file after queued poll: %v", err)
-	}
-	if string(got) != "sentinel-untouched" {
-		t.Errorf("marker content = %q, want untouched on a queued poll", got)
-	}
+	assertMarkerUntouched(t, markerPath)
 }
 
 // TestPollCycleDiscardedWhenQueueFull pins the queue-full path: with a rerun
@@ -1175,10 +1166,7 @@ func TestRunSchedulerCoordinationFailure(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, scheduler.ExclusiveLockName), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	markerPath := filepath.Join(t.TempDir(), ".healthy")
-	if err := os.WriteFile(markerPath, []byte("sentinel-untouched"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	markerPath := seedSentinelMarker(t)
 
 	done := make(chan struct{})
 	go func() {
@@ -1190,13 +1178,7 @@ func TestRunSchedulerCoordinationFailure(t *testing.T) {
 	if !rec.Contains("cycle coordination failed; tick did not run") {
 		t.Errorf("missing the coordination-failure ERROR: %v", rec.Messages())
 	}
-	got, err := os.ReadFile(markerPath)
-	if err != nil {
-		t.Fatalf("marker file after the failed tick: %v", err)
-	}
-	if string(got) != "sentinel-untouched" {
-		t.Errorf("marker content = %q, want untouched on a coordination failure", got)
-	}
+	assertMarkerUntouched(t, markerPath)
 }
 
 // TestPollCycleQueueErrorAfterRun pins poll's exit-code contract when the run
@@ -1288,5 +1270,53 @@ func TestNewArrClientsRadarrErrorClosesSonarr(t *testing.T) {
 	}
 	if s != nil || r != nil {
 		t.Errorf("clients = (%v, %v), want (nil, nil) on a constructor error", s, r)
+	}
+}
+
+// TestWriteStarterConfigOwnerOnlyMode pins the documented owner-only mode of
+// the generated starter config (starterFileMode): the file is where the
+// operator may paste arr API keys and the AB passkey, so it must be created
+// 0600. atomicfile applies the mode via Chmod (umask-independent), so the
+// assertion is deterministic.
+func TestWriteStarterConfigOwnerOnlyMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := writeStarterConfig(path); err != nil {
+		t.Fatalf("writeStarterConfig(%q) = %v, want nil", path, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat starter: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("starter config mode = %o, want 0600 (owner-only: the file is where API keys get pasted)", got)
+	}
+}
+
+// TestStartIndexerLogsRunErrorAndStops pins the configured half of the
+// startIndexer contract that TestStartIndexerUnconfiguredIsNoOp cannot reach:
+// with a Prowlarr Torznab URL configured, the feed goroutine is launched, a
+// Run failure is logged as the component=indexer ERROR fault line (via
+// logIndexerStop's non-shutdown branch), and the returned stop func waits for
+// the goroutine instead of deadlocking or returning before the record is
+// written. The Run failure used is indexer.Run's own fail-closed refusal on an
+// empty feed_api_key, which returns before any port bind - so the test is
+// hermetic and deterministic (the refusal precedes every context check, so the
+// message is stable even if stop's cancel wins the race with the goroutine).
+// Serial (capture swaps slog.Default).
+func TestStartIndexerLogsRunErrorAndStops(t *testing.T) {
+	rec := capture.Default(t)
+	ctx := t.Context()
+
+	cfg := &config.Config{IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api"}
+	stop := startIndexer(ctx, cfg)
+	stop() // must wait for the goroutine's terminal log, then return
+
+	if !rec.Contains("indexer feed stopped") {
+		t.Fatalf("missing the indexer feed stopped ERROR line: %v", rec.Messages())
+	}
+	for _, r := range rec.Records() {
+		if r.Message == "indexer feed stopped" && r.Level != slog.LevelError {
+			t.Errorf("level = %v, want ERROR (a Run failure outside shutdown is a fault)", r.Level)
+		}
 	}
 }

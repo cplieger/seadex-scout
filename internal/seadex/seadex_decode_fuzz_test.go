@@ -28,6 +28,8 @@ func FuzzDecodePage(f *testing.F) {
 		`{}`,
 		`{"unknown":{"deep":[{"nested":true}]},"items":[]}`,
 		`{"items":[{"alID":1}],"items":[{"alID":2}]}`,
+		`{"items":[{"alID":1,"notes":"x"}],"items":[{"alID":2}]}`,
+		`{"items":[{"alID":1,"notes":"x"},{"alID":3,"notes":"y"}],"items":[{"alID":2}]}`,
 		`{"totalItems":"not-a-number"}`,
 		`{"items":{}}`,
 		`{"items":[`,

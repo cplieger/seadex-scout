@@ -476,7 +476,7 @@ func TestMatchHarvestSkipsEmptyTitlesAndKeepsFirstTitle(t *testing.T) {
 		{Title: "   ", InfoURL: "https://nyaa.si/view/1"},
 		{Title: "Second Title", InfoURL: "https://nyaa.si/view/2"},
 	}
-	if n := matchHarvest(results, index, titles); n != 0 {
+	if n := matchHarvest(results, "nyaa", index, titles); n != 0 {
 		t.Errorf("matchHarvest = %d matches, want 0", n)
 	}
 	if _, ok := titles["nyaa:1"]; ok {
@@ -498,7 +498,7 @@ func TestMatchHarvestFailsClosedOnContradictoryIdentity(t *testing.T) {
 	results := []item{
 		{Title: "Tampered Title", InfoURL: "https://nyaa.si/view/1", GUID: "https://nyaa.si/view/2"},
 	}
-	if n := matchHarvest(results, index, titles); n != 0 {
+	if n := matchHarvest(results, "nyaa", index, titles); n != 0 {
 		t.Errorf("matchHarvest = %d matches, want 0 (contradictory identity fails closed)", n)
 	}
 	if len(titles) != 0 {
@@ -518,10 +518,196 @@ func TestMatchHarvestFailsClosedWhenURLAndHashResolveToDifferentReleases(t *test
 		Title: "Tampered Title", InfoURL: "https://nyaa.si/view/1",
 		GUID: "https://nyaa.si/view/1", InfoHash: hash,
 	}}
-	if n := matchHarvest(results, index, titles); n != 0 {
+	if n := matchHarvest(results, "nyaa", index, titles); n != 0 {
 		t.Errorf("matchHarvest = %d matches, want 0 (URL and hash resolving to different releases must fail closed)", n)
 	}
 	if len(titles) != 0 {
 		t.Errorf("conflicting URL/hash identity cached a title: %v", titles)
+	}
+}
+
+// TestMatchHarvestRejectsCrossScopeKey pins the scope binding matchHarvest
+// shares with the search curation match (acceptScopedKeys): a result returned
+// by one tracker's upstream whose identity resolves to the OTHER tracker's
+// journal key must title nothing - a healthy Prowlarr never emits
+// cross-tracker URLs, so such a result is an untrusted response.
+func TestMatchHarvestRejectsCrossScopeKey(t *testing.T) {
+	index := map[string]string{"ab:300": "ab:300"}
+	titles := map[string]string{}
+	results := []item{{Title: "AB title from the nyaa upstream", InfoURL: "https://animebytes.tv/torrent/300/group", GUID: "https://animebytes.tv/torrent/300/group"}}
+	if n := matchHarvest(results, "nyaa", index, titles); n != 0 {
+		t.Errorf("matchHarvest = %d matches, want 0 (a cross-scope key must not title the other tracker's item)", n)
+	}
+	if len(titles) != 0 {
+		t.Errorf("cross-scope result cached a title: %v", titles)
+	}
+}
+
+// TestMatchHarvestRejectsOversizedTitle pins the title length bound on the
+// harvest cache: the titles map is persisted verbatim into the snapshot and
+// rendered into every RSS response, so an absurd multi-KB title from a
+// tampered/garbled upstream body must never enter the cache, while a normal
+// title still caches.
+func TestMatchHarvestRejectsOversizedTitle(t *testing.T) {
+	index := map[string]string{"nyaa:1": "nyaa:1", "nyaa:2": "nyaa:2"}
+	titles := map[string]string{}
+	results := []item{
+		{Title: strings.Repeat("A", harvestMaxTitleLen+1), InfoURL: "https://nyaa.si/view/1"},
+		{Title: "Normal Title - S01 (1080p) [G]", InfoURL: "https://nyaa.si/view/2"},
+	}
+	if n := matchHarvest(results, "nyaa", index, titles); n != 1 {
+		t.Errorf("matchHarvest = %d matches, want 1 (only the normal title caches)", n)
+	}
+	if _, ok := titles["nyaa:1"]; ok {
+		t.Errorf("oversized title cached: %d bytes", len(titles["nyaa:1"]))
+	}
+	if titles["nyaa:2"] != "Normal Title - S01 (1080p) [G]" {
+		t.Errorf("normal title not cached: %v", titles)
+	}
+}
+
+// TestHarvestScopeWideFailureSkipsRemainingShows pins the scope-wide half of
+// the harvest failure classification (the counterpart of
+// TestHarvestMalformedResponseSkipsOnlyThatShow): after one show's query fails
+// with a status error (upstream down/refusing), the SAME upstream's remaining
+// shows are skipped this rebuild - only one show is ever queried, no matter
+// how many are pending - all stay on synthesized titles, and the rebuild still
+// succeeds. Distinct shows are counted by the q param, not raw HTTP calls,
+// because the retry stack may issue several transport attempts per query.
+func TestHarvestScopeWideFailureSkipsRemainingShows(t *testing.T) {
+	entries := []seadex.Entry{
+		nyaaEntry(7, 42, true, "Show A - S01E01 (1080p) [G].mkv", "Show A - S01E02 (1080p) [G].mkv"),
+		nyaaEntry(8, 43, true, "Show B - S01E01 (1080p) [G].mkv", "Show B - S01E02 (1080p) [G].mkv"),
+		nyaaEntry(9, 44, true, "Show C - S01E01 (1080p) [G].mkv", "Show C - S01E02 (1080p) [G].mkv"),
+	}
+	var mu sync.Mutex
+	queried := map[string]int{}
+	countSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		queried[r.URL.Query().Get("q")]++
+		mu.Unlock()
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+	}))
+	defer countSrv.Close()
+	info := func(alID int) EntryInfo {
+		switch alID {
+		case 7:
+			return EntryInfo{Title: "Show A", SeasonTvdb: 1}
+		case 8:
+			return EntryInfo{Title: "Show B", SeasonTvdb: 1}
+		default:
+			return EntryInfo{Title: "Show C", SeasonTvdb: 1}
+		}
+	}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	log, rec := capture.New()
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: countSrv.URL, ProwlarrAPIKey: "k"}},
+		Deps{HTTP: countSrv.Client(), Logger: log})
+	if err := w.Rebuild(context.Background(), entries, info); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	mu.Lock()
+	shows := len(queried)
+	mu.Unlock()
+	if shows != 1 {
+		t.Errorf("shows queried = %d (%v), want 1 (a scope-wide failure must skip the scope's remaining shows this rebuild)", shows, queried)
+	}
+	if !rec.Contains("indexer title harvest query failed; skipping this upstream's remaining shows this rebuild") {
+		t.Errorf("scope-wide failure not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.Titles) != 0 {
+		t.Errorf("titles = %v, want empty (no show harvested after the scope failed)", snap.Titles)
+	}
+	if len(snap.NyaaFeed) != 3 {
+		t.Errorf("feed = %d items, want 3 (skipped shows still serve synthesized titles)", len(snap.NyaaFeed))
+	}
+}
+
+// TestHarvestCancellationMidQueryIsNotWarnedAsUpstreamFault pins harvest
+// shutdown observability (the writer-side mirror of
+// TestQueryCallerCancellationIsNotWarnedAsUpstreamFault): when the cycle
+// context is cancelled while a harvest query is in flight (a daemon redeploy
+// SIGTERM), the failed query is NOT logged as a harvest fault - neither the
+// scope-wide nor the malformed WARN fires - nothing is cached, and the item
+// stays pending for the next rebuild.
+func TestHarvestCancellationMidQueryIsNotWarnedAsUpstreamFault(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		cancel()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	log, rec := capture.New()
+	cfg := &FeedWriterConfig{
+		Path:           filepath.Join(t.TempDir(), "feed.json"),
+		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
+	}
+	w := NewFeedWriter(cfg, Deps{HTTP: srv.Client(), Logger: log})
+	feeds := map[string][]item{upstreamNyaa: {{Key: "nyaa:42", AniListID: 7, Title: "Show S01"}}}
+	titles := map[string]string{}
+	stats := w.harvestTitles(ctx, feeds, titles, func(int) EntryInfo { return EntryInfo{Title: "Show", SeasonTvdb: 1} })
+	if len(titles) != 0 {
+		t.Errorf("titles = %v, want empty (cancelled harvest must cache nothing)", titles)
+	}
+	if stats.pending != 1 {
+		t.Errorf("stats.pending = %d, want 1 (the item stays synthetic for the next rebuild)", stats.pending)
+	}
+	if rec.Contains("indexer title harvest query failed; skipping this upstream's remaining shows this rebuild") ||
+		rec.Contains("indexer title harvest response malformed; show keeps its synthesized title this rebuild") {
+		t.Errorf("shutdown cancellation logged as a harvest fault; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestHarvestableGuards pins harvestable's admission guards directly: only a
+// journal item that carries its bookkeeping (key + positive AniList id), has
+// no cached real title yet, and whose show has a non-blank synthesis title
+// source is due a harvest query.
+func TestHarvestableGuards(t *testing.T) {
+	title := func(int) EntryInfo { return EntryInfo{Title: "Show"} }
+	noTitle := func(int) EntryInfo { return EntryInfo{} }
+	tests := []struct {
+		name   string
+		it     item
+		titles map[string]string
+		info   func(int) EntryInfo
+		want   bool
+	}{
+		{"pending journal item is harvestable", item{Key: "nyaa:42", AniListID: 7}, map[string]string{}, title, true},
+		{"missing journal key", item{AniListID: 7}, map[string]string{}, title, false},
+		{"non-positive AniList id", item{Key: "nyaa:42"}, map[string]string{}, title, false},
+		{"already-cached title", item{Key: "nyaa:42", AniListID: 7}, map[string]string{"nyaa:42": "Real"}, title, false},
+		{"no synthesis title source", item{Key: "nyaa:42", AniListID: 7}, map[string]string{}, noTitle, false},
+		{"whitespace-only title source", item{Key: "nyaa:42", AniListID: 7}, map[string]string{}, func(int) EntryInfo { return EntryInfo{Title: "   "} }, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := harvestable(&tc.it, tc.titles, tc.info); got != tc.want {
+				t.Errorf("harvestable(%+v) = %v, want %v", tc.it, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSyntheticCountSkipsKeylessItems pins the harvest_pending stat's
+// domain: only journal-tracked items (non-empty Key) lacking a cached title
+// count as pending; a key-less item (no journal bookkeeping, e.g. a
+// search-shaped entry in a hand-edited or legacy snapshot) never counts.
+func TestSyntheticCountSkipsKeylessItems(t *testing.T) {
+	feeds := map[string][]item{
+		upstreamNyaa: {
+			{Key: "nyaa:1", Title: "synthetic"},
+			{Key: "nyaa:2", Title: "harvested"},
+			{Title: "keyless search-shaped item"},
+		},
+		upstreamAB: {
+			{Key: "ab:3", Title: "synthetic"},
+		},
+	}
+	titles := map[string]string{"nyaa:2": "Real Title"}
+	if got := syntheticCount(feeds, titles); got != 2 {
+		t.Errorf("syntheticCount = %d, want 2 (one keyed-untitled per feed; the key-less item never counts)", got)
 	}
 }

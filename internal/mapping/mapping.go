@@ -25,6 +25,7 @@ import (
 
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/httpx/v3"
+	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 )
 
@@ -45,9 +46,21 @@ const (
 // dropped, so the next refresh is simply an unconditional 200.
 const maxValidatorBytes = 1 << 10
 
-// boundedValidator returns v, or empty when it exceeds maxValidatorBytes.
-func boundedValidator(v string) string {
+// Loader fetches and caches the Fribb map and overlays the overrides file.
+type Loader struct {
+	http          *http.Client
+	log           *slog.Logger
+	url           string
+	overridesPath string
+	refresh       time.Duration
+}
+
+// boundedValidator returns v, or empty when it exceeds maxValidatorBytes,
+// logging the drop so a persistently oversized upstream validator (which
+// forces an unconditional full re-download every cycle) is observable.
+func (l *Loader) boundedValidator(name, v string) string {
 	if len(v) > maxValidatorBytes {
+		l.log.Warn("mapping: dropping oversized HTTP validator, next refresh will be unconditional", "validator", name, "length", len(v))
 		return ""
 	}
 	return v
@@ -251,15 +264,6 @@ func cacheUsable(records []Record) bool {
 func coverageFloor(n int) int { return max(1, (n+99)/100) }
 
 // --- Loader: conditional fetch, acceptance guards, stale-map degradation ---
-
-// Loader fetches and caches the Fribb map and overlays the overrides file.
-type Loader struct {
-	http          *http.Client
-	log           *slog.Logger
-	url           string
-	overridesPath string
-	refresh       time.Duration
-}
 
 // NewLoader returns a mapping loader. httpClient must be non-nil for any
 // loader that will fetch (a loader whose cache is always fresh never touches
@@ -472,11 +476,14 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 			nil, errors.New("mapping: refresh shrank unexpectedly and no cache available"))
 	}
 	l.log.Info("mapping: refreshed", "records", len(records))
+	// The fresh Cache literal deliberately omits RejectedRefreshes: an
+	// accepted refresh resets the streak to zero (see Cache.RejectedRefreshes),
+	// mirroring reuseCachedRecords' explicit 304 reset.
 	return Cache{
 		FetchedAt:    time.Now(),
 		Records:      records,
-		ETag:         boundedValidator(res.Validators.ETag),
-		LastModified: boundedValidator(res.Validators.LastModified),
+		ETag:         l.boundedValidator("etag", res.Validators.ETag),
+		LastModified: l.boundedValidator("last_modified", res.Validators.LastModified),
 	}, nil
 }
 
@@ -537,10 +544,13 @@ func validateRefreshedRecords(previous, records []Record, sourceElements int) er
 // type-sparse cache or a first boot against a type-sparse catalogue is the
 // catalogue's valid shape, not a regression to reject.
 func validateTypeCoverage(previous, records []Record, minimum int) error {
+	if len(previous) == 0 {
+		return nil
+	}
 	previousTyped := typedRecordCount(previous)
 	previousMinimum := coverageFloor(len(previous))
 	typed := typedRecordCount(records)
-	if len(previous) > 0 && previousTyped >= previousMinimum && typed < minimum && typed < previousTyped {
+	if previousTyped >= previousMinimum && typed < minimum && typed < previousTyped {
 		return fmt.Errorf("type coverage %d/%d is below minimum %d (previous cache carried %d typed records)", typed, len(records), minimum, previousTyped)
 	}
 	return nil
@@ -709,7 +719,7 @@ func (l *Loader) readOverrides(ctx context.Context) ([]Record, bool) {
 		shortened := false
 		for _, k := range unknown[:shown] {
 			if len(k) > maxLoggedKeyBytes {
-				k = strings.ToValidUTF8(k[:maxLoggedKeyBytes], "") + "..."
+				k = runesafe.CapBytes(k, maxLoggedKeyBytes) + "..."
 				shortened = true
 			}
 			logged = append(logged, k)

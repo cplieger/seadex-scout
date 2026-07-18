@@ -21,9 +21,11 @@ func newerSchemaState(data []byte) bool {
 		return false
 	}
 	var st State
-	if err := json.Unmarshal(data, &st); err != nil {
-		return false
-	}
+	// Mirror Load: a syntactically invalid document populates nothing
+	// (Version stays 0, quarantine), while a type-level error still
+	// populates the valid fields, so a newer Version is honored even when
+	// another member's shape mismatches this binary.
+	_ = json.Unmarshal(data, &st)
 	return st.Version > SchemaVersion
 }
 
@@ -48,6 +50,7 @@ func FuzzStoreLoadQuarantine(f *testing.F) {
 	f.Add([]byte(`{"baselined":true,"version":1}`))
 	f.Add([]byte(`{"version":"not-a-number"}`))
 	f.Add([]byte(`{"version":99,"baselined":true}`))
+	f.Add([]byte(`{"findings":"moved-member-shape","version":99}`))
 	f.Add([]byte(`{"findings":{"k":{}},"shrunk_walks":3}`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		dir := t.TempDir()

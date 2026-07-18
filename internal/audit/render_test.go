@@ -69,12 +69,13 @@ func TestDisplayBestGroups(t *testing.T) {
 
 func TestGroupSets(t *testing.T) {
 	rels := []Release{
-		{Group: "SubsPlease", Best: true, URL: "https://nyaa.si/view/1"},
-		{Group: "subsplease", Best: true, URL: "https://nyaa.si/view/2"},
-		{Group: "Erai", Best: false, URL: "https://nyaa.si/view/3"},
-		// A URL-less release (UsableURL rejected its link) is raw-catalogue
-		// visibility only: it must drive neither the best nor the alt set,
-		// mirroring the daemon's Obtainable exclusion.
+		{Group: "SubsPlease", Best: true, URL: "https://nyaa.si/view/1", Evidence: true},
+		{Group: "subsplease", Best: true, URL: "https://nyaa.si/view/2", Evidence: true},
+		{Group: "Erai", Best: false, URL: "https://nyaa.si/view/3", Evidence: true},
+		// A non-Evidence release (the daemon's filter.Obtainable rule rejected
+		// it: no usable link, or a tracker the operator cannot use) is
+		// raw-catalogue visibility only: it must drive neither the best nor
+		// the alt set - the eligibility IS the daemon's obtainability rule.
 		{Group: "LinklessBest", Best: true},
 		{Group: "LinklessAlt", Best: false},
 	}
@@ -765,5 +766,60 @@ func TestRenderMarkdownWarnedBestAnnotatedNotLinked(t *testing.T) {
 	}
 	if !strings.Contains(md, "https://releases.moe/10") {
 		t.Errorf("markdown lost the SeaDex entry link:\n%s", md)
+	}
+}
+
+// cancelAfterHandler wraps a slog.Handler and cancels the given context while
+// handling the after-th record, so a test can deterministically cancel the
+// report context mid-emission. Log drives it from one goroutine, so the
+// counter needs no synchronization; Log never calls WithAttrs/WithGroup, so
+// the embedded-handler passthrough is safe.
+type cancelAfterHandler struct {
+	slog.Handler
+	cancel  context.CancelFunc
+	after   int
+	handled int
+}
+
+func (h *cancelAfterHandler) Handle(ctx context.Context, r slog.Record) error {
+	h.handled++
+	if h.handled == h.after {
+		h.cancel()
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+// TestReportLogCanceledMidRowsStopsEmitting pins Report.Log's per-row
+// cancellation checkpoint: cancellation observed between row records stops
+// the loop with the report-log stage error, so a shutdown does not spend its
+// grace period synchronously emitting the remaining rows.
+func TestReportLogCanceledMidRowsStopsEmitting(t *testing.T) {
+	base, rec := capture.New()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Cancel during the FIRST row record (record 2: summary is record 1), so
+	// the per-row checkpoint fires before row 2 and the remaining rows are
+	// never emitted - a shutdown must not spend its grace period on the loop.
+	log := slog.New(&cancelAfterHandler{Handler: base.Handler(), cancel: cancel, after: 2})
+	r := &Report{
+		GeneratedAt: time.Unix(0, 0).UTC(),
+		Totals:      map[string]int{string(VerdictBest): 3},
+		Rows: []Row{
+			{Title: "A", Arr: "sonarr", Verdict: VerdictBest},
+			{Title: "B", Arr: "sonarr", Verdict: VerdictBest},
+			{Title: "C", Arr: "sonarr", Verdict: VerdictBest},
+		},
+	}
+
+	err := r.Log(ctx, log)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Log error = %v, want context.Canceled", err)
+	}
+	if !strings.Contains(err.Error(), "report log interrupted") {
+		t.Errorf("error = %q, want the report-log stage context", err)
+	}
+	if rec.Len() != 2 {
+		t.Errorf("Log emitted %d records, want 2 (summary + first row; cancellation stops the loop)", rec.Len())
 	}
 }

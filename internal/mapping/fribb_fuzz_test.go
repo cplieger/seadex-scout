@@ -31,6 +31,7 @@ func FuzzParseFribb(f *testing.F) {
 	f.Add([]byte(`[{"anilist_id":5,"type":"tv","season":{"tvdb":2},"episode_offset":{"tvdb":12}}]`))
 	f.Add([]byte(`[{"anilist_id":6,"tvdb_id":"2147483648","imdb_id":["tt1",5,null]}]`))
 	f.Add([]byte(`[{"anilist_id":7,"themoviedb_id":{"movie":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33]}}]`))
+	f.Add([]byte(`[{"anilist_id":8,"imdb_id":["a","b","c","d","e","f","g","h","i","j","k","l","m","n","o","p","q","r","s","t","u","v","w","x","y","z","aa","bb","cc","dd","ee","ff","gg"]}]`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		records, err := parseFribb(data, log)
 		if err != nil {
@@ -52,6 +53,12 @@ func FuzzParseFribb(f *testing.F) {
 				if s == "" || s != strings.TrimSpace(s) {
 					t.Errorf("parseFribb IMDbIDs entry not trimmed/non-empty: %q", s)
 				}
+			}
+			if len(r.IMDbIDs) > maxFribbIdentifiers || len(r.TmdbMovies) > maxFribbIdentifiers {
+				t.Errorf("parseFribb retained identifier list over cap %d: imdb=%d tmdb=%d", maxFribbIdentifiers, len(r.IMDbIDs), len(r.TmdbMovies))
+			}
+			if r.TvdbID < 0 || r.SeasonTvdb < 0 || r.AniListID < 0 {
+				t.Errorf("parseFribb retained a negative id: %+v", r)
 			}
 		}
 	})

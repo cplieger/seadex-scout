@@ -53,16 +53,23 @@ func TestStripExt(t *testing.T) {
 }
 
 // TestEntryURL pins the info-link contract: a positive AniList id yields the
-// releases.moe entry page and a zero/negative id yields no link at all.
+// releases.moe entry page (the default site base when none is configured, a
+// trailing-slash base normalized to the same link) and a zero/negative id
+// yields no link at all.
 func TestEntryURL(t *testing.T) {
-	if got := entryURL(154587); got != "https://releases.moe/154587" {
+	w := NewFeedWriter(&FeedWriterConfig{}, Deps{})
+	if got := w.entryURL(154587); got != "https://releases.moe/154587" {
 		t.Errorf("entryURL(154587) = %q, want the releases.moe entry page", got)
 	}
-	if got := entryURL(0); got != "" {
+	if got := w.entryURL(0); got != "" {
 		t.Errorf("entryURL(0) = %q, want empty", got)
 	}
-	if got := entryURL(-3); got != "" {
+	if got := w.entryURL(-3); got != "" {
 		t.Errorf("entryURL(-3) = %q, want empty", got)
+	}
+	slash := NewFeedWriter(&FeedWriterConfig{SeaDexBaseURL: "https://releases.moe/"}, Deps{})
+	if got := slash.entryURL(154587); got != "https://releases.moe/154587" {
+		t.Errorf("entryURL(154587) with trailing-slash base = %q, want the normalized entry page", got)
 	}
 }
 
@@ -380,5 +387,42 @@ func TestPackSeasonIgnoresEpisodeNamedSidecars(t *testing.T) {
 	season, ok := packSeason(files)
 	if season != 1 || !ok {
 		t.Errorf("packSeason = (%d, %v), want (1, true) (sidecar tokens must not outvote media files)", season, ok)
+	}
+}
+
+// TestFeedTitlePackWithDirectoryOnlyEpisodeTokens pins feedTitle's final
+// fallback (the one branch its tables missed): coveredEpisodes counts episode
+// tokens from the FULL path, but the title derives from path.Base of the
+// representative file - so a pack whose SxxExx tokens live only in directory
+// components is a pack with a token-less base, and the trimmed basename is
+// served rather than an invented marker.
+func TestFeedTitlePackWithDirectoryOnlyEpisodeTokens(t *testing.T) {
+	files := []seadex.File{
+		{Name: "S01E01/Movie Cut A.mkv"},
+		{Name: "S01E02/Movie Cut B.mkv"},
+	}
+	if got := coveredEpisodes(files); got != 2 {
+		t.Fatalf("coveredEpisodes = %d, want 2 (tokens counted from the full path)", got)
+	}
+	if got := feedTitle(&seadex.Torrent{Files: files}); got != "Movie Cut A" {
+		t.Errorf("feedTitle = %q, want %q (basename fallback when the base carries no episode token)", got, "Movie Cut A")
+	}
+}
+
+// TestPackSeasonTieBreakIsOrderIndependent hardens the tie-break contract
+// against map iteration order: seasonCounts hands packSeason a map, so a
+// single-shot tie assertion could pass by iteration luck even if the
+// lowest-season tie-break regressed (e.g. a c >= bestCount boundary slip).
+// Repeating the evaluation makes the kill deterministic in practice.
+func TestPackSeasonTieBreakIsOrderIndependent(t *testing.T) {
+	files := []seadex.File{
+		{Name: "Show - S02E01.mkv"},
+		{Name: "Show - S01E01.mkv"},
+		{Name: "Show - S03E01.mkv"},
+	}
+	for range 100 {
+		if got, ok := packSeason(files); got != 1 || !ok {
+			t.Fatalf("packSeason = (%d, %v), want (1, true) on every evaluation (tie must break to the lowest real season regardless of map iteration order)", got, ok)
+		}
 	}
 }

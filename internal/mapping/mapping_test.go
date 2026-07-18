@@ -187,3 +187,28 @@ func TestUnknownOverrideKeys_partialRawDecodeYieldsNil(t *testing.T) {
 		t.Errorf("unknownOverrideKeys(partially decodable array) = %v, want nil", got)
 	}
 }
+
+// TestParseOverrides_typedDecodeErrorPropagates pins the typed-decode error
+// return: a document that passes the top-level array check but fails
+// json.Unmarshal into []Record must surface the error so readOverrides logs
+// the malformed-file WARN, never a silently-empty overlay.
+func TestParseOverrides_typedDecodeErrorPropagates(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+	}{
+		{name: "non-object element", in: `[5]`},
+		{name: "wrong-typed field", in: `[{"anilist_id":"not-a-number"}]`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			recs, unknown, err := parseOverrides([]byte(tc.in))
+			if err == nil {
+				t.Fatalf("parseOverrides(%s) = nil error, want typed-decode error", tc.in)
+			}
+			if recs != nil || unknown != nil {
+				t.Errorf("parseOverrides(%s) = %v, %v, want nil records and nil unknown keys on error", tc.in, recs, unknown)
+			}
+		})
+	}
+}

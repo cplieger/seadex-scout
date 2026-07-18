@@ -21,10 +21,10 @@ import (
 // same rendered feed.
 const feedWindow = 300
 
-// seaDexEntryURL is the SeaDex entry page base; the per-item info URL (the feed
-// <comments>) is this plus the AniList id, so the operator can see why a release
-// is curated.
-const seaDexEntryURL = "https://releases.moe/"
+// defaultSeaDexBaseURL is the fallback SeaDex site base for a FeedWriter
+// constructed without one (tests, alternate wiring); production passes
+// config.DefaultSeaDexBaseURL through FeedWriterConfig.SeaDexBaseURL.
+const defaultSeaDexBaseURL = "https://releases.moe"
 
 // EntryInfo is the per-show (per-AniList-id) metadata the compare cycle hands
 // the feed writer for title synthesis: the show's own title as its arr knows it
@@ -435,12 +435,13 @@ func totalSize(files []seadex.File) int64 {
 	return n
 }
 
-// entryURL is the SeaDex entry page for an AniList id, or "" when unknown.
-func entryURL(alID int) string {
-	if alID <= 0 {
-		return ""
-	}
-	return seaDexEntryURL + strconv.Itoa(alID)
+// entryURL is the SeaDex entry page for an AniList id under the writer's
+// configured site base, or "" when the id is unknown - the per-item info URL
+// (the feed <comments>), so the operator can see why a release is curated.
+// The URL rule is the shared releases.moe contract in internal/seadex; this
+// is a thin delegate, like validInfoHash.
+func (w *FeedWriter) entryURL(alID int) string {
+	return seadex.EntryURL(w.seadexBaseURL, alID)
 }
 
 // validInfoHash returns h lowercased when it is a 40-char SHA-1 hex info hash,

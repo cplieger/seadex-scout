@@ -135,6 +135,7 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 	now := m.now()
 	m.migrateMemo(&memo, now)
 	cov := Coverage{Hits: make(map[string]int), Unmapped: make(map[string]int)}
+	outage := m.prefetch(ctx, entries, idx, lib, &memo, now)
 	run := &matchRun{
 		m:    m,
 		lib:  lib,
@@ -142,7 +143,7 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 		memo: &memo,
 		cov:  &cov,
 		now:  now,
-		gate: &lookupGate{outage: m.prefetch(ctx, entries, idx, lib, &memo, now)},
+		gate: &lookupGate{outage: outage},
 	}
 	matches := make([]Match, 0, len(entries))
 	for i := range entries {

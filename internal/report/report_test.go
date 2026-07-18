@@ -436,7 +436,7 @@ func TestNewReporterNilLoggerFallsBackToDefault(t *testing.T) {
 // slog-path pin (TestReportLogSanitizesControlAndBidiRunes) against the
 // daemon finding emitter: slog's JSONHandler escapes C0 controls but emits C1
 // controls and bidi controls raw, so every untrusted attribute emitted by
-// emit and emitResolved must ride through textsafe.SanitizeLogText first. A
+// emit and emitResolved must ride through runesafe.Sanitize first. A
 // finding whose upstream-derived fields embed a C1 CSI (U+009B), an RLO bidi
 // override (U+202E), and a C0 escape introducer must log spaces in their
 // place on both the finding line and the resolution line.
@@ -633,5 +633,89 @@ func TestFindingLineCarriesSeason(t *testing.T) {
 	}
 	if season != 2 {
 		t.Errorf("finding line season = %d, want 2", season)
+	}
+}
+
+// TestReportSummaryLineCarriesAccountingCounts pins the cycle-summary
+// counters on the "findings reported" line: total, new, resolved, preserved,
+// and suppressed. The existing tests only count the line's occurrences, so a
+// mutation swapping or zeroing any counter (e.g. suppressed's len-newCount
+// arithmetic) would pass every test while silently corrupting the Loki cycle
+// accounting the operator reads.
+func TestReportSummaryLineCarriesAccountingCounts(t *testing.T) {
+	reporter, recorder := newCapturedReporter()
+	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	kept := testFinding("kept", "Kept")
+	gone := testFinding("gone", "Gone")
+	gone.AniListID = 111
+	preserved := testFinding("preserved", "Preserved")
+	preserved.AniListID = 222
+	prior := map[string]Alerted{
+		"kept":      {AlertedAt: oldTime, Finding: storedFinding(&kept)},
+		"gone":      {AlertedAt: oldTime, Finding: storedFinding(&gone)},
+		"preserved": {AlertedAt: oldTime, Finding: storedFinding(&preserved)},
+	}
+
+	reporter.Report([]compare.Finding{
+		testFinding("new", "Brand New"),
+		kept,
+	}, prior, map[int]struct{}{222: {}}, time.Now())
+
+	want := map[string]int64{
+		"total": 2, "new": 1, "resolved": 1, "preserved": 1, "suppressed": 1,
+	}
+	got := map[string]int64{}
+	sawLine := false
+	for _, rec := range recorder.Records() {
+		if rec.Message != "findings reported" {
+			continue
+		}
+		sawLine = true
+		rec.Attrs(func(a slog.Attr) bool {
+			got[a.Key] = a.Value.Int64()
+			return true
+		})
+	}
+	if !sawLine {
+		t.Fatal("no findings-reported summary line emitted")
+	}
+	for key, w := range want {
+		if got[key] != w {
+			t.Errorf("summary attr %q = %d, want %d", key, got[key], w)
+		}
+	}
+}
+
+// TestFindingLineCarriesJoinedRecommendedGroups pins the recommended_groups
+// attribute with a multi-group value: the fixtures in every other finding-line
+// test leave RecommendedGroups nil, so the joined attr renders "" and a
+// mutation dropping the attribute or breaking the comma join passes the whole
+// suite unnoticed.
+func TestFindingLineCarriesJoinedRecommendedGroups(t *testing.T) {
+	reporter, recorder := newCapturedReporter()
+	f := testFinding("multi", "Frieren")
+	f.RecommendedGroups = []string{"SubsPlease", "PMR"}
+
+	reporter.Report([]compare.Finding{f}, nil, nil, time.Now())
+
+	got := ""
+	seen := false
+	for _, rec := range recorder.Records() {
+		if rec.Message != "better release available" {
+			continue
+		}
+		rec.Attrs(func(a slog.Attr) bool {
+			if a.Key == "recommended_groups" {
+				seen = true
+				got, _ = a.Value.Any().(string)
+			}
+			return true
+		})
+	}
+	if !seen {
+		t.Fatal("finding line carries no recommended_groups attribute")
+	}
+	if got != "SubsPlease,PMR" {
+		t.Errorf("recommended_groups = %q, want %q", got, "SubsPlease,PMR")
 	}
 }

@@ -18,6 +18,7 @@ func TestSafeLogURL(t *testing.T) {
 		{"empty", "", ""},
 		{"unparseable", "http://[::1", ""},
 		{"clean link unchanged", "https://sonarr.example/series/frieren", "https://sonarr.example/series/frieren"},
+		{"plain-http internal link unchanged", "http://sonarr.internal:8989/series/frieren", "http://sonarr.internal:8989/series/frieren"},
 		{"userinfo stripped", "https://user:pass@host/movie/1", "https://host/movie/1"},
 		{"query token stripped", "https://host/movie/1?apikey=secret", "https://host/movie/1"},
 		{"opaque credentialed URL dropped", "user:pass@host/series/x", ""},

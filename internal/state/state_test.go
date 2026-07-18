@@ -663,3 +663,108 @@ func TestStoreSaveCommitFailureReturnsError(t *testing.T) {
 		}
 	}
 }
+
+func TestStoreLoadReadsPersistedValidatorsAndPartialWalk(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	body := `{"mapping":{"fetched_at":"2026-07-01T00:00:00Z","etag":"W/\"fribb-v7\"","last_modified":"Wed, 01 Jul 2026 12:00:00 GMT"},"library":{"taken_at":"0001-01-01T00:00:00Z","partial":true},"anilist_memo":{}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write state fixture: %v", err)
+	}
+	got, err := NewStore(path, testLogger()).Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if got.Mapping.ETag != `W/"fribb-v7"` {
+		t.Errorf("Mapping.ETag from persisted envelope = %q, want %q (a json-tag drift silently drops the conditional-GET validator on restart)", got.Mapping.ETag, `W/"fribb-v7"`)
+	}
+	if got.Mapping.LastModified != "Wed, 01 Jul 2026 12:00:00 GMT" {
+		t.Errorf("Mapping.LastModified from persisted envelope = %q, want the fixture's validator", got.Mapping.LastModified)
+	}
+	if !got.Library.Partial {
+		t.Error("Library.Partial from persisted envelope = false, want true (an incomplete walk must not read as complete after a restart)")
+	}
+}
+
+func TestStoreSaveAppliesOwnerOnlyFileMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("seed permissive state file: %v", err)
+	}
+	store := NewStore(path, testLogger())
+	if err := store.Save(context.Background(), &State{Baselined: true}); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat saved state: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("state file mode = %v, want -rw------- (owner-only: the file holds the operator's library inventory and finding history, and Save must tighten a permissive pre-upgrade file)",
+			info.Mode().Perm())
+	}
+}
+
+func TestStoreLoadRecoveryClearsNewerSchemaSaveBlock(t *testing.T) {
+	tests := []struct {
+		name    string
+		recover func(t *testing.T, path string)
+	}{
+		{"replaced with supported envelope", func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte(`{"version":1,"baselined":true}`), 0o600); err != nil {
+				t.Fatalf("write supported state: %v", err)
+			}
+		}},
+		{"file removed", func(t *testing.T, path string) {
+			if err := os.Remove(path); err != nil {
+				t.Fatalf("remove state: %v", err)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			newer := fmt.Sprintf(`{"version":%d}`, SchemaVersion+1)
+			if err := os.WriteFile(path, []byte(newer), 0o600); err != nil {
+				t.Fatalf("write newer-schema state: %v", err)
+			}
+			store := NewStore(path, testLogger())
+			if _, err := store.Load(context.Background()); err == nil {
+				t.Fatal("Load of newer-schema state returned nil error, want refusal")
+			}
+			if err := store.Save(context.Background(), &State{}); err == nil {
+				t.Fatal("Save while blocked returned nil error, want refusal")
+			}
+			tt.recover(t, path)
+			if _, err := store.Load(context.Background()); err != nil {
+				t.Fatalf("Load after recovery returned error: %v", err)
+			}
+			if err := store.Save(context.Background(), &State{Baselined: true}); err != nil {
+				t.Errorf("Save after a recovered Load still blocked: %v (the block must clear once a supported or missing state loads)", err)
+			}
+		})
+	}
+}
+
+func TestStoreSaveOverCapErrorReportsJSONSize(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := NewStore(path, testLogger())
+	huge := &State{
+		Findings: map[string]report.Alerted{
+			"huge": {Finding: report.StoredFinding{Title: strings.Repeat("a", maxStateBytes+1)}},
+		},
+	}
+	stamped := *huge
+	stamped.Version = SchemaVersion
+	encoded, err := json.Marshal(&stamped)
+	if err != nil {
+		t.Fatalf("marshal size probe: %v", err)
+	}
+	saveErr := store.Save(context.Background(), huge)
+	if saveErr == nil {
+		t.Fatal("Save returned nil error, want over-cap rejection")
+	}
+	want := fmt.Sprintf("%d bytes exceeds", len(encoded))
+	if !strings.Contains(saveErr.Error(), want) {
+		t.Errorf("error = %q, want the exact JSON size named (%q: the encoder's trailing newline must be subtracted)", saveErr.Error(), want)
+	}
+}

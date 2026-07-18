@@ -324,3 +324,47 @@ func TestAcquireReportLockReportsOpenError(t *testing.T) {
 		t.Error("an open failure must not be reported as a concurrent-run refusal")
 	}
 }
+
+// TestWriteFilesAlreadyCanceledWritesNothing pins WriteFiles' first
+// cancellation checkpoint: an already-canceled context returns the
+// report-write stage error before the stale-temp cleanup, the stem probe, or
+// any write runs, so nothing is created on disk.
+func TestWriteFilesAlreadyCanceledWritesNothing(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "reports")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := &Report{GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC), Totals: map[string]int{}}
+
+	err := r.WriteFiles(ctx, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("WriteFiles error = %v, want context.Canceled", err)
+	}
+	if !strings.Contains(err.Error(), "report write interrupted") {
+		t.Errorf("error = %q, want the report-write stage context", err)
+	}
+	if _, statErr := os.Stat(dir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("report dir stat = %v, want absent (nothing written before the first checkpoint)", statErr)
+	}
+}
+
+// TestReportPairStemAlreadyCanceledStopsProbe pins reportPairStem's in-loop
+// cancellation checkpoint: a canceled report-wide context stops the directory
+// scan on the first probe round with the stem-probe stage error and an empty
+// stem, keeping a routine SIGTERM off main's ERROR alert.
+func TestReportPairStemAlreadyCanceledStopsProbe(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	stem, err := reportPairStem(ctx, t.TempDir(), time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC))
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("reportPairStem error = %v, want context.Canceled", err)
+	}
+	if !strings.Contains(err.Error(), "report stem probe interrupted") {
+		t.Errorf("error = %q, want the stem-probe stage context", err)
+	}
+	if stem != "" {
+		t.Errorf("stem = %q, want empty on interruption", stem)
+	}
+}

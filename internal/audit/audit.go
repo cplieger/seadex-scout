@@ -22,7 +22,6 @@ import (
 	"cmp"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -102,6 +101,10 @@ type Release struct {
 	// the render layer).
 	Warnings []string `json:"warnings,omitempty"`
 	Best     bool     `json:"best"`
+	// Evidence reports whether the daemon's obtainability rule
+	// (filter.Obtainable) admits this release as verdict evidence;
+	// groupSets keys on it so the two flows share one encoding.
+	Evidence bool `json:"-"`
 }
 
 // Row is one anime's alignment record.
@@ -435,31 +438,35 @@ func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 			URL:      t.UsableURL(),
 			Best:     t.IsBest,
 			Warnings: release.CurationWarnings(t.Tags),
+			Evidence: filter.Obtainable(&rel, t.URL, t.UsableURL(),
+				filter.Options{AnimeBytes: a.includeAnimeBytes}),
 		})
 	}
 	return out
 }
 
-// seadexURL builds the releases.moe entry link for an AniList ID.
+// seadexURL builds the releases.moe entry link for an AniList ID. The URL
+// rule is the shared releases.moe contract in internal/seadex; this is a
+// thin delegate over the injected base.
 func (a *Auditor) seadexURL(aniListID int) string {
-	base := strings.TrimRight(a.seadexBaseURL, "/")
-	return base + "/" + strconv.Itoa(aniListID)
+	return seadex.EntryURL(a.seadexBaseURL, aniListID)
 }
 
 // groupSets returns the distinct normalized groups among the best and the alt
 // releases. A curation-warned release contributes to neither set: counting it
 // would let a release SeaDex tags Broken/Incomplete drive the verdict (read
 // as a best to have or to want), where the daemon's compare pass excludes it
-// - the two flows must tell one story. A URL-less release (no usable link:
-// classifyReleases stores seadex.Torrent.UsableURL, which rejects empty,
-// malformed, foreign-host, and unsafe URLs) contributes to neither set for
-// the same reason: the daemon's Obtainable filter excludes it, so it must
-// not drive best/alt verdict evidence here. Both stay visible in the row's
-// release list, the warned one annotated.
+// - the two flows must tell one story. A non-Evidence release (one the
+// daemon's filter.Obtainable rule rejects: no usable link, or a tracker the
+// operator cannot use) contributes to neither set for the same reason - the
+// eligibility here IS the daemon's filter.Obtainable, computed in
+// classifyReleases, not a mirror of it, so the two flows cannot drift when
+// the tracker table grows. Both stay visible in the row's release list, the
+// warned one annotated.
 func groupSets(releases []Release) (best, alt []string) {
 	bestSeen, altSeen := map[string]struct{}{}, map[string]struct{}{}
 	for i := range releases {
-		if releases[i].URL == "" || len(releases[i].Warnings) > 0 {
+		if !releases[i].Evidence || len(releases[i].Warnings) > 0 {
 			continue
 		}
 		g := release.NormalizeGroup(releases[i].Group)

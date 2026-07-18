@@ -15,10 +15,10 @@ import (
 	"time"
 
 	"github.com/cplieger/atomicfile/v2"
+	"github.com/cplieger/runesafe"
 	"github.com/cplieger/scheduler/v2"
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/library"
-	"github.com/cplieger/textsafe"
 )
 
 const (
@@ -277,8 +277,10 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	// matches only the exact temp-name convention - never a report file.
 	// WithLogger keeps the library's own diagnostics (including its one
 	// removed-stale-temps INFO) on the report logger; only the top-level
-	// readdir failure is unlogged by the library, so that WARN stays here.
-	if _, err := atomicfile.CleanupStaleTemps(dir, time.Hour, atomicfile.WithLogger(log)); err != nil {
+	// readdir failure is unlogged by the library, so that WARN stays here (a
+	// not-yet-created dir is skipped silently: WriteFiles creates it at write
+	// time and it holds no temps to reap).
+	if _, err := atomicfile.CleanupStaleTemps(dir, time.Hour, atomicfile.WithLogger(log)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		log.Warn("stale report temp cleanup failed", "dir", dir, "error", err)
 	}
 	base, err := reportPairStem(ctx, dir, r.GeneratedAt)
@@ -476,20 +478,20 @@ var linkURLEscaper = strings.NewReplacer(
 // parentheses, angle brackets, pipes, backslash and backtick (the CommonMark
 // inline metacharacters still active inside a link destination), and every
 // ASCII whitespace form (space, tab, vertical tab, form feed, CR, LF). It also
-// percent-encodes the non-ASCII control ranges url.Parse accepts but a
-// terminal or Markdown viewer must never receive raw: C1 controls
+// percent-encodes the above-ASCII policy runes url.Parse accepts but a
+// terminal or Markdown viewer must never receive raw — C1 controls
 // (U+0080-U+009F, terminal-escape introducers), the full Unicode Bidi_Control
-// set (textsafe.IsBidiControl: the U+061C/U+200E/U+200F singleton marks plus
-// the U+202A-U+202E and U+2066-U+2069 override/isolate ranges, visual
-// reordering of the rendered links cell), and the U+2028/U+2029 line
-// separators. Percent-encoding is semantically transparent for a URL, so an
+// set (visual reordering of the rendered links cell), and the U+2028/U+2029
+// line separators — classified by runesafe.IsUnsafeNonASCII (the shared
+// policy's above-ASCII subset; the escaper's ASCII replacements above cover
+// the rest). Percent-encoding is semantically transparent for a URL, so an
 // ordinary destination is unchanged.
 func escapeLinkURL(u string) string {
 	u = linkURLEscaper.Replace(u)
 	var b strings.Builder
 	for _, r := range u {
 		switch {
-		case (r >= 0x80 && r <= 0x9f) || textsafe.IsBidiControl(r) || r == '\u2028' || r == '\u2029':
+		case runesafe.IsUnsafeNonASCII(r):
 			for _, byt := range []byte(string(r)) {
 				fmt.Fprintf(&b, "%%%02X", byt)
 			}
@@ -574,13 +576,13 @@ var cellEscaper = strings.NewReplacer(
 
 // sanitizeDisplayText makes an untrusted string safe for the machine-readable
 // outputs (the JSON report file and slog attributes): the unsafe-rune set is
-// the shared textsafe policy (C0 controls except CR/LF, which both encoders
+// the shared runesafe policy (C0 controls except CR/LF, which both encoders
 // escape; DEL; C1 controls, single-rune terminal-escape introducers emitted
 // raw by encoding/json and slog's JSONHandler; Unicode bidi controls; and the
 // U+2028/U+2029 line separators), each replaced with a space. Markdown output
 // has its own context-aware sanitizers (escapeCell, escapeLinkURL).
 func sanitizeDisplayText(s string) string {
-	return textsafe.SanitizeLogText(s)
+	return runesafe.Sanitize(s)
 }
 
 // sanitizeOutput returns a deep-enough copy of the report with every untrusted
@@ -641,12 +643,12 @@ func sanitizeOutput(r *Report) *Report {
 // the backslash itself, and flattens CR/LF. strings.NewReplacer performs a
 // single non-overlapping left-to-right pass and never re-scans its replacement
 // output, so encoding & first does not double-encode the entities it inserts.
-// A textsafe.SanitizeLogText pre-pass removes the remaining C0/DEL/C1 control
+// A runesafe.Sanitize pre-pass removes the remaining C0/DEL/C1 control
 // characters, the full Unicode Bidi_Control set, and the U+2028/U+2029 line
 // separators (terminal-escape, visual-reordering, and line-break smuggling);
 // CR/LF survive that pass by design and are flattened by cellEscaper here.
 func escapeCell(s string) string {
-	return cellEscaper.Replace(textsafe.SanitizeLogText(s))
+	return cellEscaper.Replace(runesafe.Sanitize(s))
 }
 
 // orEmpty returns the empty-cell marker for a blank string.

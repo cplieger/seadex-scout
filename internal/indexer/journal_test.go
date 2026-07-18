@@ -635,6 +635,38 @@ func TestRebuildDropsCarriedABItemWhenPasskeyRemoved(t *testing.T) {
 	}
 }
 
+// TestRebuildDropsCarriedNonCuratedABItemWhenPasskeyRemoved pins the sibling
+// arm of the carry-side passkey gate: a previously journaled AnimeBytes item
+// whose torrent has LEFT the curation set is subject to the same documented
+// passkey drop as a still-curated one - with ab_passkey removed its download
+// link can no longer be built either, so keeping its stored render would make
+// the post-restore AB feed an arbitrary subset (curated carries dropped,
+// non-curated carries kept).
+func TestRebuildDropsCarriedNonCuratedABItemWhenPasskeyRemoved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	first := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{"ab:1167293": true},
+		ABFeed: []item{{
+			Title: "Frieren - S01 (BD Remux 1080p) [PMR]",
+			GUID:  "https://animebytes.tv/torrents.php?id=86576&torrentid=1167293",
+			Key:   "ab:1167293", AniListID: 154587,
+			FirstSeen: first, PubDate: first,
+		}},
+	})
+	// No entries: the carried item's torrent is absent from the curation set,
+	// exercising the non-curated carry arm.
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, Deps{})
+	if err := w.Rebuild(context.Background(), nil, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if snap := readSnapshotFile(t, path); len(snap.ABFeed) != 0 {
+		t.Errorf("ab feed = %+v, want empty (no passkey, the carried non-curated item is no longer grabbable)", snap.ABFeed)
+	}
+}
+
 // TestRebuildDropsKeylessCarriedItem pins carryJournal's defensive drop of a
 // pre-journal item (no Key / no FirstSeen, e.g. a hand-edited snapshot that
 // kept the seen ledger but stripped an item's bookkeeping): it leaves the
@@ -781,5 +813,57 @@ func TestRebuildUnknownTrackerWithHashSilentlyIgnored(t *testing.T) {
 	}
 	if unresolvable != 0 {
 		t.Errorf("skipped_unresolvable = %d, want 0 (the tail is silently ignored, not an upstream fault signal)", unresolvable)
+	}
+}
+
+// TestRebuildDropsCarriedItemBecomingUnresolvable pins carryJournal's drop
+// accounting for a still-curated item that can no longer render: a journaled
+// torrent whose current SeaDex record has lost its files and release group
+// synthesizes no title, so the carried item is dropped as a genuine drop -
+// counted as journal_dropped on the snapshot log line, never as an AB passkey
+// skip - while the seen ledger keeps its identity so it can never re-enter.
+func TestRebuildDropsCarriedItemBecomingUnresolvable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	first := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{"nyaa:42": true},
+		Seen:   map[string]bool{"nyaa:42": true},
+		NyaaFeed: []item{{
+			Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42",
+			DownloadURL: "https://nyaa.si/download/42.torrent",
+			Key:         "nyaa:42", AniListID: 7,
+			FirstSeen: first, PubDate: first,
+		}},
+	})
+	entries := []seadex.Entry{{
+		AniListID: 7,
+		Torrents:  []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/42", IsBest: true}},
+	}}
+	log, rec := capture.New()
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 0 {
+		t.Errorf("nyaa feed = %+v, want empty (the carried item can no longer render a title)", snap.NyaaFeed)
+	}
+	if !snap.Seen["nyaa:42"] {
+		t.Errorf("seen ledger lost the dropped identity: %v", snap.Seen)
+	}
+	dropped := int64(-1)
+	for _, r := range rec.Records() {
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "journal_dropped" {
+				dropped = a.Value.Int64()
+			}
+			return true
+		})
+	}
+	if dropped != 1 {
+		t.Errorf("journal_dropped = %d, want 1; log:\n%s", dropped, strings.Join(rec.Messages(), "\n"))
+	}
+	if rec.Contains("ab RSS feed empty of grabbable links") {
+		t.Errorf("the genuine drop was counted as an AB passkey skip; log:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }

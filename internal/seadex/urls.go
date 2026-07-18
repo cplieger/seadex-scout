@@ -7,6 +7,18 @@ import (
 	"github.com/cplieger/seadex-scout/internal/release"
 )
 
+// EntryURL returns the SeaDex entry page for an AniList id under baseURL
+// (the releases.moe site base), or "" when the id is unknown. The entry-page
+// rule lives here, beside the package's other releases.moe contract knowledge
+// (ValidInfoHash/RedactedInfoHash), so every consumer builds the same link
+// from the same base.
+func EntryURL(baseURL string, aniListID int) string {
+	if aniListID <= 0 {
+		return ""
+	}
+	return strings.TrimRight(baseURL, "/") + "/" + strconv.Itoa(aniListID)
+}
+
 // UsableURL returns a link a human can follow for the torrent. An absolute URL
 // is returned unchanged only when its host is a canonical tracker host from
 // the release tracker table (or a dot-delimited subdomain of one), so a
@@ -34,9 +46,10 @@ func (t *Torrent) UsableURL() string {
 		return ""
 	}
 	// Resolve the tracker before handling any usable form: the tracker label
-	// is untrusted upstream data too, and the canonical table entry supplies
-	// both the base URL a relative path needs and the only host an absolute
-	// URL is allowed to point at.
+	// is untrusted upstream data too, and a resolvable canonical table entry
+	// supplies the base URL a relative path needs. An absolute URL's host is
+	// checked against the WHOLE canonical table in usableAbsolute (a
+	// mislabeled cross-tracker URL stays usable), not only this entry's host.
 	tr, ok := release.LookupTracker(t.Tracker)
 	if !ok || tr.BaseURL == "" {
 		return ""

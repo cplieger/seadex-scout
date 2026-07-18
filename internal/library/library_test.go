@@ -1448,3 +1448,37 @@ func TestWalkSonarrExactBudgetFailureCountFailsWalk(t *testing.T) {
 		t.Errorf("items = %d, want the zero Snapshot on a budget failure", len(snap.Items))
 	}
 }
+
+// TestWalkSonarrZeroKeptSeriesSucceeds pins the empty-library boundary of the
+// total-failure rule: a Sonarr side whose kept series set is empty (an empty
+// arr library, or every series dropped by the tag filters) walks clean -
+// zero kept with zero failures is not a total episode-fetch outage, so the
+// walk succeeds with an empty, non-partial snapshot instead of tripping the
+// "all kept series failed" guard.
+func TestWalkSonarrZeroKeptSeriesSucceeds(t *testing.T) {
+	t.Run("empty series list", func(t *testing.T) {
+		fs := &fakeSonarr{}
+		w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
+		snap, err := w.Walk(context.Background())
+		if err != nil {
+			t.Fatalf("Walk with an empty Sonarr library: %v", err)
+		}
+		if len(snap.Items) != 0 || snap.Partial {
+			t.Errorf("snapshot = %+v, want empty and not partial", snap)
+		}
+	})
+	t.Run("all series dropped by the include filter", func(t *testing.T) {
+		fs := &fakeSonarr{
+			series: []arrapi.Series{{ID: 1, Title: "Dropped", Tags: []int{3}}},
+			tags:   []arrapi.Tag{{ID: 7, Label: "anime"}},
+		}
+		w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: discardLogger()})
+		snap, err := w.Walk(context.Background())
+		if err != nil {
+			t.Fatalf("Walk with every series tag-filtered out: %v", err)
+		}
+		if len(snap.Items) != 0 || snap.Partial {
+			t.Errorf("snapshot = %+v, want empty and not partial", snap)
+		}
+	})
+}

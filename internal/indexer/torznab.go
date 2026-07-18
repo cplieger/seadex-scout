@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cplieger/runesafe"
 )
 
 // Torznab category ids. SeaDex is anime, so series map to the Anime subcategory
@@ -242,7 +244,7 @@ type errorXML struct {
 	Description string   `xml:"description,attr"`
 }
 
-// upstreamErrorDoc is parseTorznab's error for a syntactically VALID Torznab
+// upstreamDocError is parseTorznab's error for a syntactically VALID Torznab
 // <error> document delivered in place of an RSS feed (the errorXML shape: bad
 // credentials, a named indexer failure). It is a deliberate upstream-scoped
 // answer, not a garbled body: fetchAndParse still wraps it transient (the
@@ -250,13 +252,30 @@ type errorXML struct {
 // after retry exhaustion the harvest latches the failed scope instead of
 // treating an upstream-wide auth/config failure as one show's poison result
 // set.
-type upstreamErrorDoc struct {
+type upstreamDocError struct {
 	code        string
 	description string
 }
 
-func (e *upstreamErrorDoc) Error() string {
+func (e *upstreamDocError) Error() string {
 	return fmt.Sprintf("upstream torznab error code=%s: %s", e.code, e.description)
+}
+
+// sanitizeUpstreamText bounds and cleans an untrusted Torznab <error>
+// code/description before it is carried into an error that reaches slog
+// (fetchRaw's Warn, httpx.Do's retry logs) - the same emit-boundary policy
+// report.go/anilist.go apply to untrusted upstream text, mirroring anilist's
+// sanitizeUpstreamMessage: single-line rune safety, then a 200-byte cap on a
+// rune boundary (truncated output appends "...", for a 203-byte maximum) so
+// a multi-MB or control-laden <error> body can never spoof or flood a log
+// line.
+func sanitizeUpstreamText(s string) string {
+	const maxLen = 200
+	s = runesafe.SanitizeSingleLine(s)
+	if len(s) > maxLen {
+		s = runesafe.CapBytes(s, maxLen) + "..."
+	}
+	return s
 }
 
 // parseTorznab decodes a Prowlarr Torznab response into feed items.
@@ -265,7 +284,10 @@ func parseTorznab(body []byte) ([]item, error) {
 	if err := xml.Unmarshal(body, &feed); err != nil {
 		var e errorXML
 		if xml.Unmarshal(body, &e) == nil {
-			return nil, &upstreamErrorDoc{code: e.Code, description: e.Description}
+			return nil, &upstreamDocError{
+				code:        sanitizeUpstreamText(e.Code),
+				description: sanitizeUpstreamText(e.Description),
+			}
 		}
 		return nil, fmt.Errorf("parse torznab feed: %w", err)
 	}
@@ -283,7 +305,11 @@ func (x *itemXML) toItem() item {
 	var cats []int
 	for _, a := range x.Attrs {
 		if a.Name == "category" {
-			if n, err := strconv.Atoi(strings.TrimSpace(a.Value)); err == nil {
+			// Categories are tracker-controlled numerics rendered back into the
+			// served feed; only positive ids are meaningful Torznab categories,
+			// so a negative/zero value is dropped like the other count fields
+			// are clamped below.
+			if n, err := strconv.Atoi(strings.TrimSpace(a.Value)); err == nil && n > 0 {
 				cats = append(cats, n)
 			}
 			continue

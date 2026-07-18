@@ -24,8 +24,12 @@ package release
 
 import (
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 )
+
+// --- Classification vocabulary: kinds, tracker types, Release/Input ---
 
 // Kind is the remux-vs-encode classification of a release.
 type Kind string
@@ -82,6 +86,15 @@ type Input struct {
 	DualAudio  bool
 }
 
+// --- Evidence parsing: marker regexes, codec tokens, Classify ---
+
+// resolutionHeights is the single home of the recognized resolution
+// vocabulary, highest first. reResolution's alternation and ResolutionRank
+// both derive from it, so a height added to one consumer cannot silently
+// miss the other (the same single-home rule trackerTable applies to the
+// tracker vocabulary).
+var resolutionHeights = []string{"2160p", "1440p", "1080p", "720p", "480p"}
+
 var (
 	// reResolution matches a known resolution height with hand-built edges
 	// instead of \b: Go regexp word boundaries require a non-word character
@@ -91,7 +104,7 @@ var (
 	// 1080p) and the right edge rejects an alphanumeric continuation (so
 	// "x1080py" stays unmatched); the height itself is captured in group 1
 	// for detectResolution.
-	reResolution = regexp.MustCompile(`(?i)(?:^|[^0-9])(2160p|1440p|1080p|720p|480p)(?:$|[^[:alnum:]])`)
+	reResolution = regexp.MustCompile(`(?i)(?:^|[^0-9])(` + strings.Join(resolutionHeights, "|") + `)(?:$|[^[:alnum:]])`)
 	reBitrate    = regexp.MustCompile(`(?i)\b\d+\s?(kbps|mbps)\b`)
 	// reCRF matches an x264/x265 CRF tag such as "crf18" or "crf 20".
 	reCRF = regexp.MustCompile(`(?i)\bcrf\s?\d+\b`)
@@ -260,6 +273,8 @@ func canonicalCodec(s string) string {
 	}
 }
 
+// --- Tracker classification ---
+
 // classifyTracker maps a tracker name to its obtainability class via the
 // canonical tracker table (LookupTracker).
 func classifyTracker(tracker string) TrackerType {
@@ -299,6 +314,8 @@ func IsNyaaHost(host string) bool {
 	t, ok := LookupTrackerByHost(host)
 	return ok && t.Name == TrackerNameNyaa
 }
+
+// --- Group vocabulary and three-valued overlap ---
 
 // NoGroup is the placeholder release group for a release that specifies none.
 // SeaDex already tags some group-less releases with the literal "NOGRP", so
@@ -413,25 +430,22 @@ func GroupsOverlap(a, b []string) Overlap {
 	return OverlapNone
 }
 
+// --- Ranking and generic helpers ---
+
 // ResolutionRank returns a comparable rank for a resolution string (its height
 // in pixels; higher is better). An empty or unrecognized resolution ranks 0, so
 // a resolution floor never drops a release whose resolution could not be
 // parsed.
 func ResolutionRank(res string) int {
-	switch strings.ToLower(strings.TrimSpace(res)) {
-	case "2160p":
-		return 2160
-	case "1440p":
-		return 1440
-	case "1080p":
-		return 1080
-	case "720p":
-		return 720
-	case "480p":
-		return 480
-	default:
+	r := strings.ToLower(strings.TrimSpace(res))
+	if !slices.Contains(resolutionHeights, r) {
 		return 0
 	}
+	n, err := strconv.Atoi(strings.TrimSuffix(r, "p"))
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // containsAny reports whether s contains any of the substrings.

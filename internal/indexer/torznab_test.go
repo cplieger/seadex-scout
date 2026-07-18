@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"errors"
 	"math"
 	"strconv"
 	"strings"
@@ -73,5 +74,25 @@ func TestWriteItemSaturatesPeerCount(t *testing.T) {
 				t.Errorf("rendered a negative attribute value:\n%s", out)
 			}
 		})
+	}
+}
+
+// TestUpstreamErrorDocMessageNamesCodeAndDescription pins the operator-facing
+// message of the Torznab <error>-document failure: the error string carries
+// both the upstream code and its description, since it is what fetchRaw's
+// "upstream query failed" WARN renders for the operator diagnosing a bad
+// Prowlarr credential or a named indexer failure.
+func TestUpstreamErrorDocMessageNamesCodeAndDescription(t *testing.T) {
+	_, err := parseTorznab([]byte(`<?xml version="1.0"?><error code="100" description="Incorrect user credentials"/>`))
+	if err == nil {
+		t.Fatal("parseTorznab on an <error> document returned nil error")
+	}
+	var doc *upstreamDocError
+	if !errors.As(err, &doc) {
+		t.Fatalf("error = %T, want *upstreamDocError", err)
+	}
+	got := err.Error()
+	if !strings.Contains(got, "code=100") || !strings.Contains(got, "Incorrect user credentials") {
+		t.Errorf("Error() = %q, want it to carry the upstream code and description", got)
 	}
 }
