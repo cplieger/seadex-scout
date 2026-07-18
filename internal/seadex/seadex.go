@@ -80,6 +80,15 @@ const (
 	// this cap bounds the aggregate allocation (honest pages run ~tens of
 	// thousands of elements).
 	maxPageElements = 1_000_000
+	// maxTotalElements bounds the cumulative decoded array elements across
+	// the WHOLE fetch. fetchAndAppend retains every decoded entry until the
+	// fetch completes, so a per-page element cap alone still lets dozens of
+	// compact pages (each individually under maxPageElements, together under
+	// maxTotalBytes) amplify into decoded structs and slice backing arrays
+	// that OOM-kill the 256 MiB deployment container. Like the byte budget,
+	// the remaining allowance caps each page's decode, so the guard fires
+	// (clean degradation) before allocation scales with the hostile input.
+	maxTotalElements = 1_000_000
 )
 
 // errCumulativeBytes reports the cumulative-byte budget (maxTotalBytes) being
@@ -88,6 +97,20 @@ const (
 // which preserves the pre-budget error contract for the same condition.
 var errCumulativeBytes = fmt.Errorf("seadex: cumulative page bytes exceeded cap %d (upstream misbehaving); "+
 	"refusing to compare against a truncated view", maxTotalBytes)
+
+// errCumulativeElements reports the fetch-wide decoded-element budget
+// (maxTotalElements) being exceeded. Like errCumulativeBytes it is enforced
+// at the decode layer - fetchPage bounds each page's decode at the REMAINING
+// element budget, so an over-budget page is rejected mid-decode, before the
+// excess elements are materialized or retained.
+var errCumulativeElements = fmt.Errorf("seadex: cumulative decoded elements exceeded cap %d (upstream misbehaving); "+
+	"refusing to compare against a truncated view", maxTotalElements)
+
+// errElementCap marks the page decoder's element budget being exceeded, so
+// fetchPage can classify which budget fired: the full per-page bound is a
+// per-page violation, while a budget-reduced limit is the fetch-wide
+// cumulative cap.
+var errElementCap = errors.New("elements exceeded cap")
 
 // File is one file inside a SeaDex torrent (its name and byte length).
 type File struct {
@@ -225,6 +248,7 @@ func parsePBTime(s string) time.Time {
 // fetchTotals accumulates the cross-page counters of one FetchEntries run.
 type fetchTotals struct {
 	bytes         int
+	elements      int
 	reportedTotal int
 	unparsedTimes int
 	unusableURLs  int
@@ -300,44 +324,59 @@ func (c *Client) finishFetch(all []Entry, tot fetchTotals) ([]Entry, error) {
 }
 
 // fetchAndAppend fetches one page, appends its entries, updates the running
-// totals (cumulative bytes, the API's reported item total, and the
-// unparseable-updated and unusable-URL counters), enforces the cumulative-byte
-// and entry-count caps, and reports whether pagination is complete. Both caps
-// run BEFORE allocation scales with the hostile input: the cumulative-byte
-// budget caps the wire read itself (fetchPage downloads at most the remaining
-// budget, so tot.bytes can never exceed maxTotalBytes), and the entry-count
-// cap rejects the page before any of its items are converted or appended.
+// totals (cumulative bytes and decoded elements, the API's reported item
+// total, and the unparseable-updated and unusable-URL counters), enforces the
+// cumulative-byte, cumulative-element, and entry-count caps, and reports
+// whether pagination is complete. All caps run BEFORE allocation scales with
+// the hostile input: the cumulative-byte budget caps the wire read itself
+// (fetchPage downloads at most the remaining budget, so tot.bytes can never
+// exceed maxTotalBytes), the cumulative-element budget caps the decode
+// (fetchPage decodes at most the remaining element allowance, so tot.elements
+// can never exceed maxTotalElements), and the entry-count cap rejects the
+// page before any of its items are converted or appended.
 func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, tot *fetchTotals) (out []Entry, done bool, err error) {
 	remaining := int64(maxTotalBytes - tot.bytes)
 	if remaining <= 0 {
 		return all, false, errCumulativeBytes
 	}
-	list, n, err := c.fetchPage(ctx, page, min(int64(maxPageBytes), remaining))
+	remainingElems := maxTotalElements - tot.elements
+	if remainingElems <= 0 {
+		return all, false, errCumulativeElements
+	}
+	list, n, elems, err := c.fetchPage(ctx, page, min(int64(maxPageBytes), remaining), min(maxPageElements, remainingElems))
 	if err != nil {
-		if errors.Is(err, errCumulativeBytes) {
+		if errors.Is(err, errCumulativeBytes) || errors.Is(err, errCumulativeElements) {
 			return all, false, err
 		}
 		return all, false, fmt.Errorf("seadex: fetch page %d: %w", page, err)
 	}
 	tot.bytes += n
+	tot.elements += elems
 	tot.reportedTotal = list.TotalItems
 	if len(list.Items) > maxEntries-len(all) {
 		return all, false, fmt.Errorf("seadex: entry count exceeded cap %d (upstream misbehaving)", maxEntries)
 	}
-	for i := range list.Items {
-		e := list.Items[i].toEntry()
-		if e.Updated.IsZero() && strings.TrimSpace(list.Items[i].Updated) != "" {
+	all = appendPageEntries(all, list.Items, tot)
+	done, err = pageComplete(page, len(list.Items), list.TotalPages, len(all), tot.reportedTotal)
+	return all, done, err
+}
+
+// appendPageEntries converts one page's decoded records into public entries,
+// charging the unparseable-updated and unusable-URL counters as it appends.
+func appendPageEntries(all []Entry, items []pbEntry, tot *fetchTotals) []Entry {
+	for i := range items {
+		entry := items[i].toEntry()
+		if entry.Updated.IsZero() && strings.TrimSpace(items[i].Updated) != "" {
 			tot.unparsedTimes++
 		}
-		for j := range e.Torrents {
-			if strings.TrimSpace(e.Torrents[j].URL) != "" && e.Torrents[j].UsableURL() == "" {
+		for j := range entry.Torrents {
+			if strings.TrimSpace(entry.Torrents[j].URL) != "" && entry.Torrents[j].UsableURL() == "" {
 				tot.unusableURLs++
 			}
 		}
-		all = append(all, e)
+		all = append(all, entry)
 	}
-	done, err = pageComplete(page, len(list.Items), list.TotalPages, len(all), tot.reportedTotal)
-	return all, done, err
+	return all
 }
 
 // pageComplete reports whether pagination is done after a page, or an error
@@ -378,15 +417,21 @@ func pageComplete(page, itemCount, totalPages, fetched, reportedTotal int) (done
 }
 
 // fetchPage fetches and decodes a single page of entries, also returning the
-// raw body size so the caller can bound cumulative bytes across pages.
-// wireLimit is the download cap for THIS page: the per-page bound
+// raw body size and the decoded array-element count so the caller can bound
+// cumulative bytes and decoded elements across pages. wireLimit is the
+// download cap for THIS page: the per-page bound
 // (maxPageBytes) already reduced by the caller to the remaining cumulative
 // budget, so an over-budget page is rejected at the wire layer, before any
 // bytes beyond the budget are held or decoded. A too-large response that
 // tripped a budget-reduced limit (below maxPageBytes) is reported as the
 // cumulative-cap error; one that tripped the full per-page bound is a
-// per-page violation and surfaces as the fetch error itself.
-func (c *Client) fetchPage(ctx context.Context, page int, wireLimit int64) (pbList, int, error) {
+// per-page violation and surfaces as the fetch error itself. elemLimit is
+// the decode cap for THIS page, classified the same way: the per-page
+// element bound (maxPageElements) already reduced by the caller to the
+// remaining fetch-wide element budget, so tripping a reduced limit is the
+// cumulative-element cap while tripping the full bound stays a per-page
+// violation.
+func (c *Client) fetchPage(ctx context.Context, page int, wireLimit int64, elemLimit int) (list pbList, bodyBytes, elems int, err error) {
 	q := url.Values{
 		"expand":  {"trs"},
 		"page":    {strconv.Itoa(page)},
@@ -407,18 +452,20 @@ func (c *Client) fetchPage(ctx context.Context, page int, wireLimit int64) (pbLi
 		httpx.WithLogger(c.log),
 	)
 	if err != nil {
-		var tooLarge *httpx.ResponseTooLargeError
-		if errors.As(err, &tooLarge) && tooLarge.Limit < maxPageBytes {
-			return pbList{}, 0, errCumulativeBytes
+		if tooLarge, ok := errors.AsType[*httpx.ResponseTooLargeError](err); ok && tooLarge.Limit < maxPageBytes {
+			return pbList{}, 0, 0, errCumulativeBytes
 		}
-		return pbList{}, 0, err
+		return pbList{}, 0, 0, err
 	}
 
-	list, err := decodePage(body)
+	list, elems, err = decodePage(body, elemLimit)
 	if err != nil {
-		return pbList{}, 0, fmt.Errorf("decode page: %w", err)
+		if errors.Is(err, errElementCap) && elemLimit < maxPageElements {
+			return pbList{}, 0, 0, errCumulativeElements
+		}
+		return pbList{}, 0, 0, fmt.Errorf("decode page: %w", err)
 	}
-	return list, len(body), nil
+	return list, len(body), elems, nil
 }
 
 // pageDecoder is a schema-aware bounded decoder for one pbList page. Unlike
@@ -436,29 +483,33 @@ func (c *Client) fetchPage(ctx context.Context, page int, wireLimit int64) (pbLi
 type pageDecoder struct {
 	dec      *json.Decoder
 	elements int
+	limit    int
 }
 
 // decodePage decodes one page body under the pageDecoder bounds, rejecting
 // trailing data after the top-level value (matching json.Unmarshal
-// strictness).
-func decodePage(body []byte) (pbList, error) {
-	d := &pageDecoder{dec: json.NewDecoder(bytes.NewReader(body))}
+// strictness). elemLimit is the aggregate element budget for this page (the
+// per-page bound, possibly reduced to the fetch-wide remaining allowance by
+// fetchAndAppend); the decoded element count is returned so the caller can
+// charge the fetch-wide budget.
+func decodePage(body []byte, elemLimit int) (pbList, int, error) {
+	d := &pageDecoder{dec: json.NewDecoder(bytes.NewReader(body)), limit: elemLimit}
 	list, err := d.decodeList()
 	if err != nil {
-		return pbList{}, err
+		return pbList{}, 0, err
 	}
 	if _, err := d.dec.Token(); !errors.Is(err, io.EOF) {
-		return pbList{}, errors.New("trailing data after page object")
+		return pbList{}, 0, errors.New("trailing data after page object")
 	}
-	return list, nil
+	return list, d.elements, nil
 }
 
 // count charges one decoded array element against the page's aggregate
 // element budget.
 func (d *pageDecoder) count() error {
 	d.elements++
-	if d.elements > maxPageElements {
-		return fmt.Errorf("page elements exceeded cap %d (upstream misbehaving)", maxPageElements)
+	if d.elements > d.limit {
+		return fmt.Errorf("page %w %d (upstream misbehaving)", errElementCap, d.limit)
 	}
 	return nil
 }

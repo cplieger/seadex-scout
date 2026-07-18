@@ -19,6 +19,9 @@
 package compare
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"slices"
 	"strconv"
 	"strings"
@@ -221,7 +224,7 @@ func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
 		if ok, _ := filter.KeepNonTracker(&rel, c.opts); !ok {
 			continue
 		}
-		if !filter.Obtainable(&rel, t.URL, c.opts) {
+		if !filter.Obtainable(&rel, t.URL, t.UsableURL(), c.opts) {
 			continue
 		}
 		out = append(out, candidate{rel: rel, torrent: *t})
@@ -344,16 +347,21 @@ func finalize(f *Finding, status Status, sev Severity) *Finding {
 // that itself contains the ',' or '|' delimiter cannot collide two distinct
 // findings onto one key (which would suppress the second as already alerted),
 // while a delimiter-free value keeps its legacy representation and existing
-// persisted dedupe state stays valid.
+// persisted dedupe state stays valid. Every untrusted component is also
+// size-bounded (boundedJoinParts/boundedPart): a component set larger than
+// maxKeyComponentBytes is reduced to a fixed-size SHA-256 identity instead of
+// being materialized into the key, so hostile bulk SeaDex data (hundreds of
+// oversized URLs per entry) cannot amplify key construction into an
+// out-of-memory failure.
 func dedupeKey(f *Finding) string {
 	groups := slices.Clone(f.RecommendedGroups)
 	slices.Sort(groups)
 	key := strings.Join([]string{
 		strconv.Itoa(f.AniListID),
 		string(f.Status),
-		escapeJoinParts(groups),
+		boundedJoinParts(groups),
 		currentGroupKey(f),
-		escapeDedupePart(releaseIdentity(f)),
+		boundedPart(releaseIdentity(f)),
 	}, "|")
 	if abLinks := animeBytesLinkKey(f.Links); abLinks != "" {
 		key += "|ab=" + abLinks
@@ -383,9 +391,9 @@ func escapeJoinParts(parts []string) string {
 // delimiter-free production keys are byte-identical either way.
 func currentGroupKey(f *Finding) string {
 	if f.currentGroups != nil {
-		return escapeJoinParts(f.currentGroups)
+		return boundedJoinParts(f.currentGroups)
 	}
-	return escapeDedupePart(f.CurrentGroup)
+	return boundedPart(f.CurrentGroup)
 }
 
 // dedupePartEscaper escapes the characters that participate in the dedupe-key
@@ -403,6 +411,57 @@ var dedupePartEscaper = strings.NewReplacer(
 // the ',' and '|' delimiters (see dedupePartEscaper).
 func escapeDedupePart(s string) string { return dedupePartEscaper.Replace(s) }
 
+// maxKeyComponentBytes is the raw-size threshold above which a dedupe-key
+// component (or component set) is reduced to a fixed-size SHA-256 identity
+// instead of an escaped join. The untrusted components come from SeaDex data
+// the client deliberately admits in bulk (up to 512 torrents per entry,
+// arbitrarily long syntactically valid URLs), so materializing them into ever
+// larger key strings - while the decoded catalogue is still resident - lets a
+// compromised upstream drive peak memory past the deployment container limit
+// (CWE-400). Honest components run well under this bound, so persisted dedupe
+// keys keep their legacy escaped representation and remain valid.
+const maxKeyComponentBytes = 8 << 10
+
+// boundedJoinParts returns escapeJoinParts(parts) when the components' raw
+// size is within maxKeyComponentBytes, else the fixed-size hashed identity of
+// the component set (see hashKeyParts). The threshold checks the raw sizes so
+// an honest set's representation never depends on how many delimiters
+// escaping added.
+func boundedJoinParts(parts []string) string {
+	total := 0
+	for _, p := range parts {
+		total += len(p)
+	}
+	if total <= maxKeyComponentBytes {
+		return escapeJoinParts(parts)
+	}
+	return hashKeyParts(parts)
+}
+
+// boundedPart is boundedJoinParts for a single component: the escaped legacy
+// form within the bound, the hashed identity above it.
+func boundedPart(s string) string {
+	if len(s) <= maxKeyComponentBytes {
+		return escapeDedupePart(s)
+	}
+	return hashKeyParts([]string{s})
+}
+
+// hashKeyParts streams each original component into SHA-256 under a
+// length-prefixed encoding - element boundaries survive without ever joining
+// the inputs into one allocation, so ["a,b"] and ["a","b"] hash differently -
+// and returns the fixed-size "sha256:<hex>" identity.
+func hashKeyParts(parts []string) string {
+	h := sha256.New()
+	var lenBuf [8]byte
+	for _, p := range parts {
+		binary.BigEndian.PutUint64(lenBuf[:], uint64(len(p)))
+		_, _ = h.Write(lenBuf[:])
+		_, _ = h.Write([]byte(p))
+	}
+	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+}
+
 // releaseIdentity returns the stable torrent identity used by finding dedupe.
 // SeaDex redacts AnimeBytes info hashes (seadex.RedactedInfoHash), so use the
 // unique torrent page URL there; otherwise every same-group AB replacement
@@ -416,29 +475,35 @@ func releaseIdentity(f *Finding) string {
 }
 
 // animeBytesLinkKey returns the sorted toggle-gated (AnimeBytes) link URLs of
-// a finding as a single comma-joined string, or "" when the finding carries no
-// such link, so the dedupe key changes when the AB source set changes. A link
-// is toggle-gated when filter.ABGated - the URL-aware invariant boundary
+// a finding as a single bounded key component, or "" when the finding carries
+// no such link, so the dedupe key changes when the AB source set changes. A
+// link is toggle-gated when filter.ABGated - the URL-aware invariant boundary
 // candidate filtering uses - would hide it with the toggle off, so a
-// mislabeled AB URL still keys the same as a correctly labeled one. Each URL
-// has its delimiters escaped before joining, matching dedupeKey's
-// collision-proofing: a SeaDex-supplied URL containing ',' or '|' cannot
-// collide two link sets.
+// mislabeled AB URL still keys the same as a correctly labeled one. The
+// sorted raw set goes through boundedJoinParts, matching dedupeKey's
+// collision-proofing and size-bounding: a SeaDex-supplied URL containing ','
+// or '|' cannot collide two link sets, and an oversized set (SeaDex admits up
+// to 512 arbitrarily long URLs per entry) reduces to a fixed-size hash
+// instead of one huge joined allocation.
 func animeBytesLinkKey(links []ReleaseLink) string {
 	var urls []string
 	for i := range links {
 		if filter.ABGated(links[i].Tracker, links[i].URL) {
-			urls = append(urls, escapeDedupePart(strings.TrimSpace(links[i].URL)))
+			urls = append(urls, strings.TrimSpace(links[i].URL))
 		}
 	}
+	if len(urls) == 0 {
+		return ""
+	}
 	slices.Sort(urls)
-	return strings.Join(urls, ",")
+	return boundedJoinParts(urls)
 }
 
 // --- Headline candidate selection ---
 
 // representative picks the headline recommended release: highest resolution,
-// then a public tracker, then the first. It assumes len(pool) > 0.
+// then a public tracker, then the stable content key (never upstream order).
+// It assumes len(pool) > 0.
 func representative(pool []candidate) candidate {
 	bestIdx := 0
 	for i := 1; i < len(pool); i++ {
@@ -450,13 +515,43 @@ func representative(pool []candidate) candidate {
 }
 
 // betterCandidate reports whether a should outrank b as the headline
-// recommendation (higher resolution, then public-over-private tracker).
+// recommendation (higher resolution, then public-over-private tracker, then a
+// stable content key). The final tie-break must not fall through to upstream
+// slice order: the chosen candidate's identity enters the dedupe key, so two
+// equal-ranked candidates arriving in the opposite relation order from
+// PocketBase would otherwise flip the headline and emit a different key for
+// an unchanged finding (a duplicate alert plus a false resolution).
 func betterCandidate(a, b *candidate) bool {
 	ra, rb := release.ResolutionRank(a.rel.Resolution), release.ResolutionRank(b.rel.Resolution)
 	if ra != rb {
 		return ra > rb
 	}
-	return a.rel.TrackerType == release.TrackerPublic && b.rel.TrackerType != release.TrackerPublic
+	aPublic := a.rel.TrackerType == release.TrackerPublic
+	bPublic := b.rel.TrackerType == release.TrackerPublic
+	if aPublic != bPublic {
+		return aPublic
+	}
+	return candidateStableKey(a) < candidateStableKey(b)
+}
+
+// candidateStableKey is the deterministic content identity that breaks
+// equal-rank headline ties independently of upstream order: the same
+// candidate set always selects the same representative, whatever order
+// PocketBase returned the torrents relation in. Delimiters are escaped
+// element-wise (escapeJoinParts) so a field containing the join delimiter
+// cannot make two distinct candidates compare equal.
+func candidateStableKey(c *candidate) string {
+	return escapeJoinParts([]string{
+		release.NormalizeGroup(c.rel.Group),
+		strings.ToLower(strings.TrimSpace(c.rel.Tracker)),
+		strings.ToLower(strings.TrimSpace(c.rel.Resolution)),
+		strings.ToLower(strings.TrimSpace(c.rel.Codec)),
+		string(c.rel.Kind),
+		c.rel.Reason,
+		strings.TrimSpace(c.torrent.InfoHash),
+		strings.TrimSpace(c.torrent.UsableURL()),
+		strconv.FormatBool(c.rel.DualAudio),
+	})
 }
 
 // groupSet returns the sorted distinct normalized groups of the given releases.

@@ -373,6 +373,24 @@ const (
 	OverlapUnknown
 )
 
+// groupEvidence partitions one group set into its known members (normalized
+// via NormalizeGroup, as a set) and whether it carries unknown evidence (a
+// member that normalizes to the NoGroup sentinel). Both sides of
+// GroupsOverlap share this partition so the normalization rule lives in
+// exactly one place.
+func groupEvidence(groups []string) (known map[string]struct{}, unknown bool) {
+	known = make(map[string]struct{}, len(groups))
+	for _, group := range groups {
+		normalized := NormalizeGroup(group)
+		if normalized == noGroupNormalized {
+			unknown = true
+			continue
+		}
+		known[normalized] = struct{}{}
+	}
+	return known, unknown
+}
+
 // GroupsOverlap is the shared three-valued group-set comparison the compare
 // and audit layers key alignment on, comparing both sides normalized
 // (NormalizeGroup) so the overlap decision lives in exactly one place. A
@@ -382,24 +400,10 @@ const (
 // hide a match. It operates only on []string, keeping release a pure,
 // seadex-free leaf.
 func GroupsOverlap(a, b []string) Overlap {
-	knownB := make(map[string]struct{}, len(b))
-	unknownB := false
-	for _, g := range b {
-		n := NormalizeGroup(g)
-		if n == noGroupNormalized {
-			unknownB = true
-			continue
-		}
-		knownB[n] = struct{}{}
-	}
-	unknownA := false
-	for _, g := range a {
-		n := NormalizeGroup(g)
-		if n == noGroupNormalized {
-			unknownA = true
-			continue
-		}
-		if _, ok := knownB[n]; ok {
+	knownA, unknownA := groupEvidence(a)
+	knownB, unknownB := groupEvidence(b)
+	for group := range knownA {
+		if _, ok := knownB[group]; ok {
 			return OverlapKnown
 		}
 	}

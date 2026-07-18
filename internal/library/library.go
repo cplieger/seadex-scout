@@ -172,7 +172,7 @@ func (w *Walker) Walk(ctx context.Context) (Snapshot, error) {
 	if w.sonarr != nil {
 		series, skipped, err := w.walkSonarr(ctx)
 		if err != nil {
-			return Snapshot{}, err
+			return Snapshot{}, fmt.Errorf("walking sonarr: %w", err)
 		}
 		items = append(items, series...)
 		partial = skipped > 0
@@ -180,7 +180,7 @@ func (w *Walker) Walk(ctx context.Context) (Snapshot, error) {
 	if w.radarr != nil {
 		movies, err := w.walkRadarr(ctx)
 		if err != nil {
-			return Snapshot{}, err
+			return Snapshot{}, fmt.Errorf("walking radarr: %w", err)
 		}
 		items = append(items, movies...)
 	}
@@ -628,7 +628,8 @@ func DiffSnapshots(prev, cur *Snapshot) Diff {
 // a Failed placeholder still asserts arr presence, so it counts as a
 // genuine arrival/departure exactly once regardless of which side holds it.
 func countAbsent(fromByKey map[string]*Item, fromFailed map[string]struct{},
-	otherByKey map[string]*Item, otherFailed map[string]struct{}) int {
+	otherByKey map[string]*Item, otherFailed map[string]struct{},
+) int {
 	n := 0
 	for k := range fromByKey {
 		if !presentIn(k, otherByKey, otherFailed) {

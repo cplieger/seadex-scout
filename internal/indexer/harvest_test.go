@@ -274,6 +274,54 @@ func TestHarvestQueryFailureKeepsSynthetic(t *testing.T) {
 	}
 }
 
+// TestHarvestMalformedResponseSkipsOnlyThatShow pins the failure
+// classification: a persistently malformed 2xx response for one show is a
+// show-local poison item, not a scope-wide outage, so a LATER group on the
+// same upstream is still harvested this rebuild instead of the whole tracker
+// freezing on synthesized titles indefinitely (the sorted rebuild order would
+// otherwise retry the same poisoned show first every cycle).
+func TestHarvestMalformedResponseSkipsOnlyThatShow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		if r.URL.Query().Get("q") == "Show A" {
+			_, _ = io.WriteString(w, "this is not torznab xml <<<")
+			return
+		}
+		body := torznabBody(torznabItem("Show B S01 1080p BluRay [G]", "https://nyaa.si/view/43"))
+		_, _ = io.WriteString(w, strings.ReplaceAll(body, "http://prowlarr:9696", "http://"+r.Host))
+	}))
+	defer srv.Close()
+
+	entries := []seadex.Entry{
+		nyaaEntry(7, 42, true, "Show A - S01E01 (1080p) [G].mkv", "Show A - S01E02 (1080p) [G].mkv"),
+		nyaaEntry(8, 43, true, "Show B - S01E01 (1080p) [G].mkv", "Show B - S01E02 (1080p) [G].mkv"),
+	}
+	info := func(alID int) EntryInfo {
+		if alID == 7 {
+			return EntryInfo{Title: "Show A", SeasonTvdb: 1}
+		}
+		return EntryInfo{Title: "Show B", SeasonTvdb: 1}
+	}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	log, rec := capture.New()
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+		Deps{HTTP: srv.Client(), Logger: log})
+	if err := w.Rebuild(context.Background(), entries, info); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if !rec.Contains("indexer title harvest response malformed; show keeps its synthesized title this rebuild") {
+		t.Errorf("show-local malformed response not warned as such; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+	snap := readSnapshotFile(t, path)
+	if _, ok := snap.Titles["nyaa:42"]; ok {
+		t.Errorf("titles = %v, want no cached title for the malformed show", snap.Titles)
+	}
+	if snap.Titles["nyaa:43"] != "Show B S01 1080p BluRay [G]" {
+		t.Errorf("titles = %v, want the later show on the same upstream still harvested (nyaa:43)", snap.Titles)
+	}
+}
+
 // TestHarvestUnconfiguredTrackerNeverQueried pins the tracker gate: journal
 // items whose tracker has no configured Prowlarr upstream are never harvested
 // - no query leaves the process for them - and they serve their synthesized
@@ -455,5 +503,25 @@ func TestMatchHarvestFailsClosedOnContradictoryIdentity(t *testing.T) {
 	}
 	if len(titles) != 0 {
 		t.Errorf("contradictory-identity result cached a title: %v", titles)
+	}
+}
+
+// TestMatchHarvestFailsClosedWhenURLAndHashResolveToDifferentReleases pins
+// the other fail-closed branch of resolveHarvestKey: the page URLs agree with
+// each other but the info hash maps to a DIFFERENT curated release, so the
+// cross-signal contradiction must title nothing.
+func TestMatchHarvestFailsClosedWhenURLAndHashResolveToDifferentReleases(t *testing.T) {
+	const hash = "143ed15e5e3df072ae91adaeb149973a887590dd"
+	index := map[string]string{"nyaa:1": "nyaa:1", hash: "nyaa:2"}
+	titles := map[string]string{}
+	results := []item{{
+		Title: "Tampered Title", InfoURL: "https://nyaa.si/view/1",
+		GUID: "https://nyaa.si/view/1", InfoHash: hash,
+	}}
+	if n := matchHarvest(results, index, titles); n != 0 {
+		t.Errorf("matchHarvest = %d matches, want 0 (URL and hash resolving to different releases must fail closed)", n)
+	}
+	if len(titles) != 0 {
+		t.Errorf("conflicting URL/hash identity cached a title: %v", titles)
 	}
 }

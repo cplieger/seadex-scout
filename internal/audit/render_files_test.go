@@ -50,6 +50,45 @@ func TestWriteFilesWritesTimestampedPair(t *testing.T) {
 	}
 }
 
+// TestWriteFilesMarkdownFailureLeavesJSONAndWrapsError pins the other arm of
+// the documented JSON-first ordering: when the Markdown half fails after the
+// JSON half has already committed, WriteFiles surfaces the wrapped
+// write-markdown error while the machine-readable JSON half survives
+// parseable on disk (never a dangling .md without its .json, and never a
+// swallowed error).
+func TestWriteFilesMarkdownFailureLeavesJSONAndWrapsError(t *testing.T) {
+	dir := t.TempDir()
+	r := &Report{
+		GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC),
+		Totals:      map[string]int{},
+		Rows:        []Row{{Title: "Frieren", Arr: "sonarr", Verdict: VerdictBest}},
+	}
+	base := filepath.Join(dir, "report-2026-07-11T15-04-05Z")
+	if err := os.Symlink("missing-target", base+".md"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := r.WriteFiles(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	if err == nil {
+		t.Fatal("WriteFiles must fail when the Markdown target is a symlink")
+	}
+	if !strings.Contains(err.Error(), "write markdown") {
+		t.Errorf("error = %q, want it wrapped with the write-markdown context", err)
+	}
+	data, readErr := os.ReadFile(base + ".json")
+	if readErr != nil {
+		t.Fatalf("JSON half must remain after the Markdown write fails: %v", readErr)
+	}
+	var back Report
+	if unmarshalErr := json.Unmarshal(data, &back); unmarshalErr != nil {
+		t.Fatalf("surviving JSON half does not parse: %v", unmarshalErr)
+	}
+	if len(back.Rows) != 1 || back.Rows[0].Title != "Frieren" {
+		t.Errorf("surviving JSON rows = %+v, want the Frieren row", back.Rows)
+	}
+}
+
 // TestWriteFilesRedactsArrURLCredentials pins the persistence-sink URL
 // sanitization: a credentialed arr deep-link (URL userinfo password plus a
 // credential-like query token) never lands in either half of the 0644 report

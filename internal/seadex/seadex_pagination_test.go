@@ -3,12 +3,14 @@ package seadex
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/cplieger/slogx/capture"
@@ -109,32 +111,48 @@ func TestFetchEntriesErrorsOnEmptyTerminalPageWithOutstandingItems(t *testing.T)
 	}
 }
 
+// staticPageTransport serves a fixed two-page envelope's first page for every
+// request, keeping the unmanaged SeaDex boundary hermetic inside the synctest
+// bubble (a real httptest socket would block virtual time).
+type staticPageTransport struct{}
+
+func (staticPageTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(`{"totalPages":2,"items":[{"alID":1,"expand":{"trs":[]}}]}`)),
+		Request:    req,
+	}, nil
+}
+
 // TestFetchEntriesCancelledBetweenPagesAborts pins the shutdown arm of the
 // "never compare against a truncated view" contract: a context that expires
 // during the inter-page politeness sleep must abort the fetch with an
-// interrupted error and a nil slice, never return the pages accumulated so far.
+// interrupted error and a nil slice, never return the pages accumulated so
+// far. synctest advances exactly 500ms of virtual time, so the timer branch
+// is exercised without real wall-clock waiting.
 func TestFetchEntriesCancelledBetweenPagesAborts(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"totalPages":2,"items":[{"alID":1,"expand":{"trs":[]}}]}`)
-	}))
-	defer server.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-	// The page delay far exceeds the context deadline, so the sleep between
-	// page 1 and page 2 is where the cancellation lands.
-	client := NewClient(server.Client(), server.URL, time.Minute, nil)
-
-	entries, err := client.FetchEntries(ctx)
-	if err == nil {
-		t.Fatal("FetchEntries returned nil error, want interrupted-between-pages error")
-	}
-	if entries != nil {
-		t.Fatalf("entries = %+v, want nil (partial pages discarded on interruption)", entries)
-	}
-	if !strings.Contains(err.Error(), "interrupted between pages") {
-		t.Errorf("error = %q, want interrupted-between-pages context", err.Error())
-	}
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+		defer cancel()
+		// The page delay far exceeds the context deadline, so the sleep
+		// between page 1 and page 2 is where the cancellation lands.
+		client := NewClient(&http.Client{Transport: staticPageTransport{}}, "https://example.test", time.Minute, nil)
+		started := time.Now()
+		entries, err := client.FetchEntries(ctx)
+		if err == nil {
+			t.Fatal("FetchEntries returned nil error, want interrupted-between-pages error")
+		}
+		if entries != nil {
+			t.Fatalf("entries = %+v, want nil (partial pages discarded on interruption)", entries)
+		}
+		if !strings.Contains(err.Error(), "interrupted between pages") {
+			t.Errorf("error = %q, want interrupted-between-pages context", err.Error())
+		}
+		if elapsed := time.Since(started); elapsed != 500*time.Millisecond {
+			t.Errorf("elapsed = %s, want virtual 500ms", elapsed)
+		}
+	})
 }
 
 // TestFetchEntriesHTTPStatusErrorAborts pins the transport arm of the "never

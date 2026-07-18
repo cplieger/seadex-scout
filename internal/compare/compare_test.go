@@ -2,6 +2,7 @@ package compare
 
 import (
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -134,6 +135,38 @@ func TestDedupeKeyEscapesDelimiters(t *testing.T) {
 	}
 }
 
+// TestDedupeKeyBoundsOversizedComponents pins the size bound on untrusted key
+// components: the SeaDex client admits up to 512 torrents per entry with
+// arbitrarily long syntactically valid URLs, so an oversized AB link set must
+// reduce to a fixed-size hashed identity - the key stays bounded instead of
+// materializing megabytes - while distinct oversized sets still key
+// distinctly (injectivity survives the hashing).
+func TestDedupeKeyBoundsOversizedComponents(t *testing.T) {
+	abLinks := func(tag string) []ReleaseLink {
+		links := make([]ReleaseLink, 0, 512)
+		for i := range 512 {
+			links = append(links, ReleaseLink{
+				Tracker: "AB",
+				URL: "https://animebytes.tv/torrents.php?id=9&torrentid=" + strconv.Itoa(i) +
+					"&pad=" + tag + strings.Repeat("x", 4096),
+			})
+		}
+		return links
+	}
+	base := Finding{AniListID: 42, Status: StatusBetter, InfoHash: "<redacted>"}
+	setA := base
+	setA.Links = abLinks("a")
+	keyA := dedupeKey(&setA)
+	if len(keyA) > 1024 {
+		t.Errorf("dedupe key over 512 oversized AB links = %d bytes, want bounded (hashed component)", len(keyA))
+	}
+	setB := base
+	setB.Links = abLinks("b")
+	if keyB := dedupeKey(&setB); keyB == keyA {
+		t.Error("distinct oversized AB link sets must not share a dedupe key")
+	}
+}
+
 func TestRepresentativePrefersResolutionThenPublic(t *testing.T) {
 	higherRes := []candidate{
 		{rel: release.Release{Resolution: "720p", TrackerType: release.TrackerPublic}},
@@ -149,6 +182,35 @@ func TestRepresentativePrefersResolutionThenPublic(t *testing.T) {
 	}
 	if rep := representative(tie); rep.rel.TrackerType != release.TrackerPublic {
 		t.Errorf("on a resolution tie the public tracker must win, got %q", rep.rel.TrackerType)
+	}
+
+	// Equal-ranked candidates must select the same representative whatever
+	// order the upstream returned them in: the headline's identity enters the
+	// dedupe key, so an order-dependent pick would emit a different key (a
+	// duplicate alert plus a false resolution) for an unchanged finding.
+	forward := []candidate{
+		{
+			rel:     release.Release{Group: "GrpA", Resolution: "1080p", TrackerType: release.TrackerPublic},
+			torrent: seadex.Torrent{Tracker: "Nyaa", InfoHash: "aaa", URL: "https://nyaa.si/view/1"},
+		},
+		{
+			rel:     release.Release{Group: "GrpB", Resolution: "1080p", TrackerType: release.TrackerPublic},
+			torrent: seadex.Torrent{Tracker: "Nyaa", InfoHash: "bbb", URL: "https://nyaa.si/view/2"},
+		},
+	}
+	reversed := []candidate{forward[1], forward[0]}
+	fwd, rev := representative(forward), representative(reversed)
+	if fwd.torrent.InfoHash != rev.torrent.InfoHash || fwd.torrent.URL != rev.torrent.URL {
+		t.Errorf("representative depends on upstream order: forward picked %q, reversed picked %q",
+			fwd.torrent.InfoHash, rev.torrent.InfoHash)
+	}
+	keyFor := func(pool []candidate) string {
+		f := Finding{AniListID: 1}
+		fillBest(&f, pool, groupSet(pool))
+		return finalize(&f, StatusBetter, SevWarn).DedupeKey
+	}
+	if keyFor(forward) != keyFor(reversed) {
+		t.Error("findings built from opposite upstream orders must share a dedupe key")
 	}
 }
 
@@ -501,17 +563,23 @@ func TestCompareMislabeledAnimeBytesURLRequiresOptIn(t *testing.T) {
 	// The tracker label is untrusted upstream data: a torrent claiming "Nyaa"
 	// but carrying an animebytes.tv URL - absolute, schemeless, or host:port -
 	// must be invisible while the AnimeBytes toggle is off (URL-aware guard on
-	// the RAW upstream URL), and surface only when it is on.
+	// the RAW upstream URL), and surface only when it is on AND the URL still
+	// yields a usable link. The host:port form hides its host from UsableURL
+	// (hidden-host: no followable link can be published), so it stays absent
+	// even with the toggle on - an unusable URL is never obtainable evidence.
 	const absURL = "https://animebytes.tv/torrents.php?id=9&torrentid=10"
-	for _, sneakyURL := range []string{
-		absURL,
-		"animebytes.tv/torrents.php?id=9&torrentid=10",
-		"animebytes.tv:443/torrents.php?id=9&torrentid=10",
+	for _, tc := range []struct {
+		sneakyURL string
+		wantOn    int
+	}{
+		{absURL, 1},
+		{"animebytes.tv/torrents.php?id=9&torrentid=10", 1},
+		{"animebytes.tv:443/torrents.php?id=9&torrentid=10", 0},
 	} {
-		t.Run(sneakyURL, func(t *testing.T) {
+		t.Run(tc.sneakyURL, func(t *testing.T) {
 			item := &library.Item{Title: "Mislabeled", Groups: []string{"erai-raws"}, SeasonGroups: map[int][]string{1: {"erai-raws"}}}
 			entry := seadex.Entry{AniListID: 500, Torrents: []seadex.Torrent{
-				{IsBest: true, ReleaseGroup: "Sneaky", Tracker: "Nyaa", URL: sneakyURL},
+				{IsBest: true, ReleaseGroup: "Sneaky", Tracker: "Nyaa", URL: tc.sneakyURL},
 			}}
 			m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
 
@@ -519,10 +587,10 @@ func TestCompareMislabeledAnimeBytesURLRequiresOptIn(t *testing.T) {
 				t.Fatalf("AnimeBytes off must hide a mislabeled AB-URL recommendation, got %+v", got)
 			}
 			got := comparer(filter.Options{AnimeBytes: true}, false).Compare([]match.Match{m})
-			if len(got) != 1 {
-				t.Fatalf("AnimeBytes on should surface the recommendation, got %d", len(got))
+			if len(got) != tc.wantOn {
+				t.Fatalf("AnimeBytes on: got %d findings, want %d", len(got), tc.wantOn)
 			}
-			if sneakyURL == absURL && got[0].ReleaseURL != absURL {
+			if tc.sneakyURL == absURL && got[0].ReleaseURL != absURL {
 				t.Errorf("ReleaseURL = %q, want the AB URL", got[0].ReleaseURL)
 			}
 		})

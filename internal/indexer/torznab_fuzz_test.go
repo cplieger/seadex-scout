@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"math"
 	"slices"
 	"testing"
 )
@@ -21,6 +22,7 @@ func FuzzParseTorznab(f *testing.F) {
 	f.Add(`<rss><channel><item><title>a &amp; b "q"</title><guid>g</guid></item></channel></rss>`)
 	f.Add(`<rss><channel><item><guid></guid><torznab:attr name="infohash" value="ABCDEF1234567890ABCDEF1234567890ABCDEF12"/></item></channel></rss>`)
 	f.Add(`<rss><channel><item><enclosure url="http://prowlarr/download?id=1&amp;token=x" length="123" type="application/x-bittorrent"/><torznab:attr name="category" value="2000"/></item></channel></rss>`)
+	f.Add(`<rss><channel><item><torznab:attr name="seeders" value="9223372036854775807"/><torznab:attr name="leechers" value="9223372036854775807"/></item></channel></rss>`)
 	f.Add("")
 	f.Add("not xml at all")
 	f.Fuzz(func(t *testing.T, body string) {
@@ -80,5 +82,9 @@ func normalizedRenderedItem(it item) item {
 	}
 	it.Seeders = max(it.Seeders, 1)
 	it.Leechers = max(it.Leechers, 0)
+	// Mirror writeItem's peers saturation: the rendered peers attr is
+	// seeders+leechers capped at math.MaxInt, and the re-parse derives
+	// leechers from it, so leechers survive the round trip capped the same way.
+	it.Leechers = min(it.Leechers, math.MaxInt-it.Seeders)
 	return it
 }

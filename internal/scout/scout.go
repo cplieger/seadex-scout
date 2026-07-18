@@ -750,9 +750,13 @@ func (s *Scout) Report(ctx context.Context) (audit.Report, error) {
 	}
 
 	result := s.deps.Matcher.Match(ctx, entries, &snap, idx, st.Memo)
-	if result.Degraded && ctx.Err() != nil {
-		// A shutdown truncated the match set (entries after the cancellation
-		// were never attempted), so there is no complete audit to render.
+	if ctx.Err() != nil {
+		// A shutdown arrived during or right after matching. The match set may
+		// be truncated (entries after the cancellation were never attempted),
+		// and even a complete one should not spend the shutdown grace period
+		// building, logging, and persisting a full audit: the signal context
+		// is one report-wide budget, so stop here. Wrapping context.Cause
+		// keeps a routine SIGTERM off main's ERROR alert.
 		return audit.Report{}, fmt.Errorf("report interrupted: %w", context.Cause(ctx))
 	}
 	if result.Degraded {

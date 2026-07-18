@@ -477,8 +477,9 @@ func TestStoreSaveLoadPreservesEscalationStreaks(t *testing.T) {
 // Save stamps SchemaVersion into every file it writes (round-tripping through
 // Load), the stamp lands on the copy Save writes - never the caller's State -
 // a legacy pre-version file (no version field) loads without error as
-// version zero, and a file stamped by a newer binary is refused and
-// quarantined instead of silently zero-loading moved members.
+// version zero, and a file stamped by a newer binary is refused, preserved at
+// the live path, and shielded from every subsequent Save instead of silently
+// zero-loading moved members or overwriting the newer state.
 func TestStoreSaveStampsSchemaVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := NewStore(path, testLogger())
@@ -511,10 +512,11 @@ func TestStoreSaveStampsSchemaVersion(t *testing.T) {
 	}
 
 	// A file stamped by a NEWER binary (an image rollback) must be refused,
-	// not field-by-field zero-loaded: its members may have moved, and the
-	// next Save would overwrite the newer-schema file with this binary's
-	// envelope, destroying the newer state. The file is quarantined so
-	// rolling forward again finds it at .corrupt (latest wins).
+	// not field-by-field zero-loaded: its members may have moved. It is valid
+	// state, not corruption, so it stays at the live path (no .corrupt copy)
+	// and every subsequent Save on this Store is refused — otherwise this
+	// binary would overwrite the newer-schema file with a cold envelope and
+	// rolling forward would silently lose the newer state.
 	newer := fmt.Sprintf(`{"version":%d,"baselined":true}`, SchemaVersion+1)
 	if err := os.WriteFile(path, []byte(newer), 0o644); err != nil {
 		t.Fatalf("write newer-version state: %v", err)
@@ -529,7 +531,20 @@ func TestStoreSaveStampsSchemaVersion(t *testing.T) {
 				err.Error(), wantFile, wantSupported)
 		}
 	}
-	assertQuarantined(t, path, newer)
+	if _, statErr := os.Stat(path + ".corrupt"); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("newer-schema file quarantined (stat err = %v), want it preserved at the live path", statErr)
+	}
+	live, readErr := os.ReadFile(path)
+	if readErr != nil || string(live) != newer {
+		t.Errorf("live state file after newer-schema load = %q (err %v), want the original bytes preserved", live, readErr)
+	}
+	if saveErr := store.Save(context.Background(), &State{}); saveErr == nil {
+		t.Error("Save after loading a newer-schema file returned nil error, want refusal")
+	}
+	live, readErr = os.ReadFile(path)
+	if readErr != nil || string(live) != newer {
+		t.Errorf("live state file after blocked Save = %q (err %v), want the newer-schema bytes untouched", live, readErr)
+	}
 }
 
 // TestStoreLoadLogsLibrarySnapshotAge pins the snapshot-age diagnostic on the

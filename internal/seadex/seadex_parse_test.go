@@ -111,7 +111,7 @@ func TestDecodePageCaseInsensitiveKeysMatchUnmarshal(t *testing.T) {
 		`"TRACKER":"Nyaa","INFOHASH":"abc","URL":"https://nyaa.si/view/1","ISBEST":true,` +
 		`"DUALAUDIO":true,"FILES":[{"name":"a.mkv","length":1}],"TAGS":["t"]}]}}]}`)
 
-	got, err := decodePage(body)
+	got, _, err := decodePage(body, maxPageElements)
 	if err != nil {
 		t.Fatalf("decodePage: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestDecodePageDuplicateExpandNullMatchesUnmarshal(t *testing.T) {
 		`"expand":{"trs":[{"releaseGroup":"PMR","tracker":"Nyaa","isBest":true,` +
 		`"url":"https://nyaa.si/view/1"}]},"expand":null}]}`)
 
-	got, err := decodePage(body)
+	got, _, err := decodePage(body, maxPageElements)
 	if err != nil {
 		t.Fatalf("decodePage: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestDecodePageDuplicateExpandObjectMatchesUnmarshal(t *testing.T) {
 		`"expand":{"trs":[{"releaseGroup":"PMR","tracker":"Nyaa","isBest":true,` +
 		`"url":"https://nyaa.si/view/1"}]},"expand":{}}]}`)
 
-	got, err := decodePage(body)
+	got, _, err := decodePage(body, maxPageElements)
 	if err != nil {
 		t.Fatalf("decodePage: %v", err)
 	}

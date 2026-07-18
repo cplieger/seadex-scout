@@ -100,7 +100,7 @@ func TestDecodePageElementBudgetErrors(t *testing.T) {
 	item := `{"alID":1,"expand":{"trs":[` + repeatJSON(torrent, 512) + `]}}`
 	page := `{"totalPages":1,"items":[` + repeatJSON(item, 40) + `]}`
 
-	_, err := decodePage([]byte(page))
+	_, _, err := decodePage([]byte(page), maxPageElements)
 	if err == nil {
 		t.Fatal("decodePage returned nil error, want element-budget error")
 	}
@@ -110,7 +110,36 @@ func TestDecodePageElementBudgetErrors(t *testing.T) {
 	}
 }
 
-// TestFetchAndAppendEntryCapBeforeAppend pins the relocated total-entry guard:
+// TestFetchEntriesCumulativeElementCapErrors pins the fetch-wide element
+// budget the per-page cap cannot cover: pages each individually below
+// maxPageElements (and far under the cumulative byte cap) still accumulate
+// retained decoded entries across the whole fetch, so their combined element
+// count must trip maxTotalElements with errCumulativeElements and a nil slice
+// - before the excess page's elements are materialized - instead of amplifying
+// dozens of compact pages into decoded slice backing arrays that OOM-kill the
+// deployment container.
+func TestFetchEntriesCumulativeElementCapErrors(t *testing.T) {
+	// 20 items x (1 + 512 torrents + 512x64 tags) = 665,620 elements per
+	// page: under the 1M per-page budget, over the 1M fetch-wide budget on
+	// page 2. Each page is ~2 MB, so the byte caps never fire first.
+	torrent := `{"tags":[` + repeatJSON(`""`, 64) + `]}`
+	item := `{"alID":1,"expand":{"trs":[` + repeatJSON(torrent, 512) + `]}}`
+	page := `{"totalPages":3,"items":[` + repeatJSON(item, 20) + `]}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, page)
+	}))
+	defer server.Close()
+
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	if !errors.Is(err, errCumulativeElements) {
+		t.Fatalf("FetchEntries error = %v, want errCumulativeElements", err)
+	}
+	if entries != nil {
+		t.Fatalf("entries = %d items, want nil on cap error", len(entries))
+	}
+}
+
 // a page whose items would push the accumulated catalogue past maxEntries is
 // rejected BEFORE any of its items are converted or appended, so the decoded
 // page never amplifies into public Entry structs once the budget is spent.

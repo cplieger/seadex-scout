@@ -110,7 +110,7 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 	}
 	items, err := parseTorznab(body)
 	if err != nil {
-		return nil, &transientUpstreamError{err: err}
+		return nil, &transientUpstreamError{err: err, malformedBody: true}
 	}
 	return items, nil
 }
@@ -122,15 +122,31 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 // capped Retry-After (via httpx.ParseRetryAfter, so it can never exceed
 // httpx.RetryAfterCap), exposed through RetryAfterHint so Do
 // waits the upstream-requested delay instead of its jittered backoff.
+// malformedBody distinguishes the decode failure of a SUCCESSFUL (2xx)
+// response from the status/transport failures: after retry exhaustion the
+// harvest treats a persistently malformed body as specific to one show's
+// result set (malformedUpstreamBody), never as evidence the upstream itself
+// is down.
 type transientUpstreamError struct {
-	err        error
-	retryAfter time.Duration
+	err           error
+	retryAfter    time.Duration
+	malformedBody bool
 }
 
 func (e *transientUpstreamError) Error() string                 { return e.err.Error() }
 func (e *transientUpstreamError) Unwrap() error                 { return e.err }
 func (e *transientUpstreamError) IsTransient() bool             { return true }
 func (e *transientUpstreamError) RetryAfterHint() time.Duration { return e.retryAfter }
+
+// malformedUpstreamBody reports whether err is (or wraps) the decode failure
+// of a successful upstream response: the query reached the upstream and it
+// answered 2xx, so the failure is scoped to the one result set that would not
+// parse, not to the upstream's availability. Status failures (429/5xx,
+// auth/config 4xx) and transport errors never carry the marker.
+func malformedUpstreamBody(err error) bool {
+	tue, ok := errors.AsType[*transientUpstreamError](err)
+	return ok && tue.malformedBody
+}
 
 // filterDownloadURLs drops items whose download URL is not an absolute http(s)
 // URL on the same origin as the configured Prowlarr Torznab endpoint. The

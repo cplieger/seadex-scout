@@ -8,8 +8,10 @@ import (
 // FuzzClassifyRawURL fuzzes the raw-URL structural classifier over untrusted
 // SeaDex link strings with bounded-output and metamorphic invariants (never a
 // reimplementation of the class rules): every input lands in exactly one enum
-// class; Parsed is nil exactly for the two no-facts classes (Empty,
-// Malformed); Host is always lowercase and empty for every class that carries
+// class; the private parsed object is nil exactly for the two no-facts
+// classes (Empty, Malformed) and the exported semantic facts (Scheme, Port,
+// HasUserInfo) are zero whenever it is; Host is always lowercase and empty
+// for every class that carries
 // no extractable host evidence (Empty, Malformed, HiddenHost, Relative) while
 // an absolute form always carries its host; HostUnrecoverable marks only
 // schemeless-host forms; Trimmed never carries surrounding whitespace; and
@@ -45,8 +47,11 @@ func FuzzClassifyRawURL(f *testing.F) {
 		if fm.Trimmed != strings.TrimSpace(fm.Trimmed) {
 			t.Errorf("Trimmed = %q still carries surrounding whitespace", fm.Trimmed)
 		}
-		if gotNil := fm.Parsed == nil; gotNil != (fm.Class == URLFormEmpty || fm.Class == URLFormMalformed) {
-			t.Errorf("Parsed nil = %v for class %v, want nil exactly for Empty/Malformed", gotNil, fm.Class)
+		if gotNil := fm.parsed == nil; gotNil != (fm.Class == URLFormEmpty || fm.Class == URLFormMalformed) {
+			t.Errorf("parsed nil = %v for class %v, want nil exactly for Empty/Malformed", gotNil, fm.Class)
+		}
+		if fm.parsed == nil && (fm.Scheme != "" || fm.Port != "" || fm.HasUserInfo) {
+			t.Errorf("Scheme=%q Port=%q HasUserInfo=%v without a parse for %q, want zero facts", fm.Scheme, fm.Port, fm.HasUserInfo, raw)
 		}
 		if fm.Host != strings.ToLower(fm.Host) {
 			t.Errorf("Host = %q is not lowercase", fm.Host)
@@ -67,6 +72,7 @@ func FuzzClassifyRawURL(f *testing.F) {
 
 		again := ClassifyRawURL(fm.Trimmed)
 		if again.Class != fm.Class || again.Host != fm.Host || again.Trimmed != fm.Trimmed ||
+			again.Scheme != fm.Scheme || again.Port != fm.Port || again.HasUserInfo != fm.HasUserInfo ||
 			again.HasBackslash != fm.HasBackslash || again.HostUnrecoverable != fm.HostUnrecoverable {
 			t.Errorf("ClassifyRawURL(%q) is not stable on its own Trimmed form %q", raw, fm.Trimmed)
 		}

@@ -37,8 +37,11 @@ const (
 	// clean cold start.
 	maxStateBytes = 32 << 20
 	// dirMode / fileMode are applied to the created state directory and file.
+	// The file holds the operator's library inventory and finding history, so
+	// it stays owner-only (least privilege); the directory mode is the broader
+	// config-directory contract and is unchanged.
 	dirMode  = 0o755
-	fileMode = 0o644
+	fileMode = 0o600
 )
 
 // SchemaVersion is the schema version Save stamps into State.Version on every
@@ -99,9 +102,15 @@ type State struct {
 
 // Store loads and saves the state file at a fixed path.
 type Store struct {
-	log      *slog.Logger
-	path     string
-	readOnly bool
+	log  *slog.Logger
+	path string
+	// unsupportedVersion remembers a newer-than-supported schema version the
+	// last Load found at the live path. While non-zero, Save is refused: the
+	// newer-schema file must stay in place so rolling forward to the image
+	// that wrote it consumes it again, instead of this older binary
+	// overwriting it with a fresh cold-start envelope.
+	unsupportedVersion int
+	readOnly           bool
 }
 
 // NewStore returns a Store for the given state-file path. logger may be nil.
@@ -130,17 +139,27 @@ const staleTempMaxAge = time.Hour
 // Load reads and decodes the state file. A missing file returns a zero State
 // and no error (cold start); a present but corrupt or oversized file is
 // quarantined and returns the error so the caller can decide (the scout logs
-// it and starts cold).
+// it and starts cold). A valid file stamped by a NEWER binary (an image
+// rollback) is NOT quarantined: it stays at the live path and this Store
+// refuses every subsequent Save, so rolling forward to the newer image finds
+// its state intact instead of a freshly-overwritten older envelope.
 func (s *Store) Load(ctx context.Context) (State, error) {
 	// CleanupStaleTemps maps a missing dir to (0, nil) and logs its own
 	// removal summary at Info through the supplied logger, so Load only
-	// surfaces a readdir failure.
-	if _, cleanErr := atomicfile.CleanupStaleTemps(filepath.Dir(s.path), staleTempMaxAge, atomicfile.WithLogger(s.log)); cleanErr != nil {
-		s.log.Warn("could not clean stale atomic-write temp files", "dir", filepath.Dir(s.path), "error", cleanErr)
+	// surfaces a readdir failure. Read-only stores (the one-shot report) skip
+	// state-directory maintenance entirely: the report's state access is
+	// documented read-only and holds only report.lock, so removing files here
+	// would both break that contract and risk unlinking a stalled concurrent
+	// daemon Save's still-open temp.
+	if !s.readOnly {
+		if _, cleanErr := atomicfile.CleanupStaleTemps(filepath.Dir(s.path), staleTempMaxAge, atomicfile.WithLogger(s.log)); cleanErr != nil {
+			s.log.Warn("could not clean stale atomic-write temp files", "dir", filepath.Dir(s.path), "error", cleanErr)
+		}
 	}
 	data, err := atomicfile.ReadBounded(ctx, s.path, maxStateBytes)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
+			s.unsupportedVersion = 0
 			s.log.Info("no state file, starting cold", "path", s.path)
 			return State{}, nil
 		}
@@ -168,11 +187,14 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 	if st.Version > SchemaVersion {
 		// A file stamped by a newer binary (an image rollback): its members may
 		// have moved, so field-by-field zero-loading is exactly the silent
-		// discard SchemaVersion exists to prevent. Preserve the file and start
-		// cold; rolling forward again finds it at .corrupt (latest wins).
-		s.maybeQuarantine()
+		// discard SchemaVersion exists to prevent. This is valid state, not
+		// corruption: keep it at the live path and block this older Store from
+		// overwriting it (Save refuses while unsupportedVersion is set), so
+		// rolling forward again consumes it in place.
+		s.unsupportedVersion = st.Version
 		return State{}, fmt.Errorf("state: decode %s: schema version %d is newer than this binary supports (%d)", s.path, st.Version, SchemaVersion)
 	}
+	s.unsupportedVersion = 0
 	attrs := []any{
 		"path", s.path,
 		"library_items", len(st.Library.Items),
@@ -259,13 +281,19 @@ func (bw *boundedWriter) Write(p []byte) (int, error) {
 // happen on a shallow copy, so the caller's State is never mutated.
 // A context already cancelled on entry fails fast — before the sanitize and
 // encode work — so scout.save's detached shutdown retry runs immediately
-// instead of after a doomed full serialization of the same state.
+// instead of after a doomed full serialization of the same state. A Store
+// whose last Load found a newer-than-supported schema version refuses to
+// save: the newer-schema file must survive at the live path for a
+// roll-forward to consume (see Load).
 func (s *Store) Save(ctx context.Context, st *State) error {
 	if st == nil {
 		return errors.New("state: encode: nil state (Save never writes a non-object state file)")
 	}
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("state: save %s: %w", s.path, err)
+	}
+	if s.unsupportedVersion > SchemaVersion {
+		return fmt.Errorf("state: save %s: blocked after loading newer schema version %d (supported %d)", s.path, s.unsupportedVersion, SchemaVersion)
 	}
 	sanitized := *st
 	sanitized.Library = st.Library.SanitizedForStorage()

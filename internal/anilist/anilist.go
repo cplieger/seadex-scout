@@ -28,6 +28,7 @@ import (
 
 	"github.com/cplieger/httpx/v3"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
+	"github.com/cplieger/seadex-scout/internal/titlekey"
 	"github.com/cplieger/textsafe"
 )
 
@@ -50,6 +51,12 @@ const (
 
 // ErrNotFound reports that AniList has no media for the requested ID.
 var ErrNotFound = errors.New("anilist: media not found")
+
+// errBatchRecord marks a record-local validation failure inside an otherwise
+// well-formed batch response, distinguishing it from a request/envelope
+// failure so FetchMany can keep fetching later chunks instead of reading one
+// poisoned record as a total outage.
+var errBatchRecord = errors.New("anilist: batch response")
 
 // query fetches the fields needed for a title fallback match.
 const query = `query ($id: Int) { Media(id: $id, type: ANIME) { format seasonYear startDate { year } title { romaji english native } } }`
@@ -157,11 +164,17 @@ func (c *Client) Fetch(ctx context.Context, aniListID int) (Media, error) {
 // FetchMany resolves many AniList ids in batched requests (up to batchSize ids
 // each, every batch throttled and retried like Fetch), returning the media that
 // exist keyed by id. An id AniList has no anime for is simply absent from the
-// result (the caller treats an absent id as not-found). On a request error it
-// returns the media gathered so far together with the error, so the caller can
-// fall back to a per-id Fetch for the remainder rather than losing the batch.
+// result (the caller treats an absent id as not-found). On a request or
+// envelope error it returns the media gathered so far together with the error,
+// so the caller can fall back to a per-id Fetch for the remainder rather than
+// losing the batch. A record-local failure (errBatchRecord, a poisoned record
+// inside an otherwise well-formed response) does NOT abort the batch: later
+// chunks are still fetched and the first record error is surfaced alongside
+// the merged result, so one malformed record cannot hide every id after it or
+// read as a total outage to the caller.
 func (c *Client) FetchMany(ctx context.Context, ids []int) (map[int]Media, error) {
 	out := make(map[int]Media, len(ids))
+	var firstRecordErr error
 	for chunk := range slices.Chunk(ids, batchSize) {
 		raw, err := c.request(ctx, batchQuery, map[string]any{"ids": chunk})
 		if err != nil {
@@ -170,11 +183,17 @@ func (c *Client) FetchMany(ctx context.Context, ids []int) (map[int]Media, error
 
 		page, err := parseMediaPage(raw)
 		maps.Copy(out, page)
-		if err != nil {
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, errBatchRecord) {
 			return out, err
 		}
+		if firstRecordErr == nil {
+			firstRecordErr = err
+		}
 	}
-	return out, nil
+	return out, firstRecordErr
 }
 
 // do performs one GraphQL POST attempt, translating a 429 into a
@@ -455,12 +474,13 @@ type gqlPageResponse struct {
 // parseMediaPage decodes a batched Page(media) response into a map keyed by
 // AniList id. A GraphQL-level error or a missing/null Page or media field
 // fails the batch; an invalid media record (missing id or rejected fields) is
-// skipped and surfaced via the returned error alongside the chunk's valid
-// records, so one poisoned record cannot discard the chunk or read as a total
-// outage - a skipped id is absent from the map AND covered by the non-nil
-// error, so the caller never negative-memoizes it. Ids absent from the media
-// array of an error-free response are simply not in the map (the caller
-// treats them as not-found).
+// skipped and surfaced via an errBatchRecord-wrapped error alongside the
+// chunk's valid records, so one poisoned record cannot discard the chunk or
+// read as a total outage - a skipped id is absent from the map AND covered by
+// the non-nil error, so the caller never negative-memoizes it, and FetchMany
+// distinguishes the record-local failure from an envelope failure and keeps
+// fetching later chunks. Ids absent from the media array of an error-free
+// response are simply not in the map (the caller treats them as not-found).
 func parseMediaPage(raw []byte) (map[int]Media, error) {
 	var r gqlPageResponse
 	if err := json.Unmarshal(raw, &r); err != nil {
@@ -482,14 +502,14 @@ func parseMediaPage(raw []byte) (map[int]Media, error) {
 		md := &media[i]
 		if md.ID <= 0 {
 			if recordErr == nil {
-				recordErr = fmt.Errorf("anilist: batch response media record %d missing id", i)
+				recordErr = fmt.Errorf("%w media record %d missing id", errBatchRecord, i)
 			}
 			continue
 		}
 		parsed, err := md.toMedia()
 		if err != nil {
 			if recordErr == nil {
-				recordErr = fmt.Errorf("anilist: batch response media record %d: %w", i, err)
+				recordErr = fmt.Errorf("%w media record %d: %v", errBatchRecord, i, err)
 			}
 			continue
 		}
@@ -518,17 +538,16 @@ func dedupeTitles(titles ...string) []string {
 }
 
 // hasMatchableTitle reports whether at least one title survives the match
-// package's normalized-title key domain (lowercased [a-z0-9] only, the
-// normalizeTitle contract). A payload whose every title normalizes to an
-// empty key (punctuation-only, or entirely non-ASCII) would parse into a
-// Media that can never match and would be memoized as a permanent false
-// negative; erroring instead lets the lookup degrade and retry next cycle.
+// package's normalized-title key domain (titlekey.Normalize, the shared
+// implementation of the lowercased [a-z0-9] key). A payload whose every title
+// normalizes to an empty key (punctuation-only, or entirely non-ASCII) would
+// parse into a Media that can never match and would be memoized as a
+// permanent false negative; erroring instead lets the lookup degrade and
+// retry next cycle.
 func hasMatchableTitle(titles []string) bool {
 	for _, title := range titles {
-		for _, r := range strings.ToLower(title) {
-			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-				return true
-			}
+		if titlekey.Normalize(title) != "" {
+			return true
 		}
 	}
 	return false

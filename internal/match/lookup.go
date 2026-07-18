@@ -154,9 +154,11 @@ func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *map
 		m.log.Debug("anilist batch prefetch cancelled",
 			"requested", len(ids), "fetched", len(fetched))
 	case len(fetched) == 0:
-		// TOTAL failure: FetchMany aborts on the first chunk error, so an
-		// empty result means zero chunks succeeded (an outage, not a partial
-		// miss). Degrade fast: fail the pending ids immediately instead of
+		// TOTAL failure: FetchMany continues past record-local errors and
+		// aborts only on a request/envelope failure, so an empty result plus
+		// an error means no completed chunk produced media - one poisoned
+		// record can no longer hide later chunks or read as an outage here.
+		// Degrade fast: fail the pending ids immediately instead of
 		// regressing to one doomed per-id request each.
 		m.log.Warn("anilist batch prefetch failed; skipping per-id fallback for pending ids",
 			"requested", len(ids), "error", err)

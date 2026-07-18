@@ -307,7 +307,6 @@ func TestMemoEntryExpiryWireFormat(t *testing.T) {
 	}
 }
 
-
 // TestMemoDegradedPassRetainsExpiredEntries pins the prune guard (h-f8): a
 // degraded pass (here a total AniList outage) could not renew what expired,
 // so it must NOT prune the expired entries — the feed's stale-title tier

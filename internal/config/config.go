@@ -471,11 +471,8 @@ func (c *Config) IndexerConfigured() bool {
 // Validate reports the first configuration problem that would stop the app from
 // running, or nil when runnable.
 func (c *Config) Validate() error {
-	if c.RunMode != RunModeDaemon && c.RunMode != RunModeReport {
-		// Field-name-only (do not echo the supplied mode): the value may be an
-		// expanded ${VAR} secret placed here by a config typo, and this error
-		// reaches the startup log.
-		return fmt.Errorf("mode must be %q or %q", RunModeDaemon, RunModeReport)
+	if err := validateRunMode(c.RunMode); err != nil {
+		return err
 	}
 	if err := validateArrPair("sonarr", c.SonarrURL, c.SonarrAPIKey); err != nil {
 		return err
@@ -484,6 +481,26 @@ func (c *Config) Validate() error {
 		return err
 	}
 	c.warnArrURLCredentials()
+	if err := c.validateEnabledArrs(); err != nil {
+		return err
+	}
+	c.warnMalformedPublicURLs()
+	return c.validateIndexer()
+}
+
+// validateRunMode rejects an unknown run mode. Field-name-only (do not echo
+// the supplied mode): the value may be an expanded ${VAR} secret placed here
+// by a config typo, and this error reaches the startup log.
+func validateRunMode(mode string) error {
+	if mode != RunModeDaemon && mode != RunModeReport {
+		return fmt.Errorf("mode must be %q or %q", RunModeDaemon, RunModeReport)
+	}
+	return nil
+}
+
+// validateEnabledArrs rejects an explicitly enabled arr with no connection
+// details at all, and a config that enables no arr whatsoever.
+func (c *Config) validateEnabledArrs() error {
 	if c.SonarrWanted && c.SonarrURL == "" && c.SonarrAPIKey == "" {
 		return errors.New("sonarr.enabled is true but sonarr.url and sonarr.api_key are both empty")
 	}
@@ -493,9 +510,14 @@ func (c *Config) Validate() error {
 	if !c.SonarrEnabled() && !c.RadarrEnabled() {
 		return errors.New("no arr configured: enable sonarr and/or radarr with a url + api_key")
 	}
-	// public_url only feeds report deep-links, so a malformed value warns (the
-	// links will be broken) but still loads; a hard rejection would newly reject
-	// configs that load today.
+	return nil
+}
+
+// warnMalformedPublicURLs warns on a malformed public_url. public_url only
+// feeds report deep-links, so a malformed value warns (the links will be
+// broken) but still loads; a hard rejection would newly reject configs that
+// load today.
+func (c *Config) warnMalformedPublicURLs() {
 	for _, pu := range []struct{ name, val string }{
 		{"sonarr.public_url", c.SonarrPublicURL},
 		{"radarr.public_url", c.RadarrPublicURL},
@@ -505,7 +527,6 @@ func (c *Config) Validate() error {
 				"error", err)
 		}
 	}
-	return c.validateIndexer()
 }
 
 // warnArrURLCredentials warns (field-name-only, never echoing the URL)
@@ -534,15 +555,7 @@ func (c *Config) warnArrURLCredentials() {
 // no-indexer config is unaffected.
 func (c *Config) validateIndexer() error {
 	if !c.IndexerConfigured() {
-		if c.IndexerAPIKey != "" || c.IndexerProwlarrAPIKey != "" || c.IndexerABPasskey != "" {
-			// Half-configuration signal, mirroring the disabled-arr-with-key
-			// Info in toConfig: indexer secrets are always operator-written,
-			// so keys without a torznab URL almost always mean the operator
-			// expected the feed to start. Info, not Warn - deliberately
-			// parked keys must not raise Loki alert noise.
-			slog.Info("indexer keys are set but no torznab url is configured; " +
-				"the Torznab feed will not start (set indexer.nyaa_torznab_url and/or indexer.ab_torznab_url)")
-		}
+		c.warnDisabledIndexerKeys()
 		return nil
 	}
 	if c.IndexerAPIKey == "" {
@@ -562,22 +575,7 @@ func (c *Config) validateIndexer() error {
 	if err := validateHTTPURL("indexer.ab_torznab_url", c.IndexerABTorznabURL); err != nil {
 		return err
 	}
-	// The header-based Prowlarr key posture (X-Api-Key, never in a logged URL)
-	// is defeated when the operator pastes a Jackett-style URL with an embedded
-	// credential: upstream failures log the request URL, shipping the pasted
-	// key to the WARN log on every failed search. Warn field-name-only (never
-	// echo the URL), matching the public_url warn-only posture.
-	for _, tu := range []struct{ name, val string }{
-		{"indexer.nyaa_torznab_url", c.IndexerNyaaTorznabURL},
-		{"indexer.ab_torznab_url", c.IndexerABTorznabURL},
-	} {
-		if urlEmbedsCredential(tu.val) {
-			slog.Warn("torznab url embeds a credential-like query parameter or userinfo; "+
-				"move the key to indexer.prowlarr_api_key (sent as a header, never logged) "+
-				"or it will appear in upstream-failure logs",
-				"field", tu.name)
-		}
-	}
+	c.warnTorznabURLCredentials()
 	// A search proxies Prowlarr using indexer.prowlarr_api_key in the X-Api-Key
 	// header. An empty key is accepted rather than rejected (it is valid when
 	// Prowlarr has auth "Disabled for Local Addresses"), but the common case is a
@@ -592,6 +590,39 @@ func (c *Config) validateIndexer() error {
 			"every search answers the arr with a Torznab <error code=\"900\"> instead of results")
 	}
 	return nil
+}
+
+// warnDisabledIndexerKeys emits the half-configuration signal for indexer
+// secrets set with no torznab URL, mirroring the disabled-arr-with-key Info
+// in toConfig: indexer secrets are always operator-written, so keys without a
+// torznab URL almost always mean the operator expected the feed to start.
+// Info, not Warn - deliberately parked keys must not raise Loki alert noise.
+func (c *Config) warnDisabledIndexerKeys() {
+	if c.IndexerAPIKey != "" || c.IndexerProwlarrAPIKey != "" || c.IndexerABPasskey != "" {
+		slog.Info("indexer keys are set but no torznab url is configured; " +
+			"the Torznab feed will not start (set indexer.nyaa_torznab_url and/or indexer.ab_torznab_url)")
+	}
+}
+
+// warnTorznabURLCredentials warns (field-name-only, never echoing the URL)
+// when a torznab url embeds a credential-like userinfo or query parameter.
+// The header-based Prowlarr key posture (X-Api-Key, never in a logged URL)
+// is defeated when the operator pastes a Jackett-style URL with an embedded
+// credential: upstream failures log the request URL, shipping the pasted
+// key to the WARN log on every failed search. Matches the public_url
+// warn-only posture.
+func (c *Config) warnTorznabURLCredentials() {
+	for _, tu := range []struct{ name, val string }{
+		{"indexer.nyaa_torznab_url", c.IndexerNyaaTorznabURL},
+		{"indexer.ab_torznab_url", c.IndexerABTorznabURL},
+	} {
+		if urlEmbedsCredential(tu.val) {
+			slog.Warn("torznab url embeds a credential-like query parameter or userinfo; "+
+				"move the key to indexer.prowlarr_api_key (sent as a header, never logged) "+
+				"or it will appear in upstream-failure logs",
+				"field", tu.name)
+		}
+	}
 }
 
 // validateArrPair rejects a half-configured enabled arr (a URL with no key or a

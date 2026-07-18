@@ -43,8 +43,14 @@ const (
 // snapshot without a seen ledger is the retired pre-journal schema and
 // re-baselines (see loadPrevious).
 type snapshot struct {
-	ByHash   map[string]bool   `json:"by_hash"`
-	ByKey    map[string]bool   `json:"by_key"`
+	ByHash map[string]bool `json:"by_hash"`
+	ByKey  map[string]bool `json:"by_key"`
+	// ByPair is the hash/key pair relation (pairKey of an info hash and a
+	// tracker key observed on the same SeaDex torrent) lookup's cross-torrent
+	// gate reads. Persisted without omitempty so a freshly written snapshot
+	// always carries the map (even empty) and only a genuinely legacy
+	// snapshot decodes it nil.
+	ByPair   map[string]bool   `json:"by_pair"`
 	Seen     map[string]bool   `json:"seen,omitempty"`
 	Titles   map[string]string `json:"titles,omitempty"`
 	NyaaFeed []item            `json:"nyaa_feed"`
@@ -167,7 +173,7 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info f
 	nyaa, ab = sortAndCap(nyaa), sortAndCap(ab)
 	titles = retainTitles(titles, nyaa, ab)
 
-	snap := snapshot{ByHash: set.byHash, ByKey: set.byKey, Seen: seen, Titles: titles, NyaaFeed: nyaa, ABFeed: ab}
+	snap := snapshot{ByHash: set.byHash, ByKey: set.byKey, ByPair: set.byPair, Seen: seen, Titles: titles, NyaaFeed: nyaa, ABFeed: ab}
 	if err := w.persist(ctx, &snap); err != nil {
 		return err
 	}
@@ -324,18 +330,25 @@ func anyCurationWarned(ts []seadex.Torrent) bool {
 // buildCuration builds the search curation index over the whole SeaDex
 // catalogue: every torrent's info hash and tracker key mapped to whether any
 // entry marks that release best (OR-accumulated for a torrent attached to
-// several entries). Searches match Prowlarr results against it; unlike the
+// several entries), plus the pair relation - which hash/key combinations
+// were observed on one and the same torrent - that lookup's cross-torrent
+// gate reads. Searches match Prowlarr results against it; unlike the
 // RSS journal it always reflects the full current curation set.
 func buildCuration(entries []seadex.Entry) curation {
-	set := curation{byHash: make(map[string]bool), byKey: make(map[string]bool)}
+	set := curation{byHash: make(map[string]bool), byKey: make(map[string]bool), byPair: make(map[string]bool)}
 	for i := range entries {
 		for j := range entries[i].Torrents {
 			t := &entries[i].Torrents[j]
-			if h := validInfoHash(t.InfoHash); h != "" {
+			h := validInfoHash(t.InfoHash)
+			k := trackerKey(t.Tracker, t.URL)
+			if h != "" {
 				set.byHash[h] = set.byHash[h] || t.IsBest
 			}
-			if k := trackerKey(t.Tracker, t.URL); k != "" {
+			if k != "" {
 				set.byKey[k] = set.byKey[k] || t.IsBest
+			}
+			if h != "" && k != "" {
+				set.byPair[pairKey(h, k)] = true
 			}
 		}
 	}

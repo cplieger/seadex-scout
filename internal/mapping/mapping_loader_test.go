@@ -1104,3 +1104,96 @@ func TestLoader_refreshCache_freshUnusableCacheStillFetches(t *testing.T) {
 		t.Fatalf("fresh-but-unusable cache was reused as fresh: records = %+v, want fetched record id 42", next.Records)
 	}
 }
+
+// TestLoader_refreshCache_boundsPersistedValidators pins the maxValidatorBytes
+// guard: an at-limit validator is retained while an over-limit one is dropped,
+// so an upstream-controlled header cannot inflate the persisted state.json.
+func TestLoader_refreshCache_boundsPersistedValidators(t *testing.T) {
+	atLimit := strings.Repeat("v", maxValidatorBytes)
+	tests := []struct {
+		name      string
+		validator string
+		want      string
+	}{
+		{name: "at limit retained", validator: atLimit, want: atLimit},
+		{name: "over limit dropped", validator: atLimit + "x", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("ETag", tc.validator)
+				_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
+			}))
+			defer ts.Close()
+
+			loader := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+			next, err := loader.refreshCache(t.Context(), &Cache{})
+			if err != nil {
+				t.Fatalf("refreshCache error: %v", err)
+			}
+			if next.ETag != tc.want {
+				t.Errorf("ETag length %d persisted as length %d, want length %d", len(tc.validator), len(next.ETag), len(tc.want))
+			}
+		})
+	}
+}
+
+// TestLoader_refreshCache_firstBootKeylessBodyRejected pins the AniList-key
+// coverage floor's denominator: on first boot (no previous cache, so the
+// relative shrink guard cannot fire) a valid 200-element body where 199
+// records lack an anilist_id and only one is fully mapped must be rejected as
+// wholesale key loss — not reinterpreted as a healthy 1/1 map after the
+// parser drops the keyless rows. The floor validates the survivor count
+// against the top-level source-element count (parseFribbForRefresh), which
+// destructive filtering cannot shrink.
+func TestLoader_refreshCache_firstBootKeylessBodyRejected(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(`[{"anilist_id":1,"type":"tv","tvdb_id":100}`)
+	for i := 2; i <= 200; i++ {
+		b.WriteString(`,{"type":"tv","tvdb_id":100}`)
+	}
+	b.WriteByte(']')
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(b.String()))
+	}))
+	defer ts.Close()
+
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), &Cache{})
+	if err == nil {
+		t.Fatal("first-boot refresh with 1/200 AniList-keyed records returned nil error, want below-minimum rejection")
+	}
+	if len(next.Records) != 0 {
+		t.Errorf("rejected first-boot refresh produced %d records, want 0", len(next.Records))
+	}
+}
+
+// TestLoader_refreshCache_firstBootDuplicateAmplificationRejected pins that
+// the AniList-key floor's denominator survives deduplication too: a
+// first-boot body of 200 rows all repeating one valid AniList ID collapses to
+// a single effective record, which must be rejected against the original
+// 200-element source count instead of passing every floor as a 1/1 map.
+func TestLoader_refreshCache_firstBootDuplicateAmplificationRejected(t *testing.T) {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := 1; i <= 200; i++ {
+		if i > 1 {
+			b.WriteByte(',')
+		}
+		b.WriteString(`{"anilist_id":9,"type":"tv","tvdb_id":900}`)
+	}
+	b.WriteByte(']')
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(b.String()))
+	}))
+	defer ts.Close()
+
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), &Cache{})
+	if err == nil {
+		t.Fatal("first-boot refresh of 200 duplicates of one AniList ID returned nil error, want below-minimum rejection")
+	}
+	if len(next.Records) != 0 {
+		t.Errorf("rejected first-boot refresh produced %d records, want 0", len(next.Records))
+	}
+}

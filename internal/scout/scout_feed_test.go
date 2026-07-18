@@ -149,7 +149,7 @@ func TestCycleUnusableMapSkipsFeedRebuild(t *testing.T) {
 // (healthy, state baselined), so a broken feed write can never take down the
 // monitoring half.
 func TestCycleFeedRebuildErrorIsNonFatal(t *testing.T) {
-	logger := scoutTestLogger()
+	logger, recorder := capture.New()
 	feed := &fakeFeed{err: errors.New("disk full")}
 	store := &fakeStore{st: state.State{
 		Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
@@ -181,6 +181,18 @@ func TestCycleFeedRebuildErrorIsNonFatal(t *testing.T) {
 	}
 	if !store.st.Baselined {
 		t.Error("state Baselined=false; the compare half must complete despite a feed rebuild failure")
+	}
+	if n := recorder.CountExact("indexer feed rebuild failed; keeping previous feed"); n != 1 {
+		t.Errorf("feed-rebuild failure log count = %d, want exactly 1", n)
+	}
+	warns := 0
+	for _, r := range recorder.Records() {
+		if r.Message == "indexer feed rebuild failed; keeping previous feed" && r.Level.String() == "WARN" {
+			warns++
+		}
+	}
+	if warns != 1 {
+		t.Errorf("feed-rebuild failure WARN count = %d, want exactly 1", warns)
 	}
 }
 

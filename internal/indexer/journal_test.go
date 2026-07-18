@@ -692,6 +692,56 @@ func TestRebuildSkipsTitlelessTorrentAsUnresolvable(t *testing.T) {
 	}
 }
 
+// TestRebuildCountsIdentitylessABTorrentAsUnresolvable pins journalIfNew's
+// no-identity accounting: an enabled AnimeBytes torrent whose info hash is
+// redacted (AB always redacts) and whose URL shape is unrecognized carries no
+// identity signal at all - the exact shape an upstream AB URL change produces
+// - so the rebuild must report it as skipped_unresolvable on the snapshot log
+// line instead of silently losing the release from both the RSS journal and
+// search curation. An intentionally disabled AB scope (no ab_torznab_url)
+// stays silent: the operator opted out, so the loss is not a fault signal.
+func TestRebuildCountsIdentitylessABTorrentAsUnresolvable(t *testing.T) {
+	entries := []seadex.Entry{{
+		AniListID: 5,
+		Torrents: []seadex.Torrent{{
+			Tracker: "AB", URL: "/details.php?torrent=1167293", InfoHash: "<redacted>", IsBest: true,
+			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
+		}},
+	}}
+	tests := map[string]struct {
+		cfg  UpstreamConfig
+		want int64
+	}{
+		"enabled AB counts the loss":  {cfg: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: "http://prowlarr/2/api"}, want: 1},
+		"disabled AB scope is silent": {cfg: UpstreamConfig{}, want: 0},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "feed.json")
+			seedEmptyLedger(t, path)
+			log, rec := capture.New()
+			if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: tc.cfg}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+				t.Fatalf("Rebuild: %v", err)
+			}
+			if snap := readSnapshotFile(t, path); len(snap.ABFeed) != 0 {
+				t.Errorf("identity-less AB release leaked into the feed: %d items, want 0", len(snap.ABFeed))
+			}
+			unresolvable := int64(-1)
+			for _, r := range rec.Records() {
+				r.Attrs(func(a slog.Attr) bool {
+					if a.Key == "skipped_unresolvable" {
+						unresolvable = a.Value.Int64()
+					}
+					return true
+				})
+			}
+			if unresolvable != tc.want {
+				t.Errorf("skipped_unresolvable = %d, want %d; log:\n%s", unresolvable, tc.want, strings.Join(rec.Messages(), "\n"))
+			}
+		})
+	}
+}
+
 // TestRebuildUnknownTrackerWithHashSilentlyIgnored pins newJournalItem's
 // tail-tracker branch for a torrent that DOES carry a stable identity: an
 // AnimeTosho/RuTracker release with a valid info hash reaches the journal

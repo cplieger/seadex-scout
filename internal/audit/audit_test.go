@@ -154,7 +154,7 @@ func TestAuditUnknownGroupEvidenceIsUnverified(t *testing.T) {
 				Item:   &snap.Items[0],
 				Arr:    library.ArrSonarr,
 				Source: match.SourceID,
-				Entry:  seadex.Entry{AniListID: 9, Torrents: []seadex.Torrent{{Tracker: "Nyaa", ReleaseGroup: tt.bestGroup, IsBest: true}}},
+				Entry:  seadex.Entry{AniListID: 9, Torrents: []seadex.Torrent{{Tracker: "Nyaa", ReleaseGroup: tt.bestGroup, IsBest: true, URL: "https://nyaa.si/view/9"}}},
 				Record: mapping.Record{Type: "TV", TvdbID: 900, SeasonTvdb: 1},
 			}}
 
@@ -235,7 +235,7 @@ func TestAuditRoutesWholeSeriesAndSkips(t *testing.T) {
 	matches := []match.Match{
 		{ // seasonless non-special: routed through the whole-series verdict
 			Item: &inLib, Arr: library.ArrSonarr, Source: match.SourceID,
-			Entry:  seadex.Entry{AniListID: 1, Torrents: []seadex.Torrent{{Tracker: "Nyaa", ReleaseGroup: "A&C", IsBest: true}}},
+			Entry:  seadex.Entry{AniListID: 1, Torrents: []seadex.Torrent{{Tracker: "Nyaa", ReleaseGroup: "A&C", IsBest: true, URL: "https://nyaa.si/view/1"}}},
 			Record: mapping.Record{Type: "TV", TvdbID: 100},
 		},
 		{ // not in the library: skipped entirely

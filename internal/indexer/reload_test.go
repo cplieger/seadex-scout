@@ -54,7 +54,6 @@ func TestReloadWarnsOnceOnMissingSnapshotAndRecovers(t *testing.T) {
 	}
 }
 
-
 // TestReloadRecoversDegradationOnUnchangedSnapshot pins the reloadDegraded
 // state machine across a stat fault whose recovery leaves the snapshot
 // untouched: the file is still the already-loaded inode at the same mtime, so

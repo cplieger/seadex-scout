@@ -187,6 +187,15 @@ than racing the first onto the same timestamped filenames. And each pair is
 written JSON first, so a run interrupted mid-write can leave a `.json` without
 its `.md`, but never a Markdown file without its machine-readable pair.
 
+Reports are written owner-only (`0600` files, newly created report directories
+`0700`): they enumerate your library and can carry private-tracker page links,
+so other local accounts able to traverse the bind-mounted config tree must not
+read them. Writes never retighten what already exists on disk, so if you
+generated reports with an older version, tighten the historical pairs and
+directory once with `chmod -R go-rwx /config/reports` — run it against the
+host-side path or from a helper container mounting the same volume, like the
+pruning command above (the distroless image has no shell).
+
 ## Indexer (Torznab feed)
 
 When a Prowlarr Torznab URL is configured, the daemon serves a
@@ -523,10 +532,10 @@ used only for the report's deep-links (leave empty to reuse `url`), so an
 internal Docker hostname in `url` still yields working links.
 
 The upstream endpoints (SeaDex, Fribb, AniList), their request cadences, and the
-internal file locations (the state cache and the reports and overrides files) are
-fixed under `/config` and are not config keys, so the file stays limited to what
-you actually tune. To pin a mapping Fribb gets wrong, drop a
-`/config/overrides.json` beside the config (see [How matching works](#how-matching-works)).
+internal state, override, and feed-snapshot locations are fixed under `/config`
+and are not config keys. Report output is the exception: `report.dir` selects
+its destination (default `/config/reports`). To pin a mapping Fribb gets wrong,
+drop a `/config/overrides.json` beside the config (see [How matching works](#how-matching-works)).
 
 ## Observability
 

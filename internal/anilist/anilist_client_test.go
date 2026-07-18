@@ -247,6 +247,72 @@ func TestFetchManyReturnsPartialResultsOnError(t *testing.T) {
 	}
 }
 
+// TestFetchManyPreservesValidRecordsOnRecordError pins the same-chunk salvage
+// contract: when parseMediaPage returns valid records alongside a record-level
+// error from the same response, FetchMany copies the valid records into the
+// result before surfacing the error, so the caller keeps what parsed instead
+// of losing the whole chunk.
+func TestFetchManyPreservesValidRecordsOnRecordError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"data":{"Page":{"media":[{"id":1,"format":"TV","seasonYear":2020,"title":{"romaji":"valid"}},{"id":0,"format":"TV","seasonYear":2020,"title":{"romaji":"poisoned"}}]}}}`)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	out, err := c.FetchMany(context.Background(), []int{1, 2})
+	if err == nil {
+		t.Fatal("FetchMany must surface the invalid record")
+	}
+	if len(out) != 1 {
+		t.Fatalf("FetchMany returned %d valid records, want 1", len(out))
+	}
+	if got := out[1].Titles; !slices.Equal(got, []string{"valid"}) {
+		t.Errorf("out[1].Titles = %v, want [valid]", got)
+	}
+}
+
+// TestFetchManyContinuesAfterRecordError pins the record-local-vs-envelope
+// distinction: a poisoned record in the first chunk must not abort the batch,
+// so with stable id ordering one malformed record cannot permanently hide
+// every valid id in later chunks (which the caller would otherwise misread as
+// a total outage). Later chunks are still fetched, their media merged, and the
+// first record error surfaced alongside the merged result.
+func TestFetchManyContinuesAfterRecordError(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n == 1 {
+			fmt.Fprint(w, `{"data":{"Page":{"media":[{"id":0,"format":"TV","seasonYear":2020,"title":{"romaji":"poisoned"}}]}}}`)
+			return
+		}
+		fmt.Fprint(w, `{"data":{"Page":{"media":[{"id":51,"format":"TV","seasonYear":2020,"title":{"romaji":"t51"}}]}}}`)
+	}))
+	defer srv.Close()
+
+	ids := make([]int, 60) // two chunks: the first is poisoned, the second valid
+	for i := range ids {
+		ids[i] = i + 1
+	}
+	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	out, err := c.FetchMany(context.Background(), ids)
+	if err == nil {
+		t.Fatal("FetchMany must surface the first chunk's record error")
+	}
+	mu.Lock()
+	gotCalls := calls
+	mu.Unlock()
+	if gotCalls != 2 {
+		t.Errorf("batch calls = %d, want 2 (a record error must not abort later chunks)", gotCalls)
+	}
+	if got := out[51].Titles; !slices.Equal(got, []string{"t51"}) {
+		t.Errorf("out[51].Titles = %v, want [t51] (second chunk fetched despite the first chunk's record error)", got)
+	}
+}
+
 // TestFetchCountsEveryHTTPAttempt proves Stats().Calls counts outbound HTTP
 // attempts, not logical fetches: two 429s followed by success are three
 // attempts (and two rate-limit waits), so the counter keeps its request-volume

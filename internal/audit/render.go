@@ -22,8 +22,15 @@ import (
 )
 
 const (
-	reportDirMode  = 0o755
-	reportFileMode = 0o644
+	// Reports enumerate the operator's library and can carry private-tracker
+	// page links, so newly created report directories and every written
+	// report pair are owner-only (least privilege, CWE-732): another local
+	// account able to traverse the bind-mounted config tree must not read the
+	// inventory. Neither MkdirAll nor an atomic replacement retightens what
+	// already exists on disk - the README's upgrade note covers historical
+	// reports (`chmod -R go-rwx /config/reports`).
+	reportDirMode  = 0o700
+	reportFileMode = 0o600
 	// linkSep joins the links within a table cell (a middle dot, not an em dash).
 	linkSep = " \u00b7 "
 	// emptyCell is shown for a column with no value.
@@ -144,12 +151,16 @@ func writeRow(b *strings.Builder, row *Row) {
 // the report is queryable in Loki alongside the human-readable Markdown. The
 // summary's msg is "report summary", deliberately distinct from Scout.Report's
 // "report generated" completion line, so a Loki query or counter keyed on
-// either message never double-counts a report run. Every row-derived string is
+// either message never double-counts a report run. Cancellation is observed
+// between row records (the signal context is one report-wide budget), so a
+// shutdown does not spend its grace period synchronously emitting hundreds of
+// row lines; the returned error wraps context.Cause, keeping a routine SIGTERM
+// off main's ERROR alert. Every row-derived string is
 // passed through sanitizeDisplayText (after URL redaction where applicable):
 // slog's JSONHandler escapes C0 controls but emits C1 controls and bidi
 // controls raw, so untrusted titles/groups/tracker strings could otherwise
 // smuggle terminal escapes or visual reordering into raw log/Loki views.
-func (r *Report) Log(log *slog.Logger) {
+func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
 	stamp := r.GeneratedAt.UTC().Format(time.RFC3339)
 	log.Info("report summary",
 		"generated_at", stamp,
@@ -162,6 +173,9 @@ func (r *Report) Log(log *slog.Logger) {
 		"not_on_seadex", r.Totals[string(VerdictNotOnSeaDex)],
 		"incomplete_mappings", len(r.Incomplete))
 	for i := range r.Rows {
+		if err := interrupted(ctx, "report log"); err != nil {
+			return err
+		}
 		row := &r.Rows[i]
 		log.Info("report item",
 			"generated_at", stamp,
@@ -178,6 +192,19 @@ func (r *Report) Log(log *slog.Logger) {
 			"seadex_url", sanitizeDisplayText(row.SeaDexURL),
 			"match_source", sanitizeDisplayText(row.MatchSource))
 	}
+	return nil
+}
+
+// interrupted maps a done context to the audit-interrupted error for stage,
+// wrapping context.Cause so main's shutdown classification (errors.Is
+// context.Canceled) keeps a routine SIGTERM off the ERROR alert. It returns
+// nil while the context is live, so callers can gate each stage of the
+// report's log/persist pipeline on the one report-wide budget.
+func interrupted(ctx context.Context, stage string) error {
+	if ctx.Err() == nil {
+		return nil
+	}
+	return fmt.Errorf("audit: %s interrupted: %w", stage, context.Cause(ctx))
 }
 
 // reportStampLayout is the UTC timestamp embedded in report filenames: sortable,
@@ -231,24 +258,35 @@ func AcquireReportLock(dir string) (func(), error) {
 // silently replaced. The caller holds the report lock across the whole
 // generate+write, so the probe cannot race a concurrent writer.
 func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) error {
+	// The signal context is one report-wide budget: check it before each
+	// stage (cleanup, stem probing, rendering, the two writes) so a shutdown
+	// stops the pipeline instead of spending its grace period on CPU-bound
+	// work whose final atomic write would fail with context canceled anyway.
+	if err := interrupted(ctx, "report write"); err != nil {
+		return err
+	}
 	// Reap stale atomicfile temps first: a crash (SIGKILL/OOM/power loss)
 	// between temp create and rename orphans a .atomicfile-<digits>.tmp in
 	// the report dir forever otherwise. The caller holds report.lock, so no
 	// concurrent report writer owns an in-flight temp, and CleanupStaleTemps
 	// matches only the exact temp-name convention - never a report file.
-	if removed, err := atomicfile.CleanupStaleTemps(dir, time.Hour); err != nil {
+	// WithLogger keeps the library's own diagnostics (including its one
+	// removed-stale-temps INFO) on the report logger; only the top-level
+	// readdir failure is unlogged by the library, so that WARN stays here.
+	if _, err := atomicfile.CleanupStaleTemps(dir, time.Hour, atomicfile.WithLogger(log)); err != nil {
 		log.Warn("stale report temp cleanup failed", "dir", dir, "error", err)
-	} else if removed > 0 {
-		log.Info("reclaimed stale report temps", "dir", dir, "removed", removed)
 	}
-	base, err := reportPairStem(dir, r.GeneratedAt)
+	base, err := reportPairStem(ctx, dir, r.GeneratedAt)
 	if err != nil {
 		return err
 	}
 	mdPath, jsonPath := base+".md", base+".json"
+	if interruptErr := interrupted(ctx, "report render"); interruptErr != nil {
+		return interruptErr
+	}
 	// Render from a credential-redacted copy: report rows carry ArrURLs from
 	// the raw library snapshot, so a credentialed public_url (userinfo, query
-	// token) would otherwise persist verbatim into the 0644 report pair even
+	// token) would otherwise persist verbatim into the report pair even
 	// though the state and slog paths strip the same values. Redacting at the
 	// persistence sink covers every caller.
 	safe := redactReportURLs(r)
@@ -261,6 +299,9 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	}
 	if err := writeAtomic(ctx, jsonPath, data, log); err != nil {
 		return fmt.Errorf("audit: write json %s: %w", jsonPath, err)
+	}
+	if err := interrupted(ctx, "report markdown render"); err != nil {
+		return err
 	}
 	if err := writeAtomic(ctx, mdPath, []byte(renderMarkdown(safe)), log); err != nil {
 		return fmt.Errorf("audit: write markdown %s: %w", mdPath, err)
@@ -292,11 +333,16 @@ func redactReportURLs(r *Report) *Report {
 // rerun therefore gets a suffixed pair instead of silently overwriting the
 // earlier report (each run re-walks mutable upstream and library state, so a
 // same-second timestamp does not mean the same content). The loop terminates
-// because every probed stem must be occupied on disk to advance.
-func reportPairStem(dir string, generatedAt time.Time) (string, error) {
+// because every probed stem must be occupied on disk to advance; each probe
+// round observes the report-wide context so a shutdown stops the directory
+// scan instead of starting new stat work after cancellation.
+func reportPairStem(ctx context.Context, dir string, generatedAt time.Time) (string, error) {
 	base := filepath.Join(dir, "report-"+generatedAt.UTC().Format(reportStampLayout))
 	stem := base
 	for n := 2; ; n++ {
+		if err := interrupted(ctx, "report stem probe"); err != nil {
+			return "", err
+		}
 		free := true
 		for _, path := range []string{stem + ".json", stem + ".md"} {
 			if _, err := os.Stat(path); err == nil {
@@ -313,19 +359,16 @@ func reportPairStem(dir string, generatedAt time.Time) (string, error) {
 	}
 }
 
-// writeAtomic writes data to path atomically, warning (not failing) on a
-// non-durable write, matching the state store's policy.
+// writeAtomic writes data to path atomically. A non-durable write warns (not
+// fails), matching the state store's policy: atomicfile itself emits the one
+// WARN carrying the causal parent-directory fsync error (WithLogger keeps it
+// on the report logger), so no second app-side record is layered on top.
 func writeAtomic(ctx context.Context, path string, data []byte, log *slog.Logger) error {
-	res, err := atomicfile.WriteFile(ctx, path, data,
+	_, err := atomicfile.WriteFile(ctx, path, data,
+		atomicfile.WithLogger(log),
 		atomicfile.WithMkdirMode(reportDirMode),
 		atomicfile.WithMode(reportFileMode))
-	if err != nil {
-		return err
-	}
-	if !res.Durable {
-		log.Warn("report written but not durable", "path", path)
-	}
-	return nil
+	return err
 }
 
 // scopeCell renders the scope for the Markdown table, appending the comparison

@@ -51,9 +51,14 @@ const (
 // gate hides what it cannot classify (extract-evidence-or-hide). Fields are
 // ordered for govet fieldalignment.
 type URLForm struct {
-	// Parsed is the canonicalized parse result (backslashes read as slashes,
-	// like the WHATWG parser); nil for URLFormEmpty and URLFormMalformed.
-	Parsed *url.URL
+	// parsed is the canonicalized parse result (backslashes read as slashes,
+	// like the WHATWG parser); nil for URLFormEmpty and URLFormMalformed. It
+	// stays private to the classifier: consumers read the semantic facts
+	// below (Scheme, Host, Port, HasUserInfo), never the parser
+	// representation, so a parser/canonicalization change cannot cross the
+	// package boundary. The nil-exactly-for-Empty/Malformed invariant is
+	// pinned by the in-package fuzz test.
+	parsed *url.URL
 	// Trimmed is the whitespace-trimmed raw string the classification read,
 	// with backslashes NOT canonicalized: it is what a publisher emits or
 	// prefixes, never a rewritten form.
@@ -63,11 +68,20 @@ type URLForm struct {
 	// form, or the authority reparse of a schemeless-host form. Empty when
 	// the string carries none (or the form hides it; see Class).
 	Host string
+	// Scheme is the canonicalized parse's scheme (net/url lowercases it);
+	// empty when the string carries none or did not parse.
+	Scheme string
+	// Port is the canonicalized parse's port string; empty when none is
+	// present or the string did not parse. net/url only accepts an
+	// all-digit port, but it does not range-check it - consumers that need
+	// a valid 16-bit port (the seadex link publisher) validate the range.
+	Port string
 	// Class is the structural form.
 	Class URLFormClass
 	// HasBackslash records a '\' anywhere in the trimmed string. Browsers
-	// (WHATWG URL parser) treat '\' as '/', so Parsed/Host/Class describe the
-	// canonicalized reading - a `/\host/x` form classifies protocol-relative,
+	// (WHATWG URL parser) treat '\' as '/', so the parsed facts (Scheme/
+	// Host/Port/Class) describe the canonicalized reading - a `/\host/x`
+	// form classifies protocol-relative,
 	// not as a host-less rooted path - while the flag lets a publisher that
 	// must emit the raw string reject it outright.
 	HasBackslash bool
@@ -76,6 +90,11 @@ type URLForm struct {
 	// exist but cannot be extracted, so evidence-driven consumers treat the
 	// form like a parse failure.
 	HostUnrecoverable bool
+	// HasUserInfo records a userinfo authority component ("user@host") in
+	// the canonicalized parse - a visual-spoofing vector
+	// ("https://trusted@evil/") the seadex link publisher rejects. Always
+	// false when the string did not parse.
+	HasUserInfo bool
 }
 
 // ClassifyRawURL classifies a raw URL string into its structural URLForm. It
@@ -95,7 +114,10 @@ func ClassifyRawURL(raw string) URLForm {
 		f.Class = URLFormMalformed
 		return f
 	}
-	f.Parsed = parsed
+	f.parsed = parsed
+	f.Scheme = parsed.Scheme
+	f.Port = parsed.Port()
+	f.HasUserInfo = parsed.User != nil
 	// Hostname() drops the port and userinfo; ToLower folds case for the
 	// byte-wise host predicates downstream.
 	f.Host = strings.ToLower(parsed.Hostname())

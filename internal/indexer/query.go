@@ -19,19 +19,36 @@ const (
 )
 
 // curation is the set of SeaDex-tracked releases, keyed by info hash and by
-// tracker key, each mapping to whether SeaDex marks that release best.
+// tracker key, each mapping to whether SeaDex marks that release best. byPair
+// records which hash/key combinations were observed on the SAME SeaDex
+// torrent (keyed by pairKey), so lookup can prove an item's two identity
+// signals name one release rather than two same-marker ones. A nil byPair is
+// a legacy snapshot persisted before the pair relation existed; lookup then
+// falls back to the per-signal agreement gate until the next cycle rewrites
+// the snapshot.
 type curation struct {
 	byHash map[string]bool
 	byKey  map[string]bool
+	byPair map[string]bool
 }
+
+// pairKey joins a validated info hash and a tracker key into the byPair
+// relation key. The "|" separator appears in neither component (the hash is a
+// 40-char hex run, the key is "<scope>:<digits>"), so two distinct hash/key
+// pairs can never collide onto one relation key.
+func pairKey(hash, key string) string { return hash + "|" + key }
 
 // lookup reports whether a release (by its info hash and page URLs) is SeaDex-
 // curated, and if so whether it is the best release. Every structurally valid
 // identity signal the item carries must resolve to curated entries agreeing on
 // the best/alt value; a signal that misses the curation set, or one that
-// contradicts an earlier signal, rejects the whole item. This keeps an
+// contradicts an earlier signal, rejects the whole item. An item carrying BOTH
+// a curated hash and a curated tracker key must additionally prove the exact
+// pair was observed on a single SeaDex torrent (byPair): best/alt agreement
+// alone would still admit torrent A's hash cross-wired with torrent B's key
+// whenever both happen to be best (or both alt). Together these keep an
 // untrusted Torznab item from pairing a curated info hash with the page URL or
-// download link of a different (alt or uncurated) torrent. scope binds tracker
+// download link of a different torrent. scope binds tracker
 // identity: a tracker key parsed from the item's URLs must belong to the
 // endpoint being served, so a swapped upstream (or a cross-tracker item) cannot
 // pass /ab an accepted Nyaa key or vice versa.
@@ -45,19 +62,28 @@ func (c *curation) lookup(scope, hash, infoURL, guid string) (isBest, matched bo
 		return true
 	}
 
-	if h := validInfoHash(hash); h != "" {
+	h := validInfoHash(hash)
+	if h != "" {
 		b, ok := c.byHash[h]
 		if !accept(b, ok) {
 			return false, false
 		}
 	}
-	scopedKey, ok := c.acceptScopedKeys(scope, []string{infoURL, guid}, accept)
+	key, ok := c.acceptScopedKeys(scope, []string{infoURL, guid}, accept)
 	if !ok {
 		return false, false
 	}
 	// AnimeBytes exposes no info hash in Torznab, so a scoped tracker key is
 	// mandatory there; Nyaa may still match a hash-only item.
-	if scope == upstreamAB && !scopedKey {
+	if scope == upstreamAB && key == "" {
+		return false, false
+	}
+	// Both signals present and individually curated: require the persisted
+	// pair relation to prove they belong to one release. A nil byPair is a
+	// legacy snapshot written before the relation was persisted (an upgraded
+	// resident server still serving the old file); the per-signal checks
+	// above remain the gate until the next cycle rewrites the snapshot.
+	if h != "" && key != "" && c.byPair != nil && !c.byPair[pairKey(h, key)] {
 		return false, false
 	}
 	return isBest, matched
@@ -70,9 +96,10 @@ func (c *curation) lookup(scope, hash, infoURL, guid string) (isBest, matched bo
 // comments and guid, so two URLs naming different curated torrents are an
 // invalid untrusted response and fail closed - even when both ids happen to
 // share a best/alt value), and must pass accept (curated, agreeing on
-// best/alt). It reports whether any scoped key was seen (scopedKey - the
-// signal lookup's AB rule needs) and whether the item survives (ok).
-func (c *curation) acceptScopedKeys(scope string, urls []string, accept func(candidate, ok bool) bool) (scopedKey, ok bool) {
+// best/alt). It reports the resolved scoped key (key - "" when the URLs
+// carried none; lookup's AB rule and hash/key pair check need it) and whether
+// the item survives (ok).
+func (c *curation) acceptScopedKeys(scope string, urls []string, accept func(candidate, ok bool) bool) (key string, ok bool) {
 	var identity string
 	for _, raw := range urls {
 		k := trackerKeyFromURL(raw)
@@ -81,19 +108,18 @@ func (c *curation) acceptScopedKeys(scope string, urls []string, accept func(can
 		}
 		keyScope, _, found := strings.Cut(k, ":")
 		if !found || keyScope != scope {
-			return scopedKey, false
+			return identity, false
 		}
 		if identity != "" && k != identity {
-			return scopedKey, false
+			return identity, false
 		}
 		identity = k
-		scopedKey = true
 		b, curated := c.byKey[k]
 		if !accept(b, curated) {
-			return scopedKey, false
+			return identity, false
 		}
 	}
-	return scopedKey, true
+	return identity, true
 }
 
 // queryStats summarizes one request for the per-request log line: whether the
@@ -147,7 +173,7 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 		// The snapshot maps are safe to read after the lock is released: reload
 		// installs a fresh snapshot and never mutates the loaded maps in place
 		// (the same invariant feedFor documents for the feed slices).
-		set := curation{byHash: ix.snap.ByHash, byKey: ix.snap.ByKey}
+		set := curation{byHash: ix.snap.ByHash, byKey: ix.snap.ByKey, byPair: ix.snap.ByPair}
 		ix.mu.RUnlock()
 		items = markAndDedupe(raw, &set, scope)
 		stats = queryStats{answered: true, upstreamFailed: failed, upstream: len(raw), curated: len(items)}

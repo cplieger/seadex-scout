@@ -2,6 +2,7 @@ package audit
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log/slog"
 	"reflect"
@@ -67,9 +68,14 @@ func TestDisplayBestGroups(t *testing.T) {
 
 func TestGroupSets(t *testing.T) {
 	rels := []Release{
-		{Group: "SubsPlease", Best: true},
-		{Group: "subsplease", Best: true},
-		{Group: "Erai", Best: false},
+		{Group: "SubsPlease", Best: true, URL: "https://nyaa.si/view/1"},
+		{Group: "subsplease", Best: true, URL: "https://nyaa.si/view/2"},
+		{Group: "Erai", Best: false, URL: "https://nyaa.si/view/3"},
+		// A URL-less release (UsableURL rejected its link) is raw-catalogue
+		// visibility only: it must drive neither the best nor the alt set,
+		// mirroring the daemon's Obtainable exclusion.
+		{Group: "LinklessBest", Best: true},
+		{Group: "LinklessAlt", Best: false},
 	}
 	best, alt := groupSets(rels)
 	if !reflect.DeepEqual(best, []string{"subsplease"}) {
@@ -280,7 +286,9 @@ func TestReportLogEmitsSummaryAndPerRowLines(t *testing.T) {
 		}},
 	}
 
-	r.Log(log)
+	if err := r.Log(context.Background(), log); err != nil {
+		t.Fatalf("Log: %v", err)
+	}
 
 	if rec.Len() != 2 {
 		t.Fatalf("Log emitted %d records, want 2 (summary + one per row)", rec.Len())
@@ -425,7 +433,9 @@ func TestReportLogSanitizesControlAndBidiRunes(t *testing.T) {
 	log := slog.New(slog.NewJSONHandler(&buf, nil))
 	r := craftedReport()
 
-	r.Log(log)
+	if err := r.Log(context.Background(), log); err != nil {
+		t.Fatalf("Log: %v", err)
+	}
 
 	out := buf.String()
 	if !strings.Contains(out, "report item") {

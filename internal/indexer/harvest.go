@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"cmp"
 	"context"
 	"maps"
 	"net/url"
@@ -51,7 +52,11 @@ type harvestGroup struct {
 // live); Nyaa uses the season form and pages by offset under the indexer's
 // default created/desc ordering (see harvestParams). Failures warn and never
 // fail the rebuild; a show with no known title, no configured upstream, or no
-// remaining budget stays synthetic and retries next cycle.
+// remaining budget stays synthetic and retries next cycle. A SCOPE-WIDE query
+// failure (status/transport - see harvestShow) skips the scope's remaining
+// shows this rebuild, while a show-local malformed response only skips that
+// show, so one poison result set cannot freeze an otherwise healthy tracker's
+// whole harvest on synthesized titles.
 func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]item, titles map[string]string, infoFor func(alID int) EntryInfo) (stats harvestStats) {
 	defer func() { stats.pending = syntheticCount(feeds, titles) }()
 	groups, index := pendingHarvest(feeds, titles, infoFor)
@@ -64,29 +69,40 @@ func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]item,
 		if ctx.Err() != nil || budget == 0 {
 			break
 		}
-		if failed[g.scope] {
-			continue // upstream already failed this rebuild: keep synthesized titles, retry next cycle
-		}
-		u := upstreamForScope(w.upstreams, g.scope)
+		u := availableHarvestUpstream(w.upstreams, failed, g.scope)
 		if u == nil {
-			continue // tracker not configured for searches: never queried
+			continue
 		}
 		var ok bool
 		budget, ok = w.harvestShow(ctx, u, g, infoFor(g.alID), index, titles, budget, &stats)
-		if !ok {
-			failed[g.scope] = true
-		}
+		failed[g.scope] = !ok
 	}
 	return stats
+}
+
+// availableHarvestUpstream returns the upstream serving scope, or nil when
+// the scope's upstream already failed this rebuild (keep synthesized titles,
+// retry next cycle) or the tracker is not configured for searches (never
+// queried).
+func availableHarvestUpstream(upstreams []*upstream, failed map[string]bool, scope string) *upstream {
+	if failed[scope] {
+		return nil
+	}
+	return upstreamForScope(upstreams, scope)
 }
 
 // harvestShow runs one show's query (plus offset pages while its items remain
 // unmatched, full pages keep coming, and budget remains) against its tracker's
 // upstream, returning the remaining budget. A query failure warns and ends the
-// show's harvest for this rebuild (the next rebuild retries). It additionally
-// reports ok=false when the show's query failed (the upstream is likely down;
-// the caller skips its remaining groups this rebuild - they keep synthesized
-// titles and retry next cycle).
+// show's harvest for this rebuild (the next rebuild retries). Failures are
+// classified before condemning the whole scope: a SCOPE-WIDE failure
+// (429/5xx, an auth/config status, a transport error - the upstream is likely
+// down or refusing service) reports ok=false so the caller skips the scope's
+// remaining groups this rebuild, while a persistently malformed SUCCESSFUL
+// body (malformedUpstreamBody) is specific to this one show's result set and
+// reports ok=true, so the scope's other shows are still harvested within the
+// remaining budget instead of one poison response freezing the whole tracker
+// on synthesized titles indefinitely.
 func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGroup, meta EntryInfo, index, titles map[string]string, budget int, stats *harvestStats) (int, bool) {
 	params := harvestParams(meta, g.scope)
 	for offset := 0; budget > 0 && ctx.Err() == nil; offset += harvestPageSize {
@@ -95,10 +111,16 @@ func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGrou
 		page := harvestPage(params, offset)
 		results, err := u.search(ctx, page)
 		if err != nil {
-			if ctx.Err() == nil {
-				w.log.Warn("indexer title harvest query failed; skipping this upstream's remaining shows this rebuild",
-					"upstream", u.name, "al_id", g.alID, "error", err)
+			if ctx.Err() != nil {
+				return budget, false
 			}
+			if malformedUpstreamBody(err) {
+				w.log.Warn("indexer title harvest response malformed; show keeps its synthesized title this rebuild",
+					"upstream", u.name, "al_id", g.alID, "error", err)
+				return budget, true
+			}
+			w.log.Warn("indexer title harvest query failed; skipping this upstream's remaining shows this rebuild",
+				"upstream", u.name, "al_id", g.alID, "error", err)
 			return budget, false
 		}
 		stats.matched += matchHarvest(results, index, titles)
@@ -109,6 +131,41 @@ func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGrou
 	return budget, true
 }
 
+// harvestGroupKey identifies one show's pending harvest group on one
+// tracker: the per-show, per-tracker bucket pendingHarvest collects journal
+// keys into before materializing the sorted harvestGroup list.
+type harvestGroupKey struct {
+	scope string
+	alID  int
+}
+
+// indexHarvestItem records one harvestable journal item: it appends the
+// item's key to its show's per-tracker group and registers the item's
+// identity forms (tracker key and info hash) in the global index that maps a
+// matched Prowlarr result back to the journal key whose title it supplies.
+// A non-harvestable item is left out (see harvestable).
+func indexHarvestItem(it *item, scope string, titles map[string]string, infoFor func(int) EntryInfo, byShow map[harvestGroupKey][]string, index map[string]string) {
+	if !harvestable(it, titles, infoFor) {
+		return
+	}
+	key := harvestGroupKey{scope: scope, alID: it.AniListID}
+	byShow[key] = append(byShow[key], it.Key)
+	index[it.Key] = it.Key
+	if it.InfoHash != "" {
+		index[it.InfoHash] = it.Key
+	}
+}
+
+// compareHarvestGroups orders harvest groups by tracker scope then AniList ID
+// for deterministic query order; cmp.Compare avoids the overflow a plain int
+// subtraction could hit on extreme untrusted AniList IDs.
+func compareHarvestGroups(a, b harvestGroup) int {
+	if c := strings.Compare(a.scope, b.scope); c != 0 {
+		return c
+	}
+	return cmp.Compare(a.alID, b.alID)
+}
+
 // pendingHarvest collects the journal items lacking a cached title into
 // per-show, per-tracker groups (sorted for deterministic query order) plus a
 // global identity index (tracker key and info hash forms) mapping a matched
@@ -117,36 +174,18 @@ func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGrou
 // query with, and they retry once the library or the AniList memo knows the
 // show.
 func pendingHarvest(feeds map[string][]item, titles map[string]string, infoFor func(alID int) EntryInfo) (groups []harvestGroup, index map[string]string) {
-	type groupKey struct {
-		scope string
-		alID  int
-	}
-	byShow := make(map[groupKey][]string)
+	byShow := make(map[harvestGroupKey][]string)
 	index = make(map[string]string)
 	for scope, feed := range feeds {
 		for i := range feed {
-			it := &feed[i]
-			if !harvestable(it, titles, infoFor) {
-				continue
-			}
-			gk := groupKey{scope: scope, alID: it.AniListID}
-			byShow[gk] = append(byShow[gk], it.Key)
-			index[it.Key] = it.Key
-			if it.InfoHash != "" {
-				index[it.InfoHash] = it.Key
-			}
+			indexHarvestItem(&feed[i], scope, titles, infoFor, byShow, index)
 		}
 	}
 	groups = make([]harvestGroup, 0, len(byShow))
 	for k, keys := range byShow {
 		groups = append(groups, harvestGroup{keys: keys, scope: k.scope, alID: k.alID})
 	}
-	slices.SortFunc(groups, func(a, b harvestGroup) int {
-		if a.scope != b.scope {
-			return strings.Compare(a.scope, b.scope)
-		}
-		return a.alID - b.alID
-	})
+	slices.SortFunc(groups, compareHarvestGroups)
 	return groups, index
 }
 

@@ -49,8 +49,16 @@ func KeepNonTracker(r *release.Release, opts Options) (keep bool, reason string)
 // SeaDex supplied it, BEFORE any label-trusting normalization such as
 // seadex.Torrent.UsableURL) so the AnimeBytes URL-host cross-check (see
 // ABVisible) inspects unmodified evidence rather than a rewritten link; pass
-// "" when no URL is available.
-func Obtainable(r *release.Release, rawURL string, opts Options) bool {
+// "" when no URL is available. It ALSO requires the canonical usable URL
+// (seadex.Torrent.UsableURL's output): a release whose usable URL is empty -
+// no URL at all, or one the canonicalizer rejected as malformed, foreign-host,
+// or unsafe - is never obtainable, because the operator has no link to act on,
+// so it must not count as comparison evidence (the SeaDex client already warns
+// about the unusable URL).
+func Obtainable(r *release.Release, rawURL, usableURL string, opts Options) bool {
+	if usableURL == "" {
+		return false
+	}
 	switch r.TrackerType {
 	case release.TrackerPublic:
 		return ABVisible(r.Tracker, rawURL, opts.AnimeBytes)

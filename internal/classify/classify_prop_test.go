@@ -6,9 +6,8 @@ import (
 	"strconv"
 	"testing"
 
-	"pgregory.net/rapid"
-
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"pgregory.net/rapid"
 )
 
 // TestTorrentFileNamesProperty pins the primary-payload selection's

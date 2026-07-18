@@ -55,6 +55,104 @@ func TestResolveMode(t *testing.T) {
 	}
 }
 
+// TestValidateInvocation covers the trailing-argument gate that runs before
+// the health fast path: at most one subcommand is accepted (a `poll typo` must
+// never run a real poll or report healthy), and the error names the valid
+// invocations. main maps a non-nil error to exit 2.
+func TestValidateInvocation(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr bool
+	}{
+		{"no arguments", nil, false},
+		{"one subcommand", []string{"poll"}, false},
+		{"trailing argument", []string{"poll", "typo"}, true},
+		{"trailing argument after health", []string{"health", "typo"}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateInvocation(tt.args)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateInvocation(%v) = %v, wantErr %v", tt.args, err, tt.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), validArgsHint) {
+				t.Errorf("err = %q, want it to carry the valid-invocations hint", err)
+			}
+		})
+	}
+}
+
+// TestRunHealthProbeNotApplicable covers the fast path's dispatch test: any
+// invocation other than exactly `health` reports false so main continues with
+// normal startup. The true branch cannot be exercised here - health.RunProbe
+// terminates the process by contract - which is exactly why the dispatch test
+// is extracted and pinned separately.
+func TestRunHealthProbeNotApplicable(t *testing.T) {
+	for _, args := range [][]string{nil, {"poll"}, {"report"}, {"daemon"}, {"health", "typo"}} {
+		if runHealthProbe(args, filepath.Join(t.TempDir(), "config.yaml")) {
+			t.Errorf("runHealthProbe(%v) = true, want false (not the health subcommand)", args)
+		}
+	}
+}
+
+// TestLoadRuntimeConfig covers the config-bootstrap sequence main exits 1 on:
+// a first boot writes the starter and returns the typed errStarterWritten
+// sentinel (an expected outcome, not a fault), a starter write failure and a
+// load failure return ordinary errors, and a present valid config loads.
+func TestLoadRuntimeConfig(t *testing.T) {
+	t.Run("first boot writes the starter and returns the sentinel", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		_, err := loadRuntimeConfig(path)
+		if !errors.Is(err, errStarterWritten) {
+			t.Fatalf("loadRuntimeConfig(missing config) = %v, want errStarterWritten", err)
+		}
+		got, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatalf("reading starter: %v", readErr)
+		}
+		if !bytes.Equal(got, exampleConfig) {
+			t.Errorf("starter content differs from embedded example (%d vs %d bytes)", len(got), len(exampleConfig))
+		}
+	})
+	t.Run("starter write failure is not the sentinel", func(t *testing.T) {
+		dir := t.TempDir()
+		blocker := filepath.Join(dir, "blocker")
+		if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := loadRuntimeConfig(filepath.Join(blocker, "config.yaml"))
+		if err == nil {
+			t.Fatal("loadRuntimeConfig(unwritable starter) = nil, want error")
+		}
+		if errors.Is(err, errStarterWritten) {
+			t.Errorf("err = %v, must not read as a successfully written starter", err)
+		}
+	})
+	t.Run("present valid config loads", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, exampleConfig, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadRuntimeConfig(path); err != nil {
+			t.Fatalf("loadRuntimeConfig(example config) = %v, want nil", err)
+		}
+	})
+	t.Run("malformed config is a load failure", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte("{not yaml"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := loadRuntimeConfig(path)
+		if err == nil {
+			t.Fatal("loadRuntimeConfig(malformed config) = nil, want error")
+		}
+		if errors.Is(err, errStarterWritten) {
+			t.Errorf("err = %v, must not read as a written starter", err)
+		}
+	})
+}
+
 // TestIndexerConfigured covers the daemon's HTTP-surface gate: the Torznab feed
 // starts iff at least one Prowlarr Torznab URL is set (the shared
 // config.IndexerConfigured decision the composition root and validation read).
@@ -636,8 +734,8 @@ func holdCycleLock(t *testing.T, dir string) *scheduler.Lock {
 // runs, the health marker is untouched, and the library's pinned busy WARN is
 // emitted. Serial (capture swaps slog.Default).
 func TestRunSchedulerSkipsBusyTick(t *testing.T) {
-	rec := capture.Default(t)
 	ctx, cancel := context.WithCancel(context.Background())
+	rec := captureAndCancelOn(t, cancel, "cycle lock busy; skipping tick")
 	defer cancel()
 	dir := t.TempDir()
 	ex, err := newCycleExclusive(ctx, dir)
@@ -658,10 +756,11 @@ func TestRunSchedulerSkipsBusyTick(t *testing.T) {
 		defer close(done)
 		runScheduler(ctx, time.Hour, ex, mustNotRunCycler{t: t}, health.NewMarker(markerPath))
 	}()
-	waitFor(t, func() bool { return rec.Contains("cycle lock busy; skipping tick") })
-	cancel()
 	<-done
 
+	if !rec.Contains("cycle lock busy; skipping tick") {
+		t.Errorf("missing the library's busy-skip line: %v", rec.Messages())
+	}
 	got, err := os.ReadFile(markerPath)
 	if err != nil {
 		t.Fatalf("marker file after skipped tick: %v", err)
@@ -671,16 +770,45 @@ func TestRunSchedulerSkipsBusyTick(t *testing.T) {
 	}
 }
 
-// waitFor polls cond until it holds or a deadline expires.
-func waitFor(t *testing.T, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatal("condition not reached within the deadline")
-		}
-		time.Sleep(time.Millisecond)
+// cancelHandler records logs and cancels the scheduler context after the
+// expected record, providing deterministic event-driven synchronization.
+type cancelHandler struct {
+	next    slog.Handler
+	cancel  context.CancelFunc
+	message string
+}
+
+func (h *cancelHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.next.Enabled(ctx, level)
+}
+
+func (h *cancelHandler) Handle(ctx context.Context, record slog.Record) error {
+	err := h.next.Handle(ctx, record)
+	if record.Message == h.message {
+		h.cancel()
 	}
+	return err
+}
+
+func (h *cancelHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &cancelHandler{next: h.next.WithAttrs(attrs), cancel: h.cancel, message: h.message}
+}
+
+func (h *cancelHandler) WithGroup(name string) slog.Handler {
+	return &cancelHandler{next: h.next.WithGroup(name), cancel: h.cancel, message: h.message}
+}
+
+// captureAndCancelOn installs a recording default logger whose handler cancels
+// the given context after the expected message is recorded, replacing
+// wall-clock polling with event-driven synchronization. Serial (swaps
+// slog.Default; restored via t.Cleanup).
+func captureAndCancelOn(t *testing.T, cancel context.CancelFunc, message string) *capture.Recorder {
+	t.Helper()
+	_, rec := capture.New()
+	prev := slog.Default()
+	slog.SetDefault(slog.New(&cancelHandler{next: rec, cancel: cancel, message: message}))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return rec
 }
 
 // TestPollCycleQueuedWhenBusy pins poll's queue mode against a busy cycle
@@ -894,7 +1022,7 @@ func TestLogIndexerStopClassifiesShutdownAndFault(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := capture.Default(t)
 
-			logIndexerStop(tt.ctx, tt.err)
+			logIndexerStop(tt.ctx, slog.Default().With("component", "indexer"), tt.err)
 
 			records := rec.Records()
 			if len(records) != 1 {
@@ -1036,8 +1164,8 @@ func TestStartIndexerUnconfiguredIsNoOp(t *testing.T) {
 // - cycles have stopped - while the cycle never runs and the health marker is
 // untouched. Serial (capture swaps slog.Default).
 func TestRunSchedulerCoordinationFailure(t *testing.T) {
-	rec := capture.Default(t)
 	ctx, cancel := context.WithCancel(context.Background())
+	rec := captureAndCancelOn(t, cancel, "cycle coordination failed; tick did not run")
 	defer cancel()
 	dir := t.TempDir()
 	ex, err := newCycleExclusive(ctx, dir)
@@ -1057,10 +1185,11 @@ func TestRunSchedulerCoordinationFailure(t *testing.T) {
 		defer close(done)
 		runScheduler(ctx, time.Hour, ex, mustNotRunCycler{t: t}, health.NewMarker(markerPath))
 	}()
-	waitFor(t, func() bool { return rec.Contains("cycle coordination failed; tick did not run") })
-	cancel()
 	<-done
 
+	if !rec.Contains("cycle coordination failed; tick did not run") {
+		t.Errorf("missing the coordination-failure ERROR: %v", rec.Messages())
+	}
 	got, err := os.ReadFile(markerPath)
 	if err != nil {
 		t.Fatalf("marker file after the failed tick: %v", err)
@@ -1107,8 +1236,8 @@ func TestPollCycleQueueErrorAfterRun(t *testing.T) {
 // cycle-error Loki alert on every tick - and the marker records the cycle's
 // health. Serial (capture swaps slog.Default).
 func TestRunSchedulerQueueErrorAfterRun(t *testing.T) {
-	rec := capture.Default(t)
 	ctx, cancel := context.WithCancel(context.Background())
+	rec := captureAndCancelOn(t, cancel, "cycle coordination error after run")
 	defer cancel()
 	dir := t.TempDir()
 	ex, err := newCycleExclusive(ctx, dir)
@@ -1125,10 +1254,11 @@ func TestRunSchedulerQueueErrorAfterRun(t *testing.T) {
 		defer close(done)
 		runScheduler(ctx, time.Hour, ex, boolCycler(true), marker)
 	}()
-	waitFor(t, func() bool { return rec.Contains("cycle coordination error after run") })
-	cancel()
 	<-done
 
+	if !rec.Contains("cycle coordination error after run") {
+		t.Errorf("missing the after-run coordination WARN: %v", rec.Messages())
+	}
 	if !marker.Healthy() {
 		t.Error("marker not healthy after the healthy cycle")
 	}

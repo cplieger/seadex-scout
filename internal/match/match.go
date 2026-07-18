@@ -27,13 +27,12 @@ import (
 	"context"
 	"log/slog"
 	"math/rand/v2"
-	"regexp"
-	"strings"
 	"time"
 
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/titlekey"
 )
 
 // arrUnknown labels coverage for an entry whose arr could not be determined.
@@ -366,7 +365,7 @@ func (li *LibIndex) indexTitles(it *library.Item) {
 
 // addTitle indexes one title for an item under its normalized key.
 func (li *LibIndex) addTitle(title string, it *library.Item) {
-	if key := normalizeTitle(title); key != "" {
+	if key := titlekey.Normalize(title); key != "" {
 		li.byTitle[key] = append(li.byTitle[key], it)
 	}
 }
@@ -447,7 +446,7 @@ func (li *LibIndex) titleCandidates(titles []string, arr string) []*library.Item
 	seen := make(map[*library.Item]struct{})
 	var candidates []*library.Item
 	for _, t := range titles {
-		key := normalizeTitle(t)
+		key := titlekey.Normalize(t)
 		if key == "" {
 			continue
 		}
@@ -474,19 +473,4 @@ func filterByYear(candidates []*library.Item, year int) []*library.Item {
 		}
 	}
 	return out
-}
-
-// reTitleStrip removes every character that is not a lowercase letter or digit.
-var reTitleStrip = regexp.MustCompile(`[^a-z0-9]+`)
-
-// normalizeTitle lowercases a title and strips all non-alphanumeric characters
-// so punctuation, spacing, and separators do not defeat an otherwise exact
-// match. It is deliberately conservative (no transliteration or fuzzy edits).
-//
-// The key domain (lowercase [a-z0-9] only) is mirrored by
-// anilist.hasMatchableTitle, which pre-rejects payloads whose every title
-// normalizes to an empty key (anilist cannot import this package). Change
-// the two in lockstep.
-func normalizeTitle(s string) string {
-	return reTitleStrip.ReplaceAllString(strings.ToLower(s), "")
 }

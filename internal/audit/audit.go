@@ -450,12 +450,16 @@ func (a *Auditor) seadexURL(aniListID int) string {
 // releases. A curation-warned release contributes to neither set: counting it
 // would let a release SeaDex tags Broken/Incomplete drive the verdict (read
 // as a best to have or to want), where the daemon's compare pass excludes it
-// - the two flows must tell one story. It stays visible in the row's release
-// list, annotated.
+// - the two flows must tell one story. A URL-less release (no usable link:
+// classifyReleases stores seadex.Torrent.UsableURL, which rejects empty,
+// malformed, foreign-host, and unsafe URLs) contributes to neither set for
+// the same reason: the daemon's Obtainable filter excludes it, so it must
+// not drive best/alt verdict evidence here. Both stay visible in the row's
+// release list, the warned one annotated.
 func groupSets(releases []Release) (best, alt []string) {
 	bestSeen, altSeen := map[string]struct{}{}, map[string]struct{}{}
 	for i := range releases {
-		if len(releases[i].Warnings) > 0 {
+		if releases[i].URL == "" || len(releases[i].Warnings) > 0 {
 			continue
 		}
 		g := release.NormalizeGroup(releases[i].Group)

@@ -3,6 +3,7 @@ package indexer
 import (
 	"encoding/xml"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -167,8 +168,14 @@ func writeItem(b *strings.Builder, it *item) {
 
 	seeders := max(it.Seeders, 1)
 	leechers := max(it.Leechers, 0)
+	// Saturate instead of wrapping: attrInt accepts counts through
+	// math.MaxInt, so a malformed-but-valid upstream item with huge counts
+	// would otherwise overflow seeders+leechers negative and render an
+	// invalid negative peers attr, contradicting toItem's non-negative
+	// normalization.
+	peers := seeders + min(leechers, math.MaxInt-seeders)
 	writeAttr(b, "seeders", strconv.Itoa(seeders))
-	writeAttr(b, "peers", strconv.Itoa(seeders+leechers))
+	writeAttr(b, "peers", strconv.Itoa(peers))
 	b.WriteString("</item>")
 }
 

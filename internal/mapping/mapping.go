@@ -11,6 +11,7 @@
 package mapping
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -434,7 +435,7 @@ func (l *Loader) reuseCachedRecords(prev *Cache) (Cache, error) {
 // and the shrink guard), degrading to the stale map when any step rejects the
 // refresh.
 func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache, error) {
-	records, err := parseFribb(res.Body, l.log)
+	parsed, err := parseFribbForRefresh(res.Body, l.log)
 	if err != nil {
 		if errors.Is(err, errRecordCapExceeded) {
 			// A record-cap breach is a guard rejection, not a transient parse
@@ -452,8 +453,8 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 	// buildIndex later keeps only the last record per ID, so validating or
 	// size-comparing the raw row count would let a body that repeats one ID
 	// thousands of times pass every guard and then index to almost nothing.
-	records = deduplicateRecords(records)
-	if validationErr := validateRefreshedRecords(prev.Records, records); validationErr != nil {
+	records := deduplicateRecords(parsed.records)
+	if validationErr := validateRefreshedRecords(prev.Records, records, parsed.elements); validationErr != nil {
 		return rejectRefresh(prev, "refresh validation failed", validationErr,
 			fmt.Errorf("mapping: %w and no cache available", validationErr))
 	}
@@ -480,8 +481,9 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 }
 
 // validateRefreshedRecords is acceptRefresh's acceptance invariant for a fresh
-// 200 body: it rejects a zero-record refresh and one below the arr-identifier
-// or type coverage floors. The tolerant per-record decoders in fribb.go deliberately
+// 200 body: it rejects a zero-record refresh and one below the AniList-key,
+// arr-identifier, or type coverage floors. The tolerant per-record decoders in
+// fribb.go deliberately
 // zero individual odd fields, so a wholesale upstream loss of the arr-ID
 // fields can decode as a full set of otherwise-valid records that no longer
 // map to any Sonarr or Radarr item. Accepting that as a successful refresh
@@ -492,56 +494,84 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 // computed as a ceiling
 // so e.g. 1/199 stays below the documented floor. maxMapBytes bounds the
 // decoded body (and thus len(records)), so the +99 cannot overflow.
-func validateRefreshedRecords(previous, records []Record) error {
+//
+// sourceElements is the top-level element count of the downloaded body
+// (parseFribbForRefresh: survivors + skipped-malformed + dropped-keyless,
+// BEFORE deduplication). The AniList-key floor validates len(records) against
+// it, so destructive filtering and deduplication cannot shrink both the
+// numerator and denominator: a first-boot body of 200 rows with one keyed
+// record (or 200 duplicates of one ID) is rejected as wholesale key loss
+// instead of passing as a "healthy" 1/1 map — the case the previous-relative
+// shrink guard cannot catch when there is no previous cache.
+func validateRefreshedRecords(previous, records []Record, sourceElements int) error {
 	if len(records) == 0 {
 		return errors.New("refresh returned zero records")
+	}
+	keyMinimum := coverageFloor(sourceElements)
+	if len(records) < keyMinimum {
+		return fmt.Errorf("AniList-key coverage %d/%d is below minimum %d", len(records), sourceElements, keyMinimum)
 	}
 	minimum := coverageFloor(len(records))
 	if covered := arrIdentifierCount(records); covered < minimum {
 		return fmt.Errorf("arr identifier coverage %d/%d is below minimum %d", covered, len(records), minimum)
 	}
-	// A wholesale upstream loss of the type field (flexString zeroes any
-	// non-string shape) re-routes every MOVIE record to Sonarr via its parent
-	// tvdb_id while still passing the arr-identifier floor and the shrink
-	// guard — but only a LOSS is a degradation. fribb.go's tolerant contract
-	// lets an absent/odd type survive as the safe non-movie (Sonarr) default,
-	// so the floor is relative to the previously accepted cache: it fires only
-	// when that cache was itself type-rich (met the same 1% floor) AND the
-	// candidate carries fewer typed records than the cache did — an additive
-	// refresh that merely grows the record count (raising the ceiling-derived
-	// minimum) without losing any typed record is the catalogue growing, not
-	// type data degrading. An established type-sparse cache or a first boot
-	// against a type-sparse catalogue is the catalogue's valid shape, not a
-	// regression to reject.
 	previous = deduplicateRecords(previous)
+	if err := validateTypeCoverage(previous, records, minimum); err != nil {
+		return err
+	}
+	return validateRoutingCoverage(previous, records, minimum)
+}
+
+// validateTypeCoverage rejects a candidate refresh that lost type coverage
+// relative to the previously accepted cache. A wholesale upstream loss of the
+// type field (flexString zeroes any non-string shape) re-routes every MOVIE
+// record to Sonarr via its parent tvdb_id while still passing the
+// arr-identifier floor and the shrink guard — but only a LOSS is a
+// degradation. fribb.go's tolerant contract lets an absent/odd type survive
+// as the safe non-movie (Sonarr) default, so the floor is relative to the
+// previously accepted cache: it fires only when that cache was itself
+// type-rich (met the same 1% floor) AND the candidate carries fewer typed
+// records than the cache did — an additive refresh that merely grows the
+// record count (raising the ceiling-derived minimum) without losing any typed
+// record is the catalogue growing, not type data degrading. An established
+// type-sparse cache or a first boot against a type-sparse catalogue is the
+// catalogue's valid shape, not a regression to reject.
+func validateTypeCoverage(previous, records []Record, minimum int) error {
 	previousTyped := typedRecordCount(previous)
 	previousMinimum := coverageFloor(len(previous))
-	previousMetFloor := len(previous) > 0 && previousTyped >= previousMinimum
 	typed := typedRecordCount(records)
-	if previousMetFloor && typed < minimum && typed < previousTyped {
+	if len(previous) > 0 && previousTyped >= previousMinimum && typed < minimum && typed < previousTyped {
 		return fmt.Errorf("type coverage %d/%d is below minimum %d (previous cache carried %d typed records)", typed, len(records), minimum, previousTyped)
 	}
-	// The typed floor above validates syntactic presence of Type, but routing
-	// recognizes only MOVIE and sends every other value to Sonarr — so a
-	// wrong-but-string schema change (all movie types renamed to FILM, or
-	// every record stamped MOVIE) retains 100% typed coverage while silently
-	// routing an entire side of the catalogue to the wrong arr. Guard the
-	// operational invariant instead: preservation of both routing populations
-	// (MOVIE-routed and non-MOVIE), relative to the previously accepted
-	// cache. For each side that met the conservative 1% floor in that cache,
-	// reject a candidate whose side falls below the candidate floor AND below
-	// its prior count — an additive catalogue update that keeps both sides
-	// populated passes, and individual or future non-movie labels stay legal
-	// because every non-MOVIE type counts toward the same side.
-	if len(previous) > 0 {
-		prevMovies, prevOthers := routingCounts(previous)
-		movies, others := routingCounts(records)
-		if prevMovies >= previousMinimum && movies < minimum && movies < prevMovies {
-			return fmt.Errorf("movie-routed coverage %d/%d is below minimum %d (previous cache carried %d movie-routed records)", movies, len(records), minimum, prevMovies)
-		}
-		if prevOthers >= previousMinimum && others < minimum && others < prevOthers {
-			return fmt.Errorf("series-routed coverage %d/%d is below minimum %d (previous cache carried %d series-routed records)", others, len(records), minimum, prevOthers)
-		}
+	return nil
+}
+
+// validateRoutingCoverage rejects a candidate refresh that collapsed a
+// routing population relative to the previously accepted cache. The typed
+// floor validates syntactic presence of Type, but routing recognizes only
+// MOVIE and sends every other value to Sonarr — so a wrong-but-string schema
+// change (all movie types renamed to FILM, or every record stamped MOVIE)
+// retains 100% typed coverage while silently routing an entire side of the
+// catalogue to the wrong arr. Guard the operational invariant instead:
+// preservation of both routing populations (MOVIE-routed and non-MOVIE),
+// relative to the previously accepted cache. For each side that met the
+// conservative 1% floor in that cache, reject a candidate whose side falls
+// below the candidate floor AND below its prior count — an additive catalogue
+// update that keeps both sides populated passes, and individual or future
+// non-movie labels stay legal because every non-MOVIE type counts toward the
+// same side.
+func validateRoutingCoverage(previous, records []Record, minimum int) error {
+	if len(previous) == 0 {
+		return nil
+	}
+	previousMinimum := coverageFloor(len(previous))
+	prevMovies, prevOthers := routingCounts(previous)
+	movies, others := routingCounts(records)
+	if prevMovies >= previousMinimum && movies < minimum && movies < prevMovies {
+		return fmt.Errorf("movie-routed coverage %d/%d is below minimum %d (previous cache carried %d movie-routed records)", movies, len(records), minimum, prevMovies)
+	}
+	if prevOthers >= previousMinimum && others < minimum && others < prevOthers {
+		return fmt.Errorf("series-routed coverage %d/%d is below minimum %d (previous cache carried %d series-routed records)", others, len(records), minimum, prevOthers)
 	}
 	return nil
 }
@@ -752,12 +782,20 @@ func unknownOverrideKeys(data []byte) []string {
 // operator can write "movie" or "tv". It also returns the sorted set of
 // unknown keys found in any record (e.g. upstream Fribb spellings like
 // "imdb_id"), so the caller can warn instead of silently dropping them.
+// The top-level value must be a JSON array: encoding/json would otherwise
+// accept a literal null into a nil []Record without error, silently treating
+// a clobbered overrides file as a valid empty overlay instead of routing it
+// through readOverrides' malformed-file warning.
 func parseOverrides(data []byte) ([]Record, []string, error) {
+	trimmedData := bytes.TrimSpace(data)
+	if len(trimmedData) == 0 || trimmedData[0] != '[' {
+		return nil, nil, errors.New("mapping: overrides must be a JSON array")
+	}
 	var records []Record
-	if err := json.Unmarshal(data, &records); err != nil {
+	if err := json.Unmarshal(trimmedData, &records); err != nil {
 		return nil, nil, err
 	}
-	unknown := unknownOverrideKeys(data)
+	unknown := unknownOverrideKeys(trimmedData)
 	for i := range records {
 		records[i].Type = NormalizeType(records[i].Type)
 	}

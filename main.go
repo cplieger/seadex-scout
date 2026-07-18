@@ -69,48 +69,26 @@ const validArgsHint = "(valid: health, daemon, report, poll, or no argument)"
 func main() {
 	installLogger()
 
-	// Reject malformed invocations with trailing arguments (e.g. `poll typo`,
-	// `health typo`) before the health fast path, so a typo can never run a
-	// real poll or report healthy. Exit 2 = invalid invocation, matching the
-	// resolveMode contract below.
 	args := os.Args[1:]
-	if len(args) > 1 {
-		slog.Error("invalid invocation", "error",
-			fmt.Errorf("too many arguments %q %s", args, validArgsHint))
+	if err := validateInvocation(args); err != nil {
+		// Exit 2 = invalid invocation, matching the resolveMode contract below.
+		slog.Error("invalid invocation", "error", err)
 		os.Exit(2)
 	}
 
-	// The health subcommand backs the Docker healthcheck and must not require
-	// configuration, so it is handled before config load. It does read the
-	// config best-effort (never failing on absence or parse errors) to derive
-	// the freshness deadline: in scheduled mode each cycle refreshes the
-	// marker, so a marker older than 3 poll intervals means a wedged compare
-	// loop and a restart fixes it. External mode (poll_interval: off) and any
-	// config-read failure disable the deadline (WithMaxAge(0) is a no-op):
-	// idle-until-poll is healthy.
 	configPath := cmp.Or(strings.TrimSpace(os.Getenv("CONFIG_PATH")), config.DefaultConfigPath)
-	if len(args) == 1 && args[0] == "health" {
-		health.RunProbe(health.DefaultPath,
-			health.WithMaxAge(3*config.PollIntervalFromFile(configPath)))
+	if runHealthProbe(args, configPath) {
 		// health.RunProbe terminates via os.Exit(0/1); if it ever returns
 		// (a contract change in the separately versioned health dependency),
 		// fail closed: report unhealthy rather than a silently-green probe.
 		os.Exit(1)
 	}
 
-	//nolint:gosec // G304: CONFIG_PATH is an operator-supplied path, not user input
-	if _, err := os.Stat(configPath); errors.Is(err, fs.ErrNotExist) {
-		if werr := writeStarterConfig(configPath); werr != nil {
-			slog.Error("no config found and could not write a starter", "path", configPath, "error", werr)
-			os.Exit(1)
-		}
-		slog.Warn("no config found; wrote a starter config - set your Sonarr/Radarr url + api_key and restart", "path", configPath)
-		os.Exit(1)
-	}
-
-	cfg, err := config.Load(configPath)
+	cfg, err := loadRuntimeConfig(configPath)
 	if err != nil {
-		slog.Error("failed to load config", "path", configPath, "error", err)
+		// Every terminal outcome (a starter written on first boot, a starter
+		// write failure, a load failure) is already logged by the helper with
+		// its original level and message; main only owns the exit code.
 		os.Exit(1)
 	}
 	configureLogger(cfg.LogLevel, cfg.LogFormat)
@@ -134,6 +112,65 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+// validateInvocation rejects malformed invocations with trailing arguments
+// (e.g. `poll typo`, `health typo`) before the health fast path, so a typo can
+// never run a real poll or report healthy. main maps a non-nil error to exit 2.
+func validateInvocation(args []string) error {
+	if len(args) > 1 {
+		return fmt.Errorf("too many arguments %q %s", args, validArgsHint)
+	}
+	return nil
+}
+
+// runHealthProbe handles the health subcommand, which backs the Docker
+// healthcheck and must not require configuration, so it runs before config
+// load. It reports false when the invocation is not `health` (main continues
+// with normal startup). The probe reads the config best-effort (never failing
+// on absence or parse errors) to derive the freshness deadline: in scheduled
+// mode each cycle refreshes the marker, so a marker older than 3 poll
+// intervals means a wedged compare loop and a restart fixes it. External mode
+// (poll_interval: off) and any config-read failure disable the deadline
+// (WithMaxAge(0) is a no-op): idle-until-poll is healthy. health.RunProbe
+// terminates via os.Exit(0/1), so the true return is reachable only if that
+// contract ever changes - main then fails closed with exit 1.
+func runHealthProbe(args []string, configPath string) bool {
+	if len(args) != 1 || args[0] != "health" {
+		return false
+	}
+	health.RunProbe(health.DefaultPath,
+		health.WithMaxAge(3*config.PollIntervalFromFile(configPath)))
+	return true
+}
+
+// errStarterWritten is returned by loadRuntimeConfig after a first boot
+// successfully wrote the starter config (logged as the edit-and-restart WARN),
+// distinguishing that expected outcome from a genuine write or load failure
+// (logged at ERROR). main exits 1 on both; the typed sentinel keeps the
+// classification testable.
+var errStarterWritten = errors.New("no config found; starter config written")
+
+// loadRuntimeConfig runs the startup config sequence: a missing config file
+// writes the first-boot starter, a present one is loaded. Every terminal
+// outcome is logged here with its original level and message; a non-nil error
+// means main must exit 1.
+func loadRuntimeConfig(configPath string) (config.Config, error) {
+	//nolint:gosec // G304: CONFIG_PATH is an operator-supplied path, not user input
+	if _, err := os.Stat(configPath); errors.Is(err, fs.ErrNotExist) {
+		if werr := writeStarterConfig(configPath); werr != nil {
+			slog.Error("no config found and could not write a starter", "path", configPath, "error", werr)
+			return config.Config{}, fmt.Errorf("write starter config: %w", werr)
+		}
+		slog.Warn("no config found; wrote a starter config - set your Sonarr/Radarr url + api_key and restart", "path", configPath)
+		return config.Config{}, errStarterWritten
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		slog.Error("failed to load config", "path", configPath, "error", err)
+		return config.Config{}, fmt.Errorf("load config: %w", err)
+	}
+	return cfg, nil
 }
 
 // dispatch validates the config, then runs the resolved mode. Each run body
@@ -218,7 +255,9 @@ func runReport(cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	rep.Log(slog.Default())
+	if err := rep.Log(ctx, slog.Default()); err != nil {
+		return err
+	}
 	return rep.WriteFiles(ctx, cfg.ReportDir, slog.Default())
 }
 
@@ -470,16 +509,22 @@ func startIndexer(ctx context.Context, cfg *config.Config) func() {
 	ictx, cancel := context.WithCancel(ctx)
 	bi := buildIndexer(cfg)
 	done := make(chan struct{})
+	// The goroutine's terminal records (a recovered panic, the Run stop
+	// classification) carry the same component=indexer scope the feed's
+	// request and lifecycle logs use (see buildIndexer), so the feed's most
+	// important failure lines stay routable/queryable with the rest of its
+	// stream in Loki.
+	log := slog.Default().With("component", "indexer")
 	go func() {
 		defer close(done)
 		defer bi.cleanup()
 		defer func() {
 			if r := recover(); r != nil {
-				slog.Error("indexer feed panicked", "panic", r, "stack", string(debug.Stack()))
+				log.Error("indexer feed panicked", "panic", r, "stack", string(debug.Stack()))
 			}
 		}()
 		if err := bi.indexer.Run(ictx); err != nil {
-			logIndexerStop(ictx, err)
+			logIndexerStop(ictx, log, err)
 		}
 	}()
 	return func() {
@@ -489,22 +534,24 @@ func startIndexer(ctx context.Context, cfg *config.Config) func() {
 }
 
 // logIndexerStop classifies the indexer feed's Run error for the shared slog
-// stream. Both shutdown-path cases are routine on a redeploy (WARN, kept off
+// stream, emitting through the caller's indexer-scoped logger so the terminal
+// record carries the same component=indexer context as the feed's normal logs.
+// Both shutdown-path cases are routine on a redeploy (WARN, kept off
 // the level=ERROR cycle-error alert, matching the walk/matching/save
 // classification), but they carry distinct messages: webhttp.Run returns
 // DeadlineExceeded specifically when its graceful-shutdown budget expired,
 // meaning in-flight Torznab requests were cut off - information worth its own
 // log line rather than vanishing into the clean-shutdown message. Any error
 // outside a shutdown is a fault and stays ERROR.
-func logIndexerStop(ctx context.Context, err error) {
+func logIndexerStop(ctx context.Context, log *slog.Logger, err error) {
 	switch {
 	case ctx.Err() != nil && errors.Is(err, context.DeadlineExceeded):
-		slog.Warn("indexer shutdown budget expired; in-flight requests aborted", "error", err, "cause", context.Cause(ctx))
+		log.Warn("indexer shutdown budget expired; in-flight requests aborted", "error", err, "cause", context.Cause(ctx))
 	case ctx.Err() != nil && errors.Is(err, context.Canceled):
 		// Bind cancelled mid-startup, or a clean graceful drain: routine.
-		slog.Warn("indexer feed stopped during shutdown", "error", err, "cause", context.Cause(ctx))
+		log.Warn("indexer feed stopped during shutdown", "error", err, "cause", context.Cause(ctx))
 	default:
-		slog.Error("indexer feed stopped", "error", err)
+		log.Error("indexer feed stopped", "error", err)
 	}
 }
 

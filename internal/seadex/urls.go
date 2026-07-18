@@ -91,16 +91,19 @@ func usableRelative(raw, baseURL string) string {
 // itself: an IDN lookalike of a tracker host (a homograph such as a Cyrillic
 // "nyаa.si") has no legitimate use in SeaDex data, and this gate's fail
 // direction (unclassifiable = drop the link) is exactly the predicate's.
+// All facts read here are the classifier's semantic fields (Scheme,
+// HasUserInfo, Port, Host), never the parser representation, which stays
+// private to the release package.
 func usableAbsolute(f *release.URLForm) bool {
-	if !strings.EqualFold(f.Parsed.Scheme, "http") &&
-		!strings.EqualFold(f.Parsed.Scheme, "https") {
+	if !strings.EqualFold(f.Scheme, "http") &&
+		!strings.EqualFold(f.Scheme, "https") {
 		return false
 	}
-	if f.Parsed.User != nil {
+	if f.HasUserInfo {
 		return false
 	}
-	if port := f.Parsed.Port(); port != "" {
-		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+	if f.Port != "" {
+		if _, err := strconv.ParseUint(f.Port, 10, 16); err != nil {
 			return false
 		}
 	}

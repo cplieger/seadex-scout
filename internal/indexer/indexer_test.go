@@ -262,6 +262,72 @@ func TestMarkAndDedupeRejectsConflictingIdentity(t *testing.T) {
 	}
 }
 
+// TestMarkAndDedupeRejectsCrossTorrentPair pins lookup's hash/key pair
+// relation: an item pairing torrent A's curated info hash with torrent B's
+// curated tracker key must be rejected even when both signals carry the same
+// best/alt marker, because byPair records only same-torrent hash/key
+// combinations. A hash-only Nyaa item still matches without a pair, and a
+// legacy snapshot (nil byPair, persisted before the relation existed) falls
+// back to the per-signal agreement gate.
+func TestMarkAndDedupeRejectsCrossTorrentPair(t *testing.T) {
+	hashA := "abcdef1234567890abcdef1234567890abcdef12"
+	hashB := "0123456789012345678901234567890123456789"
+	set := &curation{
+		byHash: map[string]bool{hashA: true, hashB: true},
+		byKey:  map[string]bool{"nyaa:100": true, "nyaa:200": true},
+		byPair: map[string]bool{
+			pairKey(hashA, "nyaa:100"): true,
+			pairKey(hashB, "nyaa:200"): true,
+		},
+	}
+	matching := []item{{
+		Title: "hash and key from one torrent", InfoHash: hashA,
+		InfoURL: "https://nyaa.si/view/100", GUID: "https://nyaa.si/view/100",
+	}}
+	if out := markAndDedupe(matching, set, upstreamNyaa); len(out) != 1 {
+		t.Fatalf("got %d items, want 1 (a same-torrent hash/key pair must match)", len(out))
+	}
+	crossWired := []item{{
+		Title: "torrent A hash + torrent B key", InfoHash: hashA,
+		InfoURL: "https://nyaa.si/view/200", GUID: "https://nyaa.si/view/200",
+	}}
+	if out := markAndDedupe(crossWired, set, upstreamNyaa); len(out) != 0 {
+		t.Fatalf("got %d items, want 0 (a cross-torrent hash/key pair must not match even when both are best)", len(out))
+	}
+	hashOnly := []item{{Title: "hash only", InfoHash: hashA, GUID: "g1"}}
+	if out := markAndDedupe(hashOnly, set, upstreamNyaa); len(out) != 1 {
+		t.Fatalf("got %d items, want 1 (a hash-only Nyaa item needs no pair)", len(out))
+	}
+	legacy := &curation{byHash: set.byHash, byKey: set.byKey}
+	if out := markAndDedupe(crossWired, legacy, upstreamNyaa); len(out) != 1 {
+		t.Fatalf("got %d items, want 1 (a legacy nil-byPair snapshot falls back to per-signal agreement)", len(out))
+	}
+}
+
+// TestMarkAndDedupeKeyOnlyABNeedsNoPair pins that the pair gate does not
+// change AnimeBytes matching: AB exposes no info hash in Torznab, so a
+// key-only item matches on its scoped tracker key alone with no pair to
+// prove, even against a snapshot whose pair relation is empty.
+func TestMarkAndDedupeKeyOnlyABNeedsNoPair(t *testing.T) {
+	set := &curation{
+		byHash: map[string]bool{},
+		byKey:  map[string]bool{"ab:300": true},
+		byPair: map[string]bool{},
+	}
+	raw := []item{{
+		Title:   "key only",
+		InfoURL: "https://animebytes.tv/torrent/300/group",
+		GUID:    "https://animebytes.tv/torrent/300/group",
+	}}
+	out := markAndDedupe(raw, set, upstreamAB)
+	if len(out) != 1 {
+		t.Fatalf("got %d items, want 1 (a key-only AB item needs no pair)", len(out))
+	}
+	if out[0].DownloadVolumeFactor != dvfBest {
+		t.Errorf("marker = %q, want %q", out[0].DownloadVolumeFactor, dvfBest)
+	}
+}
+
 // TestMarkAndDedupeRejectsCrossScopeKey pins lookup's tracker-scope binding: a
 // tracker key parsed from an item's page URL must belong to the endpoint being
 // served, so a curated Nyaa item is rejected under the /ab scope (a swapped

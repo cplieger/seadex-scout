@@ -1,7 +1,6 @@
 package seadex
 
 import (
-	"bytes"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -17,14 +16,8 @@ import (
 // decodePage must reject it too (never accept what stdlib refuses). This
 // guards the whole parity surface at once: case-insensitive key matching,
 // null-into-container no-ops, duplicate-key overwrite order, trailing-data
-// strictness, and scalar type errors. Two known divergences are scoped out:
-// decodePage leaves an empty JSON array as a nil slice where json.Unmarshal
-// allocates an empty one (normalized before comparing; no consumer
-// distinguishes them), and duplicate fold-equal keys within one object are
-// conservatively skipped to keep the oracle independent of duplicate-key
-// semantics - decodeExpand now merges a duplicate "expand" field-wise like
-// json.Unmarshal (the unit tests pin both the null and object arms directly),
-// so the skip is scope hygiene, not a known divergence.
+// strictness, and scalar type errors. Empty arrays are normalized before the
+// comparison because no consumer distinguishes nil from empty slices.
 func FuzzDecodePage(f *testing.F) {
 	seeds := []string{
 		`{"totalItems":1,"totalPages":1,"items":[{"alID":7,"notes":"n","theoreticalBest":"tb","updated":"2026-01-02 03:04:05.000Z","incomplete":true,"expand":{"trs":[{"releaseGroup":"PMR","tracker":"Nyaa","infoHash":"abc","url":"https://nyaa.si/view/1","isBest":true,"dualAudio":true,"files":[{"name":"a.mkv","length":1}],"tags":["best"]}]}}]}`,
@@ -48,10 +41,7 @@ func FuzzDecodePage(f *testing.F) {
 		f.Add([]byte(s))
 	}
 	f.Fuzz(func(t *testing.T, body []byte) {
-		if hasFoldDuplicateKeys(body) {
-			t.Skip("duplicate-key merge semantics deliberately diverge from json.Unmarshal")
-		}
-		got, gotErr := decodePage(body)
+		got, _, gotErr := decodePage(body, maxPageElements)
 		var want pbList
 		wantErr := json.Unmarshal(body, &want)
 		if gotErr != nil {
@@ -93,63 +83,4 @@ func normalizePBList(l pbList) pbList {
 		}
 	}
 	return l
-}
-
-// hasFoldDuplicateKeys reports whether any single JSON object in body carries
-// two keys equal under Unicode case folding. Such bodies are excluded from
-// the differential oracle (duplicate-container merge-vs-replace divergence);
-// a walk error reports false, since both decoders will reject the body anyway.
-func hasFoldDuplicateKeys(body []byte) bool {
-	dec := json.NewDecoder(bytes.NewReader(body))
-	type frame struct {
-		keys     []string
-		isObject bool
-		wantKey  bool
-	}
-	var stack []frame
-	for {
-		tok, err := dec.Token()
-		if err != nil {
-			return false
-		}
-		if delim, ok := tok.(json.Delim); ok {
-			switch delim {
-			case '{':
-				stack = append(stack, frame{isObject: true, wantKey: true})
-			case '[':
-				stack = append(stack, frame{})
-			case '}', ']':
-				stack = stack[:len(stack)-1]
-				if len(stack) == 0 {
-					return false
-				}
-				if stack[len(stack)-1].isObject {
-					stack[len(stack)-1].wantKey = true
-				}
-			}
-			continue
-		}
-		if len(stack) == 0 {
-			return false
-		}
-		top := &stack[len(stack)-1]
-		if !top.isObject {
-			continue
-		}
-		if top.wantKey {
-			key, ok := tok.(string)
-			if !ok {
-				return false
-			}
-			for _, seen := range top.keys {
-				if strings.EqualFold(seen, key) {
-					return true
-				}
-			}
-			top.keys = append(top.keys, key)
-			top.wantKey = false
-			continue
-		}
-		top.wantKey = true
-	}
 }

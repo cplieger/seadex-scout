@@ -235,7 +235,17 @@ func (w *FeedWriter) growJournal(entries []seadex.Entry, cur map[string][]curate
 func (w *FeedWriter) journalIfNew(t *seadex.Torrent, cur map[string][]curatedRef, seen map[string]bool, infoFor func(alID int) EntryInfo, js *journalStats) (it item, scope string, ok bool) {
 	ids := identitySignals(t)
 	if len(ids) == 0 {
-		return item{}, "", false // no stable identity: cannot journal or remember it
+		// No stable identity at all: the torrent can neither be journaled nor
+		// remembered. For an enabled, supported tracker (Nyaa, or a configured
+		// AnimeBytes - whose hashes SeaDex redacts, so an upstream AB
+		// URL-shape change lands exactly here) this is the same
+		// unresolvable-diagnostic case newJournalItem counts: surface it on
+		// the snapshot log line instead of silently shrinking the feed.
+		// Unknown tail trackers and an intentionally disabled AB stay silent.
+		if scope := trackerScope(t.Tracker); scope == upstreamNyaa || (scope == upstreamAB && w.abConfigured) {
+			js.unresolvable++
+		}
+		return item{}, "", false
 	}
 	isNew := true
 	for _, id := range ids {

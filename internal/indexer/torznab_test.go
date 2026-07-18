@@ -1,6 +1,11 @@
 package indexer
 
-import "testing"
+import (
+	"math"
+	"strconv"
+	"strings"
+	"testing"
+)
 
 // TestRenderFeed_usesStableGUIDFallback pins the documented GUID fallback
 // order (explicit GUID -> info hash -> download URL) independently of the
@@ -35,6 +40,37 @@ func TestRenderFeed_usesStableGUIDFallback(t *testing.T) {
 			}
 			if got := parsed[0].GUID; got != tc.want {
 				t.Errorf("rendered GUID = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWriteItemSaturatesPeerCount pins writeItem's overflow guard: attrInt
+// accepts counts through math.MaxInt, so a malformed-but-valid upstream item
+// with seeders and leechers both at math.MaxInt must render a peers attr
+// saturated at math.MaxInt - never a wrapped negative value, which would
+// contradict toItem's non-negative normalization.
+func TestWriteItemSaturatesPeerCount(t *testing.T) {
+	tests := map[string]struct {
+		wantPeers         int
+		seeders, leechers int
+	}{
+		"both at MaxInt saturate":        {seeders: math.MaxInt, leechers: math.MaxInt, wantPeers: math.MaxInt},
+		"sum just over MaxInt saturates": {seeders: math.MaxInt - 1, leechers: 2, wantPeers: math.MaxInt},
+		"ordinary counts sum exactly":    {seeders: 146, leechers: 3, wantPeers: 149},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			var b strings.Builder
+			it := item{Title: "x", Seeders: tc.seeders, Leechers: tc.leechers}
+			writeItem(&b, &it)
+			out := b.String()
+			want := `<torznab:attr name="peers" value="` + strconv.Itoa(tc.wantPeers) + `"/>`
+			if !strings.Contains(out, want) {
+				t.Errorf("rendered item missing %s:\n%s", want, out)
+			}
+			if strings.Contains(out, `value="-`) {
+				t.Errorf("rendered a negative attribute value:\n%s", out)
 			}
 		})
 	}

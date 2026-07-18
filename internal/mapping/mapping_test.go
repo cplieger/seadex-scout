@@ -1,9 +1,7 @@
 package mapping
 
 import (
-	"reflect"
 	"slices"
-	"sort"
 	"testing"
 )
 
@@ -90,8 +88,8 @@ func TestIndex_ForEachRecordAndNewIndex(t *testing.T) {
 	idx := NewIndex([]Record{{AniListID: 1}, {AniListID: 2}})
 	var got []int
 	idx.ForEachRecord(func(r Record) { got = append(got, r.AniListID) })
-	sort.Ints(got)
-	if !reflect.DeepEqual(got, []int{1, 2}) {
+	slices.Sort(got)
+	if !slices.Equal(got, []int{1, 2}) {
 		t.Errorf("ForEachRecord visited %v, want [1 2]", got)
 	}
 }
@@ -109,6 +107,9 @@ func TestParseOverrides(t *testing.T) {
 	}
 	if _, _, err := parseOverrides([]byte(`{bad`)); err == nil {
 		t.Error("parseOverrides(malformed) = nil error, want error")
+	}
+	if _, _, err := parseOverrides([]byte(`null`)); err == nil {
+		t.Error("parseOverrides(null) = nil error, want error (a non-array top level must not read as an empty overlay)")
 	}
 }
 

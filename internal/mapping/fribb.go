@@ -95,35 +95,58 @@ const maxFribbRecordBytes = 64 << 10
 // cannot amplify compact wire-size arrays into a large retained working set.
 const maxFribbIdentifiers = 32
 
-// parseFribb decodes the Fribb list resiliently: it streams the top-level
-// array element by element (never materializing all raw messages at once, so a
-// bounded body of tiny elements cannot amplify into a huge transient
-// allocation), decoding each element on its own so a single malformed record
-// is skipped (counted) rather than failing the whole map. A list that exceeds
-// maxFribbRecords is rejected outright with the errRecordCapExceeded sentinel
-// — before the excess elements are ever decoded — so the caller keeps the
-// stale cache rather than admitting an amplified record set (and can tell the
-// cap breach apart from a transient parse failure). Trailing data after the
-// closing bracket is rejected, matching the strictness of a whole-document
-// json.Unmarshal.
+// fribbParseResult is parseFribbForRefresh's counted decode result: the
+// surviving AniList-keyed records plus the number of top-level array elements
+// they were distilled from (survivors + skipped-malformed + dropped-keyless).
+// acceptRefresh validates identifier coverage against elements rather than
+// len(records), so destructive filtering and deduplication cannot shrink the
+// denominator along with the numerator — a first-boot body of 200 keyless
+// rows must not be reinterpreted as a "healthy" 1/1 map.
+type fribbParseResult struct {
+	records  []Record
+	elements int
+}
+
+// parseFribb decodes the Fribb list resiliently, returning only the surviving
+// records. It is the stable surface the parser tests and fuzz targets
+// exercise; the refresh acceptance path uses parseFribbForRefresh to also
+// observe the top-level element count.
 func parseFribb(data []byte, log *slog.Logger) ([]Record, error) {
+	parsed, err := parseFribbForRefresh(data, log)
+	return parsed.records, err
+}
+
+// parseFribbForRefresh decodes the Fribb list resiliently: it streams the
+// top-level array element by element (never materializing all raw messages at
+// once, so a bounded body of tiny elements cannot amplify into a huge
+// transient allocation), decoding each element on its own so a single
+// malformed record is skipped (counted) rather than failing the whole map. A
+// list that exceeds maxFribbRecords is rejected outright with the
+// errRecordCapExceeded sentinel — before the excess elements are ever decoded
+// — so the caller keeps the stale cache rather than admitting an amplified
+// record set (and can tell the cap breach apart from a transient parse
+// failure). Trailing data after the closing bracket is rejected, matching the
+// strictness of a whole-document json.Unmarshal. Alongside the surviving
+// records it reports the top-level element count (see fribbParseResult), the
+// denominator the refresh acceptance floors validate coverage against.
+func parseFribbForRefresh(data []byte, log *slog.Logger) (fribbParseResult, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	tok, err := dec.Token()
 	if err != nil {
-		return nil, err
+		return fribbParseResult{}, err
 	}
 	if d, ok := tok.(json.Delim); !ok || d != '[' {
-		return nil, fmt.Errorf("mapping: Fribb list is not a JSON array (got %T)", tok)
+		return fribbParseResult{}, fmt.Errorf("mapping: Fribb list is not a JSON array (got %T)", tok)
 	}
 	records, skipped, dropped, firstErr, err := decodeFribbRecords(dec)
 	if err != nil {
-		return nil, err
+		return fribbParseResult{}, err
 	}
 	if _, err := dec.Token(); err != nil { // consume the closing ']'
-		return nil, err
+		return fribbParseResult{}, err
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return nil, errors.New("mapping: trailing data after Fribb list")
+		return fribbParseResult{}, errors.New("mapping: trailing data after Fribb list")
 	}
 	if skipped > 0 {
 		attrs := []any{"skipped", skipped, "parsed", len(records)}
@@ -135,7 +158,7 @@ func parseFribb(data []byte, log *slog.Logger) ([]Record, error) {
 	if dropped > 0 {
 		log.Debug("mapping: dropped records without anilist_id", "dropped", dropped, "parsed", len(records))
 	}
-	return records, nil
+	return fribbParseResult{records: records, elements: len(records) + skipped + dropped}, nil
 }
 
 // decodeFribbRecords streams the array body element-by-element, decoding each

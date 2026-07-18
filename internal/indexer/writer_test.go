@@ -15,6 +15,34 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
+// TestRebuildPersistsPairRelation pins that the persisted curation set
+// carries the hash/key pair relation lookup's cross-torrent gate reads: a
+// torrent with both identity signals records its exact pair, and the map is
+// persisted non-nil (even when empty) so a freshly written snapshot never
+// falls back to the weaker legacy per-signal gate.
+func TestRebuildPersistsPairRelation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	entries := []seadex.Entry{{
+		AniListID: 9,
+		Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://nyaa.si/view/42",
+			InfoHash: "abcdef1234567890abcdef1234567890abcdef12", IsBest: true,
+			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
+		}},
+	}}
+	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if snap.ByPair == nil {
+		t.Fatal("by_pair missing from the persisted snapshot (readers would fall back to the legacy per-signal gate)")
+	}
+	if !snap.ByPair[pairKey("abcdef1234567890abcdef1234567890abcdef12", "nyaa:42")] {
+		t.Errorf("by_pair missing the same-torrent hash/key pair: %v", snap.ByPair)
+	}
+}
+
 // TestRebuildWarnsWhenABPasskeyMissing pins the operator nudge: a rebuild
 // journaling AnimeBytes releases with no configured passkey still writes the
 // snapshot (Nyaa unaffected) and logs ONE warning carrying the skip count, so
