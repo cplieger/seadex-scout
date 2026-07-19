@@ -471,6 +471,18 @@ func TestLogParamBoundsAndCleansRequestValues(t *testing.T) {
 	}
 }
 
+// TestLogParamCapsAtRuneBoundary pins the rune-boundary guarantee of the
+// 256-byte cap: a multibyte rune straddling the cap is dropped whole (never
+// split into invalid UTF-8), which a raw byte-slice cap would violate while
+// the ASCII-only cases above still passed.
+func TestLogParamCapsAtRuneBoundary(t *testing.T) {
+	input := strings.Repeat("x", 255) + "é"
+	want := strings.Repeat("x", 255) + "..."
+	if got := logParam(input); got != want {
+		t.Errorf("logParam(multibyte boundary) = %q, want %q", got, want)
+	}
+}
+
 // TestRunSurfacesBindFailureSynchronously pins Run's documented bind
 // contract: the listener is bound up front, so a port already in use fails
 // Run synchronously with an error naming the address (startIndexer logs it),

@@ -181,6 +181,9 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 		// layer behind the key's entropy: past the burst, a brute-forcing or
 		// misconfigured LAN client gets 429s and stops generating log lines.
 		if !ix.allowAuthFailure() {
+			// One token refills every six seconds (10/min): tell a compliant
+			// retrying client when trying again can succeed.
+			w.Header().Set("Retry-After", "6")
 			http.Error(w, "too many requests", http.StatusTooManyRequests)
 			return
 		}

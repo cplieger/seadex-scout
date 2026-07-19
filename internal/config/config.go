@@ -738,7 +738,14 @@ func urlEmbedsCredential(rawURL string) bool {
 		}
 	}
 	for pair := range strings.FieldsFuncSeq(u.RawQuery, func(r rune) bool { return r == '&' || r == ';' }) {
-		if name, _, _ := strings.Cut(pair, "="); isCredentialParam(name) {
+		name, _, _ := strings.Cut(pair, "=")
+		// Match the percent-decoded name (u.Query() would have decoded it had
+		// the pair been well-formed); an undecodable escape keeps the raw
+		// name so a malformed pair is still matched conservatively.
+		if decoded, err := url.QueryUnescape(name); err == nil {
+			name = decoded
+		}
+		if isCredentialParam(name) {
 			return true
 		}
 	}

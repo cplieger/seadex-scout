@@ -623,3 +623,61 @@ func TestDoRejectsUnparseableURL(t *testing.T) {
 		t.Errorf("Stats().Calls = %d, want 0 (a request that cannot be built is never an outbound attempt)", got)
 	}
 }
+
+// TestFetchManyFirstChunkFailureReturnsNil pins the completion contract's
+// total-failure side: a request/envelope failure before any chunk completes
+// returns a NIL map together with the error — the signal callers use to
+// distinguish a genuine outage from a completed batch that found no media.
+func TestFetchManyFirstChunkFailureReturnsNil(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"errors":[{"message":"boom"}]}`)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	out, err := c.FetchMany(context.Background(), []int{1, 2})
+	if err == nil {
+		t.Fatal("FetchMany must surface the first chunk's envelope error")
+	}
+	if out != nil {
+		t.Errorf("FetchMany() result = %v, want nil (no chunk completed)", out)
+	}
+}
+
+// TestFetchManyAllNotFoundThenFailureReturnsNonNilEmpty pins the completion
+// contract's partial side: a first chunk that completes with every id
+// definitively not found (a valid empty media array) followed by a failed
+// second chunk returns a NON-NIL empty map plus the error, so the caller can
+// tell "a chunk completed and found nothing" apart from a total outage.
+func TestFetchManyAllNotFoundThenFailureReturnsNonNilEmpty(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n > 1 {
+			fmt.Fprint(w, `{"errors":[{"message":"boom"}]}`)
+			return
+		}
+		fmt.Fprint(w, `{"data":{"Page":{"media":[]}}}`)
+	}))
+	defer srv.Close()
+
+	ids := make([]int, 60) // two chunks: the first completes all-not-found, the second fails
+	for i := range ids {
+		ids[i] = i + 1
+	}
+	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	out, err := c.FetchMany(context.Background(), ids)
+	if err == nil {
+		t.Fatal("FetchMany must surface the second chunk's envelope error")
+	}
+	if out == nil {
+		t.Error("FetchMany() result = nil, want a non-nil empty map (the first chunk completed)")
+	}
+	if len(out) != 0 {
+		t.Errorf("FetchMany() result = %v, want empty (every completed id was not-found)", out)
+	}
+}

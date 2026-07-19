@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/cplieger/arrapi"
+	"github.com/cplieger/httpx/v3"
 	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/release"
 )
@@ -318,7 +319,11 @@ func (w *Walker) fetchSeriesItem(ctx context.Context, s *arrapi.Series) (*Item, 
 		if ctx.Err() != nil {
 			return nil, false
 		}
-		w.log.Warn("skipping series: episode fetch failed", "series", runesafe.Sanitize(s.Title), "id", s.ID, "error", err)
+		// LogSafeError strips any userinfo-bearing request URL the arr client's
+		// wrapped *url.Error carries: this recoverable per-series warning sits
+		// outside the walk-level LogSafeError boundary, so a configured
+		// credential must be redacted here too before the line reaches Loki.
+		w.log.Warn("sonarr episode fetch failed; series kept as failed placeholder", "series", runesafe.Sanitize(s.Title), "id", s.ID, "error", httpx.LogSafeError(err))
 		// seriesItem with no files yields the identity fields and no file
 		// data - exactly the Failed placeholder shape.
 		item := w.seriesItem(s, nil)

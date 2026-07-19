@@ -1,6 +1,7 @@
 package anilist
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"reflect"
@@ -91,6 +92,7 @@ func TestParseMediaNotFoundClassification(t *testing.T) {
 		{name: "whitespace-only titles are not usable", raw: `{"data":{"Media":{"title":{"romaji":" ","english":"\t"}}}}`, wantErr: true, wantNotFound: false},
 		{name: "punctuation-only title normalizes to no match key", raw: `{"data":{"Media":{"format":"TV","title":{"romaji":"!!!"}}}}`, wantErr: true, wantNotFound: false},
 		{name: "decorated title keeps a match key", raw: `{"data":{"Media":{"format":"TV","title":{"romaji":"(A)"}}}}`, wantErr: false, wantNotFound: false},
+		{name: "invalid UTF-8 in title rejected before decode", raw: "{\"data\":{\"Media\":{\"format\":\"TV\",\"title\":{\"romaji\":\"A\xff\"}}}}", wantErr: true, wantNotFound: false},
 		{name: "media present", raw: `{"data":{"Media":{"format":"TV","seasonYear":2023,"title":{"romaji":"A"}}}}`, wantErr: false, wantNotFound: false},
 	}
 	for _, tt := range tests {
@@ -190,6 +192,7 @@ func TestParseMediaPageNullableEnvelope(t *testing.T) {
 		{name: "record with whitespace-only title fails batch", raw: `{"data":{"Page":{"media":[{"id":1,"title":{"romaji":" "}}]}}}`, wantErr: true},
 		{name: "record with punctuation-only title fails batch", raw: `{"data":{"Page":{"media":[{"id":1,"title":{"romaji":"!!!"}}]}}}`, wantErr: true},
 		{name: "record with no title fails batch", raw: `{"data":{"Page":{"media":[{"id":1}]}}}`, wantErr: true},
+		{name: "invalid UTF-8 in title rejected before decode", raw: "{\"data\":{\"Page\":{\"media\":[{\"id\":1,\"title\":{\"romaji\":\"A\xff\"}}]}}}", wantErr: true},
 		{name: "empty media array", raw: `{"data":{"Page":{"media":[]}}}`, wantErr: false},
 	}
 	for _, tt := range tests {
@@ -256,6 +259,41 @@ func TestThrottlePenalizeNeverShortensSchedule(t *testing.T) {
 		th.penalize(time.Millisecond) // smaller penalty must not shorten the schedule
 		if got := th.reserve(); got != 500*time.Millisecond {
 			t.Errorf("reserve after penalties = %v, want 500ms", got)
+		}
+	})
+}
+
+// TestThrottleWaitRevalidatesReservationAfterPenalty pins the penalty-epoch
+// revalidation: a waiter already holding a reserved slot when penalize fires
+// must NOT wake and issue its request inside the penalty window on the stale
+// pre-penalty slot - it re-reserves at the end of the penalized schedule, and
+// a subsequent reservation stays interval-spaced behind it.
+func TestThrottleWaitRevalidatesReservationAfterPenalty(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		th := &throttle{interval: time.Second}
+		start := time.Now()
+		if err := th.wait(context.Background()); err != nil {
+			t.Fatalf("first wait: %v", err)
+		}
+		// Second waiter holds a reservation one interval out (start+1s).
+		done := make(chan time.Time, 1)
+		go func() {
+			if err := th.wait(context.Background()); err != nil {
+				t.Errorf("penalized wait: %v", err)
+			}
+			done <- time.Now()
+		}()
+		synctest.Wait() // the waiter has reserved its slot and is sleeping
+		// A 429 penalty lands before the outstanding slot matures.
+		th.penalize(5 * time.Second)
+		woke := <-done
+		if got := woke.Sub(start); got != 5*time.Second {
+			t.Errorf("penalized waiter proceeded after %v, want exactly the 5s penalty epoch", got)
+		}
+		// The re-reserved slot consumed start+5s, so the next reservation is
+		// interval-spaced behind it at start+6s.
+		if got := th.reserve(); got != time.Second {
+			t.Errorf("reserve after penalized waiter = %v, want one interval (1s)", got)
 		}
 	})
 }

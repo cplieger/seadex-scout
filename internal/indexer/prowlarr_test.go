@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cplieger/httpx/v3"
+	"github.com/cplieger/slogx/capture"
 )
 
 // TestUpstreamSearchPreservesExistingQuery pins the URL-join logic of the
@@ -326,6 +327,69 @@ func TestUpstreamSearchTorznabErrorDocAttempts(t *testing.T) {
 			t.Errorf("upstream called %d times, want 2 (one code-900 attempt + one retry)", calls)
 		}
 	})
+}
+
+// TestUpstreamSearchRedactsAPIKeyInTorznabErrorDoc pins the credential
+// redaction on the parse boundary: a syntactically valid Torznab <error>
+// document's code/description are attacker-influenced text, and the request
+// that produced them carried the Prowlarr API key - a compromised upstream
+// can reflect that key back in the error description. Both the terminal
+// (request/parameter) and retryable (generic) document paths must scrub the
+// key before the error reaches httpx.Do's retry logger or any caller WARN,
+// so the credential never expands into the log stream (CWE-532).
+func TestUpstreamSearchRedactsAPIKeyInTorznabErrorDoc(t *testing.T) {
+	const apiKey = "prowlarr-secret-key-123"
+	tests := map[string]string{
+		"terminal request code 201":  "201",
+		"retryable generic code 900": "900",
+	}
+	for name, code := range tests {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/rss+xml")
+				_, _ = io.WriteString(w,
+					`<?xml version="1.0" encoding="UTF-8"?><error code="`+code+`" description="rejected key `+apiKey+`"/>`)
+			}))
+			defer srv.Close()
+
+			log, rec := capture.New()
+			u := &upstream{http: srv.Client(), log: log, name: upstreamNyaa, feed: srv.URL, apiKey: apiKey}
+			_, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+			if err == nil {
+				t.Fatal("search against an error document returned nil error")
+			}
+			if strings.Contains(err.Error(), apiKey) {
+				t.Errorf("returned error leaks the API key: %v", err)
+			}
+			if !strings.Contains(err.Error(), "REDACTED") {
+				t.Errorf("returned error = %v, want REDACTED in place of the API key", err)
+			}
+			for _, line := range renderedLogRecords(rec) {
+				if strings.Contains(line, apiKey) {
+					t.Errorf("log record leaks the API key: %q", line)
+				}
+			}
+		})
+	}
+}
+
+// renderedLogRecords flattens each captured slog record (message + top-level
+// attrs) into one string, so a test can assert a secret never reached ANY
+// part of a log line - the error text rides the "error" attr, which
+// Recorder.Contains (messages only) would miss.
+func renderedLogRecords(rec *capture.Recorder) []string {
+	var out []string
+	for _, r := range rec.Records() {
+		var b strings.Builder
+		b.WriteString(r.Message)
+		r.Attrs(func(a slog.Attr) bool {
+			b.WriteString(" ")
+			b.WriteString(a.String())
+			return true
+		})
+		out = append(out, b.String())
+	}
+	return out
 }
 
 // TestFetchAndParseRateLimitCarriesRetryAfterHint pins the status path of the

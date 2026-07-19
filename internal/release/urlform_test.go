@@ -76,6 +76,7 @@ func TestClassifyRawURLSemanticFacts(t *testing.T) {
 		{name: "userinfo spoof authority sets the flag", raw: "https://trusted@evil.example/x", wantClass: URLFormAbsolute, wantHost: "evil.example", wantScheme: "https", wantUserInfo: true},
 		{name: "out-of-range port passes through unvalidated", raw: "https://user:pass@animebytes.tv:65536/x", wantClass: URLFormAbsolute, wantHost: "animebytes.tv", wantScheme: "https", wantPort: "65536", wantUserInfo: true},
 		{name: "userinfo on a protocol-relative form", raw: "//user@animebytes.tv/x", wantClass: URLFormProtocolRelative, wantHost: "animebytes.tv", wantUserInfo: true},
+		{name: "userinfo recovered from a schemeless authority reparse", raw: "user@animebytes.tv/x", wantClass: URLFormSchemelessHost, wantHost: "animebytes.tv", wantUserInfo: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

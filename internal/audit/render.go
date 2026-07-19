@@ -616,49 +616,79 @@ func sanitizeDisplayText(s string) string {
 // string (row text, group lists, release fields, incomplete-mapping links)
 // passed through sanitizeDisplayText, for the machine-readable outputs. The
 // canonical Report is never mutated: its rows and nested slices are copied
-// before sanitizing. Verdict, Qualifier, and release Warnings are app-defined
+// before sanitizing (each helper below preserves the current nil/empty
+// shape). Verdict, Qualifier, and release Warnings are app-defined
 // vocabularies (CurationWarnings returns canonical constants, never raw
 // upstream tag bytes), not upstream data, and stay as-is.
 func sanitizeOutput(r *Report) *Report {
 	out := *r
-	out.Rows = slices.Clone(r.Rows)
-	if out.Rows == nil {
-		// Preserve the pre-review empty-array JSON shape ("rows": []) for a
-		// nil-rows Report: slices.Clone(nil) is nil, which would render null.
-		out.Rows = []Row{}
+	out.Rows = sanitizedRows(r.Rows)
+	out.Incomplete = sanitizedIncomplete(r.Incomplete)
+	return &out
+}
+
+// sanitizedRows returns a sanitized clone of the report rows: each row's
+// scalar strings pass through sanitizeDisplayText and its nested slices are
+// replaced by their sanitized clones. Nil rows become []Row{} to preserve
+// the pre-review empty-array JSON shape ("rows": []) for a nil-rows Report
+// (slices.Clone(nil) is nil, which would render null).
+func sanitizedRows(rows []Row) []Row {
+	out := slices.Clone(rows)
+	if out == nil {
+		out = []Row{}
 	}
-	for i := range out.Rows {
-		row := &out.Rows[i]
+	for i := range out {
+		row := &out[i]
 		row.Title = sanitizeDisplayText(row.Title)
 		row.Arr = sanitizeDisplayText(row.Arr)
 		row.ArrURL = sanitizeDisplayText(row.ArrURL)
 		row.SeaDexURL = sanitizeDisplayText(row.SeaDexURL)
 		row.MatchSource = sanitizeDisplayText(row.MatchSource)
-		if len(row.CurrentGroups) > 0 {
-			groups := make([]string, len(row.CurrentGroups))
-			for j, g := range row.CurrentGroups {
-				groups[j] = sanitizeDisplayText(g)
-			}
-			row.CurrentGroups = groups
-		}
-		if len(row.Releases) > 0 {
-			rels := slices.Clone(row.Releases)
-			for j := range rels {
-				rels[j].Tracker = sanitizeDisplayText(rels[j].Tracker)
-				rels[j].Group = sanitizeDisplayText(rels[j].Group)
-				rels[j].URL = sanitizeDisplayText(rels[j].URL)
-			}
-			row.Releases = rels
-		}
+		row.CurrentGroups = sanitizedStrings(row.CurrentGroups)
+		row.Releases = sanitizedReleases(row.Releases)
 	}
-	if len(out.Incomplete) > 0 {
-		inc := slices.Clone(r.Incomplete)
-		for i := range inc {
-			inc[i].SeaDexURL = sanitizeDisplayText(inc[i].SeaDexURL)
-		}
-		out.Incomplete = inc
+	return out
+}
+
+// sanitizedStrings returns a sanitized copy of a string slice; a nil or
+// empty slice is returned as-is (never cloned), preserving its JSON shape.
+func sanitizedStrings(ss []string) []string {
+	if len(ss) == 0 {
+		return ss
 	}
-	return &out
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = sanitizeDisplayText(s)
+	}
+	return out
+}
+
+// sanitizedReleases returns a sanitized clone of a row's releases (Tracker,
+// Group, and URL are upstream data); a nil or empty slice is returned as-is.
+func sanitizedReleases(rels []Release) []Release {
+	if len(rels) == 0 {
+		return rels
+	}
+	out := slices.Clone(rels)
+	for i := range out {
+		out[i].Tracker = sanitizeDisplayText(out[i].Tracker)
+		out[i].Group = sanitizeDisplayText(out[i].Group)
+		out[i].URL = sanitizeDisplayText(out[i].URL)
+	}
+	return out
+}
+
+// sanitizedIncomplete returns a sanitized clone of the incomplete-mapping
+// entries (the releases.moe link); a nil or empty slice is returned as-is.
+func sanitizedIncomplete(inc []IncompleteEntry) []IncompleteEntry {
+	if len(inc) == 0 {
+		return inc
+	}
+	out := slices.Clone(inc)
+	for i := range out {
+		out[i].SeaDexURL = sanitizeDisplayText(out[i].SeaDexURL)
+	}
+	return out
 }
 
 // escapeCell makes a string safe inside a Markdown table cell. It uses HTML

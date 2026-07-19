@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -205,6 +206,57 @@ func TestReloadMemoizedMalformedSnapshotClearsDegradation(t *testing.T) {
 	ix.reload(context.Background())
 	if got := rec.Count("indexer feed snapshot stat failed"); got != 2 {
 		t.Errorf("stat-failure warned %d times across two onsets, want 2 (the recovered stat over the memoized file must re-arm the warning); log output:\n%s",
+			got, strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestReloadReassertsFailedStateWhenMalformedSnapshotReappears pins the
+// pre-load state machine across a disappear/reappear of the SAME malformed
+// snapshot inode (an unmount/remount, a rename away and back): startup over
+// malformed bytes answers requests with a Torznab error; the file going
+// missing restores fresh-install semantics (an empty feed is intentional, not
+// an error); but when the identical bad inode returns, the memo-hit arm must
+// re-assert the snapshot-unavailable state - NOT treat the bad snapshot as a
+// valid fresh install and serve false-empty success (searches filtering every
+// Prowlarr result against nil curation maps) indefinitely - and it must do so
+// without rereading the unchanged file (no repeated malformed WARN).
+func TestReloadReassertsFailedStateWhenMalformedSnapshotReappears(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "feed.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("write malformed snapshot: %v", err)
+	}
+	log, rec := capture.New()
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, path)
+
+	rss := url.Values{"t": {"search"}}
+	if _, stats := ix.query(context.Background(), rss, upstreamNyaa); !stats.snapshotUnavailable {
+		t.Fatalf("startup over a malformed snapshot: stats = %+v, want snapshotUnavailable (a Torznab error)", stats)
+	}
+	if got := rec.Count("indexer feed snapshot malformed"); got != 1 {
+		t.Fatalf("malformed snapshot warned %d times, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+	}
+
+	// The bad file disappears (unmounted / renamed away): fresh-install
+	// semantics return, since deleting the bad file is a valid operator fix.
+	aside := filepath.Join(dir, "feed-aside.json")
+	if err := os.Rename(path, aside); err != nil {
+		t.Fatal(err)
+	}
+	if _, stats := ix.query(context.Background(), rss, upstreamNyaa); stats.snapshotUnavailable {
+		t.Fatalf("missing first snapshot: stats = %+v, want fresh-install semantics (no error)", stats)
+	}
+
+	// The SAME malformed inode reappears (remounted / renamed back): the memo
+	// hit must re-assert the snapshot-unavailable state without a reread.
+	if err := os.Rename(aside, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, stats := ix.query(context.Background(), rss, upstreamNyaa); !stats.snapshotUnavailable {
+		t.Errorf("reappeared malformed snapshot: stats = %+v, want snapshotUnavailable (a Torznab error), not false-empty success", stats)
+	}
+	if got := rec.Count("indexer feed snapshot malformed"); got != 1 {
+		t.Errorf("malformed snapshot warned %d times, want still 1 (the memo must hold, no reread); log output:\n%s",
 			got, strings.Join(rec.Messages(), "\n"))
 	}
 }

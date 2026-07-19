@@ -151,7 +151,8 @@ func TestClassifyKind(t *testing.T) {
 	}
 }
 
-// TestClassifyCodec covers detectCodec/canonicalCodec: x265/HEVC and x264/AVC
+// TestClassifyCodec covers codec detection (evidence.textCodec/canonicalCodec):
+// x265/HEVC and x264/AVC
 // tokens normalize to the canonical family, the authoritative MediaInfo codec
 // wins over a conflicting name token, a name marker wins over a conflicting
 // entry-wide notes marker (matching the Kind reason's precedence), the notes

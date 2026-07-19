@@ -79,3 +79,20 @@ func TestTrackerKeyFromURLRejectsForgedTrackerHosts(t *testing.T) {
 		})
 	}
 }
+
+// TestAnimeBytesIDRejectsDuplicateTorrentIDParams pins the fail-closed rule
+// on a duplicated torrentid query parameter (HTTP parameter pollution): Go's
+// url.Values.Get would silently pick the first value while another consumer
+// may pick a different one, so an ambiguous query-form URL must yield no key
+// in either ordering, while the unambiguous single-value form still matches.
+func TestAnimeBytesIDRejectsDuplicateTorrentIDParams(t *testing.T) {
+	if got := animeBytesID("/torrents.php?id=1&torrentid=1167293&torrentid=999"); got != "" {
+		t.Errorf("duplicate torrentid (curated first) = %q, want empty (ambiguous)", got)
+	}
+	if got := animeBytesID("/torrents.php?id=1&torrentid=999&torrentid=1167293"); got != "" {
+		t.Errorf("duplicate torrentid (curated last) = %q, want empty (ambiguous)", got)
+	}
+	if got := animeBytesID("/torrents.php?id=1&torrentid=1167293"); got != "1167293" {
+		t.Errorf("single torrentid = %q, want 1167293", got)
+	}
+}

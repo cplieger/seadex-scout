@@ -32,9 +32,12 @@ func EntryURL(baseURL string, aniListID int) string {
 // compromised SeaDex response cannot surface an attacker-controlled
 // destination under a trusted tracker label; a relative path (as private
 // trackers return) is prefixed with the tracker's base URL from that table,
-// so a finding or report never emits a broken bare path. An unknown tracker's
-// URL drops to "" like every other unusable form (no canonical host exists to
-// vouch for it or make a relative path followable).
+// so a finding or report never emits a broken bare path. A schemeless value
+// whose recovered host is itself a canonical tracker host is a mislabeled
+// absolute URL, not a path: it is published on that recovered host with an
+// https scheme, never base-prefixed under the (untrusted) label's host. An
+// unknown tracker's URL drops to "" like every other unusable form (no
+// canonical host exists to vouch for it or make a relative path followable).
 //
 // The structural reading of the raw string - which of the browser-vs-net/url
 // parse-quirk forms it is - lives in the shared release.ClassifyRawURL; this
@@ -67,10 +70,26 @@ func (t *Torrent) UsableURL() string {
 			return ""
 		}
 		return f.Trimmed
-	case release.URLFormRelative, release.URLFormSchemelessHost:
-		// In an href context both forms resolve as tracker-relative paths
-		// (the schemeless-host reading applies to address bars, not links),
-		// so they are published base-prefixed - subject to the colon rule.
+	case release.URLFormRelative:
+		// In an href context a rooted path resolves tracker-relative, so it
+		// is published base-prefixed - subject to the colon rule.
+		return usableRelative(f.Trimmed, tr.BaseURL)
+	case release.URLFormSchemelessHost:
+		// A schemeless value whose recovered authority IS a canonical
+		// tracker host ("animebytes.tv/torrents.php?...") is a mislabeled
+		// absolute URL, not a path: base-prefixing it under the LABELED
+		// tracker would publish a wrong-tracker link
+		// ("https://nyaa.si/animebytes.tv/...") that cannot identify the
+		// intended torrent, so it is published on its own recovered host
+		// with an https scheme (every canonical tracker is https). The
+		// userinfo gate mirrors usableAbsolute: a credential-bearing
+		// authority is a spoofing vector and never publishes canonicalized.
+		// Any other schemeless value keeps the href reading - a
+		// tracker-relative path under the labeled tracker's base - exactly
+		// like the relative form above.
+		if _, hostOK := release.LookupTrackerByHost(f.Host); hostOK && !f.HasUserInfo {
+			return "https://" + f.Trimmed
+		}
 		return usableRelative(f.Trimmed, tr.BaseURL)
 	default:
 		// Empty, malformed, hidden-host, and protocol-relative forms drop.

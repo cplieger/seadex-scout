@@ -27,6 +27,7 @@ func FuzzDecodePage(f *testing.F) {
 		`null`,
 		`{}`,
 		`{"unknown":{"deep":[{"nested":true}]},"items":[]}`,
+		`{"unknown":1e1000,"items":[{}]}`,
 		`{"items":[{"alID":1}],"items":[{"alID":2}]}`,
 		`{"items":[{"alID":1,"notes":"x"}],"items":[{"alID":2}]}`,
 		`{"items":[{"alID":1,"notes":"x"},{"alID":3,"notes":"y"}],"items":[{"alID":2}]}`,

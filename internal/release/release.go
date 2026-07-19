@@ -117,7 +117,7 @@ var (
 	// reEncode matches a generic encode marker ("encode", "encoded", "BDRip")
 	// with reRemux's delimiter-bounded token style, so a bare substring inside
 	// a longer word ("reencoded", "encoder") is never a marker. It is the
-	// weakest encoder-marker rung in kindFromText — checked after the remux
+	// weakest encoder-marker rung in kindFromEvidence — checked after the remux
 	// token and the codec/CRF/bitrate markers, so it only ever moves a release
 	// from unknown to encode, never off remux. Live SeaDex data motivates it:
 	// many isBest encodes state "encode"/"BDRip" in their name or notes
@@ -165,30 +165,93 @@ func normalizeEvidence(text string) string {
 	return strings.ToLower(strings.ReplaceAll(text, "_", " "))
 }
 
+// evidence accumulates the classification signals of one text source (the
+// release names, or the entry notes) one observed piece at a time, so a large
+// evidence set — up to thousands of upstream-controlled file names per SeaDex
+// torrent — is never materialized as a single joined and normalized string
+// (which cost several simultaneous evidence-sized allocations and could OOM a
+// memory-limited container on a malformed page). Each piece is normalized and
+// matched independently, bounding peak allocation by the largest single piece,
+// and only the marker flags, the codec-family flags, and the first observed
+// resolution are retained. The original whole-text precedence is preserved by
+// resolving over the accumulated flags: first resolution in observation order,
+// the x265 family over x264 (textCodec), and remux over the encoder-marker
+// rungs (kindFromEvidence).
+type evidence struct {
+	resolution string
+	x265       bool
+	x264       bool
+	remux      bool
+	crf        bool
+	bitrate    bool
+	encode     bool
+}
+
+// observe folds one piece of evidence text (a single release/file name, or the
+// entry notes) into the accumulator. Already-set flags short-circuit their
+// matchers; the per-piece normalization still runs, which is the accumulator's
+// allocation bound.
+func (e *evidence) observe(text string) {
+	t := normalizeEvidence(text)
+	if e.resolution == "" {
+		e.resolution = detectResolution(t)
+	}
+	e.x265 = e.x265 || containsAny(t, x265TextTokens) || reDottedX265.MatchString(t)
+	e.x264 = e.x264 || containsAny(t, x264TextTokens) || reDottedX264.MatchString(t)
+	e.remux = e.remux || reRemux.MatchString(t)
+	e.crf = e.crf || reCRF.MatchString(t)
+	e.bitrate = e.bitrate || reBitrate.MatchString(t)
+	e.encode = e.encode || reEncode.MatchString(t)
+}
+
+// textCodec resolves the accumulated codec-family markers to the canonical
+// codec, x265 family first (the family precedence when evidence carries
+// markers from both), or "" when neither family was observed.
+func (e *evidence) textCodec() string {
+	switch {
+	case e.x265:
+		return codecX265
+	case e.x264:
+		return codecX264
+	default:
+		return ""
+	}
+}
+
 // Classify converts raw release material into a normalized Release. It never
 // errors: an unclassifiable release is KindUnknown with a recorded reason.
 // DualAudio passes through from the structured input flag untouched — text is
 // never evidence for it (see the Input and package docs).
 func Classify(in *Input) Release {
-	nameText := normalizeEvidence(strings.Join(in.Names, " "))
-	notesText := normalizeEvidence(in.Notes)
-	text := nameText + " " + notesText
+	var nameEv, notesEv evidence
+	for _, name := range in.Names {
+		nameEv.observe(name)
+	}
+	notesEv.observe(in.Notes)
 	// The Codec field uses the same name-first precedence classifyKind applies:
 	// per-file evidence (names + MediaInfo) wins, the entry-wide notes only
 	// fill the gap, so the logged codec cannot contradict the Kind reason when
-	// the notes mention an alternative encode.
-	nameCodec := detectCodec(nameText, in.VideoCodec)
-	notesCodec := detectCodec(notesText, "")
+	// the notes mention an alternative encode. The MediaInfo codec is
+	// authoritative for the name side when it maps to a known family.
+	nameCodec := canonicalCodec(strings.ToLower(strings.TrimSpace(in.VideoCodec)))
+	if nameCodec == "" {
+		nameCodec = nameEv.textCodec()
+	}
+	notesCodec := notesEv.textCodec()
 	codec := nameCodec
 	if codec == "" {
 		codec = notesCodec
 	}
-	kind, reason := classifyKind(nameText, notesText, nameCodec, notesCodec)
+	kind, reason := classifyKind(&nameEv, &notesEv, nameCodec, notesCodec)
+	resolution := nameEv.resolution
+	if resolution == "" {
+		resolution = notesEv.resolution
+	}
 
 	return Release{
 		Group:       groupOrNoGroup(in.Group),
 		Tracker:     strings.TrimSpace(in.Tracker),
-		Resolution:  detectResolution(text),
+		Resolution:  resolution,
 		Codec:       codec,
 		Kind:        kind,
 		TrackerType: classifyTracker(in.Tracker),
@@ -216,47 +279,33 @@ func detectResolution(text string) string {
 // remux note cannot override a contradicting per-file encode marker. The remux
 // decision stays name-and-notes based (never size/bitrate inference), so no
 // operator-supplied group list is needed.
-func classifyKind(nameText, notesText, nameCodec, notesCodec string) (kind Kind, reason string) {
-	if kind, reason := kindFromText(nameText, nameCodec); kind != KindUnknown {
+func classifyKind(nameEv, notesEv *evidence, nameCodec, notesCodec string) (kind Kind, reason string) {
+	if kind, reason := kindFromEvidence(nameEv, nameCodec); kind != KindUnknown {
 		return kind, reason
 	}
-	return kindFromText(notesText, notesCodec)
+	return kindFromEvidence(notesEv, notesCodec)
 }
 
-// kindFromText classifies one text source (names or notes) in isolation: a
-// delimiter-bounded remux token (reRemux) wins, then an encoder marker (codec,
-// CRF tag, bitrate, or a generic encode token — reEncode, the weakest rung),
-// else unknown. It returns the kind and a short reason for observability.
-func kindFromText(text, codec string) (kind Kind, reason string) {
-	if reRemux.MatchString(text) {
+// kindFromEvidence classifies one accumulated evidence source (names or notes)
+// in isolation: a delimiter-bounded remux token (reRemux) wins, then an
+// encoder marker (codec, CRF tag, bitrate, or a generic encode token —
+// reEncode, the weakest rung), else unknown. It returns the kind and a short
+// reason for observability.
+func kindFromEvidence(e *evidence, codec string) (kind Kind, reason string) {
+	if e.remux {
 		return KindRemux, "name/notes marker: remux"
 	}
 	switch {
 	case codec != "":
 		return KindEncode, "encoder marker: " + codec
-	case reCRF.MatchString(text):
+	case e.crf:
 		return KindEncode, "encoder marker: crf"
-	case reBitrate.MatchString(text):
+	case e.bitrate:
 		return KindEncode, "encoder marker: bitrate"
-	case reEncode.MatchString(text):
+	case e.encode:
 		return KindEncode, "encoder marker: encode"
 	}
 	return KindUnknown, "no remux or encode marker"
-}
-
-// detectCodec returns the canonical codec ("x265"/"x264") from the MediaInfo
-// video codec (preferred, authoritative) or the release text, else "".
-func detectCodec(text, videoCodec string) string {
-	if c := canonicalCodec(strings.ToLower(strings.TrimSpace(videoCodec))); c != "" {
-		return c
-	}
-	if containsAny(text, x265TextTokens) || reDottedX265.MatchString(text) {
-		return codecX265
-	}
-	if containsAny(text, x264TextTokens) || reDottedX264.MatchString(text) {
-		return codecX264
-	}
-	return ""
 }
 
 // canonicalCodec maps a MediaInfo codec token to the canonical codec family.

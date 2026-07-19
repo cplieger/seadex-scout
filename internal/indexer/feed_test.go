@@ -231,9 +231,9 @@ func TestSynthesizeTitle(t *testing.T) {
 	}
 	tests := []struct {
 		name string
+		want string
 		t    seadex.Torrent
 		meta EntryInfo
-		want string
 	}{
 		{
 			name: "season pack labels the Fribb season with flags",

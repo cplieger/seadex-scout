@@ -225,18 +225,25 @@ func TestAuditRoutesWholeSeriesAndSkips(t *testing.T) {
 }
 
 // TestAuditMislabeledAnimeBytesURLHiddenWhenOff proves the URL-aware AB guard:
-// a torrent whose untrusted tracker label says "Nyaa" but whose URL points at
-// animebytes.tv - absolute, schemeless, or host:port - must be dropped from
-// the report's releases while the AnimeBytes toggle is off, exactly like a
-// correctly labeled AB torrent (the guard reads the RAW upstream URL).
+// a torrent whose untrusted tracker label says "Nyaa" but whose URL carries
+// DEFINITIVE animebytes.tv host evidence - absolute or schemeless - must be
+// dropped from the report's releases while the AnimeBytes toggle is off,
+// exactly like a correctly labeled AB torrent (the guard reads the RAW
+// upstream URL). The host:port form hides its host evidence (net/url parses
+// the host as an opaque scheme), so it is NOT definitive: its row stays
+// LISTED - link dropped, annotated unobtainable - rather than erased, while
+// the AB link itself still never surfaces.
 func TestAuditMislabeledAnimeBytesURLHiddenWhenOff(t *testing.T) {
-	for _, sneakyURL := range []string{
-		"https://animebytes.tv/torrents.php?id=9&torrentid=10",
-		"animebytes.tv/torrents.php?id=9&torrentid=10",
-		"animebytes.tv:443/torrents.php?id=9&torrentid=10",
+	for _, tc := range []struct {
+		sneakyURL  string
+		definitive bool
+	}{
+		{"https://animebytes.tv/torrents.php?id=9&torrentid=10", true},
+		{"animebytes.tv/torrents.php?id=9&torrentid=10", true},
+		{"animebytes.tv:443/torrents.php?id=9&torrentid=10", false},
 	} {
 		entry := seadex.Entry{AniListID: 11, Torrents: []seadex.Torrent{
-			{Tracker: "Nyaa", URL: sneakyURL, ReleaseGroup: "Sneaky", IsBest: true},
+			{Tracker: "Nyaa", URL: tc.sneakyURL, ReleaseGroup: "Sneaky", IsBest: true},
 			{Tracker: "Nyaa", URL: "https://nyaa.si/view/11", ReleaseGroup: "Honest", IsBest: true},
 		}}
 		snap := &library.Snapshot{Items: []library.Item{{
@@ -256,10 +263,10 @@ func TestAuditMislabeledAnimeBytesURLHiddenWhenOff(t *testing.T) {
 			animeBytes bool
 			wantSneaky bool
 		}{
-			{"AB off omits the mislabeled release", false, false},
+			{"AB off", false, !tc.definitive},
 			{"AB on keeps it", true, true},
 		} {
-			t.Run(sneakyURL+" "+tt.name, func(t *testing.T) {
+			t.Run(tc.sneakyURL+" "+tt.name, func(t *testing.T) {
 				a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe", AnimeBytes: tt.animeBytes})
 				rep := a.Audit(matches, snap, mapping.NewIndex(nil), nil)
 				var row *Row
@@ -271,17 +278,90 @@ func TestAuditMislabeledAnimeBytesURLHiddenWhenOff(t *testing.T) {
 				if row == nil {
 					t.Fatal("expected a row for the matched entry")
 				}
-				gotSneaky := false
-				for _, r := range row.Releases {
-					if r.Group == "Sneaky" || strings.Contains(r.URL, "animebytes.tv") {
-						gotSneaky = true
+				var sneaky *Release
+				for i := range row.Releases {
+					if row.Releases[i].Group == "Sneaky" {
+						sneaky = &row.Releases[i]
 					}
 				}
-				if gotSneaky != tt.wantSneaky {
-					t.Errorf("mislabeled AB-URL release present = %v, want %v (releases: %+v)", gotSneaky, tt.wantSneaky, row.Releases)
+				if got := sneaky != nil; got != tt.wantSneaky {
+					t.Errorf("mislabeled AB-URL release present = %v, want %v (releases: %+v)", got, tt.wantSneaky, row.Releases)
+				}
+				if !tt.animeBytes {
+					// Whatever the row visibility, the AB link must never
+					// surface while the toggle is off.
+					for _, r := range row.Releases {
+						if strings.Contains(r.URL, "animebytes.tv") {
+							t.Errorf("AB link surfaced with the toggle off: %q", r.URL)
+						}
+					}
+					if sneaky != nil {
+						if !sneaky.Unobtainable {
+							t.Error("ambiguous-evidence release listed but not marked unobtainable")
+						}
+						if sneaky.URL != "" {
+							t.Errorf("ambiguous-evidence release URL = %q, want empty", sneaky.URL)
+						}
+					}
 				}
 			})
 		}
+	}
+}
+
+// TestAuditMalformedPublicURLListedUnobtainable pins the report contract for
+// a public-labeled release with MALFORMED URL evidence: the fail-closed
+// verdict gate (classify.ABVisible) cannot prove it is AnimeBytes, so with
+// the toggle off the row must remain LISTED with an empty URL and
+// Unobtainable=true - the operator sees why it did not affect the verdict -
+// while a definite AB release in the same entry stays hidden. Regression
+// test: classifyReleases previously used ABVisible as the row-visibility
+// gate, silently erasing such rows.
+func TestAuditMalformedPublicURLListedUnobtainable(t *testing.T) {
+	entry := seadex.Entry{AniListID: 12, Torrents: []seadex.Torrent{
+		{Tracker: "Nyaa", URL: "https://nyaa.si/\x7f", ReleaseGroup: "Mangled", IsBest: true},
+		{Tracker: "AB", URL: "/torrents.php?id=9&torrentid=10", ReleaseGroup: "Private", IsBest: true},
+	}}
+	snap := &library.Snapshot{Items: []library.Item{{
+		Arr: library.ArrSonarr, ArrID: 12, Title: "Mangled Link", TvdbID: 1200,
+		SeasonGroups: map[int][]string{1: {"other"}}, Groups: []string{"other"}, HasFile: true,
+	}}}
+	matches := []match.Match{{
+		Item:   &snap.Items[0],
+		Arr:    library.ArrSonarr,
+		Source: match.SourceID,
+		Entry:  entry,
+		Record: mapping.Record{Type: "TV", TvdbID: 1200, SeasonTvdb: 1},
+	}}
+
+	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"})
+	rep := a.Audit(matches, snap, mapping.NewIndex(nil), nil)
+	var row *Row
+	for i := range rep.Rows {
+		if rep.Rows[i].AniListID == 12 {
+			row = &rep.Rows[i]
+		}
+	}
+	if row == nil {
+		t.Fatal("expected a row for the matched entry")
+	}
+	var mangled *Release
+	for i := range row.Releases {
+		switch row.Releases[i].Group {
+		case "Mangled":
+			mangled = &row.Releases[i]
+		case "Private":
+			t.Errorf("definite AB release listed with the toggle off: %+v", row.Releases[i])
+		}
+	}
+	if mangled == nil {
+		t.Fatalf("malformed-URL public release missing; want listed and unobtainable (releases: %+v)", row.Releases)
+	}
+	if !mangled.Unobtainable {
+		t.Error("malformed-URL public release not marked unobtainable")
+	}
+	if mangled.URL != "" {
+		t.Errorf("malformed-URL public release URL = %q, want empty", mangled.URL)
 	}
 }
 

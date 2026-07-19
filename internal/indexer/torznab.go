@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -214,6 +215,93 @@ type channelXML struct {
 	Items []itemXML `xml:"item"`
 }
 
+// Decode limits on an untrusted upstream Torznab response. The transport cap
+// (prowlarr.go's upstreamMaxBytes) bounds wire bytes only: a compromised
+// Prowlarr could pack millions of tiny item/attr elements into that byte
+// budget, or one multi-megabyte field, amplifying allocations in the decoded
+// object graph and again in renderFeed (CWE-400). These constants bound the
+// decoded representation independently; any overflow fails the whole parse
+// closed with a torznabLimitError, which fetchAndParse wraps as a transient
+// malformed-body failure inside the existing bounded retry budget.
+const (
+	// maxUpstreamItems caps item elements per response. It reuses the render
+	// cap (query.go's maxItems): the served feed never renders more than
+	// maxItems items, so accepting more from one upstream has no value. Real
+	// responses are far smaller (a live AB series search returns ~145).
+	maxUpstreamItems = maxItems
+	// maxUpstreamAttrs caps torznab:attr elements per item. Prowlarr emits
+	// roughly a dozen (size, seeders, categories, flags); 64 is generous.
+	maxUpstreamAttrs = 64
+	// maxUpstreamFieldBytes caps each decoded text field (title, guid,
+	// comments, link, pubDate, enclosure URL, attr name/value). Real titles
+	// and Prowlarr proxy URLs are well under 1 KiB.
+	maxUpstreamFieldBytes = 4096
+	// maxUpstreamTextBytes caps the cumulative decoded text across all items
+	// in one response, bounding total retained memory even when every field
+	// stays under its individual cap.
+	maxUpstreamTextBytes = 4 << 20
+)
+
+// torznabLimitError is parseTorznab's fail-closed error for a syntactically
+// valid response that exceeds the decode limits above. fetchAndParse treats
+// it like any other 2xx decode failure: transient with the malformedBody
+// marker, so it retries within the bounded budget and, after exhaustion, the
+// harvest scopes the failure to the one result set rather than the upstream.
+type torznabLimitError struct {
+	limit string
+}
+
+func (e *torznabLimitError) Error() string {
+	return "torznab response exceeds decode limit: " + e.limit
+}
+
+// UnmarshalXML decodes <channel> one <item> at a time so the item-count cap
+// rejects an oversized response before its object graph is built, instead of
+// after encoding/xml has already allocated an unbounded Items slice. Each
+// decoded item is validated (attr count, field lengths, cumulative text
+// budget) before it is retained. Non-item children are skipped. The decoder
+// this runs under is xml.Unmarshal's, which keeps Strict enabled.
+func (c *channelXML) UnmarshalXML(d *xml.Decoder, _ xml.StartElement) error {
+	textBudget := 0
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			return err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if err := c.decodeChild(d, t, &textBudget); err != nil {
+				return err
+			}
+		case xml.EndElement:
+			// The first end element at this nesting level is </channel>:
+			// DecodeElement and Skip consume every nested element whole.
+			return nil
+		}
+	}
+}
+
+// decodeChild skips a non-item child and decodes+validates one <item>,
+// appending it under the item cap. A nil return on a skipped non-item child
+// lets the caller's token loop continue exactly as before.
+func (c *channelXML) decodeChild(d *xml.Decoder, t xml.StartElement, textBudget *int) error {
+	if t.Name.Local != "item" {
+		return d.Skip()
+	}
+	if len(c.Items) >= maxUpstreamItems {
+		return &torznabLimitError{limit: fmt.Sprintf("more than %d items", maxUpstreamItems)}
+	}
+	var it itemXML
+	if err := d.DecodeElement(&it, &t); err != nil {
+		return err
+	}
+	if err := it.checkLimits(textBudget); err != nil {
+		return err
+	}
+	c.Items = append(c.Items, it)
+	return nil
+}
+
 type itemXML struct {
 	Title     string       `xml:"title"`
 	GUID      string       `xml:"guid"`
@@ -223,6 +311,28 @@ type itemXML struct {
 	Enclosure enclosureXML `xml:"enclosure"`
 	Attrs     []attrXML    `xml:"attr"`
 	Size      int64        `xml:"size"`
+}
+
+// checkLimits validates one decoded item against the per-field, per-item,
+// and cumulative decode limits, accumulating its text into budget.
+func (x *itemXML) checkLimits(budget *int) error {
+	if len(x.Attrs) > maxUpstreamAttrs {
+		return &torznabLimitError{limit: fmt.Sprintf("more than %d attrs on one item", maxUpstreamAttrs)}
+	}
+	fields := []string{x.Title, x.GUID, x.Comments, x.Link, x.PubDate, x.Enclosure.URL}
+	for _, a := range x.Attrs {
+		fields = append(fields, a.Name, a.Value)
+	}
+	for _, f := range fields {
+		if len(f) > maxUpstreamFieldBytes {
+			return &torznabLimitError{limit: fmt.Sprintf("field longer than %d bytes", maxUpstreamFieldBytes)}
+		}
+		*budget += len(f)
+	}
+	if *budget > maxUpstreamTextBytes {
+		return &torznabLimitError{limit: fmt.Sprintf("cumulative decoded text over %d bytes", maxUpstreamTextBytes)}
+	}
+	return nil
 }
 
 type enclosureXML struct {
@@ -288,6 +398,12 @@ func sanitizeUpstreamText(s string) string { return capLogText(s, 200) }
 func parseTorznab(body []byte) ([]item, error) {
 	var feed feedXML
 	if err := xml.Unmarshal(body, &feed); err != nil {
+		// A decode-limit overflow is already a definitive verdict on a
+		// well-formed feed document; skip the <error>-document re-parse of
+		// the (up to 16 MiB) body it could never match.
+		if limitErr, ok := errors.AsType[*torznabLimitError](err); ok {
+			return nil, limitErr
+		}
 		var e errorXML
 		if xml.Unmarshal(body, &e) == nil {
 			return nil, &upstreamDocError{

@@ -25,6 +25,8 @@ func FuzzParseMedia(f *testing.F) {
 	f.Add([]byte(`{"data":{"Media":{"format":"TV","title":{"romaji":"A"}}},"errors":[{"message":"partial"}]}`))
 	f.Add([]byte(`{"data":{"Media":{"title":{"romaji":" ","english":"\t"}}}}`))
 	f.Add([]byte(`{"data":{"Media":{"format":"TV","title":{"romaji":"!!!"}}}}`))
+	f.Add([]byte("{\"data\":{\"Media\":{\"format\":\"TV\",\"title\":{\"romaji\":\"A\xff\"}}}}"))
+	f.Add([]byte("\xff\xfe"))
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		m, err := parseMedia(raw)
 		if err != nil {
@@ -51,6 +53,8 @@ func FuzzParseMediaPage(f *testing.F) {
 	f.Add([]byte(`{"data":{"Page":{"media":[{"id":1,"title":{"romaji":"first"}},{"id":1,"title":{"romaji":"second"}},{"id":2,"title":{"romaji":"sibling"}}]}}}`))
 	f.Add([]byte(`{"data":{"Page":{"media":[{"id":1,"title":{"romaji":"` + strings.Repeat("a", maxTitleBytes+1) + `"}},{"id":2,"title":{"romaji":"valid"}}]}}}`))
 	f.Add([]byte(`{"data":{"Page":{"media":[{"id":1,"title":{"romaji":" "}}]}}}`))
+	f.Add([]byte("{\"data\":{\"Page\":{\"media\":[{\"id\":1,\"title\":{\"romaji\":\"A\xff\"}}]}}}"))
+	f.Add([]byte("\xff\xfe"))
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		out, err := parseMediaPage(raw)
 		if err != nil {

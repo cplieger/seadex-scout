@@ -183,11 +183,15 @@ func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *map
 		// A cancellation is not a fault (same contract as Scout.save).
 		m.log.Debug("anilist batch prefetch cancelled",
 			"requested", len(ids), "fetched", len(fetched))
-	case len(fetched) == 0:
-		// TOTAL failure: FetchMany continues past record-local errors and
-		// aborts only on a request/envelope failure, so an empty result plus
-		// an error means no completed chunk produced media - one poisoned
-		// record can no longer hide later chunks or read as an outage here.
+	case fetched == nil:
+		// TOTAL failure: FetchMany's completion contract returns a nil map
+		// only when NO chunk completed (a request/envelope failure before
+		// any chunk finished). A non-nil-but-EMPTY result is NOT an outage —
+		// at least one chunk completed and simply produced no media (every
+		// id definitively not found, or every record malformed, which is
+		// record-local) — so it falls to the default branch and each absent
+		// id stays uncached for the documented per-id Fetch fallback instead
+		// of being failed fast.
 		// Degrade fast: fail the pending ids immediately instead of
 		// regressing to one doomed per-id request each.
 		m.log.Warn("anilist batch prefetch failed; skipping per-id fallback for pending ids",

@@ -132,7 +132,17 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 		// and the enclosing Do fails fast; a generic/server-side or
 		// unparseable code stays transient within the bounded budget.
 		if docErr, ok := errors.AsType[*upstreamDocError](err); ok {
-			if terminalTorznabCode(docErr.code) {
+			// The document's code/description are attacker-influenced text
+			// and the request carried the Prowlarr API key: a compromised
+			// upstream could reflect the key into the error message, which
+			// httpx.Do's retry logger and the harvest WARN would then expand
+			// into the log stream (CWE-532). Classify on the ORIGINAL code
+			// first, then redact any reflection of the key from both fields
+			// before the error escapes this function.
+			terminal := terminalTorznabCode(docErr.code)
+			docErr.code = httpx.RedactSecretString(docErr.code, u.apiKey)
+			docErr.description = httpx.RedactSecretString(docErr.description, u.apiKey)
+			if terminal {
 				return nil, docErr
 			}
 			return nil, &transientUpstreamError{err: err}

@@ -252,6 +252,34 @@ func TestStoreLoadDuplicateVersionKeyQuarantines(t *testing.T) {
 	}
 }
 
+// TestStoreLoadEarlierInvalidDuplicateVersionQuarantines pins the converse
+// duplicate ordering: when the INVALID duplicate comes first
+// ({"version":"bad","Version":99}), the effective (last, case-insensitive)
+// value is a valid 99, so a one-field whole-document unmarshal would classify
+// the corrupt payload as newer-schema state - leaving the poisoned bytes at
+// the live path and blocking every subsequent Save. newerSchemaVersion must
+// validate every occurrence of the discriminator, classify the file as
+// corrupt, quarantine it, and leave Save unblocked.
+func TestStoreLoadEarlierInvalidDuplicateVersionQuarantines(t *testing.T) {
+	const body = `{"version":"bad","Version":99,"findings":{}}`
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	store := NewStore(path, testLogger())
+	_, err := store.Load(context.Background())
+	if err == nil {
+		t.Fatal("Load returned nil error, want duplicate-version decode error")
+	}
+	if strings.Contains(err.Error(), "newer than this binary supports") {
+		t.Errorf("error = %q, want plain decode error, not the newer-schema classification", err.Error())
+	}
+	assertQuarantined(t, path, body)
+	if saveErr := store.Save(context.Background(), &State{}); saveErr != nil {
+		t.Errorf("Save after quarantining malformed duplicate version remained blocked: %v", saveErr)
+	}
+}
+
 // TestStoreLoadNegativeVersionQuarantines pins the version-domain check: the
 // documented legacy envelope's version is absent or zero and Save only stamps
 // SchemaVersion, so a negative decoded version is corruption - quarantined,

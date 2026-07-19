@@ -32,6 +32,19 @@ func Obtainable(rel *release.Release, t *seadex.Torrent, animeBytes bool) bool {
 	return filter.Obtainable(rel, t.URL, t.UsableURL(), animeBytes)
 }
 
+// DefinitelyAB reports whether a SeaDex torrent is DEFINITIVELY AnimeBytes:
+// by its tracker label, or by successfully extracted host evidence in its
+// raw upstream URL. Like ABVisible it owns the raw-URL invariant (t.URL
+// feeds the host cross-check, never t.UsableURL()), but unlike ABVisible it
+// fails OPEN on malformed or ambiguous evidence. The audit report uses it
+// for row VISIBILITY — a definite AB row hides with the toggle off, while an
+// ambiguous public-labeled row stays listed, annotated unobtainable — where
+// ABVisible stays the fail-closed verdict-eligibility gate shared with
+// compare.
+func DefinitelyAB(t *seadex.Torrent) bool {
+	return filter.DefinitelyAB(t.Tracker, t.URL)
+}
+
 // Torrent classifies one SeaDex torrent, in the context of its entry (for the
 // shared notes), into a normalized release.Release. This is the one place the
 // release.Input for a SeaDex torrent is built, so compare and audit classify

@@ -1105,6 +1105,39 @@ func TestLoader_refreshCache_freshUnusableCacheStillFetches(t *testing.T) {
 	}
 }
 
+// TestLoader_refreshCache_zeroIDIdentifiersDoNotMakeCacheUsable pins the
+// population deduplicateRecords hands to cacheUsable: a zero-AniList-ID record
+// is dropped by buildIndex, so its arr identifiers must not count toward the
+// coverage floor. A cache whose only keyed record carries no arr id, padded by
+// a zero-key record with a TVDB id, is NOT usable — the fresh-cache fast path
+// must fall through to the fetch instead of serving an effective index whose
+// only keyed record cannot resolve.
+func TestLoader_refreshCache_zeroIDIdentifiersDoNotMakeCacheUsable(t *testing.T) {
+	records := []Record{
+		{AniListID: 1, Type: "TV"},
+		{AniListID: 0, Type: "TV", TvdbID: 100},
+	}
+	if cacheUsable(records) {
+		t.Fatal("cacheUsable = true, want false: the zero-ID record's TVDB id must not count for the dropped record")
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
+	}))
+	defer ts.Close()
+	prev := &Cache{
+		FetchedAt: time.Now(), // inside the refresh window: freshness alone would reuse it
+		Records:   records,
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	if err != nil {
+		t.Fatalf("refreshCache with a fresh-but-unusable cache error: %v", err)
+	}
+	if len(next.Records) != 1 || next.Records[0].AniListID != 42 {
+		t.Fatalf("fresh-but-unusable cache was reused as fresh: records = %+v, want fetched record id 42", next.Records)
+	}
+}
+
 // TestLoader_refreshCache_boundsPersistedValidators pins the maxValidatorBytes
 // guard: an at-limit validator is retained while an over-limit one is dropped,
 // so an upstream-controlled header cannot inflate the persisted state.json.
@@ -1135,6 +1168,83 @@ func TestLoader_refreshCache_boundsPersistedValidators(t *testing.T) {
 				t.Errorf("ETag length %d persisted as length %d, want length %d", len(tc.validator), len(next.ETag), len(tc.want))
 			}
 		})
+	}
+}
+
+// TestLoader_refreshCache_sanitizesPersistedValidators pins the load-side
+// half of the validator guard: a poisoned validator already persisted in the
+// previous Cache (it predates the accept-200 sanitization, or the state file
+// was tampered with) must be dropped BEFORE the conditional request is built
+// - never sent as a request header net/http would reject at write time - and
+// the returned Cache must no longer carry it, so the poison self-heals
+// instead of failing every revalidation forever.
+func TestLoader_refreshCache_sanitizesPersistedValidators(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("If-None-Match"); got != "" {
+			t.Errorf("If-None-Match = %q, want the poisoned persisted ETag dropped before the request", got)
+		}
+		if got := r.Header.Get("If-Modified-Since"); got != "" {
+			t.Errorf("If-Modified-Since = %q, want empty (no Last-Modified was cached)", got)
+		}
+		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
+	}))
+	defer ts.Close()
+
+	prev := &Cache{
+		FetchedAt: time.Now().Add(-2 * time.Hour),
+		ETag:      "\"et\x01ag\"",
+		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+	}
+	loader := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := loader.refreshCache(t.Context(), prev)
+	if err != nil {
+		t.Fatalf("refreshCache error: %v", err)
+	}
+	if next.ETag != "" {
+		t.Errorf("returned ETag = %q, want the poisoned persisted validator gone", next.ETag)
+	}
+	if len(next.Records) != 1 || next.Records[0].AniListID != 42 {
+		t.Errorf("records = %+v, want the refreshed record id 42", next.Records)
+	}
+}
+
+// TestLoader_refreshCache_304KeepsValidDropsPoisonedValidator pins the mixed
+// case on the 304 path: with one valid and one poisoned persisted validator,
+// the valid one still rides the conditional request (a 304 stays possible)
+// while the poisoned one is neither sent nor re-persisted - the returned
+// 304 Cache carries only the valid validator.
+func TestLoader_refreshCache_304KeepsValidDropsPoisonedValidator(t *testing.T) {
+	const lastModified = "Wed, 21 Oct 2015 07:28:00 GMT"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("If-None-Match"); got != "" {
+			t.Errorf("If-None-Match = %q, want the poisoned persisted ETag dropped before the request", got)
+		}
+		if got := r.Header.Get("If-Modified-Since"); got != lastModified {
+			t.Errorf("If-Modified-Since = %q, want the valid persisted validator %q", got, lastModified)
+		}
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer ts.Close()
+
+	prev := &Cache{
+		FetchedAt:    time.Now().Add(-2 * time.Hour),
+		ETag:         "\"et\x01ag\"",
+		LastModified: lastModified,
+		Records:      []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+	}
+	loader := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := loader.refreshCache(t.Context(), prev)
+	if err != nil {
+		t.Fatalf("refreshCache error: %v", err)
+	}
+	if next.ETag != "" {
+		t.Errorf("returned ETag = %q, want the poisoned persisted validator gone from the 304 cache", next.ETag)
+	}
+	if next.LastModified != lastModified {
+		t.Errorf("returned LastModified = %q, want the valid validator %q retained", next.LastModified, lastModified)
+	}
+	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
+		t.Errorf("records = %+v, want the cached record reused on 304", next.Records)
 	}
 }
 

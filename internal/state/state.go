@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cplieger/atomicfile/v2"
@@ -138,6 +139,32 @@ func NewReadOnlyStore(path string, logger *slog.Logger) *Store {
 // pass), so an hour cannot race a concurrent writer in another process.
 const staleTempMaxAge = time.Hour
 
+// scanVersionField reads one object member from the envelope, reporting
+// whether it was a valid "version" field (matched) and whether the member
+// decoded cleanly (ok=false signals a decode error; the caller returns
+// 0, false).
+func scanVersionField(dec *json.Decoder, version *int) (matched, ok bool) {
+	tok, err := dec.Token()
+	if err != nil {
+		return false, false
+	}
+	key, isStr := tok.(string)
+	if !isStr {
+		return false, false
+	}
+	var raw json.RawMessage
+	if err := dec.Decode(&raw); err != nil {
+		return false, false
+	}
+	if !strings.EqualFold(key, "version") {
+		return false, true
+	}
+	if err := json.Unmarshal(raw, version); err != nil {
+		return false, false
+	}
+	return true, true
+}
+
 // newerSchemaVersion independently decodes the persisted envelope's schema
 // version discriminator straight from the wire bytes, reporting the decoded
 // version and whether it is newer than SchemaVersion. Load must never read
@@ -147,21 +174,38 @@ const staleTempMaxAge = time.Hour
 // {"version":2,"version":"bad"}) leaves a stale earlier value in
 // State.Version while the error came from the later duplicate - trusting it
 // would preserve a corrupt file as "newer-schema" state and block every
-// subsequent Save. Decoding the version alone from the raw bytes has no such
-// partial-population hazard: any failure reports (0, false) and the caller
-// falls through to the quarantine path.
+// subsequent Save. The streaming decode below validates EVERY case-insensitive
+// occurrence of the key before using the effective (last) value: a
+// whole-document one-field unmarshal retains only that final duplicate, so a
+// payload like {"version":"bad","Version":99} - corrupt for this binary AND
+// for a roll-forward binary reading the same integer discriminator - would
+// read as newer-schema 99 and be preserved with Save blocked instead of
+// quarantined. Any failure reports (0, false) and the caller falls through to
+// the quarantine path.
 func newerSchemaVersion(data []byte) (int, bool) {
-	var envelope struct {
-		Version json.RawMessage `json:"version"`
-	}
-	if err := json.Unmarshal(data, &envelope); err != nil || len(envelope.Version) == 0 {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
 		return 0, false
 	}
-	var version int
-	if err := json.Unmarshal(envelope.Version, &version); err != nil {
+	version, found := 0, false
+	for dec.More() {
+		matched, ok := scanVersionField(dec, &version)
+		if !ok {
+			return 0, false
+		}
+		if matched {
+			found = true
+		}
+	}
+	if _, err := dec.Token(); err != nil {
 		return 0, false
 	}
-	return version, version > SchemaVersion
+	var trailing json.RawMessage
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return 0, false
+	}
+	return version, found && version > SchemaVersion
 }
 
 // Load reads and decodes the state file. A missing file returns a zero State
@@ -216,8 +260,12 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 		// walk), so diagnosing a stale synthesized title needs to see how old
 		// the snapshot backing it is. A legacy or walk-less state carries the
 		// zero TakenAt and skips the attribute rather than logging a
-		// nonsensical multi-century age.
-		attrs = append(attrs, "library_age", time.Since(st.Library.TakenAt).Round(time.Second).String())
+		// nonsensical multi-century age. A future TakenAt (a backward host
+		// clock step, or a syntactically valid state file with a future
+		// timestamp) is clamped to zero rather than logging a misleading
+		// negative age, matching the mapping cache's clock-skew handling.
+		age := max(time.Since(st.Library.TakenAt), 0)
+		attrs = append(attrs, "library_age", age.Round(time.Second).String())
 	}
 	s.log.Info("state loaded", attrs...)
 	return st, nil

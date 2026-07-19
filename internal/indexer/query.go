@@ -401,7 +401,10 @@ func servesQuery(q url.Values) bool {
 	case "movie", "movie-search", "moviesearch":
 		return true
 	case "tvsearch", "tv-search":
-		return strings.TrimSpace(q.Get("ep")) == ""
+		// Season 0 is Sonarr's specials bucket: specials are single releases
+		// (never packs), so a season-0 per-episode search is always answered
+		// rather than skipped like an ordinary season's episode barrage.
+		return strings.TrimSpace(q.Get("ep")) == "" || strings.TrimSpace(q.Get("season")) == "0"
 	default: // "search", "", specials, generic, RSS
 		// A Movies-category search is a film (single release), always answered. It
 		// must not fall through to the anime episode-skip below: a movie query

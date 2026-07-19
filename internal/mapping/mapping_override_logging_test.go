@@ -154,3 +154,35 @@ func TestLoader_Load_unknownOverrideKeyNameTruncated(t *testing.T) {
 		t.Errorf("keys_truncated logs = %v, want true", rec.Messages())
 	}
 }
+
+// TestLoader_Load_warnsOnDuplicateOverrideIDs pins the duplicate-override
+// diagnostic end to end: the same non-zero anilist_id supplied three times
+// logs one WARN naming the distinct duplicated ID once with duplicate_count=1
+// (distinct conflicting mappings, not repeated rows), while the documented
+// last-record-wins overlay still applies.
+func TestLoader_Load_warnsOnDuplicateOverrideIDs(t *testing.T) {
+	overrides := filepath.Join(t.TempDir(), "overrides.json")
+	data := []byte(`[{"anilist_id":2,"type":"tv","tvdb_id":100},{"anilist_id":2,"type":"tv","tvdb_id":200},{"anilist_id":2,"type":"tv","tvdb_id":300}]`)
+	if err := os.WriteFile(overrides, data, 0o644); err != nil {
+		t.Fatalf("write overrides: %v", err)
+	}
+	logger, logs := capture.New()
+	loader := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
+	_, idx, err := loader.Load(context.Background(), freshCache())
+	if err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	got, ok := idx.Lookup(2)
+	if !ok || got.TvdbID != 300 {
+		t.Errorf("Lookup(2) = %+v, %v, want last duplicate with TvdbID 300", got, ok)
+	}
+	if logs.CountExact("mapping: duplicate override anilist_ids, last record wins") != 1 {
+		t.Fatalf("Load logs = %v, want one duplicate-overrides warning", logs.Messages())
+	}
+	if !attrRendered(logs, "ids", "[2]") {
+		t.Errorf("duplicate-overrides logs = %v, want ids=[2]", logs.Messages())
+	}
+	if !attrRendered(logs, "duplicate_count", "1") {
+		t.Errorf("duplicate-overrides logs = %v, want duplicate_count=1", logs.Messages())
+	}
+}

@@ -113,7 +113,15 @@ func animeBytesID(rawURL string) string {
 	if id := extractID(u.EscapedPath(), "/torrent/"); id != "" {
 		return id
 	}
-	id := strings.TrimSpace(u.Query().Get("torrentid"))
+	// A duplicated torrentid parameter is ambiguous: another consumer (a
+	// PHP-style tracker, a proxy) may pick a different value than Go's
+	// first-value Get, so an item could be authorized against one torrent
+	// while referring to another (HTTP parameter pollution). Fail closed.
+	values, ok := u.Query()["torrentid"]
+	if !ok || len(values) != 1 {
+		return ""
+	}
+	id := strings.TrimSpace(values[0])
 	if !isAllDigits(id) {
 		return ""
 	}

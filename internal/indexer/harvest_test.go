@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -322,16 +323,80 @@ func TestHarvestMalformedResponseSkipsOnlyThatShow(t *testing.T) {
 	}
 }
 
-// TestHarvestUnconfiguredTrackerNeverQueried pins the tracker gate: journal
-// items whose tracker has no configured Prowlarr upstream are never harvested
-// - no query leaves the process for them - and they serve their synthesized
-// titles.
+// TestHarvestRequestErrorSkipsOnlyThatShow pins the request-scoped half of the
+// failure classification: a Torznab <error> document naming a
+// request/parameter code (200-299) means the upstream deliberately rejected
+// ONE show's query, so that show keeps its synthesized title this rebuild
+// while a LATER group on the same upstream is still harvested - a
+// deterministic bad request must never condemn the whole scope the way an
+// auth (100-199) or status failure does.
+func TestHarvestRequestErrorSkipsOnlyThatShow(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		queries []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query().Get("q")
+		mu.Lock()
+		queries = append(queries, q)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/rss+xml")
+		if q == "Show A" {
+			_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><error code="201" description="Incorrect parameter"/>`)
+			return
+		}
+		body := torznabBody(torznabItem("Show B S01 1080p BluRay [G]", "https://nyaa.si/view/43"))
+		_, _ = io.WriteString(w, strings.ReplaceAll(body, "http://prowlarr:9696", "http://"+r.Host))
+	}))
+	defer srv.Close()
+
+	entries := []seadex.Entry{
+		nyaaEntry(7, 42, true, "Show A - S01E01 (1080p) [G].mkv", "Show A - S01E02 (1080p) [G].mkv"),
+		nyaaEntry(8, 43, true, "Show B - S01E01 (1080p) [G].mkv", "Show B - S01E02 (1080p) [G].mkv"),
+	}
+	info := func(alID int) EntryInfo {
+		if alID == 7 {
+			return EntryInfo{Title: "Show A", SeasonTvdb: 1}
+		}
+		return EntryInfo{Title: "Show B", SeasonTvdb: 1}
+	}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	log, rec := capture.New()
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+		Deps{HTTP: srv.Client(), Logger: log})
+	if err := w.Rebuild(context.Background(), entries, info); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if !rec.Contains("indexer title harvest request rejected; show keeps its synthesized title this rebuild") {
+		t.Errorf("request-scoped rejection not warned as such; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+	mu.Lock()
+	gotQueries := slices.Clone(queries)
+	mu.Unlock()
+	if !slices.Contains(gotQueries, "Show A") || !slices.Contains(gotQueries, "Show B") {
+		t.Errorf("queries = %v, want both shows queried (the rejection must stay show-local)", gotQueries)
+	}
+	snap := readSnapshotFile(t, path)
+	if _, ok := snap.Titles["nyaa:42"]; ok {
+		t.Errorf("titles = %v, want no cached title for the rejected show", snap.Titles)
+	}
+	if snap.Titles["nyaa:43"] != "Show B S01 1080p BluRay [G]" {
+		t.Errorf("titles = %v, want the later show on the same upstream still harvested (nyaa:43)", snap.Titles)
+	}
+}
+
+// TestHarvestUnconfiguredTrackerNeverQueried pins the tracker gate: a tracker
+// with no configured Prowlarr upstream journals nothing (its Torznab URL is
+// the off switch, so no items ever pend for it) and no harvest query leaves
+// the process for it - while its identities still fold into the seen ledger,
+// so enabling the tracker later starts from current novelty.
 func TestHarvestUnconfiguredTrackerNeverQueried(t *testing.T) {
 	mock, srv := newHarvestMock(func(int) string { return emptyTorznab() })
 	defer srv.Close()
 
-	// Nyaa items pending, but only the AB upstream is configured (pointing at
-	// the mock): the nyaa group must be skipped without any HTTP call.
+	// A Nyaa entry, but only the AB upstream is configured (pointing at
+	// the mock): the nyaa scope must journal nothing and trigger no HTTP call.
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
 	info := func(int) EntryInfo { return EntryInfo{Title: "Show", SeasonTvdb: 1} }
 	path := filepath.Join(t.TempDir(), "feed.json")
@@ -345,8 +410,11 @@ func TestHarvestUnconfiguredTrackerNeverQueried(t *testing.T) {
 		t.Errorf("harvest queries = %d, want 0 (no upstream configured for the nyaa scope)", mock.calls())
 	}
 	snap := readSnapshotFile(t, path)
-	if len(snap.NyaaFeed) != 1 || !strings.HasPrefix(snap.NyaaFeed[0].Title, "Show") {
-		t.Errorf("feed = %+v, want the synthesized title served", snap.NyaaFeed)
+	if len(snap.NyaaFeed) != 0 {
+		t.Errorf("feed = %+v, want empty (an unconfigured tracker journals nothing)", snap.NyaaFeed)
+	}
+	if !snap.Seen["nyaa:42"] {
+		t.Errorf("seen ledger missing the skipped Nyaa identity (it must not journal later as new): %v", snap.Seen)
 	}
 }
 
@@ -744,5 +812,102 @@ func TestHarvestParams(t *testing.T) {
 				t.Errorf("harvestParams(%+v, %q) q = %q, want %q", tc.meta, tc.scope, got.Get("q"), want)
 			}
 		})
+	}
+}
+
+// TestHarvestMalformedResponsesLatchAtThreshold pins the latch boundary: the
+// THIRD consecutive malformed show (consecutiveMalformedLatch) condemns the
+// scope, so the fourth show is never queried - a >= to > regression makes a
+// fourth query and caches its title instead.
+func TestHarvestMalformedResponsesLatchAtThreshold(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		body := "this is not torznab xml <<<"
+		if r.URL.Query().Get("q") == "Show D" {
+			body = strings.ReplaceAll(
+				torznabBody(torznabItem("Show D Real Title", "https://nyaa.si/view/45")),
+				"http://prowlarr:9696", "http://"+r.Host,
+			)
+		}
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	feeds := map[string][]item{upstreamNyaa: {
+		{Key: "nyaa:42", AniListID: 7, Title: "Show A"},
+		{Key: "nyaa:43", AniListID: 8, Title: "Show B"},
+		{Key: "nyaa:44", AniListID: 9, Title: "Show C"},
+		{Key: "nyaa:45", AniListID: 10, Title: "Show D"},
+	}}
+	info := map[int]EntryInfo{
+		7: {Title: "Show A"}, 8: {Title: "Show B"},
+		9: {Title: "Show C"}, 10: {Title: "Show D"},
+	}
+	log, rec := capture.New()
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
+	}}, Deps{HTTP: srv.Client(), Logger: log})
+	titles := map[string]string{}
+	stats := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] })
+
+	if stats.queries != 3 {
+		t.Errorf("harvest queries = %d, want 3 (the third consecutive malformed show latches the scope)", stats.queries)
+	}
+	if len(titles) != 0 || stats.pending != 4 {
+		t.Errorf("titles = %v, pending = %d; want no titles and 4 pending after the latch", titles, stats.pending)
+	}
+	if !rec.Contains("indexer title harvest: repeated malformed responses; skipping this upstream's remaining shows this rebuild") {
+		t.Errorf("malformed-response latch not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestHarvestMalformedResponseRunResetsAfterSuccessfulPage pins the
+// CONSECUTIVE semantics of the malformed-show latch: a successful (even
+// empty) page resets the run, so two separated malformed pairs never latch
+// and a later healthy show is still harvested - removing the reset latches on
+// the fourth show and leaves every title pending.
+func TestHarvestMalformedResponseRunResetsAfterSuccessfulPage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		var body string
+		switch r.URL.Query().Get("q") {
+		case "Show C":
+			body = emptyTorznab()
+		case "Show F":
+			body = torznabBody(torznabItem("Show F Real Title", "https://nyaa.si/view/47"))
+		default:
+			body = "this is not torznab xml <<<"
+		}
+		_, _ = io.WriteString(w, strings.ReplaceAll(body, "http://prowlarr:9696", "http://"+r.Host))
+	}))
+	defer srv.Close()
+
+	feeds := map[string][]item{upstreamNyaa: {
+		{Key: "nyaa:42", AniListID: 7, Title: "Show A"},
+		{Key: "nyaa:43", AniListID: 8, Title: "Show B"},
+		{Key: "nyaa:44", AniListID: 9, Title: "Show C"},
+		{Key: "nyaa:45", AniListID: 10, Title: "Show D"},
+		{Key: "nyaa:46", AniListID: 11, Title: "Show E"},
+		{Key: "nyaa:47", AniListID: 12, Title: "Show F"},
+	}}
+	info := map[int]EntryInfo{
+		7: {Title: "Show A"}, 8: {Title: "Show B"}, 9: {Title: "Show C"},
+		10: {Title: "Show D"}, 11: {Title: "Show E"}, 12: {Title: "Show F"},
+	}
+	log, _ := capture.New()
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
+	}}, Deps{HTTP: srv.Client(), Logger: log})
+	titles := map[string]string{}
+	stats := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] })
+
+	if stats.queries != 6 {
+		t.Errorf("harvest queries = %d, want 6 (a successful empty page resets the malformed run)", stats.queries)
+	}
+	if got := titles["nyaa:47"]; got != "Show F Real Title" {
+		t.Errorf("titles[nyaa:47] = %q, want the post-reset show harvested", got)
+	}
+	if len(titles) != 1 || stats.pending != 5 {
+		t.Errorf("titles = %v, pending = %d; want one harvested title and 5 pending", titles, stats.pending)
 	}
 }

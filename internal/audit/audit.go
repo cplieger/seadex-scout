@@ -363,26 +363,33 @@ func rowQualifier(entry *seadex.Entry, d *align.Decision) Qualifier {
 
 // classifyReleases turns every SeaDex torrent into a report Release (group
 // normalized via the shared classifier, tracker, usable URL, best flag,
-// curation warnings). AnimeBytes torrents are dropped when the operator has
-// AnimeBytes off — whether identified by the tracker label OR by the URL
-// host, since the label is untrusted upstream data — so the report never
-// surfaces AB releases or links they cannot use (and cannot leak them),
-// mirroring the daemon's obtainability rule. A curation-warned release
-// (SeaDex tags it Broken/Incomplete) stays listed but annotated: the report
-// enumerates raw SeaDex data by design, so hiding it would misrepresent the
-// entry, while groupSets and the render layer keep it out of the verdict and
-// the grab links. A release the daemon's filter.Obtainable rule rejects (no
-// usable link, or a tracker the operator cannot use) gets the same treatment,
+// curation warnings). DEFINITIVELY AnimeBytes torrents — identified by the
+// tracker label OR by successfully extracted URL host evidence, since the
+// label is untrusted upstream data — are dropped when the operator has
+// AnimeBytes off, so the report never surfaces AB releases or links they
+// cannot use (and cannot leak them). A public-labeled release whose URL
+// evidence is malformed or ambiguous is NOT dropped: the fail-closed
+// classify.ABVisible gate (kept for verdict eligibility) cannot prove it is
+// AB, and the report's contract is that a release with no usable link stays
+// listed with Unobtainable=true so the operator can see why it did not
+// affect the verdict. A curation-warned release (SeaDex tags it
+// Broken/Incomplete) stays listed but annotated: the report enumerates raw
+// SeaDex data by design, so hiding it would misrepresent the entry, while
+// groupSets and the render layer keep it out of the verdict and the grab
+// links. A release the daemon's filter.Obtainable rule rejects (no usable
+// link, or a tracker the operator cannot use) gets the same treatment,
 // carried on Release.Unobtainable: listed and annotated, never verdict
 // evidence - so a visible best the verdict ignored is always explained.
 func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 	out := make([]Release, 0, len(entry.Torrents))
 	for i := range entry.Torrents {
 		t := &entry.Torrents[i]
-		// AB guard on the raw upstream URL; the invariant lives in
-		// classify.ABVisible (the rendered Release below still carries the
-		// usable link).
-		if !classify.ABVisible(t, a.includeAnimeBytes) {
+		// Hide only a DEFINITIVELY AB torrent (label or extracted raw-URL
+		// host evidence; the invariant lives in classify.DefinitelyAB) when
+		// the toggle is off. Malformed/ambiguous public-labeled evidence
+		// stays listed: UsableURL drops the link and the fail-closed
+		// Obtainable below annotates the row unobtainable instead.
+		if !a.includeAnimeBytes && classify.DefinitelyAB(t) {
 			continue
 		}
 		rel := classify.Torrent(entry, t)

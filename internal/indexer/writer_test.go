@@ -65,7 +65,7 @@ func TestRebuildWarnsWhenABPasskeyMissing(t *testing.T) {
 			},
 		},
 	}}
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, Deps{Logger: log})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABTorznabURL: "http://prowlarr/2/api"}}, Deps{Logger: log})
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestRebuildUnconfiguredABPersistsNoABFeed(t *testing.T) {
 			},
 		},
 	}}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "SECRETPASSKEY"}}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: "SECRETPASSKEY"}}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	data, err := os.ReadFile(path)
@@ -190,7 +190,7 @@ func TestRebuildPersistsABItemsGUIDOnly(t *testing.T) {
 			},
 		},
 	}}
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: passkey, ABTorznabURL: "http://prowlarr/2/api"}}, Deps{})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: passkey, ABTorznabURL: "http://prowlarr/2/api"}}, Deps{})
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestRebuildRejectsOversizedSnapshot(t *testing.T) {
 			ReleaseGroup: strings.Repeat("a", maxFeedBytes+1),
 		}},
 	}}
-	err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{}).Rebuild(context.Background(), entries, nil)
+	err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}).Rebuild(context.Background(), entries, nil)
 	if err == nil {
 		t.Fatal("Rebuild with an oversized snapshot returned nil, want size error")
 	}
@@ -332,7 +332,7 @@ func TestRebuildExcludesCurationWarnedTorrents(t *testing.T) {
 			},
 		},
 	}}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -368,7 +368,7 @@ func TestRebuildExcludesCurationWarnedTorrents(t *testing.T) {
 	// ledger, so it now journals as NEW - the moment it first became
 	// grabbable curation is when the arrs should see it on RSS.
 	entries[0].Torrents[0].Tags = []string{"dual"}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("second Rebuild: %v", err)
 	}
 	snap = readSnapshotFile(t, path)
@@ -392,13 +392,31 @@ func TestRebuildExcludesCurationWarnedTorrents(t *testing.T) {
 // any-occurrence key set) - so the two indexer paths can never disagree about
 // whether the release is grabbable. The unwarned duplicate deliberately
 // carries a DIFFERENT journal key and shares only the info hash, so the test
-// fails if the warned-identity collector regresses to key-only matching.
+// fails if the warned-identity collector regresses to key-only matching. The
+// duplicate is also seeded as a PREVIOUSLY JOURNALED item, so the test fails
+// if the carry-drop key set regresses to direct-warning keys only (the
+// carried nyaa:99 would then keep serving warned bytes on RSS while search
+// suppresses them).
 func TestRebuildWarnedTorrentIdentityWinsAcrossEntries(t *testing.T) {
+	log, rec := capture.New()
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
 	const warnedURL = "https://nyaa.si/view/41"
 	const duplicateURL = "https://nyaa.si/view/99"
 	hash := strings.Repeat("a", 40)
+	// The duplicate was journaled BEFORE its sibling occurrence was warned:
+	// its carried item must be retracted through the carry-drop key set even
+	// though its own occurrence never carries the Broken tag.
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{"nyaa:99": true},
+		Seen:   map[string]bool{},
+		NyaaFeed: []item{{
+			Title: "Show - S01 (1080p) [W]", GUID: duplicateURL,
+			DownloadURL: "https://nyaa.si/download/99.torrent",
+			Key:         "nyaa:99", AniListID: 8,
+			FirstSeen: time.Now().UTC(), PubDate: time.Now().UTC(),
+		}},
+	})
 	entries := []seadex.Entry{
 		{
 			AniListID: 7,
@@ -416,7 +434,7 @@ func TestRebuildWarnedTorrentIdentityWinsAcrossEntries(t *testing.T) {
 			}},
 		},
 	}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -430,10 +448,22 @@ func TestRebuildWarnedTorrentIdentityWinsAcrossEntries(t *testing.T) {
 		t.Error("curation set marks the warned identity's info hash via its unwarned duplicate")
 	}
 	if len(snap.NyaaFeed) != 0 {
-		t.Errorf("nyaa feed = %+v, want empty (a warned identity must not journal)", snap.NyaaFeed)
+		t.Errorf("nyaa feed = %+v, want empty (a warned identity must not journal, and the carried duplicate must be retracted)", snap.NyaaFeed)
 	}
 	if snap.Seen["nyaa:41"] || snap.Seen["nyaa:99"] || snap.Seen[hash] {
 		t.Errorf("seen ledger recorded the warned identity (un-warning could never journal it): %v", snap.Seen)
+	}
+	warnedDropped := int64(-1)
+	for _, r := range rec.Records() {
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "journal_warned_dropped" {
+				warnedDropped = a.Value.Int64()
+			}
+			return true
+		})
+	}
+	if warnedDropped != 1 {
+		t.Errorf("snapshot log line journal_warned_dropped = %d, want 1 (the carried duplicate); log output:\n%s", warnedDropped, strings.Join(rec.Messages(), "\n"))
 	}
 }
 
@@ -465,7 +495,7 @@ func TestRebuildDropsCarriedJournalItemBecomingWarned(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
 		}},
 	}}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)

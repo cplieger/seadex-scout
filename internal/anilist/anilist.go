@@ -24,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cplieger/httpx/v3"
 	"github.com/cplieger/runesafe"
@@ -56,6 +57,15 @@ var ErrNotFound = errors.New("anilist: media not found")
 // failure so FetchMany can keep fetching later chunks instead of reading one
 // poisoned record as a total outage.
 var errBatchRecord = errors.New("anilist: batch response")
+
+// ErrBatchRecord marks a record-local validation failure in a batch response.
+// FetchMany returns it (match with errors.Is) alongside its partial result to
+// name the failure class; batch COMPLETION is signaled separately by the
+// result map (nil = no chunk completed), so an empty-but-non-nil map beside
+// this error means the chunks completed but every record was malformed —
+// still record-local, per-id fallback applies. Same identity as the internal
+// sentinel the parsers wrap.
+var ErrBatchRecord = errBatchRecord
 
 // query fetches the fields needed for a title fallback match.
 const query = `query ($id: Int) { Media(id: $id, type: ANIME) { format seasonYear startDate { year } title { romaji english native } } }`
@@ -163,37 +173,47 @@ func (c *Client) Fetch(ctx context.Context, aniListID int) (Media, error) {
 // FetchMany resolves many AniList ids in batched requests (up to batchSize ids
 // each, every batch throttled and retried like Fetch), returning the media that
 // exist keyed by id. An id AniList has no anime for is simply absent from the
-// result (the caller treats an absent id as not-found). On a request or
-// envelope error it returns the media gathered so far together with the error,
-// so the caller can fall back to a per-id Fetch for the remainder rather than
-// losing the batch. A record-local failure (errBatchRecord, a poisoned record
-// inside an otherwise well-formed response) does NOT abort the batch: later
-// chunks are still fetched and the first record error is surfaced alongside
-// the merged result, so one malformed record cannot hide every id after it or
-// read as a total outage to the caller. The response is untrusted: an id the
-// current chunk never requested is dropped before the merge (retainRequested)
-// and surfaced like any other record-local failure, so a malformed or
-// compromised response cannot inject an unrelated Media or overwrite an
-// earlier chunk's value.
+// result (the caller treats an absent id as not-found). The result carries the
+// batch-completion contract: a NIL map with an error means no chunk completed
+// (a total failure); a NON-NIL map with an error means at least one chunk
+// completed — even when the map is empty because every completed chunk
+// definitively found no media — so the caller can fall back to a per-id Fetch
+// for the remainder rather than losing the batch, and can tell an all-not-found
+// chunk apart from a total outage. A record-local failure (errBatchRecord, a
+// poisoned record inside an otherwise well-formed response) does NOT abort the
+// batch: the chunk still counts as completed, later chunks are still fetched,
+// and the first record error is surfaced alongside the merged result, so one
+// malformed record cannot hide every id after it or read as a total outage to
+// the caller. The response is untrusted: an id the current chunk never
+// requested is dropped before the merge (retainRequested) and surfaced like
+// any other record-local failure, so a malformed or compromised response
+// cannot inject an unrelated Media or overwrite an earlier chunk's value.
 func (c *Client) FetchMany(ctx context.Context, ids []int) (map[int]Media, error) {
 	out := make(map[int]Media, len(ids))
+	completed := false
 	var firstRecordErr error
 	for chunk := range slices.Chunk(ids, batchSize) {
 		raw, err := c.request(ctx, batchQuery, map[string]any{"ids": chunk})
 		if err != nil {
+			if !completed {
+				return nil, err
+			}
 			return out, err
 		}
 
 		page, parseErr := parseMediaPage(raw)
 		retainErr := retainRequested(page, chunk)
 		maps.Copy(out, page)
-		if err := errors.Join(parseErr, retainErr); err != nil {
-			if !errors.Is(err, errBatchRecord) {
-				return out, err
+		recordErr := errors.Join(parseErr, retainErr)
+		if recordErr != nil && !errors.Is(recordErr, errBatchRecord) {
+			if !completed {
+				return nil, recordErr
 			}
-			if firstRecordErr == nil {
-				firstRecordErr = err
-			}
+			return out, recordErr
+		}
+		completed = true
+		if recordErr != nil && firstRecordErr == nil {
+			firstRecordErr = recordErr
 		}
 	}
 	return out, firstRecordErr
@@ -435,6 +455,19 @@ func classifyNullMedia(errs []gqlError) error {
 	return mediaQueryError(errs[0])
 }
 
+// validateResponseUTF8 rejects a response body that is not valid UTF-8 before
+// it reaches encoding/json. json.Unmarshal replaces malformed UTF-8 inside
+// JSON strings with U+FFFD instead of failing, so without this gate a wire
+// title with invalid bytes could lossily normalize to a legitimate title key,
+// be title-matched, and be memoized even though the upstream payload was not
+// valid JSON text. Shared by parseMedia and parseMediaPage.
+func validateResponseUTF8(raw []byte) error {
+	if !utf8.Valid(raw) {
+		return errors.New("anilist: response is not valid UTF-8")
+	}
+	return nil
+}
+
 // parseMedia decodes the GraphQL envelope into a Media. Only an explicit
 // Media null with no error, or AniList's verified not-found error shape
 // (a sole error with status 404 / message "Not Found."), is classified as
@@ -444,6 +477,9 @@ func classifyNullMedia(errs []gqlError) error {
 // a plain error (degraded, retried next cycle) rather than permanently
 // suppressing the id.
 func parseMedia(raw []byte) (Media, error) {
+	if err := validateResponseUTF8(raw); err != nil {
+		return Media{}, err
+	}
 	var r gqlResponse
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return Media{}, fmt.Errorf("anilist: decode response: %w", err)
@@ -503,6 +539,9 @@ type gqlPageResponse struct {
 // an error-free response are simply not in the map (the caller treats them as
 // not-found).
 func parseMediaPage(raw []byte) (map[int]Media, error) {
+	if err := validateResponseUTF8(raw); err != nil {
+		return nil, err
+	}
 	var r gqlPageResponse
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return nil, fmt.Errorf("anilist: decode batch response: %w", err)
@@ -596,36 +635,75 @@ func hasMatchableTitle(titles []string) bool {
 // --- adaptive throttle ---
 
 // throttle spaces requests to a minimum interval, with a penalty hook for
-// backing off when the budget is low or a 429 was seen.
+// backing off when the budget is low or a 429 was seen. Each request reserves
+// a slot TIMESTAMP (not a fixed sleep duration), and wait revalidates the
+// reservation against the shared penalty epoch after sleeping: a penalty
+// raised while a reservation was outstanding would otherwise be invisible to
+// that waiter, which would wake on its stale pre-penalty slot and spend
+// budget inside the reset/Retry-After window the upstream told the client to
+// sit out.
 type throttle struct {
-	next     time.Time
-	interval time.Duration
-	mu       sync.Mutex
+	next         time.Time
+	penaltyUntil time.Time
+	interval     time.Duration
+	mu           sync.Mutex
 }
 
-// wait blocks until this request's reserved slot, or ctx is cancelled.
+// wait blocks until this request's reserved slot, or ctx is cancelled. A slot
+// that predates a penalty raised after it was reserved is stale: the waiter
+// re-reserves at the end of the current schedule (preserving both the penalty
+// wait and the configured spacing against sibling waiters) and sleeps again.
 func (t *throttle) wait(ctx context.Context) error {
-	return httpx.SleepCtx(ctx, t.reserve())
+	slot := t.reserveSlot(time.Now())
+	for {
+		if err := httpx.SleepCtx(ctx, time.Until(slot)); err != nil {
+			return err
+		}
+		t.mu.Lock()
+		if !slot.Before(t.penaltyUntil) {
+			t.mu.Unlock()
+			return nil
+		}
+		slot = t.reserveSlotLocked(time.Now())
+		t.mu.Unlock()
+	}
 }
 
 // reserve claims the next slot and returns how long to wait before using it.
 func (t *throttle) reserve() time.Duration {
+	now := time.Now()
+	return t.reserveSlot(now).Sub(now)
+}
+
+// reserveSlot claims and returns the next slot timestamp.
+func (t *throttle) reserveSlot(now time.Time) time.Time {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	now := time.Now()
+	return t.reserveSlotLocked(now)
+}
+
+// reserveSlotLocked claims the next slot with t.mu already held.
+func (t *throttle) reserveSlotLocked(now time.Time) time.Time {
 	start := now
 	if t.next.After(now) {
 		start = t.next
 	}
 	t.next = start.Add(t.interval)
-	return start.Sub(now)
+	return start
 }
 
-// penalize pushes the next slot out by at least d from now.
+// penalize pushes the next slot out by at least d from now and advances the
+// penalty epoch, invalidating every outstanding pre-penalty reservation (wait
+// re-reserves them after the epoch). A smaller later penalty never shortens
+// either the schedule or the epoch.
 func (t *throttle) penalize(d time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if until := time.Now().Add(d); until.After(t.next) {
+	until := time.Now().Add(d)
+	if until.After(t.penaltyUntil) {
+		t.penaltyUntil = until
+	}
+	if until.After(t.next) {
 		t.next = until
 	}
 }

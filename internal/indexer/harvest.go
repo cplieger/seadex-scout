@@ -3,6 +3,7 @@ package indexer
 import (
 	"cmp"
 	"context"
+	"errors"
 	"maps"
 	"net/url"
 	"slices"
@@ -77,6 +78,8 @@ func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]item,
 			// An earlier page already titled this group's items
 			// opportunistically (matchHarvest matches the global index);
 			// spend no query on a satisfied group.
+			w.log.Debug("indexer title harvest group already satisfied; skipping query",
+				"upstream", g.scope, "al_id", g.alID, "items", len(g.keys))
 			continue
 		}
 		u := availableHarvestUpstream(w.upstreams, failed, g.scope)
@@ -85,21 +88,36 @@ func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]item,
 		}
 		var outcome harvestOutcome
 		budget, outcome = w.harvestShow(ctx, u, g, infoFor(g.alID), index, titles, budget, &stats)
-		switch outcome {
-		case harvestScopeFailed:
-			failed[g.scope] = true
-		case harvestShowMalformed:
-			malformed[g.scope]++
-			if malformed[g.scope] >= consecutiveMalformedLatch {
-				w.log.Warn("indexer title harvest: repeated malformed responses; skipping this upstream's remaining shows this rebuild",
-					"upstream", g.scope, "consecutive", malformed[g.scope])
-				failed[g.scope] = true
-			}
-		default:
-			malformed[g.scope] = 0
-		}
+		w.updateHarvestScopeState(g.scope, outcome, failed, malformed)
 	}
 	return stats
+}
+
+// updateHarvestScopeState applies one queried show's outcome to the per-scope
+// failure latch and consecutive-malformed counter: harvestScopeFailed latches
+// the scope, harvestShowMalformed counts toward consecutiveMalformedLatch
+// (latching the scope when the run trips it), and any other outcome - a
+// success or a show-local request rejection (harvestShowFailed), both
+// definitive upstream answers - resets the malformed run.
+func (w *FeedWriter) updateHarvestScopeState(scope string, outcome harvestOutcome, failed map[string]bool, malformed map[string]int) {
+	switch outcome {
+	case harvestScopeFailed:
+		failed[scope] = true
+	case harvestShowMalformed:
+		malformed[scope]++
+		if malformed[scope] >= consecutiveMalformedLatch {
+			w.log.Warn("indexer title harvest: repeated malformed responses; skipping this upstream's remaining shows this rebuild",
+				"upstream", scope, "consecutive", malformed[scope])
+			failed[scope] = true
+		}
+	case harvestShowFailed:
+		// A request-scoped rejection is a definitive upstream answer:
+		// reset the consecutive-malformed run like a success, without
+		// condemning the scope.
+		malformed[scope] = 0
+	default:
+		malformed[scope] = 0
+	}
 }
 
 // availableHarvestUpstream returns the upstream serving scope, or nil when
@@ -116,14 +134,34 @@ func availableHarvestUpstream(upstreams []*upstream, failed map[string]bool, sco
 // harvestOutcome classifies how one show's harvest ended, deciding what
 // harvestTitles latches for the show's scope: harvestScopeFailed condemns the
 // whole scope this rebuild, harvestShowMalformed counts toward the
-// consecutive-malformed latch, and harvestOK resets that run.
+// consecutive-malformed latch, harvestShowFailed ends only that show's
+// harvest (a request-scoped Torznab rejection - the upstream answered, so it
+// resets the malformed run like a success), and harvestOK resets that run.
 type harvestOutcome int
 
 const (
 	harvestOK harvestOutcome = iota
 	harvestScopeFailed
 	harvestShowMalformed
+	harvestShowFailed
 )
+
+// requestScopedHarvestError reports whether err is a Torznab <error> document
+// naming a request/parameter failure (Newznab codes 200-299): the upstream
+// deliberately rejected THIS show's query, so the failure is show-local -
+// terminal for the show (retrying the same invalid request cannot help, which
+// is why terminalTorznabCode already fails it fast) but never evidence the
+// upstream itself is down, so the scope's other shows are still harvested.
+// Auth/account codes (100-199) stay scope-wide: bad credentials fail every
+// show's query identically.
+func requestScopedHarvestError(err error) bool {
+	docErr, ok := errors.AsType[*upstreamDocError](err)
+	if !ok {
+		return false
+	}
+	code, parseErr := strconv.Atoi(docErr.code)
+	return parseErr == nil && code >= 200 && code < 300
+}
 
 // consecutiveMalformedLatch is how many CONSECUTIVE shows on one scope may
 // fail with a persistently malformed 2xx body before the scope is treated as
@@ -145,7 +183,11 @@ const consecutiveMalformedLatch = 3
 // still harvested within the remaining budget instead of one poison response
 // freezing the whole tracker on synthesized titles indefinitely - unless a
 // RUN of malformed shows trips the caller's consecutiveMalformedLatch, the
-// signature of an upstream answering 2xx garbage to everything.
+// signature of an upstream answering 2xx garbage to everything. A Torznab
+// <error> document naming a request/parameter code (200-299) is likewise
+// show-local (requestScopedHarvestError -> harvestShowFailed): the upstream
+// deliberately rejected this one show's query, so its siblings' valid queries
+// must still run.
 func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGroup, meta EntryInfo, index, titles map[string]string, budget int, stats *harvestStats) (int, harvestOutcome) {
 	params := harvestParams(meta, g.scope)
 	for offset := 0; budget > 0 && ctx.Err() == nil; offset += harvestPageSize {
@@ -157,14 +199,7 @@ func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGrou
 			if ctx.Err() != nil {
 				return budget, harvestScopeFailed
 			}
-			if malformedUpstreamBody(err) {
-				w.log.Warn("indexer title harvest response malformed; show keeps its synthesized title this rebuild",
-					"upstream", u.name, "al_id", g.alID, "error", err)
-				return budget, harvestShowMalformed
-			}
-			w.log.Warn("indexer title harvest query failed; skipping this upstream's remaining shows this rebuild",
-				"upstream", u.name, "al_id", g.alID, "error", err)
-			return budget, harvestScopeFailed
+			return budget, w.classifyHarvestError(err, u, g.alID)
 		}
 		stats.matched += matchHarvest(results, g.scope, index, titles)
 		if !groupPending(g, titles) || len(results) < harvestPageSize {
@@ -172,6 +207,29 @@ func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGrou
 		}
 	}
 	return budget, harvestOK
+}
+
+// classifyHarvestError warns about one show's failed (non-cancelled) harvest
+// query and maps it to the outcome harvestTitles latches: a persistently
+// malformed SUCCESSFUL body stays show-local (harvestShowMalformed, counted
+// toward the consecutive-malformed latch), a request-scoped Torznab rejection
+// (codes 200-299) stays show-local without counting (harvestShowFailed), and
+// anything else - a status/transport/auth failure - condemns the scope
+// (harvestScopeFailed).
+func (w *FeedWriter) classifyHarvestError(err error, u *upstream, alID int) harvestOutcome {
+	if malformedUpstreamBody(err) {
+		w.log.Warn("indexer title harvest response malformed; show keeps its synthesized title this rebuild",
+			"upstream", u.name, "al_id", alID, "error", err)
+		return harvestShowMalformed
+	}
+	if requestScopedHarvestError(err) {
+		w.log.Warn("indexer title harvest request rejected; show keeps its synthesized title this rebuild",
+			"upstream", u.name, "al_id", alID, "error", err)
+		return harvestShowFailed
+	}
+	w.log.Warn("indexer title harvest query failed; skipping this upstream's remaining shows this rebuild",
+		"upstream", u.name, "al_id", alID, "error", err)
+	return harvestScopeFailed
 }
 
 // harvestGroupKey identifies one show's pending harvest group on one
@@ -263,8 +321,7 @@ func harvestParams(meta EntryInfo, scope string) url.Values {
 
 // harvestPage clones the show query with the paging window applied.
 func harvestPage(params url.Values, offset int) url.Values {
-	page := url.Values{}
-	maps.Copy(page, params)
+	page := maps.Clone(params)
 	page.Set("limit", strconv.Itoa(harvestPageSize))
 	if offset > 0 {
 		page.Set("offset", strconv.Itoa(offset))

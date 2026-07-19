@@ -354,6 +354,27 @@ func pollOnce(ctx context.Context, sc cycler, marker *health.Marker) error {
 	return nil
 }
 
+// executePollRuns runs poll's cycle body under the cycle lock and captures the
+// first execution's outcome - this invocation's own run. The closure returns
+// nil to Exclusive so exErr stays purely a coordination-infrastructure signal
+// (job outcomes must not stop queued demand or muddy pollCycle's infra-error
+// accounting). The closure can run again for demand queued by OTHER processes;
+// a rerun has no exit code to report through, so its error is logged here -
+// without that line a failed marker write (or a shutdown observed mid-rerun)
+// would vanish (the cycle's own faults already log inside Cycle).
+func executePollRuns(ctx context.Context, ex *scheduler.Exclusive, sc cycler, marker *health.Marker) (outcome scheduler.Outcome, ran bool, own, exErr error) {
+	outcome, exErr = ex.Run(func() error {
+		err := pollOnce(ctx, sc, marker)
+		if !ran {
+			own, ran = err, true
+		} else if err != nil {
+			slog.Warn("queued rerun cycle reported an error", "error", err)
+		}
+		return nil
+	})
+	return outcome, ran, own, exErr
+}
+
 // pollCycle runs poll's one cycle under the cross-process cycle lock (queue
 // mode) and maps the coalescing outcome to poll's exit contract:
 //
@@ -383,24 +404,7 @@ func pollCycle(ctx context.Context, ex *scheduler.Exclusive, sc cycler, marker *
 	if ctx.Err() != nil {
 		return pollInterrupted(ctx)
 	}
-	// Capture the first execution's outcome: it is this invocation's own run.
-	// The closure returns nil to Exclusive so exErr stays purely a
-	// coordination-infrastructure signal (job outcomes must not stop queued
-	// demand or muddy the infra-error accounting below).
-	var own error
-	ran := false
-	outcome, exErr := ex.Run(func() error {
-		err := pollOnce(ctx, sc, marker)
-		if !ran {
-			own, ran = err, true
-		} else if err != nil {
-			// A queued rerun has no exit code to report through; without this
-			// line a failed marker write (or a shutdown observed mid-rerun)
-			// would vanish - the cycle's own faults already log inside Cycle.
-			slog.Warn("queued rerun cycle reported an error", "error", err)
-		}
-		return nil
-	})
+	outcome, ran, own, exErr := executePollRuns(ctx, ex, sc, marker)
 	switch outcome {
 	case scheduler.OutcomeQueued, scheduler.OutcomeDiscarded:
 		if exErr != nil {

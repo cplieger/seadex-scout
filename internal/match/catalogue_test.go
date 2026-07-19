@@ -37,6 +37,7 @@ func TestCatalogueHas(t *testing.T) {
 		{"radarr no ids is not catalogued", library.Item{Arr: library.ArrRadarr}, false},
 		{"sonarr not catalogued via a movie record's tvdb id", library.Item{Arr: library.ArrSonarr, TvdbID: 555}, false},
 		{"radarr not catalogued via a series record's movie ids", library.Item{Arr: library.ArrRadarr, TmdbID: 600, ImdbID: "tt888"}, false},
+		{"unknown arr never matches even a catalogued tvdb id", library.Item{Arr: "lidarr", TvdbID: 100}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

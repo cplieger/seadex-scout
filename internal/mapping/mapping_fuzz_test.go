@@ -26,28 +26,43 @@ func FuzzParseOverrides(f *testing.F) {
 	f.Add([]byte(`  [ ] `))
 	f.Add([]byte(`[{"weird":1},5]`))
 	f.Add([]byte(`[{"anilist_id":1,"tmdb_movies":[1,2],"imdb_ids":["a"],"season_tvdb":2,"tvdb_id":3}]`))
+	f.Add([]byte(`[{"anilist_id":1},{"anilist_id":1},{"anilist_id":0}]`))
+	f.Add([]byte(`[] trailing`))
 	f.Fuzz(func(t *testing.T, data []byte) {
-		records, unknown, err := parseOverrides(data)
+		set, err := parseOverrides(data)
 		if err != nil {
-			if records != nil || unknown != nil {
-				t.Errorf("parseOverrides error with non-nil results: records=%v unknown=%v", records, unknown)
+			if set.records != nil || set.unknown != nil || set.duplicates != nil || set.applied != 0 || set.skipped != 0 {
+				t.Errorf("parseOverrides error with non-empty result: %+v", set)
 			}
 			return
 		}
-		for _, r := range records {
+		for _, r := range set.records {
+			if r.AniListID == 0 {
+				t.Errorf("parseOverrides retained a zero-AniList-ID record: %+v", r)
+			}
 			if r.Type != NormalizeType(r.Type) {
 				t.Errorf("parseOverrides record Type %q not normalized", r.Type)
 			}
 		}
-		if !slices.IsSorted(unknown) {
-			t.Errorf("parseOverrides unknown keys not sorted: %v", unknown)
+		seen := make(map[int]struct{}, len(set.records))
+		for _, r := range set.records {
+			if _, dup := seen[r.AniListID]; dup {
+				t.Errorf("parseOverrides effective records not deduplicated: id %d repeats", r.AniListID)
+			}
+			seen[r.AniListID] = struct{}{}
 		}
-		for i := 1; i < len(unknown); i++ {
-			if unknown[i] == unknown[i-1] {
-				t.Errorf("parseOverrides unknown keys not deduped: %v", unknown)
+		if set.applied < len(set.records) {
+			t.Errorf("applied %d < effective records %d", set.applied, len(set.records))
+		}
+		if !slices.IsSorted(set.unknown) {
+			t.Errorf("parseOverrides unknown keys not sorted: %v", set.unknown)
+		}
+		for i := 1; i < len(set.unknown); i++ {
+			if set.unknown[i] == set.unknown[i-1] {
+				t.Errorf("parseOverrides unknown keys not deduped: %v", set.unknown)
 			}
 		}
-		for _, k := range unknown {
+		for _, k := range set.unknown {
 			for canonical := range overrideKeys {
 				if strings.EqualFold(k, canonical) {
 					t.Errorf("parseOverrides reported canonical key %q as unknown", k)

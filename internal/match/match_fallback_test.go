@@ -304,3 +304,56 @@ func TestMatchSuccessfulLookupResetsFailureBreaker(t *testing.T) {
 		t.Error("Degraded = false, want true because transient failures occurred")
 	}
 }
+
+// allNotFoundBatchAniList models a batch whose first chunk COMPLETED but found
+// no media before a later chunk failed: FetchMany returns a NON-NIL empty map
+// plus an error (the completion contract's partial side), and every per-id
+// Fetch answers a definitive not-found.
+type allNotFoundBatchAniList struct {
+	fetchCalls int
+	batchCalls int
+}
+
+func (o *allNotFoundBatchAniList) Fetch(context.Context, int) (anilist.Media, error) {
+	o.fetchCalls++
+	return anilist.Media{}, anilist.ErrNotFound
+}
+
+func (o *allNotFoundBatchAniList) FetchMany(context.Context, []int) (map[int]anilist.Media, error) {
+	o.batchCalls++
+	return map[int]anilist.Media{}, errors.New("anilist 500 on a later chunk")
+}
+
+// TestMatchEmptyCompletedBatchIsNotAnOutage pins the completion contract at
+// the prefetch outage gate: a NON-NIL empty map plus an error means at least
+// one chunk completed (its ids definitively not found), NOT a total outage —
+// so the fast-fail must not trip, every pending id is retried with one per-id
+// Fetch, each definitive not-found is memoized negatively, and the cycle stays
+// non-degraded. Only a NIL map (no chunk completed) may trip the outage gate,
+// which TestMatchTotalBatchOutageSkipsPerIDFallback pins.
+func TestMatchEmptyCompletedBatchIsNotAnOutage(t *testing.T) {
+	snap := &library.Snapshot{}
+	idx := mapping.NewIndex([]mapping.Record{
+		{AniListID: 11, Type: "MOVIE"}, // id-less: needs the title fallback
+		{AniListID: 22, Type: "MOVIE"}, // id-less: needs the title fallback
+	})
+	fake := &allNotFoundBatchAniList{}
+
+	res := NewMatcher(fake, nil).Match(context.Background(),
+		[]seadex.Entry{{AniListID: 11}, {AniListID: 22}}, snap, idx, Memo{})
+
+	if fake.batchCalls != 1 {
+		t.Errorf("batch calls = %d, want 1", fake.batchCalls)
+	}
+	if fake.fetchCalls != 2 {
+		t.Errorf("single Fetch calls = %d, want 2 (a completed empty batch must not trip the outage fast-fail)", fake.fetchCalls)
+	}
+	for _, id := range []int{11, 22} {
+		if ent, ok := res.Memo.Entries[id]; !ok || !ent.NotFound {
+			t.Errorf("memo[%d] = %+v (present=%v), want a NotFound negative entry", id, ent, ok)
+		}
+	}
+	if res.Degraded {
+		t.Error("Degraded = true, want false: definitive not-founds after a completed batch are answers, not an outage")
+	}
+}

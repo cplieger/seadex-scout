@@ -116,17 +116,18 @@ func TestLoadRuntimeConfig(t *testing.T) {
 		}
 	})
 	t.Run("starter write failure is not the sentinel", func(t *testing.T) {
-		if os.Getuid() == 0 {
-			t.Skip("read-only directory permissions do not bind for root")
-		}
+		// A dangling parent symlink makes os.Stat report the config missing
+		// while the starter's parent creation fails deterministically for
+		// every UID (root-safe, unlike a read-only-dir chmod).
 		dir := t.TempDir()
-		if err := os.Chmod(dir, 0o555); err != nil {
+		missingTarget := filepath.Join(dir, "missing-target")
+		blockedParent := filepath.Join(dir, "blocked-parent")
+		if err := os.Symlink(missingTarget, blockedParent); err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
-		_, err := loadRuntimeConfig(filepath.Join(dir, "config.yaml"))
+		_, err := loadRuntimeConfig(filepath.Join(blockedParent, "config.yaml"))
 		if err == nil {
-			t.Fatal("loadRuntimeConfig(unwritable starter dir) = nil, want error")
+			t.Fatal("loadRuntimeConfig(blocked starter path) = nil, want error")
 		}
 		if errors.Is(err, errStarterWritten) {
 			t.Errorf("err = %v, must not read as a successfully written starter", err)
@@ -990,6 +991,51 @@ func TestPollCycleExecutesQueuedRerun(t *testing.T) {
 	}
 }
 
+// queuedFailureCycler holds its first cycle in flight (signalling started,
+// blocking until release) and reports healthy; any later execution - the
+// queued rerun - fails, so a test can pin the rerun-failure warning.
+type queuedFailureCycler struct {
+	started chan struct{}
+	release chan struct{}
+	runs    atomic.Int32
+}
+
+func (c *queuedFailureCycler) Cycle(context.Context) bool {
+	if c.runs.Add(1) == 1 {
+		close(c.started)
+		<-c.release
+		return true
+	}
+	return false
+}
+
+// TestPollCycleLogsQueuedRerunFailure pins the failure signal of a queued
+// rerun: the rerun has no requesting process left to receive an exit code, so
+// the WARN line in executePollRuns is its only observable failure signal.
+// Serial (capture swaps slog.Default).
+func TestPollCycleLogsQueuedRerunFailure(t *testing.T) {
+	rec := capture.Default(t)
+	ctx := context.Background()
+	ex := testCycleExclusive(t, ctx)
+	marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
+	sc := &queuedFailureCycler{started: make(chan struct{}), release: make(chan struct{})}
+	holderErr := make(chan error, 1)
+	go func() { holderErr <- pollCycle(ctx, ex, sc, marker) }()
+	<-sc.started
+
+	if err := pollCycle(ctx, ex, mustNotRunCycler{t: t}, marker); err != nil {
+		t.Fatalf("overlapping pollCycle = %v, want nil (queued)", err)
+	}
+	close(sc.release)
+	if err := <-holderErr; err != nil {
+		t.Fatalf("holder pollCycle = %v, want nil from its own healthy run", err)
+	}
+
+	if !rec.Contains("queued rerun cycle reported an error") {
+		t.Errorf("missing queued-rerun error warning: %v", rec.Messages())
+	}
+}
+
 // TestPollCycleCoordinationFailure pins the infrastructure-failure path:
 // an unusable cycle lock (the lock path is a directory) means nothing ran and
 // no demand was recorded, so pollCycle returns the error (exit 1) and never
@@ -1396,27 +1442,30 @@ func TestPollInterruptedClassifiesNonCanceledCause(t *testing.T) {
 }
 
 // TestPollCycleMarkerWriteFailure pins pollOnce's marker-write failure
-// branch: the marker directory is writable at construction (so the marker
-// does not enter its degraded no-op mode) and turns read-only before the
-// cycle, so SetChecked fails and a healthy cycle still exits non-zero with
-// the record-poll-health error - the external scheduler must see the fail
-// rather than trusting an unrecorded outcome.
+// branch: the marker directory is present at construction (so the marker
+// does not enter its degraded no-op mode) and is then replaced by a regular
+// file, so SetChecked reaches its transient-error return for every UID
+// (root-safe, unlike a read-only-dir chmod) and a healthy cycle still exits
+// non-zero with the record-poll-health error - the external scheduler must
+// see the fail rather than trusting an unrecorded outcome.
 func TestPollCycleMarkerWriteFailure(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("read-only directory permissions do not bind for root")
-	}
 	ctx := context.Background()
-	dir := t.TempDir()
-	marker := health.NewMarker(filepath.Join(dir, ".healthy"))
-	if err := os.Chmod(dir, 0o555); err != nil {
+	dir := filepath.Join(t.TempDir(), "marker-dir")
+	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	marker := health.NewMarker(filepath.Join(dir, ".healthy"))
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, []byte("blocker"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	err := pollCycle(ctx, testCycleExclusive(t, ctx), boolCycler(true), marker)
 
 	if err == nil {
-		t.Fatal("pollCycle(unwritable marker) = nil, want the record-poll-health error (exit 1)")
+		t.Fatal("pollCycle(blocked marker path) = nil, want the record-poll-health error (exit 1)")
 	}
 	if !strings.Contains(err.Error(), "record poll health") {
 		t.Errorf("err = %q, want it wrapped as record poll health", err)

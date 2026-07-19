@@ -130,18 +130,27 @@ func (ix *Indexer) reload(ctx context.Context) {
 
 // skipMemoizedMalformed applies reload's memoized-malformed-file arm: it
 // reports whether the stat'ed file is the memoized malformed snapshot,
-// unchanged, and if so clears the transient degradation flag. The memoized
-// malformed snapshot fails deterministically: unchanged bytes decode the same
-// way on every read, so rereading it would only repeat the per-request
-// I/O/JSON work and the malformed WARN. The successful stat that reached this
-// point already proves file access recovered from any transient stat/read
-// fault, so clear the degradation flag directly - re-arming the next onset's
-// warning - without a reread and without the "reload recovered" INFO (nothing
-// was successfully reloaded; the file is still bad).
+// unchanged, and if so re-asserts the snapshot-unavailable state and clears
+// the transient degradation flag. The memoized malformed snapshot fails
+// deterministically: unchanged bytes decode the same way on every read, so
+// rereading it would only repeat the per-request I/O/JSON work and the
+// malformed WARN. The successful stat that reached this point already proves
+// file access recovered from any transient stat/read fault, so clear the
+// degradation flag directly - re-arming the next onset's warning - without a
+// reread and without the "reload recovered" INFO (nothing was successfully
+// reloaded; the file is still bad). markSnapshotFailedIfUnloaded is a no-op
+// after a last-good snapshot, but it restores the startup error state when
+// the same memoized bad inode REAPPEARS after an ENOENT interval (an
+// unmount/remount, a rename away and back): the missing-file arm cleared
+// snapFailed to restore fresh-install semantics while keeping failedFile, so
+// without re-asserting here the pre-load state machine would treat the bad
+// snapshot as a valid fresh install and serve false-empty success instead of
+// a Torznab error.
 func (ix *Indexer) skipMemoizedMalformed(info os.FileInfo) bool {
 	if !ix.matchesFailedFile(info) {
 		return false
 	}
+	ix.markSnapshotFailedIfUnloaded()
 	ix.reloadDegraded = false
 	return true
 }

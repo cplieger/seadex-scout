@@ -2,6 +2,7 @@ package mapping
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -99,21 +100,24 @@ func TestIndex_ForEachRecordAndNewIndex(t *testing.T) {
 }
 
 func TestParseOverrides(t *testing.T) {
-	recs, unknown, err := parseOverrides([]byte(`[{"anilist_id":5,"type":"  movie  "}]`))
+	set, err := parseOverrides([]byte(`[{"anilist_id":5,"type":"  movie  "}]`))
 	if err != nil {
 		t.Fatalf("parseOverrides error: %v", err)
 	}
-	if len(recs) != 1 || recs[0].Type != "MOVIE" {
-		t.Fatalf("parseOverrides = %+v, want one record with Type MOVIE", recs)
+	if len(set.records) != 1 || set.records[0].Type != "MOVIE" {
+		t.Fatalf("parseOverrides = %+v, want one record with Type MOVIE", set.records)
 	}
-	if len(unknown) != 0 {
-		t.Errorf("unknown keys = %v, want none for a well-formed override", unknown)
+	if len(set.unknown) != 0 {
+		t.Errorf("unknown keys = %v, want none for a well-formed override", set.unknown)
 	}
-	if _, _, err := parseOverrides([]byte(`{bad`)); err == nil {
+	if _, err := parseOverrides([]byte(`{bad`)); err == nil {
 		t.Error("parseOverrides(malformed) = nil error, want error")
 	}
-	if _, _, err := parseOverrides([]byte(`null`)); err == nil {
+	if _, err := parseOverrides([]byte(`null`)); err == nil {
 		t.Error("parseOverrides(null) = nil error, want error (a non-array top level must not read as an empty overlay)")
+	}
+	if _, err := parseOverrides([]byte(`[] trailing`)); err == nil {
+		t.Error("parseOverrides(trailing data) = nil error, want error (json.Unmarshal parity)")
 	}
 }
 
@@ -123,16 +127,16 @@ func TestParseOverrides(t *testing.T) {
 // while the records still parse.
 func TestParseOverridesReportsUnknownKeys(t *testing.T) {
 	data := []byte(`[{"anilist_id":5,"imdb_id":"tt1","season":1},{"anilist_id":6,"imdb_id":"tt2","themoviedb_id":9}]`)
-	recs, unknown, err := parseOverrides(data)
+	set, err := parseOverrides(data)
 	if err != nil {
 		t.Fatalf("parseOverrides error: %v", err)
 	}
-	if len(recs) != 2 {
-		t.Fatalf("records = %d, want 2 (unknown keys do not reject the record)", len(recs))
+	if len(set.records) != 2 {
+		t.Fatalf("records = %d, want 2 (unknown keys do not reject the record)", len(set.records))
 	}
 	want := []string{"imdb_id", "season", "themoviedb_id"}
-	if !slices.Equal(unknown, want) {
-		t.Errorf("unknown keys = %v, want %v (sorted, deduped)", unknown, want)
+	if !slices.Equal(set.unknown, want) {
+		t.Errorf("unknown keys = %v, want %v (sorted, deduped)", set.unknown, want)
 	}
 }
 
@@ -142,15 +146,15 @@ func TestParseOverridesReportsUnknownKeys(t *testing.T) {
 // unknown and "ignored" - that would tell the operator an accepted field was
 // discarded.
 func TestParseOverridesAcceptsCaseVariantKeys(t *testing.T) {
-	recs, unknown, err := parseOverrides([]byte(`[{"ANILIST_ID":5,"TYPE":"movie"}]`))
+	set, err := parseOverrides([]byte(`[{"ANILIST_ID":5,"TYPE":"movie"}]`))
 	if err != nil {
 		t.Fatalf("parseOverrides error: %v", err)
 	}
-	if len(recs) != 1 || recs[0].AniListID != 5 || recs[0].Type != "MOVIE" {
-		t.Fatalf("parseOverrides = %+v, want one record with AniListID 5 and Type MOVIE", recs)
+	if len(set.records) != 1 || set.records[0].AniListID != 5 || set.records[0].Type != "MOVIE" {
+		t.Fatalf("parseOverrides = %+v, want one record with AniListID 5 and Type MOVIE", set.records)
 	}
-	if len(unknown) != 0 {
-		t.Errorf("unknown keys = %v, want none for case-variant canonical keys (encoding/json accepts them)", unknown)
+	if len(set.unknown) != 0 {
+		t.Errorf("unknown keys = %v, want none for case-variant canonical keys (encoding/json accepts them)", set.unknown)
 	}
 }
 
@@ -180,15 +184,79 @@ func TestNewIndex_ignoresZeroAndKeepsLastDuplicate(t *testing.T) {
 	}
 }
 
-// TestUnknownOverrideKeys_partialRawDecodeYieldsNil pins the documented
-// raw-unmarshal error contract: encoding/json fills the decodable prefix of a
-// partially decodable array before reporting the type error, so without the
-// error guard the scan would report the prefix's keys ([weird]) for a file the
-// typed decode rejects anyway. The guard must yield nil and leave error
-// reporting to parseOverrides' typed decode.
-func TestUnknownOverrideKeys_partialRawDecodeYieldsNil(t *testing.T) {
-	if got := unknownOverrideKeys([]byte(`[{"weird":1},5]`)); got != nil {
-		t.Errorf("unknownOverrideKeys(partially decodable array) = %v, want nil", got)
+// TestParseOverrides_reportsEachDuplicateIDOnce pins the duplicate diagnostic
+// population: each distinct duplicated AniList ID is reported once (on its
+// first repeated occurrence), so a heavily repeated first ID cannot fill the
+// bounded log prefix and hide later duplicated IDs, while the effective set
+// keeps last-record-wins and applied still counts every keyed transport row.
+func TestParseOverrides_reportsEachDuplicateIDOnce(t *testing.T) {
+	set, err := parseOverrides([]byte(`[
+		{"anilist_id":1,"type":"TV","tvdb_id":10},
+		{"anilist_id":1,"type":"TV","tvdb_id":11},
+		{"anilist_id":1,"type":"TV","tvdb_id":12},
+		{"anilist_id":2,"type":"TV","tvdb_id":20},
+		{"anilist_id":2,"type":"TV","tvdb_id":21}
+	]`))
+	if err != nil {
+		t.Fatalf("parseOverrides error: %v", err)
+	}
+	if set.applied != 5 {
+		t.Errorf("applied = %d, want 5 (every keyed record applies)", set.applied)
+	}
+	if !slices.Equal(set.duplicates, []int{1, 2}) {
+		t.Errorf("duplicates = %v, want [1 2] (each distinct duplicated ID once)", set.duplicates)
+	}
+	if len(set.records) != 2 {
+		t.Fatalf("effective records = %d, want 2 (deduplicated during the stream)", len(set.records))
+	}
+	idx := NewIndex(nil)
+	for _, r := range set.records {
+		idx.byAniList[r.AniListID] = r
+	}
+	if got, ok := idx.Lookup(1); !ok || got.TvdbID != 12 {
+		t.Errorf("Lookup(1) = %+v, %v, want last record with TvdbID 12", got, ok)
+	}
+	if got, ok := idx.Lookup(2); !ok || got.TvdbID != 21 {
+		t.Errorf("Lookup(2) = %+v, %v, want last record with TvdbID 21", got, ok)
+	}
+}
+
+// TestParseOverrides_discardsSemanticallyEmptyRowsDuringStream pins the
+// memory-amplification regression (a valid compact array of empty objects
+// fits under maxOverrideBytes but used to be materialized whole three times
+// before every row was discarded): a large all-empty-object array parses to
+// an EMPTY effective overlay with the exact skipped count, allocating no
+// []Record growth per transport row.
+func TestParseOverrides_discardsSemanticallyEmptyRowsDuringStream(t *testing.T) {
+	const rows = 100_000
+	data := []byte("[" + strings.Repeat("{},", rows-1) + "{}]")
+	set, err := parseOverrides(data)
+	if err != nil {
+		t.Fatalf("parseOverrides error: %v", err)
+	}
+	if len(set.records) != 0 || cap(set.records) != 0 {
+		t.Errorf("effective records len=%d cap=%d, want 0/0 (zero-ID rows discarded during the stream)", len(set.records), cap(set.records))
+	}
+	if set.skipped != rows {
+		t.Errorf("skipped = %d, want the exact discarded row count %d", set.skipped, rows)
+	}
+	if set.applied != 0 || len(set.duplicates) != 0 || len(set.unknown) != 0 {
+		t.Errorf("applied=%d duplicates=%v unknown=%v, want all empty", set.applied, set.duplicates, set.unknown)
+	}
+}
+
+// TestParseOverrides_partialRawDecodeYieldsNoUnknownKeys pins the documented
+// error contract the old whole-document key scan carried: for a partially
+// decodable array ([{"weird":1},5]) the typed decode rejects the file, so no
+// unknown keys from the decodable prefix may leak out - the error return
+// carries an empty set and readOverrides logs the malformed-file WARN.
+func TestParseOverrides_partialRawDecodeYieldsNoUnknownKeys(t *testing.T) {
+	set, err := parseOverrides([]byte(`[{"weird":1},5]`))
+	if err == nil {
+		t.Fatal("parseOverrides(partially decodable array) = nil error, want typed-decode error")
+	}
+	if set.unknown != nil {
+		t.Errorf("unknown keys on error = %v, want nil", set.unknown)
 	}
 }
 
@@ -206,12 +274,12 @@ func TestParseOverrides_typedDecodeErrorPropagates(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			recs, unknown, err := parseOverrides([]byte(tc.in))
+			set, err := parseOverrides([]byte(tc.in))
 			if err == nil {
 				t.Fatalf("parseOverrides(%s) = nil error, want typed-decode error", tc.in)
 			}
-			if recs != nil || unknown != nil {
-				t.Errorf("parseOverrides(%s) = %v, %v, want nil records and nil unknown keys on error", tc.in, recs, unknown)
+			if set.records != nil || set.unknown != nil {
+				t.Errorf("parseOverrides(%s) = %v, %v, want nil records and nil unknown keys on error", tc.in, set.records, set.unknown)
 			}
 		})
 	}

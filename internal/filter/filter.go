@@ -155,6 +155,28 @@ func ABGated(tracker, rawURL string) bool {
 	return !ABVisible(tracker, rawURL, false)
 }
 
+// DefinitelyAB reports whether a release is DEFINITIVELY AnimeBytes: the
+// tracker label is AnimeBytes, or the raw upstream URL carries successfully
+// extracted canonical ASCII host evidence resolving to the AnimeBytes host
+// (or a dot-delimited subdomain). Unlike ABVisible — which fails CLOSED,
+// reading malformed or ambiguous host evidence as "hide" — this predicate
+// fails OPEN: evidence that cannot be extracted is not AnimeBytes evidence.
+// It exists for consumers that must keep a non-AB release LISTED rather than
+// erased (the audit report's row visibility, which annotates a release with
+// no usable link as unobtainable) while still never surfacing a definite
+// AnimeBytes release with the toggle off; ABVisible stays the fail-closed
+// gate for verdict/obtainability eligibility.
+func DefinitelyAB(tracker, rawURL string) bool {
+	if release.IsAnimeBytes(tracker) {
+		return true
+	}
+	host, ok := hostFromRawURL(rawURL)
+	if !ok || host == "" || !release.IsASCIIHost(host) {
+		return false
+	}
+	return release.IsAnimeBytesHost(host)
+}
+
 // ExcludeSpecial reports whether an entry classified special should be dropped
 // under the exclude_specials filter; shared by compare and audit so the two
 // consumers cannot drift.

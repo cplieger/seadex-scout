@@ -16,11 +16,13 @@ import (
 )
 
 // newTestWriter builds a FeedWriter for path with no harvest upstreams (the
-// common shape of the journal tests). abConfigured wires a fake AB Torznab URL
+// common shape of the journal tests). Nyaa is always configured (a fake Nyaa
+// Torznab URL, the tracker's on switch - without it the Nyaa journal is
+// neither carried nor grown). abConfigured wires a fake AB Torznab URL
 // (the tracker's on switch); abPasskey makes AB releases journalable (persisted
 // GUID-only; the server derives the served links).
 func newTestWriter(path, abPasskey string, abConfigured bool) *FeedWriter {
-	cfg := &FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: abPasskey}}
+	cfg := &FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: abPasskey}}
 	if abConfigured {
 		cfg.ABTorznabURL = "http://prowlarr/2/api"
 	}
@@ -485,7 +487,7 @@ func TestRebuildJournalItemShape(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PASSKEY123", ABTorznabURL: "http://prowlarr/2/api"}}, Deps{})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: "PASSKEY123", ABTorznabURL: "http://prowlarr/2/api"}}, Deps{})
 	now := time.Date(2026, time.July, 2, 9, 0, 0, 0, time.UTC)
 	w.now = func() time.Time { return now }
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
@@ -667,6 +669,55 @@ func TestRebuildDropsCarriedNonCuratedABItemWhenPasskeyRemoved(t *testing.T) {
 	}
 }
 
+// TestRebuildRebasesFutureFirstSeenCarriedItem pins the clock-rollback guard:
+// a carried item whose FirstSeen is AHEAD of the wall clock (a clock rollback,
+// or a snapshot restored from a future-skewed host) is kept but rebased to
+// now - FirstSeen and PubDate move to the current rebuild time, bounding its
+// remaining journal lifetime to feedJournalMaxAge instead of letting the
+// negative age hold it in RSS until the clock catches up plus 14 days - and
+// the rebase is counted on the snapshot log line.
+func TestRebuildRebasesFutureFirstSeenCarriedItem(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	log, rec := capture.New()
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
+	t0 := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
+	w.now = func() time.Time { return t0 }
+	future := t0.Add(72 * time.Hour)
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{"nyaa:42": true},
+		NyaaFeed: []item{{
+			Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42",
+			DownloadURL: "https://nyaa.si/download/42.torrent",
+			Key:         "nyaa:42", AniListID: 7,
+			FirstSeen: future, PubDate: future,
+		}},
+	})
+	if err := w.Rebuild(context.Background(), nil, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 1 {
+		t.Fatalf("feed = %d items, want 1 (the future-stamped item survives the clock correction)", len(snap.NyaaFeed))
+	}
+	if !snap.NyaaFeed[0].FirstSeen.Equal(t0) || !snap.NyaaFeed[0].PubDate.Equal(t0) {
+		t.Errorf("rebased FirstSeen/PubDate = %v/%v, want both %v", snap.NyaaFeed[0].FirstSeen, snap.NyaaFeed[0].PubDate, t0)
+	}
+	rebased := int64(-1)
+	for _, r := range rec.Records() {
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "journal_clock_rebased" {
+				rebased = a.Value.Int64()
+			}
+			return true
+		})
+	}
+	if rebased != 1 {
+		t.Errorf("journal_clock_rebased = %d, want 1; log:\n%s", rebased, strings.Join(rec.Messages(), "\n"))
+	}
+}
+
 // TestRebuildDropsKeylessCarriedItem pins carryJournal's defensive drop of a
 // pre-journal item (no Key / no FirstSeen, e.g. a hand-edited snapshot that
 // kept the seen ledger but stripped an item's bookkeeping): it leaves the
@@ -700,7 +751,7 @@ func TestRebuildSkipsTitlelessTorrentAsUnresolvable(t *testing.T) {
 		Torrents:  []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/7", IsBest: true}},
 	}}
 	log, rec := capture.New()
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -841,7 +892,7 @@ func TestRebuildDropsCarriedItemBecomingUnresolvable(t *testing.T) {
 		Torrents:  []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/42", IsBest: true}},
 	}}
 	log, rec := capture.New()
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)

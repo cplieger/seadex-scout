@@ -50,9 +50,14 @@ func NewCatalogue(idx *mapping.Index, keep func(mapping.Record) bool) *Catalogue
 }
 
 // Has reports whether a library item corresponds to any kept mapping record:
-// a Radarr movie by its TMDB or IMDb id, a Sonarr series by its TVDB id.
+// a Radarr movie by its TMDB or IMDb id, a Sonarr series by its TVDB id. The
+// switch is exhaustive over the known arr values and answers false for any
+// other Arr, mirroring the forward side (indexIDs/arrItem require an exact
+// Sonarr or Radarr match), so an unknown or future arr value can never be
+// misclassified through the Sonarr TVDB branch.
 func (c *Catalogue) Has(it *library.Item) bool {
-	if it.Arr == library.ArrRadarr {
+	switch it.Arr {
+	case library.ArrRadarr:
 		if it.TmdbID != 0 {
 			if _, ok := c.tmdb[it.TmdbID]; ok {
 				return true
@@ -64,10 +69,13 @@ func (c *Catalogue) Has(it *library.Item) bool {
 			}
 		}
 		return false
-	}
-	if it.TvdbID == 0 {
+	case library.ArrSonarr:
+		if it.TvdbID == 0 {
+			return false
+		}
+		_, ok := c.tvdb[it.TvdbID]
+		return ok
+	default:
 		return false
 	}
-	_, ok := c.tvdb[it.TvdbID]
-	return ok
 }

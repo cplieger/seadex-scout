@@ -248,8 +248,14 @@ func feedTitle(t *seadex.Torrent) string {
 		}
 		return strings.TrimSpace(base[:l[0]] + label + base[l[1]:])
 	}
-	if absoluteEpisode.MatchString(base) {
-		return strings.TrimSpace(multiSpace.ReplaceAllString(absoluteEpisode.ReplaceAllString(base, " "), " "))
+	if locs := absoluteEpisode.FindAllStringIndex(base, -1); len(locs) > 0 {
+		// Collapse only the LAST absolute episode token (mirroring the SxxExx
+		// arm above): a title segment that is itself " - NN"-shaped (e.g.
+		// "Show - 07 (WEB) - 01") must be preserved, not stripped with the
+		// real episode token.
+		last := locs[len(locs)-1]
+		collapsed := base[:last[0]] + " " + base[last[1]:]
+		return strings.TrimSpace(multiSpace.ReplaceAllString(collapsed, " "))
 	}
 	return strings.TrimSpace(base)
 }

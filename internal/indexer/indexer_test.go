@@ -543,7 +543,8 @@ func TestServesQuery(t *testing.T) {
 		{"t": {"search"}, "q": {"Frieren"}},     // generic series search
 		{"t": {"search"}, "q": {"Frieren OVA"}}, // special
 		{"t": {"caps"}},                         // (query() not called for caps, but classifies as serve)
-		{"t": {"search"}, "q": {"Some Film 2011"}, "cat": {"2999"}}, // top of the Movies range still reads as a film
+		{"t": {"search"}, "q": {"Some Film 2011"}, "cat": {"2999"}},         // top of the Movies range still reads as a film
+		{"t": {"tvsearch"}, "q": {"Frieren"}, "season": {"0"}, "ep": {"1"}}, // season-0 special search (single release, always answered)
 	}
 	for _, q := range serves {
 		if !servesQuery(q) {
@@ -706,6 +707,14 @@ func TestFeedTitle(t *testing.T) {
 			name:  "single absolute-numbered episode keeps its number",
 			files: []seadex.File{{Name: "[Grp] Some Show - 07 (1080p).mkv"}},
 			want:  "[Grp] Some Show - 07 (1080p)",
+		},
+		{
+			name: "absolute-numbered pack collapses only the final episode token",
+			files: []seadex.File{
+				{Name: "Show - 07 (WEB) - 01.mkv"},
+				{Name: "Show - 07 (WEB) - 02.mkv"},
+			},
+			want: "Show - 07 (WEB)",
 		},
 		{
 			name:  "no files falls back to release group",
@@ -919,6 +928,22 @@ func TestFilterByCats_appliesTorznabCategorySemantics(t *testing.T) {
 	}
 }
 
+// TestFilterByCatsMatchesAnyTorznabParent pins the GENERALIZED parent-category
+// rule beyond the old Anime-under-TV special case: a Movies/HD 2040
+// subcategory item satisfies its 2000 Movies parent while staying excluded
+// from the unrelated TV parent, so a regression back to a hard-coded
+// anime-to-TV mapping fails here.
+func TestFilterByCatsMatchesAnyTorznabParent(t *testing.T) {
+	items := []item{{Title: "movie subcategory", Categories: []int{2040}}}
+	got := filterByCats(items, map[int]bool{catMovies: true})
+	if len(got) != 1 || got[0].Title != "movie subcategory" {
+		t.Errorf("Movies parent filter returned %#v, want the 2040 subcategory item", got)
+	}
+	if got := filterByCats(items, map[int]bool{catTV: true}); len(got) != 0 {
+		t.Errorf("TV parent filter returned %#v, want no movie-subcategory items", got)
+	}
+}
+
 // TestReloadKeepsFeedOnMalformedSnapshot verifies reload's resilience contract: once a
 // good feed is loaded, a later malformed snapshot write (a partial/corrupt cycle write) is
 // logged and ignored, never blanking the live feed. A cross-process poll writes the file
@@ -1118,7 +1143,7 @@ func seedRebuild(path string, entries []seadex.Entry) error {
 	if err := os.WriteFile(path, []byte(emptyLedgerJSON), 0o600); err != nil {
 		return err
 	}
-	return NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{}).Rebuild(context.Background(), entries, nil)
+	return NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}).Rebuild(context.Background(), entries, nil)
 }
 
 // TestReloadInstallsPreservedMtimeReplacementAfterSuccess pins the last-good
@@ -1580,8 +1605,8 @@ func TestInstallSnapshotSkipsAlreadyInstalledFile(t *testing.T) {
 // AnimeBytes upstream in New, so an /ab search proxies Prowlarr, matches the
 // curated AB torrent by tracker key (AB exposes no info hash in Torznab), and
 // marks it best - while the unconfigured nyaa scope serves nothing without an
-// upstream failure. Kills the lived CONDITIONALS_NEGATION mutant on New's AB
-// wiring conditional (with the wiring negated, /ab returns 0 items).
+// upstream failure. Without the AB wiring in New, a valid snapshot and
+// Prowlarr response would still produce no curated search items.
 func TestSearchUsesConfiguredABUpstream(t *testing.T) {
 	// The compare cycle rebuilds the curation set from a SeaDex AB entry
 	// (torrentid 1167293, best). No passkey is needed: a search matches by

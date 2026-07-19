@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"errors"
 	"math"
 	"slices"
 	"testing"
@@ -33,6 +34,14 @@ func FuzzParseTorznab(f *testing.F) {
 		rendered := renderFeed(items)
 		reparsed, err := parseTorznab([]byte(rendered))
 		if err != nil {
+			// An input accepted near the decode limits can re-render
+			// slightly larger than it parsed (fixed rendered attr names,
+			// the guid fallback duplicating a URL into a second element),
+			// so a fail-closed limit rejection on re-parse is a valid
+			// outcome. Any other re-parse failure is a fidelity bug.
+			if _, ok := errors.AsType[*torznabLimitError](err); ok {
+				return
+			}
 			t.Fatalf("re-parse of rendered feed failed: %v\nrendered: %s", err, rendered)
 		}
 		if len(reparsed) != len(items) {

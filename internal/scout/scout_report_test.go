@@ -72,8 +72,8 @@ func TestReportGeneratesRowsAndNeverWritesState(t *testing.T) {
 // TestReportPartialSnapshotErrors pins Report's completeness gate: a walk that
 // skipped series after episode-fetch failures (Partial=true, nil error) must
 // fail the one-shot report rather than publish a successful, timestamped audit
-// that silently omits the skipped series - the whole-library contract the
-// daemon cycle already enforces via its partial-snapshot gate.
+// that silently omits skipped series. Report mode requires a complete snapshot;
+// the daemon instead compares the clean subset and preserves failed items' findings.
 func TestReportPartialSnapshotErrors(t *testing.T) {
 	logger := scoutTestLogger()
 	sonarr := &flakySonarr{

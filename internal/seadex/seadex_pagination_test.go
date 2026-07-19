@@ -111,6 +111,43 @@ func TestFetchEntriesErrorsOnEmptyTerminalPageWithOutstandingItems(t *testing.T)
 	}
 }
 
+// TestFetchEntriesErrorsOnMetadataRegression pins the truncated-view guard
+// against pagination-metadata REGRESSION: page 1 promises totalItems=501 over
+// totalPages=2 and delivers 500 entries, then page 2 arrives empty and OMITS
+// totalItems (which decodes as zero). The retained highest reported total
+// (fetchTotals.reportedTotal is never overwritten downward) keeps
+// pageComplete's outstanding-items check armed, so the fetch fails rather
+// than successfully returning the truncated 500-entry catalogue.
+func TestFetchEntriesErrorsOnMetadataRegression(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		switch page {
+		case 1:
+			items := make([]string, 500)
+			for i := range items {
+				items[i] = fmt.Sprintf(`{"alID":%d,"expand":{"trs":[]}}`, i+1)
+			}
+			fmt.Fprintf(w, `{"totalItems":501,"totalPages":2,"items":[%s]}`, strings.Join(items, ","))
+		case 2:
+			fmt.Fprint(w, `{"totalPages":2,"items":[]}`)
+		default:
+			t.Errorf("unexpected request for page %d after metadata regression", page)
+		}
+	}))
+	defer server.Close()
+
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	if err == nil {
+		t.Fatal("FetchEntries returned nil error, want truncated-view error on metadata regression")
+	}
+	if entries != nil {
+		t.Fatalf("len(entries) = %d, want nil on truncated-view error", len(entries))
+	}
+	if !strings.Contains(err.Error(), "500 of 501 reported entries fetched") {
+		t.Errorf("error = %q, want it to name fetched (500) vs reported (501) counts", err.Error())
+	}
+}
+
 // staticPageTransport serves a fixed two-page envelope's first page for every
 // request, keeping the unmanaged SeaDex boundary hermetic inside the synctest
 // bubble (a real httptest socket would block virtual time).

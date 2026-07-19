@@ -119,6 +119,8 @@ func TestTorrentUsableURL(t *testing.T) {
 		{name: "prefix-confusion host drops", in: Torrent{Tracker: "Nyaa", URL: "https://nyaa.si.evil.example/view/1"}, want: ""},
 		{name: "idn lookalike host drops", in: Torrent{Tracker: "Nyaa", URL: "https://ny\u0430a.si/view/1"}, want: ""},
 		{name: "mislabeled cross-tracker canonical host kept", in: Torrent{Tracker: "Nyaa", URL: "https://animebytes.tv/torrents.php?id=9&torrentid=10"}, want: "https://animebytes.tv/torrents.php?id=9&torrentid=10"},
+		{name: "mislabeled schemeless canonical host recovers", in: Torrent{Tracker: "Nyaa", URL: "animebytes.tv/torrents.php?id=9&torrentid=10"}, want: "https://animebytes.tv/torrents.php?id=9&torrentid=10"},
+		{name: "schemeless canonical host with userinfo never publishes canonicalized", in: Torrent{Tracker: "Nyaa", URL: "user@animebytes.tv/torrents.php?id=9"}, want: "https://nyaa.si/user@animebytes.tv/torrents.php?id=9"},
 		{name: "animebytes relative", in: Torrent{Tracker: "AB", URL: "/torrents.php?id=1"}, want: "https://animebytes.tv/torrents.php?id=1"},
 		{name: "relative without slash", in: Torrent{Tracker: "Nyaa", URL: "view/1"}, want: "https://nyaa.si/view/1"},
 		{name: "unknown tracker relative drops", in: Torrent{Tracker: "unknown", URL: "/local/path"}, want: ""},

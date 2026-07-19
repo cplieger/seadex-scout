@@ -235,3 +235,20 @@ func TestABVisibleAdapterGatesOnRawEvidence(t *testing.T) {
 		})
 	}
 }
+
+// TestObtainableAdapterPreservesRawURLForCrossCheck pins the adapter's wiring
+// invariant that filter.Obtainable's own tests cannot cover: the RAW upstream
+// URL must feed the AnimeBytes host cross-check (so a mislabeled schemeless AB
+// URL is caught) while Torrent.UsableURL supplies the actionable link. A
+// mutant passing the canonical URL to both arguments returns true here.
+func TestObtainableAdapterPreservesRawURLForCrossCheck(t *testing.T) {
+	torrent := &seadex.Torrent{
+		Tracker: "Nyaa",
+		URL:     "animebytes.tv/torrents.php?id=1&torrentid=2",
+	}
+	rel := &release.Release{Tracker: "Nyaa", TrackerType: release.TrackerPublic}
+
+	if got := Obtainable(rel, torrent, false); got {
+		t.Error("Obtainable() = true, want false for a mislabeled schemeless AnimeBytes URL when AnimeBytes is disabled")
+	}
+}

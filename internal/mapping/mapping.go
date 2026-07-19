@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -219,17 +220,22 @@ func NewIndex(records []Record) *Index {
 
 // deduplicateRecords returns one effective record per AniList ID while
 // preserving buildIndex's existing last-record-wins semantics and stable order.
+// Records with a zero AniList ID are omitted: buildIndex drops them, so keeping
+// them here would let cacheUsable and the acceptance validators count a larger
+// population (rows and arr identifiers) than the effective served index.
 // acceptRefresh runs it before the acceptance invariants so row counts and
 // identifier coverage measure the AniList-keyed dataset consumers actually
 // receive, not the transport representation.
 func deduplicateRecords(records []Record) []Record {
 	last := make(map[int]int, len(records))
 	for i := range records {
-		last[records[i].AniListID] = i
+		if records[i].AniListID != 0 {
+			last[records[i].AniListID] = i
+		}
 	}
 	out := make([]Record, 0, len(last))
 	for i := range records {
-		if last[records[i].AniListID] == i {
+		if records[i].AniListID != 0 && last[records[i].AniListID] == i {
 			out = append(out, records[i])
 		}
 	}
@@ -412,8 +418,19 @@ func rejectRefresh(prev *Cache, staleMsg string, cause, noCache error) (Cache, e
 }
 
 // refreshCache decides whether to reuse, re-validate, or re-download the Fribb
-// map and returns the cache to persist.
+// map and returns the cache to persist. Validators loaded from the previously
+// persisted Cache are sanitized (boundedValidator) up front: they were only
+// ever checked on the accept-200 path that captured them, so a pre-existing
+// oversized or control-byte validator in state.json would otherwise be
+// replayed into every conditional request (which net/http rejects at
+// request-write time) and re-persisted verbatim by every stale/304 return,
+// never self-healing. Dropping it here makes the drop part of every returned
+// Cache - fresh reuse, 304, acceptance, and stale degradation alike.
 func (l *Loader) refreshCache(ctx context.Context, prev *Cache) (Cache, error) {
+	sanitized := *prev
+	sanitized.ETag = l.boundedValidator("etag", prev.ETag)
+	sanitized.LastModified = l.boundedValidator("last_modified", prev.LastModified)
+	prev = &sanitized
 	age := time.Since(prev.FetchedAt)
 	// age >= 0 rejects a future FetchedAt (clock skew or a corrupt state file):
 	// a negative age is never fresh, forcing a revalidating fetch rather than
@@ -460,8 +477,11 @@ func (l *Loader) reuseCachedRecords(prev *Cache) (Cache, error) {
 // degraded conditional revalidation is observable. A hostile validator with a
 // CR/LF would otherwise be persisted into state.json and replayed as a request
 // header on every subsequent conditional GET, which net/http rejects at
-// request-write time - and since validators are only replaced on a successful
-// 200, the poisoned value would never self-heal. If no other validator
+// request-write time. Applied on BOTH sides of persistence: acceptRefresh
+// sanitizes validators captured from a fresh 200, and refreshCache sanitizes
+// validators loaded from the previously persisted Cache, so a poisoned value
+// already in state.json is dropped (self-heals) instead of being re-persisted
+// by every stale/304 return. If no other validator
 // remains, the next refresh is an unconditional full fetch.
 func (l *Loader) boundedValidator(name, v string) string {
 	if len(v) > maxValidatorBytes {
@@ -786,31 +806,38 @@ const maxLoggedUnknownKeys = 20
 // count still rides in unknown_key_count.
 const maxLoggedKeyBytes = 64
 
+// maxLoggedDuplicateIDs bounds how many distinct duplicated AniList IDs the
+// duplicate-override WARN names; the full distinct count still rides in
+// duplicate_count.
+const maxLoggedDuplicateIDs = 20
+
 // applyOverrides reads the operator overrides file (if present) and overlays
-// each record onto the index, keyed by AniList ID. A missing file is not an
-// error; a malformed file is logged and ignored so a bad override never blocks
-// a cycle.
+// each effective record onto the index, keyed by AniList ID. A missing file is
+// not an error; a malformed file is logged and ignored so a bad override never
+// blocks a cycle.
 func (l *Loader) applyOverrides(ctx context.Context, idx *Index) {
 	if l.overridesPath == "" {
 		return
 	}
-	overrides, ok := l.readOverrides(ctx)
+	set, ok := l.readOverrides(ctx)
 	if !ok {
 		return
 	}
-	applied, duplicates := overlayRecords(idx, overrides)
-	if len(duplicates) > 0 {
-		shown := min(len(duplicates), maxLoggedUnknownKeys)
+	for _, record := range set.records {
+		idx.byAniList[record.AniListID] = record
+	}
+	if len(set.duplicates) > 0 {
+		shown := min(len(set.duplicates), maxLoggedDuplicateIDs)
 		l.log.Warn("mapping: duplicate override anilist_ids, last record wins",
-			"ids", duplicates[:shown],
-			"duplicate_count", len(duplicates),
+			"ids", set.duplicates[:shown],
+			"duplicate_count", len(set.duplicates),
 			"path", l.overridesPath)
 	}
-	if skipped := len(overrides) - applied; skipped > 0 {
-		l.log.Warn("mapping: overrides missing anilist_id skipped", "skipped", skipped, "path", l.overridesPath)
+	if set.skipped > 0 {
+		l.log.Warn("mapping: overrides missing anilist_id skipped", "skipped", set.skipped, "path", l.overridesPath)
 	}
-	if applied > 0 {
-		l.log.Info("mapping: applied overrides", "count", applied)
+	if set.applied > 0 {
+		l.log.Info("mapping: applied overrides", "count", set.applied)
 	}
 }
 
@@ -818,27 +845,27 @@ func (l *Loader) applyOverrides(ctx context.Context, idx *Index) {
 // every ignored outcome: a cancelled read, a missing file (silently), an
 // unreadable or malformed file (logged). Unknown keys are diagnosed with a
 // bounded WARN but never reject the file.
-func (l *Loader) readOverrides(ctx context.Context) ([]Record, bool) {
+func (l *Loader) readOverrides(ctx context.Context) (overrideSet, bool) {
 	data, err := atomicfile.ReadBounded(ctx, l.overridesPath, maxOverrideBytes)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, false
+			return overrideSet{}, false
 		}
 		if !errors.Is(err, fs.ErrNotExist) {
 			l.log.Warn("mapping: overrides unreadable, ignoring", "path", l.overridesPath, "error", err)
 		}
-		return nil, false
+		return overrideSet{}, false
 	}
-	overrides, unknown, err := parseOverrides(data)
+	set, err := parseOverrides(data)
 	if err != nil {
 		l.log.Warn("mapping: overrides malformed, ignoring", "path", l.overridesPath, "error", err)
-		return nil, false
+		return overrideSet{}, false
 	}
-	if len(unknown) > 0 {
-		shown := min(len(unknown), maxLoggedUnknownKeys)
+	if len(set.unknown) > 0 {
+		shown := min(len(set.unknown), maxLoggedUnknownKeys)
 		logged := make([]string, 0, shown)
 		shortened := false
-		for _, k := range unknown[:shown] {
+		for _, k := range set.unknown[:shown] {
 			if len(k) > maxLoggedKeyBytes {
 				k = runesafe.CapBytes(k, maxLoggedKeyBytes) + "..."
 				shortened = true
@@ -847,32 +874,30 @@ func (l *Loader) readOverrides(ctx context.Context) ([]Record, bool) {
 		}
 		l.log.Warn("mapping: overrides contain unknown keys, ignored",
 			"keys", logged,
-			"unknown_key_count", len(unknown),
-			"keys_truncated", len(unknown) > maxLoggedUnknownKeys || shortened,
+			"unknown_key_count", len(set.unknown),
+			"keys_truncated", len(set.unknown) > maxLoggedUnknownKeys || shortened,
 			"path", l.overridesPath)
 	}
-	return overrides, true
+	return set, true
 }
 
-// overlayRecords overlays each record with a non-zero AniList ID onto the
-// index and returns how many were applied plus the AniList IDs that appeared
-// more than once (a later duplicate overwrites the earlier one, matching
-// NewIndex's last-record-wins semantics); zero-ID records are skipped (the
-// caller reports the skip count).
-func overlayRecords(idx *Index, records []Record) (applied int, duplicates []int) {
-	seen := make(map[int]struct{}, len(records))
-	for _, record := range records {
-		if record.AniListID == 0 {
-			continue
-		}
-		if _, dup := seen[record.AniListID]; dup {
-			duplicates = append(duplicates, record.AniListID)
-		}
-		seen[record.AniListID] = struct{}{}
-		idx.byAniList[record.AniListID] = record
-		applied++
-	}
-	return applied, duplicates
+// overrideSet is parseOverrides' result: the effective overlay plus the
+// diagnostics applyOverrides logs. records holds only effective records
+// (non-zero AniList ID, deduplicated last-record-wins), so its size is
+// bounded by the distinct usable IDs in the file rather than the transport
+// row count. applied counts the non-zero-ID transport rows (duplicate rows
+// included, matching the pre-streaming overlay arithmetic); skipped counts
+// the zero-ID rows discarded during the stream; duplicates lists each
+// distinct duplicated AniList ID once, on its first repeated occurrence, so
+// one heavily repeated ID cannot fill the bounded log prefix and hide later
+// duplicated IDs; unknown is the sorted, deduplicated set of keys outside
+// overrideKeys.
+type overrideSet struct {
+	records    []Record
+	unknown    []string
+	duplicates []int
+	applied    int
+	skipped    int
 }
 
 // knownOverrideKey reports whether key names an overrideKeys entry under the
@@ -888,55 +913,104 @@ func knownOverrideKey(key string) bool {
 	return false
 }
 
-// unknownOverrideKeys scans the raw overrides JSON for keys outside
-// overrideKeys and returns them sorted and de-duplicated; a raw-unmarshal
-// error yields nil (the typed decode in parseOverrides reports real errors).
-func unknownOverrideKeys(data []byte) []string {
-	var raw []map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil
+// collectUnknownKeys scans one raw override record for keys outside
+// overrideKeys, appending first occurrences to unknown (seen dedupes across
+// records). A raw-unmarshal error is ignored: the typed decode in
+// parseOverrides reports real errors.
+func collectUnknownKeys(raw json.RawMessage, seen map[string]struct{}, unknown []string) []string {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return unknown
 	}
-	seen := make(map[string]struct{})
-	var unknown []string
-	for _, m := range raw {
-		for k := range m {
-			if knownOverrideKey(k) {
-				continue
-			}
-			if _, dup := seen[k]; dup {
-				continue
-			}
-			seen[k] = struct{}{}
-			unknown = append(unknown, k)
+	for k := range m {
+		if knownOverrideKey(k) {
+			continue
 		}
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		unknown = append(unknown, k)
 	}
-	slices.Sort(unknown)
 	return unknown
 }
 
-// parseOverrides decodes the overrides file: a JSON array of Record objects,
-// each keyed by its AniList ID. The Type is normalized to upper case so an
-// operator can write "movie" or "tv". It also returns the sorted set of
-// unknown keys found in any record (e.g. upstream Fribb spellings like
-// "imdb_id"), so the caller can warn instead of silently dropping them.
-// The top-level value must be a JSON array: encoding/json would otherwise
-// accept a literal null into a nil []Record without error, silently treating
-// a clobbered overrides file as a valid empty overlay instead of routing it
-// through readOverrides' malformed-file warning.
-func parseOverrides(data []byte) ([]Record, []string, error) {
+// applyRecord decodes one raw override record and folds it into the set:
+// unknown keys are collected, Type is normalized, a zero-AniList-ID record is
+// counted as skipped, and a duplicate ID replaces its earlier record
+// (last-record-wins) while being reported once in set.duplicates.
+func (set *overrideSet) applyRecord(raw json.RawMessage, seenKeys map[string]struct{}, position map[int]int, reported map[int]struct{}) error {
+	var record Record
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return err
+	}
+	set.unknown = collectUnknownKeys(raw, seenKeys, set.unknown)
+	record.Type = NormalizeType(record.Type)
+	if record.AniListID == 0 {
+		set.skipped++
+		return nil
+	}
+	set.applied++
+	if at, dup := position[record.AniListID]; dup {
+		if _, done := reported[record.AniListID]; !done {
+			reported[record.AniListID] = struct{}{}
+			set.duplicates = append(set.duplicates, record.AniListID)
+		}
+		set.records[at] = record
+		return nil
+	}
+	position[record.AniListID] = len(set.records)
+	set.records = append(set.records, record)
+	return nil
+}
+
+// parseOverrides decodes the overrides file - a JSON array of Record objects,
+// each keyed by its AniList ID - streaming one record at a time so the peak
+// allocation tracks the effective overlay, not the transport row count.
+// maxOverrideBytes bounds the wire size, but a compact array of semantically
+// empty records (e.g. a million {} rows) fits under it while three
+// whole-document materializations ([]Record, the unknown-key scan's
+// []map[string]json.RawMessage, and the overlay's row-sized seen map) would
+// multiply it well past the container's memory budget before every row is
+// discarded as unusable. Each record is instead decoded from its own
+// RawMessage, its unknown keys collected, its Type normalized (so an operator
+// can write "movie" or "tv"), and then either discarded (zero AniList ID,
+// counted in skipped) or folded into the deduplicated effective set with
+// last-record-wins. The top-level value must be a JSON array with no trailing
+// data: encoding/json would otherwise accept a literal null into a nil
+// []Record without error, silently treating a clobbered overrides file as a
+// valid empty overlay instead of routing it through readOverrides'
+// malformed-file warning.
+func parseOverrides(data []byte) (overrideSet, error) {
 	trimmedData := bytes.TrimSpace(data)
 	if len(trimmedData) == 0 || trimmedData[0] != '[' {
-		return nil, nil, errors.New("mapping: overrides must be a JSON array")
+		return overrideSet{}, errors.New("mapping: overrides must be a JSON array")
 	}
-	var records []Record
-	if err := json.Unmarshal(trimmedData, &records); err != nil {
-		return nil, nil, err
+	dec := json.NewDecoder(bytes.NewReader(trimmedData))
+	if _, err := dec.Token(); err != nil { // the opening '['
+		return overrideSet{}, err
 	}
-	unknown := unknownOverrideKeys(trimmedData)
-	for i := range records {
-		records[i].Type = NormalizeType(records[i].Type)
+	var set overrideSet
+	seenKeys := make(map[string]struct{})
+	position := make(map[int]int) // AniList ID -> index in set.records
+	reported := make(map[int]struct{})
+	for dec.More() {
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return overrideSet{}, err
+		}
+		if err := set.applyRecord(raw, seenKeys, position, reported); err != nil {
+			return overrideSet{}, err
+		}
 	}
-	return records, unknown, nil
+	if _, err := dec.Token(); err != nil { // the closing ']'
+		return overrideSet{}, err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return overrideSet{}, errors.New("mapping: overrides carry data after the JSON array")
+	}
+	slices.Sort(set.unknown)
+	return set, nil
 }
 
 // overrideKeys is the set of keys an overrides record may carry (Record's JSON tags).

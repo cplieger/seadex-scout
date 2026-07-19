@@ -250,10 +250,16 @@ func parsePBTime(s string) time.Time {
 }
 
 // fetchTotals accumulates the cross-page counters of one FetchEntries run.
+// reportedTotal and reportedPages retain the HIGHEST value any page promised
+// (never overwritten downward): a later page whose metadata regresses — an
+// empty page omitting totalItems decodes it as zero, or a lowered totalPages —
+// must not erase an earlier page's promise of more records, or pageComplete
+// would accept a truncated view.
 type fetchTotals struct {
 	bytes         int
 	elements      int
 	reportedTotal int
+	reportedPages int
 	unparsedTimes int
 	unusableURLs  int
 }
@@ -291,8 +297,8 @@ func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 			return c.finishFetch(all, tot)
 		}
 	}
-	return nil, fmt.Errorf("seadex: pagination exceeded max %d pages (upstream reported more); "+
-		"refusing to compare against a truncated view", maxPages)
+	return nil, fmt.Errorf("seadex: pagination exceeded max %d pages after %d entries fetched (upstream reported more); "+
+		"refusing to compare against a truncated view", maxPages, len(all))
 }
 
 // finishFetch validates a completed catalogue before returning it: zero
@@ -357,13 +363,25 @@ func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, tot 
 	}
 	tot.bytes += n
 	tot.elements += elems
-	tot.reportedTotal = list.TotalItems
+	tot.reportedTotal = max(tot.reportedTotal, list.TotalItems)
+	tot.reportedPages = max(tot.reportedPages, list.TotalPages)
 	if len(list.Items) > maxEntries-len(all) {
-		return all, false, fmt.Errorf("seadex: entry count exceeded cap %d (upstream misbehaving)", maxEntries)
+		return all, false, fmt.Errorf("seadex: entry count exceeded cap %d on page %d (%d already fetched, %d received; upstream misbehaving)",
+			maxEntries, page, len(all), len(list.Items))
 	}
 	all = appendPageEntries(all, list.Items, tot)
 	done, err = pageComplete(page, len(list.Items), list.TotalPages, len(all), tot.reportedTotal)
-	return all, done, err
+	if err != nil {
+		return all, false, err
+	}
+	// pageComplete judges the CURRENT page's totalPages (so invalid current
+	// metadata still errors); the retained highest promise prevents a
+	// lower-but-currently-valid terminal value from ending the walk early
+	// after an earlier page promised more pages.
+	if done && page < tot.reportedPages {
+		done = false
+	}
+	return all, done, nil
 }
 
 // appendPageEntries converts one page's decoded records into public entries,
@@ -500,7 +518,13 @@ type pageDecoder struct {
 // fetchAndAppend); the decoded element count is returned so the caller can
 // charge the fetch-wide budget.
 func decodePage(body []byte, elemLimit int) (pbList, int, error) {
-	d := &pageDecoder{dec: json.NewDecoder(bytes.NewReader(body)), limit: elemLimit}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	// UseNumber keeps Token from converting unknown-field numbers to float64
+	// (which rejects syntactically valid values like 1e1000 that
+	// json.Unmarshal's field skipping accepts); Decode into the known
+	// int/string/bool fields is unaffected.
+	dec.UseNumber()
+	d := &pageDecoder{dec: dec, limit: elemLimit}
 	list, err := d.decodeList()
 	if err != nil {
 		return pbList{}, 0, err

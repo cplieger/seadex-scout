@@ -191,12 +191,10 @@ func TestDedupeKeyDomainSeparatesRawAndHashed(t *testing.T) {
 
 // TestCandidateStableKeyBoundsOversizedComponents pins the size bound on the
 // headline tie-break key: SeaDex admits arbitrarily long URLs (48 MiB pages,
-// up to 512 torrents per entry) and betterCandidate rebuilds the incumbent's
-// key on every equal-rank comparison, so an oversized component set must
-// reduce to a fixed-size hashed identity (boundedJoinParts) instead of
-// materializing large escaped URL copies per comparison - while distinct
-// oversized candidates still key distinctly and headline selection stays
-// order-independent.
+// up to 512 torrents per entry), so each memoized candidate key must reduce an
+// oversized component set to a fixed-size hashed identity. Distinct oversized
+// candidates must still key differently and select the same headline regardless
+// of upstream order.
 func TestCandidateStableKeyBoundsOversizedComponents(t *testing.T) {
 	oversized := func(tag string) candidate {
 		return candidate{
@@ -622,7 +620,10 @@ func TestCompareMislabeledAnimeBytesURLRequiresOptIn(t *testing.T) {
 	// but carrying an animebytes.tv URL - absolute, schemeless, or host:port -
 	// must be invisible while the AnimeBytes toggle is off (URL-aware guard on
 	// the RAW upstream URL), and surface only when it is on AND the URL still
-	// yields a usable link. The host:port form hides its host from UsableURL
+	// yields a usable link. Both the absolute and the schemeless forms must
+	// then publish the ANIMEBYTES URL (UsableURL recovers the schemeless
+	// form's canonical host rather than base-prefixing it under the wrong
+	// label). The host:port form hides its host from UsableURL
 	// (hidden-host: no followable link can be published), so it stays absent
 	// even with the toggle on - an unusable URL is never obtainable evidence.
 	const absURL = "https://animebytes.tv/torrents.php?id=9&torrentid=10"
@@ -648,8 +649,8 @@ func TestCompareMislabeledAnimeBytesURLRequiresOptIn(t *testing.T) {
 			if len(got) != tc.wantOn {
 				t.Fatalf("AnimeBytes on: got %d findings, want %d", len(got), tc.wantOn)
 			}
-			if tc.sneakyURL == absURL && got[0].ReleaseURL != absURL {
-				t.Errorf("ReleaseURL = %q, want the AB URL", got[0].ReleaseURL)
+			if tc.wantOn == 1 && got[0].ReleaseURL != absURL {
+				t.Errorf("ReleaseURL = %q, want the AB URL %q", got[0].ReleaseURL, absURL)
 			}
 		})
 	}

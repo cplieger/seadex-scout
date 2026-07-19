@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -997,10 +998,10 @@ func TestWalkSonarrLogsLiveContextTimeout(t *testing.T) {
 	if len(snap.Items) != 2 {
 		t.Fatalf("items = %d, want 2 (the timed-out series stays as a Failed placeholder)", len(snap.Items))
 	}
-	if !rec.Contains("skipping series: episode fetch failed") {
+	if !rec.Contains("sonarr episode fetch failed; series kept as failed placeholder") {
 		t.Errorf("messages = %q, want a per-series episode-fetch-failed warning", rec.Messages())
 	}
-	if !recordHasAttr(rec, "skipping series: episode fetch failed", "series", "Bravo") {
+	if !recordHasAttr(rec, "sonarr episode fetch failed; series kept as failed placeholder", "series", "Bravo") {
 		t.Error("episode-fetch-failed warning does not name Bravo in its series attr")
 	}
 }
@@ -1023,7 +1024,7 @@ func TestWalkSonarrSilentOnContextCancel(t *testing.T) {
 	if _, err := w.Walk(ctx); err == nil {
 		t.Fatal("Walk returned nil error, want the walk-context cancellation propagated")
 	}
-	if rec.Contains("skipping series: episode fetch failed") {
+	if rec.Contains("sonarr episode fetch failed; series kept as failed placeholder") {
 		t.Errorf("messages = %q, want no per-series warning on walk-context cancellation", rec.Messages())
 	}
 }
@@ -1481,4 +1482,71 @@ func TestWalkSonarrZeroKeptSeriesSucceeds(t *testing.T) {
 			t.Errorf("snapshot = %+v, want empty and not partial", snap)
 		}
 	})
+}
+
+// TestWalkSonarrEpisodeFailureRedactsErrorURL pins the credential boundary of
+// the recoverable per-series warning: an arr transport error is a *url.Error
+// embedding the full request URL (with any configured userinfo), and the
+// warning sits outside the walk-level LogSafeError boundary, so the log site
+// must apply the same reduction itself before the line reaches Loki.
+func TestWalkSonarrEpisodeFailureRedactsErrorURL(t *testing.T) {
+	transportErr := &url.Error{
+		Op:  "Get",
+		URL: "http://user:LEAK-SENTINEL@sonarr:8989/api/v3/episodefile?seriesId=1",
+		Err: errors.New("connection refused"),
+	}
+	fs := &fakeSonarr{
+		series: []arrapi.Series{
+			{ID: 1, Title: "Alpha"},
+			{ID: 2, Title: "Bravo"},
+		},
+		files: map[int][]arrapi.EpisodeFile{
+			2: {epFile(1, "PMR")},
+		},
+		epErr: map[int]error{1: transportErr},
+	}
+	logger, rec := capture.New()
+	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
+
+	if _, err := w.Walk(context.Background()); err != nil {
+		t.Fatalf("Walk returned error, want a successful partial walk: %v", err)
+	}
+	if !recordHasAttr(rec, "sonarr episode fetch failed; series kept as failed placeholder", "error", "connection refused") {
+		t.Errorf("episode-fetch-failed warning does not carry the reduced transport error; records = %+v", rec.Records())
+	}
+	for _, r := range rec.Records() {
+		r.Attrs(func(a slog.Attr) bool {
+			if strings.Contains(a.Value.String(), "LEAK-SENTINEL") {
+				t.Errorf("captured record %q attr %q leaks the userinfo credential", r.Message, a.Key)
+			}
+			return true
+		})
+	}
+}
+
+// TestWalkSonarrEpisodeFailureSanitizesTitle pins the log-injection boundary
+// of the same warning: the upstream Sonarr series title passes through
+// runesafe.Sanitize before landing in the series attribute, so terminal
+// escapes and bidi overrides cannot forge log content.
+func TestWalkSonarrEpisodeFailureSanitizesTitle(t *testing.T) {
+	const rawTitle = "Frieren\x1b[2J \u202egpj.exe"
+	fs := &fakeSonarr{
+		series: []arrapi.Series{
+			{ID: 1, Title: rawTitle},
+			{ID: 2, Title: "Healthy"},
+		},
+		files: map[int][]arrapi.EpisodeFile{
+			2: {epFile(1, "PMR")},
+		},
+		epErr: map[int]error{1: errors.New("episode fetch boom")},
+	}
+	logger, rec := capture.New()
+	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
+
+	if _, err := w.Walk(context.Background()); err != nil {
+		t.Fatalf("Walk returned error, want a successful partial walk: %v", err)
+	}
+	if !recordHasAttr(rec, "sonarr episode fetch failed; series kept as failed placeholder", "series", "Frieren [2J  gpj.exe") {
+		t.Errorf("episode-fetch-failed warning does not carry the sanitized series title; records = %+v", rec.Records())
+	}
 }

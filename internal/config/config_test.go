@@ -1125,6 +1125,7 @@ func TestURLEmbedsCredential(t *testing.T) {
 		{"malformed semicolon pair keeps apikey flagged", "http://prowlarr:9696/22/api?apikey=k;foo=x", true},
 		{"credential after semicolon in malformed pair", "http://prowlarr:9696/22/api?foo=x;passkey=k", true},
 		{"uppercase credential in malformed pair", "http://prowlarr:9696/22/api?APIKEY=k;foo=x", true},
+		{"percent-encoded credential in malformed pair", "http://prowlarr:9696/22/api?%61pikey=k;foo=x", true},
 		{"malformed pair without credential", "http://prowlarr:9696/22/api?foo=x;bar=y", false},
 		{"credential name in value position", "http://prowlarr:9696/22/api?mode=apikey", false},
 		{"unparseable", "http://[::1", false},

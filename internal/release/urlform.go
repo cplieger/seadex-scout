@@ -95,8 +95,10 @@ type URLForm struct {
 	HostUnrecoverable bool
 	// HasUserInfo records a userinfo authority component ("user@host") in
 	// the canonicalized parse - a visual-spoofing vector
-	// ("https://trusted@evil/") the seadex link publisher rejects. Always
-	// false when the string did not parse.
+	// ("https://trusted@evil/") the seadex link publisher rejects. For a
+	// URLFormSchemelessHost the fact comes from the same authority reparse
+	// that supplies Host (so "user@host/x" reports it alongside the
+	// recovered host). Always false when the string did not parse.
 	HasUserInfo bool
 }
 
@@ -145,6 +147,7 @@ func ClassifyRawURL(raw string) URLForm {
 			return f
 		}
 		f.Host = strings.ToLower(rehost.Hostname())
+		f.HasUserInfo = rehost.User != nil
 	}
 	return f
 }

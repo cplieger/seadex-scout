@@ -138,6 +138,7 @@ type journalStats struct {
 	pruned             int
 	dropped            int
 	warned             int
+	rebased            int
 	unresolvable       int
 	abSkippedNoPasskey int
 }
@@ -154,11 +155,26 @@ func (js *journalStats) recordDrop(noPasskey bool) {
 }
 
 // carryItem re-renders or prunes one carried journal item, updating js, and
-// reports whether it survives into the rebuilt journal.
-func (w *FeedWriter) carryItem(it *item, cur map[string][]curatedRef, warned map[string]struct{}, infoFor func(alID int) EntryInfo, now time.Time, js *journalStats) (item, bool) {
+// reports whether it survives into the rebuilt journal. warned is the
+// excluded tracker-key set (direct warnings plus duplicates removed through a
+// shared identity); warnedIDs is the full warned-identity signal set, so a
+// carried item whose stored info hash is warned under a DIFFERENT tracker key
+// is retracted too (RSS must never keep serving bytes search suppresses).
+func (w *FeedWriter) carryItem(it *item, cur map[string][]curatedRef, warned, warnedIDs map[string]struct{}, infoFor func(alID int) EntryInfo, now time.Time, js *journalStats) (item, bool) {
 	if it.Key == "" || it.FirstSeen.IsZero() {
 		js.dropped++
 		return item{}, false
+	}
+	if it.FirstSeen.After(now) {
+		// A FirstSeen ahead of the wall clock (a clock rollback, or a
+		// snapshot restored from a future-skewed host) would make the
+		// max-age check below see a negative age and keep the item past the
+		// bounded journal window. Rebase it to now - preserving the item
+		// across the clock correction while bounding its remaining lifetime
+		// to feedJournalMaxAge - and count the rebase for the snapshot log
+		// line.
+		it.FirstSeen, it.PubDate = now, now
+		js.rebased++
 	}
 	if now.Sub(it.FirstSeen) > feedJournalMaxAge {
 		js.pruned++
@@ -167,6 +183,12 @@ func (w *FeedWriter) carryItem(it *item, cur map[string][]curatedRef, warned map
 	if _, bad := warned[it.Key]; bad {
 		js.warned++
 		return item{}, false
+	}
+	if it.InfoHash != "" {
+		if _, bad := warnedIDs[it.InfoHash]; bad {
+			js.warned++
+			return item{}, false
+		}
 	}
 	refs, curated := cur[it.Key]
 	if !curated {
@@ -194,17 +216,19 @@ func (w *FeedWriter) carryItem(it *item, cur map[string][]curatedRef, warned map
 // curation set keeps its stored render (a curated-then-replaced torrent is
 // still a valid release). An item older than feedJournalMaxAge leaves the
 // journal (its cached title is dropped by the caller's retainTitles); an item
-// whose torrent has become curation-warned (its key is in warned) is dropped
+// whose torrent has become curation-warned (its key is in warned, or its
+// stored info hash is in warnedIDs - a warning under a different tracker key
+// still retracts the shared bytes) is dropped
 // - unlike a curated-then-replaced torrent, SeaDex's curators now warn
 // against it, so serving it would hand the arrs a Broken/Incomplete release;
 // a pre-journal item with no Key or FirstSeen (unreachable after a baseline,
 // defensive against hand-edited snapshots) and a carried AnimeBytes item whose
 // download link can no longer be built (the passkey was removed - the release
 // is no longer grabbable, so serving it would be dead weight) are dropped.
-func (w *FeedWriter) carryJournal(prevFeed []item, cur map[string][]curatedRef, warned map[string]struct{}, infoFor func(alID int) EntryInfo, now time.Time, js *journalStats) []item {
+func (w *FeedWriter) carryJournal(prevFeed []item, cur map[string][]curatedRef, warned, warnedIDs map[string]struct{}, infoFor func(alID int) EntryInfo, now time.Time, js *journalStats) []item {
 	kept := make([]item, 0, len(prevFeed))
 	for i := range prevFeed {
-		if it, ok := w.carryItem(&prevFeed[i], cur, warned, infoFor, now, js); ok {
+		if it, ok := w.carryItem(&prevFeed[i], cur, warned, warnedIDs, infoFor, now, js); ok {
 			kept = append(kept, it)
 		}
 	}
@@ -252,7 +276,7 @@ func (w *FeedWriter) journalIfNew(t *seadex.Torrent, cur map[string][]curatedRef
 		// unresolvable-diagnostic case newJournalItem counts: surface it on
 		// the snapshot log line instead of silently shrinking the feed.
 		// Unknown tail trackers and an intentionally disabled AB stay silent.
-		if scope := trackerScope(t.Tracker); scope == upstreamNyaa || (scope == upstreamAB && w.abConfigured) {
+		if scope := trackerScope(t.Tracker); (scope == upstreamNyaa && w.nyaaConfigured) || (scope == upstreamAB && w.abConfigured) {
 			js.unresolvable++
 		}
 		return item{}, "", false
@@ -273,23 +297,28 @@ func (w *FeedWriter) journalIfNew(t *seadex.Torrent, cur map[string][]curatedRef
 // newJournalItem resolves one newly curated torrent into its journal item and
 // scope, updating the skip counters when it cannot be served: a non-Nyaa/AB
 // tracker (the negligible SeaDex tail) is silently ignored, an unconfigured
-// AnimeBytes tracker is skipped without persisting anything for it (the
-// README's off switch; its identity is already in seen), a missing AB passkey
+// tracker (Nyaa or AnimeBytes without its Torznab URL) is skipped without
+// persisting anything for it (the README's off switch; its identity is
+// already in seen, so enabling it later starts from current novelty instead
+// of backfilling disabled-era curation), a missing AB passkey
 // counts toward the operator nudge, and an in-scope torrent with no journal
 // key or no parseable title counts as unresolvable so an upstream URL-shape
 // change surfaces on the snapshot log line instead of silently shrinking the
-// feed.
+// feed (unresolvable is counted only for configured scopes).
 func (w *FeedWriter) newJournalItem(t *seadex.Torrent, cur map[string][]curatedRef, infoFor func(alID int) EntryInfo, js *journalStats) (it item, scope string, ok bool) {
 	scope = trackerScope(t.Tracker)
 	if scope == "" {
 		return item{}, "", false
 	}
-	key := journalKey(t)
-	if key == "" {
-		js.unresolvable++
+	if scope == upstreamNyaa && !w.nyaaConfigured {
 		return item{}, "", false
 	}
 	if scope == upstreamAB && !w.abConfigured {
+		return item{}, "", false
+	}
+	key := journalKey(t)
+	if key == "" {
+		js.unresolvable++
 		return item{}, "", false
 	}
 	it, ok, noPasskey := w.renderJournalItem(key, cur[key], infoFor)

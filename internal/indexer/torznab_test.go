@@ -112,3 +112,79 @@ func TestSanitizeUpstreamText_cleansAndBounds(t *testing.T) {
 		t.Errorf("sanitizeUpstreamText(201 bytes) = %q, want %q", got, want)
 	}
 }
+
+// TestParseTorznabDecodeLimits pins the fail-closed decode limits on an
+// untrusted upstream response: the transport byte cap alone cannot stop a
+// compromised Prowlarr from packing millions of tiny item/attr elements (or
+// one escape-heavy multi-megabyte field) into the budget, so the parser must
+// reject cardinality, per-field, and cumulative-text overflows with a
+// torznabLimitError - which fetchAndParse then retries as a malformed body -
+// while responses at or under the limits keep parsing.
+func TestParseTorznabDecodeLimits(t *testing.T) {
+	feedOf := func(inner string) []byte {
+		return []byte(`<?xml version="1.0"?><rss><channel>` + inner + `</channel></rss>`)
+	}
+	// An escape-heavy field: every source byte is a 5-byte entity, so the
+	// wire form is ~5x the decoded length the limit is measured against.
+	escapeHeavy := strings.Repeat("&amp;", maxUpstreamFieldBytes+1)
+
+	tests := map[string]struct {
+		inner    string
+		wantErr  bool
+		wantItem int
+	}{
+		"item count at the cap parses": {
+			inner:    strings.Repeat("<item><title>x</title></item>", maxUpstreamItems),
+			wantItem: maxUpstreamItems,
+		},
+		"item count over the cap rejected": {
+			inner:   strings.Repeat("<item/>", maxUpstreamItems+1),
+			wantErr: true,
+		},
+		"attr count over the cap rejected": {
+			inner:   "<item>" + strings.Repeat(`<torznab:attr name="a" value="b"/>`, maxUpstreamAttrs+1) + "</item>",
+			wantErr: true,
+		},
+		"escape-heavy field over the cap rejected": {
+			inner:   "<item><title>" + escapeHeavy + "</title></item>",
+			wantErr: true,
+		},
+		"attr value over the cap rejected": {
+			inner:   `<item><torznab:attr name="a" value="` + strings.Repeat("v", maxUpstreamFieldBytes+1) + `"/></item>`,
+			wantErr: true,
+		},
+		"cumulative text over the budget rejected": {
+			// Each item stays under the per-field cap; together they cross
+			// the cumulative budget.
+			inner: strings.Repeat(
+				"<item><title>"+strings.Repeat("t", maxUpstreamFieldBytes)+"</title></item>",
+				maxUpstreamTextBytes/maxUpstreamFieldBytes+1),
+			wantErr: true,
+		},
+		"maximum-length field parses": {
+			inner:    "<item><title>" + strings.Repeat("t", maxUpstreamFieldBytes) + "</title></item>",
+			wantItem: 1,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			items, err := parseTorznab(feedOf(tc.inner))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseTorznab accepted an over-limit response (%d items)", len(items))
+				}
+				var limitErr *torznabLimitError
+				if !errors.As(err, &limitErr) {
+					t.Errorf("error = %T (%v), want *torznabLimitError", err, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseTorznab: %v", err)
+			}
+			if len(items) != tc.wantItem {
+				t.Errorf("parsed item count = %d, want %d", len(items), tc.wantItem)
+			}
+		})
+	}
+}
