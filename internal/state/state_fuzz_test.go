@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -19,25 +20,49 @@ import (
 // the oracle stays independent of production: a regression to State.Version's
 // JSON tag or decoding shape changes Load's classification without silently
 // changing this helper with it, and the newer-schema seeds fail instead of
-// staying green. A struct decode (not a map) mirrors encoding/json's
-// case-insensitive field matching and duplicate-key resolution, so the oracle
-// and production agree on payloads like {"Version":99}.
+// staying green. Every case-insensitive occurrence of the key must decode to
+// an int and the effective (last) value must exceed SchemaVersion, mirroring
+// Load's newer-schema contract: a payload with any invalid duplicate
+// occurrence is corruption, never newer-schema state.
 func newerSchemaState(data []byte) bool {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return false
 	}
-	var envelope struct {
-		Version json.RawMessage `json:"version"`
-	}
-	if err := json.Unmarshal(trimmed, &envelope); err != nil || len(envelope.Version) == 0 {
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
 		return false
 	}
-	var version int
-	if err := json.Unmarshal(envelope.Version, &version); err != nil {
+	version, found := 0, false
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		key, isStr := tok.(string)
+		if !isStr {
+			return false
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return false
+		}
+		if !strings.EqualFold(key, "version") {
+			continue
+		}
+		if err := json.Unmarshal(raw, &version); err != nil {
+			return false
+		}
+		found = true
+	}
+	if _, err := dec.Token(); err != nil {
 		return false
 	}
-	return version > SchemaVersion
+	var trailing json.RawMessage
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return false
+	}
+	return found && version > SchemaVersion
 }
 
 // FuzzStoreLoadQuarantine drives Load with arbitrary state-file bytes and pins
@@ -62,6 +87,7 @@ func FuzzStoreLoadQuarantine(f *testing.F) {
 	f.Add([]byte(`{"baselined":true,"version":1}`))
 	f.Add([]byte(`{"version":"not-a-number"}`))
 	f.Add([]byte(`{"version":99,"version":"not-a-number"}`))
+	f.Add([]byte(`{"version":"bad","Version":99,"findings":{}}`))
 	f.Add([]byte(`{"version":-1}`))
 	f.Add([]byte(`{"version":99,"baselined":true}`))
 	f.Add([]byte(`{"Version":99,"baselined":true}`))

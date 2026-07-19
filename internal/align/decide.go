@@ -94,8 +94,9 @@ type Decision struct {
 	Standing Standing
 	Outcome  Outcome
 	// Season is max(0, Record.SeasonTvdb), the shared non-negative TVDB
-	// season label both consumers stamp on their output. Ordinary movie,
-	// special, and whole-series records carry 0.
+	// season label both consumers stamp on their output. Records without a
+	// positive mapping, including ordinary movies, season-0 specials, and
+	// whole-series comparisons, carry 0.
 	Season int
 	Approx bool
 	NoBest bool

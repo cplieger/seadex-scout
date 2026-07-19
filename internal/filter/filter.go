@@ -118,8 +118,10 @@ func hostFromRawURL(rawURL string) (string, bool) {
 // clickable AnimeBytes link while the toggle is off. The URL-to-host evidence
 // extraction (including the conservative hide of malformed or ambiguous
 // forms) lives in hostFromRawURL; this function is the policy decision. It is
-// the single home of the animebytes toggle's drop rule, shared by the
-// daemon's obtainability filter and the audit report's release listing.
+// the single home of the animebytes toggle's fail-closed drop rule, used
+// by the daemon's obtainability filter and the audit report's verdict
+// eligibility (the audit report's row LISTING is gated by the fail-open
+// DefinitelyAB instead).
 func ABVisible(tracker, rawURL string, animeBytes bool) bool {
 	if animeBytes {
 		return true

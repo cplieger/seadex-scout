@@ -935,3 +935,56 @@ func TestRenderJournalItemNoOccurrencesRejected(t *testing.T) {
 		t.Errorf("renderJournalItem(no refs) item = %+v, want the zero item", it)
 	}
 }
+
+// TestRebuildDropsCarriedItemWarnedByStoredHashOnly pins carryItem's
+// stored-hash branch (warnedIDs[it.InfoHash]) in isolation: the carried
+// nyaa:99 item has NO current occurrence in the catalogue (so its key never
+// enters the widened carry-drop key set), but its stored info hash matches a
+// Broken torrent journaled under a DIFFERENT key (nyaa:41). The carried item
+// must still be retracted through the stored hash - deleting the
+// warnedIDs[it.InfoHash] branch would leave it serving warned bytes on RSS -
+// and the drop is counted on the snapshot log line.
+func TestRebuildDropsCarriedItemWarnedByStoredHashOnly(t *testing.T) {
+	log, rec := capture.New()
+	path := filepath.Join(t.TempDir(), "feed.json")
+	hash := strings.Repeat("a", 40)
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{"nyaa:99": true},
+		Seen:   map[string]bool{"nyaa:99": true},
+		NyaaFeed: []item{{
+			Title: "Show - S01 (1080p) [W]", GUID: "https://nyaa.si/view/99",
+			DownloadURL: "https://nyaa.si/download/99.torrent",
+			Key:         "nyaa:99", InfoHash: hash, AniListID: 8,
+			FirstSeen: time.Now().UTC(), PubDate: time.Now().UTC(),
+		}},
+	})
+	entries := []seadex.Entry{{
+		AniListID: 7,
+		Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://nyaa.si/view/41", IsBest: true,
+			InfoHash: hash,
+			Tags:     []string{"Broken"},
+			Files:    []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [W].mkv"}},
+		}},
+	}}
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 0 {
+		t.Errorf("nyaa feed = %+v, want empty (the carried item's stored hash is warned under a different key)", snap.NyaaFeed)
+	}
+	warnedDropped := int64(-1)
+	for _, r := range rec.Records() {
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "journal_warned_dropped" {
+				warnedDropped = a.Value.Int64()
+			}
+			return true
+		})
+	}
+	if warnedDropped != 1 {
+		t.Errorf("snapshot log line journal_warned_dropped = %d, want 1 (the hash-retracted carried item); log output:\n%s", warnedDropped, strings.Join(rec.Messages(), "\n"))
+	}
+}

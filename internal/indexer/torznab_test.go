@@ -145,6 +145,14 @@ func TestParseTorznabDecodeLimits(t *testing.T) {
 			inner:   "<item>" + strings.Repeat(`<torznab:attr name="a" value="b"/>`, maxUpstreamAttrs+1) + "</item>",
 			wantErr: true,
 		},
+		"tiny attr flood rejected": {
+			// A body-sized run of tiny <attr/> elements: the per-item cap
+			// must reject DURING decoding (itemXML.decodeChild refuses the
+			// 65th attr before decoding it), so the flood never materializes
+			// an attr slice proportional to the wire bytes.
+			inner:   "<item>" + strings.Repeat(`<torznab:attr name="a" value="b"/>`, 100000) + "</item>",
+			wantErr: true,
+		},
 		"escape-heavy field over the cap rejected": {
 			inner:   "<item><title>" + escapeHeavy + "</title></item>",
 			wantErr: true,
@@ -154,11 +162,32 @@ func TestParseTorznabDecodeLimits(t *testing.T) {
 			wantErr: true,
 		},
 		"cumulative text over the budget rejected": {
-			// Each item stays under the per-field cap; together they cross
-			// the cumulative budget.
+			// Each item stays under the per-field cap and the item count
+			// stays under maxUpstreamItems (513 < 1000), so ONLY the
+			// cumulative budget can reject: 513 items x (title+guid) 8192
+			// bytes = 4,202,496 > maxUpstreamTextBytes.
 			inner: strings.Repeat(
-				"<item><title>"+strings.Repeat("t", maxUpstreamFieldBytes)+"</title></item>",
-				maxUpstreamTextBytes/maxUpstreamFieldBytes+1),
+				"<item><title>"+strings.Repeat("t", maxUpstreamFieldBytes)+"</title>"+
+					"<guid>"+strings.Repeat("g", maxUpstreamFieldBytes)+"</guid></item>",
+				maxUpstreamTextBytes/(2*maxUpstreamFieldBytes)+1),
+			wantErr: true,
+		},
+		"cumulative text across two channels rejected": {
+			// Each <channel> stays individually under the budget (~2 MiB of
+			// decoded text) but their aggregate crosses it. encoding/xml
+			// re-invokes channelXML.UnmarshalXML on the same value for each
+			// sibling, so the budget must persist across invocations with
+			// the accumulated Items - a per-invocation budget would accept
+			// this response.
+			inner: strings.Repeat(
+				"<item><title>"+strings.Repeat("t", maxUpstreamFieldBytes)+"</title>"+
+					"<guid>"+strings.Repeat("g", maxUpstreamFieldBytes)+"</guid></item>",
+				257) +
+				"</channel><channel>" +
+				strings.Repeat(
+					"<item><title>"+strings.Repeat("t", maxUpstreamFieldBytes)+"</title>"+
+						"<guid>"+strings.Repeat("g", maxUpstreamFieldBytes)+"</guid></item>",
+					257),
 			wantErr: true,
 		},
 		"maximum-length field parses": {

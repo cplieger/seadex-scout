@@ -105,15 +105,23 @@ var (
 	// "x1080py" stays unmatched); the height itself is captured in group 1
 	// for detectResolution.
 	reResolution = regexp.MustCompile(`(?i)(?:^|[^0-9])(` + strings.Join(resolutionHeights, "|") + `)(?:$|[^[:alnum:]])`)
-	reBitrate    = regexp.MustCompile(`(?i)\b\d+\s?(kbps|mbps)\b`)
+	// reBitrate / reCRF / reRemux / reEncode match the raw evidence text in
+	// place: case-insensitive, with explicit non-alphanumeric edges instead
+	// of \b. Go regexp treats "_" as a word character, so \b would miss
+	// underscore-delimited scene names such as Show_CRF18_BDRemux; POSIX
+	// [^[:alnum:]] treats "_" as a delimiter, and the optional separator
+	// classes accept "_" alongside whitespace. Matching in place means no
+	// evidence-sized lowercased/underscore-replaced copy is ever allocated
+	// for an upstream-controlled name or notes value.
+	reBitrate = regexp.MustCompile(`(?i)(?:^|[^[:alnum:]])\d+[\s_]?(?:kbps|mbps)(?:$|[^[:alnum:]])`)
 	// reCRF matches an x264/x265 CRF tag such as "crf18" or "crf 20".
-	reCRF = regexp.MustCompile(`(?i)\bcrf\s?\d+\b`)
+	reCRF = regexp.MustCompile(`(?i)(?:^|[^[:alnum:]])crf[\s_]?\d+(?:$|[^[:alnum:]])`)
 	// reRemux matches a remux marker as a delimiter-bounded token ("remux",
 	// "BDRemux", "BD-Remux"), never a bare substring inside a longer word.
 	// "PREMUX" is included deliberately: SeaDex uses it for pre-muxed
 	// releases, and token-bounding alone would lose it (no word boundary
 	// between the "p" and "remux").
-	reRemux = regexp.MustCompile(`(?i)\b(?:bd[\s._-]?remux|premux|remux)\b`)
+	reRemux = regexp.MustCompile(`(?i)(?:^|[^[:alnum:]])(?:bd[\s._-]?remux|premux|remux)(?:$|[^[:alnum:]])`)
 	// reEncode matches a generic encode marker ("encode", "encoded", "BDRip")
 	// with reRemux's delimiter-bounded token style, so a bare substring inside
 	// a longer word ("reencoded", "encoder") is never a marker. It is the
@@ -123,7 +131,7 @@ var (
 	// many isBest encodes state "encode"/"BDRip" in their name or notes
 	// without any codec, CRF, or bitrate marker and previously classified
 	// unknown.
-	reEncode = regexp.MustCompile(`(?i)\b(?:bdrip|encoded|encode)\b`)
+	reEncode = regexp.MustCompile(`(?i)(?:^|[^[:alnum:]])(?:bdrip|encoded|encode)(?:$|[^[:alnum:]])`)
 )
 
 // Canonical codec families the classifier normalizes video codecs to.
@@ -150,33 +158,31 @@ var (
 var (
 	x265TextTokens = []string{codecX265, "h265", "hevc"}
 	x264TextTokens = []string{codecX264, "h264", "avc"}
-	reDottedX265   = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])h\.265`)
-	reDottedX264   = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])h\.264`)
+	// reTextX265 / reTextX264 apply the text-token lists to raw evidence in
+	// place (case-insensitive substring, no boundary — see above), so codec
+	// detection needs no lowercased copy of the evidence. The alternations
+	// derive from the token lists to keep the vocabulary single-homed.
+	reTextX265   = regexp.MustCompile(`(?i)` + strings.Join(x265TextTokens, "|"))
+	reTextX264   = regexp.MustCompile(`(?i)` + strings.Join(x264TextTokens, "|"))
+	reDottedX265 = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])h\.265`)
+	reDottedX264 = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])h\.264`)
 )
-
-// normalizeEvidence lowercases evidence text and replaces underscore
-// delimiters with spaces before the token regexes run. Go regexp treats "_"
-// as a word character, so an underscore-delimited scene name such as
-// Show_1080p_BDRemux would otherwise hide every marker family (resolution,
-// remux/kind, CRF, bitrate) behind a missing word boundary. SeaDex/arr names
-// use underscores as delimiters, never inside a marker token, so the
-// replacement is safe.
-func normalizeEvidence(text string) string {
-	return strings.ToLower(strings.ReplaceAll(text, "_", " "))
-}
 
 // evidence accumulates the classification signals of one text source (the
 // release names, or the entry notes) one observed piece at a time, so a large
 // evidence set — up to thousands of upstream-controlled file names per SeaDex
 // torrent — is never materialized as a single joined and normalized string
 // (which cost several simultaneous evidence-sized allocations and could OOM a
-// memory-limited container on a malformed page). Each piece is normalized and
-// matched independently, bounding peak allocation by the largest single piece,
-// and only the marker flags, the codec-family flags, and the first observed
-// resolution are retained. The original whole-text precedence is preserved by
-// resolving over the accumulated flags: first resolution in observation order,
-// the x265 family over x264 (textCodec), and remux over the encoder-marker
-// rungs (kindFromEvidence).
+// memory-limited container on a malformed page). Each piece is matched IN
+// PLACE by the case-insensitive, underscore-aware marker regexes — no
+// per-piece lowercased or underscore-replaced copy is allocated either, so
+// even a single decode-cap-sized name or notes value adds no evidence-sized
+// allocations on top of the decoded source string. Only the marker flags, the
+// codec-family flags, and the first observed resolution are retained. The
+// original whole-text precedence is preserved by resolving over the
+// accumulated flags: first resolution in observation order, the x265 family
+// over x264 (textCodec), and remux over the encoder-marker rungs
+// (kindFromEvidence).
 type evidence struct {
 	resolution string
 	x265       bool
@@ -189,19 +195,18 @@ type evidence struct {
 
 // observe folds one piece of evidence text (a single release/file name, or the
 // entry notes) into the accumulator. Already-set flags short-circuit their
-// matchers; the per-piece normalization still runs, which is the accumulator's
-// allocation bound.
+// matchers; the matchers run against the text in place, allocating nothing
+// evidence-sized.
 func (e *evidence) observe(text string) {
-	t := normalizeEvidence(text)
 	if e.resolution == "" {
-		e.resolution = detectResolution(t)
+		e.resolution = detectResolution(text)
 	}
-	e.x265 = e.x265 || containsAny(t, x265TextTokens) || reDottedX265.MatchString(t)
-	e.x264 = e.x264 || containsAny(t, x264TextTokens) || reDottedX264.MatchString(t)
-	e.remux = e.remux || reRemux.MatchString(t)
-	e.crf = e.crf || reCRF.MatchString(t)
-	e.bitrate = e.bitrate || reBitrate.MatchString(t)
-	e.encode = e.encode || reEncode.MatchString(t)
+	e.x265 = e.x265 || reTextX265.MatchString(text) || reDottedX265.MatchString(text)
+	e.x264 = e.x264 || reTextX264.MatchString(text) || reDottedX264.MatchString(text)
+	e.remux = e.remux || reRemux.MatchString(text)
+	e.crf = e.crf || reCRF.MatchString(text)
+	e.bitrate = e.bitrate || reBitrate.MatchString(text)
+	e.encode = e.encode || reEncode.MatchString(text)
 }
 
 // textCodec resolves the accumulated codec-family markers to the canonical

@@ -213,6 +213,13 @@ type feedXML struct {
 
 type channelXML struct {
 	Items []itemXML `xml:"item"`
+	// textBytes is the cumulative decoded text across every <channel>
+	// occurrence in the response. It lives on the struct (not a per-
+	// UnmarshalXML local) because encoding/xml re-invokes UnmarshalXML on
+	// the same channelXML value for each <channel> sibling, accumulating
+	// Items across invocations - a per-call budget would reset while the
+	// retained items kept growing.
+	textBytes int
 }
 
 // Decode limits on an untrusted upstream Torznab response. The transport cap
@@ -258,11 +265,11 @@ func (e *torznabLimitError) Error() string {
 // UnmarshalXML decodes <channel> one <item> at a time so the item-count cap
 // rejects an oversized response before its object graph is built, instead of
 // after encoding/xml has already allocated an unbounded Items slice. Each
-// decoded item is validated (attr count, field lengths, cumulative text
-// budget) before it is retained. Non-item children are skipped. The decoder
-// this runs under is xml.Unmarshal's, which keeps Strict enabled.
+// item bounds itself during decoding (see itemXML.UnmarshalXML) and its
+// decoded text is folded into the response-wide budget before it is
+// retained. Non-item children are skipped. The decoder this runs under is
+// xml.Unmarshal's, which keeps Strict enabled.
 func (c *channelXML) UnmarshalXML(d *xml.Decoder, _ xml.StartElement) error {
-	textBudget := 0
 	for {
 		tok, err := d.Token()
 		if err != nil {
@@ -270,7 +277,7 @@ func (c *channelXML) UnmarshalXML(d *xml.Decoder, _ xml.StartElement) error {
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
-			if err := c.decodeChild(d, t, &textBudget); err != nil {
+			if err := c.decodeChild(d, t); err != nil {
 				return err
 			}
 		case xml.EndElement:
@@ -281,10 +288,11 @@ func (c *channelXML) UnmarshalXML(d *xml.Decoder, _ xml.StartElement) error {
 	}
 }
 
-// decodeChild skips a non-item child and decodes+validates one <item>,
-// appending it under the item cap. A nil return on a skipped non-item child
-// lets the caller's token loop continue exactly as before.
-func (c *channelXML) decodeChild(d *xml.Decoder, t xml.StartElement, textBudget *int) error {
+// decodeChild skips a non-item child and decodes one <item>, appending it
+// under the item cap and folding its decoded text into the response-wide
+// budget. A nil return on a skipped non-item child lets the caller's token
+// loop continue exactly as before.
+func (c *channelXML) decodeChild(d *xml.Decoder, t xml.StartElement) error {
 	if t.Name.Local != "item" {
 		return d.Skip()
 	}
@@ -295,8 +303,9 @@ func (c *channelXML) decodeChild(d *xml.Decoder, t xml.StartElement, textBudget 
 	if err := d.DecodeElement(&it, &t); err != nil {
 		return err
 	}
-	if err := it.checkLimits(textBudget); err != nil {
-		return err
+	c.textBytes += it.textBytes
+	if c.textBytes > maxUpstreamTextBytes {
+		return &torznabLimitError{limit: fmt.Sprintf("cumulative decoded text over %d bytes", maxUpstreamTextBytes)}
 	}
 	c.Items = append(c.Items, it)
 	return nil
@@ -311,25 +320,106 @@ type itemXML struct {
 	Enclosure enclosureXML `xml:"enclosure"`
 	Attrs     []attrXML    `xml:"attr"`
 	Size      int64        `xml:"size"`
+	// textBytes accumulates the decoded text of every field occurrence in
+	// this item (unexported: invisible to encoding/xml). channelXML's
+	// decodeChild folds it into the response-wide budget.
+	textBytes int
 }
 
-// checkLimits validates one decoded item against the per-field, per-item,
-// and cumulative decode limits, accumulating its text into budget.
-func (x *itemXML) checkLimits(budget *int) error {
-	if len(x.Attrs) > maxUpstreamAttrs {
-		return &torznabLimitError{limit: fmt.Sprintf("more than %d attrs on one item", maxUpstreamAttrs)}
-	}
-	fields := []string{x.Title, x.GUID, x.Comments, x.Link, x.PubDate, x.Enclosure.URL}
-	for _, a := range x.Attrs {
-		fields = append(fields, a.Name, a.Value)
-	}
-	for _, f := range fields {
-		if len(f) > maxUpstreamFieldBytes {
-			return &torznabLimitError{limit: fmt.Sprintf("field longer than %d bytes", maxUpstreamFieldBytes)}
+// UnmarshalXML decodes one <item> child-by-child so the attr-count and
+// per-field caps reject an oversized item DURING decoding - before
+// encoding/xml materializes an unbounded []attrXML from a run of tiny
+// <attr/> elements or retains a multi-megabyte field - instead of
+// validating the fully-built object graph after the fact. Unknown children
+// are skipped whole; the decoder stays xml.Unmarshal's Strict one.
+func (x *itemXML) UnmarshalXML(d *xml.Decoder, _ xml.StartElement) error {
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			return err
 		}
-		*budget += len(f)
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if err := x.decodeChild(d, t); err != nil {
+				return err
+			}
+		case xml.EndElement:
+			// The first end element at this nesting level is </item>.
+			return nil
+		}
 	}
-	if *budget > maxUpstreamTextBytes {
+}
+
+// decodeChild decodes and validates one child element of an <item>. Each
+// recognized scalar field is bounded as it decodes; an <attr> is rejected
+// BEFORE decoding once the per-item attr cap is reached, so the cap bounds
+// the allocation instead of merely reporting it; unknown children are
+// skipped.
+func (x *itemXML) decodeChild(d *xml.Decoder, t xml.StartElement) error {
+	switch t.Name.Local {
+	case "title":
+		return x.decodeField(d, t, &x.Title)
+	case "guid":
+		return x.decodeField(d, t, &x.GUID)
+	case "comments":
+		return x.decodeField(d, t, &x.Comments)
+	case "link":
+		return x.decodeField(d, t, &x.Link)
+	case "pubDate":
+		return x.decodeField(d, t, &x.PubDate)
+	case "size":
+		return d.DecodeElement(&x.Size, &t)
+	case "enclosure":
+		if err := d.DecodeElement(&x.Enclosure, &t); err != nil {
+			return err
+		}
+		return x.account(x.Enclosure.URL)
+	case "attr":
+		if len(x.Attrs) >= maxUpstreamAttrs {
+			return &torznabLimitError{limit: fmt.Sprintf("more than %d attrs on one item", maxUpstreamAttrs)}
+		}
+		var a attrXML
+		if err := d.DecodeElement(&a, &t); err != nil {
+			return err
+		}
+		if err := x.account(a.Name); err != nil {
+			return err
+		}
+		if err := x.account(a.Value); err != nil {
+			return err
+		}
+		x.Attrs = append(x.Attrs, a)
+		return nil
+	default:
+		return d.Skip()
+	}
+}
+
+// decodeField decodes one text child into dst, bounding and accounting it.
+// Every decoded occurrence is accounted (a repeated <title> overwrites dst
+// but still consumes budget), so duplicate elements cannot amplify past the
+// cumulative cap.
+func (x *itemXML) decodeField(d *xml.Decoder, t xml.StartElement, dst *string) error {
+	var s string
+	if err := d.DecodeElement(&s, &t); err != nil {
+		return err
+	}
+	if err := x.account(s); err != nil {
+		return err
+	}
+	*dst = s
+	return nil
+}
+
+// account enforces the per-field cap on one decoded string and accumulates
+// it into the item's text counter, failing fast when this single item
+// already exceeds the whole response budget.
+func (x *itemXML) account(s string) error {
+	if len(s) > maxUpstreamFieldBytes {
+		return &torznabLimitError{limit: fmt.Sprintf("field longer than %d bytes", maxUpstreamFieldBytes)}
+	}
+	x.textBytes += len(s)
+	if x.textBytes > maxUpstreamTextBytes {
 		return &torznabLimitError{limit: fmt.Sprintf("cumulative decoded text over %d bytes", maxUpstreamTextBytes)}
 	}
 	return nil

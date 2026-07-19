@@ -654,7 +654,7 @@ type throttle struct {
 // re-reserves at the end of the current schedule (preserving both the penalty
 // wait and the configured spacing against sibling waiters) and sleeps again.
 func (t *throttle) wait(ctx context.Context) error {
-	slot := t.reserveSlot(time.Now())
+	slot := t.reserveSlot()
 	for {
 		if err := httpx.SleepCtx(ctx, time.Until(slot)); err != nil {
 			return err
@@ -671,15 +671,20 @@ func (t *throttle) wait(ctx context.Context) error {
 
 // reserve claims the next slot and returns how long to wait before using it.
 func (t *throttle) reserve() time.Duration {
-	now := time.Now()
-	return t.reserveSlot(now).Sub(now)
-}
-
-// reserveSlot claims and returns the next slot timestamp.
-func (t *throttle) reserveSlot(now time.Time) time.Time {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.reserveSlotLocked(now)
+	now := time.Now()
+	return t.reserveSlotLocked(now).Sub(now)
+}
+
+// reserveSlot claims and returns the next slot timestamp. The clock is
+// sampled under t.mu so a caller descheduled before acquiring the lock
+// cannot schedule from a stale timestamp and hand out already-expired
+// slots that break the minimum spacing.
+func (t *throttle) reserveSlot() time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.reserveSlotLocked(time.Now())
 }
 
 // reserveSlotLocked claims the next slot with t.mu already held.
