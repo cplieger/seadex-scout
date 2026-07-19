@@ -495,7 +495,7 @@ func TestCompareSkipsNotInLibraryAndSpecials(t *testing.T) {
 	notInLib := match.Match{Arr: library.ArrSonarr, Entry: seadex.Entry{AniListID: 1}}
 	special := match.Match{
 		Item:   &library.Item{Title: "OVA", Groups: []string{"x"}},
-		Arr:    "sonarr",
+		Arr:    library.ArrSonarr,
 		Entry:  seadex.Entry{AniListID: 2, Torrents: []seadex.Torrent{{IsBest: true, ReleaseGroup: "Y", Tracker: "Nyaa", URL: "https://nyaa.si/view/2"}}},
 		Record: mapping.Record{Type: "OVA"},
 	}

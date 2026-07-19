@@ -145,6 +145,7 @@ func TestWarnOverlappingTags(t *testing.T) {
 		wantWarn bool
 	}{
 		{"overlap warns", []string{"anime", "keep"}, []string{"anime"}, true},
+		{"case and whitespace still overlap", []string{" Anime "}, []string{"anime"}, true},
 		{"disjoint lists stay silent", []string{"anime"}, []string{"skip"}, false},
 		{"empty lists stay silent", nil, nil, false},
 	}

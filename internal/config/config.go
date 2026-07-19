@@ -543,10 +543,10 @@ func (c *Config) warnMalformedPublicURLs() {
 func (c *Config) warnOverlappingTags() {
 	exclude := make(map[string]struct{}, len(c.ExcludeTags))
 	for _, tag := range c.ExcludeTags {
-		exclude[tag] = struct{}{}
+		exclude[strings.ToLower(strings.TrimSpace(tag))] = struct{}{}
 	}
 	for _, tag := range c.IncludeTags {
-		if _, ok := exclude[tag]; ok {
+		if _, ok := exclude[strings.ToLower(strings.TrimSpace(tag))]; ok {
 			slog.Warn("a tag is listed in both arr_tags.include and arr_tags.exclude; " +
 				"exclude wins, so items carrying it are never scanned")
 			return
