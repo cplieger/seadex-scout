@@ -1,5 +1,5 @@
-github.com/cplieger/arrapi v1.7.0 h1:svFZhUvXQouwJb8pxc+ZRmq7tkOKOSlNwjK+kXcWQKo=
-github.com/cplieger/arrapi v1.7.0/go.mod h1:72mOov8fSs+SObR3ZH6oHbsChAGTSXh2ahLYSrizuF0=
+github.com/cplieger/arrapi v1.7.2 h1:KvK7fki7kPP3hc1GvCUL5N9+UjTzDpepLI+ZOw8fu28=
+github.com/cplieger/arrapi v1.7.2/go.mod h1:Je7A4ywGik/cQLXwu/CiZuxqQ5kh11CK3gwyOqoqqvY=
 github.com/cplieger/atomicfile/v2 v2.2.0 h1:JY8wEZ+DmcenfuaVvHOaCZJdVbwpSr6z4wT5y278FCM=
 github.com/cplieger/atomicfile/v2 v2.2.0/go.mod h1:jgwJ7oU3qahL4NwiF+1iBIzPRpR8LwXnicSalGoJeVA=
 github.com/cplieger/envx/yamlenv v1.1.0 h1:owAvn64ygGlDFMZVqho9PlKS2ONtf8AFr+E8Av8tDng=
@@ -10,8 +10,8 @@ github.com/cplieger/httpx/v2 v2.6.0 h1:KPBxno0EY/KcwXiB1Vi94bE4NFNaXxFyqnp02XBn9
 github.com/cplieger/httpx/v2 v2.6.0/go.mod h1:Q3ulXhfiO40EGxIVofnz2KdJY1X3MSKZTwYhv/pL9W0=
 github.com/cplieger/httpx/v3 v3.1.0 h1:KXbVxn9+c/7UbnXKQgH+Qh75syqqYiV9UH0GzwO0YR8=
 github.com/cplieger/httpx/v3 v3.1.0/go.mod h1:aITrLHd0nPnJ5+Gu76xhRyOChC0KZEBCwslCELPHk+s=
-github.com/cplieger/runesafe v1.0.0 h1:ZI3zLucRSMIcrpwwkMhCvsY4hyLNGJP4embfxWTZwV0=
-github.com/cplieger/runesafe v1.0.0/go.mod h1:37oz7JJVn1PIWv5UHrJhDhCabmqhMY+eRavwZ6Lp6NI=
+github.com/cplieger/runesafe v1.1.0 h1:OAUE2GX9JSiUes+HR7hEgOHqA2w5FI/KsXkmZ0iZJW4=
+github.com/cplieger/runesafe v1.1.0/go.mod h1:37oz7JJVn1PIWv5UHrJhDhCabmqhMY+eRavwZ6Lp6NI=
 github.com/cplieger/scheduler v1.2.0 h1:f3iOT8KXvakAWvwWkgrlg/cVBXweLgImIBrpoqgOM2o=
 github.com/cplieger/scheduler v1.2.0/go.mod h1:OT/FkHZsRcL7I4oFfeFT6PM9ZhafBfcZWBfakQmBV5I=
 github.com/cplieger/slogx v1.3.0 h1:UXTm85V0ChnnTnAsSVq2Vl4Aywb7dw+FcYaBnzgnVHk=
