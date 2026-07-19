@@ -13,14 +13,6 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
-// feedWindow caps each per-tracker synthesized RSS feed. It is the secondary
-// bound under the journal's feedJournalMaxAge prune (see journal.go): the
-// journal rarely approaches it, but a burst of new curation can never bloat
-// the rendered XML or the persisted snapshot past this many items per tracker.
-// The render path applies its own final cap, maxItems (query.go), to the
-// same rendered feed.
-const feedWindow = 300
-
 // defaultSeaDexBaseURL is the fallback SeaDex site base for a FeedWriter
 // constructed without one (tests, alternate wiring); production passes
 // config.DefaultSeaDexBaseURL through FeedWriterConfig.SeaDexBaseURL.
@@ -454,15 +446,17 @@ func validInfoHash(h string) string {
 	return seadex.ValidInfoHash(h)
 }
 
-// sortAndCap orders a journal feed newest-first by first-seen time (stable, so
-// items journaled in the same rebuild keep catalogue order) and trims it to
-// feedWindow, the secondary bound under the 14-day journal prune.
-func sortAndCap(items []item) []item {
+// sortFeed orders a journal feed newest-first by first-seen time (stable, so
+// items journaled in the same rebuild keep catalogue order). The persisted
+// journal is deliberately bounded by AGE alone (feedJournalMaxAge,
+// journal.go), never by count: growJournal marks every new identity seen
+// before this runs, so evicting an item here would permanently deny it RSS
+// exposure (the seen ledger can never re-admit it). Size caps apply only at
+// render/serve time (applyPaging + maxItems, query.go), evicting from the
+// rendered view, and maxFeedBytes bounds the persisted snapshot as a whole.
+func sortFeed(items []item) []item {
 	slices.SortStableFunc(items, func(a, b item) int {
 		return b.FirstSeen.Compare(a.FirstSeen)
 	})
-	if len(items) > feedWindow {
-		items = items[:feedWindow]
-	}
 	return items
 }

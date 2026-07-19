@@ -384,6 +384,53 @@ func TestRebuildExcludesCurationWarnedTorrents(t *testing.T) {
 	}
 }
 
+// TestRebuildWarnedTorrentIdentityWinsAcrossEntries pins the identity-level
+// warning policy: a torrent attached to several SeaDex entries where only ONE
+// occurrence carries the Broken/Incomplete tag is excluded everywhere - the
+// search curation set (proxied searches would otherwise serve and mark the
+// unwarned duplicate) and the RSS journal alike (carryJournal consumes the
+// any-occurrence key set) - so the two indexer paths can never disagree about
+// whether the release is grabbable.
+func TestRebuildWarnedTorrentIdentityWinsAcrossEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	const url = "https://nyaa.si/view/41"
+	hash := strings.Repeat("a", 40)
+	entries := []seadex.Entry{
+		{
+			AniListID: 7,
+			Torrents: []seadex.Torrent{{
+				Tracker: "Nyaa", URL: url, IsBest: true, InfoHash: hash,
+				Tags:  []string{"dual", "Broken"},
+				Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [W].mkv"}},
+			}},
+		},
+		{
+			AniListID: 8,
+			Torrents: []seadex.Torrent{{
+				Tracker: "Nyaa", URL: url, IsBest: true, InfoHash: hash,
+				Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [W].mkv"}},
+			}},
+		},
+	}
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{}).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if _, ok := snap.ByKey["nyaa:41"]; ok {
+		t.Error("curation set marks the warned identity via its unwarned duplicate (searches would serve it)")
+	}
+	if _, ok := snap.ByHash[hash]; ok {
+		t.Error("curation set marks the warned identity's info hash via its unwarned duplicate")
+	}
+	if len(snap.NyaaFeed) != 0 {
+		t.Errorf("nyaa feed = %+v, want empty (a warned identity must not journal)", snap.NyaaFeed)
+	}
+	if snap.Seen["nyaa:41"] || snap.Seen[hash] {
+		t.Errorf("seen ledger recorded the warned identity (un-warning could never journal it): %v", snap.Seen)
+	}
+}
+
 // TestRebuildDropsCarriedJournalItemBecomingWarned pins the carry-side gate:
 // a previously journaled item whose torrent has SINCE been tagged
 // Broken/Incomplete is dropped from the journal - unlike a

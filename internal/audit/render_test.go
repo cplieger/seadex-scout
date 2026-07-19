@@ -69,15 +69,16 @@ func TestDisplayBestGroups(t *testing.T) {
 
 func TestGroupSets(t *testing.T) {
 	rels := []Release{
-		{Group: "SubsPlease", Best: true, URL: "https://nyaa.si/view/1", Evidence: true},
-		{Group: "subsplease", Best: true, URL: "https://nyaa.si/view/2", Evidence: true},
-		{Group: "Erai", Best: false, URL: "https://nyaa.si/view/3", Evidence: true},
-		// A non-Evidence release (the daemon's filter.Obtainable rule rejected
-		// it: no usable link, or a tracker the operator cannot use) is
-		// raw-catalogue visibility only: it must drive neither the best nor
-		// the alt set - the eligibility IS the daemon's obtainability rule.
-		{Group: "LinklessBest", Best: true},
-		{Group: "LinklessAlt", Best: false},
+		{Group: "SubsPlease", Best: true, URL: "https://nyaa.si/view/1"},
+		{Group: "subsplease", Best: true, URL: "https://nyaa.si/view/2"},
+		{Group: "Erai", Best: false, URL: "https://nyaa.si/view/3"},
+		// An Unobtainable release (the daemon's filter.Obtainable rule
+		// rejected it: no usable link, or a tracker the operator cannot use)
+		// is raw-catalogue visibility only: it must drive neither the best
+		// nor the alt set - the eligibility IS the daemon's obtainability
+		// rule.
+		{Group: "LinklessBest", Best: true, Unobtainable: true},
+		{Group: "LinklessAlt", Best: false, Unobtainable: true},
 	}
 	best, alt := groupSets(rels)
 	if !reflect.DeepEqual(best, []string{"subsplease"}) {
@@ -732,6 +733,83 @@ func TestDisplayBestGroupsAnnotatesWarned(t *testing.T) {
 	want := []string{"pmr", "SEV (broken, incomplete)"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("displayBestGroups() = %v, want %v", got, want)
+	}
+}
+
+// TestDisplayBestGroupsAnnotatesUnobtainable pins the SeaDex-best column's
+// obtainability marker: an unobtainable best renders annotated
+// ("PMR (unobtainable)") so the rendered facts explain why the verdict
+// ignored a visible best, an obtainable best of the same group wins the
+// dedupe, and a best that is both warned and unobtainable joins its notes
+// ("SEV (broken, unobtainable)") without mutating Release.Warnings.
+func TestDisplayBestGroupsAnnotatesUnobtainable(t *testing.T) {
+	warnings := []string{"broken"}
+	rels := []Release{
+		{Group: "PMR", Best: true, Unobtainable: true},
+		{Group: "pmr", Best: true},
+		{Group: "SEV", Best: true, Warnings: warnings, Unobtainable: true},
+		{Group: "A&C", Best: true, Unobtainable: true},
+	}
+	got := displayBestGroups(rels)
+	want := []string{"pmr", "SEV (broken, unobtainable)", "A&C (unobtainable)"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("displayBestGroups() = %v, want %v", got, want)
+	}
+	if !reflect.DeepEqual(warnings, []string{"broken"}) {
+		t.Errorf("Warnings = %v, want [broken] (annotation must not mutate the release)", warnings)
+	}
+}
+
+// TestRenderUnobtainableBestAnnotatedInBothProjections pins the rendered
+// contract for a SeaDex-listed but unobtainable best (option (b) of review
+// finding h-f15): obtainability keeps controlling the verdict, and BOTH
+// projections surface the divergence - the Markdown SeaDex-best column
+// carries the "(unobtainable)" annotation and does NOT offer the release as
+// a grab link (the releases.moe link still renders), while the JSON release
+// carries an explicit "unobtainable": true marker so machine consumers can
+// see why the visible best was ignored. An obtainable release's JSON shape
+// is unchanged (the marker is omitted).
+func TestRenderUnobtainableBestAnnotatedInBothProjections(t *testing.T) {
+	rep := &Report{
+		GeneratedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+		Totals:      map[string]int{string(VerdictUnlisted): 1},
+		Rows: []Row{{
+			Title:         "Unobtainable Show",
+			Arr:           "sonarr",
+			SeaDexURL:     "https://releases.moe/11",
+			Verdict:       VerdictUnlisted,
+			CurrentGroups: []string{"other"},
+			Releases: []Release{
+				{
+					Tracker: "Nyaa", Group: "PMR", URL: "https://nyaa.si/view/901",
+					Best: true, Unobtainable: true,
+				},
+				{Tracker: "Nyaa", Group: "Erai", URL: "https://nyaa.si/view/902"},
+			},
+			AniListID: 11,
+		}},
+	}
+
+	md := renderMarkdown(rep)
+	if !strings.Contains(md, "PMR (unobtainable)") {
+		t.Errorf("markdown lacks the unobtainable-best annotation \"PMR (unobtainable)\":\n%s", md)
+	}
+	if strings.Contains(md, "https://nyaa.si/view/901") {
+		t.Errorf("markdown offers the unobtainable release as a grab link:\n%s", md)
+	}
+	if !strings.Contains(md, "https://releases.moe/11") {
+		t.Errorf("markdown lost the SeaDex entry link:\n%s", md)
+	}
+
+	data, err := renderJSON(rep)
+	if err != nil {
+		t.Fatalf("renderJSON: %v", err)
+	}
+	if !strings.Contains(string(data), `"unobtainable": true`) {
+		t.Errorf("JSON is missing the unobtainable marker on the excluded best: %s", data)
+	}
+	if n := strings.Count(string(data), `"unobtainable"`); n != 1 {
+		t.Errorf("JSON carries %d unobtainable keys, want 1 (omitted on an obtainable release): %s", n, data)
 	}
 }
 

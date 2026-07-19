@@ -313,6 +313,62 @@ func TestFetchManyContinuesAfterRecordError(t *testing.T) {
 	}
 }
 
+// TestFetchManyDropsUnsolicitedID pins FetchMany's identity-set invariant: an
+// id the request chunk never asked for is untrusted response data - it is
+// omitted from the merged result (never injected, never allowed to overwrite
+// another chunk's value) and surfaced as a record-local error, while the
+// requested sibling records still resolve.
+func TestFetchManyDropsUnsolicitedID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"data":{"Page":{"media":[{"id":1,"format":"TV","seasonYear":2020,"title":{"romaji":"t1"}},{"id":999,"format":"TV","seasonYear":2020,"title":{"romaji":"injected"}}]}}}`)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	out, err := c.FetchMany(context.Background(), []int{1, 2})
+	if err == nil {
+		t.Fatal("FetchMany must surface the unsolicited id as a record error")
+	}
+	if !errors.Is(err, errBatchRecord) {
+		t.Errorf("error = %v, want errBatchRecord classification (later chunks must not be aborted)", err)
+	}
+	if !strings.Contains(err.Error(), "unexpected media id 999") {
+		t.Errorf("error = %q, want the unexpected-id context", err.Error())
+	}
+	if _, ok := out[999]; ok {
+		t.Error("unsolicited id 999 was merged into the result")
+	}
+	if got := out[1].Titles; !slices.Equal(got, []string{"t1"}) {
+		t.Errorf("out[1].Titles = %v, want [t1] (valid sibling must survive)", got)
+	}
+}
+
+// TestParseMediaPageDuplicateIDExcluded pins the duplicate-id policy: records
+// claiming the same id are conflicting untrusted data, so NO record for that
+// id is returned (never last-write-wins, and a third duplicate stays excluded
+// too) while a valid sibling survives and the conflict surfaces as a
+// record-local error.
+func TestParseMediaPageDuplicateIDExcluded(t *testing.T) {
+	raw := []byte(`{"data":{"Page":{"media":[` +
+		`{"id":1,"format":"TV","seasonYear":2020,"title":{"romaji":"first"}},` +
+		`{"id":1,"format":"TV","seasonYear":2021,"title":{"romaji":"second"}},` +
+		`{"id":1,"format":"TV","seasonYear":2022,"title":{"romaji":"third"}},` +
+		`{"id":2,"format":"TV","seasonYear":2020,"title":{"romaji":"sibling"}}]}}}`)
+	out, err := parseMediaPage(raw)
+	if err == nil {
+		t.Fatal("parseMediaPage must surface the duplicate id")
+	}
+	if !errors.Is(err, errBatchRecord) {
+		t.Errorf("error = %v, want errBatchRecord classification", err)
+	}
+	if got, ok := out[1]; ok {
+		t.Errorf("out[1] = %+v, want the conflicting duplicate excluded, not one record chosen", got)
+	}
+	if got := out[2].Titles; !slices.Equal(got, []string{"sibling"}) {
+		t.Errorf("out[2].Titles = %v, want [sibling]", got)
+	}
+}
+
 // TestFetchCountsEveryHTTPAttempt proves Stats().Calls counts outbound HTTP
 // attempts, not logical fetches: two 429s followed by success are three
 // attempts (and two rate-limit waits), so the counter keeps its request-volume

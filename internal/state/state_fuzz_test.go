@@ -12,22 +12,31 @@ import (
 )
 
 // newerSchemaState reports whether data is what Load classifies as valid
-// newer-schema state: a JSON object envelope whose decoded Version is beyond
-// SchemaVersion, even when another member's older-binary shape produces a
-// type-level decode error (mirroring Load's acceptance steps, so the fuzz
-// oracle and production cannot disagree on which branch fired).
+// newer-schema state: a JSON object envelope whose persisted "version" member
+// decodes to an int beyond SchemaVersion. It reads the wire shape directly
+// (a map of json.RawMessage) instead of decoding into State, so the oracle
+// stays independent of production: a regression to State.Version's JSON tag
+// or decoding shape changes Load's classification without silently changing
+// this helper with it, and the newer-schema seeds fail instead of staying
+// green.
 func newerSchemaState(data []byte) bool {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return false
 	}
-	var st State
-	// Mirror Load: a syntactically invalid document populates nothing
-	// (Version stays 0, quarantine), while a type-level error still
-	// populates the valid fields, so a newer Version is honored even when
-	// another member's shape mismatches this binary.
-	_ = json.Unmarshal(data, &st)
-	return st.Version > SchemaVersion
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &envelope); err != nil {
+		return false
+	}
+	rawVersion, ok := envelope["version"]
+	if !ok {
+		return false
+	}
+	var version int
+	if err := json.Unmarshal(rawVersion, &version); err != nil {
+		return false
+	}
+	return version > SchemaVersion
 }
 
 // FuzzStoreLoadQuarantine drives Load with arbitrary state-file bytes and pins
@@ -50,6 +59,8 @@ func FuzzStoreLoadQuarantine(f *testing.F) {
 	f.Add([]byte(`{`))
 	f.Add([]byte(`{"baselined":true,"version":1}`))
 	f.Add([]byte(`{"version":"not-a-number"}`))
+	f.Add([]byte(`{"version":99,"version":"not-a-number"}`))
+	f.Add([]byte(`{"version":-1}`))
 	f.Add([]byte(`{"version":99,"baselined":true}`))
 	f.Add([]byte(`{"findings":"moved-member-shape","version":99}`))
 	f.Add([]byte(`{"findings":{"k":{}},"shrunk_walks":3}`))

@@ -207,6 +207,58 @@ func assertQuarantined(t *testing.T, path, wantBody string) {
 	}
 }
 
+// TestStoreLoadDuplicateVersionKeyQuarantines pins that Load never trusts
+// st.Version after a decode error: a payload with a duplicate version key
+// ({"version":99,"version":"not-a-number"}) leaves the first numeric value in
+// the partially-populated State while json.Unmarshal fails on the later
+// duplicate. The independently decoded discriminator (newerSchemaVersion)
+// reads the wire's effective (last) value, classifies the file as corrupt -
+// not newer-schema - so it is quarantined and a following Save is NOT
+// blocked (the daemon persists instead of silently re-baselining every run).
+func TestStoreLoadDuplicateVersionKeyQuarantines(t *testing.T) {
+	const body = `{"version":99,"version":"not-a-number"}`
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	store := NewStore(path, testLogger())
+	_, err := store.Load(context.Background())
+	if err == nil {
+		t.Fatal("Load returned nil error, want decode error for a duplicate-version-key payload")
+	}
+	if strings.Contains(err.Error(), "newer than this binary supports") {
+		t.Errorf("error = %q, want plain decode error, not the newer-schema classification", err.Error())
+	}
+	assertQuarantined(t, path, body)
+	if saveErr := store.Save(context.Background(), &State{}); saveErr != nil {
+		t.Errorf("Save after quarantining a duplicate-version-key file failed: %v", saveErr)
+	}
+}
+
+// TestStoreLoadNegativeVersionQuarantines pins the version-domain check: the
+// documented legacy envelope's version is absent or zero and Save only stamps
+// SchemaVersion, so a negative decoded version is corruption - quarantined,
+// never accepted as valid state.
+func TestStoreLoadNegativeVersionQuarantines(t *testing.T) {
+	const body = `{"version":-1}`
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	store := NewStore(path, testLogger())
+	_, err := store.Load(context.Background())
+	if err == nil {
+		t.Fatal("Load returned nil error, want error for a negative schema version")
+	}
+	if !strings.Contains(err.Error(), "negative schema version") {
+		t.Errorf("error = %q, want negative-schema-version context", err.Error())
+	}
+	assertQuarantined(t, path, body)
+	if saveErr := store.Save(context.Background(), &State{}); saveErr != nil {
+		t.Errorf("Save after quarantining a negative-version file failed: %v", saveErr)
+	}
+}
+
 // TestStoreLoadNullReturnsDecodeError pins the envelope check: a state file
 // holding literal JSON null is syntactically valid (json.Unmarshal accepts
 // null into a struct) but can never be produced by Save, so loading it must

@@ -90,10 +90,14 @@ func TestPageComplete(t *testing.T) {
 
 // TestEntryHasTheoreticalBest pins the theoretical-best predicate both
 // consumers branch on (compare's theoretical_best info finding and audit's
-// theoretical qualifier): a named theoretical best reports true, empty false.
+// theoretical qualifier): a named theoretical best reports true, empty and
+// whitespace-only false (untrusted PocketBase text names nothing).
 func TestEntryHasTheoreticalBest(t *testing.T) {
 	if (&Entry{}).HasTheoreticalBest() {
 		t.Error("HasTheoreticalBest() = true for empty TheoreticalBest, want false")
+	}
+	if (&Entry{TheoreticalBest: " \t "}).HasTheoreticalBest() {
+		t.Error("HasTheoreticalBest() = true for whitespace-only TheoreticalBest, want false")
 	}
 	if !(&Entry{TheoreticalBest: "a stated remux"}).HasTheoreticalBest() {
 		t.Error("HasTheoreticalBest() = false with TheoreticalBest set, want true")

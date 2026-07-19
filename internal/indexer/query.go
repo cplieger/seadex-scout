@@ -10,9 +10,10 @@ import (
 )
 
 const (
-	// maxItems caps a rendered feed as a safety bound. It bounds the same
-	// rendered feed as feedWindow (feed.go), which already caps each
-	// synthesized per-tracker feed at persistence.
+	// maxItems caps a rendered feed as a safety bound. It evicts from the
+	// RENDERED view only: the persisted journal is bounded by age alone
+	// (feedJournalMaxAge, journal.go), and Torznab paging (applyPaging)
+	// keeps every journaled item reachable across pages.
 	maxItems = 1000
 	// defaultCapsLimit is the default result count advertised in t=caps.
 	defaultCapsLimit = 100
@@ -38,6 +39,26 @@ type curation struct {
 // pairs can never collide onto one relation key.
 func pairKey(hash, key string) string { return hash + "|" + key }
 
+// curationMatch accumulates the best/alt agreement state across an item's
+// identity signals: accept admits a signal only when it resolves to a curated
+// entry (ok) that agrees with every previously accepted signal on the
+// best/alt value. Bookkeeping only; lookup owns the ordered policy.
+type curationMatch struct {
+	isBest  bool
+	matched bool
+}
+
+// accept records one identity signal's curation result, reporting whether the
+// signal keeps the item alive: a signal that missed the curation set (!ok) or
+// contradicts an earlier signal's best/alt value rejects it.
+func (m *curationMatch) accept(candidate, ok bool) bool {
+	if !ok || (m.matched && candidate != m.isBest) {
+		return false
+	}
+	m.isBest, m.matched = candidate, true
+	return true
+}
+
 // lookup reports whether a release (by its info hash and page URLs) is SeaDex-
 // curated, and if so whether it is the best release. Every structurally valid
 // identity signal the item carries must resolve to curated entries agreeing on
@@ -53,23 +74,16 @@ func pairKey(hash, key string) string { return hash + "|" + key }
 // endpoint being served, so a swapped upstream (or a cross-tracker item) cannot
 // pass /ab an accepted Nyaa key or vice versa.
 func (c *curation) lookup(scope, hash, infoURL, guid string) (isBest, matched bool) {
-	accept := func(candidate, ok bool) bool {
-		if !ok || (matched && candidate != isBest) {
-			return false
-		}
-		isBest = candidate
-		matched = true
-		return true
-	}
+	var match curationMatch
 
 	h := validInfoHash(hash)
 	if h != "" {
 		b, ok := c.byHash[h]
-		if !accept(b, ok) {
+		if !match.accept(b, ok) {
 			return false, false
 		}
 	}
-	key, ok := c.acceptScopedKeys(scope, []string{infoURL, guid}, accept)
+	key, ok := c.acceptScopedKeys(scope, []string{infoURL, guid}, match.accept)
 	if !ok {
 		return false, false
 	}
@@ -86,7 +100,7 @@ func (c *curation) lookup(scope, hash, infoURL, guid string) (isBest, matched bo
 	if h != "" && key != "" && c.byPair != nil && !c.byPair[pairKey(h, key)] {
 		return false, false
 	}
-	return isBest, matched
+	return match.isBest, match.matched
 }
 
 // acceptScopedKeys applies lookup's tracker-key arm: every tracker key parsed
@@ -124,17 +138,22 @@ func (c *curation) acceptScopedKeys(scope string, urls []string, accept func(can
 
 // queryStats summarizes one request for the per-request log line: whether the
 // feed answered it (answered), whether it was served from the synthesized RSS
-// feed (feed - an empty-q periodic check) rather than a proxied search, whether
-// the search's queried upstream(s) ALL failed (upstreamFailed - serve renders a
-// Torznab <error> instead of an empty feed then), how many upstream results
-// survived the Prowlarr fetch's download-URL origin filter (search only), and how many items were
-// returned after curation or synthesis (curated).
+// feed (feed - an empty-q periodic check) rather than a proxied search,
+// whether the persisted feed snapshot failed to load before any snapshot was
+// installed (snapshotUnavailable - serve renders a Torznab <error> then,
+// since a false-empty feed would record the local fault as a clean no-match),
+// whether the search's queried upstream(s) ALL failed (upstreamFailed - serve
+// renders a Torznab <error> instead of an empty feed then), how many upstream
+// results survived the Prowlarr fetch's download-URL origin filter (search
+// only), and how many items were returned after curation or synthesis
+// (curated).
 type queryStats struct {
-	answered       bool
-	feed           bool
-	upstreamFailed bool
-	upstream       int
-	curated        int
+	answered            bool
+	feed                bool
+	snapshotUnavailable bool
+	upstreamFailed      bool
+	upstream            int
+	curated             int
 }
 
 // query returns the feed items for a request (restricted to scope's tracker)
@@ -159,6 +178,14 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 	// Pick up a newer feed snapshot a cycle may have written (this process's
 	// daemon loop, or the `poll` subcommand in another process) before serving.
 	ix.reload(ctx)
+	// A snapshot that failed to load before any successful install is a local
+	// fault, not an empty catalogue: serving the synthesized feed would blank
+	// it, and a search would filter every Prowlarr result against nil
+	// curation maps - both false-empty. Answer with the dedicated flag (serve
+	// renders a Torznab <error>) without contacting a tracker.
+	if ix.snapshotUnavailable() {
+		return nil, queryStats{answered: true, snapshotUnavailable: true}
+	}
 
 	var (
 		items []item
@@ -187,6 +214,25 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 		items = items[:maxItems]
 	}
 	return items, stats
+}
+
+// snapshotUnavailable reports whether the startup snapshot-unavailable state
+// (see the snapFailed field) is active, emitting its once-per-onset WARN on
+// the first report so the local fault is visible without a per-request log
+// storm. The state is set/cleared by reload's load paths; requests only read
+// it here.
+func (ix *Indexer) snapshotUnavailable() bool {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	if !ix.snapFailed {
+		return false
+	}
+	if !ix.snapFailedWarned {
+		ix.snapFailedWarned = true
+		ix.log.Warn("indexer feed snapshot unavailable; answering Torznab requests with an error until a snapshot loads",
+			"path", ix.path)
+	}
+	return true
 }
 
 // applyPaging honors the Torznab offset/limit params (advertised in t=caps)

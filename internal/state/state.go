@@ -136,6 +136,32 @@ func NewReadOnlyStore(path string, logger *slog.Logger) *Store {
 // pass), so an hour cannot race a concurrent writer in another process.
 const staleTempMaxAge = time.Hour
 
+// newerSchemaVersion independently decodes the persisted envelope's schema
+// version discriminator straight from the wire bytes, reporting the decoded
+// version and whether it is newer than SchemaVersion. Load must never read
+// the discriminator from a partially-populated State on a decode error: Go
+// documents that json.Unmarshal may populate fields before returning a type
+// error, and a payload with a duplicate version key (e.g.
+// {"version":2,"version":"bad"}) leaves a stale earlier value in
+// State.Version while the error came from the later duplicate - trusting it
+// would preserve a corrupt file as "newer-schema" state and block every
+// subsequent Save. Decoding the version alone from the raw bytes has no such
+// partial-population hazard: any failure reports (0, false) and the caller
+// falls through to the quarantine path.
+func newerSchemaVersion(data []byte) (int, bool) {
+	var envelope struct {
+		Version json.RawMessage `json:"version"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil || len(envelope.Version) == 0 {
+		return 0, false
+	}
+	var version int
+	if err := json.Unmarshal(envelope.Version, &version); err != nil {
+		return 0, false
+	}
+	return version, version > SchemaVersion
+}
+
 // Load reads and decodes the state file. A missing file returns a zero State
 // and no error (cold start); a present but corrupt or oversized file is
 // quarantined and returns the error so the caller can decide (the scout logs
@@ -170,42 +196,9 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 		}
 		return State{}, fmt.Errorf("state: read %s: %w", s.path, err)
 	}
-	// Require a JSON object envelope before unmarshalling: json.Unmarshal
-	// accepts a literal null into a struct, so a corrupt file holding "null"
-	// would otherwise load as a silently-empty state (a fake cold start that
-	// baselines findings and discards every cache) instead of surfacing the
-	// corruption. Save can never produce anything but an object.
-	if trimmed := bytes.TrimSpace(data); len(trimmed) == 0 || trimmed[0] != '{' {
-		s.maybeQuarantine()
-		return State{}, fmt.Errorf("state: decode %s: not a JSON object", s.path)
-	}
-	var st State
-	if err := json.Unmarshal(data, &st); err != nil {
-		if st.Version > SchemaVersion {
-			// A type-level decode error on a file stamped by a newer binary
-			// is the "moved member" case SchemaVersion exists for:
-			// json.Unmarshal validates syntax first and, on an
-			// UnmarshalTypeError, still populates every decodable field
-			// (including Version) before returning, so the stamp is
-			// trustworthy here. The shape is valid for the newer image;
-			// preserve it and block Save exactly like the clean
-			// newer-version path below instead of quarantining it away
-			// from the roll-forward.
-			s.unsupportedVersion = st.Version
-			return State{}, fmt.Errorf("state: decode %s: schema version %d is newer than this binary supports (%d)", s.path, st.Version, SchemaVersion)
-		}
-		s.maybeQuarantine()
-		return State{}, fmt.Errorf("state: decode %s: %w", s.path, err)
-	}
-	if st.Version > SchemaVersion {
-		// A file stamped by a newer binary (an image rollback): its members may
-		// have moved, so field-by-field zero-loading is exactly the silent
-		// discard SchemaVersion exists to prevent. This is valid state, not
-		// corruption: keep it at the live path and block this older Store from
-		// overwriting it (Save refuses while unsupportedVersion is set), so
-		// rolling forward again consumes it in place.
-		s.unsupportedVersion = st.Version
-		return State{}, fmt.Errorf("state: decode %s: schema version %d is newer than this binary supports (%d)", s.path, st.Version, SchemaVersion)
+	st, err := s.decode(data)
+	if err != nil {
+		return State{}, err
 	}
 	s.unsupportedVersion = 0
 	attrs := []any{
@@ -225,6 +218,58 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 		attrs = append(attrs, "library_age", time.Since(st.Library.TakenAt).Round(time.Second).String())
 	}
 	s.log.Debug("state loaded", attrs...)
+	return st, nil
+}
+
+// decode applies Load's corruption and schema-version policy to the raw state
+// bytes, quarantining a corrupt payload (or, for a newer-schema file, setting
+// the Save block instead) before returning the error.
+func (s *Store) decode(data []byte) (State, error) {
+	// Require a JSON object envelope before unmarshalling: json.Unmarshal
+	// accepts a literal null into a struct, so a corrupt file holding "null"
+	// would otherwise load as a silently-empty state (a fake cold start that
+	// baselines findings and discards every cache) instead of surfacing the
+	// corruption. Save can never produce anything but an object.
+	if trimmed := bytes.TrimSpace(data); len(trimmed) == 0 || trimmed[0] != '{' {
+		s.maybeQuarantine()
+		return State{}, fmt.Errorf("state: decode %s: not a JSON object", s.path)
+	}
+	var st State
+	if err := json.Unmarshal(data, &st); err != nil {
+		if version, newer := newerSchemaVersion(data); newer {
+			// A type-level decode error on a file stamped by a newer binary
+			// is the "moved member" case SchemaVersion exists for. The stamp
+			// is decoded independently from the raw bytes (see
+			// newerSchemaVersion) - st.Version is NOT trustworthy on this
+			// error path, since Unmarshal may have populated it from an
+			// earlier duplicate key before failing on the later one. The
+			// shape is valid for the newer image; preserve it and block Save
+			// exactly like the clean newer-version path below instead of
+			// quarantining it away from the roll-forward.
+			s.unsupportedVersion = version
+			return State{}, fmt.Errorf("state: decode %s: schema version %d is newer than this binary supports (%d)", s.path, version, SchemaVersion)
+		}
+		s.maybeQuarantine()
+		return State{}, fmt.Errorf("state: decode %s: %w", s.path, err)
+	}
+	if st.Version < 0 {
+		// The documented legacy envelope's version is absent or zero, and
+		// Save only ever stamps SchemaVersion - a negative version can only
+		// be corruption or tampering, never a schema this or any binary
+		// wrote. Quarantine it like any other corrupt payload.
+		s.maybeQuarantine()
+		return State{}, fmt.Errorf("state: decode %s: invalid negative schema version %d", s.path, st.Version)
+	}
+	if st.Version > SchemaVersion {
+		// A file stamped by a newer binary (an image rollback): its members may
+		// have moved, so field-by-field zero-loading is exactly the silent
+		// discard SchemaVersion exists to prevent. This is valid state, not
+		// corruption: keep it at the live path and block this older Store from
+		// overwriting it (Save refuses while unsupportedVersion is set), so
+		// rolling forward again consumes it in place.
+		s.unsupportedVersion = st.Version
+		return State{}, fmt.Errorf("state: decode %s: schema version %d is newer than this binary supports (%d)", s.path, st.Version, SchemaVersion)
+	}
 	return st, nil
 }
 
@@ -331,30 +376,8 @@ func (s *Store) Save(ctx context.Context, st *State) error {
 			s.log.Warn("could not remove pending state temp file", "path", pf.Name(), "error", clErr)
 		}
 	}()
-	// Enforce the reader's bound on write too: persisting a file Load is
-	// contractually unable to consume would silently discard the whole cache
-	// next cycle (fail-open). The encoder writes into the pending temp
-	// through the bounded writer, which rejects an over-cap encoding before
-	// it lands; Cleanup discards the temp on any encode failure, so the
-	// last readable state file stays intact until Commit replaces it.
-	//
-	// The limit admits ONE byte beyond maxStateBytes for the trailing newline
-	// json.Encoder.Encode appends (json.Marshal produces none): a state whose
-	// json.Marshal encoding is exactly maxStateBytes must stay accepted, and
-	// the newline is truncated away below so the persisted file never exceeds
-	// what Load can read. The over-cap error subtracts that byte so the
-	// reported count is the JSON size, comparable to the limit it names.
-	bw := &boundedWriter{w: pf, limit: maxStateBytes + 1}
-	if encErr := json.NewEncoder(bw).Encode(&sanitized); encErr != nil {
-		if errors.Is(encErr, errStateTooLarge) {
-			return fmt.Errorf("state: encode: %d bytes exceeds the %d-byte load limit; keeping previous state file", bw.attempted-1, maxStateBytes)
-		}
-		return fmt.Errorf("state: encode: %w", encErr)
-	}
-	// Drop the encoder's guaranteed trailing newline so the persisted size
-	// matches the json.Marshal encoding Load's bound is defined against.
-	if truncErr := pf.Truncate(bw.written - 1); truncErr != nil {
-		return fmt.Errorf("state: write %s: %w", s.path, truncErr)
+	if encErr := encodeState(pf, &sanitized, s.path); encErr != nil {
+		return encErr
 	}
 	res, err := pf.Commit(ctx)
 	if err != nil {
@@ -362,6 +385,38 @@ func (s *Store) Save(ctx context.Context, st *State) error {
 	}
 	if !res.Durable {
 		s.log.Warn("state written but not durable", "path", s.path)
+	}
+	return nil
+}
+
+// encodeState serializes st into the pending temp file under Load's size
+// bound and drops the encoder's trailing newline.
+//
+// It enforces the reader's bound on write too: persisting a file Load is
+// contractually unable to consume would silently discard the whole cache
+// next cycle (fail-open). The encoder writes into the pending temp
+// through the bounded writer, which rejects an over-cap encoding before
+// it lands; the caller's Cleanup discards the temp on any encode failure,
+// so the last readable state file stays intact until Commit replaces it.
+//
+// The limit admits ONE byte beyond maxStateBytes for the trailing newline
+// json.Encoder.Encode appends (json.Marshal produces none): a state whose
+// json.Marshal encoding is exactly maxStateBytes must stay accepted, and
+// the newline is truncated away below so the persisted file never exceeds
+// what Load can read. The over-cap error subtracts that byte so the
+// reported count is the JSON size, comparable to the limit it names.
+// The truncation also makes the persisted size match the json.Marshal
+// encoding Load's bound is defined against.
+func encodeState(pf *atomicfile.PendingFile, st *State, path string) error {
+	bw := &boundedWriter{w: pf, limit: maxStateBytes + 1}
+	if encErr := json.NewEncoder(bw).Encode(st); encErr != nil {
+		if errors.Is(encErr, errStateTooLarge) {
+			return fmt.Errorf("state: encode: %d bytes exceeds the %d-byte load limit; keeping previous state file", bw.attempted-1, maxStateBytes)
+		}
+		return fmt.Errorf("state: encode: %w", encErr)
+	}
+	if truncErr := pf.Truncate(bw.written - 1); truncErr != nil {
+		return fmt.Errorf("state: write %s: %w", path, truncErr)
 	}
 	return nil
 }

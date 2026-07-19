@@ -368,3 +368,29 @@ func TestReportPairStemAlreadyCanceledStopsProbe(t *testing.T) {
 		t.Errorf("stem = %q, want empty on interruption", stem)
 	}
 }
+
+// TestReportPairStemSkipsMultipleOccupiedSuffixes pins the repeated suffix
+// probe: when both the deterministic stem and its -2 suffix are occupied
+// (either half), the probe advances one suffix at a time and selects -3 —
+// the README's deterministic -2/-3/... contract. A regression that advances
+// the suffix by two would keep every single-collision test green but pick -4
+// here.
+func TestReportPairStemSkipsMultipleOccupiedSuffixes(t *testing.T) {
+	dir := t.TempDir()
+	stamp := time.Date(2026, time.July, 11, 15, 4, 5, 0, time.UTC)
+	base := filepath.Join(dir, "report-2026-07-11T15-04-05Z")
+	if err := os.WriteFile(base+".json", []byte("occupied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(base+"-2.md", []byte("occupied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := reportPairStem(t.Context(), dir, stamp)
+	if err != nil {
+		t.Fatalf("reportPairStem: %v", err)
+	}
+	if want := base + "-3"; got != want {
+		t.Errorf("reportPairStem() = %q, want %q", got, want)
+	}
+}

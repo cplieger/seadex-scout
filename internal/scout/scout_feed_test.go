@@ -40,7 +40,7 @@ func TestCycleWalkFailureWithFeedStillRebuildsFeed(t *testing.T) {
 		Logger:  logger,
 		Store:   store,
 		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Feed:    feed,
 	})
@@ -80,7 +80,7 @@ func TestCycleWalkFailureWithFeedResetsSeaDexFailureStreak(t *testing.T) {
 		Logger:  scoutTestLogger(),
 		Store:   store,
 		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Feed:    &fakeFeed{},
 	})
@@ -165,7 +165,7 @@ func TestCycleFeedRebuildErrorIsNonFatal(t *testing.T) {
 		Logger:       logger,
 		Store:        store,
 		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
-		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
 		Comparer:     compare.NewComparer(compare.Config{}),
@@ -275,8 +275,8 @@ func (p *probingFeed) Rebuild(_ context.Context, _ []seadex.Entry, info func(alI
 func TestCycleFeedInfoClassifiesViaFribbIndex(t *testing.T) {
 	logger := scoutTestLogger()
 	feed := &probingFeed{}
-	// A fresh cache (within the refresh window) makes the loader reuse the
-	// records without fetching, so the index is exactly these two records.
+	// The persisted cache echoed by fakeMapping is exactly these two records,
+	// so the index the info closure reads is fully controlled.
 	store := &fakeStore{st: state.State{
 		Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{
 			{AniListID: 100, Type: "MOVIE"},
@@ -287,7 +287,7 @@ func TestCycleFeedInfoClassifiesViaFribbIndex(t *testing.T) {
 		Logger:  logger,
 		Store:   store,
 		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: logger}),
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Feed:    feed,
 	})
@@ -319,8 +319,8 @@ func TestCycleWalkFailShutdownDuringSeaDexFetchStaysSilent(t *testing.T) {
 	defer cancel()
 	logger, recorder := capture.New()
 	feed := &fakeFeed{}
-	// A fresh mapping cache keeps the loader off the network, so the only
-	// failure ordering exercised is walk-failed then fetch-cancelled.
+	// The echoed mapping cache loads usable, so the only failure ordering
+	// exercised is walk-failed then fetch-cancelled.
 	store := &fakeStore{st: state.State{
 		Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
 	}}
@@ -328,7 +328,7 @@ func TestCycleWalkFailShutdownDuringSeaDexFetchStaysSilent(t *testing.T) {
 		Logger:  logger,
 		Store:   store,
 		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		Mapping: fakeMapping{},
 		SeaDex:  &cancellingSeaDex{cancel: cancel},
 		Feed:    feed,
 	})
@@ -383,7 +383,7 @@ func TestCycleShutdownDuringFeedRebuildStaysSilent(t *testing.T) {
 		Logger:  logger,
 		Store:   store,
 		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
 		Matcher: match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
 		Feed:    feed,

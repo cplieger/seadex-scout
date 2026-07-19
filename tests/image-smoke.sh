@@ -91,22 +91,22 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   fi
   status=$(docker inspect --format '{{ if .State.Health }}{{ .State.Health.Status }}{{ else }}no-healthcheck{{ end }}' "$NAME" 2>/dev/null || echo gone)
   case "$status" in
-    healthy)
-      printf '%s image smoke: ok (healthy after %ss)\n' "$APP" "$(($(date +%s) - start))"
-      exit 0
-      ;;
-    unhealthy)
-      printf 'FAIL: %s reported unhealthy\n' "$APP" >&2
-      exit 1
-      ;;
-    no-healthcheck)
-      printf 'FAIL: image has no HEALTHCHECK to assert against\n' >&2
-      exit 1
-      ;;
-    gone)
-      printf 'FAIL: %s container is gone\n' "$APP" >&2
-      exit 1
-      ;;
+  healthy)
+    printf '%s image smoke: ok (healthy after %ss)\n' "$APP" "$i"
+    exit 0
+    ;;
+  unhealthy)
+    printf 'FAIL: %s reported unhealthy\n' "$APP" >&2
+    exit 1
+    ;;
+  no-healthcheck)
+    printf 'FAIL: image has no HEALTHCHECK to assert against\n' >&2
+    exit 1
+    ;;
+  gone)
+    printf 'FAIL: %s container is gone\n' "$APP" >&2
+    exit 1
+    ;;
   esac
   sleep 1
 done

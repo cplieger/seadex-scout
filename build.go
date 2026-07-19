@@ -103,9 +103,9 @@ func buildScout(ctx context.Context, cfg *config.Config, readOnlyState bool) (bu
 	})
 
 	cleanup := func() {
-		httpx.Close(seadexHTTP)
-		httpx.Close(mappingHTTP)
-		httpx.Close(anilistHTTP)
+		seadexHTTP.CloseIdleConnections()
+		mappingHTTP.CloseIdleConnections()
+		anilistHTTP.CloseIdleConnections()
 		feedCleanup()
 		if sonarr != nil {
 			sonarr.Close()
@@ -148,7 +148,7 @@ func feedWriter(cfg *config.Config, log *slog.Logger) (fw scout.FeedWriter, clea
 		SeaDexBaseURL:  config.DefaultSeaDexBaseURL,
 		UpstreamConfig: upstreamConfig(cfg),
 	}, indexer.Deps{HTTP: prowlarrHTTP, Logger: log.With("component", "indexer")})
-	return writer, func() { httpx.Close(prowlarrHTTP) }
+	return writer, func() { prowlarrHTTP.CloseIdleConnections() }
 }
 
 // builtIndexer holds the assembled Torznab feed server and the resources to
@@ -176,7 +176,7 @@ func buildIndexer(cfg *config.Config) builtIndexer {
 		Logger: log,
 	}, config.DefaultIndexerFeedPath)
 	cleanup := func() {
-		httpx.Close(prowlarrHTTP)
+		prowlarrHTTP.CloseIdleConnections()
 	}
 	return builtIndexer{indexer: ix, cleanup: cleanup}
 }

@@ -1,0 +1,13 @@
+# Minimize the Docker build context. The Dockerfile only needs go.mod,
+# go.sum, the root *.go files, the embedded config.example.yaml, and
+# internal/. Deny everything, then allow the build inputs back in so the
+# gitignored .code-review/ review scratch, .git/, tests/, docs, go.work,
+# and any local secrets never reach the daemon.
+*
+!Dockerfile
+!.dockerignore
+!go.mod
+!go.sum
+!*.go
+!config.example.yaml
+!internal/

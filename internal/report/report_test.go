@@ -43,8 +43,8 @@ func testFinding(key, title string) compare.Finding {
 
 // storedTestFinding is testFinding projected onto the persisted dedupe
 // record, for building prior-state maps the way a previous cycle would have.
-func storedTestFinding(key, title string) StoredFinding {
-	f := testFinding(key, title)
+func storedTestFinding(title string) StoredFinding {
+	f := testFinding("", title)
 	return storedFinding(&f)
 }
 
@@ -78,8 +78,8 @@ func TestReporterReportSuppressesExistingAndEmitsNewAndResolved(t *testing.T) {
 	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	prior := map[string]Alerted{
-		"same": {AlertedAt: oldTime, Finding: storedTestFinding("same", "Frieren")},
-		"old":  {AlertedAt: oldTime, Finding: storedTestFinding("old", "Old Title")},
+		"same": {AlertedAt: oldTime, Finding: storedTestFinding("Frieren")},
+		"old":  {AlertedAt: oldTime, Finding: storedTestFinding("Old Title")},
 	}
 
 	current := reporter.Report([]compare.Finding{
@@ -501,18 +501,41 @@ func TestReporterEmitSanitizesControlAndBidiRunes(t *testing.T) {
 // SeaDex fetcher appends every upstream record and the matcher preserves
 // per-entry cardinality, so one current batch can carry the same DedupeKey
 // twice. The returned state collapses them to one record, and the emitted
-// notifications must collapse the same way — one line, not one per copy.
+// notifications must collapse the same way — one line, not one per copy — and
+// that one line must carry the batch's LAST payload, matching the documented
+// last-payload-wins stored state (a first-copy title in the alert would
+// contradict the persisted record and any later resolution line).
 func TestReporterReportSuppressesDuplicateCurrentKeys(t *testing.T) {
 	reporter, recorder := newCapturedReporter()
-	finding := testFinding("duplicate", "Frieren")
+	first := testFinding("duplicate", "Frieren (first copy)")
+	last := testFinding("duplicate", "Frieren (last copy)")
 
-	current := reporter.Report([]compare.Finding{finding, finding}, nil, nil, time.Now())
+	current := reporter.Report([]compare.Finding{first, last}, nil, nil, time.Now())
 
 	if got := recorder.CountExact("better release available"); got != 1 {
 		t.Errorf("duplicate current finding notifications = %d, want 1", got)
 	}
 	if len(current) != 1 {
 		t.Errorf("current dedupe state entries = %d, want 1", len(current))
+	}
+	if got := current["duplicate"].Finding.Title; got != last.Title {
+		t.Errorf("stored title = %q, want the last payload's %q", got, last.Title)
+	}
+	var emittedTitle string
+	for _, rec := range recorder.Records() {
+		if rec.Message != "better release available" {
+			continue
+		}
+		rec.Attrs(func(a slog.Attr) bool {
+			if a.Key == "title" {
+				emittedTitle, _ = a.Value.Any().(string)
+				return false
+			}
+			return true
+		})
+	}
+	if emittedTitle != last.Title {
+		t.Errorf("emitted title = %q, want the last payload's %q (the alert must match the stored state)", emittedTitle, last.Title)
 	}
 }
 

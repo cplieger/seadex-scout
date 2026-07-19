@@ -89,12 +89,20 @@ func NewReporter(logger *slog.Logger) *Reporter {
 func (r *Reporter) Report(findings []compare.Finding, prior map[string]Alerted, failedItems map[int]struct{}, now time.Time) map[string]Alerted {
 	current := make(map[string]Alerted, len(findings))
 	newCount := 0
+	// Last-payload-wins with one emission per key: precompute each DedupeKey's
+	// final payload, then process keys in first-occurrence order using that
+	// payload — so the single emitted notification carries the same fields the
+	// stored record (and any later resolution line) persists, instead of a
+	// first-copy title contradicting the last-copy state.
+	latest := make(map[string]*compare.Finding, len(findings))
 	for i := range findings {
-		f := &findings[i]
-		if a, ok := current[f.DedupeKey]; ok {
-			// Preserve the existing last-payload-wins behavior without emitting
-			// the same logical finding more than once in this batch.
-			current[f.DedupeKey] = Alerted{AlertedAt: a.AlertedAt, Finding: storedFinding(f)}
+		latest[findings[i].DedupeKey] = &findings[i]
+	}
+	for i := range findings {
+		f := latest[findings[i].DedupeKey]
+		if _, ok := current[f.DedupeKey]; ok {
+			// A later copy of a key this batch already handled: the first
+			// occurrence stored (and, if new, emitted) the final payload.
 			continue
 		}
 		if a, ok := prior[f.DedupeKey]; ok {

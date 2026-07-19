@@ -96,3 +96,19 @@ func TestUpstreamErrorDocMessageNamesCodeAndDescription(t *testing.T) {
 		t.Errorf("Error() = %q, want it to carry the upstream code and description", got)
 	}
 }
+
+// TestSanitizeUpstreamText_cleansAndBounds pins the emit-boundary policy on
+// untrusted Torznab <error> text: control characters (a newline that could
+// spoof a level=ERROR log line) are replaced with spaces, and the output is
+// capped at exactly 200 bytes plus the "..." truncation marker, so a multi-MB
+// <error> body can never flood a log line.
+func TestSanitizeUpstreamText_cleansAndBounds(t *testing.T) {
+	if got, want := sanitizeUpstreamText("ok\nlevel=ERROR fake"), "ok level=ERROR fake"; got != want {
+		t.Errorf("sanitizeUpstreamText(control text) = %q, want %q", got, want)
+	}
+	input := strings.Repeat("x", 201)
+	want := strings.Repeat("x", 200) + "..."
+	if got := sanitizeUpstreamText(input); got != want {
+		t.Errorf("sanitizeUpstreamText(201 bytes) = %q, want %q", got, want)
+	}
+}

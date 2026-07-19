@@ -436,11 +436,13 @@ func links(row *Row) string {
 	seen := make(map[releaseLinkKey]struct{}, len(row.Releases))
 	for i := range row.Releases {
 		rel := &row.Releases[i]
-		// A curation-warned best is not offered as a grab link: the links
-		// cell is an action affordance, and SeaDex's own curators warn
-		// against the release (it is annotated in the SeaDex-best column
-		// instead; the daemon and the Torznab feed exclude it the same way).
-		if !rel.Best || rel.URL == "" || len(rel.Warnings) > 0 {
+		// A curation-warned or unobtainable best is not offered as a grab
+		// link: the links cell is an action affordance, and either SeaDex's
+		// own curators warn against the release or the daemon's obtainability
+		// rule says the operator cannot get it (it is annotated in the
+		// SeaDex-best column instead; the daemon and the Torznab feed exclude
+		// both the same way).
+		if !rel.Best || rel.URL == "" || len(rel.Warnings) > 0 || rel.Unobtainable {
 			continue
 		}
 		key := releaseLinkKey{tracker: rel.Tracker, url: rel.URL}
@@ -520,19 +522,22 @@ func mdLink(label, rawURL string) string {
 }
 
 // displayBestGroups returns the distinct best-release groups in their original
-// case (deduped case-insensitively), for display. A curation-warned best is
-// annotated with its canonical warning tags - "PMR (broken)" - so the column
-// stays complete (the report shows raw SeaDex data) while explaining why the
-// verdict did not count the release. Unwarned bests are collected first and
-// win the dedupe, so a group genuinely available as an unwarned best never
-// displays warned.
+// case (deduped case-insensitively), for display. An annotated best - one
+// carrying curation warnings, one the daemon's obtainability rule rejected
+// (Release.Unobtainable), or both - renders with its notes: "PMR (broken)",
+// "PMR (unobtainable)", "SEV (broken, unobtainable)". The column stays
+// complete (the report shows raw SeaDex data) while explaining why the
+// verdict did not count the release. Clean bests are collected first and win
+// the dedupe, so a group genuinely available as a clean best never displays
+// annotated.
 func displayBestGroups(releases []Release) []string {
 	var out []string
 	seen := make(map[string]struct{}, len(releases))
-	for _, warnedPass := range []bool{false, true} {
+	for _, annotatedPass := range []bool{false, true} {
 		for i := range releases {
 			rel := &releases[i]
-			if !rel.Best || rel.Group == "" || (len(rel.Warnings) > 0) != warnedPass {
+			notes := releaseNotes(rel)
+			if !rel.Best || rel.Group == "" || (len(notes) > 0) != annotatedPass {
 				continue
 			}
 			key := strings.ToLower(rel.Group)
@@ -541,13 +546,26 @@ func displayBestGroups(releases []Release) []string {
 			}
 			seen[key] = struct{}{}
 			label := rel.Group
-			if warnedPass {
-				label += " (" + strings.Join(rel.Warnings, ", ") + ")"
+			if annotatedPass {
+				label += " (" + strings.Join(notes, ", ") + ")"
 			}
 			out = append(out, label)
 		}
 	}
 	return out
+}
+
+// releaseNotes returns a release's display annotations: its canonical
+// curation-warning tags, plus "unobtainable" when the daemon's obtainability
+// rule (filter.Obtainable, computed in classifyReleases) rejected it as
+// verdict evidence. The returned slice is always a fresh allocation, so
+// callers can append without aliasing Release.Warnings.
+func releaseNotes(rel *Release) []string {
+	notes := append([]string(nil), rel.Warnings...)
+	if rel.Unobtainable {
+		notes = append(notes, "unobtainable")
+	}
+	return notes
 }
 
 // rowsWithVerdict returns the rows carrying verdict v, preserving order.

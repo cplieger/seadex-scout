@@ -304,32 +304,40 @@ func (r *matchRun) lookupAniList(ctx context.Context, aniListID int) (anilist.Me
 	}
 	media, err := r.m.anilist.Fetch(ctx, aniListID)
 	if err != nil {
-		if errors.Is(err, anilist.ErrNotFound) {
-			r.gate.recordSuccess()
-			r.memo.Entries[aniListID] = MemoEntry{NotFound: true, Expiry: r.entryExpiry()}
-		} else {
-			// A transient/upstream error (network, context cancellation, rate-limit
-			// exhaustion) means this needed fallback lookup could not be completed.
-			// Record the id as incomplete (flagging the cycle degraded) so the
-			// caller preserves the affected entry's prior findings rather than
-			// treating the missing match as a resolved finding, and leave the
-			// id un-memoized so it is retried next cycle.
-			r.markIncomplete(aniListID)
-			if errors.Is(err, context.Canceled) {
-				// A cancellation is not a fault (same contract as Scout.save):
-				// log at Debug so a redeploy is not attributed to an AniList outage.
-				r.m.log.Debug("anilist fallback cancelled", "al_id", aniListID)
-			} else {
-				r.m.log.Warn("anilist fallback failed", "al_id", aniListID, "error", err)
-				if r.gate.recordFailure() {
-					r.m.log.Warn("anilist fallback failing repeatedly; failing remaining lookups fast this cycle",
-						"consecutive_failures", transientFailureCap)
-				}
-			}
-		}
+		r.handleLookupFailure(aniListID, err)
 		return anilist.Media{}, false
 	}
 	r.gate.recordSuccess()
 	r.memo.Entries[aniListID] = mediaEntry(media, r.entryExpiry())
 	return media, true
+}
+
+// handleLookupFailure classifies a failed AniList fetch: a definitive
+// not-found is memoized negatively (a definitive answer, so the breaker
+// streak resets); anything else marks the cycle incomplete and leaves the
+// id un-memoized so it is retried next cycle.
+func (r *matchRun) handleLookupFailure(aniListID int, err error) {
+	if errors.Is(err, anilist.ErrNotFound) {
+		r.gate.recordSuccess()
+		r.memo.Entries[aniListID] = MemoEntry{NotFound: true, Expiry: r.entryExpiry()}
+		return
+	}
+	// A transient/upstream error (network, context cancellation, rate-limit
+	// exhaustion) means this needed fallback lookup could not be completed.
+	// Record the id as incomplete (flagging the cycle degraded) so the
+	// caller preserves the affected entry's prior findings rather than
+	// treating the missing match as a resolved finding, and leave the
+	// id un-memoized so it is retried next cycle.
+	r.markIncomplete(aniListID)
+	if errors.Is(err, context.Canceled) {
+		// A cancellation is not a fault (same contract as Scout.save):
+		// log at Debug so a redeploy is not attributed to an AniList outage.
+		r.m.log.Debug("anilist fallback cancelled", "al_id", aniListID)
+		return
+	}
+	r.m.log.Warn("anilist fallback failed", "al_id", aniListID, "error", err)
+	if r.gate.recordFailure() {
+		r.m.log.Warn("anilist fallback failing repeatedly; failing remaining lookups fast this cycle",
+			"consecutive_failures", transientFailureCap)
+	}
 }

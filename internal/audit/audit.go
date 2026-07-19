@@ -88,7 +88,8 @@ const (
 	QualifierIncomplete Qualifier = "incomplete"
 )
 
-// Release is one SeaDex torrent in a report row (best or alt), with a usable link.
+// Release is one SeaDex torrent in a report row (best or alt). URL is
+// empty when the upstream link fails usable-link validation.
 type Release struct {
 	Tracker string `json:"tracker"`
 	Group   string `json:"group,omitempty"`
@@ -101,10 +102,16 @@ type Release struct {
 	// the render layer).
 	Warnings []string `json:"warnings,omitempty"`
 	Best     bool     `json:"best"`
-	// Evidence reports whether the daemon's obtainability rule
-	// (filter.Obtainable) admits this release as verdict evidence;
-	// groupSets keys on it so the two flows share one encoding.
-	Evidence bool `json:"-"`
+	// Unobtainable marks a release the daemon's obtainability rule
+	// (filter.Obtainable) rejects as verdict evidence: no usable link, or a
+	// tracker the operator cannot use. Like a curation-warned release it
+	// stays listed - the report enumerates raw SeaDex data - but it drives
+	// neither the verdict's group sets nor the grab links, rendering with an
+	// "(unobtainable)" annotation instead (see groupSets and the render
+	// layer). Serialized so machine consumers can see WHY a visible best did
+	// not drive the verdict; omitted on the common obtainable release, so a
+	// fully obtainable row's JSON shape is unchanged.
+	Unobtainable bool `json:"unobtainable,omitempty"`
 }
 
 // Row is one anime's alignment record.
@@ -248,11 +255,9 @@ func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[strin
 		if !cat.has(it) {
 			continue
 		}
-		// An uncovered item has no Fribb record, so its scope label resolves
-		// through the shared align.Scope dispatch with the zero record (Radarr
-		// -> movie; a seasonless non-special Sonarr series -> whole-series),
-		// rather than re-deriving that arm choice locally where it could drift
-		// from the protocol align owns.
+		// An uncovered item has no SeaDex-associated Fribb record to supply a
+		// specific scope, so resolve its label through align.Scope with a zero
+		// record (Radarr -> movie; Sonarr -> whole-series).
 		rows = append(rows, Row{
 			Title:         it.Title,
 			Arr:           it.Arr,
@@ -420,7 +425,10 @@ func rowQualifier(entry *seadex.Entry, d *align.Decision) Qualifier {
 // (SeaDex tags it Broken/Incomplete) stays listed but annotated: the report
 // enumerates raw SeaDex data by design, so hiding it would misrepresent the
 // entry, while groupSets and the render layer keep it out of the verdict and
-// the grab links.
+// the grab links. A release the daemon's filter.Obtainable rule rejects (no
+// usable link, or a tracker the operator cannot use) gets the same treatment,
+// carried on Release.Unobtainable: listed and annotated, never verdict
+// evidence - so a visible best the verdict ignored is always explained.
 func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 	out := make([]Release, 0, len(entry.Torrents))
 	for i := range entry.Torrents {
@@ -438,7 +446,7 @@ func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 			URL:      t.UsableURL(),
 			Best:     t.IsBest,
 			Warnings: release.CurationWarnings(t.Tags),
-			Evidence: filter.Obtainable(&rel, t.URL, t.UsableURL(),
+			Unobtainable: !filter.Obtainable(&rel, t.URL, t.UsableURL(),
 				filter.Options{AnimeBytes: a.includeAnimeBytes}),
 		})
 	}
@@ -456,17 +464,17 @@ func (a *Auditor) seadexURL(aniListID int) string {
 // releases. A curation-warned release contributes to neither set: counting it
 // would let a release SeaDex tags Broken/Incomplete drive the verdict (read
 // as a best to have or to want), where the daemon's compare pass excludes it
-// - the two flows must tell one story. A non-Evidence release (one the
+// - the two flows must tell one story. An Unobtainable release (one the
 // daemon's filter.Obtainable rule rejects: no usable link, or a tracker the
 // operator cannot use) contributes to neither set for the same reason - the
 // eligibility here IS the daemon's filter.Obtainable, computed in
 // classifyReleases, not a mirror of it, so the two flows cannot drift when
-// the tracker table grows. Both stay visible in the row's release list, the
-// warned one annotated.
+// the tracker table grows. Both stay visible in the row's release list,
+// annotated (the warning tags / "(unobtainable)").
 func groupSets(releases []Release) (best, alt []string) {
 	bestSeen, altSeen := map[string]struct{}{}, map[string]struct{}{}
 	for i := range releases {
-		if !releases[i].Evidence || len(releases[i].Warnings) > 0 {
+		if releases[i].Unobtainable || len(releases[i].Warnings) > 0 {
 			continue
 		}
 		g := release.NormalizeGroup(releases[i].Group)

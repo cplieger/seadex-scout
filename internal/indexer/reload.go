@@ -28,6 +28,14 @@ func (ix *Indexer) statSnapshot() (os.FileInfo, bool) {
 			ix.mu.RLock()
 			loaded := ix.snapInfo != nil
 			ix.mu.RUnlock()
+			if !loaded {
+				// A genuinely absent first snapshot IS the fresh-install
+				// state - serving the empty feed is intentional there - so
+				// an earlier load fault stops blocking requests once the bad
+				// file is gone (deleting it returns to fresh-install
+				// semantics).
+				ix.clearSnapshotFailed()
+			}
 			if loaded && !ix.snapMissing {
 				ix.snapMissing = true
 				ix.log.Warn("indexer feed snapshot missing; serving last loaded feed until it reappears", "path", ix.path)
@@ -36,6 +44,7 @@ func (ix *Indexer) statSnapshot() (os.FileInfo, bool) {
 		}
 		// Anything else (EACCES, EIO) silently freezes the served feed, so
 		// make it visible - once per onset, not once per request.
+		ix.markSnapshotFailedIfUnloaded()
 		if !ix.reloadDegraded {
 			ix.reloadDegraded = true
 			ix.log.Warn("indexer feed snapshot stat failed; keeping current feed", "path", ix.path, "error", err)
@@ -81,16 +90,7 @@ func (ix *Indexer) reload(ctx context.Context) {
 	if !ok {
 		return
 	}
-	// The memoized malformed snapshot fails deterministically: unchanged
-	// bytes decode the same way on every read, so rereading it would only
-	// repeat the per-request I/O/JSON work and the malformed WARN. The
-	// successful stat that reached this point already proves file access
-	// recovered from any transient stat/read fault, so clear the degradation
-	// flag directly - re-arming the next onset's warning - without a reread
-	// and without the "reload recovered" INFO (nothing was successfully
-	// reloaded; the file is still bad).
-	if ix.matchesFailedFile(info) {
-		ix.reloadDegraded = false
+	if ix.skipMemoizedMalformed(info) {
 		return
 	}
 	// A degraded reload must not take the unchanged-loaded-snapshot fast
@@ -105,16 +105,7 @@ func (ix *Indexer) reload(ctx context.Context) {
 	}
 	snap, ok, memoize := ix.readSnapshot(ctx)
 	if !ok {
-		// Only malformed bytes are deterministic for an unchanged file. Read
-		// failures can recover after chmod or transient filesystem repair
-		// without changing inode or mtime, so they must remain retryable -
-		// and a shutdown cancellation never memoizes (the file was never
-		// actually read; a retry could succeed).
-		if ctx.Err() == nil && memoize {
-			ix.failedFile = info
-		} else {
-			ix.failedFile = nil
-		}
+		ix.recordSnapshotFailure(ctx, info, memoize)
 		return
 	}
 	ix.failedFile = nil
@@ -128,6 +119,36 @@ func (ix *Indexer) reload(ctx context.Context) {
 	ix.log.Info("indexer feed snapshot loaded",
 		"path", ix.path, "hashes", len(snap.ByHash), "keys", len(snap.ByKey),
 		"nyaa_feed", len(snap.NyaaFeed), "ab_feed", len(snap.ABFeed))
+}
+
+// skipMemoizedMalformed applies reload's memoized-malformed-file arm: it
+// reports whether the stat'ed file is the memoized malformed snapshot,
+// unchanged, and if so clears the transient degradation flag. The memoized
+// malformed snapshot fails deterministically: unchanged bytes decode the same
+// way on every read, so rereading it would only repeat the per-request
+// I/O/JSON work and the malformed WARN. The successful stat that reached this
+// point already proves file access recovered from any transient stat/read
+// fault, so clear the degradation flag directly - re-arming the next onset's
+// warning - without a reread and without the "reload recovered" INFO (nothing
+// was successfully reloaded; the file is still bad).
+func (ix *Indexer) skipMemoizedMalformed(info os.FileInfo) bool {
+	if !ix.matchesFailedFile(info) {
+		return false
+	}
+	ix.reloadDegraded = false
+	return true
+}
+
+// recordSnapshotFailure applies reload's failed-read memo policy. Only
+// malformed bytes are deterministic for an unchanged file. Read failures can
+// recover after chmod or transient filesystem repair without changing inode
+// or mtime, so they must remain retryable - and a shutdown cancellation never
+// memoizes (the file was never actually read; a retry could succeed).
+func (ix *Indexer) recordSnapshotFailure(ctx context.Context, info os.FileInfo, memoize bool) {
+	ix.failedFile = nil
+	if ctx.Err() == nil && memoize {
+		ix.failedFile = info
+	}
 }
 
 // loadedSnapshotUnchanged reports whether the stat'ed snapshot file is the
@@ -170,7 +191,32 @@ func (ix *Indexer) installSnapshot(info os.FileInfo, snap *snapshot) bool {
 	ix.snap = *snap
 	ix.snapMod = info.ModTime()
 	ix.snapInfo = info
+	// A successful install ends any startup snapshot-unavailable state and
+	// re-arms its per-onset WARN (see snapFailed).
+	ix.snapFailed = false
+	ix.snapFailedWarned = false
 	return true
+}
+
+// markSnapshotFailedIfUnloaded flags the snapshot-unavailable state (see the
+// snapFailed field) after a load fault, but only while no snapshot has ever
+// been installed: after a successful load the last-good snapshot keeps being
+// served instead.
+func (ix *Indexer) markSnapshotFailedIfUnloaded() {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	if ix.snapInfo == nil {
+		ix.snapFailed = true
+	}
+}
+
+// clearSnapshotFailed resets the snapshot-unavailable state and re-arms its
+// per-onset WARN (see the snapFailed field).
+func (ix *Indexer) clearSnapshotFailed() {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	ix.snapFailed = false
+	ix.snapFailedWarned = false
 }
 
 // readSnapshot is reload's read/decode error policy: it bounded-reads and
@@ -184,14 +230,21 @@ func (ix *Indexer) installSnapshot(info os.FileInfo, snap *snapshot) bool {
 func (ix *Indexer) readSnapshot(ctx context.Context) (snapshot, bool, bool) {
 	data, err := atomicfile.ReadBounded(ctx, ix.path, maxFeedBytes)
 	if err != nil {
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !ix.reloadDegraded {
-			ix.reloadDegraded = true
-			ix.log.Warn("indexer feed snapshot unreadable; keeping current feed", "path", ix.path, "error", err)
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			// A shutdown cancellation is silent and never marks the
+			// snapshot-unavailable state (the file was never actually read;
+			// a retry could succeed).
+			ix.markSnapshotFailedIfUnloaded()
+			if !ix.reloadDegraded {
+				ix.reloadDegraded = true
+				ix.log.Warn("indexer feed snapshot unreadable; keeping current feed", "path", ix.path, "error", err)
+			}
 		}
 		return snapshot{}, false, false
 	}
 	var snap snapshot
 	if err := json.Unmarshal(data, &snap); err != nil {
+		ix.markSnapshotFailedIfUnloaded()
 		ix.log.Warn("indexer feed snapshot malformed; keeping current feed", "path", ix.path, "error", err)
 		return snapshot{}, false, true
 	}
@@ -202,6 +255,7 @@ func (ix *Indexer) readSnapshot(ctx context.Context) (snapshot, bool, bool) {
 	// nil curation maps identify a structurally invalid snapshot without
 	// rejecting a valid empty feed.
 	if snap.ByHash == nil || snap.ByKey == nil {
+		ix.markSnapshotFailedIfUnloaded()
 		ix.log.Warn("indexer feed snapshot malformed; keeping current feed",
 			"path", ix.path, "reason", "missing required curation maps")
 		return snapshot{}, false, true

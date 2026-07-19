@@ -3,10 +3,13 @@ package scout
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,6 +116,20 @@ func (f *fakeStore) Save(ctx context.Context, st *state.State) error {
 	f.st = *st
 	f.saves++
 	return nil
+}
+
+// fakeMapping is an in-package MappingSource for the fresh-cache reuse path:
+// it echoes the persisted cache and indexes its records, exactly what the
+// real loader does inside its refresh window, without the no-network HTTP
+// client, dummy URL, and override-path ceremony the concrete loader forces on
+// every test. Scenarios exercising the loader's own behavior (a stale map, an
+// unusable refresh, a cancelled in-flight fetch, acceptance-guard rejections)
+// keep the real loader; its fetch/degradation coverage lives in the mapping
+// package's suite.
+type fakeMapping struct{}
+
+func (fakeMapping) Load(_ context.Context, prev *mapping.Cache) (mapping.Cache, *mapping.Index, error) {
+	return *prev, mapping.NewIndex(prev.Records), nil
 }
 
 // seadexFrierenEntry returns the single curated Frieren entry (one best Nyaa
@@ -245,7 +262,7 @@ func TestCycleSeaDexFailureIsHealthyAndPreservesFindings(t *testing.T) {
 		Logger:  logger,
 		Store:   store,
 		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/fribb.json", filepath.Join(t.TempDir(), "overrides.json"), time.Hour, logger),
+		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{err: errors.New("seadex down")},
 	})
 
@@ -303,5 +320,77 @@ func TestSaveRetriesDetachedOnCancelledContext(t *testing.T) {
 	}
 	if !got.Baselined {
 		t.Errorf("Load().Baselined = false, want true")
+	}
+}
+
+// recordsContainString reports whether any captured record's message or
+// rendered attribute value contains sub.
+func recordsContainString(recorder *capture.Recorder, sub string) bool {
+	for _, rec := range recorder.Records() {
+		if strings.Contains(rec.Message, sub) {
+			return true
+		}
+		found := false
+		rec.Attrs(func(a slog.Attr) bool {
+			if strings.Contains(fmt.Sprint(a.Value.Any()), sub) {
+				found = true
+				return false
+			}
+			return true
+		})
+		if found {
+			return true
+		}
+	}
+	return false
+}
+
+// TestWalkFailureLogsAndReportErrorAreLogSafe pins the credential-redaction
+// boundary on the walk-failure paths: the configured arr URL may carry
+// userinfo (config.Validate only warns on that shape) and a transport failure
+// wraps a *url.Error embedding the full request URL, so neither the cycle's
+// walk-failure log sites nor Report's returned error (logged at ERROR by
+// main) may carry the embedded credentials — httpx.LogSafeError must reduce
+// the *url.Error to its cause before any log or return boundary.
+func TestWalkFailureLogsAndReportErrorAreLogSafe(t *testing.T) {
+	const userinfoSentinel = "hunter2pass"
+	const querySentinel = "sekrettoken"
+	sentinels := []string{userinfoSentinel, querySentinel}
+	walkErr := fmt.Errorf("sonarr: %w", &url.Error{
+		Op:  "Get",
+		URL: "http://user:" + userinfoSentinel + "@sonarr.local/api/v3/series?apikey=" + querySentinel,
+		Err: errors.New("connect: connection refused"),
+	})
+
+	logger, recorder := capture.New()
+	s := New(&Deps{
+		Logger:  logger,
+		Store:   &fakeStore{},
+		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: walkErr}, Logger: scoutTestLogger()}),
+	})
+
+	if healthy := s.Cycle(context.Background()); healthy {
+		t.Fatal("Cycle returned healthy=true, want false when the library walk fails")
+	}
+	if n := recorder.CountExact("library walk failed; cycle unhealthy"); n != 1 {
+		t.Fatalf("walk-failure ERROR count = %d, want 1 (the redaction test needs the log to fire)", n)
+	}
+	for _, sentinel := range sentinels {
+		if recordsContainString(recorder, sentinel) {
+			t.Errorf("cycle logs contain credential sentinel %q, want *url.Error reduced before logging", sentinel)
+		}
+	}
+
+	_, err := s.Report(context.Background())
+	if err == nil {
+		t.Fatal("Report returned nil error, want the walk failure")
+	}
+	if !strings.Contains(err.Error(), "library walk") {
+		t.Errorf("Report error %q does not name the failing stage, want a 'library walk' wrap", err)
+	}
+	for _, sentinel := range sentinels {
+		if strings.Contains(err.Error(), sentinel) {
+			t.Errorf("Report error %q contains credential sentinel %q, want *url.Error reduced before returning", err, sentinel)
+		}
 	}
 }

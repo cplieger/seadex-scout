@@ -340,7 +340,9 @@ func pollOnce(ctx context.Context, sc cycler, marker *health.Marker) error {
 	if ctx.Err() != nil {
 		return pollInterrupted(ctx)
 	}
-	marker.Set(healthy)
+	if err := marker.SetChecked(healthy); err != nil {
+		return fmt.Errorf("record poll health: %w", err)
+	}
 	if !healthy {
 		return errors.New("compare cycle failed (library ingest)")
 	}

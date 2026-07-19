@@ -228,6 +228,11 @@ func TestValidateRejectsMalformedURLs(t *testing.T) {
 		name   string
 	}{
 		{func(c *Config) { c.SonarrURL = "http://[::1" }, "unparseable sonarr url"},
+		{func(c *Config) { c.SonarrURL = "http://sonarr:99999" }, "out-of-range sonarr port"},
+		{func(c *Config) {
+			c.IndexerAPIKey = "fk"
+			c.IndexerNyaaTorznabURL = "http://prowlarr:9696/22/api#copied"
+		}, "fragment-bearing nyaa indexer url"},
 		{func(c *Config) {
 			c.IndexerAPIKey = "fk"
 			c.IndexerNyaaTorznabURL = "http://[::1"
@@ -275,44 +280,16 @@ func TestValidateHTTPURLErrorOmitsCredentials(t *testing.T) {
 	}
 }
 
-// TestLoadDecodeErrorOmitsExpandedSecret pins the field-name-only posture of
-// Load's post-expansion decode error: yaml.v3 type-mismatch errors embed a
-// backtick-quoted excerpt of the offending scalar value, which after ${VAR}
-// expansion can be a prefix of a real secret (an api key placed in a non-string
-// field by a config typo). The error must keep line/type info but never the
-// expanded value (h-f3, the sibling gate to l-f4's validateHTTPURL fix).
-func TestLoadDecodeErrorOmitsExpandedSecret(t *testing.T) {
-	const secret = "super-secret-api-key-sentinel"
-	t.Setenv("SONARR_API_KEY", secret)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	content := "sonarr:\n  enabled: ${SONARR_API_KEY}\n"
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("Load() = nil error, want type-mismatch error")
-	}
-	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "super-s") {
-		t.Errorf("Load() error = %q, leaks expanded secret", err)
-	}
-	if !strings.Contains(err.Error(), "cannot unmarshal !!str <redacted> into bool") {
-		t.Errorf("Load() error = %q, want the redacted wrong-type entry shape", err)
-	}
-}
-
-// TestLoadDecodeErrorOmitsBacktickSecret pins the value-independent redaction:
-// yaml.v3 embeds the scalar excerpt with any backtick in the value unchanged,
-// so a secret containing a backtick defeats backtick-pair matching and would
-// leak a prefix. No fragment of the expanded value may survive
-// sanitizeYAMLError, in the returned error or the captured startup log (h-f14).
-func TestLoadDecodeErrorOmitsBacktickSecret(t *testing.T) {
-	const secret = "zq9`vw7-secret-sentinel"
-	t.Setenv("SONARR_API_KEY", secret)
-	rec := capture.Default(t)
+// TestLoadTypeErrorOmitsScalarExcerpt pins the field-name-only posture of
+// Load's strict pre-decode rejection: a literal scalar placed in a bool field
+// is rejected by the raw-document check before expansion, and yaml.v3's
+// type-mismatch error embeds a quoted excerpt of that scalar — which can be a
+// pasted secret. The error must keep line/type info but never any fragment of
+// the rejected value.
+func TestLoadTypeErrorOmitsScalarExcerpt(t *testing.T) {
+	const scalar = "super-secret-api-key-sentinel"
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	content := "sonarr:\n  enabled: ${SONARR_API_KEY}\n"
+	content := "sonarr:\n  enabled: " + scalar + "\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -321,10 +298,34 @@ func TestLoadDecodeErrorOmitsBacktickSecret(t *testing.T) {
 	if err == nil {
 		t.Fatal("Load() = nil error, want type-mismatch error")
 	}
-	corpus := err.Error() + "\n" + strings.Join(rec.Messages(), "\n")
-	for _, frag := range []string{secret, "zq9", "vw7", "secret-sentinel"} {
-		if strings.Contains(corpus, frag) {
-			t.Errorf("decode-error corpus leaks secret fragment %q: %q", frag, corpus)
+	if strings.Contains(err.Error(), scalar) || strings.Contains(err.Error(), "super-s") {
+		t.Errorf("Load() error = %q, leaks the rejected scalar", err)
+	}
+	if !strings.Contains(err.Error(), "cannot unmarshal !!str <redacted> into bool") {
+		t.Errorf("Load() error = %q, want the redacted wrong-type entry shape", err)
+	}
+}
+
+// TestLoadTypeErrorOmitsBacktickScalar pins the value-independent redaction:
+// yaml.v3 embeds the scalar excerpt with any backtick in the value unchanged,
+// so a rejected scalar containing a backtick defeats backtick-pair matching
+// and would leak a prefix. No fragment of the rejected value may survive
+// sanitizeYAMLError.
+func TestLoadTypeErrorOmitsBacktickScalar(t *testing.T) {
+	const scalar = "zq9`vw7-secret-sentinel"
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := "sonarr:\n  enabled: \"" + scalar + "\"\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() = nil error, want type-mismatch error")
+	}
+	for _, fragment := range []string{scalar, "zq9", "vw7", "secret-sentinel"} {
+		if strings.Contains(err.Error(), fragment) {
+			t.Errorf("Load() error leaks scalar fragment %q: %q", fragment, err)
 		}
 	}
 	if !strings.Contains(err.Error(), "cannot unmarshal !!str <redacted> into bool") {

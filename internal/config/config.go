@@ -7,11 +7,12 @@
 // The file exposes only user-facing settings (arrs, mode, schedule, filters,
 // arr_tags, report dir, logging, the indexer feed). Internal machinery - the
 // upstream endpoints, the politeness/refresh/rate cadences, the indexer bind
-// address, and the /config file paths (state, overrides, reports) - are fixed
-// package constants, not file keys. The on-disk shape (fileConfig) is loaded
-// onto a defaults baseline, ${VAR}-expanded, then flattened into the runtime
-// Config the rest of the app reads. Call Validate to check the result is
-// runnable. There is no hot reload: the file is read once at startup.
+// address, and the internal /config file paths (state, overrides, feed
+// snapshot) - are fixed package constants, not file keys. The on-disk shape
+// (fileConfig) is loaded onto a defaults baseline, ${VAR}-expanded, then
+// flattened into the runtime Config the rest of the app reads. Call Validate
+// to check the result is runnable. There is no hot reload: the file is read
+// once at startup.
 package config
 
 import (
@@ -23,6 +24,7 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,11 +41,13 @@ const DefaultConfigPath = "/config/config.yaml"
 // maxConfigBytes bounds the config file read (it is a small document).
 const maxConfigBytes = 1 << 20
 
-// Fixed endpoints, cadences, and /config file paths. These are internal
-// machinery wired at build time, deliberately NOT exposed as config-file keys:
-// the user should never need to point the app at a different SeaDex/Fribb/
-// AniList, retune the politeness delays, or relocate the state/report files
-// (everything lives under the single /config mount).
+// Fixed endpoints, cadences, internal /config file paths, and the default
+// report directory. These are internal machinery wired at build time,
+// deliberately NOT exposed as config-file keys: the user should never need to
+// point the app at a different SeaDex/Fribb/AniList, retune the politeness
+// delays, or relocate the state, overrides, or feed-snapshot files (everything
+// lives under the single /config mount). DefaultReportDir is the one
+// configurable baseline here: report.dir overrides it.
 const (
 	// DefaultSeaDexBaseURL is the SeaDex (releases.moe) API base.
 	DefaultSeaDexBaseURL = "https://releases.moe"
@@ -575,6 +579,16 @@ func (c *Config) validateIndexer() error {
 	if err := validateHTTPURL("indexer.ab_torznab_url", c.IndexerABTorznabURL); err != nil {
 		return err
 	}
+	// The /ab RSS feed builds its download links from indexer.ab_passkey; a
+	// stable AB-URL-without-passkey config makes that endpoint return a
+	// Torznab <error> on every arr RSS check while searches (Prowlarr-proxied,
+	// passkey-free) keep working. Warn at startup so the operator gets a
+	// config-time signal instead of discovering it in downstream arr RSS
+	// failures. Field-name-only; never echoes a secret.
+	if c.IndexerABTorznabURL != "" && c.IndexerABPasskey == "" {
+		slog.Warn("indexer.ab_passkey is empty; AnimeBytes searches still work through Prowlarr, " +
+			"but the /ab RSS feed returns a Torznab error until a passkey is configured")
+	}
 	c.warnTorznabURLCredentials()
 	// A search proxies Prowlarr using indexer.prowlarr_api_key in the X-Api-Key
 	// header. An empty key is accepted rather than rejected (it is valid when
@@ -658,6 +672,20 @@ func validateHTTPURL(name, rawURL string) error {
 		// a userinfo password, so echoing the URL would still ship a username-only
 		// token or a query-string apikey to the startup log.
 		return fmt.Errorf("%s must be an absolute http(s) URL with a host", name)
+	}
+	// url.Parse accepts URI shapes the base-URL consumers cannot use: a
+	// fragment survives the parse but is never sent over HTTP (and the Torznab
+	// search path appends its query params after it, so the upstream would see
+	// no parameters at all), and an out-of-range port passes parsing but fails
+	// every later dial. Both must fail at startup, not at first request.
+	// Errors stay field-name-only, matching the branches above.
+	if u.Fragment != "" {
+		return fmt.Errorf("%s must not contain a URL fragment", name)
+	}
+	if port := u.Port(); port != "" {
+		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+			return fmt.Errorf("%s has an invalid port", name)
+		}
 	}
 	return nil
 }

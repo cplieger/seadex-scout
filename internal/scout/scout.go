@@ -19,6 +19,7 @@ import (
 	"maps"
 	"time"
 
+	"github.com/cplieger/httpx/v3"
 	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/indexer"
@@ -68,12 +69,26 @@ type StateStore interface {
 // The concrete file-backed store must keep satisfying the cycle's seam.
 var _ StateStore = (*state.Store)(nil)
 
+// MappingSource supplies the Fribb mapping cache and index a cycle (or a
+// one-shot report) loads from the persisted cache. It is the consumer-side
+// seam over the concrete *mapping.Loader (which implements it; build.go
+// injects it), so orchestration tests can supply mapping outcomes with a fake
+// instead of constructing the loader's HTTP client, source URL, and override
+// path (the mapping package's own suite covers the real loader's fetch and
+// degradation behavior).
+type MappingSource interface {
+	Load(ctx context.Context, prev *mapping.Cache) (mapping.Cache, *mapping.Index, error)
+}
+
+// The concrete Fribb loader must keep satisfying the cycle's seam.
+var _ MappingSource = (*mapping.Loader)(nil)
+
 // Deps are the assembled components a Scout runs a cycle with.
 type Deps struct {
 	Logger   *slog.Logger
 	Store    StateStore
 	Library  *library.Walker
-	Mapping  *mapping.Loader
+	Mapping  MappingSource
 	SeaDex   SeaDexSource
 	Matcher  *match.Matcher
 	Comparer *compare.Comparer
@@ -231,7 +246,12 @@ func (s *Scout) stopAfterWalkFailure(ctx context.Context, walkErr error) bool {
 		s.log.Warn("cycle interrupted by shutdown during library walk", "cause", context.Cause(ctx))
 		return true
 	}
-	s.log.Error("library walk failed; cycle unhealthy", "error", walkErr)
+	// The arr URL may carry userinfo (config.Validate only warns on that
+	// shape), and a transport failure wraps a *url.Error embedding the full
+	// request URL — reduce it (httpx.LogSafeError) before it crosses any log
+	// boundary so an outage cannot ship an embedded credential into Loki.
+	safeWalkErr := httpx.LogSafeError(walkErr)
+	s.log.Error("library walk failed; cycle unhealthy", "error", safeWalkErr)
 	// Alert-only (no Torznab feed): a failed walk is unhealthy and there is
 	// nothing else to do, so skip the SeaDex/Fribb fetch (the pre-fold
 	// behaviour) - the cycle ends here, so emit its completion line now (the
@@ -240,7 +260,7 @@ func (s *Scout) stopAfterWalkFailure(ctx context.Context, walkErr error) bool {
 	// needs only SeaDex + Fribb, not the arrs - before returning unhealthy
 	// (the library gate then emits the completion line).
 	if s.deps.Feed == nil {
-		s.cycleDegraded("walk-failed", "error", walkErr)
+		s.cycleDegraded("walk-failed", "error", safeWalkErr)
 		return true
 	}
 	return false
@@ -571,7 +591,9 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap lib
 		// SeaDex fetch or mapping load) keeps the no-completion-line rule:
 		// an interrupted cycle did not complete, degraded or not.
 		if ctx.Err() == nil {
-			s.cycleDegraded("walk-failed", "error", walkErr)
+			// Same *url.Error reduction as stopAfterWalkFailure's log sites:
+			// the walk error may embed a credential-bearing request URL.
+			s.cycleDegraded("walk-failed", "error", httpx.LogSafeError(walkErr))
 		}
 		return true, false
 	}
@@ -688,7 +710,10 @@ func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap li
 func (s *Scout) reportSnapshot(ctx context.Context) (library.Snapshot, error) {
 	snap, err := s.deps.Library.Walk(ctx)
 	if err != nil {
-		return library.Snapshot{}, fmt.Errorf("library walk: %w", err)
+		// Reduce a transport *url.Error before it crosses the returned-report
+		// boundary (main logs this error at ERROR): the request URL inside it
+		// may carry configured userinfo credentials.
+		return library.Snapshot{}, fmt.Errorf("library walk: %w", httpx.LogSafeError(err))
 	}
 	if snap.Partial {
 		// The walk skipped series after episode-fetch failures - fail instead,

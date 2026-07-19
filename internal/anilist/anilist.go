@@ -170,7 +170,11 @@ func (c *Client) Fetch(ctx context.Context, aniListID int) (Media, error) {
 // inside an otherwise well-formed response) does NOT abort the batch: later
 // chunks are still fetched and the first record error is surfaced alongside
 // the merged result, so one malformed record cannot hide every id after it or
-// read as a total outage to the caller.
+// read as a total outage to the caller. The response is untrusted: an id the
+// current chunk never requested is dropped before the merge (retainRequested)
+// and surfaced like any other record-local failure, so a malformed or
+// compromised response cannot inject an unrelated Media or overwrite an
+// earlier chunk's value.
 func (c *Client) FetchMany(ctx context.Context, ids []int) (map[int]Media, error) {
 	out := make(map[int]Media, len(ids))
 	var firstRecordErr error
@@ -180,19 +184,44 @@ func (c *Client) FetchMany(ctx context.Context, ids []int) (map[int]Media, error
 			return out, err
 		}
 
-		page, err := parseMediaPage(raw)
+		page, parseErr := parseMediaPage(raw)
+		retainErr := retainRequested(page, chunk)
 		maps.Copy(out, page)
-		if err == nil {
-			continue
-		}
-		if !errors.Is(err, errBatchRecord) {
-			return out, err
-		}
-		if firstRecordErr == nil {
-			firstRecordErr = err
+		if err := errors.Join(parseErr, retainErr); err != nil {
+			if !errors.Is(err, errBatchRecord) {
+				return out, err
+			}
+			if firstRecordErr == nil {
+				firstRecordErr = err
+			}
 		}
 	}
 	return out, firstRecordErr
+}
+
+// retainRequested enforces FetchMany's identity-set invariant on one parsed
+// page: every id in the response must have been in the chunk that requested
+// it. An unsolicited id is deleted from the page - never merged, where it
+// could inject an unrelated Media or overwrite a value an earlier chunk
+// legitimately resolved - and the first such id is reported as an
+// errBatchRecord-wrapped error so the caller sees the malformed response
+// without losing the chunk's valid records.
+func retainRequested(page map[int]Media, chunk []int) error {
+	requested := make(map[int]struct{}, len(chunk))
+	for _, id := range chunk {
+		requested[id] = struct{}{}
+	}
+	var first error
+	for id := range page {
+		if _, ok := requested[id]; ok {
+			continue
+		}
+		delete(page, id)
+		if first == nil {
+			first = fmt.Errorf("%w unexpected media id %d", errBatchRecord, id)
+		}
+	}
+	return first
 }
 
 // do performs one GraphQL POST attempt, translating a 429 into a
@@ -463,14 +492,16 @@ type gqlPageResponse struct {
 
 // parseMediaPage decodes a batched Page(media) response into a map keyed by
 // AniList id. A GraphQL-level error or a missing/null Page or media field
-// fails the batch; an invalid media record (missing id or rejected fields) is
-// skipped and surfaced via an errBatchRecord-wrapped error alongside the
-// chunk's valid records, so one poisoned record cannot discard the chunk or
-// read as a total outage - a skipped id is absent from the map AND covered by
-// the non-nil error, so the caller never negative-memoizes it, and FetchMany
-// distinguishes the record-local failure from an envelope failure and keeps
-// fetching later chunks. Ids absent from the media array of an error-free
-// response are simply not in the map (the caller treats them as not-found).
+// fails the batch; the record loop's per-record invariants (positive id,
+// valid fields, no duplicate ids) live in parsePageRecords - a rejected
+// record is skipped and surfaced via an errBatchRecord-wrapped error
+// alongside the chunk's valid records, so one poisoned record cannot discard
+// the chunk or read as a total outage - a skipped id is absent from the map
+// AND covered by the non-nil error, so the caller never negative-memoizes it,
+// and FetchMany distinguishes the record-local failure from an envelope
+// failure and keeps fetching later chunks. Ids absent from the media array of
+// an error-free response are simply not in the map (the caller treats them as
+// not-found).
 func parseMediaPage(raw []byte) (map[int]Media, error) {
 	var r gqlPageResponse
 	if err := json.Unmarshal(raw, &r); err != nil {
@@ -485,22 +516,41 @@ func parseMediaPage(raw []byte) (map[int]Media, error) {
 	if r.Data.Page.Media == nil {
 		return nil, errors.New("anilist: batch response missing media")
 	}
-	media := *r.Data.Page.Media
+	return parsePageRecords(*r.Data.Page.Media)
+}
+
+// parsePageRecords validates one batch response's record list into a map
+// keyed by AniList id: a record with a non-positive id or rejected fields
+// (toMedia) is skipped, and a DUPLICATE id is conflicting untrusted data -
+// two records claiming one identity - so NO record for that id is returned
+// (the earlier occurrence is deleted and the id stays excluded however many
+// duplicates follow) rather than silently letting the last write win. Each
+// failure surfaces the first offender via an errBatchRecord-wrapped error
+// beside the valid sibling records.
+func parsePageRecords(media []gqlMedia) (map[int]Media, error) {
 	out := make(map[int]Media, len(media))
+	seen := make(map[int]bool, len(media))
 	var recordErr error
+	record := func(err error) {
+		if recordErr == nil {
+			recordErr = err
+		}
+	}
 	for i := range media {
 		md := &media[i]
 		if md.ID <= 0 {
-			if recordErr == nil {
-				recordErr = fmt.Errorf("%w media record %d missing id", errBatchRecord, i)
-			}
+			record(fmt.Errorf("%w media record %d missing id", errBatchRecord, i))
 			continue
 		}
+		if seen[md.ID] {
+			delete(out, md.ID)
+			record(fmt.Errorf("%w media record %d duplicates id %d", errBatchRecord, i, md.ID))
+			continue
+		}
+		seen[md.ID] = true
 		parsed, err := md.toMedia()
 		if err != nil {
-			if recordErr == nil {
-				recordErr = fmt.Errorf("%w media record %d (id %d): %v", errBatchRecord, i, md.ID, err)
-			}
+			record(fmt.Errorf("%w media record %d (id %d): %v", errBatchRecord, i, md.ID, err))
 			continue
 		}
 		out[md.ID] = parsed

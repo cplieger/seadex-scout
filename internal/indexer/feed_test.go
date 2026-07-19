@@ -9,27 +9,30 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
-// TestSortAndCap pins the journal feed's ordering + window contract: items are
-// sorted newest-first by first-seen time and the feed is trimmed to feedWindow
-// (the secondary bound under the 14-day journal prune), dropping the oldest
-// journal entries beyond the cap.
-func TestSortAndCap(t *testing.T) {
+// TestSortFeedRetainsOverflow pins the journal feed's ordering + retention
+// contract: items are sorted newest-first by first-seen time and NOTHING is
+// evicted by count - the persisted journal is bounded by age alone
+// (feedJournalMaxAge), so a burst of new curation larger than any old window
+// persists in full and gets its RSS exposure (growJournal has already marked
+// every identity seen, so a count-evicted item could never re-enter). Size
+// caps apply only to the rendered view (applyPaging + maxItems, query.go).
+func TestSortFeedRetainsOverflow(t *testing.T) {
 	base := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
-	items := make([]item, feedWindow+2)
+	const n = 302 // larger than the retired 300-item persisted cap
+	items := make([]item, n)
 	for i := range items {
 		items[i] = item{GUID: strconv.Itoa(i), FirstSeen: base.Add(time.Duration(i) * time.Minute)}
 	}
-	got := sortAndCap(items)
-	if len(got) != feedWindow {
-		t.Fatalf("sortAndCap returned %d items, want %d (capped)", len(got), feedWindow)
+	got := sortFeed(items)
+	if len(got) != n {
+		t.Fatalf("sortFeed returned %d items, want all %d (overflow must persist, never be count-evicted)", len(got), n)
 	}
-	newest := base.Add(time.Duration(feedWindow+1) * time.Minute)
+	newest := base.Add(time.Duration(n-1) * time.Minute)
 	if !got[0].FirstSeen.Equal(newest) {
 		t.Errorf("got[0].FirstSeen = %v, want %v (newest first)", got[0].FirstSeen, newest)
 	}
-	oldestKept := base.Add(2 * time.Minute)
-	if !got[len(got)-1].FirstSeen.Equal(oldestKept) {
-		t.Errorf("got[last].FirstSeen = %v, want %v (the two oldest dropped)", got[len(got)-1].FirstSeen, oldestKept)
+	if !got[len(got)-1].FirstSeen.Equal(base) {
+		t.Errorf("got[last].FirstSeen = %v, want %v (the oldest item is retained, not dropped)", got[len(got)-1].FirstSeen, base)
 	}
 }
 

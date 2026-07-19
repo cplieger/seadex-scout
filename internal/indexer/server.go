@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cplieger/runesafe"
 	"github.com/cplieger/webhttp"
 )
 
@@ -107,6 +108,24 @@ func noCacheHeaders(h http.Header) {
 	h.Set("Pragma", "no-cache")
 }
 
+// logParam bounds and cleans a request-controlled string (URL path, Host,
+// Torznab query params) before it reaches a log line - the same emit-boundary
+// policy sanitizeUpstreamText applies to untrusted upstream text: single-line
+// rune safety (runesafe.SanitizeSingleLine), then a 256-byte cap on a rune
+// boundary (truncated output appends "...") so a caller holding the feed key
+// cannot inject near-megabyte query values (NewServer permits up to 1 MiB of
+// headers) into oversized Loki records. Structured JSON already prevents line
+// injection; this bounds volume. The apikey is never passed through this
+// helper or into any log.
+func logParam(s string) string {
+	const maxLen = 256
+	s = runesafe.SanitizeSingleLine(s)
+	if len(s) > maxLen {
+		s = runesafe.CapBytes(s, maxLen) + "..."
+	}
+	return s
+}
+
 // handler builds the HTTP mux (a single Torznab endpoint).
 func (ix *Indexer) handler() http.Handler {
 	mux := http.NewServeMux()
@@ -127,19 +146,20 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 		// a second independent guard keeps any future construction path from
 		// serving the passkey-bearing feed unauthenticated - and it is what
 		// distinguishes "auth not configured" (this 503, an operator problem)
-		// from "wrong key" (the 401 below). VerifyStaticToken itself fails
-		// CLOSED on an empty configured key, so skipping this guard could
-		// never open the gate; it would just misreport the unconfigured state
-		// as an unauthorized caller.
-		ix.log.Error("indexer request rejected", "reason", "feed_api_key not configured", "path", r.URL.Path)
+		// from "wrong key" (the 401 below). The static-token verifier itself
+		// fails CLOSED on an empty configured key, so skipping this guard
+		// could never open the gate; it would just misreport the unconfigured
+		// state as an unauthorized caller.
+		ix.log.Error("indexer request rejected", "reason", "feed_api_key not configured", "path", logParam(r.URL.Path))
 		http.Error(w, "service unavailable: feed_api_key not configured", http.StatusServiceUnavailable)
 		return
 	}
 	// Constant-time verification, with the length side-channel (CWE-208)
 	// closed by comparing fixed-length SHA-256 digests rather than the raw
-	// strings, lives in the shared library: see webhttp.VerifyStaticToken.
-	if !webhttp.VerifyStaticToken(ix.cfg.APIKey, q.Get("apikey")) {
-		ix.log.Info("indexer request rejected", "reason", "bad apikey", "path", r.URL.Path)
+	// strings, lives in the shared library; the verifier is built once in New
+	// (pre-hashed configured key): see webhttp.NewStaticTokenVerifier.
+	if !ix.verifyKey.Verify(q.Get("apikey")) {
+		ix.log.Info("indexer request rejected", "reason", "bad apikey", "path", logParam(r.URL.Path))
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -151,7 +171,7 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 	noCacheHeaders(w.Header())
 	scope := scopeFor(r.Host, r.URL.Path)
 	if scope == "" {
-		ix.log.Info("indexer request rejected", "reason", "no tracker scope", "path", r.URL.Path, "host", r.Host)
+		ix.log.Info("indexer request rejected", "reason", "no tracker scope", "path", logParam(r.URL.Path), "host", logParam(r.Host))
 		http.Error(w, "not found: address a tracker feed at /nyaa or /ab", http.StatusNotFound)
 		return
 	}
@@ -178,6 +198,18 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items, stats := ix.query(r.Context(), q, scope)
+	// A snapshot-unavailable state (the persisted feed failed to load before
+	// any snapshot was installed - see snapFailed) is a local fault, not an
+	// empty catalogue: an empty 200 feed would read as a clean no-match to
+	// the arr, silently recording the fault as a successful search. Render a
+	// Torznab <error>, exactly like an unavailable Prowlarr dependency.
+	if stats.snapshotUnavailable {
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		_, _ = io.WriteString(w, renderError(errCodeUnknown,
+			"feed snapshot unavailable: the persisted SeaDex feed failed to load; results unavailable until a snapshot loads"))
+		ix.log.Info("indexer request rejected", "scope", scope, "reason", "feed snapshot unavailable")
+		return
+	}
 	// A total upstream failure (every queried Prowlarr upstream failed) is
 	// reported as a Torznab <error>, not an empty 200 feed: an empty feed reads
 	// as a clean "no SeaDex match" to the arr, which would silently record a
@@ -201,11 +233,11 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 	// the final count after the category filter.
 	ix.log.Info("indexer request",
 		"scope", scope,
-		"t", q.Get("t"),
-		"q", q.Get("q"),
-		"season", q.Get("season"),
-		"ep", q.Get("ep"),
-		"cat", q.Get("cat"),
+		"t", logParam(q.Get("t")),
+		"q", logParam(q.Get("q")),
+		"season", logParam(q.Get("season")),
+		"ep", logParam(q.Get("ep")),
+		"cat", logParam(q.Get("cat")),
 		"answered", stats.answered,
 		"feed", stats.feed,
 		"upstream", stats.upstream,

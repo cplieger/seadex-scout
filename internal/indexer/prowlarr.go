@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,14 +48,20 @@ type upstream struct {
 // transient error, so Do waits the upstream-requested delay
 // instead of its jittered backoff.
 func (u *upstream) search(ctx context.Context, params url.Values) ([]item, error) {
-	reqURL := u.feed
-	if enc := params.Encode(); enc != "" {
-		if strings.Contains(reqURL, "?") {
-			reqURL += "&" + enc
-		} else {
-			reqURL += "?" + enc
-		}
+	parsed, err := url.Parse(u.feed)
+	if err != nil {
+		return nil, errors.New("invalid upstream feed URL")
 	}
+	// Merge the Torznab params into RawQuery component-wise: appending to the
+	// raw string would land them after any fragment on the configured
+	// endpoint, where net/http strips them before sending.
+	if enc := params.Encode(); enc != "" {
+		if parsed.RawQuery != "" {
+			parsed.RawQuery += "&"
+		}
+		parsed.RawQuery += enc
+	}
+	reqURL := parsed.String()
 
 	items, err := httpx.Do(ctx,
 		func(ctx context.Context) ([]item, error) {
@@ -77,11 +84,14 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, error
 // followed by the Torznab decode. Errors the enclosing Do should
 // retry are marked transient: a 429/5xx status (with the 429's capped
 // Retry-After carried as the transient error's RetryAfterHint, so the outer
-// loop honors the upstream-requested delay) and a parse failure of a 2xx
-// body (transient truncated/garbled output on an idempotent GET). Transient
-// transport errors (timeouts, resets, DNS) already classify via
-// httpx.IsTransient through the returned chain; anything else (a 4xx, an
-// unparseable URL) stays terminal.
+// loop honors the upstream-requested delay), a garbled/truncated 2xx body,
+// and a Torznab <error> document carrying a generic/server-side code (e.g.
+// 900). A Torznab <error> document naming a deterministic auth/account
+// (100-199) or request/parameter (200-299) code is terminal - retrying
+// cannot recover a credentials or request-validation failure
+// (terminalTorznabCode). Transient transport errors (timeouts, resets, DNS)
+// already classify via httpx.IsTransient through the returned chain;
+// anything else (a 4xx, an unparseable URL) stays terminal.
 func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, http.NoBody)
 	if err != nil {
@@ -92,7 +102,7 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 	if err != nil {
 		// LogSafeError reduces a URL-embedding *url.Error to its cause
 		// (preserving errors.Is/As, so IsTransient still classifies it),
-		// matching the redaction httpx.Retry applied here before.
+		// matching the redaction httpx.GetBytes (v2's Retry) applied here before.
 		return nil, httpx.LogSafeError(err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -112,15 +122,38 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 	if err != nil {
 		// A syntactically valid Torznab <error> document (upstreamDocError:
 		// bad credentials, a named indexer failure) is a deliberate
-		// upstream-scoped answer, not a garbled body. It stays transient -
-		// the bounded retry budget is unchanged - but never carries the
-		// malformedBody marker, so after exhaustion the harvest latches the
-		// failed scope instead of treating an upstream-wide auth/config
-		// failure as one show's poison result set.
-		_, isErrorDoc := errors.AsType[*upstreamDocError](err)
-		return nil, &transientUpstreamError{err: err, malformedBody: !isErrorDoc}
+		// upstream-scoped answer, not a garbled body, so it never carries
+		// the malformedBody marker - after the search fails, the harvest
+		// latches the failed scope instead of treating an upstream-wide
+		// auth/config failure as one show's poison result set. Its
+		// retryability splits on the numeric Torznab code: a deterministic
+		// auth/account (100-199) or request/parameter (200-299) error
+		// cannot recover without a config change, so it returns terminal
+		// and the enclosing Do fails fast; a generic/server-side or
+		// unparseable code stays transient within the bounded budget.
+		if docErr, ok := errors.AsType[*upstreamDocError](err); ok {
+			if terminalTorznabCode(docErr.code) {
+				return nil, docErr
+			}
+			return nil, &transientUpstreamError{err: err}
+		}
+		return nil, &transientUpstreamError{err: err, malformedBody: true}
 	}
 	return items, nil
+}
+
+// terminalTorznabCode reports whether a Torznab <error> document's code names
+// a deterministic failure a retry cannot recover: the Newznab error ranges
+// 100-199 (incorrect credentials, account problems) and 200-299 (missing or
+// invalid request parameters) stay wrong on every attempt until the operator
+// fixes configuration, so retrying only multiplies upstream load and warning
+// noise while delaying the error. Generic/server-side codes (e.g. 900
+// "unknown error") and a code that does not parse as a number are NOT
+// terminal: they may recover, and an unknown shape defaults to the bounded
+// retry rather than failing fast.
+func terminalTorznabCode(code string) bool {
+	n, err := strconv.Atoi(code)
+	return err == nil && n >= 100 && n < 300
 }
 
 // transientUpstreamError marks an upstream failure retryable for
@@ -134,9 +167,11 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 // response from the status/transport failures: after retry exhaustion the
 // harvest treats a persistently malformed body as specific to one show's
 // result set (malformedUpstreamBody), never as evidence the upstream itself
-// is down. A valid Torznab <error> document (upstreamDocError) is the one
-// 2xx parse failure that stays UNMARKED: it is an upstream-scoped answer
-// (bad credentials, a named indexer failure), not a garbled body.
+// is down. A valid Torznab <error> document (upstreamDocError) with a
+// retryable generic/server-side code is the one 2xx parse failure that stays
+// UNMARKED: it is an upstream-scoped answer, not a garbled body. A doc error
+// with a deterministic auth/request code never reaches this wrapper at all -
+// it returns terminal from fetchAndParse (terminalTorznabCode).
 type transientUpstreamError struct {
 	err           error
 	retryAfter    time.Duration

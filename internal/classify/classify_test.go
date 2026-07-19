@@ -132,6 +132,33 @@ func TestTorrentFileNamesMaxInt64LengthKeepsOnlyPrimary(t *testing.T) {
 	}
 }
 
+// TestTorrentFileNamesUsesCeilingHalfThreshold pins the ceiling-half (not
+// floor-half) primary-payload threshold at the odd-maximum boundary: with a
+// maximum length of 3 the cutoff is 2, so a length-1 extra is excluded and a
+// length-2 extra is included. A floor-half regression would keep the length-1
+// extra and slip past the existing strictly-below property.
+func TestTorrentFileNamesUsesCeilingHalfThreshold(t *testing.T) {
+	tests := []struct {
+		name      string
+		extraSize int64
+		want      []string
+	}{
+		{name: "below ceiling half is excluded", extraSize: 1, want: []string{"primary.mkv"}},
+		{name: "at ceiling half is included", extraSize: 2, want: []string{"primary.mkv", "extra.mkv"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			files := []seadex.File{
+				{Name: "primary.mkv", Length: 3},
+				{Name: "extra.mkv", Length: tt.extraSize},
+			}
+			if got := torrentFileNames(files); !slices.Equal(got, tt.want) {
+				t.Errorf("torrentFileNames(%+v) = %v, want %v", files, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestTorrentPrimaryPayloadIgnoresSmallExtraMarker pins the primary-payload
 // selection: a best BD encode whose payload is twelve similarly-sized HEVC
 // episodes plus one small BDRemux-named NCED extra must classify from the

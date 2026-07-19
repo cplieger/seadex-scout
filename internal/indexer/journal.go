@@ -320,7 +320,7 @@ func applyTitles(items []item, titles map[string]string) {
 }
 
 // retainTitles prunes the harvested-title cache to the keys still present in
-// the journal feeds, so a pruned or capped-out item's cached title leaves with
+// the journal feeds, so an aged-out or dropped item's cached title leaves with
 // it (its seen-ledger identity guarantees it can never return to need it).
 func retainTitles(titles map[string]string, feeds ...[]item) map[string]string {
 	kept := make(map[string]string, len(titles))

@@ -95,14 +95,32 @@ func (r *Record) RoutedIDs() (tvdbID int, tmdbMovies []int, imdbIDs []string) {
 	return r.TvdbID, nil, nil
 }
 
-// HasArrIdentifier reports whether the record carries an identifier consumed by
-// the arr selected by its type: TMDB-movie/IMDb for movies, TVDB for series.
-// It is the canonical arr-routing predicate shared by the refresh acceptance
-// guard, the matcher, and the report's reverse catalogue, so all three agree
-// on which identifier fields are meaningful for a record's routed arr.
+// HasArrIdentifier reports whether the record carries a USABLE identifier
+// consumed by the arr selected by its type: TMDB-movie/IMDb for movies, TVDB
+// for series. It is the canonical arr-routing predicate shared by the refresh
+// acceptance guard, the matcher, and the report's reverse catalogue, so all
+// three agree on which identifier fields are meaningful for a record's routed
+// arr. Usability is checked per value, not per field shape: the Fribb
+// decoders guarantee positive/non-blank ids, but operator overrides construct
+// Record through plain encoding/json, so a negative tvdb_id, a zero
+// tmdb_movies entry, or a blank imdb id must read as id-less — otherwise it
+// would suppress the AniList title fallback while FindByID can never match it.
 func (r *Record) HasArrIdentifier() bool {
 	tvdb, tmdbMovies, imdbIDs := r.RoutedIDs()
-	return tvdb != 0 || len(tmdbMovies) > 0 || len(imdbIDs) > 0
+	if tvdb > 0 {
+		return true
+	}
+	for _, id := range tmdbMovies {
+		if id > 0 {
+			return true
+		}
+	}
+	for _, id := range imdbIDs {
+		if strings.TrimSpace(id) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // IsSpecial reports whether the entry is an OVA/ONA/special/music video rather
@@ -526,6 +544,9 @@ func validateRefreshedRecords(previous, records []Record, sourceElements int) er
 	if err := validateTypeCoverage(previous, records, minimum); err != nil {
 		return err
 	}
+	if err := validateScopeCoverage(previous, records, minimum); err != nil {
+		return err
+	}
 	return validateRoutingCoverage(previous, records, minimum)
 }
 
@@ -554,6 +575,63 @@ func validateTypeCoverage(previous, records []Record, minimum int) error {
 		return fmt.Errorf("type coverage %d/%d is below minimum %d (previous cache carried %d typed records)", typed, len(records), minimum, previousTyped)
 	}
 	return nil
+}
+
+// validateScopeCoverage rejects a candidate refresh that wholesale lost the
+// mapping metadata controlling comparison scope, relative to the previously
+// accepted cache. The typed and routing floors cannot see it: a body whose
+// season objects all decode to SeasonTvdb=0 (flex decoding zeroes odd shapes)
+// or whose OVA/SPECIAL labels all changed to the still-valid TV keeps AniList
+// ids, arr ids, types, and both routing populations healthy — yet align.Scope
+// then compares ordinary cours whole-series instead of their mapped season,
+// and exclude_specials/season-0 bucketing is silently bypassed. Same
+// loss-relative shape as the type and routing floors: each semantic
+// population (positive-season, special-type) is guarded only when the prior
+// cache met the floor for it, and an additive refresh that merely grows the
+// record count passes.
+func validateScopeCoverage(previous, records []Record, minimum int) error {
+	if len(previous) == 0 {
+		return nil
+	}
+	previousMinimum := coverageFloor(len(previous))
+	prevSeasons, seasons := positiveSeasonCount(previous), positiveSeasonCount(records)
+	if prevSeasons >= previousMinimum && seasons < minimum && seasons < prevSeasons {
+		return fmt.Errorf("positive-season coverage %d/%d is below minimum %d (previous cache carried %d season-scoped records)", seasons, len(records), minimum, prevSeasons)
+	}
+	prevSpecials, specials := specialRecordCount(previous), specialRecordCount(records)
+	if prevSpecials >= previousMinimum && specials < minimum && specials < prevSpecials {
+		return fmt.Errorf("special-type coverage %d/%d is below minimum %d (previous cache carried %d special records)", specials, len(records), minimum, prevSpecials)
+	}
+	return nil
+}
+
+// positiveSeasonCount returns how many records carry a positive TVDB season.
+// It backs validateScopeCoverage's season floor: align.Scope keys season-exact
+// comparison on SeasonTvdb > 0, so a refresh that wholesale zeroed the season
+// field silently degrades every mapped cour to whole-series scope.
+func positiveSeasonCount(records []Record) int {
+	n := 0
+	for i := range records {
+		if records[i].SeasonTvdb > 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// specialRecordCount returns how many records carry a special type (IsSpecial:
+// OVA/ONA/SPECIAL/MUSIC). It backs validateScopeCoverage's special floor:
+// exclude_specials filtering and the report's season-0 bucketing key on
+// IsSpecial, so a refresh that relabeled every special as TV silently routes
+// them through whole-series scope while passing the typed and routing floors.
+func specialRecordCount(records []Record) int {
+	n := 0
+	for i := range records {
+		if records[i].IsSpecial() {
+			n++
+		}
+	}
+	return n
 }
 
 // validateRoutingCoverage rejects a candidate refresh that collapsed a
@@ -586,12 +664,19 @@ func validateRoutingCoverage(previous, records []Record, minimum int) error {
 	return nil
 }
 
-// routingCounts returns how many records route to each arr side: MOVIE
-// records (Radarr) and everything else (Sonarr, per RoutedIDs' branch). It
-// backs validateRefreshedRecords' routing-distribution floor: consumers rely
-// on both populations surviving a refresh, not on per-record type syntax.
+// routingCounts returns how many records route to each arr side AND can
+// actually resolve there: MOVIE records (Radarr) and everything else (Sonarr,
+// per RoutedIDs' branch), counting only records that retain an identifier
+// their routed arr consumes (HasArrIdentifier). It backs
+// validateRefreshedRecords' routing-distribution floor: consumers rely on
+// both resolvable populations surviving a refresh, not on type labels alone —
+// a candidate that keeps every type but loses one side's usable ids must read
+// as a collapse of that side, not as healthy routing.
 func routingCounts(records []Record) (movies, others int) {
 	for i := range records {
+		if !records[i].HasArrIdentifier() {
+			continue
+		}
 		if records[i].IsMovie() {
 			movies++
 		} else {

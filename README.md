@@ -133,6 +133,12 @@ groups. Each row gets a verdict:
   nor ruled out. Absence of evidence is never read as evidence: such a row is
   a manual check, not a `have_best` or a `have_unlisted`.
 
+A listed release you could not act on — no usable link, or a tracker you
+cannot use — stays visible in the row but never drives the verdict: the
+Markdown annotates it (`PMR (unobtainable)`, like a curation-warned release's
+warning tags) and the JSON marks it `"unobtainable": true`, so a visible best
+the verdict ignored is always explained.
+
 After the per-match verdicts, a trailing **`not_on_seadex`** section lists library
 items recognized as anime (through the Fribb catalogue) that SeaDex does not list
 at all, so you can see which of your titles SeaDex has not curated.

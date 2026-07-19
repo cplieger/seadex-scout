@@ -270,12 +270,13 @@ func TestFetchEntriesUnparseableUpdatedWarnsOnce(t *testing.T) {
 }
 
 // TestFetchEntriesUnusableTorrentURLWarnsOnce pins the link-drop signal: a
-// torrent whose non-empty URL is dropped to "" by UsableURL (a foreign host
-// under a trusted tracker label, or an unknown tracker) is counted, and the
-// fetch surfaces ONE aggregate WARN carrying the count - a tracker host
-// migration that strips every release link must be alertable from Loki - while
-// the fetch itself still succeeds. An empty URL and a usable canonical-host
-// URL must not count.
+// torrent whose URL is unusable — omitted/empty, a foreign host under a
+// trusted tracker label, or an unknown tracker — is counted (filter.Obtainable
+// treats every UsableURL()=="" torrent as unobtainable), and the fetch
+// surfaces ONE aggregate WARN carrying the count - a tracker host migration or
+// schema drift that strips every release link must be alertable from Loki -
+// while the fetch itself still succeeds. A usable canonical-host URL must not
+// count.
 func TestFetchEntriesUnusableTorrentURLWarnsOnce(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{"totalItems":2,"totalPages":1,"items":[`+
@@ -306,7 +307,7 @@ func TestFetchEntriesUnusableTorrentURLWarnsOnce(t *testing.T) {
 			continue
 		}
 		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "count" && a.Value.Int64() == 2 {
+			if a.Key == "count" && a.Value.Int64() == 3 {
 				warned = true
 				return false
 			}
@@ -314,6 +315,6 @@ func TestFetchEntriesUnusableTorrentURLWarnsOnce(t *testing.T) {
 		})
 	}
 	if !warned {
-		t.Error("unusable-URL WARN does not carry count=2 (only the foreign-host and unknown-tracker URLs; the empty and usable ones must not count)")
+		t.Error("unusable-URL WARN does not carry count=3 (the foreign-host, unknown-tracker, and omitted-URL torrents; the usable one must not count)")
 	}
 }

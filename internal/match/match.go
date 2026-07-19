@@ -231,34 +231,45 @@ func (r *matchRun) matchEntry(ctx context.Context, e *seadex.Entry) Match {
 		return Match{Entry: *e, Arr: arrUnknown, Source: SourceUnmapped}
 	}
 	if recOK {
-		arr := recordArr(&rec)
-		if needsLookup {
-			// needsLookup under a present record means the record is id-less
-			// (see aniListNeed): the ID bridge by definition could not resolve
-			// an arr id, so the entry counts as Unmapped even when the AniList
-			// title fallback below links it - keeping the cycle line's "mapped"
-			// an honest count of actual ID-bridge resolutions. The title is the
-			// only remaining link to the arr item, so consult AniList.
-			r.cov.Unmapped[arr]++
-			if matched := r.titleMatch(ctx, e, arr); matched != nil {
-				return Match{Item: matched, Entry: *e, Record: rec, Arr: arr, Source: SourceTitle}
-			}
-			return Match{Entry: *e, Record: rec, Arr: arr, Source: SourceUnmapped}
-		}
-		// The record carries a usable arr id: the ID mapping resolved, so this
-		// is a coverage hit whether or not the item is in the library.
-		r.cov.Hits[arr]++
-		if item != nil {
-			return Match{Item: item, Entry: *e, Record: rec, Arr: arr, Source: SourceID}
-		}
-		// A record that carries its arr id but missed FindByID is simply not in
-		// the library and is unmatched directly, with no AniList lookup - this
-		// keeps the fallback off the ~thousands of SeaDex entries the operator
-		// does not have, which otherwise dominate a cold cycle's AniList
-		// traffic.
-		return Match{Entry: *e, Record: rec, Arr: arr, Source: SourceUnmapped}
+		return r.matchMappedEntry(ctx, e, &rec, item, needsLookup)
 	}
+	return r.matchUnmappedEntry(ctx, e)
+}
 
+// matchMappedEntry links an entry whose Fribb record resolved, tracking
+// coverage per outcome (ID hit, id-less title fallback, or library miss).
+func (r *matchRun) matchMappedEntry(ctx context.Context, e *seadex.Entry, rec *mapping.Record, item *library.Item, needsLookup bool) Match {
+	arr := recordArr(rec)
+	if needsLookup {
+		// needsLookup under a present record means the record is id-less
+		// (see aniListNeed): the ID bridge by definition could not resolve
+		// an arr id, so the entry counts as Unmapped even when the AniList
+		// title fallback below links it - keeping the cycle line's "mapped"
+		// an honest count of actual ID-bridge resolutions. The title is the
+		// only remaining link to the arr item, so consult AniList.
+		r.cov.Unmapped[arr]++
+		if matched := r.titleMatch(ctx, e, arr); matched != nil {
+			return Match{Item: matched, Entry: *e, Record: *rec, Arr: arr, Source: SourceTitle}
+		}
+		return Match{Entry: *e, Record: *rec, Arr: arr, Source: SourceUnmapped}
+	}
+	// The record carries a usable arr id: the ID mapping resolved, so this
+	// is a coverage hit whether or not the item is in the library.
+	r.cov.Hits[arr]++
+	if item != nil {
+		return Match{Item: item, Entry: *e, Record: *rec, Arr: arr, Source: SourceID}
+	}
+	// A record that carries its arr id but missed FindByID is simply not in
+	// the library and is unmatched directly, with no AniList lookup - this
+	// keeps the fallback off the ~thousands of SeaDex entries the operator
+	// does not have, which otherwise dominate a cold cycle's AniList
+	// traffic.
+	return Match{Entry: *e, Record: *rec, Arr: arr, Source: SourceUnmapped}
+}
+
+// matchUnmappedEntry links an entry with no Fribb record through the AniList
+// title fallback, counting it as unmapped coverage either way.
+func (r *matchRun) matchUnmappedEntry(ctx context.Context, e *seadex.Entry) Match {
 	media, ok := r.lookupAniList(ctx, e.AniListID)
 	if !ok {
 		r.cov.Unmapped[arrUnknown]++
@@ -266,7 +277,7 @@ func (r *matchRun) matchEntry(ctx context.Context, e *seadex.Entry) Match {
 	}
 	arr := formatArr(media.Format)
 	r.cov.Unmapped[arr]++
-	item = r.lib.findByTitle(media.Titles, media.Year, arr, r.m.log)
+	item := r.lib.findByTitle(media.Titles, media.Year, arr, r.m.log)
 	if item == nil {
 		return Match{Entry: *e, Arr: arr, Source: SourceUnmapped}
 	}
@@ -330,30 +341,35 @@ func NewLibIndex(snap *library.Snapshot) *LibIndex {
 	}
 	for i := range snap.Items {
 		it := &snap.Items[i]
-		// Each ID index has exactly one arr-gated consumer (byTvdb only via the
-		// Sonarr branch of FindByID, byTmdb/byImdb only via findMovie's Radarr
-		// gate), so index each map only with items of the arr that consumes it.
-		// Pooling both arrs added no lookup capability - it only let a wrong-arr
-		// item shadow the right-arr one under a shared key (TMDB movie and TV ids
-		// are disjoint namespaces over the same small-int key space, and TVDB
-		// reuses movie IMDb ids on the parent series), making FindByID/findMovie
-		// falsely miss a library item that IS present, depending on item order.
-		switch it.Arr {
-		case library.ArrSonarr:
-			if it.TvdbID != 0 {
-				li.byTvdb[it.TvdbID] = it
-			}
-		case library.ArrRadarr:
-			if it.TmdbID != 0 {
-				li.byTmdb[it.TmdbID] = it
-			}
-			if it.ImdbID != "" {
-				li.byImdb[it.ImdbID] = it
-			}
-		}
+		li.indexIDs(it)
 		li.indexTitles(it)
 	}
 	return li
+}
+
+// indexIDs adds an item's external IDs to the ID indexes of its arr.
+// Each ID index has exactly one arr-gated consumer (byTvdb only via the
+// Sonarr branch of FindByID, byTmdb/byImdb only via findMovie's Radarr
+// gate), so index each map only with items of the arr that consumes it.
+// Pooling both arrs added no lookup capability - it only let a wrong-arr
+// item shadow the right-arr one under a shared key (TMDB movie and TV ids
+// are disjoint namespaces over the same small-int key space, and TVDB
+// reuses movie IMDb ids on the parent series), making FindByID/findMovie
+// falsely miss a library item that IS present, depending on item order.
+func (li *LibIndex) indexIDs(it *library.Item) {
+	switch it.Arr {
+	case library.ArrSonarr:
+		if it.TvdbID != 0 {
+			li.byTvdb[it.TvdbID] = it
+		}
+	case library.ArrRadarr:
+		if it.TmdbID != 0 {
+			li.byTmdb[it.TmdbID] = it
+		}
+		if it.ImdbID != "" {
+			li.byImdb[it.ImdbID] = it
+		}
+	}
 }
 
 // indexTitles adds an item's primary and alternate titles to the title index.
@@ -446,21 +462,28 @@ func (li *LibIndex) findByTitle(titles []string, year int, arr string, log *slog
 func (li *LibIndex) titleCandidates(titles []string, arr string) []*library.Item {
 	seen := make(map[*library.Item]struct{})
 	var candidates []*library.Item
-	for _, t := range titles {
-		key := titlekey.Normalize(t)
-		if key == "" {
+	for _, title := range titles {
+		candidates = li.appendTitleCandidates(candidates, seen, title, arr)
+	}
+	return candidates
+}
+
+// appendTitleCandidates appends the items indexed under title's normalized
+// key that pass the arr restriction and are not already in seen.
+func (li *LibIndex) appendTitleCandidates(candidates []*library.Item, seen map[*library.Item]struct{}, title, arr string) []*library.Item {
+	key := titlekey.Normalize(title)
+	if key == "" {
+		return candidates
+	}
+	for _, it := range li.byTitle[key] {
+		if arr != "" && arr != arrUnknown && it.Arr != arr {
 			continue
 		}
-		for _, it := range li.byTitle[key] {
-			if arr != "" && arr != arrUnknown && it.Arr != arr {
-				continue
-			}
-			if _, dup := seen[it]; dup {
-				continue
-			}
-			seen[it] = struct{}{}
-			candidates = append(candidates, it)
+		if _, dup := seen[it]; dup {
+			continue
 		}
+		seen[it] = struct{}{}
+		candidates = append(candidates, it)
 	}
 	return candidates
 }

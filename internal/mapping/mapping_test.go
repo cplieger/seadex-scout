@@ -42,6 +42,10 @@ func TestRecord_HasArrIdentifier(t *testing.T) {
 		{"movie with imdb", Record{Type: "MOVIE", IMDbIDs: []string{"tt1"}}, true},
 		{"movie with only tvdb", Record{Type: "MOVIE", TvdbID: 100}, false},
 		{"no ids", Record{Type: "TV"}, false},
+		{"series with negative tvdb", Record{Type: "TV", TvdbID: -1}, false},
+		{"movie with zero tmdb entry", Record{Type: "MOVIE", TmdbMovies: []int{0}}, false},
+		{"movie with blank imdb entry", Record{Type: "MOVIE", IMDbIDs: []string{"  "}}, false},
+		{"movie with zero then valid tmdb", Record{Type: "MOVIE", TmdbMovies: []int{0, 4}}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

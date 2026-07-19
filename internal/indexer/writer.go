@@ -184,7 +184,7 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info f
 	hs := w.harvestTitles(ctx, feeds, titles, infoFor)
 	applyTitles(nyaa, titles)
 	applyTitles(ab, titles)
-	nyaa, ab = sortAndCap(nyaa), sortAndCap(ab)
+	nyaa, ab = sortFeed(nyaa), sortFeed(ab)
 	titles = retainTitles(titles, nyaa, ab)
 
 	snap := snapshot{ByHash: set.byHash, ByKey: set.byKey, ByPair: set.byPair, Seen: seen, Titles: titles, NyaaFeed: nyaa, ABFeed: ab}
@@ -297,48 +297,70 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 // copy of entries with every curation-warned torrent (release.CurationWarned
 // over the SeaDex tags: Broken/Incomplete) removed, plus the warned torrents'
 // journal keys, which carryJournal uses to drop a previously journaled item
-// whose torrent has since been warned. Filtering at the source keeps every
-// downstream consumer honest at once: the search curation set never marks a
-// warned release (a Prowlarr result matching one is purged as uncurated), the
-// journal never grows one, and the seen ledger never records one - so when a
-// warning is lifted the torrent becomes grabbable curation for the first time
-// and journals as new (a torrent journaled BEFORE it was warned stays in the
-// persisted ledger, so un-warning it never re-broadcasts it). The input is
-// never mutated: the cycle shares the entries slice with the compare pass, so
-// an entry containing a warned torrent gets a fresh filtered Torrents slice.
+// whose torrent has since been warned. The warning wins BY IDENTITY, not per
+// occurrence: a torrent can be attached to several SeaDex entries, and when
+// one occurrence is tagged Broken/Incomplete while a duplicate of the same
+// tracker key is not, keeping the unwarned duplicate would let proxied
+// searches serve and mark the release while carryJournal (which consumes the
+// any-occurrence key set) removes it from RSS - the two indexer paths would
+// disagree about whether the release is grabbable. So a first pass collects
+// every warned journal key across the whole catalogue, and a second pass
+// removes every occurrence that is warned itself OR shares a warned identity.
+// Filtering at the source keeps every downstream consumer honest at once: the
+// search curation set never marks a warned release (a Prowlarr result
+// matching one is purged as uncurated), the journal never grows one, and the
+// seen ledger never records one - so when a warning is lifted the torrent
+// becomes grabbable curation for the first time and journals as new (a
+// torrent journaled BEFORE it was warned stays in the persisted ledger, so
+// un-warning it never re-broadcasts it). The input is never mutated: the
+// cycle shares the entries slice with the compare pass, so an entry
+// containing a removed torrent gets a fresh filtered Torrents slice.
 func splitCurationWarned(entries []seadex.Entry) (kept []seadex.Entry, warned map[string]struct{}) {
-	warned = make(map[string]struct{})
+	warned = collectWarnedKeys(entries)
 	kept = make([]seadex.Entry, len(entries))
 	for i := range entries {
 		kept[i] = entries[i]
-		ts := entries[i].Torrents
-		if !anyCurationWarned(ts) {
-			continue
+		if unwarned, changed := filterWarnedTorrents(entries[i].Torrents, warned); changed {
+			kept[i].Torrents = unwarned
 		}
-		unwarned := make([]seadex.Torrent, 0, len(ts))
-		for j := range ts {
-			if release.CurationWarned(ts[j].Tags) {
-				if k := journalKey(&ts[j]); k != "" {
-					warned[k] = struct{}{}
-				}
-				continue
-			}
-			unwarned = append(unwarned, ts[j])
-		}
-		kept[i].Torrents = unwarned
 	}
 	return kept, warned
 }
 
-// anyCurationWarned reports whether any torrent carries a curation-warning
-// tag, so splitCurationWarned only copies the torrent slices it must filter.
-func anyCurationWarned(ts []seadex.Torrent) bool {
-	for i := range ts {
-		if release.CurationWarned(ts[i].Tags) {
-			return true
+// collectWarnedKeys is splitCurationWarned's first pass: the journal keys of
+// every curation-warned torrent occurrence across the whole catalogue.
+func collectWarnedKeys(entries []seadex.Entry) map[string]struct{} {
+	warned := make(map[string]struct{})
+	for i := range entries {
+		for j := range entries[i].Torrents {
+			t := &entries[i].Torrents[j]
+			if release.CurationWarned(t.Tags) {
+				if k := journalKey(t); k != "" {
+					warned[k] = struct{}{}
+				}
+			}
 		}
 	}
-	return false
+	return warned
+}
+
+// filterWarnedTorrents is splitCurationWarned's second pass for one entry's
+// torrents: it drops every occurrence that is warned itself OR shares a
+// warned identity, reporting whether anything was removed (the caller only
+// swaps in the fresh slice then, keeping the shared input unmutated).
+func filterWarnedTorrents(ts []seadex.Torrent, warned map[string]struct{}) ([]seadex.Torrent, bool) {
+	unwarned := make([]seadex.Torrent, 0, len(ts))
+	changed := false
+	for j := range ts {
+		t := &ts[j]
+		_, identityWarned := warned[journalKey(t)]
+		if release.CurationWarned(t.Tags) || identityWarned {
+			changed = true
+			continue
+		}
+		unwarned = append(unwarned, *t)
+	}
+	return unwarned, changed
 }
 
 // buildCuration builds the search curation index over the whole SeaDex

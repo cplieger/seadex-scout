@@ -332,3 +332,48 @@ func TestMemoDegradedPassRetainsExpiredEntries(t *testing.T) {
 		t.Errorf("memo[11] = %+v, want the stale entry retained verbatim", ent)
 	}
 }
+
+// TestMemoStaleTitleUsesExpiredPositiveEntry pins StaleTitle's deliberate
+// expiry-ignorance: the memo expiry governs re-fetch cadence only, so an
+// expired positive entry must still yield its title/year for the feed's
+// title tier (a stale show title beats a file-name derivation).
+func TestMemoStaleTitleUsesExpiredPositiveEntry(t *testing.T) {
+	memo := Memo{Entries: map[int]MemoEntry{
+		42: {
+			Titles: []string{"Frieren: Beyond Journey's End"},
+			Year:   2023,
+			Expiry: memoTestClock.Add(-time.Hour),
+		},
+	}}
+
+	title, year, ok := memo.StaleTitle(42)
+	if !ok {
+		t.Fatal("StaleTitle(42) ok = false, want true for an expired positive entry")
+	}
+	if title != "Frieren: Beyond Journey's End" || year != 2023 {
+		t.Errorf("StaleTitle(42) = (%q, %d), want (%q, %d)", title, year, "Frieren: Beyond Journey's End", 2023)
+	}
+}
+
+// TestMemoStaleTitleRejectsUnusableEntries pins the three unusable shapes:
+// a not-found negative, a title-less entry, and an absent id all return zero
+// values and false, never a fabricated title.
+func TestMemoStaleTitleRejectsUnusableEntries(t *testing.T) {
+	memo := Memo{Entries: map[int]MemoEntry{
+		1: {Titles: []string{"Negative"}, Year: 2020, NotFound: true, Expiry: memoTestClock.Add(time.Hour)},
+		2: {Year: 2021, Expiry: memoTestClock.Add(time.Hour)},
+	}}
+	tests := map[string]int{
+		"not found":    1,
+		"empty titles": 2,
+		"absent":       3,
+	}
+	for name, id := range tests {
+		t.Run(name, func(t *testing.T) {
+			title, year, ok := memo.StaleTitle(id)
+			if ok || title != "" || year != 0 {
+				t.Errorf("StaleTitle(%d) = (%q, %d, %v), want zero values and false", id, title, year, ok)
+			}
+		})
+	}
+}

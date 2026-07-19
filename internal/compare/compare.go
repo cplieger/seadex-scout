@@ -177,7 +177,7 @@ func (c *Comparer) compareOne(m *match.Match) *Finding {
 	if d.Outcome == align.OutcomeNoFile {
 		return nil
 	}
-	base := c.baseFinding(m, d.Groups)
+	base := baseFinding(m, d.Groups)
 	switch d.Outcome {
 	case align.OutcomeNoBest:
 		return emptyResult(entry, &base)
@@ -264,7 +264,7 @@ func emptyResult(entry *seadex.Entry, base *Finding) *Finding {
 // the shared decision judged the unit against (align.Decision.Groups: the
 // mapped season's groups, or the whole-series union) - so a season-scoped
 // finding's CurrentGroup and dedupe key never leak whole-series groups.
-func (c *Comparer) baseFinding(m *match.Match, groups []string) Finding {
+func baseFinding(m *match.Match, groups []string) Finding {
 	return Finding{
 		Title:         m.Item.Title,
 		Arr:           m.Arr,
@@ -499,11 +499,24 @@ func releaseIdentity(f *Finding) string {
 // to 512 arbitrarily long URLs per entry) reduces to a fixed-size hash
 // instead of one huge joined allocation.
 func animeBytesLinkKey(links []ReleaseLink) string {
+	seen := make(map[string]struct{}, len(links))
 	var urls []string
 	for i := range links {
-		if filter.ABGated(links[i].Tracker, links[i].URL) {
-			urls = append(urls, strings.TrimSpace(links[i].URL))
+		if !filter.ABGated(links[i].Tracker, links[i].URL) {
+			continue
 		}
+		// Deduplicate by trimmed URL: obtainableLinks preserves distinct
+		// (tracker, URL) pairs, so one AB URL can arrive twice when SeaDex
+		// supplies the same source once as AB and once under a mislabeled
+		// tracker. The key describes the URL SET - correcting the duplicate
+		// or its label later must not change the key and re-alert an
+		// unchanged obtainable source.
+		u := strings.TrimSpace(links[i].URL)
+		if _, dup := seen[u]; dup {
+			continue
+		}
+		seen[u] = struct{}{}
+		urls = append(urls, u)
 	}
 	if len(urls) == 0 {
 		return ""

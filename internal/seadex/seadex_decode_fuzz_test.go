@@ -86,3 +86,29 @@ func normalizePBList(l pbList) pbList {
 	}
 	return l
 }
+
+// FuzzInfoHashRedacted_caseAndWhitespaceInvariant pins the redaction
+// predicate's two documented metamorphic contracts over the untrusted SeaDex
+// info-hash field - case folding (EqualFold) and surrounding-whitespace
+// tolerance (TrimSpace) - and cross-checks that the redaction sentinel can
+// never also pass ValidInfoHash (the two gates partition the same input).
+func FuzzInfoHashRedacted_caseAndWhitespaceInvariant(f *testing.F) {
+	f.Add("<redacted>")
+	f.Add("<REDACTED>")
+	f.Add("  <Redacted>\t")
+	f.Add("redacted")
+	f.Add("143ed15e5e3df072ae91adaeb149973a887590dd")
+	f.Add("")
+	f.Fuzz(func(t *testing.T, h string) {
+		got := InfoHashRedacted(h)
+		if upper := InfoHashRedacted(strings.ToUpper(h)); upper != got {
+			t.Errorf("InfoHashRedacted case invariance for %q = %v after uppercasing, want %v", h, upper, got)
+		}
+		if padded := InfoHashRedacted(" \t\n" + h + "\r\n "); padded != got {
+			t.Errorf("InfoHashRedacted whitespace invariance for %q = %v after padding, want %v", h, padded, got)
+		}
+		if got && ValidInfoHash(h) != "" {
+			t.Errorf("InfoHashRedacted(%q) and ValidInfoHash(%q) both accepted the same value", h, h)
+		}
+	})
+}

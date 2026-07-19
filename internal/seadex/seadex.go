@@ -166,8 +166,10 @@ type Entry struct {
 }
 
 // HasTheoreticalBest reports whether the entry names a theoretical-best release
-// that is not yet muxed (nothing concrete to grab).
-func (e *Entry) HasTheoreticalBest() bool { return e.TheoreticalBest != "" }
+// that is not yet muxed (nothing concrete to grab). Like the package's other
+// predicates over untrusted PocketBase text, surrounding whitespace is not a
+// name: a whitespace-only value reports false.
+func (e *Entry) HasTheoreticalBest() bool { return strings.TrimSpace(e.TheoreticalBest) != "" }
 
 // Client fetches entries from a SeaDex PocketBase instance.
 type Client struct {
@@ -301,10 +303,11 @@ func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 // whose non-empty updated timestamp failed to parse (zeroed, sorting to the
 // feed's tail) are surfaced as one aggregate WARN so an upstream format drift
 // that zeroes the whole catalogue is alertable without per-record noise.
-// Torrents whose non-empty URL is unusable (dropped to "" by UsableURL: a
-// foreign host under a trusted label, an unknown tracker, a malformed URL)
-// are likewise surfaced as one aggregate WARN, so a tracker host migration
-// that strips every release link is alertable instead of silent.
+// Torrents whose URL is unusable (omitted/empty, or a non-empty value
+// dropped to "" by UsableURL: a foreign host under a trusted label, an
+// unknown tracker, a malformed URL) are likewise surfaced as one aggregate
+// WARN — filter.Obtainable treats both cases as unobtainable — so a schema
+// drift that strips every release link is alertable instead of silent.
 func (c *Client) finishFetch(all []Entry, tot fetchTotals) ([]Entry, error) {
 	if len(all) == 0 {
 		return nil, fmt.Errorf("seadex: returned an empty catalogue (totalItems=%d); "+
@@ -372,7 +375,7 @@ func appendPageEntries(all []Entry, items []pbEntry, tot *fetchTotals) []Entry {
 			tot.unparsedTimes++
 		}
 		for j := range entry.Torrents {
-			if strings.TrimSpace(entry.Torrents[j].URL) != "" && entry.Torrents[j].UsableURL() == "" {
+			if entry.Torrents[j].UsableURL() == "" {
 				tot.unusableURLs++
 			}
 		}
@@ -642,7 +645,9 @@ func (d *pageDecoder) decodeItems(prior []pbEntry) ([]pbEntry, error) {
 // decodeEntry decodes one entries record field-wise into e, matching
 // json.Unmarshal's duplicate-key semantics: a JSON null element is a no-op
 // that preserves the existing value, and an object only overwrites the
-// fields it actually carries.
+// fields it actually carries. Field-specific decode behavior lives in
+// decodeEntryField; this function owns only the open/key/dispatch/close
+// token-stream lifecycle.
 func (d *pageDecoder) decodeEntry(e *pbEntry) error {
 	ok, err := d.open('{')
 	if err != nil || !ok {
@@ -653,31 +658,36 @@ func (d *pageDecoder) decodeEntry(e *pbEntry) error {
 		if err != nil {
 			return err
 		}
-		switch {
-		case strings.EqualFold(k, "notes"):
-			err = d.dec.Decode(&e.Notes)
-		case strings.EqualFold(k, "theoreticalBest"):
-			err = d.dec.Decode(&e.TheoreticalBest)
-		case strings.EqualFold(k, "updated"):
-			err = d.dec.Decode(&e.Updated)
-		case strings.EqualFold(k, "alID"):
-			err = d.dec.Decode(&e.AlID)
-		case strings.EqualFold(k, "incomplete"):
-			err = d.dec.Decode(&e.Incomplete)
-		case strings.EqualFold(k, "expand"):
-			// json.Unmarshal merges duplicate object keys field-wise and
-			// treats null into a non-pointer struct as a no-op; decode into
-			// the existing value so neither a duplicate "expand":null nor a
-			// duplicate/partial "expand":{} can wipe an already-decoded trs.
-			err = d.decodeExpand(&e.Expand)
-		default:
-			err = d.skip()
-		}
-		if err != nil {
+		if err := d.decodeEntryField(e, k); err != nil {
 			return err
 		}
 	}
 	return d.close()
+}
+
+// decodeEntryField decodes one entries-record field (or skips an unknown
+// key), preserving decodeEntry's duplicate-key semantics for each field.
+func (d *pageDecoder) decodeEntryField(e *pbEntry, key string) error {
+	switch {
+	case strings.EqualFold(key, "notes"):
+		return d.dec.Decode(&e.Notes)
+	case strings.EqualFold(key, "theoreticalBest"):
+		return d.dec.Decode(&e.TheoreticalBest)
+	case strings.EqualFold(key, "updated"):
+		return d.dec.Decode(&e.Updated)
+	case strings.EqualFold(key, "alID"):
+		return d.dec.Decode(&e.AlID)
+	case strings.EqualFold(key, "incomplete"):
+		return d.dec.Decode(&e.Incomplete)
+	case strings.EqualFold(key, "expand"):
+		// json.Unmarshal merges duplicate object keys field-wise and
+		// treats null into a non-pointer struct as a no-op; decode into
+		// the existing value so neither a duplicate "expand":null nor a
+		// duplicate/partial "expand":{} can wipe an already-decoded trs.
+		return d.decodeExpand(&e.Expand)
+	default:
+		return d.skip()
+	}
 }
 
 // decodeExpand decodes the expand relation envelope field-wise into ex,
@@ -740,7 +750,9 @@ func (d *pageDecoder) decodeTorrents(prior []Torrent) ([]Torrent, error) {
 // decodeTorrent decodes one torrent record field-wise into t, matching
 // json.Unmarshal's duplicate-key semantics: a JSON null element is a no-op
 // that preserves the existing value, and an object only overwrites the
-// fields it actually carries.
+// fields it actually carries. Field-specific decode behavior lives in
+// decodeTorrentField; this function owns only the open/key/dispatch/close
+// token-stream lifecycle.
 func (d *pageDecoder) decodeTorrent(t *Torrent) error {
 	ok, err := d.open('{')
 	if err != nil || !ok {
@@ -751,31 +763,42 @@ func (d *pageDecoder) decodeTorrent(t *Torrent) error {
 		if err != nil {
 			return err
 		}
-		switch {
-		case strings.EqualFold(k, "releaseGroup"):
-			err = d.dec.Decode(&t.ReleaseGroup)
-		case strings.EqualFold(k, "tracker"):
-			err = d.dec.Decode(&t.Tracker)
-		case strings.EqualFold(k, "infoHash"):
-			err = d.dec.Decode(&t.InfoHash)
-		case strings.EqualFold(k, "url"):
-			err = d.dec.Decode(&t.URL)
-		case strings.EqualFold(k, "isBest"):
-			err = d.dec.Decode(&t.IsBest)
-		case strings.EqualFold(k, "dualAudio"):
-			err = d.dec.Decode(&t.DualAudio)
-		case strings.EqualFold(k, "files"):
-			t.Files, err = d.decodeFiles(t.Files)
-		case strings.EqualFold(k, "tags"):
-			t.Tags, err = d.decodeTags(t.Tags)
-		default:
-			err = d.skip()
-		}
-		if err != nil {
+		if err := d.decodeTorrentField(t, k); err != nil {
 			return err
 		}
 	}
 	return d.close()
+}
+
+// decodeTorrentField decodes one torrent-record field (or skips an unknown
+// key), preserving decodeTorrent's duplicate-key semantics for each field:
+// the nested-array fields decode INTO the existing slice (element-wise merge
+// plus truncation, matching json.Unmarshal's duplicate-key slice semantics).
+func (d *pageDecoder) decodeTorrentField(t *Torrent, key string) error {
+	switch {
+	case strings.EqualFold(key, "releaseGroup"):
+		return d.dec.Decode(&t.ReleaseGroup)
+	case strings.EqualFold(key, "tracker"):
+		return d.dec.Decode(&t.Tracker)
+	case strings.EqualFold(key, "infoHash"):
+		return d.dec.Decode(&t.InfoHash)
+	case strings.EqualFold(key, "url"):
+		return d.dec.Decode(&t.URL)
+	case strings.EqualFold(key, "isBest"):
+		return d.dec.Decode(&t.IsBest)
+	case strings.EqualFold(key, "dualAudio"):
+		return d.dec.Decode(&t.DualAudio)
+	case strings.EqualFold(key, "files"):
+		var err error
+		t.Files, err = d.decodeFiles(t.Files)
+		return err
+	case strings.EqualFold(key, "tags"):
+		var err error
+		t.Tags, err = d.decodeTags(t.Tags)
+		return err
+	default:
+		return d.skip()
+	}
 }
 
 // decodeFiles decodes one torrent's file list, capped at maxFilesPerTorrent.

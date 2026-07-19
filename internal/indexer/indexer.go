@@ -52,6 +52,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/cplieger/webhttp"
 )
 
 const (
@@ -132,6 +134,10 @@ type Indexer struct {
 	path       string
 	snap       snapshot
 	upstreams  []*upstream // wired once in New; immutable afterwards (not guarded by mu)
+	// verifyKey is the pre-hashed feed_api_key verifier, built once in New so
+	// per-request verification hashes only the presented value (see
+	// webhttp.NewStaticTokenVerifier). Immutable after New.
+	verifyKey webhttp.StaticTokenVerifier
 	// reloadMu coalesces concurrent snapshot refreshes: only one request runs
 	// reload's stat/read/unmarshal at a time; the rest serve the current
 	// immutable snapshot (see reload). mu still guards the published snapshot.
@@ -151,6 +157,25 @@ type Indexer struct {
 	// itself is NOT suppressed (both faults can recover without an mtime
 	// change). Guarded by reloadMu (set/cleared only inside reload).
 	reloadDegraded bool
+	// snapFailed records that snapshot loading failed BEFORE any snapshot was
+	// installed: a non-ENOENT stat or read fault, or a malformed or
+	// structurally invalid file, at startup leaves the zero-value in-memory
+	// snapshot indistinguishable from the intentional fresh-install state -
+	// query would contact Prowlarr, filter every result against nil curation
+	// maps, and serve a successful empty feed, so the arr records a clean
+	// no-match during a local fault. While set, query answers with a
+	// snapshot-unavailable flag (no Prowlarr query) and serve renders a
+	// Torznab <error>, like an unavailable Prowlarr dependency. Set on those
+	// failure paths only while snapInfo is nil (a fault AFTER a successful
+	// load keeps serving the last-good snapshot); cleared by the first
+	// successful installSnapshot, and by a genuinely absent file (deleting
+	// the bad file returns to fresh-install semantics). Guarded by mu (read
+	// per request by query, unlike the reloadMu-guarded flags above).
+	snapFailed bool
+	// snapFailedWarned bounds the snapshot-unavailable WARN to one per onset
+	// instead of one per request; re-armed whenever snapFailed clears.
+	// Guarded by mu.
+	snapFailedWarned bool
 }
 
 // New builds the Torznab feed server from cfg and deps, wiring one upstream per
@@ -164,9 +189,10 @@ func New(cfg *Config, deps Deps, snapshotPath string) *Indexer {
 		log = slog.Default()
 	}
 	ix := &Indexer{
-		log:  log,
-		path: snapshotPath,
-		cfg:  *cfg,
+		log:       log,
+		path:      snapshotPath,
+		cfg:       *cfg,
+		verifyKey: webhttp.NewStaticTokenVerifier(cfg.APIKey),
 	}
 	// One upstream per configured Prowlarr Torznab URL. An empty URL means that
 	// tracker is off: it is simply not wired, so the feed never queries it. (The

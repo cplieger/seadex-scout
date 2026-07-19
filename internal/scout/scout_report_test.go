@@ -40,7 +40,7 @@ func TestReportGeneratesRowsAndNeverWritesState(t *testing.T) {
 		Logger:  logger,
 		Store:   store,
 		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher: match.NewMatcher(notFoundAniList{}, logger),
 		Auditor: audit.NewAuditor(audit.Config{SeaDexBaseURL: "https://releases.moe"}),
@@ -137,7 +137,7 @@ func TestReportZeroSeaDexEntriesErrors(t *testing.T) {
 			Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
 		}},
 		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{},
 	})
 
@@ -158,13 +158,13 @@ func TestReportSeaDexFailureErrors(t *testing.T) {
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
 	s := New(&Deps{
 		Logger: logger,
-		// A cached mapping keeps the loader usable so the report reaches the
+		// A cached mapping keeps the map usable so the report reaches the
 		// SeaDex arm (an unusable map is its own hard error, gated earlier).
 		Store: &fakeStore{st: state.State{
 			Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
 		}},
 		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{err: errors.New("seadex down")},
 	})
 
@@ -276,7 +276,7 @@ func TestReportDegradedMatching(t *testing.T) {
 			Logger:  logger,
 			Store:   &fakeStore{st: state.State{Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}}}},
 			Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
-			Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+			Mapping: fakeMapping{},
 			SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
 			Matcher: match.NewMatcher(degradedMatcherAniList{}, logger),
 			Auditor: audit.NewAuditor(audit.Config{SeaDexBaseURL: "https://releases.moe"}),
@@ -310,7 +310,7 @@ func TestReportDegradedMatching(t *testing.T) {
 			Logger:  logger,
 			Store:   &fakeStore{st: state.State{Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}}}},
 			Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
-			Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+			Mapping: fakeMapping{},
 			SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
 			Matcher: match.NewMatcher(&ctxCancellingAniList{cancel: cancel}, logger),
 		})

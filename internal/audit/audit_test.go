@@ -506,6 +506,65 @@ func TestAuditCurationWarnedReleaseAnnotatedNotCounted(t *testing.T) {
 	})
 }
 
+// TestAuditUnobtainableBestAnnotatedNotCounted pins the report-path
+// obtainability contract (option (b) of review finding h-f15): a SeaDex best
+// the daemon's filter.Obtainable rule rejects (here: no usable URL) stays
+// LISTED, carrying an explicit Unobtainable marker, but counts as neither
+// best nor alt for the verdict - an on-disk group matching only an
+// unobtainable best reads have_unlisted, never have_best, mirroring the
+// daemon's exclusion - so the rendered facts and the decision inputs no
+// longer silently diverge. An obtainable best on the same entry still
+// classifies as usual and carries no marker.
+func TestAuditUnobtainableBestAnnotatedNotCounted(t *testing.T) {
+	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"})
+	rowFor := func(t *testing.T, torrents []seadex.Torrent) Row {
+		t.Helper()
+		item := &library.Item{
+			Arr: library.ArrSonarr, ArrID: 1, Title: "Unobtainable", TvdbID: 100,
+			SeasonGroups: map[int][]string{1: {"pmr"}}, Groups: []string{"pmr"}, HasFile: true,
+		}
+		matches := []match.Match{{
+			Item:   item,
+			Arr:    library.ArrSonarr,
+			Source: match.SourceID,
+			Entry:  seadex.Entry{AniListID: 10, Torrents: torrents},
+			Record: mapping.Record{Type: "TV", TvdbID: 100, SeasonTvdb: 1},
+		}}
+		rep := a.Audit(matches, nil, nil, nil)
+		if len(rep.Rows) != 1 {
+			t.Fatalf("rows = %d, want 1", len(rep.Rows))
+		}
+		return rep.Rows[0]
+	}
+
+	t.Run("unobtainable best neither aligns nor recommends", func(t *testing.T) {
+		row := rowFor(t, []seadex.Torrent{{
+			Tracker: "Nyaa", ReleaseGroup: "PMR", IsBest: true,
+		}})
+		if row.Verdict != VerdictUnlisted {
+			t.Errorf("verdict = %q, want %q (an unobtainable best must not count as best)", row.Verdict, VerdictUnlisted)
+		}
+		if len(row.Releases) != 1 {
+			t.Fatalf("releases = %d, want 1 (an unobtainable release stays listed)", len(row.Releases))
+		}
+		if !row.Releases[0].Unobtainable {
+			t.Error("release Unobtainable = false, want true (the marker explains the ignored best)")
+		}
+	})
+
+	t.Run("obtainable best still classifies unmarked", func(t *testing.T) {
+		row := rowFor(t, []seadex.Torrent{{
+			Tracker: "Nyaa", ReleaseGroup: "PMR", URL: "https://nyaa.si/view/5", IsBest: true,
+		}})
+		if row.Verdict != VerdictBest {
+			t.Errorf("verdict = %q, want %q (an obtainable best is unaffected)", row.Verdict, VerdictBest)
+		}
+		if len(row.Releases) != 1 || row.Releases[0].Unobtainable {
+			t.Errorf("releases = %+v, want one obtainable release without the marker", row.Releases)
+		}
+	})
+}
+
 // TestAuditExcludedSpecialMatchStillCoversItem pins the covered-mark ordering
 // in Audit's row loop: an item whose only SeaDex match is a special dropped
 // by exclude_specials is still marked covered BEFORE the specials filter

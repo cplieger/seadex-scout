@@ -18,9 +18,10 @@ import (
 
 // TestUpstreamSearchPreservesExistingQuery pins the URL-join logic of the
 // Prowlarr proxy: a configured Torznab URL that already carries a query string
-// gets the forwarded params appended with "&" (not a second "?"), so both the
-// original and forwarded params survive; the Prowlarr key rides the X-Api-Key
-// header, never the URL.
+// gets the forwarded params merged into the query component (not appended
+// after a trailing fragment, which net/http would strip before sending), so
+// both the original and forwarded params survive even on an endpoint carrying
+// a fragment; the Prowlarr key rides the X-Api-Key header, never the URL.
 func TestUpstreamSearchPreservesExistingQuery(t *testing.T) {
 	var (
 		mu     sync.Mutex
@@ -40,7 +41,7 @@ func TestUpstreamSearchPreservesExistingQuery(t *testing.T) {
 
 	u := &upstream{
 		http: srv.Client(), log: slog.Default(), name: upstreamNyaa,
-		feed: srv.URL + "/api?indexer=1", apiKey: "prowlarr-key",
+		feed: srv.URL + "/api?indexer=1#client-fragment", apiKey: "prowlarr-key",
 	}
 	items, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
 	if err != nil {
@@ -187,25 +188,44 @@ func TestUpstreamSearchRetriesMalformedResponse(t *testing.T) {
 	}
 }
 
-// TestFetchAndParseClassifiesTorznabErrorDocScopeWide pins the harvest
-// failure classification at the parse boundary: a syntactically valid Torznab
-// <error> document (bad credentials, a named indexer failure - an
-// upstream-wide answer delivered with HTTP 200) must NOT carry the show-local
-// malformedBody marker after fetchAndParse wraps it, so after retry
-// exhaustion the harvest latches the failed scope; a truncated/garbled RSS
-// body remains show-local (marker set). Both stay transient, so the bounded
-// retry budget is unchanged either way.
-func TestFetchAndParseClassifiesTorznabErrorDocScopeWide(t *testing.T) {
+// TestFetchAndParseClassifiesTorznabErrorDoc pins the failure classification
+// at the parse boundary: a syntactically valid Torznab <error> document is an
+// upstream-scoped answer, so it NEVER carries the show-local malformedBody
+// marker (after the search fails, the harvest latches the failed scope), and
+// its retryability splits on the numeric code - a deterministic auth/account
+// (100-199) or request/parameter (200-299) error is terminal because retrying
+// cannot recover bad credentials or a bad request, while a generic/
+// server-side (900) or unparseable code stays transient within the bounded
+// budget. A truncated/garbled RSS body remains show-local (marker set) and
+// transient.
+func TestFetchAndParseClassifiesTorznabErrorDoc(t *testing.T) {
 	tests := map[string]struct {
 		body          string
+		wantTransient bool
 		wantMalformed bool
+		wantDocErr    bool
 	}{
-		"valid torznab error document stays scope-wide": {
-			body:          `<?xml version="1.0" encoding="UTF-8"?><error code="100" description="Incorrect user credentials"/>`,
-			wantMalformed: false,
+		"auth error code 100 is terminal": {
+			body:       `<?xml version="1.0" encoding="UTF-8"?><error code="100" description="Incorrect user credentials"/>`,
+			wantDocErr: true,
+		},
+		"parameter error code 201 is terminal": {
+			body:       `<?xml version="1.0" encoding="UTF-8"?><error code="201" description="Incorrect parameter"/>`,
+			wantDocErr: true,
+		},
+		"generic error code 900 stays transient": {
+			body:          `<?xml version="1.0" encoding="UTF-8"?><error code="900" description="Unknown error"/>`,
+			wantTransient: true,
+			wantDocErr:    true,
+		},
+		"unparseable error code stays transient": {
+			body:          `<?xml version="1.0" encoding="UTF-8"?><error code="oops" description="weird upstream"/>`,
+			wantTransient: true,
+			wantDocErr:    true,
 		},
 		"truncated RSS stays show-local": {
 			body:          `<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><item><title>trunc`,
+			wantTransient: true,
 			wantMalformed: true,
 		},
 	}
@@ -223,14 +243,89 @@ func TestFetchAndParseClassifiesTorznabErrorDocScopeWide(t *testing.T) {
 				t.Fatal("fetchAndParse on an undecodable feed returned nil error")
 			}
 			var transient httpx.Transient
-			if !errors.As(err, &transient) || !transient.IsTransient() {
-				t.Errorf("parse failure is not transient (err = %v), want retryable within the bounded budget", err)
+			gotTransient := errors.As(err, &transient) && transient.IsTransient()
+			if gotTransient != tc.wantTransient {
+				t.Errorf("transient = %v, want %v (err = %v)", gotTransient, tc.wantTransient, err)
 			}
 			if got := malformedUpstreamBody(err); got != tc.wantMalformed {
 				t.Errorf("malformedUpstreamBody(err) = %v, want %v (err = %v)", got, tc.wantMalformed, err)
 			}
+			if _, ok := errors.AsType[*upstreamDocError](err); ok != tc.wantDocErr {
+				t.Errorf("upstreamDocError in chain = %v, want %v (err = %v)", ok, tc.wantDocErr, err)
+			}
 		})
 	}
+}
+
+// TestUpstreamSearchTorznabErrorDocAttempts pins the retry traffic the error
+// document classification governs: a deterministic auth failure (code 100)
+// fails the search on the FIRST attempt - no retry backoff, no extra upstream
+// load for credentials that stay wrong until a config change - while a
+// generic upstream failure (code 900) stays inside the bounded retry budget,
+// so a healthy response on the next attempt still succeeds the search.
+func TestUpstreamSearchTorznabErrorDocAttempts(t *testing.T) {
+	t.Run("auth error code 100 fails after one attempt", func(t *testing.T) {
+		var (
+			mu    sync.Mutex
+			calls int
+		)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			mu.Lock()
+			calls++
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/rss+xml")
+			_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><error code="100" description="Incorrect user credentials"/>`)
+		}))
+		defer srv.Close()
+
+		u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
+		_, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
+		if err == nil {
+			t.Fatal("search against a code-100 error document returned nil error")
+		}
+		if _, ok := errors.AsType[*upstreamDocError](err); !ok {
+			t.Errorf("error = %T (%v), want *upstreamDocError in the chain", err, err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if calls != 1 {
+			t.Errorf("upstream called %d times, want 1 (a credentials error is deterministic, not a transient to retry)", calls)
+		}
+	})
+
+	t.Run("generic error code 900 is retried", func(t *testing.T) {
+		var (
+			mu    sync.Mutex
+			calls int
+		)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			calls++
+			n := calls
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/rss+xml")
+			if n == 1 {
+				_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><error code="900" description="Unknown error"/>`)
+				return
+			}
+			_, _ = io.WriteString(w, strings.ReplaceAll(sampleFeed, "http://prowlarr:9696", "http://"+r.Host))
+		}))
+		defer srv.Close()
+
+		u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
+		items, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
+		if err != nil {
+			t.Fatalf("search after one code-900 error document: %v (a generic upstream error must be retried)", err)
+		}
+		if len(items) != 1 {
+			t.Fatalf("got %d items, want 1", len(items))
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if calls != 2 {
+			t.Errorf("upstream called %d times, want 2 (one code-900 attempt + one retry)", calls)
+		}
+	})
 }
 
 // TestFetchAndParseRateLimitCarriesRetryAfterHint pins the status path of the

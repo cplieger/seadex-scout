@@ -1244,3 +1244,63 @@ func TestLoader_refreshCache_acceptedDuplicateKeepsLastRecord(t *testing.T) {
 		t.Errorf("duplicated record persisted TvdbID = %d, want 901 (last record wins, matching buildIndex)", rec9.TvdbID)
 	}
 }
+
+// TestValidateRefreshedRecordsOneArrIdentifierCollapseRejected pins the
+// per-side resolvability of the routing floor: a candidate that keeps every
+// type label and every TVDB id but loses all movie TMDB/IMDb ids preserves the
+// global arr-identifier floor and the type-label routing counts, yet the
+// matcher could then resolve no Radarr entry at all. routingCounts must count
+// records that can actually resolve in their routed arr (HasArrIdentifier),
+// so a collapse of one arr's resolvable population is rejected in favour of
+// the stale map.
+func TestValidateRefreshedRecordsOneArrIdentifierCollapseRejected(t *testing.T) {
+	previous := make([]Record, 0, 200)
+	candidate := make([]Record, 0, 200)
+	for id := 1; id <= 100; id++ {
+		previous = append(previous, Record{AniListID: id, Type: "MOVIE", TmdbMovies: []int{id}})
+		candidate = append(candidate, Record{AniListID: id, Type: "MOVIE"})
+	}
+	for id := 101; id <= 200; id++ {
+		previous = append(previous, Record{AniListID: id, Type: "TV", TvdbID: id})
+		candidate = append(candidate, Record{AniListID: id, Type: "TV", TvdbID: id})
+	}
+	if err := validateRefreshedRecords(previous, candidate, len(candidate)); err == nil {
+		t.Fatal("refresh that lost every movie identifier returned nil error, want rejection")
+	}
+}
+
+// TestValidateRefreshedRecordsScopeCollapseRejected pins the scope-coverage
+// floor: a candidate that keeps 200 valid AniList IDs, TVDB ids, non-empty
+// types, and unchanged routing counts — but wholesale zeroes every positive
+// SeasonTvdb, or relabels every special as TV — silently degrades comparison
+// scope (whole-series instead of the mapped season; specials bypassing
+// exclude_specials and the season-0 bucket) and must be rejected in favour of
+// the stale map.
+func TestValidateRefreshedRecordsScopeCollapseRejected(t *testing.T) {
+	previous := make([]Record, 0, 200)
+	for id := 1; id <= 100; id++ {
+		previous = append(previous, Record{AniListID: id, Type: "TV", TvdbID: id, SeasonTvdb: 1})
+	}
+	for id := 101; id <= 200; id++ {
+		previous = append(previous, Record{AniListID: id, Type: "OVA", TvdbID: id, SeasonTvdb: 1})
+	}
+	tests := []struct {
+		name   string
+		mutate func(r *Record)
+	}{
+		{"every positive season zeroed", func(r *Record) { r.SeasonTvdb = 0 }},
+		{"every special relabeled TV", func(r *Record) { r.Type = "TV" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := make([]Record, len(previous))
+			copy(candidate, previous)
+			for i := range candidate {
+				tc.mutate(&candidate[i])
+			}
+			if err := validateRefreshedRecords(previous, candidate, len(candidate)); err == nil {
+				t.Error("scope-collapsing refresh returned nil error, want rejection")
+			}
+		})
+	}
+}

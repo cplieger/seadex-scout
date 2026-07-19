@@ -182,6 +182,66 @@ func TestServeTotalUpstreamFailureRendersTorznabError(t *testing.T) {
 	}
 }
 
+// TestServeStartupSnapshotFailureRendersTorznabError pins the startup
+// false-empty gate: a daemon starting over a malformed feed snapshot (before
+// any snapshot has ever loaded) holds a zero-value in-memory snapshot that is
+// a local fault, not a fresh install - so a search must NOT contact Prowlarr
+// (it would filter every result against nil curation maps) and both request
+// kinds must answer a Torznab <error> (code 900) rather than an empty 200
+// feed the arr would record as a clean no-match. The WARN is bounded to one
+// per onset, and a subsequently written valid snapshot restores normal
+// serving.
+func TestServeStartupSnapshotFailureRendersTorznabError(t *testing.T) {
+	upstreamCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamCalls++
+		_, _ = io.WriteString(w, `<rss><channel></channel></rss>`)
+	}))
+	defer srv.Close()
+
+	path := filepath.Join(t.TempDir(), "feed.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("write malformed snapshot: %v", err)
+	}
+	log, logRec := capture.New()
+	ix := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "pk"}},
+		Deps{HTTP: srv.Client(), Logger: log}, path)
+
+	rec := httptest.NewRecorder()
+	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?t=tvsearch&q=Frieren&apikey=k", nil))
+	body := rec.Body.String()
+	if !strings.Contains(body, `<error code="900"`) || !strings.Contains(body, "feed snapshot unavailable") {
+		t.Errorf("search body = %q, want a Torznab <error code=\"900\"> naming the unavailable snapshot", body)
+	}
+	if strings.Contains(body, "<rss") {
+		t.Errorf("search body = %q, want no RSS feed while the snapshot is unavailable", body)
+	}
+	if upstreamCalls != 0 {
+		t.Errorf("Prowlarr queried %d times during a snapshot-unavailable search, want 0", upstreamCalls)
+	}
+
+	rec = httptest.NewRecorder()
+	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?apikey=k", nil))
+	if body := rec.Body.String(); !strings.Contains(body, `<error code="900"`) {
+		t.Errorf("RSS body = %q, want a Torznab <error code=\"900\"> instead of a false-empty feed", body)
+	}
+
+	const warnMsg = "indexer feed snapshot unavailable; answering Torznab requests with an error until a snapshot loads"
+	if got := logRec.CountExact(warnMsg); got != 1 {
+		t.Errorf("snapshot-unavailable WARN count = %d, want 1 (bounded per onset); log output:\n%s",
+			got, strings.Join(logRec.Messages(), "\n"))
+	}
+
+	// A cycle writes a valid snapshot: the state clears and requests serve
+	// the feed normally again.
+	writeSnapshotFile(t, path, &snapshot{ByHash: map[string]bool{}, ByKey: map[string]bool{}, Seen: map[string]bool{}})
+	rec = httptest.NewRecorder()
+	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?apikey=k", nil))
+	if body := rec.Body.String(); !strings.Contains(body, "<rss") || strings.Contains(body, "<error") {
+		t.Errorf("body after a valid snapshot = %q, want a normal RSS feed", body)
+	}
+}
+
 // TestQuerySkipsPerEpisodeQuery pins the skip path through query itself: a
 // per-episode basic search returns nothing WITHOUT being marked answered, so
 // the request log reads as a deliberate skip rather than a no-match.
