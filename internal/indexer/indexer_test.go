@@ -1646,3 +1646,25 @@ func TestSearchUsesConfiguredABUpstream(t *testing.T) {
 		t.Errorf("nyaa scope = %d items (upstreamFailed=%v), want 0 items and no failure", len(nyaaItems), nyaaStats.upstreamFailed)
 	}
 }
+
+// TestFeedForUnknownScopeServesNothing pins feedFor's default arm: a scope
+// that names no tracker serves no feed even when both configured trackers
+// hold items, so a routing bug can never leak one tracker's feed (or the
+// in-memory credential-bearing AB items) under an unrecognized scope.
+func TestFeedForUnknownScopeServesNothing(t *testing.T) {
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: "http://prowlarr/1/api",
+		ABTorznabURL:   "http://prowlarr/2/api",
+		ABPasskey:      "PK",
+	}}, Deps{}, "")
+	ix.mu.Lock()
+	ix.snap.NyaaFeed = []item{{Title: "n"}}
+	ix.snap.ABFeed = []item{{Title: "a"}}
+	ix.mu.Unlock()
+	if got := ix.feedFor("other"); got != nil {
+		t.Errorf("feedFor(unknown scope) = %+v, want nil", got)
+	}
+	if got := ix.feedFor(""); got != nil {
+		t.Errorf("feedFor(empty scope) = %+v, want nil", got)
+	}
+}

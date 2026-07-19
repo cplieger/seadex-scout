@@ -246,3 +246,73 @@ func TestFetchAndAppendExhaustedElementBudgetErrors(t *testing.T) {
 		t.Errorf("out = %+v, want the accumulated entries untouched", out)
 	}
 }
+
+// TestFetchEntriesPerPageByteCapErrors pins the per-page arm of the wire-size
+// guard's classification: a SINGLE page whose body exceeds the full per-page
+// bound (maxPageBytes) is a per-page violation and must surface as the
+// page-level fetch error naming page 1 - never as errCumulativeBytes, whose
+// alert-stable "cumulative page bytes exceeded cap" message would
+// misattribute a one-page anomaly to fetch-wide budget exhaustion.
+func TestFetchEntriesPerPageByteCapErrors(t *testing.T) {
+	// The pad pushes the body past maxPageBytes; it rides an unknown JSON
+	// field so only len(body) matters (it is never decoded).
+	page := `{"totalPages":1,"items":[{"alID":1,"expand":{"trs":[]}}],"pad":"` +
+		strings.Repeat("x", maxPageBytes) + `"}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, page)
+	}))
+	defer server.Close()
+
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	if err == nil {
+		t.Fatal("FetchEntries returned nil error, want per-page byte-cap error")
+	}
+	if entries != nil {
+		t.Fatalf("entries = %d items, want nil on cap error", len(entries))
+	}
+	if errors.Is(err, errCumulativeBytes) {
+		t.Errorf("error = %v, want the per-page violation NOT classified as the cumulative-byte cap", err)
+	}
+	if !strings.Contains(err.Error(), "fetch page 1") {
+		t.Errorf("error = %q, want it to name the failed page 1", err.Error())
+	}
+}
+
+// TestFetchEntriesPerPageElementCapErrors pins the per-page arm of the decode
+// element budget's classification: a SINGLE page tripping the full per-page
+// element bound (maxPageElements) is a per-page violation and must surface as
+// the page-level decode error naming page 1 - never as errCumulativeElements,
+// whose alert-stable message would misattribute a one-page anomaly to
+// fetch-wide budget exhaustion.
+func TestFetchEntriesPerPageElementCapErrors(t *testing.T) {
+	// Same shape as TestDecodePageElementBudgetErrors: over 1M aggregate
+	// elements while every per-parent cap holds, served over HTTP so the
+	// classification in fetchPage runs with the FULL per-page element limit.
+	torrent := `{"tags":[` + repeatJSON(`""`, 60) + `]}`
+	item := `{"alID":1,"expand":{"trs":[` + repeatJSON(torrent, 512) + `]}}`
+	page := `{"totalPages":1,"items":[` + repeatJSON(item, 40) + `]}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, page)
+	}))
+	defer server.Close()
+
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	if err == nil {
+		t.Fatal("FetchEntries returned nil error, want per-page element-budget error")
+	}
+	if entries != nil {
+		t.Fatalf("entries = %d items, want nil on cap error", len(entries))
+	}
+	if errors.Is(err, errCumulativeElements) {
+		t.Errorf("error = %v, want the per-page violation NOT classified as the cumulative-element cap", err)
+	}
+	if !strings.Contains(err.Error(), "fetch page 1") {
+		t.Errorf("error = %q, want it to name the failed page 1", err.Error())
+	}
+	want := fmt.Sprintf("page elements exceeded cap %d", maxPageElements)
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want substring %q", err.Error(), want)
+	}
+}

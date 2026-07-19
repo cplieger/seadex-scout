@@ -55,17 +55,6 @@ type Loader struct {
 	refresh       time.Duration
 }
 
-// boundedValidator returns v, or empty when it exceeds maxValidatorBytes,
-// logging the drop so degraded conditional revalidation is observable. If no
-// other validator remains, the next refresh is an unconditional full fetch.
-func (l *Loader) boundedValidator(name, v string) string {
-	if len(v) > maxValidatorBytes {
-		l.log.Warn("mapping: dropping oversized HTTP validator", "validator", name, "length", len(v))
-		return ""
-	}
-	return v
-}
-
 // --- Record: the per-entry mapping and its arr-routing predicates ---
 
 // Record is the resolved mapping for one AniList entry: its media type and the
@@ -281,6 +270,16 @@ func cacheUsable(records []Record) bool {
 // division, minimum 1) shared by cacheUsable and validateRefreshedRecords.
 func coverageFloor(n int) int { return max(1, (n+99)/100) }
 
+// coverageLost reports the shared loss-relative floor decision applied by the
+// type, scope, and routing floors: the previously accepted cache met its own
+// floor for the population (prevCount >= previousMinimum) AND the candidate
+// falls below the candidate floor (count < minimum) AND below the prior count
+// (count < prevCount) - so an additive refresh that merely grows the record
+// count never fires it.
+func coverageLost(prevCount, count, previousMinimum, minimum int) bool {
+	return prevCount >= previousMinimum && count < minimum && count < prevCount
+}
+
 // --- Loader: conditional fetch, acceptance guards, stale-map degradation ---
 
 // NewLoader returns a mapping loader. httpClient must be non-nil for any
@@ -448,8 +447,34 @@ func (l *Loader) reuseCachedRecords(prev *Cache) (Cache, error) {
 	refreshed.FetchedAt = time.Now()
 	// A 304 is upstream affirmation that the cached map is current, so any
 	// acceptance-guard rejection streak ends here.
+	if prev.RejectedRefreshes > 0 {
+		l.log.Info("mapping: rejection streak ended by 304 revalidation", "ended_rejection_streak", prev.RejectedRefreshes, "records", len(prev.Records))
+	}
 	refreshed.RejectedRefreshes = 0
 	return refreshed, nil
+}
+
+// boundedValidator returns v, or empty when it exceeds maxValidatorBytes or
+// carries bytes illegal in an HTTP header field value (RFC 9110 field-value
+// grammar: control characters other than tab, or DEL), logging the drop so
+// degraded conditional revalidation is observable. A hostile validator with a
+// CR/LF would otherwise be persisted into state.json and replayed as a request
+// header on every subsequent conditional GET, which net/http rejects at
+// request-write time - and since validators are only replaced on a successful
+// 200, the poisoned value would never self-heal. If no other validator
+// remains, the next refresh is an unconditional full fetch.
+func (l *Loader) boundedValidator(name, v string) string {
+	if len(v) > maxValidatorBytes {
+		l.log.Warn("mapping: dropping oversized HTTP validator", "validator", name, "length", len(v))
+		return ""
+	}
+	for i := range len(v) {
+		if c := v[i]; (c < 0x20 && c != '\t') || c == 0x7f {
+			l.log.Warn("mapping: dropping HTTP validator with invalid bytes", "validator", name, "length", len(v))
+			return ""
+		}
+	}
+	return v
 }
 
 // acceptRefresh parses a fresh 200 body and runs the cache-acceptance
@@ -493,7 +518,11 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 			fmt.Sprintf("refresh returned %d records, less than half of previous %d", len(records), prevCount),
 			nil, errors.New("mapping: refresh shrank unexpectedly and no cache available"))
 	}
-	l.log.Info("mapping: refreshed", "records", len(records))
+	attrs := []any{"records", len(records)}
+	if prev.RejectedRefreshes > 0 {
+		attrs = append(attrs, "ended_rejection_streak", prev.RejectedRefreshes)
+	}
+	l.log.Info("mapping: refreshed", attrs...)
 	// The fresh Cache literal deliberately omits RejectedRefreshes: an
 	// accepted refresh resets the streak to zero (see Cache.RejectedRefreshes),
 	// mirroring reuseCachedRecords' explicit 304 reset.
@@ -571,7 +600,7 @@ func validateTypeCoverage(previous, records []Record, minimum int) error {
 	previousTyped := typedRecordCount(previous)
 	previousMinimum := coverageFloor(len(previous))
 	typed := typedRecordCount(records)
-	if previousTyped >= previousMinimum && typed < minimum && typed < previousTyped {
+	if coverageLost(previousTyped, typed, previousMinimum, minimum) {
 		return fmt.Errorf("type coverage %d/%d is below minimum %d (previous cache carried %d typed records)", typed, len(records), minimum, previousTyped)
 	}
 	return nil
@@ -595,11 +624,11 @@ func validateScopeCoverage(previous, records []Record, minimum int) error {
 	}
 	previousMinimum := coverageFloor(len(previous))
 	prevSeasons, seasons := positiveSeasonCount(previous), positiveSeasonCount(records)
-	if prevSeasons >= previousMinimum && seasons < minimum && seasons < prevSeasons {
+	if coverageLost(prevSeasons, seasons, previousMinimum, minimum) {
 		return fmt.Errorf("positive-season coverage %d/%d is below minimum %d (previous cache carried %d season-scoped records)", seasons, len(records), minimum, prevSeasons)
 	}
 	prevSpecials, specials := specialRecordCount(previous), specialRecordCount(records)
-	if prevSpecials >= previousMinimum && specials < minimum && specials < prevSpecials {
+	if coverageLost(prevSpecials, specials, previousMinimum, minimum) {
 		return fmt.Errorf("special-type coverage %d/%d is below minimum %d (previous cache carried %d special records)", specials, len(records), minimum, prevSpecials)
 	}
 	return nil
@@ -655,10 +684,10 @@ func validateRoutingCoverage(previous, records []Record, minimum int) error {
 	previousMinimum := coverageFloor(len(previous))
 	prevMovies, prevOthers := routingCounts(previous)
 	movies, others := routingCounts(records)
-	if prevMovies >= previousMinimum && movies < minimum && movies < prevMovies {
+	if coverageLost(prevMovies, movies, previousMinimum, minimum) {
 		return fmt.Errorf("movie-routed coverage %d/%d is below minimum %d (previous cache carried %d movie-routed records)", movies, len(records), minimum, prevMovies)
 	}
-	if prevOthers >= previousMinimum && others < minimum && others < prevOthers {
+	if coverageLost(prevOthers, others, previousMinimum, minimum) {
 		return fmt.Errorf("series-routed coverage %d/%d is below minimum %d (previous cache carried %d series-routed records)", others, len(records), minimum, prevOthers)
 	}
 	return nil
@@ -769,7 +798,14 @@ func (l *Loader) applyOverrides(ctx context.Context, idx *Index) {
 	if !ok {
 		return
 	}
-	applied := overlayRecords(idx, overrides)
+	applied, duplicates := overlayRecords(idx, overrides)
+	if len(duplicates) > 0 {
+		shown := min(len(duplicates), maxLoggedUnknownKeys)
+		l.log.Warn("mapping: duplicate override anilist_ids, last record wins",
+			"ids", duplicates[:shown],
+			"duplicate_count", len(duplicates),
+			"path", l.overridesPath)
+	}
 	if skipped := len(overrides) - applied; skipped > 0 {
 		l.log.Warn("mapping: overrides missing anilist_id skipped", "skipped", skipped, "path", l.overridesPath)
 	}
@@ -819,18 +855,24 @@ func (l *Loader) readOverrides(ctx context.Context) ([]Record, bool) {
 }
 
 // overlayRecords overlays each record with a non-zero AniList ID onto the
-// index and returns how many were applied; zero-ID records are skipped (the
+// index and returns how many were applied plus the AniList IDs that appeared
+// more than once (a later duplicate overwrites the earlier one, matching
+// NewIndex's last-record-wins semantics); zero-ID records are skipped (the
 // caller reports the skip count).
-func overlayRecords(idx *Index, records []Record) int {
-	applied := 0
+func overlayRecords(idx *Index, records []Record) (applied int, duplicates []int) {
+	seen := make(map[int]struct{}, len(records))
 	for _, record := range records {
 		if record.AniListID == 0 {
 			continue
 		}
+		if _, dup := seen[record.AniListID]; dup {
+			duplicates = append(duplicates, record.AniListID)
+		}
+		seen[record.AniListID] = struct{}{}
 		idx.byAniList[record.AniListID] = record
 		applied++
 	}
-	return applied
+	return applied, duplicates
 }
 
 // knownOverrideKey reports whether key names an overrideKeys entry under the

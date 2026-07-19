@@ -85,63 +85,63 @@ func TestMemoExpiryLifecycleProperty(t *testing.T) {
 		res := m.Match(context.Background(), entries, &library.Snapshot{}, mapping.NewIndex(records), memo)
 
 		if res.Degraded {
-			t.Fatalf("Degraded = true, want false on a clean pass")
+			rt.Fatalf("Degraded = true, want false on a clean pass")
 		}
 		pending := 0
 		for id := 1; id <= nIDs; id++ {
 			st := states[id]
 			ent, ok := res.Memo.Entries[id]
 			if !ok {
-				t.Fatalf("memo[%d] missing after a clean pass (state %d)", id, st)
+				rt.Fatalf("memo[%d] missing after a clean pass (state %d)", id, st)
 			}
 			if ent.Expiry.IsZero() {
-				t.Fatalf("memo[%d].Expiry is zero: an immortal entry survived the pass (state %d)", id, st)
+				rt.Fatalf("memo[%d].Expiry is zero: an immortal entry survived the pass (state %d)", id, st)
 			}
 			if !ent.Expiry.After(now) {
-				t.Fatalf("memo[%d].Expiry = %s is not after now: a clean pass must renew or prune what expired", id, ent.Expiry)
+				rt.Fatalf("memo[%d].Expiry = %s is not after now: a clean pass must renew or prune what expired", id, ent.Expiry)
 			}
 			switch st {
 			case stateAbsent, stateExpired:
 				pending++
 				lo, hi := now.Add(memoTTLMin), now.Add(memoTTLMax)
 				if ent.Expiry.Before(lo) || !ent.Expiry.Before(hi) {
-					t.Fatalf("memo[%d].Expiry = %s outside the fresh-stamp window [%s, %s)", id, ent.Expiry, lo, hi)
+					rt.Fatalf("memo[%d].Expiry = %s outside the fresh-stamp window [%s, %s)", id, ent.Expiry, lo, hi)
 				}
 				if _, known := media[id]; known == ent.NotFound {
-					t.Fatalf("memo[%d].NotFound = %v with batch answer known=%v; the completed batch must decide positive vs negative", id, ent.NotFound, known)
+					rt.Fatalf("memo[%d].NotFound = %v with batch answer known=%v; the completed batch must decide positive vs negative", id, ent.NotFound, known)
 				}
 			case stateLive:
 				if !ent.Expiry.Equal(pre[id].Expiry) || ent.NotFound != pre[id].NotFound {
-					t.Fatalf("memo[%d] = %+v, want the live pre-state entry untouched (%+v)", id, ent, pre[id])
+					rt.Fatalf("memo[%d] = %+v, want the live pre-state entry untouched (%+v)", id, ent, pre[id])
 				}
 			case stateLegacy:
 				lo, hi := now.Add(memoMigrationMin), now.Add(memoTTLMax)
 				if ent.Expiry.Before(lo) || !ent.Expiry.Before(hi) {
-					t.Fatalf("memo[%d].Expiry = %s outside the migration window [%s, %s)", id, ent.Expiry, lo, hi)
+					rt.Fatalf("memo[%d].Expiry = %s outside the migration window [%s, %s)", id, ent.Expiry, lo, hi)
 				}
 				if len(ent.Titles) != 1 || ent.Titles[0] != "Legacy" {
-					t.Fatalf("memo[%d] = %+v, want the legacy payload kept (migration never re-fetches)", id, ent)
+					rt.Fatalf("memo[%d] = %+v, want the legacy payload kept (migration never re-fetches)", id, ent)
 				}
 			}
 		}
 		for id, live := range bgLive {
 			ent, ok := res.Memo.Entries[id]
 			if live && (!ok || !ent.Expiry.Equal(now.Add(time.Hour))) {
-				t.Fatalf("background live memo[%d] = %+v (present=%v), want kept untouched", id, ent, ok)
+				rt.Fatalf("background live memo[%d] = %+v (present=%v), want kept untouched", id, ent, ok)
 			}
 			if !live && ok {
-				t.Fatalf("background expired memo[%d] = %+v survived a clean pass, want it pruned", id, ent)
+				rt.Fatalf("background expired memo[%d] = %+v survived a clean pass, want it pruned", id, ent)
 			}
 		}
 		if fake.fetchCalls != 0 {
-			t.Fatalf("single Fetch calls = %d, want 0 (a completed batch answers every pending id)", fake.fetchCalls)
+			rt.Fatalf("single Fetch calls = %d, want 0 (a completed batch answers every pending id)", fake.fetchCalls)
 		}
 		wantBatches := 0
 		if pending > 0 {
 			wantBatches = 1
 		}
 		if fake.batchCalls != wantBatches {
-			t.Fatalf("batch calls = %d, want %d (only pending ids consult AniList)", fake.batchCalls, wantBatches)
+			rt.Fatalf("batch calls = %d, want %d (only pending ids consult AniList)", fake.batchCalls, wantBatches)
 		}
 	})
 }

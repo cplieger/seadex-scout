@@ -514,12 +514,13 @@ func (s *Scout) rebuildFeed(ctx context.Context, entries []seadex.Entry, idx *ma
 	}
 }
 
-// logFeedOutageOnWalkFail surfaces a concurrent SeaDex outage when the arr
-// walk already failed but a feed is configured, so a multi-dependency outage
-// does not read as arr-only. During a shutdown the SeaDex failure is the
-// cancellation (the walk path already logged the interruption), so it stays
-// silent then.
-func (s *Scout) logFeedOutageOnWalkFail(ctx context.Context, entries []seadex.Entry, seaErr error) {
+// logFeedOutageOnGatedCycle surfaces a concurrent SeaDex outage when the
+// library gate (a failed arr walk, or a suspicious shrunken walk) already
+// closed the cycle but a feed is configured, so a multi-dependency outage
+// does not read as library-only. During a shutdown the SeaDex failure is the
+// cancellation (the interruption is logged by the gate that owns it), so it
+// stays silent then.
+func (s *Scout) logFeedOutageOnGatedCycle(ctx context.Context, entries []seadex.Entry, seaErr error) {
 	if s.deps.Feed == nil || ctx.Err() != nil {
 		return
 	}
@@ -575,7 +576,7 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap lib
 		// multi-dependency outage does not read as arr-only. Single SeaDex
 		// failures (walk healthy) keep their own WARNs in the upstream gate, so
 		// no duplicates.
-		s.logFeedOutageOnWalkFail(ctx, entries, seaErr)
+		s.logFeedOutageOnGatedCycle(ctx, entries, seaErr)
 		// Persist only the refreshed mapping cache, like the shrunk-walk arm
 		// below: discarding it re-downloads an updated Fribb
 		// body next cycle. Findings, memo, and the prior library snapshot
@@ -602,7 +603,7 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap lib
 		// rebuildFeed already ran: if SeaDex ALSO failed (or returned
 		// nothing), the previous feed was silently kept - surface it so a
 		// shrink + SeaDex double outage does not read as shrink-only.
-		s.logFeedOutageOnWalkFail(ctx, entries, seaErr)
+		s.logFeedOutageOnGatedCycle(ctx, entries, seaErr)
 		// A non-failed walk that shrank far below the prior snapshot
 		// (zero items, or a misconfigured arr_tags.include leaving a handful)
 		// would mass-resolve most findings. Do NOT degradedSave here:
@@ -630,7 +631,14 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap lib
 		} else {
 			s.log.Warn("library walk shrank below half the prior snapshot; skipping comparison, findings preserved", attrs...)
 		}
-		s.cycleDegraded("library-shrunk", "items", len(snap.Items), "prior_items", len(st.Library.Items))
+		// A shutdown that landed after the shrunken walk (cancelling the
+		// SeaDex fetch or mapping load) keeps the no-completion-line rule,
+		// mirroring the walk-failed arm above: an interrupted cycle did not
+		// complete, degraded or not. The shrink WARN and streak stay - the
+		// shrink evidence comes from the completed walk.
+		if ctx.Err() == nil {
+			s.cycleDegraded("library-shrunk", "items", len(snap.Items), "prior_items", len(st.Library.Items))
+		}
 		return true, true
 	}
 	// The walk passed the shrink guard: any shrunk-walk streak ends here (a
@@ -785,9 +793,11 @@ func (s *Scout) Report(ctx context.Context) (audit.Report, error) {
 		// be truncated (entries after the cancellation were never attempted),
 		// and even a complete one should not spend the shutdown grace period
 		// building, logging, and persisting a full audit: the signal context
-		// is one report-wide budget, so stop here. Wrapping context.Cause
-		// keeps a routine SIGTERM off main's ERROR alert.
-		return audit.Report{}, fmt.Errorf("report interrupted: %w", context.Cause(ctx))
+		// is one report-wide budget, so stop here. The wrap carries ctx.Err()
+		// for main's shutdown classification (errors.Is context.Canceled,
+		// keeping a routine SIGTERM off the ERROR alert) plus the signal
+		// cause for display.
+		return audit.Report{}, fmt.Errorf("report interrupted: %w (cause: %w)", ctx.Err(), context.Cause(ctx))
 	}
 	if result.Degraded {
 		// A transient AniList failure left some entries' library mapping

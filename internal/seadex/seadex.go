@@ -342,16 +342,16 @@ func (c *Client) finishFetch(all []Entry, tot fetchTotals) ([]Entry, error) {
 func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, tot *fetchTotals) (out []Entry, done bool, err error) {
 	remaining := int64(maxTotalBytes - tot.bytes)
 	if remaining <= 0 {
-		return all, false, errCumulativeBytes
+		return all, false, fmt.Errorf("%w (page %d, %d entries fetched)", errCumulativeBytes, page, len(all))
 	}
 	remainingElems := maxTotalElements - tot.elements
 	if remainingElems <= 0 {
-		return all, false, errCumulativeElements
+		return all, false, fmt.Errorf("%w (page %d, %d entries fetched)", errCumulativeElements, page, len(all))
 	}
 	list, n, elems, err := c.fetchPage(ctx, page, min(int64(maxPageBytes), remaining), min(maxPageElements, remainingElems))
 	if err != nil {
 		if errors.Is(err, errCumulativeBytes) || errors.Is(err, errCumulativeElements) {
-			return all, false, err
+			return all, false, fmt.Errorf("%w (page %d, %d entries fetched)", err, page, len(all))
 		}
 		return all, false, fmt.Errorf("seadex: fetch page %d: %w", page, err)
 	}
@@ -614,9 +614,11 @@ func (d *pageDecoder) decodeList() (pbList, error) {
 // for perPage records, so a page stuffing more is upstream misbehavior and is
 // rejected before the excess is decoded. prior is the already-decoded value
 // of a previous occurrence of the key: elements decode INTO the existing
-// slice and the result truncates to the new array's length, matching
-// json.Unmarshal's duplicate-key slice semantics (element-wise field merge,
-// SetLen truncation).
+// slice (regrown via growForIndex, so a within-capacity regrow re-exposes the
+// retained backing element like stdlib) and the result is finalized by
+// truncateArray, matching json.Unmarshal's duplicate-key slice semantics
+// (element-wise field merge, SetLen truncation, backing replaced on an empty
+// array).
 func (d *pageDecoder) decodeItems(prior []pbEntry) ([]pbEntry, error) {
 	ok, err := d.open('[')
 	if err != nil || !ok {
@@ -631,15 +633,13 @@ func (d *pageDecoder) decodeItems(prior []pbEntry) ([]pbEntry, error) {
 		if err := d.count(); err != nil {
 			return nil, err
 		}
-		if n == len(items) {
-			items = append(items, pbEntry{})
-		}
+		items = growForIndex(items, n)
 		if err := d.decodeEntry(&items[n]); err != nil {
 			return nil, err
 		}
 		n++
 	}
-	return items[:n], d.close()
+	return truncateArray(items, n), d.close()
 }
 
 // decodeEntry decodes one entries record field-wise into e, matching
@@ -719,9 +719,9 @@ func (d *pageDecoder) decodeExpand(ex *pbExpand) error {
 
 // decodeTorrents decodes one entry's expanded trs relation, capped at
 // maxTorrentsPerEntry. prior is the already-decoded value of a previous
-// occurrence of the key: elements decode INTO the existing slice and the
-// result truncates to the new array's length, matching json.Unmarshal's
-// duplicate-key slice semantics.
+// occurrence of the key: elements decode INTO the existing slice (regrown
+// via growForIndex) and the result is finalized by truncateArray, matching
+// json.Unmarshal's duplicate-key slice semantics.
 func (d *pageDecoder) decodeTorrents(prior []Torrent) ([]Torrent, error) {
 	ok, err := d.open('[')
 	if err != nil || !ok {
@@ -736,15 +736,13 @@ func (d *pageDecoder) decodeTorrents(prior []Torrent) ([]Torrent, error) {
 		if err := d.count(); err != nil {
 			return nil, err
 		}
-		if n == len(trs) {
-			trs = append(trs, Torrent{})
-		}
+		trs = growForIndex(trs, n)
 		if err := d.decodeTorrent(&trs[n]); err != nil {
 			return nil, err
 		}
 		n++
 	}
-	return trs[:n], d.close()
+	return truncateArray(trs, n), d.close()
 }
 
 // decodeTorrent decodes one torrent record field-wise into t, matching
@@ -805,8 +803,9 @@ func (d *pageDecoder) decodeTorrentField(t *Torrent, key string) error {
 // A File is flat (two scalar fields), so per-element json.Decoder.Decode
 // cannot amplify beyond the already-capped raw bytes. prior is the
 // already-decoded value of a previous occurrence of the key: Decode into an
-// existing element gives json.Unmarshal's duplicate-key merge and
-// null-no-op semantics, and the result truncates to the new array's length.
+// existing element (regrown via growForIndex) gives json.Unmarshal's
+// duplicate-key merge and null-no-op semantics, and truncateArray finalizes
+// the result to the new array's length.
 func (d *pageDecoder) decodeFiles(prior []File) ([]File, error) {
 	ok, err := d.open('[')
 	if err != nil || !ok {
@@ -821,15 +820,13 @@ func (d *pageDecoder) decodeFiles(prior []File) ([]File, error) {
 		if err := d.count(); err != nil {
 			return nil, err
 		}
-		if n == len(files) {
-			files = append(files, File{})
-		}
+		files = growForIndex(files, n)
 		if err := d.dec.Decode(&files[n]); err != nil {
 			return nil, err
 		}
 		n++
 	}
-	return files[:n], d.close()
+	return truncateArray(files, n), d.close()
 }
 
 // decodeTags decodes one torrent's tag list, capped at maxTagsPerTorrent.
@@ -849,15 +846,41 @@ func (d *pageDecoder) decodeTags(prior []string) ([]string, error) {
 		if err := d.count(); err != nil {
 			return nil, err
 		}
-		if n == len(tags) {
-			tags = append(tags, "")
-		}
+		tags = growForIndex(tags, n)
 		if err := d.dec.Decode(&tags[n]); err != nil {
 			return nil, err
 		}
 		n++
 	}
-	return tags[:n], d.close()
+	return truncateArray(tags, n), d.close()
+}
+
+// growForIndex ensures the slice covers index n, matching json.Unmarshal's
+// slice-regrow semantics for duplicate keys: within retained capacity the
+// existing backing element is re-exposed (stdlib SetLen), beyond capacity a
+// zero element is appended (stdlib Grow reallocates; the new tail is zero).
+func growForIndex[T any](s []T, n int) []T {
+	if n < len(s) {
+		return s
+	}
+	if n < cap(s) {
+		return s[:n+1]
+	}
+	var zero T
+	return append(s, zero)
+}
+
+// truncateArray finalizes a decoded array at n elements, matching
+// json.Unmarshal's end-of-array semantics: an empty array REPLACES the
+// slice (stdlib MakeSlice(0,0) - no retained backing a later duplicate
+// occurrence could re-expose), a non-empty one truncates in place
+// (stdlib SetLen). Returning nil for the empty case stays inside the
+// documented nil-vs-empty divergence no consumer observes.
+func truncateArray[T any](s []T, n int) []T {
+	if n == 0 {
+		return nil
+	}
+	return s[:n]
 }
 
 // setHeaders sets the descriptive User-Agent and JSON Accept header on each

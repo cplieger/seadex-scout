@@ -219,6 +219,15 @@ func TestDecideWholeSeriesUnknownAltEvidence(t *testing.T) {
 	}
 }
 
+// standingConservativeness ranks standings by conservativeness for the
+// whole-series aggregation properties: Best < Unverified < Alt < Unlisted.
+var standingConservativeness = map[align.Standing]int{
+	align.StandingBest:       0,
+	align.StandingUnverified: 1,
+	align.StandingAlt:        2,
+	align.StandingUnlisted:   3,
+}
+
 // TestDecideWholeSeriesMonotoneDowngrade property-checks the conservative
 // aggregation's core invariant: growing a whole-series item by one more filed
 // real season can only hold or downgrade the standing (Best -> Unverified ->
@@ -227,12 +236,6 @@ func TestDecideWholeSeriesUnknownAltEvidence(t *testing.T) {
 // adding evidence. A violation would mean one season's verdict masked
 // another's, the exact bug the conservative aggregation exists to prevent.
 func TestDecideWholeSeriesMonotoneDowngrade(t *testing.T) {
-	conservativeness := map[align.Standing]int{
-		align.StandingBest:       0,
-		align.StandingUnverified: 1,
-		align.StandingAlt:        2,
-		align.StandingUnlisted:   3,
-	}
 	groupPool := []string{"a&c", "kh", "kitsune", "nogrp", "sam"}
 	best := []string{"a&c"}
 	alt := []string{"kh"}
@@ -245,7 +248,7 @@ func TestDecideWholeSeriesMonotoneDowngrade(t *testing.T) {
 		grown[rapid.IntRange(7, 9).Draw(t, "extra_season")] = groupsGen.Draw(t, "extra_groups")
 		after := decideWhole(grown, best, alt)
 
-		if conservativeness[after.Standing] < conservativeness[before.Standing] {
+		if standingConservativeness[after.Standing] < standingConservativeness[before.Standing] {
 			t.Fatalf("adding a season upgraded the standing: %v -> %v (seasons %v, grown %v)",
 				before.Standing, after.Standing, seasons, grown)
 		}
@@ -263,12 +266,6 @@ func TestDecideWholeSeriesMonotoneDowngrade(t *testing.T) {
 // ladder and unitStanding's - the divergence class the shared package exists
 // to prevent - fails the property.
 func TestDecideWholeSeriesMatchesMostConservativeSeason(t *testing.T) {
-	conservativeness := map[align.Standing]int{
-		align.StandingBest:       0,
-		align.StandingUnverified: 1,
-		align.StandingAlt:        2,
-		align.StandingUnlisted:   3,
-	}
 	groupPool := []string{"a&c", "kh", "kitsune", "nogrp", "sam"}
 	rapid.Check(t, func(t *rapid.T) {
 		groupsGen := rapid.SliceOfN(rapid.SampledFrom(groupPool), 0, 3)
@@ -287,7 +284,7 @@ func TestDecideWholeSeriesMatchesMostConservativeSeason(t *testing.T) {
 			item := &library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{season: groups}}
 			rec := mapping.Record{Type: "TV", SeasonTvdb: season}
 			single := align.Decide(item, &rec, best, alt)
-			if !filed || conservativeness[single.Standing] > conservativeness[want] {
+			if !filed || standingConservativeness[single.Standing] > standingConservativeness[want] {
 				want = single.Standing
 			}
 			filed = true

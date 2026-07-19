@@ -453,10 +453,13 @@ instead of a confident verdict, such a comparison surfaces as the
 informational `unverifiable` finding status and the report's `unverified`
 verdict.
 
-These filters shape the **report/alert engine only** — the daemon's `better
-release` findings and the report. The [indexer](#indexer-torznab-feed) feed
-applies none of them; there the arrs filter through their own quality profile and
-Custom Formats. All are optional:
+These filters shape the **report/alert engine only** — the
+[indexer](#indexer-torznab-feed) feed applies none of them; there the arrs
+filter through their own quality profile and Custom Formats. Their scope
+differs by engine: the two content filters (`exclude_remux`,
+`require_dual_audio`) shape the daemon's findings only — the report always
+lists SeaDex's raw best/alt picks — while `exclude_specials` and the
+`animebytes` toggle shape both the findings and the report. All are optional:
 
 - `filters.exclude_remux` (default false): when true, releases classified
   `remux` never count as a recommendation. The default keeps them — on SeaDex a

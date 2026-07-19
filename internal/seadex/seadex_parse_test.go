@@ -229,6 +229,32 @@ func TestDecodePageDuplicateItemsMergeMatchesUnmarshal(t *testing.T) {
 	}
 }
 
+// TestDecodePageDuplicateItemsRegrowMatchesUnmarshal is the regrow arm of
+// the duplicate-key oracle: a duplicate array key that shrinks and then
+// regrows within retained capacity re-exposes the stale backing element
+// (stdlib SetLen), while a regrow after an empty occurrence starts from a
+// fresh zeroed slice (stdlib replaces the backing on an empty array).
+func TestDecodePageDuplicateItemsRegrowMatchesUnmarshal(t *testing.T) {
+	bodies := []string{
+		`{"items":[{"alID":1,"notes":"x"},{"alID":3,"notes":"y"}],"items":[{"alID":2}],"items":[{"alID":9},{}]}`,
+		`{"items":[{"alID":1,"notes":"x"},{"alID":3,"notes":"y"}],"items":[],"items":[{},{}]}`,
+		`{"items":[{"expand":{"trs":[{"tags":["a","b"],"tags":[],"tags":[null]}]}}]}`,
+	}
+	for _, body := range bodies {
+		got, _, err := decodePage([]byte(body), maxPageElements)
+		if err != nil {
+			t.Fatalf("decodePage(%s): %v", body, err)
+		}
+		var want pbList
+		if err := json.Unmarshal([]byte(body), &want); err != nil {
+			t.Fatalf("json.Unmarshal oracle: %v", err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("decodePage(%s) = %+v, want json.Unmarshal parity %+v", body, got, want)
+		}
+	}
+}
+
 // TestInfoHashRedacted pins the redaction predicate's tolerant matching on the
 // untrusted upstream value: the exact literal, case variants, and surrounding
 // whitespace all read as redacted, while a real hash, an empty string, and a

@@ -93,8 +93,12 @@ type Decision struct {
 	Kind     ScopeKind
 	Standing Standing
 	Outcome  Outcome
-	Approx   bool
-	NoBest   bool
+	// Season is the non-negative TVDB season attributed to the decided unit
+	// (0 for a special/movie/whole-series comparison), the shared label both
+	// consumers stamp on their output.
+	Season int
+	Approx bool
+	NoBest bool
 }
 
 // Decide resolves the one comparison decision both align consumers project
@@ -109,6 +113,7 @@ type Decision struct {
 func Decide(item *library.Item, rec *mapping.Record, best, alt []string) Decision {
 	scoped := Scope(item, rec)
 	d := Decision{Kind: scoped.Kind, NoBest: len(best) == 0}
+	d.Season = max(0, rec.SeasonTvdb)
 	if scoped.Kind == ScopeWholeSeries {
 		// An absolute-numbered run / title-only match has no per-season Fribb
 		// mapping: its single whole-series recommendation is judged against

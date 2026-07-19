@@ -226,10 +226,10 @@ type Config struct {
 	// PollExternal is set when poll_interval is off/disabled/0: no internal
 	// timer, cycles are triggered out-of-band via the `poll` subcommand.
 	PollExternal bool
-	// SonarrWanted / RadarrWanted record the file's enabled toggles so
+	// sonarrWanted / radarrWanted record the file's enabled toggles so
 	// Validate can reject an enabled arr left with neither url nor api_key.
-	SonarrWanted bool
-	RadarrWanted bool
+	sonarrWanted bool
+	radarrWanted bool
 }
 
 // Load reads, ${VAR}-expands, and parses the YAML config at path into the
@@ -373,32 +373,31 @@ func (fc *fileConfig) toConfig() Config {
 		IndexerABTorznabURL:   strings.TrimSpace(fc.Indexer.ABTorznabURL),
 		IndexerProwlarrAPIKey: strings.TrimSpace(fc.Indexer.ProwlarrAPIKey),
 		IndexerABPasskey:      strings.TrimSpace(fc.Indexer.ABPasskey),
-		SonarrWanted:          fc.Sonarr.Enabled,
-		RadarrWanted:          fc.Radarr.Enabled,
+		sonarrWanted:          fc.Sonarr.Enabled,
+		radarrWanted:          fc.Radarr.Enabled,
 	}
-	if fc.Sonarr.Enabled {
-		c.SonarrURL = strings.TrimSpace(fc.Sonarr.URL)
-		c.SonarrAPIKey = strings.TrimSpace(fc.Sonarr.APIKey)
-		c.SonarrPublicURL = strings.TrimSpace(fc.Sonarr.PublicURL)
-	} else if strings.TrimSpace(fc.Sonarr.APIKey) != "" {
-		// A set api_key is always operator-written (the defaults baseline
-		// carries none), so this is a half-configuration signal: the arr is
-		// filled in but the enabled toggle was left off. Info, not Warn - the
-		// deliberate temporary-disable case must not raise Loki alert noise.
-		slog.Info("sonarr.api_key is set but sonarr.enabled is false; sonarr will not be scanned")
-	}
-	if fc.Radarr.Enabled {
-		c.RadarrURL = strings.TrimSpace(fc.Radarr.URL)
-		c.RadarrAPIKey = strings.TrimSpace(fc.Radarr.APIKey)
-		c.RadarrPublicURL = strings.TrimSpace(fc.Radarr.PublicURL)
-	} else if strings.TrimSpace(fc.Radarr.APIKey) != "" {
-		slog.Info("radarr.api_key is set but radarr.enabled is false; radarr will not be scanned")
-	}
+	c.SonarrURL, c.SonarrAPIKey, c.SonarrPublicURL = applyArr("sonarr", fc.Sonarr)
+	c.RadarrURL, c.RadarrAPIKey, c.RadarrPublicURL = applyArr("radarr", fc.Radarr)
 	if c.ReportDir == "" {
 		c.ReportDir = DefaultReportDir
 	}
 	c.PollInterval, c.PollExternal = parseInterval(fc.PollInterval)
 	return c
+}
+
+// applyArr flattens one arr section: an enabled arr's trimmed connection
+// details, or empty strings plus the half-configuration Info signal (a set
+// api_key is always operator-written, so a disabled-but-keyed arr almost
+// always means the enabled toggle was left off; Info, not Warn, so a
+// deliberate temporary disable raises no Loki alert noise).
+func applyArr(name string, af arrFile) (arrURL, key, publicURL string) {
+	if af.Enabled {
+		return strings.TrimSpace(af.URL), strings.TrimSpace(af.APIKey), strings.TrimSpace(af.PublicURL)
+	}
+	if strings.TrimSpace(af.APIKey) != "" {
+		slog.Info(name + ".api_key is set but " + name + ".enabled is false; " + name + " will not be scanned")
+	}
+	return "", "", ""
 }
 
 // parseInterval reads the poll_interval value into a built-in cadence or the
@@ -489,6 +488,7 @@ func (c *Config) Validate() error {
 		return err
 	}
 	c.warnMalformedPublicURLs()
+	c.warnOverlappingTags()
 	return c.validateIndexer()
 }
 
@@ -505,10 +505,10 @@ func validateRunMode(mode string) error {
 // validateEnabledArrs rejects an explicitly enabled arr with no connection
 // details at all, and a config that enables no arr whatsoever.
 func (c *Config) validateEnabledArrs() error {
-	if c.SonarrWanted && c.SonarrURL == "" && c.SonarrAPIKey == "" {
+	if c.sonarrWanted && c.SonarrURL == "" && c.SonarrAPIKey == "" {
 		return errors.New("sonarr.enabled is true but sonarr.url and sonarr.api_key are both empty")
 	}
-	if c.RadarrWanted && c.RadarrURL == "" && c.RadarrAPIKey == "" {
+	if c.radarrWanted && c.RadarrURL == "" && c.RadarrAPIKey == "" {
 		return errors.New("radarr.enabled is true but radarr.url and radarr.api_key are both empty")
 	}
 	if !c.SonarrEnabled() && !c.RadarrEnabled() {
@@ -529,6 +529,27 @@ func (c *Config) warnMalformedPublicURLs() {
 		if err := validateHTTPURL(pu.name, pu.val); err != nil {
 			slog.Warn("public_url is malformed; report deep-links will be broken",
 				"error", err)
+		}
+	}
+}
+
+// warnOverlappingTags warns when a tag appears in both arr_tags.include and
+// arr_tags.exclude. The library walk gives exclude precedence, so every item
+// carrying such a tag is skipped and the include entry can never match --
+// with a single overlapping include tag the config silently scans nothing.
+// Warn-only (exclude-wins semantics are well defined, so the config still
+// loads); field-name-only like every other config diagnostic, since a tag
+// value can carry an expanded ${VAR} placed there by a config typo.
+func (c *Config) warnOverlappingTags() {
+	exclude := make(map[string]struct{}, len(c.ExcludeTags))
+	for _, tag := range c.ExcludeTags {
+		exclude[tag] = struct{}{}
+	}
+	for _, tag := range c.IncludeTags {
+		if _, ok := exclude[tag]; ok {
+			slog.Warn("a tag is listed in both arr_tags.include and arr_tags.exclude; " +
+				"exclude wins, so items carrying it are never scanned")
+			return
 		}
 	}
 }

@@ -54,7 +54,7 @@ var exampleConfig []byte
 // owner-only like the indexer feed snapshot (internal/indexer/writer.go).
 const (
 	starterFileMode = 0o600
-	starterDirMode  = 0o755
+	starterDirMode  = 0o700
 )
 
 // modePoll is the subcommand-only mode: run one compare cycle for an external
@@ -160,7 +160,7 @@ func loadRuntimeConfig(configPath string) (config.Config, error) {
 	if _, err := os.Stat(configPath); errors.Is(err, fs.ErrNotExist) {
 		if werr := writeStarterConfig(configPath); werr != nil {
 			slog.Error("no config found and could not write a starter", "path", configPath, "error", werr)
-			return config.Config{}, fmt.Errorf("write starter config: %w", werr)
+			return config.Config{}, werr
 		}
 		slog.Warn("no config found; wrote a starter config - set your Sonarr/Radarr url + api_key and restart", "path", configPath)
 		return config.Config{}, errStarterWritten
@@ -264,7 +264,7 @@ func runReport(cfg *config.Config) error {
 // cycleDirMode is applied when creating the cycle-lock directory (normally
 // /config, which already exists as the mounted volume holding the config and
 // state files this lock guards).
-const cycleDirMode = 0o755
+const cycleDirMode = 0o700
 
 // newCycleExclusive builds the cross-process cycle coalescer shared by every
 // cycle entry point: the daemon's RunLoop ticks (skip mode) and exec'd `poll`
@@ -284,11 +284,16 @@ func newCycleExclusive(ctx context.Context, dir string) (*scheduler.Exclusive, e
 		scheduler.WithGate(func() bool { return ctx.Err() == nil })), nil
 }
 
-// pollInterrupted wraps the shutdown cancellation cause with poll's uniform
-// interruption message, so main classifies it as a routine-shutdown WARN and
-// the marker-untouched contract reads identically from every phase.
+// pollInterrupted wraps the stable ctx.Err() (always context.Canceled here)
+// with poll's uniform interruption message, so main classifies it as a
+// routine-shutdown WARN and the marker-untouched contract reads identically
+// from every phase. The cancellation cause rides along as a second %w so the
+// message still names the signal: under Go 1.26 signal.NotifyContext cancels
+// with a bare signalError cause that does NOT satisfy
+// errors.Is(_, context.Canceled), so the cause alone must never be the
+// classification token.
 func pollInterrupted(ctx context.Context) error {
-	return fmt.Errorf("poll interrupted; health marker left unchanged: %w", context.Cause(ctx))
+	return fmt.Errorf("poll interrupted; health marker left unchanged: %w (cause: %w)", ctx.Err(), context.Cause(ctx))
 }
 
 // runPoll runs one compare cycle for an external scheduler (poll_interval: off).
@@ -388,6 +393,11 @@ func pollCycle(ctx context.Context, ex *scheduler.Exclusive, sc cycler, marker *
 		err := pollOnce(ctx, sc, marker)
 		if !ran {
 			own, ran = err, true
+		} else if err != nil {
+			// A queued rerun has no exit code to report through; without this
+			// line a failed marker write (or a shutdown observed mid-rerun)
+			// would vanish - the cycle's own faults already log inside Cycle.
+			slog.Warn("queued rerun cycle reported an error", "error", err)
 		}
 		return nil
 	})

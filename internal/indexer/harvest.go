@@ -56,7 +56,10 @@ type harvestGroup struct {
 // failure (status/transport - see harvestShow) skips the scope's remaining
 // shows this rebuild, while a show-local malformed response only skips that
 // show, so one poison result set cannot freeze an otherwise healthy tracker's
-// whole harvest on synthesized titles.
+// whole harvest on synthesized titles; a run of consecutiveMalformedLatch
+// malformed shows on one scope latches it scope-wide anyway, since systematic
+// 2xx garbage (e.g. a proxy answering HTML to everything) is upstream-wide
+// breakage that would otherwise burn the whole budget with zero progress.
 func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]item, titles map[string]string, infoFor func(alID int) EntryInfo) (stats harvestStats) {
 	defer func() { stats.pending = syntheticCount(feeds, titles) }()
 	groups, index := pendingHarvest(feeds, titles, infoFor)
@@ -65,17 +68,36 @@ func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]item,
 	}
 	budget := harvestSearchBudget
 	failed := make(map[string]bool, len(w.upstreams))
+	malformed := make(map[string]int, len(w.upstreams))
 	for _, g := range groups {
 		if ctx.Err() != nil || budget == 0 {
 			break
+		}
+		if !groupPending(g, titles) {
+			// An earlier page already titled this group's items
+			// opportunistically (matchHarvest matches the global index);
+			// spend no query on a satisfied group.
+			continue
 		}
 		u := availableHarvestUpstream(w.upstreams, failed, g.scope)
 		if u == nil {
 			continue
 		}
-		var ok bool
-		budget, ok = w.harvestShow(ctx, u, g, infoFor(g.alID), index, titles, budget, &stats)
-		failed[g.scope] = !ok
+		var outcome harvestOutcome
+		budget, outcome = w.harvestShow(ctx, u, g, infoFor(g.alID), index, titles, budget, &stats)
+		switch outcome {
+		case harvestScopeFailed:
+			failed[g.scope] = true
+		case harvestShowMalformed:
+			malformed[g.scope]++
+			if malformed[g.scope] >= consecutiveMalformedLatch {
+				w.log.Warn("indexer title harvest: repeated malformed responses; skipping this upstream's remaining shows this rebuild",
+					"upstream", g.scope, "consecutive", malformed[g.scope])
+				failed[g.scope] = true
+			}
+		default:
+			malformed[g.scope] = 0
+		}
 	}
 	return stats
 }
@@ -91,19 +113,40 @@ func availableHarvestUpstream(upstreams []*upstream, failed map[string]bool, sco
 	return upstreamForScope(upstreams, scope)
 }
 
+// harvestOutcome classifies how one show's harvest ended, deciding what
+// harvestTitles latches for the show's scope: harvestScopeFailed condemns the
+// whole scope this rebuild, harvestShowMalformed counts toward the
+// consecutive-malformed latch, and harvestOK resets that run.
+type harvestOutcome int
+
+const (
+	harvestOK harvestOutcome = iota
+	harvestScopeFailed
+	harvestShowMalformed
+)
+
+// consecutiveMalformedLatch is how many CONSECUTIVE shows on one scope may
+// fail with a persistently malformed 2xx body before the scope is treated as
+// upstream-wide broken (e.g. a reverse proxy answering an HTML error page to
+// every request) and its remaining shows are skipped this rebuild. One poison
+// result set stays show-local; a successful (even empty) page resets the run.
+const consecutiveMalformedLatch = 3
+
 // harvestShow runs one show's query (plus offset pages while its items remain
 // unmatched, full pages keep coming, and budget remains) against its tracker's
 // upstream, returning the remaining budget. A query failure warns and ends the
 // show's harvest for this rebuild (the next rebuild retries). Failures are
 // classified before condemning the whole scope: a SCOPE-WIDE failure
 // (429/5xx, an auth/config status, a transport error - the upstream is likely
-// down or refusing service) reports ok=false so the caller skips the scope's
-// remaining groups this rebuild, while a persistently malformed SUCCESSFUL
-// body (malformedUpstreamBody) is specific to this one show's result set and
-// reports ok=true, so the scope's other shows are still harvested within the
-// remaining budget instead of one poison response freezing the whole tracker
-// on synthesized titles indefinitely.
-func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGroup, meta EntryInfo, index, titles map[string]string, budget int, stats *harvestStats) (int, bool) {
+// down or refusing service) reports harvestScopeFailed so the caller skips the
+// scope's remaining groups this rebuild, while a persistently malformed
+// SUCCESSFUL body (malformedUpstreamBody) is specific to this one show's
+// result set and reports harvestShowMalformed, so the scope's other shows are
+// still harvested within the remaining budget instead of one poison response
+// freezing the whole tracker on synthesized titles indefinitely - unless a
+// RUN of malformed shows trips the caller's consecutiveMalformedLatch, the
+// signature of an upstream answering 2xx garbage to everything.
+func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGroup, meta EntryInfo, index, titles map[string]string, budget int, stats *harvestStats) (int, harvestOutcome) {
 	params := harvestParams(meta, g.scope)
 	for offset := 0; budget > 0 && ctx.Err() == nil; offset += harvestPageSize {
 		budget--
@@ -112,23 +155,23 @@ func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGrou
 		results, err := u.search(ctx, page)
 		if err != nil {
 			if ctx.Err() != nil {
-				return budget, false
+				return budget, harvestScopeFailed
 			}
 			if malformedUpstreamBody(err) {
 				w.log.Warn("indexer title harvest response malformed; show keeps its synthesized title this rebuild",
 					"upstream", u.name, "al_id", g.alID, "error", err)
-				return budget, true
+				return budget, harvestShowMalformed
 			}
 			w.log.Warn("indexer title harvest query failed; skipping this upstream's remaining shows this rebuild",
 				"upstream", u.name, "al_id", g.alID, "error", err)
-			return budget, false
+			return budget, harvestScopeFailed
 		}
 		stats.matched += matchHarvest(results, g.scope, index, titles)
 		if !groupPending(g, titles) || len(results) < harvestPageSize {
-			return budget, true
+			return budget, harvestOK
 		}
 	}
-	return budget, true
+	return budget, harvestOK
 }
 
 // harvestGroupKey identifies one show's pending harvest group on one

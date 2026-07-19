@@ -701,7 +701,44 @@ func TestHandlePreCompareGateShrunkWalkEscalatesAfterRepeatedShrinks(t *testing.
 			if n := recorder.CountExact("cycle degraded"); n != 1 {
 				t.Errorf("'cycle degraded' count = %d, want 1 (the shrink guard's completion line)", n)
 			}
+			if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "library-shrunk" {
+				t.Errorf("degraded reasons = %v, want [library-shrunk]", reasons)
+			}
 		})
+	}
+}
+
+// TestHandlePreCompareGateShrunkWalkWithSeaDexOutageWarnsFeedKept pins the
+// shrink-guard arm's feed-outage contract: a library-shrink + SeaDex double
+// outage with a feed configured must still emit the feed-kept WARN so it does
+// not read as shrink-only in Loki, while the shrink guard's own degraded
+// completion line and no-rebuild behavior are unchanged.
+func TestHandlePreCompareGateShrunkWalkWithSeaDexOutageWarnsFeedKept(t *testing.T) {
+	logger, recorder := capture.New()
+	feed := &fakeFeed{}
+	st := state.State{
+		Library: library.Snapshot{Items: []library.Item{
+			{ArrID: 1, Title: "A"}, {ArrID: 2, Title: "B"}, {ArrID: 3, Title: "C"}, {ArrID: 4, Title: "D"},
+		}},
+		Baselined: true,
+	}
+	store := &fakeStore{st: st}
+	s := New(&Deps{Logger: logger, Store: store, Feed: feed})
+	snap := library.Snapshot{Items: []library.Item{{ArrID: 1, Title: "A"}}}
+	mapCache := mapping.Cache{}
+
+	handled, healthy := s.handlePreCompareGate(context.Background(), &st, snap, &mapCache, nil, nil, nil, errors.New("seadex down"))
+	if !handled || !healthy {
+		t.Errorf("handlePreCompareGate = (%v, %v), want (true, true)", handled, healthy)
+	}
+	if n := recorder.CountExact("seadex fetch failed; indexer feed kept previous feed"); n != 1 {
+		t.Errorf("feed-kept WARN count = %d, want 1 (a shrink + SeaDex double outage must not read as shrink-only)", n)
+	}
+	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "library-shrunk" {
+		t.Errorf("degraded reasons = %v, want [library-shrunk]", reasons)
+	}
+	if feed.calls != 0 {
+		t.Errorf("feed Rebuild calls = %d, want 0 (nothing to rebuild from)", feed.calls)
 	}
 }
 

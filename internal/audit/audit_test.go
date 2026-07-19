@@ -179,47 +179,6 @@ func TestAuditUnknownGroupEvidenceIsUnverified(t *testing.T) {
 	}
 }
 
-// TestCatalogueHas covers the reverse-catalogue predicate directly, exercising
-// every id path: the Sonarr TVDB match and zero-TVDB short-circuit, and the
-// Radarr TMDB-match plus IMDb fallback. Audit only ever reaches has through the
-// TMDB/TVDB paths, so the IMDb fallback and the zero-TVDB guard are otherwise
-// untested.
-func TestCatalogueHas(t *testing.T) {
-	cat := newCatalogue(mapping.NewIndex([]mapping.Record{
-		{AniListID: 1, Type: "TV", TvdbID: 100},
-		{AniListID: 2, Type: "MOVIE", TmdbMovies: []int{400}, IMDbIDs: []string{"tt777"}},
-		// Wrong-arm identifiers must not be catalogued (the HasArrIdentifier
-		// contract): a MOVIE record's stray TVDB id must not recognize a
-		// Sonarr item, nor a series record's movie ids a Radarr item.
-		{AniListID: 3, Type: "MOVIE", TvdbID: 555},
-		{AniListID: 4, Type: "TV", TmdbMovies: []int{600}, IMDbIDs: []string{"tt888"}},
-	}), false)
-	tests := []struct {
-		name string
-		item library.Item
-		want bool
-	}{
-		{"sonarr tvdb matches", library.Item{Arr: library.ArrSonarr, TvdbID: 100}, true},
-		{"sonarr tvdb absent", library.Item{Arr: library.ArrSonarr, TvdbID: 999}, false},
-		{"sonarr tvdb zero is not catalogued", library.Item{Arr: library.ArrSonarr, TvdbID: 0}, false},
-		{"radarr tmdb matches", library.Item{Arr: library.ArrRadarr, TmdbID: 400}, true},
-		{"radarr tmdb miss falls through to imdb match", library.Item{Arr: library.ArrRadarr, TmdbID: 401, ImdbID: "tt777"}, true},
-		{"radarr imdb only matches", library.Item{Arr: library.ArrRadarr, ImdbID: "tt777"}, true},
-		{"radarr neither id matches", library.Item{Arr: library.ArrRadarr, TmdbID: 402, ImdbID: "tt000"}, false},
-		{"radarr no ids is not catalogued", library.Item{Arr: library.ArrRadarr}, false},
-		{"sonarr not catalogued via a movie record's tvdb id", library.Item{Arr: library.ArrSonarr, TvdbID: 555}, false},
-		{"radarr not catalogued via a series record's movie ids", library.Item{Arr: library.ArrRadarr, TmdbID: 600, ImdbID: "tt888"}, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			it := tt.item
-			if got := cat.has(&it); got != tt.want {
-				t.Errorf("has() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 // TestAuditRoutesWholeSeriesAndSkips exercises Audit's row loop end to end: a
 // seasonless non-special Sonarr match routes through the whole-series verdict
 // (conservative, approximate over two seasons), a match not in the library is
@@ -622,5 +581,50 @@ func TestAssessClampsNegativeSeason(t *testing.T) {
 
 	if row.Season != 0 {
 		t.Errorf("Season = %d, want 0 (negative Fribb season.tvdb must clamp to zero)", row.Season)
+	}
+}
+
+func TestAuditNotOnSeaDexRowScopeAndEmptyCells(t *testing.T) {
+	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"})
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrRadarr, ArrID: 1, Title: "UncoveredMovie", TmdbID: 400, HasFile: true},
+		{Arr: library.ArrSonarr, ArrID: 2, Title: "UncoveredSeries", TvdbID: 200, Groups: []string{"grp"}, HasFile: true},
+	}}
+	idx := mapping.NewIndex([]mapping.Record{
+		{AniListID: 1, Type: "MOVIE", TmdbMovies: []int{400}},
+		{AniListID: 2, Type: "TV", TvdbID: 200},
+	})
+
+	rep := a.Audit(nil, snap, idx, nil)
+	md := renderMarkdown(&rep)
+
+	if !strings.Contains(md, "| UncoveredMovie | movie | - | - | - |") {
+		t.Errorf("markdown missing the movie-scoped not_on_seadex row with empty-cell placeholders:\n%s", md)
+	}
+	if !strings.Contains(md, "| UncoveredSeries | series | grp | - | - |") {
+		t.Errorf("markdown missing the series-scoped not_on_seadex row:\n%s", md)
+	}
+}
+
+func TestAssessCarriesEntryStateFlags(t *testing.T) {
+	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"})
+	item := &library.Item{
+		Arr: library.ArrSonarr, ArrID: 1, Title: "Flagged", TvdbID: 100,
+		SeasonGroups: map[int][]string{0: {"g"}}, Groups: []string{"g"}, HasFile: true,
+	}
+
+	row := a.assess(&match.Match{
+		Item:   item,
+		Arr:    library.ArrSonarr,
+		Source: match.SourceID,
+		Entry:  seadex.Entry{AniListID: 1, Incomplete: true},
+		Record: mapping.Record{Type: "OVA", TvdbID: 100},
+	})
+
+	if !row.Incomplete {
+		t.Error("row.Incomplete = false, want true (copied from the SeaDex entry for the JSON wire shape)")
+	}
+	if !row.Special {
+		t.Error("row.Special = false, want true (an OVA record marks the row special)")
 	}
 }

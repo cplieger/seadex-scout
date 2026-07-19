@@ -113,6 +113,7 @@ func TestTorrentUsableURL(t *testing.T) {
 		{name: "absolute canonical host case-insensitive", in: Torrent{Tracker: "Nyaa", URL: "https://NYAA.SI/view/1"}, want: "https://NYAA.SI/view/1"},
 		{name: "absolute canonical subdomain", in: Torrent{Tracker: "Nyaa", URL: "https://sukebei.nyaa.si/view/1"}, want: "https://sukebei.nyaa.si/view/1"},
 		{name: "absolute canonical host trailing dot", in: Torrent{Tracker: "Nyaa", URL: "https://nyaa.si./view/1"}, want: "https://nyaa.si./view/1"},
+		{name: "absolute canonical host with valid port kept", in: Torrent{Tracker: "Nyaa", URL: "https://nyaa.si:8080/view/1"}, want: "https://nyaa.si:8080/view/1"},
 		{name: "nyaa-labeled foreign host drops", in: Torrent{Tracker: "Nyaa", URL: "https://evil.example/view/1"}, want: ""},
 		{name: "suffix-confusion host drops", in: Torrent{Tracker: "Nyaa", URL: "https://evilnyaa.si/view/1"}, want: ""},
 		{name: "prefix-confusion host drops", in: Torrent{Tracker: "Nyaa", URL: "https://nyaa.si.evil.example/view/1"}, want: ""},

@@ -261,6 +261,19 @@ func (e *upstreamDocError) Error() string {
 	return fmt.Sprintf("upstream torznab error code=%s: %s", e.code, e.description)
 }
 
+// capLogText bounds and cleans an untrusted string before it reaches a log
+// line: single-line rune safety (runesafe.SanitizeSingleLine), then a byte cap
+// on a rune boundary (truncated output appends "..."). It is the shared
+// emit-boundary policy behind sanitizeUpstreamText and logParam, so a policy
+// change (truncation marker, control-char class) lands once.
+func capLogText(s string, maxLen int) string {
+	s = runesafe.SanitizeSingleLine(s)
+	if len(s) > maxLen {
+		s = runesafe.CapBytes(s, maxLen) + "..."
+	}
+	return s
+}
+
 // sanitizeUpstreamText bounds and cleans an untrusted Torznab <error>
 // code/description before it is carried into an error that reaches slog
 // (fetchRaw's Warn, httpx.Do's retry logs) - the same emit-boundary policy
@@ -269,14 +282,7 @@ func (e *upstreamDocError) Error() string {
 // rune boundary (truncated output appends "...", for a 203-byte maximum) so
 // a multi-MB or control-laden <error> body can never spoof or flood a log
 // line.
-func sanitizeUpstreamText(s string) string {
-	const maxLen = 200
-	s = runesafe.SanitizeSingleLine(s)
-	if len(s) > maxLen {
-		s = runesafe.CapBytes(s, maxLen) + "..."
-	}
-	return s
-}
+func sanitizeUpstreamText(s string) string { return capLogText(s, 200) }
 
 // parseTorznab decodes a Prowlarr Torznab response into feed items.
 func parseTorznab(body []byte) ([]item, error) {

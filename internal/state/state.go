@@ -124,7 +124,9 @@ func NewStore(path string, logger *slog.Logger) *Store {
 // NewReadOnlyStore returns a Store for flows documented read-only on the
 // state file (the one-shot report): Load reports corruption without
 // quarantining, leaving the file in place for the daemon's own Load to
-// quarantine and surface on the container's log stream.
+// quarantine and surface on the container's log stream. Save is refused, so
+// the read-only contract is enforced by the type rather than relied on from
+// callers.
 func NewReadOnlyStore(path string, logger *slog.Logger) *Store {
 	st := NewStore(path, logger)
 	st.readOnly = true
@@ -217,7 +219,7 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 		// nonsensical multi-century age.
 		attrs = append(attrs, "library_age", time.Since(st.Library.TakenAt).Round(time.Second).String())
 	}
-	s.log.Debug("state loaded", attrs...)
+	s.log.Info("state loaded", attrs...)
 	return st, nil
 }
 
@@ -352,7 +354,10 @@ func (bw *boundedWriter) Write(p []byte) (int, error) {
 // roll-forward to consume (see Load).
 func (s *Store) Save(ctx context.Context, st *State) error {
 	if st == nil {
-		return errors.New("state: encode: nil state (Save never writes a non-object state file)")
+		return fmt.Errorf("state: encode %s: nil state (Save never writes a non-object state file)", s.path)
+	}
+	if s.readOnly {
+		return fmt.Errorf("state: save %s: store is read-only", s.path)
 	}
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("state: save %s: %w", s.path, err)
@@ -411,9 +416,9 @@ func encodeState(pf *atomicfile.PendingFile, st *State, path string) error {
 	bw := &boundedWriter{w: pf, limit: maxStateBytes + 1}
 	if encErr := json.NewEncoder(bw).Encode(st); encErr != nil {
 		if errors.Is(encErr, errStateTooLarge) {
-			return fmt.Errorf("state: encode: %d bytes exceeds the %d-byte load limit; keeping previous state file", bw.attempted-1, maxStateBytes)
+			return fmt.Errorf("state: encode %s: %d bytes exceeds the %d-byte load limit; keeping previous state file", path, bw.attempted-1, maxStateBytes)
 		}
-		return fmt.Errorf("state: encode: %w", encErr)
+		return fmt.Errorf("state: encode %s: %w", path, encErr)
 	}
 	if truncErr := pf.Truncate(bw.written - 1); truncErr != nil {
 		return fmt.Errorf("state: write %s: %w", path, truncErr)

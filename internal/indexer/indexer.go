@@ -133,16 +133,26 @@ type Indexer struct {
 	cfg        Config
 	path       string
 	snap       snapshot
-	upstreams  []*upstream // wired once in New; immutable afterwards (not guarded by mu)
-	// verifyKey is the pre-hashed feed_api_key verifier, built once in New so
-	// per-request verification hashes only the presented value (see
-	// webhttp.NewStaticTokenVerifier). Immutable after New.
-	verifyKey webhttp.StaticTokenVerifier
+	// authFailLast is the failed-auth token bucket's last-refill instant, part
+	// of the bucket guarded by authFailMu below (see allowAuthFailure).
+	authFailLast time.Time
+	upstreams    []*upstream // wired once in New; immutable afterwards (not guarded by mu)
+	// authFailTokens is the failed-auth token bucket's fill level, guarded by
+	// authFailMu below together with authFailLast above (see allowAuthFailure).
+	authFailTokens float64
 	// reloadMu coalesces concurrent snapshot refreshes: only one request runs
 	// reload's stat/read/unmarshal at a time; the rest serve the current
 	// immutable snapshot (see reload). mu still guards the published snapshot.
 	mu       sync.RWMutex
 	reloadMu sync.Mutex
+	// authFailMu guards the failed-auth token bucket (authFailTokens above /
+	// authFailLast at the top of the struct), which rate-limits responses to
+	// bad apikey attempts (see allowAuthFailure).
+	authFailMu sync.Mutex
+	// verifyKey is the pre-hashed feed_api_key verifier, built once in New so
+	// per-request verification hashes only the presented value (see
+	// webhttp.NewStaticTokenVerifier). Immutable after New.
+	verifyKey webhttp.StaticTokenVerifier
 	// snapMissing records that the snapshot file disappeared AFTER one was
 	// loaded (deleted file, incomplete restore, lost volume), so the
 	// stale-feed WARN fires once per disappearance instead of on every

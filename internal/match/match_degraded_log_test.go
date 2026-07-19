@@ -2,6 +2,7 @@ package match
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 
 	"github.com/cplieger/seadex-scout/internal/anilist"
@@ -47,10 +48,10 @@ func TestMatchTransientFailuresLogWarn(t *testing.T) {
 	if len(records) != 2 {
 		t.Fatalf("records = %d, want 2", len(records))
 	}
-	if records[0].Message != "anilist batch prefetch incomplete; remaining ids fall back to per-id fetch" || records[0].Level.String() != "WARN" {
+	if records[0].Message != "anilist batch prefetch incomplete; remaining ids fall back to per-id fetch" || records[0].Level != slog.LevelWarn {
 		t.Errorf("batch record = level %s message %q, want WARN incomplete-prefetch message", records[0].Level, records[0].Message)
 	}
-	if records[1].Message != "anilist fallback failed" || records[1].Level.String() != "WARN" {
+	if records[1].Message != "anilist fallback failed" || records[1].Level != slog.LevelWarn {
 		t.Errorf("fallback record = level %s message %q, want WARN fallback-failed message", records[1].Level, records[1].Message)
 	}
 }
@@ -76,7 +77,7 @@ func TestMatchTotalOutageLogsSingleWarn(t *testing.T) {
 	if len(records) != 1 {
 		t.Fatalf("records = %d, want 1", len(records))
 	}
-	if records[0].Message != "anilist batch prefetch failed; skipping per-id fallback for pending ids" || records[0].Level.String() != "WARN" {
+	if records[0].Message != "anilist batch prefetch failed; skipping per-id fallback for pending ids" || records[0].Level != slog.LevelWarn {
 		t.Errorf("record = level %s message %q, want WARN total-outage message", records[0].Level, records[0].Message)
 	}
 }

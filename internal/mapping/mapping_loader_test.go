@@ -1138,6 +1138,38 @@ func TestLoader_refreshCache_boundsPersistedValidators(t *testing.T) {
 	}
 }
 
+// TestLoader_boundedValidator_dropsInvalidHeaderBytes pins the content
+// dimension of the persisted-validator guard (the sibling of the size bound
+// above): a validator carrying bytes illegal in an HTTP header field value
+// (RFC 9110 field-value grammar - control characters other than tab, or DEL)
+// is dropped, so a hostile upstream ETag with a CR/LF can never be persisted
+// into state.json and replayed as a request header net/http rejects at
+// write time, permanently poisoning conditional revalidation. Exercised
+// directly on boundedValidator because Go's server-side header writer
+// rewrites CR/LF to spaces, so the httptest harness above cannot deliver
+// these bytes over the wire.
+func TestLoader_boundedValidator_dropsInvalidHeaderBytes(t *testing.T) {
+	l := NewLoader(nil, "", "", 0, discardLogger())
+	tests := []struct {
+		name      string
+		validator string
+		want      string
+	}{
+		{name: "crlf dropped", validator: "\"etag\r\nX-Injected: 1\"", want: ""},
+		{name: "control byte dropped", validator: "\"et\x01ag\"", want: ""},
+		{name: "DEL dropped", validator: "\"et\x7fag\"", want: ""},
+		{name: "tab retained", validator: "\"et\tag\"", want: "\"et\tag\""},
+		{name: "printable ascii retained", validator: "W/\"abc-123\"", want: "W/\"abc-123\""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := l.boundedValidator("etag", tc.validator); got != tc.want {
+				t.Errorf("boundedValidator(%q) = %q, want %q", tc.validator, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestLoader_refreshCache_firstBootKeylessBodyRejected pins the AniList-key
 // coverage floor's denominator: on first boot (no previous cache, so the
 // relative shrink guard cannot fire) a valid 200-element body where 199
@@ -1302,5 +1334,72 @@ func TestValidateRefreshedRecordsScopeCollapseRejected(t *testing.T) {
 				t.Error("scope-collapsing refresh returned nil error, want rejection")
 			}
 		})
+	}
+}
+
+// TestValidateRefreshedRecordsScopeAdditiveGrowthAccepted pins the accepting
+// side of the scope floor's loss requirement: an additive refresh that grows
+// the record count (raising the ceiling-derived minimum) while RETAINING every
+// season-scoped and special record must be accepted — the floor fires only on
+// a genuine loss, never on catalogue growth.
+func TestValidateRefreshedRecordsScopeAdditiveGrowthAccepted(t *testing.T) {
+	previous := make([]Record, 0, 100)
+	previous = append(previous,
+		Record{AniListID: 1, Type: "TV", TvdbID: 1, SeasonTvdb: 1},
+		Record{AniListID: 2, Type: "OVA", TvdbID: 2},
+	)
+	for id := 3; id <= 100; id++ {
+		previous = append(previous, Record{AniListID: id, Type: "TV", TvdbID: id})
+	}
+	candidate := make([]Record, len(previous), len(previous)+101)
+	copy(candidate, previous)
+	for id := 101; id <= 201; id++ {
+		candidate = append(candidate, Record{AniListID: id, Type: "TV", TvdbID: id})
+	}
+	if err := validateRefreshedRecords(previous, candidate, len(candidate)); err != nil {
+		t.Errorf("additive refresh retaining all season-scoped and special records returned error %v, want accepted", err)
+	}
+}
+
+// TestValidateRefreshedRecordsScopeSparsePreviousAccepted pins the scope
+// floor's previous-cache gate: when the previously accepted cache is itself
+// scope-sparse (no season-scoped and no special records, so it never met the
+// floor), an equally scope-sparse but otherwise valid refresh is the
+// catalogue's established shape and must be accepted — not rejected on an
+// absolute requirement the tolerant decoders do not impose.
+func TestValidateRefreshedRecordsScopeSparsePreviousAccepted(t *testing.T) {
+	previous := make([]Record, 0, 200)
+	candidate := make([]Record, 0, 200)
+	for id := 1; id <= 200; id++ {
+		previous = append(previous, Record{AniListID: id, Type: "TV", TvdbID: id})
+		candidate = append(candidate, Record{AniListID: id, Type: "TV", TvdbID: id})
+	}
+	if err := validateRefreshedRecords(previous, candidate, len(candidate)); err != nil {
+		t.Errorf("scope-sparse refresh over a scope-sparse cache returned error %v, want accepted", err)
+	}
+}
+
+// TestLoader_refreshCache_freshLowCoverageCacheStillFetches pins the second
+// arm of cacheUsable on the fresh-reuse fast path: a cache inside the refresh
+// window whose records index fine but carry no arr identifier (below the 1%
+// coverage floor) must NOT be reused as fresh — serving it would idle a whole
+// refresh window on a map no lookup can resolve; the loader must fall through
+// to the fetch and accept the upstream body.
+func TestLoader_refreshCache_freshLowCoverageCacheStillFetches(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
+	}))
+	defer ts.Close()
+	prev := &Cache{
+		FetchedAt: time.Now(),                           // inside the refresh window
+		Records:   []Record{{AniListID: 1, Type: "TV"}}, // keyed, but zero arr-identifier coverage
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	if err != nil {
+		t.Fatalf("refreshCache with a fresh-but-unmappable cache error: %v", err)
+	}
+	if len(next.Records) != 1 || next.Records[0].AniListID != 42 {
+		t.Fatalf("fresh-but-unmappable cache was reused as fresh: records = %+v, want fetched record id 42", next.Records)
 	}
 }

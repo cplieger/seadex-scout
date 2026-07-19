@@ -316,6 +316,36 @@ func TestMatchTitleFallbackAmbiguousIsUnmapped(t *testing.T) {
 	}
 }
 
+// TestMatchTitleFallbackYearDisambiguatesAmbiguousTitles pins the
+// disambiguation half of the conservative title+year contract: when the
+// normalized title matches MORE than one library item, a known year must
+// narrow the set to the single right item and link it, instead of treating
+// the pre-narrowing multi-candidate set as ambiguous. This is the scenario
+// filterByYear exists for (a remake/sequel sharing the original's title).
+func TestMatchTitleFallbackYearDisambiguatesAmbiguousTitles(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 1, Title: "Clannad", TvdbID: 100, Year: 2007},
+		{Arr: library.ArrSonarr, ArrID: 2, Title: "Clannad", TvdbID: 200, Year: 2010},
+	}}
+	idx := mapping.NewIndex(nil) // no record: matchEntry resolves via AniList
+	fake := fakeAniList{media: map[int]anilist.Media{
+		500: {Titles: []string{"Clannad"}, Format: "TV", Year: 2010},
+	}}
+
+	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 500}}, snap, idx, Memo{})
+
+	if len(res.Matches) != 1 {
+		t.Fatalf("matches = %d, want 1", len(res.Matches))
+	}
+	got := res.Matches[0]
+	if !got.InLibrary() || got.Item.ArrID != 2 {
+		t.Fatalf("match item = %+v, want the 2010 series ArrID 2 (the year must disambiguate the two same-titled items)", got.Item)
+	}
+	if got.Source != SourceTitle {
+		t.Errorf("source = %q, want %q", got.Source, SourceTitle)
+	}
+}
+
 // TestMatchTitleFallbackRejectsWrongYear pins the conservative title+year
 // contract: when a year is supplied, it is a hard constraint. A lone library
 // item whose normalized title matches but whose year differs must NOT be

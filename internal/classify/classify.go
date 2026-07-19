@@ -23,6 +23,15 @@ func ABVisible(t *seadex.Torrent, includeAnimeBytes bool) bool {
 	return filter.ABVisible(t.Tracker, t.URL, includeAnimeBytes)
 }
 
+// Obtainable reports whether a classified SeaDex release is obtainability
+// evidence under the operator's AnimeBytes toggle. It owns the argument
+// invariant shared by compare and audit (mirroring ABVisible's adapter
+// pattern): the RAW upstream URL (t.URL) feeds the tracker cross-check while
+// the normalized t.UsableURL() is the grabbable link, in that order.
+func Obtainable(rel *release.Release, t *seadex.Torrent, animeBytes bool) bool {
+	return filter.Obtainable(rel, t.URL, t.UsableURL(), animeBytes)
+}
+
 // Torrent classifies one SeaDex torrent, in the context of its entry (for the
 // shared notes), into a normalized release.Release. This is the one place the
 // release.Input for a SeaDex torrent is built, so compare and audit classify

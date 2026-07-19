@@ -309,7 +309,7 @@ func TestCycleFeedInfoClassifiesViaFribbIndex(t *testing.T) {
 }
 
 // TestCycleWalkFailShutdownDuringSeaDexFetchStaysSilent pins the shutdown arm
-// of logFeedOutageOnWalkFail: when the arr walk genuinely failed but the
+// of logFeedOutageOnGatedCycle: when the arr walk genuinely failed but the
 // SeaDex "failure" is the cycle context being cancelled mid-fetch (a
 // redeploy), the feed-kept WARN must NOT fire - blaming SeaDex would
 // misattribute a routine shutdown to an upstream outage (the genuine double

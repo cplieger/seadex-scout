@@ -21,7 +21,6 @@ package audit
 import (
 	"cmp"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -245,14 +244,23 @@ func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[strin
 	if snap == nil {
 		return nil
 	}
-	cat := newCatalogue(idx, excludeSpecials)
+	// The reverse item->record catalogue lives in match beside the forward ID
+	// bridge (one home for the arr-consistent pairing rule); audit contributes
+	// only its specials policy, as a record predicate mirroring the
+	// matched-rows arm's filter: with the filter on, a special record
+	// catalogues nothing, so a specials-only item is not catalogued and cannot
+	// surface as not_on_seadex, while a mixed series stays catalogued through
+	// its non-special records sharing the same TVDB id.
+	cat := match.NewCatalogue(idx, func(r mapping.Record) bool {
+		return !filter.ExcludeSpecial(r.IsSpecial(), excludeSpecials)
+	})
 	var rows []Row
 	for i := range snap.Items {
 		it := &snap.Items[i]
 		if _, ok := covered[it.Key()]; ok {
 			continue
 		}
-		if !cat.has(it) {
+		if !cat.Has(it) {
 			continue
 		}
 		// An uncovered item has no SeaDex-associated Fribb record to supply a
@@ -268,68 +276,6 @@ func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[strin
 		})
 	}
 	return rows
-}
-
-// catalogue is a reverse (arr-ID) lookup over the Fribb map: the set of TVDB,
-// TMDB-movie, and IMDb IDs any record references, used to tell a recognized
-// anime from an arbitrary library entry.
-type catalogue struct {
-	tvdb map[int]struct{}
-	tmdb map[int]struct{}
-	imdb map[string]struct{}
-}
-
-// newCatalogue builds the reverse ID sets from the mapping records. A nil index
-// yields an empty catalogue (nothing is considered catalogued). When
-// excludeSpecials is on, special (OVA/ONA/SPECIAL) records are skipped, so a
-// specials-only item is not catalogued and cannot surface as not_on_seadex —
-// mirroring the matched-rows arm's specials filter. A mixed series stays
-// catalogued through its non-special records sharing the same TVDB id.
-func newCatalogue(idx *mapping.Index, excludeSpecials bool) *catalogue {
-	c := &catalogue{tvdb: map[int]struct{}{}, tmdb: map[int]struct{}{}, imdb: map[string]struct{}{}}
-	idx.ForEachRecord(func(r mapping.Record) {
-		if filter.ExcludeSpecial(r.IsSpecial(), excludeSpecials) {
-			return
-		}
-		// Insert only the identifiers the record's routed arr consumes
-		// (mapping.Record.RoutedIDs): a MOVIE record must not catalogue a
-		// Sonarr item through a stray TVDB id, nor a series record a Radarr
-		// item through its movie ids.
-		tvdb, tmdbMovies, imdbIDs := r.RoutedIDs()
-		if tvdb != 0 {
-			c.tvdb[tvdb] = struct{}{}
-		}
-		for _, id := range tmdbMovies {
-			c.tmdb[id] = struct{}{}
-		}
-		for _, im := range imdbIDs {
-			c.imdb[im] = struct{}{}
-		}
-	})
-	return c
-}
-
-// has reports whether a library item corresponds to any Fribb record: a Radarr
-// movie by its TMDB or IMDb id, a Sonarr series by its TVDB id.
-func (c *catalogue) has(it *library.Item) bool {
-	if it.Arr == library.ArrRadarr {
-		if it.TmdbID != 0 {
-			if _, ok := c.tmdb[it.TmdbID]; ok {
-				return true
-			}
-		}
-		if it.ImdbID != "" {
-			if _, ok := c.imdb[it.ImdbID]; ok {
-				return true
-			}
-		}
-		return false
-	}
-	if it.TvdbID == 0 {
-		return false
-	}
-	_, ok := c.tvdb[it.TvdbID]
-	return ok
 }
 
 // assess builds one row: classify the entry's releases, resolve the shared
@@ -348,12 +294,12 @@ func (a *Auditor) assess(m *match.Match) Row {
 		SeaDexURL:   a.seadexURL(m.Entry.AniListID),
 		MatchSource: string(m.Source),
 		AniListID:   m.Entry.AniListID,
-		Season:      max(0, m.Record.SeasonTvdb),
 		Special:     m.Record.IsSpecial(),
 		Incomplete:  m.Entry.Incomplete,
 	}
 	d := align.Decide(m.Item, &m.Record, best, alt)
 	row.scope = d.Kind
+	row.Season = d.Season
 	row.CurrentGroups, row.Approx = d.Groups, d.Approx
 	row.Verdict = verdictFor(d.Standing)
 	row.Qualifier = rowQualifier(&m.Entry, &d)
@@ -441,13 +387,12 @@ func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 		}
 		rel := classify.Torrent(entry, t)
 		out = append(out, Release{
-			Tracker:  t.Tracker,
-			Group:    rel.Group,
-			URL:      t.UsableURL(),
-			Best:     t.IsBest,
-			Warnings: release.CurationWarnings(t.Tags),
-			Unobtainable: !filter.Obtainable(&rel, t.URL, t.UsableURL(),
-				filter.Options{AnimeBytes: a.includeAnimeBytes}),
+			Tracker:      t.Tracker,
+			Group:        rel.Group,
+			URL:          t.UsableURL(),
+			Best:         t.IsBest,
+			Warnings:     release.CurationWarnings(t.Tags),
+			Unobtainable: !classify.Obtainable(&rel, t, a.includeAnimeBytes),
 		})
 	}
 	return out
@@ -502,10 +447,10 @@ func sortRows(rows []Row) {
 	for i, v := range verdictOrder {
 		rank[v] = i
 	}
-	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].Verdict != rows[j].Verdict {
-			return rank[rows[i].Verdict] < rank[rows[j].Verdict]
+	slices.SortStableFunc(rows, func(a, b Row) int {
+		if c := cmp.Compare(rank[a.Verdict], rank[b.Verdict]); c != 0 {
+			return c
 		}
-		return strings.ToLower(rows[i].Title) < strings.ToLower(rows[j].Title)
+		return cmp.Compare(strings.ToLower(a.Title), strings.ToLower(b.Title))
 	})
 }

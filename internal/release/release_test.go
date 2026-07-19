@@ -444,3 +444,23 @@ func TestClassifyTrackerPassthrough(t *testing.T) {
 		}
 	}
 }
+
+// TestClassifyMultiNameEvidence pins Classify's whole-Names-list evidence
+// aggregation: markers carried only by a LATER element of the Names slice
+// (the shape classify.TorrentFileNames and library's sceneName+relPath pair
+// produce) must still classify - resolution, kind, and codec together - so a
+// regression to reading only Names[0] cannot survive. The existing tables all
+// pass a single name, and classify's own multi-file test carries its marker
+// in the first element, so only this test covers the later-element direction.
+func TestClassifyMultiNameEvidence(t *testing.T) {
+	got := Classify(&Input{Names: []string{"Show S01E01", "Show S01E02 1080p BDRemux x265"}})
+	if got.Resolution != "1080p" {
+		t.Errorf("Resolution = %q, want 1080p from a later Names element", got.Resolution)
+	}
+	if got.Kind != KindRemux {
+		t.Errorf("Kind = %q, want %q from a later Names element", got.Kind, KindRemux)
+	}
+	if got.Codec != "x265" {
+		t.Errorf("Codec = %q, want x265 from a later Names element", got.Codec)
+	}
+}

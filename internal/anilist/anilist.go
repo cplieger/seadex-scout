@@ -60,15 +60,15 @@ var errBatchRecord = errors.New("anilist: batch response")
 // query fetches the fields needed for a title fallback match.
 const query = `query ($id: Int) { Media(id: $id, type: ANIME) { format seasonYear startDate { year } title { romaji english native } } }`
 
+// batchSize is AniList's Page perPage maximum; FetchMany resolves up to this
+// many ids per request.
+const batchSize = 50
+
 // batchQuery fetches the same fields for many ids in one request via Page.media,
 // which still counts as a single request against AniList's per-minute budget -
 // so a cold cycle's hundreds of id-less lookups collapse to a handful of calls.
 // Built from batchSize so the page size and the chunk size cannot drift apart.
 var batchQuery = fmt.Sprintf(`query ($ids: [Int]) { Page(perPage: %d) { media(id_in: $ids, type: ANIME) { id format seasonYear startDate { year } title { romaji english native } } } }`, batchSize)
-
-// batchSize is AniList's Page perPage maximum; FetchMany resolves up to this
-// many ids per request.
-const batchSize = 50
 
 // Media is the subset of an AniList entry used for title matching.
 type Media struct {

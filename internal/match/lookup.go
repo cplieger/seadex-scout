@@ -62,6 +62,18 @@ type Memo struct {
 	Entries map[int]MemoEntry `json:"entries,omitempty"`
 }
 
+// liveEntry returns the memo entry for id when it exists and is unexpired at
+// now: the ONE liveness rule both pendingAniListIDs (skip a non-pending id)
+// and lookupAniList (serve a memo hit) consult, so the batch worklist and the
+// per-entry hit test cannot drift.
+func (m *Memo) liveEntry(id int, now time.Time) (MemoEntry, bool) {
+	ent, ok := m.Entries[id]
+	if !ok || ent.expired(now) {
+		return MemoEntry{}, false
+	}
+	return ent, true
+}
+
 // StaleTitle returns the memoized AniList title/year for id, deliberately
 // ignoring expiry: the memo's expiry governs re-fetch cadence, and a stale
 // show title still beats a file-name derivation (the feed's title tier).
@@ -219,7 +231,7 @@ func pendingAniListIDs(entries []seadex.Entry, idx *mapping.Index, lib *LibIndex
 	seen := make(map[int]struct{})
 	var ids []int
 	add := func(alID int) {
-		if ent, done := memo.Entries[alID]; done && !ent.expired(now) {
+		if _, live := memo.liveEntry(alID, now); live {
 			return
 		}
 		if _, dup := seen[alID]; dup {
@@ -289,7 +301,7 @@ func (g *lookupGate) recordSuccess() { g.streak = 0 }
 // request: the same outage would doom it, and the id stays un-memoized so it
 // is retried next cycle.
 func (r *matchRun) lookupAniList(ctx context.Context, aniListID int) (anilist.Media, bool) {
-	if ent, ok := r.memo.Entries[aniListID]; ok && !ent.expired(r.now) {
+	if ent, live := r.memo.liveEntry(aniListID, r.now); live {
 		if ent.NotFound {
 			return anilist.Media{}, false
 		}

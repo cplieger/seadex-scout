@@ -711,3 +711,38 @@ func TestSyntheticCountSkipsKeylessItems(t *testing.T) {
 		t.Errorf("syntheticCount = %d, want 2 (one keyed-untitled per feed; the key-less item never counts)", got)
 	}
 }
+
+// TestHarvestParams pins the per-tracker query form the title harvest sends:
+// Nyaa uses the season form (t=tvsearch, q + season) only for a non-movie
+// with a mapped season - a seasonless show and a movie stay a plain search -
+// while AnimeBytes is always a plain series-level search, and the q value is
+// the trimmed synthesis title.
+func TestHarvestParams(t *testing.T) {
+	tests := []struct {
+		name       string
+		meta       EntryInfo
+		scope      string
+		wantT      string
+		wantSeason string
+	}{
+		{"nyaa series with a mapped season uses the season form", EntryInfo{Title: "Frieren", SeasonTvdb: 1}, upstreamNyaa, "tvsearch", "1"},
+		{"nyaa seasonless series stays a plain search", EntryInfo{Title: "One Piece"}, upstreamNyaa, "search", ""},
+		{"nyaa movie stays a plain search even with a mapped season", EntryInfo{Title: "A Silent Voice", SeasonTvdb: 1, IsMovie: true}, upstreamNyaa, "search", ""},
+		{"ab is always a plain series-level search", EntryInfo{Title: "Frieren", SeasonTvdb: 1}, upstreamAB, "search", ""},
+		{"q is the trimmed synthesis title", EntryInfo{Title: "  Frieren  ", SeasonTvdb: 2}, upstreamNyaa, "tvsearch", "2"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := harvestParams(tc.meta, tc.scope)
+			if got.Get("t") != tc.wantT {
+				t.Errorf("harvestParams(%+v, %q) t = %q, want %q", tc.meta, tc.scope, got.Get("t"), tc.wantT)
+			}
+			if got.Get("season") != tc.wantSeason {
+				t.Errorf("harvestParams(%+v, %q) season = %q, want %q", tc.meta, tc.scope, got.Get("season"), tc.wantSeason)
+			}
+			if want := strings.TrimSpace(tc.meta.Title); got.Get("q") != want {
+				t.Errorf("harvestParams(%+v, %q) q = %q, want %q", tc.meta, tc.scope, got.Get("q"), want)
+			}
+		})
+	}
+}

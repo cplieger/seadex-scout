@@ -177,7 +177,7 @@ func (c *Comparer) compareOne(m *match.Match) *Finding {
 	if d.Outcome == align.OutcomeNoFile {
 		return nil
 	}
-	base := baseFinding(m, d.Groups)
+	base := baseFinding(m, &d)
 	switch d.Outcome {
 	case align.OutcomeNoBest:
 		return emptyResult(entry, &base)
@@ -224,7 +224,7 @@ func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
 		if ok, _ := filter.KeepNonTracker(&rel, c.opts); !ok {
 			continue
 		}
-		if !filter.Obtainable(&rel, t.URL, t.UsableURL(), c.opts) {
+		if !classify.Obtainable(&rel, t, c.opts.AnimeBytes) {
 			continue
 		}
 		out = append(out, candidate{rel: rel, torrent: *t})
@@ -261,18 +261,20 @@ func emptyResult(entry *seadex.Entry, base *Finding) *Finding {
 }
 
 // baseFinding seeds a finding with the item identity fields, using the groups
-// the shared decision judged the unit against (align.Decision.Groups: the
-// mapped season's groups, or the whole-series union) - so a season-scoped
-// finding's CurrentGroup and dedupe key never leak whole-series groups.
-func baseFinding(m *match.Match, groups []string) Finding {
+// and season the shared decision judged/attributed the unit against
+// (align.Decision.Groups: the mapped season's groups, or the whole-series
+// union; align.Decision.Season: the shared season label) - so a season-scoped
+// finding's CurrentGroup and dedupe key never leak whole-series groups, and
+// the season attribution cannot drift from the audit report's.
+func baseFinding(m *match.Match, d *align.Decision) Finding {
 	return Finding{
 		Title:         m.Item.Title,
 		Arr:           m.Arr,
 		ArrURL:        m.Item.ArrURL,
-		CurrentGroup:  strings.Join(groups, ","),
-		currentGroups: slices.Clone(groups),
+		CurrentGroup:  strings.Join(d.Groups, ","),
+		currentGroups: slices.Clone(d.Groups),
 		AniListID:     m.Entry.AniListID,
-		Season:        max(0, m.Record.SeasonTvdb),
+		Season:        d.Season,
 	}
 }
 
@@ -451,14 +453,7 @@ func boundedJoinParts(parts []string) string {
 // boundedPart is boundedJoinParts for a single component: the escaped legacy
 // form within the bound, the hashed identity above it (or when the escaped
 // form would spell the hashed-identity prefix, keeping the domains disjoint).
-func boundedPart(s string) string {
-	if len(s) <= maxKeyComponentBytes {
-		if escaped := escapeDedupePart(s); !strings.HasPrefix(escaped, hashedKeyPrefix) {
-			return escaped
-		}
-	}
-	return hashKeyParts([]string{s})
-}
+func boundedPart(s string) string { return boundedJoinParts([]string{s}) }
 
 // hashKeyParts streams each original component into SHA-256 under a
 // length-prefixed encoding - element boundaries survive without ever joining
@@ -529,11 +524,24 @@ func animeBytesLinkKey(links []ReleaseLink) string {
 
 // representative picks the headline recommended release: highest resolution,
 // then a public tracker, then the stable content key (never upstream order).
-// It assumes len(pool) > 0.
+// It assumes len(pool) > 0. Each candidate's stable key is memoized so it is
+// hashed at most once per pool rather than once per equal-rank comparison:
+// candidateStableKey streams the candidate's raw components (including
+// attacker-controlled URLs) through SHA-256 when oversized, so recomputing
+// the incumbent's key per comparison would make the hashing WORK (not the
+// bounded output) quadratic on hostile data - up to 512 tied candidates with
+// multi-MB URLs per entry.
 func representative(pool []candidate) candidate {
+	keys := make([]string, len(pool)) // candidateStableKey memo; "" = not yet computed (a real key is never empty)
+	keyOf := func(i int) string {
+		if keys[i] == "" {
+			keys[i] = candidateStableKey(&pool[i])
+		}
+		return keys[i]
+	}
 	bestIdx := 0
 	for i := 1; i < len(pool); i++ {
-		if betterCandidate(&pool[i], &pool[bestIdx]) {
+		if betterCandidate(&pool[i], &pool[bestIdx], keyOf(i), keyOf(bestIdx)) {
 			bestIdx = i
 		}
 	}
@@ -541,13 +549,14 @@ func representative(pool []candidate) candidate {
 }
 
 // betterCandidate reports whether a should outrank b as the headline
-// recommendation (higher resolution, then public-over-private tracker, then a
-// stable content key). The final tie-break must not fall through to upstream
-// slice order: the chosen candidate's identity enters the dedupe key, so two
-// equal-ranked candidates arriving in the opposite relation order from
-// PocketBase would otherwise flip the headline and emit a different key for
-// an unchanged finding (a duplicate alert plus a false resolution).
-func betterCandidate(a, b *candidate) bool {
+// recommendation (higher resolution, then public-over-private tracker, then
+// the candidates' precomputed stable content keys keyA/keyB). The final
+// tie-break must not fall through to upstream slice order: the chosen
+// candidate's identity enters the dedupe key, so two equal-ranked candidates
+// arriving in the opposite relation order from PocketBase would otherwise
+// flip the headline and emit a different key for an unchanged finding (a
+// duplicate alert plus a false resolution).
+func betterCandidate(a, b *candidate, keyA, keyB string) bool {
 	ra, rb := release.ResolutionRank(a.rel.Resolution), release.ResolutionRank(b.rel.Resolution)
 	if ra != rb {
 		return ra > rb
@@ -557,7 +566,7 @@ func betterCandidate(a, b *candidate) bool {
 	if aPublic != bPublic {
 		return aPublic
 	}
-	return candidateStableKey(a) < candidateStableKey(b)
+	return keyA < keyB
 }
 
 // candidateStableKey is the deterministic content identity that breaks
@@ -566,9 +575,9 @@ func betterCandidate(a, b *candidate) bool {
 // PocketBase returned the torrents relation in. Delimiters are escaped
 // element-wise so a field containing the join delimiter cannot make two
 // distinct candidates compare equal, and the component set is size-bounded
-// (boundedJoinParts, same as dedupeKey's components): betterCandidate rebuilds
-// the incumbent key on every equal-rank comparison across up to 512 torrents
-// per entry, so an unbounded escaped join of attacker-controlled URLs would
+// (boundedJoinParts, same as dedupeKey's components): representative memoizes
+// each candidate's key, but the components are still attacker-controlled URLs
+// across up to 512 torrents per entry, so an unbounded escaped join would
 // recreate the memory amplification the dedupe-key bounding removed
 // (CWE-400). Components within the bound keep the exact escaped
 // representation, so ordinary headline selection is unchanged.

@@ -88,3 +88,36 @@ func FuzzValidInfoHash_normalizedShapeAndIdempotent(f *testing.F) {
 		}
 	})
 }
+
+// FuzzSynthesizeTitle_titledAndTrimmed exercises the assembled-title path on
+// arbitrary show metadata and SeaDex file names (the untrusted strings the
+// episode-marker regexes and the flag classifier parse). Invariants: it never
+// panics, the result carries no leading/trailing whitespace, and with a
+// non-blank show title the result begins with that trimmed title - so a
+// degenerate implementation returning "" (or one that lets hostile file names
+// displace the show title) cannot pass. The feedTitle fallback (blank title)
+// has its own two targets above.
+func FuzzSynthesizeTitle_titledAndTrimmed(f *testing.F) {
+	f.Add("Frieren: Beyond Journey's End", 2023, 1, false, false, true,
+		"Frieren - S01E07 (BD Remux 1080p) [PMR].mkv", "Frieren - S01E08 (BD Remux 1080p) [PMR].mkv", "PMR")
+	f.Add("A Silent Voice", 2016, 0, true, false, false,
+		"A Silent Voice (2016) (BD 1080p x264 FLAC) [Group].mkv", "", "Group")
+	f.Add("Show OVA", 0, 0, false, true, false, "Show OVA - 01.mkv", "Show OVA - 02.mkv", "")
+	f.Add("One Piece", 1999, 0, false, false, false, "[Grp] One Piece - 1085 (1080p).mkv", "", "Grp")
+	f.Add("", 0, 0, false, false, false, "Show - S01E01.mkv", "NCED 01.mkv", "  spaced  ")
+	f.Fuzz(func(t *testing.T, title string, year, season int, isMovie, isSpecial, dual bool, name1, name2, group string) {
+		tor := &seadex.Torrent{
+			ReleaseGroup: group,
+			DualAudio:    dual,
+			Files:        []seadex.File{{Name: name1}, {Name: name2}},
+		}
+		meta := EntryInfo{Title: title, Year: year, SeasonTvdb: season, IsMovie: isMovie, IsSpecial: isSpecial}
+		got := synthesizeTitle(tor, meta)
+		if got != strings.TrimSpace(got) {
+			t.Errorf("synthesizeTitle(title %q) = %q, not trimmed", title, got)
+		}
+		if want := strings.TrimSpace(title); want != "" && !strings.HasPrefix(got, want) {
+			t.Errorf("synthesizeTitle(title %q) = %q, want it to begin with the trimmed show title", title, got)
+		}
+	})
+}

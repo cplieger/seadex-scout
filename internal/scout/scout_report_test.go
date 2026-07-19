@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -323,4 +324,38 @@ func TestReportDegradedMatching(t *testing.T) {
 			t.Errorf("error = %q, want report-interrupted context", err.Error())
 		}
 	})
+}
+
+// TestReportShutdownDuringMappingLoadNotMisattributed pins Report's half of
+// the shutdown-misattribution contract: a SIGTERM landing during the report's
+// Fribb refresh must neither log "report: mapping degraded" (blaming a healthy
+// upstream; the WARN backs a Loki query) nor fail with "mapping unusable" -
+// the report proceeds on the cached map and the cancellation surfaces from the
+// SeaDex fetch instead.
+func TestReportShutdownDuringMappingLoadNotMisattributed(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger, recorder := capture.New()
+	store := &fakeStore{st: state.State{
+		Mapping: mapping.Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}},
+	}}
+	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+	s := New(&Deps{
+		Logger:  logger,
+		Store:   store,
+		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping: mapping.NewLoader(&http.Client{Transport: cancellingMappingTransport{cancel: cancel}}, "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		SeaDex:  &cancellingSeaDex{cancel: cancel},
+	})
+
+	_, err := s.Report(ctx)
+	if err == nil {
+		t.Fatal("Report returned nil error, want the cancellation surfaced")
+	}
+	if strings.Contains(err.Error(), "mapping unusable") {
+		t.Errorf("error = %q, want the cancelled load NOT misattributed to an unusable map", err.Error())
+	}
+	if n := recorder.CountExact("report: mapping degraded"); n != 0 {
+		t.Errorf("'report: mapping degraded' fired %d times during a shutdown, want 0 (a cancelled load is the shutdown, not a Fribb fault)", n)
+	}
 }

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/runesafe"
 	"github.com/cplieger/webhttp"
 )
 
@@ -19,11 +18,15 @@ const (
 	readHeaderTimeout = 15 * time.Second
 	readTimeout       = 30 * time.Second
 	idleTimeout       = 120 * time.Second
-	// listenAddr is the fixed LAN bind address for the Torznab feed server. The
-	// port is an internal detail (the container/compose port mapping publishes
-	// it), not an operator-tuned setting, so it is hardcoded rather than a key.
-	listenAddr = ":9118"
 )
+
+// listenAddr is the fixed LAN bind address for the Torznab feed server. The
+// port is an internal detail (the container/compose port mapping publishes
+// it), not an operator-tuned setting, so it is hardcoded rather than a key.
+// A var rather than a const purely as a test seam: the server lifecycle
+// tests point it at an ephemeral 127.0.0.1 port so they never collide with a
+// real deployment's :9118.
+var listenAddr = ":9118"
 
 // Run serves the Torznab endpoint from the persisted feed snapshot until ctx is
 // cancelled. The endpoint listens immediately (so an arr's caps Test succeeds
@@ -117,20 +120,35 @@ func noCacheHeaders(h http.Header) {
 // headers) into oversized Loki records. Structured JSON already prevents line
 // injection; this bounds volume. The apikey is never passed through this
 // helper or into any log.
-func logParam(s string) string {
-	const maxLen = 256
-	s = runesafe.SanitizeSingleLine(s)
-	if len(s) > maxLen {
-		s = runesafe.CapBytes(s, maxLen) + "..."
-	}
-	return s
-}
+func logParam(s string) string { return capLogText(s, 256) }
 
 // handler builds the HTTP mux (a single Torznab endpoint).
 func (ix *Indexer) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", ix.serve)
 	return mux
+}
+
+// allowAuthFailure rate-limits responses to bad apikey attempts (token
+// bucket: burst 10, refill 10/min) so a LAN client cannot brute-force
+// feed_api_key at wire speed or flood the log with per-attempt lines.
+// Correct-key callers never consult it, so the happy path is untouched.
+func (ix *Indexer) allowAuthFailure() bool {
+	const burst, perMin = 10.0, 10.0
+	ix.authFailMu.Lock()
+	defer ix.authFailMu.Unlock()
+	now := time.Now()
+	if !ix.authFailLast.IsZero() {
+		ix.authFailTokens = min(burst, ix.authFailTokens+now.Sub(ix.authFailLast).Minutes()*perMin)
+	} else {
+		ix.authFailTokens = burst
+	}
+	ix.authFailLast = now
+	if ix.authFailTokens < 1 {
+		return false
+	}
+	ix.authFailTokens--
+	return true
 }
 
 // serve handles the Torznab endpoint. Every request must address a specific
@@ -159,7 +177,14 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 	// strings, lives in the shared library; the verifier is built once in New
 	// (pre-hashed configured key): see webhttp.NewStaticTokenVerifier.
 	if !ix.verifyKey.Verify(q.Get("apikey")) {
-		ix.log.Info("indexer request rejected", "reason", "bad apikey", "path", logParam(r.URL.Path))
+		// Failed attempts are throttled (allowAuthFailure) as a second defense
+		// layer behind the key's entropy: past the burst, a brute-forcing or
+		// misconfigured LAN client gets 429s and stops generating log lines.
+		if !ix.allowAuthFailure() {
+			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			return
+		}
+		ix.log.Info("indexer request rejected", "reason", "bad apikey", "path", logParam(r.URL.Path), "remote", logParam(r.RemoteAddr))
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -171,7 +196,7 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 	noCacheHeaders(w.Header())
 	scope := scopeFor(r.Host, r.URL.Path)
 	if scope == "" {
-		ix.log.Info("indexer request rejected", "reason", "no tracker scope", "path", logParam(r.URL.Path), "host", logParam(r.Host))
+		ix.log.Info("indexer request rejected", "reason", "no tracker scope", "path", logParam(r.URL.Path), "host", logParam(r.Host), "remote", logParam(r.RemoteAddr))
 		http.Error(w, "not found: address a tracker feed at /nyaa or /ab", http.StatusNotFound)
 		return
 	}

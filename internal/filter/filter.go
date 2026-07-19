@@ -55,15 +55,15 @@ func KeepNonTracker(r *release.Release, opts Options) (keep bool, reason string)
 // or unsafe - is never obtainable, because the operator has no link to act on,
 // so it must not count as comparison evidence (the SeaDex client already warns
 // about the unusable URL).
-func Obtainable(r *release.Release, rawURL, usableURL string, opts Options) bool {
+func Obtainable(r *release.Release, rawURL, usableURL string, animeBytes bool) bool {
 	if usableURL == "" {
 		return false
 	}
 	switch r.TrackerType {
 	case release.TrackerPublic:
-		return ABVisible(r.Tracker, rawURL, opts.AnimeBytes)
+		return ABVisible(r.Tracker, rawURL, animeBytes)
 	case release.TrackerPrivate:
-		return release.IsAnimeBytes(r.Tracker) && ABVisible(r.Tracker, rawURL, opts.AnimeBytes)
+		return release.IsAnimeBytes(r.Tracker) && ABVisible(r.Tracker, rawURL, animeBytes)
 	default:
 		return false
 	}

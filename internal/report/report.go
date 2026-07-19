@@ -16,9 +16,6 @@ import (
 	"github.com/cplieger/seadex-scout/internal/release"
 )
 
-// labelArr is the arr key shared by the finding log lines.
-const labelArr = "arr"
-
 // Alerted is a persisted dedupe record: when the finding was first alerted
 // plus the trimmed subset of it the resolution path reads back, keyed in the
 // state by the finding's dedupe key.
@@ -80,12 +77,13 @@ func NewReporter(logger *slog.Logger) *Reporter {
 // original alert time forward), logs a one-line resolution for any prior finding
 // no longer present, and returns the new dedupe state to persist.
 //
-// failedItems scopes resolution on a partial library walk: a prior finding
-// whose AniList ID is in failedItems belongs to an item whose episode fetch
-// failed this cycle, so its absence from findings is missing data, not
-// evidence of alignment - it is carried forward unresolved (original alert
-// time kept, no "finding resolved" line) instead of being falsely resolved.
-// Pass nil when every item walked cleanly.
+// failedItems scopes resolution to items whose evidence is incomplete this
+// cycle: a prior finding whose AniList ID is in failedItems belongs to an
+// item with missing data (the caller passes the union of episode-fetch
+// failures and AniList-degraded entries), so its absence from findings is
+// missing data, not evidence of alignment - it is carried forward unresolved
+// (original alert time kept, no "finding resolved" line) instead of being
+// falsely resolved. Pass nil when every item has complete evidence.
 func (r *Reporter) Report(findings []compare.Finding, prior map[string]Alerted, failedItems map[int]struct{}, now time.Time) map[string]Alerted {
 	current := make(map[string]Alerted, len(findings))
 	newCount := 0
@@ -167,7 +165,7 @@ func (r *Reporter) emitResolved(f *StoredFinding) {
 	r.log.Info("finding resolved",
 		"title", runesafe.Sanitize(f.Title),
 		"al_id", f.AniListID,
-		labelArr, f.Arr,
+		"arr", f.Arr,
 		"season", f.Season,
 		"current_group", runesafe.Sanitize(f.CurrentGroup),
 		"status", string(f.Status),
@@ -188,7 +186,7 @@ func findingKVs(f *compare.Finding) []any {
 	return []any{
 		"title", runesafe.Sanitize(f.Title),
 		"al_id", f.AniListID,
-		labelArr, f.Arr,
+		"arr", f.Arr,
 		"arr_url", runesafe.Sanitize(library.SafeLogURL(f.ArrURL)),
 		"season", f.Season,
 		"current_group", runesafe.Sanitize(f.CurrentGroup),

@@ -403,3 +403,24 @@ func TestUpstreamSearchRejectsOversizedResponse(t *testing.T) {
 		t.Errorf("upstream called %d times, want 1 (an oversized body is deterministic, not a transient to retry)", calls)
 	}
 }
+
+// TestSearchRejectsUnparseableUpstreamURLs pins the two defensive parse
+// guards of the Prowlarr proxy: a configured Torznab feed URL that does not
+// parse fails the search with the invalid-feed-URL error BEFORE any HTTP call
+// (no request can be built against it), and fetchAndParse surfaces a
+// request-build failure for a URL http.NewRequestWithContext cannot accept.
+func TestSearchRejectsUnparseableUpstreamURLs(t *testing.T) {
+	t.Run("unparseable configured feed URL", func(t *testing.T) {
+		u := &upstream{log: slog.Default(), name: upstreamNyaa, feed: "http://prowlarr:9696/api%zz"}
+		_, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+		if err == nil || !strings.Contains(err.Error(), "invalid upstream feed URL") {
+			t.Errorf("search error = %v, want the invalid-feed-URL error before any HTTP call", err)
+		}
+	})
+	t.Run("unbuildable request URL", func(t *testing.T) {
+		u := &upstream{http: &http.Client{}, log: slog.Default(), name: upstreamNyaa}
+		if _, err := u.fetchAndParse(context.Background(), ":"); err == nil {
+			t.Error("fetchAndParse(\":\") = nil error, want a request-build failure")
+		}
+	})
+}

@@ -262,8 +262,6 @@ func (w *FeedWriter) journalIfNew(t *seadex.Torrent, cur map[string][]curatedRef
 		if seen[id] {
 			isNew = false
 		}
-	}
-	for _, id := range ids {
 		seen[id] = true
 	}
 	if !isNew {

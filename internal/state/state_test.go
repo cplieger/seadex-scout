@@ -190,6 +190,23 @@ func TestReadOnlyStoreLoadCorruptLeavesFileInPlace(t *testing.T) {
 	}
 }
 
+// TestReadOnlyStoreSaveRefused pins the read-only store's write guard: the
+// one-shot report flow is documented read-only on the state file, so Save
+// on a NewReadOnlyStore must refuse and leave no file behind.
+func TestReadOnlyStoreSaveRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	err := NewReadOnlyStore(path, testLogger()).Save(context.Background(), &State{Baselined: true})
+	if err == nil {
+		t.Fatal("Save on a read-only store returned nil error, want refusal")
+	}
+	if !strings.Contains(err.Error(), "read-only") {
+		t.Errorf("error = %q, want read-only refusal context", err.Error())
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("state file after refused Save stat error = %v, want not exist", statErr)
+	}
+}
+
 // assertQuarantined asserts the decode-failure quarantine contract: the corrupt
 // payload is preserved at path+".corrupt" with its original bytes, and the live
 // path is gone so the next Save recreates it cleanly.
@@ -819,4 +836,81 @@ func TestStoreSaveOverCapErrorReportsJSONSize(t *testing.T) {
 	if !strings.Contains(saveErr.Error(), want) {
 		t.Errorf("error = %q, want the exact JSON size named (%q: the encoder's trailing newline must be subtracted)", saveErr.Error(), want)
 	}
+}
+
+func TestStoreLoadCorruptClearsNewerSchemaSaveBlock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	newer := fmt.Sprintf(`{"version":%d}`, SchemaVersion+1)
+	if err := os.WriteFile(path, []byte(newer), 0o600); err != nil {
+		t.Fatalf("write newer-schema state: %v", err)
+	}
+	store := NewStore(path, testLogger())
+	if _, err := store.Load(context.Background()); err == nil {
+		t.Fatal("Load of newer-schema state returned nil error, want refusal")
+	}
+	if err := store.Save(context.Background(), &State{}); err == nil {
+		t.Fatal("Save while blocked returned nil error, want refusal")
+	}
+
+	// The live file is later replaced by corruption: Load must quarantine it
+	// AND clear the remembered newer-schema block (the block is documented as
+	// describing what the LAST Load found at the live path), so the daemon
+	// resumes persisting instead of silently re-baselining every run.
+	if err := os.WriteFile(path, []byte("null"), 0o600); err != nil {
+		t.Fatalf("write corrupt state: %v", err)
+	}
+	if _, err := store.Load(context.Background()); err == nil {
+		t.Fatal("Load of corrupt state returned nil error, want decode error")
+	}
+	assertQuarantined(t, path, "null")
+	if err := store.Save(context.Background(), &State{Baselined: true}); err != nil {
+		t.Errorf("Save after a corrupt Load still blocked: %v (maybeQuarantine must clear the newer-schema block once the live file is positively classified corrupt)", err)
+	}
+	got, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load after unblocked Save returned error: %v", err)
+	}
+	if !got.Baselined {
+		t.Error("re-loaded state lost Baselined, want the unblocked Save persisted")
+	}
+}
+
+func TestStoreLoadReapsStaleTempsAndReadOnlySkips(t *testing.T) {
+	writeTemp := func(t *testing.T, dir, name string, mtime time.Time) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatalf("write temp fixture: %v", err)
+		}
+		if err := os.Chtimes(p, mtime, mtime); err != nil {
+			t.Fatalf("age temp fixture: %v", err)
+		}
+		return p
+	}
+
+	t.Run("normal store reaps stale, keeps fresh", func(t *testing.T) {
+		dir := t.TempDir()
+		stale := writeTemp(t, dir, ".atomicfile-11111.tmp", time.Now().Add(-2*time.Hour))
+		fresh := writeTemp(t, dir, ".atomicfile-22222.tmp", time.Now())
+		if _, err := NewStore(filepath.Join(dir, "state.json"), testLogger()).Load(context.Background()); err != nil {
+			t.Fatalf("Load returned error: %v", err)
+		}
+		if _, err := os.Stat(stale); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("stale temp after Load: stat err = %v, want reaped (hour-old orphan)", err)
+		}
+		if _, err := os.Stat(fresh); err != nil {
+			t.Errorf("fresh temp after Load: stat err = %v, want kept (could be a live concurrent Save)", err)
+		}
+	})
+
+	t.Run("read-only store leaves even a stale temp", func(t *testing.T) {
+		dir := t.TempDir()
+		stale := writeTemp(t, dir, ".atomicfile-33333.tmp", time.Now().Add(-2*time.Hour))
+		if _, err := NewReadOnlyStore(filepath.Join(dir, "state.json"), testLogger()).Load(context.Background()); err != nil {
+			t.Fatalf("Load returned error: %v", err)
+		}
+		if _, err := os.Stat(stale); err != nil {
+			t.Errorf("stale temp after read-only Load: stat err = %v, want left in place (the report flow is documented read-only on the state dir)", err)
+		}
+	})
 }

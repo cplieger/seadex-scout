@@ -37,6 +37,8 @@ const (
 	emptyCell = "-"
 )
 
+// --- Markdown + JSON rendering ---
+
 // verdictDesc is the one-line explanation shown under each verdict section.
 var verdictDesc = map[Verdict]string{
 	VerdictUnlisted:    "You have a release SeaDex does not list as best or alt.",
@@ -147,6 +149,8 @@ func writeRow(b *strings.Builder, row *Row) {
 		links(row))
 }
 
+// --- slog emission ---
+
 // Log emits the report to slog: a summary line then one INFO line per row, so
 // the report is queryable in Loki alongside the human-readable Markdown. The
 // summary's msg is "report summary", deliberately distinct from Scout.Report's
@@ -201,16 +205,19 @@ func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
 }
 
 // interrupted maps a done context to the audit-interrupted error for stage,
-// wrapping context.Cause so main's shutdown classification (errors.Is
-// context.Canceled) keeps a routine SIGTERM off the ERROR alert. It returns
-// nil while the context is live, so callers can gate each stage of the
-// report's log/persist pipeline on the one report-wide budget.
+// wrapping ctx.Err() as the classification token main's shutdown handling
+// keys on (errors.Is context.Canceled, keeping a routine SIGTERM off the
+// ERROR alert) plus the signal cause for display. It returns nil while the
+// context is live, so callers can gate each stage of the report's
+// log/persist pipeline on the one report-wide budget.
 func interrupted(ctx context.Context, stage string) error {
 	if ctx.Err() == nil {
 		return nil
 	}
-	return fmt.Errorf("audit: %s interrupted: %w", stage, context.Cause(ctx))
+	return fmt.Errorf("audit: %s interrupted: %w (cause: %w)", stage, ctx.Err(), context.Cause(ctx))
 }
+
+// --- File persistence + report lock ---
 
 // reportStampLayout is the UTC timestamp embedded in report filenames: sortable,
 // filesystem-safe (no colons), second precision.
@@ -457,6 +464,8 @@ func links(row *Row) string {
 	}
 	return strings.Join(parts, linkSep)
 }
+
+// --- Sanitizers + link/cell escaping ---
 
 // linkURLEscaper backs escapeLinkURL; built once, safe for concurrent use.
 var linkURLEscaper = strings.NewReplacer(

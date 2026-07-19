@@ -57,8 +57,8 @@ func TestConfigValidate(t *testing.T) {
 		{"ab indexer url without feed key rejected", Config{RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k", IndexerABTorznabURL: "http://prowlarr/2/api"}, true},
 		{"indexer url with feed key ok", Config{RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k", IndexerNyaaTorznabURL: "http://prowlarr/22/api", IndexerAPIKey: "feedkey"}, false},
 		{"no indexer url unaffected", Config{RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k"}, false},
-		{"enabled sonarr with url and key both empty rejected", Config{RunMode: RunModeDaemon, SonarrWanted: true, RadarrURL: "http://radarr:7878", RadarrAPIKey: "k"}, true},
-		{"enabled radarr with url and key both empty rejected", Config{RunMode: RunModeDaemon, RadarrWanted: true, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k"}, true},
+		{"enabled sonarr with url and key both empty rejected", Config{RunMode: RunModeDaemon, sonarrWanted: true, RadarrURL: "http://radarr:7878", RadarrAPIKey: "k"}, true},
+		{"enabled radarr with url and key both empty rejected", Config{RunMode: RunModeDaemon, radarrWanted: true, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k"}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -78,11 +78,11 @@ func TestToConfigEnabledToggleAndTrim(t *testing.T) {
 
 	c := fc.toConfig()
 
-	if !c.SonarrWanted {
-		t.Error("SonarrWanted = false, want true (sonarr.enabled must transfer to the runtime Config)")
+	if !c.sonarrWanted {
+		t.Error("sonarrWanted = false, want true (sonarr.enabled must transfer to the runtime Config)")
 	}
-	if c.RadarrWanted {
-		t.Error("RadarrWanted = true, want false (radarr.enabled must transfer to the runtime Config)")
+	if c.radarrWanted {
+		t.Error("radarrWanted = true, want false (radarr.enabled must transfer to the runtime Config)")
 	}
 	if c.SonarrURL != "http://sonarr:8989" || c.SonarrAPIKey != "key" {
 		t.Errorf("sonarr not trimmed: url=%q key=%q", c.SonarrURL, c.SonarrAPIKey)
@@ -131,6 +131,39 @@ func TestToConfigInfoOnDisabledArrWithKey(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestWarnOverlappingTags pins the include/exclude overlap diagnostic: a tag
+// in both arr_tags lists warns (exclude wins, so the include entry is dead),
+// disjoint lists stay silent, and the warning is field-name-only — it never
+// echoes the tag value, which can carry an expanded ${VAR}.
+func TestWarnOverlappingTags(t *testing.T) {
+	tests := []struct {
+		name     string
+		include  []string
+		exclude  []string
+		wantWarn bool
+	}{
+		{"overlap warns", []string{"anime", "keep"}, []string{"anime"}, true},
+		{"disjoint lists stay silent", []string{"anime"}, []string{"skip"}, false},
+		{"empty lists stay silent", nil, nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := capture.Default(t)
+			c := Config{IncludeTags: tt.include, ExcludeTags: tt.exclude}
+			c.warnOverlappingTags()
+			got := rec.Contains("exclude wins, so items carrying it are never scanned")
+			if got != tt.wantWarn {
+				t.Errorf("overlap warning present = %v, want %v (messages %v)", got, tt.wantWarn, rec.Messages())
+			}
+			for _, msg := range rec.Messages() {
+				if strings.Contains(msg, "anime") || strings.Contains(msg, "skip") {
+					t.Errorf("warning echoes a tag value: %q", msg)
+				}
+			}
+		})
+	}
 }
 
 func TestWebBaseFallsBackToInternalURL(t *testing.T) {
@@ -1026,6 +1059,7 @@ func TestPollIntervalFromFile(t *testing.T) {
 		{"absent key falls back to the default interval", "mode: \"daemon\"\n", DefaultPollInterval},
 		{"empty file falls back to the default interval", "", DefaultPollInterval},
 		{"unknown keys are tolerated", "not_a_real_key: 1\npoll_interval: \"6h\"\n", 6 * time.Hour},
+		{"multi-document file is tolerated", "poll_interval: \"6h\"\n---\nignored: true\n", 6 * time.Hour},
 		{"malformed YAML disables the deadline", "poll_interval: [\n", 0},
 		{"wrong value type disables the deadline", "poll_interval: {h: 3}\n", 0},
 		{"oversized file disables the deadline", "poll_interval: \"6h\"\n#" + strings.Repeat("x", maxConfigBytes) + "\n", 0},
@@ -1294,5 +1328,48 @@ func TestLoadEmptyOrCommentOnlyConfig(t *testing.T) {
 				t.Errorf("Validate() error = %q, want the no-arr-configured message", verr)
 			}
 		})
+	}
+}
+
+// TestLoadLeavesNonAllowlistedEnvLiteral pins the negative half of the
+// allowlist wiring at Load level: a set but non-allowlisted environment
+// variable (${HOME}) referenced in the config is never expanded - the literal
+// survives into the runtime Config - so an arbitrary host env value can never
+// be injected into a config field through a ${VAR} reference.
+func TestLoadLeavesNonAllowlistedEnvLiteral(t *testing.T) {
+	t.Setenv("HOME", "/home/leaked-value")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := "sonarr:\n  enabled: true\n  url: http://sonarr:8989\n  api_key: ${HOME}\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.SonarrAPIKey != "${HOME}" {
+		t.Errorf("SonarrAPIKey = %q, want the literal ${HOME} (non-allowlisted vars must never expand)", c.SonarrAPIKey)
+	}
+}
+
+// TestLoadDefaultsArrURLWhenAbsent pins the defaults-baseline overlay
+// contract ("absent keys keep these values, so a partial config still runs"):
+// an enabled arr whose url key is absent inherits the baseline URL and the
+// resulting config validates, so a minimal enabled+api_key config is runnable.
+func TestLoadDefaultsArrURLWhenAbsent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := "sonarr:\n  enabled: true\n  api_key: k\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.SonarrURL != "http://sonarr:8989" {
+		t.Errorf("SonarrURL = %q, want the defaults-baseline http://sonarr:8989 for an absent url key", c.SonarrURL)
+	}
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate() = %v, want nil (default url + key is a runnable pair)", err)
 	}
 }

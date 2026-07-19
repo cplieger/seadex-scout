@@ -172,7 +172,9 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info f
 	} else {
 		cur := indexCurated(entries)
 		nyaa = w.carryJournal(prev.nyaaFeed, cur, warned, infoFor, now, &js)
-		ab = w.carryJournal(prev.abFeed, cur, warned, infoFor, now, &js)
+		if w.abConfigured {
+			ab = w.carryJournal(prev.abFeed, cur, warned, infoFor, now, &js)
+		}
 		newNyaa, newAB := w.growJournal(entries, cur, seen, infoFor, now, &js)
 		nyaa = append(nyaa, newNyaa...)
 		ab = append(ab, newAB...)
@@ -304,7 +306,9 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 // searches serve and mark the release while carryJournal (which consumes the
 // any-occurrence key set) removes it from RSS - the two indexer paths would
 // disagree about whether the release is grabbable. So a first pass collects
-// every warned journal key across the whole catalogue, and a second pass
+// every warned identity signal - journal key AND info hash (identitySignals,
+// the package's one identity definition) - across the whole catalogue, and a
+// second pass
 // removes every occurrence that is warned itself OR shares a warned identity.
 // Filtering at the source keeps every downstream consumer honest at once: the
 // search curation set never marks a warned release (a Prowlarr result
@@ -316,44 +320,59 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 // cycle shares the entries slice with the compare pass, so an entry
 // containing a removed torrent gets a fresh filtered Torrents slice.
 func splitCurationWarned(entries []seadex.Entry) (kept []seadex.Entry, warned map[string]struct{}) {
-	warned = collectWarnedKeys(entries)
+	warned, all := collectWarnedIdentities(entries)
 	kept = make([]seadex.Entry, len(entries))
 	for i := range entries {
 		kept[i] = entries[i]
-		if unwarned, changed := filterWarnedTorrents(entries[i].Torrents, warned); changed {
+		if unwarned, changed := filterWarnedTorrents(entries[i].Torrents, all); changed {
 			kept[i].Torrents = unwarned
 		}
 	}
 	return kept, warned
 }
 
-// collectWarnedKeys is splitCurationWarned's first pass: the journal keys of
-// every curation-warned torrent occurrence across the whole catalogue.
-func collectWarnedKeys(entries []seadex.Entry) map[string]struct{} {
-	warned := make(map[string]struct{})
+// collectWarnedIdentities is splitCurationWarned's first pass: keys holds the
+// warned journal keys (carryJournal's drop set and the warned_excluded count),
+// all holds every warned identity signal (journal key AND info hash, the
+// package's identitySignals definition), so a duplicate occurrence sharing a
+// warned torrent's info hash under a different or unparseable URL is excluded
+// too.
+func collectWarnedIdentities(entries []seadex.Entry) (keys, all map[string]struct{}) {
+	keys, all = make(map[string]struct{}), make(map[string]struct{})
 	for i := range entries {
 		for j := range entries[i].Torrents {
 			t := &entries[i].Torrents[j]
-			if release.CurationWarned(t.Tags) {
-				if k := journalKey(t); k != "" {
-					warned[k] = struct{}{}
-				}
+			if !release.CurationWarned(t.Tags) {
+				continue
+			}
+			if k := journalKey(t); k != "" {
+				keys[k] = struct{}{}
+			}
+			for _, id := range identitySignals(t) {
+				all[id] = struct{}{}
 			}
 		}
 	}
-	return warned
+	return keys, all
 }
 
 // filterWarnedTorrents is splitCurationWarned's second pass for one entry's
 // torrents: it drops every occurrence that is warned itself OR shares a
-// warned identity, reporting whether anything was removed (the caller only
-// swaps in the fresh slice then, keeping the shared input unmutated).
-func filterWarnedTorrents(ts []seadex.Torrent, warned map[string]struct{}) ([]seadex.Torrent, bool) {
+// warned identity signal (journal key or info hash), reporting whether
+// anything was removed (the caller only swaps in the fresh slice then,
+// keeping the shared input unmutated).
+func filterWarnedTorrents(ts []seadex.Torrent, warnedIDs map[string]struct{}) ([]seadex.Torrent, bool) {
 	unwarned := make([]seadex.Torrent, 0, len(ts))
 	changed := false
 	for j := range ts {
 		t := &ts[j]
-		_, identityWarned := warned[journalKey(t)]
+		identityWarned := false
+		for _, id := range identitySignals(t) {
+			if _, ok := warnedIDs[id]; ok {
+				identityWarned = true
+				break
+			}
+		}
 		if release.CurationWarned(t.Tags) || identityWarned {
 			changed = true
 			continue

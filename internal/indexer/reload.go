@@ -25,6 +25,13 @@ func (ix *Indexer) statSnapshot() (os.FileInfo, bool) {
 			// longer refresh: every request keeps serving the last in-memory
 			// feed, so warn once that the feed is stale, then stay quiet
 			// until the file reappears.
+			//
+			// Absence is a successful stat determination, so it ENDS any
+			// stat/read degradation episode: clear the transient flag (no
+			// recovery INFO - nothing was reloaded; the missing state has
+			// its own once-per-disappearance WARN) so the next fault onset
+			// warns again instead of being suppressed by a stale flag.
+			ix.reloadDegraded = false
 			ix.mu.RLock()
 			loaded := ix.snapInfo != nil
 			ix.mu.RUnlock()

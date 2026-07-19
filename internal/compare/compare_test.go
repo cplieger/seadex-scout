@@ -322,7 +322,7 @@ func TestCompareAlignedProducesNoFinding(t *testing.T) {
 	entry := seadex.Entry{AniListID: 154587, Torrents: []seadex.Torrent{
 		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
 	}}
-	m := match.Match{Item: item, Arr: "sonarr", Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
 	if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
 		t.Errorf("aligned item must produce no finding, got %+v", got)
 	}
@@ -333,7 +333,7 @@ func TestCompareBetterRelease(t *testing.T) {
 	entry := seadex.Entry{AniListID: 154587, Torrents: []seadex.Torrent{
 		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
 	}}
-	m := match.Match{Item: item, Arr: "sonarr", Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
 	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
 	if len(got) != 1 {
 		t.Fatalf("expected 1 finding, got %d", len(got))
@@ -471,7 +471,7 @@ func TestCompareTheoreticalBestIsInfo(t *testing.T) {
 	// recommendation-emptiness nudge, so a fileless item stays silent.
 	item := &library.Item{Title: "X", Arr: library.ArrSonarr, Groups: []string{"whatever"}, SeasonGroups: map[int][]string{1: {"whatever"}}}
 	entry := seadex.Entry{AniListID: 1, TheoreticalBest: "a stated remux"}
-	m := match.Match{Item: item, Arr: "sonarr", Entry: entry, Record: mapping.Record{}}
+	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{}}
 	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
 	if len(got) != 1 || got[0].Status != StatusTheoretical || got[0].Severity != SevInfo {
 		t.Fatalf("expected one theoretical_best/info finding, got %+v", got)
@@ -492,7 +492,7 @@ func TestCompareSeasonNotOnDiskTheoreticalIsSilent(t *testing.T) {
 }
 
 func TestCompareSkipsNotInLibraryAndSpecials(t *testing.T) {
-	notInLib := match.Match{Arr: "sonarr", Entry: seadex.Entry{AniListID: 1}}
+	notInLib := match.Match{Arr: library.ArrSonarr, Entry: seadex.Entry{AniListID: 1}}
 	special := match.Match{
 		Item:   &library.Item{Title: "OVA", Groups: []string{"x"}},
 		Arr:    "sonarr",

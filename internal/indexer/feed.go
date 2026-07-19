@@ -15,8 +15,12 @@ import (
 
 // defaultSeaDexBaseURL is the fallback SeaDex site base for a FeedWriter
 // constructed without one (tests, alternate wiring); production passes
-// config.DefaultSeaDexBaseURL through FeedWriterConfig.SeaDexBaseURL.
-const defaultSeaDexBaseURL = "https://releases.moe"
+// config.DefaultSeaDexBaseURL through FeedWriterConfig.SeaDexBaseURL. It
+// references the canonical constant in internal/seadex (the package that owns
+// the releases.moe contract) so the fallback cannot drift from it.
+const defaultSeaDexBaseURL = seadex.DefaultBaseURL
+
+// --- Per-show metadata and categories ---
 
 // EntryInfo is the per-show (per-AniList-id) metadata the compare cycle hands
 // the feed writer for title synthesis: the show's own title as its arr knows it
@@ -57,6 +61,8 @@ func categoriesFor(isMovie bool) []int {
 	}
 	return []int{catAnime}
 }
+
+// --- Assembled title synthesis (known show title) ---
 
 // synthesizeTitle builds the served release title for one curated torrent.
 //
@@ -159,10 +165,12 @@ func releaseFlags(t *seadex.Torrent) []string {
 // alone, via the shared release classifier. The entry notes are deliberately
 // excluded: they are entry-wide and routinely describe sibling releases, so a
 // note mentioning another release's 1080p must not stamp this torrent's title.
+// Creditless extras are excluded like every other synthesis scanner (see
+// creditlessExtra): an NC bonus file's resolution must not drive the title either.
 func fileResolution(files []seadex.File) string {
 	names := make([]string, 0, len(files))
 	for i := range files {
-		if isMediaFile(files[i].Name) {
+		if isContentMediaFile(files[i].Name) {
 			names = append(names, files[i].Name)
 		}
 	}
@@ -171,6 +179,8 @@ func fileResolution(files []seadex.File) string {
 	}
 	return release.Classify(&release.Input{Names: names}).Resolution
 }
+
+// --- Episode/pack heuristics: token regexes, feedTitle, packSeason ---
 
 // episodeToken matches a season+episode token (S01E01, S1E1, S01E01-E13,
 // S01E15v2). Collapsing its episode half to just the season turns a season
@@ -331,6 +341,8 @@ func coveredEpisodes(files []seadex.File) int {
 	return len(seen)
 }
 
+// --- Media-file classification helpers ---
+
 // representativeFile picks the file name a title is derived from: the first file
 // carrying a season+episode token (so extras like NCED/NCOP/creditless files,
 // which lack one, are skipped in favour of a real episode), or the first file
@@ -408,6 +420,8 @@ func stripExt(name string) string {
 	}
 	return name
 }
+
+// --- Feed assembly utilities ---
 
 // totalSize sums the byte lengths of a torrent's files (the pack size). The
 // lengths come from the untrusted SeaDex record, so the arithmetic is

@@ -66,23 +66,23 @@ func TestRequireDualAudioKeysOnStructuredFlag(t *testing.T) {
 
 func TestObtainable(t *testing.T) {
 	tests := []struct {
-		name      string
-		rel       release.Release
-		usableURL string
-		opts      Options
-		want      bool
+		name       string
+		rel        release.Release
+		usableURL  string
+		animeBytes bool
+		want       bool
 	}{
-		{"public always obtainable", release.Release{TrackerType: release.TrackerPublic}, "https://nyaa.si/view/1", Options{}, true},
-		{"animebytes obtainable when enabled", release.Release{TrackerType: release.TrackerPrivate, Tracker: "AB"}, "https://animebytes.tv/torrents.php?id=1", Options{AnimeBytes: true}, true},
-		{"animebytes not obtainable when disabled", release.Release{TrackerType: release.TrackerPrivate, Tracker: "AB"}, "https://animebytes.tv/torrents.php?id=1", Options{}, false},
-		{"other private tracker never obtainable even with AB on", release.Release{TrackerType: release.TrackerPrivate, Tracker: "beyondhd"}, "https://beyondhd.co/t/1", Options{AnimeBytes: true}, false},
-		{"unknown tracker not obtainable", release.Release{TrackerType: release.TrackerUnknown}, "https://example.com/t/1", Options{AnimeBytes: true}, false},
-		{"public with empty usable URL not obtainable", release.Release{TrackerType: release.TrackerPublic}, "", Options{}, false},
-		{"animebytes with empty usable URL not obtainable even when enabled", release.Release{TrackerType: release.TrackerPrivate, Tracker: "AB"}, "", Options{AnimeBytes: true}, false},
+		{"public always obtainable", release.Release{TrackerType: release.TrackerPublic}, "https://nyaa.si/view/1", false, true},
+		{"animebytes obtainable when enabled", release.Release{TrackerType: release.TrackerPrivate, Tracker: "AB"}, "https://animebytes.tv/torrents.php?id=1", true, true},
+		{"animebytes not obtainable when disabled", release.Release{TrackerType: release.TrackerPrivate, Tracker: "AB"}, "https://animebytes.tv/torrents.php?id=1", false, false},
+		{"other private tracker never obtainable even with AB on", release.Release{TrackerType: release.TrackerPrivate, Tracker: "beyondhd"}, "https://beyondhd.co/t/1", true, false},
+		{"unknown tracker not obtainable", release.Release{TrackerType: release.TrackerUnknown}, "https://example.com/t/1", true, false},
+		{"public with empty usable URL not obtainable", release.Release{TrackerType: release.TrackerPublic}, "", false, false},
+		{"animebytes with empty usable URL not obtainable even when enabled", release.Release{TrackerType: release.TrackerPrivate, Tracker: "AB"}, "", true, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := Obtainable(&tt.rel, "", tt.usableURL, tt.opts); got != tt.want {
+			if got := Obtainable(&tt.rel, "", tt.usableURL, tt.animeBytes); got != tt.want {
 				t.Errorf("Obtainable() = %v, want %v", got, tt.want)
 			}
 		})
@@ -165,27 +165,27 @@ func TestABVisible(t *testing.T) {
 func TestObtainableAppliesABURLCrossCheck(t *testing.T) {
 	abURL := "https://animebytes.tv/torrents.php?id=1&torrentid=2"
 	tests := []struct {
-		name      string
-		rel       release.Release
-		rawURL    string
-		usableURL string
-		opts      Options
-		want      bool
+		name       string
+		rel        release.Release
+		rawURL     string
+		usableURL  string
+		animeBytes bool
+		want       bool
 	}{
-		{"public tracker with AB URL hidden when AB off", release.Release{TrackerType: release.TrackerPublic, Tracker: "Nyaa"}, abURL, abURL, Options{}, false},
-		{"public tracker with AB subdomain URL hidden when AB off", release.Release{TrackerType: release.TrackerPublic, Tracker: "Nyaa"}, "https://cdn.animebytes.tv/t/1", "https://cdn.animebytes.tv/t/1", Options{}, false},
-		{"public tracker with AB URL obtainable when AB on", release.Release{TrackerType: release.TrackerPublic, Tracker: "Nyaa"}, abURL, abURL, Options{AnimeBytes: true}, true},
-		{"public tracker with public URL obtainable when AB off", release.Release{TrackerType: release.TrackerPublic, Tracker: "Nyaa"}, "https://nyaa.si/view/1", "https://nyaa.si/view/1", Options{}, true},
-		{"public tracker with malformed raw URL hidden by ABVisible even with a usable URL", release.Release{TrackerType: release.TrackerPublic, Tracker: "Nyaa"}, "https://nyaa.si/\x7f", "https://nyaa.si/view/1", Options{}, false},
-		{"public tracker with foreign-host URL rejected by UsableURL not obtainable", release.Release{TrackerType: release.TrackerPublic, Tracker: "Nyaa"}, "https://evil.example/view/1", "", Options{}, false},
-		{"public tracker with no URL at all not obtainable", release.Release{TrackerType: release.TrackerPublic, Tracker: "Nyaa"}, "", "", Options{}, false},
-		{"AB release with AB URL obtainable when AB on", release.Release{TrackerType: release.TrackerPrivate, Tracker: "AB"}, abURL, abURL, Options{AnimeBytes: true}, true},
-		{"AB release with AB URL hidden when AB off", release.Release{TrackerType: release.TrackerPrivate, Tracker: "AB"}, abURL, abURL, Options{}, false},
+		{"public tracker with AB URL hidden when AB off", release.Release{TrackerType: release.TrackerPublic, Tracker: "Nyaa"}, abURL, abURL, false, false},
+		{"public tracker with AB subdomain URL hidden when AB off", release.Release{TrackerType: release.TrackerPublic, Tracker: "Nyaa"}, "https://cdn.animebytes.tv/t/1", "https://cdn.animebytes.tv/t/1", false, false},
+		{"public tracker with AB URL obtainable when AB on", release.Release{TrackerType: release.TrackerPublic, Tracker: "Nyaa"}, abURL, abURL, true, true},
+		{"public tracker with public URL obtainable when AB off", release.Release{TrackerType: release.TrackerPublic, Tracker: "Nyaa"}, "https://nyaa.si/view/1", "https://nyaa.si/view/1", false, true},
+		{"public tracker with malformed raw URL hidden by ABVisible even with a usable URL", release.Release{TrackerType: release.TrackerPublic, Tracker: "Nyaa"}, "https://nyaa.si/\x7f", "https://nyaa.si/view/1", false, false},
+		{"public tracker with foreign-host URL rejected by UsableURL not obtainable", release.Release{TrackerType: release.TrackerPublic, Tracker: "Nyaa"}, "https://evil.example/view/1", "", false, false},
+		{"public tracker with no URL at all not obtainable", release.Release{TrackerType: release.TrackerPublic, Tracker: "Nyaa"}, "", "", false, false},
+		{"AB release with AB URL obtainable when AB on", release.Release{TrackerType: release.TrackerPrivate, Tracker: "AB"}, abURL, abURL, true, true},
+		{"AB release with AB URL hidden when AB off", release.Release{TrackerType: release.TrackerPrivate, Tracker: "AB"}, abURL, abURL, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := Obtainable(&tt.rel, tt.rawURL, tt.usableURL, tt.opts); got != tt.want {
-				t.Errorf("Obtainable(%q, %q, %q, %+v) = %v, want %v", tt.rel.Tracker, tt.rawURL, tt.usableURL, tt.opts, got, tt.want)
+			if got := Obtainable(&tt.rel, tt.rawURL, tt.usableURL, tt.animeBytes); got != tt.want {
+				t.Errorf("Obtainable(%q, %q, %q, %v) = %v, want %v", tt.rel.Tracker, tt.rawURL, tt.usableURL, tt.animeBytes, got, tt.want)
 			}
 		})
 	}

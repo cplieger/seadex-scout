@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/cplieger/arrapi"
+	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/release"
 )
 
@@ -170,12 +171,12 @@ func (w *Walker) Walk(ctx context.Context) (Snapshot, error) {
 	partial := false
 
 	if w.sonarr != nil {
-		series, skipped, err := w.walkSonarr(ctx)
+		series, failed, err := w.walkSonarr(ctx)
 		if err != nil {
 			return Snapshot{}, fmt.Errorf("walking sonarr: %w", err)
 		}
 		items = append(items, series...)
-		partial = skipped > 0
+		partial = failed > 0
 	}
 	if w.radarr != nil {
 		movies, err := w.walkRadarr(ctx)
@@ -228,12 +229,12 @@ func (w *Walker) walkSonarr(ctx context.Context) ([]Item, int, error) {
 
 	kept := filterSeriesByTags(series, includeIDs, excludeIDs)
 
-	results, skipped := w.fetchEpisodeItems(ctx, kept)
+	results, failed := w.fetchEpisodeItems(ctx, kept)
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
-	if skipped >= episodeFailureBudget {
-		return nil, 0, fmt.Errorf("sonarr episode fetches: %d series failed, hitting the walk failure budget of %d", skipped, episodeFailureBudget)
+	if failed >= episodeFailureBudget {
+		return nil, 0, fmt.Errorf("sonarr episode fetches: %d series failed, hitting the walk failure budget of %d", failed, episodeFailureBudget)
 	}
 	// Sub-budget total failure: every kept series' episode fetch failed. The
 	// budget above is an absolute count a library with fewer kept series can
@@ -243,8 +244,8 @@ func (w *Walker) walkSonarr(ctx context.Context) ([]Item, int, error) {
 	// library size (a restart or config fix could recover it, the app's
 	// unhealthy semantic). The ctx check above keeps a shutdown from
 	// masquerading as a total failure.
-	if len(kept) > 0 && skipped == len(kept) {
-		return nil, 0, fmt.Errorf("sonarr episode fetches: all %d kept series failed", skipped)
+	if len(kept) > 0 && failed == len(kept) {
+		return nil, 0, fmt.Errorf("sonarr episode fetches: all %d kept series failed", failed)
 	}
 	items := make([]Item, 0, len(results))
 	for _, item := range results {
@@ -252,11 +253,14 @@ func (w *Walker) walkSonarr(ctx context.Context) ([]Item, int, error) {
 			items = append(items, *item)
 		}
 	}
-	if skipped > 0 {
-		w.log.Warn("sonarr series skipped after episode-fetch failures; snapshot is partial",
-			"skipped", skipped, "kept", len(kept))
+	if failed > 0 {
+		// The attr keys ("skipped", "kept") and the "snapshot is partial"
+		// message substring are pinned by the library tests and Loki queries;
+		// only the misleading "series skipped" prefix changes.
+		w.log.Warn("sonarr episode fetches failed; failed series kept as placeholders; snapshot is partial",
+			"skipped", failed, "kept", len(kept))
 	}
-	return items, skipped, nil
+	return items, failed, nil
 }
 
 // fetchEpisodeItems runs the bounded episode-fetch fan-out over the kept
@@ -314,7 +318,7 @@ func (w *Walker) fetchSeriesItem(ctx context.Context, s *arrapi.Series) (*Item, 
 		if ctx.Err() != nil {
 			return nil, false
 		}
-		w.log.Warn("skipping series: episode fetch failed", "series", s.Title, "id", s.ID, "error", err)
+		w.log.Warn("skipping series: episode fetch failed", "series", runesafe.Sanitize(s.Title), "id", s.ID, "error", err)
 		// seriesItem with no files yields the identity fields and no file
 		// data - exactly the Failed placeholder shape.
 		item := w.seriesItem(s, nil)

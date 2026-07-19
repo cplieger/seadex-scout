@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -423,5 +424,110 @@ func TestHandlerRoutesTorznabEndpoint(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/other?apikey=k", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("handler /other = %d, want 404 (no tracker scope)", rec.Code)
+	}
+}
+
+// TestServeThrottlesFailedAuth pins the failed-auth throttle: past the burst
+// of 10, rapid bad-apikey requests get 429 (no per-attempt log line), while a
+// correct key is never throttled - so a LAN client cannot brute-force
+// feed_api_key at wire speed or flood the slog stream, and the arrs' happy
+// path is untouched.
+func TestServeThrottlesFailedAuth(t *testing.T) {
+	ix := New(&Config{APIKey: "k"}, Deps{}, "")
+	for i := 1; i <= 10; i++ {
+		rec := httptest.NewRecorder()
+		ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?apikey=wrong", nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("bad-key request %d status = %d, want %d (inside burst)", i, rec.Code, http.StatusUnauthorized)
+		}
+	}
+	rec := httptest.NewRecorder()
+	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?apikey=wrong", nil))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("bad-key request past burst status = %d, want %d", rec.Code, http.StatusTooManyRequests)
+	}
+	rec = httptest.NewRecorder()
+	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=k", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("good-key request during throttle status = %d, want %d (correct callers are never throttled)", rec.Code, http.StatusOK)
+	}
+}
+
+// TestLogParamBoundsAndCleansRequestValues pins the emit-boundary policy on
+// request-controlled log values (URL path, Host, Torznab query params):
+// control characters are flattened to spaces (a newline cannot spoof a log
+// line) and output past 256 bytes is capped on a rune boundary with a "..."
+// marker, so a caller holding the feed key cannot flood a Loki record with a
+// near-megabyte query value; a value at exactly the cap is untouched.
+func TestLogParamBoundsAndCleansRequestValues(t *testing.T) {
+	if got, want := logParam("a\nb"), "a b"; got != want {
+		t.Errorf("logParam(control char) = %q, want %q", got, want)
+	}
+	if got, want := logParam(strings.Repeat("x", 300)), strings.Repeat("x", 256)+"..."; got != want {
+		t.Errorf("logParam(300 bytes) = %d bytes %q..., want 256 bytes plus the truncation marker", len(got), got[:16])
+	}
+	if got := logParam(strings.Repeat("x", 256)); got != strings.Repeat("x", 256) {
+		t.Errorf("logParam(exactly 256 bytes) = %d bytes, want the input unchanged", len(got))
+	}
+}
+
+// TestRunSurfacesBindFailureSynchronously pins Run's documented bind
+// contract: the listener is bound up front, so a port already in use fails
+// Run synchronously with an error naming the address (startIndexer logs it),
+// never a silently dead feed goroutine.
+func TestRunSurfacesBindFailureSynchronously(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupy port: %v", err)
+	}
+	defer ln.Close()
+	orig := listenAddr
+	listenAddr = ln.Addr().String()
+	defer func() { listenAddr = orig }()
+	err = New(&Config{APIKey: "k"}, Deps{}, "").Run(context.Background())
+	if err == nil {
+		t.Fatal("Run on an occupied port returned nil, want a bind error")
+	}
+	if !strings.Contains(err.Error(), "indexer listen on") {
+		t.Errorf("Run error = %v, want it wrapped as a listen failure naming the address", err)
+	}
+}
+
+// TestRunServesAndShutsDownGracefully pins Run's lifecycle: it binds, logs
+// the listening line, blocks until the shared daemon context is cancelled,
+// then shuts down gracefully returning nil and logging shutdown-complete -
+// the contract startIndexer's goroutine and the daemon's shutdown wait rely
+// on. The capture recorder is mutex-guarded, so polling it while Run's
+// goroutine logs is race-safe; both waits are deadline-bounded.
+func TestRunServesAndShutsDownGracefully(t *testing.T) {
+	orig := listenAddr
+	listenAddr = "127.0.0.1:0"
+	defer func() { listenAddr = orig }()
+	log, rec := capture.New()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- New(&Config{APIKey: "k"}, Deps{Logger: log}, "").Run(ctx) }()
+	deadline := time.After(10 * time.Second)
+	for !rec.Contains("seadex-scout indexer listening") {
+		select {
+		case err := <-done:
+			t.Fatalf("Run exited before serving: %v", err)
+		case <-deadline:
+			t.Fatal("indexer never logged the listening line")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned %v on graceful shutdown, want nil", err)
+		}
+	case <-deadline:
+		t.Fatal("Run did not return after context cancellation")
+	}
+	if !rec.Contains("indexer shutdown complete") {
+		t.Errorf("shutdown-complete line not logged; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }

@@ -120,8 +120,7 @@ func (c *curation) acceptScopedKeys(scope string, urls []string, accept func(can
 		if k == "" {
 			continue
 		}
-		keyScope, _, found := strings.Cut(k, ":")
-		if !found || keyScope != scope {
+		if scopeOfKey(k) != scope {
 			return identity, false
 		}
 		if identity != "" && k != identity {
@@ -453,13 +452,16 @@ func filterByCats(items []item, cats map[int]bool) []item {
 	return out
 }
 
-// categoryMatch reports whether an item's categories satisfy the requested set.
+// categoryMatch reports whether an item's categories satisfy the requested
+// set: an item category matches when requested exactly or by its Torznab
+// parent category (the multiple-of-1000 floor, e.g. anime 5070's parent is TV
+// 5000) - generalizing the previous anime->TV special case.
 func categoryMatch(itemCats []int, want map[int]bool) bool {
 	if len(itemCats) == 0 {
 		return true
 	}
 	for _, c := range itemCats {
-		if want[c] || (c == catAnime && want[catTV]) {
+		if want[c] || (c >= 1000 && want[c-c%1000]) {
 			return true
 		}
 	}
@@ -470,7 +472,7 @@ func categoryMatch(itemCats []int, want map[int]bool) bool {
 func parseCats(s string) map[int]bool {
 	out := make(map[int]bool)
 	for part := range strings.SplitSeq(s, ",") {
-		if n, err := strconv.Atoi(strings.TrimSpace(part)); err == nil && n != 0 {
+		if n, err := strconv.Atoi(strings.TrimSpace(part)); err == nil && n > 0 {
 			out[n] = true
 		}
 	}
