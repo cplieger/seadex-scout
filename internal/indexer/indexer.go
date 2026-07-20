@@ -129,10 +129,14 @@ type Indexer struct {
 	// that replacement must be retried, not skipped. Guarded by reloadMu
 	// (set/cleared only inside reload).
 	failedFile os.FileInfo
-	log        *slog.Logger
-	cfg        Config
-	path       string
-	snap       snapshot
+	// log, cfg, and path are set once in New and read per request without a
+	// lock: cfg is a by-value copy and none of the three is ever written
+	// after construction (the same immutable-after-New contract as
+	// upstreams and verifyKey below).
+	log  *slog.Logger
+	cfg  Config
+	path string
+	snap snapshot
 	// authFailLast is the failed-auth token bucket's last-refill instant, part
 	// of the bucket guarded by authFailMu below (see allowAuthFailure).
 	authFailLast time.Time
@@ -167,9 +171,13 @@ type Indexer struct {
 	// reloadDegraded records that reloads are failing (a stat error or a
 	// read failure of an unchanged-identity file), so the WARN fires once
 	// per degradation onset instead of on every request; cleared with one
-	// INFO recovery line on the next successful snapshot read. The retry
-	// itself is NOT suppressed (both faults can recover without an mtime
-	// change). Guarded by reloadMu (set/cleared only inside reload).
+	// INFO recovery line on the next successful snapshot read, and cleared
+	// SILENTLY when the file goes absent (statSnapshot's ENOENT arm - the
+	// missing state has its own once-per-disappearance WARN) or when the
+	// stat lands on the memoized malformed file (skipMemoizedMalformed -
+	// access recovered, but nothing was reloaded). The retry itself is NOT
+	// suppressed (both faults can recover without an mtime change). Guarded
+	// by reloadMu (set/cleared only inside reload).
 	reloadDegraded bool
 	// snapFailed records that snapshot loading failed BEFORE any snapshot was
 	// installed: a non-ENOENT stat or read fault, or a malformed or

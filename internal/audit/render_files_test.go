@@ -394,3 +394,49 @@ func TestReportPairStemSkipsMultipleOccupiedSuffixes(t *testing.T) {
 		t.Errorf("reportPairStem() = %q, want %q", got, want)
 	}
 }
+
+// pathExistsCancelCtx is a context whose Err flips to context.Canceled once
+// the watched path exists, deterministically landing a cancellation after the
+// JSON half commits (atomicfile's own ctx polls all happen before the final
+// rename, so the JSON write itself succeeds) but before the Markdown half
+// renders. The checkpoints poll Err via interrupted and never select on
+// Done; context.Cause falls back to Err for a non-cancelCtx context.
+type pathExistsCancelCtx struct {
+	context.Context
+	path string
+}
+
+func (c *pathExistsCancelCtx) Err() error {
+	if _, err := os.Stat(c.path); err == nil {
+		return context.Canceled
+	}
+	return nil
+}
+
+// TestWriteFilesCanceledAfterJSONSkipsMarkdown pins the markdown-render
+// cancellation checkpoint (the one mid-pipeline stage no existing test
+// reaches): a cancellation observed after the JSON half is committed stops
+// the pipeline with the markdown-render stage error, leaving the
+// machine-readable .json on disk and never writing the .md - the
+// cancellation arm of the deliberate json-then-md ordering.
+func TestWriteFilesCanceledAfterJSONSkipsMarkdown(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "report-2026-07-11T15-04-05Z")
+	ctx := &pathExistsCancelCtx{Context: context.Background(), path: base + ".json"}
+	r := &Report{GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC), Totals: map[string]int{}}
+
+	err := r.WriteFiles(ctx, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("WriteFiles error = %v, want context.Canceled", err)
+	}
+	if !strings.Contains(err.Error(), "report markdown render interrupted") {
+		t.Errorf("error = %q, want the markdown-render stage context", err)
+	}
+	if _, statErr := os.Stat(base + ".json"); statErr != nil {
+		t.Errorf("JSON half must be committed before the cancellation checkpoint fires: %v", statErr)
+	}
+	if _, statErr := os.Stat(base + ".md"); statErr == nil {
+		t.Error("markdown half must not be written after a post-JSON cancellation")
+	}
+}

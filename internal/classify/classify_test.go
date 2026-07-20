@@ -284,3 +284,18 @@ func TestDefinitelyABAdapterFailsOpenOnRawEvidence(t *testing.T) {
 		})
 	}
 }
+
+// TestDivergedIncomplete pins the shared diverged-downgrade rule at its
+// defining site, mirroring TestFallbackPrecedence: an incomplete entry
+// downgrades a diverged comparison to the incomplete vocabulary, a complete
+// entry does not. Cross-package callers (compare, audit.rowQualifier) pin the
+// mapped vocabularies, but the one shared rule both map from had no test in
+// its own package.
+func TestDivergedIncomplete(t *testing.T) {
+	if !DivergedIncomplete(&seadex.Entry{Incomplete: true}) {
+		t.Error("DivergedIncomplete(incomplete entry) = false, want true")
+	}
+	if DivergedIncomplete(&seadex.Entry{}) {
+		t.Error("DivergedIncomplete(complete entry) = true, want false")
+	}
+}

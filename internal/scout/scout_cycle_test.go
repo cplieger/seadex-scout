@@ -1266,20 +1266,7 @@ func TestCycleStaleMapStillComparesAndRebuildsFeed(t *testing.T) {
 	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "mapping-stale" {
 		t.Errorf("degraded reasons = %v, want [mapping-stale]", reasons)
 	}
-	staleAttr := false
-	for _, r := range recorder.Records() {
-		if r.Message != "mapping degraded" {
-			continue
-		}
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "stale_reason" {
-				staleAttr = true
-				return false
-			}
-			return true
-		})
-	}
-	if !staleAttr {
+	if _, ok := recordAttr(recorder, "mapping degraded", "stale_reason"); !ok {
 		t.Error("\"mapping degraded\" WARN carries no stale_reason attribute; StaleMapError.LogAttrs was not appended")
 	}
 }
@@ -1743,5 +1730,65 @@ func TestCycleShutdownDuringMappingLoadWarnsShutdownNotFribb(t *testing.T) {
 	}
 	if _, ok := store.st.Findings["prior"]; !ok {
 		t.Errorf("prior finding not preserved on shutdown mid-load: %+v", store.st.Findings)
+	}
+}
+
+// TestCycleCompletionLineCarriesAniListCycleDeltas pins the per-cycle AniList
+// counter arithmetic on the completion line: anilist_calls/anilist_waits are
+// the client's cumulative counters, and their _cycle twins must be the delta
+// against the cycle-start snapshot - the pair the documented "cycle complete"
+// Loki line carries. A scripted AniListStats closure (the same seam build.go
+// wires the real client's Stats into) returns different values on the
+// cycle-start and completion snapshots, so a broken subtraction, a swapped
+// operand, or a completion line reading the start snapshot is directly
+// observable.
+func TestCycleCompletionLineCarriesAniListCycleDeltas(t *testing.T) {
+	logger, recorder := capture.New()
+	store := &fakeStore{st: state.State{
+		Mapping:   mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+		Baselined: true,
+	}}
+	sonarr := &fakeSonarr{
+		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+		},
+	}
+	var statsCalls int
+	stats := func() (int64, int64) {
+		statsCalls++
+		if statsCalls == 1 {
+			return 10, 1 // the cycle-start snapshot
+		}
+		return 60, 3 // the completion-line snapshot
+	}
+	s := New(&Deps{
+		Logger:       logger,
+		Store:        store,
+		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping:      fakeMapping{},
+		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
+		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
+		Comparer:     compare.NewComparer(compare.Config{}),
+		Reporter:     report.NewReporter(scoutTestLogger()),
+		AniListStats: stats,
+	})
+
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("Cycle healthy=false, want true on a successful steady-state cycle")
+	}
+	if statsCalls != 2 {
+		t.Fatalf("AniListStats snapshots = %d, want 2 (cycle start and completion line)", statsCalls)
+	}
+	wantAttrs := map[string]string{
+		"anilist_calls":       "60",
+		"anilist_calls_cycle": "50",
+		"anilist_waits":       "3",
+		"anilist_waits_cycle": "2",
+	}
+	for key, want := range wantAttrs {
+		if got, ok := recordAttr(recorder, "cycle complete", key); !ok || got != want {
+			t.Errorf("'cycle complete' %s = %q (found=%t), want %q", key, got, ok, want)
+		}
 	}
 }

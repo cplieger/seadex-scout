@@ -1200,3 +1200,31 @@ func TestHarvestHTTPStatusFailureScoping(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveHarvestKeyPartialSignals pins the partial-identity resolution
+// table of resolveHarvestKey: one tracker page URL (guid OR comments) alone
+// resolves, agreeing URL+hash resolve, an unknown id or a signal-less result
+// resolves nothing - the accepting side of the fail-closed contract the
+// contradictory-identity tests pin from the rejecting side.
+func TestResolveHarvestKeyPartialSignals(t *testing.T) {
+	const hash = "143ed15e5e3df072ae91adaeb149973a887590dd"
+	index := map[string]string{"nyaa:42": "nyaa:42", hash: "nyaa:42"}
+	tests := []struct {
+		name string
+		it   item
+		want string
+	}{
+		{"guid alone resolves when comments URL is foreign", item{InfoURL: "https://mirror.example/x", GUID: "https://nyaa.si/view/42"}, "nyaa:42"},
+		{"comments alone resolves when guid URL is foreign", item{InfoURL: "https://nyaa.si/view/42", GUID: "https://mirror.example/x"}, "nyaa:42"},
+		{"url and hash agreeing on one release resolve it", item{InfoURL: "https://nyaa.si/view/42", GUID: "https://nyaa.si/view/42", InfoHash: hash}, "nyaa:42"},
+		{"unknown id resolves nothing", item{InfoURL: "https://nyaa.si/view/999", GUID: "https://nyaa.si/view/999"}, ""},
+		{"no identity signals resolve nothing", item{InfoURL: "https://mirror.example/x", GUID: "https://mirror.example/x"}, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveHarvestKey(&tc.it, index); got != tc.want {
+				t.Errorf("resolveHarvestKey(%+v) = %q, want %q", tc.it, got, tc.want)
+			}
+		})
+	}
+}

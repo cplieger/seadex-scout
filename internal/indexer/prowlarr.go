@@ -19,6 +19,12 @@ const (
 	// upstreamMaxAttempts / upstreamBaseDelay bound the per-query retry.
 	upstreamMaxAttempts = 3
 	upstreamBaseDelay   = time.Second
+	// UpstreamAttemptTimeout is the per-attempt HTTP client timeout for a
+	// Prowlarr Torznab query. Exported so the composition root (build.go)
+	// wires the shared Prowlarr client from the same constant server.go's
+	// writeTimeout is derived from - one home for the number keeps the
+	// write deadline sized above the whole retry tree by construction.
+	UpstreamAttemptTimeout = 60 * time.Second
 	// upstreamMaxBytes bounds a single Torznab response before decode.
 	upstreamMaxBytes = 16 << 20
 )
@@ -36,7 +42,11 @@ type upstream struct {
 
 // search queries the Torznab endpoint with the forwarded params and returns the
 // parsed items. The Prowlarr API key is sent as the X-Api-Key header (not a
-// query param), so it never appears in a logged request URL.
+// query param), so it never appears in a logged request URL. It returns the
+// filtered items plus the RAW parsed-item count of the page (before
+// filterDownloadURLs), so the harvest's paging exit judges page fullness on
+// what the upstream actually returned, not on what survived the origin
+// filter.
 //
 // The retry boundary encloses the WHOLE attempt - transport, status, bounded
 // body read, AND the Torznab decode - so a transient truncated or malformed
@@ -47,10 +57,10 @@ type upstream struct {
 // explosion. A 429's capped Retry-After survives as a RetryAfterHint on the
 // transient error, so Do waits the upstream-requested delay
 // instead of its jittered backoff.
-func (u *upstream) search(ctx context.Context, params url.Values) ([]item, error) {
+func (u *upstream) search(ctx context.Context, params url.Values) ([]item, int, error) {
 	parsed, err := url.Parse(u.feed)
 	if err != nil {
-		return nil, errors.New("invalid upstream feed URL")
+		return nil, 0, errors.New("invalid upstream feed URL")
 	}
 	// Merge the Torznab params into RawQuery component-wise: appending to the
 	// raw string would land them after any fragment on the configured
@@ -75,9 +85,9 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, error
 		// falling through to slog.Default().
 		httpx.WithLogger(u.log))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return u.filterDownloadURLs(items), nil
+	return u.filterDownloadURLs(items), len(items), nil
 }
 
 // fetchAndParse performs ONE search attempt: a single bounded HTTP fetch
@@ -120,39 +130,57 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 	}
 	items, err := parseTorznab(body)
 	if err != nil {
-		// A syntactically valid Torznab <error> document (upstreamDocError:
-		// bad credentials, a named indexer failure) is a deliberate
-		// upstream-scoped answer, not a garbled body, so it never carries
-		// the malformedBody marker - after the search fails, the harvest
-		// latches the failed scope instead of treating an upstream-wide
-		// auth/config failure as one show's poison result set. Its
-		// retryability splits on the numeric Torznab code: a deterministic
-		// auth/account (100-199) or request/parameter (200-299) error
-		// cannot recover without a config change, so it returns terminal
-		// and the enclosing Do fails fast; a generic/server-side or
-		// unparseable code stays transient within the bounded budget.
-		if docErr, ok := errors.AsType[*upstreamDocError](err); ok {
-			// The document's code/description are attacker-influenced text
-			// and the request carried the Prowlarr API key: a compromised
-			// upstream could reflect the key into the error message, which
-			// httpx.Do's retry logger and the harvest WARN would then expand
-			// into the log stream (CWE-532). Classify on the ORIGINAL code
-			// first, then redact any reflection of the key from both fields
-			// before the error escapes this function. The fields are RAW
-			// (untruncated) here - upstreamDocError.Error() sanitizes at the
-			// emit boundary - so the exact-substring replacement always sees
-			// the intact key.
-			terminal := terminalTorznabCode(docErr.code)
-			docErr.code = httpx.RedactSecretString(docErr.code, u.apiKey)
-			docErr.description = httpx.RedactSecretString(docErr.description, u.apiKey)
-			if terminal {
-				return nil, docErr
-			}
-			return nil, &transientUpstreamError{err: err}
-		}
-		return nil, &transientUpstreamError{err: err, malformedBody: true}
+		return nil, u.classifyParseError(err)
 	}
 	return items, nil
+}
+
+// classifyParseError maps a parseTorznab failure onto the retry taxonomy.
+// A syntactically valid Torznab <error> document (upstreamDocError:
+// bad credentials, a named indexer failure) is a deliberate
+// upstream-scoped answer, not a garbled body, so it never carries
+// the malformedBody marker - after the search fails, the harvest
+// latches the failed scope instead of treating an upstream-wide
+// auth/config failure as one show's poison result set. Its
+// retryability splits on the numeric Torznab code: a deterministic
+// auth/account (100-199) or request/parameter (200-299) error
+// cannot recover without a config change, so it returns terminal
+// and the enclosing Do fails fast; a generic/server-side or
+// unparseable code stays transient within the bounded budget.
+func (u *upstream) classifyParseError(err error) error {
+	if docErr, ok := errors.AsType[*upstreamDocError](err); ok {
+		// The document's code/description are attacker-influenced text
+		// and the request carried the Prowlarr API key: a compromised
+		// upstream could reflect the key into the error message, which
+		// httpx.Do's retry logger and the harvest WARN would then expand
+		// into the log stream (CWE-532). Classify on the ORIGINAL code
+		// first, then redact any reflection of the key from both fields
+		// before the error escapes this function. The fields are RAW
+		// (untruncated) here - upstreamDocError.Error() sanitizes at the
+		// emit boundary - so the exact-substring replacement always sees
+		// the intact key.
+		terminal := terminalTorznabCode(docErr.code)
+		docErr.code = httpx.RedactSecretString(docErr.code, u.apiKey)
+		docErr.description = httpx.RedactSecretString(docErr.description, u.apiKey)
+		if terminal {
+			return docErr
+		}
+		return &transientUpstreamError{err: err}
+	}
+	if limitErr, ok := errors.AsType[*torznabLimitError](err); ok {
+		// App-controlled message; keep it verbatim.
+		return &transientUpstreamError{err: limitErr, malformedBody: true}
+	}
+	// A generic decode failure can echo attacker-controlled body text
+	// verbatim (encoding/xml returns raw strconv errors quoting the full
+	// unparsed <size>/length value, up to the 16 MiB wire cap), and the
+	// request carried the Prowlarr API key: redact any reflection of the
+	// key FIRST (the exact-substring replacement must see intact text),
+	// then bound the text, before the error reaches httpx.Do's retry
+	// logger or fetchRaw's WARN - the same emit-boundary policy the
+	// upstreamDocError path applies.
+	msg := sanitizeUpstreamText(httpx.RedactSecretString(err.Error(), u.apiKey))
+	return &transientUpstreamError{err: errors.New(msg), malformedBody: true}
 }
 
 // terminalTorznabCode reports whether a Torznab <error> document's code names

@@ -246,7 +246,7 @@ func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGrou
 		budget--
 		stats.queries++
 		page := harvestPage(params, offset)
-		results, err := u.search(ctx, page)
+		results, raw, err := u.search(ctx, page)
 		if err != nil {
 			if ctx.Err() != nil {
 				return budget, harvestScopeFailed
@@ -254,7 +254,7 @@ func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGrou
 			return budget, w.classifyHarvestError(err, u, g.alID)
 		}
 		stats.matched += matchHarvest(results, g.scope, index, titles)
-		if !groupPending(g, titles) || len(results) < harvestPageSize {
+		if !groupPending(g, titles) || raw < harvestPageSize {
 			return budget, harvestOK
 		}
 	}

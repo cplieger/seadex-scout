@@ -373,8 +373,9 @@ func (s *Store) quarantine() {
 }
 
 // errStateTooLarge marks a Save encoding that would exceed maxStateBytes. It
-// is returned by boundedWriter's Write and detected by Save (errors.Is) to
-// produce the size-cap rejection while the previous state file stays intact.
+// is returned by boundedWriter's Write and detected by encodeState
+// (errors.Is) to produce the size-cap rejection while the previous state
+// file stays intact.
 var errStateTooLarge = errors.New("state: encoded state exceeds size limit")
 
 // boundedWriter passes writes through to w while enforcing limit, so Save can

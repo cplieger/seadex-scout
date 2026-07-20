@@ -26,6 +26,12 @@ import (
 // Load's newer-schema contract: a payload with any invalid duplicate
 // occurrence is corruption, never newer-schema state.
 func newerSchemaState(data []byte) bool {
+	// Load's bounded read rejects an over-cap file before the version
+	// discriminator can be inspected, so it is quarantined as foreign/corrupt
+	// regardless of a valid newer-schema stamp (see the SchemaVersion doc).
+	if len(data) > maxStateBytes {
+		return false
+	}
 	// Load quarantines invalid UTF-8 before the newer-schema check (Save
 	// only emits valid UTF-8), so such a payload is never newer-schema
 	// state regardless of its version stamp.

@@ -131,8 +131,9 @@ func TestMatchTitleFallbackOnIdlessRecord(t *testing.T) {
 	}
 }
 
-// countingAniList records how many times Fetch is called (always returning
-// not-found), to prove which match paths consult AniList.
+// countingAniList counts every AniList request - single Fetch AND batched
+// FetchMany share the one counter (always answering not-found), so calls == 0
+// proves a path spends no AniList traffic of either kind.
 type countingAniList struct{ calls int }
 
 func (c *countingAniList) Fetch(_ context.Context, _ int) (anilist.Media, error) {

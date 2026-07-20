@@ -232,18 +232,19 @@ func buildIndex(records []Record) *Index {
 }
 
 // cacheUsable reports whether a cached record set is usable as an effective
-// AniList-keyed mapping: after deduplication it must build a non-empty index
-// (buildIndex drops zero AniList IDs, so a JSON-valid state cache such as
-// records:[{}] is not a usable map) and meet the same conservative 1%
-// arr-identifier coverage floor a newly accepted refresh must meet
-// (validateRefreshedRecords), without the previous-relative type and shrink
-// checks. Every cache-state gate (the fresh-cache fast path, staleOrFail,
-// reuseCachedRecords, conditionalGet, and acceptRefresh's shrink guard) keys
-// on this predicate so "has cached bytes" can never diverge from "has a
-// mapping the consumers can use".
+// AniList-keyed mapping: after deduplication (which drops zero AniList IDs,
+// so a JSON-valid state cache such as records:[{}] is not a usable map - and
+// whose output indexes bijectively, pinned by
+// TestDeduplicateRecordsIndexOracle) the effective set must be non-empty and
+// meet the same conservative 1% arr-identifier coverage floor a newly
+// accepted refresh must meet (validateRefreshedRecords), without the
+// previous-relative type and shrink checks. Every cache-state gate (the
+// fresh-cache fast path, staleOrFail, reuseCachedRecords, conditionalGet, and
+// acceptRefresh's shrink guard) keys on this predicate so "has cached bytes"
+// can never diverge from "has a mapping the consumers can use".
 func cacheUsable(records []Record) bool {
 	records = deduplicateRecords(records)
-	if buildIndex(records).Len() == 0 {
+	if len(records) == 0 {
 		return false
 	}
 	return arrIdentifierCount(records) >= coverageFloor(len(records))
@@ -914,9 +915,10 @@ func collectUnknownKeys(raw json.RawMessage, seen map[string]struct{}, unknown [
 }
 
 // applyRecord decodes one raw override record and folds it into the set:
-// unknown keys are collected, Type is normalized, IMDb ids are trimmed to the
-// same canonical form the Fribb decoder produces (so exact-key lookups agree
-// with HasArrIdentifier's trimmed usability view), a zero-AniList-ID record is
+// unknown keys are collected, Type is normalized, IMDb ids are trimmed and
+// TMDB movie ids reduced to positives - the same canonical forms the Fribb
+// decoder produces (so exact-key lookups agree with HasArrIdentifier's
+// trimmed usability view), a zero-AniList-ID record is
 // counted as skipped, and a duplicate ID replaces its earlier record
 // (last-record-wins) while being reported once in set.duplicates.
 func (set *overrideSet) applyRecord(raw json.RawMessage, seenKeys map[string]struct{}, position map[int]int, reported map[int]struct{}) error {
@@ -927,6 +929,7 @@ func (set *overrideSet) applyRecord(raw json.RawMessage, seenKeys map[string]str
 	set.unknown = collectUnknownKeys(raw, seenKeys, set.unknown)
 	record.Type = NormalizeType(record.Type)
 	record.IMDbIDs = trimmed(record.IMDbIDs)
+	record.TmdbMovies = positiveInts(record.TmdbMovies)
 	if record.AniListID == 0 {
 		set.skipped++
 		return nil
@@ -943,6 +946,21 @@ func (set *overrideSet) applyRecord(raw json.RawMessage, seenKeys map[string]str
 	position[record.AniListID] = len(set.records)
 	set.records = append(set.records, record)
 	return nil
+}
+
+// positiveInts returns in with non-positive entries dropped, matching the
+// canonical TmdbMovies form the Fribb decoders guarantee (flexInt zeroes
+// negatives and non-numerics, intSlice drops zeros), so an override record
+// and a Fribb record agree on the exact TMDB keys downstream lookups and the
+// report's reverse catalogue index.
+func positiveInts(in []int) []int {
+	var out []int
+	for _, v := range in {
+		if v > 0 {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // parseOverrides decodes the overrides file - a JSON array of Record objects,

@@ -3,7 +3,6 @@ package scout
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -244,20 +243,7 @@ func TestReportStaleMapWarnsAndStillAudits(t *testing.T) {
 	if n := recorder.CountExact("report: mapping degraded"); n != 1 {
 		t.Errorf("'report: mapping degraded' WARN count = %d, want 1", n)
 	}
-	staleAttr := false
-	for _, r := range recorder.Records() {
-		if r.Message != "report: mapping degraded" {
-			continue
-		}
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "stale_reason" {
-				staleAttr = true
-				return false
-			}
-			return true
-		})
-	}
-	if !staleAttr {
+	if _, ok := recordAttr(recorder, "report: mapping degraded", "stale_reason"); !ok {
 		t.Error("\"report: mapping degraded\" WARN carries no stale_reason attribute; StaleMapError.LogAttrs was not appended")
 	}
 }

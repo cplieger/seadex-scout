@@ -509,3 +509,35 @@ func TestClassifyMultiNameEvidence(t *testing.T) {
 		t.Errorf("Codec = %q, want x265 from a later Names element", got.Codec)
 	}
 }
+
+// TestClassifyEarlierNameEvidenceRetained pins the evidence accumulator's
+// retention contract: markers observed in an EARLIER Names element survive
+// marker-less later elements (each observe call ORs into the accumulated
+// flags, never overwrites them). TestClassifyMultiNameEvidence covers only
+// the later-element pickup direction, so a regression that re-evaluates each
+// flag per element (last element wins) passes every existing test; this
+// covers the retention direction.
+func TestClassifyEarlierNameEvidenceRetained(t *testing.T) {
+	got := Classify(&Input{Names: []string{"Show S01E01 1080p BDRemux x265", "Show S01E02", "Show S01E03"}})
+	if got.Resolution != "1080p" {
+		t.Errorf("Resolution = %q, want 1080p retained from the first Names element", got.Resolution)
+	}
+	if got.Kind != KindRemux {
+		t.Errorf("Kind = %q, want %q retained from the first Names element", got.Kind, KindRemux)
+	}
+	if got.Codec != "x265" {
+		t.Errorf("Codec = %q, want x265 retained from the first Names element", got.Codec)
+	}
+}
+
+// TestClassifyFirstResolutionWinsAcrossNames pins the documented
+// first-resolution-in-observation-order contract (see the evidence struct
+// doc): when two Names elements carry different resolutions, the first
+// observed one wins - observe only fills an empty resolution, never
+// overwrites an accumulated one.
+func TestClassifyFirstResolutionWinsAcrossNames(t *testing.T) {
+	got := Classify(&Input{Names: []string{"Show S01E01 720p", "Show S01E02 1080p"}})
+	if got.Resolution != "720p" {
+		t.Errorf("Resolution = %q, want 720p (first observed resolution wins)", got.Resolution)
+	}
+}

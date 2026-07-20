@@ -229,6 +229,51 @@ func TestRebuildPersistsABItemsGUIDOnly(t *testing.T) {
 	}
 }
 
+// TestRebuildPersistScrubsABScopedItemCarriedInNyaaFeed pins the key-scoped
+// arm of the passkey-at-rest invariant: the wholesale strip runs per FEED
+// (snap.ABFeed), but the secret is attached per item by KEY scope - an
+// ab:-keyed item that a legacy or corrupted snapshot placed in nyaa_feed is
+// re-rendered by carryJournal with a passkey-bearing AB download link and
+// appended to the nyaa slice, where the AB-feed strip never looks. The
+// persist-time scrub must catch it by key scope, so the persisted file can
+// never hold the passkey regardless of which feed slice the item rode in on.
+func TestRebuildPersistScrubsABScopedItemCarriedInNyaaFeed(t *testing.T) {
+	const passkey = "SUPERSECRETPASSKEY123"
+	path := filepath.Join(t.TempDir(), "feed.json")
+	first := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{"ab:1167293": true},
+		// The ab:-scoped item sits in the WRONG feed slice (nyaa_feed), the
+		// scope/feed mismatch loadPrevious does not validate.
+		NyaaFeed: []item{{
+			Title: "Frieren - S01 (BD Remux 1080p) [PMR]",
+			GUID:  "https://animebytes.tv/torrents.php?id=86576&torrentid=1167293",
+			Key:   "ab:1167293", AniListID: 154587,
+			FirstSeen: first, PubDate: first,
+		}},
+	})
+	entries := []seadex.Entry{{
+		AniListID: 154587,
+		Torrents: []seadex.Torrent{{
+			Tracker: "AB", URL: "/torrents.php?id=86576&torrentid=1167293", IsBest: true,
+			Files: []seadex.File{{Length: 1, Name: "Frieren - S01E01 (BD Remux 1080p) [PMR].mkv"}},
+		}},
+	}}
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: passkey, ABTorznabURL: "http://prowlarr/2/api"}}, Deps{})
+	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read persisted snapshot: %v", err)
+	}
+	if n := bytes.Count(data, []byte(passkey)); n != 0 {
+		t.Errorf("persisted feed.json contains the AB passkey %d times, want 0 (ab:-scoped item in nyaa_feed must be scrubbed at persist)", n)
+	}
+}
+
 // TestRebuildReportsWriteError pins the write-failure path: when the snapshot
 // cannot be persisted (here the target's parent is a regular file, a root-safe
 // ENOTDIR injection - which the previous-snapshot read classifies as absent,
@@ -586,5 +631,73 @@ func TestRebuildDropsCarriedJournalItemBecomingWarned(t *testing.T) {
 	}
 	if warnedDropped != 1 {
 		t.Errorf("snapshot log line journal_warned_dropped = %d, want 1; log output:\n%s", warnedDropped, strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestRebuildBaselinesSnapshotMissingCurationMaps pins loadPrevious's
+// structural-validity gate: a previous snapshot that decodes cleanly and even
+// carries a seen ledger, but is missing the required by_hash/by_key curation
+// maps (a hand-edited or corrupted file - the writer always persists both,
+// even empty), must warn and re-baseline rather than trust the ledger: the
+// seen set rebuilds from the current catalogue and the journal starts empty.
+func TestRebuildBaselinesSnapshotMissingCurationMaps(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	if err := os.WriteFile(path, []byte(`{"seen":{"nyaa:41":true},"nyaa_feed":[],"ab_feed":[]}`), 0o600); err != nil {
+		t.Fatalf("seed mapless snapshot: %v", err)
+	}
+	log, rec := capture.New()
+	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
+	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 0 {
+		t.Errorf("feed = %d items, want 0 (a mapless snapshot must re-baseline, not journal against its stale seen ledger)", len(snap.NyaaFeed))
+	}
+	if !snap.Seen["nyaa:42"] {
+		t.Errorf("seen ledger missing the current catalogue after re-baseline: %v", snap.Seen)
+	}
+	if !rec.Contains("previous feed snapshot malformed; re-baselining the feed journal") {
+		t.Errorf("mapless snapshot not warned as malformed; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestRebuildBaselinesOversizedFeedItem pins the feed-items ingress of the
+// shared persisted-item limits - the journal twin of
+// TestRebuildBaselinesOversizedCachedTitle: a previous snapshot whose maps and
+// titles are bounded but whose persisted journal carries an item past
+// maxPersistedFieldBytes must warn and re-baseline as malformed, never carry
+// the oversized item forward (the server's readSnapshot rejects the same
+// bytes, so trusting them would wedge reader and writer on a poisoned file).
+func TestRebuildBaselinesOversizedFeedItem(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	t0 := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{}, ByKey: map[string]bool{"nyaa:42": true},
+		ByPair: map[string]bool{},
+		Seen:   map[string]bool{"nyaa:42": true},
+		NyaaFeed: []item{{
+			PubDate: t0, FirstSeen: t0, Key: "nyaa:42",
+			Title: strings.Repeat("a", maxPersistedFieldBytes+1),
+			GUID:  "https://nyaa.si/view/42",
+		}},
+	})
+	log, rec := capture.New()
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
+	w.now = func() time.Time { return t0.Add(time.Hour) }
+	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
+	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 0 {
+		t.Errorf("feed = %d items, want 0 (an over-limit journal item must re-baseline, not be carried or re-rendered)", len(snap.NyaaFeed))
+	}
+	if !snap.Seen["nyaa:42"] {
+		t.Errorf("seen ledger missing the curated identity after re-baseline: %v", snap.Seen)
+	}
+	if !rec.Contains("previous feed snapshot malformed; re-baselining the feed journal") {
+		t.Errorf("over-limit journal item not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }

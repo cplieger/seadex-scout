@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
@@ -994,4 +995,52 @@ func TestStoreLoadReapsStaleTempsAndReadOnlySkips(t *testing.T) {
 			t.Errorf("stale temp after read-only Load: stat err = %v, want left in place (the report flow is documented read-only on the state dir)", err)
 		}
 	})
+}
+
+// TestStoreLoadStaleTempCleanupFailureWarnsAndContinues pins Load's
+// degraded-maintenance contract: when the stale-temp sweep cannot read the
+// state directory (the "directory" is a regular file, a root-safe injection),
+// the failure is logged at Warn exactly once and Load still proceeds to the
+// read (surfacing the read error), never aborting on the maintenance failure.
+func TestStoreLoadStaleTempCleanupFailureWarnsAndContinues(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("create blocker file: %v", err)
+	}
+	logger, recorder := capture.New()
+	_, err := NewStore(filepath.Join(blocker, "state.json"), logger).Load(context.Background())
+	if err == nil {
+		t.Fatal("Load with an unreadable state dir returned nil error, want read error")
+	}
+	if !strings.Contains(err.Error(), "state: read") {
+		t.Errorf("error = %q, want 'state: read' context (cleanup failure must not become the returned error)", err.Error())
+	}
+	if got := recorder.CountExact("could not clean stale atomic-write temp files"); got != 1 {
+		t.Errorf("cleanup-failure WARN count = %d, want 1", got)
+	}
+}
+
+// TestEncodeStateWriteErrorWrapped pins encodeState's generic (non-size)
+// error path: an I/O failure from the pending temp (here the fd is already
+// closed via Cleanup, standing in for a disk error) surfaces wrapped as
+// "state: encode <path>", distinct from the over-cap rejection message.
+func TestEncodeStateWriteErrorWrapped(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	pf, err := atomicfile.NewPendingFile(context.Background(), path)
+	if err != nil {
+		t.Fatalf("NewPendingFile: %v", err)
+	}
+	if err := pf.Cleanup(); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	encErr := encodeState(pf, &State{Baselined: true}, path)
+	if encErr == nil {
+		t.Fatal("encodeState on a closed pending temp returned nil error, want write failure")
+	}
+	if !strings.Contains(encErr.Error(), "state: encode") {
+		t.Errorf("error = %q, want the generic 'state: encode' wrap", encErr.Error())
+	}
+	if errors.Is(encErr, errStateTooLarge) {
+		t.Errorf("error = %v classified as the over-cap rejection, want the generic I/O wrap", encErr)
+	}
 }

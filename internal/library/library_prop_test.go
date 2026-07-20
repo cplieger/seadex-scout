@@ -32,16 +32,22 @@ func genPropItem(t *rapid.T) Item {
 	}
 }
 
-// genPropSnapshot generates a snapshot of 0-8 items, setting Partial whenever
-// a Sonarr Failed placeholder was generated, so generated snapshots honor the
-// producer invariant (Walk publishes Partial=true exactly when a failed
-// series' placeholder is present in Items).
+// genPropSnapshot generates a snapshot of 0-8 items with unique arr:id keys
+// (Walk publishes at most one item per series/movie), setting Partial
+// whenever a Sonarr Failed placeholder was generated, so generated snapshots
+// honor the producer invariants (one item per key; Partial=true exactly when
+// a failed series' placeholder is present in Items).
 func genPropSnapshot(t *rapid.T, label string) *Snapshot {
 	n := rapid.IntRange(0, 8).Draw(t, label+"N")
 	items := make([]Item, 0, n)
+	seen := make(map[string]struct{}, n)
 	partial := false
 	for range n {
 		it := genPropItem(t)
+		if _, dup := seen[it.Key()]; dup {
+			continue
+		}
+		seen[it.Key()] = struct{}{}
 		partial = partial || it.Failed
 		items = append(items, it)
 	}

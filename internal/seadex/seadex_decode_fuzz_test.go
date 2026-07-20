@@ -54,13 +54,22 @@ func FuzzDecodePage(f *testing.F) {
 		`{"items":[{"expand":{"trs":[{"files":[`,
 		`{"items":[{"expand":{"trs":[{"files":[5]}]}}]}`,
 		`{"items":[{"expand":{"trs":[{"tags":[5]}]}}]}`,
+		`{"items":[{"alID":1}],"items":null}`,
+		`{"items":[{"expand":{"trs":[{"files":[{"name":"a","length":1}],"files":null,"tags":["x"],"tags":null}]}}]}`,
 		`{"unknown":{"deep":[`,
+		`{"`,
+		`{"items":[{"`,
+		`{"items":[{"expand":{"`,
+		`{"items":[{"expand":{"trs":[{"`,
+		`{"items":[{"expand":{"unknown":1}}]}`,
+		`{"items":[{"expand":{"trs":[{"unknown":1}]}}]}`,
+		`{} []`,
 	}
 	for _, s := range seeds {
 		f.Add([]byte(s))
 	}
 	f.Fuzz(func(t *testing.T, body []byte) {
-		got, _, gotErr := decodePage(body, maxPageElements)
+		got, elems, gotErr := decodePage(body, maxPageElements)
 		var want pbList
 		wantErr := json.Unmarshal(body, &want)
 		if gotErr != nil {
@@ -68,6 +77,16 @@ func FuzzDecodePage(f *testing.F) {
 				t.Errorf("decodePage(%q) = error %v, but json.Unmarshal accepts it (only cardinality caps may diverge)", body, gotErr)
 			}
 			return
+		}
+		// Accounting invariants on the element count the fetch-wide budget
+		// (maxTotalElements, charged by fetchAndAppend) is billed from: an
+		// accepted page never reports more elements than its budget, and
+		// never fewer than it retained (duplicate occurrences only add).
+		if elems > maxPageElements {
+			t.Errorf("decodePage(%q) accepted but charged %d elements, over the %d budget", body, elems, maxPageElements)
+		}
+		if retained := retainedElements(got); elems < retained {
+			t.Errorf("decodePage(%q) charged %d elements, fewer than the %d it retained (budget undercharge)", body, elems, retained)
 		}
 		if wantErr != nil {
 			t.Errorf("decodePage(%q) accepted a body json.Unmarshal rejects: %v", body, wantErr)
@@ -77,6 +96,22 @@ func FuzzDecodePage(f *testing.F) {
 			t.Errorf("decodePage(%q) = %+v, want json.Unmarshal parity %+v", body, got, want)
 		}
 	})
+}
+
+// retainedElements counts the array elements retained in a decoded pbList
+// (items + torrents + files + tags): a lower bound on the decoder's charged
+// element count, since duplicate key occurrences and truncated-away elements
+// only add charges.
+func retainedElements(l pbList) int {
+	n := len(l.Items)
+	for i := range l.Items {
+		trs := l.Items[i].Expand.Trs
+		n += len(trs)
+		for j := range trs {
+			n += len(trs[j].Files) + len(trs[j].Tags)
+		}
+	}
+	return n
 }
 
 // normalizePBList maps every nil slice to an empty one so the oracle

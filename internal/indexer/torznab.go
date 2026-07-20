@@ -144,10 +144,16 @@ func writeItem(b *strings.Builder, it *item) {
 	if !it.PubDate.IsZero() {
 		writeText(b, "pubDate", it.PubDate.UTC().Format(time.RFC1123Z))
 	}
+	// Clamp like the peer counts below: toItem and totalSize normalize at
+	// their own ingresses, but a hand-edited or corrupted persisted snapshot
+	// passes validPersistedItem (string/category-count checks only), so an
+	// unclamped value would render a negative enclosure length/size attr or
+	// a non-positive category id, contradicting toItem's normalization.
+	size := max(it.Size, 0)
 	if it.DownloadURL != "" {
 		b.WriteString(`<enclosure url="`)
 		escTo(b, it.DownloadURL)
-		fmt.Fprintf(b, `" length="%d" type="application/x-bittorrent"/>`, it.Size)
+		fmt.Fprintf(b, `" length="%d" type="application/x-bittorrent"/>`, size)
 	}
 
 	cats := it.Categories
@@ -155,9 +161,12 @@ func writeItem(b *strings.Builder, it *item) {
 		cats = []int{catAnime}
 	}
 	for _, c := range cats {
+		if c <= 0 {
+			continue
+		}
 		writeAttr(b, "category", strconv.Itoa(c))
 	}
-	writeAttr(b, "size", strconv.FormatInt(it.Size, 10))
+	writeAttr(b, "size", strconv.FormatInt(size, 10))
 	if it.InfoHash != "" {
 		writeAttr(b, "infohash", it.InfoHash)
 	}

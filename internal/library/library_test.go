@@ -1255,7 +1255,10 @@ func TestWalkSonarrSeriesItemCarriesIdentityFieldsAndDeepLink(t *testing.T) {
 // TestWalkCleanSonarrWalkIsNotPartial pins the negative side of the
 // Snapshot.Partial producer contract: a walk where every kept series fetches
 // its episodes successfully must publish Partial=false, so the diff's
-// partial-suppression logic is not permanently engaged.
+// partial-suppression logic is not permanently engaged. It also pins the log
+// contract's negative side: a zero-failure walk logs NO warning, so the
+// aggregate partial-snapshot warn gate (failed > 0) cannot silently invert
+// to fire on every healthy cycle.
 func TestWalkCleanSonarrWalkIsNotPartial(t *testing.T) {
 	fs := &fakeSonarr{
 		series: []arrapi.Series{{ID: 1, Title: "Alpha"}},
@@ -1263,13 +1266,17 @@ func TestWalkCleanSonarrWalkIsNotPartial(t *testing.T) {
 			1: {epFile(1, "PMR")},
 		},
 	}
-	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
+	logger, rec := capture.New()
+	w := NewWalker(&Config{Sonarr: fs, Logger: logger})
 	snap, err := w.Walk(context.Background())
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
 	if snap.Partial {
 		t.Error("Snapshot.Partial = true, want false for a clean walk with no skipped series")
+	}
+	if sawWarn(rec) {
+		t.Errorf("clean walk logged a warning, want none (no partial-snapshot warning with zero failures); messages = %q", rec.Messages())
 	}
 }
 

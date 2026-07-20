@@ -334,6 +334,25 @@ func TestConfigureLoggerAppliesLevel(t *testing.T) {
 	}
 }
 
+// TestInstallLoggerInitialLevel pins installLogger's documented contract: the
+// pre-config default handler emits at Info (so first-boot and config-parse
+// warnings are visible on the container log stream) and not at Debug, until
+// configureLogger applies the configured level. Serial (swaps slog.Default);
+// the previous default is restored.
+func TestInstallLoggerInitialLevel(t *testing.T) {
+	prev := slog.Default()
+	defer slog.SetDefault(prev)
+
+	installLogger()
+	ctx := context.Background()
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		t.Error("Debug enabled before config is read, want the documented Info floor")
+	}
+	if !slog.Default().Enabled(ctx, slog.LevelInfo) {
+		t.Error("Info disabled before config is read, want enabled (config-parse warnings must emit)")
+	}
+}
+
 // TestFeedWriter pins the nil-when-unconfigured contract: the compare cycle
 // does feed work only when the Torznab feed is configured, and the returned
 // cleanup is a callable no-op then.
@@ -364,6 +383,32 @@ func TestFilterOptions(t *testing.T) {
 	}
 	if got.RequireDualAudio {
 		t.Error("RequireDualAudio = true, want false")
+	}
+}
+
+// TestUpstreamConfig pins the config-to-indexer upstream field mapping shared
+// by the feed writer and the feed server, so a swapped or dropped field in the
+// wiring cannot route Nyaa searches at the AB endpoint or hand the wrong
+// credential to an upstream.
+func TestUpstreamConfig(t *testing.T) {
+	cfg := &config.Config{
+		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api",
+		IndexerABTorznabURL:   "http://prowlarr:9696/2/api",
+		IndexerProwlarrAPIKey: "pk-3x",
+		IndexerABPasskey:      "ab-4y",
+	}
+	got := upstreamConfig(cfg)
+	if got.NyaaTorznabURL != cfg.IndexerNyaaTorznabURL {
+		t.Errorf("NyaaTorznabURL = %q, want %q", got.NyaaTorznabURL, cfg.IndexerNyaaTorznabURL)
+	}
+	if got.ABTorznabURL != cfg.IndexerABTorznabURL {
+		t.Errorf("ABTorznabURL = %q, want %q", got.ABTorznabURL, cfg.IndexerABTorznabURL)
+	}
+	if got.ProwlarrAPIKey != cfg.IndexerProwlarrAPIKey {
+		t.Errorf("ProwlarrAPIKey = %q, want %q", got.ProwlarrAPIKey, cfg.IndexerProwlarrAPIKey)
+	}
+	if got.ABPasskey != cfg.IndexerABPasskey {
+		t.Errorf("ABPasskey = %q, want %q", got.ABPasskey, cfg.IndexerABPasskey)
 	}
 }
 

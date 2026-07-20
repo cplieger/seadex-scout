@@ -47,6 +47,8 @@ func FuzzParseMediaPage(f *testing.F) {
 	f.Add([]byte(``))
 	f.Add([]byte(`{bad`))
 	f.Add([]byte(`{"data":{"Page":null}}`))
+	f.Add([]byte(`{"data":{"Page":{"media":"nope"}}}`))
+	f.Add([]byte(`{"data":{"Page":{"media":[{"id":"x","title":{"romaji":"A"}}]}}}`))
 	f.Add([]byte(`{"data":{"Page":{"media":[{"id":0,"title":{"romaji":"missing"}}]}}}`))
 	f.Add([]byte(`{"data":{"Page":{"media":[{"id":-1,"title":{"romaji":"negative"}}]}}}`))
 	f.Add([]byte(`{"data":{"Page":{"media":[{"id":2,"format":"MOVIE","startDate":{"year":2019},"title":{"romaji":"B","english":"B"}}]}}}`))

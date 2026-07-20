@@ -25,6 +25,8 @@ type curatedRef struct {
 	torrent *seadex.Torrent
 }
 
+// --- Journal identity ---
+
 // journalKey returns a torrent's journal identity - its tracker key
 // (nyaa:{id} / ab:{id}), the same stable id the search curation set and the
 // harvest matching key on - or "" when the torrent has no parseable tracker
@@ -85,6 +87,8 @@ func scopeOfKey(key string) string {
 	return scope
 }
 
+// --- Journal item rendering ---
+
 // renderJournalItem materializes the journal item for key from its current
 // curated occurrences: synthesis from the first occurrence, then best-wins on
 // the marker and category union across all of them (a torrent attached to
@@ -98,6 +102,14 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor fu
 		return item{}, false, false
 	}
 	first := refs[0]
+	// Deterministic synthesis source: a torrent attached to several entries
+	// must render the same item regardless of catalogue order (marker and
+	// categories are already order-independent folds below).
+	for _, r := range refs[1:] {
+		if r.entry.AniListID < first.entry.AniListID {
+			first = r
+		}
+	}
 	dl, resolved := downloadURL(first.torrent.Tracker, first.torrent.URL, w.abPasskey)
 	if !resolved {
 		return item{}, false, scopeOfKey(key) == upstreamAB && w.abPasskey == ""
@@ -118,16 +130,7 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor fu
 		// match a title-less item, so drop it (counted as unresolvable).
 		return item{}, false, false
 	}
-	for _, ref := range refs {
-		if ref.torrent.IsBest {
-			it.DownloadVolumeFactor = dvfBest
-		}
-		for _, c := range categoriesFor(infoFor(ref.entry.AniListID).IsMovie) {
-			if !slices.Contains(it.Categories, c) {
-				it.Categories = append(it.Categories, c)
-			}
-		}
-	}
+	foldRefs(&it, refs, infoFor)
 	if !validPersistedItem(&it) {
 		// An oversized external value (a SeaDex filename synthesized into
 		// the title, an over-long URL) is unservable: renderFeed's XML
@@ -139,6 +142,25 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor fu
 	}
 	return it, true, false
 }
+
+// foldRefs applies the order-independent folds across all of a torrent's
+// curated occurrences: best-wins on the download-volume-factor marker and
+// category union (a torrent attached to several entries must not render
+// conflicting duplicates).
+func foldRefs(it *item, refs []curatedRef, infoFor func(alID int) EntryInfo) {
+	for _, ref := range refs {
+		if ref.torrent.IsBest {
+			it.DownloadVolumeFactor = dvfBest
+		}
+		for _, c := range categoriesFor(infoFor(ref.entry.AniListID).IsMovie) {
+			if !slices.Contains(it.Categories, c) {
+				it.Categories = append(it.Categories, c)
+			}
+		}
+	}
+}
+
+// --- Rebuild accounting ---
 
 // journalStats counts one rebuild's journal transitions for the snapshot log
 // line.
@@ -162,6 +184,8 @@ func (js *journalStats) recordDrop(noPasskey bool) {
 	}
 	js.dropped++
 }
+
+// --- Carrying the previous journal ---
 
 // carryItem re-renders or prunes one carried journal item, updating js, and
 // reports whether it survives into the rebuilt journal. ws is the
@@ -238,6 +262,8 @@ func (w *FeedWriter) carryJournal(prevFeed []item, cur map[string][]curatedRef, 
 	return kept
 }
 
+// --- Growing the journal ---
+
 // growJournal adds the newly curated torrents to the per-scope journals and
 // folds every current identity into the seen ledger. A torrent is NEW only
 // when none of its identity signals is in seen - the tracker post date is
@@ -266,6 +292,13 @@ func (w *FeedWriter) growJournal(entries []seadex.Entry, cur map[string][]curate
 	return nyaa, ab
 }
 
+// scopeConfigured reports whether a tracker scope's Prowlarr Torznab URL is
+// configured (the README's per-tracker on switch); "" (a tail tracker) is
+// never configured.
+func (w *FeedWriter) scopeConfigured(scope string) bool {
+	return (scope == upstreamNyaa && w.nyaaConfigured) || (scope == upstreamAB && w.abConfigured)
+}
+
 // journalIfNew applies growJournal's novelty test to one torrent - folding its
 // identity signals into seen either way - and materializes its journal item
 // when it is genuinely new and servable.
@@ -279,7 +312,7 @@ func (w *FeedWriter) journalIfNew(t *seadex.Torrent, cur map[string][]curatedRef
 		// unresolvable-diagnostic case newJournalItem counts: surface it on
 		// the snapshot log line instead of silently shrinking the feed.
 		// Unknown tail trackers and an intentionally disabled AB stay silent.
-		if scope := trackerScope(t.Tracker); (scope == upstreamNyaa && w.nyaaConfigured) || (scope == upstreamAB && w.abConfigured) {
+		if w.scopeConfigured(trackerScope(t.Tracker)) {
 			js.unresolvable++
 		}
 		return item{}, "", false
@@ -310,13 +343,7 @@ func (w *FeedWriter) journalIfNew(t *seadex.Torrent, cur map[string][]curatedRef
 // feed (unresolvable is counted only for configured scopes).
 func (w *FeedWriter) newJournalItem(t *seadex.Torrent, cur map[string][]curatedRef, infoFor func(alID int) EntryInfo, js *journalStats) (it item, scope string, ok bool) {
 	scope = trackerScope(t.Tracker)
-	if scope == "" {
-		return item{}, "", false
-	}
-	if scope == upstreamNyaa && !w.nyaaConfigured {
-		return item{}, "", false
-	}
-	if scope == upstreamAB && !w.abConfigured {
+	if !w.scopeConfigured(scope) {
 		return item{}, "", false
 	}
 	key := journalKey(t)
@@ -336,6 +363,8 @@ func (w *FeedWriter) newJournalItem(t *seadex.Torrent, cur map[string][]curatedR
 	}
 	return it, scope, true
 }
+
+// --- Harvested-title cache ---
 
 // applyTitles upgrades each journal item's served title to its harvested real
 // title when the cache holds one; items without a cached title keep their

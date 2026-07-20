@@ -43,16 +43,26 @@ const (
 	// writer unions at most the three Torznab ids the feed uses (TV, Anime,
 	// Movies); anything larger is a hand-edited snapshot.
 	maxPersistedCategories = 8
+	// reasonMalformed is loadPrevious's baseline reason for a structurally invalid
+	// previous snapshot (bad JSON, missing curation maps, or an over-limit item/title).
+	reasonMalformed = "malformed"
 )
 
 // validPersistedItem reports whether one feed item respects the shared
-// persisted-item limits: every string field under maxPersistedFieldBytes and
-// the category list under maxPersistedCategories. Enforced when
+// persisted-item limits: every string field under maxPersistedFieldBytes, the
+// category list under maxPersistedCategories, and the non-negative numeric
+// domain both producers guarantee (toItem clamps size/seeders/leechers to
+// >= 0; totalSize returns 0 on negative/overflowing sums), so a hand-edited
+// or corrupted snapshot with a negative value is rejected at load instead of
+// rendering an invalid enclosure length/size attr. Enforced when
 // renderJournalItem creates an item (an oversized external value counts as
 // unresolvable) and re-checked after every snapshot unmarshal (loadPrevious
 // re-baselines; the server's readSnapshot treats it as malformed), so an
 // over-limit item can neither be persisted nor served.
 func validPersistedItem(it *item) bool {
+	if it.Size < 0 || it.Seeders < 0 || it.Leechers < 0 {
+		return false
+	}
 	for _, f := range []string{it.Title, it.GUID, it.InfoURL, it.DownloadURL, it.InfoHash, it.DownloadVolumeFactor, it.Key} {
 		if len(f) > maxPersistedFieldBytes {
 			return false
@@ -267,6 +277,7 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info f
 // stripABDownloadURLs).
 func (w *FeedWriter) persist(ctx context.Context, snap *snapshot) error {
 	stripABDownloadURLs(snap.ABFeed)
+	stripABScopedDownloadURLs(snap.NyaaFeed)
 	data, err := json.Marshal(snap)
 	if err != nil {
 		return fmt.Errorf("indexer: encode feed snapshot: %w", err)
@@ -293,6 +304,20 @@ func (w *FeedWriter) persist(ctx context.Context, snap *snapshot) error {
 func stripABDownloadURLs(feed []item) {
 	for i := range feed {
 		feed[i].DownloadURL = ""
+	}
+}
+
+// stripABScopedDownloadURLs blanks the download URL of any item whose journal
+// key is AnimeBytes-scoped, wherever it is persisted: an AB download link
+// embeds the operator's passkey, and a scope-mismatched carried item (a
+// legacy or corrupted snapshot placing an ab:-keyed item in nyaa_feed) must
+// not bypass the GUID-only invariant stripABDownloadURLs enforces on the AB
+// feed itself.
+func stripABScopedDownloadURLs(feed []item) {
+	for i := range feed {
+		if scopeOfKey(feed[i].Key) == upstreamAB {
+			feed[i].DownloadURL = ""
+		}
 	}
 }
 
@@ -330,19 +355,19 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 	var snap snapshot
 	if err := json.Unmarshal(data, &snap); err != nil {
 		w.log.Warn("previous feed snapshot malformed; re-baselining the feed journal", "path", w.path, "error", err)
-		return previousJournal{baseline: true, reason: "malformed"}, nil
+		return previousJournal{baseline: true, reason: reasonMalformed}, nil
 	}
 	if snap.ByHash == nil || snap.ByKey == nil {
 		w.log.Warn("previous feed snapshot malformed; re-baselining the feed journal",
 			"path", w.path, "reason", "missing required curation maps")
-		return previousJournal{baseline: true, reason: "malformed"}, nil
+		return previousJournal{baseline: true, reason: reasonMalformed}, nil
 	}
 	if !validFeedItems(snap.NyaaFeed, snap.ABFeed) {
 		// The value itself is never logged: it can be attacker-shaped
 		// multi-megabyte text.
 		w.log.Warn("previous feed snapshot malformed; re-baselining the feed journal",
 			"path", w.path, "reason", "item exceeds persisted-item limits")
-		return previousJournal{baseline: true, reason: "malformed"}, nil
+		return previousJournal{baseline: true, reason: reasonMalformed}, nil
 	}
 	for k, t := range snap.Titles {
 		if len(k) > maxPersistedFieldBytes || len(t) > maxPersistedFieldBytes {
@@ -353,7 +378,7 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 			// logged: it can be attacker-shaped multi-megabyte text.
 			w.log.Warn("previous feed snapshot malformed; re-baselining the feed journal",
 				"path", w.path, "reason", "cached title exceeds persisted-item limits")
-			return previousJournal{baseline: true, reason: "malformed"}, nil
+			return previousJournal{baseline: true, reason: reasonMalformed}, nil
 		}
 	}
 	if snap.Seen == nil {

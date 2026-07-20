@@ -260,3 +260,41 @@ func TestReloadReassertsFailedStateWhenMalformedSnapshotReappears(t *testing.T) 
 			got, strings.Join(rec.Messages(), "\n"))
 	}
 }
+
+// TestReloadMemoizesOversizedItemSnapshot pins readSnapshot's persisted-item
+// limit gate: a snapshot whose curation maps are valid but whose feed carries
+// an item past maxPersistedFieldBytes is rejected like malformed JSON - the
+// last-good feed keeps serving, the WARN fires once, and the deterministic
+// bad bytes are memoized so repeated reloads never reread or re-warn.
+func TestReloadMemoizesOversizedItemSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash:   map[string]bool{},
+		ByKey:    map[string]bool{},
+		NyaaFeed: []item{{Title: "first", GUID: "https://nyaa.si/view/1"}},
+	})
+	log, rec := capture.New()
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, path)
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+		t.Fatalf("initial feed = %d items, want 1", len(got))
+	}
+
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash:   map[string]bool{},
+		ByKey:    map[string]bool{},
+		NyaaFeed: []item{{Title: strings.Repeat("a", maxPersistedFieldBytes+1), GUID: "https://nyaa.si/view/2"}},
+	})
+	distinct := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(path, distinct, distinct); err != nil {
+		t.Fatal(err)
+	}
+	ix.reload(context.Background())
+	ix.reload(context.Background())
+	if got := rec.Count("indexer feed snapshot malformed"); got != 1 {
+		t.Errorf("over-limit snapshot warned %d times across two reloads, want exactly 1 (deterministic bytes must memoize, no reread); log output:\n%s",
+			got, strings.Join(rec.Messages(), "\n"))
+	}
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
+		t.Errorf("feed after over-limit rewrite = %+v, want the last-good feed kept", got)
+	}
+}

@@ -29,10 +29,6 @@ const (
 	seadexTimeout  = 90 * time.Second  // large paged responses
 	mappingTimeout = 180 * time.Second // multi-MB Fribb file
 	anilistTimeout = 30 * time.Second  // small GraphQL replies
-	// indexerUpstreamTimeout bounds a Prowlarr Torznab query (which searches the
-	// trackers live), used by the daemon's Torznab feed server (search proxying)
-	// and the feed writer's title harvest alike.
-	indexerUpstreamTimeout = 60 * time.Second
 	// arrMaxAttempts / arrBaseDelay bound arr request retries.
 	arrMaxAttempts = 3
 	arrBaseDelay   = 5 * time.Second
@@ -143,7 +139,7 @@ func feedWriter(cfg *config.Config, log *slog.Logger) (fw scout.FeedWriter, clea
 	if !cfg.IndexerConfigured() {
 		return nil, func() {}
 	}
-	prowlarrHTTP := httpx.NewClient(indexerUpstreamTimeout)
+	prowlarrHTTP := httpx.NewClient(indexer.UpstreamAttemptTimeout)
 	writer := indexer.NewFeedWriter(&indexer.FeedWriterConfig{
 		Path:           config.DefaultIndexerFeedPath,
 		SeaDexBaseURL:  config.DefaultSeaDexBaseURL,
@@ -167,7 +163,7 @@ type builtIndexer struct {
 // so its lines separate cleanly from the compare findings in a shared slog stream.
 func buildIndexer(cfg *config.Config) builtIndexer {
 	log := slog.Default().With("component", "indexer")
-	prowlarrHTTP := httpx.NewClient(indexerUpstreamTimeout)
+	prowlarrHTTP := httpx.NewClient(indexer.UpstreamAttemptTimeout)
 
 	ix := indexer.New(&indexer.Config{
 		APIKey:         cfg.IndexerAPIKey,

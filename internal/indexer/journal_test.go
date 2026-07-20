@@ -324,6 +324,48 @@ func TestRebuildSharedTorrentMergesBestWins(t *testing.T) {
 	}
 }
 
+// TestRenderJournalItemDeterministicSynthesisSource pins the synthesis-source
+// selection for a torrent shared by several SeaDex entries: the rendered
+// item's identity fields (AniListID, InfoURL) must come from the LOWEST
+// AniList id, regardless of the untrusted upstream catalogue order - a
+// first-wins fold would flip the served InfoURL and AniListID between
+// rebuilds whenever the catalogue order changes, and AniListID also drives
+// harvest grouping.
+func TestRenderJournalItemDeterministicSynthesisSource(t *testing.T) {
+	w := newTestWriter(filepath.Join(t.TempDir(), "feed.json"), "", false)
+	torrent := seadex.Torrent{
+		Tracker: "Nyaa", URL: "https://nyaa.si/view/1234567",
+		Files: []seadex.File{{Length: 7, Name: "Show - S01E01 (1080p) [G].mkv"}},
+	}
+	e1 := &seadex.Entry{AniListID: 1, Torrents: []seadex.Torrent{torrent}}
+	e2 := &seadex.Entry{AniListID: 2, Torrents: []seadex.Torrent{torrent}}
+	info := func(int) EntryInfo { return EntryInfo{} }
+	orders := map[string][]curatedRef{
+		"lowest id first": {
+			{entry: e1, torrent: &e1.Torrents[0]},
+			{entry: e2, torrent: &e2.Torrents[0]},
+		},
+		"lowest id second": {
+			{entry: e2, torrent: &e2.Torrents[0]},
+			{entry: e1, torrent: &e1.Torrents[0]},
+		},
+	}
+	for name, refs := range orders {
+		t.Run(name, func(t *testing.T) {
+			it, ok, _ := w.renderJournalItem("nyaa:1234567", refs, info)
+			if !ok {
+				t.Fatal("renderJournalItem: item not rendered")
+			}
+			if it.AniListID != 1 {
+				t.Errorf("AniListID = %d, want 1 (synthesis source must be the lowest AniList id, not the first occurrence)", it.AniListID)
+			}
+			if !strings.HasSuffix(it.InfoURL, "/1") {
+				t.Errorf("InfoURL = %q, want the lowest AniList id's releases.moe/1 link", it.InfoURL)
+			}
+		})
+	}
+}
+
 // TestRebuildDistinctEmptyGUIDItemsStayDistinct pins the journal identity key:
 // two DISTINCT Nyaa torrents whose SeaDex URLs sit on a foreign host resolve
 // canonical download links (nyaaID reads /view/{id} without host validation)
@@ -1046,5 +1088,109 @@ func TestRebuildHashVetoesNoveltyAcrossKeyChange(t *testing.T) {
 	}
 	if !snap.Seen["nyaa:9042"] || !snap.Seen[hash] {
 		t.Errorf("seen ledger missing the new key or the carried hash: %v", snap.Seen)
+	}
+}
+
+// TestRebuildKeyVetoesNoveltyAcrossHashChange pins the mirror image of
+// TestRebuildHashVetoesNoveltyAcrossKeyChange: a torrent whose journal KEY is
+// already in the seen ledger must not re-enter the journal as new when its
+// info hash changes (SeaDex correcting a hash, or a same-view-id in-place
+// replacement). Novelty is vetoed by ANY seen identity signal - not just the
+// hash - and the NEW hash still folds into the seen ledger even though the
+// torrent is not new.
+func TestRebuildKeyVetoesNoveltyAcrossHashChange(t *testing.T) {
+	const hashA = "143ed15e5e3df072ae91adaeb149973a887590dd"
+	const hashB = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	path := filepath.Join(t.TempDir(), "feed.json")
+	w := newTestWriter(path, "", false)
+	t0 := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
+	w.now = func() time.Time { return t0 }
+	orig := seadex.Entry{
+		AniListID: 7,
+		Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://nyaa.si/view/42", InfoHash: hashA, IsBest: true,
+			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
+		}},
+	}
+	if err := w.Rebuild(context.Background(), []seadex.Entry{orig}, nil); err != nil {
+		t.Fatalf("baseline Rebuild: %v", err)
+	}
+	swapped := orig
+	swapped.Torrents = []seadex.Torrent{orig.Torrents[0]}
+	swapped.Torrents[0].InfoHash = hashB
+	w.now = func() time.Time { return t0.Add(3 * time.Hour) }
+	if err := w.Rebuild(context.Background(), []seadex.Entry{swapped}, nil); err != nil {
+		t.Fatalf("swapped Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 0 {
+		t.Errorf("feed = %d items, want 0 (a seen key under a new hash must veto novelty)", len(snap.NyaaFeed))
+	}
+	if !snap.Seen[hashB] || !snap.Seen["nyaa:42"] {
+		t.Errorf("seen ledger missing the new hash or the key (every signal must fold even when not new): %v", snap.Seen)
+	}
+}
+
+// TestRebuildKeepsItemAtExactMaxAgeBoundary pins the strict-inequality prune
+// boundary carryItem's contract documents ("an item OLDER than
+// feedJournalMaxAge leaves the journal"): a carried item whose age equals
+// feedJournalMaxAge exactly stays in the feed, and one second past it prunes.
+func TestRebuildKeepsItemAtExactMaxAgeBoundary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	w := newTestWriter(path, "", false)
+	t0 := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
+	first := t0.Add(-feedJournalMaxAge) // age == feedJournalMaxAge exactly
+	w.now = func() time.Time { return t0 }
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{"nyaa:42": true},
+		NyaaFeed: []item{{
+			Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42",
+			DownloadURL: "https://nyaa.si/download/42.torrent",
+			Key:         "nyaa:42", AniListID: 7,
+			FirstSeen: first, PubDate: first,
+		}},
+	})
+	if err := w.Rebuild(context.Background(), nil, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 1 {
+		t.Fatalf("feed at the exact max-age boundary = %d items, want 1 (only STRICTLY older items prune)", len(snap.NyaaFeed))
+	}
+	if !snap.NyaaFeed[0].FirstSeen.Equal(first) {
+		t.Errorf("FirstSeen = %v, want the original %v", snap.NyaaFeed[0].FirstSeen, first)
+	}
+	// One second past the boundary the item prunes.
+	w.now = func() time.Time { return t0.Add(time.Second) }
+	if err := w.Rebuild(context.Background(), nil, nil); err != nil {
+		t.Fatalf("past-boundary Rebuild: %v", err)
+	}
+	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 {
+		t.Errorf("feed one second past the boundary = %d items, want 0", len(snap.NyaaFeed))
+	}
+}
+
+// TestApplyTitlesSkipsEmptyCachedTitle pins applyTitles' empty-value guard
+// (the documented "items without a cached title keep their synthesized title"
+// fallback): a cache entry holding an EMPTY string must not blank the served
+// title, a non-empty cached title upgrades it, and an unknown key leaves the
+// item untouched.
+func TestApplyTitlesSkipsEmptyCachedTitle(t *testing.T) {
+	items := []item{
+		{Key: "nyaa:1", Title: "Synth A"},
+		{Key: "nyaa:2", Title: "Synth B"},
+		{Key: "nyaa:3", Title: "Synth C"},
+	}
+	applyTitles(items, map[string]string{"nyaa:1": "", "nyaa:2": "Harvested B"})
+	if items[0].Title != "Synth A" {
+		t.Errorf("empty cached title overwrote the synthesized title: %q, want %q", items[0].Title, "Synth A")
+	}
+	if items[1].Title != "Harvested B" {
+		t.Errorf("cached title not applied: %q, want %q", items[1].Title, "Harvested B")
+	}
+	if items[2].Title != "Synth C" {
+		t.Errorf("unknown key changed the title: %q, want %q", items[2].Title, "Synth C")
 	}
 }

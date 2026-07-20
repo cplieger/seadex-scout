@@ -32,6 +32,8 @@ import (
 	"github.com/cplieger/seadex-scout/internal/state"
 )
 
+// --- dependency seams + assembly ---
+
 // FeedWriter rebuilds and persists the indexer's Torznab feed from the cycle's
 // shared SeaDex snapshot, so the findings and the RSS feed the arrs grab from
 // are produced by one data engine from a single fetch. The indexer's feed writer
@@ -176,6 +178,8 @@ func New(deps *Deps) *Scout {
 	}
 	return &Scout{deps: *deps, log: log}
 }
+
+// --- cycle orchestration ---
 
 // Cycle runs one full compare cycle and reports whether the run was healthy
 // (the library ingest succeeded). It never returns an error: a failed ingest
@@ -351,6 +355,8 @@ func (s *Scout) aniListCycleAttrs(startStats aniListStats) []any {
 	}
 }
 
+// --- cycle completion paths ---
+
 // finishInterruptedMatch closes a cycle whose matching was cut short by a
 // shutdown/redeploy: the match set is truncated, so comparing it would treat
 // the never-attempted entries' absent findings as resolved. Save the refreshed
@@ -516,6 +522,8 @@ func mapUsable(mapErr error) bool {
 	return stale
 }
 
+// --- feed rebuild ---
+
 // rebuildFeed refreshes the indexer's Torznab feed from the cycle's shared
 // SeaDex snapshot, independent of the arr walk (the feed needs only SeaDex +
 // Fribb + persisted state, so an arr outage must not freeze it). It is a no-op
@@ -558,6 +566,8 @@ func (s *Scout) logFeedOutageOnGatedCycle(ctx context.Context, entries []seadex.
 		s.log.Warn("seadex returned zero entries; indexer feed kept previous feed")
 	}
 }
+
+// --- pre-compare gates ---
 
 // handlePreCompareGate applies the pre-compare degradation gate: it reports
 // whether the cycle should stop before the compare pass (handled) and, when it
@@ -746,6 +756,8 @@ func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap li
 	return false, true
 }
 
+// --- one-shot report ---
+
 // reportSnapshot walks the library for a one-shot report, failing on a walk
 // error or a partial snapshot: auditing an incomplete snapshot would publish a
 // successful, timestamped report that silently omits the skipped series,
@@ -852,6 +864,8 @@ func (s *Scout) Report(ctx context.Context) (audit.Report, error) {
 		"duration", time.Since(start).Round(time.Millisecond).String())
 	return rep, nil
 }
+
+// --- state + stats helpers ---
 
 // aniStats returns the AniList client's cumulative stats via the injected
 // callback, or zero stats when none is wired (the early-return degradation

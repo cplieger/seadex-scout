@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cplieger/httpx/v3"
 	"github.com/cplieger/webhttp"
 )
 
@@ -18,13 +19,16 @@ const (
 	readHeaderTimeout = 15 * time.Second
 	readTimeout       = 30 * time.Second
 	idleTimeout       = 120 * time.Second
-	// writeTimeout bounds a stalled response consumer. It is sized above the
-	// complete bounded Prowlarr retry budget - three 60-second HTTP attempts
-	// plus at most two 60-second Retry-After waits - with render margin, so
-	// no legitimate search can hit it while a client that stops reading
-	// cannot hold the connection, handler goroutine, and rendered response
-	// indefinitely.
-	writeTimeout = 6 * time.Minute
+	// writeTimeout bounds a stalled response consumer. It is derived from
+	// the complete bounded Prowlarr retry budget - upstreamMaxAttempts
+	// full-timeout attempts plus the capped Retry-After waits between them -
+	// with a one-minute render margin, so no legitimate search can hit it
+	// while a client that stops reading cannot hold the connection, handler
+	// goroutine, and rendered response indefinitely. Deriving it from the
+	// budget's own constants keeps the deadline valid when the retry policy
+	// or the per-attempt timeout changes. (Evaluates to 6 minutes today.)
+	writeTimeout = upstreamMaxAttempts*UpstreamAttemptTimeout +
+		(upstreamMaxAttempts-1)*httpx.RetryAfterCap + time.Minute
 )
 
 // listenAddr is the fixed LAN bind address for the Torznab feed server. The

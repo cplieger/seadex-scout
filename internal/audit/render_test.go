@@ -861,3 +861,46 @@ func TestReportLogCanceledMidRowsStopsEmitting(t *testing.T) {
 		t.Errorf("Log emitted %d records, want 2 (summary + first row; cancellation stops the loop)", rec.Len())
 	}
 }
+
+// TestRowsWithVerdict pins the section filter directly: only rows carrying
+// the requested verdict are returned, in their original order, and a verdict
+// with no rows yields nil. The 2026-07-20 gremlins tracker listed the
+// filter's equality check as a solid-gap CONDITIONALS_NEGATION mutant: every
+// existing renderMarkdown assertion is a whole-document Contains, which stays
+// green when the filter inverts (rows merely land under the wrong section),
+// so membership must be pinned here.
+func TestRowsWithVerdict(t *testing.T) {
+	rows := []Row{
+		{Title: "a", Verdict: VerdictBest},
+		{Title: "b", Verdict: VerdictAlt},
+		{Title: "c", Verdict: VerdictBest},
+	}
+	got := rowsWithVerdict(rows, VerdictBest)
+	if len(got) != 2 || got[0].Title != "a" || got[1].Title != "c" {
+		t.Errorf("rowsWithVerdict(best) = %+v, want the a and c rows in order", got)
+	}
+	if got := rowsWithVerdict(rows, VerdictNoFile); got != nil {
+		t.Errorf("rowsWithVerdict(no_file) = %+v, want nil", got)
+	}
+}
+
+// TestRenderMarkdownVerdictSectionDescription pins the one-line explanation
+// under a verdict section header: the section renders its verdictDesc text
+// between the heading and the table. The verdictDesc guard's
+// CONDITIONALS_NEGATION mutant LIVED in all 3 gremlins runs because no test
+// asserted any description text, so inverting the guard (never printing a
+// description) stayed green.
+func TestRenderMarkdownVerdictSectionDescription(t *testing.T) {
+	r := &Report{
+		GeneratedAt: time.Unix(0, 0).UTC(),
+		Totals:      map[string]int{string(VerdictBest): 1},
+		Rows:        []Row{{Title: "Matched", Arr: "sonarr", Verdict: VerdictBest}},
+	}
+
+	md := renderMarkdown(r)
+
+	want := "## have_best (1)\n\nYou already have SeaDex's best release.\n\n"
+	if !strings.Contains(md, want) {
+		t.Errorf("markdown section is missing its description line %q:\n%s", want, md)
+	}
+}

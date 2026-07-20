@@ -402,3 +402,61 @@ func TestCycleShutdownDuringFeedRebuildStaysSilent(t *testing.T) {
 		t.Errorf("prior finding not preserved on shutdown mid-cycle: %+v", store.st.Findings)
 	}
 }
+
+// TestCycleUnusableMapWithSeaDexOutageWarnsFeedKept pins the mapping-unusable
+// arm's feed-outage contract: with a feed configured, a cycle whose map is
+// unusable AND whose SeaDex fetch failed (or returned zero entries) silently
+// kept the previous feed - the feed-kept WARN must still fire so the double
+// outage does not read as mapping-only in Loki, while the unusable-map gate's
+// own WARN, degraded completion line, and no-rebuild behavior are unchanged.
+func TestCycleUnusableMapWithSeaDexOutageWarnsFeedKept(t *testing.T) {
+	tests := []struct {
+		name     string
+		seadex   *fakeSeaDex
+		wantWarn string
+	}{
+		{
+			name:     "seadex fetch fails",
+			seadex:   &fakeSeaDex{err: errors.New("seadex down")},
+			wantWarn: "seadex fetch failed; indexer feed kept previous feed",
+		},
+		{
+			name:     "seadex returns zero entries",
+			seadex:   &fakeSeaDex{},
+			wantWarn: "seadex returned zero entries; indexer feed kept previous feed",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			logger, recorder := capture.New()
+			feed := &fakeFeed{}
+			sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+			s := New(&Deps{
+				Logger:  logger,
+				Store:   &fakeStore{},
+				Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+				// Empty state + unreachable Fribb: the load fails with nothing
+				// stale to fall back on, so the map is unusable.
+				Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+				SeaDex:  tc.seadex,
+				Feed:    feed,
+			})
+
+			if healthy := s.Cycle(context.Background()); !healthy {
+				t.Fatal("Cycle healthy=false, want true (an unusable map is degraded, not unhealthy)")
+			}
+			if feed.calls != 0 {
+				t.Errorf("feed Rebuild calls = %d, want 0 (nothing to rebuild from)", feed.calls)
+			}
+			if n := recorder.CountExact(tc.wantWarn); n != 1 {
+				t.Errorf("%q count = %d, want 1 (a mapping + SeaDex double outage must not read as mapping-only)", tc.wantWarn, n)
+			}
+			if n := recorder.CountExact("mapping unusable; skipping comparison, findings preserved"); n != 1 {
+				t.Errorf("unusable-map WARN count = %d, want 1", n)
+			}
+			if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "mapping-unusable" {
+				t.Errorf("degraded reasons = %v, want [mapping-unusable]", reasons)
+			}
+		})
+	}
+}

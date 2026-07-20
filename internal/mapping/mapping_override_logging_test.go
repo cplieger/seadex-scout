@@ -173,3 +173,85 @@ func TestLoader_Load_warnsOnDuplicateOverrideIDs(t *testing.T) {
 		t.Errorf("duplicate-overrides logs = %v, want duplicate_count=1", logs.Messages())
 	}
 }
+
+// TestLoader_Load_duplicateOverrideIDsLogBounded pins the log-volume bound on
+// the duplicate-override diagnostic (the sibling of the unknown-keys bound):
+// more distinct duplicated AniList IDs than maxLoggedDuplicateIDs logs only
+// the fixed id prefix while duplicate_count still carries the full distinct
+// count, so a pathological overrides file cannot balloon the WARN into a
+// record downstream log limits would truncate or reject.
+func TestLoader_Load_duplicateOverrideIDsLogBounded(t *testing.T) {
+	overrides := filepath.Join(t.TempDir(), "overrides.json")
+	total := maxLoggedDuplicateIDs + 5
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := 1; i <= total; i++ {
+		if i > 1 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"anilist_id":%d,"type":"tv","tvdb_id":1},{"anilist_id":%d,"type":"tv","tvdb_id":2}`, i, i)
+	}
+	b.WriteByte(']')
+	if err := os.WriteFile(overrides, []byte(b.String()), 0o644); err != nil {
+		t.Fatalf("write overrides: %v", err)
+	}
+	logger, logs := capture.New()
+	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
+	if _, _, err := l.Load(context.Background(), freshCache()); err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if logs.CountExact("mapping: duplicate override anilist_ids, last record wins") != 1 {
+		t.Fatalf("Load logs = %v, want one duplicate-overrides warning", logs.Messages())
+	}
+	wantIDs := make([]int, 0, maxLoggedDuplicateIDs)
+	for i := 1; i <= maxLoggedDuplicateIDs; i++ {
+		wantIDs = append(wantIDs, i)
+	}
+	if !attrRendered(logs, "ids", fmt.Sprint(wantIDs)) {
+		t.Errorf("duplicate-overrides logs = %v, want the first %d ids only", logs.Messages(), maxLoggedDuplicateIDs)
+	}
+	if !attrRendered(logs, "duplicate_count", strconv.Itoa(total)) {
+		t.Errorf("duplicate_count logs = %v, want %d", logs.Messages(), total)
+	}
+}
+
+// TestLoader_Load_unknownOverrideKeyBoundsAtLimit pins the accepting side of
+// both unknown-key log bounds at their exact limits: exactly
+// maxLoggedUnknownKeys keys of exactly maxLoggedKeyBytes bytes are logged
+// whole - no elided tail, no ellipsis, keys_truncated=false - so the bounds
+// fire only past the documented limits (a boundary off-by-one would truncate
+// a legal diagnostic).
+func TestLoader_Load_unknownOverrideKeyBoundsAtLimit(t *testing.T) {
+	overrides := filepath.Join(t.TempDir(), "overrides.json")
+	pad := strings.Repeat("x", maxLoggedKeyBytes-3)
+	var b strings.Builder
+	b.WriteString(`[{"anilist_id":2,"type":"movie"`)
+	for i := range maxLoggedUnknownKeys {
+		fmt.Fprintf(&b, `,"k%02d%s":1`, i, pad)
+	}
+	b.WriteString(`}]`)
+	if err := os.WriteFile(overrides, []byte(b.String()), 0o644); err != nil {
+		t.Fatalf("write overrides: %v", err)
+	}
+	logger, rec := capture.New()
+	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
+	if _, _, err := l.Load(context.Background(), freshCache()); err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if rec.CountExact("mapping: overrides contain unknown keys, ignored") != 1 {
+		t.Fatalf("Load logs = %v, want one unknown-keys warning", rec.Messages())
+	}
+	wantKeys := make([]string, 0, maxLoggedUnknownKeys)
+	for i := range maxLoggedUnknownKeys {
+		wantKeys = append(wantKeys, fmt.Sprintf("k%02d%s", i, pad))
+	}
+	if !unknownKeysAre(rec, fmt.Sprint(wantKeys)) {
+		t.Errorf("at-limit keys logs = %v, want all %d keys whole (no ellipsis)", rec.Messages(), maxLoggedUnknownKeys)
+	}
+	if !attrRendered(rec, "unknown_key_count", strconv.Itoa(maxLoggedUnknownKeys)) {
+		t.Errorf("unknown_key_count logs = %v, want %d", rec.Messages(), maxLoggedUnknownKeys)
+	}
+	if !attrRendered(rec, "keys_truncated", "false") {
+		t.Errorf("keys_truncated logs = %v, want false (both bounds exactly at their limits)", rec.Messages())
+	}
+}

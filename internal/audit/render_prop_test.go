@@ -16,15 +16,7 @@ func TestEscapeCellPropertyBoundedOutput(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		s := rapid.String().Draw(t, "s")
 		got := escapeCell(s)
-		if strings.ContainsAny(got, "|[]\\<>\n\r") {
-			t.Errorf("escapeCell(%q) = %q, contains a raw Markdown/HTML metacharacter", s, got)
-		}
-		for _, r := range got {
-			if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) ||
-				(r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
-				t.Errorf("escapeCell(%q) = %q, contains control/bidi rune %U", s, got, r)
-			}
-		}
+		checkEscapedCellInvariants(t, s, got)
 	})
 }
 
@@ -51,19 +43,7 @@ func TestMdLinkPropertyOnlyHTTPLinks(t *testing.T) {
 			return
 		}
 		dest := got[idx+2 : len(got)-1]
-		if strings.ContainsAny(dest, " \t\v\f\n\r()<>|") {
-			t.Errorf("mdLink(%q, %q) destination %q contains a raw URL metacharacter", label, rawURL, dest)
-		}
-		for _, r := range dest {
-			if (r >= 0x80 && r <= 0x9f) || (r >= 0x202a && r <= 0x202e) ||
-				(r >= 0x2066 && r <= 0x2069) || r == 0x2028 || r == 0x2029 {
-				t.Errorf("mdLink(%q, %q) destination %q contains raw control/bidi rune %U", label, rawURL, dest, r)
-			}
-		}
-		lower := strings.ToLower(dest)
-		if !strings.HasPrefix(lower, "http:") && !strings.HasPrefix(lower, "https:") {
-			t.Errorf("mdLink(%q, %q) emitted a non-http link destination %q", label, rawURL, dest)
-		}
+		checkMdLinkDestinationInvariants(t, label, rawURL, dest)
 	})
 }
 
@@ -124,18 +104,6 @@ func TestMdLinkPropertyHTTPDestinationsStayContained(t *testing.T) {
 			t.Fatalf("mdLink(%q, %q) = %q, want an HTTP Markdown link", label, rawURL, got)
 		}
 		dest := got[idx+2 : len(got)-1]
-		if strings.ContainsAny(dest, " \t\v\f\n\r()<>|\\`") {
-			t.Errorf("mdLink(%q, %q) destination %q contains a raw URL metacharacter", label, rawURL, dest)
-		}
-		for _, r := range dest {
-			if (r >= 0x80 && r <= 0x9f) || (r >= 0x202a && r <= 0x202e) ||
-				(r >= 0x2066 && r <= 0x2069) || r == 0x2028 || r == 0x2029 {
-				t.Errorf("mdLink(%q, %q) destination %q contains raw control/bidi rune %U", label, rawURL, dest, r)
-			}
-		}
-		lower := strings.ToLower(dest)
-		if !strings.HasPrefix(lower, "http:") && !strings.HasPrefix(lower, "https:") {
-			t.Errorf("mdLink(%q, %q) emitted a non-http link destination %q", label, rawURL, dest)
-		}
+		checkMdLinkDestinationInvariants(t, label, rawURL, dest)
 	})
 }

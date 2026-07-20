@@ -429,3 +429,69 @@ func TestPackSeasonTieBreakIsOrderIndependent(t *testing.T) {
 		}
 	}
 }
+
+// TestFeedTitleCollapsesOnlyLastEpisodeToken pins the LAST-token contract of
+// the SxxExx collapse arm shared by feedTitle and coveredEpisodes: a file name
+// whose TITLE segment is itself SxxExx-shaped ("Show S02E00 Cut - S01E01")
+// must key/collapse on the real trailing marker, preserving the title segment
+// verbatim - a first-token regression reads the pack as one episode and
+// mangles the served title.
+func TestFeedTitleCollapsesOnlyLastEpisodeToken(t *testing.T) {
+	files := []seadex.File{
+		{Name: "Show S02E00 Cut - S01E01 (1080p).mkv"},
+		{Name: "Show S02E00 Cut - S01E02 (1080p).mkv"},
+	}
+	if got := coveredEpisodes(files); got != 2 {
+		t.Fatalf("coveredEpisodes = %d, want 2 (episodes keyed on the LAST token; the title's SxxExx-shaped substring must not shadow the real marker)", got)
+	}
+	if got, want := feedTitle(&seadex.Torrent{Files: files}), "Show S02E00 Cut - S01 (1080p)"; got != want {
+		t.Errorf("feedTitle = %q, want %q (only the LAST episode token collapses; the title's own SxxExx-shaped substring is preserved verbatim)", got, want)
+	}
+}
+
+// TestFeedTitleCollapsesOnlyLastAbsoluteEpisodeToken pins the LAST-token
+// contract of the absolute-episode collapse arm: a title segment that is
+// itself " - NN"-shaped ("Show - 07 (WEB) - 01") must be preserved and only
+// the real trailing episode number collapsed/keyed - the exact case the arm's
+// own comment names, previously untested.
+func TestFeedTitleCollapsesOnlyLastAbsoluteEpisodeToken(t *testing.T) {
+	files := []seadex.File{
+		{Name: "Show - 07 (WEB) - 01.mkv"},
+		{Name: "Show - 07 (WEB) - 02.mkv"},
+	}
+	if got := coveredEpisodes(files); got != 2 {
+		t.Fatalf("coveredEpisodes = %d, want 2 (absolute episodes keyed on the LAST token)", got)
+	}
+	if got, want := feedTitle(&seadex.Torrent{Files: files}), "Show - 07 (WEB)"; got != want {
+		t.Errorf("feedTitle = %q, want %q (only the LAST absolute token collapses; the ' - NN'-shaped title segment is preserved)", got, want)
+	}
+}
+
+// TestSingleEpisodeMarkerUsesLastToken pins singleEpisodeMarker's LAST-token
+// pick on the assembled-title path: a single episode whose title segment is
+// itself SxxExx-shaped must synthesize with the real trailing marker, not the
+// title's substring - a first-token regression serves the wrong episode
+// identity to the arr.
+func TestSingleEpisodeMarkerUsesLastToken(t *testing.T) {
+	got := synthesizeTitle(&seadex.Torrent{Files: []seadex.File{
+		{Name: "Show S02E00 Cut - S01E05 (1080p).mkv"},
+	}}, EntryInfo{Title: "Show", SeasonTvdb: 1})
+	if want := "Show S01E05 1080p"; got != want {
+		t.Errorf("synthesizeTitle(single episode with a token-shaped title segment) = %q, want %q (the marker is the LAST SxxExx token)", got, want)
+	}
+}
+
+// TestPackSeasonKeysOnLastToken pins the LAST-token rule inside the season
+// tally (seasonCounts): each file votes with its trailing SxxExx token, so a
+// pack whose title segment carries an S02-shaped substring still labels by
+// the real S01 markers - a first-token regression mislabels the whole pack.
+func TestPackSeasonKeysOnLastToken(t *testing.T) {
+	files := []seadex.File{
+		{Name: "Show S02E00 Cut - S01E01.mkv"},
+		{Name: "Show S02E00 Cut - S01E02.mkv"},
+	}
+	season, ok := packSeason(files)
+	if season != 1 || !ok {
+		t.Errorf("packSeason = (%d, %v), want (1, true) (the season tally keys each file on its LAST token, not the title's S02-shaped substring)", season, ok)
+	}
+}

@@ -243,3 +243,49 @@ func TestDecideTriStateEvidence(t *testing.T) {
 		})
 	}
 }
+
+// TestDecideSeasonLabel pins the shared non-negative season label the
+// consumers stamp on their output (Decision.Season): a positive Fribb TVDB
+// season passes through, and a zero or negative mapping (Fribb uses -1 for
+// absolute-numbered runs) is clamped to 0 rather than leaking a negative
+// label into the daemon findings and audit rows.
+func TestDecideSeasonLabel(t *testing.T) {
+	tests := []struct {
+		name       string
+		recType    string
+		arr        string
+		seasonTvdb int
+		want       int
+	}{
+		{"positive season passes through", "TV", library.ArrSonarr, 2, 2},
+		{"negative absolute-numbered mapping clamps to 0", "TV", library.ArrSonarr, -1, 0},
+		{"movie carries 0", "MOVIE", library.ArrRadarr, 0, 0},
+		{"special carries 0", "OVA", library.ArrSonarr, 0, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := library.Item{Arr: tt.arr, HasFile: true, SeasonGroups: map[int][]string{2: {"sam"}}}
+			rec := mapping.Record{Type: tt.recType, SeasonTvdb: tt.seasonTvdb}
+			if d := align.Decide(&item, &rec, []string{"sam"}, nil); d.Season != tt.want {
+				t.Errorf("Season = %d, want %d", d.Season, tt.want)
+			}
+		})
+	}
+}
+
+// TestDecideSingleUnitApproxPassThrough pins that Decide carries the scope
+// layer's approximation flag for a single-unit comparison: a multi-group
+// season-0 specials bucket stays approximate through the shared decision, so
+// a dropped pass-through in Decide cannot silently render every coarse audit
+// row exact.
+func TestDecideSingleUnitApproxPassThrough(t *testing.T) {
+	item := library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{0: {"cait-sidhe", "sallysubs"}}}
+	rec := mapping.Record{Type: "OVA"}
+	d := align.Decide(&item, &rec, []string{"cait-sidhe"}, nil)
+	if !d.Approx {
+		t.Error("Approx = false, want true (multi-group specials bucket is approximate)")
+	}
+	if d.Kind != align.ScopeSpecial {
+		t.Errorf("Kind = %v, want ScopeSpecial", d.Kind)
+	}
+}

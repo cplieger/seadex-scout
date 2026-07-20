@@ -100,7 +100,7 @@ func TestIndex_ForEachRecordAndNewIndex(t *testing.T) {
 }
 
 func TestParseOverrides(t *testing.T) {
-	set, err := parseOverrides([]byte(`[{"anilist_id":5,"type":"  movie  ","imdb_ids":[" tt2222222 ",""]}]`))
+	set, err := parseOverrides([]byte(`[{"anilist_id":5,"type":"  movie  ","imdb_ids":[" tt2222222 ",""],"tmdb_movies":[0,42,-5]}]`))
 	if err != nil {
 		t.Fatalf("parseOverrides error: %v", err)
 	}
@@ -112,6 +112,12 @@ func TestParseOverrides(t *testing.T) {
 	// exact lookup key.
 	if got := set.records[0].IMDbIDs; !slices.Equal(got, []string{"tt2222222"}) {
 		t.Errorf("IMDbIDs = %v, want [tt2222222] (trimmed, blank dropped)", got)
+	}
+	// TMDB movie ids likewise: non-positive entries are dropped to match the
+	// canonical form flexInt+intSlice guarantee on the Fribb path, so an
+	// override cannot introduce a phantom zero/negative lookup key.
+	if got := set.records[0].TmdbMovies; !slices.Equal(got, []int{42}) {
+		t.Errorf("TmdbMovies = %v, want [42] (non-positive entries dropped)", got)
 	}
 	if len(set.unknown) != 0 {
 		t.Errorf("unknown keys = %v, want none for a well-formed override", set.unknown)

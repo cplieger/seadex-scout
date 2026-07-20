@@ -311,7 +311,7 @@ func (ix *Indexer) fetchRaw(ctx context.Context, params url.Values, scope string
 		return nil, false
 	}
 
-	items, err := u.search(ctx, params)
+	items, _, err := u.search(ctx, params)
 	if err != nil {
 		if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, ctx.Err())) {
 			// Caller (the arr) went away or its request deadline fired; not an

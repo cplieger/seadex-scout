@@ -646,8 +646,9 @@ func nonEmpty(vals ...string) []string {
 // --- Snapshot diffing ---
 
 // DiffSnapshots reports what changed between prev and cur, keyed by arr + id.
-// An item is Changed when its group set, per-season group attribution, or
-// current fingerprint differs. Partial-walk suppression is scoped to the
+// An item is Changed when its file presence, group set, per-season group
+// attribution, or current fingerprint differs. Partial-walk suppression is
+// scoped to the
 // known-Failed keys: an item that is a Failed placeholder in cur is not
 // counted as removed (its file state is missing, not gone), and an item that
 // was a Failed placeholder in prev is not counted as added when it walks

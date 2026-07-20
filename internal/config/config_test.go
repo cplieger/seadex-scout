@@ -641,6 +641,34 @@ func TestValidateIndexerHalfConfiguredInfo(t *testing.T) {
 			t.Errorf("Validate() log = %v, want no half-configured indexer info", rec.Messages())
 		}
 	})
+	// The mode/feature half-configuration: a torznab URL with mode report - the
+	// feed is served only by the daemon, so it silently never starts. Info,
+	// same no-Loki-noise posture as the other half-configuration signals.
+	feedBase := base
+	feedBase.IndexerNyaaTorznabURL = "http://prowlarr:9696/22/api"
+	feedBase.IndexerAPIKey = strings.Repeat("a", 32)
+	feedBase.IndexerProwlarrAPIKey = "pk"
+	t.Run("torznab url with mode report logs info", func(t *testing.T) {
+		rec := capture.Default(t)
+		c := feedBase
+		c.RunMode = RunModeReport
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if !rec.Contains("indexer torznab urls are set but mode is report") {
+			t.Errorf("Validate() log = %v, want the report-mode indexer info", rec.Messages())
+		}
+	})
+	t.Run("torznab url with mode daemon stays silent", func(t *testing.T) {
+		rec := capture.Default(t)
+		c := feedBase
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if rec.Contains("indexer torznab urls are set but mode is report") {
+			t.Errorf("Validate() log = %v, want no report-mode indexer info", rec.Messages())
+		}
+	})
 }
 
 // TestValidateIndexerParkedABPasskeyInfo pins the inverse half-configuration

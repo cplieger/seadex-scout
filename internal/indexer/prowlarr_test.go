@@ -44,7 +44,7 @@ func TestUpstreamSearchPreservesExistingQuery(t *testing.T) {
 		http: srv.Client(), log: slog.Default(), name: upstreamNyaa,
 		feed: srv.URL + "/api?indexer=1#client-fragment", apiKey: "prowlarr-key",
 	}
-	items, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
+	items, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestUpstreamSearchDropsForeignDownloadURLs(t *testing.T) {
 	defer srv.Close()
 
 	u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL + "/api"}
-	items, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+	items, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestUpstreamSearchRetriesMalformedResponse(t *testing.T) {
 	defer srv.Close()
 
 	u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
-	items, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
+	items, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
 	if err != nil {
 		t.Fatalf("search after one malformed response: %v (a parse failure must be retried)", err)
 	}
@@ -280,7 +280,7 @@ func TestUpstreamSearchTorznabErrorDocAttempts(t *testing.T) {
 		defer srv.Close()
 
 		u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
-		_, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
+		_, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
 		if err == nil {
 			t.Fatal("search against a code-100 error document returned nil error")
 		}
@@ -314,7 +314,7 @@ func TestUpstreamSearchTorznabErrorDocAttempts(t *testing.T) {
 		defer srv.Close()
 
 		u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
-		items, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
+		items, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
 		if err != nil {
 			t.Fatalf("search after one code-900 error document: %v (a generic upstream error must be retried)", err)
 		}
@@ -362,7 +362,7 @@ func TestUpstreamSearchRedactsAPIKeyInTorznabErrorDoc(t *testing.T) {
 
 			log, rec := capture.New()
 			u := &upstream{http: srv.Client(), log: log, name: upstreamNyaa, feed: srv.URL, apiKey: apiKey}
-			_, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+			_, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
 			if err == nil {
 				t.Fatal("search against an error document returned nil error")
 			}
@@ -400,6 +400,48 @@ func renderedLogRecords(rec *capture.Recorder) []string {
 		out = append(out, b.String())
 	}
 	return out
+}
+
+// TestUpstreamSearchRedactsAndBoundsGenericDecodeError pins the emit-boundary
+// policy on the GENERIC 2xx decode-failure path (the sibling of the <error>-
+// document path above): encoding/xml returns the raw strconv error quoting
+// the FULL unparsed <size> value, so a hostile 2xx body can pack
+// attacker-controlled text - including a reflection of the Prowlarr API key
+// the request carried - into the search error that httpx.Do's retry logger
+// and fetchRaw's WARN expand into the log stream. The returned error must be
+// redacted FIRST and then bounded (sanitizeUpstreamText's 200-byte cap plus
+// the truncation marker, well under the 259-byte ceiling), must never contain
+// the key, and must keep the malformedBody marker the harvest classifies on.
+func TestUpstreamSearchRedactsAndBoundsGenericDecodeError(t *testing.T) {
+	const apiKey = "test-prowlarr-key"
+	garbage := "GARBAGE-" + apiKey + "-" + strings.Repeat("z", 4096)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = io.WriteString(w,
+			`<?xml version="1.0" encoding="UTF-8"?><rss xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel><item><title>x</title><size>`+garbage+`</size></item></channel></rss>`)
+	}))
+	defer srv.Close()
+
+	log, rec := capture.New()
+	u := &upstream{http: srv.Client(), log: log, name: upstreamNyaa, feed: srv.URL, apiKey: apiKey}
+	_, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+	if err == nil {
+		t.Fatal("search against a garbled <size> body returned nil error")
+	}
+	if !malformedUpstreamBody(err) {
+		t.Errorf("error = %T (%v), want the malformedBody marker preserved", err, err)
+	}
+	if got := len(err.Error()); got > 259 {
+		t.Errorf("error text is %d bytes, want <= 259 (redacted then bounded at the parse boundary)", got)
+	}
+	if strings.Contains(err.Error(), apiKey[:8]) {
+		t.Errorf("returned error leaks the API key (or a prefix): %v", err)
+	}
+	for _, line := range renderedLogRecords(rec) {
+		if strings.Contains(line, apiKey[:8]) {
+			t.Errorf("log record leaks the API key (or a prefix): %q", line)
+		}
+	}
 }
 
 // TestFetchAndParseRateLimitCarriesRetryAfterHint pins the status path of the
@@ -460,7 +502,7 @@ func TestUpstreamSearchRejectsOversizedResponse(t *testing.T) {
 	defer srv.Close()
 
 	u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
-	_, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+	_, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
 	if err == nil {
 		t.Fatal("search with an oversized upstream body returned nil, want *httpx.ResponseTooLargeError")
 	}
@@ -486,7 +528,7 @@ func TestUpstreamSearchRejectsOversizedResponse(t *testing.T) {
 func TestSearchRejectsUnparseableUpstreamURLs(t *testing.T) {
 	t.Run("unparseable configured feed URL", func(t *testing.T) {
 		u := &upstream{log: slog.Default(), name: upstreamNyaa, feed: "http://prowlarr:9696/api%zz"}
-		_, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+		_, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
 		if err == nil || !strings.Contains(err.Error(), "invalid upstream feed URL") {
 			t.Errorf("search error = %v, want the invalid-feed-URL error before any HTTP call", err)
 		}

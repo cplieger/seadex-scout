@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -16,7 +16,7 @@ import (
 func TestDedupeTitles(t *testing.T) {
 	got := dedupeTitles("Frieren", "", " \t", "Frieren", "Sousou no Frieren")
 	want := []string{"Frieren", "Sousou no Frieren"}
-	if !reflect.DeepEqual(got, want) {
+	if !slices.Equal(got, want) {
 		t.Errorf("dedupeTitles() = %v, want %v", got, want)
 	}
 }
@@ -31,7 +31,7 @@ func TestParseMedia(t *testing.T) {
 		t.Errorf("format/year = %q/%d, want TV/2023", m.Format, m.Year)
 	}
 	want := []string{"Sousou no Frieren", "Frieren", "x"}
-	if !reflect.DeepEqual(m.Titles, want) {
+	if !slices.Equal(m.Titles, want) {
 		t.Errorf("titles = %v, want %v", m.Titles, want)
 	}
 }
@@ -129,7 +129,7 @@ func TestParseMediaPage(t *testing.T) {
 	if out[2].Year != 2019 {
 		t.Errorf("id 2 year = %d, want startDate fallback 2019", out[2].Year)
 	}
-	if !reflect.DeepEqual(out[2].Titles, []string{"B"}) {
+	if !slices.Equal(out[2].Titles, []string{"B"}) {
 		t.Errorf("id 2 titles = %v, want deduped [B]", out[2].Titles)
 	}
 }
@@ -189,6 +189,9 @@ func TestParseMediaPageNullableEnvelope(t *testing.T) {
 		{name: "missing Page", raw: `{"data":{}}`, wantErr: true},
 		{name: "missing media", raw: `{"data":{"Page":{}}}`, wantErr: true},
 		{name: "null media", raw: `{"data":{"Page":{"media":null}}}`, wantErr: true},
+		{name: "non-array media (string) rejected", raw: `{"data":{"Page":{"media":"nope"}}}`, wantErr: true},
+		{name: "non-array media (object) rejected", raw: `{"data":{"Page":{"media":{}}}}`, wantErr: true},
+		{name: "type-mismatched element fails batch", raw: `{"data":{"Page":{"media":[{"id":"x","title":{"romaji":"A"}}]}}}`, wantErr: true},
 		{name: "duplicate media ending in null", raw: `{"data":{"Page":{"media":[{"id":1,"title":{"romaji":"A"}}],"media":null}}}`, wantErr: true},
 		{name: "record with whitespace-only title fails batch", raw: `{"data":{"Page":{"media":[{"id":1,"title":{"romaji":" "}}]}}}`, wantErr: true},
 		{name: "record with punctuation-only title fails batch", raw: `{"data":{"Page":{"media":[{"id":1,"title":{"romaji":"!!!"}}]}}}`, wantErr: true},
@@ -489,6 +492,36 @@ func TestObserveRateHeadersThresholdBoundary(t *testing.T) {
 					}
 				}
 			})
+		})
+	}
+}
+
+// TestBoundedMediaListUnmarshalTruncatedData pins the json.Unmarshaler
+// contract of boundedMediaList against inputs the outer decoder never
+// produces (encoding/json hands UnmarshalJSON syntax-valid values only, so
+// these EOF branches are unreachable through parseMediaPage): a truncated
+// value must error and leave the list unset, never a silent empty decode.
+func TestBoundedMediaListUnmarshalTruncatedData(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{name: "empty input", data: ""},
+		{name: "unclosed array", data: "["},
+		{name: "truncated element", data: `[{"id":`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var l boundedMediaList
+			if err := l.UnmarshalJSON([]byte(tt.data)); err == nil {
+				t.Fatal("UnmarshalJSON on truncated data = nil error, want error")
+			}
+			if l.set {
+				t.Error("l.set = true after a failed decode, want unset")
+			}
+			if l.records != nil {
+				t.Errorf("l.records = %v after a failed decode, want nil", l.records)
+			}
 		})
 	}
 }

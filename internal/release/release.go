@@ -7,7 +7,12 @@
 // (the canonical spelling, with every no-group variant folded onto the NoGroup
 // sentinel) and GroupsOverlap, the three-valued group-set comparison in which
 // a NoGroup member is unknown evidence — it can neither prove an overlap nor
-// permit a divergence proof — rather than an identity token.
+// permit a divergence proof — rather than an identity token. The same
+// single-home rule extends to the canonical tracker table (trackers.go:
+// names, aliases, obtainability class, site base URLs, and the fail-closed
+// host-classification gates) and to the curation-warning tag vocabulary
+// (curation.go), both of which this package owns so they cannot fork
+// across consumers.
 //
 // The remux-vs-encode decision is deliberately name-and-notes based, never a
 // size or bitrate inference: on SeaDex a remux is stated in the release name or

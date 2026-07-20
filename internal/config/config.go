@@ -6,9 +6,10 @@
 //
 // The file exposes only user-facing settings (arrs, mode, schedule, filters,
 // arr_tags, report dir, logging, the indexer feed). Internal machinery - the
-// upstream endpoints, the politeness/refresh/rate cadences, the indexer bind
-// address, and the internal /config file paths (state, overrides, feed
-// snapshot) - are fixed package constants, not file keys. The on-disk shape
+// upstream endpoints, the politeness/refresh/rate cadences, and the internal
+// /config file paths (state, overrides, feed snapshot) - are fixed package
+// constants, not file keys (the indexer bind address is fixed too, in
+// internal/indexer). The on-disk shape
 // (fileConfig) is loaded onto a defaults baseline, ${VAR}-expanded, then
 // flattened into the runtime Config the rest of the app reads. Call Validate
 // to check the result is runnable. There is no hot reload: the file is read
@@ -180,9 +181,10 @@ func defaultFileConfig() fileConfig {
 }
 
 // Config is the effective runtime configuration after loading. It holds only
-// the user-configurable settings; the fixed endpoints, cadences, bind address,
-// and /config file paths are package constants (see the const block), wired in
-// build.go. Fields are ordered largest-alignment-first for govet fieldalignment.
+// the user-configurable settings; the fixed endpoints, cadences, and /config
+// file paths are package constants (see the const block), wired in build.go;
+// the indexer bind address is fixed in internal/indexer. Fields are ordered
+// largest-alignment-first for govet fieldalignment.
 type Config struct {
 	RunMode   string // "daemon" (default) or "report" (one-shot audit).
 	ReportDir string // directory for timestamped report-<ts>.md / .json pairs.
@@ -487,7 +489,7 @@ func (c *Config) Validate() error {
 	if err := c.validateEnabledArrs(); err != nil {
 		return err
 	}
-	c.warnMalformedPublicURLs()
+	c.warnPublicURLProblems()
 	c.warnOverlappingTags()
 	return c.validateIndexer()
 }
@@ -517,11 +519,11 @@ func (c *Config) validateEnabledArrs() error {
 	return nil
 }
 
-// warnMalformedPublicURLs warns on a malformed public_url. public_url only
-// feeds report deep-links, so a malformed value warns (the links will be
-// broken) but still loads; a hard rejection would newly reject configs that
-// load today.
-func (c *Config) warnMalformedPublicURLs() {
+// warnPublicURLProblems warns on a malformed or credentialed public_url.
+// public_url only feeds report deep-links, so a malformed value warns (the
+// links will be broken) but still loads; a hard rejection would newly reject
+// configs that load today.
+func (c *Config) warnPublicURLProblems() {
 	for _, pu := range []struct{ name, val string }{
 		{"sonarr.public_url", c.SonarrPublicURL},
 		{"radarr.public_url", c.RadarrPublicURL},
@@ -529,6 +531,12 @@ func (c *Config) warnMalformedPublicURLs() {
 		if err := validateHTTPURL(pu.name, pu.val); err != nil {
 			slog.Warn("public_url is malformed; report deep-links will be broken",
 				"error", err)
+		}
+		if urlEmbedsCredential(pu.val) {
+			slog.Warn("public_url embeds userinfo or a credential-like query parameter; "+
+				"deep-links are credential-redacted in logs, state, and report files, "+
+				"so the credential will never appear in the links",
+				"field", pu.name)
 		}
 	}
 }
@@ -582,6 +590,14 @@ func (c *Config) validateIndexer() error {
 	if !c.IndexerConfigured() {
 		c.infoDisabledIndexerKeys()
 		return nil
+	}
+	// The Torznab feed is served only by the daemon; a file-level report mode
+	// exits after the one-shot audit, so a configured feed silently never
+	// starts. Info, mirroring the other half-configuration signals: a
+	// deliberately parked indexer section must not raise Loki alert noise.
+	if c.RunMode == RunModeReport {
+		slog.Info("indexer torznab urls are set but mode is report; " +
+			"the Torznab feed only runs in daemon mode and will not start")
 	}
 	if c.IndexerAPIKey == "" {
 		return errors.New("indexer.feed_api_key is required when indexer.nyaa_torznab_url or indexer.ab_torznab_url is set")

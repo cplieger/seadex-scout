@@ -14,7 +14,7 @@ func FuzzNormalize(f *testing.F) {
 	f.Add("Re:ZERO -Starting Life in Another World-")
 	f.Add("\u846c\u9001\u306e\u30d5\u30ea\u30fc\u30ec\u30f3") // CJK-only strips to empty
 	f.Add("  ")
-	f.Add("\u0130stanbul") // dotted capital I: ToLower yields i + combining dot
+	f.Add("\u0130stanbul") // dotted capital I: Go's simple case mapping lowercases it to plain "i"
 	f.Fuzz(func(t *testing.T, title string) {
 		got := Normalize(title)
 		for _, r := range got {
