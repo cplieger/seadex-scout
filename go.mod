@@ -22,5 +22,5 @@ require github.com/cplieger/envx/yamlenv v1.1.0
 
 require (
 	github.com/cplieger/httpx/v3 v3.1.1 // indirect
-	github.com/cplieger/runesafe v1.1.0 // indirect
+	github.com/cplieger/runesafe v1.1.1 // indirect
 )
