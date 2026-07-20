@@ -90,9 +90,10 @@ func scopeOfKey(key string) string {
 // --- Journal item rendering ---
 
 // renderJournalItem materializes the journal item for key from its current
-// curated occurrences: synthesis from the first occurrence, then best-wins on
-// the marker and category union across all of them (a torrent attached to
-// several entries must not render conflicting duplicates). ok is false when
+// curated occurrences: synthesis from the lowest-AniList-ID occurrence, then
+// best-wins on the marker and category union across all of them (a torrent
+// attached to several entries must not render conflicting duplicates). ok is
+// false when
 // the torrent cannot be served: no grabbable download link (an AnimeBytes
 // release without a passkey - reported via noPasskey so the caller can nudge
 // the operator - or an id-less URL, which journalKey already excludes) or no

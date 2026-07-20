@@ -274,7 +274,9 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info f
 // before committing: a snapshot the reload would reject must not replace the
 // last-good file, or the next restart starts with an empty feed. It first
 // strips the AB feed's download URLs so no passkey is ever serialized (see
-// stripABDownloadURLs).
+// stripABDownloadURLs), and likewise scrubs AB-scoped items misplaced in the
+// Nyaa feed (stripABScopedDownloadURLs) so a scope mismatch cannot leak a
+// passkey either.
 func (w *FeedWriter) persist(ctx context.Context, snap *snapshot) error {
 	stripABDownloadURLs(snap.ABFeed)
 	stripABScopedDownloadURLs(snap.NyaaFeed)

@@ -145,10 +145,12 @@ func writeItem(b *strings.Builder, it *item) {
 		writeText(b, "pubDate", it.PubDate.UTC().Format(time.RFC1123Z))
 	}
 	// Clamp like the peer counts below: toItem and totalSize normalize at
-	// their own ingresses, but a hand-edited or corrupted persisted snapshot
-	// passes validPersistedItem (string/category-count checks only), so an
-	// unclamped value would render a negative enclosure length/size attr or
-	// a non-positive category id, contradicting toItem's normalization.
+	// their own ingresses, and validPersistedItem rejects persisted negative
+	// size/peer counts, but it does not validate category positivity, and
+	// search-path items rendered directly never pass the persistence gate -
+	// so an unclamped value here could still render a negative enclosure
+	// length/size attr or a non-positive category id, contradicting toItem's
+	// normalization.
 	size := max(it.Size, 0)
 	if it.DownloadURL != "" {
 		b.WriteString(`<enclosure url="`)
