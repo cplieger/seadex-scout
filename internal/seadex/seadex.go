@@ -89,7 +89,8 @@ const (
 	// the remaining allowance caps each page's decode, so the guard fires
 	// (clean degradation) before allocation scales with the hostile input.
 	// Sized jointly with maxTotalBytes: worst-case element struct overhead
-	// (~112 B/torrent x this cap) must fit under the 256 MiB container
+	// (~120 B/torrent on supported 64-bit targets x this cap) must fit
+	// under the 256 MiB container
 	// TOGETHER with maxTotalBytes of decoded string content.
 	maxTotalElements = 500_000
 )

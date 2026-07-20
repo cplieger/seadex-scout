@@ -62,9 +62,11 @@ type harvestGroup struct {
 // shows this rebuild, while a show-local malformed response only skips that
 // show, so one poison result set cannot freeze an otherwise healthy tracker's
 // whole harvest on synthesized titles; a run of consecutiveMalformedLatch
-// malformed shows on one scope latches it scope-wide anyway, since systematic
-// 2xx garbage (e.g. a proxy answering HTML to everything) is upstream-wide
-// breakage that would otherwise burn the whole budget with zero progress.
+// malformed shows — or of consecutiveRejectedLatch request-scoped rejections
+// — on one scope latches it scope-wide anyway, since systematic 2xx garbage
+// (e.g. a proxy answering HTML to everything) or an upstream deterministically
+// rejecting every query shape is upstream-wide breakage that would otherwise
+// burn the whole budget with zero progress.
 func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]item, titles map[string]string, infoFor func(alID int) EntryInfo) (stats harvestStats) {
 	defer func() { stats.pending = syntheticCount(feeds, titles) }()
 	groups, index := pendingHarvest(feeds, titles, infoFor)
@@ -172,7 +174,8 @@ const (
 // deliberately rejected THIS show's query, so the failure is show-local -
 // terminal for the show (retrying the same invalid request cannot help, which
 // is why terminalTorznabCode already fails it fast) but never evidence the
-// upstream itself is down, so the scope's other shows are still harvested.
+// upstream itself is down, so one rejection stays show-local (a consecutive
+// run of them may still trip consecutiveRejectedLatch and latch the scope).
 // Auth/account codes (100-199) stay scope-wide: bad credentials fail every
 // show's query identically.
 func requestScopedHarvestError(err error) bool {
@@ -200,7 +203,9 @@ const consecutiveMalformedLatch = 3
 // scope is treated as systematically rejecting this app's query shape (e.g.
 // an indexer definition without tvsearch caps answering 203 to every
 // season-form query) and its remaining shows are skipped this rebuild. One
-// rejected query stays show-local; a successful page resets the run.
+// rejected query stays show-local; a show whose harvest ends without a
+// request-scoped rejection - a success (even an empty one) or a malformed
+// show - resets the run.
 const consecutiveRejectedLatch = 3
 
 // harvestShow runs one show's query (plus offset pages while its items remain
@@ -220,7 +225,8 @@ const consecutiveRejectedLatch = 3
 // <error> document naming a request/parameter code (200-299) is likewise
 // show-local (requestScopedHarvestError -> harvestShowFailed): the upstream
 // deliberately rejected this one show's query, so its siblings' valid queries
-// must still run.
+// still run — unless a run of rejections trips the caller's
+// consecutiveRejectedLatch.
 func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGroup, meta EntryInfo, index, titles map[string]string, budget int, stats *harvestStats) (int, harvestOutcome) {
 	params := harvestParams(meta, g.scope)
 	for offset := 0; budget > 0 && ctx.Err() == nil; offset += harvestPageSize {
@@ -246,7 +252,8 @@ func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGrou
 // query and maps it to the outcome harvestTitles latches: a persistently
 // malformed SUCCESSFUL body stays show-local (harvestShowMalformed, counted
 // toward the consecutive-malformed latch), a request-scoped Torznab rejection
-// (codes 200-299) stays show-local without counting (harvestShowFailed), and
+// (codes 200-299) stays show-local and counts toward the consecutive-rejected
+// latch (harvestShowFailed), and
 // anything else - a status/transport/auth failure - condemns the scope
 // (harvestScopeFailed).
 func (w *FeedWriter) classifyHarvestError(err error, u *upstream, alID int) harvestOutcome {

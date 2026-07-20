@@ -514,10 +514,11 @@ func (s *Scout) rebuildFeed(ctx context.Context, entries []seadex.Entry, idx *ma
 	}
 }
 
-// logFeedOutageOnGatedCycle surfaces a concurrent SeaDex outage when the
-// library gate (a failed arr walk, or a suspicious shrunken walk) already
-// closed the cycle but a feed is configured, so a multi-dependency outage
-// does not read as library-only. During a shutdown the SeaDex failure is the
+// logFeedOutageOnGatedCycle surfaces a concurrent SeaDex outage when an
+// earlier gate (a failed arr walk, a suspicious shrunken walk, or an
+// unusable mapping) already closed the cycle but a feed is configured, so a
+// multi-dependency outage does not read as the gate's primary failure only.
+// During a shutdown the SeaDex failure is the
 // cancellation (the interruption is logged by the gate that owns it), so it
 // stays silent then.
 func (s *Scout) logFeedOutageOnGatedCycle(ctx context.Context, entries []seadex.Entry, seaErr error) {

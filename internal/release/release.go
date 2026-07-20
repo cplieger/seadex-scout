@@ -95,33 +95,93 @@ type Input struct {
 // tracker vocabulary).
 var resolutionHeights = []string{"2160p", "1440p", "1080p", "720p", "480p"}
 
+// evidenceWordClass is the raw-text word alphabet the marker edges are
+// defined against: the ASCII alphanumerics plus U+0130 (LATIN CAPITAL LETTER
+// I WITH DOT ABOVE) and U+212A (KELVIN SIGN) — exactly the runes
+// strings.ToLower folds onto an ASCII alphanumeric. The pre-optimization
+// classifier lowercased the evidence and used [[:alnum:]] edges; defining
+// word-ness on the raw text via this class preserves those exact token
+// boundaries without allocating the lowercased copy. Underscore stays a
+// delimiter (the old normalization replaced it with a space before matching).
+const evidenceWordClass = `A-Za-z0-9\x{0130}\x{212A}`
+
+// nonWordEdge matches one raw-text rune the old normalized comparison
+// treated as a token delimiter: any rune outside evidenceWordClass.
+const nonWordEdge = `[^` + evidenceWordClass + `]`
+
+// lowerLiteralPattern renders a lowercase marker token as a regexp fragment
+// matching exactly the raw spellings whose strings.ToLower image equals the
+// token: each ASCII letter becomes an explicit case class — with U+0130
+// added to the i class and U+212A to the k class, the only non-ASCII runes
+// unicode.ToLower maps onto ASCII — digits match themselves, and anything
+// else is quoted literally. A global (?i) is deliberately NOT used: regexp
+// case folding follows unicode.SimpleFold, which diverges from
+// strings.ToLower — (?i)s also matches U+017F (ſ), which ToLower never folds
+// onto s, while (?i)i misses U+0130, which ToLower does fold onto i — so
+// (?i) silently changes classification decisions on such runes (pinned by
+// the Unicode rows in TestClassifyKind and TestClassifyResolution).
+func lowerLiteralPattern(token string) string {
+	var b strings.Builder
+	for _, r := range token {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteByte('[')
+			b.WriteRune(r)
+			b.WriteRune(r - 'a' + 'A')
+			switch r {
+			case 'i':
+				b.WriteString(`\x{0130}`)
+			case 'k':
+				b.WriteString(`\x{212A}`)
+			}
+			b.WriteByte(']')
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteString(regexp.QuoteMeta(string(r)))
+		}
+	}
+	return b.String()
+}
+
+// lowerTokensPattern joins the lowerLiteralPattern renderings of tokens into
+// one regexp alternation.
+func lowerTokensPattern(tokens []string) string {
+	parts := make([]string, len(tokens))
+	for i, t := range tokens {
+		parts[i] = lowerLiteralPattern(t)
+	}
+	return strings.Join(parts, "|")
+}
+
 var (
 	// reResolution matches a known resolution height with hand-built edges
 	// instead of \b: Go regexp word boundaries require a non-word character
 	// before the first digit, which misses compact spellings such as
 	// "BD1080p" and "1920x1080p" that the live SeaDex catalogue uses. The
 	// left edge rejects only a preceding digit (so "21080p" is not read as
-	// 1080p) and the right edge rejects an alphanumeric continuation (so
-	// "x1080py" stays unmatched); the height itself is captured in group 1
-	// for detectResolution.
-	reResolution = regexp.MustCompile(`(?i)(?:^|[^0-9])(` + strings.Join(resolutionHeights, "|") + `)(?:$|[^[:alnum:]])`)
+	// 1080p) and the right edge rejects a word-rune continuation via
+	// nonWordEdge (so "x1080py" stays unmatched); the height itself is
+	// captured in group 1 for detectResolution.
+	reResolution = regexp.MustCompile(`(?:^|[^0-9])(` + lowerTokensPattern(resolutionHeights) + `)(?:$|` + nonWordEdge + `)`)
 	// reBitrate / reCRF / reRemux / reEncode match the raw evidence text in
-	// place: case-insensitive, with explicit non-alphanumeric edges instead
-	// of \b. Go regexp treats "_" as a word character, so \b would miss
-	// underscore-delimited scene names such as Show_CRF18_BDRemux; POSIX
-	// [^[:alnum:]] treats "_" as a delimiter, and the optional separator
+	// place, built via lowerLiteralPattern (strings.ToLower-faithful case
+	// classes; see its doc) with explicit nonWordEdge boundaries instead of
+	// \b. Go regexp treats "_" as a word character, so \b would miss
+	// underscore-delimited scene names such as Show_CRF18_BDRemux;
+	// nonWordEdge treats "_" as a delimiter, and the optional separator
 	// classes accept "_" alongside whitespace. Matching in place means no
 	// evidence-sized lowercased/underscore-replaced copy is ever allocated
 	// for an upstream-controlled name or notes value.
-	reBitrate = regexp.MustCompile(`(?i)(?:^|[^[:alnum:]])\d+[\s_]?(?:kbps|mbps)(?:$|[^[:alnum:]])`)
+	reBitrate = regexp.MustCompile(`(?:^|` + nonWordEdge + `)\d+[\s_]?(?:` + lowerTokensPattern([]string{"kbps", "mbps"}) + `)(?:$|` + nonWordEdge + `)`)
 	// reCRF matches an x264/x265 CRF tag such as "crf18" or "crf 20".
-	reCRF = regexp.MustCompile(`(?i)(?:^|[^[:alnum:]])crf[\s_]?\d+(?:$|[^[:alnum:]])`)
+	reCRF = regexp.MustCompile(`(?:^|` + nonWordEdge + `)` + lowerLiteralPattern("crf") + `[\s_]?\d+(?:$|` + nonWordEdge + `)`)
 	// reRemux matches a remux marker as a delimiter-bounded token ("remux",
 	// "BDRemux", "BD-Remux"), never a bare substring inside a longer word.
 	// "PREMUX" is included deliberately: SeaDex uses it for pre-muxed
 	// releases, and token-bounding alone would lose it (no word boundary
 	// between the "p" and "remux").
-	reRemux = regexp.MustCompile(`(?i)(?:^|[^[:alnum:]])(?:bd[\s._-]?remux|premux|remux)(?:$|[^[:alnum:]])`)
+	reRemux = regexp.MustCompile(`(?:^|` + nonWordEdge + `)(?:` + lowerLiteralPattern("bd") + `[\s._-]?` + lowerLiteralPattern("remux") + `|` + lowerTokensPattern([]string{"premux", "remux"}) + `)(?:$|` + nonWordEdge + `)`)
 	// reEncode matches a generic encode marker ("encode", "encoded", "BDRip")
 	// with reRemux's delimiter-bounded token style, so a bare substring inside
 	// a longer word ("reencoded", "encoder") is never a marker. It is the
@@ -131,7 +191,7 @@ var (
 	// many isBest encodes state "encode"/"BDRip" in their name or notes
 	// without any codec, CRF, or bitrate marker and previously classified
 	// unknown.
-	reEncode = regexp.MustCompile(`(?i)(?:^|[^[:alnum:]])(?:bdrip|encoded|encode)(?:$|[^[:alnum:]])`)
+	reEncode = regexp.MustCompile(`(?:^|` + nonWordEdge + `)(?:` + lowerTokensPattern([]string{"bdrip", "encoded", "encode"}) + `)(?:$|` + nonWordEdge + `)`)
 )
 
 // Canonical codec families the classifier normalizes video codecs to.
@@ -159,13 +219,16 @@ var (
 	x265TextTokens = []string{codecX265, "h265", "hevc"}
 	x264TextTokens = []string{codecX264, "h264", "avc"}
 	// reTextX265 / reTextX264 apply the text-token lists to raw evidence in
-	// place (case-insensitive substring, no boundary — see above), so codec
-	// detection needs no lowercased copy of the evidence. The alternations
-	// derive from the token lists to keep the vocabulary single-homed.
-	reTextX265   = regexp.MustCompile(`(?i)` + strings.Join(x265TextTokens, "|"))
-	reTextX264   = regexp.MustCompile(`(?i)` + strings.Join(x264TextTokens, "|"))
-	reDottedX265 = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])h\.265`)
-	reDottedX264 = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])h\.264`)
+	// place (ToLower-faithful case classes via lowerTokensPattern, no
+	// boundary — see above), so codec detection needs no lowercased copy of
+	// the evidence. The alternations derive from the token lists to keep the
+	// vocabulary single-homed.
+	reTextX265 = regexp.MustCompile(lowerTokensPattern(x265TextTokens))
+	reTextX264 = regexp.MustCompile(lowerTokensPattern(x264TextTokens))
+	// reDottedX265 / reDottedX264 require a non-word left boundary
+	// (nonWordEdge, the same raw-text word set the marker edges use).
+	reDottedX265 = regexp.MustCompile(`(?:^|` + nonWordEdge + `)` + lowerLiteralPattern("h.265"))
+	reDottedX264 = regexp.MustCompile(`(?:^|` + nonWordEdge + `)` + lowerLiteralPattern("h.264"))
 )
 
 // evidence accumulates the classification signals of one text source (the
@@ -174,7 +237,8 @@ var (
 // torrent — is never materialized as a single joined and normalized string
 // (which cost several simultaneous evidence-sized allocations and could OOM a
 // memory-limited container on a malformed page). Each piece is matched IN
-// PLACE by the case-insensitive, underscore-aware marker regexes — no
+// PLACE by the ToLower-faithful, underscore-aware marker regexes (built via
+// lowerLiteralPattern) — no
 // per-piece lowercased or underscore-replaced copy is allocated either, so
 // even a single decode-cap-sized name or notes value adds no evidence-sized
 // allocations on top of the decoded source string. Only the marker flags, the

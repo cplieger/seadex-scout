@@ -16,7 +16,7 @@ import (
 // newerSchemaState reports whether data is what Load classifies as valid
 // newer-schema state: a JSON object envelope whose persisted "version" member
 // decodes to an int beyond SchemaVersion. It reads the wire shape directly
-// (a struct with its own "version" tag) instead of decoding into State, so
+// (a streaming token decode of the raw bytes) instead of decoding into State, so
 // the oracle stays independent of production: a regression to State.Version's
 // JSON tag or decoding shape changes Load's classification without silently
 // changing this helper with it, and the newer-schema seeds fail instead of

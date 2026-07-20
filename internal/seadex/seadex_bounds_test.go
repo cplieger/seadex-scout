@@ -95,7 +95,7 @@ func TestFetchEntriesDecodeCardinalityCapsError(t *testing.T) {
 // materialized.
 func TestDecodePageElementBudgetErrors(t *testing.T) {
 	// 40 items x 512 torrents x 60 tags = 1+512+30720 elements per item,
-	// 1,249,320 total: over the 1M budget while every per-parent cap holds.
+	// 1,249,320 total: over the 500K budget while every per-parent cap holds.
 	torrent := `{"tags":[` + repeatJSON(`""`, 60) + `]}`
 	item := `{"alID":1,"expand":{"trs":[` + repeatJSON(torrent, 512) + `]}}`
 	page := `{"totalPages":1,"items":[` + repeatJSON(item, 40) + `]}`

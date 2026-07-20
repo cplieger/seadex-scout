@@ -142,6 +142,16 @@ func TestClassifyKind(t *testing.T) {
 		{name: "underscore-delimited crf", in: Input{Names: []string{"Show_CRF18"}}, wantKind: KindEncode, wantReason: "encoder marker: crf"},
 		{name: "underscore-delimited bitrate", in: Input{Names: []string{"Show_4500_kbps"}}, wantKind: KindEncode, wantReason: "encoder marker: bitrate"},
 		{name: "underscore-delimited bdrip", in: Input{Names: []string{"Show_1080p_BDRip"}}, wantKind: KindEncode, wantReason: "encoder marker: encode"},
+		// The Unicode rows pin lowerLiteralPattern's ToLower-faithful folding
+		// against regexp's SimpleFold: U+0130 (İ) lowercases to ASCII i (a
+		// word rune SimpleFold misses), U+212A (KELVIN SIGN) lowercases to k,
+		// and U+017F (ſ) is a delimiter (ToLower never folds it onto s,
+		// though SimpleFold does).
+		{name: "U+0130 joins the digits to the word and blocks the bitrate edge", in: Input{Names: []string{"Show\u01304500 kbps"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
+		{name: "U+017F is not an s in the bitrate suffix", in: Input{Names: []string{"Show 4500 kbp\u017f"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
+		{name: "U+017F is a delimiter before the bitrate", in: Input{Names: []string{"Show\u017f4500 kbps"}}, wantKind: KindEncode, wantReason: "encoder marker: bitrate"},
+		{name: "U+0130 folds onto i in the bdrip token", in: Input{Names: []string{"Show BDR\u0130P"}}, wantKind: KindEncode, wantReason: "encoder marker: encode"},
+		{name: "kelvin sign folds onto k in the bitrate suffix", in: Input{Names: []string{"Show 4500 \u212abps"}}, wantKind: KindEncode, wantReason: "encoder marker: bitrate"},
 		{name: "unknown when no marker", in: Input{Names: []string{"Show 1080p"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
 	}
 	for _, tc := range tests {
@@ -400,6 +410,11 @@ func TestClassifyResolution(t *testing.T) {
 		{name: "compact BD1080p spelling", in: Input{Names: []string{"Show [BD1080p]"}}, want: "1080p"},
 		{name: "dimension form 1920x1080p", in: Input{Names: []string{"Show 1920x1080p"}}, want: "1080p"},
 		{name: "preceding digit is not a resolution boundary", in: Input{Names: []string{"Show 21080p"}}, want: ""},
+		// U+0130 lowercases to ASCII i (a word rune: it blocks the right
+		// edge like any letter), while U+017F never folds onto an ASCII
+		// alphanumeric under ToLower, so it delimits the height.
+		{name: "U+0130 word rune blocks the right edge", in: Input{Names: []string{"Show 1080p\u0130"}}, want: ""},
+		{name: "U+017F delimits the height", in: Input{Names: []string{"Show 1080p\u017f"}}, want: "1080p"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

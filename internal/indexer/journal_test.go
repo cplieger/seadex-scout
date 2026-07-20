@@ -951,12 +951,12 @@ func TestRenderJournalItemNoOccurrencesRejected(t *testing.T) {
 }
 
 // TestRebuildDropsCarriedItemWarnedByStoredHashOnly pins carryItem's
-// stored-hash branch (warnedIDs[it.InfoHash]) in isolation: the carried
+// stored-hash branch (warnedSet.retracts via ws.ids[it.InfoHash]) in isolation: the carried
 // nyaa:99 item has NO current occurrence in the catalogue (so its key never
 // enters the widened carry-drop key set), but its stored info hash matches a
 // Broken torrent journaled under a DIFFERENT key (nyaa:41). The carried item
 // must still be retracted through the stored hash - deleting the
-// warnedIDs[it.InfoHash] branch would leave it serving warned bytes on RSS -
+// warnedSet.retracts' stored-hash branch would leave it serving warned bytes on RSS -
 // and the drop is counted on the snapshot log line.
 func TestRebuildDropsCarriedItemWarnedByStoredHashOnly(t *testing.T) {
 	log, rec := capture.New()
