@@ -28,7 +28,51 @@ const (
 	// read alike so a rebuild can never persist a snapshot the server's reload
 	// would then reject.
 	maxFeedBytes = 64 << 20
+	// maxPersistedFieldBytes caps each persisted feed item's string field
+	// (title, GUID/info/download URL, journal key). It equals torznab.go's
+	// maxUpstreamFieldBytes, so every harvested title and Prowlarr URL fits
+	// by construction; only an external value with no other bound (a SeaDex
+	// filename synthesized into a title can approach the 48 MiB page limit)
+	// is rejected. Without a per-item cap, one such value could pass the
+	// whole-snapshot maxFeedBytes check and reach renderFeed, whose XML
+	// escaping expands an ampersand-heavy title ~5x - enough to drive peak
+	// memory past the 256 MiB container limit and OOM the indexer instead
+	// of degrading.
+	maxPersistedFieldBytes = 4096
+	// maxPersistedCategories caps one persisted item's category list. The
+	// writer unions at most the three Torznab ids the feed uses (TV, Anime,
+	// Movies); anything larger is a hand-edited snapshot.
+	maxPersistedCategories = 8
 )
+
+// validPersistedItem reports whether one feed item respects the shared
+// persisted-item limits: every string field under maxPersistedFieldBytes and
+// the category list under maxPersistedCategories. Enforced when
+// renderJournalItem creates an item (an oversized external value counts as
+// unresolvable) and re-checked after every snapshot unmarshal (loadPrevious
+// re-baselines; the server's readSnapshot treats it as malformed), so an
+// over-limit item can neither be persisted nor served.
+func validPersistedItem(it *item) bool {
+	for _, f := range []string{it.Title, it.GUID, it.InfoURL, it.DownloadURL, it.InfoHash, it.DownloadVolumeFactor, it.Key} {
+		if len(f) > maxPersistedFieldBytes {
+			return false
+		}
+	}
+	return len(it.Categories) <= maxPersistedCategories
+}
+
+// validFeedItems reports whether every item in the given feeds respects the
+// shared persisted-item limits (see validPersistedItem).
+func validFeedItems(feeds ...[]item) bool {
+	for _, feed := range feeds {
+		for i := range feed {
+			if !validPersistedItem(&feed[i]) {
+				return false
+			}
+		}
+	}
+	return true
+}
 
 // snapshot is the materialized feed a cycle produces and the server serves:
 // the search curation index (info hash / tracker key -> isBest, matched
@@ -286,6 +330,18 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 	var snap snapshot
 	if err := json.Unmarshal(data, &snap); err != nil {
 		w.log.Warn("previous feed snapshot malformed; re-baselining the feed journal", "path", w.path, "error", err)
+		return previousJournal{baseline: true, reason: "malformed"}, nil
+	}
+	if snap.ByHash == nil || snap.ByKey == nil {
+		w.log.Warn("previous feed snapshot malformed; re-baselining the feed journal",
+			"path", w.path, "reason", "missing required curation maps")
+		return previousJournal{baseline: true, reason: "malformed"}, nil
+	}
+	if !validFeedItems(snap.NyaaFeed, snap.ABFeed) {
+		// The value itself is never logged: it can be attacker-shaped
+		// multi-megabyte text.
+		w.log.Warn("previous feed snapshot malformed; re-baselining the feed journal",
+			"path", w.path, "reason", "item exceeds persisted-item limits")
 		return previousJournal{baseline: true, reason: "malformed"}, nil
 	}
 	if snap.Seen == nil {

@@ -18,6 +18,13 @@ const (
 	readHeaderTimeout = 15 * time.Second
 	readTimeout       = 30 * time.Second
 	idleTimeout       = 120 * time.Second
+	// writeTimeout bounds a stalled response consumer. It is sized above the
+	// complete bounded Prowlarr retry budget - three 60-second HTTP attempts
+	// plus at most two 60-second Retry-After waits - with render margin, so
+	// no legitimate search can hit it while a client that stops reading
+	// cannot hold the connection, handler goroutine, and rendered response
+	// indefinitely.
+	writeTimeout = 6 * time.Minute
 )
 
 // listenAddr is the fixed LAN bind address for the Torznab feed server. The
@@ -64,10 +71,10 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	// turns a handler panic into a logged 500 rendered as a Torznab <error>
 	// via torznabErrorResponder - not net/http's bare connection close, and
 	// not webhttp's default JSON envelope, which is the wrong wire shape for
-	// this XML endpoint. WriteTimeout stays unset (NewServer's streaming-safe
-	// default): a search proxies an upstream Prowlarr query of unbounded
-	// latency, so a fixed write deadline would truncate a slow search
-	// mid-response.
+	// this XML endpoint. WriteTimeout is set (see writeTimeout): this endpoint
+	// only emits finite XML and the upstream Prowlarr retry tree has a
+	// calculable upper bound, so the deadline bounds stalled response
+	// consumers while leaving the bounded retry budget intact.
 	handler := webhttp.Chain(ix.handler(),
 		webhttp.Logging(webhttp.WithLogger(ix.log)),
 		webhttp.Recoverer(
@@ -79,6 +86,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		webhttp.WithReadHeaderTimeout(readHeaderTimeout),
 		webhttp.WithReadTimeout(readTimeout),
 		webhttp.WithIdleTimeout(idleTimeout),
+		webhttp.WithWriteTimeout(writeTimeout),
 	)
 
 	ix.log.Info("seadex-scout indexer listening",

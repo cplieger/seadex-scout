@@ -28,6 +28,7 @@ import (
 	"github.com/cplieger/httpx/v3"
 	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
+	"github.com/cplieger/seadex-scout/internal/degradation"
 )
 
 const (
@@ -142,7 +143,7 @@ type Cache struct {
 	// parse-time record cap) rejected in favour of the stale map. It persists
 	// across cycles and restarts, resets to 0 on any accepted refresh or 304,
 	// and rides on the *StaleMapError (ConsecutiveRejections) so the scout
-	// can escalate its degraded-mapping log at RejectionEscalationThreshold.
+	// can escalate its degraded-mapping log at degradation.EscalationThreshold.
 	// Transient fetch or parse failures neither advance nor reset it — with
 	// one exception: a record-cap breach (errRecordCapExceeded) surfaces as a
 	// parse error but is a persistent guard refusal (an over-cap upstream
@@ -150,30 +151,6 @@ type Cache struct {
 	// rejection.
 	RejectedRefreshes int `json:"rejected_refreshes,omitempty"`
 }
-
-// RejectionEscalationThreshold is the consecutive-rejection streak
-// (Cache.RejectedRefreshes) at which the scout escalates its degraded-mapping
-// log from WARN to ERROR. It is the single home of the shared escalation
-// policy - tolerate 8 consecutive degraded cycles, about a day at the default
-// 3h cadence, before escalating - which the scout's shrunk-walk threshold
-// (shrunkWalkEscalationThreshold in internal/scout) references rather than
-// re-declaring: long enough to ride out a transient upstream oddity, short
-// enough that a persistent guard rejection (which re-downloads the ~5.9MB
-// body every cycle against an aging cache and never self-heals) alerts
-// instead of degrading silently forever. The remedy is operator-driven:
-// inspect upstream, and if the change is legitimate remove state.json to
-// cold-start onto the new map.
-const RejectionEscalationThreshold = 8
-
-// ShrinkGuardFactor is the shrink guards' trigger fraction: a refreshed data
-// set that would replace the prior one with fewer than 1/ShrinkGuardFactor of
-// its entries - below half, at the default 2 - is treated as a suspicious
-// truncation rather than a real change, keeping the prior data and never
-// auto-accepting. It is the single home of the shared below-half policy,
-// applied by acceptRefresh's mapping shrink guard and referenced by the
-// scout's library shrink guard (libraryShrinkFactor in internal/scout) rather
-// than re-declared there.
-const ShrinkGuardFactor = 2
 
 // Index is an AniList-ID-keyed lookup over mapping records.
 type Index struct {
@@ -375,7 +352,7 @@ func (e *StaleMapError) LogAttrs() []any {
 // acceptance guards rejected a fresh 200 body, including this one; 0 when the
 // degradation is a fetch or parse failure rather than a guard rejection. The
 // scout reads it to escalate its existing degraded-mapping log line to ERROR
-// at RejectionEscalationThreshold - carrying the streak here keeps that the
+// at degradation.EscalationThreshold - carrying the streak here keeps that the
 // single log site instead of adding a second log line in this package.
 func (e *StaleMapError) ConsecutiveRejections() int { return e.rejections }
 
@@ -405,7 +382,7 @@ func staleOrFail(prev *Cache, staleMsg string, cause, noCache error) (Cache, err
 // the stale map via staleOrFail, additionally advancing the persisted
 // consecutive-rejection streak (Cache.RejectedRefreshes) and carrying it on
 // the *StaleMapError so the scout can escalate its degraded-mapping log after
-// RejectionEscalationThreshold consecutive rejections. Only guard rejections
+// degradation.EscalationThreshold consecutive rejections. Only guard rejections
 // route here: a fetch or parse failure is a transient outage, not a persistent
 // guard refusal, so it neither advances the streak (plain staleOrFail) nor
 // resets it (only an accepted refresh or a 304 does).
@@ -510,7 +487,7 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 			// failure: a permanently over-cap upstream list re-downloads the
 			// multi-MB body and rejects it every cycle, never self-healing, so
 			// the streak must advance for the scout to escalate at
-			// RejectionEscalationThreshold instead of degrading at WARN forever.
+			// degradation.EscalationThreshold instead of degrading at WARN forever.
 			return rejectRefresh(prev, "refresh exceeded record cap", err,
 				fmt.Errorf("%w and no cache available", err))
 		}
@@ -528,11 +505,11 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 	}
 	// A syntactically valid but sharply truncated refresh (e.g. one record
 	// replacing ~40k) can pass the coverage floor above yet silently erase most
-	// mappings; treat a below-half-size refresh (ShrinkGuardFactor, the shared
-	// below-half policy home) as part of the cache-acceptance invariant and
-	// keep the stale map (multiplication avoids integer-division rounding for
-	// odd counts).
-	if prevCount := buildIndex(prev.Records).Len(); cacheUsable(prev.Records) && len(records)*ShrinkGuardFactor < prevCount {
+	// mappings; treat a below-half-size refresh (degradation.ShrinkGuardFactor,
+	// the shared below-half policy home) as part of the cache-acceptance
+	// invariant and keep the stale map (multiplication avoids integer-division
+	// rounding for odd counts).
+	if prevCount := buildIndex(prev.Records).Len(); cacheUsable(prev.Records) && len(records)*degradation.ShrinkGuardFactor < prevCount {
 		// The noCache argument is unreachable here (cacheUsable guarantees the
 		// stale branch); it exists only to satisfy rejectRefresh's signature.
 		return rejectRefresh(prev,
@@ -937,7 +914,9 @@ func collectUnknownKeys(raw json.RawMessage, seen map[string]struct{}, unknown [
 }
 
 // applyRecord decodes one raw override record and folds it into the set:
-// unknown keys are collected, Type is normalized, a zero-AniList-ID record is
+// unknown keys are collected, Type is normalized, IMDb ids are trimmed to the
+// same canonical form the Fribb decoder produces (so exact-key lookups agree
+// with HasArrIdentifier's trimmed usability view), a zero-AniList-ID record is
 // counted as skipped, and a duplicate ID replaces its earlier record
 // (last-record-wins) while being reported once in set.duplicates.
 func (set *overrideSet) applyRecord(raw json.RawMessage, seenKeys map[string]struct{}, position map[int]int, reported map[int]struct{}) error {
@@ -947,6 +926,7 @@ func (set *overrideSet) applyRecord(raw json.RawMessage, seenKeys map[string]str
 	}
 	set.unknown = collectUnknownKeys(raw, seenKeys, set.unknown)
 	record.Type = NormalizeType(record.Type)
+	record.IMDbIDs = trimmed(record.IMDbIDs)
 	if record.AniListID == 0 {
 		set.skipped++
 		return nil

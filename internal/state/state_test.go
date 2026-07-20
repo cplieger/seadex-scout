@@ -164,6 +164,22 @@ func TestStoreLoadCorruptReturnsDecodeError(t *testing.T) {
 	assertQuarantined(t, path, "{")
 }
 
+func TestStoreLoadInvalidUTF8Quarantines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	body := []byte("{\"findings\":{\"bad\xffkey\":{}}}")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatalf("write invalid UTF-8 state: %v", err)
+	}
+	store := NewStore(path, testLogger())
+	if _, err := store.Load(context.Background()); err == nil {
+		t.Fatal("Load returned nil error, want invalid UTF-8 decode error")
+	}
+	assertQuarantined(t, path, string(body))
+	if err := store.Save(context.Background(), &State{}); err != nil {
+		t.Errorf("Save after quarantining invalid UTF-8 remained blocked: %v", err)
+	}
+}
+
 // TestReadOnlyStoreLoadCorruptLeavesFileInPlace pins the read-only flow's
 // quarantine posture (the one-shot report is documented read-only on the
 // state file): Load still surfaces the decode error, but the corrupt file

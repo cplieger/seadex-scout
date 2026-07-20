@@ -78,7 +78,10 @@ func TestParseMediaPage_roundTripsGeneratedBatchesProperty(t *testing.T) {
 			Data wireData `json:"data"`
 		}
 
-		ids := rapid.SliceOfNDistinct(rapid.IntRange(1, 1_000_000), 0, 60, rapid.ID).Draw(t, "ids")
+		// Capped at batchSize: the decoder's boundedMediaList rejects a longer
+		// array by contract (the query requests perPage=batchSize), and that
+		// edge is pinned by TestParseMediaPageBoundsMediaCardinality.
+		ids := rapid.SliceOfNDistinct(rapid.IntRange(1, 1_000_000), 0, batchSize, rapid.ID).Draw(t, "ids")
 		media := make([]wireMedia, len(ids))
 		want := make(map[int]Media, len(ids))
 		for i, id := range ids {

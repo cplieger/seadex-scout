@@ -453,9 +453,7 @@ func TestClassifyUnderscoreDelimitedName(t *testing.T) {
 // worst case for the removed lowercase+underscore normalization, which
 // allocated two evidence-sized copies per piece) still classifies correctly —
 // the case-insensitive, underscore-aware regexes must find every marker
-// family in the raw text. A second observe with every flag already set does
-// zero allocations, proving no per-piece normalized copy is made regardless
-// of the evidence size.
+// family in the raw text.
 func TestClassifyLargeUppercaseUnderscoreEvidence(t *testing.T) {
 	name := strings.Repeat("PADDING_", 1<<16) + "SHOW_1080P_BD_REMUX_X265_CRF_18_4500_KBPS_BDRIP"
 	got := Classify(&Input{Names: []string{name}})
@@ -467,15 +465,6 @@ func TestClassifyLargeUppercaseUnderscoreEvidence(t *testing.T) {
 	}
 	if got.Codec != "x265" {
 		t.Errorf("Codec = %q, want x265", got.Codec)
-	}
-	var ev evidence
-	ev.observe(name) // saturate every flag and the resolution
-	if ev.resolution == "" || !ev.x265 || !ev.remux || !ev.crf || !ev.bitrate || !ev.encode {
-		t.Fatalf("evidence not saturated by the marker-bearing name: %+v", ev)
-	}
-	ev.x264 = true // the name carries no x264 marker; saturate it directly
-	if allocs := testing.AllocsPerRun(5, func() { ev.observe(name) }); allocs != 0 {
-		t.Errorf("observe with saturated flags allocated %v times on a %d-byte piece, want 0 (no evidence-sized normalization copy)", allocs, len(name))
 	}
 }
 

@@ -214,6 +214,39 @@ func TestParseMediaPageNullableEnvelope(t *testing.T) {
 	}
 }
 
+// TestParseMediaPageBoundsMediaCardinality pins the wire-cardinality bound on
+// the untrusted batch decode: exactly batchSize compact valid records parse,
+// while batchSize+1 records fail the whole batch as an envelope error (never
+// ErrBatchRecord) rejected before the extra element is decoded — so a hostile
+// endpoint cannot expand an attacker-sized media array into []gqlMedia under
+// the 1 MiB body cap.
+func TestParseMediaPageBoundsMediaCardinality(t *testing.T) {
+	page := func(n int) []byte {
+		records := make([]string, n)
+		for i := range records {
+			id := strconv.Itoa(i + 1)
+			records[i] = `{"id":` + id + `,"title":{"romaji":"T` + id + `"}}`
+		}
+		return []byte(`{"data":{"Page":{"media":[` + strings.Join(records, ",") + `]}}}`)
+	}
+
+	out, err := parseMediaPage(page(batchSize))
+	if err != nil {
+		t.Fatalf("parseMediaPage with %d records: %v", batchSize, err)
+	}
+	if len(out) != batchSize {
+		t.Errorf("len = %d, want %d", len(out), batchSize)
+	}
+
+	_, err = parseMediaPage(page(batchSize + 1))
+	if err == nil {
+		t.Fatalf("parseMediaPage with %d records must be rejected", batchSize+1)
+	}
+	if errors.Is(err, ErrBatchRecord) {
+		t.Errorf("over-cardinality must be an envelope error, got record-local %v", err)
+	}
+}
+
 func TestObserveRateHeadersCapsResetWindow(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		client := NewClient(http.DefaultClient, "https://example.invalid/graphql", 30, nil)

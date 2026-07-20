@@ -1,6 +1,7 @@
 package mapping
 
 import (
+	"reflect"
 	"testing"
 
 	"pgregory.net/rapid"
@@ -10,18 +11,23 @@ import (
 // buildIndex, the consumer whose semantics it exists to mirror: for any record
 // list, the deduplicated slice must index bijectively (len == index len) and
 // produce exactly the same effective index as the raw input, every surviving
-// ID must be non-zero and unique, surviving records must be the LAST
-// occurrence of their ID, and the operation must be idempotent. This is the
-// invariant the acceptance guards depend on (row counts and identifier
-// coverage are measured on the deduplicated set so they match what consumers
-// receive).
+// ID must be non-zero and unique, each survivor must be the WHOLE last
+// occurrence of its ID (every field, not a projection - routing and refresh
+// acceptance consume Type, TmdbMovies, IMDbIDs, and SeasonTvdb too), and the
+// operation must be idempotent. This is the invariant the acceptance guards
+// depend on (row counts and identifier coverage are measured on the
+// deduplicated set so they match what consumers receive).
 func TestDeduplicateRecordsIndexOracle(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		records := rapid.SliceOfN(rapid.Custom(func(t *rapid.T) Record {
 			return Record{
 				// A small ID range forces duplicate and zero IDs.
-				AniListID: rapid.IntRange(0, 5).Draw(t, "anilist_id"),
-				TvdbID:    rapid.IntRange(0, 1000).Draw(t, "tvdb_id"),
+				AniListID:  rapid.IntRange(0, 5).Draw(t, "anilist_id"),
+				Type:       rapid.SampledFrom([]string{"", "TV", "MOVIE", "OVA", "SPECIAL"}).Draw(t, "type"),
+				TvdbID:     rapid.IntRange(0, 1000).Draw(t, "tvdb_id"),
+				SeasonTvdb: rapid.IntRange(0, 5).Draw(t, "season_tvdb"),
+				TmdbMovies: rapid.SliceOfN(rapid.IntRange(1, 9), 0, 3).Draw(t, "tmdb_movies"),
+				IMDbIDs:    rapid.SliceOfN(rapid.SampledFrom([]string{"tt1", "tt2", "tt3"}), 0, 3).Draw(t, "imdb_ids"),
 			}
 		}), 0, 20).Draw(t, "records")
 
@@ -34,12 +40,6 @@ func TestDeduplicateRecordsIndexOracle(t *testing.T) {
 		if rawIdx.Len() != outIdx.Len() {
 			t.Fatalf("index size diverged: raw %d, deduplicated %d", rawIdx.Len(), outIdx.Len())
 		}
-		lastByID := make(map[int]Record, len(records))
-		for _, r := range records {
-			if r.AniListID != 0 {
-				lastByID[r.AniListID] = r
-			}
-		}
 		seen := make(map[int]struct{}, len(out))
 		for _, r := range out {
 			if r.AniListID == 0 {
@@ -49,22 +49,16 @@ func TestDeduplicateRecordsIndexOracle(t *testing.T) {
 				t.Fatalf("deduplicated set repeats ID %d", r.AniListID)
 			}
 			seen[r.AniListID] = struct{}{}
-			if last := lastByID[r.AniListID]; r.TvdbID != last.TvdbID {
-				t.Fatalf("survivor for ID %d = %+v, want last occurrence %+v", r.AniListID, r, last)
-			}
+			// buildIndex is the last-write-wins oracle: the survivor must be
+			// the WHOLE last occurrence, every field intact.
 			got, ok := rawIdx.Lookup(r.AniListID)
-			if !ok || got.TvdbID != r.TvdbID {
+			if !ok || !reflect.DeepEqual(got, r) {
 				t.Fatalf("raw index disagrees for ID %d: index %+v ok=%v, deduplicated %+v", r.AniListID, got, ok, r)
 			}
 		}
 		again := deduplicateRecords(out)
-		if len(again) != len(out) {
-			t.Fatalf("deduplicateRecords not idempotent: %d -> %d records", len(out), len(again))
-		}
-		for i := range again {
-			if again[i].AniListID != out[i].AniListID || again[i].TvdbID != out[i].TvdbID {
-				t.Fatalf("idempotence broke at [%d]: %+v vs %+v", i, again[i], out[i])
-			}
+		if !reflect.DeepEqual(again, out) {
+			t.Fatalf("deduplicateRecords not idempotent: %+v -> %+v", out, again)
 		}
 	})
 }

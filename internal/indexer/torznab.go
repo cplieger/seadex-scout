@@ -145,7 +145,9 @@ func writeItem(b *strings.Builder, it *item) {
 		writeText(b, "pubDate", it.PubDate.UTC().Format(time.RFC1123Z))
 	}
 	if it.DownloadURL != "" {
-		fmt.Fprintf(b, `<enclosure url="%s" length="%d" type="application/x-bittorrent"/>`, esc(it.DownloadURL), it.Size)
+		b.WriteString(`<enclosure url="`)
+		escTo(b, it.DownloadURL)
+		fmt.Fprintf(b, `" length="%d" type="application/x-bittorrent"/>`, it.Size)
 	}
 
 	cats := it.Categories
@@ -185,19 +187,35 @@ func writeItem(b *strings.Builder, it *item) {
 // writeText writes a simple escaped <tag>value</tag> element.
 func writeText(b *strings.Builder, tag, value string) {
 	b.WriteString("<" + tag + ">")
-	b.WriteString(esc(value))
+	escTo(b, value)
 	b.WriteString("</" + tag + ">")
 }
 
 // writeAttr writes a <torznab:attr name=".." value=".."/> element.
 func writeAttr(b *strings.Builder, name, value string) {
-	fmt.Fprintf(b, `<torznab:attr name="%s" value="%s"/>`, name, esc(value))
+	b.WriteString(`<torznab:attr name="`)
+	escTo(b, name)
+	b.WriteString(`" value="`)
+	escTo(b, value)
+	b.WriteString(`"/>`)
 }
 
-// esc escapes a string for use in XML text or attribute values.
+// escTo escapes s for use in XML text or attribute values, writing directly
+// into b. Escaping in place keeps renderFeed from holding a second escaped
+// copy of every field beside the document builder: XML escaping can expand an
+// ampersand-heavy value ~5x, and the temporary copies esc-per-field rendering
+// retained were one leg of the snapshot memory-amplification path (the other
+// is the shared persisted-item limits in writer.go).
+func escTo(b *strings.Builder, s string) {
+	_ = xml.EscapeText(b, []byte(s))
+}
+
+// esc escapes a string for use in XML text or attribute values, returning it
+// as a new string. Rendering paths that already own a strings.Builder should
+// prefer escTo; esc remains for call sites that interpolate (renderError).
 func esc(s string) string {
 	var b strings.Builder
-	_ = xml.EscapeText(&b, []byte(s))
+	escTo(&b, s)
 	return b.String()
 }
 

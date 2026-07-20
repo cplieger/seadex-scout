@@ -14,6 +14,7 @@ import (
 	"github.com/cplieger/arrapi"
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/compare"
+	"github.com/cplieger/seadex-scout/internal/degradation"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
@@ -1327,7 +1328,7 @@ func TestSaveGenuineFailureLogsError(t *testing.T) {
 // TestLoadMappingEscalatesAfterRepeatedRejections pins the WARN-to-ERROR
 // escalation of the single degraded-mapping log site: below the threshold a
 // guard-rejected refresh logs "mapping degraded" at WARN; once the persisted
-// streak reaches mapping.RejectionEscalationThreshold the same site logs at
+// streak reaches degradation.EscalationThreshold the same site logs at
 // ERROR (firing the existing SeadexScoutCycleError Loki rule) with the remedy
 // in the message and the streak/guard in the structured attrs - exactly one
 // line either way (no double-logging), still returning the stale cache.
@@ -1337,8 +1338,8 @@ func TestLoadMappingEscalatesAfterRepeatedRejections(t *testing.T) {
 		priorStreak int
 		wantError   bool
 	}{
-		{name: "below threshold stays WARN", priorStreak: mapping.RejectionEscalationThreshold - 2, wantError: false},
-		{name: "at threshold escalates to ERROR", priorStreak: mapping.RejectionEscalationThreshold - 1, wantError: true},
+		{name: "below threshold stays WARN", priorStreak: degradation.EscalationThreshold - 2, wantError: false},
+		{name: "at threshold escalates to ERROR", priorStreak: degradation.EscalationThreshold - 1, wantError: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

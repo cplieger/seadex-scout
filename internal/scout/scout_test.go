@@ -420,3 +420,104 @@ func TestWalkFailureLogsAndReportErrorAreLogSafe(t *testing.T) {
 		}
 	}
 }
+
+// fakeRadarr is a scripted RadarrClient for orchestration tests: GetMovies
+// returns movies (or listErr); tags are unused here.
+type fakeRadarr struct {
+	listErr error
+	movies  []arrapi.Movie
+}
+
+func (f *fakeRadarr) GetMovies(context.Context) ([]arrapi.Movie, error) {
+	return f.movies, f.listErr
+}
+
+func (f *fakeRadarr) GetTags(context.Context) ([]arrapi.Tag, error) {
+	return nil, nil
+}
+
+// recordAttr returns the string value of key on the first captured record
+// whose message is msg and that carries the attr, and whether one was found.
+func recordAttr(recorder *capture.Recorder, msg, key string) (string, bool) {
+	for _, r := range recorder.Records() {
+		if r.Message != msg {
+			continue
+		}
+		val, found := "", false
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == key {
+				val, found = a.Value.String(), true
+				return false
+			}
+			return true
+		})
+		if found {
+			return val, true
+		}
+	}
+	return "", false
+}
+
+// TestWalkFailureLogsCarryArrIdentity pins the failed-side attribution on the
+// walk-failure log boundaries: httpx.LogSafeError reduces a transport failure
+// to the *url.Error's underlying cause, discarding library.Walk's textual
+// "walking sonarr/radarr" wrapper, so with both arrs enabled the reduced
+// error alone cannot say which dependency failed - each boundary (the
+// walk-failure ERROR, the alert-only walk-failed completion line, and the
+// feed-configured library gate's walk-failed completion line) must carry the
+// bounded `arr` attribute recovered from the typed walk-side error.
+func TestWalkFailureLogsCarryArrIdentity(t *testing.T) {
+	transportErr := func(host string) error {
+		return &url.Error{
+			Op:  "Get",
+			URL: "http://" + host + "/api/v3",
+			Err: errors.New("connect: connection refused"),
+		}
+	}
+
+	// Alert-only deployment (no feed): stopAfterWalkFailure owns both the
+	// ERROR and the walk-failed completion line.
+	t.Run("sonarr alert-only", func(t *testing.T) {
+		logger, recorder := capture.New()
+		s := New(&Deps{
+			Logger:  logger,
+			Store:   &fakeStore{},
+			Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: transportErr("sonarr.local")}, Logger: scoutTestLogger()}),
+		})
+		if healthy := s.Cycle(context.Background()); healthy {
+			t.Fatal("Cycle returned healthy=true, want false when the library walk fails")
+		}
+		if arr, ok := recordAttr(recorder, "library walk failed; cycle unhealthy", "arr"); !ok || arr != library.ArrSonarr {
+			t.Errorf("walk-failure ERROR arr attr = %q (found=%t), want %q", arr, ok, library.ArrSonarr)
+		}
+		if arr, ok := recordAttr(recorder, "cycle degraded", "arr"); !ok || arr != library.ArrSonarr {
+			t.Errorf("walk-failed completion-line arr attr = %q (found=%t), want %q", arr, ok, library.ArrSonarr)
+		}
+	})
+
+	// Feed-configured deployment: the walk failure falls through to
+	// handleLibraryGate, whose walk-failed completion line is the third
+	// boundary.
+	t.Run("radarr with feed", func(t *testing.T) {
+		logger, recorder := capture.New()
+		s := New(&Deps{
+			Logger: logger,
+			Store: &fakeStore{st: state.State{
+				Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+			}},
+			Library: library.NewWalker(&library.Config{Radarr: &fakeRadarr{listErr: transportErr("radarr.local")}, Logger: scoutTestLogger()}),
+			Mapping: fakeMapping{},
+			SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
+			Feed:    &fakeFeed{},
+		})
+		if healthy := s.Cycle(context.Background()); healthy {
+			t.Fatal("feed-configured Cycle returned healthy=true, want false when the library walk fails")
+		}
+		if arr, ok := recordAttr(recorder, "library walk failed; cycle unhealthy", "arr"); !ok || arr != library.ArrRadarr {
+			t.Errorf("walk-failure ERROR arr attr = %q (found=%t), want %q", arr, ok, library.ArrRadarr)
+		}
+		if arr, ok := recordAttr(recorder, "cycle degraded", "arr"); !ok || arr != library.ArrRadarr {
+			t.Errorf("library-gate walk-failed completion-line arr attr = %q (found=%t), want %q", arr, ok, library.ArrRadarr)
+		}
+	})
+}

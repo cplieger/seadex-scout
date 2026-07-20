@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cplieger/seadex-scout/internal/degradation"
 )
 
 func freshCache() *Cache {
@@ -670,7 +672,7 @@ func TestLoader_refreshCache_rejectionStreakCountsAndResets(t *testing.T) {
 		},
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	for i := 1; i <= RejectionEscalationThreshold; i++ {
+	for i := 1; i <= degradation.EscalationThreshold; i++ {
 		next, err := l.refreshCache(context.Background(), prev)
 		var stale *StaleMapError
 		if !errors.As(err, &stale) {
@@ -757,7 +759,7 @@ func TestLoader_refreshCache_fetchFailureKeepsRejectionStreak(t *testing.T) {
 // must route it through rejectRefresh — the errors.Is-matchable sentinel
 // survives the *StaleMapError wrap, the stale map is kept, and the persisted
 // streak advances so ConsecutiveRejections reaches
-// RejectionEscalationThreshold (the scout's WARN→ERROR escalation point)
+// degradation.EscalationThreshold (the scout's WARN→ERROR escalation point)
 // instead of degrading at WARN forever.
 func TestLoader_refreshCache_recordCapBreachAdvancesRejectionStreak(t *testing.T) {
 	var b strings.Builder
@@ -778,7 +780,7 @@ func TestLoader_refreshCache_recordCapBreachAdvancesRejectionStreak(t *testing.T
 	prev := &Cache{
 		FetchedAt:         time.Now().Add(-2 * time.Hour),
 		Records:           []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-		RejectedRefreshes: RejectionEscalationThreshold - 1,
+		RejectedRefreshes: degradation.EscalationThreshold - 1,
 	}
 	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
 	next, err := l.refreshCache(context.Background(), prev)
@@ -792,11 +794,11 @@ func TestLoader_refreshCache_recordCapBreachAdvancesRejectionStreak(t *testing.T
 	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
 		t.Fatalf("cap-breach refresh records = %+v, want stale record id 1", next.Records)
 	}
-	if next.RejectedRefreshes != RejectionEscalationThreshold {
-		t.Errorf("cap-breach RejectedRefreshes = %d, want %d (a cap breach advances the streak)", next.RejectedRefreshes, RejectionEscalationThreshold)
+	if next.RejectedRefreshes != degradation.EscalationThreshold {
+		t.Errorf("cap-breach RejectedRefreshes = %d, want %d (a cap breach advances the streak)", next.RejectedRefreshes, degradation.EscalationThreshold)
 	}
-	if stale.ConsecutiveRejections() != RejectionEscalationThreshold {
-		t.Errorf("cap-breach ConsecutiveRejections = %d, want %d (the scout escalates to ERROR at the threshold)", stale.ConsecutiveRejections(), RejectionEscalationThreshold)
+	if stale.ConsecutiveRejections() != degradation.EscalationThreshold {
+		t.Errorf("cap-breach ConsecutiveRejections = %d, want %d (the scout escalates to ERROR at the threshold)", stale.ConsecutiveRejections(), degradation.EscalationThreshold)
 	}
 }
 

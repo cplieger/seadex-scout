@@ -14,6 +14,7 @@ package library
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -178,7 +179,7 @@ func (w *Walker) Walk(ctx context.Context) (Snapshot, error) {
 	if w.sonarr != nil {
 		series, failed, err := w.walkSonarr(ctx)
 		if err != nil {
-			return Snapshot{}, fmt.Errorf("walking sonarr: %w", err)
+			return Snapshot{}, &walkSideError{arr: ArrSonarr, err: err}
 		}
 		items = append(items, series...)
 		partial = failed > 0
@@ -186,7 +187,7 @@ func (w *Walker) Walk(ctx context.Context) (Snapshot, error) {
 	if w.radarr != nil {
 		movies, err := w.walkRadarr(ctx)
 		if err != nil {
-			return Snapshot{}, fmt.Errorf("walking radarr: %w", err)
+			return Snapshot{}, &walkSideError{arr: ArrRadarr, err: err}
 		}
 		items = append(items, movies...)
 	}
@@ -201,6 +202,38 @@ func (w *Walker) Walk(ctx context.Context) (Snapshot, error) {
 	w.log.Info("library walk complete", "items", len(items), "partial", partial,
 		"sonarr", w.sonarr != nil, "radarr", w.radarr != nil)
 	return Snapshot{TakenAt: time.Now().UTC(), Items: items, Partial: partial}, nil
+}
+
+// walkSideError wraps a per-side walk failure with the failed arr's identity.
+// Error preserves the exact "walking <arr>: <cause>" text the previous plain
+// fmt.Errorf wrapper produced (report-mode CLI output reads it unchanged) and
+// Unwrap keeps the cause chain intact for errors.Is/As. The identity rides
+// the TYPE rather than the text because the scout's production log boundaries
+// reduce the chain via httpx.LogSafeError, which collapses to a nested
+// *url.Error's underlying cause and discards every textual wrapper -
+// WalkErrArr recovers the side from the original error before that reduction.
+type walkSideError struct {
+	err error
+	arr string
+}
+
+func (e *walkSideError) Error() string { return "walking " + e.arr + ": " + e.err.Error() }
+
+// Unwrap exposes the underlying cause so the chain stays visible to
+// errors.Is/As (context-cancellation checks, LogSafeError's *url.Error search).
+func (e *walkSideError) Unwrap() error { return e.err }
+
+// WalkErrArr returns the arr identity (ArrSonarr or ArrRadarr) a Walk error
+// carries for its failed side, or "" for an error that names no side (Walk's
+// final cancellation guard, or any non-walk error). Callers that log a
+// reduced form of the error (httpx.LogSafeError) must extract the side from
+// the ORIGINAL error - the reduction returns a new error that no longer
+// carries the wrapper type.
+func WalkErrArr(err error) string {
+	if side, ok := errors.AsType[*walkSideError](err); ok {
+		return side.arr
+	}
+	return ""
 }
 
 // filterSeriesByTags returns the series that pass the include/exclude tag

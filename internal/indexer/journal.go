@@ -128,6 +128,15 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor fu
 			}
 		}
 	}
+	if !validPersistedItem(&it) {
+		// An oversized external value (a SeaDex filename synthesized into
+		// the title, an over-long URL) is unservable: renderFeed's XML
+		// escaping could amplify it well past the container memory budget
+		// (see maxPersistedFieldBytes). Dropped as unresolvable - the caller
+		// has already folded the identity into the seen ledger, so the item
+		// never re-enters the journal as new.
+		return item{}, false, false
+	}
 	return it, true, false
 }
 

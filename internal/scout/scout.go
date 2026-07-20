@@ -22,6 +22,7 @@ import (
 	"github.com/cplieger/httpx/v3"
 	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/compare"
+	"github.com/cplieger/seadex-scout/internal/degradation"
 	"github.com/cplieger/seadex-scout/internal/indexer"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
@@ -114,15 +115,15 @@ type Deps struct {
 // at the default 2) is treated as suspicious (a misconfigured arr_tags
 // filter, an emptied or fresh arr) rather than a real library change. The
 // zero-items case is the extreme of the same shrink. It references
-// mapping.ShrinkGuardFactor - the single home of the below-half policy this
-// guard shares with the mapping loader's refresh shrink guard - rather than
-// re-declaring the fraction.
-const libraryShrinkFactor = mapping.ShrinkGuardFactor
+// degradation.ShrinkGuardFactor - the single home of the below-half policy
+// this guard shares with the mapping loader's refresh shrink guard - rather
+// than re-declaring the fraction.
+const libraryShrinkFactor = degradation.ShrinkGuardFactor
 
 // shrunkWalkEscalationThreshold is the consecutive-shrunk-walk streak
 // (state.State.ShrunkWalks) at which the scout escalates its shrunk-walk log
 // from WARN to ERROR (firing the existing SeadexScoutCycleError Loki rule).
-// It references mapping.RejectionEscalationThreshold - the single home of the
+// It references degradation.EscalationThreshold - the single home of the
 // shared escalation policy: tolerate 8 consecutive degraded cycles, about a
 // day at the default 3h cadence, before escalating - long enough to ride out
 // a transient arr oddity, short enough that a persistent misconfiguration
@@ -130,13 +131,13 @@ const libraryShrinkFactor = mapping.ShrinkGuardFactor
 // forever. The remedy is operator-driven: fix the arr/tags, or remove
 // state.json to accept the smaller library - the guard never auto-accepts a
 // shrunken walk.
-const shrunkWalkEscalationThreshold = mapping.RejectionEscalationThreshold
+const shrunkWalkEscalationThreshold = degradation.EscalationThreshold
 
 // seadexFailureEscalationThreshold is the consecutive-failed-fetch streak
 // (state.State.SeadexFailures) at which the scout escalates its single
 // seadex-fetch-failed log site from WARN to ERROR (firing the existing
 // SeadexScoutCycleError rule). It references
-// mapping.RejectionEscalationThreshold - the single home of the shared
+// degradation.EscalationThreshold - the single home of the shared
 // escalation policy the shrunk-walk and mapping-rejection streaks already
 // ride: tolerate 8 consecutive degraded cycles, about a day at the default
 // 3h cadence, before escalating. A SeaDex blip must stay a WARN (findings
@@ -144,7 +145,7 @@ const shrunkWalkEscalationThreshold = mapping.RejectionEscalationThreshold
 // that persists for a day is a lasting upstream fault or an egress
 // misconfiguration and must alert instead of WARNing forever. Recovery is
 // operator-free: the first successful fetch resets the streak.
-const seadexFailureEscalationThreshold = mapping.RejectionEscalationThreshold
+const seadexFailureEscalationThreshold = degradation.EscalationThreshold
 
 // Scout runs compare cycles from its assembled dependencies.
 type Scout struct {
@@ -247,11 +248,11 @@ func (s *Scout) stopAfterWalkFailure(ctx context.Context, walkErr error) bool {
 		return true
 	}
 	// The arr URL may carry userinfo (config.Validate only warns on that
-	// shape), and a transport failure wraps a *url.Error embedding the full
-	// request URL — reduce it (httpx.LogSafeError) before it crosses any log
-	// boundary so an outage cannot ship an embedded credential into Loki.
-	safeWalkErr := httpx.LogSafeError(walkErr)
-	s.log.Error("library walk failed; cycle unhealthy", "error", safeWalkErr)
+	// shape), so the error must be reduced before it crosses any log
+	// boundary; walkFailureAttrs adds the failed side's identity beside the
+	// reduced error.
+	attrs := walkFailureAttrs(walkErr)
+	s.log.Error("library walk failed; cycle unhealthy", attrs...)
 	// Alert-only (no Torznab feed): a failed walk is unhealthy and there is
 	// nothing else to do, so skip the SeaDex/Fribb fetch (the pre-fold
 	// behaviour) - the cycle ends here, so emit its completion line now (the
@@ -260,10 +261,35 @@ func (s *Scout) stopAfterWalkFailure(ctx context.Context, walkErr error) bool {
 	// needs only SeaDex + Fribb, not the arrs - before returning unhealthy
 	// (the library gate then emits the completion line).
 	if s.deps.Feed == nil {
-		s.cycleDegraded("walk-failed", "error", safeWalkErr)
+		s.cycleDegraded("walk-failed", attrs...)
 		return true
 	}
 	return false
+}
+
+// attrError is the slog attribute key for an error value, named because the
+// attr-slice builders (walkFailureAttrs, mappingDegradedAttrs, the SeaDex
+// failure arm) share it as a slice-literal element (goconst); direct log-call
+// sites keep the literal "error".
+const attrError = "error"
+
+// walkFailureAttrs builds the attribute set shared by the walk-failure log
+// boundaries (the ERROR and both walk-failed "cycle degraded" completion
+// lines): the LogSafeError-reduced error - a transport failure wraps a
+// *url.Error embedding the full request URL, which may carry configured
+// userinfo credentials, so it must not reach Loki unreduced - plus a bounded
+// `arr` attribute naming the failed side when the walk error carries one
+// (library.WalkErrArr). The side must come from the ORIGINAL error: the
+// reduction collapses the chain to the *url.Error's underlying cause,
+// discarding library.Walk's textual "walking sonarr/radarr" wrapper, so with
+// both arrs enabled the reduced error alone would not say which dependency
+// failed.
+func walkFailureAttrs(walkErr error) []any {
+	attrs := []any{attrError, httpx.LogSafeError(walkErr)}
+	if arr := library.WalkErrArr(walkErr); arr != "" {
+		attrs = append(attrs, "arr", arr)
+	}
+	return attrs
 }
 
 // loadMapping refreshes the Fribb map from the persisted cache, logging a
@@ -271,7 +297,7 @@ func (s *Scout) stopAfterWalkFailure(ctx context.Context, walkErr error) bool {
 // pre-compare gate logs the interruption instead (same rule as the
 // walk/matching paths). The degraded log is WARN, escalating to ERROR (which
 // fires the existing SeadexScoutCycleError Loki rule) once the loader's
-// acceptance guards have rejected mapping.RejectionEscalationThreshold
+// acceptance guards have rejected degradation.EscalationThreshold
 // consecutive refreshes: that state re-downloads the ~5.9MB body every cycle
 // against an aging cache and never self-heals without the operator, so it
 // must alert rather than WARN forever. The rejection streak rides on the
@@ -282,7 +308,7 @@ func (s *Scout) loadMapping(ctx context.Context, st *state.State) (mapping.Cache
 	if mapErr != nil && ctx.Err() == nil {
 		attrs := mappingDegradedAttrs(mapErr, idx.Len())
 		stale, ok := errors.AsType[*mapping.StaleMapError](mapErr)
-		if ok && stale.ConsecutiveRejections() >= mapping.RejectionEscalationThreshold {
+		if ok && stale.ConsecutiveRejections() >= degradation.EscalationThreshold {
 			// The attrs carry the streak (stale_consecutive_rejections) and
 			// the rejecting guard (stale_reason).
 			s.log.Error("mapping degraded: refresh rejected repeatedly; inspect upstream, or remove state.json to cold-start if the change is legitimate", attrs...)
@@ -299,7 +325,7 @@ func (s *Scout) loadMapping(ctx context.Context, st *state.State) (mapping.Cache
 // stale_age_seconds, stale_records) when the error carries them, so Loki can
 // query the rejection class and stale age without parsing the message text.
 func mappingDegradedAttrs(mapErr error, usableRecords int) []any {
-	attrs := []any{"error", mapErr, "usable_records", usableRecords}
+	attrs := []any{attrError, mapErr, "usable_records", usableRecords}
 	if stale, ok := errors.AsType[*mapping.StaleMapError](mapErr); ok {
 		attrs = append(attrs, stale.LogAttrs()...)
 	}
@@ -593,9 +619,11 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap lib
 		// SeaDex fetch or mapping load) keeps the no-completion-line rule:
 		// an interrupted cycle did not complete, degraded or not.
 		if ctx.Err() == nil {
-			// Same *url.Error reduction as stopAfterWalkFailure's log sites:
-			// the walk error may embed a credential-bearing request URL.
-			s.cycleDegraded("walk-failed", "error", httpx.LogSafeError(walkErr))
+			// Same reduction + failed-side attribution as
+			// stopAfterWalkFailure's log sites: the walk error may embed a
+			// credential-bearing request URL, and the reduced error alone
+			// does not name the failed arr.
+			s.cycleDegraded("walk-failed", walkFailureAttrs(walkErr)...)
 		}
 		return true, false
 	}
@@ -700,7 +728,7 @@ func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap li
 		// streak so Loki can see how long the outage has run.
 		st.SeadexFailures++
 		s.degradedSave(ctx, st, snap, mapCache)
-		attrs := []any{"error", seaErr, "consecutive_seadex_failures", st.SeadexFailures}
+		attrs := []any{attrError, seaErr, "consecutive_seadex_failures", st.SeadexFailures}
 		if st.SeadexFailures >= seadexFailureEscalationThreshold {
 			s.log.Error("seadex fetch failed repeatedly; skipping comparison, findings preserved - inspect SeaDex (releases.moe) reachability and egress", attrs...)
 		} else {

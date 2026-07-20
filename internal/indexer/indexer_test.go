@@ -1378,8 +1378,11 @@ func TestReloadInstallsOlderMtimeSnapshot(t *testing.T) {
 	if len(got) != 1 || got[0].Title != "restored" {
 		t.Fatalf("feed after reloading an older-mtime snapshot = %#v, want the restored on-disk snapshot", got)
 	}
-	if ix.snapMod.Equal(newerTime) {
-		t.Fatalf("snapMod after reloading an older-mtime snapshot = %v, want the on-disk mtime, not the stale %v", ix.snapMod, newerTime)
+	ix.mu.RLock()
+	reloadedMod := ix.snapMod
+	ix.mu.RUnlock()
+	if reloadedMod.Equal(newerTime) {
+		t.Fatalf("snapMod after reloading an older-mtime snapshot = %v, want the on-disk mtime, not the stale %v", reloadedMod, newerTime)
 	}
 }
 

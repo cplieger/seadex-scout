@@ -90,6 +90,13 @@ func (ix *Indexer) reload(ctx context.Context) {
 		return
 	}
 	if !ix.reloadMu.TryLock() {
+		// Before the first successful load, an in-flight reload has not yet
+		// established whether the on-disk snapshot is usable. Mark that
+		// state unavailable until the winning reload either installs a good
+		// snapshot or confirms the normal fresh-install ENOENT case, so a
+		// concurrent request cannot serve a false-empty result. After a
+		// successful load this is a no-op and siblings keep serving last-good.
+		ix.markSnapshotFailedIfUnloaded()
 		return
 	}
 	defer ix.reloadMu.Unlock()
@@ -274,6 +281,20 @@ func (ix *Indexer) readSnapshot(ctx context.Context) (snapshot, bool, bool) {
 		ix.markSnapshotFailedIfUnloaded()
 		ix.log.Warn("indexer feed snapshot malformed; keeping current feed",
 			"path", ix.path, "reason", "missing required curation maps")
+		return snapshot{}, false, true
+	}
+	// A structurally valid snapshot can still carry an item whose fields blow
+	// the shared persisted-item limits (a hand-edited or corrupted file; the
+	// writer enforces the same limits at item creation). Serving it would let
+	// renderFeed's XML escaping amplify one multi-megabyte field far past the
+	// container memory budget, so treat it exactly like malformed JSON:
+	// deterministic for unchanged bytes (memoize), snapshot unavailable only
+	// before first load, last-good feed retained, and the value itself never
+	// logged (it can be attacker-shaped multi-megabyte text).
+	if !validFeedItems(snap.NyaaFeed, snap.ABFeed) {
+		ix.markSnapshotFailedIfUnloaded()
+		ix.log.Warn("indexer feed snapshot malformed; keeping current feed",
+			"path", ix.path, "reason", "item exceeds persisted-item limits")
 		return snapshot{}, false, true
 	}
 	snap.ABFeed = ix.rebuildABDownloadURLs(snap.ABFeed)

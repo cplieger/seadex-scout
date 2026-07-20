@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unsafe"
 )
 
 // repeatJSON joins n copies of one JSON element with commas, for building
@@ -95,7 +96,7 @@ func TestFetchEntriesDecodeCardinalityCapsError(t *testing.T) {
 // materialized.
 func TestDecodePageElementBudgetErrors(t *testing.T) {
 	// 40 items x 512 torrents x 60 tags = 1+512+30720 elements per item,
-	// 1,249,320 total: over the 500K budget while every per-parent cap holds.
+	// 1,249,320 total: over the 250K budget while every per-parent cap holds.
 	torrent := `{"tags":[` + repeatJSON(`""`, 60) + `]}`
 	item := `{"alID":1,"expand":{"trs":[` + repeatJSON(torrent, 512) + `]}}`
 	page := `{"totalPages":1,"items":[` + repeatJSON(item, 40) + `]}`
@@ -119,12 +120,12 @@ func TestDecodePageElementBudgetErrors(t *testing.T) {
 // dozens of compact pages into decoded slice backing arrays that OOM-kill the
 // deployment container.
 func TestFetchEntriesCumulativeElementCapErrors(t *testing.T) {
-	// 20 items x (1 + 512 torrents + 512x40 tags) = 419,860 elements per
-	// page: under the 500K per-page budget, over the 500K fetch-wide budget
-	// on page 2. Each page is ~1.3 MB, so the byte caps never fire first.
+	// 10 items x (1 + 512 torrents + 512x40 tags) = 209,930 elements per
+	// page: under the 250K per-page budget, over the 250K fetch-wide budget
+	// on page 2. Each page is ~0.7 MB, so the byte caps never fire first.
 	torrent := `{"tags":[` + repeatJSON(`""`, 40) + `]}`
 	item := `{"alID":1,"expand":{"trs":[` + repeatJSON(torrent, 512) + `]}}`
-	page := `{"totalPages":3,"items":[` + repeatJSON(item, 20) + `]}`
+	page := `{"totalPages":3,"items":[` + repeatJSON(item, 10) + `]}`
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, page)
@@ -286,7 +287,7 @@ func TestFetchEntriesPerPageByteCapErrors(t *testing.T) {
 // whose alert-stable message would misattribute a one-page anomaly to
 // fetch-wide budget exhaustion.
 func TestFetchEntriesPerPageElementCapErrors(t *testing.T) {
-	// Same shape as TestDecodePageElementBudgetErrors: over 1M aggregate
+	// Same shape as TestDecodePageElementBudgetErrors: ~1.25M aggregate
 	// elements while every per-parent cap holds, served over HTTP so the
 	// classification in fetchPage runs with the FULL per-page element limit.
 	torrent := `{"tags":[` + repeatJSON(`""`, 60) + `]}`
@@ -314,5 +315,26 @@ func TestFetchEntriesPerPageElementCapErrors(t *testing.T) {
 	want := fmt.Sprintf("page elements exceeded cap %d", maxPageElements)
 	if !strings.Contains(err.Error(), want) {
 		t.Errorf("error = %q, want substring %q", err.Error(), want)
+	}
+}
+
+
+// TestSeadexWorkingSetBudget pins the JOINT sizing of the fetch-wide budgets
+// against the deployment container: the caps are independently admissible, so
+// their maxima can occur in the same fetch, and an admitted catalogue may
+// simultaneously retain maxTotalBytes of decoded string content, the raw page
+// fetchPage still holds (maxPageBytes), and maxTotalElements of element
+// structs. That conservative working set must stay under a 192 MiB ceiling so
+// the guards fire (clean degradation) with at least 64 MiB of the 256 MiB
+// container left for slice spare capacity, decoder buffers, the loaded
+// state/mapping/library snapshots, and the Go runtime — instead of the kernel
+// OOM-killing the process.
+func TestSeadexWorkingSetBudget(t *testing.T) {
+	const ceiling = 192 << 20 // 256 MiB container minus 64 MiB headroom
+	workingSet := maxTotalBytes + maxPageBytes + maxTotalElements*int(unsafe.Sizeof(Torrent{}))
+	if workingSet >= ceiling {
+		t.Errorf("conservative SeaDex working set = %d bytes (%d MiB), want under the %d MiB ceiling; "+
+			"resize maxTotalBytes/maxPageBytes/maxTotalElements jointly",
+			workingSet, workingSet>>20, ceiling>>20)
 	}
 }

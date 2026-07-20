@@ -506,11 +506,62 @@ func parseMedia(raw []byte) (Media, error) {
 	return parsed, nil
 }
 
-// gqlPage is the nullable Page object of the batched query; pointers in the
-// envelope distinguish an explicit empty media array (valid, nothing found)
-// from a missing/null Page or media field (malformed response).
+// gqlPage is the nullable Page object of the batched query; the Page pointer
+// and media's set flag distinguish an explicit empty media array (valid,
+// nothing found) from a missing/null Page or media field (malformed response).
 type gqlPage struct {
-	Media *[]gqlMedia `json:"media"`
+	Media boundedMediaList `json:"media"`
+}
+
+// boundedMediaList decodes the untrusted Page.media array element by element
+// via json.Decoder, rejecting the element after batchSize BEFORE decoding or
+// appending it. The batched query requests perPage=batchSize, so a longer
+// array is malformed by construction; without the bound a hostile endpoint
+// could pack hundreds of thousands of tiny objects under the 1 MiB body cap
+// and json.Unmarshal would expand them all into []gqlMedia before
+// parsePageRecords validates anything (CWE-400 resource exhaustion). A
+// post-decode length check would be too late: the allocation has already
+// happened. set stays false for a missing field (UnmarshalJSON never runs)
+// or an explicit null, both rejected by parseMediaPage as a malformed
+// envelope; an explicit empty array sets it with zero records (valid).
+type boundedMediaList struct {
+	records []gqlMedia
+	set     bool
+}
+
+// UnmarshalJSON implements the bounded element-at-a-time decode described on
+// boundedMediaList. Over-cardinality is an envelope error (the whole batch
+// fails), not an ErrBatchRecord: the response shape itself violates the
+// query's perPage contract, so no record in it is trustworthy.
+func (l *boundedMediaList) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return nil // explicit null stays unset, rejected like a missing field
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	tok, err := dec.Token()
+	if err != nil {
+		return fmt.Errorf("media: %w", err)
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '[' {
+		return errors.New("media is not an array")
+	}
+	var records []gqlMedia
+	for dec.More() {
+		if len(records) == batchSize {
+			return fmt.Errorf("media array exceeds %d elements", batchSize)
+		}
+		var m gqlMedia
+		if err := dec.Decode(&m); err != nil {
+			return fmt.Errorf("media element %d: %w", len(records), err)
+		}
+		records = append(records, m)
+	}
+	if _, err := dec.Token(); err != nil { // consume the closing ']'
+		return fmt.Errorf("media: %w", err)
+	}
+	l.records = records
+	l.set = true
+	return nil
 }
 
 // gqlPageResponse is the GraphQL envelope for the batched Page(media) query.
@@ -547,10 +598,10 @@ func parseMediaPage(raw []byte) (map[int]Media, error) {
 	if r.Data.Page == nil {
 		return nil, errors.New("anilist: batch response missing Page")
 	}
-	if r.Data.Page.Media == nil {
+	if !r.Data.Page.Media.set {
 		return nil, errors.New("anilist: batch response missing media")
 	}
-	return parsePageRecords(*r.Data.Page.Media)
+	return parsePageRecords(r.Data.Page.Media.records)
 }
 
 // parsePageRecords validates one batch response's record list into a map

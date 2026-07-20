@@ -5,10 +5,13 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/cplieger/httpx/v3"
 )
 
 // --- Budget, paging, and stats ---
@@ -169,22 +172,31 @@ const (
 	harvestShowFailed
 )
 
-// requestScopedHarvestError reports whether err is a Torznab <error> document
-// naming a request/parameter failure (Newznab codes 200-299): the upstream
-// deliberately rejected THIS show's query, so the failure is show-local -
-// terminal for the show (retrying the same invalid request cannot help, which
-// is why terminalTorznabCode already fails it fast) but never evidence the
-// upstream itself is down, so one rejection stays show-local (a consecutive
-// run of them may still trip consecutiveRejectedLatch and latch the scope).
-// Auth/account codes (100-199) stay scope-wide: bad credentials fail every
-// show's query identically.
+// requestScopedHarvestError reports whether err names a failure the upstream
+// scoped to THIS show's query, so the failure is show-local - terminal for
+// the show (retrying the same invalid request cannot help, which is why
+// terminalTorznabCode and fetchAndParse already fail it fast) but never
+// evidence the upstream itself is down, so one rejection stays show-local (a
+// consecutive run of them may still trip consecutiveRejectedLatch and latch
+// the scope). Two shapes qualify: a Torznab <error> document naming a
+// request/parameter failure (Newznab codes 200-299), and an HTTP status that
+// condemns only the request that carried it - 400 Bad Request, 414 URI Too
+// Long, 422 Unprocessable Entity, the statuses an upstream answers when ONE
+// title's encoded query is itself unacceptable. Auth/account document codes
+// (100-199) and auth/config/availability statuses (401/403/404/408/429/5xx)
+// stay scope-wide: they fail every show's query identically.
 func requestScopedHarvestError(err error) bool {
-	docErr, ok := errors.AsType[*upstreamDocError](err)
-	if !ok {
-		return false
+	if docErr, ok := errors.AsType[*upstreamDocError](err); ok {
+		code, parseErr := strconv.Atoi(docErr.code)
+		return parseErr == nil && code >= 200 && code < 300
 	}
-	code, parseErr := strconv.Atoi(docErr.code)
-	return parseErr == nil && code >= 200 && code < 300
+	if statusErr, ok := errors.AsType[*httpx.StatusError](err); ok {
+		switch statusErr.Code {
+		case http.StatusBadRequest, http.StatusRequestURITooLong, http.StatusUnprocessableEntity:
+			return true
+		}
+	}
+	return false
 }
 
 // consecutiveMalformedLatch is how many CONSECUTIVE shows on one scope may
@@ -222,7 +234,8 @@ const consecutiveRejectedLatch = 3
 // freezing the whole tracker on synthesized titles indefinitely - unless a
 // RUN of malformed shows trips the caller's consecutiveMalformedLatch, the
 // signature of an upstream answering 2xx garbage to everything. A Torznab
-// <error> document naming a request/parameter code (200-299) is likewise
+// <error> document naming a request/parameter code (200-299) - or an HTTP
+// status condemning only this request (400/414/422) - is likewise
 // show-local (requestScopedHarvestError -> harvestShowFailed): the upstream
 // deliberately rejected this one show's query, so its siblings' valid queries
 // still run — unless a run of rejections trips the caller's
@@ -251,11 +264,12 @@ func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGrou
 // classifyHarvestError warns about one show's failed (non-cancelled) harvest
 // query and maps it to the outcome harvestTitles latches: a persistently
 // malformed SUCCESSFUL body stays show-local (harvestShowMalformed, counted
-// toward the consecutive-malformed latch), a request-scoped Torznab rejection
-// (codes 200-299) stays show-local and counts toward the consecutive-rejected
-// latch (harvestShowFailed), and
-// anything else - a status/transport/auth failure - condemns the scope
-// (harvestScopeFailed).
+// toward the consecutive-malformed latch), a request-scoped rejection - a
+// Torznab <error> document with a request/parameter code (200-299) or a
+// request-specific HTTP status (400/414/422) - stays show-local and counts
+// toward the consecutive-rejected latch (harvestShowFailed), and
+// anything else - an auth/config/availability status or a transport failure -
+// condemns the scope (harvestScopeFailed).
 func (w *FeedWriter) classifyHarvestError(err error, u *upstream, alID int) harvestOutcome {
 	if malformedUpstreamBody(err) {
 		w.log.Warn("indexer title harvest response malformed; show keeps its synthesized title this rebuild",

@@ -278,6 +278,9 @@ func TestMatchAniListTransientErrorDegrades(t *testing.T) {
 	if !res.Degraded {
 		t.Error("Degraded = false, want true when a needed AniList lookup fails transiently")
 	}
+	if got := res.Coverage.Unmapped[arrUnknown]; got != 1 {
+		t.Errorf("coverage unmapped[unknown] = %d, want 1 for the failed no-record fallback", got)
+	}
 	if _, ok := res.IncompleteIDs[42]; !ok || len(res.IncompleteIDs) != 1 {
 		t.Errorf("IncompleteIDs = %v, want exactly {42} (the transiently failed lookup)", res.IncompleteIDs)
 	}

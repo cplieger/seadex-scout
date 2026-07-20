@@ -1546,3 +1546,59 @@ func TestWalkSonarrEpisodeFailureSanitizesTitle(t *testing.T) {
 		t.Errorf("episode-fetch-failed warning does not carry the sanitized series title; records = %+v", rec.Records())
 	}
 }
+
+// TestWalkErrorCarriesArrIdentity pins the typed walk-side error contract the
+// scout's log boundaries depend on: a per-side walk failure preserves the
+// exact "walking <arr>: <cause>" text (report-mode CLI output reads it
+// unchanged), keeps the cause reachable through the chain, and carries the
+// failed side as a bounded value WalkErrArr recovers - the identity rides the
+// type because httpx.LogSafeError discards textual wrappers at the scout's
+// production log boundaries.
+func TestWalkErrorCarriesArrIdentity(t *testing.T) {
+	cause := errors.New("connect: connection refused")
+	tests := []struct {
+		name       string
+		cfg        Config
+		wantPrefix string
+		wantArr    string
+	}{
+		{
+			name:       "sonarr",
+			cfg:        Config{Sonarr: &fakeSonarr{listErr: cause}},
+			wantPrefix: "walking sonarr: ",
+			wantArr:    ArrSonarr,
+		},
+		{
+			name:       "radarr",
+			cfg:        Config{Radarr: &fakeRadarr{listErr: cause}},
+			wantPrefix: "walking radarr: ",
+			wantArr:    ArrRadarr,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.cfg.Logger = discardLogger()
+			w := NewWalker(&tc.cfg)
+			_, err := w.Walk(context.Background())
+			if err == nil {
+				t.Fatal("Walk returned nil error, want the list failure")
+			}
+			if got, want := err.Error(), tc.wantPrefix+cause.Error(); got != want {
+				t.Errorf("Walk error text = %q, want %q", got, want)
+			}
+			if !errors.Is(err, cause) {
+				t.Error("Walk error does not unwrap to its cause; the chain must stay intact")
+			}
+			if got := WalkErrArr(err); got != tc.wantArr {
+				t.Errorf("WalkErrArr = %q, want %q", got, tc.wantArr)
+			}
+		})
+	}
+
+	// An error that names no side (Walk's final cancellation guard, or any
+	// non-walk error) yields the empty identity, so the scout's log
+	// boundaries omit the attr instead of logging a bogus one.
+	if got := WalkErrArr(context.Canceled); got != "" {
+		t.Errorf("WalkErrArr(context.Canceled) = %q, want empty", got)
+	}
+}

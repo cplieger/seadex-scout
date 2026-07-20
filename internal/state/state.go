@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/seadex-scout/internal/library"
@@ -285,6 +286,13 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 // bytes, quarantining a corrupt payload (or, for a newer-schema file, setting
 // the Save block instead) before returning the error.
 func (s *Store) decode(data []byte) (State, error) {
+	// Save always emits valid UTF-8 JSON. encoding/json otherwise replaces
+	// malformed UTF-8 inside strings with U+FFFD, silently altering cache
+	// keys and values instead of reporting corruption.
+	if !utf8.Valid(data) {
+		s.maybeQuarantine()
+		return State{}, fmt.Errorf("state: decode %s: invalid UTF-8", s.path)
+	}
 	// Require a JSON object envelope before unmarshalling: json.Unmarshal
 	// accepts a literal null into a struct, so a corrupt file holding "null"
 	// would otherwise load as a silently-empty state (a fake cold start that

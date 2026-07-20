@@ -139,3 +139,27 @@ func TestFeedEntryInfoEmptyMemoTitles(t *testing.T) {
 		t.Errorf("info(1) = %+v, want the zero EntryInfo for an empty-titles memo entry", got)
 	}
 }
+
+// TestFeedEntryInfoEmptyArrTitleFallsBackToMemo pins the documented fallback
+// chain when the library item exists but its Title is empty: an unusable arr
+// title must not short-circuit the chain - the memo's canonical title (the
+// stronger remaining source) is returned, while the record's Fribb typing and
+// mapped season ride along untouched.
+func TestFeedEntryInfoEmptyArrTitleFallsBackToMemo(t *testing.T) {
+	idx := mapping.NewIndex([]mapping.Record{
+		{AniListID: 1, Type: "TV", TvdbID: 123, SeasonTvdb: 2},
+	})
+	lib := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 10, TvdbID: 123, Title: "", Year: 2023},
+	}}
+	memo := match.Memo{Entries: map[int]match.MemoEntry{
+		1: {Titles: []string{"Memo Title"}, Year: 2021},
+	}}
+	got := feedEntryInfo(idx, lib, memo)(1)
+	if got.Title != "Memo Title" || got.Year != 2021 {
+		t.Errorf("info(1) = %+v, want the memo title/year when the arr title is empty", got)
+	}
+	if got.SeasonTvdb != 2 || got.IsMovie || got.IsSpecial {
+		t.Errorf("info(1) typing = %+v, want SeasonTvdb=2 series typing intact", got)
+	}
+}

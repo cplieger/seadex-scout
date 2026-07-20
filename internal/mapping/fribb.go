@@ -78,7 +78,7 @@ const maxFribbRecords = 1 << 16
 // failure: it re-downloads the multi-MB body and rejects it every cycle,
 // never self-healing, so acceptRefresh routes it through rejectRefresh — the
 // consecutive-rejection streak advances and the scout escalates at
-// RejectionEscalationThreshold instead of degrading at WARN forever.
+// degradation.EscalationThreshold instead of degrading at WARN forever.
 var errRecordCapExceeded = fmt.Errorf("mapping: Fribb list exceeds cap %d records", maxFribbRecords)
 
 // maxFribbRecordBytes bounds one encoded Fribb record before its tolerant

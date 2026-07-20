@@ -44,12 +44,17 @@ const (
 	// maxTotalBytes caps cumulative page bytes across the whole fetch so a
 	// compromised upstream serving few-but-huge items per page (under the
 	// entry-count cap) cannot accumulate maxPages*maxPageBytes of memory.
-	// The honest catalogue is a few tens of MB (3x+ headroom at 128 MB), and
-	// retained decoded entries grow roughly with cumulative body bytes, so
-	// the cap must sit below the 256 MiB deployment container limit for the
-	// guard to fire (clean degradation) before the kernel OOM-kills the
-	// process.
-	maxTotalBytes = 128 << 20
+	// The honest catalogue is a few tens of MB (still ample headroom at
+	// 64 MB), and retained decoded entries grow roughly with cumulative body
+	// bytes. Sized jointly with maxPageBytes and maxTotalElements so the
+	// conservative SeaDex working set (decoded strings + the raw page still
+	// held by fetchPage + element structs) stays under the 192 MiB budget
+	// asserted by TestSeadexWorkingSetBudget, leaving over 64 MiB of the
+	// 256 MiB deployment container for slice spare capacity, decoder
+	// buffers, the loaded state/mapping/library snapshots, and the runtime
+	// — so the guard fires (clean degradation) before the kernel OOM-kills
+	// the process.
+	maxTotalBytes = 64 << 20
 	// maxAttempts / baseDelay bound the per-page retry.
 	maxAttempts = 3
 	baseDelay   = time.Second
@@ -78,8 +83,10 @@ const (
 	// multiplicatively (perPage x maxTorrentsPerEntry x maxFilesPerTorrent),
 	// so a body of minimal elements could still decode into hundreds of MB;
 	// this cap bounds the aggregate allocation (honest pages run ~tens of
-	// thousands of elements).
-	maxPageElements = 500_000
+	// thousands of elements). Kept equal to maxTotalElements so a first-page
+	// violation still classifies as per-page (fetchPage's budget-reduced
+	// check) rather than fetch-wide.
+	maxPageElements = 250_000
 	// maxTotalElements bounds the cumulative decoded array elements across
 	// the WHOLE fetch. fetchAndAppend retains every decoded entry until the
 	// fetch completes, so a per-page element cap alone still lets dozens of
@@ -89,10 +96,11 @@ const (
 	// the remaining allowance caps each page's decode, so the guard fires
 	// (clean degradation) before allocation scales with the hostile input.
 	// Sized jointly with maxTotalBytes: worst-case element struct overhead
-	// (~120 B/torrent on supported 64-bit targets x this cap) must fit
-	// under the 256 MiB container
-	// TOGETHER with maxTotalBytes of decoded string content.
-	maxTotalElements = 500_000
+	// (~120 B/torrent on supported 64-bit targets x this cap, ~30 MiB) must
+	// fit under the 192 MiB working-set ceiling asserted by
+	// TestSeadexWorkingSetBudget TOGETHER with maxTotalBytes of decoded
+	// string content and the raw page fetchPage still holds.
+	maxTotalElements = 250_000
 )
 
 // errCumulativeBytes reports the cumulative-byte budget (maxTotalBytes) being

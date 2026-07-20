@@ -1143,7 +1143,7 @@ func TestPollIntervalFromFile(t *testing.T) {
 // TestURLEmbedsCredential pins the sole trigger of the credential-leak config
 // warning: userinfo (with or without a password), each credential-like query
 // parameter, the case-insensitive fold, the raw-query scan that still flags a
-// credential in a malformed pair u.Query() drops (d-gpt-u4-1), and the silent
+// credential in a malformed semicolon-delimited pair that net/url.Query drops, and the silent
 // parse-failure and clean-URL negatives.
 func TestURLEmbedsCredential(t *testing.T) {
 	tests := []struct {

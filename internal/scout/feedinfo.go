@@ -42,7 +42,7 @@ func feedEntryInfo(idx *mapping.Index, lib *library.Snapshot, memo match.Memo) f
 			info.IsMovie = rec.IsMovie()
 			info.IsSpecial = rec.IsSpecial()
 			info.SeasonTvdb = rec.SeasonTvdb
-			if it := find(&rec); it != nil {
+			if it := find(&rec); it != nil && it.Title != "" {
 				info.Title, info.Year = it.Title, it.Year
 				return info
 			}

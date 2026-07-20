@@ -100,12 +100,18 @@ func TestIndex_ForEachRecordAndNewIndex(t *testing.T) {
 }
 
 func TestParseOverrides(t *testing.T) {
-	set, err := parseOverrides([]byte(`[{"anilist_id":5,"type":"  movie  "}]`))
+	set, err := parseOverrides([]byte(`[{"anilist_id":5,"type":"  movie  ","imdb_ids":[" tt2222222 ",""]}]`))
 	if err != nil {
 		t.Fatalf("parseOverrides error: %v", err)
 	}
 	if len(set.records) != 1 || set.records[0].Type != "MOVIE" {
 		t.Fatalf("parseOverrides = %+v, want one record with Type MOVIE", set.records)
+	}
+	// IMDb ids must be normalized like Fribb's (trimmed, blanks dropped) so
+	// HasArrIdentifier, findMovie, and the report catalogue agree on the
+	// exact lookup key.
+	if got := set.records[0].IMDbIDs; !slices.Equal(got, []string{"tt2222222"}) {
+		t.Errorf("IMDbIDs = %v, want [tt2222222] (trimmed, blank dropped)", got)
 	}
 	if len(set.unknown) != 0 {
 		t.Errorf("unknown keys = %v, want none for a well-formed override", set.unknown)

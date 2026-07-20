@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/cplieger/httpx/v3"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/slogx/capture"
 )
@@ -1050,10 +1051,46 @@ func TestHarvestRequestRejectionResetsMalformedRun(t *testing.T) {
 	}
 }
 
-// TestRequestScopedHarvestError pins the Newznab code-range boundaries of the
-// show-local classification directly: 200-299 is request-scoped, 100-199
-// (auth) and anything else stays scope-wide, a non-numeric code never
-// classifies, and the document error is found through a wrap.
+// TestUpdateHarvestScopeState_resetsRejectedRun pins the inverse reset
+// direction of the rejected latch: a successful or malformed show resets the
+// consecutive-rejected run, so two rejections, an intervening non-rejection,
+// and a later rejection never latch the scope.
+func TestUpdateHarvestScopeState_resetsRejectedRun(t *testing.T) {
+	tests := []struct {
+		name  string
+		reset harvestOutcome
+	}{
+		{name: "successful show", reset: harvestOK},
+		{name: "malformed show", reset: harvestShowMalformed},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			log, _ := capture.New()
+			w := NewFeedWriter(&FeedWriterConfig{}, Deps{Logger: log})
+			failed := map[string]bool{}
+			malformed := map[string]int{}
+			rejected := map[string]int{}
+			w.updateHarvestScopeState(upstreamNyaa, harvestShowFailed, failed, malformed, rejected)
+			w.updateHarvestScopeState(upstreamNyaa, harvestShowFailed, failed, malformed, rejected)
+			w.updateHarvestScopeState(upstreamNyaa, tc.reset, failed, malformed, rejected)
+			w.updateHarvestScopeState(upstreamNyaa, harvestShowFailed, failed, malformed, rejected)
+			if failed[upstreamNyaa] {
+				t.Fatal("scope latched after a non-consecutive third rejection; the intervening outcome must reset the run")
+			}
+			if got := rejected[upstreamNyaa]; got != 1 {
+				t.Errorf("rejected run after reset = %d, want 1", got)
+			}
+		})
+	}
+}
+
+// TestRequestScopedHarvestError pins the boundaries of the show-local
+// classification directly, across both failure shapes. Torznab documents:
+// 200-299 is request-scoped, 100-199 (auth) and anything else stays
+// scope-wide, a non-numeric code never classifies, and the document error is
+// found through a wrap. HTTP statuses: only the request-specific 400/414/422
+// are show-local; auth/config (401/403/404), timeout (408), rate-limit (429),
+// and server (5xx) statuses stay scope-wide.
 func TestRequestScopedHarvestError(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1068,11 +1105,97 @@ func TestRequestScopedHarvestError(t *testing.T) {
 		{"empty code stays scope-wide", &upstreamDocError{code: ""}, false},
 		{"non-document error stays scope-wide", fmt.Errorf("connection refused"), false},
 		{"wrapped document error still classifies", fmt.Errorf("search %q: %w", "Show", &upstreamDocError{code: "201"}), true},
+		{"HTTP 400 bad request is request-scoped", &httpx.StatusError{Code: http.StatusBadRequest}, true},
+		{"HTTP 414 URI too long is request-scoped", &httpx.StatusError{Code: http.StatusRequestURITooLong}, true},
+		{"HTTP 422 unprocessable entity is request-scoped", &httpx.StatusError{Code: http.StatusUnprocessableEntity}, true},
+		{"HTTP 401 unauthorized stays scope-wide", &httpx.StatusError{Code: http.StatusUnauthorized}, false},
+		{"HTTP 403 forbidden stays scope-wide", &httpx.StatusError{Code: http.StatusForbidden}, false},
+		{"HTTP 404 not found stays scope-wide", &httpx.StatusError{Code: http.StatusNotFound}, false},
+		{"HTTP 408 request timeout stays scope-wide", &httpx.StatusError{Code: http.StatusRequestTimeout}, false},
+		{"HTTP 429 rate limit stays scope-wide", &httpx.StatusError{Code: http.StatusTooManyRequests}, false},
+		{"HTTP 500 server error stays scope-wide", &httpx.StatusError{Code: http.StatusInternalServerError}, false},
+		{"HTTP 503 unavailable stays scope-wide", &httpx.StatusError{Code: http.StatusServiceUnavailable}, false},
+		{"wrapped status error still classifies", fmt.Errorf("search %q: %w", "Show", &httpx.StatusError{Code: http.StatusBadRequest}), true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := requestScopedHarvestError(tc.err); got != tc.want {
 				t.Errorf("requestScopedHarvestError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHarvestHTTPStatusFailureScoping pins the HTTP-status sibling of the
+// Torznab-document classification end to end: a request-specific status
+// (400/414/422) answered to ONE show's query consumes only that show's
+// budget - the SAME upstream's next show is still queried and harvested -
+// while an auth/config status (401/403/404) latches the whole scope, so the
+// next show is never queried. Without the status arm of
+// requestScopedHarvestError, a single title whose encoded query the upstream
+// rejects with 400 would condemn every later healthy show on the tracker to
+// synthesized titles.
+func TestHarvestHTTPStatusFailureScoping(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    int
+		showLocal bool
+	}{
+		{"400 bad request stays show-local", http.StatusBadRequest, true},
+		{"414 URI too long stays show-local", http.StatusRequestURITooLong, true},
+		{"422 unprocessable entity stays show-local", http.StatusUnprocessableEntity, true},
+		{"401 unauthorized latches the scope", http.StatusUnauthorized, false},
+		{"403 forbidden latches the scope", http.StatusForbidden, false},
+		{"404 not found latches the scope", http.StatusNotFound, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("q") == "Show A" {
+					http.Error(w, "rejected", tc.status)
+					return
+				}
+				w.Header().Set("Content-Type", "application/rss+xml")
+				body := torznabBody(torznabItem("Show B S01 1080p BluRay [G]", "https://nyaa.si/view/43"))
+				_, _ = io.WriteString(w, strings.ReplaceAll(body, "http://prowlarr:9696", "http://"+r.Host))
+			}))
+			defer srv.Close()
+
+			feeds := map[string][]item{upstreamNyaa: {
+				{Key: "nyaa:42", AniListID: 7, Title: "Show A"},
+				{Key: "nyaa:43", AniListID: 8, Title: "Show B"},
+			}}
+			info := map[int]EntryInfo{7: {Title: "Show A"}, 8: {Title: "Show B"}}
+			log, rec := capture.New()
+			w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+				NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
+			}}, Deps{HTTP: srv.Client(), Logger: log})
+			titles := map[string]string{}
+			stats := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] })
+
+			if _, ok := titles["nyaa:42"]; ok {
+				t.Errorf("titles = %v, want no cached title for the rejected show", titles)
+			}
+			if tc.showLocal {
+				if stats.queries != 2 {
+					t.Errorf("harvest queries = %d, want 2 (a request-specific status must consume only one show's budget)", stats.queries)
+				}
+				if titles["nyaa:43"] != "Show B S01 1080p BluRay [G]" {
+					t.Errorf("titles = %v, want the later show on the same upstream still harvested (nyaa:43)", titles)
+				}
+				if !rec.Contains("indexer title harvest request rejected; show keeps its synthesized title this rebuild") {
+					t.Errorf("request-specific status not warned as a show-local rejection; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+				}
+			} else {
+				if stats.queries != 1 {
+					t.Errorf("harvest queries = %d, want 1 (an auth/config status must latch the scope)", stats.queries)
+				}
+				if len(titles) != 0 {
+					t.Errorf("titles = %v, want empty (no show harvested after the scope latched)", titles)
+				}
+				if !rec.Contains("indexer title harvest query failed; skipping this upstream's remaining shows this rebuild") {
+					t.Errorf("scope-wide status not warned as such; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+				}
 			}
 		})
 	}

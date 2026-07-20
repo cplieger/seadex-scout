@@ -269,29 +269,56 @@ func TestRebuildFailsOnUnreadablePreviousSnapshot(t *testing.T) {
 	}
 }
 
-// TestRebuildRejectsOversizedSnapshot pins the write-side size bound: a
+// TestRebuildDropsOversizedItem pins the shared persisted-item limits at the
+// creation choke point (h-f10): a torrent whose synthesized field blows
+// maxPersistedFieldBytes (here a file-less torrent whose feed title falls
+// back to an oversized release group) is dropped as unresolvable instead of
+// being persisted - one such value could otherwise pass the whole-snapshot
+// size bound and OOM the reader's XML render - while its identity is still
+// recorded in the seen ledger so it can never re-enter the journal as new.
+func TestRebuildDropsOversizedItem(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	entries := []seadex.Entry{{
+		AniListID: 9,
+		Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://nyaa.si/view/42", IsBest: true,
+			ReleaseGroup: strings.Repeat("a", maxPersistedFieldBytes+1),
+		}},
+	}}
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 0 {
+		t.Errorf("nyaa_feed has %d items, want the oversized item dropped as unresolvable", len(snap.NyaaFeed))
+	}
+	if !snap.Seen["nyaa:42"] {
+		t.Error("seen ledger missing the dropped torrent's identity; it could re-enter the journal as new")
+	}
+}
+
+// TestPersistRejectsOversizedSnapshot pins the write-side size bound: a
 // snapshot that marshals past maxFeedBytes (which Indexer.reload would refuse)
 // is rejected BEFORE the atomic write, returning a size error naming actual and
 // maximum bytes, and the previous last-good snapshot stays in place readable.
-func TestRebuildRejectsOversizedSnapshot(t *testing.T) {
+// Exercised on persist directly: since renderJournalItem drops over-limit items
+// at creation (TestRebuildDropsOversizedItem), no single item can inflate a
+// rebuilt snapshot past the bound anymore - the bound now guards aggregate
+// growth (e.g. an enormous seen ledger or title cache).
+func TestPersistRejectsOversizedSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	previous := []byte(`{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[],"ab_feed":[]}`)
 	if err := os.WriteFile(path, previous, 0o600); err != nil {
 		t.Fatalf("seed previous snapshot: %v", err)
 	}
-	// A file-less torrent's feed title falls back to the release group, so an
-	// oversized group inflates the marshaled snapshot past maxFeedBytes without
-	// regex-scanning a huge file name.
-	entries := []seadex.Entry{{
-		AniListID: 9,
-		Torrents: []seadex.Torrent{{
-			Tracker: "Nyaa", URL: "https://nyaa.si/view/42", IsBest: true,
-			ReleaseGroup: strings.Repeat("a", maxFeedBytes+1),
-		}},
-	}}
-	err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}).Rebuild(context.Background(), entries, nil)
+	snap := &snapshot{
+		ByHash: map[string]bool{}, ByKey: map[string]bool{}, Seen: map[string]bool{},
+		Titles: map[string]string{"nyaa:42": strings.Repeat("a", maxFeedBytes+1)},
+	}
+	err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{}).persist(context.Background(), snap)
 	if err == nil {
-		t.Fatal("Rebuild with an oversized snapshot returned nil, want size error")
+		t.Fatal("persist with an oversized snapshot returned nil, want size error")
 	}
 	if !strings.Contains(err.Error(), "exceeds max") {
 		t.Errorf("error = %q, want a size-cap error naming the max", err)
