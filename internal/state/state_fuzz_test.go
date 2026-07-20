@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // newerSchemaState reports whether data is what Load classifies as valid
@@ -25,6 +26,12 @@ import (
 // Load's newer-schema contract: a payload with any invalid duplicate
 // occurrence is corruption, never newer-schema state.
 func newerSchemaState(data []byte) bool {
+	// Load quarantines invalid UTF-8 before the newer-schema check (Save
+	// only emits valid UTF-8), so such a payload is never newer-schema
+	// state regardless of its version stamp.
+	if !utf8.Valid(data) {
+		return false
+	}
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return false
@@ -68,8 +75,8 @@ func newerSchemaState(data []byte) bool {
 // FuzzStoreLoadQuarantine drives Load with arbitrary state-file bytes and pins
 // the corruption-recovery invariants: Load never panics; a rejected payload is
 // quarantined at path+".corrupt" with its original bytes and the live path is
-// renamed away - EXCEPT a decoded object whose Version is newer than
-// SchemaVersion, which is valid newer-schema state (an image rollback), stays
+// renamed away - EXCEPT a valid-UTF-8 decoded object whose Version is newer
+// than SchemaVersion, which is valid newer-schema state (an image rollback), stays
 // preserved at the live path with no .corrupt copy, and blocks Save so this
 // binary cannot overwrite it; an accepted payload is never quarantined and
 // stays usable - Save re-persists it (stamping SchemaVersion) and Load reads
@@ -97,6 +104,8 @@ func FuzzStoreLoadQuarantine(f *testing.F) {
 	f.Add([]byte(`{"version":99} {"baselined":true}`))
 	f.Add([]byte(`{1:2}`))
 	f.Add([]byte(`{"version":99,"k":}`))
+	f.Add([]byte("{\"version\":99,\"findings\":{\"bad\xffkey\":{}}}"))
+	f.Add([]byte("{\"version\":99,\"k\":\"bad\xffval\"}"))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "state.json")

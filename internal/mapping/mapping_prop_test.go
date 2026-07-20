@@ -2,6 +2,7 @@ package mapping
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 
 	"pgregory.net/rapid"
@@ -31,12 +32,25 @@ func TestDeduplicateRecordsIndexOracle(t *testing.T) {
 			}
 		}), 0, 20).Draw(t, "records")
 
+		// Freeze the oracle BEFORE the call under test, from a deep copy:
+		// the Record copies would otherwise alias the generated TmdbMovies/
+		// IMDbIDs backing arrays, so an in-place deduplicator regression that
+		// mutates a survivor's fields could contaminate the oracle and the
+		// output alike, and the parity check would still pass.
+		frozen := make([]Record, len(records))
+		for i, r := range records {
+			r.TmdbMovies = slices.Clone(r.TmdbMovies)
+			r.IMDbIDs = slices.Clone(r.IMDbIDs)
+			frozen[i] = r
+		}
+		rawIdx := buildIndex(frozen)
+
 		out := deduplicateRecords(records)
 
 		if got, want := buildIndex(out).Len(), len(out); got != want {
 			t.Fatalf("deduplicated set indexes to %d entries, want bijective %d", got, want)
 		}
-		rawIdx, outIdx := buildIndex(records), buildIndex(out)
+		outIdx := buildIndex(out)
 		if rawIdx.Len() != outIdx.Len() {
 			t.Fatalf("index size diverged: raw %d, deduplicated %d", rawIdx.Len(), outIdx.Len())
 		}

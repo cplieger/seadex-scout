@@ -344,6 +344,18 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 			"path", w.path, "reason", "item exceeds persisted-item limits")
 		return previousJournal{baseline: true, reason: "malformed"}, nil
 	}
+	for k, t := range snap.Titles {
+		if len(k) > maxPersistedFieldBytes || len(t) > maxPersistedFieldBytes {
+			// The titles cache is an ingress of its own: applyTitles overwrites
+			// carried items' titles AFTER renderJournalItem's creation-time
+			// check, so an over-limit cached title would let a rebuild persist
+			// a snapshot the server's reload rejects. The value itself is never
+			// logged: it can be attacker-shaped multi-megabyte text.
+			w.log.Warn("previous feed snapshot malformed; re-baselining the feed journal",
+				"path", w.path, "reason", "cached title exceeds persisted-item limits")
+			return previousJournal{baseline: true, reason: "malformed"}, nil
+		}
+	}
 	if snap.Seen == nil {
 		return previousJournal{baseline: true, reason: "pre-journal-schema"}, nil
 	}

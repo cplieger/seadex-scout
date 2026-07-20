@@ -189,6 +189,7 @@ func TestParseMediaPageNullableEnvelope(t *testing.T) {
 		{name: "missing Page", raw: `{"data":{}}`, wantErr: true},
 		{name: "missing media", raw: `{"data":{"Page":{}}}`, wantErr: true},
 		{name: "null media", raw: `{"data":{"Page":{"media":null}}}`, wantErr: true},
+		{name: "duplicate media ending in null", raw: `{"data":{"Page":{"media":[{"id":1,"title":{"romaji":"A"}}],"media":null}}}`, wantErr: true},
 		{name: "record with whitespace-only title fails batch", raw: `{"data":{"Page":{"media":[{"id":1,"title":{"romaji":" "}}]}}}`, wantErr: true},
 		{name: "record with punctuation-only title fails batch", raw: `{"data":{"Page":{"media":[{"id":1,"title":{"romaji":"!!!"}}]}}}`, wantErr: true},
 		{name: "record with no title fails batch", raw: `{"data":{"Page":{"media":[{"id":1}]}}}`, wantErr: true},

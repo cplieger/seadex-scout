@@ -298,6 +298,49 @@ func TestRebuildDropsOversizedItem(t *testing.T) {
 	}
 }
 
+// TestRebuildBaselinesOversizedCachedTitle pins the titles-cache ingress of
+// the shared persisted-item limits (h-f10): a previous snapshot whose feed
+// items are all bounded but whose harvested-title cache carries an over-limit
+// value must warn and re-baseline as malformed - applyTitles overwrites a
+// carried item's title AFTER renderJournalItem's creation-time check, so
+// accepting the cache would let one rebuild persist a snapshot the server's
+// reload rejects and degrade the feed for a full rebuild interval.
+func TestRebuildBaselinesOversizedCachedTitle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	t0 := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
+	prev := snapshot{
+		ByHash: map[string]bool{}, ByKey: map[string]bool{"nyaa:42": true},
+		ByPair: map[string]bool{},
+		Seen:   map[string]bool{"nyaa:42": true},
+		Titles: map[string]string{"nyaa:42": strings.Repeat("a", maxPersistedFieldBytes+1)},
+		NyaaFeed: []item{{
+			PubDate: t0, FirstSeen: t0, Key: "nyaa:42",
+			Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42",
+		}},
+	}
+	writeSnapshotFile(t, path, &prev)
+	log, rec := capture.New()
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
+	w.now = func() time.Time { return t0.Add(time.Hour) }
+	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
+	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 0 {
+		t.Errorf("feed = %d items, want 0 (an oversized cached title must re-baseline, not be applied to a carried item)", len(snap.NyaaFeed))
+	}
+	if len(snap.Titles) != 0 {
+		t.Errorf("titles after re-baseline = %v, want empty", snap.Titles)
+	}
+	if !snap.Seen["nyaa:42"] {
+		t.Errorf("seen ledger missing the curated identity after re-baseline: %v", snap.Seen)
+	}
+	if !rec.Contains("previous feed snapshot malformed; re-baselining the feed journal") {
+		t.Errorf("oversized cached title not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
 // TestPersistRejectsOversizedSnapshot pins the write-side size bound: a
 // snapshot that marshals past maxFeedBytes (which Indexer.reload would refuse)
 // is rejected BEFORE the atomic write, returning a size error naming actual and

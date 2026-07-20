@@ -534,6 +534,11 @@ type boundedMediaList struct {
 // fails), not an ErrBatchRecord: the response shape itself violates the
 // query's perPage contract, so no record in it is trustworthy.
 func (l *boundedMediaList) UnmarshalJSON(data []byte) error {
+	// encoding/json processes duplicate object keys in order, invoking this
+	// method once per occurrence on the same receiver. Reset before each
+	// value so a later null cannot retain an earlier array.
+	l.records = nil
+	l.set = false
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return nil // explicit null stays unset, rejected like a missing field
 	}

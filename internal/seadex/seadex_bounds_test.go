@@ -318,7 +318,6 @@ func TestFetchEntriesPerPageElementCapErrors(t *testing.T) {
 	}
 }
 
-
 // TestSeadexWorkingSetBudget pins the JOINT sizing of the fetch-wide budgets
 // against the deployment container: the caps are independently admissible, so
 // their maxima can occur in the same fetch, and an admitted catalogue may
