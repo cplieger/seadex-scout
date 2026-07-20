@@ -451,14 +451,17 @@ type errorXML struct {
 // bounded retry budget is unchanged) but never marks it malformedBody, so
 // after retry exhaustion the harvest latches the failed scope instead of
 // treating an upstream-wide auth/config failure as one show's poison result
-// set.
+// set. The fields hold the RAW upstream text (so fetchAndParse's exact-
+// substring API-key redaction sees the untruncated key); Error() is the
+// sanitizing emit boundary.
 type upstreamDocError struct {
 	code        string
 	description string
 }
 
 func (e *upstreamDocError) Error() string {
-	return fmt.Sprintf("upstream torznab error code=%s: %s", e.code, e.description)
+	return fmt.Sprintf("upstream torznab error code=%s: %s",
+		sanitizeUpstreamText(e.code), sanitizeUpstreamText(e.description))
 }
 
 // capLogText bounds and cleans an untrusted string before it reaches a log
@@ -496,10 +499,11 @@ func parseTorznab(body []byte) ([]item, error) {
 		}
 		var e errorXML
 		if xml.Unmarshal(body, &e) == nil {
-			return nil, &upstreamDocError{
-				code:        sanitizeUpstreamText(e.Code),
-				description: sanitizeUpstreamText(e.Description),
-			}
+			// Raw fields; Error() sanitizes at the emit boundary so the key
+			// redaction in fetchAndParse sees the untruncated text (cap-before-
+			// redact would let a boundary-straddling key prefix escape the
+			// exact-substring replacement).
+			return nil, &upstreamDocError{code: e.Code, description: e.Description}
 		}
 		return nil, fmt.Errorf("parse torznab feed: %w", err)
 	}
@@ -534,10 +538,10 @@ func (x *itemXML) toItem() item {
 		dl = x.Link
 	}
 	size := x.Enclosure.Length
-	if size == 0 {
+	if size <= 0 {
 		size = x.Size
 	}
-	if size == 0 {
+	if size <= 0 {
 		size, _ = strconv.ParseInt(strings.TrimSpace(attrs["size"]), 10, 64)
 	}
 

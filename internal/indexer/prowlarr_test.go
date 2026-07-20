@@ -338,17 +338,25 @@ func TestUpstreamSearchTorznabErrorDocAttempts(t *testing.T) {
 // key before the error reaches httpx.Do's retry logger or any caller WARN,
 // so the credential never expands into the log stream (CWE-532).
 func TestUpstreamSearchRedactsAPIKeyInTorznabErrorDoc(t *testing.T) {
-	const apiKey = "prowlarr-secret-key-123"
-	tests := map[string]string{
-		"terminal request code 201":  "201",
-		"retryable generic code 900": "900",
+	const apiKey = "test-prowlarr-key"
+	tests := map[string]struct {
+		code    string
+		padding string
+	}{
+		"terminal request code 201":  {code: "201"},
+		"retryable generic code 900": {code: "900"},
+		// The reflected key straddles sanitizeUpstreamText's 200-byte cap:
+		// redaction must run on the untruncated text (Error() sanitizes at
+		// the emit boundary), or the exact-substring replacement misses the
+		// cap-truncated key and leaks its prefix (CWE-532).
+		"key straddling the sanitize cap": {code: "900", padding: strings.Repeat("x", 190)},
 	}
-	for name, code := range tests {
+	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "application/rss+xml")
 				_, _ = io.WriteString(w,
-					`<?xml version="1.0" encoding="UTF-8"?><error code="`+code+`" description="rejected key `+apiKey+`"/>`)
+					`<?xml version="1.0" encoding="UTF-8"?><error code="`+tc.code+`" description="`+tc.padding+apiKey+`"/>`)
 			}))
 			defer srv.Close()
 
@@ -358,15 +366,17 @@ func TestUpstreamSearchRedactsAPIKeyInTorznabErrorDoc(t *testing.T) {
 			if err == nil {
 				t.Fatal("search against an error document returned nil error")
 			}
-			if strings.Contains(err.Error(), apiKey) {
-				t.Errorf("returned error leaks the API key: %v", err)
+			// A leaked PREFIX is as bad as the full key (the attacker picks
+			// the truncation offset, so >=8 leaked chars are brute-forceable).
+			if strings.Contains(err.Error(), apiKey[:8]) {
+				t.Errorf("returned error leaks the API key (or a prefix): %v", err)
 			}
 			if !strings.Contains(err.Error(), "REDACTED") {
 				t.Errorf("returned error = %v, want REDACTED in place of the API key", err)
 			}
 			for _, line := range renderedLogRecords(rec) {
-				if strings.Contains(line, apiKey) {
-					t.Errorf("log record leaks the API key: %q", line)
+				if strings.Contains(line, apiKey[:8]) {
+					t.Errorf("log record leaks the API key (or a prefix): %q", line)
 				}
 			}
 		})

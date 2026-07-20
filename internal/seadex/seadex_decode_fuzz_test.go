@@ -42,6 +42,19 @@ func FuzzDecodePage(f *testing.F) {
 		`true`,
 		``,
 		`{"items":[{"expand":{"trs":[{"files":null,"tags":null}]}}]}`,
+		`{"items":[{`,
+		`{"items":[5]}`,
+		`{"items":[{"notes":5}]}`,
+		`{"items":[{"expand":{`,
+		`{"items":[{"expand":[]}]}`,
+		`{"items":[{"expand":{"trs":{}}}]}`,
+		`{"items":[{"expand":{"trs":[5]}}]}`,
+		`{"items":[{"expand":{"trs":[{`,
+		`{"items":[{"expand":{"trs":[{"url":5}]}}]}`,
+		`{"items":[{"expand":{"trs":[{"files":[`,
+		`{"items":[{"expand":{"trs":[{"files":[5]}]}}]}`,
+		`{"items":[{"expand":{"trs":[{"tags":[5]}]}}]}`,
+		`{"unknown":{"deep":[`,
 	}
 	for _, s := range seeds {
 		f.Add([]byte(s))

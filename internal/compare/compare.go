@@ -4,8 +4,10 @@
 // tracker, or on AnimeBytes when the operator enables it), and compares the
 // surviving recommended release groups against the groups present on the
 // library item. The comparison is season-scoped and decided by the shared
-// internal/align decision core (align.Decide) - the same decision the audit
-// report renders, so a daemon finding never disagrees with the report: a
+// internal/align decision core (align.Decide) - the same decision rules the
+// audit report renders, so the two flows cannot drift on shared inputs (they
+// deliberately prepare different ones: the report judges the raw SeaDex
+// best/alt sets, this pass only its filtered obtainable recommendations): a
 // mapped TVDB season against that season's groups, a special against Sonarr's
 // season-0 bucket, a movie against its groups, and an absolute-numbered or
 // title-only run against every real season conservatively -
@@ -112,12 +114,19 @@ type Finding struct {
 type Comparer struct {
 	opts            filter.Options
 	excludeSpecials bool
+	animeBytes      bool
 }
 
 // Config configures a Comparer.
 type Config struct {
 	Filter          filter.Options
 	ExcludeSpecials bool
+	// AnimeBytes includes AnimeBytes (private tracker) releases in the
+	// obtainability check; public trackers are always considered. Off means
+	// AnimeBytes releases are invisible. It is the comparer's own carrier for
+	// the tracker toggle (mirroring audit.Config.AnimeBytes) because
+	// filter.Options holds only the content filters.
+	AnimeBytes bool
 }
 
 // NewComparer builds a Comparer from cfg.
@@ -125,6 +134,7 @@ func NewComparer(cfg Config) *Comparer {
 	return &Comparer{
 		opts:            cfg.Filter,
 		excludeSpecials: cfg.ExcludeSpecials,
+		animeBytes:      cfg.AnimeBytes,
 	}
 }
 
@@ -217,14 +227,14 @@ func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
 		// AB guard before classification; the raw-URL invariant lives in
 		// classify.ABVisible. Obtainable below re-checks the label as defense
 		// in depth.
-		if !classify.ABVisible(t, c.opts.AnimeBytes) {
+		if !classify.ABVisible(t, c.animeBytes) {
 			continue
 		}
 		rel := classify.Torrent(entry, t)
 		if ok, _ := filter.KeepNonTracker(&rel, c.opts); !ok {
 			continue
 		}
-		if !classify.Obtainable(&rel, t, c.opts.AnimeBytes) {
+		if !classify.Obtainable(&rel, t, c.animeBytes) {
 			continue
 		}
 		out = append(out, candidate{rel: rel, torrent: *t})
@@ -237,7 +247,7 @@ func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
 // is incomplete (nothing complete to grab).
 func betterResult(entry *seadex.Entry, base *Finding, recommended []candidate, recGroups []string) *Finding {
 	status, sev := StatusBetter, SevWarn
-	if entry.Incomplete {
+	if classify.DivergedIncomplete(entry) {
 		status, sev = StatusIncomplete, SevInfo
 	}
 	fillBest(base, recommended, recGroups)

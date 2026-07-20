@@ -55,6 +55,11 @@ func epFile(season int, group string) arrapi.EpisodeFile {
 	return arrapi.EpisodeFile{SeasonNumber: season, ReleaseGroup: group}
 }
 
+// diffItem builds a minimal comparable Item for the DiffSnapshots tests.
+func diffItem(arr string, id int, groups ...string) Item {
+	return Item{Arr: arr, ArrID: id, Groups: groups, HasFile: len(groups) > 0}
+}
+
 // TestWalkSonarrPartialEpisodeFailure pins the "ingest succeeded == healthy"
 // semantic: a sub-budget per-series episode-fetch failure keeps the series as
 // a Failed placeholder (identity only, no file data, so a transient fetch
@@ -329,18 +334,15 @@ func TestKeepByTags(t *testing.T) {
 }
 
 func TestDiffSnapshots(t *testing.T) {
-	item := func(arr string, id int, groups ...string) Item {
-		return Item{Arr: arr, ArrID: id, Groups: groups, HasFile: len(groups) > 0}
-	}
 	prev := &Snapshot{Items: []Item{
-		item(ArrSonarr, 1, "pmr"),
-		item(ArrSonarr, 2, "grp"),
-		item(ArrRadarr, 3, "movgrp"),
+		diffItem(ArrSonarr, 1, "pmr"),
+		diffItem(ArrSonarr, 2, "grp"),
+		diffItem(ArrRadarr, 3, "movgrp"),
 	}}
 	cur := &Snapshot{Items: []Item{
-		item(ArrSonarr, 1, "pmr"),       // unchanged
-		item(ArrSonarr, 2, "lostyears"), // changed group set
-		item(ArrSonarr, 4, "newgrp"),    // added
+		diffItem(ArrSonarr, 1, "pmr"),       // unchanged
+		diffItem(ArrSonarr, 2, "lostyears"), // changed group set
+		diffItem(ArrSonarr, 4, "newgrp"),    // added
 		// Radarr id 3 removed
 	}}
 	d := DiffSnapshots(prev, cur)
@@ -358,9 +360,6 @@ func TestDiffSnapshots(t *testing.T) {
 // permanently masked real removals and additions once partial walks started
 // retaining Failed placeholders.
 func TestDiffSnapshotsPartialAware(t *testing.T) {
-	item := func(arr string, id int, groups ...string) Item {
-		return Item{Arr: arr, ArrID: id, Groups: groups, HasFile: len(groups) > 0}
-	}
 	failed := func(arr string, id int) Item {
 		return Item{Arr: arr, ArrID: id, Failed: true}
 	}
@@ -369,13 +368,13 @@ func TestDiffSnapshotsPartialAware(t *testing.T) {
 		// series B is truly gone from Sonarr. B reports removed even though
 		// cur is Partial; A does not, and a change on a clean item counts.
 		prev := &Snapshot{Items: []Item{
-			item(ArrSonarr, 1, "pmr"),  // A: fetch failed this walk
-			item(ArrSonarr, 2, "grp"),  // B: genuinely removed
-			item(ArrSonarr, 3, "seed"), // C: group changed
+			diffItem(ArrSonarr, 1, "pmr"),  // A: fetch failed this walk
+			diffItem(ArrSonarr, 2, "grp"),  // B: genuinely removed
+			diffItem(ArrSonarr, 3, "seed"), // C: group changed
 		}}
 		cur := &Snapshot{Partial: true, Items: []Item{
 			failed(ArrSonarr, 1),
-			item(ArrSonarr, 3, "lostyears"),
+			diffItem(ArrSonarr, 3, "lostyears"),
 		}}
 		d := DiffSnapshots(prev, cur)
 		if d.Removed != 1 || d.Changed != 1 || d.Added != 0 {
@@ -384,13 +383,13 @@ func TestDiffSnapshotsPartialAware(t *testing.T) {
 	})
 	t.Run("failed placeholder in prev suppresses only its own addition", func(t *testing.T) {
 		prev := &Snapshot{Partial: true, Items: []Item{
-			item(ArrSonarr, 1, "pmr"),
+			diffItem(ArrSonarr, 1, "pmr"),
 			failed(ArrSonarr, 2), // recovers this walk
 		}}
 		cur := &Snapshot{Items: []Item{
-			item(ArrSonarr, 1, "pmr"),
-			item(ArrSonarr, 2, "grp"),    // recovered, not an arrival
-			item(ArrSonarr, 4, "newgrp"), // genuinely added
+			diffItem(ArrSonarr, 1, "pmr"),
+			diffItem(ArrSonarr, 2, "grp"),    // recovered, not an arrival
+			diffItem(ArrSonarr, 4, "newgrp"), // genuinely added
 		}}
 		d := DiffSnapshots(prev, cur)
 		if d.Added != 1 || d.Removed != 0 || d.Changed != 0 {
@@ -401,12 +400,12 @@ func TestDiffSnapshotsPartialAware(t *testing.T) {
 		// Partial is set only by Sonarr episode-fetch failures and Radarr
 		// items never carry Failed, so their presence changes always count.
 		prev := &Snapshot{Items: []Item{
-			item(ArrSonarr, 1, "pmr"),
-			item(ArrRadarr, 3, "movgrp"), // genuinely removed
+			diffItem(ArrSonarr, 1, "pmr"),
+			diffItem(ArrRadarr, 3, "movgrp"), // genuinely removed
 		}}
 		cur := &Snapshot{Partial: true, Items: []Item{
 			failed(ArrSonarr, 1),
-			item(ArrRadarr, 4, "newmov"), // genuinely added
+			diffItem(ArrRadarr, 4, "newmov"), // genuinely added
 		}}
 		d := DiffSnapshots(prev, cur)
 		if d.Added != 1 || d.Removed != 1 || d.Changed != 0 {
@@ -1309,11 +1308,8 @@ func TestWalkCombinesBothArrsIntoOneSnapshot(t *testing.T) {
 // its key is never Changed, its own removal is suppressed while it is Failed
 // in cur, and its recovery is not an addition when it was Failed in prev.
 func TestDiffSnapshotsSkipsFailedPlaceholders(t *testing.T) {
-	item := func(arr string, id int, groups ...string) Item {
-		return Item{Arr: arr, ArrID: id, Groups: groups, HasFile: len(groups) > 0}
-	}
 	t.Run("failed placeholder in cur is not a change or removal", func(t *testing.T) {
-		prev := &Snapshot{Items: []Item{item(ArrSonarr, 1, "pmr")}}
+		prev := &Snapshot{Items: []Item{diffItem(ArrSonarr, 1, "pmr")}}
 		cur := &Snapshot{Partial: true, Items: []Item{{Arr: ArrSonarr, ArrID: 1, Failed: true}}}
 		if d := DiffSnapshots(prev, cur); d != (Diff{}) {
 			t.Errorf("diff = %+v, want zero Diff (a Failed placeholder carries no comparable state)", d)
@@ -1321,7 +1317,7 @@ func TestDiffSnapshotsSkipsFailedPlaceholders(t *testing.T) {
 	})
 	t.Run("failed placeholder in prev is not an addition when the series returns", func(t *testing.T) {
 		prev := &Snapshot{Partial: true, Items: []Item{{Arr: ArrSonarr, ArrID: 1, Failed: true}}}
-		cur := &Snapshot{Items: []Item{item(ArrSonarr, 1, "pmr")}}
+		cur := &Snapshot{Items: []Item{diffItem(ArrSonarr, 1, "pmr")}}
 		if d := DiffSnapshots(prev, cur); d != (Diff{}) {
 			t.Errorf("diff = %+v, want zero Diff (a returning series after a Failed walk is not added)", d)
 		}

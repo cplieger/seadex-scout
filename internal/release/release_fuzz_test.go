@@ -100,6 +100,46 @@ func fuzzLabel(s string) string {
 	return b.String()
 }
 
+// hostGateInvariants asserts the shared metamorphic and bounded-output
+// invariants for a tracker host gate over one fuzz input (never a
+// reimplementation of the dot-boundary rule): the canonical domain itself
+// (with or without the DNS-root dot) always matches; gluing a valid label
+// onto an explicit ".<domain>" boundary always matches; gluing an EMPTY
+// label ("..<domain>") never matches, whatever precedes it (no resolvable
+// DNS name has an empty label); gluing a dotless prefix onto a non-matching
+// host never creates a match (the suffix rule cannot be bypassed without a
+// label boundary); a single trailing dot never changes the answer; and a
+// matching host must at least end in the domain after the gate's own
+// case/whitespace fold and root-dot trim (the gate resolves through
+// LookupTrackerByHost, which folds case and trims whitespace).
+func hostGateInvariants(t *testing.T, gate func(string) bool, domain, host string) {
+	t.Helper()
+	got := gate(host)
+	if (host == domain || host == domain+".") && !got {
+		t.Errorf("gate(%q) = false, want true for the canonical %s host", host, domain)
+	}
+	if glued := fuzzLabel(host) + "." + domain; !gate(glued) {
+		t.Errorf("gate(%q) = false, want true: a valid label on an explicit .%s boundary always matches", glued, domain)
+	}
+	if bad := host + ".." + domain; gate(bad) {
+		t.Errorf("gate(%q) = true, want false: an empty label is never a real subdomain boundary", bad)
+	}
+	if !got && !strings.HasPrefix(strings.TrimSpace(host), ".") && gate("evil"+host) {
+		t.Errorf("gate(%q) = true for a dotless-prefix variant of non-matching host %q: suffix rule bypassed", "evil"+host, host)
+	}
+	// The gate trims surrounding whitespace itself, so the trailing-dot
+	// metamorphic check appends the dot to the trimmed host (a dot after
+	// trailing whitespace is not a DNS-root dot).
+	if trimmed := strings.TrimSpace(host); !strings.HasSuffix(trimmed, ".") {
+		if dotted := gate(trimmed + "."); dotted != got {
+			t.Errorf("gate(%q) = %v but gate(%q) = %v: DNS-root trailing dot must not change the answer", host, got, trimmed+".", dotted)
+		}
+	}
+	if norm := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), "."); got && !strings.HasSuffix(norm, domain) {
+		t.Errorf("gate(%q) = true but the host does not even end in %s", host, domain)
+	}
+}
+
 // FuzzIsAnimeBytesHost fuzzes the AB host gate over arbitrary host strings
 // with metamorphic and bounded-output invariants (never a reimplementation of
 // the dot-boundary rule): gluing a valid label onto an explicit
@@ -123,31 +163,7 @@ func FuzzIsAnimeBytesHost(f *testing.F) {
 	f.Add("ANIMEBYTES.TV")
 	f.Add("animebytes.tv ")
 	f.Add("")
-	f.Fuzz(func(t *testing.T, host string) {
-		got := IsAnimeBytesHost(host)
-
-		if glued := fuzzLabel(host) + ".animebytes.tv"; !IsAnimeBytesHost(glued) {
-			t.Errorf("IsAnimeBytesHost(%q) = false, want true: a valid label on an explicit .animebytes.tv boundary always matches", glued)
-		}
-		if IsAnimeBytesHost(host + "..animebytes.tv") {
-			t.Errorf("IsAnimeBytesHost(%q) = true, want false: an empty label is never a real subdomain boundary", host+"..animebytes.tv")
-		}
-		if !got && !strings.HasPrefix(strings.TrimSpace(host), ".") && IsAnimeBytesHost("evil"+host) {
-			t.Errorf("IsAnimeBytesHost(%q) = true for a dotless-prefix variant of non-matching host %q: suffix rule bypassed", "evil"+host, host)
-		}
-		// The gate trims surrounding whitespace itself, so the trailing-dot
-		// metamorphic check appends the dot to the trimmed host (a dot after
-		// trailing whitespace is not a DNS-root dot).
-		if trimmed := strings.TrimSpace(host); !strings.HasSuffix(trimmed, ".") {
-			if dotted := IsAnimeBytesHost(trimmed + "."); dotted != got {
-				t.Errorf("IsAnimeBytesHost(%q) = %v but IsAnimeBytesHost(%q) = %v: DNS-root trailing dot must not change the answer", host, got, trimmed+".", dotted)
-			}
-		}
-		norm := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
-		if got && !strings.HasSuffix(norm, "animebytes.tv") {
-			t.Errorf("IsAnimeBytesHost(%q) = true but the host does not even end in animebytes.tv", host)
-		}
-	})
+	f.Fuzz(func(t *testing.T, host string) { hostGateInvariants(t, IsAnimeBytesHost, "animebytes.tv", host) })
 }
 
 // FuzzIsNyaaHost fuzzes the Nyaa host classifier (an untrusted-URL-host gate
@@ -172,32 +188,5 @@ func FuzzIsNyaaHost(f *testing.F) {
 	f.Add("NYAA.SI")
 	f.Add("nyaa.si ")
 	f.Add("")
-	f.Fuzz(func(t *testing.T, host string) {
-		got := IsNyaaHost(host)
-
-		if (host == "nyaa.si" || host == "nyaa.si.") && !got {
-			t.Errorf("IsNyaaHost(%q) = false, want true for the canonical Nyaa host", host)
-		}
-		if glued := fuzzLabel(host) + ".nyaa.si"; !IsNyaaHost(glued) {
-			t.Errorf("IsNyaaHost(%q) = false, want true: a valid label on an explicit .nyaa.si boundary always matches", glued)
-		}
-		if IsNyaaHost(host + "..nyaa.si") {
-			t.Errorf("IsNyaaHost(%q) = true, want false: an empty label is never a real subdomain boundary", host+"..nyaa.si")
-		}
-		if !got && !strings.HasPrefix(strings.TrimSpace(host), ".") && IsNyaaHost("evil"+host) {
-			t.Errorf("IsNyaaHost(%q) = true for a dotless-prefix variant of non-matching host %q: suffix rule bypassed", "evil"+host, host)
-		}
-		// The gate trims surrounding whitespace itself, so the trailing-dot
-		// metamorphic check appends the dot to the trimmed host (a dot after
-		// trailing whitespace is not a DNS-root dot).
-		if trimmed := strings.TrimSpace(host); !strings.HasSuffix(trimmed, ".") {
-			if dotted := IsNyaaHost(trimmed + "."); dotted != got {
-				t.Errorf("IsNyaaHost(%q) = %v but IsNyaaHost(%q) = %v: DNS-root trailing dot must not change the answer", host, got, trimmed+".", dotted)
-			}
-		}
-		norm := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
-		if got && !strings.HasSuffix(norm, "nyaa.si") {
-			t.Errorf("IsNyaaHost(%q) = true but the host does not even end in nyaa.si", host)
-		}
-	})
+	f.Fuzz(func(t *testing.T, host string) { hostGateInvariants(t, IsNyaaHost, "nyaa.si", host) })
 }

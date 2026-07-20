@@ -96,10 +96,17 @@ var trackerByHost = func() map[string]Tracker {
 // "a..nyaa.si") is not a subdomain - no DNS name has an empty label, so only
 // a non-empty label chain counts (see hostMatchesDomain).
 func LookupTrackerByHost(host string) (Tracker, bool) {
-	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	// The ASCII gate runs on the RAW trimmed host, BEFORE any case fold:
+	// strings.ToLower is a full-Unicode fold whose few ASCII-producing
+	// mappings (U+0130 -> 'i', U+212A KELVIN SIGN -> 'k') would launder a
+	// homograph host ("an\u0130mebytes.tv") into ASCII and slip it past the
+	// fail-closed non-ASCII rule. Folding an ASCII-verified string is a pure
+	// ASCII fold, so legitimate hosts are unaffected by the ordering.
+	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
 	if host == "" || !IsASCIIHost(host) {
 		return Tracker{}, false
 	}
+	host = strings.ToLower(host)
 	for canonical, t := range trackerByHost {
 		if hostMatchesDomain(host, canonical) {
 			return t, true

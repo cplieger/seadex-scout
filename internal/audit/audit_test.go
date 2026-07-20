@@ -708,3 +708,42 @@ func TestAssessCarriesEntryStateFlags(t *testing.T) {
 		t.Error("row.Special = false, want true (an OVA record marks the row special)")
 	}
 }
+
+func TestGroupSets(t *testing.T) {
+	rels := []Release{
+		{Group: "SubsPlease", Best: true, URL: "https://nyaa.si/view/1"},
+		{Group: "subsplease", Best: true, URL: "https://nyaa.si/view/2"},
+		{Group: "Erai", Best: false, URL: "https://nyaa.si/view/3"},
+		// An Unobtainable release (the daemon's filter.Obtainable rule
+		// rejected it: no usable link, or a tracker the operator cannot use)
+		// is raw-catalogue visibility only: it must drive neither the best
+		// nor the alt set - the eligibility IS the daemon's obtainability
+		// rule.
+		{Group: "LinklessBest", Best: true, Unobtainable: true},
+		{Group: "LinklessAlt", Best: false, Unobtainable: true},
+	}
+	best, alt := groupSets(rels)
+	if !reflect.DeepEqual(best, []string{"subsplease"}) {
+		t.Errorf("best = %v, want [subsplease]", best)
+	}
+	if !reflect.DeepEqual(alt, []string{"erai"}) {
+		t.Errorf("alt = %v, want [erai]", alt)
+	}
+}
+
+func TestClassifyReleasesGatesAnimeBytes(t *testing.T) {
+	entry := &seadex.Entry{Torrents: []seadex.Torrent{
+		{Tracker: "Nyaa", ReleaseGroup: "SubsPlease", IsBest: true, URL: "https://nyaa.si/view/1"},
+		{Tracker: "AB", ReleaseGroup: "Commie", IsBest: false, URL: "/torrents.php?id=1"},
+	}}
+
+	off := NewAuditor(Config{}).classifyReleases(entry)
+	if len(off) != 1 || off[0].Tracker != "Nyaa" {
+		t.Errorf("with AnimeBytes off only the Nyaa release should survive, got %+v", off)
+	}
+
+	on := NewAuditor(Config{AnimeBytes: true}).classifyReleases(entry)
+	if len(on) != 2 {
+		t.Errorf("with AnimeBytes on both releases should be present, got %d", len(on))
+	}
+}

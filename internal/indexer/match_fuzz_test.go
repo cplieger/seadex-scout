@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -52,6 +53,30 @@ func FuzzExtractID_roundTripsNumericIDs(f *testing.F) {
 		} {
 			if got := extractID(tc.raw, tc.needle); got != id {
 				t.Errorf("extractID(%q, %q) = %q, want %q", tc.raw, tc.needle, got, id)
+			}
+		}
+	})
+}
+
+// FuzzTrackerKeyFromURL_neverKeysFromQueryOrFragment pins the no-smuggling
+// invariant the digits-or-empty target cannot: arbitrary content placed in a
+// query value or fragment of a genuine tracker host must never yield a
+// curation key, because only the path (Nyaa /view, AB permalink) and the
+// torrentid query parameter may key.
+func FuzzTrackerKeyFromURL_neverKeysFromQueryOrFragment(f *testing.F) {
+	f.Add("/view/1234567")
+	f.Add("/torrent/1167293/group")
+	f.Add("torrentid=1143533")
+	f.Fuzz(func(t *testing.T, payload string) {
+		esc := url.QueryEscape(payload)
+		for _, raw := range []string{
+			"https://nyaa.si/?next=" + esc,
+			"https://nyaa.si/#" + esc,
+			"https://animebytes.tv/?next=" + esc,
+			"https://animebytes.tv/#" + esc,
+		} {
+			if k := trackerKeyFromURL(raw); k != "" {
+				t.Fatalf("trackerKeyFromURL(%q) = %q, want empty (query/fragment content must never key)", raw, k)
 			}
 		}
 	})

@@ -643,6 +643,45 @@ func TestValidateIndexerHalfConfiguredInfo(t *testing.T) {
 	})
 }
 
+// TestValidateIndexerParkedABPasskeyInfo pins the inverse half-configuration
+// signal inside a configured feed: indexer.ab_passkey set while
+// indexer.ab_torznab_url is empty (the feed otherwise configured via
+// nyaa_torznab_url) logs an Info naming the inert passkey - the AB URL is the
+// AnimeBytes on switch, so the passkey is otherwise silently unused. Info,
+// not Warn, mirroring infoDisabledIndexerKeys: a deliberately parked passkey
+// must not raise Loki alert noise. Silent when ab_torznab_url is also set.
+func TestValidateIndexerParkedABPasskeyInfo(t *testing.T) {
+	base := Config{
+		RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k",
+		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api",
+		IndexerAPIKey:         strings.Repeat("a", 32),
+		IndexerProwlarrAPIKey: "pk",
+		IndexerABPasskey:      "passkey",
+	}
+
+	t.Run("passkey without ab url logs info", func(t *testing.T) {
+		rec := capture.Default(t)
+		c := base
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if !rec.Contains("indexer.ab_passkey is set but indexer.ab_torznab_url is empty") {
+			t.Errorf("Validate() log = %v, want the parked-passkey info", rec.Messages())
+		}
+	})
+	t.Run("passkey with ab url stays silent", func(t *testing.T) {
+		rec := capture.Default(t)
+		c := base
+		c.IndexerABTorznabURL = "http://prowlarr:9696/2/api"
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if rec.Contains("indexer.ab_passkey is set but indexer.ab_torznab_url is empty") {
+			t.Errorf("Validate() log = %v, want no parked-passkey info", rec.Messages())
+		}
+	})
+}
+
 // TestValidateIndexerShortFeedKeyWarning pins the warn-only strength floor on
 // indexer.feed_api_key: a key under 16 characters warns (it gates the
 // AnimeBytes-passkey-bearing feed), a strong key stays silent, and the key

@@ -315,6 +315,12 @@ func comparer(opts filter.Options, excludeSpecials bool) *Comparer {
 	return NewComparer(Config{Filter: opts, ExcludeSpecials: excludeSpecials})
 }
 
+// abComparer is a comparer with the AnimeBytes tracker toggle enabled (the
+// toggle rides Config, not filter.Options, which holds only content filters).
+func abComparer() *Comparer {
+	return NewComparer(Config{AnimeBytes: true})
+}
+
 func TestCompareAlignedProducesNoFinding(t *testing.T) {
 	item := &library.Item{Title: "Frieren", Groups: []string{"subsplease"}, SeasonGroups: map[int][]string{1: {"subsplease"}}}
 	entry := seadex.Entry{AniListID: 154587, Torrents: []seadex.Torrent{
@@ -514,7 +520,7 @@ func TestCompareAnimeBytesRecommendationRequiresOptIn(t *testing.T) {
 		t.Fatalf("AnimeBytes off must make AB-only recommendations silent, got %+v", got)
 	}
 
-	got := comparer(filter.Options{AnimeBytes: true}, false).Compare([]match.Match{m})
+	got := abComparer().Compare([]match.Match{m})
 	if len(got) != 1 {
 		t.Fatalf("AnimeBytes on should surface the AB recommendation, got %d", len(got))
 	}
@@ -645,7 +651,7 @@ func TestCompareMislabeledAnimeBytesURLRequiresOptIn(t *testing.T) {
 			if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
 				t.Fatalf("AnimeBytes off must hide a mislabeled AB-URL recommendation, got %+v", got)
 			}
-			got := comparer(filter.Options{AnimeBytes: true}, false).Compare([]match.Match{m})
+			got := abComparer().Compare([]match.Match{m})
 			if len(got) != tc.wantOn {
 				t.Fatalf("AnimeBytes on: got %d findings, want %d", len(got), tc.wantOn)
 			}
@@ -674,7 +680,7 @@ func TestCompareMislabeledAnimeBytesURLChangesDedupeKey(t *testing.T) {
 	if len(off) != 1 {
 		t.Fatalf("AnimeBytes off should still surface the public recommendation, got %d", len(off))
 	}
-	on := comparer(filter.Options{AnimeBytes: true}, false).Compare([]match.Match{m})
+	on := abComparer().Compare([]match.Match{m})
 	if len(on) != 1 {
 		t.Fatalf("AnimeBytes on should surface the recommendation, got %d", len(on))
 	}
@@ -690,7 +696,7 @@ func TestCompareUnknownTrackerRecommendationIsSilent(t *testing.T) {
 	}}
 	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
 
-	if got := comparer(filter.Options{AnimeBytes: true}, false).Compare([]match.Match{m}); len(got) != 0 {
+	if got := abComparer().Compare([]match.Match{m}); len(got) != 0 {
 		t.Errorf("an unknown-tracker recommendation is unobtainable and must be silent, got %+v", got)
 	}
 }

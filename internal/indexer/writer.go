@@ -160,7 +160,7 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info f
 	if err != nil {
 		return err
 	}
-	entries, warned, warnedIDs := splitCurationWarned(entries)
+	entries, ws := splitCurationWarned(entries)
 	set := buildCuration(entries)
 	now := w.now()
 
@@ -174,10 +174,10 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info f
 	} else {
 		cur := indexCurated(entries)
 		if w.nyaaConfigured {
-			nyaa = w.carryJournal(prev.nyaaFeed, cur, warned, warnedIDs, infoFor, now, &js)
+			nyaa = w.carryJournal(prev.nyaaFeed, cur, &ws, infoFor, now, &js)
 		}
 		if w.abConfigured {
-			ab = w.carryJournal(prev.abFeed, cur, warned, warnedIDs, infoFor, now, &js)
+			ab = w.carryJournal(prev.abFeed, cur, &ws, infoFor, now, &js)
 		}
 		newNyaa, newAB := w.growJournal(entries, cur, seen, infoFor, now, &js)
 		nyaa = append(nyaa, newNyaa...)
@@ -203,7 +203,7 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info f
 	w.log.Info("indexer feed snapshot written",
 		"entries", len(entries), "hashes", len(snap.ByHash), "keys", len(snap.ByKey),
 		"nyaa_feed", len(snap.NyaaFeed), "ab_feed", len(snap.ABFeed),
-		"warned_excluded", len(warned),
+		"warned_excluded", len(ws.keys),
 		"journal_new", js.added, "journal_pruned", js.pruned, "journal_dropped", js.dropped,
 		"journal_warned_dropped", js.warned,
 		"journal_clock_rebased", js.rebased,
@@ -303,15 +303,38 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 	}, nil
 }
 
+// warnedSet is the curation-warned exclusion set splitCurationWarned builds
+// and the carry side consumes as one value: keys holds the excluded journal
+// keys (every directly warned occurrence plus every duplicate removed through
+// a shared identity - also the warned_excluded operator count), and ids holds
+// the directly-warned identity-signal set (journal key AND info hash), which
+// retracts uses to drop a previously journaled item whose stored info hash is
+// warned under a DIFFERENT tracker key.
+type warnedSet struct {
+	keys map[string]struct{}
+	ids  map[string]struct{}
+}
+
+// retracts reports whether a carried journal item shares a warned identity:
+// its key is excluded, or its stored info hash is warned under any tracker
+// key (RSS must never keep serving bytes search suppresses).
+func (ws *warnedSet) retracts(it *item) bool {
+	if _, bad := ws.keys[it.Key]; bad {
+		return true
+	}
+	if it.InfoHash != "" {
+		if _, bad := ws.ids[it.InfoHash]; bad {
+			return true
+		}
+	}
+	return false
+}
+
 // splitCurationWarned partitions the catalogue for the feed: it returns a
 // copy of entries with every curation-warned torrent (release.CurationWarned
-// over the SeaDex tags: Broken/Incomplete) removed, plus TWO warned sets the
-// carry side consumes: warned holds the excluded torrents' journal keys
-// (every directly warned occurrence plus every duplicate removed through a
-// shared identity - also the warned_excluded operator count), and warnedIDs
-// holds the full warned-identity signal set (journal key AND info hash),
-// which carryJournal uses to drop a previously journaled item whose stored
-// info hash is warned under a DIFFERENT tracker key. The warning wins BY
+// over the SeaDex tags: Broken/Incomplete) removed, plus the warnedSet the
+// carry side consumes (see warnedSet for the two sets it holds and
+// warnedSet.retracts for the retraction decision). The warning wins BY
 // IDENTITY, not per
 // occurrence: a torrent can be attached to several SeaDex entries, and when
 // one occurrence is tagged Broken/Incomplete while a duplicate of the same
@@ -332,16 +355,16 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 // un-warning it never re-broadcasts it). The input is never mutated: the
 // cycle shares the entries slice with the compare pass, so an entry
 // containing a removed torrent gets a fresh filtered Torrents slice.
-func splitCurationWarned(entries []seadex.Entry) (kept []seadex.Entry, warned, warnedIDs map[string]struct{}) {
-	warned, warnedIDs = collectWarnedIdentities(entries)
+func splitCurationWarned(entries []seadex.Entry) (kept []seadex.Entry, ws warnedSet) {
+	ws.keys, ws.ids = collectWarnedIdentities(entries)
 	kept = make([]seadex.Entry, len(entries))
 	for i := range entries {
 		kept[i] = entries[i]
-		if unwarned, changed := filterWarnedTorrents(entries[i].Torrents, warnedIDs, warned); changed {
+		if unwarned, changed := filterWarnedTorrents(entries[i].Torrents, ws.ids, ws.keys); changed {
 			kept[i].Torrents = unwarned
 		}
 	}
-	return kept, warned, warnedIDs
+	return kept, ws
 }
 
 // collectWarnedIdentities is splitCurationWarned's first pass: keys holds the

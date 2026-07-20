@@ -111,6 +111,15 @@ func noCacheHeaders(h http.Header) {
 	h.Set("Pragma", "no-cache")
 }
 
+// rejectTorznab renders a Torznab <error> rejection and logs one INFO line
+// naming the reason. noCacheHeaders was already set by serve for every
+// authenticated response.
+func (ix *Indexer) rejectTorznab(w http.ResponseWriter, scope, reason string, code int, msg string) {
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	_, _ = io.WriteString(w, renderError(code, msg))
+	ix.log.Info("indexer request rejected", "scope", scope, "reason", reason)
+}
+
 // logParam bounds and cleans a request-controlled string (URL path, Host,
 // Torznab query params) before it reaches a log line - the same emit-boundary
 // policy sanitizeUpstreamText applies to untrusted upstream text: single-line
@@ -219,10 +228,8 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 	// falls through to the empty feed below, the same shape as a tracker with
 	// no data.
 	if scope == upstreamAB && ix.cfg.ABTorznabURL != "" && ix.cfg.ABPasskey == "" && strings.TrimSpace(q.Get("q")) == "" {
-		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-		_, _ = io.WriteString(w, renderError(errCodeIncorrectCredentials,
-			"AnimeBytes passkey not configured: set indexer.ab_passkey in seadex-scout to serve the AnimeBytes feed"))
-		ix.log.Info("indexer request rejected", "scope", scope, "reason", "ab passkey not configured")
+		ix.rejectTorznab(w, scope, "ab passkey not configured", errCodeIncorrectCredentials,
+			"AnimeBytes passkey not configured: set indexer.ab_passkey in seadex-scout to serve the AnimeBytes feed")
 		return
 	}
 	items, stats := ix.query(r.Context(), q, scope)
@@ -232,10 +239,8 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 	// the arr, silently recording the fault as a successful search. Render a
 	// Torznab <error>, exactly like an unavailable Prowlarr dependency.
 	if stats.snapshotUnavailable {
-		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-		_, _ = io.WriteString(w, renderError(errCodeUnknown,
-			"feed snapshot unavailable: the persisted SeaDex feed failed to load; results unavailable until a snapshot loads"))
-		ix.log.Info("indexer request rejected", "scope", scope, "reason", "feed snapshot unavailable")
+		ix.rejectTorznab(w, scope, "feed snapshot unavailable", errCodeUnknown,
+			"feed snapshot unavailable: the persisted SeaDex feed failed to load; results unavailable until a snapshot loads")
 		return
 	}
 	// A total upstream failure (every queried Prowlarr upstream failed) is
@@ -244,10 +249,8 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 	// Prowlarr outage as a successful no-results search. A partial failure (one
 	// of several upstreams answered) keeps the degraded-but-successful feed.
 	if stats.upstreamFailed {
-		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-		_, _ = io.WriteString(w, renderError(errCodeUnknown,
-			"upstream Prowlarr query failed; search results unavailable"))
-		ix.log.Info("indexer request rejected", "scope", scope, "reason", "upstream query failed")
+		ix.rejectTorznab(w, scope, "upstream query failed", errCodeUnknown,
+			"upstream Prowlarr query failed; search results unavailable")
 		return
 	}
 	w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")

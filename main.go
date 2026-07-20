@@ -106,9 +106,9 @@ func main() {
 			// cancels with context.Canceled): routine, not a fault, so keep it
 			// off the level=ERROR cycle-error alert. A DeadlineExceeded is a
 			// genuine operation timeout and falls through to ERROR.
-			slog.Warn("seadex-scout interrupted by shutdown", "mode", mode, "error", err)
+			slog.Warn("seadex-scout interrupted by shutdown", "mode", loggableMode(mode), "error", err)
 		} else {
-			slog.Error("seadex-scout failed", "mode", mode, "error", err)
+			slog.Error("seadex-scout failed", "mode", loggableMode(mode), "error", err)
 		}
 		os.Exit(1)
 	}
@@ -418,8 +418,11 @@ func pollCycle(ctx context.Context, ex *scheduler.Exclusive, sc cycler, marker *
 			// than a success observed after shutdown was signalled.
 			return pollInterrupted(ctx)
 		}
-		slog.Info("compare cycle already in flight; demand queued for the active runner",
-			"outcome", outcome.String())
+		msg := "compare cycle already in flight; demand queued for the active runner"
+		if outcome == scheduler.OutcomeDiscarded {
+			msg = "compare cycle already in flight; demand already covered by the queued rerun"
+		}
+		slog.Info(msg, "outcome", outcome.String())
 		return nil
 	case scheduler.OutcomeGated:
 		return pollInterrupted(ctx)
@@ -650,4 +653,16 @@ func logConfig(cfg *config.Config) {
 		"include_tags", len(cfg.IncludeTags),
 		"exclude_tags", len(cfg.ExcludeTags),
 		"run_mode", runMode)
+}
+
+// loggableMode returns mode when it is a known run mode, else the fixed
+// "invalid" marker: an unrecognized value may be an expanded ${VAR} secret
+// placed by a config typo (the same contract as logConfig and
+// config.validateRunMode, which are both deliberately field-name-only).
+func loggableMode(mode string) string {
+	switch mode {
+	case config.RunModeDaemon, config.RunModeReport, modePoll:
+		return mode
+	}
+	return "invalid"
 }

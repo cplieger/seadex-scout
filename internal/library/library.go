@@ -52,6 +52,8 @@ const episodeConcurrency = 6
 // an ingest failure at any library size.
 const episodeFailureBudget = 5
 
+// --- Arr client surfaces and snapshot model ---
+
 // SonarrClient is the arrapi Sonarr surface the walker needs (consumer-side
 // interface; *arrapi.Sonarr satisfies it). GetEpisodeFiles lists exactly the
 // episodes that have a file on disk - the walker only consumes episodes WITH
@@ -119,6 +121,8 @@ type Diff struct {
 	Removed int
 	Changed int
 }
+
+// --- Walker and walk flow ---
 
 // Walker ingests the library through the configured arr clients.
 type Walker struct {
@@ -357,6 +361,8 @@ func (w *Walker) walkRadarr(ctx context.Context) ([]Item, error) {
 	return items, nil
 }
 
+// --- Tag resolution and filtering ---
+
 // resolveTags fetches the arr's tag list once per walk and resolves the
 // include and exclude label sets against it locally (arrapi.TagIDs /
 // UnmatchedLabels), logging any label that matched no tag. With neither set
@@ -410,6 +416,8 @@ func keepByTags(itemTags []int, includeIDs, excludeIDs map[int]struct{}) bool {
 	}
 	return true
 }
+
+// --- Item construction and fingerprinting ---
 
 // seriesItem builds a library Item from a series and its episode files (as
 // listed by GetEpisodeFiles: exactly the episodes with a file on disk, each
@@ -601,6 +609,8 @@ func nonEmpty(vals ...string) []string {
 	}
 	return out
 }
+
+// --- Snapshot diffing ---
 
 // DiffSnapshots reports what changed between prev and cur, keyed by arr + id.
 // An item is Changed when its group set, per-season group attribution, or

@@ -66,7 +66,11 @@ type URLForm struct {
 	// Host is the lowercased host evidence a browser would navigate to, when
 	// extractable: the parsed hostname of an absolute or protocol-relative
 	// form, or the authority reparse of a schemeless-host form. Empty when
-	// the string carries none (or the form hides it; see Class).
+	// the string carries none (or the form hides it; see Class). The fold is
+	// ASCII-only by design (see asciiLower): a full-Unicode fold would
+	// launder homograph bytes (U+0130 -> 'i', U+212A -> 'k') into ASCII, so
+	// non-ASCII host evidence survives here unfolded for the fail-closed
+	// IsASCIIHost gates downstream (LookupTrackerByHost, filter.ABVisible).
 	Host string
 	// Scheme is the canonicalized parse's scheme, which url.Parse folds to
 	// lowercase (an "HTTPS://" source reads "https", RFC 3986 canonical
@@ -123,9 +127,10 @@ func ClassifyRawURL(raw string) URLForm {
 	f.Scheme = parsed.Scheme
 	f.Port = parsed.Port()
 	f.HasUserInfo = parsed.User != nil
-	// Hostname() drops the port and userinfo; ToLower folds case for the
-	// byte-wise host predicates downstream.
-	f.Host = strings.ToLower(parsed.Hostname())
+	// Hostname() drops the port and userinfo; asciiLower folds case for the
+	// byte-wise host predicates downstream while leaving non-ASCII homograph
+	// bytes intact for the fail-closed IsASCIIHost gates.
+	f.Host = asciiLower(parsed.Hostname())
 	switch {
 	case parsed.Scheme != "" && f.Host != "":
 		f.Class = URLFormAbsolute
@@ -134,8 +139,11 @@ func ClassifyRawURL(raw string) URLForm {
 	case f.Host != "":
 		f.Class = URLFormProtocolRelative
 	case strings.HasPrefix(canonical, "//"):
-		// Three or more leading slashes: Go parsed a rooted path (no host),
-		// browsers resolve a network-path authority.
+		// A leading "//" whose parse yielded no host: three or more slashes
+		// (Go parsed a rooted path while browsers read an authority) or an
+		// empty-authority form ("//", "//?q"). Either way the string is a
+		// network-path reference with no extractable host evidence, so Host
+		// stays empty and the form classifies protocol-relative.
 		f.Class = URLFormProtocolRelative
 	case strings.HasPrefix(canonical, "/"):
 		f.Class = URLFormRelative
@@ -146,8 +154,24 @@ func ClassifyRawURL(raw string) URLForm {
 			f.HostUnrecoverable = true
 			return f
 		}
-		f.Host = strings.ToLower(rehost.Hostname())
+		f.Host = asciiLower(rehost.Hostname())
 		f.HasUserInfo = rehost.User != nil
 	}
 	return f
+}
+
+// asciiLower lowercases only the ASCII letters A-Z, leaving every other byte
+// untouched. URLForm.Host folds with this instead of strings.ToLower because
+// the full-Unicode fold has ASCII-producing mappings (U+0130 LATIN CAPITAL
+// LETTER I WITH DOT ABOVE -> 'i', U+212A KELVIN SIGN -> 'k') that would
+// launder a homograph host into ASCII before the fail-closed IsASCIIHost
+// gates (LookupTrackerByHost, filter.ABVisible) ever see the non-ASCII
+// evidence they exist to reject.
+func asciiLower(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, s)
 }

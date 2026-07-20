@@ -329,8 +329,8 @@ func TestFetchManyDropsUnsolicitedID(t *testing.T) {
 	if err == nil {
 		t.Fatal("FetchMany must surface the unsolicited id as a record error")
 	}
-	if !errors.Is(err, errBatchRecord) {
-		t.Errorf("error = %v, want errBatchRecord classification (later chunks must not be aborted)", err)
+	if !errors.Is(err, ErrBatchRecord) {
+		t.Errorf("error = %v, want ErrBatchRecord classification (later chunks must not be aborted)", err)
 	}
 	if !strings.Contains(err.Error(), "unexpected media id 999") {
 		t.Errorf("error = %q, want the unexpected-id context", err.Error())
@@ -358,8 +358,8 @@ func TestParseMediaPageDuplicateIDExcluded(t *testing.T) {
 	if err == nil {
 		t.Fatal("parseMediaPage must surface the duplicate id")
 	}
-	if !errors.Is(err, errBatchRecord) {
-		t.Errorf("error = %v, want errBatchRecord classification", err)
+	if !errors.Is(err, ErrBatchRecord) {
+		t.Errorf("error = %v, want ErrBatchRecord classification", err)
 	}
 	if got, ok := out[1]; ok {
 		t.Errorf("out[1] = %+v, want the conflicting duplicate excluded, not one record chosen", got)
@@ -679,5 +679,67 @@ func TestFetchManyAllNotFoundThenFailureReturnsNonNilEmpty(t *testing.T) {
 	}
 	if len(out) != 0 {
 		t.Errorf("FetchMany() result = %v, want empty (every completed id was not-found)", out)
+	}
+}
+
+// TestFetchManyRequestFailureAfterCompletedChunkReturnsPartial pins the
+// request-layer side of the completion contract: an HTTP-level failure (a
+// non-transient 400) on a later chunk after an earlier chunk completed must
+// return the merged partial result beside the typed httpx status error --
+// the same partial-result shape the parse-layer tests pin, on the other
+// error path.
+func TestFetchManyRequestFailureAfterCompletedChunkReturnsPartial(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n > 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		fmt.Fprint(w, `{"data":{"Page":{"media":[{"id":1,"format":"TV","seasonYear":2020,"title":{"romaji":"t1"}}]}}}`)
+	}))
+	defer srv.Close()
+
+	ids := make([]int, 60) // two chunks: the first completes, the second fails at the HTTP layer
+	for i := range ids {
+		ids[i] = i + 1
+	}
+	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	out, err := c.FetchMany(context.Background(), ids)
+	if err == nil {
+		t.Fatal("FetchMany must surface the second chunk's HTTP failure")
+	}
+	var statusErr *httpx.HTTPStatusError
+	if !errors.As(err, &statusErr) {
+		t.Errorf("error = %v, want *httpx.HTTPStatusError from the failed chunk", err)
+	}
+	if out == nil {
+		t.Fatal("FetchMany() result = nil, want the completed first chunk preserved")
+	}
+	if got := out[1].Titles; !slices.Equal(got, []string{"t1"}) {
+		t.Errorf("out[1].Titles = %v, want [t1] (completed chunk preserved on a later HTTP failure)", got)
+	}
+}
+
+// TestRequestMarshalErrorMakesNoAttempt pins the request-construction
+// boundary of the shared request helper: variables that cannot marshal
+// surface as the wrapped marshal error before any throttle wait or outbound
+// attempt, so Stats().Calls stays 0 (the same no-attempt invariant
+// TestDoRejectsUnparseableURL pins for the URL-construction branch).
+func TestRequestMarshalErrorMakesNoAttempt(t *testing.T) {
+	c := NewClient(http.DefaultClient, "http://127.0.0.1:1", 60, nil)
+	_, err := c.request(context.Background(), query, map[string]any{"bad": make(chan int)})
+	if err == nil {
+		t.Fatal("request() with unmarshalable variables = nil error, want a marshal error")
+	}
+	if !strings.Contains(err.Error(), "anilist: marshal request:") {
+		t.Errorf("error = %q, want the anilist marshal-request wrap", err)
+	}
+	if got := c.Stats().Calls; got != 0 {
+		t.Errorf("Stats().Calls = %d, want 0 (a request that cannot be marshaled is never an outbound attempt)", got)
 	}
 }

@@ -155,12 +155,12 @@ func (js *journalStats) recordDrop(noPasskey bool) {
 }
 
 // carryItem re-renders or prunes one carried journal item, updating js, and
-// reports whether it survives into the rebuilt journal. warned is the
-// excluded tracker-key set (direct warnings plus duplicates removed through a
-// shared identity); warnedIDs is the full warned-identity signal set, so a
-// carried item whose stored info hash is warned under a DIFFERENT tracker key
-// is retracted too (RSS must never keep serving bytes search suppresses).
-func (w *FeedWriter) carryItem(it *item, cur map[string][]curatedRef, warned, warnedIDs map[string]struct{}, infoFor func(alID int) EntryInfo, now time.Time, js *journalStats) (item, bool) {
+// reports whether it survives into the rebuilt journal. ws is the
+// curation-warned exclusion set splitCurationWarned built; a carried item it
+// retracts (its key is excluded, or its stored info hash is warned under a
+// DIFFERENT tracker key) is dropped (RSS must never keep serving bytes search
+// suppresses).
+func (w *FeedWriter) carryItem(it *item, cur map[string][]curatedRef, ws *warnedSet, infoFor func(alID int) EntryInfo, now time.Time, js *journalStats) (item, bool) {
 	if it.Key == "" || it.FirstSeen.IsZero() {
 		js.dropped++
 		return item{}, false
@@ -180,15 +180,9 @@ func (w *FeedWriter) carryItem(it *item, cur map[string][]curatedRef, warned, wa
 		js.pruned++
 		return item{}, false
 	}
-	if _, bad := warned[it.Key]; bad {
+	if ws.retracts(it) {
 		js.warned++
 		return item{}, false
-	}
-	if it.InfoHash != "" {
-		if _, bad := warnedIDs[it.InfoHash]; bad {
-			js.warned++
-			return item{}, false
-		}
 	}
 	refs, curated := cur[it.Key]
 	if !curated {
@@ -216,19 +210,19 @@ func (w *FeedWriter) carryItem(it *item, cur map[string][]curatedRef, warned, wa
 // curation set keeps its stored render (a curated-then-replaced torrent is
 // still a valid release). An item older than feedJournalMaxAge leaves the
 // journal (its cached title is dropped by the caller's retainTitles); an item
-// whose torrent has become curation-warned (its key is in warned, or its
-// stored info hash is in warnedIDs - a warning under a different tracker key
-// still retracts the shared bytes) is dropped
+// whose torrent has become curation-warned (ws.retracts: its key is excluded,
+// or its stored info hash is warned under a different tracker key - a warning
+// under another key still retracts the shared bytes) is dropped
 // - unlike a curated-then-replaced torrent, SeaDex's curators now warn
 // against it, so serving it would hand the arrs a Broken/Incomplete release;
 // a pre-journal item with no Key or FirstSeen (unreachable after a baseline,
 // defensive against hand-edited snapshots) and a carried AnimeBytes item whose
 // download link can no longer be built (the passkey was removed - the release
 // is no longer grabbable, so serving it would be dead weight) are dropped.
-func (w *FeedWriter) carryJournal(prevFeed []item, cur map[string][]curatedRef, warned, warnedIDs map[string]struct{}, infoFor func(alID int) EntryInfo, now time.Time, js *journalStats) []item {
+func (w *FeedWriter) carryJournal(prevFeed []item, cur map[string][]curatedRef, ws *warnedSet, infoFor func(alID int) EntryInfo, now time.Time, js *journalStats) []item {
 	kept := make([]item, 0, len(prevFeed))
 	for i := range prevFeed {
-		if it, ok := w.carryItem(&prevFeed[i], cur, warned, warnedIDs, infoFor, now, js); ok {
+		if it, ok := w.carryItem(&prevFeed[i], cur, ws, infoFor, now, js); ok {
 			kept = append(kept, it)
 		}
 	}

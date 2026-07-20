@@ -51,6 +51,7 @@ func FuzzDedupeKeyEncodingInjective(f *testing.F) {
 	f.Add(`x\`, "|y")
 	f.Add("sha256:", "0000")
 	f.Add(strings.Repeat("x", 5000), strings.Repeat("y", 4000))
+	f.Add("\xff\xfe,|", `a\`)
 	f.Fuzz(func(t *testing.T, a, b string) {
 		parts := []string{a, b}
 		encoded := escapeJoinParts(parts)

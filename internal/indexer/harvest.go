@@ -11,6 +11,8 @@ import (
 	"strings"
 )
 
+// --- Budget, paging, and stats ---
+
 // harvestSearchBudget hard-caps the Prowlarr Torznab queries one rebuild may
 // spend harvesting real release titles (each offset page counts as one
 // query). The rebuild runs every poll_interval against community-backed
@@ -43,6 +45,8 @@ type harvestGroup struct {
 	alID  int
 }
 
+// --- Harvest orchestration ---
+
 // harvestTitles fetches real release titles for journal items still serving a
 // synthesized title: ONE Prowlarr Torznab query per show and tracker (q = the
 // show's synthesis title source), matching the returned items back to curated
@@ -70,6 +74,7 @@ func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]item,
 	budget := harvestSearchBudget
 	failed := make(map[string]bool, len(w.upstreams))
 	malformed := make(map[string]int, len(w.upstreams))
+	rejected := make(map[string]int, len(w.upstreams))
 	for _, g := range groups {
 		if ctx.Err() != nil || budget == 0 {
 			break
@@ -88,22 +93,25 @@ func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]item,
 		}
 		var outcome harvestOutcome
 		budget, outcome = w.harvestShow(ctx, u, g, infoFor(g.alID), index, titles, budget, &stats)
-		w.updateHarvestScopeState(g.scope, outcome, failed, malformed)
+		w.updateHarvestScopeState(g.scope, outcome, failed, malformed, rejected)
 	}
 	return stats
 }
 
 // updateHarvestScopeState applies one queried show's outcome to the per-scope
-// failure latch and consecutive-malformed counter: harvestScopeFailed latches
-// the scope, harvestShowMalformed counts toward consecutiveMalformedLatch
-// (latching the scope when the run trips it), and any other outcome - a
-// success or a show-local request rejection (harvestShowFailed), both
-// definitive upstream answers - resets the malformed run.
-func (w *FeedWriter) updateHarvestScopeState(scope string, outcome harvestOutcome, failed map[string]bool, malformed map[string]int) {
+// failure latch and the two consecutive-run counters: harvestScopeFailed
+// latches the scope, harvestShowMalformed counts toward
+// consecutiveMalformedLatch (latching the scope when the run trips it), a
+// show-local request rejection (harvestShowFailed) resets the malformed run
+// but counts toward its own consecutiveRejectedLatch (latching the scope on a
+// run of systematic rejections), and any other outcome - a success - resets
+// both runs.
+func (w *FeedWriter) updateHarvestScopeState(scope string, outcome harvestOutcome, failed map[string]bool, malformed, rejected map[string]int) {
 	switch outcome {
 	case harvestScopeFailed:
 		failed[scope] = true
 	case harvestShowMalformed:
+		rejected[scope] = 0
 		malformed[scope]++
 		if malformed[scope] >= consecutiveMalformedLatch {
 			w.log.Warn("indexer title harvest: repeated malformed responses; skipping this upstream's remaining shows this rebuild",
@@ -111,12 +119,22 @@ func (w *FeedWriter) updateHarvestScopeState(scope string, outcome harvestOutcom
 			failed[scope] = true
 		}
 	case harvestShowFailed:
-		// A request-scoped rejection is a definitive upstream answer:
-		// reset the consecutive-malformed run like a success, without
-		// condemning the scope.
+		// A request-scoped rejection is a definitive upstream answer for
+		// ONE show (reset the malformed run), but a consecutive RUN of
+		// rejections is the signature of an upstream deterministically
+		// rejecting this app's query shape - latch it like systematic
+		// malformed bodies, or the whole budget burns with zero progress
+		// on every rebuild.
 		malformed[scope] = 0
+		rejected[scope]++
+		if rejected[scope] >= consecutiveRejectedLatch {
+			w.log.Warn("indexer title harvest: repeated request rejections; skipping this upstream's remaining shows this rebuild",
+				"upstream", scope, "consecutive", rejected[scope])
+			failed[scope] = true
+		}
 	default:
 		malformed[scope] = 0
+		rejected[scope] = 0
 	}
 }
 
@@ -131,12 +149,15 @@ func availableHarvestUpstream(upstreams []*upstream, failed map[string]bool, sco
 	return upstreamForScope(upstreams, scope)
 }
 
+// --- Failure classification ---
+
 // harvestOutcome classifies how one show's harvest ended, deciding what
 // harvestTitles latches for the show's scope: harvestScopeFailed condemns the
 // whole scope this rebuild, harvestShowMalformed counts toward the
 // consecutive-malformed latch, harvestShowFailed ends only that show's
 // harvest (a request-scoped Torznab rejection - the upstream answered, so it
-// resets the malformed run like a success), and harvestOK resets that run.
+// resets the malformed run but counts toward the consecutive-rejected
+// latch), and harvestOK resets both runs.
 type harvestOutcome int
 
 const (
@@ -167,8 +188,20 @@ func requestScopedHarvestError(err error) bool {
 // fail with a persistently malformed 2xx body before the scope is treated as
 // upstream-wide broken (e.g. a reverse proxy answering an HTML error page to
 // every request) and its remaining shows are skipped this rebuild. One poison
-// result set stays show-local; a successful (even empty) page resets the run.
+// result set stays show-local; a show whose harvest ends without a malformed
+// page - a success (even an empty one) or a request-scoped rejection - resets
+// the run. The reset is per show outcome, not per page: a show whose LATER
+// offset page is malformed after a successful first page still counts toward
+// the latch.
 const consecutiveMalformedLatch = 3
+
+// consecutiveRejectedLatch is how many CONSECUTIVE shows on one scope may
+// fail with a request-scoped Torznab rejection (codes 200-299) before the
+// scope is treated as systematically rejecting this app's query shape (e.g.
+// an indexer definition without tvsearch caps answering 203 to every
+// season-form query) and its remaining shows are skipped this rebuild. One
+// rejected query stays show-local; a successful page resets the run.
+const consecutiveRejectedLatch = 3
 
 // harvestShow runs one show's query (plus offset pages while its items remain
 // unmatched, full pages keep coming, and budget remains) against its tracker's
@@ -231,6 +264,8 @@ func (w *FeedWriter) classifyHarvestError(err error, u *upstream, alID int) harv
 		"upstream", u.name, "al_id", alID, "error", err)
 	return harvestScopeFailed
 }
+
+// --- Pending-group collection ---
 
 // harvestGroupKey identifies one show's pending harvest group on one
 // tracker: the per-show, per-tracker bucket pendingHarvest collects journal
@@ -303,6 +338,8 @@ func harvestable(it *item, titles map[string]string, infoFor func(alID int) Entr
 	return strings.TrimSpace(infoFor(it.AniListID).Title) != ""
 }
 
+// --- Query building ---
+
 // harvestParams builds the one Torznab query for a show on a tracker, from the
 // show's synthesis title source. AnimeBytes search is series-level - a plain
 // q returns the show's whole torrent set - so a basic search suffices. Nyaa is
@@ -328,6 +365,8 @@ func harvestPage(params url.Values, offset int) url.Values {
 	}
 	return page
 }
+
+// --- Result matching ---
 
 // harvestMaxTitleLen bounds a cached harvested title: real tracker release
 // titles are well under this, and the titles map is persisted verbatim into
@@ -365,37 +404,24 @@ func matchHarvest(results []item, scope string, index, titles map[string]string)
 	return n
 }
 
-// harvestIdentity returns the identity forms a Prowlarr result can be matched
-// under: tracker keys parsed from its page URLs and its (already validated)
-// info hash.
-func harvestIdentity(it *item) []string {
-	var ids []string
-	if k := trackerKeyFromURL(it.InfoURL); k != "" {
-		ids = append(ids, k)
-	}
-	if k := trackerKeyFromURL(it.GUID); k != "" {
-		ids = append(ids, k)
-	}
-	if it.InfoHash != "" {
-		ids = append(ids, it.InfoHash)
-	}
-	return ids
-}
-
 // resolveHarvestKey resolves a Prowlarr result to the single journal key its
-// identity signals agree on. It fails closed - returning "" - when the keys
-// parsed from the result's two page URLs name different releases, or when two
-// signals resolve to different journal items: a healthy Prowlarr emits one
-// consistent identity per item, so a contradictory result is an untrusted
-// response that must not title anything (the same fail-closed rule the search
-// curation match applies in acceptScopedKeys).
+// identity signals - the tracker keys parsed from its page URLs and its
+// (already validated) info hash - agree on. It fails closed - returning "" -
+// when the keys parsed from the result's two page URLs name different
+// releases, or when two signals resolve to different journal items: a healthy
+// Prowlarr emits one consistent identity per item, so a contradictory result
+// is an untrusted response that must not title anything (the same fail-closed
+// rule the search curation match applies in acceptScopedKeys).
 func resolveHarvestKey(it *item, index map[string]string) string {
 	kc, kg := trackerKeyFromURL(it.InfoURL), trackerKeyFromURL(it.GUID)
 	if kc != "" && kg != "" && kc != kg {
 		return ""
 	}
 	var key string
-	for _, id := range harvestIdentity(it) {
+	for _, id := range []string{kc, kg, it.InfoHash} {
+		if id == "" {
+			continue
+		}
 		k, ok := index[id]
 		if !ok {
 			continue
@@ -407,6 +433,8 @@ func resolveHarvestKey(it *item, index map[string]string) string {
 	}
 	return key
 }
+
+// --- Pending accounting ---
 
 // groupPending reports whether any of the group's journal keys still lacks a
 // cached title (more paging could still help).

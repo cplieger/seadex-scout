@@ -138,7 +138,10 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 			// httpx.Do's retry logger and the harvest WARN would then expand
 			// into the log stream (CWE-532). Classify on the ORIGINAL code
 			// first, then redact any reflection of the key from both fields
-			// before the error escapes this function.
+			// before the error escapes this function. The fields are RAW
+			// (untruncated) here - upstreamDocError.Error() sanitizes at the
+			// emit boundary - so the exact-substring replacement always sees
+			// the intact key.
 			terminal := terminalTorznabCode(docErr.code)
 			docErr.code = httpx.RedactSecretString(docErr.code, u.apiKey)
 			docErr.description = httpx.RedactSecretString(docErr.description, u.apiKey)

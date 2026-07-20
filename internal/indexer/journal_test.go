@@ -721,18 +721,32 @@ func TestRebuildRebasesFutureFirstSeenCarriedItem(t *testing.T) {
 // TestRebuildDropsKeylessCarriedItem pins carryJournal's defensive drop of a
 // pre-journal item (no Key / no FirstSeen, e.g. a hand-edited snapshot that
 // kept the seen ledger but stripped an item's bookkeeping): it leaves the
-// journal instead of being carried forever un-prunable.
+// journal instead of being carried forever un-prunable, and each guard arm is
+// counted as a genuine drop on the snapshot log line.
 func TestRebuildDropsKeylessCarriedItem(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	const seeded = `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Title":"orphan","GUID":"https://nyaa.si/view/9"}],"ab_feed":[]}`
+	const seeded = `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Title":"orphan","GUID":"https://nyaa.si/view/9"},{"Title":"no first seen","GUID":"https://nyaa.si/view/10","Key":"nyaa:10"}],"ab_feed":[]}`
 	if err := os.WriteFile(path, []byte(seeded), 0o600); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{}).Rebuild(context.Background(), nil, nil); err != nil {
+	log, rec := capture.New()
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}).Rebuild(context.Background(), nil, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 {
 		t.Errorf("feed = %+v, want empty (a keyless pre-journal item cannot be carried: it could never be pruned or re-rendered)", snap.NyaaFeed)
+	}
+	dropped := int64(-1)
+	for _, r := range rec.Records() {
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "journal_dropped" {
+				dropped = a.Value.Int64()
+			}
+			return true
+		})
+	}
+	if dropped != 2 {
+		t.Errorf("journal_dropped = %d, want 2 (one per defensive-guard arm: no Key, no FirstSeen); log:\n%s", dropped, strings.Join(rec.Messages(), "\n"))
 	}
 }
 
@@ -986,5 +1000,51 @@ func TestRebuildDropsCarriedItemWarnedByStoredHashOnly(t *testing.T) {
 	}
 	if warnedDropped != 1 {
 		t.Errorf("snapshot log line journal_warned_dropped = %d, want 1 (the hash-retracted carried item); log output:\n%s", warnedDropped, strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestRebuildHashVetoesNoveltyAcrossKeyChange pins the multi-signal novelty
+// contract identitySignals documents ("novelty detection survives one signal
+// going missing - a URL-shape change upstream"): a torrent whose info hash is
+// already in the seen ledger must NOT re-enter the journal as new when its
+// tracker URL changes shape (a new /view id, i.e. a new journal key). Novelty
+// is judged across ALL identity signals, so a re-upload or upstream URL change
+// keeping the same bytes never re-broadcasts old curation, while both the new
+// key and the hash fold into the seen ledger.
+func TestRebuildHashVetoesNoveltyAcrossKeyChange(t *testing.T) {
+	const hash = "143ed15e5e3df072ae91adaeb149973a887590dd"
+	path := filepath.Join(t.TempDir(), "feed.json")
+	w := newTestWriter(path, "", false)
+	t0 := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
+	w.now = func() time.Time { return t0 }
+
+	// Baseline over the torrent at its original URL: key AND hash enter seen.
+	orig := seadex.Entry{
+		AniListID: 7,
+		Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://nyaa.si/view/42", InfoHash: hash, IsBest: true,
+			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
+		}},
+	}
+	if err := w.Rebuild(context.Background(), []seadex.Entry{orig}, nil); err != nil {
+		t.Fatalf("baseline Rebuild: %v", err)
+	}
+
+	// The same torrent re-appears under a NEW view id: its journal key is new
+	// but its hash is seen, so it must not journal as new.
+	moved := orig
+	moved.Torrents = []seadex.Torrent{orig.Torrents[0]}
+	moved.Torrents[0].URL = "https://nyaa.si/view/9042"
+	t1 := t0.Add(3 * time.Hour)
+	w.now = func() time.Time { return t1 }
+	if err := w.Rebuild(context.Background(), []seadex.Entry{moved}, nil); err != nil {
+		t.Fatalf("moved Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 0 {
+		t.Errorf("feed = %d items, want 0 (a seen hash under a new key must veto novelty)", len(snap.NyaaFeed))
+	}
+	if !snap.Seen["nyaa:9042"] || !snap.Seen[hash] {
+		t.Errorf("seen ledger missing the new key or the carried hash: %v", snap.Seen)
 	}
 }

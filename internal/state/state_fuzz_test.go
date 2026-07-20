@@ -93,6 +93,10 @@ func FuzzStoreLoadQuarantine(f *testing.F) {
 	f.Add([]byte(`{"Version":99,"baselined":true}`))
 	f.Add([]byte(`{"findings":"moved-member-shape","version":99}`))
 	f.Add([]byte(`{"findings":{"k":{}},"shrunk_walks":3}`))
+	f.Add([]byte(`{"version":99}x`))
+	f.Add([]byte(`{"version":99} {"baselined":true}`))
+	f.Add([]byte(`{1:2}`))
+	f.Add([]byte(`{"version":99,"k":}`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "state.json")

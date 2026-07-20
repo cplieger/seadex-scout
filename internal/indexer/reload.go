@@ -300,11 +300,17 @@ func (ix *Indexer) rebuildABDownloadURLs(feed []item) []item {
 	}
 	out := make([]item, 0, len(feed))
 	dropped := 0
+	var samples []string
 	for i := range feed {
 		it := feed[i]
 		dl, ok := downloadURL(release.TrackerNameAnimeBytes, it.GUID, ix.cfg.ABPasskey)
 		if !ok {
 			dropped++
+			if len(samples) < 3 {
+				// The GUID is a non-secret tracker page URL; bound it through
+				// the shared emit-boundary policy before it reaches the log.
+				samples = append(samples, capLogText(it.GUID, 256))
+			}
 			continue
 		}
 		it.DownloadURL = dl
@@ -315,7 +321,7 @@ func (ix *Indexer) rebuildABDownloadURLs(feed []item) []item {
 		// undecodable items; the download URL (which embeds the passkey) is
 		// never logged.
 		ix.log.Warn("indexer feed snapshot: AnimeBytes items dropped; no download URL derivable from tracker page URL",
-			"path", ix.path, "dropped", dropped, "kept", len(out))
+			"path", ix.path, "dropped", dropped, "kept", len(out), "sample_guids", samples)
 	}
 	return out
 }

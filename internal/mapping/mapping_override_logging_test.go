@@ -3,7 +3,6 @@ package mapping
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,8 +14,9 @@ import (
 )
 
 // TestLoader_Load_logsSkippedOverrideCount pins the operator-visible skipped
-// count arithmetic (len(overrides) - applied): two zero-ID overrides beside
-// one valid entry must log skipped=2, not just leave the index unpolluted.
+// count (zero-ID rows discarded during the parse stream): two zero-ID
+// overrides beside one valid entry must log skipped=2, not just leave the
+// index unpolluted.
 func TestLoader_Load_logsSkippedOverrideCount(t *testing.T) {
 	overrides := filepath.Join(t.TempDir(), "overrides.json")
 	data := []byte(`[{"anilist_id":0,"type":"tv"},{"anilist_id":2,"type":"movie"},{"anilist_id":0,"type":"ova"}]`)
@@ -68,20 +68,7 @@ func unknownKeysAre(rec *capture.Recorder, want string) bool {
 // attrRendered reports whether any captured record carries an attribute with
 // the given key whose rendered value equals want.
 func attrRendered(rec *capture.Recorder, key, want string) bool {
-	for _, r := range rec.Records() {
-		found := false
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == key && a.Value.String() == want {
-				found = true
-				return false
-			}
-			return true
-		})
-		if found {
-			return true
-		}
-	}
-	return false
+	return attrValueMatches(rec, key, func(v string) bool { return v == want })
 }
 
 // TestLoader_Load_unknownOverrideKeysLogBounded pins the log-volume bound on

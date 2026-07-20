@@ -79,7 +79,7 @@ const (
 	// so a body of minimal elements could still decode into hundreds of MB;
 	// this cap bounds the aggregate allocation (honest pages run ~tens of
 	// thousands of elements).
-	maxPageElements = 1_000_000
+	maxPageElements = 500_000
 	// maxTotalElements bounds the cumulative decoded array elements across
 	// the WHOLE fetch. fetchAndAppend retains every decoded entry until the
 	// fetch completes, so a per-page element cap alone still lets dozens of
@@ -88,7 +88,10 @@ const (
 	// that OOM-kill the 256 MiB deployment container. Like the byte budget,
 	// the remaining allowance caps each page's decode, so the guard fires
 	// (clean degradation) before allocation scales with the hostile input.
-	maxTotalElements = 1_000_000
+	// Sized jointly with maxTotalBytes: worst-case element struct overhead
+	// (~112 B/torrent x this cap) must fit under the 256 MiB container
+	// TOGETHER with maxTotalBytes of decoded string content.
+	maxTotalElements = 500_000
 )
 
 // errCumulativeBytes reports the cumulative-byte budget (maxTotalBytes) being
@@ -530,6 +533,9 @@ func decodePage(body []byte, elemLimit int) (pbList, int, error) {
 		return pbList{}, 0, err
 	}
 	if _, err := d.dec.Token(); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return pbList{}, 0, fmt.Errorf("trailing data after page object: %w", err)
+		}
 		return pbList{}, 0, errors.New("trailing data after page object")
 	}
 	return list, d.elements, nil
@@ -634,6 +640,36 @@ func (d *pageDecoder) decodeList() (pbList, error) {
 	return list, d.close()
 }
 
+// decodeBoundedArray decodes one JSON array with the package's shared
+// bounded-decode lifecycle: per-parent cap check BEFORE the element is
+// counted, count() budget charge BEFORE growForIndex, decode INTO the
+// regrown element (json.Unmarshal's duplicate-key merge), and truncateArray
+// finalization (SetLen/replace parity). prior is the already-decoded value
+// of a previous occurrence of the key; what names the array in the cap
+// error message.
+func decodeBoundedArray[T any](d *pageDecoder, prior []T, maxElems int, what string, decodeElem func(*T) error) ([]T, error) {
+	ok, err := d.open('[')
+	if err != nil || !ok {
+		return nil, err
+	}
+	s := prior
+	n := 0
+	for d.dec.More() {
+		if n >= maxElems {
+			return nil, fmt.Errorf("%s exceeded cap %d (upstream misbehaving)", what, maxElems)
+		}
+		if err := d.count(); err != nil {
+			return nil, err
+		}
+		s = growForIndex(s, n)
+		if err := decodeElem(&s[n]); err != nil {
+			return nil, err
+		}
+		n++
+	}
+	return truncateArray(s, n), d.close()
+}
+
 // decodeItems decodes the items array, capped at perPage: the request asks
 // for perPage records, so a page stuffing more is upstream misbehavior and is
 // rejected before the excess is decoded. prior is the already-decoded value
@@ -644,26 +680,7 @@ func (d *pageDecoder) decodeList() (pbList, error) {
 // (element-wise field merge, SetLen truncation, backing replaced on an empty
 // array).
 func (d *pageDecoder) decodeItems(prior []pbEntry) ([]pbEntry, error) {
-	ok, err := d.open('[')
-	if err != nil || !ok {
-		return nil, err
-	}
-	items := prior
-	n := 0
-	for d.dec.More() {
-		if n >= perPage {
-			return nil, fmt.Errorf("page items exceeded cap %d (upstream misbehaving)", perPage)
-		}
-		if err := d.count(); err != nil {
-			return nil, err
-		}
-		items = growForIndex(items, n)
-		if err := d.decodeEntry(&items[n]); err != nil {
-			return nil, err
-		}
-		n++
-	}
-	return truncateArray(items, n), d.close()
+	return decodeBoundedArray(d, prior, perPage, "page items", d.decodeEntry)
 }
 
 // decodeEntry decodes one entries record field-wise into e, matching
@@ -747,26 +764,7 @@ func (d *pageDecoder) decodeExpand(ex *pbExpand) error {
 // via growForIndex) and the result is finalized by truncateArray, matching
 // json.Unmarshal's duplicate-key slice semantics.
 func (d *pageDecoder) decodeTorrents(prior []Torrent) ([]Torrent, error) {
-	ok, err := d.open('[')
-	if err != nil || !ok {
-		return nil, err
-	}
-	trs := prior
-	n := 0
-	for d.dec.More() {
-		if n >= maxTorrentsPerEntry {
-			return nil, fmt.Errorf("torrents per entry exceeded cap %d (upstream misbehaving)", maxTorrentsPerEntry)
-		}
-		if err := d.count(); err != nil {
-			return nil, err
-		}
-		trs = growForIndex(trs, n)
-		if err := d.decodeTorrent(&trs[n]); err != nil {
-			return nil, err
-		}
-		n++
-	}
-	return truncateArray(trs, n), d.close()
+	return decodeBoundedArray(d, prior, maxTorrentsPerEntry, "torrents per entry", d.decodeTorrent)
 }
 
 // decodeTorrent decodes one torrent record field-wise into t, matching
@@ -831,52 +829,14 @@ func (d *pageDecoder) decodeTorrentField(t *Torrent, key string) error {
 // duplicate-key merge and null-no-op semantics, and truncateArray finalizes
 // the result to the new array's length.
 func (d *pageDecoder) decodeFiles(prior []File) ([]File, error) {
-	ok, err := d.open('[')
-	if err != nil || !ok {
-		return nil, err
-	}
-	files := prior
-	n := 0
-	for d.dec.More() {
-		if n >= maxFilesPerTorrent {
-			return nil, fmt.Errorf("files per torrent exceeded cap %d (upstream misbehaving)", maxFilesPerTorrent)
-		}
-		if err := d.count(); err != nil {
-			return nil, err
-		}
-		files = growForIndex(files, n)
-		if err := d.dec.Decode(&files[n]); err != nil {
-			return nil, err
-		}
-		n++
-	}
-	return truncateArray(files, n), d.close()
+	return decodeBoundedArray(d, prior, maxFilesPerTorrent, "files per torrent", func(f *File) error { return d.dec.Decode(f) })
 }
 
 // decodeTags decodes one torrent's tag list, capped at maxTagsPerTorrent.
 // prior is the already-decoded value of a previous occurrence of the key
 // (see decodeFiles).
 func (d *pageDecoder) decodeTags(prior []string) ([]string, error) {
-	ok, err := d.open('[')
-	if err != nil || !ok {
-		return nil, err
-	}
-	tags := prior
-	n := 0
-	for d.dec.More() {
-		if n >= maxTagsPerTorrent {
-			return nil, fmt.Errorf("tags per torrent exceeded cap %d (upstream misbehaving)", maxTagsPerTorrent)
-		}
-		if err := d.count(); err != nil {
-			return nil, err
-		}
-		tags = growForIndex(tags, n)
-		if err := d.dec.Decode(&tags[n]); err != nil {
-			return nil, err
-		}
-		n++
-	}
-	return truncateArray(tags, n), d.close()
+	return decodeBoundedArray(d, prior, maxTagsPerTorrent, "tags per torrent", func(s *string) error { return d.dec.Decode(s) })
 }
 
 // growForIndex ensures the slice covers index n, matching json.Unmarshal's

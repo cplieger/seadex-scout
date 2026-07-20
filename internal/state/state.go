@@ -50,6 +50,16 @@ const (
 // a future loader can detect the old shape and migrate (or refuse) explicitly
 // instead of silently zero-loading it. A file whose version field is absent or
 // zero is a legacy envelope written before versioning and loads unchanged.
+//
+// Cross-version coupling with maxStateBytes: the newer-schema preservation
+// guarantee (Load refuses the file but keeps it at the live path with Save
+// blocked) can only hold for a file that passes the bounded read. An
+// over-cap file fails ReadBounded before the version discriminator can be
+// inspected and is quarantined as foreign/corrupt (renamed to .corrupt), so
+// a future schema bump must not grow the persisted state past the
+// maxStateBytes of any binary it may be rolled back to - or must teach the
+// over-cap read path to stream-scan the version discriminator before
+// choosing quarantine over preservation.
 const SchemaVersion = 1
 
 // State is the persisted cross-cycle cache. Findings is keyed by dedupe key.
@@ -410,7 +420,7 @@ func (s *Store) Save(ctx context.Context, st *State) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("state: save %s: %w", s.path, err)
 	}
-	if s.unsupportedVersion > SchemaVersion {
+	if s.unsupportedVersion != 0 {
 		return fmt.Errorf("state: save %s: blocked after loading newer schema version %d (supported %d)", s.path, s.unsupportedVersion, SchemaVersion)
 	}
 	sanitized := *st

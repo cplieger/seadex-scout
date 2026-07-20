@@ -11,18 +11,17 @@ import (
 	"github.com/cplieger/seadex-scout/internal/release"
 )
 
-// Options are the operator's release filters. A zero Options keeps everything:
-// ExcludeRemux and RequireDualAudio default false, and AnimeBytes off only
-// hides the one private tracker.
+// Options are the operator's content filters - exactly the set KeepNonTracker
+// consumes. A zero Options keeps everything: ExcludeRemux and RequireDualAudio
+// default false. The AnimeBytes tracker toggle is deliberately NOT an Options
+// field: obtainability is a separate concern (the package's content-vs-tracker
+// split), so consumers pass the toggle explicitly to Obtainable/ABVisible.
 type Options struct {
 	// ExcludeRemux drops releases classified remux when true. Default false, so
 	// remuxes (often the best release) are kept unless the operator opts out.
 	ExcludeRemux bool
 	// RequireDualAudio drops releases that are not dual-audio when true.
 	RequireDualAudio bool
-	// AnimeBytes includes AnimeBytes (private tracker) releases; the public
-	// trackers are always included. Off means AnimeBytes releases are invisible.
-	AnimeBytes bool
 }
 
 // KeepNonTracker reports whether a release passes the content filters (remux

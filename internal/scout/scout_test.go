@@ -381,6 +381,32 @@ func TestWalkFailureLogsAndReportErrorAreLogSafe(t *testing.T) {
 		}
 	}
 
+	// Feed-configured: the walk failure falls through to handleLibraryGate,
+	// whose "cycle degraded" walk-failed line (a second LogSafeError site)
+	// must stay credential-free as well.
+	feedLogger, feedRecorder := capture.New()
+	sFeed := New(&Deps{
+		Logger: feedLogger,
+		Store: &fakeStore{st: state.State{
+			Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+		}},
+		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: walkErr}, Logger: scoutTestLogger()}),
+		Mapping: fakeMapping{},
+		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
+		Feed:    &fakeFeed{},
+	})
+	if healthy := sFeed.Cycle(context.Background()); healthy {
+		t.Fatal("feed-configured Cycle returned healthy=true, want false when the library walk fails")
+	}
+	if n := feedRecorder.CountExact("cycle degraded"); n != 1 {
+		t.Fatalf("feed-configured 'cycle degraded' count = %d, want 1 (the redaction assertion needs the log to fire)", n)
+	}
+	for _, sentinel := range sentinels {
+		if recordsContainString(feedRecorder, sentinel) {
+			t.Errorf("feed-configured cycle logs contain credential sentinel %q, want *url.Error reduced before logging", sentinel)
+		}
+	}
+
 	_, err := s.Report(context.Background())
 	if err == nil {
 		t.Fatal("Report returned nil error, want the walk failure")

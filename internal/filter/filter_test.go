@@ -190,3 +190,79 @@ func TestObtainableAppliesABURLCrossCheck(t *testing.T) {
 		})
 	}
 }
+
+// TestABGatedMatchesToggleOffVisibility pins ABGated as the named form of the
+// toggle-off hide decision shared by the compare dedupe key
+// (compare.animeBytesLinkKey) and the alert URL routing (report.trackerURLs):
+// an AB label or AB-hosted URL is gated, a public link is not, and the
+// conservative hides (malformed or non-ASCII host evidence) are gated even
+// though DefinitelyAB fails open on them - the asymmetry the two predicates
+// exist to encode.
+func TestABGatedMatchesToggleOffVisibility(t *testing.T) {
+	tests := []struct {
+		name    string
+		tracker string
+		url     string
+		want    bool
+	}{
+		{"AB label gated", "AB", "https://animebytes.tv/torrents.php?id=1", true},
+		{"public URL not gated", "Nyaa", "https://nyaa.si/view/1", false},
+		{"AB URL under public label gated", "Nyaa", "https://animebytes.tv/torrents.php?id=1", true},
+		{"malformed URL gated conservatively but not definitely AB", "Nyaa", "https://nyaa.si/\x7f", true},
+		{"non-ASCII AB host gated conservatively but not definitely AB", "Nyaa", "https://animebytes\uFF0Etv/torrents.php?id=1", true},
+		{"empty URL not gated", "Nyaa", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ABGated(tt.tracker, tt.url); got != tt.want {
+				t.Errorf("ABGated(%q, %q) = %v, want %v", tt.tracker, tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDefinitelyAB pins the fail-OPEN contract of DefinitelyAB (the inverse
+// fail direction of ABVisible's fail-closed gate): evidence that cannot be
+// extracted is not AnimeBytes evidence, so malformed, hidden-host,
+// unrecoverable-authority, and non-ASCII hosts all read false (the release
+// stays LISTED, annotated), while an AB tracker label or extractable AB host
+// evidence reads true. Each true row is also cross-checked against ABGated:
+// the fail-open set must stay a subset of the fail-closed gate, so a definite
+// AB release is always hidden with the toggle off.
+func TestDefinitelyAB(t *testing.T) {
+	tests := []struct {
+		name    string
+		tracker string
+		url     string
+		want    bool
+	}{
+		{"AB label with no URL", "AB", "", true},
+		{"animebytes label with public URL", "animebytes", "https://nyaa.si/view/1", true},
+		{"public label with AB URL", "Nyaa", "https://animebytes.tv/torrents.php?id=1", true},
+		{"public label with AB subdomain URL", "Nyaa", "https://cdn.animebytes.tv/t/1", true},
+		{"public label with trailing-dot AB FQDN", "Nyaa", "https://animebytes.tv./torrents.php?id=1", true},
+		{"schemeless AB host", "Nyaa", "animebytes.tv/torrents.php?id=1&torrentid=2", true},
+		{"protocol-relative AB host", "Nyaa", "//animebytes.tv/x", true},
+		{"backslash-canonicalized AB host is definite (browser semantics)", "Nyaa", `animebytes.tv\@evil/x`, true},
+		{"public label with public URL", "Nyaa", "https://nyaa.si/view/1", false},
+		{"empty URL carries no evidence", "Nyaa", "", false},
+		{"relative path carries no host evidence", "Nyaa", "/local/path", false},
+		{"lookalike suffix host is not AB", "Nyaa", "https://notanimebytes.tv/t/1", false},
+		{"AB-suffixed foreign domain is not AB", "Nyaa", "https://animebytes.tv.evil.example/t/1", false},
+		{"malformed URL fails open", "Nyaa", "https://nyaa.si/\x7f", false},
+		{"hidden-host form fails open", "Nyaa", "https:/animebytes.tv/torrents.php?id=1", false},
+		{"space-userinfo host failing authority reparse fails open", "Nyaa", "foo bar@animebytes.tv/x", false},
+		{"non-ASCII fullwidth-dot AB host fails open", "Nyaa", "https://animebytes\uFF0Etv/torrents.php?id=1", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DefinitelyAB(tt.tracker, tt.url)
+			if got != tt.want {
+				t.Errorf("DefinitelyAB(%q, %q) = %v, want %v", tt.tracker, tt.url, got, tt.want)
+			}
+			if got && !ABGated(tt.tracker, tt.url) {
+				t.Errorf("DefinitelyAB(%q, %q) = true but ABGated = false; the fail-open set must stay a subset of the fail-closed gate", tt.tracker, tt.url)
+			}
+		})
+	}
+}

@@ -52,20 +52,15 @@ const (
 // ErrNotFound reports that AniList has no media for the requested ID.
 var ErrNotFound = errors.New("anilist: media not found")
 
-// errBatchRecord marks a record-local validation failure inside an otherwise
-// well-formed batch response, distinguishing it from a request/envelope
-// failure so FetchMany can keep fetching later chunks instead of reading one
-// poisoned record as a total outage.
-var errBatchRecord = errors.New("anilist: batch response")
-
-// ErrBatchRecord marks a record-local validation failure in a batch response.
-// FetchMany returns it (match with errors.Is) alongside its partial result to
-// name the failure class; batch COMPLETION is signaled separately by the
-// result map (nil = no chunk completed), so an empty-but-non-nil map beside
-// this error means the chunks completed but every record was malformed —
-// still record-local, per-id fallback applies. Same identity as the internal
-// sentinel the parsers wrap.
-var ErrBatchRecord = errBatchRecord
+// ErrBatchRecord marks a record-local validation failure inside an otherwise
+// well-formed batch response (match with errors.Is), distinguishing it from a
+// request/envelope failure so FetchMany keeps fetching later chunks instead of
+// reading one poisoned record as a total outage. FetchMany returns it alongside
+// its partial result; batch COMPLETION is signaled separately by the result map
+// (nil = no chunk completed), so an empty-but-non-nil map beside this error
+// means the chunks completed but every record was malformed — still
+// record-local, per-id fallback applies.
+var ErrBatchRecord = errors.New("anilist: batch response")
 
 // query fetches the fields needed for a title fallback match.
 const query = `query ($id: Int) { Media(id: $id, type: ANIME) { format seasonYear startDate { year } title { romaji english native } } }`
@@ -179,7 +174,7 @@ func (c *Client) Fetch(ctx context.Context, aniListID int) (Media, error) {
 // completed — even when the map is empty because every completed chunk
 // definitively found no media — so the caller can fall back to a per-id Fetch
 // for the remainder rather than losing the batch, and can tell an all-not-found
-// chunk apart from a total outage. A record-local failure (errBatchRecord, a
+// chunk apart from a total outage. A record-local failure (ErrBatchRecord, a
 // poisoned record inside an otherwise well-formed response) does NOT abort the
 // batch: the chunk still counts as completed, later chunks are still fetched,
 // and the first record error is surfaced alongside the merged result, so one
@@ -205,7 +200,7 @@ func (c *Client) FetchMany(ctx context.Context, ids []int) (map[int]Media, error
 		retainErr := retainRequested(page, chunk)
 		maps.Copy(out, page)
 		recordErr := errors.Join(parseErr, retainErr)
-		if recordErr != nil && !errors.Is(recordErr, errBatchRecord) {
+		if recordErr != nil && !errors.Is(recordErr, ErrBatchRecord) {
 			if !completed {
 				return nil, recordErr
 			}
@@ -224,7 +219,7 @@ func (c *Client) FetchMany(ctx context.Context, ids []int) (map[int]Media, error
 // it. An unsolicited id is deleted from the page - never merged, where it
 // could inject an unrelated Media or overwrite a value an earlier chunk
 // legitimately resolved - and the first such id is reported as an
-// errBatchRecord-wrapped error so the caller sees the malformed response
+// ErrBatchRecord-wrapped error so the caller sees the malformed response
 // without losing the chunk's valid records.
 func retainRequested(page map[int]Media, chunk []int) error {
 	requested := make(map[int]struct{}, len(chunk))
@@ -238,7 +233,7 @@ func retainRequested(page map[int]Media, chunk []int) error {
 		}
 		delete(page, id)
 		if first == nil {
-			first = fmt.Errorf("%w unexpected media id %d", errBatchRecord, id)
+			first = fmt.Errorf("%w unexpected media id %d", ErrBatchRecord, id)
 		}
 	}
 	return first
@@ -530,7 +525,7 @@ type gqlPageResponse struct {
 // AniList id. A GraphQL-level error or a missing/null Page or media field
 // fails the batch; the record loop's per-record invariants (positive id,
 // valid fields, no duplicate ids) live in parsePageRecords - a rejected
-// record is skipped and surfaced via an errBatchRecord-wrapped error
+// record is skipped and surfaced via an ErrBatchRecord-wrapped error
 // alongside the chunk's valid records, so one poisoned record cannot discard
 // the chunk or read as a total outage - a skipped id is absent from the map
 // AND covered by the non-nil error, so the caller never negative-memoizes it,
@@ -564,7 +559,7 @@ func parseMediaPage(raw []byte) (map[int]Media, error) {
 // two records claiming one identity - so NO record for that id is returned
 // (the earlier occurrence is deleted and the id stays excluded however many
 // duplicates follow) rather than silently letting the last write win. Each
-// failure surfaces the first offender via an errBatchRecord-wrapped error
+// failure surfaces the first offender via an ErrBatchRecord-wrapped error
 // beside the valid sibling records.
 func parsePageRecords(media []gqlMedia) (map[int]Media, error) {
 	out := make(map[int]Media, len(media))
@@ -578,18 +573,18 @@ func parsePageRecords(media []gqlMedia) (map[int]Media, error) {
 	for i := range media {
 		md := &media[i]
 		if md.ID <= 0 {
-			record(fmt.Errorf("%w media record %d missing id", errBatchRecord, i))
+			record(fmt.Errorf("%w media record %d missing id", ErrBatchRecord, i))
 			continue
 		}
 		if seen[md.ID] {
 			delete(out, md.ID)
-			record(fmt.Errorf("%w media record %d duplicates id %d", errBatchRecord, i, md.ID))
+			record(fmt.Errorf("%w media record %d duplicates id %d", ErrBatchRecord, i, md.ID))
 			continue
 		}
 		seen[md.ID] = true
 		parsed, err := md.toMedia()
 		if err != nil {
-			record(fmt.Errorf("%w media record %d (id %d): %v", errBatchRecord, i, md.ID, err))
+			record(fmt.Errorf("%w media record %d (id %d): %v", ErrBatchRecord, i, md.ID, err))
 			continue
 		}
 		out[md.ID] = parsed
@@ -667,14 +662,6 @@ func (t *throttle) wait(ctx context.Context) error {
 		slot = t.reserveSlotLocked(time.Now())
 		t.mu.Unlock()
 	}
-}
-
-// reserve claims the next slot and returns how long to wait before using it.
-func (t *throttle) reserve() time.Duration {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	now := time.Now()
-	return t.reserveSlotLocked(now).Sub(now)
 }
 
 // reserveSlot claims and returns the next slot timestamp. The clock is

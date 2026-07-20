@@ -10,7 +10,9 @@ import (
 // reimplementation of the class rules): every input lands in exactly one enum
 // class; the private parsed object is nil exactly for the two no-facts
 // classes (Empty, Malformed) and the exported semantic facts (Scheme, Port,
-// HasUserInfo) are zero whenever it is; Host is always lowercase and empty
+// HasUserInfo) are zero whenever it is; Host carries no ASCII uppercase (the
+// fold is ASCII-only by design, so non-ASCII homograph bytes survive to the
+// fail-closed IsASCIIHost gates downstream) and is empty
 // for every class that carries
 // no extractable host evidence (Empty, Malformed, HiddenHost, Relative) while
 // an absolute form always carries its host; HostUnrecoverable marks only
@@ -31,6 +33,7 @@ func FuzzClassifyRawURL(f *testing.F) {
 	f.Add(`/\animebytes.tv/x`)
 	f.Add("animebytes.tv/torrents.php?id=1")
 	f.Add("ANIMEBYTES.TV/torrents.php?id=1")
+	f.Add("https://an\u0130mebytes.tv/x")
 	f.Add("?x:y")
 	f.Add("foo bar@animebytes.tv/x")
 	f.Add("/torrents.php?id=1")
@@ -53,8 +56,8 @@ func FuzzClassifyRawURL(f *testing.F) {
 		if fm.parsed == nil && (fm.Scheme != "" || fm.Port != "" || fm.HasUserInfo) {
 			t.Errorf("Scheme=%q Port=%q HasUserInfo=%v without a parse for %q, want zero facts", fm.Scheme, fm.Port, fm.HasUserInfo, raw)
 		}
-		if fm.Host != strings.ToLower(fm.Host) {
-			t.Errorf("Host = %q is not lowercase", fm.Host)
+		if fm.Host != asciiLower(fm.Host) {
+			t.Errorf("Host = %q carries ASCII uppercase; the ASCII-only fold must apply", fm.Host)
 		}
 		switch fm.Class {
 		case URLFormEmpty, URLFormMalformed, URLFormHiddenHost, URLFormRelative:

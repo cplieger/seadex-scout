@@ -99,3 +99,41 @@ func TestClassifyRawURLSemanticFacts(t *testing.T) {
 		})
 	}
 }
+
+// TestClassifyRawURLHomographHostsFailClosed pins the end-to-end homograph
+// contract between ClassifyRawURL's ASCII-only Host fold (asciiLower) and
+// the downstream fail-closed IsASCIIHost gates (LookupTrackerByHost and its
+// IsAnimeBytesHost twin, the evidence filter.ABVisible and the seadex
+// publish gate key on): a host spelled with a fold-laundering codepoint
+// (U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE -> ASCII 'i', U+212A KELVIN
+// SIGN -> ASCII 'k' under strings.ToLower) must survive classification with
+// its non-ASCII bytes intact so the gates reject it - a full-Unicode fold
+// here would launder the spoof into the canonical tracker host and hand
+// every consumer an already-ASCII, tracker-matchable Host.
+func TestClassifyRawURLHomographHostsFailClosed(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "U+0130 dotted capital I, absolute form", raw: "https://an\u0130mebytes.tv/torrents.php?id=1"},
+		{name: "U+0130 dotted capital I, schemeless form", raw: "an\u0130mebytes.tv/torrents.php?id=1"},
+		{name: "U+212A kelvin sign, absolute form", raw: "https://rutrac\u212Aer.org/forum/viewtopic.php?t=1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := ClassifyRawURL(tt.raw)
+			if f.Host == "" {
+				t.Fatal("Host is empty, want the non-ASCII host evidence preserved")
+			}
+			if IsASCIIHost(f.Host) {
+				t.Errorf("IsASCIIHost(%q) = true: the fold laundered the homograph bytes into ASCII", f.Host)
+			}
+			if tr, ok := LookupTrackerByHost(f.Host); ok {
+				t.Errorf("LookupTrackerByHost(%q) classified as %q, want fail-closed no match", f.Host, tr.Name)
+			}
+			if IsAnimeBytesHost(f.Host) {
+				t.Errorf("IsAnimeBytesHost(%q) = true, want false", f.Host)
+			}
+		})
+	}
+}

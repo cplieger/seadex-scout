@@ -29,6 +29,7 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/seadex"
@@ -452,7 +453,11 @@ func (li *LibIndex) findByTitle(titles []string, year int, arr string, log *slog
 	case 0:
 		return nil
 	default:
-		log.Debug("title fallback ambiguous, treating as unmapped", "titles", titles, "candidates", len(candidates))
+		safe := make([]string, len(titles))
+		for i, t := range titles {
+			safe[i] = runesafe.Sanitize(t)
+		}
+		log.Debug("title fallback ambiguous, treating as unmapped", "titles", safe, "candidates", len(candidates))
 		return nil
 	}
 }

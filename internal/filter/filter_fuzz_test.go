@@ -65,6 +65,14 @@ func FuzzABVisible(f *testing.F) {
 		if padded := ABVisible(tracker, " "+rawURL+"\t", false); padded != off {
 			t.Errorf("ABVisible(%q, padded, false) = %v, want %v (url %q)", tracker, padded, off, rawURL)
 		}
+		// Cross-function consistency: the fail-open predicate is a subset of
+		// the fail-closed gate. Anything DEFINITELY AnimeBytes must also be
+		// AB-gated (hidden with the toggle off); the converse is deliberately
+		// free - the gate also hides malformed, ambiguous, and non-ASCII
+		// evidence the fail-open predicate cannot prove is AnimeBytes.
+		if DefinitelyAB(tracker, rawURL) && !ABGated(tracker, rawURL) {
+			t.Errorf("DefinitelyAB(%q, %q) = true but ABGated = false; the fail-open set must stay inside the fail-closed gate", tracker, rawURL)
+		}
 		// Security: no fuzzer-built subdomain of the AB host may surface while
 		// the toggle is off, and a lookalike suffix host must not be hidden as
 		// AB. Built from generated input, not by re-running the parser.

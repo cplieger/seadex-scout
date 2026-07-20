@@ -353,7 +353,9 @@ func TestFeedWriter(t *testing.T) {
 }
 
 // TestFilterOptions pins the config-to-filter field mapping so a swapped or
-// dropped field in the wiring cannot silently invert a content filter.
+// dropped field in the wiring cannot silently invert a content filter. The
+// AnimeBytes tracker toggle is not part of filter.Options (it rides
+// compare.Config / audit.Config directly).
 func TestFilterOptions(t *testing.T) {
 	cfg := &config.Config{ExcludeRemux: true, RequireDualAudio: false, AnimeBytes: true}
 	got := filterOptions(cfg)
@@ -362,9 +364,6 @@ func TestFilterOptions(t *testing.T) {
 	}
 	if got.RequireDualAudio {
 		t.Error("RequireDualAudio = true, want false")
-	}
-	if !got.AnimeBytes {
-		t.Error("AnimeBytes = false, want true")
 	}
 }
 
@@ -414,6 +413,39 @@ func TestLogConfigMasksInvalidRunMode(t *testing.T) {
 	}
 	if !strings.Contains(out, `"run_mode":"invalid"`) {
 		t.Errorf("run_mode not logged as the fixed marker %q: %s", "invalid", out)
+	}
+}
+
+// TestLoggableModeMasksUnknownMode pins the same redaction contract at main's
+// terminal log sites: loggableMode passes the known run modes through and maps
+// anything else (which may be an expanded ${VAR} secret placed by a config
+// typo) to the fixed marker "invalid", so the dispatch-failure lines never
+// echo the raw value. Serial (swaps slog.Default).
+func TestLoggableModeMasksUnknownMode(t *testing.T) {
+	for _, mode := range []string{config.RunModeDaemon, config.RunModeReport, modePoll} {
+		if got := loggableMode(mode); got != mode {
+			t.Errorf("loggableMode(%q) = %q, want the known mode passed through", mode, got)
+		}
+	}
+	const secret = "leaked-secret-value-9"
+	if got := loggableMode(secret); got != "invalid" {
+		t.Errorf("loggableMode(%q) = %q, want the fixed marker %q", secret, got, "invalid")
+	}
+
+	prev := slog.Default()
+	defer slog.SetDefault(prev)
+	var buf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+
+	// The exact failure line main emits when dispatch rejects the mode.
+	slog.Error("seadex-scout failed", "mode", loggableMode(secret), "error", errors.New("invalid configuration"))
+
+	out := buf.String()
+	if strings.Contains(out, secret) {
+		t.Errorf("dispatch-failure log leaks the raw mode value: %s", out)
+	}
+	if !strings.Contains(out, `"mode":"invalid"`) {
+		t.Errorf("mode not logged as the fixed marker %q: %s", "invalid", out)
 	}
 }
 
@@ -561,16 +593,26 @@ func (c cancelCycler) Cycle(context.Context) bool {
 	return c.healthy
 }
 
+// testCycleExclusiveIn builds a cycle coalescer for tests in the given dir,
+// wired exactly like production (newCycleExclusive, including the shutdown
+// gate on ctx), so the tests exercise the real gate and lock wiring. Takes
+// the dir explicitly so lock-contention tests can share it with holdCycleLock
+// or a seeded queue file.
+func testCycleExclusiveIn(t *testing.T, ctx context.Context, dir string) *scheduler.Exclusive {
+	t.Helper()
+	ex, err := newCycleExclusive(ctx, dir)
+	if err != nil {
+		t.Fatalf("newCycleExclusive: %v", err)
+	}
+	return ex
+}
+
 // testCycleExclusive builds a cycle coalescer for tests in a temp dir, wired
 // exactly like production (newCycleExclusive, including the shutdown gate on
 // ctx), so the tests exercise the real gate and lock wiring.
 func testCycleExclusive(t *testing.T, ctx context.Context) *scheduler.Exclusive {
 	t.Helper()
-	ex, err := newCycleExclusive(ctx, t.TempDir())
-	if err != nil {
-		t.Fatalf("newCycleExclusive: %v", err)
-	}
-	return ex
+	return testCycleExclusiveIn(t, ctx, t.TempDir())
 }
 
 // seedSentinelMarker writes a pre-existing health marker standing in for the
@@ -654,14 +696,11 @@ func TestPollCycleBusyLockPreCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	dir := t.TempDir()
-	ex, err := newCycleExclusive(ctx, dir)
-	if err != nil {
-		t.Fatalf("newCycleExclusive: %v", err)
-	}
+	ex := testCycleExclusiveIn(t, ctx, dir)
 	holdCycleLock(t, dir)
 	path := seedSentinelMarker(t)
 
-	err = pollCycle(ctx, ex, mustNotRunCycler{t: t}, health.NewMarker(path))
+	err := pollCycle(ctx, ex, mustNotRunCycler{t: t}, health.NewMarker(path))
 
 	if err == nil {
 		t.Fatal("pollCycle = nil, want the interruption error (exit 1)")
@@ -672,6 +711,39 @@ func TestPollCycleBusyLockPreCancelled(t *testing.T) {
 	assertMarkerUntouched(t, path)
 	if pending, perr := ex.Pending(); perr != nil || pending != 0 {
 		t.Errorf("Pending() = (%d, %v), want (0, nil): a cancelled poll must not enqueue demand", pending, perr)
+	}
+}
+
+// TestPollCycleGatedRun pins the OutcomeGated leg of poll's uniform
+// interruption contract: shutdown lands in the race window between
+// pollCycle's pre-Run check and the Exclusive's gate evaluation (simulated
+// deterministically by a gate that cancels the shared context exactly when
+// it is consulted, mirroring newCycleExclusive's ctx.Err()==nil gate). The
+// run is refused (the cycle never executes), pollCycle reports the
+// interruption (wrapping context.Canceled so main classifies it WARN and
+// exits non-zero), and the health marker is left at the daemon's last real
+// state.
+func TestPollCycleGatedRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ex := scheduler.NewExclusive(t.TempDir(), slog.Default(),
+		scheduler.WithGate(func() bool {
+			cancel() // shutdown arrives exactly as the gate is consulted
+			return ctx.Err() == nil
+		}))
+	path := seedSentinelMarker(t)
+
+	err := pollCycle(ctx, ex, mustNotRunCycler{t: t}, health.NewMarker(path))
+
+	if err == nil {
+		t.Fatal("pollCycle(gated run) = nil, want the interruption error (exit 1)")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want it to wrap context.Canceled (main classifies the interruption WARN, not ERROR)", err)
+	}
+	assertMarkerUntouched(t, path)
+	if pending, perr := ex.Pending(); perr != nil || pending != 0 {
+		t.Errorf("Pending() = (%d, %v), want (0, nil): a gated fresh acquisition must not leave queued demand", pending, perr)
 	}
 }
 
@@ -763,10 +835,7 @@ func TestRunSchedulerSkipsBusyTick(t *testing.T) {
 	rec := captureAndCancelOn(t, cancel, "cycle lock busy; skipping tick")
 	defer cancel()
 	dir := t.TempDir()
-	ex, err := newCycleExclusive(ctx, dir)
-	if err != nil {
-		t.Fatalf("newCycleExclusive: %v", err)
-	}
+	ex := testCycleExclusiveIn(t, ctx, dir)
 	holdCycleLock(t, dir)
 
 	markerPath := seedSentinelMarker(t)
@@ -835,10 +904,7 @@ func TestPollCycleQueuedWhenBusy(t *testing.T) {
 	rec := capture.Default(t)
 	ctx := context.Background()
 	dir := t.TempDir()
-	ex, err := newCycleExclusive(ctx, dir)
-	if err != nil {
-		t.Fatalf("newCycleExclusive: %v", err)
-	}
+	ex := testCycleExclusiveIn(t, ctx, dir)
 	holdCycleLock(t, dir)
 
 	markerPath := seedSentinelMarker(t)
@@ -872,14 +938,11 @@ func TestPollCycleQueuedThenCancelled(t *testing.T) {
 	rec := captureAndCancelOn(t, cancel, "cycle lock busy; queued rerun request")
 	defer cancel()
 	dir := t.TempDir()
-	ex, err := newCycleExclusive(ctx, dir)
-	if err != nil {
-		t.Fatalf("newCycleExclusive: %v", err)
-	}
+	ex := testCycleExclusiveIn(t, ctx, dir)
 	holdCycleLock(t, dir)
 	path := seedSentinelMarker(t)
 
-	err = pollCycle(ctx, ex, mustNotRunCycler{t: t}, health.NewMarker(path))
+	err := pollCycle(ctx, ex, mustNotRunCycler{t: t}, health.NewMarker(path))
 
 	if err == nil {
 		t.Fatal("pollCycle(queued, then cancelled) = nil, want the interruption error (exit 1)")
@@ -904,10 +967,7 @@ func TestPollCycleDiscardedWhenQueueFull(t *testing.T) {
 	rec := capture.Default(t)
 	ctx := context.Background()
 	dir := t.TempDir()
-	ex, err := newCycleExclusive(ctx, dir)
-	if err != nil {
-		t.Fatalf("newCycleExclusive: %v", err)
-	}
+	ex := testCycleExclusiveIn(t, ctx, dir)
 	holdCycleLock(t, dir)
 	marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
 
@@ -952,10 +1012,7 @@ func TestPollCycleExecutesQueuedRerun(t *testing.T) {
 	rec := capture.Default(t)
 	ctx := context.Background()
 	dir := t.TempDir()
-	ex, err := newCycleExclusive(ctx, dir)
-	if err != nil {
-		t.Fatalf("newCycleExclusive: %v", err)
-	}
+	ex := testCycleExclusiveIn(t, ctx, dir)
 	marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
 
 	sc := &signalCycler{
@@ -1043,16 +1100,13 @@ func TestPollCycleLogsQueuedRerunFailure(t *testing.T) {
 func TestPollCycleCoordinationFailure(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	ex, err := newCycleExclusive(ctx, dir)
-	if err != nil {
-		t.Fatalf("newCycleExclusive: %v", err)
-	}
+	ex := testCycleExclusiveIn(t, ctx, dir)
 	if err := os.Mkdir(filepath.Join(dir, scheduler.ExclusiveLockName), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	marker := health.NewMarker(filepath.Join(t.TempDir(), ".healthy"))
 
-	err = pollCycle(ctx, ex, mustNotRunCycler{t: t}, marker)
+	err := pollCycle(ctx, ex, mustNotRunCycler{t: t}, marker)
 
 	if err == nil {
 		t.Fatal("pollCycle(unusable lock) = nil, want the coordination error (exit 1)")
@@ -1257,10 +1311,7 @@ func TestRunSchedulerCoordinationFailure(t *testing.T) {
 	rec := captureAndCancelOn(t, cancel, "cycle coordination failed; tick did not run")
 	defer cancel()
 	dir := t.TempDir()
-	ex, err := newCycleExclusive(ctx, dir)
-	if err != nil {
-		t.Fatalf("newCycleExclusive: %v", err)
-	}
+	ex := testCycleExclusiveIn(t, ctx, dir)
 	if err := os.Mkdir(filepath.Join(dir, scheduler.ExclusiveLockName), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1289,10 +1340,7 @@ func TestPollCycleQueueErrorAfterRun(t *testing.T) {
 	rec := capture.Default(t)
 	ctx := context.Background()
 	dir := t.TempDir()
-	ex, err := newCycleExclusive(ctx, dir)
-	if err != nil {
-		t.Fatalf("newCycleExclusive: %v", err)
-	}
+	ex := testCycleExclusiveIn(t, ctx, dir)
 	if err := os.Mkdir(filepath.Join(dir, scheduler.ExclusiveQueueName), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1320,10 +1368,7 @@ func TestRunSchedulerQueueErrorAfterRun(t *testing.T) {
 	rec := captureAndCancelOn(t, cancel, "cycle coordination error after run")
 	defer cancel()
 	dir := t.TempDir()
-	ex, err := newCycleExclusive(ctx, dir)
-	if err != nil {
-		t.Fatalf("newCycleExclusive: %v", err)
-	}
+	ex := testCycleExclusiveIn(t, ctx, dir)
 	if err := os.Mkdir(filepath.Join(dir, scheduler.ExclusiveQueueName), 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -24,6 +24,8 @@ func FuzzFeedTitle_boundedAndTrimmed(f *testing.F) {
 	f.Add("Scum.of.the.Brave.S01E05.1080p.CR.WEB-DL-VARYG.mkv", "", "VARYG")
 	f.Add("[LostYears] Frieren - S01E15v2 (WEB 1080p) [3564C0AD].mkv", "[LostYears] Frieren - S01E16 (WEB 1080p) [06E8039D].mkv", "LostYears")
 	f.Add("Show - 07.mkv", "Show - 08.mkv", "")
+	f.Add("[Grp]_Show_-_01_(1080p).mkv", "[Grp]_Show_-_02_(1080p).mkv", "Grp")
+	f.Add("S01E01/Movie Cut A.mkv", "S01E02/Movie Cut B.mkv", "")
 	f.Fuzz(func(t *testing.T, name1, name2, group string) {
 		tor := &seadex.Torrent{
 			ReleaseGroup: group,

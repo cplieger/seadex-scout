@@ -861,6 +861,55 @@ func TestHarvestMalformedResponsesLatchAtThreshold(t *testing.T) {
 	}
 }
 
+// TestHarvestRejectedResponsesLatchAtThreshold pins the request-rejection
+// twin of the malformed latch: the THIRD consecutive request-scoped Torznab
+// rejection (consecutiveRejectedLatch, e.g. an indexer definition without
+// tvsearch caps answering 201/203 to every season-form query) condemns the
+// scope, so the fourth show is never queried and a deterministically-
+// rejecting upstream cannot re-burn the whole budget with zero progress on
+// every rebuild.
+func TestHarvestRejectedResponsesLatchAtThreshold(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		body := `<?xml version="1.0" encoding="UTF-8"?><error code="201" description="Incorrect parameter"/>`
+		if r.URL.Query().Get("q") == "Show D" {
+			body = strings.ReplaceAll(
+				torznabBody(torznabItem("Show D Real Title", "https://nyaa.si/view/45")),
+				"http://prowlarr:9696", "http://"+r.Host,
+			)
+		}
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	feeds := map[string][]item{upstreamNyaa: {
+		{Key: "nyaa:42", AniListID: 7, Title: "Show A"},
+		{Key: "nyaa:43", AniListID: 8, Title: "Show B"},
+		{Key: "nyaa:44", AniListID: 9, Title: "Show C"},
+		{Key: "nyaa:45", AniListID: 10, Title: "Show D"},
+	}}
+	info := map[int]EntryInfo{
+		7: {Title: "Show A"}, 8: {Title: "Show B"},
+		9: {Title: "Show C"}, 10: {Title: "Show D"},
+	}
+	log, rec := capture.New()
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
+	}}, Deps{HTTP: srv.Client(), Logger: log})
+	titles := map[string]string{}
+	stats := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] })
+
+	if stats.queries != 3 {
+		t.Errorf("harvest queries = %d, want 3 (the third consecutive rejected show latches the scope)", stats.queries)
+	}
+	if len(titles) != 0 || stats.pending != 4 {
+		t.Errorf("titles = %v, pending = %d; want no titles and 4 pending after the latch", titles, stats.pending)
+	}
+	if !rec.Contains("indexer title harvest: repeated request rejections; skipping this upstream's remaining shows this rebuild") {
+		t.Errorf("request-rejection latch not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
 // TestHarvestMalformedResponseRunResetsAfterSuccessfulPage pins the
 // CONSECUTIVE semantics of the malformed-show latch: a successful (even
 // empty) page resets the run, so two separated malformed pairs never latch
@@ -909,5 +958,122 @@ func TestHarvestMalformedResponseRunResetsAfterSuccessfulPage(t *testing.T) {
 	}
 	if len(titles) != 1 || stats.pending != 5 {
 		t.Errorf("titles = %v, pending = %d; want one harvested title and 5 pending", titles, stats.pending)
+	}
+}
+
+// TestHarvestOpportunisticMatchSkipsSatisfiedGroup pins the satisfied-group
+// skip in harvestTitles: matchHarvest matches against the GLOBAL identity
+// index, so one show's page can title a LATER group's items opportunistically
+// - and that group must then spend no query of the budget (the skip branch),
+// with both titles cached from the single page.
+func TestHarvestOpportunisticMatchSkipsSatisfiedGroup(t *testing.T) {
+	mock, srv := newHarvestMock(func(int) string {
+		return torznabBody(
+			torznabItem("Show A S01 1080p BluRay [G]", "https://nyaa.si/view/42"),
+			torznabItem("Show B S01 1080p BluRay [G]", "https://nyaa.si/view/43"),
+		)
+	})
+	defer srv.Close()
+
+	feeds := map[string][]item{upstreamNyaa: {
+		{Key: "nyaa:42", AniListID: 7, Title: "Show A"},
+		{Key: "nyaa:43", AniListID: 8, Title: "Show B"},
+	}}
+	info := map[int]EntryInfo{7: {Title: "Show A"}, 8: {Title: "Show B"}}
+	log, _ := capture.New()
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
+	}}, Deps{HTTP: srv.Client(), Logger: log})
+	titles := map[string]string{}
+	stats := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] })
+
+	if mock.calls() != 1 || stats.queries != 1 {
+		t.Errorf("harvest queries = %d (HTTP calls %d), want 1 (the satisfied group must be skipped without a query)", stats.queries, mock.calls())
+	}
+	if titles["nyaa:42"] != "Show A S01 1080p BluRay [G]" || titles["nyaa:43"] != "Show B S01 1080p BluRay [G]" {
+		t.Errorf("titles = %v, want both shows titled from the single page", titles)
+	}
+	if stats.matched != 2 || stats.pending != 0 {
+		t.Errorf("stats = %+v, want matched=2 pending=0", stats)
+	}
+}
+
+// TestHarvestRequestRejectionResetsMalformedRun pins the harvestShowFailed
+// arm of updateHarvestScopeState: a request-scoped Torznab rejection resets
+// the consecutive-malformed run like a success, so two separated malformed
+// pairs never latch and a later healthy show is still harvested.
+func TestHarvestRequestRejectionResetsMalformedRun(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		var body string
+		switch r.URL.Query().Get("q") {
+		case "Show C":
+			body = `<?xml version="1.0" encoding="UTF-8"?><error code="201" description="Incorrect parameter"/>`
+		case "Show F":
+			body = strings.ReplaceAll(
+				torznabBody(torznabItem("Show F Real Title", "https://nyaa.si/view/47")),
+				"http://prowlarr:9696", "http://"+r.Host)
+		default:
+			body = "this is not torznab xml <<<"
+		}
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	feeds := map[string][]item{upstreamNyaa: {
+		{Key: "nyaa:42", AniListID: 7, Title: "Show A"},
+		{Key: "nyaa:43", AniListID: 8, Title: "Show B"},
+		{Key: "nyaa:44", AniListID: 9, Title: "Show C"},
+		{Key: "nyaa:45", AniListID: 10, Title: "Show D"},
+		{Key: "nyaa:46", AniListID: 11, Title: "Show E"},
+		{Key: "nyaa:47", AniListID: 12, Title: "Show F"},
+	}}
+	info := map[int]EntryInfo{
+		7: {Title: "Show A"}, 8: {Title: "Show B"}, 9: {Title: "Show C"},
+		10: {Title: "Show D"}, 11: {Title: "Show E"}, 12: {Title: "Show F"},
+	}
+	log, _ := capture.New()
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
+	}}, Deps{HTTP: srv.Client(), Logger: log})
+	titles := map[string]string{}
+	stats := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] })
+
+	if stats.queries != 6 {
+		t.Errorf("harvest queries = %d, want 6 (a request-scoped rejection must reset the malformed run like a success)", stats.queries)
+	}
+	if got := titles["nyaa:47"]; got != "Show F Real Title" {
+		t.Errorf("titles[nyaa:47] = %q, want the post-rejection show harvested", got)
+	}
+	if len(titles) != 1 || stats.pending != 5 {
+		t.Errorf("titles = %v, pending = %d; want one harvested title and 5 pending", titles, stats.pending)
+	}
+}
+
+// TestRequestScopedHarvestError pins the Newznab code-range boundaries of the
+// show-local classification directly: 200-299 is request-scoped, 100-199
+// (auth) and anything else stays scope-wide, a non-numeric code never
+// classifies, and the document error is found through a wrap.
+func TestRequestScopedHarvestError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"code 200 lower bound is request-scoped", &upstreamDocError{code: "200"}, true},
+		{"code 299 upper bound is request-scoped", &upstreamDocError{code: "299"}, true},
+		{"code 199 auth code stays scope-wide", &upstreamDocError{code: "199"}, false},
+		{"code 300 stays scope-wide", &upstreamDocError{code: "300"}, false},
+		{"non-numeric code stays scope-wide", &upstreamDocError{code: "20x"}, false},
+		{"empty code stays scope-wide", &upstreamDocError{code: ""}, false},
+		{"non-document error stays scope-wide", fmt.Errorf("connection refused"), false},
+		{"wrapped document error still classifies", fmt.Errorf("search %q: %w", "Show", &upstreamDocError{code: "201"}), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := requestScopedHarvestError(tc.err); got != tc.want {
+				t.Errorf("requestScopedHarvestError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }

@@ -355,3 +355,40 @@ func TestFetchEntriesUnusableTorrentURLWarnsOnce(t *testing.T) {
 		t.Error("unusable-URL WARN does not carry count=3 (the foreign-host, unknown-tracker, and omitted-URL torrents; the usable one must not count)")
 	}
 }
+
+// TestFetchEntriesContinuesPastLoweredTotalPages pins the totalPages arm of
+// the metadata-regression guard (fetchTotals.reportedPages, never overwritten
+// downward): a later NON-EMPTY page whose currently-valid totalPages regressed
+// below an earlier page's promise must not end the walk early - the fetch
+// continues to the promised page and returns the full catalogue, instead of
+// stopping at the regressed value and returning a truncated view finishFetch
+// would wave through with only the count-mismatch WARN.
+func TestFetchEntriesContinuesPastLoweredTotalPages(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		switch page {
+		case 1:
+			fmt.Fprint(w, `{"totalItems":3,"totalPages":3,"items":[{"alID":1,"expand":{"trs":[]}}]}`)
+		case 2:
+			// A non-empty page whose CURRENT metadata says the walk is over
+			// (totalPages regressed 3 -> 2) while page 1 promised a page 3.
+			fmt.Fprint(w, `{"totalItems":3,"totalPages":2,"items":[{"alID":2,"expand":{"trs":[]}}]}`)
+		case 3:
+			fmt.Fprint(w, `{"totalItems":3,"totalPages":3,"items":[{"alID":3,"expand":{"trs":[]}}]}`)
+		default:
+			t.Errorf("unexpected request for page %d", page)
+		}
+	}))
+	defer server.Close()
+
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	if err != nil {
+		t.Fatalf("FetchEntries returned error: %v (a lowered-but-valid totalPages must not fail the fetch)", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("entries = %d, want 3 (the walk must continue to the promised page 3, not stop at the regressed totalPages)", len(entries))
+	}
+	if entries[2].AniListID != 3 {
+		t.Errorf("entries[2].AniListID = %d, want 3 (page 3 fetched after the metadata regression)", entries[2].AniListID)
+	}
+}

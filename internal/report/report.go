@@ -45,6 +45,8 @@ type StoredFinding struct {
 	Season           int            `json:"season,omitempty"`
 }
 
+// --- Reporter / cross-cycle dedupe ---
+
 // Reporter emits findings as slog events with cross-cycle dedupe.
 type Reporter struct {
 	log *slog.Logger
@@ -146,6 +148,8 @@ func (r *Reporter) Baseline(findings []compare.Finding, now time.Time) map[strin
 	r.log.Info("cold start: findings baselined without notifying", "total", len(findings))
 	return current
 }
+
+// --- Emission / rendering ---
 
 // emit logs a finding at the level matching its severity, with the full field
 // set the dashboard and Loki alert key on.

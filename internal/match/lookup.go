@@ -18,6 +18,8 @@ type AniListClient interface {
 	FetchMany(ctx context.Context, ids []int) (map[int]anilist.Media, error)
 }
 
+// --- Memo: the persisted AniList lookup cache and its expiry policy ---
+
 // memoTTLMin and memoTTLMax bound the uniform random TTL stamped on every
 // memo write: mean 14 days with ±25% jitter, so entries written together (a
 // cold cycle's whole batch) expire spread across a week instead of in
@@ -79,7 +81,7 @@ func (m *Memo) liveEntry(id int, now time.Time) (MemoEntry, bool) {
 // show title still beats a file-name derivation (the feed's title tier).
 // ok is false for an absent entry, a not-found negative, or an entry with
 // no titles.
-func (m Memo) StaleTitle(id int) (title string, year int, ok bool) {
+func (m *Memo) StaleTitle(id int) (title string, year int, ok bool) {
 	ent, cached := m.Entries[id]
 	if !cached || ent.NotFound || len(ent.Titles) == 0 {
 		return "", 0, false
@@ -153,6 +155,14 @@ func mediaEntry(media anilist.Media, expiry time.Time) MemoEntry {
 	return MemoEntry{Titles: media.Titles, Format: media.Format, Year: media.Year, Expiry: expiry}
 }
 
+// notFoundEntry builds a negative (not-found) memo entry stamped with expiry,
+// the negative twin of mediaEntry.
+func notFoundEntry(expiry time.Time) MemoEntry {
+	return MemoEntry{NotFound: true, Expiry: expiry}
+}
+
+// --- Prefetch: the batched cold-cycle memo warm-up ---
+
 // prefetch batch-fetches into the memo every AniList id the per-entry pass will
 // consult but has no live (unexpired) entry for, so a cold cycle costs a
 // handful of batched AniList requests instead of one request per id-less entry
@@ -215,7 +225,7 @@ func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *map
 			// media. Memoize the negative so it is not re-fetched this run; the
 			// expiry gives the negative the same lifetime policy as a positive,
 			// so a show created on AniList later is eventually seen.
-			memo.Entries[id] = MemoEntry{NotFound: true, Expiry: m.freshExpiry(now)}
+			memo.Entries[id] = notFoundEntry(m.freshExpiry(now))
 		}
 		// err != nil and id not returned: leave uncached so matchEntry retries it
 		// via the single Fetch.
@@ -251,6 +261,8 @@ func pendingAniListIDs(entries []seadex.Entry, idx *mapping.Index, lib *LibIndex
 	}
 	return ids
 }
+
+// --- lookupGate + per-id lookup: fast-fail and degradation accounting ---
 
 // transientFailureCap is the consecutive transient per-id AniList failure
 // streak at which the matcher stops issuing further lookups for the cycle: an
@@ -335,7 +347,7 @@ func (r *matchRun) lookupAniList(ctx context.Context, aniListID int) (anilist.Me
 func (r *matchRun) handleLookupFailure(aniListID int, err error) {
 	if errors.Is(err, anilist.ErrNotFound) {
 		r.gate.recordSuccess()
-		r.memo.Entries[aniListID] = MemoEntry{NotFound: true, Expiry: r.entryExpiry()}
+		r.memo.Entries[aniListID] = notFoundEntry(r.entryExpiry())
 		return
 	}
 	// A transient/upstream error (network, context cancellation, rate-limit

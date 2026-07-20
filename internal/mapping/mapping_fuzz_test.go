@@ -28,6 +28,9 @@ func FuzzParseOverrides(f *testing.F) {
 	f.Add([]byte(`[{"anilist_id":1,"tmdb_movies":[1,2],"imdb_ids":["a"],"season_tvdb":2,"tvdb_id":3}]`))
 	f.Add([]byte(`[{"anilist_id":1},{"anilist_id":1},{"anilist_id":0}]`))
 	f.Add([]byte(`[] trailing`))
+	f.Add([]byte(`[bad]`))
+	f.Add([]byte(`[{"anilist_id":1},`))
+	f.Add([]byte(`[{"anilist_id":1,"type":"tv"}`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		set, err := parseOverrides(data)
 		if err != nil {

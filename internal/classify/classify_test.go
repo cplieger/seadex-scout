@@ -252,3 +252,35 @@ func TestObtainableAdapterPreservesRawURLForCrossCheck(t *testing.T) {
 		t.Error("Obtainable() = true, want false for a mislabeled schemeless AnimeBytes URL when AnimeBytes is disabled")
 	}
 }
+
+// TestDefinitelyABAdapterFailsOpenOnRawEvidence pins the third adapter's
+// policy surface at its defining site, mirroring the ABVisible and
+// Obtainable adapter tests: an AB tracker label or definitively extracted
+// raw-URL host evidence (absolute or schemeless animebytes.tv) reads
+// definitely-AB, while ambiguous evidence - a hidden-host host:port form,
+// an empty URL, or an honest public URL - fails OPEN (not definitely AB).
+// The adapter must feed the RAW upstream URL (t.URL) to the host
+// cross-check: a mutant passing t.UsableURL() (which drops the schemeless
+// AB form under a public label to "") would read that case as
+// not-definitive and fail this test.
+func TestDefinitelyABAdapterFailsOpenOnRawEvidence(t *testing.T) {
+	tests := []struct {
+		name    string
+		torrent seadex.Torrent
+		want    bool
+	}{
+		{"AB label is definitive", seadex.Torrent{Tracker: "AB", URL: "/torrents.php?id=1&torrentid=2"}, true},
+		{"absolute AB URL under a public label is definitive", seadex.Torrent{Tracker: "Nyaa", URL: "https://animebytes.tv/torrents.php?id=1"}, true},
+		{"schemeless AB URL under a public label is definitive", seadex.Torrent{Tracker: "Nyaa", URL: "animebytes.tv/torrents.php?id=1"}, true},
+		{"hidden-host form is ambiguous and fails open", seadex.Torrent{Tracker: "Nyaa", URL: "animebytes.tv:443/torrents.php?id=1"}, false},
+		{"public tracker with public URL is not AB", seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}, false},
+		{"empty URL carries no host evidence and fails open", seadex.Torrent{Tracker: "Nyaa", URL: ""}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := DefinitelyAB(&tt.torrent); got != tt.want {
+				t.Errorf("DefinitelyAB(%q, %q) = %v, want %v", tt.torrent.Tracker, tt.torrent.URL, got, tt.want)
+			}
+		})
+	}
+}

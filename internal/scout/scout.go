@@ -680,6 +680,12 @@ func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap li
 		return true, true
 	}
 	if !mapUsable(mapErr) {
+		// Like the walk-failed and shrunk-walk arms, this gate closes the
+		// cycle before the seaErr arm below: if SeaDex ALSO failed (or
+		// returned nothing), rebuildFeed silently kept the previous feed -
+		// surface it so a mapping + SeaDex double outage does not read as
+		// mapping-only.
+		s.logFeedOutageOnGatedCycle(ctx, entries, seaErr)
 		s.degradedSave(ctx, st, snap, mapCache)
 		s.log.Warn("mapping unusable; skipping comparison, findings preserved", "error", mapErr)
 		s.cycleDegraded("mapping-unusable", "error", mapErr)

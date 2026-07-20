@@ -38,7 +38,7 @@ func trackerScope(tracker string) string {
 // trackerID extracts the tracker's numeric torrent id from a SeaDex source
 // URL for a scope: Nyaa's /view/{id}, AnimeBytes' torrentid=/permalink forms.
 // It is the single home of the scope->id-extraction pairing, shared by
-// trackerKey and downloadURL.
+// trackerKey, trackerKeyFromURL, and downloadURL.
 func trackerID(scope, sourceURL string) string {
 	switch scope {
 	case upstreamNyaa:
@@ -83,16 +83,17 @@ func trackerKeyFromURL(raw string) string {
 	if err != nil {
 		return ""
 	}
-	host := u.Hostname()
-	switch {
+	var scope string
+	switch host := u.Hostname(); {
 	case release.IsNyaaHost(host):
-		if id := nyaaID(raw); id != "" {
-			return upstreamNyaa + ":" + id
-		}
+		scope = upstreamNyaa
 	case release.IsAnimeBytesHost(host):
-		if id := animeBytesID(raw); id != "" {
-			return upstreamAB + ":" + id
-		}
+		scope = upstreamAB
+	default:
+		return ""
+	}
+	if id := trackerID(scope, raw); id != "" {
+		return scope + ":" + id
 	}
 	return ""
 }

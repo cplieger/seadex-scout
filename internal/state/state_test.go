@@ -252,6 +252,43 @@ func TestStoreLoadDuplicateVersionKeyQuarantines(t *testing.T) {
 	}
 }
 
+// TestStoreLoadTrailingGarbageAfterValidVersionQuarantines pins the
+// trailing-data rejection in newerSchemaVersion: a payload whose leading
+// object carries a valid newer version but is followed by trailing bytes
+// ({"version":99}x, or a second JSON document) is corruption, never
+// newer-schema state. Without the trailing check the poisoned file would be
+// preserved at the live path with every subsequent Save blocked; instead it
+// must be quarantined and Save left unblocked.
+func TestStoreLoadTrailingGarbageAfterValidVersionQuarantines(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"raw trailing bytes", `{"version":99}x`},
+		{"second JSON document", `{"version":99} {"baselined":true}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			if err := os.WriteFile(path, []byte(tt.body), 0o600); err != nil {
+				t.Fatalf("write state: %v", err)
+			}
+			store := NewStore(path, testLogger())
+			_, err := store.Load(context.Background())
+			if err == nil {
+				t.Fatal("Load returned nil error, want decode error for trailing data")
+			}
+			if strings.Contains(err.Error(), "newer than this binary supports") {
+				t.Errorf("error = %q, want plain decode error, not the newer-schema classification", err.Error())
+			}
+			assertQuarantined(t, path, tt.body)
+			if saveErr := store.Save(context.Background(), &State{}); saveErr != nil {
+				t.Errorf("Save after quarantining a trailing-garbage file failed: %v", saveErr)
+			}
+		})
+	}
+}
+
 // TestStoreLoadEarlierInvalidDuplicateVersionQuarantines pins the converse
 // duplicate ordering: when the INVALID duplicate comes first
 // ({"version":"bad","Version":99}), the effective (last, case-insensitive)

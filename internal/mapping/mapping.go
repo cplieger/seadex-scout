@@ -309,10 +309,11 @@ func NewLoader(httpClient *http.Client, url, overridesPath string, refresh time.
 // Load returns the mapping index to use this cycle and the cache to persist. It
 // reuses prev when it is still fresh, otherwise issues a conditional GET and
 // refreshes on a 200 (or bumps the timestamp on a 304). Overrides are always
-// re-read and applied on top. When a refresh fails but prev holds records, it
-// returns the stale index with a *StaleMapError (match with errors.As) so the
-// caller can log a degraded cycle while still comparing against the last good
-// map; any other non-nil error means no usable map was returned at all.
+// re-read and applied on top. When a refresh fails but prev holds a usable
+// record set (cacheUsable), it returns the stale index with a *StaleMapError
+// (match with errors.As) so the caller can log a degraded cycle while still
+// comparing against the last good map; any other non-nil error means no
+// usable map was returned at all.
 func (l *Loader) Load(ctx context.Context, prev *Cache) (Cache, *Index, error) {
 	next, err := l.refreshCache(ctx, prev)
 	// Build from whatever records survived (fresh, refreshed, or stale prev).

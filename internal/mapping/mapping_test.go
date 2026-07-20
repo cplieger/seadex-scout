@@ -284,3 +284,32 @@ func TestParseOverrides_typedDecodeErrorPropagates(t *testing.T) {
 		})
 	}
 }
+
+// TestParseOverrides_streamDecodeErrorsPropagate pins the two element-stream
+// error branches of parseOverrides that the array-guard and typed-decode
+// tests cannot reach: a malformed array element that fails dec.Decode (a bare
+// token or a row truncated mid-stream) and a truncated document that ends
+// before the closing ']'. Each must surface an error with an empty result set
+// so readOverrides logs the malformed-file WARN instead of applying a partial
+// overlay.
+func TestParseOverrides_streamDecodeErrorsPropagate(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+	}{
+		{name: "malformed element token", in: `[bad]`},
+		{name: "element truncated after comma", in: `[{"anilist_id":1},`},
+		{name: "array missing closing bracket", in: `[{"anilist_id":1,"type":"tv"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			set, err := parseOverrides([]byte(tc.in))
+			if err == nil {
+				t.Fatalf("parseOverrides(%q) = nil error, want stream-decode error", tc.in)
+			}
+			if set.records != nil || set.unknown != nil || set.duplicates != nil || set.applied != 0 || set.skipped != 0 {
+				t.Errorf("parseOverrides(%q) error carried a partial result: %+v", tc.in, set)
+			}
+		})
+	}
+}

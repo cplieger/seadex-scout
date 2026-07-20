@@ -610,6 +610,15 @@ func (c *Config) validateIndexer() error {
 		slog.Warn("indexer.ab_passkey is empty; AnimeBytes searches still work through Prowlarr, " +
 			"but the /ab RSS feed returns a Torznab error until a passkey is configured")
 	}
+	// The inverse half-configuration: a passkey with no AB Torznab URL is
+	// inert - the AB URL is the AnimeBytes on switch, so neither AB
+	// journaling nor the /ab feed uses the passkey. Info, mirroring
+	// infoDisabledIndexerKeys: a deliberately parked passkey must not raise
+	// Loki alert noise. Field-name-only; never echoes the secret.
+	if c.IndexerABTorznabURL == "" && c.IndexerABPasskey != "" {
+		slog.Info("indexer.ab_passkey is set but indexer.ab_torznab_url is empty; " +
+			"AnimeBytes is disabled and the passkey is unused (set indexer.ab_torznab_url to enable it)")
+	}
 	c.warnTorznabURLCredentials()
 	// A search proxies Prowlarr using indexer.prowlarr_api_key in the X-Api-Key
 	// header. An empty key is accepted rather than rejected (it is valid when
@@ -715,12 +724,12 @@ func validateHTTPURL(name, rawURL string) error {
 // or a credential-like query parameter (apikey/api_key/passkey/token). Such a
 // URL survives validation but leaks the credential to upstream-failure logs,
 // which wrap the full request URL; validateIndexer warns on it field-name-only.
-// The query is scanned twice: u.Query() matches percent-decoded names in
-// well-formed pairs, but drops any malformed pair wholesale (an unescaped ';'
-// in "?apikey=SECRET;foo=x" discards the entire pair while the secret stays in
-// RawQuery for outgoing requests and logs), so a raw scan splitting on both
-// '&' and ';' catches the credential names the parsed scan lost. Both match
-// field names only, never values.
+// The query is scanned on the raw string, splitting on both '&' and ';' and
+// percent-decoding each name (the same decode u.Query() applies to keys):
+// this is a strict superset of the parsed u.Query() view, which drops any
+// malformed pair wholesale (an unescaped ';' in "?apikey=SECRET;foo=x"
+// discards the entire pair while the secret stays in RawQuery for outgoing
+// requests and logs). Matches field names only, never values.
 func urlEmbedsCredential(rawURL string) bool {
 	if rawURL == "" {
 		return false
@@ -731,11 +740,6 @@ func urlEmbedsCredential(rawURL string) bool {
 	}
 	if u.User != nil {
 		return true
-	}
-	for k := range u.Query() {
-		if isCredentialParam(k) {
-			return true
-		}
 	}
 	for pair := range strings.FieldsFuncSeq(u.RawQuery, func(r rune) bool { return r == '&' || r == ';' }) {
 		name, _, _ := strings.Cut(pair, "=")
@@ -753,8 +757,8 @@ func urlEmbedsCredential(rawURL string) bool {
 }
 
 // isCredentialParam reports whether a query-parameter name is credential-like
-// (apikey/api_key/passkey/token, case-insensitive) — the single key set both
-// query scans of urlEmbedsCredential match against.
+// (apikey/api_key/passkey/token, case-insensitive) — the single key set
+// urlEmbedsCredential's raw query scan matches against.
 func isCredentialParam(name string) bool {
 	switch strings.ToLower(name) {
 	case "apikey", "api_key", "passkey", "token":

@@ -526,10 +526,16 @@ func TestParseFribb_logsSkippedAndDroppedCounts(t *testing.T) {
 // attrContains reports whether any captured record carries an attribute with
 // the given key whose rendered value contains want.
 func attrContains(rec *capture.Recorder, key, want string) bool {
+	return attrValueMatches(rec, key, func(v string) bool { return strings.Contains(v, want) })
+}
+
+// attrValueMatches reports whether any captured record carries an attribute
+// with the given key whose rendered value satisfies match.
+func attrValueMatches(rec *capture.Recorder, key string, match func(string) bool) bool {
 	for _, r := range rec.Records() {
 		found := false
 		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == key && strings.Contains(a.Value.String(), want) {
+			if a.Key == key && match(a.Value.String()) {
 				found = true
 				return false
 			}

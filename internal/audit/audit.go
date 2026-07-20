@@ -353,8 +353,7 @@ func rowQualifier(entry *seadex.Entry, d *align.Decision) Qualifier {
 	switch {
 	case d.Outcome == align.OutcomeMixed:
 		return QualifierMixed
-	case d.Outcome == align.OutcomeDiverged && entry.Incomplete &&
-		(d.Standing == align.StandingAlt || d.Standing == align.StandingUnlisted):
+	case d.Outcome == align.OutcomeDiverged && classify.DivergedIncomplete(entry):
 		return QualifierIncomplete
 	default:
 		return ""

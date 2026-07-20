@@ -895,6 +895,37 @@ func TestCycleSuccessfulSeaDexFetchResetsFailureStreak(t *testing.T) {
 	}
 }
 
+// TestCycleZeroEntriesFetchResetsSeaDexFailureStreak pins the reset arm of
+// the documented SeadexFailures contract ("resets to 0 on any successful
+// fetch") for a successful-but-EMPTY fetch: zero entries is anomalous (the
+// cycle degrades and skips the compare) but the fetch itself succeeded, so
+// the persisted streak must end - the zero-entries degradedSave carries the
+// reset, and a later real outage starts a fresh streak instead of escalating
+// early against a stale count.
+func TestCycleZeroEntriesFetchResetsSeaDexFailureStreak(t *testing.T) {
+	logger := scoutTestLogger()
+	store := &fakeStore{st: state.State{
+		Mapping:        mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+		SeadexFailures: 3,
+		Baselined:      true,
+	}}
+	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+	s := New(&Deps{
+		Logger:  logger,
+		Store:   store,
+		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Mapping: fakeMapping{},
+		SeaDex:  &fakeSeaDex{},
+	})
+
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("Cycle healthy=false, want true (a zero-entries fetch is degraded, not unhealthy)")
+	}
+	if store.st.SeadexFailures != 0 {
+		t.Errorf("persisted SeadexFailures = %d, want 0 (a zero-entries fetch is still a successful fetch; the documented contract resets the streak)", store.st.SeadexFailures)
+	}
+}
+
 // TestCycleSteadyStateReportsAndSaves pins the daemon's steady-state operating
 // mode end to end: an already-baselined instance must take the Report path (not
 // Baseline), emit the new finding, resolve the stale prior finding, close with
@@ -1142,6 +1173,39 @@ func TestCycleShutdownDuringSeaDexFetchWarnsShutdownNotSeaDex(t *testing.T) {
 	}
 	if len(store.st.Library.Items) != 1 {
 		t.Errorf("persisted library items = %d, want 1 (the refreshed walk snapshot must be saved)", len(store.st.Library.Items))
+	}
+}
+
+// TestCycleCancelledSeaDexFetchLeavesFailureStreakUntouched pins the
+// no-evidence arm of the SeadexFailures contract: a fetch that failed because
+// the cycle context was cancelled (a redeploy SIGTERM mid-fetch) is evidence
+// of neither an outage nor a recovery, so the persisted streak must survive
+// the shutdown's degradedSave untouched - incrementing would let routine
+// redeploys walk a healthy deployment up to the ERROR escalation, and
+// resetting would mask a real ongoing outage across a redeploy.
+func TestCycleCancelledSeaDexFetchLeavesFailureStreakUntouched(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger := scoutTestLogger()
+	store := &fakeStore{st: state.State{
+		Mapping:        mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}},
+		SeadexFailures: 5,
+		Baselined:      true,
+	}}
+	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+	s := New(&Deps{
+		Logger:  logger,
+		Store:   store,
+		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Mapping: fakeMapping{},
+		SeaDex:  &cancellingSeaDex{cancel: cancel},
+	})
+
+	if healthy := s.Cycle(ctx); !healthy {
+		t.Fatal("Cycle healthy=false, want true (a shutdown during the SeaDex fetch is not an arr failure)")
+	}
+	if store.st.SeadexFailures != 5 {
+		t.Errorf("persisted SeadexFailures = %d, want the seeded 5 untouched (a cancelled fetch is evidence of neither an outage nor a recovery)", store.st.SeadexFailures)
 	}
 }
 

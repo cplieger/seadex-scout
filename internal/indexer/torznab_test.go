@@ -161,6 +161,19 @@ func TestParseTorznabDecodeLimits(t *testing.T) {
 			inner:   `<item><torznab:attr name="a" value="` + strings.Repeat("v", maxUpstreamFieldBytes+1) + `"/></item>`,
 			wantErr: true,
 		},
+		"attr name over the cap rejected": {
+			inner:   `<item><torznab:attr name="` + strings.Repeat("n", maxUpstreamFieldBytes+1) + `" value="b"/></item>`,
+			wantErr: true,
+		},
+		"repeated fields in one item over the budget rejected": {
+			// decodeField accounts EVERY occurrence of a repeated element, so
+			// 1025 x 4096-byte titles in ONE item cross the 4 MiB response budget
+			// even though each field and the item count stay under their own caps.
+			inner: "<item>" + strings.Repeat(
+				"<title>"+strings.Repeat("t", maxUpstreamFieldBytes)+"</title>",
+				maxUpstreamTextBytes/maxUpstreamFieldBytes+1) + "</item>",
+			wantErr: true,
+		},
 		"cumulative text over the budget rejected": {
 			// Each item stays under the per-field cap and the item count
 			// stays under maxUpstreamItems (513 < 1000), so ONLY the
@@ -215,5 +228,62 @@ func TestParseTorznabDecodeLimits(t *testing.T) {
 				t.Errorf("parsed item count = %d, want %d", len(items), tc.wantItem)
 			}
 		})
+	}
+}
+
+// TestTorznabLimitErrorMessageNamesLimit pins the operator-facing message of a
+// decode-limit rejection (what fetchAndParse's retry logging + the harvest WARN
+// render), so it must name the decode limit that fired.
+func TestTorznabLimitErrorMessageNamesLimit(t *testing.T) {
+	_, err := parseTorznab([]byte(`<?xml version="1.0"?><rss><channel>` +
+		strings.Repeat("<item/>", maxUpstreamItems+1) + `</channel></rss>`))
+	if err == nil {
+		t.Fatal("parseTorznab accepted an over-limit response")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "torznab response exceeds decode limit") || !strings.Contains(got, "more than 1000 items") {
+		t.Errorf("Error() = %q, want it to name the decode limit that fired", got)
+	}
+}
+
+// TestParseTorznabRejectsTruncatedResponses pins error propagation at every
+// decode nesting level of the hand-rolled UnmarshalXML loops.
+func TestParseTorznabRejectsTruncatedResponses(t *testing.T) {
+	tests := map[string]string{
+		"EOF inside channel":        `<?xml version="1.0"?><rss><channel>`,
+		"EOF inside item":           `<?xml version="1.0"?><rss><channel><item>`,
+		"EOF after complete child":  `<?xml version="1.0"?><rss><channel><item><title>x</title>`,
+		"EOF inside open enclosure": `<?xml version="1.0"?><rss><channel><item><enclosure url="http://x/1">`,
+		"EOF inside open attr":      `<?xml version="1.0"?><rss><channel><item><torznab:attr name="seeders">`,
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			items, err := parseTorznab([]byte(body))
+			if err == nil {
+				t.Errorf("parseTorznab accepted a truncated response (%d items); partial data must fail so the fetch retries", len(items))
+			}
+		})
+	}
+}
+
+// TestParseTorznabSkipsUnknownItemChildren pins the default d.Skip() arm of
+// itemXML.decodeChild: real Prowlarr responses carry item children the feed
+// does not consume, and the parser must skip them whole.
+func TestParseTorznabSkipsUnknownItemChildren(t *testing.T) {
+	body := `<?xml version="1.0"?><rss><channel><item>` +
+		`<title>x</title>` +
+		`<description>rendered by Prowlarr, ignored by the feed</description>` +
+		`<jackettindexer id="1">Nyaa</jackettindexer>` +
+		`<guid>https://nyaa.si/view/1</guid>` +
+		`</item></channel></rss>`
+	items, err := parseTorznab([]byte(body))
+	if err != nil {
+		t.Fatalf("parseTorznab with unknown item children: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("parsed item count = %d, want 1", len(items))
+	}
+	if items[0].Title != "x" || items[0].GUID != "https://nyaa.si/view/1" {
+		t.Errorf("recognized fields around unknown children = %q/%q, want x/https://nyaa.si/view/1", items[0].Title, items[0].GUID)
 	}
 }

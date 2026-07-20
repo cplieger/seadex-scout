@@ -140,10 +140,14 @@ type Indexer struct {
 	// authFailTokens is the failed-auth token bucket's fill level, guarded by
 	// authFailMu below together with authFailLast above (see allowAuthFailure).
 	authFailTokens float64
+	// mu guards the published snapshot fields read per request: snap,
+	// snapMod, snapInfo, snapFailed, and snapFailedWarned (see the
+	// per-field comments).
+	mu sync.RWMutex
 	// reloadMu coalesces concurrent snapshot refreshes: only one request runs
 	// reload's stat/read/unmarshal at a time; the rest serve the current
-	// immutable snapshot (see reload). mu still guards the published snapshot.
-	mu       sync.RWMutex
+	// immutable snapshot (see reload). It also guards the reload-only flags
+	// failedFile / snapMissing / reloadDegraded.
 	reloadMu sync.Mutex
 	// authFailMu guards the failed-auth token bucket (authFailTokens above /
 	// authFailLast at the top of the struct), which rate-limits responses to

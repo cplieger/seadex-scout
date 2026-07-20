@@ -229,6 +229,16 @@ func TestObserveRateHeadersCapsResetWindow(t *testing.T) {
 	})
 }
 
+// reserve claims the next slot and returns how long to wait before using it.
+// Test-only observation helper for throttle state; production code reserves
+// via wait/reserveSlot.
+func (t *throttle) reserve() time.Duration {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := time.Now()
+	return t.reserveSlotLocked(now).Sub(now)
+}
+
 // TestThrottleReserveSpacesRequests pins the spacing math: the first slot is
 // immediate, and each subsequent reserve is spaced one interval after the
 // previous slot (not after the call), so N requests spread across (N-1)

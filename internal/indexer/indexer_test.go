@@ -106,14 +106,19 @@ func TestParseTorznabClampsNegativeCounts(t *testing.T) {
       <enclosure url="http://prowlarr:9696/1/download" length="-5" type="application/x-bittorrent"/>
       <torznab:attr name="peers" value="-9"/>
     </item>
+    <item>
+      <title>negative enclosure length falls through to size element</title>
+      <enclosure url="http://prowlarr:9696/1/download" length="-5" type="application/x-bittorrent"/>
+      <size>99</size>
+    </item>
   </channel>
 </rss>`
 	items, err := parseTorznab([]byte(feed))
 	if err != nil {
 		t.Fatalf("parseTorznab: %v", err)
 	}
-	if len(items) != 3 {
-		t.Fatalf("got %d items, want 3", len(items))
+	if len(items) != 4 {
+		t.Fatalf("got %d items, want 4", len(items))
 	}
 	if it := items[0]; it.Size != 0 || it.Seeders != 0 || it.Leechers != 0 {
 		t.Errorf("all-negative item = size %d seeders %d leechers %d, want 0/0/0", it.Size, it.Seeders, it.Leechers)
@@ -124,6 +129,12 @@ func TestParseTorznabClampsNegativeCounts(t *testing.T) {
 	}
 	if it := items[2]; it.Size != 0 || it.Leechers != 0 {
 		t.Errorf("negative-enclosure item = size %d leechers %d, want 0/0", it.Size, it.Leechers)
+	}
+	// An invalid negative enclosure length is unset-or-invalid, not a
+	// distinct value: the chain falls through to the valid <size> element
+	// instead of clamping the whole item to 0.
+	if it := items[3]; it.Size != 99 {
+		t.Errorf("negative-enclosure-with-size item = size %d, want 99 (fall through to the <size> element)", it.Size)
 	}
 }
 

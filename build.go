@@ -88,6 +88,7 @@ func buildScout(ctx context.Context, cfg *config.Config, readOnlyState bool) (bu
 		Comparer: compare.NewComparer(compare.Config{
 			Filter:          filterOptions(cfg),
 			ExcludeSpecials: cfg.ExcludeSpecials,
+			AnimeBytes:      cfg.AnimeBytes,
 		}),
 		Auditor: audit.NewAuditor(audit.Config{
 			SeaDexBaseURL:   config.DefaultSeaDexBaseURL,
@@ -232,12 +233,13 @@ func logPing(arr string, err error) {
 	}
 }
 
-// filterOptions builds the release filter policy from config.
+// filterOptions builds the content-filter policy from config. The AnimeBytes
+// tracker toggle is not part of filter.Options; it rides compare.Config and
+// audit.Config directly.
 func filterOptions(cfg *config.Config) filter.Options {
 	return filter.Options{
 		ExcludeRemux:     cfg.ExcludeRemux,
 		RequireDualAudio: cfg.RequireDualAudio,
-		AnimeBytes:       cfg.AnimeBytes,
 	}
 }
 

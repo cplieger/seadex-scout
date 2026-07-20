@@ -93,6 +93,15 @@ func torrentFileNames(files []seadex.File) []string {
 	return names
 }
 
+// DivergedIncomplete reports whether a diverged comparison of
+// entry downgrades to the incomplete vocabulary (compare's
+// StatusIncomplete, audit's QualifierIncomplete) - the one
+// downgrade rule both flows must share, kept here beside
+// Fallback so they cannot silently drift.
+func DivergedIncomplete(entry *seadex.Entry) bool {
+	return entry.Incomplete
+}
+
 // EntryFallback classifies an entry that lists no recommended releases.
 // Theoretical beats incomplete - the one precedence compare's emptyResult
 // and audit's rowQualifier must share.

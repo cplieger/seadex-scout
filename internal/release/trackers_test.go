@@ -44,6 +44,13 @@ func TestLookupTrackerByHostFailClosed(t *testing.T) {
 		// a fullwidth-dot spelling of the domain itself never classify.
 		{host: "x\u00e9.nyaa.si", wantOK: false},
 		{host: "animebytes\uff0etv", wantOK: false},
+		// Fail-closed fold-laundering homographs: the ASCII gate must run on
+		// the RAW host, because strings.ToLower folds U+0130 (LATIN CAPITAL
+		// LETTER I WITH DOT ABOVE) to ASCII 'i' and U+212A (KELVIN SIGN) to
+		// ASCII 'k' - a pre-gate fold would launder these into the canonical
+		// hosts and classify them.
+		{host: "an\u0130mebytes.tv", wantOK: false},
+		{host: "rutrac\u212Aer.org", wantOK: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.host, func(t *testing.T) {

@@ -15,7 +15,6 @@ import (
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
-	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/slogx/capture"
 )
 
@@ -64,28 +63,6 @@ func TestDisplayBestGroups(t *testing.T) {
 	got := displayBestGroups(rels)
 	if !reflect.DeepEqual(got, []string{"SubsPlease"}) {
 		t.Errorf("displayBestGroups() = %v, want [SubsPlease] (best-only, case-insensitive dedupe, original case)", got)
-	}
-}
-
-func TestGroupSets(t *testing.T) {
-	rels := []Release{
-		{Group: "SubsPlease", Best: true, URL: "https://nyaa.si/view/1"},
-		{Group: "subsplease", Best: true, URL: "https://nyaa.si/view/2"},
-		{Group: "Erai", Best: false, URL: "https://nyaa.si/view/3"},
-		// An Unobtainable release (the daemon's filter.Obtainable rule
-		// rejected it: no usable link, or a tracker the operator cannot use)
-		// is raw-catalogue visibility only: it must drive neither the best
-		// nor the alt set - the eligibility IS the daemon's obtainability
-		// rule.
-		{Group: "LinklessBest", Best: true, Unobtainable: true},
-		{Group: "LinklessAlt", Best: false, Unobtainable: true},
-	}
-	best, alt := groupSets(rels)
-	if !reflect.DeepEqual(best, []string{"subsplease"}) {
-		t.Errorf("best = %v, want [subsplease]", best)
-	}
-	if !reflect.DeepEqual(alt, []string{"erai"}) {
-		t.Errorf("alt = %v, want [erai]", alt)
 	}
 }
 
@@ -149,23 +126,6 @@ func TestEscapeLinkURLEncodesBackslashAndBacktick(t *testing.T) {
 	got = escapeLinkURL("https://x/a`b")
 	if want := "https://x/a%60b"; got != want {
 		t.Errorf("escapeLinkURL(backtick) = %q, want %q", got, want)
-	}
-}
-
-func TestClassifyReleasesGatesAnimeBytes(t *testing.T) {
-	entry := &seadex.Entry{Torrents: []seadex.Torrent{
-		{Tracker: "Nyaa", ReleaseGroup: "SubsPlease", IsBest: true, URL: "https://nyaa.si/view/1"},
-		{Tracker: "AB", ReleaseGroup: "Commie", IsBest: false, URL: "/torrents.php?id=1"},
-	}}
-
-	off := NewAuditor(Config{}).classifyReleases(entry)
-	if len(off) != 1 || off[0].Tracker != "Nyaa" {
-		t.Errorf("with AnimeBytes off only the Nyaa release should survive, got %+v", off)
-	}
-
-	on := NewAuditor(Config{AnimeBytes: true}).classifyReleases(entry)
-	if len(on) != 2 {
-		t.Errorf("with AnimeBytes on both releases should be present, got %d", len(on))
 	}
 }
 
