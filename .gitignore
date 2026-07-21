@@ -15,3 +15,7 @@
 # go.work / go.work.sum are local-dev only (never committed)
 go.work
 go.work.sum
+
+
+# gitleaks scan artifacts (generated locally by security scans, never committed)
+gitleaks-history.sarif
