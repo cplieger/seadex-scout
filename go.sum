@@ -10,8 +10,8 @@ github.com/cplieger/httpx/v3 v3.2.0 h1:vMqF0Bf06gkfJJMfZQNHnHyEnbtLo8DdnqZNLL0D+
 github.com/cplieger/httpx/v3 v3.2.0/go.mod h1:aITrLHd0nPnJ5+Gu76xhRyOChC0KZEBCwslCELPHk+s=
 github.com/cplieger/jsonx v1.2.0 h1:fWOAvQdsSiu30kWQduCF3S3qUrnosDKwYdByVQ+SM5M=
 github.com/cplieger/jsonx v1.2.0/go.mod h1:6EoDR/SptVUcpEx+YyZcvGym6Je9vBPmhEwG/BwAVv8=
-github.com/cplieger/runesafe v1.1.0 h1:OAUE2GX9JSiUes+HR7hEgOHqA2w5FI/KsXkmZ0iZJW4=
-github.com/cplieger/runesafe v1.1.0/go.mod h1:37oz7JJVn1PIWv5UHrJhDhCabmqhMY+eRavwZ6Lp6NI=
+github.com/cplieger/runesafe v1.2.0 h1:xoQY70MipJlse5K8NoZzxmy4xb06VkjLWDKjEdfw62Y=
+github.com/cplieger/runesafe v1.2.0/go.mod h1:37oz7JJVn1PIWv5UHrJhDhCabmqhMY+eRavwZ6Lp6NI=
 github.com/cplieger/scheduler/v2 v2.0.0 h1:SuMKuywcxAGdlBIvMEoGK7debBWnYwbpPlkw3n4QrMI=
 github.com/cplieger/scheduler/v2 v2.0.0/go.mod h1:+uGxZnD7/hftimflPJgOmNY3jqShKFhUZuBEpNgc1dA=
 github.com/cplieger/slogx v1.4.0 h1:VlT8gYxqrQHxyEd7VKLy+QCmm3Utut3DQ6Y0P09uv3Q=
