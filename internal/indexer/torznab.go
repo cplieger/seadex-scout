@@ -210,8 +210,19 @@ func writeAttr(b *strings.Builder, name, value string) {
 // ampersand-heavy value ~5x, and the temporary copies esc-per-field rendering
 // retained were one leg of the snapshot memory-amplification path (the other
 // is the shared persisted-item limits in writer.go).
+// escTo writes s XML-escaped through the shared rune policy: xml.EscapeText
+// covers XML's own metacharacters and the C0 controls, but passes C1
+// controls (U+0080-U+009F), Unicode bidi controls, and U+2028/U+2029 through
+// RAW - and every text value on this feed is upstream-controlled (tracker
+// titles via Prowlarr, SeaDex file names synthesized into titles), consumed
+// by arr web UIs and operator terminals. Sanitizing at the one emit boundary
+// (the runesafe adoption rule) keeps the raw bytes intact everywhere they
+// are computed on - the persisted snapshot, matching, dedupe keys - while no
+// rendered document can carry the unsafe classes, wherever the value came
+// from (a live search passthrough, the persisted journal, or a legacy
+// snapshot written before this policy).
 func escTo(b *strings.Builder, s string) {
-	_ = xml.EscapeText(b, []byte(s))
+	_ = xml.EscapeText(b, []byte(runesafe.Sanitize(s)))
 }
 
 // esc escapes a string for use in XML text or attribute values, returning it

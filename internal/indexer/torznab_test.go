@@ -287,3 +287,25 @@ func TestParseTorznabSkipsUnknownItemChildren(t *testing.T) {
 		t.Errorf("recognized fields around unknown children = %q/%q, want x/https://nyaa.si/view/1", items[0].Title, items[0].GUID)
 	}
 }
+
+// TestRenderFeedSanitizesUnsafeRunes pins the emit-boundary rune policy
+// (escTo composes runesafe.Sanitize under the XML escaper): xml.EscapeText
+// alone passes C1 controls, bidi controls, and U+2028/U+2029 through raw,
+// and every text value here is upstream-controlled (tracker titles via
+// Prowlarr, SeaDex file names synthesized into titles) headed for arr web
+// UIs and operator terminals. The rendered document must never carry the
+// unsafe classes - whatever the item's origin (live search passthrough,
+// persisted journal, or a legacy snapshot written before this policy) -
+// while the in-memory value stays raw for matching and persistence.
+func TestRenderFeedSanitizesUnsafeRunes(t *testing.T) {
+	title := "Show \u202e[G]\u0085 \u2028S01"
+	got := renderFeed([]item{{Title: title, GUID: "https://nyaa.si/view/1"}})
+	for _, bad := range []string{"\u202e", "\u0085", "\u2028"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("rendered feed carries unsafe rune %U; escTo must apply the shared rune policy", []rune(bad)[0])
+		}
+	}
+	if !strings.Contains(got, "Show") || !strings.Contains(got, "[G]") || !strings.Contains(got, "S01") {
+		t.Errorf("sanitizing damaged the safe text: %q", got)
+	}
+}
