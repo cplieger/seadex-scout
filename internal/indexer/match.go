@@ -63,13 +63,49 @@ func nyaaID(rawURL string) string {
 }
 
 // trackerKey builds the match key for a SeaDex torrent from its tracker name
-// and stored URL, or "" when the tracker is unknown or the id is missing.
+// and stored URL, or "" when the tracker is unknown, the id is missing, or
+// the URL does not belong to the named tracker. The host gate is the
+// fail-closed half of the curation trust boundary: the tracker LABEL alone
+// must never authorize an id extracted from a foreign URL (a malformed or
+// compromised SeaDex record with Tracker "Nyaa" and
+// https://evil.example/view/123 would otherwise mint nyaa:123 and admit the
+// REAL Nyaa torrent 123 as curated), so the id counts only when the URL is
+// the tracker's own (see trackerOwnURL). A gated-out torrent is simply not
+// curated/journaled - the safe direction, surfaced by the journal's
+// unresolvable counter.
 func trackerKey(tracker, sourceURL string) string {
 	scope := trackerScope(tracker)
+	if scope == "" || !trackerOwnURL(scope, sourceURL) {
+		return ""
+	}
 	if id := trackerID(scope, sourceURL); id != "" {
 		return scope + ":" + id
 	}
 	return ""
+}
+
+// trackerOwnURL reports whether a SeaDex source URL belongs to the scope's
+// own tracker: an absolute URL on the tracker's host (the shared
+// release.Is*Host predicates, so homograph labels never pass), or - for
+// AnimeBytes only - a true relative reference, SeaDex's documented AB shape
+// (UsableURL resolves it against animebytes.tv, so a relative URL is an AB
+// URL by construction). Anything else - a foreign host, an unparseable URL,
+// an opaque non-hierarchical form - fails closed.
+func trackerOwnURL(scope, sourceURL string) bool {
+	u, err := url.Parse(sourceURL)
+	if err != nil {
+		return false
+	}
+	switch scope {
+	case upstreamNyaa:
+		return release.IsNyaaHost(u.Hostname())
+	case upstreamAB:
+		if release.IsAnimeBytesHost(u.Hostname()) {
+			return true
+		}
+		return u.Scheme == "" && u.Host == "" && u.Opaque == ""
+	}
+	return false
 }
 
 // trackerKeyFromURL builds the match key from an arbitrary release URL (a

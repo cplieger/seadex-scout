@@ -495,3 +495,62 @@ func TestPackSeasonKeysOnLastToken(t *testing.T) {
 		t.Errorf("packSeason = (%d, %v), want (1, true) (the season tally keys each file on its LAST token, not the title's S02-shaped substring)", season, ok)
 	}
 }
+
+// TestEpisodeMarkerRelabelsCourLocalSeason pins the single-release half of
+// the season correction (the pack arm already labels by the Fribb season): a
+// single-episode torrent whose file uses cour-local numbering (S01E07) under
+// an entry Fribb maps to TVDB season 3 must synthesize S03E07 - the arr's own
+// numbering - never the file's S01E07, which points at a DIFFERENT episode of
+// the parent series. An absolute "- NN" marker and an unmapped entry
+// (SeasonTvdb 0) pass through unchanged, and a file already on the mapped
+// season is a no-op.
+func TestEpisodeMarkerRelabelsCourLocalSeason(t *testing.T) {
+	tests := []struct {
+		name string
+		file string
+		meta EntryInfo
+		want string
+	}{
+		{"cour-local season relabeled", "Show - S01E07 (1080p) [G].mkv", EntryInfo{SeasonTvdb: 3}, "S03E07"},
+		{"matching season is a no-op", "Show - S03E07 (1080p) [G].mkv", EntryInfo{SeasonTvdb: 3}, "S03E07"},
+		{"unmapped entry keeps the file marker", "Show - S01E07 (1080p) [G].mkv", EntryInfo{}, "S01E07"},
+		{"episode range keeps its range half", "Show - S01E01-E03 [G].mkv", EntryInfo{SeasonTvdb: 2}, "S02E01-E03"},
+		{"absolute marker is never relabeled", "Show - 07 (1080p) [G].mkv", EntryInfo{SeasonTvdb: 3}, "- 07"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tor := seadex.Torrent{Files: []seadex.File{{Name: tc.file}}}
+			if got := episodeMarker(&tor, tc.meta); got != tc.want {
+				t.Errorf("episodeMarker(%q, season %d) = %q, want %q", tc.file, tc.meta.SeasonTvdb, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEpisodeTokenIgnoresDashJoinedResolution pins the token boundary: a
+// dash-joined resolution after the episode ("S01E07-1080p") must not be
+// swallowed by the E-less range arm as the bogus range "S01E07-1080" - the
+// single-episode marker keeps the real token, and a pack collapse leaves no
+// stray "p" behind. Genuine ranges (dash-joined digits NOT followed by more
+// alphanumerics) and underscore-delimited names keep matching.
+func TestEpisodeTokenIgnoresDashJoinedResolution(t *testing.T) {
+	single := seadex.Torrent{Files: []seadex.File{{Name: "Show - S01E07-1080p [G].mkv"}}}
+	if got, want := episodeMarker(&single, EntryInfo{}), "S01E07"; got != want {
+		t.Errorf("single marker = %q, want %q (resolution not swallowed)", got, want)
+	}
+	pack := seadex.Torrent{Files: []seadex.File{
+		{Name: "Show - S01E07-1080p [G].mkv"},
+		{Name: "Show - S01E08-1080p [G].mkv"},
+	}}
+	if got, want := feedTitle(&pack), "Show - S01-1080p [G]"; got != want {
+		t.Errorf("pack collapse = %q, want %q (no stray residue)", got, want)
+	}
+	trueRange := seadex.Torrent{Files: []seadex.File{{Name: "Show - S01E01-13 [G].mkv"}}}
+	if got, want := episodeMarker(&trueRange, EntryInfo{}), "S01E01-13"; got != want {
+		t.Errorf("range marker = %q, want %q (genuine E-less range kept)", got, want)
+	}
+	underscore := seadex.Torrent{Files: []seadex.File{{Name: "_Show_S02E05_1080p_.mkv"}}}
+	if got, want := episodeMarker(&underscore, EntryInfo{}), "S02E05"; got != want {
+		t.Errorf("underscore marker = %q, want %q (underscore-delimited names keep matching)", got, want)
+	}
+}

@@ -376,13 +376,17 @@ func TestRenderJournalItemDeterministicSynthesisSource(t *testing.T) {
 	}
 }
 
-// TestRebuildDistinctEmptyGUIDItemsStayDistinct pins the journal identity key:
-// two DISTINCT Nyaa torrents whose SeaDex URLs sit on a foreign host resolve
-// canonical download links (nyaaID reads /view/{id} without host validation)
-// while UsableURL rejects the host and leaves their stored GUIDs empty - they
-// must journal as two items keyed nyaa:111 / nyaa:222, never merge on the
-// empty GUID.
-func TestRebuildDistinctEmptyGUIDItemsStayDistinct(t *testing.T) {
+// TestRebuildRejectsForeignHostTrackerURLs pins the curation trust boundary
+// (trackerKey's host gate): a SeaDex record whose tracker label says Nyaa but
+// whose URL sits on a foreign host must mint NO curation key and NO journal
+// item - the label alone must never authorize an id extracted from a foreign
+// URL (a compromised record with evil.example/view/111 would otherwise both
+// admit the REAL Nyaa torrent 111 into the search curation set and serve a
+// canonical nyaa.si download link for it on RSS). The gated torrents surface
+// on the unresolvable counter instead of vanishing silently, and their
+// identities stay OUT of the seen ledger, so the same torrent republished
+// with its real tracker URL still journals as new.
+func TestRebuildRejectsForeignHostTrackerURLs(t *testing.T) {
 	entries := []seadex.Entry{{
 		AniListID: 9,
 		Torrents: []seadex.Torrent{
@@ -398,20 +402,24 @@ func TestRebuildDistinctEmptyGUIDItemsStayDistinct(t *testing.T) {
 	}}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
+	log, rec := capture.New()
+	w := newTestWriter(path, "", false)
+	w.log = log
+	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
-	if len(snap.NyaaFeed) != 2 {
-		t.Fatalf("feed = %d items, want 2 (distinct empty-GUID torrents must not merge)", len(snap.NyaaFeed))
+	if len(snap.NyaaFeed) != 0 {
+		t.Errorf("feed = %d items, want 0 (foreign-host URLs must not journal)", len(snap.NyaaFeed))
 	}
-	for i := range snap.NyaaFeed {
-		if snap.NyaaFeed[i].GUID != "" {
-			t.Errorf("item %d stored GUID = %q, want empty (UsableURL must reject the foreign host)", i, snap.NyaaFeed[i].GUID)
-		}
+	if len(snap.ByKey) != 0 || len(snap.ByHash) != 0 {
+		t.Errorf("curation set = %d keys / %d hashes, want empty (no authorization from a foreign URL)", len(snap.ByKey), len(snap.ByHash))
 	}
-	if snap.NyaaFeed[0].DownloadURL == snap.NyaaFeed[1].DownloadURL {
-		t.Errorf("both items share download URL %q, want distinct canonical links", snap.NyaaFeed[0].DownloadURL)
+	if len(snap.Seen) != 0 {
+		t.Errorf("seen ledger = %v, want empty (a later legitimate republish must journal as new)", snap.Seen)
+	}
+	if !rec.Contains("indexer feed snapshot written") {
+		t.Fatalf("no snapshot log line; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }
 

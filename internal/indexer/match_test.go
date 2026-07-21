@@ -96,3 +96,37 @@ func TestAnimeBytesIDRejectsDuplicateTorrentIDParams(t *testing.T) {
 		t.Errorf("single torrentid = %q, want 1167293", got)
 	}
 }
+
+// TestTrackerKeyRejectsForeignHostURLs pins the SeaDex-side host gate
+// (trackerOwnURL): the record's tracker LABEL alone must never authorize an
+// id extracted from a foreign URL - a malformed or compromised SeaDex record
+// (Tracker "Nyaa", https://evil.example/view/123) would otherwise mint
+// nyaa:123 as curation authorization for the REAL Nyaa torrent 123. An
+// absolute URL keys only on the tracker's own host; the relative site form is
+// accepted for AnimeBytes alone (SeaDex's documented AB shape, resolved
+// against animebytes.tv by UsableURL); opaque non-hierarchical forms fail
+// closed.
+func TestTrackerKeyRejectsForeignHostURLs(t *testing.T) {
+	tests := []struct {
+		name    string
+		tracker string
+		url     string
+		want    string
+	}{
+		{"nyaa on its own host keys", "Nyaa", "https://nyaa.si/view/123", "nyaa:123"},
+		{"nyaa label with a foreign host fails closed", "Nyaa", "https://evil.example/view/123", ""},
+		{"nyaa label with a homograph-adjacent host fails closed", "Nyaa", "https://notnyaa.example/view/123", ""},
+		{"nyaa relative form fails closed (SeaDex ships nyaa absolute)", "Nyaa", "/view/123", ""},
+		{"ab on its own host keys", "AB", "https://animebytes.tv/torrents.php?id=1&torrentid=456", "ab:456"},
+		{"ab relative site form keys", "AB", "/torrents.php?id=1&torrentid=456", "ab:456"},
+		{"ab label with a foreign host fails closed", "AB", "https://evil.example/torrents.php?id=1&torrentid=456", ""},
+		{"ab opaque scheme fails closed", "AB", "javascript:/torrents.php?torrentid=456", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := trackerKey(tc.tracker, tc.url); got != tc.want {
+				t.Errorf("trackerKey(%q, %q) = %q, want %q", tc.tracker, tc.url, got, tc.want)
+			}
+		})
+	}
+}

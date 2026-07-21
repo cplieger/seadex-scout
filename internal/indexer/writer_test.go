@@ -701,3 +701,45 @@ func TestRebuildBaselinesOversizedFeedItem(t *testing.T) {
 		t.Errorf("over-limit journal item not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }
+
+// TestRebuildOversizedSnapshotRebaselines pins the deterministic-failure
+// classification of an over-cap feed.json: persist enforces the same
+// maxFeedBytes cap, so an oversized file can only come from external
+// corruption or hand-editing and never shrinks on its own - classifying it
+// transient (an error) would wedge every future rebuild on the same file.
+// It must re-baseline like malformed JSON, and the rebuild's persist then
+// atomically replaces the oversized file (self-healing).
+func TestRebuildOversizedSnapshotRebaselines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create oversized snapshot: %v", err)
+	}
+	// A sparse file over the cap: ReadBounded rejects on size, so no real
+	// 64 MiB payload is needed on disk.
+	if err := f.Truncate(maxFeedBytes + 1); err != nil {
+		t.Fatalf("truncate to over-cap size: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close oversized snapshot: %v", err)
+	}
+	log, rec := capture.New()
+	w := newTestWriter(path, "", false)
+	w.log = log
+	if err := w.Rebuild(context.Background(), nil, nil); err != nil {
+		t.Fatalf("Rebuild over an oversized snapshot: %v (must re-baseline, not error)", err)
+	}
+	if !rec.Contains("previous feed snapshot exceeds size cap; re-baselining the feed journal") {
+		t.Errorf("no oversized-rebaseline warn; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat rewritten snapshot: %v", err)
+	}
+	if fi.Size() > maxFeedBytes {
+		t.Errorf("rewritten snapshot = %d bytes, want under the cap (persist must replace the oversized file)", fi.Size())
+	}
+	if snap := readSnapshotFile(t, path); snap.Seen == nil {
+		t.Error("rewritten snapshot carries no seen ledger, want a baselined journal schema")
+	}
+}

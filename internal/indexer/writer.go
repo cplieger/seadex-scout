@@ -349,16 +349,29 @@ type previousJournal struct {
 // file (or a path whose parent is not a directory) is the fresh-install
 // baseline; a decoded snapshot without a seen ledger is the retired
 // whole-catalogue schema and re-baselines (the journal contract: treat it as
-// absent); malformed JSON warns and re-baselines (self-healing - the seen
+// absent); malformed JSON and an over-cap file warn and re-baseline
+// (self-healing - both are deterministic for unchanged bytes, and the seen
 // ledger is rebuilt from the current catalogue, so nothing old can re-enter
-// the journal). Any other read failure (EACCES, EIO, an over-cap file) is
-// returned as an error so a TRANSIENT fault cannot blank a live journal: the
-// caller keeps the last-good snapshot and the next cycle retries.
+// the journal). Any other read failure (EACCES, EIO) is returned as an error
+// so a TRANSIENT fault cannot blank a live journal: the caller keeps the
+// last-good snapshot and the next cycle retries.
 func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) {
 	data, err := atomicfile.ReadBounded(ctx, w.path, maxFeedBytes)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+		switch {
+		case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):
 			return previousJournal{baseline: true, reason: "fresh-install"}, nil
+		case errors.Is(err, atomicfile.ErrFileTooLarge):
+			// Deterministic, not transient: persist enforces the same
+			// maxFeedBytes cap, so an over-cap snapshot can only come from
+			// external corruption or hand-editing and never shrinks on its
+			// own - returning an error here would wedge every future rebuild
+			// on the same file. Treat it like malformed JSON: warn and
+			// re-baseline; the rebuild's persist atomically replaces the
+			// oversized file, so the state self-heals.
+			w.log.Warn("previous feed snapshot exceeds size cap; re-baselining the feed journal",
+				"path", w.path, "max_bytes", int64(maxFeedBytes))
+			return previousJournal{baseline: true, reason: "oversized"}, nil
 		}
 		return previousJournal{}, fmt.Errorf("indexer: read previous feed snapshot %s: %w", w.path, err)
 	}

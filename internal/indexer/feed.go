@@ -102,12 +102,15 @@ func synthesizeTitle(t *seadex.Torrent, meta EntryInfo) string {
 //     labels S01, never the specials bucket its first file happens to sit in),
 //     else S00 for a Fribb-typed special, else no marker (an absolute-numbered
 //     pack with no season evidence stays a bare title).
-//   - A single release keeps its own file marker verbatim (SxxExx, or the
-//     fansub "- NN" absolute form) - today's proven arr-parseable shape - and a
+//   - A single release keeps its own file marker (SxxExx, or the fansub
+//     "- NN" absolute form) with its SEASON half relabeled to the Fribb TVDB
+//     season when the entry maps one (see relabelSeason) - fansub episode
+//     naming is cour-local, so the file's own season half routinely
+//     disagrees with the season the arr tracks the entry under - and a
 //     marker-less single file (a movie-shaped OVA) gets none.
 func episodeMarker(t *seadex.Torrent, meta EntryInfo) string {
 	if !isPack(t) {
-		return singleEpisodeMarker(t.Files)
+		return relabelSeason(singleEpisodeMarker(t.Files), meta.SeasonTvdb)
 	}
 	if meta.SeasonTvdb > 0 {
 		return fmt.Sprintf("S%02d", meta.SeasonTvdb)
@@ -121,6 +124,27 @@ func episodeMarker(t *seadex.Torrent, meta EntryInfo) string {
 	return ""
 }
 
+// seasonPrefix matches the season half of an SxxExx marker for relabeling.
+var seasonPrefix = regexp.MustCompile(`(?i)^S\d{1,2}`)
+
+// relabelSeason rewrites the season half of a single release's SxxExx marker
+// to the Fribb TVDB season, mirroring the pack arm's correction: fansub
+// episode naming is cour-local (a second cour restarts at S01E01 under its
+// own AniList entry), so a file's own season half routinely names a season
+// the arr does not track this entry under - and a synthesized
+// "{series} S01E07" would point the arr at a DIFFERENT episode of the parent
+// series. The Fribb season is the arr's own numbering, so it wins; the
+// episode number is kept as-is (Fribb maps seasons, not episode offsets -
+// the same approximation the pack arm already accepts). An absolute "- NN"
+// marker (series-scoped, nothing to relabel), an empty marker, and an
+// unmapped entry (seasonTvdb <= 0) pass through unchanged.
+func relabelSeason(marker string, seasonTvdb int) string {
+	if seasonTvdb <= 0 {
+		return marker
+	}
+	return seasonPrefix.ReplaceAllString(marker, fmt.Sprintf("S%02d", seasonTvdb))
+}
+
 // singleEpisodeMarker returns a single-episode torrent's own episode token:
 // the last SxxExx token of the representative file (uppercased), or the
 // absolute-episode number in the fansub "- NN" form, or "" when the file
@@ -131,8 +155,8 @@ func singleEpisodeMarker(files []seadex.File) string {
 		return ""
 	}
 	base := stripExt(path.Base(name))
-	if toks := episodeToken.FindAllString(base, -1); len(toks) > 0 {
-		return strings.ToUpper(toks[len(toks)-1])
+	if toks := episodeToken.FindAllStringSubmatch(base, -1); len(toks) > 0 {
+		return strings.ToUpper(toks[len(toks)-1][1])
 	}
 	if m := absoluteEpisode.FindAllStringSubmatch(base, -1); len(m) > 0 {
 		return "- " + m[len(m)-1][1]
@@ -183,10 +207,18 @@ func fileResolution(files []seadex.File) string {
 // --- Episode/pack heuristics: token regexes, feedTitle, packSeason ---
 
 // episodeToken matches a season+episode token (S01E01, S1E1, S01E01-E13,
-// S01E15v2). Collapsing its episode half to just the season turns a season
-// pack's per-episode file name into a whole-season release title, so the arr
-// grabs the pack rather than treating it as a single episode.
-var episodeToken = regexp.MustCompile(`(?i)(S\d{1,2})E\d{1,4}(?:-E?\d{1,4})?(?:v\d+)?`)
+// S01E15v2), captured in group 1 with its season half in group 2. Collapsing
+// its episode half to just the season turns a season pack's per-episode file
+// name into a whole-season release title, so the arr grabs the pack rather
+// than treating it as a single episode. The token must end at a
+// non-alphanumeric boundary (underscore included - underscore-delimited
+// names use "_" everywhere a space would sit) or the end of the string:
+// without it, the E-less range arm swallowed a dash-joined resolution
+// ("S01E07-1080p" tokenized as the bogus range "S01E07-1080", corrupting
+// both the single-episode marker and the pack collapse, which left a stray
+// "p" in the title). Consumers read the SUBMATCH (group 1), never the full
+// match, which may include the terminator character.
+var episodeToken = regexp.MustCompile(`(?i)((S\d{1,2})E\d{1,4}(?:-E?\d{1,4})?(?:v\d+)?)(?:[^0-9a-z]|$)`)
 
 // absoluteEpisode matches an absolute episode number in the fansub "- 07" form
 // (optional version suffix), with the episode number captured in group 1. The
@@ -239,14 +271,17 @@ func feedTitle(t *seadex.Torrent) string {
 		// after the title, so a title that itself contains an SxxExx-shaped
 		// substring is preserved verbatim. The season label comes from the
 		// whole pack (packSeason), not this one file, so a representative
-		// file from the S00 specials bucket cannot mislabel the pack.
+		// file from the S00 specials bucket cannot mislabel the pack. The
+		// replacement spans the TOKEN group (l[2]:l[3]), never the full
+		// match, whose trailing terminator character must survive the
+		// collapse.
 		locs := episodeToken.FindAllStringSubmatchIndex(base, -1)
 		l := locs[len(locs)-1]
-		label := base[l[2]:l[3]]
+		label := base[l[4]:l[5]]
 		if s, ok := packSeason(t.Files); ok {
 			label = fmt.Sprintf("S%02d", s)
 		}
-		return strings.TrimSpace(base[:l[0]] + label + base[l[1]:])
+		return strings.TrimSpace(base[:l[2]] + label + base[l[3]:])
 	}
 	if locs := absoluteEpisode.FindAllStringIndex(base, -1); len(locs) > 0 {
 		// Collapse only the LAST absolute episode token (mirroring the SxxExx
@@ -300,7 +335,7 @@ func seasonCounts(files []seadex.File) map[int]int {
 		if len(toks) == 0 {
 			continue
 		}
-		s, err := strconv.Atoi(toks[len(toks)-1][1][1:])
+		s, err := strconv.Atoi(toks[len(toks)-1][2][1:])
 		if err != nil {
 			continue
 		}
@@ -335,8 +370,8 @@ func coveredEpisodes(files []seadex.File) int {
 			// Key on the LAST token: scene naming puts the episode marker
 			// after the title, so a title containing an SxxExx-shaped
 			// substring must not shadow the real episode marker.
-			all := episodeToken.FindAllString(base, -1)
-			tok := strings.ToUpper(all[len(all)-1])
+			all := episodeToken.FindAllStringSubmatch(base, -1)
+			tok := strings.ToUpper(all[len(all)-1][1])
 			seen["e"+episodeVersion.ReplaceAllString(tok, "")] = struct{}{}
 		case absoluteEpisode.MatchString(base):
 			all := absoluteEpisode.FindAllStringSubmatch(base, -1)
