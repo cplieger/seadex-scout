@@ -50,8 +50,11 @@ const maxConfigBytes = 1 << 20
 // lives under the single /config mount). DefaultReportDir is the one
 // configurable baseline here: report.dir overrides it.
 const (
-	// DefaultSeaDexBaseURL is the SeaDex (releases.moe) API base.
-	DefaultSeaDexBaseURL = "https://releases.moe"
+	// The SeaDex (releases.moe) site base deliberately has NO constant here:
+	// internal/seadex owns the releases.moe contract (seadex.DefaultBaseURL,
+	// beside EntryURL/ValidInfoHash), and config - a dependency leaf that
+	// cannot import it - must not keep an equal literal that can silently
+	// drift. The wiring site (build.go) references the seadex constant.
 	// DefaultMappingURL is the Fribb anime-lists AniList<->arr ID bridge.
 	DefaultMappingURL = "https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-mini.json"
 	// DefaultAniListURL is the AniList GraphQL endpoint (title/format fallback).

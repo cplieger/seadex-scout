@@ -79,7 +79,7 @@ func buildScout(ctx context.Context, cfg *config.Config, readOnlyState bool) (bu
 			ExcludeTags: cfg.ExcludeTags,
 		}),
 		Mapping: mapping.NewLoader(mappingHTTP, config.DefaultMappingURL, config.DefaultMappingOverrides, config.DefaultMappingRefresh, log),
-		SeaDex:  seadex.NewClient(seadexHTTP, config.DefaultSeaDexBaseURL, config.DefaultSeaDexPageDelay, log),
+		SeaDex:  seadex.NewClient(seadexHTTP, seadex.DefaultBaseURL, config.DefaultSeaDexPageDelay, log),
 		Matcher: match.NewMatcher(anilistClient, log),
 		Comparer: compare.NewComparer(compare.Config{
 			Filter:          filterOptions(cfg),
@@ -87,7 +87,7 @@ func buildScout(ctx context.Context, cfg *config.Config, readOnlyState bool) (bu
 			AnimeBytes:      cfg.AnimeBytes,
 		}),
 		Auditor: audit.NewAuditor(audit.Config{
-			SeaDexBaseURL:   config.DefaultSeaDexBaseURL,
+			SeaDexBaseURL:   seadex.DefaultBaseURL,
 			ExcludeSpecials: cfg.ExcludeSpecials,
 			AnimeBytes:      cfg.AnimeBytes,
 		}),
@@ -142,7 +142,7 @@ func feedWriter(cfg *config.Config, log *slog.Logger) (fw scout.FeedWriter, clea
 	prowlarrHTTP := httpx.NewClient(indexer.UpstreamAttemptTimeout)
 	writer := indexer.NewFeedWriter(&indexer.FeedWriterConfig{
 		Path:           config.DefaultIndexerFeedPath,
-		SeaDexBaseURL:  config.DefaultSeaDexBaseURL,
+		SeaDexBaseURL:  seadex.DefaultBaseURL,
 		UpstreamConfig: upstreamConfig(cfg),
 	}, indexer.Deps{HTTP: prowlarrHTTP, Logger: log.With("component", "indexer")})
 	return writer, func() { prowlarrHTTP.CloseIdleConnections() }

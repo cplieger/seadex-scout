@@ -7,11 +7,12 @@ import (
 	"github.com/cplieger/seadex-scout/internal/release"
 )
 
-// DefaultBaseURL is the canonical releases.moe site base - the single home of
+// DefaultBaseURL is the canonical releases.moe site base - the SINGLE home of
 // the SeaDex site-base fact, beside the package's other releases.moe contract
-// knowledge (EntryURL, ValidInfoHash). The indexer's fallback references it;
-// config.DefaultSeaDexBaseURL keeps its own equal literal because config is a
-// dependency leaf (no internal imports).
+// knowledge (EntryURL, ValidInfoHash). The indexer's fallback and the
+// composition root (build.go) both reference it; config deliberately carries
+// no equal literal (it is a dependency leaf and a second copy could silently
+// drift).
 const DefaultBaseURL = "https://releases.moe"
 
 // EntryURL returns the SeaDex entry page for an AniList id under baseURL

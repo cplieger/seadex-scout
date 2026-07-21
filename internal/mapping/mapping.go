@@ -872,6 +872,14 @@ func (l *Loader) readOverrides(ctx context.Context) (overrideSet, bool) {
 		logged := make([]string, 0, shown)
 		shortened := false
 		for _, k := range set.unknown[:shown] {
+			// Full log-bound text policy for an operator-controlled JSON key,
+			// not just a length bound: SanitizeSingleLine replaces unsafe
+			// C0/C1 controls, bidi controls, DEL, and line separators before
+			// the byte cap, so a key carrying such runes cannot smuggle
+			// terminal-control or direction-override text into the log
+			// stream (the same runesafe policy the indexer's logParam and
+			// sanitizeUpstreamText apply at their emit boundaries).
+			k = runesafe.SanitizeSingleLine(k)
 			if len(k) > maxLoggedKeyBytes {
 				k = runesafe.CapBytes(k, maxLoggedKeyBytes) + "..."
 				shortened = true
