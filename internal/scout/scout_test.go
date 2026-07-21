@@ -19,7 +19,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/indexer"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
-	"github.com/cplieger/seadex-scout/internal/report"
+	"github.com/cplieger/seadex-scout/internal/notify"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/state"
 	"github.com/cplieger/slogx/capture"
@@ -236,9 +236,9 @@ func TestCycleLibraryWalkFailureIsUnhealthy(t *testing.T) {
 
 func TestCycleSeaDexFailureIsHealthyAndPreservesFindings(t *testing.T) {
 	logger := scoutTestLogger()
-	prior := report.Alerted{
+	prior := notify.Alerted{
 		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Finding: report.StoredFinding{
+		Finding: notify.StoredFinding{
 			Title:     "Existing finding",
 			Status:    compare.StatusBetter,
 			AniListID: 154587,
@@ -249,7 +249,7 @@ func TestCycleSeaDexFailureIsHealthyAndPreservesFindings(t *testing.T) {
 			FetchedAt: time.Now(),
 			Records:   []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}},
 		},
-		Findings:  map[string]report.Alerted{"prior": prior},
+		Findings:  map[string]notify.Alerted{"prior": prior},
 		Baselined: true,
 	}}
 	sonarr := &fakeSonarr{

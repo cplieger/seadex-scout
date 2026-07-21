@@ -1,4 +1,4 @@
-package report
+package notify
 
 import (
 	"testing"

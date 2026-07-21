@@ -15,7 +15,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
-	"github.com/cplieger/seadex-scout/internal/report"
+	"github.com/cplieger/seadex-scout/internal/notify"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/state"
 	"github.com/cplieger/slogx/capture"
@@ -169,7 +169,7 @@ func TestCycleFeedRebuildErrorIsNonFatal(t *testing.T) {
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
 		Comparer:     compare.NewComparer(compare.Config{}),
-		Reporter:     report.NewReporter(logger),
+		Notifier:     notify.NewNotifier(logger),
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
 		Feed:         feed,
 	})
@@ -369,13 +369,13 @@ func TestCycleShutdownDuringFeedRebuildStaysSilent(t *testing.T) {
 	defer cancel()
 	logger, recorder := capture.New()
 	feed := &cancellingFeed{cancel: cancel}
-	prior := report.Alerted{
+	prior := notify.Alerted{
 		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Finding:   report.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
+		Finding:   notify.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
 	}
 	store := &fakeStore{st: state.State{
 		Mapping:   mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}},
-		Findings:  map[string]report.Alerted{"prior": prior},
+		Findings:  map[string]notify.Alerted{"prior": prior},
 		Baselined: true,
 	}}
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}

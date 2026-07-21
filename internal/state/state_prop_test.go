@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/cplieger/seadex-scout/internal/match"
-	"github.com/cplieger/seadex-scout/internal/report"
+	"github.com/cplieger/seadex-scout/internal/notify"
 	"pgregory.net/rapid"
 )
 
@@ -27,10 +27,10 @@ func TestStoreSaveLoadRoundTripProperty(t *testing.T) {
 		})
 		findings := rapid.MapOfN(
 			rapid.String(),
-			rapid.Custom(func(rt *rapid.T) report.Alerted {
-				return report.Alerted{
+			rapid.Custom(func(rt *rapid.T) notify.Alerted {
+				return notify.Alerted{
 					AlertedAt: genTime.Draw(rt, "alerted_at"),
-					Finding: report.StoredFinding{
+					Finding: notify.StoredFinding{
 						Title:     rapid.String().Draw(rt, "title"),
 						Arr:       rapid.SampledFrom([]string{"sonarr", "radarr"}).Draw(rt, "arr"),
 						AniListID: rapid.IntRange(0, 1<<30).Draw(rt, "al_id"),

@@ -1,7 +1,10 @@
-// Package report emits findings as structured slog events with cross-cycle
-// dedupe. Observability is slog-only (shipped to Loki); there is no metrics
-// endpoint.
-package report
+// Package notify emits findings as structured slog events with cross-cycle
+// dedupe - the daemon's NOTIFICATION path (Loki alerting rides these lines).
+// Observability is slog-only; there is no metrics endpoint. It is distinct
+// from the user-facing report FEATURE (the `report` subcommand's season-level
+// audit), which lives in internal/audit - this package was named `report`
+// until 2026-07, and the rename ended the standing collision between the two.
+package notify
 
 import (
 	"context"
@@ -45,10 +48,10 @@ type StoredFinding struct {
 	Season           int            `json:"season,omitempty"`
 }
 
-// --- Reporter / cross-cycle dedupe ---
+// --- Notifier / cross-cycle dedupe ---
 
-// Reporter emits findings as slog events with cross-cycle dedupe.
-type Reporter struct {
+// Notifier emits findings as slog events with cross-cycle dedupe.
+type Notifier struct {
 	log *slog.Logger
 }
 
@@ -67,15 +70,15 @@ func storedFinding(f *compare.Finding) StoredFinding {
 	}
 }
 
-// NewReporter builds a Reporter. logger may be nil.
-func NewReporter(logger *slog.Logger) *Reporter {
+// NewNotifier builds a Notifier. logger may be nil.
+func NewNotifier(logger *slog.Logger) *Notifier {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Reporter{log: logger}
+	return &Notifier{log: logger}
 }
 
-// Report emits new findings, suppresses ones already alerted (carrying their
+// Notify emits new findings, suppresses ones already alerted (carrying their
 // original alert time forward), logs a one-line resolution for any prior finding
 // no longer present, and returns the new dedupe state to persist.
 //
@@ -86,7 +89,7 @@ func NewReporter(logger *slog.Logger) *Reporter {
 // missing data, not evidence of alignment - it is carried forward unresolved
 // (original alert time kept, no "finding resolved" line) instead of being
 // falsely resolved. Pass nil when every item has complete evidence.
-func (r *Reporter) Report(findings []compare.Finding, prior map[string]Alerted, failedItems map[int]struct{}, now time.Time) map[string]Alerted {
+func (r *Notifier) Notify(findings []compare.Finding, prior map[string]Alerted, failedItems map[int]struct{}, now time.Time) map[string]Alerted {
 	current := make(map[string]Alerted, len(findings))
 	newCount := 0
 	// Last-payload-wins with one emission per key: precompute each DedupeKey's
@@ -139,7 +142,7 @@ func (r *Reporter) Report(findings []compare.Finding, prior map[string]Alerted, 
 // a lost cache) so the pre-existing backlog is not dumped as a burst of
 // notifications. Steady-state emission resumes on the next cycle via Report;
 // the full current picture is always available on demand through report mode.
-func (r *Reporter) Baseline(findings []compare.Finding, now time.Time) map[string]Alerted {
+func (r *Notifier) Baseline(findings []compare.Finding, now time.Time) map[string]Alerted {
 	current := make(map[string]Alerted, len(findings))
 	for i := range findings {
 		f := &findings[i]
@@ -153,7 +156,7 @@ func (r *Reporter) Baseline(findings []compare.Finding, now time.Time) map[strin
 
 // emit logs a finding at the level matching its severity, with the full field
 // set the dashboard and Loki alert key on.
-func (r *Reporter) emit(f *compare.Finding) {
+func (r *Notifier) emit(f *compare.Finding) {
 	level := slog.LevelInfo
 	if f.Severity == compare.SevWarn {
 		level = slog.LevelWarn
@@ -165,7 +168,7 @@ func (r *Reporter) emit(f *compare.Finding) {
 // reading the trimmed record the dedupe state persisted. The untrusted
 // upstream strings (title, groups) ride through runesafe.Sanitize,
 // matching findingKVs' policy.
-func (r *Reporter) emitResolved(f *StoredFinding) {
+func (r *Notifier) emitResolved(f *StoredFinding) {
 	r.log.Info("finding resolved",
 		"title", runesafe.Sanitize(f.Title),
 		"al_id", f.AniListID,

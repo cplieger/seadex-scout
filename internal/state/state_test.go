@@ -19,7 +19,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
-	"github.com/cplieger/seadex-scout/internal/report"
+	"github.com/cplieger/seadex-scout/internal/notify"
 	"github.com/cplieger/slogx/capture"
 )
 
@@ -64,10 +64,10 @@ func TestStoreSaveLoadRoundTrip(t *testing.T) {
 		Memo: match.Memo{Entries: map[int]match.MemoEntry{
 			154587: {Titles: []string{"Frieren"}, Format: "TV", Year: 2023, Expiry: now.Add(300 * time.Hour)},
 		}},
-		Findings: map[string]report.Alerted{
+		Findings: map[string]notify.Alerted{
 			"dedupe": {
 				AlertedAt: now,
-				Finding: report.StoredFinding{
+				Finding: notify.StoredFinding{
 					Title:     "Frieren",
 					Arr:       library.ArrSonarr,
 					Status:    compare.StatusBetter,
@@ -430,8 +430,8 @@ func TestStoreSaveOverCapReturnsErrorAndKeepsPreviousFile(t *testing.T) {
 		t.Fatalf("seed valid state: %v", err)
 	}
 
-	huge := &State{Findings: map[string]report.Alerted{
-		"huge": {Finding: report.StoredFinding{Title: strings.Repeat("a", maxStateBytes+1)}},
+	huge := &State{Findings: map[string]notify.Alerted{
+		"huge": {Finding: notify.StoredFinding{Title: strings.Repeat("a", maxStateBytes+1)}},
 	}}
 	err := store.Save(context.Background(), huge)
 	if err == nil {
@@ -467,8 +467,8 @@ func TestStoreSaveExactCapBoundaryAccepted(t *testing.T) {
 		// Version mirrors the SchemaVersion stamp Save applies to the copy it
 		// writes, so the json.Marshal probe below measures the on-disk shape.
 		return &State{
-			Findings: map[string]report.Alerted{
-				"huge": {Finding: report.StoredFinding{Title: strings.Repeat("a", n)}},
+			Findings: map[string]notify.Alerted{
+				"huge": {Finding: notify.StoredFinding{Title: strings.Repeat("a", n)}},
 			},
 			Version: SchemaVersion,
 		}
@@ -900,8 +900,8 @@ func TestStoreSaveOverCapErrorReportsJSONSize(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := NewStore(path, testLogger())
 	huge := &State{
-		Findings: map[string]report.Alerted{
-			"huge": {Finding: report.StoredFinding{Title: strings.Repeat("a", maxStateBytes+1)}},
+		Findings: map[string]notify.Alerted{
+			"huge": {Finding: notify.StoredFinding{Title: strings.Repeat("a", maxStateBytes+1)}},
 		},
 	}
 	stamped := *huge

@@ -18,7 +18,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
-	"github.com/cplieger/seadex-scout/internal/report"
+	"github.com/cplieger/seadex-scout/internal/notify"
 	"github.com/cplieger/seadex-scout/internal/scout"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/state"
@@ -91,7 +91,7 @@ func buildScout(ctx context.Context, cfg *config.Config, readOnlyState bool) (bu
 			ExcludeSpecials: cfg.ExcludeSpecials,
 			AnimeBytes:      cfg.AnimeBytes,
 		}),
-		Reporter: report.NewReporter(log),
+		Notifier: notify.NewNotifier(log),
 		AniListStats: func() (calls, rateLimitWaits int64) {
 			st := anilistClient.Stats()
 			return st.Calls, st.RateLimitWaits

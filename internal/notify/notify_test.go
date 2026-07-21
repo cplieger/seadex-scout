@@ -1,4 +1,4 @@
-package report
+package notify
 
 import (
 	"encoding/json"
@@ -11,9 +11,9 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
-func newCapturedReporter() (*Reporter, *capture.Recorder) {
+func newCapturedNotifier() (*Notifier, *capture.Recorder) {
 	logger, recorder := capture.New()
-	return NewReporter(logger), recorder
+	return NewNotifier(logger), recorder
 }
 
 func testFinding(key, title string) compare.Finding {
@@ -48,8 +48,8 @@ func storedTestFinding(title string) StoredFinding {
 	return storedFinding(&f)
 }
 
-func TestReporterBaselineSeedsWithoutFindingNotification(t *testing.T) {
-	reporter, recorder := newCapturedReporter()
+func TestNotifierBaselineSeedsWithoutFindingNotification(t *testing.T) {
+	reporter, recorder := newCapturedNotifier()
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	finding := testFinding("same", "Frieren")
 
@@ -73,8 +73,8 @@ func TestReporterBaselineSeedsWithoutFindingNotification(t *testing.T) {
 	}
 }
 
-func TestReporterReportSuppressesExistingAndEmitsNewAndResolved(t *testing.T) {
-	reporter, recorder := newCapturedReporter()
+func TestNotifierReportSuppressesExistingAndEmitsNewAndResolved(t *testing.T) {
+	reporter, recorder := newCapturedNotifier()
 	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	prior := map[string]Alerted{
@@ -82,7 +82,7 @@ func TestReporterReportSuppressesExistingAndEmitsNewAndResolved(t *testing.T) {
 		"old":  {AlertedAt: oldTime, Finding: storedTestFinding("Old Title")},
 	}
 
-	current := reporter.Report([]compare.Finding{
+	current := reporter.Notify([]compare.Finding{
 		testFinding("same", "Frieren"),
 		testFinding("new", "Bocchi"),
 	}, prior, nil, now)
@@ -109,15 +109,15 @@ func TestReporterReportSuppressesExistingAndEmitsNewAndResolved(t *testing.T) {
 	}
 }
 
-// TestReporterReportPreservesFailedItemsFindings pins the partial-walk
+// TestNotifierReportPreservesFailedItemsFindings pins the partial-walk
 // resolution scoping: a prior finding whose AniList ID is in failedItems (its
 // item's episode fetch failed this cycle, so it was excluded from the compare)
 // must be carried forward unresolved - kept in the returned dedupe state with
 // its original alert time and WITHOUT a "finding resolved" line - while a
 // prior finding for a cleanly-compared item that produced no finding is
 // resolved as usual.
-func TestReporterReportPreservesFailedItemsFindings(t *testing.T) {
-	reporter, recorder := newCapturedReporter()
+func TestNotifierReportPreservesFailedItemsFindings(t *testing.T) {
+	reporter, recorder := newCapturedNotifier()
 	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	failedFinding := testFinding("failed-item", "Broken Series")
 	failedFinding.AniListID = 222
@@ -128,7 +128,7 @@ func TestReporterReportPreservesFailedItemsFindings(t *testing.T) {
 		"clean-gone":  {AlertedAt: oldTime, Finding: storedFinding(&resolvable)},
 	}
 
-	current := reporter.Report(nil, prior, map[int]struct{}{222: {}}, time.Now())
+	current := reporter.Notify(nil, prior, map[int]struct{}{222: {}}, time.Now())
 
 	preserved, ok := current["failed-item"]
 	if !ok {
@@ -150,11 +150,11 @@ func TestReporterReportPreservesFailedItemsFindings(t *testing.T) {
 // and a query token must never cross into the emitted slog attributes, while
 // an ordinary credential-free deep-link passes through unchanged.
 func TestFindingLogSanitizesArrURL(t *testing.T) {
-	reporter, recorder := newCapturedReporter()
+	reporter, recorder := newCapturedNotifier()
 	finding := testFinding("cred", "Frieren")
 	finding.ArrURL = "https://user:password@sonarr.example/series/frieren?token=secret#frag"
 
-	reporter.Report([]compare.Finding{finding}, nil, nil, time.Now())
+	reporter.Notify([]compare.Finding{finding}, nil, nil, time.Now())
 
 	var got string
 	for _, rec := range recorder.Records() {
@@ -181,7 +181,7 @@ func TestFindingLogSanitizesArrURL(t *testing.T) {
 // lands in state.json. All three storage sites project identically: a new
 // finding, a suppressed (already-alerted) finding, and a cold-start baseline.
 func TestStoredFindingTrimsToResolutionFields(t *testing.T) {
-	reporter, _ := newCapturedReporter()
+	reporter, _ := newCapturedNotifier()
 	finding := testFinding("cred", "Frieren")
 	finding.ArrURL = "https://user:password@sonarr.example/series/frieren?token=secret#frag"
 	finding.Season = 2
@@ -196,12 +196,12 @@ func TestStoredFindingTrimsToResolutionFields(t *testing.T) {
 		Season:           2,
 	}
 
-	current := reporter.Report([]compare.Finding{finding}, nil, nil, now)
+	current := reporter.Notify([]compare.Finding{finding}, nil, nil, now)
 	if got := current["cred"].Finding; got != want {
 		t.Errorf("new-finding stored record = %+v, want %+v", got, want)
 	}
 
-	suppressed := reporter.Report([]compare.Finding{finding}, current, nil, now)
+	suppressed := reporter.Notify([]compare.Finding{finding}, current, nil, now)
 	if got := suppressed["cred"].Finding; got != want {
 		t.Errorf("suppressed-finding stored record = %+v, want %+v", got, want)
 	}
@@ -267,20 +267,20 @@ func TestAlertedDecodesLegacyFullFindingRecord(t *testing.T) {
 	}
 }
 
-// TestReporterUnverifiableFindingIsInfoNotBetterRelease pins the alert-rule
+// TestNotifierUnverifiableFindingIsInfoNotBetterRelease pins the alert-rule
 // safety of the unverifiable status: the SeadexScoutBetterReleaseFound Loki
 // rule counts only msg="better release available" warn lines, so an
 // unverifiable finding must emit ONE line at INFO with its own message and
 // contribute zero warn-level better-release lines - and, like every finding,
 // it dedupes across cycles by its key (the second Report emits nothing new).
-func TestReporterUnverifiableFindingIsInfoNotBetterRelease(t *testing.T) {
-	reporter, recorder := newCapturedReporter()
+func TestNotifierUnverifiableFindingIsInfoNotBetterRelease(t *testing.T) {
+	reporter, recorder := newCapturedNotifier()
 	finding := testFinding("unv", "Unknown Evidence")
 	finding.Severity = compare.SevInfo
 	finding.Status = compare.StatusUnverifiable
 
-	prior := reporter.Report([]compare.Finding{finding}, nil, nil, time.Now())
-	reporter.Report([]compare.Finding{finding}, prior, nil, time.Now())
+	prior := reporter.Notify([]compare.Finding{finding}, nil, nil, time.Now())
+	reporter.Notify([]compare.Finding{finding}, prior, nil, time.Now())
 
 	if got := recorder.CountExact("release group unverifiable, manual review"); got != 1 {
 		t.Errorf("unverifiable notification count across two cycles = %d, want 1 (dedupe by identity)", got)
@@ -323,19 +323,19 @@ func TestMessage(t *testing.T) {
 	}
 }
 
-// TestReporterEmitLevelFollowsSeverity pins the severity-to-level mapping the
+// TestNotifierEmitLevelFollowsSeverity pins the severity-to-level mapping the
 // Loki alert rules key on: a SevWarn finding must emit at WARN (the
 // SeadexScoutBetterReleaseFound rule filters level="WARN") and a SevInfo
 // finding at INFO. The existing tests count messages only, so a flipped level
 // would silently break every shipped alert without failing a test.
-func TestReporterEmitLevelFollowsSeverity(t *testing.T) {
-	reporter, recorder := newCapturedReporter()
+func TestNotifierEmitLevelFollowsSeverity(t *testing.T) {
+	reporter, recorder := newCapturedNotifier()
 	warn := testFinding("w", "Warn Title") // testFinding severity is SevWarn
 	info := testFinding("i", "Info Title")
 	info.Severity = compare.SevInfo
 	info.Status = compare.StatusIncomplete
 
-	reporter.Report([]compare.Finding{warn, info}, nil, nil, time.Now())
+	reporter.Notify([]compare.Finding{warn, info}, nil, nil, time.Now())
 
 	sawWarn, sawInfo := false, false
 	for _, rec := range recorder.Records() {
@@ -366,8 +366,8 @@ func TestReporterEmitLevelFollowsSeverity(t *testing.T) {
 // dashboard without failing a test; this asserts the full rendered set for
 // one warn finding, which also gives joinLinks its behavioral assertion.
 func TestFindingLineCarriesDocumentedAttrs(t *testing.T) {
-	reporter, recorder := newCapturedReporter()
-	reporter.Report([]compare.Finding{testFinding("k1", "Frieren")}, nil, nil, time.Now())
+	reporter, recorder := newCapturedNotifier()
+	reporter.Notify([]compare.Finding{testFinding("k1", "Frieren")}, nil, nil, time.Now())
 
 	want := map[string]string{
 		"title":                 "Frieren",
@@ -414,17 +414,17 @@ func TestFindingLineCarriesDocumentedAttrs(t *testing.T) {
 	}
 }
 
-// TestNewReporterNilLoggerFallsBackToDefault pins the documented "logger may
+// TestNewNotifierNilLoggerFallsBackToDefault pins the documented "logger may
 // be nil" contract: a nil logger falls back to slog.Default() rather than
 // panicking, and the reporter's lines land on the default logger. The default
 // logger is process-global, so this test must not run in parallel.
-func TestNewReporterNilLoggerFallsBackToDefault(t *testing.T) {
+func TestNewNotifierNilLoggerFallsBackToDefault(t *testing.T) {
 	logger, recorder := capture.New()
 	prev := slog.Default()
 	slog.SetDefault(logger)
 	defer slog.SetDefault(prev)
 
-	reporter := NewReporter(nil)
+	reporter := NewNotifier(nil)
 	reporter.Baseline([]compare.Finding{testFinding("k", "Frieren")}, time.Now())
 
 	if got := recorder.CountExact("cold start: findings baselined without notifying"); got != 1 {
@@ -432,7 +432,7 @@ func TestNewReporterNilLoggerFallsBackToDefault(t *testing.T) {
 	}
 }
 
-// TestReporterEmitSanitizesControlAndBidiRunes mirrors the audit report's
+// TestNotifierEmitSanitizesControlAndBidiRunes mirrors the audit report's
 // slog-path pin (TestReportLogSanitizesControlAndBidiRunes) against the
 // daemon finding emitter: slog's JSONHandler escapes C0 controls but emits C1
 // controls and bidi controls raw, so every untrusted attribute emitted by
@@ -440,18 +440,18 @@ func TestNewReporterNilLoggerFallsBackToDefault(t *testing.T) {
 // finding whose upstream-derived fields embed a C1 CSI (U+009B), an RLO bidi
 // override (U+202E), and a C0 escape introducer must log spaces in their
 // place on both the finding line and the resolution line.
-func TestReporterEmitSanitizesControlAndBidiRunes(t *testing.T) {
+func TestNotifierEmitSanitizesControlAndBidiRunes(t *testing.T) {
 	const dirty = "a\u009bb\u202ec\x1bd" // C1 CSI, RLO override, C0 ESC
 	const clean = "a b c d"
-	reporter, recorder := newCapturedReporter()
+	reporter, recorder := newCapturedNotifier()
 	finding := testFinding("dirty", dirty)
 	finding.CurrentGroup = dirty
 	finding.RecommendedGroup = dirty
 	finding.ReleaseURL = dirty
 	finding.InfoHash = dirty
 
-	prior := reporter.Report([]compare.Finding{finding}, nil, nil, time.Now())
-	reporter.Report(nil, prior, nil, time.Now()) // resolve it via emitResolved
+	prior := reporter.Notify([]compare.Finding{finding}, nil, nil, time.Now())
+	reporter.Notify(nil, prior, nil, time.Now()) // resolve it via emitResolved
 
 	want := map[string]map[string]string{
 		"better release available": {
@@ -497,7 +497,7 @@ func TestReporterEmitSanitizesControlAndBidiRunes(t *testing.T) {
 	}
 }
 
-// TestReporterReportSuppressesDuplicateCurrentKeys pins in-batch dedupe: the
+// TestNotifierReportSuppressesDuplicateCurrentKeys pins in-batch dedupe: the
 // SeaDex fetcher appends every upstream record and the matcher preserves
 // per-entry cardinality, so one current batch can carry the same DedupeKey
 // twice. The returned state collapses them to one record, and the emitted
@@ -505,12 +505,12 @@ func TestReporterEmitSanitizesControlAndBidiRunes(t *testing.T) {
 // that one line must carry the batch's LAST payload, matching the documented
 // last-payload-wins stored state (a first-copy title in the alert would
 // contradict the persisted record and any later resolution line).
-func TestReporterReportSuppressesDuplicateCurrentKeys(t *testing.T) {
-	reporter, recorder := newCapturedReporter()
+func TestNotifierReportSuppressesDuplicateCurrentKeys(t *testing.T) {
+	reporter, recorder := newCapturedNotifier()
 	first := testFinding("duplicate", "Frieren (first copy)")
 	last := testFinding("duplicate", "Frieren (last copy)")
 
-	current := reporter.Report([]compare.Finding{first, last}, nil, nil, time.Now())
+	current := reporter.Notify([]compare.Finding{first, last}, nil, nil, time.Now())
 
 	if got := recorder.CountExact("better release available"); got != 1 {
 		t.Errorf("duplicate current finding notifications = %d, want 1", got)
@@ -545,14 +545,14 @@ func TestReporterReportSuppressesDuplicateCurrentKeys(t *testing.T) {
 // silently dropped or zeroed key (season, al_id, status) breaks the Loki
 // dashboards without failing any existing test.
 func TestResolvedLineCarriesDocumentedAttrs(t *testing.T) {
-	reporter, recorder := newCapturedReporter()
+	reporter, recorder := newCapturedNotifier()
 	f := testFinding("gone", "Frieren")
 	f.Season = 2
 	prior := map[string]Alerted{
 		"gone": {AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Finding: storedFinding(&f)},
 	}
 
-	reporter.Report(nil, prior, nil, time.Now())
+	reporter.Notify(nil, prior, nil, time.Now())
 
 	wantStr := map[string]string{
 		"title":             "Frieren",
@@ -599,14 +599,14 @@ func TestResolvedLineCarriesDocumentedAttrs(t *testing.T) {
 	}
 }
 
-// TestReporterDuplicateOfPriorFindingKeepsOriginalAlertTime pins the
+// TestNotifierDuplicateOfPriorFindingKeepsOriginalAlertTime pins the
 // interaction of in-batch dedupe with the prior state: when a batch carries
 // the same DedupeKey twice AND that key was already alerted in a prior cycle,
 // no notification is emitted, the original alert time survives the in-batch
 // duplicate branch, and the stored record follows the documented
 // last-payload-wins rule.
-func TestReporterDuplicateOfPriorFindingKeepsOriginalAlertTime(t *testing.T) {
-	reporter, recorder := newCapturedReporter()
+func TestNotifierDuplicateOfPriorFindingKeepsOriginalAlertTime(t *testing.T) {
+	reporter, recorder := newCapturedNotifier()
 	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	f := testFinding("dup-prior", "Frieren")
 	updated := testFinding("dup-prior", "Frieren (retitled)")
@@ -614,7 +614,7 @@ func TestReporterDuplicateOfPriorFindingKeepsOriginalAlertTime(t *testing.T) {
 		"dup-prior": {AlertedAt: oldTime, Finding: storedFinding(&f)},
 	}
 
-	current := reporter.Report([]compare.Finding{f, updated}, prior, nil, time.Now())
+	current := reporter.Notify([]compare.Finding{f, updated}, prior, nil, time.Now())
 
 	if got := recorder.CountExact("better release available"); got != 0 {
 		t.Errorf("notifications for an already-alerted duplicated finding = %d, want 0", got)
@@ -636,11 +636,11 @@ func TestReporterDuplicateOfPriorFindingKeepsOriginalAlertTime(t *testing.T) {
 // attrs, so the int-valued season was the one documented finding-line key a
 // mutation could zero without failing any test.
 func TestFindingLineCarriesSeason(t *testing.T) {
-	reporter, recorder := newCapturedReporter()
+	reporter, recorder := newCapturedNotifier()
 	f := testFinding("s2", "Frieren")
 	f.Season = 2
 
-	reporter.Report([]compare.Finding{f}, nil, nil, time.Now())
+	reporter.Notify([]compare.Finding{f}, nil, nil, time.Now())
 
 	season := int64(-1)
 	for _, rec := range recorder.Records() {
@@ -666,7 +666,7 @@ func TestFindingLineCarriesSeason(t *testing.T) {
 // arithmetic) would pass every test while silently corrupting the Loki cycle
 // accounting the operator reads.
 func TestReportSummaryLineCarriesAccountingCounts(t *testing.T) {
-	reporter, recorder := newCapturedReporter()
+	reporter, recorder := newCapturedNotifier()
 	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	kept := testFinding("kept", "Kept")
 	gone := testFinding("gone", "Gone")
@@ -679,7 +679,7 @@ func TestReportSummaryLineCarriesAccountingCounts(t *testing.T) {
 		"preserved": {AlertedAt: oldTime, Finding: storedFinding(&preserved)},
 	}
 
-	reporter.Report([]compare.Finding{
+	reporter.Notify([]compare.Finding{
 		testFinding("new", "Brand New"),
 		kept,
 	}, prior, map[int]struct{}{222: {}}, time.Now())
@@ -715,11 +715,11 @@ func TestReportSummaryLineCarriesAccountingCounts(t *testing.T) {
 // mutation dropping the attribute or breaking the comma join passes the whole
 // suite unnoticed.
 func TestFindingLineCarriesJoinedRecommendedGroups(t *testing.T) {
-	reporter, recorder := newCapturedReporter()
+	reporter, recorder := newCapturedNotifier()
 	f := testFinding("multi", "Frieren")
 	f.RecommendedGroups = []string{"SubsPlease", "PMR"}
 
-	reporter.Report([]compare.Finding{f}, nil, nil, time.Now())
+	reporter.Notify([]compare.Finding{f}, nil, nil, time.Now())
 
 	got := ""
 	seen := false

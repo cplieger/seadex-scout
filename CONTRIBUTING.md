@@ -78,8 +78,9 @@ direction (leaves have no internal imports):
   items emit nothing; the rest are warn/info findings, each with a dedupe key).
 - `internal/audit` — the season-level report generator for report mode: a verdict
   per in-library match, rendered as Markdown + JSON + per-row slog.
-- `internal/report` — the slog finding emitter with cross-cycle dedupe
-  (observability is slog-only; no metrics).
+- `internal/notify` — the slog finding notifier with cross-cycle dedupe, the
+  daemon's alerting path (observability is slog-only; no metrics). Distinct
+  from the report FEATURE, which `internal/audit` generates.
 - `internal/state` — the atomic JSON cache load/save (via `atomicfile`).
 - `internal/scout` — the cycle orchestrator that wires the above into one cycle.
 - `internal/indexer` — the Torznab feed server the daemon runs when a Prowlarr

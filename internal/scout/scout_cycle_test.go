@@ -18,7 +18,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
-	"github.com/cplieger/seadex-scout/internal/report"
+	"github.com/cplieger/seadex-scout/internal/notify"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/state"
 	"github.com/cplieger/slogx/capture"
@@ -59,12 +59,12 @@ func TestCycleMappingUnusablePreservesFindings(t *testing.T) {
 	defer mapSrv.Close()
 
 	logger := scoutTestLogger()
-	prior := report.Alerted{
+	prior := notify.Alerted{
 		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Finding:   report.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
+		Finding:   notify.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
 	}
 	store := &fakeStore{st: state.State{
-		Findings:  map[string]report.Alerted{"prior": prior},
+		Findings:  map[string]notify.Alerted{"prior": prior},
 		Baselined: true,
 	}}
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
@@ -147,9 +147,9 @@ func TestCycleDegradedSavePersistsSanitizedArrURL(t *testing.T) {
 func TestCycleAniListDegradedComparesMajorityAndPreservesAffected(t *testing.T) {
 	logger, recorder := capture.New()
 	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	prior := report.Alerted{
+	prior := notify.Alerted{
 		AlertedAt: oldTime,
-		Finding:   report.StoredFinding{Title: "Idless Show", Status: compare.StatusBetter, AniListID: 222},
+		Finding:   notify.StoredFinding{Title: "Idless Show", Status: compare.StatusBetter, AniListID: 222},
 	}
 	store := &fakeStore{st: state.State{
 		Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{
@@ -158,7 +158,7 @@ func TestCycleAniListDegradedComparesMajorityAndPreservesAffected(t *testing.T) 
 			// the AniList title lookup, which fails transiently this cycle.
 			{AniListID: 222, Type: "TV"},
 		}},
-		Findings:  map[string]report.Alerted{"prior-idless": prior},
+		Findings:  map[string]notify.Alerted{"prior-idless": prior},
 		Baselined: true,
 	}}
 	sonarr := &fakeSonarr{
@@ -190,7 +190,7 @@ func TestCycleAniListDegradedComparesMajorityAndPreservesAffected(t *testing.T) 
 		SeaDex:       &fakeSeaDex{entries: entries},
 		Matcher:      match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
 		Comparer:     compare.NewComparer(compare.Config{}),
-		Reporter:     report.NewReporter(logger),
+		Notifier:     notify.NewNotifier(logger),
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 	})
 
@@ -256,7 +256,7 @@ func TestCycleAniListDegradedColdStartSeedsIncompleteBaseline(t *testing.T) {
 			SeaDex:       &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
 			Matcher:      matcher,
 			Comparer:     compare.NewComparer(compare.Config{}),
-			Reporter:     report.NewReporter(logger),
+			Notifier:     notify.NewNotifier(logger),
 			AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
 		}
 	}
@@ -289,7 +289,7 @@ func TestCycleAniListDegradedColdStartSeedsIncompleteBaseline(t *testing.T) {
 // the steady-state Report path.
 func TestCycleColdStartBaselinesSilently(t *testing.T) {
 	captureLogger, recorder := capture.New()
-	reporter := report.NewReporter(captureLogger)
+	reporter := notify.NewNotifier(captureLogger)
 	logger := scoutTestLogger()
 	store := &fakeStore{st: state.State{
 		Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
@@ -308,7 +308,7 @@ func TestCycleColdStartBaselinesSilently(t *testing.T) {
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
 		Comparer:     compare.NewComparer(compare.Config{}),
-		Reporter:     reporter,
+		Notifier:     reporter,
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
 	})
 
@@ -338,23 +338,23 @@ func TestCycleColdStartBaselinesSilently(t *testing.T) {
 
 // TestCycleEmptySeaDexEntriesPreservesFindings pins the anomalous empty-but-non-
 // error SeaDex response path: a successful fetch with totalPages=1 and an empty
-// items array must preserve prior findings and NOT run Reporter.Report (which
+// items array must preserve prior findings and NOT run Notifier.Notify (which
 // would emit a "finding resolved" line for the prior finding), while still
 // refreshing the library snapshot and staying healthy.
 func TestCycleEmptySeaDexEntriesPreservesFindings(t *testing.T) {
 	captureLogger, recorder := capture.New()
-	reporter := report.NewReporter(captureLogger)
+	reporter := notify.NewNotifier(captureLogger)
 	logger := scoutTestLogger()
-	prior := report.Alerted{
+	prior := notify.Alerted{
 		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Finding:   report.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
+		Finding:   notify.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
 	}
 	store := &fakeStore{st: state.State{
 		Mapping: mapping.Cache{
 			FetchedAt: time.Now(),
 			Records:   []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}},
 		},
-		Findings:  map[string]report.Alerted{"prior": prior},
+		Findings:  map[string]notify.Alerted{"prior": prior},
 		Baselined: true,
 	}}
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
@@ -366,7 +366,7 @@ func TestCycleEmptySeaDexEntriesPreservesFindings(t *testing.T) {
 		SeaDex:       &fakeSeaDex{},
 		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
 		Comparer:     compare.NewComparer(compare.Config{}),
-		Reporter:     reporter,
+		Notifier:     reporter,
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
 	})
 
@@ -384,7 +384,7 @@ func TestCycleEmptySeaDexEntriesPreservesFindings(t *testing.T) {
 		t.Errorf("empty-SeaDex cycle emitted %d resolved finding logs, want 0", n)
 	}
 	if n := recorder.CountExact("findings reported"); n != 0 {
-		t.Errorf("empty-SeaDex cycle ran Reporter.Report %d times, want 0", n)
+		t.Errorf("empty-SeaDex cycle ran Notifier.Notify %d times, want 0", n)
 	}
 }
 
@@ -394,8 +394,8 @@ func TestCycleEmptySeaDexEntriesPreservesFindings(t *testing.T) {
 // persisting the empty snapshot (the one-cycle ratchet).
 func TestHandlePreCompareGateEmptyWalkPreservesPriorSnapshot(t *testing.T) {
 	logger := scoutTestLogger()
-	prior := report.Alerted{AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Finding: report.StoredFinding{Title: "Existing"}}
-	st := state.State{Library: library.Snapshot{Items: []library.Item{{ArrID: 7, Title: "Frieren"}}}, Findings: map[string]report.Alerted{"prior": prior}, Baselined: true}
+	prior := notify.Alerted{AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Finding: notify.StoredFinding{Title: "Existing"}}
+	st := state.State{Library: library.Snapshot{Items: []library.Item{{ArrID: 7, Title: "Frieren"}}}, Findings: map[string]notify.Alerted{"prior": prior}, Baselined: true}
 	store := &fakeStore{st: st}
 	s := New(&Deps{Logger: logger, Store: store})
 	handled, healthy := s.handlePreCompareGate(context.Background(), &st, library.Snapshot{}, &mapping.Cache{}, []seadex.Entry{{AniListID: 1}}, nil, nil, nil)
@@ -424,16 +424,16 @@ func TestHandlePreCompareGateEmptyWalkPreservesPriorSnapshot(t *testing.T) {
 func TestCyclePartialWalkComparesCleanAndPreservesFailedItemsFindings(t *testing.T) {
 	logger, recorder := capture.New()
 	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	prior := report.Alerted{
+	prior := notify.Alerted{
 		AlertedAt: oldTime,
-		Finding:   report.StoredFinding{Title: "Broken Series", Status: compare.StatusBetter, AniListID: 222},
+		Finding:   notify.StoredFinding{Title: "Broken Series", Status: compare.StatusBetter, AniListID: 222},
 	}
 	store := &fakeStore{st: state.State{
 		Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{
 			{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1},
 			{AniListID: 222, Type: "TV", TvdbID: 124, SeasonTvdb: 1},
 		}},
-		Findings:  map[string]report.Alerted{"prior-failed": prior},
+		Findings:  map[string]notify.Alerted{"prior-failed": prior},
 		Baselined: true,
 	}}
 	sonarr := &flakySonarr{
@@ -467,7 +467,7 @@ func TestCyclePartialWalkComparesCleanAndPreservesFailedItemsFindings(t *testing
 		SeaDex:       &fakeSeaDex{entries: entries},
 		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
 		Comparer:     compare.NewComparer(compare.Config{}),
-		Reporter:     report.NewReporter(logger),
+		Notifier:     notify.NewNotifier(logger),
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 	})
 
@@ -558,7 +558,7 @@ func TestCyclePartialColdStartSeedsIncompleteBaseline(t *testing.T) {
 		SeaDex:       seaDex,
 		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
 		Comparer:     compare.NewComparer(compare.Config{}),
-		Reporter:     report.NewReporter(logger),
+		Notifier:     notify.NewNotifier(logger),
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 	})
 
@@ -651,12 +651,12 @@ func TestHandlePreCompareGateShrunkWalkEscalatesAfterRepeatedShrinks(t *testing.
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			logger, recorder := capture.New()
-			prior := report.Alerted{AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Finding: report.StoredFinding{Title: "Existing"}}
+			prior := notify.Alerted{AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Finding: notify.StoredFinding{Title: "Existing"}}
 			st := state.State{
 				Library: library.Snapshot{Items: []library.Item{
 					{ArrID: 1, Title: "A"}, {ArrID: 2, Title: "B"}, {ArrID: 3, Title: "C"}, {ArrID: 4, Title: "D"},
 				}},
-				Findings:    map[string]report.Alerted{"prior": prior},
+				Findings:    map[string]notify.Alerted{"prior": prior},
 				ShrunkWalks: tc.priorStreak,
 				Baselined:   true,
 			}
@@ -769,7 +769,7 @@ func TestCycleRecoveredWalkResetsShrunkStreak(t *testing.T) {
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
 		Comparer:     compare.NewComparer(compare.Config{}),
-		Reporter:     report.NewReporter(logger),
+		Notifier:     notify.NewNotifier(logger),
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
 	})
 
@@ -801,16 +801,16 @@ func TestCycleSeaDexFailureEscalatesAfterRepeatedFailures(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			logger, recorder := capture.New()
-			prior := report.Alerted{
+			prior := notify.Alerted{
 				AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-				Finding:   report.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
+				Finding:   notify.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
 			}
 			store := &fakeStore{st: state.State{
 				Mapping: mapping.Cache{
 					FetchedAt: time.Now(),
 					Records:   []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}},
 				},
-				Findings:       map[string]report.Alerted{"prior": prior},
+				Findings:       map[string]notify.Alerted{"prior": prior},
 				SeadexFailures: tc.priorStreak,
 				Baselined:      true,
 			}}
@@ -884,7 +884,7 @@ func TestCycleSuccessfulSeaDexFetchResetsFailureStreak(t *testing.T) {
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
 		Comparer:     compare.NewComparer(compare.Config{}),
-		Reporter:     report.NewReporter(logger),
+		Notifier:     notify.NewNotifier(logger),
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
 	})
 
@@ -933,13 +933,13 @@ func TestCycleZeroEntriesFetchResetsSeaDexFailureStreak(t *testing.T) {
 // one "cycle complete" line, and persist the updated dedupe table.
 func TestCycleSteadyStateReportsAndSaves(t *testing.T) {
 	logger, recorder := capture.New()
-	stale := report.Alerted{
+	stale := notify.Alerted{
 		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Finding:   report.StoredFinding{Title: "Gone Title", Status: compare.StatusBetter, AniListID: 111},
+		Finding:   notify.StoredFinding{Title: "Gone Title", Status: compare.StatusBetter, AniListID: 111},
 	}
 	store := &fakeStore{st: state.State{
 		Mapping:   mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
-		Findings:  map[string]report.Alerted{"stale": stale},
+		Findings:  map[string]notify.Alerted{"stale": stale},
 		Baselined: true,
 	}}
 	sonarr := &fakeSonarr{
@@ -956,7 +956,7 @@ func TestCycleSteadyStateReportsAndSaves(t *testing.T) {
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
 		Comparer:     compare.NewComparer(compare.Config{}),
-		Reporter:     report.NewReporter(logger),
+		Notifier:     notify.NewNotifier(logger),
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 	})
 
@@ -1080,13 +1080,13 @@ func TestCycleShutdownDuringMatchingWarnsShutdownNotAniList(t *testing.T) {
 	logger, recorder := capture.New()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	prior := report.Alerted{
+	prior := notify.Alerted{
 		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Finding:   report.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
+		Finding:   notify.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
 	}
 	store := &fakeStore{st: state.State{
 		Mapping:   mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}},
-		Findings:  map[string]report.Alerted{"prior": prior},
+		Findings:  map[string]notify.Alerted{"prior": prior},
 		Baselined: true,
 	}}
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
@@ -1139,13 +1139,13 @@ func TestCycleShutdownDuringSeaDexFetchWarnsShutdownNotSeaDex(t *testing.T) {
 	defer cancel()
 
 	logger, recorder := capture.New()
-	prior := report.Alerted{
+	prior := notify.Alerted{
 		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Finding:   report.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
+		Finding:   notify.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
 	}
 	store := &fakeStore{st: state.State{
 		Mapping:   mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}},
-		Findings:  map[string]report.Alerted{"prior": prior},
+		Findings:  map[string]notify.Alerted{"prior": prior},
 		Baselined: true,
 	}}
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
@@ -1243,7 +1243,7 @@ func TestCycleStaleMapStillComparesAndRebuildsFeed(t *testing.T) {
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
 		Comparer:     compare.NewComparer(compare.Config{}),
-		Reporter:     report.NewReporter(logger),
+		Notifier:     notify.NewNotifier(logger),
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 		Feed:         feed,
 	})
@@ -1484,7 +1484,7 @@ func TestCycleDegradedEarlyReturnsEmitCycleDegraded(t *testing.T) {
 					SeaDex:   &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
 					Matcher:  match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
 					Comparer: compare.NewComparer(compare.Config{}),
-					Reporter: report.NewReporter(scoutTestLogger()),
+					Notifier: notify.NewNotifier(scoutTestLogger()),
 					Logger:   logger,
 				}
 			},
@@ -1518,13 +1518,13 @@ func TestCycleDegradedEarlyReturnsEmitCycleDegraded(t *testing.T) {
 // notifications and resolutions.
 func TestCycleUpgradeWithPriorFindingsTakesReportPath(t *testing.T) {
 	logger, recorder := capture.New()
-	stale := report.Alerted{
+	stale := notify.Alerted{
 		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Finding:   report.StoredFinding{Title: "Gone Title", Status: compare.StatusBetter, AniListID: 111},
+		Finding:   notify.StoredFinding{Title: "Gone Title", Status: compare.StatusBetter, AniListID: 111},
 	}
 	store := &fakeStore{st: state.State{
 		Mapping:  mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
-		Findings: map[string]report.Alerted{"stale": stale},
+		Findings: map[string]notify.Alerted{"stale": stale},
 	}}
 	sonarr := &fakeSonarr{
 		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
@@ -1540,7 +1540,7 @@ func TestCycleUpgradeWithPriorFindingsTakesReportPath(t *testing.T) {
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
 		Comparer:     compare.NewComparer(compare.Config{}),
-		Reporter:     report.NewReporter(logger),
+		Notifier:     notify.NewNotifier(logger),
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 	})
 
@@ -1579,13 +1579,13 @@ func TestCycleUpgradeWithPriorFindingsTakesReportPath(t *testing.T) {
 func TestCyclePartialWalkAndAniListDegradedPreservesBothFindingSets(t *testing.T) {
 	logger, recorder := capture.New()
 	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	priorFailed := report.Alerted{
+	priorFailed := notify.Alerted{
 		AlertedAt: oldTime,
-		Finding:   report.StoredFinding{Title: "Broken Series", Status: compare.StatusBetter, AniListID: 222},
+		Finding:   notify.StoredFinding{Title: "Broken Series", Status: compare.StatusBetter, AniListID: 222},
 	}
-	priorIdless := report.Alerted{
+	priorIdless := notify.Alerted{
 		AlertedAt: oldTime,
-		Finding:   report.StoredFinding{Title: "Idless Show", Status: compare.StatusBetter, AniListID: 333},
+		Finding:   notify.StoredFinding{Title: "Idless Show", Status: compare.StatusBetter, AniListID: 333},
 	}
 	store := &fakeStore{st: state.State{
 		Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{
@@ -1595,7 +1595,7 @@ func TestCyclePartialWalkAndAniListDegradedPreservesBothFindingSets(t *testing.T
 			// the AniList title lookup, which fails transiently this cycle.
 			{AniListID: 333, Type: "TV"},
 		}},
-		Findings:  map[string]report.Alerted{"prior-failed": priorFailed, "prior-idless": priorIdless},
+		Findings:  map[string]notify.Alerted{"prior-failed": priorFailed, "prior-idless": priorIdless},
 		Baselined: true,
 	}}
 	sonarr := &flakySonarr{
@@ -1641,7 +1641,7 @@ func TestCyclePartialWalkAndAniListDegradedPreservesBothFindingSets(t *testing.T
 		SeaDex:   &fakeSeaDex{entries: entries},
 		Matcher:  match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
 		Comparer: compare.NewComparer(compare.Config{}),
-		Reporter: report.NewReporter(logger),
+		Notifier: notify.NewNotifier(logger),
 	})
 
 	if healthy := s.Cycle(context.Background()); !healthy {
@@ -1656,7 +1656,7 @@ func TestCyclePartialWalkAndAniListDegradedPreservesBothFindingSets(t *testing.T
 	if n := recorder.CountExact("finding resolved"); n != 0 {
 		t.Errorf("resolved count = %d, want 0 (both degradations' findings must be preserved)", n)
 	}
-	for key, want := range map[string]report.Alerted{"prior-failed": priorFailed, "prior-idless": priorIdless} {
+	for key, want := range map[string]notify.Alerted{"prior-failed": priorFailed, "prior-idless": priorIdless} {
 		got, ok := store.st.Findings[key]
 		if !ok {
 			t.Errorf("prior finding %q was dropped, want it preserved: %+v", key, store.st.Findings)
@@ -1696,15 +1696,15 @@ func TestCycleShutdownDuringMappingLoadWarnsShutdownNotFribb(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	logger, recorder := capture.New()
-	prior := report.Alerted{
+	prior := notify.Alerted{
 		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Finding:   report.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
+		Finding:   notify.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
 	}
 	store := &fakeStore{st: state.State{
 		// Records fetched beyond the 1h refresh window force a refresh
 		// attempt, whose transport cancels the cycle context mid-flight.
 		Mapping:   mapping.Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}},
-		Findings:  map[string]report.Alerted{"prior": prior},
+		Findings:  map[string]notify.Alerted{"prior": prior},
 		Baselined: true,
 	}}
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
@@ -1773,7 +1773,7 @@ func TestCycleCompletionLineCarriesAniListCycleDeltas(t *testing.T) {
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
 		Comparer:     compare.NewComparer(compare.Config{}),
-		Reporter:     report.NewReporter(scoutTestLogger()),
+		Notifier:     notify.NewNotifier(scoutTestLogger()),
 		AniListStats: stats,
 	})
 
@@ -1827,7 +1827,7 @@ func TestCycleAniListDegradedStreakEscalatesToError(t *testing.T) {
 			SeaDex:       &fakeSeaDex{entries: entries},
 			Matcher:      match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
 			Comparer:     compare.NewComparer(compare.Config{}),
-			Reporter:     report.NewReporter(logger),
+			Notifier:     notify.NewNotifier(logger),
 			AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 		}), recorder
 	}

@@ -25,7 +25,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
-	"github.com/cplieger/seadex-scout/internal/report"
+	"github.com/cplieger/seadex-scout/internal/notify"
 )
 
 const (
@@ -69,7 +69,7 @@ const SchemaVersion = 1
 // pre-existing backlog silently instead of alerting on every misaligned title
 // at once.
 type State struct {
-	Findings map[string]report.Alerted `json:"findings,omitempty"`
+	Findings map[string]notify.Alerted `json:"findings,omitempty"`
 	Memo     match.Memo                `json:"anilist_memo"`
 	Mapping  mapping.Cache             `json:"mapping"`
 	Library  library.Snapshot          `json:"library"`

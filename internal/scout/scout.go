@@ -27,7 +27,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
-	"github.com/cplieger/seadex-scout/internal/report"
+	"github.com/cplieger/seadex-scout/internal/notify"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/state"
 )
@@ -96,7 +96,7 @@ type Deps struct {
 	Matcher  *match.Matcher
 	Comparer *compare.Comparer
 	Auditor  *audit.Auditor
-	Reporter *report.Reporter
+	Notifier *notify.Notifier
 	// AniListStats reports the AniList client's cumulative request counters
 	// (calls, rate-limit waits) for the cycle completion logs. The scout only
 	// needs these two counters, so it takes a narrow callback instead of the
@@ -432,9 +432,9 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 	// bursting a whole backlog - a finding first appearing in exactly that
 	// cycle is seeded, not emitted. The full list is always available on
 	// demand via report mode.
-	var newFindings map[string]report.Alerted
+	var newFindings map[string]notify.Alerted
 	if st.BaselineIncomplete || (!st.Baselined && len(st.Findings) == 0) {
-		newFindings = s.deps.Reporter.Baseline(findings, time.Now())
+		newFindings = s.deps.Notifier.Baseline(findings, time.Now())
 		st.Baselined = true
 		st.BaselineIncomplete = snap.Partial || result.Degraded
 	} else {
@@ -443,7 +443,7 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 		// lookup failed transiently this cycle - is carried forward unresolved
 		// (its absence from findings is missing data, not alignment), while
 		// the unaffected majority emits and resolves normally.
-		newFindings = s.deps.Reporter.Report(findings, st.Findings, unionIDs(failedItems, result.IncompleteIDs), time.Now())
+		newFindings = s.deps.Notifier.Notify(findings, st.Findings, unionIDs(failedItems, result.IncompleteIDs), time.Now())
 		st.Baselined = true
 	}
 
