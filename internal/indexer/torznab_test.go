@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/cplieger/runesafe"
 )
 
 // TestRenderFeed_usesStableGUIDFallback pins the documented GUID fallback
@@ -307,5 +309,43 @@ func TestRenderFeedSanitizesUnsafeRunes(t *testing.T) {
 	}
 	if !strings.Contains(got, "Show") || !strings.Contains(got, "[G]") || !strings.Contains(got, "S01") {
 		t.Errorf("sanitizing damaged the safe text: %q", got)
+	}
+}
+
+// TestItemXMLTitleProvenance pins the h-f20 wire-boundary design for
+// tracker-controlled titles: the decode struct tags Title as
+// runesafe.Untrusted, so any emission of the WIRE form (a bare slog attr,
+// an fmt.Errorf) is sanitized automatically, while toItem unwraps via Raw()
+// into the plain persisted/compute form — runesafe's machine-read
+// persistence rule (feed.json must round-trip raw bytes; the XML render's
+// escTo belt and capLogText own the emit-side policy there).
+func TestItemXMLTitleProvenance(t *testing.T) {
+	t.Parallel()
+	// The hostile runes are XML-legal on purpose: a raw C0 control (ESC)
+	// cannot even arrive through well-formed XML (encoding/xml rejects the
+	// document), so the classes that CAN reach the decode boundary are C1
+	// controls (U+009B CSI, a single-rune escape introducer) and bidi
+	// overrides (U+202E) — exactly what the Untrusted tag guards.
+	const hostile = "Show\u202e 01 [1080p]\u009b31m.mkv"
+	body := `<?xml version="1.0"?><rss><channel><item>` +
+		`<title>` + hostile + `</title>` +
+		`<guid>g1</guid><link>https://example.test/dl/1</link>` +
+		`</item></channel></rss>`
+
+	items, err := parseTorznab([]byte(body))
+	if err != nil {
+		t.Fatalf("parseTorznab: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("parsed %d items, want 1", len(items))
+	}
+	if items[0].Title != hostile {
+		t.Errorf("item.Title = %q, want the RAW bytes preserved for persistence and matching (%q)", items[0].Title, hostile)
+	}
+
+	// The wire form itself emits sanitized through every standard sink.
+	wire := runesafe.Untrusted(hostile)
+	if got := wire.String(); strings.ContainsRune(got, '\u009b') || strings.ContainsRune(got, '\u202e') {
+		t.Errorf("wire-form String() = %q, want the C1 and bidi runes sanitized", got)
 	}
 }

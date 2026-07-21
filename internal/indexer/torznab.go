@@ -345,14 +345,23 @@ func (c *channelXML) decodeChild(d *xml.Decoder, t xml.StartElement) error {
 }
 
 type itemXML struct {
-	Title     string       `xml:"title"`
-	GUID      string       `xml:"guid"`
-	Comments  string       `xml:"comments"`
-	Link      string       `xml:"link"`
-	PubDate   string       `xml:"pubDate"`
-	Enclosure enclosureXML `xml:"enclosure"`
-	Attrs     []attrXML    `xml:"attr"`
-	Size      int64        `xml:"size"`
+	// Title is the tracker-controlled release title. It is tagged
+	// runesafe.Untrusted at this decode boundary — the one place Prowlarr
+	// titles enter the program — so the trust decision is recorded on the
+	// wire struct and any emission of the wire form (a bare slog attr, an
+	// fmt.Errorf) is sanitized automatically. toItem unwraps via Raw() into
+	// the plain persisted/compute form (runesafe's machine-read persistence
+	// rule: feed.json stores raw bytes in plain string fields), and the
+	// human-facing sinks keep their own layers: the XML render escapes over
+	// the rune belt (escTo), capped log lines use capLogText.
+	Title     runesafe.Untrusted `xml:"title"`
+	GUID      string             `xml:"guid"`
+	Comments  string             `xml:"comments"`
+	Link      string             `xml:"link"`
+	PubDate   string             `xml:"pubDate"`
+	Enclosure enclosureXML       `xml:"enclosure"`
+	Attrs     []attrXML          `xml:"attr"`
+	Size      int64              `xml:"size"`
 	// textBytes accumulates the decoded text of every field occurrence in
 	// this item (unexported: invisible to encoding/xml). channelXML's
 	// decodeChild folds it into the response-wide budget.
@@ -391,7 +400,7 @@ func (x *itemXML) UnmarshalXML(d *xml.Decoder, _ xml.StartElement) error {
 func (x *itemXML) decodeChild(d *xml.Decoder, t xml.StartElement) error {
 	switch t.Name.Local {
 	case "title":
-		return x.decodeField(d, t, &x.Title)
+		return x.decodeUntrustedField(d, t, &x.Title)
 	case "guid":
 		return x.decodeField(d, t, &x.GUID)
 	case "comments":
@@ -441,6 +450,23 @@ func (x *itemXML) decodeField(d *xml.Decoder, t xml.StartElement, dst *string) e
 		return err
 	}
 	*dst = s
+	return nil
+}
+
+// decodeUntrustedField decodes one text element into an Untrusted-tagged
+// destination: the same accounting as decodeField, with the provenance tag
+// applied at the decode boundary (raw bytes preserved — Untrusted has no
+// UnmarshalText, and the explicit conversion here keeps the manual decoder's
+// *string plumbing out of the tagged field).
+func (x *itemXML) decodeUntrustedField(d *xml.Decoder, t xml.StartElement, dst *runesafe.Untrusted) error {
+	var s string
+	if err := d.DecodeElement(&s, &t); err != nil {
+		return err
+	}
+	if err := x.account(s); err != nil {
+		return err
+	}
+	*dst = runesafe.Untrusted(s)
 	return nil
 }
 
@@ -616,7 +642,12 @@ func (x *itemXML) toItem() item {
 	}
 
 	return item{
-		Title:       strings.TrimSpace(x.Title),
+		// Raw() by design: item rides journalItem into feed.json, and
+		// runesafe's machine-read persistence rule stores raw bytes in
+		// plain fields (a tagged field would round-trip sanitized). The
+		// emit boundaries own the policy: escTo for the XML render,
+		// capLogText for log lines.
+		Title:       strings.TrimSpace(x.Title.Raw()),
 		GUID:        strings.TrimSpace(x.GUID),
 		InfoURL:     strings.TrimSpace(x.Comments),
 		DownloadURL: strings.TrimSpace(dl),
