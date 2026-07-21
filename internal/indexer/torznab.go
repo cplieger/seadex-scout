@@ -525,16 +525,13 @@ func (e *upstreamDocError) Error() string {
 }
 
 // capLogText bounds and cleans an untrusted string before it reaches a log
-// line: single-line rune safety (runesafe.SanitizeSingleLine), then a byte cap
-// on a rune boundary (truncated output appends "..."). It is the shared
-// emit-boundary policy behind sanitizeUpstreamText and logParam, so a policy
-// change (truncation marker, control-char class) lands once.
+// line, delegating to runesafe.SanitizeSingleLineBounded (single-line rune
+// safety, then a rune-boundary byte cap with the "..." truncation marker).
+// It is the shared emit-boundary policy behind sanitizeUpstreamText and
+// logParam; the composition itself now lives in the library, so the policy
+// cannot drift per consumer.
 func capLogText(s string, maxLen int) string {
-	s = runesafe.SanitizeSingleLine(s)
-	if len(s) > maxLen {
-		s = runesafe.CapBytes(s, maxLen) + "..."
-	}
-	return s
+	return runesafe.SanitizeSingleLineBounded(s, maxLen)
 }
 
 // sanitizeUpstreamText bounds and cleans an untrusted Torznab <error>

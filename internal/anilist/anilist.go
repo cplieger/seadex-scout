@@ -421,11 +421,7 @@ type gqlResponse struct {
 // UTF-8.
 func sanitizeUpstreamMessage(s string) string {
 	const maxLen = 200
-	s = runesafe.SanitizeSingleLine(s)
-	if len(s) > maxLen {
-		s = runesafe.CapBytes(s, maxLen) + "..."
-	}
-	return s
+	return runesafe.SanitizeSingleLineBounded(s, maxLen)
 }
 
 // mediaQueryError wraps an upstream GraphQL error into the plain
