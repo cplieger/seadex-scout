@@ -896,7 +896,13 @@ func TestStoreLoadRecoveryClearsNewerSchemaSaveBlock(t *testing.T) {
 	}
 }
 
-func TestStoreSaveOverCapErrorReportsJSONSize(t *testing.T) {
+// TestStoreSaveOverCapErrorReportsSizes pins the over-cap error's numbers:
+// the app wrap names the limit Load actually enforces (maxStateBytes, NOT
+// the internal +1 the encoder's newline rides on), and the wrapped
+// atomicfile rejection quotes the staged size the encoder attempted - the
+// JSON size plus that trailing newline - so an operator can read both the
+// contract and the overshoot from one line.
+func TestStoreSaveOverCapErrorReportsSizes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := NewStore(path, testLogger())
 	huge := &State{
@@ -914,9 +920,16 @@ func TestStoreSaveOverCapErrorReportsJSONSize(t *testing.T) {
 	if saveErr == nil {
 		t.Fatal("Save returned nil error, want over-cap rejection")
 	}
-	want := fmt.Sprintf("%d bytes exceeds", len(encoded))
-	if !strings.Contains(saveErr.Error(), want) {
-		t.Errorf("error = %q, want the exact JSON size named (%q: the encoder's trailing newline must be subtracted)", saveErr.Error(), want)
+	if !errors.Is(saveErr, atomicfile.ErrFileTooLarge) {
+		t.Errorf("error = %v, want it to match atomicfile.ErrFileTooLarge", saveErr)
+	}
+	wantLimit := fmt.Sprintf("exceeds the %d-byte load limit", maxStateBytes)
+	if !strings.Contains(saveErr.Error(), wantLimit) {
+		t.Errorf("error = %q, want the load limit named (%q)", saveErr.Error(), wantLimit)
+	}
+	wantAttempted := fmt.Sprintf("to %d bytes", len(encoded)+1)
+	if !strings.Contains(saveErr.Error(), wantAttempted) {
+		t.Errorf("error = %q, want the attempted staged size named (%q: the JSON size plus the encoder's trailing newline)", saveErr.Error(), wantAttempted)
 	}
 }
 
@@ -1040,7 +1053,7 @@ func TestEncodeStateWriteErrorWrapped(t *testing.T) {
 	if !strings.Contains(encErr.Error(), "state: encode") {
 		t.Errorf("error = %q, want the generic 'state: encode' wrap", encErr.Error())
 	}
-	if errors.Is(encErr, errStateTooLarge) {
+	if errors.Is(encErr, atomicfile.ErrFileTooLarge) {
 		t.Errorf("error = %v classified as the over-cap rejection, want the generic I/O wrap", encErr)
 	}
 }

@@ -407,38 +407,6 @@ func (s *Store) quarantine() {
 	s.log.Warn("corrupt state file preserved for inspection", "path", dst)
 }
 
-// errStateTooLarge marks a Save encoding that would exceed maxStateBytes. It
-// is returned by boundedWriter's Write and detected by encodeState
-// (errors.Is) to produce the size-cap rejection while the previous state
-// file stays intact.
-var errStateTooLarge = errors.New("state: encoded state exceeds size limit")
-
-// boundedWriter passes writes through to w while enforcing limit, so Save can
-// refuse to persist a file Load is contractually unable to read before any
-// byte reaches the pending temp. (encoding/json's Encoder still buffers the
-// complete encoding internally before its single Write, so peak encode memory
-// is unchanged from the json.Marshal it replaced; the buffer is pooled and
-// released after Encode rather than held across the atomic replacement.) A
-// write that would cross the limit is rejected
-// whole — before any byte reaches w — with attempted recording the total the
-// encoder tried to produce, so the temp never holds an over-cap prefix.
-type boundedWriter struct {
-	w         io.Writer
-	limit     int64
-	written   int64
-	attempted int64
-}
-
-func (bw *boundedWriter) Write(p []byte) (int, error) {
-	if bw.written+int64(len(p)) > bw.limit {
-		bw.attempted = bw.written + int64(len(p))
-		return 0, errStateTooLarge
-	}
-	n, err := bw.w.Write(p)
-	bw.written += int64(n)
-	return n, err
-}
-
 // Save atomically writes the state file, creating the parent directory if
 // needed. It returns an error only when the data did not reach disk; a
 // non-durable (unsynced) write is logged, not failed. Save owns the
@@ -478,7 +446,10 @@ func (s *Store) Save(ctx context.Context, st *State) error {
 	sanitized.Version = SchemaVersion
 	pf, err := atomicfile.NewPendingFile(ctx, s.path,
 		atomicfile.WithMkdirMode(dirMode),
-		atomicfile.WithMode(fileMode))
+		atomicfile.WithMode(fileMode),
+		// One byte beyond maxStateBytes for json.Encoder's trailing
+		// newline, truncated away in encodeState (see its doc).
+		atomicfile.WithMaxBytes(maxStateBytes+1))
 	if err != nil {
 		return fmt.Errorf("state: write %s: %w", s.path, err)
 	}
@@ -507,28 +478,31 @@ func (s *Store) Save(ctx context.Context, st *State) error {
 //
 // It enforces the reader's bound on write too: persisting a file Load is
 // contractually unable to consume would silently discard the whole cache
-// next cycle (fail-open). The encoder writes into the pending temp
-// through the bounded writer, which rejects an over-cap encoding before
-// it lands; the caller's Cleanup discards the temp on any encode failure,
-// so the last readable state file stays intact until Commit replaces it.
+// next cycle (fail-open). The bound is atomicfile's WithMaxBytes cap, wired
+// in Save: the pending file rejects the encoder's over-cap write whole -
+// before any byte lands - and the caller's Cleanup discards the temp on any
+// encode failure, so the last readable state file stays intact until Commit
+// replaces it. (encoding/json's Encoder still buffers the complete encoding
+// internally before its single Write, so peak encode memory is unchanged
+// from the json.Marshal it replaced; the buffer is pooled and released
+// after Encode rather than held across the atomic replacement.)
 //
-// The limit admits ONE byte beyond maxStateBytes for the trailing newline
+// The cap admits ONE byte beyond maxStateBytes for the trailing newline
 // json.Encoder.Encode appends (json.Marshal produces none): a state whose
 // json.Marshal encoding is exactly maxStateBytes must stay accepted, and
 // the newline is truncated away below so the persisted file never exceeds
-// what Load can read. The over-cap error subtracts that byte so the
-// reported count is the JSON size, comparable to the limit it names.
+// what Load can read. The over-cap error therefore quotes the staged size
+// including that newline, while the wrap names the limit Load enforces.
 // The truncation also makes the persisted size match the json.Marshal
 // encoding Load's bound is defined against.
 func encodeState(pf *atomicfile.PendingFile, st *State, path string) error {
-	bw := &boundedWriter{w: pf, limit: maxStateBytes + 1}
-	if encErr := json.NewEncoder(bw).Encode(st); encErr != nil {
-		if errors.Is(encErr, errStateTooLarge) {
-			return fmt.Errorf("state: encode %s: %d bytes exceeds the %d-byte load limit; keeping previous state file", path, bw.attempted-1, maxStateBytes)
+	if encErr := json.NewEncoder(pf).Encode(st); encErr != nil {
+		if errors.Is(encErr, atomicfile.ErrFileTooLarge) {
+			return fmt.Errorf("state: encode %s: encoded state exceeds the %d-byte load limit (%w); keeping previous state file", path, maxStateBytes, encErr)
 		}
 		return fmt.Errorf("state: encode %s: %w", path, encErr)
 	}
-	if truncErr := pf.Truncate(bw.written - 1); truncErr != nil {
+	if truncErr := pf.Truncate(pf.BytesWritten() - 1); truncErr != nil {
 		return fmt.Errorf("state: write %s: %w", path, truncErr)
 	}
 	return nil
