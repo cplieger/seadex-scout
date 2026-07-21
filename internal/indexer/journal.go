@@ -302,8 +302,21 @@ func (w *FeedWriter) scopeConfigured(scope string) bool {
 
 // journalIfNew applies growJournal's novelty test to one torrent - folding its
 // identity signals into seen either way - and materializes its journal item
-// when it is genuinely new and servable.
+// when it is genuinely new and servable. Tail-tracker occurrences never reach
+// the ledger: see the guard below.
 func (w *FeedWriter) journalIfNew(t *seadex.Torrent, cur map[string][]curatedRef, seen map[string]bool, infoFor func(alID int) EntryInfo, js *journalStats) (it item, scope string, ok bool) {
+	if trackerScope(t.Tracker) == "" {
+		// A tail tracker (AnimeTosho, RuTracker) can never be journaled - and
+		// AnimeTosho is a Nyaa MIRROR carrying the IDENTICAL info hash, so
+		// folding its identity into the seen ledger would, depending on
+		// nothing but catalogue iteration order, mark the Nyaa listing of the
+		// same bytes as already seen and silently deny it RSS exposure
+		// forever. The deliberate fold-though-unservable cases below (an
+		// unconfigured tracker's off switch, a missing AB passkey) are
+		// different: those trackers CAN be enabled later, and their
+		// identities must not backfill then - a tail tracker has no later.
+		return item{}, "", false
+	}
 	ids := identitySignals(t)
 	if len(ids) == 0 {
 		// No stable identity at all: the torrent can neither be journaled nor

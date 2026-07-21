@@ -899,12 +899,14 @@ func TestRebuildCountsIdentitylessABTorrentAsUnresolvable(t *testing.T) {
 	}
 }
 
-// TestRebuildUnknownTrackerWithHashSilentlyIgnored pins newJournalItem's
-// tail-tracker branch for a torrent that DOES carry a stable identity: an
-// AnimeTosho/RuTracker release with a valid info hash reaches the journal
-// logic (unlike an id-less tail torrent, which has no identity at all), is
-// silently ignored - never counted unresolvable, since the tail is expected -
-// and its hash is still folded into the seen ledger.
+// TestRebuildUnknownTrackerWithHashSilentlyIgnored pins the tail-tracker
+// guard for a torrent that DOES carry a stable identity: an
+// AnimeTosho/RuTracker release with a valid info hash is silently ignored -
+// never counted unresolvable, since the tail is expected - and contributes
+// NOTHING to the seen ledger: AnimeTosho is a Nyaa mirror carrying the
+// identical info hash, so folding it would let catalogue order decide
+// whether the Nyaa listing of the same bytes ever journals (see
+// TestRebuildMirrorTrackerCannotSuppressNyaaJournal).
 func TestRebuildUnknownTrackerWithHashSilentlyIgnored(t *testing.T) {
 	const hash = "143ed15e5e3df072ae91adaeb149973a887590dd"
 	path := filepath.Join(t.TempDir(), "feed.json")
@@ -924,8 +926,8 @@ func TestRebuildUnknownTrackerWithHashSilentlyIgnored(t *testing.T) {
 	if len(snap.NyaaFeed) != 0 || len(snap.ABFeed) != 0 {
 		t.Errorf("unknown tracker leaked into a feed: nyaa=%d ab=%d", len(snap.NyaaFeed), len(snap.ABFeed))
 	}
-	if !snap.Seen[hash] {
-		t.Errorf("seen ledger missing the hash identity: %v", snap.Seen)
+	if snap.Seen[hash] {
+		t.Errorf("tail-tracker hash folded into the seen ledger, want absent (a mirror's hash must not pre-mark the Nyaa listing): %v", snap.Seen)
 	}
 	unresolvable := int64(-1)
 	for _, r := range rec.Records() {
@@ -1210,5 +1212,41 @@ func TestApplyTitlesSkipsEmptyCachedTitle(t *testing.T) {
 	}
 	if items[2].Title != "Synth C" {
 		t.Errorf("unknown key changed the title: %q, want %q", items[2].Title, "Synth C")
+	}
+}
+
+// TestRebuildMirrorTrackerCannotSuppressNyaaJournal pins the tail-tracker
+// seen-ledger guard: AnimeTosho is a Nyaa mirror carrying the IDENTICAL info
+// hash, and folding its (never-journalable) occurrence into the seen ledger
+// first - purely a catalogue-order accident - used to mark the Nyaa listing
+// of the same bytes as already seen, silently denying it RSS exposure
+// forever. A tail-tracker occurrence must contribute nothing to the ledger.
+func TestRebuildMirrorTrackerCannotSuppressNyaaJournal(t *testing.T) {
+	hash := strings.Repeat("a", 40)
+	entries := []seadex.Entry{{
+		AniListID: 9,
+		Torrents: []seadex.Torrent{
+			// The mirror occurrence deliberately sorts FIRST in the catalogue.
+			{
+				Tracker: "AnimeTosho", URL: "https://animetosho.org/view/900", InfoHash: hash, IsBest: true,
+				Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
+			},
+			{
+				Tracker: "Nyaa", URL: "https://nyaa.si/view/900", InfoHash: hash, IsBest: true,
+				Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
+			},
+		},
+	}}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 1 {
+		t.Fatalf("nyaa feed = %d items, want 1 (the mirror occurrence must not pre-mark the shared hash seen)", len(snap.NyaaFeed))
+	}
+	if snap.NyaaFeed[0].Key != "nyaa:900" {
+		t.Errorf("journaled key = %q, want nyaa:900", snap.NyaaFeed[0].Key)
 	}
 }
