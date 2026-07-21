@@ -10,10 +10,8 @@ package seadex
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -22,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cplieger/httpx/v3"
+	"github.com/cplieger/jsonx/bounded"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 )
 
@@ -118,11 +117,10 @@ var errCumulativeBytes = fmt.Errorf("seadex: cumulative page bytes exceeded cap 
 var errCumulativeElements = fmt.Errorf("seadex: cumulative decoded elements exceeded cap %d (upstream misbehaving); "+
 	"refusing to compare against a truncated view", maxTotalElements)
 
-// errElementCap marks the page decoder's element budget being exceeded, so
-// fetchPage can classify which budget fired: the full per-page bound is a
+// fetchPage's classification of the aggregate element budget rides
+// jsonx/bounded's ErrElementBudget sentinel: the full per-page bound is a
 // per-page violation, while a budget-reduced limit is the fetch-wide
-// cumulative cap.
-var errElementCap = errors.New("elements exceeded cap")
+// cumulative cap (errCumulativeElements).
 
 // File is one file inside a SeaDex torrent (its name and byte length).
 type File struct {
@@ -495,7 +493,7 @@ func (c *Client) fetchPage(ctx context.Context, page int, wireLimit int64, elemL
 
 	list, elems, err = decodePage(body, elemLimit)
 	if err != nil {
-		if errors.Is(err, errElementCap) && elemLimit < maxPageElements {
+		if errors.Is(err, bounded.ErrElementBudget) && elemLimit < maxPageElements {
 			return pbList{}, 0, 0, errCumulativeElements
 		}
 		return pbList{}, 0, 0, fmt.Errorf("decode page: %w", err)
@@ -504,376 +502,149 @@ func (c *Client) fetchPage(ctx context.Context, page int, wireLimit int64, elemL
 }
 
 // ---- Bounded token-level page decoder ----
-
-// pageDecoder is a schema-aware bounded decoder for one pbList page. Unlike
+//
+// decodePage and the decode* functions below form a schema-aware bounded
+// decoder for one pbList page, built on jsonx/bounded. Unlike
 // json.Unmarshal - which materializes the entire decoded value before any
-// caller-side count check can run, letting compact serialized elements amplify
-// a wire-capped body into decoded structs and slice backing arrays far beyond
-// maxPageBytes - it walks the token stream and enforces every cardinality cap
-// (perPage items, maxTorrentsPerEntry, maxFilesPerTorrent, maxTagsPerTorrent,
-// and the aggregate maxPageElements) BEFORE appending each element, so
-// allocation never scales with hostile array cardinality. Scalar values decode
-// via json.Decoder.Decode for stdlib-identical type handling; known keys
-// match case-insensitively (json.Unmarshal's fallback rule for field names);
-// unknown fields are token-skipped without materializing; a JSON null anywhere
-// a container is expected yields the zero value, matching json.Unmarshal.
-type pageDecoder struct {
-	dec      *json.Decoder
-	elements int
-	limit    int
-}
+// caller-side count check can run, letting compact serialized elements
+// amplify a wire-capped body into decoded structs and slice backing arrays
+// far beyond maxPageBytes - the token walk enforces every cardinality cap
+// (perPage items, maxTorrentsPerEntry, maxFilesPerTorrent,
+// maxTagsPerTorrent, and the aggregate maxPageElements budget) BEFORE
+// appending each element, so allocation never scales with hostile array
+// cardinality. The library owns the json.Unmarshal-parity building blocks
+// (null-into-container no-ops, duplicate-key merge via each Array call's
+// prior argument, unknown-field token skipping, UseNumber so a skipped
+// 1e1000 stays valid); the dispatch functions below own only which keys
+// exist, their scalar targets, and their caps. Keys match with
+// strings.EqualFold, json.Unmarshal's case-insensitive field fallback.
 
-// decodePage decodes one page body under the pageDecoder bounds, rejecting
+// decodePage decodes one page body under the bounded-decoder caps, rejecting
 // trailing data after the top-level value (matching json.Unmarshal
 // strictness). elemLimit is the aggregate element budget for this page (the
 // per-page bound, possibly reduced to the fetch-wide remaining allowance by
 // fetchAndAppend); the decoded element count is returned so the caller can
 // charge the fetch-wide budget.
 func decodePage(body []byte, elemLimit int) (pbList, int, error) {
-	dec := json.NewDecoder(bytes.NewReader(body))
-	// UseNumber keeps Token from converting unknown-field numbers to float64
-	// (which rejects syntactically valid values like 1e1000 that
-	// json.Unmarshal's field skipping accepts); Decode into the known
-	// int/string/bool fields is unaffected.
-	dec.UseNumber()
-	d := &pageDecoder{dec: dec, limit: elemLimit}
-	list, err := d.decodeList()
+	d := bounded.NewDecoder(bytes.NewReader(body), elemLimit)
+	list, err := decodeList(d)
 	if err != nil {
 		return pbList{}, 0, err
 	}
-	if _, err := d.dec.Token(); !errors.Is(err, io.EOF) {
-		if err != nil {
-			return pbList{}, 0, fmt.Errorf("trailing data after page object: %w", err)
-		}
-		return pbList{}, 0, errors.New("trailing data after page object")
+	if err := d.End(); err != nil {
+		return pbList{}, 0, err
 	}
-	return list, d.elements, nil
+	return list, d.Elements(), nil
 }
 
-// count charges one decoded array element against the page's aggregate
-// element budget.
-func (d *pageDecoder) count() error {
-	d.elements++
-	if d.elements > d.limit {
-		return fmt.Errorf("page %w %d (upstream misbehaving)", errElementCap, d.limit)
-	}
-	return nil
-}
-
-// open consumes the opening delimiter of a container. It reports ok=false
-// (without error) for a JSON null, matching json.Unmarshal's null-into-value
-// no-op, and errors on any other token.
-func (d *pageDecoder) open(delim json.Delim) (ok bool, err error) {
-	t, err := d.dec.Token()
-	if err != nil {
-		return false, err
-	}
-	if t == nil {
-		return false, nil
-	}
-	if got, isDelim := t.(json.Delim); !isDelim || got != delim {
-		return false, fmt.Errorf("expected %q, got %v", delim, t)
-	}
-	return true, nil
-}
-
-// close consumes a container's closing delimiter (the token json.Decoder
-// guarantees once More reports false).
-func (d *pageDecoder) close() error {
-	_, err := d.dec.Token()
-	return err
-}
-
-// key reads the next object key.
-func (d *pageDecoder) key() (string, error) {
-	t, err := d.dec.Token()
-	if err != nil {
-		return "", err
-	}
-	s, isString := t.(string)
-	if !isString {
-		return "", fmt.Errorf("expected object key, got %v", t)
-	}
-	return s, nil
-}
-
-// skip consumes and discards one whole value (scalar or container) without
-// materializing it.
-func (d *pageDecoder) skip() error {
-	depth := 0
-	for {
-		t, err := d.dec.Token()
-		if err != nil {
-			return err
-		}
-		if delim, isDelim := t.(json.Delim); isDelim {
-			switch delim {
-			case '{', '[':
-				depth++
-			case '}', ']':
-				depth--
-			}
-		}
-		if depth == 0 {
-			return nil
-		}
-	}
-}
-
-// decodeList decodes the pbList envelope.
-func (d *pageDecoder) decodeList() (pbList, error) {
+// decodeList decodes the pbList envelope. The items array is capped at
+// perPage: the request asks for perPage records, so a page stuffing more is
+// upstream misbehavior and is rejected before the excess is decoded.
+func decodeList(d *bounded.Decoder) (pbList, error) {
 	var list pbList
-	ok, err := d.open('{')
-	if err != nil || !ok {
-		return list, err
-	}
-	for d.dec.More() {
-		k, err := d.key()
-		if err != nil {
-			return list, err
-		}
+	err := d.Object(func(k string) error {
 		switch {
 		case strings.EqualFold(k, "items"):
-			list.Items, err = d.decodeItems(list.Items)
+			var err error
+			list.Items, err = bounded.Array(d, list.Items, perPage, "page items",
+				func(e *pbEntry) error { return decodeEntry(d, e) })
+			return err
 		case strings.EqualFold(k, "totalItems"):
-			err = d.dec.Decode(&list.TotalItems)
+			return d.Decode(&list.TotalItems)
 		case strings.EqualFold(k, "totalPages"):
-			err = d.dec.Decode(&list.TotalPages)
+			return d.Decode(&list.TotalPages)
 		default:
-			err = d.skip()
+			return d.Skip()
 		}
-		if err != nil {
-			return list, err
-		}
-	}
-	return list, d.close()
+	})
+	return list, err
 }
 
-// decodeBoundedArray decodes one JSON array with the package's shared
-// bounded-decode lifecycle: per-parent cap check BEFORE the element is
-// counted, count() budget charge BEFORE growForIndex, decode INTO the
-// regrown element (json.Unmarshal's duplicate-key merge), and truncateArray
-// finalization (SetLen/replace parity). prior is the already-decoded value
-// of a previous occurrence of the key; what names the array in the cap
-// error message.
-func decodeBoundedArray[T any](d *pageDecoder, prior []T, maxElems int, what string, decodeElem func(*T) error) ([]T, error) {
-	ok, err := d.open('[')
-	if err != nil || !ok {
-		return nil, err
-	}
-	s := prior
-	n := 0
-	for d.dec.More() {
-		if n >= maxElems {
-			return nil, fmt.Errorf("%s exceeded cap %d (upstream misbehaving)", what, maxElems)
-		}
-		if err := d.count(); err != nil {
-			return nil, err
-		}
-		s = growForIndex(s, n)
-		if err := decodeElem(&s[n]); err != nil {
-			return nil, err
-		}
-		n++
-	}
-	return truncateArray(s, n), d.close()
-}
-
-// decodeItems decodes the items array, capped at perPage: the request asks
-// for perPage records, so a page stuffing more is upstream misbehavior and is
-// rejected before the excess is decoded. prior is the already-decoded value
-// of a previous occurrence of the key: elements decode INTO the existing
-// slice (regrown via growForIndex, so a within-capacity regrow re-exposes the
-// retained backing element like stdlib) and the result is finalized by
-// truncateArray, matching json.Unmarshal's duplicate-key slice semantics
-// (element-wise field merge, SetLen truncation, backing replaced on an empty
-// array).
-func (d *pageDecoder) decodeItems(prior []pbEntry) ([]pbEntry, error) {
-	return decodeBoundedArray(d, prior, perPage, "page items", d.decodeEntry)
-}
-
-// decodeEntry decodes one entries record field-wise into e, matching
-// json.Unmarshal's duplicate-key semantics: a JSON null element is a no-op
-// that preserves the existing value, and an object only overwrites the
-// fields it actually carries. Field-specific decode behavior lives in
-// decodeEntryField; this function owns only the open/key/dispatch/close
-// token-stream lifecycle.
-func (d *pageDecoder) decodeEntry(e *pbEntry) error {
-	ok, err := d.open('{')
-	if err != nil || !ok {
-		return err
-	}
-	for d.dec.More() {
-		k, err := d.key()
-		if err != nil {
-			return err
-		}
-		if err := d.decodeEntryField(e, k); err != nil {
-			return err
-		}
-	}
-	return d.close()
+// decodeEntry decodes one entries record field-wise into e; the Object walk
+// gives json.Unmarshal's duplicate-key semantics (a JSON null element is a
+// no-op that preserves the existing value, and an object only overwrites
+// the fields it actually carries).
+func decodeEntry(d *bounded.Decoder, e *pbEntry) error {
+	return d.Object(func(k string) error { return decodeEntryField(d, e, k) })
 }
 
 // decodeEntryField decodes one entries-record field (or skips an unknown
-// key), preserving decodeEntry's duplicate-key semantics for each field.
-func (d *pageDecoder) decodeEntryField(e *pbEntry, key string) error {
+// key).
+func decodeEntryField(d *bounded.Decoder, e *pbEntry, key string) error {
 	switch {
 	case strings.EqualFold(key, "notes"):
-		return d.dec.Decode(&e.Notes)
+		return d.Decode(&e.Notes)
 	case strings.EqualFold(key, "theoreticalBest"):
-		return d.dec.Decode(&e.TheoreticalBest)
+		return d.Decode(&e.TheoreticalBest)
 	case strings.EqualFold(key, "updated"):
-		return d.dec.Decode(&e.Updated)
+		return d.Decode(&e.Updated)
 	case strings.EqualFold(key, "alID"):
-		return d.dec.Decode(&e.AlID)
+		return d.Decode(&e.AlID)
 	case strings.EqualFold(key, "incomplete"):
-		return d.dec.Decode(&e.Incomplete)
+		return d.Decode(&e.Incomplete)
 	case strings.EqualFold(key, "expand"):
-		// json.Unmarshal merges duplicate object keys field-wise and
-		// treats null into a non-pointer struct as a no-op; decode into
-		// the existing value so neither a duplicate "expand":null nor a
-		// duplicate/partial "expand":{} can wipe an already-decoded trs.
-		return d.decodeExpand(&e.Expand)
+		// Decode into the existing value so neither a duplicate
+		// "expand":null nor a duplicate/partial "expand":{} can wipe an
+		// already-decoded trs (Object's null no-op + field-wise merge).
+		return decodeExpand(d, &e.Expand)
 	default:
-		return d.skip()
+		return d.Skip()
 	}
 }
 
-// decodeExpand decodes the expand relation envelope field-wise into ex,
-// matching json.Unmarshal's struct semantics for duplicate keys: a JSON null
-// is a no-op (any previously decoded value stays), and an object only
-// overwrites the fields it actually carries, so a repeated "expand" that
-// omits "trs" leaves already-decoded torrents in place.
-func (d *pageDecoder) decodeExpand(ex *pbExpand) error {
-	ok, err := d.open('{')
-	if err != nil || !ok {
-		return err
-	}
-	for d.dec.More() {
-		k, err := d.key()
-		if err != nil {
-			return err
-		}
-		if strings.EqualFold(k, "trs") {
-			ex.Trs, err = d.decodeTorrents(ex.Trs)
-		} else {
-			err = d.skip()
-		}
-		if err != nil {
-			return err
-		}
-	}
-	return d.close()
-}
-
-// decodeTorrents decodes one entry's expanded trs relation, capped at
-// maxTorrentsPerEntry. prior is the already-decoded value of a previous
-// occurrence of the key: elements decode INTO the existing slice (regrown
-// via growForIndex) and the result is finalized by truncateArray, matching
+// decodeExpand decodes the expand relation envelope field-wise into ex. The
+// trs relation is capped at maxTorrentsPerEntry; a repeated "trs" decodes
+// INTO the existing slice (bounded.Array's prior), matching
 // json.Unmarshal's duplicate-key slice semantics.
-func (d *pageDecoder) decodeTorrents(prior []Torrent) ([]Torrent, error) {
-	return decodeBoundedArray(d, prior, maxTorrentsPerEntry, "torrents per entry", d.decodeTorrent)
+func decodeExpand(d *bounded.Decoder, ex *pbExpand) error {
+	return d.Object(func(k string) error {
+		if strings.EqualFold(k, "trs") {
+			var err error
+			ex.Trs, err = bounded.Array(d, ex.Trs, maxTorrentsPerEntry, "torrents per entry",
+				func(t *Torrent) error { return decodeTorrent(d, t) })
+			return err
+		}
+		return d.Skip()
+	})
 }
 
-// decodeTorrent decodes one torrent record field-wise into t, matching
-// json.Unmarshal's duplicate-key semantics: a JSON null element is a no-op
-// that preserves the existing value, and an object only overwrites the
-// fields it actually carries. Field-specific decode behavior lives in
-// decodeTorrentField; this function owns only the open/key/dispatch/close
-// token-stream lifecycle.
-func (d *pageDecoder) decodeTorrent(t *Torrent) error {
-	ok, err := d.open('{')
-	if err != nil || !ok {
-		return err
-	}
-	for d.dec.More() {
-		k, err := d.key()
-		if err != nil {
-			return err
-		}
-		if err := d.decodeTorrentField(t, k); err != nil {
-			return err
-		}
-	}
-	return d.close()
+// decodeTorrent decodes one torrent record field-wise into t (see
+// decodeEntry for the duplicate-key semantics the Object walk provides).
+func decodeTorrent(d *bounded.Decoder, t *Torrent) error {
+	return d.Object(func(k string) error { return decodeTorrentField(d, t, k) })
 }
 
 // decodeTorrentField decodes one torrent-record field (or skips an unknown
-// key), preserving decodeTorrent's duplicate-key semantics for each field:
-// the nested-array fields decode INTO the existing slice (element-wise merge
-// plus truncation, matching json.Unmarshal's duplicate-key slice semantics).
-func (d *pageDecoder) decodeTorrentField(t *Torrent, key string) error {
+// key). The files and tags arrays are capped per torrent; a File is flat
+// (two scalar fields), so per-element json.Decoder.Decode cannot amplify
+// beyond the already-capped raw bytes.
+func decodeTorrentField(d *bounded.Decoder, t *Torrent, key string) error {
 	switch {
 	case strings.EqualFold(key, "releaseGroup"):
-		return d.dec.Decode(&t.ReleaseGroup)
+		return d.Decode(&t.ReleaseGroup)
 	case strings.EqualFold(key, "tracker"):
-		return d.dec.Decode(&t.Tracker)
+		return d.Decode(&t.Tracker)
 	case strings.EqualFold(key, "infoHash"):
-		return d.dec.Decode(&t.InfoHash)
+		return d.Decode(&t.InfoHash)
 	case strings.EqualFold(key, "url"):
-		return d.dec.Decode(&t.URL)
+		return d.Decode(&t.URL)
 	case strings.EqualFold(key, "isBest"):
-		return d.dec.Decode(&t.IsBest)
+		return d.Decode(&t.IsBest)
 	case strings.EqualFold(key, "dualAudio"):
-		return d.dec.Decode(&t.DualAudio)
+		return d.Decode(&t.DualAudio)
 	case strings.EqualFold(key, "files"):
 		var err error
-		t.Files, err = d.decodeFiles(t.Files)
+		t.Files, err = bounded.Array(d, t.Files, maxFilesPerTorrent, "files per torrent",
+			func(f *File) error { return d.Decode(f) })
 		return err
 	case strings.EqualFold(key, "tags"):
 		var err error
-		t.Tags, err = d.decodeTags(t.Tags)
+		t.Tags, err = bounded.Array(d, t.Tags, maxTagsPerTorrent, "tags per torrent",
+			func(s *string) error { return d.Decode(s) })
 		return err
 	default:
-		return d.skip()
+		return d.Skip()
 	}
-}
-
-// decodeFiles decodes one torrent's file list, capped at maxFilesPerTorrent.
-// A File is flat (two scalar fields), so per-element json.Decoder.Decode
-// cannot amplify beyond the already-capped raw bytes. prior is the
-// already-decoded value of a previous occurrence of the key: Decode into an
-// existing element (regrown via growForIndex) gives json.Unmarshal's
-// duplicate-key merge and null-no-op semantics, and truncateArray finalizes
-// the result to the new array's length.
-func (d *pageDecoder) decodeFiles(prior []File) ([]File, error) {
-	return decodeBoundedArray(d, prior, maxFilesPerTorrent, "files per torrent", func(f *File) error { return d.dec.Decode(f) })
-}
-
-// decodeTags decodes one torrent's tag list, capped at maxTagsPerTorrent.
-// prior is the already-decoded value of a previous occurrence of the key
-// (see decodeFiles).
-func (d *pageDecoder) decodeTags(prior []string) ([]string, error) {
-	return decodeBoundedArray(d, prior, maxTagsPerTorrent, "tags per torrent", func(s *string) error { return d.dec.Decode(s) })
-}
-
-// growForIndex ensures the slice covers index n, matching json.Unmarshal's
-// slice-regrow semantics for duplicate keys: within retained capacity the
-// existing backing element is re-exposed (stdlib SetLen), beyond capacity a
-// zero element is appended (stdlib Grow reallocates; the new tail is zero).
-func growForIndex[T any](s []T, n int) []T {
-	if n < len(s) {
-		return s
-	}
-	if n < cap(s) {
-		return s[:n+1]
-	}
-	var zero T
-	return append(s, zero)
-}
-
-// truncateArray finalizes a decoded array at n elements, matching
-// json.Unmarshal's end-of-array semantics: an empty array REPLACES the
-// slice (stdlib MakeSlice(0,0) - no retained backing a later duplicate
-// occurrence could re-expose), a non-empty one truncates in place
-// (stdlib SetLen). Returning nil for the empty case stays inside the
-// documented nil-vs-empty divergence no consumer observes.
-func truncateArray[T any](s []T, n int) []T {
-	if n == 0 {
-		return nil
-	}
-	return s[:n]
 }
 
 // setHeaders sets the descriptive User-Agent and JSON Accept header on each

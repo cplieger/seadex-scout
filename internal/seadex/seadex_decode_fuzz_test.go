@@ -2,22 +2,26 @@ package seadex
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/cplieger/jsonx/bounded"
 )
 
-// FuzzDecodePage is a differential fuzz target for the hand-written
-// token-level page decoder: for any body, decodePage must match the
-// json.Unmarshal oracle it documents parity with. If json.Unmarshal accepts a
-// body, decodePage must either accept it with a deeply-equal pbList or reject
-// it for exactly one reason - a cardinality cap ("exceeded cap"), the one
-// deliberate divergence from stdlib. If json.Unmarshal rejects a body,
-// decodePage must reject it too (never accept what stdlib refuses). This
-// guards the whole parity surface at once: case-insensitive key matching,
-// null-into-container no-ops, duplicate-key overwrite order, trailing-data
-// strictness, and scalar type errors. Empty arrays are normalized before the
-// comparison because no consumer distinguishes nil from empty slices.
+// FuzzDecodePage is a differential fuzz target for the schema-aware bounded
+// page decoder: for any body, decodePage must match the json.Unmarshal
+// oracle it documents parity with. If json.Unmarshal accepts a body,
+// decodePage must either accept it with a deeply-equal pbList or reject it
+// for exactly one reason - a jsonx/bounded cardinality cap or element
+// budget, the one deliberate divergence from stdlib. If json.Unmarshal
+// rejects a body, decodePage must reject it too (never accept what stdlib
+// refuses). This guards the whole parity surface at once: case-insensitive
+// key matching, null-into-container no-ops, duplicate-key overwrite order,
+// trailing-data strictness, and scalar type errors. Empty arrays are
+// normalized before the comparison because no consumer distinguishes nil
+// from empty slices.
 func FuzzDecodePage(f *testing.F) {
 	seeds := []string{
 		`{"totalItems":1,"totalPages":1,"items":[{"alID":7,"notes":"n","theoreticalBest":"tb","updated":"2026-01-02 03:04:05.000Z","incomplete":true,"expand":{"trs":[{"releaseGroup":"PMR","tracker":"Nyaa","infoHash":"abc","url":"https://nyaa.si/view/1","isBest":true,"dualAudio":true,"files":[{"name":"a.mkv","length":1}],"tags":["best"]}]}}]}`,
@@ -73,8 +77,9 @@ func FuzzDecodePage(f *testing.F) {
 		var want pbList
 		wantErr := json.Unmarshal(body, &want)
 		if gotErr != nil {
-			if wantErr == nil && !strings.Contains(gotErr.Error(), "exceeded cap") {
-				t.Errorf("decodePage(%q) = error %v, but json.Unmarshal accepts it (only cardinality caps may diverge)", body, gotErr)
+			boundsCap := errors.Is(gotErr, bounded.ErrArrayCap) || errors.Is(gotErr, bounded.ErrElementBudget)
+			if wantErr == nil && !boundsCap {
+				t.Errorf("decodePage(%q) = error %v, but json.Unmarshal accepts it (only cardinality caps and the element budget may diverge)", body, gotErr)
 			}
 			return
 		}
