@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"strings"
 
 	"github.com/cplieger/jsonx"
+	"github.com/cplieger/jsonx/bounded"
 )
 
 // Fribb type strings. MOVIE routes to Radarr (TMDB movie / IMDb); every other
@@ -130,22 +130,25 @@ func parseFribb(data []byte, log *slog.Logger) ([]Record, error) {
 // records it reports the top-level element count (see fribbParseResult), the
 // denominator the refresh acceptance floors validate coverage against.
 func parseFribbForRefresh(data []byte, log *slog.Logger) (fribbParseResult, error) {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	tok, err := dec.Token()
+	dec := bounded.NewDecoder(bytes.NewReader(data), 0)
+	ok, err := dec.Open('[')
 	if err != nil {
-		return fribbParseResult{}, err
+		return fribbParseResult{}, fmt.Errorf("mapping: Fribb list is not a JSON array: %w", err)
 	}
-	if d, ok := tok.(json.Delim); !ok || d != '[' {
-		return fribbParseResult{}, fmt.Errorf("mapping: Fribb list is not a JSON array (got %T)", tok)
+	if !ok {
+		// bounded.Open reports a JSON null as ok=false without error (the
+		// Unmarshal null-into-slice no-op); for the Fribb map an absent list
+		// is as unusable as a non-array.
+		return fribbParseResult{}, errors.New("mapping: Fribb list is not a JSON array (got null)")
 	}
 	records, skipped, dropped, firstErr, err := decodeFribbRecords(dec)
 	if err != nil {
 		return fribbParseResult{}, err
 	}
-	if _, err := dec.Token(); err != nil { // consume the closing ']'
+	if err := dec.Close(); err != nil { // consume the closing ']'
 		return fribbParseResult{}, err
 	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+	if err := dec.End(); err != nil {
 		return fribbParseResult{}, errors.New("mapping: trailing data after Fribb list")
 	}
 	if skipped > 0 {
@@ -166,7 +169,7 @@ func parseFribbForRefresh(data []byte, log *slog.Logger) (fribbParseResult, erro
 // the whole map, and rejecting a list that exceeds maxFribbRecords (the
 // errRecordCapExceeded sentinel) before the excess elements are decoded. It
 // leaves the decoder positioned on the array's closing token.
-func decodeFribbRecords(dec *json.Decoder) (records []Record, skipped, dropped int, firstErr, err error) {
+func decodeFribbRecords(dec *bounded.Decoder) (records []Record, skipped, dropped int, firstErr, err error) {
 	seen := 0
 	for dec.More() {
 		if seen == maxFribbRecords {
@@ -198,7 +201,7 @@ func decodeFribbRecords(dec *json.Decoder) (records []Record, skipped, dropped i
 // first (decodeErr) is a tolerated per-record decode failure the caller skips
 // and counts; the second (streamErr) is a fatal RawMessage stream-decode
 // failure that rejects the whole document.
-func decodeNextFribbRecord(dec *json.Decoder) (rec Record, ok bool, decodeErr, streamErr error) {
+func decodeNextFribbRecord(dec *bounded.Decoder) (rec Record, ok bool, decodeErr, streamErr error) {
 	var msg json.RawMessage
 	if err := dec.Decode(&msg); err != nil {
 		return Record{}, false, nil, err

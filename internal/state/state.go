@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -22,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cplieger/atomicfile/v2"
+	"github.com/cplieger/jsonx/bounded"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
@@ -173,32 +173,6 @@ func NewReadOnlyStore(path string, logger *slog.Logger) *Store {
 // pass), so an hour cannot race a concurrent writer in another process.
 const staleTempMaxAge = time.Hour
 
-// scanVersionField reads one object member from the envelope, reporting
-// whether it was a valid "version" field (matched) and whether the member
-// decoded cleanly (ok=false signals a decode error; the caller returns
-// 0, false).
-func scanVersionField(dec *json.Decoder, version *int) (matched, ok bool) {
-	tok, err := dec.Token()
-	if err != nil {
-		return false, false
-	}
-	key, isStr := tok.(string)
-	if !isStr {
-		return false, false
-	}
-	var raw json.RawMessage
-	if err := dec.Decode(&raw); err != nil {
-		return false, false
-	}
-	if !strings.EqualFold(key, "version") {
-		return false, true
-	}
-	if err := json.Unmarshal(raw, version); err != nil {
-		return false, false
-	}
-	return true, true
-}
-
 // newerSchemaVersion independently decodes the persisted envelope's schema
 // version discriminator straight from the wire bytes, reporting the decoded
 // version and whether it is newer than SchemaVersion. Load must never read
@@ -217,26 +191,26 @@ func scanVersionField(dec *json.Decoder, version *int) (matched, ok bool) {
 // quarantined. Any failure reports (0, false) and the caller falls through to
 // the quarantine path.
 func newerSchemaVersion(data []byte) (int, bool) {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	tok, err := dec.Token()
-	if err != nil || tok != json.Delim('{') {
-		return 0, false
-	}
+	dec := bounded.NewDecoder(bytes.NewReader(data), 0)
 	version, found := 0, false
-	for dec.More() {
-		matched, ok := scanVersionField(dec, &version)
-		if !ok {
-			return 0, false
+	err := dec.Object(func(key string) error {
+		var raw json.RawMessage
+		if decodeErr := dec.Decode(&raw); decodeErr != nil {
+			return decodeErr
 		}
-		if matched {
-			found = true
+		if !strings.EqualFold(key, "version") {
+			return nil
 		}
-	}
-	if _, err := dec.Token(); err != nil {
-		return 0, false
-	}
-	var trailing json.RawMessage
-	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if unmarshalErr := json.Unmarshal(raw, &version); unmarshalErr != nil {
+			return unmarshalErr
+		}
+		found = true
+		return nil
+	})
+	// A top-level null is Object's documented no-op (found stays false); any
+	// other non-object, a malformed member, or trailing data reports
+	// (0, false) so the caller falls through to the quarantine path.
+	if err != nil || dec.End() != nil {
 		return 0, false
 	}
 	return version, found && version > SchemaVersion

@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -26,6 +25,7 @@ import (
 
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/httpx/v3"
+	"github.com/cplieger/jsonx/bounded"
 	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/degradation"
@@ -1040,8 +1040,8 @@ func parseOverrides(data []byte) (overrideSet, error) {
 	if len(trimmedData) == 0 || trimmedData[0] != '[' {
 		return overrideSet{}, errors.New("mapping: overrides must be a JSON array")
 	}
-	dec := json.NewDecoder(bytes.NewReader(trimmedData))
-	if _, err := dec.Token(); err != nil { // the opening '['
+	dec := bounded.NewDecoder(bytes.NewReader(trimmedData), 0)
+	if _, err := dec.Open('['); err != nil { // the '['-first-byte guard above rules out null
 		return overrideSet{}, err
 	}
 	var set overrideSet
@@ -1057,10 +1057,10 @@ func parseOverrides(data []byte) (overrideSet, error) {
 			return overrideSet{}, err
 		}
 	}
-	if _, err := dec.Token(); err != nil { // the closing ']'
+	if err := dec.Close(); err != nil { // the closing ']'
 		return overrideSet{}, err
 	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+	if err := dec.End(); err != nil {
 		return overrideSet{}, errors.New("mapping: overrides carry data after the JSON array")
 	}
 	slices.Sort(set.unknown)

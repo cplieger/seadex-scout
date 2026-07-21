@@ -27,6 +27,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cplieger/httpx/v3"
+	"github.com/cplieger/jsonx/bounded"
 	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/titlekey"
@@ -526,38 +527,28 @@ type boundedMediaList struct {
 }
 
 // UnmarshalJSON implements the bounded element-at-a-time decode described on
-// boundedMediaList. Over-cardinality is an envelope error (the whole batch
-// fails), not an ErrBatchRecord: the response shape itself violates the
-// query's perPage contract, so no record in it is trustworthy.
+// boundedMediaList via jsonx/bounded's Array (cap checked BEFORE the element
+// is decoded, so over-cardinality never materializes the excess).
+// Over-cardinality is an envelope error (the whole batch fails), not an
+// ErrBatchRecord: the response shape itself violates the query's perPage
+// contract, so no record in it is trustworthy.
 func (l *boundedMediaList) UnmarshalJSON(data []byte) error {
 	// encoding/json processes duplicate object keys in order, invoking this
 	// method once per occurrence on the same receiver. Reset before each
 	// value so a later null cannot retain an earlier array.
 	l.records = nil
 	l.set = false
+	// The explicit null pre-check STAYS app-side: bounded.Array nulls to
+	// (nil, nil) by Unmarshal parity, but this field's contract must read
+	// null as UNSET (rejected like a missing field), never as a valid empty
+	// array.
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
-		return nil // explicit null stays unset, rejected like a missing field
+		return nil
 	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	tok, err := dec.Token()
+	dec := bounded.NewDecoder(bytes.NewReader(data), 0)
+	records, err := bounded.Array(dec, nil, batchSize, "media",
+		func(m *gqlMedia) error { return dec.Decode(m) })
 	if err != nil {
-		return fmt.Errorf("media: %w", err)
-	}
-	if delim, ok := tok.(json.Delim); !ok || delim != '[' {
-		return errors.New("media is not an array")
-	}
-	var records []gqlMedia
-	for dec.More() {
-		if len(records) == batchSize {
-			return fmt.Errorf("media array exceeds %d elements", batchSize)
-		}
-		var m gqlMedia
-		if err := dec.Decode(&m); err != nil {
-			return fmt.Errorf("media element %d: %w", len(records), err)
-		}
-		records = append(records, m)
-	}
-	if _, err := dec.Token(); err != nil { // consume the closing ']'
 		return fmt.Errorf("media: %w", err)
 	}
 	l.records = records
