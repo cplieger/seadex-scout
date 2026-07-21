@@ -17,12 +17,10 @@
 package config
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/url"
 	"strconv"
@@ -254,10 +252,14 @@ func Load(path string) (Config, error) {
 		// '<secret>' referenced"), and main logs this error at startup.
 		return Config{}, fmt.Errorf("parse config %s: %w", path, sanitizeYAMLError(err))
 	}
-	if err := checkSingleDocument(data); err != nil {
+	// Both strict-load checks run on the raw pre-expansion bytes (see their
+	// godoc): the multi-document error is static (safe unsanitized), while
+	// the unknown-key error can embed document content and rides the same
+	// fail-closed sanitizer as every other decode error here.
+	if err := yamlenv.CheckSingleDocument(data); err != nil {
 		return Config{}, fmt.Errorf("parse config %s: %w", path, err)
 	}
-	if err := checkUnknownKeys(data); err != nil {
+	if err := yamlenv.CheckUnknownKeys(data, &fileConfig{}); err != nil {
 		return Config{}, fmt.Errorf("parse config %s: %w", path, sanitizeYAMLError(err))
 	}
 	if len(refs) > 0 {
@@ -294,51 +296,6 @@ func loadExpandedDoc(path string) (doc *yaml.Node, refs []string, raw []byte, er
 	}
 	refs = yamlenv.Expand(&node, isAllowedEnvVar)
 	return &node, refs, raw, nil
-}
-
-// checkUnknownKeys re-decodes the raw document with KnownFields(true) into a
-// throwaway fileConfig so a key the on-disk shape does not declare fails the
-// load ("line N: field X not found in type ..."), instead of being silently
-// ignored (e.g. a top-level anime_bytes or a filters.animebytes leaving the
-// real animebytes toggle false). It runs on the pre-expansion bytes - Load's
-// yaml.Node path has no KnownFields switch - so line numbers point at the file
-// the operator wrote, and expansion (string values only, keys stay literal)
-// cannot change which keys exist. Any accompanying type-error entries carry
-// the literal ${VAR}, not an expanded secret, and every entry still passes
-// through sanitizeYAMLError at the Load call site.
-func checkUnknownKeys(data []byte) error {
-	dec := yaml.NewDecoder(bytes.NewReader(data))
-	dec.KnownFields(true)
-	var probe fileConfig
-	if err := dec.Decode(&probe); err != nil && !errors.Is(err, io.EOF) {
-		return err
-	}
-	return nil
-}
-
-// checkSingleDocument rejects a config file containing more than one YAML
-// document: Load's yaml.Unmarshal and checkUnknownKeys both consume only the
-// first document, so everything below a stray "---" separator would otherwise
-// be silently ignored — the opposite of the loader's fail-loud posture. Like
-// checkUnknownKeys it runs on the raw pre-expansion bytes (expansion is
-// post-parse and string-values only, so it cannot change how many documents
-// exist). The error is fully static — it embeds no file content — so the Load
-// call site returns it without sanitizeYAMLError.
-func checkSingleDocument(data []byte) error {
-	dec := yaml.NewDecoder(bytes.NewReader(data))
-	var doc yaml.Node
-	if err := dec.Decode(&doc); err != nil {
-		// Empty or unparseable first document: the parse and decode steps own
-		// those diagnostics; this check owns only document multiplicity.
-		return nil
-	}
-	if err := dec.Decode(&doc); !errors.Is(err, io.EOF) {
-		// Anything but EOF — a second document (even the empty one a trailing
-		// separator produces) or a syntax error inside it — means the file
-		// carries content beyond the first document.
-		return errors.New("config contains multiple YAML documents; remove the '---' separator")
-	}
-	return nil
 }
 
 // sanitizeYAMLError rewrites a yaml parse/decode error via

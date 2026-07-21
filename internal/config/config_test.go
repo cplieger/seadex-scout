@@ -904,9 +904,11 @@ func TestLoadRejectsMistypedKeys(t *testing.T) {
 // file loudly — including the empty trailing document a stray end-of-file
 // separator produces — while trailing whitespace/comments and a leading
 // document-start marker (both still single-document files) keep loading.
+// The check itself is yamlenv.CheckSingleDocument; this is the consumer
+// contract pin, asserting its static sentinel surfaces through Load's wrap.
 func TestLoadRejectsMultiDocumentConfig(t *testing.T) {
 	const arr = "sonarr:\n  enabled: true\n  url: http://sonarr:8989\n  api_key: k\n"
-	const wantMsg = "config contains multiple YAML documents; remove the '---' separator"
+	const wantMsg = "more than one YAML document; remove the '---' separator"
 	write := func(t *testing.T, content string) string {
 		t.Helper()
 		path := filepath.Join(t.TempDir(), "config.yaml")
