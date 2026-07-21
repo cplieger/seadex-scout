@@ -813,7 +813,11 @@ func (l *Loader) applyOverrides(ctx context.Context, idx *Index) {
 			"path", l.overridesPath)
 	}
 	if set.skipped > 0 {
-		l.log.Warn("mapping: overrides missing anilist_id skipped", "skipped", set.skipped, "path", l.overridesPath)
+		l.log.Warn("mapping: overrides with missing or invalid anilist_id skipped", "skipped", set.skipped, "path", l.overridesPath)
+	}
+	if set.oversized > 0 {
+		l.log.Warn("mapping: overrides with oversized id arrays skipped",
+			"skipped", set.oversized, "max_ids", maxOverrideIDsPerRecord, "path", l.overridesPath)
 	}
 	if set.applied > 0 {
 		l.log.Info("mapping: applied overrides", "count", set.applied)
@@ -877,7 +881,19 @@ type overrideSet struct {
 	duplicates []int
 	applied    int
 	skipped    int
+	oversized  int
 }
+
+// maxOverrideIDsPerRecord caps one override record's tmdb_movies and imdb_ids
+// array lengths after normalization. The 4 MiB wire bound caps the FILE, not
+// the retained amplification: a compact, syntactically valid record can
+// otherwise fan a few bytes per entry into hundreds of thousands of retained
+// slice entries and reverse-catalogue index insertions (a local configuration
+// denial of service). One record maps ONE anime - the largest real franchise
+// overrides run a few dozen ids - so 64 is generous headroom; an over-cap
+// record is skipped loudly (the oversized counter's WARN), never silently
+// truncated.
+const maxOverrideIDsPerRecord = 64
 
 // knownOverrideKey reports whether key names an overrideKeys entry under the
 // same case-insensitive matching encoding/json applies when decoding into
@@ -930,8 +946,16 @@ func (set *overrideSet) applyRecord(raw json.RawMessage, seenKeys map[string]str
 	record.Type = NormalizeType(record.Type)
 	record.IMDbIDs = trimmed(record.IMDbIDs)
 	record.TmdbMovies = positiveInts(record.TmdbMovies)
-	if record.AniListID == 0 {
+	if record.AniListID <= 0 {
+		// Zero (missing) and negative alike: encoding/json decodes a negative
+		// anilist_id the tolerant Fribb decoders can never produce, and an
+		// indexed negative key matches no SeaDex lookup while still leaking
+		// into the reverse arr-ID catalogue (phantom recognized-anime rows).
 		set.skipped++
+		return nil
+	}
+	if len(record.TmdbMovies) > maxOverrideIDsPerRecord || len(record.IMDbIDs) > maxOverrideIDsPerRecord {
+		set.oversized++
 		return nil
 	}
 	set.applied++

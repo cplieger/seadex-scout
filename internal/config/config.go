@@ -729,7 +729,12 @@ func validateHTTPURL(name, rawURL string) error {
 		return fmt.Errorf("%s must not contain a URL fragment", name)
 	}
 	if port := u.Port(); port != "" {
-		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+		// ParseUint bounds the range; port 0 parses but is never a dialable
+		// destination (the wildcard "any port" in bind contexts only), so a
+		// config carrying it would start cleanly and then fail every later
+		// arr walk / proxied search at connect time - exactly the
+		// runnable-but-broken class these checks exist to reject.
+		if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
 			return fmt.Errorf("%s has an invalid port", name)
 		}
 	}

@@ -14,12 +14,14 @@ import (
 )
 
 // TestLoader_Load_logsSkippedOverrideCount pins the operator-visible skipped
-// count (zero-ID rows discarded during the parse stream): two zero-ID
-// overrides beside one valid entry must log skipped=2, not just leave the
-// index unpolluted.
+// count (non-positive-ID rows discarded during the parse stream): a zero-ID
+// and a NEGATIVE-ID override beside one valid entry must log skipped=2 - a
+// negative anilist_id is a key the tolerant Fribb decoders can never produce
+// and would otherwise be indexed unreachable yet leak into the reverse
+// arr-ID catalogue.
 func TestLoader_Load_logsSkippedOverrideCount(t *testing.T) {
 	overrides := filepath.Join(t.TempDir(), "overrides.json")
-	data := []byte(`[{"anilist_id":0,"type":"tv"},{"anilist_id":2,"type":"movie"},{"anilist_id":0,"type":"ova"}]`)
+	data := []byte(`[{"anilist_id":0,"type":"tv"},{"anilist_id":2,"type":"movie"},{"anilist_id":-7,"type":"ova"}]`)
 	if err := os.WriteFile(overrides, data, 0o644); err != nil {
 		t.Fatalf("write overrides: %v", err)
 	}
@@ -28,11 +30,44 @@ func TestLoader_Load_logsSkippedOverrideCount(t *testing.T) {
 	if _, _, err := l.Load(context.Background(), freshCache()); err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
-	if rec.CountExact("mapping: overrides missing anilist_id skipped") != 1 {
+	if rec.CountExact("mapping: overrides with missing or invalid anilist_id skipped") != 1 {
 		t.Fatalf("Load logs = %v, want one skipped-overrides warning", rec.Messages())
 	}
 	if !attrRendered(rec, "skipped", "2") {
 		t.Errorf("Load skipped count logs = %v, want skipped=2", rec.Messages())
+	}
+}
+
+// TestLoader_Load_skipsOversizedOverrideIDArrays pins the per-record
+// amplification cap: the 4 MiB wire bound caps the file, not what a compact
+// record can fan out into retained slices and reverse-catalogue index work,
+// so a record whose tmdb_movies (or imdb_ids) array exceeds
+// maxOverrideIDsPerRecord is skipped loudly - never applied, never silently
+// truncated - while its valid siblings still apply.
+func TestLoader_Load_skipsOversizedOverrideIDArrays(t *testing.T) {
+	ids := make([]string, maxOverrideIDsPerRecord+1)
+	for i := range ids {
+		ids[i] = strconv.Itoa(i + 1)
+	}
+	overrides := filepath.Join(t.TempDir(), "overrides.json")
+	data := []byte(`[{"anilist_id":5,"type":"movie","tmdb_movies":[` + strings.Join(ids, ",") + `]},{"anilist_id":2,"type":"movie"}]`)
+	if err := os.WriteFile(overrides, data, 0o644); err != nil {
+		t.Fatalf("write overrides: %v", err)
+	}
+	logger, rec := capture.New()
+	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
+	_, idx, err := l.Load(context.Background(), freshCache())
+	if err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if rec.CountExact("mapping: overrides with oversized id arrays skipped") != 1 {
+		t.Fatalf("Load logs = %v, want one oversized-overrides warning", rec.Messages())
+	}
+	if _, ok := idx.Lookup(5); ok {
+		t.Error("oversized override applied, want skipped")
+	}
+	if _, ok := idx.Lookup(2); !ok {
+		t.Error("valid sibling override not applied")
 	}
 }
 

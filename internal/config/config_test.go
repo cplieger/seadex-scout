@@ -263,6 +263,11 @@ func TestValidateRejectsMalformedURLs(t *testing.T) {
 	}{
 		{func(c *Config) { c.SonarrURL = "http://[::1" }, "unparseable sonarr url"},
 		{func(c *Config) { c.SonarrURL = "http://sonarr:99999" }, "out-of-range sonarr port"},
+		{func(c *Config) { c.SonarrURL = "http://sonarr:0" }, "port-zero sonarr url (parses but is never dialable)"},
+		{func(c *Config) {
+			c.IndexerAPIKey = "fk"
+			c.IndexerNyaaTorznabURL = "http://prowlarr:0/22/api"
+		}, "port-zero nyaa indexer url"},
 		{func(c *Config) {
 			c.IndexerAPIKey = "fk"
 			c.IndexerNyaaTorznabURL = "http://prowlarr:9696/22/api#copied"
