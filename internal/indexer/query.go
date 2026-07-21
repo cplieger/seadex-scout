@@ -274,20 +274,30 @@ func applyPaging(items []item, q url.Values) []item {
 func (ix *Indexer) feedFor(scope string) []item {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
+	var feed []journalItem
 	switch scope {
 	case upstreamNyaa:
 		if ix.cfg.NyaaTorznabURL == "" {
 			return nil
 		}
-		return ix.snap.NyaaFeed
+		feed = ix.snap.NyaaFeed
 	case upstreamAB:
 		if ix.cfg.ABTorznabURL == "" {
 			return nil
 		}
-		return ix.snap.ABFeed
+		feed = ix.snap.ABFeed
 	default:
 		return nil
 	}
+	// The serve boundary speaks the WIRE vocabulary only: strip the journal
+	// bookkeeping (never rendered) by projecting each record onto its
+	// embedded item, so the render path cannot depend on persisted-only
+	// fields.
+	items := make([]item, len(feed))
+	for i := range feed {
+		items[i] = feed[i].item
+	}
+	return items
 }
 
 // fetchRaw queries the scope's upstream and returns the raw results, before

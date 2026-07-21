@@ -587,7 +587,7 @@ func TestRebuildJournalItemShape(t *testing.T) {
 		t.Errorf("journal bookkeeping = key %q / alID %d, want nyaa:1961373 / 154587", pmrNyaa.Key, pmrNyaa.AniListID)
 	}
 
-	byKey := map[string]item{}
+	byKey := map[string]journalItem{}
 	for i := range snap.ABFeed {
 		byKey[snap.ABFeed[i].Key] = snap.ABFeed[i]
 	}
@@ -638,12 +638,9 @@ func TestRebuildCarriesUncuratedItemStoredRender(t *testing.T) {
 		ByHash: map[string]bool{},
 		ByKey:  map[string]bool{},
 		Seen:   map[string]bool{"nyaa:42": true},
-		NyaaFeed: []item{{
-			Title: "Stored Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42",
-			DownloadURL: "https://nyaa.si/download/42.torrent",
-			Key:         "nyaa:42", AniListID: 7,
-			FirstSeen: first, PubDate: first,
-		}},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "Stored Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: first}, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
+		},
 	})
 	if err := newTestWriter(path, "", false).Rebuild(context.Background(), nil, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -673,12 +670,9 @@ func TestRebuildDropsCarriedABItemWhenPasskeyRemoved(t *testing.T) {
 		ByHash: map[string]bool{},
 		ByKey:  map[string]bool{},
 		Seen:   map[string]bool{"ab:1167293": true},
-		ABFeed: []item{{
-			Title: "Frieren - S01 (BD Remux 1080p) [PMR]",
-			GUID:  "https://animebytes.tv/torrents.php?id=86576&torrentid=1167293",
-			Key:   "ab:1167293", AniListID: 154587,
-			FirstSeen: first, PubDate: first,
-		}},
+		ABFeed: []journalItem{
+			{item: item{Title: "Frieren - S01 (BD Remux 1080p) [PMR]", GUID: "https://animebytes.tv/torrents.php?id=86576&torrentid=1167293", PubDate: first}, Key: "ab:1167293", AniListID: 154587, FirstSeen: first},
+		},
 	})
 	entries := []seadex.Entry{{
 		AniListID: 154587,
@@ -711,12 +705,9 @@ func TestRebuildDropsCarriedNonCuratedABItemWhenPasskeyRemoved(t *testing.T) {
 		ByHash: map[string]bool{},
 		ByKey:  map[string]bool{},
 		Seen:   map[string]bool{"ab:1167293": true},
-		ABFeed: []item{{
-			Title: "Frieren - S01 (BD Remux 1080p) [PMR]",
-			GUID:  "https://animebytes.tv/torrents.php?id=86576&torrentid=1167293",
-			Key:   "ab:1167293", AniListID: 154587,
-			FirstSeen: first, PubDate: first,
-		}},
+		ABFeed: []journalItem{
+			{item: item{Title: "Frieren - S01 (BD Remux 1080p) [PMR]", GUID: "https://animebytes.tv/torrents.php?id=86576&torrentid=1167293", PubDate: first}, Key: "ab:1167293", AniListID: 154587, FirstSeen: first},
+		},
 	})
 	// No entries: the carried item's torrent is absent from the curation set,
 	// exercising the non-curated carry arm.
@@ -747,12 +738,9 @@ func TestRebuildRebasesFutureFirstSeenCarriedItem(t *testing.T) {
 		ByHash: map[string]bool{},
 		ByKey:  map[string]bool{},
 		Seen:   map[string]bool{"nyaa:42": true},
-		NyaaFeed: []item{{
-			Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42",
-			DownloadURL: "https://nyaa.si/download/42.torrent",
-			Key:         "nyaa:42", AniListID: 7,
-			FirstSeen: future, PubDate: future,
-		}},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: future}, Key: "nyaa:42", AniListID: 7, FirstSeen: future},
+		},
 	})
 	if err := w.Rebuild(context.Background(), nil, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -956,12 +944,9 @@ func TestRebuildDropsCarriedItemBecomingUnresolvable(t *testing.T) {
 		ByHash: map[string]bool{},
 		ByKey:  map[string]bool{"nyaa:42": true},
 		Seen:   map[string]bool{"nyaa:42": true},
-		NyaaFeed: []item{{
-			Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42",
-			DownloadURL: "https://nyaa.si/download/42.torrent",
-			Key:         "nyaa:42", AniListID: 7,
-			FirstSeen: first, PubDate: first,
-		}},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: first}, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
+		},
 	})
 	entries := []seadex.Entry{{
 		AniListID: 7,
@@ -1028,12 +1013,9 @@ func TestRebuildDropsCarriedItemWarnedByStoredHashOnly(t *testing.T) {
 		ByHash: map[string]bool{},
 		ByKey:  map[string]bool{"nyaa:99": true},
 		Seen:   map[string]bool{"nyaa:99": true},
-		NyaaFeed: []item{{
-			Title: "Show - S01 (1080p) [W]", GUID: "https://nyaa.si/view/99",
-			DownloadURL: "https://nyaa.si/download/99.torrent",
-			Key:         "nyaa:99", InfoHash: hash, AniListID: 8,
-			FirstSeen: time.Now().UTC(), PubDate: time.Now().UTC(),
-		}},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "Show - S01 (1080p) [W]", GUID: "https://nyaa.si/view/99", DownloadURL: "https://nyaa.si/download/99.torrent", InfoHash: hash, PubDate: time.Now().UTC()}, Key: "nyaa:99", AniListID: 8, FirstSeen: time.Now().UTC()},
+		},
 	})
 	entries := []seadex.Entry{{
 		AniListID: 7,
@@ -1165,12 +1147,9 @@ func TestRebuildKeepsItemAtExactMaxAgeBoundary(t *testing.T) {
 		ByHash: map[string]bool{},
 		ByKey:  map[string]bool{},
 		Seen:   map[string]bool{"nyaa:42": true},
-		NyaaFeed: []item{{
-			Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42",
-			DownloadURL: "https://nyaa.si/download/42.torrent",
-			Key:         "nyaa:42", AniListID: 7,
-			FirstSeen: first, PubDate: first,
-		}},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: first}, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
+		},
 	})
 	if err := w.Rebuild(context.Background(), nil, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -1198,10 +1177,10 @@ func TestRebuildKeepsItemAtExactMaxAgeBoundary(t *testing.T) {
 // title, a non-empty cached title upgrades it, and an unknown key leaves the
 // item untouched.
 func TestApplyTitlesSkipsEmptyCachedTitle(t *testing.T) {
-	items := []item{
-		{Key: "nyaa:1", Title: "Synth A"},
-		{Key: "nyaa:2", Title: "Synth B"},
-		{Key: "nyaa:3", Title: "Synth C"},
+	items := []journalItem{
+		{item: item{Title: "Synth A"}, Key: "nyaa:1"},
+		{item: item{Title: "Synth B"}, Key: "nyaa:2"},
+		{item: item{Title: "Synth C"}, Key: "nyaa:3"},
 	}
 	applyTitles(items, map[string]string{"nyaa:1": "", "nyaa:2": "Harvested B"})
 	if items[0].Title != "Synth A" {

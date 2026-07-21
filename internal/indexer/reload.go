@@ -312,14 +312,14 @@ func (ix *Indexer) readSnapshot(ctx context.Context) (snapshot, bool, bool) {
 // already answers the /ab RSS check with a Torznab <error> then); an item
 // whose current URL cannot be derived (no parseable AB id in its GUID) is
 // dropped rather than served link-less.
-func (ix *Indexer) rebuildABDownloadURLs(feed []item) []item {
+func (ix *Indexer) rebuildABDownloadURLs(feed []journalItem) []journalItem {
 	if len(feed) == 0 {
 		return feed
 	}
 	if ix.cfg.ABPasskey == "" {
 		return nil
 	}
-	out := make([]item, 0, len(feed))
+	out := make([]journalItem, 0, len(feed))
 	dropped := 0
 	var samples []string
 	for i := range feed {

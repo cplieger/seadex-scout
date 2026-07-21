@@ -34,33 +34,26 @@ const errCodeIncorrectCredentials = 100
 // unexpected internal failure such as a recovered handler panic.
 const errCodeUnknown = 900
 
-// item is one feed release: the real fields parsed from a Prowlarr Torznab
-// result, plus the SeaDex download-volume-factor marker this feed adds. The
-// json tags pin the persisted feed.json snapshot contract (see writer.go's
-// snapshot): they mirror the historical field names, so renaming a Go field
-// never silently changes the on-disk format a resident daemon or an upgraded
-// binary reads back.
-//
-// FirstSeen, Key, and AniListID are journal bookkeeping carried only by
-// synthesized RSS items (see journal.go): when the release entered the
-// journal (PubDate mirrors it; the prune clock keys on it), the torrent's
-// stable tracker identity (nyaa:{id} / ab:{id} - the harvested-title cache
-// key), and the SeaDex entry's AniList id (the harvest query group). They are
-// zero on proxied search results, which are never persisted, and writeItem
-// does not render them.
+// item is one Torznab feed release in the WIRE vocabulary - the real fields
+// parsed from a Prowlarr Torznab result, plus the SeaDex
+// download-volume-factor marker this feed adds; writeItem renders exactly
+// these fields back out. It carries no journal bookkeeping: the persisted
+// RSS journal wraps this type as journalItem (journal.go), so a change to
+// the volatile upstream parse shape and a change to the on-disk snapshot
+// contract can never silently be the same edit. The json tags pin the
+// persisted feed.json snapshot contract (journalItem embeds item, and
+// encoding/json flattens the embed, so these names ARE the historical
+// on-disk field names an upgraded binary must keep reading).
 type item struct {
 	PubDate              time.Time `json:"PubDate"`
-	FirstSeen            time.Time `json:"FirstSeen,omitzero"`
 	Title                string    `json:"Title"`
 	GUID                 string    `json:"GUID"`
 	InfoURL              string    `json:"InfoURL"`
 	DownloadURL          string    `json:"DownloadURL"`
 	InfoHash             string    `json:"InfoHash"`
 	DownloadVolumeFactor string    `json:"DownloadVolumeFactor"`
-	Key                  string    `json:"Key,omitempty"`
 	Categories           []int     `json:"Categories"`
 	Size                 int64     `json:"Size"`
-	AniListID            int       `json:"AniListID,omitempty"`
 	Seeders              int       `json:"Seeders"`
 	Leechers             int       `json:"Leechers"`
 }

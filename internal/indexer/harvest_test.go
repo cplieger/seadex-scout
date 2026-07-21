@@ -786,7 +786,9 @@ func TestHarvestCancellationMidQueryIsNotWarnedAsUpstreamFault(t *testing.T) {
 		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 	}
 	w := NewFeedWriter(cfg, Deps{HTTP: srv.Client(), Logger: log})
-	feeds := map[string][]item{upstreamNyaa: {{Key: "nyaa:42", AniListID: 7, Title: "Show S01"}}}
+	feeds := map[string][]journalItem{
+		upstreamNyaa: {{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7}},
+	}
 	titles := map[string]string{}
 	stats, _ := w.harvestTitles(ctx, feeds, titles, func(int) EntryInfo { return EntryInfo{Title: "Show", SeasonTvdb: 1} }, "")
 	if len(titles) != 0 {
@@ -810,17 +812,17 @@ func TestHarvestableGuards(t *testing.T) {
 	noTitle := func(int) EntryInfo { return EntryInfo{} }
 	tests := []struct {
 		name   string
-		it     item
+		it     journalItem
 		titles map[string]string
 		info   func(int) EntryInfo
 		want   bool
 	}{
-		{"pending journal item is harvestable", item{Key: "nyaa:42", AniListID: 7}, map[string]string{}, title, true},
-		{"missing journal key", item{AniListID: 7}, map[string]string{}, title, false},
-		{"non-positive AniList id", item{Key: "nyaa:42"}, map[string]string{}, title, false},
-		{"already-cached title", item{Key: "nyaa:42", AniListID: 7}, map[string]string{"nyaa:42": "Real"}, title, false},
-		{"no synthesis title source", item{Key: "nyaa:42", AniListID: 7}, map[string]string{}, noTitle, false},
-		{"whitespace-only title source", item{Key: "nyaa:42", AniListID: 7}, map[string]string{}, func(int) EntryInfo { return EntryInfo{Title: "   "} }, false},
+		{"pending journal item is harvestable", journalItem{item: item{}, Key: "nyaa:42", AniListID: 7}, map[string]string{}, title, true},
+		{"missing journal key", journalItem{item: item{}, AniListID: 7}, map[string]string{}, title, false},
+		{"non-positive AniList id", journalItem{item: item{}, Key: "nyaa:42"}, map[string]string{}, title, false},
+		{"already-cached title", journalItem{item: item{}, Key: "nyaa:42", AniListID: 7}, map[string]string{"nyaa:42": "Real"}, title, false},
+		{"no synthesis title source", journalItem{item: item{}, Key: "nyaa:42", AniListID: 7}, map[string]string{}, noTitle, false},
+		{"whitespace-only title source", journalItem{item: item{}, Key: "nyaa:42", AniListID: 7}, map[string]string{}, func(int) EntryInfo { return EntryInfo{Title: "   "} }, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -836,14 +838,14 @@ func TestHarvestableGuards(t *testing.T) {
 // count as pending; a key-less item (no journal bookkeeping, e.g. a
 // search-shaped entry in a hand-edited or legacy snapshot) never counts.
 func TestSyntheticCountSkipsKeylessItems(t *testing.T) {
-	feeds := map[string][]item{
+	feeds := map[string][]journalItem{
 		upstreamNyaa: {
-			{Key: "nyaa:1", Title: "synthetic"},
-			{Key: "nyaa:2", Title: "harvested"},
-			{Title: "keyless search-shaped item"},
+			{item: item{Title: "synthetic"}, Key: "nyaa:1"},
+			{item: item{Title: "harvested"}, Key: "nyaa:2"},
+			{item: item{Title: "keyless search-shaped item"}},
 		},
 		upstreamAB: {
-			{Key: "ab:3", Title: "synthetic"},
+			{item: item{Title: "synthetic"}, Key: "ab:3"},
 		},
 	}
 	titles := map[string]string{"nyaa:2": "Real Title"}
@@ -905,12 +907,14 @@ func TestHarvestMalformedResponsesLatchAtThreshold(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	feeds := map[string][]item{upstreamNyaa: {
-		{Key: "nyaa:42", AniListID: 7, Title: "Show A"},
-		{Key: "nyaa:43", AniListID: 8, Title: "Show B"},
-		{Key: "nyaa:44", AniListID: 9, Title: "Show C"},
-		{Key: "nyaa:45", AniListID: 10, Title: "Show D"},
-	}}
+	feeds := map[string][]journalItem{
+		upstreamNyaa: {
+			{item: item{Title: "Show A"}, Key: "nyaa:42", AniListID: 7},
+			{item: item{Title: "Show B"}, Key: "nyaa:43", AniListID: 8},
+			{item: item{Title: "Show C"}, Key: "nyaa:44", AniListID: 9},
+			{item: item{Title: "Show D"}, Key: "nyaa:45", AniListID: 10},
+		},
+	}
 	info := map[int]EntryInfo{
 		7: {Title: "Show A"}, 8: {Title: "Show B"},
 		9: {Title: "Show C"}, 10: {Title: "Show D"},
@@ -954,12 +958,14 @@ func TestHarvestRejectedResponsesLatchAtThreshold(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	feeds := map[string][]item{upstreamNyaa: {
-		{Key: "nyaa:42", AniListID: 7, Title: "Show A"},
-		{Key: "nyaa:43", AniListID: 8, Title: "Show B"},
-		{Key: "nyaa:44", AniListID: 9, Title: "Show C"},
-		{Key: "nyaa:45", AniListID: 10, Title: "Show D"},
-	}}
+	feeds := map[string][]journalItem{
+		upstreamNyaa: {
+			{item: item{Title: "Show A"}, Key: "nyaa:42", AniListID: 7},
+			{item: item{Title: "Show B"}, Key: "nyaa:43", AniListID: 8},
+			{item: item{Title: "Show C"}, Key: "nyaa:44", AniListID: 9},
+			{item: item{Title: "Show D"}, Key: "nyaa:45", AniListID: 10},
+		},
+	}
 	info := map[int]EntryInfo{
 		7: {Title: "Show A"}, 8: {Title: "Show B"},
 		9: {Title: "Show C"}, 10: {Title: "Show D"},
@@ -1003,14 +1009,16 @@ func TestHarvestMalformedResponseRunResetsAfterSuccessfulPage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	feeds := map[string][]item{upstreamNyaa: {
-		{Key: "nyaa:42", AniListID: 7, Title: "Show A"},
-		{Key: "nyaa:43", AniListID: 8, Title: "Show B"},
-		{Key: "nyaa:44", AniListID: 9, Title: "Show C"},
-		{Key: "nyaa:45", AniListID: 10, Title: "Show D"},
-		{Key: "nyaa:46", AniListID: 11, Title: "Show E"},
-		{Key: "nyaa:47", AniListID: 12, Title: "Show F"},
-	}}
+	feeds := map[string][]journalItem{
+		upstreamNyaa: {
+			{item: item{Title: "Show A"}, Key: "nyaa:42", AniListID: 7},
+			{item: item{Title: "Show B"}, Key: "nyaa:43", AniListID: 8},
+			{item: item{Title: "Show C"}, Key: "nyaa:44", AniListID: 9},
+			{item: item{Title: "Show D"}, Key: "nyaa:45", AniListID: 10},
+			{item: item{Title: "Show E"}, Key: "nyaa:46", AniListID: 11},
+			{item: item{Title: "Show F"}, Key: "nyaa:47", AniListID: 12},
+		},
+	}
 	info := map[int]EntryInfo{
 		7: {Title: "Show A"}, 8: {Title: "Show B"}, 9: {Title: "Show C"},
 		10: {Title: "Show D"}, 11: {Title: "Show E"}, 12: {Title: "Show F"},
@@ -1047,10 +1055,12 @@ func TestHarvestOpportunisticMatchSkipsSatisfiedGroup(t *testing.T) {
 	})
 	defer srv.Close()
 
-	feeds := map[string][]item{upstreamNyaa: {
-		{Key: "nyaa:42", AniListID: 7, Title: "Show A"},
-		{Key: "nyaa:43", AniListID: 8, Title: "Show B"},
-	}}
+	feeds := map[string][]journalItem{
+		upstreamNyaa: {
+			{item: item{Title: "Show A"}, Key: "nyaa:42", AniListID: 7},
+			{item: item{Title: "Show B"}, Key: "nyaa:43", AniListID: 8},
+		},
+	}
 	info := map[int]EntryInfo{7: {Title: "Show A"}, 8: {Title: "Show B"}}
 	log, _ := capture.New()
 	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
@@ -1092,14 +1102,16 @@ func TestHarvestRequestRejectionResetsMalformedRun(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	feeds := map[string][]item{upstreamNyaa: {
-		{Key: "nyaa:42", AniListID: 7, Title: "Show A"},
-		{Key: "nyaa:43", AniListID: 8, Title: "Show B"},
-		{Key: "nyaa:44", AniListID: 9, Title: "Show C"},
-		{Key: "nyaa:45", AniListID: 10, Title: "Show D"},
-		{Key: "nyaa:46", AniListID: 11, Title: "Show E"},
-		{Key: "nyaa:47", AniListID: 12, Title: "Show F"},
-	}}
+	feeds := map[string][]journalItem{
+		upstreamNyaa: {
+			{item: item{Title: "Show A"}, Key: "nyaa:42", AniListID: 7},
+			{item: item{Title: "Show B"}, Key: "nyaa:43", AniListID: 8},
+			{item: item{Title: "Show C"}, Key: "nyaa:44", AniListID: 9},
+			{item: item{Title: "Show D"}, Key: "nyaa:45", AniListID: 10},
+			{item: item{Title: "Show E"}, Key: "nyaa:46", AniListID: 11},
+			{item: item{Title: "Show F"}, Key: "nyaa:47", AniListID: 12},
+		},
+	}
 	info := map[int]EntryInfo{
 		7: {Title: "Show A"}, 8: {Title: "Show B"}, 9: {Title: "Show C"},
 		10: {Title: "Show D"}, 11: {Title: "Show E"}, 12: {Title: "Show F"},
@@ -1258,10 +1270,12 @@ func TestHarvestHTTPStatusFailureScoping(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			feeds := map[string][]item{upstreamNyaa: {
-				{Key: "nyaa:42", AniListID: 7, Title: "Show A"},
-				{Key: "nyaa:43", AniListID: 8, Title: "Show B"},
-			}}
+			feeds := map[string][]journalItem{
+				upstreamNyaa: {
+					{item: item{Title: "Show A"}, Key: "nyaa:42", AniListID: 7},
+					{item: item{Title: "Show B"}, Key: "nyaa:43", AniListID: 8},
+				},
+			}
 			info := map[int]EntryInfo{7: {Title: "Show A"}, 8: {Title: "Show B"}}
 			log, rec := capture.New()
 			w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{

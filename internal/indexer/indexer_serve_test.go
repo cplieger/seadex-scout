@@ -264,9 +264,9 @@ func TestQuerySkipsPerEpisodeQuery(t *testing.T) {
 // see TestQueryFeedDefaultLimit.)
 func TestQueryCapsResults(t *testing.T) {
 	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, "")
-	feed := make([]item, maxItems+5)
+	feed := make([]journalItem, maxItems+5)
 	for i := range feed {
-		feed[i] = item{Title: "t", GUID: strconv.Itoa(i)}
+		feed[i] = journalItem{item: item{Title: "t", GUID: strconv.Itoa(i)}}
 	}
 	ix.mu.Lock()
 	ix.snap.NyaaFeed = feed
@@ -285,9 +285,9 @@ func TestQueryCapsResults(t *testing.T) {
 // newest-first), and an explicit limit still wins over the default.
 func TestQueryFeedDefaultLimit(t *testing.T) {
 	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, "")
-	feed := make([]item, defaultCapsLimit+50)
+	feed := make([]journalItem, defaultCapsLimit+50)
 	for i := range feed {
-		feed[i] = item{Title: "t", GUID: strconv.Itoa(i)}
+		feed[i] = journalItem{item: item{Title: "t", GUID: strconv.Itoa(i)}}
 	}
 	ix.mu.Lock()
 	ix.snap.NyaaFeed = feed

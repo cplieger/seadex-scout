@@ -8,6 +8,24 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
+// journalItem is one persisted RSS-journal record: the served wire item plus
+// the journal bookkeeping the wire never carries. FirstSeen is when the
+// release entered the journal (PubDate mirrors it; the prune clock keys on
+// it), Key is the torrent's stable tracker identity (nyaa:{id} / ab:{id} -
+// the harvested-title cache key), and AniListID is the SeaDex entry's
+// AniList id (the harvest query group). Proxied search results are plain
+// items and are never persisted, so the type split makes the finding-class
+// mistake unrepresentable: a change to the volatile Prowlarr parse shape
+// cannot silently move the on-disk snapshot contract, and bookkeeping cannot
+// leak into a search passthrough. encoding/json flattens the embedded item,
+// so the persisted feed.json object keeps its exact historical flat shape.
+type journalItem struct {
+	FirstSeen time.Time `json:"FirstSeen,omitzero"`
+	Key       string    `json:"Key,omitempty"`
+	item
+	AniListID int `json:"AniListID,omitempty"`
+}
+
 // feedJournalMaxAge bounds how long a newly curated release stays in the
 // synthesized RSS journal. The arrs poll RSS on a minutes-scale sync interval,
 // so 14 days is generous - it survives a week-long arr outage with margin -
@@ -98,9 +116,9 @@ func scopeOfKey(key string) string {
 // release without a passkey - reported via noPasskey so the caller can nudge
 // the operator - or an id-less URL, which journalKey already excludes) or no
 // parseable title at all (no files and no release group).
-func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor func(alID int) EntryInfo) (it item, ok, noPasskey bool) {
+func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor func(alID int) EntryInfo) (it journalItem, ok, noPasskey bool) {
 	if len(refs) == 0 {
-		return item{}, false, false
+		return journalItem{}, false, false
 	}
 	first := refs[0]
 	// Deterministic synthesis source: a torrent attached to several entries
@@ -113,23 +131,25 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor fu
 	}
 	dl, resolved := downloadURL(first.torrent.Tracker, first.torrent.URL, w.abPasskey)
 	if !resolved {
-		return item{}, false, scopeOfKey(key) == upstreamAB && w.abPasskey == ""
+		return journalItem{}, false, scopeOfKey(key) == upstreamAB && w.abPasskey == ""
 	}
-	it = item{
-		Title:                synthesizeTitle(first.torrent, infoFor(first.entry.AniListID)),
-		GUID:                 first.torrent.UsableURL(),
-		InfoURL:              w.entryURL(first.entry.AniListID),
-		DownloadURL:          dl,
-		InfoHash:             validInfoHash(first.torrent.InfoHash),
-		DownloadVolumeFactor: dvfAlt,
-		Size:                 totalSize(first.torrent.Files),
-		Key:                  key,
-		AniListID:            first.entry.AniListID,
+	it = journalItem{
+		item: item{
+			Title:                synthesizeTitle(first.torrent, infoFor(first.entry.AniListID)),
+			GUID:                 first.torrent.UsableURL(),
+			InfoURL:              w.entryURL(first.entry.AniListID),
+			DownloadURL:          dl,
+			InfoHash:             validInfoHash(first.torrent.InfoHash),
+			DownloadVolumeFactor: dvfAlt,
+			Size:                 totalSize(first.torrent.Files),
+		},
+		Key:       key,
+		AniListID: first.entry.AniListID,
 	}
 	if it.Title == "" {
 		// No episode files and no release group: an arr cannot parse or
 		// match a title-less item, so drop it (counted as unresolvable).
-		return item{}, false, false
+		return journalItem{}, false, false
 	}
 	foldRefs(&it, refs, infoFor)
 	if !validPersistedItem(&it) {
@@ -139,7 +159,7 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor fu
 		// (see maxPersistedFieldBytes). Dropped as unresolvable - the caller
 		// has already folded the identity into the seen ledger, so the item
 		// never re-enters the journal as new.
-		return item{}, false, false
+		return journalItem{}, false, false
 	}
 	return it, true, false
 }
@@ -148,7 +168,7 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor fu
 // curated occurrences: best-wins on the download-volume-factor marker and
 // category union (a torrent attached to several entries must not render
 // conflicting duplicates).
-func foldRefs(it *item, refs []curatedRef, infoFor func(alID int) EntryInfo) {
+func foldRefs(it *journalItem, refs []curatedRef, infoFor func(alID int) EntryInfo) {
 	for _, ref := range refs {
 		if ref.torrent.IsBest {
 			it.DownloadVolumeFactor = dvfBest
@@ -194,10 +214,10 @@ func (js *journalStats) recordDrop(noPasskey bool) {
 // retracts (its key is excluded, or its stored info hash is warned under a
 // DIFFERENT tracker key) is dropped (RSS must never keep serving bytes search
 // suppresses).
-func (w *FeedWriter) carryItem(it *item, cur map[string][]curatedRef, ws *warnedSet, infoFor func(alID int) EntryInfo, now time.Time, js *journalStats) (item, bool) {
+func (w *FeedWriter) carryItem(it *journalItem, cur map[string][]curatedRef, ws *warnedSet, infoFor func(alID int) EntryInfo, now time.Time, js *journalStats) (journalItem, bool) {
 	if it.Key == "" || it.FirstSeen.IsZero() {
 		js.dropped++
-		return item{}, false
+		return journalItem{}, false
 	}
 	if it.FirstSeen.After(now) {
 		// A FirstSeen ahead of the wall clock (a clock rollback, or a
@@ -212,24 +232,24 @@ func (w *FeedWriter) carryItem(it *item, cur map[string][]curatedRef, ws *warned
 	}
 	if now.Sub(it.FirstSeen) > feedJournalMaxAge {
 		js.pruned++
-		return item{}, false
+		return journalItem{}, false
 	}
 	if ws.retracts(it) {
 		js.warned++
-		return item{}, false
+		return journalItem{}, false
 	}
 	refs, curated := cur[it.Key]
 	if !curated {
 		if scopeOfKey(it.Key) == upstreamAB && w.abPasskey == "" {
 			js.recordDrop(true)
-			return item{}, false
+			return journalItem{}, false
 		}
 		return *it, true
 	}
 	fresh, ok, noPasskey := w.renderJournalItem(it.Key, refs, infoFor)
 	if !ok {
 		js.recordDrop(noPasskey)
-		return item{}, false
+		return journalItem{}, false
 	}
 	fresh.FirstSeen = it.FirstSeen
 	fresh.PubDate = it.FirstSeen
@@ -253,8 +273,8 @@ func (w *FeedWriter) carryItem(it *item, cur map[string][]curatedRef, ws *warned
 // defensive against hand-edited snapshots) and a carried AnimeBytes item whose
 // download link can no longer be built (the passkey was removed - the release
 // is no longer grabbable, so serving it would be dead weight) are dropped.
-func (w *FeedWriter) carryJournal(prevFeed []item, cur map[string][]curatedRef, ws *warnedSet, infoFor func(alID int) EntryInfo, now time.Time, js *journalStats) []item {
-	kept := make([]item, 0, len(prevFeed))
+func (w *FeedWriter) carryJournal(prevFeed []journalItem, cur map[string][]curatedRef, ws *warnedSet, infoFor func(alID int) EntryInfo, now time.Time, js *journalStats) []journalItem {
+	kept := make([]journalItem, 0, len(prevFeed))
 	for i := range prevFeed {
 		if it, ok := w.carryItem(&prevFeed[i], cur, ws, infoFor, now, js); ok {
 			kept = append(kept, it)
@@ -274,7 +294,7 @@ func (w *FeedWriter) carryJournal(prevFeed []item, cur map[string][]curatedRef, 
 // unconfigured tracker, an unresolvable id), so the journal only ever grows
 // from curation that is new AT THE TIME it is served; backfill is search's
 // job.
-func (w *FeedWriter) growJournal(entries []seadex.Entry, cur map[string][]curatedRef, seen map[string]bool, infoFor func(alID int) EntryInfo, now time.Time, js *journalStats) (nyaa, ab []item) {
+func (w *FeedWriter) growJournal(entries []seadex.Entry, cur map[string][]curatedRef, seen map[string]bool, infoFor func(alID int) EntryInfo, now time.Time, js *journalStats) (nyaa, ab []journalItem) {
 	for i := range entries {
 		for j := range entries[i].Torrents {
 			it, scope, ok := w.journalIfNew(&entries[i].Torrents[j], cur, seen, infoFor, js)
@@ -304,7 +324,7 @@ func (w *FeedWriter) scopeConfigured(scope string) bool {
 // identity signals into seen either way - and materializes its journal item
 // when it is genuinely new and servable. Tail-tracker occurrences never reach
 // the ledger: see the guard below.
-func (w *FeedWriter) journalIfNew(t *seadex.Torrent, cur map[string][]curatedRef, seen map[string]bool, infoFor func(alID int) EntryInfo, js *journalStats) (it item, scope string, ok bool) {
+func (w *FeedWriter) journalIfNew(t *seadex.Torrent, cur map[string][]curatedRef, seen map[string]bool, infoFor func(alID int) EntryInfo, js *journalStats) (it journalItem, scope string, ok bool) {
 	if trackerScope(t.Tracker) == "" {
 		// A tail tracker (AnimeTosho, RuTracker) can never be journaled - and
 		// AnimeTosho is a Nyaa MIRROR carrying the IDENTICAL info hash, so
@@ -315,7 +335,7 @@ func (w *FeedWriter) journalIfNew(t *seadex.Torrent, cur map[string][]curatedRef
 		// unconfigured tracker's off switch, a missing AB passkey) are
 		// different: those trackers CAN be enabled later, and their
 		// identities must not backfill then - a tail tracker has no later.
-		return item{}, "", false
+		return journalItem{}, "", false
 	}
 	ids := identitySignals(t)
 	if len(ids) == 0 {
@@ -329,7 +349,7 @@ func (w *FeedWriter) journalIfNew(t *seadex.Torrent, cur map[string][]curatedRef
 		if w.scopeConfigured(trackerScope(t.Tracker)) {
 			js.unresolvable++
 		}
-		return item{}, "", false
+		return journalItem{}, "", false
 	}
 	isNew := true
 	for _, id := range ids {
@@ -339,7 +359,7 @@ func (w *FeedWriter) journalIfNew(t *seadex.Torrent, cur map[string][]curatedRef
 		seen[id] = true
 	}
 	if !isNew {
-		return item{}, "", false
+		return journalItem{}, "", false
 	}
 	return w.newJournalItem(t, cur, infoFor, js)
 }
@@ -355,15 +375,15 @@ func (w *FeedWriter) journalIfNew(t *seadex.Torrent, cur map[string][]curatedRef
 // key or no parseable title counts as unresolvable so an upstream URL-shape
 // change surfaces on the snapshot log line instead of silently shrinking the
 // feed (unresolvable is counted only for configured scopes).
-func (w *FeedWriter) newJournalItem(t *seadex.Torrent, cur map[string][]curatedRef, infoFor func(alID int) EntryInfo, js *journalStats) (it item, scope string, ok bool) {
+func (w *FeedWriter) newJournalItem(t *seadex.Torrent, cur map[string][]curatedRef, infoFor func(alID int) EntryInfo, js *journalStats) (it journalItem, scope string, ok bool) {
 	scope = trackerScope(t.Tracker)
 	if !w.scopeConfigured(scope) {
-		return item{}, "", false
+		return journalItem{}, "", false
 	}
 	key := journalKey(t)
 	if key == "" {
 		js.unresolvable++
-		return item{}, "", false
+		return journalItem{}, "", false
 	}
 	it, ok, noPasskey := w.renderJournalItem(key, cur[key], infoFor)
 	if noPasskey {
@@ -373,7 +393,7 @@ func (w *FeedWriter) newJournalItem(t *seadex.Torrent, cur map[string][]curatedR
 		if !noPasskey {
 			js.unresolvable++
 		}
-		return item{}, "", false
+		return journalItem{}, "", false
 	}
 	return it, scope, true
 }
@@ -384,7 +404,7 @@ func (w *FeedWriter) newJournalItem(t *seadex.Torrent, cur map[string][]curatedR
 // title when the cache holds one; items without a cached title keep their
 // synthesized title (the permanent fallback). GUIDs never change with the
 // title, so an upgrade cannot re-trigger a grab.
-func applyTitles(items []item, titles map[string]string) {
+func applyTitles(items []journalItem, titles map[string]string) {
 	for i := range items {
 		if t, ok := titles[items[i].Key]; ok && t != "" {
 			items[i].Title = t
@@ -395,7 +415,7 @@ func applyTitles(items []item, titles map[string]string) {
 // retainTitles prunes the harvested-title cache to the keys still present in
 // the journal feeds, so an aged-out or dropped item's cached title leaves with
 // it (its seen-ledger identity guarantees it can never return to need it).
-func retainTitles(titles map[string]string, feeds ...[]item) map[string]string {
+func retainTitles(titles map[string]string, feeds ...[]journalItem) map[string]string {
 	kept := make(map[string]string, len(titles))
 	for _, feed := range feeds {
 		for i := range feed {

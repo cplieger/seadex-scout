@@ -19,9 +19,9 @@ import (
 func TestSortFeedRetainsOverflow(t *testing.T) {
 	base := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	const n = 302 // larger than the retired 300-item persisted cap
-	items := make([]item, n)
+	items := make([]journalItem, n)
 	for i := range items {
-		items[i] = item{GUID: strconv.Itoa(i), FirstSeen: base.Add(time.Duration(i) * time.Minute)}
+		items[i] = journalItem{item: item{GUID: strconv.Itoa(i)}, FirstSeen: base.Add(time.Duration(i) * time.Minute)}
 	}
 	got := sortFeed(items)
 	if len(got) != n {

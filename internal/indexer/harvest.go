@@ -149,7 +149,7 @@ type harvestGroup struct {
 // (e.g. a proxy answering HTML to everything) or an upstream deterministically
 // rejecting every query shape is upstream-wide breakage that would otherwise
 // burn the whole time slice with zero progress.
-func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]item, titles map[string]string, infoFor func(alID int) EntryInfo, prevCursor string) (stats harvestStats, cursor string) {
+func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]journalItem, titles map[string]string, infoFor func(alID int) EntryInfo, prevCursor string) (stats harvestStats, cursor string) {
 	cursor = prevCursor
 	defer func() { stats.pending = syntheticCount(feeds, titles) }()
 	groups, index := pendingHarvest(feeds, titles, infoFor)
@@ -424,7 +424,7 @@ type harvestGroupKey struct {
 // identity forms (tracker key and info hash) in the global index that maps a
 // matched Prowlarr result back to the journal key whose title it supplies.
 // A non-harvestable item is left out (see harvestable).
-func indexHarvestItem(it *item, scope string, titles map[string]string, infoFor func(int) EntryInfo, byShow map[harvestGroupKey][]string, index map[string]string) {
+func indexHarvestItem(it *journalItem, scope string, titles map[string]string, infoFor func(int) EntryInfo, byShow map[harvestGroupKey][]string, index map[string]string) {
 	if !harvestable(it, titles, infoFor) {
 		return
 	}
@@ -453,7 +453,7 @@ func compareHarvestGroups(a, b harvestGroup) int {
 // whose show has no synthesis title source are left out: there is nothing to
 // query with, and they retry once the library or the AniList memo knows the
 // show.
-func pendingHarvest(feeds map[string][]item, titles map[string]string, infoFor func(alID int) EntryInfo) (groups []harvestGroup, index map[string]string) {
+func pendingHarvest(feeds map[string][]journalItem, titles map[string]string, infoFor func(alID int) EntryInfo) (groups []harvestGroup, index map[string]string) {
 	byShow := make(map[harvestGroupKey][]string)
 	index = make(map[string]string)
 	for scope, feed := range feeds {
@@ -472,7 +472,7 @@ func pendingHarvest(feeds map[string][]item, titles map[string]string, infoFor f
 // harvestable reports whether a journal item is due a harvest query: it still
 // serves a synthesized title, carries its journal bookkeeping, and its show
 // has a title source to query with.
-func harvestable(it *item, titles map[string]string, infoFor func(alID int) EntryInfo) bool {
+func harvestable(it *journalItem, titles map[string]string, infoFor func(alID int) EntryInfo) bool {
 	if it.Key == "" || it.AniListID <= 0 {
 		return false
 	}
@@ -595,7 +595,7 @@ func groupPending(g harvestGroup, titles map[string]string) bool {
 // synthesized title (no cached harvested title), for the snapshot log line -
 // whatever the reason: over budget, unmatched, no query source, or no
 // configured upstream for their tracker.
-func syntheticCount(feeds map[string][]item, titles map[string]string) int {
+func syntheticCount(feeds map[string][]journalItem, titles map[string]string) int {
 	n := 0
 	for _, feed := range feeds {
 		for i := range feed {

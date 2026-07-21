@@ -59,7 +59,7 @@ const (
 // unresolvable) and re-checked after every snapshot unmarshal (loadPrevious
 // re-baselines; the server's readSnapshot treats it as malformed), so an
 // over-limit item can neither be persisted nor served.
-func validPersistedItem(it *item) bool {
+func validPersistedItem(it *journalItem) bool {
 	if it.Size < 0 || it.Seeders < 0 || it.Leechers < 0 {
 		return false
 	}
@@ -73,7 +73,7 @@ func validPersistedItem(it *item) bool {
 
 // validFeedItems reports whether every item in the given feeds respects the
 // shared persisted-item limits (see validPersistedItem).
-func validFeedItems(feeds ...[]item) bool {
+func validFeedItems(feeds ...[]journalItem) bool {
 	for _, feed := range feeds {
 		for i := range feed {
 			if !validPersistedItem(&feed[i]) {
@@ -117,9 +117,9 @@ type snapshot struct {
 	// (see harvestTitles; a deep show can then never starve its successors
 	// across rebuilds). Optional both ways: an older snapshot without it
 	// starts at the head, and an older binary ignores it.
-	HarvestCursor string `json:"harvest_cursor,omitempty"`
-	NyaaFeed      []item `json:"nyaa_feed"`
-	ABFeed        []item `json:"ab_feed"`
+	HarvestCursor string        `json:"harvest_cursor,omitempty"`
+	NyaaFeed      []journalItem `json:"nyaa_feed"`
+	ABFeed        []journalItem `json:"ab_feed"`
 }
 
 // FeedWriterConfig configures NewFeedWriter. Path is where the snapshot is
@@ -226,7 +226,7 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info f
 	now := w.now()
 
 	var js journalStats
-	var nyaa, ab []item
+	var nyaa, ab []journalItem
 	seen, titles := prev.seen, prev.titles
 	if prev.baseline {
 		seen, titles = allIdentities(entries), map[string]string{}
@@ -250,7 +250,7 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info f
 	if !w.abConfigured {
 		ab = nil
 	}
-	feeds := map[string][]item{upstreamNyaa: nyaa, upstreamAB: ab}
+	feeds := map[string][]journalItem{upstreamNyaa: nyaa, upstreamAB: ab}
 	hs, cursor := w.harvestTitles(ctx, feeds, titles, infoFor, prev.cursor)
 	applyTitles(nyaa, titles)
 	applyTitles(ab, titles)
@@ -310,7 +310,7 @@ func (w *FeedWriter) persist(ctx context.Context, snap *snapshot) error {
 // and running at the persist choke point also scrubs a legacy snapshot whose
 // carried items still embed a passkey on the first rebuild over it. Nyaa
 // items live in their own feed and keep their public .torrent links.
-func stripABDownloadURLs(feed []item) {
+func stripABDownloadURLs(feed []journalItem) {
 	for i := range feed {
 		feed[i].DownloadURL = ""
 	}
@@ -322,7 +322,7 @@ func stripABDownloadURLs(feed []item) {
 // legacy or corrupted snapshot placing an ab:-keyed item in nyaa_feed) must
 // not bypass the GUID-only invariant stripABDownloadURLs enforces on the AB
 // feed itself.
-func stripABScopedDownloadURLs(feed []item) {
+func stripABScopedDownloadURLs(feed []journalItem) {
 	for i := range feed {
 		if scopeOfKey(feed[i].Key) == upstreamAB {
 			feed[i].DownloadURL = ""
@@ -340,8 +340,8 @@ type previousJournal struct {
 	cursor   string
 	seen     map[string]bool
 	titles   map[string]string
-	nyaaFeed []item
-	abFeed   []item
+	nyaaFeed []journalItem
+	abFeed   []journalItem
 	baseline bool
 }
 
@@ -435,7 +435,7 @@ type warnedSet struct {
 // retracts reports whether a carried journal item shares a warned identity:
 // its key is excluded, or its stored info hash is warned under any tracker
 // key (RSS must never keep serving bytes search suppresses).
-func (ws *warnedSet) retracts(it *item) bool {
+func (ws *warnedSet) retracts(it *journalItem) bool {
 	if _, bad := ws.keys[it.Key]; bad {
 		return true
 	}

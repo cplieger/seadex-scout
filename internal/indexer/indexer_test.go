@@ -1363,9 +1363,11 @@ func TestReloadInstallsOlderMtimeSnapshot(t *testing.T) {
 	// holding the write lock exactly as reload's install path does.
 	ix.mu.Lock()
 	ix.snap = snapshot{
-		ByHash:   map[string]bool{},
-		ByKey:    map[string]bool{},
-		NyaaFeed: []item{{Title: "stale", GUID: "stale", DownloadURL: "stale"}},
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "stale", GUID: "stale", DownloadURL: "stale"}},
+		},
 	}
 	ix.snapMod = newerTime
 	ix.mu.Unlock()
@@ -1603,10 +1605,14 @@ func TestInstallSnapshotSkipsAlreadyInstalledFile(t *testing.T) {
 		t.Fatalf("stat: %v", err)
 	}
 	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, "")
-	if !ix.installSnapshot(info1, &snapshot{NyaaFeed: []item{{Title: "first"}}}) {
+	if !ix.installSnapshot(info1, &snapshot{NyaaFeed: []journalItem{
+		{item: item{Title: "first"}},
+	}}) {
 		t.Fatal("first installSnapshot = false, want true")
 	}
-	if ix.installSnapshot(info2, &snapshot{NyaaFeed: []item{{Title: "second"}}}) {
+	if ix.installSnapshot(info2, &snapshot{NyaaFeed: []journalItem{
+		{item: item{Title: "second"}},
+	}}) {
 		t.Fatal("second installSnapshot with same unchanged file = true, want false")
 	}
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
@@ -1697,8 +1703,12 @@ func TestFeedForUnknownScopeServesNothing(t *testing.T) {
 		ABPasskey:      "PK",
 	}}, Deps{}, "")
 	ix.mu.Lock()
-	ix.snap.NyaaFeed = []item{{Title: "n"}}
-	ix.snap.ABFeed = []item{{Title: "a"}}
+	ix.snap.NyaaFeed = []journalItem{
+		{item: item{Title: "n"}},
+	}
+	ix.snap.ABFeed = []journalItem{
+		{item: item{Title: "a"}},
+	}
 	ix.mu.Unlock()
 	if got := ix.feedFor("other"); got != nil {
 		t.Errorf("feedFor(unknown scope) = %+v, want nil", got)

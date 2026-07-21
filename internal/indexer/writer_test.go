@@ -3,6 +3,7 @@ package indexer
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -247,12 +248,9 @@ func TestRebuildPersistScrubsABScopedItemCarriedInNyaaFeed(t *testing.T) {
 		Seen:   map[string]bool{"ab:1167293": true},
 		// The ab:-scoped item sits in the WRONG feed slice (nyaa_feed), the
 		// scope/feed mismatch loadPrevious does not validate.
-		NyaaFeed: []item{{
-			Title: "Frieren - S01 (BD Remux 1080p) [PMR]",
-			GUID:  "https://animebytes.tv/torrents.php?id=86576&torrentid=1167293",
-			Key:   "ab:1167293", AniListID: 154587,
-			FirstSeen: first, PubDate: first,
-		}},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "Frieren - S01 (BD Remux 1080p) [PMR]", GUID: "https://animebytes.tv/torrents.php?id=86576&torrentid=1167293", PubDate: first}, Key: "ab:1167293", AniListID: 154587, FirstSeen: first},
+		},
 	})
 	entries := []seadex.Entry{{
 		AniListID: 154587,
@@ -358,10 +356,9 @@ func TestRebuildBaselinesOversizedCachedTitle(t *testing.T) {
 		ByPair: map[string]bool{},
 		Seen:   map[string]bool{"nyaa:42": true},
 		Titles: map[string]string{"nyaa:42": strings.Repeat("a", maxPersistedFieldBytes+1)},
-		NyaaFeed: []item{{
-			PubDate: t0, FirstSeen: t0, Key: "nyaa:42",
-			Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42",
-		}},
+		NyaaFeed: []journalItem{
+			{item: item{PubDate: t0, Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42"}, FirstSeen: t0, Key: "nyaa:42"},
+		},
 	}
 	writeSnapshotFile(t, path, &prev)
 	log, rec := capture.New()
@@ -525,12 +522,9 @@ func TestRebuildWarnedTorrentIdentityWinsAcrossEntries(t *testing.T) {
 		ByHash: map[string]bool{},
 		ByKey:  map[string]bool{"nyaa:99": true},
 		Seen:   map[string]bool{},
-		NyaaFeed: []item{{
-			Title: "Show - S01 (1080p) [W]", GUID: duplicateURL,
-			DownloadURL: "https://nyaa.si/download/99.torrent",
-			Key:         "nyaa:99", AniListID: 8,
-			FirstSeen: time.Now().UTC(), PubDate: time.Now().UTC(),
-		}},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "Show - S01 (1080p) [W]", GUID: duplicateURL, DownloadURL: "https://nyaa.si/download/99.torrent", PubDate: time.Now().UTC()}, Key: "nyaa:99", AniListID: 8, FirstSeen: time.Now().UTC()},
+		},
 	})
 	entries := []seadex.Entry{
 		{
@@ -595,12 +589,9 @@ func TestRebuildDropsCarriedJournalItemBecomingWarned(t *testing.T) {
 		ByHash: map[string]bool{},
 		ByKey:  map[string]bool{"nyaa:42": true},
 		Seen:   map[string]bool{"nyaa:42": true},
-		NyaaFeed: []item{{
-			Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42",
-			DownloadURL: "https://nyaa.si/download/42.torrent",
-			Key:         "nyaa:42", AniListID: 7,
-			FirstSeen: time.Now().UTC(), PubDate: time.Now().UTC(),
-		}},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: time.Now().UTC()}, Key: "nyaa:42", AniListID: 7, FirstSeen: time.Now().UTC()},
+		},
 	})
 	entries := []seadex.Entry{{
 		AniListID: 7,
@@ -677,11 +668,9 @@ func TestRebuildBaselinesOversizedFeedItem(t *testing.T) {
 		ByHash: map[string]bool{}, ByKey: map[string]bool{"nyaa:42": true},
 		ByPair: map[string]bool{},
 		Seen:   map[string]bool{"nyaa:42": true},
-		NyaaFeed: []item{{
-			PubDate: t0, FirstSeen: t0, Key: "nyaa:42",
-			Title: strings.Repeat("a", maxPersistedFieldBytes+1),
-			GUID:  "https://nyaa.si/view/42",
-		}},
+		NyaaFeed: []journalItem{
+			{item: item{PubDate: t0, Title: strings.Repeat("a", maxPersistedFieldBytes+1), GUID: "https://nyaa.si/view/42"}, FirstSeen: t0, Key: "nyaa:42"},
+		},
 	})
 	log, rec := capture.New()
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
@@ -741,5 +730,50 @@ func TestRebuildOversizedSnapshotRebaselines(t *testing.T) {
 	}
 	if snap := readSnapshotFile(t, path); snap.Seen == nil {
 		t.Error("rewritten snapshot carries no seen ledger, want a baselined journal schema")
+	}
+}
+
+// TestJournalItemPersistedShapeIsFlat pins the on-disk contract across the
+// item/journalItem type split: encoding/json flattens the embedded wire item,
+// so a persisted journal record keeps the exact historical FLAT object shape
+// - no nested "item" key - and a snapshot written by a pre-split binary
+// (flat fields) decodes losslessly into the new shape. The resident daemon
+// reads what the poll subcommand writes across binary versions, so this
+// shape IS the cross-process contract.
+func TestJournalItemPersistedShapeIsFlat(t *testing.T) {
+	first := time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC)
+	jit := journalItem{
+		item: item{
+			Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42",
+			DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: first,
+			Size: 7, Seeders: 1,
+		},
+		Key: "nyaa:42", AniListID: 9, FirstSeen: first,
+	}
+	data, err := json.Marshal(&jit)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var flat map[string]json.RawMessage
+	if err := json.Unmarshal(data, &flat); err != nil {
+		t.Fatalf("unmarshal into map: %v", err)
+	}
+	if _, nested := flat["item"]; nested {
+		t.Fatalf("persisted journal item carries a nested \"item\" object, want the historical flat shape: %s", data)
+	}
+	for _, key := range []string{"Title", "GUID", "DownloadURL", "PubDate", "Key", "AniListID", "FirstSeen"} {
+		if _, ok := flat[key]; !ok {
+			t.Errorf("persisted journal item lost flat key %q: %s", key, data)
+		}
+	}
+
+	legacy := []byte(`{"PubDate":"2026-07-01T00:00:00Z","FirstSeen":"2026-07-01T00:00:00Z","Title":"Show - S01 (1080p) [G]","GUID":"https://nyaa.si/view/42","InfoURL":"","DownloadURL":"https://nyaa.si/download/42.torrent","InfoHash":"","DownloadVolumeFactor":"","Key":"nyaa:42","Categories":null,"Size":7,"AniListID":9,"Seeders":1,"Leechers":0}`)
+	var decoded journalItem
+	if err := json.Unmarshal(legacy, &decoded); err != nil {
+		t.Fatalf("decode pre-split flat snapshot record: %v", err)
+	}
+	if decoded.Title != jit.Title || decoded.Key != jit.Key || decoded.AniListID != jit.AniListID ||
+		!decoded.FirstSeen.Equal(first) || decoded.Size != 7 || decoded.Seeders != 1 {
+		t.Errorf("pre-split record decoded lossily: %+v", decoded)
 	}
 }

@@ -19,9 +19,11 @@ import (
 func TestReloadWarnsOnceOnMissingSnapshotAndRecovers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash:   map[string]bool{},
-		ByKey:    map[string]bool{},
-		NyaaFeed: []item{{Title: "first", GUID: "https://nyaa.si/view/1"}},
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}},
+		},
 	})
 	log, rec := capture.New()
 	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, path)
@@ -43,9 +45,11 @@ func TestReloadWarnsOnceOnMissingSnapshotAndRecovers(t *testing.T) {
 	}
 
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash:   map[string]bool{},
-		ByKey:    map[string]bool{},
-		NyaaFeed: []item{{Title: "second", GUID: "https://nyaa.si/view/2"}},
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "second", GUID: "https://nyaa.si/view/2"}},
+		},
 	})
 	ix.reload(context.Background())
 	if got := rec.Count("indexer feed snapshot reappeared"); got != 1 {
@@ -98,9 +102,11 @@ func TestReloadRecoversDegradationOnUnchangedSnapshot(t *testing.T) {
 	}
 	path := filepath.Join(sub, "feed.json")
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash:   map[string]bool{},
-		ByKey:    map[string]bool{},
-		NyaaFeed: []item{{Title: "first", GUID: "https://nyaa.si/view/1"}},
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}},
+		},
 	})
 	log, rec := capture.New()
 	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, path)
@@ -149,9 +155,11 @@ func TestReloadMemoizedMalformedSnapshotClearsDegradation(t *testing.T) {
 	}
 	path := filepath.Join(sub, "feed.json")
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash:   map[string]bool{},
-		ByKey:    map[string]bool{},
-		NyaaFeed: []item{{Title: "first", GUID: "https://nyaa.si/view/1"}},
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}},
+		},
 	})
 	log, rec := capture.New()
 	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, path)
@@ -269,9 +277,11 @@ func TestReloadReassertsFailedStateWhenMalformedSnapshotReappears(t *testing.T) 
 func TestReloadMemoizesOversizedItemSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash:   map[string]bool{},
-		ByKey:    map[string]bool{},
-		NyaaFeed: []item{{Title: "first", GUID: "https://nyaa.si/view/1"}},
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}},
+		},
 	})
 	log, rec := capture.New()
 	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, path)
@@ -280,9 +290,11 @@ func TestReloadMemoizesOversizedItemSnapshot(t *testing.T) {
 	}
 
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash:   map[string]bool{},
-		ByKey:    map[string]bool{},
-		NyaaFeed: []item{{Title: strings.Repeat("a", maxPersistedFieldBytes+1), GUID: "https://nyaa.si/view/2"}},
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		NyaaFeed: []journalItem{
+			{item: item{Title: strings.Repeat("a", maxPersistedFieldBytes+1), GUID: "https://nyaa.si/view/2"}},
+		},
 	})
 	distinct := time.Now().Add(2 * time.Second)
 	if err := os.Chtimes(path, distinct, distinct); err != nil {

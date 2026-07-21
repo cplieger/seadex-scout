@@ -509,8 +509,8 @@ func validInfoHash(h string) string {
 // exposure (the seen ledger can never re-admit it). Size caps apply only at
 // render/serve time (applyPaging + maxItems, query.go), evicting from the
 // rendered view, and maxFeedBytes bounds the persisted snapshot as a whole.
-func sortFeed(items []item) []item {
-	slices.SortStableFunc(items, func(a, b item) int {
+func sortFeed(items []journalItem) []journalItem {
+	slices.SortStableFunc(items, func(a, b journalItem) int {
 		return b.FirstSeen.Compare(a.FirstSeen)
 	})
 	return items
