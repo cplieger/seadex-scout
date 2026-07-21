@@ -264,6 +264,26 @@ func coverageLost(prevCount, count, previousMinimum, minimum int) bool {
 	return prevCount >= previousMinimum && count < minimum && count < prevCount
 }
 
+// populationCollapsed is the per-population shrink guard the type, scope, and
+// routing validators apply beside their loss-relative floors: the previously
+// accepted cache carried a meaningful population (prevCount >=
+// previousMinimum, the same significance gate coverageLost uses) and the
+// candidate retains less than half of it (degradation.ShrinkGuardFactor, the
+// shared below-half policy home; multiplication avoids integer-division
+// rounding). The 1%-of-body floors catch total loss; this catches the
+// MID-BAND, where a corrupted refresh guts most of ONE population (typed
+// records 10000 -> 450 in a 40k body) while the record count and every 1%
+// floor stay green - accepted, it would silently erase most of the library's
+// routing for that population. Deliberately NO auto-accept after a streak:
+// by duration alone a persistent poisoning is indistinguishable from a
+// legitimate upstream restructuring, and the guard exists for the persistent
+// case - the rejection streak escalates to ERROR within ~a day and the
+// documented remedy (remove state.json to cold-start onto the new shape)
+// applies, exactly like the whole-map shrink guard.
+func populationCollapsed(prevCount, count, previousMinimum int) bool {
+	return prevCount >= previousMinimum && count*degradation.ShrinkGuardFactor < prevCount
+}
+
 // --- Loader: conditional fetch, acceptance guards, stale-map degradation ---
 
 // NewLoader returns a mapping loader. httpClient must be non-nil for any
@@ -557,8 +577,11 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 }
 
 // validateRefreshedRecords is acceptRefresh's acceptance invariant for a fresh
-// 200 body: it rejects a zero-record refresh and one below the AniList-key,
-// arr-identifier, or type coverage floors. The tolerant per-record decoders in
+// 200 body: it rejects a zero-record refresh, one below the AniList-key,
+// arr-identifier, or type coverage floors, and one whose individual
+// populations (typed, season-scoped, special, movie-/series-routed) collapse
+// below half of the previously accepted cache's (populationCollapsed - the
+// mid-band the 1% floors cannot see). The tolerant per-record decoders in
 // fribb.go deliberately
 // zero individual odd fields, so a wholesale upstream loss of the arr-ID
 // fields can decode as a full set of otherwise-valid records that no longer
@@ -625,6 +648,9 @@ func validateTypeCoverage(previous, records []Record, minimum int) error {
 	if coverageLost(previousTyped, typed, previousMinimum, minimum) {
 		return fmt.Errorf("type coverage %d/%d is below minimum %d (previous cache carried %d typed records)", typed, len(records), minimum, previousTyped)
 	}
+	if populationCollapsed(previousTyped, typed, previousMinimum) {
+		return fmt.Errorf("typed records collapsed below half of previous (%d of previous %d)", typed, previousTyped)
+	}
 	return nil
 }
 
@@ -649,9 +675,15 @@ func validateScopeCoverage(previous, records []Record, minimum int) error {
 	if coverageLost(prevSeasons, seasons, previousMinimum, minimum) {
 		return fmt.Errorf("positive-season coverage %d/%d is below minimum %d (previous cache carried %d season-scoped records)", seasons, len(records), minimum, prevSeasons)
 	}
+	if populationCollapsed(prevSeasons, seasons, previousMinimum) {
+		return fmt.Errorf("season-scoped records collapsed below half of previous (%d of previous %d)", seasons, prevSeasons)
+	}
 	prevSpecials, specials := specialRecordCount(previous), specialRecordCount(records)
 	if coverageLost(prevSpecials, specials, previousMinimum, minimum) {
 		return fmt.Errorf("special-type coverage %d/%d is below minimum %d (previous cache carried %d special records)", specials, len(records), minimum, prevSpecials)
+	}
+	if populationCollapsed(prevSpecials, specials, previousMinimum) {
+		return fmt.Errorf("special records collapsed below half of previous (%d of previous %d)", specials, prevSpecials)
 	}
 	return nil
 }
@@ -709,8 +741,14 @@ func validateRoutingCoverage(previous, records []Record, minimum int) error {
 	if coverageLost(prevMovies, movies, previousMinimum, minimum) {
 		return fmt.Errorf("movie-routed coverage %d/%d is below minimum %d (previous cache carried %d movie-routed records)", movies, len(records), minimum, prevMovies)
 	}
+	if populationCollapsed(prevMovies, movies, previousMinimum) {
+		return fmt.Errorf("movie-routed records collapsed below half of previous (%d of previous %d)", movies, prevMovies)
+	}
 	if coverageLost(prevOthers, others, previousMinimum, minimum) {
 		return fmt.Errorf("series-routed coverage %d/%d is below minimum %d (previous cache carried %d series-routed records)", others, len(records), minimum, prevOthers)
+	}
+	if populationCollapsed(prevOthers, others, previousMinimum) {
+		return fmt.Errorf("series-routed records collapsed below half of previous (%d of previous %d)", others, prevOthers)
 	}
 	return nil
 }

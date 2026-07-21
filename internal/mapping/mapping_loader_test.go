@@ -1515,3 +1515,57 @@ func TestLoader_refreshCache_freshLowCoverageCacheStillFetches(t *testing.T) {
 		t.Fatalf("fresh-but-unmappable cache was reused as fresh: records = %+v, want fetched record id 42", next.Records)
 	}
 }
+
+// TestValidateRefreshedRecordsMidBandPopulationCollapseRejected pins the
+// per-population shrink guards (populationCollapsed): a refresh that keeps
+// the record count and every 1%-of-body floor green while gutting MOST of one
+// population - typed records dropping 2000 -> 40 in a 2000-record body, where
+// 40 still clears the 1% floor of 20 - must be rejected in favour of the
+// stale map. A drop that retains at least half of the previous population is
+// accepted (the guard mirrors the whole-map below-half shrink guard), and a
+// population below the significance gate (under 1% of the previous body) is
+// never guarded, so tiny populations cannot reject noisily.
+func TestValidateRefreshedRecordsMidBandPopulationCollapseRejected(t *testing.T) {
+	const body = 2000
+	previous := make([]Record, 0, body)
+	for id := 1; id <= body; id++ {
+		previous = append(previous, Record{AniListID: id, Type: "TV", TvdbID: id})
+	}
+
+	midBand := make([]Record, len(previous))
+	copy(midBand, previous)
+	for i := 40; i < len(midBand); i++ {
+		midBand[i].Type = "" // routing (TvdbID) intact: only the typed population collapses
+	}
+	if err := validateRefreshedRecords(previous, midBand, len(midBand)); err == nil {
+		t.Error("mid-band typed collapse (2000 -> 40, above the 1% floor) returned nil error, want rejection")
+	}
+
+	aboveHalf := make([]Record, len(previous))
+	copy(aboveHalf, previous)
+	for i := 1001; i < len(aboveHalf); i++ {
+		aboveHalf[i].Type = ""
+	}
+	if err := validateRefreshedRecords(previous, aboveHalf, len(aboveHalf)); err != nil {
+		t.Errorf("at-least-half typed retention rejected: %v (the guard is below-half-of-previous)", err)
+	}
+
+	sparsePrev := make([]Record, 0, body)
+	for id := 1; id <= body; id++ {
+		r := Record{AniListID: id, Type: "TV", TvdbID: id}
+		if id <= 10 {
+			r.Type = "SPECIAL" // a 10-record population, below the 1% significance gate (20)
+		}
+		sparsePrev = append(sparsePrev, r)
+	}
+	noSpecials := make([]Record, len(sparsePrev))
+	copy(noSpecials, sparsePrev)
+	for i := range noSpecials {
+		if noSpecials[i].Type == "SPECIAL" {
+			noSpecials[i].Type = "TV"
+		}
+	}
+	if err := validateRefreshedRecords(sparsePrev, noSpecials, len(noSpecials)); err != nil {
+		t.Errorf("sparse-population drop rejected: %v (populations under the significance gate are not guarded)", err)
+	}
+}
