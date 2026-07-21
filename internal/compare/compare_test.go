@@ -15,23 +15,42 @@ import (
 )
 
 func TestDedupeKey(t *testing.T) {
+	h1 := strings.Repeat("a", 40)
+	h2 := strings.Repeat("b", 40)
 	f := &Finding{
 		AniListID:         42,
 		Status:            StatusBetter,
 		RecommendedGroups: []string{"b", "a"},
 		CurrentGroup:      "x",
-		InfoHash:          "hash1",
+		InfoHash:          h1,
 	}
 	got := dedupeKey(f)
-	want := `42|better_release|a,b|x|hash1`
+	want := `42|better_release|a,b|x|hash:` + h1
 	if got != want {
 		t.Errorf("dedupeKey() = %q, want %q", got, want)
 	}
 
 	swap := *f
-	swap.InfoHash = "hash2"
+	swap.InfoHash = h2
 	if dedupeKey(&swap) == got {
 		t.Error("a new infoHash (same-group quality swap) must produce a different dedupe key")
+	}
+
+	// The InfoHash is untrusted SeaDex data: anything that is not a valid
+	// 40-hex hash (garbage, a truncated value, the AB redaction marker) must
+	// not become the identity - the finding keys on its release URL instead,
+	// domain-tagged so the two sources can never alias.
+	garbage := *f
+	garbage.InfoHash = "hash1"
+	garbage.ReleaseURL = "https://nyaa.si/view/7"
+	if k := dedupeKey(&garbage); !strings.Contains(k, "|url:https://nyaa.si/view/7") {
+		t.Errorf("invalid-hash dedupeKey() = %q, want the url: fallback identity", k)
+	}
+	bareHexURL := *f
+	bareHexURL.InfoHash = ""
+	bareHexURL.ReleaseURL = h1
+	if dedupeKey(&bareHexURL) == got {
+		t.Error("a release URL spelling a valid hash must not alias the hash identity (domain separation)")
 	}
 
 	// SeaDex redacts AB info hashes: two AB-only replacement torrents differing
@@ -61,11 +80,30 @@ func TestDedupeKey(t *testing.T) {
 		t.Error("adding an AnimeBytes link must change the dedupe key")
 	}
 
-	// A public-only finding (non-redacted hash, no AB links) keeps the exact
-	// pre-AB-aware, unescaped key shape for delimiter-free values, so existing
-	// persisted dedupe state stays valid across upgrades.
-	if k := dedupeKey(&publicOnly); k != want {
-		t.Errorf("public-only dedupeKey() = %q, want unchanged %q", k, want)
+	// The FULL obtainable-source set is keyed, not just the headline
+	// identity: a NON-headline public candidate's torrent replacement (a new
+	// page URL beside an unchanged headline) must re-surface the finding -
+	// keying only the headline suppressed such a swap forever.
+	twoSources := publicOnly
+	twoSources.Links = []ReleaseLink{
+		{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
+		{Tracker: "Nyaa", URL: "https://nyaa.si/view/2"},
+	}
+	secondarySwap := publicOnly
+	secondarySwap.Links = []ReleaseLink{
+		{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
+		{Tracker: "Nyaa", URL: "https://nyaa.si/view/3"},
+	}
+	if dedupeKey(&twoSources) == dedupeKey(&secondarySwap) {
+		t.Error("a non-headline source replacement must change the dedupe key")
+	}
+
+	// The full key shape is pinned once: identity domain tag plus the sorted
+	// link-set component. (This encoding deliberately invalidates pre-change
+	// persisted keys - a benign one-time re-alert burst, the accepted cost of
+	// the validated, domain-separated identity and the full-source coverage.)
+	if k := dedupeKey(&publicOnly); k != want+"|links=https://nyaa.si/view/1" {
+		t.Errorf("public-only dedupeKey() = %q, want %q", k, want+"|links=https://nyaa.si/view/1")
 	}
 }
 
@@ -86,15 +124,15 @@ func TestDedupeKeyEscapesDelimiters(t *testing.T) {
 	}
 
 	// A '|' inside a component must not shift the field boundary: group "x"
-	// with identity "h|y" naively joins identically to group "x|h" with
-	// identity "y".
-	pipeInHash := base
-	pipeInHash.CurrentGroup = "x"
-	pipeInHash.InfoHash = "h|y"
+	// with identity URL "h|y" naively joins identically to group "x|h" with
+	// identity URL "y".
+	pipeInURL := base
+	pipeInURL.CurrentGroup = "x"
+	pipeInURL.ReleaseURL = "h|y"
 	pipeInGroup := base
 	pipeInGroup.CurrentGroup = "x|h"
-	pipeInGroup.InfoHash = "y"
-	if dedupeKey(&pipeInHash) == dedupeKey(&pipeInGroup) {
+	pipeInGroup.ReleaseURL = "y"
+	if dedupeKey(&pipeInURL) == dedupeKey(&pipeInGroup) {
 		t.Error(`("x", "h|y") and ("x|h", "y") must not share a dedupe key`)
 	}
 
@@ -103,10 +141,10 @@ func TestDedupeKeyEscapesDelimiters(t *testing.T) {
 	// both join to x\|y.
 	trailingBackslash := base
 	trailingBackslash.CurrentGroup = `x\`
-	trailingBackslash.InfoHash = "y"
+	trailingBackslash.ReleaseURL = "y"
 	leadingPipe := base
 	leadingPipe.CurrentGroup = "x"
-	leadingPipe.InfoHash = "|y"
+	leadingPipe.ReleaseURL = "|y"
 	if dedupeKey(&trailingBackslash) == dedupeKey(&leadingPipe) {
 		t.Error(`("x\", "y") and ("x", "|y") must not share a dedupe key (backslash must be escaped)`)
 	}

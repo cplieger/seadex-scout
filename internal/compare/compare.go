@@ -347,14 +347,18 @@ func finalize(f *Finding, status Status, sev Severity) *Finding {
 // --- Dedupe-key encoding ---
 
 // dedupeKey keys a finding by AniList ID, status, recommended-group set, current
-// group, and release identity, so a same-group quality swap (new identity) or a
-// changed library state re-surfaces while an unchanged finding is suppressed.
-// It is AnimeBytes-aware two ways: SeaDex redacts AB info hashes, so the
-// identity falls back to the release URL (releaseIdentity), and the AB link set
-// is appended when present (animeBytesLinkKey), so enabling AnimeBytes on an
-// existing public-tracker finding re-surfaces the newly obtainable AB source.
-// The untrusted components (group names, the current group, and the release
-// identity - all parsed from SeaDex data or library file names) have their
+// group, release identity, and the full obtainable-source link set, so a
+// same-group quality swap (new identity), a changed library state, or ANY
+// change to the recommended sources re-surfaces while an unchanged finding is
+// suppressed. The link-set component covers what the headline identity alone
+// cannot: a NON-headline candidate's torrent replacement (a new tracker page
+// URL) and an AnimeBytes toggle flip (AB links joining or leaving the set)
+// both change the key, where previously only the headline candidate and the
+// AB subset were keyed and a replaced secondary public source stayed
+// suppressed forever.
+// The untrusted components (group names, the current group, the release
+// identity, and the link URLs - all parsed from SeaDex data or library file
+// names) have their
 // delimiter characters escaped (escapeDedupePart) before joining, so a value
 // that itself contains the ',' or '|' delimiter cannot collide two distinct
 // findings onto one key (which would suppress the second as already alerted),
@@ -375,8 +379,8 @@ func dedupeKey(f *Finding) string {
 		currentGroupKey(f),
 		boundedPart(releaseIdentity(f)),
 	}, "|")
-	if abLinks := animeBytesLinkKey(f.Links); abLinks != "" {
-		key += "|ab=" + abLinks
+	if linkSet := obtainableLinkKey(f.Links); linkSet != "" {
+		key += "|links=" + linkSet
 	}
 	return key
 }
@@ -480,43 +484,46 @@ func hashKeyParts(parts []string) string {
 	return hashedKeyPrefix + hex.EncodeToString(h.Sum(nil))
 }
 
-// releaseIdentity returns the stable torrent identity used by finding dedupe.
-// SeaDex redacts AnimeBytes info hashes (seadex.RedactedInfoHash), so use the
-// unique torrent page URL there; otherwise every same-group AB replacement
-// would keep the same key and the later replacement would be suppressed.
+// releaseIdentity returns the stable torrent identity used by finding dedupe,
+// domain-tagged so the two identity sources can never alias each other: a
+// VALIDATED 40-hex info hash ("hash:" + the lowercased hex), else the release
+// page URL ("url:" + trimmed). The InfoHash is untrusted SeaDex data - the
+// previous code trusted any non-redacted value verbatim as the identity, so a
+// crafted or garbled hash field keyed the finding unvalidated; dedupe now
+// applies the same seadex.ValidInfoHash gate the indexer feed already uses.
+// SeaDex redacts AnimeBytes info hashes (ValidInfoHash rejects the redaction
+// marker along with everything else non-hex), so every same-group AB
+// replacement keys on its unique torrent page URL, as before.
 func releaseIdentity(f *Finding) string {
-	hash := strings.TrimSpace(f.InfoHash)
-	if hash == "" || seadex.InfoHashRedacted(hash) {
-		return strings.TrimSpace(f.ReleaseURL)
+	if h := seadex.ValidInfoHash(f.InfoHash); h != "" {
+		return "hash:" + h
 	}
-	return hash
+	return "url:" + strings.TrimSpace(f.ReleaseURL)
 }
 
-// animeBytesLinkKey returns the sorted toggle-gated (AnimeBytes) link URLs of
-// a finding as a single bounded key component, or "" when the finding carries
-// no such link, so the dedupe key changes when the AB source set changes. A
-// link is toggle-gated when filter.ABGated - the URL-aware invariant boundary
-// candidate filtering uses - would hide it with the toggle off, so a
-// mislabeled AB URL still keys the same as a correctly labeled one. The
-// sorted raw set goes through boundedJoinParts, matching dedupeKey's
-// collision-proofing and size-bounding: a SeaDex-supplied URL containing ','
-// or '|' cannot collide two link sets, and an oversized set (SeaDex admits up
-// to 512 arbitrarily long URLs per entry) reduces to a fixed-size hash
-// instead of one huge joined allocation.
-func animeBytesLinkKey(links []ReleaseLink) string {
+// obtainableLinkKey returns a finding's full obtainable-source URL set
+// (deduplicated by trimmed URL, sorted, bounded) as a single key component,
+// or "" when the finding carries no links. Folding EVERY obtainable source
+// into the key - not just the headline candidate's identity - re-surfaces a
+// finding when any recommended source changes: a non-headline public-tracker
+// torrent replacement (a new page URL) previously kept the key unchanged and
+// was suppressed forever, and an AnimeBytes toggle flip changes the set
+// exactly as the retired AB-only component did. Deduplicating by URL keeps
+// the key label-insensitive: one source arriving twice (once mislabeled)
+// keys once, so correcting the label later never re-alerts an unchanged
+// source. The sorted raw set goes through boundedJoinParts, matching
+// dedupeKey's collision-proofing and size-bounding: a SeaDex-supplied URL
+// containing ',' or '|' cannot collide two link sets, and an oversized set
+// (SeaDex admits up to 512 arbitrarily long URLs per entry) reduces to a
+// fixed-size hash instead of one huge joined allocation.
+func obtainableLinkKey(links []ReleaseLink) string {
 	seen := make(map[string]struct{}, len(links))
 	var urls []string
 	for i := range links {
-		if !filter.ABGated(links[i].Tracker, links[i].URL) {
+		u := strings.TrimSpace(links[i].URL)
+		if u == "" {
 			continue
 		}
-		// Deduplicate by trimmed URL: obtainableLinks preserves distinct
-		// (tracker, URL) pairs, so one AB URL can arrive twice when SeaDex
-		// supplies the same source once as AB and once under a mislabeled
-		// tracker. The key describes the URL SET - correcting the duplicate
-		// or its label later must not change the key and re-alert an
-		// unchanged obtainable source.
-		u := strings.TrimSpace(links[i].URL)
 		if _, dup := seen[u]; dup {
 			continue
 		}

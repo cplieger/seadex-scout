@@ -496,10 +496,20 @@ func (li *LibIndex) appendTitleCandidates(candidates []*library.Item, seen map[*
 }
 
 // filterByYear returns the candidates whose year equals year.
+// filterByYear narrows candidates to those whose year matches, KEEPING items
+// whose year is unknown (0): absence of year evidence is not a mismatch.
+// findByTitle already skips narrowing entirely when the ANILIST year is
+// unknown, and hard-failing a library item for the same missing evidence
+// made the asymmetry fatal in one direction and invisible in the other - an
+// id-less Fribb record whose library item carries no year could never
+// title-match at all. The single-candidate requirement still gates the final
+// match, so a kept unknown-year candidate can only leave a set ambiguous (a
+// miss) or let the one true candidate survive - never force a wrong match on
+// its own.
 func filterByYear(candidates []*library.Item, year int) []*library.Item {
 	var out []*library.Item
 	for _, it := range candidates {
-		if it.Year == year {
+		if it.Year == 0 || it.Year == year {
 			out = append(out, it)
 		}
 	}
