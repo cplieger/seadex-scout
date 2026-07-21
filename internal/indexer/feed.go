@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cplieger/seadex-scout/internal/classify"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
@@ -185,19 +186,16 @@ func releaseFlags(t *seadex.Torrent) []string {
 	return flags
 }
 
-// fileResolution classifies a torrent's resolution from its media file names
-// alone, via the shared release classifier. The entry notes are deliberately
-// excluded: they are entry-wide and routinely describe sibling releases, so a
-// note mentioning another release's 1080p must not stamp this torrent's title.
-// Creditless extras are excluded like every other synthesis scanner (see
-// creditlessExtra): an NC bonus file's resolution must not drive the title either.
+// fileResolution classifies a torrent's resolution from its file names
+// alone, via the shared release classifier over the ONE file-eligibility
+// rule (classify.PayloadNames — type gate plus size refinement), so the RSS
+// title's resolution flag and the daemon finding's classification can never
+// disagree about which files vote (h-f3). The entry notes are deliberately
+// excluded: they are entry-wide and routinely describe sibling releases, so
+// a note mentioning another release's 1080p must not stamp this torrent's
+// title — that axis stays per-consumer while the names selection is shared.
 func fileResolution(files []seadex.File) string {
-	names := make([]string, 0, len(files))
-	for i := range files {
-		if isContentMediaFile(files[i].Name) {
-			names = append(names, files[i].Name)
-		}
-	}
+	names := classify.PayloadNames(files)
 	if len(names) == 0 {
 		return ""
 	}
@@ -232,10 +230,6 @@ var absoluteEpisode = regexp.MustCompile(`[\s_]-[\s_](\d{1,4}(?:v\d+)?)(?:[\s_]|
 // episodeVersion strips a trailing vN revision from an episode token so a v2
 // replacement of the same episode never counts as a second episode.
 var episodeVersion = regexp.MustCompile(`(?i)v\d+$`)
-
-// creditlessExtra matches bonus OP/ED files that may carry absolute-looking
-// numbers but should not count as episode files or drive the synthesized title.
-var creditlessExtra = regexp.MustCompile(`(?i)\b(?:NCOP|NCED|creditless)\d*(?:v\d+)?\b`)
 
 // multiSpace collapses runs of whitespace left after removing a token.
 var multiSpace = regexp.MustCompile(`\s{2,}`)
@@ -433,30 +427,17 @@ func firstEpisodeFile(files []seadex.File, match func(string) bool) string {
 }
 
 // isContentMediaFile reports whether name is eligible to identify the release
-// content: it must be a video file and not a creditless extra.
+// content, delegating to the shared type predicate in classify (one home for
+// "what counts as a content file", h-f3).
 func isContentMediaFile(name string) bool {
-	return isMediaFile(name) && !creditlessExtra.MatchString(name)
-}
-
-// isMediaFile reports whether a file name carries a known video container
-// extension, so title synthesis derives from a real episode/movie file rather
-// than a sidecar (subtitles, fonts) that happens to carry the episode token.
-func isMediaFile(name string) bool {
-	return mediaExts[strings.ToLower(path.Ext(name))]
-}
-
-// mediaExts are the video container extensions used to tell an episode/movie
-// file from a sidecar file (subtitles, samples) when scanning a torrent's files.
-var mediaExts = map[string]bool{
-	".mkv": true, ".mp4": true, ".avi": true, ".m2ts": true,
-	".ts": true, ".ogm": true, ".mov": true, ".wmv": true, ".webm": true,
+	return classify.ContentMediaFile(name)
 }
 
 // stripExt drops a trailing known video extension from a file name, leaving any
 // other trailing dotted token (a release name is not a path) intact.
 func stripExt(name string) string {
 	ext := strings.ToLower(path.Ext(name))
-	if mediaExts[ext] {
+	if classify.IsMediaFile(name) && ext != "" {
 		return name[:len(name)-len(ext)]
 	}
 	return name
