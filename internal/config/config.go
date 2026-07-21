@@ -240,36 +240,37 @@ type Config struct {
 // YAML, a file containing more than one YAML document, or an unknown
 // configuration key (a misspelled or misplaced key fails loudly at startup
 // rather than being silently ignored); call Validate for semantic checks.
+//
+// The strict pipeline is yamlenv.Load: the single-document and unknown-key
+// checks on the raw pre-expansion bytes, allowlisted post-parse ${VAR}
+// expansion of string scalar values, the decode onto the defaults baseline
+// (an empty document keeps it), and fail-closed sanitization of every yaml
+// error so an expanded — or pasted literal — secret never reaches the
+// startup log. The one policy choice made here is WithUnknownKeyEcho: the
+// unknown-key name is kept — it IS the diagnostic the operator needs to fix
+// a typo, and the strict probe runs on the pre-expansion bytes so the name
+// cannot carry an expanded secret — while duplicate-key names and scalar
+// excerpts stay redacted per the library default.
 func Load(path string) (Config, error) {
-	doc, refs, data, err := loadExpandedDoc(path)
+	// The shared atomicfile bounded reader (the same primitive
+	// writeStarterConfig and internal/state use) enforces the size cap and
+	// returns the atomicfile.ErrFileTooLarge sentinel on an oversized file.
+	// Config load is a synchronous startup step with no cancellation point,
+	// so it passes context.Background(), matching writeStarterConfig.
+	raw, err := atomicfile.ReadBounded(context.Background(), path, maxConfigBytes)
 	if err != nil {
-		if data == nil {
-			return Config{}, fmt.Errorf("read config %s: %w", path, err)
-		}
-		// Same fail-closed sanitizer as the decode errors below: a parse error
-		// can embed operator-written text adjacent to a secret (e.g. an
-		// unquoted literal secret read as an alias yields "unknown anchor
-		// '<secret>' referenced"), and main logs this error at startup.
-		return Config{}, fmt.Errorf("parse config %s: %w", path, sanitizeYAMLError(err))
+		return Config{}, fmt.Errorf("read config %s: %w", path, err)
 	}
-	// Both strict-load checks run on the raw pre-expansion bytes (see their
-	// godoc): the multi-document error is static (safe unsanitized), while
-	// the unknown-key error can embed document content and rides the same
-	// fail-closed sanitizer as every other decode error here.
-	if err := yamlenv.CheckSingleDocument(data); err != nil {
-		return Config{}, fmt.Errorf("parse config %s: %w", path, err)
-	}
-	if err := yamlenv.CheckUnknownKeys(data, &fileConfig{}); err != nil {
-		return Config{}, fmt.Errorf("parse config %s: %w", path, sanitizeYAMLError(err))
-	}
+	fc := defaultFileConfig()
+	refs, err := yamlenv.Load(raw, &fc, isAllowedEnvVar,
+		yamlenv.WithSanitizeOptions(yamlenv.WithUnknownKeyEcho()))
 	if len(refs) > 0 {
 		slog.Warn("config references environment variables that are not set; "+
 			"the literal ${VAR} is kept and will likely fail authentication",
 			"vars", strings.Join(refs, ","))
 	}
-	fc := defaultFileConfig()
-	if err := doc.Decode(&fc); err != nil {
-		return Config{}, fmt.Errorf("parse config %s: %w", path, sanitizeYAMLError(err))
+	if err != nil {
+		return Config{}, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	return fc.toConfig(), nil
 }
@@ -278,8 +279,9 @@ func Load(path string) (Config, error) {
 // allowlisted ${VAR} expansion, returning the expanded document node, the
 // unresolved allowlisted refs, and the raw pre-expansion bytes (nil raw
 // signals a read failure; non-nil raw alongside an error signals a parse
-// failure). It is the single home of the read+expand pipeline shared by Load
-// (strict) and PollIntervalFromFile (best-effort).
+// failure). It serves PollIntervalFromFile's deliberately permissive
+// partial probe on the yamlenv primitives; Load itself rides yamlenv.Load,
+// which owns the strict pipeline internally.
 func loadExpandedDoc(path string) (doc *yaml.Node, refs []string, raw []byte, err error) {
 	// Read through the shared atomicfile bounded reader (the same primitive
 	// writeStarterConfig and internal/state use), which enforces the size cap and
@@ -296,23 +298,6 @@ func loadExpandedDoc(path string) (doc *yaml.Node, refs []string, raw []byte, er
 	}
 	refs = yamlenv.Expand(&node, isAllowedEnvVar)
 	return &node, refs, raw, nil
-}
-
-// sanitizeYAMLError rewrites a yaml parse/decode error via
-// yamlenv.SanitizeDecodeError so an expanded secret never reaches the startup
-// log; line numbers and target types are kept (field-name-only, the same
-// posture as validateHTTPURL errors). The decode runs after ${VAR} expansion,
-// so the excerpt yaml.v3 embeds can carry a prefix of an expanded secret (an
-// api key placed in a non-string field by a config typo); the library rebuilds
-// each *yaml.TypeError entry from its value-independent structure and
-// withholds anything it cannot prove value-free. The one policy choice made
-// here is WithUnknownKeyEcho: the unknown-key name from the strict
-// checkUnknownKeys pre-decode is kept — it IS the diagnostic the operator
-// needs to fix a typo, and that pre-decode runs on the pre-expansion bytes so
-// the name cannot carry an expanded secret — while duplicate-key names and
-// scalar excerpts stay redacted per the library default.
-func sanitizeYAMLError(err error) error {
-	return yamlenv.SanitizeDecodeError(err, yamlenv.WithUnknownKeyEcho())
 }
 
 // toConfig flattens the on-disk shape into the runtime Config, applying
