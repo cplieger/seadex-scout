@@ -683,15 +683,8 @@ func TestHandlePreCompareGateShrunkWalkEscalatesAfterRepeatedShrinks(t *testing.
 			if _, ok := loaded.Findings["prior"]; !ok {
 				t.Errorf("persisted findings = %+v, want prior finding preserved", loaded.Findings)
 			}
-			var warns, errs int
-			for _, r := range recorder.Records() {
-				switch {
-				case r.Level == slog.LevelError && strings.HasPrefix(r.Message, "library walk shrank"):
-					errs++
-				case r.Level == slog.LevelWarn && strings.HasPrefix(r.Message, "library walk shrank"):
-					warns++
-				}
-			}
+			warns := recorder.CountLevel(slog.LevelWarn, "library walk shrank")
+			errs := recorder.CountLevel(slog.LevelError, "library walk shrank")
 			if tc.wantError {
 				if errs != 1 || warns != 0 {
 					t.Errorf("escalated log counts: ERROR=%d WARN=%d, want exactly one ERROR and no WARN (single log site)", errs, warns)

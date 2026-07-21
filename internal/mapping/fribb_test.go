@@ -506,44 +506,19 @@ func TestParseFribb_logsSkippedAndDroppedCounts(t *testing.T) {
 	if rec.CountExact("mapping: skipped malformed records") != 1 {
 		t.Fatalf("logs = %v, want one skipped-records warning", rec.Messages())
 	}
-	if !attrRendered(rec, "skipped", "2") {
+	if !rec.HasAttr("", "skipped", "2") {
 		t.Errorf("skipped-records logs = %v, want skipped=2", rec.Messages())
 	}
-	if !attrRendered(rec, "parsed", "1") {
+	if !rec.HasAttr("", "parsed", "1") {
 		t.Errorf("skipped-records logs = %v, want parsed=1", rec.Messages())
 	}
-	if !attrContains(rec, "error", "cannot unmarshal") {
+	if !rec.AttrContains("", "error", "cannot unmarshal") {
 		t.Errorf("skipped-records logs = %v, want the FIRST decode error (a type mismatch), not the later over-cap error", rec.Messages())
 	}
 	if rec.CountExact("mapping: dropped records without anilist_id") != 1 {
 		t.Fatalf("logs = %v, want one dropped-records debug line", rec.Messages())
 	}
-	if !attrRendered(rec, "dropped", "1") {
+	if !rec.HasAttr("", "dropped", "1") {
 		t.Errorf("dropped-records logs = %v, want dropped=1", rec.Messages())
 	}
-}
-
-// attrContains reports whether any captured record carries an attribute with
-// the given key whose rendered value contains want.
-func attrContains(rec *capture.Recorder, key, want string) bool {
-	return attrValueMatches(rec, key, func(v string) bool { return strings.Contains(v, want) })
-}
-
-// attrValueMatches reports whether any captured record carries an attribute
-// with the given key whose rendered value satisfies match.
-func attrValueMatches(rec *capture.Recorder, key string, match func(string) bool) bool {
-	for _, r := range rec.Records() {
-		found := false
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == key && match(a.Value.String()) {
-				found = true
-				return false
-			}
-			return true
-		})
-		if found {
-			return true
-		}
-	}
-	return false
 }

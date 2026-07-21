@@ -156,18 +156,7 @@ func TestFindingLogSanitizesArrURL(t *testing.T) {
 
 	reporter.Notify([]compare.Finding{finding}, nil, nil, time.Now())
 
-	var got string
-	for _, rec := range recorder.Records() {
-		if rec.Message != "better release available" {
-			continue
-		}
-		rec.Attrs(func(a slog.Attr) bool {
-			if a.Key == "arr_url" {
-				got, _ = a.Value.Any().(string)
-			}
-			return true
-		})
-	}
+	got, _ := recorder.AttrValue("better release available", "arr_url")
 	if got != "https://sonarr.example/series/frieren" {
 		t.Errorf("logged arr_url = %q, want credentials, query, and fragment stripped", got)
 	}
@@ -521,19 +510,7 @@ func TestNotifierReportSuppressesDuplicateCurrentKeys(t *testing.T) {
 	if got := current["duplicate"].Finding.Title; got != last.Title {
 		t.Errorf("stored title = %q, want the last payload's %q", got, last.Title)
 	}
-	var emittedTitle string
-	for _, rec := range recorder.Records() {
-		if rec.Message != "better release available" {
-			continue
-		}
-		rec.Attrs(func(a slog.Attr) bool {
-			if a.Key == "title" {
-				emittedTitle, _ = a.Value.Any().(string)
-				return false
-			}
-			return true
-		})
-	}
+	emittedTitle, _ := recorder.AttrValue("better release available", "title")
 	if emittedTitle != last.Title {
 		t.Errorf("emitted title = %q, want the last payload's %q (the alert must match the stored state)", emittedTitle, last.Title)
 	}
@@ -642,20 +619,8 @@ func TestFindingLineCarriesSeason(t *testing.T) {
 
 	reporter.Notify([]compare.Finding{f}, nil, nil, time.Now())
 
-	season := int64(-1)
-	for _, rec := range recorder.Records() {
-		if rec.Message != "better release available" {
-			continue
-		}
-		rec.Attrs(func(a slog.Attr) bool {
-			if a.Key == "season" {
-				season = a.Value.Int64()
-			}
-			return true
-		})
-	}
-	if season != 2 {
-		t.Errorf("finding line season = %d, want 2", season)
+	if season, ok := recorder.AttrValue("better release available", "season"); !ok || season != "2" {
+		t.Errorf("finding line season = %q (found %v), want 2", season, ok)
 	}
 }
 
@@ -721,20 +686,7 @@ func TestFindingLineCarriesJoinedRecommendedGroups(t *testing.T) {
 
 	reporter.Notify([]compare.Finding{f}, nil, nil, time.Now())
 
-	got := ""
-	seen := false
-	for _, rec := range recorder.Records() {
-		if rec.Message != "better release available" {
-			continue
-		}
-		rec.Attrs(func(a slog.Attr) bool {
-			if a.Key == "recommended_groups" {
-				seen = true
-				got, _ = a.Value.Any().(string)
-			}
-			return true
-		})
-	}
+	got, seen := recorder.AttrValue("better release available", "recommended_groups")
 	if !seen {
 		t.Fatal("finding line carries no recommended_groups attribute")
 	}

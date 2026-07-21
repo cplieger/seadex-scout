@@ -390,26 +390,6 @@ func TestToConfigRadarrEnabledAndReportDirFallback(t *testing.T) {
 	}
 }
 
-// recordHasAttr reports whether any captured record carries an attribute with
-// the given key whose string form contains sub (capture.Recorder.Contains
-// matches messages only; warned-about values ride in attrs).
-func recordHasAttr(rec *capture.Recorder, key, sub string) bool {
-	for _, r := range rec.Records() {
-		found := false
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == key && strings.Contains(a.Value.String(), sub) {
-				found = true
-				return false
-			}
-			return true
-		})
-		if found {
-			return true
-		}
-	}
-	return false
-}
-
 func TestLoadWarnsOnUnresolvedAllowlistedEnv(t *testing.T) {
 	rec := capture.Default(t)
 	dir := t.TempDir()
@@ -426,7 +406,7 @@ func TestLoadWarnsOnUnresolvedAllowlistedEnv(t *testing.T) {
 	if cfg.SonarrAPIKey != "${SONARR_MISSING}" {
 		t.Errorf("SonarrAPIKey = %q, want unresolved literal", cfg.SonarrAPIKey)
 	}
-	if !rec.Contains("config references environment variables") || !recordHasAttr(rec, "vars", "SONARR_MISSING") {
+	if !rec.Contains("config references environment variables") || !rec.AttrContains("", "vars", "SONARR_MISSING") {
 		t.Errorf("Load unresolved-env warning = %v, want message and variable name", rec.Messages())
 	}
 }
@@ -442,7 +422,7 @@ func TestParseLogLevelWarnsOnUnrecognizedValue(t *testing.T) {
 	}
 	// Field-name-only: the rejected value may be an expanded ${VAR} secret and
 	// must never ride the warning (h-f13).
-	if anyAttrContains(rec, "verbose") {
+	if rec.AttrContains("", "", "verbose") {
 		t.Errorf("parseLogLevel warning echoes the rejected value: %v", rec.Messages())
 	}
 }
@@ -471,7 +451,7 @@ func TestParseLogFormatWarnsOnUnrecognizedValue(t *testing.T) {
 			}
 			// Field-name-only: the rejected value may be an expanded ${VAR}
 			// secret and must never ride the warning (h-f13).
-			if tt.wantWarn && anyAttrContains(rec, "txt") {
+			if tt.wantWarn && rec.AttrContains("", "", "txt") {
 				t.Errorf("parseLogFormat warning echoes the rejected value: %v", rec.Messages())
 			}
 			if !tt.wantWarn && rec.Contains("unrecognized log.format") {
@@ -737,7 +717,7 @@ func TestValidateIndexerShortFeedKeyWarning(t *testing.T) {
 			t.Errorf("Validate() log = %v, want the short feed_api_key warning", rec.Messages())
 		}
 		corpus := strings.Join(rec.Messages(), "\n")
-		if strings.Contains(corpus, shortKey) || anyAttrContains(rec, shortKey) {
+		if strings.Contains(corpus, shortKey) || rec.AttrContains("", "", shortKey) {
 			t.Errorf("Validate() log leaks the key value: %v", rec.Messages())
 		}
 	})
@@ -1236,11 +1216,11 @@ func TestValidateWarnsOnCredentialBearingTorznabURL(t *testing.T) {
 		if err := c.Validate(); err != nil {
 			t.Fatalf("Validate: %v", err)
 		}
-		if !rec.Contains(warnMsg) || !recordHasAttr(rec, "field", "indexer.nyaa_torznab_url") {
+		if !rec.Contains(warnMsg) || !rec.AttrContains("", "field", "indexer.nyaa_torznab_url") {
 			t.Errorf("Validate() log = %v, want the credential warning naming indexer.nyaa_torznab_url", rec.Messages())
 		}
 		corpus := strings.Join(rec.Messages(), "\n")
-		if strings.Contains(corpus, cred) || anyAttrContains(rec, cred) {
+		if strings.Contains(corpus, cred) || rec.AttrContains("", "", cred) {
 			t.Errorf("Validate() log leaks the credential value: %v", rec.Messages())
 		}
 	})
@@ -1252,11 +1232,11 @@ func TestValidateWarnsOnCredentialBearingTorznabURL(t *testing.T) {
 		if err := c.Validate(); err != nil {
 			t.Fatalf("Validate: %v", err)
 		}
-		if !rec.Contains(warnMsg) || !recordHasAttr(rec, "field", "indexer.ab_torznab_url") {
+		if !rec.Contains(warnMsg) || !rec.AttrContains("", "field", "indexer.ab_torznab_url") {
 			t.Errorf("Validate() log = %v, want the credential warning naming indexer.ab_torznab_url", rec.Messages())
 		}
 		corpus := strings.Join(rec.Messages(), "\n")
-		if strings.Contains(corpus, cred) || anyAttrContains(rec, cred) {
+		if strings.Contains(corpus, cred) || rec.AttrContains("", "", cred) {
 			t.Errorf("Validate() log leaks the userinfo credential value: %v", rec.Messages())
 		}
 	})
@@ -1287,11 +1267,11 @@ func TestValidateWarnsOnCredentialBearingArrURL(t *testing.T) {
 		if err := c.Validate(); err != nil {
 			t.Fatalf("Validate: %v", err)
 		}
-		if !rec.Contains(warnMsg) || !recordHasAttr(rec, "field", "sonarr.url") {
+		if !rec.Contains(warnMsg) || !rec.AttrContains("", "field", "sonarr.url") {
 			t.Errorf("Validate() log = %v, want the credential warning naming sonarr.url", rec.Messages())
 		}
 		corpus := strings.Join(rec.Messages(), "\n")
-		if strings.Contains(corpus, cred) || anyAttrContains(rec, cred) {
+		if strings.Contains(corpus, cred) || rec.AttrContains("", "", cred) {
 			t.Errorf("Validate() log leaks the credential value: %v", rec.Messages())
 		}
 	})
@@ -1302,11 +1282,11 @@ func TestValidateWarnsOnCredentialBearingArrURL(t *testing.T) {
 		if err := c.Validate(); err != nil {
 			t.Fatalf("Validate: %v", err)
 		}
-		if !rec.Contains(warnMsg) || !recordHasAttr(rec, "field", "radarr.url") {
+		if !rec.Contains(warnMsg) || !rec.AttrContains("", "field", "radarr.url") {
 			t.Errorf("Validate() log = %v, want the credential warning naming radarr.url", rec.Messages())
 		}
 		corpus := strings.Join(rec.Messages(), "\n")
-		if strings.Contains(corpus, cred) || anyAttrContains(rec, cred) {
+		if strings.Contains(corpus, cred) || rec.AttrContains("", "", cred) {
 			t.Errorf("Validate() log leaks the userinfo credential value: %v", rec.Messages())
 		}
 	})
@@ -1320,28 +1300,6 @@ func TestValidateWarnsOnCredentialBearingArrURL(t *testing.T) {
 			t.Errorf("Validate() log = %v, want no credential warning for clean urls", rec.Messages())
 		}
 	})
-}
-
-// anyAttrContains reports whether ANY attribute on ANY captured record - not
-// just one with a known key - carries sub in its string form. recordHasAttr
-// keys on a single attribute name, so a regression that logs a credential
-// under a different attr would slip past it; the leak assertions walk the
-// whole attr set instead.
-func anyAttrContains(rec *capture.Recorder, sub string) bool {
-	for _, r := range rec.Records() {
-		found := false
-		r.Attrs(func(a slog.Attr) bool {
-			if strings.Contains(a.Value.String(), sub) {
-				found = true
-				return false
-			}
-			return true
-		})
-		if found {
-			return true
-		}
-	}
-	return false
 }
 
 // TestToConfigInfoOnDisabledSonarrWithKey mirrors the radarr variant above for

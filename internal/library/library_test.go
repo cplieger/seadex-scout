@@ -514,40 +514,6 @@ func TestWalkSonarrBoundsEpisodeFetchConcurrency(t *testing.T) {
 	})
 }
 
-// sawWarn reports whether any captured record was logged at WARN, so a test
-// can assert no warning was emitted.
-func sawWarn(rec *capture.Recorder) bool {
-	for _, r := range rec.Records() {
-		if r.Level == slog.LevelWarn {
-			return true
-		}
-	}
-	return false
-}
-
-// recordHasAttr reports whether any captured record whose Message contains
-// msgSub carries an attribute with the given key whose rendered value equals
-// want, so tests assert on structured records instead of rendered logfmt.
-func recordHasAttr(rec *capture.Recorder, msgSub, key, want string) bool {
-	for _, r := range rec.Records() {
-		if !strings.Contains(r.Message, msgSub) {
-			continue
-		}
-		found := false
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == key && a.Value.String() == want {
-				found = true
-				return false
-			}
-			return true
-		})
-		if found {
-			return true
-		}
-	}
-	return false
-}
-
 // cancelingSonarr cancels the walk context from inside GetEpisodeFiles,
 // simulating a shutdown/timeout during the episode fetch.
 type cancelingSonarr struct {
@@ -582,7 +548,7 @@ func TestWalkSonarrEpisodeCancellationIsFatalWithoutWarn(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Walk error = %v, want context.Canceled", err)
 	}
-	if sawWarn(rec) {
+	if rec.CountLevel(slog.LevelWarn, "") > 0 {
 		t.Fatal("Walk logged a warning for context cancellation; want cancellation treated as shutdown, not an arr fault")
 	}
 }
@@ -859,7 +825,7 @@ func TestWalkSonarrUnmatchedIncludeTagLogsWarning(t *testing.T) {
 	if len(snap.Items) != 1 || snap.Items[0].ArrID != 1 {
 		t.Fatalf("items = %+v, want only the tag-included series (id 1)", snap.Items)
 	}
-	if !sawWarn(rec) {
+	if rec.CountLevel(slog.LevelWarn, "") == 0 {
 		t.Error("no warning logged, want a warning that a configured tag matched no arr tag")
 	}
 }
@@ -1000,7 +966,7 @@ func TestWalkSonarrLogsLiveContextTimeout(t *testing.T) {
 	if !rec.Contains("sonarr episode fetch failed; series kept as failed placeholder") {
 		t.Errorf("messages = %q, want a per-series episode-fetch-failed warning", rec.Messages())
 	}
-	if !recordHasAttr(rec, "sonarr episode fetch failed; series kept as failed placeholder", "series", "Bravo") {
+	if !rec.HasAttr("sonarr episode fetch failed; series kept as failed placeholder", "series", "Bravo") {
 		t.Error("episode-fetch-failed warning does not name Bravo in its series attr")
 	}
 }
@@ -1092,10 +1058,10 @@ func TestWalkSonarrPartialFailureLogsAggregateSkipWarning(t *testing.T) {
 	if !rec.Contains("snapshot is partial") {
 		t.Fatalf("messages = %q, want an aggregate partial-snapshot warning", rec.Messages())
 	}
-	if !recordHasAttr(rec, "snapshot is partial", "skipped", "2") {
+	if !rec.HasAttr("snapshot is partial", "skipped", "2") {
 		t.Error("partial-snapshot warning skipped attr != 2")
 	}
-	if !recordHasAttr(rec, "snapshot is partial", "kept", "3") {
+	if !rec.HasAttr("snapshot is partial", "kept", "3") {
 		t.Error("partial-snapshot warning kept attr != 3")
 	}
 }
@@ -1275,7 +1241,7 @@ func TestWalkCleanSonarrWalkIsNotPartial(t *testing.T) {
 	if snap.Partial {
 		t.Error("Snapshot.Partial = true, want false for a clean walk with no skipped series")
 	}
-	if sawWarn(rec) {
+	if rec.CountLevel(slog.LevelWarn, "") > 0 {
 		t.Errorf("clean walk logged a warning, want none (no partial-snapshot warning with zero failures); messages = %q", rec.Messages())
 	}
 }
@@ -1514,7 +1480,7 @@ func TestWalkSonarrEpisodeFailureRedactsErrorURL(t *testing.T) {
 	if _, err := w.Walk(context.Background()); err != nil {
 		t.Fatalf("Walk returned error, want a successful partial walk: %v", err)
 	}
-	if !recordHasAttr(rec, "sonarr episode fetch failed; series kept as failed placeholder", "error", "connection refused") {
+	if !rec.HasAttr("sonarr episode fetch failed; series kept as failed placeholder", "error", "connection refused") {
 		t.Errorf("episode-fetch-failed warning does not carry the reduced transport error; records = %+v", rec.Records())
 	}
 	for _, r := range rec.Records() {
@@ -1549,7 +1515,7 @@ func TestWalkSonarrEpisodeFailureSanitizesTitle(t *testing.T) {
 	if _, err := w.Walk(context.Background()); err != nil {
 		t.Fatalf("Walk returned error, want a successful partial walk: %v", err)
 	}
-	if !recordHasAttr(rec, "sonarr episode fetch failed; series kept as failed placeholder", "series", "Frieren [2J  gpj.exe") {
+	if !rec.HasAttr("sonarr episode fetch failed; series kept as failed placeholder", "series", "Frieren [2J  gpj.exe") {
 		t.Errorf("episode-fetch-failed warning does not carry the sanitized series title; records = %+v", rec.Records())
 	}
 }

@@ -34,10 +34,10 @@ func TestLoader_refreshCache_notModifiedLogsEndedRejectionStreak(t *testing.T) {
 	if logs.CountExact("mapping: rejection streak ended by 304 revalidation") != 1 {
 		t.Fatalf("refreshCache logs = %v, want one 304 rejection-streak recovery message", logs.Messages())
 	}
-	if !attrRendered(logs, "ended_rejection_streak", "3") {
+	if !logs.HasAttr("", "ended_rejection_streak", "3") {
 		t.Errorf("refreshCache logs = %v, want ended_rejection_streak=3", logs.Messages())
 	}
-	if !attrRendered(logs, "records", "1") {
+	if !logs.HasAttr("", "records", "1") {
 		t.Errorf("refreshCache logs = %v, want records=1", logs.Messages())
 	}
 }
@@ -64,10 +64,10 @@ func TestLoader_refreshCache_acceptedRefreshLogsEndedRejectionStreak(t *testing.
 	if logs.CountExact("mapping: refreshed") != 1 {
 		t.Fatalf("refreshCache logs = %v, want one refreshed message", logs.Messages())
 	}
-	if !attrRendered(logs, "ended_rejection_streak", "3") {
+	if !logs.HasAttr("", "ended_rejection_streak", "3") {
 		t.Errorf("refreshCache logs = %v, want ended_rejection_streak=3", logs.Messages())
 	}
-	if !attrRendered(logs, "records", "1") {
+	if !logs.HasAttr("", "records", "1") {
 		t.Errorf("refreshCache logs = %v, want records=1", logs.Messages())
 	}
 }

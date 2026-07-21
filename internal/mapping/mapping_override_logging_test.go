@@ -33,7 +33,7 @@ func TestLoader_Load_logsSkippedOverrideCount(t *testing.T) {
 	if rec.CountExact("mapping: overrides with missing or invalid anilist_id skipped") != 1 {
 		t.Fatalf("Load logs = %v, want one skipped-overrides warning", rec.Messages())
 	}
-	if !attrRendered(rec, "skipped", "2") {
+	if !rec.HasAttr("", "skipped", "2") {
 		t.Errorf("Load skipped count logs = %v, want skipped=2", rec.Messages())
 	}
 }
@@ -97,13 +97,7 @@ func TestLoader_Load_warnsOnUnknownOverrideKeys(t *testing.T) {
 // unknownKeysAre reports whether any captured record carries a "keys"
 // attribute whose rendered value equals want.
 func unknownKeysAre(rec *capture.Recorder, want string) bool {
-	return attrRendered(rec, "keys", want)
-}
-
-// attrRendered reports whether any captured record carries an attribute with
-// the given key whose rendered value equals want.
-func attrRendered(rec *capture.Recorder, key, want string) bool {
-	return attrValueMatches(rec, key, func(v string) bool { return v == want })
+	return rec.HasAttr("", "keys", want)
 }
 
 // TestLoader_Load_unknownOverrideKeysLogBounded pins the log-volume bound on
@@ -138,10 +132,10 @@ func TestLoader_Load_unknownOverrideKeysLogBounded(t *testing.T) {
 	if !unknownKeysAre(rec, fmt.Sprint(wantKeys)) {
 		t.Errorf("bounded keys logs = %v, want the first %d keys only", rec.Messages(), maxLoggedUnknownKeys)
 	}
-	if !attrRendered(rec, "unknown_key_count", strconv.Itoa(total)) {
+	if !rec.HasAttr("", "unknown_key_count", strconv.Itoa(total)) {
 		t.Errorf("unknown_key_count logs = %v, want %d", rec.Messages(), total)
 	}
-	if !attrRendered(rec, "keys_truncated", "true") {
+	if !rec.HasAttr("", "keys_truncated", "true") {
 		t.Errorf("keys_truncated logs = %v, want true", rec.Messages())
 	}
 }
@@ -169,10 +163,10 @@ func TestLoader_Load_unknownOverrideKeyNameTruncated(t *testing.T) {
 	if !unknownKeysAre(rec, wantKeys) {
 		t.Errorf("unknown keys logs = %v, want keys=%s", rec.Messages(), wantKeys)
 	}
-	if !attrRendered(rec, "unknown_key_count", "1") {
+	if !rec.HasAttr("", "unknown_key_count", "1") {
 		t.Errorf("unknown_key_count logs = %v, want 1", rec.Messages())
 	}
-	if !attrRendered(rec, "keys_truncated", "true") {
+	if !rec.HasAttr("", "keys_truncated", "true") {
 		t.Errorf("keys_truncated logs = %v, want true", rec.Messages())
 	}
 }
@@ -201,10 +195,10 @@ func TestLoader_Load_warnsOnDuplicateOverrideIDs(t *testing.T) {
 	if logs.CountExact("mapping: duplicate override anilist_ids, last record wins") != 1 {
 		t.Fatalf("Load logs = %v, want one duplicate-overrides warning", logs.Messages())
 	}
-	if !attrRendered(logs, "ids", "[2]") {
+	if !logs.HasAttr("", "ids", "[2]") {
 		t.Errorf("duplicate-overrides logs = %v, want ids=[2]", logs.Messages())
 	}
-	if !attrRendered(logs, "duplicate_count", "1") {
+	if !logs.HasAttr("", "duplicate_count", "1") {
 		t.Errorf("duplicate-overrides logs = %v, want duplicate_count=1", logs.Messages())
 	}
 }
@@ -242,10 +236,10 @@ func TestLoader_Load_duplicateOverrideIDsLogBounded(t *testing.T) {
 	for i := 1; i <= maxLoggedDuplicateIDs; i++ {
 		wantIDs = append(wantIDs, i)
 	}
-	if !attrRendered(logs, "ids", fmt.Sprint(wantIDs)) {
+	if !logs.HasAttr("", "ids", fmt.Sprint(wantIDs)) {
 		t.Errorf("duplicate-overrides logs = %v, want the first %d ids only", logs.Messages(), maxLoggedDuplicateIDs)
 	}
-	if !attrRendered(logs, "duplicate_count", strconv.Itoa(total)) {
+	if !logs.HasAttr("", "duplicate_count", strconv.Itoa(total)) {
 		t.Errorf("duplicate_count logs = %v, want %d", logs.Messages(), total)
 	}
 }
@@ -283,10 +277,10 @@ func TestLoader_Load_unknownOverrideKeyBoundsAtLimit(t *testing.T) {
 	if !unknownKeysAre(rec, fmt.Sprint(wantKeys)) {
 		t.Errorf("at-limit keys logs = %v, want all %d keys whole (no ellipsis)", rec.Messages(), maxLoggedUnknownKeys)
 	}
-	if !attrRendered(rec, "unknown_key_count", strconv.Itoa(maxLoggedUnknownKeys)) {
+	if !rec.HasAttr("", "unknown_key_count", strconv.Itoa(maxLoggedUnknownKeys)) {
 		t.Errorf("unknown_key_count logs = %v, want %d", rec.Messages(), maxLoggedUnknownKeys)
 	}
-	if !attrRendered(rec, "keys_truncated", "false") {
+	if !rec.HasAttr("", "keys_truncated", "false") {
 		t.Errorf("keys_truncated logs = %v, want false (both bounds exactly at their limits)", rec.Messages())
 	}
 }
