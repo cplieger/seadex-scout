@@ -122,7 +122,17 @@ type Store struct {
 	// that wrote it consumes it again, instead of this older binary
 	// overwriting it with a fresh cold-start envelope.
 	unsupportedVersion int
-	readOnly           bool
+	// loadFailed remembers that the last Load failed WITHOUT classifying the
+	// file: an EACCES/EIO-style read error, not absence, not an over-cap or
+	// corrupt payload (those quarantine), not a newer schema (that sets
+	// unsupportedVersion). While set, Save is refused - the unread bytes may
+	// be fully recoverable (a permissions mistake, a transient I/O fault)
+	// and must be preserved like every classified failure preserves its
+	// evidence, instead of the cold-started cycle overwriting them at its
+	// end. The scout loads at the start of every cycle, so the block clears
+	// as soon as a Load succeeds or classifies the file.
+	loadFailed bool
+	readOnly   bool
 }
 
 // NewStore returns a Store for the given state-file path. logger may be nil.
@@ -243,6 +253,7 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			s.unsupportedVersion = 0
+			s.loadFailed = false
 			s.log.Info("no state file, starting cold", "path", s.path)
 			return State{}, nil
 		}
@@ -250,9 +261,20 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 			// Save enforces maxStateBytes, so an oversized file can only be
 			// foreign or corrupt; preserve it like any other corruption.
 			s.maybeQuarantine()
+			s.loadFailed = false
+			return State{}, fmt.Errorf("state: read %s: %w", s.path, err)
 		}
+		// An UNCLASSIFIED read failure (EACCES, EIO, a cancelled read - not
+		// absence, not an over-cap file, not a decode error): the bytes at
+		// the live path may be fully recoverable, so they must be preserved
+		// like every classified failure preserves its evidence (quarantine /
+		// the newer-schema Save block). Block Save until a later Load can
+		// classify the file - without this, the cycle that started cold
+		// after the failed read would overwrite the unread bytes at its end.
+		s.loadFailed = true
 		return State{}, fmt.Errorf("state: read %s: %w", s.path, err)
 	}
+	s.loadFailed = false
 	st, err := s.decode(data)
 	if err != nil {
 		return State{}, err
@@ -418,7 +440,10 @@ func (bw *boundedWriter) Write(p []byte) (int, error) {
 // instead of after a doomed full serialization of the same state. A Store
 // whose last Load found a newer-than-supported schema version refuses to
 // save: the newer-schema file must survive at the live path for a
-// roll-forward to consume (see Load).
+// roll-forward to consume (see Load). A Store whose last Load failed WITHOUT
+// classifying the file (loadFailed: an EACCES/EIO-style read error) refuses
+// too, preserving the possibly-recoverable bytes until a Load classifies
+// them.
 func (s *Store) Save(ctx context.Context, st *State) error {
 	if st == nil {
 		return fmt.Errorf("state: encode %s: nil state (Save never writes a non-object state file)", s.path)
@@ -431,6 +456,9 @@ func (s *Store) Save(ctx context.Context, st *State) error {
 	}
 	if s.unsupportedVersion != 0 {
 		return fmt.Errorf("state: save %s: blocked after loading newer schema version %d (supported %d)", s.path, s.unsupportedVersion, SchemaVersion)
+	}
+	if s.loadFailed {
+		return fmt.Errorf("state: save %s: blocked after an unclassified read failure; the on-disk state is preserved until a load can classify it", s.path)
 	}
 	sanitized := *st
 	sanitized.Library = st.Library.SanitizedForStorage()

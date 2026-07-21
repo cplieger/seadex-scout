@@ -1044,3 +1044,43 @@ func TestEncodeStateWriteErrorWrapped(t *testing.T) {
 		t.Errorf("error = %v classified as the over-cap rejection, want the generic I/O wrap", encErr)
 	}
 }
+
+// TestStoreLoadUnclassifiedReadErrorBlocksSaveUntilClassified pins the
+// preservation posture's last gap: a present-but-unreadable state file (here
+// EACCES via chmod 0o000 - not absence, not over-cap, not a decode failure)
+// must block Save, or the cycle that started cold after the failed read would
+// overwrite the possibly-recoverable bytes at its end. Every CLASSIFIED
+// failure already preserves its evidence (quarantine / the newer-schema Save
+// block); the block here clears as soon as a later Load succeeds - the scout
+// loads at the start of every cycle, so a transient fault self-heals.
+func TestStoreLoadUnclassifiedReadErrorBlocksSaveUntilClassified(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: chmod 0o000 does not produce EACCES")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	store := NewStore(path, slog.New(slog.DiscardHandler))
+	if err := store.Save(context.Background(), &State{}); err != nil {
+		t.Fatalf("seed Save: %v", err)
+	}
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	if _, err := store.Load(context.Background()); err == nil {
+		t.Fatal("Load on an unreadable file = nil error, want a read error")
+	}
+	if err := store.Save(context.Background(), &State{}); err == nil {
+		t.Fatal("Save after an unclassified read failure = nil error, want the preservation block")
+	} else if !strings.Contains(err.Error(), "unclassified read failure") {
+		t.Errorf("blocked Save error = %v, want it to name the unclassified read failure", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatalf("chmod back: %v", err)
+	}
+	if _, err := store.Load(context.Background()); err != nil {
+		t.Fatalf("Load after repair: %v", err)
+	}
+	if err := store.Save(context.Background(), &State{}); err != nil {
+		t.Errorf("Save after a classifying Load = %v, want the block cleared", err)
+	}
+}
