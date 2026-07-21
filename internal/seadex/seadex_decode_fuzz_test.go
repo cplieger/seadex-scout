@@ -19,9 +19,9 @@ import (
 // rejects a body, decodePage must reject it too (never accept what stdlib
 // refuses). This guards the whole parity surface at once: case-insensitive
 // key matching, null-into-container no-ops, duplicate-key overwrite order,
-// trailing-data strictness, and scalar type errors. Empty arrays are
-// normalized before the comparison because no consumer distinguishes nil
-// from empty slices.
+// trailing-data strictness, scalar type errors, and nil-vs-empty slice
+// identity (jsonx/bounded matches stdlib exactly: null → nil, `[]` → empty
+// non-nil, absent → untouched), so the comparison is a plain DeepEqual.
 func FuzzDecodePage(f *testing.F) {
 	seeds := []string{
 		`{"totalItems":1,"totalPages":1,"items":[{"alID":7,"notes":"n","theoreticalBest":"tb","updated":"2026-01-02 03:04:05.000Z","incomplete":true,"expand":{"trs":[{"releaseGroup":"PMR","tracker":"Nyaa","infoHash":"abc","url":"https://nyaa.si/view/1","isBest":true,"dualAudio":true,"files":[{"name":"a.mkv","length":1}],"tags":["best"]}]}}]}`,
@@ -97,7 +97,7 @@ func FuzzDecodePage(f *testing.F) {
 			t.Errorf("decodePage(%q) accepted a body json.Unmarshal rejects: %v", body, wantErr)
 			return
 		}
-		if !reflect.DeepEqual(normalizePBList(got), normalizePBList(want)) {
+		if !reflect.DeepEqual(got, want) {
 			t.Errorf("decodePage(%q) = %+v, want json.Unmarshal parity %+v", body, got, want)
 		}
 	})
@@ -117,31 +117,6 @@ func retainedElements(l pbList) int {
 		}
 	}
 	return n
-}
-
-// normalizePBList maps every nil slice to an empty one so the oracle
-// comparison ignores the nil-vs-empty divergence (decodePage leaves an empty
-// JSON array nil; json.Unmarshal allocates), which no consumer can observe.
-func normalizePBList(l pbList) pbList {
-	if l.Items == nil {
-		l.Items = []pbEntry{}
-	}
-	for i := range l.Items {
-		trs := l.Items[i].Expand.Trs
-		if trs == nil {
-			l.Items[i].Expand.Trs = []Torrent{}
-			continue
-		}
-		for j := range trs {
-			if trs[j].Files == nil {
-				trs[j].Files = []File{}
-			}
-			if trs[j].Tags == nil {
-				trs[j].Tags = []string{}
-			}
-		}
-	}
-	return l
 }
 
 // FuzzInfoHashRedacted_caseAndWhitespaceInvariant pins the redaction
