@@ -40,14 +40,6 @@ const (
 	baseDelay        = time.Second
 )
 
-// maxValidatorBytes bounds one persisted HTTP validator (ETag/Last-Modified).
-// Real validators are well under 1 KiB; Go's transport admits response
-// headers up to ~10 MB, and an unbounded hostile validator would be
-// re-persisted into state.json every cycle (past the state Save cap it
-// blocks the whole state from persisting). An over-long validator is
-// dropped, so the next refresh is simply an unconditional 200.
-const maxValidatorBytes = 1 << 10
-
 // Loader fetches and caches the Fribb map and overlays the overrides file.
 type Loader struct {
 	http          *http.Client
@@ -433,19 +425,15 @@ func rejectRefresh(prev *Cache, staleMsg string, cause, noCache error) (Cache, e
 }
 
 // refreshCache decides whether to reuse, re-validate, or re-download the Fribb
-// map and returns the cache to persist. Validators loaded from the previously
-// persisted Cache are sanitized (boundedValidator) up front: they were only
-// ever checked on the accept-200 path that captured them, so a pre-existing
-// oversized or control-byte validator in state.json would otherwise be
-// replayed into every conditional request (which net/http rejects at
-// request-write time) and re-persisted verbatim by every stale/304 return,
-// never self-healing. Dropping it here makes the drop part of every returned
-// Cache - fresh reuse, 304, acceptance, and stale degradation alike.
+// map and returns the cache to persist. Validator hygiene (the RFC 9110
+// field-value grammar plus a 1 KiB cap) lives in httpx.DoConditional, both
+// directions: a poisoned validator loaded from a persisted Cache is skipped at
+// replay (the refresh degrades to an unconditional GET instead of failing
+// net/http's request-write validation forever), and captured validators
+// arrive pre-sanitized, so the next accepted 200 replaces any poison still
+// sitting in state.json. Until then a bad persisted validator is inert: 304
+// and stale returns re-persist it, but it is never sent.
 func (l *Loader) refreshCache(ctx context.Context, prev *Cache) (Cache, error) {
-	sanitized := *prev
-	sanitized.ETag = l.boundedValidator("etag", prev.ETag)
-	sanitized.LastModified = l.boundedValidator("last_modified", prev.LastModified)
-	prev = &sanitized
 	age := time.Since(prev.FetchedAt)
 	// age >= 0 rejects a future FetchedAt (clock skew or a corrupt state file):
 	// a negative age is never fresh, forcing a revalidating fetch rather than
@@ -484,32 +472,6 @@ func (l *Loader) reuseCachedRecords(prev *Cache) (Cache, error) {
 	}
 	refreshed.RejectedRefreshes = 0
 	return refreshed, nil
-}
-
-// boundedValidator returns v, or empty when it exceeds maxValidatorBytes or
-// carries bytes illegal in an HTTP header field value (RFC 9110 field-value
-// grammar: control characters other than tab, or DEL), logging the drop so
-// degraded conditional revalidation is observable. A hostile validator with a
-// CR/LF would otherwise be persisted into state.json and replayed as a request
-// header on every subsequent conditional GET, which net/http rejects at
-// request-write time. Applied on BOTH sides of persistence: acceptRefresh
-// sanitizes validators captured from a fresh 200, and refreshCache sanitizes
-// validators loaded from the previously persisted Cache, so a poisoned value
-// already in state.json is dropped (self-heals) instead of being re-persisted
-// by every stale/304 return. If no other validator
-// remains, the next refresh is an unconditional full fetch.
-func (l *Loader) boundedValidator(name, v string) string {
-	if len(v) > maxValidatorBytes {
-		l.log.Warn("mapping: dropping oversized HTTP validator", "validator", name, "length", len(v))
-		return ""
-	}
-	for i := range len(v) {
-		if c := v[i]; (c < 0x20 && c != '\t') || c == 0x7f {
-			l.log.Warn("mapping: dropping HTTP validator with invalid bytes", "validator", name, "length", len(v))
-			return ""
-		}
-	}
-	return v
 }
 
 // acceptRefresh parses a fresh 200 body and runs the cache-acceptance
@@ -571,8 +533,8 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 	return Cache{
 		FetchedAt:    time.Now(),
 		Records:      records,
-		ETag:         l.boundedValidator("etag", res.Validators.ETag),
-		LastModified: l.boundedValidator("last_modified", res.Validators.LastModified),
+		ETag:         res.Validators.ETag,
+		LastModified: res.Validators.LastModified,
 	}, nil
 }
 

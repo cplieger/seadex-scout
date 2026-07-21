@@ -1140,11 +1140,15 @@ func TestLoader_refreshCache_zeroIDIdentifiersDoNotMakeCacheUsable(t *testing.T)
 	}
 }
 
-// TestLoader_refreshCache_boundsPersistedValidators pins the maxValidatorBytes
-// guard: an at-limit validator is retained while an over-limit one is dropped,
-// so an upstream-controlled header cannot inflate the persisted state.json.
+// TestLoader_refreshCache_boundsPersistedValidators pins the validator size
+// bound the app's state.json bloat protection rides on: an at-limit validator
+// is retained while an over-limit one is dropped, so an upstream-controlled
+// header cannot inflate the persisted state. The guard itself lives in
+// httpx.DoConditional (capture-side hygiene); this is the consumer-side
+// contract pin, with the limit mirroring httpx's documented 1 KiB cap.
 func TestLoader_refreshCache_boundsPersistedValidators(t *testing.T) {
-	atLimit := strings.Repeat("v", maxValidatorBytes)
+	const httpxValidatorCap = 1 << 10
+	atLimit := strings.Repeat("v", httpxValidatorCap)
 	tests := []struct {
 		name      string
 		validator string
@@ -1173,13 +1177,13 @@ func TestLoader_refreshCache_boundsPersistedValidators(t *testing.T) {
 	}
 }
 
-// TestLoader_refreshCache_sanitizesPersistedValidators pins the load-side
-// half of the validator guard: a poisoned validator already persisted in the
-// previous Cache (it predates the accept-200 sanitization, or the state file
-// was tampered with) must be dropped BEFORE the conditional request is built
-// - never sent as a request header net/http would reject at write time - and
-// the returned Cache must no longer carry it, so the poison self-heals
-// instead of failing every revalidation forever.
+// TestLoader_refreshCache_sanitizesPersistedValidators pins the app's
+// self-heal contract for a poisoned validator already persisted in the
+// previous Cache (it predates the hygiene, or the state file was tampered
+// with): it must never be sent as a request header (httpx.DoConditional's
+// replay-side hygiene skips it, so the refresh degrades to an unconditional
+// GET instead of failing net/http's request-write validation forever), and a
+// successful refresh must return a Cache that no longer carries it.
 func TestLoader_refreshCache_sanitizesPersistedValidators(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("If-None-Match"); got != "" {
@@ -1210,16 +1214,19 @@ func TestLoader_refreshCache_sanitizesPersistedValidators(t *testing.T) {
 	}
 }
 
-// TestLoader_refreshCache_304KeepsValidDropsPoisonedValidator pins the mixed
+// TestLoader_refreshCache_304KeepsValidSkipsPoisonedValidator pins the mixed
 // case on the 304 path: with one valid and one poisoned persisted validator,
 // the valid one still rides the conditional request (a 304 stays possible)
-// while the poisoned one is neither sent nor re-persisted - the returned
-// 304 Cache carries only the valid validator.
-func TestLoader_refreshCache_304KeepsValidDropsPoisonedValidator(t *testing.T) {
+// while the poisoned one is never sent (httpx.DoConditional's replay-side
+// hygiene skips it). The 304 return re-persists the poisoned value - it is
+// inert (skipped again on every replay) and stays until the next accepted
+// 200's pre-sanitized capture replaces it.
+func TestLoader_refreshCache_304KeepsValidSkipsPoisonedValidator(t *testing.T) {
 	const lastModified = "Wed, 21 Oct 2015 07:28:00 GMT"
+	const poisoned = "\"et\x01ag\""
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("If-None-Match"); got != "" {
-			t.Errorf("If-None-Match = %q, want the poisoned persisted ETag dropped before the request", got)
+			t.Errorf("If-None-Match = %q, want the poisoned persisted ETag skipped at replay", got)
 		}
 		if got := r.Header.Get("If-Modified-Since"); got != lastModified {
 			t.Errorf("If-Modified-Since = %q, want the valid persisted validator %q", got, lastModified)
@@ -1230,7 +1237,7 @@ func TestLoader_refreshCache_304KeepsValidDropsPoisonedValidator(t *testing.T) {
 
 	prev := &Cache{
 		FetchedAt:    time.Now().Add(-2 * time.Hour),
-		ETag:         "\"et\x01ag\"",
+		ETag:         poisoned,
 		LastModified: lastModified,
 		Records:      []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
 	}
@@ -1239,46 +1246,14 @@ func TestLoader_refreshCache_304KeepsValidDropsPoisonedValidator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("refreshCache error: %v", err)
 	}
-	if next.ETag != "" {
-		t.Errorf("returned ETag = %q, want the poisoned persisted validator gone from the 304 cache", next.ETag)
+	if next.ETag != poisoned {
+		t.Errorf("returned ETag = %q, want the poisoned validator retained inert on the 304 path (replaced only by an accepted 200)", next.ETag)
 	}
 	if next.LastModified != lastModified {
 		t.Errorf("returned LastModified = %q, want the valid validator %q retained", next.LastModified, lastModified)
 	}
 	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
 		t.Errorf("records = %+v, want the cached record reused on 304", next.Records)
-	}
-}
-
-// TestLoader_boundedValidator_dropsInvalidHeaderBytes pins the content
-// dimension of the persisted-validator guard (the sibling of the size bound
-// above): a validator carrying bytes illegal in an HTTP header field value
-// (RFC 9110 field-value grammar - control characters other than tab, or DEL)
-// is dropped, so a hostile upstream ETag with a CR/LF can never be persisted
-// into state.json and replayed as a request header net/http rejects at
-// write time, permanently poisoning conditional revalidation. Exercised
-// directly on boundedValidator because Go's server-side header writer
-// rewrites CR/LF to spaces, so the httptest harness above cannot deliver
-// these bytes over the wire.
-func TestLoader_boundedValidator_dropsInvalidHeaderBytes(t *testing.T) {
-	l := NewLoader(nil, "", "", 0, discardLogger())
-	tests := []struct {
-		name      string
-		validator string
-		want      string
-	}{
-		{name: "crlf dropped", validator: "\"etag\r\nX-Injected: 1\"", want: ""},
-		{name: "control byte dropped", validator: "\"et\x01ag\"", want: ""},
-		{name: "DEL dropped", validator: "\"et\x7fag\"", want: ""},
-		{name: "tab retained", validator: "\"et\tag\"", want: "\"et\tag\""},
-		{name: "printable ascii retained", validator: "W/\"abc-123\"", want: "W/\"abc-123\""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := l.boundedValidator("etag", tc.validator); got != tc.want {
-				t.Errorf("boundedValidator(%q) = %q, want %q", tc.validator, got, tc.want)
-			}
-		})
 	}
 }
 
