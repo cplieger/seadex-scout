@@ -427,29 +427,42 @@ func TestHandlerRoutesTorznabEndpoint(t *testing.T) {
 	}
 }
 
-// TestServeThrottlesFailedAuth pins the failed-auth throttle: past the burst
-// of 10, rapid bad-apikey requests get 429 (no per-attempt log line), while a
-// correct key is never throttled - so a LAN client cannot brute-force
-// feed_api_key at wire speed or flood the slog stream, and the arrs' happy
-// path is untouched.
+// TestServeThrottlesFailedAuth pins the failed-auth throttle at the served
+// middleware chain: past the burst of 10, rapid bad-apikey requests get 429
+// rejected OUTSIDE the access logger - no access line, no domain line, so a
+// wire-speed flood cannot fill the slog/Loki stream - while a correct key is
+// never throttled, so the arrs' happy path is untouched even mid-flood.
 func TestServeThrottlesFailedAuth(t *testing.T) {
-	ix := New(&Config{APIKey: "k"}, Deps{}, "")
+	log, rec := capture.New()
+	ix := New(&Config{APIKey: "k"}, Deps{Logger: log}, "")
+	h := ix.chain()
 	for i := 1; i <= 10; i++ {
-		rec := httptest.NewRecorder()
-		ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?apikey=wrong", nil))
-		if rec.Code != http.StatusUnauthorized {
-			t.Fatalf("bad-key request %d status = %d, want %d (inside burst)", i, rec.Code, http.StatusUnauthorized)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/nyaa?apikey=wrong", nil))
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("bad-key request %d status = %d, want %d (inside burst)", i, w.Code, http.StatusUnauthorized)
 		}
 	}
-	rec := httptest.NewRecorder()
-	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?apikey=wrong", nil))
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("bad-key request past burst status = %d, want %d", rec.Code, http.StatusTooManyRequests)
+	accessBefore := rec.CountExact("http")
+	domainBefore := rec.CountExact("indexer request rejected")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/nyaa?apikey=wrong", nil))
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("bad-key request past burst status = %d, want %d", w.Code, http.StatusTooManyRequests)
 	}
-	rec = httptest.NewRecorder()
-	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=k", nil))
-	if rec.Code != http.StatusOK {
-		t.Errorf("good-key request during throttle status = %d, want %d (correct callers are never throttled)", rec.Code, http.StatusOK)
+	if got := w.Header().Get("Retry-After"); got != "6" {
+		t.Errorf("throttled Retry-After = %q, want %q (one token accrued per 6s)", got, "6")
+	}
+	if got := rec.CountExact("http"); got != accessBefore {
+		t.Errorf("throttled 429 emitted an access line (%d -> %d records); the limiter must sit outside the logger", accessBefore, got)
+	}
+	if got := rec.CountExact("indexer request rejected"); got != domainBefore {
+		t.Errorf("throttled 429 emitted a domain rejection line (%d -> %d records)", domainBefore, got)
+	}
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=k", nil))
+	if w.Code != http.StatusOK {
+		t.Errorf("good-key request during throttle status = %d, want %d (correct callers are never throttled)", w.Code, http.StatusOK)
 	}
 }
 

@@ -19,6 +19,13 @@ const (
 	readHeaderTimeout = 15 * time.Second
 	readTimeout       = 30 * time.Second
 	idleTimeout       = 120 * time.Second
+	// authFailBurst/authFailRefill tune the failed-auth throttle
+	// (authFailureLimiter): 10 free wrong-key attempts, then one accrued
+	// every 6s (10/min) - enough headroom for an operator fixing a
+	// misconfigured arr, tight enough that a flooding LAN client is
+	// silenced within a second.
+	authFailBurst  = 10
+	authFailRefill = 6 * time.Second
 	// writeTimeout bounds a stalled response consumer. It is derived from
 	// the complete bounded Prowlarr retry budget - upstreamMaxAttempts
 	// full-timeout attempts plus the capped Retry-After waits between them -
@@ -64,29 +71,13 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		return fmt.Errorf("indexer listen on %s: %w", listenAddr, err)
 	}
 
-	// The HTTP surface rides the shared webhttp plumbing (server bootstrap +
-	// graceful shutdown). Logging is the standard access line (method, PATH
-	// only, status, duration, request id) - adopted here because webhttp's
-	// RequestLogger logs r.URL.Path and never the query string, so the Torznab
-	// apikey (which arrives as a query parameter) cannot leak into the access
-	// log; it sits outermost so a recovered panic logs as its 500. serve's own
-	// domain line (scope/params/result counts) complements it - that line
-	// whitelists the params it logs and likewise never logs apikey. Recoverer
-	// turns a handler panic into a logged 500 rendered as a Torznab <error>
-	// via torznabErrorResponder - not net/http's bare connection close, and
-	// not webhttp's default JSON envelope, which is the wrong wire shape for
-	// this XML endpoint. WriteTimeout is set (see writeTimeout): this endpoint
-	// only emits finite XML and the upstream Prowlarr retry tree has a
-	// calculable upper bound, so the deadline bounds stalled response
-	// consumers while leaving the bounded retry budget intact.
-	handler := webhttp.Chain(ix.handler(),
-		webhttp.Logging(webhttp.WithLogger(ix.log)),
-		webhttp.Recoverer(
-			webhttp.WithRecoverLogger(ix.log),
-			webhttp.WithRecoverResponder(torznabErrorResponder),
-		),
-	)
-	srv := webhttp.NewServer(handler,
+	// The HTTP surface rides the shared webhttp plumbing: server bootstrap +
+	// graceful shutdown here, the middleware stack in chain. WriteTimeout is
+	// set (see writeTimeout): this endpoint only emits finite XML and the
+	// upstream Prowlarr retry tree has a calculable upper bound, so the
+	// deadline bounds stalled response consumers while leaving the bounded
+	// retry budget intact.
+	srv := webhttp.NewServer(ix.chain(),
 		webhttp.WithReadHeaderTimeout(readHeaderTimeout),
 		webhttp.WithReadTimeout(readTimeout),
 		webhttp.WithIdleTimeout(idleTimeout),
@@ -150,26 +141,61 @@ func (ix *Indexer) handler() http.Handler {
 	return mux
 }
 
-// allowAuthFailure rate-limits responses to bad apikey attempts (token
-// bucket: burst 10, refill 10/min) so a LAN client cannot brute-force
-// feed_api_key at wire speed or flood the log with per-attempt lines.
-// Correct-key callers never consult it, so the happy path is untouched.
-func (ix *Indexer) allowAuthFailure() bool {
-	const burst, perMin = 10.0, 10.0
-	ix.authFailMu.Lock()
-	defer ix.authFailMu.Unlock()
-	now := time.Now()
-	if !ix.authFailLast.IsZero() {
-		ix.authFailTokens = min(burst, ix.authFailTokens+now.Sub(ix.authFailLast).Minutes()*perMin)
-	} else {
-		ix.authFailTokens = burst
-	}
-	ix.authFailLast = now
-	if ix.authFailTokens < 1 {
-		return false
-	}
-	ix.authFailTokens--
-	return true
+// chain assembles the middleware stack Run serves. Order (outermost first):
+//
+//   - authFailureLimiter: rejects over-budget bad-apikey requests BEFORE the
+//     access logger, so a flooding or brute-forcing LAN client cannot fill
+//     the slog/Loki stream at wire speed - suppressing that flood is the
+//     throttle's whole point, so it must sit outside Logging. Admitted
+//     wrong-key requests still fall through to serve's 401 + domain line,
+//     now bounded by the bucket's rate.
+//   - Logging: the standard access line (method, PATH only, status,
+//     duration, request id) - webhttp's RequestLogger logs r.URL.Path and
+//     never the query string, so the Torznab apikey (which arrives as a
+//     query parameter) cannot leak into the access log. serve's own domain
+//     line (scope/params/result counts) complements it - that line
+//     whitelists the params it logs and likewise never logs apikey.
+//   - Recoverer: turns a handler panic into a logged 500 rendered as a
+//     Torznab <error> via torznabErrorResponder - not net/http's bare
+//     connection close, and not webhttp's default JSON envelope, which is
+//     the wrong wire shape for this XML endpoint. It sits inside Logging so
+//     a recovered panic logs as its 500.
+func (ix *Indexer) chain() http.Handler {
+	return webhttp.Chain(ix.handler(),
+		ix.authFailureLimiter(),
+		webhttp.Logging(webhttp.WithLogger(ix.log)),
+		webhttp.Recoverer(
+			webhttp.WithRecoverLogger(ix.log),
+			webhttp.WithRecoverResponder(torznabErrorResponder),
+		),
+	)
+}
+
+// authFailureLimiter rate-limits bad-apikey requests through a shared
+// webhttp.RateLimiter token bucket (burst authFailBurst, one token accrued
+// per authFailRefill). Requests presenting a correct key never consume a
+// token - the predicate verifies with the same pre-hashed constant-time
+// verifier serve uses - so the arrs' happy path can never be throttled, not
+// even mid-flood; over-budget bad-key requests get a 429 (with a computed
+// Retry-After hint) before reaching the logger or the handler. The
+// empty-configured-key guard keeps serve's fail-closed 503 diagnostic
+// reachable for alternate constructions (Run refuses to bind in that state,
+// so it is test-only).
+//
+// Wire-speed key guessing remains answerable in principle (a correct guess
+// is never throttled, so 200-vs-429 is an oracle); that residue is an
+// accepted trade: feed_api_key is a high-entropy operator secret on a
+// LAN-only bind, and the alternative - throttling verification itself -
+// would let any flooding client lock out the legitimate arr. The realistic
+// threats are the log flood and misconfigured-client spam, both bounded
+// here.
+func (ix *Indexer) authFailureLimiter() webhttp.Middleware {
+	return webhttp.RateLimiter(authFailBurst, authFailRefill,
+		webhttp.WithRateLimitWhen(func(r *http.Request) bool {
+			return ix.cfg.APIKey != "" && !ix.verifyKey.Verify(r.URL.Query().Get("apikey"))
+		}),
+		webhttp.WithRateLimitError("too_many_auth_failures", "too many failed apikey attempts"),
+	)
 }
 
 // serve handles the Torznab endpoint. Every request must address a specific
@@ -198,16 +224,9 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 	// strings, lives in the shared library; the verifier is built once in New
 	// (pre-hashed configured key): see webhttp.NewStaticTokenVerifier.
 	if !ix.verifyKey.Verify(q.Get("apikey")) {
-		// Failed attempts are throttled (allowAuthFailure) as a second defense
-		// layer behind the key's entropy: past the burst, a brute-forcing or
-		// misconfigured LAN client gets 429s and stops generating log lines.
-		if !ix.allowAuthFailure() {
-			// One token refills every six seconds (10/min): tell a compliant
-			// retrying client when trying again can succeed.
-			w.Header().Set("Retry-After", "6")
-			http.Error(w, "too many requests", http.StatusTooManyRequests)
-			return
-		}
+		// Volume is bounded upstream: authFailureLimiter (see chain) 429s
+		// over-budget bad-key requests before the access logger, so this
+		// domain line and its 401 are capped at the bucket's rate.
 		ix.log.Info("indexer request rejected", "reason", "bad apikey", "path", logParam(r.URL.Path), "remote", logParam(r.RemoteAddr))
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return

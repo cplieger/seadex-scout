@@ -133,17 +133,11 @@ type Indexer struct {
 	// lock: cfg is a by-value copy and none of the three is ever written
 	// after construction (the same immutable-after-New contract as
 	// upstreams and verifyKey below).
-	log  *slog.Logger
-	cfg  Config
-	path string
-	snap snapshot
-	// authFailLast is the failed-auth token bucket's last-refill instant, part
-	// of the bucket guarded by authFailMu below (see allowAuthFailure).
-	authFailLast time.Time
-	upstreams    []*upstream // wired once in New; immutable afterwards (not guarded by mu)
-	// authFailTokens is the failed-auth token bucket's fill level, guarded by
-	// authFailMu below together with authFailLast above (see allowAuthFailure).
-	authFailTokens float64
+	log       *slog.Logger
+	cfg       Config
+	path      string
+	snap      snapshot
+	upstreams []*upstream // wired once in New; immutable afterwards (not guarded by mu)
 	// mu guards the published snapshot fields read per request: snap,
 	// snapMod, snapInfo, snapFailed, and snapFailedWarned (see the
 	// per-field comments).
@@ -153,10 +147,6 @@ type Indexer struct {
 	// immutable snapshot (see reload). It also guards the reload-only flags
 	// failedFile / snapMissing / reloadDegraded.
 	reloadMu sync.Mutex
-	// authFailMu guards the failed-auth token bucket (authFailTokens above /
-	// authFailLast at the top of the struct), which rate-limits responses to
-	// bad apikey attempts (see allowAuthFailure).
-	authFailMu sync.Mutex
 	// verifyKey is the pre-hashed feed_api_key verifier, built once in New so
 	// per-request verification hashes only the presented value (see
 	// webhttp.NewStaticTokenVerifier). Immutable after New.
