@@ -175,18 +175,25 @@ var (
 	// \b. Go regexp treats "_" as a word character, so \b would miss
 	// underscore-delimited scene names such as Show_CRF18_BDRemux;
 	// nonWordEdge treats "_" as a delimiter, and the optional separator
-	// classes accept "_" alongside whitespace. Matching in place means no
+	// classes accept the full scene-delimiter set [\s._-] between token
+	// halves — dot- and hyphen-joined spellings (CRF.18, 4500-kbps,
+	// BD.Remux) are as real as the space/underscore forms, and accepting
+	// them on one marker but not another made classification depend on
+	// which delimiter a group happens to use. Matching in place means no
 	// evidence-sized lowercased/underscore-replaced copy is ever allocated
 	// for an upstream-controlled name or notes value.
-	reBitrate = regexp.MustCompile(`(?:^|` + nonWordEdge + `)\d+[\s_]?(?:` + lowerTokensPattern([]string{"kbps", "mbps"}) + `)(?:$|` + nonWordEdge + `)`)
-	// reCRF matches an x264/x265 CRF tag such as "crf18" or "crf 20".
-	reCRF = regexp.MustCompile(`(?:^|` + nonWordEdge + `)` + lowerLiteralPattern("crf") + `[\s_]?\d+(?:$|` + nonWordEdge + `)`)
+	reBitrate = regexp.MustCompile(`(?:^|` + nonWordEdge + `)\d+[\s._-]?(?:` + lowerTokensPattern([]string{"kbps", "mbps"}) + `)(?:$|` + nonWordEdge + `)`)
+	// reCRF matches an x264/x265 CRF tag such as "crf18", "crf 20", or "crf.18".
+	reCRF = regexp.MustCompile(`(?:^|` + nonWordEdge + `)` + lowerLiteralPattern("crf") + `[\s._-]?\d+(?:$|` + nonWordEdge + `)`)
 	// reRemux matches a remux marker as a delimiter-bounded token ("remux",
 	// "BDRemux", "BD-Remux"), never a bare substring inside a longer word.
 	// "PREMUX" is included deliberately: SeaDex uses it for pre-muxed
 	// releases, and token-bounding alone would lose it (no word boundary
-	// between the "p" and "remux").
-	reRemux = regexp.MustCompile(`(?:^|` + nonWordEdge + `)(?:` + lowerLiteralPattern("bd") + `[\s._-]?` + lowerLiteralPattern("remux") + `|` + lowerTokensPattern([]string{"premux", "remux"}) + `)(?:$|` + nonWordEdge + `)`)
+	// between the "p" and "remux"). The inflected "-ed" forms ("remuxed
+	// from the JPBD", "BD-Remuxed") count too — reEncode already accepts
+	// "encoded" alongside "encode", and rejecting the same inflection on
+	// the remux side silently declassified stated remuxes to unknown.
+	reRemux = regexp.MustCompile(`(?:^|` + nonWordEdge + `)(?:` + lowerLiteralPattern("bd") + `[\s._-]?)?(?:` + lowerTokensPattern([]string{"premux", "remux"}) + `)(?:` + lowerLiteralPattern("ed") + `)?(?:$|` + nonWordEdge + `)`)
 	// reEncode matches a generic encode marker ("encode", "encoded", "BDRip")
 	// with reRemux's delimiter-bounded token style, so a bare substring inside
 	// a longer word ("reencoded", "encoder") is never a marker. It is the
@@ -302,17 +309,23 @@ func Classify(in *Input) Release {
 		nameEv.observe(name)
 	}
 	notesEv.observe(in.Notes)
-	// The Codec field uses the same name-first precedence classifyKind applies:
-	// per-file evidence (names + MediaInfo) wins, the entry-wide notes only
-	// fill the gap, so the logged codec cannot contradict the Kind reason when
-	// the notes mention an alternative encode. The MediaInfo codec is
-	// authoritative for the name side when it maps to a known family.
-	nameCodec := canonicalCodec(strings.ToLower(strings.TrimSpace(in.VideoCodec)))
-	if nameCodec == "" {
-		nameCodec = nameEv.textCodec()
-	}
+	// The Codec FIELD folds the authoritative MediaInfo value in first, then
+	// name tokens, then notes (per-file evidence wins, the entry-wide notes
+	// only fill the gap). The KIND decision deliberately excludes MediaInfo:
+	// every video stream HAS a codec, so MediaInfo reporting AVC/HEVC is a
+	// property of the file, never a statement that it is an encode — a BD
+	// remux's stream is AVC/HEVC too, and feeding MediaInfo into the
+	// encoder-marker rung misclassified every marker-less library remux as
+	// an encode. Only a codec token someone WROTE (release name or notes) is
+	// encode evidence, so the Kind reason names the written token, which can
+	// differ from the authoritative Codec field when they disagree.
+	mediaCodec := canonicalCodec(strings.ToLower(strings.TrimSpace(in.VideoCodec)))
+	nameCodec := nameEv.textCodec()
 	notesCodec := notesEv.textCodec()
-	codec := nameCodec
+	codec := mediaCodec
+	if codec == "" {
+		codec = nameCodec
+	}
 	if codec == "" {
 		codec = notesCodec
 	}
@@ -347,12 +360,13 @@ func detectResolution(text string) string {
 }
 
 // classifyKind applies per-file-evidence-first scoping to the remux -> encode
-// -> unknown rules. The release names (plus the per-file MediaInfo codec) are
-// classified first and win for this release; the entry-wide SeaDex notes only
-// fill the gap when the names and MediaInfo carry no marker, so a notes-level
-// remux note cannot override a contradicting per-file encode marker. The remux
-// decision stays name-and-notes based (never size/bitrate inference), so no
-// operator-supplied group list is needed.
+// -> unknown rules. The release names are classified first and win for this
+// release; the entry-wide SeaDex notes only fill the gap when the names carry
+// no marker, so a notes-level remux note cannot override a contradicting
+// per-file encode marker. The codec arguments are the TEXT-observed families
+// only — the MediaInfo codec is deliberately not kind evidence (see Classify).
+// The remux decision stays name-and-notes based (never size/bitrate
+// inference), so no operator-supplied group list is needed.
 func classifyKind(nameEv, notesEv *evidence, nameCodec, notesCodec string) (kind Kind, reason string) {
 	if kind, reason := kindFromEvidence(nameEv, nameCodec); kind != KindUnknown {
 		return kind, reason
