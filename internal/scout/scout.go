@@ -149,6 +149,20 @@ const shrunkWalkEscalationThreshold = degradation.EscalationThreshold
 // operator-free: the first successful fetch resets the streak.
 const seadexFailureEscalationThreshold = degradation.EscalationThreshold
 
+// aniListDegradedEscalationThreshold is the consecutive anilist-degraded
+// completed-cycle streak (state.State.AniListDegraded) at which the scout
+// escalates its single anilist-degraded log site from WARN to ERROR (firing
+// the existing SeadexScoutCycleError rule). It references
+// degradation.EscalationThreshold - the single home of the shared escalation
+// policy its three sibling streaks already ride. A transient AniList blip
+// must stay a WARN (the compare ran on the unaffected majority with the
+// affected findings preserved), but a degradation that persists for a day is
+// a lasting egress or upstream fault - and under a cold start it keeps the
+// baseline permanently incomplete, silently suppressing every notification -
+// so it must alert instead of WARNing forever. Recovery is operator-free:
+// the first undegraded completed cycle resets the streak.
+const aniListDegradedEscalationThreshold = degradation.EscalationThreshold
+
 // Scout runs compare cycles from its assembled dependencies.
 type Scout struct {
 	deps Deps
@@ -191,7 +205,19 @@ func (s *Scout) Cycle(ctx context.Context) bool {
 	st := s.loadState(ctx)
 
 	snap, walkErr := s.deps.Library.Walk(ctx)
-	if s.stopAfterWalkFailure(ctx, walkErr) {
+	if walkErr != nil && ctx.Err() != nil {
+		// A shutdown/redeploy cancelled the cycle mid-walk: not an arr fault,
+		// so neither the "library walk failed" ERROR (it would trip the
+		// SeadexScoutCycleError alert on every redeploy landing mid-cycle)
+		// nor an unhealthy verdict - the same "a redeploy is not an ingest
+		// fault" rule every LATER interruption arm already applies
+		// (finishInterruptedMatch, handleUpstreamGate's ctx arm). A `poll`
+		// SIGTERMed mid-walk now exits 0 like one SIGTERMed mid-match, and
+		// the daemon's health marker is not flipped by a routine stop.
+		s.log.Warn("cycle interrupted by shutdown during library walk", "cause", context.Cause(ctx))
+		return true
+	}
+	if s.stopAfterWalkFailure(walkErr) {
 		return false
 	}
 
@@ -231,25 +257,17 @@ func (s *Scout) Cycle(ctx context.Context) bool {
 }
 
 // stopAfterWalkFailure logs a failed library walk and reports whether Cycle
-// should stop immediately. A shutdown-cancelled walk is logged at WARN (a
-// redeploy is routine, not an arr fault) and always stops without a completion
-// line (the cycle did not complete). A genuine walk
-// failure is unhealthy; an alert-only deployment (no Torznab feed) stops right
+// should stop immediately. A genuine walk
+// failure is unhealthy (a shutdown-cancelled walk never reaches this - Cycle
+// attributes it to the shutdown and stays healthy); an alert-only deployment
+// (no Torznab feed) stops right
 // away since nothing else remains to do - emitting the "cycle degraded"
 // completion line beside the ERROR - while a configured feed falls through
 // so the arr-independent feed rebuild still runs (the pre-compare gate then
 // returns unhealthy and emits the completion line).
-func (s *Scout) stopAfterWalkFailure(ctx context.Context, walkErr error) bool {
+func (s *Scout) stopAfterWalkFailure(walkErr error) bool {
 	if walkErr == nil {
 		return false
-	}
-	if ctx.Err() != nil {
-		// A shutdown/redeploy cancelled the cycle mid-walk: not an arr fault,
-		// so do not log at ERROR (it would trip the SeadexScoutCycleError
-		// alert on every redeploy landing mid-cycle - the same fault class
-		// the detached state-save retry in save already closed).
-		s.log.Warn("cycle interrupted by shutdown during library walk", "cause", context.Cause(ctx))
-		return true
 	}
 	// The arr URL may carry userinfo (config.Validate only warns on that
 	// shape), so the error must be reduced before it crosses any log
@@ -442,6 +460,17 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 	attrs = append(attrs,
 		"added", diff.Added, "removed", diff.Removed, "changed", diff.Changed,
 		"duration", time.Since(start).Round(time.Millisecond).String())
+	// The AniList degradation streak advances/resets only on COMPLETED
+	// cycles (mirroring how SeadexFailures resets beside the fetch-success
+	// check): a gated or interrupted cycle is evidence of neither an outage
+	// nor a recovery. The increment lands before the switch so the WARN and
+	// the escalated ERROR both carry the up-to-date streak, and the persisted
+	// value rides the save below.
+	if result.Degraded {
+		st.AniListDegraded++
+	} else {
+		st.AniListDegraded = 0
+	}
 	switch {
 	case snap.Partial:
 		// A partial walk compared only the clean items, so the cycle closed
@@ -454,8 +483,21 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 		// affected entries' prior findings preserved, but the cycle must not
 		// read as fully successful. Same reason attr as before the scoped
 		// handling, so the deadman and any reason-keyed queries stay stable.
+		// The persisted streak escalates a SUSTAINED degradation to ERROR
+		// (the SeadexScoutCycleError rule) beside the unchanged completion
+		// line: a day-long broken egress to graphql.anilist.co - which under
+		// a cold start silently freezes the incomplete baseline and every
+		// notification - must alert, exactly like its three sibling streaks.
+		if st.AniListDegraded >= aniListDegradedEscalationThreshold {
+			s.log.Error("anilist lookups degraded repeatedly; matching incomplete and findings frozen for affected entries - inspect graphql.anilist.co reachability and egress",
+				"incomplete_lookups", len(result.IncompleteIDs),
+				"consecutive_anilist_degraded", st.AniListDegraded)
+		}
 		s.cycleDegraded("anilist-degraded",
-			append([]any{"incomplete_lookups", len(result.IncompleteIDs)}, attrs...)...)
+			append([]any{
+				"incomplete_lookups", len(result.IncompleteIDs),
+				"consecutive_anilist_degraded", st.AniListDegraded,
+			}, attrs...)...)
 	case mapErr != nil:
 		// Only a stale-but-usable mapping error reaches this point; unusable and
 		// cancelled loads returned at the pre-compare gate. The compare ran on

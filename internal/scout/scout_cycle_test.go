@@ -1022,10 +1022,13 @@ func (c *cancellingSonarr) GetTags(context.Context) ([]arrapi.Tag, error) {
 	return nil, nil
 }
 
-// TestCycleShutdownDuringWalkWarnsNotErrors pins the redeploy log contract for
-// the walk phase: a cycle cancelled mid-walk is unhealthy but must log the
-// shutdown WARN, never the "library walk failed" ERROR that trips the
-// SeadexScoutCycleError Loki alert on a routine redeploy.
+// TestCycleShutdownDuringWalkWarnsNotErrors pins the redeploy contract for
+// the walk phase: a cycle cancelled mid-walk must log the shutdown WARN,
+// never the "library walk failed" ERROR that trips the SeadexScoutCycleError
+// Loki alert on a routine redeploy - and it is HEALTHY, the same "a redeploy
+// is not an ingest fault" verdict every later interruption arm applies, so a
+// `poll` SIGTERMed mid-walk exits 0 like one SIGTERMed mid-match and the
+// daemon's health marker is not flipped by a routine stop.
 func TestCycleShutdownDuringWalkWarnsNotErrors(t *testing.T) {
 	logger, recorder := capture.New()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1037,8 +1040,8 @@ func TestCycleShutdownDuringWalkWarnsNotErrors(t *testing.T) {
 		Library: library.NewWalker(&library.Config{Sonarr: &cancellingSonarr{cancel: cancel}, Logger: scoutTestLogger()}),
 	})
 
-	if healthy := s.Cycle(ctx); healthy {
-		t.Fatal("Cycle healthy=true, want false when the walk is interrupted")
+	if healthy := s.Cycle(ctx); !healthy {
+		t.Fatal("Cycle healthy=false, want true (a shutdown mid-walk is a redeploy, not an ingest fault)")
 	}
 	if n := recorder.CountExact("cycle interrupted by shutdown during library walk"); n != 1 {
 		t.Errorf("shutdown WARN count = %d, want 1", n)
@@ -1790,5 +1793,74 @@ func TestCycleCompletionLineCarriesAniListCycleDeltas(t *testing.T) {
 		if got, ok := recordAttr(recorder, "cycle complete", key); !ok || got != want {
 			t.Errorf("'cycle complete' %s = %q (found=%t), want %q", key, got, ok, want)
 		}
+	}
+}
+
+// TestCycleAniListDegradedStreakEscalatesToError pins the fourth escalation
+// class: a persistent AniList degradation (result.Degraded on consecutive
+// completed cycles) must escalate its log site to ERROR (firing the
+// SeadexScoutCycleError rule) at the shared threshold, exactly like the
+// shrunk-walk, SeaDex-failure, and mapping-rejection streaks - a permanently
+// broken egress to graphql.anilist.co previously WARNed "cycle degraded"
+// forever while findings stayed frozen. Below the threshold no ERROR fires,
+// the streak persists in state, and an undegraded completed cycle resets it.
+func TestCycleAniListDegradedStreakEscalatesToError(t *testing.T) {
+	newScout := func(store *fakeStore) (*Scout, *capture.Recorder) {
+		logger, recorder := capture.New()
+		sonarr := &fakeSonarr{
+			series: []arrapi.Series{{ID: 8, Title: "Idless Show", TvdbID: 124, Year: 2024}},
+			files:  map[int][]arrapi.EpisodeFile{8: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}}},
+		}
+		entries := []seadex.Entry{{
+			AniListID: 222,
+			Torrents: []seadex.Torrent{{
+				ReleaseGroup: "SubsPlease", Tracker: "Nyaa", InfoHash: "def",
+				URL: "https://nyaa.si/view/2", IsBest: true,
+				Files: []seadex.File{{Name: "Idless Show S01E01 1080p.mkv", Length: 1}},
+			}},
+		}}
+		return New(&Deps{
+			Logger:       logger,
+			Store:        store,
+			Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+			Mapping:      fakeMapping{},
+			SeaDex:       &fakeSeaDex{entries: entries},
+			Matcher:      match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
+			Comparer:     compare.NewComparer(compare.Config{}),
+			Reporter:     report.NewReporter(logger),
+			AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
+		}), recorder
+	}
+
+	// One cycle below the threshold: streak advances, no ERROR.
+	store := &fakeStore{st: state.State{
+		Baselined:       true,
+		AniListDegraded: aniListDegradedEscalationThreshold - 2,
+		Mapping:         mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 222, Type: "TV"}}},
+	}}
+	s, recorder := newScout(store)
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("Cycle healthy=false, want true (degraded, not failed)")
+	}
+	if got := store.st.AniListDegraded; got != aniListDegradedEscalationThreshold-1 {
+		t.Errorf("persisted streak = %d, want %d", got, aniListDegradedEscalationThreshold-1)
+	}
+	if n := recorder.CountExact("anilist lookups degraded repeatedly; matching incomplete and findings frozen for affected entries - inspect graphql.anilist.co reachability and egress"); n != 0 {
+		t.Errorf("escalation ERROR count below threshold = %d, want 0", n)
+	}
+
+	// The threshold cycle: the ERROR fires beside the unchanged completion line.
+	s, recorder = newScout(store)
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("threshold Cycle healthy=false, want true")
+	}
+	if got := store.st.AniListDegraded; got != aniListDegradedEscalationThreshold {
+		t.Errorf("persisted streak = %d, want %d", got, aniListDegradedEscalationThreshold)
+	}
+	if n := recorder.CountExact("anilist lookups degraded repeatedly; matching incomplete and findings frozen for affected entries - inspect graphql.anilist.co reachability and egress"); n != 1 {
+		t.Errorf("escalation ERROR count at threshold = %d, want 1", n)
+	}
+	if n := recorder.CountExact("cycle degraded"); n != 1 {
+		t.Errorf("'cycle degraded' completion line count = %d, want 1 (the deadman vocabulary must not change)", n)
 	}
 }

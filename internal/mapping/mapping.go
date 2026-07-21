@@ -321,16 +321,28 @@ type StaleMapError struct {
 	// (Cache.RejectedRefreshes) including this rejection; 0 when the
 	// degradation is a fetch or parse failure rather than a guard rejection.
 	rejections int
+	// shrunkReturned/shrunkPrevious carry the shrink guard's counts as
+	// structured facts (the stale_returned/stale_previous attrs and the
+	// Error() parenthetical); zero for every other class. Keeping the live
+	// counts OUT of msg keeps stale_reason a fixed-cardinality class
+	// discriminator - equality-queryable in Loki like its sibling classes,
+	// instead of needing a regex.
+	shrunkReturned int
+	shrunkPrevious int
 }
 
 // Error renders the degradation facts as the single prose line the degraded
 // cycle logs. The exact message shape is a pinned log contract
 // (stale_map_error_test.go locks it), so edits here change log content.
 func (e *StaleMapError) Error() string {
-	if e.cause != nil {
-		return fmt.Sprintf("mapping: %s, using stale map (%d records, fetched %s ago): %v", e.msg, e.records, e.age, e.cause)
+	reason := e.msg
+	if e.shrunkPrevious > 0 {
+		reason = fmt.Sprintf("%s (returned %d, previous %d)", e.msg, e.shrunkReturned, e.shrunkPrevious)
 	}
-	return fmt.Sprintf("mapping: %s, using stale map (%d records, fetched %s ago)", e.msg, e.records, e.age)
+	if e.cause != nil {
+		return fmt.Sprintf("mapping: %s, using stale map (%d records, fetched %s ago): %v", reason, e.records, e.age, e.cause)
+	}
+	return fmt.Sprintf("mapping: %s, using stale map (%d records, fetched %s ago)", reason, e.records, e.age)
 }
 
 // Unwrap exposes the underlying refresh failure for errors.Is/As chains.
@@ -341,12 +353,16 @@ func (e *StaleMapError) Unwrap() error { return e.cause }
 // stale_records, stale_consecutive_rejections), so callers can emit a
 // queryable degraded-cycle log line without parsing the message text.
 func (e *StaleMapError) LogAttrs() []any {
-	return []any{
+	attrs := []any{
 		"stale_reason", e.msg,
 		"stale_age_seconds", e.age.Seconds(),
 		"stale_records", e.records,
 		"stale_consecutive_rejections", e.rejections,
 	}
+	if e.shrunkPrevious > 0 {
+		attrs = append(attrs, "stale_returned", e.shrunkReturned, "stale_previous", e.shrunkPrevious)
+	}
+	return attrs
 }
 
 // ConsecutiveRejections reports how many refresh cycles in a row the
@@ -513,9 +529,16 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 	if prevCount := buildIndex(prev.Records).Len(); cacheUsable(prev.Records) && len(records)*degradation.ShrinkGuardFactor < prevCount {
 		// The noCache argument is unreachable here (cacheUsable guarantees the
 		// stale branch); it exists only to satisfy rejectRefresh's signature.
-		return rejectRefresh(prev,
-			fmt.Sprintf("refresh returned %d records, less than half of previous %d", len(records), prevCount),
+		// The reason string is FIXED (class-queryable in Loki); the live
+		// counts ride as structured fields on the error instead
+		// (stale_returned/stale_previous), set post-construction the same way
+		// rejectRefresh carries the rejection streak.
+		next, err := rejectRefresh(prev, "refresh shrank below half of previous",
 			nil, errors.New("mapping: refresh shrank unexpectedly and no cache available"))
+		if stale, ok := errors.AsType[*StaleMapError](err); ok {
+			stale.shrunkReturned, stale.shrunkPrevious = len(records), prevCount
+		}
+		return next, err
 	}
 	attrs := []any{"records", len(records)}
 	if prev.RejectedRefreshes > 0 {

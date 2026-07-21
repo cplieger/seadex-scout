@@ -87,6 +87,19 @@ type State struct {
 	// the scout can escalate its single seadex-fetch-failed log site after a
 	// sustained outage instead of degrading at WARN forever.
 	SeadexFailures int `json:"seadex_failures,omitempty"`
+	// AniListDegraded counts consecutive COMPLETED cycles whose matching
+	// left AniList lookups incomplete (match.Result.Degraded), preserving the
+	// affected entries' prior findings. It persists across cycles and
+	// restarts, resets to 0 on any completed cycle whose matching ran
+	// undegraded, and mirrors ShrunkWalks/SeadexFailures (and
+	// mapping.Cache.RejectedRefreshes) so the scout can escalate its single
+	// anilist-degraded log site after a sustained streak - a permanently
+	// broken egress to graphql.anilist.co must alert instead of WARNing
+	// forever (and, on a cold start, silently freezing the incomplete
+	// baseline path indefinitely). Gated cycles (walk failure, upstream
+	// outage, shutdown) neither advance nor reset it: they are evidence of
+	// neither an AniList outage nor a recovery.
+	AniListDegraded int `json:"anilist_degraded,omitempty"`
 	// Version is the persisted envelope's schema version, stamped with
 	// SchemaVersion by every Save (on the shallow copy it writes; the
 	// caller's State is never mutated). A file with the field absent or zero
