@@ -2,16 +2,19 @@ package indexer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cplieger/httpx/v3"
 	"github.com/cplieger/seadex-scout/internal/seadex"
@@ -214,15 +217,30 @@ func TestHarvestCachePersistsAcrossRebuilds(t *testing.T) {
 	}
 }
 
-// TestHarvestBudgetCapEnforced pins harvestSearchBudget: with more pending
-// shows than the budget, exactly harvestSearchBudget queries are issued and
-// the rest stay synthetic (to retry next rebuild); the rebuild still succeeds.
-func TestHarvestBudgetCapEnforced(t *testing.T) {
+// TestMain replaces the harvest's politeness sleep for the whole package: the
+// pacing gap is wall-clock politeness toward the trackers, not logic under
+// test, and the suite must not spend 2s per simulated query. Tests that
+// exercise the pacer's deadline install their own clock-advancing harvestWait
+// (serially - nothing here runs t.Parallel).
+func TestMain(m *testing.M) {
+	harvestWait = func(context.Context, time.Duration) error { return nil }
+	os.Exit(m.Run())
+}
+
+// TestHarvestTimeSliceEnforced pins the per-rebuild wall-clock slice: with a
+// harvestWait that advances a fake clock by a quarter of the slice per pacing
+// gap, only the queries fitting the slice run (the first query waits for no
+// gap, so 1 + 4 gaps = 5 queries; the 5th gap crosses the deadline), the
+// remaining shows keep their synthesized titles, and the persisted rotation
+// cursor points at the last show that consumed a query so the NEXT rebuild
+// resumes there instead of restarting at the head.
+func TestHarvestTimeSliceEnforced(t *testing.T) {
 	mock, srv := newHarvestMock(func(int) string { return emptyTorznab() })
 	defer srv.Close()
 
-	entries := make([]seadex.Entry, 0, harvestSearchBudget+5)
-	for i := range harvestSearchBudget + 5 {
+	const shows = 12
+	entries := make([]seadex.Entry, 0, shows)
+	for i := range shows {
 		entries = append(entries, nyaaEntry(1000+i, 500+i, true, fmt.Sprintf("Show %d - S01E01 (1080p) [G].mkv", i)))
 	}
 	info := func(alID int) EntryInfo { return EntryInfo{Title: fmt.Sprintf("Show %d", alID)} }
@@ -230,18 +248,67 @@ func TestHarvestBudgetCapEnforced(t *testing.T) {
 	seedEmptyLedger(t, path)
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		Deps{HTTP: srv.Client()})
+	clock := time.Unix(1700000000, 0)
+	w.now = func() time.Time { return clock }
+	prevWait := harvestWait
+	harvestWait = func(context.Context, time.Duration) error {
+		clock = clock.Add(harvestTimeBudget / 4)
+		return nil
+	}
+	t.Cleanup(func() { harvestWait = prevWait })
+
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
-	if mock.calls() != harvestSearchBudget {
-		t.Errorf("harvest queries = %d, want the budget cap %d", mock.calls(), harvestSearchBudget)
+	if mock.calls() != 5 {
+		t.Errorf("harvest queries = %d, want 5 (1 gap-free + 4 quarter-slice gaps; the 5th gap crosses the deadline)", mock.calls())
 	}
 	snap := readSnapshotFile(t, path)
-	if len(snap.NyaaFeed) != harvestSearchBudget+5 {
-		t.Errorf("feed = %d items, want %d (over-budget items still serve synthesized titles)", len(snap.NyaaFeed), harvestSearchBudget+5)
+	if len(snap.NyaaFeed) != shows {
+		t.Errorf("feed = %d items, want %d (out-of-slice items still serve synthesized titles)", len(snap.NyaaFeed), shows)
 	}
-	if len(snap.Titles) != 0 {
-		t.Errorf("titles = %v, want empty (no query matched)", snap.Titles)
+	if got, want := snap.HarvestCursor, "nyaa:1004"; got != want {
+		t.Errorf("harvest cursor = %q, want %q (the last show that consumed a query)", got, want)
+	}
+}
+
+// TestHarvestRotationResumesAfterCursor pins the anti-starvation rotation: a
+// persisted cursor between two pending shows makes the rebuild query the
+// LATER show first (wrapping to the earlier one afterwards), so a rebuild cut
+// short never restarts at the head and a deep early show cannot starve its
+// successors across rebuilds.
+func TestHarvestRotationResumesAfterCursor(t *testing.T) {
+	mock, srv := newHarvestMock(func(int) string { return emptyTorznab() })
+	defer srv.Close()
+
+	entries := []seadex.Entry{
+		nyaaEntry(1000, 500, true, "Show A - S01E01 (1080p) [G].mkv"),
+		nyaaEntry(2000, 600, true, "Show B - S01E01 (1080p) [G].mkv"),
+	}
+	info := func(alID int) EntryInfo {
+		if alID == 1000 {
+			return EntryInfo{Title: "Show A"}
+		}
+		return EntryInfo{Title: "Show B"}
+	}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedLedgerWithCursor(t, path, "nyaa:1500")
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+		Deps{HTTP: srv.Client()})
+	if err := w.Rebuild(context.Background(), entries, info); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if mock.calls() != 2 {
+		t.Fatalf("harvest queries = %d, want 2 (both shows, one page each)", mock.calls())
+	}
+	if got := mock.request(0)["q"]; got != "Show B" {
+		t.Errorf("first query q = %q, want %q (rotation starts after the cursor nyaa:1500)", got, "Show B")
+	}
+	if got := mock.request(1)["q"]; got != "Show A" {
+		t.Errorf("second query q = %q, want %q (rotation wraps to the head)", got, "Show A")
+	}
+	if got, want := readSnapshotFile(t, path).HarvestCursor, "nyaa:1000"; got != want {
+		t.Errorf("harvest cursor = %q, want %q (the last show that consumed a query)", got, want)
 	}
 }
 
@@ -503,12 +570,13 @@ func TestHarvestMatchesNyaaByInfoHash(t *testing.T) {
 	}
 }
 
-// TestHarvestSingleShowPagingStopsAtBudget pins the politeness bound on the
+// TestHarvestSingleShowPagingStopsAtPageCap pins the anti-hog bound on the
 // paging leg: ONE show whose Nyaa search keeps returning full, non-matching
-// pages drains the whole harvestSearchBudget through offset paging and then
-// stops - the global budget bounds pages, not just shows - leaving the item
-// synthetic for the next rebuild to retry.
-func TestHarvestSingleShowPagingStopsAtBudget(t *testing.T) {
+// pages spends exactly harvestShowPageCap offset pages this rebuild and then
+// stops - it can no longer monopolize the rebuild's time slice, the flaw that
+// used to starve every show sorted after it - leaving the item synthetic to
+// page deeper on later rebuilds.
+func TestHarvestSingleShowPagingStopsAtPageCap(t *testing.T) {
 	filler := make([]string, 0, harvestPageSize)
 	for i := range harvestPageSize {
 		filler = append(filler, torznabItem(fmt.Sprintf("Other %d", i), fmt.Sprintf("https://nyaa.si/view/%d", 9000+i)))
@@ -525,8 +593,11 @@ func TestHarvestSingleShowPagingStopsAtBudget(t *testing.T) {
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
-	if mock.calls() != harvestSearchBudget {
-		t.Errorf("harvest queries = %d, want the budget %d (paging one show must respect the global budget)", mock.calls(), harvestSearchBudget)
+	if mock.calls() != harvestShowPageCap {
+		t.Errorf("harvest queries = %d, want the per-show page cap %d (one show must not monopolize the slice)", mock.calls(), harvestShowPageCap)
+	}
+	if got, want := mock.request(harvestShowPageCap - 1)["offset"], strconv.Itoa((harvestShowPageCap-1)*harvestPageSize); got != want {
+		t.Errorf("last page offset = %q, want %q (offset paging advanced page by page)", got, want)
 	}
 	if snap := readSnapshotFile(t, path); len(snap.Titles) != 0 {
 		t.Errorf("titles = %v, want empty (nothing matched)", snap.Titles)
@@ -717,7 +788,7 @@ func TestHarvestCancellationMidQueryIsNotWarnedAsUpstreamFault(t *testing.T) {
 	w := NewFeedWriter(cfg, Deps{HTTP: srv.Client(), Logger: log})
 	feeds := map[string][]item{upstreamNyaa: {{Key: "nyaa:42", AniListID: 7, Title: "Show S01"}}}
 	titles := map[string]string{}
-	stats := w.harvestTitles(ctx, feeds, titles, func(int) EntryInfo { return EntryInfo{Title: "Show", SeasonTvdb: 1} })
+	stats, _ := w.harvestTitles(ctx, feeds, titles, func(int) EntryInfo { return EntryInfo{Title: "Show", SeasonTvdb: 1} }, "")
 	if len(titles) != 0 {
 		t.Errorf("titles = %v, want empty (cancelled harvest must cache nothing)", titles)
 	}
@@ -849,7 +920,7 @@ func TestHarvestMalformedResponsesLatchAtThreshold(t *testing.T) {
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, Deps{HTTP: srv.Client(), Logger: log})
 	titles := map[string]string{}
-	stats := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] })
+	stats, _ := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
 	if stats.queries != 3 {
 		t.Errorf("harvest queries = %d, want 3 (the third consecutive malformed show latches the scope)", stats.queries)
@@ -898,7 +969,7 @@ func TestHarvestRejectedResponsesLatchAtThreshold(t *testing.T) {
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, Deps{HTTP: srv.Client(), Logger: log})
 	titles := map[string]string{}
-	stats := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] })
+	stats, _ := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
 	if stats.queries != 3 {
 		t.Errorf("harvest queries = %d, want 3 (the third consecutive rejected show latches the scope)", stats.queries)
@@ -949,7 +1020,7 @@ func TestHarvestMalformedResponseRunResetsAfterSuccessfulPage(t *testing.T) {
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, Deps{HTTP: srv.Client(), Logger: log})
 	titles := map[string]string{}
-	stats := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] })
+	stats, _ := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
 	if stats.queries != 6 {
 		t.Errorf("harvest queries = %d, want 6 (a successful empty page resets the malformed run)", stats.queries)
@@ -986,7 +1057,7 @@ func TestHarvestOpportunisticMatchSkipsSatisfiedGroup(t *testing.T) {
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, Deps{HTTP: srv.Client(), Logger: log})
 	titles := map[string]string{}
-	stats := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] })
+	stats, _ := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
 	if mock.calls() != 1 || stats.queries != 1 {
 		t.Errorf("harvest queries = %d (HTTP calls %d), want 1 (the satisfied group must be skipped without a query)", stats.queries, mock.calls())
@@ -1038,7 +1109,7 @@ func TestHarvestRequestRejectionResetsMalformedRun(t *testing.T) {
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, Deps{HTTP: srv.Client(), Logger: log})
 	titles := map[string]string{}
-	stats := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] })
+	stats, _ := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
 	if stats.queries != 6 {
 		t.Errorf("harvest queries = %d, want 6 (a request-scoped rejection must reset the malformed run like a success)", stats.queries)
@@ -1097,14 +1168,14 @@ func TestRequestScopedHarvestError(t *testing.T) {
 		err  error
 		want bool
 	}{
-		{"code 200 lower bound is request-scoped", &upstreamDocError{code: "200"}, true},
-		{"code 299 upper bound is request-scoped", &upstreamDocError{code: "299"}, true},
-		{"code 199 auth code stays scope-wide", &upstreamDocError{code: "199"}, false},
-		{"code 300 stays scope-wide", &upstreamDocError{code: "300"}, false},
-		{"non-numeric code stays scope-wide", &upstreamDocError{code: "20x"}, false},
-		{"empty code stays scope-wide", &upstreamDocError{code: ""}, false},
+		{"code 200 lower bound is request-scoped", newUpstreamDocError("200", ""), true},
+		{"code 299 upper bound is request-scoped", newUpstreamDocError("299", ""), true},
+		{"code 199 auth code stays scope-wide", newUpstreamDocError("199", ""), false},
+		{"code 300 stays scope-wide", newUpstreamDocError("300", ""), false},
+		{"non-numeric code stays scope-wide", newUpstreamDocError("20x", ""), false},
+		{"empty code stays scope-wide", newUpstreamDocError("", ""), false},
 		{"non-document error stays scope-wide", fmt.Errorf("connection refused"), false},
-		{"wrapped document error still classifies", fmt.Errorf("search %q: %w", "Show", &upstreamDocError{code: "201"}), true},
+		{"wrapped document error still classifies", fmt.Errorf("search %q: %w", "Show", newUpstreamDocError("201", "")), true},
 		{"HTTP 400 bad request is request-scoped", &httpx.StatusError{Code: http.StatusBadRequest}, true},
 		{"HTTP 414 URI too long is request-scoped", &httpx.StatusError{Code: http.StatusRequestURITooLong}, true},
 		{"HTTP 422 unprocessable entity is request-scoped", &httpx.StatusError{Code: http.StatusUnprocessableEntity}, true},
@@ -1123,6 +1194,32 @@ func TestRequestScopedHarvestError(t *testing.T) {
 				t.Errorf("requestScopedHarvestError(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestRequestScopedClassificationSurvivesKeyRedaction pins the parse-before-
+// redact contract: classifyParseError scrubs a reflected Prowlarr API key
+// from the document's DISPLAY strings, and with a short all-digit key ("2")
+// that scrub rewrites a valid request code ("201" -> "REDACTED01") - but the
+// show-vs-scope classification must still read the parse-time codeNum and
+// classify the rejection show-local, never re-parsing the redacted string
+// (the c2 audit regression: a one-show rejection wrongly condemned the whole
+// scope).
+func TestRequestScopedClassificationSurvivesKeyRedaction(t *testing.T) {
+	u := &upstream{name: upstreamNyaa, apiKey: "2"}
+	err := u.classifyParseError(newUpstreamDocError("201", "missing parameter (apikey=2)"))
+	docErr, ok := errors.AsType[*upstreamDocError](err)
+	if !ok {
+		t.Fatalf("classifyParseError = %T (%v), want the terminal *upstreamDocError", err, err)
+	}
+	if docErr.code != "REDACTED01" {
+		t.Errorf("redacted code string = %q, want %q (display text scrubbed)", docErr.code, "REDACTED01")
+	}
+	if !strings.Contains(docErr.description, "REDACTED") {
+		t.Errorf("redacted description = %q, want the key scrubbed", docErr.description)
+	}
+	if !requestScopedHarvestError(err) {
+		t.Error("requestScopedHarvestError = false after redaction rewrote the code string; classification must read the parse-time codeNum")
 	}
 }
 
@@ -1171,7 +1268,7 @@ func TestHarvestHTTPStatusFailureScoping(t *testing.T) {
 				NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 			}}, Deps{HTTP: srv.Client(), Logger: log})
 			titles := map[string]string{}
-			stats := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] })
+			stats, _ := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
 			if _, ok := titles["nyaa:42"]; ok {
 				t.Errorf("titles = %v, want no cached title for the rejected show", titles)

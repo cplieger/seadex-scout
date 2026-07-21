@@ -480,12 +480,39 @@ type errorXML struct {
 // bounded retry budget is unchanged) but never marks it malformedBody, so
 // after retry exhaustion the harvest latches the failed scope instead of
 // treating an upstream-wide auth/config failure as one show's poison result
-// set. The fields hold the RAW upstream text (so fetchAndParse's exact-
-// substring API-key redaction sees the untruncated key); Error() is the
+// set. The string fields hold the RAW upstream text (so fetchAndParse's
+// exact-substring API-key redaction sees the untruncated key); Error() is the
 // sanitizing emit boundary.
 type upstreamDocError struct {
 	code        string
 	description string
+	// codeNum is the document code parsed ONCE at construction from the raw
+	// upstream text (-1 when non-numeric), before fetchAndParse's API-key
+	// redaction can rewrite the code string. Both classification consumers -
+	// terminalTorznabCode's retry decision and requestScopedHarvestError's
+	// show-vs-scope decision - read this field, so a short all-digit
+	// Prowlarr key occurring inside a valid code (key "2" turning "201"
+	// into "REDACTED01") can no longer corrupt control flow: redaction
+	// rewrites only the display strings.
+	codeNum int
+}
+
+// newUpstreamDocError builds the error from the document's raw code and
+// description, parsing codeNum from the untouched code text (see the field
+// comment for why classification must never re-parse the string).
+func newUpstreamDocError(code, description string) *upstreamDocError {
+	return &upstreamDocError{code: code, description: description, codeNum: torznabCodeNum(code)}
+}
+
+// torznabCodeNum parses a Torznab <error> document code, returning -1 for
+// anything non-numeric (an unknown shape classifies as neither terminal nor
+// request-scoped, the conservative default).
+func torznabCodeNum(code string) int {
+	n, err := strconv.Atoi(code)
+	if err != nil {
+		return -1
+	}
+	return n
 }
 
 func (e *upstreamDocError) Error() string {
@@ -532,7 +559,7 @@ func parseTorznab(body []byte) ([]item, error) {
 			// redaction in fetchAndParse sees the untruncated text (cap-before-
 			// redact would let a boundary-straddling key prefix escape the
 			// exact-substring replacement).
-			return nil, &upstreamDocError{code: e.Code, description: e.Description}
+			return nil, newUpstreamDocError(e.Code, e.Description)
 		}
 		return nil, fmt.Errorf("parse torznab feed: %w", err)
 	}

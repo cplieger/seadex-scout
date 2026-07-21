@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -159,7 +158,7 @@ func (u *upstream) classifyParseError(err error) error {
 		// (untruncated) here - upstreamDocError.Error() sanitizes at the
 		// emit boundary - so the exact-substring replacement always sees
 		// the intact key.
-		terminal := terminalTorznabCode(docErr.code)
+		terminal := terminalTorznabCode(docErr.codeNum)
 		docErr.code = httpx.RedactSecretString(docErr.code, u.apiKey)
 		docErr.description = httpx.RedactSecretString(docErr.description, u.apiKey)
 		if terminal {
@@ -183,18 +182,17 @@ func (u *upstream) classifyParseError(err error) error {
 	return &transientUpstreamError{err: errors.New(msg), malformedBody: true}
 }
 
-// terminalTorznabCode reports whether a Torznab <error> document's code names
-// a deterministic failure a retry cannot recover: the Newznab error ranges
-// 100-199 (incorrect credentials, account problems) and 200-299 (missing or
-// invalid request parameters) stay wrong on every attempt until the operator
-// fixes configuration, so retrying only multiplies upstream load and warning
-// noise while delaying the error. Generic/server-side codes (e.g. 900
-// "unknown error") and a code that does not parse as a number are NOT
-// terminal: they may recover, and an unknown shape defaults to the bounded
-// retry rather than failing fast.
-func terminalTorznabCode(code string) bool {
-	n, err := strconv.Atoi(code)
-	return err == nil && n >= 100 && n < 300
+// terminalTorznabCode reports whether a Torznab <error> document's parsed
+// code (upstreamDocError.codeNum, -1 for non-numeric) names a deterministic
+// failure a retry cannot recover: the Newznab error ranges 100-199 (incorrect
+// credentials, account problems) and 200-299 (missing or invalid request
+// parameters) stay wrong on every attempt until the operator fixes
+// configuration, so retrying only multiplies upstream load and warning noise
+// while delaying the error. Generic/server-side codes (e.g. 900 "unknown
+// error") and a non-numeric code are NOT terminal: they may recover, and an
+// unknown shape defaults to the bounded retry rather than failing fast.
+func terminalTorznabCode(n int) bool {
+	return n >= 100 && n < 300
 }
 
 // transientUpstreamError marks an upstream failure retryable for

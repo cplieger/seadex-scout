@@ -44,6 +44,16 @@ func seedEmptyLedger(t *testing.T, path string) {
 	}
 }
 
+// seedLedgerWithCursor is seedEmptyLedger plus a persisted harvest rotation
+// cursor, for tests pinning where the next rebuild's title harvest resumes.
+func seedLedgerWithCursor(t *testing.T, path, cursor string) {
+	t.Helper()
+	snap := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[],"ab_feed":[],"harvest_cursor":` + strconv.Quote(cursor) + `}`
+	if err := os.WriteFile(path, []byte(snap), 0o600); err != nil {
+		t.Fatalf("seed ledger with cursor: %v", err)
+	}
+}
+
 // readSnapshotFile decodes the persisted snapshot for assertions.
 func readSnapshotFile(t *testing.T, path string) snapshot {
 	t.Helper()

@@ -109,10 +109,17 @@ type snapshot struct {
 	// nil-ness is loadPrevious's pre-journal-schema sentinel, so an honestly
 	// empty ledger must round-trip as {} rather than aliasing the retired
 	// schema and re-baselining every cycle (see loadPrevious).
-	Seen     map[string]bool   `json:"seen"`
-	Titles   map[string]string `json:"titles,omitempty"`
-	NyaaFeed []item            `json:"nyaa_feed"`
-	ABFeed   []item            `json:"ab_feed"`
+	Seen   map[string]bool   `json:"seen"`
+	Titles map[string]string `json:"titles,omitempty"`
+	// HarvestCursor is the title harvest's rotation position: the
+	// "scope:alID" of the last show group that consumed a harvest query, so
+	// the next rebuild resumes AFTER it instead of restarting at the head
+	// (see harvestTitles; a deep show can then never starve its successors
+	// across rebuilds). Optional both ways: an older snapshot without it
+	// starts at the head, and an older binary ignores it.
+	HarvestCursor string `json:"harvest_cursor,omitempty"`
+	NyaaFeed      []item `json:"nyaa_feed"`
+	ABFeed        []item `json:"ab_feed"`
 }
 
 // FeedWriterConfig configures NewFeedWriter. Path is where the snapshot is
@@ -244,13 +251,13 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info f
 		ab = nil
 	}
 	feeds := map[string][]item{upstreamNyaa: nyaa, upstreamAB: ab}
-	hs := w.harvestTitles(ctx, feeds, titles, infoFor)
+	hs, cursor := w.harvestTitles(ctx, feeds, titles, infoFor, prev.cursor)
 	applyTitles(nyaa, titles)
 	applyTitles(ab, titles)
 	nyaa, ab = sortFeed(nyaa), sortFeed(ab)
 	titles = retainTitles(titles, nyaa, ab)
 
-	snap := snapshot{ByHash: set.byHash, ByKey: set.byKey, ByPair: set.byPair, Seen: seen, Titles: titles, NyaaFeed: nyaa, ABFeed: ab}
+	snap := snapshot{ByHash: set.byHash, ByKey: set.byKey, ByPair: set.byPair, Seen: seen, Titles: titles, NyaaFeed: nyaa, ABFeed: ab, HarvestCursor: cursor}
 	if err := w.persist(ctx, &snap); err != nil {
 		return err
 	}
@@ -330,6 +337,7 @@ func stripABScopedDownloadURLs(feed []item) {
 // file) and the rebuild must baseline instead of growing.
 type previousJournal struct {
 	reason   string
+	cursor   string
 	seen     map[string]bool
 	titles   map[string]string
 	nyaaFeed []item
@@ -395,6 +403,7 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 		abFeed:   snap.ABFeed,
 		seen:     snap.Seen,
 		titles:   titles,
+		cursor:   snap.HarvestCursor,
 	}, nil
 }
 

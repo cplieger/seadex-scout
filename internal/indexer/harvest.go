@@ -10,28 +10,99 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cplieger/httpx/v3"
 )
 
-// --- Budget, paging, and stats ---
+// --- Politeness rate, time slice, paging, and stats ---
 
-// harvestSearchBudget hard-caps the Prowlarr Torznab queries one rebuild may
-// spend harvesting real release titles (each offset page counts as one
-// query). The rebuild runs every poll_interval against community-backed
-// trackers, so the budget keeps the harvest polite and bounded: over-budget
-// shows keep their synthesized titles this cycle and retry next rebuild -
-// harvesting is enrichment, never a dependency.
-const harvestSearchBudget = 15
+// harvestQueryInterval is the pacing gap between consecutive harvest queries:
+// one Prowlarr Torznab query per 2s. Nyaa publishes no API guidance, so the
+// authoritative politeness number is Prowlarr's own nyaasi indexer definition,
+// which declares `requestDelay: 2` (the delay Prowlarr enforces tracker-side);
+// the harvest matches it app-side so a rebuild's query train is polite
+// regardless of Prowlarr's own throttling. The gap is global across scopes
+// (conservative: per-indexer pacing would allow interleaving).
+const harvestQueryInterval = 2 * time.Second
+
+// harvestTimeBudget is the wall-clock slice one rebuild may spend harvesting
+// titles. The harvest runs inside the compare cycle (before the arr walk), so
+// the slice keeps a backlogged harvest from stalling the cycle's findings
+// indefinitely; whatever does not fit resumes NEXT rebuild at the rotation
+// cursor (see harvestTitles), so there is no per-rebuild query count to
+// starve - a deep backlog just takes more cycles. At the 2s pacing this
+// admits ~300 queries per rebuild, an order of magnitude beyond any realistic
+// pending set (the journal is a 14-day window of new curations).
+const harvestTimeBudget = 10 * time.Minute
+
+// harvestShowPageCap bounds one show's offset pages per rebuild, so a single
+// never-matching show with a deep result set cannot monopolize a rebuild's
+// time slice: at most 3 pages (300 results) per show per rebuild, then the
+// next show runs; the capped show pages deeper across subsequent rebuilds.
+const harvestShowPageCap = 3
 
 // harvestPageSize is the per-query result window requested from Prowlarr and
 // the paging stride: a page returning fewer results than this ends the show's
 // offset paging (there is nothing older left to reach).
 const harvestPageSize = 100
 
+// harvestWait blocks between paced queries; a package var so the test suite
+// can replace the real sleep (pacing gaps are wall-clock politeness, not
+// logic under test) and the pacer tests can advance a fake clock instead.
+var harvestWait = sleepCtx
+
+// sleepCtx blocks for d or until ctx is done, returning ctx's error when
+// cancelled first: a pacing gap must never outlive a shutdown.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// harvestPacer enforces the politeness rate and the per-rebuild time slice:
+// next gates every query, blocking for the pacing gap first (except before
+// the rebuild's first query) and reporting false - permanently, for this
+// rebuild - once the slice is spent or ctx is done.
+type harvestPacer struct {
+	now      func() time.Time
+	deadline time.Time
+	started  bool
+}
+
+// next reports whether another query may run, after enforcing the pacing gap.
+// The deadline is re-checked after the gap so a wait that crosses it cannot
+// admit one final over-budget query.
+func (p *harvestPacer) next(ctx context.Context) bool {
+	if p.spent(ctx) {
+		return false
+	}
+	if p.started {
+		if harvestWait(ctx, harvestQueryInterval) != nil {
+			return false
+		}
+		if p.spent(ctx) {
+			return false
+		}
+	}
+	p.started = true
+	return true
+}
+
+// spent reports whether the rebuild's harvest slice is over (deadline passed
+// or ctx done) without consuming a pacing slot.
+func (p *harvestPacer) spent(ctx context.Context) bool {
+	return ctx.Err() != nil || p.now().After(p.deadline)
+}
+
 // harvestStats summarizes one rebuild's title harvest for the snapshot log
 // line: queries spent, titles matched into the cache, and journal items still
-// on a synthesized title afterwards (over budget, unmatched, no query source,
+// on a synthesized title afterwards (out of time, unmatched, no query source,
 // or no upstream for their tracker).
 type harvestStats struct {
 	queries int
@@ -58,30 +129,41 @@ type harvestGroup struct {
 // immutable, so a title is harvested once, ever). AnimeBytes search is
 // series-level (one query returns the show's whole torrent set, validated
 // live); Nyaa uses the season form and pages by offset under the indexer's
-// default created/desc ordering (see harvestParams). Failures warn and never
-// fail the rebuild; a show with no known title, no configured upstream, or no
-// remaining budget stays synthetic and retries next cycle. A SCOPE-WIDE query
-// failure (status/transport - see harvestShow) skips the scope's remaining
-// shows this rebuild, while a show-local malformed response only skips that
-// show, so one poison result set cannot freeze an otherwise healthy tracker's
+// default created/desc ordering (see harvestParams), at most
+// harvestShowPageCap pages per show per rebuild. Queries are paced at
+// harvestQueryInterval inside a harvestTimeBudget slice (see the constants);
+// work that does not fit resumes next rebuild: the groups are visited in
+// their deterministic order ROTATED to start after prevCursor - the last
+// group that consumed a query last rebuild, persisted in the snapshot - and
+// the returned cursor carries that fairness forward, so a never-matching
+// deep show can only delay its successors within one rebuild, never starve
+// them across rebuilds. Failures warn and never fail the rebuild; a show
+// with no known title, no configured upstream, or no remaining slice stays
+// synthetic and retries next cycle. A SCOPE-WIDE query failure
+// (status/transport - see harvestShow) skips the scope's remaining shows
+// this rebuild, while a show-local malformed response only skips that show,
+// so one poison result set cannot freeze an otherwise healthy tracker's
 // whole harvest on synthesized titles; a run of consecutiveMalformedLatch
 // malformed shows — or of consecutiveRejectedLatch request-scoped rejections
 // — on one scope latches it scope-wide anyway, since systematic 2xx garbage
 // (e.g. a proxy answering HTML to everything) or an upstream deterministically
 // rejecting every query shape is upstream-wide breakage that would otherwise
-// burn the whole budget with zero progress.
-func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]item, titles map[string]string, infoFor func(alID int) EntryInfo) (stats harvestStats) {
+// burn the whole time slice with zero progress.
+func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]item, titles map[string]string, infoFor func(alID int) EntryInfo, prevCursor string) (stats harvestStats, cursor string) {
+	cursor = prevCursor
 	defer func() { stats.pending = syntheticCount(feeds, titles) }()
 	groups, index := pendingHarvest(feeds, titles, infoFor)
 	if len(groups) == 0 || len(w.upstreams) == 0 {
-		return stats
+		return stats, cursor
 	}
-	budget := harvestSearchBudget
+	pacer := &harvestPacer{now: w.now, deadline: w.now().Add(harvestTimeBudget)}
 	failed := make(map[string]bool, len(w.upstreams))
 	malformed := make(map[string]int, len(w.upstreams))
 	rejected := make(map[string]int, len(w.upstreams))
-	for _, g := range groups {
-		if ctx.Err() != nil || budget == 0 {
+	start := rotationStart(groups, prevCursor)
+	for i := range groups {
+		g := groups[(start+i)%len(groups)]
+		if pacer.spent(ctx) {
 			break
 		}
 		if !groupPending(g, titles) {
@@ -96,11 +178,47 @@ func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]item,
 		if u == nil {
 			continue
 		}
-		var outcome harvestOutcome
-		budget, outcome = w.harvestShow(ctx, u, g, infoFor(g.alID), index, titles, budget, &stats)
+		before := stats.queries
+		outcome := w.harvestShow(ctx, u, g, infoFor(g.alID), index, titles, pacer, &stats)
+		if stats.queries > before {
+			// The cursor tracks the last group that CONSUMED a query - not
+			// merely one dispatched after the slice ran out - so the next
+			// rebuild resumes exactly where real work stopped.
+			cursor = harvestCursorKey(g)
+		}
 		w.updateHarvestScopeState(g.scope, outcome, failed, malformed, rejected)
 	}
-	return stats
+	return stats, cursor
+}
+
+// harvestCursorKey renders a group's rotation-cursor identity, the
+// "scope:alID" form persisted in the snapshot's harvest_cursor field.
+func harvestCursorKey(g harvestGroup) string {
+	return g.scope + ":" + strconv.Itoa(g.alID)
+}
+
+// rotationStart resolves where this rebuild's group iteration begins: the
+// first group strictly AFTER the persisted cursor in the deterministic
+// (scope, AniList ID) order, wrapping to the head past the end. An empty or
+// unparseable cursor - a fresh install, a baseline, or a hand-edited
+// snapshot - starts at the head; a cursor whose group is gone (titled or
+// aged out) still lands on its order-successor.
+func rotationStart(groups []harvestGroup, cursor string) int {
+	scope, idStr, ok := strings.Cut(cursor, ":")
+	if !ok {
+		return 0
+	}
+	alID, err := strconv.Atoi(idStr)
+	if err != nil {
+		return 0
+	}
+	after := harvestGroup{scope: scope, alID: alID}
+	for i := range groups {
+		if compareHarvestGroups(groups[i], after) > 0 {
+			return i
+		}
+	}
+	return 0
 }
 
 // updateHarvestScopeState applies one queried show's outcome to the per-scope
@@ -179,16 +297,17 @@ const (
 // evidence the upstream itself is down, so one rejection stays show-local (a
 // consecutive run of them may still trip consecutiveRejectedLatch and latch
 // the scope). Two shapes qualify: a Torznab <error> document naming a
-// request/parameter failure (Newznab codes 200-299), and an HTTP status that
-// condemns only the request that carried it - 400 Bad Request, 414 URI Too
-// Long, 422 Unprocessable Entity, the statuses an upstream answers when ONE
-// title's encoded query is itself unacceptable. Auth/account document codes
+// request/parameter failure (Newznab codes 200-299, read from the
+// parse-time codeNum - never re-parsed from the code string, which API-key
+// redaction may have rewritten), and an HTTP status that condemns only the
+// request that carried it - 400 Bad Request, 414 URI Too Long, 422
+// Unprocessable Entity, the statuses an upstream answers when ONE title's
+// encoded query is itself unacceptable. Auth/account document codes
 // (100-199) and auth/config/availability statuses (401/403/404/408/429/5xx)
 // stay scope-wide: they fail every show's query identically.
 func requestScopedHarvestError(err error) bool {
 	if docErr, ok := errors.AsType[*upstreamDocError](err); ok {
-		code, parseErr := strconv.Atoi(docErr.code)
-		return parseErr == nil && code >= 200 && code < 300
+		return docErr.codeNum >= 200 && docErr.codeNum < 300
 	}
 	if statusErr, ok := errors.AsType[*httpx.StatusError](err); ok {
 		switch statusErr.Code {
@@ -221,8 +340,11 @@ const consecutiveMalformedLatch = 3
 const consecutiveRejectedLatch = 3
 
 // harvestShow runs one show's query (plus offset pages while its items remain
-// unmatched, full pages keep coming, and budget remains) against its tracker's
-// upstream, returning the remaining budget. A query failure warns and ends the
+// unmatched and full pages keep coming, up to harvestShowPageCap pages this
+// rebuild) against its tracker's upstream. Every page passes through the
+// pacer (politeness gap + time slice); a show cut off by the cap or the
+// slice simply resumes on a later rebuild via the rotation cursor. A query
+// failure warns and ends the
 // show's harvest for this rebuild (the next rebuild retries). Failures are
 // classified before condemning the whole scope: a SCOPE-WIDE failure
 // (429/5xx, an auth/config status, a transport error - the upstream is likely
@@ -230,7 +352,7 @@ const consecutiveRejectedLatch = 3
 // scope's remaining groups this rebuild, while a persistently malformed
 // SUCCESSFUL body (malformedUpstreamBody) is specific to this one show's
 // result set and reports harvestShowMalformed, so the scope's other shows are
-// still harvested within the remaining budget instead of one poison response
+// still harvested within the remaining slice instead of one poison response
 // freezing the whole tracker on synthesized titles indefinitely - unless a
 // RUN of malformed shows trips the caller's consecutiveMalformedLatch, the
 // signature of an upstream answering 2xx garbage to everything. A Torznab
@@ -240,25 +362,26 @@ const consecutiveRejectedLatch = 3
 // deliberately rejected this one show's query, so its siblings' valid queries
 // still run — unless a run of rejections trips the caller's
 // consecutiveRejectedLatch.
-func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGroup, meta EntryInfo, index, titles map[string]string, budget int, stats *harvestStats) (int, harvestOutcome) {
+func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGroup, meta EntryInfo, index, titles map[string]string, pacer *harvestPacer, stats *harvestStats) harvestOutcome {
 	params := harvestParams(meta, g.scope)
-	for offset := 0; budget > 0 && ctx.Err() == nil; offset += harvestPageSize {
-		budget--
+	for page := range harvestShowPageCap {
+		if !pacer.next(ctx) {
+			return harvestOK
+		}
 		stats.queries++
-		page := harvestPage(params, offset)
-		results, raw, err := u.search(ctx, page)
+		results, raw, err := u.search(ctx, harvestPage(params, page*harvestPageSize))
 		if err != nil {
 			if ctx.Err() != nil {
-				return budget, harvestScopeFailed
+				return harvestScopeFailed
 			}
-			return budget, w.classifyHarvestError(err, u, g.alID)
+			return w.classifyHarvestError(err, u, g.alID)
 		}
 		stats.matched += matchHarvest(results, g.scope, index, titles)
 		if !groupPending(g, titles) || raw < harvestPageSize {
-			return budget, harvestOK
+			return harvestOK
 		}
 	}
-	return budget, harvestOK
+	return harvestOK
 }
 
 // classifyHarvestError warns about one show's failed (non-cancelled) harvest
