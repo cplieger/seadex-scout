@@ -3,6 +3,8 @@ package release
 import (
 	"net/url"
 	"testing"
+
+	"github.com/cplieger/urlform"
 )
 
 // TestLookupTrackerByHostFailClosed pins the fail-closed guards of the
@@ -118,8 +120,10 @@ func TestTrackerTableBaseURLsAreHTTPS(t *testing.T) {
 	}
 }
 
-// TestIsASCIIHost pins the exported ASCII homograph gate's byte-boundary
-// contract directly in its defining package (filter.ABVisible calls it
+// TestIsASCIIHost pins the ASCII homograph gate's byte-boundary contract as
+// a consumer contract (the gate now lives in the urlform library;
+// LookupTrackerByHost keys its fail-closed rejection on it, and
+// filter.ABVisible calls it
 // without going through LookupTrackerByHost, since its fail direction
 // inverts the lookup): every byte below utf8.RuneSelf is ASCII - 0x7F (DEL),
 // the last ASCII byte, passes - while 0x80 (utf8.RuneSelf itself, the first
@@ -142,8 +146,8 @@ func TestIsASCIIHost(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := IsASCIIHost(tc.host); got != tc.want {
-				t.Errorf("IsASCIIHost(%q) = %v, want %v", tc.host, got, tc.want)
+			if got := urlform.IsASCIIHost(tc.host); got != tc.want {
+				t.Errorf("urlform.IsASCIIHost(%q) = %v, want %v", tc.host, got, tc.want)
 			}
 		})
 	}

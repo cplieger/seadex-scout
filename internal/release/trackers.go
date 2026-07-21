@@ -3,7 +3,8 @@ package release
 import (
 	"net/url"
 	"strings"
-	"unicode/utf8"
+
+	"github.com/cplieger/urlform"
 )
 
 // Canonical tracker names: the Tracker.Name values of the table entries.
@@ -92,7 +93,7 @@ var trackerByHost = func() map[string]Tracker {
 // ("evilnyaa.si") nor a parent-domain spoof ("nyaa.si.evil.example")
 // survives the dot-delimited comparison. Two further fail-closed rules live
 // here so every consumer inherits them: a non-ASCII host never matches (see
-// IsASCIIHost - homograph territory), and an empty-labeled host (".nyaa.si",
+// urlform.IsASCIIHost - homograph territory), and an empty-labeled host (".nyaa.si",
 // "a..nyaa.si") is not a subdomain - no DNS name has an empty label, so only
 // a non-empty label chain counts (see hostMatchesDomain).
 func LookupTrackerByHost(host string) (Tracker, bool) {
@@ -103,7 +104,7 @@ func LookupTrackerByHost(host string) (Tracker, bool) {
 	// fail-closed non-ASCII rule. Folding an ASCII-verified string is a pure
 	// ASCII fold, so legitimate hosts are unaffected by the ordering.
 	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
-	if host == "" || !IsASCIIHost(host) {
+	if host == "" || !urlform.IsASCIIHost(host) {
 		return Tracker{}, false
 	}
 	host = strings.ToLower(host)
@@ -131,25 +132,6 @@ func hostMatchesDomain(host, domain string) bool {
 	}
 	for label := range strings.SplitSeq(prefix, ".") {
 		if label == "" {
-			return false
-		}
-	}
-	return true
-}
-
-// IsASCIIHost reports whether every byte of host is ASCII (below
-// utf8.RuneSelf). A non-ASCII host is homograph territory: browsers apply
-// UTS46 host mapping (a fullwidth U+FF0E or ideographic U+3002 dot becomes
-// '.', fullwidth letters fold to ASCII), so a host spelled
-// "animebytes<U+FF0E>tv" navigates to animebytes.tv while a byte-wise
-// comparison cannot see it. Every legitimate tracker host is ASCII, so
-// LookupTrackerByHost (and through it the Is*Host twins) rejects non-ASCII
-// hosts outright; this helper is exported for consumers whose fail direction
-// inverts the lookup (filter.ABVisible hides a release when its host is NOT
-// classifiable) so the ASCII rule keeps one home.
-func IsASCIIHost(host string) bool {
-	for i := range len(host) {
-		if host[i] >= utf8.RuneSelf {
 			return false
 		}
 	}

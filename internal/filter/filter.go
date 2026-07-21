@@ -9,6 +9,7 @@ package filter
 
 import (
 	"github.com/cplieger/seadex-scout/internal/release"
+	"github.com/cplieger/urlform"
 )
 
 // Options are the operator's content filters - exactly the set KeepNonTracker
@@ -73,24 +74,24 @@ func Obtainable(r *release.Release, rawURL, usableURL string, animeBytes bool) b
 // hidden conservatively; an empty host with ok=true means the URL carries no
 // host evidence at all (an empty string, a rooted relative path, or a
 // query/fragment-only form). The structural reading of the raw string lives
-// in the shared release.ClassifyRawURL (which canonicalizes backslashes the
+// in the shared urlform.Classify (which canonicalizes backslashes the
 // way browsers do, so a `/\animebytes.tv/x` form reads protocol-relative, not
 // as a host-less rooted path); this gate applies the extract-evidence-or-hide
 // policy over those facts - the inverse fail direction of the seadex
 // publisher's publish-or-drop over the same classifier.
 func hostFromRawURL(rawURL string) (string, bool) {
-	f := release.ClassifyRawURL(rawURL)
+	f := urlform.Classify(rawURL)
 	switch f.Class {
-	case release.URLFormEmpty, release.URLFormRelative:
+	case urlform.ClassEmpty, urlform.ClassRelative:
 		return "", true
-	case release.URLFormAbsolute:
+	case urlform.ClassAbsolute:
 		return f.Host, true
-	case release.URLFormProtocolRelative:
+	case urlform.ClassProtocolRelative:
 		// "//host/x" carries real host evidence; the three-or-more-slash form
 		// (a browser authority, a Go rooted path) has none and is ambiguous,
 		// so it hides conservatively rather than losing host evidence.
 		return f.Host, f.Host != ""
-	case release.URLFormSchemelessHost:
+	case urlform.ClassSchemelessHost:
 		// A schemeless absolute URL ("animebytes.tv/torrents.php?...") would
 		// bypass a naive host check; the classifier's authority reparse keeps
 		// the AnimeBytes host recognizable. A failed reparse means the host
@@ -99,7 +100,7 @@ func hostFromRawURL(rawURL string) (string, bool) {
 		// toggle is off.
 		return f.Host, !f.HostUnrecoverable
 	default:
-		// URLFormMalformed and URLFormHiddenHost ("https:/animebytes.tv/..."
+		// urlform.ClassMalformed and URLFormHiddenHost ("https:/animebytes.tv/..."
 		// parses as scheme + path, "animebytes.tv:443/..." as an opaque
 		// scheme, "https://:443/x" as a port-only authority) have hidden or
 		// destroyed their host evidence: hide conservatively.
@@ -132,8 +133,8 @@ func ABVisible(tracker, rawURL string, animeBytes bool) bool {
 	if !ok {
 		return false
 	}
-	if !release.IsASCIIHost(host) {
-		// A non-ASCII host is homoglyph territory (see release.IsASCIIHost,
+	if !urlform.IsASCIIHost(host) {
+		// A non-ASCII host is homoglyph territory (see urlform.IsASCIIHost,
 		// the one home of the ASCII rule): browsers navigate
 		// "animebytes<U+FF0E>tv" to animebytes.tv while a byte-wise check
 		// cannot see it. The shared tracker predicate rejects such hosts too,
@@ -172,7 +173,7 @@ func DefinitelyAB(tracker, rawURL string) bool {
 		return true
 	}
 	host, ok := hostFromRawURL(rawURL)
-	if !ok || host == "" || !release.IsASCIIHost(host) {
+	if !ok || host == "" || !urlform.IsASCIIHost(host) {
 		return false
 	}
 	return release.IsAnimeBytesHost(host)

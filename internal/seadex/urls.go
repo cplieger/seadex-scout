@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/cplieger/seadex-scout/internal/release"
+	"github.com/cplieger/urlform"
 )
 
 // DefaultBaseURL is the canonical releases.moe site base - the SINGLE home of
@@ -41,7 +42,7 @@ func EntryURL(baseURL string, aniListID int) string {
 // canonical host exists to vouch for it or make a relative path followable).
 //
 // The structural reading of the raw string - which of the browser-vs-net/url
-// parse-quirk forms it is - lives in the shared release.ClassifyRawURL; this
+// parse-quirk forms it is - lives in the shared urlform.Classify; this
 // publisher applies the publish-or-drop policy over those facts (where the
 // AnimeBytes toggle gate, filter.ABVisible, applies extract-evidence-or-hide
 // over the same facts). Malformed, hidden-host, and protocol-relative forms
@@ -49,7 +50,7 @@ func EntryURL(baseURL string, aniListID int) string {
 // protocol-relative URL ("//host/path") carries no scheme, yet a renderer
 // resolves it against the ambient scheme and navigates off-site.
 func (t *Torrent) UsableURL() string {
-	f := release.ClassifyRawURL(t.URL)
+	f := urlform.Classify(t.URL)
 	// Backslashes are rejected outright, even where the canonicalized reading
 	// classifies cleanly: browsers treat "\\host" as an authority even though
 	// url.Parse does not, and this publisher emits the raw string.
@@ -66,16 +67,16 @@ func (t *Torrent) UsableURL() string {
 		return ""
 	}
 	switch f.Class {
-	case release.URLFormAbsolute:
+	case urlform.ClassAbsolute:
 		if !usableAbsolute(&f) {
 			return ""
 		}
 		return f.Trimmed
-	case release.URLFormRelative:
+	case urlform.ClassRelative:
 		// In an href context a rooted path resolves tracker-relative, so it
 		// is published base-prefixed - subject to the colon rule.
 		return usableRelative(f.Trimmed, tr.BaseURL)
-	case release.URLFormSchemelessHost:
+	case urlform.ClassSchemelessHost:
 		// A schemeless value whose recovered authority IS a canonical
 		// tracker host ("animebytes.tv/torrents.php?...") is a mislabeled
 		// absolute URL, not a path: base-prefixing it under the LABELED
@@ -134,7 +135,7 @@ func usableRelative(raw, baseURL string) string {
 // All facts read here are the classifier's semantic fields (Scheme,
 // HasUserInfo, Port, Host), never the parser representation, which stays
 // private to the release package.
-func usableAbsolute(f *release.URLForm) bool {
+func usableAbsolute(f *urlform.Form) bool {
 	if !strings.EqualFold(f.Scheme, "http") &&
 		!strings.EqualFold(f.Scheme, "https") {
 		return false
