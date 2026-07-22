@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -208,9 +209,35 @@ func (ix *Indexer) authFailureLimiter() webhttp.Middleware {
 // tracker feed - /nyaa or /ab by path, or a nyaa.*/ab.* host; an unscoped
 // request is 404 (there is no combined feed). t=caps returns capabilities,
 // everything else proxies that tracker's Prowlarr endpoint filtered to SeaDex's
-// curation.
+// curation. serve is the top-down dispatcher reading in protocol order; each
+// response policy lives in its own helper.
 func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	if !ix.authorizeRequest(w, r, q) {
+		return
+	}
+	// Every authenticated caps/error/feed response is marked non-cacheable up
+	// front: the /ab RSS body embeds the operator's AnimeBytes passkey in its
+	// download links, and a browser, intermediary, or explicitly configured
+	// reverse-proxy cache must never retain that credential-bearing body
+	// beyond the request.
+	noCacheHeaders(w.Header())
+	scope, ok := ix.requireScope(w, r)
+	if !ok {
+		return
+	}
+	if ix.serveCaps(w, q, scope) {
+		return
+	}
+	if ix.rejectMissingABPasskey(w, q, scope) {
+		return
+	}
+	ix.serveQuery(w, r, q, scope)
+}
+
+// authorizeRequest applies serve's authentication policy and reports whether
+// the request may proceed; on rejection the response has been written.
+func (ix *Indexer) authorizeRequest(w http.ResponseWriter, r *http.Request, q url.Values) bool {
 	if ix.cfg.APIKey == "" {
 		// Fail closed at the handler too: Run already refuses to bind with an
 		// empty feed_api_key, so this branch is unreachable in production, but
@@ -223,7 +250,7 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 		// state as an unauthorized caller.
 		ix.log.Error("indexer request rejected", "reason", "feed_api_key not configured", "path", logParam(r.URL.Path))
 		http.Error(w, "service unavailable: feed_api_key not configured", http.StatusServiceUnavailable)
-		return
+		return false
 	}
 	// Constant-time verification, with the length side-channel (CWE-208)
 	// closed by comparing fixed-length SHA-256 digests rather than the raw
@@ -235,40 +262,58 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 		// domain line and its 401 are capped at the bucket's rate.
 		ix.log.Info("indexer request rejected", "reason", "bad apikey", "path", logParam(r.URL.Path), "remote", logParam(r.RemoteAddr))
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
+		return false
 	}
-	// Every authenticated caps/error/feed response is marked non-cacheable up
-	// front: the /ab RSS body embeds the operator's AnimeBytes passkey in its
-	// download links, and a browser, intermediary, or explicitly configured
-	// reverse-proxy cache must never retain that credential-bearing body
-	// beyond the request.
-	noCacheHeaders(w.Header())
+	return true
+}
+
+// requireScope resolves the request's tracker scope and reports whether one
+// was addressed; an unscoped request has been answered with the 404.
+func (ix *Indexer) requireScope(w http.ResponseWriter, r *http.Request) (string, bool) {
 	scope := scopeFor(r.Host, r.URL.Path)
 	if scope == "" {
 		ix.log.Info("indexer request rejected", "reason", "no tracker scope", "path", logParam(r.URL.Path), "host", logParam(r.Host), "remote", logParam(r.RemoteAddr))
 		http.Error(w, "not found: address a tracker feed at /nyaa or /ab", http.StatusNotFound)
-		return
+		return "", false
 	}
-	if strings.EqualFold(strings.TrimSpace(q.Get("t")), "caps") {
-		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-		_, _ = io.WriteString(w, renderCaps())
-		ix.log.Info("indexer request", "scope", scope, "t", "caps")
-		return
+	return scope, true
+}
+
+// serveCaps answers a t=caps capabilities request, reporting whether it
+// handled the request.
+func (ix *Indexer) serveCaps(w http.ResponseWriter, q url.Values, scope string) bool {
+	if !strings.EqualFold(strings.TrimSpace(q.Get("t")), "caps") {
+		return false
 	}
-	// The AnimeBytes RSS feed needs the operator's passkey to build grabbable
-	// links, so without it a configured /ab feed has nothing to serve a periodic
-	// RSS check (an empty-q request). Answer that with a Torznab error rather
-	// than an empty feed, so Prowlarr's save-test fails with a clear reason and
-	// the operator sets the passkey. An AB search (non-empty q) is unaffected:
-	// it proxies Prowlarr, whose own link needs no passkey. An UNCONFIGURED AB
-	// tracker (empty ab_torznab_url, the README's off switch) is not nudged: it
-	// falls through to the empty feed below, the same shape as a tracker with
-	// no data.
-	if scope == upstreamAB && ix.cfg.ABTorznabURL != "" && ix.cfg.ABPasskey == "" && strings.TrimSpace(q.Get("q")) == "" {
-		ix.rejectTorznab(w, scope, "ab passkey not configured", errCodeIncorrectCredentials,
-			"AnimeBytes passkey not configured: set indexer.ab_passkey in seadex-scout to serve the AnimeBytes feed")
-		return
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	_, _ = io.WriteString(w, renderCaps())
+	ix.log.Info("indexer request", "scope", scope, "t", "caps")
+	return true
+}
+
+// rejectMissingABPasskey applies serve's AB configuration guard, reporting
+// whether it rejected the request. The AnimeBytes RSS feed needs the
+// operator's passkey to build grabbable links, so without it a configured
+// /ab feed has nothing to serve a periodic RSS check (an empty-q request).
+// Answer that with a Torznab error rather than an empty feed, so Prowlarr's
+// save-test fails with a clear reason and the operator sets the passkey. An
+// AB search (non-empty q) is unaffected: it proxies Prowlarr, whose own link
+// needs no passkey. An UNCONFIGURED AB tracker (empty ab_torznab_url, the
+// README's off switch) is not nudged: it falls through to the empty feed
+// (see serveQuery), the same shape as a tracker with no data.
+func (ix *Indexer) rejectMissingABPasskey(w http.ResponseWriter, q url.Values, scope string) bool {
+	if scope != upstreamAB || ix.cfg.ABTorznabURL == "" || ix.cfg.ABPasskey != "" || strings.TrimSpace(q.Get("q")) != "" {
+		return false
 	}
+	ix.rejectTorznab(w, scope, "ab passkey not configured", errCodeIncorrectCredentials,
+		"AnimeBytes passkey not configured: set indexer.ab_passkey in seadex-scout to serve the AnimeBytes feed")
+	return true
+}
+
+// serveQuery runs the tracker query and renders the feed, translating the
+// two local-fault outcomes (snapshot unavailable, total upstream failure)
+// into Torznab errors, then logs the one INFO line per request.
+func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Values, scope string) {
 	items, stats := ix.query(r.Context(), q, scope)
 	// A snapshot-unavailable state (the persisted feed failed to load before
 	// any snapshot was installed - see snapFailed) is a local fault, not an

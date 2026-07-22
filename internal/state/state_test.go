@@ -244,7 +244,7 @@ func assertQuarantined(t *testing.T, path, wantBody string) {
 // st.Version after a decode error: a payload with a duplicate version key
 // ({"version":99,"version":"not-a-number"}) leaves the first numeric value in
 // the partially-populated State while json.Unmarshal fails on the later
-// duplicate. The independently decoded discriminator (newerSchemaVersion)
+// duplicate. The independently decoded discriminator (schemaVersion)
 // reads the wire's effective (last) value, classifies the file as corrupt -
 // not newer-schema - so it is quarantined and a following Save is NOT
 // blocked (the daemon persists instead of silently re-baselining every run).
@@ -269,7 +269,7 @@ func TestStoreLoadDuplicateVersionKeyQuarantines(t *testing.T) {
 }
 
 // TestStoreLoadTrailingGarbageAfterValidVersionQuarantines pins the
-// trailing-data rejection in newerSchemaVersion: a payload whose leading
+// trailing-data rejection in schemaVersion: a payload whose leading
 // object carries a valid newer version but is followed by trailing bytes
 // ({"version":99}x, or a second JSON document) is corruption, never
 // newer-schema state. Without the trailing check the poisoned file would be
@@ -310,7 +310,7 @@ func TestStoreLoadTrailingGarbageAfterValidVersionQuarantines(t *testing.T) {
 // ({"version":"bad","Version":99}), the effective (last, case-insensitive)
 // value is a valid 99, so a one-field whole-document unmarshal would classify
 // the corrupt payload as newer-schema state - leaving the poisoned bytes at
-// the live path and blocking every subsequent Save. newerSchemaVersion must
+// the live path and blocking every subsequent Save. schemaVersion must
 // validate every occurrence of the discriminator, classify the file as
 // corrupt, quarantine it, and leave Save unblocked.
 func TestStoreLoadEarlierInvalidDuplicateVersionQuarantines(t *testing.T) {
@@ -354,6 +354,44 @@ func TestStoreLoadNegativeVersionQuarantines(t *testing.T) {
 	assertQuarantined(t, path, body)
 	if saveErr := store.Save(context.Background(), &State{}); saveErr != nil {
 		t.Errorf("Save after quarantining a negative-version file failed: %v", saveErr)
+	}
+}
+
+// TestStoreLoadNullVersionQuarantines pins the wire discriminator's null
+// rejection: encoding/json deliberately accepts JSON null into an int without
+// an error, so {"version":null} would otherwise load as legacy version zero
+// (and could cold-baseline and overwrite the file), while
+// {"version":99,"version":null} would leave the stale earlier 99 in
+// State.Version and be preserved forever as newer-schema state. Save can
+// never produce either payload; both must quarantine as corruption with a
+// subsequent Save unblocked.
+func TestStoreLoadNullVersionQuarantines(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"null version", `{"version":null}`},
+		{"stale numeric before null duplicate", `{"version":99,"version":null}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			if err := os.WriteFile(path, []byte(tt.body), 0o600); err != nil {
+				t.Fatalf("write state: %v", err)
+			}
+			store := NewStore(path, testLogger())
+			_, err := store.Load(context.Background())
+			if err == nil {
+				t.Fatal("Load returned nil error, want decode error for a null version discriminator")
+			}
+			if strings.Contains(err.Error(), "newer than this binary supports") {
+				t.Errorf("error = %q, want plain decode error, not the newer-schema classification", err.Error())
+			}
+			assertQuarantined(t, path, tt.body)
+			if saveErr := store.Save(context.Background(), &State{}); saveErr != nil {
+				t.Errorf("Save after quarantining a null-version file failed: %v", saveErr)
+			}
+		})
 	}
 }
 

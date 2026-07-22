@@ -246,14 +246,16 @@ var ErrReportRunning = errors.New("another report is already running")
 // file is left in place on release (unlinking it would open a window where
 // two runs flock different inodes and both proceed) holding only the current
 // holder's acquisition timestamp.
+// Errors are stage-plus-redacted-cause only (redactPathErr): dir is the
+// secret-capable report.dir config value and these errors reach main's log.
 func AcquireReportLock(dir string) (func(), error) {
 	if err := os.MkdirAll(dir, reportDirMode); err != nil {
-		return nil, fmt.Errorf("audit: create report dir %s: %w", dir, err)
+		return nil, fmt.Errorf("audit: create report dir: %w", redactPathErr(dir, err))
 	}
 	path := filepath.Join(dir, reportLockName)
 	lock, ok, err := scheduler.TryLock(path)
 	if err != nil {
-		return nil, fmt.Errorf("audit: report lock %s: %w", path, err)
+		return nil, fmt.Errorf("audit: report lock %s: %w", reportLockName, redactPathErr(dir, err))
 	}
 	if !ok {
 		return nil, ErrReportRunning
@@ -270,6 +272,12 @@ func AcquireReportLock(dir string) (func(), error) {
 // silently replaced. The caller holds the report lock across the whole
 // generate+write, so the probe cannot race a concurrent writer.
 func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) error {
+	// dir is the secret-capable report.dir config value: every slog record
+	// below (including atomicfile's own WithLogger diagnostics) rides the
+	// redacting logger, and every returned error carries only the stage plus
+	// a redacted cause, so the expanded value never reaches Loki or main's
+	// error log. Filesystem calls keep the real path.
+	log = redactingLogger(log, dir)
 	// The signal context is one report-wide budget: check it before each
 	// stage (cleanup, stem probing, rendering, the two writes) so a shutdown
 	// stops the pipeline instead of spending its grace period on CPU-bound
@@ -288,7 +296,9 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	// not-yet-created dir is skipped silently: WriteFiles creates it at write
 	// time and it holds no temps to reap).
 	if _, err := atomicfile.CleanupStaleTemps(dir, time.Hour, atomicfile.WithLogger(log)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		log.Warn("stale report temp cleanup failed", "dir", dir, "error", err)
+		// No dir attribute: the redacting logger would mask it anyway, and
+		// the fixed message already identifies the location as report.dir.
+		log.Warn("stale report temp cleanup failed", "error", err)
 	}
 	base, err := reportPairStem(ctx, dir, r.GeneratedAt)
 	if err != nil {
@@ -312,15 +322,17 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 		return fmt.Errorf("audit: encode json: %w", err)
 	}
 	if err := writeAtomic(ctx, jsonPath, data, log); err != nil {
-		return fmt.Errorf("audit: write json %s: %w", jsonPath, err)
+		return fmt.Errorf("audit: write json %s: %w", filepath.Base(jsonPath), redactPathErr(dir, err))
 	}
 	if err := interrupted(ctx, "report markdown render"); err != nil {
 		return err
 	}
 	if err := writeAtomic(ctx, mdPath, []byte(renderMarkdown(safe)), log); err != nil {
-		return fmt.Errorf("audit: write markdown %s: %w", mdPath, err)
+		return fmt.Errorf("audit: write markdown %s: %w", filepath.Base(mdPath), redactPathErr(dir, err))
 	}
-	log.Info("report written", "markdown", mdPath, "json", jsonPath, "anime", len(r.Rows))
+	// Basenames only: the stem is timestamp-derived (never dir-derived), so
+	// the success record stays useful without shipping the directory value.
+	log.Info("report written", "markdown", filepath.Base(mdPath), "json", filepath.Base(jsonPath), "anime", len(r.Rows))
 	return nil
 }
 
@@ -363,7 +375,9 @@ func reportPairStem(ctx context.Context, dir string, generatedAt time.Time) (str
 				free = false
 				break
 			} else if !errors.Is(err, os.ErrNotExist) {
-				return "", fmt.Errorf("audit: probe report path %s: %w", path, err)
+				// Basename plus redacted cause only: this error reaches
+				// main's log and dir is the secret-capable report.dir value.
+				return "", fmt.Errorf("audit: probe report path %s: %w", filepath.Base(path), redactPathErr(dir, err))
 			}
 		}
 		if free {

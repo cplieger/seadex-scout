@@ -531,14 +531,31 @@ func (c *Config) validateIndexer() error {
 		c.infoDisabledIndexerKeys()
 		return nil
 	}
-	// The Torznab feed is served only by the daemon; a file-level report mode
-	// exits after the one-shot audit, so a configured feed silently never
-	// starts. Info, mirroring the other half-configuration signals: a
-	// deliberately parked indexer section must not raise Loki alert noise.
+	c.infoIndexerModeMismatch()
+	if err := c.validateIndexerEndpoints(); err != nil {
+		return err
+	}
+	c.warnIndexerEndpointProblems()
+	c.warnTorznabURLCredentials()
+	c.warnMissingProwlarrKey()
+	return nil
+}
+
+// infoIndexerModeMismatch signals a configured feed in report mode. The
+// Torznab feed is served only by the daemon; a file-level report mode exits
+// after the one-shot audit, so a configured feed silently never starts.
+// Info, mirroring the other half-configuration signals: a deliberately
+// parked indexer section must not raise Loki alert noise.
+func (c *Config) infoIndexerModeMismatch() {
 	if c.RunMode == RunModeReport {
 		slog.Info("indexer torznab urls are set but mode is report; " +
 			"the Torznab feed only runs in daemon mode and will not start")
 	}
+}
+
+// validateIndexerEndpoints enforces the feed's authentication requirement and
+// validates the two upstream Torznab URLs, in the original diagnostic order.
+func (c *Config) validateIndexerEndpoints() error {
 	if c.IndexerAPIKey == "" {
 		return errors.New("indexer.feed_api_key is required when indexer.nyaa_torznab_url or indexer.ab_torznab_url is set")
 	}
@@ -550,12 +567,22 @@ func (c *Config) validateIndexer() error {
 		slog.Warn("indexer.feed_api_key is shorter than 16 characters; it gates the " +
 			"AnimeBytes-passkey-bearing feed - generate a strong key (openssl rand -hex 16)")
 	}
-	if err := validateHTTPURL("indexer.nyaa_torznab_url", c.IndexerNyaaTorznabURL); err != nil {
-		return err
+	for _, endpoint := range []struct{ name, value string }{
+		{"indexer.nyaa_torznab_url", c.IndexerNyaaTorznabURL},
+		{"indexer.ab_torznab_url", c.IndexerABTorznabURL},
+	} {
+		if err := validateHTTPURL(endpoint.name, endpoint.value); err != nil {
+			return err
+		}
 	}
-	if err := validateHTTPURL("indexer.ab_torznab_url", c.IndexerABTorznabURL); err != nil {
-		return err
-	}
+	return nil
+}
+
+// warnIndexerEndpointProblems emits the warn/info diagnostics for suspicious
+// but runnable endpoint combinations: a pasted-twice shared endpoint and the
+// two AB passkey half-configurations. All field-name-only; never echo a URL
+// or secret.
+func (c *Config) warnIndexerEndpointProblems() {
 	// The two upstream URLs are per-indexer Prowlarr Torznab endpoints
 	// (/1/api vs /2/api); identical values are almost always a paste error.
 	// The AB matcher is torrent-id-only, so pointing it at a Nyaa endpoint
@@ -585,21 +612,22 @@ func (c *Config) validateIndexer() error {
 		slog.Info("indexer.ab_passkey is set but indexer.ab_torznab_url is empty; " +
 			"AnimeBytes is disabled and the passkey is unused (set indexer.ab_torznab_url to enable it)")
 	}
-	c.warnTorznabURLCredentials()
-	// A search proxies Prowlarr using indexer.prowlarr_api_key in the X-Api-Key
-	// header. An empty key is accepted rather than rejected (it is valid when
-	// Prowlarr has auth "Disabled for Local Addresses"), but the common case is a
-	// misconfiguration: Prowlarr then answers 401 for every proxied search, and
-	// the feed reports each one to the arr as a Torznab <error code="900">
-	// document (upstream query failed) rather than results. Warn so the operator
-	// gets a config-time signal without breaking the legitimate no-auth
-	// deployment.
+}
+
+// warnMissingProwlarrKey warns on an empty Prowlarr API key. A search proxies
+// Prowlarr using indexer.prowlarr_api_key in the X-Api-Key header. An empty
+// key is accepted rather than rejected (it is valid when Prowlarr has auth
+// "Disabled for Local Addresses"), but the common case is a misconfiguration:
+// Prowlarr then answers 401 for every proxied search, and the feed reports
+// each one to the arr as a Torznab <error code="900"> document (upstream
+// query failed) rather than results. Warn so the operator gets a config-time
+// signal without breaking the legitimate no-auth deployment.
+func (c *Config) warnMissingProwlarrKey() {
 	if c.IndexerProwlarrAPIKey == "" {
 		slog.Warn("indexer.prowlarr_api_key is empty; searches proxy Prowlarr with no API key - " +
 			"unless Prowlarr auth is disabled for local addresses they fail upstream (401) and " +
 			"every search answers the arr with a Torznab <error code=\"900\"> instead of results")
 	}
-	return nil
 }
 
 // infoDisabledIndexerKeys emits the half-configuration signal for indexer
@@ -646,7 +674,26 @@ func validateArrPair(name, rawURL, key string) error {
 	case key == "":
 		return fmt.Errorf("%s.url is set but %s.api_key is empty", name, name)
 	}
-	return validateHTTPURL(name+".url", rawURL)
+	if err := validateHTTPURL(name+".url", rawURL); err != nil {
+		return err
+	}
+	// arrapi's base-URL contract forbids a query: a non-empty query passes
+	// this load-time validation only to be rejected by arrapi.NewSonarr/
+	// NewRadarr with an error that echoes the full configured URL (and any
+	// credential-like query parameter with it), and a bare trailing '?'
+	// (ForceQuery) is accepted by arrapi but turns every appended API path
+	// into a query. Reject both here, field-name-only like the shared
+	// validator's branches, so the failure is early and never URL-echoing.
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		// Unreachable after validateHTTPURL parsed the same string; kept for
+		// the same field-name-only posture rather than a panic.
+		return fmt.Errorf("%s is not a valid URL", name)
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return fmt.Errorf("%s.url must not contain a query", name)
+	}
+	return nil
 }
 
 // validateHTTPURL rejects a non-empty rawURL that is not an absolute http(s) URL
@@ -677,7 +724,11 @@ func validateHTTPURL(name, rawURL string) error {
 	// an out-of-range port passes parsing but fails every later dial. Both
 	// must fail at startup, not at first request.
 	// Errors stay field-name-only, matching the branches above.
-	if u.Fragment != "" {
+	// The raw string is scanned for the literal delimiter because u.Fragment
+	// misses a bare trailing '#' (an empty fragment parses to ""), yet arrapi
+	// would still append its API path after that delimiter as fragment data
+	// and send every request to '/'. An encoded %23 remains valid path data.
+	if strings.Contains(rawURL, "#") {
 		return fmt.Errorf("%s must not contain a URL fragment", name)
 	}
 	if port := u.Port(); port != "" {

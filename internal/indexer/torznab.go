@@ -393,49 +393,131 @@ func (x *itemXML) UnmarshalXML(d *xml.Decoder, _ xml.StartElement) error {
 	}
 }
 
-// decodeChild decodes and validates one child element of an <item>. Each
-// recognized scalar field is bounded as it decodes; an <attr> is rejected
-// BEFORE decoding once the per-item attr cap is reached, so the cap bounds
-// the allocation instead of merely reporting it; unknown children are
-// skipped.
+// decodeChild decodes and validates one child element of an <item>: the
+// plain string scalars route through stringField's destination lookup, the
+// remaining recognized children keep their dedicated decoders, and unknown
+// children are skipped. Each recognized field is bounded as it decodes; an
+// <attr> is rejected BEFORE decoding once the per-item attr cap is reached,
+// so the cap bounds the allocation instead of merely reporting it.
 func (x *itemXML) decodeChild(d *xml.Decoder, t xml.StartElement) error {
+	if dst := x.stringField(t.Name.Local); dst != nil {
+		return x.decodeField(d, t, dst)
+	}
 	switch t.Name.Local {
 	case "title":
 		return x.decodeUntrustedField(d, t, &x.Title)
-	case "guid":
-		return x.decodeField(d, t, &x.GUID)
-	case "comments":
-		return x.decodeField(d, t, &x.Comments)
-	case "link":
-		return x.decodeField(d, t, &x.Link)
-	case "pubDate":
-		return x.decodeField(d, t, &x.PubDate)
 	case "size":
-		return d.DecodeElement(&x.Size, &t)
+		return x.decodeSizeField(d, t)
 	case "enclosure":
-		if err := d.DecodeElement(&x.Enclosure, &t); err != nil {
-			return err
-		}
-		return x.account(x.Enclosure.URL)
+		return x.decodeEnclosure(d, t)
 	case "attr":
 		if len(x.Attrs) >= maxUpstreamAttrs {
 			return &torznabLimitError{limit: fmt.Sprintf("more than %d attrs on one item", maxUpstreamAttrs)}
 		}
-		var a attrXML
-		if err := d.DecodeElement(&a, &t); err != nil {
-			return err
-		}
-		if err := x.account(a.Name); err != nil {
-			return err
-		}
-		if err := x.account(a.Value); err != nil {
-			return err
-		}
-		x.Attrs = append(x.Attrs, a)
-		return nil
+		return x.decodeAttr(d, t)
 	default:
 		return d.Skip()
 	}
+}
+
+// stringField maps a recognized plain string child element to its
+// destination field, or nil for anything needing more than decodeField's
+// bounded string decode (the untrusted title, the numeric size, the two
+// structured children).
+func (x *itemXML) stringField(name string) *string {
+	switch name {
+	case "guid":
+		return &x.GUID
+	case "comments":
+		return &x.Comments
+	case "link":
+		return &x.Link
+	case "pubDate":
+		return &x.PubDate
+	default:
+		return nil
+	}
+}
+
+// decodeSizeField decodes the <size> child: bounded text first, numeric
+// conversion second - decoding straight into the int64 would let a
+// multi-megabyte <size> text bypass the per-field cap and the cumulative
+// budget entirely (the conversion error, when it came, arrived only after
+// the allocation).
+func (x *itemXML) decodeSizeField(d *xml.Decoder, t xml.StartElement) error {
+	var s string
+	if err := d.DecodeElement(&s, &t); err != nil {
+		return err
+	}
+	n, err := x.boundedInt64(s)
+	if err != nil {
+		return err
+	}
+	x.Size = n
+	return nil
+}
+
+// decodeEnclosure reads an <enclosure>'s recognized attributes off its start
+// element, bounding and accounting each retained value BEFORE it is parsed or
+// stored. The struct decode it replaces materialized the attributes first and
+// accounted only the URL afterwards, leaving the length text outside the
+// budget; here the same accounting helper covers every recognized field. The
+// element body is skipped whole (Torznab enclosures are attribute-only).
+func (x *itemXML) decodeEnclosure(d *xml.Decoder, t xml.StartElement) error {
+	var enc enclosureXML
+	for _, a := range t.Attr {
+		switch a.Name.Local {
+		case "url":
+			if err := x.account(a.Value); err != nil {
+				return err
+			}
+			enc.URL = a.Value
+		case "length":
+			n, err := x.boundedInt64(a.Value)
+			if err != nil {
+				return err
+			}
+			enc.Length = n
+		}
+	}
+	x.Enclosure = enc
+	return d.Skip()
+}
+
+// decodeAttr reads one <torznab:attr>'s name/value off its start element,
+// bounding and accounting both retained fields before they are stored (the
+// struct decode it replaces materialized them first and accounted after).
+// The element body is skipped whole (attr elements are attribute-only).
+func (x *itemXML) decodeAttr(d *xml.Decoder, t xml.StartElement) error {
+	var a attrXML
+	for _, at := range t.Attr {
+		switch at.Name.Local {
+		case "name":
+			if err := x.account(at.Value); err != nil {
+				return err
+			}
+			a.Name = at.Value
+		case "value":
+			if err := x.account(at.Value); err != nil {
+				return err
+			}
+			a.Value = at.Value
+		}
+	}
+	x.Attrs = append(x.Attrs, a)
+	return d.Skip()
+}
+
+// boundedInt64 bounds and accounts one numeric text value through the same
+// accounting helper as the string fields, then parses it, so an oversized
+// numeric field is charged against the item's budget (and capped) before
+// strconv ever sees it. TrimSpace mirrors encoding/xml's own numeric
+// conversion.
+func (x *itemXML) boundedInt64(s string) (int64, error) {
+	if err := x.account(s); err != nil {
+		return 0, err
+	}
+	return strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 }
 
 // decodeField decodes one text child into dst, bounding and accounting it.
@@ -543,6 +625,29 @@ func torznabCodeNum(code string) int {
 	return n
 }
 
+// parseErrorDocument strictly parses a Newznab/Torznab <error> document (the
+// errorXML XMLName only accepts an <error> root), bounding its code and
+// description to maxUpstreamFieldBytes BEFORE an upstreamDocError retains
+// them: the previous unrestricted unmarshal let a compromised upstream park
+// up to the 16 MiB transport cap in the retained error strings, which the
+// retry loop then redacted and logged on every attempt. The bound REJECTS an
+// over-cap document (ok=false; the caller reports the generic parse failure,
+// whose classify path redacts then bounds) rather than truncating it, which
+// preserves the redact-before-sanitize ordering: the retained fields stay
+// RAW and untruncated so fetchAndParse's exact-substring API-key redaction
+// always sees the intact key, and Error() remains the sanitizing emit
+// boundary.
+func parseErrorDocument(body []byte) (*upstreamDocError, bool) {
+	var e errorXML
+	if xml.Unmarshal(body, &e) != nil {
+		return nil, false
+	}
+	if len(e.Code) > maxUpstreamFieldBytes || len(e.Description) > maxUpstreamFieldBytes {
+		return nil, false
+	}
+	return newUpstreamDocError(e.Code, e.Description), true
+}
+
 func (e *upstreamDocError) Error() string {
 	return fmt.Sprintf("upstream torznab error code=%s: %s",
 		sanitizeUpstreamText(e.code), sanitizeUpstreamText(e.description))
@@ -578,13 +683,8 @@ func parseTorznab(body []byte) ([]item, error) {
 		if limitErr, ok := errors.AsType[*torznabLimitError](err); ok {
 			return nil, limitErr
 		}
-		var e errorXML
-		if xml.Unmarshal(body, &e) == nil {
-			// Raw fields; Error() sanitizes at the emit boundary so the key
-			// redaction in fetchAndParse sees the untruncated text (cap-before-
-			// redact would let a boundary-straddling key prefix escape the
-			// exact-substring replacement).
-			return nil, newUpstreamDocError(e.Code, e.Description)
+		if docErr, ok := parseErrorDocument(body); ok {
+			return nil, docErr
 		}
 		return nil, fmt.Errorf("parse torznab feed: %w", err)
 	}

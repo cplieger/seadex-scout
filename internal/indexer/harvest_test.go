@@ -527,6 +527,65 @@ func TestHarvestPagesNyaaByOffset(t *testing.T) {
 	}
 }
 
+// TestHarvestResumesPagingAcrossRebuilds pins the checkpoint's per-group page
+// state (the deep-paging contract): a show whose curated torrent sits beyond
+// the first harvestShowPageCap full pages is cut off at the cap on rebuild
+// one - which must persist the next page in the harvest cursor - and rebuild
+// two must resume that group at the checkpointed offset (300, not a restart
+// at zero) and cache the title, clearing the page state once satisfied.
+func TestHarvestResumesPagingAcrossRebuilds(t *testing.T) {
+	filler := make([]string, 0, harvestPageSize)
+	for i := range harvestPageSize {
+		filler = append(filler, torznabItem(fmt.Sprintf("Other %d", i), "https://nyaa.si/view/"+strconv.Itoa(9000+i)))
+	}
+	mock, srv := newHarvestMock(func(call int) string {
+		if call < harvestShowPageCap {
+			return torznabBody(filler...)
+		}
+		return torznabBody(torznabItem("Show S01 1080p BluRay [G]", "https://nyaa.si/view/42"))
+	})
+	defer srv.Close()
+
+	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv", "Show - S01E02 (1080p) [G].mkv")}
+	info := func(int) EntryInfo { return EntryInfo{Title: "Show", SeasonTvdb: 1} }
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+		Deps{HTTP: srv.Client()})
+
+	if err := w.Rebuild(context.Background(), entries, info); err != nil {
+		t.Fatalf("first Rebuild: %v", err)
+	}
+	if mock.calls() != harvestShowPageCap {
+		t.Fatalf("first-rebuild queries = %d, want %d (offsets 0/100/200)", mock.calls(), harvestShowPageCap)
+	}
+	snap := readSnapshotFile(t, path)
+	cp := decodeHarvestCheckpoint(snap.HarvestCursor)
+	if got := cp.Pages["nyaa:7"]; got != harvestShowPageCap {
+		t.Fatalf("checkpointed page = %d (cursor %q), want %d preserved for the cut-off group", got, snap.HarvestCursor, harvestShowPageCap)
+	}
+	if len(snap.Titles) != 0 {
+		t.Fatalf("titles = %v, want empty after the capped first rebuild", snap.Titles)
+	}
+
+	if err := w.Rebuild(context.Background(), entries, info); err != nil {
+		t.Fatalf("second Rebuild: %v", err)
+	}
+	if mock.calls() != harvestShowPageCap+1 {
+		t.Fatalf("total queries = %d, want %d (rebuild two resumes with one deeper page)", mock.calls(), harvestShowPageCap+1)
+	}
+	if off, want := mock.request(harvestShowPageCap)["offset"], strconv.Itoa(harvestShowPageCap*harvestPageSize); off != want {
+		t.Errorf("resumed page offset = %q, want %q (resume deeper, not a restart at zero)", off, want)
+	}
+	snap = readSnapshotFile(t, path)
+	if snap.Titles["nyaa:42"] != "Show S01 1080p BluRay [G]" {
+		t.Errorf("titles = %v, want the deep-page match cached on rebuild two", snap.Titles)
+	}
+	if cp := decodeHarvestCheckpoint(snap.HarvestCursor); len(cp.Pages) != 0 {
+		t.Errorf("checkpoint pages = %v, want empty once the group is satisfied", cp.Pages)
+	}
+}
+
 // TestHarvestMatchesNyaaByInfoHash pins the info-hash arm of the harvest
 // match (the documented secondary identity): a Prowlarr result whose page
 // URLs identify no tracker (a mirror/foreign host) still matches the pending

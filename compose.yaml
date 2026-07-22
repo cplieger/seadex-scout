@@ -4,6 +4,8 @@ services:
     image: ghcr.io/cplieger/seadex-scout:latest
     container_name: seadex-scout
     restart: unless-stopped
+    # Before first start, run `mkdir -p ./config` as the host user matching this
+    # UID:GID: a Docker-created bind source is root-owned and unwritable to 1000:1000.
     user: "1000:1000"  # match your host user (owns ./config)
 
     # See README "Configuration"; config.yaml expands these .env-backed secret variables.
@@ -13,6 +15,6 @@ services:
       SEADEX_SCOUT_PROWLARR_KEY: "${SEADEX_SCOUT_PROWLARR_KEY:-}"
       SEADEX_SCOUT_AB_PASSKEY: "${SEADEX_SCOUT_AB_PASSKEY:-}"
     volumes:
-      # First boot with no config.yaml writes a commented starter here and exits;
-      # edit it and restart (README "Configuration").
+      # No config.yaml: writes a starter, exits, and unless-stopped retries.
+      # Edit the host-owned starter; the next retry starts automatically.
       - "./config:/config"  # holds config.yaml, state, and the reports dir

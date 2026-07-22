@@ -1,10 +1,52 @@
 package mapping
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 )
+
+// TestParseOverrides_boundsUnknownKeyRetention pins the diagnostic-state
+// bound for a many-row, all-skipped input: rows discarded for a non-positive
+// anilist_id are exempt from the effective-record and per-record ID caps, so
+// a valid sub-cap file of such rows with distinct unknown keys must not
+// amplify into unbounded retained key strings. The parser retains at most
+// maxRetainedUnknownKeys distinct keys (arrival order, per-record sorted),
+// marks the overflow, and still processes the whole file.
+func TestParseOverrides_boundsUnknownKeyRetention(t *testing.T) {
+	total := maxRetainedUnknownKeys + 50
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := range total {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"anilist_id":0,"unknown_%03d":1}`, i)
+	}
+	b.WriteByte(']')
+
+	set, err := parseOverrides([]byte(b.String()))
+	if err != nil {
+		t.Fatalf("parseOverrides error: %v", err)
+	}
+	if len(set.unknown) != maxRetainedUnknownKeys {
+		t.Errorf("retained unknown keys = %d, want the bound %d", len(set.unknown), maxRetainedUnknownKeys)
+	}
+	if !set.unknownOverflow {
+		t.Error("unknownOverflow = false, want true past the retention bound")
+	}
+	if set.skipped != total {
+		t.Errorf("skipped = %d, want %d (every row discarded, none rejected)", set.skipped, total)
+	}
+	want := make([]string, 0, maxRetainedUnknownKeys)
+	for i := range maxRetainedUnknownKeys {
+		want = append(want, fmt.Sprintf("unknown_%03d", i))
+	}
+	if !slices.Equal(set.unknown, want) {
+		t.Errorf("retained unknown keys = %v, want the first %d in arrival order", set.unknown, maxRetainedUnknownKeys)
+	}
+}
 
 func TestRecord_IsMovie(t *testing.T) {
 	if !(&Record{Type: "MOVIE"}).IsMovie() {
@@ -171,12 +213,13 @@ func TestParseOverridesAcceptsCaseVariantKeys(t *testing.T) {
 }
 
 // TestNewIndex_ignoresZeroAndKeepsLastDuplicate pins the public NewIndex
-// contract consumers rely on: zero AniList IDs are omitted (unkeyable) and
-// the last duplicate wins, so upstream ordering cannot silently retain a
-// stale record.
+// contract consumers rely on: non-positive AniList IDs are omitted
+// (unkeyable; real AniList IDs are positive) and the last duplicate wins, so
+// upstream ordering cannot silently retain a stale record.
 func TestNewIndex_ignoresZeroAndKeepsLastDuplicate(t *testing.T) {
 	idx := NewIndex([]Record{
 		{AniListID: 0, Type: "TV", TvdbID: 99},
+		{AniListID: -7, Type: "TV", TvdbID: 77},
 		{AniListID: 42, Type: "TV", TvdbID: 100},
 		{AniListID: 42, Type: "TV", TvdbID: 200},
 	})
@@ -193,6 +236,9 @@ func TestNewIndex_ignoresZeroAndKeepsLastDuplicate(t *testing.T) {
 	}
 	if _, ok := idx.Lookup(0); ok {
 		t.Error("NewIndex retained zero AniList ID")
+	}
+	if _, ok := idx.Lookup(-7); ok {
+		t.Error("NewIndex retained negative AniList ID")
 	}
 }
 

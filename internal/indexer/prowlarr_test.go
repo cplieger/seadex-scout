@@ -545,3 +545,42 @@ func TestSearchRejectsUnparseableUpstreamURLs(t *testing.T) {
 		}
 	})
 }
+
+// TestUpstreamSearchStatusErrorOmitsUserinfoAndQuery pins the status-error
+// sanitization of the Prowlarr proxy: a configured Torznab endpoint may carry
+// a username-only userinfo token (which validateHTTPURL accepts) and an
+// apikey query value, and pinned httpx's StatusError redactor preserves the
+// username - so on a non-2xx response fetchAndParse must construct the
+// StatusError from a clone stripped of userinfo, query, and fragment before
+// the error reaches httpx.Do's retry logger and the harvest WARN (CWE-532).
+func TestUpstreamSearchStatusErrorOmitsUserinfoAndQuery(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	feed := strings.Replace(srv.URL, "http://", "http://secret-token@", 1) + "/1/api?apikey=secret-value"
+	log, rec := capture.New()
+	u := &upstream{http: srv.Client(), log: log, name: upstreamNyaa, feed: feed}
+	_, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+	if err == nil {
+		t.Fatal("search against a 404 endpoint returned nil error")
+	}
+	for _, secret := range []string{"secret-token", "secret-value"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("returned status error leaks %q: %v", secret, err)
+		}
+		for _, line := range renderedLogRecords(rec) {
+			if strings.Contains(line, secret) {
+				t.Errorf("log record leaks %q: %q", secret, line)
+			}
+		}
+	}
+	var statusErr *httpx.StatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("error = %T (%v), want *httpx.StatusError", err, err)
+	}
+	if statusErr.Code != http.StatusNotFound {
+		t.Errorf("StatusError.Code = %d, want 404", statusErr.Code)
+	}
+}

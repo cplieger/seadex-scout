@@ -25,8 +25,9 @@ const (
 // torrent (keyed by pairKey), so lookup can prove an item's two identity
 // signals name one release rather than two same-marker ones. A nil byPair is
 // a legacy snapshot persisted before the pair relation existed; lookup then
-// falls back to the per-signal agreement gate until the next cycle rewrites
-// the snapshot.
+// FAILS CLOSED for items carrying both signals (the relation cannot be
+// proven) while single-signal matching keeps working, until the next cycle
+// rewrites the snapshot with the relation.
 type curation struct {
 	byHash map[string]bool
 	byKey  map[string]bool
@@ -93,12 +94,19 @@ func (c *curation) lookup(scope, hash, infoURL, guid string) (isBest, matched bo
 		return false, false
 	}
 	// Both signals present and individually curated: require the persisted
-	// pair relation to prove they belong to one release. A nil byPair is a
-	// legacy snapshot written before the relation was persisted (an upgraded
-	// resident server still serving the old file); the per-signal checks
-	// above remain the gate until the next cycle rewrites the snapshot.
-	if h != "" && key != "" && c.byPair != nil && !c.byPair[pairKey(h, key)] {
-		return false, false
+	// pair relation to prove they belong to one release. A nil byPair (a
+	// legacy snapshot written before the relation was persisted - an
+	// upgraded resident server still serving the old file) fails closed
+	// too: absence of the relation that proves co-membership is not
+	// permission to fall back to the weaker per-signal checks, which would
+	// admit torrent A's hash cross-wired with torrent B's key whenever both
+	// share a best/alt bit. Single-signal legacy matching (hash-only Nyaa,
+	// key-only AB) is unaffected, and the next cycle's snapshot rewrite
+	// restores dual-signal matching.
+	if h != "" && key != "" {
+		if c.byPair == nil || !c.byPair[pairKey(h, key)] {
+			return false, false
+		}
 	}
 	return match.isBest, match.matched
 }

@@ -18,7 +18,7 @@ import (
 const (
 	feedDirMode = 0o755
 	// feed.json is persisted GUID-only - AB items carry no passkey-bearing
-	// download URL (see stripABDownloadURLs) - but it stays owner-only as
+	// download URL (see stripDownloadURLs) - but it stays owner-only as
 	// defense in depth for that invariant, and a legacy snapshot may still
 	// embed a passkey until the first rebuild scrubs it. The daemon and the
 	// `poll` subcommand both run as the same container user, so 0o600 stays
@@ -302,15 +302,14 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info f
 // persist atomically writes the snapshot, mirroring the reader's size bound
 // before committing: a snapshot the reload would reject must not replace the
 // last-good file, or the next restart starts with an empty feed. It first
-// strips BOTH feeds' download URLs (stripABDownloadURLs /
-// stripNyaaDownloadURLs) so no passkey is ever serialized and the snapshot
-// stays GUID-only for fetch targets: the reader re-derives every served link
-// from the item's tracker page URL on load. The wholesale Nyaa strip also
-// scrubs an AB-scoped item misplaced in the Nyaa feed, so a scope mismatch
-// cannot leak a passkey either.
+// strips BOTH feeds' download URLs (stripDownloadURLs) so no passkey is ever
+// serialized and the snapshot stays GUID-only for fetch targets: the reader
+// re-derives every served link from the item's tracker page URL on load. The
+// wholesale Nyaa strip also scrubs an AB-scoped item misplaced in the Nyaa
+// feed, so a scope mismatch cannot leak a passkey either.
 func (w *FeedWriter) persist(ctx context.Context, snap *snapshot) error {
-	stripABDownloadURLs(snap.ABFeed)
-	stripNyaaDownloadURLs(snap.NyaaFeed)
+	stripDownloadURLs(snap.ABFeed)
+	stripDownloadURLs(snap.NyaaFeed)
 	data, err := json.Marshal(snap)
 	if err != nil {
 		return fmt.Errorf("indexer: encode feed snapshot: %w", err)
@@ -326,31 +325,21 @@ func (w *FeedWriter) persist(ctx context.Context, snap *snapshot) error {
 	return nil
 }
 
-// stripABDownloadURLs blanks every AnimeBytes feed item's download URL before
-// persistence: an AB download link embeds the operator's passkey, and the
-// snapshot must stay GUID-only so /config/feed.json never holds that
-// credential at rest. Nothing is lost - the server re-derives each served AB
-// link from the item's non-secret tracker page URL (the GUID) and the
-// currently configured passkey on every load (see rebuildABDownloadURLs) -
-// and running at the persist choke point also scrubs a legacy snapshot whose
-// carried items still embed a passkey on the first rebuild over it.
-func stripABDownloadURLs(feed []journalItem) {
-	for i := range feed {
-		feed[i].DownloadURL = ""
-	}
-}
-
-// stripNyaaDownloadURLs blanks every Nyaa feed item's download URL before
-// persistence, mirroring stripABDownloadURLs: the Nyaa link is public and
-// carries no credential, but keeping the snapshot GUID-only for fetch targets
-// on BOTH feeds means /config/feed.json is never authoritative for what the
-// arrs download - the reader re-derives each served Nyaa link from the item's
-// tracker page URL on load (see rebuildNyaaDownloadURLs), so a tampered
-// snapshot cannot plant an arbitrary fetch target. Blanking the whole feed
-// also subsumes the key-scoped scrub of an ab:-keyed item a legacy or
-// corrupted snapshot misplaced in nyaa_feed (its passkey-bearing link is
-// blanked with everything else).
-func stripNyaaDownloadURLs(feed []journalItem) {
+// stripDownloadURLs blanks every feed item's download URL before persistence:
+// BOTH feeds are GUID-only at rest. For AnimeBytes the download link embeds
+// the operator's passkey, and the snapshot must stay GUID-only so
+// /config/feed.json never holds that credential at rest; running at the
+// persist choke point also scrubs a legacy snapshot whose carried items still
+// embed a passkey on the first rebuild over it. The Nyaa link is public and
+// carries no credential, but keeping fetch targets GUID-only on BOTH feeds
+// means /config/feed.json is never authoritative for what the arrs download -
+// a tampered snapshot cannot plant an arbitrary fetch target - and blanking
+// the whole Nyaa feed subsumes the key-scoped scrub of an ab:-keyed item a
+// legacy or corrupted snapshot misplaced in nyaa_feed. Nothing is lost: the
+// server re-derives each served link from the item's non-secret tracker page
+// URL (the GUID) on every load (see rebuildABDownloadURLs /
+// rebuildNyaaDownloadURLs).
+func stripDownloadURLs(feed []journalItem) {
 	for i := range feed {
 		feed[i].DownloadURL = ""
 	}
@@ -384,22 +373,7 @@ type previousJournal struct {
 func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) {
 	data, err := atomicfile.ReadBounded(ctx, w.path, maxFeedBytes)
 	if err != nil {
-		switch {
-		case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):
-			return previousJournal{baseline: true, reason: "fresh-install"}, nil
-		case errors.Is(err, atomicfile.ErrFileTooLarge):
-			// Deterministic, not transient: persist enforces the same
-			// maxFeedBytes cap, so an over-cap snapshot can only come from
-			// external corruption or hand-editing and never shrinks on its
-			// own - returning an error here would wedge every future rebuild
-			// on the same file. Treat it like malformed JSON: warn and
-			// re-baseline; the rebuild's persist atomically replaces the
-			// oversized file, so the state self-heals.
-			w.log.Warn("previous feed snapshot exceeds size cap; re-baselining the feed journal",
-				"path", w.path, "max_bytes", int64(maxFeedBytes))
-			return previousJournal{baseline: true, reason: "oversized"}, nil
-		}
-		return previousJournal{}, fmt.Errorf("indexer: read previous feed snapshot %s: %w", w.path, err)
+		return w.classifyPreviousReadError(err)
 	}
 	snap, structReason, decodeErr := decodeSnapshot(data)
 	if decodeErr != nil {
@@ -413,17 +387,15 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 			"path", w.path, "reason", structReason)
 		return previousJournal{baseline: true, reason: reasonMalformed}, nil
 	}
-	for k, t := range snap.Titles {
-		if len(k) > maxPersistedFieldBytes || len(t) > maxPersistedFieldBytes {
-			// The titles cache is an ingress of its own: applyTitles overwrites
-			// carried items' titles AFTER renderJournalItem's creation-time
-			// check, so an over-limit cached title would let a rebuild persist
-			// a snapshot the server's reload rejects. The value itself is never
-			// logged: it can be attacker-shaped multi-megabyte text.
-			w.log.Warn("previous feed snapshot malformed; re-baselining the feed journal",
-				"path", w.path, "reason", "cached title exceeds persisted-item limits")
-			return previousJournal{baseline: true, reason: reasonMalformed}, nil
-		}
+	if !titleCacheWithinLimits(snap.Titles) {
+		// The titles cache is an ingress of its own: applyTitles overwrites
+		// carried items' titles AFTER renderJournalItem's creation-time
+		// check, so an over-limit cached title would let a rebuild persist
+		// a snapshot the server's reload rejects. The value itself is never
+		// logged: it can be attacker-shaped multi-megabyte text.
+		w.log.Warn("previous feed snapshot malformed; re-baselining the feed journal",
+			"path", w.path, "reason", "cached title exceeds persisted-item limits")
+		return previousJournal{baseline: true, reason: reasonMalformed}, nil
 	}
 	if snap.Seen == nil {
 		return previousJournal{baseline: true, reason: "pre-journal-schema"}, nil
@@ -439,6 +411,42 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 		titles:   titles,
 		cursor:   snap.HarvestCursor,
 	}, nil
+}
+
+// classifyPreviousReadError is loadPrevious's transient-versus-baseline
+// decision for a snapshot read failure. A missing file (or a path whose
+// parent is not a directory) is the fresh-install baseline. An over-cap file
+// is deterministic, not transient: persist enforces the same maxFeedBytes
+// cap, so an over-cap snapshot can only come from external corruption or
+// hand-editing and never shrinks on its own - returning an error there would
+// wedge every future rebuild on the same file. Treat it like malformed JSON:
+// warn and re-baseline; the rebuild's persist atomically replaces the
+// oversized file, so the state self-heals. Any other read failure (EACCES,
+// EIO) is returned as an error so a TRANSIENT fault cannot blank a live
+// journal.
+func (w *FeedWriter) classifyPreviousReadError(err error) (previousJournal, error) {
+	switch {
+	case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):
+		return previousJournal{baseline: true, reason: "fresh-install"}, nil
+	case errors.Is(err, atomicfile.ErrFileTooLarge):
+		w.log.Warn("previous feed snapshot exceeds size cap; re-baselining the feed journal",
+			"path", w.path, "max_bytes", int64(maxFeedBytes))
+		return previousJournal{baseline: true, reason: "oversized"}, nil
+	default:
+		return previousJournal{}, fmt.Errorf("indexer: read previous feed snapshot %s: %w", w.path, err)
+	}
+}
+
+// titleCacheWithinLimits reports whether every harvested-title cache entry
+// (key and title alike) respects maxPersistedFieldBytes (see loadPrevious's
+// ingress check for why the cache is validated separately).
+func titleCacheWithinLimits(titles map[string]string) bool {
+	for k, title := range titles {
+		if len(k) > maxPersistedFieldBytes || len(title) > maxPersistedFieldBytes {
+			return false
+		}
+	}
+	return true
 }
 
 // warnedSet is the curation-warned exclusion set splitCurationWarned builds

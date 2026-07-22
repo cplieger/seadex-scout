@@ -189,34 +189,38 @@ func NewIndex(records []Record) *Index {
 
 // deduplicateRecords returns one effective record per AniList ID while
 // preserving buildIndex's existing last-record-wins semantics and stable order.
-// Records with a zero AniList ID are omitted: buildIndex drops them, so keeping
-// them here would let cacheUsable and the acceptance validators count a larger
-// population (rows and arr identifiers) than the effective served index.
-// acceptRefresh runs it before the acceptance invariants so row counts and
-// identifier coverage measure the AniList-keyed dataset consumers actually
-// receive, not the transport representation.
+// Records without a positive AniList ID are omitted: buildIndex drops them
+// (real AniList IDs are positive, the same contract overrideSet.applyRecord
+// enforces), so keeping them here would let cacheUsable and the acceptance
+// validators count a larger population (rows and arr identifiers) than the
+// effective served index. acceptRefresh runs it before the acceptance
+// invariants so row counts and identifier coverage measure the AniList-keyed
+// dataset consumers actually receive, not the transport representation.
 func deduplicateRecords(records []Record) []Record {
 	last := make(map[int]int, len(records))
 	for i := range records {
-		if records[i].AniListID != 0 {
+		if records[i].AniListID > 0 {
 			last[records[i].AniListID] = i
 		}
 	}
 	out := make([]Record, 0, len(last))
 	for i := range records {
-		if records[i].AniListID != 0 && last[records[i].AniListID] == i {
+		if records[i].AniListID > 0 && last[records[i].AniListID] == i {
 			out = append(out, records[i])
 		}
 	}
 	return out
 }
 
-// buildIndex keys records by AniList ID. A later record with the same AniList
-// ID overwrites an earlier one (overrides are applied on top afterwards).
+// buildIndex keys records by AniList ID, admitting only positive IDs (the
+// same positive-key contract overrideSet.applyRecord enforces; real SeaDex
+// lookups use positive AniList IDs, so a zero or negative key could never
+// resolve an entry). A later record with the same AniList ID overwrites an
+// earlier one (overrides are applied on top afterwards).
 func buildIndex(records []Record) *Index {
 	byAniList := make(map[int]Record, len(records))
 	for _, r := range records {
-		if r.AniListID != 0 {
+		if r.AniListID > 0 {
 			byAniList[r.AniListID] = r
 		}
 	}
@@ -810,9 +814,22 @@ func (l *Loader) conditionalGet(ctx context.Context, prev *Cache) (httpx.Conditi
 // WARN names. A malformed but accepted-size overrides file can carry enough
 // unique keys to render a multi-megabyte log record every cycle, which
 // downstream Docker/Alloy/Loki limits may truncate or reject — hiding the
-// diagnostic while amplifying log volume. The full count still rides in
-// unknown_key_count, with keys_truncated marking an elided tail.
+// diagnostic while amplifying log volume. unknown_key_count carries the
+// retained count (itself bounded by maxRetainedUnknownKeys), with
+// keys_truncated marking an elided tail and count_capped marking a count
+// that is a lower bound.
 const maxLoggedUnknownKeys = 20
+
+// maxRetainedUnknownKeys bounds how many distinct unknown-key strings the
+// parser RETAINS for the diagnostic, not just how many the WARN displays: a
+// valid sub-cap overrides file can carry hundreds of thousands of tiny
+// skipped rows with distinct unknown keys (skipped rows are exempt from the
+// effective-record and per-record ID caps), and unbounded retention would
+// fan them into map/slice/string entries plus an O(n log n) sort on every
+// mapping load. One extra slot beyond the logged prefix keeps the existing
+// keys_truncated arithmetic truthful; further keys only set
+// overrideSet.unknownOverflow.
+const maxRetainedUnknownKeys = maxLoggedUnknownKeys + 1
 
 // maxLoggedKeyBytes bounds one displayed unknown-key name; the full
 // count still rides in unknown_key_count.
@@ -878,7 +895,7 @@ func (l *Loader) readOverrides(ctx context.Context) (overrideSet, bool) {
 		return overrideSet{}, false
 	}
 	if len(set.unknown) > 0 {
-		l.logUnknownKeys(set.unknown)
+		l.logUnknownKeys(set.unknown, set.unknownOverflow)
 	}
 	return set, true
 }
@@ -890,7 +907,7 @@ func (l *Loader) readOverrides(ctx context.Context) (overrideSet, bool) {
 // smuggle terminal-control or direction-override text into the log stream
 // (the same runesafe policy the indexer's logParam and sanitizeUpstreamText
 // apply at their emit boundaries).
-func (l *Loader) logUnknownKeys(unknown []string) {
+func (l *Loader) logUnknownKeys(unknown []string, capped bool) {
 	shown := min(len(unknown), maxLoggedUnknownKeys)
 	logged := make([]string, 0, shown)
 	shortened := false
@@ -905,7 +922,8 @@ func (l *Loader) logUnknownKeys(unknown []string) {
 	l.log.Warn("mapping: overrides contain unknown keys, ignored",
 		"keys", logged,
 		"unknown_key_count", len(unknown),
-		"keys_truncated", len(unknown) > maxLoggedUnknownKeys || shortened,
+		"count_capped", capped,
+		"keys_truncated", capped || len(unknown) > maxLoggedUnknownKeys || shortened,
 		"path", l.overridesPath)
 }
 
@@ -919,15 +937,19 @@ func (l *Loader) logUnknownKeys(unknown []string) {
 // (oversized rows are counted separately in oversized); duplicates lists each
 // distinct duplicated AniList ID once, on its first repeated occurrence, so
 // one heavily repeated ID cannot fill the bounded log prefix and hide later
-// duplicated IDs; unknown is the sorted, deduplicated set of keys outside
-// overrideKeys.
+// duplicated IDs; unknown is the sorted, deduplicated, BOUNDED set of keys
+// outside overrideKeys (at most maxRetainedUnknownKeys entries, retained
+// during the stream so skipped rows cannot amplify diagnostic state), with
+// unknownOverflow marking that further distinct unknown keys were seen but
+// not retained.
 type overrideSet struct {
-	records    []Record
-	unknown    []string
-	duplicates []int
-	applied    int
-	skipped    int
-	oversized  int
+	records         []Record
+	unknown         []string
+	duplicates      []int
+	applied         int
+	skipped         int
+	oversized       int
+	unknownOverflow bool
 }
 
 // maxOverrideIDsPerRecord caps one override record's tmdb_movies and imdb_ids
@@ -965,14 +987,23 @@ func knownOverrideKey(key string) bool {
 }
 
 // collectUnknownKeys scans one raw override record for keys outside
-// overrideKeys, appending first occurrences to unknown (seen dedupes across
-// records). A raw-unmarshal error is ignored: the typed decode in
-// parseOverrides reports real errors.
-func collectUnknownKeys(raw json.RawMessage, seen map[string]struct{}, unknown []string) []string {
+// overrideKeys, appending first occurrences to set.unknown (seen dedupes
+// across records). Retention is bounded at maxRetainedUnknownKeys so a file
+// of many skipped rows with distinct unknown keys cannot amplify diagnostic
+// state; once full, further distinct keys only set set.unknownOverflow (and
+// an already-overflowed set skips the scan entirely). A record's fresh keys
+// are sorted before retention so the bounded set is deterministic regardless
+// of map iteration order. A raw-unmarshal error is ignored: the typed decode
+// in parseOverrides reports real errors.
+func (set *overrideSet) collectUnknownKeys(raw json.RawMessage, seen map[string]struct{}) {
+	if set.unknownOverflow {
+		return
+	}
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &m); err != nil {
-		return unknown
+		return
 	}
+	fresh := make([]string, 0, len(m))
 	for k := range m {
 		if knownOverrideKey(k) {
 			continue
@@ -980,10 +1011,17 @@ func collectUnknownKeys(raw json.RawMessage, seen map[string]struct{}, unknown [
 		if _, dup := seen[k]; dup {
 			continue
 		}
-		seen[k] = struct{}{}
-		unknown = append(unknown, k)
+		fresh = append(fresh, k)
 	}
-	return unknown
+	slices.Sort(fresh)
+	for _, k := range fresh {
+		if len(set.unknown) >= maxRetainedUnknownKeys {
+			set.unknownOverflow = true
+			return
+		}
+		seen[k] = struct{}{}
+		set.unknown = append(set.unknown, k)
+	}
 }
 
 // applyRecord decodes one raw override record and folds it into the set:
@@ -998,7 +1036,7 @@ func (set *overrideSet) applyRecord(raw json.RawMessage, seenKeys map[string]str
 	if err := json.Unmarshal(raw, &record); err != nil {
 		return err
 	}
-	set.unknown = collectUnknownKeys(raw, seenKeys, set.unknown)
+	set.collectUnknownKeys(raw, seenKeys)
 	record.Type = NormalizeType(record.Type)
 	record.IMDbIDs = trimmed(record.IMDbIDs)
 	record.TmdbMovies = positiveInts(record.TmdbMovies)

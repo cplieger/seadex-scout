@@ -116,6 +116,26 @@ func LookupTrackerByHost(host string) (Tracker, bool) {
 	return Tracker{}, false
 }
 
+// LookupTrackerByRelativeURL resolves tracker-specific relative page shapes
+// to their owning tracker. SeaDex publishes AnimeBytes pages in the
+// documented relative form "/torrents.php?...&torrentid=..."; that shape
+// carries tracker identity even though the URL has no host, so consumers
+// that would otherwise fall back to the untrusted tracker label (the
+// AB-toggle visibility gate, the usable-link canonicalizer) key on this
+// structural evidence instead. A non-relative or unrecognized shape matches
+// nothing.
+func LookupTrackerByRelativeURL(raw string) (Tracker, bool) {
+	f := urlform.Classify(raw)
+	if f.Class != urlform.ClassRelative {
+		return Tracker{}, false
+	}
+	u, err := url.Parse(f.Trimmed)
+	if err != nil || !strings.EqualFold(u.Path, "/torrents.php") || !u.Query().Has("torrentid") {
+		return Tracker{}, false
+	}
+	return LookupTracker(TrackerNameAnimeBytes)
+}
+
 // hostMatchesDomain reports whether host equals domain or is a real
 // dot-delimited subdomain of it: host must end in "."+domain and every label
 // of the subdomain prefix must be non-empty. Plain suffix matching would also

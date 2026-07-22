@@ -236,7 +236,7 @@ func TestRebuildPersistsABItemsGUIDOnly(t *testing.T) {
 // scope - an ab:-keyed item that a legacy or corrupted snapshot placed in
 // nyaa_feed is re-rendered by carryJournal with a passkey-bearing AB download
 // link and appended to the nyaa slice, where the AB-feed strip never looks.
-// The persist-time Nyaa-feed strip (stripNyaaDownloadURLs blanks every item's
+// The persist-time Nyaa-feed strip (stripDownloadURLs blanks every item's
 // download URL) must catch it, so the persisted file can never hold the
 // passkey regardless of which feed slice the item rode in on.
 func TestRebuildPersistScrubsABScopedItemCarriedInNyaaFeed(t *testing.T) {

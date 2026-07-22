@@ -140,7 +140,7 @@ func (n *Notifier) Notify(findings []compare.Finding, prior map[string]Alerted, 
 // Baseline records every current finding as already-alerted without emitting
 // any, seeding the cross-cycle dedupe table on a cold start (a fresh install or
 // a lost cache) so the pre-existing backlog is not dumped as a burst of
-// notifications. Steady-state emission resumes on the next cycle via Report;
+// notifications. Steady-state emission resumes on the next cycle via Notify;
 // the full current picture is always available on demand through report mode.
 func (n *Notifier) Baseline(findings []compare.Finding, now time.Time) map[string]Alerted {
 	current := make(map[string]Alerted, len(findings))
@@ -216,23 +216,29 @@ func findingKVs(f *compare.Finding) []any {
 
 // trackerURLs splits a finding's obtainable links into the public (Nyaa) and
 // AnimeBytes URLs, so an alert can render a distinct Nyaa link and AB link.
-// AB routing is URL-aware via filter.ABGated (label OR animebytes.tv URL
-// host), matching the obtainability filter (compare's dedupe key now keys
-// the full obtainable URL set label-insensitively instead). ABGated's
-// conservative fail direction carries over: a link whose raw URL is
-// malformed, unparseable, or has a non-ASCII host is unclassifiable and
-// fills the AB slot, never the public one, so an ambiguous link is never
-// rendered as the clickable public URL. The first non-AnimeBytes link is
-// treated as the public/Nyaa source (Nyaa is by far the dominant public
-// tracker on SeaDex).
+// AB routing is URL-aware, matching the obtainability filter (compare's
+// dedupe key now keys the full obtainable URL set label-insensitively
+// instead): a link with definite AnimeBytes evidence (filter.DefinitelyAB -
+// AB label or animebytes.tv URL host) wins the AB slot outright, ahead of
+// ABGated's conservative fail-closed fallback. ABGated intentionally also
+// reads a malformed, unparseable, or non-ASCII-host URL as AB-gated; such an
+// unclassifiable link only fills the AB slot when no definite AnimeBytes
+// link exists, so an ambiguous link is never rendered as the clickable
+// public URL yet can never displace a genuine AB link either. The first
+// non-AnimeBytes link is treated as the public/Nyaa source (Nyaa is by far
+// the dominant public tracker on SeaDex).
 func trackerURLs(links []compare.ReleaseLink) (nyaa, ab string) {
-	var firstPublic string
+	var firstPublic, firstABFallback string
 	for i := range links {
 		t, known := release.LookupTracker(links[i].Tracker)
 		switch {
-		case filter.ABGated(links[i].Tracker, links[i].URL):
+		case filter.DefinitelyAB(links[i].Tracker, links[i].URL):
 			if ab == "" {
 				ab = links[i].URL
+			}
+		case filter.ABGated(links[i].Tracker, links[i].URL):
+			if firstABFallback == "" {
+				firstABFallback = links[i].URL
 			}
 		case known && t.Name == release.TrackerNameNyaa:
 			if nyaa == "" {
@@ -244,6 +250,9 @@ func trackerURLs(links []compare.ReleaseLink) (nyaa, ab string) {
 	}
 	if nyaa == "" {
 		nyaa = firstPublic
+	}
+	if ab == "" {
+		ab = firstABFallback
 	}
 	return nyaa, ab
 }

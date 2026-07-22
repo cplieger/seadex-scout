@@ -102,9 +102,9 @@ func unknownKeysAre(rec *capture.Recorder, want string) bool {
 
 // TestLoader_Load_unknownOverrideKeysLogBounded pins the log-volume bound on
 // the unknown-key diagnostic: an overrides file carrying more unique unknown
-// keys than the cap logs only the fixed prefix plus the full count and a
-// truncation marker, so the WARN cannot balloon into a multi-megabyte record
-// downstream log limits would truncate or reject.
+// keys than the cap logs only the fixed prefix plus the bounded retained
+// count with truncation and count_capped markers, so neither the WARN nor
+// the parser's retained diagnostic state can balloon on a pathological file.
 func TestLoader_Load_unknownOverrideKeysLogBounded(t *testing.T) {
 	overrides := filepath.Join(t.TempDir(), "overrides.json")
 	total := maxLoggedUnknownKeys + 5
@@ -132,8 +132,11 @@ func TestLoader_Load_unknownOverrideKeysLogBounded(t *testing.T) {
 	if !unknownKeysAre(rec, fmt.Sprint(wantKeys)) {
 		t.Errorf("bounded keys logs = %v, want the first %d keys only", rec.Messages(), maxLoggedUnknownKeys)
 	}
-	if !rec.HasAttr("", "unknown_key_count", strconv.Itoa(total)) {
-		t.Errorf("unknown_key_count logs = %v, want %d", rec.Messages(), total)
+	if !rec.HasAttr("", "unknown_key_count", strconv.Itoa(maxRetainedUnknownKeys)) {
+		t.Errorf("unknown_key_count logs = %v, want the retained bound %d", rec.Messages(), maxRetainedUnknownKeys)
+	}
+	if !rec.HasAttr("", "count_capped", "true") {
+		t.Errorf("count_capped logs = %v, want true (count is a lower bound)", rec.Messages())
 	}
 	if !rec.HasAttr("", "keys_truncated", "true") {
 		t.Errorf("keys_truncated logs = %v, want true", rec.Messages())
@@ -279,6 +282,9 @@ func TestLoader_Load_unknownOverrideKeyBoundsAtLimit(t *testing.T) {
 	}
 	if !rec.HasAttr("", "unknown_key_count", strconv.Itoa(maxLoggedUnknownKeys)) {
 		t.Errorf("unknown_key_count logs = %v, want %d", rec.Messages(), maxLoggedUnknownKeys)
+	}
+	if !rec.HasAttr("", "count_capped", "false") {
+		t.Errorf("count_capped logs = %v, want false (retention bound not reached)", rec.Messages())
 	}
 	if !rec.HasAttr("", "keys_truncated", "false") {
 		t.Errorf("keys_truncated logs = %v, want false (both bounds exactly at their limits)", rec.Messages())

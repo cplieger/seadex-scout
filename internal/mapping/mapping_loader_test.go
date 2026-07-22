@@ -1321,6 +1321,69 @@ func TestLoader_refreshCache_firstBootDuplicateAmplificationRejected(t *testing.
 	}
 }
 
+// TestLoader_refreshCache_negativeOnlyCacheNotUsable pins the positive-ID
+// half of the effective-record contract on the persisted-cache path: a
+// state.json record set whose only keys are unique negative AniList IDs
+// (which real SeaDex lookups can never resolve) must not make the cache
+// usable, so the fresh-cache fast path falls through to the fetch instead of
+// serving an index that cannot resolve any entry.
+func TestLoader_refreshCache_negativeOnlyCacheNotUsable(t *testing.T) {
+	records := []Record{
+		{AniListID: -1, Type: "TV", TvdbID: 100},
+		{AniListID: -2, Type: "TV", TvdbID: 200},
+	}
+	if cacheUsable(records) {
+		t.Fatal("cacheUsable = true, want false: negative AniList IDs can never resolve a SeaDex lookup")
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
+	}))
+	defer ts.Close()
+	prev := &Cache{
+		FetchedAt: time.Now(), // inside the refresh window: freshness alone would reuse it
+		Records:   records,
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	if err != nil {
+		t.Fatalf("refreshCache with a fresh-but-unusable cache error: %v", err)
+	}
+	if len(next.Records) != 1 || next.Records[0].AniListID != 42 {
+		t.Fatalf("fresh-but-unusable cache was reused as fresh: records = %+v, want fetched record id 42", next.Records)
+	}
+}
+
+// TestLoader_refreshCache_firstBootNegativeIDBodyRejected pins that the
+// positive-ID rule holds at the acceptance boundary too: a first-boot body of
+// 200 rows with unique NEGATIVE AniList IDs and valid arr identifiers must be
+// rejected (the parser drops the rows as keyless, so the AniList-key floor
+// fires against the 200-element source count) instead of being accepted as a
+// map no real SeaDex lookup could ever resolve against.
+func TestLoader_refreshCache_firstBootNegativeIDBodyRejected(t *testing.T) {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := 1; i <= 200; i++ {
+		if i > 1 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"anilist_id":%d,"type":"tv","tvdb_id":%d}`, -i, i)
+	}
+	b.WriteByte(']')
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(b.String()))
+	}))
+	defer ts.Close()
+
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), &Cache{})
+	if err == nil {
+		t.Fatal("first-boot refresh of 200 negative-ID records returned nil error, want rejection")
+	}
+	if len(next.Records) != 0 {
+		t.Errorf("rejected first-boot refresh produced %d records, want 0", len(next.Records))
+	}
+}
+
 // TestLoader_refreshCache_acceptedDuplicateKeepsLastRecord pins
 // deduplicateRecords' documented last-record-wins and stable-order semantics
 // on an ACCEPTED refresh: the persisted Cache.Records (and hence the served

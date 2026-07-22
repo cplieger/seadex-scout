@@ -261,6 +261,15 @@ func (w *FeedWriter) carryItem(it *journalItem, cur map[string][]curatedRef, ws 
 	}
 	fresh.FirstSeen = it.FirstSeen
 	fresh.PubDate = it.FirstSeen
+	// GUID is journal identity, not refreshable presentation: the arrs
+	// dedupe RSS releases by GUID, so a SeaDex URL-text change on the same
+	// tracker identity (a query param appended, scheme/casing normalized)
+	// must never mint a new GUID and re-trigger a grab for an
+	// already-journaled torrent. A malformed hand-edited record with an
+	// empty stored GUID still self-heals from the fresh render.
+	if it.GUID != "" {
+		fresh.GUID = it.GUID
+	}
 	return fresh, true
 }
 

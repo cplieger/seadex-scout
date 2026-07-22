@@ -526,9 +526,8 @@ func TestParseFribb_logsSkippedAndDroppedCounts(t *testing.T) {
 // TestParseFribb_cleanParseEmitsNoLogs pins the log-gating conditions on the
 // silent side: a fully-clean body (every record keyed, nothing skipped or
 // dropped) must emit NO skipped-records warning and NO dropped-records debug
-// line. Kills the CONDITIONALS_BOUNDARY mutants on `skipped > 0` and
-// `dropped > 0` (>= would fire both lines with zero counts on every clean
-// cycle, noise the operator would read as upstream corruption).
+// line: a clean cycle must not imply upstream corruption by logging zero-count
+// diagnostics.
 func TestParseFribb_cleanParseEmitsNoLogs(t *testing.T) {
 	logger, rec := capture.New()
 	data := []byte(`[{"anilist_id":1,"type":"tv","tvdb_id":100},{"anilist_id":2,"type":"movie","themoviedb_id":603}]`)
@@ -547,9 +546,7 @@ func TestParseFribb_cleanParseEmitsNoLogs(t *testing.T) {
 // TestParseFribb_atCapRecordAccepted pins the inclusive side of the
 // per-record byte cap: a record whose encoded form is exactly
 // maxFribbRecordBytes bytes is accepted (the guard is strictly
-// greater-than), while one byte over is skipped. Kills the
-// CONDITIONALS_BOUNDARY mutant on `len(msg) > maxFribbRecordBytes` (>= would
-// reject a legitimate at-cap record).
+// greater-than), while one byte over is skipped.
 func TestParseFribb_atCapRecordAccepted(t *testing.T) {
 	// Build a record padded to exactly maxFribbRecordBytes bytes via one
 	// long imdb_id string entry (a single string stays under the
@@ -589,9 +586,7 @@ func TestParseFribb_atCapRecordAccepted(t *testing.T) {
 // themoviedb_id.movie identifier cap, matching the imdb_id at-cap coverage in
 // TestParseFribb_identifierSlicesCapped: a movie list of exactly
 // maxFribbIdentifiers entries is retained in full, one more rejects the
-// record. Kills the CONDITIONALS_BOUNDARY mutant on
-// `len(a.Movie) > maxFribbIdentifiers` (>= would reject a legitimate at-cap
-// movie list).
+// record.
 func TestTmdbID_atCapMovieListRetained(t *testing.T) {
 	build := func(n int) string {
 		var b strings.Builder

@@ -117,7 +117,18 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		retryAfter := httpx.ParseRetryAfter(resp.Header.Get("Retry-After"))
 		httpx.DrainClose(resp.Body)
-		statusErr := &httpx.StatusError{URL: reqURL, Code: resp.StatusCode}
+		// StatusError's own redactor keeps a username-only userinfo token
+		// (e.g. https://token@prowlarr/1/api, which validateHTTPURL
+		// accepts), and this error reaches httpx.Do's retry logger and the
+		// harvest WARN verbatim - so strip userinfo, query, and fragment
+		// here before the error is constructed. Only the actual HTTP
+		// request keeps the full URL.
+		safeURL := *req.URL
+		safeURL.User = nil
+		safeURL.RawQuery = ""
+		safeURL.Fragment = ""
+		safeURL.RawFragment = ""
+		statusErr := &httpx.StatusError{URL: safeURL.String(), Code: resp.StatusCode}
 		if errors.Is(statusErr, httpx.ErrRateLimited) || errors.Is(statusErr, httpx.ErrServerError) {
 			return nil, &transientUpstreamError{err: statusErr, retryAfter: retryAfter}
 		}

@@ -145,7 +145,7 @@ func TestDo429WithPastResetFallsBackToDefault(t *testing.T) {
 // counter feeding the cycle-complete log line.
 func TestFetchReturnsMediaAndCountsCalls(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"data":{"Media":{"format":"TV","seasonYear":2023,"title":{"romaji":"Sousou no Frieren","english":"Frieren"}}}}`)
+		fmt.Fprint(w, `{"data":{"Media":{"id":154587,"format":"TV","seasonYear":2023,"title":{"romaji":"Sousou no Frieren","english":"Frieren"}}}}`)
 	}))
 	defer srv.Close()
 
@@ -159,6 +159,23 @@ func TestFetchReturnsMediaAndCountsCalls(t *testing.T) {
 	}
 	if got := c.Stats(); got.Calls != 1 {
 		t.Errorf("Stats().Calls = %d, want 1", got.Calls)
+	}
+}
+
+// TestFetchRejectsMismatchedMediaID pins the single-fetch identity invariant
+// (the per-id equivalent of the batch path's retainRequested): a response
+// carrying a valid Media for a DIFFERENT id than the one requested is
+// rejected as a plain lookup failure, so a malformed or compromised endpoint
+// cannot get the wrong titles memoized under the requested id.
+func TestFetchRejectsMismatchedMediaID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"data":{"Media":{"id":601,"format":"TV","seasonYear":2007,"title":{"romaji":"Clannad"}}}}`)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	if _, err := c.Fetch(context.Background(), 600); err == nil || !strings.Contains(err.Error(), "does not match requested id") {
+		t.Fatalf("Fetch mismatched identity error = %v, want identity rejection", err)
 	}
 }
 
@@ -386,7 +403,7 @@ func TestFetchCountsEveryHTTPAttempt(t *testing.T) {
 			w.WriteHeader(http.StatusTooManyRequests)
 			return
 		}
-		fmt.Fprint(w, `{"data":{"Media":{"format":"TV","seasonYear":2023,"title":{"romaji":"A"}}}}`)
+		fmt.Fprint(w, `{"data":{"Media":{"id":1,"format":"TV","seasonYear":2023,"title":{"romaji":"A"}}}}`)
 	}))
 	defer srv.Close()
 

@@ -141,6 +141,26 @@ func TestTrackerURLsRoutesMislabeledABURLToABSlot(t *testing.T) {
 	}
 }
 
+// TestTrackerURLsDefiniteABWinsOverMalformedFallback pins the precedence of
+// definite AnimeBytes evidence over the fail-closed fallback: a malformed
+// Nyaa-labeled URL (unclassifiable, so ABGated) appearing BEFORE a genuine
+// AnimeBytes link must not occupy the AB slot - the later definite AB URL
+// wins it, and the unclassifiable link still never renders as the public URL.
+func TestTrackerURLsDefiniteABWinsOverMalformedFallback(t *testing.T) {
+	links := []compare.ReleaseLink{
+		{Tracker: "Nyaa", URL: "https://animebytes.tv exploit"},
+		{Tracker: "AB", URL: "https://animebytes.tv/torrents.php?id=9&torrentid=10"},
+		{Tracker: "Nyaa", URL: "https://nyaa.si/view/9"},
+	}
+	nyaa, ab := trackerURLs(links)
+	if ab != "https://animebytes.tv/torrents.php?id=9&torrentid=10" {
+		t.Errorf("ab = %q, want the definite AnimeBytes URL to win the AB slot over the malformed fallback", ab)
+	}
+	if nyaa != "https://nyaa.si/view/9" {
+		t.Errorf("nyaa = %q, want the genuine Nyaa URL, never the unclassifiable one", nyaa)
+	}
+}
+
 // TestTrackerURLsMalformedURLFailsClosedToABSlot pins the conservative fail
 // direction trackerURLs documents: a link whose raw URL is malformed,
 // host-hiding, or has a non-ASCII (homoglyph) host is unclassifiable, so it

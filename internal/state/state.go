@@ -173,27 +173,27 @@ func NewReadOnlyStore(path string, logger *slog.Logger) *Store {
 // pass), so an hour cannot race a concurrent writer in another process.
 const staleTempMaxAge = time.Hour
 
-// newerSchemaVersion independently decodes the persisted envelope's schema
-// version discriminator straight from the wire bytes, reporting the decoded
-// version and whether it is newer than SchemaVersion. Load must never read
-// the discriminator from a partially-populated State on a decode error: Go
+// schemaVersion independently decodes the persisted envelope's schema version
+// discriminator straight from the wire bytes, reporting the effective (last)
+// decoded version, whether the key was present, and any wire-level failure.
+// It is the single source of truth for the discriminator on BOTH the clean
+// and error decode paths: decode must never read it from State.Version. Go
 // documents that json.Unmarshal may populate fields before returning a type
-// error, and a payload with a duplicate version key (e.g.
-// {"version":2,"version":"bad"}) leaves a stale earlier value in
-// State.Version while the error came from the later duplicate - trusting it
-// would preserve a corrupt file as "newer-schema" state and block every
-// subsequent Save. The streaming decode below validates EVERY case-insensitive
-// occurrence of the key before using the effective (last) value: a
-// whole-document one-field unmarshal retains only that final duplicate, so a
-// payload like {"version":"bad","Version":99} - corrupt for this binary AND
-// for a roll-forward binary reading the same integer discriminator - would
-// read as newer-schema 99 and be preserved with Save blocked instead of
-// quarantined. Any failure reports (0, false) and the caller falls through to
-// the quarantine path.
-func newerSchemaVersion(data []byte) (int, bool) {
+// error, and it also deliberately accepts JSON null into an int WITHOUT an
+// error - so {"version":null} would otherwise pass as legacy version zero,
+// and {"version":99,"version":null} would leave the stale earlier 99 in
+// State.Version and be preserved forever as newer-schema state. Save can
+// never produce either payload; both violate the documented integer
+// discriminator contract. The streaming decode below validates EVERY
+// case-insensitive occurrence of the key, explicitly rejecting null (via the
+// *int decode), so a payload like {"version":"bad","Version":99} - corrupt
+// for this binary AND for a roll-forward binary reading the same integer
+// discriminator - errors instead of reading as newer-schema 99. Any error
+// (a non-object, a malformed member, a null or non-integer version, trailing
+// data) sends the caller to the quarantine path.
+func schemaVersion(data []byte) (version int, found bool, err error) {
 	dec := bounded.NewDecoder(bytes.NewReader(data), 0)
-	version, found := 0, false
-	err := dec.Object(func(key string) error {
+	err = dec.Object(func(key string) error {
 		if !strings.EqualFold(key, "version") {
 			return dec.Skip()
 		}
@@ -201,19 +201,23 @@ func newerSchemaVersion(data []byte) (int, bool) {
 		if decodeErr := dec.Decode(&raw); decodeErr != nil {
 			return decodeErr
 		}
-		if unmarshalErr := json.Unmarshal(raw, &version); unmarshalErr != nil {
+		var decoded *int
+		if unmarshalErr := json.Unmarshal(raw, &decoded); unmarshalErr != nil {
 			return unmarshalErr
 		}
-		found = true
+		if decoded == nil {
+			return errors.New("schema version must be an integer")
+		}
+		version, found = *decoded, true
 		return nil
 	})
-	// A top-level null is Object's documented no-op (found stays false); any
-	// other non-object, a malformed member, or trailing data reports
-	// (0, false) so the caller falls through to the quarantine path.
-	if err != nil || dec.End() != nil {
-		return 0, false
+	if err != nil {
+		return 0, false, err
 	}
-	return version, found && version > SchemaVersion
+	if endErr := dec.End(); endErr != nil {
+		return 0, false, endErr
+	}
+	return version, found, nil
 }
 
 // Load reads and decodes the state file. A missing file returns a zero State
@@ -311,41 +315,41 @@ func (s *Store) decode(data []byte) (State, error) {
 		s.maybeQuarantine()
 		return State{}, fmt.Errorf("state: decode %s: not a JSON object", s.path)
 	}
-	var st State
-	if err := json.Unmarshal(data, &st); err != nil {
-		if version, newer := newerSchemaVersion(data); newer {
-			// A type-level decode error on a file stamped by a newer binary
-			// is the "moved member" case SchemaVersion exists for. The stamp
-			// is decoded independently from the raw bytes (see
-			// newerSchemaVersion) - st.Version is NOT trustworthy on this
-			// error path, since Unmarshal may have populated it from an
-			// earlier duplicate key before failing on the later one. The
-			// shape is valid for the newer image; preserve it and block Save
-			// exactly like the clean newer-version path below instead of
-			// quarantining it away from the roll-forward.
-			s.unsupportedVersion = version
-			return State{}, fmt.Errorf("state: decode %s: schema version %d is newer than this binary supports (%d)", s.path, version, SchemaVersion)
-		}
+	// The wire discriminator is decoded independently BEFORE the State
+	// unmarshal, on every load: State.Version is never trusted (Unmarshal may
+	// populate it from an earlier duplicate key, and accepts null into an int
+	// silently - see schemaVersion). A wire-level failure - a malformed
+	// member, a null or non-integer version occurrence, trailing data - is
+	// corruption Save can never have produced; quarantine it.
+	wireVersion, found, err := schemaVersion(data)
+	if err != nil {
 		s.maybeQuarantine()
 		return State{}, fmt.Errorf("state: decode %s: %w", s.path, err)
 	}
-	if st.Version < 0 {
+	if found && wireVersion < 0 {
 		// The documented legacy envelope's version is absent or zero, and
 		// Save only ever stamps SchemaVersion - a negative version can only
 		// be corruption or tampering, never a schema this or any binary
 		// wrote. Quarantine it like any other corrupt payload.
 		s.maybeQuarantine()
-		return State{}, fmt.Errorf("state: decode %s: invalid negative schema version %d", s.path, st.Version)
+		return State{}, fmt.Errorf("state: decode %s: invalid negative schema version %d", s.path, wireVersion)
 	}
-	if st.Version > SchemaVersion {
-		// A file stamped by a newer binary (an image rollback): its members may
-		// have moved, so field-by-field zero-loading is exactly the silent
-		// discard SchemaVersion exists to prevent. This is valid state, not
-		// corruption: keep it at the live path and block this older Store from
-		// overwriting it (Save refuses while unsupportedVersion is set), so
-		// rolling forward again consumes it in place.
-		s.unsupportedVersion = st.Version
-		return State{}, fmt.Errorf("state: decode %s: schema version %d is newer than this binary supports (%d)", s.path, st.Version, SchemaVersion)
+	if found && wireVersion > SchemaVersion {
+		// A file stamped by a newer binary (an image rollback): its members
+		// may have moved, so field-by-field zero-loading is exactly the
+		// silent discard SchemaVersion exists to prevent - and a type-level
+		// State decode error on such a file is the "moved member" case
+		// itself. This is valid state, not corruption: keep it at the live
+		// path and block this older Store from overwriting it (Save refuses
+		// while unsupportedVersion is set), so rolling forward again consumes
+		// it in place.
+		s.unsupportedVersion = wireVersion
+		return State{}, fmt.Errorf("state: decode %s: schema version %d is newer than this binary supports (%d)", s.path, wireVersion, SchemaVersion)
+	}
+	var st State
+	if err := json.Unmarshal(data, &st); err != nil {
+		s.maybeQuarantine()
+		return State{}, fmt.Errorf("state: decode %s: %w", s.path, err)
 	}
 	return st, nil
 }
@@ -400,24 +404,42 @@ func (s *Store) quarantine() {
 // too, preserving the possibly-recoverable bytes until a Load classifies
 // them.
 func (s *Store) Save(ctx context.Context, st *State) error {
+	sanitized, err := s.prepareSave(ctx, st)
+	if err != nil {
+		return err
+	}
+	return s.writeState(ctx, &sanitized)
+}
+
+// prepareSave validates whether this Store may write (nil state, read-only,
+// cancelled context, the newer-schema and unclassified-read-failure Save
+// blocks - see Save's doc) and returns the sanitized, version-stamped shallow
+// copy Save persists; the caller's State is never mutated.
+func (s *Store) prepareSave(ctx context.Context, st *State) (State, error) {
 	if st == nil {
-		return fmt.Errorf("state: save %s: nil state (Save never writes a non-object state file)", s.path)
+		return State{}, fmt.Errorf("state: save %s: nil state (Save never writes a non-object state file)", s.path)
 	}
 	if s.readOnly {
-		return fmt.Errorf("state: save %s: store is read-only", s.path)
+		return State{}, fmt.Errorf("state: save %s: store is read-only", s.path)
 	}
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("state: save %s: %w", s.path, err)
+		return State{}, fmt.Errorf("state: save %s: %w", s.path, err)
 	}
 	if s.unsupportedVersion != 0 {
-		return fmt.Errorf("state: save %s: blocked after loading newer schema version %d (supported %d)", s.path, s.unsupportedVersion, SchemaVersion)
+		return State{}, fmt.Errorf("state: save %s: blocked after loading newer schema version %d (supported %d)", s.path, s.unsupportedVersion, SchemaVersion)
 	}
 	if s.loadFailed {
-		return fmt.Errorf("state: save %s: blocked after an unclassified read failure; the on-disk state is preserved until a load can classify it", s.path)
+		return State{}, fmt.Errorf("state: save %s: blocked after an unclassified read failure; the on-disk state is preserved until a load can classify it", s.path)
 	}
 	sanitized := *st
 	sanitized.Library = st.Library.SanitizedForStorage()
 	sanitized.Version = SchemaVersion
+	return sanitized, nil
+}
+
+// writeState owns Save's persistence phase: the pending-file lifecycle,
+// encoding under the size bound, the atomic commit, and durability reporting.
+func (s *Store) writeState(ctx context.Context, st *State) error {
 	pf, err := atomicfile.NewPendingFile(ctx, s.path,
 		atomicfile.WithMkdirMode(dirMode),
 		atomicfile.WithMode(fileMode),
@@ -434,7 +456,7 @@ func (s *Store) Save(ctx context.Context, st *State) error {
 			s.log.Warn("could not remove pending state temp file", "path", pf.Name(), "error", clErr)
 		}
 	}()
-	if encErr := encodeState(pf, &sanitized, s.path); encErr != nil {
+	if encErr := encodeState(pf, st, s.path); encErr != nil {
 		return encErr
 	}
 	res, err := pf.Commit(ctx)

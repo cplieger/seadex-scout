@@ -386,3 +386,140 @@ func TestSnapshotUnavailableRecoveredBetweenLocksAnswersFresh(t *testing.T) {
 			got, strings.Join(rec.Messages(), "\n"))
 	}
 }
+
+// TestReloadCoalescingLoserDefersToWinnerOnFreshInstall pins the pre-first-
+// load coalescing handoff: while a winning reload holds reloadMu over a
+// MISSING snapshot (the healthy fresh-install case), a concurrent reload must
+// not mark the snapshot unavailable and return - it blocks until the winner's
+// verdict and then runs the stat path itself - so no startup request can
+// render a false snapshot-unavailable Torznab error that the winner's ENOENT
+// confirmation contradicts. Synchronization is by holding the real lock and
+// a done channel; no sleeps.
+func TestReloadCoalescingLoserDefersToWinnerOnFreshInstall(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json") // never written: fresh install
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, path)
+
+	// Simulate the winning reload in flight: hold the coalescing lock the
+	// way the winner does for its whole stat/read/install sequence.
+	ix.reloadMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ix.reload(context.Background())
+	}()
+	// Release the winner's lock; the loser (blocked on it, or arriving
+	// after) then runs the normal stat path and confirms the fresh-install
+	// ENOENT state instead of latching a failure it never observed.
+	ix.reloadMu.Unlock()
+	<-done
+
+	ix.mu.RLock()
+	failed := ix.snapFailed
+	ix.mu.RUnlock()
+	if failed {
+		t.Fatal("snapFailed = true after a fresh-install reload; a coalescing loser must defer to the winning reload's verdict, not mark the snapshot unavailable")
+	}
+	if ix.snapshotUnavailable() {
+		t.Fatal("snapshotUnavailable() = true on a fresh install; absence of a first snapshot is the documented healthy state")
+	}
+}
+
+// TestReloadRebuildsNyaaDownloadURLsFromGUID pins the Nyaa load-boundary
+// guarantees (rebuildNyaaDownloadURLs): a persisted DownloadURL is never
+// authoritative - an attacker-planted fetch target is overwritten from the
+// non-secret GUID - and an item whose GUID carries no parseable numeric Nyaa
+// id is dropped with the bounded warning rather than served link-less.
+func TestReloadRebuildsNyaaDownloadURLsFromGUID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "valid", GUID: "https://nyaa.si/view/42", DownloadURL: "https://attacker.example/poison.torrent"}},
+			{item: item{Title: "invalid", GUID: "https://nyaa.si/view/not-a-number", DownloadURL: "https://attacker.example/invalid.torrent"}},
+		},
+	})
+	log, rec := capture.New()
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, path)
+
+	got := ix.feedFor(upstreamNyaa)
+	if len(got) != 1 {
+		t.Fatalf("nyaa feed = %d items, want 1 valid item after dropping the underivable GUID", len(got))
+	}
+	if got[0].Title != "valid" {
+		t.Errorf("kept item title = %q, want valid", got[0].Title)
+	}
+	if want := "https://nyaa.si/download/42.torrent"; got[0].DownloadURL != want {
+		t.Errorf("nyaa download = %q, want %q rebuilt from the GUID", got[0].DownloadURL, want)
+	}
+	if count := rec.Count("indexer feed snapshot: Nyaa items dropped; no download URL derivable from tracker page URL"); count != 1 {
+		t.Errorf("underivable-item warnings = %d, want 1", count)
+	}
+}
+
+// TestReloadDropsForeignHostSnapshotGUIDs pins the load-boundary trust gate
+// (snapshotDownloadURL): a tampered but structurally valid feed.json cannot
+// mint an apex-tracker download URL from a foreign or independent-subdomain
+// GUID - trackerID's shape-only extraction would otherwise read the numeric
+// id out of https://evil.example/view/123 or sukebei.nyaa.si/view/123 - so
+// only items whose GUID passes the same trackerOwnURL gate writer-side
+// journal admission applies survive the reload, with their served URLs
+// derived on the expected apex tracker.
+func TestReloadDropsForeignHostSnapshotGUIDs(t *testing.T) {
+	tests := map[string]struct {
+		scope     string
+		feed      []journalItem
+		wantTitle string
+		wantURL   string
+	}{
+		"nyaa keeps only the canonical-host GUID": {
+			scope: upstreamNyaa,
+			feed: []journalItem{
+				{item: item{Title: "canonical", GUID: "https://nyaa.si/view/42"}},
+				{item: item{Title: "foreign", GUID: "https://evil.example/view/123"}},
+				{item: item{Title: "subdomain", GUID: "https://sukebei.nyaa.si/view/123"}},
+			},
+			wantTitle: "canonical",
+			wantURL:   "https://nyaa.si/download/42.torrent",
+		},
+		"ab keeps only the canonical-host GUID": {
+			scope: upstreamAB,
+			feed: []journalItem{
+				{item: item{Title: "canonical", GUID: "https://animebytes.tv/torrents.php?id=1&torrentid=777"}},
+				{item: item{Title: "foreign", GUID: "https://evil.example/torrents.php?id=1&torrentid=888"}},
+			},
+			wantTitle: "canonical",
+			wantURL:   "https://animebytes.tv/torrent/777/download/PASSKEY",
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "feed.json")
+			snap := &snapshot{ByHash: map[string]bool{}, ByKey: map[string]bool{}, Seen: map[string]bool{}}
+			if tc.scope == upstreamNyaa {
+				snap.NyaaFeed = tc.feed
+			} else {
+				snap.ABFeed = tc.feed
+			}
+			writeSnapshotFile(t, path, snap)
+			log, _ := capture.New()
+			ix := New(&Config{UpstreamConfig: UpstreamConfig{
+				NyaaTorznabURL: "http://prowlarr/1/api",
+				ABTorznabURL:   "http://prowlarr/2/api",
+				ABPasskey:      "PASSKEY",
+			}}, Deps{Logger: log}, path)
+
+			got := ix.feedFor(tc.scope)
+			if len(got) != 1 {
+				t.Fatalf("%s feed = %d items (%+v), want only the canonical-host item after the trust gate", tc.scope, len(got), got)
+			}
+			if got[0].Title != tc.wantTitle {
+				t.Errorf("kept item = %q, want %q", got[0].Title, tc.wantTitle)
+			}
+			if got[0].DownloadURL != tc.wantURL {
+				t.Errorf("derived download = %q, want %q on the apex tracker", got[0].DownloadURL, tc.wantURL)
+			}
+		})
+	}
+}

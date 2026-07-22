@@ -630,7 +630,7 @@ func TestCategoriesFor(t *testing.T) {
 // curated-then-replaced torrent: a journaled item whose torrent has LEFT the
 // current curation set keeps its stored render (title, FirstSeen) - it is
 // still a valid release the arrs may grab - instead of being re-rendered or
-// dropped. The download URL is GUID-only at rest (stripNyaaDownloadURLs); the
+// dropped. The download URL is GUID-only at rest (stripDownloadURLs); the
 // reader re-derives it on load.
 func TestRebuildCarriesUncuratedItemStoredRender(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
@@ -1169,5 +1169,50 @@ func TestRebuildMirrorTrackerCannotSuppressNyaaJournal(t *testing.T) {
 	}
 	if snap.NyaaFeed[0].Key != "nyaa:900" {
 		t.Errorf("journaled key = %q, want nyaa:900", snap.NyaaFeed[0].Key)
+	}
+}
+
+// TestRebuildBaselineTailTrackerCannotSuppressLaterNyaa pins the fresh-install
+// baseline arm of the tail-tracker guard (allIdentities): an AnimeTosho/
+// RuTracker occurrence in the FIRST catalogue must not seed its shared info
+// hash into the baseline seen ledger, or the later supported Nyaa listing of
+// the same bytes would be silently denied RSS exposure forever. The growth
+// arm is pinned by TestRebuildMirrorTrackerCannotSuppressNyaaJournal; this
+// covers baseline construction.
+func TestRebuildBaselineTailTrackerCannotSuppressLaterNyaa(t *testing.T) {
+	const hash = "143ed15e5e3df072ae91adaeb149973a887590dd"
+	path := filepath.Join(t.TempDir(), "feed.json")
+	w := newTestWriter(path, "", false)
+
+	tail := seadex.Entry{
+		AniListID: 7,
+		Torrents: []seadex.Torrent{{
+			Tracker:  "AnimeTosho",
+			URL:      "https://animetosho.org/view/42",
+			InfoHash: hash,
+			IsBest:   true,
+			Files:    []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
+		}},
+	}
+	if err := w.Rebuild(context.Background(), []seadex.Entry{tail}, nil); err != nil {
+		t.Fatalf("baseline Rebuild: %v", err)
+	}
+	if snap := readSnapshotFile(t, path); snap.Seen[hash] {
+		t.Fatalf("fresh baseline recorded tail-tracker hash %q; a mirror must not suppress a later Nyaa listing", hash)
+	}
+
+	nyaa := tail
+	nyaa.Torrents = []seadex.Torrent{tail.Torrents[0]}
+	nyaa.Torrents[0].Tracker = "Nyaa"
+	nyaa.Torrents[0].URL = "https://nyaa.si/view/42"
+	if err := w.Rebuild(context.Background(), []seadex.Entry{nyaa}, nil); err != nil {
+		t.Fatalf("Nyaa Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 1 {
+		t.Fatalf("Nyaa feed = %d items, want 1 (the tail-tracker baseline must not veto later Nyaa novelty)", len(snap.NyaaFeed))
+	}
+	if snap.NyaaFeed[0].Key != "nyaa:42" {
+		t.Errorf("journaled key = %q, want nyaa:42", snap.NyaaFeed[0].Key)
 	}
 }

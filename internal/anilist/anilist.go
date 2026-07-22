@@ -63,8 +63,9 @@ var ErrNotFound = errors.New("anilist: media not found")
 // record-local, per-id fallback applies.
 var ErrBatchRecord = errors.New("anilist: batch response")
 
-// query fetches the fields needed for a title fallback match.
-const query = `query ($id: Int) { Media(id: $id, type: ANIME) { format seasonYear startDate { year } title { romaji english native } } }`
+// query fetches the fields needed for a title fallback match, plus the id so
+// Fetch can bind the response to the requested identity (parseMediaForID).
+const query = `query ($id: Int) { Media(id: $id, type: ANIME) { id format seasonYear startDate { year } title { romaji english native } } }`
 
 // batchSize is AniList's Page perPage maximum; FetchMany resolves up to this
 // many ids per request.
@@ -163,7 +164,7 @@ func (c *Client) Fetch(ctx context.Context, aniListID int) (Media, error) {
 	if err != nil {
 		return Media{}, err
 	}
-	return parseMedia(raw)
+	return parseMediaForID(raw, aniListID)
 }
 
 // FetchMany resolves many AniList ids in batched requests (up to batchSize ids
@@ -345,7 +346,8 @@ func (c *Client) observeRateHeaders(resp *http.Response) {
 // --- GraphQL response parsing ---
 
 // gqlMedia is the media object shape shared by the single and batched queries
-// (the single query returns no id; the field stays zero there).
+// (both select id; the single path binds it to the requested identity in
+// parseMediaForID, the batch path via retainRequested/parsePageRecords).
 type gqlMedia struct {
 	Title struct {
 		Romaji  string `json:"romaji"`
@@ -478,6 +480,16 @@ func validateResponseUTF8(raw []byte) error {
 // a plain error (degraded, retried next cycle) rather than permanently
 // suppressing the id.
 func parseMedia(raw []byte) (Media, error) {
+	return parseMediaForID(raw, 0)
+}
+
+// parseMediaForID is parseMedia with the single-response identity invariant:
+// when expectedID is positive, a decoded Media whose id differs from the
+// requested id is rejected as a plain (transient, non-memoized) error — the
+// batch path's retainRequested equivalent for the per-id fallback, so a
+// malformed or compromised endpoint cannot answer a request for one id with
+// a valid Media for another and have it memoized under the wrong key.
+func parseMediaForID(raw []byte, expectedID int) (Media, error) {
 	if err := validateResponseUTF8(raw); err != nil {
 		return Media{}, err
 	}
@@ -504,6 +516,9 @@ func parseMedia(raw []byte) (Media, error) {
 	var media gqlMedia
 	if err := json.Unmarshal(mediaRaw, &media); err != nil {
 		return Media{}, fmt.Errorf("anilist: decode Media: %w", err)
+	}
+	if expectedID > 0 && media.ID != expectedID {
+		return Media{}, fmt.Errorf("anilist: response media id %d does not match requested id %d", media.ID, expectedID)
 	}
 	parsed, err := media.toMedia()
 	if err != nil {

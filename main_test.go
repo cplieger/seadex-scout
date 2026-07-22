@@ -820,6 +820,67 @@ func TestPollCycleUninterrupted(t *testing.T) {
 	})
 }
 
+// queueThenCancelCycler drives the ran-plus-queued-rerun interruption leg:
+// its first (own) run queues demand from a second process on the shared lock
+// dir, and the queued rerun then cancels the shared context, simulating
+// shutdown arriving while Exclusive services another process's demand after
+// this invocation's own run completed.
+type queueThenCancelCycler struct {
+	t         *testing.T
+	cancel    context.CancelFunc
+	dir       string
+	calls     *int
+	queuedErr *error
+}
+
+func (c queueThenCancelCycler) Cycle(context.Context) bool {
+	*c.calls++
+	if *c.calls == 1 {
+		// Another process requests a poll while this one holds the lock: it
+		// must observe OutcomeQueued (its cycle never runs) and report
+		// success — the demand is recorded for the active runner.
+		exB := testCycleExclusiveIn(c.t, context.Background(), c.dir)
+		marker := health.NewMarker(filepath.Join(c.t.TempDir(), ".healthy"))
+		*c.queuedErr = pollCycle(context.Background(), exB, mustNotRunCycler{t: c.t}, marker)
+		return true
+	}
+	c.cancel() // shutdown lands during the queued rerun
+	return true
+}
+
+// TestPollCycleRanQueuedThenCancelled pins the ran-plus-queued-rerun leg of
+// poll's uniform interruption contract: this process's own run completes
+// healthy, Exclusive then services another process's queued rerun, and
+// shutdown lands during that rerun. Run returns OutcomeRanQueued with a nil
+// own result, but the cancellation observed by then must win — pollCycle
+// returns the interruption error (wrapping context.Canceled, so main
+// classifies it WARN and exits non-zero) instead of the own run's success —
+// while the queued requester itself still returned nil.
+func TestPollCycleRanQueuedThenCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dir := t.TempDir()
+	ex := testCycleExclusiveIn(t, ctx, dir)
+	var calls int
+	var queuedErr error
+	cy := queueThenCancelCycler{t: t, cancel: cancel, dir: dir, calls: &calls, queuedErr: &queuedErr}
+
+	err := pollCycle(ctx, ex, cy, health.NewMarker(filepath.Join(t.TempDir(), ".healthy")))
+
+	if calls != 2 {
+		t.Fatalf("cycle calls = %d, want 2 (the own run plus the queued rerun)", calls)
+	}
+	if queuedErr != nil {
+		t.Errorf("queued requester pollCycle = %v, want nil (recorded demand is success)", queuedErr)
+	}
+	if err == nil {
+		t.Fatal("pollCycle = nil, want the interruption error (exit 1)")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want it to wrap context.Canceled (main classifies the interruption WARN, not ERROR)", err)
+	}
+}
+
 // TestRunSchedulerShutdownMidCycle pins the daemon twin of pollCycle's
 // interruption contract: a shutdown-interrupted unhealthy cycle must not
 // overwrite the health marker (the guard `if !healthy && ctx.Err() != nil`),

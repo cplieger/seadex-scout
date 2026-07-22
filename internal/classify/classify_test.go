@@ -187,6 +187,70 @@ func TestTorrentPrimaryPayloadIgnoresSmallExtraMarker(t *testing.T) {
 	}
 }
 
+// TestIsCreditlessExtraCaseFolds pins the marker's strings.ToLower-faithful
+// case classes on the two Unicode folds where Go regexp's (?i) SimpleFold
+// diverges: a Turkish-uppercase CREDİTLESS (U+0130 folds to I/i) is a
+// creditless extra, while a long-s CREDITLEſS (U+017F, which (?i) would have
+// folded onto S) is not.
+func TestIsCreditlessExtraCaseFolds(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"Show NCOP01.mkv", true},
+		{"Show NCED01v2.mkv", true},
+		{"Show creditless ED.mkv", true},
+		{"Show CREDITLESS01v2.mkv", true},
+		{"Show CRED\u0130TLESS01v2.mkv", true},  // Turkish-uppercase İ folds to i under strings.ToLower
+		{"Show CREDITLE\u017FS01v2.mkv", false}, // long s must not fold onto S
+		{"Show - 01 [1080p].mkv", false},
+	}
+	for _, tc := range cases {
+		if got := IsCreditlessExtra(tc.name); got != tc.want {
+			t.Errorf("IsCreditlessExtra(%q) = %t, want %t", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestTorrentLargeUnicodeCreditlessExtraStaysEncode pins the classification
+// consequence of the İ fold: a CREDİTLESS extra large enough to pass the
+// size refinement must still be excluded by the type gate, so its BDRemux
+// marker cannot flip an x265 episode payload to remux (and invert an
+// operator's exclude_remux filter).
+func TestTorrentLargeUnicodeCreditlessExtraStaysEncode(t *testing.T) {
+	files := make([]seadex.File, 0, 13)
+	for i := 1; i <= 12; i++ {
+		files = append(files, seadex.File{
+			Name:   fmt.Sprintf("Show - %02d [1080p][x265].mkv", i),
+			Length: 1_400_000_000 + int64(i)*1_000_000,
+		})
+	}
+	files = append(files, seadex.File{Name: "Show - CRED\u0130TLESS01v2 [BDRemux].mkv", Length: 1_400_000_000})
+	torrent := &seadex.Torrent{ReleaseGroup: "cappybara", Tracker: "Nyaa", Files: files}
+
+	got := Torrent(&seadex.Entry{}, torrent)
+
+	if got.Kind != release.KindEncode {
+		t.Errorf("Torrent() kind = %q, want encode (a payload-sized CREDİTLESS extra's BDRemux marker must not override the episode payload)", got.Kind)
+	}
+}
+
+// TestTorrentUnderscoreDelimitedCreditlessExtraDoesNotVote pins the boundary
+// semantics of the creditless type gate: underscore is a scene delimiter for
+// the rest of the classification stack, so an underscore-delimited NCED extra
+// must be excluded like any other creditless file — its remux marker cannot
+// outrank the episode payload's encode marker.
+func TestTorrentUnderscoreDelimitedCreditlessExtraDoesNotVote(t *testing.T) {
+	torrent := &seadex.Torrent{Files: []seadex.File{
+		{Name: "Show_01_[1080p][x265].mkv", Length: 1000},
+		{Name: "Show_NCED_01_[BDRemux].mkv", Length: 900},
+	}}
+	got := Torrent(&seadex.Entry{}, torrent)
+	if got.Kind != release.KindEncode {
+		t.Errorf("Torrent() kind = %q, want encode (an underscore-delimited NCED extra must not vote)", got.Kind)
+	}
+}
+
 // TestPayloadNamesLayeredRule pins the combined eligibility rule's layer
 // interplay on the exact cases where the two historical rules (compare/
 // audit's size-only torrentFileNames, the indexer's name-only

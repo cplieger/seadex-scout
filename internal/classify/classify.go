@@ -178,8 +178,19 @@ func IsCreditlessExtra(name string) bool {
 
 // creditlessExtra matches bonus OP/ED files that may carry absolute-looking
 // numbers ("NCED01v2") which must not read as episodes or classification
-// evidence.
-var creditlessExtra = regexp.MustCompile(`(?i)\b(?:NCOP|NCED|creditless)\d*(?:v\d+)?\b`)
+// evidence. Explicit case classes instead of a global (?i): the release
+// marker engine uses strings.ToLower-faithful classes because Go regexp's
+// SimpleFold diverges from ToLower on U+0130 (İ, which must match as I/i)
+// and U+017F (ſ, which must NOT match as S/s), and this marker feeds the
+// same classification pipeline. Explicit ASCII-alnum boundaries instead of
+// \b: underscore is a regexp word character, but the rest of the
+// classification stack treats it as a scene delimiter, so an
+// underscore-delimited extra ("NCED_01", "creditless_OP") must still read
+// as creditless.
+var creditlessExtra = regexp.MustCompile(
+	`(?:^|[^[:alnum:]])(?:[Nn][Cc][Oo][Pp]|[Nn][Cc][Ee][Dd]|` +
+		`[Cc][Rr][Ee][Dd][Ii\x{0130}][Tt][Ll][Ee][Ss][Ss])\d*(?:[Vv]\d+)?(?:$|[^[:alnum:]])`,
+)
 
 // mediaExts are the video container extensions used to tell an episode/movie
 // file from a sidecar file (subtitles, samples) when scanning a torrent's

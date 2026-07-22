@@ -12,7 +12,7 @@ import (
 // buildIndex, the consumer whose semantics it exists to mirror: for any record
 // list, the deduplicated slice must index bijectively (len == index len) and
 // produce exactly the same effective index as the raw input, every surviving
-// ID must be non-zero and unique, each survivor must be the WHOLE last
+// ID must be positive and unique, each survivor must be the WHOLE last
 // occurrence of its ID (every field, not a projection - routing and refresh
 // acceptance consume Type, TmdbMovies, IMDbIDs, and SeasonTvdb too), and the
 // operation must be idempotent. This is the invariant the acceptance guards
@@ -22,8 +22,8 @@ func TestDeduplicateRecordsIndexOracle(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		records := rapid.SliceOfN(rapid.Custom(func(t *rapid.T) Record {
 			return Record{
-				// A small ID range forces duplicate and zero IDs.
-				AniListID:  rapid.IntRange(0, 5).Draw(t, "anilist_id"),
+				// A small ID range forces duplicate, zero, and negative IDs.
+				AniListID:  rapid.IntRange(-2, 5).Draw(t, "anilist_id"),
 				Type:       rapid.SampledFrom([]string{"", "TV", "MOVIE", "OVA", "SPECIAL"}).Draw(t, "type"),
 				TvdbID:     rapid.IntRange(0, 1000).Draw(t, "tvdb_id"),
 				SeasonTvdb: rapid.IntRange(0, 5).Draw(t, "season_tvdb"),
@@ -56,8 +56,8 @@ func TestDeduplicateRecordsIndexOracle(t *testing.T) {
 		}
 		seen := make(map[int]struct{}, len(out))
 		for _, r := range out {
-			if r.AniListID == 0 {
-				t.Fatalf("deduplicated set retained a zero-ID record: %+v", r)
+			if r.AniListID <= 0 {
+				t.Fatalf("deduplicated set retained a non-positive-ID record: %+v", r)
 			}
 			if _, dup := seen[r.AniListID]; dup {
 				t.Fatalf("deduplicated set repeats ID %d", r.AniListID)

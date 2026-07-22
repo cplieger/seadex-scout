@@ -278,8 +278,9 @@ func TestMarkAndDedupeRejectsConflictingIdentity(t *testing.T) {
 // curated tracker key must be rejected even when both signals carry the same
 // best/alt marker, because byPair records only same-torrent hash/key
 // combinations. A hash-only Nyaa item still matches without a pair, and a
-// legacy snapshot (nil byPair, persisted before the relation existed) falls
-// back to the per-signal agreement gate.
+// legacy snapshot (nil byPair, persisted before the relation existed) fails
+// closed for dual-signal items - the relation cannot be proven - while
+// single-signal matching keeps working until the next snapshot rebuild.
 func TestMarkAndDedupeRejectsCrossTorrentPair(t *testing.T) {
 	hashA := "abcdef1234567890abcdef1234567890abcdef12"
 	hashB := "0123456789012345678901234567890123456789"
@@ -309,9 +310,20 @@ func TestMarkAndDedupeRejectsCrossTorrentPair(t *testing.T) {
 	if out := markAndDedupe(hashOnly, set, upstreamNyaa); len(out) != 1 {
 		t.Fatalf("got %d items, want 1 (a hash-only Nyaa item needs no pair)", len(out))
 	}
+	// A legacy snapshot (nil byPair, persisted before the relation existed)
+	// cannot PROVE any hash/key co-membership, so a dual-signal item fails
+	// closed - even a genuinely same-torrent pair - until the next cycle
+	// rewrites the snapshot with the relation; single-signal matching keeps
+	// working through the upgrade window.
 	legacy := &curation{byHash: set.byHash, byKey: set.byKey}
-	if out := markAndDedupe(crossWired, legacy, upstreamNyaa); len(out) != 1 {
-		t.Fatalf("got %d items, want 1 (a legacy nil-byPair snapshot falls back to per-signal agreement)", len(out))
+	if out := markAndDedupe(crossWired, legacy, upstreamNyaa); len(out) != 0 {
+		t.Fatalf("got %d items, want 0 (a legacy nil-byPair snapshot must reject an unprovable dual-signal pair)", len(out))
+	}
+	if out := markAndDedupe(matching, legacy, upstreamNyaa); len(out) != 0 {
+		t.Fatalf("got %d items, want 0 (even a same-torrent pair is unprovable against a nil byPair)", len(out))
+	}
+	if out := markAndDedupe(hashOnly, legacy, upstreamNyaa); len(out) != 1 {
+		t.Fatalf("got %d items, want 1 (single-signal matching survives a legacy nil-byPair snapshot)", len(out))
 	}
 }
 
@@ -1421,20 +1433,31 @@ func TestReloadSkipsUnchangedMtime(t *testing.T) {
 	}
 }
 
-// TestReloadCoalescesConcurrentRefreshes pins reload's coalescing contract:
-// while one request holds the refresh (reloadMu, as a winning reload does for
-// its whole stat/read/unmarshal), a sibling reload returns immediately without
-// duplicating the read - it does not block and does not install the on-disk
-// snapshot itself - and feedFor keeps serving the current snapshot unblocked.
-// Once the refresh is released, the next reload installs the new snapshot.
+// TestReloadCoalescesConcurrentRefreshes pins reload's coalescing contract
+// AFTER a first successful load: while one request holds the refresh
+// (reloadMu, as a winning reload does for its whole stat/read/unmarshal), a
+// sibling reload returns immediately without duplicating the read - it does
+// not block and does not install the on-disk snapshot itself - and feedFor
+// keeps serving the current snapshot unblocked. Once the refresh is released,
+// the next reload installs the new snapshot. (Before the first load, losers
+// block on the winner's verdict instead - see
+// TestReloadCoalescingLoserDefersToWinnerOnFreshInstall in reload_test.go.)
 func TestReloadCoalescesConcurrentRefreshes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
+	firstJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Title":"first","GUID":"https://nyaa.si/view/1","DownloadURL":"first"}],"ab_feed":[]}`
+	if err := os.WriteFile(path, []byte(firstJSON), 0o600); err != nil {
+		t.Fatalf("write first snapshot: %v", err)
+	}
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, path)
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
+		t.Fatalf("initial feed = %#v, want the first snapshot loaded", got)
+	}
+
+	// A newer on-disk snapshot the in-progress refresh has not installed yet.
 	newJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Title":"new","GUID":"https://nyaa.si/view/3","DownloadURL":"new"}],"ab_feed":[]}`
 	if err := os.WriteFile(path, []byte(newJSON), 0o600); err != nil {
-		t.Fatalf("write snapshot: %v", err)
+		t.Fatalf("write new snapshot: %v", err)
 	}
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, "")
-	ix.path = path
 
 	// Simulate a refresh in progress: hold reloadMu exactly as the winning
 	// request does across its stat/read/unmarshal.
@@ -1451,11 +1474,11 @@ func TestReloadCoalescesConcurrentRefreshes(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		ix.reloadMu.Unlock()
-		t.Fatal("sibling reload blocked behind an in-progress refresh; want an immediate return")
+		t.Fatal("sibling reload blocked behind an in-progress refresh; want an immediate return once a snapshot is loaded")
 	}
-	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
 		ix.reloadMu.Unlock()
-		t.Fatalf("sibling reload installed the snapshot itself = %#v; want the install left to the refresh holder", got)
+		t.Fatalf("sibling reload = %#v; want the current snapshot kept and the install left to the refresh holder", got)
 	}
 
 	// Once the winning request releases the refresh, the next reload installs

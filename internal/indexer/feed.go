@@ -110,7 +110,19 @@ func synthesizeTitle(t *seadex.Torrent, meta EntryInfo) string {
 //     marker-less single file (a movie-shaped OVA) gets none.
 func episodeMarker(t *seadex.Torrent, meta EntryInfo) string {
 	if !isPack(t) {
-		return relabelSeason(singleEpisodeMarker(t.Files), meta.SeasonTvdb)
+		marker := singleEpisodeMarker(t.Files)
+		if meta.IsSpecial && seasonPrefix.MatchString(marker) {
+			// A Fribb-typed special's SeasonTvdb of 0 is a MAPPED season
+			// zero, not an unknown mapping (IsSpecial is the discriminator
+			// the pack arm below already uses), so a single-file special's
+			// cour-local SxxExx half relabels to S00 - relabelSeason alone
+			// would read the 0 as unmapped and keep the file's own season,
+			// pointing the arr at the parent series. Markerless and
+			// absolute-numbered specials pass through: only an SxxExx
+			// season prefix is rewritten.
+			return seasonPrefix.ReplaceAllString(marker, seasonLabel(0))
+		}
+		return relabelSeason(marker, meta.SeasonTvdb)
 	}
 	if meta.SeasonTvdb > 0 {
 		return seasonLabel(meta.SeasonTvdb)

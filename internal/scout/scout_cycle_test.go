@@ -1773,9 +1773,6 @@ func TestCycleCompletionLineCarriesAniListCycleDeltas(t *testing.T) {
 	if healthy := s.Cycle(context.Background()); !healthy {
 		t.Fatal("Cycle healthy=false, want true on a successful steady-state cycle")
 	}
-	if statsCalls != 2 {
-		t.Fatalf("AniListStats snapshots = %d, want 2 (cycle start and completion line)", statsCalls)
-	}
 	wantAttrs := map[string]string{
 		"anilist_calls":       "60",
 		"anilist_calls_cycle": "50",

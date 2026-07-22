@@ -628,7 +628,14 @@ repo root is a minimal example. For a hardened deployment, layer on:
 
 The `/config` volume must be writable by the container user (set `user:` to match
 the host owner of the mounted directory); it holds `config.yaml`, the state
-cache, and the report output. By default the container exposes no network
+cache, and the report output. Create the bind-mount source before the first
+start — `mkdir -p ./config`, run as the host user matching the compose `user:`
+UID:GID — because a directory Docker auto-creates for a missing bind source is
+owned by `root:root`, and the container then cannot write the first-boot
+starter config: `restart: unless-stopped` loops on a permission error without
+ever producing `config.yaml`. (With no `config.yaml` present, each start writes
+a commented starter and exits; edit the host-owned starter and the next retry
+picks it up automatically.) By default the container exposes no network
 port — observability is slog-only and health is the file-marker `health`
 subcommand. It binds a port only when you configure the
 [indexer](#indexer-torznab-feed) feed, which serves on a fixed `:9118`; publish

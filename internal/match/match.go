@@ -161,6 +161,13 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 		}
 		matches = append(matches, run.matchEntry(ctx, &entries[i]))
 	}
+	// Cancellation can arrive while the final entry is being matched, after
+	// the loop's boundary check. Classify it before the clean-pass-only prune
+	// so the caller takes the whole-cycle interruption path and stale memo
+	// entries remain available to the next cycle.
+	if ctx.Err() != nil {
+		run.degraded = true
+	}
 	if !run.degraded {
 		// A degraded pass (outage, tripped breaker, shutdown) could not renew
 		// what expired; keep those entries so the feed's stale-title tier

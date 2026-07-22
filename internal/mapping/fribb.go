@@ -46,10 +46,12 @@ type fribbRecord struct {
 // toRecord converts a decoded Fribb record into a public Record, normalizing
 // the type to upper case and consuming a bare-number themoviedb_id as the
 // movie TMDB id when the record's own type is MOVIE (see tmdbID.movieIDs). It
-// returns ok=false when the record has no AniList ID (nothing to key the
-// SeaDex lookup on).
+// returns ok=false when the record has no positive AniList ID (real AniList
+// IDs are positive, so a zero or negative key could never resolve a SeaDex
+// lookup; the same positive-key contract deduplicateRecords and buildIndex
+// enforce).
 func (r *fribbRecord) toRecord() (Record, bool) {
-	if r.AniListID == 0 {
+	if r.AniListID <= 0 {
 		return Record{}, false
 	}
 	typ := NormalizeType(string(r.Type))

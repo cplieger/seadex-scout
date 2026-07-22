@@ -82,21 +82,38 @@ func (ix *Indexer) statSnapshot() (os.FileInfo, bool) {
 // in-flight request observes the newer mtime at once, and without coalescing
 // each would independently read and unmarshal up to maxFeedBytes before the
 // under-mu recheck let only one install it. reloadMu.TryLock lets exactly one
-// request refresh; the rest return immediately and serve the current immutable
-// snapshot (the next request picks up the newly installed one).
+// request refresh; once a snapshot has loaded, the rest return immediately and
+// serve the current immutable snapshot (the next request picks up the newly
+// installed one). Before the FIRST successful load, losers block on the lock
+// instead: the winner has not yet established whether the on-disk snapshot is
+// usable, so returning early would have to guess between fresh-install and
+// failed state (see the branch below).
 func (ix *Indexer) reload(ctx context.Context) {
 	if ix.path == "" {
 		return
 	}
 	if !ix.reloadMu.TryLock() {
+		ix.mu.RLock()
+		loaded := ix.snapInfo != nil
+		ix.mu.RUnlock()
+		if loaded {
+			// After a successful load, losers coalesce non-blocking and
+			// keep serving the current immutable snapshot; the next request
+			// picks up whatever the winner installs.
+			return
+		}
 		// Before the first successful load, an in-flight reload has not yet
-		// established whether the on-disk snapshot is usable. Mark that
-		// state unavailable until the winning reload either installs a good
-		// snapshot or confirms the normal fresh-install ENOENT case, so a
-		// concurrent request cannot serve a false-empty result. After a
-		// successful load this is a no-op and siblings keep serving last-good.
-		ix.markSnapshotFailedIfUnloaded()
-		return
+		// established whether the on-disk snapshot is usable, and marking
+		// the snapshot failed here would race the winner: it can confirm
+		// the healthy fresh-install ENOENT case and clear snapFailed, then
+		// this loser would set it again before the winner releases
+		// reloadMu, making one startup request render a false
+		// snapshot-unavailable Torznab error. Initial-load callers instead
+		// BLOCK until the winning reload has established fresh-install,
+		// failed, or loaded state; once acquired, this caller runs the
+		// normal stat/read path itself, so a cancelled winner is also
+		// retried.
+		ix.reloadMu.Lock()
 	}
 	defer ix.reloadMu.Unlock()
 	info, ok := ix.statSnapshot()
@@ -297,10 +314,58 @@ func (ix *Indexer) readSnapshot(ctx context.Context) (snapshot, bool, bool) {
 	return snap, true, false
 }
 
+// snapshotDownloadURL is the host-gated reconstruction path for a PERSISTED
+// item's fetch target: it re-applies the tracker-ownership gate
+// (trackerOwnURL, the same fail-closed check writer-side journal admission
+// runs through trackerKey) before handing the GUID to downloadURL, whose
+// trackerID-only contract explicitly assumes its caller already applied that
+// invariant. Persisted data crosses a separate trust boundary from writer
+// admission: a tampered but structurally valid feed.json could otherwise
+// carry a foreign (https://evil.example/view/123) or independent-subdomain
+// (sukebei.nyaa.si/view/123) GUID whose numeric id downloadURL would mint
+// into the apex tracker's download URL for an unrelated torrent. A gated-out
+// item reports ok=false and is dropped exactly like an undecodable GUID.
+func snapshotDownloadURL(tracker, sourceURL, abPasskey string) (string, bool) {
+	scope := trackerScope(tracker)
+	if scope == "" || !trackerOwnURL(scope, sourceURL) {
+		return "", false
+	}
+	return downloadURL(tracker, sourceURL, abPasskey)
+}
+
+// rebuildDownloadURLs is the shared derivation mechanics behind
+// rebuildABDownloadURLs and rebuildNyaaDownloadURLs: it re-derives each feed
+// item's download URL from its non-secret tracker page URL (the GUID) via
+// snapshotDownloadURL (the host-gated path - see its comment for why the
+// persisted GUID must re-pass the tracker-ownership gate), dropping any item
+// whose URL cannot be derived and collecting
+// the drop count plus up to three bounded sample GUIDs for the wrappers'
+// tracker-specific warnings. The wrappers own the policy (the AB passkey
+// gate) and the exact log contract.
+func rebuildDownloadURLs(feed []journalItem, tracker, passkey string) (out []journalItem, dropped int, samples []string) {
+	out = make([]journalItem, 0, len(feed))
+	for i := range feed {
+		it := feed[i]
+		dl, ok := snapshotDownloadURL(tracker, it.GUID, passkey)
+		if !ok {
+			dropped++
+			if len(samples) < 3 {
+				// The GUID is a non-secret tracker page URL; bound it through
+				// the shared emit-boundary policy before it reaches the log.
+				samples = append(samples, capLogText(it.GUID, 256))
+			}
+			continue
+		}
+		it.DownloadURL = dl
+		out = append(out, it)
+	}
+	return out, dropped, samples
+}
+
 // rebuildABDownloadURLs derives each persisted AnimeBytes feed item's download
 // URL from its non-secret tracker page URL (the GUID) and the CURRENTLY
 // configured passkey. FeedWriter persists AB items GUID-only - never a
-// passkey-bearing download URL (see stripABDownloadURLs) - so this derivation
+// passkey-bearing download URL (see stripDownloadURLs) - so this derivation
 // is what makes the loaded AB feed servable at all; it also means a rotated
 // indexer.ab_passkey takes effect on the next load, and a LEGACY snapshot
 // that still embeds a (possibly rotated) passkey URL is overwritten rather
@@ -315,24 +380,7 @@ func (ix *Indexer) rebuildABDownloadURLs(feed []journalItem) []journalItem {
 	if ix.cfg.ABPasskey == "" {
 		return nil
 	}
-	out := make([]journalItem, 0, len(feed))
-	dropped := 0
-	var samples []string
-	for i := range feed {
-		it := feed[i]
-		dl, ok := downloadURL(release.TrackerNameAnimeBytes, it.GUID, ix.cfg.ABPasskey)
-		if !ok {
-			dropped++
-			if len(samples) < 3 {
-				// The GUID is a non-secret tracker page URL; bound it through
-				// the shared emit-boundary policy before it reaches the log.
-				samples = append(samples, capLogText(it.GUID, 256))
-			}
-			continue
-		}
-		it.DownloadURL = dl
-		out = append(out, it)
-	}
+	out, dropped, samples := rebuildDownloadURLs(feed, release.TrackerNameAnimeBytes, ix.cfg.ABPasskey)
 	if dropped > 0 {
 		// The GUID (a tracker page URL) is not a secret and names the
 		// undecodable items; the download URL (which embeds the passkey) is
@@ -357,24 +405,7 @@ func (ix *Indexer) rebuildNyaaDownloadURLs(feed []journalItem) []journalItem {
 	if len(feed) == 0 {
 		return feed
 	}
-	out := make([]journalItem, 0, len(feed))
-	dropped := 0
-	var samples []string
-	for i := range feed {
-		it := feed[i]
-		dl, ok := downloadURL(release.TrackerNameNyaa, it.GUID, "")
-		if !ok {
-			dropped++
-			if len(samples) < 3 {
-				// The GUID is a non-secret tracker page URL; bound it through
-				// the shared emit-boundary policy before it reaches the log.
-				samples = append(samples, capLogText(it.GUID, 256))
-			}
-			continue
-		}
-		it.DownloadURL = dl
-		out = append(out, it)
-	}
+	out, dropped, samples := rebuildDownloadURLs(feed, release.TrackerNameNyaa, "")
 	if dropped > 0 {
 		ix.log.Warn("indexer feed snapshot: Nyaa items dropped; no download URL derivable from tracker page URL",
 			"path", ix.path, "dropped", dropped, "kept", len(out), "sample_guids", samples)

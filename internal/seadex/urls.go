@@ -74,7 +74,15 @@ func (t *Torrent) UsableURL() string {
 		return f.Trimmed
 	case urlform.ClassRelative:
 		// In an href context a rooted path resolves tracker-relative, so it
-		// is published base-prefixed - subject to the colon rule.
+		// is published base-prefixed - subject to the colon rule. A
+		// tracker-specific relative shape (the AB torrent-page form) names
+		// its OWN tracker: prefixing it under a mislabeled entry's base
+		// would publish a wrong-tracker link that cannot identify the
+		// torrent, so the inferred owner's base wins over the untrusted
+		// label's.
+		if inferred, ok := release.LookupTrackerByRelativeURL(f.Trimmed); ok {
+			return usableRelative(f.Trimmed, inferred.BaseURL)
+		}
 		return usableRelative(f.Trimmed, tr.BaseURL)
 	case urlform.ClassSchemelessHost:
 		// A schemeless value whose recovered authority IS a canonical

@@ -218,15 +218,21 @@ func pingArrs(ctx context.Context, sonarr *arrapi.Sonarr, radarr *arrapi.Radarr)
 
 // logPing logs one arr's startup reachability, classifying a context
 // cancellation (shutdown mid-startup) as routine rather than an arr fault.
+// The logged error rides httpx.LogSafeError like the cycle and per-series
+// walk boundaries: arrapi wraps transport failures around *url.Error, whose
+// text carries the full request URL, so an accepted arr URL with embedded
+// reverse-proxy credentials would otherwise leak them to this WARN/DEBUG.
 func logPing(arr string, err error) {
-	switch {
-	case err == nil:
+	if err == nil {
 		slog.Info(arr + " reachable")
-	case errors.Is(err, context.Canceled):
-		slog.Debug(arr+" startup ping cancelled by shutdown", "error", err)
-	default:
-		slog.Warn(arr+" ping failed at startup", "error", err)
+		return
 	}
+	safeErr := httpx.LogSafeError(err)
+	if errors.Is(err, context.Canceled) {
+		slog.Debug(arr+" startup ping cancelled by shutdown", "error", safeErr)
+		return
+	}
+	slog.Warn(arr+" ping failed at startup", "error", safeErr)
 }
 
 // filterOptions builds the content-filter policy from config. The AnimeBytes

@@ -129,6 +129,13 @@ func ABVisible(tracker, rawURL string, animeBytes bool) bool {
 	if release.IsAnimeBytes(tracker) {
 		return false
 	}
+	// A relative URL carries no host evidence, but the AB torrent-page shape
+	// ("/torrents.php?...&torrentid=...") is tracker identity in its own
+	// right: a mislabeled entry publishing that shape must not surface with
+	// the toggle off.
+	if inferred, ok := release.LookupTrackerByRelativeURL(rawURL); ok && inferred.Name == release.TrackerNameAnimeBytes {
+		return false
+	}
 	host, ok := hostFromRawURL(rawURL)
 	if !ok {
 		return false
@@ -171,6 +178,11 @@ func ABGated(tracker, rawURL string) bool {
 // gate for verdict/obtainability eligibility.
 func DefinitelyAB(tracker, rawURL string) bool {
 	if release.IsAnimeBytes(tracker) {
+		return true
+	}
+	// The AB torrent-page relative shape is definitive tracker identity,
+	// exactly like host evidence (mirrors ABVisible's relative-URL gate).
+	if inferred, ok := release.LookupTrackerByRelativeURL(rawURL); ok && inferred.Name == release.TrackerNameAnimeBytes {
 		return true
 	}
 	host, ok := hostFromRawURL(rawURL)

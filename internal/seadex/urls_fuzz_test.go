@@ -4,6 +4,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/cplieger/seadex-scout/internal/release"
 )
 
 // FuzzTorrentUsableURL fuzzes the unsafe-scheme and host-binding gate over the
@@ -11,10 +13,13 @@ import (
 // Invariants: a protocol-relative URL (//host/...) is always rejected (empty
 // result); a non-empty result never carries a non-http(s) scheme (javascript:,
 // data:, file: must never become clickable links in findings/reports/feeds);
-// an absolute http(s) input that survives the tracker host-binding gate is
-// returned unchanged apart from trimming; and the function is idempotent
-// (re-running on its own output is a fixed point, so a link already made
-// usable is never re-mangled).
+// a non-empty result's host is always bound to a canonical tracker host from
+// the release tracker table (so a regression that drops the
+// release.LookupTrackerByHost gate cannot let https://evil.example/x or a
+// suffix-confusion host through); an absolute http(s) input that survives the
+// tracker host-binding gate is returned unchanged apart from trimming; and
+// the function is idempotent (re-running on its own output is a fixed point,
+// so a link already made usable is never re-mangled).
 func FuzzTorrentUsableURL(f *testing.F) {
 	f.Add("https://nyaa.si/view/1", "Nyaa")
 	f.Add("/torrents.php?id=1&torrentid=2", "AB")
@@ -58,6 +63,12 @@ func FuzzTorrentUsableURL(f *testing.F) {
 		// authority (https://trusted@evil.example/x must be rejected).
 		if parsed.User != nil {
 			t.Errorf("UsableURL(%q, tracker %q) = %q retains userinfo authority", rawURL, tracker, out)
+		}
+		// Security invariant: a usable link's host is always a canonical
+		// tracker host (or a real dot-delimited subdomain of one) - the
+		// host-binding gate a compromised SeaDex response must not bypass.
+		if _, ok := release.LookupTrackerByHost(parsed.Hostname()); !ok {
+			t.Errorf("UsableURL(%q, tracker %q) = %q has non-canonical host %q", rawURL, tracker, out, parsed.Hostname())
 		}
 		lower := strings.ToLower(out)
 		// Security invariant: any scheme on the output must be http or https.

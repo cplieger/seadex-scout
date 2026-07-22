@@ -99,6 +99,47 @@ func TestUpstreamErrorDocMessageNamesCodeAndDescription(t *testing.T) {
 	}
 }
 
+// TestParseErrorDocumentBoundsFields pins the retention bound on the fallback
+// <error>-document parse: an over-cap code or description must NOT be retained
+// in an upstreamDocError (the previous unrestricted unmarshal parked up to the
+// 16 MiB transport cap in the error strings the retry loop then redacted and
+// logged on every attempt) - the response instead fails as a generic parse
+// error, whose classify path redacts then bounds. At-cap documents and the
+// <error>-root requirement keep working.
+func TestParseErrorDocumentBoundsFields(t *testing.T) {
+	over := strings.Repeat("d", maxUpstreamFieldBytes+1)
+	tests := map[string]struct {
+		body    string
+		wantDoc bool
+	}{
+		"description over the cap rejected": {
+			body: `<?xml version="1.0"?><error code="100" description="` + over + `"/>`,
+		},
+		"code over the cap rejected": {
+			body: `<?xml version="1.0"?><error code="` + over + `" description="x"/>`,
+		},
+		"non-error root rejected": {
+			body: `<?xml version="1.0"?><failure code="100" description="x"/>`,
+		},
+		"at-cap description accepted": {
+			body:    `<?xml version="1.0"?><error code="100" description="` + strings.Repeat("d", maxUpstreamFieldBytes) + `"/>`,
+			wantDoc: true,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := parseTorznab([]byte(tc.body))
+			if err == nil {
+				t.Fatal("parseTorznab on a non-RSS document returned nil error")
+			}
+			var doc *upstreamDocError
+			if got := errors.As(err, &doc); got != tc.wantDoc {
+				t.Errorf("errors.As(err, *upstreamDocError) = %v (err = %T), want %v", got, err, tc.wantDoc)
+			}
+		})
+	}
+}
+
 // TestSanitizeUpstreamText_cleansAndBounds pins the emit-boundary policy on
 // untrusted Torznab <error> text: control characters (a newline that could
 // spoof a level=ERROR log line) are replaced with spaces, and the output is
@@ -169,6 +210,24 @@ func TestParseTorznabDecodeLimits(t *testing.T) {
 		},
 		"guid over the cap rejected": {
 			inner:   "<item><guid>" + strings.Repeat("g", maxUpstreamFieldBytes+1) + "</guid></item>",
+			wantErr: true,
+		},
+		"size text over the cap rejected": {
+			// <size> decodes through the bounded-text path before ParseInt,
+			// so a multi-kilobyte numeric field is charged to the budget
+			// (and rejected) instead of bypassing the accounting helper.
+			inner:   "<item><size>" + strings.Repeat("9", maxUpstreamFieldBytes+1) + "</size></item>",
+			wantErr: true,
+		},
+		"enclosure url over the cap rejected": {
+			inner:   `<item><enclosure url="http://x/` + strings.Repeat("u", maxUpstreamFieldBytes+1) + `" length="1"/></item>`,
+			wantErr: true,
+		},
+		"enclosure length over the cap rejected": {
+			// The length attribute is bounded and accounted BEFORE strconv,
+			// like every other recognized field; the struct decode it
+			// replaced materialized it outside the budget.
+			inner:   `<item><enclosure url="http://x/1" length="` + strings.Repeat("9", maxUpstreamFieldBytes+1) + `"/></item>`,
 			wantErr: true,
 		},
 		"repeated fields in one item over the budget rejected": {

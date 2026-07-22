@@ -412,40 +412,8 @@ func (s *Scout) finishInterruptedMatch(ctx context.Context, start time.Time, sta
 func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, startStats aniListStats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, result match.Result, mapErr error) bool {
 	cleanMatches, failedItems := splitFailedMatches(result.Matches)
 	findings := s.deps.Comparer.Compare(cleanMatches)
-
-	// A cold start (a fresh install, or a lost/reset cache) has no dedupe table
-	// yet: baseline the current findings silently so the whole pre-existing
-	// backlog is not dumped as notifications at once. A partial first walk (or
-	// an AniList-degraded first match) seeds the same way but records the
-	// baseline as incomplete (state.BaselineIncomplete): the seed covers only
-	// the items that walked cleanly and mapped completely, so every following
-	// successful cycle keeps seeding silently -
-	// the affected items' pre-existing backlog must not burst as fresh
-	// notifications when they recover - until the first complete cycle seeds
-	// the whole library and clears the flag. Steady-state emission then
-	// resumes via Report. The len(Findings) guard keeps an upgrade of an
-	// already-running instance (state predating the flags but already holding
-	// findings) on the normal emit path. One cell stays conservative: a state
-	// with no findings and no flags set (an upgraded fully-aligned instance,
-	// or an install whose first cycles were all degraded) is indistinguishable
-	// from a cold start and baselines, preferring a one-cycle silent seed over
-	// bursting a whole backlog - a finding first appearing in exactly that
-	// cycle is seeded, not emitted. The full list is always available on
-	// demand via report mode.
-	var newFindings map[string]notify.Alerted
-	if st.BaselineIncomplete || (!st.Baselined && len(st.Findings) == 0) {
-		newFindings = s.deps.Notifier.Baseline(findings, time.Now())
-		st.Baselined = true
-		st.BaselineIncomplete = snap.Partial || result.Degraded
-	} else {
-		// Resolution scoping: a prior finding whose entry sits in the failed
-		// set - a Failed-walk item's AniList id, or an id whose needed AniList
-		// lookup failed transiently this cycle - is carried forward unresolved
-		// (its absence from findings is missing data, not alignment), while
-		// the unaffected majority emits and resolves normally.
-		newFindings = s.deps.Notifier.Notify(findings, st.Findings, unionIDs(failedItems, result.IncompleteIDs), time.Now())
-		st.Baselined = true
-	}
+	newFindings := s.reconcileFindings(st, findings,
+		unionIDs(failedItems, result.IncompleteIDs), snap.Partial || result.Degraded, time.Now())
 
 	diff := library.DiffSnapshots(&st.Library, &snap)
 	attrs := make([]any, 0, 26)
@@ -460,27 +428,79 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 	attrs = append(attrs,
 		"added", diff.Added, "removed", diff.Removed, "changed", diff.Changed,
 		"duration", time.Since(start).Round(time.Millisecond).String())
-	// The AniList degradation streak advances/resets only on COMPLETED
-	// cycles (mirroring how SeadexFailures resets beside the fetch-success
-	// check): a gated or interrupted cycle is evidence of neither an outage
-	// nor a recovery. The increment lands before the switch so the WARN and
-	// the escalated ERROR both carry the up-to-date streak, and the persisted
-	// value rides the save below.
-	if result.Degraded {
-		st.AniListDegraded++
-	} else {
-		st.AniListDegraded = 0
+	s.recordAniListDegradation(st, &result)
+	s.logCompletedCycle(&snap, &result, mapErr, failedItems, st.AniListDegraded, attrs)
+
+	st.Library, st.Mapping, st.Memo, st.Findings = snap, *mapCache, result.Memo, newFindings
+	s.save(ctx, st)
+	return true
+}
+
+// reconcileFindings emits (or cold-start baselines) this cycle's findings
+// against the persisted dedupe table, returning the refreshed table. A cold
+// start (a fresh install, or a lost/reset cache) has no dedupe table yet:
+// baseline the current findings silently so the whole pre-existing backlog is
+// not dumped as notifications at once. A partial first walk (or an
+// AniList-degraded first match) seeds the same way but records the baseline
+// as incomplete (state.BaselineIncomplete): the seed covers only the items
+// that walked cleanly and mapped completely, so every following successful
+// cycle keeps seeding silently - the affected items' pre-existing backlog
+// must not burst as fresh notifications when they recover - until the first
+// complete cycle seeds the whole library and clears the flag. Steady-state
+// emission then resumes via Report. The len(Findings) guard keeps an upgrade
+// of an already-running instance (state predating the flags but already
+// holding findings) on the normal emit path. One cell stays conservative: a
+// state with no findings and no flags set (an upgraded fully-aligned
+// instance, or an install whose first cycles were all degraded) is
+// indistinguishable from a cold start and baselines, preferring a one-cycle
+// silent seed over bursting a whole backlog - a finding first appearing in
+// exactly that cycle is seeded, not emitted. The full list is always
+// available on demand via report mode.
+func (s *Scout) reconcileFindings(st *state.State, findings []compare.Finding, preserve map[int]struct{}, incomplete bool, now time.Time) map[string]notify.Alerted {
+	if st.BaselineIncomplete || (!st.Baselined && len(st.Findings) == 0) {
+		current := s.deps.Notifier.Baseline(findings, now)
+		st.Baselined = true
+		st.BaselineIncomplete = incomplete
+		return current
 	}
-	if result.Degraded && st.AniListDegraded >= aniListDegradedEscalationThreshold {
-		// The escalation fires on EVERY completed AniList-degraded cycle at
-		// the threshold, including one whose completion line the partial-walk
-		// switch arm below wins - otherwise a sustained AniList outage that
-		// coexists with a persistent partial walk advances the streak forever
-		// without ever alerting.
+	// Resolution scoping: a prior finding whose entry sits in the preserve
+	// set - a Failed-walk item's AniList id, or an id whose needed AniList
+	// lookup failed transiently this cycle - is carried forward unresolved
+	// (its absence from findings is missing data, not alignment), while
+	// the unaffected majority emits and resolves normally.
+	st.Baselined = true
+	return s.deps.Notifier.Notify(findings, st.Findings, preserve, now)
+}
+
+// recordAniListDegradation advances or resets the persisted AniList
+// degradation streak and escalates a sustained outage. The streak
+// advances/resets only on COMPLETED cycles (mirroring how SeadexFailures
+// resets beside the fetch-success check): a gated or interrupted cycle is
+// evidence of neither an outage nor a recovery. It runs before the completion
+// line so the WARN and the escalated ERROR both carry the up-to-date streak,
+// and the persisted value rides the caller's save. The escalation fires on
+// EVERY completed AniList-degraded cycle at the threshold, including one
+// whose completion line the partial-walk switch arm wins - otherwise a
+// sustained AniList outage that coexists with a persistent partial walk
+// advances the streak forever without ever alerting.
+func (s *Scout) recordAniListDegradation(st *state.State, result *match.Result) {
+	if !result.Degraded {
+		st.AniListDegraded = 0
+		return
+	}
+	st.AniListDegraded++
+	if st.AniListDegraded >= aniListDegradedEscalationThreshold {
 		s.log.Error("anilist lookups degraded repeatedly; matching incomplete and findings frozen for affected entries - inspect graphql.anilist.co reachability and egress",
 			"incomplete_lookups", len(result.IncompleteIDs),
 			"consecutive_anilist_degraded", st.AniListDegraded)
 	}
+}
+
+// logCompletedCycle emits the one completion line the deadman alert counts:
+// "cycle complete", or "cycle degraded" with the most severe applicable
+// reason (partial walk, then AniList degradation, then a stale-but-usable
+// map).
+func (s *Scout) logCompletedCycle(snap *library.Snapshot, result *match.Result, mapErr error, failedItems map[int]struct{}, aniListStreak int, attrs []any) {
 	switch {
 	case snap.Partial:
 		// A partial walk compared only the clean items, so the cycle closed
@@ -494,13 +514,13 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 		// read as fully successful. Same reason attr as before the scoped
 		// handling, so the deadman and any reason-keyed queries stay stable.
 		// The persisted streak's SUSTAINED-degradation ERROR escalation (the
-		// SeadexScoutCycleError rule) lives above the switch, beside the
-		// streak update, so it fires even when the partial-walk arm wins
-		// this completion line.
+		// SeadexScoutCycleError rule) lives in recordAniListDegradation,
+		// beside the streak update, so it fires even when the partial-walk
+		// arm wins this completion line.
 		s.cycleDegraded("anilist-degraded",
 			append([]any{
 				"incomplete_lookups", len(result.IncompleteIDs),
-				"consecutive_anilist_degraded", st.AniListDegraded,
+				"consecutive_anilist_degraded", aniListStreak,
 			}, attrs...)...)
 	case mapErr != nil:
 		// Only a stale-but-usable mapping error reaches this point; unusable and
@@ -511,10 +531,6 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 	default:
 		s.log.Info("cycle complete", attrs...)
 	}
-
-	st.Library, st.Mapping, st.Memo, st.Findings = snap, *mapCache, result.Memo, newFindings
-	s.save(ctx, st)
-	return true
 }
 
 // splitFailedMatches partitions the match set for a partial walk: a match

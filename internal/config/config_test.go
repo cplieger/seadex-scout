@@ -1256,23 +1256,28 @@ func TestValidateWarnsOnCredentialBearingTorznabURL(t *testing.T) {
 	})
 }
 
-// TestValidateWarnsOnCredentialBearingArrURL pins Validate's credential-embedding
-// arr-URL diagnostic: a credential-like query parameter or userinfo in
-// sonarr.url or radarr.url fires the warning naming ONLY the field (never the
-// credential-bearing URL, which the warning exists to keep out of
-// library-walk-failure logs), and clean URLs stay silent.
+// TestValidateWarnsOnCredentialBearingArrURL pins Validate's credential
+// posture for arr URLs: a query-bearing url (where pasted credentials land)
+// is rejected outright naming ONLY the field — arrapi's base-URL contract
+// forbids a query, and its own rejection would echo the full URL — while a
+// userinfo credential (which still loads) fires the field-name-only warning,
+// and clean URLs stay silent. Neither path may leak the credential value.
 func TestValidateWarnsOnCredentialBearingArrURL(t *testing.T) {
 	const warnMsg = "arr url embeds a credential-like query parameter or userinfo"
 
-	t.Run("apikey query param warns naming the sonarr field", func(t *testing.T) {
+	t.Run("apikey query param is rejected naming only the sonarr field", func(t *testing.T) {
 		const cred = "leaked-arr-cred-sentinel"
 		rec := capture.Default(t)
 		c := Config{RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989?apikey=" + cred, SonarrAPIKey: "k"}
-		if err := c.Validate(); err != nil {
-			t.Fatalf("Validate: %v", err)
+		err := c.Validate()
+		if err == nil {
+			t.Fatal("Validate() = nil, want the no-query rejection (arrapi's base-URL contract forbids a query)")
 		}
-		if !rec.Contains(warnMsg) || !rec.AttrContains("", "field", "sonarr.url") {
-			t.Errorf("Validate() log = %v, want the credential warning naming sonarr.url", rec.Messages())
+		if !strings.Contains(err.Error(), "sonarr.url must not contain a query") {
+			t.Errorf("Validate() error = %q, want the field-name-only no-query rejection", err)
+		}
+		if strings.Contains(err.Error(), cred) {
+			t.Errorf("Validate() error leaks the credential value: %v", err)
 		}
 		corpus := strings.Join(rec.Messages(), "\n")
 		if strings.Contains(corpus, cred) || rec.AttrContains("", "", cred) {
