@@ -215,11 +215,20 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 	return items, stats
 }
 
+// snapshotUnavailableGate is a test seam (see harvestWait for the pattern)
+// marking the window between snapshotUnavailable's read-unlock and its
+// write-lock, where a concurrent install/clear can race the escalation. A
+// no-op in production.
+var snapshotUnavailableGate = func() {}
+
 // snapshotUnavailable reports whether the startup snapshot-unavailable state
 // (see the snapFailed field) is active, emitting its once-per-onset WARN on
 // the first report so the local fault is visible without a per-request log
 // storm. The state is set/cleared by reload's load paths; requests only read
-// it here.
+// it here. The write-locked re-check is authoritative: a request that saw the
+// failed state under the read lock but loses the race to an install/clear
+// before acquiring the write lock answers from the fresh snapshot instead of
+// rendering a stale Torznab error.
 func (ix *Indexer) snapshotUnavailable() bool {
 	ix.mu.RLock()
 	failed, warned := ix.snapFailed, ix.snapFailedWarned
@@ -227,17 +236,25 @@ func (ix *Indexer) snapshotUnavailable() bool {
 	if !failed {
 		return false
 	}
-	if !warned {
-		ix.mu.Lock()
-		// Re-check under the write lock: concurrent requests racing the onset
-		// must still emit the WARN exactly once, and an install that cleared
-		// snapFailed in between must not re-arm a stale warning.
-		if ix.snapFailed && !ix.snapFailedWarned {
-			ix.snapFailedWarned = true
-			ix.log.Warn("indexer feed snapshot unavailable; answering Torznab requests with an error until a snapshot loads",
-				"path", ix.path)
-		}
-		ix.mu.Unlock()
+	if warned {
+		return true
+	}
+
+	snapshotUnavailableGate()
+
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	// Re-check under the write lock, authoritatively: concurrent requests
+	// racing the onset must still emit the WARN exactly once, and an install
+	// that cleared snapFailed between the read-unlock and here must make THIS
+	// request answer from the fresh snapshot rather than render a stale error.
+	if !ix.snapFailed {
+		return false
+	}
+	if !ix.snapFailedWarned {
+		ix.snapFailedWarned = true
+		ix.log.Warn("indexer feed snapshot unavailable; answering Torznab requests with an error until a snapshot loads",
+			"path", ix.path)
 	}
 	return true
 }

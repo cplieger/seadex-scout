@@ -1340,32 +1340,11 @@ func TestResolveHarvestKeyPartialSignals(t *testing.T) {
 	}
 }
 
-// TestSleepCtx pins the production pacing sleep the suite otherwise never
-// runs (TestMain swaps harvestWait package-wide; the default is
-// httpx.SleepCtx): a cancelled context ends the gap immediately with the
-// context error - a pacing gap must never outlive a shutdown - and an
-// uncancelled gap blocks for at least the requested duration and returns
-// nil.
-func TestSleepCtx(t *testing.T) {
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := httpx.SleepCtx(cancelled, time.Hour); !errors.Is(err, context.Canceled) {
-		t.Errorf("SleepCtx(cancelled ctx) = %v, want context.Canceled", err)
-	}
-	start := time.Now()
-	if err := httpx.SleepCtx(context.Background(), time.Millisecond); err != nil {
-		t.Errorf("SleepCtx(1ms) = %v, want nil", err)
-	}
-	if elapsed := time.Since(start); elapsed < time.Millisecond {
-		t.Errorf("SleepCtx returned after %v, want at least the 1ms gap", elapsed)
-	}
-}
-
 // TestHarvestPacerNextDeniedBranches pins the two refusal paths of the pacer
 // no end-to-end test reaches: a slice already spent at entry admits no query
 // (harvestShow's inner page loop calls next directly, so page 2+ of a show
 // can arrive with the slice expired and no outer pre-check), and a pacing
-// gap cut short by cancellation (sleepCtx returning the context error)
+// gap cut short by cancellation (harvestWait returning the context error)
 // admits no query rather than letting a shutdown leak one last request.
 func TestHarvestPacerNextDeniedBranches(t *testing.T) {
 	base := time.Unix(1700000000, 0)

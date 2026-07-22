@@ -124,8 +124,16 @@ func TestClassifyPlantedMarkerProperties(t *testing.T) {
 			t.Fatalf("markers in a later Names element classified %q/%q, want remux/%q", later.Kind, later.Resolution, strings.ToLower(res))
 		}
 
-		if got := classifyName(both); got.Group != NoGroup || got.DualAudio {
-			t.Fatalf("group fallback/dual-audio contract broken: Group=%q DualAudio=%v", got.Group, got.DualAudio)
+		if got := classifyName(both); got.Group != NoGroup {
+			t.Fatalf("group fallback broken: Group=%q, want %q", got.Group, NoGroup)
+		}
+
+		dualAudioText := base + d + "Dual Audio"
+		if got := classifyName(dualAudioText); got.DualAudio {
+			t.Fatalf("text-only dual-audio marker in %q set DualAudio=true, want structured metadata only", dualAudioText)
+		}
+		if got := Classify(&Input{Names: []string{dualAudioText}, DualAudio: true}); !got.DualAudio {
+			t.Fatal("structured DualAudio=true was not preserved")
 		}
 	})
 }

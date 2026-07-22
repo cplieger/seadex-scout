@@ -251,7 +251,8 @@ suffixed — resolution, `Dual Audio`, the release group bracketed; nothing is
 invented. On top of that the feed **harvests real release titles**: each cycle
 it spends a paced slice of Prowlarr queries (one every 2 seconds, for at most
 10 minutes; series-level on AnimeBytes, season-form with up to 3 offset pages
-per show per cycle on Nyaa, resuming where it left off on the next cycle)
+per show per cycle on Nyaa, with the next cycle rotating to the show after
+the last group that consumed a query)
 matching curated torrents by tracker id or info hash, and caches each matched
 title permanently — so items upgrade from
 a synthesized title to the tracker's real one, usually within a cycle or two,

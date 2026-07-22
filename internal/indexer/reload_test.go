@@ -353,3 +353,36 @@ func TestReloadPreJournalSnapshotServesEmptyFeeds(t *testing.T) {
 		t.Error("curation maps dropped from a pre-journal snapshot; searches must still match against them")
 	}
 }
+
+// TestSnapshotUnavailableRecoveredBetweenLocksAnswersFresh pins the
+// read-fast-path escalation window deterministically: a request that
+// observes the failed state under the read lock, then loses the race to an
+// install/clear before it acquires the write lock, must answer from the
+// fresh snapshot (snapshotUnavailable = false, no Torznab error) and emit no
+// stale snapshot-unavailable WARN. The snapshotUnavailableGate seam pauses
+// the request exactly between the read unlock and the write lock.
+func TestSnapshotUnavailableRecoveredBetweenLocksAnswersFresh(t *testing.T) {
+	log, rec := capture.New()
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, filepath.Join(t.TempDir(), "feed.json"))
+	ix.mu.Lock()
+	ix.snapFailed = true
+	ix.mu.Unlock()
+
+	prev := snapshotUnavailableGate
+	snapshotUnavailableGate = func() {
+		// A concurrent installSnapshot/clearSnapshotFailed wins the race and
+		// clears the failure before this request obtains the write lock.
+		ix.mu.Lock()
+		ix.snapFailed = false
+		ix.mu.Unlock()
+	}
+	t.Cleanup(func() { snapshotUnavailableGate = prev })
+
+	if ix.snapshotUnavailable() {
+		t.Error("snapshotUnavailable = true after the failure cleared between the read unlock and the write lock, want false (answer from the fresh snapshot)")
+	}
+	if got := rec.Count("indexer feed snapshot unavailable; answering Torznab requests with an error until a snapshot loads"); got != 0 {
+		t.Errorf("stale snapshot-unavailable WARN emitted %d times after recovery, want 0; log output:\n%s",
+			got, strings.Join(rec.Messages(), "\n"))
+	}
+}
