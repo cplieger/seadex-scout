@@ -265,9 +265,14 @@ func (w *FeedWriter) carryItem(it *journalItem, cur map[string][]curatedRef, ws 
 	// dedupe RSS releases by GUID, so a SeaDex URL-text change on the same
 	// tracker identity (a query param appended, scheme/casing normalized)
 	// must never mint a new GUID and re-trigger a grab for an
-	// already-journaled torrent. A malformed hand-edited record with an
-	// empty stored GUID still self-heals from the fresh render.
-	if it.GUID != "" {
+	// already-journaled torrent. Only a stored GUID that still proves the
+	// same journal identity is kept (trackerKeyFromURL resolves it back to
+	// this item's key): a malformed, foreign-host, or cross-key GUID from a
+	// hand-edited snapshot would otherwise permanently displace the valid
+	// fresh GUID and make reload drop the item every rebuild. Such a record
+	// - like one with an empty stored GUID - self-heals from the fresh
+	// render.
+	if it.GUID != "" && trackerKeyFromURL(it.GUID) == it.Key {
 		fresh.GUID = it.GUID
 	}
 	return fresh, true

@@ -228,7 +228,7 @@ func buildIndex(records []Record) *Index {
 }
 
 // cacheUsable reports whether a cached record set is usable as an effective
-// AniList-keyed mapping: after deduplication (which drops zero AniList IDs,
+// AniList-keyed mapping: after deduplication (which drops non-positive AniList IDs,
 // so a JSON-valid state cache such as records:[{}] is not a usable map - and
 // whose output indexes bijectively, pinned by
 // TestDeduplicateRecordsIndexOracle) the effective set must be non-empty and
@@ -831,8 +831,8 @@ const maxLoggedUnknownKeys = 20
 // overrideSet.unknownOverflow.
 const maxRetainedUnknownKeys = maxLoggedUnknownKeys + 1
 
-// maxLoggedKeyBytes bounds one displayed unknown-key name; the full
-// count still rides in unknown_key_count.
+// maxLoggedKeyBytes bounds one displayed unknown-key name. unknown_key_count
+// is exact unless count_capped is true, in which case it is a lower bound.
 const maxLoggedKeyBytes = 64
 
 // maxLoggedDuplicateIDs bounds how many distinct duplicated AniList IDs the

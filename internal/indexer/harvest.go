@@ -149,11 +149,11 @@ func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]journ
 	cursor = prevCursor
 	defer func() { stats.pending = syntheticCount(feeds, titles) }()
 	groups, index := pendingHarvest(feeds, titles, infoFor)
+	pruneHarvestPages(cp.Pages, groups)
+	defer func() { cursor = encodeHarvestCheckpoint(cp) }()
 	if len(groups) == 0 || len(w.upstreams) == 0 {
 		return stats, cursor
 	}
-	pruneHarvestPages(cp.Pages, groups)
-	defer func() { cursor = encodeHarvestCheckpoint(cp) }()
 	// The pacer's deadline only gates ADMISSION of the next query; an
 	// admitted u.search runs the whole Prowlarr retry tree (three 60s
 	// attempts plus backoff or Retry-After waits) under the caller's

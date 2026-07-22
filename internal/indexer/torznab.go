@@ -576,11 +576,41 @@ type attrXML struct {
 
 // errorXML mirrors a Newznab/Torznab <error> document an upstream can return
 // in place of an RSS feed (bad credentials, a named indexer failure) - the
-// same shape renderError emits on the serving side.
+// same shape renderError emits on the serving side. Decoding is custom (see
+// UnmarshalXML) so every attribute is bounded BEFORE assignment.
 type errorXML struct {
-	XMLName     xml.Name `xml:"error"`
-	Code        string   `xml:"code,attr"`
-	Description string   `xml:"description,attr"`
+	Code        string
+	Description string
+}
+
+// UnmarshalXML decodes the <error> document under the same decode-time
+// budget itemXML.account enforces on feed items: only an <error> root is
+// accepted, and every attribute value is charged against
+// maxUpstreamFieldBytes and the cumulative maxUpstreamTextBytes BEFORE it is
+// assigned, returning a *torznabLimitError on breach - the plain struct
+// unmarshal this replaces copied up to the transport cap into the fields and
+// only len()-checked them afterwards.
+func (e *errorXML) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	if start.Name.Local != "error" {
+		return fmt.Errorf("expected torznab error element, got %s", start.Name.Local)
+	}
+	total := 0
+	for _, attr := range start.Attr {
+		if len(attr.Value) > maxUpstreamFieldBytes {
+			return &torznabLimitError{limit: fmt.Sprintf("field longer than %d bytes", maxUpstreamFieldBytes)}
+		}
+		total += len(attr.Value)
+		if total > maxUpstreamTextBytes {
+			return &torznabLimitError{limit: fmt.Sprintf("cumulative decoded text over %d bytes", maxUpstreamTextBytes)}
+		}
+		switch attr.Name.Local {
+		case "code":
+			e.Code = attr.Value
+		case "description":
+			e.Description = attr.Value
+		}
+	}
+	return d.Skip()
 }
 
 // upstreamDocError is parseTorznab's error for a syntactically VALID Torznab
@@ -625,27 +655,23 @@ func torznabCodeNum(code string) int {
 	return n
 }
 
-// parseErrorDocument strictly parses a Newznab/Torznab <error> document (the
-// errorXML XMLName only accepts an <error> root), bounding its code and
-// description to maxUpstreamFieldBytes BEFORE an upstreamDocError retains
-// them: the previous unrestricted unmarshal let a compromised upstream park
-// up to the 16 MiB transport cap in the retained error strings, which the
-// retry loop then redacted and logged on every attempt. The bound REJECTS an
-// over-cap document (ok=false; the caller reports the generic parse failure,
-// whose classify path redacts then bounds) rather than truncating it, which
-// preserves the redact-before-sanitize ordering: the retained fields stay
-// RAW and untruncated so fetchAndParse's exact-substring API-key redaction
-// always sees the intact key, and Error() remains the sanitizing emit
-// boundary.
-func parseErrorDocument(body []byte) (*upstreamDocError, bool) {
+// parseErrorDocument strictly parses a Newznab/Torznab <error> document
+// (errorXML.UnmarshalXML only accepts an <error> root), bounding its code and
+// description AT DECODE TIME before an upstreamDocError retains them: the
+// previous unrestricted unmarshal let a compromised upstream park up to the
+// 16 MiB transport cap in the retained error strings, which the retry loop
+// then redacted and logged on every attempt. The bound REJECTS an over-cap
+// document (the decoder's *torznabLimitError, a definitive verdict
+// parseTorznab propagates) rather than truncating it, which preserves the
+// redact-before-sanitize ordering: the retained fields stay RAW and
+// untruncated so fetchAndParse's exact-substring API-key redaction always
+// sees the intact key, and Error() remains the sanitizing emit boundary.
+func parseErrorDocument(body []byte) (*upstreamDocError, error) {
 	var e errorXML
-	if xml.Unmarshal(body, &e) != nil {
-		return nil, false
+	if err := xml.Unmarshal(body, &e); err != nil {
+		return nil, err
 	}
-	if len(e.Code) > maxUpstreamFieldBytes || len(e.Description) > maxUpstreamFieldBytes {
-		return nil, false
-	}
-	return newUpstreamDocError(e.Code, e.Description), true
+	return newUpstreamDocError(e.Code, e.Description), nil
 }
 
 func (e *upstreamDocError) Error() string {
@@ -683,8 +709,15 @@ func parseTorznab(body []byte) ([]item, error) {
 		if limitErr, ok := errors.AsType[*torznabLimitError](err); ok {
 			return nil, limitErr
 		}
-		if docErr, ok := parseErrorDocument(body); ok {
+		docErr, docParseErr := parseErrorDocument(body)
+		if docParseErr == nil {
 			return nil, docErr
+		}
+		// An over-cap <error> attribute is a definitive decode-limit
+		// verdict on the fallback parse too; propagate it over the generic
+		// RSS parse failure so it classifies like every other limit breach.
+		if limitErr, ok := errors.AsType[*torznabLimitError](docParseErr); ok {
+			return nil, limitErr
 		}
 		return nil, fmt.Errorf("parse torznab feed: %w", err)
 	}

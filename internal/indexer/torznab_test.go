@@ -99,24 +99,28 @@ func TestUpstreamErrorDocMessageNamesCodeAndDescription(t *testing.T) {
 	}
 }
 
-// TestParseErrorDocumentBoundsFields pins the retention bound on the fallback
-// <error>-document parse: an over-cap code or description must NOT be retained
-// in an upstreamDocError (the previous unrestricted unmarshal parked up to the
-// 16 MiB transport cap in the error strings the retry loop then redacted and
-// logged on every attempt) - the response instead fails as a generic parse
-// error, whose classify path redacts then bounds. At-cap documents and the
+// TestParseErrorDocumentBoundsFields pins the decode-time bound on the
+// fallback <error>-document parse: an over-cap code or description must NOT
+// be retained in an upstreamDocError (the previous unrestricted unmarshal
+// parked up to the 16 MiB transport cap in the error strings the retry loop
+// then redacted and logged on every attempt) - the breach surfaces as the
+// decoder's *torznabLimitError, which parseTorznab propagates so it
+// classifies like every other limit overflow. At-cap documents and the
 // <error>-root requirement keep working.
 func TestParseErrorDocumentBoundsFields(t *testing.T) {
 	over := strings.Repeat("d", maxUpstreamFieldBytes+1)
 	tests := map[string]struct {
-		body    string
-		wantDoc bool
+		body      string
+		wantDoc   bool
+		wantLimit bool
 	}{
 		"description over the cap rejected": {
-			body: `<?xml version="1.0"?><error code="100" description="` + over + `"/>`,
+			body:      `<?xml version="1.0"?><error code="100" description="` + over + `"/>`,
+			wantLimit: true,
 		},
 		"code over the cap rejected": {
-			body: `<?xml version="1.0"?><error code="` + over + `" description="x"/>`,
+			body:      `<?xml version="1.0"?><error code="` + over + `" description="x"/>`,
+			wantLimit: true,
 		},
 		"non-error root rejected": {
 			body: `<?xml version="1.0"?><failure code="100" description="x"/>`,
@@ -135,6 +139,10 @@ func TestParseErrorDocumentBoundsFields(t *testing.T) {
 			var doc *upstreamDocError
 			if got := errors.As(err, &doc); got != tc.wantDoc {
 				t.Errorf("errors.As(err, *upstreamDocError) = %v (err = %T), want %v", got, err, tc.wantDoc)
+			}
+			var limitErr *torznabLimitError
+			if got := errors.As(err, &limitErr); got != tc.wantLimit {
+				t.Errorf("errors.As(err, *torznabLimitError) = %v (err = %T), want %v", got, err, tc.wantLimit)
 			}
 		})
 	}

@@ -662,6 +662,49 @@ func TestRebuildCarriesUncuratedItemStoredRender(t *testing.T) {
 	}
 }
 
+// TestRebuildCarriedGUIDKeptOnlyForSameIdentity pins the GUID half of the
+// carry contract both ways: a stored GUID that still resolves to the carried
+// item's tracker key is preserved verbatim (URL-text churn on the same
+// identity must never mint a new GUID and re-trigger a grab), while a
+// foreign-host stored GUID (a hand-edited or corrupted snapshot) fails the
+// identity check and self-heals to the fresh canonical URL instead of
+// permanently displacing it.
+func TestRebuildCarriedGUIDKeptOnlyForSameIdentity(t *testing.T) {
+	first := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	tests := []struct {
+		name   string
+		stored string
+		want   string
+	}{
+		{"same-key stored GUID with changed URL text is preserved", "https://nyaa.si/view/42?utm=x", "https://nyaa.si/view/42?utm=x"},
+		{"foreign stored GUID self-heals to the fresh canonical URL", "https://evil.example/view/42", "https://nyaa.si/view/42"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "feed.json")
+			writeSnapshotFile(t, path, &snapshot{
+				ByHash: map[string]bool{},
+				ByKey:  map[string]bool{},
+				Seen:   map[string]bool{"nyaa:42": true},
+				NyaaFeed: []journalItem{
+					{item: item{Title: "Show - S01 (1080p) [G]", GUID: tc.stored, PubDate: first}, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
+				},
+			})
+			entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
+			if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
+				t.Fatalf("Rebuild: %v", err)
+			}
+			snap := readSnapshotFile(t, path)
+			if len(snap.NyaaFeed) != 1 {
+				t.Fatalf("feed = %d items, want 1 (the carried item survives the rebuild)", len(snap.NyaaFeed))
+			}
+			if got := snap.NyaaFeed[0].GUID; got != tc.want {
+				t.Errorf("carried GUID = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRebuildDropsCarriedABItemWhenPasskeyRemoved pins the carry-side passkey
 // gate: a previously journaled AnimeBytes item whose download link can no
 // longer be built (the operator removed ab_passkey while the item was in the

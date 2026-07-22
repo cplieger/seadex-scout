@@ -518,6 +518,7 @@ func TestEpisodeMarkerRelabelsCourLocalSeason(t *testing.T) {
 		{"absolute marker is never relabeled", "Show - 07 (1080p) [G].mkv", EntryInfo{SeasonTvdb: 3}, "- 07"},
 		{"special relabels cour-local season to S00", "Show - S01E01 (1080p) [G].mkv", EntryInfo{IsSpecial: true}, "S00E01"},
 		{"absolute-marked special is never relabeled", "Show - 07 (1080p) [G].mkv", EntryInfo{IsSpecial: true}, "- 07"},
+		{"special with a mapped season keeps the mapped season", "Show - S01E01 (1080p) [G].mkv", EntryInfo{IsSpecial: true, SeasonTvdb: 2}, "S02E01"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -111,7 +111,7 @@ func synthesizeTitle(t *seadex.Torrent, meta EntryInfo) string {
 func episodeMarker(t *seadex.Torrent, meta EntryInfo) string {
 	if !isPack(t) {
 		marker := singleEpisodeMarker(t.Files)
-		if meta.IsSpecial && seasonPrefix.MatchString(marker) {
+		if meta.IsSpecial && meta.SeasonTvdb <= 0 && seasonPrefix.MatchString(marker) {
 			// A Fribb-typed special's SeasonTvdb of 0 is a MAPPED season
 			// zero, not an unknown mapping (IsSpecial is the discriminator
 			// the pack arm below already uses), so a single-file special's

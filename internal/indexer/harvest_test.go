@@ -586,6 +586,42 @@ func TestHarvestResumesPagingAcrossRebuilds(t *testing.T) {
 	}
 }
 
+// TestHarvestPrunesStalePagesWithNoPendingGroups pins checkpoint hygiene on
+// the no-work early return: a persisted checkpoint carrying page state for a
+// group that is no longer pending (its last item was titled or aged out) must
+// be pruned and re-encoded even when a rebuild has NO pending groups at all,
+// so a later curation reusing the same key starts at page zero instead of the
+// stale deep offset.
+func TestHarvestPrunesStalePagesWithNoPendingGroups(t *testing.T) {
+	mock, srv := newHarvestMock(func(int) string {
+		return torznabBody(torznabItem("Show S01 1080p BluRay [G]", "https://nyaa.si/view/42"))
+	})
+	defer srv.Close()
+	w := NewFeedWriter(&FeedWriterConfig{
+		Path:           filepath.Join(t.TempDir(), "feed.json"),
+		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
+	}, Deps{HTTP: srv.Client()})
+
+	stale := encodeHarvestCheckpoint(harvestCheckpoint{Pages: map[string]int{"nyaa:7": 3}})
+	_, cursor := w.harvestTitles(t.Context(), map[string][]journalItem{}, map[string]string{},
+		func(int) EntryInfo { return EntryInfo{} }, stale)
+	if cp := decodeHarvestCheckpoint(cursor); len(cp.Pages) != 0 {
+		t.Fatalf("checkpoint pages = %v, want stale page state pruned on the no-pending rebuild", cp.Pages)
+	}
+
+	feeds := map[string][]journalItem{
+		upstreamNyaa: {{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7}},
+	}
+	w.harvestTitles(t.Context(), feeds, map[string]string{},
+		func(int) EntryInfo { return EntryInfo{Title: "Show", SeasonTvdb: 1} }, cursor)
+	if mock.calls() == 0 {
+		t.Fatal("no harvest query fired for the re-pending group")
+	}
+	if off := mock.request(0)["offset"]; off != "" {
+		t.Errorf("first page offset = %q, want unset (a re-pending group starts at page zero, not the stale offset)", off)
+	}
+}
+
 // TestHarvestMatchesNyaaByInfoHash pins the info-hash arm of the harvest
 // match (the documented secondary identity): a Prowlarr result whose page
 // URLs identify no tracker (a mirror/foreign host) still matches the pending

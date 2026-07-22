@@ -447,7 +447,7 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 // cycle keeps seeding silently - the affected items' pre-existing backlog
 // must not burst as fresh notifications when they recover - until the first
 // complete cycle seeds the whole library and clears the flag. Steady-state
-// emission then resumes via Report. The len(Findings) guard keeps an upgrade
+// emission then resumes via Notify. The len(Findings) guard keeps an upgrade
 // of an already-running instance (state predating the flags but already
 // holding findings) on the normal emit path. One cell stays conservative: a
 // state with no findings and no flags set (an upgraded fully-aligned

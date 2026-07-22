@@ -426,7 +426,18 @@ func pollCycle(ctx context.Context, ex *scheduler.Exclusive, sc cycler, marker *
 		// observed after shutdown was signalled; any recorded demand still
 		// stands for the active runner.
 		if exErr != nil {
-			slog.Warn("cycle coordination error observed at shutdown; demand stands", "error", exErr)
+			// Outcome-specific diagnostics: "demand stands" is only true
+			// when demand was actually recorded (Queued/Discarded); after a
+			// run the error is post-run bookkeeping; and OutcomeNone means
+			// Exclusive failed BEFORE recording demand, so no demand stands.
+			switch outcome {
+			case scheduler.OutcomeQueued, scheduler.OutcomeDiscarded:
+				slog.Warn("cycle coordination error after queueing; demand stands", "error", exErr)
+			case scheduler.OutcomeRan, scheduler.OutcomeRanQueued, scheduler.OutcomeSkipped:
+				slog.Warn("cycle coordination error after run", "error", exErr)
+			default:
+				slog.Warn("cycle coordination failed during shutdown", "error", exErr)
+			}
 		}
 		return pollInterrupted(ctx)
 	}
