@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -149,7 +148,7 @@ func seadexFrierenEntry() []seadex.Entry {
 }
 
 func scoutTestLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+	return slog.New(slog.DiscardHandler)
 }
 
 // errTransport fails every request with a plain (non-transient) error, so
@@ -324,25 +323,10 @@ func TestSaveRetriesDetachedOnCancelledContext(t *testing.T) {
 }
 
 // recordsContainString reports whether any captured record's message or
-// rendered attribute value contains sub.
+// rendered attribute value contains sub, via capture's message matcher and
+// its wildcard attr matcher (msgSub "" = every record, key "" = every attr).
 func recordsContainString(recorder *capture.Recorder, sub string) bool {
-	for _, rec := range recorder.Records() {
-		if strings.Contains(rec.Message, sub) {
-			return true
-		}
-		found := false
-		rec.Attrs(func(a slog.Attr) bool {
-			if strings.Contains(fmt.Sprint(a.Value.Any()), sub) {
-				found = true
-				return false
-			}
-			return true
-		})
-		if found {
-			return true
-		}
-	}
-	return false
+	return recorder.Contains(sub) || recorder.AttrContains("", "", sub)
 }
 
 // TestWalkFailureLogsAndReportErrorAreLogSafe pins the credential-redaction
@@ -520,4 +504,53 @@ func TestWalkFailureLogsCarryArrIdentity(t *testing.T) {
 			t.Errorf("library-gate walk-failed completion-line arr attr = %q (found=%t), want %q", arr, ok, library.ArrRadarr)
 		}
 	})
+}
+
+// failOnceStore fails the first Save with a genuine (non-cancellation) error
+// and succeeds on any later attempt, counting attempts, so a test can tell a
+// single failed attempt apart from a failed-then-retried pair.
+type failOnceStore struct {
+	st       state.State
+	attempts int
+}
+
+func (f *failOnceStore) Load(context.Context) (state.State, error) { return f.st, nil }
+
+func (f *failOnceStore) Save(_ context.Context, st *state.State) error {
+	f.attempts++
+	if f.attempts == 1 {
+		return errors.New("disk full")
+	}
+	f.st = *st
+	return nil
+}
+
+// TestSaveGenuineFailureOnLiveContextIsNotRetried pins the retry SCOPE of
+// save's documented contract: the detached context.WithoutCancel retry exists
+// only for a shutdown cancellation (a redeploy SIGTERM landing mid-cycle). A
+// genuine write failure on a live context must stay a single attempt that
+// logs the "state save failed" ERROR - retrying it would paper over a real
+// disk fault with a second write nothing asked for.
+func TestSaveGenuineFailureOnLiveContextIsNotRetried(t *testing.T) {
+	logger, recorder := capture.New()
+	store := &failOnceStore{}
+	s := New(&Deps{Logger: logger, Store: store})
+
+	s.save(context.Background(), &state.State{Baselined: true})
+
+	if store.attempts != 1 {
+		t.Errorf("Save attempts = %d, want 1 (only a cancellation takes the detached retry)", store.attempts)
+	}
+	if store.st.Baselined {
+		t.Error("state was persisted by a retry, want the genuinely-failed save left unpersisted")
+	}
+	errCount := 0
+	for _, r := range recorder.Records() {
+		if r.Message == "state save failed" && r.Level == slog.LevelError {
+			errCount++
+		}
+	}
+	if errCount != 1 {
+		t.Errorf("\"state save failed\" ERROR count = %d, want exactly 1", errCount)
+	}
 }

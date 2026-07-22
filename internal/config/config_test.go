@@ -1010,10 +1010,10 @@ func TestLoadExpandsEnvInSequenceValues(t *testing.T) {
 // carry any fragment of the secret; the parse error must route through
 // sanitizeYAMLError like the decode errors.
 func TestLoadParseErrorOmitsSecretAlias(t *testing.T) {
-	const secret = "LEAK-SENTINEL-a1b2"
+	const sentinel = "LEAK-SENTINEL-a1b2"
 	rec := capture.Default(t)
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	content := "sonarr:\n  enabled: true\n  url: http://sonarr:8989\n  api_key: *" + secret + "\n"
+	content := "sonarr:\n  enabled: true\n  url: http://sonarr:8989\n  api_key: *" + sentinel + "\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1023,7 +1023,7 @@ func TestLoadParseErrorOmitsSecretAlias(t *testing.T) {
 		t.Fatal("Load() = nil error, want unknown-anchor parse error")
 	}
 	corpus := err.Error() + "\n" + strings.Join(rec.Messages(), "\n")
-	for _, frag := range []string{secret, "LEAK", "SENTINEL", "a1b2"} {
+	for _, frag := range []string{sentinel, "LEAK", "SENTINEL", "a1b2"} {
 		if strings.Contains(corpus, frag) {
 			t.Errorf("parse-error corpus leaks secret fragment %q: %q", frag, corpus)
 		}
@@ -1175,6 +1175,8 @@ func TestURLEmbedsCredential(t *testing.T) {
 		{"api_key", "http://prowlarr:9696/22/api?api_key=k", true},
 		{"passkey", "http://prowlarr:9696/22/api?passkey=k", true},
 		{"token", "http://prowlarr:9696/22/api?token=k", true},
+		{"authkey", "http://prowlarr:9696/22/api?authkey=k", true},
+		{"torrent_pass", "http://prowlarr:9696/22/api?torrent_pass=k", true},
 		{"uppercase APIKEY", "http://prowlarr:9696/22/api?APIKEY=k", true},
 		{"malformed semicolon pair keeps apikey flagged", "http://prowlarr:9696/22/api?apikey=k;foo=x", true},
 		{"credential after semicolon in malformed pair", "http://prowlarr:9696/22/api?foo=x;passkey=k", true},
@@ -1405,5 +1407,96 @@ func TestLoadDefaultsArrURLWhenAbsent(t *testing.T) {
 	}
 	if err := c.Validate(); err != nil {
 		t.Errorf("Validate() = %v, want nil (default url + key is a runnable pair)", err)
+	}
+}
+
+// TestValidateWarnsOnCredentialBearingPublicURL pins warnPublicURLProblems'
+// credential-embedding diagnostic: userinfo or a credential-like query
+// parameter in sonarr/radarr public_url fires the warning naming ONLY the
+// field (deep-links are credential-redacted, so the value never rides the
+// log), and clean public URLs stay silent.
+func TestValidateWarnsOnCredentialBearingPublicURL(t *testing.T) {
+	const warnMsg = "public_url embeds userinfo or a credential-like query parameter"
+
+	t.Run("apikey query param warns naming the sonarr field", func(t *testing.T) {
+		const cred = "public-url-cred-sentinel"
+		rec := capture.Default(t)
+		c := Config{
+			RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k",
+			SonarrPublicURL: "https://sonarr.example.com?apikey=" + cred,
+		}
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if !rec.Contains(warnMsg) || !rec.AttrContains("", "field", "sonarr.public_url") {
+			t.Errorf("Validate() log = %v, want the credential warning naming sonarr.public_url", rec.Messages())
+		}
+		corpus := strings.Join(rec.Messages(), "\n")
+		if strings.Contains(corpus, cred) || rec.AttrContains("", "", cred) {
+			t.Errorf("Validate() log leaks the credential value: %v", rec.Messages())
+		}
+	})
+	t.Run("userinfo credential warns naming the radarr field", func(t *testing.T) {
+		const cred = "public-url-pw-sentinel"
+		rec := capture.Default(t)
+		c := Config{
+			RunMode: RunModeDaemon, RadarrURL: "http://radarr:7878", RadarrAPIKey: "k",
+			RadarrPublicURL: "https://user:" + cred + "@radarr.example.com",
+		}
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if !rec.Contains(warnMsg) || !rec.AttrContains("", "field", "radarr.public_url") {
+			t.Errorf("Validate() log = %v, want the credential warning naming radarr.public_url", rec.Messages())
+		}
+		corpus := strings.Join(rec.Messages(), "\n")
+		if strings.Contains(corpus, cred) || rec.AttrContains("", "", cred) {
+			t.Errorf("Validate() log leaks the userinfo credential value: %v", rec.Messages())
+		}
+	})
+	t.Run("clean public urls stay silent", func(t *testing.T) {
+		rec := capture.Default(t)
+		c := Config{
+			RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k",
+			SonarrPublicURL: "https://sonarr.example.com",
+		}
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if rec.Contains(warnMsg) {
+			t.Errorf("Validate() log = %v, want no credential warning for a clean public_url", rec.Messages())
+		}
+	})
+}
+
+// TestValidateIndexerFeedKeyLengthBoundary pins the exact floor of the
+// short-feed-key warning: a key of exactly 16 characters meets the minimum
+// the warning names ("shorter than 16 characters") and must stay silent,
+// while a 15-character key still warns.
+func TestValidateIndexerFeedKeyLengthBoundary(t *testing.T) {
+	base := Config{
+		RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k",
+		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api", IndexerProwlarrAPIKey: "pk",
+	}
+	tests := []struct {
+		name     string
+		keyLen   int
+		wantWarn bool
+	}{
+		{"15-char key warns", 15, true},
+		{"16-char key stays silent", 16, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := capture.Default(t)
+			c := base
+			c.IndexerAPIKey = strings.Repeat("a", tt.keyLen)
+			if err := c.Validate(); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			if got := rec.Contains("feed_api_key is shorter than 16 characters"); got != tt.wantWarn {
+				t.Errorf("short-key warning present = %v, want %v for a %d-character key", got, tt.wantWarn, tt.keyLen)
+			}
+		})
 	}
 }

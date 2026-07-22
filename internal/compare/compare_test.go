@@ -957,3 +957,28 @@ func TestBoundedJoinPartsThresholdOnRawSize(t *testing.T) {
 		t.Error("one raw byte over the bound must reduce to the hashed identity")
 	}
 }
+
+// TestDedupeKeyLinkSetIgnoresEmptyURL pins obtainableLinkKey's empty-URL
+// guard: a link whose URL is empty (or whitespace-only) carries no source
+// identity, so it must not perturb the key, and a finding whose every link
+// is empty must key identically to a link-less finding (no links component).
+func TestDedupeKeyLinkSetIgnoresEmptyURL(t *testing.T) {
+	base := Finding{AniListID: 42, Status: StatusBetter, InfoHash: "hash1"}
+	withEmpty := base
+	withEmpty.Links = []ReleaseLink{
+		{Tracker: "Nyaa", URL: ""},
+		{Tracker: "Nyaa", URL: "  "},
+		{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
+	}
+	withoutEmpty := base
+	withoutEmpty.Links = []ReleaseLink{{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}}
+	if got, want := dedupeKey(&withEmpty), dedupeKey(&withoutEmpty); got != want {
+		t.Errorf("dedupeKey with empty-URL links = %q, want %q (an empty URL carries no source identity and must not perturb the key)", got, want)
+	}
+
+	allEmpty := base
+	allEmpty.Links = []ReleaseLink{{Tracker: "Nyaa", URL: ""}, {Tracker: "AB", URL: "  "}}
+	if got, want := dedupeKey(&allEmpty), dedupeKey(&base); got != want {
+		t.Errorf("dedupeKey with only empty-URL links = %q, want the link-less key %q", got, want)
+	}
+}

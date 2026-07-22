@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -39,6 +40,40 @@ func FuzzValidateHTTPURL(f *testing.F) {
 			if err := validateHTTPURL("sonarr.url", in); err != nil &&
 				strings.Contains(err.Error(), sentinel) {
 				t.Errorf("validateHTTPURL(%q) error leaks credential sentinel: %v", in, err)
+			}
+		}
+	})
+}
+
+// FuzzURLEmbedsCredentialSupersetOfParsedQuery pins urlEmbedsCredential's
+// documented contract: the raw-query scan is a strict superset of the parsed
+// u.Query() view, so a credential-like parameter net/url itself can see, and
+// a userinfo-bearing parseable URL, are always flagged; an unparseable URL is
+// never flagged (the parse-failure negative).
+func FuzzURLEmbedsCredentialSupersetOfParsedQuery(f *testing.F) {
+	f.Add("http://prowlarr:9696/22/api?apikey=k")
+	f.Add("http://prowlarr:9696/22/api?apikey=k;foo=x")
+	f.Add("http://user:pw@host/x")
+	f.Add("http://host/x?foo=1&API_KEY=2")
+	f.Add("http://host/x?%61pikey=k")
+	f.Add("http://host/x?mode=apikey")
+	f.Add("http://[::1")
+	f.Add("")
+	f.Fuzz(func(t *testing.T, raw string) {
+		got := urlEmbedsCredential(raw)
+		u, err := url.Parse(raw)
+		if err != nil {
+			if got {
+				t.Errorf("urlEmbedsCredential(%q) = true for an unparseable URL, want false", raw)
+			}
+			return
+		}
+		if u.User != nil && !got {
+			t.Errorf("urlEmbedsCredential(%q) = false, want true for a userinfo-bearing URL", raw)
+		}
+		for name := range u.Query() {
+			if isCredentialParam(name) && !got {
+				t.Errorf("urlEmbedsCredential(%q) = false, want true: the parsed query carries credential parameter %q", raw, name)
 			}
 		}
 	})

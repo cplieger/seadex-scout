@@ -192,8 +192,8 @@ func TestObtainableAppliesABURLCrossCheck(t *testing.T) {
 }
 
 // TestABGatedMatchesToggleOffVisibility pins ABGated as the named form of the
-// toggle-off hide decision shared by the compare dedupe key
-// (compare.animeBytesLinkKey) and the alert URL routing (report.trackerURLs):
+// toggle-off hide decision consumed by the alert URL routing
+// (notify.trackerURLs):
 // an AB label or AB-hosted URL is gated, a public link is not, and the
 // conservative hides (malformed or non-ASCII host evidence) are gated even
 // though DefinitelyAB fails open on them - the asymmetry the two predicates

@@ -3,7 +3,6 @@ package indexer
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -518,11 +517,12 @@ func TestRebuildUnpackedSeasonListsPerEpisode(t *testing.T) {
 
 // TestRebuildJournalItemShape pins the journaled item fields on the real
 // Frieren catalogue shape (PMR best + LostYears alt, each on Nyaa and AB):
-// tracker split, per-tracker download links (public Nyaa .torrent persisted;
-// AB persisted GUID-only, its passkey link derived by the reader), best/alt
-// markers, the dropped redacted AB info hash, the SeaDex entry info URL, the
-// summed pack size, the synthesized title from the show metadata, and PubDate
-// mirroring FirstSeen (not the SeaDex entry update).
+// tracker split, GUID-only persistence on both feeds (no download URL at
+// rest; the reader derives the public Nyaa .torrent and the passkey-bearing
+// AB link from each item's GUID on load), best/alt markers, the dropped
+// redacted AB info hash, the SeaDex entry info URL, the summed pack size,
+// the synthesized title from the show metadata, and PubDate mirroring
+// FirstSeen (not the SeaDex entry update).
 func TestRebuildJournalItemShape(t *testing.T) {
 	updated := time.Date(2025, 7, 26, 15, 5, 59, 0, time.UTC)
 	pmrFiles := []seadex.File{
@@ -562,8 +562,8 @@ func TestRebuildJournalItemShape(t *testing.T) {
 	if want := "Frieren: Beyond Journey's End S01 1080p Dual Audio [PMR]"; pmrNyaa.Title != want {
 		t.Errorf("PMR nyaa title = %q, want %q", pmrNyaa.Title, want)
 	}
-	if pmrNyaa.DownloadURL != "https://nyaa.si/download/1961373.torrent" {
-		t.Errorf("PMR nyaa download = %q", pmrNyaa.DownloadURL)
+	if pmrNyaa.DownloadURL != "" {
+		t.Errorf("PMR nyaa persisted download = %q, want empty (GUID-only; the reader derives the public link)", pmrNyaa.DownloadURL)
 	}
 	if pmrNyaa.DownloadVolumeFactor != dvfBest {
 		t.Errorf("PMR nyaa dvf = %q, want %q", pmrNyaa.DownloadVolumeFactor, dvfBest)
@@ -628,9 +628,10 @@ func TestCategoriesFor(t *testing.T) {
 
 // TestRebuildCarriesUncuratedItemStoredRender pins the carry contract for a
 // curated-then-replaced torrent: a journaled item whose torrent has LEFT the
-// current curation set keeps its stored render verbatim (title, download URL,
-// FirstSeen) - it is still a valid release the arrs may grab - instead of
-// being re-rendered or dropped.
+// current curation set keeps its stored render (title, FirstSeen) - it is
+// still a valid release the arrs may grab - instead of being re-rendered or
+// dropped. The download URL is GUID-only at rest (stripNyaaDownloadURLs); the
+// reader re-derives it on load.
 func TestRebuildCarriesUncuratedItemStoredRender(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	first := time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Second)
@@ -650,8 +651,11 @@ func TestRebuildCarriesUncuratedItemStoredRender(t *testing.T) {
 		t.Fatalf("feed = %d items, want 1 (a curated-then-replaced torrent keeps its stored render)", len(snap.NyaaFeed))
 	}
 	got := snap.NyaaFeed[0]
-	if got.Title != "Stored Show - S01 (1080p) [G]" || got.DownloadURL != "https://nyaa.si/download/42.torrent" {
+	if got.Title != "Stored Show - S01 (1080p) [G]" {
 		t.Errorf("carried item = %+v, want the stored render unchanged", got)
+	}
+	if got.DownloadURL != "" {
+		t.Errorf("carried item persisted download = %q, want empty (GUID-only; the reader derives the public link)", got.DownloadURL)
 	}
 	if !got.FirstSeen.Equal(first) {
 		t.Errorf("FirstSeen = %v, want the original %v", got.FirstSeen, first)
@@ -752,17 +756,8 @@ func TestRebuildRebasesFutureFirstSeenCarriedItem(t *testing.T) {
 	if !snap.NyaaFeed[0].FirstSeen.Equal(t0) || !snap.NyaaFeed[0].PubDate.Equal(t0) {
 		t.Errorf("rebased FirstSeen/PubDate = %v/%v, want both %v", snap.NyaaFeed[0].FirstSeen, snap.NyaaFeed[0].PubDate, t0)
 	}
-	rebased := int64(-1)
-	for _, r := range rec.Records() {
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "journal_clock_rebased" {
-				rebased = a.Value.Int64()
-			}
-			return true
-		})
-	}
-	if rebased != 1 {
-		t.Errorf("journal_clock_rebased = %d, want 1; log:\n%s", rebased, strings.Join(rec.Messages(), "\n"))
+	if got, ok := rec.AttrValue("indexer feed snapshot written", "journal_clock_rebased"); !ok || got != "1" {
+		t.Errorf("journal_clock_rebased = %q (found=%v), want 1; log:\n%s", got, ok, strings.Join(rec.Messages(), "\n"))
 	}
 }
 
@@ -784,17 +779,8 @@ func TestRebuildDropsKeylessCarriedItem(t *testing.T) {
 	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 {
 		t.Errorf("feed = %+v, want empty (a keyless pre-journal item cannot be carried: it could never be pruned or re-rendered)", snap.NyaaFeed)
 	}
-	dropped := int64(-1)
-	for _, r := range rec.Records() {
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "journal_dropped" {
-				dropped = a.Value.Int64()
-			}
-			return true
-		})
-	}
-	if dropped != 2 {
-		t.Errorf("journal_dropped = %d, want 2 (one per defensive-guard arm: no Key, no FirstSeen); log:\n%s", dropped, strings.Join(rec.Messages(), "\n"))
+	if got, ok := rec.AttrValue("indexer feed snapshot written", "journal_dropped"); !ok || got != "2" {
+		t.Errorf("journal_dropped = %q (found=%v), want 2 (one per defensive-guard arm: no Key, no FirstSeen); log:\n%s", got, ok, strings.Join(rec.Messages(), "\n"))
 	}
 }
 
@@ -823,17 +809,8 @@ func TestRebuildSkipsTitlelessTorrentAsUnresolvable(t *testing.T) {
 	if !snap.Seen["nyaa:7"] {
 		t.Errorf("seen ledger missing nyaa:7: %v", snap.Seen)
 	}
-	unresolvable := int64(-1)
-	for _, r := range rec.Records() {
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "skipped_unresolvable" {
-				unresolvable = a.Value.Int64()
-			}
-			return true
-		})
-	}
-	if unresolvable != 1 {
-		t.Errorf("skipped_unresolvable = %d, want 1; log:\n%s", unresolvable, strings.Join(rec.Messages(), "\n"))
+	if got, ok := rec.AttrValue("indexer feed snapshot written", "skipped_unresolvable"); !ok || got != "1" {
+		t.Errorf("skipped_unresolvable = %q (found=%v), want 1; log:\n%s", got, ok, strings.Join(rec.Messages(), "\n"))
 	}
 }
 
@@ -871,17 +848,9 @@ func TestRebuildCountsIdentitylessABTorrentAsUnresolvable(t *testing.T) {
 			if snap := readSnapshotFile(t, path); len(snap.ABFeed) != 0 {
 				t.Errorf("identity-less AB release leaked into the feed: %d items, want 0", len(snap.ABFeed))
 			}
-			unresolvable := int64(-1)
-			for _, r := range rec.Records() {
-				r.Attrs(func(a slog.Attr) bool {
-					if a.Key == "skipped_unresolvable" {
-						unresolvable = a.Value.Int64()
-					}
-					return true
-				})
-			}
-			if unresolvable != tc.want {
-				t.Errorf("skipped_unresolvable = %d, want %d; log:\n%s", unresolvable, tc.want, strings.Join(rec.Messages(), "\n"))
+			want := strconv.FormatInt(tc.want, 10)
+			if got, ok := rec.AttrValue("indexer feed snapshot written", "skipped_unresolvable"); !ok || got != want {
+				t.Errorf("skipped_unresolvable = %q (found=%v), want %s; log:\n%s", got, ok, want, strings.Join(rec.Messages(), "\n"))
 			}
 		})
 	}
@@ -917,17 +886,8 @@ func TestRebuildUnknownTrackerWithHashSilentlyIgnored(t *testing.T) {
 	if snap.Seen[hash] {
 		t.Errorf("tail-tracker hash folded into the seen ledger, want absent (a mirror's hash must not pre-mark the Nyaa listing): %v", snap.Seen)
 	}
-	unresolvable := int64(-1)
-	for _, r := range rec.Records() {
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "skipped_unresolvable" {
-				unresolvable = a.Value.Int64()
-			}
-			return true
-		})
-	}
-	if unresolvable != 0 {
-		t.Errorf("skipped_unresolvable = %d, want 0 (the tail is silently ignored, not an upstream fault signal)", unresolvable)
+	if got, ok := rec.AttrValue("indexer feed snapshot written", "skipped_unresolvable"); !ok || got != "0" {
+		t.Errorf("skipped_unresolvable = %q (found=%v), want 0 (the tail is silently ignored, not an upstream fault signal)", got, ok)
 	}
 }
 
@@ -963,17 +923,8 @@ func TestRebuildDropsCarriedItemBecomingUnresolvable(t *testing.T) {
 	if !snap.Seen["nyaa:42"] {
 		t.Errorf("seen ledger lost the dropped identity: %v", snap.Seen)
 	}
-	dropped := int64(-1)
-	for _, r := range rec.Records() {
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "journal_dropped" {
-				dropped = a.Value.Int64()
-			}
-			return true
-		})
-	}
-	if dropped != 1 {
-		t.Errorf("journal_dropped = %d, want 1; log:\n%s", dropped, strings.Join(rec.Messages(), "\n"))
+	if got, ok := rec.AttrValue("indexer feed snapshot written", "journal_dropped"); !ok || got != "1" {
+		t.Errorf("journal_dropped = %q (found=%v), want 1; log:\n%s", got, ok, strings.Join(rec.Messages(), "\n"))
 	}
 	if rec.Contains("ab RSS feed empty of grabbable links") {
 		t.Errorf("the genuine drop was counted as an AB passkey skip; log:\n%s", strings.Join(rec.Messages(), "\n"))
@@ -1033,17 +984,8 @@ func TestRebuildDropsCarriedItemWarnedByStoredHashOnly(t *testing.T) {
 	if len(snap.NyaaFeed) != 0 {
 		t.Errorf("nyaa feed = %+v, want empty (the carried item's stored hash is warned under a different key)", snap.NyaaFeed)
 	}
-	warnedDropped := int64(-1)
-	for _, r := range rec.Records() {
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "journal_warned_dropped" {
-				warnedDropped = a.Value.Int64()
-			}
-			return true
-		})
-	}
-	if warnedDropped != 1 {
-		t.Errorf("snapshot log line journal_warned_dropped = %d, want 1 (the hash-retracted carried item); log output:\n%s", warnedDropped, strings.Join(rec.Messages(), "\n"))
+	if got, ok := rec.AttrValue("indexer feed snapshot written", "journal_warned_dropped"); !ok || got != "1" {
+		t.Errorf("snapshot log line journal_warned_dropped = %q (found=%v), want 1 (the hash-retracted carried item); log output:\n%s", got, ok, strings.Join(rec.Messages(), "\n"))
 	}
 }
 

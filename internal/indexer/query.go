@@ -221,15 +221,23 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 // storm. The state is set/cleared by reload's load paths; requests only read
 // it here.
 func (ix *Indexer) snapshotUnavailable() bool {
-	ix.mu.Lock()
-	defer ix.mu.Unlock()
-	if !ix.snapFailed {
+	ix.mu.RLock()
+	failed, warned := ix.snapFailed, ix.snapFailedWarned
+	ix.mu.RUnlock()
+	if !failed {
 		return false
 	}
-	if !ix.snapFailedWarned {
-		ix.snapFailedWarned = true
-		ix.log.Warn("indexer feed snapshot unavailable; answering Torznab requests with an error until a snapshot loads",
-			"path", ix.path)
+	if !warned {
+		ix.mu.Lock()
+		// Re-check under the write lock: concurrent requests racing the onset
+		// must still emit the WARN exactly once, and an install that cleared
+		// snapFailed in between must not re-arm a stale warning.
+		if ix.snapFailed && !ix.snapFailedWarned {
+			ix.snapFailedWarned = true
+			ix.log.Warn("indexer feed snapshot unavailable; answering Torznab requests with an error until a snapshot loads",
+				"path", ix.path)
+		}
+		ix.mu.Unlock()
 	}
 	return true
 }

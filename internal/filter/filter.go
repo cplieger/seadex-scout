@@ -100,7 +100,7 @@ func hostFromRawURL(rawURL string) (string, bool) {
 		// toggle is off.
 		return f.Host, !f.HostUnrecoverable
 	default:
-		// urlform.ClassMalformed and URLFormHiddenHost ("https:/animebytes.tv/..."
+		// urlform.ClassMalformed and urlform.ClassHiddenHost ("https:/animebytes.tv/..."
 		// parses as scheme + path, "animebytes.tv:443/..." as an opaque
 		// scheme, "https://:443/x" as a port-only authority) have hidden or
 		// destroyed their host evidence: hide conservatively.
@@ -150,9 +150,10 @@ func ABVisible(tracker, rawURL string, animeBytes bool) bool {
 // hidden by the animebytes toggle when off, identified by the tracker label
 // OR the raw upstream URL's host (plus the conservative hides of malformed,
 // ambiguous, or non-ASCII host evidence). It is the single named form of the
-// "would ABVisible hide this with the toggle off" idiom shared by the dedupe
-// key (compare.animeBytesLinkKey) and the alert URL routing
-// (report.trackerURLs).
+// "would ABVisible hide this with the toggle off" idiom, consumed by the
+// alert URL routing (notify.trackerURLs). Compare's dedupe key no longer
+// routes AB links specially: its obtainableLinkKey keys the full obtainable
+// URL set label-insensitively.
 func ABGated(tracker, rawURL string) bool {
 	return !ABVisible(tracker, rawURL, false)
 }

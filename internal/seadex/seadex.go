@@ -140,17 +140,17 @@ type Torrent struct {
 	DualAudio    bool     `json:"dualAudio"`
 }
 
-// RedactedInfoHash is the placeholder releases.moe publishes in place of a
+// redactedInfoHash is the placeholder releases.moe publishes in place of a
 // private-tracker (AnimeBytes) torrent's info hash.
-const RedactedInfoHash = "<redacted>"
+const redactedInfoHash = "<redacted>"
 
-// InfoHashRedacted reports whether h is the RedactedInfoHash placeholder.
-func InfoHashRedacted(h string) bool {
-	return strings.EqualFold(strings.TrimSpace(h), RedactedInfoHash)
+// infoHashRedacted reports whether h is the redactedInfoHash placeholder.
+func infoHashRedacted(h string) bool {
+	return strings.EqualFold(strings.TrimSpace(h), redactedInfoHash)
 }
 
 // ValidInfoHash returns h lowercased when it is a 40-char SHA-1 hex info hash,
-// else "" (covers RedactedInfoHash and any other junk value).
+// else "" (covers redactedInfoHash and any other junk value).
 func ValidInfoHash(h string) string {
 	h = strings.ToLower(strings.TrimSpace(h))
 	if len(h) != 40 {
@@ -241,8 +241,11 @@ func (r *pbEntry) toEntry() Entry {
 }
 
 // pbTimeLayouts are the PocketBase datetime formats seen on the `updated`
-// field (space-separated with optional fractional seconds, or RFC3339).
-var pbTimeLayouts = []string{"2006-01-02 15:04:05.000Z", "2006-01-02 15:04:05Z", time.RFC3339}
+// field (space-separated or RFC3339). time.Parse accepts a fractional
+// second after the seconds field even when the layout omits it, so the
+// space-separated layout covers both the whole-second and the ".000"
+// fractional wire forms (any fraction length).
+var pbTimeLayouts = []string{"2006-01-02 15:04:05Z", time.RFC3339}
 
 // parsePBTime parses a PocketBase timestamp, returning the zero time on failure
 // (which sorts oldest, so an unparseable record just falls to the feed's tail).
@@ -328,6 +331,10 @@ func (c *Client) finishFetch(all []Entry, tot fetchTotals) ([]Entry, error) {
 	if len(all) == 0 {
 		return nil, fmt.Errorf("seadex: returned an empty catalogue (totalItems=%d); "+
 			"SeaDex is never legitimately empty, refusing to compare against it", tot.reportedTotal)
+	}
+	if tot.reportedTotal > tot.reportedPages*perPage {
+		return nil, fmt.Errorf("seadex: reported totalItems %d cannot fit the reported %d pages of %d (upstream misbehaving); "+
+			"refusing to compare against a truncated view", tot.reportedTotal, tot.reportedPages, perPage)
 	}
 	if len(all) != tot.reportedTotal {
 		c.log.Warn("seadex catalogue count mismatch", "got", len(all), "want", tot.reportedTotal)

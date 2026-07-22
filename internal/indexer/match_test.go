@@ -130,3 +130,21 @@ func TestTrackerKeyRejectsForeignHostURLs(t *testing.T) {
 		})
 	}
 }
+
+// TestTrackerIDHelpersFailClosedOnUnparseableInput pins the defensive
+// fail-closed arms the current calling paths cannot reach on their own:
+// nyaaID and animeBytesID return "" for a URL url.Parse rejects, and
+// trackerOwnURL answers false for a scope outside the nyaa/ab vocabulary,
+// so any future caller reaching these helpers directly still fails closed
+// on the curation trust boundary.
+func TestTrackerIDHelpersFailClosedOnUnparseableInput(t *testing.T) {
+	if got := nyaaID("http://[::1"); got != "" {
+		t.Errorf("nyaaID(unparseable) = %q, want empty", got)
+	}
+	if got := animeBytesID("http://[::1"); got != "" {
+		t.Errorf("animeBytesID(unparseable) = %q, want empty", got)
+	}
+	if trackerOwnURL("other", "https://nyaa.si/view/1") {
+		t.Error("trackerOwnURL(unknown scope) = true, want false (fail closed)")
+	}
+}

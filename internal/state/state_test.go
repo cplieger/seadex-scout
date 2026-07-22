@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -24,7 +23,7 @@ import (
 )
 
 func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+	return slog.New(slog.DiscardHandler)
 }
 
 func TestStoreLoadMissingReturnsEmptyState(t *testing.T) {
@@ -602,14 +601,15 @@ func TestStoreSaveNilReturnsErrorWithoutWriting(t *testing.T) {
 }
 
 // TestStoreSaveLoadPreservesEscalationStreaks pins the restart persistence of
-// the scout's two escalation streaks (the library-shrink walk streak and the
-// consecutive SeaDex-failure streak) through the real Store disk path: a json
-// tag drift or a persistence projection omission would silently reset a
-// streak after every restart, deferring its WARN-to-ERROR escalation forever.
+// the scout's three escalation streaks (the library-shrink walk streak, the
+// consecutive SeaDex-failure streak, and the consecutive AniList-degraded
+// streak) through the real Store disk path: a json tag drift or a
+// persistence projection omission would silently reset a streak after every
+// restart, deferring its WARN-to-ERROR escalation forever.
 func TestStoreSaveLoadPreservesEscalationStreaks(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "state.json"), testLogger())
-	const wantShrunk, wantSeadex = 7, 5
-	if err := store.Save(context.Background(), &State{ShrunkWalks: wantShrunk, SeadexFailures: wantSeadex}); err != nil {
+	const wantShrunk, wantSeadex, wantAniList = 7, 5, 6
+	if err := store.Save(context.Background(), &State{ShrunkWalks: wantShrunk, SeadexFailures: wantSeadex, AniListDegraded: wantAniList}); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
 	got, err := store.Load(context.Background())
@@ -621,6 +621,9 @@ func TestStoreSaveLoadPreservesEscalationStreaks(t *testing.T) {
 	}
 	if got.SeadexFailures != wantSeadex {
 		t.Errorf("SeadexFailures after disk round trip = %d, want %d", got.SeadexFailures, wantSeadex)
+	}
+	if got.AniListDegraded != wantAniList {
+		t.Errorf("AniListDegraded after disk round trip = %d, want %d", got.AniListDegraded, wantAniList)
 	}
 }
 
@@ -1072,7 +1075,7 @@ func TestStoreLoadUnclassifiedReadErrorBlocksSaveUntilClassified(t *testing.T) {
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
-	store := NewStore(path, slog.New(slog.DiscardHandler))
+	store := NewStore(path, testLogger())
 	if err := store.Save(context.Background(), &State{}); err != nil {
 		t.Fatalf("seed Save: %v", err)
 	}

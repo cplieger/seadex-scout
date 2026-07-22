@@ -495,7 +495,6 @@ func (li *LibIndex) appendTitleCandidates(candidates []*library.Item, seen map[*
 	return candidates
 }
 
-// filterByYear returns the candidates whose year equals year.
 // filterByYear narrows candidates to those whose year matches, KEEPING items
 // whose year is unknown (0): absence of year evidence is not a mismatch.
 // findByTitle already skips narrowing entirely when the ANILIST year is

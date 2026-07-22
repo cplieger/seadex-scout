@@ -27,11 +27,13 @@ func TestStaleMapError_ErrorMessage(t *testing.T) {
 	}
 
 	noCause := &StaleMapError{
-		msg:     "refresh returned 1 records, less than half of previous 4",
-		age:     time.Hour,
-		records: 4,
+		msg:            "refresh shrank below half of previous",
+		age:            time.Hour,
+		records:        4,
+		shrunkReturned: 1,
+		shrunkPrevious: 4,
 	}
-	wantNoCause := "mapping: refresh returned 1 records, less than half of previous 4, using stale map (4 records, fetched 1h0m0s ago)"
+	wantNoCause := "mapping: refresh shrank below half of previous (returned 1, previous 4), using stale map (4 records, fetched 1h0m0s ago)"
 	if got := noCause.Error(); got != wantNoCause {
 		t.Errorf("Error() without cause = %q, want %q", got, wantNoCause)
 	}
@@ -68,6 +70,43 @@ func TestStaleMapError_LogAttrs(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("LogAttrs()[%d] = %v (%T), want %v (%T)", i, got[i], got[i], want[i], want[i])
+		}
+	}
+}
+
+// TestStaleMapError_shrunkFormMessageAndLogAttrs pins the shrunk-refresh form
+// of the pinned log contract: with shrunkPrevious set, Error() renders the
+// counts as a parenthetical on the fixed reason (keeping stale_reason a
+// fixed-cardinality Loki class), and LogAttrs appends the
+// stale_returned/stale_previous structured pairs after the four base attrs.
+func TestStaleMapError_shrunkFormMessageAndLogAttrs(t *testing.T) {
+	e := &StaleMapError{
+		msg:            "refresh shrank below half of previous",
+		age:            90 * time.Second,
+		records:        4,
+		rejections:     2,
+		shrunkReturned: 1,
+		shrunkPrevious: 4,
+	}
+	want := "mapping: refresh shrank below half of previous (returned 1, previous 4), using stale map (4 records, fetched 1m30s ago)"
+	if got := e.Error(); got != want {
+		t.Errorf("Error() shrunk form = %q, want %q", got, want)
+	}
+	got := e.LogAttrs()
+	wantAttrs := []any{
+		"stale_reason", "refresh shrank below half of previous",
+		"stale_age_seconds", 90.0,
+		"stale_records", 4,
+		"stale_consecutive_rejections", 2,
+		"stale_returned", 1,
+		"stale_previous", 4,
+	}
+	if len(got) != len(wantAttrs) {
+		t.Fatalf("LogAttrs() len = %d, want %d", len(got), len(wantAttrs))
+	}
+	for i := range wantAttrs {
+		if got[i] != wantAttrs[i] {
+			t.Errorf("LogAttrs()[%d] = %v (%T), want %v (%T)", i, got[i], got[i], wantAttrs[i], wantAttrs[i])
 		}
 	}
 }

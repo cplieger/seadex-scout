@@ -17,6 +17,8 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
+// --- AB visibility gates (adapters over filter) ---
+
 // ABVisible reports whether a SeaDex torrent may surface under the operator's
 // AnimeBytes toggle. It owns the raw-URL invariant shared by compare and audit:
 // the guard inspects the RAW upstream URL (t.URL), never t.UsableURL(), because
@@ -49,6 +51,8 @@ func DefinitelyAB(t *seadex.Torrent) bool {
 	return filter.DefinitelyAB(t.Tracker, t.URL)
 }
 
+// --- Torrent classification + payload eligibility ---
+
 // Torrent classifies one SeaDex torrent, in the context of its entry (for the
 // shared notes), into a normalized release.Release. This is the one place the
 // release.Input for a SeaDex torrent is built, so compare and audit classify
@@ -65,6 +69,20 @@ func Torrent(entry *seadex.Entry, t *seadex.Torrent) release.Release {
 		Tracker:   t.Tracker,
 		DualAudio: t.DualAudio,
 	})
+}
+
+// FileResolution classifies a torrent's resolution from its file names
+// alone, over the shared PayloadNames eligibility rule. The entry notes are
+// deliberately excluded: they are entry-wide and routinely describe sibling
+// releases, so they must not stamp a per-torrent title (the indexer's RSS
+// title synthesis is the consumer). Kept beside Torrent so every
+// release.Input built from SeaDex data has one home.
+func FileResolution(files []seadex.File) string {
+	names := PayloadNames(files)
+	if len(names) == 0 {
+		return ""
+	}
+	return release.Classify(&release.Input{Names: names}).Resolution
 }
 
 // PayloadNames returns the file names eligible as classification evidence for
@@ -170,6 +188,8 @@ var mediaExts = map[string]bool{
 	".mkv": true, ".mp4": true, ".avi": true, ".m2ts": true,
 	".ts": true, ".ogm": true, ".mov": true, ".wmv": true, ".webm": true,
 }
+
+// --- Shared entry-state verdict rules ---
 
 // DivergedIncomplete reports whether a diverged comparison of
 // entry downgrades to the incomplete vocabulary (compare's

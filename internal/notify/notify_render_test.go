@@ -140,3 +140,35 @@ func TestTrackerURLsRoutesMislabeledABURLToABSlot(t *testing.T) {
 		t.Errorf("nyaa = %q, want the genuine Nyaa URL", nyaa)
 	}
 }
+
+// TestTrackerURLsMalformedURLFailsClosedToABSlot pins the conservative fail
+// direction trackerURLs documents: a link whose raw URL is malformed,
+// host-hiding, or has a non-ASCII (homoglyph) host is unclassifiable, so it
+// must fill the AB slot (hidden while the toggle is off) and never render as
+// the clickable public URL - even when its tracker label claims a public
+// tracker. The genuine Nyaa link still wins the nyaa slot.
+func TestTrackerURLsMalformedURLFailsClosedToABSlot(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{name: "malformed URL", url: "https://animebytes.tv exploit"},
+		{name: "hidden host form", url: "https:/animebytes.tv/torrents.php?id=9"},
+		{name: "non-ascii homoglyph host", url: "https://animebytes\uff0etv/torrents.php?id=9"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			links := []compare.ReleaseLink{
+				{Tracker: "Nyaa", URL: tc.url},
+				{Tracker: "Nyaa", URL: "https://nyaa.si/view/9"},
+			}
+			nyaa, ab := trackerURLs(links)
+			if ab != tc.url {
+				t.Errorf("ab = %q, want the unclassifiable URL %q routed to the AB slot (fail closed)", ab, tc.url)
+			}
+			if nyaa != "https://nyaa.si/view/9" {
+				t.Errorf("nyaa = %q, want the genuine Nyaa URL, never the unclassifiable one", nyaa)
+			}
+		})
+	}
+}

@@ -262,6 +262,30 @@ func TestFetchEntriesCountMismatchWarnsButSucceeds(t *testing.T) {
 	}
 }
 
+// TestFetchEntriesInconsistentTotalsError pins finishFetch's metadata
+// self-consistency guard: a completed catalogue whose retained totalItems
+// cannot fit the retained totalPages at perPage (every honest PocketBase
+// response satisfies totalItems <= totalPages*perPage, and the
+// retained-highest maxima preserve that inequality) proves a single response
+// was internally inconsistent - upstream misbehavior, not offset-pagination
+// raciness - so the fetch must abort instead of waving the deficit through
+// with the count-mismatch WARN.
+func TestFetchEntriesInconsistentTotalsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"totalItems":501,"totalPages":1,"items":[{"alID":1,"expand":{"trs":[]}},{"alID":2,"expand":{"trs":[]}}]}`)
+	}))
+	defer server.Close()
+
+	logger, _ := capture.New()
+	entries, err := NewClient(server.Client(), server.URL, 0, logger).FetchEntries(context.Background())
+	if err == nil {
+		t.Fatalf("FetchEntries = %d entries, want an error (totalItems 501 cannot fit 1 page of %d)", len(entries), perPage)
+	}
+	if !strings.Contains(err.Error(), "cannot fit the reported") {
+		t.Errorf("error = %q, want inconsistent-totals context", err.Error())
+	}
+}
+
 // TestFetchEntriesUnparseableUpdatedWarnsOnce pins the timestamp-drift signal:
 // entries whose non-empty updated value fails every known PocketBase layout
 // are zeroed (sorting to the feed's tail), and the fetch surfaces ONE
@@ -390,5 +414,86 @@ func TestFetchEntriesContinuesPastLoweredTotalPages(t *testing.T) {
 	}
 	if entries[2].AniListID != 3 {
 		t.Errorf("entries[2].AniListID = %d, want 3 (page 3 fetched after the metadata regression)", entries[2].AniListID)
+	}
+}
+
+// pagedRecordingTransport serves a fixed two-page catalogue and records the
+// virtual time of each page request relative to the transport's start.
+type pagedRecordingTransport struct {
+	started time.Time
+	times   []time.Duration
+}
+
+func (tr *pagedRecordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	tr.times = append(tr.times, time.Since(tr.started))
+	body := `{"totalItems":2,"totalPages":2,"items":[{"alID":1,"expand":{"trs":[]}}]}`
+	if req.URL.Query().Get("page") == "2" {
+		body = `{"totalItems":2,"totalPages":2,"items":[{"alID":2,"expand":{"trs":[]}}]}`
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    req,
+	}, nil
+}
+
+// TestFetchEntriesSleepsOnlyBetweenPages pins WHERE the politeness sleep
+// lands, not just that cancellation during it aborts: page 1 must be fetched
+// immediately (no delay before the first page of a cycle), and exactly one
+// pageDelay must elapse before page 2. A guard drift that also sleeps before
+// page 1 (or stops sleeping between pages) shifts every cycle's first fetch
+// by a full pageDelay without failing any existing test.
+func TestFetchEntriesSleepsOnlyBetweenPages(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tr := &pagedRecordingTransport{started: time.Now()}
+		client := NewClient(&http.Client{Transport: tr}, "https://example.test", time.Minute, nil)
+		entries, err := client.FetchEntries(t.Context())
+		if err != nil {
+			t.Fatalf("FetchEntries returned error: %v", err)
+		}
+		if len(entries) != 2 {
+			t.Fatalf("entries = %d, want 2", len(entries))
+		}
+		if len(tr.times) != 2 {
+			t.Fatalf("requests = %d, want 2", len(tr.times))
+		}
+		if tr.times[0] != 0 {
+			t.Errorf("page 1 fetched after %s of delay, want immediately (no politeness sleep before the first page)", tr.times[0])
+		}
+		if tr.times[1] != time.Minute {
+			t.Errorf("page 2 fetched after %s, want exactly one pageDelay (1m0s)", tr.times[1])
+		}
+	})
+}
+
+// TestFetchEntriesCleanFetchEmitsNoWarnings pins the OFF state of the three
+// aggregate degradation gates (count mismatch, unparseable timestamps,
+// unusable torrent URLs): a fully healthy fetch - counts agreeing, a
+// parseable updated timestamp, a usable canonical-host torrent URL - must
+// emit none of the alert-stable WARN lines, so the Loki alerts keyed on them
+// can never fire on a clean cycle.
+func TestFetchEntriesCleanFetchEmitsNoWarnings(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"totalItems":1,"totalPages":1,"items":[{"alID":1,"updated":"2026-01-02 03:04:05.000Z","expand":{"trs":[{"tracker":"Nyaa","url":"https://nyaa.si/view/1"}]}}]}`)
+	}))
+	defer server.Close()
+
+	logger, recorder := capture.New()
+	entries, err := NewClient(server.Client(), server.URL, 0, logger).FetchEntries(context.Background())
+	if err != nil {
+		t.Fatalf("FetchEntries returned error: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	for _, msg := range []string{
+		"seadex catalogue count mismatch",
+		"seadex updated timestamps unparseable; feed newest-first ordering degraded",
+		"seadex torrent URLs unusable; affected findings and feed items carry no release link",
+	} {
+		if got := recorder.CountExact(msg); got != 0 {
+			t.Errorf("clean fetch logged %q %d times, want 0", msg, got)
+		}
 	}
 }

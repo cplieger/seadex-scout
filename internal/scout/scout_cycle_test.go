@@ -1857,3 +1857,40 @@ func TestCycleAniListDegradedStreakEscalatesToError(t *testing.T) {
 		t.Errorf("'cycle degraded' completion line count = %d, want 1 (the deadman vocabulary must not change)", n)
 	}
 }
+
+// TestHandlePreCompareGateExactlyHalfWalkPassesShrinkGuard pins the shrink
+// guard's exact boundary: the policy (degradation.ShrinkGuardFactor) is
+// "fewer than 1/factor of the prior items" - strictly BELOW half at the
+// default 2 - so a walk returning exactly half the prior snapshot's items
+// must pass the guard: the compare proceeds (handled=false), the persisted
+// shrunk-walk streak resets, and the gate itself saves nothing.
+func TestHandlePreCompareGateExactlyHalfWalkPassesShrinkGuard(t *testing.T) {
+	logger, recorder := capture.New()
+	st := state.State{
+		Library: library.Snapshot{Items: []library.Item{
+			{ArrID: 1, Title: "A"}, {ArrID: 2, Title: "B"}, {ArrID: 3, Title: "C"}, {ArrID: 4, Title: "D"},
+		}},
+		ShrunkWalks: 3,
+		Baselined:   true,
+	}
+	store := &fakeStore{st: st}
+	s := New(&Deps{Logger: logger, Store: store})
+	// 2 items against a prior of 4: 2*2 == 4 is NOT below half, so the guard
+	// must not trip (1 item, 1*2 < 4, is the tripping case the escalation
+	// test pins).
+	snap := library.Snapshot{Items: []library.Item{{ArrID: 1, Title: "A"}, {ArrID: 2, Title: "B"}}}
+
+	handled, healthy := s.handlePreCompareGate(context.Background(), &st, snap, &mapping.Cache{}, []seadex.Entry{{AniListID: 1}}, nil, nil, nil)
+	if handled || !healthy {
+		t.Errorf("handlePreCompareGate = (%v, %v), want (false, true) at exactly half the prior items", handled, healthy)
+	}
+	if st.ShrunkWalks != 0 {
+		t.Errorf("ShrunkWalks = %d, want 0 (a walk that passes the guard resets the streak)", st.ShrunkWalks)
+	}
+	if n := recorder.CountExact("cycle degraded"); n != 0 {
+		t.Errorf("'cycle degraded' count = %d, want 0 (the gate falls through to the compare)", n)
+	}
+	if store.saves != 0 {
+		t.Errorf("saves = %d, want 0 (the fall-through gate saves nothing; the cycle's closing save persists)", store.saves)
+	}
+}

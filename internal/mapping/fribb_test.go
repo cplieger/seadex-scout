@@ -522,3 +522,100 @@ func TestParseFribb_logsSkippedAndDroppedCounts(t *testing.T) {
 		t.Errorf("dropped-records logs = %v, want dropped=1", rec.Messages())
 	}
 }
+
+// TestParseFribb_cleanParseEmitsNoLogs pins the log-gating conditions on the
+// silent side: a fully-clean body (every record keyed, nothing skipped or
+// dropped) must emit NO skipped-records warning and NO dropped-records debug
+// line. Kills the CONDITIONALS_BOUNDARY mutants on `skipped > 0` and
+// `dropped > 0` (>= would fire both lines with zero counts on every clean
+// cycle, noise the operator would read as upstream corruption).
+func TestParseFribb_cleanParseEmitsNoLogs(t *testing.T) {
+	logger, rec := capture.New()
+	data := []byte(`[{"anilist_id":1,"type":"tv","tvdb_id":100},{"anilist_id":2,"type":"movie","themoviedb_id":603}]`)
+	records, err := parseFribb(data, logger)
+	if err != nil {
+		t.Fatalf("parseFribb error: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("parseFribb kept %d records, want 2", len(records))
+	}
+	if msgs := rec.Messages(); len(msgs) != 0 {
+		t.Errorf("clean parse logged %v, want no log lines (skipped=0 and dropped=0 must stay silent)", msgs)
+	}
+}
+
+// TestParseFribb_atCapRecordAccepted pins the inclusive side of the
+// per-record byte cap: a record whose encoded form is exactly
+// maxFribbRecordBytes bytes is accepted (the guard is strictly
+// greater-than), while one byte over is skipped. Kills the
+// CONDITIONALS_BOUNDARY mutant on `len(msg) > maxFribbRecordBytes` (>= would
+// reject a legitimate at-cap record).
+func TestParseFribb_atCapRecordAccepted(t *testing.T) {
+	// Build a record padded to exactly maxFribbRecordBytes bytes via one
+	// long imdb_id string entry (a single string stays under the
+	// maxFribbIdentifiers list cap).
+	buildRecord := func(size int) string {
+		const skeleton = `{"anilist_id":1,"imdb_id":"tt"}`
+		pad := size - len(skeleton)
+		if pad < 0 {
+			t.Fatalf("cap %d smaller than skeleton %d", size, len(skeleton))
+		}
+		return `{"anilist_id":1,"imdb_id":"tt` + strings.Repeat("x", pad) + `"}`
+	}
+
+	atCap := buildRecord(maxFribbRecordBytes)
+	if len(atCap) != maxFribbRecordBytes {
+		t.Fatalf("at-cap record is %d bytes, want exactly %d", len(atCap), maxFribbRecordBytes)
+	}
+	records, err := parseFribb([]byte(`[`+atCap+`]`), discardLogger())
+	if err != nil {
+		t.Fatalf("parseFribb(at-cap record) error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("parseFribb kept %d records, want 1 (an exactly-at-cap record is accepted)", len(records))
+	}
+
+	overCap := buildRecord(maxFribbRecordBytes + 1)
+	records, err = parseFribb([]byte(`[`+overCap+`]`), discardLogger())
+	if err != nil {
+		t.Fatalf("parseFribb(over-cap record) error: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("parseFribb kept %d records, want 0 (one byte over the cap is skipped)", len(records))
+	}
+}
+
+// TestTmdbID_atCapMovieListRetained pins the inclusive side of the
+// themoviedb_id.movie identifier cap, matching the imdb_id at-cap coverage in
+// TestParseFribb_identifierSlicesCapped: a movie list of exactly
+// maxFribbIdentifiers entries is retained in full, one more rejects the
+// record. Kills the CONDITIONALS_BOUNDARY mutant on
+// `len(a.Movie) > maxFribbIdentifiers` (>= would reject a legitimate at-cap
+// movie list).
+func TestTmdbID_atCapMovieListRetained(t *testing.T) {
+	build := func(n int) string {
+		var b strings.Builder
+		b.WriteString(`{"movie":[`)
+		for i := range n {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(strconv.Itoa(i + 1))
+		}
+		b.WriteString(`]}`)
+		return b.String()
+	}
+
+	var at tmdbID
+	if err := at.UnmarshalJSON([]byte(build(maxFribbIdentifiers))); err != nil {
+		t.Fatalf("UnmarshalJSON(at-cap movie list) error: %v", err)
+	}
+	if len(at.Movie) != maxFribbIdentifiers {
+		t.Errorf("at-cap movie list retained %d ids, want the full %d", len(at.Movie), maxFribbIdentifiers)
+	}
+
+	var over tmdbID
+	if err := over.UnmarshalJSON([]byte(build(maxFribbIdentifiers + 1))); err == nil {
+		t.Error("UnmarshalJSON(over-cap movie list) = nil error, want the record-rejecting cap error")
+	}
+}

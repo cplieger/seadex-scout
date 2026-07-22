@@ -13,4 +13,6 @@ services:
       SEADEX_SCOUT_PROWLARR_KEY: "${SEADEX_SCOUT_PROWLARR_KEY:-}"
       SEADEX_SCOUT_AB_PASSKEY: "${SEADEX_SCOUT_AB_PASSKEY:-}"
     volumes:
+      # First boot with no config.yaml writes a commented starter here and exits;
+      # edit it and restart (README "Configuration").
       - "./config:/config"  # holds config.yaml, state, and the reports dir

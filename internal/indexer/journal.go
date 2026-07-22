@@ -74,7 +74,16 @@ func allIdentities(entries []seadex.Entry) map[string]bool {
 	seen := make(map[string]bool)
 	for i := range entries {
 		for j := range entries[i].Torrents {
-			for _, id := range identitySignals(&entries[i].Torrents[j]) {
+			t := &entries[i].Torrents[j]
+			if trackerScope(t.Tracker) == "" {
+				// Tail-tracker occurrences never reach the ledger (the same
+				// guard journalIfNew applies on the growth path): AnimeTosho
+				// mirrors Nyaa with the IDENTICAL info hash, so folding it at
+				// baseline would pre-mark a later Nyaa listing of the same
+				// bytes as already seen and deny it RSS exposure forever.
+				continue
+			}
+			for _, id := range identitySignals(t) {
 				seen[id] = true
 			}
 		}
@@ -111,11 +120,10 @@ func scopeOfKey(key string) string {
 // curated occurrences: synthesis from the lowest-AniList-ID occurrence, then
 // best-wins on the marker and category union across all of them (a torrent
 // attached to several entries must not render conflicting duplicates). ok is
-// false when
-// the torrent cannot be served: no grabbable download link (an AnimeBytes
-// release without a passkey - reported via noPasskey so the caller can nudge
-// the operator - or an id-less URL, which journalKey already excludes) or no
-// parseable title at all (no files and no release group).
+// false when the torrent cannot be served: no grabbable download link (an
+// AnimeBytes release without a passkey - reported via noPasskey so the caller
+// can nudge the operator - or an id-less URL, which journalKey already
+// excludes) or no parseable title at all (no files and no release group).
 func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor func(alID int) EntryInfo) (it journalItem, ok, noPasskey bool) {
 	if len(refs) == 0 {
 		return journalItem{}, false, false

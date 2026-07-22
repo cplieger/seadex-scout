@@ -552,10 +552,13 @@ func TestLoader_refreshCache_coverageFloorCeiling(t *testing.T) {
 	}
 }
 
-// TestLoader_refreshCache_truncatedRefreshKeepsStale covers the below-half-size
-// acceptance guard: a syntactically valid refresh that shrinks the map to less
-// than half the previous record count (here 1 valid mapped record replacing 4)
-// must degrade to the stale cache with an error, not replace it.
+// TestLoader_refreshCache_truncatedRefreshKeepsStale covers truncated-refresh
+// rejection: a syntactically valid refresh that shrinks the map to less than
+// half the previous record count (here 1 valid mapped record replacing 4) must
+// degrade to the stale cache with an error, not replace it. For this all-typed
+// shape the typed population-collapse floor (validateTypeCoverage) fires before
+// the whole-map below-half shrink guard, which is pinned separately by
+// TestLoader_refreshCache_wholeMapShrinkGuardKeepsStale.
 func TestLoader_refreshCache_truncatedRefreshKeepsStale(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`[{"anilist_id":9,"type":"tv","tvdb_id":900}]`))
@@ -591,8 +594,9 @@ func TestLoader_refreshCache_truncatedRefreshKeepsStale(t *testing.T) {
 // TestLoader_refreshCache_duplicateIDCollapseKeepsStale pins that cache
 // acceptance measures the effective AniList-keyed dataset, not the transport
 // row count: a 200 whose mapped rows all repeat one AniList ID collapses to a
-// single effective record, which the below-half-size guard must reject against
-// a 4-record stale cache instead of persisting a refresh that indexes to
+// single effective record, which the acceptance floors must reject against a
+// 4-record stale cache (the typed population-collapse floor fires first for
+// this all-typed shape) instead of persisting a refresh that indexes to
 // length one.
 func TestLoader_refreshCache_duplicateIDCollapseKeepsStale(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1542,5 +1546,154 @@ func TestValidateRefreshedRecordsMidBandPopulationCollapseRejected(t *testing.T)
 	}
 	if err := validateRefreshedRecords(sparsePrev, noSpecials, len(noSpecials)); err != nil {
 		t.Errorf("sparse-population drop rejected: %v (populations under the significance gate are not guarded)", err)
+	}
+}
+
+// TestLoader_refreshCache_wholeMapShrinkGuardKeepsStale pins acceptRefresh's
+// whole-map below-half shrink guard on a shape the per-population floors
+// cannot intercept: the guarded populations (typed, season, special, both
+// routing sides) are fully retained while the TOTAL record count drops below
+// half (100 -> 40, via loss of bare id-only records). The guard must reject
+// with the FIXED "refresh shrank below half of previous" reason (a
+// Loki-queryable class discriminator), carry the live counts as structured
+// stale_returned/stale_previous facts, advance the persisted rejection
+// streak, and keep the stale map unchanged.
+func TestLoader_refreshCache_wholeMapShrinkGuardKeepsStale(t *testing.T) {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := 1; i <= 10; i++ {
+		if i > 1 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"anilist_id":%d,"type":"tv","tvdb_id":%d}`, i, i)
+	}
+	for i := 11; i <= 40; i++ {
+		fmt.Fprintf(&b, `,{"anilist_id":%d}`, i)
+	}
+	b.WriteByte(']')
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(b.String()))
+	}))
+	defer ts.Close()
+
+	prevRecords := make([]Record, 0, 100)
+	for i := 1; i <= 10; i++ {
+		prevRecords = append(prevRecords, Record{AniListID: i, Type: "TV", TvdbID: i})
+	}
+	for i := 11; i <= 100; i++ {
+		prevRecords = append(prevRecords, Record{AniListID: i})
+	}
+	prev := &Cache{
+		FetchedAt: time.Now().Add(-2 * time.Hour),
+		Records:   prevRecords,
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	stale, ok := errors.AsType[*StaleMapError](err)
+	if !ok {
+		t.Fatalf("below-half refresh error = %v, want a *StaleMapError guard rejection", err)
+	}
+	if len(next.Records) != len(prevRecords) {
+		t.Fatalf("below-half refresh kept %d records, want the %d stale records unchanged", len(next.Records), len(prevRecords))
+	}
+	if next.RejectedRefreshes != 1 {
+		t.Errorf("below-half refresh RejectedRefreshes = %d, want 1 (the shrink guard is an acceptance-guard rejection)", next.RejectedRefreshes)
+	}
+	if stale.ConsecutiveRejections() != 1 {
+		t.Errorf("ConsecutiveRejections = %d, want 1", stale.ConsecutiveRejections())
+	}
+	if !strings.Contains(stale.Error(), "refresh shrank below half of previous (returned 40, previous 100)") {
+		t.Errorf("StaleMapError text = %q, want the fixed reason with the shrink counts parenthetical", stale.Error())
+	}
+	attrs := stale.LogAttrs()
+	var gotReturned, gotPrevious any
+	for i := 0; i+1 < len(attrs); i += 2 {
+		switch attrs[i] {
+		case "stale_returned":
+			gotReturned = attrs[i+1]
+		case "stale_previous":
+			gotPrevious = attrs[i+1]
+		}
+	}
+	if gotReturned != 40 || gotPrevious != 100 {
+		t.Errorf("LogAttrs stale_returned=%v stale_previous=%v, want 40 and 100", gotReturned, gotPrevious)
+	}
+}
+
+// TestValidateRefreshedRecordsScopeMidBandCollapseRejected pins the scope
+// floor's per-population shrink guards (populationCollapsed), which the
+// existing scope tests never reach: zeroing a WHOLE population fires the
+// coverageLost branch first, so the mid-band - most of one scope population
+// gutted while the survivor count still clears the 1% floor - was unguarded
+// by any test. Seasons 2000 -> 40 (SeasonTvdb zeroed above index 40) and
+// specials 200 -> 40 (OVA relabeled TV) each keep every other floor green
+// yet must be rejected in favour of the stale map.
+func TestValidateRefreshedRecordsScopeMidBandCollapseRejected(t *testing.T) {
+	const body = 2000
+	seasonPrev := make([]Record, 0, body)
+	for id := 1; id <= body; id++ {
+		seasonPrev = append(seasonPrev, Record{AniListID: id, Type: "TV", TvdbID: id, SeasonTvdb: 1})
+	}
+	seasonMidBand := make([]Record, len(seasonPrev))
+	copy(seasonMidBand, seasonPrev)
+	for i := 40; i < len(seasonMidBand); i++ {
+		seasonMidBand[i].SeasonTvdb = 0
+	}
+	if err := validateRefreshedRecords(seasonPrev, seasonMidBand, len(seasonMidBand)); err == nil {
+		t.Error("mid-band season collapse (2000 -> 40, above the 1% floor) returned nil error, want rejection")
+	}
+
+	specialPrev := make([]Record, 0, body)
+	for id := 1; id <= body; id++ {
+		r := Record{AniListID: id, Type: "TV", TvdbID: id}
+		if id <= 200 {
+			r.Type = "OVA"
+		}
+		specialPrev = append(specialPrev, r)
+	}
+	specialMidBand := make([]Record, len(specialPrev))
+	copy(specialMidBand, specialPrev)
+	for i := 40; i < 200; i++ {
+		specialMidBand[i].Type = "TV"
+	}
+	if err := validateRefreshedRecords(specialPrev, specialMidBand, len(specialMidBand)); err == nil {
+		t.Error("mid-band special collapse (200 -> 40, above the 1% floor) returned nil error, want rejection")
+	}
+}
+
+// TestValidateRefreshedRecordsRoutingMidBandCollapseRejected pins the routing
+// floor's per-population shrink guards (populationCollapsed), which the
+// existing routing tests never reach: collapsing a WHOLE side fires the
+// coverageLost branch first, so the mid-band - most of one resolvable routing
+// side gutted while the survivors still clear the 1% floor - was unguarded by
+// any test. Movie-routed 200 -> 40 (TMDB ids stripped, types intact) and
+// series-routed 1800 -> 800 (TVDB ids zeroed) each keep every other floor
+// green yet must be rejected in favour of the stale map.
+func TestValidateRefreshedRecordsRoutingMidBandCollapseRejected(t *testing.T) {
+	const body = 2000
+	previous := make([]Record, 0, body)
+	for id := 1; id <= 200; id++ {
+		previous = append(previous, Record{AniListID: id, Type: "MOVIE", TmdbMovies: []int{id}})
+	}
+	for id := 201; id <= body; id++ {
+		previous = append(previous, Record{AniListID: id, Type: "TV", TvdbID: id})
+	}
+
+	movieMidBand := make([]Record, len(previous))
+	copy(movieMidBand, previous)
+	for i := 40; i < 200; i++ {
+		movieMidBand[i].TmdbMovies = nil
+	}
+	if err := validateRefreshedRecords(previous, movieMidBand, len(movieMidBand)); err == nil {
+		t.Error("mid-band movie-routed collapse (200 -> 40, above the 1% floor) returned nil error, want rejection")
+	}
+
+	seriesMidBand := make([]Record, len(previous))
+	copy(seriesMidBand, previous)
+	for i := 1000; i < body; i++ {
+		seriesMidBand[i].TvdbID = 0
+	}
+	if err := validateRefreshedRecords(previous, seriesMidBand, len(seriesMidBand)); err == nil {
+		t.Error("mid-band series-routed collapse (1800 -> 800, above the 1% floor) returned nil error, want rejection")
 	}
 }

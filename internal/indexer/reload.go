@@ -2,7 +2,6 @@ package indexer
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -265,39 +264,36 @@ func (ix *Indexer) readSnapshot(ctx context.Context) (snapshot, bool, bool) {
 		}
 		return snapshot{}, false, false
 	}
-	var snap snapshot
-	if err := json.Unmarshal(data, &snap); err != nil {
+	snap, reason, decodeErr := decodeSnapshot(data)
+	if decodeErr != nil {
 		ix.markSnapshotFailedIfUnloaded()
-		ix.log.Warn("indexer feed snapshot malformed; keeping current feed", "path", ix.path, "error", err)
+		ix.log.Warn("indexer feed snapshot malformed; keeping current feed", "path", ix.path, "error", decodeErr)
 		return snapshot{}, false, true
 	}
-	// Syntactically valid JSON is not yet a usable snapshot: `null` or `{}`
-	// decodes cleanly into a zero value, and installing it would blank both
-	// synthesized feeds and both curation maps. The writer always emits
-	// non-nil by_hash/by_key maps - even for an honestly empty catalogue - so
-	// nil curation maps identify a structurally invalid snapshot without
-	// rejecting a valid empty feed.
-	if snap.ByHash == nil || snap.ByKey == nil {
-		ix.markSnapshotFailedIfUnloaded()
-		ix.log.Warn("indexer feed snapshot malformed; keeping current feed",
-			"path", ix.path, "reason", "missing required curation maps")
-		return snapshot{}, false, true
-	}
-	// A structurally valid snapshot can still carry an item whose fields blow
-	// the shared persisted-item limits (a hand-edited or corrupted file; the
-	// writer enforces the same limits at item creation). Serving it would let
-	// renderFeed's XML escaping amplify one multi-megabyte field far past the
-	// container memory budget, so treat it exactly like malformed JSON:
-	// deterministic for unchanged bytes (memoize), snapshot unavailable only
-	// before first load, last-good feed retained, and the value itself never
+	// `null` or `{}` decodes cleanly into a zero value; nil curation maps
+	// and over-limit items identify a structurally invalid snapshot (see
+	// decodeSnapshot). Both are deterministic for unchanged bytes, so they
+	// memoize like malformed JSON; the offending value itself is never
 	// logged (it can be attacker-shaped multi-megabyte text).
-	if !validFeedItems(snap.NyaaFeed, snap.ABFeed) {
+	if reason != "" {
 		ix.markSnapshotFailedIfUnloaded()
-		ix.log.Warn("indexer feed snapshot malformed; keeping current feed",
-			"path", ix.path, "reason", "item exceeds persisted-item limits")
+		ix.log.Warn("indexer feed snapshot malformed; keeping current feed", "path", ix.path, "reason", reason)
 		return snapshot{}, false, true
+	}
+	if snap.Seen == nil {
+		// The retired pre-journal schema: the journal contract (see
+		// loadPrevious) treats its feeds as absent. Keep the curation maps
+		// so searches still work, but serve empty RSS feeds until the next
+		// cycle re-baselines - an upgrade must never re-broadcast the whole
+		// legacy catalogue as newly curated releases.
+		if len(snap.NyaaFeed) > 0 || len(snap.ABFeed) > 0 {
+			ix.log.Info("indexer feed snapshot is pre-journal schema; serving empty RSS feeds until the next cycle re-baselines",
+				"path", ix.path)
+		}
+		snap.NyaaFeed, snap.ABFeed = nil, nil
 	}
 	snap.ABFeed = ix.rebuildABDownloadURLs(snap.ABFeed)
+	snap.NyaaFeed = ix.rebuildNyaaDownloadURLs(snap.NyaaFeed)
 	return snap, true, false
 }
 
@@ -342,6 +338,45 @@ func (ix *Indexer) rebuildABDownloadURLs(feed []journalItem) []journalItem {
 		// undecodable items; the download URL (which embeds the passkey) is
 		// never logged.
 		ix.log.Warn("indexer feed snapshot: AnimeBytes items dropped; no download URL derivable from tracker page URL",
+			"path", ix.path, "dropped", dropped, "kept", len(out), "sample_guids", samples)
+	}
+	return out
+}
+
+// rebuildNyaaDownloadURLs derives each persisted Nyaa feed item's download
+// URL from its non-secret tracker page URL (the GUID), mirroring
+// rebuildABDownloadURLs. The Nyaa link carries no credential, but re-deriving
+// it at the load boundary keeps the persisted snapshot non-authoritative for
+// fetch targets on BOTH feeds: a tampered /config/feed.json cannot plant an
+// arbitrary URL that renderFeed would then hand the arrs as a curated
+// release's enclosure. FeedWriter only ever produces Nyaa links of the fixed
+// nyaa.BaseURL/download/{id}.torrent shape, so the derivation is lossless for
+// every writer-produced snapshot; an item whose URL cannot be derived (no
+// parseable Nyaa id in its GUID) is dropped rather than served link-less.
+func (ix *Indexer) rebuildNyaaDownloadURLs(feed []journalItem) []journalItem {
+	if len(feed) == 0 {
+		return feed
+	}
+	out := make([]journalItem, 0, len(feed))
+	dropped := 0
+	var samples []string
+	for i := range feed {
+		it := feed[i]
+		dl, ok := downloadURL(release.TrackerNameNyaa, it.GUID, "")
+		if !ok {
+			dropped++
+			if len(samples) < 3 {
+				// The GUID is a non-secret tracker page URL; bound it through
+				// the shared emit-boundary policy before it reaches the log.
+				samples = append(samples, capLogText(it.GUID, 256))
+			}
+			continue
+		}
+		it.DownloadURL = dl
+		out = append(out, it)
+	}
+	if dropped > 0 {
+		ix.log.Warn("indexer feed snapshot: Nyaa items dropped; no download URL derivable from tracker page URL",
 			"path", ix.path, "dropped", dropped, "kept", len(out), "sample_guids", samples)
 	}
 	return out

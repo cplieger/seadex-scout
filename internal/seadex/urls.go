@@ -19,7 +19,7 @@ const DefaultBaseURL = "https://releases.moe"
 // EntryURL returns the SeaDex entry page for an AniList id under baseURL
 // (the releases.moe site base), or "" when the id is unknown. The entry-page
 // rule lives here, beside the package's other releases.moe contract knowledge
-// (ValidInfoHash/RedactedInfoHash), so every consumer builds the same link
+// (ValidInfoHash/redactedInfoHash), so every consumer builds the same link
 // from the same base.
 func EntryURL(baseURL string, aniListID int) string {
 	if aniListID <= 0 {

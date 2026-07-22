@@ -169,11 +169,12 @@ func TestRebuildUnconfiguredABPersistsNoABFeed(t *testing.T) {
 // TestRebuildPersistsABItemsGUIDOnly pins the at-rest credential contract: a
 // rebuild with a CONFIGURED AnimeBytes passkey journals AB releases yet
 // persists them GUID-only - the raw feed.json bytes contain ZERO occurrences
-// of the passkey and the stored AB item has an empty download URL (Nyaa items
-// keep their public .torrent links) - while a server loading that snapshot
-// with the same passkey still serves the AB item with its correct derived
-// download link (rebuildABDownloadURLs), so keeping the credential off disk
-// costs the served feed nothing.
+// of the passkey and BOTH stored items have an empty download URL (the
+// snapshot is never authoritative for fetch targets; the reader re-derives
+// Nyaa links too, see rebuildNyaaDownloadURLs) - while a server loading that
+// snapshot with the same passkey still serves the AB item with its correct
+// derived download link (rebuildABDownloadURLs), so keeping the credential
+// off disk costs the served feed nothing.
 func TestRebuildPersistsABItemsGUIDOnly(t *testing.T) {
 	const passkey = "SUPERSECRETPASSKEY123"
 	path := filepath.Join(t.TempDir(), "feed.json")
@@ -213,8 +214,8 @@ func TestRebuildPersistsABItemsGUIDOnly(t *testing.T) {
 	if got, want := snap.ABFeed[0].GUID, "https://animebytes.tv/torrents.php?id=86576&torrentid=1167293"; got != want {
 		t.Errorf("persisted AB GUID = %q, want %q (the reader derives the link from it)", got, want)
 	}
-	if got, want := snap.NyaaFeed[0].DownloadURL, "https://nyaa.si/download/1961373.torrent"; got != want {
-		t.Errorf("persisted Nyaa download URL = %q, want the public link %q", got, want)
+	if got := snap.NyaaFeed[0].DownloadURL; got != "" {
+		t.Errorf("persisted Nyaa download URL = %q, want empty (GUID-only; the reader re-derives the public link)", got)
 	}
 
 	// The reader derives the served AB link from the GUID and its own
@@ -230,14 +231,14 @@ func TestRebuildPersistsABItemsGUIDOnly(t *testing.T) {
 	}
 }
 
-// TestRebuildPersistScrubsABScopedItemCarriedInNyaaFeed pins the key-scoped
-// arm of the passkey-at-rest invariant: the wholesale strip runs per FEED
-// (snap.ABFeed), but the secret is attached per item by KEY scope - an
-// ab:-keyed item that a legacy or corrupted snapshot placed in nyaa_feed is
-// re-rendered by carryJournal with a passkey-bearing AB download link and
-// appended to the nyaa slice, where the AB-feed strip never looks. The
-// persist-time scrub must catch it by key scope, so the persisted file can
-// never hold the passkey regardless of which feed slice the item rode in on.
+// TestRebuildPersistScrubsABScopedItemCarriedInNyaaFeed pins the misplaced-item
+// arm of the passkey-at-rest invariant: the secret is attached per item by KEY
+// scope - an ab:-keyed item that a legacy or corrupted snapshot placed in
+// nyaa_feed is re-rendered by carryJournal with a passkey-bearing AB download
+// link and appended to the nyaa slice, where the AB-feed strip never looks.
+// The persist-time Nyaa-feed strip (stripNyaaDownloadURLs blanks every item's
+// download URL) must catch it, so the persisted file can never hold the
+// passkey regardless of which feed slice the item rode in on.
 func TestRebuildPersistScrubsABScopedItemCarriedInNyaaFeed(t *testing.T) {
 	const passkey = "SUPERSECRETPASSKEY123"
 	path := filepath.Join(t.TempDir(), "feed.json")
@@ -775,5 +776,30 @@ func TestJournalItemPersistedShapeIsFlat(t *testing.T) {
 	if decoded.Title != jit.Title || decoded.Key != jit.Key || decoded.AniListID != jit.AniListID ||
 		!decoded.FirstSeen.Equal(first) || decoded.Size != 7 || decoded.Seeders != 1 {
 		t.Errorf("pre-split record decoded lossily: %+v", decoded)
+	}
+}
+
+// TestValidPersistedItemRejectsNegativeCounts pins the numeric arm of the
+// shared persisted-item limits: both producers guarantee non-negative
+// size/seeders/leechers (toItem clamps, totalSize floors at 0), so a
+// persisted negative value identifies a hand-edited or corrupted snapshot
+// and must be rejected at load rather than rendered as an invalid enclosure
+// length or peer count.
+func TestValidPersistedItemRejectsNegativeCounts(t *testing.T) {
+	tests := map[string]journalItem{
+		"negative size":     {item: item{Title: "x", Size: -1}},
+		"negative seeders":  {item: item{Title: "x", Seeders: -1}},
+		"negative leechers": {item: item{Title: "x", Leechers: -1}},
+	}
+	for name, it := range tests {
+		t.Run(name, func(t *testing.T) {
+			if validPersistedItem(&it) {
+				t.Errorf("validPersistedItem(%s) = true, want false", name)
+			}
+		})
+	}
+	ok := journalItem{item: item{Title: "x"}}
+	if !validPersistedItem(&ok) {
+		t.Error("validPersistedItem(zero counts) = false, want true")
 	}
 }

@@ -34,6 +34,8 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
+// --- Verdict + qualifier vocabulary ---
+
 // Verdict is the SeaDex-alignment classification of a library item's release.
 type Verdict string
 
@@ -165,6 +167,8 @@ type Report struct {
 	// report's shape is unchanged.
 	Incomplete []IncompleteEntry `json:"incomplete_mappings,omitempty"`
 }
+
+// --- Report building ---
 
 // Config configures an Auditor.
 type Config struct {
@@ -393,7 +397,7 @@ func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 		}
 		rel := classify.Torrent(entry, t)
 		out = append(out, Release{
-			Tracker:      t.Tracker,
+			Tracker:      rel.Tracker,
 			Group:        rel.Group,
 			URL:          t.UsableURL(),
 			Best:         t.IsBest,
@@ -410,6 +414,8 @@ func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 func (a *Auditor) seadexURL(aniListID int) string {
 	return seadex.EntryURL(a.seadexBaseURL, aniListID)
 }
+
+// --- Group sets + row ordering ---
 
 // groupSets returns the distinct normalized groups among the best and the alt
 // releases. A curation-warned release contributes to neither set: counting it

@@ -229,6 +229,11 @@ func TestFetchAndParseClassifiesTorznabErrorDoc(t *testing.T) {
 			wantTransient: true,
 			wantMalformed: true,
 		},
+		"decode-limit overflow stays show-local": {
+			body:          `<?xml version="1.0" encoding="UTF-8"?><rss><channel>` + strings.Repeat("<item/>", maxUpstreamItems+1) + `</channel></rss>`,
+			wantTransient: true,
+			wantMalformed: true,
+		},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {

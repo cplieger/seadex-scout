@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/cplieger/seadex-scout/internal/classify"
-	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
@@ -114,10 +113,10 @@ func episodeMarker(t *seadex.Torrent, meta EntryInfo) string {
 		return relabelSeason(singleEpisodeMarker(t.Files), meta.SeasonTvdb)
 	}
 	if meta.SeasonTvdb > 0 {
-		return fmt.Sprintf("S%02d", meta.SeasonTvdb)
+		return seasonLabel(meta.SeasonTvdb)
 	}
 	if s, ok := packSeason(t.Files); ok {
-		return fmt.Sprintf("S%02d", s)
+		return seasonLabel(s)
 	}
 	if meta.IsSpecial {
 		return "S00"
@@ -127,6 +126,10 @@ func episodeMarker(t *seadex.Torrent, meta EntryInfo) string {
 
 // seasonPrefix matches the season half of an SxxExx marker for relabeling.
 var seasonPrefix = regexp.MustCompile(`(?i)^S\d{1,2}`)
+
+// seasonLabel renders a season number as the SNN token the arrs parse
+// (the one wire format every season marker in this file must agree on).
+func seasonLabel(s int) string { return fmt.Sprintf("S%02d", s) }
 
 // relabelSeason rewrites the season half of a single release's SxxExx marker
 // to the Fribb TVDB season, mirroring the pack arm's correction: fansub
@@ -143,7 +146,7 @@ func relabelSeason(marker string, seasonTvdb int) string {
 	if seasonTvdb <= 0 {
 		return marker
 	}
-	return seasonPrefix.ReplaceAllString(marker, fmt.Sprintf("S%02d", seasonTvdb))
+	return seasonPrefix.ReplaceAllString(marker, seasonLabel(seasonTvdb))
 }
 
 // singleEpisodeMarker returns a single-episode torrent's own episode token:
@@ -187,19 +190,12 @@ func releaseFlags(t *seadex.Torrent) []string {
 }
 
 // fileResolution classifies a torrent's resolution from its file names
-// alone, via the shared release classifier over the ONE file-eligibility
-// rule (classify.PayloadNames — type gate plus size refinement), so the RSS
-// title's resolution flag and the daemon finding's classification can never
-// disagree about which files vote (h-f3). The entry notes are deliberately
-// excluded: they are entry-wide and routinely describe sibling releases, so
-// a note mentioning another release's 1080p must not stamp this torrent's
-// title — that axis stays per-consumer while the names selection is shared.
+// alone, via the shared classify.FileResolution (the ONE place a
+// release.Input is built from SeaDex data, over the shared PayloadNames
+// eligibility rule), so the RSS title's resolution flag and the daemon
+// finding's classification can never disagree about which files vote (h-f3).
 func fileResolution(files []seadex.File) string {
-	names := classify.PayloadNames(files)
-	if len(names) == 0 {
-		return ""
-	}
-	return release.Classify(&release.Input{Names: names}).Resolution
+	return classify.FileResolution(files)
 }
 
 // --- Episode/pack heuristics: token regexes, feedTitle, packSeason ---
@@ -273,7 +269,7 @@ func feedTitle(t *seadex.Torrent) string {
 		l := locs[len(locs)-1]
 		label := base[l[4]:l[5]]
 		if s, ok := packSeason(t.Files); ok {
-			label = fmt.Sprintf("S%02d", s)
+			label = seasonLabel(s)
 		}
 		return strings.TrimSpace(base[:l[2]] + label + base[l[3]:])
 	}
@@ -436,7 +432,7 @@ func isContentMediaFile(name string) bool {
 // stripExt drops a trailing known video extension from a file name, leaving any
 // other trailing dotted token (a release name is not a path) intact.
 func stripExt(name string) string {
-	ext := strings.ToLower(path.Ext(name))
+	ext := path.Ext(name)
 	if classify.IsMediaFile(name) && ext != "" {
 		return name[:len(name)-len(ext)]
 	}

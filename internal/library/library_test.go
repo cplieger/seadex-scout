@@ -838,7 +838,7 @@ func TestWalkSonarrUnmatchedIncludeTagLogsWarning(t *testing.T) {
 // attributes), so any future full OR partial tag-value field fails the test
 // without relying on spotting a particular secret substring.
 func TestWalkUnmatchedTagWarningNeverEmitsTagValues(t *testing.T) {
-	const secret = "sekrit-expanded-api-key-9f8e7d"
+	const sentinel = "sekrit-expanded-tag-9f8e7d"
 	fs := &fakeSonarr{
 		series: []arrapi.Series{
 			{ID: 1, Title: "Kept", Tags: []int{7}},
@@ -849,7 +849,7 @@ func TestWalkUnmatchedTagWarningNeverEmitsTagValues(t *testing.T) {
 		tags: []arrapi.Tag{{ID: 7, Label: "anime"}},
 	}
 	logger, rec := capture.New()
-	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime", secret}, Logger: logger})
+	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime", sentinel}, Logger: logger})
 
 	if _, err := w.Walk(context.Background()); err != nil {
 		t.Fatalf("Walk: %v", err)

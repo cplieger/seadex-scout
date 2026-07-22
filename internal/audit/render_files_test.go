@@ -440,3 +440,47 @@ func TestWriteFilesCanceledAfterJSONSkipsMarkdown(t *testing.T) {
 		t.Error("markdown half must not be written after a post-JSON cancellation")
 	}
 }
+
+// countingCancelCtx is a context whose Err flips to context.Canceled from the
+// after-th Err call onward, deterministically landing a cancellation at a
+// specific interrupted checkpoint. WriteFiles polls Err via interrupted and
+// never selects on Done; context.Cause falls back to Err for a non-cancelCtx
+// context (the same contract pathExistsCancelCtx relies on).
+type countingCancelCtx struct {
+	context.Context
+	after int
+	calls int
+}
+
+func (c *countingCancelCtx) Err() error {
+	c.calls++
+	if c.calls >= c.after {
+		return context.Canceled
+	}
+	return nil
+}
+
+// TestWriteFilesCanceledBeforeJSONRenderWritesNothing pins the report-render
+// cancellation checkpoint (the one WriteFiles stage no existing test
+// reaches): a cancellation observed after the stem probe but before the JSON
+// half is rendered stops the pipeline with the report-render stage error and
+// writes nothing - the report dir is never created. Err call #1 is the
+// report-write checkpoint, #2 the single stem-probe round (empty dir), so
+// flipping at call 3 lands exactly on the report-render checkpoint.
+func TestWriteFilesCanceledBeforeJSONRenderWritesNothing(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "reports")
+	ctx := &countingCancelCtx{Context: context.Background(), after: 3}
+	r := &Report{GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC), Totals: map[string]int{}}
+
+	err := r.WriteFiles(ctx, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("WriteFiles error = %v, want context.Canceled", err)
+	}
+	if !strings.Contains(err.Error(), "report render interrupted") {
+		t.Errorf("error = %q, want the report-render stage context", err)
+	}
+	if _, statErr := os.Stat(dir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("report dir stat = %v, want absent (nothing written before the JSON render)", statErr)
+	}
+}

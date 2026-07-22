@@ -337,3 +337,31 @@ func TestSeadexWorkingSetBudget(t *testing.T) {
 			workingSet, workingSet>>20, ceiling>>20)
 	}
 }
+
+// TestFetchAndAppendAcceptsPageExactlyFillingEntryCap pins the entry-cap
+// boundary: a page whose items land the accumulated catalogue EXACTLY on
+// maxEntries is legal (the cap is a ceiling, not a strict bound) and must be
+// appended and complete pagination, not rejected as upstream misbehavior.
+func TestFetchAndAppendAcceptsPageExactlyFillingEntryCap(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"totalItems":1,"totalPages":1,"items":[{"alID":7,"expand":{"trs":[]}}]}`)
+	}))
+	defer server.Close()
+
+	c := NewClient(server.Client(), server.URL, 0, nil)
+	all := make([]Entry, maxEntries-1)
+	var tot fetchTotals
+	out, done, err := c.fetchAndAppend(context.Background(), 1, all, &tot)
+	if err != nil {
+		t.Fatalf("fetchAndAppend returned error %v, want the exactly-filling page accepted (the cap is a ceiling, not a strict bound)", err)
+	}
+	if !done {
+		t.Error("fetchAndAppend done = false, want true (single-page catalogue)")
+	}
+	if len(out) != maxEntries {
+		t.Fatalf("out = %d entries, want exactly maxEntries (%d)", len(out), maxEntries)
+	}
+	if out[maxEntries-1].AniListID != 7 {
+		t.Errorf("last entry alID = %d, want the appended 7", out[maxEntries-1].AniListID)
+	}
+}

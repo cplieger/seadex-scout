@@ -84,6 +84,28 @@ func validFeedItems(feeds ...[]journalItem) bool {
 	return true
 }
 
+// decodeSnapshot unmarshals persisted snapshot bytes and applies the
+// structural-validity gate BOTH consumers share (the server's readSnapshot
+// and the writer's loadPrevious): valid JSON, the required curation maps
+// present (the writer always persists both, even empty, so nil maps identify
+// a structurally invalid snapshot without rejecting a valid empty feed), and
+// every feed item within the shared persisted-item limits. err reports
+// malformed JSON; a non-empty reason names a structural violation.
+// Consumer-specific ingress checks (the writer's titles-cache cap) stay with
+// their consumer.
+func decodeSnapshot(data []byte) (snap snapshot, reason string, err error) {
+	if err := json.Unmarshal(data, &snap); err != nil {
+		return snapshot{}, "", err
+	}
+	if snap.ByHash == nil || snap.ByKey == nil {
+		return snapshot{}, "missing required curation maps", nil
+	}
+	if !validFeedItems(snap.NyaaFeed, snap.ABFeed) {
+		return snapshot{}, "item exceeds persisted-item limits", nil
+	}
+	return snap, "", nil
+}
+
 // snapshot is the materialized feed a cycle produces and the server serves:
 // the search curation index (info hash / tracker key -> isBest, matched
 // against Prowlarr results), the two synthesized per-tracker RSS journals
@@ -280,22 +302,25 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info f
 // persist atomically writes the snapshot, mirroring the reader's size bound
 // before committing: a snapshot the reload would reject must not replace the
 // last-good file, or the next restart starts with an empty feed. It first
-// strips the AB feed's download URLs so no passkey is ever serialized (see
-// stripABDownloadURLs), and likewise scrubs AB-scoped items misplaced in the
-// Nyaa feed (stripABScopedDownloadURLs) so a scope mismatch cannot leak a
-// passkey either.
+// strips BOTH feeds' download URLs (stripABDownloadURLs /
+// stripNyaaDownloadURLs) so no passkey is ever serialized and the snapshot
+// stays GUID-only for fetch targets: the reader re-derives every served link
+// from the item's tracker page URL on load. The wholesale Nyaa strip also
+// scrubs an AB-scoped item misplaced in the Nyaa feed, so a scope mismatch
+// cannot leak a passkey either.
 func (w *FeedWriter) persist(ctx context.Context, snap *snapshot) error {
 	stripABDownloadURLs(snap.ABFeed)
-	stripABScopedDownloadURLs(snap.NyaaFeed)
+	stripNyaaDownloadURLs(snap.NyaaFeed)
 	data, err := json.Marshal(snap)
 	if err != nil {
 		return fmt.Errorf("indexer: encode feed snapshot: %w", err)
 	}
-	if int64(len(data)) > maxFeedBytes {
-		return fmt.Errorf("indexer: feed snapshot %d bytes exceeds max %d; keeping previous feed", len(data), maxFeedBytes)
-	}
 	if _, err := atomicfile.WriteFile(ctx, w.path, data,
-		atomicfile.WithMkdirMode(feedDirMode), atomicfile.WithMode(feedFileMode)); err != nil {
+		atomicfile.WithMkdirMode(feedDirMode), atomicfile.WithMode(feedFileMode),
+		atomicfile.WithMaxBytes(maxFeedBytes)); err != nil {
+		if errors.Is(err, atomicfile.ErrFileTooLarge) {
+			return fmt.Errorf("indexer: feed snapshot %d bytes exceeds max %d; keeping previous feed", len(data), maxFeedBytes)
+		}
 		return fmt.Errorf("indexer: write feed snapshot %s: %w", w.path, err)
 	}
 	return nil
@@ -308,25 +333,26 @@ func (w *FeedWriter) persist(ctx context.Context, snap *snapshot) error {
 // link from the item's non-secret tracker page URL (the GUID) and the
 // currently configured passkey on every load (see rebuildABDownloadURLs) -
 // and running at the persist choke point also scrubs a legacy snapshot whose
-// carried items still embed a passkey on the first rebuild over it. Nyaa
-// items live in their own feed and keep their public .torrent links.
+// carried items still embed a passkey on the first rebuild over it.
 func stripABDownloadURLs(feed []journalItem) {
 	for i := range feed {
 		feed[i].DownloadURL = ""
 	}
 }
 
-// stripABScopedDownloadURLs blanks the download URL of any item whose journal
-// key is AnimeBytes-scoped, wherever it is persisted: an AB download link
-// embeds the operator's passkey, and a scope-mismatched carried item (a
-// legacy or corrupted snapshot placing an ab:-keyed item in nyaa_feed) must
-// not bypass the GUID-only invariant stripABDownloadURLs enforces on the AB
-// feed itself.
-func stripABScopedDownloadURLs(feed []journalItem) {
+// stripNyaaDownloadURLs blanks every Nyaa feed item's download URL before
+// persistence, mirroring stripABDownloadURLs: the Nyaa link is public and
+// carries no credential, but keeping the snapshot GUID-only for fetch targets
+// on BOTH feeds means /config/feed.json is never authoritative for what the
+// arrs download - the reader re-derives each served Nyaa link from the item's
+// tracker page URL on load (see rebuildNyaaDownloadURLs), so a tampered
+// snapshot cannot plant an arbitrary fetch target. Blanking the whole feed
+// also subsumes the key-scoped scrub of an ab:-keyed item a legacy or
+// corrupted snapshot misplaced in nyaa_feed (its passkey-bearing link is
+// blanked with everything else).
+func stripNyaaDownloadURLs(feed []journalItem) {
 	for i := range feed {
-		if scopeOfKey(feed[i].Key) == upstreamAB {
-			feed[i].DownloadURL = ""
-		}
+		feed[i].DownloadURL = ""
 	}
 }
 
@@ -375,21 +401,16 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 		}
 		return previousJournal{}, fmt.Errorf("indexer: read previous feed snapshot %s: %w", w.path, err)
 	}
-	var snap snapshot
-	if err := json.Unmarshal(data, &snap); err != nil {
-		w.log.Warn("previous feed snapshot malformed; re-baselining the feed journal", "path", w.path, "error", err)
+	snap, structReason, decodeErr := decodeSnapshot(data)
+	if decodeErr != nil {
+		w.log.Warn("previous feed snapshot malformed; re-baselining the feed journal", "path", w.path, "error", decodeErr)
 		return previousJournal{baseline: true, reason: reasonMalformed}, nil
 	}
-	if snap.ByHash == nil || snap.ByKey == nil {
+	if structReason != "" {
+		// The offending value itself is never logged: it can be
+		// attacker-shaped multi-megabyte text.
 		w.log.Warn("previous feed snapshot malformed; re-baselining the feed journal",
-			"path", w.path, "reason", "missing required curation maps")
-		return previousJournal{baseline: true, reason: reasonMalformed}, nil
-	}
-	if !validFeedItems(snap.NyaaFeed, snap.ABFeed) {
-		// The value itself is never logged: it can be attacker-shaped
-		// multi-megabyte text.
-		w.log.Warn("previous feed snapshot malformed; re-baselining the feed journal",
-			"path", w.path, "reason", "item exceeds persisted-item limits")
+			"path", w.path, "reason", structReason)
 		return previousJournal{baseline: true, reason: reasonMalformed}, nil
 	}
 	for k, t := range snap.Titles {

@@ -146,10 +146,10 @@ func parseFribbForRefresh(data []byte, log *slog.Logger) (fribbParseResult, erro
 		return fribbParseResult{}, err
 	}
 	if err := dec.Close(); err != nil { // consume the closing ']'
-		return fribbParseResult{}, err
+		return fribbParseResult{}, fmt.Errorf("mapping: Fribb list truncated or malformed at close: %w", err)
 	}
 	if err := dec.End(); err != nil {
-		return fribbParseResult{}, errors.New("mapping: trailing data after Fribb list")
+		return fribbParseResult{}, fmt.Errorf("mapping: trailing data after Fribb list: %w", err)
 	}
 	if skipped > 0 {
 		attrs := []any{"skipped", skipped, "parsed", len(records)}
@@ -204,7 +204,7 @@ func decodeFribbRecords(dec *bounded.Decoder) (records []Record, skipped, droppe
 func decodeNextFribbRecord(dec *bounded.Decoder) (rec Record, ok bool, decodeErr, streamErr error) {
 	var msg json.RawMessage
 	if err := dec.Decode(&msg); err != nil {
-		return Record{}, false, nil, err
+		return Record{}, false, nil, fmt.Errorf("mapping: Fribb stream decode: %w", err)
 	}
 	rec, ok, decodeErr = decodeFribbRecord(msg)
 	return rec, ok, decodeErr, nil

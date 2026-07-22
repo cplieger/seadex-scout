@@ -1339,3 +1339,83 @@ func TestResolveHarvestKeyPartialSignals(t *testing.T) {
 		})
 	}
 }
+
+// TestSleepCtx pins the production pacing sleep the suite otherwise never
+// runs (TestMain swaps harvestWait package-wide; the default is
+// httpx.SleepCtx): a cancelled context ends the gap immediately with the
+// context error - a pacing gap must never outlive a shutdown - and an
+// uncancelled gap blocks for at least the requested duration and returns
+// nil.
+func TestSleepCtx(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := httpx.SleepCtx(cancelled, time.Hour); !errors.Is(err, context.Canceled) {
+		t.Errorf("SleepCtx(cancelled ctx) = %v, want context.Canceled", err)
+	}
+	start := time.Now()
+	if err := httpx.SleepCtx(context.Background(), time.Millisecond); err != nil {
+		t.Errorf("SleepCtx(1ms) = %v, want nil", err)
+	}
+	if elapsed := time.Since(start); elapsed < time.Millisecond {
+		t.Errorf("SleepCtx returned after %v, want at least the 1ms gap", elapsed)
+	}
+}
+
+// TestHarvestPacerNextDeniedBranches pins the two refusal paths of the pacer
+// no end-to-end test reaches: a slice already spent at entry admits no query
+// (harvestShow's inner page loop calls next directly, so page 2+ of a show
+// can arrive with the slice expired and no outer pre-check), and a pacing
+// gap cut short by cancellation (sleepCtx returning the context error)
+// admits no query rather than letting a shutdown leak one last request.
+func TestHarvestPacerNextDeniedBranches(t *testing.T) {
+	base := time.Unix(1700000000, 0)
+	t.Run("spent slice admits no query at entry", func(t *testing.T) {
+		p := &harvestPacer{now: func() time.Time { return base }, deadline: base.Add(-time.Second)}
+		if p.next(context.Background()) {
+			t.Error("next = true with the slice already spent, want false")
+		}
+	})
+	t.Run("cancelled pacing gap admits no query", func(t *testing.T) {
+		prev := harvestWait
+		harvestWait = func(context.Context, time.Duration) error { return context.Canceled }
+		t.Cleanup(func() { harvestWait = prev })
+		p := &harvestPacer{now: func() time.Time { return base }, deadline: base.Add(time.Hour), started: true}
+		if p.next(context.Background()) {
+			t.Error("next = true when the pacing gap was cancelled, want false")
+		}
+	})
+}
+
+// TestRotationStart pins the cursor-resolution table directly (the
+// end-to-end rotation test covers only a cursor strictly between two
+// groups): the group AFTER the cursor is picked, a vanished cursor group
+// lands on its order-successor, a cursor on or past the LAST group wraps to
+// the head - the steady-state case every rebuild whose final query hit the
+// tail-ordered show produces - and an unparseable cursor (hand-edited or
+// legacy snapshot: non-numeric id, no colon) starts at the head.
+func TestRotationStart(t *testing.T) {
+	groups := []harvestGroup{
+		{scope: "ab", alID: 10},
+		{scope: "nyaa", alID: 5},
+		{scope: "nyaa", alID: 9},
+	}
+	tests := []struct {
+		name   string
+		cursor string
+		want   int
+	}{
+		{"cursor on the first group resumes at the second", "ab:10", 1},
+		{"cursor on a vanished group lands on its successor", "nyaa:7", 2},
+		{"cursor on the last group wraps to the head", "nyaa:9", 0},
+		{"cursor past every group wraps to the head", "nyaa:9999", 0},
+		{"non-numeric id starts at the head", "nyaa:abc", 0},
+		{"colon-less cursor starts at the head", "garbage", 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rotationStart(groups, tc.cursor); got != tc.want {
+				t.Errorf("rotationStart(%q) = %d, want %d", tc.cursor, got, tc.want)
+			}
+		})
+	}
+}

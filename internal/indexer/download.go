@@ -15,6 +15,14 @@ import (
 // (no credential) and private AnimeBytes (needs the operator's passkey). The
 // AB download URL embeds the passkey, so it is a secret and callers must not
 // log it.
+//
+// The id is extracted from sourceURL by URL SHAPE alone (trackerID), with no
+// host gate of its own: callers must pass a URL that already passed the
+// trackerKey/trackerOwnURL host gate. Every journaled torrent has (journal
+// admission requires a non-empty journalKey, which applies that gate), but a
+// future caller handing this a raw SeaDex URL could mint a download link for
+// an arbitrary tracker torrent id smuggled in a foreign host's /view/{id}
+// path.
 func downloadURL(tracker, sourceURL, abPasskey string) (string, bool) {
 	scope := trackerScope(tracker)
 	id := trackerID(scope, sourceURL)

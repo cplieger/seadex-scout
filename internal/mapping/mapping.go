@@ -576,6 +576,16 @@ func validateRefreshedRecords(previous, records []Record, sourceElements int) er
 	if covered := arrIdentifierCount(records); covered < minimum {
 		return fmt.Errorf("arr identifier coverage %d/%d is below minimum %d", covered, len(records), minimum)
 	}
+	// An unusable previous cache must degrade like no cache here too: the
+	// loader refuses to serve it (cacheUsable gates every other cache-state
+	// gate, including acceptRefresh's whole-map shrink guard), so it must
+	// not anchor the loss-relative guards either - a corrupted or pre-guard
+	// state file could otherwise falsely reject a healthy smaller refresh
+	// (populationCollapsed against a map consumers never received), leaving
+	// the loader in a permanent no-cache rejection loop.
+	if !cacheUsable(previous) {
+		return nil
+	}
 	previous = deduplicateRecords(previous)
 	if err := validateTypeCoverage(previous, records, minimum); err != nil {
 		return err
@@ -868,40 +878,45 @@ func (l *Loader) readOverrides(ctx context.Context) (overrideSet, bool) {
 		return overrideSet{}, false
 	}
 	if len(set.unknown) > 0 {
-		shown := min(len(set.unknown), maxLoggedUnknownKeys)
-		logged := make([]string, 0, shown)
-		shortened := false
-		for _, k := range set.unknown[:shown] {
-			// Full log-bound text policy for an operator-controlled JSON key,
-			// not just a length bound: SanitizeSingleLine replaces unsafe
-			// C0/C1 controls, bidi controls, DEL, and line separators before
-			// the byte cap, so a key carrying such runes cannot smuggle
-			// terminal-control or direction-override text into the log
-			// stream (the same runesafe policy the indexer's logParam and
-			// sanitizeUpstreamText apply at their emit boundaries).
-			k = runesafe.SanitizeSingleLine(k)
-			if len(k) > maxLoggedKeyBytes {
-				k = runesafe.CapBytes(k, maxLoggedKeyBytes) + "..."
-				shortened = true
-			}
-			logged = append(logged, k)
-		}
-		l.log.Warn("mapping: overrides contain unknown keys, ignored",
-			"keys", logged,
-			"unknown_key_count", len(set.unknown),
-			"keys_truncated", len(set.unknown) > maxLoggedUnknownKeys || shortened,
-			"path", l.overridesPath)
+		l.logUnknownKeys(set.unknown)
 	}
 	return set, true
 }
 
+// logUnknownKeys emits the bounded unknown-key diagnostic. Full log-bound
+// text policy for an operator-controlled JSON key, not just a length bound:
+// SanitizeSingleLine replaces unsafe C0/C1 controls, bidi controls, DEL, and
+// line separators before the byte cap, so a key carrying such runes cannot
+// smuggle terminal-control or direction-override text into the log stream
+// (the same runesafe policy the indexer's logParam and sanitizeUpstreamText
+// apply at their emit boundaries).
+func (l *Loader) logUnknownKeys(unknown []string) {
+	shown := min(len(unknown), maxLoggedUnknownKeys)
+	logged := make([]string, 0, shown)
+	shortened := false
+	for _, k := range unknown[:shown] {
+		k = runesafe.SanitizeSingleLine(k)
+		if len(k) > maxLoggedKeyBytes {
+			k = runesafe.CapBytes(k, maxLoggedKeyBytes) + "..."
+			shortened = true
+		}
+		logged = append(logged, k)
+	}
+	l.log.Warn("mapping: overrides contain unknown keys, ignored",
+		"keys", logged,
+		"unknown_key_count", len(unknown),
+		"keys_truncated", len(unknown) > maxLoggedUnknownKeys || shortened,
+		"path", l.overridesPath)
+}
+
 // overrideSet is parseOverrides' result: the effective overlay plus the
 // diagnostics applyOverrides logs. records holds only effective records
-// (non-zero AniList ID, deduplicated last-record-wins), so its size is
+// (positive AniList ID, deduplicated last-record-wins), so its size is
 // bounded by the distinct usable IDs in the file rather than the transport
-// row count. applied counts the non-zero-ID transport rows (duplicate rows
-// included, matching the pre-streaming overlay arithmetic); skipped counts
-// the zero-ID rows discarded during the stream; duplicates lists each
+// row count. applied counts the positive-ID, non-oversized transport rows
+// (duplicate rows included, matching the pre-streaming overlay arithmetic);
+// skipped counts the non-positive-ID rows discarded during the stream
+// (oversized rows are counted separately in oversized); duplicates lists each
 // distinct duplicated AniList ID once, on its first repeated occurrence, so
 // one heavily repeated ID cannot fill the bounded log prefix and hide later
 // duplicated IDs; unknown is the sorted, deduplicated set of keys outside
@@ -925,6 +940,16 @@ type overrideSet struct {
 // record is skipped loudly (the oversized counter's WARN), never silently
 // truncated.
 const maxOverrideIDsPerRecord = 64
+
+// maxOverrideRecords caps the effective records parseOverrides retains,
+// mirroring the Fribb parser's maxFribbRecords ceiling: the 4 MiB wire bound
+// caps the file, not the retained amplification of ~250k tiny distinct-ID
+// records fanned into set.records, the position map, and the live index.
+// Skipped rows (non-positive IDs, e.g. semantically empty objects) are
+// discarded during the stream and never retained, so they stay uncapped.
+// An over-cap file errors out and routes through readOverrides' existing
+// malformed-file WARN (overlay ignored loudly).
+const maxOverrideRecords = 1 << 16
 
 // knownOverrideKey reports whether key names an overrideKeys entry under the
 // same case-insensitive matching encoding/json applies when decoding into
@@ -1055,6 +1080,9 @@ func parseOverrides(data []byte) (overrideSet, error) {
 		}
 		if err := set.applyRecord(raw, seenKeys, position, reported); err != nil {
 			return overrideSet{}, err
+		}
+		if len(set.records) > maxOverrideRecords {
+			return overrideSet{}, fmt.Errorf("mapping: overrides exceed cap %d records", maxOverrideRecords)
 		}
 	}
 	if err := dec.Close(); err != nil { // the closing ']'

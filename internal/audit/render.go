@@ -473,6 +473,8 @@ var linkURLEscaper = strings.NewReplacer(
 	"\t", "%09",
 	"\\", "%5C",
 	"`", "%60",
+	"\"", "%22",
+	"'", "%27",
 	"\v", "%0B",
 	"\f", "%0C",
 	"(", "%28",
@@ -487,7 +489,9 @@ var linkURLEscaper = strings.NewReplacer(
 // escapeLinkURL percent-encodes the characters in a URL that would break out
 // of a Markdown link's ](...) destination or the surrounding table cell/row:
 // parentheses, angle brackets, pipes, backslash and backtick (the CommonMark
-// inline metacharacters still active inside a link destination), and every
+// inline metacharacters still active inside a link destination), both quotes
+// (inert in CommonMark itself, but attribute-context defense for a downstream
+// MD-to-HTML conversion emitting the destination into href="..."), and every
 // ASCII whitespace form (space, tab, vertical tab, form feed, CR, LF). It also
 // percent-encodes the above-ASCII policy runes url.Parse accepts but a
 // terminal or Markdown viewer must never receive raw — C1 controls

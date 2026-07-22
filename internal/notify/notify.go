@@ -89,7 +89,7 @@ func NewNotifier(logger *slog.Logger) *Notifier {
 // missing data, not evidence of alignment - it is carried forward unresolved
 // (original alert time kept, no "finding resolved" line) instead of being
 // falsely resolved. Pass nil when every item has complete evidence.
-func (r *Notifier) Notify(findings []compare.Finding, prior map[string]Alerted, failedItems map[int]struct{}, now time.Time) map[string]Alerted {
+func (n *Notifier) Notify(findings []compare.Finding, prior map[string]Alerted, failedItems map[int]struct{}, now time.Time) map[string]Alerted {
 	current := make(map[string]Alerted, len(findings))
 	newCount := 0
 	// Last-payload-wins with one emission per key: precompute each DedupeKey's
@@ -112,7 +112,7 @@ func (r *Notifier) Notify(findings []compare.Finding, prior map[string]Alerted, 
 			current[f.DedupeKey] = Alerted{AlertedAt: a.AlertedAt, Finding: storedFinding(f)}
 			continue
 		}
-		r.emit(f)
+		n.emit(f)
 		newCount++
 		current[f.DedupeKey] = Alerted{AlertedAt: now, Finding: storedFinding(f)}
 	}
@@ -127,11 +127,11 @@ func (r *Notifier) Notify(findings []compare.Finding, prior map[string]Alerted, 
 			preserved++
 			continue
 		}
-		r.emitResolved(&a.Finding)
+		n.emitResolved(&a.Finding)
 		resolved++
 	}
 
-	r.log.Info("findings reported",
+	n.log.Info("findings reported",
 		"total", len(findings), "new", newCount, "resolved", resolved,
 		"preserved", preserved, "suppressed", len(findings)-newCount)
 	return current
@@ -142,13 +142,13 @@ func (r *Notifier) Notify(findings []compare.Finding, prior map[string]Alerted, 
 // a lost cache) so the pre-existing backlog is not dumped as a burst of
 // notifications. Steady-state emission resumes on the next cycle via Report;
 // the full current picture is always available on demand through report mode.
-func (r *Notifier) Baseline(findings []compare.Finding, now time.Time) map[string]Alerted {
+func (n *Notifier) Baseline(findings []compare.Finding, now time.Time) map[string]Alerted {
 	current := make(map[string]Alerted, len(findings))
 	for i := range findings {
 		f := &findings[i]
 		current[f.DedupeKey] = Alerted{AlertedAt: now, Finding: storedFinding(f)}
 	}
-	r.log.Info("cold start: findings baselined without notifying", "total", len(findings))
+	n.log.Info("cold start: findings baselined without notifying", "total", len(findings))
 	return current
 }
 
@@ -156,20 +156,20 @@ func (r *Notifier) Baseline(findings []compare.Finding, now time.Time) map[strin
 
 // emit logs a finding at the level matching its severity, with the full field
 // set the dashboard and Loki alert key on.
-func (r *Notifier) emit(f *compare.Finding) {
+func (n *Notifier) emit(f *compare.Finding) {
 	level := slog.LevelInfo
 	if f.Severity == compare.SevWarn {
 		level = slog.LevelWarn
 	}
-	r.log.Log(context.Background(), level, message(f.Status), findingKVs(f)...)
+	n.log.Log(context.Background(), level, message(f.Status), findingKVs(f)...)
 }
 
 // emitResolved logs a single info line when a prior finding no longer applies,
 // reading the trimmed record the dedupe state persisted. The untrusted
 // upstream strings (title, groups) ride through runesafe.Sanitize,
 // matching findingKVs' policy.
-func (r *Notifier) emitResolved(f *StoredFinding) {
-	r.log.Info("finding resolved",
+func (n *Notifier) emitResolved(f *StoredFinding) {
+	n.log.Info("finding resolved",
 		"title", runesafe.Sanitize(f.Title),
 		"al_id", f.AniListID,
 		"arr", f.Arr,
@@ -217,7 +217,8 @@ func findingKVs(f *compare.Finding) []any {
 // trackerURLs splits a finding's obtainable links into the public (Nyaa) and
 // AnimeBytes URLs, so an alert can render a distinct Nyaa link and AB link.
 // AB routing is URL-aware via filter.ABGated (label OR animebytes.tv URL
-// host), matching the obtainability filter and the dedupe key. ABGated's
+// host), matching the obtainability filter (compare's dedupe key now keys
+// the full obtainable URL set label-insensitively instead). ABGated's
 // conservative fail direction carries over: a link whose raw URL is
 // malformed, unparseable, or has a non-ASCII host is unclassifiable and
 // fills the AB slot, never the public one, so an ambiguous link is never

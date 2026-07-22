@@ -219,8 +219,9 @@ func (c *Client) FetchMany(ctx context.Context, ids []int) (map[int]Media, error
 // page: every id in the response must have been in the chunk that requested
 // it. An unsolicited id is deleted from the page - never merged, where it
 // could inject an unrelated Media or overwrite a value an earlier chunk
-// legitimately resolved - and the first such id is reported as an
-// ErrBatchRecord-wrapped error so the caller sees the malformed response
+// legitimately resolved - and one such id (the first encountered in map
+// iteration order, so arbitrary when several are unsolicited) is reported as
+// an ErrBatchRecord-wrapped error so the caller sees the malformed response
 // without losing the chunk's valid records.
 func retainRequested(page map[int]Media, chunk []int) error {
 	requested := make(map[int]struct{}, len(chunk))
@@ -378,6 +379,14 @@ func (m *gqlMedia) toMedia() (Media, error) {
 	for _, t := range []string{m.Title.Romaji, m.Title.English, m.Title.Native} {
 		if len(t) > maxTitleBytes {
 			return Media{}, fmt.Errorf("media title exceeds %d bytes", maxTitleBytes)
+		}
+		// json.Unmarshal decodes a lone \uD800-\uDFFF surrogate escape to
+		// U+FFFD even though validateResponseUTF8 passed (the raw escape bytes
+		// are valid UTF-8); titlekey.Normalize would strip the replacement
+		// character into a forged normalized-title match key, so reject like
+		// any other invalid-text payload (degrade and retry, never memoize).
+		if strings.ContainsRune(t, utf8.RuneError) {
+			return Media{}, errors.New("media title contains U+FFFD replacement character")
 		}
 	}
 	if len(m.Format) > maxFormatBytes {

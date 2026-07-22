@@ -1561,3 +1561,23 @@ func TestPollCycleMarkerWriteFailure(t *testing.T) {
 		t.Errorf("err = %q, want it wrapped as record poll health", err)
 	}
 }
+
+// TestRunPollBuildFailure pins runPoll's pre-cycle failure contract: a build
+// failure with no shutdown signal propagates as the ordinary error (exit 1)
+// and must never read as an interruption (an errors.Is(context.Canceled)
+// result would make main demote a genuine misconfiguration to the
+// routine-shutdown WARN, keeping it off the level=ERROR cycle-error alert).
+// Hermetic: the invalid sonarr URL fails newArrClients before any network
+// I/O, cycle-lock creation, or health-marker write.
+func TestRunPollBuildFailure(t *testing.T) {
+	err := runPoll(&config.Config{SonarrURL: "not-a-url", SonarrAPIKey: "k"})
+	if err == nil {
+		t.Fatal("runPoll(invalid sonarr URL) = nil, want a build error (exit 1)")
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, must not read as an interruption (main would demote the fault to WARN)", err)
+	}
+	if !strings.Contains(err.Error(), "sonarr client") {
+		t.Errorf("err = %q, want the sonarr client build failure", err)
+	}
+}

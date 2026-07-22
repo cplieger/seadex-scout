@@ -89,7 +89,8 @@ The `mode` setting (or a subcommand) picks the run mode:
 The daemon follows the standard `*_INTERVAL` scheduling shape:
 
 - **Built-in** (default): `poll_interval` is a Go duration (`3h` default, `6h`;
-  minimum `1h`, shorter values are clamped up to `1h`); a cycle runs on start,
+  minimum `1h` and maximum `720h` (30 days), out-of-range values are clamped
+  inward); a cycle runs on start,
   then every interval. It is the single cadence for
   both the alert loop and the Torznab feed.
 - **External / resident-idle**: set `poll_interval: off` (or `disabled` / `0`).
@@ -248,9 +249,11 @@ with S01 episodes reads S01), a single episode keeps its own `SxxExx`/absolute
 marker, a movie reads `Title (Year)`, and the flags the app actually holds are
 suffixed — resolution, `Dual Audio`, the release group bracketed; nothing is
 invented. On top of that the feed **harvests real release titles**: each cycle
-it spends up to 15 Prowlarr queries (one per show, series-level on AnimeBytes,
-season-form with offset paging on Nyaa) matching curated torrents by tracker id
-or info hash, and caches each matched title permanently — so items upgrade from
+it spends a paced slice of Prowlarr queries (one every 2 seconds, for at most
+10 minutes; series-level on AnimeBytes, season-form with up to 3 offset pages
+per show per cycle on Nyaa, resuming where it left off on the next cycle)
+matching curated torrents by tracker id or info hash, and caches each matched
+title permanently — so items upgrade from
 a synthesized title to the tracker's real one, usually within a cycle or two,
 while the synthesized title remains a fully working fallback. GUIDs never
 change with a title upgrade, so the arrs never re-grab.
@@ -586,7 +589,7 @@ deliver through your Alertmanager like any Prometheus metric alert. They cover:
 
 | Alert | Fires when | Severity |
 | --- | --- | --- |
-| `SeadexScoutCycleError` | a cycle logs an error: the Sonarr/Radarr library walk failed, or a library-shrink / mapping-refresh guard escalated after 8 consecutive degraded cycles | warning |
+| `SeadexScoutCycleError` | a cycle logs an error: the Sonarr/Radarr library walk failed, a state save failed, or a persisted degradation streak (library shrink, mapping refresh, SeaDex fetch, AniList lookups) escalated after 8 consecutive degraded cycles | warning |
 | `SeadexScoutScanStalled` | no cycle completion line (`cycle complete` or `cycle degraded`) in 7h, i.e. the daemon poll loop is wedged | warning |
 | `SeadexScoutBetterReleaseFound` | SeaDex recommended a better release than the one on disk (informational, not a fault) | info |
 | `SeadexScoutReportWritten` | a report run wrote a season-level alignment report (informational) | info |

@@ -471,6 +471,16 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 	} else {
 		st.AniListDegraded = 0
 	}
+	if result.Degraded && st.AniListDegraded >= aniListDegradedEscalationThreshold {
+		// The escalation fires on EVERY completed AniList-degraded cycle at
+		// the threshold, including one whose completion line the partial-walk
+		// switch arm below wins - otherwise a sustained AniList outage that
+		// coexists with a persistent partial walk advances the streak forever
+		// without ever alerting.
+		s.log.Error("anilist lookups degraded repeatedly; matching incomplete and findings frozen for affected entries - inspect graphql.anilist.co reachability and egress",
+			"incomplete_lookups", len(result.IncompleteIDs),
+			"consecutive_anilist_degraded", st.AniListDegraded)
+	}
 	switch {
 	case snap.Partial:
 		// A partial walk compared only the clean items, so the cycle closed
@@ -483,16 +493,10 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 		// affected entries' prior findings preserved, but the cycle must not
 		// read as fully successful. Same reason attr as before the scoped
 		// handling, so the deadman and any reason-keyed queries stay stable.
-		// The persisted streak escalates a SUSTAINED degradation to ERROR
-		// (the SeadexScoutCycleError rule) beside the unchanged completion
-		// line: a day-long broken egress to graphql.anilist.co - which under
-		// a cold start silently freezes the incomplete baseline and every
-		// notification - must alert, exactly like its three sibling streaks.
-		if st.AniListDegraded >= aniListDegradedEscalationThreshold {
-			s.log.Error("anilist lookups degraded repeatedly; matching incomplete and findings frozen for affected entries - inspect graphql.anilist.co reachability and egress",
-				"incomplete_lookups", len(result.IncompleteIDs),
-				"consecutive_anilist_degraded", st.AniListDegraded)
-		}
+		// The persisted streak's SUSTAINED-degradation ERROR escalation (the
+		// SeadexScoutCycleError rule) lives above the switch, beside the
+		// streak update, so it fires even when the partial-walk arm wins
+		// this completion line.
 		s.cycleDegraded("anilist-degraded",
 			append([]any{
 				"incomplete_lookups", len(result.IncompleteIDs),
@@ -718,7 +722,7 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap lib
 		// complete, degraded or not. The shrink WARN and streak stay - the
 		// shrink evidence comes from the completed walk.
 		if ctx.Err() == nil {
-			s.cycleDegraded("library-shrunk", "items", len(snap.Items), "prior_items", len(st.Library.Items))
+			s.cycleDegraded("library-shrunk", attrs...)
 		}
 		return true, true
 	}

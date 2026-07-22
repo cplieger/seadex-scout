@@ -276,28 +276,23 @@ func Load(path string) (Config, error) {
 }
 
 // loadExpandedDoc reads the bounded config file at path and applies the
-// allowlisted ${VAR} expansion, returning the expanded document node, the
-// unresolved allowlisted refs, and the raw pre-expansion bytes (nil raw
-// signals a read failure; non-nil raw alongside an error signals a parse
-// failure). It serves PollIntervalFromFile's deliberately permissive
-// partial probe on the yamlenv primitives; Load itself rides yamlenv.Load,
-// which owns the strict pipeline internally.
-func loadExpandedDoc(path string) (doc *yaml.Node, refs []string, raw []byte, err error) {
-	// Read through the shared atomicfile bounded reader (the same primitive
-	// writeStarterConfig and internal/state use), which enforces the size cap and
-	// returns the atomicfile.ErrFileTooLarge sentinel on an oversized file.
-	// Config load is a synchronous startup step with no cancellation point, so it
-	// passes context.Background(), matching writeStarterConfig.
-	raw, err = atomicfile.ReadBounded(context.Background(), path, maxConfigBytes)
+// allowlisted ${VAR} expansion, returning the expanded document node. It
+// serves PollIntervalFromFile's deliberately permissive partial probe on
+// the yamlenv primitives; Load itself rides yamlenv.Load, which owns the
+// strict pipeline internally (including the unresolved-refs diagnostic,
+// which this silent probe deliberately drops).
+func loadExpandedDoc(path string) (*yaml.Node, error) {
+	// Same bounded read + context.Background() rationale as Load above.
+	raw, err := atomicfile.ReadBounded(context.Background(), path, maxConfigBytes)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	var node yaml.Node
 	if err := yaml.Unmarshal(raw, &node); err != nil {
-		return nil, nil, raw, err
+		return nil, err
 	}
-	refs = yamlenv.Expand(&node, isAllowedEnvVar)
-	return &node, refs, raw, nil
+	yamlenv.Expand(&node, isAllowedEnvVar)
+	return &node, nil
 }
 
 // toConfig flattens the on-disk shape into the runtime Config, applying
@@ -378,7 +373,7 @@ func parseInterval(raw string) (time.Duration, bool) {
 // startup. Unknown keys and extra YAML documents are deliberately tolerated
 // here (no checkUnknownKeys / checkSingleDocument): strictness is Load's job.
 func PollIntervalFromFile(path string) time.Duration {
-	doc, _, _, err := loadExpandedDoc(path)
+	doc, err := loadExpandedDoc(path)
 	if err != nil {
 		return 0
 	}
@@ -561,6 +556,16 @@ func (c *Config) validateIndexer() error {
 	if err := validateHTTPURL("indexer.ab_torznab_url", c.IndexerABTorznabURL); err != nil {
 		return err
 	}
+	// The two upstream URLs are per-indexer Prowlarr Torznab endpoints
+	// (/1/api vs /2/api); identical values are almost always a paste error.
+	// The AB matcher is torrent-id-only, so pointing it at a Nyaa endpoint
+	// yields wrong-tracker attribution and duplicate upstream queries.
+	// Warn-only: the config still runs. Field-name-only; never echoes URLs.
+	if c.IndexerNyaaTorznabURL != "" && c.IndexerNyaaTorznabURL == c.IndexerABTorznabURL {
+		slog.Warn("indexer.nyaa_torznab_url and indexer.ab_torznab_url are identical; " +
+			"they should be Prowlarr's per-indexer endpoints (e.g. /1/api vs /2/api) - " +
+			"a shared endpoint double-queries one indexer and misattributes trackers")
+	}
 	// The /ab RSS feed builds its download links from indexer.ab_passkey; a
 	// stable AB-URL-without-passkey config makes that endpoint return a
 	// Torznab <error> on every arr RSS check while searches (Prowlarr-proxied,
@@ -665,10 +670,12 @@ func validateHTTPURL(name, rawURL string) error {
 		return fmt.Errorf("%s must be an absolute http(s) URL with a host", name)
 	}
 	// url.Parse accepts URI shapes the base-URL consumers cannot use: a
-	// fragment survives the parse but is never sent over HTTP (and the Torznab
-	// search path appends its query params after it, so the upstream would see
-	// no parameters at all), and an out-of-range port passes parsing but fails
-	// every later dial. Both must fail at startup, not at first request.
+	// fragment survives the parse but is never sent over HTTP (the indexer's
+	// request builder merges Torznab params into RawQuery component-wise -
+	// see internal/indexer/prowlarr.go - precisely so a fragment cannot
+	// swallow them, leaving a config fragment pure paste-error noise), and
+	// an out-of-range port passes parsing but fails every later dial. Both
+	// must fail at startup, not at first request.
 	// Errors stay field-name-only, matching the branches above.
 	if u.Fragment != "" {
 		return fmt.Errorf("%s must not contain a URL fragment", name)
@@ -687,7 +694,8 @@ func validateHTTPURL(name, rawURL string) error {
 }
 
 // urlEmbedsCredential reports whether rawURL carries a credential in userinfo
-// or a credential-like query parameter (apikey/api_key/passkey/token). Such a
+// or a credential-like query parameter
+// (apikey/api_key/passkey/token/authkey/torrent_pass). Such a
 // URL survives validation but leaks the credential to upstream-failure logs,
 // which wrap the full request URL; validateIndexer warns on it field-name-only.
 // The query is scanned on the raw string, splitting on both '&' and ';' and
@@ -723,11 +731,15 @@ func urlEmbedsCredential(rawURL string) bool {
 }
 
 // isCredentialParam reports whether a query-parameter name is credential-like
-// (apikey/api_key/passkey/token, case-insensitive) — the single key set
-// urlEmbedsCredential's raw query scan matches against.
+// (apikey/api_key/passkey/token/authkey/torrent_pass, case-insensitive) — the
+// single key set urlEmbedsCredential's raw query scan matches against.
+// authkey and torrent_pass are AnimeBytes' own credential parameter names,
+// carried by every AB direct download/announce URL — exactly the paste
+// mistake (a real tracker URL where the Prowlarr per-indexer endpoint
+// belongs) this warning exists to catch.
 func isCredentialParam(name string) bool {
 	switch strings.ToLower(name) {
-	case "apikey", "api_key", "passkey", "token":
+	case "apikey", "api_key", "passkey", "token", "authkey", "torrent_pass":
 		return true
 	}
 	return false

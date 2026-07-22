@@ -50,20 +50,10 @@ const harvestPageSize = 100
 // harvestWait blocks between paced queries; a package var so the test suite
 // can replace the real sleep (pacing gaps are wall-clock politeness, not
 // logic under test) and the pacer tests can advance a fake clock instead.
-var harvestWait = sleepCtx
-
-// sleepCtx blocks for d or until ctx is done, returning ctx's error when
-// cancelled first: a pacing gap must never outlive a shutdown.
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
-}
+// The default is httpx.SleepCtx: block for d or until ctx is done,
+// returning ctx's error when cancelled first -- a pacing gap must never
+// outlive a shutdown.
+var harvestWait = httpx.SleepCtx
 
 // harvestPacer enforces the politeness rate and the per-rebuild time slice:
 // next gates every query, blocking for the pacing gap first (except before

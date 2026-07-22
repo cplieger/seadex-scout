@@ -14,7 +14,7 @@ import (
 // TestStoreSaveLoadRoundTripProperty pins the persistence round trip for
 // arbitrary generated states: every persisted field (the findings dedupe map
 // keyed by arbitrary unicode dedupe keys, the AniList memo with its jittered
-// expiry stamps, both escalation streaks, and both baseline flags) survives
+// expiry stamps, all three escalation streaks, and both baseline flags) survives
 // Save then Load exactly, and Save stamps SchemaVersion. This is the
 // generative net over the json-tag/projection drift the deterministic
 // round-trip tests pin with single sample values.
@@ -58,6 +58,7 @@ func TestStoreSaveLoadRoundTripProperty(t *testing.T) {
 			Memo:               match.Memo{Entries: memo},
 			ShrunkWalks:        rapid.IntRange(0, 1000).Draw(rt, "shrunk"),
 			SeadexFailures:     rapid.IntRange(0, 1000).Draw(rt, "seadex_failures"),
+			AniListDegraded:    rapid.IntRange(0, 1000).Draw(rt, "anilist_degraded"),
 			Baselined:          rapid.Bool().Draw(rt, "baselined"),
 			BaselineIncomplete: rapid.Bool().Draw(rt, "baseline_incomplete"),
 		}
@@ -73,8 +74,8 @@ func TestStoreSaveLoadRoundTripProperty(t *testing.T) {
 		if got.Version != SchemaVersion {
 			rt.Errorf("Version = %d, want stamped %d", got.Version, SchemaVersion)
 		}
-		if got.ShrunkWalks != want.ShrunkWalks || got.SeadexFailures != want.SeadexFailures {
-			rt.Errorf("streaks = %d/%d, want %d/%d", got.ShrunkWalks, got.SeadexFailures, want.ShrunkWalks, want.SeadexFailures)
+		if got.ShrunkWalks != want.ShrunkWalks || got.SeadexFailures != want.SeadexFailures || got.AniListDegraded != want.AniListDegraded {
+			rt.Errorf("streaks = %d/%d/%d, want %d/%d/%d", got.ShrunkWalks, got.SeadexFailures, got.AniListDegraded, want.ShrunkWalks, want.SeadexFailures, want.AniListDegraded)
 		}
 		if got.Baselined != want.Baselined || got.BaselineIncomplete != want.BaselineIncomplete {
 			rt.Errorf("flags = %v/%v, want %v/%v", got.Baselined, got.BaselineIncomplete, want.Baselined, want.BaselineIncomplete)

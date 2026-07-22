@@ -796,7 +796,7 @@ func TestABFeedRequiresPasskey(t *testing.T) {
 func TestServeUnconfiguredABServesNoPasskeyItems(t *testing.T) {
 	// A stale snapshot written before the operator blanked ab_torznab_url: its
 	// AB feed carries a credential-bearing download link.
-	stale := `{"by_hash":{},"by_key":{},"nyaa_feed":[],"ab_feed":[{"Title":"Frieren - S01 (BD Remux 1080p) [PMR]","GUID":"https://animebytes.tv/torrents.php?id=86576&torrentid=1167293","DownloadURL":"https://animebytes.tv/torrent/1167293/download/SECRETPASSKEY"}]}`
+	stale := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[],"ab_feed":[{"Title":"Frieren - S01 (BD Remux 1080p) [PMR]","GUID":"https://animebytes.tv/torrents.php?id=86576&torrentid=1167293","DownloadURL":"https://animebytes.tv/torrent/1167293/download/SECRETPASSKEY"}]}`
 	path := filepath.Join(t.TempDir(), "feed.json")
 	if err := os.WriteFile(path, []byte(stale), 0o600); err != nil {
 		t.Fatalf("write stale snapshot: %v", err)
@@ -1073,7 +1073,7 @@ func TestReloadRebuildsABDownloadURLsFromCurrentPasskey(t *testing.T) {
 
 	// An AB item whose page URL yields no torrent id cannot have its URL
 	// re-derived: it is dropped rather than served with the stale credential.
-	noID := `{"by_hash":{},"by_key":{},"nyaa_feed":[],"ab_feed":[{"Title":"no id","GUID":"https://animebytes.tv/torrents.php?id=1","DownloadURL":"https://animebytes.tv/torrent/1/download/OLD_PASSKEY"}]}`
+	noID := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[],"ab_feed":[{"Title":"no id","GUID":"https://animebytes.tv/torrents.php?id=1","DownloadURL":"https://animebytes.tv/torrent/1/download/OLD_PASSKEY"}]}`
 	noIDPath := filepath.Join(t.TempDir(), "feed.json")
 	if err := os.WriteFile(noIDPath, []byte(noID), 0o600); err != nil {
 		t.Fatalf("write no-id snapshot: %v", err)
@@ -1348,7 +1348,7 @@ func TestReloadInstallsOlderMtimeSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	oldTime := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	newerTime := oldTime.Add(time.Hour)
-	restoredJSON := `{"by_hash":{},"by_key":{},"nyaa_feed":[{"Title":"restored","GUID":"restored","DownloadURL":"restored"}],"ab_feed":[]}`
+	restoredJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Title":"restored","GUID":"https://nyaa.si/view/7","DownloadURL":"restored"}],"ab_feed":[]}`
 	if err := os.WriteFile(path, []byte(restoredJSON), 0o600); err != nil {
 		t.Fatalf("write restored snapshot: %v", err)
 	}
@@ -1395,7 +1395,7 @@ func TestReloadInstallsOlderMtimeSnapshot(t *testing.T) {
 func TestReloadSkipsUnchangedMtime(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	when := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
-	firstJSON := `{"by_hash":{},"by_key":{},"nyaa_feed":[{"Title":"first","GUID":"first","DownloadURL":"first"}],"ab_feed":[]}`
+	firstJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Title":"first","GUID":"https://nyaa.si/view/1","DownloadURL":"first"}],"ab_feed":[]}`
 	if err := os.WriteFile(path, []byte(firstJSON), 0o600); err != nil {
 		t.Fatalf("write first snapshot: %v", err)
 	}
@@ -1408,7 +1408,7 @@ func TestReloadSkipsUnchangedMtime(t *testing.T) {
 	}
 
 	// Rewrite the content but restore the identical mtime: reload must skip.
-	secondJSON := `{"by_hash":{},"by_key":{},"nyaa_feed":[{"Title":"second","GUID":"second","DownloadURL":"second"}],"ab_feed":[]}`
+	secondJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Title":"second","GUID":"https://nyaa.si/view/2","DownloadURL":"second"}],"ab_feed":[]}`
 	if err := os.WriteFile(path, []byte(secondJSON), 0o600); err != nil {
 		t.Fatalf("write second snapshot: %v", err)
 	}
@@ -1429,7 +1429,7 @@ func TestReloadSkipsUnchangedMtime(t *testing.T) {
 // Once the refresh is released, the next reload installs the new snapshot.
 func TestReloadCoalescesConcurrentRefreshes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	newJSON := `{"by_hash":{},"by_key":{},"nyaa_feed":[{"Title":"new","GUID":"new","DownloadURL":"new"}],"ab_feed":[]}`
+	newJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Title":"new","GUID":"https://nyaa.si/view/3","DownloadURL":"new"}],"ab_feed":[]}`
 	if err := os.WriteFile(path, []byte(newJSON), 0o600); err != nil {
 		t.Fatalf("write snapshot: %v", err)
 	}
@@ -1491,6 +1491,8 @@ func TestApplyPaging(t *testing.T) {
 		{"offset+limit page", feed, "offset=1&limit=1", []string{"b"}},
 		{"offset past the end is an empty page", feed, "offset=10", nil},
 		{"invalid params fall back to the default window", feed, "offset=x&limit=-1", []string{"a", "b", "c"}},
+		{"zero limit falls back to the default window", feed, "limit=0", []string{"a", "b", "c"}},
+		{"zero offset leaves the window anchored", feed, "offset=0", []string{"a", "b", "c"}},
 		{"no limit applies the advertised default to a larger feed", big, "", func() []string {
 			want := make([]string, defaultCapsLimit)
 			for i := range want {

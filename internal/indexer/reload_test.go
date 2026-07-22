@@ -21,6 +21,7 @@ func TestReloadWarnsOnceOnMissingSnapshotAndRecovers(t *testing.T) {
 	writeSnapshotFile(t, path, &snapshot{
 		ByHash: map[string]bool{},
 		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}},
 		},
@@ -47,6 +48,7 @@ func TestReloadWarnsOnceOnMissingSnapshotAndRecovers(t *testing.T) {
 	writeSnapshotFile(t, path, &snapshot{
 		ByHash: map[string]bool{},
 		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "second", GUID: "https://nyaa.si/view/2"}},
 		},
@@ -104,6 +106,7 @@ func TestReloadRecoversDegradationOnUnchangedSnapshot(t *testing.T) {
 	writeSnapshotFile(t, path, &snapshot{
 		ByHash: map[string]bool{},
 		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}},
 		},
@@ -157,6 +160,7 @@ func TestReloadMemoizedMalformedSnapshotClearsDegradation(t *testing.T) {
 	writeSnapshotFile(t, path, &snapshot{
 		ByHash: map[string]bool{},
 		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}},
 		},
@@ -279,6 +283,7 @@ func TestReloadMemoizesOversizedItemSnapshot(t *testing.T) {
 	writeSnapshotFile(t, path, &snapshot{
 		ByHash: map[string]bool{},
 		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}},
 		},
@@ -292,6 +297,7 @@ func TestReloadMemoizesOversizedItemSnapshot(t *testing.T) {
 	writeSnapshotFile(t, path, &snapshot{
 		ByHash: map[string]bool{},
 		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{},
 		NyaaFeed: []journalItem{
 			{item: item{Title: strings.Repeat("a", maxPersistedFieldBytes+1), GUID: "https://nyaa.si/view/2"}},
 		},
@@ -308,5 +314,42 @@ func TestReloadMemoizesOversizedItemSnapshot(t *testing.T) {
 	}
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
 		t.Errorf("feed after over-limit rewrite = %+v, want the last-good feed kept", got)
+	}
+}
+
+// TestReloadPreJournalSnapshotServesEmptyFeeds pins readSnapshot's pre-journal
+// schema gate: a legacy snapshot with NO "seen" key (the retired
+// whole-catalogue schema; loadPrevious re-baselines on the same sentinel) must
+// not serve its persisted feeds as the RSS journal - an upgrade must never
+// re-broadcast the whole legacy catalogue as newly curated releases - while
+// the curation maps are kept so searches still match.
+func TestReloadPreJournalSnapshotServesEmptyFeeds(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	legacy := `{"by_hash":{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":true},"by_key":{"nyaa:1":true},` +
+		`"nyaa_feed":[{"Title":"legacy nyaa","GUID":"https://nyaa.si/view/1"}],` +
+		`"ab_feed":[{"Title":"legacy ab","GUID":"https://animebytes.tv/torrents.php?id=1&torrentid=2"}]}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy snapshot: %v", err)
+	}
+	log, rec := capture.New()
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: "http://prowlarr/1/api",
+		ABTorznabURL:   "http://prowlarr/2/api",
+		ABPasskey:      "PASSKEY",
+	}}, Deps{Logger: log}, path)
+	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
+		t.Errorf("nyaa feed from a pre-journal snapshot = %d items, want 0 (the legacy catalogue must not re-broadcast)", len(got))
+	}
+	if got := ix.feedFor(upstreamAB); len(got) != 0 {
+		t.Errorf("ab feed from a pre-journal snapshot = %d items, want 0 (the legacy catalogue must not re-broadcast)", len(got))
+	}
+	if got := rec.Count("indexer feed snapshot is pre-journal schema; serving empty RSS feeds until the next cycle re-baselines"); got != 1 {
+		t.Errorf("pre-journal INFO logged %d times, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+	}
+	ix.mu.RLock()
+	curated := ix.snap.ByHash["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] && ix.snap.ByKey["nyaa:1"]
+	ix.mu.RUnlock()
+	if !curated {
+		t.Error("curation maps dropped from a pre-journal snapshot; searches must still match against them")
 	}
 }

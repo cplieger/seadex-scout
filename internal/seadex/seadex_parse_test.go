@@ -276,8 +276,8 @@ func TestInfoHashRedacted(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := InfoHashRedacted(tc.in); got != tc.want {
-				t.Errorf("InfoHashRedacted(%q) = %v, want %v", tc.in, got, tc.want)
+			if got := infoHashRedacted(tc.in); got != tc.want {
+				t.Errorf("infoHashRedacted(%q) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
 	}

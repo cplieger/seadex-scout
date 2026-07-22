@@ -194,12 +194,12 @@ func newerSchemaVersion(data []byte) (int, bool) {
 	dec := bounded.NewDecoder(bytes.NewReader(data), 0)
 	version, found := 0, false
 	err := dec.Object(func(key string) error {
+		if !strings.EqualFold(key, "version") {
+			return dec.Skip()
+		}
 		var raw json.RawMessage
 		if decodeErr := dec.Decode(&raw); decodeErr != nil {
 			return decodeErr
-		}
-		if !strings.EqualFold(key, "version") {
-			return nil
 		}
 		if unmarshalErr := json.Unmarshal(raw, &version); unmarshalErr != nil {
 			return unmarshalErr
@@ -401,7 +401,7 @@ func (s *Store) quarantine() {
 // them.
 func (s *Store) Save(ctx context.Context, st *State) error {
 	if st == nil {
-		return fmt.Errorf("state: encode %s: nil state (Save never writes a non-object state file)", s.path)
+		return fmt.Errorf("state: save %s: nil state (Save never writes a non-object state file)", s.path)
 	}
 	if s.readOnly {
 		return fmt.Errorf("state: save %s: store is read-only", s.path)

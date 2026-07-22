@@ -114,6 +114,8 @@ func main() {
 	}
 }
 
+// --- Startup: invocation validation, config bootstrap, mode resolution ---
+
 // validateInvocation rejects malformed invocations with trailing arguments
 // (e.g. `poll typo`, `health typo`) before the health fast path, so a typo can
 // never run a real poll or report healthy. main maps a non-nil error to exit 2.
@@ -224,6 +226,8 @@ func resolveMode(args []string, cfg *config.Config) (mode string, err error) {
 	}
 }
 
+// --- Report mode ---
+
 // runReport runs the one-shot audit: build components, generate the report,
 // emit it to slog, and write the JSON + Markdown files. It never writes state,
 // so a one-shot report cannot clobber a running daemon's cache.
@@ -260,6 +264,8 @@ func runReport(cfg *config.Config) error {
 	}
 	return rep.WriteFiles(ctx, cfg.ReportDir, slog.Default())
 }
+
+// --- Cycle coalescing: the cross-process lock shared by poll and the daemon ---
 
 // cycleDirMode is applied when creating the cycle-lock directory (normally
 // /config, which already exists as the mounted volume holding the config and
@@ -441,6 +447,8 @@ func pollCycle(ctx context.Context, ex *scheduler.Exclusive, sc cycler, marker *
 	}
 	return own
 }
+
+// --- Daemon mode: poll loop + indexer feed ---
 
 // run wires up the daemon and polls until the context is cancelled. It returns
 // an error only on a startup failure.
@@ -626,6 +634,8 @@ func runCycle(ctx context.Context, sc cycler) (healthy bool) {
 	}()
 	return sc.Cycle(ctx)
 }
+
+// --- Logging helpers ---
 
 // logConfig logs the effective configuration at startup. API keys are never
 // logged, only whether each is present.

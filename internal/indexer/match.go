@@ -85,12 +85,14 @@ func trackerKey(tracker, sourceURL string) string {
 }
 
 // trackerOwnURL reports whether a SeaDex source URL belongs to the scope's
-// own tracker: an absolute URL on the tracker's host (the shared
-// release.Is*Host predicates, so homograph labels never pass), or - for
+// own tracker: an absolute URL on the tracker's EXACT canonical host (the
+// shared release.Is*Host predicates reject homograph labels; the additional
+// canonical-host check rejects subdomains, whose torrent-id databases are
+// independent of the apex site's - see isCanonicalTrackerHost), or - for
 // AnimeBytes only - a true relative reference, SeaDex's documented AB shape
 // (UsableURL resolves it against animebytes.tv, so a relative URL is an AB
-// URL by construction). Anything else - a foreign host, an unparseable URL,
-// an opaque non-hierarchical form - fails closed.
+// URL by construction). Anything else - a foreign host, a subdomain, an
+// unparseable URL, an opaque non-hierarchical form - fails closed.
 func trackerOwnURL(scope, sourceURL string) bool {
 	u, err := url.Parse(sourceURL)
 	if err != nil {
@@ -98,14 +100,57 @@ func trackerOwnURL(scope, sourceURL string) bool {
 	}
 	switch scope {
 	case upstreamNyaa:
-		return release.IsNyaaHost(u.Hostname())
+		return release.IsNyaaHost(u.Hostname()) && isCanonicalTrackerHost(scope, u.Hostname())
 	case upstreamAB:
 		if release.IsAnimeBytesHost(u.Hostname()) {
-			return true
+			return isCanonicalTrackerHost(scope, u.Hostname())
 		}
 		return u.Scheme == "" && u.Host == "" && u.Opaque == ""
 	}
 	return false
+}
+
+// canonicalTrackerHost returns the exact hostname of a scope's tracker site,
+// derived from the canonical release tracker table (release.LookupTracker's
+// BaseURL) so the host vocabulary stays single-homed, or "" for an unknown
+// scope.
+func canonicalTrackerHost(scope string) string {
+	var name string
+	switch scope {
+	case upstreamNyaa:
+		name = release.TrackerNameNyaa
+	case upstreamAB:
+		name = release.TrackerNameAnimeBytes
+	default:
+		return ""
+	}
+	t, ok := release.LookupTracker(name)
+	if !ok {
+		return ""
+	}
+	u, err := url.Parse(t.BaseURL)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
+}
+
+// isCanonicalTrackerHost reports whether host is exactly the scope's
+// canonical tracker host. Identity keying must be namespace-exact: a
+// tracker torrent id only identifies a torrent within one site's database,
+// and a real Nyaa subdomain (sukebei.nyaa.si) runs an id database
+// independent of nyaa.si's, so an id read from a subdomain URL must not
+// mint the apex site's key - nyaa:123 minted from sukebei.nyaa.si/view/123
+// would authorize the UNRELATED nyaa.si torrent 123 as curated and build
+// its download link for the wrong bytes. The shared release.Is*Host
+// predicates accept subdomains, which is right for tracker CLASSIFICATION
+// (obtainability, display) but too broad for identity; callers apply this
+// check after them, so the ASCII/homograph gates have already run and the
+// EqualFold here is a pure ASCII fold. Cross-site matching still works for
+// mirrors through the info hash, which names the bytes themselves.
+func isCanonicalTrackerHost(scope, host string) bool {
+	c := canonicalTrackerHost(scope)
+	return c != "" && strings.EqualFold(strings.TrimSuffix(host, "."), c)
 }
 
 // trackerKeyFromURL builds the match key from an arbitrary release URL (a
@@ -126,6 +171,12 @@ func trackerKeyFromURL(raw string) string {
 	case release.IsAnimeBytesHost(host):
 		scope = upstreamAB
 	default:
+		return ""
+	}
+	// Identity is namespace-exact: a subdomain (sukebei.nyaa.si) has its own
+	// torrent-id database, so an id there must not key the apex site (see
+	// isCanonicalTrackerHost). Such an item can still match by info hash.
+	if !isCanonicalTrackerHost(scope, u.Hostname()) {
 		return ""
 	}
 	if id := trackerID(scope, raw); id != "" {

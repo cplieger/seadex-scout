@@ -210,7 +210,8 @@ func writeAttr(b *strings.Builder, name, value string) {
 // ampersand-heavy value ~5x, and the temporary copies esc-per-field rendering
 // retained were one leg of the snapshot memory-amplification path (the other
 // is the shared persisted-item limits in writer.go).
-// escTo writes s XML-escaped through the shared rune policy: xml.EscapeText
+//
+// The escape composes the shared rune policy: xml.EscapeText
 // covers XML's own metacharacters and the C0 controls, but passes C1
 // controls (U+0080-U+009F), Unicode bidi controls, and U+2028/U+2029 through
 // RAW - and every text value on this feed is upstream-controlled (tracker
@@ -460,10 +461,7 @@ func (x *itemXML) decodeField(d *xml.Decoder, t xml.StartElement, dst *string) e
 // *string plumbing out of the tagged field).
 func (x *itemXML) decodeUntrustedField(d *xml.Decoder, t xml.StartElement, dst *runesafe.Untrusted) error {
 	var s string
-	if err := d.DecodeElement(&s, &t); err != nil {
-		return err
-	}
-	if err := x.account(s); err != nil {
+	if err := x.decodeField(d, t, &s); err != nil {
 		return err
 	}
 	*dst = runesafe.Untrusted(s)

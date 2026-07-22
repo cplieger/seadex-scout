@@ -167,6 +167,10 @@ func TestParseTorznabDecodeLimits(t *testing.T) {
 			inner:   `<item><torznab:attr name="` + strings.Repeat("n", maxUpstreamFieldBytes+1) + `" value="b"/></item>`,
 			wantErr: true,
 		},
+		"guid over the cap rejected": {
+			inner:   "<item><guid>" + strings.Repeat("g", maxUpstreamFieldBytes+1) + "</guid></item>",
+			wantErr: true,
+		},
 		"repeated fields in one item over the budget rejected": {
 			// decodeField accounts EVERY occurrence of a repeated element, so
 			// 1025 x 4096-byte titles in ONE item cross the 4 MiB response budget
@@ -257,6 +261,7 @@ func TestParseTorznabRejectsTruncatedResponses(t *testing.T) {
 		"EOF after complete child":  `<?xml version="1.0"?><rss><channel><item><title>x</title>`,
 		"EOF inside open enclosure": `<?xml version="1.0"?><rss><channel><item><enclosure url="http://x/1">`,
 		"EOF inside open attr":      `<?xml version="1.0"?><rss><channel><item><torznab:attr name="seeders">`,
+		"EOF inside open guid":      `<?xml version="1.0"?><rss><channel><item><guid>x`,
 	}
 	for name, body := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -347,5 +352,23 @@ func TestItemXMLTitleProvenance(t *testing.T) {
 	wire := runesafe.Untrusted(hostile)
 	if got := wire.String(); strings.ContainsRune(got, '\u009b') || strings.ContainsRune(got, '\u202e') {
 		t.Errorf("wire-form String() = %q, want the C1 and bidi runes sanitized", got)
+	}
+}
+
+// TestWriteItemSkipsNonPositiveCategories pins writeItem's render-side clamp:
+// validPersistedItem does not validate category positivity and search-path
+// items never pass the persistence gate, so a non-positive category reaching
+// the renderer must be skipped rather than rendered as an invalid Torznab
+// category id.
+func TestWriteItemSkipsNonPositiveCategories(t *testing.T) {
+	var b strings.Builder
+	it := item{Title: "x", Categories: []int{-5, 0, catAnime}}
+	writeItem(&b, &it)
+	out := b.String()
+	if !strings.Contains(out, `<torznab:attr name="category" value="5070"/>`) {
+		t.Errorf("rendered item missing the positive category:\n%s", out)
+	}
+	if strings.Contains(out, `name="category" value="-5"`) || strings.Contains(out, `name="category" value="0"`) {
+		t.Errorf("rendered a non-positive category id:\n%s", out)
 	}
 }

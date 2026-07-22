@@ -132,15 +132,15 @@ func FuzzInfoHashRedacted_caseAndWhitespaceInvariant(f *testing.F) {
 	f.Add("143ed15e5e3df072ae91adaeb149973a887590dd")
 	f.Add("")
 	f.Fuzz(func(t *testing.T, h string) {
-		got := InfoHashRedacted(h)
-		if upper := InfoHashRedacted(strings.ToUpper(h)); upper != got {
-			t.Errorf("InfoHashRedacted case invariance for %q = %v after uppercasing, want %v", h, upper, got)
+		got := infoHashRedacted(h)
+		if upper := infoHashRedacted(strings.ToUpper(h)); upper != got {
+			t.Errorf("infoHashRedacted case invariance for %q = %v after uppercasing, want %v", h, upper, got)
 		}
-		if padded := InfoHashRedacted(" \t\n" + h + "\r\n "); padded != got {
-			t.Errorf("InfoHashRedacted whitespace invariance for %q = %v after padding, want %v", h, padded, got)
+		if padded := infoHashRedacted(" \t\n" + h + "\r\n "); padded != got {
+			t.Errorf("infoHashRedacted whitespace invariance for %q = %v after padding, want %v", h, padded, got)
 		}
 		if got && ValidInfoHash(h) != "" {
-			t.Errorf("InfoHashRedacted(%q) and ValidInfoHash(%q) both accepted the same value", h, h)
+			t.Errorf("infoHashRedacted(%q) and ValidInfoHash(%q) both accepted the same value", h, h)
 		}
 	})
 }

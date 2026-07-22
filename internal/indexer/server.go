@@ -160,6 +160,11 @@ func (ix *Indexer) handler() http.Handler {
 //     connection close, and not webhttp's default JSON envelope, which is
 //     the wrong wire shape for this XML endpoint. It sits inside Logging so
 //     a recovered panic logs as its 500.
+//   - SecurityHeaders: the innermost baseline (nosniff, X-Frame-Options:
+//     DENY, Referrer-Policy), set before the handler runs so every
+//     response - including a recovered panic's 500 - carries it. Defense
+//     in depth for the credential-bearing /ab feed opened in a browser;
+//     the arrs ignore all three headers.
 func (ix *Indexer) chain() http.Handler {
 	return webhttp.Chain(ix.handler(),
 		ix.authFailureLimiter(),
@@ -168,6 +173,7 @@ func (ix *Indexer) chain() http.Handler {
 			webhttp.WithRecoverLogger(ix.log),
 			webhttp.WithRecoverResponder(torznabErrorResponder),
 		),
+		webhttp.SecurityHeaders(),
 	)
 }
 

@@ -47,13 +47,6 @@ func TestParseMediaYearFallsBackToStartDate(t *testing.T) {
 	}
 }
 
-func TestParseMediaNotFound(t *testing.T) {
-	raw := []byte(`{"data":{"Media":null}}`)
-	if _, err := parseMedia(raw); !errors.Is(err, ErrNotFound) {
-		t.Errorf("err = %v, want ErrNotFound", err)
-	}
-}
-
 func TestParseMediaNotFoundCarriesMessage(t *testing.T) {
 	raw := []byte(`{"data":{"Media":null},"errors":[{"message":"Not Found."}]}`)
 	_, err := parseMedia(raw)
@@ -93,6 +86,7 @@ func TestParseMediaNotFoundClassification(t *testing.T) {
 		{name: "punctuation-only title normalizes to no match key", raw: `{"data":{"Media":{"format":"TV","title":{"romaji":"!!!"}}}}`, wantErr: true, wantNotFound: false},
 		{name: "decorated title keeps a match key", raw: `{"data":{"Media":{"format":"TV","title":{"romaji":"(A)"}}}}`, wantErr: false, wantNotFound: false},
 		{name: "invalid UTF-8 in title rejected before decode", raw: "{\"data\":{\"Media\":{\"format\":\"TV\",\"title\":{\"romaji\":\"A\xff\"}}}}", wantErr: true, wantNotFound: false},
+		{name: "lone surrogate escape decoding to U+FFFD rejected", raw: `{"data":{"Media":{"format":"TV","title":{"romaji":"A\ud800"}}}}`, wantErr: true, wantNotFound: false},
 		{name: "media present", raw: `{"data":{"Media":{"format":"TV","seasonYear":2023,"title":{"romaji":"A"}}}}`, wantErr: false, wantNotFound: false},
 	}
 	for _, tt := range tests {
@@ -197,6 +191,7 @@ func TestParseMediaPageNullableEnvelope(t *testing.T) {
 		{name: "record with punctuation-only title fails batch", raw: `{"data":{"Page":{"media":[{"id":1,"title":{"romaji":"!!!"}}]}}}`, wantErr: true},
 		{name: "record with no title fails batch", raw: `{"data":{"Page":{"media":[{"id":1}]}}}`, wantErr: true},
 		{name: "invalid UTF-8 in title rejected before decode", raw: "{\"data\":{\"Page\":{\"media\":[{\"id\":1,\"title\":{\"romaji\":\"A\xff\"}}]}}}", wantErr: true},
+		{name: "lone surrogate escape decoding to U+FFFD fails batch", raw: `{"data":{"Page":{"media":[{"id":1,"title":{"romaji":"A\ud800"}}]}}}`, wantErr: true},
 		{name: "empty media array", raw: `{"data":{"Page":{"media":[]}}}`, wantErr: false},
 	}
 	for _, tt := range tests {
