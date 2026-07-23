@@ -92,7 +92,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   status=$(docker inspect --format '{{ if .State.Health }}{{ .State.Health.Status }}{{ else }}no-healthcheck{{ end }}' "$NAME" 2>/dev/null || echo gone)
   case "$status" in
     healthy)
-      printf '%s image smoke: ok (healthy after %ss)\n' "$APP" "$i"
+      printf '%s image smoke: ok (healthy after %ss)\n' "$APP" "$(($(date +%s) - start))"
       exit 0
       ;;
     unhealthy)
