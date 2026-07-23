@@ -16,8 +16,8 @@ github.com/cplieger/scheduler v1.2.0 h1:f3iOT8KXvakAWvwWkgrlg/cVBXweLgImIBrpoqgO
 github.com/cplieger/scheduler v1.2.0/go.mod h1:OT/FkHZsRcL7I4oFfeFT6PM9ZhafBfcZWBfakQmBV5I=
 github.com/cplieger/slogx v1.4.0 h1:VlT8gYxqrQHxyEd7VKLy+QCmm3Utut3DQ6Y0P09uv3Q=
 github.com/cplieger/slogx v1.4.0/go.mod h1:15KA2NVx725imQe/PYXUmd3oM2oMpYpqwU+hdHtz7Fc=
-github.com/cplieger/webhttp v1.11.0 h1:pWBdaEV93toXiXtWcnJGd8PnXb3n86w/wT9VUuNRHx4=
-github.com/cplieger/webhttp v1.11.0/go.mod h1:RYtweYFUohqE5DIOt06Ypr0j9VHXjxSPBLIG3vM0H44=
+github.com/cplieger/webhttp v1.12.0 h1:NccCkTMZJ7tQ88ozOKe+qFe1pWUyQb/PjEnywB7E8zY=
+github.com/cplieger/webhttp v1.12.0/go.mod h1:RYtweYFUohqE5DIOt06Ypr0j9VHXjxSPBLIG3vM0H44=
 github.com/devopsarr/radarr-go v1.2.1 h1:96pwxuR75Ks1W01su4dwhUpjBUpAb3Zy9EVswqLwHpA=
 github.com/devopsarr/radarr-go v1.2.1/go.mod h1:uydTUSf+2zHNKCGq3U9ooHAlElHIOhDA+2J7nje1bHE=
 github.com/devopsarr/sonarr-go v1.1.1 h1:5C/D3I5EaWQsx5DU5FRn5rFKhFNtABLxJFuL7CyBJ90=
