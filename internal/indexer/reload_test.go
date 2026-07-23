@@ -459,7 +459,8 @@ func TestReloadRebuildsNyaaDownloadURLsFromGUID(t *testing.T) {
 }
 
 // TestReloadDropsForeignHostSnapshotGUIDs pins the load-boundary trust gate
-// (snapshotDownloadURL): a tampered but structurally valid feed.json cannot
+// (downloadURL's internal tracker-ownership check): a tampered but
+// structurally valid feed.json cannot
 // mint an apex-tracker download URL from a foreign or independent-subdomain
 // GUID - trackerID's shape-only extraction would otherwise read the numeric
 // id out of https://evil.example/view/123 or sukebei.nyaa.si/view/123 - so
@@ -521,5 +522,51 @@ func TestReloadDropsForeignHostSnapshotGUIDs(t *testing.T) {
 				t.Errorf("derived download = %q, want %q on the apex tracker", got[0].DownloadURL, tc.wantURL)
 			}
 		})
+	}
+}
+
+// TestReloadSanitizesSnapshotInfoURLs pins the load-boundary display-URL gate
+// (sanitizeSnapshotInfoURLs): a tampered but structurally valid feed.json
+// cannot plant a javascript:/data: or foreign-host clickable info link that
+// renderFeed would hand the arr UI as <comments> - only the canonical
+// releases.moe entry URL the writer persists (entryURL) survives; anything
+// else is blanked (never dropped), mirroring the search path's
+// sanitizeDisplayURL.
+func TestReloadSanitizesSnapshotInfoURLs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "canonical", GUID: "https://nyaa.si/view/42", InfoURL: "https://releases.moe/154587"}},
+			{item: item{Title: "scheme", GUID: "https://nyaa.si/view/43", InfoURL: "javascript:alert(1)"}},
+			{item: item{Title: "foreign", GUID: "https://nyaa.si/view/44", InfoURL: "https://evil.example/phish"}},
+		},
+	})
+	log, rec := capture.New()
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, path)
+
+	got := ix.feedFor(upstreamNyaa)
+	if len(got) != 3 {
+		t.Fatalf("nyaa feed = %d items (%+v), want 3: the gate blanks InfoURL, never drops the item", len(got), got)
+	}
+	want := map[string]string{
+		"canonical": "https://releases.moe/154587",
+		"scheme":    "",
+		"foreign":   "",
+	}
+	for _, it := range got {
+		w, ok := want[it.Title]
+		if !ok {
+			t.Errorf("unexpected item %q in the served feed", it.Title)
+			continue
+		}
+		if it.InfoURL != w {
+			t.Errorf("item %q InfoURL = %q, want %q", it.Title, it.InfoURL, w)
+		}
+	}
+	if count := rec.Count("indexer feed snapshot: non-SeaDex info URLs blanked"); count != 1 {
+		t.Errorf("blanked-InfoURL warnings = %d, want 1", count)
 	}
 }

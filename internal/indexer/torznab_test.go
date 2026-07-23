@@ -6,8 +6,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/cplieger/runesafe"
 )
 
 // TestRenderFeed_usesStableGUIDFallback pins the documented GUID fallback
@@ -414,12 +412,6 @@ func TestItemXMLTitleProvenance(t *testing.T) {
 	if items[0].Title != hostile {
 		t.Errorf("item.Title = %q, want the RAW bytes preserved for persistence and matching (%q)", items[0].Title, hostile)
 	}
-
-	// The wire form itself emits sanitized through every standard sink.
-	wire := runesafe.Untrusted(hostile)
-	if got := wire.String(); strings.ContainsRune(got, '\u009b') || strings.ContainsRune(got, '\u202e') {
-		t.Errorf("wire-form String() = %q, want the C1 and bidi runes sanitized", got)
-	}
 }
 
 // TestWriteItemSkipsNonPositiveCategories pins writeItem's render-side clamp:
@@ -437,5 +429,33 @@ func TestWriteItemSkipsNonPositiveCategories(t *testing.T) {
 	}
 	if strings.Contains(out, `name="category" value="-5"`) || strings.Contains(out, `name="category" value="0"`) {
 		t.Errorf("rendered a non-positive category id:\n%s", out)
+	}
+}
+
+// TestParseErrorDocumentBoundsCumulativeAttrText pins the response-wide
+// budget arm of errorXML.UnmarshalXML: an <error> document whose attributes
+// each stay under maxUpstreamFieldBytes but whose cumulative attribute text
+// crosses maxUpstreamTextBytes must be rejected with a torznabLimitError -
+// never retained as an upstreamDocError - matching the per-item accounting
+// the feed decode applies (1025 attrs x 4096 bytes = 4,198,400 > the 4 MiB
+// budget, while every individual value passes the per-field cap).
+func TestParseErrorDocumentBoundsCumulativeAttrText(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0"?><error code="100" `)
+	val := strings.Repeat("d", maxUpstreamFieldBytes)
+	for i := 0; i <= maxUpstreamTextBytes/maxUpstreamFieldBytes; i++ {
+		b.WriteString("a" + strconv.Itoa(i) + `="` + val + `" `)
+	}
+	b.WriteString(`/>`)
+	_, err := parseTorznab([]byte(b.String()))
+	if err == nil {
+		t.Fatal("parseTorznab accepted an <error> document with over-budget cumulative attribute text")
+	}
+	var limitErr *torznabLimitError
+	if !errors.As(err, &limitErr) {
+		t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
+	}
+	if !strings.Contains(err.Error(), "cumulative decoded text") {
+		t.Errorf("Error() = %q, want the cumulative-text limit named", err)
 	}
 }

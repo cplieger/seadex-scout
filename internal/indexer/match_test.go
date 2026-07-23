@@ -148,3 +148,22 @@ func TestTrackerIDHelpersFailClosedOnUnparseableInput(t *testing.T) {
 		t.Error("trackerOwnURL(unknown scope) = true, want false (fail closed)")
 	}
 }
+
+// TestCanonicalTrackerHost pins the canonical-host vocabulary the identity
+// keying (isCanonicalTrackerHost) relies on: each scope derives exactly the
+// apex hostname from the release tracker table, and an unknown scope fails
+// closed with "" - the defensive arm no calling path reaches today, kept
+// honest for any future direct caller on the curation trust boundary.
+func TestCanonicalTrackerHost(t *testing.T) {
+	tests := []struct{ scope, want string }{
+		{upstreamNyaa, "nyaa.si"},
+		{upstreamAB, "animebytes.tv"},
+		{"other", ""},
+		{"", ""},
+	}
+	for _, tc := range tests {
+		if got := canonicalTrackerHost(tc.scope); got != tc.want {
+			t.Errorf("canonicalTrackerHost(%q) = %q, want %q", tc.scope, got, tc.want)
+		}
+	}
+}

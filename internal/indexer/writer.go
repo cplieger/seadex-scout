@@ -16,7 +16,11 @@ import (
 )
 
 const (
-	feedDirMode = 0o755
+	// feedDirMode keeps an auto-created feed.json parent owner-only,
+	// mirroring the report-dir 0o700 rationale: the snapshot's GUIDs are
+	// private-tracker page URLs, so the directory stays unlistable by
+	// other users as defense in depth.
+	feedDirMode = 0o700
 	// feed.json is persisted GUID-only - AB items carry no passkey-bearing
 	// download URL (see stripDownloadURLs) - but it stays owner-only as
 	// defense in depth for that invariant, and a legacy snapshot may still
@@ -47,6 +51,8 @@ const (
 	// previous snapshot (bad JSON, missing curation maps, or an over-limit item/title).
 	reasonMalformed = "malformed"
 )
+
+// --- Persisted-item and snapshot validity ---
 
 // validPersistedItem reports whether one feed item respects the shared
 // persisted-item limits: every string field under maxPersistedFieldBytes, the
@@ -144,6 +150,8 @@ type snapshot struct {
 	ABFeed        []journalItem `json:"ab_feed"`
 }
 
+// --- Writer construction ---
+
 // FeedWriterConfig configures NewFeedWriter. Path is where the snapshot is
 // persisted (config.DefaultIndexerFeedPath in production). SeaDexBaseURL is
 // the releases.moe site base the per-item info links are built under
@@ -214,6 +222,8 @@ func NewFeedWriter(cfg *FeedWriterConfig, deps Deps) *FeedWriter {
 	}
 	return w
 }
+
+// --- Rebuild and persistence ---
 
 // Rebuild refreshes the persisted feed snapshot from the SeaDex entries
 // (categorized and titled via info, the per-show metadata closure the cycle
@@ -318,7 +328,7 @@ func (w *FeedWriter) persist(ctx context.Context, snap *snapshot) error {
 		atomicfile.WithMkdirMode(feedDirMode), atomicfile.WithMode(feedFileMode),
 		atomicfile.WithMaxBytes(maxFeedBytes)); err != nil {
 		if errors.Is(err, atomicfile.ErrFileTooLarge) {
-			return fmt.Errorf("indexer: feed snapshot %d bytes exceeds max %d; keeping previous feed", len(data), maxFeedBytes)
+			return fmt.Errorf("indexer: feed snapshot %d bytes exceeds max %d; keeping previous feed: %w", len(data), maxFeedBytes, err)
 		}
 		return fmt.Errorf("indexer: write feed snapshot %s: %w", w.path, err)
 	}
@@ -344,6 +354,8 @@ func stripDownloadURLs(feed []journalItem) {
 		feed[i].DownloadURL = ""
 	}
 }
+
+// --- Previous-snapshot loading ---
 
 // previousJournal is the journal bookkeeping loaded from the previous
 // snapshot: the seen ledger, the harvested-title cache, and the two persisted
@@ -400,9 +412,11 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 	if snap.Seen == nil {
 		return previousJournal{baseline: true, reason: "pre-journal-schema"}, nil
 	}
-	titles := snap.Titles
-	if titles == nil {
-		titles = map[string]string{}
+	titles := make(map[string]string, len(snap.Titles))
+	for k, t := range snap.Titles {
+		if t != "" {
+			titles[k] = t
+		}
 	}
 	return previousJournal{
 		nyaaFeed: snap.NyaaFeed,
@@ -448,6 +462,8 @@ func titleCacheWithinLimits(titles map[string]string) bool {
 	}
 	return true
 }
+
+// --- Curation-warned exclusion ---
 
 // warnedSet is the curation-warned exclusion set splitCurationWarned builds
 // and the carry side consumes as one value: keys holds the excluded journal
@@ -570,6 +586,8 @@ func filterWarnedTorrents(ts []seadex.Torrent, warnedIDs, warnedKeys map[string]
 	}
 	return unwarned, changed
 }
+
+// --- Search curation index ---
 
 // buildCuration builds the search curation index over the whole SeaDex
 // catalogue: every torrent's info hash and tracker key mapped to whether any

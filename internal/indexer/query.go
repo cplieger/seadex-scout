@@ -84,7 +84,7 @@ func (c *curation) lookup(scope, hash, infoURL, guid string) (isBest, matched bo
 			return false, false
 		}
 	}
-	key, ok := c.acceptScopedKeys(scope, []string{infoURL, guid}, match.accept)
+	key, ok := c.acceptScopedKeys(scope, []string{infoURL, guid}, &match)
 	if !ok {
 		return false, false
 	}
@@ -117,11 +117,11 @@ func (c *curation) lookup(scope, hash, infoURL, guid string) (isBest, matched bo
 // on the SAME release identity (healthy Prowlarr emits the same tracker id in
 // comments and guid, so two URLs naming different curated torrents are an
 // invalid untrusted response and fail closed - even when both ids happen to
-// share a best/alt value), and must pass accept (curated, agreeing on
+// share a best/alt value), and must pass m.accept (curated, agreeing on
 // best/alt). It reports the resolved scoped key (key - "" when the URLs
 // carried none; lookup's AB rule and hash/key pair check need it) and whether
 // the item survives (ok).
-func (c *curation) acceptScopedKeys(scope string, urls []string, accept func(candidate, ok bool) bool) (key string, ok bool) {
+func (c *curation) acceptScopedKeys(scope string, urls []string, m *curationMatch) (key string, ok bool) {
 	var identity string
 	for _, raw := range urls {
 		k := trackerKeyFromURL(raw)
@@ -136,7 +136,7 @@ func (c *curation) acceptScopedKeys(scope string, urls []string, accept func(can
 		}
 		identity = k
 		b, curated := c.byKey[k]
-		if !accept(b, curated) {
+		if !m.accept(b, curated) {
 			return identity, false
 		}
 	}

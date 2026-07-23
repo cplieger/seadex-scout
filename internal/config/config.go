@@ -53,10 +53,9 @@ const (
 	// beside EntryURL/ValidInfoHash), and config - a dependency leaf that
 	// cannot import it - must not keep an equal literal that can silently
 	// drift. The wiring site (build.go) references the seadex constant.
-	// DefaultMappingURL is the Fribb anime-lists AniList<->arr ID bridge.
-	DefaultMappingURL = "https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-mini.json"
-	// DefaultAniListURL is the AniList GraphQL endpoint (title/format fallback).
-	DefaultAniListURL = "https://graphql.anilist.co"
+	// The Fribb and AniList endpoints follow the same rule: internal/mapping
+	// and internal/anilist export their own DefaultURL beside the decoders
+	// that embody each upstream contract.
 	// DefaultMappingOverrides is the local alID->IDs override file: drop one in
 	// at this path to pin mappings; absent is fine.
 	DefaultMappingOverrides = "/config/overrides.json"
@@ -104,6 +103,8 @@ const (
 	minPollInterval = time.Hour
 	maxPollInterval = 30 * 24 * time.Hour
 )
+
+// --- On-disk YAML shape and defaults ---
 
 // fileConfig is the on-disk YAML shape: only the user-facing settings.
 type fileConfig struct {
@@ -235,6 +236,8 @@ type Config struct {
 	radarrWanted bool
 }
 
+// --- Loading ---
+
 // Load reads, ${VAR}-expands, and parses the YAML config at path into the
 // runtime Config. It returns an error on a missing/oversized file, invalid
 // YAML, a file containing more than one YAML document, or an unknown
@@ -294,6 +297,8 @@ func loadExpandedDoc(path string) (*yaml.Node, error) {
 	yamlenv.Expand(&node, isAllowedEnvVar)
 	return &node, nil
 }
+
+// --- Flattening to the runtime Config ---
 
 // toConfig flattens the on-disk shape into the runtime Config, applying
 // normalization and the enabled toggles (a disabled arr leaves its URL/key
@@ -390,6 +395,8 @@ func PollIntervalFromFile(path string) time.Duration {
 	return interval
 }
 
+// --- Accessors ---
+
 // SonarrEnabled reports whether a complete Sonarr pair (URL + key) is set.
 func (c *Config) SonarrEnabled() bool { return c.SonarrURL != "" && c.SonarrAPIKey != "" }
 
@@ -413,6 +420,8 @@ func (c *Config) IndexerConfigured() bool {
 	return c.IndexerNyaaTorznabURL != "" || c.IndexerABTorznabURL != ""
 }
 
+// --- Validation and diagnostics ---
+
 // Validate reports the first configuration problem that would stop the app from
 // running, or nil when runnable.
 func (c *Config) Validate() error {
@@ -426,6 +435,7 @@ func (c *Config) Validate() error {
 		return err
 	}
 	c.warnArrURLCredentials()
+	c.warnIdenticalArrURLs()
 	if err := c.validateEnabledArrs(); err != nil {
 		return err
 	}
@@ -470,7 +480,17 @@ func (c *Config) warnPublicURLProblems() {
 	} {
 		if err := validateHTTPURL(pu.name, pu.val); err != nil {
 			slog.Warn("public_url is malformed; report deep-links will be broken",
-				"error", err)
+				"field", pu.name, "error", err)
+		}
+		// arrapi's WebURL joins the base and the route by string concatenation,
+		// so a query in the base (or a bare trailing '?') puts the /series or
+		// /movie route inside the query string and breaks every deep-link.
+		// Warn-only, field-name-only: public_url only feeds deep-links, and the
+		// query may carry a credential-like value that must never be echoed.
+		if u, err := url.Parse(pu.val); err == nil && (u.RawQuery != "" || u.ForceQuery) {
+			slog.Warn("public_url contains a query; report deep-links append the "+
+				"route after it and will be broken - remove the query from the base",
+				"field", pu.name)
 		}
 		if urlEmbedsCredential(pu.val) {
 			slog.Warn("public_url embeds userinfo or a credential-like query parameter; "+
@@ -505,6 +525,10 @@ func (c *Config) warnOverlappingTags() {
 // warnArrURLCredentials warns (field-name-only, never echoing the URL)
 // when an arr url embeds a credential-like userinfo or query parameter,
 // which would otherwise leak into a library-walk-failure *url.Error log.
+// For arr URLs the query half is defense-in-depth only: Validate's earlier
+// validateArrPair no-query rejection fires first for any query-bearing url,
+// so in practice only the userinfo form reaches this warning; the shared
+// urlEmbedsCredential query scan stays live for torznab and public_url.
 // Mirrors the torznab-URL gate in validateIndexer.
 func (c *Config) warnArrURLCredentials() {
 	for _, au := range []struct{ name, val string }{
@@ -517,6 +541,20 @@ func (c *Config) warnArrURLCredentials() {
 				"or it will appear in library-walk-failure logs",
 				"field", au.name)
 		}
+	}
+}
+
+// warnIdenticalArrURLs warns when sonarr.url and radarr.url are identical -
+// almost always a paste error: the two arrs are different applications, so a
+// shared full URL points one client at the wrong service and every library
+// walk on that side fails at runtime with confusing API errors. Warn-only
+// (the config still loads), mirroring the identical-torznab-endpoint warning;
+// field-name-only like every other config diagnostic.
+func (c *Config) warnIdenticalArrURLs() {
+	if c.SonarrURL != "" && c.SonarrURL == c.RadarrURL {
+		slog.Warn("sonarr.url and radarr.url are identical; the two arrs are different " +
+			"applications, so one of them points at the wrong service and its " +
+			"library walk will fail at runtime")
 	}
 }
 
@@ -696,6 +734,8 @@ func validateArrPair(name, rawURL, key string) error {
 	return nil
 }
 
+// --- URL helpers ---
+
 // validateHTTPURL rejects a non-empty rawURL that is not an absolute http(s) URL
 // with a host; an empty rawURL passes (the caller decides whether the field is
 // required). Shared by the arr-pair and indexer Torznab-URL validators so a
@@ -795,6 +835,8 @@ func isCredentialParam(name string) bool {
 	}
 	return false
 }
+
+// --- Parse helpers and policies ---
 
 // isAllowedEnvVar reports whether an env var name is safe to expand in the
 // config: only the app's own SONARR_*, RADARR_*, and SEADEX_SCOUT_* names, so a

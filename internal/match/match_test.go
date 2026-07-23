@@ -707,3 +707,33 @@ func TestNewLibIndexNilSnapshot(t *testing.T) {
 		t.Errorf("findByTitle on an empty index = %+v, want nil", got)
 	}
 }
+
+// TestMatchTitleFallbackKeepsUnknownYearItem pins filterByYear's documented
+// keep-unknown contract: a library item whose year is unknown (0) survives
+// narrowing by a KNOWN AniList year - absence of year evidence is not a
+// mismatch - so an id-less entry still title-matches a year-less library
+// item. Hard-failing that item was a real one-direction-fatal asymmetry the
+// current code documents; no other test exercises a year-less candidate
+// against a known year.
+func TestMatchTitleFallbackKeepsUnknownYearItem(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 6, Title: "Clannad", TvdbID: 555},
+	}}
+	idx := mapping.NewIndex(nil) // no record: matchEntry resolves via AniList
+	fake := fakeAniList{media: map[int]anilist.Media{
+		620: {Titles: []string{"Clannad"}, Format: "TV", Year: 2007},
+	}}
+
+	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 620}}, snap, idx, Memo{})
+
+	if len(res.Matches) != 1 {
+		t.Fatalf("matches = %d, want 1", len(res.Matches))
+	}
+	got := res.Matches[0]
+	if !got.InLibrary() || got.Item.ArrID != 6 {
+		t.Fatalf("match item = %+v, want the year-less Sonarr series kept through year narrowing", got.Item)
+	}
+	if got.Source != SourceTitle {
+		t.Errorf("source = %q, want %q", got.Source, SourceTitle)
+	}
+}

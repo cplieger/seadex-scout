@@ -24,7 +24,9 @@ import (
 // staying green. Every case-insensitive occurrence of the key must decode to
 // an int and the effective (last) value must exceed SchemaVersion, mirroring
 // Load's newer-schema contract: a payload with any invalid duplicate
-// occurrence is corruption, never newer-schema state.
+// occurrence - including a JSON null, which encoding/json otherwise accepts
+// into a plain int as a silent no-op but production rejects via its *int
+// decode - is corruption, never newer-schema state.
 func newerSchemaState(data []byte) bool {
 	// Load's bounded read rejects an over-cap file before the version
 	// discriminator can be inspected, so it is quarantined as foreign/corrupt
@@ -63,10 +65,11 @@ func newerSchemaState(data []byte) bool {
 		if !strings.EqualFold(key, "version") {
 			continue
 		}
-		if err := json.Unmarshal(raw, &version); err != nil {
+		var decoded *int
+		if err := json.Unmarshal(raw, &decoded); err != nil || decoded == nil {
 			return false
 		}
-		found = true
+		version, found = *decoded, true
 	}
 	if _, err := dec.Token(); err != nil {
 		return false
@@ -100,6 +103,8 @@ func FuzzStoreLoadQuarantine(f *testing.F) {
 	f.Add([]byte(`{"baselined":true,"version":1}`))
 	f.Add([]byte(`{"version":"not-a-number"}`))
 	f.Add([]byte(`{"version":99,"version":"not-a-number"}`))
+	f.Add([]byte(`{"version":99,"version":null}`))
+	f.Add([]byte(`{"version":null,"Version":99}`))
 	f.Add([]byte(`{"version":"bad","Version":99,"findings":{}}`))
 	f.Add([]byte(`{"version":-1}`))
 	f.Add([]byte(`{"version":99,"baselined":true}`))

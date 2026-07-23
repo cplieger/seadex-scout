@@ -1642,3 +1642,61 @@ func TestRunPollBuildFailure(t *testing.T) {
 		t.Errorf("err = %q, want the sonarr client build failure", err)
 	}
 }
+
+// TestPollCycleQueueErrorThenCancelled pins the cancelled-with-coordination-
+// error diagnostics leg of poll's uniform interruption contract: the tick's
+// own run completes (the lock was free) but the queue bookkeeping is broken
+// (the queue file is a directory) AND shutdown lands during the run. The
+// coordination error must surface as the after-run WARN inside the cancelled
+// path, and the interruption must still win over the own-run result: pollCycle
+// returns the error wrapping context.Canceled (main classifies it WARN, exit
+// non-zero) with the marker untouched. Serial (capture swaps slog.Default).
+func TestPollCycleQueueErrorThenCancelled(t *testing.T) {
+	rec := capture.Default(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dir := t.TempDir()
+	ex := testCycleExclusiveIn(t, ctx, dir)
+	if err := os.Mkdir(filepath.Join(dir, scheduler.ExclusiveQueueName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := seedSentinelMarker(t)
+
+	err := pollCycle(ctx, ex, cancelCycler{cancel: cancel, healthy: true}, health.NewMarker(path))
+
+	if err == nil {
+		t.Fatal("pollCycle(cancelled run, broken queue bookkeeping) = nil, want the interruption error (exit 1)")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want it to wrap context.Canceled (the interruption wins over the own-run result)", err)
+	}
+	if !rec.Contains("cycle coordination error after run") {
+		t.Errorf("missing the after-run coordination WARN in the cancelled path: %v", rec.Messages())
+	}
+	assertMarkerUntouched(t, path)
+}
+
+// TestRunIndexerPanicShield pins the daemon's feed crash shield (the runCycle
+// shield's twin): a panicking feed goroutine is recovered - it must not crash
+// the long-lived daemon - logged as the component=indexer panic ERROR, its
+// clients are still released (cleanup runs on the panic path), and done is
+// closed so startIndexer's stop func cannot deadlock. Serial (capture swaps
+// slog.Default).
+func TestRunIndexerPanicShield(t *testing.T) {
+	rec := capture.Default(t)
+	done := make(chan struct{})
+	cleaned := false
+
+	runIndexer(context.Background(), done,
+		func(context.Context) error { panic("boom") },
+		func() { cleaned = true },
+		slog.Default().With("component", "indexer"))
+	<-done
+
+	if !rec.Contains("indexer feed panicked") {
+		t.Errorf("missing the panic-shield ERROR line: %v", rec.Messages())
+	}
+	if !cleaned {
+		t.Error("cleanup not released on the panic path (the Prowlarr transport would leak)")
+	}
+}

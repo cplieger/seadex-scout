@@ -31,6 +31,12 @@ import (
 	"github.com/cplieger/seadex-scout/internal/degradation"
 )
 
+// DefaultURL is the Fribb anime-list-mini.json endpoint - the AniList<->arr
+// ID bridge. The variant choice (mini, not the reduced files) is Fribb
+// contract knowledge and lives here beside fribb.go's shape decoders; the
+// wiring site (build.go) references it.
+const DefaultURL = "https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-mini.json"
+
 const (
 	// maxMapBytes bounds the Fribb download before decode (~2.7x the real ~5.9MB body).
 	maxMapBytes = 16 << 20
@@ -618,14 +624,21 @@ func validateTypeCoverage(previous, records []Record, minimum int) error {
 	if len(previous) == 0 {
 		return nil
 	}
-	previousTyped := typedRecordCount(previous)
-	previousMinimum := coverageFloor(len(previous))
-	typed := typedRecordCount(records)
-	if coverageLost(previousTyped, typed, previousMinimum, minimum) {
-		return fmt.Errorf("type coverage %d/%d is below minimum %d (previous cache carried %d typed records)", typed, len(records), minimum, previousTyped)
+	return validatePopulation("type", "typed", typedRecordCount(previous), typedRecordCount(records), len(records), coverageFloor(len(previous)), minimum)
+}
+
+// validatePopulation applies the shared pair of per-population guards every
+// semantic population (typed, season-scoped, special, movie-routed,
+// series-routed) is checked with: the loss-relative floor (coverageLost) and
+// the below-half shrink guard (populationCollapsed). floorNoun and
+// collapseNoun carry each population's existing error vocabulary so the
+// rejection messages stay byte-identical to the pre-extraction text.
+func validatePopulation(floorNoun, collapseNoun string, prevCount, count, total, previousMinimum, minimum int) error {
+	if coverageLost(prevCount, count, previousMinimum, minimum) {
+		return fmt.Errorf("%s coverage %d/%d is below minimum %d (previous cache carried %d %s records)", floorNoun, count, total, minimum, prevCount, collapseNoun)
 	}
-	if populationCollapsed(previousTyped, typed, previousMinimum) {
-		return fmt.Errorf("typed records collapsed below half of previous (%d of previous %d)", typed, previousTyped)
+	if populationCollapsed(prevCount, count, previousMinimum) {
+		return fmt.Errorf("%s records collapsed below half of previous (%d of previous %d)", collapseNoun, count, prevCount)
 	}
 	return nil
 }
@@ -647,21 +660,10 @@ func validateScopeCoverage(previous, records []Record, minimum int) error {
 		return nil
 	}
 	previousMinimum := coverageFloor(len(previous))
-	prevSeasons, seasons := positiveSeasonCount(previous), positiveSeasonCount(records)
-	if coverageLost(prevSeasons, seasons, previousMinimum, minimum) {
-		return fmt.Errorf("positive-season coverage %d/%d is below minimum %d (previous cache carried %d season-scoped records)", seasons, len(records), minimum, prevSeasons)
+	if err := validatePopulation("positive-season", "season-scoped", positiveSeasonCount(previous), positiveSeasonCount(records), len(records), previousMinimum, minimum); err != nil {
+		return err
 	}
-	if populationCollapsed(prevSeasons, seasons, previousMinimum) {
-		return fmt.Errorf("season-scoped records collapsed below half of previous (%d of previous %d)", seasons, prevSeasons)
-	}
-	prevSpecials, specials := specialRecordCount(previous), specialRecordCount(records)
-	if coverageLost(prevSpecials, specials, previousMinimum, minimum) {
-		return fmt.Errorf("special-type coverage %d/%d is below minimum %d (previous cache carried %d special records)", specials, len(records), minimum, prevSpecials)
-	}
-	if populationCollapsed(prevSpecials, specials, previousMinimum) {
-		return fmt.Errorf("special records collapsed below half of previous (%d of previous %d)", specials, prevSpecials)
-	}
-	return nil
+	return validatePopulation("special-type", "special", specialRecordCount(previous), specialRecordCount(records), len(records), previousMinimum, minimum)
 }
 
 // positiveSeasonCount returns how many records carry a positive TVDB season.
@@ -714,19 +716,10 @@ func validateRoutingCoverage(previous, records []Record, minimum int) error {
 	previousMinimum := coverageFloor(len(previous))
 	prevMovies, prevOthers := routingCounts(previous)
 	movies, others := routingCounts(records)
-	if coverageLost(prevMovies, movies, previousMinimum, minimum) {
-		return fmt.Errorf("movie-routed coverage %d/%d is below minimum %d (previous cache carried %d movie-routed records)", movies, len(records), minimum, prevMovies)
+	if err := validatePopulation("movie-routed", "movie-routed", prevMovies, movies, len(records), previousMinimum, minimum); err != nil {
+		return err
 	}
-	if populationCollapsed(prevMovies, movies, previousMinimum) {
-		return fmt.Errorf("movie-routed records collapsed below half of previous (%d of previous %d)", movies, prevMovies)
-	}
-	if coverageLost(prevOthers, others, previousMinimum, minimum) {
-		return fmt.Errorf("series-routed coverage %d/%d is below minimum %d (previous cache carried %d series-routed records)", others, len(records), minimum, prevOthers)
-	}
-	if populationCollapsed(prevOthers, others, previousMinimum) {
-		return fmt.Errorf("series-routed records collapsed below half of previous (%d of previous %d)", others, prevOthers)
-	}
-	return nil
+	return validatePopulation("series-routed", "series-routed", prevOthers, others, len(records), previousMinimum, minimum)
 }
 
 // routingCounts returns how many records route to each arr side AND can
@@ -1127,7 +1120,7 @@ func parseOverrides(data []byte) (overrideSet, error) {
 		return overrideSet{}, err
 	}
 	if err := dec.End(); err != nil {
-		return overrideSet{}, errors.New("mapping: overrides carry data after the JSON array")
+		return overrideSet{}, fmt.Errorf("mapping: overrides carry data after the JSON array: %w", err)
 	}
 	slices.Sort(set.unknown)
 	return set, nil

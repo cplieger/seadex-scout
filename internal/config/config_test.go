@@ -413,6 +413,26 @@ func TestLoadWarnsOnUnresolvedAllowlistedEnv(t *testing.T) {
 	}
 }
 
+// TestLoadStaysSilentWhenAllEnvResolved pins the absence side of Load's
+// unresolved-${VAR}-refs warning: when every allowlisted reference resolves,
+// the warning must not fire (kills the lived CONDITIONALS_BOUNDARY mutant on
+// the len(refs) > 0 guard).
+func TestLoadStaysSilentWhenAllEnvResolved(t *testing.T) {
+	rec := capture.Default(t)
+	t.Setenv("SONARR_API_KEY", "sk-123")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := "sonarr:\n  enabled: true\n  url: http://sonarr:8989\n  api_key: ${SONARR_API_KEY}\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if rec.Contains("config references environment variables") {
+		t.Errorf("Load logged the unresolved-env warning for a fully resolved config: %v", rec.Messages())
+	}
+}
+
 func TestParseLogLevelWarnsOnUnrecognizedValue(t *testing.T) {
 	rec := capture.Default(t)
 
@@ -568,6 +588,71 @@ func TestValidateWarnsOnMalformedPublicURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestValidateSilentOnCleanOrEmptyPublicURL pins the absence side of the
+// malformed-public_url warning: a clean or empty public_url must not warn
+// (kills the lived CONDITIONALS_NEGATION mutant on the err != nil guard,
+// which would warn on every clean config).
+func TestValidateSilentOnCleanOrEmptyPublicURL(t *testing.T) {
+	tests := map[string]Config{
+		"empty public urls": {RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k"},
+		"well-formed public url": {
+			RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k",
+			SonarrPublicURL: "https://sonarr.example.com",
+		},
+	}
+	for name, cfg := range tests {
+		t.Run(name, func(t *testing.T) {
+			rec := capture.Default(t)
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			if rec.Contains("public_url is malformed") {
+				t.Errorf("Validate() warned malformed public_url: %v", rec.Messages())
+			}
+		})
+	}
+}
+
+// TestValidateWarnsOnIdenticalArrURLs pins warnIdenticalArrURLs' warn-only
+// contract: identical sonarr.url/radarr.url values warn (a paste error - one
+// client queries the wrong application), distinct values stay silent, and the
+// warning is field-name-only (never echoes a URL).
+func TestValidateWarnsOnIdenticalArrURLs(t *testing.T) {
+	t.Run("identical arr urls warn", func(t *testing.T) {
+		rec := capture.Default(t)
+		cfg := Config{
+			RunMode:   RunModeDaemon,
+			SonarrURL: "http://arr:8989", SonarrAPIKey: "sk",
+			RadarrURL: "http://arr:8989", RadarrAPIKey: "rk",
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() error = %v, want identical arr urls to remain warn-only", err)
+		}
+		if !rec.Contains("sonarr.url and radarr.url are identical") {
+			t.Errorf("Validate() log = %v, want the identical-arr-url warning", rec.Messages())
+		}
+		for _, m := range rec.Messages() {
+			if strings.Contains(m, "http://arr:8989") {
+				t.Errorf("Validate() log echoes the URL: %q", m)
+			}
+		}
+	})
+	t.Run("distinct arr urls stay silent", func(t *testing.T) {
+		rec := capture.Default(t)
+		cfg := Config{
+			RunMode:   RunModeDaemon,
+			SonarrURL: "http://sonarr:8989", SonarrAPIKey: "sk",
+			RadarrURL: "http://radarr:7878", RadarrAPIKey: "rk",
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if rec.Contains("sonarr.url and radarr.url are identical") {
+			t.Errorf("Validate() log = %v, want no identical-arr-url warning", rec.Messages())
+		}
+	})
 }
 
 func TestValidateIndexerProwlarrKeyWarning(t *testing.T) {
@@ -1506,4 +1591,39 @@ func TestValidateIndexerFeedKeyLengthBoundary(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestValidateIndexerEmptyABPasskeyWarning pins the empty-ab_passkey startup
+// warning (indexer.ab_torznab_url set + indexer.ab_passkey empty): the /ab
+// RSS feed builds its download links from the passkey, so the operator gets a
+// config-time signal instead of discovering it in downstream arr RSS
+// failures. Silent when the passkey is configured.
+func TestValidateIndexerEmptyABPasskeyWarning(t *testing.T) {
+	base := Config{
+		RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k",
+		IndexerAPIKey:         strings.Repeat("a", 32),
+		IndexerProwlarrAPIKey: "pk",
+		IndexerABTorznabURL:   "http://prowlarr:9696/2/api",
+	}
+	t.Run("ab url with empty passkey warns", func(t *testing.T) {
+		rec := capture.Default(t)
+		c := base
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if !rec.Contains("indexer.ab_passkey is empty") {
+			t.Errorf("Validate() log = %v, want the empty-ab_passkey warning", rec.Messages())
+		}
+	})
+	t.Run("ab url with passkey stays silent", func(t *testing.T) {
+		rec := capture.Default(t)
+		c := base
+		c.IndexerABPasskey = "passkey"
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if rec.Contains("indexer.ab_passkey is empty") {
+			t.Errorf("Validate() log = %v, want no empty-ab_passkey warning", rec.Messages())
+		}
+	})
 }

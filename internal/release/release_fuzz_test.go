@@ -131,8 +131,8 @@ func hostGateInvariants(t *testing.T, gate func(string) bool, domain, host strin
 	// metamorphic check appends the dot to the trimmed host (a dot after
 	// trailing whitespace is not a DNS-root dot).
 	if trimmed := strings.TrimSpace(host); !strings.HasSuffix(trimmed, ".") {
-		if dotted := gate(trimmed + "."); dotted != got {
-			t.Errorf("gate(%q) = %v but gate(%q) = %v: DNS-root trailing dot must not change the answer", host, got, trimmed+".", dotted)
+		if dotted, base := gate(trimmed+"."), gate(trimmed); dotted != base {
+			t.Errorf("gate(%q) = %v but gate(%q) = %v: DNS-root trailing dot must not change the answer", trimmed, base, trimmed+".", dotted)
 		}
 	}
 	if norm := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), "."); got && !strings.HasSuffix(norm, domain) {

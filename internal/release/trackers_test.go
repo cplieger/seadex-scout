@@ -53,6 +53,14 @@ func TestLookupTrackerByHostFailClosed(t *testing.T) {
 		// hosts and classify them.
 		{host: "an\u0130mebytes.tv", wantOK: false},
 		{host: "rutrac\u212Aer.org", wantOK: false},
+		// Fail-closed trim-laundering whitespace: Unicode WHITESPACE is
+		// non-ASCII host bytes too and must not be trimmed into a match
+		// before the gate - strings.TrimSpace trims unicode.IsSpace (U+00A0
+		// NBSP, U+3000 ideographic space), so a pre-gate trim would launder
+		// a whitespace-decorated host into the canonical hosts.
+		{host: "nyaa.si\u00a0", wantOK: false},
+		{host: "\u00a0nyaa.si", wantOK: false},
+		{host: "nyaa.si\u3000", wantOK: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.host, func(t *testing.T) {
@@ -148,6 +156,49 @@ func TestIsASCIIHost(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := urlform.IsASCIIHost(tc.host); got != tc.want {
 				t.Errorf("urlform.IsASCIIHost(%q) = %v, want %v", tc.host, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLookupTrackerByRelativeURL pins the structural relative-URL tracker
+// resolver consumed by filter's AB evidence gate and seadex's link publisher:
+// only SeaDex's documented AnimeBytes relative page shape - a rooted
+// "/torrents.php" path carrying a "torrentid" query parameter - resolves (to
+// the canonical AnimeBytes table entry), case-insensitively on the path.
+// Everything else fails closed: an absolute URL (tracker identity must then
+// come from the host gate, never this shape), a protocol-relative or
+// schemeless-host form, a different relative path, a torrentid-less
+// torrents.php query, and the empty string.
+func TestLookupTrackerByRelativeURL(t *testing.T) {
+	tests := []struct {
+		name   string
+		raw    string
+		wantOK bool
+	}{
+		{name: "documented AB relative shape", raw: "/torrents.php?id=12345&torrentid=1167293", wantOK: true},
+		{name: "torrentid alone", raw: "/torrents.php?torrentid=1", wantOK: true},
+		{name: "path case-insensitive", raw: "/TORRENTS.PHP?torrentid=1", wantOK: true},
+		{name: "surrounding whitespace tolerated", raw: "  /torrents.php?torrentid=1  ", wantOK: true},
+		{name: "missing torrentid", raw: "/torrents.php?id=12345", wantOK: false},
+		{name: "no query at all", raw: "/torrents.php", wantOK: false},
+		{name: "different relative path", raw: "/view/1918784", wantOK: false},
+		{name: "subpath is not the AB page", raw: "/torrents.php/extra?torrentid=1", wantOK: false},
+		{name: "absolute AB URL is not a relative shape", raw: "https://animebytes.tv/torrents.php?torrentid=1", wantOK: false},
+		{name: "protocol-relative form is not relative", raw: "//animebytes.tv/torrents.php?torrentid=1", wantOK: false},
+		{name: "schemeless host form is not relative", raw: "animebytes.tv/torrents.php?torrentid=1", wantOK: false},
+		{name: "empty string", raw: "", wantOK: false},
+		{name: "whitespace only", raw: "   ", wantOK: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := LookupTrackerByRelativeURL(tc.raw)
+			if ok != tc.wantOK {
+				t.Errorf("LookupTrackerByRelativeURL(%q) ok = %v, want %v", tc.raw, ok, tc.wantOK)
+				return
+			}
+			if ok && got.Name != TrackerNameAnimeBytes {
+				t.Errorf("LookupTrackerByRelativeURL(%q) = %q, want %q", tc.raw, got.Name, TrackerNameAnimeBytes)
 			}
 		})
 	}

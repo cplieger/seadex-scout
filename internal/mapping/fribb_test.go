@@ -614,3 +614,16 @@ func TestTmdbID_atCapMovieListRetained(t *testing.T) {
 		t.Error("UnmarshalJSON(over-cap movie list) = nil error, want the record-rejecting cap error")
 	}
 }
+
+// TestFribbRecord_toRecord_negativeAniListIDDropped pins the negative arm of
+// the positive-key guard: a directly-constructed record with a negative
+// AniList ID is dropped (ok=false), matching the documented contract that a
+// zero or negative key can never resolve a SeaDex lookup. The branch is
+// unreachable through parseFribb (flexInt zeroes negative wire values), so
+// only this direct-construction case distinguishes the `<= 0` guard from an
+// `== 0` form.
+func TestFribbRecord_toRecord_negativeAniListIDDropped(t *testing.T) {
+	if _, ok := (&fribbRecord{AniListID: -5, Type: "tv", TvdbID: 100}).toRecord(); ok {
+		t.Error("toRecord with negative AniListID returned ok=true, want false (positive-key contract)")
+	}
+}

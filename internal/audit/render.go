@@ -149,6 +149,144 @@ func writeRow(b *strings.Builder, row *Row) {
 		links(row))
 }
 
+// scopeCell renders the scope for the Markdown table, appending the comparison
+// annotations in parentheses: "approx" when the comparison used a coarse
+// multi-group bucket, and the daemon-vocabulary qualifier
+// (mixed/theoretical/incomplete) when one applies - e.g. "S2 (approx, mixed)".
+func scopeCell(row *Row) string {
+	var notes []string
+	if row.Approx {
+		notes = append(notes, "approx")
+	}
+	if row.Qualifier != "" {
+		notes = append(notes, string(row.Qualifier))
+	}
+	if len(notes) == 0 {
+		return scopeLabel(row)
+	}
+	return scopeLabel(row) + " (" + strings.Join(notes, ", ") + ")"
+}
+
+// scopeLabel renders the comparison scope recorded on the row at build time:
+// "movie", "special", the TVDB season ("S2"), or "series" for a whole-series
+// comparison (an absolute-numbered run, a title-only match, or a not-on-SeaDex
+// library item). It is a pure reader of Row.scope — the classification itself
+// is the align.Scope decision recorded on the Row, so the label cannot drift
+// from the comparison actually performed.
+func scopeLabel(row *Row) string {
+	switch row.scope {
+	case align.ScopeMovie:
+		return "movie"
+	case align.ScopeSeason:
+		return "S" + strconv.Itoa(row.Season)
+	case align.ScopeSpecial:
+		return "special"
+	default:
+		return "series"
+	}
+}
+
+// releaseLinkKey is the structural dedupe identity for a links-cell entry.
+// Deduping on a comparable tuple (not a delimiter-joined string) means a
+// crafted tracker or URL containing the would-be delimiter cannot collide two
+// distinct (tracker, URL) pairs and silently drop a best-release link.
+type releaseLinkKey struct {
+	tracker, url string
+}
+
+// links builds the compact links cell: the arr deep-link, the SeaDex entry, and
+// each distinct best-release indexer link.
+func links(row *Row) string {
+	var parts []string
+	if row.ArrURL != "" {
+		parts = append(parts, mdLink(row.Arr, row.ArrURL))
+	}
+	if row.SeaDexURL != "" {
+		parts = append(parts, mdLink("seadex", row.SeaDexURL))
+	}
+	seen := make(map[releaseLinkKey]struct{}, len(row.Releases))
+	for i := range row.Releases {
+		rel := &row.Releases[i]
+		// A curation-warned or unobtainable best is not offered as a grab
+		// link: the links cell is an action affordance, and either SeaDex's
+		// own curators warn against the release or the daemon's obtainability
+		// rule says the operator cannot get it (it is annotated in the
+		// SeaDex-best column instead; the daemon and the Torznab feed exclude
+		// both the same way).
+		if !rel.Best || rel.URL == "" || len(rel.Warnings) > 0 || rel.Unobtainable {
+			continue
+		}
+		key := releaseLinkKey{tracker: rel.Tracker, url: rel.URL}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		parts = append(parts, mdLink(orTracker(rel.Tracker), rel.URL))
+	}
+	if len(parts) == 0 {
+		return emptyCell
+	}
+	return strings.Join(parts, linkSep)
+}
+
+// displayBestGroups returns the distinct best-release groups in their original
+// case (deduped case-insensitively), for display. An annotated best - one
+// carrying curation warnings, one the daemon's obtainability rule rejected
+// (Release.Unobtainable), or both - renders with its notes: "PMR (broken)",
+// "PMR (unobtainable)", "SEV (broken, unobtainable)". The column stays
+// complete (the report shows raw SeaDex data) while explaining why the
+// verdict did not count the release. Clean bests are collected first and win
+// the dedupe, so a group genuinely available as a clean best never displays
+// annotated.
+func displayBestGroups(releases []Release) []string {
+	var out []string
+	seen := make(map[string]struct{}, len(releases))
+	for _, annotatedPass := range []bool{false, true} {
+		for i := range releases {
+			rel := &releases[i]
+			notes := releaseNotes(rel)
+			if !rel.Best || rel.Group == "" || (len(notes) > 0) != annotatedPass {
+				continue
+			}
+			key := strings.ToLower(rel.Group)
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			label := rel.Group
+			if annotatedPass {
+				label += " (" + strings.Join(notes, ", ") + ")"
+			}
+			out = append(out, label)
+		}
+	}
+	return out
+}
+
+// releaseNotes returns a release's display annotations: its canonical
+// curation-warning tags, plus "unobtainable" when the daemon's obtainability
+// rule (filter.Obtainable, computed in classifyReleases) rejected it as
+// verdict evidence. The returned slice is always a fresh allocation, so
+// callers can append without aliasing Release.Warnings.
+func releaseNotes(rel *Release) []string {
+	notes := append([]string(nil), rel.Warnings...)
+	if rel.Unobtainable {
+		notes = append(notes, "unobtainable")
+	}
+	return notes
+}
+
+// rowsWithVerdict returns the rows carrying verdict v, preserving order.
+func rowsWithVerdict(rows []Row, v Verdict) []Row {
+	var out []Row
+	for i := range rows {
+		if rows[i].Verdict == v {
+			out = append(out, rows[i])
+		}
+	}
+	return out
+}
+
 // --- slog emission ---
 
 // Log emits the report to slog: a summary line then one INFO line per row, so
@@ -399,86 +537,6 @@ func writeAtomic(ctx context.Context, path string, data []byte, log *slog.Logger
 	return err
 }
 
-// scopeCell renders the scope for the Markdown table, appending the comparison
-// annotations in parentheses: "approx" when the comparison used a coarse
-// multi-group bucket, and the daemon-vocabulary qualifier
-// (mixed/theoretical/incomplete) when one applies - e.g. "S2 (approx, mixed)".
-func scopeCell(row *Row) string {
-	var notes []string
-	if row.Approx {
-		notes = append(notes, "approx")
-	}
-	if row.Qualifier != "" {
-		notes = append(notes, string(row.Qualifier))
-	}
-	if len(notes) == 0 {
-		return scopeLabel(row)
-	}
-	return scopeLabel(row) + " (" + strings.Join(notes, ", ") + ")"
-}
-
-// scopeLabel renders the comparison scope recorded on the row at build time:
-// "movie", "special", the TVDB season ("S2"), or "series" for a whole-series
-// comparison (an absolute-numbered run, a title-only match, or a not-on-SeaDex
-// library item). It is a pure reader of Row.scope — the classification itself
-// is the align.Scope decision recorded on the Row, so the label cannot drift
-// from the comparison actually performed.
-func scopeLabel(row *Row) string {
-	switch row.scope {
-	case align.ScopeMovie:
-		return "movie"
-	case align.ScopeSeason:
-		return "S" + strconv.Itoa(row.Season)
-	case align.ScopeSpecial:
-		return "special"
-	default:
-		return "series"
-	}
-}
-
-// releaseLinkKey is the structural dedupe identity for a links-cell entry.
-// Deduping on a comparable tuple (not a delimiter-joined string) means a
-// crafted tracker or URL containing the would-be delimiter cannot collide two
-// distinct (tracker, URL) pairs and silently drop a best-release link.
-type releaseLinkKey struct {
-	tracker, url string
-}
-
-// links builds the compact links cell: the arr deep-link, the SeaDex entry, and
-// each distinct best-release indexer link.
-func links(row *Row) string {
-	var parts []string
-	if row.ArrURL != "" {
-		parts = append(parts, mdLink(row.Arr, row.ArrURL))
-	}
-	if row.SeaDexURL != "" {
-		parts = append(parts, mdLink("seadex", row.SeaDexURL))
-	}
-	seen := make(map[releaseLinkKey]struct{}, len(row.Releases))
-	for i := range row.Releases {
-		rel := &row.Releases[i]
-		// A curation-warned or unobtainable best is not offered as a grab
-		// link: the links cell is an action affordance, and either SeaDex's
-		// own curators warn against the release or the daemon's obtainability
-		// rule says the operator cannot get it (it is annotated in the
-		// SeaDex-best column instead; the daemon and the Torznab feed exclude
-		// both the same way).
-		if !rel.Best || rel.URL == "" || len(rel.Warnings) > 0 || rel.Unobtainable {
-			continue
-		}
-		key := releaseLinkKey{tracker: rel.Tracker, url: rel.URL}
-		if _, dup := seen[key]; dup {
-			continue
-		}
-		seen[key] = struct{}{}
-		parts = append(parts, mdLink(orTracker(rel.Tracker), rel.URL))
-	}
-	if len(parts) == 0 {
-		return emptyCell
-	}
-	return strings.Join(parts, linkSep)
-}
-
 // --- Sanitizers + link/cell escaping ---
 
 // linkURLEscaper backs escapeLinkURL; built once, safe for concurrent use.
@@ -546,64 +604,6 @@ func mdLink(label, rawURL string) string {
 		}
 	}
 	return safeLabel
-}
-
-// displayBestGroups returns the distinct best-release groups in their original
-// case (deduped case-insensitively), for display. An annotated best - one
-// carrying curation warnings, one the daemon's obtainability rule rejected
-// (Release.Unobtainable), or both - renders with its notes: "PMR (broken)",
-// "PMR (unobtainable)", "SEV (broken, unobtainable)". The column stays
-// complete (the report shows raw SeaDex data) while explaining why the
-// verdict did not count the release. Clean bests are collected first and win
-// the dedupe, so a group genuinely available as a clean best never displays
-// annotated.
-func displayBestGroups(releases []Release) []string {
-	var out []string
-	seen := make(map[string]struct{}, len(releases))
-	for _, annotatedPass := range []bool{false, true} {
-		for i := range releases {
-			rel := &releases[i]
-			notes := releaseNotes(rel)
-			if !rel.Best || rel.Group == "" || (len(notes) > 0) != annotatedPass {
-				continue
-			}
-			key := strings.ToLower(rel.Group)
-			if _, dup := seen[key]; dup {
-				continue
-			}
-			seen[key] = struct{}{}
-			label := rel.Group
-			if annotatedPass {
-				label += " (" + strings.Join(notes, ", ") + ")"
-			}
-			out = append(out, label)
-		}
-	}
-	return out
-}
-
-// releaseNotes returns a release's display annotations: its canonical
-// curation-warning tags, plus "unobtainable" when the daemon's obtainability
-// rule (filter.Obtainable, computed in classifyReleases) rejected it as
-// verdict evidence. The returned slice is always a fresh allocation, so
-// callers can append without aliasing Release.Warnings.
-func releaseNotes(rel *Release) []string {
-	notes := append([]string(nil), rel.Warnings...)
-	if rel.Unobtainable {
-		notes = append(notes, "unobtainable")
-	}
-	return notes
-}
-
-// rowsWithVerdict returns the rows carrying verdict v, preserving order.
-func rowsWithVerdict(rows []Row, v Verdict) []Row {
-	var out []Row
-	for i := range rows {
-		if rows[i].Verdict == v {
-			out = append(out, rows[i])
-		}
-	}
-	return out
 }
 
 // cellEscaper backs escapeCell; built once, safe for concurrent use.

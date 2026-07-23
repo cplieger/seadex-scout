@@ -4,7 +4,11 @@ import (
 	"errors"
 	"math"
 	"slices"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/cplieger/runesafe"
 )
 
 // FuzzParseTorznab exercises the Prowlarr Torznab XML parser on arbitrary bytes.
@@ -24,6 +28,7 @@ func FuzzParseTorznab(f *testing.F) {
 	f.Add(`<rss><channel><item><guid></guid><torznab:attr name="infohash" value="ABCDEF1234567890ABCDEF1234567890ABCDEF12"/></item></channel></rss>`)
 	f.Add(`<rss><channel><item><enclosure url="http://prowlarr/download?id=1&amp;token=x" length="123" type="application/x-bittorrent"/><torznab:attr name="category" value="2000"/></item></channel></rss>`)
 	f.Add(`<rss><channel><item><torznab:attr name="seeders" value="9223372036854775807"/><torznab:attr name="leechers" value="9223372036854775807"/></item></channel></rss>`)
+	f.Add(`<?xml version="1.0"?><error code="100" description="Incorrect user credentials"/>`)
 	f.Add("")
 	f.Add("not xml at all")
 	f.Fuzz(func(t *testing.T, body string) {
@@ -86,6 +91,18 @@ func FuzzParseTorznab(f *testing.F) {
 
 func normalizedRenderedItem(it item) item {
 	it.GUID = it.guid()
+	// escTo sanitizes every rendered text field (runesafe.Sanitize maps
+	// C1/bidi/U+2028-class runes and DEL to spaces, invalid UTF-8 to
+	// U+FFFD) and toItem re-trims on re-parse; and pubDate renders at
+	// RFC1123Z second precision while parsePubDate's RFC3339 layout
+	// accepts fractional seconds on input. Mirror both, or a valid XML
+	// input carrying such runes (or a fractional pubDate) fails the
+	// round trip spuriously.
+	it.Title = strings.TrimSpace(runesafe.Sanitize(it.Title))
+	it.GUID = strings.TrimSpace(runesafe.Sanitize(it.GUID))
+	it.InfoURL = strings.TrimSpace(runesafe.Sanitize(it.InfoURL))
+	it.DownloadURL = strings.TrimSpace(runesafe.Sanitize(it.DownloadURL))
+	it.PubDate = it.PubDate.Truncate(time.Second)
 	if len(it.Categories) == 0 {
 		it.Categories = []int{catAnime}
 	}

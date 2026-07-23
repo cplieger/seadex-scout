@@ -125,11 +125,10 @@ func NewMatcher(anilistClient AniListClient, logger *slog.Logger) *Matcher {
 // and entries still expired at the end of a clean pass are pruned. Degraded
 // passes retain expired entries as stale feed-title fallback data. The
 // caller's memo.Entries map is updated in place (Result.Memo aliases it, not
-// a copy), so the pre-call memo is not preserved. Match never
-// fails as a whole: an AniList fallback error
-// for one entry is logged, that entry is left unmatched, and its id is
-// reported in Result.IncompleteIDs so the caller can scope its degradation
-// handling to the affected entries.
+// a copy), so the pre-call memo is not preserved. Match never fails as a
+// whole: an AniList fallback error for one entry is logged, that entry is
+// left unmatched, and its id is reported in Result.IncompleteIDs so the
+// caller can scope its degradation handling to the affected entries.
 func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *library.Snapshot, idx *mapping.Index, memo Memo) Result {
 	lib := NewLibIndex(snap)
 	if memo.Entries == nil {

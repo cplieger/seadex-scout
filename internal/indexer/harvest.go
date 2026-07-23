@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"math"
 	"net/http"
 	"net/url"
 	"slices"
@@ -146,7 +147,6 @@ type harvestGroup struct {
 // burn the whole time slice with zero progress.
 func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]journalItem, titles map[string]string, infoFor func(alID int) EntryInfo, prevCursor string) (stats harvestStats, cursor string) {
 	cp := decodeHarvestCheckpoint(prevCursor)
-	cursor = prevCursor
 	defer func() { stats.pending = syntheticCount(feeds, titles) }()
 	groups, index := pendingHarvest(feeds, titles, infoFor)
 	pruneHarvestPages(cp.Pages, groups)
@@ -234,8 +234,9 @@ type harvestCheckpoint struct {
 // checkpoint, a JSON object decodes fully, and malformed JSON - a hand-edited
 // or corrupted snapshot - degrades to an empty checkpoint (start at the head,
 // page from zero: the safe baseline). Non-positive persisted pages are
-// dropped: page 0 is the default and needs no entry, and a negative value is
-// meaningless.
+// dropped: page 0 is the default and needs no entry, a negative value is
+// meaningless, and a value that would overflow the offset computation resets
+// to zero.
 func decodeHarvestCheckpoint(raw string) harvestCheckpoint {
 	if !strings.HasPrefix(strings.TrimSpace(raw), "{") {
 		return harvestCheckpoint{Last: raw, Pages: make(map[string]int)}
@@ -248,7 +249,12 @@ func decodeHarvestCheckpoint(raw string) harvestCheckpoint {
 		cp.Pages = make(map[string]int)
 	}
 	for key, page := range cp.Pages {
-		if page <= 0 {
+		// Drop pages that would overflow the offset multiplication in
+		// harvestShow (page*harvestPageSize): an overflowed negative offset
+		// is silently omitted by harvestPage, so the show would re-query
+		// page zero forever while persisting the poisoned value - unlike an
+		// in-range absurd page, which self-heals via the short-page exit.
+		if page <= 0 || page > math.MaxInt/harvestPageSize {
 			delete(cp.Pages, key)
 		}
 	}

@@ -28,6 +28,12 @@ func redactPathText(dir, s string) string {
 	if dir == "" {
 		return s
 	}
+	// A degenerate configured dir ("." or "/") can never hold a pasted
+	// secret, and replacing it would rewrite every dot or slash in the
+	// diagnostic text; skip redaction entirely (nothing secret to mask).
+	if c := filepath.Clean(dir); c == "." || c == string(filepath.Separator) {
+		return s
+	}
 	s = strings.ReplaceAll(s, dir, redactedPath)
 	for p := filepath.Clean(dir); p != "." && p != string(filepath.Separator); {
 		s = strings.ReplaceAll(s, p, redactedPath)

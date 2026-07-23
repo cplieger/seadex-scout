@@ -168,10 +168,10 @@ func notFoundEntry(expiry time.Time) MemoEntry {
 // handful of batched AniList requests instead of one request per id-less entry
 // — and an expired entry renews through the same batch, since pendingAniListIDs
 // counts it as pending. Every write (positive or negative) is stamped with a
-// fresh jittered expiry. A PARTIAL batch failure is
-// best-effort: an id a partial batch does not return is left uncached and falls
-// through to matchEntry's single Fetch, so batching never changes the match
-// result, only the request count. A TOTAL batch failure (no chunk succeeded -
+// fresh jittered expiry. A PARTIAL batch failure is best-effort: an id a
+// partial batch does not return is left uncached and falls through to
+// matchEntry's single Fetch, so batching never changes the match result,
+// only the request count. A TOTAL batch failure (no chunk succeeded -
 // an AniList outage) instead returns the pending ids so the per-entry pass
 // fails them fast: every per-id lookup would be doomed against the same outage,
 // and the unbounded futile tail of requests would only stall the cycle.

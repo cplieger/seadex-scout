@@ -4,7 +4,8 @@
 // outside ASCII [a-z0-9] is stripped, so two titles differing only in
 // decoration collide as intended. Unicode capitals whose lowercase mapping
 // is ASCII therefore contribute to the key rather than being stripped. It is
-// deliberately conservative (no transliteration or fuzzy edits). A dependency-free leaf so both consumers (match, which indexes and
+// deliberately conservative (no transliteration or fuzzy edits). A
+// dependency-free leaf so both consumers (match, which indexes and
 // looks up by key, and anilist, which pre-rejects payloads whose every title
 // normalizes to an empty key) share one implementation instead of mirroring
 // the character set in lockstep.

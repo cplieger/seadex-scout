@@ -760,3 +760,52 @@ func TestRequestMarshalErrorMakesNoAttempt(t *testing.T) {
 		t.Errorf("Stats().Calls = %d, want 0 (a request that cannot be marshaled is never an outbound attempt)", got)
 	}
 }
+
+// TestFetchManyKeepsFirstRecordErrorAcrossChunks pins the documented
+// "first record error is surfaced" side of the batch contract: when two
+// chunks each contain a poisoned record, the error returned beside the merged
+// result is the FIRST chunk's record error, not overwritten by the second
+// chunk's, while both chunks' valid records still merge.
+func TestFetchManyKeepsFirstRecordErrorAcrossChunks(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n == 1 {
+			// Chunk 1: a missing-id record beside a valid sibling.
+			fmt.Fprint(w, `{"data":{"Page":{"media":[{"id":0,"format":"TV","seasonYear":2020,"title":{"romaji":"poisoned-one"}},{"id":1,"format":"TV","seasonYear":2020,"title":{"romaji":"t1"}}]}}}`)
+			return
+		}
+		// Chunk 2: a duplicate-id conflict, a different record error.
+		fmt.Fprint(w, `{"data":{"Page":{"media":[{"id":51,"format":"TV","seasonYear":2020,"title":{"romaji":"first"}},{"id":51,"format":"TV","seasonYear":2020,"title":{"romaji":"second"}},{"id":52,"format":"TV","seasonYear":2020,"title":{"romaji":"t52"}}]}}}`)
+	}))
+	defer srv.Close()
+
+	ids := make([]int, 60) // two chunks, each carrying its own record error
+	for i := range ids {
+		ids[i] = i + 1
+	}
+	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	out, err := c.FetchMany(context.Background(), ids)
+	if err == nil {
+		t.Fatal("FetchMany must surface a record error")
+	}
+	if !errors.Is(err, ErrBatchRecord) {
+		t.Errorf("error = %v, want ErrBatchRecord classification", err)
+	}
+	if !strings.Contains(err.Error(), "media record 0 missing id") {
+		t.Errorf("error = %q, want the FIRST chunk's record error (missing id), not a later chunk's", err.Error())
+	}
+	if strings.Contains(err.Error(), "duplicates id") {
+		t.Errorf("error = %q, must not be overwritten by the second chunk's duplicate-id error", err.Error())
+	}
+	if got := out[1].Titles; len(got) != 1 || got[0] != "t1" {
+		t.Errorf("out[1].Titles = %v, want [t1]", got)
+	}
+	if got := out[52].Titles; len(got) != 1 || got[0] != "t52" {
+		t.Errorf("out[52].Titles = %v, want [t52] (second chunk still merged)", got)
+	}
+}

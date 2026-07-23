@@ -26,7 +26,7 @@ import (
 func TestReportGeneratesRowsAndNeverWritesState(t *testing.T) {
 	logger := scoutTestLogger()
 	store := &fakeStore{st: state.State{
-		Mapping:   mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+		Mapping:   frierenMappingCache(),
 		Baselined: true,
 	}}
 
@@ -134,7 +134,7 @@ func TestReportZeroSeaDexEntriesErrors(t *testing.T) {
 	s := New(&Deps{
 		Logger: logger,
 		Store: &fakeStore{st: state.State{
-			Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+			Mapping: frierenMappingCache(),
 		}},
 		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping: fakeMapping{},
@@ -161,7 +161,7 @@ func TestReportSeaDexFailureErrors(t *testing.T) {
 		// A cached mapping keeps the map usable so the report reaches the
 		// SeaDex arm (an unusable map is its own hard error, gated earlier).
 		Store: &fakeStore{st: state.State{
-			Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+			Mapping: frierenMappingCache(),
 		}},
 		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping: fakeMapping{},
@@ -261,7 +261,7 @@ func TestReportDegradedMatching(t *testing.T) {
 		sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
 		s := New(&Deps{
 			Logger:  logger,
-			Store:   &fakeStore{st: state.State{Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}}}},
+			Store:   &fakeStore{st: state.State{Mapping: seasonlessMappingCache()}},
 			Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
 			Mapping: fakeMapping{},
 			SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
@@ -295,7 +295,7 @@ func TestReportDegradedMatching(t *testing.T) {
 		sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
 		s := New(&Deps{
 			Logger:  logger,
-			Store:   &fakeStore{st: state.State{Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}}}},
+			Store:   &fakeStore{st: state.State{Mapping: seasonlessMappingCache()}},
 			Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
 			Mapping: fakeMapping{},
 			SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},

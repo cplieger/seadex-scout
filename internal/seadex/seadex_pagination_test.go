@@ -497,3 +497,27 @@ func TestFetchEntriesCleanFetchEmitsNoWarnings(t *testing.T) {
 		}
 	}
 }
+
+// TestFetchEntriesExactlyFullPagesSucceed pins the consistency guard's
+// boundary: a catalogue whose reported totalItems exactly fills the reported
+// pages (totalItems == totalPages*perPage) is the honest maximally-full
+// PocketBase shape and must succeed - the guard fires only when totalItems
+// STRICTLY exceeds what the reported pages can carry.
+func TestFetchEntriesExactlyFullPagesSucceed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		items := make([]string, perPage)
+		for i := range items {
+			items[i] = fmt.Sprintf(`{"alID":%d,"expand":{"trs":[]}}`, i+1)
+		}
+		fmt.Fprintf(w, `{"totalItems":%d,"totalPages":1,"items":[%s]}`, perPage, strings.Join(items, ","))
+	}))
+	defer server.Close()
+
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	if err != nil {
+		t.Fatalf("FetchEntries returned error: %v (totalItems == totalPages*perPage is the honest full-page shape and must not trip the consistency guard)", err)
+	}
+	if len(entries) != perPage {
+		t.Fatalf("entries = %d, want %d", len(entries), perPage)
+	}
+}

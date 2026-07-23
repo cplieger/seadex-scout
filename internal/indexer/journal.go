@@ -252,6 +252,18 @@ func (w *FeedWriter) carryItem(it *journalItem, cur map[string][]curatedRef, ws 
 			js.recordDrop(true)
 			return journalItem{}, false
 		}
+		// Same GUID-identity gate as the curated arm below: a stored GUID
+		// that no longer proves this item's journal identity (a cross-key,
+		// foreign-host, or empty GUID from a hand-edited snapshot) must not
+		// be carried - unlike a curated item there is no fresh render to
+		// self-heal from, and reload derives the SERVED download link from
+		// the GUID, so a cross-key GUID would plant a fetch target for a
+		// different torrent id on the same tracker for the item's whole
+		// journal window.
+		if trackerKeyFromURL(it.GUID) != it.Key {
+			js.dropped++
+			return journalItem{}, false
+		}
 		return *it, true
 	}
 	fresh, ok, noPasskey := w.renderJournalItem(it.Key, refs, infoFor)
@@ -347,7 +359,8 @@ func (w *FeedWriter) scopeConfigured(scope string) bool {
 // when it is genuinely new and servable. Tail-tracker occurrences never reach
 // the ledger: see the guard below.
 func (w *FeedWriter) journalIfNew(t *seadex.Torrent, cur map[string][]curatedRef, seen map[string]bool, infoFor func(alID int) EntryInfo, js *journalStats) (it journalItem, scope string, ok bool) {
-	if trackerScope(t.Tracker) == "" {
+	scope = trackerScope(t.Tracker)
+	if scope == "" {
 		// A tail tracker (AnimeTosho, RuTracker) can never be journaled - and
 		// AnimeTosho is a Nyaa MIRROR carrying the IDENTICAL info hash, so
 		// folding its identity into the seen ledger would, depending on
@@ -368,7 +381,7 @@ func (w *FeedWriter) journalIfNew(t *seadex.Torrent, cur map[string][]curatedRef
 		// unresolvable-diagnostic case newJournalItem counts: surface it on
 		// the snapshot log line instead of silently shrinking the feed.
 		// Unknown tail trackers and an intentionally disabled AB stay silent.
-		if w.scopeConfigured(trackerScope(t.Tracker)) {
+		if w.scopeConfigured(scope) {
 			js.unresolvable++
 		}
 		return journalItem{}, "", false
@@ -383,7 +396,7 @@ func (w *FeedWriter) journalIfNew(t *seadex.Torrent, cur map[string][]curatedRef
 	if !isNew {
 		return journalItem{}, "", false
 	}
-	return w.newJournalItem(t, cur, infoFor, js)
+	return w.newJournalItem(t, scope, cur, infoFor, js)
 }
 
 // newJournalItem resolves one newly curated torrent into its journal item and
@@ -397,8 +410,7 @@ func (w *FeedWriter) journalIfNew(t *seadex.Torrent, cur map[string][]curatedRef
 // key or no parseable title counts as unresolvable so an upstream URL-shape
 // change surfaces on the snapshot log line instead of silently shrinking the
 // feed (unresolvable is counted only for configured scopes).
-func (w *FeedWriter) newJournalItem(t *seadex.Torrent, cur map[string][]curatedRef, infoFor func(alID int) EntryInfo, js *journalStats) (it journalItem, scope string, ok bool) {
-	scope = trackerScope(t.Tracker)
+func (w *FeedWriter) newJournalItem(t *seadex.Torrent, scope string, cur map[string][]curatedRef, infoFor func(alID int) EntryInfo, js *journalStats) (journalItem, string, bool) {
 	if !w.scopeConfigured(scope) {
 		return journalItem{}, "", false
 	}

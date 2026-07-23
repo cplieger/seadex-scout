@@ -1493,3 +1493,60 @@ func TestRotationStart(t *testing.T) {
 		})
 	}
 }
+
+// TestHarvestCheckpointCodec pins the persisted harvest_cursor codec's
+// degradation and compatibility contracts directly: the legacy bare cursor
+// decodes Last-only (with an allocated Pages map callers write into),
+// malformed JSON degrades to the empty checkpoint, a pages-less JSON object
+// still gets a non-nil map, non-positive persisted pages are dropped, a
+// pages-less checkpoint encodes as the bare legacy cursor an older binary
+// reads, and both forms round-trip (the legacy form byte-identical).
+func TestHarvestCheckpointCodec(t *testing.T) {
+	t.Run("legacy bare cursor decodes as Last-only", func(t *testing.T) {
+		cp := decodeHarvestCheckpoint("nyaa:1500")
+		if cp.Last != "nyaa:1500" || len(cp.Pages) != 0 {
+			t.Errorf("decode legacy = %+v, want Last-only with empty non-nil Pages", cp)
+		}
+		if cp.Pages == nil {
+			t.Error("Pages = nil, want an allocated empty map (callers write into it)")
+		}
+	})
+	t.Run("malformed JSON degrades to the empty checkpoint", func(t *testing.T) {
+		cp := decodeHarvestCheckpoint(`{"pages": {"nyaa:7": `)
+		if cp.Last != "" || len(cp.Pages) != 0 || cp.Pages == nil {
+			t.Errorf("decode malformed = %+v, want the empty checkpoint with a non-nil Pages map", cp)
+		}
+	})
+	t.Run("JSON object without pages gets a non-nil map", func(t *testing.T) {
+		cp := decodeHarvestCheckpoint(`{"last":"nyaa:7"}`)
+		if cp.Last != "nyaa:7" || cp.Pages == nil || len(cp.Pages) != 0 {
+			t.Errorf("decode pages-less JSON = %+v, want Last kept and an allocated empty Pages", cp)
+		}
+	})
+	t.Run("non-positive persisted pages are dropped", func(t *testing.T) {
+		cp := decodeHarvestCheckpoint(`{"last":"ab:9","pages":{"nyaa:7":0,"ab:3":-2,"nyaa:9":4}}`)
+		if len(cp.Pages) != 1 || cp.Pages["nyaa:9"] != 4 {
+			t.Errorf("decode pages = %v, want only the positive entry kept", cp.Pages)
+		}
+		if cp.Last != "ab:9" {
+			t.Errorf("Last = %q, want %q", cp.Last, "ab:9")
+		}
+	})
+	t.Run("pages-less checkpoint encodes as the bare legacy cursor", func(t *testing.T) {
+		if got := encodeHarvestCheckpoint(harvestCheckpoint{Last: "nyaa:1500"}); got != "nyaa:1500" {
+			t.Errorf("encode = %q, want the bare legacy cursor", got)
+		}
+	})
+	t.Run("checkpoint with pages round-trips through encode and decode", func(t *testing.T) {
+		in := harvestCheckpoint{Last: "nyaa:7", Pages: map[string]int{"nyaa:7": 3}}
+		out := decodeHarvestCheckpoint(encodeHarvestCheckpoint(in))
+		if out.Last != in.Last || len(out.Pages) != 1 || out.Pages["nyaa:7"] != 3 {
+			t.Errorf("round-trip = %+v, want %+v", out, in)
+		}
+	})
+	t.Run("legacy cursor round-trips byte-identical", func(t *testing.T) {
+		if got := encodeHarvestCheckpoint(decodeHarvestCheckpoint("nyaa:1500")); got != "nyaa:1500" {
+			t.Errorf("legacy round-trip = %q, want byte-identical %q", got, "nyaa:1500")
+		}
+	})
+}

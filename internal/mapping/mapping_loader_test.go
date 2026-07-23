@@ -887,12 +887,17 @@ func TestLoader_refreshCache_futureFetchedAtFailedFetchClampsStaleAge(t *testing
 		t.Errorf("StaleMapError text = %q, want non-negative age", stale.Error())
 	}
 	attrs := stale.LogAttrs()
+	foundAge := false
 	for i := 0; i+1 < len(attrs); i += 2 {
 		if attrs[i] == "stale_age_seconds" {
+			foundAge = true
 			if secs, isFloat := attrs[i+1].(float64); !isFloat || secs < 0 {
 				t.Errorf("LogAttrs stale_age_seconds = %v, want non-negative float64", attrs[i+1])
 			}
 		}
+	}
+	if !foundAge {
+		t.Error("LogAttrs carries no stale_age_seconds attribute; the clamp assertion never ran")
 	}
 }
 
@@ -1758,5 +1763,78 @@ func TestValidateRefreshedRecordsRoutingMidBandCollapseRejected(t *testing.T) {
 	}
 	if err := validateRefreshedRecords(previous, seriesMidBand, len(seriesMidBand)); err == nil {
 		t.Error("mid-band series-routed collapse (1800 -> 800, above the 1% floor) returned nil error, want rejection")
+	}
+}
+
+// TestLoader_refreshCache_exactHalfShrinkAccepted pins the exact-half
+// acceptance boundary shared by acceptRefresh's whole-map shrink guard and
+// populationCollapsed: both use a strict below-half comparison
+// (count*degradation.ShrinkGuardFactor < prevCount), so a refresh retaining
+// EXACTLY half of the previous records (4 of 8, every guarded population
+// halved together) must be accepted and reset the rejection streak. The
+// existing shrink tests only pin below-half rejection and above-half
+// acceptance (1001 of 2000), leaving the <= boundary mutant alive in both
+// guards.
+func TestLoader_refreshCache_exactHalfShrinkAccepted(t *testing.T) {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := 1; i <= 4; i++ {
+		if i > 1 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"anilist_id":%d,"type":"tv","tvdb_id":%d}`, i, i)
+	}
+	b.WriteByte(']')
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(b.String()))
+	}))
+	defer ts.Close()
+
+	prevRecords := make([]Record, 0, 8)
+	for i := 1; i <= 8; i++ {
+		prevRecords = append(prevRecords, Record{AniListID: i, Type: "TV", TvdbID: i})
+	}
+	prev := &Cache{
+		FetchedAt:         time.Now().Add(-2 * time.Hour),
+		Records:           prevRecords,
+		RejectedRefreshes: 3,
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	if err != nil {
+		t.Fatalf("exactly-half refresh (4 of 8) returned error %v, want accepted (the guards are strictly below-half)", err)
+	}
+	if len(next.Records) != 4 {
+		t.Fatalf("accepted refresh records = %d, want 4", len(next.Records))
+	}
+	if next.RejectedRefreshes != 0 {
+		t.Errorf("accepted refresh RejectedRefreshes = %d, want 0 (acceptance resets the streak)", next.RejectedRefreshes)
+	}
+}
+
+// TestValidateRefreshedRecordsTypedAtFloorAccepted pins the at-floor
+// acceptance boundary of coverageLost: the floor comparison is strictly
+// below-minimum (count < minimum), so a typed population sitting EXACTLY at
+// the ceiling-derived 1% floor (2 typed of 200 records, floor 2) after a
+// small legal loss (previous carried 3) must be accepted. The existing floor
+// tests pin below-floor rejection and growth acceptance, leaving the
+// count <= minimum boundary mutant alive.
+func TestValidateRefreshedRecordsTypedAtFloorAccepted(t *testing.T) {
+	previous := make([]Record, 0, 200)
+	candidate := make([]Record, 0, 200)
+	for id := 1; id <= 200; id++ {
+		p := Record{AniListID: id, TvdbID: id}
+		c := Record{AniListID: id, TvdbID: id}
+		if id <= 3 {
+			p.Type = "TV"
+		}
+		if id <= 2 {
+			c.Type = "TV"
+		}
+		previous = append(previous, p)
+		candidate = append(candidate, c)
+	}
+	if err := validateRefreshedRecords(previous, candidate, len(candidate)); err != nil {
+		t.Errorf("typed count at the exact floor (2 of 200, floor 2) returned error %v, want accepted (the floor is strictly below-minimum)", err)
 	}
 }

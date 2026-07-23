@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"net/url"
 	"os"
+	"strings"
+	"sync"
 
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/seadex-scout/internal/release"
@@ -311,34 +314,23 @@ func (ix *Indexer) readSnapshot(ctx context.Context) (snapshot, bool, bool) {
 	}
 	snap.ABFeed = ix.rebuildABDownloadURLs(snap.ABFeed)
 	snap.NyaaFeed = ix.rebuildNyaaDownloadURLs(snap.NyaaFeed)
+	snap.ABFeed = ix.sanitizeSnapshotInfoURLs(snap.ABFeed)
+	snap.NyaaFeed = ix.sanitizeSnapshotInfoURLs(snap.NyaaFeed)
 	return snap, true, false
-}
-
-// snapshotDownloadURL is the host-gated reconstruction path for a PERSISTED
-// item's fetch target: it re-applies the tracker-ownership gate
-// (trackerOwnURL, the same fail-closed check writer-side journal admission
-// runs through trackerKey) before handing the GUID to downloadURL, whose
-// trackerID-only contract explicitly assumes its caller already applied that
-// invariant. Persisted data crosses a separate trust boundary from writer
-// admission: a tampered but structurally valid feed.json could otherwise
-// carry a foreign (https://evil.example/view/123) or independent-subdomain
-// (sukebei.nyaa.si/view/123) GUID whose numeric id downloadURL would mint
-// into the apex tracker's download URL for an unrelated torrent. A gated-out
-// item reports ok=false and is dropped exactly like an undecodable GUID.
-func snapshotDownloadURL(tracker, sourceURL, abPasskey string) (string, bool) {
-	scope := trackerScope(tracker)
-	if scope == "" || !trackerOwnURL(scope, sourceURL) {
-		return "", false
-	}
-	return downloadURL(tracker, sourceURL, abPasskey)
 }
 
 // rebuildDownloadURLs is the shared derivation mechanics behind
 // rebuildABDownloadURLs and rebuildNyaaDownloadURLs: it re-derives each feed
 // item's download URL from its non-secret tracker page URL (the GUID) via
-// snapshotDownloadURL (the host-gated path - see its comment for why the
-// persisted GUID must re-pass the tracker-ownership gate), dropping any item
-// whose URL cannot be derived and collecting
+// downloadURL, which enforces the tracker-ownership gate internally
+// (trackerOwnURL, the same fail-closed check writer-side journal admission
+// runs through trackerKey). Persisted data crosses a separate trust boundary
+// from writer admission: a tampered but structurally valid feed.json could
+// otherwise carry a foreign (https://evil.example/view/123) or
+// independent-subdomain (sukebei.nyaa.si/view/123) GUID whose numeric id
+// would be minted into the apex tracker's download URL for an unrelated
+// torrent; the gate drops such items exactly like an undecodable GUID. Any
+// item whose URL cannot be derived is dropped, collecting
 // the drop count plus up to three bounded sample GUIDs for the wrappers'
 // tracker-specific warnings. The wrappers own the policy (the AB passkey
 // gate) and the exact log contract.
@@ -346,7 +338,7 @@ func rebuildDownloadURLs(feed []journalItem, tracker, passkey string) (out []jou
 	out = make([]journalItem, 0, len(feed))
 	for i := range feed {
 		it := feed[i]
-		dl, ok := snapshotDownloadURL(tracker, it.GUID, passkey)
+		dl, ok := downloadURL(tracker, it.GUID, passkey)
 		if !ok {
 			dropped++
 			if len(samples) < 3 {
@@ -411,4 +403,58 @@ func (ix *Indexer) rebuildNyaaDownloadURLs(feed []journalItem) []journalItem {
 			"path", ix.path, "dropped", dropped, "kept", len(out), "sample_guids", samples)
 	}
 	return out
+}
+
+// seadexInfoHost is the canonical releases.moe hostname persisted InfoURLs
+// must live on, derived once from the same constant the writer builds them
+// from (feed.go's defaultSeaDexBaseURL) so the two ends cannot drift.
+var seadexInfoHost = sync.OnceValue(func() string {
+	u, err := url.Parse(defaultSeaDexBaseURL)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
+})
+
+// sanitizeSnapshotInfoURLs blanks any persisted item's InfoURL that is not a
+// userinfo-free absolute http(s) URL on the canonical SeaDex host - the only
+// shape the writer ever persists (entryURL). The persisted snapshot crosses
+// the same trust boundary rebuildDownloadURLs defends for fetch targets:
+// renderFeed hands InfoURL to the arr UI as the item's clickable info link,
+// so a tampered feed.json must not plant a javascript:/data:/foreign-host
+// link there. Blanking (never dropping) mirrors the search path's
+// sanitizeDisplayURL: writeItem omits an empty <comments>.
+func (ix *Indexer) sanitizeSnapshotInfoURLs(feed []journalItem) []journalItem {
+	host := seadexInfoHost()
+	blanked := 0
+	for i := range feed {
+		if feed[i].InfoURL == "" || snapshotInfoURLAllowed(feed[i].InfoURL, host) {
+			continue
+		}
+		feed[i].InfoURL = ""
+		blanked++
+	}
+	if blanked > 0 {
+		// Counts only; the rejected value can be attacker-shaped text.
+		ix.log.Warn("indexer feed snapshot: non-SeaDex info URLs blanked",
+			"path", ix.path, "blanked", blanked)
+	}
+	return feed
+}
+
+// snapshotInfoURLAllowed reports whether raw is a userinfo-free absolute
+// http(s) URL on the canonical SeaDex host.
+func snapshotInfoURLAllowed(raw, host string) bool {
+	if host == "" {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.User != nil {
+		return false
+	}
+	s := strings.ToLower(u.Scheme)
+	if s != "http" && s != "https" {
+		return false
+	}
+	return strings.EqualFold(u.Hostname(), host)
 }

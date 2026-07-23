@@ -24,8 +24,12 @@ const (
 	// writeTimeout is derived from - one home for the number keeps the
 	// write deadline sized above the whole retry tree by construction.
 	UpstreamAttemptTimeout = 60 * time.Second
-	// upstreamMaxBytes bounds a single Torznab response before decode.
-	upstreamMaxBytes = 16 << 20
+	// upstreamMaxBytes bounds a single Torznab response before decode. 8 MiB
+	// covers the 4 MiB decoded-text budget even at full 5x entity expansion
+	// (real responses are ~150 KiB) while bounding the one allocation the
+	// decode caps cannot: encoding/xml materializes a start element's whole
+	// attribute slice per token at ~10x per-attr overhead (CWE-400).
+	upstreamMaxBytes = 8 << 20
 )
 
 // upstream is one Prowlarr per-indexer Torznab endpoint (Nyaa or AnimeBytes).
@@ -59,6 +63,11 @@ type upstream struct {
 func (u *upstream) search(ctx context.Context, params url.Values) ([]item, int, error) {
 	parsed, err := url.Parse(u.feed)
 	if err != nil {
+		// Deliberately NOT wrapped: a *url.Error echoes the raw configured
+		// URL, which may carry a username-only userinfo token
+		// (validateHTTPURL accepts one), and this error reaches httpx.Do's
+		// retry logger - the same redaction stance the StatusError path
+		// below applies (CWE-532).
 		return nil, 0, errors.New("invalid upstream feed URL")
 	}
 	// Merge the Torznab params into RawQuery component-wise: appending to the
@@ -264,6 +273,7 @@ func (u *upstream) filterDownloadURLs(items []item) []item {
 	}
 	out := make([]item, 0, len(items))
 	dropped := 0
+	blankedDisplay := 0
 	for i := range items {
 		if !sameHTTPOrigin(items[i].DownloadURL, feedURL) {
 			dropped++
@@ -282,8 +292,14 @@ func (u *upstream) filterDownloadURLs(items []item) []item {
 		// derived from it (e.g. a scheme-relative //host/... form), leaving
 		// such an item to match by info hash alone, which fails closed for
 		// a URL shape a healthy Prowlarr never emits.
-		items[i].InfoURL = sanitizeDisplayURL(u.name, items[i].InfoURL)
-		items[i].GUID = sanitizeDisplayURL(u.name, items[i].GUID)
+		if s := sanitizeDisplayURL(u.name, items[i].InfoURL); s != items[i].InfoURL {
+			blankedDisplay++
+			items[i].InfoURL = s
+		}
+		if s := sanitizeDisplayURL(u.name, items[i].GUID); s != items[i].GUID {
+			blankedDisplay++
+			items[i].GUID = s
+		}
 		out = append(out, items[i])
 	}
 	if dropped > 0 {
@@ -291,21 +307,38 @@ func (u *upstream) filterDownloadURLs(items []item) []item {
 			"upstream", u.name, "dropped", dropped, "kept", len(out),
 			"expected_origin", feedURL.Scheme+"://"+feedURL.Host)
 	}
+	if blankedDisplay > 0 {
+		// Counts only, mirroring the origin-filter WARN above: the rejected
+		// value is never logged (it can be attacker-shaped text).
+		u.log.Warn("upstream display URLs blanked: not the tracker's own canonical http(s) page URL",
+			"upstream", u.name, "blanked", blankedDisplay, "kept_items", len(out))
+	}
 	return out
+}
+
+// httpNoUserinfoURL parses raw and returns it when it is an absolute
+// http or https URL free of userinfo - the shared admission prefix of
+// sameHTTPOrigin (fetch targets) and sanitizeDisplayURL (display
+// links). Anything else returns nil, false.
+func httpNoUserinfoURL(raw string) (*url.URL, bool) {
+	u, err := url.Parse(raw)
+	if err != nil || u.User != nil {
+		return nil, false
+	}
+	if s := strings.ToLower(u.Scheme); s != "http" && s != "https" {
+		return nil, false
+	}
+	return u, true
 }
 
 // sameHTTPOrigin reports whether raw is an absolute http or https URL, free of
 // userinfo, whose scheme and host (including port) match origin's.
 func sameHTTPOrigin(raw string, origin *url.URL) bool {
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.User != nil {
+	parsed, ok := httpNoUserinfoURL(raw)
+	if !ok {
 		return false
 	}
-	scheme := strings.ToLower(parsed.Scheme)
-	if scheme != "http" && scheme != "https" {
-		return false
-	}
-	return strings.EqualFold(scheme, origin.Scheme) && strings.EqualFold(parsed.Host, origin.Host)
+	return strings.EqualFold(parsed.Scheme, origin.Scheme) && strings.EqualFold(parsed.Host, origin.Host)
 }
 
 // sanitizeDisplayURL returns raw when it is an absolute http(s) URL, free of
@@ -320,12 +353,8 @@ func sameHTTPOrigin(raw string, origin *url.URL) bool {
 // tampered upstream could attach to a curated item) is blanked rather than
 // rendered clickable.
 func sanitizeDisplayURL(scope, raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil || u.User != nil {
-		return ""
-	}
-	s := strings.ToLower(u.Scheme)
-	if s != "http" && s != "https" {
+	u, ok := httpNoUserinfoURL(raw)
+	if !ok {
 		return ""
 	}
 	switch scope {

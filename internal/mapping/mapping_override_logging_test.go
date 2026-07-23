@@ -290,3 +290,69 @@ func TestLoader_Load_unknownOverrideKeyBoundsAtLimit(t *testing.T) {
 		t.Errorf("keys_truncated logs = %v, want false (both bounds exactly at their limits)", rec.Messages())
 	}
 }
+
+// TestLoader_Load_cleanOverridesEmitNoDiagnostics pins the absence side of
+// applyOverrides' diagnostic contract: a clean single-record overrides file
+// (no duplicates, no skipped rows, no oversized arrays, no unknown keys)
+// must emit NONE of the four diagnostic warnings and exactly one
+// applied-overrides info with count=1. Every existing logging test asserts
+// presence only, so a regression that emits a zero-count WARN on every cycle
+// (log noise that pattern-matched Loki queries would surface as a standing
+// alert condition) would go undetected.
+func TestLoader_Load_cleanOverridesEmitNoDiagnostics(t *testing.T) {
+	overrides := filepath.Join(t.TempDir(), "overrides.json")
+	if err := os.WriteFile(overrides, []byte(`[{"anilist_id":2,"type":"movie","tmdb_movies":[4]}]`), 0o644); err != nil {
+		t.Fatalf("write overrides: %v", err)
+	}
+	logger, logs := capture.New()
+	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
+	if _, _, err := l.Load(context.Background(), freshCache()); err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	for _, msg := range []string{
+		"mapping: duplicate override anilist_ids, last record wins",
+		"mapping: overrides with missing or invalid anilist_id skipped",
+		"mapping: overrides with oversized id arrays skipped",
+		"mapping: overrides contain unknown keys, ignored",
+	} {
+		if n := logs.CountExact(msg); n != 0 {
+			t.Errorf("clean overrides logged %q %d times, want 0", msg, n)
+		}
+	}
+	if logs.CountExact("mapping: applied overrides") != 1 {
+		t.Errorf("clean overrides logs = %v, want one applied-overrides info", logs.Messages())
+	}
+	if !logs.HasAttr("", "count", "1") {
+		t.Errorf("applied-overrides logs = %v, want count=1", logs.Messages())
+	}
+}
+
+// TestLoader_Load_emptyOverridesEmitNoAppliedLog pins the zero-applied
+// absence contract: a valid empty overrides array applies nothing, so the
+// applied-overrides info line (and every diagnostic warning) must NOT be
+// emitted - a count=0 "applied overrides" line every cycle would falsely
+// tell the operator an overlay is active.
+func TestLoader_Load_emptyOverridesEmitNoAppliedLog(t *testing.T) {
+	overrides := filepath.Join(t.TempDir(), "overrides.json")
+	if err := os.WriteFile(overrides, []byte(`[]`), 0o644); err != nil {
+		t.Fatalf("write overrides: %v", err)
+	}
+	logger, logs := capture.New()
+	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
+	if _, _, err := l.Load(context.Background(), freshCache()); err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if n := logs.CountExact("mapping: applied overrides"); n != 0 {
+		t.Errorf("empty overrides logged applied-overrides %d times, want 0 (nothing was applied)", n)
+	}
+	for _, msg := range []string{
+		"mapping: duplicate override anilist_ids, last record wins",
+		"mapping: overrides with missing or invalid anilist_id skipped",
+		"mapping: overrides with oversized id arrays skipped",
+		"mapping: overrides contain unknown keys, ignored",
+	} {
+		if n := logs.CountExact(msg); n != 0 {
+			t.Errorf("empty overrides logged %q %d times, want 0", msg, n)
+		}
+	}
+}

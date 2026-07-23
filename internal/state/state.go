@@ -441,6 +441,7 @@ func (s *Store) prepareSave(ctx context.Context, st *State) (State, error) {
 // encoding under the size bound, the atomic commit, and durability reporting.
 func (s *Store) writeState(ctx context.Context, st *State) error {
 	pf, err := atomicfile.NewPendingFile(ctx, s.path,
+		atomicfile.WithLogger(s.log),
 		atomicfile.WithMkdirMode(dirMode),
 		atomicfile.WithMode(fileMode),
 		// One byte beyond maxStateBytes for json.Encoder's trailing

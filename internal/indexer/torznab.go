@@ -114,6 +114,13 @@ func renderFeed(items []item) string {
 	b.WriteString("<channel>")
 	b.WriteString("<title>seadex-scout</title>")
 	for i := range items {
+		if b.Len() > maxRenderedFeedBytes {
+			// A pathological feed (every field at maxPersistedFieldBytes,
+			// escape-amplified ~5x) must degrade to a truncated-but-valid
+			// document instead of OOMing the container; a realistic feed
+			// never comes near the budget.
+			break
+		}
 		writeItem(&b, &items[i])
 	}
 	b.WriteString("</channel></rss>")
@@ -282,6 +289,13 @@ const (
 	// stays under its individual cap.
 	maxUpstreamTextBytes = 4 << 20
 )
+
+// maxRenderedFeedBytes bounds one rendered feed document, the render-side
+// twin of maxUpstreamTextBytes: the search path is aggregate-bounded at
+// decode, but the persisted journal path is bounded only per field and per
+// snapshot, and XML escaping can expand an ampersand-heavy field ~5x.
+// Overshoot past the check is at most one item (~120 KiB).
+const maxRenderedFeedBytes = 8 << 20
 
 // torznabLimitError is parseTorznab's fail-closed error for a syntactically
 // valid response that exceeds the decode limits above. fetchAndParse treats
@@ -550,19 +564,26 @@ func (x *itemXML) decodeUntrustedField(d *xml.Decoder, t xml.StartElement, dst *
 	return nil
 }
 
-// account enforces the per-field cap on one decoded string and accumulates
-// it into the item's text counter, failing fast when this single item
-// already exceeds the whole response budget.
-func (x *itemXML) account(s string) error {
+// chargeText enforces the per-field cap on one decoded string and folds it
+// into a cumulative decoded-text counter, failing fast on either breach. It
+// is the single home of the decode-time budget arithmetic, shared by the
+// item decoder (itemXML.account) and the <error>-document decoder
+// (errorXML.UnmarshalXML), so the cap policy cannot drift between them.
+func chargeText(total *int, s string) error {
 	if len(s) > maxUpstreamFieldBytes {
 		return &torznabLimitError{limit: fmt.Sprintf("field longer than %d bytes", maxUpstreamFieldBytes)}
 	}
-	x.textBytes += len(s)
-	if x.textBytes > maxUpstreamTextBytes {
+	*total += len(s)
+	if *total > maxUpstreamTextBytes {
 		return &torznabLimitError{limit: fmt.Sprintf("cumulative decoded text over %d bytes", maxUpstreamTextBytes)}
 	}
 	return nil
 }
+
+// account enforces the per-field cap on one decoded string and accumulates
+// it into the item's text counter, failing fast when this single item
+// already exceeds the whole response budget.
+func (x *itemXML) account(s string) error { return chargeText(&x.textBytes, s) }
 
 type enclosureXML struct {
 	URL    string `xml:"url,attr"`
@@ -596,12 +617,8 @@ func (e *errorXML) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	}
 	total := 0
 	for _, attr := range start.Attr {
-		if len(attr.Value) > maxUpstreamFieldBytes {
-			return &torznabLimitError{limit: fmt.Sprintf("field longer than %d bytes", maxUpstreamFieldBytes)}
-		}
-		total += len(attr.Value)
-		if total > maxUpstreamTextBytes {
-			return &torznabLimitError{limit: fmt.Sprintf("cumulative decoded text over %d bytes", maxUpstreamTextBytes)}
+		if err := chargeText(&total, attr.Value); err != nil {
+			return err
 		}
 		switch attr.Name.Local {
 		case "code":

@@ -140,17 +140,9 @@ type Torrent struct {
 	DualAudio    bool     `json:"dualAudio"`
 }
 
-// redactedInfoHash is the placeholder releases.moe publishes in place of a
-// private-tracker (AnimeBytes) torrent's info hash.
-const redactedInfoHash = "<redacted>"
-
-// infoHashRedacted reports whether h is the redactedInfoHash placeholder.
-func infoHashRedacted(h string) bool {
-	return strings.EqualFold(strings.TrimSpace(h), redactedInfoHash)
-}
-
 // ValidInfoHash returns h lowercased when it is a 40-char SHA-1 hex info hash,
-// else "" (covers redactedInfoHash and any other junk value).
+// else "" (covers the releases.moe "<redacted>" placeholder and any other
+// junk value).
 func ValidInfoHash(h string) string {
 	h = strings.ToLower(strings.TrimSpace(h))
 	if len(h) != 40 {

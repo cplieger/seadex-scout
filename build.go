@@ -58,7 +58,7 @@ func buildScout(ctx context.Context, cfg *config.Config, readOnlyState bool) (bu
 	anilistHTTP := httpx.NewClient(anilistTimeout)
 	pingArrs(ctx, sonarr, radarr)
 
-	anilistClient := anilist.NewClient(anilistHTTP, config.DefaultAniListURL, config.DefaultAniListRate, log)
+	anilistClient := anilist.NewClient(anilistHTTP, anilist.DefaultURL, config.DefaultAniListRate, log)
 	feed, feedCleanup := feedWriter(cfg, log)
 
 	store := state.NewStore(config.DefaultStatePath, log)
@@ -78,7 +78,7 @@ func buildScout(ctx context.Context, cfg *config.Config, readOnlyState bool) (bu
 			IncludeTags: cfg.IncludeTags,
 			ExcludeTags: cfg.ExcludeTags,
 		}),
-		Mapping: mapping.NewLoader(mappingHTTP, config.DefaultMappingURL, config.DefaultMappingOverrides, config.DefaultMappingRefresh, log),
+		Mapping: mapping.NewLoader(mappingHTTP, mapping.DefaultURL, config.DefaultMappingOverrides, config.DefaultMappingRefresh, log),
 		SeaDex:  seadex.NewClient(seadexHTTP, seadex.DefaultBaseURL, config.DefaultSeaDexPageDelay, log),
 		Matcher: match.NewMatcher(anilistClient, log),
 		Comparer: compare.NewComparer(compare.Config{

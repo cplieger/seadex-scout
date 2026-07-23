@@ -1138,3 +1138,78 @@ func TestStoreLoadUnclassifiedReadErrorBlocksSaveUntilClassified(t *testing.T) {
 		t.Errorf("Save after a classifying Load = %v, want the block cleared", err)
 	}
 }
+
+// TestStoreLoadMalformedVersionValueQuarantines pins schemaVersion's raw-value
+// decode error branch: a version member whose VALUE is syntactically invalid
+// JSON ({"version":} / a truncated {"version":) fails the raw decode before
+// the int unmarshal runs. The payload is corruption Save can never produce, so
+// it must quarantine (original bytes preserved at .corrupt, live path renamed
+// away) with the following Save unblocked - never classified newer-schema.
+func TestStoreLoadMalformedVersionValueQuarantines(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"missing value", `{"version":}`},
+		{"truncated after key", `{"version":`},
+		{"bare invalid token", `{"version":nul}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			if err := os.WriteFile(path, []byte(tt.body), 0o600); err != nil {
+				t.Fatalf("write state: %v", err)
+			}
+			store := NewStore(path, testLogger())
+			_, err := store.Load(context.Background())
+			if err == nil {
+				t.Fatal("Load returned nil error, want decode error for a malformed version value")
+			}
+			if strings.Contains(err.Error(), "newer than this binary supports") {
+				t.Errorf("error = %q, want plain decode error, not the newer-schema classification", err.Error())
+			}
+			assertQuarantined(t, path, tt.body)
+			if saveErr := store.Save(context.Background(), &State{}); saveErr != nil {
+				t.Errorf("Save after quarantining a malformed-version-value file failed: %v", saveErr)
+			}
+		})
+	}
+}
+
+// TestStoreLoadStateFieldTypeMismatchQuarantines pins decode's final gate: a
+// payload that passes the UTF-8, object-envelope, and version-discriminator
+// checks but fails the State unmarshal on a member type mismatch
+// ({"baselined":"yes"} / {"findings":[]}) is corruption Save can never
+// produce. It must quarantine with the original bytes preserved and the
+// following Save unblocked - the daemon persists a fresh envelope instead of
+// silently re-baselining behind a poisoned file forever.
+func TestStoreLoadStateFieldTypeMismatchQuarantines(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"bool member holds a string", `{"baselined":"yes"}`},
+		{"map member holds an array", `{"findings":[]}`},
+		{"int member holds an object", `{"shrunk_walks":{}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			if err := os.WriteFile(path, []byte(tt.body), 0o600); err != nil {
+				t.Fatalf("write state: %v", err)
+			}
+			store := NewStore(path, testLogger())
+			_, err := store.Load(context.Background())
+			if err == nil {
+				t.Fatal("Load returned nil error, want decode error for a State field type mismatch")
+			}
+			if !strings.Contains(err.Error(), "decode") {
+				t.Errorf("error = %q, want decode context", err.Error())
+			}
+			assertQuarantined(t, path, tt.body)
+			if saveErr := store.Save(context.Background(), &State{}); saveErr != nil {
+				t.Errorf("Save after quarantining a type-mismatched file failed: %v", saveErr)
+			}
+		})
+	}
+}

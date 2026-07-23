@@ -1,10 +1,14 @@
 package indexer
 
 import (
+	"context"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"pgregory.net/rapid"
@@ -78,6 +82,71 @@ func TestRenderJournalItemOrderInvariantFoldProperty(t *testing.T) {
 			it2.AniListID != it.AniListID || it2.DownloadVolumeFactor != it.DownloadVolumeFactor ||
 			!slices.Equal(catsOf(it2.Categories), catsOf(it.Categories)) {
 			rt.Errorf("permuted render differs:\n got %+v\nwant %+v", it2, it)
+		}
+	})
+}
+
+// TestRebuildNeverRebroadcastsProperty is a model-based property over the
+// journal's novelty ledger across arbitrary rebuild sequences: for a fixed
+// pool of distinct Nyaa torrents, each rebuild curating a random subset, (1)
+// a torrent curated in the FIRST rebuild (the fresh-install baseline) never
+// journals in any later rebuild, (2) a journaled key's FirstSeen never
+// changes across rebuilds, and (3) no feed ever holds duplicate keys. The
+// model is a plain set of first-round keys plus a key->FirstSeen map - never
+// a reimplementation of the ledger - so a broken seen-fold (re-broadcast), a
+// broken baseline, or a duplicate append all fail the property.
+func TestRebuildNeverRebroadcastsProperty(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		path := filepath.Join(t.TempDir(), "feed.json")
+		w := newTestWriter(path, "", false)
+		now := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
+		w.now = func() time.Time { return now }
+
+		const poolSize = 5
+		rounds := rapid.IntRange(2, 6).Draw(rt, "rounds")
+		baselined := map[string]bool{} // keys curated in round 0 (fresh-install baseline)
+		firstSeen := map[string]time.Time{}
+		for r := range rounds {
+			var cat []seadex.Entry
+			for i := range poolSize {
+				if rapid.Bool().Draw(rt, "in"+strconv.Itoa(r)+"_"+strconv.Itoa(i)) {
+					cat = append(cat, nyaaEntry(100+i, 1000+i, true,
+						"Show "+strconv.Itoa(i)+" - S01E01 (1080p) [G].mkv"))
+					if r == 0 {
+						baselined["nyaa:"+strconv.Itoa(1000+i)] = true
+					}
+				}
+			}
+			if err := w.Rebuild(context.Background(), cat, nil); err != nil {
+				rt.Fatalf("Rebuild round %d: %v", r, err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				rt.Fatalf("read snapshot round %d: %v", r, err)
+			}
+			var snap snapshot
+			if err := json.Unmarshal(data, &snap); err != nil {
+				rt.Fatalf("unmarshal snapshot round %d: %v", r, err)
+			}
+			inFeed := map[string]bool{}
+			for i := range snap.NyaaFeed {
+				it := snap.NyaaFeed[i]
+				if inFeed[it.Key] {
+					rt.Errorf("round %d: duplicate journal key %q in one feed", r, it.Key)
+				}
+				inFeed[it.Key] = true
+				if baselined[it.Key] {
+					rt.Errorf("round %d: baselined key %q re-entered the journal (baseline must permanently veto novelty)", r, it.Key)
+				}
+				if prev, ok := firstSeen[it.Key]; ok {
+					if !it.FirstSeen.Equal(prev) {
+						rt.Errorf("round %d: key %q FirstSeen changed %v -> %v (a journaled item must keep its first-seen stamp)", r, it.Key, prev, it.FirstSeen)
+					}
+				} else {
+					firstSeen[it.Key] = it.FirstSeen
+				}
+			}
+			now = now.Add(time.Hour)
 		}
 	})
 }

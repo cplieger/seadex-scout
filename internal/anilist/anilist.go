@@ -33,6 +33,9 @@ import (
 	"github.com/cplieger/seadex-scout/internal/titlekey"
 )
 
+// DefaultURL is the AniList GraphQL endpoint (title/format fallback).
+const DefaultURL = "https://graphql.anilist.co"
+
 const (
 	maxBodyBytes = 1 << 20
 	maxAttempts  = 3
@@ -158,8 +161,12 @@ func (c *Client) request(ctx context.Context, gql string, variables any) ([]byte
 
 // Fetch returns the AniList media for the given ID, or ErrNotFound when AniList
 // has no such anime. It throttles before the request and retries transient
-// failures and 429s (honoring Retry-After).
+// failures and 429s (honoring Retry-After). A non-positive id is rejected
+// without a request; the identity invariant requires a positive requested id.
 func (c *Client) Fetch(ctx context.Context, aniListID int) (Media, error) {
+	if aniListID <= 0 {
+		return Media{}, fmt.Errorf("anilist: invalid media id %d", aniListID)
+	}
 	raw, err := c.request(ctx, query, map[string]int{"id": aniListID})
 	if err != nil {
 		return Media{}, err
@@ -412,7 +419,7 @@ type gqlError struct {
 }
 
 // gqlResponse is the GraphQL envelope for the media query. Media is a
-// json.RawMessage so parseMedia can distinguish a missing Media field (a
+// json.RawMessage so parseMediaForID can distinguish a missing Media field (a
 // malformed or failed response) from an explicit null (AniList's genuine
 // not-found), which a typed pointer alone cannot.
 type gqlResponse struct {
@@ -443,7 +450,7 @@ func mediaQueryError(e gqlError) error {
 }
 
 // classifyNullMedia maps an explicit Media null plus its error list to the
-// error parseMedia surfaces: ErrNotFound for no error or AniList's verified
+// error parseMediaForID surfaces: ErrNotFound for no error or AniList's verified
 // not-found shape (a sole error with status 404 / message "Not Found."), and a
 // plain query error for anything else.
 func classifyNullMedia(errs []gqlError) error {
@@ -463,7 +470,7 @@ func classifyNullMedia(errs []gqlError) error {
 // JSON strings with U+FFFD instead of failing, so without this gate a wire
 // title with invalid bytes could lossily normalize to a legitimate title key,
 // be title-matched, and be memoized even though the upstream payload was not
-// valid JSON text. Shared by parseMedia and parseMediaPage.
+// valid JSON text. Shared by parseMediaForID and parseMediaPage.
 func validateResponseUTF8(raw []byte) error {
 	if !utf8.Valid(raw) {
 		return errors.New("anilist: response is not valid UTF-8")
@@ -471,22 +478,17 @@ func validateResponseUTF8(raw []byte) error {
 	return nil
 }
 
-// parseMedia decodes the GraphQL envelope into a Media. Only an explicit
+// parseMediaForID decodes the GraphQL envelope into a Media. Only an explicit
 // Media null with no error, or AniList's verified not-found error shape
 // (a sole error with status 404 / message "Not Found."), is classified as
 // ErrNotFound — the matcher negative-memoizes ErrNotFound, so an HTTP-200
 // GraphQL failure, a mixed error envelope, a partial response (non-null Media
 // alongside field-resolution errors), or a malformed envelope must surface as
 // a plain error (degraded, retried next cycle) rather than permanently
-// suppressing the id.
-func parseMedia(raw []byte) (Media, error) {
-	return parseMediaForID(raw, 0)
-}
-
-// parseMediaForID is parseMedia with the single-response identity invariant:
-// when expectedID is positive, a decoded Media whose id differs from the
-// requested id is rejected as a plain (transient, non-memoized) error — the
-// batch path's retainRequested equivalent for the per-id fallback, so a
+// suppressing the id. When expectedID is positive it also enforces the
+// single-response identity invariant: a decoded Media whose id differs from
+// the requested id is rejected as a plain (transient, non-memoized) error —
+// the batch path's retainRequested equivalent for the per-id fallback, so a
 // malformed or compromised endpoint cannot answer a request for one id with
 // a valid Media for another and have it memoized under the wrong key.
 func parseMediaForID(raw []byte, expectedID int) (Media, error) {
@@ -497,24 +499,12 @@ func parseMediaForID(raw []byte, expectedID int) (Media, error) {
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return Media{}, fmt.Errorf("anilist: decode response: %w", err)
 	}
-	if r.Data == nil || len(r.Data.Media) == 0 {
-		if len(r.Errors) > 0 {
-			return Media{}, mediaQueryError(r.Errors[0])
-		}
-		return Media{}, errors.New("anilist: response missing Media")
-	}
-	mediaRaw := bytes.TrimSpace(r.Data.Media)
-	if bytes.Equal(mediaRaw, []byte("null")) {
-		return Media{}, classifyNullMedia(r.Errors)
-	}
-	// A GraphQL partial response carries a non-null Media beside
-	// field-resolution errors; accepting it would memoize incomplete
-	// titles/year, so it fails like any other query error.
-	if len(r.Errors) > 0 {
-		return Media{}, mediaQueryError(r.Errors[0])
+	mediaRaw, err := mediaPayload(&r)
+	if err != nil {
+		return Media{}, err
 	}
 	var media gqlMedia
-	if err := json.Unmarshal(mediaRaw, &media); err != nil {
+	if err = json.Unmarshal(mediaRaw, &media); err != nil {
 		return Media{}, fmt.Errorf("anilist: decode Media: %w", err)
 	}
 	if expectedID > 0 && media.ID != expectedID {
@@ -525,6 +515,29 @@ func parseMediaForID(raw []byte, expectedID int) (Media, error) {
 		return Media{}, fmt.Errorf("anilist: invalid Media: %w", err)
 	}
 	return parsed, nil
+}
+
+// mediaPayload classifies the single-media envelope and returns the raw
+// non-null Media value: a missing data/Media field or a GraphQL error fails
+// plainly, an explicit null routes to classifyNullMedia (the one path that may
+// yield ErrNotFound), and a partial response (non-null Media beside
+// field-resolution errors) fails like any other query error, because
+// accepting it would memoize incomplete titles/year.
+func mediaPayload(r *gqlResponse) (json.RawMessage, error) {
+	if r.Data == nil || len(r.Data.Media) == 0 {
+		if len(r.Errors) > 0 {
+			return nil, mediaQueryError(r.Errors[0])
+		}
+		return nil, errors.New("anilist: response missing Media")
+	}
+	mediaRaw := bytes.TrimSpace(r.Data.Media)
+	if bytes.Equal(mediaRaw, []byte("null")) {
+		return nil, classifyNullMedia(r.Errors)
+	}
+	if len(r.Errors) > 0 {
+		return nil, mediaQueryError(r.Errors[0])
+	}
+	return mediaRaw, nil
 }
 
 // gqlPage is the nullable Page object of the batched query; the Page pointer

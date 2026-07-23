@@ -97,14 +97,22 @@ var trackerByHost = func() map[string]Tracker {
 // "a..nyaa.si") is not a subdomain - no DNS name has an empty label, so only
 // a non-empty label chain counts (see hostMatchesDomain).
 func LookupTrackerByHost(host string) (Tracker, bool) {
-	// The ASCII gate runs on the RAW trimmed host, BEFORE any case fold:
-	// strings.ToLower is a full-Unicode fold whose few ASCII-producing
-	// mappings (U+0130 -> 'i', U+212A KELVIN SIGN -> 'k') would launder a
-	// homograph host ("an\u0130mebytes.tv") into ASCII and slip it past the
-	// fail-closed non-ASCII rule. Folding an ASCII-verified string is a pure
-	// ASCII fold, so legitimate hosts are unaffected by the ordering.
+	// The ASCII gate runs on the RAW UNTRIMMED host, BEFORE any Unicode
+	// transform: BOTH strings.ToLower and strings.TrimSpace are full-Unicode
+	// operations that can launder non-ASCII runes past the fail-closed
+	// non-ASCII rule - ToLower's few ASCII-producing fold mappings
+	// (U+0130 -> 'i', U+212A KELVIN SIGN -> 'k') would launder a homograph
+	// host ("an\u0130mebytes.tv"), and TrimSpace's unicode.IsSpace trim
+	// (U+00A0 NBSP, U+3000 ideographic space) would launder a
+	// whitespace-decorated host ("nyaa.si\u00a0"). IsASCIIHost is byte-wise,
+	// so a host with incidental ASCII space/tab padding still passes it and
+	// is trimmed after; trimming or folding an ASCII-verified string is a
+	// pure ASCII operation, so legitimate hosts are unaffected.
+	if !urlform.IsASCIIHost(host) {
+		return Tracker{}, false
+	}
 	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
-	if host == "" || !urlform.IsASCIIHost(host) {
+	if host == "" {
 		return Tracker{}, false
 	}
 	host = strings.ToLower(host)
@@ -130,10 +138,23 @@ func LookupTrackerByRelativeURL(raw string) (Tracker, bool) {
 		return Tracker{}, false
 	}
 	u, err := url.Parse(f.Trimmed)
-	if err != nil || !strings.EqualFold(u.Path, "/torrents.php") || !u.Query().Has("torrentid") {
+	if err != nil || !strings.EqualFold(u.Path, "/torrents.php") || !hasQueryKeyFold(u.Query(), "torrentid") {
 		return Tracker{}, false
 	}
 	return LookupTracker(TrackerNameAnimeBytes)
+}
+
+// hasQueryKeyFold reports whether the parsed query carries key under ASCII
+// case folding, mirroring the path comparison's case tolerance so the same
+// evasion (an off-case spelling of the AB torrent-page shape) cannot slip
+// one half of the shape check while the other half tolerates it.
+func hasQueryKeyFold(q url.Values, key string) bool {
+	for k := range q {
+		if strings.EqualFold(k, key) {
+			return true
+		}
+	}
+	return false
 }
 
 // hostMatchesDomain reports whether host equals domain or is a real

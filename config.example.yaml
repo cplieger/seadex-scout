@@ -7,7 +7,7 @@
 sonarr:
   enabled: true
   url: "http://sonarr:8989" # where seadex-scout reaches Sonarr (internal is fine)
-  api_key: "" # required when enabled
+  api_key: "" # required when enabled; a ${SONARR_API_KEY}-style env ref works too (see README)
   public_url: "" # browser base for the report's deep-links; empty = use url
 radarr:
   enabled: false
@@ -51,5 +51,5 @@ indexer:
   feed_api_key: "" # the arrs send this, the feed checks it (openssl rand -hex 16)
   nyaa_torznab_url: "" # Prowlarr Nyaa Torznab URL, e.g. http://prowlarr:9696/1/api ("" = off)
   ab_torznab_url: "" # Prowlarr AnimeBytes Torznab URL ("" = off)
-  prowlarr_api_key: "" # Prowlarr API key; secret, never logged
-  ab_passkey: "" # AnimeBytes passkey for the AB RSS feed download links ("" = AB RSS off; Nyaa needs none)
+  prowlarr_api_key: "" # Prowlarr API key; secret, never logged (${SEADEX_SCOUT_PROWLARR_KEY} ref works)
+  ab_passkey: "" # AnimeBytes passkey for AB RSS download links ("" = AB RSS off); ${SEADEX_SCOUT_AB_PASSKEY} ref works

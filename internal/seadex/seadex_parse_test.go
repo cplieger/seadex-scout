@@ -255,34 +255,6 @@ func TestDecodePageDuplicateItemsRegrowMatchesUnmarshal(t *testing.T) {
 	}
 }
 
-// TestInfoHashRedacted pins the redaction predicate's tolerant matching on the
-// untrusted upstream value: the exact literal, case variants, and surrounding
-// whitespace all read as redacted, while a real hash, an empty string, and a
-// near-miss do not.
-func TestInfoHashRedacted(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want bool
-	}{
-		{name: "exact literal", in: "<redacted>", want: true},
-		{name: "upper-cased", in: "<REDACTED>", want: true},
-		{name: "mixed case", in: "<Redacted>", want: true},
-		{name: "surrounding whitespace", in: "  <redacted>  ", want: true},
-		{name: "real hash", in: "143ed15e5e3df072ae91adaeb149973a887590dd", want: false},
-		{name: "empty", in: "", want: false},
-		{name: "near-miss without brackets", in: "redacted", want: false},
-		{name: "embedded in longer value", in: "x<redacted>", want: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := infoHashRedacted(tc.in); got != tc.want {
-				t.Errorf("infoHashRedacted(%q) = %v, want %v", tc.in, got, tc.want)
-			}
-		})
-	}
-}
-
 // TestValidInfoHash pins the info-hash sanitizer at its home in the seadex
 // package (the releases.moe contract: 40-char SHA-1 hex, lowercased, trimmed;
 // anything else - the <redacted> placeholder, a wrong length, a non-hex byte -

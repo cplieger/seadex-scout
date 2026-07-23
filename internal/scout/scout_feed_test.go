@@ -34,7 +34,7 @@ func TestCycleWalkFailureWithFeedStillRebuildsFeed(t *testing.T) {
 	// refresh window: this test pins the walk-failure arm, and an unusable map
 	// deliberately keeps the previous feed (see TestCycleUnusableMapSkipsFeedRebuild).
 	store := &fakeStore{st: state.State{
-		Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+		Mapping: frierenMappingCache(),
 	}}
 	s := New(&Deps{
 		Logger:  logger,
@@ -74,7 +74,7 @@ func TestCycleWalkFailureWithFeedStillRebuildsFeed(t *testing.T) {
 func TestCycleWalkFailureWithFeedResetsSeaDexFailureStreak(t *testing.T) {
 	store := &fakeStore{st: state.State{
 		SeadexFailures: 7,
-		Mapping:        mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+		Mapping:        frierenMappingCache(),
 	}}
 	s := New(&Deps{
 		Logger:  scoutTestLogger(),
@@ -153,7 +153,7 @@ func TestCycleFeedRebuildErrorIsNonFatal(t *testing.T) {
 	logger, recorder := capture.New()
 	feed := &fakeFeed{err: errors.New("disk full")}
 	store := &fakeStore{st: state.State{
-		Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+		Mapping: frierenMappingCache(),
 	}}
 	sonarr := &fakeSonarr{
 		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
@@ -322,7 +322,7 @@ func TestCycleWalkFailShutdownDuringSeaDexFetchStaysSilent(t *testing.T) {
 	// The echoed mapping cache loads usable, so the only failure ordering
 	// exercised is walk-failed then fetch-cancelled.
 	store := &fakeStore{st: state.State{
-		Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+		Mapping: frierenMappingCache(),
 	}}
 	s := New(&Deps{
 		Logger:  logger,
@@ -374,7 +374,7 @@ func TestCycleShutdownDuringFeedRebuildStaysSilent(t *testing.T) {
 		Finding:   notify.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
 	}
 	store := &fakeStore{st: state.State{
-		Mapping:   mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}},
+		Mapping:   seasonlessMappingCache(),
 		Findings:  map[string]notify.Alerted{"prior": prior},
 		Baselined: true,
 	}}

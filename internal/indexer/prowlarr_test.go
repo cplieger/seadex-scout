@@ -498,7 +498,7 @@ func TestUpstreamSearchRejectsOversizedResponse(t *testing.T) {
 		calls++
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/rss+xml")
-		for range 17 { // 17 MiB > the 16 MiB upstreamMaxBytes cap
+		for range 17 { // 17 MiB > the 8 MiB upstreamMaxBytes cap
 			if _, err := w.Write(chunk); err != nil {
 				return
 			}
@@ -582,5 +582,113 @@ func TestUpstreamSearchStatusErrorOmitsUserinfoAndQuery(t *testing.T) {
 	}
 	if statusErr.Code != http.StatusNotFound {
 		t.Errorf("StatusError.Code = %d, want 404", statusErr.Code)
+	}
+}
+
+// TestSameHTTPOrigin pins the accept side of the SSRF origin gate directly,
+// including the https leg no other test reaches: every existing consumer test
+// runs against an http httptest server, so a mutant that rejects the https
+// scheme survives the whole suite while breaking every TLS-terminated
+// Prowlarr deployment.
+func TestSameHTTPOrigin(t *testing.T) {
+	mustParse := func(s string) *url.URL {
+		u, err := url.Parse(s)
+		if err != nil {
+			t.Fatalf("parse origin %q: %v", s, err)
+		}
+		return u
+	}
+	tests := []struct {
+		name   string
+		raw    string
+		origin string
+		want   bool
+	}{
+		{"http URL on http origin accepted", "http://prowlarr:9696/1/download?link=abc", "http://prowlarr:9696/1/api", true},
+		{"https URL on https origin accepted", "https://prowlarr:9696/1/download?link=abc", "https://prowlarr:9696/1/api", true},
+		{"uppercase scheme and host fold to the origin", "HTTPS://PROWLARR:9696/1/download", "https://prowlarr:9696/1/api", true},
+		{"http URL on https origin rejected", "http://prowlarr:9696/1/download", "https://prowlarr:9696/1/api", false},
+		{"https URL on http origin rejected", "https://prowlarr:9696/1/download", "http://prowlarr:9696/1/api", false},
+		{"port mismatch rejected", "https://prowlarr:9697/1/download", "https://prowlarr:9696/1/api", false},
+		{"host mismatch rejected", "https://sonarr:9696/1/download", "https://prowlarr:9696/1/api", false},
+		{"userinfo rejected even on the origin host", "https://user@prowlarr:9696/1/download", "https://prowlarr:9696/1/api", false},
+		{"non-http scheme rejected", "ftp://prowlarr:9696/1/download", "https://prowlarr:9696/1/api", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sameHTTPOrigin(tc.raw, mustParse(tc.origin)); got != tc.want {
+				t.Errorf("sameHTTPOrigin(%q, %q) = %v, want %v", tc.raw, tc.origin, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFilterDownloadURLsWarnsOnDroppedItems pins the operational contract of
+// the SSRF origin filter's warning: the "upstream items dropped" WARN fires
+// exactly once per search that dropped items, carrying the true dropped/kept
+// counts, and never fires for a clean all-same-origin response. This is the
+// only observable that distinguishes a healthy passthrough from a filter
+// silently eating items, and no existing test asserts it.
+func TestFilterDownloadURLsWarnsOnDroppedItems(t *testing.T) {
+	const feedTmpl = `<rss xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel>
+<item><title>ok</title><enclosure url="http://HOST/1/download?link=abc" length="1" type="application/x-bittorrent"/></item>
+<item><title>foreign</title><enclosure url="http://evil.internal/steal" length="1" type="application/x-bittorrent"/></item>
+<item><title>no link</title></item>
+</channel></rss>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = io.WriteString(w, strings.ReplaceAll(feedTmpl, "HOST", r.Host))
+	}))
+	defer srv.Close()
+
+	log, rec := capture.New()
+	u := &upstream{http: srv.Client(), log: log, name: upstreamNyaa, feed: srv.URL + "/api"}
+	items, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want 1 (only the same-origin item)", len(items))
+	}
+
+	const msg = "upstream items dropped: download URL not on the Prowlarr endpoint origin"
+	if got := rec.CountExact(msg); got != 1 {
+		t.Fatalf("dropped-items WARN count = %d, want exactly 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+	}
+	var dropped, kept int64 = -1, -1
+	for _, r := range rec.Records() {
+		if r.Message != msg {
+			continue
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			switch a.Key {
+			case "dropped":
+				dropped = a.Value.Int64()
+			case "kept":
+				kept = a.Value.Int64()
+			}
+			return true
+		})
+	}
+	if dropped != 2 || kept != 1 {
+		t.Errorf("WARN attrs dropped=%d kept=%d, want dropped=2 kept=1", dropped, kept)
+	}
+
+	// A clean response (every item on the endpoint origin) must not warn.
+	cleanLog, cleanRec := capture.New()
+	const cleanTmpl = `<rss xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel>
+<item><title>ok</title><enclosure url="http://HOST/1/download?link=abc" length="1" type="application/x-bittorrent"/></item>
+</channel></rss>`
+	cleanSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = io.WriteString(w, strings.ReplaceAll(cleanTmpl, "HOST", r.Host))
+	}))
+	defer cleanSrv.Close()
+	cu := &upstream{http: cleanSrv.Client(), log: cleanLog, name: upstreamNyaa, feed: cleanSrv.URL + "/api"}
+	if _, _, err := cu.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}}); err != nil {
+		t.Fatalf("clean search: %v", err)
+	}
+	if got := cleanRec.CountExact(msg); got != 0 {
+		t.Errorf("clean response WARN count = %d, want 0; log output:\n%s", got, strings.Join(cleanRec.Messages(), "\n"))
 	}
 }

@@ -261,6 +261,13 @@ func TestObserveRateHeadersCapsResetWindow(t *testing.T) {
 	})
 }
 
+// parseMedia is parseMediaForID without the identity invariant — a test-local
+// shorthand for exercising the envelope contract (production always binds the
+// requested id via Fetch -> parseMediaForID).
+func parseMedia(raw []byte) (Media, error) {
+	return parseMediaForID(raw, 0)
+}
+
 // reserve claims the next slot and returns how long to wait before using it.
 // Test-only observation helper for throttle state; production code reserves
 // via wait/reserveSlot.

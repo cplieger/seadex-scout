@@ -117,7 +117,11 @@ func noCacheHeaders(h http.Header) {
 
 // rejectTorznab renders a Torznab <error> rejection and logs one INFO line
 // naming the reason. noCacheHeaders was already set by serve for every
-// authenticated response.
+// authenticated response. The implicit HTTP 200 is deliberate: Newznab/
+// Torznab error documents ride 200 and the arrs/Prowlarr classify by the
+// <error> body (that is what surfaces the description on Prowlarr's
+// save-test); only torznabErrorResponder, which answers a recovered
+// panic, writes a real 5xx status.
 func (ix *Indexer) rejectTorznab(w http.ResponseWriter, scope, reason string, code int, msg string) {
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	_, _ = io.WriteString(w, renderError(code, msg))

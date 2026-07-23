@@ -77,7 +77,7 @@ func categoriesFor(isMovie bool) []int {
 func synthesizeTitle(t *seadex.Torrent, meta EntryInfo) string {
 	title := strings.TrimSpace(meta.Title)
 	if title == "" {
-		return feedTitle(t)
+		return derivedTitle(t, meta)
 	}
 	parts := []string{title}
 	switch {
@@ -97,11 +97,12 @@ func synthesizeTitle(t *seadex.Torrent, meta EntryInfo) string {
 // title from the Fribb season AND the full file-list span:
 //
 //   - A pack labels by season: the Fribb TVDB season when the entry maps one
-//     (the arr's own season numbering), else the dominant/lowest REAL season
-//     across the file list (so a pack bundling S00 specials with S01 episodes
-//     labels S01, never the specials bucket its first file happens to sit in),
-//     else S00 for a Fribb-typed special, else no marker (an absolute-numbered
-//     pack with no season evidence stays a bare title).
+//     (the arr's own season numbering), else S00 for a Fribb-typed special
+//     (the typing outvotes cour-local file seasons, mirroring the single-
+//     release arm), else the dominant/lowest REAL season across the file list
+//     (so a pack bundling S00 specials with S01 episodes labels S01, never
+//     the specials bucket its first file happens to sit in), else no marker
+//     (an absolute-numbered pack with no season evidence stays a bare title).
 //   - A single release keeps its own file marker (SxxExx, or the fansub
 //     "- NN" absolute form) with its SEASON half relabeled to the Fribb TVDB
 //     season when the entry maps one (see relabelSeason) - fansub episode
@@ -127,11 +128,16 @@ func episodeMarker(t *seadex.Torrent, meta EntryInfo) string {
 	if meta.SeasonTvdb > 0 {
 		return seasonLabel(meta.SeasonTvdb)
 	}
+	if meta.IsSpecial {
+		// A Fribb-typed special's season is a MAPPED season zero (the same
+		// discriminator the single-release arm above applies): fansub groups
+		// routinely number an OVA/special run S01Exx cour-locally, so the
+		// pack's file-season evidence must not outvote the typing and label
+		// the parent series' real season.
+		return "S00"
+	}
 	if s, ok := packSeason(t.Files); ok {
 		return seasonLabel(s)
-	}
-	if meta.IsSpecial {
-		return "S00"
 	}
 	return ""
 }
@@ -159,6 +165,36 @@ func relabelSeason(marker string, seasonTvdb int) string {
 		return marker
 	}
 	return seasonPrefix.ReplaceAllString(marker, seasonLabel(seasonTvdb))
+}
+
+// mappedSeason resolves the season an entry's metadata pins: the positive
+// Fribb TVDB season, or season 0 for a Fribb-typed special (a MAPPED season
+// zero - IsSpecial is the discriminator episodeMarker already uses).
+func mappedSeason(meta EntryInfo) (int, bool) {
+	if meta.SeasonTvdb > 0 {
+		return meta.SeasonTvdb, true
+	}
+	if meta.IsSpecial {
+		return 0, true
+	}
+	return 0, false
+}
+
+// relabelBaseSeason rewrites the season half of the LAST SxxExx token in a
+// derived single-release title to the entry's mapped season. A no-op without
+// a mapped season or when the name carries no SxxExx token (an absolute
+// "- NN" or marker-less name - nothing to relabel, same as relabelSeason).
+func relabelBaseSeason(base string, meta EntryInfo) string {
+	s, ok := mappedSeason(meta)
+	if !ok {
+		return base
+	}
+	locs := episodeToken.FindAllStringSubmatchIndex(base, -1)
+	if len(locs) == 0 {
+		return base
+	}
+	l := locs[len(locs)-1]
+	return base[:l[4]] + seasonLabel(s) + base[l[5]:]
 }
 
 // singleEpisodeMarker returns a single-episode torrent's own episode token:
@@ -257,7 +293,16 @@ var multiSpace = regexp.MustCompile(`\s{2,}`)
 // The feed deliberately does NOT filter packs vs episodes - it lists both and
 // lets Sonarr's FullSeason preference + already-grabbed dedupe pick (see the
 // indexer package doc); this function only has to LABEL each release correctly.
-func feedTitle(t *seadex.Torrent) string {
+func feedTitle(t *seadex.Torrent) string { return derivedTitle(t, EntryInfo{}) }
+
+// derivedTitle is the file-name derivation with the entry's known mapping
+// applied: when the entry pins a season (a positive Fribb TVDB season, or a
+// Fribb-typed special's mapped season 0), the pack's collapsed season label
+// and a single release's LAST SxxExx season half are relabeled to it - the
+// same cour-local correction episodeMarker applies on the assembled path,
+// with the same precedence (the Fribb season beats file evidence; an
+// absolute "- NN" or marker-less name is never relabeled).
+func derivedTitle(t *seadex.Torrent, meta EntryInfo) string {
 	name := representativeFile(t.Files)
 	if name == "" {
 		return strings.TrimSpace(t.ReleaseGroup)
@@ -265,8 +310,9 @@ func feedTitle(t *seadex.Torrent) string {
 	base := stripExt(path.Base(name))
 	if !isPack(t) {
 		// A single episode, movie, or single OVA: the file name is already the
-		// release title the arr should parse (do not collapse its episode).
-		return strings.TrimSpace(base)
+		// release title the arr should parse (do not collapse its episode) -
+		// with its cour-local season half relabeled when the entry maps one.
+		return strings.TrimSpace(relabelBaseSeason(base, meta))
 	}
 	if episodeToken.MatchString(base) {
 		// Collapse only the LAST episode token: scene naming puts the marker
@@ -282,6 +328,9 @@ func feedTitle(t *seadex.Torrent) string {
 		label := base[l[4]:l[5]]
 		if s, ok := packSeason(t.Files); ok {
 			label = seasonLabel(s)
+		}
+		if meta.SeasonTvdb > 0 {
+			label = seasonLabel(meta.SeasonTvdb)
 		}
 		return strings.TrimSpace(base[:l[2]] + label + base[l[3]:])
 	}

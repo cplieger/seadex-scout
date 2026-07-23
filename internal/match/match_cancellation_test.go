@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/library"
@@ -104,5 +105,42 @@ func TestMatchMidRunCancellationRetainsCompletedMatches(t *testing.T) {
 	}
 	if _, ok := res.IncompleteIDs[22]; ok {
 		t.Errorf("IncompleteIDs = %v, want id 22 absent: a never-attempted id is a whole-cycle shutdown event, not a per-id incomplete lookup", res.IncompleteIDs)
+	}
+}
+
+// TestMatchCancellationDuringFinalEntryFlagsDegraded pins the post-loop
+// cancellation classification: when cancellation lands while the FINAL entry
+// is being matched (after the loop's boundary check already passed), the pass
+// must still be flagged Degraded so the clean-pass-only prune is skipped and
+// expired memo entries stay available to the feed's stale-title tier and the
+// next cycle's batch. The completed final match is retained, and the shutdown
+// stays a whole-cycle event (no per-id IncompleteIDs entry).
+func TestMatchCancellationDuringFinalEntryFlagsDegraded(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrRadarr, ArrID: 1, Title: "Movie A", TmdbID: 100, Year: 2020},
+	}}
+	idx := mapping.NewIndex([]mapping.Record{
+		{AniListID: 11, Type: "MOVIE"}, // id-less: the per-id Fetch cancels the ctx and still answers
+	})
+	fake := &cancelOnFetchAniList{cancel: cancel}
+	memo := Memo{Entries: map[int]MemoEntry{
+		901: {Titles: []string{"Stale"}, Format: "TV", Year: 2019, Expiry: time.Now().Add(-time.Hour)},
+	}}
+
+	res := NewMatcher(fake, nil).Match(ctx, []seadex.Entry{{AniListID: 11}}, snap, idx, memo)
+
+	if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != SourceTitle {
+		t.Fatalf("matches = %+v, want the final entry's completed title match retained", res.Matches)
+	}
+	if !res.Degraded {
+		t.Error("Degraded = false, want true when cancellation lands during the final entry")
+	}
+	if _, ok := res.Memo.Entries[901]; !ok {
+		t.Error("expired memo entry 901 was pruned; a cancelled pass must retain expired entries")
+	}
+	if len(res.IncompleteIDs) != 0 {
+		t.Errorf("IncompleteIDs = %v, want empty (a shutdown is a whole-cycle event)", res.IncompleteIDs)
 	}
 }

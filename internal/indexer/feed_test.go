@@ -557,3 +557,39 @@ func TestEpisodeTokenIgnoresDashJoinedResolution(t *testing.T) {
 		t.Errorf("underscore marker = %q, want %q (underscore-delimited names keep matching)", got, want)
 	}
 }
+
+// TestSingleEpisodeMarkerAbsoluteArmUsesLastToken pins the LAST-token pick
+// of singleEpisodeMarker's ABSOLUTE arm (the SxxExx arm has its own
+// last-token test): a single file whose title segment is itself " - NN"-
+// shaped ("Show - 07 (WEB) - 01") must yield the trailing "- 01" marker,
+// never the title's "- 07" - a limit regression in the FindAll call (the
+// live INVERT_NEGATIVES mutant class) serves the wrong episode identity to
+// the arr.
+func TestSingleEpisodeMarkerAbsoluteArmUsesLastToken(t *testing.T) {
+	files := []seadex.File{{Name: "Show - 07 (WEB) - 01.mkv"}}
+	if got, want := singleEpisodeMarker(files), "- 01"; got != want {
+		t.Errorf("singleEpisodeMarker = %q, want %q (the marker is the LAST absolute token, not the title's ' - NN'-shaped segment)", got, want)
+	}
+}
+
+// TestDerivedTitleRelabelsCourLocalSeason pins the fallback half of the
+// season correction (episodeMarker's relabel already covers the assembled
+// path): a title-less entry Fribb maps to season 3 whose files use
+// cour-local S01 numbering must serve S03 titles - single episodes and the
+// pack collapse alike - while an unmapped entry keeps the file's own season.
+func TestDerivedTitleRelabelsCourLocalSeason(t *testing.T) {
+	single := &seadex.Torrent{Files: []seadex.File{{Name: "Show - S01E07 (1080p) [G].mkv"}}}
+	if got, want := synthesizeTitle(single, EntryInfo{SeasonTvdb: 3}), "Show - S03E07 (1080p) [G]"; got != want {
+		t.Errorf("fallback single = %q, want %q", got, want)
+	}
+	pack := &seadex.Torrent{Files: []seadex.File{
+		{Name: "Show - S01E01 (1080p) [G].mkv"},
+		{Name: "Show - S01E02 (1080p) [G].mkv"},
+	}}
+	if got, want := synthesizeTitle(pack, EntryInfo{SeasonTvdb: 3}), "Show - S03 (1080p) [G]"; got != want {
+		t.Errorf("fallback pack = %q, want %q", got, want)
+	}
+	if got, want := synthesizeTitle(single, EntryInfo{}), "Show - S01E07 (1080p) [G]"; got != want {
+		t.Errorf("unmapped fallback = %q, want %q (file's own season kept)", got, want)
+	}
+}

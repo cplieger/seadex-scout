@@ -16,15 +16,18 @@ import (
 // AB download URL embeds the passkey, so it is a secret and callers must not
 // log it.
 //
-// The id is extracted from sourceURL by URL SHAPE alone (trackerID), with no
-// host gate of its own: callers must pass a URL that already passed the
-// trackerKey/trackerOwnURL host gate. Every journaled torrent has (journal
-// admission requires a non-empty journalKey, which applies that gate), but a
-// future caller handing this a raw SeaDex URL could mint a download link for
-// an arbitrary tracker torrent id smuggled in a foreign host's /view/{id}
-// path.
+// The tracker-ownership host gate (trackerOwnURL, the same fail-closed check
+// journal admission applies via trackerKey) is enforced HERE, before the
+// shape-only id extraction (trackerID): a caller handing this a raw SeaDex
+// URL cannot mint a download link for an arbitrary tracker torrent id
+// smuggled in a foreign host's /view/{id} path. Inputs that already passed
+// the gate (every journaled torrent) re-pass it unchanged; anything else
+// fails closed with ok=false.
 func downloadURL(tracker, sourceURL, abPasskey string) (string, bool) {
 	scope := trackerScope(tracker)
+	if scope == "" || !trackerOwnURL(scope, sourceURL) {
+		return "", false
+	}
 	id := trackerID(scope, sourceURL)
 	if id == "" {
 		return "", false

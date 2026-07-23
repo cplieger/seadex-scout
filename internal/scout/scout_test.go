@@ -147,6 +147,19 @@ func seadexFrierenEntry() []seadex.Entry {
 	}}
 }
 
+// frierenMappingCache returns a fresh (inside the refresh window) mapping
+// cache holding the single Frieren record the orchestration tests key on -
+// the mapping-side twin of seadexFrierenEntry.
+func frierenMappingCache() mapping.Cache {
+	return mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}}
+}
+
+// seasonlessMappingCache returns a fresh mapping cache holding the single
+// seasonless TV record (AniList 111) the shutdown/degradation tests key on.
+func seasonlessMappingCache() mapping.Cache {
+	return mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}}
+}
+
 func scoutTestLogger() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
 }
@@ -372,7 +385,7 @@ func TestWalkFailureLogsAndReportErrorAreLogSafe(t *testing.T) {
 	sFeed := New(&Deps{
 		Logger: feedLogger,
 		Store: &fakeStore{st: state.State{
-			Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+			Mapping: frierenMappingCache(),
 		}},
 		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: walkErr}, Logger: scoutTestLogger()}),
 		Mapping: fakeMapping{},
@@ -487,7 +500,7 @@ func TestWalkFailureLogsCarryArrIdentity(t *testing.T) {
 		s := New(&Deps{
 			Logger: logger,
 			Store: &fakeStore{st: state.State{
-				Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+				Mapping: frierenMappingCache(),
 			}},
 			Library: library.NewWalker(&library.Config{Radarr: &fakeRadarr{listErr: transportErr("radarr.local")}, Logger: scoutTestLogger()}),
 			Mapping: fakeMapping{},
@@ -552,5 +565,24 @@ func TestSaveGenuineFailureOnLiveContextIsNotRetried(t *testing.T) {
 	}
 	if errCount != 1 {
 		t.Errorf("\"state save failed\" ERROR count = %d, want exactly 1", errCount)
+	}
+}
+
+// TestLoadStateDeadlineExceededIsNotAFault pins the deadline arm of
+// loadState's shutdown tolerance: a load failing with
+// context.DeadlineExceeded is handled like a cancellation - empty state and
+// no "state load failed" ERROR (the shipped Loki rule alerts on every ERROR)
+// - even when the cycle context itself is still live.
+func TestLoadStateDeadlineExceededIsNotAFault(t *testing.T) {
+	logger, recorder := capture.New()
+	s := New(&Deps{Logger: logger, Store: &fakeStore{loadErr: context.DeadlineExceeded}})
+
+	st := s.loadState(context.Background())
+
+	if st.Baselined || len(st.Findings) != 0 {
+		t.Errorf("loadState on a deadline-exceeded load = %+v, want empty state", st)
+	}
+	if n := recorder.CountExact("state load failed; starting from empty state"); n != 0 {
+		t.Errorf("deadline-exceeded state load was logged as a fault %d times, want 0", n)
 	}
 }

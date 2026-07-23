@@ -158,7 +158,7 @@ var errStarterWritten = errors.New("no config found; starter config written")
 // outcome is logged here with its original level and message; a non-nil error
 // means main must exit 1.
 func loadRuntimeConfig(configPath string) (config.Config, error) {
-	//nolint:gosec // G304: CONFIG_PATH is an operator-supplied path, not user input
+	//nolint:gosec // G703: CONFIG_PATH is an operator-supplied path, not user input
 	if _, err := os.Stat(configPath); errors.Is(err, fs.ErrNotExist) {
 		if werr := writeStarterConfig(configPath); werr != nil {
 			slog.Error("no config found and could not write a starter", "path", configPath, "error", werr)
@@ -381,6 +381,22 @@ func executePollRuns(ctx context.Context, ex *scheduler.Exclusive, sc cycler, ma
 	return outcome, ran, own, exErr
 }
 
+// warnCoordinationError logs the coordination-infrastructure diagnostic for a
+// poll whose demand or run still stands despite the error: demand was
+// recorded (Queued/Discarded), a run completed (Ran/RanQueued/Skipped), or
+// Exclusive failed before recording demand (anything else - reachable only
+// from pollCycle's shutdown branch).
+func warnCoordinationError(outcome scheduler.Outcome, err error) {
+	switch outcome {
+	case scheduler.OutcomeQueued, scheduler.OutcomeDiscarded:
+		slog.Warn("cycle coordination error after queueing; demand stands", "error", err)
+	case scheduler.OutcomeRan, scheduler.OutcomeRanQueued, scheduler.OutcomeSkipped:
+		slog.Warn("cycle coordination error after run", "error", err)
+	default:
+		slog.Warn("cycle coordination failed during shutdown", "error", err)
+	}
+}
+
 // pollCycle runs poll's one cycle under the cross-process cycle lock (queue
 // mode) and maps the coalescing outcome to poll's exit contract:
 //
@@ -430,21 +446,14 @@ func pollCycle(ctx context.Context, ex *scheduler.Exclusive, sc cycler, marker *
 			// when demand was actually recorded (Queued/Discarded); after a
 			// run the error is post-run bookkeeping; and OutcomeNone means
 			// Exclusive failed BEFORE recording demand, so no demand stands.
-			switch outcome {
-			case scheduler.OutcomeQueued, scheduler.OutcomeDiscarded:
-				slog.Warn("cycle coordination error after queueing; demand stands", "error", exErr)
-			case scheduler.OutcomeRan, scheduler.OutcomeRanQueued, scheduler.OutcomeSkipped:
-				slog.Warn("cycle coordination error after run", "error", exErr)
-			default:
-				slog.Warn("cycle coordination failed during shutdown", "error", exErr)
-			}
+			warnCoordinationError(outcome, exErr)
 		}
 		return pollInterrupted(ctx)
 	}
 	switch outcome {
 	case scheduler.OutcomeQueued, scheduler.OutcomeDiscarded:
 		if exErr != nil {
-			slog.Warn("cycle coordination error after queueing; demand stands", "error", exErr)
+			warnCoordinationError(outcome, exErr)
 		}
 		msg := "compare cycle already in flight; demand queued for the active runner"
 		if outcome == scheduler.OutcomeDiscarded {
@@ -465,7 +474,7 @@ func pollCycle(ctx context.Context, ex *scheduler.Exclusive, sc cycler, marker *
 		// The run itself completed; a queue-file error only degrades the
 		// demand-coalescing bookkeeping, so it is logged rather than failing
 		// the cycle this invocation paid for.
-		slog.Warn("cycle coordination error after run", "error", exErr)
+		warnCoordinationError(outcome, exErr)
 	}
 	return own
 }
@@ -564,22 +573,33 @@ func startIndexer(ctx context.Context, cfg *config.Config) func() {
 	// important failure lines stay routable/queryable with the rest of its
 	// stream in Loki.
 	log := slog.Default().With("component", "indexer")
+	runIndexer(ictx, done, bi.indexer.Run, bi.cleanup, log)
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+// runIndexer launches the feed goroutine: it runs the feed until it returns
+// (classifying the stop via logIndexerStop), recovers a panic so a crashing
+// feed cannot take down the long-lived daemon (the runCycle shield's twin),
+// releases the feed's clients on every exit path, and closes done last so
+// startIndexer's stop func can wait for a fully-drained goroutine. Extracted
+// from startIndexer so the shield is testable with a fake runner (the cycler
+// seam precedent).
+func runIndexer(ctx context.Context, done chan struct{}, run func(context.Context) error, cleanup func(), log *slog.Logger) {
 	go func() {
 		defer close(done)
-		defer bi.cleanup()
+		defer cleanup()
 		defer func() {
 			if r := recover(); r != nil {
 				log.Error("indexer feed panicked", "panic", r, "stack", string(debug.Stack()))
 			}
 		}()
-		if err := bi.indexer.Run(ictx); err != nil {
-			logIndexerStop(ictx, log, err)
+		if err := run(ctx); err != nil {
+			logIndexerStop(ctx, log, err)
 		}
 	}()
-	return func() {
-		cancel()
-		<-done
-	}
 }
 
 // logIndexerStop classifies the indexer feed's Run error for the shared slog
