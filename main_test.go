@@ -1670,8 +1670,12 @@ func TestPollCycleQueueErrorThenCancelled(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v, want it to wrap context.Canceled (the interruption wins over the own-run result)", err)
 	}
-	if !rec.Contains("cycle coordination error after run") {
-		t.Errorf("missing the after-run coordination WARN in the cancelled path: %v", rec.Messages())
+	const msg = "cycle coordination error after run"
+	if got := rec.CountLevel(slog.LevelWarn, msg); got != 1 {
+		t.Errorf("after-run coordination WARN count = %d, want 1: %v", got, rec.Messages())
+	}
+	if got := rec.CountLevel(slog.LevelError, msg); got != 0 {
+		t.Errorf("after-run coordination ERROR count = %d, want 0: %v", got, rec.Messages())
 	}
 	assertMarkerUntouched(t, path)
 }
@@ -1693,8 +1697,15 @@ func TestRunIndexerPanicShield(t *testing.T) {
 		slog.Default().With("component", "indexer"))
 	<-done
 
-	if !rec.Contains("indexer feed panicked") {
-		t.Errorf("missing the panic-shield ERROR line: %v", rec.Messages())
+	const msg = "indexer feed panicked"
+	if got := rec.CountLevel(slog.LevelError, msg); got != 1 {
+		t.Errorf("panic-shield ERROR count = %d, want 1: %v", got, rec.Messages())
+	}
+	if got := rec.CountLevel(slog.LevelWarn, msg); got != 0 {
+		t.Errorf("panic-shield WARN count = %d, want 0: %v", got, rec.Messages())
+	}
+	if !rec.HasAttr(msg, "component", "indexer") {
+		t.Errorf("panic-shield record missing component=indexer: %v", rec.Records())
 	}
 	if !cleaned {
 		t.Error("cleanup not released on the panic path (the Prowlarr transport would leak)")

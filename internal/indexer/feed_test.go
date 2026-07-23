@@ -592,4 +592,7 @@ func TestDerivedTitleRelabelsCourLocalSeason(t *testing.T) {
 	if got, want := synthesizeTitle(single, EntryInfo{}), "Show - S01E07 (1080p) [G]"; got != want {
 		t.Errorf("unmapped fallback = %q, want %q (file's own season kept)", got, want)
 	}
+	if got, want := synthesizeTitle(pack, EntryInfo{IsSpecial: true}), "Show - S00 (1080p) [G]"; got != want {
+		t.Errorf("fallback special pack = %q, want %q (the special typing outvotes cour-local file seasons, mirroring episodeMarker's pack arm)", got, want)
+	}
 }

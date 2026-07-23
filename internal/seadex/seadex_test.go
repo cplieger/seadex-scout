@@ -123,6 +123,7 @@ func TestTorrentUsableURL(t *testing.T) {
 		{name: "schemeless canonical host with userinfo never publishes canonicalized", in: Torrent{Tracker: "Nyaa", URL: "user@animebytes.tv/torrents.php?id=9"}, want: "https://nyaa.si/user@animebytes.tv/torrents.php?id=9"},
 		{name: "animebytes relative", in: Torrent{Tracker: "AB", URL: "/torrents.php?id=1"}, want: "https://animebytes.tv/torrents.php?id=1"},
 		{name: "mislabeled AB torrent-page relative canonicalizes to AB base", in: Torrent{Tracker: "Nyaa", URL: "/torrents.php?id=1&torrentid=2"}, want: "https://animebytes.tv/torrents.php?id=1&torrentid=2"},
+		{name: "mislabeled slashless AB torrent-page shape canonicalizes to AB base", in: Torrent{Tracker: "Nyaa", URL: "torrents.php?id=1&torrentid=2"}, want: "https://animebytes.tv/torrents.php?id=1&torrentid=2"},
 		{name: "relative without slash", in: Torrent{Tracker: "Nyaa", URL: "view/1"}, want: "https://nyaa.si/view/1"},
 		{name: "unknown tracker relative drops", in: Torrent{Tracker: "unknown", URL: "/local/path"}, want: ""},
 		{name: "unknown tracker absolute drops", in: Torrent{Tracker: "unknown", URL: "https://example.test/t/9"}, want: ""},

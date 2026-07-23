@@ -638,6 +638,9 @@ func TestValidateWarnsOnIdenticalArrURLs(t *testing.T) {
 				t.Errorf("Validate() log echoes the URL: %q", m)
 			}
 		}
+		if rec.AttrContains("", "", "http://arr:8989") {
+			t.Errorf("Validate() structured attributes echo the URL: %v", rec.Messages())
+		}
 	})
 	t.Run("distinct arr urls stay silent", func(t *testing.T) {
 		rec := capture.Default(t)

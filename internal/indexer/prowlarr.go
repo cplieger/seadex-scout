@@ -25,8 +25,9 @@ const (
 	// write deadline sized above the whole retry tree by construction.
 	UpstreamAttemptTimeout = 60 * time.Second
 	// upstreamMaxBytes bounds a single Torznab response before decode. 8 MiB
-	// covers the 4 MiB decoded-text budget even at full 5x entity expansion
-	// (real responses are ~150 KiB) while bounding the one allocation the
+	// deliberately rejects pathological escape-heavy documents before decode:
+	// 4 MiB of decoded ampersands can require about 20 MiB on the wire. Real
+	// responses are ~150 KiB. The tighter cap also bounds the one allocation the
 	// decode caps cannot: encoding/xml materializes a start element's whole
 	// attribute slice per token at ~10x per-attr overhead (CWE-400).
 	upstreamMaxBytes = 8 << 20

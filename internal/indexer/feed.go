@@ -329,8 +329,8 @@ func derivedTitle(t *seadex.Torrent, meta EntryInfo) string {
 		if s, ok := packSeason(t.Files); ok {
 			label = seasonLabel(s)
 		}
-		if meta.SeasonTvdb > 0 {
-			label = seasonLabel(meta.SeasonTvdb)
+		if s, ok := mappedSeason(meta); ok {
+			label = seasonLabel(s)
 		}
 		return strings.TrimSpace(base[:l[2]] + label + base[l[3]:])
 	}

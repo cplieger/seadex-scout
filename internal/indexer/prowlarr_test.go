@@ -498,7 +498,7 @@ func TestUpstreamSearchRejectsOversizedResponse(t *testing.T) {
 		calls++
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/rss+xml")
-		for range 17 { // 17 MiB > the 8 MiB upstreamMaxBytes cap
+		for range 9 { // 9 MiB > the new 8 MiB cap but < the former 16 MiB cap
 			if _, err := w.Write(chunk); err != nil {
 				return
 			}

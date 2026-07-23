@@ -257,10 +257,7 @@ func TestCycleSeaDexFailureIsHealthyAndPreservesFindings(t *testing.T) {
 		},
 	}
 	store := &fakeStore{st: state.State{
-		Mapping: mapping.Cache{
-			FetchedAt: time.Now(),
-			Records:   []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}},
-		},
+		Mapping:   frierenMappingCache(),
 		Findings:  map[string]notify.Alerted{"prior": prior},
 		Baselined: true,
 	}}
