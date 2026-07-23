@@ -7,15 +7,18 @@ import (
 )
 
 // TestExtractID_roundTripsNumericIDsProperty is the every-PR randomized
-// complement to the fixed fuzz corpus: arbitrary-width numeric IDs followed by
-// every supported delimiter must extract intact from Nyaa view URLs and the
-// AnimeBytes /torrent/{id} permalink path. The torrentid= query form is
-// component-aware (the id must be the whole parameter value), so only genuine
-// URL-level terminators (a following param or a fragment) may trail it - a "?"
-// or "/" inside a query value is literal content and must NOT yield an id.
+// complement to the fixed fuzz corpus: numeric IDs up to the documented
+// maxTrackerIDDigits width followed by every supported delimiter must extract
+// intact from Nyaa view URLs and the AnimeBytes /torrent/{id} permalink path
+// (wider runs fail closed - pinned by
+// TestTrackerIDExtractionRejectsOverlongDigitRuns). The torrentid= query form
+// is component-aware (the id must be the whole parameter value), so only
+// genuine URL-level terminators (a following param or a fragment) may trail
+// it - a "?" or "/" inside a query value is literal content and must NOT
+// yield an id.
 func TestExtractID_roundTripsNumericIDsProperty(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
-		id := rapid.StringMatching(`[0-9]{1,64}`).Draw(t, "id")
+		id := rapid.StringMatching(`[0-9]{1,20}`).Draw(t, "id")
 		delimiter := rapid.SampledFrom([]string{"?", "#", "/", "&"}).Draw(t, "delimiter")
 
 		if got := nyaaID("https://nyaa.si/view/" + id + delimiter + "tail"); got != id {

@@ -186,11 +186,13 @@ const staleTempMaxAge = time.Hour
 // never produce either payload; both violate the documented integer
 // discriminator contract. The streaming decode below validates EVERY
 // case-insensitive occurrence of the key, explicitly rejecting null (via the
-// *int decode), so a payload like {"version":"bad","Version":99} - corrupt
-// for this binary AND for a roll-forward binary reading the same integer
-// discriminator - errors instead of reading as newer-schema 99. Any error
-// (a non-object, a malformed member, a null or non-integer version, trailing
-// data) sends the caller to the quarantine path.
+// *int decode) and any negative value (the documented discriminator domain is
+// non-negative), so a payload like {"version":"bad","Version":99} or
+// {"version":-1,"version":99} - corrupt for this binary AND for a
+// roll-forward binary reading the same integer discriminator - errors instead
+// of reading as newer-schema 99. Any error (a non-object, a malformed member,
+// a null, negative, or non-integer version occurrence, trailing data) sends
+// the caller to the quarantine path.
 func schemaVersion(data []byte) (version int, found bool, err error) {
 	dec := bounded.NewDecoder(bytes.NewReader(data), 0)
 	err = dec.Object(func(key string) error {
@@ -207,6 +209,17 @@ func schemaVersion(data []byte) (version int, found bool, err error) {
 		}
 		if decoded == nil {
 			return errors.New("schema version must be an integer")
+		}
+		if *decoded < 0 {
+			// The documented legacy envelope's version is absent or zero, and
+			// Save only ever stamps SchemaVersion - a negative occurrence can
+			// only be corruption or tampering. Validate the domain while each
+			// occurrence is still visible: checking only the final
+			// accumulated value would let a payload like
+			// {"version":-1,"version":99} shed its invalid earlier occurrence
+			// and read as preserved newer-schema state (blocking Save every
+			// cycle) instead of quarantining as corruption.
+			return fmt.Errorf("invalid negative schema version %d", *decoded)
 		}
 		version, found = *decoded, true
 		return nil
@@ -325,14 +338,6 @@ func (s *Store) decode(data []byte) (State, error) {
 	if err != nil {
 		s.maybeQuarantine()
 		return State{}, fmt.Errorf("state: decode %s: %w", s.path, err)
-	}
-	if found && wireVersion < 0 {
-		// The documented legacy envelope's version is absent or zero, and
-		// Save only ever stamps SchemaVersion - a negative version can only
-		// be corruption or tampering, never a schema this or any binary
-		// wrote. Quarantine it like any other corrupt payload.
-		s.maybeQuarantine()
-		return State{}, fmt.Errorf("state: decode %s: invalid negative schema version %d", s.path, wireVersion)
 	}
 	if found && wireVersion > SchemaVersion {
 		// A file stamped by a newer binary (an image rollback): its members

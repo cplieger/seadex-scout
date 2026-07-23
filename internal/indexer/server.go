@@ -339,15 +339,28 @@ func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Valu
 			"upstream Prowlarr query failed; search results unavailable")
 		return
 	}
+	doc, rendered := renderFeed(items)
 	w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
-	_, _ = io.WriteString(w, renderFeed(items))
+	_, _ = io.WriteString(w, doc)
+	if rendered < len(items) {
+		// renderFeed degraded to a truncated-but-valid document (the byte
+		// budget); without this WARN the only request log would falsely
+		// report the full result count while the arr silently received a
+		// partial feed. Counts only - no item fields or URLs.
+		ix.log.Warn("indexer feed truncated by the render byte budget",
+			"scope", scope,
+			"requested_items", len(items),
+			"rendered_items", rendered,
+			"max_bytes", maxRenderedFeedBytes)
+	}
 	// One INFO line per request: the incoming Torznab params plus a result
 	// summary. `answered` is false when the feed deliberately skips a per-episode
 	// query (so an empty result reads as a skip, not a no-match); `feed` is true
 	// for an empty-q RSS check served from the synthesized SeaDex feed; `upstream`
 	// is how many upstream results survived the Prowlarr fetch (post origin-filter) for a search,
 	// `curated` how many items were returned after curation/synthesis, `returned`
-	// the final count after the category filter.
+	// the count actually EMITTED into the rendered document (the render byte
+	// budget can truncate below the post-category-filter count).
 	ix.log.Info("indexer request",
 		"scope", scope,
 		"t", logParam(q.Get("t")),
@@ -359,7 +372,7 @@ func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Valu
 		"feed", stats.feed,
 		"upstream", stats.upstream,
 		"curated", stats.curated,
-		"returned", len(items))
+		"returned", rendered)
 }
 
 // scopeFor resolves which tracker's results a request targets: the URL path

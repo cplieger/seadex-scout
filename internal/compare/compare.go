@@ -21,9 +21,6 @@
 package compare
 
 import (
-	"crypto/sha256"
-	"encoding/binary"
-	"encoding/hex"
 	"slices"
 	"strconv"
 	"strings"
@@ -31,6 +28,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/classify"
 	"github.com/cplieger/seadex-scout/internal/filter"
+	"github.com/cplieger/seadex-scout/internal/keyenc"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
@@ -77,8 +75,10 @@ type ReleaseLink struct {
 	URL     string `json:"url"`
 }
 
-// Finding is one comparison result for a library item. It carries the fields
-// the report layer emits and the dedupe key that suppresses re-alerts.
+// Finding is one comparison result for a library item. It carries the
+// semantic fields the notification layer emits; alert dedupe-key construction
+// (the persisted suppression identity) is the notify package's own policy,
+// derived from these fields at the notification boundary.
 type Finding struct {
 	Kind              string        `json:"kind,omitempty"`
 	Reason            string        `json:"classification_reason,omitempty"`
@@ -93,19 +93,18 @@ type Finding struct {
 	ReleaseURL        string        `json:"release_url,omitempty"`
 	ArrURL            string        `json:"arr_url,omitempty"`
 	InfoHash          string        `json:"info_hash,omitempty"`
-	DedupeKey         string        `json:"dedupe_key"`
 	Status            Status        `json:"status"`
 	RecommendedGroups []string      `json:"recommended_groups,omitempty"`
 	Links             []ReleaseLink `json:"links,omitempty"`
-	// currentGroups preserves the scoped on-disk group set with its element
-	// boundaries for dedupe-key generation: CurrentGroup is the flattened
+	// CurrentGroups preserves the scoped on-disk group set with its element
+	// boundaries as semantic structured data: CurrentGroup is the flattened
 	// display join, where ["a,b","c"] and ["a","b,c"] are indistinguishable.
-	// Unexported (never serialized); nil on manually constructed findings,
-	// which fall back to the flattened CurrentGroup in dedupeKey.
-	currentGroups []string
-	AniListID     int  `json:"al_id"`
-	Season        int  `json:"season,omitempty"`
-	DualAudio     bool `json:"dual_audio,omitempty"`
+	// Never serialized; nil on manually constructed findings, which the
+	// notify key builder falls back to the flattened CurrentGroup for.
+	CurrentGroups []string `json:"-"`
+	AniListID     int      `json:"al_id"`
+	Season        int      `json:"season,omitempty"`
+	DualAudio     bool     `json:"dual_audio,omitempty"`
 }
 
 // --- Comparison flow ---
@@ -274,15 +273,16 @@ func emptyResult(entry *seadex.Entry, base *Finding) *Finding {
 // and season the shared decision judged/attributed the unit against
 // (align.Decision.Groups: the mapped season's groups, or the whole-series
 // union; align.Decision.Season: the shared season label) - so a season-scoped
-// finding's CurrentGroup and dedupe key never leak whole-series groups, and
-// the season attribution cannot drift from the audit report's.
+// finding's CurrentGroup (and the dedupe key notify derives from it) never
+// leaks whole-series groups, and the season attribution cannot drift from
+// the audit report's.
 func baseFinding(m *match.Match, d *align.Decision) Finding {
 	return Finding{
 		Title:         m.Item.Title,
 		Arr:           m.Arr,
 		ArrURL:        m.Item.ArrURL,
 		CurrentGroup:  strings.Join(d.Groups, ","),
-		currentGroups: slices.Clone(d.Groups),
+		CurrentGroups: slices.Clone(d.Groups),
 		AniListID:     m.Entry.AniListID,
 		Season:        d.Season,
 	}
@@ -336,205 +336,11 @@ func obtainableLinks(pool []candidate) []ReleaseLink {
 	return links
 }
 
-// finalize sets a finding's status/severity and computes its dedupe key.
+// finalize sets a finding's status and severity.
 func finalize(f *Finding, status Status, sev Severity) *Finding {
 	f.Status = status
 	f.Severity = sev
-	f.DedupeKey = dedupeKey(f)
 	return f
-}
-
-// --- Dedupe-key encoding ---
-
-// dedupeKey keys a finding by AniList ID, status, recommended-group set, current
-// group, release identity, and the full obtainable-source link set, so a
-// same-group quality swap (new identity), a changed library state, or ANY
-// change to the recommended sources re-surfaces while an unchanged finding is
-// suppressed. The link-set component covers what the headline identity alone
-// cannot: a NON-headline candidate's torrent replacement (a new tracker page
-// URL) and an AnimeBytes toggle flip (AB links joining or leaving the set)
-// both change the key, where previously only the headline candidate and the
-// AB subset were keyed and a replaced secondary public source stayed
-// suppressed forever.
-// The untrusted components (group names, the current group, the release
-// identity, and the link URLs - all parsed from SeaDex data or library file
-// names) have their
-// delimiter characters escaped (escapeDedupePart) before joining, so a value
-// that itself contains the ',' or '|' delimiter cannot collide two distinct
-// findings onto one key (which would suppress the second as already alerted),
-// while a delimiter-free value keeps its legacy representation and existing
-// persisted dedupe state stays valid. Every untrusted component is also
-// size-bounded (boundedJoinParts/boundedPart): a component set larger than
-// maxKeyComponentBytes is reduced to a fixed-size SHA-256 identity instead of
-// being materialized into the key, so hostile bulk SeaDex data (hundreds of
-// oversized URLs per entry) cannot amplify key construction into an
-// out-of-memory failure.
-func dedupeKey(f *Finding) string {
-	groups := slices.Clone(f.RecommendedGroups)
-	slices.Sort(groups)
-	key := strings.Join([]string{
-		strconv.Itoa(f.AniListID),
-		string(f.Status),
-		boundedJoinParts(groups),
-		currentGroupKey(f),
-		boundedPart(releaseIdentity(f)),
-	}, "|")
-	if linkSet := obtainableLinkKey(f.Links); linkSet != "" {
-		key += "|links=" + linkSet
-	}
-	return key
-}
-
-// escapeJoinParts escapes each part with escapeDedupePart BEFORE comma-joining,
-// so element boundaries survive in the encoding: a part that itself contains a
-// comma is escaped while the joining commas stay raw, making ["a,b"] and
-// ["a","b"] encode differently. Delimiter-free parts stay byte-identical to
-// their naive join.
-func escapeJoinParts(parts []string) string {
-	escaped := make([]string, len(parts))
-	for i, p := range parts {
-		escaped[i] = escapeDedupePart(p)
-	}
-	return strings.Join(escaped, ",")
-}
-
-// currentGroupKey encodes the finding's current-group component for the dedupe
-// key. When the structured group slice is present (production findings built
-// by baseFinding), each element is escaped before joining so distinct group
-// sets whose display joins collide (["a,b","c"] vs ["a","b,c"], or ["A","B"]
-// vs the literal ["A,B"]) keep distinct keys. A manually constructed finding
-// (nil currentGroups) falls back to escaping the flattened CurrentGroup;
-// delimiter-free production keys are byte-identical either way.
-func currentGroupKey(f *Finding) string {
-	if f.currentGroups != nil {
-		return boundedJoinParts(f.currentGroups)
-	}
-	return boundedPart(f.CurrentGroup)
-}
-
-// dedupePartEscaper escapes the characters that participate in the dedupe-key
-// grammar (the '|' field and ',' list delimiters, plus the '\' escape itself,
-// escaped first so the mapping stays injective). Escaping only the reserved
-// characters keeps every delimiter-free component byte-identical to its legacy
-// unescaped form, so persisted dedupe keys from earlier versions remain valid.
-var dedupePartEscaper = strings.NewReplacer(
-	`\`, `\\`,
-	",", `\,`,
-	"|", `\|`,
-)
-
-// escapeDedupePart makes an untrusted dedupe-key component safe to join with
-// the ',' and '|' delimiters (see dedupePartEscaper).
-func escapeDedupePart(s string) string { return dedupePartEscaper.Replace(s) }
-
-// maxKeyComponentBytes is the raw-size threshold above which a dedupe-key
-// component (or component set) is reduced to a fixed-size SHA-256 identity
-// instead of an escaped join. The untrusted components come from SeaDex data
-// the client deliberately admits in bulk (up to 512 torrents per entry,
-// arbitrarily long syntactically valid URLs), so materializing them into ever
-// larger key strings - while the decoded catalogue is still resident - lets a
-// compromised upstream drive peak memory past the deployment container limit
-// (CWE-400). Honest components run well under this bound, so persisted dedupe
-// keys keep their legacy escaped representation and remain valid.
-const maxKeyComponentBytes = 8 << 10
-
-// hashedKeyPrefix marks a hashed component identity; the raw encodings
-// exclude it so the two output domains cannot collide (a small upstream
-// component that literally spells "sha256:<hex>" would otherwise alias the
-// hashed identity of a different, oversized component set).
-const hashedKeyPrefix = "sha256:"
-
-// boundedJoinParts returns escapeJoinParts(parts) when the components' raw
-// size is within maxKeyComponentBytes, else the fixed-size hashed identity of
-// the component set (see hashKeyParts). The threshold checks the raw sizes so
-// an honest set's representation never depends on how many delimiters
-// escaping added. An in-bound set whose escaped join itself begins with the
-// hashed-identity prefix is routed through the hash too, keeping the raw and
-// hashed output domains disjoint (injectivity across the size boundary).
-func boundedJoinParts(parts []string) string {
-	total := 0
-	for _, p := range parts {
-		total += len(p)
-	}
-	if total <= maxKeyComponentBytes {
-		if joined := escapeJoinParts(parts); !strings.HasPrefix(joined, hashedKeyPrefix) {
-			return joined
-		}
-	}
-	return hashKeyParts(parts)
-}
-
-// boundedPart is boundedJoinParts for a single component: the escaped legacy
-// form within the bound, the hashed identity above it (or when the escaped
-// form would spell the hashed-identity prefix, keeping the domains disjoint).
-func boundedPart(s string) string { return boundedJoinParts([]string{s}) }
-
-// hashKeyParts streams each original component into SHA-256 under a
-// length-prefixed encoding - element boundaries survive without ever joining
-// the inputs into one allocation, so ["a,b"] and ["a","b"] hash differently -
-// and returns the fixed-size "sha256:<hex>" identity.
-func hashKeyParts(parts []string) string {
-	h := sha256.New()
-	var lenBuf [8]byte
-	for _, p := range parts {
-		binary.BigEndian.PutUint64(lenBuf[:], uint64(len(p)))
-		_, _ = h.Write(lenBuf[:])
-		_, _ = h.Write([]byte(p))
-	}
-	return hashedKeyPrefix + hex.EncodeToString(h.Sum(nil))
-}
-
-// releaseIdentity returns the stable torrent identity used by finding dedupe,
-// domain-tagged so the two identity sources can never alias each other: a
-// VALIDATED 40-hex info hash ("hash:" + the lowercased hex), else the release
-// page URL ("url:" + trimmed). The InfoHash is untrusted SeaDex data - the
-// previous code trusted any non-redacted value verbatim as the identity, so a
-// crafted or garbled hash field keyed the finding unvalidated; dedupe now
-// applies the same seadex.ValidInfoHash gate the indexer feed already uses.
-// SeaDex redacts AnimeBytes info hashes (ValidInfoHash rejects the redaction
-// marker along with everything else non-hex), so every same-group AB
-// replacement keys on its unique torrent page URL, as before.
-func releaseIdentity(f *Finding) string {
-	if h := seadex.ValidInfoHash(f.InfoHash); h != "" {
-		return "hash:" + h
-	}
-	return "url:" + strings.TrimSpace(f.ReleaseURL)
-}
-
-// obtainableLinkKey returns a finding's full obtainable-source URL set
-// (deduplicated by trimmed URL, sorted, bounded) as a single key component,
-// or "" when the finding carries no links. Folding EVERY obtainable source
-// into the key - not just the headline candidate's identity - re-surfaces a
-// finding when any recommended source changes: a non-headline public-tracker
-// torrent replacement (a new page URL) previously kept the key unchanged and
-// was suppressed forever, and an AnimeBytes toggle flip changes the set
-// exactly as the retired AB-only component did. Deduplicating by URL keeps
-// the key label-insensitive: one source arriving twice (once mislabeled)
-// keys once, so correcting the label later never re-alerts an unchanged
-// source. The sorted raw set goes through boundedJoinParts, matching
-// dedupeKey's collision-proofing and size-bounding: a SeaDex-supplied URL
-// containing ',' or '|' cannot collide two link sets, and an oversized set
-// (SeaDex admits up to 512 arbitrarily long URLs per entry) reduces to a
-// fixed-size hash instead of one huge joined allocation.
-func obtainableLinkKey(links []ReleaseLink) string {
-	seen := make(map[string]struct{}, len(links))
-	var urls []string
-	for i := range links {
-		u := strings.TrimSpace(links[i].URL)
-		if u == "" {
-			continue
-		}
-		if _, dup := seen[u]; dup {
-			continue
-		}
-		seen[u] = struct{}{}
-		urls = append(urls, u)
-	}
-	if len(urls) == 0 {
-		return ""
-	}
-	slices.Sort(urls)
-	return boundedJoinParts(urls)
 }
 
 // --- Headline candidate selection ---
@@ -592,14 +398,14 @@ func betterCandidate(a, b *candidate, keyA, keyB string) bool {
 // PocketBase returned the torrents relation in. Delimiters are escaped
 // element-wise so a field containing the join delimiter cannot make two
 // distinct candidates compare equal, and the component set is size-bounded
-// (boundedJoinParts, same as dedupeKey's components): representative memoizes
-// each candidate's key, but the components are still attacker-controlled URLs
-// across up to 512 torrents per entry, so an unbounded escaped join would
-// recreate the memory amplification the dedupe-key bounding removed
-// (CWE-400). Components within the bound keep the exact escaped
-// representation, so ordinary headline selection is unchanged.
+// (keyenc.BoundedJoinParts, the same encoding notify's dedupe keys use):
+// representative memoizes each candidate's key, but the components are still
+// attacker-controlled URLs across up to 512 torrents per entry, so an
+// unbounded escaped join would recreate the memory amplification the
+// bounding removed (CWE-400). Components within the bound keep the exact
+// escaped representation, so ordinary headline selection is unchanged.
 func candidateStableKey(c *candidate) string {
-	return boundedJoinParts([]string{
+	return keyenc.BoundedJoinParts([]string{
 		release.NormalizeGroup(c.rel.Group),
 		strings.ToLower(strings.TrimSpace(c.rel.Tracker)),
 		strings.ToLower(strings.TrimSpace(c.rel.Resolution)),

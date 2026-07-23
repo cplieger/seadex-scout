@@ -74,7 +74,15 @@ func validPersistedItem(it *journalItem) bool {
 			return false
 		}
 	}
-	return len(it.Categories) <= maxPersistedCategories
+	if len(it.Categories) > maxPersistedCategories {
+		return false
+	}
+	for _, category := range it.Categories {
+		if category <= 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // validFeedItems reports whether every item in the given feeds respects the
@@ -540,18 +548,65 @@ func collectWarnedIdentities(entries []seadex.Entry) (keys, all map[string]struc
 	for i := range entries {
 		for j := range entries[i].Torrents {
 			t := &entries[i].Torrents[j]
-			if !release.CurationWarned(t.Tags) {
-				continue
-			}
-			if k := journalKey(t); k != "" {
-				keys[k] = struct{}{}
-			}
-			for _, id := range identitySignals(t) {
-				all[id] = struct{}{}
+			if release.CurationWarned(t.Tags) {
+				markWarnedIdentity(t, keys, all)
 			}
 		}
 	}
+
+	// Warning identity is transitive across occurrences: if A shares a hash
+	// with B and B shares its tracker key with C, all three name the same
+	// warned release graph and must be excluded together.
+	for propagateWarnedIdentities(entries, keys, all) {
+	}
 	return keys, all
+}
+
+// propagateWarnedIdentities runs one sweep of the transitive closure over the
+// warned sets: every torrent sharing a warned identity signal has its own
+// journal key and signals folded in. It reports whether the sweep added
+// anything, so the caller loops it to a fixpoint.
+func propagateWarnedIdentities(entries []seadex.Entry, keys, all map[string]struct{}) bool {
+	changed := false
+	for i := range entries {
+		for j := range entries[i].Torrents {
+			t := &entries[i].Torrents[j]
+			if sharesWarnedIdentity(t, all) && markWarnedIdentity(t, keys, all) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+// markWarnedIdentity folds torrent t's identity signals (journal key + info
+// hash) into the warned sets, reporting whether any signal was new.
+func markWarnedIdentity(t *seadex.Torrent, keys, all map[string]struct{}) bool {
+	added := false
+	if k := journalKey(t); k != "" {
+		if _, warned := keys[k]; !warned {
+			keys[k] = struct{}{}
+			added = true
+		}
+	}
+	for _, id := range identitySignals(t) {
+		if _, warned := all[id]; !warned {
+			all[id] = struct{}{}
+			added = true
+		}
+	}
+	return added
+}
+
+// sharesWarnedIdentity reports whether any of t's identity signals is already
+// in the warned set.
+func sharesWarnedIdentity(t *seadex.Torrent, all map[string]struct{}) bool {
+	for _, id := range identitySignals(t) {
+		if _, warned := all[id]; warned {
+			return true
+		}
+	}
+	return false
 }
 
 // filterWarnedTorrents is splitCurationWarned's second pass for one entry's

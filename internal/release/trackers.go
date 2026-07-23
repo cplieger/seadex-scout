@@ -138,10 +138,31 @@ func LookupTrackerByRelativeURL(raw string) (Tracker, bool) {
 		return Tracker{}, false
 	}
 	u, err := url.Parse(f.Trimmed)
-	if err != nil || !strings.EqualFold(u.Path, "/torrents.php") || !hasQueryKeyFold(u.Query(), "torrentid") {
+	if err != nil || !equalASCIIFold(u.Path, "/torrents.php") || !hasQueryKeyFold(u.Query(), "torrentid") {
 		return Tracker{}, false
 	}
 	return LookupTracker(TrackerNameAnimeBytes)
+}
+
+// equalASCIIFold reports whether a and b are equal under ASCII case folding.
+// Non-ASCII bytes can never compare equal to an ASCII protocol token.
+func equalASCIIFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range len(a) {
+		ca, cb := a[i], b[i]
+		if ca >= 'A' && ca <= 'Z' {
+			ca += 'a' - 'A'
+		}
+		if cb >= 'A' && cb <= 'Z' {
+			cb += 'a' - 'A'
+		}
+		if ca != cb {
+			return false
+		}
+	}
+	return true
 }
 
 // hasQueryKeyFold reports whether the parsed query carries key under ASCII
@@ -150,7 +171,7 @@ func LookupTrackerByRelativeURL(raw string) (Tracker, bool) {
 // one half of the shape check while the other half tolerates it.
 func hasQueryKeyFold(q url.Values, key string) bool {
 	for k := range q {
-		if strings.EqualFold(k, key) {
+		if equalASCIIFold(k, key) {
 			return true
 		}
 	}

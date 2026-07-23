@@ -1564,6 +1564,48 @@ func TestValidateWarnsOnCredentialBearingPublicURL(t *testing.T) {
 	})
 }
 
+// TestValidateWarnsOnPublicURLQuery pins warnPublicURLProblems' distinct
+// query-breaks-deep-links diagnostic: a query on sonarr/radarr public_url
+// (including a bare trailing "?") fires the warning naming the field while
+// Validate stays warn-only - the existing tests exercise this branch only
+// incidentally beside the credential warning, so negating its condition
+// would otherwise go unnoticed.
+func TestValidateWarnsOnPublicURLQuery(t *testing.T) {
+	tests := map[string]struct {
+		cfg   Config
+		field string
+	}{
+		"sonarr non-empty query": {
+			cfg: Config{
+				RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k",
+				SonarrPublicURL: "https://sonarr.example.com?theme=dark",
+			},
+			field: "sonarr.public_url",
+		},
+		"radarr bare trailing query": {
+			cfg: Config{
+				RunMode: RunModeDaemon, RadarrURL: "http://radarr:7878", RadarrAPIKey: "k",
+				RadarrPublicURL: "https://radarr.example.com?",
+			},
+			field: "radarr.public_url",
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			rec := capture.Default(t)
+			if err := tt.cfg.Validate(); err != nil {
+				t.Fatalf("Validate() error = %v, want query-bearing public_url to remain warn-only", err)
+			}
+			if !rec.Contains("public_url contains a query; report deep-links append the route after it") {
+				t.Errorf("Validate() log = %v, want the query-bearing public_url warning", rec.Messages())
+			}
+			if !rec.AttrContains("", "field", tt.field) {
+				t.Errorf("Validate() log = %v, want the warning to name %s", rec.Messages(), tt.field)
+			}
+		})
+	}
+}
+
 // TestValidateIndexerFeedKeyLengthBoundary pins the exact floor of the
 // short-feed-key warning: a key of exactly 16 characters meets the minimum
 // the warning names ("shorter than 16 characters") and must stay silent,

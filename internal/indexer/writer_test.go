@@ -803,3 +803,25 @@ func TestValidPersistedItemRejectsNegativeCounts(t *testing.T) {
 		t.Error("validPersistedItem(zero counts) = false, want true")
 	}
 }
+
+// TestValidPersistedItemRejectsNonPositiveCategories pins that the
+// persisted-item gate rejects a category list carrying a non-positive
+// Torznab id: both producers only ever union positive ids (catTV/catAnime/
+// catMovies), so a zero or negative entry identifies a hand-edited or
+// corrupted snapshot. Accepting it would let a non-empty-but-all-invalid
+// list disable filterByCats' uncategorized fallback and turn a real release
+// into a false no-match instead of re-baselining the snapshot.
+func TestValidPersistedItemRejectsNonPositiveCategories(t *testing.T) {
+	for name, categories := range map[string][]int{
+		"zero":     {0},
+		"negative": {-1},
+		"mixed":    {catAnime, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			it := journalItem{item: item{Title: "x", Categories: categories}}
+			if validPersistedItem(&it) {
+				t.Errorf("validPersistedItem(Categories=%v) = true, want false", categories)
+			}
+		})
+	}
+}

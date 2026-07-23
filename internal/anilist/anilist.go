@@ -389,13 +389,12 @@ func (m *gqlMedia) toMedia() (Media, error) {
 		if len(t) > maxTitleBytes {
 			return Media{}, fmt.Errorf("media title exceeds %d bytes", maxTitleBytes)
 		}
-		// json.Unmarshal decodes a lone \uD800-\uDFFF surrogate escape to
-		// U+FFFD even though validateResponseUTF8 passed (the raw escape bytes
-		// are valid UTF-8); titlekey.Normalize would strip the replacement
-		// character into a forged normalized-title match key, so reject like
-		// any other invalid-text payload (degrade and retry, never memoize).
-		if strings.ContainsRune(t, utf8.RuneError) {
-			return Media{}, errors.New("media title contains U+FFFD replacement character")
+		// JSON escapes are valid UTF-8 wire bytes but may decode to U+FFFD,
+		// controls, line separators, or bidi controls. titlekey.Normalize strips
+		// those runes into a forged match key, so reject the payload rather than
+		// sanitizing or memoizing it.
+		if strings.ContainsRune(t, utf8.RuneError) || runesafe.SanitizeSingleLine(t) != t {
+			return Media{}, errors.New("media title contains invalid single-line text")
 		}
 	}
 	if len(m.Format) > maxFormatBytes {
@@ -452,14 +451,19 @@ func mediaQueryError(e gqlError) error {
 // classifyNullMedia maps an explicit Media null plus its error list to the
 // error parseMediaForID surfaces: ErrNotFound for no error or AniList's verified
 // not-found shape (a sole error with status 404 / message "Not Found."), and a
-// plain query error for anything else.
+// plain query error for anything else. Classification runs on the ORIGINAL
+// upstream message: sanitizeUpstreamMessage replaces embedded controls and
+// bidi marks with spaces, so classifying the sanitized text would let a
+// malformed message such as "Not\nFound." launder into the trusted "Not
+// Found." sentinel and be negative-memoized. Only the text rendered into the
+// returned error is sanitized.
 func classifyNullMedia(errs []gqlError) error {
 	if len(errs) == 0 {
 		return ErrNotFound
 	}
 	message := sanitizeUpstreamMessage(errs[0].Message)
-	normalized := strings.TrimSuffix(strings.TrimSpace(message), ".")
-	if len(errs) == 1 && (errs[0].Status == http.StatusNotFound || strings.EqualFold(normalized, "not found")) {
+	rawNormalized := strings.TrimSuffix(strings.TrimSpace(errs[0].Message), ".")
+	if len(errs) == 1 && (errs[0].Status == http.StatusNotFound || strings.EqualFold(rawNormalized, "not found")) {
 		return fmt.Errorf("%w: %s", ErrNotFound, message)
 	}
 	return mediaQueryError(errs[0])

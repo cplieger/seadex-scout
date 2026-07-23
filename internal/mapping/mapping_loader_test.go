@@ -99,6 +99,28 @@ func TestLoader_refreshCache_parseFailKeepsStale(t *testing.T) {
 	}
 }
 
+// TestLoader_Load_nilCacheFetches pins the documented no-persisted-cache
+// entry point: Load(ctx, nil) must take the ordinary initial-fetch route (no
+// panic on the nil previous cache) and return the fetched records in both the
+// persisted Cache and the built Index.
+func TestLoader_Load_nilCacheFetches(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
+	}))
+	defer ts.Close()
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, idx, err := l.Load(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("Load(nil) error: %v", err)
+	}
+	if len(next.Records) != 1 || next.Records[0].AniListID != 42 {
+		t.Errorf("Load(nil) cache records = %+v, want one record id 42", next.Records)
+	}
+	if rec, ok := idx.Lookup(42); !ok || rec.TvdbID != 100 {
+		t.Errorf("Load(nil) index Lookup(42) = %+v ok=%v, want the fetched record", rec, ok)
+	}
+}
+
 func TestLoader_Load_overrideWinsOverFribb(t *testing.T) {
 	dir := t.TempDir()
 	overrides := filepath.Join(dir, "overrides.json")

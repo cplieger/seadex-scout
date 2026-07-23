@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"cmp"
 	"slices"
 	"strings"
 	"time"
@@ -114,62 +115,79 @@ func scopeOfKey(key string) string {
 	return scope
 }
 
+// journalIdentityMatches reports whether a journal item's stored GUID still
+// proves its journal identity: a non-empty Key that the GUID resolves back
+// to via trackerKeyFromURL. It is the ONE home of the journal's GUID-to-Key
+// invariant, shared by the writer's carry gates and the reader's snapshot
+// rebuild (rebuildDownloadURLs): a cross-key, foreign-host, empty, or
+// undecodable GUID must never authorize serving - or deriving a download
+// link for - a different torrent than the persisted curation binding names.
+func journalIdentityMatches(it *journalItem) bool {
+	return it.Key != "" && trackerKeyFromURL(it.GUID) == it.Key
+}
+
 // --- Journal item rendering ---
 
 // renderJournalItem materializes the journal item for key from its current
-// curated occurrences: synthesis from the lowest-AniList-ID occurrence, then
-// best-wins on the marker and category union across all of them (a torrent
-// attached to several entries must not render conflicting duplicates). ok is
-// false when the torrent cannot be served: no grabbable download link (an
-// AnimeBytes release without a passkey - reported via noPasskey so the caller
-// can nudge the operator - or an id-less URL, which journalKey already
-// excludes) or no parseable title at all (no files and no release group).
+// curated occurrences: synthesis from the first RENDERABLE occurrence in
+// ascending AniList-ID order, then best-wins on the marker and category union
+// across all of them (a torrent attached to several entries must not render
+// conflicting duplicates). An occurrence is renderable when it yields a
+// grabbable download link, a non-empty synthesized title, and fields within
+// the persisted limits; trying siblings in a deterministic order keeps the
+// render catalogue-order independent while one partial occurrence (no files
+// and no release group on the lowest AniList ID) cannot deny the whole key
+// RSS when a renderable sibling exists. ok is false only when EVERY
+// occurrence is unrenderable: no grabbable download link (an AnimeBytes
+// release without a passkey - reported via noPasskey so the caller can nudge
+// the operator - or an id-less URL, which journalKey already excludes) or no
+// parseable title at all (no files and no release group).
 func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor func(alID int) EntryInfo) (it journalItem, ok, noPasskey bool) {
-	if len(refs) == 0 {
-		return journalItem{}, false, false
-	}
-	first := refs[0]
-	// Deterministic synthesis source: a torrent attached to several entries
+	// Deterministic synthesis order: a torrent attached to several entries
 	// must render the same item regardless of catalogue order (marker and
 	// categories are already order-independent folds below).
-	for _, r := range refs[1:] {
-		if r.entry.AniListID < first.entry.AniListID {
-			first = r
+	ordered := slices.Clone(refs)
+	slices.SortStableFunc(ordered, func(a, b curatedRef) int {
+		return cmp.Compare(a.entry.AniListID, b.entry.AniListID)
+	})
+	for _, first := range ordered {
+		dl, resolved := downloadURL(first.torrent.Tracker, first.torrent.URL, w.abPasskey)
+		if !resolved {
+			noPasskey = noPasskey || (scopeOfKey(key) == upstreamAB && w.abPasskey == "")
+			continue
 		}
+		it = journalItem{
+			item: item{
+				Title:                synthesizeTitle(first.torrent, infoFor(first.entry.AniListID)),
+				GUID:                 first.torrent.UsableURL(),
+				InfoURL:              w.entryURL(first.entry.AniListID),
+				DownloadURL:          dl,
+				InfoHash:             validInfoHash(first.torrent.InfoHash),
+				DownloadVolumeFactor: dvfAlt,
+				Size:                 totalSize(first.torrent.Files),
+			},
+			Key:       key,
+			AniListID: first.entry.AniListID,
+		}
+		if it.Title == "" {
+			// No episode files and no release group on this occurrence: an
+			// arr cannot parse or match a title-less item, so try the next
+			// occurrence (counted as unresolvable only when all fail).
+			continue
+		}
+		foldRefs(&it, refs, infoFor)
+		if !validPersistedItem(&it) {
+			// An oversized external value (a SeaDex filename synthesized into
+			// the title, an over-long URL) is unservable: renderFeed's XML
+			// escaping could amplify it well past the container memory budget
+			// (see maxPersistedFieldBytes). Try the next occurrence - the
+			// caller has already folded the identity into the seen ledger, so
+			// a fully unrenderable key never re-enters the journal as new.
+			continue
+		}
+		return it, true, false
 	}
-	dl, resolved := downloadURL(first.torrent.Tracker, first.torrent.URL, w.abPasskey)
-	if !resolved {
-		return journalItem{}, false, scopeOfKey(key) == upstreamAB && w.abPasskey == ""
-	}
-	it = journalItem{
-		item: item{
-			Title:                synthesizeTitle(first.torrent, infoFor(first.entry.AniListID)),
-			GUID:                 first.torrent.UsableURL(),
-			InfoURL:              w.entryURL(first.entry.AniListID),
-			DownloadURL:          dl,
-			InfoHash:             validInfoHash(first.torrent.InfoHash),
-			DownloadVolumeFactor: dvfAlt,
-			Size:                 totalSize(first.torrent.Files),
-		},
-		Key:       key,
-		AniListID: first.entry.AniListID,
-	}
-	if it.Title == "" {
-		// No episode files and no release group: an arr cannot parse or
-		// match a title-less item, so drop it (counted as unresolvable).
-		return journalItem{}, false, false
-	}
-	foldRefs(&it, refs, infoFor)
-	if !validPersistedItem(&it) {
-		// An oversized external value (a SeaDex filename synthesized into
-		// the title, an over-long URL) is unservable: renderFeed's XML
-		// escaping could amplify it well past the container memory budget
-		// (see maxPersistedFieldBytes). Dropped as unresolvable - the caller
-		// has already folded the identity into the seen ledger, so the item
-		// never re-enters the journal as new.
-		return journalItem{}, false, false
-	}
-	return it, true, false
+	return journalItem{}, false, noPasskey
 }
 
 // foldRefs applies the order-independent folds across all of a torrent's
@@ -217,15 +235,37 @@ func (js *journalStats) recordDrop(noPasskey bool) {
 // --- Carrying the previous journal ---
 
 // carryItem re-renders or prunes one carried journal item, updating js, and
-// reports whether it survives into the rebuilt journal. ws is the
-// curation-warned exclusion set splitCurationWarned built; a carried item it
-// retracts (its key is excluded, or its stored info hash is warned under a
-// DIFFERENT tracker key) is dropped (RSS must never keep serving bytes search
-// suppresses).
+// reports whether it survives into the rebuilt journal: the top-down
+// dispatcher over the three cohesive carry phases - validation/clock/expiry
+// (prepareCarriedItem), the warned-set retraction, and the
+// curated-vs-uncurated carry policy (refreshCarriedItem / carryStoredItem).
+// ws is the curation-warned exclusion set splitCurationWarned built; a
+// carried item it retracts (its key is excluded, or its stored info hash is
+// warned under a DIFFERENT tracker key) is dropped (RSS must never keep
+// serving bytes search suppresses).
 func (w *FeedWriter) carryItem(it *journalItem, cur map[string][]curatedRef, ws *warnedSet, infoFor func(alID int) EntryInfo, now time.Time, js *journalStats) (journalItem, bool) {
+	if !prepareCarriedItem(it, now, js) {
+		return journalItem{}, false
+	}
+	if ws.retracts(it) {
+		js.warned++
+		return journalItem{}, false
+	}
+	refs, curated := cur[it.Key]
+	if !curated {
+		return w.carryStoredItem(it, js)
+	}
+	return w.refreshCarriedItem(it, refs, infoFor, js)
+}
+
+// prepareCarriedItem applies carryItem's validation, clock-correction, and
+// expiry phase, reporting whether the item is still carryable: a pre-journal
+// item with no Key or FirstSeen is dropped, a future FirstSeen is rebased,
+// and an item older than feedJournalMaxAge is pruned.
+func prepareCarriedItem(it *journalItem, now time.Time, js *journalStats) bool {
 	if it.Key == "" || it.FirstSeen.IsZero() {
 		js.dropped++
-		return journalItem{}, false
+		return false
 	}
 	if it.FirstSeen.After(now) {
 		// A FirstSeen ahead of the wall clock (a clock rollback, or a
@@ -240,32 +280,38 @@ func (w *FeedWriter) carryItem(it *journalItem, cur map[string][]curatedRef, ws 
 	}
 	if now.Sub(it.FirstSeen) > feedJournalMaxAge {
 		js.pruned++
+		return false
+	}
+	return true
+}
+
+// carryStoredItem applies carryItem's non-curated carry policy: an item whose
+// torrent has left the curation set keeps its stored render, subject to the
+// AB passkey gate and the GUID-identity gate.
+func (w *FeedWriter) carryStoredItem(it *journalItem, js *journalStats) (journalItem, bool) {
+	if scopeOfKey(it.Key) == upstreamAB && w.abPasskey == "" {
+		js.recordDrop(true)
 		return journalItem{}, false
 	}
-	if ws.retracts(it) {
-		js.warned++
+	// Same GUID-identity gate as the curated arm (refreshCarriedItem): a
+	// stored GUID that no longer proves this item's journal identity (a
+	// cross-key, foreign-host, or empty GUID from a hand-edited snapshot)
+	// must not be carried - unlike a curated item there is no fresh render
+	// to self-heal from, and reload derives the SERVED download link from
+	// the GUID, so a cross-key GUID would plant a fetch target for a
+	// different torrent id on the same tracker for the item's whole journal
+	// window.
+	if !journalIdentityMatches(it) {
+		js.dropped++
 		return journalItem{}, false
 	}
-	refs, curated := cur[it.Key]
-	if !curated {
-		if scopeOfKey(it.Key) == upstreamAB && w.abPasskey == "" {
-			js.recordDrop(true)
-			return journalItem{}, false
-		}
-		// Same GUID-identity gate as the curated arm below: a stored GUID
-		// that no longer proves this item's journal identity (a cross-key,
-		// foreign-host, or empty GUID from a hand-edited snapshot) must not
-		// be carried - unlike a curated item there is no fresh render to
-		// self-heal from, and reload derives the SERVED download link from
-		// the GUID, so a cross-key GUID would plant a fetch target for a
-		// different torrent id on the same tracker for the item's whole
-		// journal window.
-		if trackerKeyFromURL(it.GUID) != it.Key {
-			js.dropped++
-			return journalItem{}, false
-		}
-		return *it, true
-	}
+	return *it, true
+}
+
+// refreshCarriedItem applies carryItem's still-curated carry policy: a fresh
+// render from current data with the item's FirstSeen (and, when identity
+// still holds, its GUID) preserved.
+func (w *FeedWriter) refreshCarriedItem(it *journalItem, refs []curatedRef, infoFor func(alID int) EntryInfo, js *journalStats) (journalItem, bool) {
 	fresh, ok, noPasskey := w.renderJournalItem(it.Key, refs, infoFor)
 	if !ok {
 		js.recordDrop(noPasskey)
@@ -284,7 +330,7 @@ func (w *FeedWriter) carryItem(it *journalItem, cur map[string][]curatedRef, ws 
 	// fresh GUID and make reload drop the item every rebuild. Such a record
 	// - like one with an empty stored GUID - self-heals from the fresh
 	// render.
-	if it.GUID != "" && trackerKeyFromURL(it.GUID) == it.Key {
+	if journalIdentityMatches(it) {
 		fresh.GUID = it.GUID
 	}
 	return fresh, true

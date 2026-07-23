@@ -49,17 +49,24 @@ func trackerID(scope, sourceURL string) string {
 	return ""
 }
 
-// nyaaID extracts the Nyaa torrent id from a URL's /view/{id} path component.
-// Parsing first and scanning only the path keeps an id embedded in a query
-// value or fragment (e.g. ?next=/view/123) from being read as the torrent id,
-// so a curation key is only ever derived from the URL component that actually
+// nyaaID extracts the Nyaa torrent id from a URL whose path is the canonical
+// /view/{id} route. Parsing first and scanning only the path keeps an id
+// embedded in a query value or fragment (e.g. ?next=/view/123) from being
+// read as the torrent id, and anchoring the route at the path START keeps a
+// /view/ buried deeper in the path (e.g. /redirect/view/123) from minting a
+// key: only the tracker's own torrent-page route is identity evidence, so a
+// curation key is only ever derived from the URL component that actually
 // identifies the torrent.
 func nyaaID(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return ""
 	}
-	return extractID(u.EscapedPath(), "/view/")
+	path := u.EscapedPath()
+	if !strings.HasPrefix(path, "/view/") {
+		return ""
+	}
+	return extractID(path, "/view/")
 }
 
 // trackerKey builds the match key for a SeaDex torrent from its tracker name
@@ -198,8 +205,18 @@ func animeBytesID(rawURL string) string {
 	if err != nil {
 		return ""
 	}
-	if id := extractID(u.EscapedPath(), "/torrent/"); id != "" {
-		return id
+	// Only the two canonical route shapes are identity evidence, each
+	// anchored at the path start: the permalink form's path begins exactly
+	// at /torrent/{id}/..., and the torrentid parameter is consulted ONLY on
+	// the site form's /torrents.php path - a torrentid on any other path
+	// (e.g. /not-a-torrent?torrentid=123) is not evidence for the tracker
+	// record and never mints a key.
+	path := u.EscapedPath()
+	if strings.HasPrefix(path, "/torrent/") {
+		return extractID(path, "/torrent/")
+	}
+	if path != "/torrents.php" {
+		return ""
 	}
 	// A duplicated torrentid parameter is ambiguous: another consumer (a
 	// PHP-style tracker, a proxy) may pick a different value than Go's
@@ -209,17 +226,22 @@ func animeBytesID(rawURL string) string {
 	if !ok || len(values) != 1 {
 		return ""
 	}
-	id := strings.TrimSpace(values[0])
-	if !isAllDigits(id) {
-		return ""
-	}
-	return id
+	return validTrackerID(strings.TrimSpace(values[0]))
 }
 
+// maxTrackerIDDigits bounds a tracker torrent id's decimal width: 20 digits
+// covers a full uint64 with margin over both trackers' real id spaces. SeaDex
+// permits multi-megabyte response pages with no per-string cap, and an
+// extracted id is copied into byKey/byPair/Seen keys and JSON encoding, so an
+// unbounded digit run would be a memory-amplification vector; anything longer
+// fails closed exactly like a non-numeric id.
+const maxTrackerIDDigits = 20
+
 // extractID returns the token in rawURL immediately after needle, up to the
-// next URL delimiter (?, #, /, &). It returns "" unless the token is a
-// non-empty run of ASCII digits, so a malformed or unexpected URL never yields
-// a bogus key (adopted from seadexerr's id extraction).
+// next URL delimiter (?, #, /, &). It returns "" unless the token is a valid
+// tracker id (validTrackerID: a non-empty, width-bounded run of ASCII
+// digits), so a malformed or unexpected URL never yields a bogus key (adopted
+// from seadexerr's id extraction).
 func extractID(rawURL, needle string) string {
 	_, after, found := strings.Cut(rawURL, needle)
 	if !found {
@@ -228,10 +250,17 @@ func extractID(rawURL, needle string) string {
 	if cut := strings.IndexAny(after, "?#/&"); cut >= 0 {
 		after = after[:cut]
 	}
-	if after == "" || !isAllDigits(after) {
+	return validTrackerID(after)
+}
+
+// validTrackerID is the single bounded validator every extracted tracker-id
+// candidate routes through: it returns id unchanged when it is a non-empty
+// run of ASCII digits no longer than maxTrackerIDDigits, and "" otherwise.
+func validTrackerID(id string) string {
+	if id == "" || len(id) > maxTrackerIDDigits || !isAllDigits(id) {
 		return ""
 	}
-	return after
+	return id
 }
 
 // isAllDigits reports whether s is a non-empty run of ASCII digits.

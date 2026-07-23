@@ -357,6 +357,36 @@ func TestStoreLoadNegativeVersionQuarantines(t *testing.T) {
 	}
 }
 
+// TestStoreLoadNegativeDuplicateVersionQuarantines pins the version-domain
+// check against duplicate-key reduction: schemaVersion validates EVERY
+// case-insensitive occurrence of the discriminator, so a payload whose
+// invalid negative occurrence precedes a newer-schema value must classify as
+// corruption (quarantined, Save subsequently unblocked) - not as preserved
+// newer-schema state, which would leave the daemon cold-starting every cycle
+// with every end-of-cycle Save refused.
+func TestStoreLoadNegativeDuplicateVersionQuarantines(t *testing.T) {
+	const body = `{"version":-1,"version":99}`
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	store := NewStore(path, testLogger())
+	_, err := store.Load(context.Background())
+	if err == nil {
+		t.Fatal("Load returned nil error, want error for a negative duplicate schema version")
+	}
+	if !strings.Contains(err.Error(), "negative schema version") {
+		t.Errorf("error = %q, want negative-schema-version context", err.Error())
+	}
+	if strings.Contains(err.Error(), "newer than this binary supports") {
+		t.Errorf("error = %q, want corruption classification, not the newer-schema preservation", err.Error())
+	}
+	assertQuarantined(t, path, body)
+	if saveErr := store.Save(context.Background(), &State{}); saveErr != nil {
+		t.Errorf("Save after quarantining a negative-duplicate-version file remained blocked: %v", saveErr)
+	}
+}
+
 // TestStoreLoadNullVersionQuarantines pins the wire discriminator's null
 // rejection: encoding/json deliberately accepts JSON null into an int without
 // an error, so {"version":null} would otherwise load as legacy version zero

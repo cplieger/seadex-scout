@@ -329,15 +329,27 @@ func (ix *Indexer) readSnapshot(ctx context.Context) (snapshot, bool, bool) {
 // otherwise carry a foreign (https://evil.example/view/123) or
 // independent-subdomain (sukebei.nyaa.si/view/123) GUID whose numeric id
 // would be minted into the apex tracker's download URL for an unrelated
-// torrent; the gate drops such items exactly like an undecodable GUID. Any
-// item whose URL cannot be derived is dropped, collecting
-// the drop count plus up to three bounded sample GUIDs for the wrappers'
-// tracker-specific warnings. The wrappers own the policy (the AB passkey
-// gate) and the exact log contract.
+// torrent; the gate drops such items exactly like an undecodable GUID. Each
+// item must also pass the journal's GUID-to-Key invariant
+// (journalIdentityMatches, the same check the writer's carry gates apply): a
+// structurally valid snapshot whose GUID resolves to a DIFFERENT torrent
+// than its persisted Key names (Key nyaa:42, GUID .../view/666) would
+// otherwise rebuild and serve torrent 666 as the journaled curated item
+// until a later writer rebuild self-heals. Any item failing either gate is
+// dropped, collecting the drop count plus up to three bounded sample GUIDs
+// for the wrappers' tracker-specific warnings. The wrappers own the policy
+// (the AB passkey gate) and the exact log contract.
 func rebuildDownloadURLs(feed []journalItem, tracker, passkey string) (out []journalItem, dropped int, samples []string) {
 	out = make([]journalItem, 0, len(feed))
 	for i := range feed {
 		it := feed[i]
+		if !journalIdentityMatches(&it) {
+			dropped++
+			if len(samples) < 3 {
+				samples = append(samples, capLogText(it.GUID, 256))
+			}
+			continue
+		}
 		dl, ok := downloadURL(tracker, it.GUID, passkey)
 		if !ok {
 			dropped++

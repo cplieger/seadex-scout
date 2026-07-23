@@ -397,6 +397,31 @@ func warnCoordinationError(outcome scheduler.Outcome, err error) {
 	}
 }
 
+// pollNonRunResult maps the coalescing outcomes that end the poll WITHOUT an
+// own run to poll's exit contract: Queued/Discarded log success (any
+// coordination error is a stands-anyway diagnostic) and Gated applies the
+// uniform interruption contract. It reports handled=false for every outcome
+// that falls through to pollCycle's ran/own accounting (None, Ran, RanQueued,
+// and the queue-mode-unreachable Skipped).
+func pollNonRunResult(ctx context.Context, outcome scheduler.Outcome, exErr error) (handled bool, err error) {
+	switch outcome {
+	case scheduler.OutcomeQueued, scheduler.OutcomeDiscarded:
+		if exErr != nil {
+			warnCoordinationError(outcome, exErr)
+		}
+		msg := "compare cycle already in flight; demand queued for the active runner"
+		if outcome == scheduler.OutcomeDiscarded {
+			msg = "compare cycle already in flight; demand already covered by the queued rerun"
+		}
+		slog.Info(msg, "outcome", outcome.String())
+		return true, nil
+	case scheduler.OutcomeGated:
+		return true, pollInterrupted(ctx)
+	default:
+		return false, nil
+	}
+}
+
 // pollCycle runs poll's one cycle under the cross-process cycle lock (queue
 // mode) and maps the coalescing outcome to poll's exit contract:
 //
@@ -450,22 +475,8 @@ func pollCycle(ctx context.Context, ex *scheduler.Exclusive, sc cycler, marker *
 		}
 		return pollInterrupted(ctx)
 	}
-	switch outcome {
-	case scheduler.OutcomeQueued, scheduler.OutcomeDiscarded:
-		if exErr != nil {
-			warnCoordinationError(outcome, exErr)
-		}
-		msg := "compare cycle already in flight; demand queued for the active runner"
-		if outcome == scheduler.OutcomeDiscarded {
-			msg = "compare cycle already in flight; demand already covered by the queued rerun"
-		}
-		slog.Info(msg, "outcome", outcome.String())
-		return nil
-	case scheduler.OutcomeGated:
-		return pollInterrupted(ctx)
-	case scheduler.OutcomeNone, scheduler.OutcomeRan, scheduler.OutcomeRanQueued, scheduler.OutcomeSkipped:
-		// Fall through to the ran/own accounting below. OutcomeSkipped is
-		// unreachable from queue-mode Run; it is listed for switch completeness.
+	if handled, err := pollNonRunResult(ctx, outcome, exErr); handled {
+		return err
 	}
 	if !ran {
 		return fmt.Errorf("cycle coordination failed: %w", exErr)

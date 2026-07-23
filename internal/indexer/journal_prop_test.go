@@ -88,13 +88,14 @@ func TestRenderJournalItemOrderInvariantFoldProperty(t *testing.T) {
 
 // TestRebuildNeverRebroadcastsProperty is a model-based property over the
 // journal's novelty ledger across arbitrary rebuild sequences: for a fixed
-// pool of distinct Nyaa torrents, each rebuild curating a random subset, (1)
-// a torrent curated in the FIRST rebuild (the fresh-install baseline) never
-// journals in any later rebuild, (2) a journaled key's FirstSeen never
-// changes across rebuilds, and (3) no feed ever holds duplicate keys. The
-// model is a plain set of first-round keys plus a key->FirstSeen map - never
-// a reimplementation of the ledger - so a broken seen-fold (re-broadcast), a
-// broken baseline, or a duplicate append all fail the property.
+// pool of distinct Nyaa torrents, each rebuild curating a random subset, the
+// COMPLETE feed must equal the external membership-and-FirstSeen model - the
+// set of keys first curated after the round-0 fresh-install baseline, each
+// stamped with the rebuild time it first appeared. One post-baseline
+// introduction is forced every run, so an implementation that journals
+// nothing (or re-broadcasts the baseline, mutates FirstSeen, or duplicates a
+// key) fails the property; the model is a plain map, never a
+// reimplementation of the ledger.
 func TestRebuildNeverRebroadcastsProperty(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		path := filepath.Join(t.TempDir(), "feed.json")
@@ -104,20 +105,39 @@ func TestRebuildNeverRebroadcastsProperty(t *testing.T) {
 
 		const poolSize = 5
 		rounds := rapid.IntRange(2, 6).Draw(rt, "rounds")
-		baselined := map[string]bool{} // keys curated in round 0 (fresh-install baseline)
-		firstSeen := map[string]time.Time{}
+		introducedAfterBaseline := rapid.IntRange(0, poolSize-1).Draw(rt, "introducedAfterBaseline")
+		known := map[string]bool{}
+		wantFirstSeen := map[string]time.Time{}
 		for r := range rounds {
-			var cat []seadex.Entry
+			var catalogue []seadex.Entry
+			present := map[string]bool{}
 			for i := range poolSize {
-				if rapid.Bool().Draw(rt, "in"+strconv.Itoa(r)+"_"+strconv.Itoa(i)) {
-					cat = append(cat, nyaaEntry(100+i, 1000+i, true,
-						"Show "+strconv.Itoa(i)+" - S01E01 (1080p) [G].mkv"))
-					if r == 0 {
-						baselined["nyaa:"+strconv.Itoa(1000+i)] = true
+				include := rapid.Bool().Draw(rt, "in"+strconv.Itoa(r)+"_"+strconv.Itoa(i))
+				if i == introducedAfterBaseline {
+					include = r == 1
+				}
+				if !include {
+					continue
+				}
+				key := "nyaa:" + strconv.Itoa(1000+i)
+				present[key] = true
+				catalogue = append(catalogue, nyaaEntry(100+i, 1000+i, true,
+					"Show "+strconv.Itoa(i)+" - S01E01 (1080p) [G].mkv"))
+			}
+			if r == 0 {
+				for key := range present {
+					known[key] = true
+				}
+			} else {
+				for key := range present {
+					if !known[key] {
+						wantFirstSeen[key] = now
 					}
+					known[key] = true
 				}
 			}
-			if err := w.Rebuild(context.Background(), cat, nil); err != nil {
+
+			if err := w.Rebuild(context.Background(), catalogue, nil); err != nil {
 				rt.Fatalf("Rebuild round %d: %v", r, err)
 			}
 			data, err := os.ReadFile(path)
@@ -128,22 +148,24 @@ func TestRebuildNeverRebroadcastsProperty(t *testing.T) {
 			if err := json.Unmarshal(data, &snap); err != nil {
 				rt.Fatalf("unmarshal snapshot round %d: %v", r, err)
 			}
-			inFeed := map[string]bool{}
-			for i := range snap.NyaaFeed {
-				it := snap.NyaaFeed[i]
-				if inFeed[it.Key] {
-					rt.Errorf("round %d: duplicate journal key %q in one feed", r, it.Key)
+			if len(snap.NyaaFeed) != len(wantFirstSeen) {
+				rt.Fatalf("round %d: feed has %d items, want %d newly curated keys", r, len(snap.NyaaFeed), len(wantFirstSeen))
+			}
+			got := make(map[string]time.Time, len(snap.NyaaFeed))
+			for _, it := range snap.NyaaFeed {
+				if _, duplicate := got[it.Key]; duplicate {
+					rt.Fatalf("round %d: duplicate journal key %q", r, it.Key)
 				}
-				inFeed[it.Key] = true
-				if baselined[it.Key] {
-					rt.Errorf("round %d: baselined key %q re-entered the journal (baseline must permanently veto novelty)", r, it.Key)
+				got[it.Key] = it.FirstSeen
+			}
+			for key, want := range wantFirstSeen {
+				firstSeen, ok := got[key]
+				if !ok {
+					rt.Errorf("round %d: newly curated key %q missing from journal", r, key)
+					continue
 				}
-				if prev, ok := firstSeen[it.Key]; ok {
-					if !it.FirstSeen.Equal(prev) {
-						rt.Errorf("round %d: key %q FirstSeen changed %v -> %v (a journaled item must keep its first-seen stamp)", r, it.Key, prev, it.FirstSeen)
-					}
-				} else {
-					firstSeen[it.Key] = it.FirstSeen
+				if !firstSeen.Equal(want) {
+					rt.Errorf("round %d: key %q FirstSeen = %v, want %v", r, key, firstSeen, want)
 				}
 			}
 			now = now.Add(time.Hour)

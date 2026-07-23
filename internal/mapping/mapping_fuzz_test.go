@@ -65,9 +65,13 @@ func FuzzParseOverrides(f *testing.F) {
 				t.Errorf("parseOverrides unknown keys not deduped: %v", set.unknown)
 			}
 		}
+		// The canonical key set is spelled out here as a test-local oracle
+		// (Record's JSON tags), independent of the production dispatch in
+		// decodeOverrideRecord.
+		canonical := []string{"anilist_id", "type", "tvdb_id", "tmdb_movies", "imdb_ids", "season_tvdb"}
 		for _, k := range set.unknown {
-			for canonical := range overrideKeys {
-				if strings.EqualFold(k, canonical) {
+			for _, c := range canonical {
+				if strings.EqualFold(k, c) {
 					t.Errorf("parseOverrides reported canonical key %q as unknown", k)
 				}
 			}

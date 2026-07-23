@@ -1,4 +1,4 @@
-package compare
+package keyenc
 
 import (
 	"strings"
@@ -36,15 +36,15 @@ func splitEscapedPartsBytes(s string) []string {
 }
 
 // FuzzDedupeKeyEncodingInjective is the weekly-fuzz complement of the rapid
-// properties in compare_prop_test.go: coverage-guided exploration over
+// properties in keyenc_prop_test.go: coverage-guided exploration over
 // arbitrary bytes (including invalid UTF-8, which the rapid generators'
-// 5-rune alphabet never reaches) of the dedupe-key encoding invariants the
-// escaping and bounding exist to defend - a collision here suppresses a
-// distinct finding as already alerted. Invariants: element boundaries
-// round-trip through the escaped join, a delimiter-bearing merge cannot
-// alias the split form, length-prefixed hashing preserves boundaries, the
-// raw and hashed output domains stay disjoint, and oversized component sets
-// reduce to the fixed-size hashed identity (CWE-400 bounding).
+// 5-rune alphabet never reaches) of the key-encoding invariants the escaping
+// and bounding exist to defend - a collision here suppresses a distinct
+// finding as already alerted. Invariants: element boundaries round-trip
+// through the escaped join, a delimiter-bearing merge cannot alias the split
+// form, length-prefixed hashing preserves boundaries, the raw and hashed
+// output domains stay disjoint, and oversized component sets reduce to the
+// fixed-size hashed identity (CWE-400 bounding).
 func FuzzDedupeKeyEncodingInjective(f *testing.F) {
 	f.Add("a", "b")
 	f.Add("a,b", "")
@@ -66,11 +66,11 @@ func FuzzDedupeKeyEncodingInjective(f *testing.F) {
 			t.Errorf("hashKeyParts collapsed element boundaries for [%q,%q]", a, b)
 		}
 		forged := hashKeyParts([]string{a})
-		if boundedPart(forged) == forged {
-			t.Errorf("boundedPart(%q) returned the raw hashed-identity spelling", forged)
+		if BoundedPart(forged) == forged {
+			t.Errorf("BoundedPart(%q) returned the raw hashed-identity spelling", forged)
 		}
-		if len(a)+len(b) > maxKeyComponentBytes {
-			if got := boundedJoinParts(parts); len(got) > len(hashedKeyPrefix)+64 {
+		if len(a)+len(b) > MaxComponentBytes {
+			if got := BoundedJoinParts(parts); len(got) > len(hashedPrefix)+64 {
 				t.Errorf("oversized input not reduced to hashed identity: %d bytes", len(got))
 			}
 		}

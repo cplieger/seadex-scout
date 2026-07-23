@@ -808,7 +808,7 @@ func TestABFeedRequiresPasskey(t *testing.T) {
 func TestServeUnconfiguredABServesNoPasskeyItems(t *testing.T) {
 	// A stale snapshot written before the operator blanked ab_torznab_url: its
 	// AB feed carries a credential-bearing download link.
-	stale := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[],"ab_feed":[{"Title":"Frieren - S01 (BD Remux 1080p) [PMR]","GUID":"https://animebytes.tv/torrents.php?id=86576&torrentid=1167293","DownloadURL":"https://animebytes.tv/torrent/1167293/download/SECRETPASSKEY"}]}`
+	stale := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[],"ab_feed":[{"Key":"ab:1167293","Title":"Frieren - S01 (BD Remux 1080p) [PMR]","GUID":"https://animebytes.tv/torrents.php?id=86576&torrentid=1167293","DownloadURL":"https://animebytes.tv/torrent/1167293/download/SECRETPASSKEY"}]}`
 	path := filepath.Join(t.TempDir(), "feed.json")
 	if err := os.WriteFile(path, []byte(stale), 0o600); err != nil {
 		t.Fatalf("write stale snapshot: %v", err)
@@ -848,7 +848,7 @@ func TestServeUnconfiguredABServesNoPasskeyItems(t *testing.T) {
 // uploadvolumefactor 1), a floored seeders count, the SeaDex entry as comments,
 // and the info hash.
 func TestRenderSynthesizedItem(t *testing.T) {
-	out := renderFeed([]item{{
+	out, _ := renderFeed([]item{{
 		Title:                "Frieren Beyond Journey's End - S01 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR]",
 		GUID:                 "https://nyaa.si/view/1961373",
 		InfoURL:              "https://releases.moe/154587",
@@ -1360,7 +1360,7 @@ func TestReloadInstallsOlderMtimeSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	oldTime := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	newerTime := oldTime.Add(time.Hour)
-	restoredJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Title":"restored","GUID":"https://nyaa.si/view/7","DownloadURL":"restored"}],"ab_feed":[]}`
+	restoredJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Key":"nyaa:7","Title":"restored","GUID":"https://nyaa.si/view/7","DownloadURL":"restored"}],"ab_feed":[]}`
 	if err := os.WriteFile(path, []byte(restoredJSON), 0o600); err != nil {
 		t.Fatalf("write restored snapshot: %v", err)
 	}
@@ -1407,7 +1407,7 @@ func TestReloadInstallsOlderMtimeSnapshot(t *testing.T) {
 func TestReloadSkipsUnchangedMtime(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	when := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
-	firstJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Title":"first","GUID":"https://nyaa.si/view/1","DownloadURL":"first"}],"ab_feed":[]}`
+	firstJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Key":"nyaa:1","Title":"first","GUID":"https://nyaa.si/view/1","DownloadURL":"first"}],"ab_feed":[]}`
 	if err := os.WriteFile(path, []byte(firstJSON), 0o600); err != nil {
 		t.Fatalf("write first snapshot: %v", err)
 	}
@@ -1420,7 +1420,7 @@ func TestReloadSkipsUnchangedMtime(t *testing.T) {
 	}
 
 	// Rewrite the content but restore the identical mtime: reload must skip.
-	secondJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Title":"second","GUID":"https://nyaa.si/view/2","DownloadURL":"second"}],"ab_feed":[]}`
+	secondJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Key":"nyaa:2","Title":"second","GUID":"https://nyaa.si/view/2","DownloadURL":"second"}],"ab_feed":[]}`
 	if err := os.WriteFile(path, []byte(secondJSON), 0o600); err != nil {
 		t.Fatalf("write second snapshot: %v", err)
 	}
@@ -1444,7 +1444,7 @@ func TestReloadSkipsUnchangedMtime(t *testing.T) {
 // TestReloadCoalescingLoserDefersToWinnerOnFreshInstall in reload_test.go.)
 func TestReloadCoalescesConcurrentRefreshes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	firstJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Title":"first","GUID":"https://nyaa.si/view/1","DownloadURL":"first"}],"ab_feed":[]}`
+	firstJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Key":"nyaa:1","Title":"first","GUID":"https://nyaa.si/view/1","DownloadURL":"first"}],"ab_feed":[]}`
 	if err := os.WriteFile(path, []byte(firstJSON), 0o600); err != nil {
 		t.Fatalf("write first snapshot: %v", err)
 	}
@@ -1454,7 +1454,7 @@ func TestReloadCoalescesConcurrentRefreshes(t *testing.T) {
 	}
 
 	// A newer on-disk snapshot the in-progress refresh has not installed yet.
-	newJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Title":"new","GUID":"https://nyaa.si/view/3","DownloadURL":"new"}],"ab_feed":[]}`
+	newJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Key":"nyaa:3","Title":"new","GUID":"https://nyaa.si/view/3","DownloadURL":"new"}],"ab_feed":[]}`
 	if err := os.WriteFile(path, []byte(newJSON), 0o600); err != nil {
 		t.Fatalf("write new snapshot: %v", err)
 	}

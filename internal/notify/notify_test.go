@@ -16,6 +16,12 @@ func newCapturedNotifier() (*Notifier, *capture.Recorder) {
 	return NewNotifier(logger), recorder
 }
 
+// testFinding builds a fixture finding whose derived dedupe key is unique per
+// key argument: the key rides the release URL (and its Nyaa link), the
+// identity component dedupeKey falls back to for a non-40-hex InfoHash, so
+// two fixtures with different keys never collapse in-batch while two with the
+// same key (and any title) do - mirroring how production findings key on
+// their release identity, not their title.
 func testFinding(key, title string) compare.Finding {
 	return compare.Finding{
 		Kind:             "encode",
@@ -28,13 +34,12 @@ func testFinding(key, title string) compare.Finding {
 		Resolution:       "1080p",
 		Severity:         compare.SevWarn,
 		Codec:            "x265",
-		ReleaseURL:       "https://nyaa.si/view/1",
+		ReleaseURL:       "https://nyaa.si/view/" + key,
 		InfoHash:         "hash-" + key,
-		DedupeKey:        key,
 		Status:           compare.StatusBetter,
 		AniListID:        154587,
 		Links: []compare.ReleaseLink{
-			{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
+			{Tracker: "Nyaa", URL: "https://nyaa.si/view/" + key},
 			{Tracker: "AB", URL: "https://animebytes.tv/torrents.php?id=1"},
 		},
 		DualAudio: true,
@@ -55,7 +60,7 @@ func TestNotifierBaselineSeedsWithoutFindingNotification(t *testing.T) {
 
 	got := reporter.Baseline([]compare.Finding{finding}, now)
 
-	alert, ok := got["same"]
+	alert, ok := got[dedupeKey(&finding)]
 	if !ok {
 		t.Fatalf("Baseline did not store finding under its dedupe key: %+v", got)
 	}
@@ -77,21 +82,21 @@ func TestNotifierReportSuppressesExistingAndEmitsNewAndResolved(t *testing.T) {
 	reporter, recorder := newCapturedNotifier()
 	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	same := testFinding("same", "Frieren")
+	fresh := testFinding("new", "Bocchi")
+	sameKey, freshKey := dedupeKey(&same), dedupeKey(&fresh)
 	prior := map[string]Alerted{
-		"same": {AlertedAt: oldTime, Finding: storedTestFinding("Frieren")},
-		"old":  {AlertedAt: oldTime, Finding: storedTestFinding("Old Title")},
+		sameKey: {AlertedAt: oldTime, Finding: storedTestFinding("Frieren")},
+		"old":   {AlertedAt: oldTime, Finding: storedTestFinding("Old Title")},
 	}
 
-	current := reporter.Notify([]compare.Finding{
-		testFinding("same", "Frieren"),
-		testFinding("new", "Bocchi"),
-	}, prior, nil, now)
+	current := reporter.Notify([]compare.Finding{same, fresh}, prior, nil, now)
 
-	if !current["same"].AlertedAt.Equal(oldTime) {
-		t.Errorf("suppressed finding AlertedAt = %s, want original %s", current["same"].AlertedAt, oldTime)
+	if !current[sameKey].AlertedAt.Equal(oldTime) {
+		t.Errorf("suppressed finding AlertedAt = %s, want original %s", current[sameKey].AlertedAt, oldTime)
 	}
-	if !current["new"].AlertedAt.Equal(now) {
-		t.Errorf("new finding AlertedAt = %s, want %s", current["new"].AlertedAt, now)
+	if !current[freshKey].AlertedAt.Equal(now) {
+		t.Errorf("new finding AlertedAt = %s, want %s", current[freshKey].AlertedAt, now)
 	}
 	if _, ok := current["old"]; ok {
 		t.Errorf("resolved finding still present in current state: %+v", current["old"])
@@ -185,18 +190,19 @@ func TestStoredFindingTrimsToResolutionFields(t *testing.T) {
 		Season:           2,
 	}
 
+	key := dedupeKey(&finding)
 	current := reporter.Notify([]compare.Finding{finding}, nil, nil, now)
-	if got := current["cred"].Finding; got != want {
+	if got := current[key].Finding; got != want {
 		t.Errorf("new-finding stored record = %+v, want %+v", got, want)
 	}
 
 	suppressed := reporter.Notify([]compare.Finding{finding}, current, nil, now)
-	if got := suppressed["cred"].Finding; got != want {
+	if got := suppressed[key].Finding; got != want {
 		t.Errorf("suppressed-finding stored record = %+v, want %+v", got, want)
 	}
 
 	baseline := reporter.Baseline([]compare.Finding{finding}, now)
-	if got := baseline["cred"].Finding; got != want {
+	if got := baseline[key].Finding; got != want {
 		t.Errorf("baselined stored record = %+v, want %+v", got, want)
 	}
 }
@@ -368,9 +374,9 @@ func TestFindingLineCarriesDocumentedAttrs(t *testing.T) {
 		"codec":                 "x265",
 		"kind":                  "encode",
 		"classification_reason": "encoder marker: x265",
-		"release_url":           "https://nyaa.si/view/1",
-		"release_urls":          "Nyaa=https://nyaa.si/view/1 AB=https://animebytes.tv/torrents.php?id=1",
-		"nyaa_url":              "https://nyaa.si/view/1",
+		"release_url":           "https://nyaa.si/view/k1",
+		"release_urls":          "Nyaa=https://nyaa.si/view/k1 AB=https://animebytes.tv/torrents.php?id=1",
+		"nyaa_url":              "https://nyaa.si/view/k1",
 		"ab_url":                "https://animebytes.tv/torrents.php?id=1",
 		"info_hash":             "hash-k1",
 		"seadex_tags":           "best · encode · 1080p · dual-audio",
@@ -488,7 +494,7 @@ func TestNotifierEmitSanitizesControlAndBidiRunes(t *testing.T) {
 
 // TestNotifierReportSuppressesDuplicateCurrentKeys pins in-batch dedupe: the
 // SeaDex fetcher appends every upstream record and the matcher preserves
-// per-entry cardinality, so one current batch can carry the same DedupeKey
+// per-entry cardinality, so one current batch can carry the same dedupe key
 // twice. The returned state collapses them to one record, and the emitted
 // notifications must collapse the same way — one line, not one per copy — and
 // that one line must carry the batch's LAST payload, matching the documented
@@ -507,7 +513,7 @@ func TestNotifierReportSuppressesDuplicateCurrentKeys(t *testing.T) {
 	if len(current) != 1 {
 		t.Errorf("current dedupe state entries = %d, want 1", len(current))
 	}
-	if got := current["duplicate"].Finding.Title; got != last.Title {
+	if got := current[dedupeKey(&first)].Finding.Title; got != last.Title {
 		t.Errorf("stored title = %q, want the last payload's %q", got, last.Title)
 	}
 	emittedTitle, _ := recorder.AttrValue("better release available", "title")
@@ -578,7 +584,7 @@ func TestResolvedLineCarriesDocumentedAttrs(t *testing.T) {
 
 // TestNotifierDuplicateOfPriorFindingKeepsOriginalAlertTime pins the
 // interaction of in-batch dedupe with the prior state: when a batch carries
-// the same DedupeKey twice AND that key was already alerted in a prior cycle,
+// the same dedupe key twice AND that key was already alerted in a prior cycle,
 // no notification is emitted, the original alert time survives the in-batch
 // duplicate branch, and the stored record follows the documented
 // last-payload-wins rule.
@@ -587,8 +593,9 @@ func TestNotifierDuplicateOfPriorFindingKeepsOriginalAlertTime(t *testing.T) {
 	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	f := testFinding("dup-prior", "Frieren")
 	updated := testFinding("dup-prior", "Frieren (retitled)")
+	key := dedupeKey(&f)
 	prior := map[string]Alerted{
-		"dup-prior": {AlertedAt: oldTime, Finding: storedFinding(&f)},
+		key: {AlertedAt: oldTime, Finding: storedFinding(&f)},
 	}
 
 	current := reporter.Notify([]compare.Finding{f, updated}, prior, nil, time.Now())
@@ -596,7 +603,7 @@ func TestNotifierDuplicateOfPriorFindingKeepsOriginalAlertTime(t *testing.T) {
 	if got := recorder.CountExact("better release available"); got != 0 {
 		t.Errorf("notifications for an already-alerted duplicated finding = %d, want 0", got)
 	}
-	rec, ok := current["dup-prior"]
+	rec, ok := current[key]
 	if !ok {
 		t.Fatal("finding missing from returned state")
 	}
@@ -639,9 +646,9 @@ func TestReportSummaryLineCarriesAccountingCounts(t *testing.T) {
 	preserved := testFinding("preserved", "Preserved")
 	preserved.AniListID = 222
 	prior := map[string]Alerted{
-		"kept":      {AlertedAt: oldTime, Finding: storedFinding(&kept)},
-		"gone":      {AlertedAt: oldTime, Finding: storedFinding(&gone)},
-		"preserved": {AlertedAt: oldTime, Finding: storedFinding(&preserved)},
+		dedupeKey(&kept): {AlertedAt: oldTime, Finding: storedFinding(&kept)},
+		"gone":           {AlertedAt: oldTime, Finding: storedFinding(&gone)},
+		"preserved":      {AlertedAt: oldTime, Finding: storedFinding(&preserved)},
 	}
 
 	reporter.Notify([]compare.Finding{

@@ -991,6 +991,42 @@ func TestRenderJournalItemNoOccurrencesRejected(t *testing.T) {
 	}
 }
 
+// TestRenderJournalItemFallsBackToRenderableOccurrence pins the multi-entry
+// fallback contract: when the lowest-AniList-ID occurrence of a journal key
+// cannot synthesize a title (no files, no release group) but a higher sibling
+// with the same key can, the item renders from the renderable sibling instead
+// of being rejected - one partial upstream occurrence must not permanently
+// deny the release RSS while buildCuration still exposes it to search - and
+// the marker fold still spans ALL occurrences.
+func TestRenderJournalItemFallsBackToRenderableOccurrence(t *testing.T) {
+	w := newTestWriter(filepath.Join(t.TempDir(), "feed.json"), "", false)
+	// Lowest AniList ID: no files and no release group -> no parseable title.
+	partial := &seadex.Entry{AniListID: 1, Torrents: []seadex.Torrent{{
+		Tracker: "Nyaa", URL: "https://nyaa.si/view/77", IsBest: true,
+	}}}
+	full := &seadex.Entry{AniListID: 2, Torrents: []seadex.Torrent{{
+		Tracker: "Nyaa", URL: "https://nyaa.si/view/77",
+		Files: []seadex.File{{Length: 9, Name: "Show - S01E01 (1080p) [G].mkv"}},
+	}}}
+	refs := []curatedRef{
+		{entry: partial, torrent: &partial.Torrents[0]},
+		{entry: full, torrent: &full.Torrents[0]},
+	}
+	it, ok, noPasskey := w.renderJournalItem("nyaa:77", refs, func(int) EntryInfo { return EntryInfo{} })
+	if !ok || noPasskey {
+		t.Fatalf("renderJournalItem = (ok=%v, noPasskey=%v), want (true, false): a renderable sibling must render", ok, noPasskey)
+	}
+	if it.AniListID != 2 {
+		t.Errorf("AniListID = %d, want 2 (the first RENDERABLE occurrence in AniList-ID order)", it.AniListID)
+	}
+	if it.Title == "" {
+		t.Error("Title is empty, want the sibling's synthesized title")
+	}
+	if it.DownloadVolumeFactor != dvfBest {
+		t.Errorf("marker = %q, want %q (best-wins fold must still span the unrenderable occurrence)", it.DownloadVolumeFactor, dvfBest)
+	}
+}
+
 // TestRebuildDropsCarriedItemWarnedByStoredHashOnly pins carryItem's
 // stored-hash branch (warnedSet.retracts via ws.ids[it.InfoHash]) in isolation: the carried
 // nyaa:99 item has NO current occurrence in the catalogue (so its key never

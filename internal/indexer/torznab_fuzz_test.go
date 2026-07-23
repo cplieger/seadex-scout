@@ -36,7 +36,7 @@ func FuzzParseTorznab(f *testing.F) {
 		if err != nil {
 			return // a decode error is a valid outcome for hostile input
 		}
-		rendered := renderFeed(items)
+		rendered, _ := renderFeed(items)
 		reparsed, err := parseTorznab([]byte(rendered))
 		if err != nil {
 			// An input accepted near the decode limits can re-render

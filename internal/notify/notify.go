@@ -92,29 +92,34 @@ func NewNotifier(logger *slog.Logger) *Notifier {
 func (n *Notifier) Notify(findings []compare.Finding, prior map[string]Alerted, failedItems map[int]struct{}, now time.Time) map[string]Alerted {
 	current := make(map[string]Alerted, len(findings))
 	newCount := 0
-	// Last-payload-wins with one emission per key: precompute each DedupeKey's
-	// final payload, then process keys in first-occurrence order using that
-	// payload — so the single emitted notification carries the same fields the
-	// stored record (and any later resolution line) persists, instead of a
-	// first-copy title contradicting the last-copy state.
+	// Derive each finding's dedupe key once up front (dedupeKey: key
+	// construction is this notification boundary's own suppression policy;
+	// compare hands over semantic findings only). Last-payload-wins with one
+	// emission per key: precompute each key's final payload, then process
+	// keys in first-occurrence order using that payload — so the single
+	// emitted notification carries the same fields the stored record (and any
+	// later resolution line) persists, instead of a first-copy title
+	// contradicting the last-copy state.
+	keys := make([]string, len(findings))
 	latest := make(map[string]*compare.Finding, len(findings))
 	for i := range findings {
-		latest[findings[i].DedupeKey] = &findings[i]
+		keys[i] = dedupeKey(&findings[i])
+		latest[keys[i]] = &findings[i]
 	}
-	for i := range findings {
-		f := latest[findings[i].DedupeKey]
-		if _, ok := current[f.DedupeKey]; ok {
+	for _, key := range keys {
+		f := latest[key]
+		if _, ok := current[key]; ok {
 			// A later copy of a key this batch already handled: the first
 			// occurrence stored (and, if new, emitted) the final payload.
 			continue
 		}
-		if a, ok := prior[f.DedupeKey]; ok {
-			current[f.DedupeKey] = Alerted{AlertedAt: a.AlertedAt, Finding: storedFinding(f)}
+		if a, ok := prior[key]; ok {
+			current[key] = Alerted{AlertedAt: a.AlertedAt, Finding: storedFinding(f)}
 			continue
 		}
 		n.emit(f)
 		newCount++
-		current[f.DedupeKey] = Alerted{AlertedAt: now, Finding: storedFinding(f)}
+		current[key] = Alerted{AlertedAt: now, Finding: storedFinding(f)}
 	}
 
 	resolved, preserved := 0, 0
@@ -146,7 +151,7 @@ func (n *Notifier) Baseline(findings []compare.Finding, now time.Time) map[strin
 	current := make(map[string]Alerted, len(findings))
 	for i := range findings {
 		f := &findings[i]
-		current[f.DedupeKey] = Alerted{AlertedAt: now, Finding: storedFinding(f)}
+		current[dedupeKey(f)] = Alerted{AlertedAt: now, Finding: storedFinding(f)}
 	}
 	n.log.Info("cold start: findings baselined without notifying", "total", len(findings))
 	return current
@@ -214,6 +219,41 @@ func findingKVs(f *compare.Finding) []any {
 	}
 }
 
+// trackerLinkKind classifies a finding link for trackerURLs' slot routing.
+type trackerLinkKind uint8
+
+const (
+	trackerLinkPublic trackerLinkKind = iota
+	trackerLinkNyaa
+	trackerLinkABFallback
+	trackerLinkAB
+)
+
+// classifyTrackerLink maps a link to its slot kind: definite AnimeBytes
+// evidence wins outright, an AB-gated (ambiguous or unclassifiable) link is
+// the conservative AB fallback, a known Nyaa link is the public Nyaa source,
+// and anything else is a generic public link.
+func classifyTrackerLink(link compare.ReleaseLink) trackerLinkKind {
+	if filter.DefinitelyAB(link.Tracker, link.URL) {
+		return trackerLinkAB
+	}
+	if filter.ABGated(link.Tracker, link.URL) {
+		return trackerLinkABFallback
+	}
+	if t, known := release.LookupTracker(link.Tracker); known && t.Name == release.TrackerNameNyaa {
+		return trackerLinkNyaa
+	}
+	return trackerLinkPublic
+}
+
+// setFirst writes value into dst only when dst is still empty, preserving
+// first-link-wins precedence within each slot.
+func setFirst(dst *string, value string) {
+	if *dst == "" {
+		*dst = value
+	}
+}
+
 // trackerURLs splits a finding's obtainable links into the public (Nyaa) and
 // AnimeBytes URLs, so an alert can render a distinct Nyaa link and AB link.
 // AB routing is URL-aware, matching the obtainability filter (compare's
@@ -230,30 +270,19 @@ func findingKVs(f *compare.Finding) []any {
 func trackerURLs(links []compare.ReleaseLink) (nyaa, ab string) {
 	var firstPublic, firstABFallback string
 	for i := range links {
-		t, known := release.LookupTracker(links[i].Tracker)
-		switch {
-		case filter.DefinitelyAB(links[i].Tracker, links[i].URL):
-			if ab == "" {
-				ab = links[i].URL
-			}
-		case filter.ABGated(links[i].Tracker, links[i].URL):
-			if firstABFallback == "" {
-				firstABFallback = links[i].URL
-			}
-		case known && t.Name == release.TrackerNameNyaa:
-			if nyaa == "" {
-				nyaa = links[i].URL
-			}
-		case firstPublic == "":
-			firstPublic = links[i].URL
+		switch classifyTrackerLink(links[i]) {
+		case trackerLinkAB:
+			setFirst(&ab, links[i].URL)
+		case trackerLinkABFallback:
+			setFirst(&firstABFallback, links[i].URL)
+		case trackerLinkNyaa:
+			setFirst(&nyaa, links[i].URL)
+		case trackerLinkPublic:
+			setFirst(&firstPublic, links[i].URL)
 		}
 	}
-	if nyaa == "" {
-		nyaa = firstPublic
-	}
-	if ab == "" {
-		ab = firstABFallback
-	}
+	setFirst(&nyaa, firstPublic)
+	setFirst(&ab, firstABFallback)
 	return nyaa, ab
 }
 

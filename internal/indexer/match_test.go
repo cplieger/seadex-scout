@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -94,6 +95,59 @@ func TestAnimeBytesIDRejectsDuplicateTorrentIDParams(t *testing.T) {
 	}
 	if got := animeBytesID("/torrents.php?id=1&torrentid=1167293"); got != "1167293" {
 		t.Errorf("single torrentid = %q, want 1167293", got)
+	}
+}
+
+// TestTrackerIDExtractionRejectsNonCanonicalRoutes pins the route-anchoring
+// half of the identity gate: only the tracker's own canonical torrent-page
+// route shapes are identity evidence, so a /view/ or /torrent/ buried deeper
+// in the path, or a torrentid parameter on a non-/torrents.php path, must
+// never mint a key even on the tracker's own host - a compromised SeaDex
+// response could otherwise authorize and build a canonical download link for
+// an unrelated torrent.
+func TestTrackerIDExtractionRejectsNonCanonicalRoutes(t *testing.T) {
+	tests := []struct {
+		name string
+		got  string
+	}{
+		{"nyaa /view/ not at path start", nyaaID("https://nyaa.si/redirect/view/123")},
+		{"ab torrentid on a non-torrents.php path", animeBytesID("/not-a-torrent?torrentid=123")},
+		{"ab permalink route not at path start", animeBytesID("https://animebytes.tv/x/torrent/123/group")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got != "" {
+				t.Errorf("extracted id = %q, want empty (non-canonical route is not identity evidence)", tc.got)
+			}
+		})
+	}
+	if got := animeBytesID("https://animebytes.tv/torrent/1167293/group"); got != "1167293" {
+		t.Errorf("canonical permalink = %q, want 1167293", got)
+	}
+	if got := nyaaID("https://nyaa.si/view/123"); got != "123" {
+		t.Errorf("canonical nyaa route = %q, want 123", got)
+	}
+}
+
+// TestTrackerIDExtractionRejectsOverlongDigitRuns pins the width bound
+// (maxTrackerIDDigits) on every extraction route: an arbitrarily long digit
+// run from a multi-megabyte SeaDex page must fail closed like a non-numeric
+// id instead of being copied into byKey/byPair/Seen keys and JSON encoding
+// (memory amplification), while a full-width real id still keys.
+func TestTrackerIDExtractionRejectsOverlongDigitRuns(t *testing.T) {
+	over := strings.Repeat("9", maxTrackerIDDigits+1)
+	atMax := strings.Repeat("9", maxTrackerIDDigits)
+	if got := nyaaID("https://nyaa.si/view/" + over); got != "" {
+		t.Errorf("nyaaID(overlong id) = %q, want empty", got)
+	}
+	if got := nyaaID("https://nyaa.si/view/" + atMax); got != atMax {
+		t.Errorf("nyaaID(max-width id) = %q, want %q", got, atMax)
+	}
+	if got := animeBytesID("/torrents.php?torrentid=" + over); got != "" {
+		t.Errorf("animeBytesID(overlong torrentid) = %q, want empty", got)
+	}
+	if got := animeBytesID("https://animebytes.tv/torrent/" + over + "/group"); got != "" {
+		t.Errorf("animeBytesID(overlong permalink id) = %q, want empty", got)
 	}
 }
 

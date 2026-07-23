@@ -23,7 +23,7 @@ func TestReloadWarnsOnceOnMissingSnapshotAndRecovers(t *testing.T) {
 		ByKey:  map[string]bool{},
 		Seen:   map[string]bool{},
 		NyaaFeed: []journalItem{
-			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}},
+			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}, Key: "nyaa:1"},
 		},
 	})
 	log, rec := capture.New()
@@ -50,7 +50,7 @@ func TestReloadWarnsOnceOnMissingSnapshotAndRecovers(t *testing.T) {
 		ByKey:  map[string]bool{},
 		Seen:   map[string]bool{},
 		NyaaFeed: []journalItem{
-			{item: item{Title: "second", GUID: "https://nyaa.si/view/2"}},
+			{item: item{Title: "second", GUID: "https://nyaa.si/view/2"}, Key: "nyaa:2"},
 		},
 	})
 	ix.reload(context.Background())
@@ -108,7 +108,7 @@ func TestReloadRecoversDegradationOnUnchangedSnapshot(t *testing.T) {
 		ByKey:  map[string]bool{},
 		Seen:   map[string]bool{},
 		NyaaFeed: []journalItem{
-			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}},
+			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}, Key: "nyaa:1"},
 		},
 	})
 	log, rec := capture.New()
@@ -162,7 +162,7 @@ func TestReloadMemoizedMalformedSnapshotClearsDegradation(t *testing.T) {
 		ByKey:  map[string]bool{},
 		Seen:   map[string]bool{},
 		NyaaFeed: []journalItem{
-			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}},
+			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}, Key: "nyaa:1"},
 		},
 	})
 	log, rec := capture.New()
@@ -285,7 +285,7 @@ func TestReloadMemoizesOversizedItemSnapshot(t *testing.T) {
 		ByKey:  map[string]bool{},
 		Seen:   map[string]bool{},
 		NyaaFeed: []journalItem{
-			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}},
+			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}, Key: "nyaa:1"},
 		},
 	})
 	log, rec := capture.New()
@@ -436,8 +436,8 @@ func TestReloadRebuildsNyaaDownloadURLsFromGUID(t *testing.T) {
 		ByKey:  map[string]bool{},
 		Seen:   map[string]bool{},
 		NyaaFeed: []journalItem{
-			{item: item{Title: "valid", GUID: "https://nyaa.si/view/42", DownloadURL: "https://attacker.example/poison.torrent"}},
-			{item: item{Title: "invalid", GUID: "https://nyaa.si/view/not-a-number", DownloadURL: "https://attacker.example/invalid.torrent"}},
+			{item: item{Title: "valid", GUID: "https://nyaa.si/view/42", DownloadURL: "https://attacker.example/poison.torrent"}, Key: "nyaa:42"},
+			{item: item{Title: "invalid", GUID: "https://nyaa.si/view/not-a-number", DownloadURL: "https://attacker.example/invalid.torrent"}, Key: "nyaa:invalid"},
 		},
 	})
 	log, rec := capture.New()
@@ -477,9 +477,9 @@ func TestReloadDropsForeignHostSnapshotGUIDs(t *testing.T) {
 		"nyaa keeps only the canonical-host GUID": {
 			scope: upstreamNyaa,
 			feed: []journalItem{
-				{item: item{Title: "canonical", GUID: "https://nyaa.si/view/42"}},
-				{item: item{Title: "foreign", GUID: "https://evil.example/view/123"}},
-				{item: item{Title: "subdomain", GUID: "https://sukebei.nyaa.si/view/123"}},
+				{item: item{Title: "canonical", GUID: "https://nyaa.si/view/42"}, Key: "nyaa:42"},
+				{item: item{Title: "foreign", GUID: "https://evil.example/view/123"}, Key: "nyaa:123"},
+				{item: item{Title: "subdomain", GUID: "https://sukebei.nyaa.si/view/123"}, Key: "nyaa:123"},
 			},
 			wantTitle: "canonical",
 			wantURL:   "https://nyaa.si/download/42.torrent",
@@ -487,8 +487,8 @@ func TestReloadDropsForeignHostSnapshotGUIDs(t *testing.T) {
 		"ab keeps only the canonical-host GUID": {
 			scope: upstreamAB,
 			feed: []journalItem{
-				{item: item{Title: "canonical", GUID: "https://animebytes.tv/torrents.php?id=1&torrentid=777"}},
-				{item: item{Title: "foreign", GUID: "https://evil.example/torrents.php?id=1&torrentid=888"}},
+				{item: item{Title: "canonical", GUID: "https://animebytes.tv/torrents.php?id=1&torrentid=777"}, Key: "ab:777"},
+				{item: item{Title: "foreign", GUID: "https://evil.example/torrents.php?id=1&torrentid=888"}, Key: "ab:888"},
 			},
 			wantTitle: "canonical",
 			wantURL:   "https://animebytes.tv/torrent/777/download/PASSKEY",
@@ -525,6 +525,62 @@ func TestReloadDropsForeignHostSnapshotGUIDs(t *testing.T) {
 	}
 }
 
+// TestReloadDropsCrossKeySnapshotGUIDs pins the reader half of the journal's
+// GUID-to-Key invariant (journalIdentityMatches in rebuildDownloadURLs): a
+// structurally valid snapshot whose stored GUID resolves to a DIFFERENT
+// torrent than its persisted Key names must be dropped at load - the writer's
+// carry gates enforce the same invariant, and without the reader-side check a
+// tampered feed.json with Key nyaa:42 and GUID .../view/666 would rebuild and
+// serve torrent 666 as the journaled curated item until a later writer
+// rebuild self-heals. Same gap for AnimeBytes.
+func TestReloadDropsCrossKeySnapshotGUIDs(t *testing.T) {
+	tests := map[string]struct {
+		scope    string
+		feed     []journalItem
+		wantWarn string
+	}{
+		"nyaa cross-key GUID dropped": {
+			scope: upstreamNyaa,
+			feed: []journalItem{
+				{item: item{Title: "cross", GUID: "https://nyaa.si/view/666"}, Key: "nyaa:42"},
+			},
+			wantWarn: "indexer feed snapshot: Nyaa items dropped; no download URL derivable from tracker page URL",
+		},
+		"ab cross-key GUID dropped": {
+			scope: upstreamAB,
+			feed: []journalItem{
+				{item: item{Title: "cross", GUID: "https://animebytes.tv/torrents.php?id=1&torrentid=666"}, Key: "ab:42"},
+			},
+			wantWarn: "indexer feed snapshot: AnimeBytes items dropped; no download URL derivable from tracker page URL",
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "feed.json")
+			snap := &snapshot{ByHash: map[string]bool{}, ByKey: map[string]bool{}, Seen: map[string]bool{}}
+			if tc.scope == upstreamNyaa {
+				snap.NyaaFeed = tc.feed
+			} else {
+				snap.ABFeed = tc.feed
+			}
+			writeSnapshotFile(t, path, snap)
+			log, rec := capture.New()
+			ix := New(&Config{UpstreamConfig: UpstreamConfig{
+				NyaaTorznabURL: "http://prowlarr/1/api",
+				ABTorznabURL:   "http://prowlarr/2/api",
+				ABPasskey:      "PASSKEY",
+			}}, Deps{Logger: log}, path)
+
+			if got := ix.feedFor(tc.scope); len(got) != 0 {
+				t.Errorf("%s feed = %d items (%+v), want 0: a cross-key GUID must never serve under the persisted curation binding", tc.scope, len(got), got)
+			}
+			if count := rec.Count(tc.wantWarn); count != 1 {
+				t.Errorf("cross-key drop warnings = %d, want 1", count)
+			}
+		})
+	}
+}
+
 // TestReloadSanitizesSnapshotInfoURLs pins the load-boundary display-URL gate
 // (sanitizeSnapshotInfoURLs): a tampered but structurally valid feed.json
 // cannot plant a javascript:/data: or foreign-host clickable info link that
@@ -539,9 +595,9 @@ func TestReloadSanitizesSnapshotInfoURLs(t *testing.T) {
 		ByKey:  map[string]bool{},
 		Seen:   map[string]bool{},
 		NyaaFeed: []journalItem{
-			{item: item{Title: "canonical", GUID: "https://nyaa.si/view/42", InfoURL: "https://releases.moe/154587"}},
-			{item: item{Title: "scheme", GUID: "https://nyaa.si/view/43", InfoURL: "javascript:alert(1)"}},
-			{item: item{Title: "foreign", GUID: "https://nyaa.si/view/44", InfoURL: "https://evil.example/phish"}},
+			{item: item{Title: "canonical", GUID: "https://nyaa.si/view/42", InfoURL: "https://releases.moe/154587"}, Key: "nyaa:42"},
+			{item: item{Title: "scheme", GUID: "https://nyaa.si/view/43", InfoURL: "javascript:alert(1)"}, Key: "nyaa:43"},
+			{item: item{Title: "foreign", GUID: "https://nyaa.si/view/44", InfoURL: "https://evil.example/phish"}, Key: "nyaa:44"},
 		},
 	})
 	log, rec := capture.New()

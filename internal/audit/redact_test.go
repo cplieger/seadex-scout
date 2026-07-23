@@ -2,6 +2,7 @@ package audit
 
 import (
 	"bytes"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -83,4 +84,42 @@ func TestReportPathsRedactedFromLogsAndErrors(t *testing.T) {
 			t.Errorf("AcquireReportLock error leaks the report.dir value: %v", err)
 		}
 	})
+}
+
+// TestRedactPathErrRedactsMessageAndPreservesCause pins redactPathErr's
+// documented errors.Is/As contract, not just its rendered text: the redacted
+// wrapper must keep the original cause reachable so shutdown/errno
+// classification survives the masking. A future simplification that preserves
+// the redacted message but drops the cause would keep the rendered-text
+// redaction tests green while silently breaking errors.Is(os.ErrPermission)
+// and errors.As(*os.PathError) for every report consumer.
+func TestRedactPathErrRedactsMessageAndPreservesCause(t *testing.T) {
+	const dir = "/config/sekret-passkey/reports"
+	cause := &os.PathError{Op: "open", Path: dir + "/report.json", Err: os.ErrPermission}
+
+	got := redactPathErr(dir, cause)
+
+	if got == nil {
+		t.Fatal("redactPathErr() = nil, want a wrapped error")
+	}
+	if strings.Contains(got.Error(), "sekret-passkey") {
+		t.Errorf("redactPathErr() leaked report.dir in %q", got)
+	}
+	if !strings.Contains(got.Error(), redactedPath) {
+		t.Errorf("redactPathErr() = %q, want the %q marker", got, redactedPath)
+	}
+	if !errors.Is(got, os.ErrPermission) {
+		t.Errorf("errors.Is(redactPathErr(), os.ErrPermission) = false")
+	}
+	var pathErr *os.PathError
+	if !errors.As(got, &pathErr) || pathErr != cause {
+		t.Errorf("errors.As(redactPathErr(), *os.PathError) = %v, want original cause %v", pathErr, cause)
+	}
+	if redactPathErr(dir, nil) != nil {
+		t.Error("redactPathErr(nil) must remain nil")
+	}
+	clean := errors.New("clean diagnostic")
+	if unchanged := redactPathErr(dir, clean); unchanged != clean {
+		t.Errorf("redactPathErr(clean error) = %v, want the original error identity", unchanged)
+	}
 }

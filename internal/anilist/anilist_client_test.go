@@ -809,3 +809,22 @@ func TestFetchManyKeepsFirstRecordErrorAcrossChunks(t *testing.T) {
 		t.Errorf("out[52].Titles = %v, want [t52] (second chunk still merged)", got)
 	}
 }
+
+// TestFetchRejectsNonPositiveIDWithoutRequest pins Fetch's fast-rejection
+// guard: a zero or negative id is rejected locally with the invalid-media-id
+// error and never issues an HTTP attempt (Stats().Calls stays 0) - relaxing
+// the guard's boundary from <= 0 to < 0 would instead send id 0 through
+// three doomed HTTP attempts against the unroutable base URL.
+func TestFetchRejectsNonPositiveIDWithoutRequest(t *testing.T) {
+	c := NewClient(http.DefaultClient, "http://127.0.0.1:1", 60, nil)
+
+	if _, err := c.Fetch(context.Background(), 0); err == nil || !strings.Contains(err.Error(), "invalid media id 0") {
+		t.Errorf("Fetch(0) error = %v, want invalid-media-id rejection", err)
+	}
+	if _, err := c.Fetch(context.Background(), -1); err == nil || !strings.Contains(err.Error(), "invalid media id -1") {
+		t.Errorf("Fetch(-1) error = %v, want invalid-media-id rejection", err)
+	}
+	if got := c.Stats().Calls; got != 0 {
+		t.Errorf("Stats().Calls = %d, want 0 (invalid ids must not issue requests)", got)
+	}
+}

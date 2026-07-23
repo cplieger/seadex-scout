@@ -13,7 +13,6 @@ package mapping
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -444,6 +443,13 @@ func rejectRefresh(prev *Cache, staleMsg string, cause, noCache error) (Cache, e
 // sitting in state.json. Until then a bad persisted validator is inert: 304
 // and stale returns re-persist it, but it is never sent.
 func (l *Loader) refreshCache(ctx context.Context, prev *Cache) (Cache, error) {
+	// Normalize the optional previous cache: Load(ctx, nil) is the natural
+	// representation of "no persisted cache" on first use, and the pointer is
+	// read-only on every path below, so an empty Cache makes nil take the
+	// ordinary initial-fetch route instead of panicking on prev.FetchedAt.
+	if prev == nil {
+		prev = &Cache{}
+	}
 	age := time.Since(prev.FetchedAt)
 	// age >= 0 rejects a future FetchedAt (clock skew or a corrupt state file):
 	// a negative age is never fresh, forcing a revalidating fetch rather than
@@ -931,7 +937,8 @@ func (l *Loader) logUnknownKeys(unknown []string, capped bool) {
 // distinct duplicated AniList ID once, on its first repeated occurrence, so
 // one heavily repeated ID cannot fill the bounded log prefix and hide later
 // duplicated IDs; unknown is the sorted, deduplicated, BOUNDED set of keys
-// outside overrideKeys (at most maxRetainedUnknownKeys entries, retained
+// outside the six canonical override keys (at most maxRetainedUnknownKeys
+// entries, retained
 // during the stream so skipped rows cannot amplify diagnostic state), with
 // unknownOverflow marking that further distinct unknown keys were seen but
 // not retained.
@@ -946,14 +953,15 @@ type overrideSet struct {
 }
 
 // maxOverrideIDsPerRecord caps one override record's tmdb_movies and imdb_ids
-// array lengths after normalization. The 4 MiB wire bound caps the FILE, not
-// the retained amplification: a compact, syntactically valid record can
-// otherwise fan a few bytes per entry into hundreds of thousands of retained
-// slice entries and reverse-catalogue index insertions (a local configuration
-// denial of service). One record maps ONE anime - the largest real franchise
-// overrides run a few dozen ids - so 64 is generous headroom; an over-cap
-// record is skipped loudly (the oversized counter's WARN), never silently
-// truncated.
+// array lengths, enforced during the token walk BEFORE the element past the
+// cap is decoded (decodeCappedArray). The 4 MiB wire bound caps the FILE, not
+// the decode amplification: a compact, syntactically valid record can
+// otherwise fan a few bytes per entry into hundreds of thousands of transient
+// and retained slice entries and reverse-catalogue index insertions (a local
+// configuration denial of service). One record maps ONE anime - the largest
+// real franchise overrides run a few dozen ids - so 64 is generous headroom;
+// an over-cap record is skipped loudly (the oversized counter's WARN), never
+// silently truncated.
 const maxOverrideIDsPerRecord = 64
 
 // maxOverrideRecords caps the effective records parseOverrides retains,
@@ -966,70 +974,103 @@ const maxOverrideIDsPerRecord = 64
 // malformed-file WARN (overlay ignored loudly).
 const maxOverrideRecords = 1 << 16
 
-// knownOverrideKey reports whether key names an overrideKeys entry under the
-// same case-insensitive matching encoding/json applies when decoding into
-// Record, so a case-variant canonical key (e.g. "TYPE") that the typed decode
-// accepts is never misreported as unknown and ignored.
-func knownOverrideKey(key string) bool {
-	for canonical := range overrideKeys {
-		if strings.EqualFold(key, canonical) {
-			return true
-		}
-	}
-	return false
-}
-
-// collectUnknownKeys scans one raw override record for keys outside
-// overrideKeys, appending first occurrences to set.unknown (seen dedupes
-// across records). Retention is bounded at maxRetainedUnknownKeys so a file
-// of many skipped rows with distinct unknown keys cannot amplify diagnostic
-// state; once full, further distinct keys only set set.unknownOverflow (and
-// an already-overflowed set skips the scan entirely). A record's fresh keys
-// are sorted before retention so the bounded set is deterministic regardless
-// of map iteration order. A raw-unmarshal error is ignored: the typed decode
-// in parseOverrides reports real errors.
-func (set *overrideSet) collectUnknownKeys(raw json.RawMessage, seen map[string]struct{}) {
+// recordUnknownKey retains one unknown override key for the diagnostic (seen
+// dedupes across records). Retention is bounded at maxRetainedUnknownKeys so
+// a file of many skipped rows with distinct unknown keys cannot amplify
+// diagnostic state; once full, further distinct keys only set
+// set.unknownOverflow. Keys arrive in document order off the token stream,
+// so retention is deterministic without a per-record sort.
+func (set *overrideSet) recordUnknownKey(key string, seen map[string]struct{}) {
 	if set.unknownOverflow {
 		return
 	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &m); err != nil {
+	if _, dup := seen[key]; dup {
 		return
 	}
-	fresh := make([]string, 0, len(m))
-	for k := range m {
-		if knownOverrideKey(k) {
-			continue
-		}
-		if _, dup := seen[k]; dup {
-			continue
-		}
-		fresh = append(fresh, k)
+	if len(set.unknown) >= maxRetainedUnknownKeys {
+		set.unknownOverflow = true
+		return
 	}
-	slices.Sort(fresh)
-	for _, k := range fresh {
-		if len(set.unknown) >= maxRetainedUnknownKeys {
-			set.unknownOverflow = true
-			return
-		}
-		seen[k] = struct{}{}
-		set.unknown = append(set.unknown, k)
-	}
+	seen[key] = struct{}{}
+	set.unknown = append(set.unknown, key)
 }
 
-// applyRecord decodes one raw override record and folds it into the set:
-// unknown keys are collected, Type is normalized, IMDb ids are trimmed and
-// TMDB movie ids reduced to positives - the same canonical forms the Fribb
-// decoder produces (so exact-key lookups agree with HasArrIdentifier's
-// trimmed usability view), a zero-AniList-ID record is
-// counted as skipped, and a duplicate ID replaces its earlier record
-// (last-record-wins) while being reported once in set.duplicates.
-func (set *overrideSet) applyRecord(raw json.RawMessage, seenKeys map[string]struct{}, position map[int]int, reported map[int]struct{}) error {
-	var record Record
-	if err := json.Unmarshal(raw, &record); err != nil {
+// decodeCappedArray decodes one override id array under the
+// maxOverrideIDsPerRecord cap, preserving encoding/json's duplicate-key slice
+// semantics through bounded.Array's prior argument (a JSON null yields nil,
+// matching Unmarshal's null-into-slice). An over-cap array reports
+// oversized=true after token-skipping its remaining elements (they are never
+// decoded or allocated) and consuming the closing bracket, so the record walk
+// stays aligned and the caller counts the record oversized instead of
+// materializing hundreds of thousands of compact ids before a length check.
+func decodeCappedArray[T any](dec *bounded.Decoder, target *[]T, what string) (oversized bool, err error) {
+	decoded, err := bounded.Array(dec, *target, maxOverrideIDsPerRecord, what, func(v *T) error { return dec.Decode(v) })
+	if err == nil {
+		*target = decoded
+		return false, nil
+	}
+	if !errors.Is(err, bounded.ErrArrayCap) {
+		return false, err
+	}
+	for dec.More() {
+		if skipErr := dec.Skip(); skipErr != nil {
+			return true, skipErr
+		}
+	}
+	return true, dec.Close()
+}
+
+// decodeOverrideRecord walks one override object off the token stream in a
+// single bounded pass: the six canonical keys (matched with strings.EqualFold
+// for encoding/json's case-insensitive field fallback, duplicate keys merging
+// last-wins like Unmarshal) decode directly into the Record, the id arrays
+// are capped BEFORE their 65th element allocates (decodeCappedArray), and an
+// unknown key retains only its name (recordUnknownKey) while its value is
+// token-skipped - never materialized into a map[string]json.RawMessage. This
+// replaces the former whole-record json.Unmarshal plus independent raw
+// unknown-key decode, whose pre-check allocations a valid compact near-cap
+// record could amplify into severe memory pressure (CWE-770).
+func decodeOverrideRecord(dec *bounded.Decoder, set *overrideSet, seenKeys map[string]struct{}) (record Record, oversized bool, err error) {
+	err = dec.Object(func(key string) error {
+		switch {
+		case strings.EqualFold(key, "anilist_id"):
+			return dec.Decode(&record.AniListID)
+		case strings.EqualFold(key, "type"):
+			return dec.Decode(&record.Type)
+		case strings.EqualFold(key, "tvdb_id"):
+			return dec.Decode(&record.TvdbID)
+		case strings.EqualFold(key, "season_tvdb"):
+			return dec.Decode(&record.SeasonTvdb)
+		case strings.EqualFold(key, "tmdb_movies"):
+			over, arrErr := decodeCappedArray(dec, &record.TmdbMovies, "tmdb_movies")
+			oversized = oversized || over
+			return arrErr
+		case strings.EqualFold(key, "imdb_ids"):
+			over, arrErr := decodeCappedArray(dec, &record.IMDbIDs, "imdb_ids")
+			oversized = oversized || over
+			return arrErr
+		default:
+			set.recordUnknownKey(key, seenKeys)
+			return dec.Skip()
+		}
+	})
+	return record, oversized, err
+}
+
+// applyRecord decodes the next override record from the token stream
+// (decodeOverrideRecord: one bounded walk collecting unknown keys and capping
+// the id arrays before allocation) and folds it into the set: Type is
+// normalized, IMDb ids are trimmed and TMDB movie ids reduced to positives -
+// the same canonical forms the Fribb decoder produces (so exact-key lookups
+// agree with HasArrIdentifier's trimmed usability view), a zero-AniList-ID
+// record is counted as skipped, an over-cap record is counted as oversized,
+// and a duplicate ID replaces its earlier record (last-record-wins) while
+// being reported once in set.duplicates.
+func (set *overrideSet) applyRecord(dec *bounded.Decoder, seenKeys map[string]struct{}, position map[int]int, reported map[int]struct{}) error {
+	record, oversized, err := decodeOverrideRecord(dec, set, seenKeys)
+	if err != nil {
 		return err
 	}
-	set.collectUnknownKeys(raw, seenKeys)
 	record.Type = NormalizeType(record.Type)
 	record.IMDbIDs = trimmed(record.IMDbIDs)
 	record.TmdbMovies = positiveInts(record.TmdbMovies)
@@ -1041,7 +1082,7 @@ func (set *overrideSet) applyRecord(raw json.RawMessage, seenKeys map[string]str
 		set.skipped++
 		return nil
 	}
-	if len(record.TmdbMovies) > maxOverrideIDsPerRecord || len(record.IMDbIDs) > maxOverrideIDsPerRecord {
+	if oversized {
 		set.oversized++
 		return nil
 	}
@@ -1078,19 +1119,19 @@ func positiveInts(in []int) []int {
 // each keyed by its AniList ID - streaming one record at a time so the peak
 // allocation tracks the effective overlay, not the transport row count.
 // maxOverrideBytes bounds the wire size, but a compact array of semantically
-// empty records (e.g. a million {} rows) fits under it while three
-// whole-document materializations ([]Record, the unknown-key scan's
-// []map[string]json.RawMessage, and the overlay's row-sized seen map) would
-// multiply it well past the container's memory budget before every row is
-// discarded as unusable. Each record is instead decoded from its own
-// RawMessage, its unknown keys collected, its Type normalized (so an operator
-// can write "movie" or "tv"), and then either discarded (zero AniList ID,
-// counted in skipped) or folded into the deduplicated effective set with
-// last-record-wins. The top-level value must be a JSON array with no trailing
-// data: encoding/json would otherwise accept a literal null into a nil
-// []Record without error, silently treating a clobbered overrides file as a
-// valid empty overlay instead of routing it through readOverrides'
-// malformed-file warning.
+// empty records (e.g. a million {} rows) or a single near-cap record carrying
+// hundreds of thousands of compact ids or distinct unknown keys fits under it
+// while whole-value materializations would multiply it well past the
+// container's memory budget before the row is discarded. Each record is
+// instead walked token by token (applyRecord/decodeOverrideRecord: id arrays
+// capped before allocation, unknown-key values skipped), its Type normalized
+// (so an operator can write "movie" or "tv"), and then either discarded (zero
+// AniList ID, counted in skipped; over-cap arrays, counted in oversized) or
+// folded into the deduplicated effective set with last-record-wins. The
+// top-level value must be a JSON array with no trailing data: encoding/json
+// would otherwise accept a literal null into a nil []Record without error,
+// silently treating a clobbered overrides file as a valid empty overlay
+// instead of routing it through readOverrides' malformed-file warning.
 func parseOverrides(data []byte) (overrideSet, error) {
 	trimmedData := bytes.TrimSpace(data)
 	if len(trimmedData) == 0 || trimmedData[0] != '[' {
@@ -1105,11 +1146,7 @@ func parseOverrides(data []byte) (overrideSet, error) {
 	position := make(map[int]int) // AniList ID -> index in set.records
 	reported := make(map[int]struct{})
 	for dec.More() {
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil {
-			return overrideSet{}, err
-		}
-		if err := set.applyRecord(raw, seenKeys, position, reported); err != nil {
+		if err := set.applyRecord(dec, seenKeys, position, reported); err != nil {
 			return overrideSet{}, err
 		}
 		if len(set.records) > maxOverrideRecords {
@@ -1124,9 +1161,4 @@ func parseOverrides(data []byte) (overrideSet, error) {
 	}
 	slices.Sort(set.unknown)
 	return set, nil
-}
-
-// overrideKeys is the set of keys an overrides record may carry (Record's JSON tags).
-var overrideKeys = map[string]struct{}{
-	"anilist_id": {}, "type": {}, "tvdb_id": {}, "tmdb_movies": {}, "imdb_ids": {}, "season_tvdb": {},
 }

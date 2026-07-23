@@ -29,7 +29,8 @@ func TestTorznabRenderParse_roundTripsItemsProperty(t *testing.T) {
 			Leechers:    rapid.IntRange(0, 10_000).Draw(t, "leechers"),
 		}
 
-		gotItems, err := parseTorznab([]byte(renderFeed([]item{want})))
+		rendered, _ := renderFeed([]item{want})
+		gotItems, err := parseTorznab([]byte(rendered))
 		if err != nil {
 			t.Fatalf("parseTorznab(renderFeed(item)): %v", err)
 		}

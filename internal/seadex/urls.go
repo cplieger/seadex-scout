@@ -85,29 +85,33 @@ func (t *Torrent) UsableURL() string {
 		}
 		return usableRelative(f.Trimmed, tr.BaseURL)
 	case urlform.ClassSchemelessHost:
-		// A schemeless value whose recovered authority IS a canonical
-		// tracker host ("animebytes.tv/torrents.php?...") is a mislabeled
-		// absolute URL, not a path: base-prefixing it under the LABELED
-		// tracker would publish a wrong-tracker link
-		// ("https://nyaa.si/animebytes.tv/...") that cannot identify the
-		// intended torrent, so it is published on its own recovered host
-		// with an https scheme (every canonical tracker is https). The
-		// userinfo gate mirrors usableAbsolute: a credential-bearing
-		// authority is a spoofing vector and never publishes canonicalized.
-		// Any other schemeless value keeps the href reading - a
-		// tracker-relative path under the labeled tracker's base - exactly
-		// like the relative form above.
-		if _, hostOK := release.LookupTrackerByHost(f.Host); hostOK && !f.HasUserInfo {
-			return "https://" + f.Trimmed
-		}
-		if inferred, ok := release.LookupTrackerByRelativeURL("/" + f.Trimmed); ok {
-			return usableRelative(f.Trimmed, inferred.BaseURL)
-		}
-		return usableRelative(f.Trimmed, tr.BaseURL)
+		return usableSchemelessHost(&f, tr.BaseURL)
 	default:
 		// Empty, malformed, hidden-host, and protocol-relative forms drop.
 		return ""
 	}
+}
+
+// usableSchemelessHost applies UsableURL's schemeless-host publish policy. A
+// schemeless value whose recovered authority IS a canonical tracker host
+// ("animebytes.tv/torrents.php?...") is a mislabeled absolute URL, not a
+// path: base-prefixing it under the LABELED tracker would publish a
+// wrong-tracker link ("https://nyaa.si/animebytes.tv/...") that cannot
+// identify the intended torrent, so it is published on its own recovered
+// host with an https scheme (every canonical tracker is https). The userinfo
+// gate mirrors usableAbsolute: a credential-bearing authority is a spoofing
+// vector and never publishes canonicalized. Any other schemeless value keeps
+// the href reading - a tracker-relative path under the labeled tracker's
+// base (or the inferred owner's, for a tracker-specific relative shape) -
+// exactly like UsableURL's relative form.
+func usableSchemelessHost(f *urlform.Form, baseURL string) string {
+	if _, hostOK := release.LookupTrackerByHost(f.Host); hostOK && !f.HasUserInfo {
+		return "https://" + f.Trimmed
+	}
+	if inferred, ok := release.LookupTrackerByRelativeURL("/" + f.Trimmed); ok {
+		return usableRelative(f.Trimmed, inferred.BaseURL)
+	}
+	return usableRelative(f.Trimmed, baseURL)
 }
 
 // usableRelative converts a tracker-relative path into a followable link by

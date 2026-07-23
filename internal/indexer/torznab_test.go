@@ -2,7 +2,9 @@ package indexer
 
 import (
 	"errors"
+	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -32,7 +34,8 @@ func TestRenderFeed_usesStableGUIDFallback(t *testing.T) {
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			parsed, err := parseTorznab([]byte(renderFeed([]item{tc.item})))
+			rendered, _ := renderFeed([]item{tc.item})
+			parsed, err := parseTorznab([]byte(rendered))
 			if err != nil {
 				t.Fatalf("parseTorznab(renderFeed(item)): %v", err)
 			}
@@ -302,6 +305,71 @@ func TestParseTorznabDecodeLimits(t *testing.T) {
 	}
 }
 
+// TestParseTorznabRejectsOversizedTokensAtLexicalGuard pins the allocation
+// gate that runs BEFORE encoding/xml tokenizes anything (preflightTorznab):
+// an upstreamMaxBytes-scale text node and a start tag packed with tiny XML
+// attributes must both fail at the lexical guard's own limits - proving the
+// rejection happened before DecodeElement/StartElement could materialize the
+// attacker-sized token - rather than at the post-allocation decode caps.
+func TestParseTorznabRejectsOversizedTokensAtLexicalGuard(t *testing.T) {
+	t.Run("8 MiB text node fails the text-run bound", func(t *testing.T) {
+		body := "<rss><channel><item><title>" + strings.Repeat("a", 8<<20) + "</title></item></channel></rss>"
+		_, err := parseTorznab([]byte(body))
+		limitErr, ok := errors.AsType[*torznabLimitError](err)
+		if !ok {
+			t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
+		}
+		if !strings.Contains(limitErr.limit, "text run longer than") {
+			t.Errorf("limit = %q, want the lexical text-run bound, not a post-allocation decode cap", limitErr.limit)
+		}
+	})
+	t.Run("8 MiB start tag fails the per-tag attribute bound", func(t *testing.T) {
+		var b strings.Builder
+		b.WriteString("<rss><channel><item ")
+		for i := 0; b.Len() < 8<<20; i++ {
+			fmt.Fprintf(&b, `a%d="x" `, i)
+		}
+		b.WriteString("></item></channel></rss>")
+		_, err := parseTorznab([]byte(b.String()))
+		limitErr, ok := errors.AsType[*torznabLimitError](err)
+		if !ok {
+			t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
+		}
+		if !strings.Contains(limitErr.limit, "attributes on one start tag") {
+			t.Errorf("limit = %q, want the lexical per-tag attribute bound", limitErr.limit)
+		}
+	})
+	t.Run("quoted '>' does not terminate a tag", func(t *testing.T) {
+		body := `<rss><channel><item><enclosure url="http://x/?q=a>b" length="1"/></item></channel></rss>`
+		items, err := parseTorznab([]byte(body))
+		if err != nil {
+			t.Fatalf("parseTorznab: %v (the preflight must honor quoted '>' bytes)", err)
+		}
+		if len(items) != 1 || items[0].DownloadURL != "http://x/?q=a>b" {
+			t.Errorf("items = %+v, want the quoted enclosure URL intact", items)
+		}
+	})
+}
+
+// TestParseTorznabRejectsSplitTextPastFieldCap pins decodeBoundedElementText:
+// a field split across CDATA seams - each chunk under the lexical text-run
+// cap and each CharData token under the per-field cap - must still be
+// rejected once the CUMULATIVE decoded bytes cross maxUpstreamFieldBytes,
+// closing the chunked bypass DecodeElement's whole-string materialization
+// allowed.
+func TestParseTorznabRejectsSplitTextPastFieldCap(t *testing.T) {
+	half := strings.Repeat("a", maxUpstreamFieldBytes/2+1)
+	body := "<rss><channel><item><title>" + half + "<![CDATA[" + half + "]]></title></item></channel></rss>"
+	_, err := parseTorznab([]byte(body))
+	limitErr, ok := errors.AsType[*torznabLimitError](err)
+	if !ok {
+		t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
+	}
+	if !strings.Contains(limitErr.limit, "field longer than") {
+		t.Errorf("limit = %q, want the per-field cap on the cumulative decoded text", limitErr.limit)
+	}
+}
+
 // TestTorznabLimitErrorMessageNamesLimit pins the operator-facing message of a
 // decode-limit rejection (what fetchAndParse's retry logging + the harvest WARN
 // render), so it must name the decode limit that fired.
@@ -371,7 +439,7 @@ func TestParseTorznabSkipsUnknownItemChildren(t *testing.T) {
 // while the in-memory value stays raw for matching and persistence.
 func TestRenderFeedSanitizesUnsafeRunes(t *testing.T) {
 	title := "Show \u202e[G]\u0085 \u2028S01"
-	got := renderFeed([]item{{Title: title, GUID: "https://nyaa.si/view/1"}})
+	got, _ := renderFeed([]item{{Title: title, GUID: "https://nyaa.si/view/1"}})
 	for _, bad := range []string{"\u202e", "\u0085", "\u2028"} {
 		if strings.Contains(got, bad) {
 			t.Errorf("rendered feed carries unsafe rune %U; escTo must apply the shared rune policy", []rune(bad)[0])
@@ -379,6 +447,32 @@ func TestRenderFeedSanitizesUnsafeRunes(t *testing.T) {
 	}
 	if !strings.Contains(got, "Show") || !strings.Contains(got, "[G]") || !strings.Contains(got, "S01") {
 		t.Errorf("sanitizing damaged the safe text: %q", got)
+	}
+}
+
+// TestRenderFeedTruncatesOversizedDocument deterministically exercises
+// renderFeed's maxRenderedFeedBytes truncation branch - the render-side
+// memory guard the fuzz and rapid round-trip suites never reach - and pins
+// both of its guarantees: oversized output is truncated to fewer items than
+// requested (with the emitted count reporting exactly what survived) and the
+// truncated document remains parseable Torznab XML with at most one
+// bounded-item overshoot past the byte budget.
+func TestRenderFeedTruncatesOversizedDocument(t *testing.T) {
+	items := slices.Repeat([]item{{Title: strings.Repeat("&", maxPersistedFieldBytes), GUID: "g"}}, maxItems)
+	rendered, emitted := renderFeed(items)
+
+	got, err := parseTorznab([]byte(rendered))
+	if err != nil {
+		t.Fatalf("parseTorznab(renderFeed(oversized items)): %v", err)
+	}
+	if len(got) >= len(items) {
+		t.Errorf("rendered item count = %d, want fewer than %d after size-cap truncation", len(got), len(items))
+	}
+	if emitted != len(got) {
+		t.Errorf("renderFeed emitted count = %d, want %d (the parsed item count)", emitted, len(got))
+	}
+	if len(rendered) > maxRenderedFeedBytes+(128<<10) {
+		t.Errorf("rendered feed size = %d, want at most %d plus one bounded item", len(rendered), maxRenderedFeedBytes)
 	}
 }
 
@@ -440,6 +534,12 @@ func TestWriteItemSkipsNonPositiveCategories(t *testing.T) {
 // the feed decode applies (1025 attrs x 4096 bytes = 4,198,400 > the 4 MiB
 // budget, while every individual value passes the per-field cap).
 func TestParseErrorDocumentBoundsCumulativeAttrText(t *testing.T) {
+	// Built past the lexical per-tag attribute cap on purpose and fed to
+	// parseErrorDocument DIRECTLY: through parseTorznab the preflight
+	// rejects this tag first (pinned by
+	// TestParseTorznabRejectsOversizedTokensAtLexicalGuard), so this test
+	// keeps the errorXML decoder's own cumulative budget honest as defense
+	// in depth behind that gate.
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0"?><error code="100" `)
 	val := strings.Repeat("d", maxUpstreamFieldBytes)
@@ -447,9 +547,9 @@ func TestParseErrorDocumentBoundsCumulativeAttrText(t *testing.T) {
 		b.WriteString("a" + strconv.Itoa(i) + `="` + val + `" `)
 	}
 	b.WriteString(`/>`)
-	_, err := parseTorznab([]byte(b.String()))
+	_, err := parseErrorDocument([]byte(b.String()))
 	if err == nil {
-		t.Fatal("parseTorznab accepted an <error> document with over-budget cumulative attribute text")
+		t.Fatal("parseErrorDocument accepted an <error> document with over-budget cumulative attribute text")
 	}
 	var limitErr *torznabLimitError
 	if !errors.As(err, &limitErr) {
