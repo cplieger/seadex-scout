@@ -352,7 +352,11 @@ func sameHTTPOrigin(raw string, origin *url.URL) bool {
 // Healthy Prowlarr output carries the served tracker's canonical page URLs
 // here, so a foreign-host or userinfo-bearing link (a phishing target a
 // tampered upstream could attach to a curated item) is blanked rather than
-// rendered clickable.
+// rendered clickable. These url.Parse hostnames never pass through urlform
+// classification; they are safe against homograph lookalikes because the
+// Is*Host twins delegate to release.LookupTrackerByHost, which carries the
+// centralized ASCII/homograph gate (urlform.IsASCIIHost) every host-table
+// match inherits.
 func sanitizeDisplayURL(scope, raw string) string {
 	u, ok := httpNoUserinfoURL(raw)
 	if !ok {

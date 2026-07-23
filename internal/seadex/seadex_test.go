@@ -165,9 +165,12 @@ func TestFetchEntriesUsesStableSort(t *testing.T) {
 // TestTorrentUsableURLRejectsUnsafeSchemes pins the unsafe-scheme and
 // malformed-URL gate on the untrusted upstream URL: javascript:, data:, and
 // file: values must never be converted into clickable tracker links, and a
-// malformed absolute value (hostless, unparseable escape, whitespace in the
-// host, backslash authority) must drop to the empty-URL case rather than be
-// published as a link a human cannot follow.
+// malformed or anomalous value (hostless, unparseable escape, whitespace in
+// the host, backslash authority, a tab/newline-smuggled form the WHATWG
+// preprocessing de-smuggled, a hidden-host quirk form) must drop to the
+// empty-URL case rather than be published as a link a human cannot follow -
+// publish-or-drop rejects what it cannot vouch for even when the classifier
+// recovered the evidence.
 func TestTorrentUsableURLRejectsUnsafeSchemes(t *testing.T) {
 	tests := []struct {
 		name string
@@ -182,6 +185,9 @@ func TestTorrentUsableURLRejectsUnsafeSchemes(t *testing.T) {
 		{name: "invalid escape", url: "https://example.test/%zz"},
 		{name: "whitespace in host", url: "https://bad host/path"},
 		{name: "backslash authority", url: `\\evil.example/path`},
+		{name: "tab-smuggled canonical host", url: "https://nyaa\t.si/view/1"},
+		{name: "newline-smuggled scheme", url: "ht\ntps://nyaa.si/view/1"},
+		{name: "hidden-host single-slash form (evidence recovered, still unvouchable)", url: "https:/animebytes.tv/torrents.php?id=1"},
 		{name: "userinfo authority confusion", url: "https://animebytes.tv@evil.example/torrent"},
 		{name: "query-only with colon", url: "?x:y"},
 		{name: "fragment-only with colon", url: "#a:b"},

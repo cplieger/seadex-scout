@@ -53,8 +53,12 @@ func (t *Torrent) UsableURL() string {
 	f := urlform.Classify(t.URL)
 	// Backslashes are rejected outright, even where the canonicalized reading
 	// classifies cleanly: browsers treat "\\host" as an authority even though
-	// url.Parse does not, and this publisher emits the raw string.
-	if f.HasBackslash {
+	// url.Parse does not, and this publisher emits the raw string. A
+	// tab/newline-smuggled URL (the WHATWG preprocessing removed embedded
+	// whitespace to read it) is rejected the same way: Trimmed is emit-safe,
+	// but legitimate SeaDex data has no reason to carry smuggling bytes, and
+	// this publisher drops what it cannot vouch for.
+	if f.HasBackslash || f.HasTabOrNewline {
 		return ""
 	}
 	// Resolve the tracker before handling any usable form: the tracker label

@@ -651,6 +651,12 @@ taste, so a human-in-the-loop nudge beats a blind auto-grab. The opt-in
 Sonarr/Radarr and lets them grab through their own engine, so nothing bypasses the
 tooling you already trust.
 
+## Disclaimer
+
+This project is built with care and follows security best practices, but it is intended for personal / self-hosted use. No guarantees of fitness for production environments. Use at your own risk.
+
+This project was built with AI-assisted tooling using [Claude](https://claude.com), [GPT](https://openai.com), and [Kiro](https://kiro.dev). The human maintainer defines architecture, supervises implementation, and makes all final decisions.
+
 ## License
 
 GPL-3.0. Linking [`arrapi`](https://github.com/cplieger/arrapi) (GPL-3.0) makes
