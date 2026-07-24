@@ -763,7 +763,7 @@ func TestFeedTitle(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got := derivedTitle(&seadex.Torrent{Files: tc.files, ReleaseGroup: tc.group}, EntryInfo{})
 			if got != tc.want {
-				t.Errorf("feedTitle = %q, want %q", got, tc.want)
+				t.Errorf("derivedTitle = %q, want %q", got, tc.want)
 			}
 		})
 	}

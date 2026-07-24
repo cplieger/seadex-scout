@@ -133,15 +133,17 @@ func journalIdentityMatches(it *journalItem) bool {
 // ascending AniList-ID order, then best-wins on the marker and category union
 // across all of them (a torrent attached to several entries must not render
 // conflicting duplicates). An occurrence is renderable when it yields a
-// grabbable download link, a non-empty synthesized title, and fields within
+// grabbable download link, a non-empty synthesized title, a GUID that proves
+// the journal key (journalIdentityMatches), and fields within
 // the persisted limits; trying siblings in a deterministic order keeps the
 // render catalogue-order independent while one partial occurrence (no files
 // and no release group on the lowest AniList ID) cannot deny the whole key
 // RSS when a renderable sibling exists. ok is false only when EVERY
 // occurrence is unrenderable: no grabbable download link (an AnimeBytes
 // release without a passkey - reported via noPasskey so the caller can nudge
-// the operator - or an id-less URL, which journalKey already excludes) or no
-// parseable title at all (no files and no release group).
+// the operator - or an id-less URL, which journalKey already excludes), no
+// parseable title at all (no files and no release group), or a page URL
+// whose GUID cannot prove the journal key.
 func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor func(alID int) EntryInfo) (it journalItem, ok, noPasskey bool) {
 	// Deterministic synthesis order: a torrent attached to several entries
 	// must render the same item regardless of catalogue order (marker and
@@ -179,8 +181,8 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor fu
 			// Creation-time enforcement of the journal's GUID-to-Key
 			// invariant (the carry gates and the reader's rebuild already
 			// enforce it): an occurrence whose page URL is unpublishable
-			// (UsableURL dropped it - e.g. a userinfo- or bad-port-bearing
-			// URL that still passes trackerKey) would journal an item every
+			// (UsableURL dropped it - e.g. a bad-port-bearing URL that
+			// still passes trackerKey) would journal an item every
 			// reader load then drops as undecodable. Try the next
 			// occurrence.
 			continue

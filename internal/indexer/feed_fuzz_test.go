@@ -33,10 +33,10 @@ func FuzzFeedTitle_boundedAndTrimmed(f *testing.F) {
 		}
 		got := derivedTitle(tor, EntryInfo{})
 		if got != strings.TrimSpace(got) {
-			t.Errorf("feedTitle(%q, %q, group %q) = %q, not trimmed", name1, name2, group, got)
+			t.Errorf("derivedTitle(%q, %q, group %q) = %q, not trimmed", name1, name2, group, got)
 		}
 		if maxIn := max(len(name1), len(name2), len(group)); len(got) > maxIn {
-			t.Errorf("feedTitle(%q, %q, group %q) = %q (len %d), exceeds longest input (len %d)",
+			t.Errorf("derivedTitle(%q, %q, group %q) = %q (len %d), exceeds longest input (len %d)",
 				name1, name2, group, got, len(got), maxIn)
 		}
 	})
@@ -54,7 +54,7 @@ func FuzzFeedTitle_singleVideoPreservesName(f *testing.F) {
 		got := derivedTitle(&seadex.Torrent{Files: []seadex.File{{Name: base + ".mkv"}}}, EntryInfo{})
 		want := strings.TrimSpace(base[strings.LastIndex(base, "/")+1:])
 		if got != want {
-			t.Errorf("feedTitle(single video %q) = %q, want %q", base, got, want)
+			t.Errorf("derivedTitle(single video %q) = %q, want %q", base, got, want)
 		}
 	})
 }
@@ -97,7 +97,7 @@ func FuzzValidInfoHash_normalizedShapeAndIdempotent(f *testing.F) {
 // panics, the result carries no leading/trailing whitespace, and with a
 // non-blank show title the result begins with that trimmed title - so a
 // degenerate implementation returning "" (or one that lets hostile file names
-// displace the show title) cannot pass. The feedTitle fallback (blank title)
+// displace the show title) cannot pass. The derivedTitle fallback (blank title)
 // has its own two targets above.
 func FuzzSynthesizeTitle_titledAndTrimmed(f *testing.F) {
 	f.Add("Frieren: Beyond Journey's End", 2023, 1, false, false, true,

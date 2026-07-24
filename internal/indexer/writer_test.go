@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -852,5 +853,71 @@ func TestRebuildWarnedIdentityPropagatesTransitively(t *testing.T) {
 	}
 	if _, ok := snap.ByKey["nyaa:2"]; ok {
 		t.Error("curation set marks the transitively warned key")
+	}
+}
+
+// TestRebuildBaselinesOversizedSeenLedgerKey pins the seen-ledger ingress of
+// the shared persisted-item limits: the ledger is carried forward verbatim
+// and never pruned, so an over-limit identity key from a hand-edited
+// snapshot must warn and re-baseline as malformed rather than persist in
+// every future snapshot.
+func TestRebuildBaselinesOversizedSeenLedgerKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	oversized := strings.Repeat("k", maxPersistedFieldBytes+1)
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{oversized: true},
+	})
+	log, rec := capture.New()
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
+	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
+	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if snap.Seen[oversized] {
+		t.Error("oversized seen-ledger key survived the rebuild (it would persist in every future snapshot)")
+	}
+	if !snap.Seen["nyaa:42"] {
+		t.Errorf("seen ledger missing the curated identity after re-baseline: %v", snap.Seen)
+	}
+	if !rec.Contains(msgSnapshotMalformed) {
+		t.Errorf("oversized seen-ledger key not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestLoadPreviousPreservesLargeHarvestCheckpoint pins that loadPrevious
+// carries a structurally valid harvest checkpoint through byte-for-byte
+// regardless of its encoded size: harvest_cursor is a Pages map with one
+// entry per still-pending deep show (bounded by age, not count), so a
+// compact honest checkpoint legitimately exceeds maxPersistedFieldBytes at a
+// few hundred live page entries. A byte-length cap here would silently reset
+// accumulated harvest paging progress on every rebuild.
+func TestLoadPreviousPreservesLargeHarvestCheckpoint(t *testing.T) {
+	cp := harvestCheckpoint{Last: "nyaa:1", Pages: make(map[string]int, 300)}
+	for i := range 300 {
+		cp.Pages["nyaa:"+strconv.Itoa(100000+i)] = 2
+	}
+	encoded := encodeHarvestCheckpoint(cp)
+	if len(encoded) <= maxPersistedFieldBytes {
+		t.Fatalf("encoded checkpoint = %d bytes, want > %d (the honest-cursor premise of this regression test)",
+			len(encoded), maxPersistedFieldBytes)
+	}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash:        map[string]bool{},
+		ByKey:         map[string]bool{},
+		Seen:          map[string]bool{},
+		HarvestCursor: encoded,
+	})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{})
+	prev, err := w.loadPrevious(context.Background())
+	if err != nil {
+		t.Fatalf("loadPrevious: %v", err)
+	}
+	if prev.cursor != encoded {
+		t.Errorf("loadPrevious cursor = %d bytes, want the %d-byte checkpoint preserved byte-for-byte (resetting it discards accumulated harvest paging progress)",
+			len(prev.cursor), len(encoded))
 	}
 }

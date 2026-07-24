@@ -14,7 +14,6 @@ import (
 	"github.com/cplieger/arrapi"
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/compare"
-	"github.com/cplieger/seadex-scout/internal/degradation"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
@@ -1274,7 +1273,7 @@ func TestSaveGenuineFailureLogsError(t *testing.T) {
 // TestLoadMappingEscalatesAfterRepeatedRejections pins the WARN-to-ERROR
 // escalation of the single degraded-mapping log site: below the threshold a
 // guard-rejected refresh logs "mapping degraded" at WARN; once the persisted
-// streak reaches degradation.EscalationThreshold the same site logs at
+// streak reaches mappingRejectionEscalationThreshold the same site logs at
 // ERROR (firing the existing SeadexScoutCycleError Loki rule) with the remedy
 // in the message and the streak/guard in the structured attrs - exactly one
 // line either way (no double-logging), still returning the stale cache.
@@ -1284,8 +1283,8 @@ func TestLoadMappingEscalatesAfterRepeatedRejections(t *testing.T) {
 		priorStreak int
 		wantError   bool
 	}{
-		{name: "below threshold stays WARN", priorStreak: degradation.EscalationThreshold - 2, wantError: false},
-		{name: "at threshold escalates to ERROR", priorStreak: degradation.EscalationThreshold - 1, wantError: true},
+		{name: "below threshold stays WARN", priorStreak: mappingRejectionEscalationThreshold - 2, wantError: false},
+		{name: "at threshold escalates to ERROR", priorStreak: mappingRejectionEscalationThreshold - 1, wantError: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2048,8 +2047,17 @@ func TestCycleAniListEscalationFiresWhenPartialWalkWinsCompletionLine(t *testing
 	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "partial-walk" {
 		t.Errorf("degraded reasons = %v, want [partial-walk] (the switch's first arm wins the completion line)", reasons)
 	}
-	if n := recorder.CountExact("anilist lookups degraded repeatedly; matching incomplete and findings frozen for affected entries - inspect graphql.anilist.co reachability and egress"); n != 1 {
-		t.Errorf("escalation ERROR count = %d, want 1 (the escalation must fire even when the partial-walk arm wins the completion line)", n)
+	const escalationMsg = "anilist lookups degraded repeatedly; matching incomplete and findings frozen for affected entries - inspect graphql.anilist.co reachability and egress"
+	var escalations []slog.Record
+	for _, r := range recorder.Records() {
+		if r.Message == escalationMsg {
+			escalations = append(escalations, r)
+		}
+	}
+	if len(escalations) != 1 {
+		t.Errorf("escalation count = %d, want 1 (the escalation must fire even when the partial-walk arm wins the completion line)", len(escalations))
+	} else if escalations[0].Level != slog.LevelError {
+		t.Errorf("escalation level = %v, want %v (the operator-alert contract requires ERROR, not a same-message downgrade)", escalations[0].Level, slog.LevelError)
 	}
 	if got := store.st.AniListDegraded; got != aniListDegradedEscalationThreshold {
 		t.Errorf("persisted AniListDegraded = %d, want %d (the streak must advance and persist under the combined degradation)", got, aniListDegradedEscalationThreshold)

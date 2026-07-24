@@ -30,10 +30,11 @@ func FuzzHarvestCheckpointCodec(f *testing.F) {
 		if cp.Pages == nil {
 			t.Fatalf("decodeHarvestCheckpoint(%q).Pages = nil, want an allocated map", raw)
 		}
+		maxSafePage := math.MaxInt/harvestPageSize - (harvestShowPageCap - 1)
 		for key, page := range cp.Pages {
-			if page <= 0 || page > math.MaxInt/harvestPageSize {
+			if page <= 0 || page > maxSafePage {
 				t.Fatalf("decodeHarvestCheckpoint(%q) kept page %q=%d outside (0, %d]",
-					raw, key, page, math.MaxInt/harvestPageSize)
+					raw, key, page, maxSafePage)
 			}
 		}
 		if len(cp.Pages) > 0 || !strings.HasPrefix(strings.TrimSpace(cp.Last), "{") {

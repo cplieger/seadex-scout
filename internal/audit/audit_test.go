@@ -365,13 +365,15 @@ func TestAuditMalformedPublicURLListedUnobtainable(t *testing.T) {
 	}
 }
 
-// TestSortRowsOrdersByVerdictThenTitle pins the report's row ordering: rows
-// group by verdict actionability (verdictOrder: unlisted, alt, unverified,
-// no_file, best, not_on_seadex) and, within a verdict, sort by title
-// case-insensitively. The 2026-07-13 gremlins tracker confirmed sortRows'
-// comparator had no killing test (CONDITIONALS_NEGATION mutants LIVED in all
-// 3 runs on both the rank and the title comparisons).
-func TestSortRowsOrdersByVerdictThenTitle(t *testing.T) {
+// TestSortRowsOrdersByVerdictTitleSeasonAniListID pins the report's row
+// ordering: rows group by verdict actionability (verdictOrder: unlisted, alt,
+// unverified, no_file, best, not_on_seadex); within a verdict they sort by
+// title case-insensitively; same-title rows sort by season ascending; and
+// same-season rows tie-break on AniList id ascending. The 2026-07-13 gremlins
+// tracker confirmed sortRows' comparator had no killing test
+// (CONDITIONALS_NEGATION mutants LIVED in all 3 runs on both the rank and the
+// title comparisons).
+func TestSortRowsOrdersByVerdictTitleSeasonAniListID(t *testing.T) {
 	rows := []Row{
 		{Title: "zeta", Verdict: VerdictBest},
 		{Title: "Beta", Verdict: VerdictUnlisted},
@@ -381,6 +383,12 @@ func TestSortRowsOrdersByVerdictThenTitle(t *testing.T) {
 		{Title: "epsilon", Verdict: VerdictUnverified},
 		{Title: "omega", Verdict: VerdictAlt},
 		{Title: "ALPHA2", Verdict: VerdictUnlisted},
+		// Same verdict + title: season ascending, then AniList id ascending
+		// within an equal season (the tie-breaks the title-only ordering
+		// left uncovered).
+		{Title: "shared", Verdict: VerdictAlt, Season: 2, AniListID: 30},
+		{Title: "shared", Verdict: VerdictAlt, Season: 1, AniListID: 20},
+		{Title: "shared", Verdict: VerdictAlt, Season: 1, AniListID: 10},
 	}
 
 	sortRows(rows)
@@ -388,22 +396,28 @@ func TestSortRowsOrdersByVerdictThenTitle(t *testing.T) {
 	want := []struct {
 		title   string
 		verdict Verdict
+		season  int
+		alID    int
 	}{
-		{"ALPHA2", VerdictUnlisted}, // case-insensitive: "alpha2" < "beta"
-		{"Beta", VerdictUnlisted},
-		{"omega", VerdictAlt},
-		{"epsilon", VerdictUnverified},
-		{"delta", VerdictNoFile},
-		{"alpha", VerdictBest},
-		{"zeta", VerdictBest},
-		{"gamma", VerdictNotOnSeaDex},
+		{"ALPHA2", VerdictUnlisted, 0, 0}, // case-insensitive: "alpha2" < "beta"
+		{"Beta", VerdictUnlisted, 0, 0},
+		{"omega", VerdictAlt, 0, 0},
+		{"shared", VerdictAlt, 1, 10}, // same title: season first, then AniList id
+		{"shared", VerdictAlt, 1, 20},
+		{"shared", VerdictAlt, 2, 30},
+		{"epsilon", VerdictUnverified, 0, 0},
+		{"delta", VerdictNoFile, 0, 0},
+		{"alpha", VerdictBest, 0, 0},
+		{"zeta", VerdictBest, 0, 0},
+		{"gamma", VerdictNotOnSeaDex, 0, 0},
 	}
 	if len(rows) != len(want) {
 		t.Fatalf("rows = %d, want %d", len(rows), len(want))
 	}
 	for i, w := range want {
-		if rows[i].Title != w.title || rows[i].Verdict != w.verdict {
-			t.Errorf("rows[%d] = %q/%q, want %q/%q", i, rows[i].Title, rows[i].Verdict, w.title, w.verdict)
+		if rows[i].Title != w.title || rows[i].Verdict != w.verdict || rows[i].Season != w.season || rows[i].AniListID != w.alID {
+			t.Errorf("rows[%d] = %q/%q/S%d/al%d, want %q/%q/S%d/al%d",
+				i, rows[i].Title, rows[i].Verdict, rows[i].Season, rows[i].AniListID, w.title, w.verdict, w.season, w.alID)
 		}
 	}
 }

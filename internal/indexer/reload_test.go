@@ -1,12 +1,10 @@
 package indexer
 
 import (
-	"bytes"
 	"context"
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime/pprof"
 	"strings"
 	"testing"
 	"time"
@@ -389,69 +387,6 @@ func TestSnapshotUnavailableRecoveredBetweenLocksAnswersFresh(t *testing.T) {
 	}
 }
 
-// TestReloadCoalescingLoserDefersToWinnerOnFreshInstall pins the pre-first-
-// load coalescing handoff: while a winning reload holds reloadMu over a
-// MISSING snapshot (the healthy fresh-install case), a concurrent reload must
-// not mark the snapshot unavailable and return - it blocks until the winner's
-// verdict and then runs the stat path itself - so no startup request can
-// render a false snapshot-unavailable Torznab error that the winner's ENOENT
-// confirmation contradicts. Synchronization is by holding the real lock and
-// a done channel; no sleeps.
-func TestReloadCoalescingLoserDefersToWinnerOnFreshInstall(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "feed.json") // never written: fresh install
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, path)
-
-	// Simulate the winning reload in flight: hold the coalescing lock the
-	// way the winner does for its whole stat/read/install sequence.
-	ix.reloadMu.Lock()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ix.reload(context.Background())
-	}()
-	// Wait until the loser is observably blocked acquiring reloadMu inside
-	// reload (TryLock failed with no snapshot loaded, the initial-load arm),
-	// so the contested path is exercised deterministically instead of racing
-	// the Unlock below - without this wait the loser can run entirely after
-	// the release, take the uncontested TryLock path, and pass trivially.
-	prof := pprof.Lookup("goroutine")
-	deadline := time.Now().Add(10 * time.Second)
-	blocked := false
-	for !blocked && time.Now().Before(deadline) {
-		var buf bytes.Buffer
-		if err := prof.WriteTo(&buf, 2); err != nil {
-			t.Fatalf("goroutine profile: %v", err)
-		}
-		for stack := range strings.SplitSeq(buf.String(), "\n\n") {
-			if strings.Contains(stack, "sync.(*Mutex).Lock") && strings.Contains(stack, ").reload(") {
-				blocked = true
-			}
-		}
-		if !blocked {
-			time.Sleep(time.Millisecond)
-		}
-	}
-	if !blocked {
-		ix.reloadMu.Unlock()
-		t.Fatal("loser reload never blocked on reloadMu; the contested initial-load arm was not exercised")
-	}
-	// Release the winner's lock; the blocked loser then runs the normal stat
-	// path and confirms the fresh-install ENOENT state instead of latching a
-	// failure it never observed.
-	ix.reloadMu.Unlock()
-	<-done
-
-	ix.mu.RLock()
-	failed := ix.snapFailed
-	ix.mu.RUnlock()
-	if failed {
-		t.Fatal("snapFailed = true after a fresh-install reload; a coalescing loser must defer to the winning reload's verdict, not mark the snapshot unavailable")
-	}
-	if ix.snapshotUnavailable() {
-		t.Fatal("snapshotUnavailable() = true on a fresh install; absence of a first snapshot is the documented healthy state")
-	}
-}
-
 // TestReloadRebuildsNyaaDownloadURLsFromGUID pins the Nyaa load-boundary
 // guarantees (rebuildNyaaDownloadURLs): a persisted DownloadURL is never
 // authoritative - an attacker-planted fetch target is overwritten from the
@@ -739,8 +674,7 @@ func TestReloadDropsCrossTrackerSnapshotItems(t *testing.T) {
 }
 
 // TestReloadCoalescingLoserBlocksWithoutMarkingFailure deterministically pins
-// the pre-first-load coalescing arm the probabilistic
-// TestReloadCoalescingLoserDefersToWinnerOnFreshInstall can miss: while a
+// the pre-first-load coalescing arm: while a
 // winning reload holds reloadMu over a missing first snapshot, a loser that
 // reaches the pre-first-load arm must commit to BLOCKING (the
 // reloadBlockGate seam marks that commitment) without latching snapFailed -

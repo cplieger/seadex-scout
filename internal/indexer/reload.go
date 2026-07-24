@@ -67,6 +67,11 @@ func (ix *Indexer) statSnapshot() (os.FileInfo, bool) {
 	return info, true
 }
 
+// reloadBlockGate is a test seam (see snapshotUnavailableGate for the
+// pattern) marking the moment a pre-first-load coalescing loser commits to
+// BLOCKING on reloadMu instead of returning. A no-op in production.
+var reloadBlockGate = func() {}
+
 // reload refreshes the served feed from the persisted snapshot when the file
 // on disk differs from the loaded copy by mtime or file identity (or nothing
 // is loaded yet). A compare cycle - in this process (the daemon loop) or
@@ -91,11 +96,6 @@ func (ix *Indexer) statSnapshot() (os.FileInfo, bool) {
 // instead: the winner has not yet established whether the on-disk snapshot is
 // usable, so returning early would have to guess between fresh-install and
 // failed state (see the branch below).
-// reloadBlockGate is a test seam (see snapshotUnavailableGate for the
-// pattern) marking the moment a pre-first-load coalescing loser commits to
-// BLOCKING on reloadMu instead of returning. A no-op in production.
-var reloadBlockGate = func() {}
-
 func (ix *Indexer) reload(ctx context.Context) {
 	if ix.path == "" {
 		return
@@ -365,7 +365,7 @@ func rebuildDownloadURLs(feed []journalItem, tracker, passkey string) (out []jou
 	out = make([]journalItem, 0, len(feed))
 	for i := range feed {
 		it := feed[i]
-		if !journalIdentityMatches(&it) || !userinfoFreeURL(it.GUID) {
+		if !journalIdentityMatches(&it) {
 			dropped++
 			if len(samples) < 3 {
 				samples = append(samples, capLogText(it.GUID, 256))
@@ -490,14 +490,4 @@ func snapshotInfoURLAllowed(raw, host string) bool {
 		return false
 	}
 	return strings.EqualFold(u.Hostname(), host)
-}
-
-// userinfoFreeURL reports whether raw parses without a userinfo component.
-// journalIdentityMatches validates host + id but not userinfo, and the
-// persisted GUID is rendered as the RSS <guid> (consumers may treat it as a
-// permalink); the search path's sanitizeDisplayURL already blanks userinfo
-// URLs, so the persisted path matches it.
-func userinfoFreeURL(raw string) bool {
-	u, err := url.Parse(raw)
-	return err == nil && u.User == nil
 }

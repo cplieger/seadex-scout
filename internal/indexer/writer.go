@@ -37,8 +37,8 @@ const (
 	// torznab.go's maxUpstreamFieldBytes so every harvested title and
 	// Prowlarr URL fits by construction and a raise of the upstream cap can
 	// never silently outgrow the persisted cap; only an external value with
-	// no other bound (a SeaDex
-	// filename synthesized into a title can approach the 48 MiB page limit)
+	// no other bound (a SeaDex filename synthesized into a title can
+	// approach the 48 MiB page limit)
 	// is rejected. Without a per-item cap, one such value could pass the
 	// whole-snapshot maxFeedBytes check and reach renderFeed, whose XML
 	// escaping expands an ampersand-heavy title ~5x - enough to drive peak
@@ -436,24 +436,12 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 			titles[k] = t
 		}
 	}
-	cursor := snap.HarvestCursor
-	if len(cursor) > maxPersistedFieldBytes {
-		// An honest cursor is a short "scope:alID" or a small JSON page map;
-		// an over-limit one is a hand-edited snapshot that would otherwise
-		// be re-persisted forever (the steady state with nothing pending to
-		// harvest never overwrites it). Drop it: the harvest restarts at the
-		// head and pages from zero, the same safe baseline
-		// decodeHarvestCheckpoint applies to malformed cursor JSON.
-		w.log.Warn("previous feed snapshot harvest cursor exceeds persisted-item limits; dropping it",
-			"path", w.path, "cursor_bytes", len(cursor))
-		cursor = ""
-	}
 	return previousJournal{
 		nyaaFeed: snap.NyaaFeed,
 		abFeed:   snap.ABFeed,
 		seen:     snap.Seen,
 		titles:   titles,
-		cursor:   cursor,
+		cursor:   snap.HarvestCursor,
 	}, nil
 }
 

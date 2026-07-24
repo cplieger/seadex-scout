@@ -25,6 +25,9 @@ func FuzzCurationWarnings(f *testing.F) {
 		canonical := [][]string{nil, {"broken"}, {"incomplete"}, {"broken", "incomplete"}}
 
 		warns := CurationWarnings(tags)
+		if len(warns) == 0 && warns != nil {
+			t.Errorf("CurationWarnings(%q) = non-nil empty slice, want nil when no warning is present", tags)
+		}
 		bounded := false
 		for _, want := range canonical {
 			if slices.Equal(warns, want) {

@@ -256,7 +256,7 @@ func decodeHarvestCheckpoint(raw string) harvestCheckpoint {
 		// is silently omitted by harvestPage, so the show would re-query
 		// page zero forever while persisting the poisoned value - unlike an
 		// in-range absurd page, which self-heals via the short-page exit.
-		if page <= 0 || page > math.MaxInt/harvestPageSize-harvestShowPageCap {
+		if page <= 0 || page > math.MaxInt/harvestPageSize-(harvestShowPageCap-1) {
 			delete(cp.Pages, key)
 		}
 	}

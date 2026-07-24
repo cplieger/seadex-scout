@@ -19,7 +19,7 @@ func TestFeedTitle_preservesSingleEpisodesAndCollapsesPacksProperty(t *testing.T
 		title := rapid.StringMatching(`[A-Za-z0-9]{1,24}`).
 			Filter(func(s string) bool {
 				// The title must not itself look like an episode marker or a
-				// creditless-extra tag: feedTitle/coveredEpisodes key on the
+				// creditless-extra tag: derivedTitle/coveredEpisodes key on the
 				// LAST matching token in a file name, and real fansub names put
 				// the marker after the title, so a token-shaped title is outside
 				// the domain this heuristic (documented best-effort) supports.
@@ -34,7 +34,7 @@ func TestFeedTitle_preservesSingleEpisodesAndCollapsesPacksProperty(t *testing.T
 
 		single := &seadex.Torrent{Files: []seadex.File{{Name: firstName}}}
 		if got, want := derivedTitle(single, EntryInfo{}), firstName[:len(firstName)-len(".mkv")]; got != want {
-			t.Fatalf("feedTitle(single episode) = %q, want %q", got, want)
+			t.Fatalf("derivedTitle(single episode) = %q, want %q", got, want)
 		}
 
 		pack := &seadex.Torrent{Files: []seadex.File{{Name: firstName}, {Name: secondName}}}
@@ -42,7 +42,7 @@ func TestFeedTitle_preservesSingleEpisodesAndCollapsesPacksProperty(t *testing.T
 			t.Fatalf("coveredEpisodes(pack) = %d, want 2", got)
 		}
 		if got, want := derivedTitle(pack, EntryInfo{}), fmt.Sprintf("%s - S%02d [Grp]", title, season); got != want {
-			t.Fatalf("feedTitle(pack) = %q, want %q", got, want)
+			t.Fatalf("derivedTitle(pack) = %q, want %q", got, want)
 		}
 	})
 }

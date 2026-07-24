@@ -89,7 +89,7 @@ func TestRepresentativeFileSkipsCreditlessForAbsolute(t *testing.T) {
 		t.Errorf("representativeFile = %q, want the first absolute-numbered episode", got)
 	}
 	if got := derivedTitle(&seadex.Torrent{Files: files}, EntryInfo{}); got != "[Grp] Show (1080p)" {
-		t.Errorf("feedTitle = %q, want %q (collapsed from the episode, not the NCED)", got, "[Grp] Show (1080p)")
+		t.Errorf("derivedTitle = %q, want %q (collapsed from the episode, not the NCED)", got, "[Grp] Show (1080p)")
 	}
 }
 
@@ -104,7 +104,7 @@ func TestCoveredEpisodesCountsExtensionAbuttingAbsoluteForm(t *testing.T) {
 		t.Errorf("coveredEpisodes = %d, want 2 (absolute form abutting the extension)", got)
 	}
 	if got := derivedTitle(&seadex.Torrent{Files: files}, EntryInfo{}); got != "Show" {
-		t.Errorf("feedTitle = %q, want %q (two-episode pack collapses)", got, "Show")
+		t.Errorf("derivedTitle = %q, want %q (two-episode pack collapses)", got, "Show")
 	}
 }
 
@@ -146,7 +146,7 @@ func TestRepresentativeFileSkipsEpisodeNamedSidecar(t *testing.T) {
 		t.Errorf("representativeFile = %q, want media file %q", got, files[1].Name)
 	}
 	if got := derivedTitle(&seadex.Torrent{Files: files}, EntryInfo{}); got != "Show - S01E01 (1080p) [Grp]" {
-		t.Errorf("feedTitle = %q, want title derived from the media file", got)
+		t.Errorf("derivedTitle = %q, want title derived from the media file", got)
 	}
 }
 
@@ -215,7 +215,7 @@ func TestFeedTitleMixedSeasonPackLabelsRealSeason(t *testing.T) {
 		{Name: "Show - S01E02 (1080p) [Grp].mkv"},
 	}
 	if got, want := derivedTitle(&seadex.Torrent{Files: files}, EntryInfo{}), "Show - S01 (1080p) [Grp]"; got != want {
-		t.Errorf("feedTitle(S00+S01 pack) = %q, want %q (labeled by the dominant real season)", got, want)
+		t.Errorf("derivedTitle(S00+S01 pack) = %q, want %q (labeled by the dominant real season)", got, want)
 	}
 }
 
@@ -392,7 +392,7 @@ func TestPackSeasonIgnoresEpisodeNamedSidecars(t *testing.T) {
 	}
 }
 
-// TestFeedTitlePackWithDirectoryOnlyEpisodeTokens pins feedTitle's final
+// TestFeedTitlePackWithDirectoryOnlyEpisodeTokens pins derivedTitle's final
 // fallback (the one branch its tables missed): coveredEpisodes counts episode
 // tokens from the FULL path, but the title derives from path.Base of the
 // representative file - so a pack whose SxxExx tokens live only in directory
@@ -407,7 +407,7 @@ func TestFeedTitlePackWithDirectoryOnlyEpisodeTokens(t *testing.T) {
 		t.Fatalf("coveredEpisodes = %d, want 2 (tokens counted from the full path)", got)
 	}
 	if got := derivedTitle(&seadex.Torrent{Files: files}, EntryInfo{}); got != "Movie Cut A" {
-		t.Errorf("feedTitle = %q, want %q (basename fallback when the base carries no episode token)", got, "Movie Cut A")
+		t.Errorf("derivedTitle = %q, want %q (basename fallback when the base carries no episode token)", got, "Movie Cut A")
 	}
 }
 
@@ -430,7 +430,7 @@ func TestPackSeasonTieBreakIsOrderIndependent(t *testing.T) {
 }
 
 // TestFeedTitleCollapsesOnlyLastEpisodeToken pins the LAST-token contract of
-// the SxxExx collapse arm shared by feedTitle and coveredEpisodes: a file name
+// the SxxExx collapse arm shared by derivedTitle and coveredEpisodes: a file name
 // whose TITLE segment is itself SxxExx-shaped ("Show S02E00 Cut - S01E01")
 // must key/collapse on the real trailing marker, preserving the title segment
 // verbatim - a first-token regression reads the pack as one episode and
@@ -444,7 +444,7 @@ func TestFeedTitleCollapsesOnlyLastEpisodeToken(t *testing.T) {
 		t.Fatalf("coveredEpisodes = %d, want 2 (episodes keyed on the LAST token; the title's SxxExx-shaped substring must not shadow the real marker)", got)
 	}
 	if got, want := derivedTitle(&seadex.Torrent{Files: files}, EntryInfo{}), "Show S02E00 Cut - S01 (1080p)"; got != want {
-		t.Errorf("feedTitle = %q, want %q (only the LAST episode token collapses; the title's own SxxExx-shaped substring is preserved verbatim)", got, want)
+		t.Errorf("derivedTitle = %q, want %q (only the LAST episode token collapses; the title's own SxxExx-shaped substring is preserved verbatim)", got, want)
 	}
 }
 
@@ -462,7 +462,7 @@ func TestFeedTitleCollapsesOnlyLastAbsoluteEpisodeToken(t *testing.T) {
 		t.Fatalf("coveredEpisodes = %d, want 2 (absolute episodes keyed on the LAST token)", got)
 	}
 	if got, want := derivedTitle(&seadex.Torrent{Files: files}, EntryInfo{}), "Show - 07 (WEB)"; got != want {
-		t.Errorf("feedTitle = %q, want %q (only the LAST absolute token collapses; the ' - NN'-shaped title segment is preserved)", got, want)
+		t.Errorf("derivedTitle = %q, want %q (only the LAST absolute token collapses; the ' - NN'-shaped title segment is preserved)", got, want)
 	}
 }
 

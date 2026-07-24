@@ -268,7 +268,7 @@ func TestAlertedDecodesLegacyFullFindingRecord(t *testing.T) {
 // rule counts only msg="better release available" warn lines, so an
 // unverifiable finding must emit ONE line at INFO with its own message and
 // contribute zero warn-level better-release lines - and, like every finding,
-// it dedupes across cycles by its key (the second Report emits nothing new).
+// it dedupes across cycles by its key (the second Notify emits nothing new).
 func TestNotifierUnverifiableFindingIsInfoNotBetterRelease(t *testing.T) {
 	notifier, recorder := newCapturedNotifier()
 	finding := testFinding("unv", "Unknown Evidence")
