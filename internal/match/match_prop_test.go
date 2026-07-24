@@ -16,10 +16,10 @@ import (
 // randomized pre-state (absent / live / expired / legacy entries), randomized
 // jitter draws, and a randomized AniList answer set, across one clean Match
 // pass: no returned entry is immortal (zero expiry) or already expired, a
-// pending id (absent or expired) is re-stamped inside [now+memoTTLMin,
-// now+memoTTLMax) with the batch answer deciding positive vs negative, a live
+// pending id (absent or expired) is re-stamped inside [now+memoMinTTL,
+// now+memoMaxTTL) with the batch answer deciding positive vs negative, a live
 // entry survives untouched with zero AniList traffic for it, and a legacy
-// entry is migrated into [now+memoMigrationMin, now+memoTTLMax) keeping its
+// entry is migrated into [now+memoMinMigration, now+memoMaxTTL) keeping its
 // payload (migration never re-fetches). The model is the drawn state labels,
 // so the assertions restate the documented contract, not the implementation.
 func TestMemoExpiryLifecycleProperty(t *testing.T) {
@@ -51,10 +51,10 @@ func TestMemoExpiryLifecycleProperty(t *testing.T) {
 			states[id] = st
 			switch st {
 			case stateLive:
-				ttl := time.Duration(rapid.Int64Range(1, int64(memoTTLMax)).Draw(rt, "liveTTL"))
+				ttl := time.Duration(rapid.Int64Range(1, int64(memoMaxTTL)).Draw(rt, "liveTTL"))
 				memo.Entries[id] = MemoEntry{Titles: []string{"Cached"}, Format: "MOVIE", Year: 2019, Expiry: now.Add(ttl)}
 			case stateExpired:
-				age := time.Duration(rapid.Int64Range(0, int64(memoTTLMax)).Draw(rt, "expiredAge"))
+				age := time.Duration(rapid.Int64Range(0, int64(memoMaxTTL)).Draw(rt, "expiredAge"))
 				memo.Entries[id] = MemoEntry{NotFound: true, Expiry: now.Add(-age)}
 			case stateLegacy:
 				memo.Entries[id] = MemoEntry{Titles: []string{"Legacy"}, Format: "TV", Year: 2018}
@@ -103,7 +103,7 @@ func TestMemoExpiryLifecycleProperty(t *testing.T) {
 			switch st {
 			case stateAbsent, stateExpired:
 				pending++
-				lo, hi := now.Add(memoTTLMin), now.Add(memoTTLMax)
+				lo, hi := now.Add(memoMinTTL), now.Add(memoMaxTTL)
 				if ent.Expiry.Before(lo) || !ent.Expiry.Before(hi) {
 					rt.Fatalf("memo[%d].Expiry = %s outside the fresh-stamp window [%s, %s)", id, ent.Expiry, lo, hi)
 				}
@@ -115,7 +115,7 @@ func TestMemoExpiryLifecycleProperty(t *testing.T) {
 					rt.Fatalf("memo[%d] = %+v, want the live pre-state entry untouched (%+v)", id, ent, pre[id])
 				}
 			case stateLegacy:
-				lo, hi := now.Add(memoMigrationMin), now.Add(memoTTLMax)
+				lo, hi := now.Add(memoMinMigration), now.Add(memoMaxTTL)
 				if ent.Expiry.Before(lo) || !ent.Expiry.Before(hi) {
 					rt.Fatalf("memo[%d].Expiry = %s outside the migration window [%s, %s)", id, ent.Expiry, lo, hi)
 				}

@@ -234,8 +234,15 @@ func TestServeStartupSnapshotFailureRendersTorznabError(t *testing.T) {
 	}
 
 	// A cycle writes a valid snapshot: the state clears and requests serve
-	// the feed normally again.
+	// the feed normally again. The in-place rewrite lands on the memoized
+	// malformed file's inode within the filesystem's mtime granularity, so
+	// bump the mtime or matchesFailedFile would skip the reread (production
+	// writes are atomic renames, which install a new inode instead).
 	writeSnapshotFile(t, path, &snapshot{ByHash: map[string]bool{}, ByKey: map[string]bool{}, Seen: map[string]bool{}})
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
 	rec = httptest.NewRecorder()
 	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?apikey=k", nil))
 	if body := rec.Body.String(); !strings.Contains(body, "<rss") || strings.Contains(body, "<error") {

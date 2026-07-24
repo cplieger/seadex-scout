@@ -20,20 +20,20 @@ type AniListClient interface {
 
 // --- Memo: the persisted AniList lookup cache and its expiry policy ---
 
-// memoTTLMin and memoTTLMax bound the uniform random TTL stamped on every
+// memoMinTTL and memoMaxTTL bound the uniform random TTL stamped on every
 // memo write: mean 14 days with ±25% jitter, so entries written together (a
 // cold cycle's whole batch) expire spread across a week instead of in
 // lockstep. The policy is time-based, not run-based, so it is independent of
 // poll_interval.
 const (
-	memoTTLMin = 252 * time.Hour // 10.5 days (14d − 25%)
-	memoTTLMax = 420 * time.Hour // 17.5 days (14d + 25%)
-	// memoMigrationMin is the migration window's lower bound: a legacy entry
+	memoMinTTL = 252 * time.Hour // 10.5 days (14d − 25%)
+	memoMaxTTL = 420 * time.Hour // 17.5 days (14d + 25%)
+	// memoMinMigration is the migration window's lower bound: a legacy entry
 	// (persisted before the expiry policy, so it loads with a zero Expiry) is
-	// stamped on first load with a TTL in [memoMigrationMin, memoTTLMax),
+	// stamped on first load with a TTL in [memoMinMigration, memoMaxTTL),
 	// spreading the whole backlog's first renewal across ~17 days with no
 	// day-one re-fetch stampede.
-	memoMigrationMin = 24 * time.Hour
+	memoMinMigration = 24 * time.Hour
 )
 
 // MemoEntry is a cached AniList lookup (titles/format/year), or a negative
@@ -89,31 +89,31 @@ func (m *Memo) StaleTitle(id int) (title string, year int, ok bool) {
 	return ent.Titles[0], ent.Year, true
 }
 
-// jitteredTTL draws one uniform random TTL from [minTTL, memoTTLMax): the
+// jitteredTTL draws one uniform random TTL from [minTTL, memoMaxTTL): the
 // per-entry stagger that keeps memo renewals spread across cycles. Every memo
 // write draws its own TTL, so even entries written by the same batch renew
 // apart.
 func (m *Matcher) jitteredTTL(minTTL time.Duration) time.Duration {
-	return minTTL + time.Duration(m.rand()*float64(memoTTLMax-minTTL))
+	return minTTL + time.Duration(m.rand()*float64(memoMaxTTL-minTTL))
 }
 
 // freshExpiry stamps one memo write's expiry: now plus a fresh jittered TTL.
 // Each write calls it separately, so entries written in the same pass (batch
 // or per-id) still expire staggered.
 func (m *Matcher) freshExpiry(now time.Time) time.Time {
-	return now.Add(m.jitteredTTL(memoTTLMin))
+	return now.Add(m.jitteredTTL(memoMinTTL))
 }
 
 // migrateMemo stamps every legacy entry (a zero Expiry, persisted before the
-// expiry policy) with an expiry drawn from the wider [memoMigrationMin,
-// memoTTLMax) window, so the accumulated backlog's first renewal spreads
+// expiry policy) with an expiry drawn from the wider [memoMinMigration,
+// memoMaxTTL) window, so the accumulated backlog's first renewal spreads
 // across the whole window instead of stampeding on one day (or, without any
 // stamp, living forever). A migrated entry is live until its drawn expiry, so
 // migration itself never triggers a fetch.
 func (m *Matcher) migrateMemo(memo *Memo, now time.Time) {
 	for id, ent := range memo.Entries {
 		if ent.Expiry.IsZero() {
-			ent.Expiry = now.Add(m.jitteredTTL(memoMigrationMin))
+			ent.Expiry = now.Add(m.jitteredTTL(memoMinMigration))
 			memo.Entries[id] = ent
 		}
 	}

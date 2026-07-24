@@ -1454,9 +1454,17 @@ func TestReloadCoalescesConcurrentRefreshes(t *testing.T) {
 	}
 
 	// A newer on-disk snapshot the in-progress refresh has not installed yet.
+	// The in-place rewrite lands on the same inode within the filesystem's
+	// mtime granularity, so bump the mtime past the loaded snapshot's or
+	// loadedSnapshotUnchanged would skip the reload (production writes are
+	// atomic renames, which install a new inode instead).
 	newJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Key":"nyaa:3","Title":"new","GUID":"https://nyaa.si/view/3","DownloadURL":"new"}],"ab_feed":[]}`
 	if err := os.WriteFile(path, []byte(newJSON), 0o600); err != nil {
 		t.Fatalf("write new snapshot: %v", err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
 	}
 
 	// Simulate a refresh in progress: hold reloadMu exactly as the winning

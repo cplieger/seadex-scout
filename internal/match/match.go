@@ -11,13 +11,13 @@
 // hold a stale answer forever (a show added to AniList later would stay
 // not-found; a later-added title would never be seen). Every memo write
 // stamps the entry with an explicit expiry - now plus a uniform random TTL in
-// [memoTTLMin, memoTTLMax) (mean two weeks, ±25% jitter) - so entries written
+// [memoMinTTL, memoMaxTTL) (mean two weeks, ±25% jitter) - so entries written
 // together renew spread out instead of in lockstep. Expiry is lazy: an
 // expired entry is a lookup miss that re-enters the existing batched prefetch
 // (or the per-entry fetch) and is re-stamped on renewal, and entries still
 // expired when a Match pass ends are pruned from the returned memo. Legacy
 // entries persisted before the policy (no expiry field) are stamped on first
-// load from the wider [memoMigrationMin, memoTTLMax) window, spreading the
+// load from the wider [memoMinMigration, memoMaxTTL) window, spreading the
 // accumulated backlog's first renewal with no day-one stampede. The batched
 // prefetch (up to 50 ids per request) amortizes renewals, so a few expiries
 // per day cost effectively nothing.

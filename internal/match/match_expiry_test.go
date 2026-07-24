@@ -34,8 +34,8 @@ func expiryMatcher(client AniListClient, draws ...float64) *Matcher {
 
 // TestMemoStampsJitteredExpiryOnNewEntries pins the write-side policy: every
 // entry a Match pass writes — batch-prefetched positives AND not-found
-// negatives — gets its own uniform random expiry in [now+memoTTLMin,
-// now+memoTTLMax), each from a separate jitter draw, so entries written by the
+// negatives — gets its own uniform random expiry in [now+memoMinTTL,
+// now+memoMaxTTL), each from a separate jitter draw, so entries written by the
 // same batch still expire staggered.
 func TestMemoStampsJitteredExpiryOnNewEntries(t *testing.T) {
 	snap := &library.Snapshot{}
@@ -52,10 +52,10 @@ func TestMemoStampsJitteredExpiryOnNewEntries(t *testing.T) {
 
 	// Prefetch stamps in pending-id (entry) order: id 11 draws 0 (the window
 	// floor), id 22 draws 0.5 (the 14-day mean).
-	if got, want := res.Memo.Entries[11].Expiry, memoTestClock.Add(memoTTLMin); !got.Equal(want) {
+	if got, want := res.Memo.Entries[11].Expiry, memoTestClock.Add(memoMinTTL); !got.Equal(want) {
 		t.Errorf("memo[11].Expiry = %s, want the window floor %s", got, want)
 	}
-	if got, want := res.Memo.Entries[22].Expiry, memoTestClock.Add(memoTTLMin+(memoTTLMax-memoTTLMin)/2); !got.Equal(want) {
+	if got, want := res.Memo.Entries[22].Expiry, memoTestClock.Add(memoMinTTL+(memoMaxTTL-memoMinTTL)/2); !got.Equal(want) {
 		t.Errorf("memo[22].Expiry = %s, want the 14-day mean %s", got, want)
 	}
 	if !res.Memo.Entries[22].NotFound {
@@ -89,7 +89,7 @@ func TestMemoStampsExpiryOnSingleFetchWrites(t *testing.T) {
 			t.Errorf("memo[%d] missing, want a stamped entry", id)
 			continue
 		}
-		if want := memoTestClock.Add(memoTTLMin + (memoTTLMax-memoTTLMin)/2); !ent.Expiry.Equal(want) {
+		if want := memoTestClock.Add(memoMinTTL + (memoMaxTTL-memoMinTTL)/2); !ent.Expiry.Equal(want) {
 			t.Errorf("memo[%d].Expiry = %s, want %s (every write site stamps)", id, ent.Expiry, want)
 		}
 	}
@@ -135,14 +135,14 @@ func TestMemoExpiredEntryRefetchedAndRestamped(t *testing.T) {
 	if ent11.NotFound || len(ent11.Titles) != 1 || ent11.Titles[0] != "Found Later" {
 		t.Errorf("memo[11] = %+v, want the expired negative replaced by the fresh positive", ent11)
 	}
-	if want := memoTestClock.Add(memoTTLMin); !ent11.Expiry.Equal(want) {
+	if want := memoTestClock.Add(memoMinTTL); !ent11.Expiry.Equal(want) {
 		t.Errorf("memo[11].Expiry = %s, want re-stamped %s", ent11.Expiry, want)
 	}
 	ent22 := res.Memo.Entries[22]
 	if len(ent22.Titles) != 1 || ent22.Titles[0] != "New Title" {
 		t.Errorf("memo[22].Titles = %v, want the fresh AniList title", ent22.Titles)
 	}
-	if want := memoTestClock.Add(memoTTLMin + (memoTTLMax-memoTTLMin)/2); !ent22.Expiry.Equal(want) {
+	if want := memoTestClock.Add(memoMinTTL + (memoMaxTTL-memoMinTTL)/2); !ent22.Expiry.Equal(want) {
 		t.Errorf("memo[22].Expiry = %s, want re-stamped %s", ent22.Expiry, want)
 	}
 	for i := range res.Matches {
@@ -216,7 +216,7 @@ func TestMemoPruneDropsExpiredUnrenewedKeepsLive(t *testing.T) {
 
 // TestMemoLegacyEntriesMigratedWithSpread pins the migration: entries
 // persisted before the expiry policy (zero Expiry) are stamped on first load
-// with per-entry draws from the wider [memoMigrationMin, memoTTLMax) window —
+// with per-entry draws from the wider [memoMinMigration, memoMaxTTL) window —
 // distinct expiries so the backlog's first renewal spreads out — and a
 // consulted legacy entry stays a memo HIT (zero AniList requests): migration
 // must not turn the whole backlog into a day-one re-fetch stampede. The
@@ -248,11 +248,11 @@ func TestMemoLegacyEntriesMigratedWithSpread(t *testing.T) {
 	// Map iteration order randomizes which entry receives which draw, so
 	// assert the SET of stamped expiries equals the scripted draws.
 	want := map[time.Time]bool{
-		memoTestClock.Add(memoMigrationMin):                                   false,
-		memoTestClock.Add(memoMigrationMin + (memoTTLMax-memoMigrationMin)/2): false,
-		memoTestClock.Add(memoMigrationMin + (memoTTLMax-memoMigrationMin)/4): false,
+		memoTestClock.Add(memoMinMigration):                                   false,
+		memoTestClock.Add(memoMinMigration + (memoMaxTTL-memoMinMigration)/2): false,
+		memoTestClock.Add(memoMinMigration + (memoMaxTTL-memoMinMigration)/4): false,
 	}
-	lo, hi := memoTestClock.Add(memoMigrationMin), memoTestClock.Add(memoTTLMax)
+	lo, hi := memoTestClock.Add(memoMinMigration), memoTestClock.Add(memoMaxTTL)
 	for id, ent := range res.Memo.Entries {
 		if ent.Expiry.Before(lo) || !ent.Expiry.Before(hi) {
 			t.Errorf("memo[%d].Expiry = %s, want inside [%s, %s)", id, ent.Expiry, lo, hi)
