@@ -3,13 +3,10 @@ module github.com/cplieger/seadex-scout
 go 1.26.5
 
 require (
-	// arrapi v1.7.0 is UNPUBLISHED: a next-tag placeholder above the
-	// published v1.6.0, which lacks the consumed GetEpisodeFiles (see
-	// go.work for the local dev resolution).
-	github.com/cplieger/arrapi v1.7.3
+	github.com/cplieger/arrapi v1.8.0
 	github.com/cplieger/atomicfile/v2 v2.3.0
 	github.com/cplieger/health v1.4.0
-	github.com/cplieger/webhttp v1.12.0
+	github.com/cplieger/webhttp v1.12.1
 )
 
 require go.yaml.in/yaml/v3 v3.0.4
@@ -27,6 +24,6 @@ require github.com/cplieger/httpx/v3 v3.2.0
 
 require github.com/cplieger/jsonx v1.2.0
 
-require github.com/cplieger/runesafe v1.2.0
+require github.com/cplieger/runesafe v1.2.1
 
 require github.com/cplieger/urlform v1.1.0
