@@ -36,7 +36,7 @@ import (
 
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/health"
-	"github.com/cplieger/scheduler"
+	"github.com/cplieger/scheduler/v3"
 	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/config"
 )

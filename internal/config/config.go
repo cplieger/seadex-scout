@@ -28,7 +28,7 @@ import (
 
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/envx/yamlenv"
-	"github.com/cplieger/scheduler"
+	"github.com/cplieger/scheduler/v3"
 	"github.com/cplieger/slogx"
 	"go.yaml.in/yaml/v3"
 )
