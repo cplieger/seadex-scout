@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/httpx/v2"
+	"github.com/cplieger/httpx/v3"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 )
 
