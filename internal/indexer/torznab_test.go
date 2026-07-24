@@ -579,12 +579,12 @@ func TestParseErrorDocumentBoundsCumulativeAttrText(t *testing.T) {
 
 // TestPreflightTorznabBoundsCommentsDirectivesAndCData pins the lexical
 // guard's comment/directive/CDATA arms, which real Prowlarr responses can
-// carry but no other test exercises: bounded comments and <!-directives pass
-// through to encoding/xml, an overlong comment or CDATA section is rejected
-// AT the lexical guard with its own limit named, an unterminated CDATA
-// within the bound is left for encoding/xml to reject (a parse error, never
-// a limit error), and an unterminated quoted tag past the token bound fails
-// the markup-token limit.
+// carry but no other test exercises: bounded comments pass through to
+// encoding/xml, directives are rejected outright, an overlong comment or
+// CDATA section is rejected AT the lexical guard with its own limit named, an
+// unterminated CDATA within the bound is left for encoding/xml to reject (a
+// parse error, never a limit error), and an unterminated quoted tag past the
+// token bound fails the markup-token limit.
 func TestPreflightTorznabBoundsCommentsDirectivesAndCData(t *testing.T) {
 	wrap := func(inner string) []byte {
 		return []byte(`<rss><channel>` + inner + `<item><title>x</title></item></channel></rss>`)

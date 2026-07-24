@@ -205,9 +205,10 @@ func TestStringList_malformedArrayTolerated(t *testing.T) {
 }
 
 // TestTolerantDecoders_resetOnReuse pins the duplicate-key reset invariant on
-// each tolerant decoder directly: encoding/json processes duplicate object
-// keys in order against the SAME field receiver, so a later tolerated-odd
-// value must clear the earlier decode, not silently retain it.
+// each app-owned tolerant decoder directly (flexInt is covered in jsonx):
+// encoding/json processes duplicate object keys in order against the SAME
+// field receiver, so a later tolerated-odd value must clear the earlier
+// decode, not silently retain it.
 func TestTolerantDecoders_resetOnReuse(t *testing.T) {
 	var s flexString
 	if err := s.UnmarshalJSON([]byte(`"MOVIE"`)); err != nil || string(s) != "MOVIE" {

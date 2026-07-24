@@ -610,3 +610,35 @@ func TestParseAcceptsRepeatedKeysAcrossSiblingObjects(t *testing.T) {
 		t.Errorf("len = %d, want 2 records", len(got))
 	}
 }
+
+// TestValidateResponseBoundsThePreflightWalk pins the two bounds the
+// duplicate-key preflight carries over an untrusted body: json.Decoder.Token
+// does not enforce encoding/json's nesting limit, so the walk caps depth at
+// maxJSONDepth instead of recursing once per byte of a 1 MiB '[' body; and
+// per-object keys are tracked in a fold-canonicalized set, so a key-dense
+// object validates in O(keys) rather than rescanning every prior key.
+func TestValidateResponseBoundsThePreflightWalk(t *testing.T) {
+	deep := []byte(strings.Repeat("[", maxJSONDepth+10))
+	err := validateResponse(deep)
+	if err == nil {
+		t.Fatal("validateResponse(over-deep body) = nil error, want the depth bound to reject it")
+	}
+	if !strings.Contains(err.Error(), "max nesting depth") {
+		t.Errorf("err = %v, want the depth bound named", err)
+	}
+
+	var wide strings.Builder
+	wide.WriteByte('{')
+	for i := range 20000 {
+		if i > 0 {
+			wide.WriteByte(',')
+		}
+		wide.WriteString(`"k`)
+		wide.WriteString(strconv.Itoa(i))
+		wide.WriteString(`":0`)
+	}
+	wide.WriteByte('}')
+	if err := validateResponse([]byte(wide.String())); err != nil {
+		t.Errorf("validateResponse(key-dense object) = %v, want it accepted", err)
+	}
+}

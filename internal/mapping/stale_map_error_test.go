@@ -110,3 +110,34 @@ func TestStaleMapError_shrunkFormMessageAndLogAttrs(t *testing.T) {
 		}
 	}
 }
+
+// TestStaleOrFail_recordsReportIndexedCount pins that stale_records is the size
+// of the map consumers actually receive (buildIndex's deduplicated, positive-ID
+// view), not the raw persisted row count. A cache written by a pre-deduplication
+// version can be cacheUsable yet carry duplicate and non-positive rows, so the
+// raw length would over-report against Index.Len() and scout's usable_records on
+// the same degraded-cycle log line.
+func TestStaleOrFail_recordsReportIndexedCount(t *testing.T) {
+	prev := &Cache{
+		FetchedAt: time.Now().Add(-90 * time.Second),
+		Records: []Record{
+			{AniListID: 1, Type: "TV", TvdbID: 100},
+			{AniListID: 1, Type: "TV", TvdbID: 101},
+			{AniListID: 0, Type: "TV", TvdbID: 102},
+		},
+	}
+	next, err := staleOrFail(prev, "refresh failed", errors.New("boom"), errors.New("mapping: no cache"))
+	stale, ok := errors.AsType[*StaleMapError](err)
+	if !ok {
+		t.Fatalf("staleOrFail error = %v, want a *StaleMapError over a usable cache", err)
+	}
+	if got := buildIndex(next.Records).Len(); got != 1 {
+		t.Fatalf("returned stale map indexes %d records, want 1", got)
+	}
+	if stale.records != 1 {
+		t.Errorf("stale_records = %d, want 1 (the indexed size, not the %d persisted rows)", stale.records, len(prev.Records))
+	}
+	if !strings.Contains(stale.Error(), "(1 records,") {
+		t.Errorf("StaleMapError text = %q, want the indexed record count", stale.Error())
+	}
+}

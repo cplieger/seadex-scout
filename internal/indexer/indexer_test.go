@@ -491,6 +491,30 @@ func TestIndexerEndToEnd(t *testing.T) {
 	// TestMarkAndDedupe; the mock here returns the curated item for any query.)
 }
 
+// TestNilHTTPFallbackRefusesCrossHostRedirect pins the nil-Deps.HTTP fallback
+// client's redirect policy: the Prowlarr API key rides an X-Api-Key header,
+// which net/http forwards across redirects, so the fallback must refuse a
+// cross-host hop rather than hand the credential to a redirect target. New's
+// empty snapshot path leaves the warm reload a no-op.
+func TestNilHTTPFallbackRefusesCrossHostRedirect(t *testing.T) {
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: "http://prowlarr/1/api",
+		ProwlarrAPIKey: "prowlarr-key",
+	}}, Deps{}, "")
+	if len(ix.upstreams) != 1 {
+		t.Fatalf("wired %d upstreams, want 1", len(ix.upstreams))
+	}
+	client := ix.upstreams[0].http
+	if client.CheckRedirect == nil {
+		t.Fatal("nil-HTTP fallback client has no redirect policy; a cross-host redirect would forward the Prowlarr X-Api-Key")
+	}
+	via := []*http.Request{httptest.NewRequest(http.MethodGet, "https://prowlarr.local/1/api", nil)}
+	next := httptest.NewRequest(http.MethodGet, "https://evil.example/1/api", nil)
+	if err := client.CheckRedirect(next, via); err == nil {
+		t.Error("fallback client followed a cross-host redirect; want it refused so the X-Api-Key is never forwarded")
+	}
+}
+
 // TestFeedWriterReload verifies the server picks up a newer snapshot the writer
 // persists after the server started (the cross-process poll -> resident daemon
 // path): an initially-absent snapshot serves an empty feed, and once the writer

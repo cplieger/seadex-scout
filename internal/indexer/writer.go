@@ -38,12 +38,11 @@ const (
 	// Prowlarr URL fits by construction and a raise of the upstream cap can
 	// never silently outgrow the persisted cap; only an external value with
 	// no other bound (a SeaDex filename synthesized into a title can
-	// approach the 48 MiB page limit)
-	// is rejected. Without a per-item cap, one such value could pass the
-	// whole-snapshot maxFeedBytes check and reach renderFeed, whose XML
-	// escaping expands an ampersand-heavy title ~5x - enough to drive peak
-	// memory past the 256 MiB container limit and OOM the indexer instead
-	// of degrading.
+	// approach the 48 MiB page limit) is rejected. Without a per-item cap,
+	// one such value could pass the whole-snapshot maxFeedBytes check and
+	// reach renderFeed, whose XML escaping expands an ampersand-heavy
+	// title ~5x - enough to drive peak memory past the 256 MiB container
+	// limit and OOM the indexer instead of degrading.
 	maxPersistedFieldBytes = maxUpstreamFieldBytes
 	// maxPersistedCategories caps one persisted item's category list. The
 	// writer unions at most the three Torznab ids the feed uses (TV, Anime,

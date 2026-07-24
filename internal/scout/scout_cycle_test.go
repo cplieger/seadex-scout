@@ -715,8 +715,8 @@ func TestHandlePreCompareGateShrunkWalkWithSeaDexOutageWarnsFeedKept(t *testing.
 	if n := recorder.CountExact("seadex fetch failed; skipping comparison, findings preserved"); n != 1 {
 		t.Errorf("seadex failure WARN count = %d, want 1 (a shrink + SeaDex double outage must not read as shrink-only)", n)
 	}
-	if st.SeadexFailures != 1 {
-		t.Errorf("SeadexFailures = %d, want 1 (the streak advances whichever gate closes the cycle)", st.SeadexFailures)
+	if store.st.SeadexFailures != 1 {
+		t.Errorf("persisted SeadexFailures = %d, want 1 (the streak advances, and persists, whichever gate closes the cycle)", store.st.SeadexFailures)
 	}
 	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "library-shrunk" {
 		t.Errorf("degraded reasons = %v, want [library-shrunk]", reasons)
@@ -848,8 +848,8 @@ func TestHandlePreCompareGateSeaDexEscalatesBehindWinningMappingGate(t *testing.
 	if !handled || !healthy {
 		t.Errorf("handlePreCompareGate = (%v, %v), want (true, true)", handled, healthy)
 	}
-	if st.SeadexFailures != seadexFailureEscalationThreshold {
-		t.Errorf("SeadexFailures = %d, want %d (a winning gate must not freeze the streak)", st.SeadexFailures, seadexFailureEscalationThreshold)
+	if store.st.SeadexFailures != seadexFailureEscalationThreshold {
+		t.Errorf("persisted SeadexFailures = %d, want %d (a winning gate must not freeze the streak)", store.st.SeadexFailures, seadexFailureEscalationThreshold)
 	}
 	if errs := recorder.CountLevel(slog.LevelError, "seadex fetch failed"); errs != 1 {
 		t.Errorf("seadex ERROR count = %d, want 1 (the threshold must fire behind the mapping gate)", errs)

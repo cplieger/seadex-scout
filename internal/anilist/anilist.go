@@ -24,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/cplieger/httpx/v3"
@@ -500,20 +501,30 @@ func validateResponse(raw []byte) error {
 	return nil
 }
 
+// maxJSONDepth bounds the preflight walk's nesting. json.Decoder.Token does
+// not enforce encoding/json's own nesting limit, so without this cap a 1 MiB
+// body of '[' would drive ~1M recursion frames (measured 206 MB RSS) inside a
+// 256 MiB container. It is the same limit encoding/json applies, so any body
+// the decode step would have rejected is still rejected, only earlier and
+// without the deep stack.
+const maxJSONDepth = 10000
+
 // rejectDuplicateJSONKeys walks the whole response with json.Decoder tokens
 // and fails on the first object that repeats a key. Matching is
 // case-insensitive because encoding/json also matches struct fields
 // case-insensitively, so "media" and "Media" address the same field and are
-// equally ambiguous.
+// equally ambiguous. The walk is depth-bounded at maxJSONDepth, and per-object
+// keys are tracked in a fold-canonicalized set so a key-dense body costs
+// O(keys), not O(keys^2).
 func rejectDuplicateJSONKeys(raw []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
-	return walkJSONValue(dec)
+	return walkJSONValue(dec, 0)
 }
 
 // walkJSONValue consumes exactly one JSON value from dec, recursing into
 // objects and arrays. A scalar is consumed by the leading Token call; a
 // container is closed by the trailing one.
-func walkJSONValue(dec *json.Decoder) error {
+func walkJSONValue(dec *json.Decoder, depth int) error {
 	tok, err := dec.Token()
 	if err != nil {
 		return err
@@ -522,14 +533,17 @@ func walkJSONValue(dec *json.Decoder) error {
 	if !ok {
 		return nil
 	}
+	if depth >= maxJSONDepth {
+		return fmt.Errorf("exceeded max nesting depth %d", maxJSONDepth)
+	}
 	switch delim {
 	case '{':
-		if objErr := walkJSONObject(dec); objErr != nil {
+		if objErr := walkJSONObject(dec, depth+1); objErr != nil {
 			return objErr
 		}
 	case '[':
 		for dec.More() {
-			if elemErr := walkJSONValue(dec); elemErr != nil {
+			if elemErr := walkJSONValue(dec, depth+1); elemErr != nil {
 				return elemErr
 			}
 		}
@@ -543,8 +557,8 @@ func walkJSONValue(dec *json.Decoder) error {
 // walkJSONObject consumes an object's members after its opening delimiter,
 // failing on the first repeated key. The closing delimiter is consumed by the
 // caller (walkJSONValue), which owns the container's framing.
-func walkJSONObject(dec *json.Decoder) error {
-	var keys []string
+func walkJSONObject(dec *json.Decoder, depth int) error {
+	seen := make(map[string]struct{})
 	for dec.More() {
 		keyToken, keyErr := dec.Token()
 		if keyErr != nil {
@@ -554,15 +568,34 @@ func walkJSONObject(dec *json.Decoder) error {
 		if !isString {
 			return fmt.Errorf("expected object key, got %v", keyToken)
 		}
-		if slices.ContainsFunc(keys, func(seen string) bool { return strings.EqualFold(seen, key) }) {
+		folded := foldJSONKey(key)
+		if _, dup := seen[folded]; dup {
 			return fmt.Errorf("duplicate object key %q", key)
 		}
-		keys = append(keys, key)
-		if valErr := walkJSONValue(dec); valErr != nil {
+		seen[folded] = struct{}{}
+		if valErr := walkJSONValue(dec, depth); valErr != nil {
 			return valErr
 		}
 	}
 	return nil
+}
+
+// foldJSONKey canonicalizes each rune to the smallest member of its simple
+// case-folding orbit, so map equality on the result is exactly
+// strings.EqualFold equality without the per-key linear scan.
+func foldJSONKey(key string) string {
+	var b strings.Builder
+	b.Grow(len(key))
+	for _, r := range key {
+		c := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < c {
+				c = f
+			}
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
 }
 
 // parseMediaForID decodes the GraphQL envelope into a Media. Only an explicit

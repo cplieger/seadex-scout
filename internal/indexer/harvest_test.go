@@ -1424,6 +1424,8 @@ func TestResolveHarvestKeyPartialSignals(t *testing.T) {
 		{"comments alone resolves when guid URL is foreign", item{InfoURL: "https://nyaa.si/view/42", GUID: "https://mirror.example/x"}, "nyaa:42"},
 		{"url and hash agreeing on one release resolve it", item{InfoURL: "https://nyaa.si/view/42", GUID: "https://nyaa.si/view/42", InfoHash: hash}, "nyaa:42"},
 		{"unknown id resolves nothing", item{InfoURL: "https://nyaa.si/view/999", GUID: "https://nyaa.si/view/999"}, ""},
+		{"known url with an unindexed hash fails closed", item{InfoURL: "https://nyaa.si/view/42", GUID: "https://nyaa.si/view/42", InfoHash: strings.Repeat("a", 40)}, ""},
+		{"known hash with an unindexed url fails closed", item{InfoURL: "https://nyaa.si/view/999", GUID: "https://nyaa.si/view/999", InfoHash: hash}, ""},
 		{"no identity signals resolve nothing", item{InfoURL: "https://mirror.example/x", GUID: "https://mirror.example/x"}, ""},
 	}
 	for _, tc := range tests {

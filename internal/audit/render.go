@@ -541,6 +541,12 @@ func reportPairStem(ctx context.Context, dir string, generatedAt time.Time) (str
 	}
 }
 
+// atomicWriteFile is atomicfile.WriteFile behind a package variable so the
+// durability gates in WriteFiles can be exercised with a Durable=false
+// result; a parent-directory fsync failure cannot be induced on a test
+// filesystem. Production always uses atomicfile.WriteFile.
+var atomicWriteFile = atomicfile.WriteFile
+
 // writeAtomic writes data to path atomically and returns atomicfile's Result
 // so the caller can gate on durability: atomicfile deliberately reports a
 // rename whose parent-directory fsync failed as Result{Durable:false} with a
@@ -550,7 +556,7 @@ func reportPairStem(ctx context.Context, dir string, generatedAt time.Time) (str
 // it on the report logger), so no second app-side record is layered on top;
 // the caller turns the flag into a stage-specific error via durabilityErr.
 func writeAtomic(ctx context.Context, path string, data []byte, log *slog.Logger) (atomicfile.Result, error) {
-	return atomicfile.WriteFile(ctx, path, data,
+	return atomicWriteFile(ctx, path, data,
 		atomicfile.WithLogger(log),
 		atomicfile.WithMkdirMode(reportDirMode),
 		atomicfile.WithMode(reportFileMode))

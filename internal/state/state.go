@@ -86,9 +86,9 @@ type State struct {
 	// selection, so a coinciding walk/mapping failure cannot hide the outage
 	// from the streak. It persists across cycles and restarts, resets to 0 on
 	// any successful fetch, and mirrors ShrunkWalks (and
-	// mapping.Cache.RejectedRefreshes) so
-	// the scout can escalate its single seadex-fetch-failed log site after a
-	// sustained outage instead of degrading at WARN forever.
+	// mapping.Cache.RejectedRefreshes) so the scout can escalate its single
+	// seadex-fetch-failed log site after a sustained outage instead of
+	// degrading at WARN forever.
 	SeadexFailures int `json:"seadex_failures,omitempty"`
 	// AniListDegraded counts consecutive COMPLETED cycles whose matching
 	// left AniList lookups incomplete (match.Result.Degraded), preserving the

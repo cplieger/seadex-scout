@@ -112,7 +112,7 @@ func FuzzTrackerKey_keysOnlyTrackerOwnCanonicalURLs(f *testing.F) {
 			return
 		}
 		scope, id, found := strings.Cut(key, ":")
-		if !found || !isAllDigits(id) || len(id) > maxTrackerIDDigits {
+		if !found || id == "" || len(id) > maxTrackerIDDigits || strings.Trim(id, "0123456789") != "" {
 			t.Fatalf("trackerKey(%q, %q) = %q, want scope:<bounded digits>", tracker, raw, key)
 		}
 		u, err := url.Parse(raw)

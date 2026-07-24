@@ -286,7 +286,10 @@ func (j *attrJoiner) string() string {
 // a compact seadex_tags line so an alert can render a self-contained,
 // clickable notification straight from the labels. Every attribute derived
 // from untrusted upstream data (SeaDex/tracker titles, groups, URLs, hashes)
-// is passed through capAttr — runesafe.Sanitize (the same policy the audit
+// is passed through capAttr — or, for a multi-source attribute
+// (recommended_groups, release_urls), through the bounded joinGroupsAttr /
+// joinLinksAttr, which apply the same policy without materializing the
+// aggregate first — runesafe.Sanitize (the same policy the audit
 // report's slog path applies, because slog's JSONHandler escapes C0 controls
 // but emits C1 controls and bidi controls raw) plus a volume cap mirroring
 // the bound the dedupe-key path applies to the same data. Fixed-pattern app

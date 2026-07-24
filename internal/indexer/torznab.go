@@ -481,11 +481,14 @@ func preflightTag(body []byte, countAttrs bool) (n, delta int, err error) {
 
 // tagDepthDelta classifies the nesting-depth contribution of one tag whose
 // terminating unquoted '>' sits at body[end]: an end tag (</...>) closes a
-// level (-1), a <!-directive and a self-closing start tag (.../>; the byte
-// before the terminating '>' is '/', necessarily unquoted since the '>'
-// itself is) leave the depth unchanged (0), and any other start tag opens a
-// level (+1). preflightTag already visits both classification bytes, so this
-// costs two byte-compares.
+// level (-1), a self-closing start tag (.../>; the byte before the
+// terminating '>' is '/', necessarily unquoted since the '>' itself is)
+// leaves the depth unchanged (0), and any other start tag opens a level
+// (+1). preflightTag already visits both classification bytes, so this costs
+// two byte-compares. The body[1] == '!' arm is unreachable defense in depth:
+// preflightMarkup routes CDATA, comments and processing instructions to
+// preflightDelimited and rejects every remaining `<!` directive outright, so
+// no `<!`-prefixed token reaches preflightTag today.
 func tagDepthDelta(body []byte, end int) int {
 	switch {
 	case body[1] == '/':

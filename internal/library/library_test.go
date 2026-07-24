@@ -214,6 +214,46 @@ func TestWalkAppliesIncludeTagFilter(t *testing.T) {
 	}
 }
 
+// TestWalkAppliesIncludeAndExcludeTagFiltersTogether pins the combined
+// filter shape the deployed config uses: an include set AND an exclude set
+// configured on the same walk keep only the included, non-excluded items.
+func TestWalkAppliesIncludeAndExcludeTagFiltersTogether(t *testing.T) {
+	fs := &fakeSonarr{
+		series: []arrapi.Series{
+			{ID: 1, Title: "Kept", Tags: []int{7}},
+			{ID: 2, Title: "Excluded", Tags: []int{7, 9}},
+		},
+		files: map[int][]arrapi.EpisodeFile{
+			1: {epFile(1, "PMR")},
+		},
+		tags: []arrapi.Tag{{ID: 7, Label: "anime"}, {ID: 9, Label: "skip"}},
+	}
+	fr := &fakeRadarr{
+		movies: []arrapi.Movie{{ID: 10, Title: "Kept Movie", Tags: []int{7}}},
+		tags:   []arrapi.Tag{{ID: 7, Label: "anime"}, {ID: 9, Label: "skip"}},
+	}
+	w := NewWalker(&Config{
+		Sonarr:      fs,
+		Radarr:      fr,
+		IncludeTags: []string{"anime"},
+		ExcludeTags: []string{"skip"},
+		Logger:      discardLogger(),
+	})
+
+	snap, err := w.Walk(context.Background())
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	if len(snap.Items) != 2 {
+		t.Fatalf("items = %+v, want the include-tagged series and movie only", snap.Items)
+	}
+	for _, it := range snap.Items {
+		if it.Arr == ArrSonarr && it.ArrID == 2 {
+			t.Error("excluded series (id 2) present, want it dropped by the exclude set")
+		}
+	}
+}
+
 // TestWalkWithoutTagFiltersDoesNotDependOnTagEndpoint verifies that an
 // unconfigured tag filter leaves the tag endpoint outside the walk's behavior.
 func TestWalkWithoutTagFiltersDoesNotDependOnTagEndpoint(t *testing.T) {

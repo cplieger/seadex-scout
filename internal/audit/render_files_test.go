@@ -521,3 +521,65 @@ func TestDurabilityErrGatesBothReportHalves(t *testing.T) {
 		})
 	}
 }
+
+// TestWriteFilesStopsOnNonDurableHalf pins the WIRING of the durability gates
+// (TestDurabilityErrGatesBothReportHalves only pins the helper): a non-durable
+// JSON commit must abort WriteFiles before the Markdown half is published and
+// before the alert-pinned "report written" line is emitted, while a
+// non-durable Markdown commit proves the second gate is reached. Both cases
+// fail if either `if err := durabilityErr(...)` block is deleted. The write
+// seam is a package var because a parent-directory fsync failure cannot be
+// induced on a test filesystem; it runs serially (shared package state).
+func TestWriteFilesStopsOnNonDurableHalf(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		failCall int
+		stage    string
+	}{
+		{"json half", 1, "write json"},
+		{"markdown half", 2, "write markdown"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			var buf strings.Builder
+			log := slog.New(slog.NewJSONHandler(&buf, nil))
+
+			orig := atomicWriteFile
+			t.Cleanup(func() { atomicWriteFile = orig })
+			calls := 0
+			atomicWriteFile = func(ctx context.Context, path string, data []byte, opts ...atomicfile.Option) (atomicfile.Result, error) {
+				calls++
+				res, err := orig(ctx, path, data, opts...)
+				if calls == tt.failCall {
+					res.Durable = false
+				}
+				return res, err
+			}
+
+			rep := &Report{GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC), Totals: map[string]int{}}
+			err := rep.WriteFiles(context.Background(), dir, log)
+
+			if !errors.Is(err, errNotDurable) {
+				t.Fatalf("WriteFiles(non-durable %s) = %v, want errNotDurable", tt.name, err)
+			}
+			if !strings.Contains(err.Error(), tt.stage) {
+				t.Errorf("error = %q, want the %q stage named", err, tt.stage)
+			}
+			if calls != tt.failCall {
+				t.Errorf("atomic writes = %d, want %d (a failed gate must stop the next half)", calls, tt.failCall)
+			}
+			if tt.failCall == 1 {
+				mds, globErr := filepath.Glob(filepath.Join(dir, "*.md"))
+				if globErr != nil {
+					t.Fatalf("glob: %v", globErr)
+				}
+				if len(mds) != 0 {
+					t.Errorf("markdown half = %v, want none published after a non-durable json commit", mds)
+				}
+			}
+			if strings.Contains(buf.String(), "report written") {
+				t.Errorf("log = %s, want no \"report written\" record", buf.String())
+			}
+		})
+	}
+}

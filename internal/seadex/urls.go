@@ -121,10 +121,16 @@ func usableSchemelessHost(f *urlform.Form, baseURL string) string {
 // recovered Host and HasUserInfo for ClassSchemelessHost but not the
 // recovered Port, so the authority is re-parsed here ("//" + value makes
 // net/url read it as one) rather than trusting the label-free host fact
-// alone: publishing "https://nyaa.si:65536/x" would surface an invalid
-// upstream-controlled link even though the host gate held. An unparsable
-// authority is unpublishable too - this publisher drops what it cannot
-// vouch for.
+// alone. Under urlform v1.1.0 no value actually reaches this gate with a
+// port: a colon before the first "/", "?" or "#" makes net/url read a
+// scheme ("nyaa.si:65536/x" classifies ClassHiddenHost with no recoverable
+// authority, since that scheme is not special) or fail outright ("first
+// path segment in URL cannot contain colon", ClassMalformed), and UsableURL
+// drops both before this branch. The check is therefore fail-closed
+// defense in depth that keeps this branch at parity with usableAbsolute's
+// range gate should the classifier's schemeless recovery ever start
+// surfacing a ported authority. An unparsable authority is unpublishable
+// too - this publisher drops what it cannot vouch for.
 func schemelessPortOK(trimmed string) bool {
 	u, err := url.Parse("//" + trimmed)
 	if err != nil {

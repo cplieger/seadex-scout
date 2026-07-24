@@ -673,6 +673,36 @@ func TestReloadDropsCrossTrackerSnapshotItems(t *testing.T) {
 	}
 }
 
+// TestReloadDropsUserinfoBearingSnapshotGUID pins the userinfo arm of the
+// persisted-GUID gate after the dedicated userinfoFreeURL check was removed
+// as redundant: rebuildDownloadURLs now rejects a userinfo-bearing GUID only
+// as a consequence of journalIdentityMatches -> trackerKeyFromURL ->
+// httpNoUserinfoURL, so a future change to that shared key derivation must
+// fail here rather than silently republishing an attacker-shaped credential
+// URL as the RSS <guid>.
+func TestReloadDropsUserinfoBearingSnapshotGUID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{}, ByKey: map[string]bool{}, Seen: map[string]bool{},
+		NyaaFeed: []journalItem{{
+			item: item{Title: "planted", GUID: "https://evil@nyaa.si/view/42"},
+			Key:  "nyaa:42",
+		}},
+	})
+	log, rec := capture.New()
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: "http://prowlarr/1/api",
+	}}, Deps{Logger: log}, path)
+
+	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
+		t.Errorf("nyaa feed = %d items (%+v), want 0: a userinfo-bearing persisted GUID must never serve", len(got), got)
+	}
+	const wantWarn = "indexer feed snapshot: Nyaa items dropped; no download URL derivable from tracker page URL"
+	if count := rec.Count(wantWarn); count != 1 {
+		t.Errorf("userinfo drop warnings = %d, want 1", count)
+	}
+}
+
 // TestReloadCoalescingLoserBlocksWithoutMarkingFailure deterministically pins
 // the pre-first-load coalescing arm: while a
 // winning reload holds the reload gate over a missing first snapshot, a loser that
