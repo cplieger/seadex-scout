@@ -254,9 +254,9 @@ func (s *Scout) Cycle(ctx context.Context) bool {
 	}
 
 	result := s.deps.Matcher.Match(ctx, entries, &snap, idx, st.Memo)
-	if result.Degraded && ctx.Err() != nil {
-		// A shutdown/redeploy cancelled the cycle mid-matching: the match set
-		// is truncated (entries after the cancellation were never attempted),
+	if ctx.Err() != nil {
+		// A shutdown arrived during or right after matching. The match set may
+		// be truncated (entries after the cancellation were never attempted),
 		// so comparing it would falsely resolve their findings. Keep the
 		// whole-cycle skip for this one case; a transient AniList degradation
 		// instead carries Result.IncompleteIDs and flows into the compare
@@ -620,21 +620,20 @@ func (s *Scout) rebuildFeed(ctx context.Context, entries []seadex.Entry, idx *ma
 	}
 }
 
-// logFeedOutageOnGatedCycle surfaces a concurrent SeaDex outage when an
-// earlier gate (a failed arr walk, a suspicious shrunken walk, or an
+// logFeedOutageOnGatedCycle surfaces a concurrent SeaDex zero-entry response
+// when an earlier gate (a failed arr walk, a suspicious shrunken walk, or an
 // unusable mapping) already closed the cycle but a feed is configured, so a
 // multi-dependency outage does not read as the gate's primary failure only.
-// During a shutdown the SeaDex failure is the
+// A FAILED fetch is not logged here: recordSeaDexFetch already logs it exactly
+// once ahead of gate selection (carrying feed_kept), so this stays silent then
+// rather than duplicating it. During a shutdown the SeaDex failure is the
 // cancellation (the interruption is logged by the gate that owns it), so it
-// stays silent then.
+// stays silent then too.
 func (s *Scout) logFeedOutageOnGatedCycle(ctx context.Context, entries []seadex.Entry, seaErr error) {
-	if s.deps.Feed == nil || ctx.Err() != nil {
+	if s.deps.Feed == nil || ctx.Err() != nil || seaErr != nil {
 		return
 	}
-	switch {
-	case seaErr != nil:
-		s.log.Warn("seadex fetch failed; indexer feed kept previous feed", "error", seaErr)
-	case len(entries) == 0:
+	if len(entries) == 0 {
 		s.log.Warn("seadex returned zero entries; indexer feed kept previous feed")
 	}
 }
@@ -650,19 +649,50 @@ func (s *Scout) logFeedOutageOnGatedCycle(ctx context.Context, entries []seadex.
 // mapping.StaleMapError) is degraded-but-comparable and flows into the normal
 // compare path (handled=false).
 func (s *Scout) handlePreCompareGate(ctx context.Context, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, walkErr, mapErr, seaErr error) (handled, healthy bool) {
-	if seaErr == nil {
-		// The SeaDex fetch genuinely succeeded, so the consecutive-failure
-		// streak ends here regardless of which gate closes the cycle - the
-		// walk-failed and shrunk-walk arms save state too, and the documented
-		// contract (state.State.SeadexFailures) is "resets to 0 on any
-		// successful fetch". A cancelled fetch (seaErr != nil) is evidence of
-		// neither an outage nor a recovery and leaves the streak untouched.
-		st.SeadexFailures = 0
-	}
+	// Record the SeaDex fetch outcome (and log a failure) exactly once, before
+	// the mutually exclusive gates below pick a winner: gate precedence must
+	// not decide whether an observed SeaDex outage exists in persisted state.
+	s.recordSeaDexFetch(ctx, st, seaErr)
 	if handled, healthy := s.handleLibraryGate(ctx, st, snap, mapCache, entries, walkErr, seaErr); handled {
 		return true, healthy
 	}
 	return s.handleUpstreamGate(ctx, st, snap, mapCache, entries, mapErr, seaErr)
+}
+
+// recordSeaDexFetch records the cycle's SeaDex fetch outcome in the persisted
+// state and, on a failure, emits its single log line - before the mutually
+// exclusive pre-compare gates run, the same way recordAniListDegradation is
+// applied ahead of the completion-line precedence. Centralizing it here is
+// what makes the streak (state.State.SeadexFailures) independent of which gate
+// closes the cycle: the failed-walk, shrunk-walk, and mapping-unusable arms all
+// save state, so a double outage still advances the streak and still escalates
+// to ERROR at seadexFailureEscalationThreshold instead of WARNing forever
+// behind a higher-precedence gate. A successful fetch resets the streak (the
+// documented "resets to 0 on any successful fetch" contract); a cancelled fetch
+// (a shutdown) is evidence of neither an outage nor a recovery, so it leaves the
+// streak untouched and stays silent - the gate that owns the interruption logs
+// it. feed_kept records whether a configured Torznab feed kept its previous
+// snapshot through this outage.
+func (s *Scout) recordSeaDexFetch(ctx context.Context, st *state.State, seaErr error) {
+	if seaErr == nil {
+		st.SeadexFailures = 0
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	// The persisted streak escalates this single log site to ERROR (the
+	// SeadexScoutCycleError rule) once the outage has spanned
+	// seadexFailureEscalationThreshold consecutive cycles; below it the WARN
+	// keeps an upstream blip off the alert. Both levels carry the streak so
+	// Loki can see how long the outage has run.
+	st.SeadexFailures++
+	attrs := []any{attrError, seaErr, "consecutive_seadex_failures", st.SeadexFailures, "feed_kept", s.deps.Feed != nil}
+	if st.SeadexFailures >= seadexFailureEscalationThreshold {
+		s.log.Error("seadex fetch failed repeatedly; skipping comparison, findings preserved - inspect SeaDex (releases.moe) reachability and egress", attrs...)
+	} else {
+		s.log.Warn("seadex fetch failed; skipping comparison, findings preserved", attrs...)
+	}
 }
 
 // handleLibraryGate gates the compare pass on the library ingest. A failed arr
@@ -767,13 +797,11 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap lib
 // overrides-only map), a failed SeaDex fetch, or a successful-but-empty fetch
 // are each degraded but healthy: they preserve prior findings and save only
 // the refreshed library snapshot/map (degradedSave) so a transient upstream
-// outage does not falsely resolve live findings. The failed-fetch arm carries
-// a persisted consecutive-failure streak (state.State.SeadexFailures) that
-// escalates its single log site from WARN to ERROR at
-// seadexFailureEscalationThreshold, mirroring the shrunk-walk and
-// mapping-rejection guards; a successful fetch resets it in
-// handlePreCompareGate (beside the fetch-success check), so the library-gate
-// early returns see the reset too. A shutdown
+// outage does not falsely resolve live findings. The failed-fetch arm's
+// persisted consecutive-failure streak (state.State.SeadexFailures) and its
+// single WARN/ERROR log site live in recordSeaDexFetch, applied ahead of gate
+// selection so a higher-precedence gate cannot hide the outage from the streak;
+// this arm only saves, emits the completion line, and returns. A shutdown
 // cancellation during the load or fetch is attributed to the shutdown, not
 // the upstream.
 func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, mapErr, seaErr error) (handled, healthy bool) {
@@ -803,19 +831,10 @@ func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap li
 		return true, true
 	}
 	if seaErr != nil {
-		// The persisted streak escalates this single log site to ERROR (the
-		// SeadexScoutCycleError rule) once the outage has spanned
-		// seadexFailureEscalationThreshold consecutive cycles; below it the
-		// WARN keeps an upstream blip off the alert. Both levels carry the
-		// streak so Loki can see how long the outage has run.
-		st.SeadexFailures++
+		// The failure was already recorded and logged once by
+		// recordSeaDexFetch (ahead of gate selection), so this arm only owns
+		// the degraded save, the completion line, and the verdict.
 		s.degradedSave(ctx, st, snap, mapCache)
-		attrs := []any{attrError, seaErr, "consecutive_seadex_failures", st.SeadexFailures}
-		if st.SeadexFailures >= seadexFailureEscalationThreshold {
-			s.log.Error("seadex fetch failed repeatedly; skipping comparison, findings preserved - inspect SeaDex (releases.moe) reachability and egress", attrs...)
-		} else {
-			s.log.Warn("seadex fetch failed; skipping comparison, findings preserved", attrs...)
-		}
 		s.cycleDegraded("seadex-fetch-failed", "error", seaErr)
 		return true, true
 	}

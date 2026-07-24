@@ -129,39 +129,6 @@ func TestFribbRecord_toRecord(t *testing.T) {
 	}
 }
 
-func TestFlexInt_UnmarshalJSON(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want int
-	}{
-		{"number", `123`, 123},
-		{"numeric string", `"456"`, 456},
-		{"padded string", `"  78  "`, 78},
-		{"null", `null`, 0},
-		{"unknown string", `"unknown"`, 0},
-		{"fractional treated absent", `9.9`, 0},
-		{"negative treated absent", `-5`, 0},
-		{"out of range", `1e300`, 0},
-		{"quoted out of range", `"2147483648"`, 0},
-		{"quoted integral float", `"9.0"`, 9},
-		{"quoted exponent", `"1e3"`, 1000},
-		{"quoted fractional treated absent", `"1.5"`, 0},
-		{"quoted negative treated absent", `"-5"`, 0},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var f flexInt
-			if err := f.UnmarshalJSON([]byte(tc.in)); err != nil {
-				t.Fatalf("UnmarshalJSON(%s) error: %v", tc.in, err)
-			}
-			if int(f) != tc.want {
-				t.Errorf("flexInt(%s) = %d, want %d", tc.in, int(f), tc.want)
-			}
-		})
-	}
-}
-
 func TestStringList_UnmarshalJSON(t *testing.T) {
 	tests := []struct {
 		name string
@@ -291,46 +258,29 @@ func TestParseFribb_seasonDecoded(t *testing.T) {
 	}
 }
 
-// TestFlexInt_rangeClampBoundaries pins the inclusive validity endpoints of
-// the tolerant number decode: 0 and the int32 maximum decode as themselves,
-// while any negative value and anything above the int32 maximum are treated
-// as absent (0). Real AniList/TVDB/TMDB ids are never negative, and a
-// negative value must not count toward the arr-identifier acceptance floor.
-func TestFlexInt_rangeClampBoundaries(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want int
-	}{
-		{name: "zero accepted", in: `0`, want: 0},
-		{name: "negative one treated absent", in: `-1`, want: 0},
-		{name: "int32 minimum treated absent", in: `-2147483648`, want: 0},
-		{name: "maximum accepted", in: `2147483647`, want: 2147483647},
-		{name: "above maximum treated absent", in: `2147483648`, want: 0},
+// TestParseFribb_idRangeAppliedEndToEnd pins the identifier range policy at
+// the application boundary: an at-limit AniList/TVDB id survives the parse
+// unchanged, an over-range AniList id drops the whole record (its key is
+// unusable), and an over-range TVDB id decodes as absent (0) while the record
+// itself is retained.
+func TestParseFribb_idRangeAppliedEndToEnd(t *testing.T) {
+	data := []byte(`[
+		{"anilist_id":2147483647,"tvdb_id":2147483647},
+		{"anilist_id":2147483648,"tvdb_id":1},
+		{"anilist_id":7,"tvdb_id":2147483648}
+	]`)
+	records, err := parseFribb(data, discardLogger())
+	if err != nil {
+		t.Fatalf("parseFribb error: %v", err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var got flexInt
-			if err := got.UnmarshalJSON([]byte(tc.in)); err != nil {
-				t.Fatalf("UnmarshalJSON(%s) error: %v", tc.in, err)
-			}
-			if int(got) != tc.want {
-				t.Errorf("flexInt(%s) = %d, want %d", tc.in, int(got), tc.want)
-			}
-		})
+	if len(records) != 2 {
+		t.Fatalf("parseFribb kept %d records, want 2 (over-range AniList ID dropped)", len(records))
 	}
-}
-
-// TestFlexInt_nonNumericJSONTolerated pins the non-string sibling of the
-// placeholder policy: valid JSON of a non-numeric type (a boolean) is
-// tolerated as 0 rather than surfacing the decode error.
-func TestFlexInt_nonNumericJSONTolerated(t *testing.T) {
-	var got flexInt
-	if err := got.UnmarshalJSON([]byte(`true`)); err != nil {
-		t.Fatalf("UnmarshalJSON(true) error: %v", err)
+	if records[0].AniListID != 2147483647 || records[0].TvdbID != 2147483647 {
+		t.Errorf("at-limit record = %+v, want both IDs 2147483647", records[0])
 	}
-	if int(got) != 0 {
-		t.Errorf("flexInt(true) = %d, want 0 (non-numeric placeholder tolerated)", int(got))
+	if records[1].AniListID != 7 || records[1].TvdbID != 0 {
+		t.Errorf("over-range TVDB record = %+v, want AniListID 7 / TvdbID 0", records[1])
 	}
 }
 

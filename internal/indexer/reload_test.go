@@ -675,7 +675,7 @@ func TestReloadDropsCrossTrackerSnapshotItems(t *testing.T) {
 
 // TestReloadCoalescingLoserBlocksWithoutMarkingFailure deterministically pins
 // the pre-first-load coalescing arm: while a
-// winning reload holds reloadMu over a missing first snapshot, a loser that
+// winning reload holds the reload gate over a missing first snapshot, a loser that
 // reaches the pre-first-load arm must commit to BLOCKING (the
 // reloadBlockGate seam marks that commitment) without latching snapFailed -
 // the historic bug this arm exists to prevent - and, once the winner
@@ -685,7 +685,10 @@ func TestReloadCoalescingLoserBlocksWithoutMarkingFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json") // never written: fresh install
 	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, path)
 
-	ix.reloadMu.Lock() // the winning reload is in flight over the missing first snapshot
+	// The winning reload is in flight over the missing first snapshot.
+	if !ix.tryLockReload() {
+		t.Fatal("reload gate already held; want it free before simulating the winning reload")
+	}
 	atGate := make(chan struct{})
 	prev := reloadBlockGate
 	reloadBlockGate = func() { close(atGate) }
@@ -699,12 +702,47 @@ func TestReloadCoalescingLoserBlocksWithoutMarkingFailure(t *testing.T) {
 	failed := ix.snapFailed
 	ix.mu.RUnlock()
 	if failed {
-		t.Error("snapFailed = true while the winner still holds reloadMu; a blocked loser must not latch a failure it never observed")
+		t.Error("snapFailed = true while the winner still holds the reload gate; a blocked loser must not latch a failure it never observed")
 	}
-	ix.reloadMu.Unlock()
+	ix.unlockReload()
 	<-done
 
 	if ix.snapshotUnavailable() {
 		t.Fatal("snapshotUnavailable() = true after the loser re-ran the stat path on a fresh install; absence of a first snapshot is the documented healthy state")
+	}
+}
+
+// TestReloadCoalescingLoserWaitAbandonsOnCancelledContext pins the
+// cancellability of the pre-first-load wait: a loser whose request context is
+// already done (client disconnect, arr timeout) must return BEFORE the winner
+// releases the gate, instead of parking its handler goroutine and connection
+// behind the winner's unbounded stat/read/decode (no server write timeout
+// bounds a mutex wait). It must also leave the snapshot state untouched, exactly
+// like the blocking loser: the verdict is the winner's to establish.
+func TestReloadCoalescingLoserWaitAbandonsOnCancelledContext(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json") // never written: fresh install
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, path)
+
+	// The winning reload is in flight over the missing first snapshot.
+	if !ix.tryLockReload() {
+		t.Fatal("reload gate already held; want it free before simulating the winning reload")
+	}
+	t.Cleanup(ix.unlockReload)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); ix.reload(ctx) }()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled loser still waiting while the winner holds the reload gate; want an abandoned wait")
+	}
+	ix.mu.RLock()
+	failed := ix.snapFailed
+	ix.mu.RUnlock()
+	if failed {
+		t.Error("snapFailed = true after an abandoned wait; the verdict is the winner's to establish")
 	}
 }

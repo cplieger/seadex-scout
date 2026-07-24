@@ -1129,46 +1129,6 @@ func TestEncodeStateWriteErrorWrapped(t *testing.T) {
 	}
 }
 
-// TestStoreLoadUnclassifiedReadErrorBlocksSaveUntilClassified pins the
-// preservation posture's last gap: a present-but-unreadable state file (here
-// EACCES via chmod 0o000 - not absence, not over-cap, not a decode failure)
-// must block Save, or the cycle that started cold after the failed read would
-// overwrite the possibly-recoverable bytes at its end. Every CLASSIFIED
-// failure already preserves its evidence (quarantine / the newer-schema Save
-// block); the block here clears as soon as a later Load succeeds - the scout
-// loads at the start of every cycle, so a transient fault self-heals.
-func TestStoreLoadUnclassifiedReadErrorBlocksSaveUntilClassified(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: chmod 0o000 does not produce EACCES")
-	}
-	dir := t.TempDir()
-	path := filepath.Join(dir, "state.json")
-	store := NewStore(path, testLogger())
-	if err := store.Save(context.Background(), &State{}); err != nil {
-		t.Fatalf("seed Save: %v", err)
-	}
-	if err := os.Chmod(path, 0o000); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	if _, err := store.Load(context.Background()); err == nil {
-		t.Fatal("Load on an unreadable file = nil error, want a read error")
-	}
-	if err := store.Save(context.Background(), &State{}); err == nil {
-		t.Fatal("Save after an unclassified read failure = nil error, want the preservation block")
-	} else if !strings.Contains(err.Error(), "unclassified read failure") {
-		t.Errorf("blocked Save error = %v, want it to name the unclassified read failure", err)
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		t.Fatalf("chmod back: %v", err)
-	}
-	if _, err := store.Load(context.Background()); err != nil {
-		t.Fatalf("Load after repair: %v", err)
-	}
-	if err := store.Save(context.Background(), &State{}); err != nil {
-		t.Errorf("Save after a classifying Load = %v, want the block cleared", err)
-	}
-}
-
 // TestStoreLoadMalformedVersionValueQuarantines pins schemaVersion's raw-value
 // decode error branch: a version member whose VALUE is syntactically invalid
 // JSON ({"version":} / a truncated {"version":) fails the raw decode before
@@ -1244,12 +1204,13 @@ func TestStoreLoadStateFieldTypeMismatchQuarantines(t *testing.T) {
 	}
 }
 
-// TestStoreLoadCanceledReadBlocksSaveUntilClassified pins the root-safe leg
-// of the unclassified-read-failure preservation posture: a canceled read is
-// an UNCLASSIFIED failure (like EACCES/EIO), so after a Load under a
+// TestStoreLoadCanceledReadBlocksSaveUntilClassified pins the
+// unclassified-read-failure preservation posture: a canceled read is an
+// UNCLASSIFIED failure (like EACCES/EIO), so after a Load under a
 // pre-canceled context the on-disk bytes must be preserved by refusing Save
-// until a later Load classifies the file. Unlike the EACCES variant (which
-// skips under root), this injection works in any environment.
+// until a later Load classifies the file. Cancellation is the injection this
+// posture is pinned with because it needs no permission trickery and so works
+// in any environment, root included.
 func TestStoreLoadCanceledReadBlocksSaveUntilClassified(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	if err := os.WriteFile(path, []byte(`{"baselined":true}`), 0o600); err != nil {

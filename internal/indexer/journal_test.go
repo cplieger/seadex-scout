@@ -1338,3 +1338,36 @@ func TestRebuildDropsNonCuratedCarriedItemWithBadGUID(t *testing.T) {
 		})
 	}
 }
+
+// TestRebuildFallsBackFromUnpublishableOccurrence pins the sibling fallback of
+// the render's creation-time GUID-to-Key gate: two entries share one journal
+// key (nyaa:77), and the LOWER AniList id - the one the deterministic
+// synthesis order tries first - carries a bad-port page URL that journalKey
+// still reads but UsableURL drops. Without the journalIdentityMatches
+// fallback that occurrence would win and journal an unpublishable empty GUID
+// (dropped again on every reader load), instead of the publishable sibling.
+func TestRebuildFallsBackFromUnpublishableOccurrence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	entries := []seadex.Entry{
+		{AniListID: 1, Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://nyaa.si:bad/view/77",
+			Files: []seadex.File{{Length: 9, Name: "Show - S01E01 (1080p) [G].mkv"}},
+		}}},
+		{AniListID: 2, Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://nyaa.si/view/77",
+			Files: []seadex.File{{Length: 9, Name: "Show - S01E01 (1080p) [G].mkv"}},
+		}}},
+	}
+
+	if err := newTestWriter(path, "", false).Rebuild(t.Context(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 1 {
+		t.Fatalf("feed = %d items, want 1 from the publishable sibling", len(snap.NyaaFeed))
+	}
+	if got := snap.NyaaFeed[0]; got.AniListID != 2 || got.GUID != "https://nyaa.si/view/77" {
+		t.Errorf("journal item = (AniListID=%d, GUID=%q), want the publishable sibling (2, %q)", got.AniListID, got.GUID, "https://nyaa.si/view/77")
+	}
+}

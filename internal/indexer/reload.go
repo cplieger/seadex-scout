@@ -69,8 +69,39 @@ func (ix *Indexer) statSnapshot() (os.FileInfo, bool) {
 
 // reloadBlockGate is a test seam (see snapshotUnavailableGate for the
 // pattern) marking the moment a pre-first-load coalescing loser commits to
-// BLOCKING on reloadMu instead of returning. A no-op in production.
+// WAITING on the reload gate instead of returning. A no-op in production.
 var reloadBlockGate = func() {}
+
+// tryLockReload acquires the reload gate without waiting, reporting whether
+// this caller won the refresh. The sending caller owns the gate until the
+// matching unlockReload.
+func (ix *Indexer) tryLockReload() bool {
+	select {
+	case ix.reloadGate <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// lockReloadOrDone waits for the reload gate, giving up when ctx is done, and
+// reports whether it was acquired. This is the cancellable half of the gate: a
+// pre-first-load loser must wait for the winner's fresh-install-vs-failed
+// verdict, but a request whose client has gone away must be able to abandon
+// that wait instead of parking a handler goroutine behind an unbounded
+// stat/read/decode.
+func (ix *Indexer) lockReloadOrDone(ctx context.Context) bool {
+	select {
+	case ix.reloadGate <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// unlockReload releases the reload gate acquired by tryLockReload or
+// lockReloadOrDone.
+func (ix *Indexer) unlockReload() { <-ix.reloadGate }
 
 // reload refreshes the served feed from the persisted snapshot when the file
 // on disk differs from the loaded copy by mtime or file identity (or nothing
@@ -89,18 +120,20 @@ var reloadBlockGate = func() {}
 // Concurrent calls coalesce: after a cycle rewrites the snapshot, every
 // in-flight request observes the newer mtime at once, and without coalescing
 // each would independently read and unmarshal up to maxFeedBytes before the
-// under-mu recheck let only one install it. reloadMu.TryLock lets exactly one
+// under-mu recheck let only one install it. tryLockReload lets exactly one
 // request refresh; once a snapshot has loaded, the rest return immediately and
 // serve the current immutable snapshot (the next request picks up the newly
-// installed one). Before the FIRST successful load, losers block on the lock
+// installed one). Before the FIRST successful load, losers wait for the gate
 // instead: the winner has not yet established whether the on-disk snapshot is
 // usable, so returning early would have to guess between fresh-install and
-// failed state (see the branch below).
+// failed state (see the branch below). That wait is CANCELLABLE (ctx): a client
+// that disconnected or timed out must not keep its handler goroutine parked
+// behind the winner's stat/read/decode, which no server write timeout bounds.
 func (ix *Indexer) reload(ctx context.Context) {
 	if ix.path == "" {
 		return
 	}
-	if !ix.reloadMu.TryLock() {
+	if !ix.tryLockReload() {
 		ix.mu.RLock()
 		loaded := ix.snapInfo != nil
 		ix.mu.RUnlock()
@@ -115,16 +148,23 @@ func (ix *Indexer) reload(ctx context.Context) {
 		// the snapshot failed here would race the winner: it can confirm
 		// the healthy fresh-install ENOENT case and clear snapFailed, then
 		// this loser would set it again before the winner releases
-		// reloadMu, making one startup request render a false
+		// the gate, making one startup request render a false
 		// snapshot-unavailable Torznab error. Initial-load callers instead
-		// BLOCK until the winning reload has established fresh-install,
+		// WAIT until the winning reload has established fresh-install,
 		// failed, or loaded state; once acquired, this caller runs the
 		// normal stat/read path itself, so a cancelled winner is also
 		// retried.
 		reloadBlockGate()
-		ix.reloadMu.Lock()
+		if !ix.lockReloadOrDone(ctx) {
+			// The caller went away (client disconnect, arr timeout) before
+			// the winner established state: abandon the wait rather than
+			// accumulate parked goroutines and connections behind it. The
+			// snapshot state is left exactly as the winner will set it, and
+			// the next request retries.
+			return
+		}
 	}
-	defer ix.reloadMu.Unlock()
+	defer ix.unlockReload()
 	info, ok := ix.statSnapshot()
 	if !ok {
 		return
@@ -228,9 +268,9 @@ func (ix *Indexer) matchesFailedFile(info os.FileInfo) bool {
 // installSnapshot publishes snap as the served feed under mu, recording the
 // file's mtime + identity for the next reload's skip check, and reports
 // whether it installed. The re-check under the write lock is defense in depth:
-// reloadMu already serializes the whole stat/read/install sequence, so no
+// reloadGate already serializes the whole stat/read/install sequence, so no
 // concurrent reload can install in between today, but never re-installing a
-// copy of what is already loaded holds even if the TryLock coalescing changes.
+// copy of what is already loaded holds even if the gate coalescing changes.
 // Same test as loadedSnapshotUnchanged: only an equal mtime on the
 // SAME file (os.SameFile identity) skips.
 func (ix *Indexer) installSnapshot(info os.FileInfo, snap *snapshot) bool {
@@ -325,8 +365,6 @@ func (ix *Indexer) readSnapshot(ctx context.Context) (snapshot, bool, bool) {
 	snap.NyaaFeed = ix.rebuildNyaaDownloadURLs(snap.NyaaFeed)
 	snap.ABFeed = ix.sanitizeSnapshotInfoURLs(snap.ABFeed)
 	snap.NyaaFeed = ix.sanitizeSnapshotInfoURLs(snap.NyaaFeed)
-	normalizeSnapshotInfoHashes(snap.ABFeed)
-	normalizeSnapshotInfoHashes(snap.NyaaFeed)
 	return snap, true, false
 }
 
@@ -334,7 +372,9 @@ func (ix *Indexer) readSnapshot(ctx context.Context) (snapshot, bool, bool) {
 // through validInfoHash (the writer's own gate), blanking anything not a
 // 40-char hex hash: validPersistedItem bounds only the field's length, and
 // writeItem renders the value as the torznab infohash attr, a field
-// consumers treat as torrent identity.
+// consumers treat as torrent identity. decodeSnapshot invokes it for BOTH
+// consumers (reader and writer), so a non-canonical at-rest hash can neither
+// be served nor compared as identity by the writer's carry gates.
 func normalizeSnapshotInfoHashes(feed []journalItem) {
 	for i := range feed {
 		feed[i].InfoHash = validInfoHash(feed[i].InfoHash)

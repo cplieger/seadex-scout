@@ -350,10 +350,12 @@ var (
 // preflightTorznab is parseTorznab's allocation-free lexical gate over the
 // raw response bytes (see the preflight limit constants above). It walks the
 // document's surface structure - text runs, tags (honoring quoted '>'
-// bytes), comments, processing instructions, CDATA sections, and <!
-// directives - and rejects an overlong text/CDATA run, an overlong markup
+// bytes), comments, processing instructions and CDATA sections - and rejects
+// an overlong text/CDATA run, an overlong markup
 // token, a start tag carrying more than maxUpstreamTagAttrs XML attributes,
-// or element nesting deeper than maxUpstreamDepth (encoding/xml's
+// a `<!` directive (unboundable here, and unused by Torznab RSS - see
+// preflightMarkup), or element nesting deeper than maxUpstreamDepth
+// (encoding/xml's
 // open-element stack grows per start tag with no built-in depth limit), each
 // as a *torznabLimitError so it classifies exactly like the decode-time
 // caps. It never validates XML: a malformed body within the bounds passes
@@ -392,8 +394,8 @@ func preflightTorznab(body []byte) error {
 // returning how many bytes it spans and the token's nesting-depth delta (+1
 // for a start tag, -1 for an end tag, 0 for everything else). Delimited
 // forms (CDATA, comments, processing instructions) are scanned to their
-// closing delimiter within their bound; anything else is a tag or
-// <!-directive scanned to its unquoted '>'.
+// closing delimiter within their bound; a `<!` directive is rejected outright
+// (see the branch); anything else is a tag scanned to its unquoted '>'.
 func preflightMarkup(body []byte) (n, delta int, err error) {
 	switch {
 	case bytes.HasPrefix(body, cdataOpen):
@@ -406,7 +408,20 @@ func preflightMarkup(body []byte) (n, delta int, err error) {
 		n, err = preflightDelimited(body, len(piOpen), piClose, maxUpstreamTokenBytes, "processing instruction")
 		return n, 0, err
 	case bytes.HasPrefix(body, directiveOpen):
-		return preflightTag(body, false)
+		// Fail closed on every non-comment/non-CDATA `<!` directive
+		// (`<!DOCTYPE`, `<!ENTITY`, `<!ATTLIST`): preflightTag cannot bound
+		// one. encoding/xml tokenizes a directive by tracking nested '<'/'>'
+		// pairs and accumulating until a '>' at nesting depth zero, whereas
+		// preflightTag stops at the first unquoted '>' - so a body carrying a
+		// directive stuffed with balanced `<a></a>` fragments reads to
+		// preflight as many short shallow tags while encoding/xml retains one
+		// directive token up to the full transport cap, and concurrent
+		// searches can stack those allocations past the container's memory
+		// limit (CWE-400). Torznab RSS needs no DTD or ENTITY directive, so
+		// rejecting the whole class is both sound and free of false
+		// negatives; a comment and a CDATA section have their own bounded
+		// branches above.
+		return 0, 0, &torznabLimitError{limit: "XML directives are not allowed"}
 	default:
 		countAttrs := len(body) < 2 || body[1] != '/'
 		return preflightTag(body, countAttrs)
@@ -428,13 +443,14 @@ func preflightDelimited(body []byte, openLen int, closeDelim []byte, maxLen int,
 	return len(body), nil
 }
 
-// preflightTag scans one tag (or <!-directive) from body[0] == '<' to its
+// preflightTag scans one tag from body[0] == '<' to its
 // unquoted '>' - a '>' inside a quoted attribute value never terminates the
 // tag - bounding the token length and, on a start tag, counting unquoted '='
 // bytes (exactly one per XML attribute) against maxUpstreamTagAttrs. On
 // termination it classifies the token's nesting-depth delta (tagDepthDelta):
-// -1 for an end tag, 0 for a self-closing start tag or <!-directive, +1 for
-// any other start tag. An unterminated tail within the token bound is left
+// -1 for an end tag, 0 for a self-closing start tag, +1 for
+// any other start tag (a <!-directive never reaches here: preflightMarkup
+// rejects the class). An unterminated tail within the token bound is left
 // for encoding/xml to reject (delta 0: nothing else follows it).
 func preflightTag(body []byte, countAttrs bool) (n, delta int, err error) {
 	limit := min(len(body), maxUpstreamTokenBytes+1)

@@ -475,15 +475,92 @@ func classifyNullMedia(errs []gqlError) error {
 	return mediaQueryError(errs[0])
 }
 
-// validateResponseUTF8 rejects a response body that is not valid UTF-8 before
-// it reaches encoding/json. json.Unmarshal replaces malformed UTF-8 inside
-// JSON strings with U+FFFD instead of failing, so without this gate a wire
-// title with invalid bytes could lossily normalize to a legitimate title key,
-// be title-matched, and be memoized even though the upstream payload was not
-// valid JSON text. Shared by parseMediaForID and parseMediaPage.
-func validateResponseUTF8(raw []byte) error {
+// validateResponse gates a response body before it reaches encoding/json.
+//
+// UTF-8: json.Unmarshal replaces malformed UTF-8 inside JSON strings with
+// U+FFFD instead of failing, so without this gate a wire title with invalid
+// bytes could lossily normalize to a legitimate title key, be title-matched,
+// and be memoized even though the upstream payload was not valid JSON text.
+//
+// Duplicate keys: encoding/json accepts a duplicate object key and applies
+// the LAST occurrence to the struct field, discarding the earlier value
+// unseen. That erases the evidence every downstream invariant relies on - a
+// body carrying both a valid Media and a later null Media would reach
+// classifyNullMedia as a genuine not-found and be negative-memoized, and a
+// batch could have its Page.media replaced by an empty array - so an
+// ambiguous object structure is rejected outright and surfaces as a plain
+// retryable error. Shared by parseMediaForID and parseMediaPage.
+func validateResponse(raw []byte) error {
 	if !utf8.Valid(raw) {
 		return errors.New("anilist: response is not valid UTF-8")
+	}
+	if err := rejectDuplicateJSONKeys(raw); err != nil {
+		return fmt.Errorf("anilist: ambiguous response JSON: %w", err)
+	}
+	return nil
+}
+
+// rejectDuplicateJSONKeys walks the whole response with json.Decoder tokens
+// and fails on the first object that repeats a key. Matching is
+// case-insensitive because encoding/json also matches struct fields
+// case-insensitively, so "media" and "Media" address the same field and are
+// equally ambiguous.
+func rejectDuplicateJSONKeys(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	return walkJSONValue(dec)
+}
+
+// walkJSONValue consumes exactly one JSON value from dec, recursing into
+// objects and arrays. A scalar is consumed by the leading Token call; a
+// container is closed by the trailing one.
+func walkJSONValue(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		if objErr := walkJSONObject(dec); objErr != nil {
+			return objErr
+		}
+	case '[':
+		for dec.More() {
+			if elemErr := walkJSONValue(dec); elemErr != nil {
+				return elemErr
+			}
+		}
+	default:
+		return fmt.Errorf("unexpected JSON delimiter %q", delim)
+	}
+	_, err = dec.Token()
+	return err
+}
+
+// walkJSONObject consumes an object's members after its opening delimiter,
+// failing on the first repeated key. The closing delimiter is consumed by the
+// caller (walkJSONValue), which owns the container's framing.
+func walkJSONObject(dec *json.Decoder) error {
+	var keys []string
+	for dec.More() {
+		keyToken, keyErr := dec.Token()
+		if keyErr != nil {
+			return keyErr
+		}
+		key, isString := keyToken.(string)
+		if !isString {
+			return fmt.Errorf("expected object key, got %v", keyToken)
+		}
+		if slices.ContainsFunc(keys, func(seen string) bool { return strings.EqualFold(seen, key) }) {
+			return fmt.Errorf("duplicate object key %q", key)
+		}
+		keys = append(keys, key)
+		if valErr := walkJSONValue(dec); valErr != nil {
+			return valErr
+		}
 	}
 	return nil
 }
@@ -502,7 +579,7 @@ func validateResponseUTF8(raw []byte) error {
 // malformed or compromised endpoint cannot answer a request for one id with
 // a valid Media for another and have it memoized under the wrong key.
 func parseMediaForID(raw []byte, expectedID int) (Media, error) {
-	if err := validateResponseUTF8(raw); err != nil {
+	if err := validateResponse(raw); err != nil {
 		return Media{}, err
 	}
 	var r gqlResponse
@@ -624,7 +701,7 @@ type gqlPageResponse struct {
 // an error-free response are simply not in the map (the caller treats them as
 // not-found).
 func parseMediaPage(raw []byte) (map[int]Media, error) {
-	if err := validateResponseUTF8(raw); err != nil {
+	if err := validateResponse(raw); err != nil {
 		return nil, err
 	}
 	var r gqlPageResponse

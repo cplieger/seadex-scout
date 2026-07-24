@@ -494,6 +494,56 @@ func TestNotifierEmitSanitizesControlAndBidiRunes(t *testing.T) {
 	}
 }
 
+// TestFindingLineSanitizesEveryUntrustedAttr widens the sanitization pin to
+// the whole untrusted attribute set findingKVs renders: dropping capAttr /
+// the joiners from any single site (recommended_groups, tracker,
+// classification_reason, release_urls, nyaa_url, ab_url, ...) would leave the
+// narrower pin above green while restoring raw C1/bidi controls to a Loki
+// attribute.
+func TestFindingLineSanitizesEveryUntrustedAttr(t *testing.T) {
+	const dirty = "a\u009bb\u202ec\x1bd"
+	const clean = "a b c d"
+	notifier, recorder := newCapturedNotifier()
+	finding := testFinding("dirty-all", dirty)
+	finding.CurrentGroup = dirty
+	finding.RecommendedGroup = dirty
+	finding.RecommendedGroups = []string{dirty}
+	finding.Tracker = dirty
+	finding.Reason = dirty
+	finding.ReleaseURL = dirty
+	finding.InfoHash = dirty
+	finding.Links = []compare.ReleaseLink{
+		{Tracker: dirty, URL: dirty},
+		{Tracker: "Nyaa", URL: "https://nyaa.si/view/a\u009bb\u202ec"},
+	}
+
+	notifier.Notify([]compare.Finding{finding}, nil, nil, time.Unix(0, 0))
+
+	want := map[string]string{
+		"title":                 clean,
+		"current_group":         clean,
+		"recommended_group":     clean,
+		"recommended_groups":    clean,
+		"tracker":               clean,
+		"classification_reason": clean,
+		"release_url":           clean,
+		"release_urls":          clean + "=" + clean + " Nyaa=https://nyaa.si/view/a b c",
+		"nyaa_url":              "https://nyaa.si/view/a b c",
+		"ab_url":                clean,
+		"info_hash":             clean,
+	}
+	for key, expected := range want {
+		got, ok := recorder.AttrValue("better release available", key)
+		if !ok {
+			t.Errorf("finding line carries no %s attribute", key)
+			continue
+		}
+		if got != expected {
+			t.Errorf("finding line %s = %q, want sanitized %q", key, got, expected)
+		}
+	}
+}
+
 // TestNotifySuppressesDuplicateCurrentKeys pins in-batch dedupe: the
 // SeaDex fetcher appends every upstream record and the matcher preserves
 // per-entry cardinality, so one current batch can carry the same dedupe key
@@ -760,5 +810,43 @@ func TestFindingAttrVolumeIsBounded(t *testing.T) {
 	gotTitle, _ := recorder.AttrValue("better release available", "title")
 	if want := runesafe.Sanitize(normal); gotTitle != want {
 		t.Errorf("normal-length title = %q, want byte-identical sanitized form %q", gotTitle, want)
+	}
+}
+
+// TestAggregateAttrsAreBoundedBeforeJoining pins the aggregate attributes'
+// bound (attrJoiner): recommended_groups and release_urls aggregate untrusted
+// SeaDex data (up to 512 torrents, each admitting a multi-MB URL), so joining
+// first would materialize a ~48 MiB aggregate before the 8 KiB cap applied - a
+// plausible OOM kill of the documented 256 MiB container that would suppress
+// the very warn line the better-release alert keys on. Both must emit bounded
+// AND sanitized (C1 and bidi controls replaced), from bounded work.
+func TestAggregateAttrsAreBoundedBeforeJoining(t *testing.T) {
+	const maxAttrBytes = 8 << 10
+	notifier, recorder := newCapturedNotifier()
+	huge := strings.Repeat("u", 64<<10) // 64 KiB per source, 512 of them
+	f := testFinding("agg", "bounded aggregate")
+	f.Links = nil
+	f.RecommendedGroups = nil
+	for range 512 {
+		f.Links = append(f.Links, compare.ReleaseLink{Tracker: "Nyaa\u009b", URL: "https://nyaa.si/" + huge})
+		f.RecommendedGroups = append(f.RecommendedGroups, "grp\u202e"+huge)
+	}
+
+	notifier.Notify([]compare.Finding{f}, nil, nil, time.Now())
+
+	for _, key := range []string{"release_urls", "recommended_groups"} {
+		got, ok := recorder.AttrValue("better release available", key)
+		if !ok {
+			t.Fatalf("finding line carries no %s attribute", key)
+		}
+		if len(got) > maxAttrBytes+len("...") {
+			t.Errorf("%s length = %d, want <= %d", key, len(got), maxAttrBytes+len("..."))
+		}
+		if !strings.HasSuffix(got, "...") {
+			t.Errorf("%s not marked truncated (len %d)", key, len(got))
+		}
+		if strings.ContainsAny(got, "\u009b\u202e") {
+			t.Errorf("%s carries an unsanitized C1/bidi control", key)
+		}
 	}
 }

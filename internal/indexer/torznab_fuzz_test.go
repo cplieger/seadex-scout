@@ -37,7 +37,7 @@ func FuzzParseTorznab(f *testing.F) {
 		if err != nil {
 			return // a decode error is a valid outcome for hostile input
 		}
-		rendered, _ := renderFeed(items)
+		rendered, emitted := renderFeed(items)
 		reparsed, err := parseTorznab([]byte(rendered))
 		if err != nil {
 			// An input accepted near the decode limits can re-render
@@ -50,10 +50,13 @@ func FuzzParseTorznab(f *testing.F) {
 			}
 			t.Fatalf("re-parse of rendered feed failed: %v\nrendered: %s", err, rendered)
 		}
-		if len(reparsed) != len(items) {
-			t.Fatalf("round-trip item count = %d, want %d\ninput: %q", len(reparsed), len(items), body)
+		// renderFeed's byte budget is prefix-preserving but may truncate, so
+		// the oracle is its emitted count, not the pre-render item count
+		// (TestRenderFeedTruncatesOversizedDocument pins truncation itself).
+		if len(reparsed) != emitted {
+			t.Fatalf("round-trip item count = %d, renderer emitted %d\ninput: %q", len(reparsed), emitted, body)
 		}
-		for i := range items {
+		for i := range reparsed {
 			want := normalizedRenderedItem(items[i])
 			got := reparsed[i]
 			if got.Title != want.Title {

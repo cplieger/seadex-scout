@@ -595,10 +595,24 @@ func TestPreflightTorznabBoundsCommentsDirectivesAndCData(t *testing.T) {
 			t.Fatalf("parseTorznab with a comment = %d items, err %v; want 1, nil", len(items), err)
 		}
 	})
-	t.Run("directive within bound parses", func(t *testing.T) {
-		items, err := parseTorznab(wrap("<!DOCTYPE rss>"))
-		if err != nil || len(items) != 1 {
-			t.Fatalf("parseTorznab with a directive = %d items, err %v; want 1, nil", len(items), err)
+	t.Run("directive rejected: unboundable here and unused by torznab", func(t *testing.T) {
+		// encoding/xml accumulates a directive until a '>' at nesting depth
+		// zero, so a directive stuffed with balanced fragments would retain a
+		// token up to the transport cap while a first-unquoted-'>' scan saw
+		// only short shallow tags. Torznab RSS needs no DTD, so the class is
+		// rejected outright.
+		for _, body := range []string{
+			"<!DOCTYPE rss>",
+			"<!DOCTYPE x " + strings.Repeat("<a></a>", (128<<10)/7+1) + ">",
+		} {
+			_, err := parseTorznab(wrap(body))
+			limitErr, ok := errors.AsType[*torznabLimitError](err)
+			if !ok {
+				t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
+			}
+			if !strings.Contains(limitErr.limit, "XML directives are not allowed") {
+				t.Errorf("limit = %q, want the directive rejection named", limitErr.limit)
+			}
 		}
 	})
 	t.Run("overlong comment rejected at the lexical guard", func(t *testing.T) {

@@ -811,6 +811,19 @@ func TestValidPersistedItemRejectsOversizedCategoryList(t *testing.T) {
 	}
 }
 
+// TestValidPersistedItemAcceptsMaxFieldLength pins the inclusive endpoint of
+// the persisted string-field cap: the documented contract rejects only values
+// PAST maxPersistedFieldBytes, so an exactly-at-limit field stays valid. The
+// oversized-field tests alone leave a `>=` boundary slip undetected (a live
+// CONDITIONALS_BOUNDARY mutant on writer.go's length check).
+func TestValidPersistedItemAcceptsMaxFieldLength(t *testing.T) {
+	atLimit := strings.Repeat("x", maxPersistedFieldBytes)
+	it := journalItem{item: item{Title: atLimit}}
+	if !validPersistedItem(&it) {
+		t.Errorf("validPersistedItem(Title length %d) = false, want true", len(atLimit))
+	}
+}
+
 // TestRebuildWarnedIdentityPropagatesTransitively pins the fixpoint loop in
 // collectWarnedIdentities across MORE than one sweep: A (Broken, nyaa:1+H1)
 // links B (nyaa:2+H1) by hash, and B links C (a nyaa:2 occurrence carrying
@@ -919,5 +932,40 @@ func TestLoadPreviousPreservesLargeHarvestCheckpoint(t *testing.T) {
 	if prev.cursor != encoded {
 		t.Errorf("loadPrevious cursor = %d bytes, want the %d-byte checkpoint preserved byte-for-byte (resetting it discards accumulated harvest paging progress)",
 			len(prev.cursor), len(encoded))
+	}
+}
+
+// TestRebuildCanonicalizesStoredHashBeforeWarningRetraction pins that the
+// shared snapshot decode canonicalizes persisted identity fields BEFORE the
+// writer compares them: a carried item whose at-rest InfoHash is uppercase
+// must still match the current catalogue's canonical warned hash, so a
+// curator-warned release (Broken) cannot keep riding the RSS journal under a
+// stale tracker key while search suppresses it.
+func TestRebuildCanonicalizesStoredHashBeforeWarningRetraction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	hash := strings.Repeat("a", 40)
+	now := time.Now().UTC().Truncate(time.Second)
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{"nyaa:99": true},
+		Seen:   map[string]bool{"nyaa:99": true},
+		NyaaFeed: []journalItem{{
+			item:      item{Title: "Show - S01 (1080p) [W]", GUID: "https://nyaa.si/view/99", InfoHash: strings.ToUpper(hash), PubDate: now},
+			Key:       "nyaa:99",
+			AniListID: 8,
+			FirstSeen: now,
+		}},
+	})
+	entries := []seadex.Entry{{AniListID: 7, Torrents: []seadex.Torrent{{
+		Tracker: "Nyaa", URL: "https://nyaa.si/view/41", InfoHash: hash, IsBest: true,
+		Tags:  []string{"Broken"},
+		Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [W].mkv"}},
+	}}}}
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{})
+	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if got := readSnapshotFile(t, path).NyaaFeed; len(got) != 0 {
+		t.Errorf("nyaa feed = %+v, want empty after canonical stored-hash warning retraction", got)
 	}
 }

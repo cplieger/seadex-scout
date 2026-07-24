@@ -688,9 +688,12 @@ func TestHandlePreCompareGateShrunkWalkEscalatesAfterRepeatedShrinks(t *testing.
 
 // TestHandlePreCompareGateShrunkWalkWithSeaDexOutageWarnsFeedKept pins the
 // shrink-guard arm's feed-outage contract: a library-shrink + SeaDex double
-// outage with a feed configured must still emit the feed-kept WARN so it does
-// not read as shrink-only in Loki, while the shrink guard's own degraded
-// completion line and no-rebuild behavior are unchanged.
+// outage with a feed configured must still surface the SeaDex failure (its
+// standard log line, recorded ahead of gate selection, carrying feed_kept) and
+// still advance the persisted streak, so the outage does not read as
+// shrink-only in Loki and cannot escape escalation behind a winning gate, while
+// the shrink guard's own degraded completion line and no-rebuild behavior are
+// unchanged.
 func TestHandlePreCompareGateShrunkWalkWithSeaDexOutageWarnsFeedKept(t *testing.T) {
 	logger, recorder := capture.New()
 	feed := &fakeFeed{}
@@ -709,8 +712,11 @@ func TestHandlePreCompareGateShrunkWalkWithSeaDexOutageWarnsFeedKept(t *testing.
 	if !handled || !healthy {
 		t.Errorf("handlePreCompareGate = (%v, %v), want (true, true)", handled, healthy)
 	}
-	if n := recorder.CountExact("seadex fetch failed; indexer feed kept previous feed"); n != 1 {
-		t.Errorf("feed-kept WARN count = %d, want 1 (a shrink + SeaDex double outage must not read as shrink-only)", n)
+	if n := recorder.CountExact("seadex fetch failed; skipping comparison, findings preserved"); n != 1 {
+		t.Errorf("seadex failure WARN count = %d, want 1 (a shrink + SeaDex double outage must not read as shrink-only)", n)
+	}
+	if st.SeadexFailures != 1 {
+		t.Errorf("SeadexFailures = %d, want 1 (the streak advances whichever gate closes the cycle)", st.SeadexFailures)
 	}
 	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "library-shrunk" {
 		t.Errorf("degraded reasons = %v, want [library-shrunk]", reasons)
@@ -819,6 +825,37 @@ func TestCycleSeaDexFailureEscalatesAfterRepeatedFailures(t *testing.T) {
 				t.Errorf("degraded reasons = %v, want [seadex-fetch-failed]", reasons)
 			}
 		})
+	}
+}
+
+// TestHandlePreCompareGateSeaDexEscalatesBehindWinningMappingGate pins that
+// gate precedence cannot hide an observed SeaDex outage: when an unusable
+// mapping wins the pre-compare gate on the same cycle the SeaDex fetch failed,
+// the streak still advances and the single seadex-fetch-failed site still
+// escalates to ERROR at the threshold (firing SeadexScoutCycleError). Before the
+// fetch outcome was recorded ahead of gate selection, a coinciding
+// mapping/walk/shrink gate left the streak frozen, so a first boot with both
+// upstreams down could WARN forever and never alert.
+func TestHandlePreCompareGateSeaDexEscalatesBehindWinningMappingGate(t *testing.T) {
+	logger, recorder := capture.New()
+	st := state.State{SeadexFailures: seadexFailureEscalationThreshold - 1, Baselined: true}
+	store := &fakeStore{st: st}
+	s := New(&Deps{Logger: logger, Store: store, Feed: &fakeFeed{}})
+	mapCache := mapping.Cache{}
+
+	handled, healthy := s.handlePreCompareGate(context.Background(), &st, library.Snapshot{}, &mapCache, nil,
+		nil, errors.New("fribb down"), errors.New("seadex down"))
+	if !handled || !healthy {
+		t.Errorf("handlePreCompareGate = (%v, %v), want (true, true)", handled, healthy)
+	}
+	if st.SeadexFailures != seadexFailureEscalationThreshold {
+		t.Errorf("SeadexFailures = %d, want %d (a winning gate must not freeze the streak)", st.SeadexFailures, seadexFailureEscalationThreshold)
+	}
+	if errs := recorder.CountLevel(slog.LevelError, "seadex fetch failed"); errs != 1 {
+		t.Errorf("seadex ERROR count = %d, want 1 (the threshold must fire behind the mapping gate)", errs)
+	}
+	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "mapping-unusable" {
+		t.Errorf("degraded reasons = %v, want [mapping-unusable] (the winning gate still owns the completion line)", reasons)
 	}
 }
 
@@ -1801,40 +1838,59 @@ func TestCycleAniListDegradedStreakEscalatesToError(t *testing.T) {
 	}
 }
 
-// TestHandlePreCompareGateExactlyHalfWalkPassesShrinkGuard pins the shrink
-// guard's exact boundary: the policy (degradation.ShrinkGuardFactor) is
-// "fewer than 1/factor of the prior items" - strictly BELOW half at the
-// default 2 - so a walk returning exactly half the prior snapshot's items
-// must pass the guard: the compare proceeds (handled=false), the persisted
-// shrunk-walk streak resets, and the gate itself saves nothing.
-func TestHandlePreCompareGateExactlyHalfWalkPassesShrinkGuard(t *testing.T) {
+// TestCycleExactlyHalfWalkPassesShrinkGuard pins the shrink guard's exact
+// boundary through the public cycle: the policy
+// (degradation.ShrinkGuardFactor) is "fewer than 1/factor of the prior items"
+// - strictly BELOW half at the default 2 - so a walk returning exactly half
+// the prior snapshot's items must pass the guard. The externally meaningful
+// consequences are asserted, not the orchestration decomposition: the halved
+// walk is persisted as the new snapshot, the shrunk-walk streak resets, the
+// cycle stays healthy, and it closes with the completion (not the degraded)
+// line. A 1-of-4 walk (1*2 < 4) is the tripping case the escalation test pins.
+func TestCycleExactlyHalfWalkPassesShrinkGuard(t *testing.T) {
 	logger, recorder := capture.New()
-	st := state.State{
+	store := &fakeStore{st: state.State{
+		Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{
+			{AniListID: 1, Type: "TV", TvdbID: 101, SeasonTvdb: 1},
+		}},
 		Library: library.Snapshot{Items: []library.Item{
-			{ArrID: 1, Title: "A"}, {ArrID: 2, Title: "B"}, {ArrID: 3, Title: "C"}, {ArrID: 4, Title: "D"},
+			{ArrID: 1, Title: "A"},
+			{ArrID: 2, Title: "B"},
+			{ArrID: 3, Title: "C"},
+			{ArrID: 4, Title: "D"},
 		}},
 		ShrunkWalks: 3,
 		Baselined:   true,
-	}
-	store := &fakeStore{st: st}
-	s := New(&Deps{Logger: logger, Store: store})
-	// 2 items against a prior of 4: 2*2 == 4 is NOT below half, so the guard
-	// must not trip (1 item, 1*2 < 4, is the tripping case the escalation
-	// test pins).
-	snap := library.Snapshot{Items: []library.Item{{ArrID: 1, Title: "A"}, {ArrID: 2, Title: "B"}}}
+	}}
+	sonarr := &fakeSonarr{series: []arrapi.Series{
+		{ID: 1, Title: "A", TvdbID: 101},
+		{ID: 2, Title: "B", TvdbID: 102},
+	}}
+	s := New(&Deps{
+		Logger:   logger,
+		Store:    store,
+		Library:  library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping:  fakeMapping{},
+		SeaDex:   &fakeSeaDex{entries: []seadex.Entry{{AniListID: 1}}},
+		Matcher:  match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
+		Comparer: compare.NewComparer(compare.Config{}),
+		Notifier: notify.NewNotifier(scoutTestLogger()),
+	})
 
-	handled, healthy := s.handlePreCompareGate(context.Background(), &st, snap, &mapping.Cache{}, []seadex.Entry{{AniListID: 1}}, nil, nil, nil)
-	if handled || !healthy {
-		t.Errorf("handlePreCompareGate = (%v, %v), want (false, true) at exactly half the prior items", handled, healthy)
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("Cycle healthy=false, want true at exactly half the prior library")
 	}
-	if st.ShrunkWalks != 0 {
-		t.Errorf("ShrunkWalks = %d, want 0 (a walk that passes the guard resets the streak)", st.ShrunkWalks)
+	if got := len(store.st.Library.Items); got != 2 {
+		t.Errorf("persisted library items = %d, want 2 (exactly half must pass the shrink guard)", got)
+	}
+	if store.st.ShrunkWalks != 0 {
+		t.Errorf("persisted ShrunkWalks = %d, want 0 after the boundary walk completed", store.st.ShrunkWalks)
 	}
 	if n := recorder.CountExact("cycle degraded"); n != 0 {
-		t.Errorf("'cycle degraded' count = %d, want 0 (the gate falls through to the compare)", n)
+		t.Errorf("cycle degraded count = %d, want 0 at the non-shrinking boundary", n)
 	}
-	if store.saves != 0 {
-		t.Errorf("saves = %d, want 0 (the fall-through gate saves nothing; the cycle's closing save persists)", store.saves)
+	if n := recorder.CountExact("cycle complete"); n != 1 {
+		t.Errorf("cycle complete count = %d, want 1", n)
 	}
 }
 

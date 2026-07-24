@@ -11,6 +11,10 @@ import (
 // it returns is a non-empty run of ASCII digits, or it returns "" - a bogus tracker key
 // (a non-numeric id) must never reach the curation match set. The seed corpus covers the
 // Nyaa /view, AnimeBytes permalink, and AnimeBytes torrentid= forms plus a non-numeric id.
+// The digit check is an INDEPENDENT oracle (strings.Trim), not the production
+// isAllDigits helper: sharing that helper would let a mutation loosening it
+// govern both the code under test and the assertion, so the property would
+// still pass on a parser that admits a non-digit id.
 func FuzzExtractID_alwaysDigitsOrEmpty(f *testing.F) {
 	f.Add("https://nyaa.si/view/1234567")
 	f.Add("https://animebytes.tv/torrent/1167293/group?nh=709E38EC")
@@ -19,17 +23,19 @@ func FuzzExtractID_alwaysDigitsOrEmpty(f *testing.F) {
 	f.Add("https://nyaa.si/view/999999999999999999999")
 	f.Add("")
 	f.Fuzz(func(t *testing.T, raw string) {
-		for _, needle := range []string{"/view/", "/torrent/", "torrentid="} {
-			if id := extractID(raw, needle); id != "" && (!isAllDigits(id) || len(id) > maxTrackerIDDigits) {
-				t.Fatalf("extractID(%q, %q) = %q, want a bounded run of digits or empty", raw, needle, id)
+		assertValid := func(name, id string) {
+			t.Helper()
+			if id != "" && (len(id) > maxTrackerIDDigits || strings.Trim(id, "0123456789") != "") {
+				t.Fatalf("%s(%q) = %q, want a bounded run of digits or empty", name, raw, id)
 			}
 		}
-		if id := animeBytesID(raw); id != "" && (!isAllDigits(id) || len(id) > maxTrackerIDDigits) {
-			t.Fatalf("animeBytesID(%q) = %q, want a bounded run of digits or empty", raw, id)
+		for _, needle := range []string{"/view/", "/torrent/", "torrentid="} {
+			assertValid("extractID", extractID(raw, needle))
 		}
+		assertValid("animeBytesID", animeBytesID(raw))
 		if k := trackerKeyFromURL(raw); k != "" {
 			_, id, found := strings.Cut(k, ":")
-			if !found || !isAllDigits(id) || len(id) > maxTrackerIDDigits {
+			if !found || id == "" || len(id) > maxTrackerIDDigits || strings.Trim(id, "0123456789") != "" {
 				t.Fatalf("trackerKeyFromURL(%q) = %q, want scope:<bounded digits>", raw, k)
 			}
 		}

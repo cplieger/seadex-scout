@@ -459,14 +459,30 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	if err != nil {
 		return fmt.Errorf("audit: encode json: %w", err)
 	}
-	if err := writeAtomic(ctx, jsonPath, data, log); err != nil {
-		return fmt.Errorf("audit: write json %s: %w", filepath.Base(jsonPath), redactPathErr(dir, err))
+	jsonRes, jsonErr := writeAtomic(ctx, jsonPath, data, log)
+	if jsonErr != nil {
+		return fmt.Errorf("audit: write json %s: %w", filepath.Base(jsonPath), redactPathErr(dir, jsonErr))
+	}
+	// The pair ordering only holds when the JSON half's directory entry is
+	// crash-durable: atomicfile reports a successful rename whose parent-dir
+	// fsync failed as Durable=false with a NIL error, so publishing the
+	// Markdown half on that result could leave a recovered .md without its
+	// machine-readable pair. Stop with the JSON half only instead.
+	if err := durabilityErr("json", jsonPath, jsonRes); err != nil {
+		return err
 	}
 	if err := interrupted(ctx, "report markdown render"); err != nil {
 		return err
 	}
-	if err := writeAtomic(ctx, mdPath, []byte(renderMarkdown(safe)), log); err != nil {
-		return fmt.Errorf("audit: write markdown %s: %w", filepath.Base(mdPath), redactPathErr(dir, err))
+	mdRes, mdErr := writeAtomic(ctx, mdPath, []byte(renderMarkdown(safe)), log)
+	if mdErr != nil {
+		return fmt.Errorf("audit: write markdown %s: %w", filepath.Base(mdPath), redactPathErr(dir, mdErr))
+	}
+	// A non-durable Markdown half cannot create a dangling .md (the .json is
+	// already durably committed above), but "report written" must not claim a
+	// pair whose second half may vanish on a power loss.
+	if err := durabilityErr("markdown", mdPath, mdRes); err != nil {
+		return err
 	}
 	// Basenames only: the stem is timestamp-derived (never dir-derived), so
 	// the success record stays useful without shipping the directory value.
@@ -525,16 +541,39 @@ func reportPairStem(ctx context.Context, dir string, generatedAt time.Time) (str
 	}
 }
 
-// writeAtomic writes data to path atomically. A non-durable write warns (not
-// fails), matching the state store's policy: atomicfile itself emits the one
-// WARN carrying the causal parent-directory fsync error (WithLogger keeps it
-// on the report logger), so no second app-side record is layered on top.
-func writeAtomic(ctx context.Context, path string, data []byte, log *slog.Logger) error {
-	_, err := atomicfile.WriteFile(ctx, path, data,
+// writeAtomic writes data to path atomically and returns atomicfile's Result
+// so the caller can gate on durability: atomicfile deliberately reports a
+// rename whose parent-directory fsync failed as Result{Durable:false} with a
+// NIL error, and the report pair's JSON-first ordering is only a persistence
+// guarantee when that first directory update survives a crash. atomicfile
+// itself emits the one WARN carrying the causal fsync error (WithLogger keeps
+// it on the report logger), so no second app-side record is layered on top;
+// the caller turns the flag into a stage-specific error via durabilityErr.
+func writeAtomic(ctx context.Context, path string, data []byte, log *slog.Logger) (atomicfile.Result, error) {
+	return atomicfile.WriteFile(ctx, path, data,
 		atomicfile.WithLogger(log),
 		atomicfile.WithMkdirMode(reportDirMode),
 		atomicfile.WithMode(reportFileMode))
-	return err
+}
+
+// errNotDurable is the cause wrapped by a report half that landed at its
+// final path but whose parent-directory update was not crash-durable. It is a
+// sentinel so a caller (and the durability tests) can match the class without
+// decoding atomicfile internals; the causal fsync error is already logged by
+// atomicfile itself, and re-wrapping it here would risk carrying the
+// unredacted report.dir path into a returned error.
+var errNotDurable = errors.New("write succeeded but is not crash-durable (parent directory fsync failed)")
+
+// durabilityErr converts a non-durable write result into the stage-specific
+// error WriteFiles returns, or nil when the write is durable. stage names the
+// report half ("json"/"markdown") and only the basename of path is quoted:
+// the stem is timestamp-derived, so the message stays useful without leaking
+// the secret-capable report.dir value.
+func durabilityErr(stage, path string, res atomicfile.Result) error {
+	if res.Durable {
+		return nil
+	}
+	return fmt.Errorf("audit: write %s %s: %w", stage, filepath.Base(path), errNotDurable)
 }
 
 // --- Sanitizers + link/cell escaping ---

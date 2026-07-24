@@ -1709,3 +1709,42 @@ func TestValidateIndexerEmptyABPasskeyWarning(t *testing.T) {
 		}
 	})
 }
+
+// TestToConfigWarnsOnAllBlankTagLists pins the all-blank tag-list diagnostic
+// on BOTH arr_tags sides: trimList drops every blank entry, so the filter is
+// silently off, and the field-name-only warning (never the tag values, which
+// can carry an expanded ${VAR}) is the operator's only signal that the
+// configured list does nothing.
+func TestToConfigWarnsOnAllBlankTagLists(t *testing.T) {
+	t.Run("include list", func(t *testing.T) {
+		rec := capture.Default(t)
+		fc := defaultFileConfig()
+		fc.ArrTags.Include = []string{" ", "\t"}
+
+		cfg := fc.toConfig()
+
+		if len(cfg.IncludeTags) != 0 {
+			t.Errorf("IncludeTags = %v, want no effective tags", cfg.IncludeTags)
+		}
+		if !rec.Contains("configured tag list holds only blank entries; the filter is off") ||
+			!rec.AttrContains("", "which", "arr_tags.include") {
+			t.Errorf("toConfig() log = %v, want all-blank include-list warning", rec.Messages())
+		}
+	})
+
+	t.Run("exclude list", func(t *testing.T) {
+		rec := capture.Default(t)
+		fc := defaultFileConfig()
+		fc.ArrTags.Exclude = []string{" ", "\n"}
+
+		cfg := fc.toConfig()
+
+		if len(cfg.ExcludeTags) != 0 {
+			t.Errorf("ExcludeTags = %v, want no effective tags", cfg.ExcludeTags)
+		}
+		if !rec.Contains("configured tag list holds only blank entries; the filter is off") ||
+			!rec.AttrContains("", "which", "arr_tags.exclude") {
+			t.Errorf("toConfig() log = %v, want all-blank exclude-list warning", rec.Messages())
+		}
+	})
+}

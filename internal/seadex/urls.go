@@ -1,6 +1,7 @@
 package seadex
 
 import (
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -97,15 +98,44 @@ func (t *Torrent) UsableURL() string {
 // identify the intended torrent, so it is published on its own recovered
 // host with an https scheme (every canonical tracker is https). The userinfo
 // gate mirrors usableAbsolute: a credential-bearing authority is a spoofing
-// vector and never publishes canonicalized. Any other schemeless value keeps
+// vector and never publishes canonicalized; the recovered authority's port
+// is range-checked the same way (see schemelessPortOK), so a canonicalized
+// publish cannot emit an out-of-range port usableAbsolute would reject on
+// the equivalent absolute form. Any other schemeless value keeps
 // the href reading - a tracker-relative path under the labeled tracker's
 // base (or the inferred owner's, for a tracker-specific relative shape) -
 // exactly like UsableURL's relative form.
 func usableSchemelessHost(f *urlform.Form, baseURL string) string {
 	if _, hostOK := release.LookupTrackerByHost(f.Host); hostOK && !f.HasUserInfo {
+		if !schemelessPortOK(f.Trimmed) {
+			return ""
+		}
 		return "https://" + f.Trimmed
 	}
 	return publishRelative(f.Trimmed, "/"+f.Trimmed, baseURL)
+}
+
+// schemelessPortOK reports whether the recovered authority of a schemeless
+// value carries a publishable port: absent, or numeric and inside the 16-bit
+// range usableAbsolute enforces for the absolute form. urlform records the
+// recovered Host and HasUserInfo for ClassSchemelessHost but not the
+// recovered Port, so the authority is re-parsed here ("//" + value makes
+// net/url read it as one) rather than trusting the label-free host fact
+// alone: publishing "https://nyaa.si:65536/x" would surface an invalid
+// upstream-controlled link even though the host gate held. An unparsable
+// authority is unpublishable too - this publisher drops what it cannot
+// vouch for.
+func schemelessPortOK(trimmed string) bool {
+	u, err := url.Parse("//" + trimmed)
+	if err != nil {
+		return false
+	}
+	port := u.Port()
+	if port == "" {
+		return true
+	}
+	_, portErr := strconv.ParseUint(port, 10, 16)
+	return portErr == nil
 }
 
 // publishRelative applies the shared inferred-owner-wins policy for

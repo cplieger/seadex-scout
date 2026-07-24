@@ -175,6 +175,27 @@ func TestParseMediaFieldLimits(t *testing.T) {
 	}
 }
 
+// TestParseMediaRejectsUnsafeTitleText pins the title single-line guard on its
+// own: each payload carries ONE unsafe title field plus a safe sibling, so the
+// media still has a usable title and the only reason to reject it is the
+// runesafe.SanitizeSingleLine check in toMedia. Without these cases, dropping
+// that guard leaves the suite green whenever a safe sibling title remains.
+func TestParseMediaRejectsUnsafeTitleText(t *testing.T) {
+	tests := map[string]string{
+		"romaji newline with safe sibling":        `{"data":{"Media":{"title":{"romaji":"A\nB","english":"Safe"}}}}`,
+		"english C1 control with safe sibling":    `{"data":{"Media":{"title":{"romaji":"Safe","english":"A\u009bB"}}}}`,
+		"native line separator with safe sibling": `{"data":{"Media":{"title":{"romaji":"Safe","native":"A\u2028B"}}}}`,
+		"romaji bidi override with safe sibling":  `{"data":{"Media":{"title":{"romaji":"A\u202eB","english":"Safe"}}}}`,
+	}
+	for name, raw := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseMedia([]byte(raw)); err == nil {
+				t.Errorf("parseMedia(%s) = nil error, want unsafe title text rejected", raw)
+			}
+		})
+	}
+}
+
 func TestParseMediaPageNullableEnvelope(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -528,5 +549,64 @@ func TestBoundedMediaListUnmarshalTruncatedData(t *testing.T) {
 				t.Errorf("l.records = %v after a failed decode, want nil", l.records)
 			}
 		})
+	}
+}
+
+// TestParseRejectsDuplicateJSONKeys pins the structural preflight: encoding/json
+// applies the LAST occurrence of a duplicate object key and discards the earlier
+// value unseen, so a single body carrying a valid Media plus a later null Media
+// would otherwise reach classifyNullMedia as a genuine not-found and be
+// negative-memoized (and a batch could have Page.media swapped for an empty
+// array). Every ambiguous body must fail plainly — never ErrNotFound, never a
+// usable result — so the id is retried next cycle. Key matching is
+// case-insensitive because encoding/json matches struct fields that way too.
+func TestParseRejectsDuplicateJSONKeys(t *testing.T) {
+	single := map[string]string{
+		"duplicate data ending in null Media":    `{"data":{"Media":{"id":1,"title":{"romaji":"A"}}},"data":{"Media":null}}`,
+		"duplicate Media ending in null":         `{"data":{"Media":{"id":1,"title":{"romaji":"A"}},"Media":null}}`,
+		"case-insensitive duplicate Media/media": `{"data":{"Media":{"id":1,"title":{"romaji":"A"}},"media":null}}`,
+		"duplicate key inside title":             `{"data":{"Media":{"id":1,"title":{"romaji":"A","romaji":"B"}}}}`,
+	}
+	for name, raw := range single {
+		t.Run("single/"+name, func(t *testing.T) {
+			got, err := parseMediaForID([]byte(raw), 1)
+			if err == nil {
+				t.Fatalf("parseMediaForID(%s) = %+v, nil error; want ambiguous JSON rejected", raw, got)
+			}
+			if errors.Is(err, ErrNotFound) {
+				t.Errorf("err = %v, want a plain retryable error (never ErrNotFound, which is negative-memoized)", err)
+			}
+		})
+	}
+
+	batch := map[string]string{
+		"duplicate Page ending in null":   `{"data":{"Page":{"media":[{"id":1,"title":{"romaji":"A"}}]},"Page":null}}`,
+		"duplicate media ending in empty": `{"data":{"Page":{"media":[{"id":1,"title":{"romaji":"A"}}],"media":[]}}}`,
+		"duplicate data":                  `{"data":{"Page":{"media":[{"id":1,"title":{"romaji":"A"}}]}},"data":{"Page":{"media":[]}}}`,
+	}
+	for name, raw := range batch {
+		t.Run("batch/"+name, func(t *testing.T) {
+			got, err := parseMediaPage([]byte(raw))
+			if err == nil {
+				t.Fatalf("parseMediaPage(%s) = %v, nil error; want ambiguous JSON rejected", raw, got)
+			}
+			if len(got) != 0 {
+				t.Errorf("got = %v, want no usable records from an ambiguous batch", got)
+			}
+		})
+	}
+}
+
+// TestParseAcceptsRepeatedKeysAcrossSiblingObjects guards against the
+// duplicate-key preflight over-rejecting: the same key name in DIFFERENT
+// objects (each batch record has its own id/title) is normal, unambiguous JSON.
+func TestParseAcceptsRepeatedKeysAcrossSiblingObjects(t *testing.T) {
+	raw := []byte(`{"data":{"Page":{"media":[{"id":1,"title":{"romaji":"A"}},{"id":2,"title":{"romaji":"B"}}]}}}`)
+	got, err := parseMediaPage(raw)
+	if err != nil {
+		t.Fatalf("parseMediaPage: %v", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("len = %d, want 2 records", len(got))
 	}
 }

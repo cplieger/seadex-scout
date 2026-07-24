@@ -522,7 +522,7 @@ func TestRunSurfacesBindFailureSynchronously(t *testing.T) {
 // then shuts down gracefully returning nil and logging shutdown-complete -
 // the contract startIndexer's goroutine and the daemon's shutdown wait rely
 // on. The capture recorder is mutex-guarded, so polling it while Run's
-// goroutine logs is race-safe; both waits are deadline-bounded.
+// goroutine logs is race-safe; each lifecycle phase carries its own deadline.
 func TestRunServesAndShutsDownGracefully(t *testing.T) {
 	orig := listenAddr
 	listenAddr = "127.0.0.1:0"
@@ -532,23 +532,24 @@ func TestRunServesAndShutsDownGracefully(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- New(&Config{APIKey: "k"}, Deps{Logger: log}, "").Run(ctx) }()
-	deadline := time.After(10 * time.Second)
+	startupDeadline := time.After(10 * time.Second)
 	for !rec.Contains("seadex-scout indexer listening") {
 		select {
 		case err := <-done:
 			t.Fatalf("Run exited before serving: %v", err)
-		case <-deadline:
+		case <-startupDeadline:
 			t.Fatal("indexer never logged the listening line")
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
 	cancel()
+	shutdownDeadline := time.After(10 * time.Second)
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatalf("Run returned %v on graceful shutdown, want nil", err)
 		}
-	case <-deadline:
+	case <-shutdownDeadline:
 		t.Fatal("Run did not return after context cancellation")
 	}
 	if !rec.Contains("indexer shutdown complete") {

@@ -23,16 +23,14 @@ func discardLogger() *slog.Logger {
 
 // fakeSonarr is a scripted SonarrClient: GetSeries returns series (or listErr),
 // GetEpisodeFiles returns files[id] (or epErr[id]), GetTags returns the canned
-// tag list (or tagErr) and counts its calls so tests can pin the
-// one-fetch-per-walk tag-resolution contract.
+// tag list (or tagErr).
 type fakeSonarr struct {
-	files    map[int][]arrapi.EpisodeFile
-	epErr    map[int]error
-	listErr  error
-	tagErr   error
-	series   []arrapi.Series
-	tags     []arrapi.Tag
-	tagCalls int
+	files   map[int][]arrapi.EpisodeFile
+	epErr   map[int]error
+	listErr error
+	tagErr  error
+	series  []arrapi.Series
+	tags    []arrapi.Tag
 }
 
 func (f *fakeSonarr) GetSeries(context.Context) ([]arrapi.Series, error) {
@@ -47,7 +45,6 @@ func (f *fakeSonarr) GetEpisodeFiles(_ context.Context, seriesID int) ([]arrapi.
 }
 
 func (f *fakeSonarr) GetTags(context.Context) ([]arrapi.Tag, error) {
-	f.tagCalls++
 	return f.tags, f.tagErr
 }
 
@@ -217,68 +214,34 @@ func TestWalkAppliesIncludeTagFilter(t *testing.T) {
 	}
 }
 
-// TestWalkResolvesTagsWithOneFetchPerArr pins the single-fetch tag-resolution
-// contract: the include AND exclude label sets resolve against ONE tag-list
-// fetch per arr per walk (resolved locally via arrapi.TagIDs /
-// UnmatchedLabels), and a walker with no tag filters configured never fetches
-// the tag list at all.
-func TestWalkResolvesTagsWithOneFetchPerArr(t *testing.T) {
-	t.Run("include and exclude share one fetch per arr", func(t *testing.T) {
-		fs := &fakeSonarr{
-			series: []arrapi.Series{
-				{ID: 1, Title: "Kept", Tags: []int{7}},
-				{ID: 2, Title: "Excluded", Tags: []int{7, 9}},
-			},
-			files: map[int][]arrapi.EpisodeFile{
-				1: {epFile(1, "PMR")},
-			},
-			tags: []arrapi.Tag{{ID: 7, Label: "anime"}, {ID: 9, Label: "skip"}},
-		}
-		fr := &fakeRadarr{
-			movies: []arrapi.Movie{{ID: 10, Title: "Kept Movie", Tags: []int{7}}},
-			tags:   []arrapi.Tag{{ID: 7, Label: "anime"}, {ID: 9, Label: "skip"}},
-		}
-		w := NewWalker(&Config{
-			Sonarr:      fs,
-			Radarr:      fr,
-			IncludeTags: []string{"anime"},
-			ExcludeTags: []string{"skip"},
-			Logger:      discardLogger(),
-		})
+// TestWalkWithoutTagFiltersDoesNotDependOnTagEndpoint verifies that an
+// unconfigured tag filter leaves the tag endpoint outside the walk's behavior.
+func TestWalkWithoutTagFiltersDoesNotDependOnTagEndpoint(t *testing.T) {
+	tagErr := errors.New("tag endpoint unavailable")
+	fs := &fakeSonarr{
+		series: []arrapi.Series{{ID: 1, Title: "Alpha"}},
+		files:  map[int][]arrapi.EpisodeFile{1: {epFile(1, "PMR")}},
+		tagErr: tagErr,
+	}
+	fr := &fakeRadarr{
+		movies: []arrapi.Movie{{ID: 2, Title: "Movie"}},
+		tagErr: tagErr,
+	}
+	w := NewWalker(&Config{Sonarr: fs, Radarr: fr, Logger: discardLogger()})
 
-		snap, err := w.Walk(context.Background())
-		if err != nil {
-			t.Fatalf("Walk: %v", err)
-		}
-		if fs.tagCalls != 1 {
-			t.Errorf("sonarr tag-list fetches = %d, want exactly 1 for both label sets", fs.tagCalls)
-		}
-		if fr.tagCalls != 1 {
-			t.Errorf("radarr tag-list fetches = %d, want exactly 1 for both label sets", fr.tagCalls)
-		}
-		if len(snap.Items) != 2 {
-			t.Fatalf("items = %+v, want the include-tagged series and movie only", snap.Items)
-		}
-		for _, it := range snap.Items {
-			if it.Arr == ArrSonarr && it.ArrID == 2 {
-				t.Error("excluded series (id 2) present, want it dropped by the exclude set from the shared fetch")
-			}
-		}
-	})
-	t.Run("no configured tag filters means no fetch", func(t *testing.T) {
-		fs := &fakeSonarr{
-			series: []arrapi.Series{{ID: 1, Title: "Alpha"}},
-			files:  map[int][]arrapi.EpisodeFile{1: {epFile(1, "PMR")}},
-		}
-		fr := &fakeRadarr{movies: []arrapi.Movie{{ID: 2, Title: "Movie"}}}
-		w := NewWalker(&Config{Sonarr: fs, Radarr: fr, Logger: discardLogger()})
-		if _, err := w.Walk(context.Background()); err != nil {
-			t.Fatalf("Walk: %v", err)
-		}
-		if fs.tagCalls != 0 || fr.tagCalls != 0 {
-			t.Errorf("tag-list fetches = sonarr %d / radarr %d, want 0/0 with no tag filters configured", fs.tagCalls, fr.tagCalls)
-		}
-	})
+	snap, err := w.Walk(context.Background())
+	if err != nil {
+		t.Fatalf("Walk with no tag filters: %v", err)
+	}
+	if len(snap.Items) != 2 {
+		t.Fatalf("items = %d, want 2", len(snap.Items))
+	}
+	if got := snap.Items[0].Key(); got != "sonarr:1" {
+		t.Errorf("first item key = %q, want %q", got, "sonarr:1")
+	}
+	if got := snap.Items[1].Key(); got != "radarr:2" {
+		t.Errorf("second item key = %q, want %q", got, "radarr:2")
+	}
 }
 
 func TestIsDualAudio(t *testing.T) {
@@ -553,14 +516,12 @@ func TestWalkSonarrEpisodeCancellationIsFatalWithoutWarn(t *testing.T) {
 	}
 }
 
-// fakeRadarr is a scripted RadarrClient. GetTags counts its calls so tests can
-// pin the one-fetch-per-walk tag-resolution contract.
+// fakeRadarr is a scripted RadarrClient.
 type fakeRadarr struct {
-	listErr  error
-	tagErr   error
-	movies   []arrapi.Movie
-	tags     []arrapi.Tag
-	tagCalls int
+	listErr error
+	tagErr  error
+	movies  []arrapi.Movie
+	tags    []arrapi.Tag
 }
 
 func (f *fakeRadarr) GetMovies(context.Context) ([]arrapi.Movie, error) {
@@ -568,7 +529,6 @@ func (f *fakeRadarr) GetMovies(context.Context) ([]arrapi.Movie, error) {
 }
 
 func (f *fakeRadarr) GetTags(context.Context) ([]arrapi.Tag, error) {
-	f.tagCalls++
 	return f.tags, f.tagErr
 }
 

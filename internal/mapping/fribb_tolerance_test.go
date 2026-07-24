@@ -5,15 +5,6 @@ import (
 	"testing"
 )
 
-// TestFlexInt_malformedStringErrors pins that a malformed JSON string
-// propagates a syntax error (an unterminated string) instead of tolerating it.
-func TestFlexInt_malformedStringErrors(t *testing.T) {
-	var f flexInt
-	if err := f.UnmarshalJSON([]byte(`"unterminated`)); err == nil {
-		t.Error("UnmarshalJSON(unterminated string) = nil error, want syntax error")
-	}
-}
-
 // TestStringList_numberScalarTolerated pins the scalar branch's tolerance: a
 // non-string scalar (a bare number) decodes to an empty list rather than
 // failing the record.
@@ -218,14 +209,6 @@ func TestStringList_malformedArrayTolerated(t *testing.T) {
 // keys in order against the SAME field receiver, so a later tolerated-odd
 // value must clear the earlier decode, not silently retain it.
 func TestTolerantDecoders_resetOnReuse(t *testing.T) {
-	var f flexInt
-	if err := f.UnmarshalJSON([]byte(`7`)); err != nil || int(f) != 7 {
-		t.Fatalf("flexInt first decode = %d, %v, want 7, nil", int(f), err)
-	}
-	if err := f.UnmarshalJSON([]byte(`false`)); err != nil || int(f) != 0 {
-		t.Errorf("flexInt reused with odd value = %d, %v, want reset to 0, nil", int(f), err)
-	}
-
 	var s flexString
 	if err := s.UnmarshalJSON([]byte(`"MOVIE"`)); err != nil || string(s) != "MOVIE" {
 		t.Fatalf("flexString first decode = %q, %v, want MOVIE, nil", string(s), err)

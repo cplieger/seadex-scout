@@ -415,7 +415,7 @@ func staleOrFail(prev *Cache, staleMsg string, cause, noCache error) (Cache, err
 			cause:   cause,
 			msg:     staleMsg,
 			age:     max(time.Duration(0), time.Since(prev.FetchedAt).Round(time.Second)),
-			records: len(prev.Records),
+			records: buildIndex(prev.Records).Len(),
 		}
 	}
 	return *prev, noCache
@@ -1102,6 +1102,14 @@ func (set *overrideSet) applyRecord(dec *bounded.Decoder, seenKeys map[string]st
 		set.records[at] = record
 		return nil
 	}
+	// Reject BEFORE retaining: a new distinct record allocates both a
+	// set.records slot and a position map entry, so the cardinality cap has to
+	// fire here rather than after the append (which would let the first
+	// over-cap record cross the documented ceiling). A duplicate at the cap
+	// still replaces its earlier record above - it retains nothing new.
+	if len(set.records) >= maxOverrideRecords {
+		return fmt.Errorf("mapping: overrides exceed cap %d records", maxOverrideRecords)
+	}
 	position[record.AniListID] = len(set.records)
 	set.records = append(set.records, record)
 	return nil
@@ -1155,9 +1163,6 @@ func parseOverrides(data []byte) (overrideSet, error) {
 	for dec.More() {
 		if err := set.applyRecord(dec, seenKeys, position, reported); err != nil {
 			return overrideSet{}, err
-		}
-		if len(set.records) > maxOverrideRecords {
-			return overrideSet{}, fmt.Errorf("mapping: overrides exceed cap %d records", maxOverrideRecords)
 		}
 	}
 	if err := dec.Close(); err != nil { // the closing ']'

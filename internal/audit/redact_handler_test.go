@@ -67,3 +67,24 @@ func TestRedactingHandlerRedactsAttachedAndGroupedAttrs(t *testing.T) {
 		}
 	})
 }
+
+// TestRedactingHandlerRedactsRecordMessage pins the Record.Message half of
+// the redaction contract, which every other handler test misses: the suite
+// above only places the dir in attached, grouped, or inline attributes, so a
+// regression that forwarded rec.Message verbatim would still pass while
+// leaking the configured report directory to Loki.
+func TestRedactingHandlerRedactsRecordMessage(t *testing.T) {
+	const dir = "/config/sekret-passkey-sentinel"
+	var buf bytes.Buffer
+	log := redactingLogger(slog.New(slog.NewJSONHandler(&buf, nil)), dir)
+
+	log.Info("failed to write " + dir + "/report.json")
+
+	out := buf.String()
+	if strings.Contains(out, "sekret-passkey-sentinel") {
+		t.Errorf("redacting handler leaked report.dir from the record message: %s", out)
+	}
+	if !strings.Contains(out, redactedPath) {
+		t.Errorf("redacting handler emitted no %q marker: %s", redactedPath, out)
+	}
+}

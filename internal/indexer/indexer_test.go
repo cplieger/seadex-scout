@@ -1421,7 +1421,7 @@ func TestReloadSkipsUnchangedMtime(t *testing.T) {
 
 // TestReloadCoalescesConcurrentRefreshes pins reload's coalescing contract
 // AFTER a first successful load: while one request holds the refresh
-// (reloadMu, as a winning reload does for its whole stat/read/unmarshal), a
+// (the reload gate, as a winning reload does for its whole stat/read/unmarshal), a
 // sibling reload returns immediately without duplicating the read - it does
 // not block and does not install the on-disk snapshot itself - and feedFor
 // keeps serving the current snapshot unblocked. Once the refresh is released,
@@ -1453,9 +1453,11 @@ func TestReloadCoalescesConcurrentRefreshes(t *testing.T) {
 		t.Fatalf("chtimes: %v", err)
 	}
 
-	// Simulate a refresh in progress: hold reloadMu exactly as the winning
-	// request does across its stat/read/unmarshal.
-	ix.reloadMu.Lock()
+	// Simulate a refresh in progress: hold the reload gate exactly as the
+	// winning request does across its stat/read/unmarshal.
+	if !ix.tryLockReload() {
+		t.Fatal("reload gate already held; want it free before simulating a refresh")
+	}
 
 	// A sibling reload must return immediately rather than queue behind the
 	// in-progress refresh or perform a duplicate read.
@@ -1467,17 +1469,17 @@ func TestReloadCoalescesConcurrentRefreshes(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		ix.reloadMu.Unlock()
+		ix.unlockReload()
 		t.Fatal("sibling reload blocked behind an in-progress refresh; want an immediate return once a snapshot is loaded")
 	}
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
-		ix.reloadMu.Unlock()
+		ix.unlockReload()
 		t.Fatalf("sibling reload = %#v; want the current snapshot kept and the install left to the refresh holder", got)
 	}
 
 	// Once the winning request releases the refresh, the next reload installs
 	// the new snapshot as usual.
-	ix.reloadMu.Unlock()
+	ix.unlockReload()
 	ix.reload(context.Background())
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "new" {
 		t.Fatalf("reload after the refresh released = %#v, want the new snapshot installed", got)
@@ -1604,7 +1606,7 @@ func TestServeFailsClosedWithoutConfiguredAPIKey(t *testing.T) {
 // TestInstallSnapshotSkipsAlreadyInstalledFile pins installSnapshot's
 // under-lock re-check: re-installing the same unchanged file (equal mtime AND
 // os.SameFile identity) returns false and leaves the published snapshot
-// untouched. reloadMu already serializes reloads today, but the comment
+// untouched. The reload gate already serializes reloads today, but the comment
 // declares this defense-in-depth invariant must hold even if the TryLock
 // coalescing changes, so it is pinned by direct call.
 func TestInstallSnapshotSkipsAlreadyInstalledFile(t *testing.T) {

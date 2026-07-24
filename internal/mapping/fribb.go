@@ -170,32 +170,56 @@ func parseFribbForRefresh(data []byte, log *slog.Logger) (fribbParseResult, erro
 // on its own so one malformed record is skipped (counted) rather than failing
 // the whole map, and rejecting a list that exceeds maxFribbRecords (the
 // errRecordCapExceeded sentinel) before the excess elements are decoded. It
-// leaves the decoder positioned on the array's closing token.
+// leaves the decoder positioned on the array's closing token. The per-record
+// tolerance bookkeeping lives in fribbDecodeCounts, so this loop carries only
+// the cap and fatal-stream guarantees.
 func decodeFribbRecords(dec *bounded.Decoder) (records []Record, skipped, dropped int, firstErr, err error) {
-	seen := 0
-	for dec.More() {
+	var counts fribbDecodeCounts
+	// The ordering is load-bearing: dec.More observes another element, the
+	// cap guard fires on it, and only then could decodeNextFribbRecord read
+	// and decode that element.
+	for seen := 0; dec.More(); seen++ {
 		if seen == maxFribbRecords {
 			return nil, 0, 0, nil, errRecordCapExceeded
 		}
-		seen++
 		rec, ok, decodeErr, streamErr := decodeNextFribbRecord(dec)
 		if streamErr != nil {
 			return nil, 0, 0, nil, streamErr
 		}
-		if decodeErr != nil {
-			skipped++
-			if firstErr == nil {
-				firstErr = decodeErr
-			}
-			continue
-		}
-		if ok {
-			records = append(records, rec)
-		} else {
-			dropped++
-		}
+		counts.add(&rec, ok, decodeErr)
 	}
-	return records, skipped, dropped, firstErr, nil
+	return counts.records, counts.skipped, counts.dropped, counts.firstErr, nil
+}
+
+// fribbDecodeCounts accumulates decodeFribbRecords' TOLERATED per-record
+// outcomes: the accepted records, the first skipped record's decode error, and
+// the skipped (malformed) / dropped (no anilist_id) counts the caller logs.
+// Fatal outcomes (the record cap, a stream decode failure) stay in the loop.
+type fribbDecodeCounts struct {
+	firstErr error
+	records  []Record
+	skipped  int
+	dropped  int
+}
+
+// add folds one record's decode outcome in: a tolerated decode failure counts
+// as skipped (keeping the first error for the warning), a record without an
+// AniList ID counts as dropped, and anything else is accepted. rec is taken by
+// pointer only because Record is a heavy value (gocritic hugeParam); it is
+// never retained.
+func (c *fribbDecodeCounts) add(rec *Record, ok bool, decodeErr error) {
+	if decodeErr != nil {
+		c.skipped++
+		if c.firstErr == nil {
+			c.firstErr = decodeErr
+		}
+		return
+	}
+	if !ok {
+		c.dropped++
+		return
+	}
+	c.records = append(c.records, *rec)
 }
 
 // decodeNextFribbRecord reads the next array element off the stream and

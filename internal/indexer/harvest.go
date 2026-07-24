@@ -168,51 +168,87 @@ func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]journ
 	// same way.
 	harvestCtx, cancelHarvest := context.WithTimeout(ctx, harvestTimeBudget)
 	defer cancelHarvest()
-	pacer := &harvestPacer{now: w.now, deadline: w.now().Add(harvestTimeBudget)}
-	failed := make(map[string]bool, len(w.upstreams))
-	malformed := make(map[string]int, len(w.upstreams))
-	rejected := make(map[string]int, len(w.upstreams))
+	run := &harvestRun{
+		infoFor:    infoFor,
+		checkpoint: &cp,
+		pacer:      &harvestPacer{now: w.now, deadline: w.now().Add(harvestTimeBudget)},
+		stats:      &stats,
+		index:      index,
+		titles:     titles,
+		failed:     make(map[string]bool, len(w.upstreams)),
+		malformed:  make(map[string]int, len(w.upstreams)),
+		rejected:   make(map[string]int, len(w.upstreams)),
+	}
 	start := rotationStart(groups, cp.Last)
 	for i := range groups {
-		g := groups[(start+i)%len(groups)]
-		key := harvestCursorKey(g)
-		if pacer.spent(harvestCtx) {
+		if !w.processHarvestGroup(harvestCtx, groups[(start+i)%len(groups)], run) {
 			break
 		}
-		if !groupPending(g, titles) {
-			// An earlier page already titled this group's items
-			// opportunistically (matchHarvest matches the global index);
-			// spend no query on a satisfied group - and drop its resumed
-			// page state: a satisfied group has nothing left to page for.
-			delete(cp.Pages, key)
-			w.log.Debug("indexer title harvest group already satisfied; skipping query",
-				"upstream", g.scope, "al_id", g.alID, "items", len(g.keys))
-			continue
-		}
-		u := availableHarvestUpstream(w.upstreams, failed, g.scope)
-		if u == nil {
-			continue
-		}
-		before := stats.queries
-		outcome, nextPage := w.harvestShow(harvestCtx, u, g, infoFor(g.alID), index, titles, pacer, &stats, cp.Pages[key])
-		if nextPage > 0 {
-			// The show ended this rebuild with deeper pages still unseen
-			// (page cap, slice expiry, or a failed page worth retrying):
-			// persist where to resume so later rebuilds reach offsets the
-			// per-rebuild cap alone never could.
-			cp.Pages[key] = nextPage
-		} else {
-			delete(cp.Pages, key)
-		}
-		if stats.queries > before {
-			// The cursor tracks the last group that CONSUMED a query - not
-			// merely one dispatched after the slice ran out - so the next
-			// rebuild resumes exactly where real work stopped.
-			cp.Last = key
-		}
-		w.updateHarvestScopeState(g.scope, outcome, failed, malformed, rejected)
 	}
 	return stats, cursor
+}
+
+// harvestRun is one harvestTitles run's mutable accounting: the per-rebuild
+// checkpoint, time slice, stats, the identity index and title cache the
+// matcher writes through, and the per-scope failure/malformed/rejected latch
+// counters. It exists so the orchestration loop passes ONE value to the
+// per-group step instead of nine, keeping harvestTitles about setup and
+// ordered iteration.
+type harvestRun struct {
+	infoFor    func(alID int) EntryInfo
+	checkpoint *harvestCheckpoint
+	pacer      *harvestPacer
+	stats      *harvestStats
+	index      map[string]string
+	titles     map[string]string
+	failed     map[string]bool
+	malformed  map[string]int
+	rejected   map[string]int
+}
+
+// processHarvestGroup runs one show-on-one-tracker group of the rotation:
+// admission against the time slice, the already-satisfied skip, upstream
+// selection, the query itself, and the resulting checkpoint / cursor /
+// scope-latch updates. It reports whether the rotation should continue; false
+// means the slice (or the caller's context) is spent and harvestTitles stops.
+func (w *FeedWriter) processHarvestGroup(ctx context.Context, g harvestGroup, r *harvestRun) bool {
+	key := harvestCursorKey(g)
+	if r.pacer.spent(ctx) {
+		return false
+	}
+	if !groupPending(g, r.titles) {
+		// An earlier page already titled this group's items
+		// opportunistically (matchHarvest matches the global index);
+		// spend no query on a satisfied group - and drop its resumed
+		// page state: a satisfied group has nothing left to page for.
+		delete(r.checkpoint.Pages, key)
+		w.log.Debug("indexer title harvest group already satisfied; skipping query",
+			"upstream", g.scope, "al_id", g.alID, "items", len(g.keys))
+		return true
+	}
+	u := availableHarvestUpstream(w.upstreams, r.failed, g.scope)
+	if u == nil {
+		return true
+	}
+	before := r.stats.queries
+	outcome, nextPage := w.harvestShow(ctx, u, g, r.infoFor(g.alID), r.index, r.titles, r.pacer, r.stats, r.checkpoint.Pages[key])
+	if nextPage > 0 {
+		// The show ended this rebuild with deeper pages still unseen
+		// (page cap, slice expiry, or a failed page worth retrying):
+		// persist where to resume so later rebuilds reach offsets the
+		// per-rebuild cap alone never could.
+		r.checkpoint.Pages[key] = nextPage
+	} else {
+		delete(r.checkpoint.Pages, key)
+	}
+	if r.stats.queries > before {
+		// The cursor tracks the last group that CONSUMED a query - not
+		// merely one dispatched after the slice ran out - so the next
+		// rebuild resumes exactly where real work stopped.
+		r.checkpoint.Last = key
+	}
+	w.updateHarvestScopeState(g.scope, outcome, r.failed, r.malformed, r.rejected)
+	return true
 }
 
 // harvestCheckpoint is the harvest's persisted resumption state, encoded into
@@ -485,27 +521,48 @@ func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGrou
 			return harvestOK, page
 		}
 		stats.queries++
-		results, raw, err := u.search(ctx, harvestPage(params, page*harvestPageSize))
-		if err != nil {
-			if ctx.Err() != nil {
-				// The harvest context is done: the time-budget deadline
-				// fired mid-query (normal exhaustion, resumed next rebuild
-				// at the checkpoint) or the outer context was cancelled
-				// (shutdown). Neither warns, and the caller's pacer.spent
-				// check ends the rebuild's loop before the latched scope
-				// state could matter; the unconsumed page is preserved so
-				// the next rebuild retries it.
-				return harvestScopeFailed, page
-			}
-			return w.classifyHarvestError(err, u, g.alID), page
+		results, raw, failure, ok := w.searchHarvestPage(ctx, u, g, params, page)
+		if !ok {
+			return failure, page
 		}
 		stats.matched += matchHarvest(results, g.scope, index, titles)
-		if !groupPending(g, titles) || raw < harvestPageSize {
+		if harvestPageComplete(g, titles, raw) {
 			return harvestOK, 0
 		}
 		page++
 	}
 	return harvestOK, page
+}
+
+// searchHarvestPage runs one harvest page's upstream query and classifies its
+// outcome. The final bool reports whether the page's results are usable; when
+// it is false the returned outcome is the one harvestShow must report for this
+// show, leaving the page unconsumed so the checkpoint retries it. A done
+// context (the time-budget deadline firing mid-query, or shutdown) is silent
+// scope-wide exhaustion rather than an upstream fault, so it never warns; any
+// other error rides classifyHarvestError's show-local vs scope-wide split.
+func (w *FeedWriter) searchHarvestPage(ctx context.Context, u *upstream, g harvestGroup, params url.Values, page int) ([]item, int, harvestOutcome, bool) {
+	results, raw, err := u.search(ctx, harvestPage(params, page*harvestPageSize))
+	if err == nil {
+		return results, raw, harvestOK, true
+	}
+	if ctx.Err() != nil {
+		// The harvest context is done: the time-budget deadline fired
+		// mid-query (normal exhaustion, resumed next rebuild at the
+		// checkpoint) or the outer context was cancelled (shutdown). Neither
+		// warns, and the caller's pacer.spent check ends the rebuild's loop
+		// before the latched scope state could matter; the unconsumed page is
+		// preserved so the next rebuild retries it.
+		return nil, 0, harvestScopeFailed, false
+	}
+	return nil, 0, w.classifyHarvestError(err, u, g.alID), false
+}
+
+// harvestPageComplete reports whether this show's paging is done after the
+// page just consumed: either every journal key now has a harvested title, or
+// the short page proved the upstream has nothing older to offer.
+func harvestPageComplete(g harvestGroup, titles map[string]string, raw int) bool {
+	return !groupPending(g, titles) || raw < harvestPageSize
 }
 
 // classifyHarvestError warns about one show's failed (non-cancelled) harvest
@@ -679,7 +736,10 @@ func matchHarvest(results []item, scope string, index, titles map[string]string)
 // releases, or when two signals resolve to different journal items: a healthy
 // Prowlarr emits one consistent identity per item, so a contradictory result
 // is an untrusted response that must not title anything (the same fail-closed
-// rule the search curation match applies in acceptScopedKeys).
+// rule the search curation match applies in acceptScopedKeys). A signal that
+// is present and parseable but absent from the pending index is unreconcilable
+// evidence, not an absent signal, so it rejects the result too: only a signal
+// the result does not carry at all (empty) is skipped.
 func resolveHarvestKey(it *item, index map[string]string) string {
 	kc, kg := trackerKeyFromURL(it.InfoURL), trackerKeyFromURL(it.GUID)
 	if kc != "" && kg != "" && kc != kg {
@@ -692,7 +752,7 @@ func resolveHarvestKey(it *item, index map[string]string) string {
 		}
 		k, ok := index[id]
 		if !ok {
-			continue
+			return ""
 		}
 		if key != "" && k != key {
 			return ""

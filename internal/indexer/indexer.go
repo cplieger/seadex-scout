@@ -53,6 +53,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cplieger/httpx/v3"
 	"github.com/cplieger/webhttp"
 )
 
@@ -127,9 +128,19 @@ type Indexer struct {
 	// (a chmod, a transient filesystem repair), so it stays retryable.
 	// Identity matters, not just mtime: an atomic rename or backup restore can
 	// install a repaired file that preserves the failed file's timestamp, and
-	// that replacement must be retried, not skipped. Guarded by reloadMu
+	// that replacement must be retried, not skipped. Guarded by reloadGate
 	// (set/cleared only inside reload).
 	failedFile os.FileInfo
+	// reloadGate coalesces concurrent snapshot refreshes: only one request runs
+	// reload's stat/read/unmarshal at a time; the rest serve the current
+	// immutable snapshot (see reload). It also guards the reload-only flags
+	// failedFile / snapMissing / reloadDegraded. It is a capacity-one token
+	// channel rather than a sync.Mutex because the pre-first-load wait must be
+	// cancellable: a request that has already gone away (client disconnect, arr
+	// timeout) must not keep a handler goroutine and its connection parked
+	// behind the winner's whole stat/read/decode, which no server write timeout
+	// bounds. A send acquires the gate; the matching receive releases it.
+	reloadGate chan struct{}
 	// log, cfg, and path are set once in New and read per request without a
 	// lock: cfg is a by-value copy and none of the three is ever written
 	// after construction (the same immutable-after-New contract as
@@ -143,11 +154,6 @@ type Indexer struct {
 	// snapMod, snapInfo, snapFailed, and snapFailedWarned (see the
 	// per-field comments).
 	mu sync.RWMutex
-	// reloadMu coalesces concurrent snapshot refreshes: only one request runs
-	// reload's stat/read/unmarshal at a time; the rest serve the current
-	// immutable snapshot (see reload). It also guards the reload-only flags
-	// failedFile / snapMissing / reloadDegraded.
-	reloadMu sync.Mutex
 	// verifyKey is the pre-hashed feed_api_key verifier, built once in New so
 	// per-request verification hashes only the presented value (see
 	// webhttp.NewStaticTokenVerifier). Immutable after New.
@@ -157,7 +163,7 @@ type Indexer struct {
 	// stale-feed WARN fires once per disappearance instead of on every
 	// request; cleared (with one INFO recovery line) on the first successful
 	// stat afterward. A fresh install with no prior snapshot stays silent.
-	// Guarded by reloadMu (set/cleared only inside reload).
+	// Guarded by reloadGate (set/cleared only inside reload).
 	snapMissing bool
 	// reloadDegraded records that reloads are failing (a stat error or a
 	// read failure of an unchanged-identity file), so the WARN fires once
@@ -168,7 +174,7 @@ type Indexer struct {
 	// stat lands on the memoized malformed file (skipMemoizedMalformed -
 	// access recovered, but nothing was reloaded). The retry itself is NOT
 	// suppressed (both faults can recover without an mtime change). Guarded
-	// by reloadMu (set/cleared only inside reload).
+	// by reloadGate (set/cleared only inside reload).
 	reloadDegraded bool
 	// snapFailed records that snapshot loading failed BEFORE any snapshot was
 	// installed: a non-ENOENT stat or read fault, or a malformed or
@@ -183,7 +189,7 @@ type Indexer struct {
 	// load keeps serving the last-good snapshot); cleared by the first
 	// successful installSnapshot, and by a genuinely absent file (deleting
 	// the bad file returns to fresh-install semantics). Guarded by mu (read
-	// per request by query, unlike the reloadMu-guarded flags above).
+	// per request by query, unlike the reloadGate-guarded flags above).
 	snapFailed bool
 	// snapFailedWarned bounds the snapshot-unavailable WARN to one per onset
 	// instead of one per request; re-armed whenever snapFailed clears.
@@ -202,10 +208,11 @@ func New(cfg *Config, deps Deps, snapshotPath string) *Indexer {
 		log = slog.Default()
 	}
 	ix := &Indexer{
-		log:       log,
-		path:      snapshotPath,
-		cfg:       *cfg,
-		verifyKey: webhttp.NewStaticTokenVerifier(cfg.APIKey),
+		log:        log,
+		path:       snapshotPath,
+		cfg:        *cfg,
+		verifyKey:  webhttp.NewStaticTokenVerifier(cfg.APIKey),
+		reloadGate: make(chan struct{}, 1),
 	}
 	// One upstream per configured Prowlarr Torznab URL. An empty URL means that
 	// tracker is off: it is simply not wired, so the feed never queries it. (The
@@ -213,10 +220,14 @@ func New(cfg *Config, deps Deps, snapshotPath string) *Indexer {
 	httpClient := deps.HTTP
 	if httpClient == nil {
 		// NewFeedWriter treats a nil HTTP as harvest-disabled; the server has no
-		// disabled mode for searches, so a nil client falls back to a default sized
-		// from the same constant build.go wires (UpstreamAttemptTimeout), turning a
-		// latent first-search panic into working behavior.
-		httpClient = &http.Client{Timeout: UpstreamAttemptTimeout}
+		// disabled mode for searches, so a nil client falls back to the same
+		// httpx client build.go wires (sized from UpstreamAttemptTimeout),
+		// turning a latent first-search panic into working behavior. It must be
+		// httpx.NewClient, not a bare http.Client: the Prowlarr API key rides an
+		// X-Api-Key header, which net/http forwards across redirects, so the
+		// fallback needs httpx's same-host, no-downgrade redirect policy to keep
+		// a redirecting upstream from exfiltrating that credential.
+		httpClient = httpx.NewClient(UpstreamAttemptTimeout)
 	}
 	ix.upstreams = wireUpstreams(httpClient, log, cfg.UpstreamConfig)
 	// Warm the feed from the last persisted snapshot so a restart serves

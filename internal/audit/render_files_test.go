@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cplieger/atomicfile/v2"
 )
 
 // TestWriteFilesWritesTimestampedPair pins the on-disk report contract the
@@ -482,5 +484,40 @@ func TestWriteFilesCanceledBeforeJSONRenderWritesNothing(t *testing.T) {
 	}
 	if _, statErr := os.Stat(dir); !errors.Is(statErr, os.ErrNotExist) {
 		t.Errorf("report dir stat = %v, want absent (nothing written before the JSON render)", statErr)
+	}
+}
+
+// TestDurabilityErrGatesBothReportHalves pins the durability gate both report
+// halves pass through: atomicfile reports a rename whose parent-directory
+// fsync failed as Result{Durable:false} with a NIL error, so a WriteFiles that
+// only checked the error would publish the Markdown half on a non-durable JSON
+// commit (and log "report written") - exactly the dangling-.md state the
+// JSON-first ordering exists to prevent. Each stage must turn Durable=false
+// into an errNotDurable-wrapping, stage-named error that quotes only the
+// timestamp-derived basename, never the secret-capable report.dir value.
+func TestDurabilityErrGatesBothReportHalves(t *testing.T) {
+	const dir = "/config/sekret-report-dir"
+
+	for _, tt := range []struct{ stage, path string }{
+		{"json", dir + "/report-2026-07-11T15-04-05Z.json"},
+		{"markdown", dir + "/report-2026-07-11T15-04-05Z.md"},
+	} {
+		t.Run(tt.stage, func(t *testing.T) {
+			if err := durabilityErr(tt.stage, tt.path, atomicfile.Result{Path: tt.path, Durable: true}); err != nil {
+				t.Errorf("durabilityErr(durable %s write) = %v, want nil", tt.stage, err)
+			}
+
+			err := durabilityErr(tt.stage, tt.path, atomicfile.Result{Path: tt.path})
+
+			if !errors.Is(err, errNotDurable) {
+				t.Fatalf("durabilityErr(non-durable %s write) = %v, want it to wrap errNotDurable", tt.stage, err)
+			}
+			if !strings.Contains(err.Error(), "write "+tt.stage+" report-2026-07-11T15-04-05Z") {
+				t.Errorf("error = %q, want the %s stage and the report basename", err, tt.stage)
+			}
+			if strings.Contains(err.Error(), dir) {
+				t.Errorf("error = %q, want no report.dir value in it", err)
+			}
+		})
 	}
 }

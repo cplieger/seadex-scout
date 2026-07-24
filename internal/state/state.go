@@ -80,10 +80,13 @@ type State struct {
 	// mapping.Cache.RejectedRefreshes so the scout can escalate its single
 	// shrunk-walk log site after a sustained streak.
 	ShrunkWalks int `json:"shrunk_walks,omitempty"`
-	// SeadexFailures counts consecutive cycles the scout's upstream gate
-	// skipped the compare after a failed SeaDex fetch, preserving findings.
-	// It persists across cycles and restarts, resets to 0 on any successful
-	// fetch, and mirrors ShrunkWalks (and mapping.Cache.RejectedRefreshes) so
+	// SeadexFailures counts consecutive cycles whose SeaDex fetch failed (so
+	// the compare was skipped and findings preserved), whichever pre-compare
+	// gate closed the cycle - the scout records the fetch outcome ahead of gate
+	// selection, so a coinciding walk/mapping failure cannot hide the outage
+	// from the streak. It persists across cycles and restarts, resets to 0 on
+	// any successful fetch, and mirrors ShrunkWalks (and
+	// mapping.Cache.RejectedRefreshes) so
 	// the scout can escalate its single seadex-fetch-failed log site after a
 	// sustained outage instead of degrading at WARN forever.
 	SeadexFailures int `json:"seadex_failures,omitempty"`

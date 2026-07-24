@@ -112,6 +112,14 @@ func validFeedItems(feeds ...[]journalItem) bool {
 // malformed JSON; a non-empty reason names a structural violation.
 // Consumer-specific ingress checks (the writer's titles-cache cap) stay with
 // their consumer.
+//
+// It also canonicalizes each accepted item's identity fields
+// (normalizeSnapshotInfoHashes) HERE rather than in one consumer, because
+// identity is compared by both: the writer's carry gates match a persisted
+// item's InfoHash against the current catalogue's canonical hashes
+// (warnedSet.retracts), so a non-canonical at-rest hash (uppercase or padded)
+// would miss a warning retraction and keep re-persisting a curator-warned
+// release, while the server saw the canonical form.
 func decodeSnapshot(data []byte) (snap snapshot, reason string, err error) {
 	if err := json.Unmarshal(data, &snap); err != nil {
 		return snapshot{}, "", err
@@ -122,6 +130,8 @@ func decodeSnapshot(data []byte) (snap snapshot, reason string, err error) {
 	if !validFeedItems(snap.NyaaFeed, snap.ABFeed) {
 		return snapshot{}, "item exceeds persisted-item limits", nil
 	}
+	normalizeSnapshotInfoHashes(snap.NyaaFeed)
+	normalizeSnapshotInfoHashes(snap.ABFeed)
 	return snap, "", nil
 }
 

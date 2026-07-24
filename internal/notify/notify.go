@@ -90,37 +90,7 @@ func NewNotifier(logger *slog.Logger) *Notifier {
 // (original alert time kept, no "finding resolved" line) instead of being
 // falsely resolved. Pass nil when every item has complete evidence.
 func (n *Notifier) Notify(findings []compare.Finding, prior map[string]Alerted, failedItems map[int]struct{}, now time.Time) map[string]Alerted {
-	current := make(map[string]Alerted, len(findings))
-	newCount := 0
-	// Derive each finding's dedupe key once up front (dedupeKey: key
-	// construction is this notification boundary's own suppression policy;
-	// compare hands over semantic findings only). Last-payload-wins with one
-	// emission per key: precompute each key's final payload, then process
-	// keys in first-occurrence order using that payload — so the single
-	// emitted notification carries the same fields the stored record (and any
-	// later resolution line) persists, instead of a first-copy title
-	// contradicting the last-copy state.
-	keys := make([]string, len(findings))
-	latest := make(map[string]*compare.Finding, len(findings))
-	for i := range findings {
-		keys[i] = dedupeKey(&findings[i])
-		latest[keys[i]] = &findings[i]
-	}
-	for _, key := range keys {
-		f := latest[key]
-		if _, ok := current[key]; ok {
-			// A later copy of a key this batch already handled: the first
-			// occurrence stored (and, if new, emitted) the final payload.
-			continue
-		}
-		if a, ok := prior[key]; ok {
-			current[key] = Alerted{AlertedAt: a.AlertedAt, Finding: storedFinding(f)}
-			continue
-		}
-		n.emit(f)
-		newCount++
-		current[key] = Alerted{AlertedAt: now, Finding: storedFinding(f)}
-	}
+	current, newCount := n.collectCurrent(findings, prior, now)
 
 	resolved, preserved := 0, 0
 	for key, a := range prior {
@@ -140,6 +110,45 @@ func (n *Notifier) Notify(findings []compare.Finding, prior map[string]Alerted, 
 		"total", len(findings), "new", newCount, "resolved", resolved,
 		"preserved", preserved, "suppressed", len(findings)-newCount)
 	return current
+}
+
+// collectCurrent builds this cycle's dedupe state from findings, emitting one
+// notification per key that prior has not already alerted, and returns the
+// state plus the number of newly emitted findings.
+//
+// Each finding's dedupe key is derived once up front (dedupeKey: key
+// construction is this notification boundary's own suppression policy;
+// compare hands over semantic findings only). Last-payload-wins with one
+// emission per key: precompute each key's final payload, then process keys in
+// first-occurrence order using that payload — so the single emitted
+// notification carries the same fields the stored record (and any later
+// resolution line) persists, instead of a first-copy title contradicting the
+// last-copy state.
+func (n *Notifier) collectCurrent(findings []compare.Finding, prior map[string]Alerted, now time.Time) (current map[string]Alerted, newCount int) {
+	current = make(map[string]Alerted, len(findings))
+	keys := make([]string, len(findings))
+	latest := make(map[string]*compare.Finding, len(findings))
+	for i := range findings {
+		keys[i] = dedupeKey(&findings[i])
+		latest[keys[i]] = &findings[i]
+	}
+	newCount = 0
+	for _, key := range keys {
+		f := latest[key]
+		if _, ok := current[key]; ok {
+			// A later copy of a key this batch already handled: the first
+			// occurrence stored (and, if new, emitted) the final payload.
+			continue
+		}
+		if a, ok := prior[key]; ok {
+			current[key] = Alerted{AlertedAt: a.AlertedAt, Finding: storedFinding(f)}
+			continue
+		}
+		n.emit(f)
+		newCount++
+		current[key] = Alerted{AlertedAt: now, Finding: storedFinding(f)}
+	}
+	return current, newCount
 }
 
 // Baseline records every current finding as already-alerted without emitting
@@ -184,20 +193,92 @@ func (n *Notifier) emitResolved(f *StoredFinding) {
 		"recommended_group", capAttr(f.RecommendedGroup))
 }
 
+// maxAttrBytes is the per-attribute volume budget the emit path enforces on
+// every untrusted value (capAttr, attrJoiner). It mirrors
+// keyenc.MaxComponentBytes, the bound the dedupe-key path already applies to
+// the same data (CWE-400).
+const maxAttrBytes = 8 << 10
+
 // capAttr sanitizes an untrusted attribute for the JSON slog sink and caps
 // its volume: honest values pass byte-identical; a hostile oversized value
 // (SeaDex admits multi-MB URLs, up to 512 per entry) is truncated on a rune
 // boundary with a "..." marker so one record can never balloon past
 // downstream log-pipeline line limits (alert suppression) or amplify memory.
 // The cap mirrors keyenc.MaxComponentBytes, the bound the dedupe-key path
-// already applies to the same data (CWE-400).
+// already applies to the same data (CWE-400). A MULTI-SOURCE attribute (a
+// joined group or link list) must not be materialized and handed to capAttr:
+// joining first would allocate the whole untrusted aggregate (up to 512
+// multi-MB values) before the bound applies, so those render through
+// attrJoiner instead.
+//
+// It runs the single value through that same bounded joiner so the CAP applies
+// before the sanitizer, not after: sanitizing first (a strings.Map over the
+// whole value) allocated a full sanitized copy of a multi-MB SeaDex string
+// just to throw all but 8 KiB of it away, which enforced the output bound but
+// not the memory-amplification guarantee this comment makes. Honest values are
+// byte-identical either way (runesafe.Sanitize is a per-rune map).
 func capAttr(s string) string {
-	const maxAttrBytes = 8 << 10
-	s = runesafe.Sanitize(s)
-	if len(s) <= maxAttrBytes {
-		return s
+	j := newAttrJoiner()
+	j.write(s)
+	return j.string()
+}
+
+// attrJoiner renders a multi-source attribute under capAttr's byte budget
+// WITHOUT first materializing the untrusted aggregate: each piece is capped to
+// the remaining budget BEFORE it is sanitized, so a hostile SeaDex entry (up to
+// 512 torrents, each admitting a multi-MB URL) can never make the emit path
+// allocate more than the budget plus one bounded chunk - the joined-then-capped
+// shape allocated the full ~48 MiB aggregate first, a plausible OOM kill of the
+// 256 MiB container that would suppress the very finding line the alert keys on
+// (CWE-400). Honest values are byte-identical to the joined-then-capped form:
+// runesafe.Sanitize is a per-rune map, so sanitizing each piece and writing the
+// ASCII separators raw yields the same bytes.
+type attrJoiner struct {
+	b         strings.Builder
+	remaining int
+	truncated bool
+}
+
+// newAttrJoiner returns a joiner with the full per-attribute budget.
+func newAttrJoiner() *attrJoiner { return &attrJoiner{remaining: maxAttrBytes} }
+
+// write appends the sanitized prefix of raw that still fits the budget and
+// reports whether the joiner can still accept more. The pre-sanitize cap keeps
+// the sanitizer from ever walking an unbounded string; sanitizing can grow a
+// string (each invalid UTF-8 byte becomes the three-byte U+FFFD), so the result
+// is re-capped on a rune boundary.
+func (j *attrJoiner) write(raw string) bool {
+	if j.truncated || j.remaining <= 0 {
+		j.truncated = j.truncated || raw != ""
+		return false
 	}
-	return runesafe.CapBytes(s, maxAttrBytes) + "..."
+	chunk := runesafe.CapBytes(raw, j.remaining)
+	if len(chunk) < len(raw) {
+		j.truncated = true
+	}
+	clean := runesafe.Sanitize(chunk)
+	if len(clean) > j.remaining {
+		clean = runesafe.CapBytes(clean, j.remaining)
+		j.truncated = true
+	}
+	j.b.WriteString(clean)
+	j.remaining -= len(clean)
+	return !j.truncated
+}
+
+// writeSep appends a fixed ASCII separator (never untrusted data) against the
+// same budget, so a hostile piece count cannot grow the attribute past it
+// either.
+func (j *attrJoiner) writeSep(sep string) bool { return j.write(sep) }
+
+// string returns the joined attribute, marked with capAttr's "..." truncation
+// marker when any source was cut - the same truncation signal a single capped
+// attribute carries.
+func (j *attrJoiner) string() string {
+	if j.truncated {
+		return j.b.String() + "..."
+	}
+	return j.b.String()
 }
 
 // findingKVs builds the structured key-value attributes for a finding line.
@@ -220,14 +301,14 @@ func findingKVs(f *compare.Finding) []any {
 		"season", f.Season,
 		"current_group", capAttr(f.CurrentGroup),
 		"recommended_group", capAttr(f.RecommendedGroup),
-		"recommended_groups", capAttr(strings.Join(f.RecommendedGroups, ",")),
+		"recommended_groups", joinGroupsAttr(f.RecommendedGroups),
 		"tracker", capAttr(f.Tracker),
 		"resolution", f.Resolution,
 		"codec", f.Codec,
 		"kind", f.Kind,
 		"classification_reason", capAttr(f.Reason),
 		"release_url", capAttr(f.ReleaseURL),
-		"release_urls", capAttr(joinLinks(f.Links)),
+		"release_urls", joinLinksAttr(f.Links),
 		"nyaa_url", capAttr(nyaaURL),
 		"ab_url", capAttr(abURL),
 		"info_hash", capAttr(f.InfoHash),
@@ -333,15 +414,39 @@ func seadexTags(f *compare.Finding) string {
 	return strings.Join(tags, " · ")
 }
 
-// joinLinks renders every obtainable source for the recommended release as a
-// space-separated "tracker=url" list, so a finding carries both a Nyaa and an
+// joinLinksAttr renders every obtainable source for the recommended release as
+// a space-separated "tracker=url" list, so a finding carries both a Nyaa and an
 // AnimeBytes link when the release exists on both, not just the headline one.
-func joinLinks(links []compare.ReleaseLink) string {
-	parts := make([]string, 0, len(links))
+// Each tracker and URL is written straight into the bounded joiner - never
+// concatenated into a "tracker=url" string or a []string first - so the
+// attribute's byte budget bounds the work, not just the result.
+func joinLinksAttr(links []compare.ReleaseLink) string {
+	j := newAttrJoiner()
 	for i := range links {
-		parts = append(parts, links[i].Tracker+"="+links[i].URL)
+		if i > 0 && !j.writeSep(" ") {
+			break
+		}
+		if !j.write(links[i].Tracker) || !j.writeSep("=") || !j.write(links[i].URL) {
+			break
+		}
 	}
-	return strings.Join(parts, " ")
+	return j.string()
+}
+
+// joinGroupsAttr renders the recommended release groups as a comma-separated
+// list through the same bounded joiner, for the same reason: the group list is
+// untrusted SeaDex data and must not be materialized before the cap applies.
+func joinGroupsAttr(groups []string) string {
+	j := newAttrJoiner()
+	for i := range groups {
+		if i > 0 && !j.writeSep(",") {
+			break
+		}
+		if !j.write(groups[i]) {
+			break
+		}
+	}
+	return j.string()
 }
 
 // message returns the human-facing log message for a finding status.

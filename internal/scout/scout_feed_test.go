@@ -211,7 +211,7 @@ func TestCycleWalkAndSeaDexBothFailWarnsFeedKept(t *testing.T) {
 		{
 			name:     "seadex fetch fails",
 			seadex:   &fakeSeaDex{err: errors.New("seadex down")},
-			wantWarn: "seadex fetch failed; indexer feed kept previous feed",
+			wantWarn: "seadex fetch failed; skipping comparison, findings preserved",
 		},
 		{
 			name:     "seadex returns zero entries",
@@ -415,7 +415,7 @@ func TestCycleUnusableMapWithSeaDexOutageWarnsFeedKept(t *testing.T) {
 		{
 			name:     "seadex fetch fails",
 			seadex:   &fakeSeaDex{err: errors.New("seadex down")},
-			wantWarn: "seadex fetch failed; indexer feed kept previous feed",
+			wantWarn: "seadex fetch failed; skipping comparison, findings preserved",
 		},
 		{
 			name:     "seadex returns zero entries",
