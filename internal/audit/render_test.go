@@ -129,6 +129,21 @@ func TestEscapeLinkURLEncodesBackslashAndBacktick(t *testing.T) {
 	}
 }
 
+// TestEscapeLinkURLEncodesQuotes pins the attribute-context defense the
+// escaper documents: both quote forms are percent-encoded in a link
+// destination, so a downstream MD-to-HTML conversion emitting the
+// destination into href="..." cannot be broken out of by a crafted URL.
+func TestEscapeLinkURLEncodesQuotes(t *testing.T) {
+	got := escapeLinkURL(`https://x/a"b'c`)
+	if want := "https://x/a%22b%27c"; got != want {
+		t.Errorf("escapeLinkURL(quotes) = %q, want %q", got, want)
+	}
+	link := mdLink("nyaa", `https://x/a"b'c`)
+	if want := "[nyaa](https://x/a%22b%27c)"; link != want {
+		t.Errorf("mdLink(quotes) = %q, want %q", link, want)
+	}
+}
+
 func TestLinksBuildsArrSeaDexAndBestOnly(t *testing.T) {
 	row := &Row{
 		Arr:       "sonarr",

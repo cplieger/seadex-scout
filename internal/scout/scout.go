@@ -163,6 +163,16 @@ const seadexFailureEscalationThreshold = degradation.EscalationThreshold
 // the first undegraded completed cycle resets the streak.
 const aniListDegradedEscalationThreshold = degradation.EscalationThreshold
 
+// mappingRejectionEscalationThreshold is the consecutive guard-rejected
+// mapping-refresh streak (mapping.Cache.RejectedRefreshes, carried on
+// *mapping.StaleMapError.ConsecutiveRejections) at which loadMapping
+// escalates its single degraded-mapping log site from WARN to ERROR. It
+// references degradation.EscalationThreshold - the single home of the shared
+// escalation policy its three sibling streaks already ride; the streak itself
+// is owned and persisted by the mapping loader, so only the log-level policy
+// lives here.
+const mappingRejectionEscalationThreshold = degradation.EscalationThreshold
+
 // Scout runs compare cycles from its assembled dependencies.
 type Scout struct {
 	deps Deps
@@ -330,7 +340,7 @@ func (s *Scout) loadMapping(ctx context.Context, st *state.State) (mapping.Cache
 	if mapErr != nil && ctx.Err() == nil {
 		attrs := mappingDegradedAttrs(mapErr, idx.Len())
 		stale, ok := errors.AsType[*mapping.StaleMapError](mapErr)
-		if ok && stale.ConsecutiveRejections() >= degradation.EscalationThreshold {
+		if ok && stale.ConsecutiveRejections() >= mappingRejectionEscalationThreshold {
 			// The attrs carry the streak (stale_consecutive_rejections) and
 			// the rejecting guard (stale_reason).
 			s.log.Error("mapping degraded: refresh rejected repeatedly; inspect upstream, or remove state.json to cold-start if the change is legitimate", attrs...)

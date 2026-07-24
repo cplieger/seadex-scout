@@ -6,21 +6,21 @@ code-grounded detail you need to land a change without tripping over the
 load-bearing patterns.
 
 > This is a small, single-purpose self-hosted tool. Contributions are welcome,
-> but the maintainer optimises for a small, auditable tool over breadth of
+> but the maintainer optimises for a lean, auditable tool over breadth of
 > features. Please open an issue to discuss anything larger than a bug fix
 > before writing code.
 
 ## What seadex-scout is (and isn't)
 
 It has a tight scope: compare a Sonarr/Radarr anime library against SeaDex and
-surface where they diverge. It does that three ways — a **monitoring daemon**
+surface where they diverge. It does that three ways: a **monitoring daemon**
 that logs a finding whenever SeaDex has a better release (for Loki alerting), an
 on-demand **season-level report**, and an optional **Torznab feed** Sonarr/Radarr
 grab from. The first two are **report-only**: they never download, grab, or touch
 a torrent client, and the app ships no notifier of its own (alerting is the
 observability stack's job; the repo ships reference Loki-ruler rules in
 [`alerts.yaml`](alerts.yaml)). The feed is the one automation path, and even it
-does not grab — it hands releases to the arrs so they grab through their own
+does not grab: it hands releases to the arrs so they grab through their own
 engine; seadex-scout never pushes to a download client. Keep that boundary when
 proposing changes: "surface an actionable finding" and "let the arrs act on
 SeaDex's picks" fit; "push it to qBittorrent for me" does not.
@@ -30,8 +30,8 @@ SeaDex's picks" fit; "push it to qBittorrent for me" does not.
 seadex-scout is a single Go binary. The daemon runs one compare cycle on start
 and then every `poll_interval` (or, when `poll_interval` is `off`, sits
 resident-idle while an external scheduler triggers cycles via the `poll`
-subcommand), emitting findings as JSON to stdout (slog, shipped to Loki), and —
-when a Prowlarr Torznab URL is configured — also serves the Torznab feed in the
+subcommand), emitting findings as JSON to stdout (slog, shipped to Loki), and,
+when a Prowlarr Torznab URL is configured, also serves the Torznab feed in the
 same process. It binds no HTTP port unless that feed is configured. Cross-cycle state is a
 single atomic JSON file (library snapshot, cached ID map, AniList memo, finding
 dedupe); when the feed is configured, the cycle also persists the materialized
@@ -46,44 +46,55 @@ report, or a single `poll` cycle; `build.go` wires every component together
 logic; everything testable lives under `internal/`, with dependencies flowing one
 direction (leaves have no internal imports):
 
-- `internal/config` — YAML config-file loading (with `${ENV}` expansion for
+- `internal/config`: YAML config-file loading (with `${ENV}` expansion for
   secrets), clamping, and validation.
-- `internal/seadex` — the releases.moe PocketBase client (paged entries with the
+- `internal/appinfo`: the fixed identity constants (the shared User-Agent)
+  every outbound HTTP client sends, so the app presents one consistent identity
+  to every upstream instead of each client redeclaring it.
+- `internal/degradation`: the shared degradation-policy constants (the
+  persisted degradation-streak threshold that escalates repeated degraded
+  cycles from WARN to ERROR), consumed by both `mapping` and `scout`.
+- `internal/keyenc`: the bounded, injective encoding of untrusted string
+  components into a single key, shared by `notify`'s persisted dedupe keys and
+  `compare`'s headline tie-break key.
+- `internal/titlekey`: the normalized-title key algorithm shared by the
+  matcher's title index and the AniList payload gate.
+- `internal/seadex`: the releases.moe PocketBase client (paged entries with the
   torrents relation expanded), over `httpx`, bounded and polite.
-- `internal/mapping` — the Fribb anime-lists loader (conditional GET + cache) and
+- `internal/mapping`: the Fribb anime-lists loader (conditional GET + cache) and
   the local overrides overlay, indexed by AniList ID. `fribb.go` decodes the
   upstream JSON resiliently (per-record, tolerant of shape variance).
-- `internal/anilist` — the AniList GraphQL fallback client with a header-adaptive
+- `internal/anilist`: the AniList GraphQL fallback client with a header-adaptive
   throttle (spacing + `X-RateLimit` backoff + `Retry-After`).
-- `internal/library` — the arrapi walk (Sonarr series + episodes, Radarr movies),
+- `internal/library`: the arrapi walk (Sonarr series + episodes, Radarr movies),
   arr-side tag include/exclude, per-item fingerprint and per-season groups, and
   the snapshot diff.
-- `internal/release` — the pure classification engine: names/notes/metadata into
+- `internal/release`: the pure classification engine, turning names/notes/metadata into
   a normalized `Release` (group, tracker kind, resolution, codec, dual-audio,
   remux-vs-encode). It imports no domain packages so both the SeaDex and library
   sides classify into one vocabulary.
-- `internal/filter` — the operator's release filters (remux policy, the
+- `internal/filter`: the operator's release filters (remux policy, the
   AnimeBytes on/off toggle, dual-audio), split from tracker obtainability. These
   shape the report/alert engine only; the indexer feed applies none of them.
-- `internal/match` — links a SeaDex entry to a library item (ID via the map, then
+- `internal/match`: links a SeaDex entry to a library item (ID via the map, then
   the AniList title fallback) and reports mapping coverage.
-- `internal/align` — the shared season-scope resolver (mapped TVDB season /
+- `internal/align`: the shared season-scope resolver (mapped TVDB season /
   special season-0 bucket / movie / whole-series-per-season), consumed by both
   `compare` and `audit` so the daemon alerts and the report scope a SeaDex entry
   identically.
-- `internal/classify` — the shared SeaDex-torrent to `release.Release` adapter,
+- `internal/classify`: the shared SeaDex-torrent to `release.Release` adapter,
   the one place a `seadex.Torrent` is classified, so `compare` and `audit` build
   an identical release and `release` stays a seadex-free pure leaf.
-- `internal/compare` — the group-centric comparison producing `Finding`s (aligned
+- `internal/compare`: the group-centric comparison producing `Finding`s (aligned
   items emit nothing; the rest are warn/info findings, each with a dedupe key).
-- `internal/audit` — the season-level report generator for report mode: a verdict
+- `internal/audit`: the season-level report generator for report mode; a verdict
   per in-library match, rendered as Markdown + JSON + per-row slog.
-- `internal/notify` — the slog finding notifier with cross-cycle dedupe, the
+- `internal/notify`: the slog finding notifier with cross-cycle dedupe, the
   daemon's alerting path (observability is slog-only; no metrics). Distinct
   from the report FEATURE, which `internal/audit` generates.
-- `internal/state` — the atomic JSON cache load/save (via `atomicfile`).
-- `internal/scout` — the cycle orchestrator that wires the above into one cycle.
-- `internal/indexer` — the Torznab feed server the daemon runs when a Prowlarr
+- `internal/state`: the atomic JSON cache load/save (via `atomicfile`).
+- `internal/scout`: the cycle orchestrator that wires the above into one cycle.
+- `internal/indexer`: the Torznab feed server the daemon runs when a Prowlarr
   Torznab URL is configured. It proxies Prowlarr's Nyaa + AnimeBytes endpoints,
   filters the results to SeaDex's curation (matched by tracker id / info hash),
   and adds the download-volume-factor marker; a periodic RSS check is served from
@@ -100,11 +111,11 @@ direction (leaves have no internal imports):
 Cycle health follows the **library ingest**: a failed arr walk (bad config,
 unreachable arr) marks the container unhealthy, because a restart or config fix
 could recover it. A SeaDex, mapping, or AniList failure is **degraded but
-healthy** — a restart cannot fix an upstream outage, so the cycle logs a warning
+healthy**: a restart cannot fix an upstream outage, so the cycle logs a warning
 and, for a SeaDex failure, preserves the existing findings rather than falsely
 resolving them. The distroless `HEALTHCHECK` uses the `seadex-scout health`
-file-marker subcommand; there is no HTTP health endpoint (Gatus watches the
-container via the Komodo API instead).
+file-marker subcommand; there is no HTTP health endpoint, so an external
+monitor watches the container's state through your container runtime instead.
 
 ## Development environment
 

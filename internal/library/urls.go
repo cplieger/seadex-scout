@@ -42,7 +42,9 @@ func SafeLogURL(rawURL string) string {
 
 // SanitizedForStorage returns a copy of the snapshot whose per-item ArrURLs
 // have passed SafeLogURL, so a credentialed public_url never lands in
-// state.json (mirroring report.storedFinding on the finding-dedupe path).
+// state.json. state.Store.Save applies it at the persistence boundary; the
+// finding-dedupe path needs no counterpart, since notify.StoredFinding
+// persists no URL at all.
 func (s Snapshot) SanitizedForStorage() Snapshot {
 	out := s
 	out.Items = slices.Clone(s.Items)

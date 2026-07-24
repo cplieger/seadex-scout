@@ -92,13 +92,14 @@ type Config struct {
 }
 
 // Deps are the clients the indexer server needs: an HTTP client for the Prowlarr
-// per-indexer Torznab endpoints a search proxies. HTTP must be non-nil when any
-// Torznab URL is configured for the server (New wires the upstreams
-// unconditionally, and a search through a nil client panics); only NewFeedWriter
-// accepts a nil HTTP, treating it as harvest-disabled. The curation set and the
+// per-indexer Torznab endpoints a search proxies. A nil HTTP is substituted by
+// New with a default client sized from UpstreamAttemptTimeout (searches have no
+// disabled mode); only NewFeedWriter treats a nil HTTP as meaningful,
+// harvest-disabled. The curation set and the
 // synthesized RSS feeds are not built here - the compare cycle builds and
 // persists them (see FeedWriter) and the server reads that snapshot - so the
-// server needs no SeaDex or Fribb client of its own.
+// server needs no SeaDex or Fribb client of its own. A nil Logger falls back
+// to slog.Default() in both New and NewFeedWriter.
 type Deps struct {
 	HTTP   *http.Client
 	Logger *slog.Logger
@@ -209,7 +210,15 @@ func New(cfg *Config, deps Deps, snapshotPath string) *Indexer {
 	// One upstream per configured Prowlarr Torznab URL. An empty URL means that
 	// tracker is off: it is simply not wired, so the feed never queries it. (The
 	// daemon only starts the feed at all when at least one URL is set.)
-	ix.upstreams = wireUpstreams(deps.HTTP, log, cfg.UpstreamConfig)
+	httpClient := deps.HTTP
+	if httpClient == nil {
+		// NewFeedWriter treats a nil HTTP as harvest-disabled; the server has no
+		// disabled mode for searches, so a nil client falls back to a default sized
+		// from the same constant build.go wires (UpstreamAttemptTimeout), turning a
+		// latent first-search panic into working behavior.
+		httpClient = &http.Client{Timeout: UpstreamAttemptTimeout}
+	}
+	ix.upstreams = wireUpstreams(httpClient, log, cfg.UpstreamConfig)
 	// Warm the feed from the last persisted snapshot so a restart serves
 	// immediately rather than empty until the next cycle.
 	ix.reload(context.Background())

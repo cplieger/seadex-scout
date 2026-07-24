@@ -76,3 +76,32 @@ func TestDeduplicateRecordsIndexOracle(t *testing.T) {
 		}
 	})
 }
+
+// TestValidateRefreshedRecordsUnchangedRefreshAlwaysAccepted property-checks
+// the steady-state acceptance invariant none of the instance tests generalize:
+// for ANY previously accepted cache shape (a deduplicated, cacheUsable record
+// set), a byte-identical upstream refresh must always be accepted. A rejection
+// here would be a self-inflicted permanent rejection loop (the stale map is
+// kept every cycle and the streak escalates to ERROR) with a healthy upstream,
+// so no floor, shrink guard, or population guard may fire when nothing changed.
+func TestValidateRefreshedRecordsUnchangedRefreshAlwaysAccepted(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		raw := rapid.SliceOfN(rapid.Custom(func(t *rapid.T) Record {
+			return Record{
+				AniListID:  rapid.IntRange(-2, 50).Draw(t, "anilist_id"),
+				Type:       rapid.SampledFrom([]string{"", "TV", "MOVIE", "OVA", "SPECIAL"}).Draw(t, "type"),
+				TvdbID:     rapid.IntRange(0, 1000).Draw(t, "tvdb_id"),
+				SeasonTvdb: rapid.IntRange(0, 5).Draw(t, "season_tvdb"),
+				TmdbMovies: rapid.SliceOfN(rapid.IntRange(1, 9), 0, 3).Draw(t, "tmdb_movies"),
+				IMDbIDs:    rapid.SliceOfN(rapid.SampledFrom([]string{"tt1", "tt2", "tt3"}), 0, 3).Draw(t, "imdb_ids"),
+			}
+		}), 0, 30).Draw(t, "records")
+		cache := deduplicateRecords(raw)
+		if !cacheUsable(cache) {
+			t.Skip("not a usable accepted-cache shape")
+		}
+		if err := validateRefreshedRecords(cache, cache, len(cache)); err != nil {
+			t.Fatalf("unchanged refresh rejected: %v (records %+v)", err, cache)
+		}
+	})
+}

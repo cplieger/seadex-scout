@@ -250,11 +250,13 @@ func decodeHarvestCheckpoint(raw string) harvestCheckpoint {
 	}
 	for key, page := range cp.Pages {
 		// Drop pages that would overflow the offset multiplication in
-		// harvestShow (page*harvestPageSize): an overflowed negative offset
+		// harvestShow (page*harvestPageSize), including after the up-to
+		// harvestShowPageCap-1 in-rebuild increments harvestShow applies
+		// before multiplying: an overflowed negative offset
 		// is silently omitted by harvestPage, so the show would re-query
 		// page zero forever while persisting the poisoned value - unlike an
 		// in-range absurd page, which self-heals via the short-page exit.
-		if page <= 0 || page > math.MaxInt/harvestPageSize {
+		if page <= 0 || page > math.MaxInt/harvestPageSize-harvestShowPageCap {
 			delete(cp.Pages, key)
 		}
 	}
@@ -279,7 +281,8 @@ func encodeHarvestCheckpoint(cp harvestCheckpoint) string {
 }
 
 // pruneHarvestPages drops page state for groups no longer pending harvest
-// (titled, aged out of the journal, or gone from the catalogue), so the
+// (titled, aged out of the journal, gone from the catalogue, or left with no
+// synthesis title source to query with), so the
 // persisted checkpoint only ever names live groups and cannot grow without
 // bound across rebuilds.
 func pruneHarvestPages(pages map[string]int, groups []harvestGroup) {
@@ -552,8 +555,8 @@ func indexHarvestItem(it *journalItem, scope string, titles map[string]string, i
 	key := harvestGroupKey{scope: scope, alID: it.AniListID}
 	byShow[key] = append(byShow[key], it.Key)
 	index[it.Key] = it.Key
-	if it.InfoHash != "" {
-		index[it.InfoHash] = it.Key
+	if h := validInfoHash(it.InfoHash); h != "" {
+		index[h] = it.Key
 	}
 }
 

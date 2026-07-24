@@ -108,7 +108,8 @@ type Decision struct {
 // (internal/audit). The callers deliberately prepare DIFFERENT inputs - the
 // daemon feeds its filtered obtainable recommendations as best with a nil alt
 // (so a unit lacking a recommended group reads unlisted), while the report
-// feeds the raw SeaDex best and alt sets - and Decide unifies the branch
+// feeds the SeaDex best and alt sets minus curation-warned and unobtainable
+// releases - and Decide unifies the branch
 // order and decision rules over those inputs, so the two flows cannot drift
 // apart on the same title.
 func Decide(item *library.Item, rec *mapping.Record, best, alt []string) Decision {
@@ -150,6 +151,16 @@ func unitStanding(hasFile bool, current, best, alt []string) Standing {
 	case len(current) == 0:
 		return StandingUnverified
 	}
+	return groupStanding(current, best, alt)
+}
+
+// groupStanding is the shared tri-state group ladder over a non-empty filed
+// unit's current groups: the best rung first (a proven match wins, an
+// unverifiable comparison short-circuits before the alt rung), then the alt
+// rung under the same rules, and only an all-known matchless unit is
+// unlisted. Consumed by unitStanding and, per real season, by
+// summarizeWholeSeries, so the two paths cannot drift.
+func groupStanding(current, best, alt []string) Standing {
 	switch release.GroupsOverlap(current, best) {
 	case release.OverlapKnown:
 		return StandingBest

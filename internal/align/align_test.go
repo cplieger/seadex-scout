@@ -26,6 +26,12 @@ func TestScope(t *testing.T) {
 			wantGroups: []string{"arid"}, wantKind: align.ScopeMovie, wantFile: true,
 		},
 		{
+			name:       "radarr movie with a positive Fribb season still scopes to the movie",
+			item:       library.Item{Arr: library.ArrRadarr, Groups: []string{"arid"}, HasFile: true, SeasonGroups: map[int][]string{2: {"seasongrp"}}},
+			rec:        mapping.Record{Type: "MOVIE", SeasonTvdb: 2},
+			wantGroups: []string{"arid"}, wantKind: align.ScopeMovie, wantFile: true,
+		},
+		{
 			name:       "series with a positive season scopes to that season (exact)",
 			item:       library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{2: {"sam"}}},
 			rec:        mapping.Record{Type: "TV", SeasonTvdb: 2},

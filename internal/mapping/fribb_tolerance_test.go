@@ -5,22 +5,6 @@ import (
 	"testing"
 )
 
-// TestFlexInt_nonIntegerStringDecodesZero pins the tolerant number-or-string
-// decode (jsonx.TolerantZero) on the rejecting side: a validly-quoted
-// fractional string ("12.5") is a valid float form but fails the integrality
-// gate, decoding to 0 (a tolerated placeholder) rather than erroring or
-// truncating to 12 — exactly like the bare JSON number 12.5 (the accepting
-// side, "9.0" → 9, is pinned in TestFlexInt_UnmarshalJSON).
-func TestFlexInt_nonIntegerStringDecodesZero(t *testing.T) {
-	var f flexInt
-	if err := f.UnmarshalJSON([]byte(`"12.5"`)); err != nil {
-		t.Fatalf("UnmarshalJSON(%q) error: %v", `"12.5"`, err)
-	}
-	if int(f) != 0 {
-		t.Errorf("flexInt(%q) = %d, want 0 (non-integer string tolerated as placeholder)", `"12.5"`, int(f))
-	}
-}
-
 // TestFlexInt_malformedStringErrors pins that a malformed JSON string
 // propagates a syntax error (an unterminated string) instead of tolerating it.
 func TestFlexInt_malformedStringErrors(t *testing.T) {

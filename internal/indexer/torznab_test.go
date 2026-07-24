@@ -205,6 +205,23 @@ func TestParseTorznabDecodeLimits(t *testing.T) {
 			inner:   "<item>" + strings.Repeat(`<torznab:attr name="a" value="b"/>`, 100000) + "</item>",
 			wantErr: true,
 		},
+		"nesting depth over the cap rejected": {
+			// An all-opens body of tiny start tags: each token passes the
+			// token cap and there are no text runs, but every StartElement
+			// would push an entry onto encoding/xml's unbounded open-element
+			// stack (~60-100 bytes per level), so the preflight must reject
+			// on cumulative depth before the decoder tokenizes.
+			inner:   strings.Repeat("<a>", 100000),
+			wantErr: true,
+		},
+		"nesting depth at the cap parses": {
+			// Balanced nesting that peaks exactly at maxUpstreamDepth (the
+			// rss/channel wrapper contributes 2); channelXML skips unknown
+			// children whole, so the document parses with zero items.
+			inner: strings.Repeat("<a>", maxUpstreamDepth-2) +
+				strings.Repeat("</a>", maxUpstreamDepth-2),
+			wantItem: 0,
+		},
 		"escape-heavy field over the cap rejected": {
 			inner:   "<item><title>" + escapeHeavy + "</title></item>",
 			wantErr: true,
@@ -558,4 +575,97 @@ func TestParseErrorDocumentBoundsCumulativeAttrText(t *testing.T) {
 	if !strings.Contains(err.Error(), "cumulative decoded text") {
 		t.Errorf("Error() = %q, want the cumulative-text limit named", err)
 	}
+}
+
+// TestPreflightTorznabBoundsCommentsDirectivesAndCData pins the lexical
+// guard's comment/directive/CDATA arms, which real Prowlarr responses can
+// carry but no other test exercises: bounded comments and <!-directives pass
+// through to encoding/xml, an overlong comment or CDATA section is rejected
+// AT the lexical guard with its own limit named, an unterminated CDATA
+// within the bound is left for encoding/xml to reject (a parse error, never
+// a limit error), and an unterminated quoted tag past the token bound fails
+// the markup-token limit.
+func TestPreflightTorznabBoundsCommentsDirectivesAndCData(t *testing.T) {
+	wrap := func(inner string) []byte {
+		return []byte(`<rss><channel>` + inner + `<item><title>x</title></item></channel></rss>`)
+	}
+	t.Run("comment within bound parses", func(t *testing.T) {
+		items, err := parseTorznab(wrap("<!-- prowlarr comment -->"))
+		if err != nil || len(items) != 1 {
+			t.Fatalf("parseTorznab with a comment = %d items, err %v; want 1, nil", len(items), err)
+		}
+	})
+	t.Run("directive within bound parses", func(t *testing.T) {
+		items, err := parseTorznab(wrap("<!DOCTYPE rss>"))
+		if err != nil || len(items) != 1 {
+			t.Fatalf("parseTorznab with a directive = %d items, err %v; want 1, nil", len(items), err)
+		}
+	})
+	t.Run("overlong comment rejected at the lexical guard", func(t *testing.T) {
+		_, err := parseTorznab(wrap("<!--" + strings.Repeat("c", maxUpstreamTokenBytes+4) + "-->"))
+		limitErr, ok := errors.AsType[*torznabLimitError](err)
+		if !ok {
+			t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
+		}
+		if !strings.Contains(limitErr.limit, "comment longer than") {
+			t.Errorf("limit = %q, want the comment bound named", limitErr.limit)
+		}
+	})
+	t.Run("overlong CDATA rejected at the lexical guard", func(t *testing.T) {
+		_, err := parseTorznab(wrap("<item><title><![CDATA[" + strings.Repeat("a", maxUpstreamTextRunBytes+4) + "]]></title></item>"))
+		limitErr, ok := errors.AsType[*torznabLimitError](err)
+		if !ok {
+			t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
+		}
+		if !strings.Contains(limitErr.limit, "CDATA section longer than") {
+			t.Errorf("limit = %q, want the CDATA bound named", limitErr.limit)
+		}
+	})
+	t.Run("unterminated CDATA within bound left to encoding/xml", func(t *testing.T) {
+		items, err := parseTorznab([]byte("<rss><channel><item><title><![CDATA[never closed"))
+		if err == nil {
+			t.Fatalf("parseTorznab accepted an unterminated CDATA (%d items)", len(items))
+		}
+		if _, ok := errors.AsType[*torznabLimitError](err); ok {
+			t.Errorf("error = %v, want encoding/xml's own parse error, not a limit error", err)
+		}
+	})
+	t.Run("overlong quoted tag rejected at the token bound", func(t *testing.T) {
+		body := `<rss><channel><item a="` + strings.Repeat("v", maxUpstreamTokenBytes+2)
+		_, err := parseTorznab([]byte(body))
+		limitErr, ok := errors.AsType[*torznabLimitError](err)
+		if !ok {
+			t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
+		}
+		if !strings.Contains(limitErr.limit, "markup token longer than") {
+			t.Errorf("limit = %q, want the markup-token bound named", limitErr.limit)
+		}
+	})
+}
+
+// TestDecodeBoundedElementTextSkipsNestedMarkup pins the nested-markup arm
+// of decodeBoundedElementText: markup nested inside a plain text child is
+// skipped whole (matching the DecodeElement behavior the bounded decoder
+// replaced), so only the field's own CharData accumulates; and a response
+// truncated inside that nested markup propagates the Skip error so partial
+// data fails the fetch instead of parsing.
+func TestDecodeBoundedElementTextSkipsNestedMarkup(t *testing.T) {
+	body := `<?xml version="1.0"?><rss><channel><item>` +
+		`<guid>pre<b attr="v">nested</b>post</guid><title>x</title>` +
+		`</item></channel></rss>`
+	items, err := parseTorznab([]byte(body))
+	if err != nil {
+		t.Fatalf("parseTorznab with nested markup in guid: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("parsed %d items, want 1", len(items))
+	}
+	if got, want := items[0].GUID, "prepost"; got != want {
+		t.Errorf("guid = %q, want %q (nested markup skipped whole)", got, want)
+	}
+	t.Run("truncated inside nested markup fails", func(t *testing.T) {
+		if _, err := parseTorznab([]byte(`<rss><channel><item><guid>x<nested>`)); err == nil {
+			t.Error("parseTorznab accepted a response truncated inside nested markup")
+		}
+	})
 }

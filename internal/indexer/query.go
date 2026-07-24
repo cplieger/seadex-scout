@@ -152,8 +152,8 @@ func (c *curation) acceptScopedKeys(scope string, urls []string, m *curationMatc
 // whether the search's queried upstream(s) ALL failed (upstreamFailed - serve
 // renders a Torznab <error> instead of an empty feed then), how many upstream
 // results survived the Prowlarr fetch's download-URL origin filter (search
-// only), and how many items were returned after curation or synthesis
-// (curated).
+// only), and how many items survived curation or synthesis (curated -
+// counted before the category filter and paging trim the served view).
 type queryStats struct {
 	answered            bool
 	feed                bool

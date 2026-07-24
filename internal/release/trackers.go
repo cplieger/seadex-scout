@@ -70,6 +70,17 @@ func LookupTracker(name string) (Tracker, bool) {
 	return t, ok
 }
 
+// Host returns the tracker's canonical lowercased site hostname, derived
+// from BaseURL. It is "" when BaseURL does not parse to a hostname, so a
+// malformed table entry fails closed for every consumer.
+func (t Tracker) Host() string {
+	u, err := url.Parse(t.BaseURL)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
+}
+
 // trackerByHost indexes the table by canonical lowercased site hostname
 // (derived from BaseURL, so the table stays the single home of the hosts).
 // An entry whose BaseURL does not parse to a hostname is omitted, so a
@@ -77,8 +88,8 @@ func LookupTracker(name string) (Tracker, bool) {
 var trackerByHost = func() map[string]Tracker {
 	m := make(map[string]Tracker, len(trackerTable))
 	for _, t := range trackerTable {
-		if u, err := url.Parse(t.BaseURL); err == nil && u.Hostname() != "" {
-			m[strings.ToLower(u.Hostname())] = t
+		if h := t.Host(); h != "" {
+			m[h] = t
 		}
 	}
 	return m
@@ -138,7 +149,7 @@ func LookupTrackerByRelativeURL(raw string) (Tracker, bool) {
 		return Tracker{}, false
 	}
 	u, err := url.Parse(f.Trimmed)
-	if err != nil || !equalASCIIFold(u.Path, "/torrents.php") || !hasQueryKeyFold(u.Query(), "torrentid") {
+	if err != nil || !equalASCIIFold(u.Path, "/torrents.php") || !rawQueryHasKeyFold(u.RawQuery, "torrentid") {
 		return Tracker{}, false
 	}
 	return LookupTracker(TrackerNameAnimeBytes)
@@ -165,13 +176,19 @@ func equalASCIIFold(a, b string) bool {
 	return true
 }
 
-// hasQueryKeyFold reports whether the parsed query carries key under ASCII
-// case folding, mirroring the path comparison's case tolerance so the same
-// evasion (an off-case spelling of the AB torrent-page shape) cannot slip
-// one half of the shape check while the other half tolerates it.
-func hasQueryKeyFold(q url.Values, key string) bool {
-	for k := range q {
-		if equalASCIIFold(k, key) {
+// rawQueryHasKeyFold reports whether the RAW query carries key under ASCII
+// case folding, splitting on both '&' and ';' and percent-decoding each name
+// - the same strict superset of the parsed u.Query() view that
+// internal/config's urlEmbedsCredential uses, so a semicolon-smuggled pair
+// ("?torrentid=1;x", which url.Values drops wholesale) cannot evade the AB
+// torrent-page shape check.
+func rawQueryHasKeyFold(rawQuery, key string) bool {
+	for pair := range strings.FieldsFuncSeq(rawQuery, func(r rune) bool { return r == '&' || r == ';' }) {
+		name, _, _ := strings.Cut(pair, "=")
+		if decoded, err := url.QueryUnescape(name); err == nil {
+			name = decoded
+		}
+		if equalASCIIFold(name, key) {
 			return true
 		}
 	}

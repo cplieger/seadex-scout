@@ -33,16 +33,18 @@ const (
 	// would then reject.
 	maxFeedBytes = 64 << 20
 	// maxPersistedFieldBytes caps each persisted feed item's string field
-	// (title, GUID/info/download URL, journal key). It equals torznab.go's
-	// maxUpstreamFieldBytes, so every harvested title and Prowlarr URL fits
-	// by construction; only an external value with no other bound (a SeaDex
+	// (title, GUID/info/download URL, journal key). It is aliased to
+	// torznab.go's maxUpstreamFieldBytes so every harvested title and
+	// Prowlarr URL fits by construction and a raise of the upstream cap can
+	// never silently outgrow the persisted cap; only an external value with
+	// no other bound (a SeaDex
 	// filename synthesized into a title can approach the 48 MiB page limit)
 	// is rejected. Without a per-item cap, one such value could pass the
 	// whole-snapshot maxFeedBytes check and reach renderFeed, whose XML
 	// escaping expands an ampersand-heavy title ~5x - enough to drive peak
 	// memory past the 256 MiB container limit and OOM the indexer instead
 	// of degrading.
-	maxPersistedFieldBytes = 4096
+	maxPersistedFieldBytes = maxUpstreamFieldBytes
 	// maxPersistedCategories caps one persisted item's category list. The
 	// writer unions at most the three Torznab ids the feed uses (TV, Anime,
 	// Movies); anything larger is a hand-edited snapshot.
@@ -50,6 +52,9 @@ const (
 	// reasonMalformed is loadPrevious's baseline reason for a structurally invalid
 	// previous snapshot (bad JSON, missing curation maps, or an over-limit item/title).
 	reasonMalformed = "malformed"
+	// msgSnapshotMalformed is the one operator-facing malformed-rebaseline
+	// message loadPrevious's three Warn sites share (tests pin the exact text).
+	msgSnapshotMalformed = "previous feed snapshot malformed; re-baselining the feed journal"
 )
 
 // --- Persisted-item and snapshot validity ---
@@ -161,10 +166,11 @@ type snapshot struct {
 // --- Writer construction ---
 
 // FeedWriterConfig configures NewFeedWriter. Path is where the snapshot is
-// persisted (config.DefaultIndexerFeedPath in production). SeaDexBaseURL is
-// the releases.moe site base the per-item info links are built under
-// (config.DefaultSeaDexBaseURL in production; empty falls back to the same
-// default). The embedded
+// persisted (config.DefaultIndexerFeedPath in production). Per-item info
+// links are built under the canonical SeaDex site base (feed.go's
+// defaultSeaDexBaseURL - the same constant the reader's InfoURL allowlist is
+// derived from, so the two ends of the persisted contract cannot drift). The
+// embedded
 // UpstreamConfig mirrors the server's Config - the shared upstream vocabulary
 // has one home so the writer queries exactly the trackers the server proxies.
 // ABPasskey gates which AnimeBytes releases are journalable (a secret; empty
@@ -175,8 +181,7 @@ type snapshot struct {
 // built nor persisted), and the configured upstreams also power the title
 // harvest (see harvest.go).
 type FeedWriterConfig struct {
-	Path          string
-	SeaDexBaseURL string
+	Path string
 	UpstreamConfig
 }
 
@@ -212,16 +217,12 @@ func NewFeedWriter(cfg *FeedWriterConfig, deps Deps) *FeedWriter {
 	if cfg.ABPasskey != "" && !abConfigured {
 		log.Warn("indexer.ab_passkey is set but indexer.ab_torznab_url is empty; the AnimeBytes feed stays off")
 	}
-	base := cfg.SeaDexBaseURL
-	if base == "" {
-		base = defaultSeaDexBaseURL
-	}
 	w := &FeedWriter{
 		log:            log,
 		now:            time.Now,
 		path:           cfg.Path,
 		abPasskey:      cfg.ABPasskey,
-		seadexBaseURL:  base,
+		seadexBaseURL:  defaultSeaDexBaseURL,
 		nyaaConfigured: cfg.NyaaTorznabURL != "",
 		abConfigured:   abConfigured,
 	}
@@ -333,6 +334,7 @@ func (w *FeedWriter) persist(ctx context.Context, snap *snapshot) error {
 		return fmt.Errorf("indexer: encode feed snapshot: %w", err)
 	}
 	if _, err := atomicfile.WriteFile(ctx, w.path, data,
+		atomicfile.WithLogger(w.log),
 		atomicfile.WithMkdirMode(feedDirMode), atomicfile.WithMode(feedFileMode),
 		atomicfile.WithMaxBytes(maxFeedBytes)); err != nil {
 		if errors.Is(err, atomicfile.ErrFileTooLarge) {
@@ -397,14 +399,13 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 	}
 	snap, structReason, decodeErr := decodeSnapshot(data)
 	if decodeErr != nil {
-		w.log.Warn("previous feed snapshot malformed; re-baselining the feed journal", "path", w.path, "error", decodeErr)
+		w.log.Warn(msgSnapshotMalformed, "path", w.path, "error", decodeErr)
 		return previousJournal{baseline: true, reason: reasonMalformed}, nil
 	}
 	if structReason != "" {
 		// The offending value itself is never logged: it can be
 		// attacker-shaped multi-megabyte text.
-		w.log.Warn("previous feed snapshot malformed; re-baselining the feed journal",
-			"path", w.path, "reason", structReason)
+		w.log.Warn(msgSnapshotMalformed, "path", w.path, "reason", structReason)
 		return previousJournal{baseline: true, reason: reasonMalformed}, nil
 	}
 	if !titleCacheWithinLimits(snap.Titles) {
@@ -413,8 +414,17 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 		// check, so an over-limit cached title would let a rebuild persist
 		// a snapshot the server's reload rejects. The value itself is never
 		// logged: it can be attacker-shaped multi-megabyte text.
-		w.log.Warn("previous feed snapshot malformed; re-baselining the feed journal",
+		w.log.Warn(msgSnapshotMalformed,
 			"path", w.path, "reason", "cached title exceeds persisted-item limits")
+		return previousJournal{baseline: true, reason: reasonMalformed}, nil
+	}
+	if !seenLedgerWithinLimits(snap.Seen) {
+		// The seen ledger is carried forward verbatim and never pruned, so
+		// an over-limit identity key from a hand-edited snapshot would
+		// otherwise persist in every future snapshot. The value itself is
+		// never logged.
+		w.log.Warn(msgSnapshotMalformed,
+			"path", w.path, "reason", "seen-ledger key exceeds persisted-item limits")
 		return previousJournal{baseline: true, reason: reasonMalformed}, nil
 	}
 	if snap.Seen == nil {
@@ -426,13 +436,39 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 			titles[k] = t
 		}
 	}
+	cursor := snap.HarvestCursor
+	if len(cursor) > maxPersistedFieldBytes {
+		// An honest cursor is a short "scope:alID" or a small JSON page map;
+		// an over-limit one is a hand-edited snapshot that would otherwise
+		// be re-persisted forever (the steady state with nothing pending to
+		// harvest never overwrites it). Drop it: the harvest restarts at the
+		// head and pages from zero, the same safe baseline
+		// decodeHarvestCheckpoint applies to malformed cursor JSON.
+		w.log.Warn("previous feed snapshot harvest cursor exceeds persisted-item limits; dropping it",
+			"path", w.path, "cursor_bytes", len(cursor))
+		cursor = ""
+	}
 	return previousJournal{
 		nyaaFeed: snap.NyaaFeed,
 		abFeed:   snap.ABFeed,
 		seen:     snap.Seen,
 		titles:   titles,
-		cursor:   snap.HarvestCursor,
+		cursor:   cursor,
 	}, nil
+}
+
+// seenLedgerWithinLimits reports whether every seen-ledger identity key
+// respects maxPersistedFieldBytes. Honest keys are tracker keys
+// ("scope:digits") and 40-hex info hashes, orders of magnitude under the
+// bound; see loadPrevious's ingress checks for why the ledger is validated
+// separately (it is the one map the writer carries forward verbatim).
+func seenLedgerWithinLimits(seen map[string]bool) bool {
+	for k := range seen {
+		if len(k) > maxPersistedFieldBytes {
+			return false
+		}
+	}
+	return true
 }
 
 // classifyPreviousReadError is loadPrevious's transient-versus-baseline
@@ -452,7 +488,7 @@ func (w *FeedWriter) classifyPreviousReadError(err error) (previousJournal, erro
 		return previousJournal{baseline: true, reason: "fresh-install"}, nil
 	case errors.Is(err, atomicfile.ErrFileTooLarge):
 		w.log.Warn("previous feed snapshot exceeds size cap; re-baselining the feed journal",
-			"path", w.path, "max_bytes", int64(maxFeedBytes))
+			"path", w.path, "max_bytes", int64(maxFeedBytes), "error", err)
 		return previousJournal{baseline: true, reason: "oversized"}, nil
 	default:
 		return previousJournal{}, fmt.Errorf("indexer: read previous feed snapshot %s: %w", w.path, err)
@@ -477,7 +513,8 @@ func titleCacheWithinLimits(titles map[string]string) bool {
 // and the carry side consumes as one value: keys holds the excluded journal
 // keys (every directly warned occurrence plus every duplicate removed through
 // a shared identity - also the warned_excluded operator count), and ids holds
-// the directly-warned identity-signal set (journal key AND info hash), which
+// the warned identity-signal set (journal key AND info hash), transitively
+// closed over shared identities by collectWarnedIdentities' fixpoint, which
 // retracts uses to drop a previously journaled item whose stored info hash is
 // warned under a DIFFERENT tracker key.
 type warnedSet struct {
@@ -505,8 +542,8 @@ func (ws *warnedSet) retracts(it *journalItem) bool {
 // over the SeaDex tags: Broken/Incomplete) removed, plus the warnedSet the
 // carry side consumes (see warnedSet for the two sets it holds and
 // warnedSet.retracts for the retraction decision). The warning wins BY
-// IDENTITY, not per
-// occurrence: a torrent can be attached to several SeaDex entries, and when
+// IDENTITY, not per occurrence: a torrent can be attached to several SeaDex
+// entries, and when
 // one occurrence is tagged Broken/Incomplete while a duplicate of the same
 // tracker key is not, keeping the unwarned duplicate would let proxied
 // searches serve and mark the release while carryJournal (which consumes the
@@ -514,8 +551,8 @@ func (ws *warnedSet) retracts(it *journalItem) bool {
 // disagree about whether the release is grabbable. So a first pass collects
 // every warned identity signal - journal key AND info hash (identitySignals,
 // the package's one identity definition) - across the whole catalogue, and a
-// second pass
-// removes every occurrence that is warned itself OR shares a warned identity.
+// second pass removes every occurrence that is warned itself OR shares a
+// warned identity.
 // Filtering at the source keeps every downstream consumer honest at once: the
 // search curation set never marks a warned release (a Prowlarr result
 // matching one is purged as uncurated), the journal never grows one, and the

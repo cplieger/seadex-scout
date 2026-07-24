@@ -13,11 +13,12 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
-// defaultSeaDexBaseURL is the fallback SeaDex site base for a FeedWriter
-// constructed without one (tests, alternate wiring); production passes
-// config.DefaultSeaDexBaseURL through FeedWriterConfig.SeaDexBaseURL. It
-// references the canonical constant in internal/seadex (the package that owns
-// the releases.moe contract) so the fallback cannot drift from it.
+// defaultSeaDexBaseURL is the SeaDex site base the writer builds per-item
+// info links under (entryURL) and the reader's InfoURL allowlist is derived
+// from (reload.go's seadexInfoHost) - the ONE source for both ends of the
+// persisted feed.json contract. It references the canonical constant in
+// internal/seadex (the package that owns the releases.moe contract) so it
+// cannot drift from it.
 const defaultSeaDexBaseURL = seadex.DefaultBaseURL
 
 // --- Per-show metadata and categories ---
@@ -72,7 +73,7 @@ func categoriesFor(isMovie bool) []int {
 // span (see episodeMarker), and the real release flags this app actually holds
 // (see releaseFlags) - so the arr parses back a title built from its own
 // vocabulary. A movie is "{Title} ({Year})" instead of a marker. Without a
-// show title the file-name derivation (feedTitle) is the permanent last
+// show title the file-name derivation (derivedTitle) is the permanent last
 // resort.
 func synthesizeTitle(t *seadex.Torrent, meta EntryInfo) string {
 	title := strings.TrimSpace(meta.Title)
@@ -105,36 +106,27 @@ func synthesizeTitle(t *seadex.Torrent, meta EntryInfo) string {
 //     (an absolute-numbered pack with no season evidence stays a bare title).
 //   - A single release keeps its own file marker (SxxExx, or the fansub
 //     "- NN" absolute form) with its SEASON half relabeled to the Fribb TVDB
-//     season when the entry maps one (see relabelSeason) - fansub episode
+//     season when the entry maps one (see mappedSeason) - fansub episode
 //     naming is cour-local, so the file's own season half routinely
 //     disagrees with the season the arr tracks the entry under - and a
 //     marker-less single file (a movie-shaped OVA) gets none.
 func episodeMarker(t *seadex.Torrent, meta EntryInfo) string {
 	if !isPack(t) {
 		marker := singleEpisodeMarker(t.Files)
-		if meta.IsSpecial && meta.SeasonTvdb <= 0 && seasonPrefix.MatchString(marker) {
-			// A Fribb-typed special's SeasonTvdb of 0 is a MAPPED season
-			// zero, not an unknown mapping (IsSpecial is the discriminator
-			// the pack arm below already uses), so a single-file special's
-			// cour-local SxxExx half relabels to S00 - relabelSeason alone
-			// would read the 0 as unmapped and keep the file's own season,
-			// pointing the arr at the parent series. Markerless and
-			// absolute-numbered specials pass through: only an SxxExx
-			// season prefix is rewritten.
-			return seasonPrefix.ReplaceAllString(marker, seasonLabel(0))
+		if s, ok := mappedSeason(meta); ok {
+			// The mapped season (a positive Fribb TVDB season, or a
+			// Fribb-typed special's mapped season 0 - see mappedSeason)
+			// outvotes the file's cour-local season half. Only an SxxExx
+			// prefix is rewritten: a markerless or absolute "- NN" marker
+			// passes through (ReplaceAllString is a no-op without a match).
+			return seasonPrefix.ReplaceAllString(marker, seasonLabel(s))
 		}
-		return relabelSeason(marker, meta.SeasonTvdb)
+		return marker
 	}
-	if meta.SeasonTvdb > 0 {
-		return seasonLabel(meta.SeasonTvdb)
-	}
-	if meta.IsSpecial {
-		// A Fribb-typed special's season is a MAPPED season zero (the same
-		// discriminator the single-release arm above applies): fansub groups
-		// routinely number an OVA/special run S01Exx cour-locally, so the
-		// pack's file-season evidence must not outvote the typing and label
-		// the parent series' real season.
-		return "S00"
+	if s, ok := mappedSeason(meta); ok {
+		// The mapped season outvotes the pack's file-season evidence
+		// (fansub numbering is cour-local; see mappedSeason).
+		return seasonLabel(s)
 	}
 	if s, ok := packSeason(t.Files); ok {
 		return seasonLabel(s)
@@ -148,24 +140,6 @@ var seasonPrefix = regexp.MustCompile(`(?i)^S\d{1,2}`)
 // seasonLabel renders a season number as the SNN token the arrs parse
 // (the one wire format every season marker in this file must agree on).
 func seasonLabel(s int) string { return fmt.Sprintf("S%02d", s) }
-
-// relabelSeason rewrites the season half of a single release's SxxExx marker
-// to the Fribb TVDB season, mirroring the pack arm's correction: fansub
-// episode naming is cour-local (a second cour restarts at S01E01 under its
-// own AniList entry), so a file's own season half routinely names a season
-// the arr does not track this entry under - and a synthesized
-// "{series} S01E07" would point the arr at a DIFFERENT episode of the parent
-// series. The Fribb season is the arr's own numbering, so it wins; the
-// episode number is kept as-is (Fribb maps seasons, not episode offsets -
-// the same approximation the pack arm already accepts). An absolute "- NN"
-// marker (series-scoped, nothing to relabel), an empty marker, and an
-// unmapped entry (seasonTvdb <= 0) pass through unchanged.
-func relabelSeason(marker string, seasonTvdb int) string {
-	if seasonTvdb <= 0 {
-		return marker
-	}
-	return seasonPrefix.ReplaceAllString(marker, seasonLabel(seasonTvdb))
-}
 
 // mappedSeason resolves the season an entry's metadata pins: the positive
 // Fribb TVDB season, or season 0 for a Fribb-typed special (a MAPPED season
@@ -183,7 +157,8 @@ func mappedSeason(meta EntryInfo) (int, bool) {
 // relabelBaseSeason rewrites the season half of the LAST SxxExx token in a
 // derived single-release title to the entry's mapped season. A no-op without
 // a mapped season or when the name carries no SxxExx token (an absolute
-// "- NN" or marker-less name - nothing to relabel, same as relabelSeason).
+// "- NN" or marker-less name - nothing to relabel, same as episodeMarker's
+// single-release arm).
 func relabelBaseSeason(base string, meta EntryInfo) string {
 	s, ok := mappedSeason(meta)
 	if !ok {
@@ -246,7 +221,7 @@ func fileResolution(files []seadex.File) string {
 	return classify.FileResolution(files)
 }
 
-// --- Episode/pack heuristics: token regexes, feedTitle, packSeason ---
+// --- Episode/pack heuristics: token regexes, derivedTitle, packSeason ---
 
 // episodeToken matches a season+episode token (S01E01, S1E1, S01E01-E13,
 // S01E15v2), captured in group 1 with its season half in group 2. Collapsing
@@ -277,23 +252,6 @@ var episodeVersion = regexp.MustCompile(`(?i)v\d+$`)
 
 // multiSpace collapses runs of whitespace left after removing a token.
 var multiSpace = regexp.MustCompile(`\s{2,}`)
-
-// feedTitle synthesizes an arr-parseable release title from a torrent's file
-// names - the permanent last resort when no show title is known (see
-// synthesizeTitle), since SeaDex stores file names, not clean titles.
-// A real season pack (files spanning more than one episode) collapses the
-// episode marker to the pack's season (see packSeason: the dominant/lowest
-// real season across the WHOLE file list, so a pack bundling S00 specials
-// with S01 episodes labels S01 even when its first file is a special); a
-// single-episode torrent keeps its SxxExx so the arr grabs it as that
-// episode. This distinction matters because SeaDex tracks a complete-but-unpacked
-// season as one torrent PER episode: collapsing those would mislabel, say, 24
-// episodes as 24 copies of the season. A movie / single OVA (no episode marker)
-// is used verbatim, and with no files the title falls back to the release group.
-// The feed deliberately does NOT filter packs vs episodes - it lists both and
-// lets Sonarr's FullSeason preference + already-grabbed dedupe pick (see the
-// indexer package doc); this function only has to LABEL each release correctly.
-func feedTitle(t *seadex.Torrent) string { return derivedTitle(t, EntryInfo{}) }
 
 // derivedTitle is the file-name derivation with the entry's known mapping
 // applied: when the entry pins a season (a positive Fribb TVDB season, or a

@@ -400,6 +400,12 @@ func (m *gqlMedia) toMedia() (Media, error) {
 	if len(m.Format) > maxFormatBytes {
 		return Media{}, fmt.Errorf("media format exceeds %d bytes", maxFormatBytes)
 	}
+	// Format shares the titles' lifetime (memoized into state.json), so it gets
+	// the same single-line rejection: a control/bidi rune in an enum-like token
+	// is malformed upstream data, rejected rather than sanitized or persisted.
+	if strings.ContainsRune(m.Format, utf8.RuneError) || runesafe.SanitizeSingleLine(m.Format) != m.Format {
+		return Media{}, errors.New("media format contains invalid single-line text")
+	}
 	year := m.SeasonYear
 	if year == 0 {
 		year = m.StartDate.Year

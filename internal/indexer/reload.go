@@ -91,6 +91,11 @@ func (ix *Indexer) statSnapshot() (os.FileInfo, bool) {
 // instead: the winner has not yet established whether the on-disk snapshot is
 // usable, so returning early would have to guess between fresh-install and
 // failed state (see the branch below).
+// reloadBlockGate is a test seam (see snapshotUnavailableGate for the
+// pattern) marking the moment a pre-first-load coalescing loser commits to
+// BLOCKING on reloadMu instead of returning. A no-op in production.
+var reloadBlockGate = func() {}
+
 func (ix *Indexer) reload(ctx context.Context) {
 	if ix.path == "" {
 		return
@@ -116,6 +121,7 @@ func (ix *Indexer) reload(ctx context.Context) {
 		// failed, or loaded state; once acquired, this caller runs the
 		// normal stat/read path itself, so a cancelled winner is also
 		// retried.
+		reloadBlockGate()
 		ix.reloadMu.Lock()
 	}
 	defer ix.reloadMu.Unlock()
@@ -138,7 +144,7 @@ func (ix *Indexer) reload(ctx context.Context) {
 	}
 	snap, ok, memoize := ix.readSnapshot(ctx)
 	if !ok {
-		ix.recordSnapshotFailure(ctx, info, memoize)
+		ix.recordSnapshotFailure(info, memoize)
 		return
 	}
 	ix.failedFile = nil
@@ -184,11 +190,14 @@ func (ix *Indexer) skipMemoizedMalformed(info os.FileInfo) bool {
 // recordSnapshotFailure applies reload's failed-read memo policy. Only
 // malformed bytes are deterministic for an unchanged file. Read failures can
 // recover after chmod or transient filesystem repair without changing inode
-// or mtime, so they must remain retryable - and a shutdown cancellation never
-// memoizes (the file was never actually read; a retry could succeed).
-func (ix *Indexer) recordSnapshotFailure(ctx context.Context, info os.FileInfo, memoize bool) {
+// or mtime, so they must remain retryable - readSnapshot reports every read
+// failure (including a cancellation, where the file was never actually read)
+// with memoize=false. memoize=true means the bytes WERE fully read and failed
+// to decode deterministically, so the memo holds even when the requesting
+// context was cancelled after the read completed.
+func (ix *Indexer) recordSnapshotFailure(info os.FileInfo, memoize bool) {
 	ix.failedFile = nil
-	if ctx.Err() == nil && memoize {
+	if memoize {
 		ix.failedFile = info
 	}
 }
@@ -316,7 +325,20 @@ func (ix *Indexer) readSnapshot(ctx context.Context) (snapshot, bool, bool) {
 	snap.NyaaFeed = ix.rebuildNyaaDownloadURLs(snap.NyaaFeed)
 	snap.ABFeed = ix.sanitizeSnapshotInfoURLs(snap.ABFeed)
 	snap.NyaaFeed = ix.sanitizeSnapshotInfoURLs(snap.NyaaFeed)
+	normalizeSnapshotInfoHashes(snap.ABFeed)
+	normalizeSnapshotInfoHashes(snap.NyaaFeed)
 	return snap, true, false
+}
+
+// normalizeSnapshotInfoHashes re-validates each persisted item's InfoHash
+// through validInfoHash (the writer's own gate), blanking anything not a
+// 40-char hex hash: validPersistedItem bounds only the field's length, and
+// writeItem renders the value as the torznab infohash attr, a field
+// consumers treat as torrent identity.
+func normalizeSnapshotInfoHashes(feed []journalItem) {
+	for i := range feed {
+		feed[i].InfoHash = validInfoHash(feed[i].InfoHash)
+	}
 }
 
 // rebuildDownloadURLs is the shared derivation mechanics behind
@@ -343,7 +365,7 @@ func rebuildDownloadURLs(feed []journalItem, tracker, passkey string) (out []jou
 	out = make([]journalItem, 0, len(feed))
 	for i := range feed {
 		it := feed[i]
-		if !journalIdentityMatches(&it) {
+		if !journalIdentityMatches(&it) || !userinfoFreeURL(it.GUID) {
 			dropped++
 			if len(samples) < 3 {
 				samples = append(samples, capLogText(it.GUID, 256))
@@ -464,9 +486,18 @@ func snapshotInfoURLAllowed(raw, host string) bool {
 	if err != nil || u.User != nil {
 		return false
 	}
-	s := strings.ToLower(u.Scheme)
-	if s != "http" && s != "https" {
+	if !isHTTPScheme(u.Scheme) {
 		return false
 	}
 	return strings.EqualFold(u.Hostname(), host)
+}
+
+// userinfoFreeURL reports whether raw parses without a userinfo component.
+// journalIdentityMatches validates host + id but not userinfo, and the
+// persisted GUID is rendered as the RSS <guid> (consumers may treat it as a
+// permalink); the search path's sanitizeDisplayURL already blanks userinfo
+// URLs, so the persisted path matches it.
+func userinfoFreeURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.User == nil
 }

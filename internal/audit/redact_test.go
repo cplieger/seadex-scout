@@ -123,3 +123,32 @@ func TestRedactPathErrRedactsMessageAndPreservesCause(t *testing.T) {
 		t.Errorf("redactPathErr(clean error) = %v, want the original error identity", unchanged)
 	}
 }
+
+// TestRedactPathTextGuards pins redactPathText's documented guard branches:
+// an empty configured dir redacts nothing (there is no value to mask), a
+// degenerate dir ("." or "/") skips redaction entirely (replacing it would
+// rewrite every dot or slash in the diagnostic text), and a real dir is
+// masked along with its path-prefix ancestors (an os.PathError for a failed
+// intermediate MkdirAll component carries an ancestor, not the full dir).
+func TestRedactPathTextGuards(t *testing.T) {
+	tests := []struct {
+		name string
+		dir  string
+		in   string
+		want string
+	}{
+		{"empty dir redacts nothing", "", "open /config/reports/report.json: denied", "open /config/reports/report.json: denied"},
+		{"degenerate dot dir leaves dots alone", ".", "read report.json: unexpected EOF", "read report.json: unexpected EOF"},
+		{"degenerate root dir leaves slashes alone", "/", "mkdir /config/reports: denied", "mkdir /config/reports: denied"},
+		{"unclean degenerate dir is still skipped", "//", "mkdir /config/reports: denied", "mkdir /config/reports: denied"},
+		{"configured dir is masked", "/config/sekret/reports", "open /config/sekret/reports/report.json: denied", "open " + redactedPath + "/report.json: denied"},
+		{"ancestor of the dir is masked", "/config/sekret/reports", "mkdir /config/sekret: denied", "mkdir " + redactedPath + ": denied"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := redactPathText(tt.dir, tt.in); got != tt.want {
+				t.Errorf("redactPathText(%q, %q) = %q, want %q", tt.dir, tt.in, got, tt.want)
+			}
+		})
+	}
+}

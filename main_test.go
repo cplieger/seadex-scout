@@ -1711,3 +1711,105 @@ func TestRunIndexerPanicShield(t *testing.T) {
 		t.Error("cleanup not released on the panic path (the Prowlarr transport would leak)")
 	}
 }
+
+// TestWarnCoordinationError pins the outcome-to-diagnostic mapping of the
+// coordination-error WARN lines (operator-facing Loki diagnostics): recorded
+// demand (Queued/Discarded) logs the demand-stands line, a completed run
+// (Ran/RanQueued/Skipped) logs the after-run line, and every other outcome -
+// reachable only from pollCycle's shutdown branch - logs the during-shutdown
+// line. All three are WARN, never the ERROR that fires the cycle-error Loki
+// alert. Serial (capture swaps slog.Default).
+func TestWarnCoordinationError(t *testing.T) {
+	tests := []struct {
+		name    string
+		outcome scheduler.Outcome
+		wantMsg string
+	}{
+		{"queued demand stands", scheduler.OutcomeQueued, "cycle coordination error after queueing; demand stands"},
+		{"discarded demand stands", scheduler.OutcomeDiscarded, "cycle coordination error after queueing; demand stands"},
+		{"ran is after-run", scheduler.OutcomeRan, "cycle coordination error after run"},
+		{"ran-plus-queued is after-run", scheduler.OutcomeRanQueued, "cycle coordination error after run"},
+		{"skipped is after-run", scheduler.OutcomeSkipped, "cycle coordination error after run"},
+		{"none is the shutdown diagnostic", scheduler.OutcomeNone, "cycle coordination failed during shutdown"},
+		{"gated is the shutdown diagnostic", scheduler.OutcomeGated, "cycle coordination failed during shutdown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := capture.Default(t)
+
+			warnCoordinationError(tt.outcome, errors.New("queue file unusable"))
+
+			records := rec.Records()
+			if len(records) != 1 {
+				t.Fatalf("captured %d records, want 1 (%v)", len(records), rec.Messages())
+			}
+			if records[0].Message != tt.wantMsg {
+				t.Errorf("msg = %q, want %q", records[0].Message, tt.wantMsg)
+			}
+			if records[0].Level != slog.LevelWarn {
+				t.Errorf("level = %v, want WARN (a stands-anyway diagnostic must not fire the cycle-error alert)", records[0].Level)
+			}
+		})
+	}
+}
+
+// TestPollNonRunResult pins the non-run outcome mapping of poll's exit
+// contract at the helper seam: Queued/Discarded are success (exit 0) even
+// when the coordination bookkeeping errored (the error is demoted to the
+// demand-stands WARN, and each outcome logs its own coalescing Info line);
+// Gated applies the uniform interruption contract (an error wrapping
+// context.Canceled, so main classifies it WARN and exits non-zero); and every
+// run-shaped outcome falls through unhandled to pollCycle's ran/own
+// accounting. Serial (capture swaps slog.Default).
+func TestPollNonRunResult(t *testing.T) {
+	t.Run("queued with a coordination error is still success and logs demand-stands", func(t *testing.T) {
+		rec := capture.Default(t)
+
+		handled, err := pollNonRunResult(context.Background(), scheduler.OutcomeQueued, errors.New("queue bookkeeping broken"))
+
+		if !handled {
+			t.Fatal("handled = false, want true (queued ends the poll)")
+		}
+		if err != nil {
+			t.Fatalf("err = %v, want nil (recorded demand is success, exit 0)", err)
+		}
+		if got := rec.CountLevel(slog.LevelWarn, "cycle coordination error after queueing; demand stands"); got != 1 {
+			t.Errorf("demand-stands WARN count = %d, want 1: %v", got, rec.Messages())
+		}
+		if !rec.Contains("compare cycle already in flight; demand queued for the active runner") {
+			t.Errorf("missing the queued coalescing line: %v", rec.Messages())
+		}
+	})
+	t.Run("discarded logs the already-covered message", func(t *testing.T) {
+		rec := capture.Default(t)
+
+		handled, err := pollNonRunResult(context.Background(), scheduler.OutcomeDiscarded, nil)
+
+		if !handled || err != nil {
+			t.Fatalf("pollNonRunResult(discarded) = (handled=%v, err=%v), want (true, nil)", handled, err)
+		}
+		if !rec.Contains("compare cycle already in flight; demand already covered by the queued rerun") {
+			t.Errorf("missing the discarded coalescing line: %v", rec.Messages())
+		}
+	})
+	t.Run("gated applies the uniform interruption contract", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		handled, err := pollNonRunResult(ctx, scheduler.OutcomeGated, nil)
+
+		if !handled {
+			t.Fatal("handled = false, want true (a gated run ends the poll)")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("err = %v, want it to wrap context.Canceled (main classifies the interruption WARN, exit non-zero)", err)
+		}
+	})
+	t.Run("run-shaped outcomes fall through unhandled", func(t *testing.T) {
+		for _, outcome := range []scheduler.Outcome{scheduler.OutcomeNone, scheduler.OutcomeRan, scheduler.OutcomeRanQueued, scheduler.OutcomeSkipped} {
+			if handled, err := pollNonRunResult(context.Background(), outcome, nil); handled || err != nil {
+				t.Errorf("pollNonRunResult(%v) = (handled=%v, err=%v), want (false, nil): must fall through to the ran/own accounting", outcome, handled, err)
+			}
+		}
+	})
+}

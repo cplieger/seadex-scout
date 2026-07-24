@@ -36,7 +36,7 @@ func NewCatalogue(idx *mapping.Index, keep func(mapping.Record) bool) *Catalogue
 		// Sonarr item through a stray TVDB id, nor a series record a Radarr
 		// item through its movie ids.
 		tvdb, tmdbMovies, imdbIDs := r.RoutedIDs()
-		if tvdb != 0 {
+		if tvdb > 0 { // usable per HasArrIdentifier: overrides can carry a negative tvdb_id
 			c.tvdb[tvdb] = struct{}{}
 		}
 		for _, id := range tmdbMovies {

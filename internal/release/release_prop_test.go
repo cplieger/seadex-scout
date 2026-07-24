@@ -137,3 +137,40 @@ func TestClassifyPlantedMarkerProperties(t *testing.T) {
 		}
 	})
 }
+
+// TestClassifyToLowerFaithfulness pins the in-place matcher's central design
+// claim directly: classifying raw evidence text must decide every
+// text-derived field (Kind, Reason, Codec, Resolution) exactly as classifying
+// its strings.ToLower image, which is what lowerLiteralPattern's hand-built
+// case classes and the evidenceWordClass edges exist to guarantee. Any
+// boundary or case-class regression - a (?i) rewrite (SimpleFold matches
+// U+017F but misses U+0130), a dropped U+0130/U+212A class member, or an
+// edge class that is not fold-invariant - breaks this equivalence on some
+// generated input, so the whole marker machinery is pinned structurally
+// instead of only by the example rows in TestClassifyKind and
+// TestClassifyResolution. Group and Tracker are deliberately excluded: they
+// pass raw casing through by contract.
+func TestClassifyToLowerFaithfulness(t *testing.T) {
+	piece := rapid.OneOf(
+		rapid.SampledFrom([]string{
+			"REMUX", "BDRemux", "PREMUX", "Remuxed", "BDRip", "BDR\u0130P", "encode", "ENCODED",
+			"x265", "HEVC", "AVC", "h.264", "H.265", "CRF18", "crf 20", "4500 kbps", "4500 \u212abps",
+			"1080p", "2160P", "21080p", "\u0130", "\u017f", "\u212a", "_", ".", "-", " ", "Show",
+		}),
+		rapid.String(),
+	)
+	pieces := rapid.SliceOfN(piece, 1, 6)
+	rapid.Check(t, func(t *rapid.T) {
+		name := strings.Join(pieces.Draw(t, "name"), "")
+		notes := strings.Join(pieces.Draw(t, "notes"), "")
+		raw := Classify(&Input{Names: []string{name}, Notes: notes})
+		lowered := Classify(&Input{Names: []string{strings.ToLower(name)}, Notes: strings.ToLower(notes)})
+		if raw.Kind != lowered.Kind || raw.Reason != lowered.Reason ||
+			raw.Codec != lowered.Codec || raw.Resolution != lowered.Resolution {
+			t.Fatalf("raw text and its ToLower image classify differently:\nname %q notes %q\nraw     %q/%q/%q/%q\nlowered %q/%q/%q/%q",
+				name, notes,
+				raw.Kind, raw.Reason, raw.Codec, raw.Resolution,
+				lowered.Kind, lowered.Reason, lowered.Codec, lowered.Resolution)
+		}
+	})
+}

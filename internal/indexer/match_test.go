@@ -221,3 +221,17 @@ func TestCanonicalTrackerHost(t *testing.T) {
 		}
 	}
 }
+
+// TestTrackerIDUnknownScopeFailsClosed pins trackerID's fail-closed default:
+// a scope outside the nyaa/ab vocabulary extracts no id even from a URL that
+// carries one, so any future caller reaching the dispatcher with an
+// unclassified scope cannot mint identity evidence - the same defensive arm
+// TestTrackerIDHelpersFailClosedOnUnparseableInput pins for trackerOwnURL.
+func TestTrackerIDUnknownScopeFailsClosed(t *testing.T) {
+	if got := trackerID("other", "https://nyaa.si/view/123"); got != "" {
+		t.Errorf(`trackerID("other", ...) = %q, want empty (fail closed on an unknown scope)`, got)
+	}
+	if got := trackerID("", "/torrents.php?torrentid=123"); got != "" {
+		t.Errorf(`trackerID("", ...) = %q, want empty (fail closed on an empty scope)`, got)
+	}
+}

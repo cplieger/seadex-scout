@@ -175,6 +175,16 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor fu
 			// occurrence (counted as unresolvable only when all fail).
 			continue
 		}
+		if !journalIdentityMatches(&it) {
+			// Creation-time enforcement of the journal's GUID-to-Key
+			// invariant (the carry gates and the reader's rebuild already
+			// enforce it): an occurrence whose page URL is unpublishable
+			// (UsableURL dropped it - e.g. a userinfo- or bad-port-bearing
+			// URL that still passes trackerKey) would journal an item every
+			// reader load then drops as undecodable. Try the next
+			// occurrence.
+			continue
+		}
 		foldRefs(&it, refs, infoFor)
 		if !validPersistedItem(&it) {
 			// An oversized external value (a SeaDex filename synthesized into

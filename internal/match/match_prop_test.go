@@ -2,6 +2,7 @@ package match
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -142,6 +143,74 @@ func TestMemoExpiryLifecycleProperty(t *testing.T) {
 		}
 		if fake.batchCalls != wantBatches {
 			rt.Fatalf("batch calls = %d, want %d (only pending ids consult AniList)", fake.batchCalls, wantBatches)
+		}
+	})
+}
+
+// TestFindByIDCatalogueConsistencyProperty pins the documented forward/reverse
+// pairing invariant (catalogue.go: the two directions "cannot drift"): for ANY
+// record set and library, an item the forward lookup resolves a record to must
+// be recognized by the reverse catalogue built from the same records, and must
+// belong to the record's routed arr (MOVIE -> Radarr, else Sonarr). IDs draw
+// from a small pool so forward hits, wrong-arr collisions, and shadowing
+// configurations all occur frequently.
+func TestFindByIDCatalogueConsistencyProperty(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		nRec := rapid.IntRange(1, 6).Draw(rt, "records")
+		records := make([]mapping.Record, 0, nRec)
+		for i := range nRec {
+			rec := mapping.Record{AniListID: i + 1}
+			if rapid.Bool().Draw(rt, "movie") {
+				rec.Type = "MOVIE"
+				rec.TmdbMovies = rapid.SliceOfN(rapid.IntRange(1, 8), 0, 2).Draw(rt, "tmdb")
+				for range rapid.IntRange(0, 2).Draw(rt, "nimdb") {
+					rec.IMDbIDs = append(rec.IMDbIDs, fmt.Sprintf("tt%d", rapid.IntRange(1, 8).Draw(rt, "imdb")))
+				}
+			} else {
+				rec.Type = "TV"
+				rec.TvdbID = rapid.IntRange(0, 8).Draw(rt, "tvdb")
+			}
+			records = append(records, rec)
+		}
+		nItems := rapid.IntRange(1, 6).Draw(rt, "items")
+		items := make([]library.Item, 0, nItems)
+		for i := range nItems {
+			it := library.Item{ArrID: i + 1, Title: fmt.Sprintf("Item %d", i)}
+			if rapid.Bool().Draw(rt, "radarr") {
+				it.Arr = library.ArrRadarr
+				it.TmdbID = rapid.IntRange(0, 8).Draw(rt, "itemTmdb")
+				if rapid.Bool().Draw(rt, "hasImdb") {
+					it.ImdbID = fmt.Sprintf("tt%d", rapid.IntRange(1, 8).Draw(rt, "itemImdb"))
+				}
+			} else {
+				it.Arr = library.ArrSonarr
+				it.TvdbID = rapid.IntRange(0, 8).Draw(rt, "itemTvdb")
+				// A stray same-key movie id on the series item: the reverse
+				// catalogue must not recognize a Sonarr item through a MOVIE
+				// record's ids any more than FindByID may resolve one.
+				it.TmdbID = rapid.IntRange(0, 8).Draw(rt, "strayTmdb")
+			}
+			items = append(items, it)
+		}
+		li := NewLibIndex(&library.Snapshot{Items: items})
+		cat := NewCatalogue(mapping.NewIndex(records), nil)
+		for i := range records {
+			it := li.FindByID(&records[i])
+			if it == nil {
+				continue
+			}
+			wantArr := library.ArrSonarr
+			if records[i].IsMovie() {
+				wantArr = library.ArrRadarr
+			}
+			if it.Arr != wantArr {
+				rt.Fatalf("FindByID(record %d, type %s) resolved a %s item %q; the routed arr is %s",
+					records[i].AniListID, records[i].Type, it.Arr, it.Title, wantArr)
+			}
+			if !cat.Has(it) {
+				rt.Fatalf("forward/reverse drift: FindByID(record %d) resolved item %q (arr %s, tvdb %d, tmdb %d, imdb %q) but Catalogue.Has rejects it",
+					records[i].AniListID, it.Title, it.Arr, it.TvdbID, it.TmdbID, it.ImdbID)
+			}
 		}
 	})
 }

@@ -329,6 +329,8 @@ func (fc *fileConfig) toConfig() Config {
 		c.ReportDir = DefaultReportDir
 	}
 	c.PollInterval, c.PollExternal = parseInterval(fc.PollInterval)
+	warnAllBlankTagList("arr_tags.include", fc.ArrTags.Include, c.IncludeTags)
+	warnAllBlankTagList("arr_tags.exclude", fc.ArrTags.Exclude, c.ExcludeTags)
 	return c
 }
 
@@ -858,6 +860,18 @@ func trimList(items []string) []string {
 		}
 	}
 	return out
+}
+
+// warnAllBlankTagList warns when a configured arr_tags list holds only
+// blank entries: trimList drops them all, so that filter is silently OFF -
+// the include side then admits every item past the operator's scoping and
+// the exclude side excludes nothing, and no unmatched-tag warning fires
+// from the walk (blank labels never reach it; arrapi.UnmatchedLabels
+// ignores them too).
+func warnAllBlankTagList(which string, raw, trimmed []string) {
+	if len(raw) > 0 && len(trimmed) == 0 {
+		slog.Warn("configured tag list holds only blank entries; the filter is off", "which", which)
+	}
 }
 
 // parseLogFormat normalizes log.format via slogx.ParseFormat into the typed

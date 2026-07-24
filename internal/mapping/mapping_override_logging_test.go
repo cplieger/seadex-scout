@@ -356,3 +356,28 @@ func TestLoader_Load_emptyOverridesEmitNoAppliedLog(t *testing.T) {
 		}
 	}
 }
+
+// TestLoader_Load_sanitizesUnknownOverrideKeyControlChars pins the security
+// half of the unknown-key diagnostic: logUnknownKeys runs every key through
+// runesafe.SanitizeSingleLine before the byte cap, so an operator-controlled
+// key carrying a terminal-control rune (ESC here) is logged with the unsafe
+// rune replaced by a space and can never smuggle terminal-control or
+// direction-override text into the log stream.
+func TestLoader_Load_sanitizesUnknownOverrideKeyControlChars(t *testing.T) {
+	overrides := filepath.Join(t.TempDir(), "overrides.json")
+	data := []byte(`[{"anilist_id":2,"type":"movie","e\u001bvil":1}]`)
+	if err := os.WriteFile(overrides, data, 0o644); err != nil {
+		t.Fatalf("write overrides: %v", err)
+	}
+	logger, rec := capture.New()
+	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
+	if _, _, err := l.Load(context.Background(), freshCache()); err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if rec.CountExact("mapping: overrides contain unknown keys, ignored") != 1 {
+		t.Fatalf("Load logs = %v, want one unknown-keys warning", rec.Messages())
+	}
+	if !unknownKeysAre(rec, "[e vil]") {
+		t.Errorf("unknown keys logs = %v, want the ESC control replaced with a space: keys=[e vil]", rec.Messages())
+	}
+}

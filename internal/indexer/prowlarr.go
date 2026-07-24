@@ -33,6 +33,8 @@ const (
 	upstreamMaxBytes = 8 << 20
 )
 
+// --- Upstream search and retry classification ---
+
 // upstream is one Prowlarr per-indexer Torznab endpoint (Nyaa or AnimeBytes).
 // The feed proxies these to source real release data (title, seeders, size,
 // Prowlarr-proxied download URL) and never talks to the trackers directly.
@@ -193,7 +195,7 @@ func (u *upstream) classifyParseError(err error) error {
 	}
 	// A generic decode failure can echo attacker-controlled body text
 	// verbatim (encoding/xml returns raw strconv errors quoting the full
-	// unparsed <size>/length value, up to the 16 MiB wire cap), and the
+	// unparsed <size>/length value, up to the wire cap upstreamMaxBytes), and the
 	// request carried the Prowlarr API key: redact any reflection of the
 	// key FIRST (the exact-substring replacement must see intact text),
 	// then bound the text, before the error reaches httpx.Do's retry
@@ -254,6 +256,8 @@ func malformedUpstreamBody(err error) bool {
 	tue, ok := errors.AsType[*transientUpstreamError](err)
 	return ok && tue.malformedBody
 }
+
+// --- Download/display URL gates ---
 
 // filterDownloadURLs drops items whose download URL is not an absolute http(s)
 // URL on the same origin as the configured Prowlarr Torznab endpoint. The
@@ -317,6 +321,12 @@ func (u *upstream) filterDownloadURLs(items []item) []item {
 	return out
 }
 
+// isHTTPScheme reports whether scheme is http or https, case-insensitively.
+func isHTTPScheme(scheme string) bool {
+	s := strings.ToLower(scheme)
+	return s == "http" || s == "https"
+}
+
 // httpNoUserinfoURL parses raw and returns it when it is an absolute
 // http or https URL free of userinfo - the shared admission prefix of
 // sameHTTPOrigin (fetch targets) and sanitizeDisplayURL (display
@@ -326,7 +336,7 @@ func httpNoUserinfoURL(raw string) (*url.URL, bool) {
 	if err != nil || u.User != nil {
 		return nil, false
 	}
-	if s := strings.ToLower(u.Scheme); s != "http" && s != "https" {
+	if !isHTTPScheme(u.Scheme) {
 		return nil, false
 	}
 	return u, true
@@ -376,6 +386,8 @@ func sanitizeDisplayURL(scope, raw string) string {
 	}
 	return raw
 }
+
+// --- Request headers ---
 
 // setHeaders sets the User-Agent, Accept, and the Prowlarr API key header.
 func (u *upstream) setHeaders(req *http.Request) {

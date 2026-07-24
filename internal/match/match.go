@@ -408,7 +408,7 @@ func (li *LibIndex) FindByID(rec *mapping.Record) *library.Item {
 		return li.findMovie(rec)
 	}
 	tvdb, _, _ := rec.RoutedIDs()
-	if tvdb != 0 {
+	if tvdb > 0 { // usable per HasArrIdentifier: overrides can carry a negative tvdb_id
 		return arrItem(li.byTvdb[tvdb], library.ArrSonarr)
 	}
 	return nil

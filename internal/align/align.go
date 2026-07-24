@@ -23,7 +23,6 @@ import (
 
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
-	"github.com/cplieger/seadex-scout/internal/release"
 )
 
 // specialSeason is the TVDB season number Sonarr files specials under.
@@ -78,7 +77,7 @@ func Scope(item *library.Item, rec *mapping.Record) ScopeResult {
 	switch {
 	case item.Arr == library.ArrRadarr:
 		return ScopeResult{Kind: ScopeMovie, Groups: item.Groups, HasFile: item.HasFile}
-	case rec.SeasonTvdb > 0:
+	case rec.HasMappedSeason():
 		// Group presence doubles as file presence here and in the specials
 		// branch below: release.Classify falls back to the literal NOGRP
 		// (release.NoGroup) for a group-less file, so a season with any file
@@ -103,7 +102,7 @@ func Scope(item *library.Item, rec *mapping.Record) ScopeResult {
 // match). SeaDex carries one whole-series recommendation for these, with no
 // per-season mapping. Consumers read the classification via Scope's Kind.
 func wholeSeries(item *library.Item, rec *mapping.Record) bool {
-	return item.Arr == library.ArrSonarr && rec.SeasonTvdb <= 0 && !rec.IsSpecial()
+	return item.Arr == library.ArrSonarr && !rec.HasMappedSeason() && !rec.IsSpecial()
 }
 
 // summary is the per-real-season aggregate summarizeWholeSeries collects: the
@@ -148,20 +147,16 @@ func summarizeWholeSeries(item *library.Item, best, alt []string) summary {
 		}
 		s.Seasons++
 		s.Groups = appendMissingGroups(s.Groups, seen, groups)
-		switch release.GroupsOverlap(groups, best) {
-		case release.OverlapKnown:
-			continue // this season provenly carries a best group
-		case release.OverlapUnknown:
-			s.AnyUnverified = true
-			continue
-		}
-		switch release.GroupsOverlap(groups, alt) {
-		case release.OverlapKnown:
+		switch groupStanding(groups, best, alt) {
+		case StandingAlt:
 			s.AnyAlt = true
-		case release.OverlapUnknown:
-			s.AnyUnverified = true
-		default:
+		case StandingUnlisted:
 			s.AnyUnlisted = true
+		case StandingUnverified:
+			s.AnyUnverified = true
+		case StandingNoFile, StandingBest:
+			// a season provenly carrying a best group sets no flag (and
+			// NoFile is unreachable: the loop skips empty seasons)
 		}
 	}
 	slices.Sort(s.Groups)

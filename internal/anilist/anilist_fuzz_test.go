@@ -33,6 +33,7 @@ func FuzzParseMedia(f *testing.F) {
 		if err != nil {
 			return
 		}
+		assertMediaBounded(t, m, raw)
 		assertTitlesClean(t, m.Titles, raw)
 	})
 }
@@ -64,13 +65,33 @@ func FuzzParseMediaPage(f *testing.F) {
 		if err != nil {
 			return
 		}
+		if len(out) > batchSize {
+			t.Errorf("parseMediaPage(%q) returned %d records, want <= batchSize (%d)", raw, len(out), batchSize)
+		}
 		for id, m := range out {
 			if id <= 0 {
 				t.Errorf("parseMediaPage(%q) returned non-positive id %d", raw, id)
 			}
+			assertMediaBounded(t, m, raw)
 			assertTitlesClean(t, m.Titles, raw)
 		}
 	})
+}
+
+// assertMediaBounded restates the per-field wire limits as a fuzz invariant:
+// an error-free parse must never hand the matcher's memo (and, through it,
+// state.json) a title or format that exceeds the documented byte caps -- the
+// resource-exhaustion defense toMedia exists to enforce.
+func assertMediaBounded(t *testing.T, m Media, raw []byte) {
+	t.Helper()
+	for _, title := range m.Titles {
+		if len(title) > maxTitleBytes {
+			t.Errorf("parsed title of %d bytes exceeds maxTitleBytes (%d) from %q", len(title), maxTitleBytes, raw)
+		}
+	}
+	if len(m.Format) > maxFormatBytes {
+		t.Errorf("parsed format of %d bytes exceeds maxFormatBytes (%d) from %q", len(m.Format), maxFormatBytes, raw)
+	}
 }
 
 func assertTitlesClean(t *testing.T, titles []string, raw []byte) {

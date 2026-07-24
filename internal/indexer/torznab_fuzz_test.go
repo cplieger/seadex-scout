@@ -29,6 +29,7 @@ func FuzzParseTorznab(f *testing.F) {
 	f.Add(`<rss><channel><item><enclosure url="http://prowlarr/download?id=1&amp;token=x" length="123" type="application/x-bittorrent"/><torznab:attr name="category" value="2000"/></item></channel></rss>`)
 	f.Add(`<rss><channel><item><torznab:attr name="seeders" value="9223372036854775807"/><torznab:attr name="leechers" value="9223372036854775807"/></item></channel></rss>`)
 	f.Add(`<?xml version="1.0"?><error code="100" description="Incorrect user credentials"/>`)
+	f.Add("<rss><channel>" + strings.Repeat("<a>", maxUpstreamDepth+1) + "</channel></rss>")
 	f.Add("")
 	f.Add("not xml at all")
 	f.Fuzz(func(t *testing.T, body string) {

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -78,6 +79,32 @@ func TestLoader_refreshCache_overCapBodyKeepsStale(t *testing.T) {
 	}
 	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
 		t.Fatalf("over-cap refresh records = %+v, want stale record id 1", next.Records)
+	}
+}
+
+// TestLoader_refreshCache_boundsParseErrorText pins the emit-boundary
+// sanitization on the parse-failure path: a hostile 200 body whose top-level
+// value is a giant control-rune-laden JSON string surfaces a degraded error
+// whose text is bounded and single-line (the anilist sanitizeUpstreamMessage
+// policy), instead of echoing megabytes of attacker-controlled body into the
+// log stream every degraded cycle.
+func TestLoader_refreshCache_boundsParseErrorText(t *testing.T) {
+	hostile := `"` + strings.Repeat("A\u0007\u202e", 50000) + `"`
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(hostile))
+	}))
+	defer ts.Close()
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	_, err := l.refreshCache(context.Background(), &Cache{})
+	if err == nil {
+		t.Fatal("refreshCache with string-body upstream = nil error, want parse-failure error")
+	}
+	msg := err.Error()
+	if len(msg) > maxLoggedErrorBytes+100 {
+		t.Errorf("degraded error text = %d bytes, want bounded near maxLoggedErrorBytes (%d)", len(msg), maxLoggedErrorBytes)
+	}
+	if strings.ContainsAny(msg, "\n\r\u0007") || strings.Contains(msg, "\u202e") {
+		t.Errorf("degraded error text carries a control/bidi rune: %q", msg)
 	}
 }
 

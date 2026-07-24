@@ -30,7 +30,7 @@ type Alerted struct {
 // StoredFinding is the subset of a compare.Finding the dedupe record
 // persists: exactly the fields read back across cycles - emitResolved's
 // resolution line (title, al_id, arr, season, current_group, status,
-// recommended_group) and Report's failed-item preservation scope, keyed on
+// recommended_group) and Notify's failed-item preservation scope, keyed on
 // AniListID. The record used to persist the full sanitized Finding, but
 // everything beyond this set was write-only ballast in state.json (including
 // the ArrURL whose on-disk sanitization the trim makes moot: no URL is
@@ -171,17 +171,33 @@ func (n *Notifier) emit(f *compare.Finding) {
 
 // emitResolved logs a single info line when a prior finding no longer applies,
 // reading the trimmed record the dedupe state persisted. The untrusted
-// upstream strings (title, groups) ride through runesafe.Sanitize,
+// upstream strings (title, groups) ride through capAttr,
 // matching findingKVs' policy.
 func (n *Notifier) emitResolved(f *StoredFinding) {
 	n.log.Info("finding resolved",
-		"title", runesafe.Sanitize(f.Title),
+		"title", capAttr(f.Title),
 		"al_id", f.AniListID,
 		"arr", f.Arr,
 		"season", f.Season,
-		"current_group", runesafe.Sanitize(f.CurrentGroup),
+		"current_group", capAttr(f.CurrentGroup),
 		"status", string(f.Status),
-		"recommended_group", runesafe.Sanitize(f.RecommendedGroup))
+		"recommended_group", capAttr(f.RecommendedGroup))
+}
+
+// capAttr sanitizes an untrusted attribute for the JSON slog sink and caps
+// its volume: honest values pass byte-identical; a hostile oversized value
+// (SeaDex admits multi-MB URLs, up to 512 per entry) is truncated on a rune
+// boundary with a "..." marker so one record can never balloon past
+// downstream log-pipeline line limits (alert suppression) or amplify memory.
+// The cap mirrors keyenc.MaxComponentBytes, the bound the dedupe-key path
+// already applies to the same data (CWE-400).
+func capAttr(s string) string {
+	const maxAttrBytes = 8 << 10
+	s = runesafe.Sanitize(s)
+	if len(s) <= maxAttrBytes {
+		return s
+	}
+	return runesafe.CapBytes(s, maxAttrBytes) + "..."
 }
 
 // findingKVs builds the structured key-value attributes for a finding line.
@@ -189,31 +205,32 @@ func (n *Notifier) emitResolved(f *StoredFinding) {
 // a compact seadex_tags line so an alert can render a self-contained,
 // clickable notification straight from the labels. Every attribute derived
 // from untrusted upstream data (SeaDex/tracker titles, groups, URLs, hashes)
-// is passed through runesafe.Sanitize — the same policy the audit
-// report's slog path applies — because slog's JSONHandler escapes C0 controls
-// but emits C1 controls and bidi controls raw. Fixed-pattern app values
-// (resolution, codec, kind, season, al_id, arr, status) stay raw.
+// is passed through capAttr — runesafe.Sanitize (the same policy the audit
+// report's slog path applies, because slog's JSONHandler escapes C0 controls
+// but emits C1 controls and bidi controls raw) plus a volume cap mirroring
+// the bound the dedupe-key path applies to the same data. Fixed-pattern app
+// values (resolution, codec, kind, season, al_id, arr, status) stay raw.
 func findingKVs(f *compare.Finding) []any {
 	nyaaURL, abURL := trackerURLs(f.Links)
 	return []any{
-		"title", runesafe.Sanitize(f.Title),
+		"title", capAttr(f.Title),
 		"al_id", f.AniListID,
 		"arr", f.Arr,
-		"arr_url", runesafe.Sanitize(library.SafeLogURL(f.ArrURL)),
+		"arr_url", capAttr(library.SafeLogURL(f.ArrURL)),
 		"season", f.Season,
-		"current_group", runesafe.Sanitize(f.CurrentGroup),
-		"recommended_group", runesafe.Sanitize(f.RecommendedGroup),
-		"recommended_groups", runesafe.Sanitize(strings.Join(f.RecommendedGroups, ",")),
-		"tracker", runesafe.Sanitize(f.Tracker),
+		"current_group", capAttr(f.CurrentGroup),
+		"recommended_group", capAttr(f.RecommendedGroup),
+		"recommended_groups", capAttr(strings.Join(f.RecommendedGroups, ",")),
+		"tracker", capAttr(f.Tracker),
 		"resolution", f.Resolution,
 		"codec", f.Codec,
 		"kind", f.Kind,
-		"classification_reason", runesafe.Sanitize(f.Reason),
-		"release_url", runesafe.Sanitize(f.ReleaseURL),
-		"release_urls", runesafe.Sanitize(joinLinks(f.Links)),
-		"nyaa_url", runesafe.Sanitize(nyaaURL),
-		"ab_url", runesafe.Sanitize(abURL),
-		"info_hash", runesafe.Sanitize(f.InfoHash),
+		"classification_reason", capAttr(f.Reason),
+		"release_url", capAttr(f.ReleaseURL),
+		"release_urls", capAttr(joinLinks(f.Links)),
+		"nyaa_url", capAttr(nyaaURL),
+		"ab_url", capAttr(abURL),
+		"info_hash", capAttr(f.InfoHash),
 		"seadex_tags", seadexTags(f),
 		"status", string(f.Status),
 	}

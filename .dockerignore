@@ -11,3 +11,5 @@
 !*.go
 !config.example.yaml
 !internal/
+# go build never compiles tests; keep test-only edits from invalidating build layers
+**/*_test.go

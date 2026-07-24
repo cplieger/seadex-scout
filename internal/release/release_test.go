@@ -140,6 +140,11 @@ func TestClassifyKind(t *testing.T) {
 		{name: "encode from generic encode token", in: Input{Names: []string{"Show S01 1080p encode"}}, wantKind: KindEncode, wantReason: "encoder marker: encode"},
 		{name: "encode from encoded token", in: Input{Names: []string{"Show 1080p [Encoded]"}}, wantKind: KindEncode, wantReason: "encoder marker: encode"},
 		{name: "encode from bdrip token", in: Input{Names: []string{"Show BDRip 1080p"}}, wantKind: KindEncode, wantReason: "encoder marker: encode"},
+		{name: "encode from hyphenated bd-rip", in: Input{Names: []string{"Show BD-Rip 1080p"}}, wantKind: KindEncode, wantReason: "encoder marker: encode"},
+		{name: "encode from dot-joined bd.rip", in: Input{Names: []string{"Show.BD.Rip.1080p"}}, wantKind: KindEncode, wantReason: "encoder marker: encode"},
+		{name: "encode from underscore-joined bd_rip", in: Input{Names: []string{"Show_BD_Rip"}}, wantKind: KindEncode, wantReason: "encoder marker: encode"},
+		{name: "bd ripper is not an encode marker", in: Input{Names: []string{"Show BD Ripper 1080p"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
+		{name: "bd ripped is not an encode marker", in: Input{Names: []string{"Show BDRipped"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
 		{name: "notes fill the gap with a generic encode token", in: Input{Names: []string{"Show 1080p"}, Notes: "a solid encode"}, wantKind: KindEncode, wantReason: "encoder marker: encode"},
 		{name: "remux token wins over a generic encode token", in: Input{Names: []string{"Show BD-Remux encode 1080p"}}, wantKind: KindRemux, wantReason: "name/notes marker: remux"},
 		{name: "reencode is not an encode marker", in: Input{Names: []string{"Show reencode 1080p"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
@@ -161,6 +166,7 @@ func TestClassifyKind(t *testing.T) {
 		{name: "U+0130 folds onto i in the bdrip token", in: Input{Names: []string{"Show BDR\u0130P"}}, wantKind: KindEncode, wantReason: "encoder marker: encode"},
 		{name: "kelvin sign folds onto k in the bitrate suffix", in: Input{Names: []string{"Show 4500 \u212abps"}}, wantKind: KindEncode, wantReason: "encoder marker: bitrate"},
 		{name: "unknown when no marker", in: Input{Names: []string{"Show 1080p"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
+		{name: "title-glued undotted episode number is not an encoder marker", in: Input{Names: []string{"Bleach264.mkv"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -199,6 +205,7 @@ func TestClassifyCodec(t *testing.T) {
 		{name: "notes fill the gap when name has no marker", in: Input{Names: []string{"Show 1080p"}, Notes: "x265 encode"}, want: "x265"},
 		{name: "no codec marker", in: Input{Names: []string{"Show 1080p"}}, want: ""},
 		{name: "dotted episode number is not a codec marker", in: Input{Names: []string{"One.Punch.264.1080p"}}, want: ""},
+		{name: "title-glued undotted episode number is not a codec marker", in: Input{Names: []string{"Bleach264.mkv"}}, want: ""},
 		{name: "dotted h.265 token from name", in: Input{Names: []string{"Show 1080p H.265"}}, want: "x265"},
 	}
 	for _, tc := range tests {

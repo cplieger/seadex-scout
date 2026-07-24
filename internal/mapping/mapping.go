@@ -126,6 +126,11 @@ func (r *Record) IsSpecial() bool {
 	}
 }
 
+// HasMappedSeason reports whether the record carries a positive Fribb TVDB
+// season - the predicate align.Scope keys season-exact comparison on, and
+// validateScopeCoverage's season floor counts.
+func (r *Record) HasMappedSeason() bool { return r.SeasonTvdb > 0 }
+
 // --- Cache + Index: persisted state and the AniList-ID lookup ---
 
 // Cache is the persisted mapping state: the parsed Fribb records plus the HTTP
@@ -506,6 +511,7 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 			return rejectRefresh(prev, "refresh exceeded record cap", err,
 				fmt.Errorf("%w and no cache available", err))
 		}
+		err = errors.New(runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedErrorBytes))
 		return staleOrFail(prev, "parse failed", err,
 			fmt.Errorf("mapping: parse failed and no cache available: %w", err))
 	}
@@ -627,9 +633,6 @@ func validateRefreshedRecords(previous, records []Record, sourceElements int) er
 // type-sparse cache or a first boot against a type-sparse catalogue is the
 // catalogue's valid shape, not a regression to reject.
 func validateTypeCoverage(previous, records []Record, minimum int) error {
-	if len(previous) == 0 {
-		return nil
-	}
 	return validatePopulation("type", "typed", typedRecordCount(previous), typedRecordCount(records), len(records), coverageFloor(len(previous)), minimum)
 }
 
@@ -662,9 +665,6 @@ func validatePopulation(floorNoun, collapseNoun string, prevCount, count, total,
 // cache met the floor for it, and an additive refresh that merely grows the
 // record count passes.
 func validateScopeCoverage(previous, records []Record, minimum int) error {
-	if len(previous) == 0 {
-		return nil
-	}
 	previousMinimum := coverageFloor(len(previous))
 	if err := validatePopulation("positive-season", "season-scoped", positiveSeasonCount(previous), positiveSeasonCount(records), len(records), previousMinimum, minimum); err != nil {
 		return err
@@ -679,7 +679,7 @@ func validateScopeCoverage(previous, records []Record, minimum int) error {
 func positiveSeasonCount(records []Record) int {
 	n := 0
 	for i := range records {
-		if records[i].SeasonTvdb > 0 {
+		if records[i].HasMappedSeason() {
 			n++
 		}
 	}
@@ -716,9 +716,6 @@ func specialRecordCount(records []Record) int {
 // non-movie labels stay legal because every non-MOVIE type counts toward the
 // same side.
 func validateRoutingCoverage(previous, records []Record, minimum int) error {
-	if len(previous) == 0 {
-		return nil
-	}
 	previousMinimum := coverageFloor(len(previous))
 	prevMovies, prevOthers := routingCounts(previous)
 	movies, others := routingCounts(records)
@@ -834,6 +831,10 @@ const maxRetainedUnknownKeys = maxLoggedUnknownKeys + 1
 // is exact unless count_capped is true, in which case it is a lower bound.
 const maxLoggedKeyBytes = 64
 
+// maxLoggedErrorBytes bounds untrusted-input-derived parse-error text before
+// it reaches a log emit boundary (the anilist sanitizeUpstreamMessage policy).
+const maxLoggedErrorBytes = 200
+
 // maxLoggedDuplicateIDs bounds how many distinct duplicated AniList IDs the
 // duplicate-override WARN names; the full distinct count still rides in
 // duplicate_count.
@@ -890,7 +891,8 @@ func (l *Loader) readOverrides(ctx context.Context) (overrideSet, bool) {
 	}
 	set, err := parseOverrides(data)
 	if err != nil {
-		l.log.Warn("mapping: overrides malformed, ignoring", "path", l.overridesPath, "error", err)
+		l.log.Warn("mapping: overrides malformed, ignoring", "path", l.overridesPath,
+			"error", errors.New(runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedErrorBytes)))
 		return overrideSet{}, false
 	}
 	if len(set.unknown) > 0 {
@@ -1074,6 +1076,11 @@ func (set *overrideSet) applyRecord(dec *bounded.Decoder, seenKeys map[string]st
 	record.Type = NormalizeType(record.Type)
 	record.IMDbIDs = trimmed(record.IMDbIDs)
 	record.TmdbMovies = positiveInts(record.TmdbMovies)
+	// Match flexInt's canonical form: a negative tvdb_id/season_tvdb the
+	// Fribb decoders would zero must not diverge here nor leak a phantom
+	// negative key into the reverse arr-ID catalogue.
+	record.TvdbID = max(0, record.TvdbID)
+	record.SeasonTvdb = max(0, record.SeasonTvdb)
 	if record.AniListID <= 0 {
 		// Zero (missing) and negative alike: encoding/json decodes a negative
 		// anilist_id the tolerant Fribb decoders can never produce, and an

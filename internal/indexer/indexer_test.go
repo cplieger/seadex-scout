@@ -761,7 +761,7 @@ func TestFeedTitle(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := feedTitle(&seadex.Torrent{Files: tc.files, ReleaseGroup: tc.group})
+			got := derivedTitle(&seadex.Torrent{Files: tc.files, ReleaseGroup: tc.group}, EntryInfo{})
 			if got != tc.want {
 				t.Errorf("feedTitle = %q, want %q", got, tc.want)
 			}
@@ -876,10 +876,10 @@ func TestRenderSynthesizedItem(t *testing.T) {
 	}
 }
 
-// TestServe_requiresAPIKeyBeforeServingCaps verifies the API-key gate rejects a
+// TestServeRequiresAPIKeyBeforeServingCaps verifies the API-key gate rejects a
 // missing or wrong apikey before any capabilities document is served, and that a
 // correct key yields the exact caps shape the arrs expect.
-func TestServe_requiresAPIKeyBeforeServingCaps(t *testing.T) {
+func TestServeRequiresAPIKeyBeforeServingCaps(t *testing.T) {
 	ix := New(&Config{APIKey: "secret"}, Deps{}, "")
 
 	bad := httptest.NewRecorder()
@@ -920,11 +920,11 @@ func TestServe_requiresAPIKeyBeforeServingCaps(t *testing.T) {
 	}
 }
 
-// TestFilterByCats_appliesTorznabCategorySemantics pins the Torznab category
+// TestFilterByCatsAppliesTorznabCategorySemantics pins the Torznab category
 // filter contract: an Anime item satisfies a TV-parent request, Movies excludes
 // Anime, and an uncategorized item always passes through (Prowlarr already
 // applied the upstream category filter).
-func TestFilterByCats_appliesTorznabCategorySemantics(t *testing.T) {
+func TestFilterByCatsAppliesTorznabCategorySemantics(t *testing.T) {
 	items := []item{
 		{Title: "anime", Categories: []int{catAnime}},
 		{Title: "movie", Categories: []int{catMovies}},
@@ -974,14 +974,7 @@ func TestFilterByCatsMatchesAnyTorznabParent(t *testing.T) {
 func TestReloadKeepsFeedOnMalformedSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	entries := []seadex.Entry{{
-		AniListID: 7,
-		Torrents: []seadex.Torrent{{
-			Tracker: "Nyaa", URL: "https://nyaa.si/view/42", IsBest: true,
-			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
-		}},
-	}}
-	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := newTestWriter(path, "", false).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, Deps{}, path)
@@ -1121,14 +1114,7 @@ func TestReloadRetriesPreservedMtimeReplacementAfterFailure(t *testing.T) {
 	// Repair: a valid snapshot on a NEW inode, renamed over the bad file with
 	// the failed mtime preserved.
 	repaired := filepath.Join(dir, "feed-repaired.json")
-	entries := []seadex.Entry{{
-		AniListID: 7,
-		Torrents: []seadex.Torrent{{
-			Tracker: "Nyaa", URL: "https://nyaa.si/view/42", IsBest: true,
-			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
-		}},
-	}}
-	if err := seedRebuild(repaired, entries); err != nil {
+	if err := seedRebuild(repaired, nyaaTestEntries(1)); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if err := os.Rename(repaired, path); err != nil {
@@ -1166,7 +1152,7 @@ func seedRebuild(path string, entries []seadex.Entry) error {
 	if err := os.WriteFile(path, []byte(emptyLedgerJSON), 0o600); err != nil {
 		return err
 	}
-	return NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}).Rebuild(context.Background(), entries, nil)
+	return newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil)
 }
 
 // TestReloadInstallsPreservedMtimeReplacementAfterSuccess pins the last-good
@@ -1561,10 +1547,7 @@ func TestApplyPaging(t *testing.T) {
 // TestParsePubDate pins the Torznab <pubDate> parser on the untrusted upstream
 // date string: each supported layout parses to the same instant, and any empty,
 // whitespace-only, or unparseable value yields the zero time (the failure signal
-// writeItem keys on to omit the pubDate element). Today only TestParseTorznab's
-// single RFC1123Z sample and the round-trip fuzz seed exercise this, so the
-// alternate layouts and the failure branch (the uncovered path, 85.7%) are
-// otherwise unpinned.
+// writeItem keys on to omit the pubDate element).
 func TestParsePubDate(t *testing.T) {
 	want := time.Date(2026, time.July, 6, 12, 0, 0, 0, time.UTC)
 	for _, tc := range []struct{ name, in string }{

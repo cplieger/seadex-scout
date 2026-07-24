@@ -369,10 +369,7 @@ func TestCycleShutdownDuringFeedRebuildStaysSilent(t *testing.T) {
 	defer cancel()
 	logger, recorder := capture.New()
 	feed := &cancellingFeed{cancel: cancel}
-	prior := notify.Alerted{
-		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Finding:   notify.StoredFinding{Title: "Existing", Status: compare.StatusBetter, AniListID: 154587},
-	}
+	prior := priorAlerted("Existing", 154587)
 	store := &fakeStore{st: state.State{
 		Mapping:   seasonlessMappingCache(),
 		Findings:  map[string]notify.Alerted{"prior": prior},

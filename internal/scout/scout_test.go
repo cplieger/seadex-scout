@@ -164,6 +164,15 @@ func scoutTestLogger() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
 }
 
+// priorAlerted returns a persisted prior-finding fixture (alerted 2026-01-01
+// UTC) the preservation tests seed the dedupe table with.
+func priorAlerted(title string, alID int) notify.Alerted {
+	return notify.Alerted{
+		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		Finding:   notify.StoredFinding{Title: title, Status: compare.StatusBetter, AniListID: alID},
+	}
+}
+
 // errTransport fails every request with a plain (non-transient) error, so
 // orchestration tests stay hermetic: the deliberately-unreachable
 // unused.invalid deps fail at the transport instead of issuing a real DNS
@@ -248,14 +257,7 @@ func TestCycleLibraryWalkFailureIsUnhealthy(t *testing.T) {
 
 func TestCycleSeaDexFailureIsHealthyAndPreservesFindings(t *testing.T) {
 	logger := scoutTestLogger()
-	prior := notify.Alerted{
-		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Finding: notify.StoredFinding{
-			Title:     "Existing finding",
-			Status:    compare.StatusBetter,
-			AniListID: 154587,
-		},
-	}
+	prior := priorAlerted("Existing finding", 154587)
 	store := &fakeStore{st: state.State{
 		Mapping:   frierenMappingCache(),
 		Findings:  map[string]notify.Alerted{"prior": prior},

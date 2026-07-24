@@ -1243,3 +1243,43 @@ func TestStoreLoadStateFieldTypeMismatchQuarantines(t *testing.T) {
 		})
 	}
 }
+
+// TestStoreLoadCanceledReadBlocksSaveUntilClassified pins the root-safe leg
+// of the unclassified-read-failure preservation posture: a canceled read is
+// an UNCLASSIFIED failure (like EACCES/EIO), so after a Load under a
+// pre-canceled context the on-disk bytes must be preserved by refusing Save
+// until a later Load classifies the file. Unlike the EACCES variant (which
+// skips under root), this injection works in any environment.
+func TestStoreLoadCanceledReadBlocksSaveUntilClassified(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(`{"baselined":true}`), 0o600); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	store := NewStore(path, testLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := store.Load(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Load canceled context error = %v, want context.Canceled", err)
+	}
+	err := store.Save(context.Background(), &State{})
+	if err == nil {
+		t.Fatal("Save after a canceled (unclassified) read = nil error, want the preservation block")
+	}
+	if !strings.Contains(err.Error(), "unclassified read failure") {
+		t.Errorf("blocked Save error = %v, want it to name the unclassified read failure", err)
+	}
+	live, readErr := os.ReadFile(path)
+	if readErr != nil || string(live) != `{"baselined":true}` {
+		t.Errorf("live state after blocked Save = %q (err %v), want the original bytes preserved", live, readErr)
+	}
+	got, loadErr := store.Load(context.Background())
+	if loadErr != nil {
+		t.Fatalf("Load after recovery returned error: %v", loadErr)
+	}
+	if !got.Baselined {
+		t.Error("re-loaded state lost Baselined, want the preserved file read back")
+	}
+	if saveErr := store.Save(context.Background(), &got); saveErr != nil {
+		t.Errorf("Save after a classifying Load = %v, want the block cleared", saveErr)
+	}
+}

@@ -56,9 +56,9 @@ func TestStripExt(t *testing.T) {
 }
 
 // TestEntryURL pins the info-link contract: a positive AniList id yields the
-// releases.moe entry page (the default site base when none is configured, a
-// trailing-slash base normalized to the same link) and a zero/negative id
-// yields no link at all.
+// releases.moe entry page (under the canonical site base; a trailing-slash
+// base is normalized to the same link by seadex.EntryURL) and a zero/negative
+// id yields no link at all.
 func TestEntryURL(t *testing.T) {
 	w := NewFeedWriter(&FeedWriterConfig{}, Deps{})
 	if got := w.entryURL(154587); got != "https://releases.moe/154587" {
@@ -70,9 +70,8 @@ func TestEntryURL(t *testing.T) {
 	if got := w.entryURL(-3); got != "" {
 		t.Errorf("entryURL(-3) = %q, want empty", got)
 	}
-	slash := NewFeedWriter(&FeedWriterConfig{SeaDexBaseURL: "https://releases.moe/"}, Deps{})
-	if got := slash.entryURL(154587); got != "https://releases.moe/154587" {
-		t.Errorf("entryURL(154587) with trailing-slash base = %q, want the normalized entry page", got)
+	if got := seadex.EntryURL("https://releases.moe/", 154587); got != "https://releases.moe/154587" {
+		t.Errorf("EntryURL(154587) with trailing-slash base = %q, want the normalized entry page", got)
 	}
 }
 
@@ -89,7 +88,7 @@ func TestRepresentativeFileSkipsCreditlessForAbsolute(t *testing.T) {
 	if got := representativeFile(files); got != "[Grp] Show - 07 (1080p).mkv" {
 		t.Errorf("representativeFile = %q, want the first absolute-numbered episode", got)
 	}
-	if got := feedTitle(&seadex.Torrent{Files: files}); got != "[Grp] Show (1080p)" {
+	if got := derivedTitle(&seadex.Torrent{Files: files}, EntryInfo{}); got != "[Grp] Show (1080p)" {
 		t.Errorf("feedTitle = %q, want %q (collapsed from the episode, not the NCED)", got, "[Grp] Show (1080p)")
 	}
 }
@@ -104,7 +103,7 @@ func TestCoveredEpisodesCountsExtensionAbuttingAbsoluteForm(t *testing.T) {
 	if got := coveredEpisodes(files); got != 2 {
 		t.Errorf("coveredEpisodes = %d, want 2 (absolute form abutting the extension)", got)
 	}
-	if got := feedTitle(&seadex.Torrent{Files: files}); got != "Show" {
+	if got := derivedTitle(&seadex.Torrent{Files: files}, EntryInfo{}); got != "Show" {
 		t.Errorf("feedTitle = %q, want %q (two-episode pack collapses)", got, "Show")
 	}
 }
@@ -146,7 +145,7 @@ func TestRepresentativeFileSkipsEpisodeNamedSidecar(t *testing.T) {
 	if got := representativeFile(files); got != files[1].Name {
 		t.Errorf("representativeFile = %q, want media file %q", got, files[1].Name)
 	}
-	if got := feedTitle(&seadex.Torrent{Files: files}); got != "Show - S01E01 (1080p) [Grp]" {
+	if got := derivedTitle(&seadex.Torrent{Files: files}, EntryInfo{}); got != "Show - S01E01 (1080p) [Grp]" {
 		t.Errorf("feedTitle = %q, want title derived from the media file", got)
 	}
 }
@@ -215,7 +214,7 @@ func TestFeedTitleMixedSeasonPackLabelsRealSeason(t *testing.T) {
 		{Name: "Show - S01E01 (1080p) [Grp].mkv"},
 		{Name: "Show - S01E02 (1080p) [Grp].mkv"},
 	}
-	if got, want := feedTitle(&seadex.Torrent{Files: files}), "Show - S01 (1080p) [Grp]"; got != want {
+	if got, want := derivedTitle(&seadex.Torrent{Files: files}, EntryInfo{}), "Show - S01 (1080p) [Grp]"; got != want {
 		t.Errorf("feedTitle(S00+S01 pack) = %q, want %q (labeled by the dominant real season)", got, want)
 	}
 }
@@ -407,7 +406,7 @@ func TestFeedTitlePackWithDirectoryOnlyEpisodeTokens(t *testing.T) {
 	if got := coveredEpisodes(files); got != 2 {
 		t.Fatalf("coveredEpisodes = %d, want 2 (tokens counted from the full path)", got)
 	}
-	if got := feedTitle(&seadex.Torrent{Files: files}); got != "Movie Cut A" {
+	if got := derivedTitle(&seadex.Torrent{Files: files}, EntryInfo{}); got != "Movie Cut A" {
 		t.Errorf("feedTitle = %q, want %q (basename fallback when the base carries no episode token)", got, "Movie Cut A")
 	}
 }
@@ -444,7 +443,7 @@ func TestFeedTitleCollapsesOnlyLastEpisodeToken(t *testing.T) {
 	if got := coveredEpisodes(files); got != 2 {
 		t.Fatalf("coveredEpisodes = %d, want 2 (episodes keyed on the LAST token; the title's SxxExx-shaped substring must not shadow the real marker)", got)
 	}
-	if got, want := feedTitle(&seadex.Torrent{Files: files}), "Show S02E00 Cut - S01 (1080p)"; got != want {
+	if got, want := derivedTitle(&seadex.Torrent{Files: files}, EntryInfo{}), "Show S02E00 Cut - S01 (1080p)"; got != want {
 		t.Errorf("feedTitle = %q, want %q (only the LAST episode token collapses; the title's own SxxExx-shaped substring is preserved verbatim)", got, want)
 	}
 }
@@ -462,7 +461,7 @@ func TestFeedTitleCollapsesOnlyLastAbsoluteEpisodeToken(t *testing.T) {
 	if got := coveredEpisodes(files); got != 2 {
 		t.Fatalf("coveredEpisodes = %d, want 2 (absolute episodes keyed on the LAST token)", got)
 	}
-	if got, want := feedTitle(&seadex.Torrent{Files: files}), "Show - 07 (WEB)"; got != want {
+	if got, want := derivedTitle(&seadex.Torrent{Files: files}, EntryInfo{}), "Show - 07 (WEB)"; got != want {
 		t.Errorf("feedTitle = %q, want %q (only the LAST absolute token collapses; the ' - NN'-shaped title segment is preserved)", got, want)
 	}
 }
@@ -545,7 +544,7 @@ func TestEpisodeTokenIgnoresDashJoinedResolution(t *testing.T) {
 		{Name: "Show - S01E07-1080p [G].mkv"},
 		{Name: "Show - S01E08-1080p [G].mkv"},
 	}}
-	if got, want := feedTitle(&pack), "Show - S01-1080p [G]"; got != want {
+	if got, want := derivedTitle(&pack, EntryInfo{}), "Show - S01-1080p [G]"; got != want {
 		t.Errorf("pack collapse = %q, want %q (no stray residue)", got, want)
 	}
 	trueRange := seadex.Torrent{Files: []seadex.File{{Name: "Show - S01E01-13 [G].mkv"}}}
@@ -594,5 +593,55 @@ func TestDerivedTitleRelabelsCourLocalSeason(t *testing.T) {
 	}
 	if got, want := synthesizeTitle(pack, EntryInfo{IsSpecial: true}), "Show - S00 (1080p) [G]"; got != want {
 		t.Errorf("fallback special pack = %q, want %q (the special typing outvotes cour-local file seasons, mirroring episodeMarker's pack arm)", got, want)
+	}
+}
+
+// TestDerivedTitleMappedSeasonNeverRelabelsAbsoluteOrMarkerlessNames pins the
+// no-token guard of relabelBaseSeason (the one uncovered branch of the derived
+// path): a MAPPED season over a single release whose base name carries no
+// SxxExx token - an absolute "- NN" name or a marker-less movie-shaped file -
+// must pass through unchanged, never gain an invented season label.
+func TestDerivedTitleMappedSeasonNeverRelabelsAbsoluteOrMarkerlessNames(t *testing.T) {
+	single := &seadex.Torrent{Files: []seadex.File{{Name: "[Grp] Show - 07 (1080p).mkv"}}}
+	if got, want := synthesizeTitle(single, EntryInfo{SeasonTvdb: 3}), "[Grp] Show - 07 (1080p)"; got != want {
+		t.Errorf("derived absolute single with a mapped season = %q, want %q (nothing to relabel)", got, want)
+	}
+	markerless := &seadex.Torrent{Files: []seadex.File{{Name: "Show Movie.mkv"}}}
+	if got, want := synthesizeTitle(markerless, EntryInfo{SeasonTvdb: 3}), "Show Movie"; got != want {
+		t.Errorf("derived marker-less single with a mapped season = %q, want %q (nothing to relabel)", got, want)
+	}
+	special := &seadex.Torrent{Files: []seadex.File{{Name: "[Grp] Show - 07 (1080p).mkv"}}}
+	if got, want := synthesizeTitle(special, EntryInfo{IsSpecial: true}), "[Grp] Show - 07 (1080p)"; got != want {
+		t.Errorf("derived absolute single special = %q, want %q (mapped season 0 has no token to relabel)", got, want)
+	}
+}
+
+// TestSortFeedIsStableForEqualFirstSeen pins sortFeed's documented stability
+// contract: items journaled in the same rebuild share a FirstSeen and must
+// keep catalogue order (a SortFunc regression reorders them while every
+// distinct-timestamp assertion stays green). Equal-timestamp items are
+// interleaved with distinct ones so an unstable sort has to move them.
+func TestSortFeedIsStableForEqualFirstSeen(t *testing.T) {
+	base := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	const n = 400
+	items := make([]journalItem, 0, n)
+	for i := range n {
+		ts := base
+		if i%2 == 0 {
+			ts = base.Add(time.Duration(n-i) * time.Minute)
+		}
+		items = append(items, journalItem{item: item{GUID: strconv.Itoa(i)}, FirstSeen: ts})
+	}
+	got := sortFeed(items)
+	prev := -1
+	for i := range got {
+		if !got[i].FirstSeen.Equal(base) {
+			continue
+		}
+		id, _ := strconv.Atoi(got[i].GUID)
+		if id < prev {
+			t.Fatalf("sortFeed reordered equal-FirstSeen items: GUID %d appears after %d (same-rebuild items must keep catalogue order)", id, prev)
+		}
+		prev = id
 	}
 }

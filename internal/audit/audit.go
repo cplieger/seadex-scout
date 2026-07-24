@@ -284,7 +284,8 @@ func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[strin
 
 // assess builds one row: classify the entry's releases, resolve the shared
 // comparison decision (align.Decide - the same decision the daemon's compare
-// pass projects, fed here with the raw SeaDex best and alt group sets), and
+// pass projects, fed here with the SeaDex best and alt group sets minus
+// curation-warned and unobtainable releases - see groupSets), and
 // render it as the row's verdict and qualifier.
 func (a *Auditor) assess(m *match.Match) Row {
 	releases := a.classifyReleases(&m.Entry)
@@ -453,7 +454,8 @@ func addUnique(seen map[string]struct{}, out *[]string, g string) {
 	*out = append(*out, g)
 }
 
-// sortRows orders rows by verdict actionability, then title.
+// sortRows orders rows by verdict actionability, then title, then season and
+// AniList id for same-title rows.
 func sortRows(rows []Row) {
 	rank := make(map[Verdict]int, len(verdictOrder))
 	for i, v := range verdictOrder {
@@ -463,6 +465,12 @@ func sortRows(rows []Row) {
 		if c := cmp.Compare(rank[a.Verdict], rank[b.Verdict]); c != 0 {
 			return c
 		}
-		return cmp.Compare(strings.ToLower(a.Title), strings.ToLower(b.Title))
+		if c := cmp.Compare(strings.ToLower(a.Title), strings.ToLower(b.Title)); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.Season, b.Season); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.AniListID, b.AniListID)
 	})
 }

@@ -112,6 +112,11 @@ func TestSeadexTags(t *testing.T) {
 			finding: compare.Finding{Status: compare.StatusBetter, Kind: "unknown", Resolution: "720p"},
 			want:    "best · 720p",
 		},
+		{
+			name:    "unmapped status omits the qualifier tag",
+			finding: compare.Finding{Status: compare.Status("future_status"), Kind: "encode", Resolution: "1080p"},
+			want:    "encode · 1080p",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

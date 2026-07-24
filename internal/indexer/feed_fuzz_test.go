@@ -31,7 +31,7 @@ func FuzzFeedTitle_boundedAndTrimmed(f *testing.F) {
 			ReleaseGroup: group,
 			Files:        []seadex.File{{Name: name1}, {Name: name2}},
 		}
-		got := feedTitle(tor)
+		got := derivedTitle(tor, EntryInfo{})
 		if got != strings.TrimSpace(got) {
 			t.Errorf("feedTitle(%q, %q, group %q) = %q, not trimmed", name1, name2, group, got)
 		}
@@ -51,7 +51,7 @@ func FuzzFeedTitle_singleVideoPreservesName(f *testing.F) {
 	f.Add("  Movie Title (2026)  ")
 	f.Add("Season 1/Show - S01E01")
 	f.Fuzz(func(t *testing.T, base string) {
-		got := feedTitle(&seadex.Torrent{Files: []seadex.File{{Name: base + ".mkv"}}})
+		got := derivedTitle(&seadex.Torrent{Files: []seadex.File{{Name: base + ".mkv"}}}, EntryInfo{})
 		want := strings.TrimSpace(base[strings.LastIndex(base, "/")+1:])
 		if got != want {
 			t.Errorf("feedTitle(single video %q) = %q, want %q", base, got, want)

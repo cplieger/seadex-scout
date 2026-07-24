@@ -345,6 +345,7 @@ func TestParseFribb_malformedDocumentErrors(t *testing.T) {
 		in   string
 	}{
 		{name: "empty input", in: ``},
+		{name: "top-level null", in: `null`},
 		{name: "garbage first token", in: `!!!`},
 		{name: "unterminated array", in: `[{"anilist_id":1}`},
 		{name: "invalid token mid-array", in: `[{"anilist_id":1},!!!]`},
@@ -440,9 +441,6 @@ func TestParseFribb_identifierSlicesCapped(t *testing.T) {
 		t.Fatalf("parseFribb kept %d records, want %d", len(records), want)
 	}
 	for _, rec := range records {
-		if len(rec.IMDbIDs) > maxFribbIdentifiers {
-			t.Fatalf("record %d retained %d imdb ids, want <= %d", rec.AniListID, len(rec.IMDbIDs), maxFribbIdentifiers)
-		}
 		if len(rec.IMDbIDs) != maxFribbIdentifiers {
 			t.Fatalf("record %d retained %d imdb ids, want the full at-cap %d", rec.AniListID, len(rec.IMDbIDs), maxFribbIdentifiers)
 		}

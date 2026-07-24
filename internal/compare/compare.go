@@ -6,8 +6,9 @@
 // library item. The comparison is season-scoped and decided by the shared
 // internal/align decision core (align.Decide) - the same decision rules the
 // audit report renders, so the two flows cannot drift on shared inputs (they
-// deliberately prepare different ones: the report judges the raw SeaDex
-// best/alt sets, this pass only its filtered obtainable recommendations): a
+// deliberately prepare different ones: the report judges the SeaDex best/alt
+// sets minus only curation-warned and unobtainable releases, while this pass
+// additionally applies the content filters and keeps best-only): a
 // mapped TVDB season against that season's groups, a special against Sonarr's
 // season-0 bucket, a movie against its groups, and an absolute-numbered or
 // title-only run against every real season conservatively -

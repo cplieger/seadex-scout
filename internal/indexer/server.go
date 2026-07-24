@@ -358,7 +358,7 @@ func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Valu
 	// query (so an empty result reads as a skip, not a no-match); `feed` is true
 	// for an empty-q RSS check served from the synthesized SeaDex feed; `upstream`
 	// is how many upstream results survived the Prowlarr fetch (post origin-filter) for a search,
-	// `curated` how many items were returned after curation/synthesis, `returned`
+	// `curated` how many items survived curation/synthesis (pre cat-filter/paging), `returned`
 	// the count actually EMITTED into the rendered document (the render byte
 	// budget can truncate below the post-category-filter count).
 	ix.log.Info("indexer request",

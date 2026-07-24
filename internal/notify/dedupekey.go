@@ -14,9 +14,11 @@ import (
 // re-surface across cycles is a notification/suppression concern (the keys
 // are persisted as notify.Alerted map keys in state.json), so the key is
 // derived here at the start of Notify and Baseline from the semantic Finding
-// the compare package produces. The key format is a byte-for-byte
-// continuation of the format compare used to compute, so existing persisted
-// dedupe state and alert-suppression continuity are preserved.
+// the compare package produces. The key format is pinned
+// byte-for-byte by TestDedupeKey: any format change invalidates every
+// persisted key and re-alerts the whole backlog as a one-time burst, so
+// change it only deliberately (the 2026-07 validated-identity/link-set
+// hardening accepted exactly that burst).
 
 // dedupeKey keys a finding by AniList ID, status, recommended-group set, current
 // group, release identity, and the full obtainable-source link set, so a
@@ -34,7 +36,7 @@ import (
 // (keyenc.BoundedJoinParts), so a value that itself contains the ',' or '|'
 // delimiter cannot collide two distinct findings onto one key (which would
 // suppress the second as already alerted), while a delimiter-free value keeps
-// its legacy representation and existing persisted dedupe state stays valid.
+// its plain unescaped representation in the key.
 // Every untrusted component is also size-bounded: a component set larger than
 // keyenc.MaxComponentBytes is reduced to a fixed-size SHA-256 identity
 // instead of being materialized into the key, so hostile bulk SeaDex data

@@ -158,6 +158,8 @@ func TestParseMediaFieldLimits(t *testing.T) {
 		{name: "over-limit native rejected", fields: `"title":{"romaji":"A","native":"` + bigTitle + `"}`, wantErr: true},
 		{name: "boundary-sized format accepted", fields: `"format":"` + okFormat + `","title":{"romaji":"A"}`, wantErr: false},
 		{name: "over-limit format rejected", fields: `"format":"` + bigFormat + `","title":{"romaji":"A"}`, wantErr: true},
+		{name: "control rune in format rejected", fields: `"format":"TV\n","title":{"romaji":"A"}`, wantErr: true},
+		{name: "bidi override in format rejected", fields: `"format":"TV\u202e","title":{"romaji":"A"}`, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

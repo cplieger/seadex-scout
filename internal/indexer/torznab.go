@@ -327,6 +327,13 @@ const (
 	// carry at most a handful (enclosure: url/length/type; attr:
 	// name/value; rss: version plus namespaces); 16 is generous.
 	maxUpstreamTagAttrs = 16
+	// maxUpstreamDepth caps element nesting depth. encoding/xml pushes one
+	// heap-allocated stack entry per open element with no built-in depth
+	// limit, so an all-opens body of tiny tags (~3 bytes each under the
+	// token cap) could otherwise grow the decoder's element stack by
+	// ~2.7M entries from one 8 MiB response (CWE-400). A Torznab document
+	// is depth ~4 (rss/channel/item/attr).
+	maxUpstreamDepth = 64
 )
 
 // Raw markup delimiters preflightMarkup dispatches on.
@@ -345,11 +352,14 @@ var (
 // document's surface structure - text runs, tags (honoring quoted '>'
 // bytes), comments, processing instructions, CDATA sections, and <!
 // directives - and rejects an overlong text/CDATA run, an overlong markup
-// token, or a start tag carrying more than maxUpstreamTagAttrs XML
-// attributes, each as a *torznabLimitError so it classifies exactly like the
-// decode-time caps. It never validates XML: a malformed body within the
-// bounds passes through for encoding/xml to reject with its own parse error.
+// token, a start tag carrying more than maxUpstreamTagAttrs XML attributes,
+// or element nesting deeper than maxUpstreamDepth (encoding/xml's
+// open-element stack grows per start tag with no built-in depth limit), each
+// as a *torznabLimitError so it classifies exactly like the decode-time
+// caps. It never validates XML: a malformed body within the bounds passes
+// through for encoding/xml to reject with its own parse error.
 func preflightTorznab(body []byte) error {
+	depth := 0
 	for i := 0; i < len(body); {
 		if body[i] != '<' {
 			run := bytes.IndexByte(body[i:], '<')
@@ -362,9 +372,16 @@ func preflightTorznab(body []byte) error {
 			i += run
 			continue
 		}
-		n, err := preflightMarkup(body[i:])
+		n, delta, err := preflightMarkup(body[i:])
 		if err != nil {
 			return err
+		}
+		depth += delta
+		if depth > maxUpstreamDepth {
+			return &torznabLimitError{limit: fmt.Sprintf("element nesting deeper than %d", maxUpstreamDepth)}
+		}
+		if depth < 0 {
+			depth = 0 // stray end tags are left for encoding/xml to reject
 		}
 		i += n
 	}
@@ -372,18 +389,22 @@ func preflightTorznab(body []byte) error {
 }
 
 // preflightMarkup bounds one markup token starting at body[0] == '<',
-// returning how many bytes it spans. Delimited forms (CDATA, comments,
-// processing instructions) are scanned to their closing delimiter within
-// their bound; anything else is a tag or <!-directive scanned to its
-// unquoted '>'.
-func preflightMarkup(body []byte) (int, error) {
+// returning how many bytes it spans and the token's nesting-depth delta (+1
+// for a start tag, -1 for an end tag, 0 for everything else). Delimited
+// forms (CDATA, comments, processing instructions) are scanned to their
+// closing delimiter within their bound; anything else is a tag or
+// <!-directive scanned to its unquoted '>'.
+func preflightMarkup(body []byte) (n, delta int, err error) {
 	switch {
 	case bytes.HasPrefix(body, cdataOpen):
-		return preflightDelimited(body, len(cdataOpen), cdataClose, maxUpstreamTextRunBytes, "CDATA section")
+		n, err = preflightDelimited(body, len(cdataOpen), cdataClose, maxUpstreamTextRunBytes, "CDATA section")
+		return n, 0, err
 	case bytes.HasPrefix(body, commentOpen):
-		return preflightDelimited(body, len(commentOpen), commentClose, maxUpstreamTokenBytes, "comment")
+		n, err = preflightDelimited(body, len(commentOpen), commentClose, maxUpstreamTokenBytes, "comment")
+		return n, 0, err
 	case bytes.HasPrefix(body, piOpen):
-		return preflightDelimited(body, len(piOpen), piClose, maxUpstreamTokenBytes, "processing instruction")
+		n, err = preflightDelimited(body, len(piOpen), piClose, maxUpstreamTokenBytes, "processing instruction")
+		return n, 0, err
 	case bytes.HasPrefix(body, directiveOpen):
 		return preflightTag(body, false)
 	default:
@@ -410,10 +431,12 @@ func preflightDelimited(body []byte, openLen int, closeDelim []byte, maxLen int,
 // preflightTag scans one tag (or <!-directive) from body[0] == '<' to its
 // unquoted '>' - a '>' inside a quoted attribute value never terminates the
 // tag - bounding the token length and, on a start tag, counting unquoted '='
-// bytes (exactly one per XML attribute) against maxUpstreamTagAttrs. An
-// unterminated tail within the token bound is left for encoding/xml to
-// reject.
-func preflightTag(body []byte, countAttrs bool) (int, error) {
+// bytes (exactly one per XML attribute) against maxUpstreamTagAttrs. On
+// termination it classifies the token's nesting-depth delta (tagDepthDelta):
+// -1 for an end tag, 0 for a self-closing start tag or <!-directive, +1 for
+// any other start tag. An unterminated tail within the token bound is left
+// for encoding/xml to reject (delta 0: nothing else follows it).
+func preflightTag(body []byte, countAttrs bool) (n, delta int, err error) {
 	limit := min(len(body), maxUpstreamTokenBytes+1)
 	attrs := 0
 	var quote byte
@@ -428,16 +451,34 @@ func preflightTag(body []byte, countAttrs bool) (int, error) {
 		case c == '=' && countAttrs:
 			attrs++
 			if attrs > maxUpstreamTagAttrs {
-				return 0, &torznabLimitError{limit: fmt.Sprintf("more than %d attributes on one start tag", maxUpstreamTagAttrs)}
+				return 0, 0, &torznabLimitError{limit: fmt.Sprintf("more than %d attributes on one start tag", maxUpstreamTagAttrs)}
 			}
 		case c == '>':
-			return i + 1, nil
+			return i + 1, tagDepthDelta(body, i), nil
 		}
 	}
 	if len(body) > maxUpstreamTokenBytes {
-		return 0, &torznabLimitError{limit: fmt.Sprintf("markup token longer than %d bytes", maxUpstreamTokenBytes)}
+		return 0, 0, &torznabLimitError{limit: fmt.Sprintf("markup token longer than %d bytes", maxUpstreamTokenBytes)}
 	}
-	return len(body), nil
+	return len(body), 0, nil
+}
+
+// tagDepthDelta classifies the nesting-depth contribution of one tag whose
+// terminating unquoted '>' sits at body[end]: an end tag (</...>) closes a
+// level (-1), a <!-directive and a self-closing start tag (.../>; the byte
+// before the terminating '>' is '/', necessarily unquoted since the '>'
+// itself is) leave the depth unchanged (0), and any other start tag opens a
+// level (+1). preflightTag already visits both classification bytes, so this
+// costs two byte-compares.
+func tagDepthDelta(body []byte, end int) int {
+	switch {
+	case body[1] == '/':
+		return -1
+	case body[1] == '!' || body[end-1] == '/':
+		return 0
+	default:
+		return 1
+	}
 }
 
 // maxRenderedFeedBytes bounds one rendered feed document, the render-side
@@ -859,7 +900,7 @@ func torznabCodeNum(code string) int {
 // (errorXML.UnmarshalXML only accepts an <error> root), bounding its code and
 // description AT DECODE TIME before an upstreamDocError retains them: the
 // previous unrestricted unmarshal let a compromised upstream park up to the
-// 16 MiB transport cap in the retained error strings, which the retry loop
+// transport cap (upstreamMaxBytes) in the retained error strings, which the retry loop
 // then redacted and logged on every attempt. The bound REJECTS an over-cap
 // document (the decoder's *torznabLimitError, a definitive verdict
 // parseTorznab propagates) rather than truncating it, which preserves the
@@ -912,7 +953,7 @@ func parseTorznab(body []byte) ([]item, error) {
 	if err := xml.Unmarshal(body, &feed); err != nil {
 		// A decode-limit overflow is already a definitive verdict on a
 		// well-formed feed document; skip the <error>-document re-parse of
-		// the (up to 16 MiB) body it could never match.
+		// the (up to upstreamMaxBytes) body it could never match.
 		if limitErr, ok := errors.AsType[*torznabLimitError](err); ok {
 			return nil, limitErr
 		}

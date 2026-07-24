@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -73,17 +72,8 @@ func TestRebuildWarnsWhenABPasskeyMissing(t *testing.T) {
 	if !rec.Contains("ab RSS feed empty of grabbable links") {
 		t.Errorf("missing passkey warning not logged; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
-	skipped := int64(-1)
-	for _, r := range rec.Records() {
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "ab_releases_skipped" {
-				skipped = a.Value.Int64()
-			}
-			return true
-		})
-	}
-	if skipped != 1 {
-		t.Errorf("warning does not carry ab_releases_skipped=1 (got %d); log output:\n%s", skipped, strings.Join(rec.Messages(), "\n"))
+	if v, ok := rec.AttrValue("ab RSS feed empty of grabbable links", "ab_releases_skipped"); !ok || v != "1" {
+		t.Errorf("warning does not carry ab_releases_skipped=1 (got %q, found=%v); log output:\n%s", v, ok, strings.Join(rec.Messages(), "\n"))
 	}
 	snap := readSnapshotFile(t, path)
 	if len(snap.NyaaFeed) != 1 {
@@ -464,17 +454,8 @@ func TestRebuildExcludesCurationWarnedTorrents(t *testing.T) {
 	if snap.Seen["nyaa:41"] || snap.Seen[warnedTorrent.InfoHash] {
 		t.Errorf("seen ledger recorded the warned torrent (un-warning could never journal it): %v", snap.Seen)
 	}
-	warnedExcluded := int64(-1)
-	for _, r := range rec.Records() {
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "warned_excluded" {
-				warnedExcluded = a.Value.Int64()
-			}
-			return true
-		})
-	}
-	if warnedExcluded != 1 {
-		t.Errorf("snapshot log line warned_excluded = %d, want 1; log output:\n%s", warnedExcluded, strings.Join(rec.Messages(), "\n"))
+	if v, ok := rec.AttrValue("indexer feed snapshot written", "warned_excluded"); !ok || v != "1" {
+		t.Errorf("snapshot log line warned_excluded = %q (found=%v), want \"1\"; log output:\n%s", v, ok, strings.Join(rec.Messages(), "\n"))
 	}
 
 	// The warning is lifted: the torrent was never folded into the seen
@@ -563,17 +544,8 @@ func TestRebuildWarnedTorrentIdentityWinsAcrossEntries(t *testing.T) {
 	if snap.Seen["nyaa:41"] || snap.Seen["nyaa:99"] || snap.Seen[hash] {
 		t.Errorf("seen ledger recorded the warned identity (un-warning could never journal it): %v", snap.Seen)
 	}
-	warnedDropped := int64(-1)
-	for _, r := range rec.Records() {
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "journal_warned_dropped" {
-				warnedDropped = a.Value.Int64()
-			}
-			return true
-		})
-	}
-	if warnedDropped != 1 {
-		t.Errorf("snapshot log line journal_warned_dropped = %d, want 1 (the carried duplicate); log output:\n%s", warnedDropped, strings.Join(rec.Messages(), "\n"))
+	if v, ok := rec.AttrValue("indexer feed snapshot written", "journal_warned_dropped"); !ok || v != "1" {
+		t.Errorf("snapshot log line journal_warned_dropped = %q (found=%v), want \"1\" (the carried duplicate); log output:\n%s", v, ok, strings.Join(rec.Messages(), "\n"))
 	}
 }
 
@@ -612,17 +584,8 @@ func TestRebuildDropsCarriedJournalItemBecomingWarned(t *testing.T) {
 	if _, ok := snap.ByKey["nyaa:42"]; ok {
 		t.Error("curation set still marks the now-warned torrent")
 	}
-	warnedDropped := int64(-1)
-	for _, r := range rec.Records() {
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "journal_warned_dropped" {
-				warnedDropped = a.Value.Int64()
-			}
-			return true
-		})
-	}
-	if warnedDropped != 1 {
-		t.Errorf("snapshot log line journal_warned_dropped = %d, want 1; log output:\n%s", warnedDropped, strings.Join(rec.Messages(), "\n"))
+	if v, ok := rec.AttrValue("indexer feed snapshot written", "journal_warned_dropped"); !ok || v != "1" {
+		t.Errorf("snapshot log line journal_warned_dropped = %q (found=%v), want \"1\"; log output:\n%s", v, ok, strings.Join(rec.Messages(), "\n"))
 	}
 }
 
@@ -823,5 +786,71 @@ func TestValidPersistedItemRejectsNonPositiveCategories(t *testing.T) {
 				t.Errorf("validPersistedItem(Categories=%v) = true, want false", categories)
 			}
 		})
+	}
+}
+
+// TestValidPersistedItemRejectsOversizedCategoryList pins the list-length arm
+// of the shared persisted-item limits: both producers union at most the three
+// Torznab ids the feed uses (catTV/catAnime/catMovies), so a category list
+// past maxPersistedCategories identifies a hand-edited or corrupted snapshot
+// and must be rejected at load. A list at the limit stays accepted (the bound
+// rejects strictly above, not at).
+func TestValidPersistedItemRejectsOversizedCategoryList(t *testing.T) {
+	over := make([]int, maxPersistedCategories+1)
+	for i := range over {
+		over[i] = catAnime
+	}
+	it := journalItem{item: item{Title: "x", Categories: over}}
+	if validPersistedItem(&it) {
+		t.Errorf("validPersistedItem(%d categories) = true, want false", len(over))
+	}
+	atLimit := journalItem{item: item{Title: "x", Categories: over[:maxPersistedCategories]}}
+	if !validPersistedItem(&atLimit) {
+		t.Errorf("validPersistedItem(%d categories) = false, want true (an at-limit list is valid)", maxPersistedCategories)
+	}
+}
+
+// TestRebuildWarnedIdentityPropagatesTransitively pins the fixpoint loop in
+// collectWarnedIdentities across MORE than one sweep: A (Broken, nyaa:1+H1)
+// links B (nyaa:2+H1) by hash, and B links C (a nyaa:2 occurrence carrying
+// H2) by key, so H2 enters the warned identity set only on the SECOND sweep
+// (entries are ordered so C is scanned before B). A previously journaled item
+// whose stored info hash is H2 must be retracted through ws.ids; a
+// single-sweep regression (dropping the for-loop around
+// propagateWarnedIdentities) would leave it serving warned bytes on RSS while
+// every existing warned-exclusion test still passes.
+func TestRebuildWarnedIdentityPropagatesTransitively(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	h1 := strings.Repeat("a", 40)
+	h2 := strings.Repeat("b", 40)
+	now := time.Now().UTC().Truncate(time.Second)
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{"nyaa:9": true, h2: true},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/9", InfoHash: h2, PubDate: now}, Key: "nyaa:9", AniListID: 5, FirstSeen: now},
+		},
+	})
+	mkv := []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}}
+	entries := []seadex.Entry{
+		// C first: its shared key nyaa:2 is only warned after B is folded,
+		// so folding C's H2 requires a second propagation sweep.
+		{AniListID: 3, Torrents: []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/2", InfoHash: h2, IsBest: true, Files: mkv}}},
+		{AniListID: 2, Torrents: []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/2", InfoHash: h1, IsBest: true, Files: mkv}}},
+		{AniListID: 1, Torrents: []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/1", InfoHash: h1, IsBest: true, Tags: []string{"Broken"}, Files: mkv}}},
+	}
+	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 0 {
+		t.Errorf("nyaa feed = %+v, want empty (the carried nyaa:9 item stores hash %s, warned only through the key-then-hash chain)", snap.NyaaFeed, h2)
+	}
+	if _, ok := snap.ByHash[h2]; ok {
+		t.Error("curation set marks the transitively warned hash (searches would serve it)")
+	}
+	if _, ok := snap.ByKey["nyaa:2"]; ok {
+		t.Error("curation set marks the transitively warned key")
 	}
 }

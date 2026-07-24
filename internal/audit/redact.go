@@ -119,8 +119,11 @@ func (h *redactingHandler) WithGroup(name string) slog.Handler {
 
 // redactAttr rewrites one attribute: string values are redacted in place,
 // error values are flattened to their redacted text (an *os.PathError's
-// rendered form carries the full path), and groups recurse. Other kinds
-// (ints, times, durations) cannot carry the dir and pass through.
+// rendered form carries the full path), and groups recurse. Every other
+// value passes through unchanged: numeric/time kinds cannot carry the dir,
+// and a non-error KindAny value is deliberately not flattened (pinned by
+// the passthrough test) - no report-pipeline caller logs the dir inside
+// such a value, and flattening would change the record's wire shape.
 func (h *redactingHandler) redactAttr(a slog.Attr) slog.Attr {
 	v := a.Value.Resolve()
 	switch v.Kind() {

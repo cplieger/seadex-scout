@@ -29,7 +29,8 @@ func EntryURL(baseURL string, aniListID int) string {
 }
 
 // UsableURL returns a link a human can follow for the torrent. An absolute URL
-// is returned unchanged only when its host is a canonical tracker host from
+// is returned unchanged (apart from edge trimming and only when free of
+// smuggling bytes) only when its host is a canonical tracker host from
 // the release tracker table (or a dot-delimited subdomain of one), so a
 // compromised SeaDex response cannot surface an attacker-controlled
 // destination under a trusted tracker label; a relative path (as private
@@ -78,16 +79,8 @@ func (t *Torrent) UsableURL() string {
 		return f.Trimmed
 	case urlform.ClassRelative:
 		// In an href context a rooted path resolves tracker-relative, so it
-		// is published base-prefixed - subject to the colon rule. A
-		// tracker-specific relative shape (the AB torrent-page form) names
-		// its OWN tracker: prefixing it under a mislabeled entry's base
-		// would publish a wrong-tracker link that cannot identify the
-		// torrent, so the inferred owner's base wins over the untrusted
-		// label's.
-		if inferred, ok := release.LookupTrackerByRelativeURL(f.Trimmed); ok {
-			return usableRelative(f.Trimmed, inferred.BaseURL)
-		}
-		return usableRelative(f.Trimmed, tr.BaseURL)
+		// is published base-prefixed - subject to the colon rule.
+		return publishRelative(f.Trimmed, f.Trimmed, tr.BaseURL)
 	case urlform.ClassSchemelessHost:
 		return usableSchemelessHost(&f, tr.BaseURL)
 	default:
@@ -112,10 +105,20 @@ func usableSchemelessHost(f *urlform.Form, baseURL string) string {
 	if _, hostOK := release.LookupTrackerByHost(f.Host); hostOK && !f.HasUserInfo {
 		return "https://" + f.Trimmed
 	}
-	if inferred, ok := release.LookupTrackerByRelativeURL("/" + f.Trimmed); ok {
-		return usableRelative(f.Trimmed, inferred.BaseURL)
+	return publishRelative(f.Trimmed, "/"+f.Trimmed, baseURL)
+}
+
+// publishRelative applies the shared inferred-owner-wins policy for
+// path-published forms: a tracker-specific relative shape (the AB
+// torrent-page form) names its OWN tracker, so the inferred owner's base
+// wins over the untrusted label's; anything else publishes under the
+// labeled tracker's base. rooted is the lookup key (the raw value, rooted
+// with "/" when the caller's form lacks one).
+func publishRelative(raw, rooted, labelBase string) string {
+	if inferred, ok := release.LookupTrackerByRelativeURL(rooted); ok {
+		return usableRelative(raw, inferred.BaseURL)
 	}
-	return usableRelative(f.Trimmed, baseURL)
+	return usableRelative(raw, labelBase)
 }
 
 // usableRelative converts a tracker-relative path into a followable link by

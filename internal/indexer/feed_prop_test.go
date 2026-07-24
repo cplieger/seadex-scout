@@ -33,7 +33,7 @@ func TestFeedTitle_preservesSingleEpisodesAndCollapsesPacksProperty(t *testing.T
 		secondName := fmt.Sprintf("%s - S%02dE%02d [Grp].mkv", title, season, second)
 
 		single := &seadex.Torrent{Files: []seadex.File{{Name: firstName}}}
-		if got, want := feedTitle(single), firstName[:len(firstName)-len(".mkv")]; got != want {
+		if got, want := derivedTitle(single, EntryInfo{}), firstName[:len(firstName)-len(".mkv")]; got != want {
 			t.Fatalf("feedTitle(single episode) = %q, want %q", got, want)
 		}
 
@@ -41,7 +41,7 @@ func TestFeedTitle_preservesSingleEpisodesAndCollapsesPacksProperty(t *testing.T
 		if got := coveredEpisodes(pack.Files); got != 2 {
 			t.Fatalf("coveredEpisodes(pack) = %d, want 2", got)
 		}
-		if got, want := feedTitle(pack), fmt.Sprintf("%s - S%02d [Grp]", title, season); got != want {
+		if got, want := derivedTitle(pack, EntryInfo{}), fmt.Sprintf("%s - S%02d [Grp]", title, season); got != want {
 			t.Fatalf("feedTitle(pack) = %q, want %q", got, want)
 		}
 	})

@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/slogx/capture"
 )
 
@@ -325,14 +324,7 @@ func TestQueryFeedDefaultLimit(t *testing.T) {
 // blanking the live feed.
 func TestReloadKeepsFeedOnUnreadableSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	entries := []seadex.Entry{{
-		AniListID: 7,
-		Torrents: []seadex.Torrent{{
-			Tracker: "Nyaa", URL: "https://nyaa.si/view/42", IsBest: true,
-			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
-		}},
-	}}
-	if err := seedRebuild(path, entries); err != nil {
+	if err := seedRebuild(path, nyaaTestEntries(1)); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	log, rec := capture.New()
@@ -561,5 +553,51 @@ func TestRunServesAndShutsDownGracefully(t *testing.T) {
 	}
 	if !rec.Contains("indexer shutdown complete") {
 		t.Errorf("shutdown-complete line not logged; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestServeQueryWarnsOnRenderTruncation pins serveQuery's render-budget
+// degradation contract end to end: a feed whose rendered document blows
+// maxRenderedFeedBytes still answers 200 with a truncated-but-parseable
+// Torznab document, and the truncation WARN fires exactly once so the
+// request log never falsely reports the full result count while the arr
+// silently received a partial feed.
+func TestServeQueryWarnsOnRenderTruncation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	// Escape-amplified titles: each at-cap "&" title renders ~5x larger
+	// (&amp;), so 500 items overshoot the 8 MiB render budget while every
+	// item passes the persisted-item limits.
+	title := strings.Repeat("&", maxPersistedFieldBytes)
+	feed := make([]journalItem, 500)
+	now := time.Now().UTC()
+	for i := range feed {
+		id := strconv.Itoa(i + 1)
+		feed[i] = journalItem{
+			item:      item{Title: title, GUID: "https://nyaa.si/view/" + id, PubDate: now},
+			Key:       "nyaa:" + id,
+			FirstSeen: now,
+		}
+	}
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{}, ByKey: map[string]bool{}, Seen: map[string]bool{},
+		NyaaFeed: feed,
+	})
+	log, rec := capture.New()
+	ix := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, path)
+
+	rr := httptest.NewRecorder()
+	ix.serve(rr, httptest.NewRequest(http.MethodGet, "/nyaa?apikey=k&limit=1000", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (a truncated feed is still a valid document)", rr.Code)
+	}
+	if got := rec.Count("indexer feed truncated by the render byte budget"); got != 1 {
+		t.Fatalf("truncation WARN count = %d, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+	}
+	parsed, err := parseTorznab(rr.Body.Bytes())
+	if err != nil {
+		t.Fatalf("truncated response is not parseable Torznab: %v", err)
+	}
+	if len(parsed) == 0 || len(parsed) >= 500 {
+		t.Errorf("truncated response items = %d, want 0 < n < 500", len(parsed))
 	}
 }

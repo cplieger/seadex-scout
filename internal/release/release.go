@@ -194,8 +194,11 @@ var (
 	// "encoded" alongside "encode", and rejecting the same inflection on
 	// the remux side silently declassified stated remuxes to unknown.
 	reRemux = regexp.MustCompile(`(?:^|` + nonWordEdge + `)(?:` + lowerLiteralPattern("bd") + `[\s._-]?)?(?:` + lowerTokensPattern([]string{"premux", "remux"}) + `)(?:` + lowerLiteralPattern("ed") + `)?(?:$|` + nonWordEdge + `)`)
-	// reEncode matches a generic encode marker ("encode", "encoded", "BDRip")
-	// with reRemux's delimiter-bounded token style, so a bare substring inside
+	// reEncode matches a generic encode marker ("encode", "encoded", "BDRip" -
+	// the BD half accepting the same optional [\s._-] separator reRemux's BD
+	// prefix does, so "BD-Rip"/"BD.Rip"/"BD_Rip"/"BD Rip" classify like the
+	// compact spelling) with reRemux's delimiter-bounded token style, so a
+	// bare substring inside
 	// a longer word ("reencoded", "encoder") is never a marker. It is the
 	// weakest encoder-marker rung in kindFromEvidence — checked after the remux
 	// token and the codec/CRF/bitrate markers, so it only ever moves a release
@@ -203,7 +206,7 @@ var (
 	// many isBest encodes state "encode"/"BDRip" in their name or notes
 	// without any codec, CRF, or bitrate marker and previously classified
 	// unknown.
-	reEncode = regexp.MustCompile(`(?:^|` + nonWordEdge + `)(?:` + lowerTokensPattern([]string{"bdrip", "encoded", "encode"}) + `)(?:$|` + nonWordEdge + `)`)
+	reEncode = regexp.MustCompile(`(?:^|` + nonWordEdge + `)(?:` + lowerLiteralPattern("bd") + `[\s._-]?` + lowerLiteralPattern("rip") + `|` + lowerTokensPattern([]string{"encoded", "encode"}) + `)(?:$|` + nonWordEdge + `)`)
 )
 
 // Canonical codec families the classifier normalizes video codecs to.
@@ -222,14 +225,14 @@ var (
 
 // x265TextTokens / x264TextTokens are the codec markers detected in release
 // text by substring (compact spellings such as "BDx265" are real in the live
-// catalogue, so no boundary is applied). The dotted spellings are excluded
-// here and matched by reDottedX265/reDottedX264 instead, which require a
-// non-alphanumeric left boundary: without it a title ending in "h" followed
-// by a dot-delimited episode number ("Bleach.264.1080p") contains the
-// substring "h.264" and misclassifies the release as an x264 encode.
+// catalogue, so no boundary is applied). The h-prefixed spellings — dotted
+// and undotted — are excluded here and matched by reDottedX265/reDottedX264
+// instead, which require a non-alphanumeric left boundary: without it a
+// title-glued episode number ("Bleach.264.1080p", "Bleach264") contains the
+// substring "h.264"/"h264" and misclassifies the release as an x264 encode.
 var (
-	x265TextTokens = []string{codecX265, "h265", "hevc"}
-	x264TextTokens = []string{codecX264, "h264", "avc"}
+	x265TextTokens = []string{codecX265, "hevc"}
+	x264TextTokens = []string{codecX264, "avc"}
 	// reTextX265 / reTextX264 apply the text-token lists to raw evidence in
 	// place (ToLower-faithful case classes via lowerTokensPattern, no
 	// boundary — see above), so codec detection needs no lowercased copy of
@@ -238,9 +241,12 @@ var (
 	reTextX265 = regexp.MustCompile(lowerTokensPattern(x265TextTokens))
 	reTextX264 = regexp.MustCompile(lowerTokensPattern(x264TextTokens))
 	// reDottedX265 / reDottedX264 require a non-word left boundary
-	// (nonWordEdge, the same raw-text word set the marker edges use).
-	reDottedX265 = regexp.MustCompile(`(?:^|` + nonWordEdge + `)` + lowerLiteralPattern("h.265"))
-	reDottedX264 = regexp.MustCompile(`(?:^|` + nonWordEdge + `)` + lowerLiteralPattern("h.264"))
+	// (nonWordEdge, the same raw-text word set the marker edges use). The
+	// undotted h-spellings ride the same boundary: "h264"/"h265" glued to a
+	// preceding word rune is a title-glued episode number ("Bleach264"), the
+	// same failure class as the dotted form, not a codec marker.
+	reDottedX265 = regexp.MustCompile(`(?:^|` + nonWordEdge + `)(?:` + lowerLiteralPattern("h.265") + `|` + lowerLiteralPattern("h265") + `)`)
+	reDottedX264 = regexp.MustCompile(`(?:^|` + nonWordEdge + `)(?:` + lowerLiteralPattern("h.264") + `|` + lowerLiteralPattern("h264") + `)`)
 )
 
 // evidence accumulates the classification signals of one text source (the

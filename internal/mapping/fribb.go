@@ -356,28 +356,13 @@ func (t tmdbID) movieIDs(isMovie bool) []int {
 // "unknown", non-numeric, fractional, negative, or out-of-range value decodes
 // to 0 rather than erroring or truncating, so an upstream placeholder or odd
 // value does not break the record or masquerade as a valid id. The decode is
-// a thin shim over jsonx under the TolerantZero policy (which this decoder
+// an alias of jsonx.TolerantInt (the TolerantZero policy, which this decoder
 // originated): both wire forms parse identically ("9.0" → 9, "1e3" → 1000,
 // "1.5" → 0) — the number/string equivalence the Fribb id fields rely on —
 // real ids are bounded to [0, MaxInt32], fractional values zero rather than
 // truncate (9.9 truncated to 9 would silently point at a different anime),
 // and only a malformed JSON string propagates an error.
-type flexInt int
-
-// UnmarshalJSON implements the tolerant number-or-string decode via
-// jsonx.ParseInt64 with jsonx.TolerantZero. The receiver is reset first so a
-// duplicate key's later odd value clears an earlier decode (see
-// offsetPair.UnmarshalJSON), and it stays 0 on error (no partial value) —
-// both invariants are also pinned inside the library (jsonx.TolerantInt).
-func (f *flexInt) UnmarshalJSON(b []byte) error {
-	*f = 0
-	n, err := jsonx.ParseInt64(b, jsonx.TolerantZero())
-	if err != nil {
-		return err
-	}
-	*f = flexInt(n)
-	return nil
-}
+type flexInt = jsonx.TolerantInt
 
 // stringList decodes a JSON array of strings, a single string, or null into a
 // []string, trimming blanks. The imdb_id field is an array in the merged list
@@ -456,11 +441,14 @@ func trimmed(in []string) []string {
 	return out
 }
 
-// intSlice converts a []flexInt to a []int, dropping zero entries.
+// intSlice converts a []flexInt to a []int, dropping non-positive entries -
+// the same canonical positive-ids form mapping.go's positiveInts enforces on
+// the overrides path, so the invariant holds locally rather than resting on
+// flexInt's [0, MaxInt32] range bound.
 func intSlice(in []flexInt) []int {
 	var out []int
 	for _, v := range in {
-		if int(v) != 0 {
+		if v > 0 {
 			out = append(out, int(v))
 		}
 	}

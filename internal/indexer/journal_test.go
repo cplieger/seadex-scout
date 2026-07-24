@@ -1295,3 +1295,46 @@ func TestRebuildBaselineTailTrackerCannotSuppressLaterNyaa(t *testing.T) {
 		t.Errorf("journaled key = %q, want nyaa:42", snap.NyaaFeed[0].Key)
 	}
 }
+
+// TestRebuildDropsNonCuratedCarriedItemWithBadGUID pins carryStoredItem's
+// GUID-identity gate on the NON-curated carry arm: unlike a still-curated
+// item there is no fresh render to self-heal from, and reload derives the
+// SERVED download link from the GUID, so a stored GUID that no longer proves
+// the item's journal identity (foreign-host, cross-key, or empty - a
+// hand-edited or corrupted snapshot) must drop the item instead of planting
+// a fetch target for a different torrent for the item's whole journal
+// window, and the drop is counted on the snapshot log line.
+func TestRebuildDropsNonCuratedCarriedItemWithBadGUID(t *testing.T) {
+	tests := []struct {
+		name string
+		guid string
+	}{
+		{"foreign-host stored GUID", "https://evil.example/view/42"},
+		{"cross-key stored GUID", "https://nyaa.si/view/43"},
+		{"empty stored GUID", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "feed.json")
+			first := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+			writeSnapshotFile(t, path, &snapshot{
+				ByHash: map[string]bool{},
+				ByKey:  map[string]bool{},
+				Seen:   map[string]bool{"nyaa:42": true},
+				NyaaFeed: []journalItem{
+					{item: item{Title: "Show - S01 (1080p) [G]", GUID: tc.guid, PubDate: first}, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
+				},
+			})
+			log, rec := capture.New()
+			if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}).Rebuild(context.Background(), nil, nil); err != nil {
+				t.Fatalf("Rebuild: %v", err)
+			}
+			if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 {
+				t.Errorf("nyaa feed = %+v, want empty (a non-curated carry has no fresh render to self-heal from, so a GUID that no longer proves the item's identity must drop it)", snap.NyaaFeed)
+			}
+			if got, ok := rec.AttrValue("indexer feed snapshot written", "journal_dropped"); !ok || got != "1" {
+				t.Errorf("journal_dropped = %q (found=%v), want 1; log:\n%s", got, ok, strings.Join(rec.Messages(), "\n"))
+			}
+		})
+	}
+}

@@ -14,6 +14,8 @@ import (
 // line up regardless of title or info-hash availability. The info hash is used
 // as a secondary key when present.
 
+// --- Tracker scope and canonical hosts ---
+
 // trackerScope classifies a tracker name (as SeaDex spells it, "Nyaa" or "AB")
 // into the feed scope it maps to: upstreamNyaa, upstreamAB, or "" for any other
 // tracker (a negligible SeaDex tail). The tracker vocabulary (which aliases
@@ -92,25 +94,33 @@ func trackerKey(tracker, sourceURL string) string {
 }
 
 // trackerOwnURL reports whether a SeaDex source URL belongs to the scope's
-// own tracker: an absolute URL on the tracker's EXACT canonical host (the
-// shared release.Is*Host predicates reject homograph labels; the additional
-// canonical-host check rejects subdomains, whose torrent-id databases are
-// independent of the apex site's - see isCanonicalTrackerHost), or - for
-// AnimeBytes only - a true relative reference, SeaDex's documented AB shape
-// (UsableURL resolves it against animebytes.tv, so a relative URL is an AB
-// URL by construction). Anything else - a foreign host, a subdomain, an
-// unparseable URL, an opaque non-hierarchical form - fails closed.
+// own tracker: an absolute http(s), userinfo-free URL on the tracker's EXACT
+// canonical host (the shared release.Is*Host predicates reject homograph
+// labels; the additional canonical-host check rejects subdomains, whose
+// torrent-id databases are independent of the apex site's - see
+// isCanonicalTrackerHost; the scheme/userinfo bar matches trackerKeyFromURL,
+// so writer admission and journal identity agree and an odd-scheme SeaDex
+// record is never journaled in the first place), or - for AnimeBytes only -
+// a true relative reference, SeaDex's documented AB shape (UsableURL
+// resolves it against animebytes.tv, so a relative URL is an AB URL by
+// construction). Anything else - a foreign host, a subdomain, a non-http(s)
+// scheme, a userinfo-bearing authority, an unparseable URL, an opaque
+// non-hierarchical form - fails closed.
 func trackerOwnURL(scope, sourceURL string) bool {
 	u, err := url.Parse(sourceURL)
 	if err != nil {
 		return false
 	}
+	host := u.Hostname()
+	httpOK := func() bool {
+		return isHTTPScheme(u.Scheme) && u.User == nil
+	}
 	switch scope {
 	case upstreamNyaa:
-		return release.IsNyaaHost(u.Hostname()) && isCanonicalTrackerHost(scope, u.Hostname())
+		return httpOK() && release.IsNyaaHost(host) && isCanonicalTrackerHost(scope, host)
 	case upstreamAB:
-		if release.IsAnimeBytesHost(u.Hostname()) {
-			return isCanonicalTrackerHost(scope, u.Hostname())
+		if release.IsAnimeBytesHost(host) {
+			return httpOK() && isCanonicalTrackerHost(scope, host)
 		}
 		return u.Scheme == "" && u.Host == "" && u.Opaque == ""
 	}
@@ -135,11 +145,7 @@ func canonicalTrackerHost(scope string) string {
 	if !ok {
 		return ""
 	}
-	u, err := url.Parse(t.BaseURL)
-	if err != nil {
-		return ""
-	}
-	return strings.ToLower(u.Hostname())
+	return t.Host()
 }
 
 // isCanonicalTrackerHost reports whether host is exactly the scope's
@@ -160,19 +166,26 @@ func isCanonicalTrackerHost(scope, host string) bool {
 	return c != "" && strings.EqualFold(strings.TrimSuffix(host, "."), c)
 }
 
+// --- Match-key building ---
+
 // trackerKeyFromURL builds the match key from an arbitrary release URL (a
 // Prowlarr item's page URL) by detecting the tracker from the host, so it keys
-// the same way trackerKey does for the SeaDex side. Host classification rides
-// the shared tracker predicate (release.LookupTrackerByHost via the Is*Host
-// twins), so a non-ASCII homograph label or an empty-labeled host under a
-// tracker domain never yields a curation key.
+// the same way trackerKey does for the SeaDex side. Only an absolute http(s),
+// userinfo-free URL is admitted (the shared httpNoUserinfoURL prefix the
+// fetch/display gates apply), so an odd-scheme or userinfo-bearing URL never
+// proves an identity the rest of the boundary would refuse to fetch or
+// display. Host classification rides the shared tracker predicate
+// (release.LookupTrackerByHost via the Is*Host twins), so a non-ASCII
+// homograph label or an empty-labeled host under a tracker domain never
+// yields a curation key.
 func trackerKeyFromURL(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
+	u, ok := httpNoUserinfoURL(raw)
+	if !ok {
 		return ""
 	}
+	host := u.Hostname()
 	var scope string
-	switch host := u.Hostname(); {
+	switch {
 	case release.IsNyaaHost(host):
 		scope = upstreamNyaa
 	case release.IsAnimeBytesHost(host):
@@ -183,7 +196,7 @@ func trackerKeyFromURL(raw string) string {
 	// Identity is namespace-exact: a subdomain (sukebei.nyaa.si) has its own
 	// torrent-id database, so an id there must not key the apex site (see
 	// isCanonicalTrackerHost). Such an item can still match by info hash.
-	if !isCanonicalTrackerHost(scope, u.Hostname()) {
+	if !isCanonicalTrackerHost(scope, host) {
 		return ""
 	}
 	if id := trackerID(scope, raw); id != "" {
@@ -191,6 +204,8 @@ func trackerKeyFromURL(raw string) string {
 	}
 	return ""
 }
+
+// --- Id extraction and validation ---
 
 // animeBytesID extracts the AnimeBytes torrent id from either URL form: SeaDex
 // stores the site form (`/torrents.php?...torrentid={id}`), while Prowlarr's

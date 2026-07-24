@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cplieger/httpx/v3"
+	"github.com/cplieger/seadex-scout/internal/appinfo"
 )
 
 // TestDoCapsHostileRetryAfterAndPenalizesThrottle proves a pathological
@@ -826,5 +827,43 @@ func TestFetchRejectsNonPositiveIDWithoutRequest(t *testing.T) {
 	}
 	if got := c.Stats().Calls; got != 0 {
 		t.Errorf("Stats().Calls = %d, want 0 (invalid ids must not issue requests)", got)
+	}
+}
+
+// TestDoSendsRequiredHeaders pins the outbound identity/content contract the
+// package doc and appinfo document: every GraphQL POST carries the shared
+// appinfo.UserAgent (AniList politeness -- one consistent identity across
+// clients) and the JSON Content-Type/Accept pair.
+func TestDoSendsRequiredHeaders(t *testing.T) {
+	var mu sync.Mutex
+	var gotUA, gotContentType, gotAccept, gotMethod string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotUA = r.Header.Get("User-Agent")
+		gotContentType = r.Header.Get("Content-Type")
+		gotAccept = r.Header.Get("Accept")
+		gotMethod = r.Method
+		mu.Unlock()
+		fmt.Fprint(w, `{"data":{"Media":{"id":1,"format":"TV","seasonYear":2023,"title":{"romaji":"A"}}}}`)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	if _, err := c.Fetch(context.Background(), 1); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", gotMethod)
+	}
+	if gotUA != appinfo.UserAgent {
+		t.Errorf("User-Agent = %q, want %q", gotUA, appinfo.UserAgent)
+	}
+	if gotContentType != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", gotContentType)
+	}
+	if gotAccept != "application/json" {
+		t.Errorf("Accept = %q, want application/json", gotAccept)
 	}
 }

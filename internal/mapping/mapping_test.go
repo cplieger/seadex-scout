@@ -371,3 +371,43 @@ func TestParseOverrides_streamDecodeErrorsPropagate(t *testing.T) {
 		})
 	}
 }
+
+func TestParseOverrides_malformedIDArrayElementPropagates(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+	}{
+		{name: "string in tmdb_movies", in: `[{"anilist_id":5,"tmdb_movies":["x"]}]`},
+		{name: "object in imdb_ids", in: `[{"anilist_id":5,"imdb_ids":[{}]}]`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			set, err := parseOverrides([]byte(tc.in))
+			if err == nil {
+				t.Fatalf("parseOverrides(%s) = nil error, want array-element decode error", tc.in)
+			}
+			if set.records != nil || set.unknown != nil || set.applied != 0 || set.skipped != 0 || set.oversized != 0 {
+				t.Errorf("parseOverrides(%s) error carried a partial result: %+v", tc.in, set)
+			}
+		})
+	}
+}
+
+func TestParseOverrides_overCapArrayDrainErrorPropagates(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(`[{"anilist_id":5,"tmdb_movies":[`)
+	for i := range maxOverrideIDsPerRecord {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, "%d", i+1)
+	}
+	b.WriteString(`,{`)
+	set, err := parseOverrides([]byte(b.String()))
+	if err == nil {
+		t.Fatal("parseOverrides(over-cap array with truncated tail) = nil error, want drain skip error")
+	}
+	if set.records != nil || set.unknown != nil || set.applied != 0 || set.skipped != 0 || set.oversized != 0 {
+		t.Errorf("drain-error result carried a partial result: %+v", set)
+	}
+}

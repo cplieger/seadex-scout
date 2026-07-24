@@ -1,10 +1,12 @@
 package indexer
 
 import (
+	"bytes"
 	"context"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"strings"
 	"testing"
 	"time"
@@ -407,9 +409,35 @@ func TestReloadCoalescingLoserDefersToWinnerOnFreshInstall(t *testing.T) {
 		defer close(done)
 		ix.reload(context.Background())
 	}()
-	// Release the winner's lock; the loser (blocked on it, or arriving
-	// after) then runs the normal stat path and confirms the fresh-install
-	// ENOENT state instead of latching a failure it never observed.
+	// Wait until the loser is observably blocked acquiring reloadMu inside
+	// reload (TryLock failed with no snapshot loaded, the initial-load arm),
+	// so the contested path is exercised deterministically instead of racing
+	// the Unlock below - without this wait the loser can run entirely after
+	// the release, take the uncontested TryLock path, and pass trivially.
+	prof := pprof.Lookup("goroutine")
+	deadline := time.Now().Add(10 * time.Second)
+	blocked := false
+	for !blocked && time.Now().Before(deadline) {
+		var buf bytes.Buffer
+		if err := prof.WriteTo(&buf, 2); err != nil {
+			t.Fatalf("goroutine profile: %v", err)
+		}
+		for stack := range strings.SplitSeq(buf.String(), "\n\n") {
+			if strings.Contains(stack, "sync.(*Mutex).Lock") && strings.Contains(stack, ").reload(") {
+				blocked = true
+			}
+		}
+		if !blocked {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if !blocked {
+		ix.reloadMu.Unlock()
+		t.Fatal("loser reload never blocked on reloadMu; the contested initial-load arm was not exercised")
+	}
+	// Release the winner's lock; the blocked loser then runs the normal stat
+	// path and confirms the fresh-install ENOENT state instead of latching a
+	// failure it never observed.
 	ix.reloadMu.Unlock()
 	<-done
 
@@ -624,5 +652,125 @@ func TestReloadSanitizesSnapshotInfoURLs(t *testing.T) {
 	}
 	if count := rec.Count("indexer feed snapshot: non-SeaDex info URLs blanked"); count != 1 {
 		t.Errorf("blanked-InfoURL warnings = %d, want 1", count)
+	}
+}
+
+// TestSnapshotInfoURLAllowedRejectsMalformedAndUserinfoURLs pins the
+// fail-closed arms of the persisted-InfoURL display gate: a userinfo-bearing
+// URL on the canonical host, an unparseable URL, a scheme-relative form, and
+// a non-http(s) scheme must all be rejected, while the canonical http/https
+// forms (case-insensitive host) stay allowed.
+func TestSnapshotInfoURLAllowedRejectsMalformedAndUserinfoURLs(t *testing.T) {
+	host := seadexInfoHost()
+	if host == "" {
+		t.Fatal("seadexInfoHost() = empty; the canonical constant must parse")
+	}
+	tests := map[string]struct {
+		raw  string
+		want bool
+	}{
+		"canonical https accepted":             {"https://releases.moe/154587", true},
+		"canonical http accepted":              {"http://releases.moe/154587", true},
+		"uppercase host accepted":              {"https://RELEASES.MOE/154587", true},
+		"userinfo on canonical host rejected":  {"https://evil@releases.moe/154587", false},
+		"user:pass on canonical host rejected": {"https://u:p@releases.moe/154587", false},
+		"unparseable URL rejected":             {"https://releases.moe/%zz", false},
+		"scheme-relative rejected":             {"//releases.moe/154587", false},
+		"ftp scheme rejected":                  {"ftp://releases.moe/154587", false},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := snapshotInfoURLAllowed(tc.raw, host); got != tc.want {
+				t.Errorf("snapshotInfoURLAllowed(%q, %q) = %v, want %v", tc.raw, host, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestReloadDropsCrossTrackerSnapshotItems pins rebuildDownloadURLs' second
+// drop gate: a SELF-CONSISTENT item (Key matches its GUID, so the journal
+// identity check passes) planted in the WRONG tracker's feed must be dropped
+// by downloadURL's tracker-ownership gate, never served - a tampered
+// feed.json could otherwise route a Nyaa torrent through the AB feed (or
+// vice versa) and have the load boundary mint it a download link on the
+// wrong tracker's endpoint shape.
+func TestReloadDropsCrossTrackerSnapshotItems(t *testing.T) {
+	tests := map[string]struct {
+		scope    string
+		planted  journalItem
+		wantWarn string
+	}{
+		"nyaa item planted in the ab feed dropped": {
+			scope:    upstreamAB,
+			planted:  journalItem{item: item{Title: "planted", GUID: "https://nyaa.si/view/42"}, Key: "nyaa:42"},
+			wantWarn: "indexer feed snapshot: AnimeBytes items dropped; no download URL derivable from tracker page URL",
+		},
+		"ab item planted in the nyaa feed dropped": {
+			scope:    upstreamNyaa,
+			planted:  journalItem{item: item{Title: "planted", GUID: "https://animebytes.tv/torrents.php?id=1&torrentid=777"}, Key: "ab:777"},
+			wantWarn: "indexer feed snapshot: Nyaa items dropped; no download URL derivable from tracker page URL",
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "feed.json")
+			snap := &snapshot{ByHash: map[string]bool{}, ByKey: map[string]bool{}, Seen: map[string]bool{}}
+			if tc.scope == upstreamNyaa {
+				snap.NyaaFeed = []journalItem{tc.planted}
+			} else {
+				snap.ABFeed = []journalItem{tc.planted}
+			}
+			writeSnapshotFile(t, path, snap)
+			log, rec := capture.New()
+			ix := New(&Config{UpstreamConfig: UpstreamConfig{
+				NyaaTorznabURL: "http://prowlarr/1/api",
+				ABTorznabURL:   "http://prowlarr/2/api",
+				ABPasskey:      "PASSKEY",
+			}}, Deps{Logger: log}, path)
+
+			if got := ix.feedFor(tc.scope); len(got) != 0 {
+				t.Errorf("%s feed = %d items (%+v), want 0: a cross-tracker item must never serve from the wrong feed", tc.scope, len(got), got)
+			}
+			if count := rec.Count(tc.wantWarn); count != 1 {
+				t.Errorf("cross-tracker drop warnings = %d, want 1", count)
+			}
+		})
+	}
+}
+
+// TestReloadCoalescingLoserBlocksWithoutMarkingFailure deterministically pins
+// the pre-first-load coalescing arm the probabilistic
+// TestReloadCoalescingLoserDefersToWinnerOnFreshInstall can miss: while a
+// winning reload holds reloadMu over a missing first snapshot, a loser that
+// reaches the pre-first-load arm must commit to BLOCKING (the
+// reloadBlockGate seam marks that commitment) without latching snapFailed -
+// the historic bug this arm exists to prevent - and, once the winner
+// releases the lock, must run the stat path itself and confirm the healthy
+// fresh-install state.
+func TestReloadCoalescingLoserBlocksWithoutMarkingFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json") // never written: fresh install
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, path)
+
+	ix.reloadMu.Lock() // the winning reload is in flight over the missing first snapshot
+	atGate := make(chan struct{})
+	prev := reloadBlockGate
+	reloadBlockGate = func() { close(atGate) }
+	t.Cleanup(func() { reloadBlockGate = prev })
+
+	done := make(chan struct{})
+	go func() { defer close(done); ix.reload(context.Background()) }()
+
+	<-atGate // the loser took the pre-first-load arm and committed to blocking
+	ix.mu.RLock()
+	failed := ix.snapFailed
+	ix.mu.RUnlock()
+	if failed {
+		t.Error("snapFailed = true while the winner still holds reloadMu; a blocked loser must not latch a failure it never observed")
+	}
+	ix.reloadMu.Unlock()
+	<-done
+
+	if ix.snapshotUnavailable() {
+		t.Fatal("snapshotUnavailable() = true after the loser re-ran the stat path on a fresh install; absence of a first snapshot is the documented healthy state")
 	}
 }
