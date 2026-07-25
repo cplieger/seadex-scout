@@ -1159,6 +1159,51 @@ func (c *cancellingSeaDex) FetchEntries(context.Context) ([]seadex.Entry, error)
 	return nil, context.Canceled
 }
 
+// cancellingEmptySeaDex cancels the shared cycle context from inside the fetch
+// and then returns a nil-error EMPTY snapshot: the one pre-compare arm whose
+// mapping AND fetch errors are both nil, so handleUpstreamGate's shutdown
+// pre-emption (which requires one of them to be non-nil) cannot cover it.
+type cancellingEmptySeaDex struct{ cancel context.CancelFunc }
+
+func (c *cancellingEmptySeaDex) FetchEntries(context.Context) ([]seadex.Entry, error) {
+	c.cancel()
+	return nil, nil
+}
+
+// TestCycleShutdownDuringZeroEntryFetchEmitsNoCompletionLine pins the
+// zero-entries arm's shutdown silence: a cancellation landing after a
+// nil-error empty fetch must emit NO completion line (neither "cycle complete"
+// nor "cycle degraded"), the same no-completion-line rule the walk-failed and
+// shrunk-walk arms guard with their own ctx.Err() checks. The zero-entries WARN
+// itself stays, like the shrink WARN.
+func TestCycleShutdownDuringZeroEntryFetchEmitsNoCompletionLine(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger, recorder := capture.New()
+	store := &fakeStore{st: state.State{Mapping: frierenMappingCache(), Baselined: true}}
+	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+	s := New(&Deps{
+		Logger:  logger,
+		Store:   store,
+		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping: fakeMapping{},
+		SeaDex:  &cancellingEmptySeaDex{cancel: cancel},
+	})
+
+	if healthy := s.Cycle(ctx); !healthy {
+		t.Fatal("Cycle healthy=false, want true (a shutdown is not an ingest failure)")
+	}
+	if n := recorder.CountExact("seadex returned zero entries; skipping comparison, findings preserved"); n != 1 {
+		t.Errorf("zero-entries WARN count = %d, want 1 (the outage evidence stays)", n)
+	}
+	if n := recorder.CountExact("cycle degraded"); n != 0 {
+		t.Errorf("'cycle degraded' count = %d, want 0 on a shutdown-interrupted cycle", n)
+	}
+	if n := recorder.CountExact("cycle complete"); n != 0 {
+		t.Errorf("'cycle complete' count = %d, want 0 on a shutdown-interrupted cycle", n)
+	}
+}
+
 // TestCycleShutdownDuringSeaDexFetchWarnsShutdownNotSeaDex pins the
 // pre-compare shutdown log contract: when the cycle context is cancelled while
 // the SeaDex fetch is in flight (a redeploy), the cycle must log the shutdown
@@ -1795,12 +1840,14 @@ func TestCycleCompletionLineCarriesAniListCycleDeltas(t *testing.T) {
 // TestCycleCompletionLineCarriesCountsAndCoverage pins the count half of the
 // documented "cycle complete" line: seadex_entries, library_items, findings,
 // the ID-bridge coverage totals (mapped/unmapped, summed across arrs by
-// sumCounts), and the snapshot diff counters. The scenario makes every value
-// distinct - two coverage hits under DIFFERENT arrs (a Sonarr series record
-// plus a Radarr movie record), one unmapped id-less record, one changed and
-// one removed library item - so a per-arr total that reports one bucket
+// sumCounts), and the snapshot diff counters. The scenario separates the pairs
+// a swap could hide - two coverage hits under DIFFERENT arrs (a Sonarr series
+// record plus a Radarr movie record) against one unmapped id-less record, and
+// zero added against one removed - so a per-arr total that reports one bucket
 // instead of their sum, a swapped mapped/unmapped pair, or a swapped
-// added/removed pair is observable rather than silently identical.
+// added/removed pair is observable. The remaining 1-valued attrs
+// (library_items, findings, unmapped, removed, changed) are not mutually
+// distinguishable, so a swap purely among them is not covered here.
 func TestCycleCompletionLineCarriesCountsAndCoverage(t *testing.T) {
 	logger, recorder := capture.New()
 	store := &fakeStore{st: state.State{

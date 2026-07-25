@@ -49,16 +49,6 @@ const harvestShowPageCap = 3
 // offset paging (there is nothing older left to reach).
 const harvestPageSize = 100
 
-// maxHarvestCursorBytes bounds the persisted harvest_cursor at ingress - the
-// one snapshot field with no other cap (validPersistedItem covers feed items,
-// titleCacheWithinLimits the title cache, seenLedgerWithinLimits the seen
-// ledger). An honest cursor is the bare "scope:alID" form plus one small page
-// entry per pending group (kilobytes at most), so 64 KiB is orders of
-// magnitude of headroom, while a hand-edited or corrupted snapshot can no
-// longer carry a multi-megabyte cursor that every later rebuild re-encodes
-// verbatim.
-const maxHarvestCursorBytes = 64 << 10
-
 // harvestWait blocks between paced queries; a package var so the test suite
 // can replace the real sleep (pacing gaps are wall-clock politeness, not
 // logic under test) and the pacer tests can advance a fake clock instead.
@@ -285,10 +275,12 @@ type harvestCheckpoint struct {
 // forever. Non-positive persisted pages are
 // dropped: page 0 is the default and needs no entry, a negative value is
 // meaningless, and a value that would overflow the offset computation resets
-// to zero. A cursor over maxHarvestCursorBytes is external corruption and
-// takes the same empty-checkpoint baseline before any decoding.
+// to zero. A cursor over maxPersistedCursorBytes (writer.go, the one home of
+// the persisted-snapshot size caps, enforced first at loadPrevious) is
+// external corruption and takes the same empty-checkpoint baseline before any
+// decoding.
 func decodeHarvestCheckpoint(raw string) harvestCheckpoint {
-	if len(raw) > maxHarvestCursorBytes {
+	if len(raw) > maxPersistedCursorBytes {
 		// An over-cap cursor cannot come from this writer (a cursor names
 		// live groups only, and pruneHarvestPages keeps it that way), so it
 		// is external corruption: degrade to the same safe baseline
@@ -366,20 +358,23 @@ func harvestCursorKey(g harvestGroup) string {
 }
 
 // validRotationCursor returns cursor unchanged when it has the rotation-key
-// shape harvestCursorKey produces ("<scope>:<alID>"), else "". The cursor is
+// shape harvestCursorKey produces ("<scope>:<alID>", with a POSITIVE AniList
+// id - the only ids a pending group carries), else "". The cursor is
 // carried into every future snapshot verbatim - a rebuild with no pending
 // group never overwrites it - so a garbage or unbounded value from a
 // hand-edited or corrupted snapshot would persist forever, the hazard the
 // seen-ledger and title-cache caps (seenLedgerWithinLimits /
 // titleCacheWithinLimits) already close for the other verbatim-carried
 // fields. Dropping it changes no rotation behavior: rotationStart already
-// treats an unparseable cursor as "start at the head".
+// treats an unparseable cursor as "start at the head", and a zero or negative
+// id is outside harvestCursorKey's domain, so no honest cursor is rejected.
 func validRotationCursor(cursor string) string {
 	scope, idStr, ok := strings.Cut(cursor, ":")
 	if !ok || (scope != upstreamNyaa && scope != upstreamAB) {
 		return ""
 	}
-	if _, err := strconv.Atoi(idStr); err != nil {
+	alID, err := strconv.Atoi(idStr)
+	if err != nil || alID <= 0 {
 		return ""
 	}
 	return cursor
@@ -663,7 +658,9 @@ func indexHarvestItem(it *journalItem, scope string, titles map[string]string, i
 		// key names a DIFFERENT tracker than the feed it sits in. Its key can
 		// never satisfy matchHarvest's scope binding, so querying for it
 		// would burn up to harvestShowPageCap queries of every rebuild's
-		// slice forever and keep it counted as pending.
+		// slice forever with no reachable outcome. It stays counted in
+		// syntheticCount's pending total, which keys on the feed item alone -
+		// correctly, since it will never receive a harvested title.
 		return
 	}
 	key := harvestGroupKey{scope: scope, alID: it.AniListID}

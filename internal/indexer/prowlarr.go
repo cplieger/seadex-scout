@@ -325,6 +325,14 @@ func (u *upstream) filterDownloadURLs(items []item) []item {
 		}
 		out = append(out, items[i])
 	}
+	if len(items) == 0 {
+		// An empty page observes nothing: neither an onset nor a recovery.
+		// Clearing dropWarned/displayWarned here would let a title-harvest
+		// query that matched no results re-arm the WARN, so a persisting
+		// systematic condition would still WARN once per non-empty page -
+		// the flood the onset gate exists to bound.
+		return out
+	}
 	u.reportDroppedDownloadURLs(dropped, len(out), feedURL)
 	u.reportBlankedDisplayURLs(blankedDisplay, len(out))
 	return out

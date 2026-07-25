@@ -142,9 +142,11 @@ func validFeedItems(feeds ...[]journalItem) bool {
 // rebuild while the arr acted on it.
 //
 // InfoURL is canonicalized here for the same reason
-// (sanitizeSnapshotInfoURLs, whose blanked count is returned so each caller
-// keeps its own operator-facing WARN): the field belongs to the persisted
-// contract both ends must see canonical, not just the render path. The writer
+// (sanitizeSnapshotInfoURLs, whose blanked count is returned so a caller can
+// surface it: the server WARNs once per reload, while the writer ignores it -
+// its rebuild re-persists the scrubbed form regardless): the field belongs to
+// the persisted contract both ends must see canonical, not just the render
+// path. The writer
 // carries a non-curated item forward verbatim (carryStoredItem) and persist
 // scrubs only DownloadURL, so a foreign-host or javascript: InfoURL planted
 // in feed.json would otherwise be re-persisted on every rebuild for up to

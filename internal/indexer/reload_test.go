@@ -180,9 +180,7 @@ func TestReloadMemoizedMalformedSnapshotClearsDegradation(t *testing.T) {
 		t.Fatalf("write malformed snapshot: %v", err)
 	}
 	distinct := time.Now().Add(2 * time.Second)
-	if err := os.Chtimes(path, distinct, distinct); err != nil {
-		t.Fatal(err)
-	}
+	setMtime(t, path, distinct)
 	ix.reload(context.Background())
 	if got := rec.Count("indexer feed snapshot malformed"); got != 1 {
 		t.Fatalf("malformed snapshot warned %d times, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
@@ -305,9 +303,7 @@ func TestReloadMemoizesOversizedItemSnapshot(t *testing.T) {
 		},
 	})
 	distinct := time.Now().Add(2 * time.Second)
-	if err := os.Chtimes(path, distinct, distinct); err != nil {
-		t.Fatal(err)
-	}
+	setMtime(t, path, distinct)
 	ix.reload(context.Background())
 	ix.reload(context.Background())
 	if got := rec.Count("indexer feed snapshot malformed"); got != 1 {

@@ -501,20 +501,20 @@ func (c *Config) warnPublicURLProblems() {
 	}
 }
 
-// warnRelativeReportDir warns when report.dir is not an absolute path.
-// Everything the app persists lives under the single /config mount, and
-// audit.Report.WriteFiles MkdirAlls the directory, so a relative value does
-// not fail - it silently resolves against the container working directory,
-// putting the timestamped report pair outside the mount where the operator
-// looks for it and losing it on container recreation. Warn-only (the write
-// itself succeeds, so a rejection would newly refuse configs that load
-// today); field-name-only, since report.dir is secret-capable (internal/audit
-// redacts it for that reason).
+// warnRelativeReportDir warns when report.dir is not an absolute path. Every
+// report write goes through atomicfile, whose path gate rejects a relative
+// path outright (ErrUnsafePath "not absolute"), and nothing absolutizes the
+// configured value on the way there - so a relative report.dir loads and
+// validates cleanly and then fails at the END of a report run, after the whole
+// cycle has been spent, with neither half of the pair written. Warn-only: a
+// daemon that never generates a report is unaffected, and rejecting would
+// newly refuse configs that load today; field-name-only, since report.dir is
+// secret-capable (internal/audit redacts it for that reason).
 func (c *Config) warnRelativeReportDir() {
 	if c.ReportDir != "" && !filepath.IsAbs(c.ReportDir) {
-		slog.Warn("report.dir is not an absolute path; reports resolve against the "+
-			"container working directory instead of the /config mount and are lost on "+
-			"container recreation", "field", "report.dir")
+		slog.Warn("report.dir is not an absolute path; report writes are rejected "+
+			"at the end of a report run and neither report file is written - use an "+
+			"absolute path under the /config mount", "field", "report.dir")
 	}
 }
 

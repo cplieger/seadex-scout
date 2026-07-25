@@ -330,7 +330,10 @@ func rowsWithVerdict(rows []Row, v Verdict) []Row {
 // controls raw, so untrusted titles/groups/tracker strings could otherwise
 // smuggle terminal escapes or visual reordering into raw log/Loki views, and
 // the same values carry no size bound upstream, so each is also capped at the
-// per-attribute volume budget the notify emit path uses.
+// per-attribute volume budget the notify emit path uses. The two aggregate
+// attributes (current_group, seadex_best) apply that same policy through the
+// bounded attrJoiner, which never materializes the untrusted aggregate before
+// the cap applies.
 func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
 	if err := interrupted(ctx, "report log"); err != nil {
 		return err
@@ -360,8 +363,8 @@ func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
 			"qualifier", string(row.Qualifier),
 			"scope", scopeLabel(row),
 			"approx", row.Approx,
-			"current_group", capDisplayText(strings.Join(row.CurrentGroups, ",")),
-			"seadex_best", capDisplayText(strings.Join(displayBestGroups(row.Releases), ",")),
+			"current_group", joinGroupsAttr(row.CurrentGroups),
+			"seadex_best", joinBestGroupsAttr(row.Releases),
 			"arr_url", capDisplayText(library.SafeLogURL(row.ArrURL)),
 			"seadex_url", capDisplayText(row.SeaDexURL),
 			"match_source", capDisplayText(row.MatchSource))
@@ -373,7 +376,7 @@ func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
 		log.Info("report incomplete mapping",
 			"generated_at", stamp,
 			"al_id", r.Incomplete[i].AniListID,
-			"seadex_url", sanitizeDisplayText(r.Incomplete[i].SeaDexURL))
+			"seadex_url", capDisplayText(r.Incomplete[i].SeaDexURL))
 	}
 	return nil
 }
@@ -736,6 +739,135 @@ func capDisplayText(s string) string {
 	}
 	clean := runesafe.Sanitize(runesafe.CapBytes(s, maxAttrBytes))
 	return runesafe.CapBytes(clean, maxAttrBytes) + "..."
+}
+
+// attrJoiner renders a MULTI-SOURCE slog attribute under capDisplayText's byte
+// budget WITHOUT first materializing the untrusted aggregate: each piece is
+// capped to the remaining budget BEFORE it is sanitized, so a hostile SeaDex
+// entry (up to 512 torrents, each admitting a multi-MB group string) can never
+// make the report's slog path allocate more than the budget plus one bounded
+// chunk - joining first and capping after allocated the whole aggregate, the
+// memory amplification the per-attribute cap exists to remove (CWE-400). It
+// mirrors the notify emit path's joiner, for the same reason. Honest values are
+// byte-identical to the joined-then-capped form: runesafe.Sanitize is a
+// per-rune map, so sanitizing each piece and writing the ASCII separators raw
+// yields the same bytes.
+type attrJoiner struct {
+	b         strings.Builder
+	remaining int
+	truncated bool
+}
+
+// newAttrJoiner returns a joiner with the full per-attribute budget.
+func newAttrJoiner() *attrJoiner { return &attrJoiner{remaining: maxAttrBytes} }
+
+// write appends the sanitized prefix of raw that still fits the budget and
+// reports whether the joiner can still accept more. The pre-sanitize cap keeps
+// the sanitizer from ever walking an unbounded string; sanitizing can grow a
+// string (each invalid UTF-8 byte becomes the three-byte U+FFFD), so the result
+// is re-capped on a rune boundary.
+func (j *attrJoiner) write(raw string) bool {
+	if j.truncated || j.remaining <= 0 {
+		j.truncated = j.truncated || raw != ""
+		return false
+	}
+	chunk := runesafe.CapBytes(raw, j.remaining)
+	if len(chunk) < len(raw) {
+		j.truncated = true
+	}
+	clean := runesafe.Sanitize(chunk)
+	if len(clean) > j.remaining {
+		clean = runesafe.CapBytes(clean, j.remaining)
+		j.truncated = true
+	}
+	j.b.WriteString(clean)
+	j.remaining -= len(clean)
+	return !j.truncated
+}
+
+// writeSep appends a fixed ASCII separator (never untrusted data) against the
+// same budget, so a hostile piece count cannot grow the attribute past it
+// either.
+func (j *attrJoiner) writeSep(sep string) bool { return j.write(sep) }
+
+// string returns the joined attribute, marked with capDisplayText's "..."
+// truncation marker when any source was cut - the same truncation signal a
+// single capped attribute carries.
+func (j *attrJoiner) string() string {
+	if j.truncated {
+		return j.b.String() + "..."
+	}
+	return j.b.String()
+}
+
+// joinGroupsAttr renders a row's group list as the comma-separated
+// current_group attribute through the bounded joiner: the list is untrusted
+// SeaDex/arr data and must not be materialized before the cap applies.
+func joinGroupsAttr(groups []string) string {
+	j := newAttrJoiner()
+	for i := range groups {
+		if i > 0 && !j.writeSep(",") {
+			break
+		}
+		if !j.write(groups[i]) {
+			break
+		}
+	}
+	return j.string()
+}
+
+// joinBestGroupsAttr renders the seadex_best attribute through the same
+// bounded joiner. It streams displayBestGroups' semantics rather than calling
+// it - clean bests first, case-insensitive dedupe on the original-case group,
+// annotated bests rendered "GRP (broken, unobtainable)" - because that helper
+// builds the complete label slice, which is exactly the untrusted aggregate the
+// budget must bound.
+func joinBestGroupsAttr(releases []Release) string {
+	j := newAttrJoiner()
+	seen := make(map[string]struct{}, len(releases))
+	first := true
+	for _, annotatedPass := range []bool{false, true} {
+		for i := range releases {
+			rel := &releases[i]
+			if !rel.Best || rel.Group == "" || annotated(rel) != annotatedPass {
+				continue
+			}
+			key := strings.ToLower(rel.Group)
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			if !first && !j.writeSep(",") {
+				return j.string()
+			}
+			first = false
+			if !j.write(rel.Group) {
+				return j.string()
+			}
+			if annotatedPass && !writeNotesAttr(j, releaseNotes(rel)) {
+				return j.string()
+			}
+		}
+	}
+	return j.string()
+}
+
+// writeNotesAttr appends an annotated best's parenthesized note list to j,
+// matching displayBestGroups' " (broken, unobtainable)" rendering, and reports
+// whether the joiner can still accept more.
+func writeNotesAttr(j *attrJoiner, notes []string) bool {
+	if !j.writeSep(" (") {
+		return false
+	}
+	for i := range notes {
+		if i > 0 && !j.writeSep(", ") {
+			return false
+		}
+		if !j.write(notes[i]) {
+			return false
+		}
+	}
+	return j.writeSep(")")
 }
 
 // sanitizeOutput returns a deep-enough copy of the report with every untrusted

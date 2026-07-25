@@ -99,10 +99,12 @@ const maxFribbRecordBytes = 64 << 10
 const maxFribbIdentifiers = 32
 
 // maxFribbIdentifiersTotal bounds the identifiers retained across the WHOLE
-// list. maxFribbIdentifiers bounds one record; multiplied by maxFribbRecords
-// it still admits ~2.1M retained ids from a body under maxMapBytes, so this
-// aggregate budget bounds the product. Real Fribb carries ~40k records with a
-// handful of ids each, ~20x under the cap.
+// list. maxFribbIdentifiers bounds ONE list on one record and both retained
+// lists are capped separately (imdb_id and themoviedb_id.movie, 32 each), so
+// multiplied by maxFribbRecords the per-record caps still admit ~4.2M
+// retained ids from a body under maxMapBytes; this aggregate budget bounds
+// that product. Real Fribb carries ~40k records with a handful of ids each,
+// an order of magnitude under the cap.
 const maxFribbIdentifiersTotal = 1 << 20
 
 // fribbParseResult is parseFribbForRefresh's counted decode result: the

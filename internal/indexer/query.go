@@ -421,10 +421,17 @@ func upstreamParams(q url.Values) url.Values {
 	// over-contract limit would turn a workable search into a bounded-retry
 	// fetch of up to upstreamMaxBytes per attempt and then a Torznab error. A
 	// compliant client (the arrs send limit=100) is unaffected; a non-numeric
-	// limit is left untouched for the upstream's own default, matching
-	// applyPaging's tolerance.
-	if lim, err := strconv.Atoi(strings.TrimSpace(out.Get("limit"))); err == nil && lim > maxItems {
-		out.Set("limit", strconv.Itoa(maxItems))
+	// limit is left untouched so the upstream applies its own default (the
+	// feed path instead substitutes defaultCapsLimit - see applyPaging).
+	if raw := strings.TrimSpace(out.Get("limit")); raw != "" {
+		lim, err := strconv.Atoi(raw)
+		// A digit run too large for int (strconv.ErrRange) is an
+		// over-contract limit too: Atoi's error must not let it through
+		// unclamped. A non-numeric value is still left untouched.
+		if (err == nil && lim > maxItems) ||
+			(errors.Is(err, strconv.ErrRange) && !strings.HasPrefix(raw, "-")) {
+			out.Set("limit", strconv.Itoa(maxItems))
+		}
 	}
 	return out
 }

@@ -117,24 +117,6 @@ func hostFromRawURL(rawURL string) (string, bool) {
 	}
 }
 
-// abRelativeShape reports whether rawURL names the AnimeBytes torrent page by
-// its tracker-specific relative shape. The shared resolver
-// (release.LookupTrackerByRelativeURL) keys on the ROOTED form only, by design
-// (its rooted-only contract is pinned by release's own table and fuzz tests),
-// so a schemeless value ("torrents.php?...&torrentid=...") is rooted here
-// first - exactly as the link publisher roots it before the same lookup
-// (seadex.publishRelative's inferred-owner rule). Without that, the publisher
-// would turn such a value into an animebytes.tv link while this gate saw no AB
-// evidence at all.
-func abRelativeShape(rawURL string) bool {
-	rooted := rawURL
-	if f := urlform.Classify(rawURL); f.Class == urlform.ClassSchemelessHost {
-		rooted = "/" + f.Trimmed
-	}
-	inferred, ok := release.LookupTrackerByRelativeURL(rooted)
-	return ok && inferred.Name == release.TrackerNameAnimeBytes
-}
-
 // ABVisible reports whether a release on the given tracker may surface to the
 // operator: always true when the operator has enabled AnimeBytes, and
 // otherwise false when either the tracker label is AnimeBytes OR the release's
@@ -157,10 +139,11 @@ func ABVisible(tracker, rawURL string, animeBytes bool) bool {
 		return false
 	}
 	// A relative URL carries no host evidence, but the AB torrent-page shape
-	// ("/torrents.php?...&torrentid=...") is tracker identity in its own
+	// ("/torrents.php?...&torrentid=..." and its slashless spelling, which the
+	// resolver reads as the same rooted href) is tracker identity in its own
 	// right: a mislabeled entry publishing that shape must not surface with
 	// the toggle off.
-	if abRelativeShape(rawURL) {
+	if inferred, ok := release.LookupTrackerByRelativeURL(rawURL); ok && inferred.Name == release.TrackerNameAnimeBytes {
 		return false
 	}
 	host, ok := hostFromRawURL(rawURL)
@@ -207,9 +190,10 @@ func DefinitelyAB(tracker, rawURL string) bool {
 	if release.IsAnimeBytes(tracker) {
 		return true
 	}
-	// The AB torrent-page relative shape is definitive tracker identity,
-	// exactly like host evidence (mirrors ABVisible's relative-URL gate).
-	if abRelativeShape(rawURL) {
+	// The AB torrent-page relative shape (rooted or slashless - the resolver
+	// reads both as the same href) is definitive tracker identity, exactly
+	// like host evidence (mirrors ABVisible's relative-URL gate).
+	if inferred, ok := release.LookupTrackerByRelativeURL(rawURL); ok && inferred.Name == release.TrackerNameAnimeBytes {
 		return true
 	}
 	host, ok := hostFromRawURL(rawURL)

@@ -529,8 +529,10 @@ var seadexInfoHost = sync.OnceValue(func() string {
 // link there. Blanking (never dropping) mirrors the search path's
 // sanitizeDisplayURL: writeItem omits an empty <comments>. It returns the
 // number of blanked items and logs nothing itself: decodeSnapshot invokes it
-// for BOTH consumers (reader and writer), so the operator-facing WARN stays
-// with each caller.
+// for BOTH consumers (reader and writer), and the operator-facing WARN is the
+// caller's to keep - the server's readSnapshot logs the count, while the
+// writer's loadPrevious sanitizes silently (its rebuild re-derives every
+// curated item's InfoURL anyway).
 func sanitizeSnapshotInfoURLs(feed []journalItem) int {
 	host := seadexInfoHost()
 	blanked := 0

@@ -210,10 +210,11 @@ const maxAttrBytes = 8 << 10
 // sink: honest values pass byte-identical; a hostile oversized value (SeaDex
 // admits multi-MB URLs, up to 512 per entry) is truncated on a rune boundary
 // with a "..." marker so one record can never balloon past downstream
-// log-pipeline line limits (alert suppression) or amplify memory. The whole
-// policy - the rune sanitization, the maxAttrBytes budget, and the
-// cap-before-sanitize order that makes the bound cover the WORK and not just
-// the output - lives in attrJoiner; see its doc for the rationale.
+// log-pipeline line limits (alert suppression) or amplify memory. The budget
+// itself is maxAttrBytes (see its doc for why it mirrors the dedupe-key
+// bound); the rune sanitization and the cap-before-sanitize order that makes
+// that bound cover the WORK and not just the output live in attrJoiner and
+// attrJoiner.write.
 //
 // A MULTI-SOURCE attribute (a joined group or link list) must never be
 // materialized and handed to capAttr - joining first would allocate the whole

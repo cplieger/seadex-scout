@@ -1152,6 +1152,11 @@ func TestRebuildNeverLogsABPasskey(t *testing.T) {
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
+	// The guard is vacuous unless the rebuild actually journaled the AB release
+	// (renderJournalItem is what builds the passkey-bearing download link).
+	if got := readSnapshotFile(t, path).ABFeed; len(got) != 1 {
+		t.Fatalf("ab feed = %d items, want the journaled AB release", len(got))
+	}
 	if rec.Len() == 0 {
 		t.Fatal("no log records captured; the rebuild must at least log the snapshot line")
 	}

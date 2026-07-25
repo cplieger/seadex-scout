@@ -105,11 +105,10 @@ type Config struct {
 // Deps are the clients the indexer server needs: an HTTP client for the Prowlarr
 // per-indexer Torznab endpoints a search proxies. A nil HTTP is substituted by
 // New with a default client sized from UpstreamAttemptTimeout (searches have no
-// disabled mode). The curation set and the
-// synthesized RSS feeds are not built here - the compare cycle builds and
-// persists them (see FeedWriter) and the server reads that snapshot - so the
-// server needs no SeaDex or Fribb client of its own. A nil Logger falls back
-// to slog.Default().
+// disabled mode). The curation set and the synthesized RSS feeds are not built
+// here - the compare cycle builds and persists them (see FeedWriter) and the
+// server reads that snapshot - so the server needs no SeaDex or Fribb client of
+// its own. A nil Logger falls back to slog.Default().
 type Deps struct {
 	HTTP   *http.Client
 	Logger *slog.Logger

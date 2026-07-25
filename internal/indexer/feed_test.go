@@ -3,6 +3,7 @@ package indexer
 import (
 	"math"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -390,11 +391,12 @@ func TestPackSeasonIgnoresEpisodeNamedSidecars(t *testing.T) {
 }
 
 // TestDerivedTitlePackWithDirectoryOnlyEpisodeTokens pins derivedTitle's final
-// fallback (the one branch its tables missed): coveredEpisodes counts episode
-// tokens from the FULL path, but the title derives from path.Base of the
-// representative file - so a pack whose SxxExx tokens live only in directory
-// components is a pack with a token-less base, and the trimmed basename is
-// served rather than an invented marker.
+// fallback (the one branch its tables missed): coveredEpisodes keys a file whose
+// OWN base name carries no episode evidence on the FULL path (episodeKeyBase's
+// fallback arm), while the title derives from path.Base of the representative
+// file - so a pack whose SxxExx tokens live only in directory components is a
+// pack with a token-less base, and the trimmed basename is served rather than an
+// invented marker.
 func TestDerivedTitlePackWithDirectoryOnlyEpisodeTokens(t *testing.T) {
 	files := []seadex.File{
 		{Name: "S01E01/Movie Cut A.mkv"},
@@ -405,6 +407,31 @@ func TestDerivedTitlePackWithDirectoryOnlyEpisodeTokens(t *testing.T) {
 	}
 	if got := derivedTitle(&seadex.Torrent{Files: files}, EntryInfo{}); got != "Movie Cut A" {
 		t.Errorf("derivedTitle = %q, want %q (basename fallback when the base carries no episode token)", got, "Movie Cut A")
+	}
+}
+
+// TestDerivedTitleAbsolutePackUnderSharedEpisodeTokenDirectory pins the h-f8 fix:
+// when a pack's files carry only absolute episode numbers in their own base names
+// while a SHARED directory component carries an SxxExx token, each file must key on
+// its own absolute number (episodeKeyBase), so the torrent reads as the multi-episode
+// pack it is instead of collapsing onto the one directory token and being served as
+// episode 1.
+func TestDerivedTitleAbsolutePackUnderSharedEpisodeTokenDirectory(t *testing.T) {
+	files := []seadex.File{
+		{Name: "[Grp] Show S01E01-E12 [1080p]/[Grp] Show - 01 [1080p].mkv"},
+		{Name: "[Grp] Show S01E01-E12 [1080p]/[Grp] Show - 02 [1080p].mkv"},
+		{Name: "[Grp] Show S01E01-E12 [1080p]/[Grp] Show - 03 [1080p].mkv"},
+	}
+	if got := coveredEpisodes(files); got != 3 {
+		t.Fatalf("coveredEpisodes = %d, want 3 (each file keys on its own absolute number,"+
+			" not the shared directory token)", got)
+	}
+	tor := &seadex.Torrent{Files: files}
+	if !isPack(tor) {
+		t.Fatalf("isPack = false, want true for a three-episode pack")
+	}
+	if got := derivedTitle(tor, EntryInfo{}); strings.Contains(got, " - 01") {
+		t.Errorf("derivedTitle = %q, want the episode number collapsed out of the pack title", got)
 	}
 }
 

@@ -65,13 +65,16 @@ func dedupeKey(f *compare.Finding) string {
 	if len(key) > maxKeyBytes {
 		// Every component is individually bounded, but four escaped
 		// in-bound components still assemble to ~64 KiB, and these keys
-		// are the PERSISTED state map keys: N hostile findings inflate
-		// state.json past state's 32 MiB save cap, which fails the save
-		// (ERROR + dedupe not advanced) every cycle. Fold an oversized
+		// are the PERSISTED state map keys: N hostile findings push
+		// state.json toward state's 32 MiB save cap, and a refused save
+		// means ERROR + dedupe not advanced every cycle. Fold an oversized
 		// assembled key onto the same fixed-size identity keyenc already
 		// uses for an oversized component. The folded form has three
 		// '|'-separated fields where every unfolded key has at least
-		// five, so the two forms cannot collide.
+		// five, so the two forms cannot collide. This bounds the KEY
+		// side only: the stored value (StoredFinding) still persists
+		// Title/CurrentGroup/RecommendedGroup raw, so it is not on its
+		// own a bound on the persisted map's total size.
 		key = strconv.Itoa(f.AniListID) + "|" + string(f.Status) + "|" + keyenc.BoundedPart(key)
 	}
 	return key

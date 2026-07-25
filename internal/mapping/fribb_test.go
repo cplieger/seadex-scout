@@ -641,11 +641,12 @@ func TestFribbDecodeCounts_aggregateIdentifierBudget(t *testing.T) {
 	}
 }
 
-// TestParseFribb_realSizeBodyUnaffectedByIdentifierBudget shows the aggregate
-// budget is invisible to a realistic body: real Fribb carries ~40k records
-// with a handful of ids each, well under maxFribbIdentifiersTotal, so every
-// record and every identifier survives.
-func TestParseFribb_realSizeBodyUnaffectedByIdentifierBudget(t *testing.T) {
+// TestParseFribb_ordinaryBodyUnaffectedByIdentifierBudget shows the aggregate
+// budget does not fire on an ordinary body: a compact stand-in for real Fribb
+// (which carries ~40k records with a handful of ids each, an order of
+// magnitude under maxFribbIdentifiersTotal) keeps every record and every
+// identifier.
+func TestParseFribb_ordinaryBodyUnaffectedByIdentifierBudget(t *testing.T) {
 	const n = 500
 	var b strings.Builder
 	b.WriteByte('[')

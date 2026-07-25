@@ -440,9 +440,9 @@ func (w *Walker) resolveTags(ctx context.Context,
 // credential-safety test). It returns nil for an unconfigured set (keepByTags
 // reads nil as "filter off") and a non-nil - possibly empty - set for a
 // configured one, so a configured include list matching no tag still drops
-// everything rather than admitting everything. A set whose every label missed
-// logs a second, distinct warning: for an include set that empties the side
-// entirely.
+// everything rather than admitting everything. A configured set whose every
+// label missed logs a second, distinct warning, since an include set that
+// resolves to zero ids empties the side entirely.
 func (w *Walker) resolveOne(tags []arrapi.Tag, which string, labels []string) map[int]struct{} {
 	if len(labels) == 0 {
 		return nil
@@ -458,7 +458,7 @@ func (w *Walker) resolveOne(tags []arrapi.Tag, which string, labels []string) ma
 		// items and the cycle still reads healthy. Say so explicitly, so the
 		// operator (and a Loki rule) can tell a dead filter apart from one
 		// stray label.
-		w.log.Warn("no configured tag resolved to an arr tag; the filter admits nothing on this side",
+		w.log.Warn("no configured tag resolved to an arr tag; an include set therefore admits nothing, an exclude set drops nothing",
 			"which", which, "configured_count", len(labels))
 	}
 	return ids

@@ -1540,6 +1540,25 @@ func TestHarvestCheckpointCodec(t *testing.T) {
 			t.Errorf("Last = %q, want %q", cp.Last, "ab:9")
 		}
 	})
+	t.Run("non-positive cursor ids are discarded in both arms", func(t *testing.T) {
+		for _, cursor := range []string{"nyaa:0", "nyaa:-1", "ab:0", "ab:-12"} {
+			if cp := decodeHarvestCheckpoint(cursor); cp.Last != "" {
+				t.Errorf("decode legacy %q Last = %q, want it discarded (outside harvestCursorKey's domain)", cursor, cp.Last)
+			}
+			cp := decodeHarvestCheckpoint(`{"last":"` + cursor + `"}`)
+			if cp.Last != "" {
+				t.Errorf("decode JSON last %q = %q, want it discarded", cursor, cp.Last)
+			}
+		}
+		for _, cursor := range []string{"nyaa:1", "ab:154587"} {
+			if cp := decodeHarvestCheckpoint(cursor); cp.Last != cursor {
+				t.Errorf("decode legacy %q Last = %q, want it kept", cursor, cp.Last)
+			}
+			if cp := decodeHarvestCheckpoint(`{"last":"` + cursor + `"}`); cp.Last != cursor {
+				t.Errorf("decode JSON last %q = %q, want it kept", cursor, cp.Last)
+			}
+		}
+	})
 	t.Run("pages-less checkpoint encodes as the bare legacy cursor", func(t *testing.T) {
 		if got := encodeHarvestCheckpoint(harvestCheckpoint{Last: "nyaa:1500"}); got != "nyaa:1500" {
 			t.Errorf("encode = %q, want the bare legacy cursor", got)

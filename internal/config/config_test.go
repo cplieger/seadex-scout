@@ -114,7 +114,8 @@ func TestToConfigInfoOnDisabledArrWithKey(t *testing.T) {
 		if c.RadarrURL != "" || c.RadarrAPIKey != "" {
 			t.Errorf("disabled radarr should still be dropped, got url=%q key=%q", c.RadarrURL, c.RadarrAPIKey)
 		}
-		if !rec.AttrContains("", "field", "radarr.api_key") {
+		if !rec.Contains("api_key is set but the arr is not enabled") ||
+			!rec.AttrContains("api_key is set but the arr is not enabled", "field", "radarr.api_key") {
 			t.Errorf("toConfig log = %v, want the disabled-radarr-with-key info", rec.Messages())
 		}
 	})
@@ -1498,7 +1499,8 @@ func TestToConfigInfoOnDisabledSonarrWithKey(t *testing.T) {
 	if c.SonarrURL != "" || c.SonarrAPIKey != "" {
 		t.Errorf("disabled sonarr should be dropped, got url=%q key=%q", c.SonarrURL, c.SonarrAPIKey)
 	}
-	if !rec.AttrContains("", "field", "sonarr.api_key") {
+	if !rec.Contains("api_key is set but the arr is not enabled") ||
+		!rec.AttrContains("api_key is set but the arr is not enabled", "field", "sonarr.api_key") {
 		t.Errorf("toConfig log = %v, want the disabled-sonarr-with-key info", rec.Messages())
 	}
 }
@@ -1798,11 +1800,12 @@ func TestToConfigWarnsOnAllBlankTagLists(t *testing.T) {
 }
 
 // TestValidateWarnsOnRelativeReportDir pins the relative-report.dir
-// diagnostic: a non-absolute report.dir resolves against the container
-// working directory instead of the /config mount, so the report pair lands
-// outside the mount and is lost on container recreation. Warn-only (the write
-// itself succeeds), and the warning is field-name-only - report.dir is
-// secret-capable via ${VAR} expansion, so the value is never echoed.
+// diagnostic: atomicfile's path gate rejects a non-absolute path, so a
+// relative report.dir validates cleanly and then loses both halves of the
+// report pair at the end of a report run. Warn-only at config time (a daemon
+// that never reports is unaffected), and the warning is field-name-only -
+// report.dir is secret-capable via ${VAR} expansion, so the value is never
+// echoed.
 func TestValidateWarnsOnRelativeReportDir(t *testing.T) {
 	t.Run("relative report dir warns", func(t *testing.T) {
 		rec := capture.Default(t)
