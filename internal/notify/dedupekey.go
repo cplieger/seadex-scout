@@ -20,6 +20,13 @@ import (
 // change it only deliberately (the 2026-07 validated-identity/link-set
 // hardening accepted exactly that burst).
 
+// maxKeyBytes bounds the ASSEMBLED dedupe key. keyenc bounds each
+// component at MaxComponentBytes of RAW bytes, but escaping can double a
+// component and a key carries four of them, so the per-component bound
+// alone admits a ~64 KiB key. Persisted keys are state.json map keys, so
+// the aggregate has to be bounded too.
+const maxKeyBytes = 2 * keyenc.MaxComponentBytes
+
 // dedupeKey keys a finding by AniList ID, status, recommended-group set, current
 // group, release identity, and the full obtainable-source link set, so a
 // same-group quality swap (new identity), a changed library state, or ANY
@@ -55,6 +62,18 @@ func dedupeKey(f *compare.Finding) string {
 	if linkSet := obtainableLinkKey(f.Links); linkSet != "" {
 		key += "|links=" + linkSet
 	}
+	if len(key) > maxKeyBytes {
+		// Every component is individually bounded, but four escaped
+		// in-bound components still assemble to ~64 KiB, and these keys
+		// are the PERSISTED state map keys: N hostile findings inflate
+		// state.json past state's 32 MiB save cap, which fails the save
+		// (ERROR + dedupe not advanced) every cycle. Fold an oversized
+		// assembled key onto the same fixed-size identity keyenc already
+		// uses for an oversized component. The folded form has three
+		// '|'-separated fields where every unfolded key has at least
+		// five, so the two forms cannot collide.
+		key = strconv.Itoa(f.AniListID) + "|" + string(f.Status) + "|" + keyenc.BoundedPart(key)
+	}
 	return key
 }
 
@@ -68,7 +87,13 @@ func dedupeKey(f *compare.Finding) string {
 // either way.
 func currentGroupKey(f *compare.Finding) string {
 	if f.CurrentGroups != nil {
-		return keyenc.BoundedJoinParts(f.CurrentGroups)
+		// Sorted for the same reason dedupeKey sorts the recommended set: the
+		// on-disk group set is a SET, so its key contribution must not depend on
+		// producer order (every current producer already sorts, so honest keys are
+		// byte-identical and persisted suppression survives).
+		groups := slices.Clone(f.CurrentGroups)
+		slices.Sort(groups)
+		return keyenc.BoundedJoinParts(groups)
 	}
 	return keyenc.BoundedPart(f.CurrentGroup)
 }

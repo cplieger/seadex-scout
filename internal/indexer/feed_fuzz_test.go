@@ -7,7 +7,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
-// FuzzFeedTitle_boundedAndTrimmed exercises the title synthesis on arbitrary
+// FuzzDerivedTitle_boundedAndTrimmed exercises the title synthesis on arbitrary
 // SeaDex-supplied file names and release groups (untrusted upstream strings the
 // regex pipeline parses). Invariants: it never panics, the result carries no
 // leading/trailing whitespace (every return path trims), and the result never
@@ -15,7 +15,7 @@ import (
 // group, and every transformation - extension strip, episode collapse,
 // whitespace collapse - only shrinks). A violation would mean the synthesized
 // RSS title leaked padding or grew unboundedly from hostile catalogue data.
-func FuzzFeedTitle_boundedAndTrimmed(f *testing.F) {
+func FuzzDerivedTitle_boundedAndTrimmed(f *testing.F) {
 	f.Add("Frieren Beyond Journey's End - S01E07 (BD Remux 1080p) [PMR].mkv", "Frieren Beyond Journey's End - S01E08 (BD Remux 1080p) [PMR].mkv", "PMR")
 	f.Add("[Grp] Some Show - 07 (1080p).mkv", "[Grp] Some Show - 08 (1080p).mkv", "")
 	f.Add("NCED 01 (BD Remux 1080p AVC FLAC) [PMR].mkv", "Show Title - S02E01 (BD 1080p) [Grp].mkv", "Grp")
@@ -42,11 +42,11 @@ func FuzzFeedTitle_boundedAndTrimmed(f *testing.F) {
 	})
 }
 
-// FuzzFeedTitle_singleVideoPreservesName pins the single-video oracle the
+// FuzzDerivedTitle_singleVideoPreservesName pins the single-video oracle the
 // bounded/trimmed target above cannot: for a torrent holding exactly one
 // recognized video file, the synthesized title is the trimmed base name, so a
 // degenerate implementation that always returns "" cannot pass.
-func FuzzFeedTitle_singleVideoPreservesName(f *testing.F) {
+func FuzzDerivedTitle_singleVideoPreservesName(f *testing.F) {
 	f.Add("Show - S01E01 (1080p) [Grp]")
 	f.Add("  Movie Title (2026)  ")
 	f.Add("Season 1/Show - S01E01")

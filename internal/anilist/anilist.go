@@ -38,6 +38,11 @@ import (
 const DefaultURL = "https://graphql.anilist.co"
 
 const (
+	// DefaultRate is the AniList request/minute ceiling. It is AniList contract
+	// knowledge, so it lives here beside DefaultURL and the throttle that
+	// enforces it; the wiring site (build.go) references it.
+	DefaultRate = 30
+
 	maxBodyBytes = 1 << 20
 	maxAttempts  = 3
 	baseDelay    = time.Second
@@ -252,8 +257,8 @@ func retainRequested(page map[int]Media, chunk []int) error {
 
 // do performs one GraphQL POST attempt, translating a 429 into a
 // *httpx.RateLimitError carrying a capped Retry-After hint (retried by
-// request's WithRateLimitRetry mode) and reading the rate headers to pre-empt
-// the next 429.
+// request's WithRateLimitRetry mode) and reading the rate headers on every
+// non-429 response (error statuses included) to pre-empt the next 429.
 func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(body))
 	if err != nil {
@@ -273,6 +278,13 @@ func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 		httpx.DrainClose(resp.Body)
 		return nil, c.rateLimitError(resp)
 	}
+	// Read the budget headers on EVERY non-429 response, error statuses
+	// included: AniList stamps X-RateLimit-Remaining/Reset on a 4xx/5xx too,
+	// and dropping a low-remaining signal there would let the next lookup
+	// race into the 429 this pre-emption exists to avoid. A response without
+	// the headers is a no-op (the Atoi guard), so error statuses that carry
+	// no budget information are unaffected.
+	c.observeRateHeaders(resp)
 	// AniList mirrors a GraphQL-level not-found into the HTTP status: a
 	// nonexistent id answers 404 while still carrying the normal envelope
 	// {"data":{"Media":null},"errors":[{"message":"Not Found."}]} (verified
@@ -286,7 +298,6 @@ func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("anilist: unexpected status %d", resp.StatusCode)
 	}
 
-	c.observeRateHeaders(resp)
 	// ReadLimitedBody closes the body and fails loud with a distinct
 	// *httpx.ResponseTooLargeError on an over-cap body, so an oversized
 	// response surfaces as its own error rather than a silently truncated
@@ -386,36 +397,43 @@ const (
 // title, so a malformed payload degrades and is retried next cycle instead of
 // being memoized as a permanent empty or bloated Media.
 func (m *gqlMedia) toMedia() (Media, error) {
-	for _, t := range []string{m.Title.Romaji, m.Title.English, m.Title.Native} {
+	// One list of the wire title fields, used for both validation and dedupe,
+	// so a future title field cannot be validated in one place and dropped in
+	// the other.
+	wireTitles := []string{m.Title.Romaji, m.Title.English, m.Title.Native}
+	for _, t := range wireTitles {
 		if len(t) > maxTitleBytes {
 			return Media{}, fmt.Errorf("media title exceeds %d bytes", maxTitleBytes)
 		}
-		// JSON escapes are valid UTF-8 wire bytes but may decode to U+FFFD,
-		// controls, line separators, or bidi controls. titlekey.Normalize strips
-		// those runes into a forged match key, so reject the payload rather than
-		// sanitizing or memoizing it.
-		if strings.ContainsRune(t, utf8.RuneError) || runesafe.SanitizeSingleLine(t) != t {
+		if unsafeWireText(t) {
 			return Media{}, errors.New("media title contains invalid single-line text")
 		}
 	}
 	if len(m.Format) > maxFormatBytes {
 		return Media{}, fmt.Errorf("media format exceeds %d bytes", maxFormatBytes)
 	}
-	// Format shares the titles' lifetime (memoized into state.json), so it gets
-	// the same single-line rejection: a control/bidi rune in an enum-like token
-	// is malformed upstream data, rejected rather than sanitized or persisted.
-	if strings.ContainsRune(m.Format, utf8.RuneError) || runesafe.SanitizeSingleLine(m.Format) != m.Format {
+	if unsafeWireText(m.Format) {
 		return Media{}, errors.New("media format contains invalid single-line text")
 	}
 	year := m.SeasonYear
 	if year == 0 {
 		year = m.StartDate.Year
 	}
-	titles := dedupeTitles(m.Title.Romaji, m.Title.English, m.Title.Native)
+	titles := dedupeTitles(wireTitles...)
 	if !hasMatchableTitle(titles) {
 		return Media{}, errors.New("media missing usable title")
 	}
 	return Media{Titles: titles, Format: m.Format, Year: year}, nil
+}
+
+// unsafeWireText reports whether an untrusted AniList string field must be
+// rejected rather than sanitized or memoized. JSON escapes are valid UTF-8
+// wire bytes but may decode to U+FFFD (a lone surrogate), controls, line
+// separators, or bidi controls; titlekey.Normalize would strip those runes
+// into a forged match key, and both titles and format outlive the request in
+// the matcher's memo and state.json, so the two fields share one guard.
+func unsafeWireText(s string) bool {
+	return strings.ContainsRune(s, utf8.RuneError) || runesafe.SanitizeSingleLine(s) != s
 }
 
 // gqlError is the GraphQL error object shared by both response envelopes.
@@ -570,7 +588,10 @@ func walkJSONObject(dec *json.Decoder, depth int) error {
 		}
 		folded := foldJSONKey(key)
 		if _, dup := seen[folded]; dup {
-			return fmt.Errorf("duplicate object key %q", key)
+			// The key is untrusted upstream text that lands inline in a log line
+			// (match.prefetch logs this error), so it gets the same single-line,
+			// 200-byte policy as every other upstream message in this package.
+			return fmt.Errorf("duplicate object key %q", sanitizeUpstreamMessage(key))
 		}
 		seen[folded] = struct{}{}
 		if valErr := walkJSONValue(dec, depth); valErr != nil {

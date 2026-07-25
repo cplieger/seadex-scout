@@ -28,6 +28,7 @@ func FuzzParseMedia(f *testing.F) {
 	f.Add([]byte("{\"data\":{\"Media\":{\"format\":\"TV\",\"title\":{\"romaji\":\"A\xff\"}}}}"))
 	f.Add([]byte("\xff\xfe"))
 	f.Add([]byte(`{"data":{"Media":{"format":"TV","title":{"romaji":"A\ud800"}}}}`))
+	f.Add([]byte(`{"data":{"Media":{"id":1,"format":"TV","title":{"romaji":"A"}}}}`))
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		m, err := parseMedia(raw)
 		if err != nil {
@@ -35,6 +36,13 @@ func FuzzParseMedia(f *testing.F) {
 		}
 		assertMediaBounded(t, m, raw)
 		assertTitlesClean(t, m.Titles, raw)
+		// Identity binding: no body may satisfy two different requested ids, so
+		// the matcher can never memoize one id's titles under another id's key.
+		if _, oneErr := parseMediaForID(raw, 1); oneErr == nil {
+			if _, twoErr := parseMediaForID(raw, 2); twoErr == nil {
+				t.Errorf("parseMediaForID(%q) accepted requested id 1 and id 2, want the mismatched id rejected", raw)
+			}
+		}
 	})
 }
 

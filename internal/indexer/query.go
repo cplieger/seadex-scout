@@ -19,6 +19,8 @@ const (
 	defaultCapsLimit = 100
 )
 
+// --- Curation matching ---
+
 // curation is the set of SeaDex-tracked releases, keyed by info hash and by
 // tracker key, each mapping to whether SeaDex marks that release best. byPair
 // records which hash/key combinations were observed on the SAME SeaDex
@@ -142,6 +144,8 @@ func (c *curation) acceptScopedKeys(scope string, urls []string, m *curationMatc
 	}
 	return identity, true
 }
+
+// --- Request dispatch and accounting ---
 
 // queryStats summarizes one request for the per-request log line: whether the
 // feed answered it (answered), whether it was served from the synthesized RSS
@@ -267,6 +271,8 @@ func (ix *Indexer) snapshotUnavailable() bool {
 	return true
 }
 
+// --- Serving the synthesized feed ---
+
 // applyPaging honors the Torznab offset/limit params (advertised in t=caps)
 // on the synthesized feed. A request without a usable limit gets the
 // advertised default, defaultCapsLimit, newest-first (the feed is sorted
@@ -333,6 +339,8 @@ func (ix *Indexer) feedFor(scope string) []item {
 	return items
 }
 
+// --- Proxied upstream search ---
+
 // fetchRaw queries the scope's upstream and returns the raw results, before
 // any curation filtering, plus whether the query was a total upstream failure
 // (every queried upstream failed - with per-tracker scoping that is the one
@@ -395,7 +403,8 @@ func markAndDedupe(raw []item, set *curation, scope string) []item {
 }
 
 // upstreamParams selects the Torznab query params to forward to Prowlarr,
-// dropping our own apikey. It defaults the search type to a basic search.
+// dropping our own apikey. It defaults the search type to a basic search and
+// clamps the forwarded limit to the maximum the caps document advertises.
 func upstreamParams(q url.Values) url.Values {
 	out := url.Values{}
 	for _, k := range []string{"t", "q", "cat", "season", "ep", "limit", "offset"} {
@@ -405,6 +414,17 @@ func upstreamParams(q url.Values) url.Values {
 	}
 	if out.Get("t") == "" {
 		out.Set("t", "search")
+	}
+	// Never ask an upstream for more items than the decoder accepts: the caps
+	// document advertises max=maxItems and parseTorznab rejects the whole
+	// response above maxUpstreamItems (== maxItems), so forwarding an
+	// over-contract limit would turn a workable search into a bounded-retry
+	// fetch of up to upstreamMaxBytes per attempt and then a Torznab error. A
+	// compliant client (the arrs send limit=100) is unaffected; a non-numeric
+	// limit is left untouched for the upstream's own default, matching
+	// applyPaging's tolerance.
+	if lim, err := strconv.Atoi(strings.TrimSpace(out.Get("limit"))); err == nil && lim > maxItems {
+		out.Set("limit", strconv.Itoa(maxItems))
 	}
 	return out
 }
@@ -421,6 +441,8 @@ func upstreamForScope(all []*upstream, scope string) *upstream {
 	}
 	return nil
 }
+
+// --- Query admission ---
 
 // servesQuery reports whether the feed answers a request by querying the
 // trackers, or returns empty without contacting them. It answers movie searches
@@ -481,6 +503,8 @@ func requestsMovies(cat string) bool {
 // tvsearch case above, always answered), which delivers the pack; this heuristic
 // only governs the basic-search fallback, where a per-episode barrage is the risk.
 var trailingEpisode = regexp.MustCompile(`\s+\d{2,4}$`)
+
+// --- Category filtering ---
 
 // filterByCats keeps items whose category is requested (an anime item satisfies
 // a request for its TV parent). An empty request keeps everything; an item with

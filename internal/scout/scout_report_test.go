@@ -68,6 +68,49 @@ func TestReportGeneratesRowsAndNeverWritesState(t *testing.T) {
 	}
 }
 
+// TestReportSummaryLineCarriesCounts pins the one-shot report's summary line:
+// seadex_entries, library_items, rows, and incomplete_mappings are the
+// operator's only per-run account of what the report covered, so each must
+// carry its own count. The scenario keeps all four values distinct.
+func TestReportSummaryLineCarriesCounts(t *testing.T) {
+	logger, recorder := capture.New()
+	store := &fakeStore{st: state.State{Mapping: frierenMappingCache(), Baselined: true}}
+	sonarr := &fakeSonarr{
+		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+		},
+	}
+	// A second entry with no Fribb record keeps seadex_entries (2) distinct
+	// from library_items (1) and rows (1); its definitive not-found answer
+	// leaves incomplete_mappings at 0.
+	entries := append(seadexFrierenEntry(), seadex.Entry{AniListID: 999})
+	s := New(&Deps{
+		Logger:  logger,
+		Store:   store,
+		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping: fakeMapping{},
+		SeaDex:  &fakeSeaDex{entries: entries},
+		Matcher: match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
+		Auditor: audit.NewAuditor(audit.Config{SeaDexBaseURL: "https://releases.moe"}),
+	})
+
+	if _, err := s.Report(context.Background()); err != nil {
+		t.Fatalf("Report returned error: %v", err)
+	}
+	wantAttrs := map[string]string{
+		"seadex_entries":      "2",
+		"library_items":       "1",
+		"rows":                "1",
+		"incomplete_mappings": "0",
+	}
+	for key, want := range wantAttrs {
+		if got, ok := recordAttr(recorder, "report generated", key); !ok || got != want {
+			t.Errorf("'report generated' %s = %q (found=%t), want %q", key, got, ok, want)
+		}
+	}
+}
+
 // TestReportPartialSnapshotErrors pins Report's completeness gate: a walk that
 // skipped series after episode-fetch failures (Partial=true, nil error) must
 // fail the one-shot report rather than publish a successful, timestamped audit

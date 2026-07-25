@@ -627,9 +627,8 @@ func TestLoader_refreshCache_acceptedDuplicateKeepsLastRecord(t *testing.T) {
 			t.Errorf("accepted refresh record[%d].AniListID = %d, want %d (stable last-occurrence order)", i, next.Records[i].AniListID, want)
 		}
 	}
-	rec9 := next.Records[1]
-	if rec9.AniListID == 9 && rec9.TvdbID != 901 {
-		t.Errorf("duplicated record persisted TvdbID = %d, want 901 (last record wins, matching buildIndex)", rec9.TvdbID)
+	if rec9 := next.Records[1]; rec9.AniListID != 9 || rec9.TvdbID != 901 {
+		t.Errorf("accepted refresh record[1] = %+v, want the duplicated id 9 carrying the LAST record's TvdbID 901 (matching buildIndex)", rec9)
 	}
 }
 

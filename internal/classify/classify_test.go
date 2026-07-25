@@ -198,7 +198,10 @@ func TestIsCreditlessExtraCaseFolds(t *testing.T) {
 		want bool
 	}{
 		{"Show NCOP01.mkv", true},
+		{"show ncop01.mkv", true},
 		{"Show NCED01v2.mkv", true},
+		{"show nced01v2.mkv", true},
+		{"Show NcEd01v2.mkv", true},
 		{"Show creditless ED.mkv", true},
 		{"Show CREDITLESS01v2.mkv", true},
 		{"Show CRED\u0130TLESS01v2.mkv", true},  // Turkish-uppercase İ folds to i under strings.ToLower

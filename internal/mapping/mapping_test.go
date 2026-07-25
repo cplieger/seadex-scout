@@ -267,10 +267,7 @@ func TestParseOverrides_reportsEachDuplicateIDOnce(t *testing.T) {
 	if len(set.records) != 2 {
 		t.Fatalf("effective records = %d, want 2 (deduplicated during the stream)", len(set.records))
 	}
-	idx := NewIndex(nil)
-	for _, r := range set.records {
-		idx.byAniList[r.AniListID] = r
-	}
+	idx := NewIndex(set.records)
 	if got, ok := idx.Lookup(1); !ok || got.TvdbID != 12 {
 		t.Errorf("Lookup(1) = %+v, %v, want last record with TvdbID 12", got, ok)
 	}

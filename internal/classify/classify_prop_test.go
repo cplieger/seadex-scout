@@ -85,8 +85,11 @@ func TestPayloadNamesProperty(t *testing.T) {
 				if pool[i].Length == maxLength && !slices.Contains(got, pool[i].Name) {
 					t.Fatalf("PayloadNames(%+v) = %v, dropped the primary payload %q", files, got, pool[i].Name)
 				}
-				// (3) A pool file under half the primary size never survives.
-				if pool[i].Length < maxLength/2 && slices.Contains(got, pool[i].Name) {
+				// (3) A pool file under the ceil-half primary threshold never
+				// survives - the same bound FuzzPayloadNames asserts, so the two
+				// twins cannot document different rules (a floor-half bound lets
+				// an odd-maximum off-by-one slip past this property).
+				if pool[i].Length < maxLength/2+maxLength%2 && slices.Contains(got, pool[i].Name) {
 					t.Fatalf("PayloadNames(%+v) = %v, kept the sub-primary extra %q (len %d vs max %d)", files, got, pool[i].Name, pool[i].Length, maxLength)
 				}
 			}

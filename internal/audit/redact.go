@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"path/filepath"
+	"reflect"
 	"strings"
 )
 
@@ -130,7 +131,10 @@ func (h *redactingHandler) redactAttr(a slog.Attr) slog.Attr {
 	case slog.KindString:
 		return slog.String(a.Key, redactPathText(h.dir, v.String()))
 	case slog.KindAny:
-		if err, ok := v.Any().(error); ok {
+		// A typed-nil error (a non-nil interface holding a nil pointer)
+		// would panic in Error(); leave it to the wrapped handler, which
+		// renders it without calling Error() (and it can carry no path).
+		if err, ok := v.Any().(error); ok && err != nil && !isNilErrValue(err) {
 			return slog.String(a.Key, redactPathText(h.dir, err.Error()))
 		}
 		return a
@@ -143,5 +147,17 @@ func (h *redactingHandler) redactAttr(a slog.Attr) slog.Attr {
 		return slog.Attr{Key: a.Key, Value: slog.GroupValue(red...)}
 	default:
 		return a
+	}
+}
+
+// isNilErrValue reports whether err is a non-nil error interface holding a
+// nil pointer/map/slice value, whose Error() method would dereference nil.
+func isNilErrValue(err error) bool {
+	rv := reflect.ValueOf(err)
+	switch rv.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Interface, reflect.Func:
+		return rv.IsNil()
+	default:
+		return false
 	}
 }

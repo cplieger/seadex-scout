@@ -1,6 +1,10 @@
 package seadex
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/cplieger/urlform"
+)
 
 // TestEntryURL pins the releases.moe entry-page rule at its home (the seadex
 // package owns the SeaDex site-base contract): a positive AniList id yields
@@ -49,6 +53,68 @@ func TestUsableRelative(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := usableRelative(tc.raw, "https://nyaa.si"); got != tc.want {
 				t.Errorf("usableRelative(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestUsableSchemelessHostPortGate pins the schemeless-host publisher's
+// fail-closed port gate directly, the way TestUsableRelative pins the relative
+// publisher's own contract: urlform v1.1.0 never routes a ported authority to
+// this branch, so neither the gate nor schemelessPortOK behind it is reachable
+// through UsableURL. A canonical recovered host publishes canonicalized only
+// with a publishable port (absent, or numeric and inside the 16-bit range
+// usableAbsolute enforces); an out-of-range port or an unparsable authority
+// drops; a non-canonical recovered host keeps the labeled tracker's path
+// reading.
+func TestUsableSchemelessHostPortGate(t *testing.T) {
+	tests := []struct{ name, trimmed, host, want string }{
+		{
+			name:    "canonical host without a port publishes canonicalized",
+			trimmed: "nyaa.si/view/1",
+			host:    "nyaa.si",
+			want:    "https://nyaa.si/view/1",
+		},
+		{
+			name:    "canonical host with an in-range port publishes canonicalized",
+			trimmed: "nyaa.si:8080/view/1",
+			host:    "nyaa.si",
+			want:    "https://nyaa.si:8080/view/1",
+		},
+		{
+			name:    "canonical host with the maximum port publishes canonicalized",
+			trimmed: "nyaa.si:65535/view/1",
+			host:    "nyaa.si",
+			want:    "https://nyaa.si:65535/view/1",
+		},
+		{
+			name:    "canonical host with an out-of-range port drops",
+			trimmed: "nyaa.si:65536/view/1",
+			host:    "nyaa.si",
+			want:    "",
+		},
+		{
+			name:    "canonical host with an unparsable authority drops",
+			trimmed: "nyaa.si:abc/view/1",
+			host:    "nyaa.si",
+			want:    "",
+		},
+		{
+			name:    "non-canonical recovered host keeps the labeled tracker's path reading",
+			trimmed: "evil.example/view/1",
+			host:    "evil.example",
+			want:    "https://nyaa.si/evil.example/view/1",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := urlform.Form{
+				Trimmed: tc.trimmed,
+				Host:    tc.host,
+				Class:   urlform.ClassSchemelessHost,
+			}
+			if got := usableSchemelessHost(&f, "https://nyaa.si"); got != tc.want {
+				t.Errorf("usableSchemelessHost(%q, host %q) = %q, want %q", tc.trimmed, tc.host, got, tc.want)
 			}
 		})
 	}

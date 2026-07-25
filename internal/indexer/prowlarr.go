@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cplieger/httpx/v3"
@@ -44,6 +45,17 @@ type upstream struct {
 	name   string
 	feed   string
 	apiKey string
+	// dropWarned / displayWarned bound the two filterDownloadURLs
+	// diagnostics to one WARN per onset (plus one recovery INFO), so a
+	// SYSTEMATIC condition - a Prowlarr endpoint whose emitted download
+	// links sit on a different origin than the configured Torznab URL, or
+	// an upstream emitting non-tracker display URLs - cannot WARN once per
+	// query. The title harvest admits up to harvestTimeBudget /
+	// harvestQueryInterval (~300) queries per rebuild, every rebuild,
+	// while such a condition persists. Atomic because the server's
+	// upstreams are shared across concurrent requests.
+	dropWarned    atomic.Bool
+	displayWarned atomic.Bool
 }
 
 // search queries the Torznab endpoint with the forwarded params and returns the
@@ -116,7 +128,13 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, int, 
 func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, http.NoBody)
 	if err != nil {
-		return nil, err
+		// reqURL derives from the configured endpoint, which validateHTTPURL
+		// permits to carry a username-only userinfo token (and may carry an
+		// apikey query param): net/http returns url.Parse's *url.Error, which
+		// echoes the raw URL into httpx.Do's retry logger and the harvest WARN
+		// (CWE-532). Reduce it to its cause, the same stance the StatusError
+		// and transport paths below take.
+		return nil, httpx.LogSafeError(err)
 	}
 	u.setHeaders(req)
 	resp, err := u.http.Do(req) //nolint:bodyclose // closed on every path: DrainClose (non-2xx statuses) or ReadLimitedBody's own close (2xx)
@@ -307,18 +325,47 @@ func (u *upstream) filterDownloadURLs(items []item) []item {
 		}
 		out = append(out, items[i])
 	}
-	if dropped > 0 {
-		u.log.Warn("upstream items dropped: download URL not on the Prowlarr endpoint origin",
-			"upstream", u.name, "dropped", dropped, "kept", len(out),
-			"expected_origin", feedURL.Scheme+"://"+feedURL.Host)
-	}
-	if blankedDisplay > 0 {
-		// Counts only, mirroring the origin-filter WARN above: the rejected
-		// value is never logged (it can be attacker-shaped text).
-		u.log.Warn("upstream display URLs blanked: not the tracker's own canonical http(s) page URL",
-			"upstream", u.name, "blanked", blankedDisplay, "kept_items", len(out))
-	}
+	u.reportDroppedDownloadURLs(dropped, len(out), feedURL)
+	u.reportBlankedDisplayURLs(blankedDisplay, len(out))
 	return out
+}
+
+// reportDroppedDownloadURLs logs the origin-filter outcome: the first
+// transition into dropping items WARNs, subsequent dropping rounds stay at
+// Debug, and the first clean round after a dropping one logs the recovery.
+// The rejected URL itself is never logged.
+func (u *upstream) reportDroppedDownloadURLs(dropped, kept int, feedURL *url.URL) {
+	const msg = "upstream items dropped: download URL not on the Prowlarr endpoint origin"
+	if dropped == 0 {
+		if u.dropWarned.CompareAndSwap(true, false) {
+			u.log.Info("upstream download URLs back on the Prowlarr endpoint origin", "upstream", u.name)
+		}
+		return
+	}
+	log := u.log.Debug
+	if u.dropWarned.CompareAndSwap(false, true) {
+		log = u.log.Warn
+	}
+	log(msg, "upstream", u.name, "dropped", dropped, "kept", kept,
+		"expected_origin", feedURL.Scheme+"://"+feedURL.Host)
+}
+
+// reportBlankedDisplayURLs logs the display-URL sanitization outcome on the
+// same first-transition-WARN ladder as reportDroppedDownloadURLs. Counts only:
+// the rejected value is never logged (it can be attacker-shaped text).
+func (u *upstream) reportBlankedDisplayURLs(blanked, kept int) {
+	const msg = "upstream display URLs blanked: not the tracker's own canonical http(s) page URL"
+	if blanked == 0 {
+		if u.displayWarned.CompareAndSwap(true, false) {
+			u.log.Info("upstream display URLs back on the tracker's canonical host", "upstream", u.name)
+		}
+		return
+	}
+	log := u.log.Debug
+	if u.displayWarned.CompareAndSwap(false, true) {
+		log = u.log.Warn
+	}
+	log(msg, "upstream", u.name, "blanked", blanked, "kept_items", kept)
 }
 
 // isHTTPScheme reports whether scheme is http or https, case-insensitively.
@@ -329,8 +376,9 @@ func isHTTPScheme(scheme string) bool {
 
 // httpNoUserinfoURL parses raw and returns it when it is an absolute
 // http or https URL free of userinfo - the shared admission prefix of
-// sameHTTPOrigin (fetch targets) and sanitizeDisplayURL (display
-// links). Anything else returns nil, false.
+// sameHTTPOrigin (fetch targets), sanitizeDisplayURL (search-path display
+// links) and snapshotInfoURLAllowed (persisted display links). Anything
+// else returns nil, false.
 func httpNoUserinfoURL(raw string) (*url.URL, bool) {
 	u, err := url.Parse(raw)
 	if err != nil || u.User != nil {

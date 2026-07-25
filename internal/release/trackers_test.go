@@ -157,13 +157,16 @@ func TestLookupTrackerByHostRejectsClassifiedHomographs(t *testing.T) {
 
 // TestLookupTrackerByRelativeURL pins the structural relative-URL tracker
 // resolver consumed by filter's AB evidence gate and seadex's link publisher:
-// only SeaDex's documented AnimeBytes relative page shape - a rooted
-// "/torrents.php" path carrying a "torrentid" query parameter - resolves (to
-// the canonical AnimeBytes table entry), case-insensitively on the path.
-// Everything else fails closed: an absolute URL (tracker identity must then
-// come from the host gate, never this shape), a protocol-relative or
-// schemeless-host form, a different relative path, a torrentid-less
-// torrents.php query, and the empty string.
+// only SeaDex's documented AnimeBytes relative page shape - a "/torrents.php"
+// path carrying a "torrentid" query parameter - resolves (to the canonical
+// AnimeBytes table entry), case-insensitively on the path. A host-less
+// slashless value is read as that same path rooted (the href reading the link
+// publisher resolves), so "torrents.php?...torrentid=..." resolves while
+// "animebytes.tv/torrents.php?..." does not - its rooted reading is
+// "/animebytes.tv/torrents.php", not the AB page path. Everything else fails
+// closed: an absolute URL (tracker identity must then come from the host gate,
+// never this shape), a protocol-relative form, a different relative path, a
+// torrentid-less torrents.php query, and the empty string.
 func TestLookupTrackerByRelativeURL(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -173,6 +176,7 @@ func TestLookupTrackerByRelativeURL(t *testing.T) {
 		{name: "documented AB relative shape", raw: "/torrents.php?id=12345&torrentid=1167293", wantOK: true},
 		{name: "torrentid alone", raw: "/torrents.php?torrentid=1", wantOK: true},
 		{name: "path case-insensitive", raw: "/TORRENTS.PHP?torrentid=1", wantOK: true},
+		{name: "slashless href reading of the AB page shape", raw: "torrents.php?id=1&torrentid=2", wantOK: true},
 		{name: "Unicode long-s is not ASCII path case", raw: "/torrent\u017f.php?torrentid=1", wantOK: false},
 		{name: "surrounding whitespace tolerated", raw: "  /torrents.php?torrentid=1  ", wantOK: true},
 		{name: "missing torrentid", raw: "/torrents.php?id=12345", wantOK: false},
@@ -181,7 +185,7 @@ func TestLookupTrackerByRelativeURL(t *testing.T) {
 		{name: "subpath is not the AB page", raw: "/torrents.php/extra?torrentid=1", wantOK: false},
 		{name: "absolute AB URL is not a relative shape", raw: "https://animebytes.tv/torrents.php?torrentid=1", wantOK: false},
 		{name: "protocol-relative form is not relative", raw: "//animebytes.tv/torrents.php?torrentid=1", wantOK: false},
-		{name: "schemeless host form is not relative", raw: "animebytes.tv/torrents.php?torrentid=1", wantOK: false},
+		{name: "schemeless host form is not the AB page path", raw: "animebytes.tv/torrents.php?torrentid=1", wantOK: false},
 		{name: "empty string", raw: "", wantOK: false},
 		{name: "whitespace only", raw: "   ", wantOK: false},
 	}
@@ -196,5 +200,71 @@ func TestLookupTrackerByRelativeURL(t *testing.T) {
 				t.Errorf("LookupTrackerByRelativeURL(%q) = %q, want %q", tc.raw, got.Name, TrackerNameAnimeBytes)
 			}
 		})
+	}
+}
+
+// TestTrackerHost pins Tracker.Host's documented fail-closed contract: the
+// canonical lowercased site hostname when BaseURL parses to one (case folded,
+// port and path excluded), and "" when it does not - an unparseable URL or one
+// carrying no host at all. Both trackerByHost (the host allowlist the seadex
+// link-safety gate and the host twins key on) and the indexer's canonical-host
+// check consume this method, so a malformed table entry must yield no host
+// rather than a partial one; the table-shape and host-set pins only ever see
+// well-formed entries, leaving the fail-closed arm unexercised.
+func TestTrackerHost(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		want    string
+	}{
+		{name: "canonical https base", baseURL: "https://nyaa.si", want: "nyaa.si"},
+		{name: "uppercase host folds to lowercase", baseURL: "https://ANIMEBYTES.TV", want: "animebytes.tv"},
+		{name: "port and path are not part of the host", baseURL: "https://nyaa.si:8080/view/1", want: "nyaa.si"},
+		{name: "unparseable url fails closed", baseURL: "https://[::1", want: ""},
+		{name: "control character in url fails closed", baseURL: "ht\x7ftps://nyaa.si", want: ""},
+		{name: "url with no host fails closed", baseURL: "notaurl", want: ""},
+		{name: "empty base url fails closed", baseURL: "", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := Tracker{Name: "Test", Type: TrackerPublic, BaseURL: tc.baseURL}
+			if got := tr.Host(); got != tc.want {
+				t.Errorf("Tracker{BaseURL: %q}.Host() = %q, want %q", tc.baseURL, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEqualASCIIFold pins the ASCII-only case fold the AB relative-page shape
+// check rests on: the fold is symmetric across both operands (either side may
+// carry the uppercase spelling), a length mismatch never compares equal, and a
+// non-ASCII lookalike never equals an ASCII protocol token - U+0130 (which
+// strings.ToLower folds onto ASCII i) and U+017F (which regexp's SimpleFold
+// folds onto ASCII s) must both stay unequal, since this comparison is the
+// byte-wise gate that keeps a Unicode-laundered path or query name from
+// classifying as the AnimeBytes torrent page.
+func TestEqualASCIIFold(t *testing.T) {
+	tests := []struct {
+		a    string
+		b    string
+		want bool
+	}{
+		{a: "/torrents.php", b: "/torrents.php", want: true},
+		{a: "/TORRENTS.PHP", b: "/torrents.php", want: true},
+		{a: "/torrents.php", b: "/TORRENTS.PHP", want: true},
+		{a: "TorrentID", b: "torrentid", want: true},
+		{a: "torrentid", b: "TORRENTID", want: true},
+		{a: "", b: "", want: true},
+		{a: "torrentid", b: "torrentids", want: false},
+		{a: "torrentid", b: "", want: false},
+		{a: "torrentid", b: "torrentix", want: false},
+		{a: "torrent\u0130", b: "torrentid", want: false},
+		{a: "torrentid", b: "torrent\u0130", want: false},
+		{a: "torrent\u017f", b: "torrents", want: false},
+	}
+	for _, tc := range tests {
+		if got := equalASCIIFold(tc.a, tc.b); got != tc.want {
+			t.Errorf("equalASCIIFold(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
 	}
 }

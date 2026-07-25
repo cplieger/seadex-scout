@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -66,7 +67,7 @@ func TestRebuildWarnsWhenABPasskeyMissing(t *testing.T) {
 			},
 		},
 	}}
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABTorznabURL: "http://prowlarr/2/api"}}, Deps{Logger: log})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABTorznabURL: "http://prowlarr/2/api"}}, WriterDeps{Logger: log})
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -97,7 +98,7 @@ func TestRebuildNoPasskeyWarnWithoutABIntent(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
 		}},
 	}}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, WriterDeps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if rec.Contains("ab RSS feed empty of grabbable links") {
@@ -129,7 +130,7 @@ func TestRebuildUnconfiguredABPersistsNoABFeed(t *testing.T) {
 			},
 		},
 	}}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: "SECRETPASSKEY"}}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: "SECRETPASSKEY"}}, WriterDeps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	data, err := os.ReadFile(path)
@@ -183,7 +184,7 @@ func TestRebuildPersistsABItemsGUIDOnly(t *testing.T) {
 			},
 		},
 	}}
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: passkey, ABTorznabURL: "http://prowlarr/2/api"}}, Deps{})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: passkey, ABTorznabURL: "http://prowlarr/2/api"}}, WriterDeps{})
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -212,7 +213,7 @@ func TestRebuildPersistsABItemsGUIDOnly(t *testing.T) {
 	// The reader derives the served AB link from the GUID and its own
 	// configured passkey on load, so the feed serves grabbable links even
 	// though the snapshot holds none.
-	ix := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: passkey}}, Deps{}, path)
+	ix := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: passkey}}, Deps{})
 	served := ix.feedFor(upstreamAB)
 	if len(served) != 1 {
 		t.Fatalf("served ab feed = %d items, want 1", len(served))
@@ -224,12 +225,13 @@ func TestRebuildPersistsABItemsGUIDOnly(t *testing.T) {
 
 // TestRebuildPersistScrubsABScopedItemCarriedInNyaaFeed pins the misplaced-item
 // arm of the passkey-at-rest invariant: the secret is attached per item by KEY
-// scope - an ab:-keyed item that a legacy or corrupted snapshot placed in
-// nyaa_feed is re-rendered by carryJournal with a passkey-bearing AB download
-// link and appended to the nyaa slice, where the AB-feed strip never looks.
-// The persist-time Nyaa-feed strip (stripDownloadURLs blanks every item's
-// download URL) must catch it, so the persisted file can never hold the
-// passkey regardless of which feed slice the item rode in on.
+// scope, so an ab:-keyed item that a legacy or corrupted snapshot placed in
+// nyaa_feed must never reach the persisted file with a passkey-bearing AB
+// download link. Two layers hold that: carryItem's scope gate drops the
+// cross-scope item at carry admission, and the persist-time Nyaa-feed strip
+// (stripDownloadURLs blanks every item's download URL) catches anything that
+// still rides in on the wrong slice - so the persisted file can never hold the
+// passkey regardless of which feed slice the item came from.
 func TestRebuildPersistScrubsABScopedItemCarriedInNyaaFeed(t *testing.T) {
 	const passkey = "SUPERSECRETPASSKEY123"
 	path := filepath.Join(t.TempDir(), "feed.json")
@@ -251,7 +253,7 @@ func TestRebuildPersistScrubsABScopedItemCarriedInNyaaFeed(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Frieren - S01E01 (BD Remux 1080p) [PMR].mkv"}},
 		}},
 	}}
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: passkey, ABTorznabURL: "http://prowlarr/2/api"}}, Deps{})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: passkey, ABTorznabURL: "http://prowlarr/2/api"}}, WriterDeps{})
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -276,7 +278,7 @@ func TestRebuildReportsWriteError(t *testing.T) {
 		t.Fatalf("write blocker: %v", err)
 	}
 	path := filepath.Join(blocker, "feed.json")
-	err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{}).Rebuild(context.Background(), nil, nil)
+	err := NewFeedWriter(&FeedWriterConfig{Path: path}, WriterDeps{}).Rebuild(context.Background(), nil, nil)
 	if err == nil {
 		t.Fatal("Rebuild with an unwritable path returned nil, want error")
 	}
@@ -295,7 +297,7 @@ func TestRebuildFailsOnUnreadablePreviousSnapshot(t *testing.T) {
 	if err := os.Mkdir(path, 0o755); err != nil {
 		t.Fatalf("mkdir over snapshot path: %v", err)
 	}
-	err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{}).Rebuild(context.Background(), nil, nil)
+	err := NewFeedWriter(&FeedWriterConfig{Path: path}, WriterDeps{}).Rebuild(context.Background(), nil, nil)
 	if err == nil {
 		t.Fatal("Rebuild with an unreadable previous snapshot returned nil, want error")
 	}
@@ -321,7 +323,7 @@ func TestRebuildDropsOversizedItem(t *testing.T) {
 			ReleaseGroup: strings.Repeat("a", maxPersistedFieldBytes+1),
 		}},
 	}}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, WriterDeps{}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -354,7 +356,7 @@ func TestRebuildBaselinesOversizedCachedTitle(t *testing.T) {
 	}
 	writeSnapshotFile(t, path, &prev)
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
+	w := newLoggedTestWriter(path, log)
 	w.now = func() time.Time { return t0.Add(time.Hour) }
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
@@ -393,7 +395,7 @@ func TestPersistRejectsOversizedSnapshot(t *testing.T) {
 		ByHash: map[string]bool{}, ByKey: map[string]bool{}, Seen: map[string]bool{},
 		Titles: map[string]string{"nyaa:42": strings.Repeat("a", maxFeedBytes+1)},
 	}
-	err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{}).persist(context.Background(), snap)
+	err := NewFeedWriter(&FeedWriterConfig{Path: path}, WriterDeps{}).persist(context.Background(), snap)
 	if err == nil {
 		t.Fatal("persist with an oversized snapshot returned nil, want size error")
 	}
@@ -436,7 +438,7 @@ func TestRebuildExcludesCurationWarnedTorrents(t *testing.T) {
 			},
 		},
 	}}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := newLoggedTestWriter(path, log).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -463,7 +465,7 @@ func TestRebuildExcludesCurationWarnedTorrents(t *testing.T) {
 	// ledger, so it now journals as NEW - the moment it first became
 	// grabbable curation is when the arrs should see it on RSS.
 	entries[0].Torrents[0].Tags = []string{"dual"}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, WriterDeps{}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("second Rebuild: %v", err)
 	}
 	snap = readSnapshotFile(t, path)
@@ -526,7 +528,7 @@ func TestRebuildWarnedTorrentIdentityWinsAcrossEntries(t *testing.T) {
 			}},
 		},
 	}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := newLoggedTestWriter(path, log).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -575,7 +577,7 @@ func TestRebuildDropsCarriedJournalItemBecomingWarned(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
 		}},
 	}}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := newLoggedTestWriter(path, log).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -603,7 +605,7 @@ func TestRebuildBaselinesSnapshotMissingCurationMaps(t *testing.T) {
 	}
 	log, rec := capture.New()
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
+	w := newLoggedTestWriter(path, log)
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -638,7 +640,7 @@ func TestRebuildBaselinesOversizedFeedItem(t *testing.T) {
 		},
 	})
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
+	w := newLoggedTestWriter(path, log)
 	w.now = func() time.Time { return t0.Add(time.Hour) }
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
@@ -670,7 +672,7 @@ func TestRebuildOversizedSnapshotRebaselines(t *testing.T) {
 		t.Fatalf("create oversized snapshot: %v", err)
 	}
 	// A sparse file over the cap: ReadBounded rejects on size, so no real
-	// 64 MiB payload is needed on disk.
+	// multi-MiB payload is needed on disk.
 	if err := f.Truncate(maxFeedBytes + 1); err != nil {
 		t.Fatalf("truncate to over-cap size: %v", err)
 	}
@@ -883,7 +885,7 @@ func TestRebuildBaselinesOversizedSeenLedgerKey(t *testing.T) {
 		Seen:   map[string]bool{oversized: true},
 	})
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
+	w := newLoggedTestWriter(path, log)
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -924,7 +926,7 @@ func TestLoadPreviousPreservesLargeHarvestCheckpoint(t *testing.T) {
 		Seen:          map[string]bool{},
 		HarvestCursor: encoded,
 	})
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, WriterDeps{})
 	prev, err := w.loadPrevious(context.Background())
 	if err != nil {
 		t.Fatalf("loadPrevious: %v", err)
@@ -961,11 +963,207 @@ func TestRebuildCanonicalizesStoredHashBeforeWarningRetraction(t *testing.T) {
 		Tags:  []string{"Broken"},
 		Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [W].mkv"}},
 	}}}}
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, WriterDeps{})
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if got := readSnapshotFile(t, path).NyaaFeed; len(got) != 0 {
 		t.Errorf("nyaa feed = %+v, want empty after canonical stored-hash warning retraction", got)
+	}
+}
+
+// TestValidPersistedItemRejectsOversizedFields pins the string-field arm of
+// the shared persisted-item limits across EVERY field the gate walks, not
+// just Title: a hand-edited or corrupted snapshot can oversize any of them,
+// and each one is either rendered into the served Torznab item (whose XML
+// escaping expands an ampersand-heavy value ~5x) or compared as identity by
+// the writer's carry gates, so dropping any single field from the check would
+// let one over-limit value reach renderFeed.
+func TestValidPersistedItemRejectsOversizedFields(t *testing.T) {
+	over := strings.Repeat("x", maxPersistedFieldBytes+1)
+	tests := map[string]journalItem{
+		"title":                  {item: item{Title: over}},
+		"guid":                   {item: item{Title: "x", GUID: over}},
+		"info url":               {item: item{Title: "x", InfoURL: over}},
+		"download url":           {item: item{Title: "x", DownloadURL: over}},
+		"info hash":              {item: item{Title: "x", InfoHash: over}},
+		"download volume factor": {item: item{Title: "x", DownloadVolumeFactor: over}},
+		"journal key":            {item: item{Title: "x"}, Key: over},
+	}
+	for name, it := range tests {
+		t.Run(name, func(t *testing.T) {
+			if validPersistedItem(&it) {
+				t.Errorf("validPersistedItem(oversized %s, %d bytes) = true, want false", name, len(over))
+			}
+		})
+	}
+}
+
+// TestRebuildBaselinesOversizedABFeedItem is the AnimeBytes twin of
+// TestRebuildBaselinesOversizedFeedItem: the shared decode gate validates
+// BOTH persisted journals, so a previous snapshot whose ab_feed carries an
+// item past maxPersistedFieldBytes must warn and re-baseline exactly like its
+// nyaa_feed counterpart. Without this case the ab_feed argument of
+// decodeSnapshot's validFeedItems call is unpinned - the writer would carry
+// the over-limit AB item forward while the server's readSnapshot rejects the
+// same bytes, wedging reader and writer on a poisoned file.
+func TestRebuildBaselinesOversizedABFeedItem(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	now := time.Now().UTC().Truncate(time.Second)
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{}, ByKey: map[string]bool{"ab:123": true},
+		ByPair: map[string]bool{},
+		Seen:   map[string]bool{"ab:123": true},
+		ABFeed: []journalItem{{
+			item: item{
+				Title:   strings.Repeat("a", maxPersistedFieldBytes+1),
+				GUID:    "https://animebytes.tv/torrents.php?id=1&torrentid=123",
+				PubDate: now,
+			},
+			Key: "ab:123", AniListID: 9, FirstSeen: now,
+		}},
+	})
+	log, rec := capture.New()
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: "http://prowlarr/1/api",
+		ABTorznabURL:   "http://prowlarr/2/api",
+		ABPasskey:      "PASSKEY",
+	}}, WriterDeps{Logger: log})
+	entries := []seadex.Entry{{
+		AniListID: 9,
+		Torrents: []seadex.Torrent{{
+			Tracker: "AB", URL: "/torrents.php?id=1&torrentid=123", IsBest: true,
+			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
+		}},
+	}}
+	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.ABFeed) != 0 {
+		t.Errorf("ab_feed = %d items, want 0 (an over-limit ab_feed item must re-baseline, not be carried)", len(snap.ABFeed))
+	}
+	if !snap.Seen["ab:123"] {
+		t.Errorf("seen ledger missing the curated AB identity after re-baseline: %v", snap.Seen)
+	}
+	if !rec.Contains(msgSnapshotMalformed) {
+		t.Errorf("over-limit ab_feed item not warned as malformed; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestTitleCacheWithinLimitsBoundsKeyAndTitle pins BOTH arms of the
+// harvested-title cache ingress: the cached title (applied over a carried
+// item's title after the creation-time check) and its KEY, which is a journal
+// key carried forward across rebuilds. The end-to-end re-baseline test
+// exercises only the value arm, leaving the key arm unpinned. The at-limit
+// case pins the inclusive endpoint - the documented contract rejects only
+// values PAST maxPersistedFieldBytes.
+func TestTitleCacheWithinLimitsBoundsKeyAndTitle(t *testing.T) {
+	over := strings.Repeat("x", maxPersistedFieldBytes+1)
+	atLimit := strings.Repeat("x", maxPersistedFieldBytes)
+	if titleCacheWithinLimits(map[string]string{over: "Show - S01 (1080p) [G]"}) {
+		t.Errorf("titleCacheWithinLimits(key %d bytes) = true, want false", len(over))
+	}
+	if titleCacheWithinLimits(map[string]string{"nyaa:42": over}) {
+		t.Errorf("titleCacheWithinLimits(title %d bytes) = true, want false", len(over))
+	}
+	if !titleCacheWithinLimits(map[string]string{atLimit: atLimit}) {
+		t.Errorf("titleCacheWithinLimits(key and title %d bytes) = false, want true", len(atLimit))
+	}
+}
+
+// TestSeenLedgerWithinLimitsBoundary pins the inclusive endpoint of the
+// seen-ledger key cap: the documented contract rejects only keys PAST
+// maxPersistedFieldBytes, so an exactly-at-limit key must stay accepted. The
+// end-to-end re-baseline test covers only the over-limit side, leaving a
+// boundary slip (a `>=` comparison) undetected - it would re-baseline the
+// journal on an honest ledger and re-broadcast nothing while quietly
+// discarding accumulated novelty state.
+func TestSeenLedgerWithinLimitsBoundary(t *testing.T) {
+	atLimit := strings.Repeat("k", maxPersistedFieldBytes)
+	if !seenLedgerWithinLimits(map[string]bool{atLimit: true}) {
+		t.Errorf("seenLedgerWithinLimits(key %d bytes) = false, want true", len(atLimit))
+	}
+	if seenLedgerWithinLimits(map[string]bool{atLimit + "k": true}) {
+		t.Errorf("seenLedgerWithinLimits(key %d bytes) = true, want false", len(atLimit)+1)
+	}
+}
+
+// TestRebuildBlanksCarriedForeignInfoURL pins that the persisted-InfoURL
+// allowlist lives in the shared decode gate (decodeSnapshot), not only in the
+// reader: an item whose torrent has left the curation set keeps its STORED
+// render (carryStoredItem) and persist scrubs only DownloadURL, so a
+// foreign-host info link planted in feed.json would otherwise be re-persisted
+// on every rebuild for up to feedJournalMaxAge while only the server blanked
+// it at serve time.
+func TestRebuildBlanksCarriedForeignInfoURL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	now := time.Now().UTC().Truncate(time.Second)
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{}, ByKey: map[string]bool{"nyaa:42": true},
+		ByPair: map[string]bool{},
+		Seen:   map[string]bool{"nyaa:42": true},
+		NyaaFeed: []journalItem{{
+			item: item{
+				Title:   "Show S01 1080p [Grp]",
+				GUID:    "https://nyaa.si/view/42",
+				InfoURL: "https://evil.example/phish",
+				PubDate: now,
+			},
+			Key: "nyaa:42", AniListID: 7, FirstSeen: now,
+		}},
+	})
+	w := newTestWriter(path, "", false)
+	// No entries: the journaled torrent is no longer curated, so it is
+	// carried with its stored render rather than re-synthesized.
+	if err := w.Rebuild(context.Background(), nil, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	got := readSnapshotFile(t, path).NyaaFeed
+	if len(got) != 1 {
+		t.Fatalf("nyaa feed = %d items (%+v), want the carried item", len(got), got)
+	}
+	if got[0].InfoURL != "" {
+		t.Errorf("carried item InfoURL = %q, want blanked: the decode gate must scrub a non-SeaDex info link for the writer too", got[0].InfoURL)
+	}
+}
+
+// TestRebuildNeverLogsABPasskey pins the LOG side of the at-rest credential
+// contract TestRebuildPersistsABItemsGUIDOnly pins on disk: the passkey is a
+// per-cycle log hazard too (NewFeedWriter warns about a half-configured AB,
+// Rebuild's snapshot line names AB counts, and a failed persist wraps the
+// path), so a full rebuild that journals AnimeBytes releases must emit ZERO
+// log records - message or attribute - carrying the secret.
+func TestRebuildNeverLogsABPasskey(t *testing.T) {
+	const passkey = "SUPERSECRETPASSKEY123"
+	log, rec := capture.New()
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	entries := []seadex.Entry{{
+		AniListID: 154587,
+		Torrents: []seadex.Torrent{{
+			Tracker: "AB", URL: "/torrents.php?id=86576&torrentid=1167293", IsBest: true,
+			Files: []seadex.File{{Length: 1, Name: "Frieren - S01E01 (BD Remux 1080p) [PMR].mkv"}},
+		}},
+	}}
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{
+		ABTorznabURL: "http://prowlarr/2/api", ABPasskey: passkey,
+	}}, WriterDeps{Logger: log})
+	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if rec.Len() == 0 {
+		t.Fatal("no log records captured; the rebuild must at least log the snapshot line")
+	}
+	for _, r := range rec.Records() {
+		if strings.Contains(r.Message, passkey) {
+			t.Errorf("log message leaks the AB passkey: %q", r.Message)
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			if strings.Contains(a.Value.String(), passkey) {
+				t.Errorf("log attr %q leaks the AB passkey: %q", a.Key, a.Value.String())
+			}
+			return true
+		})
 	}
 }

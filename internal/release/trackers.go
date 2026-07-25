@@ -141,18 +141,44 @@ func LookupTrackerByHost(host string) (Tracker, bool) {
 // carries tracker identity even though the URL has no host, so consumers
 // that would otherwise fall back to the untrusted tracker label (the
 // AB-toggle visibility gate, the usable-link canonicalizer) key on this
-// structural evidence instead. A non-relative or unrecognized shape matches
-// nothing.
+// structural evidence instead. A slashless value ("torrents.php?...") is read
+// as that same path rooted, the href reading the link publisher resolves it to
+// (see hrefPath); any other shape matches nothing.
 func LookupTrackerByRelativeURL(raw string) (Tracker, bool) {
 	f := urlform.Classify(raw)
-	if f.Class != urlform.ClassRelative {
+	rooted, ok := hrefPath(&f)
+	if !ok {
 		return Tracker{}, false
 	}
-	u, err := url.Parse(f.Trimmed)
+	u, err := url.Parse(rooted)
 	if err != nil || !equalASCIIFold(u.Path, "/torrents.php") || !rawQueryHasKeyFold(u.RawQuery, "torrentid") {
 		return Tracker{}, false
 	}
 	return LookupTracker(TrackerNameAnimeBytes)
+}
+
+// hrefPath returns the rooted path an href-context consumer resolves a
+// host-less value against, reporting whether the form has one at all. A
+// rooted relative value ("/torrents.php?...") is already it; a slashless
+// value ("torrents.php?...") classifies schemeless-host (net/url reads a
+// bare path while an address bar would read a host), and its href reading is
+// the same path rooted - which is exactly how the link publisher resolves it
+// (seadex.usableSchemelessHost). Rooting here keeps the shape rule
+// single-homed: every consumer of LookupTrackerByRelativeURL reads both
+// spellings identically, so a mislabeled slashless AB torrent-page URL
+// cannot publish as an animebytes.tv link while the AB gates read it as
+// non-AB. Every other form (absolute, protocol-relative, hidden-host,
+// malformed, empty) carries no host-less path and matches nothing - tracker
+// identity for those comes from the host gate.
+func hrefPath(f *urlform.Form) (string, bool) {
+	switch f.Class {
+	case urlform.ClassRelative:
+		return f.Trimmed, true
+	case urlform.ClassSchemelessHost:
+		return "/" + f.Trimmed, true
+	default:
+		return "", false
+	}
 }
 
 // equalASCIIFold reports whether a and b are equal under ASCII case folding.

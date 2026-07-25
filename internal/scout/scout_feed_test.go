@@ -186,12 +186,7 @@ func TestCycleFeedRebuildErrorIsNonFatal(t *testing.T) {
 	if n := recorder.CountExact("indexer feed rebuild failed; keeping previous feed"); n != 1 {
 		t.Errorf("feed-rebuild failure log count = %d, want exactly 1", n)
 	}
-	warns := 0
-	for _, r := range recorder.Records() {
-		if r.Message == "indexer feed rebuild failed; keeping previous feed" && r.Level == slog.LevelWarn {
-			warns++
-		}
-	}
+	warns := recorder.CountLevel(slog.LevelWarn, "indexer feed rebuild failed; keeping previous feed")
 	if warns != 1 {
 		t.Errorf("feed-rebuild failure WARN count = %d, want exactly 1", warns)
 	}
@@ -257,7 +252,7 @@ type probingFeed struct {
 	got map[int]indexer.EntryInfo
 }
 
-func (p *probingFeed) Rebuild(_ context.Context, _ []seadex.Entry, info func(alID int) indexer.EntryInfo) error {
+func (p *probingFeed) Rebuild(_ context.Context, _ []seadex.Entry, info indexer.EntryInfoFunc) error {
 	p.got = map[int]indexer.EntryInfo{
 		100: info(100),
 		200: info(200),
@@ -339,7 +334,10 @@ func TestCycleWalkFailShutdownDuringSeaDexFetchStaysSilent(t *testing.T) {
 	if feed.calls != 0 {
 		t.Errorf("feed Rebuild calls = %d, want 0 (nothing to rebuild from)", feed.calls)
 	}
-	if n := recorder.CountExact("seadex fetch failed; indexer feed kept previous feed"); n != 0 {
+	if n := recorder.CountExact("seadex fetch failed; skipping comparison, findings preserved"); n != 0 {
+		t.Errorf("seadex-failure WARN fired %d times during a shutdown, want 0 (recordSeaDexFetch must stay silent on a cancelled fetch)", n)
+	}
+	if n := recorder.CountExact("seadex returned zero entries; indexer feed kept previous feed"); n != 0 {
 		t.Errorf("feed-kept WARN fired %d times during a shutdown, want 0", n)
 	}
 	if n := recorder.CountExact("cycle degraded"); n != 0 {
@@ -352,7 +350,7 @@ func TestCycleWalkFailShutdownDuringSeaDexFetchStaysSilent(t *testing.T) {
 // is writing.
 type cancellingFeed struct{ cancel context.CancelFunc }
 
-func (c *cancellingFeed) Rebuild(context.Context, []seadex.Entry, func(alID int) indexer.EntryInfo) error {
+func (c *cancellingFeed) Rebuild(context.Context, []seadex.Entry, indexer.EntryInfoFunc) error {
 	c.cancel()
 	return context.Canceled
 }

@@ -26,3 +26,14 @@ const EscalationThreshold = 8
 // auto-accepting. Shared by the mapping loader's refresh shrink guard
 // (acceptRefresh) and the scout's library shrink guard.
 const ShrinkGuardFactor = 2
+
+// Shrunk reports whether a refreshed population of count entries is a
+// suspicious truncation of a prior population of prevCount entries: it
+// retains less than 1/ShrinkGuardFactor of it (below half at the default 2).
+// The candidate is multiplied rather than the previous count divided, so an
+// odd prevCount never rounds in the guard's favour. It is the single home of
+// the shrink comparison the mapping loader's refresh guards and the scout's
+// library walk guard share.
+func Shrunk(count, prevCount int) bool {
+	return count*ShrinkGuardFactor < prevCount
+}

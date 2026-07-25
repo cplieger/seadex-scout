@@ -39,10 +39,17 @@ type EntryInfo struct {
 	IsSpecial  bool
 }
 
+// EntryInfoFunc resolves the per-show (per-AniList-id) metadata the feed
+// writer synthesizes RSS titles and categories from. It is total: an id the
+// producer knows nothing about yields the zero EntryInfo (file-name
+// fallback, anime category). The compare cycle supplies it; see
+// entryInfoFunc for the nil-safe wrapper.
+type EntryInfoFunc func(alID int) EntryInfo
+
 // entryInfoFunc normalizes a possibly-nil per-show metadata callback to a
 // total function returning the zero EntryInfo (file-name fallback, anime
 // category), so the journal and harvest paths never nil-check it.
-func entryInfoFunc(info func(alID int) EntryInfo) func(alID int) EntryInfo {
+func entryInfoFunc(info EntryInfoFunc) EntryInfoFunc {
 	if info != nil {
 		return info
 	}
@@ -200,7 +207,12 @@ func singleEpisodeMarker(files []seadex.File) string {
 // ones.
 func releaseFlags(t *seadex.Torrent) []string {
 	var flags []string
-	if res := fileResolution(t.Files); res != "" {
+	// The resolution flag comes from the shared classify.FileResolution (the ONE
+	// place a release.Input is built from SeaDex data, over the shared
+	// PayloadNames eligibility rule), so the RSS title's resolution and the
+	// daemon finding's classification can never disagree about which files
+	// vote (h-f3).
+	if res := classify.FileResolution(t.Files); res != "" {
 		flags = append(flags, res)
 	}
 	if t.DualAudio {
@@ -210,15 +222,6 @@ func releaseFlags(t *seadex.Torrent) []string {
 		flags = append(flags, "["+g+"]")
 	}
 	return flags
-}
-
-// fileResolution classifies a torrent's resolution from its file names
-// alone, via the shared classify.FileResolution (the ONE place a
-// release.Input is built from SeaDex data, over the shared PayloadNames
-// eligibility rule), so the RSS title's resolution flag and the daemon
-// finding's classification can never disagree about which files vote (h-f3).
-func fileResolution(files []seadex.File) string {
-	return classify.FileResolution(files)
 }
 
 // --- Episode/pack heuristics: token regexes, derivedTitle, packSeason ---
@@ -353,6 +356,22 @@ func seasonCounts(files []seadex.File) map[int]int {
 	return counts
 }
 
+// episodeKeyBase picks the portion of a file's name its episode identity is
+// read from: the file's OWN base name when that carries episode evidence
+// (an SxxExx token or an absolute "- NN" number), else the full path - so a
+// pack whose only episode tokens live in a directory component still keys per
+// directory. Reading the full path unconditionally let a shared directory
+// token (a batch folder named "... S01E01-E12 ...") shadow every file's own
+// absolute number, collapsing a whole season pack onto ONE episode key: the
+// pack then read as a single episode and was served titled as episode 1.
+func episodeKeyBase(name string) string {
+	base := stripExt(path.Base(name))
+	if episodeToken.MatchString(base) || absoluteEpisode.MatchString(base) {
+		return base
+	}
+	return stripExt(name)
+}
+
 // isPack reports whether a torrent bundles more than one episode (a real season
 // pack) rather than a single episode. SeaDex stores a complete season that was
 // never packed as one torrent per episode - each a single-file release - so the
@@ -373,7 +392,7 @@ func coveredEpisodes(files []seadex.File) int {
 		if !isContentMediaFile(files[i].Name) {
 			continue
 		}
-		base := stripExt(files[i].Name)
+		base := episodeKeyBase(files[i].Name)
 		switch {
 		case episodeToken.MatchString(base):
 			// Key on the LAST token: scene naming puts the episode marker
@@ -478,13 +497,14 @@ func totalSize(files []seadex.File) int64 {
 	return n
 }
 
-// entryURL is the SeaDex entry page for an AniList id under the writer's
-// configured site base, or "" when the id is unknown - the per-item info URL
-// (the feed <comments>), so the operator can see why a release is curated.
+// entryURL is the SeaDex entry page for an AniList id under the canonical
+// site base (defaultSeaDexBaseURL, the same constant the reader's InfoURL
+// allowlist is derived from), or "" when the id is unknown - the per-item info
+// URL (the feed <comments>), so the operator can see why a release is curated.
 // The URL rule is the shared releases.moe contract in internal/seadex; this
 // is a thin delegate, like validInfoHash.
-func (w *FeedWriter) entryURL(alID int) string {
-	return seadex.EntryURL(w.seadexBaseURL, alID)
+func entryURL(alID int) string {
+	return seadex.EntryURL(defaultSeaDexBaseURL, alID)
 }
 
 // validInfoHash returns h lowercased when it is a 40-char SHA-1 hex info hash,

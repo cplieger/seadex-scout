@@ -341,7 +341,14 @@ func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Valu
 	}
 	doc, rendered := renderFeed(items)
 	w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
-	_, _ = io.WriteString(w, doc)
+	if _, err := io.WriteString(w, doc); err != nil {
+		// The client went away or the write deadline fired mid-body: the
+		// request log's `returned` count below describes what was RENDERED,
+		// not what the arr received, so record the partial delivery. Debug,
+		// not Warn - an arr cancelling a slow search is routine.
+		ix.log.Debug("indexer feed write failed; client received a partial feed",
+			"scope", scope, "rendered_items", rendered, "error", err)
+	}
 	if rendered < len(items) {
 		// renderFeed degraded to a truncated-but-valid document (the byte
 		// budget); without this WARN the only request log would falsely

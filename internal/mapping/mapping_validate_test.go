@@ -264,3 +264,30 @@ func TestValidateRefreshedRecordsTypedAtFloorAccepted(t *testing.T) {
 		t.Errorf("typed count at the exact floor (2 of 200, floor 2) returned error %v, want accepted (the floor is strictly below-minimum)", err)
 	}
 }
+
+// TestValidateRefreshedRecordsPreviousPopulationAtSignificanceGateRejected
+// pins the significance gate shared by coverageLost and populationCollapsed
+// (prevCount >= previousMinimum): a previous population sitting EXACTLY at the
+// ceiling-derived 1% floor still counts as meaningful, so a candidate that
+// wholesale loses it must be rejected. Every other floor test carries a
+// previous population far above the gate (100 of 200, 2000 of 2000) or far
+// below it (10 of 2000), so the gate's boundary itself was unpinned.
+func TestValidateRefreshedRecordsPreviousPopulationAtSignificanceGateRejected(t *testing.T) {
+	const body = 200
+	previous := make([]Record, 0, body)
+	candidate := make([]Record, 0, body)
+	for id := 1; id <= body; id++ {
+		p := Record{AniListID: id, TvdbID: id}
+		if id <= 2 {
+			p.Type = "TV" // typed population == coverageFloor(200) == 2
+		}
+		previous = append(previous, p)
+		candidate = append(candidate, Record{AniListID: id, TvdbID: id})
+	}
+	if got, want := typedRecordCount(previous), coverageFloor(len(previous)); got != want {
+		t.Fatalf("previous typed population = %d, want exactly the significance gate %d", got, want)
+	}
+	if err := validateRefreshedRecords(previous, candidate, len(candidate)); err == nil {
+		t.Error("typed collapse against a previous population exactly at the significance gate returned nil error, want rejection")
+	}
+}

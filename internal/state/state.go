@@ -38,6 +38,11 @@ const (
 	// OOM-kill the container during Load instead of degrading to the intended
 	// clean cold start.
 	maxStateBytes = 32 << 20
+	// stateSizeWarnBytes is the pre-cliff warning threshold (80% of
+	// maxStateBytes): crossing the bound refuses every subsequent Save and
+	// freezes the persisted cache, so writeState warns while there is still
+	// headroom to act.
+	stateSizeWarnBytes = maxStateBytes / 10 * 8
 	// dirMode / fileMode are applied to the created state directory and file.
 	// The file holds the operator's library inventory and finding history, so
 	// it stays owner-only (least privilege); the directory mode is the broader
@@ -139,7 +144,8 @@ type Store struct {
 	// overwriting it with a fresh cold-start envelope.
 	unsupportedVersion int
 	// loadFailed remembers that the last Load failed WITHOUT classifying the
-	// file: an EACCES/EIO-style read error, not absence, not an over-cap or
+	// file: an EACCES/EIO-style read error or a read cut short by context
+	// cancellation, not absence, not an over-cap or
 	// corrupt payload (those quarantine), not a newer schema (that sets
 	// unsupportedVersion). While set, Save is refused - the unread bytes may
 	// be fully recoverable (a permissions mistake, a transient I/O fault)
@@ -408,7 +414,8 @@ func (s *Store) quarantine() {
 // whose last Load found a newer-than-supported schema version refuses to
 // save: the newer-schema file must survive at the live path for a
 // roll-forward to consume (see Load). A Store whose last Load failed WITHOUT
-// classifying the file (loadFailed: an EACCES/EIO-style read error) refuses
+// classifying the file (loadFailed: an EACCES/EIO-style read error, or a read
+// cut short by context cancellation) refuses
 // too, preserving the possibly-recoverable bytes until a Load classifies
 // them.
 func (s *Store) Save(ctx context.Context, st *State) error {
@@ -467,6 +474,10 @@ func (s *Store) writeState(ctx context.Context, st *State) error {
 	}()
 	if encErr := encodeState(pf, st, s.path); encErr != nil {
 		return encErr
+	}
+	if staged := pf.BytesWritten(); staged > stateSizeWarnBytes {
+		s.log.Warn("state file approaching the size limit; a Save that exceeds it is refused and the persisted cache freezes",
+			"path", s.path, "bytes", staged, "limit", maxStateBytes)
 	}
 	res, err := pf.Commit(ctx)
 	if err != nil {

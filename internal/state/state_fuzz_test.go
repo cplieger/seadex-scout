@@ -113,6 +113,7 @@ func FuzzStoreLoadQuarantine(f *testing.F) {
 	f.Add([]byte(`{"Version":99,"baselined":true}`))
 	f.Add([]byte(`{"findings":"moved-member-shape","version":99}`))
 	f.Add([]byte(`{"findings":{"k":{}},"shrunk_walks":3}`))
+	f.Add([]byte(`{"mapping":{"version":99},"baselined":true}`))
 	f.Add([]byte(`{"version":99}x`))
 	f.Add([]byte(`{"version":99} {"baselined":true}`))
 	f.Add([]byte(`{1:2}`))

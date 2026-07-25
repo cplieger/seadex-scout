@@ -13,12 +13,12 @@ import (
 func TestBoundedPartThreshold(t *testing.T) {
 	atLimit := strings.Repeat("x", MaxComponentBytes)
 	if got := BoundedPart(atLimit); got != atLimit {
-		t.Errorf("BoundedPart at the limit = %d bytes starting %q, want the escaped legacy form", len(got), got[:16])
+		t.Errorf("BoundedPart at the limit = %d bytes starting %.16q, want the escaped legacy form", len(got), got)
 	}
 	overLimit := atLimit + "x"
 	got := BoundedPart(overLimit)
 	if !strings.HasPrefix(got, "sha256:") {
-		t.Errorf("BoundedPart over the limit = %d bytes starting %q, want the hashed identity", len(got), got[:16])
+		t.Errorf("BoundedPart over the limit = %d bytes starting %.16q, want the hashed identity", len(got), got)
 	}
 	if other := BoundedPart(atLimit + "y"); other == got {
 		t.Error("distinct oversized components must not share a hashed identity")

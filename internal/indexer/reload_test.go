@@ -6,9 +6,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/slogx/capture"
 )
 
@@ -27,7 +29,7 @@ func TestReloadWarnsOnceOnMissingSnapshotAndRecovers(t *testing.T) {
 		},
 	})
 	log, rec := capture.New()
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, path)
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
@@ -112,7 +114,7 @@ func TestReloadRecoversDegradationOnUnchangedSnapshot(t *testing.T) {
 		},
 	})
 	log, rec := capture.New()
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, path)
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
@@ -166,7 +168,7 @@ func TestReloadMemoizedMalformedSnapshotClearsDegradation(t *testing.T) {
 		},
 	})
 	log, rec := capture.New()
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, path)
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
@@ -239,7 +241,7 @@ func TestReloadReassertsFailedStateWhenMalformedSnapshotReappears(t *testing.T) 
 		t.Fatalf("write malformed snapshot: %v", err)
 	}
 	log, rec := capture.New()
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, path)
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
 
 	rss := url.Values{"t": {"search"}}
 	if _, stats := ix.query(context.Background(), rss, upstreamNyaa); !stats.snapshotUnavailable {
@@ -289,7 +291,7 @@ func TestReloadMemoizesOversizedItemSnapshot(t *testing.T) {
 		},
 	})
 	log, rec := capture.New()
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, path)
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
@@ -332,11 +334,11 @@ func TestReloadPreJournalSnapshotServesEmptyFeeds(t *testing.T) {
 		t.Fatalf("write legacy snapshot: %v", err)
 	}
 	log, rec := capture.New()
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: "http://prowlarr/1/api",
 		ABTorznabURL:   "http://prowlarr/2/api",
 		ABPasskey:      "PASSKEY",
-	}}, Deps{Logger: log}, path)
+	}}, Deps{Logger: log})
 	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
 		t.Errorf("nyaa feed from a pre-journal snapshot = %d items, want 0 (the legacy catalogue must not re-broadcast)", len(got))
 	}
@@ -363,7 +365,7 @@ func TestReloadPreJournalSnapshotServesEmptyFeeds(t *testing.T) {
 // the request exactly between the read unlock and the write lock.
 func TestSnapshotUnavailableRecoveredBetweenLocksAnswersFresh(t *testing.T) {
 	log, rec := capture.New()
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, filepath.Join(t.TempDir(), "feed.json"))
+	ix := New(&Config{SnapshotPath: filepath.Join(t.TempDir(), "feed.json"), UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
 	ix.mu.Lock()
 	ix.snapFailed = true
 	ix.mu.Unlock()
@@ -404,7 +406,7 @@ func TestReloadRebuildsNyaaDownloadURLsFromGUID(t *testing.T) {
 		},
 	})
 	log, rec := capture.New()
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, path)
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
 
 	got := ix.feedFor(upstreamNyaa)
 	if len(got) != 1 {
@@ -468,11 +470,11 @@ func TestReloadDropsForeignHostSnapshotGUIDs(t *testing.T) {
 			}
 			writeSnapshotFile(t, path, snap)
 			log, _ := capture.New()
-			ix := New(&Config{UpstreamConfig: UpstreamConfig{
+			ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{
 				NyaaTorznabURL: "http://prowlarr/1/api",
 				ABTorznabURL:   "http://prowlarr/2/api",
 				ABPasskey:      "PASSKEY",
-			}}, Deps{Logger: log}, path)
+			}}, Deps{Logger: log})
 
 			got := ix.feedFor(tc.scope)
 			if len(got) != 1 {
@@ -528,11 +530,11 @@ func TestReloadDropsCrossKeySnapshotGUIDs(t *testing.T) {
 			}
 			writeSnapshotFile(t, path, snap)
 			log, rec := capture.New()
-			ix := New(&Config{UpstreamConfig: UpstreamConfig{
+			ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{
 				NyaaTorznabURL: "http://prowlarr/1/api",
 				ABTorznabURL:   "http://prowlarr/2/api",
 				ABPasskey:      "PASSKEY",
-			}}, Deps{Logger: log}, path)
+			}}, Deps{Logger: log})
 
 			if got := ix.feedFor(tc.scope); len(got) != 0 {
 				t.Errorf("%s feed = %d items (%+v), want 0: a cross-key GUID must never serve under the persisted curation binding", tc.scope, len(got), got)
@@ -564,7 +566,7 @@ func TestReloadSanitizesSnapshotInfoURLs(t *testing.T) {
 		},
 	})
 	log, rec := capture.New()
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, path)
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
 
 	got := ix.feedFor(upstreamNyaa)
 	if len(got) != 3 {
@@ -657,11 +659,11 @@ func TestReloadDropsCrossTrackerSnapshotItems(t *testing.T) {
 			}
 			writeSnapshotFile(t, path, snap)
 			log, rec := capture.New()
-			ix := New(&Config{UpstreamConfig: UpstreamConfig{
+			ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{
 				NyaaTorznabURL: "http://prowlarr/1/api",
 				ABTorznabURL:   "http://prowlarr/2/api",
 				ABPasskey:      "PASSKEY",
-			}}, Deps{Logger: log}, path)
+			}}, Deps{Logger: log})
 
 			if got := ix.feedFor(tc.scope); len(got) != 0 {
 				t.Errorf("%s feed = %d items (%+v), want 0: a cross-tracker item must never serve from the wrong feed", tc.scope, len(got), got)
@@ -690,9 +692,9 @@ func TestReloadDropsUserinfoBearingSnapshotGUID(t *testing.T) {
 		}},
 	})
 	log, rec := capture.New()
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: "http://prowlarr/1/api",
-	}}, Deps{Logger: log}, path)
+	}}, Deps{Logger: log})
 
 	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
 		t.Errorf("nyaa feed = %d items (%+v), want 0: a userinfo-bearing persisted GUID must never serve", len(got), got)
@@ -713,7 +715,7 @@ func TestReloadDropsUserinfoBearingSnapshotGUID(t *testing.T) {
 // fresh-install state.
 func TestReloadCoalescingLoserBlocksWithoutMarkingFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json") // never written: fresh install
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, path)
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{})
 
 	// The winning reload is in flight over the missing first snapshot.
 	if !ix.tryLockReload() {
@@ -751,7 +753,7 @@ func TestReloadCoalescingLoserBlocksWithoutMarkingFailure(t *testing.T) {
 // like the blocking loser: the verdict is the winner's to establish.
 func TestReloadCoalescingLoserWaitAbandonsOnCancelledContext(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json") // never written: fresh install
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, path)
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{})
 
 	// The winning reload is in flight over the missing first snapshot.
 	if !ix.tryLockReload() {
@@ -774,5 +776,453 @@ func TestReloadCoalescingLoserWaitAbandonsOnCancelledContext(t *testing.T) {
 	ix.mu.RUnlock()
 	if failed {
 		t.Error("snapFailed = true after an abandoned wait; the verdict is the winner's to establish")
+	}
+}
+
+// TestReloadKeepsFeedOnMalformedSnapshot verifies reload's resilience contract: once a
+// good feed is loaded, a later malformed snapshot write (a partial/corrupt cycle write) is
+// logged and ignored, never blanking the live feed. A cross-process poll writes the file
+// non-atomically only in the failure case; the server must not serve an empty feed then.
+func TestReloadKeepsFeedOnMalformedSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	if err := newTestWriter(path, "", false).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, Deps{})
+	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
+		t.Fatalf("initial feed = %d items, want 1", len(got))
+	}
+	if err := os.WriteFile(path, []byte("{not valid json"), 0o600); err != nil {
+		t.Fatalf("corrupt write: %v", err)
+	}
+	bumpMtime(t, path)
+	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
+		t.Errorf("after malformed rewrite feed = %d items, want 1 (a bad write must not blank a live feed)", len(got))
+	}
+}
+
+// TestReloadKeepsFeedOnZeroSnapshot extends the malformed-snapshot contract to
+// syntactically valid but structurally empty JSON: `null` and `{}` decode
+// cleanly into a zero snapshot, and installing one would blank both synthesized
+// feeds and both curation maps. The writer always emits non-nil by_hash/by_key
+// maps (even for an empty catalogue), so nil curation maps identify a
+// structurally invalid snapshot the reload must reject, preserving the
+// last-good feed.
+func TestReloadKeepsFeedOnZeroSnapshot(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"null document", "null"},
+		{"empty object", "{}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "feed.json")
+			seedEmptyLedger(t, path)
+			if err := newTestWriter(path, "", false).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
+				t.Fatalf("Rebuild: %v", err)
+			}
+			ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{})
+			if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+				t.Fatalf("initial feed = %d items, want 1", len(got))
+			}
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatalf("zero-snapshot write: %v", err)
+			}
+			bumpMtime(t, path)
+			ix.reload(context.Background())
+			if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+				t.Errorf("after %s rewrite feed = %d items, want 1 (a zero snapshot must not blank a live feed)", tc.name, len(got))
+			}
+		})
+	}
+}
+
+// TestReloadRebuildsABDownloadURLsFromCurrentPasskey pins the credential
+// policy for the persisted AB feed: FeedWriter persists AB items GUID-only
+// (no passkey-bearing download URL lands in feed.json), so the reload MUST
+// derive every AB download URL from the item's non-secret tracker page URL
+// (GUID) and the CURRENT passkey or the feed has no grabbable links at all.
+// The same derivation makes an ab_passkey rotation take effect on the next
+// load, never serves a legacy snapshot's persisted credential verbatim, drops
+// an item whose URL cannot be derived, and clears the AB feed entirely when
+// no passkey is configured.
+func TestReloadRebuildsABDownloadURLsFromCurrentPasskey(t *testing.T) {
+	entries := []seadex.Entry{{
+		AniListID: 154587,
+		Torrents: []seadex.Torrent{{
+			Tracker: "AB", URL: "/torrents.php?id=86576&torrentid=1167293", InfoHash: "<redacted>",
+			IsBest: true, ReleaseGroup: "PMR",
+			Files: []seadex.File{{Length: 1, Name: "Frieren - S01E01 (BD Remux 1080p) [PMR].mkv"}},
+		}},
+	}}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	if err := newTestWriter(path, "OLD_PASSKEY", true).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+
+	// A restart after rotating the passkey: the loaded AB feed must carry only
+	// the NEW credential.
+	ix := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "NEW_PASSKEY"}}, Deps{})
+	got := ix.feedFor(upstreamAB)
+	if len(got) != 1 {
+		t.Fatalf("ab feed = %d items, want 1", len(got))
+	}
+	if want := "https://animebytes.tv/torrent/1167293/download/NEW_PASSKEY"; got[0].DownloadURL != want {
+		t.Errorf("ab download = %q, want %q (rebuilt from the current passkey)", got[0].DownloadURL, want)
+	}
+	if strings.Contains(got[0].DownloadURL, "OLD_PASSKEY") {
+		t.Errorf("ab download still carries the rotated passkey: %q", got[0].DownloadURL)
+	}
+
+	// With NO passkey configured the persisted credential-bearing links must
+	// not be served at all: the AB feed clears (serve answers the /ab RSS
+	// check with a Torznab <error> in that state); Nyaa is untouched.
+	none := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, Deps{})
+	if got := none.feedFor(upstreamAB); len(got) != 0 {
+		t.Errorf("ab feed without a configured passkey = %d items, want 0", len(got))
+	}
+
+	// An AB item whose page URL yields no torrent id cannot have its URL
+	// re-derived: it is dropped rather than served with the stale credential.
+	noID := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[],"ab_feed":[{"Title":"no id","GUID":"https://animebytes.tv/torrents.php?id=1","DownloadURL":"https://animebytes.tv/torrent/1/download/OLD_PASSKEY"}]}`
+	noIDPath := filepath.Join(t.TempDir(), "feed.json")
+	if err := os.WriteFile(noIDPath, []byte(noID), 0o600); err != nil {
+		t.Fatalf("write no-id snapshot: %v", err)
+	}
+	dropper := New(&Config{APIKey: "k", SnapshotPath: noIDPath, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "NEW_PASSKEY"}}, Deps{})
+	if got := dropper.feedFor(upstreamAB); len(got) != 0 {
+		t.Errorf("ab feed with an underivable item = %d items, want 0 (dropped, never served with the persisted credential)", len(got))
+	}
+}
+
+// TestReloadRetriesPreservedMtimeReplacementAfterFailure pins the failed-file
+// memo to file IDENTITY, not just mtime: after a malformed snapshot fails to
+// load at mtime T, a repaired valid snapshot installed on a NEW inode whose
+// mtime is reset to the same T (an atomic rename or backup restore preserving
+// timestamps) must be retried and installed - a mtime-only watermark would skip
+// it and wedge the server on the old feed until restart. Only the unchanged bad
+// inode itself stays memoized.
+func TestReloadRetriesPreservedMtimeReplacementAfterFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "feed.json")
+	if err := os.WriteFile(path, []byte("{not valid json"), 0o600); err != nil {
+		t.Fatalf("malformed write: %v", err)
+	}
+	failedAt := time.Now().Add(-time.Hour).Truncate(time.Second)
+	setMtime(t, path, failedAt)
+	// New's warm-up reload reads the malformed file and memoizes it as failed.
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, Deps{})
+	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
+		t.Fatalf("initial feed = %d items, want 0 (malformed snapshot must not load)", len(got))
+	}
+	// Repair: a valid snapshot on a NEW inode, renamed over the bad file with
+	// the failed mtime preserved.
+	repaired := filepath.Join(dir, "feed-repaired.json")
+	if err := seedRebuild(repaired, nyaaTestEntries(1)); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if err := os.Rename(repaired, path); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	setMtime(t, path, failedAt)
+	ix.reload(context.Background())
+	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
+		t.Errorf("after preserved-mtime repair feed = %d items, want 1 (a new inode at the failed mtime must be retried)", len(got))
+	}
+}
+
+// TestReloadInstallsPreservedMtimeReplacementAfterSuccess pins the last-good
+// gate to file IDENTITY, not just mtime: after a snapshot loads successfully at
+// mtime T, a DIFFERENT valid snapshot installed on a new inode with its mtime
+// reset to the same T (an atomic rename or backup restore preserving
+// timestamps) must still install - a mtime-only last-good check would return
+// early and leave the old feed served until an unrelated write or a restart.
+func TestReloadInstallsPreservedMtimeReplacementAfterSuccess(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "feed.json")
+	if err := seedRebuild(path, nyaaTestEntries(1)); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	loadedAt := time.Now().Add(-time.Hour).Truncate(time.Second)
+	setMtime(t, path, loadedAt)
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{})
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+		t.Fatalf("initial feed = %d items, want 1", len(got))
+	}
+
+	// A different snapshot on a NEW inode, renamed over the loaded file with
+	// the loaded mtime preserved.
+	replacement := filepath.Join(dir, "feed-replacement.json")
+	if err := seedRebuild(replacement, nyaaTestEntries(2)); err != nil {
+		t.Fatalf("Rebuild replacement: %v", err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	setMtime(t, path, loadedAt)
+	ix.reload(context.Background())
+	if got := ix.feedFor(upstreamNyaa); len(got) != 2 {
+		t.Errorf("after preserved-mtime replacement feed = %d items, want 2 (a new inode at the loaded mtime must install)", len(got))
+	}
+}
+
+// TestReloadRetriesTransientReadFailureOnSameInode pins the failed-file memo to
+// DETERMINISTIC failures only: a snapshot whose read fails (here an oversized
+// file the bounded read rejects - a root-safe stand-in for a transient EIO or
+// a later-chmodded EACCES) must NOT be memoized, so a subsequent in-place
+// repair that changes neither inode nor mtime is still retried and installs.
+// Memoizing the read failure would skip the unchanged-identity file forever.
+func TestReloadRetriesTransientReadFailureOnSameInode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "feed.json")
+	// A sparse file one byte over the bound: os.Stat succeeds, the bounded
+	// read fails.
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := f.Truncate(maxFeedBytes + 1); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	failedAt := time.Now().Add(-time.Hour).Truncate(time.Second)
+	setMtime(t, path, failedAt)
+	// New's warm-up reload hits the read failure; it must stay retryable.
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{})
+	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
+		t.Fatalf("initial feed = %d items, want 0 (oversized snapshot must not load)", len(got))
+	}
+
+	// Repair IN PLACE (same inode: build a valid snapshot beside it, then
+	// rewrite the original file's bytes) and restore the failed mtime.
+	repaired := filepath.Join(dir, "feed-repaired.json")
+	if err := seedRebuild(repaired, nyaaTestEntries(1)); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	valid, err := os.ReadFile(repaired)
+	if err != nil {
+		t.Fatalf("read repaired: %v", err)
+	}
+	if err := os.WriteFile(path, valid, 0o600); err != nil {
+		t.Fatalf("in-place repair: %v", err)
+	}
+	setMtime(t, path, failedAt)
+	ix.reload(context.Background())
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+		t.Errorf("after same-inode repair feed = %d items, want 1 (a read failure must stay retryable)", len(got))
+	}
+}
+
+// TestReloadConcurrentCallers exercises reload's coalescing under concurrency
+// (run with -race): many requests observing a rewritten snapshot at once must
+// never race on the published snapshot fields, and the new feed must be
+// installed once the dust settles.
+func TestReloadConcurrentCallers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	if err := seedRebuild(path, nyaaTestEntries(1)); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{})
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+		t.Fatalf("initial feed = %d items, want 1", len(got))
+	}
+	// A second cycle over a grown catalogue: entry 1 carries, entry 2 is new.
+	if err := newTestWriter(path, "", false).Rebuild(context.Background(), nyaaTestEntries(2), nil); err != nil {
+		t.Fatalf("Rebuild newer: %v", err)
+	}
+	bumpMtime(t, path)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			ix.reload(context.Background())
+			_ = ix.feedFor(upstreamNyaa)
+		})
+	}
+	wg.Wait()
+	// TryLock losers return without installing; one more serial reload
+	// guarantees the newer snapshot is in.
+	ix.reload(context.Background())
+	if got := ix.feedFor(upstreamNyaa); len(got) != 2 {
+		t.Errorf("after concurrent reloads feed = %d items, want 2", len(got))
+	}
+}
+
+// TestReloadInstallsOlderMtimeSnapshot pins reload's inequality freshness
+// guard: an on-disk snapshot whose mtime is OLDER than the loaded copy's still
+// installs. A /config volume restored from backup, or a file replaced by an
+// atomic rename preserving an older mtime, is the current truth on disk; the
+// former strictly-After guard never installed it and wedged the server on the
+// stale in-memory snapshot until restart. Any mtime CHANGE reloads; only
+// equality skips (TestReloadSkipsUnchangedMtime). Driven single-threaded: the
+// pre-install holds the write lock exactly as a real cycle would, and the lone
+// reload runs after it, so there is no shared-state access outside the lock.
+func TestReloadInstallsOlderMtimeSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	oldTime := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	newerTime := oldTime.Add(time.Hour)
+	restoredJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Key":"nyaa:7","Title":"restored","GUID":"https://nyaa.si/view/7","DownloadURL":"restored"}],"ab_feed":[]}`
+	if err := os.WriteFile(path, []byte(restoredJSON), 0o600); err != nil {
+		t.Fatalf("write restored snapshot: %v", err)
+	}
+	setMtime(t, path, oldTime)
+
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{})
+
+	// Pre-install a newer-mtime snapshot the way a pre-restore cycle would,
+	// holding the write lock exactly as reload's install path does.
+	ix.mu.Lock()
+	ix.snap = snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "stale", GUID: "stale", DownloadURL: "stale"}},
+		},
+	}
+	ix.snapMod = newerTime
+	ix.mu.Unlock()
+
+	// Reloading against the older-mtime on-disk file must install it: the
+	// mtime differs from the loaded snapshot's, and the file is the truth.
+	ix.reload(context.Background())
+
+	got := ix.feedFor(upstreamNyaa)
+	if len(got) != 1 || got[0].Title != "restored" {
+		t.Fatalf("feed after reloading an older-mtime snapshot = %#v, want the restored on-disk snapshot", got)
+	}
+	ix.mu.RLock()
+	reloadedMod := ix.snapMod
+	ix.mu.RUnlock()
+	if reloadedMod.Equal(newerTime) {
+		t.Fatalf("snapMod after reloading an older-mtime snapshot = %v, want the on-disk mtime, not the stale %v", reloadedMod, newerTime)
+	}
+}
+
+// TestReloadSkipsUnchangedMtime pins the equality leg of reload's freshness
+// guard: when the on-disk mtime equals the loaded snapshot's, reload leaves the
+// served feed untouched - even if the bytes changed - so the per-request mtime
+// check stays a cheap stat, never a read/unmarshal.
+func TestReloadSkipsUnchangedMtime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	when := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	firstJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Key":"nyaa:1","Title":"first","GUID":"https://nyaa.si/view/1","DownloadURL":"first"}],"ab_feed":[]}`
+	if err := os.WriteFile(path, []byte(firstJSON), 0o600); err != nil {
+		t.Fatalf("write first snapshot: %v", err)
+	}
+	setMtime(t, path, when)
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{})
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
+		t.Fatalf("initial feed = %#v, want the first snapshot", got)
+	}
+
+	// Rewrite the content but restore the identical mtime: reload must skip.
+	secondJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Key":"nyaa:2","Title":"second","GUID":"https://nyaa.si/view/2","DownloadURL":"second"}],"ab_feed":[]}`
+	if err := os.WriteFile(path, []byte(secondJSON), 0o600); err != nil {
+		t.Fatalf("write second snapshot: %v", err)
+	}
+	setMtime(t, path, when)
+	ix.reload(context.Background())
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
+		t.Fatalf("feed after unchanged-mtime rewrite = %#v, want the loaded first snapshot (equality skips)", got)
+	}
+}
+
+// TestReloadCoalescesConcurrentRefreshes pins reload's coalescing contract
+// AFTER a first successful load: while one request holds the refresh
+// (the reload gate, as a winning reload does for its whole stat/read/unmarshal), a
+// sibling reload returns immediately without duplicating the read - it does
+// not block and does not install the on-disk snapshot itself - and feedFor
+// keeps serving the current snapshot unblocked. Once the refresh is released,
+// the next reload installs the new snapshot. (Before the first load, losers
+// block on the winner's verdict instead - see
+// TestReloadCoalescingLoserDefersToWinnerOnFreshInstall.)
+func TestReloadCoalescesConcurrentRefreshes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	firstJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Key":"nyaa:1","Title":"first","GUID":"https://nyaa.si/view/1","DownloadURL":"first"}],"ab_feed":[]}`
+	if err := os.WriteFile(path, []byte(firstJSON), 0o600); err != nil {
+		t.Fatalf("write first snapshot: %v", err)
+	}
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{})
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
+		t.Fatalf("initial feed = %#v, want the first snapshot loaded", got)
+	}
+
+	// A newer on-disk snapshot the in-progress refresh has not installed yet.
+	// The in-place rewrite lands on the same inode within the filesystem's
+	// mtime granularity, so bump the mtime past the loaded snapshot's or
+	// loadedSnapshotUnchanged would skip the reload (production writes are
+	// atomic renames, which install a new inode instead).
+	newJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Key":"nyaa:3","Title":"new","GUID":"https://nyaa.si/view/3","DownloadURL":"new"}],"ab_feed":[]}`
+	if err := os.WriteFile(path, []byte(newJSON), 0o600); err != nil {
+		t.Fatalf("write new snapshot: %v", err)
+	}
+	bumpMtime(t, path)
+
+	// Simulate a refresh in progress: hold the reload gate exactly as the
+	// winning request does across its stat/read/unmarshal.
+	if !ix.tryLockReload() {
+		t.Fatal("reload gate already held; want it free before simulating a refresh")
+	}
+
+	// A sibling reload must return immediately rather than queue behind the
+	// in-progress refresh or perform a duplicate read.
+	done := make(chan struct{})
+	go func() {
+		ix.reload(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		ix.unlockReload()
+		t.Fatal("sibling reload blocked behind an in-progress refresh; want an immediate return once a snapshot is loaded")
+	}
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
+		ix.unlockReload()
+		t.Fatalf("sibling reload = %#v; want the current snapshot kept and the install left to the refresh holder", got)
+	}
+
+	// Once the winning request releases the refresh, the next reload installs
+	// the new snapshot as usual.
+	ix.unlockReload()
+	ix.reload(context.Background())
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "new" {
+		t.Fatalf("reload after the refresh released = %#v, want the new snapshot installed", got)
+	}
+}
+
+// TestInstallSnapshotSkipsAlreadyInstalledFile pins installSnapshot's
+// under-lock re-check: re-installing the same unchanged file (equal mtime AND
+// os.SameFile identity) returns false and leaves the published snapshot
+// untouched. The reload gate already serializes reloads today, but the comment
+// declares this defense-in-depth invariant must hold even if the TryLock
+// coalescing changes, so it is pinned by direct call.
+func TestInstallSnapshotSkipsAlreadyInstalledFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	info1, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	info2, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{})
+	if !ix.installSnapshot(info1, &snapshot{NyaaFeed: []journalItem{
+		{item: item{Title: "first"}},
+	}}) {
+		t.Fatal("first installSnapshot = false, want true")
+	}
+	if ix.installSnapshot(info2, &snapshot{NyaaFeed: []journalItem{
+		{item: item{Title: "second"}},
+	}}) {
+		t.Fatal("second installSnapshot with same unchanged file = true, want false")
+	}
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
+		t.Fatalf("served feed = %+v, want the originally installed snapshot", got)
 	}
 }

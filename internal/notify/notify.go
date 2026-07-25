@@ -89,6 +89,14 @@ func NewNotifier(logger *slog.Logger) *Notifier {
 // missing data, not evidence of alignment - it is carried forward unresolved
 // (original alert time kept, no "finding resolved" line) instead of being
 // falsely resolved. Pass nil when every item has complete evidence.
+//
+// The "findings reported" summary line's counters are defined in emitted-line
+// terms: total is the input batch size, new the notifications emitted,
+// resolved and preserved the two prior-finding outcomes above, and
+// suppressed the remainder of the batch (total-new) - every finding that
+// produced no notification, whether because a prior cycle already alerted its
+// key OR because an earlier copy in this same batch carried the same key
+// (in-batch duplicates are reachable; see collectCurrent).
 func (n *Notifier) Notify(findings []compare.Finding, prior map[string]Alerted, failedItems map[int]struct{}, now time.Time) map[string]Alerted {
 	current, newCount := n.collectCurrent(findings, prior, now)
 
@@ -132,7 +140,6 @@ func (n *Notifier) collectCurrent(findings []compare.Finding, prior map[string]A
 		keys[i] = dedupeKey(&findings[i])
 		latest[keys[i]] = &findings[i]
 	}
-	newCount = 0
 	for _, key := range keys {
 		f := latest[key]
 		if _, ok := current[key]; ok {
@@ -199,24 +206,19 @@ func (n *Notifier) emitResolved(f *StoredFinding) {
 // the same data (CWE-400).
 const maxAttrBytes = 8 << 10
 
-// capAttr sanitizes an untrusted attribute for the JSON slog sink and caps
-// its volume: honest values pass byte-identical; a hostile oversized value
-// (SeaDex admits multi-MB URLs, up to 512 per entry) is truncated on a rune
-// boundary with a "..." marker so one record can never balloon past
-// downstream log-pipeline line limits (alert suppression) or amplify memory.
-// The cap mirrors keyenc.MaxComponentBytes, the bound the dedupe-key path
-// already applies to the same data (CWE-400). A MULTI-SOURCE attribute (a
-// joined group or link list) must not be materialized and handed to capAttr:
-// joining first would allocate the whole untrusted aggregate (up to 512
-// multi-MB values) before the bound applies, so those render through
-// attrJoiner instead.
+// capAttr renders one untrusted single-value attribute for the JSON slog
+// sink: honest values pass byte-identical; a hostile oversized value (SeaDex
+// admits multi-MB URLs, up to 512 per entry) is truncated on a rune boundary
+// with a "..." marker so one record can never balloon past downstream
+// log-pipeline line limits (alert suppression) or amplify memory. The whole
+// policy - the rune sanitization, the maxAttrBytes budget, and the
+// cap-before-sanitize order that makes the bound cover the WORK and not just
+// the output - lives in attrJoiner; see its doc for the rationale.
 //
-// It runs the single value through that same bounded joiner so the CAP applies
-// before the sanitizer, not after: sanitizing first (a strings.Map over the
-// whole value) allocated a full sanitized copy of a multi-MB SeaDex string
-// just to throw all but 8 KiB of it away, which enforced the output bound but
-// not the memory-amplification guarantee this comment makes. Honest values are
-// byte-identical either way (runesafe.Sanitize is a per-rune map).
+// A MULTI-SOURCE attribute (a joined group or link list) must never be
+// materialized and handed to capAttr - joining first would allocate the whole
+// untrusted aggregate before the bound applies. Those render through
+// joinGroupsAttr / joinLinksAttr on the same joiner instead.
 func capAttr(s string) string {
 	j := newAttrJoiner()
 	j.write(s)
@@ -286,14 +288,14 @@ func (j *attrJoiner) string() string {
 // a compact seadex_tags line so an alert can render a self-contained,
 // clickable notification straight from the labels. Every attribute derived
 // from untrusted upstream data (SeaDex/tracker titles, groups, URLs, hashes)
-// is passed through capAttr — or, for a multi-source attribute
-// (recommended_groups, release_urls), through the bounded joinGroupsAttr /
-// joinLinksAttr, which apply the same policy without materializing the
-// aggregate first — runesafe.Sanitize (the same policy the audit
+// is passed through capAttr: runesafe.Sanitize (the same policy the audit
 // report's slog path applies, because slog's JSONHandler escapes C0 controls
 // but emits C1 controls and bidi controls raw) plus a volume cap mirroring
-// the bound the dedupe-key path applies to the same data. Fixed-pattern app
-// values (resolution, codec, kind, season, al_id, arr, status) stay raw.
+// the bound the dedupe-key path applies to the same data. A MULTI-SOURCE
+// attribute (recommended_groups, release_urls) applies that same policy
+// through joinGroupsAttr / joinLinksAttr, which never materialize the
+// untrusted aggregate before the cap. Fixed-pattern app values (resolution,
+// codec, kind, season, al_id, arr, status) stay raw.
 func findingKVs(f *compare.Finding) []any {
 	nyaaURL, abURL := trackerURLs(f.Links)
 	return []any{
@@ -357,9 +359,10 @@ func setFirst(dst *string, value string) {
 
 // trackerURLs splits a finding's obtainable links into the public (Nyaa) and
 // AnimeBytes URLs, so an alert can render a distinct Nyaa link and AB link.
-// AB routing is URL-aware, matching the obtainability filter (compare's
-// dedupe key now keys the full obtainable URL set label-insensitively
-// instead): a link with definite AnimeBytes evidence (filter.DefinitelyAB -
+// AB routing is URL-aware, matching the obtainability filter (this package's
+// dedupe key, dedupekey.go, keys the full obtainable URL set
+// label-insensitively instead): a link with definite AnimeBytes evidence
+// (filter.DefinitelyAB -
 // AB label or animebytes.tv URL host) wins the AB slot outright, ahead of
 // ABGated's conservative fail-closed fallback. ABGated intentionally also
 // reads a malformed, unparseable, or non-ASCII-host URL as AB-gated; such an

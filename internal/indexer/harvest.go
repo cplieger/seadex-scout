@@ -49,6 +49,16 @@ const harvestShowPageCap = 3
 // offset paging (there is nothing older left to reach).
 const harvestPageSize = 100
 
+// maxHarvestCursorBytes bounds the persisted harvest_cursor at ingress - the
+// one snapshot field with no other cap (validPersistedItem covers feed items,
+// titleCacheWithinLimits the title cache, seenLedgerWithinLimits the seen
+// ledger). An honest cursor is the bare "scope:alID" form plus one small page
+// entry per pending group (kilobytes at most), so 64 KiB is orders of
+// magnitude of headroom, while a hand-edited or corrupted snapshot can no
+// longer carry a multi-megabyte cursor that every later rebuild re-encodes
+// verbatim.
+const maxHarvestCursorBytes = 64 << 10
+
 // harvestWait blocks between paced queries; a package var so the test suite
 // can replace the real sleep (pacing gaps are wall-clock politeness, not
 // logic under test) and the pacer tests can advance a fake clock instead.
@@ -145,7 +155,7 @@ type harvestGroup struct {
 // (e.g. a proxy answering HTML to everything) or an upstream deterministically
 // rejecting every query shape is upstream-wide breakage that would otherwise
 // burn the whole time slice with zero progress.
-func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]journalItem, titles map[string]string, infoFor func(alID int) EntryInfo, prevCursor string) (stats harvestStats, cursor string) {
+func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]journalItem, titles map[string]string, infoFor EntryInfoFunc, prevCursor string) (stats harvestStats, cursor string) {
 	cp := decodeHarvestCheckpoint(prevCursor)
 	defer func() { stats.pending = syntheticCount(feeds, titles) }()
 	groups, index := pendingHarvest(feeds, titles, infoFor)
@@ -195,7 +205,7 @@ func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]journ
 // per-group step instead of nine, keeping harvestTitles about setup and
 // ordered iteration.
 type harvestRun struct {
-	infoFor    func(alID int) EntryInfo
+	infoFor    EntryInfoFunc
 	checkpoint *harvestCheckpoint
 	pacer      *harvestPacer
 	stats      *harvestStats
@@ -269,18 +279,31 @@ type harvestCheckpoint struct {
 // bare "scope:alID" rotation cursor (any non-JSON string) becomes a Last-only
 // checkpoint, a JSON object decodes fully, and malformed JSON - a hand-edited
 // or corrupted snapshot - degrades to an empty checkpoint (start at the head,
-// page from zero: the safe baseline). Non-positive persisted pages are
+// page from zero: the safe baseline). The rotation cursor is validated in both
+// arms (validRotationCursor): only the "<scope>:<alID>" shape harvestCursorKey
+// produces survives, so a garbage value cannot be carried forward verbatim
+// forever. Non-positive persisted pages are
 // dropped: page 0 is the default and needs no entry, a negative value is
 // meaningless, and a value that would overflow the offset computation resets
-// to zero.
+// to zero. A cursor over maxHarvestCursorBytes is external corruption and
+// takes the same empty-checkpoint baseline before any decoding.
 func decodeHarvestCheckpoint(raw string) harvestCheckpoint {
+	if len(raw) > maxHarvestCursorBytes {
+		// An over-cap cursor cannot come from this writer (a cursor names
+		// live groups only, and pruneHarvestPages keeps it that way), so it
+		// is external corruption: degrade to the same safe baseline
+		// malformed JSON takes (start at the head, page from zero) instead
+		// of decoding it and re-persisting it forever.
+		return harvestCheckpoint{Pages: make(map[string]int)}
+	}
 	if !strings.HasPrefix(strings.TrimSpace(raw), "{") {
-		return harvestCheckpoint{Last: raw, Pages: make(map[string]int)}
+		return harvestCheckpoint{Last: validRotationCursor(raw), Pages: make(map[string]int)}
 	}
 	var cp harvestCheckpoint
 	if err := json.Unmarshal([]byte(raw), &cp); err != nil {
 		return harvestCheckpoint{Pages: make(map[string]int)}
 	}
+	cp.Last = validRotationCursor(cp.Last)
 	if cp.Pages == nil {
 		cp.Pages = make(map[string]int)
 	}
@@ -340,6 +363,26 @@ func pruneHarvestPages(pages map[string]int, groups []harvestGroup) {
 // "scope:alID" form persisted in the snapshot's harvest_cursor field.
 func harvestCursorKey(g harvestGroup) string {
 	return g.scope + ":" + strconv.Itoa(g.alID)
+}
+
+// validRotationCursor returns cursor unchanged when it has the rotation-key
+// shape harvestCursorKey produces ("<scope>:<alID>"), else "". The cursor is
+// carried into every future snapshot verbatim - a rebuild with no pending
+// group never overwrites it - so a garbage or unbounded value from a
+// hand-edited or corrupted snapshot would persist forever, the hazard the
+// seen-ledger and title-cache caps (seenLedgerWithinLimits /
+// titleCacheWithinLimits) already close for the other verbatim-carried
+// fields. Dropping it changes no rotation behavior: rotationStart already
+// treats an unparseable cursor as "start at the head".
+func validRotationCursor(cursor string) string {
+	scope, idStr, ok := strings.Cut(cursor, ":")
+	if !ok || (scope != upstreamNyaa && scope != upstreamAB) {
+		return ""
+	}
+	if _, err := strconv.Atoi(idStr); err != nil {
+		return ""
+	}
+	return cursor
 }
 
 // rotationStart resolves where this rebuild's group iteration begins: the
@@ -555,7 +598,7 @@ func (w *FeedWriter) searchHarvestPage(ctx context.Context, u *upstream, g harve
 		// preserved so the next rebuild retries it.
 		return nil, 0, harvestScopeFailed, false
 	}
-	return nil, 0, w.classifyHarvestError(err, u, g.alID), false
+	return nil, 0, w.classifyHarvestError(err, u, g.alID, params.Get("t"), page), false
 }
 
 // harvestPageComplete reports whether this show's paging is done after the
@@ -573,20 +616,26 @@ func harvestPageComplete(g harvestGroup, titles map[string]string, raw int) bool
 // request-specific HTTP status (400/414/422) - stays show-local and counts
 // toward the consecutive-rejected latch (harvestShowFailed), and
 // anything else - an auth/config/availability status or a transport failure -
-// condemns the scope (harvestScopeFailed).
-func (w *FeedWriter) classifyHarvestError(err error, u *upstream, alID int) harvestOutcome {
+// condemns the scope (harvestScopeFailed). Every arm names the failing REQUEST
+// as well as the show: queryType is the query shape harvestParams chose
+// (t=search vs t=tvsearch) and page the offset page, so an operator can tell a
+// season-form rejection from a flat-search one and a poisoned deep page from a
+// first-page failure. The encoded query and full URL stay out of the log
+// deliberately (prowlarr.go strips RawQuery and userinfo from every error that
+// reaches here).
+func (w *FeedWriter) classifyHarvestError(err error, u *upstream, alID int, queryType string, page int) harvestOutcome {
 	if malformedUpstreamBody(err) {
 		w.log.Warn("indexer title harvest response malformed; show keeps its synthesized title this rebuild",
-			"upstream", u.name, "al_id", alID, "error", err)
+			"upstream", u.name, "al_id", alID, "query_type", queryType, "page", page, "error", err)
 		return harvestShowMalformed
 	}
 	if requestScopedHarvestError(err) {
 		w.log.Warn("indexer title harvest request rejected; show keeps its synthesized title this rebuild",
-			"upstream", u.name, "al_id", alID, "error", err)
+			"upstream", u.name, "al_id", alID, "query_type", queryType, "page", page, "error", err)
 		return harvestShowFailed
 	}
 	w.log.Warn("indexer title harvest query failed; skipping this upstream's remaining shows this rebuild",
-		"upstream", u.name, "al_id", alID, "error", err)
+		"upstream", u.name, "al_id", alID, "query_type", queryType, "page", page, "error", err)
 	return harvestScopeFailed
 }
 
@@ -605,8 +654,16 @@ type harvestGroupKey struct {
 // identity forms (tracker key and info hash) in the global index that maps a
 // matched Prowlarr result back to the journal key whose title it supplies.
 // A non-harvestable item is left out (see harvestable).
-func indexHarvestItem(it *journalItem, scope string, titles map[string]string, infoFor func(int) EntryInfo, byShow map[harvestGroupKey][]string, index map[string]string) {
+func indexHarvestItem(it *journalItem, scope string, titles map[string]string, infoFor EntryInfoFunc, byShow map[harvestGroupKey][]string, index map[string]string) {
 	if !harvestable(it, titles, infoFor) {
+		return
+	}
+	if scopeOfKey(it.Key) != scope {
+		// A hand-edited or corrupted snapshot can hold an item whose journal
+		// key names a DIFFERENT tracker than the feed it sits in. Its key can
+		// never satisfy matchHarvest's scope binding, so querying for it
+		// would burn up to harvestShowPageCap queries of every rebuild's
+		// slice forever and keep it counted as pending.
 		return
 	}
 	key := harvestGroupKey{scope: scope, alID: it.AniListID}
@@ -634,7 +691,7 @@ func compareHarvestGroups(a, b harvestGroup) int {
 // whose show has no synthesis title source are left out: there is nothing to
 // query with, and they retry once the library or the AniList memo knows the
 // show.
-func pendingHarvest(feeds map[string][]journalItem, titles map[string]string, infoFor func(alID int) EntryInfo) (groups []harvestGroup, index map[string]string) {
+func pendingHarvest(feeds map[string][]journalItem, titles map[string]string, infoFor EntryInfoFunc) (groups []harvestGroup, index map[string]string) {
 	byShow := make(map[harvestGroupKey][]string)
 	index = make(map[string]string)
 	for scope, feed := range feeds {
@@ -653,7 +710,7 @@ func pendingHarvest(feeds map[string][]journalItem, titles map[string]string, in
 // harvestable reports whether a journal item is due a harvest query: it still
 // serves a synthesized title, carries its journal bookkeeping, and its show
 // has a title source to query with.
-func harvestable(it *journalItem, titles map[string]string, infoFor func(alID int) EntryInfo) bool {
+func harvestable(it *journalItem, titles map[string]string, infoFor EntryInfoFunc) bool {
 	if it.Key == "" || it.AniListID <= 0 {
 		return false
 	}

@@ -114,12 +114,15 @@ const evidenceWordClass = `A-Za-z0-9\x{0130}\x{212A}`
 // treated as a token delimiter: any rune outside evidenceWordClass.
 const nonWordEdge = `[^` + evidenceWordClass + `]`
 
-// lowerLiteralPattern renders a lowercase marker token as a regexp fragment
-// matching exactly the raw spellings whose strings.ToLower image equals the
-// token: each ASCII letter becomes an explicit case class — with U+0130
-// added to the i class and U+212A to the k class, the only non-ASCII runes
-// unicode.ToLower maps onto ASCII — digits match themselves, and anything
-// else is quoted literally. A global (?i) is deliberately NOT used: regexp
+// lowerLiteralPattern renders a marker token as a regexp fragment matching
+// exactly the raw spellings whose strings.ToLower image equals the token's
+// lowercase form: each ASCII letter becomes an explicit case class — with
+// U+0130 added to the i class and U+212A to the k class, the only non-ASCII
+// runes unicode.ToLower maps onto ASCII — digits match themselves, and
+// anything else is quoted literally. An ASCII uppercase letter in the token
+// is folded to lowercase before rendering, so a token spelled "CRF" renders
+// the same case-insensitive class "crf" does instead of a case-SENSITIVE
+// literal. A global (?i) is deliberately NOT used: regexp
 // case folding follows unicode.SimpleFold, which diverges from
 // strings.ToLower — (?i)s also matches U+017F (ſ), which ToLower never folds
 // onto s, while (?i)i misses U+0130, which ToLower does fold onto i — so
@@ -128,6 +131,9 @@ const nonWordEdge = `[^` + evidenceWordClass + `]`
 func lowerLiteralPattern(token string) string {
 	var b strings.Builder
 	for _, r := range token {
+		if r >= 'A' && r <= 'Z' {
+			r += 'a' - 'A'
+		}
 		switch {
 		case r >= 'a' && r <= 'z':
 			b.WriteByte('[')

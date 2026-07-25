@@ -27,6 +27,7 @@ func FuzzParseOverrides(f *testing.F) {
 	f.Add([]byte(`[{"weird":1},5]`))
 	f.Add([]byte(`[{"anilist_id":1,"tmdb_movies":[1,2],"imdb_ids":["a"],"season_tvdb":2,"tvdb_id":3}]`))
 	f.Add([]byte(`[{"anilist_id":1},{"anilist_id":1},{"anilist_id":0}]`))
+	f.Add([]byte(`[{"anilist_id":-7,"type":"ova"},{"anilist_id":-1,"tvdb_id":-5,"season_tvdb":-2}]`))
 	f.Add([]byte(`[] trailing`))
 	f.Add([]byte(`[bad]`))
 	f.Add([]byte(`[{"anilist_id":1},`))
@@ -43,8 +44,8 @@ func FuzzParseOverrides(f *testing.F) {
 			return
 		}
 		for _, r := range set.records {
-			if r.AniListID == 0 {
-				t.Errorf("parseOverrides retained a zero-AniList-ID record: %+v", r)
+			if r.AniListID <= 0 {
+				t.Errorf("parseOverrides retained a non-positive-AniList-ID record: %+v", r)
 			}
 			if r.Type != NormalizeType(r.Type) {
 				t.Errorf("parseOverrides record Type %q not normalized", r.Type)

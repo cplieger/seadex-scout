@@ -121,8 +121,8 @@ func TestDecodePageElementBudgetErrors(t *testing.T) {
 // deployment container.
 func TestFetchEntriesCumulativeElementCapErrors(t *testing.T) {
 	// 10 items x (1 + 512 torrents + 512x40 tags) = 209,930 elements per
-	// page: under the 250K per-page budget, over the 250K fetch-wide budget
-	// on page 2. Each page is ~0.7 MB, so the byte caps never fire first.
+	// page: under the 250K per-page budget, over the 500K fetch-wide budget
+	// on page 3. Each page is ~0.7 MB, so the byte caps never fire first.
 	torrent := `{"tags":[` + repeatJSON(`""`, 40) + `]}`
 	item := `{"alID":1,"expand":{"trs":[` + repeatJSON(torrent, 512) + `]}}`
 	page := `{"totalPages":3,"items":[` + repeatJSON(item, 10) + `]}`

@@ -22,7 +22,7 @@ func TestTorznabRenderParse_roundTripsItemsProperty(t *testing.T) {
 			InfoURL:     "https://example.test/info/" + token,
 			DownloadURL: "https://example.test/download/" + token,
 			InfoHash:    rapid.StringMatching(`[0-9a-f]{40}`).Draw(t, "info_hash"),
-			Categories:  []int{catAnime},
+			Categories:  rapid.SliceOfN(rapid.SampledFrom([]int{catAnime, catTV, catMovies, 5030}), 1, 4).Draw(t, "categories"),
 			PubDate:     time.Unix(rapid.Int64Range(0, 4_000_000_000).Draw(t, "unix_seconds"), 0).UTC(),
 			Size:        rapid.Int64Range(0, 1<<40).Draw(t, "size"),
 			Seeders:     rapid.IntRange(1, 10_000).Draw(t, "seeders"),

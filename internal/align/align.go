@@ -96,6 +96,17 @@ func Scope(item *library.Item, rec *mapping.Record) ScopeResult {
 	}
 }
 
+// ItemKind resolves the comparison scope kind of a library item that has no
+// SeaDex-associated Fribb record (an item enumerated by the audit's reverse
+// catalogue, not matched to a SeaDex entry): a Radarr movie scopes to the
+// movie, a Sonarr series has no per-season mapping and reads as the
+// whole-series comparison. It delegates to Scope so the scope dispatch stays
+// single-homed - a caller must never synthesize an empty mapping.Record to
+// reach this classification.
+func ItemKind(item *library.Item) ScopeKind {
+	return Scope(item, &mapping.Record{}).Kind
+}
+
 // wholeSeries reports whether the item must be compared against the whole series
 // rather than a single unit: a Sonarr item with no positive Fribb TVDB season
 // and not a special (an absolute-numbered run like One Piece, or a title-only

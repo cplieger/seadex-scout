@@ -76,8 +76,11 @@ const (
 // and ABPasskey are secrets and are never logged. An empty Nyaa/AnimeBytes URL
 // disables that upstream. ABPasskey is the operator's AnimeBytes passkey,
 // appended to synthesized AB RSS download links (search links go through
-// Prowlarr and need no passkey); empty leaves the AB RSS feed without grabbable
-// links.
+// Prowlarr and need no passkey); empty DROPS the AB RSS feed entirely (no
+// grabbable link can be derived, see rebuildABDownloadURLs) and makes a
+// configured /ab feed answer an empty-query RSS check with a Torznab <error>
+// naming the missing passkey (see rejectMissingABPasskey), so Prowlarr's
+// save-test fails with a reason instead of saving a link-less feed.
 type UpstreamConfig struct {
 	NyaaTorznabURL string
 	ABTorznabURL   string
@@ -86,22 +89,36 @@ type UpstreamConfig struct {
 }
 
 // Config is the indexer server's runtime settings: the embedded shared
-// upstream wiring plus APIKey, the feed's own gate (a secret, never logged).
+// upstream wiring, APIKey (the feed's own gate - a secret, never logged), and
+// SnapshotPath, where the compare cycle persists the materialized feed
+// (config.DefaultIndexerFeedPath in production). SnapshotPath names the same
+// file FeedWriterConfig.Path writes, the one contract binding the package's
+// write half to its read half; it is loaded in New so a restart serves the last
+// feed immediately, and reloaded on change while running. An empty SnapshotPath
+// serves an empty feed (used in tests).
 type Config struct {
-	APIKey string
+	APIKey       string
+	SnapshotPath string
 	UpstreamConfig
 }
 
 // Deps are the clients the indexer server needs: an HTTP client for the Prowlarr
 // per-indexer Torznab endpoints a search proxies. A nil HTTP is substituted by
 // New with a default client sized from UpstreamAttemptTimeout (searches have no
-// disabled mode); only NewFeedWriter treats a nil HTTP as meaningful,
-// harvest-disabled. The curation set and the
+// disabled mode). The curation set and the
 // synthesized RSS feeds are not built here - the compare cycle builds and
 // persists them (see FeedWriter) and the server reads that snapshot - so the
 // server needs no SeaDex or Fribb client of its own. A nil Logger falls back
-// to slog.Default() in both New and NewFeedWriter.
+// to slog.Default().
 type Deps struct {
+	HTTP   *http.Client
+	Logger *slog.Logger
+}
+
+// WriterDeps are the clients the feed writer needs. A nil HTTP is
+// meaningful here: it disables the Prowlarr title harvest (synthesized
+// titles only). A nil Logger falls back to slog.Default().
+type WriterDeps struct {
 	HTTP   *http.Client
 	Logger *slog.Logger
 }
@@ -198,18 +215,16 @@ type Indexer struct {
 }
 
 // New builds the Torznab feed server from cfg and deps, wiring one upstream per
-// configured Prowlarr Torznab URL. snapshotPath is where the compare cycle
-// persists the materialized feed (config.DefaultIndexerFeedPath in production);
-// it is loaded now so a restart serves the last feed immediately, and reloaded
-// on change while running. An empty path serves an empty feed (used in tests).
-func New(cfg *Config, deps Deps, snapshotPath string) *Indexer {
+// configured Prowlarr Torznab URL. The persisted feed snapshot named by
+// cfg.SnapshotPath is loaded now so a restart serves the last feed immediately.
+func New(cfg *Config, deps Deps) *Indexer {
 	log := deps.Logger
 	if log == nil {
 		log = slog.Default()
 	}
 	ix := &Indexer{
 		log:        log,
-		path:       snapshotPath,
+		path:       cfg.SnapshotPath,
 		cfg:        *cfg,
 		verifyKey:  webhttp.NewStaticTokenVerifier(cfg.APIKey),
 		reloadGate: make(chan struct{}, 1),

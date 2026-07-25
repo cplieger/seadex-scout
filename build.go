@@ -58,7 +58,7 @@ func buildScout(ctx context.Context, cfg *config.Config, readOnlyState bool) (bu
 	anilistHTTP := httpx.NewClient(anilistTimeout)
 	pingArrs(ctx, sonarr, radarr)
 
-	anilistClient := anilist.NewClient(anilistHTTP, anilist.DefaultURL, config.DefaultAniListRate, log)
+	anilistClient := anilist.NewClient(anilistHTTP, anilist.DefaultURL, anilist.DefaultRate, log)
 	feed, feedCleanup := feedWriter(cfg, log)
 
 	store := state.NewStore(config.DefaultStatePath, log)
@@ -78,8 +78,8 @@ func buildScout(ctx context.Context, cfg *config.Config, readOnlyState bool) (bu
 			IncludeTags: cfg.IncludeTags,
 			ExcludeTags: cfg.ExcludeTags,
 		}),
-		Mapping: mapping.NewLoader(mappingHTTP, mapping.DefaultURL, config.DefaultMappingOverrides, config.DefaultMappingRefresh, log),
-		SeaDex:  seadex.NewClient(seadexHTTP, seadex.DefaultBaseURL, config.DefaultSeaDexPageDelay, log),
+		Mapping: mapping.NewLoader(mappingHTTP, mapping.DefaultURL, config.DefaultMappingOverrides, mapping.DefaultRefresh, log),
+		SeaDex:  seadex.NewClient(seadexHTTP, seadex.DefaultBaseURL, seadex.DefaultPageDelay, log),
 		Matcher: match.NewMatcher(anilistClient, log),
 		Comparer: compare.NewComparer(compare.Config{
 			Filter:          filterOptions(cfg),
@@ -126,6 +126,14 @@ func upstreamConfig(cfg *config.Config) indexer.UpstreamConfig {
 	}
 }
 
+// indexerLogger scopes a logger to the Torznab feed, so every feed-owned
+// record (the writer's title harvest, the server's requests, the daemon
+// goroutine's terminal lines) carries one component label and stays
+// queryable together in the shared slog stream.
+func indexerLogger(log *slog.Logger) *slog.Logger {
+	return log.With("component", "indexer")
+}
+
 // feedWriter returns the indexer feed writer the compare cycle drives when the
 // Torznab feed is configured - plus the cleanup releasing its Prowlarr HTTP
 // client - else a nil writer (the cycle then does no feed work) and a no-op.
@@ -143,7 +151,7 @@ func feedWriter(cfg *config.Config, log *slog.Logger) (fw scout.FeedWriter, clea
 	writer := indexer.NewFeedWriter(&indexer.FeedWriterConfig{
 		Path:           config.DefaultIndexerFeedPath,
 		UpstreamConfig: upstreamConfig(cfg),
-	}, indexer.Deps{HTTP: prowlarrHTTP, Logger: log.With("component", "indexer")})
+	}, indexer.WriterDeps{HTTP: prowlarrHTTP, Logger: indexerLogger(log)})
 	return writer, func() { prowlarrHTTP.CloseIdleConnections() }
 }
 
@@ -161,16 +169,17 @@ type builtIndexer struct {
 // reads from config.DefaultIndexerFeedPath. Its logger carries component=indexer
 // so its lines separate cleanly from the compare findings in a shared slog stream.
 func buildIndexer(cfg *config.Config) builtIndexer {
-	log := slog.Default().With("component", "indexer")
+	log := indexerLogger(slog.Default())
 	prowlarrHTTP := httpx.NewClient(indexer.UpstreamAttemptTimeout)
 
 	ix := indexer.New(&indexer.Config{
 		APIKey:         cfg.IndexerAPIKey,
+		SnapshotPath:   config.DefaultIndexerFeedPath,
 		UpstreamConfig: upstreamConfig(cfg),
 	}, indexer.Deps{
 		HTTP:   prowlarrHTTP,
 		Logger: log,
-	}, config.DefaultIndexerFeedPath)
+	})
 	cleanup := func() {
 		prowlarrHTTP.CloseIdleConnections()
 	}

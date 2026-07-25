@@ -559,3 +559,37 @@ func TestClassifyFirstResolutionWinsAcrossNames(t *testing.T) {
 		t.Errorf("Resolution = %q, want 720p (first observed resolution wins)", got.Resolution)
 	}
 }
+
+// TestResolutionVocabularySingleHome pins the single-home claim
+// resolutionHeights documents: every height in the vocabulary must be BOTH
+// detectable by Classify (reResolution's alternation derives from the slice)
+// and rankable by ResolutionRank (its Atoi path derives from the same slice),
+// the detected value must be the canonical spelling, and the slice must stay
+// in the documented highest-first order the doc comment promises. The
+// hand-enumerated rows in TestClassifyResolution and TestResolutionRank cover
+// today's five heights only, so a sixth added in a shape one consumer cannot
+// parse (a "4K"-style entry: detected as text, yet ranking 0) would silently
+// zero the resolution floor with every existing test green.
+func TestResolutionVocabularySingleHome(t *testing.T) {
+	if len(resolutionHeights) == 0 {
+		t.Fatal("resolutionHeights is empty; the resolution vocabulary must carry every recognized height")
+	}
+	prev := 0
+	for i, h := range resolutionHeights {
+		if h != strings.ToLower(h) {
+			t.Errorf("resolutionHeights[%d] = %q, want the canonical lowercase spelling", i, h)
+		}
+		rank := ResolutionRank(h)
+		if rank <= 0 {
+			t.Errorf("ResolutionRank(%q) = %d, want > 0: every vocabulary height must rank", h, rank)
+		}
+		name := "Show " + h + " x265"
+		if got := Classify(&Input{Names: []string{name}}).Resolution; got != h {
+			t.Errorf("Classify(%q).Resolution = %q, want the vocabulary height %q", name, got, h)
+		}
+		if i > 0 && rank >= prev {
+			t.Errorf("resolutionHeights[%d] = %q ranks %d, want strictly below the preceding entry's %d (documented highest-first order)", i, h, rank, prev)
+		}
+		prev = rank
+	}
+}

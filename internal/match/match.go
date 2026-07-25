@@ -15,7 +15,9 @@
 // together renew spread out instead of in lockstep. Expiry is lazy: an
 // expired entry is a lookup miss that re-enters the existing batched prefetch
 // (or the per-entry fetch) and is re-stamped on renewal, and entries still
-// expired when a Match pass ends are pruned from the returned memo. Legacy
+// expired when a CLEAN (non-degraded) Match pass ends are pruned from the
+// returned memo - a degraded pass could not renew them, so it retains them as
+// stale feed-title fallback data (Memo.StaleTitle). Legacy
 // entries persisted before the policy (no expiry field) are stamped on first
 // load from the wider [memoMinMigration, memoMaxTTL) window, spreading the
 // accumulated backlog's first renewal with no day-one stampede. The batched
@@ -27,6 +29,7 @@ import (
 	"context"
 	"log/slog"
 	"math/rand/v2"
+	"strings"
 	"time"
 
 	"github.com/cplieger/runesafe"
@@ -368,11 +371,11 @@ func NewLibIndex(snap *library.Snapshot) *LibIndex {
 func (li *LibIndex) indexIDs(it *library.Item) {
 	switch it.Arr {
 	case library.ArrSonarr:
-		if it.TvdbID != 0 {
+		if it.TvdbID > 0 { // only positive ids are reachable: FindByID guards tvdb > 0
 			li.byTvdb[it.TvdbID] = it
 		}
 	case library.ArrRadarr:
-		if it.TmdbID != 0 {
+		if it.TmdbID > 0 { // only positive ids are reachable: findMovie guards id > 0
 			li.byTmdb[it.TmdbID] = it
 		}
 		if it.ImdbID != "" {
@@ -421,11 +424,17 @@ func (li *LibIndex) FindByID(rec *mapping.Record) *library.Item {
 func (li *LibIndex) findMovie(rec *mapping.Record) *library.Item {
 	_, tmdbMovies, imdbIDs := rec.RoutedIDs()
 	for _, id := range tmdbMovies {
+		if id <= 0 { // usable per HasArrIdentifier: overrides can carry a zero/negative tmdb id
+			continue
+		}
 		if it := arrItem(li.byTmdb[id], library.ArrRadarr); it != nil {
 			return it
 		}
 	}
 	for _, imdb := range imdbIDs {
+		if strings.TrimSpace(imdb) == "" { // usable per HasArrIdentifier: overrides can carry a blank imdb id
+			continue
+		}
 		if it := arrItem(li.byImdb[imdb], library.ArrRadarr); it != nil {
 			return it
 		}

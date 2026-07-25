@@ -25,6 +25,12 @@ import (
 )
 
 const (
+	// DefaultPageDelay is the politeness delay between SeaDex pages. It is
+	// releases.moe contract knowledge (a Cloudflare-fronted community service),
+	// so it lives here beside the client that paces itself with it rather than
+	// in the config leaf; the wiring site (build.go) references it.
+	DefaultPageDelay = 2 * time.Second
+
 	// entriesPath is the PocketBase collection endpoint for SeaDex entries.
 	entriesPath = "/api/collections/entries/records"
 	// perPage is the page size. The full set is a few thousand entries, so
@@ -35,7 +41,14 @@ const (
 	maxPages = 200
 	// maxEntries caps total accumulated entries so a compromised or misbehaving
 	// upstream cannot accumulate unbounded memory across maxPages pages
-	// (~a few thousand entries expected).
+	// (~a few thousand entries expected). It is deliberately slack: the
+	// per-page items cap (decodeList rejects a page carrying more than perPage
+	// records, merged duplicates included) already bounds a whole fetch at
+	// maxPages*perPage = 100_000 entries, so this guard is belt-and-braces and
+	// unreachable through FetchEntries today - fetchAndAppend's own test
+	// reaches it only by pre-filling the accumulator. Raising maxPages or
+	// perPage past that product is what would make it load-bearing; resize it
+	// together with them.
 	maxEntries = 200_000
 	// maxPageBytes bounds one page (500 entries with expanded torrents) before
 	// decode, guarding against an oversized or malicious payload.
@@ -82,9 +95,10 @@ const (
 	// multiplicatively (perPage x maxTorrentsPerEntry x maxFilesPerTorrent),
 	// so a body of minimal elements could still decode into hundreds of MB;
 	// this cap bounds the aggregate allocation (honest pages run ~tens of
-	// thousands of elements). Kept equal to maxTotalElements so a first-page
-	// violation still classifies as per-page (fetchPage's budget-reduced
-	// check) rather than fetch-wide.
+	// thousands of elements; the live catalogue's largest page decodes ~35k).
+	// Kept at or below maxTotalElements so a first-page violation still
+	// classifies as per-page (fetchPage's budget-reduced check) rather than
+	// fetch-wide.
 	maxPageElements = 250_000
 	// maxTotalElements bounds the cumulative decoded array elements across
 	// the WHOLE fetch. fetchAndAppend retains every decoded entry until the
@@ -95,11 +109,25 @@ const (
 	// the remaining allowance caps each page's decode, so the guard fires
 	// (clean degradation) before allocation scales with the hostile input.
 	// Sized jointly with maxTotalBytes: worst-case element struct overhead
-	// (~120 B/torrent on supported 64-bit targets x this cap, ~30 MiB) must
+	// (~120 B/torrent on supported 64-bit targets x this cap, ~57 MiB) must
 	// fit under the 192 MiB working-set ceiling asserted by
 	// TestSeadexWorkingSetBudget TOGETHER with maxTotalBytes of decoded
-	// string content and the raw page fetchPage still holds.
-	maxTotalElements = 250_000
+	// string content and the raw page fetchPage still holds (~169 MiB
+	// together). The value keeps ~3x headroom over the MEASURED live
+	// catalogue - 2797 entries / 9182 torrents / 138088 files / 1258 tags =
+	// 151325 elements - so ordinary SeaDex growth cannot turn this guard into
+	// a permanently degraded cycle; that headroom ratio matches
+	// maxTotalBytes' (18 MB observed against 64 MB).
+	maxTotalElements = 500_000
+)
+
+// budgetWarnNumerator/budgetWarnDenominator express the fraction of a
+// cumulative budget whose consumption is worth one WARN per fetch: the caps
+// exist for hostile input, so an honest catalogue approaching one means the
+// cap needs raising at the next release, not that the fetch is in trouble.
+const (
+	budgetWarnNumerator   = 3
+	budgetWarnDenominator = 4
 )
 
 // errCumulativeBytes reports the cumulative-byte budget (maxTotalBytes) being
@@ -114,7 +142,8 @@ var errCumulativeBytes = fmt.Errorf("seadex: cumulative page bytes exceeded cap 
 // at the decode layer - fetchPage bounds each page's decode at the REMAINING
 // element budget, so an over-budget page is rejected mid-decode, before the
 // excess elements are materialized or retained.
-var errCumulativeElements = fmt.Errorf("seadex: cumulative decoded elements exceeded cap %d (upstream misbehaving); "+
+var errCumulativeElements = fmt.Errorf("seadex: cumulative decoded elements exceeded cap %d "+
+	"(upstream misbehaving, or the catalogue outgrew the cap - raise maxTotalElements); "+
 	"refusing to compare against a truncated view", maxTotalElements)
 
 // fetchPage's classification of the aggregate element budget rides
@@ -339,7 +368,14 @@ func (c *Client) finishFetch(all []Entry, tot fetchTotals) ([]Entry, error) {
 		c.log.Warn("seadex torrent URLs unusable; affected findings and feed items carry no release link",
 			"count", tot.unusableURLs, "entries", len(all))
 	}
-	c.log.Debug("seadex entries fetched", "entries", len(all))
+	if tot.bytes*budgetWarnDenominator >= maxTotalBytes*budgetWarnNumerator ||
+		tot.elements*budgetWarnDenominator >= maxTotalElements*budgetWarnNumerator {
+		c.log.Warn("seadex fetch budget mostly spent; raise the caps before the catalogue outgrows them",
+			"bytes", tot.bytes, "max_bytes", maxTotalBytes,
+			"elements", tot.elements, "max_elements", maxTotalElements)
+	}
+	c.log.Debug("seadex entries fetched", "entries", len(all),
+		"bytes", tot.bytes, "elements", tot.elements)
 	return all, nil
 }
 

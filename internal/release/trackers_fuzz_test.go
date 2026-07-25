@@ -12,9 +12,10 @@ import (
 // URLs) with bounded-output and cross-function invariants, never a
 // reimplementation of the shape rule: a match is always exactly the canonical
 // AnimeBytes table entry (the resolver can never mint a tracker the table
-// does not carry); a match implies urlform classified the input as a rooted
-// relative path (so an absolute, protocol-relative, or schemeless-host input
-// can never resolve - tracker identity from those forms must come from the
+// does not carry); a match implies urlform classified the input as a host-less
+// path form - rooted relative, or the slashless spelling whose href reading is
+// that same rooted path - so an absolute, protocol-relative, or hidden-host
+// input can never resolve (tracker identity from those forms must come from the
 // host gate); and prefixing a scheme+host onto any matching input never
 // creates a match (the relative-shape rule cannot be bypassed by embedding
 // the path in an absolute URL).
@@ -44,8 +45,8 @@ func FuzzLookupTrackerByRelativeURL(f *testing.F) {
 		if !tableOK || got.Name != canonical.Name || got.Type != canonical.Type || got.BaseURL != canonical.BaseURL {
 			t.Errorf("LookupTrackerByRelativeURL(%q) = %+v, want the canonical table entry %+v", raw, got, canonical)
 		}
-		if f := urlform.Classify(raw); f.Class != urlform.ClassRelative {
-			t.Errorf("LookupTrackerByRelativeURL(%q) matched but urlform classifies it %v, not ClassRelative", raw, f.Class)
+		if c := urlform.Classify(raw).Class; c != urlform.ClassRelative && c != urlform.ClassSchemelessHost {
+			t.Errorf("LookupTrackerByRelativeURL(%q) matched but urlform classifies it %v, not a host-less path form", raw, c)
 		}
 		if abs := "https://evil.example" + strings.TrimSpace(raw); func() bool { _, ok := LookupTrackerByRelativeURL(abs); return ok }() {
 			t.Errorf("LookupTrackerByRelativeURL(%q) = true for the absolutized form of a matching relative URL: shape rule bypassed", abs)

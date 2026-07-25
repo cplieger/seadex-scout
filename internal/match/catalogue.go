@@ -1,6 +1,8 @@
 package match
 
 import (
+	"strings"
+
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 )
@@ -40,9 +42,15 @@ func NewCatalogue(idx *mapping.Index, keep func(mapping.Record) bool) *Catalogue
 			c.tvdb[tvdb] = struct{}{}
 		}
 		for _, id := range tmdbMovies {
+			if id <= 0 { // usable per HasArrIdentifier, as for tvdb above
+				continue
+			}
 			c.tmdb[id] = struct{}{}
 		}
 		for _, im := range imdbIDs {
+			if strings.TrimSpace(im) == "" { // usable per HasArrIdentifier, as for tvdb above
+				continue
+			}
 			c.imdb[im] = struct{}{}
 		}
 	})
@@ -58,7 +66,7 @@ func NewCatalogue(idx *mapping.Index, keep func(mapping.Record) bool) *Catalogue
 func (c *Catalogue) Has(it *library.Item) bool {
 	switch it.Arr {
 	case library.ArrRadarr:
-		if it.TmdbID != 0 {
+		if it.TmdbID > 0 {
 			if _, ok := c.tmdb[it.TmdbID]; ok {
 				return true
 			}
@@ -70,7 +78,7 @@ func (c *Catalogue) Has(it *library.Item) bool {
 		}
 		return false
 	case library.ArrSonarr:
-		if it.TvdbID == 0 {
+		if it.TvdbID <= 0 {
 			return false
 		}
 		_, ok := c.tvdb[it.TvdbID]

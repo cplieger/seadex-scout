@@ -21,17 +21,27 @@ const (
 	// private-tracker page URLs, so the directory stays unlistable by
 	// other users as defense in depth.
 	feedDirMode = 0o700
-	// feed.json is persisted GUID-only - AB items carry no passkey-bearing
-	// download URL (see stripDownloadURLs) - but it stays owner-only as
-	// defense in depth for that invariant, and a legacy snapshot may still
-	// embed a passkey until the first rebuild scrubs it. The daemon and the
-	// `poll` subcommand both run as the same container user, so 0o600 stays
-	// read/write-compatible.
+	// feedFileMode keeps the persisted snapshot owner-only: feed.json is
+	// GUID-only - AB items carry no passkey-bearing download URL (see
+	// stripDownloadURLs) - but it stays owner-only as defense in depth for
+	// that invariant, and a legacy snapshot may still embed a passkey until
+	// the first rebuild scrubs it. The daemon and the `poll` subcommand both
+	// run as the same container user, so 0o600 stays read/write-compatible.
 	feedFileMode = 0o600
 	// maxFeedBytes bounds the persisted feed snapshot, enforced on write and
 	// read alike so a rebuild can never persist a snapshot the server's reload
-	// would then reject.
-	maxFeedBytes = 64 << 20
+	// would then reject. It is sized against the DECODED cost, not the file:
+	// json.Unmarshal turns the curation indexes into map[string]bool, where a
+	// minimal entry ("nyaa:1":true, 14 JSON bytes) costs ~48+ bytes of live
+	// heap, so the cap must stay several times below the 256 MiB container
+	// limit (the same budget maxPersistedFieldBytes is reasoned against) or a
+	// corrupted/hand-edited file OOMs the process inside New's warm-up reload -
+	// before the listener serves, and again on every restart, crashlooping the
+	// compare loop with it. The whole current SeaDex catalogue plus the
+	// never-pruned seen ledger and a 14-day journal serialize to a few MB, so
+	// 16 MiB leaves ample headroom for years of growth while bounding the
+	// decoded blow-up.
+	maxFeedBytes = 16 << 20
 	// maxPersistedFieldBytes caps each persisted feed item's string field
 	// (title, GUID/info/download URL, journal key). It is aliased to
 	// torznab.go's maxUpstreamFieldBytes so every harvested title and
@@ -48,6 +58,13 @@ const (
 	// writer unions at most the three Torznab ids the feed uses (TV, Anime,
 	// Movies); anything larger is a hand-edited snapshot.
 	maxPersistedCategories = 8
+	// maxPersistedCursorBytes bounds the persisted harvest checkpoint
+	// (harvest_cursor). It is deliberately far above maxPersistedFieldBytes:
+	// an honest checkpoint carries one Pages entry per still-pending deep
+	// show, so a few hundred live entries legitimately exceed the per-field
+	// cap (see TestLoadPreviousPreservesLargeHarvestCheckpoint), while 64 KiB
+	// still bounds the one persisted string that is carried forward verbatim.
+	maxPersistedCursorBytes = 64 << 10
 	// reasonMalformed is loadPrevious's baseline reason for a structurally invalid
 	// previous snapshot (bad JSON, missing curation maps, or an over-limit item/title).
 	reasonMalformed = "malformed"
@@ -112,26 +129,65 @@ func validFeedItems(feeds ...[]journalItem) bool {
 // Consumer-specific ingress checks (the writer's titles-cache cap) stay with
 // their consumer.
 //
-// It also canonicalizes each accepted item's identity fields
-// (normalizeSnapshotInfoHashes) HERE rather than in one consumer, because
+// It also canonicalizes each accepted item's non-derived wire fields
+// (normalizeSnapshotItems) HERE rather than in one consumer, because
 // identity is compared by both: the writer's carry gates match a persisted
 // item's InfoHash against the current catalogue's canonical hashes
 // (warnedSet.retracts), so a non-canonical at-rest hash (uppercase or padded)
 // would miss a warning retraction and keep re-persisting a curator-warned
-// release, while the server saw the canonical form.
-func decodeSnapshot(data []byte) (snap snapshot, reason string, err error) {
+// release, while the server saw the canonical form. The
+// download-volume-factor marker is canonicalized in the same pass: the
+// writer carries a non-curated item's stored render verbatim, so an
+// out-of-vocabulary at-rest marker would otherwise be re-persisted on every
+// rebuild while the arr acted on it.
+//
+// InfoURL is canonicalized here for the same reason
+// (sanitizeSnapshotInfoURLs, whose blanked count is returned so each caller
+// keeps its own operator-facing WARN): the field belongs to the persisted
+// contract both ends must see canonical, not just the render path. The writer
+// carries a non-curated item forward verbatim (carryStoredItem) and persist
+// scrubs only DownloadURL, so a foreign-host or javascript: InfoURL planted
+// in feed.json would otherwise be re-persisted on every rebuild for up to
+// feedJournalMaxAge while only the reader blanked it at serve time.
+//
+// The derived PubDate is re-established here for the same reason
+// (normalizeSnapshotPubDates): it is persisted as an independent field but
+// documented to mirror FirstSeen, and neither consumer re-derives it for an
+// item it carries or serves verbatim.
+func decodeSnapshot(data []byte) (snap snapshot, blankedInfoURLs int, reason string, err error) {
 	if err := json.Unmarshal(data, &snap); err != nil {
-		return snapshot{}, "", err
+		return snapshot{}, 0, "", err
 	}
 	if snap.ByHash == nil || snap.ByKey == nil {
-		return snapshot{}, "missing required curation maps", nil
+		return snapshot{}, 0, "missing required curation maps", nil
 	}
 	if !validFeedItems(snap.NyaaFeed, snap.ABFeed) {
-		return snapshot{}, "item exceeds persisted-item limits", nil
+		return snapshot{}, 0, "item exceeds persisted-item limits", nil
 	}
-	normalizeSnapshotInfoHashes(snap.NyaaFeed)
-	normalizeSnapshotInfoHashes(snap.ABFeed)
-	return snap, "", nil
+	normalizeSnapshotItems(snap.NyaaFeed)
+	normalizeSnapshotItems(snap.ABFeed)
+	normalizeSnapshotPubDates(snap.NyaaFeed)
+	normalizeSnapshotPubDates(snap.ABFeed)
+	blanked := sanitizeSnapshotInfoURLs(snap.NyaaFeed) + sanitizeSnapshotInfoURLs(snap.ABFeed)
+	return snap, blanked, "", nil
+}
+
+// normalizeSnapshotPubDates restores the journal's PubDate-mirrors-FirstSeen
+// invariant (see journalItem) on every accepted item, for BOTH consumers: the
+// reader renders PubDate straight into the served <pubDate>, and the writer's
+// non-curated carry arm keeps a stored item verbatim, so a persisted PubDate
+// that diverged from FirstSeen (a hand-edited or legacy snapshot) would
+// otherwise be advertised to the arrs for the item's whole journal window - a
+// far-future value can hold a release behind a delay profile indefinitely and
+// mis-sorts a newest-first view. An item with no FirstSeen carries no journal
+// timestamp to mirror, so its PubDate is left alone (the writer drops such an
+// item at carry).
+func normalizeSnapshotPubDates(feed []journalItem) {
+	for i := range feed {
+		if !feed[i].FirstSeen.IsZero() {
+			feed[i].PubDate = feed[i].FirstSeen
+		}
+	}
 }
 
 // snapshot is the materialized feed a cycle produces and the server serves:
@@ -161,12 +217,19 @@ type snapshot struct {
 	// schema and re-baselining every cycle (see loadPrevious).
 	Seen   map[string]bool   `json:"seen"`
 	Titles map[string]string `json:"titles,omitempty"`
-	// HarvestCursor is the title harvest's rotation position: the
-	// "scope:alID" of the last show group that consumed a harvest query, so
-	// the next rebuild resumes AFTER it instead of restarting at the head
-	// (see harvestTitles; a deep show can then never starve its successors
-	// across rebuilds). Optional both ways: an older snapshot without it
-	// starts at the head, and an older binary ignores it.
+	// HarvestCursor is the title harvest's persisted resumption state: an
+	// encoded harvestCheckpoint (see decodeHarvestCheckpoint), NOT a single
+	// key. It carries the rotation position - the "scope:alID" of the last
+	// show group that consumed a harvest query, so the next rebuild resumes
+	// AFTER it instead of restarting at the head (see harvestTitles; a deep
+	// show can then never starve its successors across rebuilds) - plus each
+	// still-paging group's next offset page, so a show cut off by
+	// harvestShowPageCap resumes DEEPER on its next visit instead of
+	// re-querying page zero forever. Backward compatible both ways: a
+	// pages-less checkpoint encodes as the bare legacy "scope:alID" cursor an
+	// older binary reads, an older snapshot without the field starts at the
+	// head, and its size is deliberately NOT capped by
+	// maxPersistedFieldBytes (an honest Pages map legitimately exceeds it).
 	HarvestCursor string        `json:"harvest_cursor,omitempty"`
 	NyaaFeed      []journalItem `json:"nyaa_feed"`
 	ABFeed        []journalItem `json:"ab_feed"`
@@ -179,16 +242,15 @@ type snapshot struct {
 // links are built under the canonical SeaDex site base (feed.go's
 // defaultSeaDexBaseURL - the same constant the reader's InfoURL allowlist is
 // derived from, so the two ends of the persisted contract cannot drift). The
-// embedded
-// UpstreamConfig mirrors the server's Config - the shared upstream vocabulary
-// has one home so the writer queries exactly the trackers the server proxies.
-// ABPasskey gates which AnimeBytes releases are journalable (a secret; empty
-// leaves AnimeBytes without grabbable RSS links) - the writer never persists
-// it: AB items are stored GUID-only and the server derives their served
-// download links from its own configured passkey (see rebuildABDownloadURLs).
-// An empty Torznab URL is that tracker's off switch (its journal is neither
-// built nor persisted), and the configured upstreams also power the title
-// harvest (see harvest.go).
+// embedded UpstreamConfig mirrors the server's Config - the shared upstream
+// vocabulary has one home so the writer queries exactly the trackers the
+// server proxies. ABPasskey gates which AnimeBytes releases are journalable
+// (a secret; empty leaves AnimeBytes without grabbable RSS links) - the writer
+// never persists it: AB items are stored GUID-only and the server derives
+// their served download links from its own configured passkey (see
+// rebuildABDownloadURLs). An empty Torznab URL is that tracker's off switch
+// (its journal is neither built nor persisted), and the configured upstreams
+// also power the title harvest (see harvest.go).
 type FeedWriterConfig struct {
 	Path string
 	UpstreamConfig
@@ -204,7 +266,6 @@ type FeedWriter struct {
 	now            func() time.Time
 	path           string
 	abPasskey      string
-	seadexBaseURL  string
 	upstreams      []*upstream
 	nyaaConfigured bool
 	abConfigured   bool
@@ -217,7 +278,7 @@ type FeedWriter struct {
 // tracker (no ab_torznab_url - the README's off switch) is warned once here,
 // field names only, so a half-configured AnimeBytes intent surfaces at boot;
 // no passkey-embedded links are ever persisted for that off tracker.
-func NewFeedWriter(cfg *FeedWriterConfig, deps Deps) *FeedWriter {
+func NewFeedWriter(cfg *FeedWriterConfig, deps WriterDeps) *FeedWriter {
 	log := deps.Logger
 	if log == nil {
 		log = slog.Default()
@@ -231,7 +292,6 @@ func NewFeedWriter(cfg *FeedWriterConfig, deps Deps) *FeedWriter {
 		now:            time.Now,
 		path:           cfg.Path,
 		abPasskey:      cfg.ABPasskey,
-		seadexBaseURL:  defaultSeaDexBaseURL,
 		nyaaConfigured: cfg.NyaaTorznabURL != "",
 		abConfigured:   abConfigured,
 	}
@@ -265,7 +325,7 @@ func NewFeedWriter(cfg *FeedWriterConfig, deps Deps) *FeedWriter {
 // or on the persist side: an encode failure, a snapshot exceeding
 // maxFeedBytes (kept out so the reader never rejects what a rebuild wrote),
 // or the atomic write itself failing.
-func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info func(alID int) EntryInfo) error {
+func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info EntryInfoFunc) error {
 	infoFor := entryInfoFunc(info)
 	prev, err := w.loadPrevious(ctx)
 	if err != nil {
@@ -285,15 +345,21 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info f
 	} else {
 		cur := indexCurated(entries)
 		if w.nyaaConfigured {
-			nyaa = w.carryJournal(prev.nyaaFeed, cur, &ws, infoFor, now, &js)
+			nyaa = w.carryJournal(prev.nyaaFeed, upstreamNyaa, cur, &ws, infoFor, now, &js)
 		}
 		if w.abConfigured {
-			ab = w.carryJournal(prev.abFeed, cur, &ws, infoFor, now, &js)
+			ab = w.carryJournal(prev.abFeed, upstreamAB, cur, &ws, infoFor, now, &js)
 		}
 		newNyaa, newAB := w.growJournal(entries, cur, seen, infoFor, now, &js)
 		nyaa = append(nyaa, newNyaa...)
 		ab = append(ab, newAB...)
 	}
+	// Defense in depth, not a live path: an unconfigured tracker's journal is
+	// never carried (the guarded carryJournal calls above) and never grown
+	// (journalIfNew -> newJournalItem returns early on !scopeConfigured), so
+	// both slices are already nil here. The resets stay so a future growth
+	// path that forgets the scopeConfigured gate still cannot persist a feed
+	// for a tracker the operator turned off.
 	if !w.nyaaConfigured {
 		nyaa = nil
 	}
@@ -406,9 +472,12 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 	if err != nil {
 		return w.classifyPreviousReadError(err)
 	}
-	snap, structReason, decodeErr := decodeSnapshot(data)
+	snap, _, structReason, decodeErr := decodeSnapshot(data)
 	if decodeErr != nil {
-		w.log.Warn(msgSnapshotMalformed, "path", w.path, "error", decodeErr)
+		// Bounded like the reader's sibling gate (reload.go): a decoder error
+		// can embed the offending document text, and feed.json is a
+		// tamperable boundary.
+		w.log.Warn(msgSnapshotMalformed, "path", w.path, "error", capLogText(decodeErr.Error(), 256))
 		return previousJournal{baseline: true, reason: reasonMalformed}, nil
 	}
 	if structReason != "" {
@@ -445,12 +514,28 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 			titles[k] = t
 		}
 	}
+	cursor := snap.HarvestCursor
+	if len(cursor) > maxPersistedCursorBytes {
+		// The harvest cursor is the one persisted string carried forward
+		// VERBATIM: decodeHarvestCheckpoint keeps an unparseable value as
+		// Last and encodeHarvestCheckpoint re-emits it unchanged whenever no
+		// group consumed a query this rebuild, so a hand-edited multi-MiB
+		// value rides in every future snapshot and can push the rebuilt
+		// snapshot past maxFeedBytes - wedging persist on every cycle with no
+		// self-heal. Dropping it is the same safe degradation
+		// decodeHarvestCheckpoint already applies to malformed checkpoint
+		// JSON: rotation restarts at the head and paging at zero. The value
+		// itself is never logged (it can be attacker-shaped text).
+		w.log.Warn("previous feed snapshot harvest cursor exceeds size cap; restarting the harvest rotation",
+			"path", w.path, "max_bytes", maxPersistedCursorBytes, "cursor_bytes", len(cursor))
+		cursor = ""
+	}
 	return previousJournal{
 		nyaaFeed: snap.NyaaFeed,
 		abFeed:   snap.ABFeed,
 		seen:     snap.Seen,
 		titles:   titles,
-		cursor:   snap.HarvestCursor,
+		cursor:   cursor,
 	}, nil
 }
 
@@ -540,16 +625,15 @@ func (ws *warnedSet) retracts(it *journalItem) bool {
 // carry side consumes (see warnedSet for the two sets it holds and
 // warnedSet.retracts for the retraction decision). The warning wins BY
 // IDENTITY, not per occurrence: a torrent can be attached to several SeaDex
-// entries, and when
-// one occurrence is tagged Broken/Incomplete while a duplicate of the same
-// tracker key is not, keeping the unwarned duplicate would let proxied
-// searches serve and mark the release while carryJournal (which consumes the
-// any-occurrence key set) removes it from RSS - the two indexer paths would
-// disagree about whether the release is grabbable. So a first pass collects
-// every warned identity signal - journal key AND info hash (identitySignals,
-// the package's one identity definition) - across the whole catalogue, and a
-// second pass removes every occurrence that is warned itself OR shares a
-// warned identity.
+// entries, and when one occurrence is tagged Broken/Incomplete while a
+// duplicate of the same tracker key is not, keeping the unwarned duplicate
+// would let proxied searches serve and mark the release while carryJournal
+// (which consumes the any-occurrence key set) removes it from RSS - the two
+// indexer paths would disagree about whether the release is grabbable. So a
+// first pass collects every warned identity signal - journal key AND info
+// hash (identitySignals, the package's one identity definition) - across the
+// whole catalogue, and a second pass removes every occurrence that is warned
+// itself OR shares a warned identity.
 // Filtering at the source keeps every downstream consumer honest at once: the
 // search curation set never marks a warned release (a Prowlarr result
 // matching one is purged as uncurated), the journal never grows one, and the

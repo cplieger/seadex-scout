@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/cplieger/seadex-scout/internal/compare"
+	"github.com/cplieger/seadex-scout/internal/keyenc"
 )
 
 func TestDedupeKey(t *testing.T) {
@@ -196,6 +197,39 @@ func TestDedupeKeyBoundsOversizedComponents(t *testing.T) {
 	setB.Links = abLinks("b")
 	if keyB := dedupeKey(&setB); keyB == keyA {
 		t.Error("distinct oversized AB link sets must not share a dedupe key")
+	}
+}
+
+// TestDedupeKeyBoundsAssembledKey pins the AGGREGATE bound: keyenc bounds each
+// component against its RAW size, so four delimiter-heavy components that each
+// pass the per-component check still assemble into a ~64 KiB key once escaping
+// doubles them. Those keys are the persisted state.json map keys, so an
+// unbounded aggregate lets hostile-but-in-bound SeaDex data inflate the state
+// file past its save cap (every Save then fails and dedupe stops advancing).
+// Distinct findings must still key distinctly across the fold.
+func TestDedupeKeyBoundsAssembledKey(t *testing.T) {
+	// Just under the per-component raw bound and all delimiters, so escaping
+	// doubles each component: every one passes keyenc's per-component check
+	// while the assembled key blows past the aggregate bound.
+	heavy := func(tag string) string {
+		return tag + strings.Repeat(",", keyenc.MaxComponentBytes-len(tag)-1)
+	}
+	build := func(tag string) *compare.Finding {
+		return &compare.Finding{
+			AniListID:         42,
+			Status:            compare.StatusBetter,
+			RecommendedGroups: []string{heavy(tag)},
+			CurrentGroups:     []string{heavy(tag + "c")},
+			ReleaseURL:        heavy(tag + "u"),
+			Links:             []compare.ReleaseLink{{Tracker: "Nyaa", URL: heavy(tag + "l")}},
+		}
+	}
+	keyA := dedupeKey(build("a"))
+	if len(keyA) > maxKeyBytes {
+		t.Errorf("assembled dedupe key over four in-bound delimiter-heavy components = %d bytes, want <= %d", len(keyA), maxKeyBytes)
+	}
+	if keyB := dedupeKey(build("b")); keyB == keyA {
+		t.Error("distinct findings must not share a dedupe key after the assembled-key fold")
 	}
 }
 

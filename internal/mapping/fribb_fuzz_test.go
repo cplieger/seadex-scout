@@ -32,6 +32,8 @@ func FuzzParseFribb(f *testing.F) {
 	f.Add([]byte(`[{"anilist_id":6,"tvdb_id":"2147483648","imdb_id":["tt1",5,null]}]`))
 	f.Add([]byte(`[{"anilist_id":7,"themoviedb_id":{"movie":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33]}}]`))
 	f.Add([]byte(`[{"anilist_id":8,"imdb_id":["a","b","c","d","e","f","g","h","i","j","k","l","m","n","o","p","q","r","s","t","u","v","w","x","y","z","aa","bb","cc","dd","ee","ff","gg"]}]`))
+	f.Add([]byte(`[{"anilist_id":1,"anilist_id":false,"type":"MOVIE","type":7,"tvdb_id":42,"tvdb_id":false},{"anilist_id":2,"type":"tv","season":{"tvdb":"3"},"season":1}]`))
+	f.Add([]byte(`[{"anilist_id":3,"type":"tv","season":1,"imdb_id":["tt1",5,null,"  "]}]`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		records, err := parseFribb(data, log)
 		if err != nil {

@@ -10,9 +10,12 @@ import (
 // Auth credentials (https://user:pass@host) or query tokens configured in the
 // arr base URL never reach Loki or downstream notifications. An ordinary
 // credential-free host/path deep-link passes through unchanged and stays
-// clickable; an unparseable URL yields an empty string. It lives beside the
-// ArrURL construction it guards so every slog emitter of a config-derived arr
-// URL shares one sanitization rule.
+// clickable; any input that is not an absolute http(s) URL with a hostname -
+// an unparseable URL, an opaque or scheme-relative form, a non-http(s)
+// scheme, or a hostless (port-only) authority - yields an empty string, so a
+// caller must treat "" as "no usable link" rather than as "unparseable". It
+// lives beside the ArrURL construction it guards so every slog emitter of a
+// config-derived arr URL shares one sanitization rule.
 func SafeLogURL(rawURL string) string {
 	if rawURL == "" {
 		return ""

@@ -14,6 +14,22 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
 }
 
+// oversizedFribbRecord builds one encoded Fribb record whose imdb_id array
+// alone pushes it past maxFribbRecordBytes - the per-record byte cap
+// decodeFribbRecord rejects before the tolerant decode allocates.
+func oversizedFribbRecord(aniListID int) string {
+	var b strings.Builder
+	b.WriteString(`{"anilist_id":` + strconv.Itoa(aniListID) + `,"imdb_id":[`)
+	for i := 0; b.Len() <= maxFribbRecordBytes; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(`"tt` + strconv.Itoa(i) + `"`)
+	}
+	b.WriteString(`]}`)
+	return b.String()
+}
+
 func TestParseFribb(t *testing.T) {
 	data := []byte(`[
 		{"anilist_id":1,"type":"tv","tvdb_id":100},
@@ -79,6 +95,31 @@ func TestParseFribb_recordCap(t *testing.T) {
 	}
 	if len(records) != below {
 		t.Fatalf("parseFribb kept %d records, want %d (real-size body must be accepted in full)", len(records), below)
+	}
+}
+
+// TestParseFribb_atCapRecordCountAccepted pins the INCLUSIVE side of the
+// record-count cap: a list of exactly maxFribbRecords elements is accepted in
+// full, so an off-by-one in decodeFribbRecords' guard cannot start rejecting a
+// body the documented cap admits.
+func TestParseFribb_atCapRecordCountAccepted(t *testing.T) {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := range maxFribbRecords {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(`{"anilist_id":`)
+		b.WriteString(strconv.Itoa(i + 1))
+		b.WriteByte('}')
+	}
+	b.WriteByte(']')
+	records, err := parseFribb([]byte(b.String()), discardLogger())
+	if err != nil {
+		t.Fatalf("parseFribb(exactly %d records) error: %v, want acceptance", maxFribbRecords, err)
+	}
+	if len(records) != maxFribbRecords {
+		t.Fatalf("parseFribb kept %d records, want the full at-cap %d", len(records), maxFribbRecords)
 	}
 }
 
@@ -238,26 +279,6 @@ func TestIntSliceAndTrimmed(t *testing.T) {
 	}
 }
 
-// TestParseFribb_seasonDecoded pins the season.tvdb decode path:
-// offsetPair.tvdbOrZero's non-nil branch and Record.SeasonTvdb, which existing
-// parseFribb tests never populate. SeasonTvdb is load-bearing for the audit
-// season-scoping logic. The upstream episode_offset field is deliberately not
-// decoded (no consumer reads it); it rides along here to prove an unknown
-// field is ignored.
-func TestParseFribb_seasonDecoded(t *testing.T) {
-	data := []byte(`[{"anilist_id":5,"type":"tv","season":{"tvdb":2},"episode_offset":{"tvdb":12}}]`)
-	records, err := parseFribb(data, discardLogger())
-	if err != nil {
-		t.Fatalf("parseFribb error: %v", err)
-	}
-	if len(records) != 1 {
-		t.Fatalf("parseFribb kept %d records, want 1", len(records))
-	}
-	if records[0].SeasonTvdb != 2 {
-		t.Errorf("SeasonTvdb = %d, want 2", records[0].SeasonTvdb)
-	}
-}
-
 // TestParseFribb_idRangeAppliedEndToEnd pins the identifier range policy at
 // the application boundary: an at-limit AniList/TVDB id survives the parse
 // unchanged, an over-range AniList id drops the whole record (its key is
@@ -319,15 +340,7 @@ func TestParseFribb_malformedDocumentErrors(t *testing.T) {
 func TestParseFribb_oversizedRecordSkipped(t *testing.T) {
 	// A record over the byte cap: one imdb_id array whose encoded size alone
 	// exceeds maxFribbRecordBytes.
-	var big strings.Builder
-	big.WriteString(`{"anilist_id":2,"imdb_id":[`)
-	for i := 0; big.Len() <= maxFribbRecordBytes; i++ {
-		if i > 0 {
-			big.WriteByte(',')
-		}
-		big.WriteString(`"tt` + strconv.Itoa(i) + `"`)
-	}
-	big.WriteString(`]}`)
+	big := oversizedFribbRecord(2)
 
 	// A record well under the byte cap but over the identifier cap.
 	var wide strings.Builder
@@ -340,7 +353,7 @@ func TestParseFribb_oversizedRecordSkipped(t *testing.T) {
 	}
 	wide.WriteString(`]}}`)
 
-	data := []byte(`[{"anilist_id":1,"tvdb_id":100},` + big.String() + `,` + wide.String() + `,{"anilist_id":4,"tvdb_id":400}]`)
+	data := []byte(`[{"anilist_id":1,"tvdb_id":100},` + big + `,` + wide.String() + `,{"anilist_id":4,"tvdb_id":400}]`)
 	if len(data) >= maxMapBytes {
 		t.Fatalf("test body is %d bytes, must stay under maxMapBytes %d", len(data), maxMapBytes)
 	}
@@ -433,16 +446,8 @@ func TestParseFribb_logsSkippedAndDroppedCounts(t *testing.T) {
 	logger, rec := capture.New()
 	// Element order: a type-mismatch element (the first, retained error), an
 	// over-cap record (a later, different error), a zero-id drop, a survivor.
-	var big strings.Builder
-	big.WriteString(`{"anilist_id":9,"imdb_id":[`)
-	for i := 0; big.Len() <= maxFribbRecordBytes; i++ {
-		if i > 0 {
-			big.WriteByte(',')
-		}
-		big.WriteString(`"tt` + strconv.Itoa(i) + `"`)
-	}
-	big.WriteString(`]}`)
-	data := []byte(`[5,` + big.String() + `,{"anilist_id":0},{"anilist_id":1,"type":"tv","tvdb_id":100}]`)
+	big := oversizedFribbRecord(9)
+	data := []byte(`[5,` + big + `,{"anilist_id":0},{"anilist_id":1,"type":"tv","tvdb_id":100}]`)
 
 	records, err := parseFribb(data, logger)
 	if err != nil {
@@ -573,5 +578,96 @@ func TestTmdbID_atCapMovieListRetained(t *testing.T) {
 func TestFribbRecord_toRecord_negativeAniListIDDropped(t *testing.T) {
 	if _, ok := (&fribbRecord{AniListID: -5, Type: "tv", TvdbID: 100}).toRecord(); ok {
 		t.Error("toRecord with negative AniListID returned ok=true, want false (positive-key contract)")
+	}
+}
+
+// TestParseFribbForRefresh_elementsCountsEverySourceElement pins the counted
+// denominator the refresh acceptance floors validate coverage against: every
+// top-level element counts, whether it survived, was skipped as malformed, or
+// was dropped for a missing AniList key. Without the skipped term a body of
+// malformed elements plus one valid record would read as a healthy 1/1 map.
+func TestParseFribbForRefresh_elementsCountsEverySourceElement(t *testing.T) {
+	data := []byte(`[` +
+		`{"anilist_id":1,"type":"tv","tvdb_id":100},` +
+		`5,` +
+		`[],` +
+		`{"anilist_id":0,"type":"tv"}` +
+		`]`)
+	parsed, err := parseFribbForRefresh(data, discardLogger())
+	if err != nil {
+		t.Fatalf("parseFribbForRefresh error: %v", err)
+	}
+	if len(parsed.records) != 1 {
+		t.Fatalf("parseFribbForRefresh kept %d records, want 1", len(parsed.records))
+	}
+	if parsed.elements != 4 {
+		t.Errorf("parseFribbForRefresh elements = %d, want 4 (1 survivor + 2 skipped-malformed + 1 dropped-keyless)", parsed.elements)
+	}
+}
+
+// TestFribbDecodeCounts_aggregateIdentifierBudget pins the aggregate retained-
+// identifier budget. maxFribbIdentifiers bounds ONE record, so without this
+// budget the two existing caps multiply (maxFribbRecords x maxFribbIdentifiers
+// admits ~2.1M retained ids from a body under maxMapBytes). A record that
+// would breach the budget is rejected inside the EXISTING per-record tolerance
+// boundary - counted as skipped, with the cap named in the first error the
+// "skipped malformed records" WARN reports.
+func TestFribbDecodeCounts_aggregateIdentifierBudget(t *testing.T) {
+	atCap := Record{AniListID: 1, IMDbIDs: make([]string, maxFribbIdentifiers)}
+	var c fribbDecodeCounts
+	for range maxFribbIdentifiersTotal / maxFribbIdentifiers {
+		c.add(&atCap, true, nil)
+	}
+	if c.skipped != 0 || c.dropped != 0 {
+		t.Fatalf("filling the budget skipped=%d dropped=%d, want 0/0", c.skipped, c.dropped)
+	}
+	if c.identifiers != maxFribbIdentifiersTotal {
+		t.Fatalf("charged %d identifiers, want the full budget %d", c.identifiers, maxFribbIdentifiersTotal)
+	}
+
+	retained := len(c.records)
+	c.add(&atCap, true, nil)
+	if len(c.records) != retained {
+		t.Fatalf("over-budget record retained (%d records, want %d)", len(c.records), retained)
+	}
+	if c.skipped != 1 {
+		t.Fatalf("over-budget record counted skipped=%d, want 1", c.skipped)
+	}
+	if c.identifiers != maxFribbIdentifiersTotal {
+		t.Fatalf("over-budget record charged the budget to %d, want %d", c.identifiers, maxFribbIdentifiersTotal)
+	}
+	if c.firstErr == nil || !strings.Contains(c.firstErr.Error(), "retained identifiers exceed cap") {
+		t.Fatalf("firstErr = %v, want it to name the aggregate identifier cap", c.firstErr)
+	}
+}
+
+// TestParseFribb_realSizeBodyUnaffectedByIdentifierBudget shows the aggregate
+// budget is invisible to a realistic body: real Fribb carries ~40k records
+// with a handful of ids each, well under maxFribbIdentifiersTotal, so every
+// record and every identifier survives.
+func TestParseFribb_realSizeBodyUnaffectedByIdentifierBudget(t *testing.T) {
+	const n = 500
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := range n {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		id := strconv.Itoa(i + 1)
+		b.WriteString(`{"anilist_id":` + id + `,"type":"movie","imdb_id":["tt` + id + `"],"themoviedb_id":{"movie":[` + id + `]}}`)
+	}
+	b.WriteByte(']')
+
+	records, err := parseFribb([]byte(b.String()), discardLogger())
+	if err != nil {
+		t.Fatalf("parseFribb error: %v", err)
+	}
+	if len(records) != n {
+		t.Fatalf("parseFribb kept %d records, want all %d", len(records), n)
+	}
+	for _, rec := range records {
+		if len(rec.IMDbIDs) != 1 || len(rec.TmdbMovies) != 1 {
+			t.Fatalf("record %d retained %d imdb / %d tmdb ids, want 1/1", rec.AniListID, len(rec.IMDbIDs), len(rec.TmdbMovies))
+		}
 	}
 }

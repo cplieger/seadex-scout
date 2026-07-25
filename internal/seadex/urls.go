@@ -136,12 +136,20 @@ func schemelessPortOK(trimmed string) bool {
 	if err != nil {
 		return false
 	}
-	port := u.Port()
+	return portOK(u.Port())
+}
+
+// portOK reports whether a URL port component is publishable: absent, or
+// numeric and inside the 16-bit range a real TCP port occupies. It is the
+// SINGLE home of the publisher's port rule, so the absolute gate
+// (usableAbsolute) and the canonicalized schemeless publish
+// (schemelessPortOK) cannot drift apart.
+func portOK(port string) bool {
 	if port == "" {
 		return true
 	}
-	_, portErr := strconv.ParseUint(port, 10, 16)
-	return portErr == nil
+	_, err := strconv.ParseUint(port, 10, 16)
+	return err == nil
 }
 
 // publishRelative applies the shared inferred-owner-wins policy for
@@ -201,10 +209,8 @@ func usableAbsolute(f *urlform.Form) bool {
 	if f.HasUserInfo {
 		return false
 	}
-	if f.Port != "" {
-		if _, err := strconv.ParseUint(f.Port, 10, 16); err != nil {
-			return false
-		}
+	if !portOK(f.Port) {
+		return false
 	}
 	_, ok := release.LookupTrackerByHost(f.Host)
 	return ok

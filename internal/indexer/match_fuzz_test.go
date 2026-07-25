@@ -6,15 +6,25 @@ import (
 	"testing"
 )
 
+// boundedTrackerID reports whether id is a non-empty, width-bounded run of
+// ASCII digits - the id-validity contract of validTrackerID. The digit test is
+// an INDEPENDENT oracle (strings.Trim), never the production isAllDigits
+// helper: sharing that helper would let a mutation loosening it govern both
+// the code under test and the assertion, so a parser admitting a non-digit id
+// would still pass.
+func boundedTrackerID(id string) bool {
+	return id != "" && len(id) <= maxTrackerIDDigits && strings.Trim(id, "0123456789") == ""
+}
+
 // FuzzExtractID_alwaysDigitsOrEmpty pins the security-relevant invariant of the id
 // extraction that runs on Prowlarr-supplied (tracker-controlled) URL strings: every id
 // it returns is a non-empty run of ASCII digits, or it returns "" - a bogus tracker key
 // (a non-numeric id) must never reach the curation match set. The seed corpus covers the
 // Nyaa /view, AnimeBytes permalink, and AnimeBytes torrentid= forms plus a non-numeric id.
-// The digit check is an INDEPENDENT oracle (strings.Trim), not the production
-// isAllDigits helper: sharing that helper would let a mutation loosening it
-// govern both the code under test and the assertion, so the property would
-// still pass on a parser that admits a non-digit id.
+// The digit check is the INDEPENDENT boundedTrackerID oracle, not the
+// production isAllDigits helper: sharing that helper would let a mutation
+// loosening it govern both the code under test and the assertion, so the
+// property would still pass on a parser that admits a non-digit id.
 func FuzzExtractID_alwaysDigitsOrEmpty(f *testing.F) {
 	f.Add("https://nyaa.si/view/1234567")
 	f.Add("https://animebytes.tv/torrent/1167293/group?nh=709E38EC")
@@ -25,7 +35,7 @@ func FuzzExtractID_alwaysDigitsOrEmpty(f *testing.F) {
 	f.Fuzz(func(t *testing.T, raw string) {
 		assertValid := func(name, id string) {
 			t.Helper()
-			if id != "" && (len(id) > maxTrackerIDDigits || strings.Trim(id, "0123456789") != "") {
+			if id != "" && !boundedTrackerID(id) {
 				t.Fatalf("%s(%q) = %q, want a bounded run of digits or empty", name, raw, id)
 			}
 		}
@@ -35,7 +45,7 @@ func FuzzExtractID_alwaysDigitsOrEmpty(f *testing.F) {
 		assertValid("animeBytesID", animeBytesID(raw))
 		if k := trackerKeyFromURL(raw); k != "" {
 			_, id, found := strings.Cut(k, ":")
-			if !found || id == "" || len(id) > maxTrackerIDDigits || strings.Trim(id, "0123456789") != "" {
+			if !found || !boundedTrackerID(id) {
 				t.Fatalf("trackerKeyFromURL(%q) = %q, want scope:<bounded digits>", raw, k)
 			}
 		}
@@ -112,7 +122,7 @@ func FuzzTrackerKey_keysOnlyTrackerOwnCanonicalURLs(f *testing.F) {
 			return
 		}
 		scope, id, found := strings.Cut(key, ":")
-		if !found || id == "" || len(id) > maxTrackerIDDigits || strings.Trim(id, "0123456789") != "" {
+		if !found || !boundedTrackerID(id) {
 			t.Fatalf("trackerKey(%q, %q) = %q, want scope:<bounded digits>", tracker, raw, key)
 		}
 		u, err := url.Parse(raw)

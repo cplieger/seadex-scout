@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -25,7 +26,16 @@ func newTestWriter(path, abPasskey string, abConfigured bool) *FeedWriter {
 	if abConfigured {
 		cfg.ABTorznabURL = "http://prowlarr/2/api"
 	}
-	return NewFeedWriter(cfg, Deps{})
+	return NewFeedWriter(cfg, WriterDeps{})
+}
+
+// newLoggedTestWriter is newTestWriter (Nyaa configured, AnimeBytes off) with
+// a capture logger injected, for tests asserting on the writer's log output.
+func newLoggedTestWriter(path string, log *slog.Logger) *FeedWriter {
+	return NewFeedWriter(&FeedWriterConfig{
+		Path:           path,
+		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"},
+	}, WriterDeps{Logger: log})
 }
 
 // emptyLedgerJSON is the minimal journal-schema snapshot (an empty but PRESENT
@@ -141,7 +151,7 @@ func TestRebuildBaselinesPreJournalSchema(t *testing.T) {
 	}
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
 	log, rec := capture.New()
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, WriterDeps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -167,7 +177,7 @@ func TestRebuildBaselinesMalformedSnapshot(t *testing.T) {
 	}
 	log, rec := capture.New()
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, WriterDeps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 || !snap.Seen["nyaa:42"] {
@@ -436,7 +446,7 @@ func TestRebuildDropsUnknownTracker(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
 	log, rec := capture.New()
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: "http://prowlarr/2/api"}}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: "http://prowlarr/2/api"}}, WriterDeps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -465,7 +475,7 @@ func TestRebuildIdlessABNotCountedAsPasskeySkip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
 	log, rec := capture.New()
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, WriterDeps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -547,7 +557,7 @@ func TestRebuildJournalItemShape(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: "PASSKEY123", ABTorznabURL: "http://prowlarr/2/api"}}, Deps{})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: "PASSKEY123", ABTorznabURL: "http://prowlarr/2/api"}}, WriterDeps{})
 	now := time.Date(2026, time.July, 2, 9, 0, 0, 0, time.UTC)
 	w.now = func() time.Time { return now }
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
@@ -729,7 +739,7 @@ func TestRebuildDropsCarriedABItemWhenPasskeyRemoved(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Frieren - S01E01 (BD Remux 1080p) [PMR].mkv"}},
 		}},
 	}}
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, Deps{})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, WriterDeps{})
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -758,7 +768,7 @@ func TestRebuildDropsCarriedNonCuratedABItemWhenPasskeyRemoved(t *testing.T) {
 	})
 	// No entries: the carried item's torrent is absent from the curation set,
 	// exercising the non-curated carry arm.
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, Deps{})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, WriterDeps{})
 	if err := w.Rebuild(context.Background(), nil, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -777,7 +787,7 @@ func TestRebuildDropsCarriedNonCuratedABItemWhenPasskeyRemoved(t *testing.T) {
 func TestRebuildRebasesFutureFirstSeenCarriedItem(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, WriterDeps{Logger: log})
 	t0 := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
 	w.now = func() time.Time { return t0 }
 	future := t0.Add(72 * time.Hour)
@@ -816,7 +826,7 @@ func TestRebuildDropsKeylessCarriedItem(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	log, rec := capture.New()
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}).Rebuild(context.Background(), nil, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, WriterDeps{Logger: log}).Rebuild(context.Background(), nil, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 {
@@ -842,7 +852,7 @@ func TestRebuildSkipsTitlelessTorrentAsUnresolvable(t *testing.T) {
 		Torrents:  []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/7", IsBest: true}},
 	}}
 	log, rec := capture.New()
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, WriterDeps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -885,7 +895,7 @@ func TestRebuildCountsIdentitylessABTorrentAsUnresolvable(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "feed.json")
 			seedEmptyLedger(t, path)
 			log, rec := capture.New()
-			if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: tc.cfg}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+			if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: tc.cfg}, WriterDeps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
 				t.Fatalf("Rebuild: %v", err)
 			}
 			if snap := readSnapshotFile(t, path); len(snap.ABFeed) != 0 {
@@ -919,7 +929,7 @@ func TestRebuildUnknownTrackerWithHashSilentlyIgnored(t *testing.T) {
 		}},
 	}}
 	log, rec := capture.New()
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, WriterDeps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -956,7 +966,7 @@ func TestRebuildDropsCarriedItemBecomingUnresolvable(t *testing.T) {
 		Torrents:  []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/42", IsBest: true}},
 	}}
 	log, rec := capture.New()
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, WriterDeps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1056,7 +1066,7 @@ func TestRebuildDropsCarriedItemWarnedByStoredHashOnly(t *testing.T) {
 			Files:    []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [W].mkv"}},
 		}},
 	}}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, WriterDeps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1326,7 +1336,7 @@ func TestRebuildDropsNonCuratedCarriedItemWithBadGUID(t *testing.T) {
 				},
 			})
 			log, rec := capture.New()
-			if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}).Rebuild(context.Background(), nil, nil); err != nil {
+			if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, WriterDeps{Logger: log}).Rebuild(context.Background(), nil, nil); err != nil {
 				t.Fatalf("Rebuild: %v", err)
 			}
 			if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 {

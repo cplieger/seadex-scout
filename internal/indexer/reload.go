@@ -10,7 +10,6 @@ import (
 	"sync"
 
 	"github.com/cplieger/atomicfile/v2"
-	"github.com/cplieger/seadex-scout/internal/release"
 )
 
 // statSnapshot stats the snapshot file and applies reload's missing/unreadable
@@ -333,10 +332,13 @@ func (ix *Indexer) readSnapshot(ctx context.Context) (snapshot, bool, bool) {
 		}
 		return snapshot{}, false, false
 	}
-	snap, reason, decodeErr := decodeSnapshot(data)
+	snap, blankedInfoURLs, reason, decodeErr := decodeSnapshot(data)
 	if decodeErr != nil {
 		ix.markSnapshotFailedIfUnloaded()
-		ix.log.Warn("indexer feed snapshot malformed; keeping current feed", "path", ix.path, "error", decodeErr)
+		// Bounded through the shared emit-boundary policy: a decoder error can
+		// embed the offending document text (encoding/json quotes an over-range
+		// numeric literal verbatim), and feed.json is a tamperable boundary.
+		ix.log.Warn("indexer feed snapshot malformed; keeping current feed", "path", ix.path, "error", capLogText(decodeErr.Error(), 256))
 		return snapshot{}, false, true
 	}
 	// `null` or `{}` decodes cleanly into a zero value; nil curation maps
@@ -363,28 +365,56 @@ func (ix *Indexer) readSnapshot(ctx context.Context) (snapshot, bool, bool) {
 	}
 	snap.ABFeed = ix.rebuildABDownloadURLs(snap.ABFeed)
 	snap.NyaaFeed = ix.rebuildNyaaDownloadURLs(snap.NyaaFeed)
-	snap.ABFeed = ix.sanitizeSnapshotInfoURLs(snap.ABFeed)
-	snap.NyaaFeed = ix.sanitizeSnapshotInfoURLs(snap.NyaaFeed)
+	if blankedInfoURLs > 0 {
+		// Counts only; the rejected value can be attacker-shaped text.
+		ix.log.Warn("indexer feed snapshot: non-SeaDex info URLs blanked",
+			"path", ix.path, "blanked", blankedInfoURLs)
+	}
 	return snap, true, false
 }
 
-// normalizeSnapshotInfoHashes re-validates each persisted item's InfoHash
-// through validInfoHash (the writer's own gate), blanking anything not a
-// 40-char hex hash: validPersistedItem bounds only the field's length, and
-// writeItem renders the value as the torznab infohash attr, a field
-// consumers treat as torrent identity. decodeSnapshot invokes it for BOTH
-// consumers (reader and writer), so a non-canonical at-rest hash can neither
-// be served nor compared as identity by the writer's carry gates.
-func normalizeSnapshotInfoHashes(feed []journalItem) {
+// normalizeSnapshotItems re-canonicalizes each persisted item's non-derived
+// wire fields, so a hand-edited, tampered, or legacy snapshot cannot put a
+// value in the served feed that no producer could have written:
+//
+//   - InfoHash goes through validInfoHash (the writer's own gate), blanking
+//     anything not a 40-char hex hash - writeItem renders it as the torznab
+//     infohash attr, a field consumers treat as torrent identity.
+//   - DownloadVolumeFactor is blanked unless it is exactly one of the two
+//     markers the feed emits (dvfBest / dvfAlt). writeItem renders any
+//     non-empty value as the downloadvolumefactor attr, the arr's freeleech
+//     accounting input, so an out-of-vocabulary value ("0", arbitrary text)
+//     would either present a curated release as fully freeleech or feed the
+//     arr an unparseable factor; blanking falls back to the normal-item
+//     (factor 1) shape writeItem already documents.
+//
+// validPersistedItem bounds only these fields' LENGTH, and carryStoredItem
+// carries a non-curated item's stored render verbatim, so an at-rest value
+// would otherwise survive both the serve path and the next rebuild.
+// decodeSnapshot invokes this for BOTH consumers (reader and writer), so a
+// non-canonical at-rest value can neither be served nor compared as identity
+// by the writer's carry gates.
+func normalizeSnapshotItems(feed []journalItem) {
 	for i := range feed {
 		feed[i].InfoHash = validInfoHash(feed[i].InfoHash)
+		feed[i].DownloadVolumeFactor = validMarker(feed[i].DownloadVolumeFactor)
 	}
+}
+
+// validMarker returns m when it is one of the two download-volume-factor
+// markers the feed emits (dvfBest / dvfAlt), else "" - writeItem then omits
+// both factor attrs and the arr treats the item as a normal release.
+func validMarker(m string) string {
+	if m == dvfBest || m == dvfAlt {
+		return m
+	}
+	return ""
 }
 
 // rebuildDownloadURLs is the shared derivation mechanics behind
 // rebuildABDownloadURLs and rebuildNyaaDownloadURLs: it re-derives each feed
 // item's download URL from its non-secret tracker page URL (the GUID) via
-// downloadURL, which enforces the tracker-ownership gate internally
+// downloadURLForScope, which enforces the tracker-ownership gate internally
 // (trackerOwnURL, the same fail-closed check writer-side journal admission
 // runs through trackerKey). Persisted data crosses a separate trust boundary
 // from writer admission: a tampered but structurally valid feed.json could
@@ -401,7 +431,7 @@ func normalizeSnapshotInfoHashes(feed []journalItem) {
 // dropped, collecting the drop count plus up to three bounded sample GUIDs
 // for the wrappers' tracker-specific warnings. The wrappers own the policy
 // (the AB passkey gate) and the exact log contract.
-func rebuildDownloadURLs(feed []journalItem, tracker, passkey string) (out []journalItem, dropped int, samples []string) {
+func rebuildDownloadURLs(feed []journalItem, scope, passkey string) (out []journalItem, dropped int, samples []string) {
 	out = make([]journalItem, 0, len(feed))
 	for i := range feed {
 		it := feed[i]
@@ -412,7 +442,7 @@ func rebuildDownloadURLs(feed []journalItem, tracker, passkey string) (out []jou
 			}
 			continue
 		}
-		dl, ok := downloadURL(tracker, it.GUID, passkey)
+		dl, ok := downloadURLForScope(scope, it.GUID, passkey)
 		if !ok {
 			dropped++
 			if len(samples) < 3 {
@@ -446,7 +476,7 @@ func (ix *Indexer) rebuildABDownloadURLs(feed []journalItem) []journalItem {
 	if ix.cfg.ABPasskey == "" {
 		return nil
 	}
-	out, dropped, samples := rebuildDownloadURLs(feed, release.TrackerNameAnimeBytes, ix.cfg.ABPasskey)
+	out, dropped, samples := rebuildDownloadURLs(feed, upstreamAB, ix.cfg.ABPasskey)
 	if dropped > 0 {
 		// The GUID (a tracker page URL) is not a secret and names the
 		// undecodable items; the download URL (which embeds the passkey) is
@@ -471,7 +501,7 @@ func (ix *Indexer) rebuildNyaaDownloadURLs(feed []journalItem) []journalItem {
 	if len(feed) == 0 {
 		return feed
 	}
-	out, dropped, samples := rebuildDownloadURLs(feed, release.TrackerNameNyaa, "")
+	out, dropped, samples := rebuildDownloadURLs(feed, upstreamNyaa, "")
 	if dropped > 0 {
 		ix.log.Warn("indexer feed snapshot: Nyaa items dropped; no download URL derivable from tracker page URL",
 			"path", ix.path, "dropped", dropped, "kept", len(out), "sample_guids", samples)
@@ -497,8 +527,11 @@ var seadexInfoHost = sync.OnceValue(func() string {
 // renderFeed hands InfoURL to the arr UI as the item's clickable info link,
 // so a tampered feed.json must not plant a javascript:/data:/foreign-host
 // link there. Blanking (never dropping) mirrors the search path's
-// sanitizeDisplayURL: writeItem omits an empty <comments>.
-func (ix *Indexer) sanitizeSnapshotInfoURLs(feed []journalItem) []journalItem {
+// sanitizeDisplayURL: writeItem omits an empty <comments>. It returns the
+// number of blanked items and logs nothing itself: decodeSnapshot invokes it
+// for BOTH consumers (reader and writer), so the operator-facing WARN stays
+// with each caller.
+func sanitizeSnapshotInfoURLs(feed []journalItem) int {
 	host := seadexInfoHost()
 	blanked := 0
 	for i := range feed {
@@ -508,12 +541,7 @@ func (ix *Indexer) sanitizeSnapshotInfoURLs(feed []journalItem) []journalItem {
 		feed[i].InfoURL = ""
 		blanked++
 	}
-	if blanked > 0 {
-		// Counts only; the rejected value can be attacker-shaped text.
-		ix.log.Warn("indexer feed snapshot: non-SeaDex info URLs blanked",
-			"path", ix.path, "blanked", blanked)
-	}
-	return feed
+	return blanked
 }
 
 // snapshotInfoURLAllowed reports whether raw is a userinfo-free absolute
@@ -522,11 +550,8 @@ func snapshotInfoURLAllowed(raw, host string) bool {
 	if host == "" {
 		return false
 	}
-	u, err := url.Parse(raw)
-	if err != nil || u.User != nil {
-		return false
-	}
-	if !isHTTPScheme(u.Scheme) {
+	u, ok := httpNoUserinfoURL(raw)
+	if !ok {
 		return false
 	}
 	return strings.EqualFold(u.Hostname(), host)

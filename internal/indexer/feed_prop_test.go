@@ -9,12 +9,12 @@ import (
 	"pgregory.net/rapid"
 )
 
-// TestFeedTitle_preservesSingleEpisodesAndCollapsesPacksProperty is the
+// TestDerivedTitle_preservesSingleEpisodesAndCollapsesPacksProperty is the
 // every-PR randomized complement to the feed-title tables: for any generated
 // title/season/episode pair, a single-episode torrent keeps its SxxExx title
 // while a torrent spanning two distinct episodes is a real pack and collapses
 // to the season.
-func TestFeedTitle_preservesSingleEpisodesAndCollapsesPacksProperty(t *testing.T) {
+func TestDerivedTitle_preservesSingleEpisodesAndCollapsesPacksProperty(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		title := rapid.StringMatching(`[A-Za-z0-9]{1,24}`).
 			Filter(func(s string) bool {

@@ -583,3 +583,27 @@ func TestWriteFilesStopsOnNonDurableHalf(t *testing.T) {
 		})
 	}
 }
+
+// TestWriteFilesSurfacesJSONEncodeError pins the encode stage's error wrap and
+// its fail-safe ordering: when the report cannot be encoded at all, WriteFiles
+// returns the wrapped "encode json" error and writes NEITHER half - the report
+// dir is never even created, so a failed run cannot leave a partial pair. A
+// year outside [0,9999] is the one deterministic encode failure a Report can
+// carry (time.Time.MarshalJSON rejects it), so the branch needs no production
+// seam.
+func TestWriteFilesSurfacesJSONEncodeError(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "reports")
+	r := &Report{GeneratedAt: time.Date(10000, time.January, 1, 0, 0, 0, 0, time.UTC), Totals: map[string]int{}}
+
+	err := r.WriteFiles(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	if err == nil {
+		t.Fatal("WriteFiles must fail when the report cannot be JSON-encoded")
+	}
+	if !strings.Contains(err.Error(), "encode json") {
+		t.Errorf("error = %q, want it wrapped with the encode-json context", err)
+	}
+	if _, statErr := os.Stat(dir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("report dir stat = %v, want absent (an encode failure must write nothing)", statErr)
+	}
+}

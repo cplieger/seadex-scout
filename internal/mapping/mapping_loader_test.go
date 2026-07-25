@@ -197,10 +197,10 @@ func TestLoader_refreshCache_httpErrorKeepsStale(t *testing.T) {
 // server returns a full 200) and, if a 304 arrives anyway, refreshCache must error
 // rather than reuse zero records.
 func TestLoader_refreshCache_notModifiedEmptyCacheErrors(t *testing.T) {
-	var sawValidators bool
+	var sawValidators atomic.Bool
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "" {
-			sawValidators = true
+			sawValidators.Store(true)
 		}
 		w.WriteHeader(http.StatusNotModified)
 	}))
@@ -215,7 +215,7 @@ func TestLoader_refreshCache_notModifiedEmptyCacheErrors(t *testing.T) {
 	if len(next.Records) != 0 {
 		t.Errorf("304 with empty cache produced %d records, want 0 (must not reuse zero records)", len(next.Records))
 	}
-	if sawValidators {
+	if sawValidators.Load() {
 		t.Error("conditional GET sent validators despite a record-less cache; they must be suppressed so the server returns a full 200")
 	}
 }
@@ -365,7 +365,7 @@ func TestLoader_refreshCache_futureFetchedAtFailedFetchClampsStaleAge(t *testing
 }
 
 // TestLoader_refreshCache_zeroRefreshAlwaysRevalidates pins the deployed
-// configuration's contract (the app wires DefaultMappingRefresh = 0): a zero
+// configuration's contract (the app wires DefaultRefresh = 0): a zero
 // refresh window disables the fresh-reuse fast path entirely, so even a
 // just-fetched cache revalidates against upstream every cycle (an unchanged
 // upstream is a cheap 304) instead of being reused until the timestamp ages.
@@ -430,10 +430,10 @@ func TestLoader_refreshCache_unusableCacheFetchFailureErrors(t *testing.T) {
 // a full 200 download) and, if a 304 arrives anyway, must error rather than
 // affirm a map that indexes to nothing.
 func TestLoader_refreshCache_unusableCacheSendsNoValidatorsAndErrorsOn304(t *testing.T) {
-	var sawValidators bool
+	var sawValidators atomic.Bool
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "" {
-			sawValidators = true
+			sawValidators.Store(true)
 		}
 		w.WriteHeader(http.StatusNotModified)
 	}))
@@ -450,7 +450,7 @@ func TestLoader_refreshCache_unusableCacheSendsNoValidatorsAndErrorsOn304(t *tes
 	if err == nil {
 		t.Fatal("304 over an unusable cache returned nil error, want an error instead of reusing an empty effective map")
 	}
-	if sawValidators {
+	if sawValidators.Load() {
 		t.Error("conditional GET sent validators despite an unusable cache; they must be suppressed so the server returns a full 200")
 	}
 }

@@ -76,7 +76,7 @@ type fakeFeed struct {
 	entries int
 }
 
-func (f *fakeFeed) Rebuild(_ context.Context, entries []seadex.Entry, _ func(alID int) indexer.EntryInfo) error {
+func (f *fakeFeed) Rebuild(_ context.Context, entries []seadex.Entry, _ indexer.EntryInfoFunc) error {
 	f.calls++
 	f.entries = len(entries)
 	return f.err
@@ -556,12 +556,7 @@ func TestSaveGenuineFailureOnLiveContextIsNotRetried(t *testing.T) {
 	if store.st.Baselined {
 		t.Error("state was persisted by a retry, want the genuinely-failed save left unpersisted")
 	}
-	errCount := 0
-	for _, r := range recorder.Records() {
-		if r.Message == "state save failed" && r.Level == slog.LevelError {
-			errCount++
-		}
-	}
+	errCount := recorder.CountLevel(slog.LevelError, "state save failed")
 	if errCount != 1 {
 		t.Errorf("\"state save failed\" ERROR count = %d, want exactly 1", errCount)
 	}

@@ -272,7 +272,7 @@ func (w *Walker) walkSonarr(ctx context.Context) ([]Item, int, error) {
 		return nil, 0, err
 	}
 	if failed >= episodeFailureBudget {
-		return nil, 0, fmt.Errorf("sonarr episode fetches: %d series failed, hitting the walk failure budget of %d", failed, episodeFailureBudget)
+		return nil, 0, fmt.Errorf("episode fetches: %d series failed, hitting the walk failure budget of %d", failed, episodeFailureBudget)
 	}
 	// Sub-budget total failure: every kept series' episode fetch failed. The
 	// budget above is an absolute count a library with fewer kept series can
@@ -283,7 +283,7 @@ func (w *Walker) walkSonarr(ctx context.Context) ([]Item, int, error) {
 	// unhealthy semantic). The ctx check above keeps a shutdown from
 	// masquerading as a total failure.
 	if len(kept) > 0 && failed == len(kept) {
-		return nil, 0, fmt.Errorf("sonarr episode fetches: all %d kept series failed", failed)
+		return nil, 0, fmt.Errorf("episode fetches: all %d kept series failed", failed)
 	}
 	items := make([]Item, 0, len(results))
 	for _, item := range results {
@@ -383,10 +383,23 @@ func (w *Walker) walkRadarr(ctx context.Context) ([]Item, error) {
 	}
 
 	items := make([]Item, 0, len(movies))
+	noPayload := 0
 	for i := range movies {
-		if keepByTags(movies[i].Tags, includeIDs, excludeIDs) {
-			items = append(items, w.movieItem(&movies[i]))
+		if !keepByTags(movies[i].Tags, includeIDs, excludeIDs) {
+			continue
 		}
+		if movies[i].HasFile && movies[i].MovieFile == nil {
+			// Radarr says the movie has a file but sent no file payload: the
+			// item necessarily compares as fileless (movieItem's HasFile AND),
+			// so record the degradation instead of letting it look like a
+			// genuinely fileless movie.
+			noPayload++
+		}
+		items = append(items, w.movieItem(&movies[i]))
+	}
+	if noPayload > 0 {
+		w.log.Warn("radarr movies report a file but carry no file payload; they compare as fileless",
+			"movies", noPayload, "kept", len(items))
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -427,7 +440,9 @@ func (w *Walker) resolveTags(ctx context.Context,
 // credential-safety test). It returns nil for an unconfigured set (keepByTags
 // reads nil as "filter off") and a non-nil - possibly empty - set for a
 // configured one, so a configured include list matching no tag still drops
-// everything rather than admitting everything.
+// everything rather than admitting everything. A set whose every label missed
+// logs a second, distinct warning: for an include set that empties the side
+// entirely.
 func (w *Walker) resolveOne(tags []arrapi.Tag, which string, labels []string) map[int]struct{} {
 	if len(labels) == 0 {
 		return nil
@@ -435,7 +450,18 @@ func (w *Walker) resolveOne(tags []arrapi.Tag, which string, labels []string) ma
 	if unmatched := arrapi.UnmatchedLabels(tags, labels...); len(unmatched) > 0 {
 		w.log.Warn("configured tags matched no arr tag", "which", which, "unmatched_count", len(unmatched))
 	}
-	return arrapi.TagIDs(tags, labels...)
+	ids := arrapi.TagIDs(tags, labels...)
+	if len(ids) == 0 {
+		// Every configured label missed. For an include set that is not a
+		// partial miss but a dead filter: keepByTags reads the non-nil empty
+		// set as "filter on, nothing matches", so the side contributes ZERO
+		// items and the cycle still reads healthy. Say so explicitly, so the
+		// operator (and a Loki rule) can tell a dead filter apart from one
+		// stray label.
+		w.log.Warn("no configured tag resolved to an arr tag; the filter admits nothing on this side",
+			"which", which, "configured_count", len(labels))
+	}
+	return ids
 }
 
 // keepByTags applies include-then-exclude tag filtering. Include (when set)

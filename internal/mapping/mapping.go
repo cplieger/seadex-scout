@@ -37,6 +37,18 @@ import (
 const DefaultURL = "https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-mini.json"
 
 const (
+	// DefaultRefresh is the reuse-if-fresh window for the Fribb map. 0
+	// revalidates every cycle: each cycle issues a conditional GET
+	// (ETag/If-Modified-Since), so an unchanged map (the common case, since Fribb
+	// updates ~weekly) is a cheap 304 with no re-download, while a change is picked
+	// up within one cycle instead of lagging a fixed cadence. A failed
+	// revalidation is harmless (the persisted cache is reused stale-on-error and
+	// the next cycle retries), and the full ~5.9 MB download still happens only
+	// when Fribb actually changes, so per-cycle revalidation stays cheap. It is
+	// Fribb contract knowledge, so it lives here beside DefaultURL; the wiring
+	// site (build.go) references it.
+	DefaultRefresh = 0
+
 	// maxMapBytes bounds the Fribb download before decode (~2.7x the real ~5.9MB body).
 	maxMapBytes = 16 << 20
 	// maxOverrideBytes bounds the local overrides file.
@@ -79,6 +91,13 @@ func (r *Record) IsMovie() bool { return r.Type == typeMovie }
 func (r *Record) RoutedIDs() (tvdbID int, tmdbMovies []int, imdbIDs []string) {
 	if r.IsMovie() {
 		return 0, r.TmdbMovies, r.IMDbIDs
+	}
+	// Zero out a non-usable TVDB id here so the usability rule has ONE home:
+	// callers do a presence check, never a policy check. An operator override
+	// decodes through plain encoding/json, so a negative tvdb_id can reach a
+	// hand-built Record even though both producers canonicalize.
+	if r.TvdbID <= 0 {
+		return 0, nil, nil
 	}
 	return r.TvdbID, nil, nil
 }
@@ -237,6 +256,22 @@ func buildIndex(records []Record) *Index {
 	return &Index{byAniList: byAniList}
 }
 
+// indexedRecordCount returns how many records survive into the served index
+// (distinct positive AniList IDs, per buildIndex). It is the single spelling
+// of the count every `records` / stale_records log attribute reports, so a
+// persisted cache written before deduplication (duplicate or non-positive
+// rows) can never over-report the size of the map consumers actually
+// receive, and no caller has to build a whole Record-valued index to count.
+func indexedRecordCount(records []Record) int {
+	seen := make(map[int]struct{}, len(records))
+	for i := range records {
+		if records[i].AniListID > 0 {
+			seen[records[i].AniListID] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
 // cacheUsable reports whether a cached record set is usable as an effective
 // AniList-keyed mapping: after deduplication (which drops non-positive AniList IDs,
 // so a JSON-valid state cache such as records:[{}] is not a usable map - and
@@ -257,7 +292,10 @@ func cacheUsable(records []Record) bool {
 }
 
 // coverageFloor returns the conservative 1% acceptance floor (ceiling
-// division, minimum 1) shared by cacheUsable and validateRefreshedRecords.
+// division, minimum 1) shared by cacheUsable and validateRefreshedRecords -
+// the latter deriving BOTH the candidate floor (from the refreshed record
+// count) and the previous-cache significance gate every population guard is
+// judged against (from the deduplicated previous cache) with it.
 func coverageFloor(n int) int { return max(1, (n+99)/100) }
 
 // coverageLost reports the shared loss-relative floor decision applied by the
@@ -274,9 +312,8 @@ func coverageLost(prevCount, count, previousMinimum, minimum int) bool {
 // routing validators apply beside their loss-relative floors: the previously
 // accepted cache carried a meaningful population (prevCount >=
 // previousMinimum, the same significance gate coverageLost uses) and the
-// candidate retains less than half of it (degradation.ShrinkGuardFactor, the
-// shared below-half policy home; multiplication avoids integer-division
-// rounding). The 1%-of-body floors catch total loss; this catches the
+// candidate retains less than half of it (degradation.Shrunk, the shared
+// below-half policy home). The 1%-of-body floors catch total loss; this catches the
 // MID-BAND, where a corrupted refresh guts most of ONE population (typed
 // records 10000 -> 450 in a 40k body) while the record count and every 1%
 // floor stay green - accepted, it would silently erase most of the library's
@@ -287,7 +324,7 @@ func coverageLost(prevCount, count, previousMinimum, minimum int) bool {
 // documented remedy (remove state.json to cold-start onto the new shape)
 // applies, exactly like the whole-map shrink guard.
 func populationCollapsed(prevCount, count, previousMinimum int) bool {
-	return prevCount >= previousMinimum && count*degradation.ShrinkGuardFactor < prevCount
+	return prevCount >= previousMinimum && degradation.Shrunk(count, prevCount)
 }
 
 // --- Loader: conditional fetch, acceptance guards, stale-map degradation ---
@@ -415,7 +452,7 @@ func staleOrFail(prev *Cache, staleMsg string, cause, noCache error) (Cache, err
 			cause:   cause,
 			msg:     staleMsg,
 			age:     max(time.Duration(0), time.Since(prev.FetchedAt).Round(time.Second)),
-			records: buildIndex(prev.Records).Len(),
+			records: indexedRecordCount(prev.Records),
 		}
 	}
 	return *prev, noCache
@@ -460,7 +497,7 @@ func (l *Loader) refreshCache(ctx context.Context, prev *Cache) (Cache, error) {
 	// a negative age is never fresh, forcing a revalidating fetch rather than
 	// trusting the bad timestamp until it drifts back into range.
 	if l.refresh > 0 && age >= 0 && age < l.refresh && cacheUsable(prev.Records) {
-		l.log.Debug("mapping: cache fresh, skipping fetch", "records", len(prev.Records), "age", age.Round(time.Second))
+		l.log.Debug("mapping: cache fresh, skipping fetch", "records", indexedRecordCount(prev.Records), "age", age.Round(time.Second))
 		return *prev, nil
 	}
 
@@ -483,13 +520,13 @@ func (l *Loader) reuseCachedRecords(prev *Cache) (Cache, error) {
 	if !cacheUsable(prev.Records) {
 		return *prev, errors.New("mapping: not modified but no cache available")
 	}
-	l.log.Debug("mapping: not modified, reusing cache", "records", len(prev.Records))
+	l.log.Debug("mapping: not modified, reusing cache", "records", indexedRecordCount(prev.Records))
 	refreshed := *prev
 	refreshed.FetchedAt = time.Now()
 	// A 304 is upstream affirmation that the cached map is current, so any
 	// acceptance-guard rejection streak ends here.
 	if prev.RejectedRefreshes > 0 {
-		l.log.Info("mapping: rejection streak ended by 304 revalidation", "ended_rejection_streak", prev.RejectedRefreshes, "records", len(prev.Records))
+		l.log.Info("mapping: rejection streak ended by 304 revalidation", "ended_rejection_streak", prev.RejectedRefreshes, "records", indexedRecordCount(prev.Records))
 	}
 	refreshed.RejectedRefreshes = 0
 	return refreshed, nil
@@ -526,11 +563,10 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 	}
 	// A syntactically valid but sharply truncated refresh (e.g. one record
 	// replacing ~40k) can pass the coverage floor above yet silently erase most
-	// mappings; treat a below-half-size refresh (degradation.ShrinkGuardFactor,
-	// the shared below-half policy home) as part of the cache-acceptance
-	// invariant and keep the stale map (multiplication avoids integer-division
-	// rounding for odd counts).
-	if prevCount := buildIndex(prev.Records).Len(); cacheUsable(prev.Records) && len(records)*degradation.ShrinkGuardFactor < prevCount {
+	// mappings; treat a below-half-size refresh (degradation.Shrunk, the
+	// shared below-half policy home) as part of the cache-acceptance
+	// invariant and keep the stale map.
+	if prevCount := indexedRecordCount(prev.Records); cacheUsable(prev.Records) && degradation.Shrunk(len(records), prevCount) {
 		// The noCache argument is unreachable here (cacheUsable guarantees the
 		// stale branch); it exists only to satisfy rejectRefresh's signature.
 		// The reason string is FIXED (class-queryable in Loki); the live
@@ -609,13 +645,18 @@ func validateRefreshedRecords(previous, records []Record, sourceElements int) er
 		return nil
 	}
 	previous = deduplicateRecords(previous)
-	if err := validateTypeCoverage(previous, records, minimum); err != nil {
+	// One significance gate for every population: the previously accepted
+	// cache's own 1% floor, derived once so the type, scope, and routing
+	// guards cannot drift apart on which basis they judge "the prior cache
+	// carried a meaningful population".
+	previousMinimum := coverageFloor(len(previous))
+	if err := validateTypeCoverage(previous, records, previousMinimum, minimum); err != nil {
 		return err
 	}
-	if err := validateScopeCoverage(previous, records, minimum); err != nil {
+	if err := validateScopeCoverage(previous, records, previousMinimum, minimum); err != nil {
 		return err
 	}
-	return validateRoutingCoverage(previous, records, minimum)
+	return validateRoutingCoverage(previous, records, previousMinimum, minimum)
 }
 
 // validateTypeCoverage rejects a candidate refresh that lost type coverage
@@ -632,8 +673,8 @@ func validateRefreshedRecords(previous, records []Record, sourceElements int) er
 // record is the catalogue growing, not type data degrading. An established
 // type-sparse cache or a first boot against a type-sparse catalogue is the
 // catalogue's valid shape, not a regression to reject.
-func validateTypeCoverage(previous, records []Record, minimum int) error {
-	return validatePopulation("type", "typed", typedRecordCount(previous), typedRecordCount(records), len(records), coverageFloor(len(previous)), minimum)
+func validateTypeCoverage(previous, records []Record, previousMinimum, minimum int) error {
+	return validatePopulation("type", "typed", typedRecordCount(previous), typedRecordCount(records), len(records), previousMinimum, minimum)
 }
 
 // validatePopulation applies the shared pair of per-population guards every
@@ -664,8 +705,7 @@ func validatePopulation(floorNoun, collapseNoun string, prevCount, count, total,
 // population (positive-season, special-type) is guarded only when the prior
 // cache met the floor for it, and an additive refresh that merely grows the
 // record count passes.
-func validateScopeCoverage(previous, records []Record, minimum int) error {
-	previousMinimum := coverageFloor(len(previous))
+func validateScopeCoverage(previous, records []Record, previousMinimum, minimum int) error {
 	if err := validatePopulation("positive-season", "season-scoped", positiveSeasonCount(previous), positiveSeasonCount(records), len(records), previousMinimum, minimum); err != nil {
 		return err
 	}
@@ -715,8 +755,7 @@ func specialRecordCount(records []Record) int {
 // update that keeps both sides populated passes, and individual or future
 // non-movie labels stay legal because every non-MOVIE type counts toward the
 // same side.
-func validateRoutingCoverage(previous, records []Record, minimum int) error {
-	previousMinimum := coverageFloor(len(previous))
+func validateRoutingCoverage(previous, records []Record, previousMinimum, minimum int) error {
 	prevMovies, prevOthers := routingCounts(previous)
 	movies, others := routingCounts(records)
 	if err := validatePopulation("movie-routed", "movie-routed", prevMovies, movies, len(records), previousMinimum, minimum); err != nil {
@@ -812,7 +851,9 @@ func (l *Loader) conditionalGet(ctx context.Context, prev *Cache) (httpx.Conditi
 // downstream Docker/Alloy/Loki limits may truncate or reject — hiding the
 // diagnostic while amplifying log volume. unknown_key_count carries the
 // retained count (itself bounded by maxRetainedUnknownKeys), with
-// keys_truncated marking an elided tail and count_capped marking a count
+// keys_truncated marking that the displayed list is not verbatim — either an
+// elided tail or an individual key name byte-capped at maxLoggedKeyBytes
+// (rendered with a trailing "...") — and count_capped marking a count
 // that is a lower bound.
 const maxLoggedUnknownKeys = 20
 

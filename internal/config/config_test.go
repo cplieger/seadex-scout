@@ -114,7 +114,7 @@ func TestToConfigInfoOnDisabledArrWithKey(t *testing.T) {
 		if c.RadarrURL != "" || c.RadarrAPIKey != "" {
 			t.Errorf("disabled radarr should still be dropped, got url=%q key=%q", c.RadarrURL, c.RadarrAPIKey)
 		}
-		if !rec.Contains("radarr.api_key is set but radarr.enabled is false") {
+		if !rec.AttrContains("", "field", "radarr.api_key") {
 			t.Errorf("toConfig log = %v, want the disabled-radarr-with-key info", rec.Messages())
 		}
 	})
@@ -352,7 +352,7 @@ func TestLoadTypeErrorOmitsScalarExcerpt(t *testing.T) {
 // yaml.v3 embeds the scalar excerpt with any backtick in the value unchanged,
 // so a rejected scalar containing a backtick defeats backtick-pair matching
 // and would leak a prefix. No fragment of the rejected value may survive
-// sanitizeYAMLError.
+// yamlenv.SanitizeDecodeError.
 func TestLoadTypeErrorOmitsBacktickScalar(t *testing.T) {
 	const scalar = "zq9`vw7-secret-sentinel"
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -447,6 +447,38 @@ func TestParseLogLevelWarnsOnUnrecognizedValue(t *testing.T) {
 	// must never ride the warning (h-f13).
 	if rec.AttrContains("", "", "verbose") {
 		t.Errorf("parseLogLevel warning echoes the rejected value: %v", rec.Messages())
+	}
+}
+
+// TestParseLogLevelAcceptedValues pins the accepted half of log.level's parse:
+// every spelling an operator actually configures (including the long-form
+// "warning" alias, case folding, and surrounding whitespace) must come back as
+// its own level, silently. Without these rows the level parse could discard
+// slogx.ParseLevel's result and return a constant Info while the whole suite
+// stayed green, so log.level would silently stop working.
+func TestParseLogLevelAcceptedValues(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want slog.Level
+	}{
+		{"debug", "debug", slog.LevelDebug},
+		{"info", "info", slog.LevelInfo},
+		{"mixed case and padding", " WARN ", slog.LevelWarn},
+		{"long-form warning alias", "warning", slog.LevelWarn},
+		{"error", "error", slog.LevelError},
+		{"empty defaults silently", "", slog.LevelInfo},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := capture.Default(t)
+			if got := parseLogLevel(tt.in); got != tt.want {
+				t.Errorf("parseLogLevel(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+			if rec.Contains("unrecognized log.level") {
+				t.Errorf("parseLogLevel(%q) warned on an accepted value: %v", tt.in, rec.Messages())
+			}
+		})
 	}
 }
 
@@ -902,6 +934,22 @@ func TestToConfigNormalizesModeAndLogFormat(t *testing.T) {
 	}
 }
 
+// TestToConfigWiresLogLevel pins the flatten-site wiring of log.level into
+// Config.LogLevel, the twin of the LogFormat assertion in
+// TestToConfigNormalizesModeAndLogFormat: every other test only ever expects
+// the Info fallback, so nothing currently fails if the assignment stops
+// reading fc.Log.Level.
+func TestToConfigWiresLogLevel(t *testing.T) {
+	fc := defaultFileConfig()
+	fc.Log.Level = " DEBUG "
+
+	c := fc.toConfig()
+
+	if c.LogLevel != slog.LevelDebug {
+		t.Errorf("LogLevel = %v, want debug from log.level", c.LogLevel)
+	}
+}
+
 func TestExampleConfigMatchesLoader(t *testing.T) {
 	path, err := filepath.Abs(filepath.Join("..", "..", "config.example.yaml"))
 	if err != nil {
@@ -1135,7 +1183,7 @@ func TestLoadExpandsEnvInSequenceValues(t *testing.T) {
 // ("unknown anchor 'X' referenced") embeds it verbatim. main logs Load's error
 // at startup, so neither the returned error nor the captured log corpus may
 // carry any fragment of the secret; the parse error must route through
-// sanitizeYAMLError like the decode errors.
+// yamlenv.SanitizeDecodeError like the decode errors.
 func TestLoadParseErrorOmitsSecretAlias(t *testing.T) {
 	const sentinel = "LEAK-SENTINEL-a1b2"
 	rec := capture.Default(t)
@@ -1450,7 +1498,7 @@ func TestToConfigInfoOnDisabledSonarrWithKey(t *testing.T) {
 	if c.SonarrURL != "" || c.SonarrAPIKey != "" {
 		t.Errorf("disabled sonarr should be dropped, got url=%q key=%q", c.SonarrURL, c.SonarrAPIKey)
 	}
-	if !rec.Contains("sonarr.api_key is set but sonarr.enabled is false") {
+	if !rec.AttrContains("", "field", "sonarr.api_key") {
 		t.Errorf("toConfig log = %v, want the disabled-sonarr-with-key info", rec.Messages())
 	}
 }
@@ -1462,7 +1510,7 @@ func TestToConfigInfoOnDisabledSonarrWithKey(t *testing.T) {
 // with the no-arr error, so a `touch`ed-but-never-filled config fails loudly
 // with an actionable message instead of a parse error or a silent half-boot.
 // This is the one Load path where the yaml document node is the zero Node
-// (Decoder.Decode returns io.EOF), exercising checkSingleDocument's
+// (Decoder.Decode returns io.EOF), exercising yamlenv.CheckSingleDocument's
 // first-decode-error branch.
 func TestLoadEmptyOrCommentOnlyConfig(t *testing.T) {
 	tests := map[string]string{
@@ -1727,7 +1775,7 @@ func TestToConfigWarnsOnAllBlankTagLists(t *testing.T) {
 			t.Errorf("IncludeTags = %v, want no effective tags", cfg.IncludeTags)
 		}
 		if !rec.Contains("configured tag list holds only blank entries; the filter is off") ||
-			!rec.AttrContains("", "which", "arr_tags.include") {
+			!rec.AttrContains("", "field", "arr_tags.include") {
 			t.Errorf("toConfig() log = %v, want all-blank include-list warning", rec.Messages())
 		}
 	})
@@ -1743,8 +1791,55 @@ func TestToConfigWarnsOnAllBlankTagLists(t *testing.T) {
 			t.Errorf("ExcludeTags = %v, want no effective tags", cfg.ExcludeTags)
 		}
 		if !rec.Contains("configured tag list holds only blank entries; the filter is off") ||
-			!rec.AttrContains("", "which", "arr_tags.exclude") {
+			!rec.AttrContains("", "field", "arr_tags.exclude") {
 			t.Errorf("toConfig() log = %v, want all-blank exclude-list warning", rec.Messages())
+		}
+	})
+}
+
+// TestValidateWarnsOnRelativeReportDir pins the relative-report.dir
+// diagnostic: a non-absolute report.dir resolves against the container
+// working directory instead of the /config mount, so the report pair lands
+// outside the mount and is lost on container recreation. Warn-only (the write
+// itself succeeds), and the warning is field-name-only - report.dir is
+// secret-capable via ${VAR} expansion, so the value is never echoed.
+func TestValidateWarnsOnRelativeReportDir(t *testing.T) {
+	t.Run("relative report dir warns", func(t *testing.T) {
+		rec := capture.Default(t)
+		cfg := Config{
+			RunMode: RunModeDaemon, ReportDir: "./s3cret-dir",
+			SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k",
+		}
+
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() error = %v, want a relative report.dir to remain warn-only", err)
+		}
+		if !rec.Contains("report.dir is not an absolute path") ||
+			!rec.AttrContains("", "field", "report.dir") {
+			t.Errorf("Validate() log = %v, want the relative-report.dir warning", rec.Messages())
+		}
+		for _, m := range rec.Messages() {
+			if strings.Contains(m, "s3cret-dir") {
+				t.Errorf("Validate() log echoes the configured value: %q", m)
+			}
+		}
+		if rec.AttrContains("", "", "s3cret-dir") {
+			t.Errorf("Validate() structured attributes echo the configured value: %v", rec.Messages())
+		}
+	})
+
+	t.Run("absolute report dir stays silent", func(t *testing.T) {
+		rec := capture.Default(t)
+		cfg := Config{
+			RunMode: RunModeDaemon, ReportDir: DefaultReportDir,
+			SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k",
+		}
+
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if rec.Contains("report.dir is not an absolute path") {
+			t.Errorf("Validate() log = %v, want no relative-report.dir warning", rec.Messages())
 		}
 	})
 }

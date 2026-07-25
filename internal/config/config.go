@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -55,7 +56,10 @@ const (
 	// drift. The wiring site (build.go) references the seadex constant.
 	// The Fribb and AniList endpoints follow the same rule: internal/mapping
 	// and internal/anilist export their own DefaultURL beside the decoders
-	// that embody each upstream contract.
+	// that embody each upstream contract. Each upstream's request cadence is
+	// the same class of contract knowledge and lives beside its endpoint too
+	// (seadex.DefaultPageDelay, mapping.DefaultRefresh, anilist.DefaultRate),
+	// so retuning one upstream touches only the package that knows it.
 	// DefaultMappingOverrides is the local alID->IDs override file: drop one in
 	// at this path to pin mappings; absent is fine.
 	DefaultMappingOverrides = "/config/overrides.json"
@@ -83,19 +87,6 @@ const (
 	// feed is configured, its curation set + RSS feed rebuild - so a notification
 	// and what the arrs see in the feed come from the same fetch.
 	DefaultPollInterval = 3 * time.Hour
-	// DefaultSeaDexPageDelay is the politeness delay between SeaDex pages.
-	DefaultSeaDexPageDelay = 2 * time.Second
-	// DefaultMappingRefresh is the reuse-if-fresh window for the Fribb map. 0
-	// revalidates every cycle: each cycle issues a conditional GET
-	// (ETag/If-Modified-Since), so an unchanged map (the common case, since Fribb
-	// updates ~weekly) is a cheap 304 with no re-download, while a change is picked
-	// up within one cycle instead of lagging a fixed cadence. A failed
-	// revalidation is harmless (the persisted cache is reused stale-on-error and
-	// the next cycle retries), and the full ~5.9 MB download still happens only
-	// when Fribb actually changes, so per-cycle revalidation stays cheap.
-	DefaultMappingRefresh = 0
-	// DefaultAniListRate is the AniList request/minute ceiling.
-	DefaultAniListRate = 30
 )
 
 // Clamp bounds for poll_interval, the only file-provided duration.
@@ -344,7 +335,8 @@ func applyArr(name string, af arrFile) (arrURL, key, publicURL string) {
 		return strings.TrimSpace(af.URL), strings.TrimSpace(af.APIKey), strings.TrimSpace(af.PublicURL)
 	}
 	if strings.TrimSpace(af.APIKey) != "" {
-		slog.Info(name + ".api_key is set but " + name + ".enabled is false; " + name + " will not be scanned")
+		slog.Info("api_key is set but the arr is not enabled; it will not be scanned",
+			"field", name+".api_key")
 	}
 	return "", "", ""
 }
@@ -378,7 +370,8 @@ func parseInterval(raw string) (time.Duration, bool) {
 // freshness deadline from this and must never fail because configuration
 // is absent or malformed — the daemon itself surfaces those loudly at
 // startup. Unknown keys and extra YAML documents are deliberately tolerated
-// here (no checkUnknownKeys / checkSingleDocument): strictness is Load's job.
+// here (no yamlenv.CheckUnknownKeys / yamlenv.CheckSingleDocument):
+// strictness is Load's job.
 func PollIntervalFromFile(path string) time.Duration {
 	doc, err := loadExpandedDoc(path)
 	if err != nil {
@@ -425,7 +418,11 @@ func (c *Config) IndexerConfigured() bool {
 // --- Validation and diagnostics ---
 
 // Validate reports the first configuration problem that would stop the app from
-// running, or nil when runnable.
+// running, or nil when runnable. It is deliberately not a pure query: on the way
+// through the checks it also emits every config-time diagnostic (the
+// field-name-only warn/info lines for suspicious-but-runnable values), so it is
+// the one startup call that surfaces them - calling it twice duplicates them,
+// and a path that skips it loses them.
 func (c *Config) Validate() error {
 	if err := validateRunMode(c.RunMode); err != nil {
 		return err
@@ -442,6 +439,7 @@ func (c *Config) Validate() error {
 		return err
 	}
 	c.warnPublicURLProblems()
+	c.warnRelativeReportDir()
 	c.warnOverlappingTags()
 	return c.validateIndexer()
 }
@@ -500,6 +498,23 @@ func (c *Config) warnPublicURLProblems() {
 				"so the credential will never appear in the links",
 				"field", pu.name)
 		}
+	}
+}
+
+// warnRelativeReportDir warns when report.dir is not an absolute path.
+// Everything the app persists lives under the single /config mount, and
+// audit.Report.WriteFiles MkdirAlls the directory, so a relative value does
+// not fail - it silently resolves against the container working directory,
+// putting the timestamped report pair outside the mount where the operator
+// looks for it and losing it on container recreation. Warn-only (the write
+// itself succeeds, so a rejection would newly refuse configs that load
+// today); field-name-only, since report.dir is secret-capable (internal/audit
+// redacts it for that reason).
+func (c *Config) warnRelativeReportDir() {
+	if c.ReportDir != "" && !filepath.IsAbs(c.ReportDir) {
+		slog.Warn("report.dir is not an absolute path; reports resolve against the "+
+			"container working directory instead of the /config mount and are lost on "+
+			"container recreation", "field", "report.dir")
 	}
 }
 
@@ -728,7 +743,7 @@ func validateArrPair(name, rawURL, key string) error {
 	if err != nil {
 		// Unreachable after validateHTTPURL parsed the same string; kept for
 		// the same field-name-only posture rather than a panic.
-		return fmt.Errorf("%s is not a valid URL", name)
+		return fmt.Errorf("%s.url is not a valid URL", name)
 	}
 	if u.RawQuery != "" || u.ForceQuery {
 		return fmt.Errorf("%s.url must not contain a query", name)
@@ -788,8 +803,10 @@ func validateHTTPURL(name, rawURL string) error {
 
 // urlEmbedsCredential reports whether rawURL carries a credential in userinfo
 // or a credential-like query parameter
-// (apikey/api_key/passkey/token/authkey/torrent_pass). Such a
-// URL survives validation but leaks the credential to upstream-failure logs,
+// (apikey/api_key and the api_token/access_token/auth_token variants,
+// passkey/authkey/torrent_pass, password/pass/secret/client_secret/rss_key).
+// Such a URL survives validation but leaks the credential to
+// upstream-failure logs,
 // which wrap the full request URL; validateIndexer warns on it field-name-only.
 // The query is scanned on the raw string, splitting on both '&' and ';' and
 // percent-decoding each name (the same decode u.Query() applies to keys):
@@ -824,15 +841,19 @@ func urlEmbedsCredential(rawURL string) bool {
 }
 
 // isCredentialParam reports whether a query-parameter name is credential-like
-// (apikey/api_key/passkey/token/authkey/torrent_pass, case-insensitive) — the
-// single key set urlEmbedsCredential's raw query scan matches against.
+// (apikey/api_key and the api_token/access_token/auth_token variants,
+// passkey/authkey/torrent_pass, password/pass/secret/client_secret/rss_key,
+// case-insensitive) — the single key set urlEmbedsCredential's raw query scan
+// matches against.
 // authkey and torrent_pass are AnimeBytes' own credential parameter names,
 // carried by every AB direct download/announce URL — exactly the paste
 // mistake (a real tracker URL where the Prowlarr per-indexer endpoint
 // belongs) this warning exists to catch.
 func isCredentialParam(name string) bool {
 	switch strings.ToLower(name) {
-	case "apikey", "api_key", "passkey", "token", "authkey", "torrent_pass":
+	case "apikey", "api_key", "apitoken", "api_token", "access_token", "auth_token",
+		"passkey", "token", "authkey", "torrent_pass",
+		"password", "pass", "secret", "client_secret", "rss_key":
 		return true
 	}
 	return false
@@ -870,7 +891,7 @@ func trimList(items []string) []string {
 // ignores them too).
 func warnAllBlankTagList(which string, raw, trimmed []string) {
 	if len(raw) > 0 && len(trimmed) == 0 {
-		slog.Warn("configured tag list holds only blank entries; the filter is off", "which", which)
+		slog.Warn("configured tag list holds only blank entries; the filter is off", "field", which)
 	}
 }
 

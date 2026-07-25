@@ -268,15 +268,15 @@ func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[strin
 			continue
 		}
 		// An uncovered item has no SeaDex-associated Fribb record to supply a
-		// specific scope, so resolve its label through align.Scope with a zero
-		// record (Radarr -> movie; Sonarr -> whole-series).
+		// specific scope, so take the record-less label align owns
+		// (Radarr -> movie; Sonarr -> whole-series).
 		rows = append(rows, Row{
 			Title:         it.Title,
 			Arr:           it.Arr,
 			ArrURL:        it.ArrURL,
 			Verdict:       VerdictNotOnSeaDex,
-			CurrentGroups: it.Groups,
-			scope:         align.Scope(it, &mapping.Record{}).Kind,
+			CurrentGroups: slices.Clone(it.Groups),
+			scope:         align.ItemKind(it),
 		})
 	}
 	return rows
@@ -305,7 +305,11 @@ func (a *Auditor) assess(m *match.Match) Row {
 	d := align.Decide(m.Item, &m.Record, best, alt)
 	row.scope = d.Kind
 	row.Season = d.Season
-	row.CurrentGroups, row.Approx = d.Groups, d.Approx
+	// Cloned, not aliased: for a single-unit scope align.Scope returns the
+	// library snapshot's own slice, and the report must not hand a caller a
+	// window into the snapshot a concurrent daemon cycle owns (compare's
+	// baseFinding clones for the same reason).
+	row.CurrentGroups, row.Approx = slices.Clone(d.Groups), d.Approx
 	row.Verdict = verdictFor(d.Standing)
 	row.Qualifier = rowQualifier(&m.Entry, &d)
 	return row

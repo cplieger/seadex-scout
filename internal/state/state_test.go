@@ -469,7 +469,18 @@ func TestStoreLoadOversizedReturnsError(t *testing.T) {
 	if err := f.Close(); err != nil {
 		t.Fatalf("close oversized state: %v", err)
 	}
-	_, err = NewStore(path, testLogger()).Load(context.Background())
+	store := NewStore(path, testLogger())
+	// A canceled read is an UNCLASSIFIED failure (atomicfile rejects on ctx
+	// before it stats the file), so it arms the preservation block. The
+	// over-cap read below positively classifies the same file, so it must
+	// CLEAR that block: quarantining the evidence and then still refusing
+	// every Save would strand the daemon cold-starting and never persisting.
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, cancelErr := store.Load(canceled); !errors.Is(cancelErr, context.Canceled) {
+		t.Fatalf("Load with a canceled context error = %v, want context.Canceled to arm the preservation block", cancelErr)
+	}
+	_, err = store.Load(context.Background())
 	if err == nil {
 		t.Fatal("Load oversized state returned nil error, want bounded-read error")
 	}
@@ -482,6 +493,9 @@ func TestStoreLoadOversizedReturnsError(t *testing.T) {
 	}
 	if _, statErr := os.Stat(path); !errors.Is(statErr, fs.ErrNotExist) {
 		t.Errorf("live state path still present after quarantine (stat err = %v), want renamed away", statErr)
+	}
+	if saveErr := store.Save(context.Background(), &State{Baselined: true}); saveErr != nil {
+		t.Errorf("Save after quarantining an oversized file failed: %v (the over-cap classification must clear the unclassified-read-failure block)", saveErr)
 	}
 }
 
@@ -628,28 +642,6 @@ func TestStoreQuarantineRenameFailureWarnsAndKeepsFile(t *testing.T) {
 	}
 	if got := recorder.CountExact("could not preserve corrupt state file"); got != 1 {
 		t.Errorf("rename-failure WARN count = %d, want 1", got)
-	}
-}
-
-// TestStoreLoadCanceledReturnsErrorWithoutQuarantine pins Load's generic
-// bounded-read error path: a pre-canceled context propagates context.Canceled
-// without quarantining or deleting the valid state file.
-func TestStoreLoadCanceledReturnsErrorWithoutQuarantine(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	if err := os.WriteFile(path, []byte(`{"baselined":true}`), 0o644); err != nil {
-		t.Fatalf("write state: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := NewStore(path, testLogger()).Load(ctx)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Load canceled context error = %v, want context.Canceled", err)
-	}
-	if _, statErr := os.Stat(path); statErr != nil {
-		t.Errorf("live state file after cancellation: %v, want preserved", statErr)
-	}
-	if _, statErr := os.Stat(path + ".corrupt"); !errors.Is(statErr, os.ErrNotExist) {
-		t.Errorf("corrupt quarantine after cancellation stat error = %v, want not exist", statErr)
 	}
 }
 
@@ -829,6 +821,26 @@ func TestStoreLoadLogsLibrarySnapshotAge(t *testing.T) {
 	}
 	if _, found := libraryAge(zeroRecorder); found {
 		t.Error("\"state loaded\" carries a library_age attribute for a zero TakenAt, want it omitted")
+	}
+
+	// A snapshot whose TakenAt lies in the FUTURE (a backward host clock step,
+	// or a hand-edited state file) is clamped to zero rather than logged as a
+	// misleading negative age.
+	futureLogger, futureRecorder := capture.New()
+	futureStore := NewStore(filepath.Join(t.TempDir(), "state.json"), futureLogger)
+	future := library.Snapshot{TakenAt: time.Now().Add(time.Hour).UTC()}
+	if err := futureStore.Save(context.Background(), &State{Library: future}); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	if _, err := futureStore.Load(context.Background()); err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	futureAge, found := libraryAge(futureRecorder)
+	if !found {
+		t.Fatal("\"state loaded\" carries no library_age attribute for a future TakenAt, want the clamped age")
+	}
+	if futureAge != "0s" {
+		t.Errorf("library_age for a future TakenAt = %q, want \"0s\" (clamped; a negative age is never logged)", futureAge)
 	}
 }
 
@@ -1221,6 +1233,9 @@ func TestStoreLoadCanceledReadBlocksSaveUntilClassified(t *testing.T) {
 	cancel()
 	if _, err := store.Load(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Load canceled context error = %v, want context.Canceled", err)
+	}
+	if _, statErr := os.Stat(path + ".corrupt"); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("corrupt quarantine after an unclassified read stat error = %v, want not exist (cancellation is not corruption)", statErr)
 	}
 	err := store.Save(context.Background(), &State{})
 	if err == nil {

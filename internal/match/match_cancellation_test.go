@@ -144,3 +144,37 @@ func TestMatchCancellationDuringFinalEntryFlagsDegraded(t *testing.T) {
 		t.Errorf("IncompleteIDs = %v, want empty (a shutdown is a whole-cycle event)", res.IncompleteIDs)
 	}
 }
+
+// TestPrefetchSkippedOnAlreadyCancelledContext pins prefetch's cancellation
+// guard, the batch-side twin of TestMatchCancelledContextStopsBeforeEntries
+// (which uses an ID-resolvable record, so no batch is pending either way):
+// with a PENDING id-less record and an already-cancelled context, the batch
+// prefetch must not be issued at all - a FetchMany on a dead context can only
+// fail with context.Canceled - so no memo entry is stamped from it, the pass
+// is flagged Degraded, and no entry is matched.
+func TestPrefetchSkippedOnAlreadyCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	idx := mapping.NewIndex([]mapping.Record{{AniListID: 11, Type: "MOVIE"}}) // id-less: a pending batch id
+	fake := &batchCountingAniList{media: map[int]anilist.Media{
+		11: {Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020},
+	}}
+
+	res := NewMatcher(fake, nil).Match(ctx, []seadex.Entry{{AniListID: 11}}, &library.Snapshot{}, idx, Memo{})
+
+	if fake.batchCalls != 0 {
+		t.Errorf("batch calls = %d, want 0 (a batch issued on an already-cancelled cycle can only fail)", fake.batchCalls)
+	}
+	if fake.fetchCalls != 0 {
+		t.Errorf("single Fetch calls = %d, want 0", fake.fetchCalls)
+	}
+	if len(res.Memo.Entries) != 0 {
+		t.Errorf("memo = %+v, want empty: a cancelled pass must stamp nothing", res.Memo.Entries)
+	}
+	if !res.Degraded {
+		t.Error("Degraded = false, want true when the pass is cancelled before any entry")
+	}
+	if len(res.Matches) != 0 {
+		t.Errorf("matches = %d, want 0", len(res.Matches))
+	}
+}

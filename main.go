@@ -66,6 +66,19 @@ const modePoll = "poll"
 // subcommand is added or removed.
 const validArgsHint = "(valid: health, daemon, report, poll, or no argument)"
 
+// msgCoordErrorAfterRun is the WARN message for a coordination-bookkeeping
+// error observed after a cycle actually ran (the run stands; only the
+// demand-coalescing accounting degraded). Shared by poll's
+// warnCoordinationError and the daemon's runScheduler so the two
+// Loki-queried diagnostics cannot drift.
+const msgCoordErrorAfterRun = "cycle coordination error after run"
+
+// unknownModeMarker is the fixed value logged in place of an unrecognized
+// run mode: the raw value may be an expanded ${VAR} secret placed by a
+// config typo, so logConfig and loggableMode both emit this marker instead
+// (config.validateRunMode is field-name-only for the same reason).
+const unknownModeMarker = "invalid"
+
 func main() {
 	installLogger()
 
@@ -294,10 +307,14 @@ func newCycleExclusive(ctx context.Context, dir string) (*scheduler.Exclusive, e
 // with poll's uniform interruption message, so main classifies it as a
 // routine-shutdown WARN and the marker-untouched contract reads identically
 // from every phase. The cancellation cause rides along as a second %w so the
-// message still names the signal: under Go 1.26 signal.NotifyContext cancels
-// with a bare signalError cause that does NOT satisfy
-// errors.Is(_, context.Canceled), so the cause alone must never be the
-// classification token.
+// message still names the signal ("terminated signal received"), never as the
+// classification token: a cause is whatever the cancelling site passed to
+// context.WithCancelCause, so only ctx.Err() is guaranteed to be
+// context.Canceled. (signal.NotifyContext's own signalError does satisfy
+// errors.Is(_, context.Canceled) - golang/go#77639, backported to Go 1.26 in
+// #79499 - which is what keeps the net/http errors this app classifies
+// classifiable at all, since net/http reports a cancelled request as
+// context.Cause(ctx).)
 func pollInterrupted(ctx context.Context) error {
 	return fmt.Errorf("poll interrupted; health marker left unchanged: %w (cause: %w)", ctx.Err(), context.Cause(ctx))
 }
@@ -391,7 +408,7 @@ func warnCoordinationError(outcome scheduler.Outcome, err error) {
 	case scheduler.OutcomeQueued, scheduler.OutcomeDiscarded:
 		slog.Warn("cycle coordination error after queueing; demand stands", "error", err)
 	case scheduler.OutcomeRan, scheduler.OutcomeRanQueued, scheduler.OutcomeSkipped:
-		slog.Warn("cycle coordination error after run", "error", err)
+		slog.Warn(msgCoordErrorAfterRun, "error", err)
 	default:
 		slog.Warn("cycle coordination failed during shutdown", "error", err)
 	}
@@ -472,6 +489,15 @@ func pollCycle(ctx context.Context, ex *scheduler.Exclusive, sc cycler, marker *
 			// run the error is post-run bookkeeping; and OutcomeNone means
 			// Exclusive failed BEFORE recording demand, so no demand stands.
 			warnCoordinationError(outcome, exErr)
+		}
+		if own != nil && !errors.Is(own, context.Canceled) {
+			// The interruption replaces this invocation's own result, so the
+			// own run's error has no exit code left to report through - and a
+			// failed marker write (pollOnce's "record poll health") has no
+			// other log line anywhere. Same reasoning executePollRuns applies
+			// to a queued rerun's error. An already-interrupted own result is
+			// skipped: pollInterrupted below reports it.
+			slog.Warn("own cycle reported an error before shutdown", "error", own)
 		}
 		return pollInterrupted(ctx)
 	}
@@ -580,10 +606,10 @@ func startIndexer(ctx context.Context, cfg *config.Config) func() {
 	done := make(chan struct{})
 	// The goroutine's terminal records (a recovered panic, the Run stop
 	// classification) carry the same component=indexer scope the feed's
-	// request and lifecycle logs use (see buildIndexer), so the feed's most
+	// request and lifecycle logs use (see indexerLogger), so the feed's most
 	// important failure lines stay routable/queryable with the rest of its
 	// stream in Loki.
-	log := slog.Default().With("component", "indexer")
+	log := indexerLogger(slog.Default())
 	runIndexer(ictx, done, bi.indexer.Run, bi.cleanup, log)
 	return func() {
 		cancel()
@@ -664,7 +690,7 @@ func runScheduler(ctx context.Context, interval time.Duration, ex *scheduler.Exc
 		default:
 			// The tick's cycle ran; a queue-file error only degrades the
 			// demand-coalescing bookkeeping.
-			slog.Warn("cycle coordination error after run", "outcome", outcome.String(), "error", err)
+			slog.Warn(msgCoordErrorAfterRun, "outcome", outcome.String(), "error", err)
 		}
 	}, scheduler.LoopOptions{Interval: interval, FireOnStart: true, Jitter: 0.10})
 }
@@ -703,7 +729,7 @@ func logConfig(cfg *config.Config) {
 		// raw value may be an expanded ${VAR} secret placed here by a config
 		// typo - emit a fixed marker, never the value (Validate's error is
 		// field-name-only for the same reason).
-		runMode = "invalid"
+		runMode = unknownModeMarker
 	}
 	slog.Info("configuration loaded",
 		"sonarr_enabled", cfg.SonarrEnabled(),
@@ -727,5 +753,5 @@ func loggableMode(mode string) string {
 	case config.RunModeDaemon, config.RunModeReport, modePoll:
 		return mode
 	}
-	return "invalid"
+	return unknownModeMarker
 }

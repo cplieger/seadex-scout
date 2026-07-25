@@ -692,3 +692,91 @@ func TestFilterDownloadURLsWarnsOnDroppedItems(t *testing.T) {
 		t.Errorf("clean response WARN count = %d, want 0; log output:\n%s", got, strings.Join(cleanRec.Messages(), "\n"))
 	}
 }
+
+// TestUpstreamSearchReportsRawPageCount pins search's second return value: the
+// RAW parsed-item count of the page, taken BEFORE the download-URL origin
+// filter. The harvest's paging exit judges page fullness on it
+// (harvestPageComplete's raw < harvestPageSize), so reporting the filtered
+// count instead would make a full page whose foreign-origin items were dropped
+// look short, stop that show's title harvest at the page, and permanently lose
+// the harvested titles that live on later pages.
+func TestUpstreamSearchReportsRawPageCount(t *testing.T) {
+	const feedTmpl = `<rss xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel>
+<item><title>same origin</title><enclosure url="http://HOST/1/download?link=abc" length="1" type="application/x-bittorrent"/></item>
+<item><title>foreign host</title><enclosure url="http://evil.internal/steal" length="1" type="application/x-bittorrent"/></item>
+<item><title>no link</title></item>
+</channel></rss>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = io.WriteString(w, strings.ReplaceAll(feedTmpl, "HOST", r.Host))
+	}))
+	defer srv.Close()
+
+	u := &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL + "/api"}
+	items, raw, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("filtered items = %d, want 1 (only the same-origin item survives)", len(items))
+	}
+	if raw != 3 {
+		t.Errorf("raw page count = %d, want 3 (the parsed-item count BEFORE the origin filter, so paging still sees a full page)", raw)
+	}
+}
+
+// TestFilterDownloadURLsWarnsOnBlankedDisplayURLs pins the operational
+// contract of the display-URL gate's warning, the sibling of the origin
+// filter's "items dropped" WARN: an item whose passthrough InfoURL/GUID are not
+// the tracker's own canonical http(s) page URLs survives with those fields
+// blanked, and the blanking is reported exactly once per search carrying the
+// true per-FIELD count (two bad fields on one item count 2) and the kept-item
+// count, while a clean response never warns. It is the only observable
+// distinguishing a healthy passthrough from a tampered upstream whose
+// clickable links are being stripped.
+func TestFilterDownloadURLsWarnsOnBlankedDisplayURLs(t *testing.T) {
+	log, rec := capture.New()
+	u := &upstream{log: log, name: upstreamNyaa, feed: "http://prowlarr:9696/1/api"}
+	items := []item{
+		{
+			Title: "both display fields hostile", DownloadURL: "http://prowlarr:9696/1/download?link=a",
+			InfoURL: "https://evil.example/phish", GUID: "javascript:alert(1)",
+		},
+		{
+			Title: "clean", DownloadURL: "http://prowlarr:9696/1/download?link=b",
+			InfoURL: "https://nyaa.si/view/1", GUID: "https://nyaa.si/view/1",
+		},
+	}
+	got := u.filterDownloadURLs(items)
+	if len(got) != 2 {
+		t.Fatalf("kept items = %d, want 2 (a bad display URL blanks the field, never drops the item)", len(got))
+	}
+	if got[0].InfoURL != "" || got[0].GUID != "" {
+		t.Errorf("hostile display fields = (%q, %q), want both blanked", got[0].InfoURL, got[0].GUID)
+	}
+	if got[1].InfoURL != "https://nyaa.si/view/1" || got[1].GUID != "https://nyaa.si/view/1" {
+		t.Errorf("canonical display fields = (%q, %q), want both preserved", got[1].InfoURL, got[1].GUID)
+	}
+
+	const msg = "upstream display URLs blanked: not the tracker's own canonical http(s) page URL"
+	if n := rec.CountExact(msg); n != 1 {
+		t.Fatalf("blanked-display WARN count = %d, want exactly 1; log output:\n%s", n, strings.Join(rec.Messages(), "\n"))
+	}
+	if v, ok := rec.AttrValue(msg, "blanked"); !ok || v != "2" {
+		t.Errorf("WARN blanked = %q (found=%v), want 2 (counted per blanked FIELD, not per item)", v, ok)
+	}
+	if v, ok := rec.AttrValue(msg, "kept_items"); !ok || v != "2" {
+		t.Errorf("WARN kept_items = %q (found=%v), want 2", v, ok)
+	}
+
+	// A clean response must not warn at all.
+	cleanLog, cleanRec := capture.New()
+	cu := &upstream{log: cleanLog, name: upstreamNyaa, feed: "http://prowlarr:9696/1/api"}
+	cu.filterDownloadURLs([]item{{
+		Title: "clean", DownloadURL: "http://prowlarr:9696/1/download?link=b",
+		InfoURL: "https://nyaa.si/view/1", GUID: "https://nyaa.si/view/1",
+	}})
+	if n := cleanRec.CountExact(msg); n != 0 {
+		t.Errorf("clean response blanked-display WARN count = %d, want 0", n)
+	}
+}

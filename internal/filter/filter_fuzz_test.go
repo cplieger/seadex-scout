@@ -34,6 +34,7 @@ func abLabel(s string) string {
 func FuzzABVisible(f *testing.F) {
 	f.Add("Nyaa", "https://nyaa.si/view/1")
 	f.Add("AB", "/torrents.php?id=1&torrentid=2")
+	f.Add("Nyaa", "torrents.php?id=1&torrentid=2")
 	f.Add("animebytes", "")
 	f.Add("Nyaa", "https://animebytes.tv/torrents.php?id=1")
 	f.Add("Nyaa", "https://ANIMEBYTES.TV/t/1")

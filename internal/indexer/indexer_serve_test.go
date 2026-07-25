@@ -22,7 +22,7 @@ import (
 // the API-key gate) is 404 with a hint at the per-tracker paths, and no feed
 // body is served.
 func TestServeRejectsUnscopedRequest(t *testing.T) {
-	ix := New(&Config{APIKey: "k"}, Deps{}, "")
+	ix := New(&Config{APIKey: "k"}, Deps{})
 	rec := httptest.NewRecorder()
 	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/?t=caps&apikey=k", nil))
 	if rec.Code != http.StatusNotFound {
@@ -41,7 +41,7 @@ func TestServeRejectsUnscopedRequest(t *testing.T) {
 // carries Cache-Control/Pragma headers forbidding any cache from retaining the
 // credential-bearing body beyond the request.
 func TestServeMarksResponsesNonCacheable(t *testing.T) {
-	ix := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABPasskey: "pk"}}, Deps{}, "")
+	ix := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABPasskey: "pk"}}, Deps{})
 	rec := httptest.NewRecorder()
 	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/ab?apikey=k", nil))
 	if rec.Code != http.StatusOK {
@@ -65,7 +65,7 @@ func TestServeMarksResponsesNonCacheable(t *testing.T) {
 func TestRunRefusesEmptyAPIKey(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := New(&Config{UpstreamConfig: UpstreamConfig{ABPasskey: "pk"}}, Deps{}, "").Run(ctx)
+	err := New(&Config{UpstreamConfig: UpstreamConfig{ABPasskey: "pk"}}, Deps{}).Run(ctx)
 	if err == nil {
 		t.Fatal("Run with empty APIKey returned nil, want a configuration error")
 	}
@@ -136,7 +136,7 @@ func TestQueryTotalUpstreamFailureSetsUpstreamFailed(t *testing.T) {
 	defer srv.Close()
 
 	log, rec := capture.New()
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, Deps{HTTP: srv.Client(), Logger: log}, "")
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, Deps{HTTP: srv.Client(), Logger: log})
 
 	items, stats := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "ab")
 	if len(items) != 0 {
@@ -166,7 +166,7 @@ func TestServeTotalUpstreamFailureRendersTorznabError(t *testing.T) {
 	defer srv.Close()
 
 	ix := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "pk"}},
-		Deps{HTTP: srv.Client()}, "")
+		Deps{HTTP: srv.Client()})
 	rec := httptest.NewRecorder()
 	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?t=tvsearch&q=Frieren&apikey=k", nil))
 
@@ -204,8 +204,8 @@ func TestServeStartupSnapshotFailureRendersTorznabError(t *testing.T) {
 		t.Fatalf("write malformed snapshot: %v", err)
 	}
 	log, logRec := capture.New()
-	ix := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "pk"}},
-		Deps{HTTP: srv.Client(), Logger: log}, path)
+	ix := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "pk"}},
+		Deps{HTTP: srv.Client(), Logger: log})
 
 	rec := httptest.NewRecorder()
 	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?t=tvsearch&q=Frieren&apikey=k", nil))
@@ -238,10 +238,7 @@ func TestServeStartupSnapshotFailureRendersTorznabError(t *testing.T) {
 	// bump the mtime or matchesFailedFile would skip the reread (production
 	// writes are atomic renames, which install a new inode instead).
 	writeSnapshotFile(t, path, &snapshot{ByHash: map[string]bool{}, ByKey: map[string]bool{}, Seen: map[string]bool{}})
-	future := time.Now().Add(time.Hour)
-	if err := os.Chtimes(path, future, future); err != nil {
-		t.Fatalf("chtimes: %v", err)
-	}
+	bumpMtime(t, path)
 	rec = httptest.NewRecorder()
 	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?apikey=k", nil))
 	if body := rec.Body.String(); !strings.Contains(body, "<rss") || strings.Contains(body, "<error") {
@@ -253,7 +250,7 @@ func TestServeStartupSnapshotFailureRendersTorznabError(t *testing.T) {
 // per-episode basic search returns nothing WITHOUT being marked answered, so
 // the request log reads as a deliberate skip rather than a no-match.
 func TestQuerySkipsPerEpisodeQuery(t *testing.T) {
-	ix := New(&Config{}, Deps{}, "")
+	ix := New(&Config{}, Deps{})
 	items, stats := ix.query(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren 01"}}, "nyaa")
 	if len(items) != 0 {
 		t.Fatalf("skipped query returned %d items, want 0", len(items))
@@ -269,7 +266,7 @@ func TestQuerySkipsPerEpisodeQuery(t *testing.T) {
 // limit-less request is trimmed to defaultCapsLimit before this cap can bite;
 // see TestQueryFeedDefaultLimit.)
 func TestQueryCapsResults(t *testing.T) {
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, "")
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{})
 	feed := make([]journalItem, maxItems+5)
 	for i := range feed {
 		feed[i] = journalItem{item: item{Title: "t", GUID: strconv.Itoa(i)}}
@@ -290,7 +287,7 @@ func TestQueryCapsResults(t *testing.T) {
 // honest. The window stays anchored at the newest item (the feed is sorted
 // newest-first), and an explicit limit still wins over the default.
 func TestQueryFeedDefaultLimit(t *testing.T) {
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{}, "")
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{})
 	feed := make([]journalItem, defaultCapsLimit+50)
 	for i := range feed {
 		feed[i] = journalItem{item: item{Title: "t", GUID: strconv.Itoa(i)}}
@@ -328,7 +325,7 @@ func TestReloadKeepsFeedOnUnreadableSnapshot(t *testing.T) {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	log, rec := capture.New()
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, path)
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
@@ -341,10 +338,7 @@ func TestReloadKeepsFeedOnUnreadableSnapshot(t *testing.T) {
 	if err := os.Mkdir(path, 0o755); err != nil {
 		t.Fatalf("mkdir over snapshot: %v", err)
 	}
-	future := time.Now().Add(time.Hour)
-	if err := os.Chtimes(path, future, future); err != nil {
-		t.Fatalf("chtimes: %v", err)
-	}
+	bumpMtime(t, path)
 	ix.reload(context.Background())
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Errorf("feed after unreadable snapshot = %d items, want 1 (a bad read must not blank a live feed)", len(got))
@@ -368,7 +362,7 @@ func TestQueryCallerCancellationIsNotWarnedAsUpstreamFault(t *testing.T) {
 	defer srv.Close()
 
 	log, rec := capture.New()
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, Deps{HTTP: srv.Client(), Logger: log}, "")
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, Deps{HTTP: srv.Client(), Logger: log})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -399,7 +393,7 @@ func TestReloadWarnsOnStatFailure(t *testing.T) {
 		t.Fatalf("write blocker: %v", err)
 	}
 	log, rec := capture.New()
-	ix := New(&Config{}, Deps{Logger: log}, filepath.Join(blocker, "feed.json"))
+	ix := New(&Config{SnapshotPath: filepath.Join(blocker, "feed.json")}, Deps{Logger: log})
 	if !rec.Contains("indexer feed snapshot stat failed") {
 		t.Errorf("stat failure (ENOTDIR) not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
@@ -413,7 +407,7 @@ func TestReloadWarnsOnStatFailure(t *testing.T) {
 // like /nyaa reaches serve (200 caps) and an unscoped path 404s at serve, not
 // at the mux.
 func TestHandlerRoutesTorznabEndpoint(t *testing.T) {
-	h := New(&Config{APIKey: "k"}, Deps{}, "").handler()
+	h := New(&Config{APIKey: "k"}, Deps{}).handler()
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=k", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "<caps>") {
@@ -433,7 +427,7 @@ func TestHandlerRoutesTorznabEndpoint(t *testing.T) {
 // never throttled, so the arrs' happy path is untouched even mid-flood.
 func TestServeThrottlesFailedAuth(t *testing.T) {
 	log, rec := capture.New()
-	ix := New(&Config{APIKey: "k"}, Deps{Logger: log}, "")
+	ix := New(&Config{APIKey: "k"}, Deps{Logger: log})
 	h := ix.chain()
 	for i := 1; i <= 10; i++ {
 		w := httptest.NewRecorder()
@@ -508,7 +502,7 @@ func TestRunSurfacesBindFailureSynchronously(t *testing.T) {
 	orig := listenAddr
 	listenAddr = ln.Addr().String()
 	defer func() { listenAddr = orig }()
-	err = New(&Config{APIKey: "k"}, Deps{}, "").Run(context.Background())
+	err = New(&Config{APIKey: "k"}, Deps{}).Run(context.Background())
 	if err == nil {
 		t.Fatal("Run on an occupied port returned nil, want a bind error")
 	}
@@ -531,7 +525,7 @@ func TestRunServesAndShutsDownGracefully(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- New(&Config{APIKey: "k"}, Deps{Logger: log}, "").Run(ctx) }()
+	go func() { done <- New(&Config{APIKey: "k"}, Deps{Logger: log}).Run(ctx) }()
 	startupDeadline := time.After(10 * time.Second)
 	for !rec.Contains("seadex-scout indexer listening") {
 		select {
@@ -584,14 +578,14 @@ func TestServeQueryWarnsOnRenderTruncation(t *testing.T) {
 		NyaaFeed: feed,
 	})
 	log, rec := capture.New()
-	ix := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log}, path)
+	ix := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
 
 	rr := httptest.NewRecorder()
 	ix.serve(rr, httptest.NewRequest(http.MethodGet, "/nyaa?apikey=k&limit=1000", nil))
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (a truncated feed is still a valid document)", rr.Code)
 	}
-	if got := rec.Count("indexer feed truncated by the render byte budget"); got != 1 {
+	if got := rec.CountExact("indexer feed truncated by the render byte budget"); got != 1 {
 		t.Fatalf("truncation WARN count = %d, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
 	}
 	parsed, err := parseTorznab(rr.Body.Bytes())

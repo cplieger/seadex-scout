@@ -788,7 +788,6 @@ func TestNotifierBaselineDuplicateKeysLastPayloadWins(t *testing.T) {
 // attribute must emit truncated with the "..." marker; a normal-length value
 // must pass byte-identical to its runesafe.Sanitize form.
 func TestFindingAttrVolumeIsBounded(t *testing.T) {
-	const maxAttrBytes = 8 << 10
 	notifier, recorder := newCapturedNotifier()
 	huge := strings.Repeat("u", 4<<20) // 4 MB, well past the cap
 	normal := "a\u009bnormal title"    // C1 CSI: sanitized, not truncated
@@ -821,7 +820,6 @@ func TestFindingAttrVolumeIsBounded(t *testing.T) {
 // the very warn line the better-release alert keys on. Both must emit bounded
 // AND sanitized (C1 and bidi controls replaced), from bounded work.
 func TestAggregateAttrsAreBoundedBeforeJoining(t *testing.T) {
-	const maxAttrBytes = 8 << 10
 	notifier, recorder := newCapturedNotifier()
 	huge := strings.Repeat("u", 64<<10) // 64 KiB per source, 512 of them
 	f := testFinding("agg", "bounded aggregate")

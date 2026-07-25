@@ -26,7 +26,7 @@ import (
 // The Fribb typing (movie/special) and the mapped TVDB season ride along for
 // category routing and the season marker. Only persisted state is consulted -
 // never this cycle's walk - so the feed rebuild stays arr-independent.
-func feedEntryInfo(idx *mapping.Index, lib *library.Snapshot, memo match.Memo) func(alID int) indexer.EntryInfo {
+func feedEntryInfo(idx *mapping.Index, lib *library.Snapshot, memo match.Memo) indexer.EntryInfoFunc {
 	// match.NewLibIndex applies the matcher's arr-consistent ID routing (a
 	// series record resolves only against Sonarr items by TVDB, a movie record
 	// only against Radarr items by TMDB movie then IMDb), so a movie whose

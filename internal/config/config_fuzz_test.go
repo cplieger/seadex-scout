@@ -12,8 +12,8 @@ import (
 // fuzz coverage moved with the sanitizer (FuzzSanitizeDecodeError there pins
 // the excerpt-sentinel and exact-rebuild invariants); the app keeps only its
 // allowlist policy (isAllowedEnvVar, unit-tested), its unknown-key echo
-// policy (the sanitizeYAMLError wrapper, pinned by the Load-level tests), and
-// the Load-level integration tests.
+// policy (the yamlenv.WithUnknownKeyEcho sanitize option, pinned by the
+// Load-level tests), and the Load-level integration tests.
 
 // FuzzValidateHTTPURL generalizes the credential-redaction contract of
 // validateHTTPURL: however the fuzzer mangles a URL, an embedded userinfo

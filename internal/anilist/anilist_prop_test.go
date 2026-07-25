@@ -2,6 +2,7 @@ package anilist
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -45,6 +46,35 @@ func TestDedupeTitles_idempotentAndLossless(t *testing.T) {
 		}
 		if again := dedupeTitles(out...); !slices.Equal(again, out) {
 			t.Fatalf("dedupeTitles not idempotent: dedupeTitles(%q) = %q, want %q", out, again, out)
+		}
+	})
+}
+
+// TestFoldJSONKey_matchesEqualFold is the oracle property behind the
+// duplicate-key preflight's case-insensitive matching: foldJSONKey exists so
+// that map equality on folded keys is EXACTLY strings.EqualFold equality (the
+// linear-scan-free form of the rule encoding/json itself applies when matching
+// struct fields), and walkJSONObject's duplicate detection is only as correct
+// as that equivalence. The alphabet mixes ASCII case pairs with the
+// multi-member fold orbits a naive ToLower canonicalization gets wrong (Kelvin
+// sign, long s, final sigma), so folding only ASCII - or dropping the
+// orbit-minimum canonicalization - disagrees with the oracle.
+func TestFoldJSONKey_matchesEqualFold(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		part := rapid.SampledFrom([]string{
+			"a", "A", "k", "K", "\u212a", "s", "S", "\u017f",
+			"\u03c3", "\u03c2", "\u03a3", "1", "_", "Media", "media",
+		})
+		key := func(label string) string {
+			return strings.Join(rapid.SliceOfN(part, 0, 6).Draw(t, label), "")
+		}
+		a, b := key("a"), key("b")
+
+		if got, want := foldJSONKey(a) == foldJSONKey(b), strings.EqualFold(a, b); got != want {
+			t.Fatalf("foldJSONKey(%q) == foldJSONKey(%q) = %v, want strings.EqualFold = %v", a, b, got, want)
+		}
+		if folded := foldJSONKey(a); foldJSONKey(folded) != folded {
+			t.Fatalf("foldJSONKey not idempotent on %q: foldJSONKey(%q) = %q", a, folded, foldJSONKey(folded))
 		}
 	})
 }
@@ -113,6 +143,52 @@ func TestParseMediaPage_roundTripsGeneratedBatchesProperty(t *testing.T) {
 			}
 			if gm.Format != wm.Format || gm.Year != wm.Year || !slices.Equal(gm.Titles, wm.Titles) {
 				t.Fatalf("parsed media for id %d = %+v, want %+v", id, gm, wm)
+			}
+		}
+	})
+}
+
+// TestRetainRequested_dropsOnlyUnsolicitedIDsProperty pins FetchMany's
+// identity-set invariant across arbitrary response/request mixes, not just the
+// one injected id the fixed tables use: every unsolicited id is deleted from
+// the page (so it can never be merged, nor overwrite a value an earlier chunk
+// resolved), every requested record survives with its value untouched, and the
+// error is non-nil with ErrBatchRecord classification exactly when at least one
+// unsolicited id was present (the classification FetchMany depends on to keep
+// fetching later chunks instead of reading the response as a total outage).
+func TestRetainRequested_dropsOnlyUnsolicitedIDsProperty(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		// Disjoint ranges: chunk ids are requested, extras never were.
+		chunk := rapid.SliceOfNDistinct(rapid.IntRange(1, 500), 0, 20, rapid.ID).Draw(t, "chunk")
+		extra := rapid.SliceOfNDistinct(rapid.IntRange(501, 1000), 0, 5, rapid.ID).Draw(t, "unsolicited")
+		answered := rapid.IntRange(0, len(chunk)).Draw(t, "answered")
+
+		page := make(map[int]Media, answered+len(extra))
+		for _, id := range chunk[:answered] {
+			page[id] = Media{Titles: []string{fmt.Sprintf("t%d", id)}}
+		}
+		for _, id := range extra {
+			page[id] = Media{Titles: []string{"injected"}}
+		}
+
+		err := retainRequested(page, chunk)
+
+		if (err != nil) != (len(extra) > 0) {
+			t.Fatalf("retainRequested(chunk=%v, unsolicited=%v) err = %v, want an error exactly when an unsolicited id is present", chunk, extra, err)
+		}
+		if err != nil && !errors.Is(err, ErrBatchRecord) {
+			t.Fatalf("retainRequested err = %v, want ErrBatchRecord classification", err)
+		}
+		if len(page) != answered {
+			t.Fatalf("page retained %d records, want the %d requested ones", len(page), answered)
+		}
+		for _, id := range chunk[:answered] {
+			m, ok := page[id]
+			if !ok {
+				t.Fatalf("requested id %d was dropped", id)
+			}
+			if want := []string{fmt.Sprintf("t%d", id)}; !slices.Equal(m.Titles, want) {
+				t.Fatalf("requested id %d value = %+v, want titles %v", id, m, want)
 			}
 		}
 	})

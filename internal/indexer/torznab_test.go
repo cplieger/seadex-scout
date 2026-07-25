@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"math"
@@ -523,6 +524,27 @@ func TestItemXMLTitleProvenance(t *testing.T) {
 	if items[0].Title != hostile {
 		t.Errorf("item.Title = %q, want the RAW bytes preserved for persistence and matching (%q)", items[0].Title, hostile)
 	}
+
+	// The WIRE form keeps the raw bytes for matching and persistence, but every
+	// emission of it (%v/%s, fmt.Errorf, a bare slog attr) resolves through the
+	// Untrusted tag's sanitizing sinks - that is the half of the contract the
+	// item.Title assertion above cannot see.
+	var feed feedXML
+	if err := xml.Unmarshal([]byte(body), &feed); err != nil {
+		t.Fatalf("xml.Unmarshal into the wire struct: %v", err)
+	}
+	if len(feed.Channel.Items) != 1 {
+		t.Fatalf("decoded %d wire items, want 1", len(feed.Channel.Items))
+	}
+	wire := feed.Channel.Items[0].Title
+	if wire.Raw() != hostile {
+		t.Errorf("wire Title.Raw() = %q, want the raw decoded bytes (%q)", wire.Raw(), hostile)
+	}
+	for _, bad := range []string{"\u202e", "\u009b"} {
+		if strings.Contains(wire.String(), bad) {
+			t.Errorf("wire Title emits %U; the Untrusted tag must sanitize every emission of the wire form", []rune(bad)[0])
+		}
+	}
 }
 
 // TestWriteItemSkipsNonPositiveCategories pins writeItem's render-side clamp:
@@ -682,4 +704,23 @@ func TestDecodeBoundedElementTextSkipsNestedMarkup(t *testing.T) {
 			t.Error("parseTorznab accepted a response truncated inside nested markup")
 		}
 	})
+}
+
+// TestPreflightTorznabClampsStrayEndTagDepth pins the stray-end-tag arm of
+// preflightTorznab's depth accounting: a leading run of end tags must not bank
+// negative depth that later start tags spend, or an attacker could buy nesting
+// budget past maxUpstreamDepth - and with it encoding/xml's unbounded
+// open-element stack - simply by prefixing enough end tags.
+func TestPreflightTorznabClampsStrayEndTagDepth(t *testing.T) {
+	body := strings.Repeat("</a>", 100) + "<rss><channel>" +
+		strings.Repeat("<a>", maxUpstreamDepth-1) +
+		strings.Repeat("</a>", maxUpstreamDepth-1) + "</channel></rss>"
+	_, err := parseTorznab([]byte(body))
+	limitErr, ok := errors.AsType[*torznabLimitError](err)
+	if !ok {
+		t.Fatalf("error = %T (%v), want *torznabLimitError: stray end tags must not buy nesting budget", err, err)
+	}
+	if !strings.Contains(limitErr.limit, "element nesting deeper than") {
+		t.Errorf("limit = %q, want the nesting-depth bound", limitErr.limit)
+	}
 }

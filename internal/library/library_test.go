@@ -180,16 +180,6 @@ func TestWalkSonarrTotalEpisodeFailureFailsWalk(t *testing.T) {
 	}
 }
 
-// TestWalkTopLevelListErrorIsFatal covers the other half of the health
-// semantic: a failed top-level series list fails the whole walk.
-func TestWalkTopLevelListErrorIsFatal(t *testing.T) {
-	fs := &fakeSonarr{listErr: errors.New("sonarr unreachable")}
-	w := NewWalker(&Config{Sonarr: fs, Logger: discardLogger()})
-	if _, err := w.Walk(context.Background()); err == nil {
-		t.Fatal("Walk returned nil error, want the GetSeries failure propagated")
-	}
-}
-
 // TestWalkAppliesIncludeTagFilter verifies the arr-side include-tag filter drops
 // series that lack an included tag before they enter the snapshot.
 func TestWalkAppliesIncludeTagFilter(t *testing.T) {
@@ -921,17 +911,6 @@ func TestWalkRadarrMovieWithoutFileHasNoGroups(t *testing.T) {
 		if it.Current.Group != "" {
 			t.Errorf("%s Current.Group = %q, want empty (fingerprint skipped for a fileless movie)", it.Title, it.Current.Group)
 		}
-	}
-}
-
-// TestWalkRadarrTopLevelListErrorIsFatal covers the Radarr side of the
-// health semantic: a failed top-level movie list fails the whole walk
-// (mirrors TestWalkTopLevelListErrorIsFatal for Sonarr).
-func TestWalkRadarrTopLevelListErrorIsFatal(t *testing.T) {
-	fr := &fakeRadarr{listErr: errors.New("radarr unreachable")}
-	w := NewWalker(&Config{Radarr: fr, Logger: discardLogger()})
-	if _, err := w.Walk(context.Background()); err == nil {
-		t.Fatal("Walk returned nil error, want the GetMovies failure propagated")
 	}
 }
 

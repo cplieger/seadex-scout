@@ -44,7 +44,7 @@ import (
 // feedEntryInfo); it is built over persisted state only, keeping the rebuild
 // arr-independent.
 type FeedWriter interface {
-	Rebuild(ctx context.Context, entries []seadex.Entry, info func(alID int) indexer.EntryInfo) error
+	Rebuild(ctx context.Context, entries []seadex.Entry, info indexer.EntryInfoFunc) error
 }
 
 // SeaDexSource supplies the SeaDex entries snapshot a cycle compares and
@@ -109,18 +109,6 @@ type Deps struct {
 	// skips all feed work).
 	Feed FeedWriter
 }
-
-// libraryShrinkFactor sets the library shrink guard's trigger fraction: a
-// non-failed walk (partial included - Failed placeholders keep the item
-// count, so a shrink means the arr's series list itself shrank) returning
-// fewer than 1/libraryShrinkFactor of the prior snapshot's items (below half
-// at the default 2) is treated as suspicious (a misconfigured arr_tags
-// filter, an emptied or fresh arr) rather than a real library change. The
-// zero-items case is the extreme of the same shrink. It references
-// degradation.ShrinkGuardFactor - the single home of the below-half policy
-// this guard shares with the mapping loader's refresh shrink guard - rather
-// than re-declaring the fraction.
-const libraryShrinkFactor = degradation.ShrinkGuardFactor
 
 // shrunkWalkEscalationThreshold is the consecutive-shrunk-walk streak
 // (state.State.ShrunkWalks) at which the scout escalates its shrunk-walk log
@@ -267,14 +255,13 @@ func (s *Scout) Cycle(ctx context.Context) bool {
 }
 
 // stopAfterWalkFailure logs a failed library walk and reports whether Cycle
-// should stop immediately. A genuine walk
-// failure is unhealthy (a shutdown-cancelled walk never reaches this - Cycle
-// attributes it to the shutdown and stays healthy); an alert-only deployment
-// (no Torznab feed) stops right
-// away since nothing else remains to do - emitting the "cycle degraded"
-// completion line beside the ERROR - while a configured feed falls through
-// so the arr-independent feed rebuild still runs (the pre-compare gate then
-// returns unhealthy and emits the completion line).
+// should stop immediately. A genuine walk failure is unhealthy (a
+// shutdown-cancelled walk never reaches this - Cycle attributes it to the
+// shutdown and stays healthy); an alert-only deployment (no Torznab feed)
+// stops right away since nothing else remains to do - emitting the "cycle
+// degraded" completion line beside the ERROR - while a configured feed falls
+// through so the arr-independent feed rebuild still runs (the pre-compare
+// gate then returns unhealthy and emits the completion line).
 func (s *Scout) stopAfterWalkFailure(walkErr error) bool {
 	if walkErr == nil {
 		return false
@@ -697,11 +684,13 @@ func (s *Scout) recordSeaDexFetch(ctx context.Context, st *state.State, seaErr e
 
 // handleLibraryGate gates the compare pass on the library ingest. A failed arr
 // walk is unhealthy and persists only the refreshed mapping cache (findings,
-// memo, and the prior library snapshot ride along untouched). A
-// non-failed walk (partial included) that shrank below half the prior snapshot's items
-// (libraryShrinkFactor; zero items is the extreme case) is degraded but
-// healthy: it persists ONLY the refreshed mapping cache plus the consecutive
-// shrunk-walk streak, so a shrunken snapshot can never replace st.Library and
+// memo, and the prior library snapshot ride along untouched). A non-failed
+// walk (partial included - Failed placeholders keep the item count, so a
+// shrink means the arr's series list itself shrank) that shrank below half
+// the prior snapshot's items (degradation.Shrunk, the shared below-half
+// policy home; zero items is the extreme case) is degraded but healthy: it
+// persists ONLY the refreshed mapping cache plus the consecutive shrunk-walk
+// streak, so a shrunken snapshot can never replace st.Library and
 // mass-resolve findings (now or a cycle later), and never auto-accepts. A
 // partial snapshot (per-series episode-fetch failures) is NOT gated here: the
 // compare proceeds on the items that walked cleanly, with the Failed items'
@@ -717,10 +706,10 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap lib
 		// no duplicates.
 		s.logFeedOutageOnGatedCycle(ctx, entries, seaErr)
 		// Persist only the refreshed mapping cache, like the shrunk-walk arm
-		// below: discarding it re-downloads an updated Fribb
-		// body next cycle. Findings, memo, and the prior library snapshot
-		// ride along untouched (an unusable-map load returns the prior cache,
-		// making this persist a no-op then).
+		// below: discarding it re-downloads an updated Fribb body next cycle.
+		// Findings, memo, and the prior library snapshot ride along untouched
+		// (an unusable-map load returns the prior cache, making this persist a
+		// no-op then).
 		st.Mapping = *mapCache
 		s.save(ctx, st)
 		// The cycle ran to its degraded end (the feed refresh above was the
@@ -739,7 +728,7 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap lib
 		}
 		return true, false
 	}
-	if len(st.Library.Items) > 0 && len(snap.Items)*libraryShrinkFactor < len(st.Library.Items) {
+	if len(st.Library.Items) > 0 && degradation.Shrunk(len(snap.Items), len(st.Library.Items)) {
 		// Like the walk-failed arm above, this gate skips the compare after
 		// rebuildFeed already ran: if SeaDex ALSO failed (or returned
 		// nothing), the previous feed was silently kept - surface it so a
@@ -840,8 +829,18 @@ func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap li
 	}
 	if len(entries) == 0 {
 		s.degradedSave(ctx, st, snap, mapCache)
-		s.log.Warn("seadex returned zero entries; skipping comparison, findings preserved")
-		s.cycleDegraded("seadex-zero-entries")
+		// Same feed_kept signal recordSeaDexFetch attaches to a failed fetch: a
+		// zero-entries response skips the rebuild too (see rebuildFeed), so a
+		// configured feed is serving its previous snapshot.
+		s.log.Warn("seadex returned zero entries; skipping comparison, findings preserved",
+			"feed_kept", s.deps.Feed != nil)
+		// A shutdown that landed after a nil-error zero-entry fetch keeps the
+		// no-completion-line rule, mirroring the two library-gate arms: the
+		// ctx arm above pre-empts only an ERRORED load/fetch, so a cancelled
+		// cycle can still reach this defensive arm.
+		if ctx.Err() == nil {
+			s.cycleDegraded("seadex-zero-entries")
+		}
 		return true, true
 	}
 	return false, true
@@ -858,7 +857,13 @@ func (s *Scout) reportSnapshot(ctx context.Context) (library.Snapshot, error) {
 	if err != nil {
 		// Reduce a transport *url.Error before it crosses the returned-report
 		// boundary (main logs this error at ERROR): the request URL inside it
-		// may carry configured userinfo credentials.
+		// may carry configured userinfo credentials. The reduction also drops
+		// library.Walk's "walking sonarr/radarr" wrapper, so name the failed
+		// side from the typed walk-side error - the same recovery
+		// walkFailureAttrs performs for the cycle's log boundaries.
+		if arr := library.WalkErrArr(err); arr != "" {
+			return library.Snapshot{}, fmt.Errorf("library walk (%s): %w", arr, httpx.LogSafeError(err))
+		}
 		return library.Snapshot{}, fmt.Errorf("library walk: %w", httpx.LogSafeError(err))
 	}
 	if snap.Partial {

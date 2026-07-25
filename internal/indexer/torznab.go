@@ -421,7 +421,8 @@ func preflightMarkup(body []byte) (n, delta int, err error) {
 		// rejecting the whole class is both sound and free of false
 		// negatives; a comment and a CDATA section have their own bounded
 		// branches above.
-		return 0, 0, &torznabLimitError{limit: "XML directives are not allowed"}
+		return 0, 0, &torznabLimitError{limit: "XML directives are not allowed " +
+			"(a DOCTYPE/ENTITY declaration; an endpoint answering HTML instead of Torznab XML is the usual cause)"}
 	default:
 		countAttrs := len(body) < 2 || body[1] != '/'
 		return preflightTag(body, countAttrs)
@@ -485,15 +486,14 @@ func preflightTag(body []byte, countAttrs bool) (n, delta int, err error) {
 // terminating '>' is '/', necessarily unquoted since the '>' itself is)
 // leaves the depth unchanged (0), and any other start tag opens a level
 // (+1). preflightTag already visits both classification bytes, so this costs
-// two byte-compares. The body[1] == '!' arm is unreachable defense in depth:
-// preflightMarkup routes CDATA, comments and processing instructions to
-// preflightDelimited and rejects every remaining `<!` directive outright, so
-// no `<!`-prefixed token reaches preflightTag today.
+// two byte-compares. No `<!`-prefixed token reaches here: preflightMarkup
+// routes CDATA, comments and processing instructions to preflightDelimited
+// and rejects every remaining `<!` directive outright.
 func tagDepthDelta(body []byte, end int) int {
 	switch {
 	case body[1] == '/':
 		return -1
-	case body[1] == '!' || body[end-1] == '/':
+	case body[end-1] == '/':
 		return 0
 	default:
 		return 1
@@ -625,13 +625,13 @@ func (x *itemXML) UnmarshalXML(d *xml.Decoder, _ xml.StartElement) error {
 // so the cap bounds the allocation instead of merely reporting it.
 func (x *itemXML) decodeChild(d *xml.Decoder, t xml.StartElement) error {
 	if dst := x.stringField(t.Name.Local); dst != nil {
-		return x.decodeField(d, t, dst)
+		return x.decodeField(d, dst)
 	}
 	switch t.Name.Local {
 	case "title":
-		return x.decodeUntrustedField(d, t, &x.Title)
+		return x.decodeUntrustedField(d, &x.Title)
 	case "size":
-		return x.decodeSizeField(d, t)
+		return x.decodeSizeField(d)
 	case "enclosure":
 		return x.decodeEnclosure(d, t)
 	case "attr":
@@ -668,7 +668,7 @@ func (x *itemXML) stringField(name string) *string {
 // multi-megabyte <size> text bypass the per-field cap and the cumulative
 // budget entirely (the conversion error, when it came, arrived only after
 // the allocation).
-func (x *itemXML) decodeSizeField(d *xml.Decoder, _ xml.StartElement) error {
+func (x *itemXML) decodeSizeField(d *xml.Decoder) error {
 	s, err := decodeBoundedElementText(d)
 	if err != nil {
 		return err
@@ -748,7 +748,7 @@ func (x *itemXML) boundedInt64(s string) (int64, error) {
 // Every decoded occurrence is accounted (a repeated <title> overwrites dst
 // but still consumes budget), so duplicate elements cannot amplify past the
 // cumulative cap.
-func (x *itemXML) decodeField(d *xml.Decoder, _ xml.StartElement, dst *string) error {
+func (x *itemXML) decodeField(d *xml.Decoder, dst *string) error {
 	s, err := decodeBoundedElementText(d)
 	if err != nil {
 		return err
@@ -798,9 +798,9 @@ func decodeBoundedElementText(d *xml.Decoder) (string, error) {
 // applied at the decode boundary (raw bytes preserved — Untrusted has no
 // UnmarshalText, and the explicit conversion here keeps the manual decoder's
 // *string plumbing out of the tagged field).
-func (x *itemXML) decodeUntrustedField(d *xml.Decoder, t xml.StartElement, dst *runesafe.Untrusted) error {
+func (x *itemXML) decodeUntrustedField(d *xml.Decoder, dst *runesafe.Untrusted) error {
 	var s string
-	if err := x.decodeField(d, t, &s); err != nil {
+	if err := x.decodeField(d, &s); err != nil {
 		return err
 	}
 	*dst = runesafe.Untrusted(s)
@@ -908,7 +908,11 @@ func newUpstreamDocError(code, description string) *upstreamDocError {
 // anything non-numeric (an unknown shape classifies as neither terminal nor
 // request-scoped, the conservative default).
 func torznabCodeNum(code string) int {
-	n, err := strconv.Atoi(code)
+	// TrimSpace like every other untrusted numeric parse in this file
+	// (boundedInt64, attrInt, the category and size-attr parses): XML
+	// preserves attribute whitespace, and a padded code must not
+	// degrade to the unknown-shape classification.
+	n, err := strconv.Atoi(strings.TrimSpace(code))
 	if err != nil {
 		return -1
 	}

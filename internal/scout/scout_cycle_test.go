@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -988,6 +987,42 @@ func TestCycleSteadyStateReportsAndSaves(t *testing.T) {
 	}
 }
 
+// TestCycleCompletedCyclePersistsAniListMemo pins the AniList memo half of the
+// cycle-completion save: the memo is what makes a cold rebuild a rare one-time
+// event (a cold cycle costs ~9 batched requests against ~1704 unmemoized), so
+// a completed cycle must persist the lookups it resolved. The entry with no
+// Fribb record is the one that consults AniList, and its definitive answer
+// must be in the persisted memo afterwards.
+func TestCycleCompletedCyclePersistsAniListMemo(t *testing.T) {
+	logger := scoutTestLogger()
+	store := &fakeStore{st: state.State{Mapping: frierenMappingCache(), Baselined: true}}
+	sonarr := &fakeSonarr{
+		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+		},
+	}
+	entries := append(seadexFrierenEntry(), seadex.Entry{AniListID: 999})
+	s := New(&Deps{
+		Logger:       logger,
+		Store:        store,
+		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Mapping:      fakeMapping{},
+		SeaDex:       &fakeSeaDex{entries: entries},
+		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
+		Comparer:     compare.NewComparer(compare.Config{}),
+		Notifier:     notify.NewNotifier(logger),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
+	})
+
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("Cycle healthy=false, want true on a successful steady-state cycle")
+	}
+	if _, ok := store.st.Memo.Entries[999]; !ok {
+		t.Errorf("persisted memo = %+v, want the cycle's AniList lookup for 999 memoized (a lost memo forces a slow cold rebuild)", store.st.Memo.Entries)
+	}
+}
+
 // TestLoadStateCorruptFileStartsCold pins loadState's fallback: a failing
 // state load (the corrupt-file decode error the state suite pins on the real
 // adapter) must log the failure and start from an empty state instead of
@@ -1294,12 +1329,7 @@ func TestSaveGenuineFailureLogsError(t *testing.T) {
 			if store.saves != 0 {
 				t.Errorf("saves = %d, want 0 (every attempt failed)", store.saves)
 			}
-			errCount := 0
-			for _, r := range recorder.Records() {
-				if r.Message == "state save failed" && r.Level == slog.LevelError {
-					errCount++
-				}
-			}
+			errCount := recorder.CountLevel(slog.LevelError, "state save failed")
 			if errCount != 1 {
 				t.Errorf("\"state save failed\" ERROR count = %d, want exactly 1", errCount)
 			}
@@ -1357,15 +1387,8 @@ func TestLoadMappingEscalatesAfterRepeatedRejections(t *testing.T) {
 			if mapCache.RejectedRefreshes != tc.priorStreak+1 {
 				t.Errorf("RejectedRefreshes = %d, want %d", mapCache.RejectedRefreshes, tc.priorStreak+1)
 			}
-			var warns, errs int
-			for _, r := range recorder.Records() {
-				switch {
-				case r.Level == slog.LevelError && strings.HasPrefix(r.Message, "mapping degraded"):
-					errs++
-				case r.Level == slog.LevelWarn && r.Message == "mapping degraded":
-					warns++
-				}
-			}
+			warns := recorder.CountLevel(slog.LevelWarn, "mapping degraded")
+			errs := recorder.CountLevel(slog.LevelError, "mapping degraded")
 			if tc.wantError {
 				if errs != 1 || warns != 0 {
 					t.Errorf("escalated log counts: ERROR=%d WARN=%d, want exactly one ERROR and no WARN (single log site)", errs, warns)
@@ -1769,6 +1792,77 @@ func TestCycleCompletionLineCarriesAniListCycleDeltas(t *testing.T) {
 	}
 }
 
+// TestCycleCompletionLineCarriesCountsAndCoverage pins the count half of the
+// documented "cycle complete" line: seadex_entries, library_items, findings,
+// the ID-bridge coverage totals (mapped/unmapped, summed across arrs by
+// sumCounts), and the snapshot diff counters. The scenario makes every value
+// distinct - two coverage hits under DIFFERENT arrs (a Sonarr series record
+// plus a Radarr movie record), one unmapped id-less record, one changed and
+// one removed library item - so a per-arr total that reports one bucket
+// instead of their sum, a swapped mapped/unmapped pair, or a swapped
+// added/removed pair is observable rather than silently identical.
+func TestCycleCompletionLineCarriesCountsAndCoverage(t *testing.T) {
+	logger, recorder := capture.New()
+	store := &fakeStore{st: state.State{
+		Mapping: mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{
+			{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1},
+			// A MOVIE record carrying its TMDB id is a second ID-bridge hit,
+			// counted in the radarr bucket: "mapped" must be the SUM.
+			{AniListID: 500, Type: "MOVIE", TmdbMovies: []int{900}},
+			// An id-less record is the unmapped bucket (the ID bridge could
+			// not resolve an arr id).
+			{AniListID: 700, Type: "TV"},
+		}},
+		Library: library.Snapshot{Items: []library.Item{
+			// Same key as the walked Frieren item but different file state:
+			// one changed. The second item is gone from the walk: one removed.
+			{Arr: library.ArrSonarr, ArrID: 7, Title: "Frieren"},
+			{Arr: library.ArrSonarr, ArrID: 99, Title: "Gone"},
+		}},
+		Baselined: true,
+	}}
+	sonarr := &fakeSonarr{
+		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+		},
+	}
+	entries := append(seadexFrierenEntry(),
+		seadex.Entry{AniListID: 500},
+		seadex.Entry{AniListID: 700},
+	)
+	s := New(&Deps{
+		Logger:       logger,
+		Store:        store,
+		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping:      fakeMapping{},
+		SeaDex:       &fakeSeaDex{entries: entries},
+		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
+		Comparer:     compare.NewComparer(compare.Config{}),
+		Notifier:     notify.NewNotifier(scoutTestLogger()),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
+	})
+
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("Cycle healthy=false, want true on a successful steady-state cycle")
+	}
+	wantAttrs := map[string]string{
+		"seadex_entries": "3",
+		"library_items":  "1",
+		"findings":       "1",
+		"mapped":         "2",
+		"unmapped":       "1",
+		"added":          "0",
+		"removed":        "1",
+		"changed":        "1",
+	}
+	for key, want := range wantAttrs {
+		if got, ok := recordAttr(recorder, "cycle complete", key); !ok || got != want {
+			t.Errorf("'cycle complete' %s = %q (found=%t), want %q", key, got, ok, want)
+		}
+	}
+}
+
 // TestCycleAniListDegradedStreakEscalatesToError pins the fourth escalation
 // class: a persistent AniList degradation (result.Degraded on consecutive
 // completed cycles) must escalate its log site to ERROR (firing the
@@ -2104,16 +2198,11 @@ func TestCycleAniListEscalationFiresWhenPartialWalkWinsCompletionLine(t *testing
 		t.Errorf("degraded reasons = %v, want [partial-walk] (the switch's first arm wins the completion line)", reasons)
 	}
 	const escalationMsg = "anilist lookups degraded repeatedly; matching incomplete and findings frozen for affected entries - inspect graphql.anilist.co reachability and egress"
-	var escalations []slog.Record
-	for _, r := range recorder.Records() {
-		if r.Message == escalationMsg {
-			escalations = append(escalations, r)
-		}
+	if n := recorder.CountExact(escalationMsg); n != 1 {
+		t.Errorf("escalation count = %d, want 1 (the escalation must fire even when the partial-walk arm wins the completion line)", n)
 	}
-	if len(escalations) != 1 {
-		t.Errorf("escalation count = %d, want 1 (the escalation must fire even when the partial-walk arm wins the completion line)", len(escalations))
-	} else if escalations[0].Level != slog.LevelError {
-		t.Errorf("escalation level = %v, want %v (the operator-alert contract requires ERROR, not a same-message downgrade)", escalations[0].Level, slog.LevelError)
+	if n := recorder.CountLevel(slog.LevelError, escalationMsg); n != 1 {
+		t.Errorf("escalation ERROR count = %d, want 1 (the operator-alert contract requires ERROR, not a same-message downgrade)", n)
 	}
 	if got := store.st.AniListDegraded; got != aniListDegradedEscalationThreshold {
 		t.Errorf("persisted AniListDegraded = %d, want %d (the streak must advance and persist under the combined degradation)", got, aniListDegradedEscalationThreshold)

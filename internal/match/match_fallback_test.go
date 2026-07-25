@@ -357,3 +357,60 @@ func TestMatchEmptyCompletedBatchIsNotAnOutage(t *testing.T) {
 		t.Error("Degraded = true, want false: definitive not-founds after a completed batch are answers, not an outage")
 	}
 }
+
+// notFoundAmongOutageAniList models an outage with one definitive answer
+// mixed in: the batch prefetch is PARTIAL (first id returned + error), and the
+// per-id Fetch answers a definitive not-found for id 40 while every other id
+// fails transiently.
+type notFoundAmongOutageAniList struct {
+	fetchCalls int
+	batchCalls int
+}
+
+func (o *notFoundAmongOutageAniList) Fetch(_ context.Context, id int) (anilist.Media, error) {
+	o.fetchCalls++
+	if id == 40 {
+		return anilist.Media{}, anilist.ErrNotFound
+	}
+	return anilist.Media{}, errors.New("anilist 500")
+}
+
+func (o *notFoundAmongOutageAniList) FetchMany(_ context.Context, ids []int) (map[int]anilist.Media, error) {
+	o.batchCalls++
+	return map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}}, errors.New("anilist 500")
+}
+
+// TestMatchNotFoundResetsFailureBreaker pins the OTHER half of the breaker's
+// reset rule (TestMatchSuccessfulLookupResetsFailureBreaker pins the media
+// half): a definitive ErrNotFound is an answer, proving the upstream responds,
+// so it must reset the consecutive-transient-failure streak too. Sequence: id
+// 10 is batch-returned; 20 and 30 fail transiently (streak 2); 40 answers
+// not-found and RESETS the streak; 50, 60, 70 fail transiently (streak 3,
+// tripping the breaker); 80 fails fast without a request - 6 per-id requests.
+// Without the reset, 40 would leave the streak at 2, id 50 would trip the
+// breaker and 60/70/80 would fail fast: 4 requests.
+func TestMatchNotFoundResetsFailureBreaker(t *testing.T) {
+	fake := &notFoundAmongOutageAniList{}
+	entries := []seadex.Entry{
+		{AniListID: 10},
+		{AniListID: 20},
+		{AniListID: 30},
+		{AniListID: 40},
+		{AniListID: 50},
+		{AniListID: 60},
+		{AniListID: 70},
+		{AniListID: 80},
+	}
+
+	res := NewMatcher(fake, nil).Match(context.Background(), entries, &library.Snapshot{}, mapping.NewIndex(nil), Memo{})
+
+	if fake.fetchCalls != 6 {
+		t.Errorf("single Fetch calls = %d, want 6: a definitive not-found must reset the consecutive-failure streak", fake.fetchCalls)
+	}
+	if ent, ok := res.Memo.Entries[40]; !ok || !ent.NotFound {
+		t.Errorf("memo[40] = %+v (present=%v), want the definitive not-found memoized", ent, ok)
+	}
+	if !res.Degraded {
+		t.Error("Degraded = false, want true: transient failures occurred")
+	}
+}

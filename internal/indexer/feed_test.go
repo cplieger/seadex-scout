@@ -60,14 +60,13 @@ func TestStripExt(t *testing.T) {
 // id yields no link at all. The base-normalization rule belongs to
 // seadex.EntryURL and is covered by internal/seadex/urls_test.go.
 func TestEntryURL(t *testing.T) {
-	w := NewFeedWriter(&FeedWriterConfig{}, Deps{})
-	if got := w.entryURL(154587); got != "https://releases.moe/154587" {
+	if got := entryURL(154587); got != "https://releases.moe/154587" {
 		t.Errorf("entryURL(154587) = %q, want the releases.moe entry page", got)
 	}
-	if got := w.entryURL(0); got != "" {
+	if got := entryURL(0); got != "" {
 		t.Errorf("entryURL(0) = %q, want empty", got)
 	}
-	if got := w.entryURL(-3); got != "" {
+	if got := entryURL(-3); got != "" {
 		t.Errorf("entryURL(-3) = %q, want empty", got)
 	}
 }
@@ -201,11 +200,11 @@ func TestPackSeason(t *testing.T) {
 	}
 }
 
-// TestFeedTitleMixedSeasonPackLabelsRealSeason pins the S00+S01 fix on the
+// TestDerivedTitleMixedSeasonPackLabelsRealSeason pins the S00+S01 fix on the
 // file-name-derived path: a pack bundling an S00 special with S01 episodes
 // must label S01 (the dominant REAL season across the whole file list), not
 // the S00 its representative (first) file happens to carry.
-func TestFeedTitleMixedSeasonPackLabelsRealSeason(t *testing.T) {
+func TestDerivedTitleMixedSeasonPackLabelsRealSeason(t *testing.T) {
 	files := []seadex.File{
 		{Name: "Show - S00E01 (1080p) [Grp].mkv"},
 		{Name: "Show - S01E01 (1080p) [Grp].mkv"},
@@ -343,6 +342,7 @@ func TestTotalSize(t *testing.T) {
 		{"sums normal lengths", []seadex.File{{Length: 100}, {Length: 250}}, 350},
 		{"no files is zero", nil, 0},
 		{"negative length rejected", []seadex.File{{Length: 100}, {Length: -1}}, 0},
+		{"zero-length file does not zero the sum", []seadex.File{{Length: 0}, {Length: 250}}, 250},
 		{"overflow across two files rejected", []seadex.File{{Length: math.MaxInt64}, {Length: math.MaxInt64}}, 0},
 		{"exact MaxInt64 sum allowed", []seadex.File{{Length: math.MaxInt64 - 1}, {Length: 1}}, math.MaxInt64},
 	}
@@ -389,13 +389,13 @@ func TestPackSeasonIgnoresEpisodeNamedSidecars(t *testing.T) {
 	}
 }
 
-// TestFeedTitlePackWithDirectoryOnlyEpisodeTokens pins derivedTitle's final
+// TestDerivedTitlePackWithDirectoryOnlyEpisodeTokens pins derivedTitle's final
 // fallback (the one branch its tables missed): coveredEpisodes counts episode
 // tokens from the FULL path, but the title derives from path.Base of the
 // representative file - so a pack whose SxxExx tokens live only in directory
 // components is a pack with a token-less base, and the trimmed basename is
 // served rather than an invented marker.
-func TestFeedTitlePackWithDirectoryOnlyEpisodeTokens(t *testing.T) {
+func TestDerivedTitlePackWithDirectoryOnlyEpisodeTokens(t *testing.T) {
 	files := []seadex.File{
 		{Name: "S01E01/Movie Cut A.mkv"},
 		{Name: "S01E02/Movie Cut B.mkv"},
@@ -426,13 +426,13 @@ func TestPackSeasonTieBreakIsOrderIndependent(t *testing.T) {
 	}
 }
 
-// TestFeedTitleCollapsesOnlyLastEpisodeToken pins the LAST-token contract of
+// TestDerivedTitleCollapsesOnlyLastEpisodeToken pins the LAST-token contract of
 // the SxxExx collapse arm shared by derivedTitle and coveredEpisodes: a file name
 // whose TITLE segment is itself SxxExx-shaped ("Show S02E00 Cut - S01E01")
 // must key/collapse on the real trailing marker, preserving the title segment
 // verbatim - a first-token regression reads the pack as one episode and
 // mangles the served title.
-func TestFeedTitleCollapsesOnlyLastEpisodeToken(t *testing.T) {
+func TestDerivedTitleCollapsesOnlyLastEpisodeToken(t *testing.T) {
 	files := []seadex.File{
 		{Name: "Show S02E00 Cut - S01E01 (1080p).mkv"},
 		{Name: "Show S02E00 Cut - S01E02 (1080p).mkv"},
@@ -445,12 +445,12 @@ func TestFeedTitleCollapsesOnlyLastEpisodeToken(t *testing.T) {
 	}
 }
 
-// TestFeedTitleCollapsesOnlyLastAbsoluteEpisodeToken pins the LAST-token
+// TestDerivedTitleCollapsesOnlyLastAbsoluteEpisodeToken pins the LAST-token
 // contract of the absolute-episode collapse arm: a title segment that is
 // itself " - NN"-shaped ("Show - 07 (WEB) - 01") must be preserved and only
 // the real trailing episode number collapsed/keyed - the exact case the arm's
 // own comment names, previously untested.
-func TestFeedTitleCollapsesOnlyLastAbsoluteEpisodeToken(t *testing.T) {
+func TestDerivedTitleCollapsesOnlyLastAbsoluteEpisodeToken(t *testing.T) {
 	files := []seadex.File{
 		{Name: "Show - 07 (WEB) - 01.mkv"},
 		{Name: "Show - 07 (WEB) - 02.mkv"},
