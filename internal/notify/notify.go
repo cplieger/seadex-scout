@@ -82,14 +82,24 @@ func storedFinding(f *compare.Finding) StoredFinding {
 // maxAttrBytes+len(attrTruncMarker) once the marker is appended, which is fine
 // for a log line but would let the persisted record drift past the budget the
 // state's write bound is sized against. Honest values pass byte-identical, and
-// the helper is idempotent, so re-projecting an already-capped record (a value
-// read back from legacy state) is a no-op.
+// the helper is idempotent, so re-bounding a record carried forward from legacy
+// state by capStored is a no-op.
 func capPersisted(s string) string {
 	capped := capAttr(s)
 	if len(capped) <= maxAttrBytes {
 		return capped
 	}
 	return runesafe.CapBytes(capped, maxAttrBytes-len(attrTruncMarker)) + attrTruncMarker
+}
+
+// capStored re-bounds a record read back from a state file written before
+// storedFinding capped its untrusted strings. capPersisted is idempotent, so a
+// record projected by this build passes through byte-identical.
+func capStored(f StoredFinding) StoredFinding {
+	f.Title = capPersisted(f.Title)
+	f.CurrentGroup = capPersisted(f.CurrentGroup)
+	f.RecommendedGroup = capPersisted(f.RecommendedGroup)
+	return f
 }
 
 // NewNotifier builds a Notifier. logger may be nil.
@@ -134,7 +144,7 @@ func (n *Notifier) Notify(findings []compare.Finding, prior map[string]Alerted, 
 			continue
 		}
 		if _, failed := failedItems[a.Finding.AniListID]; failed {
-			current[key] = Alerted{AlertedAt: a.AlertedAt, Finding: a.Finding}
+			current[key] = Alerted{AlertedAt: a.AlertedAt, Finding: capStored(a.Finding)}
 			preserved++
 			continue
 		}

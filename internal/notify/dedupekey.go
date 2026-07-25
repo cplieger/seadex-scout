@@ -87,9 +87,9 @@ func dedupeKeyWithLegacy(f *compare.Finding) (canonical, legacy string) {
 		// uses for an oversized component. The folded form has three
 		// '|'-separated fields where every unfolded key has at least
 		// five, so the two forms cannot collide. This bounds the KEY
-		// side only: the stored value (StoredFinding) still persists
-		// Title/CurrentGroup/RecommendedGroup raw, so it is not on its
-		// own a bound on the persisted map's total size. The unfolded key
+		// side; the stored VALUE side is bounded separately, at
+		// projection time by notify.capPersisted, so key and payload
+		// together keep the persisted map bounded. The unfolded key
 		// rides back as the legacy form so Notify can migrate a record
 		// persisted before the fold instead of re-alerting it.
 		return strconv.Itoa(f.AniListID) + "|" + string(f.Status) + "|" + keyenc.BoundedPart(key), key

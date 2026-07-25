@@ -606,9 +606,10 @@ func TestParseFribbForRefresh_elementsCountsEverySourceElement(t *testing.T) {
 }
 
 // TestFribbDecodeCounts_aggregateIdentifierBudget pins the aggregate retained-
-// identifier budget. maxFribbIdentifiers bounds ONE record, so without this
-// budget the two existing caps multiply (maxFribbRecords x maxFribbIdentifiers
-// admits ~2.1M retained ids from a body under maxMapBytes). A record that
+// identifier budget. maxFribbIdentifiers bounds EACH of the two retained lists
+// on one record (imdb_id and themoviedb_id.movie), so without this budget the
+// per-record caps multiply (maxFribbRecords x 2 x maxFribbIdentifiers admits
+// ~4.2M retained ids from a body under maxMapBytes). A record that
 // would breach the budget is rejected inside the EXISTING per-record tolerance
 // boundary - counted as skipped, with the cap named in the first error the
 // "skipped malformed records" WARN reports.

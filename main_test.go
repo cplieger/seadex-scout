@@ -1236,6 +1236,11 @@ func TestPollCycleLogsQueuedRerunFailure(t *testing.T) {
 	if !rec.Contains("queued rerun cycle reported an error") {
 		t.Errorf("missing queued-rerun error warning: %v", rec.Messages())
 	}
+	// The marker records the LAST run's verdict, not this invocation's own:
+	// pollCycle commits the queued rerun's unhealthy cycle after Run returns.
+	if marker.Healthy() {
+		t.Error("marker healthy after the queued rerun's unhealthy cycle: pollCycle must record the last run's verdict")
+	}
 }
 
 // TestPollCycleCoordinationFailure pins the infrastructure-failure path:
@@ -1631,8 +1636,9 @@ func TestPollInterruptedClassifiesNonCanceledCause(t *testing.T) {
 	}
 }
 
-// TestPollCycleMarkerWriteFailure pins pollOnce's marker-write failure
-// branch: the marker directory is present at construction (so the marker
+// TestPollCycleMarkerWriteFailure pins recordPollHealth's marker-write failure
+// branch - the write pollCycle commits after Exclusive.Run returns: the marker
+// directory is present at construction (so the marker
 // does not enter its degraded no-op mode) and is then replaced by a regular
 // file, so SetChecked reaches its transient-error return for every UID
 // (root-safe, unlike a read-only-dir chmod) and a healthy cycle still exits

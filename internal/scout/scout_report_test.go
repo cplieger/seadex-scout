@@ -74,8 +74,8 @@ func TestReportGeneratesRowsAndNeverWritesState(t *testing.T) {
 // carry its own count. The scenario separates the two pairs a swap could hide:
 // seadex_entries (2) from library_items (1), and rows (1) from
 // incomplete_mappings (0). library_items and rows are both 1 here, so a swap
-// of THAT pair stays invisible - a second library item would add its own
-// not_on_seadex row and move both together.
+// of THAT pair stays invisible - a second Fribb-catalogued library item would
+// add its own not_on_seadex row and move both together.
 func TestReportSummaryLineCarriesCounts(t *testing.T) {
 	logger, recorder := capture.New()
 	store := &fakeStore{st: state.State{Mapping: frierenMappingCache(), Baselined: true}}

@@ -3,6 +3,7 @@ package seadex
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -64,6 +65,7 @@ func TestChunkComplete(t *testing.T) {
 		{name: "empty first chunk with outstanding items completes", page: 1, itemCount: 0, reportedTotal: 3, wantDone: true},
 		{name: "empty later chunk with the total satisfied completes", page: 2, itemCount: 0, fetched: 500, reportedTotal: 500, wantDone: true},
 		{name: "empty later chunk with outstanding items errors", page: 2, itemCount: 0, fetched: 500, reportedTotal: 501, wantErr: true},
+		{name: "empty later chunk with no reported total errors", page: 2, itemCount: 0, fetched: perPage, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -82,7 +84,8 @@ func TestChunkComplete(t *testing.T) {
 
 // TestAdvanceCursor pins the keyset cursor's fail-closed advance rules: a
 // usable (created, id) pair from the chunk's LAST record becomes the next
-// position, while a missing pair, one carrying filter-unsafe bytes, and a pair
+// position, while a missing pair, one carrying filter-unsafe bytes, one longer
+// than maxCursorValueBytes, and a pair
 // identical to the current position (an upstream ignoring the filter) all
 // error rather than looping or skipping records.
 func TestAdvanceCursor(t *testing.T) {
@@ -109,6 +112,7 @@ func TestAdvanceCursor(t *testing.T) {
 		{name: "backslash in the cursor errors", items: []pbEntry{{ID: `b\b`, Created: prev.created}}, wantErr: true},
 		{name: "control byte in the cursor errors", items: []pbEntry{{ID: "b\nb", Created: prev.created}}, wantErr: true},
 		{name: "unchanged position errors", items: []pbEntry{{ID: prev.id, Created: prev.created}}, wantErr: true},
+		{name: "oversized cursor value errors", items: []pbEntry{{ID: strings.Repeat("x", maxCursorValueBytes+1), Created: prev.created}}, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

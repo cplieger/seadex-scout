@@ -142,9 +142,9 @@ type Indexer struct {
 	// (persist enforces the same cap, so an oversized snapshot is external
 	// corruption that never shrinks on its own). An unchanged bad file is then
 	// not re-read and re-warned on every request; cleared on a successful load.
-	// Only deterministic content failures are memoized: a
-	// read failure (EIO, EACCES) can recover without changing inode or mtime
-	// (a chmod, a transient filesystem repair), so it stays retryable.
+	// Only deterministic content failures are memoized: a read failure (EIO,
+	// EACCES) can recover without changing inode or mtime (a chmod, a transient
+	// filesystem repair), so it stays retryable.
 	// Identity matters, not just mtime: an atomic rename or backup restore can
 	// install a repaired file that preserves the failed file's timestamp, and
 	// that replacement must be retried, not skipped. Guarded by reloadGate

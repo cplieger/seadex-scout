@@ -99,7 +99,9 @@ func BoundedJoinParts(parts []string) string {
 
 // BoundedPart is BoundedJoinParts for a single component: the escaped legacy
 // form within the bound, the hashed identity above it (or when the escaped
-// form would spell the hashed-identity prefix, keeping the domains disjoint).
+// form would spell the hashed-identity prefix, keeping the domains disjoint,
+// or for the empty string, which BoundedJoinParts routes through the hash so
+// it cannot alias the zero-component encoding).
 func BoundedPart(s string) string { return BoundedJoinParts([]string{s}) }
 
 // hashKeyParts streams each original component into SHA-256 under a

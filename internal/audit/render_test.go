@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cplieger/seadex-scout/internal/align"
+	"github.com/cplieger/seadex-scout/internal/keyenc"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
@@ -1051,5 +1052,16 @@ func TestBestGroupDedupeIsBoundedAndCaseInsensitive(t *testing.T) {
 	}
 	if strings.ContainsRune(attr, 'G') {
 		t.Error("joinBestGroupsAttr() emitted the deduped upper-case twin")
+	}
+}
+
+// TestAttrBudgetMirrorsKeyBudget pins the equality maxAttrBytes used to carry
+// structurally (it aliased keyenc.MaxComponentBytes before the logattr extraction).
+// Both bounds apply to the same untrusted SeaDex values - the attribute budget on the
+// emitted line, the component budget on the dedupe key - and logattr states the mirror
+// in prose only, so nothing else catches a one-sided change.
+func TestAttrBudgetMirrorsKeyBudget(t *testing.T) {
+	if maxAttrBytes != keyenc.MaxComponentBytes {
+		t.Errorf("maxAttrBytes = %d, want keyenc.MaxComponentBytes = %d", maxAttrBytes, keyenc.MaxComponentBytes)
 	}
 }

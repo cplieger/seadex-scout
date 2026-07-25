@@ -814,7 +814,7 @@ func TestFindingAttrVolumeIsBounded(t *testing.T) {
 }
 
 // TestAggregateAttrsAreBoundedBeforeJoining pins the aggregate attributes'
-// bound (attrJoiner): recommended_groups and release_urls aggregate untrusted
+// bound (logattr.Joiner): recommended_groups and release_urls aggregate untrusted
 // SeaDex data (up to 512 torrents, each admitting a multi-MB URL), so joining
 // first would materialize a ~48 MiB aggregate before the 8 KiB cap applied - a
 // plausible OOM kill of the documented 256 MiB container that would suppress

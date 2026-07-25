@@ -4,7 +4,22 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/cplieger/seadex-scout/internal/keyenc"
 )
+
+// TestMaxBytesMirrorsKeyencBudget pins the equality logattr's doc comment
+// asserts: the slog-attribute budget is kept equal to the bound the dedupe-key
+// path applies to the same SeaDex data. audit/render.go used to alias
+// keyenc.MaxComponentBytes directly (a compile-time tie); after the extraction
+// the relationship is only a comment, so this test is what keeps a change to
+// keyenc from silently diverging the two budgets. keyenc imports stdlib only,
+// so the test-only import keeps logattr a dependency-free production leaf.
+func TestMaxBytesMirrorsKeyencBudget(t *testing.T) {
+	if MaxBytes != keyenc.MaxComponentBytes {
+		t.Errorf("MaxBytes = %d, want keyenc.MaxComponentBytes (%d)", MaxBytes, keyenc.MaxComponentBytes)
+	}
+}
 
 // TestCapPassesHonestValuesUnchanged pins the byte-identical guarantee an
 // honest attribute relies on: only the rune policy applies, no marker, no cut.

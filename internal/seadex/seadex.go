@@ -67,6 +67,11 @@ const (
 	// — so the guard fires (clean degradation) before the kernel OOM-kills
 	// the process.
 	maxTotalBytes = 64 << 20
+	// maxCursorValueBytes bounds an upstream keyset cursor value before it is
+	// placed in an outbound filter: a real PocketBase id is 15 alphanumerics and
+	// a created value a ~24-byte ASCII timestamp, so anything longer is upstream
+	// misbehavior and must not be echoed back into a request URL.
+	maxCursorValueBytes = 64
 	// maxAttempts / baseDelay bound the per-page retry.
 	maxAttempts = 3
 	baseDelay   = time.Second
@@ -289,11 +294,13 @@ func parsePBTime(s string) time.Time {
 }
 
 // fetchTotals accumulates the cross-page counters of one FetchEntries run.
-// reportedTotal and reportedPages retain the HIGHEST value any page promised
-// (never overwritten downward): a later page whose metadata regresses — an
-// empty page omitting totalItems decodes it as zero, or a lowered totalPages —
-// must not erase an earlier page's promise of more records, or pageComplete
-// would accept a truncated view.
+// reportedTotal and reportedPages retain the HIGHEST value any chunk promised
+// (never overwritten downward): a later chunk whose metadata regresses — an
+// empty chunk omitting totalItems decodes it as zero — must not erase an
+// earlier chunk's promise of more records, or chunkComplete's outstanding-items
+// guard would accept a truncated view. reportedPages no longer steers the walk
+// (the keyset cursor does); it survives only for finishFetch's totalItems-fits-
+// totalPages self-consistency check.
 type fetchTotals struct {
 	// seenAniListIDs is the identity set of every entry accepted so far, so
 	// the walk can prove count completeness is also KEY completeness (see
@@ -345,11 +352,15 @@ func quoteFilterValue(v string) string {
 }
 
 // filterSafe reports whether an upstream cursor value is safe to place in a
-// filter expression: no quote, backslash, or control character (a real
-// PocketBase id is 15 alphanumerics and a created value an ASCII timestamp).
+// filter expression: no quote, backslash, or control character, and no more
+// than maxCursorValueBytes long (a real PocketBase id is 15 alphanumerics and
+// a created value an ASCII timestamp).
 // The walk fails closed on anything else rather than sending a filter it
 // cannot reason about.
 func filterSafe(v string) bool {
+	if len(v) > maxCursorValueBytes {
+		return false
+	}
 	for i := range len(v) {
 		if c := v[i]; c < 0x20 || c == 0x7f || c == '"' || c == '\\' {
 			return false
@@ -584,9 +595,12 @@ func appendPageEntries(all []Entry, items []pbEntry, tot *fetchTotals) []Entry {
 // self-consistency check.
 //
 // One arm stays an error: an EMPTY chunk after a full one, while the entries
-// collected so far are still below the reported totalItems. The API itself
-// says entries remain, so completing would hand downstream a truncated view
-// that falsely resolves findings; failing instead degrades the cycle, the
+// collected so far are still below the reported totalItems, or the response
+// carries no reported total at all (an omitted totalItems decodes to zero, so
+// there is nothing left to vouch for the walk's completeness). The API itself
+// says entries remain — or declines to say anything — so completing would hand
+// downstream a truncated view that falsely resolves findings; failing instead
+// degrades the cycle, the
 // fail-safe direction that preserves existing findings. A SHORT (non-empty)
 // terminal chunk with a count mismatch stays finishFetch's WARN (pagination
 // over a live collection can legitimately shift counts mid-fetch), and an
@@ -596,9 +610,20 @@ func chunkComplete(page, itemCount, fetched, reportedTotal int) (done bool, err 
 	if itemCount >= perPage {
 		return false, nil
 	}
-	if itemCount == 0 && page > 1 && fetched < reportedTotal {
-		return false, fmt.Errorf("seadex: page %d empty with %d of %d reported entries fetched; "+
-			"refusing to compare against a truncated view", page, fetched, reportedTotal)
+	if itemCount == 0 && page > 1 {
+		// An empty follow-up chunk is only a legitimate terminal state when the
+		// API's own reported total vouches for it. With no reported total there is
+		// nothing to check the walk against, so completing would hand downstream a
+		// possibly-truncated catalogue — the one thing FetchEntries promises never
+		// to do (the pre-keyset walk rejected metadata-less responses outright).
+		if reportedTotal <= 0 {
+			return false, fmt.Errorf("seadex: page %d empty with %d entries fetched and no reported total to "+
+				"vouch for completeness; refusing to compare against a truncated view", page, fetched)
+		}
+		if fetched < reportedTotal {
+			return false, fmt.Errorf("seadex: page %d empty with %d of %d reported entries fetched; "+
+				"refusing to compare against a truncated view", page, fetched, reportedTotal)
+		}
 	}
 	return true, nil
 }

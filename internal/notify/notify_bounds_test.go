@@ -10,7 +10,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/compare"
 )
 
-// TestAttrJoinerRecapsAfterSanitizeGrowth pins attrJoiner.write's
+// TestAttrJoinerRecapsAfterSanitizeGrowth pins logattr.Joiner.Write's
 // post-sanitize re-cap: runesafe.Sanitize grows each invalid UTF-8 byte into
 // the three-byte U+FFFD, so the pre-sanitize cap alone lets an all-invalid
 // hostile SeaDex value emit ~3x the per-attribute budget - the very

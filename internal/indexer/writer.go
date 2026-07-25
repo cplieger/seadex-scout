@@ -146,9 +146,9 @@ func validFeedItems(feeds ...[]journalItem) bool {
 // surface it: the server WARNs once per reload, while the writer ignores it -
 // its rebuild re-persists the scrubbed form regardless): the field belongs to
 // the persisted contract both ends must see canonical, not just the render
-// path. The writer
-// carries a non-curated item forward verbatim (carryStoredItem) and persist
-// scrubs only DownloadURL, so a foreign-host or javascript: InfoURL planted
+// path. The writer carries a non-curated item forward verbatim
+// (carryStoredItem) and persist scrubs only DownloadURL, so a foreign-host or
+// javascript: InfoURL planted
 // in feed.json would otherwise be re-persisted on every rebuild for up to
 // feedJournalMaxAge while only the reader blanked it at serve time.
 //
