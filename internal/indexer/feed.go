@@ -339,6 +339,10 @@ func packSeason(files []seadex.File) (season int, ok bool) {
 // marker after the title).
 func seasonCounts(files []seadex.File) map[int]int {
 	counts := make(map[int]int)
+	// Judge the payload, not the raw list: a sub-half-size sample or featurette
+	// that passes the type gate must not contribute a false season count, the
+	// same eligibility the classification and the report apply (h-f10).
+	files = classify.PayloadFiles(files)
 	for i := range files {
 		if !isContentMediaFile(files[i].Name) {
 			continue
@@ -388,6 +392,9 @@ func isPack(t *seadex.Torrent) bool {
 // its creditless files still reads as a single episode.
 func coveredEpisodes(files []seadex.File) int {
 	seen := make(map[string]struct{})
+	// Payload files only, so an episode-shaped sample or bonus video below the
+	// size threshold cannot inflate a lone episode into a "pack" (h-f10).
+	files = classify.PayloadFiles(files)
 	for i := range files {
 		if !isContentMediaFile(files[i].Name) {
 			continue
@@ -417,6 +424,17 @@ func coveredEpisodes(files []seadex.File) int {
 // which lack one, are skipped in favour of a real episode), or the first file
 // when none match (a movie/single release).
 func representativeFile(files []seadex.File) string {
+	if len(files) == 0 {
+		return ""
+	}
+	// Derive the title from the payload the classification votes on, so a
+	// first-listed sample or featurette below the size threshold can never
+	// headline the synthesized title (h-f10). PayloadFiles keeps its own
+	// totality fallbacks (type-gate-only when no lengths, size-only when no
+	// type survivor), so a sidecar-only or container-only list still yields a
+	// candidate; an all-unnamed list yields none, matching the old
+	// files[0].Name of "".
+	files = classify.PayloadFiles(files)
 	if len(files) == 0 {
 		return ""
 	}

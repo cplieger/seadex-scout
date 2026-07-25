@@ -42,24 +42,26 @@ func downloadURLForScope(scope, sourceURL, abPasskey string) (string, bool) {
 		return "", false
 	}
 	// The site hosts come from the canonical release tracker table; only the
-	// download-endpoint path shapes are indexer knowledge.
+	// download-endpoint path shapes are indexer knowledge, so each arm picks
+	// its tracker name + path suffix and the table lookup (plus its
+	// fail-closed found/BaseURL validation) happens once below.
+	var trackerName, suffix string
 	switch scope {
 	case upstreamNyaa:
-		nyaa, found := release.LookupTracker(release.TrackerNameNyaa)
-		if !found || nyaa.BaseURL == "" {
-			return "", false
-		}
-		return nyaa.BaseURL + "/download/" + id + ".torrent", true
+		trackerName = release.TrackerNameNyaa
+		suffix = "/download/" + id + ".torrent"
 	case upstreamAB:
 		if abPasskey == "" {
 			return "", false
 		}
-		ab, found := release.LookupTracker(release.TrackerNameAnimeBytes)
-		if !found || ab.BaseURL == "" {
-			return "", false
-		}
-		return ab.BaseURL + "/torrent/" + id + "/download/" + url.PathEscape(abPasskey), true
+		trackerName = release.TrackerNameAnimeBytes
+		suffix = "/torrent/" + id + "/download/" + url.PathEscape(abPasskey)
 	default:
 		return "", false
 	}
+	tracker, found := release.LookupTracker(trackerName)
+	if !found || tracker.BaseURL == "" {
+		return "", false
+	}
+	return tracker.BaseURL + suffix, true
 }

@@ -1073,7 +1073,16 @@ func decodeCappedArray[T any](dec *bounded.Decoder, target *[]T, what string) (o
 // replaces the former whole-record json.Unmarshal plus independent raw
 // unknown-key decode, whose pre-check allocations a valid compact near-cap
 // record could amplify into severe memory pressure (CWE-770).
+//
+// The over-cap state of each id array follows the SAME last-wins rule as its
+// value: duplicate keys are decoded in document order, so a later valid
+// occurrence REPLACES an earlier over-cap one (an override spelling
+// tmdb_movies twice, the second time with one id, has an effective value of
+// that one id and must not be skipped as oversized). The two arrays are
+// tracked independently so a valid duplicate of one field can never clear the
+// other's over-cap state.
 func decodeOverrideRecord(dec *bounded.Decoder, set *overrideSet, seenKeys map[string]struct{}) (record Record, oversized bool, err error) {
+	var tmdbOversized, imdbOversized bool
 	err = dec.Object(func(key string) error {
 		switch {
 		case strings.EqualFold(key, "anilist_id"):
@@ -1085,19 +1094,19 @@ func decodeOverrideRecord(dec *bounded.Decoder, set *overrideSet, seenKeys map[s
 		case strings.EqualFold(key, "season_tvdb"):
 			return dec.Decode(&record.SeasonTvdb)
 		case strings.EqualFold(key, "tmdb_movies"):
-			over, arrErr := decodeCappedArray(dec, &record.TmdbMovies, "tmdb_movies")
-			oversized = oversized || over
+			var arrErr error
+			tmdbOversized, arrErr = decodeCappedArray(dec, &record.TmdbMovies, "tmdb_movies")
 			return arrErr
 		case strings.EqualFold(key, "imdb_ids"):
-			over, arrErr := decodeCappedArray(dec, &record.IMDbIDs, "imdb_ids")
-			oversized = oversized || over
+			var arrErr error
+			imdbOversized, arrErr = decodeCappedArray(dec, &record.IMDbIDs, "imdb_ids")
 			return arrErr
 		default:
 			set.recordUnknownKey(key, seenKeys)
 			return dec.Skip()
 		}
 	})
-	return record, oversized, err
+	return record, tmdbOversized || imdbOversized, err
 }
 
 // applyRecord decodes the next override record from the token stream

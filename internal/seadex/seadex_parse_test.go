@@ -36,55 +36,113 @@ func TestParsePBTime(t *testing.T) {
 	}
 }
 
-// TestPageComplete pins the pagination-completeness decision table, including
-// the arm the HTTP-level tests never reach in-package: an empty FINAL page (or
-// an empty FIRST page when the API reports zero total pages) completes cleanly
-// only while the reported totalItems is already satisfied — an empty page with
-// entries still outstanding is a truncated-view error, as is an empty page
-// before the reported total, and ANY page with invalid metadata (totalPages
-// < 1 — the empty first page being the one exception — or a page, empty or
-// not, past the reported total) errors rather than being accepted as a
-// complete catalogue.
-func TestPageComplete(t *testing.T) {
+// TestChunkComplete pins the keyset walk's completeness decision table,
+// including the arms the HTTP-level tests never reach in-package: a FULL chunk
+// always continues (the filter asked for everything after the cursor, so a
+// full chunk cannot be the last), a SHORT chunk completes even with a count
+// mismatch (pagination over a live collection can shift counts, which stays
+// finishFetch's WARN), an EMPTY first chunk completes so finishFetch's
+// empty-catalogue guard converts it into an error, and an EMPTY later chunk
+// completes only while the reported totalItems is already satisfied - one with
+// entries still outstanding is a truncated-view error.
+func TestChunkComplete(t *testing.T) {
 	tests := []struct {
 		name          string
 		page          int
 		itemCount     int
-		totalPages    int
 		fetched       int
 		reportedTotal int
 		wantDone      bool
 		wantErr       bool
 	}{
-		{name: "mid page continues", page: 1, itemCount: 500, totalPages: 3, fetched: 500, reportedTotal: 1500, wantDone: false},
-		{name: "final page with items completes", page: 3, itemCount: 12, totalPages: 3, fetched: 1012, reportedTotal: 1012, wantDone: true},
-		{name: "final page with items and count mismatch completes", page: 3, itemCount: 12, totalPages: 3, fetched: 1012, reportedTotal: 1013, wantDone: true},
-		{name: "single page completes", page: 1, itemCount: 7, totalPages: 1, fetched: 7, reportedTotal: 7, wantDone: true},
-		{name: "empty final page with satisfied total completes", page: 2, itemCount: 0, totalPages: 2, fetched: 500, reportedTotal: 500, wantDone: true},
-		{name: "empty final page with outstanding items errors", page: 2, itemCount: 0, totalPages: 2, fetched: 500, reportedTotal: 501, wantErr: true},
-		{name: "empty single page with zero totals completes", page: 1, itemCount: 0, totalPages: 1, wantDone: true},
-		{name: "empty first page with outstanding items errors", page: 1, itemCount: 0, totalPages: 1, reportedTotal: 3, wantErr: true},
-		{name: "empty page with zero total completes", page: 1, itemCount: 0, totalPages: 0, wantDone: true},
-		{name: "later empty page with zero total errors", page: 2, itemCount: 0, totalPages: 0, fetched: 500, reportedTotal: 500, wantErr: true},
-		{name: "later empty page with negative total errors", page: 2, itemCount: 0, totalPages: -1, fetched: 500, reportedTotal: 500, wantErr: true},
-		{name: "empty page before total errors", page: 2, itemCount: 0, totalPages: 3, fetched: 500, reportedTotal: 1500, wantErr: true},
-		{name: "empty page past reported total errors", page: 3, itemCount: 0, totalPages: 2, fetched: 1000, reportedTotal: 1000, wantErr: true},
-		{name: "non-empty page with zero total errors", page: 1, itemCount: 500, totalPages: 0, fetched: 500, reportedTotal: 500, wantErr: true},
-		{name: "non-empty page with negative total errors", page: 1, itemCount: 500, totalPages: -1, fetched: 500, reportedTotal: 500, wantErr: true},
-		{name: "non-empty page past reported total errors", page: 4, itemCount: 5, totalPages: 3, fetched: 1505, reportedTotal: 1505, wantErr: true},
+		{name: "full chunk continues", page: 1, itemCount: perPage, fetched: perPage, reportedTotal: 1500, wantDone: false},
+		{name: "full chunk continues even with the total satisfied", page: 2, itemCount: perPage, fetched: 1000, reportedTotal: 1000, wantDone: false},
+		{name: "short chunk completes", page: 3, itemCount: 12, fetched: 1012, reportedTotal: 1012, wantDone: true},
+		{name: "short chunk with a count mismatch completes", page: 3, itemCount: 12, fetched: 1012, reportedTotal: 1013, wantDone: true},
+		{name: "single short chunk completes", page: 1, itemCount: 7, fetched: 7, reportedTotal: 7, wantDone: true},
+		{name: "empty first chunk completes", page: 1, itemCount: 0, wantDone: true},
+		{name: "empty first chunk with outstanding items completes", page: 1, itemCount: 0, reportedTotal: 3, wantDone: true},
+		{name: "empty later chunk with the total satisfied completes", page: 2, itemCount: 0, fetched: 500, reportedTotal: 500, wantDone: true},
+		{name: "empty later chunk with outstanding items errors", page: 2, itemCount: 0, fetched: 500, reportedTotal: 501, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			done, err := pageComplete(tc.page, tc.itemCount, tc.totalPages, tc.fetched, tc.reportedTotal)
+			done, err := chunkComplete(tc.page, tc.itemCount, tc.fetched, tc.reportedTotal)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("pageComplete(%d, %d, %d, %d, %d) error = %v, wantErr %v",
-					tc.page, tc.itemCount, tc.totalPages, tc.fetched, tc.reportedTotal, err, tc.wantErr)
+				t.Fatalf("chunkComplete(%d, %d, %d, %d) error = %v, wantErr %v",
+					tc.page, tc.itemCount, tc.fetched, tc.reportedTotal, err, tc.wantErr)
 			}
 			if err == nil && done != tc.wantDone {
-				t.Errorf("pageComplete(%d, %d, %d, %d, %d) done = %v, want %v",
-					tc.page, tc.itemCount, tc.totalPages, tc.fetched, tc.reportedTotal, done, tc.wantDone)
+				t.Errorf("chunkComplete(%d, %d, %d, %d) done = %v, want %v",
+					tc.page, tc.itemCount, tc.fetched, tc.reportedTotal, done, tc.wantDone)
 			}
 		})
+	}
+}
+
+// TestAdvanceCursor pins the keyset cursor's fail-closed advance rules: a
+// usable (created, id) pair from the chunk's LAST record becomes the next
+// position, while a missing pair, one carrying filter-unsafe bytes, and a pair
+// identical to the current position (an upstream ignoring the filter) all
+// error rather than looping or skipping records.
+func TestAdvanceCursor(t *testing.T) {
+	prev := cursor{created: "2026-01-02 03:04:05.000Z", id: "aaa"}
+	tests := []struct {
+		name    string
+		items   []pbEntry
+		want    cursor
+		wantErr bool
+	}{
+		{
+			name:  "last record advances the cursor",
+			items: []pbEntry{{ID: "aaa", Created: prev.created}, {ID: "bbb", Created: "2026-01-03 00:00:00.000Z"}},
+			want:  cursor{created: "2026-01-03 00:00:00.000Z", id: "bbb"},
+		},
+		{
+			name:  "surrounding whitespace trimmed",
+			items: []pbEntry{{ID: "  bbb  ", Created: "  2026-01-03 00:00:00.000Z  "}},
+			want:  cursor{created: "2026-01-03 00:00:00.000Z", id: "bbb"},
+		},
+		{name: "missing id errors", items: []pbEntry{{Created: prev.created}}, wantErr: true},
+		{name: "missing created errors", items: []pbEntry{{ID: "bbb"}}, wantErr: true},
+		{name: "quote in the cursor errors", items: []pbEntry{{ID: `b"b`, Created: prev.created}}, wantErr: true},
+		{name: "backslash in the cursor errors", items: []pbEntry{{ID: `b\b`, Created: prev.created}}, wantErr: true},
+		{name: "control byte in the cursor errors", items: []pbEntry{{ID: "b\nb", Created: prev.created}}, wantErr: true},
+		{name: "unchanged position errors", items: []pbEntry{{ID: prev.id, Created: prev.created}}, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := advanceCursor(tc.items, prev)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("advanceCursor error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				if got != prev {
+					t.Errorf("advanceCursor = %+v, want the previous position kept on error", got)
+				}
+				return
+			}
+			if got != tc.want {
+				t.Errorf("advanceCursor = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCursorFilter pins the rendered PocketBase filter: the composite keyset
+// predicate (a later created, or the same created with a greater id) with both
+// values quoted, so equal-timestamp records advance by id instead of stalling.
+func TestCursorFilter(t *testing.T) {
+	got := cursor{created: "2026-01-02 03:04:05.000Z", id: "abc"}.filter()
+	want := `(created>"2026-01-02 03:04:05.000Z"||(created="2026-01-02 03:04:05.000Z"&&id>"abc"))`
+	if got != want {
+		t.Errorf("cursor.filter() = %q, want %q", got, want)
+	}
+	if (cursor{}).set() {
+		t.Error("the zero cursor must report no position (the first chunk is unfiltered)")
+	}
+	if !(cursor{id: "abc"}).set() {
+		t.Error("a cursor carrying an id must report a position")
 	}
 }
 

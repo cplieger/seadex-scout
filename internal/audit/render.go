@@ -2,6 +2,7 @@ package audit
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,13 +14,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/runesafe"
 	"github.com/cplieger/scheduler/v2"
 	"github.com/cplieger/seadex-scout/internal/align"
-	"github.com/cplieger/seadex-scout/internal/keyenc"
 	"github.com/cplieger/seadex-scout/internal/library"
+	"github.com/cplieger/seadex-scout/internal/logattr"
 )
 
 const (
@@ -257,14 +260,14 @@ func links(row *Row) string {
 // annotated.
 func displayBestGroups(releases []Release) []string {
 	var out []string
-	seen := make(map[string]struct{}, len(releases))
+	seen := make(map[[sha256.Size]byte]struct{}, len(releases))
 	for _, annotatedPass := range []bool{false, true} {
 		for i := range releases {
 			rel := &releases[i]
 			if !rel.Best || rel.Group == "" || annotated(rel) != annotatedPass {
 				continue
 			}
-			key := strings.ToLower(rel.Group)
+			key := foldedGroupKey(rel.Group)
 			if _, dup := seen[key]; dup {
 				continue
 			}
@@ -277,6 +280,27 @@ func displayBestGroups(releases []Release) []string {
 		}
 	}
 	return out
+}
+
+// foldedGroupKey returns the case-insensitive dedupe identity of an untrusted
+// release group as a fixed-size digest. It streams unicode.ToLower rune by
+// rune into SHA-256 instead of materializing strings.ToLower's result, so a
+// hostile SeaDex entry (up to 512 torrents, each admitting a multi-MB group
+// string) can never make a dedupe map retain input-sized copies - the same
+// no-untrusted-aggregate-allocation contract logattr.Joiner enforces on the
+// rendered bytes (CWE-400). The digest is a lookup identity only, never
+// displayed, and matches strings.ToLower's per-rune folding, so dedupe
+// decisions are unchanged.
+func foldedGroupKey(group string) [sha256.Size]byte {
+	h := sha256.New()
+	var encoded [utf8.UTFMax]byte
+	for _, r := range group {
+		n := utf8.EncodeRune(encoded[:], unicode.ToLower(r))
+		_, _ = h.Write(encoded[:n])
+	}
+	var key [sha256.Size]byte
+	copy(key[:], h.Sum(nil))
+	return key
 }
 
 // releaseNotes returns a release's display annotations: its canonical
@@ -332,7 +356,7 @@ func rowsWithVerdict(rows []Row, v Verdict) []Row {
 // the same values carry no size bound upstream, so each is also capped at the
 // per-attribute volume budget the notify emit path uses. The two aggregate
 // attributes (current_group, seadex_best) apply that same policy through the
-// bounded attrJoiner, which never materializes the untrusted aggregate before
+// bounded logattr.Joiner, which never materializes the untrusted aggregate before
 // the cap applies.
 func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
 	if err := interrupted(ctx, "report log"); err != nil {
@@ -722,98 +746,41 @@ func sanitizeDisplayText(s string) string {
 }
 
 // maxAttrBytes is the per-attribute volume budget the report's slog path
-// enforces on every untrusted value, mirroring keyenc.MaxComponentBytes (the
-// bound the dedupe-key path applies to the same SeaDex data) and the notify
-// emit path's identical budget (CWE-400).
-const maxAttrBytes = keyenc.MaxComponentBytes
+// enforces on every untrusted value. The policy itself (the budget, the
+// truncation marker, the rune sanitization, and the cap-before-sanitize order)
+// lives in internal/logattr, shared with the daemon's notify emit path so the
+// two slog emitters cannot drift; this alias keeps the package's own bound
+// readable.
+const maxAttrBytes = logattr.MaxBytes
 
 // capDisplayText is sanitizeDisplayText plus a volume cap: an honest value
 // passes byte-identical, an oversized one (SeaDex admits multi-MB group and
 // URL strings, up to 512 torrents per entry) is capped on a rune boundary
 // with a "..." marker so one Loki record cannot balloon past the pipeline's
 // line limit or amplify memory. The cap is applied BEFORE the per-rune
-// sanitize so an oversized value is never fully copied.
-func capDisplayText(s string) string {
-	if len(s) <= maxAttrBytes {
-		return sanitizeDisplayText(s)
-	}
-	clean := runesafe.Sanitize(runesafe.CapBytes(s, maxAttrBytes))
-	return runesafe.CapBytes(clean, maxAttrBytes) + "..."
-}
-
-// attrJoiner renders a MULTI-SOURCE slog attribute under capDisplayText's byte
-// budget WITHOUT first materializing the untrusted aggregate: each piece is
-// capped to the remaining budget BEFORE it is sanitized, so a hostile SeaDex
-// entry (up to 512 torrents, each admitting a multi-MB group string) can never
-// make the report's slog path allocate more than the budget plus one bounded
-// chunk - joining first and capping after allocated the whole aggregate, the
-// memory amplification the per-attribute cap exists to remove (CWE-400). It
-// mirrors the notify emit path's joiner, for the same reason. Honest values are
-// byte-identical to the joined-then-capped form: runesafe.Sanitize is a
-// per-rune map, so sanitizing each piece and writing the ASCII separators raw
-// yields the same bytes.
-type attrJoiner struct {
-	b         strings.Builder
-	remaining int
-	truncated bool
-}
-
-// newAttrJoiner returns a joiner with the full per-attribute budget.
-func newAttrJoiner() *attrJoiner { return &attrJoiner{remaining: maxAttrBytes} }
-
-// write appends the sanitized prefix of raw that still fits the budget and
-// reports whether the joiner can still accept more. The pre-sanitize cap keeps
-// the sanitizer from ever walking an unbounded string; sanitizing can grow a
-// string (each invalid UTF-8 byte becomes the three-byte U+FFFD), so the result
-// is re-capped on a rune boundary.
-func (j *attrJoiner) write(raw string) bool {
-	if j.truncated || j.remaining <= 0 {
-		j.truncated = j.truncated || raw != ""
-		return false
-	}
-	chunk := runesafe.CapBytes(raw, j.remaining)
-	if len(chunk) < len(raw) {
-		j.truncated = true
-	}
-	clean := runesafe.Sanitize(chunk)
-	if len(clean) > j.remaining {
-		clean = runesafe.CapBytes(clean, j.remaining)
-		j.truncated = true
-	}
-	j.b.WriteString(clean)
-	j.remaining -= len(clean)
-	return !j.truncated
-}
-
-// writeSep appends a fixed ASCII separator (never untrusted data) against the
-// same budget, so a hostile piece count cannot grow the attribute past it
-// either.
-func (j *attrJoiner) writeSep(sep string) bool { return j.write(sep) }
-
-// string returns the joined attribute, marked with capDisplayText's "..."
-// truncation marker when any source was cut - the same truncation signal a
-// single capped attribute carries.
-func (j *attrJoiner) string() string {
-	if j.truncated {
-		return j.b.String() + "..."
-	}
-	return j.b.String()
-}
+// sanitize (inside the shared primitive) so an oversized value is never fully
+// copied.
+//
+// A MULTI-SOURCE attribute (a joined group or link list) must never be
+// materialized and handed to capDisplayText - joining first would allocate the
+// whole untrusted aggregate before the bound applies. Those stream through a
+// logattr.Joiner instead (joinGroupsAttr / joinBestGroupsAttr).
+func capDisplayText(s string) string { return logattr.Cap(s) }
 
 // joinGroupsAttr renders a row's group list as the comma-separated
 // current_group attribute through the bounded joiner: the list is untrusted
 // SeaDex/arr data and must not be materialized before the cap applies.
 func joinGroupsAttr(groups []string) string {
-	j := newAttrJoiner()
+	j := logattr.NewJoiner()
 	for i := range groups {
-		if i > 0 && !j.writeSep(",") {
+		if i > 0 && !j.WriteSep(",") {
 			break
 		}
-		if !j.write(groups[i]) {
+		if !j.Write(groups[i]) {
 			break
 		}
 	}
-	return j.string()
+	return j.String()
 }
 
 // joinBestGroupsAttr renders the seadex_best attribute through the same
@@ -823,51 +790,74 @@ func joinGroupsAttr(groups []string) string {
 // builds the complete label slice, which is exactly the untrusted aggregate the
 // budget must bound.
 func joinBestGroupsAttr(releases []Release) string {
-	j := newAttrJoiner()
-	seen := make(map[string]struct{}, len(releases))
-	first := true
+	w := &bestGroupsWriter{
+		j:     logattr.NewJoiner(),
+		seen:  make(map[[sha256.Size]byte]struct{}, len(releases)),
+		first: true,
+	}
 	for _, annotatedPass := range []bool{false, true} {
-		for i := range releases {
-			rel := &releases[i]
-			if !rel.Best || rel.Group == "" || annotated(rel) != annotatedPass {
-				continue
-			}
-			key := strings.ToLower(rel.Group)
-			if _, dup := seen[key]; dup {
-				continue
-			}
-			seen[key] = struct{}{}
-			if !first && !j.writeSep(",") {
-				return j.string()
-			}
-			first = false
-			if !j.write(rel.Group) {
-				return j.string()
-			}
-			if annotatedPass && !writeNotesAttr(j, releaseNotes(rel)) {
-				return j.string()
-			}
+		if !w.writePass(releases, annotatedPass) {
+			break
 		}
 	}
-	return j.string()
+	return w.j.String()
+}
+
+// bestGroupsWriter carries the streaming state joinBestGroupsAttr's two passes
+// share (the bounded joiner, the case-insensitive dedupe set, and whether a
+// separator is still owed), so each pass is one linear loop rather than nested
+// control flow inside a single function.
+type bestGroupsWriter struct {
+	j     *logattr.Joiner
+	seen  map[[sha256.Size]byte]struct{}
+	first bool
+}
+
+// writePass streams the best releases whose annotation state matches
+// annotatedPass into the joiner - preserving clean-first dedupe precedence,
+// separator state, and annotation rendering - and reports whether the joiner
+// can still accept more.
+func (w *bestGroupsWriter) writePass(releases []Release, annotatedPass bool) bool {
+	for i := range releases {
+		rel := &releases[i]
+		if !rel.Best || rel.Group == "" || annotated(rel) != annotatedPass {
+			continue
+		}
+		key := foldedGroupKey(rel.Group)
+		if _, dup := w.seen[key]; dup {
+			continue
+		}
+		w.seen[key] = struct{}{}
+		if !w.first && !w.j.WriteSep(",") {
+			return false
+		}
+		w.first = false
+		if !w.j.Write(rel.Group) {
+			return false
+		}
+		if annotatedPass && !writeNotesAttr(w.j, releaseNotes(rel)) {
+			return false
+		}
+	}
+	return true
 }
 
 // writeNotesAttr appends an annotated best's parenthesized note list to j,
 // matching displayBestGroups' " (broken, unobtainable)" rendering, and reports
 // whether the joiner can still accept more.
-func writeNotesAttr(j *attrJoiner, notes []string) bool {
-	if !j.writeSep(" (") {
+func writeNotesAttr(j *logattr.Joiner, notes []string) bool {
+	if !j.WriteSep(" (") {
 		return false
 	}
 	for i := range notes {
-		if i > 0 && !j.writeSep(", ") {
+		if i > 0 && !j.WriteSep(", ") {
 			return false
 		}
-		if !j.write(notes[i]) {
+		if !j.Write(notes[i]) {
 			return false
 		}
 	}
-	return j.writeSep(")")
+	return j.WriteSep(")")
 }
 
 // sanitizeOutput returns a deep-enough copy of the report with every untrusted

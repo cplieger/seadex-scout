@@ -54,29 +54,41 @@ func genPropSnapshot(t *rapid.T, label string) *Snapshot {
 	return &Snapshot{Items: items, Partial: partial}
 }
 
-// TestDiffSnapshotsPropIdentity pins the diff's reflexivity: diffing any
-// snapshot against itself must report nothing added, removed, or changed.
-func TestDiffSnapshotsPropIdentity(t *testing.T) {
+// TestDiffSnapshotsPropAdditionRemoval pins direction symmetry with a
+// controlled non-zero transition over arbitrary producer-valid base snapshots:
+// one key added one way is exactly one key removed the other way. Unlike a
+// reflexivity-only property, a degenerate `return Diff{}` implementation fails
+// it immediately.
+func TestDiffSnapshotsPropAdditionRemoval(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
-		s := genPropSnapshot(t, "s")
-		if d := DiffSnapshots(s, s); d != (Diff{}) {
-			t.Fatalf("DiffSnapshots(s, s) = %+v, want zero Diff", d)
+		base := genPropSnapshot(t, "base")
+		cur := &Snapshot{Items: slices.Clone(base.Items), Partial: base.Partial}
+		cur.Items = append(cur.Items, Item{Arr: ArrSonarr, ArrID: 99, Groups: []string{"pmr"}, HasFile: true})
+		if got := DiffSnapshots(base, cur); got != (Diff{Added: 1}) {
+			t.Fatalf("DiffSnapshots(base, base+item) = %+v, want Added=1", got)
+		}
+		if got := DiffSnapshots(cur, base); got != (Diff{Removed: 1}) {
+			t.Fatalf("DiffSnapshots(base+item, base) = %+v, want Removed=1", got)
 		}
 	})
 }
 
-// TestDiffSnapshotsPropSymmetry pins the diff's direction symmetry across
-// producer-valid complete and partial snapshots: an addition one way is a
-// removal the other way, and
-// Changed is direction-independent (sameItem is symmetric).
-func TestDiffSnapshotsPropSymmetry(t *testing.T) {
+// TestDiffSnapshotsPropChangedSymmetry pins a known changed transition in
+// both directions over arbitrary producer-valid base snapshots: a group swap
+// on one shared key is one Changed either way (sameItem is symmetric), and a
+// no-op implementation cannot satisfy it.
+func TestDiffSnapshotsPropChangedSymmetry(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
-		prev := genPropSnapshot(t, "prev")
-		cur := genPropSnapshot(t, "cur")
-		fwd := DiffSnapshots(prev, cur)
-		rev := DiffSnapshots(cur, prev)
-		if fwd.Added != rev.Removed || fwd.Removed != rev.Added || fwd.Changed != rev.Changed {
-			t.Fatalf("DiffSnapshots not symmetric: forward %+v, reverse %+v", fwd, rev)
+		base := genPropSnapshot(t, "base")
+		prev := &Snapshot{Items: slices.Clone(base.Items), Partial: base.Partial}
+		cur := &Snapshot{Items: slices.Clone(base.Items), Partial: base.Partial}
+		prev.Items = append(prev.Items, Item{Arr: ArrSonarr, ArrID: 98, Groups: []string{"pmr"}, HasFile: true})
+		cur.Items = append(cur.Items, Item{Arr: ArrSonarr, ArrID: 98, Groups: []string{"lostyears"}, HasFile: true})
+		if got := DiffSnapshots(prev, cur); got != (Diff{Changed: 1}) {
+			t.Fatalf("DiffSnapshots(pmr, lostyears) = %+v, want Changed=1", got)
+		}
+		if got := DiffSnapshots(cur, prev); got != (Diff{Changed: 1}) {
+			t.Fatalf("DiffSnapshots(lostyears, pmr) = %+v, want Changed=1", got)
 		}
 	})
 }

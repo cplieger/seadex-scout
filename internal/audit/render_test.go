@@ -919,3 +919,137 @@ func TestRenderMarkdownVerdictSectionDescription(t *testing.T) {
 		t.Errorf("markdown section is missing its description line %q:\n%s", want, md)
 	}
 }
+
+// TestReportLogRendersAnnotatedBestAttribute pins the seadex_best aggregate's
+// clean-first case-insensitive dedupe and its annotation rendering through the
+// public Log projection: a clean best wins the dedupe over a differently-cased
+// annotated twin, and an annotated-only best carries its parenthesized note
+// list. Deleting the note emission fails the exact-value assertion.
+func TestReportLogRendersAnnotatedBestAttribute(t *testing.T) {
+	log, rec := capture.New()
+	r := &Report{
+		GeneratedAt: time.Unix(0, 0).UTC(),
+		Rows: []Row{{
+			Releases: []Release{
+				{Group: "pmr", Best: true, Warnings: []string{"broken"}},
+				{Group: "PMR", Best: true},
+				{Group: "SEV", Best: true, Warnings: []string{"broken"}, Unobtainable: true},
+			},
+		}},
+	}
+
+	if err := r.Log(context.Background(), log); err != nil {
+		t.Fatalf("Log: %v", err)
+	}
+
+	attrs := recordAttrs(rec.Records()[1])
+	if got, want := attrs["seadex_best"], "PMR,SEV (broken, unobtainable)"; got != want {
+		t.Errorf("seadex_best = %q, want %q", got, want)
+	}
+}
+
+// TestReportLogCapsAggregateAttributes pins the per-attribute volume bound on
+// BOTH aggregates (current_group, seadex_best): an oversized upstream group
+// name is cut on a rune boundary and marked, so one report line cannot balloon
+// past the log pipeline's limit. Removing either cap fails the length or the
+// suffix assertion.
+func TestReportLogCapsAggregateAttributes(t *testing.T) {
+	log, rec := capture.New()
+	r := &Report{
+		GeneratedAt: time.Unix(0, 0).UTC(),
+		Rows: []Row{{
+			CurrentGroups: []string{strings.Repeat("x", maxAttrBytes+1)},
+			Releases:      []Release{{Group: strings.Repeat("y", maxAttrBytes+1), Best: true}},
+		}},
+	}
+
+	if err := r.Log(context.Background(), log); err != nil {
+		t.Fatalf("Log: %v", err)
+	}
+
+	attrs := recordAttrs(rec.Records()[1])
+	for _, key := range []string{"current_group", "seadex_best"} {
+		got, ok := attrs[key].(string)
+		if !ok {
+			t.Errorf("%s = %T, want string", key, attrs[key])
+			continue
+		}
+		if len(got) != maxAttrBytes+3 {
+			t.Errorf("len(%s) = %d, want %d", key, len(got), maxAttrBytes+3)
+		}
+		if !strings.HasSuffix(got, "...") {
+			t.Errorf("%s = %q, want truncation suffix", key, got)
+		}
+	}
+}
+
+// TestReportLogEmitsIncompleteMappings pins the slog projection of the
+// incomplete-mapping section, which the Markdown and JSON projections already
+// cover: the summary's incomplete_mappings count plus the per-entry message,
+// AniList ID, and SeaDex URL. Deleting the incomplete loop or its summary count
+// leaves the other slog tests green; this one fails.
+func TestReportLogEmitsIncompleteMappings(t *testing.T) {
+	log, rec := capture.New()
+	r := &Report{
+		GeneratedAt: time.Unix(0, 0).UTC(),
+		Incomplete: []IncompleteEntry{{
+			AniListID: 20791,
+			SeaDexURL: "https://releases.moe/20791",
+		}},
+	}
+
+	if err := r.Log(context.Background(), log); err != nil {
+		t.Fatalf("Log: %v", err)
+	}
+
+	if rec.Len() != 2 {
+		t.Fatalf("Log emitted %d records, want 2 (summary + incomplete mapping)", rec.Len())
+	}
+	records := rec.Records()
+	summaryAttrs := recordAttrs(records[0])
+	if got := summaryAttrs["incomplete_mappings"]; got != int64(1) {
+		t.Errorf("incomplete_mappings = %v, want 1", got)
+	}
+	if got, want := records[1].Message, "report incomplete mapping"; got != want {
+		t.Errorf("message = %q, want %q", got, want)
+	}
+	attrs := recordAttrs(records[1])
+	if got := attrs["al_id"]; got != int64(20791) {
+		t.Errorf("al_id = %v, want 20791", got)
+	}
+	if got, want := attrs["seadex_url"], "https://releases.moe/20791"; got != want {
+		t.Errorf("seadex_url = %q, want %q", got, want)
+	}
+}
+
+// TestBestGroupDedupeIsBoundedAndCaseInsensitive pins the case-insensitive
+// dedupe identity both best-group renderers share (foldedGroupKey): two
+// oversized groups differing only in case must collapse to one in the Markdown
+// column AND in the slog aggregate, without either site retaining an
+// input-sized lowercase copy of the untrusted group name.
+func TestBestGroupDedupeIsBoundedAndCaseInsensitive(t *testing.T) {
+	huge := strings.Repeat("g", 4*maxAttrBytes)
+	releases := []Release{
+		{Group: huge, Best: true},
+		{Group: strings.ToUpper(huge), Best: true},
+	}
+
+	display := displayBestGroups(releases)
+	if len(display) != 1 {
+		t.Fatalf("displayBestGroups() returned %d groups, want 1 (case-insensitive dedupe)", len(display))
+	}
+	if display[0] != huge {
+		t.Error("displayBestGroups() did not keep the first release's original case")
+	}
+
+	attr := joinBestGroupsAttr(releases)
+	if len(attr) != maxAttrBytes+3 {
+		t.Errorf("len(joinBestGroupsAttr()) = %d, want %d (bounded output)", len(attr), maxAttrBytes+3)
+	}
+	if !strings.HasSuffix(attr, "...") {
+		t.Errorf("joinBestGroupsAttr() = %q..., want truncation suffix", attr[:16])
+	}
+	if strings.ContainsRune(attr, 'G') {
+		t.Error("joinBestGroupsAttr() emitted the deduped upper-case twin")
+	}
+}

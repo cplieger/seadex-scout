@@ -299,7 +299,7 @@ func prepareCarriedItem(it *journalItem, now time.Time, js *journalStats) bool {
 		// across the clock correction while bounding its remaining lifetime
 		// to feedJournalMaxAge - and count the rebase for the snapshot log
 		// line.
-		it.FirstSeen, it.PubDate = now, now
+		rebaseFutureFirstSeen(it, now)
 		js.rebased++
 	}
 	if now.Sub(it.FirstSeen) > feedJournalMaxAge {
@@ -307,6 +307,35 @@ func prepareCarriedItem(it *journalItem, now time.Time, js *journalStats) bool {
 		return false
 	}
 	return true
+}
+
+// rebaseFutureFirstSeen applies the clock-skew correction both consumers of a
+// persisted snapshot need: an item whose FirstSeen sits ahead of now (a
+// snapshot restored from a future-skewed host, a hand-edited year-9999 value)
+// has BOTH its journal timestamp and its derived PubDate reset to now, so its
+// remaining lifetime is bounded by feedJournalMaxAge and the served <pubDate>
+// can never advertise a negative release age (an arr delay profile would
+// otherwise hold the release indefinitely). It reports whether it corrected
+// the item, so the writer can count the rebase (journalStats.rebased) and the
+// reader can warn once per reload.
+func rebaseFutureFirstSeen(it *journalItem, now time.Time) bool {
+	if !it.FirstSeen.After(now) {
+		return false
+	}
+	it.FirstSeen, it.PubDate = now, now
+	return true
+}
+
+// rebaseFutureFeed applies rebaseFutureFirstSeen across a whole persisted feed,
+// returning how many items it corrected.
+func rebaseFutureFeed(feed []journalItem, now time.Time) int {
+	rebased := 0
+	for i := range feed {
+		if rebaseFutureFirstSeen(&feed[i], now) {
+			rebased++
+		}
+	}
+	return rebased
 }
 
 // carryStoredItem applies carryItem's non-curated carry policy: an item whose

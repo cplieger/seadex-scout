@@ -98,6 +98,23 @@ func TestAnimeBytesIDRejectsDuplicateTorrentIDParams(t *testing.T) {
 	}
 }
 
+// TestAnimeBytesIDRejectsMalformedQuery pins that a query Go cannot parse
+// cleanly never mints a key. url.URL.Query silently drops malformed pairs and
+// their error, so `torrentid=123&x=1;torrentid=456` would leave exactly one
+// surviving value while a semicolon-splitting consumer downstream resolves
+// torrent 456 - the same parameter-pollution ambiguity, one parser layer down.
+func TestAnimeBytesIDRejectsMalformedQuery(t *testing.T) {
+	if got := animeBytesID("/torrents.php?torrentid=123&x=1;torrentid=456"); got != "" {
+		t.Errorf("semicolon-smuggled torrentid = %q, want empty (query does not parse cleanly)", got)
+	}
+	if got := animeBytesID("/torrents.php?torrentid=123&%zz=1"); got != "" {
+		t.Errorf("invalid percent-escape in query = %q, want empty (query does not parse cleanly)", got)
+	}
+	if got := animeBytesID("/torrents.php?id=1&torrentid=123"); got != "123" {
+		t.Errorf("well-formed single torrentid = %q, want 123", got)
+	}
+}
+
 // TestTrackerIDExtractionRejectsNonCanonicalRoutes pins the route-anchoring
 // half of the identity gate: only the tracker's own canonical torrent-page
 // route shapes are identity evidence, so a /view/ or /torrent/ buried deeper

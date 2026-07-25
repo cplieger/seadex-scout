@@ -235,7 +235,12 @@ type pbList struct {
 }
 
 // pbEntry mirrors an entries record with the torrents relation expanded.
+// ID and Created are the immutable PocketBase fields the keyset walk pages on
+// (see cursor): they are never surfaced on the public Entry, only used to
+// build the next chunk's filter.
 type pbEntry struct {
+	ID              string   `json:"id"`
+	Created         string   `json:"created"`
 	Notes           string   `json:"notes"`
 	TheoreticalBest string   `json:"theoreticalBest"`
 	Updated         string   `json:"updated"`
@@ -290,31 +295,117 @@ func parsePBTime(s string) time.Time {
 // must not erase an earlier page's promise of more records, or pageComplete
 // would accept a truncated view.
 type fetchTotals struct {
-	bytes         int
-	elements      int
-	reportedTotal int
-	reportedPages int
-	unparsedTimes int
-	unusableURLs  int
+	// seenAniListIDs is the identity set of every entry accepted so far, so
+	// the walk can prove count completeness is also KEY completeness (see
+	// validatePageIdentities).
+	seenAniListIDs map[int]struct{}
+	bytes          int
+	elements       int
+	reportedTotal  int
+	reportedPages  int
+	unparsedTimes  int
+	unusableURLs   int
 }
 
-// FetchEntries pages through the entire entries collection with torrents
-// expanded and returns every entry. It sleeps pageDelay between pages. A page
-// fetch failure aborts and returns the error; partial results are discarded so
-// a caller never compares against a truncated SeaDex view. A catalogue that
-// completes with ZERO entries is an error, never a success: SeaDex is never
-// legitimately empty for this app's use, and accepting one would make every
-// library item read as having no SeaDex coverage. A completed catalogue whose
-// entry count disagrees with the API's reported totalItems is logged (WARN)
-// but still returned - pagination raciness over a live collection can
-// legitimately shift counts mid-fetch. That leniency requires the final page
-// to have carried entries: an EMPTY page while the collected count is still
-// below the reported totalItems aborts with an error (pageComplete), since
-// the API itself says entries remain and completing would falsely resolve
-// findings against a truncated view.
+// cursor is the keyset position of the catalogue walk: the (created, id) pair
+// of the LAST record already consumed. Offset pagination is not stable under
+// deletion even with an immutable sort - deleting a record from an
+// already-read prefix shifts every later record one slot forward, so the next
+// numbered page silently skips the record that moved into the consumed offset
+// range while the aggregate counts still agree - so each chunk instead asks
+// for the records strictly AFTER this position, which no concurrent insert or
+// delete can shift.
+type cursor struct {
+	created string
+	id      string
+}
+
+// set reports whether the walk has a position yet (the first chunk has none
+// and is requested unfiltered).
+func (c cursor) set() bool { return c.created != "" || c.id != "" }
+
+// filter renders the PocketBase filter selecting the records strictly after
+// the cursor under sort=created,id: a later created, or the same created with
+// a greater id (the composite tie-break that keeps equal-timestamp records
+// from stalling or skipping the walk).
+func (c cursor) filter() string {
+	created, id := quoteFilterValue(c.created), quoteFilterValue(c.id)
+	return "(created>" + created + "||(created=" + created + "&&id>" + id + "))"
+}
+
+// filterQuoteEscaper escapes the two characters that could break out of a
+// double-quoted PocketBase filter literal. Cursor values are upstream data;
+// filterSafe already refuses the shapes that have no business in a PocketBase
+// id or timestamp, so this is the belt to that braces.
+var filterQuoteEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+
+// quoteFilterValue renders v as a double-quoted PocketBase filter literal.
+func quoteFilterValue(v string) string {
+	return `"` + filterQuoteEscaper.Replace(v) + `"`
+}
+
+// filterSafe reports whether an upstream cursor value is safe to place in a
+// filter expression: no quote, backslash, or control character (a real
+// PocketBase id is 15 alphanumerics and a created value an ASCII timestamp).
+// The walk fails closed on anything else rather than sending a filter it
+// cannot reason about.
+func filterSafe(v string) bool {
+	for i := range len(v) {
+		if c := v[i]; c < 0x20 || c == 0x7f || c == '"' || c == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
+// advanceCursor returns the keyset position after a full chunk: the (created,
+// id) pair of its last record. It fails the fetch when the pair is unusable -
+// missing (an upstream that stopped returning the fields the walk pages on),
+// unsafe to place in a filter, or identical to the previous position (no
+// progress, which would re-request the same chunk forever) - since continuing
+// blind would either loop or skip records, and this client never returns a
+// possibly-truncated view.
+func advanceCursor(items []pbEntry, prev cursor) (cursor, error) {
+	last := &items[len(items)-1]
+	next := cursor{created: strings.TrimSpace(last.Created), id: strings.TrimSpace(last.ID)}
+	if next.created == "" || next.id == "" {
+		return prev, fmt.Errorf("seadex: page of %d records carries no usable keyset cursor "+
+			"(created %q, id %q); refusing to compare against a truncated view",
+			len(items), last.Created, last.ID)
+	}
+	if !filterSafe(next.created) || !filterSafe(next.id) {
+		return prev, fmt.Errorf("seadex: keyset cursor rejected (created %q, id %q); "+
+			"refusing to compare against a truncated view", next.created, next.id)
+	}
+	if next == prev {
+		return prev, fmt.Errorf("seadex: keyset cursor did not advance past (created %q, id %q) "+
+			"(upstream ignoring the pagination filter); refusing to compare against a truncated view",
+			prev.created, prev.id)
+	}
+	return next, nil
+}
+
+// FetchEntries walks the entire entries collection with torrents expanded and
+// returns every entry. The walk is KEYSET-paged on the immutable (created, id)
+// pair (see cursor), so a record deleted from an already-read prefix cannot
+// shift a still-existing record into a consumed offset range and out of the
+// catalogue. It sleeps pageDelay between chunks. A chunk fetch failure aborts
+// and returns the error; partial results are discarded so a caller never
+// compares against a truncated SeaDex view. A catalogue that completes with
+// ZERO entries is an error, never a success: SeaDex is never legitimately
+// empty for this app's use, and accepting one would make every library item
+// read as having no SeaDex coverage. A completed catalogue whose entry count
+// disagrees with the API's reported totalItems is logged (WARN) but still
+// returned - pagination over a live collection can legitimately shift counts
+// mid-fetch. That leniency requires the walk to have ended on a SHORT chunk:
+// an EMPTY chunk after a full one while the collected count is still below the
+// reported totalItems aborts with an error (chunkComplete), since the API
+// itself says entries remain and completing would falsely resolve findings
+// against a truncated view.
 func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 	var all []Entry
 	var tot fetchTotals
+	var cur cursor
 	for page := 1; page <= maxPages; page++ {
 		if page > 1 {
 			if err := httpx.SleepCtx(ctx, c.pageDelay); err != nil {
@@ -323,7 +414,7 @@ func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 		}
 		var done bool
 		var err error
-		all, done, err = c.fetchAndAppend(ctx, page, all, &tot)
+		all, done, err = c.fetchAndAppend(ctx, page, all, &tot, &cur)
 		if err != nil {
 			return nil, err
 		}
@@ -379,18 +470,20 @@ func (c *Client) finishFetch(all []Entry, tot fetchTotals) ([]Entry, error) {
 	return all, nil
 }
 
-// fetchAndAppend fetches one page, appends its entries, updates the running
-// totals (cumulative bytes and decoded elements, the API's reported item
-// total, and the unparseable-updated and unusable-URL counters), enforces the
-// cumulative-byte, cumulative-element, and entry-count caps, and reports
+// fetchAndAppend fetches one chunk at the walk's cursor, appends its entries,
+// updates the running totals (cumulative bytes and decoded elements, the API's
+// reported item total, and the unparseable-updated and unusable-URL counters),
+// enforces the cumulative-byte, cumulative-element, and entry-count caps,
+// validates the chunk's entry identities (validatePageIdentities),
+// advances the cursor past the chunk when the walk continues, and reports
 // whether pagination is complete. All caps run BEFORE allocation scales with
 // the hostile input: the cumulative-byte budget caps the wire read itself
 // (fetchPage downloads at most the remaining budget, so tot.bytes can never
 // exceed maxTotalBytes), the cumulative-element budget caps the decode
 // (fetchPage decodes at most the remaining element allowance, so tot.elements
 // can never exceed maxTotalElements), and the entry-count cap rejects the
-// page before any of its items are converted or appended.
-func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, tot *fetchTotals) (out []Entry, done bool, err error) {
+// chunk before any of its items are converted or appended.
+func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, tot *fetchTotals, cur *cursor) (out []Entry, done bool, err error) {
 	remaining := int64(maxTotalBytes - tot.bytes)
 	if remaining <= 0 {
 		return all, false, fmt.Errorf("%w (page %d, %d entries fetched)", errCumulativeBytes, page, len(all))
@@ -399,7 +492,7 @@ func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, tot 
 	if remainingElems <= 0 {
 		return all, false, fmt.Errorf("%w (page %d, %d entries fetched)", errCumulativeElements, page, len(all))
 	}
-	list, n, elems, err := c.fetchPage(ctx, page, min(int64(maxPageBytes), remaining), min(maxPageElements, remainingElems))
+	list, n, elems, err := c.fetchPage(ctx, *cur, min(int64(maxPageBytes), remaining), min(maxPageElements, remainingElems))
 	if err != nil {
 		if errors.Is(err, errCumulativeBytes) || errors.Is(err, errCumulativeElements) {
 			return all, false, fmt.Errorf("%w (page %d, %d entries fetched)", err, page, len(all))
@@ -414,19 +507,53 @@ func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, tot 
 		return all, false, fmt.Errorf("seadex: entry count exceeded cap %d on page %d (%d already fetched, %d received; upstream misbehaving)",
 			maxEntries, page, len(all), len(list.Items))
 	}
+	if verr := validatePageIdentities(list.Items, page, tot); verr != nil {
+		return all, false, verr
+	}
 	all = appendPageEntries(all, list.Items, tot)
-	done, err = pageComplete(page, len(list.Items), list.TotalPages, len(all), tot.reportedTotal)
+	done, err = chunkComplete(page, len(list.Items), len(all), tot.reportedTotal)
 	if err != nil {
 		return all, false, err
 	}
-	// pageComplete judges the CURRENT page's totalPages (so invalid current
-	// metadata still errors); the retained highest promise prevents a
-	// lower-but-currently-valid terminal value from ending the walk early
-	// after an earlier page promised more pages.
-	if done && page < tot.reportedPages {
-		done = false
+	if !done {
+		// The walk continues, so the next chunk is requested strictly after
+		// this one's last record; an unusable cursor fails the fetch rather
+		// than looping or skipping (advanceCursor).
+		next, cerr := advanceCursor(list.Items, *cur)
+		if cerr != nil {
+			return all, false, cerr
+		}
+		*cur = next
 	}
 	return all, done, nil
+}
+
+// validatePageIdentities enforces the catalogue's primary-key invariant across
+// the whole walk: every entry is keyed by ONE positive, unique AniList ID. The
+// byte/element/count budgets prove a chunk is well-shaped and the pagination
+// arithmetic proves the counts add up, but neither notices key loss - an entry
+// that omits alID decodes it as 0 (which the matcher would silently treat as
+// unmapped) and a repeated alID can stand in for a record that was dropped,
+// both while the aggregate counts still agree. Failing the whole fetch is the
+// fail-safe direction: the caller preserves the last known findings and feed
+// instead of resolving them against a catalogue that lost an anime.
+func validatePageIdentities(items []pbEntry, page int, tot *fetchTotals) error {
+	if tot.seenAniListIDs == nil {
+		tot.seenAniListIDs = make(map[int]struct{}, len(items))
+	}
+	for i := range items {
+		id := items[i].AlID
+		if id <= 0 {
+			return fmt.Errorf("seadex: page %d item %d has invalid AniList ID %d; "+
+				"refusing to compare against an incomplete catalogue", page, i+1, id)
+		}
+		if _, exists := tot.seenAniListIDs[id]; exists {
+			return fmt.Errorf("seadex: page %d repeats AniList ID %d; "+
+				"refusing to compare against a possibly truncated catalogue", page, id)
+		}
+		tot.seenAniListIDs[id] = struct{}{}
+	}
+	return nil
 }
 
 // appendPageEntries converts one page's decoded records into public entries,
@@ -447,47 +574,42 @@ func appendPageEntries(all []Entry, items []pbEntry, tot *fetchTotals) []Entry {
 	return all
 }
 
-// pageComplete reports whether pagination is done after a page, or an error
-// when the pagination metadata is invalid (totalPages < 1, or a page past the
-// reported total — empty or not), the page is empty before the reported total
-// (a truncated view), or the page is empty while fetched (the entries
-// collected so far) is still below the reported totalItems — the API itself
+// chunkComplete reports whether the keyset walk is done after a chunk: a chunk
+// short of perPage is the last one (the filter asked for everything after the
+// cursor, so a partial chunk means the collection is exhausted), while a FULL
+// chunk always continues. Under keyset pagination completeness is a property
+// of the chunk itself, not of the response's page metadata (a numbered-page
+// count cannot skip or duplicate what a cursor walk reads), so totalPages no
+// longer steers the walk; it survives only as finishFetch's metadata
+// self-consistency check.
+//
+// One arm stays an error: an EMPTY chunk after a full one, while the entries
+// collected so far are still below the reported totalItems. The API itself
 // says entries remain, so completing would hand downstream a truncated view
 // that falsely resolves findings; failing instead degrades the cycle, the
-// fail-safe direction that preserves existing findings. A NON-empty terminal
-// page with a count mismatch stays finishFetch's WARN (offset pagination over
-// a live collection can legitimately shift counts mid-fetch). totalPages is
-// an unvalidated upstream field (a missing value decodes to zero), so the
-// only invalid-metadata exception is an empty FIRST response with zeroed
-// metadata (a degenerate `{}` body), which finishFetch's empty-catalogue
-// guard converts into an error. Every LATER page was only requested because
-// an earlier page promised it existed, so an empty page 3 reporting
-// totalPages=2 signals records shifted across already-read pages (a deletion
-// mid-pagination) and must not complete the catalogue — FetchEntries'
-// contract is to never return a possibly-truncated view.
-func pageComplete(page, itemCount, totalPages, fetched, reportedTotal int) (done bool, err error) {
-	if page == 1 && itemCount == 0 && totalPages <= 0 {
-		return true, nil
+// fail-safe direction that preserves existing findings. A SHORT (non-empty)
+// terminal chunk with a count mismatch stays finishFetch's WARN (pagination
+// over a live collection can legitimately shift counts mid-fetch), and an
+// empty FIRST chunk completes the walk so finishFetch's empty-catalogue guard
+// converts it into an error.
+func chunkComplete(page, itemCount, fetched, reportedTotal int) (done bool, err error) {
+	if itemCount >= perPage {
+		return false, nil
 	}
-	if totalPages < 1 || page > totalPages {
-		return false, fmt.Errorf("seadex: page %d with invalid pagination metadata (totalPages %d); "+
-			"refusing to compare against a truncated view", page, totalPages)
-	}
-	if itemCount == 0 && page < totalPages {
-		return false, fmt.Errorf("seadex: page %d empty before reported total %d pages; "+
-			"refusing to compare against a truncated view", page, totalPages)
-	}
-	if itemCount == 0 && fetched < reportedTotal {
+	if itemCount == 0 && page > 1 && fetched < reportedTotal {
 		return false, fmt.Errorf("seadex: page %d empty with %d of %d reported entries fetched; "+
 			"refusing to compare against a truncated view", page, fetched, reportedTotal)
 	}
-	return page >= totalPages, nil
+	return true, nil
 }
 
-// fetchPage fetches and decodes a single page of entries, also returning the
-// raw body size and the decoded array-element count so the caller can bound
-// cumulative bytes and decoded elements across pages. wireLimit is the
-// download cap for THIS page: the per-page bound
+// fetchPage fetches and decodes a single chunk of entries at the walk's cursor,
+// also returning the raw body size and the decoded array-element count so the
+// caller can bound cumulative bytes and decoded elements across chunks. Every
+// request asks for page 1 of the sorted remainder: the cursor's filter (absent
+// on the first chunk) is what advances the walk, so no numbered offset can go
+// stale under a concurrent delete. wireLimit is the download cap for THIS
+// chunk: the per-page bound
 // (maxPageBytes) already reduced by the caller to the remaining cumulative
 // budget, so an over-budget page is rejected at the wire layer, before any
 // bytes beyond the budget are held or decoded. A too-large response that
@@ -499,16 +621,18 @@ func pageComplete(page, itemCount, totalPages, fetched, reportedTotal int) (done
 // remaining fetch-wide element budget, so tripping a reduced limit is the
 // cumulative-element cap while tripping the full bound stays a per-page
 // violation.
-func (c *Client) fetchPage(ctx context.Context, page int, wireLimit int64, elemLimit int) (list pbList, bodyBytes, elems int, err error) {
+func (c *Client) fetchPage(ctx context.Context, cur cursor, wireLimit int64, elemLimit int) (list pbList, bodyBytes, elems int, err error) {
 	q := url.Values{
 		"expand":  {"trs"},
-		"page":    {strconv.Itoa(page)},
+		"page":    {"1"},
 		"perPage": {strconv.Itoa(perPage)},
-		// Sort on immutable fields: with offset pagination over a live
-		// collection, sorting on `updated` lets a mid-pagination entry update
-		// shift records across already-fetched pages (one entry missed, another
-		// duplicated, for this cycle). created,id is stable under updates.
+		// Sort on immutable fields: created,id is stable under updates (an
+		// entry updated mid-walk cannot move across chunks) and is the key the
+		// cursor filter below pages on.
 		"sort": {"created,id"},
+	}
+	if cur.set() {
+		q.Set("filter", cur.filter())
 	}
 	reqURL := c.baseURL + entriesPath + "?" + q.Encode()
 
@@ -613,6 +737,10 @@ func decodeEntryField(d *bounded.Decoder, e *pbEntry, key string) error {
 		return d.Decode(&e.TheoreticalBest)
 	case strings.EqualFold(key, "updated"):
 		return d.Decode(&e.Updated)
+	case strings.EqualFold(key, "id"):
+		return d.Decode(&e.ID)
+	case strings.EqualFold(key, "created"):
+		return d.Decode(&e.Created)
 	case strings.EqualFold(key, "alID"):
 		return d.Decode(&e.AlID)
 	case strings.EqualFold(key, "incomplete"):

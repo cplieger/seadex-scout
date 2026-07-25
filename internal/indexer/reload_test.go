@@ -963,51 +963,40 @@ func TestReloadInstallsPreservedMtimeReplacementAfterSuccess(t *testing.T) {
 }
 
 // TestReloadRetriesTransientReadFailureOnSameInode pins the failed-file memo to
-// DETERMINISTIC failures only: a snapshot whose read fails (here an oversized
-// file the bounded read rejects - a root-safe stand-in for a transient EIO or
-// a later-chmodded EACCES) must NOT be memoized, so a subsequent in-place
-// repair that changes neither inode nor mtime is still retried and installs.
-// Memoizing the read failure would skip the unchanged-identity file forever.
+// DETERMINISTIC failures only: a snapshot whose read fails for a RECOVERABLE
+// reason (here a cancelled read - a root-safe stand-in for a transient EIO or a
+// later-chmodded EACCES; an over-cap file is deterministic and DOES memoize,
+// see TestReloadMemoizesOversizedSnapshotFile) must NOT be memoized, so a
+// subsequent retry that changes neither inode nor mtime still installs.
+// Memoizing such a failure would skip the unchanged-identity file forever.
 func TestReloadRetriesTransientReadFailureOnSameInode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "feed.json")
-	// A sparse file one byte over the bound: os.Stat succeeds, the bounded
-	// read fails.
-	f, err := os.Create(path)
-	if err != nil {
-		t.Fatalf("create: %v", err)
+	// New's warm-up runs against a missing file (the fresh-install arm), so the
+	// recoverable failure below is the first read of this inode.
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{})
+	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
+		t.Fatalf("initial feed = %d items, want 0 (no snapshot yet)", len(got))
 	}
-	if err := f.Truncate(maxFeedBytes + 1); err != nil {
-		t.Fatalf("truncate: %v", err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatalf("close: %v", err)
+
+	if err := seedRebuild(path, nyaaTestEntries(1)); err != nil {
+		t.Fatalf("Rebuild: %v", err)
 	}
 	failedAt := time.Now().Add(-time.Hour).Truncate(time.Second)
 	setMtime(t, path, failedAt)
-	// New's warm-up reload hits the read failure; it must stay retryable.
-	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{})
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	ix.reload(cancelled)
 	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
-		t.Fatalf("initial feed = %d items, want 0 (oversized snapshot must not load)", len(got))
+		t.Fatalf("feed after the cancelled read = %d items, want 0 (nothing was loaded)", len(got))
 	}
 
-	// Repair IN PLACE (same inode: build a valid snapshot beside it, then
-	// rewrite the original file's bytes) and restore the failed mtime.
-	repaired := filepath.Join(dir, "feed-repaired.json")
-	if err := seedRebuild(repaired, nyaaTestEntries(1)); err != nil {
-		t.Fatalf("Rebuild: %v", err)
-	}
-	valid, err := os.ReadFile(repaired)
-	if err != nil {
-		t.Fatalf("read repaired: %v", err)
-	}
-	if err := os.WriteFile(path, valid, 0o600); err != nil {
-		t.Fatalf("in-place repair: %v", err)
-	}
+	// Retry the SAME inode at the SAME mtime: a recoverable failure is not
+	// memoized, so this read must happen and install.
 	setMtime(t, path, failedAt)
 	ix.reload(context.Background())
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
-		t.Errorf("after same-inode repair feed = %d items, want 1 (a read failure must stay retryable)", len(got))
+		t.Errorf("after same-inode retry feed = %d items, want 1 (a recoverable read failure must stay retryable)", len(got))
 	}
 }
 
@@ -1220,5 +1209,105 @@ func TestInstallSnapshotSkipsAlreadyInstalledFile(t *testing.T) {
 	}
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
 		t.Fatalf("served feed = %+v, want the originally installed snapshot", got)
+	}
+}
+
+// TestReloadRebasesFutureSnapshotTimestamps pins that the reader applies the
+// same clock-skew correction the writer's carry path does (h-f15): a persisted
+// FirstSeen ahead of the wall clock (a snapshot restored from a future-skewed
+// host, a hand-edited year-9999 value) must be rebased to load time on BOTH the
+// journal timestamp and the derived PubDate the served <pubDate> renders, so an
+// arr delay profile never sees a negative release age and hold the release past
+// the bounded journal window - which, in resident-idle mode, would last until
+// the next out-of-band poll.
+func TestReloadRebasesFutureSnapshotTimestamps(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	future := time.Date(9999, time.January, 1, 0, 0, 0, 0, time.UTC)
+	past := time.Now().UTC().Add(-time.Hour)
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "skewed", GUID: "https://nyaa.si/view/42"}, Key: "nyaa:42", FirstSeen: future},
+			{item: item{Title: "honest", GUID: "https://nyaa.si/view/43"}, Key: "nyaa:43", FirstSeen: past},
+		},
+	})
+	log, rec := capture.New()
+	before := time.Now().UTC()
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
+
+	got := ix.feedFor(upstreamNyaa)
+	if len(got) != 2 {
+		t.Fatalf("nyaa feed = %d items, want 2 (the skew is corrected, not dropped)", len(got))
+	}
+	byTitle := map[string]item{}
+	for _, it := range got {
+		byTitle[it.Title] = it
+	}
+	skewed, ok := byTitle["skewed"]
+	if !ok {
+		t.Fatalf("skewed item missing from the served feed: %+v", got)
+	}
+	if !skewed.PubDate.After(before.Add(-time.Minute)) || skewed.PubDate.After(time.Now().UTC().Add(time.Minute)) {
+		t.Errorf("served pubDate = %s, want it rebased to the load time (~%s)", skewed.PubDate, before)
+	}
+	if honest := byTitle["honest"]; !honest.PubDate.Equal(past) {
+		t.Errorf("honest item pubDate = %s, want the persisted %s left alone", honest.PubDate, past)
+	}
+	if count := rec.Count("indexer feed snapshot: future item timestamps rebased to load time"); count != 1 {
+		t.Errorf("rebase warnings = %d, want 1", count)
+	}
+}
+
+// TestReloadMemoizesOversizedSnapshotFile pins that an over-cap snapshot file is
+// memoized like malformed bytes (l-f26): persist enforces the same maxFeedBytes
+// cap, so an oversized file is external corruption that never shrinks on its
+// own, and re-reading it on every request would repeat the open/size-check
+// churn (the reload gate coalesces only overlapping calls). The last-good feed
+// keeps serving, the WARN fires once, and a REPLACEMENT inode is still retried.
+func TestReloadMemoizesOversizedSnapshotFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}, Key: "nyaa:1"},
+		},
+	})
+	log, rec := capture.New()
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+		t.Fatalf("initial feed = %d items, want 1", len(got))
+	}
+
+	if err := os.WriteFile(path, []byte(strings.Repeat("a", maxFeedBytes+1)), 0o600); err != nil {
+		t.Fatalf("write oversized snapshot: %v", err)
+	}
+	setMtime(t, path, time.Now().Add(2*time.Second))
+	ix.reload(context.Background())
+	ix.reload(context.Background())
+	if got := rec.Count("indexer feed snapshot unreadable; keeping current feed"); got != 1 {
+		t.Errorf("oversized snapshot warned %d times across two reloads, want exactly 1 (an unchanged over-cap inode must memoize); log output:\n%s",
+			got, strings.Join(rec.Messages(), "\n"))
+	}
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "first" {
+		t.Errorf("feed after the oversized write = %+v, want the last-good feed kept", got)
+	}
+
+	// A replacement file is a different inode: it must be retried, not skipped.
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "repaired", GUID: "https://nyaa.si/view/2"}, Key: "nyaa:2"},
+		},
+	})
+	setMtime(t, path, time.Now().Add(4*time.Second))
+	ix.reload(context.Background())
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "repaired" {
+		t.Errorf("feed after the repaired write = %+v, want the replacement inode loaded", got)
 	}
 }

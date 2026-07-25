@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -16,15 +15,53 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
+// keysetRecords renders count entries records numbered from start, each
+// carrying the immutable (created, id) pair the keyset walk pages on. Every
+// record shares one created value, so the walk can only advance through the
+// composite cursor's id tie-break.
+func keysetRecords(start, count int) string {
+	items := make([]string, count)
+	for i := range items {
+		n := start + i
+		items[i] = fmt.Sprintf(`{"alID":%d,"id":"rec%06d","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}}`, n, n)
+	}
+	return strings.Join(items, ",")
+}
+
+// fullKeysetChunk renders a FULL chunk (perPage records) numbered from start;
+// a full chunk is what keeps the keyset walk going.
+func fullKeysetChunk(start int) string { return keysetRecords(start, perPage) }
+
+// cursorIDFromFilter reads the keyset id predicate out of a request's filter
+// param, standing in for PocketBase evaluating it. It reports a missing
+// predicate as a test failure and returns "" (which surfaces as a duplicate or
+// skipped record in the caller's assertions).
+func cursorIDFromFilter(t *testing.T, filter string) string {
+	t.Helper()
+	const marker = `id>"`
+	_, rest, found := strings.Cut(filter, marker)
+	if !found {
+		t.Errorf("filter %q carries no keyset id predicate", filter)
+		return ""
+	}
+	id, _, terminated := strings.Cut(rest, `"`)
+	if !terminated {
+		t.Errorf("filter %q has an unterminated keyset id predicate", filter)
+		return ""
+	}
+	return id
+}
+
 // TestFetchEntriesDiscardsPartialOnMidPaginationError pins the "never compare
-// against a truncated view" contract: when a later page fails after earlier
-// pages accumulated entries, FetchEntries returns a nil slice and an error that
-// names the failed page, discarding the partial result rather than returning it.
+// against a truncated view" contract: when a later chunk fails after earlier
+// chunks accumulated entries, FetchEntries returns a nil slice and an error that
+// names the failed chunk, discarding the partial result rather than returning it.
 func TestFetchEntriesDiscardsPartialOnMidPaginationError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-		if page == 1 {
-			fmt.Fprint(w, `{"totalPages":2,"items":[{"alID":1,"expand":{"trs":[]}}]}`)
+	var reqs int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reqs++
+		if reqs == 1 {
+			fmt.Fprintf(w, `{"totalItems":%d,"totalPages":2,"items":[%s]}`, perPage+1, fullKeysetChunk(1))
 			return
 		}
 		fmt.Fprint(w, `{`)
@@ -44,61 +81,110 @@ func TestFetchEntriesDiscardsPartialOnMidPaginationError(t *testing.T) {
 	}
 }
 
-// TestFetchEntriesErrorsOnEmptyIntermediatePage pins the truncated-view guard
-// for the empty-page case: an empty page reported before the final page is an
-// error (a bad intermediate page must not falsely resolve findings), so
-// FetchEntries returns a nil slice and an error naming the empty page.
-func TestFetchEntriesErrorsOnEmptyIntermediatePage(t *testing.T) {
+// TestFetchEntriesKeysetSurvivesPrefixDeletion pins WHY the walk is keyset-
+// paged rather than offset-paged: a record deleted from an already-read prefix
+// shifts every later record one slot forward. With numbered offsets, chunk 2
+// (offset 500) would start past the record that moved into the consumed range,
+// silently dropping a still-existing entry while the counts, page shape, and
+// every completeness guard still agreed. The cursor asks for the records after
+// the last one consumed, so the boundary record is delivered exactly once.
+func TestFetchEntriesKeysetSurvivesPrefixDeletion(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-		switch page {
-		case 1:
-			fmt.Fprint(w, `{"totalPages":3,"items":[{"alID":1,"expand":{"trs":[]}}]}`)
-		case 2:
-			fmt.Fprint(w, `{"totalPages":3,"items":[]}`)
-		default:
-			t.Errorf("unexpected request for page %d after empty intermediate page", page)
+		filter := r.URL.Query().Get("filter")
+		if filter == "" {
+			// The pre-deletion prefix: records 1..perPage.
+			fmt.Fprintf(w, `{"totalItems":%d,"totalPages":2,"items":[%s]}`, perPage+1, fullKeysetChunk(1))
+			return
 		}
+		// Between the chunks a prefix record was deleted and a new record
+		// appended at the tail, so the collection now holds perPage+1 records
+		// ending at perPage+2. Everything after the cursor is what remains.
+		got := cursorIDFromFilter(t, filter)
+		if want := fmt.Sprintf("rec%06d", perPage); got != want {
+			t.Errorf("cursor id = %q, want %q (the last record of chunk 1)", got, want)
+		}
+		fmt.Fprintf(w, `{"totalItems":%d,"totalPages":2,"items":[%s,%s]}`, perPage+1,
+			keysetRecords(perPage+1, 1), keysetRecords(perPage+2, 1))
 	}))
 	defer server.Close()
 
 	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
-	if err == nil {
-		t.Fatal("FetchEntries returned nil error, want empty-intermediate-page error")
+	if err != nil {
+		t.Fatalf("FetchEntries returned error: %v", err)
 	}
-	if entries != nil {
-		t.Fatalf("entries = %+v, want nil on truncated-view error", entries)
+	seen := make(map[int]int, len(entries))
+	for i := range entries {
+		seen[entries[i].AniListID]++
 	}
-	if !strings.Contains(err.Error(), "empty before reported total") {
-		t.Errorf("error = %q, want empty-intermediate-page context", err.Error())
+	if got := seen[perPage+1]; got != 1 {
+		t.Errorf("boundary record alID %d appeared %d times, want exactly 1 (offset pagination would skip it)", perPage+1, got)
+	}
+	if got := seen[perPage+2]; got != 1 {
+		t.Errorf("tail record alID %d appeared %d times, want exactly 1", perPage+2, got)
+	}
+	if len(entries) != perPage+2 {
+		t.Errorf("entries = %d, want %d (the prefix chunk plus both remaining records)", len(entries), perPage+2)
 	}
 }
 
-// TestFetchEntriesErrorsOnEmptyTerminalPageWithOutstandingItems pins the
-// truncated-view guard for the empty FINAL page: a page equal to the reported
-// totalPages returning zero items while the collected count is still below
-// the reported totalItems must fail the fetch (the fail-safe direction — a
-// degraded cycle preserves existing findings, while accepting the truncated
-// view would falsely resolve them), with an error naming the fetched vs
-// reported counts, never finishFetch's lenient count-mismatch WARN (which is
-// reserved for terminal pages that carried entries).
-func TestFetchEntriesErrorsOnEmptyTerminalPageWithOutstandingItems(t *testing.T) {
+// TestFetchEntriesKeysetWalksEqualCreatedRecords pins the composite cursor's
+// tie-break over a multi-chunk catalogue whose records share one created
+// timestamp: the walk must advance by id through every chunk, delivering each
+// record exactly once and never stalling on the equal-created boundary (a
+// created-only cursor would either loop on the same chunk forever or skip the
+// rest of the timestamp's records).
+func TestFetchEntriesKeysetWalksEqualCreatedRecords(t *testing.T) {
+	const total = 2*perPage + 3
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-		switch page {
-		case 1:
-			fmt.Fprint(w, `{"totalItems":2,"totalPages":2,"items":[{"alID":1,"expand":{"trs":[]}}]}`)
-		case 2:
-			fmt.Fprint(w, `{"totalItems":2,"totalPages":2,"items":[]}`)
-		default:
-			t.Errorf("unexpected request for page %d after empty terminal page", page)
+		next := 1
+		if filter := r.URL.Query().Get("filter"); filter != "" {
+			id := cursorIDFromFilter(t, filter)
+			var last int
+			if _, err := fmt.Sscanf(id, "rec%d", &last); err != nil {
+				t.Errorf("cursor id %q is not a record id: %v", id, err)
+			}
+			next = last + 1
 		}
+		count := min(perPage, total-next+1)
+		fmt.Fprintf(w, `{"totalItems":%d,"totalPages":3,"items":[%s]}`, total, keysetRecords(next, count))
+	}))
+	defer server.Close()
+
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	if err != nil {
+		t.Fatalf("FetchEntries returned error: %v", err)
+	}
+	if len(entries) != total {
+		t.Fatalf("entries = %d, want %d", len(entries), total)
+	}
+	for i := range entries {
+		if want := i + 1; entries[i].AniListID != want {
+			t.Fatalf("entries[%d].AniListID = %d, want %d (every record delivered once, in order)", i, entries[i].AniListID, want)
+		}
+	}
+}
+
+// TestFetchEntriesErrorsOnEmptyChunkWithOutstandingItems pins the truncated-view
+// guard for an EMPTY follow-up chunk: a chunk returning zero items after a full
+// one, while the collected count is still below the reported totalItems, must
+// fail the fetch (the fail-safe direction — a degraded cycle preserves existing
+// findings, while accepting the truncated view would falsely resolve them), with
+// an error naming the fetched vs reported counts, never finishFetch's lenient
+// count-mismatch WARN (which is reserved for walks that ended on a SHORT chunk
+// carrying entries).
+func TestFetchEntriesErrorsOnEmptyChunkWithOutstandingItems(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("filter") == "" {
+			fmt.Fprintf(w, `{"totalItems":%d,"totalPages":2,"items":[%s]}`, perPage+1, fullKeysetChunk(1))
+			return
+		}
+		fmt.Fprintf(w, `{"totalItems":%d,"totalPages":2,"items":[]}`, perPage+1)
 	}))
 	defer server.Close()
 
 	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
 	if err == nil {
-		t.Fatal("FetchEntries returned nil error, want empty-terminal-page error")
+		t.Fatal("FetchEntries returned nil error, want empty-chunk error")
 	}
 	if entries != nil {
 		t.Fatalf("entries = %+v, want nil on truncated-view error", entries)
@@ -106,33 +192,25 @@ func TestFetchEntriesErrorsOnEmptyTerminalPageWithOutstandingItems(t *testing.T)
 	if !strings.Contains(err.Error(), "page 2 empty") {
 		t.Errorf("error = %q, want it to name the empty page 2", err.Error())
 	}
-	if !strings.Contains(err.Error(), "1 of 2 reported entries fetched") {
-		t.Errorf("error = %q, want it to name fetched (1) vs reported (2) counts", err.Error())
+	if want := fmt.Sprintf("%d of %d reported entries fetched", perPage, perPage+1); !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to name %q", err.Error(), want)
 	}
 }
 
 // TestFetchEntriesErrorsOnMetadataRegression pins the truncated-view guard
-// against pagination-metadata REGRESSION: page 1 promises totalItems=501 over
-// totalPages=2 and delivers 500 entries, then page 2 arrives empty and OMITS
+// against pagination-metadata REGRESSION: chunk 1 promises totalItems=501 and
+// delivers a full chunk of 500, then the follow-up chunk arrives empty and OMITS
 // totalItems (which decodes as zero). The retained highest reported total
 // (fetchTotals.reportedTotal is never overwritten downward) keeps
-// pageComplete's outstanding-items check armed, so the fetch fails rather
+// chunkComplete's outstanding-items check armed, so the fetch fails rather
 // than successfully returning the truncated 500-entry catalogue.
 func TestFetchEntriesErrorsOnMetadataRegression(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-		switch page {
-		case 1:
-			items := make([]string, 500)
-			for i := range items {
-				items[i] = fmt.Sprintf(`{"alID":%d,"expand":{"trs":[]}}`, i+1)
-			}
-			fmt.Fprintf(w, `{"totalItems":501,"totalPages":2,"items":[%s]}`, strings.Join(items, ","))
-		case 2:
-			fmt.Fprint(w, `{"totalPages":2,"items":[]}`)
-		default:
-			t.Errorf("unexpected request for page %d after metadata regression", page)
+		if r.URL.Query().Get("filter") == "" {
+			fmt.Fprintf(w, `{"totalItems":%d,"totalPages":2,"items":[%s]}`, perPage+1, fullKeysetChunk(1))
+			return
 		}
+		fmt.Fprint(w, `{"totalPages":2,"items":[]}`)
 	}))
 	defer server.Close()
 
@@ -143,21 +221,26 @@ func TestFetchEntriesErrorsOnMetadataRegression(t *testing.T) {
 	if entries != nil {
 		t.Fatalf("len(entries) = %d, want nil on truncated-view error", len(entries))
 	}
-	if !strings.Contains(err.Error(), "500 of 501 reported entries fetched") {
-		t.Errorf("error = %q, want it to name fetched (500) vs reported (501) counts", err.Error())
+	if want := fmt.Sprintf("%d of %d reported entries fetched", perPage, perPage+1); !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to name %q", err.Error(), want)
 	}
 }
 
-// staticPageTransport serves a fixed two-page envelope's first page for every
-// request, keeping the unmanaged SeaDex boundary hermetic inside the synctest
-// bubble (a real httptest socket would block virtual time).
-type staticPageTransport struct{}
+// staticPageTransport serves a FULL chunk (perPage records, so the keyset walk
+// continues into the politeness sleep) for every request, keeping the unmanaged
+// SeaDex boundary hermetic inside the synctest bubble (a real httptest socket
+// would block virtual time).
+type staticPageTransport struct{ body string }
 
-func (staticPageTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+func newStaticPageTransport() *staticPageTransport {
+	return &staticPageTransport{body: fmt.Sprintf(`{"totalItems":%d,"totalPages":2,"items":[%s]}`, perPage+1, fullKeysetChunk(1))}
+}
+
+func (tr *staticPageTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     make(http.Header),
-		Body:       io.NopCloser(strings.NewReader(`{"totalPages":2,"items":[{"alID":1,"expand":{"trs":[]}}]}`)),
+		Body:       io.NopCloser(strings.NewReader(tr.body)),
 		Request:    req,
 	}, nil
 }
@@ -173,8 +256,8 @@ func TestFetchEntriesCancelledBetweenPagesAborts(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 		defer cancel()
 		// The page delay far exceeds the context deadline, so the sleep
-		// between page 1 and page 2 is where the cancellation lands.
-		client := NewClient(&http.Client{Transport: staticPageTransport{}}, "https://example.test", time.Minute, nil)
+		// between chunk 1 and chunk 2 is where the cancellation lands.
+		client := NewClient(&http.Client{Transport: newStaticPageTransport()}, "https://example.test", time.Minute, nil)
 		started := time.Now()
 		entries, err := client.FetchEntries(ctx)
 		if err == nil {
@@ -380,45 +463,9 @@ func TestFetchEntriesUnusableTorrentURLWarnsOnce(t *testing.T) {
 	}
 }
 
-// TestFetchEntriesContinuesPastLoweredTotalPages pins the totalPages arm of
-// the metadata-regression guard (fetchTotals.reportedPages, never overwritten
-// downward): a later NON-EMPTY page whose currently-valid totalPages regressed
-// below an earlier page's promise must not end the walk early - the fetch
-// continues to the promised page and returns the full catalogue, instead of
-// stopping at the regressed value and returning a truncated view finishFetch
-// would wave through with only the count-mismatch WARN.
-func TestFetchEntriesContinuesPastLoweredTotalPages(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-		switch page {
-		case 1:
-			fmt.Fprint(w, `{"totalItems":3,"totalPages":3,"items":[{"alID":1,"expand":{"trs":[]}}]}`)
-		case 2:
-			// A non-empty page whose CURRENT metadata says the walk is over
-			// (totalPages regressed 3 -> 2) while page 1 promised a page 3.
-			fmt.Fprint(w, `{"totalItems":3,"totalPages":2,"items":[{"alID":2,"expand":{"trs":[]}}]}`)
-		case 3:
-			fmt.Fprint(w, `{"totalItems":3,"totalPages":3,"items":[{"alID":3,"expand":{"trs":[]}}]}`)
-		default:
-			t.Errorf("unexpected request for page %d", page)
-		}
-	}))
-	defer server.Close()
-
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
-	if err != nil {
-		t.Fatalf("FetchEntries returned error: %v (a lowered-but-valid totalPages must not fail the fetch)", err)
-	}
-	if len(entries) != 3 {
-		t.Fatalf("entries = %d, want 3 (the walk must continue to the promised page 3, not stop at the regressed totalPages)", len(entries))
-	}
-	if entries[2].AniListID != 3 {
-		t.Errorf("entries[2].AniListID = %d, want 3 (page 3 fetched after the metadata regression)", entries[2].AniListID)
-	}
-}
-
-// pagedRecordingTransport serves a fixed two-page catalogue and records the
-// virtual time of each page request relative to the transport's start.
+// pagedRecordingTransport serves a two-chunk catalogue (a full chunk, then a
+// short one) and records the virtual time of each chunk request relative to the
+// transport's start.
 type pagedRecordingTransport struct {
 	started time.Time
 	times   []time.Duration
@@ -426,9 +473,9 @@ type pagedRecordingTransport struct {
 
 func (tr *pagedRecordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	tr.times = append(tr.times, time.Since(tr.started))
-	body := `{"totalItems":2,"totalPages":2,"items":[{"alID":1,"expand":{"trs":[]}}]}`
-	if req.URL.Query().Get("page") == "2" {
-		body = `{"totalItems":2,"totalPages":2,"items":[{"alID":2,"expand":{"trs":[]}}]}`
+	body := fmt.Sprintf(`{"totalItems":%d,"totalPages":2,"items":[%s]}`, perPage+1, fullKeysetChunk(1))
+	if req.URL.Query().Get("filter") != "" {
+		body = fmt.Sprintf(`{"totalItems":%d,"totalPages":2,"items":[%s]}`, perPage+1, keysetRecords(perPage+1, 1))
 	}
 	return &http.Response{
 		StatusCode: http.StatusOK,
@@ -439,10 +486,10 @@ func (tr *pagedRecordingTransport) RoundTrip(req *http.Request) (*http.Response,
 }
 
 // TestFetchEntriesSleepsOnlyBetweenPages pins WHERE the politeness sleep
-// lands, not just that cancellation during it aborts: page 1 must be fetched
-// immediately (no delay before the first page of a cycle), and exactly one
-// pageDelay must elapse before page 2. A guard drift that also sleeps before
-// page 1 (or stops sleeping between pages) shifts every cycle's first fetch
+// lands, not just that cancellation during it aborts: chunk 1 must be fetched
+// immediately (no delay before the first chunk of a cycle), and exactly one
+// pageDelay must elapse before chunk 2. A guard drift that also sleeps before
+// chunk 1 (or stops sleeping between chunks) shifts every cycle's first fetch
 // by a full pageDelay without failing any existing test.
 func TestFetchEntriesSleepsOnlyBetweenPages(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -452,17 +499,17 @@ func TestFetchEntriesSleepsOnlyBetweenPages(t *testing.T) {
 		if err != nil {
 			t.Fatalf("FetchEntries returned error: %v", err)
 		}
-		if len(entries) != 2 {
-			t.Fatalf("entries = %d, want 2", len(entries))
+		if len(entries) != perPage+1 {
+			t.Fatalf("entries = %d, want %d", len(entries), perPage+1)
 		}
 		if len(tr.times) != 2 {
 			t.Fatalf("requests = %d, want 2", len(tr.times))
 		}
 		if tr.times[0] != 0 {
-			t.Errorf("page 1 fetched after %s of delay, want immediately (no politeness sleep before the first page)", tr.times[0])
+			t.Errorf("chunk 1 fetched after %s of delay, want immediately (no politeness sleep before the first chunk)", tr.times[0])
 		}
 		if tr.times[1] != time.Minute {
-			t.Errorf("page 2 fetched after %s, want exactly one pageDelay (1m0s)", tr.times[1])
+			t.Errorf("chunk 2 fetched after %s, want exactly one pageDelay (1m0s)", tr.times[1])
 		}
 	})
 }
@@ -498,26 +545,165 @@ func TestFetchEntriesCleanFetchEmitsNoWarnings(t *testing.T) {
 	}
 }
 
-// TestFetchEntriesExactlyFullPagesSucceed pins the consistency guard's
-// boundary: a catalogue whose reported totalItems exactly fills the reported
-// pages (totalItems == totalPages*perPage) is the honest maximally-full
-// PocketBase shape and must succeed - the guard fires only when totalItems
-// STRICTLY exceeds what the reported pages can carry.
-func TestFetchEntriesExactlyFullPagesSucceed(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		items := make([]string, perPage)
-		for i := range items {
-			items[i] = fmt.Sprintf(`{"alID":%d,"expand":{"trs":[]}}`, i+1)
+// TestFetchEntriesExactlyFullChunkCompletesOnEmptyFollowUp pins the keyset
+// walk's boundary at an exactly-full catalogue: a collection holding exactly
+// perPage records cannot be recognized as complete from the chunk itself (a
+// full chunk always continues), so the walk asks once more and the EMPTY
+// follow-up chunk completes it cleanly - the reported totalItems is already
+// satisfied, so no truncated-view error and no count-mismatch WARN fire.
+func TestFetchEntriesExactlyFullChunkCompletesOnEmptyFollowUp(t *testing.T) {
+	var reqs int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqs++
+		if r.URL.Query().Get("filter") == "" {
+			fmt.Fprintf(w, `{"totalItems":%d,"totalPages":1,"items":[%s]}`, perPage, fullKeysetChunk(1))
+			return
 		}
-		fmt.Fprintf(w, `{"totalItems":%d,"totalPages":1,"items":[%s]}`, perPage, strings.Join(items, ","))
+		fmt.Fprintf(w, `{"totalItems":%d,"totalPages":1,"items":[]}`, perPage)
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	logger, recorder := capture.New()
+	entries, err := NewClient(server.Client(), server.URL, 0, logger).FetchEntries(context.Background())
 	if err != nil {
-		t.Fatalf("FetchEntries returned error: %v (totalItems == totalPages*perPage is the honest full-page shape and must not trip the consistency guard)", err)
+		t.Fatalf("FetchEntries returned error: %v (an exactly-full catalogue must complete on the empty follow-up chunk)", err)
 	}
 	if len(entries) != perPage {
 		t.Fatalf("entries = %d, want %d", len(entries), perPage)
+	}
+	if reqs != 2 {
+		t.Errorf("requests = %d, want 2 (the full chunk plus the empty follow-up)", reqs)
+	}
+	if got := recorder.CountExact("seadex catalogue count mismatch"); got != 0 {
+		t.Errorf("count-mismatch WARN count = %d, want 0 (the reported total is satisfied)", got)
+	}
+}
+
+// TestFinishFetchWarnsWhenBudgetMostlySpent pins the cumulative-budget
+// advance-notice WARN and its inclusive threshold: consuming at least
+// budgetWarnNumerator/budgetWarnDenominator of EITHER cumulative budget logs
+// the single operator-facing line (raise the cap before ordinary catalogue
+// growth turns every cycle into a hard degradation), while a fetch below both
+// thresholds stays silent.
+func TestFinishFetchWarnsWhenBudgetMostlySpent(t *testing.T) {
+	thresholdBytes := maxTotalBytes * budgetWarnNumerator / budgetWarnDenominator
+	thresholdElements := maxTotalElements * budgetWarnNumerator / budgetWarnDenominator
+	tests := []struct {
+		name     string
+		bytes    int
+		elements int
+		want     int
+	}{
+		{name: "below both thresholds", bytes: thresholdBytes - 1, elements: thresholdElements - 1, want: 0},
+		{name: "byte threshold reached", bytes: thresholdBytes, want: 1},
+		{name: "element threshold reached", elements: thresholdElements, want: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			logger, recorder := capture.New()
+			client := NewClient(nil, "", 0, logger)
+			entries, err := client.finishFetch([]Entry{{AniListID: 1}}, fetchTotals{
+				bytes:         tc.bytes,
+				elements:      tc.elements,
+				reportedTotal: 1,
+				reportedPages: 1,
+			})
+			if err != nil {
+				t.Fatalf("finishFetch returned error: %v", err)
+			}
+			if len(entries) != 1 {
+				t.Fatalf("finishFetch returned %d entries, want 1", len(entries))
+			}
+			const msg = "seadex fetch budget mostly spent; raise the caps before the catalogue outgrows them"
+			if got := recorder.CountExact(msg); got != tc.want {
+				t.Errorf("budget WARN count = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFetchEntriesRejectsBrokenEntryIdentities pins the catalogue's
+// primary-key invariant (validatePageIdentities): the byte/element/count
+// budgets prove a chunk is well-shaped and the pagination arithmetic proves
+// the counts add up, but neither notices KEY loss - an entry omitting alID
+// decodes it as 0 (which the matcher would read as an ordinary unmapped
+// entry) and a repeated alID can stand in for a record that was dropped, both
+// while the aggregate counts still agree. Either shape must fail the whole
+// fetch with a nil slice so the caller preserves its last known findings and
+// feed instead of resolving them against a catalogue that lost an anime.
+func TestFetchEntriesRejectsBrokenEntryIdentities(t *testing.T) {
+	tests := []struct {
+		name  string
+		items string
+		want  string
+	}{
+		{
+			name:  "omitted alID",
+			items: `{"expand":{"trs":[]}},{"alID":2,"expand":{"trs":[]}}`,
+			want:  "page 1 item 1 has invalid AniList ID 0",
+		},
+		{
+			name:  "zero alID",
+			items: `{"alID":1,"expand":{"trs":[]}},{"alID":0,"expand":{"trs":[]}}`,
+			want:  "page 1 item 2 has invalid AniList ID 0",
+		},
+		{
+			name:  "negative alID",
+			items: `{"alID":-7,"expand":{"trs":[]}}`,
+			want:  "page 1 item 1 has invalid AniList ID -7",
+		},
+		{
+			name:  "duplicate alID on one page",
+			items: `{"alID":9,"expand":{"trs":[]}},{"alID":9,"expand":{"trs":[]}}`,
+			want:  "page 1 repeats AniList ID 9",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprintf(w, `{"totalItems":2,"totalPages":1,"items":[%s]}`, tc.items)
+			}))
+			defer server.Close()
+
+			logger, _ := capture.New()
+			entries, err := NewClient(server.Client(), server.URL, 0, logger).FetchEntries(context.Background())
+			if err == nil {
+				t.Fatalf("FetchEntries = %d entries, want an entry-identity error", len(entries))
+			}
+			if entries != nil {
+				t.Fatalf("entries = %d items, want nil on an identity error", len(entries))
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want substring %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+// TestFetchEntriesRejectsDuplicateIdentityAcrossPages pins the CROSS-page half
+// of the identity invariant: the seen-id set spans the whole walk, so a second
+// chunk repeating an id the first chunk already carried fails the fetch even
+// though neither chunk repeats an id on its own.
+func TestFetchEntriesRejectsDuplicateIdentityAcrossPages(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("filter") == "" {
+			// A FULL first chunk (ids 1..perPage) keeps the keyset walk going.
+			fmt.Fprintf(w, `{"totalItems":%d,"totalPages":2,"items":[%s]}`, perPage+1, fullKeysetChunk(1))
+			return
+		}
+		fmt.Fprintf(w, `{"totalItems":%d,"totalPages":2,"items":[%s]}`, perPage+1, keysetRecords(1, 1))
+	}))
+	defer server.Close()
+
+	logger, _ := capture.New()
+	entries, err := NewClient(server.Client(), server.URL, 0, logger).FetchEntries(context.Background())
+	if err == nil {
+		t.Fatalf("FetchEntries = %d entries, want a cross-page duplicate-identity error", len(entries))
+	}
+	if entries != nil {
+		t.Fatalf("entries = %d items, want nil on an identity error", len(entries))
+	}
+	if !strings.Contains(err.Error(), "page 2 repeats AniList ID 1") {
+		t.Errorf("error = %q, want cross-page duplicate-identity context", err.Error())
 	}
 }

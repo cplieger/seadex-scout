@@ -1172,3 +1172,70 @@ func TestRebuildNeverLogsABPasskey(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadPreviousDropsOversizedHarvestCheckpoint is the sibling of
+// TestLoadPreviousPreservesLargeHarvestCheckpoint: an HONEST checkpoint above
+// maxPersistedFieldBytes survives, but one past maxPersistedCursorBytes is
+// external corruption and must be reset. The cursor is the one persisted string
+// carried forward verbatim, so without the reset attacker-shaped text rides
+// every future snapshot until persist exceeds maxFeedBytes and wedges every
+// rebuild. Only the cursor is discarded - the valid journal stays usable.
+func TestLoadPreviousDropsOversizedHarvestCheckpoint(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	cursor := strings.Repeat("x", maxPersistedCursorBytes+1)
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash:        map[string]bool{},
+		ByKey:         map[string]bool{},
+		Seen:          map[string]bool{"nyaa:42": true},
+		HarvestCursor: cursor,
+	})
+	log, rec := capture.New()
+	w := NewFeedWriter(&FeedWriterConfig{Path: path}, WriterDeps{Logger: log})
+	prev, err := w.loadPrevious(context.Background())
+	if err != nil {
+		t.Fatalf("loadPrevious: %v", err)
+	}
+	if prev.baseline {
+		t.Error("oversized harvest cursor re-baselined the valid journal, want only the cursor reset")
+	}
+	if prev.cursor != "" {
+		t.Errorf("loadPrevious cursor = %d bytes, want empty after exceeding the %d-byte cap", len(prev.cursor), maxPersistedCursorBytes)
+	}
+	if !prev.seen["nyaa:42"] {
+		t.Errorf("loadPrevious discarded the valid seen ledger while resetting the cursor: %v", prev.seen)
+	}
+	if !rec.Contains("previous feed snapshot harvest cursor exceeds size cap; restarting the harvest rotation") {
+		t.Errorf("oversized harvest cursor warning not logged; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestRebuildBaselinesFalseSeenLedgerValue pins the seen ledger's producer
+// invariant at ingress: the writer only ever records true membership, so a
+// false value can only come from corruption or hand-editing. Because
+// journalIfNew reads the VALUE, carrying one forward would re-broadcast an
+// already-baselined release as newly curated (and the arr could auto-grab it).
+// It must take the existing deterministic-corruption path instead: warn,
+// re-baseline the current catalogue, and serve an empty journal.
+func TestRebuildBaselinesFalseSeenLedgerValue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{"nyaa:42": false},
+	})
+	log, rec := capture.New()
+	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
+	if err := newLoggedTestWriter(path, log).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 0 {
+		t.Errorf("feed = %d items, want 0: a false seen-ledger value must re-baseline instead of re-broadcasting", len(snap.NyaaFeed))
+	}
+	if !snap.Seen["nyaa:42"] {
+		t.Errorf("seen ledger was not rebuilt from current curation: %v", snap.Seen)
+	}
+	if !rec.Contains(msgSnapshotMalformed) {
+		t.Errorf("false seen-ledger value not warned as malformed; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}

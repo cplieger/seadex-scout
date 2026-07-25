@@ -364,10 +364,7 @@ func preflightTorznab(body []byte) error {
 	depth := 0
 	for i := 0; i < len(body); {
 		if body[i] != '<' {
-			run := bytes.IndexByte(body[i:], '<')
-			if run < 0 {
-				run = len(body) - i
-			}
+			run := textRunLen(body[i:])
 			if run > maxUpstreamTextRunBytes {
 				return &torznabLimitError{limit: fmt.Sprintf("text run longer than %d bytes", maxUpstreamTextRunBytes)}
 			}
@@ -378,16 +375,34 @@ func preflightTorznab(body []byte) error {
 		if err != nil {
 			return err
 		}
-		depth += delta
-		if depth > maxUpstreamDepth {
-			return &torznabLimitError{limit: fmt.Sprintf("element nesting deeper than %d", maxUpstreamDepth)}
-		}
-		if depth < 0 {
-			depth = 0 // stray end tags are left for encoding/xml to reject
+		depth, err = advanceDepth(depth, delta)
+		if err != nil {
+			return err
 		}
 		i += n
 	}
 	return nil
+}
+
+// textRunLen returns the length of the character-data run at the head of body:
+// everything up to the next '<', or the whole remainder when no markup
+// follows.
+func textRunLen(body []byte) int {
+	if n := bytes.IndexByte(body, '<'); n >= 0 {
+		return n
+	}
+	return len(body)
+}
+
+// advanceDepth applies one markup token's nesting-depth delta, rejecting a
+// body nested deeper than maxUpstreamDepth. A depth that would go negative
+// clamps to zero: stray end tags are left for encoding/xml to reject.
+func advanceDepth(depth, delta int) (int, error) {
+	depth += delta
+	if depth > maxUpstreamDepth {
+		return 0, &torznabLimitError{limit: fmt.Sprintf("element nesting deeper than %d", maxUpstreamDepth)}
+	}
+	return max(depth, 0), nil
 }
 
 // preflightMarkup bounds one markup token starting at body[0] == '<',
@@ -455,22 +470,13 @@ func preflightDelimited(body []byte, openLen int, closeDelim []byte, maxLen int,
 // for encoding/xml to reject (delta 0: nothing else follows it).
 func preflightTag(body []byte, countAttrs bool) (n, delta int, err error) {
 	limit := min(len(body), maxUpstreamTokenBytes+1)
-	attrs := 0
-	var quote byte
+	scan := tagScan{countAttrs: countAttrs}
 	for i := 1; i < limit; i++ {
-		switch c := body[i]; {
-		case quote != 0:
-			if c == quote {
-				quote = 0
-			}
-		case c == '"' || c == '\'':
-			quote = c
-		case c == '=' && countAttrs:
-			attrs++
-			if attrs > maxUpstreamTagAttrs {
-				return 0, 0, &torznabLimitError{limit: fmt.Sprintf("more than %d attributes on one start tag", maxUpstreamTagAttrs)}
-			}
-		case c == '>':
+		terminated, err := scan.consume(body[i])
+		if err != nil {
+			return 0, 0, err
+		}
+		if terminated {
 			return i + 1, tagDepthDelta(body, i), nil
 		}
 	}
@@ -478,6 +484,39 @@ func preflightTag(body []byte, countAttrs bool) (n, delta int, err error) {
 		return 0, 0, &torznabLimitError{limit: fmt.Sprintf("markup token longer than %d bytes", maxUpstreamTokenBytes)}
 	}
 	return len(body), 0, nil
+}
+
+// tagScan carries preflightTag's byte-loop state: the open quote character (0
+// outside a quoted attribute value), the running unquoted '=' count, and
+// whether this token is a start tag whose attributes are counted (an end tag's
+// are not).
+type tagScan struct {
+	attrs      int
+	quote      byte
+	countAttrs bool
+}
+
+// consume advances the scan by one byte, reporting whether that byte
+// terminated the tag (an unquoted '>'). A '>' inside a quoted attribute value
+// never terminates, and a start tag carrying more than maxUpstreamTagAttrs
+// unquoted '=' bytes (exactly one per XML attribute) fails closed.
+func (s *tagScan) consume(c byte) (terminated bool, err error) {
+	switch {
+	case s.quote != 0:
+		if c == s.quote {
+			s.quote = 0
+		}
+	case c == '"' || c == '\'':
+		s.quote = c
+	case c == '=' && s.countAttrs:
+		s.attrs++
+		if s.attrs > maxUpstreamTagAttrs {
+			return false, &torznabLimitError{limit: fmt.Sprintf("more than %d attributes on one start tag", maxUpstreamTagAttrs)}
+		}
+	case c == '>':
+		return true, nil
+	}
+	return false, nil
 }
 
 // tagDepthDelta classifies the nesting-depth contribution of one tag whose
@@ -1002,46 +1041,13 @@ func parseTorznab(body []byte) ([]item, error) {
 // toItem converts a decoded Torznab item into an Item, reading size, info hash,
 // seeders/peers, and categories from the torznab:attr elements.
 func (x *itemXML) toItem() item {
-	attrs := make(map[string]string, len(x.Attrs))
-	var cats []int
-	for _, a := range x.Attrs {
-		if a.Name == "category" {
-			// Categories are tracker-controlled numerics rendered back into the
-			// served feed; only positive ids are meaningful Torznab categories,
-			// so a negative/zero value is dropped like the other count fields
-			// are clamped below.
-			if n, err := strconv.Atoi(strings.TrimSpace(a.Value)); err == nil && n > 0 {
-				cats = append(cats, n)
-			}
-			continue
-		}
-		attrs[a.Name] = a.Value
-	}
+	attrs, cats := splitItemAttrs(x.Attrs)
 
 	dl := x.Enclosure.URL
 	if dl == "" {
 		dl = x.Link
 	}
-	size := x.Enclosure.Length
-	if size <= 0 {
-		size = x.Size
-	}
-	if size <= 0 {
-		size, _ = strconv.ParseInt(strings.TrimSpace(attrs["size"]), 10, 64)
-	}
-
-	// The decoded numeric fields are tracker-controlled: normalize every count
-	// to the feed's zero-as-unknown domain so a malformed-but-valid response
-	// cannot render a negative enclosure length/size attr or an inflated peer
-	// count derived from an unbounded negative seeders value.
-	size = max(size, 0)
-	seeders := max(attrInt(attrs, "seeders"), 0)
-	leechers := max(attrInt(attrs, "leechers"), 0)
-	if leechers == 0 {
-		if peers := max(attrInt(attrs, "peers"), 0); peers > seeders {
-			leechers = peers - seeders
-		}
-	}
+	seeders, leechers := itemPeers(attrs)
 
 	return item{
 		// Raw() by design: item rides journalItem into feed.json, and
@@ -1056,10 +1062,62 @@ func (x *itemXML) toItem() item {
 		InfoHash:    validInfoHash(attrs["infohash"]),
 		Categories:  cats,
 		PubDate:     parsePubDate(x.PubDate),
-		Size:        size,
+		Size:        itemSize(x, attrs),
 		Seeders:     seeders,
 		Leechers:    leechers,
 	}
+}
+
+// splitItemAttrs partitions a decoded item's torznab:attr elements into the
+// named-attribute map (last value wins for a duplicated name) and the
+// positive category ids in document order.
+func splitItemAttrs(in []attrXML) (attrs map[string]string, cats []int) {
+	attrs = make(map[string]string, len(in))
+	for _, a := range in {
+		if a.Name == "category" {
+			// Categories are tracker-controlled numerics rendered back into the
+			// served feed; only positive ids are meaningful Torznab categories,
+			// so a negative/zero value is dropped like the count fields
+			// itemSize/itemPeers clamp.
+			if n, err := strconv.Atoi(strings.TrimSpace(a.Value)); err == nil && n > 0 {
+				cats = append(cats, n)
+			}
+			continue
+		}
+		attrs[a.Name] = a.Value
+	}
+	return attrs, cats
+}
+
+// itemSize resolves a decoded item's byte size from the enclosure length, the
+// <size> element, then the size torznab:attr, in that order. The decoded
+// numeric fields are tracker-controlled, so the result is normalized to the
+// feed's zero-as-unknown domain: a malformed-but-valid response cannot render
+// a negative enclosure length or size attr.
+func itemSize(x *itemXML, attrs map[string]string) int64 {
+	size := x.Enclosure.Length
+	if size <= 0 {
+		size = x.Size
+	}
+	if size <= 0 {
+		size, _ = strconv.ParseInt(strings.TrimSpace(attrs["size"]), 10, 64)
+	}
+	return max(size, 0)
+}
+
+// itemPeers normalizes the tracker-controlled peer counts to the feed's
+// zero-as-unknown domain, deriving leechers from a peers attr only when it
+// exceeds the seeders - so an inflated peer count cannot be derived from an
+// unbounded negative seeders value.
+func itemPeers(attrs map[string]string) (seeders, leechers int) {
+	seeders = max(attrInt(attrs, "seeders"), 0)
+	leechers = max(attrInt(attrs, "leechers"), 0)
+	if leechers == 0 {
+		if peers := max(attrInt(attrs, "peers"), 0); peers > seeders {
+			leechers = peers - seeders
+		}
+	}
+	return seeders, leechers
 }
 
 // attrInt reads a named torznab:attr as an int, defaulting to 0.

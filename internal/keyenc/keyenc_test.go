@@ -70,3 +70,26 @@ func TestDomainSeparatesRawAndHashed(t *testing.T) {
 		t.Errorf("BoundedPart(\"PMR\") = %q, want the legacy raw form", got)
 	}
 }
+
+// TestSingletonEmptyDoesNotAliasZeroComponents pins injectivity at the
+// degenerate end of the component space: escaping preserves element
+// boundaries only when the join emits at least one byte, so the singleton
+// empty sequence must not share the zero-component sequence's empty encoding
+// (an empty untrusted component would otherwise merge two distinct keys). The
+// zero-component encoding itself stays the legacy empty string.
+func TestSingletonEmptyDoesNotAliasZeroComponents(t *testing.T) {
+	none := BoundedJoinParts(nil)
+	if none != "" {
+		t.Errorf("BoundedJoinParts(nil) = %q, want the legacy empty encoding", none)
+	}
+	single := BoundedJoinParts([]string{""})
+	if single == none {
+		t.Errorf("BoundedJoinParts([]string{%q}) = %q, want an encoding distinct from the zero-component one", "", single)
+	}
+	if !strings.HasPrefix(single, hashedPrefix) {
+		t.Errorf("BoundedJoinParts([]string{%q}) = %q, want the hashed identity", "", single)
+	}
+	if BoundedJoinParts([]string{"", ""}) == single {
+		t.Error("the one- and two-empty-component sequences must not share an encoding")
+	}
+}

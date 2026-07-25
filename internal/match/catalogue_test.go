@@ -49,6 +49,25 @@ func TestCatalogueHas(t *testing.T) {
 	}
 }
 
+// TestCatalogueIgnoresBlankMovieIMDbIDs pins the whitespace-only IMDb
+// rejection in the reverse catalogue: operator overrides can supply blank IDs
+// and Catalogue.Has accepts any non-empty library IMDb string, so a blank
+// override id must never be indexed (it would recognize every Radarr item
+// carrying the same whitespace value as anime).
+func TestCatalogueIgnoresBlankMovieIMDbIDs(t *testing.T) {
+	cat := NewCatalogue(mapping.NewIndex([]mapping.Record{{
+		AniListID: 1,
+		Type:      "MOVIE",
+		IMDbIDs:   []string{" ", "\t"},
+	}}), nil)
+	for _, imdb := range []string{" ", "\t"} {
+		item := library.Item{Arr: library.ArrRadarr, ImdbID: imdb}
+		if cat.Has(&item) {
+			t.Errorf("Catalogue.Has() = true for blank IMDb id %q, want false", imdb)
+		}
+	}
+}
+
 // TestCatalogueKeep pins the keep predicate: a rejected record contributes no
 // IDs, a kept sibling sharing the same TVDB id still catalogues the item, and
 // a nil predicate keeps everything. The caller-facing policy this predicate

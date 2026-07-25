@@ -392,3 +392,28 @@ func TestReportShutdownDuringMappingLoadNotMisattributed(t *testing.T) {
 		t.Errorf("'report: mapping degraded' fired %d times during a shutdown, want 0 (a cancelled load is the shutdown, not a Fribb fault)", n)
 	}
 }
+
+// TestReportCanceledBeforeWalkPreservesCancellation pins reportSnapshot's
+// side-less walk-error branch: a context already cancelled when a no-arr walk
+// reaches library.Walk's final cancellation guard must surface an error that
+// still wraps context.Canceled (so main's shutdown classification logs WARN,
+// not the ERROR that trips the cycle-fault alert) AND carries the "library
+// walk" stage context operators read. The existing report tests cover
+// arr-tagged walk failures and cancellation during matching, not this branch.
+func TestReportCanceledBeforeWalkPreservesCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s := New(&Deps{
+		Logger:  scoutTestLogger(),
+		Store:   &fakeStore{},
+		Library: library.NewWalker(&library.Config{Logger: scoutTestLogger()}),
+	})
+
+	_, err := s.Report(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Report error = %v, want it to wrap context.Canceled", err)
+	}
+	if !strings.HasPrefix(err.Error(), "library walk: ") {
+		t.Errorf("Report error = %q, want library-walk stage context", err)
+	}
+}

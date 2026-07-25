@@ -9,6 +9,7 @@ import (
 
 	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/compare"
+	"github.com/cplieger/seadex-scout/internal/keyenc"
 	"github.com/cplieger/slogx/capture"
 )
 
@@ -846,5 +847,43 @@ func TestAggregateAttrsAreBoundedBeforeJoining(t *testing.T) {
 		if strings.ContainsAny(got, "\u009b\u202e") {
 			t.Errorf("%s carries an unsanitized C1/bidi control", key)
 		}
+	}
+}
+
+// TestNotifyMigratesLegacyOversizedDedupeKeyWithoutRealert pins the
+// persisted-identity migration across the aggregate-key fold: a state file
+// written before the fold holds the unfolded 16-64 KiB key, and recognizing it
+// only by exact canonical lookup would re-alert an unchanged finding as new
+// AND emit a false resolution for the legacy key in the same cycle.
+func TestNotifyMigratesLegacyOversizedDedupeKeyWithoutRealert(t *testing.T) {
+	heavy := func(tag string) string {
+		return tag + strings.Repeat(",", keyenc.MaxComponentBytes-len(tag)-1)
+	}
+	f := compare.Finding{
+		AniListID: 42, Status: compare.StatusBetter, Severity: compare.SevWarn,
+		Title: "Oversized", RecommendedGroups: []string{heavy("r")},
+		CurrentGroups: []string{heavy("c")}, ReleaseURL: heavy("u"),
+		Links: []compare.ReleaseLink{{Tracker: "Nyaa", URL: heavy("l")}},
+	}
+	currentKey, legacyKey := dedupeKeyWithLegacy(&f)
+	if legacyKey == "" || legacyKey == currentKey {
+		t.Fatal("fixture did not cross the aggregate-key fold")
+	}
+	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	prior := map[string]Alerted{legacyKey: {AlertedAt: oldTime, Finding: storedFinding(&f)}}
+	notifier, recorder := newCapturedNotifier()
+	current := notifier.Notify([]compare.Finding{f}, prior, nil, time.Now())
+	if got := recorder.CountExact("better release available"); got != 0 {
+		t.Errorf("migration emitted %d duplicate alerts, want 0", got)
+	}
+	if got := recorder.CountExact("finding resolved"); got != 0 {
+		t.Errorf("migration emitted %d false resolutions, want 0", got)
+	}
+	alert, ok := current[currentKey]
+	if !ok || !alert.AlertedAt.Equal(oldTime) {
+		t.Errorf("canonical record = %+v (present %v), want original alert time %s", alert, ok, oldTime)
+	}
+	if _, ok := current[legacyKey]; ok {
+		t.Error("legacy key survived migration")
 	}
 }

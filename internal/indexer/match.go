@@ -237,11 +237,21 @@ func animeBytesID(rawURL string) string {
 	// PHP-style tracker, a proxy) may pick a different value than Go's
 	// first-value Get, so an item could be authorized against one torrent
 	// while referring to another (HTTP parameter pollution). Fail closed.
-	values, ok := u.Query()["torrentid"]
-	if !ok || len(values) != 1 {
+	//
+	// url.URL.Query discards malformed pairs and their error, so a query like
+	// `torrentid=123&x=1;torrentid=456` would surface exactly one value here
+	// while a semicolon-splitting parser downstream resolves a different
+	// torrent. Parse the raw query explicitly and reject any parse error so an
+	// ambiguous query never mints a key.
+	values, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
 		return ""
 	}
-	return validTrackerID(strings.TrimSpace(values[0]))
+	torrentIDs, ok := values["torrentid"]
+	if !ok || len(torrentIDs) != 1 {
+		return ""
+	}
+	return validTrackerID(strings.TrimSpace(torrentIDs[0]))
 }
 
 // maxTrackerIDDigits bounds a tracker torrent id's decimal width: 20 digits

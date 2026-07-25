@@ -90,6 +90,31 @@ func TestRepresentativeFileSkipsCreditlessForAbsolute(t *testing.T) {
 	}
 }
 
+// TestFeedSynthesisIgnoresSubHalfSizeSample pins that the feed's title and pack
+// synthesis judge the same payload the classification does (classify.PayloadFiles,
+// h-f10): a first-listed, episode-shaped sample far below half the largest
+// content file's size must neither headline the title nor count as an episode,
+// so the feed cannot disagree with the same torrent's finding or report row.
+func TestFeedSynthesisIgnoresSubHalfSizeSample(t *testing.T) {
+	const gib = 1 << 30
+	files := []seadex.File{
+		{Name: "Show S01E00 Sample [480p].mkv", Length: 200 << 20},
+		{Name: "Show S01E01 [1080p].mkv", Length: gib},
+	}
+	if got := representativeFile(files); got != files[1].Name {
+		t.Errorf("representativeFile = %q, want the real payload file %q", got, files[1].Name)
+	}
+	if got := coveredEpisodes(files); got != 1 {
+		t.Errorf("coveredEpisodes = %d, want 1 (the sample is not payload evidence)", got)
+	}
+	if isPack(&seadex.Torrent{Files: files}) {
+		t.Error("isPack = true, want false (one real episode plus a sample is not a pack)")
+	}
+	if got := derivedTitle(&seadex.Torrent{Files: files}, EntryInfo{}); got != "Show S01E01 [1080p]" {
+		t.Errorf("derivedTitle = %q, want the title derived from the real episode", got)
+	}
+}
+
 // TestCoveredEpisodesCountsExtensionAbuttingAbsoluteForm pins that the
 // absolute-episode fallback fires when the episode number abuts the file
 // extension ("Show - 07.mkv"): the tokens are matched against the

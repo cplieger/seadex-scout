@@ -1577,3 +1577,48 @@ func TestHarvestCheckpointCodec(t *testing.T) {
 		}
 	})
 }
+
+// TestPendingHarvestSkipsCrossScopeJournalKey pins the collection-side half of
+// the cross-scope guard (indexHarvestItem): a journal item whose Key names a
+// DIFFERENT tracker than the feed it sits in can never satisfy matchHarvest's
+// scope binding, so it must be left out of both the per-show query group and
+// the identity index - otherwise it burns harvest queries of every rebuild's
+// time slice forever with no reachable outcome. The package's existing
+// cross-scope test pins the MATCH side only.
+func TestPendingHarvestSkipsCrossScopeJournalKey(t *testing.T) {
+	info := func(int) EntryInfo { return EntryInfo{Title: "Show"} }
+	feeds := map[string][]journalItem{
+		upstreamNyaa: {
+			{item: item{Title: "synthetic"}, Key: "ab:300", AniListID: 7},
+			{item: item{Title: "synthetic"}, Key: "nyaa:42", AniListID: 7},
+		},
+	}
+	groups, index := pendingHarvest(feeds, map[string]string{}, info)
+	if len(groups) != 1 || groups[0].scope != upstreamNyaa || len(groups[0].keys) != 1 || groups[0].keys[0] != "nyaa:42" {
+		t.Fatalf("pendingHarvest groups = %+v, want only nyaa:42 grouped under the nyaa feed", groups)
+	}
+	if _, ok := index["ab:300"]; ok {
+		t.Errorf("index = %v, indexed the cross-scope key ab:300 that matchHarvest can never satisfy", index)
+	}
+}
+
+// TestHarvestCheckpointDropsOverCapCursor pins the size-cap arm of the
+// persisted harvest_cursor codec: a cursor longer than maxPersistedCursorBytes
+// cannot come from this writer, so it is external corruption and must degrade
+// to the empty-checkpoint baseline instead of being decoded and re-persisted
+// forever. The codec's degradation table covers every other arm; the fuzz
+// target's committed seeds are all far below the cap.
+func TestHarvestCheckpointDropsOverCapCursor(t *testing.T) {
+	const payload = `{"last":"nyaa:7","pages":{"nyaa:7":3}}`
+	if cp := decodeHarvestCheckpoint(payload); cp.Last != "nyaa:7" || cp.Pages["nyaa:7"] != 3 {
+		t.Fatalf("decode under-cap checkpoint = %+v, want the cursor and its page kept", cp)
+	}
+	overcap := strings.Repeat(" ", maxPersistedCursorBytes) + payload
+	cp := decodeHarvestCheckpoint(overcap)
+	if cp.Last != "" || len(cp.Pages) != 0 {
+		t.Errorf("decode over-cap checkpoint (%d bytes) = %+v, want the empty-checkpoint baseline", len(overcap), cp)
+	}
+	if cp.Pages == nil {
+		t.Error("Pages = nil, want an allocated empty map (callers write into it)")
+	}
+}

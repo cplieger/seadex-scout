@@ -824,13 +824,16 @@ func TestPollCycleUninterrupted(t *testing.T) {
 // its first (own) run queues demand from a second process on the shared lock
 // dir, and the queued rerun then cancels the shared context, simulating
 // shutdown arriving while Exclusive services another process's demand after
-// this invocation's own run completed.
+// this invocation's own run completed. ownUnhealthy makes that own run report
+// an ingest failure, the reachable non-cancellation own error whose only
+// report is pollCycle's shutdown-wins WARN.
 type queueThenCancelCycler struct {
-	t         *testing.T
-	cancel    context.CancelFunc
-	dir       string
-	calls     *int
-	queuedErr *error
+	t            *testing.T
+	cancel       context.CancelFunc
+	dir          string
+	calls        *int
+	queuedErr    *error
+	ownUnhealthy bool
 }
 
 func (c queueThenCancelCycler) Cycle(context.Context) bool {
@@ -842,7 +845,7 @@ func (c queueThenCancelCycler) Cycle(context.Context) bool {
 		exB := testCycleExclusiveIn(c.t, context.Background(), c.dir)
 		marker := health.NewMarker(filepath.Join(c.t.TempDir(), ".healthy"))
 		*c.queuedErr = pollCycle(context.Background(), exB, mustNotRunCycler{t: c.t}, marker)
-		return true
+		return !c.ownUnhealthy
 	}
 	c.cancel() // shutdown lands during the queued rerun
 	return true
@@ -855,7 +858,10 @@ func (c queueThenCancelCycler) Cycle(context.Context) bool {
 // own result, but the cancellation observed by then must win — pollCycle
 // returns the interruption error (wrapping context.Canceled, so main
 // classifies it WARN and exits non-zero) instead of the own run's success —
-// while the queued requester itself still returned nil.
+// while the queued requester itself still returned nil. The health marker
+// must survive byte-for-byte: the verdict is committed only after Run returns
+// and the final cancellation check passes, so a superseded poll leaves the
+// daemon's last real state alone.
 func TestPollCycleRanQueuedThenCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -864,8 +870,9 @@ func TestPollCycleRanQueuedThenCancelled(t *testing.T) {
 	var calls int
 	var queuedErr error
 	cy := queueThenCancelCycler{t: t, cancel: cancel, dir: dir, calls: &calls, queuedErr: &queuedErr}
+	path := seedSentinelMarker(t)
 
-	err := pollCycle(ctx, ex, cy, health.NewMarker(filepath.Join(t.TempDir(), ".healthy")))
+	err := pollCycle(ctx, ex, cy, health.NewMarker(path))
 
 	if calls != 2 {
 		t.Fatalf("cycle calls = %d, want 2 (the own run plus the queued rerun)", calls)
@@ -879,6 +886,38 @@ func TestPollCycleRanQueuedThenCancelled(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v, want it to wrap context.Canceled (main classifies the interruption WARN, not ERROR)", err)
 	}
+	assertMarkerUntouched(t, path)
+}
+
+// TestPollCycleLogsOwnErrorBeforeShutdown pins the shutdown-wins branch's
+// preservation of a non-cancellation OWN-run failure: the interruption replaces
+// this invocation's result, so an unhealthy own cycle followed by shutdown
+// during another process's queued rerun would otherwise disappear from both
+// the exit result and the logs. The WARN is its only report. Serial (capture
+// swaps slog.Default).
+func TestPollCycleLogsOwnErrorBeforeShutdown(t *testing.T) {
+	rec := capture.Default(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dir := t.TempDir()
+	ex := testCycleExclusiveIn(t, ctx, dir)
+	path := seedSentinelMarker(t)
+	var calls int
+	var queuedErr error
+	cy := queueThenCancelCycler{t: t, cancel: cancel, dir: dir, calls: &calls, queuedErr: &queuedErr, ownUnhealthy: true}
+
+	err := pollCycle(ctx, ex, cy, health.NewMarker(path))
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("pollCycle = %v, want the shutdown interruption", err)
+	}
+	if queuedErr != nil {
+		t.Errorf("queued requester pollCycle = %v, want nil", queuedErr)
+	}
+	if got := rec.CountLevel(slog.LevelWarn, "own cycle reported an error before shutdown"); got != 1 {
+		t.Errorf("own-error-before-shutdown WARN count = %d, want 1: %v", got, rec.Messages())
+	}
+	assertMarkerUntouched(t, path)
 }
 
 // TestRunSchedulerShutdownMidCycle pins the daemon twin of pollCycle's
@@ -1812,4 +1851,77 @@ func TestPollNonRunResult(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestNormalizeShutdownErrorClassifiesCauseOnlyForm pins the terminal-boundary
+// shutdown classifier: an error that IS this context's cancellation but only
+// carries the CAUSE (a WithCancelCause cause need not wrap context.Canceled,
+// and net/http surfaces the cause verbatim) is stamped with the stable
+// ctx.Err() so main's single errors.Is(err, context.Canceled) check reads it as
+// a routine-shutdown WARN. A nil error, an error already carrying
+// context.Canceled, and a genuine fault that merely landed while the context
+// was cancelled all pass through untouched, so a real fault is never hidden.
+func TestNormalizeShutdownErrorClassifiesCauseOnlyForm(t *testing.T) {
+	cause := errors.New("terminated signal received") // deliberately NOT wrapping context.Canceled
+	causeCtx, cancelCause := context.WithCancelCause(context.Background())
+	cancelCause(cause)
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	fault := errors.New("walk failed")
+
+	tests := []struct {
+		name          string
+		ctx           context.Context
+		err           error
+		wantCancel    bool
+		wantUnchanged bool
+	}{
+		{"cause-only cancellation is stamped", causeCtx, fmt.Errorf("audit: %w", cause), true, false},
+		{"already-canceled error passes through", canceled, fmt.Errorf("audit: %w", context.Canceled), true, true},
+		{"unrelated fault during shutdown stays a fault", causeCtx, fault, false, true},
+		{"fault with a live context stays a fault", context.Background(), fault, false, true},
+		{"nil stays nil", causeCtx, nil, false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeShutdownError(tt.ctx, tt.err)
+
+			if gotCancel := errors.Is(got, context.Canceled); gotCancel != tt.wantCancel {
+				t.Errorf("errors.Is(%v, context.Canceled) = %v, want %v", got, gotCancel, tt.wantCancel)
+			}
+			// Identity, not chain membership, is the assertion here: a stamped
+			// error still wraps the original (checked below).
+			if unchanged := got == tt.err; unchanged != tt.wantUnchanged {
+				t.Errorf("normalizeShutdownError(%v) = %v, want the error returned unchanged = %v", tt.err, got, tt.wantUnchanged)
+			}
+			if tt.err != nil && !errors.Is(got, tt.err) {
+				t.Errorf("normalizeShutdownError(%v) = %v, want the original error still in the chain", tt.err, got)
+			}
+		})
+	}
+}
+
+// TestLogIndexerStopClassifiesCauseOnlyCancellation pins the sibling terminal
+// boundary: net.ListenConfig.Listen can report a cancelled bind as the
+// cancellation CAUSE rather than context.Canceled, and that stop is still a
+// routine shutdown - it must log the WARN, never the ERROR fault line that
+// fires the cycle-error alert on a redeploy. Serial (swaps slog.Default).
+func TestLogIndexerStopClassifiesCauseOnlyCancellation(t *testing.T) {
+	cause := errors.New("terminated signal received") // deliberately NOT wrapping context.Canceled
+	ctx, cancelCause := context.WithCancelCause(context.Background())
+	cancelCause(cause)
+	rec := capture.Default(t)
+
+	logIndexerStop(ctx, slog.Default().With("component", "indexer"), fmt.Errorf("listen: %w", cause))
+
+	records := rec.Records()
+	if len(records) != 1 {
+		t.Fatalf("captured %d records, want 1 (%v)", len(records), rec.Messages())
+	}
+	if records[0].Message != "indexer feed stopped during shutdown" {
+		t.Errorf("msg = %q, want the routine shutdown WARN", records[0].Message)
+	}
+	if records[0].Level != slog.LevelWarn {
+		t.Errorf("level = %v, want WARN (a cause-only cancellation is not a fault)", records[0].Level)
+	}
 }

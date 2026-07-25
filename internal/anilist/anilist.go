@@ -203,30 +203,43 @@ func (c *Client) FetchMany(ctx context.Context, ids []int) (map[int]Media, error
 	completed := false
 	var firstRecordErr error
 	for chunk := range slices.Chunk(ids, batchSize) {
-		raw, err := c.request(ctx, batchQuery, map[string]any{"ids": chunk})
-		if err != nil {
-			if !completed {
-				return nil, err
-			}
-			return out, err
-		}
-
-		page, parseErr := parseMediaPage(raw)
-		retainErr := retainRequested(page, chunk)
+		page, err := c.fetchBatchChunk(ctx, chunk)
 		maps.Copy(out, page)
-		recordErr := errors.Join(parseErr, retainErr)
-		if recordErr != nil && !errors.Is(recordErr, ErrBatchRecord) {
-			if !completed {
-				return nil, recordErr
-			}
-			return out, recordErr
+		if err != nil && !errors.Is(err, ErrBatchRecord) {
+			return completedBatch(out, completed, err)
 		}
 		completed = true
-		if recordErr != nil && firstRecordErr == nil {
-			firstRecordErr = recordErr
+		if err != nil && firstRecordErr == nil {
+			firstRecordErr = err
 		}
 	}
 	return out, firstRecordErr
+}
+
+// fetchBatchChunk fetches and parses one chunk of FetchMany's id list. A
+// request failure returns a nil page (nothing to merge); otherwise the parsed
+// page is returned alongside the joined parse and identity-set errors, so
+// FetchMany's caller-facing contract logic reads as one linear loop. A
+// record-local failure (ErrBatchRecord) still returns the chunk's valid
+// records, matching FetchMany's does-not-abort-the-batch rule.
+func (c *Client) fetchBatchChunk(ctx context.Context, chunk []int) (map[int]Media, error) {
+	raw, err := c.request(ctx, batchQuery, map[string]any{"ids": chunk})
+	if err != nil {
+		return nil, err
+	}
+	page, parseErr := parseMediaPage(raw)
+	return page, errors.Join(parseErr, retainRequested(page, chunk))
+}
+
+// completedBatch applies FetchMany's nil-map-versus-partial-map contract to an
+// aborting chunk failure: no chunk completed yet means a total failure (a NIL
+// map with the error), while an earlier completed chunk means the merged
+// partial result rides along so the caller can fall back for the remainder.
+func completedBatch(out map[int]Media, completed bool, err error) (map[int]Media, error) {
+	if !completed {
+		return nil, err
+	}
+	return out, err
 }
 
 // retainRequested enforces FetchMany's identity-set invariant on one parsed
@@ -554,22 +567,31 @@ func walkJSONValue(dec *json.Decoder, depth int) error {
 	if depth >= maxJSONDepth {
 		return fmt.Errorf("exceeded max nesting depth %d", maxJSONDepth)
 	}
+	if containerErr := walkJSONContainer(dec, delim, depth); containerErr != nil {
+		return containerErr
+	}
+	_, err = dec.Token()
+	return err
+}
+
+// walkJSONContainer traverses the members of a container whose opening
+// delimiter walkJSONValue has already read and whose depth it has already
+// validated. The closing delimiter stays walkJSONValue's to consume, so
+// container framing has exactly one owner.
+func walkJSONContainer(dec *json.Decoder, delim json.Delim, depth int) error {
 	switch delim {
 	case '{':
-		if objErr := walkJSONObject(dec, depth+1); objErr != nil {
-			return objErr
-		}
+		return walkJSONObject(dec, depth+1)
 	case '[':
 		for dec.More() {
 			if elemErr := walkJSONValue(dec, depth+1); elemErr != nil {
 				return elemErr
 			}
 		}
+		return nil
 	default:
 		return fmt.Errorf("unexpected JSON delimiter %q", delim)
 	}
-	_, err = dec.Token()
-	return err
 }
 
 // walkJSONObject consumes an object's members after its opening delimiter,

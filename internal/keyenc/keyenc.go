@@ -74,7 +74,17 @@ func escapeJoinParts(parts []string) string {
 // escaping added. An in-bound set whose escaped join itself begins with the
 // hashed-identity prefix is routed through the hash too, keeping the raw and
 // hashed output domains disjoint (injectivity across the size boundary).
+//
+// The singleton empty sequence is routed through the hash as well: escaping
+// preserves element boundaries only when the join emits at least one byte, so
+// []string{""} would otherwise share the zero-component sequence's empty raw
+// join and alias two distinct component sets. The zero-component output stays
+// the empty string, so persisted keys built from an empty component set keep
+// their legacy representation.
 func BoundedJoinParts(parts []string) string {
+	if len(parts) == 1 && parts[0] == "" {
+		return hashKeyParts(parts)
+	}
 	total := 0
 	for _, p := range parts {
 		total += len(p)

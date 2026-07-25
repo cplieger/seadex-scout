@@ -142,7 +142,7 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 		// LogSafeError reduces a URL-embedding *url.Error to its cause
 		// (preserving errors.Is/As, so IsTransient still classifies it),
 		// matching the redaction httpx.GetBytes (v2's Retry) applied here before.
-		return nil, httpx.LogSafeError(err)
+		return nil, u.attemptError(ctx, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		retryAfter := httpx.ParseRetryAfter(resp.Header.Get("Retry-After"))
@@ -166,13 +166,38 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 	}
 	body, err := httpx.ReadLimitedBody(resp.Body, upstreamMaxBytes)
 	if err != nil {
-		return nil, err
+		return nil, u.attemptError(ctx, err)
 	}
 	items, err := parseTorznab(body)
 	if err != nil {
 		return nil, u.classifyParseError(err)
 	}
 	return items, nil
+}
+
+// attemptError normalizes the two timeout-bearing exits of one search attempt
+// (the client.Do call and the body read) so a per-attempt deadline stays inside
+// the bounded retry budget. The shared client carries an http.Client.Timeout of
+// UpstreamAttemptTimeout, and when that timer fires the error matches
+// context.DeadlineExceeded - which httpx.IsTransient deliberately treats as
+// TERMINAL before consulting net.Error or the Transient interface, because a
+// caller's expired context must never be retried. That collapsed the documented
+// three-attempt budget to one attempt whenever the attempt timer (not the
+// caller's context) expired: an interactive search failed immediately and the
+// title harvest latched the tracker scope for the whole rebuild.
+//
+// The caller's own context is the terminal signal, so the split is on ctx.Err():
+// still live means the client-owned attempt timer fired, which is retryable. The
+// replacement error deliberately does NOT wrap context.DeadlineExceeded (that
+// identity is what IsTransient rejects first); it carries a fixed log-safe
+// message instead. An actually expired caller context falls through unchanged
+// and stays single-attempt.
+func (u *upstream) attemptError(ctx context.Context, err error) error {
+	safe := httpx.LogSafeError(err)
+	if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+		return &transientUpstreamError{err: errors.New("upstream request timed out")}
+	}
+	return safe
 }
 
 // classifyParseError maps a parseTorznab failure onto the retry taxonomy.
@@ -334,7 +359,16 @@ func (u *upstream) filterDownloadURLs(items []item) []item {
 		return out
 	}
 	u.reportDroppedDownloadURLs(dropped, len(out), feedURL)
-	u.reportBlankedDisplayURLs(blankedDisplay, len(out))
+	if len(out) > 0 {
+		// The display gate's observation set is the post-origin-filter slice,
+		// not the input page: when every item is dropped for an off-origin
+		// download URL, no InfoURL/GUID was inspected at all. Reporting a
+		// zero blanked count there would clear displayWarned and announce a
+		// recovery on the strength of a page nothing was observed on, letting
+		// a persistent display-URL fault re-arm a WARN on the next surviving
+		// bad item.
+		u.reportBlankedDisplayURLs(blankedDisplay, len(out))
+	}
 	return out
 }
 

@@ -487,27 +487,59 @@ func TestIndexerEndToEnd(t *testing.T) {
 	// TestMarkAndDedupe; the mock here returns the curated item for any query.)
 }
 
-// TestNilHTTPFallbackRefusesCrossHostRedirect pins the nil-Deps.HTTP fallback
-// client's redirect policy: the Prowlarr API key rides an X-Api-Key header,
-// which net/http forwards across redirects, so the fallback must refuse a
-// cross-host hop rather than hand the credential to a redirect target. New's
-// empty snapshot path leaves the warm reload a no-op.
-func TestNilHTTPFallbackRefusesCrossHostRedirect(t *testing.T) {
+// TestNilHTTPFallbackDoesNotForwardAPIKeyAcrossHost pins the nil-Deps.HTTP
+// fallback client's redirect policy at the observable boundary: the Prowlarr API
+// key rides an X-Api-Key header, which net/http forwards across redirects, so a
+// cross-host hop must be refused before the credential can leave the configured
+// origin. Driving the real request path (rather than invoking CheckRedirect
+// directly) keeps the test on the contract instead of the mechanism, so an
+// equivalent policy moved into a RoundTripper still passes. New's empty snapshot
+// path leaves the warm reload a no-op.
+func TestNilHTTPFallbackDoesNotForwardAPIKeyAcrossHost(t *testing.T) {
+	leaked := make(chan string, 1)
+	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case leaked <- r.Header.Get("X-Api-Key"):
+		default:
+		}
+		_, _ = io.WriteString(w, `<rss><channel></channel></rss>`)
+	}))
+	defer sink.Close()
+
+	redirectTarget := strings.Replace(sink.URL, "127.0.0.1", "localhost", 1)
+	redirected := make(chan string, 1)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case redirected <- r.Header.Get("X-Api-Key"):
+		default:
+		}
+		http.Redirect(w, r, redirectTarget, http.StatusFound)
+	}))
+	defer redirector.Close()
+
 	ix := New(&Config{UpstreamConfig: UpstreamConfig{
-		NyaaTorznabURL: "http://prowlarr/1/api",
+		NyaaTorznabURL: redirector.URL,
 		ProwlarrAPIKey: "prowlarr-key",
 	}}, Deps{})
 	if len(ix.upstreams) != 1 {
 		t.Fatalf("wired %d upstreams, want 1", len(ix.upstreams))
 	}
-	client := ix.upstreams[0].http
-	if client.CheckRedirect == nil {
-		t.Fatal("nil-HTTP fallback client has no redirect policy; a cross-host redirect would forward the Prowlarr X-Api-Key")
+	_, err := ix.upstreams[0].fetchAndParse(context.Background(), redirector.URL)
+	if err == nil {
+		t.Fatal("cross-host redirect returned nil, want the fallback client to refuse it")
 	}
-	via := []*http.Request{httptest.NewRequest(http.MethodGet, "https://prowlarr.local/1/api", nil)}
-	next := httptest.NewRequest(http.MethodGet, "https://evil.example/1/api", nil)
-	if err := client.CheckRedirect(next, via); err == nil {
-		t.Error("fallback client followed a cross-host redirect; want it refused so the X-Api-Key is never forwarded")
+	select {
+	case key := <-redirected:
+		if key != "prowlarr-key" {
+			t.Errorf("original Prowlarr request X-Api-Key = %q, want %q", key, "prowlarr-key")
+		}
+	default:
+		t.Fatal("Prowlarr endpoint was not requested; the test did not exercise redirect handling")
+	}
+	select {
+	case key := <-leaked:
+		t.Fatalf("redirect target received X-Api-Key %q, want no request to cross hosts", key)
+	default:
 	}
 }
 

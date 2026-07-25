@@ -244,9 +244,16 @@ func resolveMode(args []string, cfg *config.Config) (mode string, err error) {
 // runReport runs the one-shot audit: build components, generate the report,
 // emit it to slog, and write the JSON + Markdown files. It never writes state,
 // so a one-shot report cannot clobber a running daemon's cache.
-func runReport(cfg *config.Config) error {
+//
+// Every stage's error passes through normalizeShutdownError on the way out, so
+// a stage that reports the cancellation CAUSE rather than context.Canceled (an
+// early library walk or SeaDex request cut off by SIGTERM) still reaches main
+// as a routine-shutdown WARN instead of the level=ERROR fault line that trips
+// the cycle-error alert on every redeploy.
+func runReport(cfg *config.Config) (err error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	defer func() { err = normalizeShutdownError(ctx, err) }()
 
 	// The whole generate+write is serialized on an exclusive flock in the
 	// report dir: two report runs finishing within the same UTC second would
@@ -319,6 +326,36 @@ func pollInterrupted(ctx context.Context) error {
 	return fmt.Errorf("poll interrupted; health marker left unchanged: %w (cause: %w)", ctx.Err(), context.Cause(ctx))
 }
 
+// isShutdownError reports whether err is the observable form of THIS context's
+// cancellation, so a terminal boundary can classify it as a routine shutdown
+// (WARN) instead of a fault (the level=ERROR cycle-error alert). It proves the
+// match rather than assuming it: a cancelled context alone is not enough
+// (an unrelated coincident fault must still read as a fault), so err must
+// carry either the stable ctx.Err() or the cancellation cause. Matching the
+// cause is what keeps a dependency that surfaces context.Cause(ctx) verbatim
+// (net/http does, and a WithCancelCause cause need not wrap context.Canceled)
+// classifiable at all.
+func isShutdownError(ctx context.Context, err error) bool {
+	if ctx.Err() == nil || err == nil {
+		return false
+	}
+	return errors.Is(err, ctx.Err()) || errors.Is(err, context.Cause(ctx))
+}
+
+// normalizeShutdownError adds the stable ctx.Err() as the classification token
+// to an error that IS this context's cancellation but does not carry
+// context.Canceled itself (a cause-only form), so main's single
+// errors.Is(err, context.Canceled) check classifies it as a routine shutdown.
+// Anything else - a nil error, one that already carries ctx.Err(), or a
+// genuine fault that merely happened to land while the context was cancelled -
+// is returned untouched.
+func normalizeShutdownError(ctx context.Context, err error) error {
+	if err == nil || errors.Is(err, ctx.Err()) || !isShutdownError(ctx, err) {
+		return err
+	}
+	return fmt.Errorf("%w (cause: %w): %w", ctx.Err(), context.Cause(ctx), err)
+}
+
 // runPoll runs one compare cycle for an external scheduler (poll_interval: off).
 // It updates the health marker to the cycle's outcome, leaving it in place (no
 // Cleanup) so the container healthcheck reads the last poll, and exits non-zero
@@ -356,46 +393,72 @@ func runPoll(cfg *config.Config) error {
 }
 
 // pollOnce is one execution of poll's cycle body under the cycle lock: run the
-// cycle, apply the interruption contract (a cancellation observed at any point
-// - even when the cycle still managed to complete healthy, e.g. the signal
-// landed during the end-of-cycle save - leaves the shared marker at the
-// daemon's last real state, since an interrupted run's outcome is not a
-// trustworthy health verdict), then record the outcome on the marker. The
-// active runner may execute it again for demand queued by other processes;
-// each execution records its own cycle's health.
-func pollOnce(ctx context.Context, sc cycler, marker *health.Marker) error {
-	healthy := runCycle(ctx, sc)
+// cycle and apply the interruption contract (a cancellation observed at any
+// point - even when the cycle still managed to complete healthy, e.g. the
+// signal landed during the end-of-cycle save - is reported as an interruption,
+// since an interrupted run's outcome is not a trustworthy health verdict). It
+// only REPORTS the cycle's health verdict; recording it on the shared marker
+// is deliberately pollCycle's job, after Exclusive.Run has returned and the
+// final cancellation check has run - the marker write is irreversible, so it
+// must not be committed while shutdown can still supersede this poll's result
+// (a queued rerun servicing another process is exactly that window). The
+// active runner may execute this body again for demand queued by other
+// processes; the LAST execution's verdict is the one the marker records.
+func pollOnce(ctx context.Context, sc cycler) (healthy bool, err error) {
+	healthy = runCycle(ctx, sc)
 	if ctx.Err() != nil {
-		return pollInterrupted(ctx)
-	}
-	if err := marker.SetChecked(healthy); err != nil {
-		return fmt.Errorf("record poll health: %w", err)
+		return healthy, pollInterrupted(ctx)
 	}
 	if !healthy {
-		return errors.New("compare cycle failed (library ingest)")
+		return healthy, errors.New("compare cycle failed (library ingest)")
 	}
-	return nil
+	return healthy, nil
 }
 
 // executePollRuns runs poll's cycle body under the cycle lock and captures the
-// first execution's outcome - this invocation's own run. The closure returns
-// nil to Exclusive so exErr stays purely a coordination-infrastructure signal
-// (job outcomes must not stop queued demand or muddy pollCycle's infra-error
+// first execution's outcome - this invocation's own run - plus the run count
+// and the LAST run's health verdict (what pollCycle records on the marker once
+// it knows shutdown did not supersede the poll). The closure returns nil to
+// Exclusive so exErr stays purely a coordination-infrastructure signal (job
+// outcomes must not stop queued demand or muddy pollCycle's infra-error
 // accounting). The closure can run again for demand queued by OTHER processes;
-// a rerun has no exit code to report through, so its error is logged here -
-// without that line a failed marker write (or a shutdown observed mid-rerun)
-// would vanish (the cycle's own faults already log inside Cycle).
-func executePollRuns(ctx context.Context, ex *scheduler.Exclusive, sc cycler, marker *health.Marker) (outcome scheduler.Outcome, ran bool, own, exErr error) {
+// a rerun has no exit code to report through, so its business error is logged
+// here - without that line a shutdown observed mid-rerun would vanish (the
+// cycle's own faults already log inside Cycle).
+func executePollRuns(ctx context.Context, ex *scheduler.Exclusive, sc cycler) (outcome scheduler.Outcome, runs int, lastHealthy bool, own, exErr error) {
 	outcome, exErr = ex.Run(func() error {
-		err := pollOnce(ctx, sc, marker)
-		if !ran {
-			own, ran = err, true
+		healthy, err := pollOnce(ctx, sc)
+		runs++
+		lastHealthy = healthy
+		if runs == 1 {
+			own = err
 		} else if err != nil {
 			slog.Warn("queued rerun cycle reported an error", "error", err)
 		}
 		return nil
 	})
-	return outcome, ran, own, exErr
+	return outcome, runs, lastHealthy, own, exErr
+}
+
+// recordPollHealth commits the final run's health verdict to the shared marker
+// once pollCycle knows the poll was not superseded by shutdown, preserving
+// pollOnce's former error semantics: when this invocation's OWN run was the
+// only one, a failed write is this process's result (it outranks an unhealthy
+// cycle's ingest error, exactly as the pre-commit ordering did, and is the
+// write's only report); when the final verdict came from a queued rerun
+// serviced for another process, the failure has no exit code to report through
+// and is logged as that rerun's error instead, leaving own as the result.
+func recordPollHealth(marker *health.Marker, healthy bool, runs int, own error) error {
+	err := marker.SetChecked(healthy)
+	if err == nil {
+		return own
+	}
+	err = fmt.Errorf("record poll health: %w", err)
+	if runs > 1 {
+		slog.Warn("queued rerun cycle reported an error", "error", err)
+		return own
+	}
+	return err
 }
 
 // warnCoordinationError logs the coordination-infrastructure diagnostic for a
@@ -446,7 +509,8 @@ func pollNonRunResult(ctx context.Context, outcome scheduler.Outcome, exErr erro
 //     invocation's OWN (first) run - a healthy cycle exits 0, an unhealthy or
 //     interrupted one non-zero (see pollOnce). The closure can run again for
 //     demand queued by OTHER processes; those cycles report through their own
-//     log lines and marker updates, never this process's exit code.
+//     log lines, and the LAST run's verdict is what this process records on
+//     the marker - never through this process's exit code.
 //   - Queued / Discarded: a cycle is already in flight (an overlapping poll or
 //     a daemon tick); the request was recorded for (or is already covered by)
 //     the active runner, which is owed to start a run after it arrived. That
@@ -462,7 +526,11 @@ func pollNonRunResult(ctx context.Context, outcome scheduler.Outcome, exErr erro
 // the uniform interruption contract applies (exit non-zero, WARN
 // classification, marker untouched by this return) even when this process's
 // own run completed, because Exclusive can spend post-run time servicing
-// another process's queued rerun and shutdown can land there.
+// another process's queued rerun and shutdown can land there. That is why the
+// health verdict is recorded HERE, after Run returns and after the final
+// cancellation check, rather than inside the locked cycle body: the marker
+// write is irreversible, so committing it before the interruption decision
+// would leave the marker changed on a poll that reports itself interrupted.
 func pollCycle(ctx context.Context, ex *scheduler.Exclusive, sc cycler, marker *health.Marker) error {
 	// A pre-cancelled invocation must not enqueue demand: Exclusive's gate
 	// refuses the RUN, not the queue insertion, so with the lock held by
@@ -472,7 +540,7 @@ func pollCycle(ctx context.Context, ex *scheduler.Exclusive, sc cycler, marker *
 	if ctx.Err() != nil {
 		return pollInterrupted(ctx)
 	}
-	outcome, ran, own, exErr := executePollRuns(ctx, ex, sc, marker)
+	outcome, runs, lastHealthy, own, exErr := executePollRuns(ctx, ex, sc)
 	if ctx.Err() != nil {
 		// Cancellation observed by the time Run returns wins over EVERY
 		// outcome: while Run coordinated with a busy owner (Queued/Discarded)
@@ -492,11 +560,10 @@ func pollCycle(ctx context.Context, ex *scheduler.Exclusive, sc cycler, marker *
 		}
 		if own != nil && !errors.Is(own, context.Canceled) {
 			// The interruption replaces this invocation's own result, so the
-			// own run's error has no exit code left to report through - and a
-			// failed marker write (pollOnce's "record poll health") has no
-			// other log line anywhere. Same reasoning executePollRuns applies
-			// to a queued rerun's error. An already-interrupted own result is
-			// skipped: pollInterrupted below reports it.
+			// own run's error has no exit code left to report through. Same
+			// reasoning executePollRuns applies to a queued rerun's error. An
+			// already-interrupted own result is skipped: pollInterrupted below
+			// reports it.
 			slog.Warn("own cycle reported an error before shutdown", "error", own)
 		}
 		return pollInterrupted(ctx)
@@ -504,7 +571,7 @@ func pollCycle(ctx context.Context, ex *scheduler.Exclusive, sc cycler, marker *
 	if handled, err := pollNonRunResult(ctx, outcome, exErr); handled {
 		return err
 	}
-	if !ran {
+	if runs == 0 {
 		return fmt.Errorf("cycle coordination failed: %w", exErr)
 	}
 	if exErr != nil {
@@ -513,7 +580,7 @@ func pollCycle(ctx context.Context, ex *scheduler.Exclusive, sc cycler, marker *
 		// the cycle this invocation paid for.
 		warnCoordinationError(outcome, exErr)
 	}
-	return own
+	return recordPollHealth(marker, lastHealthy, runs, own)
 }
 
 // --- Daemon mode: poll loop + indexer feed ---
@@ -653,8 +720,11 @@ func logIndexerStop(ctx context.Context, log *slog.Logger, err error) {
 	switch {
 	case ctx.Err() != nil && errors.Is(err, context.DeadlineExceeded):
 		log.Warn("indexer shutdown budget expired; in-flight requests aborted", "error", err, "cause", context.Cause(ctx))
-	case ctx.Err() != nil && errors.Is(err, context.Canceled):
+	case isShutdownError(ctx, err):
 		// Bind cancelled mid-startup, or a clean graceful drain: routine.
+		// isShutdownError also accepts the cause-only form (net.ListenConfig
+		// surfacing context.Cause(ctx) verbatim), which a plain
+		// errors.Is(err, context.Canceled) would misread as a fault.
 		log.Warn("indexer feed stopped during shutdown", "error", err, "cause", context.Cause(ctx))
 	default:
 		log.Error("indexer feed stopped", "error", err)

@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -91,4 +92,67 @@ func lastAttrBytes(s string) string {
 		return s
 	}
 	return s[len(s)-tail:]
+}
+
+// TestStoredFindingBoundsPersistedStrings pins the PERSISTENCE bound on the
+// dedupe record's untrusted strings. The emit path's per-attribute cap only
+// bounds what is logged; title and the two group names also ride into
+// state.json, so an upstream value near SeaDex's per-page allowance would push
+// the encoded state past its own write bound and freeze dedupe persistence for
+// every later cycle (CWE-400). Each persisted string must stay within
+// maxAttrBytes, carry the truncation marker, hold no unsafe runes, and the
+// projection must be idempotent so a record read back from legacy state is not
+// re-truncated.
+func TestStoredFindingBoundsPersistedStrings(t *testing.T) {
+	hostile := strings.Repeat("A", 40<<20)
+	f := testFinding("bound", hostile)
+	f.CurrentGroup = hostile
+	f.RecommendedGroup = hostile + "\u0007\u202e"
+
+	stored := storedFinding(&f)
+
+	for name, got := range map[string]string{
+		"Title":            stored.Title,
+		"CurrentGroup":     stored.CurrentGroup,
+		"RecommendedGroup": stored.RecommendedGroup,
+	} {
+		if len(got) > maxAttrBytes {
+			t.Errorf("persisted %s = %d bytes, want <= %d", name, len(got), maxAttrBytes)
+		}
+		if !strings.HasSuffix(got, attrTruncMarker) {
+			t.Errorf("persisted %s = ...%q, want the %q truncation marker", name, lastAttrBytes(got), attrTruncMarker)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("persisted %s is not valid UTF-8", name)
+		}
+		if strings.ContainsAny(got, "\u0007\u202e") {
+			t.Errorf("persisted %s carries an unsafe rune", name)
+		}
+	}
+
+	// A record projected twice (the shape a legacy state read-back takes) must
+	// be byte-identical: capPersisted is idempotent, so dedupe continuity does
+	// not depend on how many times a value passed through it.
+	again := compare.Finding{
+		Arr:              stored.Arr,
+		CurrentGroup:     stored.CurrentGroup,
+		RecommendedGroup: stored.RecommendedGroup,
+		Title:            stored.Title,
+		Status:           stored.Status,
+		AniListID:        stored.AniListID,
+		Season:           stored.Season,
+	}
+	if got := storedFinding(&again); got != stored {
+		t.Errorf("re-projected record differs from the first projection, want an idempotent capPersisted")
+	}
+
+	// The bounded record must encode small enough that a state file holding
+	// many of them stays far below the store's own 32 MiB write bound.
+	encoded, err := json.Marshal(Alerted{AlertedAt: time.Unix(0, 0).UTC(), Finding: stored})
+	if err != nil {
+		t.Fatalf("json.Marshal(Alerted): %v", err)
+	}
+	if maxRecordBytes := 4 * maxAttrBytes; len(encoded) > maxRecordBytes {
+		t.Errorf("encoded dedupe record = %d bytes, want <= %d", len(encoded), maxRecordBytes)
+	}
 }

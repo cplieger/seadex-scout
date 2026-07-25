@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cplieger/atomicfile/v2"
 )
@@ -226,14 +227,16 @@ func (ix *Indexer) skipMemoizedMalformed(info os.FileInfo) bool {
 	return true
 }
 
-// recordSnapshotFailure applies reload's failed-read memo policy. Only
-// malformed bytes are deterministic for an unchanged file. Read failures can
-// recover after chmod or transient filesystem repair without changing inode
-// or mtime, so they must remain retryable - readSnapshot reports every read
-// failure (including a cancellation, where the file was never actually read)
-// with memoize=false. memoize=true means the bytes WERE fully read and failed
-// to decode deterministically, so the memo holds even when the requesting
-// context was cancelled after the read completed.
+// recordSnapshotFailure applies reload's failed-read memo policy. Only a
+// deterministic content failure is memoized: bytes that decode the same way on
+// every read (malformed JSON, a structurally invalid document) or a file whose
+// size alone already exceeds the shared cap. Recoverable read failures can
+// succeed after a chmod or transient filesystem repair without changing inode
+// or mtime, so they must remain retryable - readSnapshot reports those
+// (including a cancellation, where the file was never actually read) with
+// memoize=false. memoize=true means the failure is reproducible from the same
+// inode/mtime, so the memo holds even when the requesting context was cancelled
+// after the read completed.
 func (ix *Indexer) recordSnapshotFailure(info os.FileInfo, memoize bool) {
 	ix.failedFile = nil
 	if memoize {
@@ -313,10 +316,13 @@ func (ix *Indexer) clearSnapshotFailed() {
 // decodes the persisted feed snapshot, reporting ok=false on any failure so
 // the caller keeps the current feed. A shutdown cancellation is silent; an
 // unreadable or malformed file is logged (a bad write must never blank a live
-// feed). The third result means "memoize unchanged bytes": true only for
-// malformed JSON, the one failure that is deterministic for an unchanged
-// file - a read failure (EIO, a fixable EACCES) can recover without changing
-// inode or mtime, so it must stay retryable.
+// feed). The third result means "memoize unchanged bytes": true for every
+// failure that is deterministic for an unchanged file - malformed JSON, a
+// structurally invalid document, and an over-cap file (persist enforces the
+// same maxFeedBytes cap, so an oversized snapshot is external corruption that
+// never shrinks on its own; the writer's classifyPreviousReadError classifies
+// it the same way). A recoverable read failure (EIO, a fixable EACCES) can
+// succeed without changing inode or mtime, so it stays retryable.
 func (ix *Indexer) readSnapshot(ctx context.Context) (snapshot, bool, bool) {
 	data, err := atomicfile.ReadBounded(ctx, ix.path, maxFeedBytes)
 	if err != nil {
@@ -330,7 +336,11 @@ func (ix *Indexer) readSnapshot(ctx context.Context) (snapshot, bool, bool) {
 				ix.log.Warn("indexer feed snapshot unreadable; keeping current feed", "path", ix.path, "error", err)
 			}
 		}
-		return snapshot{}, false, false
+		// An over-cap file is the one pre-decode failure that is deterministic
+		// for an unchanged inode, so it memoizes like malformed JSON: without
+		// that, sustained requests reopen and size-check the same oversized
+		// file on every reload attempt while it remains unchanged.
+		return snapshot{}, false, errors.Is(err, atomicfile.ErrFileTooLarge)
 	}
 	snap, blankedInfoURLs, reason, decodeErr := decodeSnapshot(data)
 	if decodeErr != nil {
@@ -362,6 +372,19 @@ func (ix *Indexer) readSnapshot(ctx context.Context) (snapshot, bool, bool) {
 				"path", ix.path)
 		}
 		snap.NyaaFeed, snap.ABFeed = nil, nil
+	}
+	// A persisted FirstSeen ahead of the wall clock is repaired on the writer's
+	// carry path (prepareCarriedItem), but the reader installs the decoded feed
+	// directly: without the same correction a restored future-skewed or
+	// hand-edited snapshot is served with a future <pubDate> until the next
+	// rebuild - indefinitely in resident-idle mode - where an arr's delay
+	// profile sees a negative release age and can hold the release instead of
+	// honoring the bounded journal window (h-f15).
+	now := time.Now().UTC()
+	if rebased := rebaseFutureFeed(snap.NyaaFeed, now) + rebaseFutureFeed(snap.ABFeed, now); rebased > 0 {
+		// Counts only; the rejected timestamp comes from a tamperable file.
+		ix.log.Warn("indexer feed snapshot: future item timestamps rebased to load time",
+			"path", ix.path, "rebased", rebased)
 	}
 	snap.ABFeed = ix.rebuildABDownloadURLs(snap.ABFeed)
 	snap.NyaaFeed = ix.rebuildNyaaDownloadURLs(snap.NyaaFeed)

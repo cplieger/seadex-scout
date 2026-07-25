@@ -528,6 +528,23 @@ func TestFindMovieResolvesByIMDbWhenTmdbMisses(t *testing.T) {
 	}
 }
 
+// TestFindMovieSkipsBlankIMDbIDs pins findMovie's whitespace-only IMDb guard:
+// a Radarr item carrying the same non-empty whitespace string is indexed, so
+// an operator override whose first IMDb ID is blank must not shadow the later
+// valid ID.
+func TestFindMovieSkipsBlankIMDbIDs(t *testing.T) {
+	li := NewLibIndex(&library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrRadarr, ArrID: 1, Title: "Blank ID", ImdbID: " "},
+		{Arr: library.ArrRadarr, ArrID: 2, Title: "Real Movie", ImdbID: "tt2222222"},
+	}})
+	rec := &mapping.Record{Type: "MOVIE", IMDbIDs: []string{" ", "tt2222222"}}
+
+	got := li.FindByID(rec)
+	if got == nil || got.ArrID != 2 {
+		t.Fatalf("FindByID() = %+v, want the valid IMDb match after the blank override id", got)
+	}
+}
+
 // TestFormatArr pins the AniList-format-to-arr routing used by the no-record
 // fallback path: MOVIE routes to Radarr, any other non-empty format to Sonarr,
 // and an empty format is unknown (so its coverage is counted under "unknown"

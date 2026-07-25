@@ -50,6 +50,21 @@ const maxKeyBytes = 2 * keyenc.MaxComponentBytes
 // (hundreds of oversized URLs per entry) cannot amplify key construction into
 // an out-of-memory failure.
 func dedupeKey(f *compare.Finding) string {
+	key, _ := dedupeKeyWithLegacy(f)
+	return key
+}
+
+// dedupeKeyWithLegacy returns the canonical dedupe key plus, when the
+// assembled key crossed the aggregate bound and was folded, the UNFOLDED key
+// the same finding produced before the fold existed ("" otherwise). The
+// aggregate bound is an in-place change to the PERSISTED identity format, so
+// an instance that already stored one of the previously valid 16-64 KiB keys
+// would otherwise re-alert an unchanged finding as new and emit a false
+// resolution for the old key in the same cycle. Notify looks the legacy form
+// up in the prior state and migrates the record onto the canonical key
+// (original alert time preserved, no notification, no resolution line); the
+// legacy key disappears with the next successful state save.
+func dedupeKeyWithLegacy(f *compare.Finding) (canonical, legacy string) {
 	groups := slices.Clone(f.RecommendedGroups)
 	slices.Sort(groups)
 	key := strings.Join([]string{
@@ -74,10 +89,12 @@ func dedupeKey(f *compare.Finding) string {
 		// five, so the two forms cannot collide. This bounds the KEY
 		// side only: the stored value (StoredFinding) still persists
 		// Title/CurrentGroup/RecommendedGroup raw, so it is not on its
-		// own a bound on the persisted map's total size.
-		key = strconv.Itoa(f.AniListID) + "|" + string(f.Status) + "|" + keyenc.BoundedPart(key)
+		// own a bound on the persisted map's total size. The unfolded key
+		// rides back as the legacy form so Notify can migrate a record
+		// persisted before the fold instead of re-alerting it.
+		return strconv.Itoa(f.AniListID) + "|" + string(f.Status) + "|" + keyenc.BoundedPart(key), key
 	}
-	return key
+	return key, ""
 }
 
 // currentGroupKey encodes the finding's current-group component for the dedupe

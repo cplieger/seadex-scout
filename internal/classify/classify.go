@@ -111,6 +111,20 @@ func FileResolution(files []seadex.File) string {
 // size-only behavior — so real content can never lose all its evidence to
 // the extension list.
 func PayloadNames(files []seadex.File) []string {
+	payload := PayloadFiles(files)
+	names := make([]string, 0, len(payload))
+	for i := range payload {
+		names = append(names, payload[i].Name)
+	}
+	return names
+}
+
+// PayloadFiles returns the files PayloadNames draws its names from: the same
+// layered type-gate-then-size-refinement eligibility rule, kept in file form
+// for the callers that need a file's length or its position in the record
+// (the indexer's title and pack synthesis), so those scanners judge the same
+// payload the classification does instead of the raw file list.
+func PayloadFiles(files []seadex.File) []seadex.File {
 	pool := eligiblePool(files)
 	var maxLength int64
 	for i := range pool {
@@ -121,14 +135,14 @@ func PayloadNames(files []seadex.File) []string {
 	// Overflow-safe ceil-half: (maxLength+1)/2 wraps negative when an
 	// untrusted length is math.MaxInt64, which would let every file survive.
 	minPrimary := maxLength/2 + maxLength%2
-	names := make([]string, 0, len(pool))
+	payload := make([]seadex.File, 0, len(pool))
 	for i := range pool {
 		if maxLength > 0 && pool[i].Length < minPrimary {
 			continue
 		}
-		names = append(names, pool[i].Name)
+		payload = append(payload, pool[i])
 	}
-	return names
+	return payload
 }
 
 // eligiblePool selects the files PayloadNames' size refinement runs over:

@@ -21,6 +21,32 @@ func repeatJSON(elem string, n int) string {
 	return strings.Join(elems, ",")
 }
 
+// keysetCursorItem renders one entries record carrying a unique (created, id)
+// pair - the immutable keyset the walk pages on - with the given trs
+// cardinality, so a repeated hostile chunk body still advances the cursor
+// instead of tripping the no-progress guard. Its alID is unique per seq too,
+// since FetchEntries requires one positive, unique AniList ID per entry across
+// the whole walk (validatePageIdentities); it sits above the ids
+// distinctFillerItems hands the same chunk's filler records.
+func keysetCursorItem(seq, torrents int) string {
+	return fmt.Sprintf(`{"alID":%d,"id":"rec%06d","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[%s]}}`,
+		(seq+1)*perPage, seq, repeatJSON(`{}`, torrents))
+}
+
+// distinctFillerItems joins count entries records with per-chunk-unique
+// positive alIDs and the given trs cardinality, for hostile-cardinality chunk
+// bodies that must still satisfy the catalogue's primary-key invariant (one
+// positive, unique AniList ID per entry) so a cap assertion is not preempted
+// by validatePageIdentities.
+func distinctFillerItems(seq, count, torrents int) string {
+	trs := repeatJSON(`{}`, torrents)
+	elems := make([]string, count)
+	for i := range elems {
+		elems[i] = fmt.Sprintf(`{"alID":%d,"expand":{"trs":[%s]}}`, seq*perPage+i+1, trs)
+	}
+	return strings.Join(elems, ",")
+}
+
 // fetchHostilePage serves one fixed page body and asserts FetchEntries rejects
 // it with a nil slice and an error carrying wantErr.
 func fetchHostilePage(t *testing.T, page, wantErr string) {
@@ -112,23 +138,26 @@ func TestDecodePageElementBudgetErrors(t *testing.T) {
 }
 
 // TestFetchEntriesCumulativeElementCapErrors pins the fetch-wide element
-// budget the per-page cap cannot cover: pages each individually below
+// budget the per-page cap cannot cover: chunks each individually below
 // maxPageElements (and far under the cumulative byte cap) still accumulate
 // retained decoded entries across the whole fetch, so their combined element
 // count must trip maxTotalElements with errCumulativeElements and a nil slice
-// - before the excess page's elements are materialized - instead of amplifying
-// dozens of compact pages into decoded slice backing arrays that OOM-kill the
-// deployment container.
+// - before the excess chunk's elements are materialized - instead of
+// amplifying dozens of compact chunks into decoded slice backing arrays that
+// OOM-kill the deployment container.
 func TestFetchEntriesCumulativeElementCapErrors(t *testing.T) {
-	// 10 items x (1 + 512 torrents + 512x40 tags) = 209,930 elements per
-	// page: under the 250K per-page budget, over the 500K fetch-wide budget
-	// on page 3. Each page is ~0.7 MB, so the byte caps never fire first.
-	torrent := `{"tags":[` + repeatJSON(`""`, 40) + `]}`
-	item := `{"alID":1,"expand":{"trs":[` + repeatJSON(torrent, 512) + `]}}`
-	page := `{"totalPages":3,"items":[` + repeatJSON(item, 10) + `]}`
+	// perPage items x (1 + 399 torrents) = 200,000 elements per chunk: under
+	// the 250K per-chunk budget, over the 500K fetch-wide budget on chunk 3.
+	// Each chunk is ~0.6 MB, so the byte caps never fire first. Every chunk is
+	// FULL (perPage records) so the keyset walk continues, and its last record
+	// carries a fresh cursor so the walk advances.
+	const torrents = 399
+	var reqs int
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, page)
+		reqs++
+		fmt.Fprintf(w, `{"totalPages":3,"items":[%s,%s]}`,
+			distinctFillerItems(reqs, perPage-1, torrents), keysetCursorItem(reqs, torrents))
 	}))
 	defer server.Close()
 
@@ -154,7 +183,8 @@ func TestFetchAndAppendEntryCapBeforeAppend(t *testing.T) {
 	c := NewClient(server.Client(), server.URL, 0, nil)
 	all := make([]Entry, maxEntries)
 	var tot fetchTotals
-	out, done, err := c.fetchAndAppend(context.Background(), 1, all, &tot)
+	var cur cursor
+	out, done, err := c.fetchAndAppend(context.Background(), 1, all, &tot, &cur)
 	if err == nil {
 		t.Fatal("fetchAndAppend returned nil error, want entry-cap error")
 	}
@@ -180,14 +210,18 @@ func TestFetchAndAppendEntryCapBeforeAppend(t *testing.T) {
 // remaining allowance), so the over-budget page is rejected before decode -
 // same observable contract, earlier enforcement.
 func TestFetchEntriesByteCapErrors(t *testing.T) {
-	// One page just under the per-page cap; the cumulative cap trips after
-	// ceil(maxTotalBytes/pageSize) pages, well before maxPages.
+	// One chunk just under the per-page cap; the cumulative cap trips after
+	// ceil(maxTotalBytes/chunkSize) chunks, well before maxPages. Each chunk is
+	// FULL (perPage records) so the keyset walk continues, with a fresh cursor
+	// record at its tail.
 	const padSize = 47 << 20
-	page := `{"totalPages":200,"items":[{"alID":1,"expand":{"trs":[]}}],"pad":"` +
-		strings.Repeat("x", padSize) + `"}`
+	pad := strings.Repeat("x", padSize)
+	var reqs int
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, page)
+		reqs++
+		fmt.Fprintf(w, `{"totalPages":200,"items":[%s,%s],"pad":"%s"}`,
+			distinctFillerItems(reqs, perPage-1, 0), keysetCursorItem(reqs, 0), pad)
 	}))
 	defer server.Close()
 
@@ -212,8 +246,9 @@ func TestFetchAndAppendExhaustedByteBudgetErrors(t *testing.T) {
 	c := NewClient(&http.Client{}, "http://unreachable.invalid", 0, nil)
 	tot := fetchTotals{bytes: maxTotalBytes}
 	all := []Entry{{AniListID: 1}}
+	var cur cursor
 
-	out, done, err := c.fetchAndAppend(context.Background(), 3, all, &tot)
+	out, done, err := c.fetchAndAppend(context.Background(), 3, all, &tot, &cur)
 	if !errors.Is(err, errCumulativeBytes) {
 		t.Fatalf("fetchAndAppend error = %v, want errCumulativeBytes without any upstream request", err)
 	}
@@ -235,8 +270,9 @@ func TestFetchAndAppendExhaustedElementBudgetErrors(t *testing.T) {
 	c := NewClient(&http.Client{}, "http://unreachable.invalid", 0, nil)
 	tot := fetchTotals{elements: maxTotalElements}
 	all := []Entry{{AniListID: 1}}
+	var cur cursor
 
-	out, done, err := c.fetchAndAppend(context.Background(), 3, all, &tot)
+	out, done, err := c.fetchAndAppend(context.Background(), 3, all, &tot, &cur)
 	if !errors.Is(err, errCumulativeElements) {
 		t.Fatalf("fetchAndAppend error = %v, want errCumulativeElements without any upstream request", err)
 	}
@@ -351,7 +387,8 @@ func TestFetchAndAppendAcceptsPageExactlyFillingEntryCap(t *testing.T) {
 	c := NewClient(server.Client(), server.URL, 0, nil)
 	all := make([]Entry, maxEntries-1)
 	var tot fetchTotals
-	out, done, err := c.fetchAndAppend(context.Background(), 1, all, &tot)
+	var cur cursor
+	out, done, err := c.fetchAndAppend(context.Background(), 1, all, &tot, &cur)
 	if err != nil {
 		t.Fatalf("fetchAndAppend returned error %v, want the exactly-filling page accepted (the cap is a ceiling, not a strict bound)", err)
 	}

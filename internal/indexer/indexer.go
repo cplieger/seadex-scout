@@ -137,9 +137,12 @@ type Indexer struct {
 	// timestamp, and that replacement must install, not be skipped.
 	snapInfo os.FileInfo
 	// failedFile identifies (mtime + os.SameFile identity) the last snapshot
-	// file whose CONTENT failed to decode (malformed JSON), so an unchanged bad
-	// file is not re-read and re-warned on every request; cleared on a
-	// successful load. Only deterministic content failures are memoized: a
+	// file whose CONTENT failed deterministically: malformed JSON, a
+	// structurally invalid document, or a file over the shared maxFeedBytes cap
+	// (persist enforces the same cap, so an oversized snapshot is external
+	// corruption that never shrinks on its own). An unchanged bad file is then
+	// not re-read and re-warned on every request; cleared on a successful load.
+	// Only deterministic content failures are memoized: a
 	// read failure (EIO, EACCES) can recover without changing inode or mtime
 	// (a chmod, a transient filesystem repair), so it stays retryable.
 	// Identity matters, not just mtime: an atomic rename or backup restore can

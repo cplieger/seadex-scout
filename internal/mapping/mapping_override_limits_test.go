@@ -83,3 +83,77 @@ func TestParseOverrides_oversizedRecordSkippedWithoutMaterialization(t *testing.
 		t.Errorf("skipped = %d, want 0", set.skipped)
 	}
 }
+
+// overCapIDs renders a JSON array of maxOverrideIDsPerRecord+1 compact ids,
+// one element past decodeCappedArray's cap.
+func overCapIDs() string {
+	ids := make([]string, maxOverrideIDsPerRecord+1)
+	for i := range ids {
+		ids[i] = strconv.Itoa(i + 1)
+	}
+	return "[" + strings.Join(ids, ",") + "]"
+}
+
+// TestParseOverrides_duplicateIDArrayLastOccurrenceWins pins the last-wins
+// rule for a duplicate id-array key's OVER-CAP state, not just its value:
+// JSON duplicate keys are decoded in document order and this decoder promises
+// encoding/json parity, so a later valid occurrence replaces an earlier
+// over-cap one (its effective value is the small array, so the record must
+// apply), a later over-cap occurrence replaces an earlier valid one (the
+// record is skipped), and the two arrays are tracked independently so a valid
+// imdb_ids duplicate can never clear an over-cap final tmdb_movies.
+func TestParseOverrides_duplicateIDArrayLastOccurrenceWins(t *testing.T) {
+	tests := []struct {
+		name          string
+		record        string
+		wantOversized int
+		wantApplied   int
+		wantMovies    []int
+	}{
+		{
+			name:          "over-cap occurrence superseded by a valid one",
+			record:        `{"anilist_id":5,"type":"movie","tmdb_movies":` + overCapIDs() + `,"tmdb_movies":[42]}`,
+			wantOversized: 0,
+			wantApplied:   1,
+			wantMovies:    []int{42},
+		},
+		{
+			name:          "valid occurrence superseded by an over-cap one",
+			record:        `{"anilist_id":5,"type":"movie","tmdb_movies":[42],"tmdb_movies":` + overCapIDs() + `}`,
+			wantOversized: 1,
+			wantApplied:   0,
+		},
+		{
+			name:          "a valid imdb_ids duplicate does not clear an over-cap tmdb_movies",
+			record:        `{"anilist_id":5,"type":"movie","tmdb_movies":` + overCapIDs() + `,"imdb_ids":["tt1"],"imdb_ids":["tt2"]}`,
+			wantOversized: 1,
+			wantApplied:   0,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			set, err := parseOverrides([]byte("[" + tc.record + "]"))
+			if err != nil {
+				t.Fatalf("parseOverrides error: %v", err)
+			}
+			if set.oversized != tc.wantOversized {
+				t.Errorf("oversized = %d, want %d", set.oversized, tc.wantOversized)
+			}
+			if set.applied != tc.wantApplied {
+				t.Errorf("applied = %d, want %d", set.applied, tc.wantApplied)
+			}
+			if tc.wantMovies == nil {
+				if len(set.records) != 0 {
+					t.Errorf("records = %+v, want none (the record is oversized)", set.records)
+				}
+				return
+			}
+			if len(set.records) != 1 {
+				t.Fatalf("records = %+v, want the one applied record", set.records)
+			}
+			if got := set.records[0].TmdbMovies; len(got) != len(tc.wantMovies) || got[0] != tc.wantMovies[0] {
+				t.Errorf("TmdbMovies = %v, want %v (the last occurrence's effective value)", got, tc.wantMovies)
+			}
+		})
+	}
+}

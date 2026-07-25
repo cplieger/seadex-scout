@@ -499,12 +499,13 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 		return previousJournal{baseline: true, reason: reasonMalformed}, nil
 	}
 	if !seenLedgerWithinLimits(snap.Seen) {
-		// The seen ledger is carried forward verbatim and never pruned, so
-		// an over-limit identity key from a hand-edited snapshot would
-		// otherwise persist in every future snapshot. The value itself is
-		// never logged.
+		// The seen ledger is carried forward verbatim and never pruned, so an
+		// over-limit identity key from a hand-edited snapshot would otherwise
+		// persist in every future snapshot, and a false membership value (which
+		// the writer never emits) would make journalIfNew re-broadcast an
+		// already-baselined release. The value itself is never logged.
 		w.log.Warn(msgSnapshotMalformed,
-			"path", w.path, "reason", "seen-ledger key exceeds persisted-item limits")
+			"path", w.path, "reason", "seen-ledger entry is invalid")
 		return previousJournal{baseline: true, reason: reasonMalformed}, nil
 	}
 	if snap.Seen == nil {
@@ -541,14 +542,18 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 	}, nil
 }
 
-// seenLedgerWithinLimits reports whether every seen-ledger identity key
-// respects maxPersistedFieldBytes. Honest keys are tracker keys
-// ("scope:digits") and 40-hex info hashes, orders of magnitude under the
-// bound; see loadPrevious's ingress checks for why the ledger is validated
-// separately (it is the one map the writer carries forward verbatim).
+// seenLedgerWithinLimits reports whether every seen-ledger entry respects the
+// producer contract: a bounded identity key mapped to true membership. Honest
+// keys are tracker keys ("scope:digits") and 40-hex info hashes, orders of
+// magnitude under the bound; see loadPrevious's ingress checks for why the
+// ledger is validated separately (it is the one map the writer carries forward
+// verbatim). A false value is only reachable by external corruption or
+// hand-editing - the writer only ever records true - and journalIfNew reads
+// the VALUE, so carrying one forward would re-broadcast an already-baselined
+// release as newly curated.
 func seenLedgerWithinLimits(seen map[string]bool) bool {
-	for k := range seen {
-		if len(k) > maxPersistedFieldBytes {
+	for k, wasSeen := range seen {
+		if len(k) > maxPersistedFieldBytes || !wasSeen {
 			return false
 		}
 	}

@@ -780,3 +780,167 @@ func TestFilterDownloadURLsWarnsOnBlankedDisplayURLs(t *testing.T) {
 		t.Errorf("clean response blanked-display WARN count = %d, want 0", n)
 	}
 }
+
+// timeoutOnFirstCall returns a Torznab server that stalls past the caller's
+// per-attempt client timeout on its FIRST request and answers with a valid
+// empty Torznab document afterwards, plus a counter of requests it received.
+// stallBody selects WHERE it stalls: before writing anything (a header-phase
+// timeout) or after flushing a 200 header and a partial body (a body-read
+// timeout).
+func timeoutOnFirstCall(t *testing.T, stallBody bool) (*httptest.Server, func() int) {
+	t.Helper()
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		first := calls == 1
+		mu.Unlock()
+		if first {
+			if stallBody {
+				w.Header().Set("Content-Type", "application/rss+xml")
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><rss><channel>`)
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+			}
+			// Hold the response open until the client's attempt timer fires
+			// (the client aborts the request, cancelling this context).
+			<-r.Context().Done()
+			return
+		}
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = io.WriteString(w,
+			`<?xml version="1.0" encoding="UTF-8"?><rss xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel></channel></rss>`)
+	}))
+	return srv, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return calls
+	}
+}
+
+// TestSearchRetriesAttemptTimeoutAwaitingHeaders pins that the client-owned
+// per-attempt timeout (http.Client.Timeout, wired from UpstreamAttemptTimeout)
+// participates in the bounded retry budget instead of ending the search after
+// one attempt. The timer's error matches context.DeadlineExceeded, which
+// httpx.IsTransient treats as terminal, so an unnormalized attempt timeout
+// would fail an interactive search immediately and latch the harvest's tracker
+// scope for the whole rebuild.
+func TestSearchRetriesAttemptTimeoutAwaitingHeaders(t *testing.T) {
+	srv, calls := timeoutOnFirstCall(t, false)
+	defer srv.Close()
+
+	client := srv.Client()
+	client.Timeout = 150 * time.Millisecond
+	u := &upstream{http: client, log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
+	items, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+	if err != nil {
+		t.Fatalf("search after one header-phase attempt timeout = %v, want the retry to succeed", err)
+	}
+	if len(items) != 0 {
+		t.Errorf("items = %d, want 0 (the second attempt returned an empty feed)", len(items))
+	}
+	if got := calls(); got != 2 {
+		t.Errorf("upstream requests = %d, want 2 (attempt timeout retried within the budget)", got)
+	}
+}
+
+// TestSearchRetriesAttemptTimeoutReadingBody pins the sibling exit: the same
+// per-attempt timer can fire while the body of an already-200 response stalls,
+// which surfaces from httpx.ReadLimitedBody rather than from client.Do. That
+// exit must be normalized identically, or a stalled body ends the search after
+// one attempt.
+func TestSearchRetriesAttemptTimeoutReadingBody(t *testing.T) {
+	srv, calls := timeoutOnFirstCall(t, true)
+	defer srv.Close()
+
+	client := srv.Client()
+	client.Timeout = 150 * time.Millisecond
+	u := &upstream{http: client, log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
+	if _, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}}); err != nil {
+		t.Fatalf("search after one body-read attempt timeout = %v, want the retry to succeed", err)
+	}
+	if got := calls(); got != 2 {
+		t.Errorf("upstream requests = %d, want 2 (body-read timeout retried within the budget)", got)
+	}
+}
+
+// TestSearchDoesNotRetryExpiredCallerContext pins the other half of the split:
+// the CALLER's expired context stays terminal. Only the client-owned attempt
+// timer is retryable, so a cancelled cycle or a shed request must not spend
+// further attempts, and the returned error keeps its context identity.
+func TestSearchDoesNotRetryExpiredCallerContext(t *testing.T) {
+	srv, calls := timeoutOnFirstCall(t, false)
+	defer srv.Close()
+
+	client := srv.Client()
+	client.Timeout = time.Minute
+	u := &upstream{http: client, log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	time.Sleep(time.Millisecond)
+	_, _, err := u.search(ctx, url.Values{"t": {"search"}, "q": {"x"}})
+	if err == nil {
+		t.Fatal("search with an expired caller context = nil error, want the deadline surfaced")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error = %v, want the caller's context deadline preserved", err)
+	}
+	if got := calls(); got > 1 {
+		t.Errorf("upstream requests = %d, want at most 1 (an expired caller context is terminal)", got)
+	}
+}
+
+// TestFilterDownloadURLsKeepsDisplayOnsetWhenPageFullyDropped pins that the
+// display-URL diagnostic only reports on pages it actually observed: when every
+// item of a non-empty page is dropped for an off-origin download URL, no
+// InfoURL/GUID was inspected, so a zero blanked count must NOT clear the onset
+// state and announce a recovery. Otherwise a simultaneous download-origin fault
+// masquerades as the display fault recovering, and the next surviving hostile
+// item re-arms another WARN.
+func TestFilterDownloadURLsKeepsDisplayOnsetWhenPageFullyDropped(t *testing.T) {
+	const (
+		blankedMsg  = "upstream display URLs blanked: not the tracker's own canonical http(s) page URL"
+		recoveryMsg = "upstream display URLs back on the tracker's canonical host"
+	)
+	log, rec := capture.New()
+	u := &upstream{log: log, name: upstreamNyaa, feed: "http://prowlarr:9696/1/api"}
+
+	// Onset: a kept item carrying a hostile display URL arms displayWarned.
+	u.filterDownloadURLs([]item{{
+		Title: "hostile display", DownloadURL: "http://prowlarr:9696/1/download?link=a",
+		InfoURL: "https://evil.example/phish", GUID: "https://nyaa.si/view/1",
+	}})
+	if n := rec.CountExact(blankedMsg); n != 1 {
+		t.Fatalf("blanked-display WARN count = %d, want 1 (the onset)", n)
+	}
+
+	// A non-empty page whose every download URL is off-origin observes no
+	// display field at all.
+	if got := u.filterDownloadURLs([]item{{
+		Title: "off-origin", DownloadURL: "https://attacker.example/poison.torrent",
+		InfoURL: "https://nyaa.si/view/2", GUID: "https://nyaa.si/view/2",
+	}}); len(got) != 0 {
+		t.Fatalf("kept items = %d, want 0 (the off-origin download URL is dropped)", len(got))
+	}
+	if n := rec.CountExact(recoveryMsg); n != 0 {
+		t.Errorf("display-recovery INFO count = %d, want 0 (nothing was observed on a fully dropped page); log output:\n%s",
+			n, strings.Join(rec.Messages(), "\n"))
+	}
+	if !u.displayWarned.Load() {
+		t.Error("displayWarned = false, want the onset state retained across a fully dropped page")
+	}
+
+	// The genuine recovery still fires once the fault clears on an observed item.
+	u.filterDownloadURLs([]item{{
+		Title: "clean", DownloadURL: "http://prowlarr:9696/1/download?link=b",
+		InfoURL: "https://nyaa.si/view/3", GUID: "https://nyaa.si/view/3",
+	}})
+	if n := rec.CountExact(recoveryMsg); n != 1 {
+		t.Errorf("display-recovery INFO count = %d, want 1 once a clean page is observed", n)
+	}
+}
