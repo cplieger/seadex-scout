@@ -4,11 +4,9 @@ services:
     image: ghcr.io/cplieger/seadex-scout:latest
     container_name: seadex-scout
     restart: unless-stopped
-    # Before first start, run `mkdir -p ./config` as the host user matching this
-    # UID:GID: a Docker-created bind source is root-owned and unwritable to 1000:1000.
-    user: "1000:1000"  # match your host user (owns ./config)
+    user: "1000:1000"  # match your host user; create ./config host-owned before first start
 
-    # See README "Configuration"; config.yaml expands these .env-backed secret variables.
+    # See README "Configuration reference"; config.yaml expands these .env-backed secret variables.
     environment:
       SONARR_API_KEY: "${SONARR_API_KEY:-}"
       RADARR_API_KEY: "${RADARR_API_KEY:-}"
