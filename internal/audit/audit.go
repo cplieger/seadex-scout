@@ -113,6 +113,19 @@ type Release struct {
 	// not drive the verdict; omitted on the common obtainable release, so a
 	// fully obtainable row's JSON shape is unchanged.
 	Unobtainable bool `json:"unobtainable,omitempty"`
+	// URLError marks a release whose SeaDex record carries a NON-EMPTY url that
+	// the publisher refused (classify.PublishURL returned ""): a foreign
+	// host under a trusted label, an unknown tracker, a smuggling form, or - the
+	// one live case - a value with no torrent-page shape at all, such as a
+	// release-group name typed into the url field. It is reported separately from
+	// Unobtainable because the two point the operator at different places: an
+	// unobtainable release is a consequence of THEIR configuration (a tracker
+	// they cannot use), while this is an upstream DATA defect they can go fix at
+	// the source. An omitted or empty url is not an error - SeaDex simply has no
+	// link for that release - so only a present-but-unpublishable value sets it.
+	// Omitted on the common healthy release, so an ordinary row's JSON shape is
+	// unchanged.
+	URLError bool `json:"url_error,omitempty"`
 }
 
 // Row is one anime's alignment record.
@@ -393,19 +406,27 @@ func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 	for i := range entry.Torrents {
 		t := &entry.Torrents[i]
 		// Hide only a DEFINITIVELY AB torrent (label or extracted raw-URL
-		// host evidence; the invariant lives in classify.DefinitelyAB) when
-		// the toggle is off. Malformed/ambiguous public-labeled evidence
-		// stays listed: UsableURL drops the link and the fail-closed
+		// host evidence; the grading lives in classify.ABEvidence) when the
+		// toggle is off. Malformed/ambiguous public-labeled evidence
+		// stays listed: the publisher drops the link and the fail-closed
 		// Obtainable below annotates the row unobtainable instead.
-		if !a.includeAnimeBytes && classify.DefinitelyAB(t) {
+		if !a.includeAnimeBytes && classify.ABEvidence(t) == filter.ABDefinite {
 			continue
 		}
 		rel := classify.Torrent(entry, t)
 		out = append(out, Release{
-			Tracker:      rel.Tracker,
-			Group:        rel.Group,
-			URL:          t.UsableURL(),
-			Best:         t.IsBest,
+			Tracker: rel.Tracker,
+			Group:   rel.Group,
+			URL:     classify.PublishURL(t),
+			Best:    t.IsBest,
+			// A record that carries a URL the publisher refused is an UPSTREAM
+			// DATA fault, not an obtainability policy decision, and the report is
+			// where an operator can see it and go fix the SeaDex record (l-f88).
+			// The live catalogue has one: tracker AB, url "Chihiro" - a
+			// release-group name typed into the url field. Reported distinctly
+			// because "(unobtainable)" would read as "a tracker you cannot use",
+			// pointing the operator at their own config instead of at the record.
+			URLError:     strings.TrimSpace(t.URL) != "" && classify.PublishURL(t) == "",
 			Warnings:     release.CurationWarnings(t.Tags),
 			Unobtainable: !classify.Obtainable(&rel, t, a.includeAnimeBytes),
 		})

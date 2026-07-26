@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/cplieger/xmlx"
 )
 
 // TestRenderFeed_usesStableGUIDFallback pins the documented GUID fallback
@@ -337,8 +339,8 @@ func TestParseTorznabRejectsOversizedTokensAtLexicalGuard(t *testing.T) {
 		if !ok {
 			t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
 		}
-		if !strings.Contains(limitErr.limit, "text run longer than") {
-			t.Errorf("limit = %q, want the lexical text-run bound, not a post-allocation decode cap", limitErr.limit)
+		if got := limitKind(t, limitErr); got != xmlx.KindTextRun {
+			t.Errorf("bound = %v, want the lexical text-run bound, not a post-allocation decode cap", got)
 		}
 	})
 	t.Run("8 MiB start tag fails the per-tag attribute bound", func(t *testing.T) {
@@ -353,8 +355,8 @@ func TestParseTorznabRejectsOversizedTokensAtLexicalGuard(t *testing.T) {
 		if !ok {
 			t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
 		}
-		if !strings.Contains(limitErr.limit, "attributes on one start tag") {
-			t.Errorf("limit = %q, want the lexical per-tag attribute bound", limitErr.limit)
+		if got := limitKind(t, limitErr); got != xmlx.KindTagAttrs {
+			t.Errorf("bound = %v, want the lexical per-tag attribute bound", got)
 		}
 	})
 	t.Run("quoted '>' does not terminate a tag", func(t *testing.T) {
@@ -383,8 +385,8 @@ func TestParseTorznabRejectsSplitTextPastFieldCap(t *testing.T) {
 	if !ok {
 		t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
 	}
-	if !strings.Contains(limitErr.limit, "field longer than") {
-		t.Errorf("limit = %q, want the per-field cap on the cumulative decoded text", limitErr.limit)
+	if got := limitKind(t, limitErr); got != xmlx.KindField {
+		t.Errorf("bound = %v, want the per-field cap on the cumulative decoded text", got)
 	}
 }
 
@@ -632,8 +634,8 @@ func TestPreflightTorznabBoundsCommentsDirectivesAndCData(t *testing.T) {
 			if !ok {
 				t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
 			}
-			if !strings.Contains(limitErr.limit, "XML directives are not allowed") {
-				t.Errorf("limit = %q, want the directive rejection named", limitErr.limit)
+			if got := limitKind(t, limitErr); got != xmlx.KindDirective {
+				t.Errorf("bound = %v, want the directive rejection", got)
 			}
 		}
 	})
@@ -643,8 +645,8 @@ func TestPreflightTorznabBoundsCommentsDirectivesAndCData(t *testing.T) {
 		if !ok {
 			t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
 		}
-		if !strings.Contains(limitErr.limit, "comment longer than") {
-			t.Errorf("limit = %q, want the comment bound named", limitErr.limit)
+		if got := limitKind(t, limitErr); got != xmlx.KindComment {
+			t.Errorf("bound = %v, want the comment bound", got)
 		}
 	})
 	t.Run("overlong CDATA rejected at the lexical guard", func(t *testing.T) {
@@ -653,8 +655,8 @@ func TestPreflightTorznabBoundsCommentsDirectivesAndCData(t *testing.T) {
 		if !ok {
 			t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
 		}
-		if !strings.Contains(limitErr.limit, "CDATA section longer than") {
-			t.Errorf("limit = %q, want the CDATA bound named", limitErr.limit)
+		if got := limitKind(t, limitErr); got != xmlx.KindCDATA {
+			t.Errorf("bound = %v, want the CDATA bound", got)
 		}
 	})
 	t.Run("unterminated CDATA within bound left to encoding/xml", func(t *testing.T) {
@@ -673,8 +675,8 @@ func TestPreflightTorznabBoundsCommentsDirectivesAndCData(t *testing.T) {
 		if !ok {
 			t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
 		}
-		if !strings.Contains(limitErr.limit, "markup token longer than") {
-			t.Errorf("limit = %q, want the markup-token bound named", limitErr.limit)
+		if got := limitKind(t, limitErr); got != xmlx.KindToken {
+			t.Errorf("bound = %v, want the markup-token bound", got)
 		}
 	})
 }
@@ -720,7 +722,21 @@ func TestPreflightTorznabClampsStrayEndTagDepth(t *testing.T) {
 	if !ok {
 		t.Fatalf("error = %T (%v), want *torznabLimitError: stray end tags must not buy nesting budget", err, err)
 	}
-	if !strings.Contains(limitErr.limit, "element nesting deeper than") {
-		t.Errorf("limit = %q, want the nesting-depth bound", limitErr.limit)
+	if got := limitKind(t, limitErr); got != xmlx.KindDepth {
+		t.Errorf("bound = %v, want the nesting-depth bound", got)
 	}
+}
+
+// limitKind reports which xmlx bound a decode rejection names. The app wraps the
+// library's *xmlx.LimitError in its own torznabLimitError, so a test pins WHICH
+// bound fired through the library's Kind rather than by matching an error string:
+// that is the cross-library acceptance assertion, and it cannot drift on a
+// wording change.
+func limitKind(t *testing.T, err error) xmlx.Kind {
+	t.Helper()
+	var le *xmlx.LimitError
+	if !errors.As(err, &le) {
+		t.Fatalf("error = %T (%v), want a wrapped *xmlx.LimitError", err, err)
+	}
+	return le.Kind
 }

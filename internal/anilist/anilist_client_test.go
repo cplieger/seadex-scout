@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -13,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/httpx/v3"
+	"github.com/cplieger/httpx/v4"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 )
 
@@ -508,19 +509,24 @@ func TestFetchNotFound404ReturnsErrNotFound(t *testing.T) {
 
 // TestFetchErrorStatusClassification pins the non-429 error-status path: a
 // 4xx or 5xx (other than the AniList 404 not-found form) surfaces as the
-// typed httpx error, is never ErrNotFound, and a non-transient status is not
-// retried (exactly one HTTP attempt against the rate budget).
+// typed httpx error and is never ErrNotFound. It also pins the retry split:
+// a self-healing server-side status (5xx, and 408) is retried inside the
+// bounded budget, while a client-side fault is attempted exactly once. httpx's
+// own HTTPStatusError policy is transient for 502/503/504 only, so a plain 500
+// is retryable here because THIS client classifies it, not httpx.
 func TestFetchErrorStatusClassification(t *testing.T) {
 	tests := []struct {
 		name        string
 		status      int
 		wantAuth    bool
 		wantGeneric bool
+		wantCalls   int
 	}{
-		{name: "500 internal error", status: http.StatusInternalServerError},
-		{name: "400 bad request", status: http.StatusBadRequest},
-		{name: "401 unauthorized", status: http.StatusUnauthorized, wantAuth: true},
-		{name: "204 unexpected status", status: http.StatusNoContent, wantGeneric: true},
+		{name: "500 internal error", status: http.StatusInternalServerError, wantCalls: maxAttempts},
+		{name: "408 request timeout", status: http.StatusRequestTimeout, wantCalls: maxAttempts},
+		{name: "400 bad request", status: http.StatusBadRequest, wantCalls: 1},
+		{name: "401 unauthorized", status: http.StatusUnauthorized, wantAuth: true, wantCalls: 1},
+		{name: "204 unexpected status", status: http.StatusNoContent, wantGeneric: true, wantCalls: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -555,8 +561,8 @@ func TestFetchErrorStatusClassification(t *testing.T) {
 					t.Errorf("HTTPStatusError.Code = %d, want %d", statusErr.Code, tt.status)
 				}
 			}
-			if got := c.Stats().Calls; got != 1 {
-				t.Errorf("Stats().Calls = %d, want 1 (non-transient status must not retry)", got)
+			if got := c.Stats().Calls; got != int64(tt.wantCalls) {
+				t.Errorf("Stats().Calls = %d, want %d (a self-healing status retries inside the budget; a client fault does not)", got, tt.wantCalls)
 			}
 		})
 	}
@@ -865,5 +871,96 @@ func TestDoSendsRequiredHeaders(t *testing.T) {
 	}
 	if gotAccept != "application/json" {
 		t.Errorf("Accept = %q, want application/json", gotAccept)
+	}
+}
+
+// TestTransientEnvelopeStatusRetries pins the class httpx cannot see: AniList
+// answers a server-side fault as HTTP 200 carrying {"errors":[{"status":500}]},
+// so by the time the parser reaches it the attempt has already been recorded as
+// a success and no retry can ever happen. Classifying it at the retry boundary
+// puts it back inside the bounded budget. A 404 envelope must NOT be caught by
+// that check - it is AniList's genuine not-found and Fetch's ErrNotFound
+// contract depends on it reaching the parser.
+func TestTransientEnvelopeStatusRetries(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body      string
+		wantCalls int64
+		wantFound bool
+	}{
+		"server fault inside a 200 envelope": {
+			body:      `{"errors":[{"message":"Internal Server Error","status":500}]}`,
+			wantCalls: int64(maxAttempts),
+		},
+		"not-found envelope is terminal": {
+			body:      `{"data":{"Media":null},"errors":[{"message":"Not Found.","status":404}]}`,
+			wantCalls: 1,
+			wantFound: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			c := NewClient(srv.Client(), srv.URL, 100000, nil)
+			_, err := c.Fetch(context.Background(), 1)
+
+			if err == nil {
+				t.Fatal("Fetch() = nil error, want an error")
+			}
+			if got := errors.Is(err, ErrNotFound); got != tc.wantFound {
+				t.Errorf("errors.Is(err, ErrNotFound) = %v, want %v (err = %v)", got, tc.wantFound, err)
+			}
+			if got := c.Stats().Calls; got != tc.wantCalls {
+				t.Errorf("Stats().Calls = %d, want %d", got, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// TestFetchManyScopesRecordErrorToItsChunk pins the batch error's SCOPE. A
+// record-local defect in one chunk must not withdraw the completion evidence of
+// the others: the returned BatchRecordError names only the offending chunk's
+// ids, so a caller can still memoize the negatives the clean chunks
+// definitively answered. Without the scoping, one malformed record dumped every
+// pending id into a rate-limited per-id fallback.
+func TestFetchManyScopesRecordErrorToItsChunk(t *testing.T) {
+	// Two chunks: the first carries a record with no usable title (record-local),
+	// the second is clean and answers nothing (its ids are definitively absent).
+	ids := make([]int, 0, batchSize+2)
+	for i := 1; i <= batchSize+2; i++ {
+		ids = append(ids, i)
+	}
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if calls == 1 {
+			_, _ = io.WriteString(w, `{"data":{"Page":{"media":[{"id":1,"title":{"romaji":"","english":"","native":""}}]}}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"data":{"Page":{"media":[]}}}`)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	_, err := c.FetchMany(context.Background(), ids)
+
+	var batchErr *BatchRecordError
+	if !errors.As(err, &batchErr) {
+		t.Fatalf("FetchMany() error = %v, want a *BatchRecordError", err)
+	}
+	if !errors.Is(err, ErrBatchRecord) {
+		t.Errorf("errors.Is(err, ErrBatchRecord) = false, want true (the sentinel must survive)")
+	}
+	if len(batchErr.UnverifiedIDs) != batchSize {
+		t.Errorf("UnverifiedIDs = %d ids, want %d (only the failing chunk)", len(batchErr.UnverifiedIDs), batchSize)
+	}
+	for _, id := range batchErr.UnverifiedIDs {
+		if id > batchSize {
+			t.Errorf("UnverifiedIDs contains %d, which belongs to the clean second chunk", id)
+		}
 	}
 }

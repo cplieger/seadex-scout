@@ -3,6 +3,9 @@ package match
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -412,5 +415,59 @@ func TestMatchNotFoundResetsFailureBreaker(t *testing.T) {
 	}
 	if !res.Degraded {
 		t.Error("Degraded = false, want true: transient failures occurred")
+	}
+}
+
+// TestHandleLookupFailureMemoizesUnusableRecord pins the permanent-vs-transient
+// split at the fallback's classification point. A record whose own content
+// cannot yield a match key (anilist.ErrRecordUnusable) is a DEFINITIVE answer:
+// it must be negative-memoized so it is not re-fetched every cycle, and it must
+// not mark the pass degraded - otherwise the persisted AniList degradation
+// streak climbs to a standing ERROR blaming upstream reachability that is
+// healthy. A genuinely transient error keeps the opposite contract, so both are
+// pinned together.
+func TestHandleLookupFailureMemoizesUnusableRecord(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err          error
+		wantMemoized bool
+		wantDegraded bool
+	}{
+		"unusable record is definitive": {
+			err:          fmt.Errorf("fetch 42: %w: media missing usable title", anilist.ErrRecordUnusable),
+			wantMemoized: true,
+			wantDegraded: false,
+		},
+		"transient failure is retried": {
+			err:          errors.New("anilist: upstream 503"),
+			wantMemoized: false,
+			wantDegraded: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			const id = 42
+			r := &matchRun{
+				m: &Matcher{
+					log:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+					now:  time.Now,
+					rand: func() float64 { return 0.5 },
+				},
+				memo: &Memo{Entries: map[int]MemoEntry{}},
+				gate: &lookupGate{},
+				now:  time.Now(),
+			}
+
+			r.handleLookupFailure(id, tc.err)
+
+			_, memoized := r.memo.Entries[id]
+			if memoized != tc.wantMemoized {
+				t.Errorf("memoized = %v, want %v", memoized, tc.wantMemoized)
+			}
+			if r.degraded != tc.wantDegraded {
+				t.Errorf("degraded = %v, want %v", r.degraded, tc.wantDegraded)
+			}
+			if _, incomplete := r.incomplete[id]; incomplete == tc.wantMemoized {
+				t.Errorf("incomplete[%d] = %v, want %v (a definitive answer is never retried)", id, incomplete, !tc.wantMemoized)
+			}
+		})
 	}
 }

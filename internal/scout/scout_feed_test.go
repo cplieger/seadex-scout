@@ -298,8 +298,8 @@ func TestCycleFeedInfoClassifiesViaFribbIndex(t *testing.T) {
 			t.Errorf("info(%d).IsMovie = %v, want %v", id, feed.got[id].IsMovie, wantMovie)
 		}
 	}
-	if got := feed.got[200].SeasonTvdb; got != 2 {
-		t.Errorf("info(200).SeasonTvdb = %d, want 2 (the Fribb season must reach the season marker)", got)
+	if got := feed.got[200]; got.Season != 2 || !got.SeasonKnown {
+		t.Errorf("info(200) season = %d (known %v), want a resolved season 2 (the Fribb season must reach the season marker)", got.Season, got.SeasonKnown)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/logattr"
 	"github.com/cplieger/seadex-scout/internal/release"
+	"github.com/cplieger/urlform"
 )
 
 // Alerted is a persisted dedupe record: when the finding was first alerted
@@ -93,13 +94,14 @@ func capPersisted(s string) string {
 }
 
 // capStored re-bounds a record read back from a state file written before
-// storedFinding capped its untrusted strings. capPersisted is idempotent, so a
-// record projected by this build passes through byte-identical.
-func capStored(f StoredFinding) StoredFinding {
+// storedFinding capped its untrusted strings, in place. capPersisted is
+// idempotent, so a record projected by this build passes through unchanged.
+// It takes a pointer because StoredFinding is heavy enough that a by-value
+// round trip is a needless copy on a per-record path (gocritic hugeParam).
+func capStored(f *StoredFinding) {
 	f.Title = capPersisted(f.Title)
 	f.CurrentGroup = capPersisted(f.CurrentGroup)
 	f.RecommendedGroup = capPersisted(f.RecommendedGroup)
-	return f
 }
 
 // NewNotifier builds a Notifier. logger may be nil.
@@ -144,7 +146,9 @@ func (n *Notifier) Notify(findings []compare.Finding, prior map[string]Alerted, 
 			continue
 		}
 		if _, failed := failedItems[a.Finding.AniListID]; failed {
-			current[key] = Alerted{AlertedAt: a.AlertedAt, Finding: capStored(a.Finding)}
+			stored := a.Finding
+			capStored(&stored)
+			current[key] = Alerted{AlertedAt: a.AlertedAt, Finding: stored}
 			preserved++
 			continue
 		}
@@ -311,7 +315,7 @@ func capAttr(s string) string { return logattr.Cap(s) }
 // untrusted aggregate before the cap. Fixed-pattern app values (resolution,
 // codec, kind, season, al_id, arr, status) stay raw.
 func findingKVs(f *compare.Finding) []any {
-	nyaaURL, abURL := trackerURLs(f.Links)
+	publicLink, abURL := trackerURLs(f.Links)
 	return []any{
 		"title", capAttr(f.Title),
 		"al_id", f.AniListID,
@@ -328,7 +332,15 @@ func findingKVs(f *compare.Finding) []any {
 		"classification_reason", capAttr(f.Reason),
 		"release_url", capAttr(f.ReleaseURL),
 		"release_urls", joinLinksAttr(f.Links),
-		"nyaa_url", capAttr(nyaaURL),
+		// nyaa_url keeps its name and its meaning: the shipped alerts.yaml
+		// renders it as a "[Nyaa]" link, so it may only ever hold a Nyaa URL.
+		// A public link from another tracker (AnimeTosho, RuTracker - both
+		// supported and present in the catalogue) rides public_url beside the
+		// tracker's real name, so the alert can label it truthfully instead of
+		// calling it Nyaa (l-f5).
+		"nyaa_url", capAttr(publicLink.nyaaURL()),
+		"public_url", capAttr(publicLink.otherURL()),
+		"public_tracker", capAttr(publicLink.otherTracker()),
 		"ab_url", capAttr(abURL),
 		"info_hash", capAttr(f.InfoHash),
 		"seadex_tags", seadexTags(f),
@@ -347,61 +359,149 @@ const (
 )
 
 // classifyTrackerLink maps a link to its slot kind: definite AnimeBytes
-// evidence wins outright, an AB-gated (ambiguous or unclassifiable) link is
-// the conservative AB fallback, a known Nyaa link is the public Nyaa source,
-// and anything else is a generic public link.
+// evidence wins outright, ambiguous evidence is the conservative AB fallback,
+// a known Nyaa link is the public Nyaa source, and anything else is a generic
+// public link. The switch is exhaustive over filter.ABEvidence, so the three
+// grades cannot be tested in the wrong order.
 func classifyTrackerLink(link compare.ReleaseLink) trackerLinkKind {
-	if filter.DefinitelyAB(link.Tracker, link.URL) {
+	switch filter.ClassifyAB(link.Tracker, link.URL) {
+	case filter.ABDefinite:
 		return trackerLinkAB
-	}
-	if filter.ABGated(link.Tracker, link.URL) {
+	case filter.ABAmbiguous:
+		return trackerLinkABFallback
+	case filter.ABNone:
+		if t, known := release.LookupTracker(link.Tracker); known && t.Name == release.TrackerNameNyaa {
+			return trackerLinkNyaa
+		}
+		return trackerLinkPublic
+	default:
+		// Unreachable: ABEvidence has exactly the three grades above. A new
+		// grade must not silently become a clickable public link, so it
+		// routes to the conservative fallback.
 		return trackerLinkABFallback
 	}
-	if t, known := release.LookupTracker(link.Tracker); known && t.Name == release.TrackerNameNyaa {
-		return trackerLinkNyaa
-	}
-	return trackerLinkPublic
 }
 
-// setFirst writes value into dst only when dst is still empty, preserving
-// first-link-wins precedence within each slot.
-func setFirst(dst *string, value string) {
-	if *dst == "" {
-		*dst = value
-	}
-}
-
-// trackerURLs splits a finding's obtainable links into the public (Nyaa) and
-// AnimeBytes URLs, so an alert can render a distinct Nyaa link and AB link.
+// trackerURLs splits a finding's obtainable links into the public and
+// AnimeBytes URLs, so an alert can render a distinct public link and AB link.
 // AB routing is URL-aware, matching the obtainability filter (this package's
 // dedupe key, dedupekey.go, keys the full obtainable URL set
-// label-insensitively instead): a link with definite AnimeBytes evidence
-// (filter.DefinitelyAB -
-// AB label or animebytes.tv URL host) wins the AB slot outright, ahead of
-// ABGated's conservative fail-closed fallback. ABGated intentionally also
-// reads a malformed, unparseable, or non-ASCII-host URL as AB-gated; such an
+// label-insensitively instead): a link whose filter.ClassifyAB grade is
+// filter.ABDefinite (AB label or animebytes.tv URL host) wins the AB slot
+// outright, ahead of filter.ABAmbiguous's conservative fail-closed fallback.
+// A malformed, unparseable, or non-ASCII-host URL grades ambiguous; such an
 // unclassifiable link only fills the AB slot when no definite AnimeBytes
 // link exists, so an ambiguous link is never rendered as the clickable
-// public URL yet can never displace a genuine AB link either. The first
-// non-AnimeBytes link is treated as the public/Nyaa source (Nyaa is by far
-// the dominant public tracker on SeaDex).
-func trackerURLs(links []compare.ReleaseLink) (nyaa, ab string) {
-	var firstPublic, firstABFallback string
+// public URL yet can never displace a genuine AB link either.
+//
+// The public slot is returned WITH the tracker it came from, because it is not
+// always Nyaa. Nyaa dominates SeaDex, but the catalogue also carries AnimeTosho
+// and RuTracker releases (both supported by release/trackers.go), and their URL
+// used to be copied into the `nyaa_url` attribute - which the shipped alerts.yaml
+// renders as a `[Nyaa]` link, so the operator was shown the wrong tracker name
+// over a correct URL (l-f5). Reporting the name alongside the URL lets the alert
+// label the link truthfully without losing it.
+func trackerURLs(links []compare.ReleaseLink) (public publicLink, ab string) {
+	var firstPublic, firstABFallback publicLink
 	for i := range links {
+		link := publicLink{url: links[i].URL, tracker: links[i].Tracker}
 		switch classifyTrackerLink(links[i]) {
 		case trackerLinkAB:
-			setFirst(&ab, links[i].URL)
+			if ab == "" {
+				ab = link.url
+			}
 		case trackerLinkABFallback:
-			setFirst(&firstABFallback, links[i].URL)
+			firstABFallback.setFirst(link)
 		case trackerLinkNyaa:
-			setFirst(&nyaa, links[i].URL)
+			public.setFirst(link)
 		case trackerLinkPublic:
-			setFirst(&firstPublic, links[i].URL)
+			firstPublic.setFirst(link)
 		}
 	}
-	setFirst(&nyaa, firstPublic)
-	setFirst(&ab, firstABFallback)
-	return nyaa, ab
+	// Nyaa first (the dominant public tracker), then any other public source.
+	public.setFirst(firstPublic)
+	if ab == "" {
+		ab = firstABFallback.url
+	}
+	return public, ab
+}
+
+// publicLink is one public-tracker source: the URL plus the tracker it belongs
+// to, so an alert can name the link it renders.
+type publicLink struct {
+	url     string
+	tracker string
+}
+
+// setFirst adopts other when this slot is still empty, preserving the
+// first-link-wins precedence trackerURLs applies within each slot.
+func (p *publicLink) setFirst(other publicLink) {
+	if p.url == "" {
+		*p = other
+	}
+}
+
+// canonicalTracker resolves the name to label this link with, preferring the
+// canonical tracker table over the raw upstream label. The SeaDex tracker field
+// is untrusted data and can be an alias, oddly cased, or empty, so the URL's own
+// host is consulted as evidence too - the same preference the rest of this
+// package applies (filter.ClassifyAB keys on the host, not the label). A host
+// that names no known tracker labels the link with itself, which is truthful and
+// always renderable; only a link with neither a known label nor an extractable
+// host yields "".
+func (p publicLink) canonicalTracker() string {
+	if t, known := release.LookupTracker(p.tracker); known {
+		return t.Name
+	}
+	host := urlform.Classify(p.url).Host
+	if host == "" {
+		return ""
+	}
+	if t, known := release.LookupTrackerByHost(host); known {
+		return t.Name
+	}
+	return host
+}
+
+// isNyaa reports whether the link is Nyaa's - the one public tracker the shipped
+// alert template has a hardcoded "[Nyaa]" label for. Resolved through
+// canonicalTracker, so a Nyaa URL carrying an alias, odd casing, or no tracker
+// label at all still reads as Nyaa instead of falling into the generic slot with
+// nothing to name it.
+func (p publicLink) isNyaa() bool {
+	return p.url != "" && p.canonicalTracker() == release.TrackerNameNyaa
+}
+
+// nyaaURL returns the URL for the legacy nyaa_url attribute: only ever a Nyaa
+// link, so the alert's hardcoded "[Nyaa]" label cannot lie.
+func (p publicLink) nyaaURL() string {
+	if p.isNyaa() {
+		return p.url
+	}
+	return ""
+}
+
+// otherURL returns the URL for the public_url attribute: a public link from a
+// tracker OTHER than Nyaa (AnimeTosho, RuTracker), which the alert renders under
+// the name otherTracker reports.
+func (p publicLink) otherURL() string {
+	if p.isNyaa() {
+		return ""
+	}
+	return p.url
+}
+
+// otherTracker returns the tracker name accompanying otherURL, so the alert can
+// label the link with the tracker it actually came from. Resolved through
+// canonicalTracker rather than the raw upstream label, so a public link whose
+// SeaDex tracker field is an alias, oddly cased, or empty is still named (by its
+// host as a last resort) instead of rendering a nameless link. Empty when there
+// is no non-Nyaa public link to name.
+func (p publicLink) otherTracker() string {
+	if p.otherURL() == "" {
+		return ""
+	}
+	return p.canonicalTracker()
 }
 
 // seadexTags renders a compact descriptive tag line for a finding — the SeaDex

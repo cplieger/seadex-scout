@@ -11,6 +11,8 @@ import (
 	"testing/synctest"
 	"time"
 	"unicode/utf8"
+
+	"github.com/cplieger/jsonx/bounded"
 )
 
 func TestDedupeTitles(t *testing.T) {
@@ -614,20 +616,19 @@ func TestParseAcceptsRepeatedKeysAcrossSiblingObjects(t *testing.T) {
 	}
 }
 
-// TestValidateResponseBoundsThePreflightWalk pins the two bounds the
-// duplicate-key preflight carries over an untrusted body: json.Decoder.Token
-// does not enforce encoding/json's nesting limit, so the walk caps depth at
-// maxJSONDepth instead of recursing once per byte of a 1 MiB '[' body; and
-// per-object keys are tracked in a fold-canonicalized set, so a key-dense
-// object validates in O(keys) rather than rescanning every prior key.
+// TestValidateResponseBoundsThePreflightWalk is the cross-library acceptance
+// test for the structural preflight this package delegates to
+// (bounded.Preflight): json.Decoder.Token does not enforce encoding/json's
+// nesting limit, so an all-opens body must be rejected by the library's depth
+// ceiling rather than recursing once per byte of a 1 MiB '[' body, and a
+// key-dense object must still validate (the library tracks per-object keys in
+// a fold-canonicalized set, so the cost is O(keys) rather than a rescan of
+// every prior key on an upstream-controlled key count).
 func TestValidateResponseBoundsThePreflightWalk(t *testing.T) {
-	deep := []byte(strings.Repeat("[", maxJSONDepth+10))
+	deep := []byte(strings.Repeat("[", bounded.MaxDepth+10))
 	err := validateResponse(deep)
-	if err == nil {
-		t.Fatal("validateResponse(over-deep body) = nil error, want the depth bound to reject it")
-	}
-	if !strings.Contains(err.Error(), "max nesting depth") {
-		t.Errorf("err = %v, want the depth bound named", err)
+	if !errors.Is(err, bounded.ErrMaxDepth) {
+		t.Fatalf("validateResponse(over-deep body) = %v, want bounded.ErrMaxDepth", err)
 	}
 
 	var wide strings.Builder
@@ -643,5 +644,44 @@ func TestValidateResponseBoundsThePreflightWalk(t *testing.T) {
 	wide.WriteByte('}')
 	if err := validateResponse([]byte(wide.String())); err != nil {
 		t.Errorf("validateResponse(key-dense object) = %v, want it accepted", err)
+	}
+}
+
+// TestParseMediaRejectsUnknownFormatAsTypeEvidence pins l-f12: the format is
+// the only arr-routing evidence the AniList fallback carries, and
+// match.formatArr routes it by EXCLUSION (MOVIE to Radarr, everything else to
+// Sonarr). An unrecognized non-empty token therefore did not read as "unknown",
+// it read as "not a movie" - so a garbled or hostile value supplied false Sonarr
+// evidence for an unmapped entry, removed the Radarr candidate a title+year
+// match would have left ambiguous, and persisted the wrong match in state.json
+// for the memo's life. An unknown token must collapse to "", which every
+// consumer already reads as type-unknown. The record itself stays usable: only
+// the TYPE claim is discarded, never the titles.
+func TestParseMediaRejectsUnknownFormatAsTypeEvidence(t *testing.T) {
+	tests := map[string]struct {
+		wire string
+		want string
+	}{
+		"a real format is preserved verbatim":    {wire: "MOVIE", want: "MOVIE"},
+		"lowercase real format is preserved":     {wire: "movie", want: "movie"},
+		"TV_SHORT is a real AniList format":      {wire: "TV_SHORT", want: "TV_SHORT"},
+		"an invented token is discarded":         {wire: "NOT_A_FORMAT", want: ""},
+		"a plausible-but-wrong token is dropped": {wire: "FILM", want: ""},
+		"an empty format stays empty":            {wire: "", want: ""},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			body := []byte(`{"data":{"Media":{"format":"` + tc.wire + `","title":{"romaji":"A Show"}}}}`)
+			got, err := parseMedia(body)
+			if err != nil {
+				t.Fatalf("parseMedia = %v, want the record accepted (only its type claim is at stake)", err)
+			}
+			if got.Format != tc.want {
+				t.Errorf("Media.Format = %q, want %q", got.Format, tc.want)
+			}
+			if len(got.Titles) == 0 {
+				t.Error("titles were dropped; an unknown format must not cost the record its usable titles")
+			}
+		})
 	}
 }

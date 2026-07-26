@@ -118,9 +118,10 @@ const annotationLegend = "Scope annotations: `approx` - the comparison used a co
 	"`mixed` - the scoped groups span more than one group and none of them is a SeaDex best (a manual review); " +
 	"`theoretical` - SeaDex names only a theoretical best, so there is nothing concrete to compare against; " +
 	"`incomplete` - the SeaDex entry itself is incomplete.\n\n" +
-	"SeaDex best annotations: `(broken)` / `(incomplete)` are SeaDex curation warnings, and `(unobtainable)` " +
-	"means the release has no usable link or sits on a tracker you do not use. An annotated release stays " +
-	"listed but never drives the verdict and is never offered as a link.\n\n"
+	"SeaDex best annotations: `(broken)` / `(incomplete)` are SeaDex curation warnings, `(url error)` means " +
+	"the SeaDex record carries a link value that is not a usable tracker URL (report it upstream), and " +
+	"`(unobtainable)` means the release has no usable link or sits on a tracker you do not use. An " +
+	"annotated release stays listed but never drives the verdict and is never offered as a link.\n\n"
 
 // incompleteHeader is the incomplete-mapping section's Markdown heading text,
 // also named by the header caveat so a reader can find the section.
@@ -306,10 +307,17 @@ func foldedGroupKey(group string) [sha256.Size]byte {
 // releaseNotes returns a release's display annotations: its canonical
 // curation-warning tags, plus "unobtainable" when the daemon's obtainability
 // rule (filter.Obtainable, computed in classifyReleases) rejected it as
-// verdict evidence. The returned slice is always a fresh allocation, so
+// verdict evidence, plus "url error" when SeaDex's record carries a url the
+// publisher refused. The returned slice is always a fresh allocation, so
 // callers can append without aliasing Release.Warnings.
 func releaseNotes(rel *Release) []string {
 	notes := append([]string(nil), rel.Warnings...)
+	if rel.URLError {
+		// Listed BEFORE "unobtainable" because it is the more specific and more
+		// actionable of the two: the record itself is wrong upstream, which is
+		// also usually WHY the release reads unobtainable.
+		notes = append(notes, "url error")
+	}
 	if rel.Unobtainable {
 		notes = append(notes, "unobtainable")
 	}
@@ -322,7 +330,7 @@ func releaseNotes(rel *Release) []string {
 // annotated best, the SeaDex-best column marks it), so a new annotation class
 // added to releaseNotes cannot start leaking into the links cell.
 func annotated(rel *Release) bool {
-	return len(rel.Warnings) > 0 || rel.Unobtainable
+	return len(rel.Warnings) > 0 || rel.Unobtainable || rel.URLError
 }
 
 // rowsWithVerdict returns the rows carrying verdict v, preserving order.
@@ -526,22 +534,33 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	// crash-durable: atomicfile reports a successful rename whose parent-dir
 	// fsync failed as Durable=false with a NIL error, so publishing the
 	// Markdown half on that result could leave a recovered .md without its
-	// machine-readable pair. Stop with the JSON half only instead.
-	if err := writeReportHalf(ctx, "json", dir, jsonPath, data, log); err != nil {
+	// machine-readable pair. Stop with the JSON half only instead - but as a
+	// degradation, not a failure: both the bytes and the operator's next action
+	// are unaffected by an fsync that did not land, so this returns nil.
+	jsonDurable, err := writeReportHalf(ctx, "json", dir, jsonPath, data, log)
+	if err != nil {
 		return err
 	}
-	if err := interrupted(ctx, "report markdown render"); err != nil {
-		return err
+	if !jsonDurable {
+		log.Warn("report json written but not crash-durable; skipping the markdown half to keep the pair ordering",
+			"json", filepath.Base(jsonPath), "anime", len(r.Rows), "durable", false)
+		return nil
+	}
+	if interruptErr := interrupted(ctx, "report markdown render"); interruptErr != nil {
+		return interruptErr
 	}
 	// A non-durable Markdown half cannot create a dangling .md (the .json is
-	// already durably committed above), but "report written" must not claim a
-	// pair whose second half may vanish on a power loss.
-	if err := writeReportHalf(ctx, "markdown", dir, mdPath, []byte(renderMarkdown(safe)), log); err != nil {
+	// already durably committed above), so the pair is complete and the success
+	// record must still be emitted - the alert that watches for it would
+	// otherwise go silent on a run whose files are both on disk. The durable
+	// attribute keeps the line honest about what may not survive a power loss.
+	mdDurable, err := writeReportHalf(ctx, "markdown", dir, mdPath, []byte(renderMarkdown(safe)), log)
+	if err != nil {
 		return err
 	}
 	// Basenames only: the stem is timestamp-derived (never dir-derived), so
 	// the success record stays useful without shipping the directory value.
-	log.Info("report written", "markdown", filepath.Base(mdPath), "json", filepath.Base(jsonPath), "anime", len(r.Rows))
+	log.Info("report written", "markdown", filepath.Base(mdPath), "json", filepath.Base(jsonPath), "anime", len(r.Rows), "durable", mdDurable)
 	return nil
 }
 
@@ -609,7 +628,8 @@ var atomicWriteFile = atomicfile.WriteFile
 // guarantee when that first directory update survives a crash. atomicfile
 // itself emits the one WARN carrying the causal fsync error (WithLogger keeps
 // it on the report logger), so no second app-side record is layered on top;
-// the caller turns the flag into a stage-specific error via durabilityErr.
+// the caller reads the flag off the Result and decides the ORDERING, never a
+// failure (see writeReportHalf).
 func writeAtomic(ctx context.Context, path string, data []byte, log *slog.Logger) (atomicfile.Result, error) {
 	return atomicWriteFile(ctx, path, data,
 		atomicfile.WithLogger(log),
@@ -617,39 +637,28 @@ func writeAtomic(ctx context.Context, path string, data []byte, log *slog.Logger
 		atomicfile.WithMode(reportFileMode))
 }
 
-// writeReportHalf persists one report half and applies the two failure
-// policies both halves share: a hard write failure is wrapped with the stage
-// and the basename only (dir is the secret-capable report.dir value, so the
-// cause is redacted), and a rename whose parent-directory fsync failed -
-// which atomicfile reports as Durable=false with a NIL error - is turned into
-// the errNotDurable sentinel by durabilityErr. Keeping both halves on one
-// path is what stops the json and markdown stages from drifting apart.
-func writeReportHalf(ctx context.Context, stage, dir, path string, data []byte, log *slog.Logger) error {
+// writeReportHalf persists one report half and applies the two policies both
+// halves share: a hard write failure is wrapped with the stage and the basename
+// only (dir is the secret-capable report.dir value, so the cause is redacted)
+// and returned as an error, while a rename whose parent-directory fsync failed -
+// which atomicfile reports as Durable=false with a NIL error - is reported
+// through the durable return value, NOT as an error.
+//
+// The split is the alerting rule: a non-durable write SUCCEEDED (atomicfile's
+// contract is that a nil error means the bytes reached their final path; only
+// the directory entry may not survive a power loss), so there is nothing for the
+// operator to do and no failure to report - a re-run cannot fix an fsync. It
+// still matters for ORDERING, which is why the flag is returned rather than
+// swallowed. atomicfile itself emits the one WARN carrying the causal fsync
+// error (WithLogger keeps it on the report logger), so no second app-side
+// record is layered on top. Keeping both halves on one path is what stops the
+// json and markdown stages from drifting apart.
+func writeReportHalf(ctx context.Context, stage, dir, path string, data []byte, log *slog.Logger) (durable bool, err error) {
 	res, err := writeAtomic(ctx, path, data, log)
 	if err != nil {
-		return fmt.Errorf("audit: write %s %s: %w", stage, filepath.Base(path), redactPathErr(dir, err))
+		return false, fmt.Errorf("audit: write %s %s: %w", stage, filepath.Base(path), redactPathErr(dir, err))
 	}
-	return durabilityErr(stage, path, res)
-}
-
-// errNotDurable is the cause wrapped by a report half that landed at its
-// final path but whose parent-directory update was not crash-durable. It is a
-// sentinel so a caller (and the durability tests) can match the class without
-// decoding atomicfile internals; the causal fsync error is already logged by
-// atomicfile itself, and re-wrapping it here would risk carrying the
-// unredacted report.dir path into a returned error.
-var errNotDurable = errors.New("write succeeded but is not crash-durable (parent directory fsync failed)")
-
-// durabilityErr converts a non-durable write result into the stage-specific
-// error WriteFiles returns, or nil when the write is durable. stage names the
-// report half ("json"/"markdown") and only the basename of path is quoted:
-// the stem is timestamp-derived, so the message stays useful without leaking
-// the secret-capable report.dir value.
-func durabilityErr(stage, path string, res atomicfile.Result) error {
-	if res.Durable {
-		return nil
-	}
-	return fmt.Errorf("audit: write %s %s: %w", stage, filepath.Base(path), errNotDurable)
+	return res.Durable, nil
 }
 
 // --- Sanitizers + link/cell escaping ---

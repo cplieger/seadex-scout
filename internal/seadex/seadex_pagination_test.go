@@ -322,11 +322,42 @@ func TestFetchEntriesEmptyCatalogueErrors(t *testing.T) {
 }
 
 // TestFetchEntriesCountMismatchWarnsButSucceeds pins the count-mismatch
-// contract: a completed catalogue whose collected entry count disagrees with
-// the API's reported totalItems logs the single alert-stable WARN line but
-// still returns the entries, since offset pagination over a live collection
-// can legitimately shift counts mid-fetch.
+// contract: a completed catalogue whose collected entry count falls a LITTLE
+// short of the API's reported totalItems logs the single alert-stable WARN line
+// but still returns the entries, since records deleted from the collection
+// during the walk legitimately shift the count. Below half the guard below
+// takes over.
 func TestFetchEntriesCountMismatchWarnsButSucceeds(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"totalItems":3,"totalPages":1,"items":[{"alID":1,"expand":{"trs":[]}},{"alID":2,"expand":{"trs":[]}}]}`)
+	}))
+	defer server.Close()
+
+	logger, recorder := capture.New()
+	entries, err := NewClient(server.Client(), server.URL, 0, logger).FetchEntries(context.Background())
+	if err != nil {
+		t.Fatalf("FetchEntries returned error: %v (a small count mismatch must not fail the fetch)", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(entries))
+	}
+	if got := recorder.CountExact("seadex catalogue count mismatch"); got != 1 {
+		t.Errorf("count-mismatch WARN count = %d, want 1", got)
+	}
+}
+
+// TestFetchEntriesBelowHalfShortfallErrors pins the last path on which a
+// truncated catalogue used to be ACCEPTED (h-f7). A short terminal chunk ends
+// the keyset walk, and a shortfall against the API's own reported totalItems was
+// waved through with a WARN however large it was - so an upstream that ended the
+// walk early while records remained handed the comparison a partial catalogue,
+// which resolves every finding whose entry went missing. The keyset cursor makes
+// a genuinely SKIPPED record impossible, so an ordinary shortfall is a handful
+// of mid-fetch deletions; losing more than HALF the catalogue is not credible
+// and now fails the fetch, degrading the cycle and PRESERVING existing findings.
+// The trigger is the app-wide shrink policy (degradation.ShrinkGuardFactor),
+// shared with the mapping-refresh and library-walk guards.
+func TestFetchEntriesBelowHalfShortfallErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{"totalItems":5,"totalPages":1,"items":[{"alID":1,"expand":{"trs":[]}},{"alID":2,"expand":{"trs":[]}}]}`)
 	}))
@@ -334,14 +365,19 @@ func TestFetchEntriesCountMismatchWarnsButSucceeds(t *testing.T) {
 
 	logger, recorder := capture.New()
 	entries, err := NewClient(server.Client(), server.URL, 0, logger).FetchEntries(context.Background())
-	if err != nil {
-		t.Fatalf("FetchEntries returned error: %v (a count mismatch must not fail the fetch)", err)
+	if err == nil {
+		t.Fatal("FetchEntries returned nil error, want the below-half shortfall to fail the fetch")
 	}
-	if len(entries) != 2 {
-		t.Fatalf("entries = %d, want 2", len(entries))
+	if entries != nil {
+		t.Errorf("entries = %+v, want nil: a truncated catalogue must never reach the comparison", entries)
 	}
-	if got := recorder.CountExact("seadex catalogue count mismatch"); got != 1 {
-		t.Errorf("count-mismatch WARN count = %d, want 1", got)
+	if !strings.Contains(err.Error(), "refusing to compare against a truncated view") {
+		t.Errorf("error = %q, want the truncated-view refusal", err.Error())
+	}
+	// The refusal replaces the WARN: the fetch failed, so there is no accepted
+	// catalogue to warn about a mismatch in.
+	if got := recorder.CountExact("seadex catalogue count mismatch"); got != 0 {
+		t.Errorf("count-mismatch WARN count = %d, want 0 on a failed fetch", got)
 	}
 }
 
@@ -416,7 +452,7 @@ func TestFetchEntriesUnparseableUpdatedWarnsOnce(t *testing.T) {
 // TestFetchEntriesUnusableTorrentURLWarnsOnce pins the link-drop signal: a
 // torrent whose URL is unusable — omitted/empty, a foreign host under a
 // trusted tracker label, or an unknown tracker — is counted (filter.Obtainable
-// treats every UsableURL()=="" torrent as unobtainable), and the fetch
+// treats every unpublishable-link torrent as unobtainable), and the fetch
 // surfaces ONE aggregate WARN carrying the count - a tracker host migration or
 // schema drift that strips every release link must be alertable from Loki -
 // while the fetch itself still succeeds. A usable canonical-host URL must not

@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/cplieger/atomicfile/v2"
-	"github.com/cplieger/httpx/v3"
+	"github.com/cplieger/httpx/v4"
 	"github.com/cplieger/jsonx/bounded"
 	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
@@ -165,11 +165,20 @@ type Cache struct {
 	// across cycles and restarts, resets to 0 on any accepted refresh or 304,
 	// and rides on the *StaleMapError (ConsecutiveRejections) so the scout
 	// can escalate its degraded-mapping log at degradation.EscalationThreshold.
-	// Transient fetch or parse failures neither advance nor reset it — with
-	// one exception: a record-cap breach (errRecordCapExceeded) surfaces as a
-	// parse error but is a persistent guard refusal (an over-cap upstream
-	// list never self-heals), so it advances the streak like any other guard
-	// rejection.
+	// It advances even when no usable stale cache exists (a first boot whose
+	// every refresh is refused), because the streak describes the upstream, not
+	// the cache; the scout therefore reads it off this Cache rather than
+	// depending on a *StaleMapError to carry it.
+	//
+	// A TRANSIENT failure - one that can succeed on the next attempt - neither
+	// advances nor resets it. Three classes are persistent guard refusals that
+	// surface as fetch or parse errors and so DO advance it, because each one
+	// re-downloads the multi-MB body and refuses it every cycle without ever
+	// self-healing: a record-cap breach (errRecordCapExceeded), a body over the
+	// download size cap (httpx.ResponseTooLargeError), and a non-array
+	// top-level document (errNotJSONArray - content-shape evidence, since
+	// truncation cannot change a body's first token). Mid-stream truncation and
+	// every other malformed-body class stays transient.
 	RejectedRefreshes int `json:"rejected_refreshes,omitempty"`
 }
 
@@ -466,10 +475,19 @@ func staleOrFail(prev *Cache, staleMsg string, cause, noCache error) (Cache, err
 // route here: a fetch or parse failure is a transient outage, not a persistent
 // guard refusal, so it neither advances the streak (plain staleOrFail) nor
 // resets it (only an accepted refresh or a 304 does).
+//
+// The streak advances even when there is NO usable stale cache to return. It is
+// persisted state about the upstream, not about the cache: on a first boot whose
+// every refresh is refused (a poisoned or restructured body), gating the
+// increment on a usable cache would freeze the streak at 0 and leave the loader
+// WARNing forever while the feed and comparison stay disabled - the exact
+// never-self-heals condition the streak exists to escalate. The scout reads the
+// streak off the returned Cache, so escalation no longer depends on a
+// *StaleMapError being available to carry it.
 func rejectRefresh(prev *Cache, staleMsg string, cause, noCache error) (Cache, error) {
 	next, err := staleOrFail(prev, staleMsg, cause, noCache)
+	next.RejectedRefreshes = prev.RejectedRefreshes + 1
 	if stale, ok := errors.AsType[*StaleMapError](err); ok {
-		next.RejectedRefreshes = prev.RejectedRefreshes + 1
 		stale.rejections = next.RejectedRefreshes
 	}
 	return next, err
@@ -503,6 +521,16 @@ func (l *Loader) refreshCache(ctx context.Context, prev *Cache) (Cache, error) {
 
 	res, err := l.conditionalGet(ctx, prev)
 	if err != nil {
+		if _, ok := errors.AsType[*httpx.ResponseTooLargeError](err); ok {
+			// A body over maxMapBytes is a persistent guard refusal, not a
+			// transient outage: the cap is deterministic on upstream SIZE, so a
+			// list that has organically grown past it re-downloads and is
+			// refused every cycle, never self-healing. Same reasoning as the
+			// parse-time record cap (errRecordCapExceeded), so it takes the
+			// same route: advance the streak and let the scout escalate.
+			return rejectRefresh(prev, "refresh exceeded size cap", err,
+				fmt.Errorf("mapping: refresh exceeded size cap and no cache available: %w", err))
+		}
 		return staleOrFail(prev, "refresh failed", err,
 			fmt.Errorf("mapping: initial fetch failed and no cache available: %w", err))
 	}
@@ -547,6 +575,16 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 			// degradation.EscalationThreshold instead of degrading at WARN forever.
 			return rejectRefresh(prev, "refresh exceeded record cap", err,
 				fmt.Errorf("%w and no cache available", err))
+		}
+		if errors.Is(err, errNotJSONArray) {
+			// A non-array top-level document is content-shape evidence that the
+			// upstream schema moved, not transport damage (truncation cannot
+			// change the first token), so it never self-heals: advance the
+			// streak like the record cap. Mid-stream truncation and every other
+			// malformed-body class stays transient below.
+			err = errors.New(runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedErrorBytes))
+			return rejectRefresh(prev, "refresh not a JSON array", err,
+				fmt.Errorf("mapping: %w and no cache available", err))
 		}
 		err = errors.New(runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedErrorBytes))
 		return staleOrFail(prev, "parse failed", err,

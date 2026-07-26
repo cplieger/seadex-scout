@@ -24,10 +24,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
-	"github.com/cplieger/httpx/v3"
+	"github.com/cplieger/httpx/v4"
 	"github.com/cplieger/jsonx/bounded"
 	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
@@ -71,6 +70,98 @@ var ErrNotFound = errors.New("anilist: media not found")
 // means the chunks completed but every record was malformed — still
 // record-local, per-id fallback applies.
 var ErrBatchRecord = errors.New("anilist: batch response")
+
+// BatchRecordError reports record-local failures found inside chunks that
+// otherwise completed, and names the ids whose CHUNK is therefore not
+// trustworthy as evidence of absence. It wraps ErrBatchRecord, so existing
+// errors.Is checks are unaffected.
+//
+// The scoping is the point. A record-local defect is confined to the chunk it
+// arrived in: the other chunks completed cleanly and their absent ids ARE
+// definitively answered. Returning one undifferentiated error for the whole call
+// made a single malformed record in chunk 1 of 9 withdraw the completion
+// evidence of the other eight, so ~450 already-answered ids each fell through to
+// a rate-limited per-id Fetch - the ~1700-request cold cycle batching exists to
+// avoid. Callers memoize negatives for every requested id EXCEPT UnverifiedIDs.
+type BatchRecordError struct {
+	Err error
+	// UnverifiedIDs are the ids belonging to chunks that reported a
+	// record-local failure. Absence of one of these from the result set proves
+	// nothing, so it must not be memoized as not-found.
+	UnverifiedIDs []int
+}
+
+func (e *BatchRecordError) Error() string { return e.Err.Error() }
+
+func (e *BatchRecordError) Unwrap() error { return e.Err }
+
+// transientStatusError marks an upstream failure this client considers
+// self-healing even though httpx's shared policy does not. httpx's
+// *HTTPStatusError is transient for 502/503/504 only, which leaves a plain 500
+// (AniList's generic GraphQL server fault) and a 408 terminal after a single
+// attempt, and leaves a server-side failure delivered inside a 200 GraphQL
+// envelope invisible to the retrier entirely. Both classes clear on their own,
+// and the queries are idempotent, so they belong inside the bounded budget.
+type transientStatusError struct{ err error }
+
+func (e *transientStatusError) Error() string { return e.err.Error() }
+
+func (e *transientStatusError) Unwrap() error { return e.err }
+
+func (e *transientStatusError) IsTransient() bool { return true }
+
+// retryableUpstreamStatus reports whether an upstream status is a self-healing
+// server-side failure worth another attempt. It covers every 5xx (not just
+// httpx's 502/503/504) plus 408 Request Timeout; a 4xx other than 408 is the
+// client's own fault and never retried, and 429 has its own dedicated
+// rate-limit path.
+func retryableUpstreamStatus(code int) bool {
+	return code == http.StatusRequestTimeout || (code >= 500 && code < 600)
+}
+
+// transientEnvelopeError classifies a GraphQL envelope that arrived with a
+// successful HTTP status but reports a SERVER-side failure in its errors[] list.
+// AniList answers such faults as 200 with {"errors":[{"status":500,...}]}, so
+// httpx.Do has already declared the attempt successful by the time the parser
+// sees it and no retry ever happens. Returning a transient error here - at the
+// retry boundary, before parsing - puts that class back inside the budget.
+//
+// Only the retryable statuses qualify: a 404 envelope is AniList's genuine
+// not-found (Fetch's ErrNotFound contract depends on it reaching the parser),
+// and an unparseable body is the parser's business, not the retrier's.
+func transientEnvelopeError(raw []byte) error {
+	var env struct {
+		Errors []gqlError `json:"errors"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil
+	}
+	for _, e := range env.Errors {
+		if retryableUpstreamStatus(e.Status) {
+			return &transientStatusError{err: fmt.Errorf("anilist: upstream reported status %d: %s",
+				e.Status, sanitizeUpstreamMessage(e.Message))}
+		}
+	}
+	return nil
+}
+
+// ErrRecordUnusable marks a rejection determined entirely by the upstream
+// record's OWN CONTENT: no title that normalizes to a usable match key (a
+// CJK-only or symbol-only title set), an over-cap title or format field, or
+// text that is unsafe to memoize. It is PERMANENT - the same record fails
+// identically on every future cycle - so it is not an outage and must not be
+// classified as one.
+//
+// The distinction is load-bearing for alerting. Treated as transient, such a
+// record is re-fetched every cycle forever, keeps Result.Degraded true, and
+// advances the persisted AniList degradation streak until it escalates to a
+// standing ERROR whose remediation text points at graphql.anilist.co
+// reachability that is perfectly healthy. It is also not a plain not-found: the
+// record exists, it just cannot be matched on, and the operator's real remedy is
+// an overrides.json entry supplying the arr id directly. Callers therefore
+// memoize it negatively (a definitive answer) and say so once, with that remedy
+// named. Callers match with errors.Is.
+var ErrRecordUnusable = errors.New("anilist: record unusable for matching")
 
 // query fetches the fields needed for a title fallback match, plus the id so
 // Fetch can bind the response to the requested identity (parseMediaForID).
@@ -156,7 +247,18 @@ func (c *Client) request(ctx context.Context, gql string, variables any) ([]byte
 			if err := c.throttle.wait(ctx); err != nil {
 				return nil, err
 			}
-			return c.do(ctx, body)
+			raw, err := c.do(ctx, body)
+			if err != nil {
+				return nil, err
+			}
+			// Classify a server-side failure delivered inside a successful
+			// envelope here, at the retry boundary: past this point httpx has
+			// recorded the attempt as a success and the class can never be
+			// retried (see transientEnvelopeError).
+			if transientErr := transientEnvelopeError(raw); transientErr != nil {
+				return nil, transientErr
+			}
+			return raw, nil
 		},
 		httpx.WithMaxAttempts(maxAttempts),
 		httpx.WithBaseDelay(baseDelay),
@@ -202,6 +304,7 @@ func (c *Client) FetchMany(ctx context.Context, ids []int) (map[int]Media, error
 	out := make(map[int]Media, len(ids))
 	completed := false
 	var firstRecordErr error
+	var unverified []int
 	for chunk := range slices.Chunk(ids, batchSize) {
 		page, err := c.fetchBatchChunk(ctx, chunk)
 		maps.Copy(out, page)
@@ -209,11 +312,21 @@ func (c *Client) FetchMany(ctx context.Context, ids []int) (map[int]Media, error
 			return completedBatch(out, completed, err)
 		}
 		completed = true
-		if err != nil && firstRecordErr == nil {
-			firstRecordErr = err
+		if err != nil {
+			// Record-local: this CHUNK's absences prove nothing, but every
+			// other chunk still completed cleanly and its absences do. Collect
+			// the untrustworthy ids rather than failing the whole call, so the
+			// caller can still memoize the negatives it legitimately learned.
+			unverified = append(unverified, chunk...)
+			if firstRecordErr == nil {
+				firstRecordErr = err
+			}
 		}
 	}
-	return out, firstRecordErr
+	if firstRecordErr != nil {
+		return out, &BatchRecordError{UnverifiedIDs: unverified, Err: firstRecordErr}
+	}
+	return out, nil
 }
 
 // fetchBatchChunk fetches and parses one chunk of FetchMany's id list. A
@@ -305,10 +418,14 @@ func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 	// ErrNotFound contract instead of surfacing an opaque HTTP 404.
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
 		httpx.DrainClose(resp.Body)
-		if statusErr := httpx.CheckHTTPStatus(resp); statusErr != nil {
-			return nil, statusErr
+		statusErr := httpx.CheckHTTPStatus(resp)
+		if statusErr == nil {
+			statusErr = fmt.Errorf("anilist: unexpected status %d", resp.StatusCode)
 		}
-		return nil, fmt.Errorf("anilist: unexpected status %d", resp.StatusCode)
+		if retryableUpstreamStatus(resp.StatusCode) {
+			return nil, &transientStatusError{err: statusErr}
+		}
+		return nil, statusErr
 	}
 
 	// ReadLimitedBody closes the body and fails loud with a distinct
@@ -407,8 +524,14 @@ const (
 // toMedia converts the wire shape to a Media, preferring seasonYear and
 // falling back to the start-date year. It rejects a media whose title or
 // format field exceeds the wire limits, or that has no usable (non-blank)
-// title, so a malformed payload degrades and is retried next cycle instead of
-// being memoized as a permanent empty or bloated Media.
+// title.
+//
+// Every rejection here is a function of the RECORD'S OWN CONTENT, so it is
+// permanent: the same upstream record fails identically on every future cycle.
+// They therefore wrap ErrRecordUnusable, which the matcher treats as a
+// definitive answer (negative-memoized, like a not-found) instead of a
+// transient outage to retry forever - see that sentinel's doc for why the
+// distinction is load-bearing for alerting.
 func (m *gqlMedia) toMedia() (Media, error) {
 	// One list of the wire title fields, used for both validation and dedupe,
 	// so a future title field cannot be validated in one place and dropped in
@@ -416,17 +539,17 @@ func (m *gqlMedia) toMedia() (Media, error) {
 	wireTitles := []string{m.Title.Romaji, m.Title.English, m.Title.Native}
 	for _, t := range wireTitles {
 		if len(t) > maxTitleBytes {
-			return Media{}, fmt.Errorf("media title exceeds %d bytes", maxTitleBytes)
+			return Media{}, fmt.Errorf("%w: media title exceeds %d bytes", ErrRecordUnusable, maxTitleBytes)
 		}
 		if unsafeWireText(t) {
-			return Media{}, errors.New("media title contains invalid single-line text")
+			return Media{}, fmt.Errorf("%w: media title contains invalid single-line text", ErrRecordUnusable)
 		}
 	}
 	if len(m.Format) > maxFormatBytes {
-		return Media{}, fmt.Errorf("media format exceeds %d bytes", maxFormatBytes)
+		return Media{}, fmt.Errorf("%w: media format exceeds %d bytes", ErrRecordUnusable, maxFormatBytes)
 	}
 	if unsafeWireText(m.Format) {
-		return Media{}, errors.New("media format contains invalid single-line text")
+		return Media{}, fmt.Errorf("%w: media format contains invalid single-line text", ErrRecordUnusable)
 	}
 	year := m.SeasonYear
 	if year == 0 {
@@ -434,9 +557,43 @@ func (m *gqlMedia) toMedia() (Media, error) {
 	}
 	titles := dedupeTitles(wireTitles...)
 	if !hasMatchableTitle(titles) {
-		return Media{}, errors.New("media missing usable title")
+		return Media{}, fmt.Errorf("%w: media missing usable title", ErrRecordUnusable)
 	}
-	return Media{Titles: titles, Format: m.Format, Year: year}, nil
+	return Media{Titles: titles, Format: knownFormat(m.Format), Year: year}, nil
+}
+
+// anilistFormats is AniList's MediaFormat enum as it applies to anime (its
+// MANGA/NOVEL/ONE_SHOT members cannot appear on a SeaDex entry). Matched
+// case-insensitively after normalization, mirroring mapping.NormalizeType.
+var anilistFormats = map[string]struct{}{
+	"TV": {}, "TV_SHORT": {}, "MOVIE": {}, "SPECIAL": {},
+	"OVA": {}, "ONA": {}, "MUSIC": {},
+}
+
+// knownFormat returns format when it names a real AniList media format, else
+// "" - the value that means "type unknown" to every consumer.
+//
+// The format is the ONLY arr-routing evidence the AniList fallback carries, and
+// match.formatArr routes it by exclusion: MOVIE goes to Radarr and EVERYTHING
+// else to Sonarr. An unrecognized non-empty token therefore did not read as
+// "unknown", it read as "not a movie" - so a garbled or hostile value like
+// "NOT_A_FORMAT" supplied false Sonarr evidence for an entirely unmapped entry,
+// removed the Radarr candidate that a title+year match would otherwise have
+// left ambiguous, and persisted that wrong match in state.json for the memo's
+// life (l-f12). An empty format has always behaved correctly here, leaving the
+// arr unknown and the cross-arr candidates ambiguous, so collapsing an
+// unrecognized token onto empty is the fix.
+//
+// Fail direction: a format AniList ADDS in future is unrecognized here and
+// degrades to unknown, which costs a title-fallback match its arr hint rather
+// than routing it wrongly. That is the safe side, and the length/safety gates
+// above still reject a hostile record outright - only the TYPE claim is
+// discarded, never the usable titles.
+func knownFormat(format string) string {
+	if _, ok := anilistFormats[strings.ToUpper(strings.TrimSpace(format))]; ok {
+		return format
+	}
+	return ""
 }
 
 // unsafeWireText reports whether an untrusted AniList string field must be
@@ -513,132 +670,28 @@ func classifyNullMedia(errs []gqlError) error {
 // U+FFFD instead of failing, so without this gate a wire title with invalid
 // bytes could lossily normalize to a legitimate title key, be title-matched,
 // and be memoized even though the upstream payload was not valid JSON text.
+// This half stays app-side because it is a CONTENT policy: it matters only
+// because the decoded titles outlive the request in the matcher's memo and
+// state.json.
 //
-// Duplicate keys: encoding/json accepts a duplicate object key and applies
-// the LAST occurrence to the struct field, discarding the earlier value
-// unseen. That erases the evidence every downstream invariant relies on - a
-// body carrying both a valid Media and a later null Media would reach
-// classifyNullMedia as a genuine not-found and be negative-memoized, and a
-// batch could have its Page.media replaced by an empty array - so an
-// ambiguous object structure is rejected outright and surfaces as a plain
+// Structure: bounded.Preflight owns the rest. encoding/json accepts a
+// duplicate object key and applies the LAST occurrence to the struct field,
+// discarding the earlier value unseen - which erases the evidence every
+// downstream invariant relies on, since a body carrying both a valid Media and
+// a later null Media would reach classifyNullMedia as a genuine not-found and
+// be negative-memoized, and a batch could have its Page.media replaced by an
+// empty array. The preflight also bounds nesting, because json.Decoder.Token
+// does not apply encoding/json's own depth limit and an all-opens body would
+// otherwise recurse once per byte. Either rejection surfaces as a plain
 // retryable error. Shared by parseMediaForID and parseMediaPage.
 func validateResponse(raw []byte) error {
 	if !utf8.Valid(raw) {
 		return errors.New("anilist: response is not valid UTF-8")
 	}
-	if err := rejectDuplicateJSONKeys(raw); err != nil {
+	if err := bounded.Preflight(bytes.NewReader(raw)); err != nil {
 		return fmt.Errorf("anilist: ambiguous response JSON: %w", err)
 	}
 	return nil
-}
-
-// maxJSONDepth bounds the preflight walk's nesting. json.Decoder.Token does
-// not enforce encoding/json's own nesting limit, so without this cap a 1 MiB
-// body of '[' would drive ~1M recursion frames (measured 206 MB RSS) inside a
-// 256 MiB container. It is the same limit encoding/json applies, so any body
-// the decode step would have rejected is still rejected, only earlier and
-// without the deep stack.
-const maxJSONDepth = 10000
-
-// rejectDuplicateJSONKeys walks the whole response with json.Decoder tokens
-// and fails on the first object that repeats a key. Matching is
-// case-insensitive because encoding/json also matches struct fields
-// case-insensitively, so "media" and "Media" address the same field and are
-// equally ambiguous. The walk is depth-bounded at maxJSONDepth, and per-object
-// keys are tracked in a fold-canonicalized set so a key-dense body costs
-// O(keys), not O(keys^2).
-func rejectDuplicateJSONKeys(raw []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	return walkJSONValue(dec, 0)
-}
-
-// walkJSONValue consumes exactly one JSON value from dec, recursing into
-// objects and arrays. A scalar is consumed by the leading Token call; a
-// container is closed by the trailing one.
-func walkJSONValue(dec *json.Decoder, depth int) error {
-	tok, err := dec.Token()
-	if err != nil {
-		return err
-	}
-	delim, ok := tok.(json.Delim)
-	if !ok {
-		return nil
-	}
-	if depth >= maxJSONDepth {
-		return fmt.Errorf("exceeded max nesting depth %d", maxJSONDepth)
-	}
-	if containerErr := walkJSONContainer(dec, delim, depth); containerErr != nil {
-		return containerErr
-	}
-	_, err = dec.Token()
-	return err
-}
-
-// walkJSONContainer traverses the members of a container whose opening
-// delimiter walkJSONValue has already read and whose depth it has already
-// validated. The closing delimiter stays walkJSONValue's to consume, so
-// container framing has exactly one owner.
-func walkJSONContainer(dec *json.Decoder, delim json.Delim, depth int) error {
-	switch delim {
-	case '{':
-		return walkJSONObject(dec, depth+1)
-	case '[':
-		for dec.More() {
-			if elemErr := walkJSONValue(dec, depth+1); elemErr != nil {
-				return elemErr
-			}
-		}
-		return nil
-	default:
-		return fmt.Errorf("unexpected JSON delimiter %q", delim)
-	}
-}
-
-// walkJSONObject consumes an object's members after its opening delimiter,
-// failing on the first repeated key. The closing delimiter is consumed by the
-// caller (walkJSONValue), which owns the container's framing.
-func walkJSONObject(dec *json.Decoder, depth int) error {
-	seen := make(map[string]struct{})
-	for dec.More() {
-		keyToken, keyErr := dec.Token()
-		if keyErr != nil {
-			return keyErr
-		}
-		key, isString := keyToken.(string)
-		if !isString {
-			return fmt.Errorf("expected object key, got %v", keyToken)
-		}
-		folded := foldJSONKey(key)
-		if _, dup := seen[folded]; dup {
-			// The key is untrusted upstream text that lands inline in a log line
-			// (match.prefetch logs this error), so it gets the same single-line,
-			// 200-byte policy as every other upstream message in this package.
-			return fmt.Errorf("duplicate object key %q", sanitizeUpstreamMessage(key))
-		}
-		seen[folded] = struct{}{}
-		if valErr := walkJSONValue(dec, depth); valErr != nil {
-			return valErr
-		}
-	}
-	return nil
-}
-
-// foldJSONKey canonicalizes each rune to the smallest member of its simple
-// case-folding orbit, so map equality on the result is exactly
-// strings.EqualFold equality without the per-key linear scan.
-func foldJSONKey(key string) string {
-	var b strings.Builder
-	b.Grow(len(key))
-	for _, r := range key {
-		c := r
-		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
-			if f < c {
-				c = f
-			}
-		}
-		b.WriteRune(c)
-	}
-	return b.String()
 }
 
 // parseMediaForID decodes the GraphQL envelope into a Media. Only an explicit

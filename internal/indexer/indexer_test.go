@@ -3,17 +3,21 @@ package indexer
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/cplieger/httpx/v4"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/slogx/capture"
 )
 
 // sampleFeed is a representative Prowlarr per-indexer Torznab response (one Nyaa
@@ -435,10 +439,10 @@ func TestIndexerEndToEnd(t *testing.T) {
 	}))
 	defer torznabSrv.Close()
 
-	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{
+	ix := wiredIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: torznabSrv.URL,
 		ProwlarrAPIKey: "prowlarr-key",
-	}}, Deps{HTTP: torznabSrv.Client()})
+	}}, nil, torznabSrv.Client())
 
 	// A real search (non-empty q) filters to the curation set loaded from the
 	// snapshot: the sample item matches by info hash, gets the best marker, and
@@ -487,15 +491,15 @@ func TestIndexerEndToEnd(t *testing.T) {
 	// TestMarkAndDedupe; the mock here returns the curated item for any query.)
 }
 
-// TestNilHTTPFallbackDoesNotForwardAPIKeyAcrossHost pins the nil-Deps.HTTP
-// fallback client's redirect policy at the observable boundary: the Prowlarr API
+// TestWiredUpstreamDoesNotForwardAPIKeyAcrossHost pins the redirect policy of
+// the client the composition root supplies to WireUpstreams (build.go passes
+// httpx.NewClient, so this test wires the production pairing): the Prowlarr API
 // key rides an X-Api-Key header, which net/http forwards across redirects, so a
 // cross-host hop must be refused before the credential can leave the configured
 // origin. Driving the real request path (rather than invoking CheckRedirect
 // directly) keeps the test on the contract instead of the mechanism, so an
-// equivalent policy moved into a RoundTripper still passes. New's empty snapshot
-// path leaves the warm reload a no-op.
-func TestNilHTTPFallbackDoesNotForwardAPIKeyAcrossHost(t *testing.T) {
+// equivalent policy moved into a RoundTripper still passes.
+func TestWiredUpstreamDoesNotForwardAPIKeyAcrossHost(t *testing.T) {
 	leaked := make(chan string, 1)
 	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -517,16 +521,16 @@ func TestNilHTTPFallbackDoesNotForwardAPIKeyAcrossHost(t *testing.T) {
 	}))
 	defer redirector.Close()
 
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{
+	ups := WireUpstreams(httpx.NewClient(UpstreamAttemptTimeout), nil, UpstreamConfig{
 		NyaaTorznabURL: redirector.URL,
 		ProwlarrAPIKey: "prowlarr-key",
-	}}, Deps{})
-	if len(ix.upstreams) != 1 {
-		t.Fatalf("wired %d upstreams, want 1", len(ix.upstreams))
+	})
+	if len(ups.ups) != 1 {
+		t.Fatalf("wired %d upstreams, want 1", len(ups.ups))
 	}
-	_, err := ix.upstreams[0].fetchAndParse(context.Background(), redirector.URL)
+	_, err := ups.ups[0].fetchAndParse(context.Background(), redirector.URL)
 	if err == nil {
-		t.Fatal("cross-host redirect returned nil, want the fallback client to refuse it")
+		t.Fatal("cross-host redirect returned nil, want the wired client to refuse it")
 	}
 	select {
 	case key := <-redirected:
@@ -543,13 +547,34 @@ func TestNilHTTPFallbackDoesNotForwardAPIKeyAcrossHost(t *testing.T) {
 	}
 }
 
+// TestZeroUpstreamsProxiesNothing pins the zero-Upstreams contract that replaced
+// the old nil-HTTP fallback: with no wired upstream the server constructs no
+// client of its own, so an enabled tracker still serves its persisted RSS feed
+// while a search makes NO outbound request at all (there is no credential to
+// forward and no default client to pick a redirect policy for it). WireUpstreams
+// with a nil client is the same state, stated at the wiring boundary.
+func TestZeroUpstreamsProxiesNothing(t *testing.T) {
+	cfg := UpstreamConfig{NyaaTorznabURL: "http://prowlarr.invalid/1/api", ProwlarrAPIKey: "prowlarr-key"}
+	if ups := WireUpstreams(nil, nil, cfg); len(ups.ups) != 0 {
+		t.Errorf("WireUpstreams with a nil client wired %d upstreams, want 0", len(ups.ups))
+	}
+	ix := New(&Config{UpstreamConfig: cfg}, nil, Upstreams{})
+	if len(ix.upstreams) != 0 {
+		t.Fatalf("zero Upstreams wired %d upstreams, want 0", len(ix.upstreams))
+	}
+	items, failed := ix.fetchRaw(context.Background(), url.Values{"q": {"anything"}}, upstreamNyaa)
+	if items != nil || failed {
+		t.Errorf("fetchRaw with no wired upstream = (%v, %v), want (nil, false)", items, failed)
+	}
+}
+
 // TestFeedWriterReload verifies the server picks up a newer snapshot the writer
 // persists after the server started (the cross-process poll -> resident daemon
 // path): an initially-absent snapshot serves an empty feed, and once the writer
 // writes one the server reloads it on the next request.
 func TestFeedWriterReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, Deps{})
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, nil, Upstreams{})
 
 	// No snapshot yet: the empty-q feed serves nothing.
 	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
@@ -675,6 +700,10 @@ func TestUpstreamForScope(t *testing.T) {
 	}
 }
 
+// TestScopeFromHost pins the Host-fallback routing table. Since the gate reads
+// webhttp.CanonicalHost (the shared strict authority parser) rather than
+// splitting the raw Host on its first dot (l-f25), a bare tracker host carrying
+// a port routes correctly and malformed authorities no longer route at all.
 func TestScopeFromHost(t *testing.T) {
 	tests := []struct{ host, want string }{
 		{"nyaa.cplieger.com", "nyaa"},
@@ -685,6 +714,17 @@ func TestScopeFromHost(t *testing.T) {
 		{"seadex-scout:9118", ""},   // internal docker name + port
 		{"seadex-scout", ""},        // internal docker name
 		{"", ""},
+		// A bare tracker host with a port: the raw first-dot split left the port
+		// inside the label ("ab:9118"), so this failed to select any scope.
+		{"ab:9118", "ab"},
+		{"nyaa:9118", "nyaa"},
+		{"nyaa.example.com.", "nyaa"}, // one trailing FQDN dot is legal
+		// Malformed authorities the raw split accepted as a tracker.
+		{"ab..example", ""},
+		{"ab.example.com:", ""},
+		{"ab.example.com:notaport", ""},
+		{"nyaa.example.com..", ""},
+		{"[ab.example.com]", ""}, // bracketed non-IPv6
 	}
 	for _, tc := range tests {
 		if got := scopeFromHost(tc.host); got != tc.want {
@@ -826,7 +866,7 @@ func TestABFeedRequiresPasskey(t *testing.T) {
 		return rec.Body.String()
 	}
 
-	noKey := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, Deps{})
+	noKey := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, nil, Upstreams{})
 	if body := serve(noKey, "/ab?t=search&apikey=k"); !strings.Contains(body, "<error") || !strings.Contains(body, "passkey") {
 		t.Errorf("ab empty-q without passkey: body = %q, want a Torznab <error> mentioning the passkey", body)
 	}
@@ -834,7 +874,7 @@ func TestABFeedRequiresPasskey(t *testing.T) {
 		t.Errorf("nyaa empty-q must not error: %q", body)
 	}
 
-	withKey := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "PASSKEY"}}, Deps{})
+	withKey := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "PASSKEY"}}, nil, Upstreams{})
 	if body := serve(withKey, "/ab?t=search&apikey=k"); strings.Contains(body, "<error") {
 		t.Errorf("ab empty-q with passkey must not error: %q", body)
 	}
@@ -864,7 +904,7 @@ func TestServeUnconfiguredABServesNoPasskeyItems(t *testing.T) {
 	}
 
 	t.Run("unconfigured AB serves the empty-feed shape", func(t *testing.T) {
-		off := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABPasskey: "SECRETPASSKEY"}}, Deps{})
+		off := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABPasskey: "SECRETPASSKEY"}}, nil, Upstreams{})
 		body := serve(off)
 		if strings.Contains(body, "SECRETPASSKEY") {
 			t.Errorf("unconfigured AB response leaks the passkey: %q", body)
@@ -878,7 +918,7 @@ func TestServeUnconfiguredABServesNoPasskeyItems(t *testing.T) {
 	})
 
 	t.Run("configured AB serves the same snapshot", func(t *testing.T) {
-		on := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "SECRETPASSKEY"}}, Deps{})
+		on := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "SECRETPASSKEY"}}, nil, Upstreams{})
 		body := serve(on)
 		if !strings.Contains(body, "<item>") || !strings.Contains(body, "Frieren - S01 (BD Remux 1080p) [PMR]") {
 			t.Errorf("configured AB did not serve the snapshot item: %q", body)
@@ -924,7 +964,7 @@ func TestRenderSynthesizedItem(t *testing.T) {
 // missing or wrong apikey before any capabilities document is served, and that a
 // correct key yields the exact caps shape the arrs expect.
 func TestServeRequiresAPIKeyBeforeServingCaps(t *testing.T) {
-	ix := New(&Config{APIKey: "secret"}, Deps{})
+	ix := New(&Config{APIKey: "secret"}, nil, Upstreams{})
 
 	bad := httptest.NewRecorder()
 	ix.serve(bad, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=wrong", nil))
@@ -1201,7 +1241,7 @@ func TestParsePubDate(t *testing.T) {
 // skipping straight to the constant-time compare would OPEN the gate and serve
 // the passkey-bearing feed unauthenticated.
 func TestServeFailsClosedWithoutConfiguredAPIKey(t *testing.T) {
-	ix := New(&Config{}, Deps{})
+	ix := New(&Config{}, nil, Upstreams{})
 	for _, target := range []string{
 		"/nyaa?t=caps",
 		"/nyaa?t=caps&apikey=",
@@ -1269,7 +1309,7 @@ func TestSearchUsesConfiguredABUpstream(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, Deps{HTTP: srv.Client()})
+	ix := wiredIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, nil, srv.Client())
 
 	items, stats := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "ab")
 	if len(items) != 1 {
@@ -1299,15 +1339,15 @@ func TestFeedForUnknownScopeServesNothing(t *testing.T) {
 		NyaaTorznabURL: "http://prowlarr/1/api",
 		ABTorznabURL:   "http://prowlarr/2/api",
 		ABPasskey:      "PK",
-	}}, Deps{})
-	ix.mu.Lock()
-	ix.snap.NyaaFeed = []journalItem{
+	}}, nil, Upstreams{})
+	ix.cache.mu.Lock()
+	ix.cache.snap.NyaaFeed = []journalItem{
 		{item: item{Title: "n"}},
 	}
-	ix.snap.ABFeed = []journalItem{
+	ix.cache.snap.ABFeed = []journalItem{
 		{item: item{Title: "a"}},
 	}
-	ix.mu.Unlock()
+	ix.cache.mu.Unlock()
 	if got := ix.feedFor("other"); got != nil {
 		t.Errorf("feedFor(unknown scope) = %+v, want nil", got)
 	}
@@ -1327,7 +1367,7 @@ func TestFeedForUnknownScopeServesNothing(t *testing.T) {
 // unconfigured-tracker empty feed.
 func TestNewCopiesConfig(t *testing.T) {
 	cfg := &Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}
-	ix := New(cfg, Deps{})
+	ix := New(cfg, nil, Upstreams{})
 
 	// The caller reuses (or clears) its Config after construction.
 	cfg.APIKey = ""
@@ -1343,5 +1383,54 @@ func TestNewCopiesConfig(t *testing.T) {
 	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/ab?t=search&apikey=k", nil))
 	if body := rec.Body.String(); !strings.Contains(body, "<error") || !strings.Contains(body, "passkey") {
 		t.Errorf("ab empty-q body after the caller blanked ab_torznab_url = %q, want the configured-tracker missing-passkey <error>", body)
+	}
+}
+
+// TestRejectionLinesNameTheClientIP pins the Loki-visible contract of the two
+// request-rejection lines: the caller is identified by the fleet-standard
+// `client_ip` attribute (every webhttp consumer's spelling, so one shared query
+// over the fleet's security lines includes this app), resolved through
+// webhttp.ClientIP - which strips the port, so the value is an address the
+// operator can match against a firewall or DHCP lease rather than an
+// ephemeral-port socket string.
+func TestRejectionLinesNameTheClientIP(t *testing.T) {
+	log, rec := capture.New()
+	ix := wiredIndexer(&Config{
+		APIKey:         "secret",
+		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"},
+	}, log, nil)
+
+	badKey := httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=wrong", nil)
+	badKey.RemoteAddr = "192.0.2.10:54321"
+	ix.serve(httptest.NewRecorder(), badKey)
+
+	noScope := httptest.NewRequest(http.MethodGet, "/other?t=caps&apikey=secret", nil)
+	noScope.RemoteAddr = "192.0.2.11:12345"
+	ix.serve(httptest.NewRecorder(), noScope)
+
+	// Both rejections share one message, so read the attrs record by record
+	// rather than through the first-match accessors.
+	var gotIPs []string
+	for _, r := range rec.Records() {
+		if r.Message != "indexer request rejected" {
+			continue
+		}
+		ip := ""
+		r.Attrs(func(a slog.Attr) bool {
+			switch a.Key {
+			case "client_ip":
+				ip = a.Value.String()
+			case "remote":
+				t.Errorf("rejection line still carries the pre-adoption `remote` attr: %v", a.Value)
+			}
+			return true
+		})
+		gotIPs = append(gotIPs, ip)
+	}
+	// Host only, no port: webhttp.ClientIP strips it, so the value matches a
+	// firewall rule or a DHCP lease instead of an ephemeral socket string.
+	want := []string{"192.0.2.10", "192.0.2.11"}
+	if !slices.Equal(gotIPs, want) {
+		t.Errorf("client_ip values on the rejection lines = %q, want %q (messages: %v)", gotIPs, want, rec.Messages())
 	}
 }

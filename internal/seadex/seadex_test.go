@@ -115,43 +115,6 @@ func TestFetchEntriesPaginationCapErrors(t *testing.T) {
 	}
 }
 
-func TestTorrentUsableURL(t *testing.T) {
-	tests := []struct {
-		name string
-		want string
-		in   Torrent
-	}{
-		{name: "blank", in: Torrent{Tracker: "Nyaa", URL: "   "}, want: ""},
-		{name: "absolute canonical host", in: Torrent{Tracker: "AB", URL: " https://animebytes.tv/torrents.php?id=1&torrentid=2 "}, want: "https://animebytes.tv/torrents.php?id=1&torrentid=2"},
-		{name: "absolute canonical host case-insensitive", in: Torrent{Tracker: "Nyaa", URL: "https://NYAA.SI/view/1"}, want: "https://NYAA.SI/view/1"},
-		{name: "absolute canonical subdomain", in: Torrent{Tracker: "Nyaa", URL: "https://sukebei.nyaa.si/view/1"}, want: "https://sukebei.nyaa.si/view/1"},
-		{name: "absolute canonical host trailing dot", in: Torrent{Tracker: "Nyaa", URL: "https://nyaa.si./view/1"}, want: "https://nyaa.si./view/1"},
-		{name: "absolute canonical host with valid port kept", in: Torrent{Tracker: "Nyaa", URL: "https://nyaa.si:8080/view/1"}, want: "https://nyaa.si:8080/view/1"},
-		{name: "nyaa-labeled foreign host drops", in: Torrent{Tracker: "Nyaa", URL: "https://evil.example/view/1"}, want: ""},
-		{name: "suffix-confusion host drops", in: Torrent{Tracker: "Nyaa", URL: "https://evilnyaa.si/view/1"}, want: ""},
-		{name: "prefix-confusion host drops", in: Torrent{Tracker: "Nyaa", URL: "https://nyaa.si.evil.example/view/1"}, want: ""},
-		{name: "idn lookalike host drops", in: Torrent{Tracker: "Nyaa", URL: "https://ny\u0430a.si/view/1"}, want: ""},
-		{name: "mislabeled cross-tracker canonical host kept", in: Torrent{Tracker: "Nyaa", URL: "https://animebytes.tv/torrents.php?id=9&torrentid=10"}, want: "https://animebytes.tv/torrents.php?id=9&torrentid=10"},
-		{name: "mislabeled schemeless canonical host recovers", in: Torrent{Tracker: "Nyaa", URL: "animebytes.tv/torrents.php?id=9&torrentid=10"}, want: "https://animebytes.tv/torrents.php?id=9&torrentid=10"},
-		{name: "schemeless canonical host with userinfo never publishes canonicalized", in: Torrent{Tracker: "Nyaa", URL: "user@animebytes.tv/torrents.php?id=9"}, want: "https://nyaa.si/user@animebytes.tv/torrents.php?id=9"},
-		{name: "animebytes relative", in: Torrent{Tracker: "AB", URL: "/torrents.php?id=1"}, want: "https://animebytes.tv/torrents.php?id=1"},
-		{name: "mislabeled AB torrent-page relative canonicalizes to AB base", in: Torrent{Tracker: "Nyaa", URL: "/torrents.php?id=1&torrentid=2"}, want: "https://animebytes.tv/torrents.php?id=1&torrentid=2"},
-		{name: "mislabeled slashless AB torrent-page shape canonicalizes to AB base", in: Torrent{Tracker: "Nyaa", URL: "torrents.php?id=1&torrentid=2"}, want: "https://animebytes.tv/torrents.php?id=1&torrentid=2"},
-		{name: "relative without slash", in: Torrent{Tracker: "Nyaa", URL: "view/1"}, want: "https://nyaa.si/view/1"},
-		{name: "unknown tracker relative drops", in: Torrent{Tracker: "unknown", URL: "/local/path"}, want: ""},
-		{name: "unknown tracker absolute drops", in: Torrent{Tracker: "unknown", URL: "https://example.test/t/9"}, want: ""},
-		{name: "stripped tracker relative drops", in: Torrent{Tracker: "beyondhd", URL: "/torrents/1"}, want: ""},
-		{name: "rutracker relative", in: Torrent{Tracker: "RuTracker", URL: "forum/viewtopic.php?t=1"}, want: "https://rutracker.org/forum/viewtopic.php?t=1"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.in.UsableURL(); got != tc.want {
-				t.Errorf("UsableURL() = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
 // TestFetchEntriesUsesStableSort pins the immutable-field pagination ordering
 // (sort=created,id): with offset pagination over a live collection, sorting on
 // a mutable field lets a mid-pagination update shift records across pages (one
@@ -172,46 +135,6 @@ func TestFetchEntriesUsesStableSort(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Errorf("entries = %d, want 1", len(entries))
-	}
-}
-
-// TestTorrentUsableURLRejectsUnsafeSchemes pins the unsafe-scheme and
-// malformed-URL gate on the untrusted upstream URL: javascript:, data:, and
-// file: values must never be converted into clickable tracker links, and a
-// malformed or anomalous value (hostless, unparseable escape, whitespace in
-// the host, backslash authority, a tab/newline-smuggled form the WHATWG
-// preprocessing de-smuggled, a hidden-host quirk form) must drop to the
-// empty-URL case rather than be published as a link a human cannot follow -
-// publish-or-drop rejects what it cannot vouch for even when the classifier
-// recovered the evidence.
-func TestTorrentUsableURLRejectsUnsafeSchemes(t *testing.T) {
-	tests := []struct {
-		name string
-		url  string
-	}{
-		{name: "javascript", url: "javascript:alert(1)"},
-		{name: "data", url: "data:text/html,<script>alert(1)</script>"},
-		{name: "file", url: "file:///etc/passwd"},
-		{name: "hostless https", url: "https://"},
-		{name: "port-only authority", url: "https://:443/path"},
-		{name: "out-of-range port", url: "https://nyaa.si:65536/path"},
-		{name: "invalid escape", url: "https://example.test/%zz"},
-		{name: "whitespace in host", url: "https://bad host/path"},
-		{name: "backslash authority", url: `\\evil.example/path`},
-		{name: "tab-smuggled canonical host", url: "https://nyaa\t.si/view/1"},
-		{name: "newline-smuggled scheme", url: "ht\ntps://nyaa.si/view/1"},
-		{name: "hidden-host single-slash form (evidence recovered, still unvouchable)", url: "https:/animebytes.tv/torrents.php?id=1"},
-		{name: "userinfo authority confusion", url: "https://animebytes.tv@evil.example/torrent"},
-		{name: "query-only with colon", url: "?x:y"},
-		{name: "fragment-only with colon", url: "#a:b"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := (&Torrent{Tracker: "Nyaa", URL: tc.url}).UsableURL()
-			if got != "" {
-				t.Errorf("UsableURL(%q) = %q, want empty for unsafe scheme", tc.url, got)
-			}
-		})
 	}
 }
 

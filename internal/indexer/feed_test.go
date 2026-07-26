@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -115,6 +116,61 @@ func TestFeedSynthesisIgnoresSubHalfSizeSample(t *testing.T) {
 	}
 }
 
+// TestFeedSynthesisCollapsesMixedLengthPack pins the user-visible half of
+// d-u5-c4-1: a real season pack whose premiere runs double length (or that
+// bundles the franchise movie) must still count every episode and collapse to
+// the season label. Under the max-anchored payload floor the regular episodes
+// all fell below half the longest file, so coveredEpisodes returned 1, isPack
+// went false, and the whole pack was served as "Show S01E01" - which Sonarr
+// grabs as a single episode, without the FullSeason ranking a pack earns. This
+// is the inverse of the v1.7.2 contract (a real multi-file pack collapses to
+// the season; only a single-episode torrent keeps its SxxExx).
+func TestFeedSynthesisCollapsesMixedLengthPack(t *testing.T) {
+	const gib = 1 << 30
+	episodes := func(from, to int, size int64) []seadex.File {
+		out := make([]seadex.File, 0, to-from+1)
+		for e := from; e <= to; e++ {
+			out = append(out, seadex.File{Name: fmt.Sprintf("Show S01E%02d [1080p].mkv", e), Length: size})
+		}
+		return out
+	}
+	tests := map[string]struct {
+		files    []seadex.File
+		wantEps  int
+		wantSeen int
+	}{
+		"double-length premiere": {
+			files:    append(episodes(1, 1, 5*gib/2), episodes(2, 12, 6*gib/5)...),
+			wantEps:  12,
+			wantSeen: 12,
+		},
+		"bundled franchise movie": {
+			// The movie carries no episode token, so it is not counted as an
+			// episode - but it must not evict the episodes that are.
+			files:    append([]seadex.File{{Name: "Show Movie [1080p].mkv", Length: 4 * gib}}, episodes(1, 12, 6*gib/5)...),
+			wantEps:  12,
+			wantSeen: 12,
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			tor := &seadex.Torrent{Files: tt.files}
+			if got := coveredEpisodes(tt.files); got != tt.wantEps {
+				t.Errorf("coveredEpisodes = %d, want %d (a shorter episode is still an episode)", got, tt.wantEps)
+			}
+			if !isPack(tor) {
+				t.Error("isPack = false, want true (a multi-episode season pack)")
+			}
+			if got := seasonCounts(tt.files)[1]; got != tt.wantSeen {
+				t.Errorf("seasonCounts[1] = %d, want %d", got, tt.wantSeen)
+			}
+			if got, want := derivedTitle(tor, EntryInfo{Title: "Show", Season: 1, SeasonKnown: true}), "Show S01 [1080p]"; got != want {
+				t.Errorf("derivedTitle = %q, want %q (the pack must collapse to the season)", got, want)
+			}
+		})
+	}
+}
+
 // TestCoveredEpisodesCountsExtensionAbuttingAbsoluteForm pins that the
 // absolute-episode fallback fires when the episode number abuts the file
 // extension ("Show - 07.mkv"): the tokens are matched against the
@@ -149,7 +205,7 @@ func TestCoveredEpisodesRecognizesUnderscoreAbsolutePacks(t *testing.T) {
 	// The synthesized-title path labels the pack from the show title; with a
 	// known title the underscore pack gets a clean assembled title instead of
 	// the first file's name.
-	got := synthesizeTitle(&seadex.Torrent{Files: files, ReleaseGroup: "Grp"}, EntryInfo{Title: "Show", SeasonTvdb: 1})
+	got := synthesizeTitle(&seadex.Torrent{Files: files, ReleaseGroup: "Grp"}, EntryInfo{Title: "Show", Season: 1, SeasonKnown: true})
 	if want := "Show S01 1080p [Grp]"; got != want {
 		t.Errorf("synthesizeTitle(underscore pack) = %q, want %q", got, want)
 	}
@@ -259,7 +315,7 @@ func TestSynthesizeTitle(t *testing.T) {
 		{
 			name: "season pack labels the Fribb season with flags",
 			t:    seadex.Torrent{Files: packFiles, ReleaseGroup: "PMR", DualAudio: true},
-			meta: EntryInfo{Title: "Frieren: Beyond Journey's End", SeasonTvdb: 1},
+			meta: EntryInfo{Title: "Frieren: Beyond Journey's End", Season: 1, SeasonKnown: true},
 			want: "Frieren: Beyond Journey's End S01 1080p Dual Audio [PMR]",
 		},
 		{
@@ -283,7 +339,7 @@ func TestSynthesizeTitle(t *testing.T) {
 			t: seadex.Torrent{Files: []seadex.File{
 				{Name: "Scum.of.the.Brave.S01E05.1080p.CR.WEB-DL-VARYG.mkv"},
 			}, ReleaseGroup: "VARYG"},
-			meta: EntryInfo{Title: "Scum of the Brave", SeasonTvdb: 1},
+			meta: EntryInfo{Title: "Scum of the Brave", Season: 1, SeasonKnown: true},
 			want: "Scum of the Brave S01E05 1080p [VARYG]",
 		},
 		{
@@ -314,7 +370,7 @@ func TestSynthesizeTitle(t *testing.T) {
 				{Name: "Show OVA - 01.mkv"},
 				{Name: "Show OVA - 02.mkv"},
 			}},
-			meta: EntryInfo{Title: "Show OVA", IsSpecial: true},
+			meta: EntryInfo{Title: "Show OVA", SeasonKnown: true},
 			want: "Show OVA S00",
 		},
 		{
@@ -332,7 +388,7 @@ func TestSynthesizeTitle(t *testing.T) {
 				{Name: "Show - S01E01.mkv"},
 				{Name: "Show - S01E02.mkv"},
 			}},
-			meta: EntryInfo{Title: "Show", SeasonTvdb: 1},
+			meta: EntryInfo{Title: "Show", Season: 1, SeasonKnown: true},
 			want: "Show S01",
 		},
 		{
@@ -523,7 +579,7 @@ func TestDerivedTitleCollapsesOnlyLastAbsoluteEpisodeToken(t *testing.T) {
 func TestSingleEpisodeMarkerUsesLastToken(t *testing.T) {
 	got := synthesizeTitle(&seadex.Torrent{Files: []seadex.File{
 		{Name: "Show S02E00 Cut - S01E05 (1080p).mkv"},
-	}}, EntryInfo{Title: "Show", SeasonTvdb: 1})
+	}}, EntryInfo{Title: "Show", Season: 1, SeasonKnown: true})
 	if want := "Show S01E05 1080p"; got != want {
 		t.Errorf("synthesizeTitle(single episode with a token-shaped title segment) = %q, want %q (the marker is the LAST SxxExx token)", got, want)
 	}
@@ -545,13 +601,14 @@ func TestPackSeasonKeysOnLastToken(t *testing.T) {
 }
 
 // TestEpisodeMarkerRelabelsCourLocalSeason pins the single-release half of
-// the season correction (the pack arm already labels by the Fribb season): a
-// single-episode torrent whose file uses cour-local numbering (S01E07) under
-// an entry Fribb maps to TVDB season 3 must synthesize S03E07 - the arr's own
-// numbering - never the file's S01E07, which points at a DIFFERENT episode of
-// the parent series. An absolute "- NN" marker and an unmapped entry
-// (SeasonTvdb 0) pass through unchanged, and a file already on the mapped
-// season is a no-op.
+// the season correction (the pack arm already labels by the resolved season): a
+// single-episode torrent whose file uses cour-local numbering (S01E07) under an
+// entry resolved to season 3 must synthesize S03E07 - the arr's own numbering -
+// never the file's S01E07, which points at a DIFFERENT episode of the parent
+// series. An absolute "- NN" marker and an entry with no resolved season
+// (SeasonKnown false) pass through unchanged, and a file already on the
+// resolved season is a no-op. A resolved season 0 (the specials bucket) is a
+// real season here, not an absent one, so it relabels to S00.
 func TestEpisodeMarkerRelabelsCourLocalSeason(t *testing.T) {
 	tests := []struct {
 		name string
@@ -559,20 +616,19 @@ func TestEpisodeMarkerRelabelsCourLocalSeason(t *testing.T) {
 		meta EntryInfo
 		want string
 	}{
-		{"cour-local season relabeled", "Show - S01E07 (1080p) [G].mkv", EntryInfo{SeasonTvdb: 3}, "S03E07"},
-		{"matching season is a no-op", "Show - S03E07 (1080p) [G].mkv", EntryInfo{SeasonTvdb: 3}, "S03E07"},
+		{"cour-local season relabeled", "Show - S01E07 (1080p) [G].mkv", EntryInfo{Season: 3, SeasonKnown: true}, "S03E07"},
+		{"matching season is a no-op", "Show - S03E07 (1080p) [G].mkv", EntryInfo{Season: 3, SeasonKnown: true}, "S03E07"},
 		{"unmapped entry keeps the file marker", "Show - S01E07 (1080p) [G].mkv", EntryInfo{}, "S01E07"},
-		{"episode range keeps its range half", "Show - S01E01-E03 [G].mkv", EntryInfo{SeasonTvdb: 2}, "S02E01-E03"},
-		{"absolute marker is never relabeled", "Show - 07 (1080p) [G].mkv", EntryInfo{SeasonTvdb: 3}, "- 07"},
-		{"special relabels cour-local season to S00", "Show - S01E01 (1080p) [G].mkv", EntryInfo{IsSpecial: true}, "S00E01"},
-		{"absolute-marked special is never relabeled", "Show - 07 (1080p) [G].mkv", EntryInfo{IsSpecial: true}, "- 07"},
-		{"special with a mapped season keeps the mapped season", "Show - S01E01 (1080p) [G].mkv", EntryInfo{IsSpecial: true, SeasonTvdb: 2}, "S02E01"},
+		{"episode range keeps its range half", "Show - S01E01-E03 [G].mkv", EntryInfo{Season: 2, SeasonKnown: true}, "S02E01-E03"},
+		{"absolute marker is never relabeled", "Show - 07 (1080p) [G].mkv", EntryInfo{Season: 3, SeasonKnown: true}, "- 07"},
+		{"special relabels cour-local season to S00", "Show - S01E01 (1080p) [G].mkv", EntryInfo{SeasonKnown: true}, "S00E01"},
+		{"absolute-marked special is never relabeled", "Show - 07 (1080p) [G].mkv", EntryInfo{SeasonKnown: true}, "- 07"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			tor := seadex.Torrent{Files: []seadex.File{{Name: tc.file}}}
 			if got := episodeMarker(&tor, tc.meta); got != tc.want {
-				t.Errorf("episodeMarker(%q, season %d) = %q, want %q", tc.file, tc.meta.SeasonTvdb, got, tc.want)
+				t.Errorf("episodeMarker(%q, season %d known %v) = %q, want %q", tc.file, tc.meta.Season, tc.meta.SeasonKnown, got, tc.want)
 			}
 		})
 	}
@@ -627,20 +683,20 @@ func TestSingleEpisodeMarkerAbsoluteArmUsesLastToken(t *testing.T) {
 // pack collapse alike - while an unmapped entry keeps the file's own season.
 func TestDerivedTitleRelabelsCourLocalSeason(t *testing.T) {
 	single := &seadex.Torrent{Files: []seadex.File{{Name: "Show - S01E07 (1080p) [G].mkv"}}}
-	if got, want := synthesizeTitle(single, EntryInfo{SeasonTvdb: 3}), "Show - S03E07 (1080p) [G]"; got != want {
+	if got, want := synthesizeTitle(single, EntryInfo{Season: 3, SeasonKnown: true}), "Show - S03E07 (1080p) [G]"; got != want {
 		t.Errorf("fallback single = %q, want %q", got, want)
 	}
 	pack := &seadex.Torrent{Files: []seadex.File{
 		{Name: "Show - S01E01 (1080p) [G].mkv"},
 		{Name: "Show - S01E02 (1080p) [G].mkv"},
 	}}
-	if got, want := synthesizeTitle(pack, EntryInfo{SeasonTvdb: 3}), "Show - S03 (1080p) [G]"; got != want {
+	if got, want := synthesizeTitle(pack, EntryInfo{Season: 3, SeasonKnown: true}), "Show - S03 (1080p) [G]"; got != want {
 		t.Errorf("fallback pack = %q, want %q", got, want)
 	}
 	if got, want := synthesizeTitle(single, EntryInfo{}), "Show - S01E07 (1080p) [G]"; got != want {
 		t.Errorf("unmapped fallback = %q, want %q (file's own season kept)", got, want)
 	}
-	if got, want := synthesizeTitle(pack, EntryInfo{IsSpecial: true}), "Show - S00 (1080p) [G]"; got != want {
+	if got, want := synthesizeTitle(pack, EntryInfo{SeasonKnown: true}), "Show - S00 (1080p) [G]"; got != want {
 		t.Errorf("fallback special pack = %q, want %q (the special typing outvotes cour-local file seasons, mirroring episodeMarker's pack arm)", got, want)
 	}
 }
@@ -652,15 +708,15 @@ func TestDerivedTitleRelabelsCourLocalSeason(t *testing.T) {
 // must pass through unchanged, never gain an invented season label.
 func TestDerivedTitleMappedSeasonNeverRelabelsAbsoluteOrMarkerlessNames(t *testing.T) {
 	single := &seadex.Torrent{Files: []seadex.File{{Name: "[Grp] Show - 07 (1080p).mkv"}}}
-	if got, want := synthesizeTitle(single, EntryInfo{SeasonTvdb: 3}), "[Grp] Show - 07 (1080p)"; got != want {
+	if got, want := synthesizeTitle(single, EntryInfo{Season: 3, SeasonKnown: true}), "[Grp] Show - 07 (1080p)"; got != want {
 		t.Errorf("derived absolute single with a mapped season = %q, want %q (nothing to relabel)", got, want)
 	}
 	markerless := &seadex.Torrent{Files: []seadex.File{{Name: "Show Movie.mkv"}}}
-	if got, want := synthesizeTitle(markerless, EntryInfo{SeasonTvdb: 3}), "Show Movie"; got != want {
+	if got, want := synthesizeTitle(markerless, EntryInfo{Season: 3, SeasonKnown: true}), "Show Movie"; got != want {
 		t.Errorf("derived marker-less single with a mapped season = %q, want %q (nothing to relabel)", got, want)
 	}
 	special := &seadex.Torrent{Files: []seadex.File{{Name: "[Grp] Show - 07 (1080p).mkv"}}}
-	if got, want := synthesizeTitle(special, EntryInfo{IsSpecial: true}), "[Grp] Show - 07 (1080p)"; got != want {
+	if got, want := synthesizeTitle(special, EntryInfo{SeasonKnown: true}), "[Grp] Show - 07 (1080p)"; got != want {
 		t.Errorf("derived absolute single special = %q, want %q (mapped season 0 has no token to relabel)", got, want)
 	}
 }

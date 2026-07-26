@@ -84,6 +84,19 @@ const maxFribbRecords = 1 << 16
 // degradation.EscalationThreshold instead of degrading at WARN forever.
 var errRecordCapExceeded = fmt.Errorf("mapping: Fribb list exceeds cap %d records", maxFribbRecords)
 
+// errNotJSONArray rejects a Fribb body whose top-level value is not a JSON
+// array (an object, a scalar, or null). It is a sentinel because the class is
+// CONTENT-SHAPE evidence, not transport damage: truncating or corrupting a
+// valid array body in flight cannot change its FIRST token, so a non-'['
+// document means the upstream schema itself moved and every later cycle will
+// re-download the multi-MB body and fail identically - it never self-heals.
+// acceptRefresh therefore routes it through rejectRefresh (advancing the
+// persisted rejection streak so the scout escalates at
+// degradation.EscalationThreshold) instead of treating it as a transient parse
+// failure. Mid-stream truncation stays transient: a partial download of a
+// genuinely array-shaped body CAN succeed on the next attempt.
+var errNotJSONArray = errors.New("mapping: Fribb list is not a JSON array")
+
 // maxFribbRecordBytes bounds one encoded Fribb record before its tolerant
 // decode. The document-level maxMapBytes cap plus maxFribbRecords still admit
 // a single record whose nested identifier arrays decode into a working set far
@@ -150,13 +163,13 @@ func parseFribbForRefresh(data []byte, log *slog.Logger) (fribbParseResult, erro
 	dec := bounded.NewDecoder(bytes.NewReader(data), 0)
 	ok, err := dec.Open('[')
 	if err != nil {
-		return fribbParseResult{}, fmt.Errorf("mapping: Fribb list is not a JSON array: %w", err)
+		return fribbParseResult{}, fmt.Errorf("%w: %w", errNotJSONArray, err)
 	}
 	if !ok {
 		// bounded.Open reports a JSON null as ok=false without error (the
 		// Unmarshal null-into-slice no-op); for the Fribb map an absent list
 		// is as unusable as a non-array.
-		return fribbParseResult{}, errors.New("mapping: Fribb list is not a JSON array (got null)")
+		return fribbParseResult{}, fmt.Errorf("%w (got null)", errNotJSONArray)
 	}
 	counts, err := decodeFribbRecords(dec)
 	if err != nil {

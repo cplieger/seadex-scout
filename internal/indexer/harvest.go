@@ -14,7 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/httpx/v3"
+	"github.com/cplieger/httpx/v4"
+	"github.com/cplieger/seadex-scout/internal/titlekey"
 )
 
 // --- Politeness rate, time slice, paging, and stats ---
@@ -97,9 +98,10 @@ func (p *harvestPacer) spent(ctx context.Context) bool {
 // on a synthesized title afterwards (out of time, unmatched, no query source,
 // or no upstream for their tracker).
 type harvestStats struct {
-	queries int
-	matched int
-	pending int
+	queries  int
+	matched  int
+	rejected int
+	pending  int
 }
 
 // harvestGroup is one show's pending harvest work on one tracker: the journal
@@ -178,6 +180,7 @@ func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]journ
 		failed:     make(map[string]bool, len(w.upstreams)),
 		malformed:  make(map[string]int, len(w.upstreams)),
 		rejected:   make(map[string]int, len(w.upstreams)),
+		fruitless:  make(map[string]int, len(w.upstreams)),
 	}
 	start := rotationStart(groups, cp.Last)
 	for i := range groups {
@@ -204,6 +207,7 @@ type harvestRun struct {
 	failed     map[string]bool
 	malformed  map[string]int
 	rejected   map[string]int
+	fruitless  map[string]int
 }
 
 // processHarvestGroup runs one show-on-one-tracker group of the rotation:
@@ -247,7 +251,7 @@ func (w *FeedWriter) processHarvestGroup(ctx context.Context, g harvestGroup, r 
 		// rebuild resumes exactly where real work stopped.
 		r.checkpoint.Last = key
 	}
-	w.updateHarvestScopeState(g.scope, outcome, r.failed, r.malformed, r.rejected)
+	w.updateHarvestScopeState(g.scope, outcome, r.failed, r.malformed, r.rejected, r.fruitless)
 	return true
 }
 
@@ -405,14 +409,33 @@ func rotationStart(groups []harvestGroup, cursor string) int {
 }
 
 // updateHarvestScopeState applies one queried show's outcome to the per-scope
-// failure latch and the two consecutive-run counters: harvestScopeFailed
+// failure latch and the three consecutive-run counters: harvestScopeFailed
 // latches the scope, harvestShowMalformed counts toward
 // consecutiveMalformedLatch (latching the scope when the run trips it), a
 // show-local request rejection (harvestShowFailed) resets the malformed run
 // but counts toward its own consecutiveRejectedLatch (latching the scope on a
 // run of systematic rejections), and any other outcome - a success - resets
-// both runs.
-func (w *FeedWriter) updateHarvestScopeState(scope string, outcome harvestOutcome, failed map[string]bool, malformed, rejected map[string]int) {
+// all three.
+//
+// The third counter closes the hole the first two left (l-f91). Because each
+// failure arm resets the OTHER's counter - deliberately, since a definitive
+// request rejection falsifies the answers-garbage-to-everything hypothesis - an
+// upstream whose failures ALTERNATE between the two show-local kinds tripped
+// NEITHER latch even with zero successful shows: the full harvestTimeBudget
+// burned with no title progress on every rebuild and classifyHarvestError emitted
+// one WARN per failed show (up to ~300) instead of the <=3-then-latch bound the
+// homogeneous case gets. That is a plausible degraded state, not just an
+// adversarial one: a misbehaving reverse proxy answering HTML garbage to one
+// query shape and 400/422 to another, while the pending set interleaves
+// mapped-season groups (tvsearch) with unmapped ones (plain search).
+//
+// fruitless counts consecutive shows that produced NO progress of any kind and is
+// reset ONLY by a success, so it states the latches' actual purpose directly
+// ("nothing is working") instead of inferring it per failure kind. The
+// cross-resets STAY, so both existing latches keep their exact documented
+// semantics and thresholds for homogeneous runs - this arm only fires on the
+// mixed runs neither of them can see.
+func (w *FeedWriter) updateHarvestScopeState(scope string, outcome harvestOutcome, failed map[string]bool, malformed, rejected, fruitless map[string]int) {
 	switch outcome {
 	case harvestScopeFailed:
 		failed[scope] = true
@@ -441,6 +464,17 @@ func (w *FeedWriter) updateHarvestScopeState(scope string, outcome harvestOutcom
 	default:
 		malformed[scope] = 0
 		rejected[scope] = 0
+		fruitless[scope] = 0
+		return
+	}
+	// Every arm above is a failure, whichever kind: charge the no-progress run
+	// and latch when even a mixed sequence has produced nothing. Skipped when a
+	// per-kind latch already fired, so the two never double-warn.
+	fruitless[scope]++
+	if !failed[scope] && fruitless[scope] >= consecutiveFruitlessLatch {
+		w.log.Warn("indexer title harvest: no show made progress; skipping this upstream's remaining shows this rebuild",
+			"upstream", scope, "consecutive", fruitless[scope])
+		failed[scope] = true
 	}
 }
 
@@ -522,6 +556,20 @@ const consecutiveMalformedLatch = 3
 // show - resets the run.
 const consecutiveRejectedLatch = 3
 
+// consecutiveFruitlessLatch is how many CONSECUTIVE shows on one scope may fail
+// in ANY mix before the scope is treated as broken and its remaining shows are
+// skipped this rebuild. It is the backstop the two per-kind latches cannot be:
+// each of those resets the other's counter (deliberately - see
+// updateHarvestScopeState), so an upstream ALTERNATING between a garbled 2xx body
+// and a request rejection trips neither of them however long it runs, and the
+// full harvestTimeBudget burns with zero title progress every rebuild (l-f91).
+//
+// Twice the per-kind threshold: a homogeneous run always latches at 3 through its
+// own counter, so this fires only on a genuinely mixed sequence - where the
+// evidence for "this upstream is broken" accumulates more slowly and deserves
+// more patience - and it can never preempt the more specific diagnostics.
+const consecutiveFruitlessLatch = 2 * consecutiveMalformedLatch
+
 // harvestShow runs one show's query (plus offset pages while its items remain
 // unmatched and full pages keep coming, up to harvestShowPageCap pages this
 // rebuild) against its tracker's upstream, starting at startPage - the
@@ -563,7 +611,19 @@ func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGrou
 		if !ok {
 			return failure, page
 		}
-		stats.matched += matchHarvest(results, g.scope, index, titles)
+		matched, rejected := matchHarvest(results, g.scope, index, titles, meta.Title)
+		stats.matched += matched
+		if rejected > 0 {
+			// A result whose own identity signals contradict each other is an
+			// untrusted upstream response, not an operator fault: it resolves
+			// nothing, the item keeps its synthesized title, and the next
+			// rebuild retries. WARN would fire per page of a systematically
+			// tampered feed, so the count rides Debug plus the harvest_rejected
+			// stat on the rebuild's summary line.
+			stats.rejected += rejected
+			w.log.Debug("indexer title harvest results rejected: contradictory identity signals",
+				"upstream", u.name, "al_id", g.alID, "page", page, "rejected", rejected)
+		}
 		if harvestPageComplete(g, titles, raw) {
 			return harvestOK, 0
 		}
@@ -616,8 +676,8 @@ func harvestPageComplete(g harvestGroup, titles map[string]string, raw int) bool
 // (t=search vs t=tvsearch) and page the offset page, so an operator can tell a
 // season-form rejection from a flat-search one and a poisoned deep page from a
 // first-page failure. The encoded query and full URL stay out of the log
-// deliberately (prowlarr.go strips RawQuery and userinfo from every error that
-// reaches here).
+// deliberately (httpx's redactor drops userinfo and REDACTs every query value
+// in the *StatusError that reaches here).
 func (w *FeedWriter) classifyHarvestError(err error, u *upstream, alID int, queryType string, page int) harvestOutcome {
 	if malformedUpstreamBody(err) {
 		w.log.Warn("indexer title harvest response malformed; show keeps its synthesized title this rebuild",
@@ -722,15 +782,18 @@ func harvestable(it *journalItem, titles map[string]string, infoFor EntryInfoFun
 // harvestParams builds the one Torznab query for a show on a tracker, from the
 // show's synthesis title source. AnimeBytes search is series-level - a plain
 // q returns the show's whole torrent set - so a basic search suffices. Nyaa is
-// a flat search, so a mapped season uses the season form (q + season): the
-// season token surfaces both packs (named "... S01 ...") and SxxExx-named
-// episodes (S01 prefixes S01E07), which is what SeaDex curates; offset paging
-// under the indexer's default created/desc ordering then reaches older items.
+// a flat search, so a REAL season (a resolved season above the specials bucket)
+// uses the season form (q + season): the season token surfaces both packs
+// (named "... S01 ...") and SxxExx-named episodes (S01 prefixes S01E07), which
+// is what SeaDex curates; offset paging under the indexer's default
+// created/desc ordering then reaches older items. The specials bucket is
+// deliberately excluded - "season=0" is not a search a tracker's episode naming
+// answers.
 func harvestParams(meta EntryInfo, scope string) url.Values {
 	q := url.Values{"t": {"search"}, "q": {strings.TrimSpace(meta.Title)}}
-	if scope == upstreamNyaa && !meta.IsMovie && meta.SeasonTvdb > 0 {
+	if scope == upstreamNyaa && !meta.IsMovie && meta.SeasonKnown && meta.Season > 0 {
 		q.Set("t", "tvsearch")
-		q.Set("season", strconv.Itoa(meta.SeasonTvdb))
+		q.Set("season", strconv.Itoa(meta.Season))
 	}
 	return q
 }
@@ -763,57 +826,182 @@ const harvestMaxTitleLen = 512
 // journal item (the same scope binding the search curation match applies in
 // acceptScopedKeys). An already-cached key is never overwritten: torrents
 // are immutable, so the first harvested title stands.
-func matchHarvest(results []item, scope string, index, titles map[string]string) int {
-	n := 0
+//
+// showTitle is the show title the synthesis already trusts (the arr's own title,
+// or the AniList canonical one), used to pick among ALIASES of the same torrent
+// - see preferredHarvestTitle. Pass "" to keep plain first-wins.
+//
+// It reports the matches AND the contradictory rejections, so a result whose
+// own signals disagree is observable. That count is the only report such a
+// result gets: a rejected result silently leaves its journal item on the
+// synthesized heuristic title, and because the index is rebuilt from the same
+// journal each rebuild, a systematic disagreement never self-heals. Results that
+// simply are not ours (a season query returns the tracker's whole page) resolve
+// no key at all and are NOT counted - they are the overwhelming majority and
+// carry no signal.
+func matchHarvest(results []item, scope string, index, titles map[string]string, showTitle string) (matched, rejected int) {
+	// Collect every candidate title per key BEFORE choosing: AnimeBytes lists
+	// one torrent three times (EN / JP / Romaji aliases, distinct ?nh= GUIDs,
+	// the SAME torrent id), so all three resolve to one journal key and the
+	// choice among them is a policy, not an accident of Prowlarr's ordering
+	// (l-f142).
+	candidates := make(map[string][]string)
+	order := make([]string, 0, len(results))
 	for i := range results {
 		title := strings.TrimSpace(results[i].Title)
 		if title == "" || len(title) > harvestMaxTitleLen {
 			continue
 		}
-		key := resolveHarvestKey(&results[i], index)
+		key, conflict := resolveHarvestKey(&results[i], index)
+		if conflict {
+			rejected++
+			continue
+		}
 		if key == "" || !strings.HasPrefix(key, scope+":") {
 			continue
 		}
 		if _, done := titles[key]; done {
 			continue
 		}
-		titles[key] = title
-		n++
+		if _, seen := candidates[key]; !seen {
+			order = append(order, key)
+		}
+		candidates[key] = append(candidates[key], title)
+	}
+	for _, key := range order {
+		titles[key] = preferredHarvestTitle(candidates[key], showTitle)
+		matched++
+	}
+	return matched, rejected
+}
+
+// preferredHarvestTitle picks which of a torrent's alias titles is cached and
+// served for the item's whole journal window.
+//
+// AnimeBytes exposes each torrent under its English, Japanese and Romaji titles
+// (documented in this app's own notes: the aliases are kept, not deduped,
+// because extra titles help the arrs match), all three carrying the same torrent
+// id and therefore the same journal key. Taking whichever Prowlarr happened to
+// list first meant the served title was a coin flip - and a JP or Romaji alias
+// the operator's Sonarr series does not carry makes the RSS item LESS matchable
+// than the synthesized title it replaced, which synthesizeTitle deliberately
+// builds from the arr's own vocabulary (l-f142).
+//
+// The policy is English-preferred, expressed against the evidence actually
+// available: Torznab carries no language marker, so the alias whose text
+// contains the show title the synthesis already trusts (the arr's own title, or
+// the AniList canonical one) is the one in the arr's vocabulary. For an
+// English-titled series that selects the English alias; for an operator whose
+// arr carries the Romaji title it selects Romaji, which is the right answer for
+// THAT library. A native-script alias loses either way, since it cannot contain
+// a Latin show title.
+//
+// When the vocabulary cannot be detected - no show title to compare against, or
+// no alias containing it - the fallback keeps the alias carrying the most
+// arr-parseable text (ASCII letters and digits; first on a tie) rather than
+// whichever Prowlarr happened to list first. The aliases differ only in the
+// show-title portion of an otherwise identical release name, so that metric is
+// monotone in how much Latin release text survives: it beats a native-script
+// title, which an arr cannot parse at all, and it is deterministic where
+// Prowlarr's ordering is not. Byte or rune length would NOT do - a CJK title is
+// three bytes per character and would win on length while being the least
+// useful alias. It always returns one of the candidates: an undetected
+// vocabulary must never cost the item its harvested title and send it back to
+// the synthesized one.
+func preferredHarvestTitle(candidates []string, showTitle string) string {
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+	if want := titlekey.Normalize(showTitle); want != "" {
+		for _, c := range candidates {
+			if strings.Contains(titlekey.Normalize(c), want) {
+				return c
+			}
+		}
+	}
+	best, bestScore := candidates[0], asciiAlnums(candidates[0])
+	for _, c := range candidates[1:] {
+		if n := asciiAlnums(c); n > bestScore {
+			best, bestScore = c, n
+		}
+	}
+	return best
+}
+
+// asciiAlnums counts the ASCII letters and digits in s - a proxy for how much of
+// a release name an arr's title parser can actually work with.
+func asciiAlnums(s string) int {
+	n := 0
+	for i := range len(s) {
+		switch c := s[i]; {
+		case c >= '0' && c <= '9', c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z':
+			n++
+		}
 	}
 	return n
 }
 
 // resolveHarvestKey resolves a Prowlarr result to the single journal key its
 // identity signals - the tracker keys parsed from its page URLs and its
-// (already validated) info hash - agree on. It fails closed - returning "" -
-// when the keys parsed from the result's two page URLs name different
-// releases, or when two signals resolve to different journal items: a healthy
-// Prowlarr emits one consistent identity per item, so a contradictory result
-// is an untrusted response that must not title anything (the same fail-closed
-// rule the search curation match applies in acceptScopedKeys). A signal that
-// is present and parseable but absent from the pending index is unreconcilable
-// evidence, not an absent signal, so it rejects the result too: only a signal
-// the result does not carry at all (empty) is skipped.
-func resolveHarvestKey(it *item, index map[string]string) string {
+// (already validated) info hash - agree on. It reports conflict=true when the
+// signals CONTRADICT each other: the keys parsed from the two page URLs name
+// different releases, or two signals resolve to different journal items. A
+// healthy Prowlarr emits one consistent identity per item, so a contradictory
+// result is an untrusted response that must not title anything (the same
+// fail-closed rule the search curation match applies in acceptScopedKeys).
+// conflict=false with an empty key means the result is simply not one of ours -
+// the ordinary outcome for most of a season query's page.
+//
+// An info hash that is absent from the index is INCONCLUSIVE, not
+// contradictory, once another signal has resolved. The index is deliberately
+// partial - it carries only items still awaiting a title, and only the hashes
+// SeaDex itself published - so a Prowlarr Nyaa result (which always reports a
+// hash, torznab.go) routinely carries one the index cannot know: AB's
+// "<redacted>" form is dropped by validInfoHash and any SeaDex record missing
+// the field indexes no hash at all. Treating that absence as unreconcilable
+// evidence rejected the result outright, and because the index is rebuilt from
+// the same journal every rebuild the rejection was PERMANENT: the item kept its
+// synthesized heuristic title forever, on an identity disagreement between
+// SeaDex and the tracker that nothing in the pipeline reported (d-u5-c2-2).
+// Corroboration is what the hash is for, so it can agree or disagree - it
+// cannot veto an identity the URLs established on their own. A hash that IS in
+// the index and names a different item still conflicts, and a hash that is the
+// ONLY signal and unknown still resolves nothing (there is no item to title,
+// and nothing contradicted anything). Format skew is not a factor: both sides
+// normalize through validInfoHash.
+func resolveHarvestKey(it *item, index map[string]string) (key string, conflict bool) {
 	kc, kg := trackerKeyFromURL(it.InfoURL), trackerKeyFromURL(it.GUID)
 	if kc != "" && kg != "" && kc != kg {
-		return ""
+		return "", true
 	}
-	var key string
-	for _, id := range []string{kc, kg, it.InfoHash} {
+	for _, id := range []string{kc, kg} {
 		if id == "" {
 			continue
 		}
 		k, ok := index[id]
 		if !ok {
-			return ""
+			// A parseable tracker key the pending index does not hold names a
+			// release that is not ours; kc == kg here, so nothing disagrees.
+			return "", false
 		}
 		if key != "" && k != key {
-			return ""
+			return "", true
 		}
 		key = k
 	}
-	return key
+	if it.InfoHash == "" {
+		return key, false
+	}
+	k, ok := index[it.InfoHash]
+	if !ok {
+		// Unknown to a partial index: corroborates nothing either way. When no
+		// URL resolved, key is still "" and the result matches nothing.
+		return key, false
+	}
+	if key != "" && k != key {
+		return "", true
+	}
+	return k, false
 }
 
 // --- Pending accounting ---

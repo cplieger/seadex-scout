@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -16,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/httpx/v3"
+	"github.com/cplieger/httpx/v4"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/slogx/capture"
 )
@@ -100,11 +102,13 @@ func TestHarvestMatchesABByTorrentID(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Frieren - S01E01 (BD Remux 1080p) [PMR].mkv"}},
 		}},
 	}}
-	info := func(int) EntryInfo { return EntryInfo{Title: "Frieren: Beyond Journey's End", SeasonTvdb: 1} }
+	info := func(int) EntryInfo {
+		return EntryInfo{Title: "Frieren: Beyond Journey's End", Season: 1, SeasonKnown: true}
+	}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
-		WriterDeps{HTTP: srv.Client()})
+	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+		nil, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -150,11 +154,11 @@ func TestHarvestMatchesNyaaByViewID(t *testing.T) {
 			},
 		}},
 	}}
-	info := func(int) EntryInfo { return EntryInfo{Title: "Frieren", SeasonTvdb: 1} }
+	info := func(int) EntryInfo { return EntryInfo{Title: "Frieren", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
-		WriterDeps{HTTP: srv.Client()})
+	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+		nil, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -194,11 +198,11 @@ func TestHarvestCachePersistsAcrossRebuilds(t *testing.T) {
 			},
 		}},
 	}}
-	info := func(int) EntryInfo { return EntryInfo{Title: "Frieren", SeasonTvdb: 1} }
+	info := func(int) EntryInfo { return EntryInfo{Title: "Frieren", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
-		WriterDeps{HTTP: srv.Client()})
+	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+		nil, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("first Rebuild: %v", err)
 	}
@@ -246,8 +250,8 @@ func TestHarvestTimeSliceEnforced(t *testing.T) {
 	info := func(alID int) EntryInfo { return EntryInfo{Title: fmt.Sprintf("Show %d", alID)} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
-		WriterDeps{HTTP: srv.Client()})
+	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+		nil, srv.Client())
 	clock := time.Unix(1700000000, 0)
 	w.now = func() time.Time { return clock }
 	prevWait := harvestWait
@@ -293,8 +297,8 @@ func TestHarvestRotationResumesAfterCursor(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedLedgerWithCursor(t, path, "nyaa:1500")
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
-		WriterDeps{HTTP: srv.Client()})
+	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+		nil, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -322,12 +326,12 @@ func TestHarvestQueryFailureKeepsSynthetic(t *testing.T) {
 	defer srv.Close()
 
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv", "Show - S01E02 (1080p) [G].mkv")}
-	info := func(int) EntryInfo { return EntryInfo{Title: "Show", SeasonTvdb: 1} }
+	info := func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
-		WriterDeps{HTTP: srv.Client(), Logger: log})
+	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+		log, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -367,15 +371,15 @@ func TestHarvestMalformedResponseSkipsOnlyThatShow(t *testing.T) {
 	}
 	info := func(alID int) EntryInfo {
 		if alID == 7 {
-			return EntryInfo{Title: "Show A", SeasonTvdb: 1}
+			return EntryInfo{Title: "Show A", Season: 1, SeasonKnown: true}
 		}
-		return EntryInfo{Title: "Show B", SeasonTvdb: 1}
+		return EntryInfo{Title: "Show B", Season: 1, SeasonKnown: true}
 	}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
-		WriterDeps{HTTP: srv.Client(), Logger: log})
+	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+		log, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -424,15 +428,15 @@ func TestHarvestRequestErrorSkipsOnlyThatShow(t *testing.T) {
 	}
 	info := func(alID int) EntryInfo {
 		if alID == 7 {
-			return EntryInfo{Title: "Show A", SeasonTvdb: 1}
+			return EntryInfo{Title: "Show A", Season: 1, SeasonKnown: true}
 		}
-		return EntryInfo{Title: "Show B", SeasonTvdb: 1}
+		return EntryInfo{Title: "Show B", Season: 1, SeasonKnown: true}
 	}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
-		WriterDeps{HTTP: srv.Client(), Logger: log})
+	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+		log, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -466,11 +470,11 @@ func TestHarvestUnconfiguredTrackerNeverQueried(t *testing.T) {
 	// A Nyaa entry, but only the AB upstream is configured (pointing at
 	// the mock): the nyaa scope must journal nothing and trigger no HTTP call.
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
-	info := func(int) EntryInfo { return EntryInfo{Title: "Show", SeasonTvdb: 1} }
+	info := func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
-		WriterDeps{HTTP: srv.Client()})
+	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+		nil, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -504,11 +508,11 @@ func TestHarvestPagesNyaaByOffset(t *testing.T) {
 	defer srv.Close()
 
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv", "Show - S01E02 (1080p) [G].mkv")}
-	info := func(int) EntryInfo { return EntryInfo{Title: "Show", SeasonTvdb: 1} }
+	info := func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
-		WriterDeps{HTTP: srv.Client()})
+	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+		nil, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -547,11 +551,11 @@ func TestHarvestResumesPagingAcrossRebuilds(t *testing.T) {
 	defer srv.Close()
 
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv", "Show - S01E02 (1080p) [G].mkv")}
-	info := func(int) EntryInfo { return EntryInfo{Title: "Show", SeasonTvdb: 1} }
+	info := func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
-		WriterDeps{HTTP: srv.Client()})
+	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+		nil, srv.Client())
 
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("first Rebuild: %v", err)
@@ -597,10 +601,10 @@ func TestHarvestPrunesStalePagesWithNoPendingGroups(t *testing.T) {
 		return torznabBody(torznabItem("Show S01 1080p BluRay [G]", "https://nyaa.si/view/42"))
 	})
 	defer srv.Close()
-	w := NewFeedWriter(&FeedWriterConfig{
+	w := wiredWriter(&FeedWriterConfig{
 		Path:           filepath.Join(t.TempDir(), "feed.json"),
 		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
-	}, WriterDeps{HTTP: srv.Client()})
+	}, nil, srv.Client())
 
 	stale := encodeHarvestCheckpoint(harvestCheckpoint{Pages: map[string]int{"nyaa:7": 3}})
 	_, cursor := w.harvestTitles(t.Context(), map[string][]journalItem{}, map[string]string{},
@@ -613,7 +617,7 @@ func TestHarvestPrunesStalePagesWithNoPendingGroups(t *testing.T) {
 		upstreamNyaa: {{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7}},
 	}
 	w.harvestTitles(t.Context(), feeds, map[string]string{},
-		func(int) EntryInfo { return EntryInfo{Title: "Show", SeasonTvdb: 1} }, cursor)
+		func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }, cursor)
 	if mock.calls() == 0 {
 		t.Fatal("no harvest query fired for the re-pending group")
 	}
@@ -648,11 +652,11 @@ func TestHarvestMatchesNyaaByInfoHash(t *testing.T) {
 			},
 		}},
 	}}
-	info := func(int) EntryInfo { return EntryInfo{Title: "Show", SeasonTvdb: 1} }
+	info := func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
-		WriterDeps{HTTP: srv.Client()})
+	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+		nil, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -680,11 +684,11 @@ func TestHarvestSingleShowPagingStopsAtPageCap(t *testing.T) {
 	defer srv.Close()
 
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv", "Show - S01E02 (1080p) [G].mkv")}
-	info := func(int) EntryInfo { return EntryInfo{Title: "Show", SeasonTvdb: 1} }
+	info := func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
-		WriterDeps{HTTP: srv.Client()})
+	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+		nil, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -711,7 +715,7 @@ func TestMatchHarvestSkipsEmptyTitlesAndKeepsFirstTitle(t *testing.T) {
 		{Title: "   ", InfoURL: "https://nyaa.si/view/1"},
 		{Title: "Second Title", InfoURL: "https://nyaa.si/view/2"},
 	}
-	if n := matchHarvest(results, "nyaa", index, titles); n != 0 {
+	if n, _ := matchHarvest(results, "nyaa", index, titles, ""); n != 0 {
 		t.Errorf("matchHarvest = %d matches, want 0", n)
 	}
 	if _, ok := titles["nyaa:1"]; ok {
@@ -733,7 +737,7 @@ func TestMatchHarvestFailsClosedOnContradictoryIdentity(t *testing.T) {
 	results := []item{
 		{Title: "Tampered Title", InfoURL: "https://nyaa.si/view/1", GUID: "https://nyaa.si/view/2"},
 	}
-	if n := matchHarvest(results, "nyaa", index, titles); n != 0 {
+	if n, _ := matchHarvest(results, "nyaa", index, titles, ""); n != 0 {
 		t.Errorf("matchHarvest = %d matches, want 0 (contradictory identity fails closed)", n)
 	}
 	if len(titles) != 0 {
@@ -753,7 +757,7 @@ func TestMatchHarvestFailsClosedWhenURLAndHashResolveToDifferentReleases(t *test
 		Title: "Tampered Title", InfoURL: "https://nyaa.si/view/1",
 		GUID: "https://nyaa.si/view/1", InfoHash: hash,
 	}}
-	if n := matchHarvest(results, "nyaa", index, titles); n != 0 {
+	if n, _ := matchHarvest(results, "nyaa", index, titles, ""); n != 0 {
 		t.Errorf("matchHarvest = %d matches, want 0 (URL and hash resolving to different releases must fail closed)", n)
 	}
 	if len(titles) != 0 {
@@ -770,7 +774,7 @@ func TestMatchHarvestRejectsCrossScopeKey(t *testing.T) {
 	index := map[string]string{"ab:300": "ab:300"}
 	titles := map[string]string{}
 	results := []item{{Title: "AB title from the nyaa upstream", InfoURL: "https://animebytes.tv/torrent/300/group", GUID: "https://animebytes.tv/torrent/300/group"}}
-	if n := matchHarvest(results, "nyaa", index, titles); n != 0 {
+	if n, _ := matchHarvest(results, "nyaa", index, titles, ""); n != 0 {
 		t.Errorf("matchHarvest = %d matches, want 0 (a cross-scope key must not title the other tracker's item)", n)
 	}
 	if len(titles) != 0 {
@@ -793,7 +797,7 @@ func TestMatchHarvestRejectsOversizedTitle(t *testing.T) {
 		{Title: "Normal Title - S01 (1080p) [G]", InfoURL: "https://nyaa.si/view/2"},
 		{Title: atCap, InfoURL: "https://nyaa.si/view/3"},
 	}
-	if n := matchHarvest(results, "nyaa", index, titles); n != 2 {
+	if n, _ := matchHarvest(results, "nyaa", index, titles, ""); n != 2 {
 		t.Errorf("matchHarvest = %d matches, want 2 (the normal and the exactly-at-cap titles cache)", n)
 	}
 	if titles["nyaa:3"] != atCap {
@@ -833,18 +837,18 @@ func TestHarvestScopeWideFailureSkipsRemainingShows(t *testing.T) {
 	info := func(alID int) EntryInfo {
 		switch alID {
 		case 7:
-			return EntryInfo{Title: "Show A", SeasonTvdb: 1}
+			return EntryInfo{Title: "Show A", Season: 1, SeasonKnown: true}
 		case 8:
-			return EntryInfo{Title: "Show B", SeasonTvdb: 1}
+			return EntryInfo{Title: "Show B", Season: 1, SeasonKnown: true}
 		default:
-			return EntryInfo{Title: "Show C", SeasonTvdb: 1}
+			return EntryInfo{Title: "Show C", Season: 1, SeasonKnown: true}
 		}
 	}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: countSrv.URL, ProwlarrAPIKey: "k"}},
-		WriterDeps{HTTP: countSrv.Client(), Logger: log})
+	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: countSrv.URL, ProwlarrAPIKey: "k"}},
+		log, countSrv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -886,12 +890,12 @@ func TestHarvestCancellationMidQueryIsNotWarnedAsUpstreamFault(t *testing.T) {
 		Path:           filepath.Join(t.TempDir(), "feed.json"),
 		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 	}
-	w := NewFeedWriter(cfg, WriterDeps{HTTP: srv.Client(), Logger: log})
+	w := wiredWriter(cfg, log, srv.Client())
 	feeds := map[string][]journalItem{
 		upstreamNyaa: {{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7}},
 	}
 	titles := map[string]string{}
-	stats, _ := w.harvestTitles(ctx, feeds, titles, func(int) EntryInfo { return EntryInfo{Title: "Show", SeasonTvdb: 1} }, "")
+	stats, _ := w.harvestTitles(ctx, feeds, titles, func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }, "")
 	if len(titles) != 0 {
 		t.Errorf("titles = %v, want empty (cancelled harvest must cache nothing)", titles)
 	}
@@ -968,11 +972,11 @@ func TestHarvestParams(t *testing.T) {
 		wantT      string
 		wantSeason string
 	}{
-		{"nyaa series with a mapped season uses the season form", EntryInfo{Title: "Frieren", SeasonTvdb: 1}, upstreamNyaa, "tvsearch", "1"},
+		{"nyaa series with a mapped season uses the season form", EntryInfo{Title: "Frieren", Season: 1, SeasonKnown: true}, upstreamNyaa, "tvsearch", "1"},
 		{"nyaa seasonless series stays a plain search", EntryInfo{Title: "One Piece"}, upstreamNyaa, "search", ""},
-		{"nyaa movie stays a plain search even with a mapped season", EntryInfo{Title: "A Silent Voice", SeasonTvdb: 1, IsMovie: true}, upstreamNyaa, "search", ""},
-		{"ab is always a plain series-level search", EntryInfo{Title: "Frieren", SeasonTvdb: 1}, upstreamAB, "search", ""},
-		{"q is the trimmed synthesis title", EntryInfo{Title: "  Frieren  ", SeasonTvdb: 2}, upstreamNyaa, "tvsearch", "2"},
+		{"nyaa movie stays a plain search even with a mapped season", EntryInfo{Title: "A Silent Voice", Season: 1, SeasonKnown: true, IsMovie: true}, upstreamNyaa, "search", ""},
+		{"ab is always a plain series-level search", EntryInfo{Title: "Frieren", Season: 1, SeasonKnown: true}, upstreamAB, "search", ""},
+		{"q is the trimmed synthesis title", EntryInfo{Title: "  Frieren  ", Season: 2, SeasonKnown: true}, upstreamNyaa, "tvsearch", "2"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1021,9 +1025,9 @@ func TestHarvestMalformedResponsesLatchAtThreshold(t *testing.T) {
 		9: {Title: "Show C"}, 10: {Title: "Show D"},
 	}
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, WriterDeps{HTTP: srv.Client(), Logger: log})
+	}}, log, srv.Client())
 	titles := map[string]string{}
 	stats, _ := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
@@ -1035,6 +1039,96 @@ func TestHarvestMalformedResponsesLatchAtThreshold(t *testing.T) {
 	}
 	if !rec.Contains("indexer title harvest: repeated malformed responses; skipping this upstream's remaining shows this rebuild") {
 		t.Errorf("malformed-response latch not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestHarvestMatchesHashlessRecordAgainstHashBearingResult pins the end-to-end
+// half of d-u5-c2-2: SeaDex's record for a curated Nyaa torrent carries no
+// usable info hash (the field is absent, or AB's "<redacted>" form which
+// validInfoHash drops), so the pending index holds only the item's tracker key
+// - while Prowlarr's Nyaa result ALWAYS reports a hash. That hash is unknown to
+// the partial index, and treating the absence as an identity contradiction
+// rejected the result outright. Because the index is rebuilt from the same
+// journal every rebuild the rejection was permanent: the item served its
+// synthesized heuristic title forever, with no diagnostic at all. The page URL
+// resolves the identity on its own, so the harvest must cache the real title.
+func TestHarvestMatchesHashlessRecordAgainstHashBearingResult(t *testing.T) {
+	const prowlarrHash = "143ed15e5e3df072ae91adaeb149973a887590dd"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		body := torznabBody(`<item><title>[SubsPlease] Show - S01 (1080p)</title>` +
+			`<guid>https://nyaa.si/view/42</guid><comments>https://nyaa.si/view/42</comments>` +
+			`<enclosure url="http://prowlarr:9696/1/download?link=abc" length="1" type="application/x-bittorrent"/>` +
+			`<torznab:attr name="infohash" value="` + prowlarrHash + `"/></item>`)
+		_, _ = io.WriteString(w, strings.ReplaceAll(body, "http://prowlarr:9696", "http://"+r.Host))
+	}))
+	defer srv.Close()
+
+	// The journal item carries NO info hash, so pendingHarvest indexes its key
+	// alone - exactly the shape a SeaDex record without the field produces.
+	feeds := map[string][]journalItem{
+		upstreamNyaa: {{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7}},
+	}
+	log, rec := capture.New()
+	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
+	}}, log, srv.Client())
+	titles := map[string]string{}
+	stats, _ := w.harvestTitles(t.Context(), feeds, titles,
+		func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }, "")
+
+	if got, want := titles["nyaa:42"], "[SubsPlease] Show - S01 (1080p)"; got != want {
+		t.Errorf("harvested title = %q, want %q (an unknown hash must not veto the page URL's identity)", got, want)
+	}
+	if stats.matched != 1 || stats.rejected != 0 {
+		t.Errorf("stats.matched = %d, stats.rejected = %d; want 1 and 0", stats.matched, stats.rejected)
+	}
+	if stats.pending != 0 {
+		t.Errorf("stats.pending = %d, want 0 (the item now serves a real title)", stats.pending)
+	}
+	if rec.Contains("indexer title harvest results rejected: contradictory identity signals") {
+		t.Errorf("an unknown hash was reported as a contradiction; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestHarvestReportsContradictoryResults pins the diagnostic half: a result
+// whose own page URLs name two DIFFERENT pending releases still fails closed,
+// and that rejection is now observable - a silently dropped result left its
+// journal item on the synthesized title with nothing in the logs or stats to
+// explain it. Debug plus the harvest_rejected stat, not WARN: a systematically
+// tampered feed would otherwise warn once per page.
+func TestHarvestReportsContradictoryResults(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		body := torznabBody(`<item><title>Tampered</title>` +
+			`<guid>https://nyaa.si/view/43</guid><comments>https://nyaa.si/view/42</comments>` +
+			`<enclosure url="http://prowlarr:9696/1/download?link=abc" length="1" type="application/x-bittorrent"/></item>`)
+		_, _ = io.WriteString(w, strings.ReplaceAll(body, "http://prowlarr:9696", "http://"+r.Host))
+	}))
+	defer srv.Close()
+
+	feeds := map[string][]journalItem{
+		upstreamNyaa: {
+			{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7},
+			{item: item{Title: "Show S02"}, Key: "nyaa:43", AniListID: 7},
+		},
+	}
+	log, rec := capture.New()
+	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
+	}}, log, srv.Client())
+	titles := map[string]string{}
+	stats, _ := w.harvestTitles(t.Context(), feeds, titles,
+		func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }, "")
+
+	if len(titles) != 0 {
+		t.Errorf("titles = %v, want none (contradictory identity must title nothing)", titles)
+	}
+	if stats.rejected == 0 {
+		t.Error("stats.rejected = 0, want the contradictory result counted")
+	}
+	if !rec.Contains("indexer title harvest results rejected: contradictory identity signals") {
+		t.Errorf("contradictory result not reported; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }
 
@@ -1072,9 +1166,9 @@ func TestHarvestRejectedResponsesLatchAtThreshold(t *testing.T) {
 		9: {Title: "Show C"}, 10: {Title: "Show D"},
 	}
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, WriterDeps{HTTP: srv.Client(), Logger: log})
+	}}, log, srv.Client())
 	titles := map[string]string{}
 	stats, _ := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
@@ -1125,9 +1219,9 @@ func TestHarvestMalformedResponseRunResetsAfterSuccessfulPage(t *testing.T) {
 		10: {Title: "Show D"}, 11: {Title: "Show E"}, 12: {Title: "Show F"},
 	}
 	log, _ := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, WriterDeps{HTTP: srv.Client(), Logger: log})
+	}}, log, srv.Client())
 	titles := map[string]string{}
 	stats, _ := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
@@ -1164,9 +1258,9 @@ func TestHarvestOpportunisticMatchSkipsSatisfiedGroup(t *testing.T) {
 	}
 	info := map[int]EntryInfo{7: {Title: "Show A"}, 8: {Title: "Show B"}}
 	log, _ := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, WriterDeps{HTTP: srv.Client(), Logger: log})
+	}}, log, srv.Client())
 	titles := map[string]string{}
 	stats, _ := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
@@ -1218,9 +1312,9 @@ func TestHarvestRequestRejectionResetsMalformedRun(t *testing.T) {
 		10: {Title: "Show D"}, 11: {Title: "Show E"}, 12: {Title: "Show F"},
 	}
 	log, _ := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, WriterDeps{HTTP: srv.Client(), Logger: log})
+	}}, log, srv.Client())
 	titles := map[string]string{}
 	stats, _ := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
@@ -1250,14 +1344,15 @@ func TestUpdateHarvestScopeState_resetsRejectedRun(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			log, _ := capture.New()
-			w := NewFeedWriter(&FeedWriterConfig{}, WriterDeps{Logger: log})
+			w := NewFeedWriter(&FeedWriterConfig{}, log, Upstreams{})
 			failed := map[string]bool{}
 			malformed := map[string]int{}
 			rejected := map[string]int{}
-			w.updateHarvestScopeState(upstreamNyaa, harvestShowFailed, failed, malformed, rejected)
-			w.updateHarvestScopeState(upstreamNyaa, harvestShowFailed, failed, malformed, rejected)
-			w.updateHarvestScopeState(upstreamNyaa, tc.reset, failed, malformed, rejected)
-			w.updateHarvestScopeState(upstreamNyaa, harvestShowFailed, failed, malformed, rejected)
+			fruitless := map[string]int{}
+			w.updateHarvestScopeState(upstreamNyaa, harvestShowFailed, failed, malformed, rejected, fruitless)
+			w.updateHarvestScopeState(upstreamNyaa, harvestShowFailed, failed, malformed, rejected, fruitless)
+			w.updateHarvestScopeState(upstreamNyaa, tc.reset, failed, malformed, rejected, fruitless)
+			w.updateHarvestScopeState(upstreamNyaa, harvestShowFailed, failed, malformed, rejected, fruitless)
 			if failed[upstreamNyaa] {
 				t.Fatal("scope latched after a non-consecutive third rejection; the intervening outcome must reset the run")
 			}
@@ -1379,9 +1474,9 @@ func TestHarvestHTTPStatusFailureScoping(t *testing.T) {
 			}
 			info := map[int]EntryInfo{7: {Title: "Show A"}, 8: {Title: "Show B"}}
 			log, rec := capture.New()
-			w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+			w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
 				NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-			}}, WriterDeps{HTTP: srv.Client(), Logger: log})
+			}}, log, srv.Client())
 			titles := map[string]string{}
 			stats, _ := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
@@ -1413,31 +1508,60 @@ func TestHarvestHTTPStatusFailureScoping(t *testing.T) {
 	}
 }
 
-// TestResolveHarvestKeyPartialSignals pins the partial-identity resolution
-// table of resolveHarvestKey: one tracker page URL (guid OR comments) alone
-// resolves, agreeing URL+hash resolve, an unknown id or a signal-less result
-// resolves nothing - the accepting side of the fail-closed contract the
-// contradictory-identity tests pin from the rejecting side.
+// TestResolveHarvestKeyPartialSignals pins the identity-resolution table of
+// resolveHarvestKey across its three outcomes: a resolved key, a plain
+// non-match (not one of ours), and a CONFLICT (the signals contradict each
+// other, which fails closed and is counted). The distinction matters because a
+// conflict is an untrusted-response signal worth reporting while a non-match is
+// the ordinary fate of most of a season query's page.
+//
+// The row that changed with d-u5-c4-1's sibling d-u5-c2-2: a known page URL
+// carrying a hash the PARTIAL index does not hold now resolves. The index holds
+// only pending items and only the hashes SeaDex published, so a Prowlarr Nyaa
+// result (always hash-bearing) routinely carries an unknown one; rejecting it
+// permanently stranded the item on its synthesized title.
 func TestResolveHarvestKeyPartialSignals(t *testing.T) {
 	const hash = "143ed15e5e3df072ae91adaeb149973a887590dd"
 	index := map[string]string{"nyaa:42": "nyaa:42", hash: "nyaa:42"}
 	tests := []struct {
-		name string
-		it   item
-		want string
+		name         string
+		it           item
+		want         string
+		wantConflict bool
 	}{
-		{"guid alone resolves when comments URL is foreign", item{InfoURL: "https://mirror.example/x", GUID: "https://nyaa.si/view/42"}, "nyaa:42"},
-		{"comments alone resolves when guid URL is foreign", item{InfoURL: "https://nyaa.si/view/42", GUID: "https://mirror.example/x"}, "nyaa:42"},
-		{"url and hash agreeing on one release resolve it", item{InfoURL: "https://nyaa.si/view/42", GUID: "https://nyaa.si/view/42", InfoHash: hash}, "nyaa:42"},
-		{"unknown id resolves nothing", item{InfoURL: "https://nyaa.si/view/999", GUID: "https://nyaa.si/view/999"}, ""},
-		{"known url with an unindexed hash fails closed", item{InfoURL: "https://nyaa.si/view/42", GUID: "https://nyaa.si/view/42", InfoHash: strings.Repeat("a", 40)}, ""},
-		{"known hash with an unindexed url fails closed", item{InfoURL: "https://nyaa.si/view/999", GUID: "https://nyaa.si/view/999", InfoHash: hash}, ""},
-		{"no identity signals resolve nothing", item{InfoURL: "https://mirror.example/x", GUID: "https://mirror.example/x"}, ""},
+		{name: "guid alone resolves when comments URL is foreign", it: item{InfoURL: "https://mirror.example/x", GUID: "https://nyaa.si/view/42"}, want: "nyaa:42"},
+		{name: "comments alone resolves when guid URL is foreign", it: item{InfoURL: "https://nyaa.si/view/42", GUID: "https://mirror.example/x"}, want: "nyaa:42"},
+		{name: "url and hash agreeing on one release resolve it", it: item{InfoURL: "https://nyaa.si/view/42", GUID: "https://nyaa.si/view/42", InfoHash: hash}, want: "nyaa:42"},
+		{name: "unknown id is a non-match, not a conflict", it: item{InfoURL: "https://nyaa.si/view/999", GUID: "https://nyaa.si/view/999"}},
+		{
+			name: "known url with an unindexed hash still resolves",
+			it:   item{InfoURL: "https://nyaa.si/view/42", GUID: "https://nyaa.si/view/42", InfoHash: strings.Repeat("a", 40)},
+			want: "nyaa:42",
+		},
+		{name: "known hash with an unindexed url is a non-match", it: item{InfoURL: "https://nyaa.si/view/999", GUID: "https://nyaa.si/view/999", InfoHash: hash}},
+		{name: "no identity signals resolve nothing", it: item{InfoURL: "https://mirror.example/x", GUID: "https://mirror.example/x"}},
+		{
+			name:         "page URLs naming different releases conflict",
+			it:           item{InfoURL: "https://nyaa.si/view/42", GUID: "https://nyaa.si/view/43"},
+			wantConflict: true,
+		},
+		{
+			name:         "hash naming a different indexed release conflicts",
+			it:           item{InfoURL: "https://nyaa.si/view/43", GUID: "https://nyaa.si/view/43", InfoHash: hash},
+			wantConflict: true,
+		},
 	}
+	// nyaa:43 must be resolvable for the cross-signal conflict rows to reach
+	// the disagreement instead of exiting as an unindexed non-match.
+	index["nyaa:43"] = "nyaa:43"
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := resolveHarvestKey(&tc.it, index); got != tc.want {
-				t.Errorf("resolveHarvestKey(%+v) = %q, want %q", tc.it, got, tc.want)
+			got, conflict := resolveHarvestKey(&tc.it, index)
+			if got != tc.want {
+				t.Errorf("resolveHarvestKey(%+v) key = %q, want %q", tc.it, got, tc.want)
+			}
+			if conflict != tc.wantConflict {
+				t.Errorf("resolveHarvestKey(%+v) conflict = %v, want %v", tc.it, conflict, tc.wantConflict)
 			}
 		})
 	}
@@ -1620,5 +1744,232 @@ func TestHarvestCheckpointDropsOverCapCursor(t *testing.T) {
 	}
 	if cp.Pages == nil {
 		t.Error("Pages = nil, want an allocated empty map (callers write into it)")
+	}
+}
+
+// TestPreferredHarvestTitlePicksTheArrsVocabulary pins the alias policy
+// (l-f142). AnimeBytes lists ONE torrent three times - English, Japanese and
+// Romaji titles, distinct ?nh= GUIDs, the same torrent id - so all three resolve
+// to one journal key. Caching whichever Prowlarr listed first made the served
+// title a coin flip, and a JP or Romaji alias the operator's Sonarr series does
+// not carry makes the RSS item LESS matchable than the synthesized title it
+// replaced (synthesizeTitle builds from the arr's own vocabulary on purpose).
+//
+// Torznab carries no language marker, so "prefer English" is expressed as
+// "prefer the alias in the arr's vocabulary": the one whose text contains the
+// show title the synthesis already trusts. For an English-titled series that is
+// the English alias; for a library whose arr carries the Romaji title it is
+// Romaji, which is correct for THAT library. A native-script alias cannot
+// contain a Latin show title and so never wins.
+func TestPreferredHarvestTitlePicksTheArrsVocabulary(t *testing.T) {
+	const (
+		jp     = "[SubsPlease] 葬送のフリーレン - S01 (BD 1080p)"
+		romaji = "[SubsPlease] Sousou no Frieren - S01 (BD 1080p)"
+		en     = "[SubsPlease] Frieren Beyond Journeys End - S01 (BD 1080p)"
+	)
+	tests := map[string]struct {
+		candidates []string
+		showTitle  string
+		want       string
+	}{
+		"english show title picks the english alias": {
+			candidates: []string{jp, romaji, en},
+			showTitle:  "Frieren: Beyond Journey's End",
+			want:       en,
+		},
+		"romaji-titled arr picks the romaji alias": {
+			candidates: []string{jp, en, romaji},
+			showTitle:  "Sousou no Frieren",
+			want:       romaji,
+		},
+		"a native-script alias listed first never wins": {
+			candidates: []string{jp, en},
+			showTitle:  "Frieren: Beyond Journey's End",
+			want:       en,
+		},
+		"no matching alias keeps the most parseable one": {
+			candidates: []string{jp, romaji},
+			showTitle:  "Something Else Entirely",
+			want:       romaji, // a native-script title carries almost no parseable text
+		},
+		"no show title keeps the most parseable one": {
+			candidates: []string{en, romaji},
+			showTitle:  "",
+			want:       en, // most ASCII release text, and deterministic where Prowlarr is not
+		},
+		"the fallback always yields a title, never empty": {
+			candidates: []string{jp},
+			showTitle:  "No Match At All",
+			want:       jp,
+		},
+		"a single candidate is returned as-is": {
+			candidates: []string{jp},
+			showTitle:  "Frieren: Beyond Journey's End",
+			want:       jp,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := preferredHarvestTitle(tc.candidates, tc.showTitle); got != tc.want {
+				t.Errorf("preferredHarvestTitle(%q) = %q, want %q", tc.showTitle, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMatchHarvestChoosesAmongABAliasesOnOnePage pins the policy end to end
+// through matchHarvest: three AB aliases of one torrent on a single page resolve
+// to the same journal key, and the arr-vocabulary alias is the one cached -
+// counted as exactly ONE match, not three.
+func TestMatchHarvestChoosesAmongABAliasesOnOnePage(t *testing.T) {
+	const en = "[PMR] Frieren Beyond Journeys End - S01 (BD Remux 1080p)"
+	// Same torrent id (1167293) under three ?nh= GUIDs, AB's documented shape.
+	results := []item{
+		{Title: "[PMR] 葬送のフリーレン - S01 (BD Remux 1080p)", InfoURL: "https://animebytes.tv/torrent/1167293/group?nh=a"},
+		{Title: "[PMR] Sousou no Frieren - S01 (BD Remux 1080p)", InfoURL: "https://animebytes.tv/torrent/1167293/group?nh=b"},
+		{Title: en, InfoURL: "https://animebytes.tv/torrent/1167293/group?nh=c"},
+	}
+	index := map[string]string{"ab:1167293": "ab:1167293"}
+	titles := map[string]string{}
+
+	matched, rejected := matchHarvest(results, upstreamAB, index, titles, "Frieren: Beyond Journey's End")
+
+	if matched != 1 || rejected != 0 {
+		t.Errorf("matched = %d, rejected = %d; want 1 and 0 (three aliases are ONE torrent)", matched, rejected)
+	}
+	if got := titles["ab:1167293"]; got != en {
+		t.Errorf("cached title = %q, want the arr-vocabulary alias %q", got, en)
+	}
+	if len(titles) != 1 {
+		t.Errorf("titles = %v, want exactly one entry", titles)
+	}
+}
+
+// TestUpdateHarvestScopeStateLatchesAlternatingFailures pins the backstop the two
+// per-kind latches cannot be (l-f91). Each of them resets the OTHER's counter -
+// deliberately, since a definitive request rejection falsifies the
+// answers-garbage-to-everything hypothesis - so an upstream ALTERNATING between a
+// garbled 2xx body and a request rejection tripped NEITHER however long it ran:
+// the full harvestTimeBudget burned with zero title progress on every rebuild and
+// one WARN fired per failed show (up to ~300) instead of the <=3-then-latch bound
+// the homogeneous case gets. A misbehaving reverse proxy answering HTML garbage to
+// one query shape and 400/422 to another produces exactly that, while the pending
+// set interleaves mapped-season groups (tvsearch) with unmapped ones (search).
+//
+// The fruitless counter states the purpose directly - consecutive shows with NO
+// progress of any kind, reset only by a success - and latches at twice the
+// per-kind threshold, so it never preempts the more specific diagnostics.
+func TestUpdateHarvestScopeStateLatchesAlternatingFailures(t *testing.T) {
+	const msg = "indexer title harvest: no show made progress; skipping this upstream's remaining shows this rebuild"
+
+	t.Run("perfectly alternating failures latch", func(t *testing.T) {
+		log, rec := capture.New()
+		w := NewFeedWriter(&FeedWriterConfig{}, log, Upstreams{})
+		failed, malformed, rejected, fruitless := map[string]bool{}, map[string]int{}, map[string]int{}, map[string]int{}
+		alternating := []harvestOutcome{
+			harvestShowMalformed, harvestShowFailed,
+			harvestShowMalformed, harvestShowFailed,
+			harvestShowMalformed, harvestShowFailed,
+		}
+		for i, outcome := range alternating {
+			if failed[upstreamNyaa] {
+				t.Fatalf("scope latched after %d shows, want it to survive to the fruitless threshold", i)
+			}
+			w.updateHarvestScopeState(upstreamNyaa, outcome, failed, malformed, rejected, fruitless)
+		}
+		if !failed[upstreamNyaa] {
+			t.Errorf("scope not latched after %d alternating failures with zero progress", len(alternating))
+		}
+		if !rec.Contains(msg) {
+			t.Errorf("no-progress latch not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+		}
+		// Neither per-kind counter ever reached its own threshold - which is
+		// exactly why the backstop is needed.
+		if malformed[upstreamNyaa] >= consecutiveMalformedLatch || rejected[upstreamNyaa] >= consecutiveRejectedLatch {
+			t.Errorf("a per-kind latch also tripped (malformed=%d rejected=%d); the fixture no longer isolates the mixed case",
+				malformed[upstreamNyaa], rejected[upstreamNyaa])
+		}
+	})
+
+	t.Run("a success resets the no-progress run", func(t *testing.T) {
+		log, rec := capture.New()
+		w := NewFeedWriter(&FeedWriterConfig{}, log, Upstreams{})
+		failed, malformed, rejected, fruitless := map[string]bool{}, map[string]int{}, map[string]int{}, map[string]int{}
+		// Five alternating failures, a success, then five more: no run of
+		// consecutiveFruitlessLatch ever completes, so the scope keeps working.
+		for range 2 {
+			for _, outcome := range []harvestOutcome{
+				harvestShowMalformed, harvestShowFailed, harvestShowMalformed, harvestShowFailed, harvestShowMalformed,
+			} {
+				w.updateHarvestScopeState(upstreamNyaa, outcome, failed, malformed, rejected, fruitless)
+			}
+			w.updateHarvestScopeState(upstreamNyaa, harvestOK, failed, malformed, rejected, fruitless)
+		}
+		if failed[upstreamNyaa] {
+			t.Error("scope latched despite a successful show between the failure runs; progress must reset the run")
+		}
+		if rec.Contains(msg) {
+			t.Errorf("no-progress latch warned despite progress; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+		}
+	})
+
+	t.Run("a homogeneous run still latches on its own diagnostic", func(t *testing.T) {
+		log, rec := capture.New()
+		w := NewFeedWriter(&FeedWriterConfig{}, log, Upstreams{})
+		failed, malformed, rejected, fruitless := map[string]bool{}, map[string]int{}, map[string]int{}, map[string]int{}
+		for range consecutiveMalformedLatch {
+			w.updateHarvestScopeState(upstreamNyaa, harvestShowMalformed, failed, malformed, rejected, fruitless)
+		}
+		if !failed[upstreamNyaa] {
+			t.Fatal("homogeneous malformed run did not latch")
+		}
+		// The specific diagnostic must win: the backstop threshold is higher, and
+		// it is skipped once a per-kind latch has fired, so the operator gets one
+		// actionable line rather than two.
+		if !rec.Contains("repeated malformed responses") {
+			t.Errorf("malformed latch lost its own diagnostic; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+		}
+		if rec.Contains(msg) {
+			t.Errorf("the generic no-progress WARN also fired; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+		}
+	})
+}
+
+// TestUpstreamFailureWarnsOnce pins the once-per-failure cadence on both callers
+// of upstream.search. httpx's retry loop publishes its own terminal "retries
+// exhausted" line, and this app publishes a WARN for the same failed query with
+// strictly more context (the show, the query shape and the page on the harvest
+// path; the scope on the request path). Leaving both at Warn produced two
+// terminal WARNs per failure and doubled the log volume of exactly the incident
+// the once-per-onset latch cadence exists to keep readable, so httpx's verdict is
+// demoted to Debug (l-f20). The per-attempt retry diagnostics are deliberately
+// kept, which is why the logger is demoted rather than dropped.
+func TestUpstreamFailureWarnsOnce(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	log, rec := capture.New()
+	w := wiredWriter(&FeedWriterConfig{
+		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
+	}, log, srv.Client())
+
+	u := upstreamForScope(w.upstreams, upstreamNyaa)
+	if u == nil {
+		t.Fatal("no nyaa upstream wired")
+	}
+	if _, _, err := u.search(t.Context(), url.Values{"t": {"search"}}); err == nil {
+		t.Fatal("search against a 503 upstream = nil error")
+	}
+
+	// The library's terminal verdict must not be a WARN: exactly one layer
+	// warns, and it is the one with the app context.
+	if n := rec.CountLevel(slog.LevelWarn, "retries exhausted"); n != 0 {
+		t.Errorf("httpx terminal line logged at WARN %d times, want 0 (demoted to Debug): %v", n, rec.Messages())
+	}
+	// It is demoted, not suppressed: the diagnosis is still available.
+	if !rec.Contains("retries exhausted") {
+		t.Errorf("httpx terminal line missing entirely, want it kept at Debug: %v", rec.Messages())
 	}
 }

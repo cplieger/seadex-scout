@@ -32,6 +32,7 @@ import (
 	"github.com/cplieger/envx/yamlenv"
 	"github.com/cplieger/scheduler/v2"
 	"github.com/cplieger/slogx"
+	"github.com/cplieger/urlform"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -808,12 +809,14 @@ func validateHTTPURL(name, rawURL string) error {
 // Such a URL survives validation but leaks the credential to
 // upstream-failure logs,
 // which wrap the full request URL; validateIndexer warns on it field-name-only.
-// The query is scanned on the raw string, splitting on both '&' and ';' and
-// percent-decoding each name (the same decode u.Query() applies to keys):
-// this is a strict superset of the parsed u.Query() view, which drops any
-// malformed pair wholesale (an unescaped ';' in "?apikey=SECRET;foo=x"
-// discards the entire pair while the secret stays in RawQuery for outgoing
-// requests and logs). Matches field names only, never values.
+// The query is scanned on the raw string via urlform.RawQueryNames (split on
+// both '&' and ';', each name percent-decoded): that is a strict superset of
+// the parsed u.Query() view, which drops any malformed pair wholesale (an
+// unescaped ';' in "?apikey=SECRET;foo=x" discards the entire pair while the
+// secret stays in RawQuery for outgoing requests and logs). This consumer's
+// fail direction is broad on purpose - over-matching a parameter name only
+// costs a warning - which is why the library reports names and leaves the
+// predicate here. Matches field names only, never values.
 func urlEmbedsCredential(rawURL string) bool {
 	if rawURL == "" {
 		return false
@@ -825,14 +828,7 @@ func urlEmbedsCredential(rawURL string) bool {
 	if u.User != nil {
 		return true
 	}
-	for pair := range strings.FieldsFuncSeq(u.RawQuery, func(r rune) bool { return r == '&' || r == ';' }) {
-		name, _, _ := strings.Cut(pair, "=")
-		// Match the percent-decoded name (u.Query() would have decoded it had
-		// the pair been well-formed); an undecodable escape keeps the raw
-		// name so a malformed pair is still matched conservatively.
-		if decoded, err := url.QueryUnescape(name); err == nil {
-			name = decoded
-		}
+	for name := range urlform.RawQueryNames(u.RawQuery) {
 		if isCredentialParam(name) {
 			return true
 		}

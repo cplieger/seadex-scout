@@ -309,7 +309,7 @@ func fillFromCandidate(f *Finding, cand *candidate) {
 	f.Kind = string(cand.rel.Kind)
 	f.Reason = cand.rel.Reason
 	f.InfoHash = cand.torrent.InfoHash
-	f.ReleaseURL = cand.torrent.UsableURL()
+	f.ReleaseURL = classify.PublishURL(&cand.torrent)
 	f.DualAudio = cand.rel.DualAudio
 }
 
@@ -323,7 +323,7 @@ func obtainableLinks(pool []candidate) []ReleaseLink {
 	seen := make(map[ReleaseLink]struct{}, len(pool))
 	var links []ReleaseLink
 	for i := range pool {
-		u := pool[i].torrent.UsableURL()
+		u := classify.PublishURL(&pool[i].torrent)
 		if u == "" {
 			continue
 		}
@@ -414,7 +414,7 @@ func candidateStableKey(c *candidate) string {
 		string(c.rel.Kind),
 		c.rel.Reason,
 		strings.TrimSpace(c.torrent.InfoHash),
-		strings.TrimSpace(c.torrent.UsableURL()),
+		strings.TrimSpace(classify.PublishURL(&c.torrent)),
 		strconv.FormatBool(c.rel.DualAudio),
 	})
 }

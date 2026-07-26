@@ -19,7 +19,7 @@ import (
 	"maps"
 	"time"
 
-	"github.com/cplieger/httpx/v3"
+	"github.com/cplieger/httpx/v4"
 	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/degradation"
@@ -325,11 +325,16 @@ func walkFailureAttrs(walkErr error) []any {
 func (s *Scout) loadMapping(ctx context.Context, st *state.State) (mapping.Cache, *mapping.Index, error) {
 	mapCache, idx, mapErr := s.deps.Mapping.Load(ctx, &st.Mapping)
 	if mapErr != nil && ctx.Err() == nil {
-		attrs := mappingDegradedAttrs(mapErr, idx.Len())
-		stale, ok := errors.AsType[*mapping.StaleMapError](mapErr)
-		if ok && stale.ConsecutiveRejections() >= mappingRejectionEscalationThreshold {
-			// The attrs carry the streak (stale_consecutive_rejections) and
-			// the rejecting guard (stale_reason).
+		attrs := mappingDegradedAttrs(mapErr, idx.Len(), mapCache.RejectedRefreshes)
+		// Escalate on the PERSISTED streak, not on the error type: a guard that
+		// keeps refusing a fresh body when there is no usable stale cache to
+		// return (a first boot against a poisoned or restructured upstream)
+		// degrades with a plain error rather than a *StaleMapError, and that
+		// condition never self-heals either - reading the streak off the cache
+		// covers both shapes with one rule.
+		if mapCache.RejectedRefreshes >= mappingRejectionEscalationThreshold {
+			// The attrs carry the streak (stale_consecutive_rejections) and,
+			// when a stale map was returned, the rejecting guard (stale_reason).
 			s.log.Error("mapping degraded: refresh rejected repeatedly; inspect upstream, or remove state.json to cold-start if the change is legitimate", attrs...)
 		} else {
 			s.log.Warn("mapping degraded", attrs...)
@@ -343,10 +348,16 @@ func (s *Scout) loadMapping(ctx context.Context, st *state.State) (mapping.Cache
 // plus StaleMapError's structured degradation fields (stale_reason,
 // stale_age_seconds, stale_records) when the error carries them, so Loki can
 // query the rejection class and stale age without parsing the message text.
-func mappingDegradedAttrs(mapErr error, usableRecords int) []any {
+// rejections is the persisted streak off the returned Cache; it is emitted on
+// its own only when no *StaleMapError supplied it (the no-usable-cache path),
+// so the attribute is present on every escalation without being duplicated.
+func mappingDegradedAttrs(mapErr error, usableRecords, rejections int) []any {
 	attrs := []any{attrError, mapErr, "usable_records", usableRecords}
 	if stale, ok := errors.AsType[*mapping.StaleMapError](mapErr); ok {
-		attrs = append(attrs, stale.LogAttrs()...)
+		return append(attrs, stale.LogAttrs()...)
+	}
+	if rejections > 0 {
+		attrs = append(attrs, "stale_consecutive_rejections", rejections)
 	}
 	return attrs
 }
@@ -882,14 +893,17 @@ func (s *Scout) reportSnapshot(ctx context.Context) (library.Snapshot, error) {
 // cancelled load is the shutdown, not a Fribb fault (the SeaDex fetch after
 // this then fails with the cancellation and Report returns it).
 func (s *Scout) reportMapping(ctx context.Context, st *state.State) (*mapping.Index, error) {
-	_, idx, mapErr := s.deps.Mapping.Load(ctx, &st.Mapping)
+	mapCache, idx, mapErr := s.deps.Mapping.Load(ctx, &st.Mapping)
 	if mapErr == nil || ctx.Err() != nil {
 		return idx, nil
 	}
 	if !mapUsable(mapErr) {
 		return nil, fmt.Errorf("mapping unusable: %w", mapErr)
 	}
-	s.log.Warn("report: mapping degraded", mappingDegradedAttrs(mapErr, idx.Len())...)
+	// The report never escalates: it is a read-only one-shot, and the operator
+	// is watching its exit. The streak is still reported for parity with the
+	// cycle's attribute set.
+	s.log.Warn("report: mapping degraded", mappingDegradedAttrs(mapErr, idx.Len(), mapCache.RejectedRefreshes)...)
 	return idx, nil
 }
 
@@ -1015,7 +1029,11 @@ const saveGrace = 5 * time.Second
 // values, drops the cancellation), letting the write finish so the expensive
 // AniList memo survives the restart. A cancellation is not a fault (a redeploy
 // is routine), so only a genuine write failure is logged at ERROR — which keeps
-// it off the cycle-error alert.
+// it off the cycle-error alert. A deliberate preservation refusal
+// (state.ErrSavePreserved) is likewise not a fault and logs at WARN: the
+// redeploy SIGTERM that cancels the cycle can land in Load's read window, which
+// blocks the save by design, and alerting on that would page the operator on
+// every redeploy.
 func (s *Scout) save(ctx context.Context, st *state.State) {
 	err := s.deps.Store.Save(ctx, st)
 	if err != nil && (errors.Is(err, context.Canceled) || ctx.Err() != nil) {
@@ -1024,6 +1042,15 @@ func (s *Scout) save(ctx context.Context, st *state.State) {
 		err = s.deps.Store.Save(dctx, st)
 	}
 	if err != nil {
+		// A deliberate preservation refusal is not a write fault: nothing is
+		// broken and nothing was lost, the store is protecting bytes it could
+		// not classify. Reporting it at ERROR fires the cycle-error alert on a
+		// routine redeploy, because a SIGTERM landing in Load's read window is
+		// exactly what sets that block. Report it as the degradation it is.
+		if errors.Is(err, state.ErrSavePreserved) {
+			s.log.Warn("state save skipped; on-disk state preserved", "error", err)
+			return
+		}
 		s.log.Error("state save failed", "error", err)
 	}
 }

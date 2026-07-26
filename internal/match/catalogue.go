@@ -38,11 +38,15 @@ func NewCatalogue(idx *mapping.Index, keep func(mapping.Record) bool) *Catalogue
 		// Sonarr item through a stray TVDB id, nor a series record a Radarr
 		// item through its movie ids.
 		tvdb, tmdbMovies, imdbIDs := r.RoutedIDs()
-		if tvdb > 0 { // usable per HasArrIdentifier: overrides can carry a negative tvdb_id
+		// A presence check over RoutedIDs' already-canonicalized scalar id (the
+		// usability policy's one home is RoutedIDs, l-f37); the slice loops below
+		// still re-check per value because RoutedIDs canonicalizes the scalar but
+		// not the SLICES (l-f49).
+		if tvdb > 0 {
 			c.tvdb[tvdb] = struct{}{}
 		}
 		for _, id := range tmdbMovies {
-			if id <= 0 { // usable per HasArrIdentifier, as for tvdb above
+			if id <= 0 { // per-value: RoutedIDs does not canonicalize the slices
 				continue
 			}
 			c.tmdb[id] = struct{}{}

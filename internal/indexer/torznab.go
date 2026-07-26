@@ -1,7 +1,6 @@
 package indexer
 
 import (
-	"bytes"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cplieger/runesafe"
+	"github.com/cplieger/xmlx"
 )
 
 // Torznab category ids. SeaDex is anime, so series map to the Anime subcategory
@@ -260,14 +260,14 @@ type feedXML struct {
 }
 
 type channelXML struct {
-	Items []itemXML `xml:"item"`
-	// textBytes is the cumulative decoded text across every <channel>
-	// occurrence in the response. It lives on the struct (not a per-
-	// UnmarshalXML local) because encoding/xml re-invokes UnmarshalXML on
-	// the same channelXML value for each <channel> sibling, accumulating
+	// budget is the response-wide decoded-text allowance, created on the first
+	// UnmarshalXML call and handed to each item as it decodes. It lives on the
+	// struct (not a per-call local) because encoding/xml re-invokes UnmarshalXML
+	// on the same channelXML value for each <channel> sibling, accumulating
 	// Items across invocations - a per-call budget would reset while the
 	// retained items kept growing.
-	textBytes int
+	budget *xmlx.Budget
+	Items  []itemXML `xml:"item"`
 }
 
 // Decode limits on an untrusted upstream Torznab response. The transport cap
@@ -297,18 +297,18 @@ const (
 	maxUpstreamTextBytes = 4 << 20
 )
 
-// Lexical preflight limits: parseTorznab's allocation gate over the RAW
-// response bytes, enforced BEFORE encoding/xml constructs any token. The
-// decode-time caps above bound the RETAINED object graph, but encoding/xml
-// materializes each token first: one text node or one start tag can force a
-// transient allocation up to the transport cap (prowlarr.go's
-// upstreamMaxBytes) before DecodeElement or the attr-element cap ever sees
-// it, and concurrent authenticated searches can stack several such
-// transients past the container memory budget (CWE-400). These bounds reject
-// a response already far outside the Torznab field/attribute contract at the
-// lexical level, cost one allocation-free scan, and preserve every valid
-// feed: a legitimate 4 KiB field XML-escapes to well under the text-run cap,
-// and no Torznab element carries more than a handful of XML attributes.
+// Lexical preflight limits: the values this app gives xmlx.Preflight, the
+// allocation gate over the RAW response bytes enforced BEFORE encoding/xml
+// constructs any token. The decode-time caps above bound the RETAINED object
+// graph, but encoding/xml materializes each token first: one text node or one
+// start tag can force a transient allocation up to the transport cap
+// (prowlarr.go's upstreamMaxBytes) before DecodeElement or the attr-element
+// cap ever sees it, and concurrent authenticated searches can stack several
+// such transients past the container memory budget. The library owns the scan;
+// these numbers are the Torznab contract, chosen to reject a response already
+// far outside it while preserving every valid feed: a legitimate 4 KiB field
+// XML-escapes to well under the text-run cap, and no Torznab element carries
+// more than a handful of XML attributes.
 const (
 	// maxUpstreamTextRunBytes caps one contiguous raw text or CDATA run.
 	// The decoded per-field cap is maxUpstreamFieldBytes (4 KiB); entity
@@ -327,216 +327,69 @@ const (
 	// carry at most a handful (enclosure: url/length/type; attr:
 	// name/value; rss: version plus namespaces); 16 is generous.
 	maxUpstreamTagAttrs = 16
-	// maxUpstreamDepth caps element nesting depth. encoding/xml pushes one
-	// heap-allocated stack entry per open element with no built-in depth
-	// limit, so an all-opens body of tiny tags (~3 bytes each under the
-	// token cap) could otherwise grow the decoder's element stack by
-	// ~2.7M entries from one 8 MiB response (CWE-400). A Torznab document
-	// is depth ~4 (rss/channel/item/attr).
+	// maxUpstreamDepth caps element nesting depth. The decoder pushes one
+	// heap-allocated stack entry per open element and its Skip path (which
+	// every child this schema does not model takes) has no depth bound, so an
+	// all-opens body of tiny tags (~3 bytes each under the token cap) could
+	// otherwise grow the decoder's element stack by ~2.7M entries from one
+	// 8 MiB response. A Torznab document is depth ~4 (rss/channel/item/attr).
 	maxUpstreamDepth = 64
+	// maxUpstreamElements caps total elements in one response, the bound for
+	// amplification by COUNT rather than size: a body of millions of tiny
+	// empty elements passes every per-token bound and charges nothing to the
+	// text budget, yet still expands into a decoded object graph. A real
+	// response is maxUpstreamItems items of ~10 elements each, so 8x that is
+	// generous while still rejecting a body two orders of magnitude larger.
+	maxUpstreamElements = 8 * maxUpstreamItems * 10
 )
 
-// Raw markup delimiters preflightMarkup dispatches on.
-var (
-	cdataOpen     = []byte("<![CDATA[")
-	cdataClose    = []byte("]]>")
-	commentOpen   = []byte("<!--")
-	commentClose  = []byte("-->")
-	piOpen        = []byte("<?")
-	piClose       = []byte("?>")
-	directiveOpen = []byte("<!")
-)
+// upstreamLimits is the xmlx.Limits value the preflight runs under, assembled
+// from the Torznab contract constants above. The library owns the scan; this app
+// owns the numbers.
+var upstreamLimits = xmlx.Limits{
+	MaxTextRunBytes: maxUpstreamTextRunBytes,
+	MaxTokenBytes:   maxUpstreamTokenBytes,
+	MaxTagAttrs:     maxUpstreamTagAttrs,
+	MaxDepth:        maxUpstreamDepth,
+	MaxElements:     maxUpstreamElements,
+}
 
-// preflightTorznab is parseTorznab's allocation-free lexical gate over the
-// raw response bytes (see the preflight limit constants above). It walks the
-// document's surface structure - text runs, tags (honoring quoted '>'
-// bytes), comments, processing instructions and CDATA sections - and rejects
-// an overlong text/CDATA run, an overlong markup
-// token, a start tag carrying more than maxUpstreamTagAttrs XML attributes,
-// a `<!` directive (unboundable here, and unused by Torznab RSS - see
-// preflightMarkup), or element nesting deeper than maxUpstreamDepth
-// (encoding/xml's
-// open-element stack grows per start tag with no built-in depth limit), each
-// as a *torznabLimitError so it classifies exactly like the decode-time
-// caps. It never validates XML: a malformed body within the bounds passes
-// through for encoding/xml to reject with its own parse error.
+// preflightTorznab is the lexical gate over the raw response bytes, converting
+// an xmlx bound rejection into this package's *torznabLimitError so a lexical
+// breach classifies exactly like a decode-time one (see asLimitError).
 func preflightTorznab(body []byte) error {
-	depth := 0
-	for i := 0; i < len(body); {
-		if body[i] != '<' {
-			run := textRunLen(body[i:])
-			if run > maxUpstreamTextRunBytes {
-				return &torznabLimitError{limit: fmt.Sprintf("text run longer than %d bytes", maxUpstreamTextRunBytes)}
-			}
-			i += run
-			continue
-		}
-		n, delta, err := preflightMarkup(body[i:])
-		if err != nil {
-			return err
-		}
-		depth, err = advanceDepth(depth, delta)
-		if err != nil {
-			return err
-		}
-		i += n
-	}
-	return nil
+	return asLimitError(xmlx.Preflight(body, upstreamLimits))
 }
 
-// textRunLen returns the length of the character-data run at the head of body:
-// everything up to the next '<', or the whole remainder when no markup
-// follows.
-func textRunLen(body []byte) int {
-	if n := bytes.IndexByte(body, '<'); n >= 0 {
-		return n
+// newUpstreamBudget returns the decode-time text budget for ONE response: the
+// per-field cap and the response-wide cumulative cap, shared by the feed item
+// decoders and the <error>-document decoder so the cap policy cannot drift
+// between the two parse paths. Errors are converted at each charge site
+// (asLimitError), not here.
+func newUpstreamBudget() *xmlx.Budget {
+	b, err := xmlx.NewBudget(maxUpstreamFieldBytes, maxUpstreamTextBytes)
+	if err != nil {
+		// Unreachable: both caps are positive constants. A panic here would be
+		// a build-time mistake surfaced on the first request, so fail loudly
+		// rather than serving unbounded.
+		panic("indexer: invalid upstream decode budget: " + err.Error())
 	}
-	return len(body)
+	return b
 }
 
-// advanceDepth applies one markup token's nesting-depth delta, rejecting a
-// body nested deeper than maxUpstreamDepth. A depth that would go negative
-// clamps to zero: stray end tags are left for encoding/xml to reject.
-func advanceDepth(depth, delta int) (int, error) {
-	depth += delta
-	if depth > maxUpstreamDepth {
-		return 0, &torznabLimitError{limit: fmt.Sprintf("element nesting deeper than %d", maxUpstreamDepth)}
+// asLimitError wraps an xmlx bound rejection in this package's
+// *torznabLimitError. Every decode-limit breach - the app's own cardinality
+// caps and the library's byte/shape bounds alike - then presents as one error
+// type, which is what fetchAndParse classifies on (transient with the
+// malformedBody marker) and what parseTorznab checks before re-parsing the body
+// as an <error> document. Any other error, including a genuine encoding/xml
+// parse failure, passes through untouched.
+func asLimitError(err error) error {
+	var le *xmlx.LimitError
+	if errors.As(err, &le) {
+		return &torznabLimitError{err: le}
 	}
-	return max(depth, 0), nil
-}
-
-// preflightMarkup bounds one markup token starting at body[0] == '<',
-// returning how many bytes it spans and the token's nesting-depth delta (+1
-// for a start tag, -1 for an end tag, 0 for everything else). Delimited
-// forms (CDATA, comments, processing instructions) are scanned to their
-// closing delimiter within their bound; a `<!` directive is rejected outright
-// (see the branch); anything else is a tag scanned to its unquoted '>'.
-func preflightMarkup(body []byte) (n, delta int, err error) {
-	switch {
-	case bytes.HasPrefix(body, cdataOpen):
-		n, err = preflightDelimited(body, len(cdataOpen), cdataClose, maxUpstreamTextRunBytes, "CDATA section")
-		return n, 0, err
-	case bytes.HasPrefix(body, commentOpen):
-		n, err = preflightDelimited(body, len(commentOpen), commentClose, maxUpstreamTokenBytes, "comment")
-		return n, 0, err
-	case bytes.HasPrefix(body, piOpen):
-		n, err = preflightDelimited(body, len(piOpen), piClose, maxUpstreamTokenBytes, "processing instruction")
-		return n, 0, err
-	case bytes.HasPrefix(body, directiveOpen):
-		// Fail closed on every non-comment/non-CDATA `<!` directive
-		// (`<!DOCTYPE`, `<!ENTITY`, `<!ATTLIST`): preflightTag cannot bound
-		// one. encoding/xml tokenizes a directive by tracking nested '<'/'>'
-		// pairs and accumulating until a '>' at nesting depth zero, whereas
-		// preflightTag stops at the first unquoted '>' - so a body carrying a
-		// directive stuffed with balanced `<a></a>` fragments reads to
-		// preflight as many short shallow tags while encoding/xml retains one
-		// directive token up to the full transport cap, and concurrent
-		// searches can stack those allocations past the container's memory
-		// limit (CWE-400). Torznab RSS needs no DTD or ENTITY directive, so
-		// rejecting the whole class is both sound and free of false
-		// negatives; a comment and a CDATA section have their own bounded
-		// branches above.
-		return 0, 0, &torznabLimitError{limit: "XML directives are not allowed " +
-			"(a DOCTYPE/ENTITY declaration; an endpoint answering HTML instead of Torznab XML is the usual cause)"}
-	default:
-		countAttrs := len(body) < 2 || body[1] != '/'
-		return preflightTag(body, countAttrs)
-	}
-}
-
-// preflightDelimited bounds one close-delimited token (CDATA, comment,
-// processing instruction): its content must end within maxLen. An
-// unterminated token within the bound is left for encoding/xml to reject.
-func preflightDelimited(body []byte, openLen int, closeDelim []byte, maxLen int, what string) (int, error) {
-	window := body[openLen:]
-	bound := min(len(window), maxLen+len(closeDelim))
-	if j := bytes.Index(window[:bound], closeDelim); j >= 0 {
-		return openLen + j + len(closeDelim), nil
-	}
-	if len(window) > bound {
-		return 0, &torznabLimitError{limit: fmt.Sprintf("%s longer than %d bytes", what, maxLen)}
-	}
-	return len(body), nil
-}
-
-// preflightTag scans one tag from body[0] == '<' to its
-// unquoted '>' - a '>' inside a quoted attribute value never terminates the
-// tag - bounding the token length and, on a start tag, counting unquoted '='
-// bytes (exactly one per XML attribute) against maxUpstreamTagAttrs. On
-// termination it classifies the token's nesting-depth delta (tagDepthDelta):
-// -1 for an end tag, 0 for a self-closing start tag, +1 for
-// any other start tag (a <!-directive never reaches here: preflightMarkup
-// rejects the class). An unterminated tail within the token bound is left
-// for encoding/xml to reject (delta 0: nothing else follows it).
-func preflightTag(body []byte, countAttrs bool) (n, delta int, err error) {
-	limit := min(len(body), maxUpstreamTokenBytes+1)
-	scan := tagScan{countAttrs: countAttrs}
-	for i := 1; i < limit; i++ {
-		terminated, err := scan.consume(body[i])
-		if err != nil {
-			return 0, 0, err
-		}
-		if terminated {
-			return i + 1, tagDepthDelta(body, i), nil
-		}
-	}
-	if len(body) > maxUpstreamTokenBytes {
-		return 0, 0, &torznabLimitError{limit: fmt.Sprintf("markup token longer than %d bytes", maxUpstreamTokenBytes)}
-	}
-	return len(body), 0, nil
-}
-
-// tagScan carries preflightTag's byte-loop state: the open quote character (0
-// outside a quoted attribute value), the running unquoted '=' count, and
-// whether this token is a start tag whose attributes are counted (an end tag's
-// are not).
-type tagScan struct {
-	attrs      int
-	quote      byte
-	countAttrs bool
-}
-
-// consume advances the scan by one byte, reporting whether that byte
-// terminated the tag (an unquoted '>'). A '>' inside a quoted attribute value
-// never terminates, and a start tag carrying more than maxUpstreamTagAttrs
-// unquoted '=' bytes (exactly one per XML attribute) fails closed.
-func (s *tagScan) consume(c byte) (terminated bool, err error) {
-	switch {
-	case s.quote != 0:
-		if c == s.quote {
-			s.quote = 0
-		}
-	case c == '"' || c == '\'':
-		s.quote = c
-	case c == '=' && s.countAttrs:
-		s.attrs++
-		if s.attrs > maxUpstreamTagAttrs {
-			return false, &torznabLimitError{limit: fmt.Sprintf("more than %d attributes on one start tag", maxUpstreamTagAttrs)}
-		}
-	case c == '>':
-		return true, nil
-	}
-	return false, nil
-}
-
-// tagDepthDelta classifies the nesting-depth contribution of one tag whose
-// terminating unquoted '>' sits at body[end]: an end tag (</...>) closes a
-// level (-1), a self-closing start tag (.../>; the byte before the
-// terminating '>' is '/', necessarily unquoted since the '>' itself is)
-// leaves the depth unchanged (0), and any other start tag opens a level
-// (+1). preflightTag already visits both classification bytes, so this costs
-// two byte-compares. No `<!`-prefixed token reaches here: preflightMarkup
-// routes CDATA, comments and processing instructions to preflightDelimited
-// and rejects every remaining `<!` directive outright.
-func tagDepthDelta(body []byte, end int) int {
-	switch {
-	case body[1] == '/':
-		return -1
-	case body[end-1] == '/':
-		return 0
-	default:
-		return 1
-	}
+	return err
 }
 
 // maxRenderedFeedBytes bounds one rendered feed document, the render-side
@@ -552,12 +405,25 @@ const maxRenderedFeedBytes = 8 << 20
 // marker, so it retries within the bounded budget and, after exhaustion, the
 // harvest scopes the failure to the one result set rather than the upstream.
 type torznabLimitError struct {
+	// err is the library's *xmlx.LimitError when the bound was one of xmlx's,
+	// nil for an app-side cap. Unwrapping it lets a consumer match
+	// errors.Is(err, xmlx.ErrLimit) as well as this type.
+	err error
+	// limit describes an app-side cardinality cap (item count, attr count).
 	limit string
 }
 
 func (e *torznabLimitError) Error() string {
-	return "torznab response exceeds decode limit: " + e.limit
+	detail := e.limit
+	if e.err != nil {
+		detail = e.err.Error()
+	}
+	return "torznab response exceeds decode limit: " + detail
 }
+
+// Unwrap exposes the library rejection, so errors.Is(err, xmlx.ErrLimit) holds
+// for a bound xmlx enforced.
+func (e *torznabLimitError) Unwrap() error { return e.err }
 
 // UnmarshalXML decodes <channel> one <item> at a time so the item-count cap
 // rejects an oversized response before its object graph is built, instead of
@@ -567,6 +433,14 @@ func (e *torznabLimitError) Error() string {
 // retained. Non-item children are skipped. The decoder this runs under is
 // xml.Unmarshal's, which keeps Strict enabled.
 func (c *channelXML) UnmarshalXML(d *xml.Decoder, _ xml.StartElement) error {
+	if c.budget == nil {
+		// First invocation owns the response-wide allowance. Setting it here
+		// rather than at the parse entry point means no construction path can
+		// leave it nil, and the field persists across sibling <channel>
+		// invocations on this same value, so repetition is bounded once for the
+		// whole response rather than reset per channel.
+		c.budget = newUpstreamBudget()
+	}
 	for {
 		tok, err := d.Token()
 		if err != nil {
@@ -596,13 +470,9 @@ func (c *channelXML) decodeChild(d *xml.Decoder, t xml.StartElement) error {
 	if len(c.Items) >= maxUpstreamItems {
 		return &torznabLimitError{limit: fmt.Sprintf("more than %d items", maxUpstreamItems)}
 	}
-	var it itemXML
+	it := itemXML{budget: c.budget}
 	if err := d.DecodeElement(&it, &t); err != nil {
 		return err
-	}
-	c.textBytes += it.textBytes
-	if c.textBytes > maxUpstreamTextBytes {
-		return &torznabLimitError{limit: fmt.Sprintf("cumulative decoded text over %d bytes", maxUpstreamTextBytes)}
 	}
 	c.Items = append(c.Items, it)
 	return nil
@@ -618,18 +488,19 @@ type itemXML struct {
 	// rule: feed.json stores raw bytes in plain string fields), and the
 	// human-facing sinks keep their own layers: the XML render escapes over
 	// the rune belt (escTo), capped log lines use capLogText.
+	// budget is the response-wide decoded-text allowance this item charges as
+	// it decodes (unexported: invisible to encoding/xml). It is the SAME
+	// budget every sibling item charges, so repetition across items is bounded
+	// by one cumulative cap rather than per item.
+	budget    *xmlx.Budget
+	Attrs     []attrXML          `xml:"attr"`
 	Title     runesafe.Untrusted `xml:"title"`
 	GUID      string             `xml:"guid"`
 	Comments  string             `xml:"comments"`
 	Link      string             `xml:"link"`
 	PubDate   string             `xml:"pubDate"`
 	Enclosure enclosureXML       `xml:"enclosure"`
-	Attrs     []attrXML          `xml:"attr"`
 	Size      int64              `xml:"size"`
-	// textBytes accumulates the decoded text of every field occurrence in
-	// this item (unexported: invisible to encoding/xml). channelXML's
-	// decodeChild folds it into the response-wide budget.
-	textBytes int
 }
 
 // UnmarshalXML decodes one <item> child-by-child so the attr-count and
@@ -708,11 +579,11 @@ func (x *itemXML) stringField(name string) *string {
 // budget entirely (the conversion error, when it came, arrived only after
 // the allocation).
 func (x *itemXML) decodeSizeField(d *xml.Decoder) error {
-	s, err := decodeBoundedElementText(d)
+	s, err := x.budget.DecodeText(d)
 	if err != nil {
-		return err
+		return asLimitError(err)
 	}
-	n, err := x.boundedInt64(s)
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 	if err != nil {
 		return err
 	}
@@ -783,53 +654,20 @@ func (x *itemXML) boundedInt64(s string) (int64, error) {
 	return strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 }
 
-// decodeField decodes one text child into dst, bounding and accounting it.
-// Every decoded occurrence is accounted (a repeated <title> overwrites dst
-// but still consumes budget), so duplicate elements cannot amplify past the
+// decodeField decodes one text child into dst, bounded and charged as it
+// accumulates: xmlx.Budget.DecodeText stops at the CharData token that would
+// cross either cap, so a value split across CDATA seams is rejected during
+// token iteration instead of after encoding/xml has materialized the whole
+// string. Every decoded occurrence is charged (a repeated <title> overwrites
+// dst but still consumes budget), so duplicate elements cannot amplify past the
 // cumulative cap.
 func (x *itemXML) decodeField(d *xml.Decoder, dst *string) error {
-	s, err := decodeBoundedElementText(d)
+	s, err := x.budget.DecodeText(d)
 	if err != nil {
-		return err
-	}
-	if err := x.account(s); err != nil {
-		return err
+		return asLimitError(err)
 	}
 	*dst = s
 	return nil
-}
-
-// decodeBoundedElementText replaces DecodeElement(&s) on the plain text
-// children: it accumulates the element's CharData only while the cumulative
-// decoded byte count stays within maxUpstreamFieldBytes, so a field split
-// across CDATA seams or entity boundaries - each chunk individually under
-// the lexical text-run cap - is rejected DURING token iteration instead of
-// after encoding/xml has materialized the whole string (each single CharData
-// token is already bounded by preflightTorznab's raw text-run cap). Nested
-// markup is skipped whole, matching the struct decode this replaces for
-// every plain Torznab text field; comments and processing instructions are
-// ignored exactly as DecodeElement ignores them.
-func decodeBoundedElementText(d *xml.Decoder) (string, error) {
-	var b strings.Builder
-	for {
-		tok, err := d.Token()
-		if err != nil {
-			return "", err
-		}
-		switch t := tok.(type) {
-		case xml.CharData:
-			if b.Len()+len(t) > maxUpstreamFieldBytes {
-				return "", &torznabLimitError{limit: fmt.Sprintf("field longer than %d bytes", maxUpstreamFieldBytes)}
-			}
-			b.Write(t)
-		case xml.StartElement:
-			if err := d.Skip(); err != nil {
-				return "", err
-			}
-		case xml.EndElement:
-			return b.String(), nil
-		}
-	}
 }
 
 // decodeUntrustedField decodes one text element into an Untrusted-tagged
@@ -846,26 +684,10 @@ func (x *itemXML) decodeUntrustedField(d *xml.Decoder, dst *runesafe.Untrusted) 
 	return nil
 }
 
-// chargeText enforces the per-field cap on one decoded string and folds it
-// into a cumulative decoded-text counter, failing fast on either breach. It
-// is the single home of the decode-time budget arithmetic, shared by the
-// item decoder (itemXML.account) and the <error>-document decoder
-// (errorXML.UnmarshalXML), so the cap policy cannot drift between them.
-func chargeText(total *int, s string) error {
-	if len(s) > maxUpstreamFieldBytes {
-		return &torznabLimitError{limit: fmt.Sprintf("field longer than %d bytes", maxUpstreamFieldBytes)}
-	}
-	*total += len(s)
-	if *total > maxUpstreamTextBytes {
-		return &torznabLimitError{limit: fmt.Sprintf("cumulative decoded text over %d bytes", maxUpstreamTextBytes)}
-	}
-	return nil
-}
-
-// account enforces the per-field cap on one decoded string and accumulates
-// it into the item's text counter, failing fast when this single item
-// already exceeds the whole response budget.
-func (x *itemXML) account(s string) error { return chargeText(&x.textBytes, s) }
+// account charges one decoded string against the response-wide budget, which
+// enforces the per-field cap and the cumulative cap and mutates nothing on
+// rejection.
+func (x *itemXML) account(s string) error { return asLimitError(x.budget.Charge(s)) }
 
 type enclosureXML struct {
 	URL    string `xml:"url,attr"`
@@ -882,6 +704,11 @@ type attrXML struct {
 // same shape renderError emits on the serving side. Decoding is custom (see
 // UnmarshalXML) so every attribute is bounded BEFORE assignment.
 type errorXML struct {
+	// budget is the decoded-text allowance this document charges, created on the
+	// UnmarshalXML call. The <error> fallback re-parses the SAME body the feed
+	// parse just walked, so it gets its own fresh allowance rather than a
+	// half-spent one.
+	budget      *xmlx.Budget
 	Code        string
 	Description string
 }
@@ -897,9 +724,11 @@ func (e *errorXML) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	if start.Name.Local != "error" {
 		return fmt.Errorf("expected torznab error element, got %s", start.Name.Local)
 	}
-	total := 0
+	if e.budget == nil {
+		e.budget = newUpstreamBudget()
+	}
 	for _, attr := range start.Attr {
-		if err := chargeText(&total, attr.Value); err != nil {
+		if err := asLimitError(e.budget.Charge(attr.Value)); err != nil {
 			return err
 		}
 		switch attr.Name.Local {

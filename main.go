@@ -6,7 +6,11 @@
 // main.go is the composition root: it installs logging, handles the distroless
 // `health` subcommand, loads and validates the YAML config (CONFIG_PATH,
 // default /config/config.yaml; a starter is written on first boot), builds the
-// scout (build.go), and runs the daemon. All logic lives in internal/*.
+// scout (build.go), dispatches the subcommand, and maps the result to a slog
+// level and an exit code. All logic lives in internal/* - including the cycle
+// coordination every entry point runs through (internal/cycle owns the
+// cross-process coalescing lock and the shutdown-interruption contract; this
+// root only wires it and translates its error into the process result).
 //
 // Two run modes: the daemon (no argument, or mode: daemon) runs a compare cycle
 // on start and every poll_interval - or sits resident-idle when poll_interval is
@@ -37,9 +41,9 @@ import (
 
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/health"
-	"github.com/cplieger/scheduler/v2"
 	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/config"
+	"github.com/cplieger/seadex-scout/internal/cycle"
 )
 
 // exampleConfig is the starter written to CONFIG_PATH on first boot; it is also
@@ -65,13 +69,6 @@ const modePoll = "poll"
 // invalid-invocation error messages so they cannot drift when a
 // subcommand is added or removed.
 const validArgsHint = "(valid: health, daemon, report, poll, or no argument)"
-
-// msgCoordErrorAfterRun is the WARN message for a coordination-bookkeeping
-// error observed after a cycle actually ran (the run stands; only the
-// demand-coalescing accounting degraded). Shared by poll's
-// warnCoordinationError and the daemon's runScheduler so the two
-// Loki-queried diagnostics cannot drift.
-const msgCoordErrorAfterRun = "cycle coordination error after run"
 
 // unknownModeMarker is the fixed value logged in place of an unrecognized
 // run mode: the raw value may be an expanded ${VAR} secret placed by a
@@ -114,16 +111,11 @@ func main() {
 	}
 
 	if err := dispatch(mode, &cfg); err != nil {
-		if errors.Is(err, context.Canceled) {
-			// A shutdown signal interrupted the run (signal.NotifyContext
-			// cancels with context.Canceled): routine, not a fault, so keep it
-			// off the level=ERROR cycle-error alert. A DeadlineExceeded is a
-			// genuine operation timeout and falls through to ERROR.
-			slog.Warn("seadex-scout interrupted by shutdown", "mode", loggableMode(mode), "error", err)
-		} else {
-			slog.Error("seadex-scout failed", "mode", loggableMode(mode), "error", err)
+		level, msg, code := dispatchOutcome(err)
+		slog.Log(context.Background(), level, msg, "mode", loggableMode(mode), "error", err)
+		if code != 0 {
+			os.Exit(code)
 		}
-		os.Exit(1)
 	}
 }
 
@@ -245,7 +237,7 @@ func resolveMode(args []string, cfg *config.Config) (mode string, err error) {
 // emit it to slog, and write the JSON + Markdown files. It never writes state,
 // so a one-shot report cannot clobber a running daemon's cache.
 //
-// Every stage's error passes through normalizeShutdownError on the way out, so
+// Every stage's error passes through cycle.NormalizeShutdownError on the way out, so
 // a stage that reports the cancellation CAUSE rather than context.Canceled (an
 // early library walk or SeaDex request cut off by SIGTERM) still reaches main
 // as a routine-shutdown WARN instead of the level=ERROR fault line that trips
@@ -253,7 +245,7 @@ func resolveMode(args []string, cfg *config.Config) (mode string, err error) {
 func runReport(cfg *config.Config) (err error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	defer func() { err = normalizeShutdownError(ctx, err) }()
+	defer func() { err = cycle.NormalizeShutdownError(ctx, err) }()
 
 	// The whole generate+write is serialized on an exclusive flock in the
 	// report dir: two report runs finishing within the same UTC second would
@@ -279,81 +271,44 @@ func runReport(cfg *config.Config) (err error) {
 	if err != nil {
 		return err
 	}
-	if err := rep.Log(ctx, slog.Default()); err != nil {
+	// The report itself is the expensive artifact - a full arr walk plus a
+	// SeaDex fetch, measured at ~25m on a real library - while writing the pair
+	// is a few milliseconds. Log's per-row emission returns as soon as the
+	// context is done, so a redeploy SIGTERM landing in the row-emission tail
+	// used to discard the whole deliverable and leave nothing on disk (l-f117).
+	// An interrupted Log therefore no longer aborts the write: the rows are
+	// diagnostics, the pair is the product. The row error is still reported when
+	// the write itself succeeds, so an interrupted run keeps its non-zero exit.
+	logErr := rep.Log(ctx, slog.Default())
+	writeCtx, cancel := reportWriteContext(ctx)
+	defer cancel()
+	if err := rep.WriteFiles(writeCtx, cfg.ReportDir, slog.Default()); err != nil {
 		return err
 	}
-	return rep.WriteFiles(ctx, cfg.ReportDir, slog.Default())
+	return logErr
 }
 
-// --- Cycle coalescing: the cross-process lock shared by poll and the daemon ---
+// reportWriteGrace bounds the detached report write, mirroring scout's saveGrace:
+// inside Docker's default 10s stop grace, so the pair lands before SIGKILL.
+const reportWriteGrace = 5 * time.Second
 
-// cycleDirMode is applied when creating the cycle-lock directory (normally
-// /config, which already exists as the mounted volume holding the config and
-// state files this lock guards).
-const cycleDirMode = 0o700
-
-// newCycleExclusive builds the cross-process cycle coalescer shared by every
-// cycle entry point: the daemon's RunLoop ticks (skip mode) and exec'd `poll`
-// subcommands (queue mode) serialize on dir/cycle.lock, closing the
-// last-writer-wins race two concurrent cycles run on state.json (AniList memo
-// and finding-dedupe loss, duplicate alerts) and feed.json. dir is the state
-// directory (filepath.Dir(config.DefaultStatePath)) so the lock lives beside
-// the files it guards; the kernel releases the flock if a process dies, so
-// there is no stale-lock state. The gate stops queued reruns (and a
-// not-yet-started initial run) once shutdown is signalled; an in-flight run
-// is never interrupted by the gate - context cancellation owns that.
-func newCycleExclusive(ctx context.Context, dir string) (*scheduler.Exclusive, error) {
-	if err := os.MkdirAll(dir, cycleDirMode); err != nil {
-		return nil, fmt.Errorf("create cycle lock dir %s: %w", dir, err)
+// reportWriteContext returns the context the report's file write runs under -
+// the caller's while it is live, else a detached, briefly-bounded one
+// (context.WithoutCancel keeps the values, drops the cancellation) - plus its
+// cancel func, which the caller must defer either way.
+//
+// This is the same escape hatch Scout.save already uses for the AniList memo,
+// for the same reason: the write is cheap and its input took tens of minutes to
+// produce, so a shutdown that arrives after generation must not cost the
+// artifact. WriteFiles' own per-stage context gates stay exactly as documented -
+// they exist so a shutdown does not spend the grace period on CPU-bound work -
+// and this decision is made HERE, in the composition root that owns the
+// subcommand's lifecycle, rather than by weakening that contract inside audit.
+func reportWriteContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx.Err() == nil {
+		return ctx, func() {}
 	}
-	return scheduler.NewExclusive(dir, slog.Default(),
-		scheduler.WithGate(func() bool { return ctx.Err() == nil })), nil
-}
-
-// pollInterrupted wraps the stable ctx.Err() (always context.Canceled here)
-// with poll's uniform interruption message, so main classifies it as a
-// routine-shutdown WARN and the marker-untouched contract reads identically
-// from every phase. The cancellation cause rides along as a second %w so the
-// message still names the signal ("terminated signal received"), never as the
-// classification token: a cause is whatever the cancelling site passed to
-// context.WithCancelCause, so only ctx.Err() is guaranteed to be
-// context.Canceled. (signal.NotifyContext's own signalError does satisfy
-// errors.Is(_, context.Canceled) - golang/go#77639, backported to Go 1.26 in
-// #79499 - which is what keeps the net/http errors this app classifies
-// classifiable at all, since net/http reports a cancelled request as
-// context.Cause(ctx).)
-func pollInterrupted(ctx context.Context) error {
-	return fmt.Errorf("poll interrupted; health marker left unchanged: %w (cause: %w)", ctx.Err(), context.Cause(ctx))
-}
-
-// isShutdownError reports whether err is the observable form of THIS context's
-// cancellation, so a terminal boundary can classify it as a routine shutdown
-// (WARN) instead of a fault (the level=ERROR cycle-error alert). It proves the
-// match rather than assuming it: a cancelled context alone is not enough
-// (an unrelated coincident fault must still read as a fault), so err must
-// carry either the stable ctx.Err() or the cancellation cause. Matching the
-// cause is what keeps a dependency that surfaces context.Cause(ctx) verbatim
-// (net/http does, and a WithCancelCause cause need not wrap context.Canceled)
-// classifiable at all.
-func isShutdownError(ctx context.Context, err error) bool {
-	if ctx.Err() == nil || err == nil {
-		return false
-	}
-	return errors.Is(err, ctx.Err()) || errors.Is(err, context.Cause(ctx))
-}
-
-// normalizeShutdownError adds the stable ctx.Err() as the classification token
-// to an error that IS this context's cancellation but does not carry
-// context.Canceled itself (a cause-only form), so main's single
-// errors.Is(err, context.Canceled) check classifies it as a routine shutdown.
-// Anything else - a nil error, one that already carries ctx.Err(), or a
-// genuine fault that merely happened to land while the context was cancelled -
-// is returned untouched.
-func normalizeShutdownError(ctx context.Context, err error) error {
-	if err == nil || errors.Is(err, ctx.Err()) || !isShutdownError(ctx, err) {
-		return err
-	}
-	return fmt.Errorf("%w (cause: %w): %w", ctx.Err(), context.Cause(ctx), err)
+	return context.WithTimeout(context.WithoutCancel(ctx), reportWriteGrace)
 }
 
 // runPoll runs one compare cycle for an external scheduler (poll_interval: off).
@@ -362,7 +317,8 @@ func normalizeShutdownError(ctx context.Context, err error) error {
 // on an unhealthy cycle so the scheduler (Ofelia job-exec, cron) sees the fail.
 // The cycle runs under the cross-process cycle lock in queue mode: a request
 // arriving while another cycle is in flight (an overlapping poll, or a daemon
-// tick) is queued for the active runner instead of racing it (see pollCycle).
+// tick) is queued for the active runner instead of racing it (see
+// cycle.RunOnce).
 //
 // Interruption contract (uniform across every phase of poll): a shutdown
 // cancellation observed at any point - during startup, mid-cycle, or after the
@@ -379,208 +335,44 @@ func runPoll(cfg *config.Config) error {
 			// Shutdown cancelled startup (pre-cycle phase of the uniform
 			// interruption contract): wrap the cancellation cause so main
 			// classifies it WARN, and never touch the marker.
-			return pollInterrupted(ctx)
+			return cycle.Interrupted(ctx)
 		}
 		return err
 	}
 	defer b.cleanup()
 
-	ex, err := newCycleExclusive(ctx, filepath.Dir(config.DefaultStatePath))
+	ex, err := cycle.NewExclusive(ctx, filepath.Dir(config.DefaultStatePath))
 	if err != nil {
 		return err
 	}
-	return pollCycle(ctx, ex, b.scout, health.NewMarker(health.DefaultPath))
+	return cycle.RunOnce(ctx, ex, b.scout, health.NewMarker(health.DefaultPath))
 }
 
-// pollOnce is one execution of poll's cycle body under the cycle lock: run the
-// cycle and apply the interruption contract (a cancellation observed at any
-// point - even when the cycle still managed to complete healthy, e.g. the
-// signal landed during the end-of-cycle save - is reported as an interruption,
-// since an interrupted run's outcome is not a trustworthy health verdict). It
-// only REPORTS the cycle's health verdict; recording it on the shared marker
-// is deliberately pollCycle's job, after Exclusive.Run has returned and the
-// final cancellation check has run - the marker write is irreversible, so it
-// must not be committed while shutdown can still supersede this poll's result
-// (a queued rerun servicing another process is exactly that window). The
-// active runner may execute this body again for demand queued by other
-// processes; the LAST execution's verdict is the one the marker records.
-func pollOnce(ctx context.Context, sc cycler) (healthy bool, err error) {
-	healthy = runCycle(ctx, sc)
-	if ctx.Err() != nil {
-		return healthy, pollInterrupted(ctx)
-	}
-	if !healthy {
-		return healthy, errors.New("compare cycle failed (library ingest)")
-	}
-	return healthy, nil
-}
-
-// executePollRuns runs poll's cycle body under the cycle lock and captures the
-// first execution's outcome - this invocation's own run - plus the run count
-// and the LAST run's health verdict (what pollCycle records on the marker once
-// it knows shutdown did not supersede the poll). The closure returns nil to
-// Exclusive so exErr stays purely a coordination-infrastructure signal (job
-// outcomes must not stop queued demand or muddy pollCycle's infra-error
-// accounting). The closure can run again for demand queued by OTHER processes;
-// a rerun has no exit code to report through, so its business error is logged
-// here - without that line a shutdown observed mid-rerun would vanish (the
-// cycle's own faults already log inside Cycle).
-func executePollRuns(ctx context.Context, ex *scheduler.Exclusive, sc cycler) (outcome scheduler.Outcome, runs int, lastHealthy bool, own, exErr error) {
-	outcome, exErr = ex.Run(func() error {
-		healthy, err := pollOnce(ctx, sc)
-		runs++
-		lastHealthy = healthy
-		if runs == 1 {
-			own = err
-		} else if err != nil {
-			slog.Warn("queued rerun cycle reported an error", "error", err)
-		}
-		return nil
-	})
-	return outcome, runs, lastHealthy, own, exErr
-}
-
-// recordPollHealth commits the final run's health verdict to the shared marker
-// once pollCycle knows the poll was not superseded by shutdown, preserving
-// pollOnce's former error semantics: when this invocation's OWN run was the
-// only one, a failed write is this process's result (it outranks an unhealthy
-// cycle's ingest error, exactly as the pre-commit ordering did, and is the
-// write's only report); when the final verdict came from a queued rerun
-// serviced for another process, the failure has no exit code to report through
-// and is logged as that rerun's error instead, leaving own as the result.
-func recordPollHealth(marker *health.Marker, healthy bool, runs int, own error) error {
-	err := marker.SetChecked(healthy)
-	if err == nil {
-		return own
-	}
-	err = fmt.Errorf("record poll health: %w", err)
-	if runs > 1 {
-		slog.Warn("queued rerun cycle reported an error", "error", err)
-		return own
-	}
-	return err
-}
-
-// warnCoordinationError logs the coordination-infrastructure diagnostic for a
-// poll whose demand or run still stands despite the error: demand was
-// recorded (Queued/Discarded), a run completed (Ran/RanQueued/Skipped), or
-// Exclusive failed before recording demand (anything else - reachable only
-// from pollCycle's shutdown branch).
-func warnCoordinationError(outcome scheduler.Outcome, err error) {
-	switch outcome {
-	case scheduler.OutcomeQueued, scheduler.OutcomeDiscarded:
-		slog.Warn("cycle coordination error after queueing; demand stands", "error", err)
-	case scheduler.OutcomeRan, scheduler.OutcomeRanQueued, scheduler.OutcomeSkipped:
-		slog.Warn(msgCoordErrorAfterRun, "error", err)
-	default:
-		slog.Warn("cycle coordination failed during shutdown", "error", err)
-	}
-}
-
-// pollNonRunResult maps the coalescing outcomes that end the poll WITHOUT an
-// own run to poll's exit contract: Queued/Discarded log success (any
-// coordination error is a stands-anyway diagnostic) and Gated applies the
-// uniform interruption contract. It reports handled=false for every outcome
-// that falls through to pollCycle's ran/own accounting (None, Ran, RanQueued,
-// and the queue-mode-unreachable Skipped).
-func pollNonRunResult(ctx context.Context, outcome scheduler.Outcome, exErr error) (handled bool, err error) {
-	switch outcome {
-	case scheduler.OutcomeQueued, scheduler.OutcomeDiscarded:
-		if exErr != nil {
-			warnCoordinationError(outcome, exErr)
-		}
-		msg := "compare cycle already in flight; demand queued for the active runner"
-		if outcome == scheduler.OutcomeDiscarded {
-			msg = "compare cycle already in flight; demand already covered by the queued rerun"
-		}
-		slog.Info(msg, "outcome", outcome.String())
-		return true, nil
-	case scheduler.OutcomeGated:
-		return true, pollInterrupted(ctx)
-	default:
-		return false, nil
-	}
-}
-
-// pollCycle runs poll's one cycle under the cross-process cycle lock (queue
-// mode) and maps the coalescing outcome to poll's exit contract:
+// dispatchOutcome classifies a dispatch error into the two operator-visible
+// contracts main owns: the slog level a Loki alert keys on, and the process exit
+// code a scheduler reads. Both follow one rule - a condition that will not clear
+// without the operator is an ERROR; a transient or DESIGNED outcome is a WARN -
+// so the classification is kept here as a pure function rather than inline in
+// main, where neither contract could be pinned by a test.
 //
-//   - Ran (or ran plus queued reruns): the exit code reflects this
-//     invocation's OWN (first) run - a healthy cycle exits 0, an unhealthy or
-//     interrupted one non-zero (see pollOnce). The closure can run again for
-//     demand queued by OTHER processes; those cycles report through their own
-//     log lines, and the LAST run's verdict is what this process records on
-//     the marker - never through this process's exit code.
-//   - Queued / Discarded: a cycle is already in flight (an overlapping poll or
-//     a daemon tick); the request was recorded for (or is already covered by)
-//     the active runner, which is owed to start a run after it arrived. That
-//     is success for this process: log and exit 0, marker untouched (the
-//     active runner's cycle records its own outcome).
-//   - Gated: shutdown was signalled before the run started - the uniform
-//     interruption contract applies (exit non-zero, WARN classification,
-//     marker untouched).
-//   - Nothing ran and no demand recorded (a cycle-lock infrastructure
-//     failure): exit non-zero with the error.
-//
-// Whatever the outcome, a cancellation observed by the time Run returns wins:
-// the uniform interruption contract applies (exit non-zero, WARN
-// classification, marker untouched by this return) even when this process's
-// own run completed, because Exclusive can spend post-run time servicing
-// another process's queued rerun and shutdown can land there. That is why the
-// health verdict is recorded HERE, after Run returns and after the final
-// cancellation check, rather than inside the locked cycle body: the marker
-// write is irreversible, so committing it before the interruption decision
-// would leave the marker changed on a poll that reports itself interrupted.
-func pollCycle(ctx context.Context, ex *scheduler.Exclusive, sc cycler, marker *health.Marker) error {
-	// A pre-cancelled invocation must not enqueue demand: Exclusive's gate
-	// refuses the RUN, not the queue insertion, so with the lock held by
-	// another process a cancelled poll would still queue a rerun and report
-	// success, adding work after shutdown was signalled. The uniform
-	// interruption contract applies instead (exit non-zero, marker untouched).
-	if ctx.Err() != nil {
-		return pollInterrupted(ctx)
+//   - ErrReportRunning is the designed coalescing outcome: another run holds the
+//     lock and is producing the report, so nothing is wrong and nothing is
+//     owed. The poll path already treats its own busy case this way (queued,
+//     exit 0); matching it keeps a routine skip off the cycle-error alert and
+//     stops a scheduler from recording a healthy skip as a failed job.
+//   - context.Canceled is a shutdown signal (signal.NotifyContext cancels with
+//     it): routine, but the run did not deliver, so it still exits non-zero.
+//     A DeadlineExceeded is a genuine operation timeout and falls through.
+//   - everything else is a fault the operator must look at.
+func dispatchOutcome(err error) (level slog.Level, msg string, exit int) {
+	switch {
+	case errors.Is(err, audit.ErrReportRunning):
+		return slog.LevelWarn, "report skipped; another report is already running", 0
+	case errors.Is(err, context.Canceled):
+		return slog.LevelWarn, "seadex-scout interrupted by shutdown", 1
+	default:
+		return slog.LevelError, "seadex-scout failed", 1
 	}
-	outcome, runs, lastHealthy, own, exErr := executePollRuns(ctx, ex, sc)
-	if ctx.Err() != nil {
-		// Cancellation observed by the time Run returns wins over EVERY
-		// outcome: while Run coordinated with a busy owner (Queued/Discarded)
-		// or while Exclusive spent post-run time servicing another process's
-		// queued rerun after this invocation's own run completed
-		// (RanQueued). In all of them this invocation reports the uniform
-		// interruption contract (exit non-zero, WARN classification, marker
-		// untouched by this return) rather than a success or own-run result
-		// observed after shutdown was signalled; any recorded demand still
-		// stands for the active runner.
-		if exErr != nil {
-			// Outcome-specific diagnostics: "demand stands" is only true
-			// when demand was actually recorded (Queued/Discarded); after a
-			// run the error is post-run bookkeeping; and OutcomeNone means
-			// Exclusive failed BEFORE recording demand, so no demand stands.
-			warnCoordinationError(outcome, exErr)
-		}
-		if own != nil && !errors.Is(own, context.Canceled) {
-			// The interruption replaces this invocation's own result, so the
-			// own run's error has no exit code left to report through. Same
-			// reasoning executePollRuns applies to a queued rerun's error. An
-			// already-interrupted own result is skipped: pollInterrupted below
-			// reports it.
-			slog.Warn("own cycle reported an error before shutdown", "error", own)
-		}
-		return pollInterrupted(ctx)
-	}
-	if handled, err := pollNonRunResult(ctx, outcome, exErr); handled {
-		return err
-	}
-	if runs == 0 {
-		return fmt.Errorf("cycle coordination failed: %w", exErr)
-	}
-	if exErr != nil {
-		// The run itself completed; a queue-file error only degrades the
-		// demand-coalescing bookkeeping, so it is logged rather than failing
-		// the cycle this invocation paid for.
-		warnCoordinationError(outcome, exErr)
-	}
-	return recordPollHealth(marker, lastHealthy, runs, own)
 }
 
 // --- Daemon mode: poll loop + indexer feed ---
@@ -640,15 +432,15 @@ func run(cfg *config.Config) error {
 	// health. The marker thereafter reflects each cycle's library-ingest outcome.
 	// Ticks run under the cross-process cycle lock in skip mode, so a tick
 	// arriving while an exec'd `poll` cycle is in flight skips instead of
-	// racing it (see runScheduler).
-	ex, err := newCycleExclusive(ctx, filepath.Dir(config.DefaultStatePath))
+	// racing it (see cycle.RunLoop).
+	ex, err := cycle.NewExclusive(ctx, filepath.Dir(config.DefaultStatePath))
 	if err != nil {
 		return err
 	}
 	marker.Set(true)
 	slog.Info("seadex-scout started", "poll_interval", cfg.PollInterval.String(), "indexer", cfg.IndexerConfigured())
 
-	runScheduler(ctx, cfg.PollInterval, ex, b.scout, marker)
+	cycle.RunLoop(ctx, cfg.PollInterval, ex, b.scout, marker)
 	normalShutdown = true
 	return nil
 }
@@ -686,11 +478,12 @@ func startIndexer(ctx context.Context, cfg *config.Config) func() {
 
 // runIndexer launches the feed goroutine: it runs the feed until it returns
 // (classifying the stop via logIndexerStop), recovers a panic so a crashing
-// feed cannot take down the long-lived daemon (the runCycle shield's twin),
+// feed cannot take down the long-lived daemon (the twin of internal/cycle's
+// compare-cycle panic shield),
 // releases the feed's clients on every exit path, and closes done last so
 // startIndexer's stop func can wait for a fully-drained goroutine. Extracted
-// from startIndexer so the shield is testable with a fake runner (the cycler
-// seam precedent).
+// from startIndexer so the shield is testable with a fake runner (the
+// cycle.Cycler seam precedent).
 func runIndexer(ctx context.Context, done chan struct{}, run func(context.Context) error, cleanup func(), log *slog.Logger) {
 	go func() {
 		defer close(done)
@@ -720,68 +513,15 @@ func logIndexerStop(ctx context.Context, log *slog.Logger, err error) {
 	switch {
 	case ctx.Err() != nil && errors.Is(err, context.DeadlineExceeded):
 		log.Warn("indexer shutdown budget expired; in-flight requests aborted", "error", err, "cause", context.Cause(ctx))
-	case isShutdownError(ctx, err):
+	case cycle.IsShutdownError(ctx, err):
 		// Bind cancelled mid-startup, or a clean graceful drain: routine.
-		// isShutdownError also accepts the cause-only form (net.ListenConfig
+		// cycle.IsShutdownError also accepts the cause-only form (net.ListenConfig
 		// surfacing context.Cause(ctx) verbatim), which a plain
 		// errors.Is(err, context.Canceled) would misread as a fault.
 		log.Warn("indexer feed stopped during shutdown", "error", err, "cause", context.Cause(ctx))
 	default:
 		log.Error("indexer feed stopped", "error", err)
 	}
-}
-
-// runScheduler runs a cycle on each tick of a POLL_INTERVAL timer with ±10%
-// jitter until ctx is cancelled. The first iteration fires immediately so a
-// cycle runs promptly on boot; the marker is set to each cycle's health.
-// Each tick body runs under the cross-process cycle lock in skip mode: a tick
-// arriving while a cycle is already in flight (an exec'd `poll` racing the
-// loop) is skipped with a WARN and the marker untouched - the next tick
-// provides freshness, and the in-flight cycle records its own outcome. An
-// acquired tick also executes demand queued by `poll` requests that arrived
-// during it (one rerun per queued request), each recording its own health.
-// A coordination-infrastructure failure (the lock or queue file unusable)
-// means the tick could not run at all and is logged at ERROR - cycles have
-// stopped, which the operator must see (the level=ERROR Loki alert fires).
-func runScheduler(ctx context.Context, interval time.Duration, ex *scheduler.Exclusive, sc cycler, marker *health.Marker) {
-	scheduler.RunLoop(ctx, func(ctx context.Context) {
-		outcome, err := ex.RunOrSkip(func() error {
-			healthy := runCycle(ctx, sc)
-			if !healthy && ctx.Err() != nil {
-				return nil // shutdown mid-cycle: cancellation is not an ingest fault
-			}
-			marker.Set(healthy)
-			return nil
-		})
-		switch {
-		case err == nil:
-		case outcome == scheduler.OutcomeNone:
-			slog.Error("cycle coordination failed; tick did not run", "error", err)
-		default:
-			// The tick's cycle ran; a queue-file error only degrades the
-			// demand-coalescing bookkeeping.
-			slog.Warn(msgCoordErrorAfterRun, "outcome", outcome.String(), "error", err)
-		}
-	}, scheduler.LoopOptions{Interval: interval, FireOnStart: true, Jitter: 0.10})
-}
-
-// cycler runs one compare cycle, reporting whether the library ingest was
-// healthy. Satisfied by *scout.Scout; a consumer-side seam so the daemon's
-// panic shield is testable without a real Scout.
-type cycler interface {
-	Cycle(ctx context.Context) bool
-}
-
-// runCycle runs one cycle, recovering from a panic so a single bad cycle cannot
-// crash the long-lived daemon. A panic is reported as an unhealthy cycle.
-func runCycle(ctx context.Context, sc cycler) (healthy bool) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("cycle panicked", "panic", r, "stack", string(debug.Stack()))
-			healthy = false
-		}
-	}()
-	return sc.Cycle(ctx)
 }
 
 // --- Logging helpers ---

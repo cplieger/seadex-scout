@@ -411,7 +411,13 @@ func (li *LibIndex) FindByID(rec *mapping.Record) *library.Item {
 		return li.findMovie(rec)
 	}
 	tvdb, _, _ := rec.RoutedIDs()
-	if tvdb > 0 { // usable per HasArrIdentifier: overrides can carry a negative tvdb_id
+	// RoutedIDs already zeroes a non-usable TVDB id, so the usability POLICY has
+	// one home there and this is a presence check, not a second policy check
+	// (l-f37). The guard is kept in the > 0 form deliberately: its slice
+	// siblings below and in catalogue.go DO have to re-check per value, because
+	// RoutedIDs canonicalizes the scalar id but not the id SLICES (l-f49), and a
+	// bare != 0 here would read as if this line were the odd one out.
+	if tvdb > 0 {
 		return arrItem(li.byTvdb[tvdb], library.ArrSonarr)
 	}
 	return nil

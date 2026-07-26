@@ -5,6 +5,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/keyenc"
 )
 
@@ -100,4 +101,71 @@ func TestJoinerHonestAggregateMatchesJoinThenCap(t *testing.T) {
 	if got, want := j.String(), Cap(strings.Join(parts, ",")); got != want {
 		t.Errorf("streamed aggregate = %q, want the joined-then-capped form %q", got, want)
 	}
+}
+
+// TestCapOrderDivergesOnlyForShrinkingHostileValues pins both sides of the ONE
+// observable difference between this package's cap-before-sanitize order and a
+// sanitize-then-cap composition (d-u14c2-2, which flagged the shift as
+// untested rather than wrong).
+//
+// Sanitizing can SHRINK - strings.Map replaces each unsafe rune with a
+// single-byte space, so a 3-byte bidi control collapses to one byte - so a raw
+// value over the budget can sanitize to well under it. Under sanitize-then-cap
+// that value emits whole and UNMARKED; here it emits cut and MARKED, because the
+// cap runs first. Both properties are deliberate: the pre-sanitize cap is what
+// makes the budget bound the WORK (one hostile multi-MB SeaDex value must never
+// walk the sanitizer in a 256 MiB container, CWE-400), and the marker is honest
+// because bytes really were dropped. An HONEST value must be byte-identical
+// under either order - that is the half a regression would break silently, since
+// every emitted attribute (title, groups, tracker, classification_reason, the
+// URLs, info_hash) and emitResolved all ride this primitive.
+func TestCapOrderDivergesOnlyForShrinkingHostileValues(t *testing.T) {
+	sanitizeThenCap := func(raw string) string {
+		clean := runesafe.Sanitize(raw)
+		if len(clean) <= MaxBytes {
+			return clean
+		}
+		return runesafe.CapBytes(clean, MaxBytes) + TruncMarker
+	}
+
+	t.Run("honest values are identical under either order", func(t *testing.T) {
+		for _, raw := range []string{
+			"",
+			"[SubsPlease] Show - S01E01 (1080p) [ABCD1234].mkv",
+			strings.Repeat("a", MaxBytes-1),
+			strings.Repeat("a", MaxBytes),
+			strings.Repeat("a", MaxBytes+1),
+			strings.Repeat("日", MaxBytes), // multi-byte but SAFE: no shrink
+		} {
+			if got, want := Cap(raw), sanitizeThenCap(raw); got != want {
+				t.Errorf("Cap(len %d) = %d bytes, want the sanitize-then-cap form's %d bytes (honest values must not diverge)",
+					len(raw), len(got), len(want))
+			}
+		}
+	})
+
+	t.Run("an oversized shrinking value is cut and marked", func(t *testing.T) {
+		// Bidi controls: 3 raw bytes each, one byte sanitized. Over the raw
+		// budget, well under it once sanitized.
+		raw := strings.Repeat("\u202e", MaxBytes/3+100)
+		if len(raw) <= MaxBytes {
+			t.Fatalf("fixture is %d bytes, want it over the %d-byte budget", len(raw), MaxBytes)
+		}
+		if n := len(runesafe.Sanitize(raw)); n > MaxBytes {
+			t.Fatalf("sanitized fixture is %d bytes, want it UNDER the budget so the two orders diverge", n)
+		}
+		if other := sanitizeThenCap(raw); strings.HasSuffix(other, TruncMarker) {
+			t.Fatal("sanitize-then-cap marked the fixture; the divergence this test pins would not exist")
+		}
+		got := Cap(raw)
+		if !strings.HasSuffix(got, TruncMarker) {
+			t.Errorf("Cap(oversized shrinking value) = %d bytes unmarked, want the truncation marker (raw bytes were dropped)", len(got))
+		}
+		if len(got) > MaxBytes+len(TruncMarker) {
+			t.Errorf("Cap() = %d bytes, want at most %d", len(got), MaxBytes+len(TruncMarker))
+		}
+		if !utf8.ValidString(got) {
+			t.Error("Cap() returned invalid UTF-8")
+		}
+	})
 }

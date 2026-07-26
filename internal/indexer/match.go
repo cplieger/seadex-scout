@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/cplieger/seadex-scout/internal/release"
+	"github.com/cplieger/urlform"
 )
 
 // The indexer matches a Prowlarr result back to a SeaDex release by a stable
@@ -101,30 +102,57 @@ func trackerKey(tracker, sourceURL string) string {
 // isCanonicalTrackerHost; the scheme/userinfo bar matches trackerKeyFromURL,
 // so writer admission and journal identity agree and an odd-scheme SeaDex
 // record is never journaled in the first place), or - for AnimeBytes only -
-// a true relative reference, SeaDex's documented AB shape (UsableURL
+// a rooted relative reference, SeaDex's documented AB shape (the publisher
 // resolves it against animebytes.tv, so a relative URL is an AB URL by
 // construction). Anything else - a foreign host, a subdomain, a non-http(s)
 // scheme, a userinfo-bearing authority, an unparseable URL, an opaque
 // non-hierarchical form - fails closed.
+//
+// Structural facts come from urlform, so this reads a raw SeaDex URL the same
+// way its three sibling consumers do (trackerlink.Publish,
+// internal/filter's AB evidence gate, release.LookupTrackerByRelativeURL). It
+// used to hand-roll the vocabulary with net/url, and the two readings had
+// already diverged in one live shape (l-f162): for a schemeless-host URL
+// ("animebytes.tv/torrents.php?id=1&torrentid=456") urlform reports
+// ClassSchemelessHost with Host=animebytes.tv, so the publisher and the evidence
+// gate treated it as AnimeBytes host evidence and published the link - while the
+// triple-empty net/url test (Scheme=="" && Host=="" && Opaque=="") called it a
+// "true relative reference" and admitted it here, after which the id extraction
+// found nothing and the indexer silently DROPPED the release. Same string, two
+// structural readings, one app. Under urlform a schemeless-host form is host
+// evidence on both sides: it now takes the host arm and is judged against the
+// canonical-host policy like any other absolute-ish form.
+//
+// The AB relative arm is deliberately ClassRelative (a rooted "/x" path) rather
+// than the narrower release.LookupTrackerByRelativeURL, which additionally
+// demands the "/torrents.php?...torrentid=" shape: keying a relative Prowlarr
+// permalink ("/torrent/123/group") works today and must keep working.
 func trackerOwnURL(scope, sourceURL string) bool {
-	u, err := url.Parse(sourceURL)
-	if err != nil {
+	f := urlform.Classify(sourceURL)
+	if f.HasBackslash || f.HasTabOrNewline {
+		// A de-smuggled string is not vouchable: a browser and net/url read it
+		// differently, so it must not prove a curation identity.
 		return false
 	}
-	host := u.Hostname()
-	httpOK := func() bool {
-		return isHTTPScheme(u.Scheme) && u.User == nil
-	}
-	switch scope {
-	case upstreamNyaa:
-		return httpOK() && release.IsNyaaHost(host) && isCanonicalTrackerHost(scope, host)
-	case upstreamAB:
-		if release.IsAnimeBytesHost(host) {
-			return httpOK() && isCanonicalTrackerHost(scope, host)
+	// Host-bearing forms (absolute, protocol-relative, schemeless-host, or a
+	// hidden-host form whose authority urlform recovered) are judged on their
+	// host evidence; only an absolute http(s) form can satisfy the scheme bar.
+	if f.Host != "" {
+		if f.Class != urlform.ClassAbsolute || f.HasUserInfo || !isHTTPScheme(f.Scheme) {
+			return false
 		}
-		return u.Scheme == "" && u.Host == "" && u.Opaque == ""
+		switch scope {
+		case upstreamNyaa:
+			return release.IsNyaaHost(f.Host) && isCanonicalTrackerHost(scope, f.Host)
+		case upstreamAB:
+			return release.IsAnimeBytesHost(f.Host) && isCanonicalTrackerHost(scope, f.Host)
+		}
+		return false
 	}
-	return false
+	// No host evidence: only AnimeBytes accepts a rooted relative reference, and
+	// a form whose host could not be recovered (HostUnrecoverable) is a parse
+	// failure for evidence purposes and must not slip through as "relative".
+	return scope == upstreamAB && f.Class == urlform.ClassRelative && !f.HostUnrecoverable
 }
 
 // canonicalTrackerHost returns the exact hostname of a scope's tracker site,
@@ -170,20 +198,19 @@ func isCanonicalTrackerHost(scope, host string) bool {
 
 // trackerKeyFromURL builds the match key from an arbitrary release URL (a
 // Prowlarr item's page URL) by detecting the tracker from the host, so it keys
-// the same way trackerKey does for the SeaDex side. Only an absolute http(s),
-// userinfo-free URL is admitted (the shared httpNoUserinfoURL prefix the
-// fetch/display gates apply), so an odd-scheme or userinfo-bearing URL never
-// proves an identity the rest of the boundary would refuse to fetch or
-// display. Host classification rides the shared tracker predicate
+// the same way trackerKey does for the SeaDex side. Admission is the shared
+// display gate (httpDisplayHost): an absolute http(s) form, free of userinfo and
+// of the browser-vs-net/url smuggling shapes, so an odd-scheme, userinfo-bearing
+// or de-smuggled URL never proves an identity the rest of the boundary would
+// refuse to display. Host classification rides the shared tracker predicate
 // (release.LookupTrackerByHost via the Is*Host twins), so a non-ASCII
 // homograph label or an empty-labeled host under a tracker domain never
 // yields a curation key.
 func trackerKeyFromURL(raw string) string {
-	u, ok := httpNoUserinfoURL(raw)
+	host, ok := httpDisplayHost(raw)
 	if !ok {
 		return ""
 	}
-	host := u.Hostname()
 	var scope string
 	switch {
 	case release.IsNyaaHost(host):

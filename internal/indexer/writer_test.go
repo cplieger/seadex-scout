@@ -33,7 +33,7 @@ func TestRebuildPersistsPairRelation(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
 		}},
 	}}
-	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := newTestWriter(path, "passkey", false).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -67,7 +67,7 @@ func TestRebuildWarnsWhenABPasskeyMissing(t *testing.T) {
 			},
 		},
 	}}
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABTorznabURL: "http://prowlarr/2/api"}}, WriterDeps{Logger: log})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABTorznabURL: "http://prowlarr/2/api"}}, log, Upstreams{})
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestRebuildNoPasskeyWarnWithoutABIntent(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
 		}},
 	}}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, WriterDeps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, log, Upstreams{}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if rec.Contains("ab RSS feed empty of grabbable links") {
@@ -130,7 +130,7 @@ func TestRebuildUnconfiguredABPersistsNoABFeed(t *testing.T) {
 			},
 		},
 	}}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: "SECRETPASSKEY"}}, WriterDeps{Logger: log}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: "SECRETPASSKEY"}}, log, Upstreams{}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	data, err := os.ReadFile(path)
@@ -153,8 +153,15 @@ func TestRebuildUnconfiguredABPersistsNoABFeed(t *testing.T) {
 	if !snap.Seen["ab:123"] {
 		t.Errorf("seen ledger missing the skipped AB identity (it must not journal later as new): %v", snap.Seen)
 	}
-	if !rec.Contains("indexer.ab_passkey is set but indexer.ab_torznab_url is empty") {
-		t.Errorf("half-configured AB intent not warned at construction; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	// The half-configured AB intent is internal/config's diagnostic, not the
+	// writer's: config validation runs in every mode and deliberately reports it
+	// at INFO ("a deliberately parked passkey must not raise Loki alert noise").
+	// The writer used to re-evaluate the same condition at WARN, so a configured
+	// feed emitted both lines at boot and the WARN re-fired on every `poll` run
+	// (l-f13). Construction must stay silent about it.
+	if rec.Contains("indexer.ab_passkey is set but indexer.ab_torznab_url is empty") {
+		t.Errorf("the writer re-reported config's half-configuration diagnostic; log output:\n%s",
+			strings.Join(rec.Messages(), "\n"))
 	}
 }
 
@@ -184,7 +191,7 @@ func TestRebuildPersistsABItemsGUIDOnly(t *testing.T) {
 			},
 		},
 	}}
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: passkey, ABTorznabURL: "http://prowlarr/2/api"}}, WriterDeps{})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: passkey, ABTorznabURL: "http://prowlarr/2/api"}}, nil, Upstreams{})
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -213,7 +220,7 @@ func TestRebuildPersistsABItemsGUIDOnly(t *testing.T) {
 	// The reader derives the served AB link from the GUID and its own
 	// configured passkey on load, so the feed serves grabbable links even
 	// though the snapshot holds none.
-	ix := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: passkey}}, Deps{})
+	ix := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: passkey}}, nil, Upstreams{})
 	served := ix.feedFor(upstreamAB)
 	if len(served) != 1 {
 		t.Fatalf("served ab feed = %d items, want 1", len(served))
@@ -253,7 +260,7 @@ func TestRebuildPersistScrubsABScopedItemCarriedInNyaaFeed(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Frieren - S01E01 (BD Remux 1080p) [PMR].mkv"}},
 		}},
 	}}
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: passkey, ABTorznabURL: "http://prowlarr/2/api"}}, WriterDeps{})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: passkey, ABTorznabURL: "http://prowlarr/2/api"}}, nil, Upstreams{})
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -278,7 +285,7 @@ func TestRebuildReportsWriteError(t *testing.T) {
 		t.Fatalf("write blocker: %v", err)
 	}
 	path := filepath.Join(blocker, "feed.json")
-	err := NewFeedWriter(&FeedWriterConfig{Path: path}, WriterDeps{}).Rebuild(context.Background(), nil, nil)
+	err := NewFeedWriter(&FeedWriterConfig{Path: path}, nil, Upstreams{}).Rebuild(context.Background(), nil, nil)
 	if err == nil {
 		t.Fatal("Rebuild with an unwritable path returned nil, want error")
 	}
@@ -297,7 +304,7 @@ func TestRebuildFailsOnUnreadablePreviousSnapshot(t *testing.T) {
 	if err := os.Mkdir(path, 0o755); err != nil {
 		t.Fatalf("mkdir over snapshot path: %v", err)
 	}
-	err := NewFeedWriter(&FeedWriterConfig{Path: path}, WriterDeps{}).Rebuild(context.Background(), nil, nil)
+	err := NewFeedWriter(&FeedWriterConfig{Path: path}, nil, Upstreams{}).Rebuild(context.Background(), nil, nil)
 	if err == nil {
 		t.Fatal("Rebuild with an unreadable previous snapshot returned nil, want error")
 	}
@@ -323,7 +330,7 @@ func TestRebuildDropsOversizedItem(t *testing.T) {
 			ReleaseGroup: strings.Repeat("a", maxPersistedFieldBytes+1),
 		}},
 	}}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, WriterDeps{}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, Upstreams{}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -395,7 +402,7 @@ func TestPersistRejectsOversizedSnapshot(t *testing.T) {
 		ByHash: map[string]bool{}, ByKey: map[string]bool{}, Seen: map[string]bool{},
 		Titles: map[string]string{"nyaa:42": strings.Repeat("a", maxFeedBytes+1)},
 	}
-	err := NewFeedWriter(&FeedWriterConfig{Path: path}, WriterDeps{}).persist(context.Background(), snap)
+	err := NewFeedWriter(&FeedWriterConfig{Path: path}, nil, Upstreams{}).persist(context.Background(), snap)
 	if err == nil {
 		t.Fatal("persist with an oversized snapshot returned nil, want size error")
 	}
@@ -465,7 +472,7 @@ func TestRebuildExcludesCurationWarnedTorrents(t *testing.T) {
 	// ledger, so it now journals as NEW - the moment it first became
 	// grabbable curation is when the arrs should see it on RSS.
 	entries[0].Torrents[0].Tags = []string{"dual"}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, WriterDeps{}).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, Upstreams{}).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("second Rebuild: %v", err)
 	}
 	snap = readSnapshotFile(t, path)
@@ -856,7 +863,7 @@ func TestRebuildWarnedIdentityPropagatesTransitively(t *testing.T) {
 		{AniListID: 2, Torrents: []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/2", InfoHash: h1, IsBest: true, Files: mkv}}},
 		{AniListID: 1, Torrents: []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/1", InfoHash: h1, IsBest: true, Tags: []string{"Broken"}, Files: mkv}}},
 	}
-	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := newTestWriter(path, "passkey", false).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -926,7 +933,7 @@ func TestLoadPreviousPreservesLargeHarvestCheckpoint(t *testing.T) {
 		Seen:          map[string]bool{},
 		HarvestCursor: encoded,
 	})
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, WriterDeps{})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, Upstreams{})
 	prev, err := w.loadPrevious(context.Background())
 	if err != nil {
 		t.Fatalf("loadPrevious: %v", err)
@@ -963,7 +970,7 @@ func TestRebuildCanonicalizesStoredHashBeforeWarningRetraction(t *testing.T) {
 		Tags:  []string{"Broken"},
 		Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [W].mkv"}},
 	}}}}
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, WriterDeps{})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, Upstreams{})
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -1028,7 +1035,7 @@ func TestRebuildBaselinesOversizedABFeedItem(t *testing.T) {
 		NyaaTorznabURL: "http://prowlarr/1/api",
 		ABTorznabURL:   "http://prowlarr/2/api",
 		ABPasskey:      "PASSKEY",
-	}}, WriterDeps{Logger: log})
+	}}, log, Upstreams{})
 	entries := []seadex.Entry{{
 		AniListID: 9,
 		Torrents: []seadex.Torrent{{
@@ -1148,7 +1155,7 @@ func TestRebuildNeverLogsABPasskey(t *testing.T) {
 	}}
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{
 		ABTorznabURL: "http://prowlarr/2/api", ABPasskey: passkey,
-	}}, WriterDeps{Logger: log})
+	}}, log, Upstreams{})
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -1190,7 +1197,7 @@ func TestLoadPreviousDropsOversizedHarvestCheckpoint(t *testing.T) {
 		HarvestCursor: cursor,
 	})
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{Path: path}, WriterDeps{Logger: log})
+	w := NewFeedWriter(&FeedWriterConfig{Path: path}, log, Upstreams{})
 	prev, err := w.loadPrevious(context.Background())
 	if err != nil {
 		t.Fatalf("loadPrevious: %v", err)
@@ -1237,5 +1244,103 @@ func TestRebuildBaselinesFalseSeenLedgerValue(t *testing.T) {
 	}
 	if !rec.Contains(msgSnapshotMalformed) {
 		t.Errorf("false seen-ledger value not warned as malformed; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestRebuildOffTrackerJournalSurvivesAndReturns pins the reversibility of a
+// tracker's off switch (l-f161). Blanking a Torznab URL used to skip the carry,
+// so ONE rebuild dropped every journaled item for that scope - while the
+// never-pruned seen ledger kept their identities, so journalIfNew reported
+// isNew=false forever and those releases could never reach RSS again. An
+// operator disabling AnimeBytes for a few days permanently lost the un-grabbed
+// part of its journal window.
+//
+// The journal must therefore be CARRIED while the tracker is off (it costs
+// nothing at rest - both feeds are stored GUID-only - and the serve side already
+// returns nothing for an unconfigured scope), must not GROW while off, and must
+// be servable again on re-enable.
+func TestRebuildOffTrackerJournalSurvivesAndReturns(t *testing.T) {
+	entries := []seadex.Entry{{
+		AniListID: 1,
+		Torrents: []seadex.Torrent{{
+			Tracker: "AB", URL: "https://animebytes.tv/torrents.php?id=1&torrentid=123",
+			IsBest: true, ReleaseGroup: "PMR",
+			Files: []seadex.File{{Length: 100, Name: "Show - S01E01 [PMR].mkv"}},
+		}},
+	}}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+
+	// Tracker ON: the release journals.
+	if err := newTestWriter(path, "passkey", true).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild (AB on): %v", err)
+	}
+	if got := len(readSnapshotFile(t, path).ABFeed); got != 1 {
+		t.Fatalf("ab_feed = %d items after the first rebuild, want 1", got)
+	}
+
+	// Tracker OFF: one rebuild must not destroy the journal.
+	if err := newTestWriter(path, "passkey", false).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild (AB off): %v", err)
+	}
+	off := readSnapshotFile(t, path)
+	if len(off.ABFeed) != 1 {
+		t.Errorf("ab_feed = %d items while the tracker is off, want the journal carried (1): %+v",
+			len(off.ABFeed), off.ABFeed)
+	}
+	if !off.Seen["ab:123"] {
+		t.Error("seen ledger lost the AB identity while the tracker was off")
+	}
+
+	// Tracker BACK ON: the item is still there, so it can be served again.
+	if err := newTestWriter(path, "passkey", true).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild (AB re-enabled): %v", err)
+	}
+	back := readSnapshotFile(t, path)
+	if len(back.ABFeed) != 1 {
+		t.Errorf("ab_feed = %d items after re-enabling, want the carried journal (1); the off switch must be reversible",
+			len(back.ABFeed))
+	}
+}
+
+// TestRebuildOffTrackerJournalDoesNotGrow pins the other half: while a tracker
+// is off its journal shrinks (items keep aging out) but never GROWS, so a
+// disabled tracker cannot accumulate releases the operator opted out of.
+func TestRebuildOffTrackerJournalDoesNotGrow(t *testing.T) {
+	first := []seadex.Entry{{
+		AniListID: 1,
+		Torrents: []seadex.Torrent{{
+			Tracker: "AB", URL: "https://animebytes.tv/torrents.php?id=1&torrentid=123",
+			IsBest: true, ReleaseGroup: "PMR",
+			Files: []seadex.File{{Length: 100, Name: "Show - S01E01 [PMR].mkv"}},
+		}},
+	}}
+	// A SECOND curated AB release, newly appearing while the tracker is off.
+	second := append(append([]seadex.Entry{}, first...), seadex.Entry{
+		AniListID: 2,
+		Torrents: []seadex.Torrent{{
+			Tracker: "AB", URL: "https://animebytes.tv/torrents.php?id=2&torrentid=456",
+			IsBest: true, ReleaseGroup: "PMR",
+			Files: []seadex.File{{Length: 100, Name: "Other - S01E01 [PMR].mkv"}},
+		}},
+	})
+
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	if err := newTestWriter(path, "passkey", true).Rebuild(context.Background(), first, nil); err != nil {
+		t.Fatalf("Rebuild (AB on): %v", err)
+	}
+	if err := newTestWriter(path, "passkey", false).Rebuild(context.Background(), second, nil); err != nil {
+		t.Fatalf("Rebuild (AB off, new release curated): %v", err)
+	}
+
+	off := readSnapshotFile(t, path)
+	if len(off.ABFeed) != 1 {
+		t.Errorf("ab_feed = %d items, want only the carried one: an off tracker's journal must not grow", len(off.ABFeed))
+	}
+	// The new identity is still recorded, so it is not treated as new later -
+	// backfill is search's job, exactly as growJournal documents.
+	if !off.Seen["ab:456"] {
+		t.Error("seen ledger missing the release curated while the tracker was off")
 	}
 }

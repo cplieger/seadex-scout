@@ -81,8 +81,8 @@ func FuzzMatchHarvest_cacheHygiene(f *testing.F) {
 		titles := map[string]string{"nyaa:43": "Already Harvested"}
 		before := maps.Clone(titles)
 
-		n := matchHarvest([]item{{Title: title, InfoURL: infoURL, GUID: guid, InfoHash: hash}},
-			upstreamNyaa, index, titles)
+		n, _ := matchHarvest([]item{{Title: title, InfoURL: infoURL, GUID: guid, InfoHash: hash}},
+			upstreamNyaa, index, titles, "")
 
 		if len(titles) < len(before) {
 			t.Fatalf("matchHarvest dropped cached titles: %v, had %v", titles, before)
@@ -113,7 +113,7 @@ func FuzzMatchHarvest_cacheHygiene(f *testing.F) {
 		trimmed := strings.TrimSpace(title)
 		admissible := trimmed != "" && len(trimmed) <= harvestMaxTitleLen
 		fresh := map[string]string{}
-		got := matchHarvest([]item{{Title: title, InfoURL: "https://nyaa.si/view/42"}}, upstreamNyaa, index, fresh)
+		got, _ := matchHarvest([]item{{Title: title, InfoURL: "https://nyaa.si/view/42"}}, upstreamNyaa, index, fresh, "")
 		if admissible {
 			if got != 1 || fresh["nyaa:42"] != trimmed {
 				t.Fatalf("matchHarvest(canonical identity, title %q) = %d matches caching %q, want it admitted as %q",

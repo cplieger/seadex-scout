@@ -66,13 +66,21 @@ func FuzzABVisible(f *testing.F) {
 		if padded := ABVisible(tracker, " "+rawURL+"\t", false); padded != off {
 			t.Errorf("ABVisible(%q, padded, false) = %v, want %v (url %q)", tracker, padded, off, rawURL)
 		}
-		// Cross-function consistency: the fail-open predicate is a subset of
-		// the fail-closed gate. Anything DEFINITELY AnimeBytes must also be
-		// AB-gated (hidden with the toggle off); the converse is deliberately
-		// free - the gate also hides malformed, ambiguous, and non-ASCII
-		// evidence the fail-open predicate cannot prove is AnimeBytes.
-		if DefinitelyAB(tracker, rawURL) && !ABGated(tracker, rawURL) {
-			t.Errorf("DefinitelyAB(%q, %q) = true but ABGated = false; the fail-open set must stay inside the fail-closed gate", tracker, rawURL)
+		// Cross-function consistency: ABVisible must be exactly the grade
+		// comparison, with no second reading of the evidence. The old
+		// definite-is-a-subset-of-gated property is structural now (one value
+		// cannot be two grades), so what is worth fuzzing is that the policy
+		// function and the grader never disagree.
+		if want := ClassifyAB(tracker, rawURL) == ABNone; off != want {
+			t.Errorf("ABVisible(%q, %q, false) = %v but ClassifyAB = %v; the gate must be exactly the ABNone comparison", tracker, rawURL, off, ClassifyAB(tracker, rawURL))
+		}
+		// Totality: every input lands in one of the three named grades, so an
+		// exhaustive consumer switch (notify.classifyTrackerLink) cannot fall
+		// through to its unreachable default.
+		switch g := ClassifyAB(tracker, rawURL); g {
+		case ABNone, ABAmbiguous, ABDefinite:
+		default:
+			t.Errorf("ClassifyAB(%q, %q) = %v, outside the three named grades", tracker, rawURL, g)
 		}
 		// Security: no fuzzer-built subdomain of the AB host may surface while
 		// the toggle is off, and a lookalike suffix host must not be hidden as

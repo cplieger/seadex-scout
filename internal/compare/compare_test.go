@@ -123,7 +123,7 @@ func TestObtainableLinksDedupesAndPrefixesPrivateURL(t *testing.T) {
 		// two distinct (tracker, URL) tuples collide ("Nyaa|https://nyaa.si/a"
 		// + "https://nyaa.si/b" == "Nyaa" + "https://nyaa.si/a|https://nyaa.si/b");
 		// the struct key keeps both. Both URLs stay on the tracker's canonical
-		// host so UsableURL passes them through.
+		// host so the publisher passes them through.
 		{rel: release.Release{Tracker: "Nyaa|https://nyaa.si/a"}, torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/b"}},
 		{rel: release.Release{Tracker: "Nyaa"}, torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/a|https://nyaa.si/b"}},
 	}
@@ -459,9 +459,9 @@ func TestCompareMislabeledAnimeBytesURLRequiresOptIn(t *testing.T) {
 	// must be invisible while the AnimeBytes toggle is off (URL-aware guard on
 	// the RAW upstream URL), and surface only when it is on AND the URL still
 	// yields a usable link. Both the absolute and the schemeless forms must
-	// then publish the ANIMEBYTES URL (UsableURL recovers the schemeless
+	// then publish the ANIMEBYTES URL (trackerlink.Publish recovers the schemeless
 	// form's canonical host rather than base-prefixing it under the wrong
-	// label). The host:port form hides its host from UsableURL
+	// label). The host:port form hides its host from the publisher
 	// (hidden-host: no followable link can be published), so it stays absent
 	// even with the toggle on - an unusable URL is never obtainable evidence.
 	const absURL = "https://animebytes.tv/torrents.php?id=9&torrentid=10"

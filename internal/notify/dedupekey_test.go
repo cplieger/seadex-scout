@@ -246,7 +246,7 @@ func TestDedupeKeyABLinkOrderIndependent(t *testing.T) {
 // TestDedupeKeyABLinkDuplicatesIgnored pins that the AB link key describes
 // the URL SET, not the occurrence list: the same AB-host URL supplied twice -
 // once correctly labeled AB, once under a mislabeled Nyaa tracker (both pass
-// the URL-aware ABGated check) - keys identically to the single link, so a
+// the URL-aware ClassifyAB grading) - keys identically to the single link, so a
 // later dedup or label correction upstream cannot re-alert an unchanged
 // obtainable source.
 func TestDedupeKeyABLinkDuplicatesIgnored(t *testing.T) {

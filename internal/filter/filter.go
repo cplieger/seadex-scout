@@ -47,10 +47,10 @@ func KeepNonTracker(r *release.Release, opts Options) (keep bool, reason string)
 // obtainable, so a release the operator cannot grab never becomes a finding.
 // Obtainable additionally takes the release's raw upstream URL (exactly as
 // SeaDex supplied it, BEFORE any label-trusting normalization such as
-// seadex.Torrent.UsableURL) so the AnimeBytes URL-host cross-check (see
+// trackerlink.Publish) so the AnimeBytes URL-host cross-check (see
 // ABVisible) inspects unmodified evidence rather than a rewritten link; pass
 // "" when no URL is available. It ALSO requires the canonical usable URL
-// (seadex.Torrent.UsableURL's output): a release whose usable URL is empty -
+// (trackerlink.Publish's output): a release whose usable URL is empty -
 // no URL at all, or one the canonicalizer rejected as malformed, foreign-host,
 // or unsafe - is never obtainable, because the operator has no link to act on,
 // so it must not count as comparison evidence (the SeaDex client already warns
@@ -117,90 +117,120 @@ func hostFromRawURL(rawURL string) (string, bool) {
 	}
 }
 
-// ABVisible reports whether a release on the given tracker may surface to the
-// operator: always true when the operator has enabled AnimeBytes, and
-// otherwise false when either the tracker label is AnimeBytes OR the release's
-// raw upstream URL (as SeaDex supplied it, never a normalized/rewritten link)
-// points at the AnimeBytes host (or a dot-delimited subdomain). The URL
-// cross-check exists because the tracker label is untrusted upstream data: a
-// torrent labeled "Nyaa" carrying an animebytes.tv URL must not surface as a
-// clickable AnimeBytes link while the toggle is off. The URL-to-host evidence
-// extraction (including the conservative hide of malformed or ambiguous
-// forms) lives in hostFromRawURL; this function is the policy decision. It is
-// the single home of the animebytes toggle's fail-closed drop rule, used
-// by the daemon's obtainability filter and the audit report's verdict
-// eligibility (the audit report's row LISTING is gated by the fail-open
-// DefinitelyAB instead).
-func ABVisible(tracker, rawURL string, animeBytes bool) bool {
-	if animeBytes {
-		return true
+// ABEvidence grades how strongly a release's untrusted (tracker, rawURL) pair
+// identifies AnimeBytes. It exists because that grading is a THREE-valued domain
+// fact, and modelling it as separate booleans left the relationship between them
+// (definite is a strict subset of gated; the difference is the ambiguous band)
+// stated only in prose and reconstructed by each consumer through CALL ORDER.
+// A consumer now switches on the value exhaustively and cannot get the order
+// wrong, because there is no order.
+type ABEvidence uint8
+
+// The three grades. Ordered from weakest to strongest evidence, so a consumer
+// that only cares whether ANY AnimeBytes evidence exists can compare against
+// ABNone.
+const (
+	// ABNone means the pair carries no AnimeBytes evidence: the label is
+	// another tracker AND the URL either yields usable non-AnimeBytes host
+	// evidence or carries no host evidence at all (an empty URL, or a
+	// relative reference matching no recognized tracker shape - which
+	// resolves against the LABELED tracker's base, so it cannot become an
+	// AnimeBytes link). This is the only grade that is safe to surface with
+	// the toggle off.
+	ABNone ABEvidence = iota
+	// ABAmbiguous means the pair MIGHT be AnimeBytes and the evidence cannot
+	// settle it: a malformed URL, a smuggled or hidden-host form whose
+	// authority could not be recovered, or a non-ASCII host (homograph
+	// territory - a browser navigates "animebytes<U+FF0E>tv" to animebytes.tv
+	// while a byte-wise check cannot see it).
+	//
+	// It is its own grade rather than being folded into either neighbour
+	// because the two fail directions in this app genuinely disagree about it:
+	// a gate deciding whether to SURFACE a link must treat it as AnimeBytes
+	// (fail closed), while a report deciding whether to LIST a row must not
+	// erase it (fail open).
+	ABAmbiguous
+	// ABDefinite means the pair proves AnimeBytes: the tracker label says so,
+	// the URL's extracted canonical ASCII host resolves to the AnimeBytes host
+	// or a dot-delimited subdomain of it, or the URL carries the documented AB
+	// torrent-page relative shape (rooted or slashless, which the resolver
+	// reads as the same href) - tracker identity in its own right.
+	ABDefinite
+)
+
+// String implements fmt.Stringer so a log line or a test failure names the grade
+// rather than an integer.
+func (e ABEvidence) String() string {
+	switch e {
+	case ABNone:
+		return "none"
+	case ABAmbiguous:
+		return "ambiguous"
+	case ABDefinite:
+		return "definite"
+	default:
+		return "unknown"
 	}
+}
+
+// ClassifyAB grades the AnimeBytes evidence in one release's untrusted
+// (tracker, rawURL) pair. It is total: every input lands in exactly one grade,
+// and it takes no view of what the caller should DO about it - the operator's
+// animebytes toggle is policy, applied by ABVisible.
+//
+// The tracker label alone is not trusted, because it is upstream data: a torrent
+// labeled "Nyaa" carrying an animebytes.tv URL is AnimeBytes. The URL is read
+// only as SeaDex supplied it, never normalized or rewritten first, so a
+// smuggling form cannot be laundered into clean host evidence before grading.
+func ClassifyAB(tracker, rawURL string) ABEvidence {
 	if release.IsAnimeBytes(tracker) {
-		return false
+		return ABDefinite
 	}
 	// A relative URL carries no host evidence, but the AB torrent-page shape
 	// ("/torrents.php?...&torrentid=..." and its slashless spelling, which the
 	// resolver reads as the same rooted href) is tracker identity in its own
-	// right: a mislabeled entry publishing that shape must not surface with
-	// the toggle off.
+	// right: a mislabeled entry publishing that shape is AnimeBytes.
 	if inferred, ok := release.LookupTrackerByRelativeURL(rawURL); ok && inferred.Name == release.TrackerNameAnimeBytes {
-		return false
+		return ABDefinite
 	}
 	host, ok := hostFromRawURL(rawURL)
 	if !ok {
-		return false
+		// The evidence was destroyed or is ambiguous: malformed, smuggled, or
+		// a hidden-host form whose authority could not be recovered.
+		return ABAmbiguous
+	}
+	if host == "" {
+		// No host evidence AT ALL - an empty URL, or a relative reference that
+		// matched no tracker shape above. Nothing points at AnimeBytes and
+		// nothing was hidden, so this is not AnimeBytes evidence. It is
+		// deliberately NOT ambiguous: a relative value resolves against the
+		// LABELED tracker's base, so it cannot become an AnimeBytes link.
+		return ABNone
 	}
 	if !urlform.IsASCIIHost(host) {
-		// A non-ASCII host is homoglyph territory (see urlform.IsASCIIHost,
-		// the one home of the ASCII rule): browsers navigate
-		// "animebytes<U+FF0E>tv" to animebytes.tv while a byte-wise check
-		// cannot see it. The shared tracker predicate rejects such hosts too,
-		// but its fail direction is inverted here - an unclassifiable host
-		// reads as "not AnimeBytes" and would surface - so the gate hides
-		// them explicitly, conservatively, like a parse failure.
-		return false
+		// Homograph territory. urlform.IsASCIIHost is the one home of the ASCII
+		// rule; a host that fails it settles nothing either way.
+		return ABAmbiguous
 	}
-	return !release.IsAnimeBytesHost(host)
+	if release.IsAnimeBytesHost(host) {
+		return ABDefinite
+	}
+	return ABNone
 }
 
-// ABGated reports whether a release link is AnimeBytes-gated: it would be
-// hidden by the animebytes toggle when off, identified by the tracker label
-// OR the raw upstream URL's host (plus the conservative hides of malformed,
-// ambiguous, or non-ASCII host evidence). It is the single named form of the
-// "would ABVisible hide this with the toggle off" idiom, consumed by the
-// alert URL routing (notify.trackerURLs). Compare's dedupe key no longer
-// routes AB links specially: its obtainableLinkKey keys the full obtainable
-// URL set label-insensitively.
-func ABGated(tracker, rawURL string) bool {
-	return !ABVisible(tracker, rawURL, false)
-}
-
-// DefinitelyAB reports whether a release is DEFINITIVELY AnimeBytes: the
-// tracker label is AnimeBytes, or the raw upstream URL carries successfully
-// extracted canonical ASCII host evidence resolving to the AnimeBytes host
-// (or a dot-delimited subdomain). Unlike ABVisible — which fails CLOSED,
-// reading malformed or ambiguous host evidence as "hide" — this predicate
-// fails OPEN: evidence that cannot be extracted is not AnimeBytes evidence.
-// It exists for consumers that must keep a non-AB release LISTED rather than
-// erased (the audit report's row visibility, which annotates a release with
-// no usable link as unobtainable) while still never surfacing a definite
-// AnimeBytes release with the toggle off; ABVisible stays the fail-closed
-// gate for verdict/obtainability eligibility.
-func DefinitelyAB(tracker, rawURL string) bool {
-	if release.IsAnimeBytes(tracker) {
-		return true
-	}
-	// The AB torrent-page relative shape (rooted or slashless - the resolver
-	// reads both as the same href) is definitive tracker identity, exactly
-	// like host evidence (mirrors ABVisible's relative-URL gate).
-	if inferred, ok := release.LookupTrackerByRelativeURL(rawURL); ok && inferred.Name == release.TrackerNameAnimeBytes {
-		return true
-	}
-	host, ok := hostFromRawURL(rawURL)
-	if !ok || host == "" || !urlform.IsASCIIHost(host) {
-		return false
-	}
-	return release.IsAnimeBytesHost(host)
+// ABVisible reports whether a release may surface to the operator: the
+// animebytes toggle's fail-closed drop rule, and the single home of it.
+//
+// With the toggle ON everything surfaces. With it OFF only ABNone surfaces, so
+// ambiguous evidence is hidden alongside definite evidence: a torrent that MIGHT
+// be an AnimeBytes link must not be rendered as a clickable one while the
+// operator has said they have no AnimeBytes account. Used by the daemon's
+// obtainability filter and the audit report's verdict eligibility. The audit
+// report's row LISTING deliberately takes the other fail direction and gates on
+// ClassifyAB == ABDefinite instead, so a release with no usable link is annotated
+// unobtainable rather than erased.
+func ABVisible(tracker, rawURL string, animeBytes bool) bool {
+	return animeBytes || ClassifyAB(tracker, rawURL) == ABNone
 }
 
 // ExcludeSpecial reports whether an entry classified special should be dropped

@@ -89,6 +89,21 @@ func (m *Memo) StaleTitle(id int) (title string, year int, ok bool) {
 	return ent.Titles[0], ent.Year, true
 }
 
+// StaleFormat returns the memoized AniList media format for id under
+// StaleTitle's expiry-ignoring rule, so a consumer taking a stale title can
+// take the type that came with it. ok is false for an absent entry, a
+// not-found negative, or an entry AniList gave no format for. The value is
+// already gated to a real AniList format at the client boundary
+// (anilist.knownFormat), so an unrecognized upstream token reads as absent here
+// rather than as false typing evidence.
+func (m *Memo) StaleFormat(id int) (format string, ok bool) {
+	ent, cached := m.Entries[id]
+	if !cached || ent.NotFound || ent.Format == "" {
+		return "", false
+	}
+	return ent.Format, true
+}
+
 // jitteredTTL draws one uniform random TTL from [minTTL, memoMaxTTL): the
 // per-entry stagger that keeps memo renewals spread across cycles. Every memo
 // write draws its own TTL, so even entries written by the same batch renew
@@ -215,22 +230,50 @@ func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *map
 		m.log.Warn("anilist batch prefetch incomplete; remaining ids fall back to per-id fetch",
 			"requested", len(ids), "fetched", len(fetched), "error", err)
 	}
+	// unverified holds the ids whose batch chunk reported a record-local
+	// failure: their absence from fetched proves nothing, so only they are
+	// exempt from the negative memo below. Every other requested id was
+	// definitively answered by a clean chunk, and memoizing those negatives is
+	// what keeps a single malformed record from dumping the whole pending set
+	// into per-id fallbacks.
+	unverified, scoped := unverifiedBatchIDs(err)
 	for _, id := range ids {
 		if media, ok := fetched[id]; ok {
 			memo.Entries[id] = mediaEntry(media, m.freshExpiry(now))
 			continue
 		}
-		if err == nil {
-			// The batch completed without returning this id: AniList has no such
+		if _, skip := unverified[id]; skip {
+			// This id's chunk was not trustworthy: leave it uncached so
+			// matchEntry retries it via the single Fetch.
+			continue
+		}
+		if err == nil || scoped {
+			// The batch definitively answered this id and AniList has no such
 			// media. Memoize the negative so it is not re-fetched this run; the
 			// expiry gives the negative the same lifetime policy as a positive,
 			// so a show created on AniList later is eventually seen.
 			memo.Entries[id] = notFoundEntry(m.freshExpiry(now))
 		}
-		// err != nil and id not returned: leave uncached so matchEntry retries it
-		// via the single Fetch.
+		// Any other error leaves the id uncached for the per-id Fetch.
 	}
 	return nil
+}
+
+// unverifiedBatchIDs extracts the ids a record-local batch failure makes
+// untrustworthy, and reports whether err was such a failure at all. A
+// scoped=true with an id absent from the set means the batch definitively
+// answered that id, so its negative is safe to memoize; scoped=false means the
+// error says nothing per-id and no negative may be inferred.
+func unverifiedBatchIDs(err error) (ids map[int]struct{}, scoped bool) {
+	var batchErr *anilist.BatchRecordError
+	if !errors.As(err, &batchErr) {
+		return nil, false
+	}
+	ids = make(map[int]struct{}, len(batchErr.UnverifiedIDs))
+	for _, id := range batchErr.UnverifiedIDs {
+		ids[id] = struct{}{}
+	}
+	return ids, true
 }
 
 // pendingAniListIDs returns the distinct AniList ids the match will look up but
@@ -340,14 +383,28 @@ func (r *matchRun) lookupAniList(ctx context.Context, aniListID int) (anilist.Me
 	return media, true
 }
 
-// handleLookupFailure classifies a failed AniList fetch: a definitive
-// not-found is memoized negatively (a definitive answer, so the breaker
-// streak resets); anything else marks the cycle incomplete and leaves the
-// id un-memoized so it is retried next cycle.
+// handleLookupFailure classifies a failed AniList fetch: a definitive answer -
+// a not-found, or a record whose own content makes it unmatchable
+// (ErrRecordUnusable) - is memoized negatively and resets the breaker streak;
+// anything else marks the cycle incomplete and leaves the id un-memoized so it
+// is retried next cycle.
 func (r *matchRun) handleLookupFailure(aniListID int, err error) {
 	if errors.Is(err, anilist.ErrNotFound) {
 		r.gate.recordSuccess()
 		r.memo.Entries[aniListID] = notFoundEntry(r.entryExpiry())
+		return
+	}
+	if errors.Is(err, anilist.ErrRecordUnusable) {
+		// The record exists but its own content cannot yield a match key, so
+		// this is a definitive answer, not an outage: memoize it like a
+		// not-found. Retrying would re-fetch the same doomed record every cycle
+		// and hold the pass degraded, escalating the AniList degradation streak
+		// into a standing ERROR that blames upstream reachability. Say it once,
+		// naming the remedy that actually applies.
+		r.gate.recordSuccess()
+		r.memo.Entries[aniListID] = notFoundEntry(r.entryExpiry())
+		r.m.log.Warn("anilist record unusable for matching; add an overrides.json entry to map it directly",
+			"al_id", aniListID, "error", err)
 		return
 	}
 	// A transient/upstream error (network, context cancellation, rate-limit

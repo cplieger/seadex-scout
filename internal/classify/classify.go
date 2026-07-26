@@ -10,45 +10,60 @@ package classify
 import (
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/cplieger/seadex-scout/internal/filter"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/trackerlink"
 )
 
 // --- AB visibility gates (adapters over filter) ---
 
 // ABVisible reports whether a SeaDex torrent may surface under the operator's
 // AnimeBytes toggle. It owns the raw-URL invariant shared by compare and audit:
-// the guard inspects the RAW upstream URL (t.URL), never t.UsableURL(), because
-// that normalization trusts the tracker label and would rewrite or erase the
+// the guard inspects the RAW upstream URL (t.URL), never the published link,
+// because publishing trusts the tracker label and would rewrite or erase the
 // very host evidence the cross-check needs. Obtainability re-checks the label
 // downstream as defense in depth.
 func ABVisible(t *seadex.Torrent, includeAnimeBytes bool) bool {
 	return filter.ABVisible(t.Tracker, t.URL, includeAnimeBytes)
 }
 
+// PublishURL returns the clickable tracker link for a SeaDex torrent, or "" when
+// the publisher refused the raw upstream value (see trackerlink.Publish). It is
+// the adapter that keeps the (tracker, rawURL) argument order in ONE place for
+// every consumer of the SeaDex model, mirroring the ABVisible/Obtainable pattern
+// - and it is why internal/seadex no longer carries this policy as a method on
+// the wire struct (l-f86): the publish half of the link concern now sits beside
+// its hide half in filter, one layer below the flows.
+func PublishURL(t *seadex.Torrent) string {
+	return trackerlink.Publish(t.Tracker, t.URL)
+}
+
 // Obtainable reports whether a classified SeaDex release is obtainability
 // evidence under the operator's AnimeBytes toggle. It owns the argument
 // invariant shared by compare and audit (mirroring ABVisible's adapter
 // pattern): the RAW upstream URL (t.URL) feeds the tracker cross-check while
-// the normalized t.UsableURL() is the grabbable link, in that order.
+// the published link (PublishURL) is the grabbable one, in that order.
 func Obtainable(rel *release.Release, t *seadex.Torrent, animeBytes bool) bool {
-	return filter.Obtainable(rel, t.URL, t.UsableURL(), animeBytes)
+	return filter.Obtainable(rel, t.URL, PublishURL(t), animeBytes)
 }
 
-// DefinitelyAB reports whether a SeaDex torrent is DEFINITIVELY AnimeBytes:
-// by its tracker label, or by successfully extracted host evidence in its
-// raw upstream URL. Like ABVisible it owns the raw-URL invariant (t.URL
-// feeds the host cross-check, never t.UsableURL()), but unlike ABVisible it
-// fails OPEN on malformed or ambiguous evidence. The audit report uses it
-// for row VISIBILITY — a definite AB row hides with the toggle off, while an
-// ambiguous public-labeled row stays listed, annotated unobtainable — where
-// ABVisible stays the fail-closed verdict-eligibility gate shared with
-// compare.
-func DefinitelyAB(t *seadex.Torrent) bool {
-	return filter.DefinitelyAB(t.Tracker, t.URL)
+// ABEvidence grades the AnimeBytes evidence in a SeaDex torrent. Like ABVisible
+// it owns the raw-URL invariant shared by compare and audit: the grading reads
+// the RAW upstream URL (t.URL), never the published link, because publishing
+// trusts the tracker label and would rewrite or erase the very host evidence the
+// grading needs.
+//
+// Consumers pick their own fail direction over the grade. The audit report gates
+// row VISIBILITY on ABDefinite (fail open: a definite AB row hides with the
+// toggle off, while an ambiguous public-labeled row stays listed, annotated
+// unobtainable), where ABVisible stays the fail-closed verdict-eligibility gate
+// shared with compare.
+func ABEvidence(t *seadex.Torrent) filter.ABEvidence {
+	return filter.ClassifyAB(t.Tracker, t.URL)
 }
 
 // --- Torrent classification + payload eligibility ---
@@ -124,6 +139,12 @@ func PayloadNames(files []seadex.File) []string {
 // for the callers that need a file's length or its position in the record
 // (the indexer's title and pack synthesis), so those scanners judge the same
 // payload the classification does instead of the raw file list.
+//
+// It answers "which files are evidence for THIS RELEASE'S quality attributes"
+// - resolution, codec, group - so it deliberately keeps only the primary
+// payload. A caller counting how many distinct EPISODES a torrent spans wants
+// PopulationFiles instead: there a shorter file is a legitimate episode, not a
+// diluting extra.
 func PayloadFiles(files []seadex.File) []seadex.File {
 	pool := eligiblePool(files)
 	var maxLength int64
@@ -145,9 +166,72 @@ func PayloadFiles(files []seadex.File) []seadex.File {
 	return payload
 }
 
-// eligiblePool selects the files PayloadNames' size refinement runs over:
-// the type gate's content survivors, or — when none survive — every named
-// file (the unlisted-container / sidecar-only / creditless-only fallback).
+// PopulationFiles returns the files an EPISODE CENSUS runs over: the same type
+// gate and the same two totality fallbacks as PayloadFiles, but a size floor
+// anchored on the pool's MEDIAN length rather than its maximum.
+//
+// The distinction is the whole point of having two rules. PayloadFiles asks
+// which files vote on the release's quality attributes, so anything far below
+// the primary payload is an extra and must not dilute the verdict. A census
+// asks how many distinct episodes the torrent spans, and there a shorter file
+// is usually a legitimately shorter episode - a 12-minute entry in a 24-minute
+// season, a recap. Reusing the max-anchored floor for counting therefore
+// deletes real episodes whenever ONE file is more than twice its siblings: a
+// season pack with a double-length premiere, or a batch that also bundles the
+// franchise movie, loses every regular episode, reads as a single episode, and
+// is served under that episode's own SxxExx marker instead of collapsing to
+// the season label - the inverse of the pack-collapse contract the feed
+// documents, and a release Sonarr then grabs as one episode without its
+// FullSeason ranking.
+//
+// The median is robust to an outlier in EITHER direction, which is exactly the
+// requirement: one over-long file cannot lift the floor above the episode
+// population, and one tiny sample cannot lower it. The floor stays at half the
+// median so an episode-shaped sample far below the real episodes is still
+// excluded (it cannot inflate a lone episode into a "pack"). A torrent whose
+// files are MOSTLY sub-episode samples defeats the median and counts them;
+// that shape does not occur in a curated release record, and admitting it is
+// the safer failure than deleting real episodes.
+func PopulationFiles(files []seadex.File) []seadex.File {
+	pool := eligiblePool(files)
+	minEpisode := medianLength(pool)
+	// Overflow-safe ceil-half, matching PayloadFiles: a math.MaxInt64 length
+	// from an untrusted record must not wrap the threshold negative.
+	minEpisode = minEpisode/2 + minEpisode%2
+	population := make([]seadex.File, 0, len(pool))
+	for i := range pool {
+		// A zero median means the record carries no positive lengths (sparse
+		// upstream data, fixtures): the type gate alone decides, the same
+		// totality fallback PayloadFiles applies.
+		if minEpisode > 0 && pool[i].Length < minEpisode {
+			continue
+		}
+		population = append(population, pool[i])
+	}
+	return population
+}
+
+// medianLength returns the upper-middle length of pool, or 0 for an empty pool.
+// The upper middle (not the mean of the two central values) keeps the statistic
+// to a single existing length: it needs no addition, so no untrusted pair of
+// lengths can overflow it, and on a two-file pool it reads the real payload
+// rather than a value halfway to a sample.
+func medianLength(pool []seadex.File) int64 {
+	if len(pool) == 0 {
+		return 0
+	}
+	lengths := make([]int64, 0, len(pool))
+	for i := range pool {
+		lengths = append(lengths, pool[i].Length)
+	}
+	slices.Sort(lengths)
+	return lengths[len(lengths)/2]
+}
+
+// eligiblePool selects the files the size refinements of PayloadFiles and
+// PopulationFiles run over: the type gate's content survivors, or — when none
+// survive — every named file (the unlisted-container / sidecar-only /
+// creditless-only fallback).
 func eligiblePool(files []seadex.File) []seadex.File {
 	pool := make([]seadex.File, 0, len(files))
 	for i := range files {

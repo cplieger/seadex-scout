@@ -8,10 +8,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/cplieger/httpx/v3"
+	"github.com/cplieger/httpx/v4"
 	"github.com/cplieger/webhttp"
 )
 
@@ -27,6 +28,17 @@ const (
 	// silenced within a second.
 	authFailBurst  = 10
 	authFailRefill = 6 * time.Second
+	// maxConcurrentQueries bounds simultaneous expensive queries (queryGate).
+	// The worst-case footprint of ONE in-flight search is roughly one
+	// upstreamMaxBytes body per upstream plus the render builder - about 24 MiB
+	// at two upstreams - so four leaves the 256 MiB container ample headroom for
+	// the compare loop that shares the process, while sitting far above what the
+	// arrs actually ask for: Sonarr and Radarr search a season at a time, the
+	// per-episode barrage is skipped entirely (servesQuery), and real Torznab
+	// responses are ~150 KiB rather than the cap. It is a resource bound, not a
+	// rate limit - authFailureLimiter bounds bad-key FLOODS, this bounds the
+	// memory a legitimate burst can hold at once.
+	maxConcurrentQueries = 4
 	// writeTimeout bounds a stalled response consumer. It is derived from
 	// the complete bounded Prowlarr retry budget - upstreamMaxAttempts
 	// full-timeout attempts plus the capped Retry-After waits between them -
@@ -38,6 +50,18 @@ const (
 	writeTimeout = upstreamMaxAttempts*UpstreamAttemptTimeout +
 		(upstreamMaxAttempts-1)*httpx.RetryAfterCap + time.Minute
 )
+
+// queryGateWait is how long an over-limit query waits for a slot before the
+// feed answers busy. Long enough to absorb a burst of near-simultaneous
+// searches (the arrs fire several as one library scan reaches several series),
+// short enough that a queue cannot grow behind upstreams stuck in their bounded
+// retry trees - waiting the full retry budget would turn one slow Prowlarr into
+// a pile of parked requests. A waiter holds only its request state, not an
+// upstream body, so the wait itself is cheap.
+//
+// A var, not a const, ONLY so the concurrency test can exercise the
+// wait-expired path without spending it in real time.
+var queryGateWait = 5 * time.Second
 
 // listenAddr is the fixed LAN bind address for the Torznab feed server. The
 // port is an internal detail (the container/compose port mapping publishes
@@ -155,11 +179,22 @@ func (ix *Indexer) handler() http.Handler {
 //     wrong-key requests still fall through to serve's 401 + domain line,
 //     now bounded by the bucket's rate.
 //   - Logging: the standard access line (method, PATH only, status,
-//     duration, request id) - webhttp's RequestLogger logs r.URL.Path and
+//     duration, request id, client_ip) - webhttp's RequestLogger logs
+//     r.URL.Path and
 //     never the query string, so the Torznab apikey (which arrives as a
 //     query parameter) cannot leak into the access log. serve's own domain
 //     line (scope/params/result counts) complements it - that line
 //     whitelists the params it logs and likewise never logs apikey.
+//     WithClientIP is passed with NO trusted ranges, the spoof-proof default:
+//     it logs the immediate socket peer, which is the real client in the
+//     supported deployment (the arrs and Prowlarr reach this port directly on
+//     the container network; nothing publishes it through a reverse proxy).
+//     Behind a proxy the operator would pass that proxy's CIDRs
+//     (webhttp.ParseCIDRs) so a trusted X-Forwarded-For resolves the real
+//     client - deliberately NOT done speculatively, since trusting a
+//     forwarded header with no proxy in front of it is how the field becomes
+//     spoofable. The attribute name is the fleet's `client_ip`, so a shared
+//     Loki query over every webhttp consumer's access lines includes this app.
 //   - Recoverer: turns a handler panic into a logged 500 rendered as a
 //     Torznab <error> via torznabErrorResponder - not net/http's bare
 //     connection close, and not webhttp's default JSON envelope, which is
@@ -173,7 +208,7 @@ func (ix *Indexer) handler() http.Handler {
 func (ix *Indexer) chain() http.Handler {
 	return webhttp.Chain(ix.handler(),
 		ix.authFailureLimiter(),
-		webhttp.Logging(webhttp.WithLogger(ix.log)),
+		webhttp.Logging(webhttp.WithLogger(ix.log), webhttp.WithClientIP()),
 		webhttp.Recoverer(
 			webhttp.WithRecoverLogger(ix.log),
 			webhttp.WithRecoverResponder(torznabErrorResponder),
@@ -264,7 +299,7 @@ func (ix *Indexer) authorizeRequest(w http.ResponseWriter, r *http.Request, q ur
 		// Volume is bounded upstream: authFailureLimiter (see chain) 429s
 		// over-budget bad-key requests before the access logger, so this
 		// domain line and its 401 are capped at the bucket's rate.
-		ix.log.Info("indexer request rejected", "reason", "bad apikey", "path", logParam(r.URL.Path), "remote", logParam(r.RemoteAddr))
+		ix.log.Info("indexer request rejected", "reason", "bad apikey", "path", logParam(r.URL.Path), "client_ip", webhttp.ClientIP(r))
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return false
 	}
@@ -276,7 +311,7 @@ func (ix *Indexer) authorizeRequest(w http.ResponseWriter, r *http.Request, q ur
 func (ix *Indexer) requireScope(w http.ResponseWriter, r *http.Request) (string, bool) {
 	scope := scopeFor(r.Host, r.URL.Path)
 	if scope == "" {
-		ix.log.Info("indexer request rejected", "reason", "no tracker scope", "path", logParam(r.URL.Path), "host", logParam(r.Host), "remote", logParam(r.RemoteAddr))
+		ix.log.Info("indexer request rejected", "reason", "no tracker scope", "path", logParam(r.URL.Path), "host", logParam(r.Host), "client_ip", webhttp.ClientIP(r))
 		http.Error(w, "not found: address a tracker feed at /nyaa or /ab", http.StatusNotFound)
 		return "", false
 	}
@@ -314,10 +349,64 @@ func (ix *Indexer) rejectMissingABPasskey(w http.ResponseWriter, q url.Values, s
 	return true
 }
 
+// acquireQuery reserves one of the maxConcurrentQueries expensive-work slots,
+// waiting at most queryGateWait for one. It reports false when the wait expired
+// (the caller answers busy) or the request's own context ended first (the client
+// gave up; the caller returns without writing, since there is nobody to write
+// to). The matching releaseQuery must run on every acquired path.
+func (ix *Indexer) acquireQuery(ctx context.Context) (acquired, clientGone bool) {
+	select {
+	case ix.queryGate <- struct{}{}:
+		return true, false
+	default:
+	}
+	// Only a genuinely over-limit request pays for a timer.
+	timer := time.NewTimer(queryGateWait)
+	defer timer.Stop()
+	select {
+	case ix.queryGate <- struct{}{}:
+		return true, false
+	case <-ctx.Done():
+		return false, true
+	case <-timer.C:
+		return false, false
+	}
+}
+
+// releaseQuery returns a slot reserved by acquireQuery.
+func (ix *Indexer) releaseQuery() { <-ix.queryGate }
+
 // serveQuery runs the tracker query and renders the feed, translating the
 // two local-fault outcomes (snapshot unavailable, total upstream failure)
 // into Torznab errors, then logs the one INFO line per request.
+//
+// The whole expensive body runs under the concurrency gate (see queryGate): the
+// upstream fetch, the decode, and the render are what a burst could stack into
+// an OOM, so the slot is held across all three and released before the request
+// returns.
 func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Values, scope string) {
+	acquired, clientGone := ix.acquireQuery(r.Context())
+	if clientGone {
+		// The arr hung up while waiting; writing a response would only log a
+		// failed write. The access line still records the request.
+		ix.log.Debug("indexer request abandoned while waiting for a query slot", "scope", scope)
+		return
+	}
+	if !acquired {
+		// Busy, not broken: a Torznab <error> (the endpoint's own wire shape,
+		// unlike webhttp's JSON 429 envelope) plus a Retry-After so the arr
+		// backs off rather than treating the feed as failed. WARN, not ERROR:
+		// the condition clears itself as in-flight searches finish, which is
+		// exactly the transient/self-healing side of the level rule.
+		w.Header().Set("Retry-After", strconv.Itoa(int(queryGateWait.Seconds())))
+		ix.log.Warn("indexer at its concurrent-query limit; request answered busy",
+			"scope", scope, "limit", maxConcurrentQueries, "waited", queryGateWait)
+		ix.rejectTorznab(w, scope, "concurrent query limit reached", errCodeUnknown,
+			"too many concurrent searches in flight; retry shortly")
+		return
+	}
+	defer ix.releaseQuery()
+
 	items, stats := ix.query(r.Context(), q, scope)
 	// A snapshot-unavailable state (the persisted feed failed to load before
 	// any snapshot was installed - see snapFailed) is a local fault, not an
@@ -411,9 +500,24 @@ func scopeFromPath(p string) string { return scopeFromToken(firstSegment(p)) }
 // reverse proxy route per-tracker subdomains to the one port with no path
 // rewrite; the Host must reach the app unmodified (the default for a Caddy/nginx
 // reverse proxy).
+//
+// The authority is canonicalized through webhttp.CanonicalHost - the shared
+// strict parser the rest of the app's HTTP stack already uses - rather than by
+// splitting the raw Host on its first dot. The raw split does not actually parse
+// an authority: it admitted malformed values ("ab..example", "ab.example.com:")
+// as the AB scope, and, worse, a bare tracker host carrying a port ("ab:9118" -
+// the shape a direct LAN client uses) failed to select any scope because the port
+// rode along in the label. CanonicalHost lowercases, strips the port and IPv6
+// brackets, allows at most one trailing FQDN dot, and returns "" for anything
+// outside the RFC 3986 authority grammar, so a second divergent Host
+// interpretation no longer sits beside the shared stack's (l-f25).
 func scopeFromHost(host string) string {
-	label, _, _ := strings.Cut(host, ".")
-	return scopeFromToken(strings.ToLower(label))
+	canonical := webhttp.CanonicalHost(host)
+	if canonical == "" {
+		return ""
+	}
+	label, _, _ := strings.Cut(canonical, ".")
+	return scopeFromToken(label)
 }
 
 // scopeFromToken maps a lowercased tracker token (a path segment or DNS

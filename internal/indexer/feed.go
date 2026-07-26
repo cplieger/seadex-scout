@@ -26,17 +26,27 @@ const defaultSeaDexBaseURL = seadex.DefaultBaseURL
 // EntryInfo is the per-show (per-AniList-id) metadata the compare cycle hands
 // the feed writer for title synthesis: the show's own title as its arr knows it
 // (or the AniList canonical title as fallback; empty when neither is known),
-// its release year, the Fribb TVDB season the entry maps to (0 = unmapped or
-// specials), and the Fribb media typing. The cycle builds it from persisted
-// state only (the mapping index, the last library snapshot, the AniList memo),
-// so the feed rebuild stays arr-independent. The zero value is valid: synthesis
-// then falls back to file-name derivation and the anime category.
+// its release year, the season the entry maps to, and whether it is a movie.
+// The cycle builds it from persisted state only (the mapping index, the last
+// library snapshot, the AniList memo), so the feed rebuild stays
+// arr-independent. The zero value is valid: synthesis then falls back to
+// file-name derivation and the anime category.
 type EntryInfo struct {
-	Title      string
-	Year       int
-	SeasonTvdb int
-	IsMovie    bool
-	IsSpecial  bool
+	Title string
+	Year  int
+	// Season is the season number this entry's releases belong to, and
+	// SeasonKnown reports whether one was resolved at all. The pair arrives
+	// ALREADY RESOLVED from the producer (scout.feedEntryInfo): interpreting
+	// Fribb's raw season/typing fields is the mapping layer's semantics, and
+	// this package deliberately imports neither align nor mapping, so it must
+	// not re-derive that rule from raw fields (l-f4). An entry with no
+	// resolvable season - an absolute-numbered run, a title-only match, or an
+	// unmapped entry - has SeasonKnown false and Season 0, and a resolved
+	// season is authoritative over any season the file names carry (fansub
+	// episode naming is cour-local).
+	Season      int
+	SeasonKnown bool
+	IsMovie     bool
 }
 
 // EntryInfoFunc resolves the per-show (per-AniList-id) metadata the feed
@@ -102,38 +112,37 @@ func synthesizeTitle(t *seadex.Torrent, meta EntryInfo) string {
 }
 
 // episodeMarker derives the season/episode token for a synthesized series
-// title from the Fribb season AND the full file-list span:
+// title from the entry's resolved season AND the full file-list span:
 //
-//   - A pack labels by season: the Fribb TVDB season when the entry maps one
-//     (the arr's own season numbering), else S00 for a Fribb-typed special
-//     (the typing outvotes cour-local file seasons, mirroring the single-
-//     release arm), else the dominant/lowest REAL season across the file list
-//     (so a pack bundling S00 specials with S01 episodes labels S01, never
-//     the specials bucket its first file happens to sit in), else no marker
-//     (an absolute-numbered pack with no season evidence stays a bare title).
+//   - A pack labels by season: the entry's resolved season when it has one
+//     (meta.SeasonKnown - the arr's own season numbering, or the season-0
+//     specials bucket), else the dominant/lowest REAL season across the file
+//     list (so a pack bundling S00 specials with S01 episodes labels S01,
+//     never the specials bucket its first file happens to sit in), else no
+//     marker (an absolute-numbered pack with no season evidence stays a bare
+//     title).
 //   - A single release keeps its own file marker (SxxExx, or the fansub
-//     "- NN" absolute form) with its SEASON half relabeled to the Fribb TVDB
-//     season when the entry maps one (see mappedSeason) - fansub episode
-//     naming is cour-local, so the file's own season half routinely
-//     disagrees with the season the arr tracks the entry under - and a
-//     marker-less single file (a movie-shaped OVA) gets none.
+//     "- NN" absolute form) with its SEASON half relabeled to the resolved
+//     season when the entry has one - fansub episode naming is cour-local, so
+//     the file's own season half routinely disagrees with the season the arr
+//     tracks the entry under - and a marker-less single file (a movie-shaped
+//     OVA) gets none.
 func episodeMarker(t *seadex.Torrent, meta EntryInfo) string {
 	if !isPack(t) {
 		marker := singleEpisodeMarker(t.Files)
-		if s, ok := mappedSeason(meta); ok {
-			// The mapped season (a positive Fribb TVDB season, or a
-			// Fribb-typed special's mapped season 0 - see mappedSeason)
-			// outvotes the file's cour-local season half. Only an SxxExx
-			// prefix is rewritten: a markerless or absolute "- NN" marker
-			// passes through (ReplaceAllString is a no-op without a match).
-			return seasonPrefix.ReplaceAllString(marker, seasonLabel(s))
+		if meta.SeasonKnown {
+			// The resolved season outvotes the file's cour-local season half.
+			// Only an SxxExx prefix is rewritten: a markerless or absolute
+			// "- NN" marker passes through (ReplaceAllString is a no-op
+			// without a match).
+			return seasonPrefix.ReplaceAllString(marker, seasonLabel(meta.Season))
 		}
 		return marker
 	}
-	if s, ok := mappedSeason(meta); ok {
-		// The mapped season outvotes the pack's file-season evidence
-		// (fansub numbering is cour-local; see mappedSeason).
-		return seasonLabel(s)
+	if meta.SeasonKnown {
+		// The resolved season outvotes the pack's file-season evidence
+		// (fansub numbering is cour-local).
+		return seasonLabel(meta.Season)
 	}
 	if s, ok := packSeason(t.Files); ok {
 		return seasonLabel(s)
@@ -148,27 +157,13 @@ var seasonPrefix = regexp.MustCompile(`(?i)^S\d{1,2}`)
 // (the one wire format every season marker in this file must agree on).
 func seasonLabel(s int) string { return fmt.Sprintf("S%02d", s) }
 
-// mappedSeason resolves the season an entry's metadata pins: the positive
-// Fribb TVDB season, or season 0 for a Fribb-typed special (a MAPPED season
-// zero - IsSpecial is the discriminator episodeMarker already uses).
-func mappedSeason(meta EntryInfo) (int, bool) {
-	if meta.SeasonTvdb > 0 {
-		return meta.SeasonTvdb, true
-	}
-	if meta.IsSpecial {
-		return 0, true
-	}
-	return 0, false
-}
-
 // relabelBaseSeason rewrites the season half of the LAST SxxExx token in a
-// derived single-release title to the entry's mapped season. A no-op without
-// a mapped season or when the name carries no SxxExx token (an absolute
+// derived single-release title to the entry's resolved season. A no-op without
+// a resolved season or when the name carries no SxxExx token (an absolute
 // "- NN" or marker-less name - nothing to relabel, same as episodeMarker's
 // single-release arm).
 func relabelBaseSeason(base string, meta EntryInfo) string {
-	s, ok := mappedSeason(meta)
-	if !ok {
+	if !meta.SeasonKnown {
 		return base
 	}
 	locs := episodeToken.FindAllStringSubmatchIndex(base, -1)
@@ -176,7 +171,7 @@ func relabelBaseSeason(base string, meta EntryInfo) string {
 		return base
 	}
 	l := locs[len(locs)-1]
-	return base[:l[4]] + seasonLabel(s) + base[l[5]:]
+	return base[:l[4]] + seasonLabel(meta.Season) + base[l[5]:]
 }
 
 // singleEpisodeMarker returns a single-episode torrent's own episode token:
@@ -290,8 +285,8 @@ func derivedTitle(t *seadex.Torrent, meta EntryInfo) string {
 		if s, ok := packSeason(t.Files); ok {
 			label = seasonLabel(s)
 		}
-		if s, ok := mappedSeason(meta); ok {
-			label = seasonLabel(s)
+		if meta.SeasonKnown {
+			label = seasonLabel(meta.Season)
 		}
 		return strings.TrimSpace(base[:l[2]] + label + base[l[3]:])
 	}
@@ -339,10 +334,12 @@ func packSeason(files []seadex.File) (season int, ok bool) {
 // marker after the title).
 func seasonCounts(files []seadex.File) map[int]int {
 	counts := make(map[int]int)
-	// Judge the payload, not the raw list: a sub-half-size sample or featurette
-	// that passes the type gate must not contribute a false season count, the
-	// same eligibility the classification and the report apply (h-f10).
-	files = classify.PayloadFiles(files)
+	// Judge the episode population, not the raw list: a sub-half-size sample or
+	// featurette that passes the type gate must not contribute a false season
+	// count (h-f10). The census rule, not PayloadFiles: a legitimately shorter
+	// episode still votes for its season, so the floor is median-anchored
+	// (d-u5-c4-1).
+	files = classify.PopulationFiles(files)
 	for i := range files {
 		if !isContentMediaFile(files[i].Name) {
 			continue
@@ -392,9 +389,13 @@ func isPack(t *seadex.Torrent) bool {
 // its creditless files still reads as a single episode.
 func coveredEpisodes(files []seadex.File) int {
 	seen := make(map[string]struct{})
-	// Payload files only, so an episode-shaped sample or bonus video below the
-	// size threshold cannot inflate a lone episode into a "pack" (h-f10).
-	files = classify.PayloadFiles(files)
+	// Census files only, so an episode-shaped sample or bonus video far below
+	// the real episodes cannot inflate a lone episode into a "pack" (h-f10).
+	// The floor is anchored on the pool's MEDIAN, not its maximum: a pack whose
+	// premiere runs double length (or that bundles the franchise movie) would
+	// otherwise lose every regular episode and read as a single episode
+	// (d-u5-c4-1).
+	files = classify.PopulationFiles(files)
 	for i := range files {
 		if !isContentMediaFile(files[i].Name) {
 			continue
@@ -427,14 +428,14 @@ func representativeFile(files []seadex.File) string {
 	if len(files) == 0 {
 		return ""
 	}
-	// Derive the title from the payload the classification votes on, so a
-	// first-listed sample or featurette below the size threshold can never
-	// headline the synthesized title (h-f10). PayloadFiles keeps its own
-	// totality fallbacks (type-gate-only when no lengths, size-only when no
-	// type survivor), so a sidecar-only or container-only list still yields a
-	// candidate; an all-unnamed list yields none, matching the old
-	// files[0].Name of "".
-	files = classify.PayloadFiles(files)
+	// Derive the title from the episode population, so a first-listed sample or
+	// featurette far below the real episodes can never headline the synthesized
+	// title (h-f10) while a legitimately shorter first episode still can
+	// (d-u5-c4-1). PopulationFiles keeps PayloadFiles' totality fallbacks
+	// (type-gate-only when no lengths, size-only when no type survivor), so a
+	// sidecar-only or container-only list still yields a candidate; an
+	// all-unnamed list yields none, matching the old files[0].Name of "".
+	files = classify.PopulationFiles(files)
 	if len(files) == 0 {
 		return ""
 	}

@@ -1,0 +1,193 @@
+package trackerlink
+
+import (
+	"testing"
+)
+
+// TestPublish pins the publish-or-drop ladder over the (tracker, rawURL) pair:
+// an absolute URL on a canonical tracker host publishes verbatim, a foreign,
+// suffix-confused, prefix-confused or homograph host drops, a schemeless
+// canonical host is recovered as the mislabeled absolute URL it is, a
+// tracker-specific relative shape publishes under its INFERRED owner's base
+// rather than the untrusted label's, any other relative value publishes under
+// the label's base, and an unknown tracker has no canonical base to vouch for
+// either form so it drops.
+func TestPublish(t *testing.T) {
+	tests := []struct {
+		name    string
+		tracker string
+		url     string
+		want    string
+	}{
+		{name: "blank", tracker: "Nyaa", url: "   ", want: ""},
+		{name: "absolute canonical host", tracker: "AB", url: " https://animebytes.tv/torrents.php?id=1&torrentid=2 ", want: "https://animebytes.tv/torrents.php?id=1&torrentid=2"},
+		{name: "absolute canonical host case-insensitive", tracker: "Nyaa", url: "https://NYAA.SI/view/1", want: "https://NYAA.SI/view/1"},
+		{name: "absolute canonical subdomain", tracker: "Nyaa", url: "https://sukebei.nyaa.si/view/1", want: "https://sukebei.nyaa.si/view/1"},
+		{name: "absolute canonical host trailing dot", tracker: "Nyaa", url: "https://nyaa.si./view/1", want: "https://nyaa.si./view/1"},
+		{name: "absolute canonical host with valid port kept", tracker: "Nyaa", url: "https://nyaa.si:8080/view/1", want: "https://nyaa.si:8080/view/1"},
+		{name: "nyaa-labeled foreign host drops", tracker: "Nyaa", url: "https://evil.example/view/1", want: ""},
+		{name: "suffix-confusion host drops", tracker: "Nyaa", url: "https://evilnyaa.si/view/1", want: ""},
+		{name: "prefix-confusion host drops", tracker: "Nyaa", url: "https://nyaa.si.evil.example/view/1", want: ""},
+		{name: "idn lookalike host drops", tracker: "Nyaa", url: "https://ny\u0430a.si/view/1", want: ""},
+		{name: "mislabeled cross-tracker canonical host kept", tracker: "Nyaa", url: "https://animebytes.tv/torrents.php?id=9&torrentid=10", want: "https://animebytes.tv/torrents.php?id=9&torrentid=10"},
+		{name: "mislabeled schemeless canonical host recovers", tracker: "Nyaa", url: "animebytes.tv/torrents.php?id=9&torrentid=10", want: "https://animebytes.tv/torrents.php?id=9&torrentid=10"},
+		{name: "schemeless canonical host with userinfo never publishes canonicalized", tracker: "Nyaa", url: "user@animebytes.tv/torrents.php?id=9", want: "https://nyaa.si/user@animebytes.tv/torrents.php?id=9"},
+		{name: "animebytes relative", tracker: "AB", url: "/torrents.php?id=1", want: "https://animebytes.tv/torrents.php?id=1"},
+		{name: "mislabeled AB torrent-page relative canonicalizes to AB base", tracker: "Nyaa", url: "/torrents.php?id=1&torrentid=2", want: "https://animebytes.tv/torrents.php?id=1&torrentid=2"},
+		{name: "mislabeled slashless AB torrent-page shape canonicalizes to AB base", tracker: "Nyaa", url: "torrents.php?id=1&torrentid=2", want: "https://animebytes.tv/torrents.php?id=1&torrentid=2"},
+		{name: "relative without slash", tracker: "Nyaa", url: "view/1", want: "https://nyaa.si/view/1"},
+		{name: "unknown tracker relative drops", tracker: "unknown", url: "/local/path", want: ""},
+		{name: "unknown tracker absolute drops", tracker: "unknown", url: "https://example.test/t/9", want: ""},
+		{name: "stripped tracker relative drops", tracker: "beyondhd", url: "/torrents/1", want: ""},
+		{name: "rutracker relative", tracker: "RuTracker", url: "forum/viewtopic.php?t=1", want: "https://rutracker.org/forum/viewtopic.php?t=1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Publish(tc.tracker, tc.url); got != tc.want {
+				t.Errorf("Publish(%q, %q) = %q, want %q", tc.tracker, tc.url, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPublishRejectsUnsafeSchemes pins the unsafe-scheme and
+// malformed-URL gate on the untrusted upstream URL: javascript:, data:, and
+// file: values must never be converted into clickable tracker links, and a
+// malformed or anomalous value (hostless, unparseable escape, whitespace in
+// the host, backslash authority, a tab/newline-smuggled form the WHATWG
+// preprocessing de-smuggled, a hidden-host quirk form) must drop to the
+// empty-URL case rather than be published as a link a human cannot follow -
+// publish-or-drop rejects what it cannot vouch for even when the classifier
+// recovered the evidence.
+func TestPublishRejectsUnsafeSchemes(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{name: "javascript", url: "javascript:alert(1)"},
+		{name: "data", url: "data:text/html,<script>alert(1)</script>"},
+		{name: "file", url: "file:///etc/passwd"},
+		{name: "hostless https", url: "https://"},
+		{name: "port-only authority", url: "https://:443/path"},
+		{name: "out-of-range port", url: "https://nyaa.si:65536/path"},
+		{name: "invalid escape", url: "https://example.test/%zz"},
+		{name: "whitespace in host", url: "https://bad host/path"},
+		{name: "backslash authority", url: `\\evil.example/path`},
+		{name: "tab-smuggled canonical host", url: "https://nyaa\t.si/view/1"},
+		{name: "newline-smuggled scheme", url: "ht\ntps://nyaa.si/view/1"},
+		{name: "hidden-host single-slash form (evidence recovered, still unvouchable)", url: "https:/animebytes.tv/torrents.php?id=1"},
+		{name: "userinfo authority confusion", url: "https://animebytes.tv@evil.example/torrent"},
+		{name: "query-only with colon", url: "?x:y"},
+		{name: "fragment-only with colon", url: "#a:b"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Publish("Nyaa", tc.url)
+			if got != "" {
+				t.Errorf("Publish(%q) = %q, want empty for unsafe scheme", tc.url, got)
+			}
+		})
+	}
+}
+
+// TestUsableRelative pins the relative-publisher helper's own contract,
+// independent of urlform.Classify's routing: any value whose first colon
+// precedes a slash is unusable as a relative path and drops - including the
+// degenerate colon-at-index-0 form no Classify class currently routes here -
+// while a colon safely inside a later path segment publishes, and a missing
+// leading slash is added exactly once.
+func TestUsableRelative(t *testing.T) {
+	tests := []struct{ name, raw, want string }{
+		{name: "leading colon drops", raw: ":8080/x", want: ""},
+		{name: "colon before any slash drops", raw: "a:b/c", want: ""},
+		{name: "query-leading colon drops", raw: "?x:y", want: ""},
+		{name: "colon after slash publishes", raw: "path/a:b", want: "https://nyaa.si/path/a:b"},
+		{name: "leading slash kept", raw: "/view/1", want: "https://nyaa.si/view/1"},
+		{name: "missing slash added", raw: "view/1", want: "https://nyaa.si/view/1"},
+		// The shape floor (l-f88): a structureless token is not a torrent page,
+		// so it drops instead of publishing a plausible-looking 404. The live
+		// catalogue carries exactly one such record (AB, url "Chihiro" - a
+		// release-group name typed into the url field).
+		{name: "bare single-segment token drops", raw: "view", want: ""},
+		{name: "bare rooted single-segment token drops", raw: "/Chihiro", want: ""},
+		{name: "single segment with a query publishes", raw: "/torrents.php?id=1&torrentid=2", want: "https://nyaa.si/torrents.php?id=1&torrentid=2"},
+		{name: "single segment with a fragment publishes", raw: "/view#1", want: "https://nyaa.si/view#1"},
+		{name: "root alone drops", raw: "/", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := usableRelative(tc.raw, "https://nyaa.si"); got != tc.want {
+				t.Errorf("usableRelative(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPublishPortBoundaries pins the publisher's shared port rule
+// (portOK) at the 16-bit boundary through the PUBLIC publisher, on real raw
+// upstream values rather than a fabricated classifier result: the maximum port
+// publishes, a port above the 16-bit range drops, and a non-numeric port
+// drops (net/url cannot read the authority at all). TestPublish continues to
+// cover schemeless-host recovery and the labeled-relative fallback.
+func TestPublishPortBoundaries(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{name: "maximum port is published", url: "https://nyaa.si:65535/view/1", want: "https://nyaa.si:65535/view/1"},
+		{name: "port above maximum drops", url: "https://nyaa.si:65536/view/1", want: ""},
+		{name: "nonnumeric port drops", url: "https://nyaa.si:abc/view/1", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Publish("Nyaa", tc.url)
+			if got != tc.want {
+				t.Errorf("Publish(%q) = %q, want %q", tc.url, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPublishCanonicalizesScheme pins the no-cleartext-publish rule
+// (l-f89). Every canonical tracker base in release.trackerTable is https, and
+// the schemeless publish branch already prefixes "https://" for that reason -
+// but the ABSOLUTE branch emitted the upstream's scheme verbatim, so a tampered
+// SeaDex record could publish "http://nyaa.si/view/1" as the clickable release
+// link. Neither tracker host is HSTS-preloaded, so that first hop is genuinely
+// cleartext and an on-path attacker can answer it with a phishing page under
+// the tracker's own URL bar (AnimeBytes is login-bearing). The host is already
+// proven canonical by the time the scheme is read, so the link is upgraded
+// rather than dropped; everything after the scheme survives byte-for-byte.
+func TestPublishCanonicalizesScheme(t *testing.T) {
+	tests := map[string]struct {
+		tracker string
+		url     string
+		want    string
+	}{
+		"cleartext nyaa is upgraded": {
+			tracker: "Nyaa", url: "http://nyaa.si/view/1", want: "https://nyaa.si/view/1",
+		},
+		"mixed-case cleartext scheme is upgraded": {
+			tracker: "Nyaa", url: "HtTp://nyaa.si/view/1", want: "https://nyaa.si/view/1",
+		},
+		"path, query and case after the scheme survive": {
+			tracker: "AB",
+			url:     "http://animebytes.tv/torrents.php?id=1&torrentid=456#Frag",
+			want:    "https://animebytes.tv/torrents.php?id=1&torrentid=456#Frag",
+		},
+		"https is unchanged": {
+			tracker: "Nyaa", url: "https://nyaa.si/view/1", want: "https://nyaa.si/view/1",
+		},
+		"a non-tracker host is still dropped, not upgraded": {
+			tracker: "Nyaa", url: "http://evil.example/view/1", want: "",
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := Publish(tc.tracker, tc.url); got != tc.want {
+				t.Errorf("Publish(%q, %q) = %q, want %q", tc.tracker, tc.url, got, tc.want)
+			}
+		})
+	}
+}

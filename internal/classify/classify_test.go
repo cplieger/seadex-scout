@@ -6,6 +6,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/cplieger/seadex-scout/internal/filter"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
@@ -383,7 +384,7 @@ func TestABVisibleAdapterGatesOnRawEvidence(t *testing.T) {
 // TestObtainableAdapterPreservesRawURLForCrossCheck pins the adapter's wiring
 // invariant that filter.Obtainable's own tests cannot cover: the RAW upstream
 // URL must feed the AnimeBytes host cross-check (so a mislabeled schemeless AB
-// URL is caught) while Torrent.UsableURL supplies the actionable link. A
+// URL is caught) while PublishURL supplies the actionable link. A
 // mutant passing the canonical URL to both arguments returns true here.
 func TestObtainableAdapterPreservesRawURLForCrossCheck(t *testing.T) {
 	torrent := &seadex.Torrent{
@@ -397,33 +398,32 @@ func TestObtainableAdapterPreservesRawURLForCrossCheck(t *testing.T) {
 	}
 }
 
-// TestDefinitelyABAdapterFailsOpenOnRawEvidence pins the third adapter's
-// policy surface at its defining site, mirroring the ABVisible and
-// Obtainable adapter tests: an AB tracker label or definitively extracted
-// raw-URL host evidence (absolute or schemeless animebytes.tv) reads
-// definitely-AB, while ambiguous evidence - a hidden-host host:port form,
-// an empty URL, or an honest public URL - fails OPEN (not definitely AB).
-// The adapter must feed the RAW upstream URL (t.URL) to the host
-// cross-check: a mutant passing t.UsableURL() (which drops the schemeless
-// AB form under a public label to "") would read that case as
-// not-definitive and fail this test.
-func TestDefinitelyABAdapterFailsOpenOnRawEvidence(t *testing.T) {
+// TestABEvidenceAdapterReadsRawEvidence pins the third adapter's policy surface
+// at its defining site, mirroring the ABVisible and Obtainable adapter tests:
+// an AB tracker label or definitively extracted raw-URL host evidence (absolute
+// or schemeless animebytes.tv) grades ABDefinite, a hidden-host host:port form
+// grades ABAmbiguous (evidence that settles nothing), and an honest public URL
+// or an empty URL grades ABNone. The adapter must feed the RAW upstream URL
+// (t.URL) to the host cross-check: a mutant passing PublishURL(t) (which drops
+// the schemeless AB form under a public label to "") would grade that case
+// ABNone and fail this test.
+func TestABEvidenceAdapterReadsRawEvidence(t *testing.T) {
 	tests := []struct {
 		name    string
 		torrent seadex.Torrent
-		want    bool
+		want    filter.ABEvidence
 	}{
-		{"AB label is definitive", seadex.Torrent{Tracker: "AB", URL: "/torrents.php?id=1&torrentid=2"}, true},
-		{"absolute AB URL under a public label is definitive", seadex.Torrent{Tracker: "Nyaa", URL: "https://animebytes.tv/torrents.php?id=1"}, true},
-		{"schemeless AB URL under a public label is definitive", seadex.Torrent{Tracker: "Nyaa", URL: "animebytes.tv/torrents.php?id=1"}, true},
-		{"hidden-host form is ambiguous and fails open", seadex.Torrent{Tracker: "Nyaa", URL: "animebytes.tv:443/torrents.php?id=1"}, false},
-		{"public tracker with public URL is not AB", seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}, false},
-		{"empty URL carries no host evidence and fails open", seadex.Torrent{Tracker: "Nyaa", URL: ""}, false},
+		{"AB label is definitive", seadex.Torrent{Tracker: "AB", URL: "/torrents.php?id=1&torrentid=2"}, filter.ABDefinite},
+		{"absolute AB URL under a public label is definitive", seadex.Torrent{Tracker: "Nyaa", URL: "https://animebytes.tv/torrents.php?id=1"}, filter.ABDefinite},
+		{"schemeless AB URL under a public label is definitive", seadex.Torrent{Tracker: "Nyaa", URL: "animebytes.tv/torrents.php?id=1"}, filter.ABDefinite},
+		{"hidden-host form settles nothing", seadex.Torrent{Tracker: "Nyaa", URL: "animebytes.tv:443/torrents.php?id=1"}, filter.ABAmbiguous},
+		{"public tracker with public URL is not AB", seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}, filter.ABNone},
+		{"empty URL carries no host evidence", seadex.Torrent{Tracker: "Nyaa", URL: ""}, filter.ABNone},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := DefinitelyAB(&tt.torrent); got != tt.want {
-				t.Errorf("DefinitelyAB(%q, %q) = %v, want %v", tt.torrent.Tracker, tt.torrent.URL, got, tt.want)
+			if got := ABEvidence(&tt.torrent); got != tt.want {
+				t.Errorf("ABEvidence(%q, %q) = %v, want %v", tt.torrent.Tracker, tt.torrent.URL, got, tt.want)
 			}
 		})
 	}
@@ -441,5 +441,79 @@ func TestDivergedIncomplete(t *testing.T) {
 	}
 	if DivergedIncomplete(&seadex.Entry{}) {
 		t.Error("DivergedIncomplete(complete entry) = true, want false")
+	}
+}
+
+// TestPopulationFilesMedianAnchoredFloor pins the census rule against the
+// primary-payload rule. PopulationFiles answers "how many distinct episodes
+// does this torrent span", where a shorter file is a legitimately shorter
+// episode; PayloadFiles answers "which names vote on the release's quality",
+// where anything far below the primary is a diluting extra. Anchoring the
+// census floor on the MAXIMUM (the d-u5-c4-1 regression) deleted every regular
+// episode of any pack carrying one over-long file, so the pack read as a single
+// episode. Both rules must still exclude an episode-shaped sample.
+func TestPopulationFilesMedianAnchoredFloor(t *testing.T) {
+	const gib = 1 << 30
+	episodes := func(n int, size int64) []seadex.File {
+		out := make([]seadex.File, 0, n)
+		for e := 1; e <= n; e++ {
+			out = append(out, seadex.File{Name: fmt.Sprintf("Show S01E%02d [1080p].mkv", e), Length: size})
+		}
+		return out
+	}
+	withFirst := func(first seadex.File, rest []seadex.File) []seadex.File {
+		return append([]seadex.File{first}, rest...)
+	}
+
+	tests := map[string]struct {
+		files          []seadex.File
+		wantPopulation int
+		wantPayload    int
+	}{
+		"double-length premiere keeps every episode": {
+			// The regression case: max 2.5 GiB puts the payload floor at
+			// 1.25 GiB and drops all 11 regular episodes; the median stays on
+			// the episode population.
+			files:          withFirst(seadex.File{Name: "Show S01E01 [1080p].mkv", Length: 5 * gib / 2}, episodes(11, 6*gib/5)),
+			wantPopulation: 12,
+			wantPayload:    1,
+		},
+		"bundled franchise movie keeps every episode": {
+			files:          withFirst(seadex.File{Name: "Show Movie [1080p].mkv", Length: 4 * gib}, episodes(12, 6*gib/5)),
+			wantPopulation: 13,
+			wantPayload:    1,
+		},
+		"episode-shaped sample is still excluded": {
+			// Both rules must drop it: a sample that counted would inflate a
+			// lone episode into a "pack" (h-f10).
+			files:          withFirst(seadex.File{Name: "Show S01E00 Sample [480p].mkv", Length: 200 << 20}, episodes(1, gib)),
+			wantPopulation: 1,
+			wantPayload:    1,
+		},
+		"no positive lengths falls back to the type gate": {
+			files:          []seadex.File{{Name: "Show - 07.mkv"}, {Name: "Show - 08.mkv"}},
+			wantPopulation: 2,
+			wantPayload:    2,
+		},
+		"no type survivor falls back to every named file": {
+			files:          []seadex.File{{Name: "Show S01 remux.iso", Length: 20 * gib}, {Name: "Show S01 remux.nfo", Length: 1 << 10}},
+			wantPopulation: 1,
+			wantPayload:    1,
+		},
+		"MaxInt64 length does not wrap the floor negative": {
+			files:          withFirst(seadex.File{Name: "Show S01E01 [1080p].mkv", Length: math.MaxInt64}, episodes(1, 1)),
+			wantPopulation: 1,
+			wantPayload:    1,
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := len(PopulationFiles(tt.files)); got != tt.wantPopulation {
+				t.Errorf("len(PopulationFiles()) = %d, want %d", got, tt.wantPopulation)
+			}
+			if got := len(PayloadFiles(tt.files)); got != tt.wantPayload {
+				t.Errorf("len(PayloadFiles()) = %d, want %d", got, tt.wantPayload)
+			}
+		})
 	}
 }

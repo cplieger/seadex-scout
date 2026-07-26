@@ -169,7 +169,7 @@ func TestABVisible(t *testing.T) {
 // cross-check, so a mislabeled public release carrying an AB URL never counts
 // as obtainable while the animebytes toggle is off. It also pins the
 // usable-URL gate: a release whose canonical usable URL is empty (no URL, or
-// one seadex.Torrent.UsableURL rejected as malformed or foreign-host) is
+// one trackerlink.Publish rejected as malformed or foreign-host) is
 // never obtainable regardless of tracker and toggle.
 func TestObtainableAppliesABURLCrossCheck(t *testing.T) {
 	abURL := "https://animebytes.tv/torrents.php?id=1&torrentid=2"
@@ -186,7 +186,7 @@ func TestObtainableAppliesABURLCrossCheck(t *testing.T) {
 		{"public tracker with AB URL obtainable when AB on", release.Release{TrackerType: release.TrackerPublic, Tracker: "Nyaa"}, abURL, abURL, true, true},
 		{"public tracker with public URL obtainable when AB off", release.Release{TrackerType: release.TrackerPublic, Tracker: "Nyaa"}, "https://nyaa.si/view/1", "https://nyaa.si/view/1", false, true},
 		{"public tracker with malformed raw URL hidden by ABVisible even with a usable URL", release.Release{TrackerType: release.TrackerPublic, Tracker: "Nyaa"}, "https://nyaa.si/\x7f", "https://nyaa.si/view/1", false, false},
-		{"public tracker with foreign-host URL rejected by UsableURL not obtainable", release.Release{TrackerType: release.TrackerPublic, Tracker: "Nyaa"}, "https://evil.example/view/1", "", false, false},
+		{"public tracker with foreign-host URL rejected by the publisher not obtainable", release.Release{TrackerType: release.TrackerPublic, Tracker: "Nyaa"}, "https://evil.example/view/1", "", false, false},
 		{"public tracker with no URL at all not obtainable", release.Release{TrackerType: release.TrackerPublic, Tracker: "Nyaa"}, "", "", false, false},
 		{"public tracker with AB torrent-page relative URL hidden when AB off", release.Release{TrackerType: release.TrackerPublic, Tracker: "Nyaa"}, "/torrents.php?id=1&torrentid=2", abURL, false, false},
 		{"AB release with AB URL obtainable when AB on", release.Release{TrackerType: release.TrackerPrivate, Tracker: "AB"}, abURL, abURL, true, true},
@@ -201,83 +201,101 @@ func TestObtainableAppliesABURLCrossCheck(t *testing.T) {
 	}
 }
 
-// TestABGatedMatchesToggleOffVisibility pins ABGated as the named form of the
-// toggle-off hide decision consumed by the alert URL routing
-// (notify.trackerURLs):
-// an AB label or AB-hosted URL is gated, a public link is not, and the
-// conservative hides (malformed or non-ASCII host evidence) are gated even
-// though DefinitelyAB fails open on them - the asymmetry the two predicates
-// exist to encode.
-func TestABGatedMatchesToggleOffVisibility(t *testing.T) {
+// TestClassifyAB pins the grade of every AnimeBytes-evidence shape, replacing
+// the two boolean tables (fail-closed gate, fail-open predicate) this one table
+// now covers in a single pass. The three grades carry the two fail directions
+// the app needs: ABNone surfaces with the toggle off, ABDefinite is the audit
+// report's row-listing gate, and ABAmbiguous is the band where the two
+// directions disagree - hidden by ABVisible, still LISTED by the report.
+//
+// The subset invariant the old tables cross-checked (definite implies gated) is
+// now structural: one value cannot be definite without also being non-None, so
+// it is asserted once through ABVisible's exhaustive reading below rather than
+// restated per row.
+func TestClassifyAB(t *testing.T) {
 	tests := []struct {
 		name    string
 		tracker string
 		url     string
-		want    bool
+		want    ABEvidence
 	}{
-		{"AB label gated", "AB", "https://animebytes.tv/torrents.php?id=1", true},
-		{"public URL not gated", "Nyaa", "https://nyaa.si/view/1", false},
-		{"AB URL under public label gated", "Nyaa", "https://animebytes.tv/torrents.php?id=1", true},
-		{"malformed URL gated conservatively but not definitely AB", "Nyaa", "https://nyaa.si/\x7f", true},
-		{"non-ASCII AB host gated conservatively but not definitely AB", "Nyaa", "https://animebytes\uFF0Etv/torrents.php?id=1", true},
-		{"empty URL not gated", "Nyaa", "", false},
+		{"AB label with no URL", "AB", "", ABDefinite},
+		{"animebytes label with public URL", "animebytes", "https://nyaa.si/view/1", ABDefinite},
+		{"public label with AB URL", "Nyaa", "https://animebytes.tv/torrents.php?id=1", ABDefinite},
+		{"public label with AB subdomain URL", "Nyaa", "https://cdn.animebytes.tv/t/1", ABDefinite},
+		{"public label with trailing-dot AB FQDN", "Nyaa", "https://animebytes.tv./torrents.php?id=1", ABDefinite},
+		{"schemeless AB host", "Nyaa", "animebytes.tv/torrents.php?id=1&torrentid=2", ABDefinite},
+		{"protocol-relative AB host", "Nyaa", "//animebytes.tv/x", ABDefinite},
+		{"backslash-canonicalized AB host is definite (browser semantics)", "Nyaa", `animebytes.tv\@evil/x`, ABDefinite},
+		{"AB torrent-page relative URL is definitive", "Nyaa", "/torrents.php?id=1&torrentid=2", ABDefinite},
+		{"schemeless AB torrent-page shape is definitive", "Nyaa", "torrents.php?id=1&torrentid=2", ABDefinite},
+		{"hidden-host special form recovers definite AB evidence", "Nyaa", "https:/animebytes.tv/torrents.php?id=1", ABDefinite},
+		{"zero-slash AB form recovers definite AB evidence", "Nyaa", "https:animebytes.tv/torrents.php?id=1", ABDefinite},
+		{"tab-smuggled AB URL is definite (browser strips the tab)", "Nyaa", "https://anime\tbytes.tv/torrents.php?id=1", ABDefinite},
+
+		{"public label with public URL", "Nyaa", "https://nyaa.si/view/1", ABNone},
+		{"empty URL carries no evidence", "Nyaa", "", ABNone},
+		{"relative path carries no host evidence", "Nyaa", "/local/path", ABNone},
+		{"lookalike suffix host is not AB", "Nyaa", "https://notanimebytes.tv/t/1", ABNone},
+		{"AB-suffixed foreign domain is not AB", "Nyaa", "https://animebytes.tv.evil.example/t/1", ABNone},
+
+		{"malformed URL settles nothing", "Nyaa", "https://nyaa.si/\x7f", ABAmbiguous},
+		{"opaque host-as-scheme settles nothing (non-special, no recovery)", "Nyaa", "animebytes.tv:443/x", ABAmbiguous},
+		{"space-userinfo host failing authority reparse settles nothing", "Nyaa", "foo bar@animebytes.tv/x", ABAmbiguous},
+		{"non-ASCII fullwidth-dot AB host settles nothing", "Nyaa", "https://animebytes\uFF0Etv/torrents.php?id=1", ABAmbiguous},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ABGated(tt.tracker, tt.url); got != tt.want {
-				t.Errorf("ABGated(%q, %q) = %v, want %v", tt.tracker, tt.url, got, tt.want)
+			if got := ClassifyAB(tt.tracker, tt.url); got != tt.want {
+				t.Errorf("ClassifyAB(%q, %q) = %v, want %v", tt.tracker, tt.url, got, tt.want)
 			}
 		})
 	}
 }
 
-// TestDefinitelyAB pins the fail-OPEN contract of DefinitelyAB (the inverse
-// fail direction of ABVisible's fail-closed gate): evidence that cannot be
-// extracted is not AnimeBytes evidence, so malformed, hidden-host,
-// unrecoverable-authority, and non-ASCII hosts all read false (the release
-// stays LISTED, annotated), while an AB tracker label or extractable AB host
-// evidence reads true. Each true row is also cross-checked against ABGated:
-// the fail-open set must stay a subset of the fail-closed gate, so a definite
-// AB release is always hidden with the toggle off.
-func TestDefinitelyAB(t *testing.T) {
-	tests := []struct {
-		name    string
+// TestABVisibleReadsEveryGrade pins the toggle policy over the grades: with the
+// toggle on everything surfaces, and with it off ONLY ABNone does. That is the
+// structural form of the old "definite is a subset of gated" cross-check - the
+// definite and ambiguous grades are hidden by the same comparison, so a definite
+// AB release can no longer be visible while an ambiguous one is hidden.
+func TestABVisibleReadsEveryGrade(t *testing.T) {
+	grades := map[ABEvidence]struct {
 		tracker string
 		url     string
-		want    bool
 	}{
-		{"AB label with no URL", "AB", "", true},
-		{"animebytes label with public URL", "animebytes", "https://nyaa.si/view/1", true},
-		{"public label with AB URL", "Nyaa", "https://animebytes.tv/torrents.php?id=1", true},
-		{"public label with AB subdomain URL", "Nyaa", "https://cdn.animebytes.tv/t/1", true},
-		{"public label with trailing-dot AB FQDN", "Nyaa", "https://animebytes.tv./torrents.php?id=1", true},
-		{"schemeless AB host", "Nyaa", "animebytes.tv/torrents.php?id=1&torrentid=2", true},
-		{"protocol-relative AB host", "Nyaa", "//animebytes.tv/x", true},
-		{"backslash-canonicalized AB host is definite (browser semantics)", "Nyaa", `animebytes.tv\@evil/x`, true},
-		{"public label with public URL", "Nyaa", "https://nyaa.si/view/1", false},
-		{"empty URL carries no evidence", "Nyaa", "", false},
-		{"relative path carries no host evidence", "Nyaa", "/local/path", false},
-		{"AB torrent-page relative URL is definitive", "Nyaa", "/torrents.php?id=1&torrentid=2", true},
-		{"schemeless AB torrent-page shape is definitive", "Nyaa", "torrents.php?id=1&torrentid=2", true},
-		{"lookalike suffix host is not AB", "Nyaa", "https://notanimebytes.tv/t/1", false},
-		{"AB-suffixed foreign domain is not AB", "Nyaa", "https://animebytes.tv.evil.example/t/1", false},
-		{"malformed URL fails open", "Nyaa", "https://nyaa.si/\x7f", false},
-		{"hidden-host special form recovers definite AB evidence", "Nyaa", "https:/animebytes.tv/torrents.php?id=1", true},
-		{"zero-slash AB form recovers definite AB evidence", "Nyaa", "https:animebytes.tv/torrents.php?id=1", true},
-		{"tab-smuggled AB URL is definite (browser strips the tab)", "Nyaa", "https://anime\tbytes.tv/torrents.php?id=1", true},
-		{"opaque host-as-scheme still fails open (non-special, no recovery)", "Nyaa", "animebytes.tv:443/x", false},
-		{"space-userinfo host failing authority reparse fails open", "Nyaa", "foo bar@animebytes.tv/x", false},
-		{"non-ASCII fullwidth-dot AB host fails open", "Nyaa", "https://animebytes\uFF0Etv/torrents.php?id=1", false},
+		ABNone:      {"Nyaa", "https://nyaa.si/view/1"},
+		ABAmbiguous: {"Nyaa", "https://nyaa.si/\x7f"},
+		ABDefinite:  {"Nyaa", "https://animebytes.tv/torrents.php?id=1"},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := DefinitelyAB(tt.tracker, tt.url)
-			if got != tt.want {
-				t.Errorf("DefinitelyAB(%q, %q) = %v, want %v", tt.tracker, tt.url, got, tt.want)
+	for grade, in := range grades {
+		t.Run(grade.String(), func(t *testing.T) {
+			// Guard the fixtures: a grading change must fail here rather than
+			// silently retarget the policy assertion at the wrong grade.
+			if got := ClassifyAB(in.tracker, in.url); got != grade {
+				t.Fatalf("fixture drift: ClassifyAB(%q, %q) = %v, want %v", in.tracker, in.url, got, grade)
 			}
-			if got && !ABGated(tt.tracker, tt.url) {
-				t.Errorf("DefinitelyAB(%q, %q) = true but ABGated = false; the fail-open set must stay a subset of the fail-closed gate", tt.tracker, tt.url)
+			if !ABVisible(in.tracker, in.url, true) {
+				t.Errorf("ABVisible(%v, toggle on) = false, want true", grade)
+			}
+			wantOff := grade == ABNone
+			if got := ABVisible(in.tracker, in.url, false); got != wantOff {
+				t.Errorf("ABVisible(%v, toggle off) = %v, want %v", grade, got, wantOff)
 			}
 		})
+	}
+}
+
+// TestABEvidenceString pins the grade names, which appear in diagnostics and
+// test failures; an out-of-range value must not render as a plausible grade.
+func TestABEvidenceString(t *testing.T) {
+	for grade, want := range map[ABEvidence]string{
+		ABNone:        "none",
+		ABAmbiguous:   "ambiguous",
+		ABDefinite:    "definite",
+		ABEvidence(9): "unknown",
+	} {
+		if got := grade.String(); got != want {
+			t.Errorf("ABEvidence(%d).String() = %q, want %q", uint8(grade), got, want)
+		}
 	}
 }

@@ -3,6 +3,8 @@ package library
 import (
 	"net/url"
 	"slices"
+
+	"github.com/cplieger/urlform"
 )
 
 // SafeLogURL returns a copy of rawURL safe to emit across the logging trust
@@ -10,31 +12,47 @@ import (
 // Auth credentials (https://user:pass@host) or query tokens configured in the
 // arr base URL never reach Loki or downstream notifications. An ordinary
 // credential-free host/path deep-link passes through unchanged and stays
-// clickable; any input that is not an absolute http(s) URL with a hostname -
-// an unparseable URL, an opaque or scheme-relative form, a non-http(s)
-// scheme, or a hostless (port-only) authority - yields an empty string, so a
-// caller must treat "" as "no usable link" rather than as "unparseable". It
-// lives beside the ArrURL construction it guards so every slog emitter of a
-// config-derived arr URL shares one sanitization rule.
+// clickable; any input that is not an absolute http(s) URL with a hostname
+// yields an empty string, so a caller must treat "" as "no usable link" rather
+// than as "unparseable". It lives beside the ArrURL construction it guards so
+// every slog emitter of a config-derived arr URL shares one sanitization rule.
+//
+// The ADMISSION half reads urlform, the app's classifier of record for the
+// browser-vs-net/url divergence classes. ArrURL is a browser-destined deep-link
+// published to humans through Loki and the report, which is exactly urlform's
+// parser-of-record case and the same publish-or-drop pattern internal/seadex
+// already runs. It used to hand-roll that taxonomy with net/url and a comment
+// block re-deriving each quirk - the opaque schemeless-credential form
+// ("user:pass@host/..."), the single- and four-slash hidden-host forms, the
+// port-only authority, the protocol-relative form - i.e. a second,
+// independently-maintained copy of knowledge the library owns, which silently
+// misses what the library learns (urlform v1.1.0's WHATWG preprocessing and
+// hidden-host recovery closed exactly such gaps for the other consumers, l-f40).
+// Only ClassAbsolute with an http(s) scheme and a real host is admitted, and a
+// smuggling form (backslash authority, embedded tab/newline) is refused
+// outright: a de-smuggled string is not vouchable, the stance trackerlink.Publish
+// takes.
+//
+// The STRIP half stays app-side by design: urlform classifies and deliberately
+// never rewrites, so removing userinfo/query/fragment remains a consumer
+// concern.
 func SafeLogURL(rawURL string) string {
-	if rawURL == "" {
+	f := urlform.Classify(rawURL)
+	if f.Class != urlform.ClassAbsolute || f.Host == "" {
 		return ""
 	}
-	u, err := url.Parse(rawURL)
-	if err != nil || u.Opaque != "" ||
-		(u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
-		// An opaque (non-hierarchical) URL - e.g. a scheme-less credentialed
-		// base like "user:pass@host/..." parsed as scheme "user" with the
-		// userinfo inside Opaque - keeps its credential where the strips
-		// below cannot reach it. Malformed hierarchical forms (e.g. the
-		// single-slash "https:/user:pass@host/..." or the four-slash
-		// "https:////user:pass@host/...") parse with an empty Host and carry
-		// the credential text in Path, equally out of reach — as does a
-		// port-only authority ("https://:443/user:pass@host/..."), whose
-		// Host is non-empty but whose Hostname is empty, hence the
-		// Hostname() check. None of these is ever a valid arr deep-link
-		// (which is always absolute http(s) with a hostname), so all are
-		// dropped like an unparseable URL.
+	if f.HasBackslash || f.HasTabOrNewline {
+		return ""
+	}
+	if f.Scheme != "http" && f.Scheme != "https" {
+		return ""
+	}
+	// Re-parse the classifier's preprocessed string to perform the strip. It is
+	// known-parseable (ClassAbsolute) and already free of the whitespace bytes a
+	// browser would drop, so this cannot fail; the guard keeps the function
+	// total rather than trusting that invariant across a library change.
+	u, err := url.Parse(f.Trimmed)
+	if err != nil {
 		return ""
 	}
 	u.User = nil

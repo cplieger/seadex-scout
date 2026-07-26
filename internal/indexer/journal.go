@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cplieger/seadex-scout/internal/classify"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
@@ -162,7 +163,7 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor En
 		it = journalItem{
 			item: item{
 				Title:                synthesizeTitle(first.torrent, infoFor(first.entry.AniListID)),
-				GUID:                 first.torrent.UsableURL(),
+				GUID:                 classify.PublishURL(first.torrent),
 				InfoURL:              entryURL(first.entry.AniListID),
 				DownloadURL:          dl,
 				InfoHash:             validInfoHash(first.torrent.InfoHash),
@@ -182,7 +183,7 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor En
 			// Creation-time enforcement of the journal's GUID-to-Key
 			// invariant (the carry gates and the reader's rebuild already
 			// enforce it): an occurrence whose page URL is unpublishable
-			// (UsableURL dropped it - e.g. a bad-port-bearing URL that
+			// (the publisher dropped it - e.g. a bad-port-bearing URL that
 			// still passes trackerKey) would journal an item every
 			// reader load then drops as undecodable. Try the next
 			// occurrence.
@@ -340,12 +341,16 @@ func rebaseFutureFeed(feed []journalItem, now time.Time) int {
 
 // carryStoredItem applies carryItem's non-curated carry policy: an item whose
 // torrent has left the curation set keeps its stored render, subject to the
-// AB passkey gate and the GUID-identity gate.
+// GUID-identity gate.
+//
+// A missing AB passkey is deliberately NOT a drop here. It used to be, which
+// made removing `ab_passkey` a second irreversible off switch: one rebuild
+// dropped every carried AB item and the never-pruned seen ledger stopped them
+// ever returning (l-f161). A passkey only supplies the grabbable LINK - items
+// persist GUID-only (stripDownloadURLs) and the reader clears the entire AB feed
+// while no passkey is configured (rebuildABDownloadURLs) - so carrying them
+// serves nothing prematurely and makes the switch reversible.
 func (w *FeedWriter) carryStoredItem(it *journalItem, js *journalStats) (journalItem, bool) {
-	if scopeOfKey(it.Key) == upstreamAB && w.abPasskey == "" {
-		js.recordDrop(true)
-		return journalItem{}, false
-	}
 	// Same GUID-identity gate as the curated arm (refreshCarriedItem): a
 	// stored GUID that no longer proves this item's journal identity (a
 	// cross-key, foreign-host, or empty GUID from a hand-edited snapshot)
@@ -367,6 +372,20 @@ func (w *FeedWriter) carryStoredItem(it *journalItem, js *journalStats) (journal
 func (w *FeedWriter) refreshCarriedItem(it *journalItem, refs []curatedRef, infoFor EntryInfoFunc, js *journalStats) (journalItem, bool) {
 	fresh, ok, noPasskey := w.renderJournalItem(it.Key, refs, infoFor)
 	if !ok {
+		if noPasskey {
+			// The AB passkey is the SECOND off switch for a tracker (beside
+			// blanking its Torznab URL), and it must be as reversible as the
+			// first: dropping the item here destroyed the AB journal on the
+			// first rebuild after the operator removed the passkey, and because
+			// the seen ledger is never pruned those releases could never return
+			// (l-f161). The only thing a missing passkey costs is the grabbable
+			// LINK, so keep the stored render instead - links are stripped at
+			// rest anyway (stripDownloadURLs) and the reader re-derives them,
+			// clearing the whole AB feed while no passkey is configured
+			// (rebuildABDownloadURLs), so nothing unservable is served. When the
+			// passkey comes back the carried item is renderable again.
+			return w.carryStoredItem(it, js)
+		}
 		js.recordDrop(noPasskey)
 		return journalItem{}, false
 	}

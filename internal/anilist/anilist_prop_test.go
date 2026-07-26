@@ -50,35 +50,6 @@ func TestDedupeTitles_idempotentAndLossless(t *testing.T) {
 	})
 }
 
-// TestFoldJSONKey_matchesEqualFold is the oracle property behind the
-// duplicate-key preflight's case-insensitive matching: foldJSONKey exists so
-// that map equality on folded keys is EXACTLY strings.EqualFold equality (the
-// linear-scan-free form of the rule encoding/json itself applies when matching
-// struct fields), and walkJSONObject's duplicate detection is only as correct
-// as that equivalence. The alphabet mixes ASCII case pairs with the
-// multi-member fold orbits a naive ToLower canonicalization gets wrong (Kelvin
-// sign, long s, final sigma), so folding only ASCII - or dropping the
-// orbit-minimum canonicalization - disagrees with the oracle.
-func TestFoldJSONKey_matchesEqualFold(t *testing.T) {
-	rapid.Check(t, func(t *rapid.T) {
-		part := rapid.SampledFrom([]string{
-			"a", "A", "k", "K", "\u212a", "s", "S", "\u017f",
-			"\u03c3", "\u03c2", "\u03a3", "1", "_", "Media", "media",
-		})
-		key := func(label string) string {
-			return strings.Join(rapid.SliceOfN(part, 0, 6).Draw(t, label), "")
-		}
-		a, b := key("a"), key("b")
-
-		if got, want := foldJSONKey(a) == foldJSONKey(b), strings.EqualFold(a, b); got != want {
-			t.Fatalf("foldJSONKey(%q) == foldJSONKey(%q) = %v, want strings.EqualFold = %v", a, b, got, want)
-		}
-		if folded := foldJSONKey(a); foldJSONKey(folded) != folded {
-			t.Fatalf("foldJSONKey not idempotent on %q: foldJSONKey(%q) = %q", a, folded, foldJSONKey(folded))
-		}
-	})
-}
-
 // TestParseMediaPage_roundTripsGeneratedBatchesProperty is the every-PR
 // round-trip complement to the fixed batch tables and the weekly fuzz run:
 // arbitrary well-formed Page(media) envelopes (built by encoding/json, not by

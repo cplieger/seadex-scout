@@ -150,6 +150,21 @@ func TestClassifyKind(t *testing.T) {
 		{name: "remux token wins over a generic encode token", in: Input{Names: []string{"Show BD-Remux encode 1080p"}}, wantKind: KindRemux, wantReason: "name/notes marker: remux"},
 		{name: "reencode is not an encode marker", in: Input{Names: []string{"Show reencode 1080p"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
 		{name: "reencoded is not an encode marker", in: Input{Names: []string{"Show reencoded 1080p"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
+		// Plural forms count: the notes field is prose, where the plural is the
+		// natural spelling, and a release whose only kind evidence was a plural
+		// statement used to classify unknown - understating the `kind` attribute
+		// and the report row, and letting filters.exclude_remux pass a stated
+		// remux through (l-f62).
+		{name: "plural remuxes in notes is a remux marker", in: Input{Names: []string{"Show 1080p"}, Notes: "both remuxes are from the JPBD"}, wantKind: KindRemux, wantReason: "name/notes marker: remux"},
+		{name: "plural premuxes is a remux marker", in: Input{Names: []string{"Show S01 PREMUXES"}}, wantKind: KindRemux, wantReason: "name/notes marker: remux"},
+		{name: "plural bd remuxes is a remux marker", in: Input{Names: []string{"Show BD-Remuxes 1080p"}}, wantKind: KindRemux, wantReason: "name/notes marker: remux"},
+		{name: "plural encodes in notes is an encode marker", in: Input{Names: []string{"Show 1080p"}, Notes: "the encodes are fine"}, wantKind: KindEncode, wantReason: "encoder marker: encode"},
+		{name: "plural bdrips is an encode marker", in: Input{Names: []string{"Show BDRips 1080p"}}, wantKind: KindEncode, wantReason: "encoder marker: encode"},
+		// The plural tail must not admit a bare in-word substring: these stay
+		// unmatched exactly as the singular forms above do.
+		{name: "remuxs is not a remux marker", in: Input{Names: []string{"Show remuxs 1080p"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
+		{name: "encodesomething is not an encode marker", in: Input{Names: []string{"Show encodesomething 1080p"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
+		{name: "bdripsomething is not an encode marker", in: Input{Names: []string{"Show BDRipsomething 1080p"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
 		{name: "encoder is not an encode marker", in: Input{Names: []string{"Show 1080p encoder notes"}}, wantKind: KindUnknown, wantReason: "no remux or encode marker"},
 		{name: "underscore-delimited bdremux", in: Input{Names: []string{"Show_1080p_BDRemux"}}, wantKind: KindRemux, wantReason: "name/notes marker: remux"},
 		{name: "underscore-delimited premux", in: Input{Names: []string{"Show_S01_PREMUX"}}, wantKind: KindRemux, wantReason: "name/notes marker: remux"},

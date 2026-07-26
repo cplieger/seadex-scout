@@ -13,8 +13,8 @@ import (
 // feed writer depends on: the arr's own title from the persisted library
 // snapshot first (keyed via the record's routed ids), the AniList canonical
 // title (Titles[0], romaji-first) from the persisted memo next, and a zero
-// title last (the writer then derives from file names). Fribb typing and the
-// mapped season ride along whenever the record exists.
+// title last (the writer then derives from file names). The movie typing and
+// the RESOLVED season ride along whenever the record exists.
 func TestFeedEntryInfoFallbackChain(t *testing.T) {
 	idx := mapping.NewIndex([]mapping.Record{
 		{AniListID: 1, Type: "TV", TvdbID: 123, SeasonTvdb: 2},
@@ -32,6 +32,8 @@ func TestFeedEntryInfoFallbackChain(t *testing.T) {
 		4: {Titles: []string{"Sousou no Frieren", "Frieren"}, Year: 2023},
 		6: {Titles: []string{"Memo Only Show"}, Year: 2020},
 		7: {NotFound: true},
+		8: {Titles: []string{"Memo Only Film"}, Year: 2019, Format: "MOVIE"},
+		9: {Titles: []string{"Memo Only OVA"}, Year: 2018, Format: "OVA"},
 	}}
 	info := feedEntryInfo(idx, lib, memo)
 
@@ -39,8 +41,8 @@ func TestFeedEntryInfoFallbackChain(t *testing.T) {
 	if sonarr.Title != "Frieren: Beyond Journey's End" || sonarr.Year != 2023 {
 		t.Errorf("info(1) = %+v, want the Sonarr item's own title/year", sonarr)
 	}
-	if sonarr.SeasonTvdb != 2 || sonarr.IsMovie || sonarr.IsSpecial {
-		t.Errorf("info(1) typing = %+v, want SeasonTvdb=2 series", sonarr)
+	if sonarr.Season != 2 || !sonarr.SeasonKnown || sonarr.IsMovie {
+		t.Errorf("info(1) typing = %+v, want a series resolved to season 2", sonarr)
 	}
 
 	if tmdb := info(2); tmdb.Title != "A Silent Voice" || !tmdb.IsMovie {
@@ -56,13 +58,29 @@ func TestFeedEntryInfoFallbackChain(t *testing.T) {
 	}
 
 	// Mapped, not in the library, no memo entry: typing survives, no title.
-	if ova := info(5); ova.Title != "" || !ova.IsSpecial {
-		t.Errorf("info(5) = %+v, want a title-less special", ova)
+	// A special resolves to the specials bucket: a MAPPED season zero, which
+	// the feed must be able to tell apart from "no season resolved".
+	if ova := info(5); ova.Title != "" || ova.Season != 0 || !ova.SeasonKnown {
+		t.Errorf("info(5) = %+v, want a title-less special resolved to season 0", ova)
 	}
 
-	// Unmapped id with a memo entry: title from the memo, no typing.
-	if memoOnly := info(6); memoOnly.Title != "Memo Only Show" || memoOnly.Year != 2020 || memoOnly.IsMovie {
+	// Unmapped id with a memo entry carrying NO format: title from the memo,
+	// and the documented unmapped-to-Anime default survives (zero typing).
+	if memoOnly := info(6); memoOnly.Title != "Memo Only Show" || memoOnly.Year != 2020 || memoOnly.IsMovie || memoOnly.SeasonKnown {
 		t.Errorf("info(6) = %+v, want the memo title with zero typing", memoOnly)
+	}
+
+	// Unmapped id whose memo DOES carry the AniList format: the typing comes
+	// from it (l-f70). Without this the app knew an entry was a movie and still
+	// routed its feed item to Anime/5070, so Radarr - which filters on
+	// Movies/2000 - never saw that movie in the RSS feed at all.
+	if film := info(8); film.Title != "Memo Only Film" || !film.IsMovie || film.SeasonKnown {
+		t.Errorf("info(8) = %+v, want the memo title typed as a movie", film)
+	}
+	// A memo-typed special resolves its season the same way a Fribb-typed one
+	// does, so an unmapped OVA still labels S00 instead of losing its season.
+	if ova := info(9); ova.Title != "Memo Only OVA" || ova.IsMovie || ova.Season != 0 || !ova.SeasonKnown {
+		t.Errorf("info(9) = %+v, want the memo title typed as a special resolved to season 0", ova)
 	}
 
 	// A negative memo entry supplies nothing.
@@ -71,7 +89,7 @@ func TestFeedEntryInfoFallbackChain(t *testing.T) {
 	}
 
 	// Entirely unknown: the zero EntryInfo (file-name fallback downstream).
-	if unknown := info(999); unknown.Title != "" || unknown.SeasonTvdb != 0 || unknown.IsMovie {
+	if unknown := info(999); unknown.Title != "" || unknown.SeasonKnown || unknown.IsMovie {
 		t.Errorf("info(999) = %+v, want the zero EntryInfo", unknown)
 	}
 }
@@ -143,8 +161,8 @@ func TestFeedEntryInfoEmptyMemoTitles(t *testing.T) {
 // TestFeedEntryInfoEmptyArrTitleFallsBackToMemo pins the documented fallback
 // chain when the library item exists but its Title is empty: an unusable arr
 // title must not short-circuit the chain - the memo's canonical title (the
-// stronger remaining source) is returned, while the record's Fribb typing and
-// mapped season ride along untouched.
+// stronger remaining source) is returned, while the record's movie typing and
+// resolved season ride along untouched.
 func TestFeedEntryInfoEmptyArrTitleFallsBackToMemo(t *testing.T) {
 	idx := mapping.NewIndex([]mapping.Record{
 		{AniListID: 1, Type: "TV", TvdbID: 123, SeasonTvdb: 2},
@@ -159,7 +177,44 @@ func TestFeedEntryInfoEmptyArrTitleFallsBackToMemo(t *testing.T) {
 	if got.Title != "Memo Title" || got.Year != 2021 {
 		t.Errorf("info(1) = %+v, want the memo title/year when the arr title is empty", got)
 	}
-	if got.SeasonTvdb != 2 || got.IsMovie || got.IsSpecial {
-		t.Errorf("info(1) typing = %+v, want SeasonTvdb=2 series typing intact", got)
+	if got.Season != 2 || !got.SeasonKnown || got.IsMovie {
+		t.Errorf("info(1) typing = %+v, want the season-2 series resolution intact", got)
+	}
+}
+
+// TestResolvedSeason pins the Fribb season-semantics rule at its one home for
+// the feed (l-f4): a positive TVDB season wins, a Fribb-typed special with no
+// positive season resolves to the specials bucket (a MAPPED season zero, which
+// the feed must be able to tell apart from an absent season), and anything else
+// - an absolute-numbered run, a title-only match, an untyped record - resolves
+// nothing. The precedence row matters most: a record that is BOTH typed special
+// and carries a positive season keeps the positive season, because that is the
+// season the arr files it under.
+//
+// The indexer used to re-derive this from raw Fribb fields projected into
+// EntryInfo, which is why it lives here now: that package imports neither
+// align nor mapping, so it cannot read Fribb semantics at all.
+func TestResolvedSeason(t *testing.T) {
+	tests := []struct {
+		name      string
+		rec       mapping.Record
+		want      int
+		wantKnown bool
+	}{
+		{"positive TVDB season", mapping.Record{Type: "TV", SeasonTvdb: 3}, 3, true},
+		{"special resolves to the specials bucket", mapping.Record{Type: "OVA"}, 0, true},
+		{"ONA is a special too", mapping.Record{Type: "ONA"}, 0, true},
+		{"a special with a positive season keeps it", mapping.Record{Type: "SPECIAL", SeasonTvdb: 2}, 2, true},
+		{"absolute-numbered run resolves nothing", mapping.Record{Type: "TV"}, 0, false},
+		{"movie resolves nothing", mapping.Record{Type: "MOVIE"}, 0, false},
+		{"untyped record resolves nothing", mapping.Record{}, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			season, known := resolvedSeason(&tt.rec)
+			if season != tt.want || known != tt.wantKnown {
+				t.Errorf("resolvedSeason(%+v) = (%d, %v), want (%d, %v)", tt.rec, season, known, tt.want, tt.wantKnown)
+			}
+		})
 	}
 }

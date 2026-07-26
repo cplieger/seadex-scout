@@ -142,13 +142,13 @@ func validFeedItems(feeds ...[]journalItem) bool {
 // rebuild while the arr acted on it.
 //
 // InfoURL is canonicalized here for the same reason
-// (sanitizeSnapshotInfoURLs, whose blanked count is returned so a caller can
-// surface it: the server WARNs once per reload, while the writer ignores it -
-// its rebuild re-persists the scrubbed form regardless): the field belongs to
-// the persisted contract both ends must see canonical, not just the render
-// path. The writer carries a non-curated item forward verbatim
-// (carryStoredItem) and persist scrubs only DownloadURL, so a foreign-host or
-// javascript: InfoURL planted
+// (sanitizeSnapshotInfoURLs, whose blanked counts are returned PER TRACKER FEED
+// so a caller can attribute them: the server WARNs once per affected feed on
+// reload, while the writer ignores them - its rebuild re-persists the scrubbed
+// form regardless): the field belongs to the persisted contract both ends must
+// see canonical, not just the render path. The writer carries a non-curated item
+// forward verbatim (carryStoredItem) and persist scrubs only DownloadURL, so a
+// foreign-host or javascript: InfoURL planted
 // in feed.json would otherwise be re-persisted on every rebuild for up to
 // feedJournalMaxAge while only the reader blanked it at serve time.
 //
@@ -156,22 +156,47 @@ func validFeedItems(feeds ...[]journalItem) bool {
 // (normalizeSnapshotPubDates): it is persisted as an independent field but
 // documented to mirror FirstSeen, and neither consumer re-derives it for an
 // item it carries or serves verbatim.
-func decodeSnapshot(data []byte) (snap snapshot, blankedInfoURLs int, reason string, err error) {
+func decodeSnapshot(data []byte) (snap snapshot, scrub snapshotScrub, reason string, err error) {
 	if err := json.Unmarshal(data, &snap); err != nil {
-		return snapshot{}, 0, "", err
+		return snapshot{}, snapshotScrub{}, "", err
 	}
 	if snap.ByHash == nil || snap.ByKey == nil {
-		return snapshot{}, 0, "missing required curation maps", nil
+		return snapshot{}, snapshotScrub{}, "missing required curation maps", nil
 	}
 	if !validFeedItems(snap.NyaaFeed, snap.ABFeed) {
-		return snapshot{}, 0, "item exceeds persisted-item limits", nil
+		return snapshot{}, snapshotScrub{}, "item exceeds persisted-item limits", nil
 	}
 	normalizeSnapshotItems(snap.NyaaFeed)
 	normalizeSnapshotItems(snap.ABFeed)
 	normalizeSnapshotPubDates(snap.NyaaFeed)
 	normalizeSnapshotPubDates(snap.ABFeed)
-	blanked := sanitizeSnapshotInfoURLs(snap.NyaaFeed) + sanitizeSnapshotInfoURLs(snap.ABFeed)
-	return snap, blanked, "", nil
+	scrub = snapshotScrub{
+		blankedInfoURLs: map[string]int{
+			upstreamNyaa: sanitizeSnapshotInfoURLs(snap.NyaaFeed),
+			upstreamAB:   sanitizeSnapshotInfoURLs(snap.ABFeed),
+		},
+	}
+	return snap, scrub, "", nil
+}
+
+// snapshotScrub carries decodeSnapshot's at-rest corrections keyed by TRACKER
+// SCOPE rather than summed. An operator reading one combined count cannot tell
+// whether the Nyaa or the AnimeBytes journal was tampered with, which is the
+// whole diagnostic value of the line (l-f176) - and summing is how the
+// attribution was lost when the shared-gate refactor moved the two calls into
+// one expression (d-u8c3-1).
+type snapshotScrub struct {
+	blankedInfoURLs map[string]int
+}
+
+// total sums one correction across feeds, for callers that only need to know
+// whether anything was scrubbed at all.
+func (s snapshotScrub) total() int {
+	n := 0
+	for _, c := range s.blankedInfoURLs {
+		n += c
+	}
+	return n
 }
 
 // normalizeSnapshotPubDates restores the journal's PubDate-mirrors-FirstSeen
@@ -273,21 +298,24 @@ type FeedWriter struct {
 	abConfigured   bool
 }
 
-// NewFeedWriter returns a FeedWriter for cfg. deps carries the HTTP client
-// the title harvest queries Prowlarr with (nil disables harvesting - items
-// then keep their synthesized titles) and the logger (nil falls back to
-// slog.Default). An AnimeBytes passkey configured for an unconfigured AB
-// tracker (no ab_torznab_url - the README's off switch) is warned once here,
-// field names only, so a half-configured AnimeBytes intent surfaces at boot;
-// no passkey-embedded links are ever persisted for that off tracker.
-func NewFeedWriter(cfg *FeedWriterConfig, deps WriterDeps) *FeedWriter {
-	log := deps.Logger
+// NewFeedWriter returns a FeedWriter for cfg. ups carries the wired Prowlarr
+// upstreams the title harvest queries (a zero Upstreams disables harvesting -
+// items then keep their synthesized titles) and log may be nil (falls back to
+// slog.Default).
+//
+// The half-configured AnimeBytes intent (a passkey set for a tracker with no
+// ab_torznab_url - the README's off switch) is NOT reported here. It is one
+// diagnostic rule and internal/config owns it: config validation runs in every
+// mode, including modes that construct no FeedWriter, and it deliberately logs
+// the condition at INFO because "a deliberately parked passkey must not raise
+// Loki alert noise". This constructor used to re-evaluate the identical
+// condition at WARN, so a configured feed emitted BOTH lines at boot and the
+// WARN re-fired on every `poll` subcommand run - producing exactly the
+// warn-level noise the owning site's policy exists to avoid (l-f13). No
+// passkey-embedded links are ever persisted for an off tracker regardless.
+func NewFeedWriter(cfg *FeedWriterConfig, log *slog.Logger, ups Upstreams) *FeedWriter {
 	if log == nil {
 		log = slog.Default()
-	}
-	abConfigured := cfg.ABTorznabURL != ""
-	if cfg.ABPasskey != "" && !abConfigured {
-		log.Warn("indexer.ab_passkey is set but indexer.ab_torznab_url is empty; the AnimeBytes feed stays off")
 	}
 	w := &FeedWriter{
 		log:            log,
@@ -295,10 +323,8 @@ func NewFeedWriter(cfg *FeedWriterConfig, deps WriterDeps) *FeedWriter {
 		path:           cfg.Path,
 		abPasskey:      cfg.ABPasskey,
 		nyaaConfigured: cfg.NyaaTorznabURL != "",
-		abConfigured:   abConfigured,
-	}
-	if deps.HTTP != nil {
-		w.upstreams = wireUpstreams(deps.HTTP, log, cfg.UpstreamConfig)
+		abConfigured:   cfg.ABTorznabURL != "",
+		upstreams:      ups.ups,
 	}
 	return w
 }
@@ -346,27 +372,37 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info E
 			"reason", prev.reason, "seen", len(seen))
 	} else {
 		cur := indexCurated(entries)
-		if w.nyaaConfigured {
-			nyaa = w.carryJournal(prev.nyaaFeed, upstreamNyaa, cur, &ws, infoFor, now, &js)
-		}
-		if w.abConfigured {
-			ab = w.carryJournal(prev.abFeed, upstreamAB, cur, &ws, infoFor, now, &js)
-		}
+		// Carry BOTH journals regardless of configuration: a tracker's off
+		// switch must be reversible. Blanking a Torznab URL used to skip the
+		// carry, so a single rebuild dropped every journaled item for that
+		// scope - while the never-pruned seen ledger kept their identities, so
+		// journalIfNew reported isNew=false forever and those releases could
+		// never reach RSS again. An operator disabling AnimeBytes for a few days
+		// permanently lost the un-grabbed part of its journal window (l-f161).
+		// Carrying costs nothing at rest (both feeds are stored GUID-only, see
+		// stripDownloadURLs) and nothing on the wire (feedFor serves an
+		// unconfigured scope nothing, and its comment already anticipates
+		// exactly this stale-snapshot case).
+		//
+		// Carried items keep AGING OUT on the normal feedJournalMaxAge window
+		// rather than freezing (prepareCarriedItem prunes them), so an off
+		// tracker's journal stays bounded and a disable longer than the window
+		// converges on empty - the operator has effectively opted out of that
+		// window - instead of thawing weeks-old releases as "recent" on
+		// re-enable.
+		//
+		// The AB passkey is the tracker's SECOND off switch and is now reversible
+		// the same way: carryStoredItem and refreshCarriedItem keep a carried AB
+		// item through a passkey-less window instead of dropping it (see those
+		// two), since a passkey only supplies the grabbable link.
+		nyaa = w.carryJournal(prev.nyaaFeed, upstreamNyaa, cur, &ws, infoFor, now, &js)
+		ab = w.carryJournal(prev.abFeed, upstreamAB, cur, &ws, infoFor, now, &js)
+		// Growth stays gated per scope: journalIfNew -> newJournalItem returns
+		// early for an unconfigured tracker, so an off tracker's journal shrinks
+		// but never grows.
 		newNyaa, newAB := w.growJournal(entries, cur, seen, infoFor, now, &js)
 		nyaa = append(nyaa, newNyaa...)
 		ab = append(ab, newAB...)
-	}
-	// Defense in depth, not a live path: an unconfigured tracker's journal is
-	// never carried (the guarded carryJournal calls above) and never grown
-	// (journalIfNew -> newJournalItem returns early on !scopeConfigured), so
-	// both slices are already nil here. The resets stay so a future growth
-	// path that forgets the scopeConfigured gate still cannot persist a feed
-	// for a tracker the operator turned off.
-	if !w.nyaaConfigured {
-		nyaa = nil
-	}
-	if !w.abConfigured {
-		ab = nil
 	}
 	feeds := map[string][]journalItem{upstreamNyaa: nyaa, upstreamAB: ab}
 	hs, cursor := w.harvestTitles(ctx, feeds, titles, infoFor, prev.cursor)
@@ -387,7 +423,8 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info E
 		"journal_warned_dropped", js.warned,
 		"journal_clock_rebased", js.rebased,
 		"skipped_unresolvable", js.unresolvable,
-		"harvest_queries", hs.queries, "harvest_matched", hs.matched, "harvest_pending", hs.pending)
+		"harvest_queries", hs.queries, "harvest_matched", hs.matched,
+		"harvest_rejected", hs.rejected, "harvest_pending", hs.pending)
 	if js.abSkippedNoPasskey > 0 && w.abConfigured {
 		w.log.Warn("ab RSS feed empty of grabbable links: set indexer.ab_passkey to serve AnimeBytes releases",
 			"ab_releases_skipped", js.abSkippedNoPasskey)

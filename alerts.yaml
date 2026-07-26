@@ -45,7 +45,20 @@ groups:
             half the prior snapshot, or a mapping refresh the acceptance guards
             keep rejecting, escalates from WARN to ERROR after 8 consecutive
             cycles; inspect the arrs and arr_tags (or the mapping upstream), or
-            remove state.json to accept the change if it is legitimate.
+            remove state.json to accept the change if it is legitimate. A
+            mapping refresh refused for a reason that cannot self-heal - a body
+            over the download size cap, a list over the record cap, or a
+            non-array document (the upstream schema moved) - counts toward that
+            streak even on a first boot with no cache to fall back on. The other
+            frequent ERROR is a health-marker write failure ("queued rerun could
+            not record poll health"); check the /tmp mount and free space, since
+            in external-scheduler mode a stale marker never turns the container
+            unhealthy on its own. What deliberately does NOT reach this rule:
+            a shutdown-interrupted run, a state save the store refused in order
+            to preserve unclassifiable bytes ("state save skipped; on-disk state
+            preserved"), a report skipped because another report holds the lock,
+            and a report half written successfully but without a durable parent
+            directory - none of those need operator action.
       # Deadman (daemon mode): the poll loop closes every cycle with a
       # completion line — `cycle complete` when healthy, `cycle degraded` (with
       # a reason attribute) when a failed arr walk, an upstream outage, or a
@@ -92,14 +105,19 @@ groups:
       # "new release available" event has nothing to resolve. Grouped by the
       # finding's identifying labels so
       # each alert names one title with clickable links: the app emits arr_url,
-      # nyaa_url, ab_url, season and seadex_tags for exactly this. The markdown
+      # nyaa_url, public_url + public_tracker, ab_url, season and seadex_tags for
+      # exactly this. nyaa_url only ever holds a Nyaa link (so the hardcoded
+      # [Nyaa] label cannot lie); a public release from any other tracker
+      # (AnimeTosho, RuTracker) arrives as public_url labelled by public_tracker.
+      # The two are mutually exclusive - one public link per finding.
+      # The markdown
       # links render in Discord/Slack; simplify the annotation for a plain-text
       # receiver. Note: receivers that echo an alert's labels (a generic footer)
       # will list the grouped labels — render seadex_tags via an annotation-only
       # template if you want just the tag line shown.
       - alert: SeadexScoutBetterReleaseFound
         expr: |
-          sum by (title, al_id, arr, arr_url, nyaa_url, ab_url, season, recommended_group, seadex_tags) (
+          sum by (title, al_id, arr, arr_url, nyaa_url, public_url, public_tracker, ab_url, season, recommended_group, seadex_tags) (
             count_over_time(
               {container="seadex-scout"} | json | msg=`better release available` [1h]
             )
@@ -116,7 +134,8 @@ groups:
             {{- if and $labels.season (ne $labels.season "0") }} Season {{ $labels.season }}{{ end }}
             ({{ $labels.recommended_group }}).
             {{ if $labels.nyaa_url }}[Nyaa]({{ $labels.nyaa_url }}){{ end }}
-            {{- if $labels.ab_url }}{{ if $labels.nyaa_url }} · {{ end }}[AB]({{ $labels.ab_url }}){{ end }}
+            {{- if $labels.public_url }}{{ if $labels.nyaa_url }} · {{ end }}[{{ $labels.public_tracker }}]({{ $labels.public_url }}){{ end }}
+            {{- if $labels.ab_url }}{{ if or $labels.nyaa_url $labels.public_url }} · {{ end }}[AB]({{ $labels.ab_url }}){{ end }}
             — {{ $labels.seadex_tags }}
       # Informational: report mode wrote a season-level alignment report. Report
       # mode is a one-shot (docker exec /seadex-scout report, or mode: report),

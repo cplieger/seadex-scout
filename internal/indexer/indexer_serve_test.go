@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,7 +24,7 @@ import (
 // the API-key gate) is 404 with a hint at the per-tracker paths, and no feed
 // body is served.
 func TestServeRejectsUnscopedRequest(t *testing.T) {
-	ix := New(&Config{APIKey: "k"}, Deps{})
+	ix := New(&Config{APIKey: "k"}, nil, Upstreams{})
 	rec := httptest.NewRecorder()
 	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/?t=caps&apikey=k", nil))
 	if rec.Code != http.StatusNotFound {
@@ -41,7 +43,7 @@ func TestServeRejectsUnscopedRequest(t *testing.T) {
 // carries Cache-Control/Pragma headers forbidding any cache from retaining the
 // credential-bearing body beyond the request.
 func TestServeMarksResponsesNonCacheable(t *testing.T) {
-	ix := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABPasskey: "pk"}}, Deps{})
+	ix := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABPasskey: "pk"}}, nil, Upstreams{})
 	rec := httptest.NewRecorder()
 	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/ab?apikey=k", nil))
 	if rec.Code != http.StatusOK {
@@ -65,7 +67,7 @@ func TestServeMarksResponsesNonCacheable(t *testing.T) {
 func TestRunRefusesEmptyAPIKey(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := New(&Config{UpstreamConfig: UpstreamConfig{ABPasskey: "pk"}}, Deps{}).Run(ctx)
+	err := New(&Config{UpstreamConfig: UpstreamConfig{ABPasskey: "pk"}}, nil, Upstreams{}).Run(ctx)
 	if err == nil {
 		t.Fatal("Run with empty APIKey returned nil, want a configuration error")
 	}
@@ -136,7 +138,7 @@ func TestQueryTotalUpstreamFailureSetsUpstreamFailed(t *testing.T) {
 	defer srv.Close()
 
 	log, rec := capture.New()
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, Deps{HTTP: srv.Client(), Logger: log})
+	ix := wiredIndexer(&Config{UpstreamConfig: UpstreamConfig{ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, log, srv.Client())
 
 	items, stats := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "ab")
 	if len(items) != 0 {
@@ -165,8 +167,8 @@ func TestServeTotalUpstreamFailureRendersTorznabError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ix := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "pk"}},
-		Deps{HTTP: srv.Client()})
+	ix := wiredIndexer(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "pk"}},
+		nil, srv.Client())
 	rec := httptest.NewRecorder()
 	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?t=tvsearch&q=Frieren&apikey=k", nil))
 
@@ -204,8 +206,8 @@ func TestServeStartupSnapshotFailureRendersTorznabError(t *testing.T) {
 		t.Fatalf("write malformed snapshot: %v", err)
 	}
 	log, logRec := capture.New()
-	ix := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "pk"}},
-		Deps{HTTP: srv.Client(), Logger: log})
+	ix := wiredIndexer(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "pk"}},
+		log, srv.Client())
 
 	rec := httptest.NewRecorder()
 	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?t=tvsearch&q=Frieren&apikey=k", nil))
@@ -250,7 +252,7 @@ func TestServeStartupSnapshotFailureRendersTorznabError(t *testing.T) {
 // per-episode basic search returns nothing WITHOUT being marked answered, so
 // the request log reads as a deliberate skip rather than a no-match.
 func TestQuerySkipsPerEpisodeQuery(t *testing.T) {
-	ix := New(&Config{}, Deps{})
+	ix := New(&Config{}, nil, Upstreams{})
 	items, stats := ix.query(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren 01"}}, "nyaa")
 	if len(items) != 0 {
 		t.Fatalf("skipped query returned %d items, want 0", len(items))
@@ -266,14 +268,14 @@ func TestQuerySkipsPerEpisodeQuery(t *testing.T) {
 // limit-less request is trimmed to defaultCapsLimit before this cap can bite;
 // see TestQueryFeedDefaultLimit.)
 func TestQueryCapsResults(t *testing.T) {
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{})
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, Upstreams{})
 	feed := make([]journalItem, maxItems+5)
 	for i := range feed {
 		feed[i] = journalItem{item: item{Title: "t", GUID: strconv.Itoa(i)}}
 	}
-	ix.mu.Lock()
-	ix.snap.NyaaFeed = feed
-	ix.mu.Unlock()
+	ix.cache.mu.Lock()
+	ix.cache.snap.NyaaFeed = feed
+	ix.cache.mu.Unlock()
 	items, _ := ix.query(context.Background(), url.Values{"t": {"search"}, "limit": {strconv.Itoa(maxItems + 5)}}, "nyaa")
 	if len(items) != maxItems {
 		t.Fatalf("got %d items, want the maxItems cap %d", len(items), maxItems)
@@ -287,14 +289,14 @@ func TestQueryCapsResults(t *testing.T) {
 // honest. The window stays anchored at the newest item (the feed is sorted
 // newest-first), and an explicit limit still wins over the default.
 func TestQueryFeedDefaultLimit(t *testing.T) {
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{})
+	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, Upstreams{})
 	feed := make([]journalItem, defaultCapsLimit+50)
 	for i := range feed {
 		feed[i] = journalItem{item: item{Title: "t", GUID: strconv.Itoa(i)}}
 	}
-	ix.mu.Lock()
-	ix.snap.NyaaFeed = feed
-	ix.mu.Unlock()
+	ix.cache.mu.Lock()
+	ix.cache.snap.NyaaFeed = feed
+	ix.cache.mu.Unlock()
 
 	items, stats := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
 	if !stats.feed {
@@ -325,7 +327,7 @@ func TestReloadKeepsFeedOnUnreadableSnapshot(t *testing.T) {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	log, rec := capture.New()
-	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, log, Upstreams{})
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
@@ -339,7 +341,7 @@ func TestReloadKeepsFeedOnUnreadableSnapshot(t *testing.T) {
 		t.Fatalf("mkdir over snapshot: %v", err)
 	}
 	bumpMtime(t, path)
-	ix.reload(context.Background())
+	ix.cache.refresh(context.Background())
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Errorf("feed after unreadable snapshot = %d items, want 1 (a bad read must not blank a live feed)", len(got))
 	}
@@ -362,7 +364,7 @@ func TestQueryCallerCancellationIsNotWarnedAsUpstreamFault(t *testing.T) {
 	defer srv.Close()
 
 	log, rec := capture.New()
-	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, Deps{HTTP: srv.Client(), Logger: log})
+	ix := wiredIndexer(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, log, srv.Client())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -393,7 +395,7 @@ func TestReloadWarnsOnStatFailure(t *testing.T) {
 		t.Fatalf("write blocker: %v", err)
 	}
 	log, rec := capture.New()
-	ix := New(&Config{SnapshotPath: filepath.Join(blocker, "feed.json")}, Deps{Logger: log})
+	ix := New(&Config{SnapshotPath: filepath.Join(blocker, "feed.json")}, log, Upstreams{})
 	if !rec.Contains("indexer feed snapshot stat failed") {
 		t.Errorf("stat failure (ENOTDIR) not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
@@ -407,7 +409,7 @@ func TestReloadWarnsOnStatFailure(t *testing.T) {
 // like /nyaa reaches serve (200 caps) and an unscoped path 404s at serve, not
 // at the mux.
 func TestHandlerRoutesTorznabEndpoint(t *testing.T) {
-	h := New(&Config{APIKey: "k"}, Deps{}).handler()
+	h := New(&Config{APIKey: "k"}, nil, Upstreams{}).handler()
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=k", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "<caps>") {
@@ -427,7 +429,7 @@ func TestHandlerRoutesTorznabEndpoint(t *testing.T) {
 // never throttled, so the arrs' happy path is untouched even mid-flood.
 func TestServeThrottlesFailedAuth(t *testing.T) {
 	log, rec := capture.New()
-	ix := New(&Config{APIKey: "k"}, Deps{Logger: log})
+	ix := New(&Config{APIKey: "k"}, log, Upstreams{})
 	h := ix.chain()
 	for i := 1; i <= 10; i++ {
 		w := httptest.NewRecorder()
@@ -502,7 +504,7 @@ func TestRunSurfacesBindFailureSynchronously(t *testing.T) {
 	orig := listenAddr
 	listenAddr = ln.Addr().String()
 	defer func() { listenAddr = orig }()
-	err = New(&Config{APIKey: "k"}, Deps{}).Run(context.Background())
+	err = New(&Config{APIKey: "k"}, nil, Upstreams{}).Run(context.Background())
 	if err == nil {
 		t.Fatal("Run on an occupied port returned nil, want a bind error")
 	}
@@ -525,7 +527,7 @@ func TestRunServesAndShutsDownGracefully(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- New(&Config{APIKey: "k"}, Deps{Logger: log}).Run(ctx) }()
+	go func() { done <- New(&Config{APIKey: "k"}, log, Upstreams{}).Run(ctx) }()
 	startupDeadline := time.After(10 * time.Second)
 	for !rec.Contains("seadex-scout indexer listening") {
 		select {
@@ -578,7 +580,7 @@ func TestServeQueryWarnsOnRenderTruncation(t *testing.T) {
 		NyaaFeed: feed,
 	})
 	log, rec := capture.New()
-	ix := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, Deps{Logger: log})
+	ix := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, log, Upstreams{})
 
 	rr := httptest.NewRecorder()
 	ix.serve(rr, httptest.NewRequest(http.MethodGet, "/nyaa?apikey=k&limit=1000", nil))
@@ -594,5 +596,141 @@ func TestServeQueryWarnsOnRenderTruncation(t *testing.T) {
 	}
 	if len(parsed) == 0 || len(parsed) >= 500 {
 		t.Errorf("truncated response items = %d, want 0 < n < 500", len(parsed))
+	}
+}
+
+// TestServeBoundsConcurrentQueries pins the in-flight bound on expensive
+// requests (h-f13). Auth, caps, and the snapshot read are cheap; a SEARCH holds
+// up to one bounded Prowlarr body per upstream plus the render builder for as
+// long as its bounded retry tree runs, and nothing else caps how many run at
+// once - net/http starts a goroutine per connection and the bad-key throttle
+// deliberately exempts a VALID key, so a burst of correct-key searches could
+// stack that footprint until the 256 MiB container is OOM-killed, taking the
+// compare loop with it.
+//
+// maxConcurrentQueries searches are held inside the upstream handler, then one
+// more is issued: it must be answered busy - as a Torznab <error> with a
+// Retry-After, the endpoint's own wire shape, so the arr backs off instead of
+// recording a failed indexer - and must never reach Prowlarr. Releasing the
+// held searches must then let a fresh one through, proving the gate is a bound
+// and not a latch.
+func TestServeBoundsConcurrentQueries(t *testing.T) {
+	var (
+		inFlight  atomic.Int64
+		peak      atomic.Int64
+		upstreams atomic.Int64
+	)
+	release := make(chan struct{})
+	// Buffered above the limit so an ungated EXTRA request (a regression) can
+	// still report its arrival instead of blocking the mock handler forever and
+	// deadlocking the suite.
+	entered := make(chan struct{}, maxConcurrentQueries+4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreams.Add(1)
+		n := inFlight.Add(1)
+		for {
+			old := peak.Load()
+			if n <= old || peak.CompareAndSwap(old, n) {
+				break
+			}
+		}
+		entered <- struct{}{}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+		inFlight.Add(-1)
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = io.WriteString(w, `<rss><channel></channel></rss>`)
+	}))
+	defer srv.Close()
+
+	log, rec := capture.New()
+	ix := wiredIndexer(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "pk",
+	}}, log, srv.Client())
+	// Exercise the wait-expired path without spending the production budget.
+	defer func(d time.Duration) { queryGateWait = d }(queryGateWait)
+	queryGateWait = 20 * time.Millisecond
+
+	search := func() *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		ix.serve(w, httptest.NewRequest(http.MethodGet, "/nyaa?t=tvsearch&q=Frieren&apikey=k", nil))
+		return w
+	}
+
+	var wg sync.WaitGroup
+	for range maxConcurrentQueries {
+		wg.Go(func() { search() })
+	}
+	// Every slot is now occupied inside the upstream call.
+	for range maxConcurrentQueries {
+		<-entered
+	}
+
+	before := upstreams.Load()
+	// The probe carries its own short deadline so a REGRESSION (a gate that
+	// admits it) fails on the assertions below instead of hanging the suite on
+	// the upstream's release channel. A gated request never reaches the
+	// upstream, so the deadline is inert on the passing path.
+	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelProbe()
+	busy := httptest.NewRecorder()
+	ix.serve(busy, httptest.NewRequest(http.MethodGet, "/nyaa?t=tvsearch&q=Frieren&apikey=k", nil).WithContext(probeCtx))
+	body := busy.Body.String()
+	if !strings.Contains(body, `<error code="900"`) || !strings.Contains(body, "too many concurrent searches") {
+		t.Errorf("over-limit body = %q, want a Torznab <error> naming the concurrency limit", body)
+	}
+	if strings.Contains(body, "<rss") {
+		t.Errorf("over-limit body = %q, want no RSS feed", body)
+	}
+	if ra := busy.Header().Get("Retry-After"); ra == "" {
+		t.Error("over-limit response carries no Retry-After; the arr has nothing to back off on")
+	}
+	if got := upstreams.Load(); got != before {
+		t.Errorf("upstream calls = %d, want %d: a rejected request must not reach Prowlarr", got, before)
+	}
+	if !rec.Contains("indexer at its concurrent-query limit; request answered busy") {
+		t.Errorf("busy rejection not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+
+	close(release)
+	// Bounded join: a regression that admits extra requests can leave a search
+	// parked on a cancelled upstream, and a bare Wait would surface that as an
+	// undiagnosable suite-wide timeout panic instead of this test's failure.
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the held searches did not drain after release; a request is parked outside the gate")
+	}
+	if got := peak.Load(); got > int64(maxConcurrentQueries) {
+		t.Errorf("peak simultaneous upstream calls = %d, want at most %d", got, maxConcurrentQueries)
+	}
+	// The gate is a bound, not a latch: with the burst drained a search serves
+	// normally again.
+	if got := search(); strings.Contains(got.Body.String(), "too many concurrent searches") {
+		t.Error("a search after the burst drained was still answered busy; the gate leaked a slot")
+	}
+}
+
+// TestServeCapsNotGatedByQueryLimit pins the gate's scope: t=caps is cheap
+// (a static capabilities document, no upstream call, no render budget), so it
+// must answer even while every expensive slot is occupied - Prowlarr's
+// save-test and health polling hit caps, and failing those would report the
+// whole indexer as down because searches happened to be busy.
+func TestServeCapsNotGatedByQueryLimit(t *testing.T) {
+	ix := wiredIndexer(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: "http://prowlarr.invalid/1/api", ProwlarrAPIKey: "pk",
+	}}, nil, http.DefaultClient)
+	// Occupy every slot without any request in flight.
+	for range maxConcurrentQueries {
+		ix.queryGate <- struct{}{}
+	}
+	rec := httptest.NewRecorder()
+	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=k", nil))
+	if body := rec.Body.String(); !strings.Contains(body, "<caps") {
+		t.Errorf("caps body = %q, want the capabilities document served while the query gate is full", body)
 	}
 }

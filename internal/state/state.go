@@ -426,6 +426,20 @@ func (s *Store) Save(ctx context.Context, st *State) error {
 	return s.writeState(ctx, &sanitized)
 }
 
+// ErrSavePreserved marks a Save that deliberately REFUSED to write in order to
+// preserve the bytes already on disk: the newer-schema block (an image
+// rollback must not discard state a later version wrote) and the
+// unclassified-read-failure block (a read that failed without classifying the
+// file must not be overwritten by a cold envelope). It is not a write fault -
+// nothing is broken and no data was lost - so a caller that would otherwise
+// log a failed save at ERROR should classify it instead. Callers match with
+// errors.Is.
+//
+// The distinction matters for alerting: a redeploy SIGTERM landing in Load's
+// read window sets loadFailed, so the cycle's Save refuses; reporting that
+// refusal as a write fault fires the cycle-error alert on a routine redeploy.
+var ErrSavePreserved = errors.New("state preserved; save refused")
+
 // prepareSave validates whether this Store may write (nil state, read-only,
 // cancelled context, the newer-schema and unclassified-read-failure Save
 // blocks - see Save's doc) and returns the sanitized, version-stamped shallow
@@ -441,10 +455,10 @@ func (s *Store) prepareSave(ctx context.Context, st *State) (State, error) {
 		return State{}, fmt.Errorf("state: save %s: %w", s.path, err)
 	}
 	if s.unsupportedVersion != 0 {
-		return State{}, fmt.Errorf("state: save %s: blocked after loading newer schema version %d (supported %d)", s.path, s.unsupportedVersion, SchemaVersion)
+		return State{}, fmt.Errorf("state: save %s: blocked after loading newer schema version %d (supported %d): %w", s.path, s.unsupportedVersion, SchemaVersion, ErrSavePreserved)
 	}
 	if s.loadFailed {
-		return State{}, fmt.Errorf("state: save %s: blocked after an unclassified read failure; the on-disk state is preserved until a load can classify it", s.path)
+		return State{}, fmt.Errorf("state: save %s: blocked after an unclassified read failure; the on-disk state is preserved until a load can classify it: %w", s.path, ErrSavePreserved)
 	}
 	sanitized := *st
 	sanitized.Library = st.Library.SanitizedForStorage()

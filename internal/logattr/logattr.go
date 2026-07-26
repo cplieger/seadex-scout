@@ -70,6 +70,20 @@ func NewJoiner() *Joiner { return &Joiner{remaining: MaxBytes} }
 // the sanitizer from ever walking an unbounded string; sanitizing can grow a
 // string (each invalid UTF-8 byte becomes the three-byte U+FFFD), so the
 // result is re-capped on a rune boundary.
+//
+// Truncation is judged on the RAW length, which diverges from a
+// sanitize-then-cap composition for ONE input class: sanitizing can also SHRINK
+// (strings.Map replaces each unsafe rune with a single-byte space, so a 2-byte
+// C1 or 3-byte bidi control collapses), so a value over the raw budget whose
+// SANITIZED form would have fitted emits cut and marked here where the other
+// order emitted it whole and unmarked. That is deliberate on both counts. The
+// pre-sanitize cap is the point of this package - the budget must bound the
+// WORK, not merely the output, or one hostile multi-MB SeaDex value walks the
+// sanitizer in a 256 MiB container (CWE-400) - and the marker stays honest
+// because bytes really were dropped before sanitizing. Reaching the divergence
+// needs an oversized value that is mostly control/bidi runes, i.e. exactly the
+// hostile shape the bound exists for; an honest value (valid UTF-8, no unsafe
+// runes) is byte-identical under either order. Both sides are pinned by test.
 func (j *Joiner) Write(raw string) bool {
 	if j.truncated || j.remaining <= 0 {
 		j.truncated = j.truncated || raw != ""

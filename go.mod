@@ -20,10 +20,15 @@ require (
 	github.com/cplieger/scheduler/v2 v2.0.0
 )
 
-require github.com/cplieger/httpx/v3 v3.2.0
+require github.com/cplieger/httpx/v4 v4.0.0
 
 require github.com/cplieger/jsonx v1.2.0
 
 require github.com/cplieger/runesafe v1.2.1
 
 require github.com/cplieger/urlform v1.1.0
+
+require (
+	github.com/cplieger/httpx/v3 v3.2.0 // indirect
+	github.com/cplieger/xmlx v1.0.0
+)

@@ -28,6 +28,18 @@ const (
 	// membership being tested, so neither alignment nor divergence is
 	// proven. It also covers the defensive case of a filed unit carrying no
 	// group list at all.
+	//
+	// One sub-case is narrower than that sentence suggests, and is
+	// deliberately still filed here (l-f30): a unit whose BEST comparison is
+	// provenly divergent (all evidence known, no overlap) but whose ALT
+	// comparison is indeterminate - SeaDex's alt releases all untagged. There
+	// "you do not have a best release" IS proven; only the placement between
+	// have_alt and have_unlisted is unknown. The conservative verdict is kept
+	// because the report's job is to name what a human must check, and the
+	// thing to check is exactly which non-best bucket the unit belongs in;
+	// promoting it to a divergence verdict would assert a bucket the evidence
+	// does not support. Read this standing as "the verdict cannot be
+	// determined", not as "nothing about the comparison is known".
 	StandingUnverified
 	// StandingBest means a known best group is proven present on the scoped
 	// unit.
@@ -66,7 +78,10 @@ const (
 	// (StandingUnverified): unknown group evidence on either side could hide
 	// an alignment, so the daemon emits an informational unverifiable finding
 	// instead of a confident aligned silence or a better-release warning, and
-	// the audit records unverified.
+	// the audit records unverified. It also covers the narrower sub-case
+	// StandingUnverified documents, where best-divergence IS proven but the
+	// alt placement is not - the VERDICT is what cannot be determined, which
+	// is why both land here.
 	OutcomeUnverifiable
 	// OutcomeMixed means the unit is not aligned and its group evidence spans
 	// more than one member (in a whole-series aggregate the unknown-evidence

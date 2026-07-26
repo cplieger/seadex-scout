@@ -188,13 +188,13 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 	}
 	// Pick up a newer feed snapshot a cycle may have written (this process's
 	// daemon loop, or the `poll` subcommand in another process) before serving.
-	ix.reload(ctx)
+	ix.cache.refresh(ctx)
 	// A snapshot that failed to load before any successful install is a local
 	// fault, not an empty catalogue: serving the synthesized feed would blank
 	// it, and a search would filter every Prowlarr result against nil
 	// curation maps - both false-empty. Answer with the dedicated flag (serve
 	// renders a Torznab <error>) without contacting a tracker.
-	if ix.snapshotUnavailable() {
+	if ix.cache.unavailable() {
 		return nil, queryStats{answered: true, snapshotUnavailable: true}
 	}
 
@@ -207,12 +207,7 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 		stats = queryStats{answered: true, feed: true, curated: len(items)}
 	} else {
 		raw, failed := ix.fetchRaw(ctx, upstreamParams(q), scope)
-		ix.mu.RLock()
-		// The snapshot maps are safe to read after the lock is released: reload
-		// installs a fresh snapshot and never mutates the loaded maps in place
-		// (the same invariant feedFor documents for the feed slices).
-		set := curation{byHash: ix.snap.ByHash, byKey: ix.snap.ByKey, byPair: ix.snap.ByPair}
-		ix.mu.RUnlock()
+		set := ix.cache.curation()
 		items = markAndDedupe(raw, &set, scope)
 		stats = queryStats{answered: true, upstreamFailed: failed, upstream: len(raw), curated: len(items)}
 	}
@@ -225,50 +220,6 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 		items = items[:maxItems]
 	}
 	return items, stats
-}
-
-// snapshotUnavailableGate is a test seam (see harvestWait for the pattern)
-// marking the window between snapshotUnavailable's read-unlock and its
-// write-lock, where a concurrent install/clear can race the escalation. A
-// no-op in production.
-var snapshotUnavailableGate = func() {}
-
-// snapshotUnavailable reports whether the startup snapshot-unavailable state
-// (see the snapFailed field) is active, emitting its once-per-onset WARN on
-// the first report so the local fault is visible without a per-request log
-// storm. The state is set/cleared by reload's load paths; requests only read
-// it here. The write-locked re-check is authoritative: a request that saw the
-// failed state under the read lock but loses the race to an install/clear
-// before acquiring the write lock answers from the fresh snapshot instead of
-// rendering a stale Torznab error.
-func (ix *Indexer) snapshotUnavailable() bool {
-	ix.mu.RLock()
-	failed, warned := ix.snapFailed, ix.snapFailedWarned
-	ix.mu.RUnlock()
-	if !failed {
-		return false
-	}
-	if warned {
-		return true
-	}
-
-	snapshotUnavailableGate()
-
-	ix.mu.Lock()
-	defer ix.mu.Unlock()
-	// Re-check under the write lock, authoritatively: concurrent requests
-	// racing the onset must still emit the WARN exactly once, and an install
-	// that cleared snapFailed between the read-unlock and here must make THIS
-	// request answer from the fresh snapshot rather than render a stale error.
-	if !ix.snapFailed {
-		return false
-	}
-	if !ix.snapFailedWarned {
-		ix.snapFailedWarned = true
-		ix.log.Warn("indexer feed snapshot unavailable; answering Torznab requests with an error until a snapshot loads",
-			"path", ix.path)
-	}
-	return true
 }
 
 // --- Serving the synthesized feed ---
@@ -311,23 +262,22 @@ func applyPaging(items []item, q url.Values) []item {
 // slice handed out here stays immutable even across a swap. Callers must only
 // read it (never append/write in place).
 func (ix *Indexer) feedFor(scope string) []item {
-	ix.mu.RLock()
-	defer ix.mu.RUnlock()
-	var feed []journalItem
+	// The enablement gate is the SERVER's, not the cache's: whether a tracker's
+	// feed may be served at all is config policy, while the cache only answers
+	// what is loaded.
 	switch scope {
 	case upstreamNyaa:
 		if ix.cfg.NyaaTorznabURL == "" {
 			return nil
 		}
-		feed = ix.snap.NyaaFeed
 	case upstreamAB:
 		if ix.cfg.ABTorznabURL == "" {
 			return nil
 		}
-		feed = ix.snap.ABFeed
 	default:
 		return nil
 	}
+	feed := ix.cache.feed(scope)
 	// The serve boundary speaks the WIRE vocabulary only: strip the journal
 	// bookkeeping (never rendered) by projecting each record onto its
 	// embedded item, so the render path cannot depend on persisted-only

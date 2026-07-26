@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/cplieger/arrapi"
-	"github.com/cplieger/httpx/v3"
+	"github.com/cplieger/httpx/v4"
 	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/release"
 )

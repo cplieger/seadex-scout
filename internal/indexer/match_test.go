@@ -175,7 +175,7 @@ func TestTrackerIDExtractionRejectsOverlongDigitRuns(t *testing.T) {
 // nyaa:123 as curation authorization for the REAL Nyaa torrent 123. An
 // absolute URL keys only on the tracker's own host; the relative site form is
 // accepted for AnimeBytes alone (SeaDex's documented AB shape, resolved
-// against animebytes.tv by UsableURL); opaque non-hierarchical forms fail
+// against animebytes.tv by the publisher); opaque non-hierarchical forms fail
 // closed.
 func TestTrackerKeyRejectsForeignHostURLs(t *testing.T) {
 	tests := []struct {
@@ -250,5 +250,57 @@ func TestTrackerIDUnknownScopeFailsClosed(t *testing.T) {
 	}
 	if got := trackerID("", "/torrents.php?torrentid=123"); got != "" {
 		t.Errorf(`trackerID("", ...) = %q, want empty (fail closed on an empty scope)`, got)
+	}
+}
+
+// TestTrackerOwnURLReadsOneStructuralVocabulary pins the urlform adoption at
+// the writer-side admission gate (l-f162). It used to hand-roll the raw-URL
+// vocabulary with net/url, and the two readings had already diverged on a live
+// shape: for a schemeless-host SeaDex URL, urlform reports host evidence (so
+// trackerlink.Publish and internal/filter's AB gate treat it as AnimeBytes and
+// publish the link) while the triple-empty net/url test
+// (Scheme=="" && Host=="" && Opaque=="") called the same string a "true relative
+// reference" and admitted it here - after which the id extraction found nothing
+// and the release was silently dropped as unresolvable. One string, two
+// structural readings, one app.
+//
+// The gate now reads urlform throughout: a host-bearing form is judged on its
+// host evidence and must be a userinfo-free absolute http(s) URL on the exact
+// canonical host, and only a ROOTED relative reference takes the AB relative
+// arm. The relative arm stays ClassRelative rather than the narrower
+// release.LookupTrackerByRelativeURL (which also demands the
+// "/torrents.php?...torrentid=" shape), so a relative Prowlarr permalink keeps
+// working.
+func TestTrackerOwnURLReadsOneStructuralVocabulary(t *testing.T) {
+	tests := map[string]struct {
+		scope string
+		raw   string
+		want  bool
+	}{
+		"absolute canonical nyaa":       {upstreamNyaa, "https://nyaa.si/view/1234567", true},
+		"absolute canonical ab":         {upstreamAB, "https://animebytes.tv/torrents.php?id=1&torrentid=456", true},
+		"ab permalink form":             {upstreamAB, "https://animebytes.tv/torrent/1167293/group", true},
+		"rooted relative is ab's own":   {upstreamAB, "/torrents.php?id=1&torrentid=456", true},
+		"rooted relative permalink":     {upstreamAB, "/torrent/1167293/group", true},
+		"rooted relative is not nyaa's": {upstreamNyaa, "/view/1234567", false},
+		"nyaa subdomain refused":        {upstreamNyaa, "https://sukebei.nyaa.si/view/123", false},
+		"foreign host refused":          {upstreamNyaa, "https://evil.example/view/123", false},
+		"userinfo authority refused":    {upstreamAB, "https://evil@animebytes.tv/torrents.php?torrentid=1", false},
+		"non-http scheme refused":       {upstreamAB, "javascript:/torrents.php?torrentid=456", false},
+		// The divergent shape: host evidence to urlform, so it takes the HOST
+		// arm and is refused for not being absolute - one honest reading,
+		// instead of being admitted as "relative" and then failing at the id.
+		"schemeless host is host evidence, not relative": {upstreamAB, "animebytes.tv/torrents.php?id=1&torrentid=456", false},
+		// Smuggling forms: a browser and net/url read these differently, so
+		// they must never prove a curation identity.
+		"backslash authority refused": {upstreamAB, "\\torrents.php?torrentid=456", false},
+		"tab-smuggled host refused":   {upstreamAB, "https://animeby\ttes.tv/torrents.php?torrentid=1", false},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := trackerOwnURL(tc.scope, tc.raw); got != tc.want {
+				t.Errorf("trackerOwnURL(%q, %q) = %v, want %v", tc.scope, tc.raw, got, tc.want)
+			}
+		})
 	}
 }

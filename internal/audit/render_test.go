@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1063,5 +1064,58 @@ func TestBestGroupDedupeIsBoundedAndCaseInsensitive(t *testing.T) {
 func TestAttrBudgetMirrorsKeyBudget(t *testing.T) {
 	if maxAttrBytes != keyenc.MaxComponentBytes {
 		t.Errorf("maxAttrBytes = %d, want keyenc.MaxComponentBytes = %d", maxAttrBytes, keyenc.MaxComponentBytes)
+	}
+}
+
+// TestReleaseNotesDistinguishesURLErrorFromUnobtainable pins the report's
+// upstream-data diagnostic (l-f88). A SeaDex record whose url field carries a
+// value the publisher refuses used to publish a plausible-looking 404 - the live
+// catalogue has one, tracker AB with url "Chihiro", a release-group name typed
+// into the url field, which became "https://animebytes.tv/Chihiro" - and because
+// a link WAS produced it also escaped the unusable-URL accounting, so nothing
+// anywhere named the problem.
+//
+// The link is now dropped and the row says why. It is reported separately from
+// "unobtainable" on purpose: the two point the operator at different places. An
+// unobtainable release is a consequence of THEIR config (a tracker they do not
+// use); a url error is an upstream DATA defect they can go fix at the source. An
+// empty url is not an error - SeaDex simply has no link for that release.
+func TestReleaseNotesDistinguishesURLErrorFromUnobtainable(t *testing.T) {
+	tests := map[string]struct {
+		rel  Release
+		want []string
+	}{
+		"healthy release carries no notes": {
+			rel: Release{URL: "https://nyaa.si/view/1"},
+		},
+		"a refused url value is a url error": {
+			rel:  Release{URLError: true},
+			want: []string{"url error"},
+		},
+		"an unusable tracker is unobtainable, not a url error": {
+			rel:  Release{URL: "https://animebytes.tv/torrents.php?torrentid=1", Unobtainable: true},
+			want: []string{"unobtainable"},
+		},
+		"both apply, url error first as the more actionable": {
+			rel:  Release{URLError: true, Unobtainable: true},
+			want: []string{"url error", "unobtainable"},
+		},
+		"curation warnings still lead": {
+			rel:  Release{Warnings: []string{"broken"}, URLError: true},
+			want: []string{"broken", "url error"},
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := releaseNotes(&tc.rel)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("releaseNotes() = %v, want %v", got, tc.want)
+			}
+			// A url error must exclude the release from the verdict and the grab
+			// links, exactly like the other annotation classes.
+			if tc.rel.URLError && !annotated(&tc.rel) {
+				t.Error("a url-error release is not annotated; it would still drive the verdict and be offered as a link")
+			}
+		})
 	}
 }

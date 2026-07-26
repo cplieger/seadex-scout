@@ -31,7 +31,7 @@ func FuzzDecodeSnapshot(f *testing.F) {
 	f.Add([]byte(`{"by_hash":{},"by_key":{},"seen":{},"ab_feed":[{"Title":"x","Size":-1}]}`))
 	f.Add([]byte(`{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Title":"x","Categories":[0]}]}`))
 	f.Fuzz(func(t *testing.T, data []byte) {
-		snap, blanked, reason, err := decodeSnapshot(data)
+		snap, scrub, reason, err := decodeSnapshot(data)
 		if err != nil || reason != "" {
 			if err != nil && reason != "" {
 				t.Errorf("decodeSnapshot reported both a decode error (%v) and a structural reason (%q)", err, reason)
@@ -39,8 +39,8 @@ func FuzzDecodeSnapshot(f *testing.F) {
 			if !reflect.DeepEqual(snap, snapshot{}) {
 				t.Errorf("rejected snapshot (reason=%q err=%v) returned non-zero data: %+v", reason, err, snap)
 			}
-			if blanked != 0 {
-				t.Errorf("rejected snapshot (reason=%q err=%v) reported %d blanked info URLs, want 0 (nothing was materialized)", reason, err, blanked)
+			if n := scrub.total(); n != 0 {
+				t.Errorf("rejected snapshot (reason=%q err=%v) reported %d blanked info URLs, want 0 (nothing was materialized)", reason, err, n)
 			}
 			return
 		}
@@ -61,12 +61,12 @@ func FuzzDecodeSnapshot(f *testing.F) {
 		if mErr != nil {
 			t.Fatalf("re-encode of an accepted snapshot failed: %v", mErr)
 		}
-		round, roundBlanked, roundReason, roundErr := decodeSnapshot(encoded)
+		round, roundScrub, roundReason, roundErr := decodeSnapshot(encoded)
 		if roundErr != nil || roundReason != "" {
 			t.Fatalf("re-decode of an accepted snapshot rejected it (reason=%q err=%v)", roundReason, roundErr)
 		}
-		if roundBlanked != 0 {
-			t.Errorf("re-decode blanked %d further info URLs, want 0 (the first pass already produced the canonical form)", roundBlanked)
+		if n := roundScrub.total(); n != 0 {
+			t.Errorf("re-decode blanked %d further info URLs, want 0 (the first pass already produced the canonical form)", n)
 		}
 		// Compare the canonical encodings rather than the structs: json.Marshal
 		// sorts map keys and renders times canonically, so byte equality pins

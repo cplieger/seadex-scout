@@ -1,4 +1,4 @@
-package seadex
+package trackerlink
 
 import (
 	"net/url"
@@ -9,9 +9,9 @@ import (
 	"pgregory.net/rapid"
 )
 
-// TestUsableURLSafeOutputProperty is the every-PR property companion to
-// FuzzTorrentUsableURL (whose coverage-guided exploration only runs in the
-// weekly fuzz job): for ANY input URL and tracker, a non-empty UsableURL
+// TestPublishSafeOutputProperty is the every-PR property companion to
+// FuzzPublish (whose coverage-guided exploration only runs in the
+// weekly fuzz job): for ANY input URL and tracker, a non-empty Publish
 // result parses as an absolute http(s) URL with a non-empty host and no
 // userinfo (the link-safety gate: no javascript:/data:/file:, no
 // protocol-relative form, no bare path, no credential-bearing authority),
@@ -22,7 +22,7 @@ import (
 // near-canonical tracker hosts: a random rest never spells a tracker host,
 // so without it every absolute draw dies on the host-binding gate and the
 // assertions never run on the absolute arm at all.
-func TestUsableURLSafeOutputProperty(t *testing.T) {
+func TestPublishSafeOutputProperty(t *testing.T) {
 	trackers := []string{"Nyaa", "AB", "AnimeTosho", "RuTracker", "unknown", ""}
 	prefixes := []string{"", "//", "/", "  ", "javascript:", "data:", "file://", "https://", "http://", "HTTPS://", ":"}
 	hosts := []string{
@@ -34,28 +34,28 @@ func TestUsableURLSafeOutputProperty(t *testing.T) {
 			rapid.SampledFrom(hosts).Draw(rt, "host") +
 			rapid.String().Draw(rt, "rest")
 		tracker := rapid.SampledFrom(trackers).Draw(rt, "tracker")
-		out := (&Torrent{URL: raw, Tracker: tracker}).UsableURL()
+		out := Publish(tracker, raw)
 		if out == "" {
 			return
 		}
 		parsed, err := url.Parse(out)
 		if err != nil {
-			rt.Fatalf("UsableURL(%q, tracker %q) = %q, not parseable: %v", raw, tracker, out, err)
+			rt.Fatalf("Publish(%q, tracker %q) = %q, not parseable: %v", raw, tracker, out, err)
 		}
 		if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
-			rt.Fatalf("UsableURL(%q, tracker %q) = %q, scheme %q is not http(s)", raw, tracker, out, parsed.Scheme)
+			rt.Fatalf("Publish(%q, tracker %q) = %q, scheme %q is not http(s)", raw, tracker, out, parsed.Scheme)
 		}
 		if parsed.Host == "" {
-			rt.Fatalf("UsableURL(%q, tracker %q) = %q has no host", raw, tracker, out)
+			rt.Fatalf("Publish(%q, tracker %q) = %q has no host", raw, tracker, out)
 		}
 		if parsed.User != nil {
-			rt.Fatalf("UsableURL(%q, tracker %q) = %q retains userinfo authority", raw, tracker, out)
+			rt.Fatalf("Publish(%q, tracker %q) = %q retains userinfo authority", raw, tracker, out)
 		}
 		if _, ok := release.LookupTrackerByHost(parsed.Hostname()); !ok {
-			rt.Fatalf("UsableURL(%q, tracker %q) = %q has non-canonical host %q", raw, tracker, out, parsed.Hostname())
+			rt.Fatalf("Publish(%q, tracker %q) = %q has non-canonical host %q", raw, tracker, out, parsed.Hostname())
 		}
-		if again := (&Torrent{URL: out, Tracker: tracker}).UsableURL(); again != out {
-			rt.Fatalf("UsableURL not a fixed point for tracker %q: %q -> %q -> %q", tracker, raw, out, again)
+		if again := Publish(tracker, out); again != out {
+			rt.Fatalf("Publish not a fixed point for tracker %q: %q -> %q -> %q", tracker, raw, out, again)
 		}
 	})
 }

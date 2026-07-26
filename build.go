@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/cplieger/arrapi"
-	"github.com/cplieger/httpx/v3"
+	"github.com/cplieger/httpx/v4"
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/compare"
@@ -148,10 +148,11 @@ func feedWriter(cfg *config.Config, log *slog.Logger) (fw scout.FeedWriter, clea
 		return nil, func() {}
 	}
 	prowlarrHTTP := httpx.NewClient(indexer.UpstreamAttemptTimeout)
+	log = indexerLogger(log)
 	writer := indexer.NewFeedWriter(&indexer.FeedWriterConfig{
 		Path:           config.DefaultIndexerFeedPath,
 		UpstreamConfig: upstreamConfig(cfg),
-	}, indexer.WriterDeps{HTTP: prowlarrHTTP, Logger: indexerLogger(log)})
+	}, log, indexer.WireUpstreams(prowlarrHTTP, log, upstreamConfig(cfg)))
 	return writer, func() { prowlarrHTTP.CloseIdleConnections() }
 }
 
@@ -176,10 +177,7 @@ func buildIndexer(cfg *config.Config) builtIndexer {
 		APIKey:         cfg.IndexerAPIKey,
 		SnapshotPath:   config.DefaultIndexerFeedPath,
 		UpstreamConfig: upstreamConfig(cfg),
-	}, indexer.Deps{
-		HTTP:   prowlarrHTTP,
-		Logger: log,
-	})
+	}, log, indexer.WireUpstreams(prowlarrHTTP, log, upstreamConfig(cfg)))
 	cleanup := func() {
 		prowlarrHTTP.CloseIdleConnections()
 	}

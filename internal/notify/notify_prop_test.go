@@ -36,7 +36,7 @@ func TestTrackerURLsRoutingProperty(t *testing.T) {
 			}
 		}
 
-		nyaa, ab := trackerURLs(links)
+		pub, ab := trackerURLs(links)
 
 		find := func(url string) *compare.ReleaseLink {
 			for i := range links {
@@ -46,18 +46,31 @@ func TestTrackerURLsRoutingProperty(t *testing.T) {
 			}
 			return nil
 		}
-		if nyaa != "" {
-			if l := find(nyaa); l == nil {
-				rt.Fatalf("nyaa = %q is not an input URL", nyaa)
-			} else if filter.ABGated(l.Tracker, l.URL) {
-				rt.Fatalf("nyaa slot carries an AB-gated link %+v", *l)
+		if pub.url != "" {
+			if l := find(pub.url); l == nil {
+				rt.Fatalf("public = %q is not an input URL", pub.url)
+			} else if filter.ClassifyAB(l.Tracker, l.URL) != filter.ABNone {
+				rt.Fatalf("public slot carries a link with AnimeBytes evidence %+v", *l)
+			}
+			// The public slot must name the tracker it came from, so the alert
+			// can label the link truthfully instead of calling everything Nyaa.
+			if l := find(pub.url); l != nil && pub.tracker != l.Tracker {
+				rt.Fatalf("public tracker = %q, want the link's own tracker %q", pub.tracker, l.Tracker)
+			}
+			// Exactly one of the two emitted URL attrs is ever populated.
+			if pub.nyaaURL() != "" && pub.otherURL() != "" {
+				rt.Fatalf("both nyaa_url (%q) and public_url (%q) populated", pub.nyaaURL(), pub.otherURL())
+			}
+			// A non-Nyaa public link must always carry a name to render.
+			if pub.otherURL() != "" && pub.otherTracker() == "" {
+				rt.Fatalf("public_url %q carries no public_tracker to label it", pub.otherURL())
 			}
 		}
 		if ab != "" && find(ab) == nil {
 			rt.Fatalf("ab = %q is not an input URL", ab)
 		}
 		for i := range links {
-			if filter.DefinitelyAB(links[i].Tracker, links[i].URL) {
+			if filter.ClassifyAB(links[i].Tracker, links[i].URL) == filter.ABDefinite {
 				if ab != links[i].URL {
 					rt.Fatalf("ab = %q, want the first definite AnimeBytes link %q", ab, links[i].URL)
 				}

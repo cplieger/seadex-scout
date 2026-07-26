@@ -107,13 +107,13 @@ func FuzzSynthesizeTitle_titledAndTrimmed(f *testing.F) {
 	f.Add("Show OVA", 0, 0, false, true, false, "Show OVA - 01.mkv", "Show OVA - 02.mkv", "")
 	f.Add("One Piece", 1999, 0, false, false, false, "[Grp] One Piece - 1085 (1080p).mkv", "", "Grp")
 	f.Add("", 0, 0, false, false, false, "Show - S01E01.mkv", "NCED 01.mkv", "  spaced  ")
-	f.Fuzz(func(t *testing.T, title string, year, season int, isMovie, isSpecial, dual bool, name1, name2, group string) {
+	f.Fuzz(func(t *testing.T, title string, year, season int, isMovie, seasonKnown, dual bool, name1, name2, group string) {
 		tor := &seadex.Torrent{
 			ReleaseGroup: group,
 			DualAudio:    dual,
 			Files:        []seadex.File{{Name: name1}, {Name: name2}},
 		}
-		meta := EntryInfo{Title: title, Year: year, SeasonTvdb: season, IsMovie: isMovie, IsSpecial: isSpecial}
+		meta := EntryInfo{Title: title, Year: year, Season: season, SeasonKnown: seasonKnown, IsMovie: isMovie}
 		got := synthesizeTitle(tor, meta)
 		if got != strings.TrimSpace(got) {
 			t.Errorf("synthesizeTitle(title %q) = %q, not trimmed", title, got)

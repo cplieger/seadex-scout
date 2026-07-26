@@ -49,11 +49,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
-	"os"
-	"sync"
-	"time"
 
-	"github.com/cplieger/httpx/v3"
 	"github.com/cplieger/webhttp"
 )
 
@@ -102,24 +98,51 @@ type Config struct {
 	UpstreamConfig
 }
 
-// Deps are the clients the indexer server needs: an HTTP client for the Prowlarr
-// per-indexer Torznab endpoints a search proxies. A nil HTTP is substituted by
-// New with a default client sized from UpstreamAttemptTimeout (searches have no
-// disabled mode). The curation set and the synthesized RSS feeds are not built
-// here - the compare cycle builds and persists them (see FeedWriter) and the
-// server reads that snapshot - so the server needs no SeaDex or Fribb client of
-// its own. A nil Logger falls back to slog.Default().
-type Deps struct {
-	HTTP   *http.Client
-	Logger *slog.Logger
+// Upstreams is the wired set of Prowlarr per-indexer Torznab endpoints, built
+// by WireUpstreams and handed to New (search proxying) or NewFeedWriter (title
+// harvesting). It carries REACHABILITY - the HTTP client, the endpoint URLs, and
+// the Prowlarr API key - and nothing else; which trackers are ENABLED stays
+// Config/FeedWriterConfig policy (see UpstreamConfig), because the server must
+// keep answering for a tracker whose snapshot it still holds.
+//
+// Taking the wired set rather than an *http.Client is what keeps outbound
+// network policy at the composition root: this package never constructs a
+// client, so it can never pick one whose redirect policy would forward the
+// X-Api-Key header to another origin.
+//
+// The zero value is valid and wires nothing: RSS still serves from the
+// persisted snapshot, a search whose scope has no wired upstream returns empty
+// with a WARN (fetchRaw's standing-misconfiguration arm), and the title harvest
+// is disabled (synthesized titles only). The curation set and the synthesized
+// RSS feeds are not built here - the compare cycle builds and persists them
+// (see FeedWriter) and the server reads that snapshot - so the server needs no
+// SeaDex or Fribb client of its own.
+type Upstreams struct {
+	ups []*upstream
 }
 
-// WriterDeps are the clients the feed writer needs. A nil HTTP is
-// meaningful here: it disables the Prowlarr title harvest (synthesized
-// titles only). A nil Logger falls back to slog.Default().
-type WriterDeps struct {
-	HTTP   *http.Client
-	Logger *slog.Logger
+// WireUpstreams builds one upstream per configured Prowlarr per-indexer Torznab
+// URL, for the server (search proxying) or the feed writer (title harvesting),
+// so both query the exact tracker set the operator configured with the same
+// client, headers, and retry discipline.
+//
+// The caller owns the client and therefore owns the outbound-network policy the
+// Prowlarr API key depends on: the key rides an X-Api-Key header, which
+// net/http forwards across redirects, so the client MUST carry a same-host,
+// no-downgrade redirect policy (httpx.NewClient does). A nil client wires
+// nothing. A nil log falls back to slog.Default().
+//
+// Call it once per consumer rather than sharing one set: an upstream's
+// once-per-onset diagnostic latches are per-instance, and the server's request
+// path and the writer's harvest must not suppress each other's WARNs.
+func WireUpstreams(client *http.Client, log *slog.Logger, cfg UpstreamConfig) Upstreams {
+	if client == nil {
+		return Upstreams{}
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+	return Upstreams{ups: wireUpstreams(client, log, cfg)}
 }
 
 // Indexer serves searches by proxying Prowlarr filtered to SeaDex's curation,
@@ -129,134 +152,63 @@ type WriterDeps struct {
 // (a cycle - in this process or the `poll` subcommand - rewrote it), reading it
 // under mu. The server never fetches SeaDex or Fribb itself.
 type Indexer struct {
-	snapMod time.Time
-	// snapInfo is the os.FileInfo of the successfully loaded snapshot file,
-	// installed together with snap/snapMod (guarded by mu). The last-good skip
-	// needs identity (os.SameFile), not just mtime: an atomic rename or a
-	// backup restore can install a DIFFERENT file that preserves the loaded
-	// timestamp, and that replacement must install, not be skipped.
-	snapInfo os.FileInfo
-	// failedFile identifies (mtime + os.SameFile identity) the last snapshot
-	// file whose CONTENT failed deterministically: malformed JSON, a
-	// structurally invalid document, or a file over the shared maxFeedBytes cap
-	// (persist enforces the same cap, so an oversized snapshot is external
-	// corruption that never shrinks on its own). An unchanged bad file is then
-	// not re-read and re-warned on every request; cleared on a successful load.
-	// Only deterministic content failures are memoized: a read failure (EIO,
-	// EACCES) can recover without changing inode or mtime (a chmod, a transient
-	// filesystem repair), so it stays retryable.
-	// Identity matters, not just mtime: an atomic rename or backup restore can
-	// install a repaired file that preserves the failed file's timestamp, and
-	// that replacement must be retried, not skipped. Guarded by reloadGate
-	// (set/cleared only inside reload).
-	failedFile os.FileInfo
-	// reloadGate coalesces concurrent snapshot refreshes: only one request runs
-	// reload's stat/read/unmarshal at a time; the rest serve the current
-	// immutable snapshot (see reload). It also guards the reload-only flags
-	// failedFile / snapMissing / reloadDegraded. It is a capacity-one token
-	// channel rather than a sync.Mutex because the pre-first-load wait must be
-	// cancellable: a request that has already gone away (client disconnect, arr
-	// timeout) must not keep a handler goroutine and its connection parked
-	// behind the winner's whole stat/read/decode, which no server write timeout
-	// bounds. A send acquires the gate; the matching receive releases it.
-	reloadGate chan struct{}
-	// log, cfg, and path are set once in New and read per request without a
-	// lock: cfg is a by-value copy and none of the three is ever written
-	// after construction (the same immutable-after-New contract as
-	// upstreams and verifyKey below).
+	// cache owns the persisted-snapshot lifecycle and its two locking regimes
+	// (see snapshotCache). The server reaches it through four methods only, so
+	// nothing on the request path names a lock primitive or a reload-only flag.
+	cache *snapshotCache
+	// queryGate bounds the number of SIMULTANEOUS expensive requests. Auth,
+	// caps, and the snapshot read are cheap; a SEARCH is not - each one holds
+	// up to one bounded Prowlarr body per upstream (upstreamMaxBytes), the
+	// encoding/xml token allocations to decode them, and up to
+	// maxRenderedFeedBytes of render builder, for as long as the bounded retry
+	// tree runs. net/http starts one goroutine per connection and the
+	// bad-key throttle deliberately exempts a VALID key, so nothing else caps
+	// how many of those run at once: a burst of correct-key searches (an arr's
+	// library-wide search, a retry storm, a misconfigured client) could stack
+	// that footprint until the 256 MiB container is OOM-killed - taking the
+	// compare loop down with it. A buffered token channel rather than a
+	// semaphore type for the same reason reloadGate is one: the wait must be
+	// cancellable, so a request whose client has gone away abandons it instead
+	// of parking a handler goroutine behind other requests' upstream calls.
+	queryGate chan struct{}
+	// log and cfg are set once in New and read per request without a lock: cfg
+	// is a by-value copy and neither is ever written after construction (the
+	// same immutable-after-New contract as upstreams and verifyKey below).
 	log       *slog.Logger
 	cfg       Config
-	path      string
-	snap      snapshot
-	upstreams []*upstream // wired once in New; immutable afterwards (not guarded by mu)
-	// mu guards the published snapshot fields read per request: snap,
-	// snapMod, snapInfo, snapFailed, and snapFailedWarned (see the
-	// per-field comments).
-	mu sync.RWMutex
+	upstreams []*upstream // wired once in New; immutable afterwards
 	// verifyKey is the pre-hashed feed_api_key verifier, built once in New so
 	// per-request verification hashes only the presented value (see
 	// webhttp.NewStaticTokenVerifier). Immutable after New.
 	verifyKey webhttp.StaticTokenVerifier
-	// snapMissing records that the snapshot file disappeared AFTER one was
-	// loaded (deleted file, incomplete restore, lost volume), so the
-	// stale-feed WARN fires once per disappearance instead of on every
-	// request; cleared (with one INFO recovery line) on the first successful
-	// stat afterward. A fresh install with no prior snapshot stays silent.
-	// Guarded by reloadGate (set/cleared only inside reload).
-	snapMissing bool
-	// reloadDegraded records that reloads are failing (a stat error or a
-	// read failure of an unchanged-identity file), so the WARN fires once
-	// per degradation onset instead of on every request; cleared with one
-	// INFO recovery line on the next successful snapshot read, and cleared
-	// SILENTLY when the file goes absent (statSnapshot's ENOENT arm - the
-	// missing state has its own once-per-disappearance WARN) or when the
-	// stat lands on the memoized malformed file (skipMemoizedMalformed -
-	// access recovered, but nothing was reloaded). The retry itself is NOT
-	// suppressed (both faults can recover without an mtime change). Guarded
-	// by reloadGate (set/cleared only inside reload).
-	reloadDegraded bool
-	// snapFailed records that snapshot loading failed BEFORE any snapshot was
-	// installed: a non-ENOENT stat or read fault, or a malformed or
-	// structurally invalid file, at startup leaves the zero-value in-memory
-	// snapshot indistinguishable from the intentional fresh-install state -
-	// query would contact Prowlarr, filter every result against nil curation
-	// maps, and serve a successful empty feed, so the arr records a clean
-	// no-match during a local fault. While set, query answers with a
-	// snapshot-unavailable flag (no Prowlarr query) and serve renders a
-	// Torznab <error>, like an unavailable Prowlarr dependency. Set on those
-	// failure paths only while snapInfo is nil (a fault AFTER a successful
-	// load keeps serving the last-good snapshot); cleared by the first
-	// successful installSnapshot, and by a genuinely absent file (deleting
-	// the bad file returns to fresh-install semantics). Guarded by mu (read
-	// per request by query, unlike the reloadGate-guarded flags above).
-	snapFailed bool
-	// snapFailedWarned bounds the snapshot-unavailable WARN to one per onset
-	// instead of one per request; re-armed whenever snapFailed clears.
-	// Guarded by mu.
-	snapFailedWarned bool
 }
 
-// New builds the Torznab feed server from cfg and deps, wiring one upstream per
-// configured Prowlarr Torznab URL. The persisted feed snapshot named by
-// cfg.SnapshotPath is loaded now so a restart serves the last feed immediately.
-func New(cfg *Config, deps Deps) *Indexer {
-	log := deps.Logger
+// New builds the Torznab feed server from cfg, log, and the wired upstream set.
+// The persisted feed snapshot named by cfg.SnapshotPath is loaded now so a
+// restart serves the last feed immediately. A nil log falls back to
+// slog.Default(); a zero ups serves the snapshot without proxying searches
+// (see Upstreams).
+func New(cfg *Config, log *slog.Logger, ups Upstreams) *Indexer {
 	if log == nil {
 		log = slog.Default()
 	}
 	ix := &Indexer{
-		log:        log,
-		path:       cfg.SnapshotPath,
-		cfg:        *cfg,
-		verifyKey:  webhttp.NewStaticTokenVerifier(cfg.APIKey),
-		reloadGate: make(chan struct{}, 1),
+		log:       log,
+		cfg:       *cfg,
+		verifyKey: webhttp.NewStaticTokenVerifier(cfg.APIKey),
+		cache:     newSnapshotCache(cfg.SnapshotPath, cfg.ABPasskey, log),
+		queryGate: make(chan struct{}, maxConcurrentQueries),
+		upstreams: ups.ups,
 	}
-	// One upstream per configured Prowlarr Torznab URL. An empty URL means that
-	// tracker is off: it is simply not wired, so the feed never queries it. (The
-	// daemon only starts the feed at all when at least one URL is set.)
-	httpClient := deps.HTTP
-	if httpClient == nil {
-		// NewFeedWriter treats a nil HTTP as harvest-disabled; the server has no
-		// disabled mode for searches, so a nil client falls back to the same
-		// httpx client build.go wires (sized from UpstreamAttemptTimeout),
-		// turning a latent first-search panic into working behavior. It must be
-		// httpx.NewClient, not a bare http.Client: the Prowlarr API key rides an
-		// X-Api-Key header, which net/http forwards across redirects, so the
-		// fallback needs httpx's same-host, no-downgrade redirect policy to keep
-		// a redirecting upstream from exfiltrating that credential.
-		httpClient = httpx.NewClient(UpstreamAttemptTimeout)
-	}
-	ix.upstreams = wireUpstreams(httpClient, log, cfg.UpstreamConfig)
 	// Warm the feed from the last persisted snapshot so a restart serves
 	// immediately rather than empty until the next cycle.
-	ix.reload(context.Background())
+	ix.cache.refresh(context.Background())
 	return ix
 }
 
-// wireUpstreams builds one upstream per configured Prowlarr per-indexer
-// Torznab URL, shared by the server (search proxying) and the feed writer
-// (title harvesting) so both query the exact tracker set the operator
-// configured, with the same client, headers, and retry discipline.
+// wireUpstreams is WireUpstreams' unexported builder: one upstream per
+// configured Prowlarr per-indexer Torznab URL. An empty URL means that tracker
+// is off, so it is simply not wired and the feed never queries it.
 func wireUpstreams(httpClient *http.Client, log *slog.Logger, cfg UpstreamConfig) []*upstream {
 	var ups []*upstream
 	if cfg.NyaaTorznabURL != "" {

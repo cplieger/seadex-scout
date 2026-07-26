@@ -204,3 +204,120 @@ func TestLoader_refreshCache_transientParseFailureKeepsRejectionStreak(t *testin
 		t.Errorf("parse-failure ConsecutiveRejections = %d, want 0 (not a guard rejection)", stale.ConsecutiveRejections())
 	}
 }
+
+// TestLoader_refreshCache_overCapBodyAdvancesRejectionStreak pins the download
+// size cap as a PERSISTENT guard refusal rather than a transient fetch failure:
+// the cap is deterministic on upstream size, so a list that has organically
+// grown past maxMapBytes re-downloads and is refused every cycle without ever
+// self-healing, which is what the streak exists to escalate.
+func TestLoader_refreshCache_overCapBodyAdvancesRejectionStreak(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A body over maxMapBytes; the content never has to parse, the wire
+		// layer refuses it first.
+		w.Header().Set("Content-Type", "application/json")
+		chunk := strings.Repeat("a", 1<<20)
+		for written := 0; written <= maxMapBytes; written += len(chunk) {
+			if _, err := w.Write([]byte(chunk)); err != nil {
+				return
+			}
+		}
+	}))
+	defer ts.Close()
+
+	prev := &Cache{
+		FetchedAt: time.Now().Add(-2 * time.Hour),
+		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, err := l.refreshCache(context.Background(), prev)
+	var stale *StaleMapError
+	if !errors.As(err, &stale) {
+		t.Fatalf("over-cap body error = %v, want a *StaleMapError", err)
+	}
+	if next.RejectedRefreshes != 1 {
+		t.Errorf("RejectedRefreshes = %d, want 1 (an over-cap body never self-heals)", next.RejectedRefreshes)
+	}
+	if stale.ConsecutiveRejections() != 1 {
+		t.Errorf("ConsecutiveRejections = %d, want 1", stale.ConsecutiveRejections())
+	}
+	if got := stale.LogAttrs(); !attrsContain(got, "stale_reason", "refresh exceeded size cap") {
+		t.Errorf("stale_reason attrs = %v, want the size-cap reason", got)
+	}
+}
+
+// TestLoader_refreshCache_nonArrayBodyAdvancesRejectionStreak pins a non-array
+// top-level document as content-shape evidence that the upstream schema moved:
+// truncation cannot change a body's FIRST token, so this class fails identically
+// every cycle and must escalate, unlike the mid-stream malformed body pinned by
+// TestLoader_refreshCache_transientParseFailureKeepsRejectionStreak.
+func TestLoader_refreshCache_nonArrayBodyAdvancesRejectionStreak(t *testing.T) {
+	for _, tc := range map[string]string{
+		"object document": `{"data":[{"anilist_id":1,"type":"tv","tvdb_id":100}]}`,
+		"null document":   `null`,
+	} {
+		body := tc
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		prev := &Cache{
+			FetchedAt: time.Now().Add(-2 * time.Hour),
+			Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+		}
+		l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+		next, err := l.refreshCache(context.Background(), prev)
+		ts.Close()
+		var stale *StaleMapError
+		if !errors.As(err, &stale) {
+			t.Errorf("body %q error = %v, want a *StaleMapError", body, err)
+			continue
+		}
+		if next.RejectedRefreshes != 1 {
+			t.Errorf("body %q RejectedRefreshes = %d, want 1 (a moved schema never self-heals)", body, next.RejectedRefreshes)
+		}
+	}
+}
+
+// TestLoader_refreshCache_streakAdvancesWithNoUsableCache pins the streak as
+// state about the UPSTREAM, not about the cache: on a first boot whose every
+// refresh is refused there is no usable stale map to return, and gating the
+// increment on one would freeze the streak at 0 and leave the loader degrading
+// at WARN forever while the feed and comparison stay disabled.
+func TestLoader_refreshCache_streakAdvancesWithNoUsableCache(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[]}`)) // a moved schema, refused every cycle
+	}))
+	defer ts.Close()
+
+	prev := &Cache{} // first boot: no records, no validators
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	for i := 1; i <= degradation.EscalationThreshold; i++ {
+		next, err := l.refreshCache(context.Background(), prev)
+		if err == nil {
+			t.Fatalf("refresh %d returned nil error, want the no-cache error", i)
+		}
+		var stale *StaleMapError
+		if errors.As(err, &stale) {
+			t.Fatalf("refresh %d returned a *StaleMapError, want the no-cache error (there is no usable map to serve)", i)
+		}
+		if next.RejectedRefreshes != i {
+			t.Fatalf("RejectedRefreshes after %d refusals = %d, want %d", i, next.RejectedRefreshes, i)
+		}
+		*prev = next
+	}
+	if prev.RejectedRefreshes < degradation.EscalationThreshold {
+		t.Errorf("streak reached %d, want >= %d so the scout can escalate", prev.RejectedRefreshes, degradation.EscalationThreshold)
+	}
+}
+
+// attrsContain reports whether the flattened slog key/value pairs carry key
+// with the wanted value.
+func attrsContain(attrs []any, key, want string) bool {
+	for i := 0; i+1 < len(attrs); i += 2 {
+		if k, ok := attrs[i].(string); ok && k == key {
+			if v, ok := attrs[i+1].(string); ok {
+				return v == want
+			}
+		}
+	}
+	return false
+}

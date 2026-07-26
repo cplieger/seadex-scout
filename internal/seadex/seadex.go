@@ -19,9 +19,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/httpx/v3"
+	"github.com/cplieger/httpx/v4"
 	"github.com/cplieger/jsonx/bounded"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
+	"github.com/cplieger/seadex-scout/internal/degradation"
+	"github.com/cplieger/seadex-scout/internal/trackerlink"
 )
 
 const (
@@ -405,8 +407,9 @@ func advanceCursor(items []pbEntry, prev cursor) (cursor, error) {
 // compares against a truncated SeaDex view. A catalogue that completes with
 // ZERO entries is an error, never a success: SeaDex is never legitimately
 // empty for this app's use, and accepting one would make every library item
-// read as having no SeaDex coverage. A completed catalogue whose entry count
-// disagrees with the API's reported totalItems is logged (WARN) but still
+// read as having no SeaDex coverage. A completed catalogue that retained less
+// than HALF the API's reported totalItems is likewise an error. A SMALLER
+// disagreement is logged (WARN) but still
 // returned - pagination over a live collection can legitimately shift counts
 // mid-fetch. That leniency requires the walk to have ended on a SHORT chunk:
 // an EMPTY chunk after a full one while the collected count is still below the
@@ -439,17 +442,29 @@ func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 
 // finishFetch validates a completed catalogue before returning it: zero
 // collected entries is an error (SeaDex is never legitimately empty for this
-// app's use, whether the API reported zero totals or served empty pages), and
-// a collected count disagreeing with the API's reported totalItems logs the
-// alert-stable count-mismatch WARN but still returns the entries. Entries
+// app's use, whether the API reported zero totals or served empty pages), a
+// collected count below HALF the API's reported totalItems is an error (the
+// app-wide shrink policy - no credible mid-fetch delete loses half a
+// catalogue, and this was the last path accepting a truncated view), and a
+// smaller disagreement logs the alert-stable count-mismatch WARN but still
+// returns the entries. Entries
 // whose non-empty updated timestamp failed to parse (zeroed, sorting to the
 // feed's tail) are surfaced as one aggregate WARN so an upstream format drift
 // that zeroes the whole catalogue is alertable without per-record noise.
-// Torrents whose URL is unusable (omitted/empty, or a non-empty value
-// dropped to "" by UsableURL: a foreign host under a trusted label, an
+// Torrents whose URL is unusable (omitted/empty, or a non-empty value the
+// publisher dropped to "": a foreign host under a trusted label, an
 // unknown tracker, a malformed URL) are likewise surfaced as one aggregate
 // WARN — filter.Obtainable treats both cases as unobtainable — so a schema
 // drift that strips every release link is alertable instead of silent.
+//
+// That counter is the ONE reason this client reads a publish policy at all
+// (trackerlink.Publish, itself a pure leaf over the canonical tracker table):
+// the diagnostic is about UPSTREAM DATA QUALITY across the whole catalogue in
+// one pass, which only the client sees, and it is deliberately defined against
+// the same rule filter.Obtainable applies rather than a weaker
+// is-the-field-blank test that would miss a wholesale host drift. The client
+// carries no other link knowledge - the publish policy itself lives in
+// internal/trackerlink beside its hide half (l-f86).
 func (c *Client) finishFetch(all []Entry, tot fetchTotals) ([]Entry, error) {
 	if len(all) == 0 {
 		return nil, fmt.Errorf("seadex: returned an empty catalogue (totalItems=%d); "+
@@ -458,6 +473,23 @@ func (c *Client) finishFetch(all []Entry, tot fetchTotals) ([]Entry, error) {
 	if tot.reportedTotal > tot.reportedPages*perPage {
 		return nil, fmt.Errorf("seadex: reported totalItems %d cannot fit the reported %d pages of %d (upstream misbehaving); "+
 			"refusing to compare against a truncated view", tot.reportedTotal, tot.reportedPages, perPage)
+	}
+	if degradation.Shrunk(len(all), tot.reportedTotal) {
+		// The keyset cursor makes a SKIPPED record structurally impossible (see
+		// cursor), so a shortfall against the API's own reported total can only
+		// be a mid-fetch delete - or an upstream that ended the walk early with
+		// a short chunk while records remained. A handful of deletions during a
+		// ~6-chunk walk is ordinary and stays the WARN below; losing more than
+		// HALF the catalogue mid-fetch is not credible, and this was the last
+		// path on which a truncated view was accepted at all (the empty-chunk
+		// and metadata-inconsistency arms already fail). Erroring degrades the
+		// cycle, which PRESERVES existing findings - the fail-safe direction -
+		// where completing would resolve every finding whose entry vanished.
+		// The below-half trigger is the app-wide shrink policy
+		// (degradation.ShrinkGuardFactor), the same one the mapping refresh and
+		// library-walk guards apply, rather than a second threshold of its own.
+		return nil, fmt.Errorf("seadex: collected %d of %d reported entries (below half); "+
+			"refusing to compare against a truncated view", len(all), tot.reportedTotal)
 	}
 	if len(all) != tot.reportedTotal {
 		c.log.Warn("seadex catalogue count mismatch", "got", len(all), "want", tot.reportedTotal)
@@ -576,7 +608,7 @@ func appendPageEntries(all []Entry, items []pbEntry, tot *fetchTotals) []Entry {
 			tot.unparsedTimes++
 		}
 		for j := range entry.Torrents {
-			if entry.Torrents[j].UsableURL() == "" {
+			if trackerlink.Publish(entry.Torrents[j].Tracker, entry.Torrents[j].URL) == "" {
 				tot.unusableURLs++
 			}
 		}

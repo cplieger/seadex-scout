@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/httpx/v3"
+	"github.com/cplieger/httpx/v4"
 	"github.com/cplieger/slogx/capture"
 )
 
@@ -483,6 +483,141 @@ func TestFetchAndParseRateLimitCarriesRetryAfterHint(t *testing.T) {
 	}
 }
 
+// TestUpstreamSearchRetriesRetryableStatuses pins the retry taxonomy the app
+// owns now that httpx.GetBytes performs the single fetch under
+// WithMaxAttempts(1). GetBytes deliberately does NOT mark its exhaustion error
+// Transient - after a one-attempt budget the retry decision belongs to the
+// caller - so without attemptError re-classifying the *StatusError, every
+// self-healing upstream status would fail the search on its first attempt:
+// the documented three-attempt budget silently collapses to one, an
+// interactive search fails immediately, and the title harvest latches the
+// tracker scope for a whole rebuild. A 408/429/5xx must therefore be retried
+// and recover on a healthy next attempt; any other non-2xx must still fail
+// fast, spending exactly one attempt.
+func TestUpstreamSearchRetriesRetryableStatuses(t *testing.T) {
+	newUpstream := func(t *testing.T, first int) (*upstream, func() int) {
+		t.Helper()
+		var (
+			mu    sync.Mutex
+			calls int
+		)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			calls++
+			n := calls
+			mu.Unlock()
+			if n == 1 {
+				// A short Retry-After keeps the retried subtests fast; the
+				// hint path itself is pinned by
+				// TestFetchAndParseRateLimitCarriesRetryAfterHint.
+				w.Header().Set("Retry-After", "1")
+				w.WriteHeader(first)
+				return
+			}
+			w.Header().Set("Content-Type", "application/rss+xml")
+			_, _ = io.WriteString(w, strings.ReplaceAll(sampleFeed, "http://prowlarr:9696", "http://"+r.Host))
+		}))
+		t.Cleanup(srv.Close)
+		return &upstream{http: srv.Client(), log: slog.Default(), name: upstreamNyaa, feed: srv.URL},
+			func() int {
+				mu.Lock()
+				defer mu.Unlock()
+				return calls
+			}
+	}
+
+	// 408 is the server reporting that IT gave up waiting, 429 a rate limit,
+	// 500/503 a server fault: all self-heal without operator action.
+	for _, status := range []int{
+		http.StatusRequestTimeout,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusServiceUnavailable,
+	} {
+		t.Run("retried/"+http.StatusText(status), func(t *testing.T) {
+			u, calls := newUpstream(t, status)
+			items, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
+			if err != nil {
+				t.Fatalf("search after one HTTP %d: %v (a self-healing status must be retried)", status, err)
+			}
+			if len(items) != 1 {
+				t.Errorf("got %d items, want 1 from the healthy retry", len(items))
+			}
+			if got := calls(); got != 2 {
+				t.Errorf("upstream called %d times, want 2 (one %d + one retry)", got, status)
+			}
+		})
+	}
+
+	// A 401/403 is a wrong Prowlarr API key and a 404 a wrong Torznab path:
+	// both stay wrong on every attempt until the operator fixes config.
+	for _, status := range []int{
+		http.StatusUnauthorized,
+		http.StatusForbidden,
+		http.StatusNotFound,
+	} {
+		t.Run("terminal/"+http.StatusText(status), func(t *testing.T) {
+			u, calls := newUpstream(t, status)
+			_, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
+			if err == nil {
+				t.Fatalf("search against an HTTP %d returned nil error", status)
+			}
+			statusErr, ok := errors.AsType[*httpx.StatusError](err)
+			if !ok {
+				t.Fatalf("error = %T (%v), want *httpx.StatusError", err, err)
+			}
+			if statusErr.Code != status {
+				t.Errorf("StatusError.Code = %d, want %d", statusErr.Code, status)
+			}
+			var transient httpx.Transient
+			if errors.As(err, &transient) && transient.IsTransient() {
+				t.Errorf("HTTP %d classified transient; a config fault must not be retried", status)
+			}
+			if got := calls(); got != 1 {
+				t.Errorf("upstream called %d times, want 1 (a config fault is deterministic)", got)
+			}
+		})
+	}
+}
+
+// TestUpstreamSearchRedactsUserinfoAcrossRetryLogging is the retry-path half of
+// TestUpstreamSearchStatusErrorOmitsUserinfoAndQuery: a retryable status is
+// logged once per attempt by BOTH httpx.GetBytes (which sees the raw request
+// URL) and the enclosing httpx.Do, so an endpoint carrying a username-only
+// userinfo token and an apikey query value gets three chances per search to
+// leak them into the log stream (CWE-532). The app passes the unscrubbed URL to
+// GetBytes deliberately - only the actual request needs the credentials - which
+// makes httpx's redaction the sole guard, and this test the acceptance test for
+// it across the whole retry tree.
+func TestUpstreamSearchRedactsUserinfoAcrossRetryLogging(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	feed := strings.Replace(srv.URL, "http://", "http://secret-token@", 1) + "/1/api?apikey=secret-value"
+	log, rec := capture.New()
+	u := &upstream{http: srv.Client(), log: log, name: upstreamNyaa, feed: feed}
+	_, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren"}})
+	if err == nil {
+		t.Fatal("search against a permanently 503 endpoint returned nil error")
+	}
+	lines := renderedLogRecords(rec)
+	if len(lines) == 0 {
+		t.Fatal("no log records captured; the retry tree must have logged the exhaustion")
+	}
+	for _, secret := range []string{"secret-token", "secret-value"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("returned error leaks %q: %v", secret, err)
+		}
+		for _, line := range lines {
+			if strings.Contains(line, secret) {
+				t.Errorf("log record leaks %q: %q", secret, line)
+			}
+		}
+	}
+}
+
 // TestUpstreamSearchRejectsOversizedResponse pins the bounded-read guard on the
 // untrusted Torznab response: a 200 body past upstreamMaxBytes fails the search
 // with httpx's *ResponseTooLargeError naming the cap, and the deterministic
@@ -549,10 +684,13 @@ func TestSearchRejectsUnparseableUpstreamURLs(t *testing.T) {
 // TestUpstreamSearchStatusErrorOmitsUserinfoAndQuery pins the status-error
 // sanitization of the Prowlarr proxy: a configured Torznab endpoint may carry
 // a username-only userinfo token (which validateHTTPURL accepts) and an
-// apikey query value, and pinned httpx's StatusError redactor preserves the
-// username - so on a non-2xx response fetchAndParse must construct the
-// StatusError from a clone stripped of userinfo, query, and fragment before
-// the error reaches httpx.Do's retry logger and the harvest WARN (CWE-532).
+// apikey query value, and both must be absent from the error the search
+// returns and from every line the retry logger emits (CWE-532). The scrub is
+// httpx's since v4 - redactURL drops the whole userinfo component and REDACTs
+// every query value, so *StatusError renders safely on its own and the app
+// carries no pre-scrubbed URL clone. This is the cross-library acceptance test
+// for that guarantee: it fails if httpx ever regresses to url.Redacted()
+// semantics, which mask only the password and preserve the username verbatim.
 func TestUpstreamSearchStatusErrorOmitsUserinfoAndQuery(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)

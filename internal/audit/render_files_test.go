@@ -487,100 +487,100 @@ func TestWriteFilesCanceledBeforeJSONRenderWritesNothing(t *testing.T) {
 	}
 }
 
-// TestDurabilityErrGatesBothReportHalves pins the durability gate both report
-// halves pass through: atomicfile reports a rename whose parent-directory
-// fsync failed as Result{Durable:false} with a NIL error, so a WriteFiles that
-// only checked the error would publish the Markdown half on a non-durable JSON
-// commit (and log "report written") - exactly the dangling-.md state the
-// JSON-first ordering exists to prevent. Each stage must turn Durable=false
-// into an errNotDurable-wrapping, stage-named error that quotes only the
-// timestamp-derived basename, never the secret-capable report.dir value.
-func TestDurabilityErrGatesBothReportHalves(t *testing.T) {
-	const dir = "/config/sekret-report-dir"
+// TestWriteFilesNonDurableJSONSkipsMarkdown pins the JSON half's durability
+// ORDERING effect without treating it as a failure. atomicfile reports a rename
+// whose parent-directory fsync failed as Result{Durable:false} with a NIL error:
+// the bytes reached their final path, so nothing is broken and a re-run cannot
+// fix an fsync - WriteFiles must therefore return nil rather than fail the run.
+// What it must still do is skip the Markdown half, because a recovered .md
+// without its machine-readable pair is exactly the state the JSON-first
+// ordering exists to prevent, and it must not claim "report written". The write
+// seam is a package var because a parent-directory fsync failure cannot be
+// induced on a test filesystem; it runs serially (shared package state).
+func TestWriteFilesNonDurableJSONSkipsMarkdown(t *testing.T) {
+	dir := t.TempDir()
+	var buf strings.Builder
+	log := slog.New(slog.NewJSONHandler(&buf, nil))
 
-	for _, tt := range []struct{ stage, path string }{
-		{"json", dir + "/report-2026-07-11T15-04-05Z.json"},
-		{"markdown", dir + "/report-2026-07-11T15-04-05Z.md"},
-	} {
-		t.Run(tt.stage, func(t *testing.T) {
-			if err := durabilityErr(tt.stage, tt.path, atomicfile.Result{Path: tt.path, Durable: true}); err != nil {
-				t.Errorf("durabilityErr(durable %s write) = %v, want nil", tt.stage, err)
-			}
+	orig := atomicWriteFile
+	t.Cleanup(func() { atomicWriteFile = orig })
+	calls := 0
+	atomicWriteFile = func(ctx context.Context, path string, data []byte, opts ...atomicfile.Option) (atomicfile.Result, error) {
+		calls++
+		res, err := orig(ctx, path, data, opts...)
+		res.Durable = false
+		return res, err
+	}
 
-			err := durabilityErr(tt.stage, tt.path, atomicfile.Result{Path: tt.path})
-
-			if !errors.Is(err, errNotDurable) {
-				t.Fatalf("durabilityErr(non-durable %s write) = %v, want it to wrap errNotDurable", tt.stage, err)
-			}
-			if !strings.Contains(err.Error(), "write "+tt.stage+" report-2026-07-11T15-04-05Z") {
-				t.Errorf("error = %q, want the %s stage and the report basename", err, tt.stage)
-			}
-			if strings.Contains(err.Error(), dir) {
-				t.Errorf("error = %q, want no report.dir value in it", err)
-			}
-		})
+	rep := &Report{GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC), Totals: map[string]int{}}
+	err := rep.WriteFiles(context.Background(), dir, log)
+	if err != nil {
+		t.Fatalf("WriteFiles(non-durable json) = %v, want nil (a completed write is not a fault)", err)
+	}
+	if calls != 1 {
+		t.Errorf("atomic writes = %d, want 1 (the markdown half must be skipped)", calls)
+	}
+	mds, globErr := filepath.Glob(filepath.Join(dir, "*.md"))
+	if globErr != nil {
+		t.Fatalf("glob: %v", globErr)
+	}
+	if len(mds) != 0 {
+		t.Errorf("markdown half = %v, want none published after a non-durable json commit", mds)
+	}
+	if strings.Contains(buf.String(), "report written") {
+		t.Errorf("log = %s, want no \"report written\" record for an incomplete pair", buf.String())
+	}
+	if !strings.Contains(buf.String(), "not crash-durable") {
+		t.Errorf("log = %s, want the degradation WARN naming the durability skip", buf.String())
 	}
 }
 
-// TestWriteFilesStopsOnNonDurableHalf pins the WIRING of the durability gates
-// (TestDurabilityErrGatesBothReportHalves only pins the helper): a non-durable
-// JSON commit must abort WriteFiles before the Markdown half is published and
-// before the alert-pinned "report written" line is emitted, while a
-// non-durable Markdown commit proves the second gate is reached. Both cases
-// fail if either `if err := durabilityErr(...)` block is deleted. The write
-// seam is a package var because a parent-directory fsync failure cannot be
-// induced on a test filesystem; it runs serially (shared package state).
-func TestWriteFilesStopsOnNonDurableHalf(t *testing.T) {
-	for _, tt := range []struct {
-		name     string
-		failCall int
-		stage    string
-	}{
-		{"json half", 1, "write json"},
-		{"markdown half", 2, "write markdown"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
-			var buf strings.Builder
-			log := slog.New(slog.NewJSONHandler(&buf, nil))
+// TestWriteFilesNonDurableMarkdownStillReportsWritten pins the second half of
+// the same rule. A non-durable Markdown commit cannot create a dangling .md
+// (the .json is already durably committed), so the pair is COMPLETE on disk and
+// the alert-pinned "report written" line must still be emitted - suppressing it
+// would blind the report-written alert on a successful run, trading a real
+// monitoring signal for a nuance in a log claim. The line carries durable=false
+// so it stays honest about what may not survive a power loss.
+func TestWriteFilesNonDurableMarkdownStillReportsWritten(t *testing.T) {
+	dir := t.TempDir()
+	var buf strings.Builder
+	log := slog.New(slog.NewJSONHandler(&buf, nil))
 
-			orig := atomicWriteFile
-			t.Cleanup(func() { atomicWriteFile = orig })
-			calls := 0
-			atomicWriteFile = func(ctx context.Context, path string, data []byte, opts ...atomicfile.Option) (atomicfile.Result, error) {
-				calls++
-				res, err := orig(ctx, path, data, opts...)
-				if calls == tt.failCall {
-					res.Durable = false
-				}
-				return res, err
-			}
+	orig := atomicWriteFile
+	t.Cleanup(func() { atomicWriteFile = orig })
+	calls := 0
+	atomicWriteFile = func(ctx context.Context, path string, data []byte, opts ...atomicfile.Option) (atomicfile.Result, error) {
+		calls++
+		res, err := orig(ctx, path, data, opts...)
+		if calls == 2 {
+			res.Durable = false
+		}
+		return res, err
+	}
 
-			rep := &Report{GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC), Totals: map[string]int{}}
-			err := rep.WriteFiles(context.Background(), dir, log)
-
-			if !errors.Is(err, errNotDurable) {
-				t.Fatalf("WriteFiles(non-durable %s) = %v, want errNotDurable", tt.name, err)
-			}
-			if !strings.Contains(err.Error(), tt.stage) {
-				t.Errorf("error = %q, want the %q stage named", err, tt.stage)
-			}
-			if calls != tt.failCall {
-				t.Errorf("atomic writes = %d, want %d (a failed gate must stop the next half)", calls, tt.failCall)
-			}
-			if tt.failCall == 1 {
-				mds, globErr := filepath.Glob(filepath.Join(dir, "*.md"))
-				if globErr != nil {
-					t.Fatalf("glob: %v", globErr)
-				}
-				if len(mds) != 0 {
-					t.Errorf("markdown half = %v, want none published after a non-durable json commit", mds)
-				}
-			}
-			if strings.Contains(buf.String(), "report written") {
-				t.Errorf("log = %s, want no \"report written\" record", buf.String())
-			}
-		})
+	rep := &Report{GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC), Totals: map[string]int{}}
+	err := rep.WriteFiles(context.Background(), dir, log)
+	if err != nil {
+		t.Fatalf("WriteFiles(non-durable markdown) = %v, want nil", err)
+	}
+	if calls != 2 {
+		t.Errorf("atomic writes = %d, want 2 (both halves published)", calls)
+	}
+	for _, glob := range []string{"*.json", "*.md"} {
+		got, globErr := filepath.Glob(filepath.Join(dir, glob))
+		if globErr != nil {
+			t.Fatalf("glob %s: %v", glob, globErr)
+		}
+		if len(got) != 1 {
+			t.Errorf("%s halves = %v, want exactly one", glob, got)
+		}
+	}
+	if !strings.Contains(buf.String(), "report written") {
+		t.Fatalf("log = %s, want the alert-pinned \"report written\" record", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"durable":false`) {
+		t.Errorf("log = %s, want the report-written line to carry durable=false", buf.String())
 	}
 }
 

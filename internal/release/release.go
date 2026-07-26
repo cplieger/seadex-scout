@@ -198,21 +198,33 @@ var (
 	// between the "p" and "remux"). The inflected "-ed" forms ("remuxed
 	// from the JPBD", "BD-Remuxed") count too — reEncode already accepts
 	// "encoded" alongside "encode", and rejecting the same inflection on
-	// the remux side silently declassified stated remuxes to unknown.
-	reRemux = regexp.MustCompile(`(?:^|` + nonWordEdge + `)(?:` + lowerLiteralPattern("bd") + `[\s._-]?)?(?:` + lowerTokensPattern([]string{"premux", "remux"}) + `)(?:` + lowerLiteralPattern("ed") + `)?(?:$|` + nonWordEdge + `)`)
-	// reEncode matches a generic encode marker ("encode", "encoded", "BDRip" -
-	// the BD half accepting the same optional [\s._-] separator reRemux's BD
-	// prefix does, so "BD-Rip"/"BD.Rip"/"BD_Rip"/"BD Rip" classify like the
-	// compact spelling) with reRemux's delimiter-bounded token style, so a
-	// bare substring inside
-	// a longer word ("reencoded", "encoder") is never a marker. It is the
+	// the remux side silently declassified stated remuxes to unknown. The
+	// PLURAL forms ("remuxes", "premuxes") count for the same reason (l-f62):
+	// the notes field is prose, where the plural is the natural spelling
+	// ("both remuxes are from the JPBD"), and a release whose only kind
+	// evidence was a plural statement classified unknown - so its `kind`
+	// attribute and report row understated it, and filters.exclude_remux did
+	// not drop it. The optional "e" keeps "remuxs" out while admitting
+	// "remuxes".
+	reRemux = regexp.MustCompile(`(?:^|` + nonWordEdge + `)(?:` + lowerLiteralPattern("bd") + `[\s._-]?)?(?:` + lowerTokensPattern([]string{"premux", "remux"}) + `)(?:` + lowerLiteralPattern("ed") + `|` + lowerLiteralPattern("es") + `)?(?:$|` + nonWordEdge + `)`)
+	// reEncode matches a generic encode marker ("encode", "encoded", "encodes",
+	// "BDRip", "BDRips" - the BD half accepting the same optional [\s._-]
+	// separator reRemux's BD prefix does, so "BD-Rip"/"BD.Rip"/"BD_Rip"/"BD Rip"
+	// classify like the compact spelling) with reRemux's delimiter-bounded token
+	// style, so a bare substring inside
+	// a longer word ("reencoded", "encoder") is never a marker — the compact
+	// "reencode" spelling stays deliberately UNMATCHED while every
+	// delimiter-separated form ("re-encode", "re encode") matches through the
+	// "encode" token, because admitting a bare in-word substring is what would
+	// make "encoder" a marker (l-f62 raised the asymmetry; only its plural half
+	// is closed here). It is the
 	// weakest encoder-marker rung in kindFromEvidence — checked after the remux
 	// token and the codec/CRF/bitrate markers, so it only ever moves a release
 	// from unknown to encode, never off remux. Live SeaDex data motivates it:
 	// many isBest encodes state "encode"/"BDRip" in their name or notes
 	// without any codec, CRF, or bitrate marker and previously classified
 	// unknown.
-	reEncode = regexp.MustCompile(`(?:^|` + nonWordEdge + `)(?:` + lowerLiteralPattern("bd") + `[\s._-]?` + lowerLiteralPattern("rip") + `|` + lowerTokensPattern([]string{"encoded", "encode"}) + `)(?:$|` + nonWordEdge + `)`)
+	reEncode = regexp.MustCompile(`(?:^|` + nonWordEdge + `)(?:` + lowerLiteralPattern("bd") + `[\s._-]?` + lowerLiteralPattern("rip") + lowerLiteralPattern("s") + `?|` + lowerTokensPattern([]string{"encoded", "encodes", "encode"}) + `)(?:$|` + nonWordEdge + `)`)
 )
 
 // Canonical codec families the classifier normalizes video codecs to.

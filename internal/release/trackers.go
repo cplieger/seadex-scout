@@ -106,7 +106,7 @@ var trackerByHost = func() map[string]Tracker {
 // here so every consumer inherits them: a non-ASCII host never matches (see
 // urlform.IsASCIIHost - homograph territory), and an empty-labeled host (".nyaa.si",
 // "a..nyaa.si") is not a subdomain - no DNS name has an empty label, so only
-// a non-empty label chain counts (see hostMatchesDomain).
+// a non-empty label chain counts (see urlform.HostMatchesDomain).
 func LookupTrackerByHost(host string) (Tracker, bool) {
 	// The ASCII gate runs on the RAW UNTRIMMED host, BEFORE any Unicode
 	// transform: BOTH strings.ToLower and strings.TrimSpace are full-Unicode
@@ -128,7 +128,7 @@ func LookupTrackerByHost(host string) (Tracker, bool) {
 	}
 	host = strings.ToLower(host)
 	for canonical, t := range trackerByHost {
-		if hostMatchesDomain(host, canonical) {
+		if urlform.HostMatchesDomain(host, canonical) {
 			return t, true
 		}
 	}
@@ -203,42 +203,18 @@ func equalASCIIFold(a, b string) bool {
 }
 
 // rawQueryHasKeyFold reports whether the RAW query carries key under ASCII
-// case folding, splitting on both '&' and ';' and percent-decoding each name
-// - the same strict superset of the parsed u.Query() view that
-// internal/config's urlEmbedsCredential uses, so a semicolon-smuggled pair
-// ("?torrentid=1;x", which url.Values drops wholesale) cannot evade the AB
-// torrent-page shape check.
+// case folding. The raw reading (urlform.RawQueryNames: split on both '&' and
+// ';', percent-decode each name) is a strict superset of the parsed u.Query()
+// view, which drops a malformed pair wholesale - so a semicolon-smuggled pair
+// ("?torrentid=1;x") cannot evade the AB torrent-page shape check. The fold
+// stays here rather than in the library because the two consumers of that walk
+// need opposite fail directions: this gate matches only the one name it
+// recognizes, while internal/config's credential warning matches broadly.
 func rawQueryHasKeyFold(rawQuery, key string) bool {
-	for pair := range strings.FieldsFuncSeq(rawQuery, func(r rune) bool { return r == '&' || r == ';' }) {
-		name, _, _ := strings.Cut(pair, "=")
-		if decoded, err := url.QueryUnescape(name); err == nil {
-			name = decoded
-		}
+	for name := range urlform.RawQueryNames(rawQuery) {
 		if equalASCIIFold(name, key) {
 			return true
 		}
 	}
 	return false
-}
-
-// hostMatchesDomain reports whether host equals domain or is a real
-// dot-delimited subdomain of it: host must end in "."+domain and every label
-// of the subdomain prefix must be non-empty. Plain suffix matching would also
-// accept empty DNS labels (".nyaa.si" via its leading dot, "a..nyaa.si" via
-// the inner one); no resolvable DNS name carries an empty label, so those
-// forms are adversarial and must not classify as the tracker.
-func hostMatchesDomain(host, domain string) bool {
-	if host == domain {
-		return true
-	}
-	prefix, ok := strings.CutSuffix(host, "."+domain)
-	if !ok {
-		return false
-	}
-	for label := range strings.SplitSeq(prefix, ".") {
-		if label == "" {
-			return false
-		}
-	}
-	return true
 }

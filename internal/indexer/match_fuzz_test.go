@@ -4,6 +4,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/cplieger/urlform"
 )
 
 // boundedTrackerID reports whether id is a non-empty, width-bounded run of
@@ -125,19 +127,25 @@ func FuzzTrackerKey_keysOnlyTrackerOwnCanonicalURLs(f *testing.F) {
 		if !found || !boundedTrackerID(id) {
 			t.Fatalf("trackerKey(%q, %q) = %q, want scope:<bounded digits>", tracker, raw, key)
 		}
-		u, err := url.Parse(raw)
-		if err != nil {
-			t.Fatalf("keyed URL %q does not parse: %v", raw, err)
-		}
-		host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+		// Assert the admitted set in the vocabulary trackerOwnURL now reads
+		// (urlform), not in net/url's: the two disagree on exactly the shape this
+		// oracle used to describe as a "true relative reference" (a schemeless
+		// host like "animebytes.tv/x" is triple-empty to net/url but host
+		// evidence to urlform, l-f162), so pinning the old reading here would
+		// re-assert the divergence the adoption removed.
+		f := urlform.Classify(raw)
 		switch scope {
 		case upstreamNyaa:
-			if host != "nyaa.si" {
-				t.Fatalf("nyaa key %q minted from host %q, want exactly nyaa.si", key, u.Hostname())
+			if f.Class != urlform.ClassAbsolute || f.Host != "nyaa.si" {
+				t.Fatalf("nyaa key %q minted from %q (class %v, host %q), want an absolute URL on exactly nyaa.si",
+					key, raw, f.Class, f.Host)
 			}
 		case upstreamAB:
-			if host != "animebytes.tv" && (u.Scheme != "" || u.Host != "" || u.Opaque != "") {
-				t.Fatalf("ab key %q minted from %q, want the canonical host or a true relative reference", key, raw)
+			absoluteCanonical := f.Class == urlform.ClassAbsolute && f.Host == "animebytes.tv"
+			rootedRelative := f.Class == urlform.ClassRelative && f.Host == ""
+			if !absoluteCanonical && !rootedRelative {
+				t.Fatalf("ab key %q minted from %q (class %v, host %q), want the canonical host or a rooted relative reference",
+					key, raw, f.Class, f.Host)
 			}
 		default:
 			t.Fatalf("trackerKey(%q, %q) = %q, want scope nyaa or ab", tracker, raw, key)

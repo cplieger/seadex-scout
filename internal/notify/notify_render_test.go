@@ -62,9 +62,9 @@ func TestTrackerURLs(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			nyaa, ab := trackerURLs(tc.links)
-			if nyaa != tc.wantNyaa {
-				t.Errorf("nyaa = %q, want %q", nyaa, tc.wantNyaa)
+			pub, ab := trackerURLs(tc.links)
+			if pub.url != tc.wantNyaa {
+				t.Errorf("public url = %q, want %q", pub.url, tc.wantNyaa)
 			}
 			if ab != tc.wantAB {
 				t.Errorf("ab = %q, want %q", ab, tc.wantAB)
@@ -137,32 +137,33 @@ func TestTrackerURLsRoutesMislabeledABURLToABSlot(t *testing.T) {
 		{Tracker: "Nyaa", URL: "https://animebytes.tv/torrents.php?id=9"},
 		{Tracker: "Nyaa", URL: "https://nyaa.si/view/9"},
 	}
-	nyaa, ab := trackerURLs(links)
+	pub, ab := trackerURLs(links)
 	if ab != "https://animebytes.tv/torrents.php?id=9" {
 		t.Errorf("ab = %q, want the mislabeled animebytes.tv URL routed to the AB slot", ab)
 	}
-	if nyaa != "https://nyaa.si/view/9" {
-		t.Errorf("nyaa = %q, want the genuine Nyaa URL", nyaa)
+	if pub.url != "https://nyaa.si/view/9" {
+		t.Errorf("public url = %q, want the genuine Nyaa URL", pub.url)
 	}
 }
 
 // TestTrackerURLsDefiniteABWinsOverMalformedFallback pins the precedence of
 // definite AnimeBytes evidence over the fail-closed fallback: a malformed
-// Nyaa-labeled URL (unclassifiable, so ABGated) appearing BEFORE a genuine
-// AnimeBytes link must not occupy the AB slot - the later definite AB URL
-// wins it, and the unclassifiable link still never renders as the public URL.
+// Nyaa-labeled URL (unclassifiable, so filter.ABAmbiguous) appearing BEFORE a
+// genuine AnimeBytes link must not occupy the AB slot - the later definite AB
+// URL wins it, and the unclassifiable link still never renders as the public
+// URL.
 func TestTrackerURLsDefiniteABWinsOverMalformedFallback(t *testing.T) {
 	links := []compare.ReleaseLink{
 		{Tracker: "Nyaa", URL: "https://animebytes.tv exploit"},
 		{Tracker: "AB", URL: "https://animebytes.tv/torrents.php?id=9&torrentid=10"},
 		{Tracker: "Nyaa", URL: "https://nyaa.si/view/9"},
 	}
-	nyaa, ab := trackerURLs(links)
+	pub, ab := trackerURLs(links)
 	if ab != "https://animebytes.tv/torrents.php?id=9&torrentid=10" {
 		t.Errorf("ab = %q, want the definite AnimeBytes URL to win the AB slot over the malformed fallback", ab)
 	}
-	if nyaa != "https://nyaa.si/view/9" {
-		t.Errorf("nyaa = %q, want the genuine Nyaa URL, never the unclassifiable one", nyaa)
+	if pub.url != "https://nyaa.si/view/9" {
+		t.Errorf("public url = %q, want the genuine Nyaa URL, never the unclassifiable one", pub.url)
 	}
 }
 
@@ -187,12 +188,12 @@ func TestTrackerURLsMalformedURLFailsClosedToABSlot(t *testing.T) {
 				{Tracker: "Nyaa", URL: tc.url},
 				{Tracker: "Nyaa", URL: "https://nyaa.si/view/9"},
 			}
-			nyaa, ab := trackerURLs(links)
+			pub, ab := trackerURLs(links)
 			if ab != tc.url {
 				t.Errorf("ab = %q, want the unclassifiable URL %q routed to the AB slot (fail closed)", ab, tc.url)
 			}
-			if nyaa != "https://nyaa.si/view/9" {
-				t.Errorf("nyaa = %q, want the genuine Nyaa URL, never the unclassifiable one", nyaa)
+			if pub.url != "https://nyaa.si/view/9" {
+				t.Errorf("public url = %q, want the genuine Nyaa URL, never the unclassifiable one", pub.url)
 			}
 		})
 	}

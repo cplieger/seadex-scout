@@ -212,6 +212,13 @@ func TestDecideTriStateEvidence(t *testing.T) {
 			wantOutcome:  align.OutcomeUnverifiable,
 		},
 		{
+			// l-f30: the deliberately conservative sub-case. Best-divergence is
+			// PROVEN here (current "kh" vs best "sam", all evidence known), and
+			// only the alt placement is indeterminate - so the row says
+			// "check this", not "you have an unlisted release". Keeping the
+			// verdict is the reviewed decision; the three docs (Standing,
+			// Outcome, README) name the sub-case explicitly rather than
+			// implying nothing is known.
 			name:         "proven-divergent best with an unknown-only alt is unverified",
 			item:         library.Item{Arr: library.ArrSonarr, SeasonGroups: map[int][]string{1: {"kh"}}},
 			best:         []string{"sam"},

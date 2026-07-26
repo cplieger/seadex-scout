@@ -10,9 +10,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cplieger/httpx/v3"
+	"github.com/cplieger/httpx/v4"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/release"
+	"github.com/cplieger/urlform"
 )
 
 const (
@@ -103,10 +104,21 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, int, 
 		httpx.WithMaxAttempts(upstreamMaxAttempts),
 		httpx.WithBaseDelay(upstreamBaseDelay),
 		httpx.WithLabel("torznab "+u.name),
-		// Route the retry loop's own Debug/Warn lines through the upstream's
+		// Route the retry loop's own Debug lines through the upstream's
 		// component logger so they carry component=indexer instead of
 		// falling through to slog.Default().
-		httpx.WithLogger(u.log))
+		httpx.WithLogger(u.log),
+		// Demote httpx's terminal "retries exhausted" line to Debug. BOTH
+		// callers of search publish their own WARN for the same failed query
+		// with strictly more context - the harvest names the show, the query
+		// shape and the page and drives its latch state (classifyHarvestError),
+		// the request path names the scope (queryUpstream) - so leaving httpx's
+		// verdict at Warn produced two terminal WARNs per failure, six per
+		// three-show homogeneous malformed run, and doubled the Loki volume of
+		// exactly the incident the once-per-onset cadence exists to keep
+		// readable. Demoting rather than dropping the logger keeps the
+		// per-attempt retry diagnostics, which are the half worth having here.
+		httpx.WithExhaustedLevel(slog.LevelDebug))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -115,7 +127,7 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, int, 
 
 // fetchAndParse performs ONE search attempt: a single bounded HTTP fetch
 // followed by the Torznab decode. Errors the enclosing Do should
-// retry are marked transient: a 429/5xx status (with the 429's capped
+// retry are marked transient: a 408/429/5xx status (with the response's capped
 // Retry-After carried as the transient error's RetryAfterHint, so the outer
 // loop honors the upstream-requested delay), a garbled/truncated 2xx body,
 // and a Torznab <error> document carrying a generic/server-side code (e.g.
@@ -124,47 +136,19 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, int, 
 // cannot recover a credentials or request-validation failure
 // (terminalTorznabCode). Transient transport errors (timeouts, resets, DNS)
 // already classify via httpx.IsTransient through the returned chain;
-// anything else (a 4xx, an unparseable URL) stays terminal.
+// anything else (a non-retryable 4xx, an unparseable URL) stays terminal.
 func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, http.NoBody)
-	if err != nil {
-		// reqURL derives from the configured endpoint, which validateHTTPURL
-		// permits to carry a username-only userinfo token (and may carry an
-		// apikey query param): net/http returns url.Parse's *url.Error, which
-		// echoes the raw URL into httpx.Do's retry logger and the harvest WARN
-		// (CWE-532). Reduce it to its cause, the same stance the StatusError
-		// and transport paths below take.
-		return nil, httpx.LogSafeError(err)
-	}
-	u.setHeaders(req)
-	resp, err := u.http.Do(req) //nolint:bodyclose // closed on every path: DrainClose (non-2xx statuses) or ReadLimitedBody's own close (2xx)
-	if err != nil {
-		// LogSafeError reduces a URL-embedding *url.Error to its cause
-		// (preserving errors.Is/As, so IsTransient still classifies it),
-		// matching the redaction httpx.GetBytes (v2's Retry) applied here before.
-		return nil, u.attemptError(ctx, err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		retryAfter := httpx.ParseRetryAfter(resp.Header.Get("Retry-After"))
-		httpx.DrainClose(resp.Body)
-		// StatusError's own redactor keeps a username-only userinfo token
-		// (e.g. https://token@prowlarr/1/api, which validateHTTPURL
-		// accepts), and this error reaches httpx.Do's retry logger and the
-		// harvest WARN verbatim - so strip userinfo, query, and fragment
-		// here before the error is constructed. Only the actual HTTP
-		// request keeps the full URL.
-		safeURL := *req.URL
-		safeURL.User = nil
-		safeURL.RawQuery = ""
-		safeURL.Fragment = ""
-		safeURL.RawFragment = ""
-		statusErr := &httpx.StatusError{URL: safeURL.String(), Code: resp.StatusCode}
-		if errors.Is(statusErr, httpx.ErrRateLimited) || errors.Is(statusErr, httpx.ErrServerError) {
-			return nil, &transientUpstreamError{err: statusErr, retryAfter: retryAfter}
-		}
-		return nil, statusErr
-	}
-	body, err := httpx.ReadLimitedBody(resp.Body, upstreamMaxBytes)
+	// GetBytes owns the one-attempt HTTP mechanics: request construction, header
+	// injection, transport-error reduction, non-2xx drain + *StatusError, the
+	// Retry-After parse, and the bounded body read. WithMaxAttempts(1) keeps the
+	// attempt budget single-owner - the enclosing typed Do runs the retries, so
+	// letting GetBytes retry too would multiply the two budgets - which makes
+	// attemptError, not GetBytes, the owner of every retry decision here.
+	body, err := httpx.GetBytes(ctx, u.http, reqURL,
+		httpx.WithMaxAttempts(1),
+		httpx.WithHeaders(u.setHeaders),
+		httpx.WithMaxBodyBytes(upstreamMaxBytes),
+		httpx.WithLogger(u.log))
 	if err != nil {
 		return nil, u.attemptError(ctx, err)
 	}
@@ -175,29 +159,79 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 	return items, nil
 }
 
-// attemptError normalizes the two timeout-bearing exits of one search attempt
-// (the client.Do call and the body read) so a per-attempt deadline stays inside
-// the bounded retry budget. The shared client carries an http.Client.Timeout of
-// UpstreamAttemptTimeout, and when that timer fires the error matches
-// context.DeadlineExceeded - which httpx.IsTransient deliberately treats as
-// TERMINAL before consulting net.Error or the Transient interface, because a
-// caller's expired context must never be retried. That collapsed the documented
-// three-attempt budget to one attempt whenever the attempt timer (not the
-// caller's context) expired: an interactive search failed immediately and the
-// title harvest latched the tracker scope for the whole rebuild.
+// retryableUpstreamStatus reports whether an upstream status is worth another
+// attempt from the enclosing Do. It mirrors GetBytes's own retryable set
+// (408/429/5xx); the app restates it because GetBytes deliberately does not mark
+// its exhaustion error Transient - after WithMaxAttempts(1) that decision is the
+// caller's policy, and only this loop knows the budget it owns.
+func retryableUpstreamStatus(code int) bool {
+	return code == http.StatusRequestTimeout ||
+		code == http.StatusTooManyRequests ||
+		(code >= 500 && code < 600)
+}
+
+// attemptError maps a GetBytes failure onto the retry taxonomy the enclosing
+// Do reads. GetBytes runs with WithMaxAttempts(1), so its every failure exit
+// arrives here and this function alone decides whether the search spends
+// another of its upstreamMaxAttempts.
 //
-// The caller's own context is the terminal signal, so the split is on ctx.Err():
-// still live means the client-owned attempt timer fired, which is retryable. The
-// replacement error deliberately does NOT wrap context.DeadlineExceeded (that
-// identity is what IsTransient rejects first); it carries a fixed log-safe
-// message instead. An actually expired caller context falls through unchanged
-// and stays single-attempt.
+// Three classes:
+//
+//   - A non-2xx surfaces as *httpx.StatusError. A self-healing status
+//     (retryableUpstreamStatus) becomes transient, carrying the response's
+//     already-capped Retry-After forward so Do waits the upstream-requested
+//     delay instead of its jittered backoff; GetBytes exposes that hint on its
+//     exhaustion error via the httpx.RetryAfterHint interface, which it
+//     deliberately does not pair with Transient (the retry decision is the
+//     caller's). Any other status (auth/config 4xx) stays terminal and fails
+//     the search on the first attempt.
+//   - A per-attempt deadline. The shared client carries an http.Client.Timeout
+//     of UpstreamAttemptTimeout, and when that timer fires the error matches
+//     context.DeadlineExceeded - which httpx.IsTransient deliberately treats as
+//     TERMINAL before consulting net.Error or the Transient interface, because a
+//     caller's expired context must never be retried. That collapsed the
+//     documented three-attempt budget to one attempt whenever the attempt timer
+//     (not the caller's context) expired: an interactive search failed
+//     immediately and the title harvest latched the tracker scope for the whole
+//     rebuild. The caller's own context is the terminal signal, so the split is
+//     on ctx.Err(): still live means the client-owned attempt timer fired, which
+//     is retryable. The replacement error deliberately does NOT wrap
+//     context.DeadlineExceeded (that identity is what IsTransient rejects
+//     first); it carries a fixed log-safe message instead. An actually expired
+//     caller context falls through unchanged and stays single-attempt.
+//   - Everything else (transport resets, DNS, an over-cap body) passes through
+//     unchanged for httpx.IsTransient to classify through the error chain.
+//
+// No app-side URL scrub is needed on any path: httpx's redactor drops the whole
+// userinfo component and REDACTs every query value, so the username-only
+// Prowlarr token that validateHTTPURL accepts cannot reach a log line through
+// *StatusError (CWE-532).
 func (u *upstream) attemptError(ctx context.Context, err error) error {
-	safe := httpx.LogSafeError(err)
+	if statusErr, ok := errors.AsType[*httpx.StatusError](err); ok {
+		if !retryableUpstreamStatus(statusErr.Code) {
+			return statusErr
+		}
+		// Unwrap to the status itself: GetBytes's "retries exhausted after 0s"
+		// prefix is noise for a budget the app deliberately set to one attempt.
+		return &transientUpstreamError{err: statusErr, retryAfter: retryAfterHint(err)}
+	}
 	if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
 		return &transientUpstreamError{err: errors.New("upstream request timed out")}
 	}
-	return safe
+	return httpx.LogSafeError(err)
+}
+
+// retryAfterHint returns the capped Retry-After an upstream asked for, or zero
+// when it named none. The hint rides the error chain as an
+// httpx.RetryAfterHint implementer (GetBytes attaches it to the exhaustion
+// error), and it is already bounded by httpx.RetryAfterCap at the parse, so it
+// satisfies the interface's pre-capped contract on the way back out.
+func retryAfterHint(err error) time.Duration {
+	var h httpx.RetryAfterHint
+	if errors.As(err, &h) {
+		return h.RetryAfterHint()
+	}
+	return 0
 }
 
 // classifyParseError maps a parseTorznab failure onto the retry taxonomy.
@@ -264,8 +298,8 @@ func terminalTorznabCode(n int) bool {
 // transientUpstreamError marks an upstream failure retryable for
 // httpx.Do (via the httpx.Transient interface): a retryable
 // status or a malformed successful body, neither of which IsTransient
-// classifies on its own. retryAfter, when positive, is the 429's parsed and
-// capped Retry-After (via httpx.ParseRetryAfter, so it can never exceed
+// classifies on its own. retryAfter, when positive, is the upstream's parsed
+// and capped Retry-After (httpx parses it, so it can never exceed
 // httpx.RetryAfterCap), exposed through RetryAfterHint so Do
 // waits the upstream-requested delay instead of its jittered backoff.
 // malformedBody distinguishes the decode failure of a SUCCESSFUL (2xx)
@@ -457,18 +491,48 @@ func sameHTTPOrigin(raw string, origin *url.URL) bool {
 // Is*Host twins delegate to release.LookupTrackerByHost, which carries the
 // centralized ASCII/homograph gate (urlform.IsASCIIHost) every host-table
 // match inherits.
+// httpDisplayHost admits a raw URL as a browser-destined DISPLAY link and
+// returns its host evidence: an absolute http(s) form, free of userinfo and of
+// the smuggling shapes a browser reads differently from net/url. It is the
+// shared admission prefix of sanitizeDisplayURL (search-path display links) and
+// snapshotInfoURLAllowed's sibling in reload.go.
+//
+// Structural facts come from urlform, the app's classifier of record for exactly
+// this browser-vs-net/url divergence, already applied at internal/seadex's
+// publish gate and internal/filter's evidence gate. The hand-rolled net/url
+// version this replaces was a second taxonomy of the same knowledge, drifting
+// from what the library learns (l-f24): it accepted hidden-host,
+// protocol-relative and backslash-authority forms whose browser reading differs
+// from its own, since it only checked scheme and userinfo. Returned Host is
+// urlform's ASCII-lowercased evidence, so the caller's release.Is*Host lookup
+// (itself gated on urlform.IsASCIIHost) sees the same string a browser would
+// navigate to.
+func httpDisplayHost(raw string) (host string, ok bool) {
+	f := urlform.Classify(raw)
+	if f.Class != urlform.ClassAbsolute || f.Host == "" {
+		return "", false
+	}
+	if f.HasUserInfo || f.HasBackslash || f.HasTabOrNewline {
+		return "", false
+	}
+	if !isHTTPScheme(f.Scheme) {
+		return "", false
+	}
+	return f.Host, true
+}
+
 func sanitizeDisplayURL(scope, raw string) string {
-	u, ok := httpNoUserinfoURL(raw)
+	host, ok := httpDisplayHost(raw)
 	if !ok {
 		return ""
 	}
 	switch scope {
 	case upstreamNyaa:
-		if !release.IsNyaaHost(u.Hostname()) {
+		if !release.IsNyaaHost(host) {
 			return ""
 		}
 	case upstreamAB:
-		if !release.IsAnimeBytesHost(u.Hostname()) {
+		if !release.IsAnimeBytesHost(host) {
 			return ""
 		}
 	default:
