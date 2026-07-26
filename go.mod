@@ -10,7 +10,7 @@ require (
 	github.com/cplieger/webhttp v1.16.0
 )
 
-require go.yaml.in/yaml/v3 v3.0.4
+require go.yaml.in/yaml/v3 v3.0.5
 
 require github.com/cplieger/slogx v1.4.0
 
