@@ -72,10 +72,14 @@ type journalPass struct {
 // either).
 func journalKey(t *seadex.Torrent) string { return trackerKey(t.Tracker, t.URL) }
 
-// identitySignals returns every identity form a curated torrent is known
-// under: its tracker key and its info hash. The seen ledger stores all of
-// them, so novelty detection survives one signal going missing (a URL-shape
-// change upstream, a hash appearing later).
+// identitySignals returns the CROSS-SCOPE identity forms of a curated
+// torrent: its tracker key and its BARE info hash. This is the identity the
+// curation-warned exclusion graph is built over (splitCurationWarned /
+// sharesWarnedIdentity), where a warning against the bytes must retract every
+// tracker listing of them - so the hash deliberately stays un-namespaced.
+// RSS novelty is NOT decided here: the never-pruned seen ledger uses
+// ledgerSignals, whose hash is scope-qualified so the same bytes listed on
+// two trackers stay two separately journalable releases.
 func identitySignals(t *seadex.Torrent) []string {
 	var ids []string
 	if k := journalKey(t); k != "" {
@@ -589,19 +593,18 @@ func (p *journalPass) journalIfNew(t *seadex.Torrent) (it journalItem, scope str
 // persisting anything for it (the README's off switch; its identity is
 // already in seen, so enabling it later starts from current novelty instead
 // of backfilling disabled-era curation), a missing AB passkey
-// counts toward the operator nudge, and an in-scope torrent with no journal
-// key or no parseable title counts as unresolvable so an upstream URL-shape
-// change surfaces on the snapshot log line instead of silently shrinking the
-// feed (unresolvable is counted only for configured scopes).
+// counts toward the operator nudge, and an in-scope torrent with no parseable
+// title counts as unresolvable so an upstream data change surfaces on the
+// snapshot log line instead of silently shrinking the feed (unresolvable is
+// counted only for configured scopes; the keyless case is refused and counted
+// one level up, in journalIfNew).
 func (p *journalPass) newJournalItem(t *seadex.Torrent, scope string) (journalItem, string, bool) {
 	if !p.w.scopeConfigured(scope) {
 		return journalItem{}, "", false
 	}
+	// journalIfNew's keyless guard already refused and counted a torrent with
+	// no journal key, so the key is non-empty by construction here.
 	key := journalKey(t)
-	if key == "" {
-		p.js.unresolvable++
-		return journalItem{}, "", false
-	}
 	it, ok, noPasskey := p.w.renderJournalItem(key, p.cur[key], p.infoFor)
 	if noPasskey {
 		p.js.abSkippedNoPasskey++

@@ -336,45 +336,66 @@ func fillFromCandidate(f *Finding, cand *candidate) {
 // same order-independence representative/candidateStableKey already guarantee
 // for the headline pick.
 func obtainableLinks(pool []candidate, headlineGroup string) []ReleaseLink {
-	seen := make(map[ReleaseLink]struct{}, len(pool))
-	type sourced struct {
-		link ReleaseLink
-		rank int
+	sources := sourcedLinks(pool, headlineGroup)
+	slices.SortFunc(sources, compareSourcedLinks)
+	links := make([]ReleaseLink, 0, len(sources))
+	for i := range sources {
+		links = append(links, sources[i].link)
 	}
-	sources := make([]sourced, 0, len(pool))
+	return links
+}
+
+// sourcedLink is one obtainable link plus its headline rank (0 = a source of
+// the headline candidate's group, 1 = any other source), the key
+// obtainableLinks' total order sorts on.
+type sourcedLink struct {
+	link ReleaseLink
+	rank int
+}
+
+// sourcedLinks collects the pool's distinct URL-carrying links in first-seen
+// order, each ranked headline-first. The rank is computed BEFORE the dedupe so
+// a duplicate link keeps the best rank any of its occurrences earns: the same
+// (tracker, URL) pair can arrive on several candidates whose upstream group
+// metadata differs, and first-occurrence-wins would leave a shared link ranked
+// as a non-headline source purely because the non-headline candidate came
+// first in relation order.
+func sourcedLinks(pool []candidate, headlineGroup string) []sourcedLink {
+	seen := make(map[ReleaseLink]int, len(pool))
+	sources := make([]sourcedLink, 0, len(pool))
 	for i := range pool {
 		u := classify.PublishURL(&pool[i].torrent)
 		if u == "" {
 			continue
 		}
 		link := ReleaseLink{Tracker: pool[i].rel.Tracker, URL: u}
-		if _, dup := seen[link]; dup {
-			continue
-		}
-		seen[link] = struct{}{}
 		rank := 1
 		if release.NormalizeGroup(pool[i].rel.Group) == headlineGroup {
 			rank = 0
 		}
-		sources = append(sources, sourced{link: link, rank: rank})
-	}
-	slices.SortFunc(sources, func(a, b sourced) int {
-		if a.rank != b.rank {
-			if a.rank < b.rank {
-				return -1
-			}
-			return 1
+		if idx, dup := seen[link]; dup {
+			sources[idx].rank = min(sources[idx].rank, rank)
+			continue
 		}
-		if c := strings.Compare(a.link.URL, b.link.URL); c != 0 {
-			return c
-		}
-		return strings.Compare(a.link.Tracker, b.link.Tracker)
-	})
-	links := make([]ReleaseLink, 0, len(sources))
-	for i := range sources {
-		links = append(links, sources[i].link)
+		seen[link] = len(sources)
+		sources = append(sources, sourcedLink{link: link, rank: rank})
 	}
-	return links
+	return sources
+}
+
+// compareSourcedLinks orders collected links headline-group-first, then by URL,
+// then by tracker - the deterministic total order obtainableLinks documents.
+func compareSourcedLinks(a, b sourcedLink) int {
+	if a.rank != b.rank {
+		if a.rank < b.rank {
+			return -1
+		}
+		return 1
+	}
+	if c := strings.Compare(a.link.URL, b.link.URL); c != 0 {
+		return c
+	}
+	return strings.Compare(a.link.Tracker, b.link.Tracker)
 }
 
 // finalize sets a finding's status.

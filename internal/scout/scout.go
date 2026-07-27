@@ -557,8 +557,10 @@ func (s *Scout) recordAniListDegradation(st *state.State, result *match.Result) 
 // escalates a sustained partial ingest. It mirrors recordAniListDegradation
 // exactly: the streak advances/resets only on COMPLETED cycles (a gated or
 // interrupted cycle observed no walk verdict), it runs before the completion
-// line so the WARN and the escalated ERROR both carry the up-to-date streak,
-// and the persisted value rides the caller's save. Without it a single
+// line so the escalated ERROR precedes the degraded-cycle line it explains,
+// and the persisted value rides the caller's save. Unlike the AniList arm the
+// streak is NOT threaded into logCompletedCycle, so consecutive_partial_walks
+// appears on the escalated ERROR only. Without it a single
 // permanently failing series is signalled only by the per-cycle
 // "reason=partial-walk" WARN forever - which in the cold-start window means
 // BaselineIncomplete is re-set every cycle and not one finding is ever

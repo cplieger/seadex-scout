@@ -25,6 +25,9 @@ func TestFeedEntryInfoFallbackChain(t *testing.T) {
 		// A MAPPED record with no Fribb typing at all: the tolerant Fribb
 		// decoder and an override omitting `type` both produce this shape.
 		{AniListID: 20},
+		// The same untyped shape, but carrying a positive season.tvdb and no
+		// routed arr id: the memo's MOVIE format must win the season too.
+		{AniListID: 21, SeasonTvdb: 3},
 	})
 	lib := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 10, TvdbID: 123, Title: "Frieren: Beyond Journey's End", Year: 2023},
@@ -38,6 +41,7 @@ func TestFeedEntryInfoFallbackChain(t *testing.T) {
 		8:  {Titles: []string{"Memo Only Film"}, Year: 2019, Format: "MOVIE"},
 		9:  {Titles: []string{"Memo Only OVA"}, Year: 2018, Format: "OVA"},
 		20: {Titles: []string{"Untyped Film"}, Year: 2017, Format: "MOVIE"},
+		21: {Titles: []string{"Untyped Season Film"}, Year: 2016, Format: "MOVIE"},
 	}}
 	info := feedEntryInfo(idx, lib, memo)
 
@@ -93,6 +97,16 @@ func TestFeedEntryInfoFallbackChain(t *testing.T) {
 	// it (the l-f70 symptom, left open for the mapped-but-untyped shape).
 	if untyped := info(20); untyped.Title != "Untyped Film" || !untyped.IsMovie || untyped.SeasonKnown {
 		t.Errorf("info(20) = %+v, want the memo title typed as a movie", untyped)
+	}
+
+	// The same untyped shape carrying a positive season.tvdb: the caller
+	// resolves that season BEFORE the memo types the entry as a movie, and a
+	// movie pins no season at all (resolvedSeason's Radarr-first arm), so the
+	// season must not survive the memo typing. Otherwise the feed publishes a
+	// Movies/2000 item whose synthesized title carries an SNN season label,
+	// which Radarr can fail to parse and match.
+	if untypedSeason := info(21); untypedSeason.Title != "Untyped Season Film" || !untypedSeason.IsMovie || untypedSeason.SeasonKnown || untypedSeason.Season != 0 {
+		t.Errorf("info(21) = %+v, want a memo-typed movie with no resolved season", untypedSeason)
 	}
 
 	// A negative memo entry supplies nothing.

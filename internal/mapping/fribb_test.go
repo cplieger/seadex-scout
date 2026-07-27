@@ -1,6 +1,8 @@
 package mapping
 
 import (
+	"errors"
+	"io"
 	"log/slog"
 	"reflect"
 	"strconv"
@@ -490,6 +492,33 @@ func TestParseFribb_cleanParseEmitsNoLogs(t *testing.T) {
 	}
 	if msgs := rec.Messages(); len(msgs) != 0 {
 		t.Errorf("clean parse logged %v, want no log lines (skipped=0 and dropped=0 must stay silent)", msgs)
+	}
+}
+
+// TestParseFribb_emptyBodyIsNotTheNonArraySentinel pins the empty-body carve-out:
+// a zero-length or whitespace-only 200 has NO first token, so it is a TRANSIENT
+// parse failure and must NOT carry errNotJSONArray - that sentinel routes through
+// rejectRefresh and advances the persisted rejection streak toward escalation,
+// which a body that can succeed on the next attempt has not earned. The object
+// and null documents stay on the sentinel.
+func TestParseFribb_emptyBodyIsNotTheNonArraySentinel(t *testing.T) {
+	for _, body := range []string{"", "   ", "\n\t"} {
+		_, err := parseFribbForRefresh([]byte(body), discardLogger())
+		if err == nil {
+			t.Fatalf("parseFribbForRefresh(%q) error = nil, want an empty-body error", body)
+		}
+		if errors.Is(err, errNotJSONArray) {
+			t.Errorf("parseFribbForRefresh(%q) error = %v, want a transient parse failure, not the errNotJSONArray sentinel (it advances the persisted rejection streak)", body, err)
+		}
+		if !errors.Is(err, io.EOF) {
+			t.Errorf("parseFribbForRefresh(%q) error = %v, want it to wrap io.EOF", body, err)
+		}
+	}
+	if _, err := parseFribbForRefresh([]byte(`{"a":1}`), discardLogger()); !errors.Is(err, errNotJSONArray) {
+		t.Errorf("object body error = %v, want the errNotJSONArray sentinel to be unaffected by the empty-body carve-out", err)
+	}
+	if _, err := parseFribbForRefresh([]byte(`null`), discardLogger()); !errors.Is(err, errNotJSONArray) {
+		t.Errorf("null body error = %v, want the errNotJSONArray sentinel to be unaffected by the empty-body carve-out", err)
 	}
 }
 

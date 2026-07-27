@@ -29,6 +29,8 @@ func FuzzCapBoundsAndPreservesHonestValues(f *testing.F) {
 	f.Add(strings.Repeat("a", MaxBytes-1) + "日")        // rune straddles the budget edge
 	f.Add(strings.Repeat("a", MaxBytes-1) + "\xff\xff") // invalid bytes at the budget edge
 	f.Add(strings.Repeat("\u202e", MaxBytes/3+100))     // sanitizing SHRINKS below the budget
+	f.Add("honest title...")                            // honest value whose own tail is the marker
+	f.Add(strings.Repeat("c", MaxBytes+50) + "...")     // truncated AND marker-tailed content
 	f.Fuzz(func(t *testing.T, raw string) {
 		got := Cap(raw)
 		if len(got) > MaxBytes+len(TruncMarker) {
@@ -37,11 +39,20 @@ func FuzzCapBoundsAndPreservesHonestValues(f *testing.F) {
 		if !utf8.ValidString(got) {
 			t.Fatalf("Cap(%d bytes) is not valid UTF-8", len(raw))
 		}
-		if !strings.HasSuffix(got, TruncMarker) {
-			if want := runesafe.Sanitize(raw); got != want {
-				t.Fatalf("Cap(%d bytes) dropped bytes without the %q marker: got %d bytes, want the sanitized %d",
-					len(raw), TruncMarker, len(got), len(want))
-			}
+		// The marker is content, not metadata: a value whose own sanitized tail is
+		// "..." would skip the equality check below, so assert the invariant that
+		// holds either way first. Cap only ever cuts a suffix (Sanitize is a
+		// per-rune map and both caps land on rune boundaries), so the result minus
+		// one marker is always a prefix of the sanitized input - an interior byte
+		// dropped silently fails this whether or not the value was truncated.
+		want := runesafe.Sanitize(raw)
+		if !strings.HasPrefix(want, strings.TrimSuffix(got, TruncMarker)) {
+			t.Fatalf("Cap(%d bytes) = %q, want a prefix of the sanitized input (%d bytes)",
+				len(raw), got, len(want))
+		}
+		if !strings.HasSuffix(got, TruncMarker) && got != want {
+			t.Fatalf("Cap(%d bytes) dropped bytes without the %q marker: got %d bytes, want the sanitized %d",
+				len(raw), TruncMarker, len(got), len(want))
 		}
 	})
 }
@@ -60,11 +71,18 @@ func FuzzJoinerBoundsAggregate(f *testing.F) {
 	f.Fuzz(func(t *testing.T, a, b, c string) {
 		j := NewJoiner()
 		accepted := 0
+		// Whether the joiner refused a write that carried bytes: an empty piece
+		// drops nothing, so only a non-empty piece or a separator obliges the
+		// truncation signal.
+		refusedBytes := false
 		for _, piece := range []string{a, b, c} {
-			if accepted > 0 {
-				j.WriteSep(",")
+			if accepted > 0 && !j.WriteSep(",") {
+				refusedBytes = true
 			}
 			if !j.Write(piece) {
+				if piece != "" {
+					refusedBytes = true
+				}
 				// An exhausted joiner must keep refusing, or a streaming caller
 				// cannot know when to stop.
 				if j.Write(piece) {
@@ -80,6 +98,9 @@ func FuzzJoinerBoundsAggregate(f *testing.F) {
 		}
 		if !utf8.ValidString(got) {
 			t.Fatal("joined attribute is not valid UTF-8")
+		}
+		if refusedBytes && !strings.HasSuffix(got, TruncMarker) {
+			t.Fatalf("joiner refused a non-empty write without the %q marker: got %q", TruncMarker, got)
 		}
 	})
 }

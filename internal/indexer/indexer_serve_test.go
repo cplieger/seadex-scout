@@ -3,7 +3,6 @@ package indexer
 import (
 	"context"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -321,9 +320,10 @@ func TestQueryFeedDefaultLimit(t *testing.T) {
 
 // TestReloadKeepsFeedOnUnreadableSnapshot pins the read-failure leg of reload's
 // resilience contract (the sibling of the malformed-JSON case): once a good
-// feed is loaded, a snapshot path that stats fine but cannot be read (here a
-// directory - a root-safe EISDIR injection) is warned about and ignored, never
-// blanking the live feed.
+// feed is loaded, a snapshot that stats as a regular file but cannot be read
+// (here one past the bounded-read limit - a root-safe injection, unlike a
+// chmod, which a root test process reads anyway) is warned about and ignored,
+// never blanking the live feed.
 func TestReloadKeepsFeedOnUnreadableSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	if err := seedRebuild(path, nyaaTestEntries(1)); err != nil {
@@ -335,13 +335,11 @@ func TestReloadKeepsFeedOnUnreadableSnapshot(t *testing.T) {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
 
-	// Replace the snapshot with a directory at a newer mtime: os.Stat succeeds,
-	// the bounded read fails (EISDIR), and the served feed must survive.
-	if err := os.Remove(path); err != nil {
-		t.Fatalf("remove snapshot: %v", err)
-	}
-	if err := os.Mkdir(path, 0o755); err != nil {
-		t.Fatalf("mkdir over snapshot: %v", err)
+	// Overwrite the snapshot with a regular file past maxFeedBytes at a newer
+	// mtime: os.Stat and the regular-file gate both pass, the bounded read
+	// fails, and the served feed must survive.
+	if err := os.WriteFile(path, make([]byte, maxFeedBytes+1), 0o600); err != nil {
+		t.Fatalf("write oversized snapshot: %v", err)
 	}
 	bumpMtime(t, path)
 	ix.cache.refresh(context.Background())
@@ -350,6 +348,40 @@ func TestReloadKeepsFeedOnUnreadableSnapshot(t *testing.T) {
 	}
 	if !rec.Contains("indexer feed snapshot unreadable") {
 		t.Errorf("unreadable snapshot not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestReloadKeepsFeedOnNonRegularSnapshotPath pins statSnapshot's regular-file
+// gate: a snapshot path replaced by anything that is not a regular file (here a
+// directory - the root-safe stand-in for the FIFO, socket, and device forms) is
+// refused BEFORE the bounded read opens it, warned about once, and leaves the
+// live feed serving. The gate is what stops a FIFO at the path from blocking
+// os.Open past the warm-load timeout, which would leave the daemon binding
+// neither the Torznab listener nor the compare loop.
+func TestReloadKeepsFeedOnNonRegularSnapshotPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	if err := seedRebuild(path, nyaaTestEntries(1)); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	log, rec := capture.New()
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, log, Upstreams{})
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+		t.Fatalf("initial feed = %d items, want 1", len(got))
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove snapshot: %v", err)
+	}
+	if err := os.Mkdir(path, 0o750); err != nil {
+		t.Fatalf("mkdir over snapshot: %v", err)
+	}
+	bumpMtime(t, path)
+	ix.cache.refresh(context.Background())
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+		t.Errorf("feed after non-regular snapshot path = %d items, want 1 (a refused path must not blank a live feed)", len(got))
+	}
+	if !rec.Contains("indexer feed snapshot path is not a regular file; refusing to load it") {
+		t.Errorf("non-regular snapshot path not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }
 
@@ -388,7 +420,7 @@ func TestQueryCallerCancellationIsNotWarnedAsUpstreamFault(t *testing.T) {
 
 // TestReloadWarnsOnStatFailure pins the stat-error visibility leg of reload:
 // an os.Stat failure other than fs.ErrNotExist (here ENOTDIR via a
-// regular-file parent, the same root-safe injection
+// regular-file parent, root-safe in the same way as the bounded-read overflow
 // TestReloadKeepsFeedOnUnreadableSnapshot uses for reads) must be warned
 // about - a silent stat failure would invisibly freeze the served feed - while
 // the current (empty) feed is kept.
@@ -681,7 +713,7 @@ func TestServeBoundsConcurrentQueries(t *testing.T) {
 	busy := httptest.NewRecorder()
 	ix.serve(busy, httptest.NewRequest(http.MethodGet, "/nyaa?t=tvsearch&q=Frieren&apikey=k", nil).WithContext(probeCtx))
 	body := busy.Body.String()
-	if !strings.Contains(body, `<error code="900"`) || !strings.Contains(body, "too many concurrent searches") {
+	if !strings.Contains(body, `<error code="900"`) || !strings.Contains(body, "too many concurrent requests") {
 		t.Errorf("over-limit body = %q, want a Torznab <error> naming the concurrency limit", body)
 	}
 	if strings.Contains(body, "<rss") {
@@ -713,7 +745,7 @@ func TestServeBoundsConcurrentQueries(t *testing.T) {
 	}
 	// The gate is a bound, not a latch: with the burst drained a search serves
 	// normally again.
-	if got := search(); strings.Contains(got.Body.String(), "too many concurrent searches") {
+	if got := search(); strings.Contains(got.Body.String(), "too many concurrent requests") {
 		t.Error("a search after the burst drained was still answered busy; the gate leaked a slot")
 	}
 }
@@ -750,6 +782,10 @@ func TestServeCapsNotGatedByQueryLimit(t *testing.T) {
 // caps, authorized RSS, unscoped 404, bad-key 401) through the SERVED
 // middleware chain, so the access line is covered alongside the domain lines;
 // the wrong-key value embeds the real key, so leaking either value fails.
+// The property rests on webhttp's RequestLogger recording r.URL.Path only and
+// on serve's whitelist of logged params; webhttp is Renovate-bumped, so a
+// library change could start recording the query string - which is why this is
+// asserted here rather than only stated in a comment.
 func TestServeNeverLogsTheFeedAPIKey(t *testing.T) {
 	const feedKey = "feed-key-not-a-secret"
 	log, rec := capture.New()
@@ -839,40 +875,5 @@ func TestServeAppliesLogParamToRequestControlledValues(t *testing.T) {
 	}
 	if strings.ContainsAny(host, "\n\r") {
 		t.Errorf("logged host = %q, want control characters flattened", host)
-	}
-}
-
-// TestChainNeverLogsTheFeedAPIKey pins the credential-in-logs contract the
-// chain documents: the Torznab apikey arrives as a QUERY parameter, and no
-// line the served stack emits - webhttp's access line, the domain rejection
-// lines, or the per-request query line - may carry it, because those records
-// ship to Loki. The property rests on webhttp's RequestLogger recording
-// r.URL.Path only and on serve's whitelist of logged params; both are
-// upstream-changeable, so it is asserted here rather than only in a comment.
-func TestChainNeverLogsTheFeedAPIKey(t *testing.T) {
-	const key = "feed-api-key-with-entropy"
-	log, rec := capture.New()
-	h := New(&Config{APIKey: key}, log, Upstreams{}).chain()
-	for _, target := range []string{
-		"/nyaa?t=caps&apikey=" + key,
-		"/nyaa?t=search&apikey=" + key,
-		"/other?t=caps&apikey=" + key,
-	} {
-		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, target, nil))
-	}
-	records := rec.Records()
-	if len(records) == 0 {
-		t.Fatal("no log records captured; the test did not exercise the logging chain")
-	}
-	for _, r := range records {
-		if strings.Contains(r.Message, key) {
-			t.Errorf("log message leaks the feed api key: %q", r.Message)
-		}
-		r.Attrs(func(a slog.Attr) bool {
-			if strings.Contains(a.Value.String(), key) {
-				t.Errorf("log attr %q leaks the feed api key: %q", a.Key, a.Value.String())
-			}
-			return true
-		})
 	}
 }

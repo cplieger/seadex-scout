@@ -33,10 +33,13 @@ const (
 	// attribute slice per token at ~10x per-attr overhead (CWE-400).
 	upstreamMaxBytes = 8 << 20
 	// minEmbeddedSecretLen is the length from which a query VALUE on the
-	// configured feed URL is treated as a credential by upstreamSecrets. It
-	// matches the floor config already applies to indexer.feed_api_key, so a
-	// structural value ("?indexer=1") is never substituted out of a
-	// diagnostic while a real 32-hex Prowlarr key always is.
+	// configured feed URL is treated as a credential by upstreamSecrets even
+	// though its parameter NAME says nothing about credentials. It matches the
+	// floor config already applies to indexer.feed_api_key, so a structural
+	// value ("?indexer=1") is never substituted out of a diagnostic while an
+	// unlabelled 32-hex token still is. A credential-NAMED parameter is a
+	// secret at any length (credentialParamName), so this floor never gates
+	// the shapes config actually warns about.
 	minEmbeddedSecretLen = 16
 )
 
@@ -249,6 +252,14 @@ func retryAfterHint(err error) time.Duration {
 // spoofed Prowlarr can therefore reflect either one back inside an <error>
 // document or a decode-error message, so both belong in the same
 // exact-substring redaction the header key already gets.
+//
+// The query is scanned on the RAW query string, split on both '&' and ';': that
+// is the string the outgoing request carries, and it is a strict superset of
+// url.Values (which discards a whole semicolon-delimited pair, leaving its value
+// transmitted but uncollected). A value is a secret when its parameter name is
+// credential-like at ANY length, or when an unlabelled value is long enough to
+// be a token (minEmbeddedSecretLen); both the raw and the percent-decoded form
+// are registered, since a reflection can echo either.
 func (u *upstream) upstreamSecrets() []string {
 	secrets := []string{u.apiKey}
 	parsed, err := url.Parse(u.feed)
@@ -264,14 +275,51 @@ func (u *upstream) upstreamSecrets() []string {
 			secrets = append(secrets, pw)
 		}
 	}
-	for _, values := range parsed.Query() {
-		for _, v := range values {
-			if len(v) >= minEmbeddedSecretLen {
-				secrets = append(secrets, v)
-			}
+	for _, pair := range strings.FieldsFunc(parsed.RawQuery, isRawQuerySeparator) {
+		name, value, _ := strings.Cut(pair, "=")
+		if value == "" {
+			continue
+		}
+		if !credentialParamName(name) && len(value) < minEmbeddedSecretLen {
+			continue
+		}
+		secrets = append(secrets, value)
+		if decoded, err := url.QueryUnescape(value); err == nil && decoded != value {
+			secrets = append(secrets, decoded)
 		}
 	}
 	return secrets
+}
+
+// isRawQuerySeparator reports whether r separates two raw query pairs. ';' is
+// included because config's own credential scan treats it as a separator
+// (urlform.RawQueryNames): net/url discards such a pair wholesale while the raw
+// query - credential and all - still rides the outgoing request.
+func isRawQuerySeparator(r rune) bool {
+	return r == '&' || r == ';'
+}
+
+// credentialParamName reports whether a query-parameter name (possibly
+// percent-encoded) names a credential, so its value is a secret regardless of
+// length. internal/config's isCredentialParam is the canonical NAME LIST for
+// the operator-facing warning, but this package deliberately takes no
+// internal/config dependency (only the composition root imports it), so the
+// rule here is expressed as the credential-word substrings that list is built
+// from - deliberately BROADER, so a name config adds later is already covered
+// here rather than silently unredacted. Over-matching only costs a mangled
+// diagnostic; under-matching writes a credential to Loki (CWE-532).
+func credentialParamName(name string) bool {
+	decoded, err := url.QueryUnescape(name)
+	if err != nil {
+		decoded = name
+	}
+	decoded = strings.ToLower(decoded)
+	for _, word := range []string{"key", "token", "pass", "secret", "auth", "cred"} {
+		if strings.Contains(decoded, word) {
+			return true
+		}
+	}
+	return false
 }
 
 // redactSecrets removes every credential this upstream carries from untrusted

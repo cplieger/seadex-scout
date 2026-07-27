@@ -928,6 +928,48 @@ func TestRunLoopQueueErrorAfterRun(t *testing.T) {
 	}
 }
 
+// TestRunLoopMarkerWriteFailure pins the daemon tick's marker-write failure
+// branch: the tick has no exit code to report the write through and the failure
+// does not self-heal (a full disk, a bad mode on /tmp), so its ERROR line is the
+// only signal the operator gets - the level alerts.yaml's SeadexScoutCycleError
+// rule keys on. Without it a wedged marker restarts the container at
+// WithMaxAge(3*poll_interval) with no logged cause. The marker's directory is
+// present at construction (so the marker does not enter its degraded no-op
+// mode) and is then replaced by a regular file, so SetChecked fails for every
+// UID (root-safe, unlike a read-only-dir chmod). Serial (capture swaps
+// slog.Default).
+func TestRunLoopMarkerWriteFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	rec := captureAndCancelOn(t, cancel, "tick could not record cycle health")
+	defer cancel()
+	markerDir := filepath.Join(t.TempDir(), "marker-dir")
+	if err := os.Mkdir(markerDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := health.NewMarker(filepath.Join(markerDir, ".healthy"))
+	if err := os.Remove(markerDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(markerDir, []byte("blocker"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		RunLoop(ctx, time.Hour, testExclusive(t, ctx), boolCycler(true), marker)
+	}()
+	<-done
+
+	const msg = "tick could not record cycle health"
+	if got := rec.CountLevel(slog.LevelError, msg); got != 1 {
+		t.Errorf("tick marker-failure ERROR count = %d, want 1 (alerts.yaml's level=ERROR rule is this fault's only report): %v", got, rec.Messages())
+	}
+	if !rec.AttrContains(msg, "error", ".healthy") {
+		t.Errorf("ERROR line lost the failing marker path: %v", rec.Records())
+	}
+}
+
 // TestInterruptedClassifiesNonCanceledCause pins poll's interruption
 // classification against a cancellation cause that does NOT itself wrap
 // context.Canceled. A WithCancelCause cause is whatever the cancelling site

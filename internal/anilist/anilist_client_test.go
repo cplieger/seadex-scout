@@ -388,6 +388,41 @@ func TestParseMediaPageDuplicateIDExcluded(t *testing.T) {
 	}
 }
 
+// TestParseMediaPageUndecodableDuplicateIDExcluded pins the same fail-closed
+// policy across an UNDECODABLE duplicate, in either order. encoding/json keeps
+// populating decodable fields after a type error, so a positive id on a
+// malformed element is still an identity claim: whether the malformed record
+// precedes or follows the well-formed one, no record for that id survives and
+// an unrelated sibling does.
+func TestParseMediaPageUndecodableDuplicateIDExcluded(t *testing.T) {
+	const (
+		valid     = `{"id":1,"format":"TV","seasonYear":2020,"title":{"romaji":"valid"}}`
+		malformed = `{"id":1,"format":"TV","seasonYear":"bad","title":{"romaji":"malformed"}}`
+		sibling   = `{"id":2,"format":"TV","seasonYear":2020,"title":{"romaji":"sibling"}}`
+	)
+	for name, media := range map[string][]string{
+		"malformed first":  {malformed, valid, sibling},
+		"malformed second": {valid, malformed, sibling},
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw := []byte(`{"data":{"Page":{"media":[` + strings.Join(media, ",") + `]}}}`)
+			out, err := parseMediaPage(raw)
+			if err == nil {
+				t.Fatal("parseMediaPage must surface the undecodable record")
+			}
+			if !errors.Is(err, ErrBatchRecord) {
+				t.Errorf("error = %v, want ErrBatchRecord classification", err)
+			}
+			if got, ok := out[1]; ok {
+				t.Errorf("out[1] = %+v, want the conflicting id excluded regardless of order", got)
+			}
+			if got := out[2].Titles; !slices.Equal(got, []string{"sibling"}) {
+				t.Errorf("out[2].Titles = %v, want [sibling] (valid sibling must survive)", got)
+			}
+		})
+	}
+}
+
 // TestFetchCountsEveryHTTPAttempt proves Stats().Calls counts outbound HTTP
 // attempts, not logical fetches: two 429s followed by success are three
 // attempts (and two rate-limit waits), so the counter keeps its request-volume
@@ -741,6 +776,24 @@ func TestFetchManyRequestFailureAfterCompletedChunkReturnsPartial(t *testing.T) 
 	if !errors.As(err, &statusErr) {
 		t.Errorf("error = %v, want *httpx.HTTPStatusError from the failed chunk", err)
 	}
+	// The abort path's own contract: the aborting chunk and every chunk after it
+	// are UNVERIFIED, while the completed chunk's absences stay memoizable
+	// negatives. If the scoping regressed to include the completed chunk's ids,
+	// match.prefetch would stop negative-memoizing ids it legitimately proved
+	// absent; if it regressed to exclude the aborting chunk's, it would
+	// negative-memoize ids whose chunk never ran.
+	var batchErr *BatchRecordError
+	if !errors.As(err, &batchErr) {
+		t.Fatalf("error = %v, want *BatchRecordError scoping the abort to its chunks", err)
+	}
+	if got, want := len(batchErr.UnverifiedIDs), len(ids)-batchSize; got != want {
+		t.Errorf("UnverifiedIDs = %d ids, want %d (only the aborting second chunk)", got, want)
+	}
+	for _, id := range batchErr.UnverifiedIDs {
+		if id <= batchSize {
+			t.Errorf("UnverifiedIDs contains %d, which belongs to the completed first chunk", id)
+		}
+	}
 	if out == nil {
 		t.Fatal("FetchMany() result = nil, want the completed first chunk preserved")
 	}
@@ -988,5 +1041,44 @@ func TestFetchDoesNotRetryUnparseableBody(t *testing.T) {
 	}
 	if got := c.Stats().Calls; got != 1 {
 		t.Errorf("Stats().Calls = %d, want 1 (a malformed body must not be retried as an upstream fault)", got)
+	}
+}
+
+// TestEnvelopeRateLimitCountsOneWait pins the interaction between the
+// envelope-429 path and the proactive low-budget observer: a single HTTP-200
+// carrying errors:[{status:429}] alongside X-RateLimit-Remaining: 0 is ONE
+// rate-limit response, so it must penalize the throttle once and report one
+// Stats().RateLimitWaits. Observing the budget headers before classifying the
+// envelope reported that one response as two waits, which desynchronizes the
+// cycle-complete anilist_waits counter from the events it documents.
+func TestEnvelopeRateLimitCountsOneWait(t *testing.T) {
+	var mu sync.Mutex
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		attempts++
+		n := attempts
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if n == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			_, _ = io.WriteString(w, `{"errors":[{"message":"Too Many Requests","status":429}]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"data":{"Media":{"id":1,"format":"TV","seasonYear":2023,"title":{"romaji":"A"}}}}`)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	if _, err := c.Fetch(context.Background(), 1); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	got := c.Stats()
+	if got.Calls != 2 {
+		t.Errorf("Stats().Calls = %d, want 2 (the envelope 429 is retried once)", got.Calls)
+	}
+	if got.RateLimitWaits != 1 {
+		t.Errorf("Stats().RateLimitWaits = %d, want 1 (one rate-limit response is one wait)", got.RateLimitWaits)
 	}
 }

@@ -237,13 +237,24 @@ func pathShaped(rooted string) bool {
 // report an unpublishable URL instead. The authority is located by the "://"
 // separator (present in every absolute form usableAbsolute admits, since it
 // already required an http(s) scheme) and absent from a schemeless value.
+//
+// The tail past that first delimiter must carry at least one NON-delimiter
+// character: a remainder made only of further delimiters ("nyaa.si/?",
+// "nyaa.si/#", "nyaa.si//") still resolves to the front page, so it names no
+// target either - the same reading pathShaped already applies to the
+// equivalent relative spellings. A genuinely targeted root query
+// ("nyaa.si/?page=view&tid=1") is kept, which is why this arm is not a
+// pathShaped delegation.
 func hostFormTargeted(trimmed string) bool {
 	rest := trimmed
 	if i := strings.Index(rest, "://"); i >= 0 {
 		rest = rest[i+len("://"):]
 	}
 	i := strings.IndexAny(rest, "/?#")
-	return i >= 0 && i < len(rest)-1
+	if i < 0 {
+		return false
+	}
+	return strings.Trim(rest[i:], "/?#") != ""
 }
 
 // httpsCanonical rewrites a vouched absolute link's cleartext scheme to https.

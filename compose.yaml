@@ -11,8 +11,8 @@ services:
     environment:
       SONARR_API_KEY: "${SONARR_API_KEY:-}"
       RADARR_API_KEY: "${RADARR_API_KEY:-}"
-      # Indexer feed only. Configuring it makes the daemon bind :9118, which the
-      # arrs must be able to reach - publish the port or share a network with them.
+      # Indexer feed only. Setting a Torznab URL in config.yaml makes the daemon bind
+      # :9118, which the arrs must reach - publish the port or share a network with them.
       SEADEX_SCOUT_FEED_KEY: "${SEADEX_SCOUT_FEED_KEY:-}"
       SEADEX_SCOUT_PROWLARR_KEY: "${SEADEX_SCOUT_PROWLARR_KEY:-}"
       SEADEX_SCOUT_AB_PASSKEY: "${SEADEX_SCOUT_AB_PASSKEY:-}"

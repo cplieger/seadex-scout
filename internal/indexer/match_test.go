@@ -132,6 +132,8 @@ func TestTrackerIDExtractionRejectsNonCanonicalRoutes(t *testing.T) {
 		{"ab permalink route not at path start", animeBytesID("https://animebytes.tv/x/torrent/123/group")},
 		{"nyaa view path with a dot segment", nyaaID("https://nyaa.si/view/123/../456")},
 		{"ab permalink path with a dot segment", animeBytesID("https://animebytes.tv/torrent/123/../456/group")},
+		{"nyaa view path with a percent-encoded dot segment", nyaaID("https://nyaa.si/view/123/%2e%2e/456")},
+		{"ab permalink path with a percent-encoded dot segment", animeBytesID("https://animebytes.tv/torrent/123/%2E%2E/456/group")},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

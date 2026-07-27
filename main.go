@@ -329,9 +329,10 @@ func reportWriteContext(ctx context.Context) (context.Context, context.CancelFun
 // DETACHED write context (reportWriteContext's else branch, taken only because a
 // shutdown had already cancelled the caller). Exhausting that shutdown grace is
 // the shutdown truncating the run - a transient, designed outcome - not the
-// upstream operation timeout dispatchOutcome's DeadlineExceeded arm is written
-// for, and alerts.yaml documents a shutdown-interrupted run as excluded from the
-// level=ERROR cycle-error rule. Adding the caller's ctx.Err() makes main's single
+// genuine operation timeout that dispatchOutcome's default arm reports at
+// level=ERROR, and alerts.yaml documents a shutdown-interrupted run as excluded
+// from the level=ERROR cycle-error rule. Adding the caller's ctx.Err() makes
+// main's single
 // errors.Is(err, context.Canceled) check classify it WARN (still exit 1: the pair
 // did not land). Any other write failure - ENOSPC, EACCES, an encode error - is a
 // genuine fault and passes through untouched.
@@ -420,11 +421,13 @@ func run(cfg *config.Config) error {
 	defer stop()
 
 	// The process-level completion record is registered before the cleanup
-	// defers below, so (defers run LIFO) it logs only after the indexer's
-	// graceful drain, the client cleanup, and the health-marker removal have
-	// all finished - "shutdown complete" then truthfully reports shutdown
-	// progress to Loki. normalShutdown guards it so a startup-error return
-	// does not log a successful shutdown.
+	// defers below, so (defers run LIFO) it logs after the indexer's drain has
+	// been waited out (bounded by indexerStopWait), the client cleanup, and the
+	// health-marker removal. A drain that outruns that bound is reported by
+	// startIndexer's WARN and its goroutine may log after this line, so the WARN
+	// - not the ordering - is what tells Loki the drain did not complete.
+	// normalShutdown guards it so a startup-error return does not log a
+	// successful shutdown.
 	normalShutdown := false
 	defer func() {
 		if normalShutdown {

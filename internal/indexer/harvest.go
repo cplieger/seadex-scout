@@ -278,14 +278,18 @@ func (h *harvester) processHarvestGroup(ctx context.Context, g harvestGroup, r *
 		return true
 	}
 	before, beforeMatched := r.stats.queries, r.stats.matched
-	rejectedBefore := r.stats.rejected
-	outcome, nextPage := h.harvestShow(ctx, u, g, r.infoFor(g.alID), r, r.checkpoint.Pages[key])
+	outcome, nextPage, refused := h.harvestShow(ctx, u, g, r.infoFor(g.alID), r, r.checkpoint.Pages[key])
 	// A show whose every candidate result was refused for contradictory
 	// identity signals answered cleanly but resolved nothing: it is a
 	// no-progress show for the fruitless backstop, even though its query
 	// succeeded. A page that simply matched nothing is NOT contradicted, so
-	// the ordinary miss still resets the run.
-	contradicted := r.stats.matched == beforeMatched && r.stats.rejected > rejectedBefore
+	// the ordinary miss still resets the run - and neither is a rejection of a
+	// result that never named one of this show's pending releases: a tracker
+	// answering the same broad series-level corpus to every query (AnimeBytes
+	// does) would otherwise let ONE unrelated malformed item in that corpus
+	// condemn the whole scope after consecutiveFruitlessLatch clean shows
+	// (d-gpt-u8-1).
+	contradicted := r.stats.matched == beforeMatched && refused
 	if r.stats.matched > beforeMatched && (outcome == harvestShowMalformed || outcome == harvestShowFailed) {
 		// The show harvested real titles before a LATER page failed
 		// show-locally (a deep offset the upstream garbles or rejects). All
@@ -532,9 +536,11 @@ func (h *harvester) updateHarvestScopeState(scope string, outcome harvestOutcome
 			return
 		}
 	}
-	// Every arm above is a failure, whichever kind: charge the no-progress run
-	// and latch when even a mixed sequence has produced nothing. Skipped when a
-	// per-kind latch already fired, so the two never double-warn.
+	// Reached by every failure arm, whichever kind, and by a SUCCESSFUL show that
+	// resolved nothing because every candidate was refused as contradictory:
+	// charge the no-progress run and latch when even a mixed sequence has produced
+	// nothing. The latch is skipped when a per-kind latch already fired, so the two
+	// never double-warn.
 	l.fruitless[scope]++
 	if !l.blocked(scope) && l.fruitless[scope] >= consecutiveFruitlessLatch {
 		h.log.Warn("indexer title harvest: no show made progress; skipping this upstream's remaining shows this rebuild",
@@ -664,20 +670,27 @@ const consecutiveFruitlessLatch = 2 * consecutiveMalformedLatch
 // deliberately rejected this one show's query, so its siblings' valid queries
 // still run — unless a run of rejections trips the caller's
 // consecutiveRejectedLatch.
-func (h *harvester) harvestShow(ctx context.Context, u *upstream, g harvestGroup, meta EntryInfo, r *harvestRun, startPage int) (outcome harvestOutcome, nextPage int) {
+//
+// refused reports whether any page REFUSED one of this show's own pending
+// releases for contradictory identity signals (matchHarvest's pendingRejected).
+// A show that resolved nothing because its candidates were all refused
+// harvested nothing while answering cleanly, which is the caller's no-progress
+// signal; rejections of unrelated items on the same broad result page are not.
+func (h *harvester) harvestShow(ctx context.Context, u *upstream, g harvestGroup, meta EntryInfo, r *harvestRun, startPage int) (outcome harvestOutcome, nextPage int, refused bool) {
 	params := harvestParams(meta, g.scope)
 	page := max(startPage, 0)
 	for range harvestShowPageCap {
 		if !r.pacer.next(ctx) {
-			return harvestOK, page
+			return harvestOK, page, refused
 		}
 		r.stats.queries++
 		results, raw, failure, ok := h.searchHarvestPage(ctx, u, g, params, page)
 		if !ok {
-			return failure, page
+			return failure, page, refused
 		}
-		matched, rejected := matchHarvest(results, g.scope, r.index, r.titles, meta.Title)
+		matched, rejected, pendingRejected := matchHarvest(results, g.scope, r.index, r.titles, meta.Title)
 		r.stats.matched += matched
+		refused = refused || pendingRejected > 0
 		if rejected > 0 {
 			// A result whose own identity signals contradict each other is an
 			// untrusted upstream response, not an operator fault: it resolves
@@ -690,11 +703,11 @@ func (h *harvester) harvestShow(ctx context.Context, u *upstream, g harvestGroup
 				"upstream", u.name, "al_id", g.alID, "page", page, "rejected", rejected)
 		}
 		if harvestPageComplete(g, r.titles, raw) {
-			return harvestOK, 0
+			return harvestOK, 0, refused
 		}
 		page++
 	}
-	return harvestOK, page
+	return harvestOK, page, refused
 }
 
 // searchHarvestPage runs one harvest page's upstream query and classifies its
@@ -923,7 +936,15 @@ const harvestMaxTitleLen = 512
 // simply are not ours (a season query returns the tracker's whole page) resolve
 // no key at all and are NOT counted - they are the overwhelming majority and
 // carry no signal.
-func matchHarvest(results []item, scope string, index, titles map[string]string, showTitle string) (matched, rejected int) {
+//
+// pendingRejected is the subset of those rejections that touched a PENDING
+// identity (pendingHarvestRefusal): the ones that actually refused one of this
+// show's own candidate releases. Only that subset licenses the caller's
+// no-progress inference - a result whose comments and guid disagree with each
+// other names nothing we asked for, and AnimeBytes answers the same broad
+// series-level corpus to every query, so one unrelated malformed item repeating
+// across shows must not read as "this scope harvests nothing".
+func matchHarvest(results []item, scope string, index, titles map[string]string, showTitle string) (matched, rejected, pendingRejected int) {
 	// Collect every candidate title per key BEFORE choosing: AnimeBytes lists
 	// one torrent three times (EN / JP / Romaji aliases, distinct ?nh= GUIDs,
 	// the SAME torrent id), so all three resolve to one journal key and the
@@ -938,7 +959,11 @@ func matchHarvest(results []item, scope string, index, titles map[string]string,
 		}
 		key, conflict := resolveHarvestKey(&results[i], index)
 		if conflict {
+			// Every contradiction is refused and counted; only one that named a
+			// release this rebuild is trying to title says the show harvested
+			// nothing.
 			rejected++
+			pendingRejected += pendingHarvestRefusal(&results[i], index)
 			continue
 		}
 		if key == "" || !strings.HasPrefix(key, scope+":") {
@@ -956,7 +981,31 @@ func matchHarvest(results []item, scope string, index, titles map[string]string,
 		titles[key] = preferredHarvestTitle(candidates[key], showTitle)
 		matched++
 	}
-	return matched, rejected
+	return matched, rejected, pendingRejected
+}
+
+// pendingHarvestRefusal grades a REFUSED result (resolveHarvestKey reported a
+// contradiction): 1 when any of its identity signals - either page-URL tracker
+// key, or its info hash - names an item in the pending index, 0 when it names
+// none of them. It reports a charge rather than a bool so the caller can add it
+// without a second nesting level.
+//
+// The grade matters because a result whose comments and guid disagree with each
+// other is refused before either signal is looked up, so the refusal alone does
+// not say whether one of OUR releases was refused or an unrelated item on the
+// same broad result page was. Only the former is evidence that this show
+// harvested nothing (matchHarvest's pendingRejected, the caller's no-progress
+// signal).
+func pendingHarvestRefusal(it *item, index map[string]string) int {
+	for _, id := range []string{trackerKeyFromURL(it.InfoURL), trackerKeyFromURL(it.GUID), it.InfoHash} {
+		if id == "" {
+			continue
+		}
+		if _, ok := index[id]; ok {
+			return 1
+		}
+	}
+	return 0
 }
 
 // preferredHarvestTitle picks which of a torrent's alias titles is cached and

@@ -226,6 +226,30 @@ func TestFetchEntriesErrorsOnMetadataRegression(t *testing.T) {
 	}
 }
 
+// TestFetchEntriesRejectsNonEmptyCatalogueWithoutReportedTotal pins the
+// completeness arm finishFetch applies when the walk ended cleanly but NO
+// response ever stated a totalItems: nothing vouches for the walk having read
+// the whole collection, so a non-empty catalogue is still refused rather than
+// returned as complete. The empty-catalogue and metadata-regression tests exit
+// through different guards, so this is the only oracle for this arm.
+func TestFetchEntriesRejectsNonEmptyCatalogueWithoutReportedTotal(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"totalPages":1,"items":[{"alID":1,"expand":{"trs":[]}}]}`)
+	}))
+	defer server.Close()
+
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	if err == nil {
+		t.Fatal("FetchEntries returned nil error, want missing-total completeness error")
+	}
+	if entries != nil {
+		t.Fatalf("entries = %+v, want nil on an unverifiable catalogue", entries)
+	}
+	if !strings.Contains(err.Error(), "no reported total to vouch for completeness") {
+		t.Errorf("error = %q, want missing-total completeness context", err.Error())
+	}
+}
+
 // staticPageTransport serves a FULL chunk (perPage records, so the keyset walk
 // continues into the politeness sleep) for every request, keeping the unmanaged
 // SeaDex boundary hermetic inside the synctest bubble (a real httptest socket
@@ -271,6 +295,31 @@ func TestFetchEntriesCancelledBetweenPagesAborts(t *testing.T) {
 		}
 		if elapsed := time.Since(started); elapsed != 500*time.Millisecond {
 			t.Errorf("elapsed = %s, want virtual 500ms", elapsed)
+		}
+	})
+}
+
+// TestFetchEntriesWholeWalkDeadlineAborts pins the INTERNAL whole-walk deadline
+// (maxFetchDuration): a slow-but-responsive upstream must not hold the cycle
+// lock indefinitely, so the fetch aborts on the client's own deadline even when
+// the caller supplied none. The caller here has no deadline at all and the page
+// delay exceeds the internal one, so only the wrapper can end the walk.
+func TestFetchEntriesWholeWalkDeadlineAborts(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client := NewClient(&http.Client{Transport: newStaticPageTransport()}, "https://example.test", maxFetchDuration+time.Minute, nil)
+		started := time.Now()
+		entries, err := client.FetchEntries(t.Context())
+		if err == nil {
+			t.Fatal("FetchEntries returned nil error, want whole-walk deadline error")
+		}
+		if entries != nil {
+			t.Fatalf("entries = %+v, want nil after the whole-walk deadline", entries)
+		}
+		if !strings.Contains(err.Error(), "interrupted between pages") {
+			t.Errorf("error = %q, want deadline interruption context", err.Error())
+		}
+		if elapsed := time.Since(started); elapsed != maxFetchDuration {
+			t.Errorf("elapsed = %s, want the internal deadline %s", elapsed, maxFetchDuration)
 		}
 	})
 }

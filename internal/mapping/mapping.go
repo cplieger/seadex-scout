@@ -15,7 +15,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -160,7 +159,7 @@ func (r *Record) IsSpecial() bool {
 }
 
 // HasMappedSeason reports whether the record carries a positive Fribb TVDB
-// season - the predicate align.Scope keys season-exact comparison on, and
+// season - the predicate align's scope resolution keys season-exact comparison on, and
 // validateScopeCoverage's season floor counts.
 func (r *Record) HasMappedSeason() bool { return r.SeasonTvdb > 0 }
 
@@ -606,11 +605,10 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 			return rejectRefresh(prev, "refresh exceeded record cap", err,
 				fmt.Errorf("%w and no cache available", err))
 		}
-		// An EOF from the top-level Open means the body carried no first token at all (an empty or
-		// whitespace-only response): that is transport truncation, which CAN succeed on the next
-		// attempt, so it stays transient below instead of advancing the never-self-heals streak. A
-		// body whose first token IS present and is not '[' is still schema evidence.
-		if errors.Is(err, errNotJSONArray) && !errors.Is(err, io.EOF) {
+		// The no-first-token case (an empty or whitespace-only body) never reaches here:
+		// parseFribbForRefresh classifies it at the source as a transient empty-body parse
+		// failure (fribb.go's io.EOF arm) rather than wrapping errNotJSONArray.
+		if errors.Is(err, errNotJSONArray) {
 			// A persistent guard refusal (Cache.RejectedRefreshes): a moved
 			// top-level shape is content evidence, not transport damage, so it
 			// never self-heals - unlike mid-stream truncation below.
@@ -689,12 +687,12 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 // fields can decode as a full set of otherwise-valid records that no longer
 // map to any Sonarr or Radarr item. Accepting that as a successful refresh
 // would replace a usable stale map with useless records; require a
-// conservative 1% coverage minimum (about 40% of the real Fribb file's
-// anilist-keyed records carry one — 8279/20687 measured live 2026-07 — so the
-// floor has ~40x headroom and only fires on genuine wholesale degradation),
+// conservative 1% coverage minimum (about 19% of the real Fribb file's
+// source elements carry one — 8279/~42868 measured live 2026-07 — so the
+// floor has ~19x headroom and only fires on genuine wholesale degradation),
 // computed as a ceiling
-// so e.g. 1/199 stays below the documented floor. maxMapBytes bounds the
-// decoded body (and thus len(records)), so the +99 cannot overflow.
+// so e.g. 1/199 stays below the documented floor. maxMapBytes and
+// maxFribbRecords bound sourceElements, so the +99 cannot overflow.
 //
 // records MUST already be deduplicated - acceptRefresh calls
 // deduplicateRecords before this call. Every quantity derived from
@@ -808,7 +806,7 @@ func validatePopulation(floorNoun, collapseNoun string, prevCount, count int, f 
 // accepted cache. The typed and routing floors cannot see it: a body whose
 // season objects all decode to SeasonTvdb=0 (flex decoding zeroes odd shapes)
 // or whose OVA/SPECIAL labels all changed to the still-valid TV keeps AniList
-// ids, arr ids, types, and both routing populations healthy — yet align.Scope
+// ids, arr ids, types, and both routing populations healthy — yet align
 // then compares ordinary cours whole-series instead of their mapped season,
 // and exclude_specials/season-0 bucketing is silently bypassed. Same
 // loss-relative shape as the type and routing floors: each semantic
@@ -823,7 +821,7 @@ func validateScopeCoverage(previous, records []Record, f acceptanceFloors) error
 }
 
 // positiveSeasonCount returns how many records carry a positive TVDB season.
-// It backs validateScopeCoverage's season floor: align.Scope keys season-exact
+// It backs validateScopeCoverage's season floor: align keys season-exact
 // comparison on SeasonTvdb > 0, so a refresh that wholesale zeroed the season
 // field silently degrades every mapped cour to whole-series scope.
 func positiveSeasonCount(records []Record) int {

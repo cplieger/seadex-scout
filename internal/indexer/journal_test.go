@@ -1272,6 +1272,45 @@ func TestRebuildKeyVetoesNoveltyAcrossHashChange(t *testing.T) {
 	}
 }
 
+// TestRebuildJournalsSameHashIndependentlyPerTracker pins the cross-scope half
+// of the ledger rule the two novelty tests above pin per scope: the same bytes
+// cross-posted to Nyaa and AnimeBytes are two separately journalable releases,
+// so a Nyaa occurrence must not consume the AB occurrence's novelty (or the
+// reverse - catalogue iteration order would decide which tracker feed ever
+// carries it). The ledger's hash entries are scope-namespaced for exactly this
+// reason; asserting the two spellings separately means a change that re-folded
+// a bare shared hash could not keep this test green.
+func TestRebuildJournalsSameHashIndependentlyPerTracker(t *testing.T) {
+	const hash = "143ed15e5e3df072ae91adaeb149973a887590dd"
+	files := []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}}
+	entries := []seadex.Entry{{
+		AniListID: 7,
+		Torrents: []seadex.Torrent{
+			{
+				Tracker: "Nyaa", URL: "https://nyaa.si/view/42", InfoHash: hash,
+				IsBest: true, Files: files,
+			},
+			{
+				Tracker: "AB", URL: "/torrents.php?id=1&torrentid=123", InfoHash: hash,
+				IsBest: true, Files: files,
+			},
+		},
+	}}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	if err := newTestWriter(path, "PK", true).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 1 || len(snap.ABFeed) != 1 {
+		t.Errorf("feeds = nyaa %d / ab %d items, want 1 each (one tracker's listing must not suppress the other's)",
+			len(snap.NyaaFeed), len(snap.ABFeed))
+	}
+	if !snap.Seen["nyaa:h:"+hash] || !snap.Seen["ab:h:"+hash] {
+		t.Errorf("seen ledger = %v, want both scope-namespaced hash entries", snap.Seen)
+	}
+}
+
 // TestRebuildKeepsItemAtExactMaxAgeBoundary pins the strict-inequality prune
 // boundary carryItem's contract documents ("an item OLDER than
 // feedJournalMaxAge leaves the journal"): a carried item whose age equals

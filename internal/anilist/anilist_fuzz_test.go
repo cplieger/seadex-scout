@@ -141,7 +141,7 @@ func assertTitlesClean(t *testing.T, titles []string, raw []byte) {
 	// permanent false negative, so it must be rejected, not parsed. The tables
 	// can only enumerate ASCII and punctuation cases; the generated inputs
 	// reach the non-Latin ones the live catalogue actually carries.
-	if len(titles) > 0 && !matchable {
+	if !matchable {
 		t.Errorf("parsed titles %q from %q carry no usable match key", titles, raw)
 	}
 }

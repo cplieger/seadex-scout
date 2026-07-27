@@ -158,6 +158,12 @@ func TestAdvanceCursorBoundsRejectedValueInDiagnostic(t *testing.T) {
 			name:  "rejected oversized created",
 			items: []pbEntry{{ID: "bbb", Created: huge}},
 		},
+		{
+			// No id at all takes the no-usable-keyset-cursor arm, which quotes
+			// the RAW upstream fields before filterSafe has bounded anything.
+			name:  "rejected oversized created with no id",
+			items: []pbEntry{{ID: "", Created: huge}},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -156,3 +156,42 @@ func TestStoredFindingBoundsPersistedStrings(t *testing.T) {
 		t.Errorf("encoded dedupe record = %d bytes, want <= %d", len(encoded), maxRecordBytes)
 	}
 }
+
+// TestPreservedRecordBoundsReadBackStatus pins the persistence half of the
+// read-back trust boundary on the ONE field the projection path does not
+// produce itself: a prior record decoded from a tampered or legacy state.json
+// takes the failed-item preservation branch, which returns it through
+// capStored WITHOUT going through emitResolved, so an oversized or unsafe
+// status must be bounded there too - otherwise the preserved record carries a
+// multi-megabyte value straight back into the next state Save and can cross
+// the store's 32 MiB write bound (CWE-400).
+func TestPreservedRecordBoundsReadBackStatus(t *testing.T) {
+	notifier, _ := newCapturedNotifier()
+	const alID = 154587
+	oldTime := time.Unix(0, 0).UTC()
+	prior := map[string]Alerted{
+		"legacy": {AlertedAt: oldTime, Finding: StoredFinding{
+			Arr:       "sonarr",
+			Title:     "Frieren",
+			Status:    compare.Status(strings.Repeat("s", 40<<10) + "\u202e"),
+			AniListID: alID,
+		}},
+	}
+
+	current := notifier.Notify(nil, prior, map[int]struct{}{alID: {}}, time.Now())
+
+	rec, ok := current["legacy"]
+	if !ok {
+		t.Fatalf("failed item's prior record was not preserved: %+v", current)
+	}
+	got := string(rec.Finding.Status)
+	if len(got) > maxAttrBytes {
+		t.Errorf("preserved Status = %d bytes, want <= %d", len(got), maxAttrBytes)
+	}
+	if !strings.HasSuffix(got, attrTruncMarker) {
+		t.Errorf("preserved Status = ...%q, want the %q truncation marker", lastAttrBytes(got), attrTruncMarker)
+	}
+	if strings.ContainsAny(got, "\u202e") {
+		t.Error("preserved Status carries an unsafe rune")
+	}
+}

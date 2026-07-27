@@ -7,9 +7,10 @@
 // subcommand's single cycle in QUEUE mode (a request arriving while another
 // cycle is in flight is queued for the active runner and exits 0); RunLoop is
 // the resident daemon's timer in SKIP mode (a tick arriving while a cycle is in
-// flight is skipped, since the next tick provides freshness). Both commit each
-// completed cycle's health verdict from INSIDE the locked body, so no verdict
-// outlives the lock that ordered the cycle producing it.
+// flight is skipped, since the next tick provides freshness). Both commit every
+// verdict they publish from inside the locked body, so no verdict outlives the
+// lock that ordered the cycle producing it. RunOnce withholds a verdict when
+// cancellation is observed before recording, even if Cycle returned healthy.
 //
 // The interruption contract is the other half: a shutdown cancellation observed
 // at any point makes the invocation report an interruption rather than a result,
@@ -53,9 +54,10 @@ const dirMode = 0o700
 // cycle entry point: the daemon's RunLoop ticks (skip mode) and exec'd `poll`
 // subcommands (queue mode) serialize on dir/cycle.lock, closing the
 // last-writer-wins race two concurrent cycles run on state.json (AniList memo
-// and finding-dedupe loss, duplicate alerts) and feed.json. dir is the state
-// directory (filepath.Dir(config.DefaultStatePath)) so the lock lives beside
-// the files it guards; the kernel releases the flock if a process dies, so
+// and finding-dedupe loss, duplicate alerts) and feed.json. dir is the single
+// /config mount root (config.DefaultCycleLockDir) so the lock lives beside every
+// file it guards instead of beside whichever one it was derived from; the kernel
+// releases the flock if a process dies, so
 // there is no stale-lock state. The gate stops queued reruns (and a
 // not-yet-started initial run) once shutdown is signalled; an in-flight run
 // is never interrupted by the gate - context cancellation owns that.
@@ -173,8 +175,9 @@ func executeRuns(ctx context.Context, ex *scheduler.Exclusive, sc Cycler, marker
 	return outcome, runs, own, exErr
 }
 
-// recordRunHealth commits ONE completed cycle's health verdict to the shared
-// marker, and is called from inside Exclusive's locked job body.
+// recordRunHealth commits ONE cycle's health verdict to the shared marker, and
+// only when the result is trustworthy: it is called from inside Exclusive's
+// locked job body.
 //
 // The lock must cover the write. The marker is cross-process shared state like
 // state.json and feed.json, and `cycle.lock` is what orders every writer of
@@ -188,10 +191,12 @@ func executeRuns(ctx context.Context, ex *scheduler.Exclusive, sc Cycler, marker
 // inside RunOrSkip's closure - so committing here restores parity between the
 // two entry points that share the marker.
 //
-// An INTERRUPTED cycle records nothing: nothing completed, so there is no
-// verdict, and the marker keeps whatever the last completed cycle published.
-// Once a cycle HAS completed, a later shutdown does not withdraw its verdict -
-// RunOnce's final check governs this invocation's exit code, not the marker.
+// An INTERRUPTED cycle records nothing - including a Cycler that returned
+// healthy before the cancellation was observed here: a result the shutdown
+// reached first is not one this process publishes, so the marker keeps whatever
+// the last published verdict was. Once a verdict HAS been published, a later
+// shutdown does not withdraw it - RunOnce's final check governs this
+// invocation's exit code, not the marker.
 //
 // Write-failure reporting preserves runOnce's former semantics: on this
 // invocation's OWN run the failure becomes the process result (it outranks an
@@ -289,11 +294,11 @@ func nonRunResult(ctx context.Context, outcome scheduler.Outcome, exErr error) (
 // for THIS PROCESS'S RESULT: the uniform interruption contract applies (exit
 // non-zero, WARN classification) even when this process's own run completed,
 // because Exclusive can spend post-run time servicing another process's queued
-// rerun and shutdown can land there. It does not reach back into the marker: a
-// cycle that completed published its verdict inside the locked body
-// (recordRunHealth), where the cycle lock orders it against every other writer,
-// and a completed cycle's health is not this invocation's to withdraw. Only a
-// path where NO cycle completed leaves the marker untouched.
+// rerun and shutdown can land there. It does not reach back into the marker:
+// any verdict already published inside the locked body stands (recordRunHealth),
+// where the cycle lock orders it against every other writer, and a published
+// verdict is not this invocation's to withdraw. A path where no verdict was
+// published leaves the marker untouched.
 func RunOnce(ctx context.Context, ex *scheduler.Exclusive, sc Cycler, marker *health.Marker) error {
 	// A pre-cancelled invocation must not enqueue demand: Exclusive's gate
 	// refuses the RUN, not the queue insertion, so with the lock held by

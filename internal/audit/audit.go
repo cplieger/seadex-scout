@@ -143,7 +143,7 @@ type Row struct {
 	Releases      []Release `json:"releases,omitempty"`
 	AniListID     int       `json:"al_id"`
 	Season        int       `json:"season,omitempty"`
-	// scope is the comparison scope the shared decision resolved (align.Scope
+	// scope is the comparison scope the shared decision resolved (align.Decide
 	// via align.Decide), recorded at build time and read by the renderer
 	// (align.ScopeWholeSeries, the zero value, renders as "series").
 	// Unexported: in-process only, absent from the JSON wire shape.
@@ -329,7 +329,7 @@ func (a *Auditor) assess(m *match.Match) Row {
 	d := align.Decide(m.Item, &m.Record, best, alt)
 	row.scope = d.Kind
 	row.Season = d.Season
-	// Cloned, not aliased: for a single-unit scope align.Scope returns the
+	// Cloned, not aliased: for a single-unit scope align.Decide returns the
 	// library snapshot's own slice, and the report must not hand a caller a
 	// window into the snapshot a concurrent daemon cycle owns (compare's
 	// baseFinding clones for the same reason).

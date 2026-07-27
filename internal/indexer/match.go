@@ -329,8 +329,9 @@ const maxTrackerIDDigits = 20
 
 // extractID returns the token in rawURL immediately after needle, up to the
 // next URL delimiter (?, #, /, &). It returns "" unless the token is a valid
-// tracker id (validTrackerID: a non-empty, width-bounded run of ASCII
-// digits), so a malformed or unexpected URL never yields a bogus key (adopted
+// tracker id (validTrackerID: a non-empty, width-bounded run of ASCII digits
+// in canonical decimal form - no leading zero except the single value "0"),
+// so a malformed or unexpected URL never yields a bogus key (adopted
 // from seadexerr's id extraction).
 func extractID(rawURL, needle string) string {
 	_, after, found := strings.Cut(rawURL, needle)

@@ -537,9 +537,11 @@ func (c *Client) finishFetch(all []Entry, tot fetchTotals) ([]Entry, error) {
 		return nil, fmt.Errorf("seadex: collected %d of %d reported entries (below half); "+
 			"refusing to compare against a truncated view", len(all), tot.reportedTotal)
 	}
-	// A response carrying no totalItems (omitted decodes to zero) stated no count
-	// to disagree with, so comparing against it would fire the alert-stable
-	// mismatch WARN with want=0 on every cycle.
+	// Belt to the no-reported-total arm above, which already errors when the
+	// responses never stated a count: a response carrying no totalItems (omitted
+	// decodes to zero) stated no count to disagree with, so should that arm ever
+	// be relaxed this WARN must still not fire the alert-stable mismatch with
+	// want=0 on every cycle.
 	if tot.reportedTotal > 0 && len(all) != tot.reportedTotal {
 		c.log.Warn("seadex catalogue count mismatch", "got", len(all), "want", tot.reportedTotal)
 	}

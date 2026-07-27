@@ -1146,42 +1146,45 @@ func TestValidInfoHash(t *testing.T) {
 // window, offset advances it, an offset past the end yields an empty page, a
 // missing or invalid limit falls back to the advertised default (which leaves
 // a feed smaller than the default untouched and trims a larger one), and the
-// offset is applied before the limit.
+// offset is applied before the limit. The substitution is silent to the
+// client, so the Debug line is the only signal a misconfigured limit was
+// ignored: each case also pins that it fires for a present-but-unusable value
+// and stays quiet for an absent one.
 func TestApplyPaging(t *testing.T) {
-	pagingLog := slog.New(slog.NewTextHandler(io.Discard, nil))
 	feed := []item{{GUID: "a"}, {GUID: "b"}, {GUID: "c"}}
 	big := make([]item, defaultCapsLimit+3)
 	for i := range big {
 		big[i] = item{GUID: strconv.Itoa(i)}
 	}
 	tests := []struct {
-		name  string
-		feed  []item
-		query string
-		want  []string
+		name                    string
+		feed                    []item
+		query                   string
+		want                    []string
+		wantUnusableLimitLogged bool
 	}{
-		{"no params leave a feed below the default untouched", feed, "", []string{"a", "b", "c"}},
-		{"limit trims the window", feed, "limit=2", []string{"a", "b"}},
-		{"offset advances the window", feed, "offset=2", []string{"c"}},
-		{"offset+limit page", feed, "offset=1&limit=1", []string{"b"}},
-		{"offset past the end is an empty page", feed, "offset=10", nil},
-		{"invalid params fall back to the default window", feed, "offset=x&limit=-1", []string{"a", "b", "c"}},
-		{"zero limit falls back to the default window", feed, "limit=0", []string{"a", "b", "c"}},
-		{"zero offset leaves the window anchored", feed, "offset=0", []string{"a", "b", "c"}},
+		{"no params leave a feed below the default untouched", feed, "", []string{"a", "b", "c"}, false},
+		{"limit trims the window", feed, "limit=2", []string{"a", "b"}, false},
+		{"offset advances the window", feed, "offset=2", []string{"c"}, false},
+		{"offset+limit page", feed, "offset=1&limit=1", []string{"b"}, false},
+		{"offset past the end is an empty page", feed, "offset=10", nil, false},
+		{"invalid params fall back to the default window", feed, "offset=x&limit=-1", []string{"a", "b", "c"}, true},
+		{"zero limit falls back to the default window", feed, "limit=0", []string{"a", "b", "c"}, true},
+		{"zero offset leaves the window anchored", feed, "offset=0", []string{"a", "b", "c"}, false},
 		{"no limit applies the advertised default to a larger feed", big, "", func() []string {
 			want := make([]string, defaultCapsLimit)
 			for i := range want {
 				want[i] = strconv.Itoa(i)
 			}
 			return want
-		}()},
+		}(), false},
 		{"explicit limit beyond the default wins", big, "limit=" + strconv.Itoa(defaultCapsLimit+3), func() []string {
 			want := make([]string, defaultCapsLimit+3)
 			for i := range want {
 				want[i] = strconv.Itoa(i)
 			}
 			return want
-		}()},
+		}(), false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1189,7 +1192,13 @@ func TestApplyPaging(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseQuery(%q): %v", tc.query, err)
 			}
+			// Per-case recorder so the diagnostic assertion is per-case.
+			pagingLog, pagingRec := capture.New()
 			got := applyPaging(pagingLog, tc.feed, q)
+			if logged := pagingRec.Contains("unusable Torznab limit param; using the advertised default"); logged != tc.wantUnusableLimitLogged {
+				t.Errorf("unusable-limit diagnostic logged = %v, want %v; records: %v",
+					logged, tc.wantUnusableLimitLogged, pagingRec.Messages())
+			}
 			if len(got) != len(tc.want) {
 				t.Fatalf("applyPaging(%q) returned %d items, want %d", tc.query, len(got), len(tc.want))
 			}

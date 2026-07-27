@@ -206,8 +206,12 @@ func halfFloor(anchor int64) int64 { return anchor/2 + anchor%2 }
 
 // keepAtLeast returns the pool members whose length reaches floor. A floor that
 // is not positive keeps the whole pool: that is the shared totality fallback
-// for a record carrying no positive lengths (sparse upstream data, fixtures),
-// where the type gate alone decides.
+// for a record whose size evidence cannot discriminate (sparse upstream data,
+// fixtures), where the type gate alone decides. What reaches that state differs
+// by anchor: PayloadFiles' maximum is non-positive only when NO length is
+// positive, while PopulationFiles' median is non-positive as soon as half the
+// pool is - so a census over lengths [0, 0, 0, 1000] deliberately keeps all
+// four files rather than reading the one real file as the whole population.
 func keepAtLeast(pool []seadex.File, floor int64) []seadex.File {
 	out := make([]seadex.File, 0, len(pool))
 	for i := range pool {
@@ -228,6 +232,14 @@ func keepAtLeast(pool []seadex.File, floor int64) []seadex.File {
 // sibling episode - exactly the max-anchored behavior PopulationFiles exists to
 // avoid, and the reason a two-episode pack whose finale (or bundled franchise
 // movie) runs more than twice its sibling counted as ONE episode.
+//
+// The tradeoff, stated because the census floor is a sample guard: on a
+// two-file pool the smaller file now survives at ~1/3 of the larger (the floor
+// is half of their midpoint) where the max anchor demanded 1/2. Real samples
+// and previews sit far below either line, and an extra carrying no episode
+// token cannot inflate a census anyway (indexer's coveredEpisodes keys on the
+// SxxExx / absolute-number token), so the widened band costs nothing observed -
+// but the indexer's "sub-half-size sample" prose is describing THIS number.
 //
 // Overflow safety is kept without adding two untrusted lengths: the midpoint is
 // computed as lo+(hi-lo)/2 over the two central values clamped at 0, so a

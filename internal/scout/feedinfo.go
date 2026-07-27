@@ -65,18 +65,19 @@ func feedEntryInfo(idx *mapping.Index, lib *library.Snapshot, memo match.Memo) i
 	}
 }
 
-// applyMemoTyping fills the media typing (and, when nothing typed it yet, the
-// season) from the persisted AniList memo. It runs only when Fribb supplied no
+// applyMemoTyping fills the media typing - and the season that typing implies -
+// from the persisted AniList memo. It runs only when Fribb supplied no
 // TYPING - either no record at all, or a record whose type field was
 // absent/odd-shaped (the tolerant Fribb decoder and an override without `type`
-// both yield an empty Type). Such a record routes no arr id either, so the
-// matcher looked the entry up on AniList and the memo carries its media
-// format. Reading it fixes the case where the app KNEW an entry was a movie
-// and still routed its feed item to Anime/5070: Radarr filters on Movies/2000,
-// so it never saw that movie in the RSS feed at all (l-f70). The typing is
-// only ever taken from the memo when Fribb had nothing to say, so a mapped
-// record's typing still wins, and an entry with no memoized format keeps the
-// documented unmapped-to-Anime default.
+// both yield an empty Type). An untyped record can still route a positive TVDB
+// id through RoutedIDs' series arm; only the id-less ones were looked up on
+// AniList and memoized a format, so for any other shape this is a no-op.
+// Reading the memoized format fixes the case where the app KNEW an entry was a
+// movie and still routed its feed item to Anime/5070: Radarr filters on
+// Movies/2000, so it never saw that movie in the RSS feed at all (l-f70). The
+// typing is only ever taken from the memo when Fribb had nothing to say, so a
+// mapped record's typing still wins, and an entry with no memoized format keeps
+// the documented unmapped-to-Anime default.
 //
 // The format is already gated to a real AniList enum member at the client
 // boundary (anilist.knownFormat), so an unrecognized upstream token cannot
@@ -88,7 +89,14 @@ func applyMemoTyping(memo match.Memo, alID int, info *indexer.EntryInfo) {
 	}
 	typed := mapping.RecordFromFormat(format)
 	info.IsMovie = typed.IsMovie()
-	if !info.SeasonKnown {
+	switch {
+	case info.IsMovie:
+		// A movie pins no season at all (resolvedSeason's Radarr-first arm),
+		// so a season the record resolved before the memo typed it as a
+		// movie must not survive: no consumer may see IsMovie with a
+		// resolved season.
+		info.Season, info.SeasonKnown = 0, false
+	case !info.SeasonKnown:
 		// A positive Fribb season already resolved by the caller wins: the
 		// memo's format can only ever add the specials bucket.
 		info.Season, info.SeasonKnown = resolvedSeason(&typed)
@@ -101,12 +109,12 @@ func applyMemoTyping(memo match.Memo, alID int, info *indexer.EntryInfo) {
 // by the arrs). An absolute-numbered run, a title-only match, and an entry with
 // no Fribb typing at all pin no season.
 //
-// A movie pins no season at all, mirroring align.Scope's Radarr-first dispatch:
+// A movie pins no season at all, mirroring align's Radarr-first scope dispatch:
 // a MOVIE-typed record's season.tvdb is not the season the arr files it under
 // (Radarr has none), so a broken upstream mapping that carries one must not
 // reach a consumer as a resolved season.
 //
-// It reads the same three Record predicates align.Scope dispatches on
+// It reads the same three Record predicates align's scope resolution dispatches on
 // (IsMovie, HasMappedSeason, IsSpecial), and exists so the indexer receives a resolved
 // season instead of raw Fribb fields it would have to re-interpret - the
 // duplication l-f4 named, in a package that deliberately imports neither align

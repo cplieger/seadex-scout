@@ -177,11 +177,22 @@ func (c *snapshotCache) statSnapshot() (os.FileInfo, bool) {
 	// (ErrSymlinkTarget, atomicfile's default) - so without this the two ends
 	// of the same /config/feed.json contract disagree about whether the path
 	// may be a link, and the reader would decode whatever the link points at
-	// as the served feed. It takes the same arm as any other stat fault:
-	// warn once per onset, keep the current feed, and mark the
-	// snapshot-unavailable state while nothing has loaded.
-	if link, lerr := os.Lstat(c.path); lerr == nil && link.Mode()&fs.ModeSymlink != 0 {
-		c.noteStatFault("indexer feed snapshot path is a symlink; refusing to load it")
+	// as the served feed. The gate is the full regular-file predicate rather
+	// than a symlink test: a FIFO, socket, device, or directory left at the
+	// path is the same non-regular ingress, and a FIFO is the worst of them -
+	// os.Open blocks on it before ReadBounded can observe the context, so
+	// New's warm-load timeout would never release startup and the daemon
+	// would neither bind the listener nor start its compare loop. Every
+	// rejection takes the same arm as any other stat fault: warn once per
+	// onset, keep the current feed, and mark the snapshot-unavailable state
+	// while nothing has loaded.
+	link, lerr := os.Lstat(c.path)
+	if lerr != nil {
+		c.noteStatFault("indexer feed snapshot lstat failed; keeping current feed", "error", lerr)
+		return nil, false
+	}
+	if !link.Mode().IsRegular() {
+		c.noteStatFault("indexer feed snapshot path is not a regular file; refusing to load it", "mode", link.Mode().String())
 		return nil, false
 	}
 	if c.snapMissing {
@@ -220,7 +231,7 @@ func (c *snapshotCache) noteSnapshotAbsent() {
 }
 
 // noteStatFault is the shared onset ladder for every stat-time fault that
-// freezes the served feed (an unreadable file, a symlinked path): mark the
+// freezes the served feed (an unreadable file, a non-regular path): mark the
 // snapshot-unavailable state while nothing has loaded, then WARN once per onset
 // rather than once per request.
 func (c *snapshotCache) noteStatFault(msg string, attrs ...any) {
@@ -531,9 +542,7 @@ func (c *snapshotCache) readSnapshot(ctx context.Context) (snapshot, bool, bool)
 	// profile sees a negative release age and can hold the release instead of
 	// honoring the bounded journal window (h-f15).
 	now := time.Now().UTC()
-	rebased := rebaseFutureFeed(snap.NyaaFeed, now) + rebaseFutureFeed(snap.ABFeed, now) +
-		rebaseFuturePubDates(snap.NyaaFeed, now) + rebaseFuturePubDates(snap.ABFeed, now)
-	if rebased > 0 {
+	if rebased := rebaseFutureFeed(snap.NyaaFeed, now) + rebaseFutureFeed(snap.ABFeed, now); rebased > 0 {
 		// Counts only; the rejected timestamp comes from a tamperable file.
 		c.log.Warn("indexer feed snapshot: future item timestamps rebased to load time",
 			"path", c.path, "rebased", rebased)
@@ -542,29 +551,6 @@ func (c *snapshotCache) readSnapshot(ctx context.Context) (snapshot, bool, bool)
 	snap.NyaaFeed = c.rebuildNyaaDownloadURLs(snap.NyaaFeed)
 	c.warnBlankedInfoURLs(scrub)
 	return snap, true, false
-}
-
-// rebaseFuturePubDates catches the one future-timestamp shape rebaseFutureFeed
-// leaves behind: an item with NO FirstSeen carries no journal timestamp to
-// rebase, so its persisted PubDate rides through verbatim. decodeSnapshot's
-// normalizeSnapshotPubDates deliberately leaves such an item alone (there is
-// nothing to mirror) on the stated grounds that the writer drops it at carry -
-// but the READER serves it, and never prunes by age, so a hand-edited
-// PubDate ahead of the wall clock would be advertised as <pubDate> until the
-// next rebuild (indefinitely in resident-idle mode). That is exactly the
-// negative-release-age an arr's delay profile holds a release on, which
-// rebaseFutureFeed exists to prevent, so clamp it to load time here. A
-// writer-produced item always carries FirstSeen, so this only ever corrects a
-// tampered or hand-edited snapshot.
-func rebaseFuturePubDates(feed []journalItem, now time.Time) int {
-	rebased := 0
-	for i := range feed {
-		if feed[i].FirstSeen.IsZero() && feed[i].PubDate.After(now) {
-			feed[i].PubDate = now
-			rebased++
-		}
-	}
-	return rebased
 }
 
 // warnBlankedInfoURLs reports the info-URL scrub PER TRACKER, one line per

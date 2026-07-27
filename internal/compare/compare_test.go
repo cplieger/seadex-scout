@@ -188,6 +188,60 @@ func TestObtainableLinksDedupesAndPrefixesPrivateURL(t *testing.T) {
 	}
 }
 
+// TestObtainableLinksOrdersHeadlineGroupFirst pins the half of the link-order
+// contract no other test reaches: the headline candidate's OWN sources sort
+// ahead of every other group's, which is what makes notify.trackerURLs fill
+// nyaa_url / public_url / ab_url with a link belonging to the group the same
+// alert line names in recommended_group. The permutation check in
+// TestRepresentativePrefersResolutionThenPublic only pins determinism (its
+// headline already owns the lexicographically first URL), so dropping the
+// headline rank leaves the whole suite green.
+func TestObtainableLinksOrdersHeadlineGroupFirst(t *testing.T) {
+	pool := []candidate{
+		{
+			rel:     release.Release{Group: "ZGroup", Resolution: "1080p", Tracker: "Nyaa", TrackerType: release.TrackerPublic},
+			torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/9"},
+		},
+		{
+			rel:     release.Release{Group: "AGroup", Resolution: "720p", Tracker: "Nyaa", TrackerType: release.TrackerPublic},
+			torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
+		},
+	}
+	f := Finding{AniListID: 1}
+	fillBest(&f, pool, groupSet(pool))
+	if f.RecommendedGroup != "ZGroup" {
+		t.Fatalf("headline group = %q, want ZGroup (the 1080p candidate)", f.RecommendedGroup)
+	}
+	if len(f.Links) != 2 {
+		t.Fatalf("link count = %d, want 2: %+v", len(f.Links), f.Links)
+	}
+	if f.Links[0].URL != "https://nyaa.si/view/9" {
+		t.Errorf("first link = %q, want the headline group's own source %q (an alert must not link a group recommended_group does not name)", f.Links[0].URL, "https://nyaa.si/view/9")
+	}
+}
+
+// TestObtainableLinksPromotesDuplicateToHeadlineRank pins the dedupe's
+// interaction with the headline rank: the same (tracker, URL) pair can arrive
+// on candidates whose upstream group metadata differs, so the rank must be the
+// best any occurrence earns rather than the first one's. With
+// first-occurrence-wins the shared /9 link stayed a non-headline source and the
+// unrelated /1 link took notify.trackerURLs' first-link slot - the exact
+// headline/link mismatch the ordering contract exists to remove.
+func TestObtainableLinksPromotesDuplicateToHeadlineRank(t *testing.T) {
+	pool := []candidate{
+		{rel: release.Release{Group: "AltGroup", Tracker: "Nyaa"}, torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/9"}},
+		{rel: release.Release{Group: "Headline", Tracker: "Nyaa"}, torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/9"}},
+		{rel: release.Release{Group: "AltGroup", Tracker: "Nyaa"}, torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}},
+	}
+	links := obtainableLinks(pool, release.NormalizeGroup("Headline"))
+	if len(links) != 2 {
+		t.Fatalf("link count = %d, want 2 (the duplicated /9 pair collapses): %+v", len(links), links)
+	}
+	if links[0].URL != "https://nyaa.si/view/9" {
+		t.Errorf("first link = %q, want https://nyaa.si/view/9 (the headline group's occurrence must promote the shared link)", links[0].URL)
+	}
+}
+
 func comparer(opts filter.Options, excludeSpecials bool) *Comparer {
 	return NewComparer(Config{Filter: opts, ExcludeSpecials: excludeSpecials})
 }

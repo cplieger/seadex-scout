@@ -81,8 +81,20 @@ func FuzzMatchHarvest_cacheHygiene(f *testing.F) {
 		titles := map[string]string{"nyaa:43": "Already Harvested"}
 		before := maps.Clone(titles)
 
-		n, _ := matchHarvest([]item{{Title: title, InfoURL: infoURL, GUID: guid, InfoHash: hash}},
+		n, rejected, pendingRejected := matchHarvest([]item{{Title: title, InfoURL: infoURL, GUID: guid, InfoHash: hash}},
 			upstreamNyaa, index, titles, "")
+
+		// The pending grade is a SUBSET of the rejections (harvest.go's
+		// no-progress signal is "one of OUR releases was refused"), so no
+		// untrusted identity shape may report more pending refusals than
+		// refusals, and a match and a pending refusal of the same single
+		// result are mutually exclusive.
+		if pendingRejected > rejected {
+			t.Fatalf("matchHarvest = %d rejected / %d pendingRejected, want the pending grade to be a subset", rejected, pendingRejected)
+		}
+		if n > 0 && pendingRejected > 0 {
+			t.Fatalf("matchHarvest = %d matched AND %d pending refusals for one result, want at most one of them", n, pendingRejected)
+		}
 
 		if len(titles) < len(before) {
 			t.Fatalf("matchHarvest dropped cached titles: %v, had %v", titles, before)
@@ -113,7 +125,7 @@ func FuzzMatchHarvest_cacheHygiene(f *testing.F) {
 		trimmed := strings.TrimSpace(title)
 		admissible := trimmed != "" && len(trimmed) <= harvestMaxTitleLen
 		fresh := map[string]string{}
-		got, _ := matchHarvest([]item{{Title: title, InfoURL: "https://nyaa.si/view/42"}}, upstreamNyaa, index, fresh, "")
+		got, _, _ := matchHarvest([]item{{Title: title, InfoURL: "https://nyaa.si/view/42"}}, upstreamNyaa, index, fresh, "")
 		if admissible {
 			if got != 1 || fresh["nyaa:42"] != trimmed {
 				t.Fatalf("matchHarvest(canonical identity, title %q) = %d matches caching %q, want it admitted as %q",

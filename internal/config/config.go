@@ -368,7 +368,7 @@ func parseInterval(raw string) (time.Duration, bool) {
 	return parseIntervalWith(raw, slog.Default())
 }
 
-// parseIntervalWith is parseInterval with an explicit logger, so the silent
+// parseIntervalWith is parseInterval with an explicit logger, so the
 // PollIntervalFromFile probe can discard the fallback/clamp warnings the
 // startup Load path already emitted once. The health subcommand runs this on
 // every Docker healthcheck (30s), and repeating a config diagnostic there
@@ -392,8 +392,11 @@ func parseIntervalWith(raw string, log *slog.Logger) (time.Duration, bool) {
 // expanded value, not the literal ${VAR}). Every failure (missing file,
 // oversized, invalid YAML) also returns 0: the health probe derives its
 // freshness deadline from this and must never fail because configuration
-// is absent or malformed — the daemon itself surfaces those loudly at
-// startup. Unknown keys and extra YAML documents are deliberately tolerated
+// is absent or malformed. An absent file is silent (the legitimate no-config
+// case); any other failure WARNs, because the deadline is being dropped on a
+// config that IS there. The scheduler's own fallback/clamp warnings are
+// discarded (parseIntervalWith): the daemon's startup log already carries them.
+// Unknown keys and extra YAML documents are deliberately tolerated
 // here (no yamlenv.CheckUnknownKeys / yamlenv.CheckSingleDocument):
 // strictness is Load's job.
 func PollIntervalFromFile(path string) time.Duration {
@@ -465,9 +468,9 @@ func (c *Config) IndexerConfigured() bool {
 // path that skips it loses them. Two limits on that: it stops at the FIRST hard
 // error, so a rejected config surfaces only the diagnostics ahead of the check
 // that failed (the operator sees the rest after fixing it and restarting), and
-// the load-time diagnostics - unresolved ${VAR} references, a disabled-but-keyed
-// arr, an all-blank tag list, an unrecognized log.level or log.format - are
-// emitted by Load/toConfig, not here.
+// the load-time diagnostics - a config file readable beyond its owner, unresolved
+// ${VAR} references, a disabled-but-keyed arr, an all-blank tag list, an
+// unrecognized log.level or log.format - are emitted by Load/toConfig, not here.
 func (c *Config) Validate() error {
 	if err := validateRunMode(c.RunMode); err != nil {
 		return err

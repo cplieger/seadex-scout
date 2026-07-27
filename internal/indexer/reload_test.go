@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1461,5 +1462,42 @@ func TestReloadBlanksOutOfVocabularyDownloadVolumeFactor(t *testing.T) {
 	doc, _ := renderFeed(got)
 	if strings.Contains(doc, `name="downloadvolumefactor" value="0"`) {
 		t.Errorf("rendered feed carries the tampered factor attr:\n%s", doc)
+	}
+}
+
+// TestReloadDropsOutOfVocabularyCategories pins the third leg of
+// normalizeSnapshotItems (validCategories): a persisted Torznab category
+// outside this feed's own vocabulary (catTV / catAnime / catMovies) must be
+// dropped at the load boundary, while the in-vocabulary ids and the item
+// itself are kept. The list is the arr's ROUTING input - filterByCats matches
+// on it and writeItem renders every positive id as a category attr - so a
+// hand-edited or legacy feed.json could otherwise route a series pack to
+// Radarr (2000) or hide a movie from it.
+func TestReloadDropsOutOfVocabularyCategories(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "tampered", GUID: "https://nyaa.si/view/42", Categories: []int{5030, catAnime, 2040}}, Key: "nyaa:42"},
+			{item: item{Title: "clean", GUID: "https://nyaa.si/view/43", Categories: []int{catMovies}}, Key: "nyaa:43"},
+		},
+	})
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, Upstreams{})
+
+	got := ix.feedFor(upstreamNyaa)
+	if len(got) != 2 {
+		t.Fatalf("nyaa feed = %d items (%+v), want 2 (the ids are filtered, the item kept)", len(got), got)
+	}
+	byTitle := map[string]item{}
+	for _, it := range got {
+		byTitle[it.Title] = it
+	}
+	if cats := byTitle["tampered"].Categories; !slices.Equal(cats, []int{catAnime}) {
+		t.Errorf("out-of-vocabulary persisted categories served as %v, want only [%d] (the list is the arr's routing input)", cats, catAnime)
+	}
+	if cats := byTitle["clean"].Categories; !slices.Equal(cats, []int{catMovies}) {
+		t.Errorf("in-vocabulary persisted categories = %v, want %v left alone", cats, []int{catMovies})
 	}
 }

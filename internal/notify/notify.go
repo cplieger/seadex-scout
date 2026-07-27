@@ -100,6 +100,7 @@ func capPersisted(s string) string {
 // round trip is a needless copy on a per-record path (gocritic hugeParam).
 func capStored(f *StoredFinding) {
 	f.Arr = capPersisted(f.Arr)
+	f.Status = compare.Status(capPersisted(string(f.Status)))
 	f.Title = capPersisted(f.Title)
 	f.CurrentGroup = capPersisted(f.CurrentGroup)
 	f.RecommendedGroup = capPersisted(f.RecommendedGroup)
@@ -315,11 +316,14 @@ func capAttr(s string) string { return logattr.Cap(s) }
 // Discord/Slack, so a ')' (or a space runesafe.Sanitize substituted for a
 // hostile rune) closes the destination early and the remainder of the
 // value renders as attacker-authored markdown. Same policy as
-// internal/audit's escapeLinkURL.
+// internal/audit's escapeLinkURL - which deliberately leaves '[' and ']'
+// alone, and so does this one: they are not destination delimiters, but they
+// are required syntax around an IPv6 literal host, so encoding them would
+// break a legitimate arr deep link (http://[fd00::1]:8989/...).
 var mdLinkEscaper = strings.NewReplacer(
 	" ", "%20", "\t", "%09", "\\", "%5C", "`", "%60", `"`, "%22", "'", "%27",
 	"\v", "%0B", "\f", "%0C", "(", "%28", ")", "%29", "<", "%3C", ">", "%3E",
-	"|", "%7C", "[", "%5B", "]", "%5D", "\n", "%0A", "\r", "%0D",
+	"|", "%7C", "\n", "%0A", "\r", "%0D",
 )
 
 // capURLAttr renders one untrusted URL attribute: capAttr's bounded,

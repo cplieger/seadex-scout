@@ -505,6 +505,21 @@ func TestPopulationFilesMedianAnchoredFloor(t *testing.T) {
 			wantPopulation: 1,
 			wantPayload:    1,
 		},
+		"two-file pack keeps the shorter episode": {
+			// The characterization case for the midpoint anchor: on a two-file
+			// pool the upper-middle statistic IS the maximum, so the old
+			// implementation floored at 1.25 GiB and counted this pack as ONE
+			// episode - the pack then served as "Show S01E01" and Sonarr grabbed
+			// it as a single episode. The property's even-pool bounds
+			// deliberately admit either tie-break, so only this case fails under
+			// the upper middle.
+			files: []seadex.File{
+				{Name: "Show S01E01 [1080p].mkv", Length: gib},
+				{Name: "Show S01E02 [1080p].mkv", Length: 5 * gib / 2},
+			},
+			wantPopulation: 2,
+			wantPayload:    1,
+		},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {

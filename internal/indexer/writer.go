@@ -617,7 +617,9 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 // seenLedgerWithinLimits reports whether every seen-ledger entry respects the
 // producer contract: a bounded identity key mapped to true membership, and the
 // ledger as a WHOLE within maxPersistedSeenBytes. Honest
-// keys are tracker keys ("scope:digits") and 40-hex info hashes, orders of
+// keys are tracker keys ("scope:digits") and scope-namespaced info hashes
+// ("scope:h:<40hex>", plus bare 40-hex hashes still carried in a ledger
+// written before ledgerSignals namespaced them), orders of
 // magnitude under the bound; see loadPrevious's ingress checks for why the
 // ledger is validated separately (it is the one map the writer carries forward
 // verbatim). A false value is only reachable by external corruption or
@@ -634,10 +636,20 @@ func seenLedgerWithinLimits(seen map[string]bool) bool {
 		if len(k) > maxPersistedFieldBytes || !wasSeen {
 			return false
 		}
-		// Each entry serializes as `"<key>":true,`, so charging len(k)
-		// alone would under-count a ledger of millions of short keys by
-		// more than half.
-		total += len(k) + 8
+		// Charge the EXACT serialized cost, not the decoded key length:
+		// each entry serializes as `"<key>":true,`, and encoding/json
+		// escapes quotes, backslashes, control bytes and the
+		// HTML-sensitive set (every '<' becomes the six-byte \u003c). A
+		// decoded-byte approximation therefore lets an escape-heavy
+		// ledger pass this cap and still push the REBUILT snapshot past
+		// maxFeedBytes - the very wedge the aggregate cap exists to
+		// prevent. json.Marshal on the key applies the same escaping
+		// policy persist's json.Marshal(snap) will.
+		encodedKey, err := json.Marshal(k)
+		if err != nil {
+			return false
+		}
+		total += len(encodedKey) + len(`:true,`)
 		if total > maxPersistedSeenBytes {
 			return false
 		}
@@ -723,7 +735,9 @@ func (ws *warnedSet) retracts(it *journalItem) bool {
 // (which consumes the any-occurrence key set) removes it from RSS - the two
 // indexer paths would disagree about whether the release is grabbable. So a
 // first pass collects every warned identity signal - journal key AND info
-// hash (identitySignals, the package's one identity definition) - across the
+// hash (identitySignals, the deliberately CROSS-SCOPE identity form: a warning
+// against the bytes must retract every listing of them, unlike the seen
+// ledger's per-scope ledgerSignals) - across the
 // whole catalogue, and a second pass removes every occurrence that is warned
 // itself OR shares a warned identity.
 // Filtering at the source keeps every downstream consumer honest at once: the

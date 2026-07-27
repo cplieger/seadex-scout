@@ -1097,6 +1097,36 @@ func TestSeenLedgerWithinLimitsBoundary(t *testing.T) {
 	}
 }
 
+// TestSeenLedgerWithinLimitsChargesJSONEscaping pins that the aggregate cap is
+// charged against the SERIALIZED ledger cost, not the decoded key bytes.
+// encoding/json escapes the HTML-sensitive set, so every '<' costs six bytes
+// (\u003c) in the file persist writes: a ledger of escape-heavy keys whose
+// decoded length sits comfortably under maxPersistedSeenBytes still pushes the
+// rebuilt snapshot past maxFeedBytes, which is exactly the persist-wedges-
+// forever case the aggregate cap exists to prevent. The test asserts the
+// decoded approximation would have ACCEPTED this ledger, so it fails if the
+// check ever reverts to len(k)+8.
+func TestSeenLedgerWithinLimitsChargesJSONEscaping(t *testing.T) {
+	const (
+		keyRunes = 1000
+		keys     = 1500
+	)
+	seen := make(map[string]bool, keys)
+	decoded := 0
+	for i := range keys {
+		k := strings.Repeat("<", keyRunes) + strconv.Itoa(i)
+		seen[k] = true
+		decoded += len(k) + 8
+	}
+	if decoded > maxPersistedSeenBytes {
+		t.Fatalf("decoded ledger cost %d exceeds cap %d; the fixture no longer isolates the escaping charge", decoded, maxPersistedSeenBytes)
+	}
+	if seenLedgerWithinLimits(seen) {
+		t.Errorf("seenLedgerWithinLimits(%d escape-heavy keys) = true, want false (encoded cost ~%d bytes exceeds cap %d)",
+			keys, keys*(6*keyRunes+10), maxPersistedSeenBytes)
+	}
+}
+
 // TestRebuildBlanksCarriedForeignInfoURL pins that the persisted-InfoURL
 // allowlist lives in the shared decode gate (decodeSnapshot), not only in the
 // reader: an item whose torrent has left the curation set keeps its STORED

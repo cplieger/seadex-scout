@@ -1,0 +1,264 @@
+package scout
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/cplieger/arrapi"
+	"github.com/cplieger/seadex-scout/internal/anilist"
+	"github.com/cplieger/seadex-scout/internal/compare"
+	"github.com/cplieger/seadex-scout/internal/library"
+	"github.com/cplieger/seadex-scout/internal/mapping"
+	"github.com/cplieger/seadex-scout/internal/match"
+	"github.com/cplieger/seadex-scout/internal/notify"
+	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/state"
+	"github.com/cplieger/slogx/capture"
+)
+
+// twoRecordMappingCache returns a fresh mapping cache holding the Frieren
+// record plus a second seasoned TV record (AniList 222 / TVDB 124), for the
+// degradation tests that need a second comparable series.
+func twoRecordMappingCache() mapping.Cache {
+	return mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{
+		{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1},
+		{AniListID: 222, Type: "TV", TvdbID: 124, SeasonTvdb: 1},
+	}}
+}
+
+// secondSeaDexEntry returns a curated best-release entry for AniList 222, the
+// mapping-side twin of twoRecordMappingCache's second record.
+func secondSeaDexEntry() seadex.Entry {
+	return seadex.Entry{
+		AniListID: 222,
+		Torrents: []seadex.Torrent{{
+			ReleaseGroup: "SubsPlease",
+			Tracker:      "Nyaa",
+			InfoHash:     "def",
+			URL:          "https://nyaa.si/view/2",
+			IsBest:       true,
+			Files:        []seadex.File{{Name: "Second Show S01E01 1080p.mkv", Length: 1}},
+		}},
+	}
+}
+
+// TestCycleEmptyFirstWalkSeedsIncompleteBaseline pins the empty-walk term of
+// the cold-start baseline's completeness decision: a FIRST successful cycle
+// whose library walk returned zero items (an arr with nothing in it yet, or an
+// arr_tags.include matching nothing) is no evidence a baseline covers the
+// library, so it must seed the baseline as INCOMPLETE. Without that term the
+// cycle after the library appears bursts the whole pre-existing backlog as
+// fresh notifications - the exact inverse of what the baseline exists for.
+// The incomplete window then closes on the first populated walk (whose backlog
+// seeds silently) and normal reporting resumes on the cycle after.
+func TestCycleEmptyFirstWalkSeedsIncompleteBaseline(t *testing.T) {
+	logger, recorder := capture.New()
+	store := &fakeStore{st: state.State{Mapping: twoRecordMappingCache()}}
+	sonarr := &fakeSonarr{}
+	seaDex := &fakeSeaDex{entries: seadexFrierenEntry()}
+	s := New(&Deps{
+		Logger:       scoutTestLogger(),
+		Store:        store,
+		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping:      fakeMapping{},
+		SeaDex:       seaDex,
+		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
+		Comparer:     compare.NewComparer(compare.Config{}),
+		Notifier:     notify.NewNotifier(logger),
+		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
+	})
+
+	// Cycle one: a successful but EMPTY walk. The seed covers nothing, so the
+	// baseline must be recorded incomplete.
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("empty-walk cycle healthy=false, want true (an empty walk is not an ingest fault)")
+	}
+	if !store.st.Baselined || !store.st.BaselineIncomplete {
+		t.Errorf("state after the empty first walk: Baselined=%v BaselineIncomplete=%v, want true/true (an empty walk cannot seed a complete baseline)",
+			store.st.Baselined, store.st.BaselineIncomplete)
+	}
+	if n := recorder.CountExact("better release available"); n != 0 {
+		t.Errorf("empty-walk cycle emitted %d finding notifications, want 0", n)
+	}
+
+	// Cycle two: the library appears, carrying a pre-existing backlog (Frieren
+	// on Erai-raws against SeaDex's best SubsPlease). It must seed silently -
+	// not burst - and close the incomplete window.
+	sonarr.series = []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}
+	sonarr.files = map[int][]arrapi.EpisodeFile{7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}}}
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("populated-walk cycle healthy=false, want true")
+	}
+	if !store.st.Baselined || store.st.BaselineIncomplete {
+		t.Errorf("state after the populated walk: Baselined=%v BaselineIncomplete=%v, want true/false (the first complete walk closes the window)",
+			store.st.Baselined, store.st.BaselineIncomplete)
+	}
+	if len(store.st.Findings) != 1 {
+		t.Errorf("baselined findings after the populated walk = %d, want 1 (the pre-existing backlog seeded)", len(store.st.Findings))
+	}
+	if n := recorder.CountExact("better release available"); n != 0 {
+		t.Errorf("populated walk emitted %d finding notifications, want 0 (the backlog must seed silently)", n)
+	}
+	if n := recorder.CountExact("findings reported"); n != 0 {
+		t.Errorf("populated walk took the Report path %d times, want 0 (still inside the incomplete-baseline window)", n)
+	}
+
+	// Cycle three: steady state. A genuinely new finding notifies normally, so
+	// the silent window is one-shot rather than permanent.
+	sonarr.series = append(sonarr.series, arrapi.Series{ID: 8, Title: "Second Show", TvdbID: 124, Year: 2024})
+	sonarr.files[8] = []arrapi.EpisodeFile{{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}}
+	seaDex.entries = append(seaDex.entries, secondSeaDexEntry())
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("steady-state cycle healthy=false, want true")
+	}
+	if n := recorder.CountExact("better release available"); n != 1 {
+		t.Errorf("steady-state notification count = %d, want 1 (normal reporting resumes once the baseline is complete)", n)
+	}
+}
+
+// TestCyclePartialWalkEscalatesAfterRepeatedPartialWalks pins the persisted
+// partial-walk streak and its escalation: below the threshold a completed
+// partial cycle only advances the counter (the per-cycle "reason=partial-walk"
+// degraded line is the whole signal), and on the threshold cycle the same site
+// escalates to ERROR - firing the SeadexScoutCycleError Loki rule - because a
+// permanently failing series never self-heals and, inside the cold-start
+// window, silences every finding. A completed WHOLE walk resets the streak, so
+// a recovered arr starts fresh instead of escalating on its next blip.
+func TestCyclePartialWalkEscalatesAfterRepeatedPartialWalks(t *testing.T) {
+	tests := []struct {
+		name        string
+		priorStreak int
+		wantError   bool
+	}{
+		{name: "below threshold does not escalate", priorStreak: partialWalkEscalationThreshold - 2, wantError: false},
+		{name: "at threshold escalates to ERROR", priorStreak: partialWalkEscalationThreshold - 1, wantError: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			logger, recorder := capture.New()
+			store := &fakeStore{st: state.State{
+				Mapping:      twoRecordMappingCache(),
+				Findings:     map[string]notify.Alerted{"prior": priorAlerted("Existing", 154587)},
+				Baselined:    true,
+				PartialWalks: tc.priorStreak,
+			}}
+			sonarr := &flakySonarr{
+				fakeSonarr: fakeSonarr{
+					series: []arrapi.Series{
+						{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
+						{ID: 8, Title: "Second Show", TvdbID: 124, Year: 2024},
+					},
+					files: map[int][]arrapi.EpisodeFile{
+						7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+						8: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+					},
+				},
+				failEpisodes: map[int]bool{8: true},
+			}
+			s := New(&Deps{
+				Logger:       logger,
+				Store:        store,
+				Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+				Mapping:      fakeMapping{},
+				SeaDex:       &fakeSeaDex{entries: append(seadexFrierenEntry(), secondSeaDexEntry())},
+				Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
+				Comparer:     compare.NewComparer(compare.Config{}),
+				Notifier:     notify.NewNotifier(scoutTestLogger()),
+				AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
+			})
+
+			if healthy := s.Cycle(context.Background()); !healthy {
+				t.Fatal("partial-walk cycle healthy=false, want true (a partial walk is degraded, not unhealthy)")
+			}
+			if got := store.st.PartialWalks; got != tc.priorStreak+1 {
+				t.Errorf("persisted PartialWalks = %d, want %d (the streak must advance and persist)", got, tc.priorStreak+1)
+			}
+			errCount := recorder.CountLevel(slog.LevelError, "library walk partial repeatedly")
+			if tc.wantError && errCount != 1 {
+				t.Errorf("escalated ERROR count = %d, want exactly 1 at the threshold (single log site)", errCount)
+			}
+			if !tc.wantError && errCount != 0 {
+				t.Errorf("below-threshold ERROR count = %d, want 0 (a partial blip must not alert)", errCount)
+			}
+			if got, ok := recorder.AttrValue("library walk partial repeatedly", "consecutive_partial_walks"); tc.wantError && (!ok || got != "8") {
+				t.Errorf("escalation streak attr = %q ok=%v, want \"8\" (the ERROR must carry the up-to-date streak)", got, ok)
+			}
+			if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "partial-walk" {
+				t.Errorf("degraded reasons = %v, want [partial-walk]", reasons)
+			}
+
+			// A completed WHOLE walk ends the streak: the failing series
+			// recovers, so the next blip starts counting from zero.
+			sonarr.failEpisodes = nil
+			if healthy := s.Cycle(context.Background()); !healthy {
+				t.Fatal("recovered cycle healthy=false, want true on a complete walk")
+			}
+			if got := store.st.PartialWalks; got != 0 {
+				t.Errorf("persisted PartialWalks after a complete walk = %d, want 0 (a whole walk resets the streak)", got)
+			}
+			if n := recorder.CountExact("cycle complete"); n != 1 {
+				t.Errorf("'cycle complete' count = %d, want 1 (the recovered cycle is no longer degraded)", n)
+			}
+		})
+	}
+}
+
+// TestCycleSeaDexFailureSanitizesLoggedErrorAtBothSites pins the emit-boundary
+// reduction on the SeaDex failure path: the client's error can embed raw
+// upstream bytes (the keyset-cursor arms format rejected created/id values with
+// %q, bounded only by the 48 MB page cap), so BOTH log sites that carry it -
+// the seadex-fetch-failed WARN and the "cycle degraded" completion line - must
+// render it bounded, single-line and rune-sanitized. An unsanitized site would
+// see the record dropped by Loki or make the 256 MiB process pay a multi-
+// megabyte render every degraded cycle. The honest part of the message survives.
+func TestCycleSeaDexFailureSanitizesLoggedErrorAtBothSites(t *testing.T) {
+	logger, recorder := capture.New()
+	hostile := "upstream said: " + strings.Repeat("A\u0007\u202e", 5000) + "\nrejected id"
+	store := &fakeStore{st: state.State{
+		Mapping:   frierenMappingCache(),
+		Findings:  map[string]notify.Alerted{"prior": priorAlerted("Existing", 154587)},
+		Baselined: true,
+	}}
+	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+	s := New(&Deps{
+		Logger:  logger,
+		Store:   store,
+		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping: fakeMapping{},
+		SeaDex:  &fakeSeaDex{err: errors.New(hostile)},
+	})
+
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("Cycle healthy=false, want true (a SeaDex outage is degraded, not unhealthy)")
+	}
+	sites := []struct {
+		msgSub string
+		what   string
+	}{
+		{msgSub: "seadex fetch failed", what: "the seadex-failure WARN"},
+		{msgSub: "cycle degraded", what: "the degraded completion line"},
+	}
+	for _, site := range sites {
+		got, ok := recorder.AttrValue(site.msgSub, attrError)
+		if !ok {
+			t.Errorf("%s carries no %q attr, want the sanitized upstream error", site.what, attrError)
+			continue
+		}
+		if len(got) > maxLoggedErrorBytes+100 {
+			t.Errorf("%s error value = %d bytes, want bounded near maxLoggedErrorBytes (%d)", site.what, len(got), maxLoggedErrorBytes)
+		}
+		if strings.ContainsAny(got, "\n\r\u0007") || strings.Contains(got, "\u202e") {
+			t.Errorf("%s error value carries a control/bidi rune (prefix %q)", site.what, got[:min(len(got), 60)])
+		}
+		if !strings.HasPrefix(got, "upstream said: ") {
+			t.Errorf("%s error value lost the honest message prefix (prefix %q)", site.what, got[:min(len(got), 60)])
+		}
+	}
+	if _, ok := store.st.Findings["prior"]; !ok {
+		t.Errorf("persisted findings = %+v, want the prior finding preserved through the outage", store.st.Findings)
+	}
+}

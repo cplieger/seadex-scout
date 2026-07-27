@@ -192,7 +192,7 @@ func scopeCell(row *Row) string {
 // "movie", "special", the TVDB season ("S2"), or "series" for a whole-series
 // comparison (an absolute-numbered run, a title-only match, or a not-on-SeaDex
 // library item). It is a pure reader of Row.scope — the classification itself
-// is the align.Scope decision recorded on the Row, so the label cannot drift
+// is the align.Decide scope decision recorded on the Row, so the label cannot drift
 // from the comparison actually performed.
 func scopeLabel(row *Row) string {
 	if row.scope == align.ScopeSeason {

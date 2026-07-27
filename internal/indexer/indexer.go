@@ -268,13 +268,19 @@ type Indexer struct {
 	verifyKey webhttp.StaticTokenVerifier
 }
 
-// warmLoadTimeout bounds New's warm load of the persisted snapshot. The read is
-// size-bounded (maxFeedBytes) but a slow or wedged /config mount has no bound of
-// its own, and New runs on the daemon's startup path (build.go's buildIndexer,
-// before main.go arms the health marker or starts the compare loop), so an
-// unbounded read holds the whole daemon down instead of one request. Abandoning
-// the warm load costs nothing durable: a cancelled read is silent and stays
-// retryable (never snapshot-unavailable), so the first request reloads.
+// warmLoadTimeout bounds how long New WAITS for the warm load of the persisted
+// snapshot - not the load itself. The read is size-bounded (maxFeedBytes) but a
+// slow or wedged /config mount has no bound of its own, and New runs on the
+// daemon's startup path (build.go's buildIndexer, before main.go arms the health
+// marker or starts the compare loop), so an unbounded WAIT holds the whole
+// daemon down instead of one request. A context deadline cannot deliver this
+// bound: refresh stats the file before any ctx check, and atomicfile's bounded
+// read only tests ctx around its syscalls - it cannot interrupt an os.Open,
+// File.Stat, or io.ReadAll already blocked in the filesystem. So the load runs
+// asynchronously and New stops waiting after the deadline; the load may finish
+// in the background, which is safe because the cache is synchronized and refresh
+// coalesces through reloadGate, so whoever finishes installs and the first
+// request either sees the warmed snapshot or reloads itself.
 const warmLoadTimeout = 15 * time.Second
 
 // New builds the Torznab feed server from cfg, log, and the wired upstream set.
@@ -307,9 +313,20 @@ func New(cfg *Config, log *slog.Logger, ups Upstreams) *Indexer {
 		},
 	}
 	// Warm the feed from the last persisted snapshot so a restart serves
-	// immediately rather than empty until the next cycle.
-	warmCtx, cancelWarm := context.WithTimeout(context.Background(), warmLoadTimeout)
-	defer cancelWarm()
-	ix.cache.refresh(warmCtx)
+	// immediately rather than empty until the next cycle. The load runs
+	// asynchronously and only the WAIT is bounded: a wedged /config mount
+	// cannot be interrupted mid-syscall, so bounding the wait is the only
+	// bound that holds (see warmLoadTimeout).
+	warmDone := make(chan struct{})
+	go func() {
+		defer close(warmDone)
+		ix.cache.refresh(context.Background())
+	}()
+	warmTimer := time.NewTimer(warmLoadTimeout)
+	defer warmTimer.Stop()
+	select {
+	case <-warmDone:
+	case <-warmTimer.C:
+	}
 	return ix
 }

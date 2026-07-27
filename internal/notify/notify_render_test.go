@@ -256,3 +256,64 @@ func TestPublicLinkAlertLabel(t *testing.T) {
 		})
 	}
 }
+
+// TestTrackerURLsHostOverridesMismatchedLabel pins the host-first precedence
+// canonicalTracker applies when the untrusted SeaDex label contradicts the
+// URL: a link labeled "Nyaa" whose host is AnimeTosho must NOT occupy the
+// nyaa slot (alerts.yaml renders that slot under a hardcoded "[Nyaa]" label,
+// so it would mislabel the destination) and must not displace the genuine
+// Nyaa link that follows it. Every other case in this file supplies matching
+// label/host pairs, so a label-first canonicalTracker (or a label-only Nyaa
+// decision in classifyTrackerLink) still satisfies them; these assertions
+// fail under either regression.
+func TestTrackerURLsHostOverridesMismatchedLabel(t *testing.T) {
+	links := []compare.ReleaseLink{
+		{Tracker: "Nyaa", URL: "https://animetosho.org/view/1"},
+		{Tracker: "Nyaa", URL: "https://nyaa.si/view/2"},
+	}
+	pub, ab := trackerURLs(links)
+	if ab != "" {
+		t.Fatalf("ab = %q, want both public links routed to public slots", ab)
+	}
+	if got := pub.nyaaURL(); got != "https://nyaa.si/view/2" {
+		t.Errorf("nyaa_url = %q, want the genuine Nyaa URL", got)
+	}
+	if got := pub.otherURL(); got != "" {
+		t.Errorf("public_url = %q, want empty (the Nyaa link wins the public slot)", got)
+	}
+}
+
+// TestTrackerURLsMismatchedLabelAloneRendersItsRealTracker pins the same
+// host-first rule for a lone mislabeled link: an AnimeTosho URL labeled
+// "Nyaa" renders as public_url with public_tracker "AnimeTosho", never as
+// nyaa_url.
+func TestTrackerURLsMismatchedLabelAloneRendersItsRealTracker(t *testing.T) {
+	pub, ab := trackerURLs([]compare.ReleaseLink{
+		{Tracker: "Nyaa", URL: "https://animetosho.org/view/1"},
+	})
+	if ab != "" {
+		t.Fatalf("ab = %q, want the link routed to a public slot", ab)
+	}
+	if got := pub.nyaaURL(); got != "" {
+		t.Errorf("nyaa_url = %q, want empty for an AnimeTosho destination", got)
+	}
+	if got := pub.otherURL(); got != "https://animetosho.org/view/1" {
+		t.Errorf("public_url = %q, want the AnimeTosho URL", got)
+	}
+	if got := pub.otherTracker(); got != "AnimeTosho" {
+		t.Errorf("public_tracker = %q, want AnimeTosho", got)
+	}
+}
+
+// TestCapURLAttrPreservesIPv6LiteralHost pins the one Markdown-escaping
+// exclusion capURLAttr must keep: square brackets are not CommonMark link
+// destination delimiters, but they are required syntax around an IPv6 literal
+// host, so percent-encoding them would turn a valid arr deep link into a URL
+// browsers and curl reject. The sibling internal/audit escapeLinkURL policy
+// leaves them alone for the same reason.
+func TestCapURLAttrPreservesIPv6LiteralHost(t *testing.T) {
+	const want = "http://[fd00::1]:8989/series/frieren"
+	if got := capURLAttr(want); got != want {
+		t.Errorf("capURLAttr(%q) = %q, want it unchanged", want, got)
+	}
+}

@@ -71,10 +71,14 @@ var ErrNotFound = errors.New("anilist: media not found")
 // record-local, per-id fallback applies.
 var ErrBatchRecord = errors.New("anilist: batch response")
 
-// BatchRecordError reports record-local failures found inside chunks that
-// otherwise completed, and names the ids whose CHUNK is therefore not
-// trustworthy as evidence of absence. It wraps ErrBatchRecord, so existing
-// errors.Is checks are unaffected.
+// BatchRecordError names the ids whose CHUNK is not trustworthy as evidence of
+// absence: either the chunk reported a record-local failure, or it never
+// completed at all (FetchMany aborted at or before it). Err is whichever
+// failure produced that scoping - a record-local error wrapping
+// ErrBatchRecord, or an aborting envelope/request error that does NOT wrap it
+// (joined with an earlier chunk's record error when there was one). So
+// errors.Is(err, ErrBatchRecord) classifies the FAILURE and must not be read
+// as "a *BatchRecordError was returned"; use errors.As for that.
 //
 // The scoping is the point. A record-local defect is confined to the chunk it
 // arrived in: the other chunks completed cleanly and their absent ids ARE
@@ -86,7 +90,8 @@ var ErrBatchRecord = errors.New("anilist: batch response")
 type BatchRecordError struct {
 	Err error
 	// UnverifiedIDs are the ids belonging to chunks that reported a
-	// record-local failure. Absence of one of these from the result set proves
+	// record-local failure OR that never completed (the aborting chunk and every
+	// chunk after it). Absence of one of these from the result set proves
 	// nothing, so it must not be memoized as not-found.
 	UnverifiedIDs []int
 }
@@ -297,9 +302,10 @@ func (c *Client) Fetch(ctx context.Context, aniListID int) (Media, error) {
 // for the remainder rather than losing the batch, and can tell an all-not-found
 // chunk apart from a total outage. "The remainder" is named by the returned
 // *BatchRecordError's UnverifiedIDs (the chunks that never completed), so the
-// completed chunks' absences stay usable as definitive evidence. A record-local failure (ErrBatchRecord, a
-// poisoned record inside an otherwise well-formed response) does NOT abort the
-// batch: the chunk still counts as completed, later chunks are still fetched,
+// completed chunks' absences stay usable as definitive evidence. A
+// record-local failure (ErrBatchRecord, a poisoned record inside an otherwise
+// well-formed response) does NOT abort the batch: the chunk still counts as
+// completed, later chunks are still fetched,
 // and the first record error is surfaced alongside the merged result, so one
 // malformed record cannot hide every id after it or read as a total outage to
 // the caller. The response is untrusted: an id the current chunk never
@@ -435,19 +441,25 @@ func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 		httpx.DrainClose(resp.Body)
 		return nil, c.rateLimitError(resp)
 	}
-	// Read the budget headers on EVERY non-429 response, error statuses
-	// included: AniList stamps X-RateLimit-Remaining/Reset on a 4xx/5xx too,
-	// and dropping a low-remaining signal there would let the next lookup
-	// race into the 429 this pre-emption exists to avoid. A response without
-	// the headers is a no-op (the Atoi guard), so error statuses that carry
-	// no budget information are unaffected.
-	c.observeRateHeaders(resp)
+	// The budget headers are read on EVERY response that is not itself a rate
+	// limit, error statuses included: AniList stamps X-RateLimit-Remaining/Reset
+	// on a 4xx/5xx too, and dropping a low-remaining signal there would let the
+	// next lookup race into the 429 this pre-emption exists to avoid. A response
+	// without the headers is a no-op (the Atoi guard), so error statuses that
+	// carry no budget information are unaffected. Each exit below observes them
+	// exactly once, and the success path observes them only AFTER
+	// envelopeRateLimitError has had its say: a 429 delivered inside a
+	// successful envelope is the same rate-limit response, so penalizing the
+	// throttle through rateLimitError and again through a low-remaining header
+	// would report one response as two Stats().RateLimitWaits.
+	//
 	// AniList mirrors a GraphQL-level not-found into the HTTP status: a
 	// nonexistent id answers 404 while still carrying the normal envelope
 	// {"data":{"Media":null},"errors":[{"message":"Not Found."}]} (verified
 	// live). Pass the 404 body through to the parser so Fetch can honor its
 	// ErrNotFound contract instead of surfacing an opaque HTTP 404.
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		c.observeRateHeaders(resp)
 		httpx.DrainClose(resp.Body)
 		statusErr := httpx.CheckHTTPStatus(resp)
 		if statusErr == nil {
@@ -465,6 +477,7 @@ func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 	// payload that only fails later as a confusing JSON decode error.
 	respBody, err := httpx.ReadLimitedBody(resp.Body, maxBodyBytes)
 	if err != nil {
+		c.observeRateHeaders(resp)
 		return nil, fmt.Errorf("anilist: read response: %w", err)
 	}
 	// A 429 AniList reports INSIDE a successful envelope must take the same
@@ -474,6 +487,7 @@ func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 	if rlErr := c.envelopeRateLimitError(resp, respBody); rlErr != nil {
 		return nil, rlErr
 	}
+	c.observeRateHeaders(resp)
 	return respBody, nil
 }
 
@@ -635,7 +649,8 @@ func (m *gqlMedia) toMedia() (Media, error) {
 
 // anilistFormats is AniList's MediaFormat enum as it applies to anime (its
 // MANGA/NOVEL/ONE_SHOT members cannot appear on a SeaDex entry). Matched
-// case-insensitively after normalization, mirroring mapping.NormalizeType.
+// case-insensitively after normalization, mirroring mapping's unexported
+// normalizeType canonical form (upper-cased, trimmed).
 var anilistFormats = map[string]struct{}{
 	"TV": {}, "TV_SHORT": {}, "MOVIE": {}, "SPECIAL": {},
 	"OVA": {}, "ONA": {}, "MUSIC": {},
@@ -872,9 +887,9 @@ type gqlPage struct {
 // array is malformed by construction; without the bound a hostile endpoint
 // could pack hundreds of thousands of tiny objects under the 1 MiB body cap
 // and json.Unmarshal would expand them all before parsePageRecords validates
-// anything (CWE-400 resource exhaustion). A
-// post-decode length check would be too late: the allocation has already
-// happened. set stays false for a missing field (UnmarshalJSON never runs)
+// anything (CWE-400 resource exhaustion). A post-decode length check would be
+// too late: the allocation has already happened. set stays false for a
+// missing field (UnmarshalJSON never runs)
 // or an explicit null, both rejected by parseMediaPage as a malformed
 // envelope; an explicit empty array sets it with zero records (valid).
 //
@@ -931,8 +946,8 @@ type gqlPageResponse struct {
 // fails the batch; the record loop's per-record invariants (a decodable
 // element, positive id, valid fields, no duplicate ids) live in
 // parsePageRecords - a rejected record is skipped and surfaced via an
-// ErrBatchRecord-wrapped error
-// alongside the chunk's valid records, so one poisoned record cannot discard
+// ErrBatchRecord-wrapped error alongside the chunk's valid records, so one
+// poisoned record cannot discard
 // the chunk or read as a total outage - a skipped id is absent from the map
 // AND covered by the non-nil error, so the caller never negative-memoizes it,
 // and FetchMany distinguishes the record-local failure from an envelope
@@ -962,46 +977,74 @@ func parseMediaPage(raw []byte) (map[int]Media, error) {
 // parsePageRecords validates one batch response's record list into a map
 // keyed by AniList id: an UNDECODABLE element (a field whose JSON type is out
 // of schema) or a record with a non-positive id or rejected fields (toMedia)
-// is skipped, and a DUPLICATE id is conflicting untrusted data -
-// two records claiming one identity - so NO record for that id is returned
+// is skipped, and a DUPLICATE id is conflicting untrusted data - two records
+// claiming one identity - so NO record for that id is returned
 // (the earlier occurrence is deleted and the id stays excluded however many
 // duplicates follow) rather than silently letting the last write win. Each
 // failure surfaces the first offender via an ErrBatchRecord-wrapped error
 // beside the valid sibling records.
 func parsePageRecords(media []json.RawMessage) (map[int]Media, error) {
-	out := make(map[int]Media, len(media))
-	seen := make(map[int]bool, len(media))
+	set := newPageRecordSet(len(media))
 	var recordErr error
-	record := func(err error) {
-		if recordErr == nil {
+	for i := range media {
+		if err := set.add(media[i], i); err != nil && recordErr == nil {
 			recordErr = err
 		}
 	}
-	for i := range media {
-		var decoded gqlMedia
-		if err := json.Unmarshal(media[i], &decoded); err != nil {
-			record(fmt.Errorf("%w media record %d is undecodable: %v", ErrBatchRecord, i, err))
-			continue
-		}
-		md := &decoded
-		if md.ID <= 0 {
-			record(fmt.Errorf("%w media record %d missing id", ErrBatchRecord, i))
-			continue
-		}
-		if seen[md.ID] {
-			delete(out, md.ID)
-			record(fmt.Errorf("%w media record %d duplicates id %d", ErrBatchRecord, i, md.ID))
-			continue
-		}
-		seen[md.ID] = true
-		parsed, err := md.toMedia()
-		if err != nil {
-			record(fmt.Errorf("%w media record %d (id %d): %v", ErrBatchRecord, i, md.ID, err))
-			continue
-		}
-		out[md.ID] = parsed
+	return set.out, recordErr
+}
+
+// pageRecordSet accumulates one batch's accepted records under the duplicate
+// rule: an id claimed twice yields NO record for that id, however many
+// duplicates follow.
+type pageRecordSet struct {
+	out  map[int]Media
+	seen map[int]bool
+}
+
+func newPageRecordSet(n int) *pageRecordSet {
+	return &pageRecordSet{out: make(map[int]Media, n), seen: make(map[int]bool, n)}
+}
+
+// claim records an identity claim on id and reports whether it is a DUPLICATE.
+// A duplicate also drops any value already accepted for that id, so the id
+// stays excluded however many duplicates follow.
+func (s *pageRecordSet) claim(id int) bool {
+	dup := s.seen[id]
+	if dup {
+		delete(s.out, id)
 	}
-	return out, recordErr
+	s.seen[id] = true
+	return dup
+}
+
+// add validates one batch element into the set, returning the
+// ErrBatchRecord-wrapped reason it was skipped (nil when it was accepted).
+func (s *pageRecordSet) add(raw json.RawMessage, i int) error {
+	var decoded gqlMedia
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		// encoding/json continues populating decodable fields after a type
+		// error, so a positive id on an undecodable element is still an
+		// identity claim: claim it (dropping any earlier value), so a
+		// malformed/well-formed duplicate pair fails closed in either order.
+		if decoded.ID > 0 {
+			s.claim(decoded.ID)
+		}
+		return fmt.Errorf("%w media record %d is undecodable: %s", ErrBatchRecord, i, sanitizeUpstreamMessage(err.Error()))
+	}
+	md := &decoded
+	if md.ID <= 0 {
+		return fmt.Errorf("%w media record %d missing id", ErrBatchRecord, i)
+	}
+	if s.claim(md.ID) {
+		return fmt.Errorf("%w media record %d duplicates id %d", ErrBatchRecord, i, md.ID)
+	}
+	parsed, err := md.toMedia()
+	if err != nil {
+		return fmt.Errorf("%w media record %d (id %d): %v", ErrBatchRecord, i, md.ID, err)
+	}
+	s.out[md.ID] = parsed
+	return nil
 }
 
 // dedupeTitles returns the usable (non-blank) titles in order, without

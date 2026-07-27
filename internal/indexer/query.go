@@ -306,10 +306,10 @@ func applyPaging(log *slog.Logger, items []item, q url.Values) []item {
 // feedFor returns the synthesized RSS feed for a tracker scope (nyaa or ab),
 // read through the snapshot cache, which owns the locking (a cycle rewrite
 // replaces the snapshot under it). A scope whose Prowlarr Torznab URL is not
-// configured serves nothing,
-// even when the loaded snapshot carries items for it (a stale snapshot written
-// before the operator turned the tracker off): the README documents an empty
-// per-tracker URL as that tracker's off switch, and the /ab feed embeds the
+// configured serves nothing, even when the loaded snapshot carries items for it
+// (a stale snapshot written before the operator turned the tracker off): the
+// README documents an empty per-tracker URL as that tracker's off switch, and
+// the /ab feed embeds the
 // operator's passkey, so an off tracker's empty-q response must be the same
 // shape as a tracker with no data - never the credential-bearing feed. The
 // returned slice is safe to use after the cache's read returns: reload installs

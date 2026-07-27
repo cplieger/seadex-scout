@@ -421,10 +421,14 @@ func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Valu
 	if servesQuery(q) {
 		// A synthesized-RSS check reads only local state, so it takes its own
 		// pool: it must stay servable while every search slot is parked in a
-		// bounded Prowlarr retry tree.
-		gate, limit := ix.queryGate, maxConcurrentQueries
+		// bounded Prowlarr retry tree. pool names which bound was hit: the two
+		// have different causes (a stalled Prowlarr retry tree vs simultaneous
+		// local renders) and different operator actions, and the limit value
+		// alone stops distinguishing them the moment either constant is
+		// retuned.
+		gate, limit, pool := ix.queryGate, maxConcurrentQueries, "search"
 		if isFeedRequest(q) {
-			gate, limit = ix.feedGate, maxConcurrentFeeds
+			gate, limit, pool = ix.feedGate, maxConcurrentFeeds, "rss"
 		}
 		acquired, clientGone := ix.acquireQuery(r.Context(), gate)
 		if clientGone {
@@ -441,9 +445,9 @@ func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Valu
 			// exactly the transient/self-healing side of the level rule.
 			w.Header().Set("Retry-After", strconv.Itoa(int(queryGateWait.Seconds())))
 			ix.log.Warn("indexer at its concurrent-query limit; request answered busy",
-				"scope", scope, "limit", limit, "waited", queryGateWait)
+				"scope", scope, "pool", pool, "limit", limit, "waited", queryGateWait)
 			ix.rejectTorznab(w, scope, "concurrent query limit reached", errCodeUnknown,
-				"too many concurrent searches in flight; retry shortly")
+				"too many concurrent requests in flight; retry shortly")
 			return
 		}
 		defer ix.releaseQuery(gate)

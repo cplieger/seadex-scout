@@ -17,6 +17,7 @@ import (
 	"github.com/cplieger/arrapi"
 	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/config"
+	"github.com/cplieger/seadex-scout/internal/cycle"
 	"github.com/cplieger/slogx"
 	"github.com/cplieger/slogx/capture"
 )
@@ -979,6 +980,53 @@ func TestReportWriteContext(t *testing.T) {
 		cancel()
 		if got.Err() == nil {
 			t.Error("cancel() left the detached context live; the caller's defer must release it")
+		}
+	})
+}
+
+// TestDetachedWriteError pins the alert-facing exit classification of a
+// shutdown-truncated report write: it must read as a routine shutdown (WARN,
+// excluded from alerts.yaml's SeadexScoutCycleError rule) while a genuine write
+// fault keeps its ERROR classification. Three non-obvious properties carry it -
+// the multi-%w wrap surviving (fmt drops ALL wrapping on a nil %w operand), the
+// guard's asymmetry, and cycle.NormalizeShutdownError leaving an
+// already-classified error alone rather than wrapping it twice.
+func TestDetachedWriteError(t *testing.T) {
+	cancelled := func() context.Context {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx
+	}
+
+	t.Run("a shutdown-truncated detached write classifies as a routine shutdown", func(t *testing.T) {
+		ctx := cancelled()
+		werr := fmt.Errorf("write report pair: %w", context.DeadlineExceeded)
+		got := detachedWriteError(ctx, werr)
+		if !errors.Is(got, context.Canceled) {
+			t.Errorf("errors.Is(err, context.Canceled) = false, want true (the multi-%%w wrap must survive; otherwise the redeploy ERROR alert returns): %v", got)
+		}
+		if !errors.Is(got, context.DeadlineExceeded) {
+			t.Errorf("the original write error was lost: %v", got)
+		}
+		if level, _, _ := dispatchOutcome(got); level != slog.LevelWarn {
+			t.Errorf("dispatchOutcome level = %v, want WARN (a shutdown-truncated report must not trip SeadexScoutCycleError)", level)
+		}
+		// cycle.NormalizeShutdownError runs deferred over the same ctx and must
+		// leave an already-classified error alone rather than wrapping it twice.
+		if again := cycle.NormalizeShutdownError(ctx, got); again != got {
+			t.Errorf("NormalizeShutdownError re-wrapped the classified error: %v", again)
+		}
+	})
+	t.Run("a genuine write failure keeps its fault classification", func(t *testing.T) {
+		werr := errors.New("write report pair: no space left on device")
+		if got := detachedWriteError(cancelled(), werr); got != werr {
+			t.Errorf("detachedWriteError(cancelled, non-timeout) = %v, want the error unchanged", got)
+		}
+	})
+	t.Run("a live context never reclassifies", func(t *testing.T) {
+		werr := fmt.Errorf("write report pair: %w", context.DeadlineExceeded)
+		if got := detachedWriteError(context.Background(), werr); got != werr {
+			t.Errorf("detachedWriteError(live, timeout) = %v, want the error unchanged", got)
 		}
 	})
 }

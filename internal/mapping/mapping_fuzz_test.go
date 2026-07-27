@@ -38,7 +38,7 @@ func FuzzParseOverrides(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		set, err := parseOverrides(data)
 		if err != nil {
-			if set.records != nil || set.unknown != nil || set.duplicates != nil || set.applied != 0 || set.skipped != 0 || set.oversized != 0 || set.unknownOverflow {
+			if set.records != nil || set.unknown != nil || set.duplicates != nil || set.oversizedIDs != nil || set.applied != 0 || set.skipped != 0 || set.oversized != 0 || set.unknownOverflow {
 				t.Errorf("parseOverrides error with non-empty result: %+v", set)
 			}
 			return

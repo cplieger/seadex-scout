@@ -83,7 +83,7 @@ func TestAuditNotOnSeaDex(t *testing.T) {
 }
 
 // TestAuditRowGroupsDoNotAliasTheSnapshot pins the clone both row-building
-// sites document: for a single-unit scope align.Scope returns the library
+// sites document: for a single-unit scope align.Decide returns the library
 // snapshot's OWN slice, and uncoveredRows reads the item's Groups directly, so
 // an aliased Row.CurrentGroups would hand the report a window into state a
 // concurrent daemon cycle owns - a data race whose torn or rewritten group

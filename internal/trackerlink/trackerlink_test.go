@@ -189,6 +189,55 @@ func TestPublishCanonicalizesScheme(t *testing.T) {
 		"a non-tracker host is still dropped, not upgraded": {
 			tracker: "Nyaa", url: "http://evil.example/view/1", want: "",
 		},
+		// The upgrade rewrites the scheme only, so a cleartext URL naming the
+		// http service's port would publish an https link to a plaintext port.
+		// 443 is the one port that stays coherent; every other explicit port
+		// drops, so the caller reports a URL error instead of a dead link.
+		"cleartext on the http port drops": {
+			tracker: "Nyaa", url: "http://nyaa.si:80/view/1", want: "",
+		},
+		"cleartext on an alternate port drops": {
+			tracker: "Nyaa", url: "http://nyaa.si:8080/view/1", want: "",
+		},
+		"cleartext already naming the https port is upgraded": {
+			tracker: "Nyaa", url: "http://nyaa.si:443/view/1", want: "https://nyaa.si:443/view/1",
+		},
+		"an https URL keeps its explicit port": {
+			tracker: "Nyaa", url: "https://nyaa.si:8080/view/1", want: "https://nyaa.si:8080/view/1",
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := Publish(tc.tracker, tc.url); got != tc.want {
+				t.Errorf("Publish(%q, %q) = %q, want %q", tc.tracker, tc.url, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPublishRequiresATargetBeyondTheHost pins the host-form shape floor
+// (hostFormTargeted): a value that carries only a canonical tracker host
+// resolves to the front page, which identifies no torrent, so it drops like
+// every other unvouchable form - and drops rather than publishes so the caller
+// reports it as a URL error instead of a plausible-looking 404. Both
+// host-bearing arms are covered: the absolute branch and the canonicalized
+// schemeless-host branch. A tail made only of further delimiters names no
+// target either, while a genuinely targeted root query still publishes.
+func TestPublishRequiresATargetBeyondTheHost(t *testing.T) {
+	tests := map[string]struct{ tracker, url, want string }{
+		"bare schemeless host drops":               {"Nyaa", "nyaa.si", ""},
+		"schemeless host with a root slash drops":  {"Nyaa", "nyaa.si/", ""},
+		"bare absolute host drops":                 {"Nyaa", "https://nyaa.si", ""},
+		"absolute host with a root slash drops":    {"Nyaa", "https://nyaa.si/", ""},
+		"bare AB host drops":                       {"AB", "animebytes.tv", ""},
+		"a subdomain tracker host is no exception": {"Nyaa", "sukebei.nyaa.si", ""},
+		"a delimiter-only query tail drops":        {"Nyaa", "nyaa.si/?", ""},
+		"a delimiter-only fragment tail drops":     {"Nyaa", "nyaa.si/#", ""},
+		"a doubled root slash drops":               {"Nyaa", "nyaa.si//", ""},
+		"an absolute delimiter-only tail drops":    {"Nyaa", "https://nyaa.si/?", ""},
+		"a targeted root query still publishes":    {"Nyaa", "nyaa.si/?page=view&tid=1", "https://nyaa.si/?page=view&tid=1"},
+		"a real torrent path still publishes":      {"Nyaa", "nyaa.si/view/1", "https://nyaa.si/view/1"},
+		"an absolute torrent path still publishes": {"Nyaa", "https://nyaa.si/view/1", "https://nyaa.si/view/1"},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {

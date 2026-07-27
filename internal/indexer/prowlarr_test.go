@@ -357,14 +357,20 @@ func TestUpstreamSearchRedactsAPIKeyInTorznabErrorDoc(t *testing.T) {
 	const (
 		userinfoToken = "secret-userinfo-token"
 		queryToken    = "secret-apikey-value-32-chars-long"
+		// Shorter than minEmbeddedSecretLen: only its parameter NAME marks it
+		// a credential.
+		shortQueryToken = "secret-value"
+		semicolonToken  = "secret-semicolon-value"
 	)
 	tests := map[string]struct {
 		code    string
 		padding string
 		// embedded configures the credential in the feed URL (userinfo plus an
 		// ?apikey= value) and leaves the header key empty; secret is the value
-		// the upstream reflects back in its <error description>.
+		// the upstream reflects back in its <error description>. rawQuery
+		// overrides the default single ?apikey= pair.
 		embedded bool
+		rawQuery string
 		secret   string
 	}{
 		"terminal request code 201":  {code: "201", secret: apiKey},
@@ -376,6 +382,18 @@ func TestUpstreamSearchRedactsAPIKeyInTorznabErrorDoc(t *testing.T) {
 		"key straddling the sanitize cap": {code: "900", padding: strings.Repeat("x", 190), secret: apiKey},
 		"feed-URL userinfo reflected":     {code: "900", embedded: true, secret: userinfoToken},
 		"feed-URL apikey value reflected": {code: "900", embedded: true, secret: queryToken},
+		// A credential-NAMED parameter is a secret at any length: config
+		// accepts (and this package's own fixtures use) a short ?apikey=
+		// value, which a value-length floor would leave unredacted.
+		"feed-URL short apikey value reflected": {
+			code: "900", embedded: true, rawQuery: "apikey=" + shortQueryToken, secret: shortQueryToken,
+		},
+		// net/url discards a semicolon-delimited pair wholesale, but the raw
+		// query - credential and all - still rides the outgoing request, so
+		// the collection must read the raw string.
+		"feed-URL semicolon-delimited credential reflected": {
+			code: "900", embedded: true, rawQuery: "apikey=" + semicolonToken + ";indexer=1", secret: semicolonToken,
+		},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -394,6 +412,9 @@ func TestUpstreamSearchRedactsAPIKeyInTorznabErrorDoc(t *testing.T) {
 				}
 				parsed.User = url.User(userinfoToken)
 				parsed.RawQuery = "apikey=" + queryToken
+				if tc.rawQuery != "" {
+					parsed.RawQuery = tc.rawQuery
+				}
 				feed, key = parsed.String(), ""
 			}
 
@@ -716,6 +737,14 @@ func TestUpstreamSearchRejectsOversizedResponse(t *testing.T) {
 	}
 	if tooLarge.Limit != upstreamMaxBytes {
 		t.Errorf("ResponseTooLargeError.Limit = %d, want %d", tooLarge.Limit, int64(upstreamMaxBytes))
+	}
+	// GetBytes checks status BEFORE reading the body, so an over-cap read is by
+	// construction the read failure of a SUCCESSFUL (2xx) response: the harvest
+	// must scope it to this one show's result set (malformedUpstreamBody) rather
+	// than latching the whole tracker scope as failed and skipping every
+	// remaining show on it.
+	if !malformedUpstreamBody(err) {
+		t.Errorf("malformedUpstreamBody(%T) = false, want true: an over-cap 2xx body is show-scoped evidence, not upstream-down evidence", err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -1144,6 +1173,44 @@ func TestFilterDownloadURLsKeepsDisplayOnsetWhenPageFullyDropped(t *testing.T) {
 	}})
 	if n := rec.CountExact(recoveryMsg); n != 1 {
 		t.Errorf("display-recovery INFO count = %d, want 1 once a clean page is observed", n)
+	}
+}
+
+// TestFilterDownloadURLsKeepsDisplayOnsetWhenSurvivorsCarryNoDisplayURL pins the
+// third unobserved-evidence case of the display gate: a page whose SURVIVING
+// items carry neither an InfoURL nor a GUID inspects no display field at all, so
+// it must not clear displayWarned. The len(out) > 0 guard reported a zero blanked
+// count here and announced a false recovery; the observedDisplay count is what
+// closes it, and nothing else in the suite fails if that count is removed.
+func TestFilterDownloadURLsKeepsDisplayOnsetWhenSurvivorsCarryNoDisplayURL(t *testing.T) {
+	const (
+		blankedMsg  = "upstream display URLs blanked: not the tracker's own canonical http(s) page URL"
+		recoveryMsg = "upstream display URLs back on the tracker's canonical host"
+	)
+	log, rec := capture.New()
+	u := &upstream{log: log, name: upstreamNyaa, feed: "http://prowlarr:9696/1/api"}
+
+	// Onset: a kept item carrying a hostile display URL arms displayWarned.
+	u.filterDownloadURLs([]item{{
+		Title: "hostile display", DownloadURL: "http://prowlarr:9696/1/download?link=a",
+		InfoURL: "https://evil.example/phish", GUID: "https://nyaa.si/view/1",
+	}})
+	if n := rec.CountExact(blankedMsg); n != 1 {
+		t.Fatalf("blanked-display WARN count = %d, want 1 (the onset)", n)
+	}
+
+	// A surviving item with neither display field observes nothing about the gate.
+	if got := u.filterDownloadURLs([]item{{
+		Title: "no display fields", DownloadURL: "http://prowlarr:9696/1/download?link=b",
+	}}); len(got) != 1 {
+		t.Fatalf("kept items = %d, want 1 (the on-origin download URL survives)", len(got))
+	}
+	if n := rec.CountExact(recoveryMsg); n != 0 {
+		t.Errorf("display-recovery INFO count = %d, want 0 (no display field was inspected); log output:\n%s",
+			n, strings.Join(rec.Messages(), "\n"))
+	}
+	if !u.displayWarned.Load() {
+		t.Error("displayWarned = false, want the onset state retained across a page carrying no display URLs")
 	}
 }
 
