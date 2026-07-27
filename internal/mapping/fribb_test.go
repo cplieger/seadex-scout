@@ -270,15 +270,6 @@ func TestParseFribb_bareNumberTmdbIDDisambiguatedByType(t *testing.T) {
 	}
 }
 
-func TestIntSliceAndTrimmed(t *testing.T) {
-	if got := intSlice([]flexInt{0, 3, 0, 4}); !reflect.DeepEqual(got, []int{3, 4}) {
-		t.Errorf("intSlice = %v, want [3 4]", got)
-	}
-	if got := trimmed([]string{" a ", "", "b"}); !reflect.DeepEqual(got, []string{"a", "b"}) {
-		t.Errorf("trimmed = %v, want [a b]", got)
-	}
-}
-
 // TestParseFribb_idRangeAppliedEndToEnd pins the identifier range policy at
 // the application boundary: an at-limit AniList/TVDB id survives the parse
 // unchanged, an over-range AniList id drops the whole record (its key is
@@ -459,6 +450,9 @@ func TestParseFribb_logsSkippedAndDroppedCounts(t *testing.T) {
 	if rec.CountExact("mapping: skipped malformed records") != 1 {
 		t.Fatalf("logs = %v, want one skipped-records warning", rec.Messages())
 	}
+	if rec.CountLevel(slog.LevelWarn, "mapping: skipped malformed records") != 1 {
+		t.Fatalf("skipped-records line is not at WARN (logs = %v); demoted to DEBUG it vanishes from the deployed info-level stream and dropped upstream rows go unseen", rec.Messages())
+	}
 	if !rec.HasAttr("", "skipped", "2") {
 		t.Errorf("skipped-records logs = %v, want skipped=2", rec.Messages())
 	}
@@ -470,6 +464,9 @@ func TestParseFribb_logsSkippedAndDroppedCounts(t *testing.T) {
 	}
 	if rec.CountExact("mapping: dropped records without anilist_id") != 1 {
 		t.Fatalf("logs = %v, want one dropped-records debug line", rec.Messages())
+	}
+	if rec.CountLevel(slog.LevelDebug, "mapping: dropped records without anilist_id") != 1 {
+		t.Fatalf("dropped-records line is not at DEBUG (logs = %v); a keyless-row count promoted to WARN is per-cycle noise on a shape Fribb always carries", rec.Messages())
 	}
 	if !rec.HasAttr("", "dropped", "1") {
 		t.Errorf("dropped-records logs = %v, want dropped=1", rec.Messages())
@@ -493,6 +490,56 @@ func TestParseFribb_cleanParseEmitsNoLogs(t *testing.T) {
 	}
 	if msgs := rec.Messages(); len(msgs) != 0 {
 		t.Errorf("clean parse logged %v, want no log lines (skipped=0 and dropped=0 must stay silent)", msgs)
+	}
+}
+
+// TestParseFribb_approachingRecordCapWarns pins the operator's only advance
+// notice before the record cap becomes a hard refusal: at three quarters of
+// maxFribbRecords the parse still succeeds but WARNs with the element count
+// and the cap, while one element below the threshold it stays silent. Without
+// the warning a growing upstream list crosses the cap with no prior signal and
+// the map freezes stale, because acceptRefresh routes the breach through
+// rejectRefresh and every later cycle re-downloads and re-rejects the body.
+func TestParseFribb_approachingRecordCapWarns(t *testing.T) {
+	const threshold = maxFribbRecords / 4 * 3
+	const msg = "mapping: Fribb list approaching record cap"
+	// Keyless elements are the cheapest way to reach the threshold: each one
+	// counts toward the element total the guard reads while keeping the body
+	// small (they are dropped, so no records are retained).
+	build := func(n int) []byte {
+		var b strings.Builder
+		b.Grow(3 * n)
+		b.WriteByte('[')
+		for i := range n {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(`{}`)
+		}
+		b.WriteByte(']')
+		return []byte(b.String())
+	}
+
+	logger, rec := capture.New()
+	if _, err := parseFribb(build(threshold), logger); err != nil {
+		t.Fatalf("parseFribb(threshold body) error: %v", err)
+	}
+	if rec.CountLevel(slog.LevelWarn, msg) != 1 {
+		t.Fatalf("logs = %v, want exactly one WARN approaching-cap line at %d elements", rec.Messages(), threshold)
+	}
+	if !rec.HasAttr(msg, "elements", strconv.Itoa(threshold)) {
+		t.Errorf("approaching-cap log = %v, want elements=%d", rec.Messages(), threshold)
+	}
+	if !rec.HasAttr(msg, "cap", strconv.Itoa(maxFribbRecords)) {
+		t.Errorf("approaching-cap log = %v, want cap=%d", rec.Messages(), maxFribbRecords)
+	}
+
+	belowLogger, belowRec := capture.New()
+	if _, err := parseFribb(build(threshold-1), belowLogger); err != nil {
+		t.Fatalf("parseFribb(below-threshold body) error: %v", err)
+	}
+	if belowRec.CountExact(msg) != 0 {
+		t.Errorf("below-threshold logs = %v, want no approaching-cap warning one element below the threshold", belowRec.Messages())
 	}
 }
 
@@ -611,16 +658,16 @@ func TestParseFribbForRefresh_elementsCountsEverySourceElement(t *testing.T) {
 // per-record caps multiply (maxFribbRecords x 2 x maxFribbIdentifiers admits
 // ~4.2M retained ids from a body under maxMapBytes). A record that
 // would breach the budget is rejected inside the EXISTING per-record tolerance
-// boundary - counted as skipped, with the cap named in the first error the
-// "skipped malformed records" WARN reports.
+// boundary - counted separately as overBudget (not as a malformed record), so
+// the "records refused by identifier budget" WARN names the app-side cap.
 func TestFribbDecodeCounts_aggregateIdentifierBudget(t *testing.T) {
 	atCap := Record{AniListID: 1, IMDbIDs: make([]string, maxFribbIdentifiers)}
 	var c fribbDecodeCounts
 	for range maxFribbIdentifiersTotal / maxFribbIdentifiers {
 		c.add(&atCap, true, nil)
 	}
-	if c.skipped != 0 || c.dropped != 0 {
-		t.Fatalf("filling the budget skipped=%d dropped=%d, want 0/0", c.skipped, c.dropped)
+	if c.skipped != 0 || c.dropped != 0 || c.overBudget != 0 {
+		t.Fatalf("filling the budget skipped=%d dropped=%d overBudget=%d, want 0/0/0", c.skipped, c.dropped, c.overBudget)
 	}
 	if c.identifiers != maxFribbIdentifiersTotal {
 		t.Fatalf("charged %d identifiers, want the full budget %d", c.identifiers, maxFribbIdentifiersTotal)
@@ -631,14 +678,17 @@ func TestFribbDecodeCounts_aggregateIdentifierBudget(t *testing.T) {
 	if len(c.records) != retained {
 		t.Fatalf("over-budget record retained (%d records, want %d)", len(c.records), retained)
 	}
-	if c.skipped != 1 {
-		t.Fatalf("over-budget record counted skipped=%d, want 1", c.skipped)
+	if c.overBudget != 1 {
+		t.Fatalf("over-budget record counted overBudget=%d, want 1", c.overBudget)
+	}
+	if c.skipped != 0 {
+		t.Fatalf("over-budget record counted skipped=%d, want 0 (a budget breach is not a malformed record)", c.skipped)
 	}
 	if c.identifiers != maxFribbIdentifiersTotal {
 		t.Fatalf("over-budget record charged the budget to %d, want %d", c.identifiers, maxFribbIdentifiersTotal)
 	}
-	if c.firstErr == nil || !strings.Contains(c.firstErr.Error(), "retained identifiers exceed cap") {
-		t.Fatalf("firstErr = %v, want it to name the aggregate identifier cap", c.firstErr)
+	if c.firstErr != nil {
+		t.Fatalf("firstErr = %v, want nil (the budget breach reports on its own line)", c.firstErr)
 	}
 }
 

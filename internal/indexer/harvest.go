@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"maps"
 	"math"
 	"net/http"
@@ -115,6 +116,25 @@ type harvestGroup struct {
 
 // --- Harvest orchestration ---
 
+// harvester owns the Prowlarr title harvest: the upstreams it queries plus the
+// logger and clock its pacing and diagnostics need. It is the network half of
+// the rebuild, held by FeedWriter (whose own job is the offline snapshot
+// transform) as a single collaborator, so the persisted snapshot's shape and
+// the Prowlarr query/pacing/matching policy have separate homes. An empty
+// upstreams slice still constructs; harvestTitles' own early return is the off
+// switch.
+type harvester struct {
+	log       *slog.Logger
+	now       func() time.Time
+	upstreams []*upstream
+}
+
+// newHarvester returns a harvester querying ups, using log for its
+// diagnostics and now for its pacing clock.
+func newHarvester(log *slog.Logger, now func() time.Time, ups []*upstream) *harvester {
+	return &harvester{log: log, now: now, upstreams: ups}
+}
+
 // harvestTitles fetches real release titles for journal items still serving a
 // synthesized title: ONE Prowlarr Torznab query per show and tracker (q = the
 // show's synthesis title source), matching the returned items back to curated
@@ -147,13 +167,18 @@ type harvestGroup struct {
 // (e.g. a proxy answering HTML to everything) or an upstream deterministically
 // rejecting every query shape is upstream-wide breakage that would otherwise
 // burn the whole time slice with zero progress.
-func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]journalItem, titles map[string]string, infoFor EntryInfoFunc, prevCursor string) (stats harvestStats, cursor string) {
+func (h *harvester) harvestTitles(ctx context.Context, feeds map[string][]journalItem, titles map[string]string, infoFor EntryInfoFunc, prevCursor string) (stats harvestStats, cursor string) {
 	cp := decodeHarvestCheckpoint(prevCursor)
 	defer func() { stats.pending = syntheticCount(feeds, titles) }()
 	groups, index := pendingHarvest(feeds, titles, infoFor)
 	pruneHarvestPages(cp.Pages, groups)
 	defer func() { cursor = encodeHarvestCheckpoint(cp) }()
-	if len(groups) == 0 || len(w.upstreams) == 0 {
+	if len(groups) == 0 || len(h.upstreams) == 0 {
+		// The value read here is discarded: the deferred encode above still runs
+		// on this path and replaces it with the PRUNED checkpoint, which is what
+		// keeps a no-work rebuild from carrying a stale deep page forward (a key
+		// that stops pending must resume at page zero). Do not move the encode
+		// onto the working path.
 		return stats, cursor
 	}
 	// The pacer's deadline only gates ADMISSION of the next query; an
@@ -173,18 +198,15 @@ func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]journ
 	run := &harvestRun{
 		infoFor:    infoFor,
 		checkpoint: &cp,
-		pacer:      &harvestPacer{now: w.now, deadline: w.now().Add(harvestTimeBudget)},
+		pacer:      &harvestPacer{now: h.now, deadline: h.now().Add(harvestTimeBudget)},
 		stats:      &stats,
 		index:      index,
 		titles:     titles,
-		failed:     make(map[string]bool, len(w.upstreams)),
-		malformed:  make(map[string]int, len(w.upstreams)),
-		rejected:   make(map[string]int, len(w.upstreams)),
-		fruitless:  make(map[string]int, len(w.upstreams)),
+		latches:    newHarvestLatches(len(h.upstreams)),
 	}
 	start := rotationStart(groups, cp.Last)
 	for i := range groups {
-		if !w.processHarvestGroup(harvestCtx, groups[(start+i)%len(groups)], run) {
+		if !h.processHarvestGroup(harvestCtx, groups[(start+i)%len(groups)], run) {
 			break
 		}
 	}
@@ -193,10 +215,9 @@ func (w *FeedWriter) harvestTitles(ctx context.Context, feeds map[string][]journ
 
 // harvestRun is one harvestTitles run's mutable accounting: the per-rebuild
 // checkpoint, time slice, stats, the identity index and title cache the
-// matcher writes through, and the per-scope failure/malformed/rejected latch
-// counters. It exists so the orchestration loop passes ONE value to the
-// per-group step instead of nine, keeping harvestTitles about setup and
-// ordered iteration.
+// matcher writes through, and the per-scope latch state. It exists so the
+// orchestration loop passes ONE value to the per-group step instead of nine,
+// keeping harvestTitles about setup and ordered iteration.
 type harvestRun struct {
 	infoFor    EntryInfoFunc
 	checkpoint *harvestCheckpoint
@@ -204,18 +225,40 @@ type harvestRun struct {
 	stats      *harvestStats
 	index      map[string]string
 	titles     map[string]string
-	failed     map[string]bool
-	malformed  map[string]int
-	rejected   map[string]int
-	fruitless  map[string]int
+	latches    *harvestLatches
 }
+
+// harvestLatches tracks, per tracker scope, whether the scope is condemned for
+// this rebuild plus the three consecutive-failure runs that condemn it. The
+// cross-reset rules live in the single method that mutates it
+// (updateHarvestScopeState), so an added outcome kind cannot miss one.
+type harvestLatches struct {
+	failed    map[string]bool
+	malformed map[string]int
+	rejected  map[string]int
+	fruitless map[string]int
+}
+
+// newHarvestLatches returns empty latches sized for n scopes.
+func newHarvestLatches(n int) *harvestLatches {
+	return &harvestLatches{
+		failed:    make(map[string]bool, n),
+		malformed: make(map[string]int, n),
+		rejected:  make(map[string]int, n),
+		fruitless: make(map[string]int, n),
+	}
+}
+
+// blocked reports whether scope is condemned for this rebuild, so no further
+// show on it is queried.
+func (l *harvestLatches) blocked(scope string) bool { return l.failed[scope] }
 
 // processHarvestGroup runs one show-on-one-tracker group of the rotation:
 // admission against the time slice, the already-satisfied skip, upstream
 // selection, the query itself, and the resulting checkpoint / cursor /
 // scope-latch updates. It reports whether the rotation should continue; false
 // means the slice (or the caller's context) is spent and harvestTitles stops.
-func (w *FeedWriter) processHarvestGroup(ctx context.Context, g harvestGroup, r *harvestRun) bool {
+func (h *harvester) processHarvestGroup(ctx context.Context, g harvestGroup, r *harvestRun) bool {
 	key := harvestCursorKey(g)
 	if r.pacer.spent(ctx) {
 		return false
@@ -226,16 +269,38 @@ func (w *FeedWriter) processHarvestGroup(ctx context.Context, g harvestGroup, r 
 		// spend no query on a satisfied group - and drop its resumed
 		// page state: a satisfied group has nothing left to page for.
 		delete(r.checkpoint.Pages, key)
-		w.log.Debug("indexer title harvest group already satisfied; skipping query",
+		h.log.Debug("indexer title harvest group already satisfied; skipping query",
 			"upstream", g.scope, "al_id", g.alID, "items", len(g.keys))
 		return true
 	}
-	u := availableHarvestUpstream(w.upstreams, r.failed, g.scope)
+	u := availableHarvestUpstream(h.upstreams, r.latches, g.scope)
 	if u == nil {
 		return true
 	}
-	before := r.stats.queries
-	outcome, nextPage := w.harvestShow(ctx, u, g, r.infoFor(g.alID), r.index, r.titles, r.pacer, r.stats, r.checkpoint.Pages[key])
+	before, beforeMatched := r.stats.queries, r.stats.matched
+	rejectedBefore := r.stats.rejected
+	outcome, nextPage := h.harvestShow(ctx, u, g, r.infoFor(g.alID), r, r.checkpoint.Pages[key])
+	// A show whose every candidate result was refused for contradictory
+	// identity signals answered cleanly but resolved nothing: it is a
+	// no-progress show for the fruitless backstop, even though its query
+	// succeeded. A page that simply matched nothing is NOT contradicted, so
+	// the ordinary miss still resets the run.
+	contradicted := r.stats.matched == beforeMatched && r.stats.rejected > rejectedBefore
+	if r.stats.matched > beforeMatched && (outcome == harvestShowMalformed || outcome == harvestShowFailed) {
+		// The show harvested real titles before a LATER page failed
+		// show-locally (a deep offset the upstream garbles or rejects). All
+		// three latches are documented against one premise - the scope is
+		// burning the slice with ZERO progress - so a show that produced
+		// titles must not charge a consecutive-failure run: otherwise an
+		// upstream whose deep pages fail while its first pages work latches
+		// the scope after consecutiveRejectedLatch shows and cuts the
+		// rebuild's remaining rotation off, and the fruitless WARN claims "no
+		// show made progress" while titles were cached. The show's own
+		// failure WARN already named the page, so nothing is hidden; only the
+		// scope-wide inference is withheld. A scope-WIDE failure still
+		// latches whatever progress preceded it - that upstream is down.
+		outcome = harvestOK
+	}
 	if nextPage > 0 {
 		// The show ended this rebuild with deeper pages still unseen
 		// (page cap, slice expiry, or a failed page worth retrying):
@@ -251,7 +316,7 @@ func (w *FeedWriter) processHarvestGroup(ctx context.Context, g harvestGroup, r 
 		// rebuild resumes exactly where real work stopped.
 		r.checkpoint.Last = key
 	}
-	w.updateHarvestScopeState(g.scope, outcome, r.failed, r.malformed, r.rejected, r.fruitless)
+	h.updateHarvestScopeState(g.scope, outcome, contradicted, r.latches)
 	return true
 }
 
@@ -415,37 +480,30 @@ func rotationStart(groups []harvestGroup, cursor string) int {
 // show-local request rejection (harvestShowFailed) resets the malformed run
 // but counts toward its own consecutiveRejectedLatch (latching the scope on a
 // run of systematic rejections), and any other outcome - a success - resets
-// all three.
-//
-// The third counter closes the hole the first two left (l-f91). Because each
-// failure arm resets the OTHER's counter - deliberately, since a definitive
-// request rejection falsifies the answers-garbage-to-everything hypothesis - an
-// upstream whose failures ALTERNATE between the two show-local kinds tripped
-// NEITHER latch even with zero successful shows: the full harvestTimeBudget
-// burned with no title progress on every rebuild and classifyHarvestError emitted
-// one WARN per failed show (up to ~300) instead of the <=3-then-latch bound the
-// homogeneous case gets. That is a plausible degraded state, not just an
-// adversarial one: a misbehaving reverse proxy answering HTML garbage to one
-// query shape and 400/422 to another, while the pending set interleaves
-// mapped-season groups (tvsearch) with unmapped ones (plain search).
+// the two per-kind runs (and the fruitless run too, unless the show resolved
+// nothing because every candidate was refused as contradictory).
 //
 // fruitless counts consecutive shows that produced NO progress of any kind and is
-// reset ONLY by a success, so it states the latches' actual purpose directly
-// ("nothing is working") instead of inferring it per failure kind. The
+// reset ONLY by a show that actually RESOLVED something (a successful query whose
+// every candidate result was refused as contradictory is progress-free and keeps
+// the run charged), so it states the latches' actual purpose directly
+// ("nothing is working") instead of inferring it per failure kind; why neither
+// per-kind latch can see a mixed failure run is documented once, on
+// consecutiveFruitlessLatch. The
 // cross-resets STAY, so both existing latches keep their exact documented
 // semantics and thresholds for homogeneous runs - this arm only fires on the
 // mixed runs neither of them can see.
-func (w *FeedWriter) updateHarvestScopeState(scope string, outcome harvestOutcome, failed map[string]bool, malformed, rejected, fruitless map[string]int) {
+func (h *harvester) updateHarvestScopeState(scope string, outcome harvestOutcome, contradicted bool, l *harvestLatches) {
 	switch outcome {
 	case harvestScopeFailed:
-		failed[scope] = true
+		l.failed[scope] = true
 	case harvestShowMalformed:
-		rejected[scope] = 0
-		malformed[scope]++
-		if malformed[scope] >= consecutiveMalformedLatch {
-			w.log.Warn("indexer title harvest: repeated malformed responses; skipping this upstream's remaining shows this rebuild",
-				"upstream", scope, "consecutive", malformed[scope])
-			failed[scope] = true
+		l.rejected[scope] = 0
+		l.malformed[scope]++
+		if l.malformed[scope] >= consecutiveMalformedLatch {
+			h.log.Warn("indexer title harvest: repeated malformed responses; skipping this upstream's remaining shows this rebuild",
+				"upstream", scope, "consecutive", l.malformed[scope])
+			l.failed[scope] = true
 		}
 	case harvestShowFailed:
 		// A request-scoped rejection is a definitive upstream answer for
@@ -454,27 +512,34 @@ func (w *FeedWriter) updateHarvestScopeState(scope string, outcome harvestOutcom
 		// rejecting this app's query shape - latch it like systematic
 		// malformed bodies, or the whole budget burns with zero progress
 		// on every rebuild.
-		malformed[scope] = 0
-		rejected[scope]++
-		if rejected[scope] >= consecutiveRejectedLatch {
-			w.log.Warn("indexer title harvest: repeated request rejections; skipping this upstream's remaining shows this rebuild",
-				"upstream", scope, "consecutive", rejected[scope])
-			failed[scope] = true
+		l.malformed[scope] = 0
+		l.rejected[scope]++
+		if l.rejected[scope] >= consecutiveRejectedLatch {
+			h.log.Warn("indexer title harvest: repeated request rejections; skipping this upstream's remaining shows this rebuild",
+				"upstream", scope, "consecutive", l.rejected[scope])
+			l.failed[scope] = true
 		}
 	default:
-		malformed[scope] = 0
-		rejected[scope] = 0
-		fruitless[scope] = 0
-		return
+		// The query itself succeeded, so both per-kind runs reset. The
+		// fruitless run only resets when the show actually resolved
+		// something: an upstream returning our releases with contradictory
+		// identity signals answers cleanly forever while harvesting nothing,
+		// which is the no-progress condition this backstop exists for.
+		l.malformed[scope] = 0
+		l.rejected[scope] = 0
+		if !contradicted {
+			l.fruitless[scope] = 0
+			return
+		}
 	}
 	// Every arm above is a failure, whichever kind: charge the no-progress run
 	// and latch when even a mixed sequence has produced nothing. Skipped when a
 	// per-kind latch already fired, so the two never double-warn.
-	fruitless[scope]++
-	if !failed[scope] && fruitless[scope] >= consecutiveFruitlessLatch {
-		w.log.Warn("indexer title harvest: no show made progress; skipping this upstream's remaining shows this rebuild",
-			"upstream", scope, "consecutive", fruitless[scope])
-		failed[scope] = true
+	l.fruitless[scope]++
+	if !l.blocked(scope) && l.fruitless[scope] >= consecutiveFruitlessLatch {
+		h.log.Warn("indexer title harvest: no show made progress; skipping this upstream's remaining shows this rebuild",
+			"upstream", scope, "consecutive", l.fruitless[scope])
+		l.failed[scope] = true
 	}
 }
 
@@ -482,8 +547,8 @@ func (w *FeedWriter) updateHarvestScopeState(scope string, outcome harvestOutcom
 // the scope's upstream already failed this rebuild (keep synthesized titles,
 // retry next cycle) or the tracker is not configured for searches (never
 // queried).
-func availableHarvestUpstream(upstreams []*upstream, failed map[string]bool, scope string) *upstream {
-	if failed[scope] {
+func availableHarvestUpstream(upstreams []*upstream, l *harvestLatches, scope string) *upstream {
+	if l.blocked(scope) {
 		return nil
 	}
 	return upstreamForScope(upstreams, scope)
@@ -599,20 +664,20 @@ const consecutiveFruitlessLatch = 2 * consecutiveMalformedLatch
 // deliberately rejected this one show's query, so its siblings' valid queries
 // still run — unless a run of rejections trips the caller's
 // consecutiveRejectedLatch.
-func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGroup, meta EntryInfo, index, titles map[string]string, pacer *harvestPacer, stats *harvestStats, startPage int) (outcome harvestOutcome, nextPage int) {
+func (h *harvester) harvestShow(ctx context.Context, u *upstream, g harvestGroup, meta EntryInfo, r *harvestRun, startPage int) (outcome harvestOutcome, nextPage int) {
 	params := harvestParams(meta, g.scope)
 	page := max(startPage, 0)
 	for range harvestShowPageCap {
-		if !pacer.next(ctx) {
+		if !r.pacer.next(ctx) {
 			return harvestOK, page
 		}
-		stats.queries++
-		results, raw, failure, ok := w.searchHarvestPage(ctx, u, g, params, page)
+		r.stats.queries++
+		results, raw, failure, ok := h.searchHarvestPage(ctx, u, g, params, page)
 		if !ok {
 			return failure, page
 		}
-		matched, rejected := matchHarvest(results, g.scope, index, titles, meta.Title)
-		stats.matched += matched
+		matched, rejected := matchHarvest(results, g.scope, r.index, r.titles, meta.Title)
+		r.stats.matched += matched
 		if rejected > 0 {
 			// A result whose own identity signals contradict each other is an
 			// untrusted upstream response, not an operator fault: it resolves
@@ -620,11 +685,11 @@ func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGrou
 			// rebuild retries. WARN would fire per page of a systematically
 			// tampered feed, so the count rides Debug plus the harvest_rejected
 			// stat on the rebuild's summary line.
-			stats.rejected += rejected
-			w.log.Debug("indexer title harvest results rejected: contradictory identity signals",
+			r.stats.rejected += rejected
+			h.log.Debug("indexer title harvest results rejected: contradictory identity signals",
 				"upstream", u.name, "al_id", g.alID, "page", page, "rejected", rejected)
 		}
-		if harvestPageComplete(g, titles, raw) {
+		if harvestPageComplete(g, r.titles, raw) {
 			return harvestOK, 0
 		}
 		page++
@@ -639,7 +704,7 @@ func (w *FeedWriter) harvestShow(ctx context.Context, u *upstream, g harvestGrou
 // context (the time-budget deadline firing mid-query, or shutdown) is silent
 // scope-wide exhaustion rather than an upstream fault, so it never warns; any
 // other error rides classifyHarvestError's show-local vs scope-wide split.
-func (w *FeedWriter) searchHarvestPage(ctx context.Context, u *upstream, g harvestGroup, params url.Values, page int) ([]item, int, harvestOutcome, bool) {
+func (h *harvester) searchHarvestPage(ctx context.Context, u *upstream, g harvestGroup, params url.Values, page int) ([]item, int, harvestOutcome, bool) {
 	results, raw, err := u.search(ctx, harvestPage(params, page*harvestPageSize))
 	if err == nil {
 		return results, raw, harvestOK, true
@@ -653,7 +718,7 @@ func (w *FeedWriter) searchHarvestPage(ctx context.Context, u *upstream, g harve
 		// preserved so the next rebuild retries it.
 		return nil, 0, harvestScopeFailed, false
 	}
-	return nil, 0, w.classifyHarvestError(err, u, g.alID, params.Get("t"), page), false
+	return nil, 0, h.classifyHarvestError(err, u, g.alID, params.Get("t"), page), false
 }
 
 // harvestPageComplete reports whether this show's paging is done after the
@@ -678,18 +743,18 @@ func harvestPageComplete(g harvestGroup, titles map[string]string, raw int) bool
 // first-page failure. The encoded query and full URL stay out of the log
 // deliberately (httpx's redactor drops userinfo and REDACTs every query value
 // in the *StatusError that reaches here).
-func (w *FeedWriter) classifyHarvestError(err error, u *upstream, alID int, queryType string, page int) harvestOutcome {
+func (h *harvester) classifyHarvestError(err error, u *upstream, alID int, queryType string, page int) harvestOutcome {
 	if malformedUpstreamBody(err) {
-		w.log.Warn("indexer title harvest response malformed; show keeps its synthesized title this rebuild",
+		h.log.Warn("indexer title harvest response malformed; show keeps its synthesized title this rebuild",
 			"upstream", u.name, "al_id", alID, "query_type", queryType, "page", page, "error", err)
 		return harvestShowMalformed
 	}
 	if requestScopedHarvestError(err) {
-		w.log.Warn("indexer title harvest request rejected; show keeps its synthesized title this rebuild",
+		h.log.Warn("indexer title harvest request rejected; show keeps its synthesized title this rebuild",
 			"upstream", u.name, "al_id", alID, "query_type", queryType, "page", page, "error", err)
 		return harvestShowFailed
 	}
-	w.log.Warn("indexer title harvest query failed; skipping this upstream's remaining shows this rebuild",
+	h.log.Warn("indexer title harvest query failed; skipping this upstream's remaining shows this rebuild",
 		"upstream", u.name, "al_id", alID, "query_type", queryType, "page", page, "error", err)
 	return harvestScopeFailed
 }
@@ -709,7 +774,7 @@ type harvestGroupKey struct {
 // identity forms (tracker key and info hash) in the global index that maps a
 // matched Prowlarr result back to the journal key whose title it supplies.
 // A non-harvestable item is left out (see harvestable).
-func indexHarvestItem(it *journalItem, scope string, titles map[string]string, infoFor EntryInfoFunc, byShow map[harvestGroupKey][]string, index map[string]string) {
+func indexHarvestItem(it *journalItem, scope string, titles map[string]string, infoFor EntryInfoFunc, byShow map[harvestGroupKey][]string, index map[string]string, ambiguous map[string]struct{}) {
 	if !harvestable(it, titles, infoFor) {
 		return
 	}
@@ -726,9 +791,27 @@ func indexHarvestItem(it *journalItem, scope string, titles map[string]string, i
 	key := harvestGroupKey{scope: scope, alID: it.AniListID}
 	byShow[key] = append(byShow[key], it.Key)
 	index[it.Key] = it.Key
-	if h := validInfoHash(it.InfoHash); h != "" {
-		index[h] = it.Key
+	h := validInfoHash(it.InfoHash)
+	if h == "" {
+		return
 	}
+	if _, bad := ambiguous[h]; bad {
+		// Already proven to name more than one pending item.
+		return
+	}
+	if prev, dup := index[h]; dup && prev != it.Key {
+		// Two pending journal items publish the SAME info hash (the same
+		// bytes curated under two tracker ids, or on two trackers). The
+		// hash names the bytes, not the item, so it can corroborate
+		// neither: retire it from the index and remember that, so a third
+		// occurrence cannot re-register it. resolveHarvestKey's existing
+		// "unknown to a partial index" arm then treats it as inconclusive
+		// rather than as a contradiction.
+		delete(index, h)
+		ambiguous[h] = struct{}{}
+		return
+	}
+	index[h] = it.Key
 }
 
 // compareHarvestGroups orders harvest groups by tracker scope then AniList ID
@@ -751,9 +834,10 @@ func compareHarvestGroups(a, b harvestGroup) int {
 func pendingHarvest(feeds map[string][]journalItem, titles map[string]string, infoFor EntryInfoFunc) (groups []harvestGroup, index map[string]string) {
 	byShow := make(map[harvestGroupKey][]string)
 	index = make(map[string]string)
+	ambiguous := make(map[string]struct{})
 	for scope, feed := range feeds {
 		for i := range feed {
-			indexHarvestItem(&feed[i], scope, titles, infoFor, byShow, index)
+			indexHarvestItem(&feed[i], scope, titles, infoFor, byShow, index, ambiguous)
 		}
 	}
 	groups = make([]harvestGroup, 0, len(byShow))
@@ -958,8 +1042,13 @@ func asciiAlnums(s string) int {
 // SeaDex itself published - so a Prowlarr Nyaa result (which always reports a
 // hash, torznab.go) routinely carries one the index cannot know: AB's
 // "<redacted>" form is dropped by validInfoHash and any SeaDex record missing
-// the field indexes no hash at all. Treating that absence as unreconcilable
-// evidence rejected the result outright, and because the index is rebuilt from
+// the field indexes no hash at all. A hash can also be absent because it was
+// RETIRED as ambiguous: two pending items publishing the same hash (the same
+// bytes curated under two tracker ids, or listed on both trackers) name the
+// bytes rather than either item, so indexHarvestItem drops it from the index
+// instead of letting one item win the slot last-write-wins. Treating that
+// absence as unreconcilable evidence rejected the result outright, and because
+// the index is rebuilt from
 // the same journal every rebuild the rejection was PERMANENT: the item kept its
 // synthesized heuristic title forever, on an identity disagreement between
 // SeaDex and the tracker that nothing in the pipeline reported (d-u5-c2-2).

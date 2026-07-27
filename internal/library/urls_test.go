@@ -69,3 +69,31 @@ func TestSnapshotSanitizedForStorage(t *testing.T) {
 		t.Errorf("receiver ArrURL = %q, want the original snapshot unmutated", snap.Items[0].ArrURL)
 	}
 }
+
+// TestSafeLogURLRefusesSmuggledSeparators pins the publish-or-drop refusal the
+// admission half documents: a raw URL carrying a backslash authority separator
+// or an embedded tab/newline is dropped rather than published in its
+// de-smuggled form. Without the HasTabOrNewline guard the tab/newline inputs
+// below emit "https://sonarr.example/series/x" - a clickable link whose raw
+// form the operator never configured - because urlform's WHATWG preprocessing
+// removes those bytes before net/url ever sees them.
+func TestSafeLogURLRefusesSmuggledSeparators(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+	}{
+		{"backslash authority separator", `https://sonarr.example\@evil.example/series/x`},
+		{"backslash after scheme", `https:/\sonarr.example/series/x`},
+		{"tab inside host", "https://son\tarr.example/series/x"},
+		{"newline inside path", "https://sonarr.example/ser\nies/x"},
+		{"tab inside scheme", "ht\ttps://sonarr.example/series/x"},
+		{"credentialed backslash host", `https://user:pass@sonarr.example\@evil.example/x?apikey=secret`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SafeLogURL(tt.in); got != "" {
+				t.Errorf("SafeLogURL(%q) = %q, want \"\" (a de-smuggled URL is not vouchable)", tt.in, got)
+			}
+		})
+	}
+}

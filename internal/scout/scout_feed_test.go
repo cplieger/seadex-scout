@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -100,11 +99,14 @@ func TestCycleSeaDexFailureSkipsFeedRebuild(t *testing.T) {
 	logger := scoutTestLogger()
 	feed := &fakeFeed{}
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+	// The echoed mapping cache loads usable, so the ONLY reason the rebuild is
+	// skipped is the failed fetch (the unusable-map arm is
+	// TestCycleUnusableMapSkipsFeedRebuild's).
 	s := New(&Deps{
 		Logger:  logger,
-		Store:   &fakeStore{},
+		Store:   &fakeStore{st: state.State{Mapping: frierenMappingCache()}},
 		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{err: errors.New("seadex down")},
 		Feed:    feed,
 	})
@@ -132,7 +134,7 @@ func TestCycleUnusableMapSkipsFeedRebuild(t *testing.T) {
 		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
 		// Empty state + unreachable Fribb: the load fails with nothing stale to
 		// fall back on, so the map is unusable (not a StaleMapError).
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		Mapping: unreachableMapLoader(t, logger),
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Feed:    feed,
 	})
@@ -222,7 +224,7 @@ func TestCycleWalkAndSeaDexBothFailWarnsFeedKept(t *testing.T) {
 				Logger:  logger,
 				Store:   &fakeStore{},
 				Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
-				Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+				Mapping: unreachableMapLoader(t, scoutTestLogger()),
 				SeaDex:  tc.seadex,
 				Feed:    feed,
 			})
@@ -432,7 +434,7 @@ func TestCycleUnusableMapWithSeaDexOutageWarnsFeedKept(t *testing.T) {
 				Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 				// Empty state + unreachable Fribb: the load fails with nothing
 				// stale to fall back on, so the map is unusable.
-				Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+				Mapping: unreachableMapLoader(t, scoutTestLogger()),
 				SeaDex:  tc.seadex,
 				Feed:    feed,
 			})
@@ -451,6 +453,45 @@ func TestCycleUnusableMapWithSeaDexOutageWarnsFeedKept(t *testing.T) {
 			}
 			if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "mapping-unusable" {
 				t.Errorf("degraded reasons = %v, want [mapping-unusable]", reasons)
+			}
+		})
+	}
+}
+
+// TestSeaDexFailureLogCarriesFeedKept pins the feed_kept attribute on the
+// SeaDex-outage log line: it is the only signal telling an operator whether
+// the arrs are still being served the PREVIOUS Torznab curation feed through
+// the outage, so an inverted or dropped boolean sends them triaging an
+// alert-only deployment as if a feed were stale (or the reverse) with nothing
+// else in the line to contradict it.
+func TestSeaDexFailureLogCarriesFeedKept(t *testing.T) {
+	tests := []struct {
+		feed FeedWriter
+		name string
+		want string
+	}{
+		{name: "feed configured", feed: &fakeFeed{}, want: "true"},
+		{name: "alert-only deployment", feed: nil, want: "false"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			logger, recorder := capture.New()
+			sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+			s := New(&Deps{
+				Logger:  logger,
+				Store:   &fakeStore{st: state.State{Mapping: frierenMappingCache(), Baselined: true}},
+				Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+				Mapping: fakeMapping{},
+				SeaDex:  &fakeSeaDex{err: errors.New("seadex down")},
+				Feed:    tc.feed,
+			})
+
+			if healthy := s.Cycle(context.Background()); !healthy {
+				t.Fatal("Cycle healthy=false, want true (a SeaDex outage is degraded, not unhealthy)")
+			}
+			got, ok := recordAttr(recorder, "seadex fetch failed; skipping comparison, findings preserved", "feed_kept")
+			if !ok || got != tc.want {
+				t.Errorf("seadex-failure feed_kept = %q (found=%t), want %q", got, ok, tc.want)
 			}
 		})
 	}

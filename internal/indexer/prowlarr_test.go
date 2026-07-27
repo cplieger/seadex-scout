@@ -136,6 +136,9 @@ func TestSanitizeDisplayURL(t *testing.T) {
 		{"cross-tracker host blanked under nyaa", upstreamNyaa, "https://animebytes.tv/torrent/1/group", ""},
 		{"cross-tracker host blanked under ab", upstreamAB, "https://nyaa.si/view/1", ""},
 		{"suffix-confusion host blanked", upstreamNyaa, "https://evilnyaa.si/view/1", ""},
+		{"non-http scheme on the canonical host blanked", upstreamNyaa, "ftp://nyaa.si/view/1", ""},
+		{"backslash-smuggled authority blanked", upstreamNyaa, "https://nyaa.si\\@evil.example/x", ""},
+		{"tab-smuggled host blanked", upstreamNyaa, "https://nya\ta.si/view/1", ""},
 		{"unknown scope blanks a canonical host", "other", "https://nyaa.si/view/1", ""},
 		{"empty input blanked", upstreamNyaa, "", ""},
 		{"unparseable blanked", upstreamNyaa, "http://[::1", ""},
@@ -342,46 +345,75 @@ func TestUpstreamSearchTorznabErrorDocAttempts(t *testing.T) {
 // (request/parameter) and retryable (generic) document paths must scrub the
 // key before the error reaches httpx.Do's retry logger or any caller WARN,
 // so the credential never expands into the log stream (CWE-532).
+//
+// "The key" is every credential the request TRANSMITS, not just the header
+// one: config accepts (with a WARN) a credential embedded in the configured
+// feed URL, and net/http turns userinfo into an Authorization: Basic header
+// while a query value rides the request URL. In that configuration the header
+// key is typically EMPTY, so a header-key-only redaction was inert on exactly
+// the shape config permits - hence the two feed-URL cases below.
 func TestUpstreamSearchRedactsAPIKeyInTorznabErrorDoc(t *testing.T) {
 	const apiKey = "test-prowlarr-key"
+	const (
+		userinfoToken = "secret-userinfo-token"
+		queryToken    = "secret-apikey-value-32-chars-long"
+	)
 	tests := map[string]struct {
 		code    string
 		padding string
+		// embedded configures the credential in the feed URL (userinfo plus an
+		// ?apikey= value) and leaves the header key empty; secret is the value
+		// the upstream reflects back in its <error description>.
+		embedded bool
+		secret   string
 	}{
-		"terminal request code 201":  {code: "201"},
-		"retryable generic code 900": {code: "900"},
+		"terminal request code 201":  {code: "201", secret: apiKey},
+		"retryable generic code 900": {code: "900", secret: apiKey},
 		// The reflected key straddles sanitizeUpstreamText's 200-byte cap:
 		// redaction must run on the untruncated text (Error() sanitizes at
 		// the emit boundary), or the exact-substring replacement misses the
 		// cap-truncated key and leaks its prefix (CWE-532).
-		"key straddling the sanitize cap": {code: "900", padding: strings.Repeat("x", 190)},
+		"key straddling the sanitize cap": {code: "900", padding: strings.Repeat("x", 190), secret: apiKey},
+		"feed-URL userinfo reflected":     {code: "900", embedded: true, secret: userinfoToken},
+		"feed-URL apikey value reflected": {code: "900", embedded: true, secret: queryToken},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "application/rss+xml")
 				_, _ = io.WriteString(w,
-					`<?xml version="1.0" encoding="UTF-8"?><error code="`+tc.code+`" description="`+tc.padding+apiKey+`"/>`)
+					`<?xml version="1.0" encoding="UTF-8"?><error code="`+tc.code+`" description="`+tc.padding+tc.secret+`"/>`)
 			}))
 			defer srv.Close()
 
+			feed, key := srv.URL, apiKey
+			if tc.embedded {
+				parsed, err := url.Parse(srv.URL)
+				if err != nil {
+					t.Fatalf("parse test server URL: %v", err)
+				}
+				parsed.User = url.User(userinfoToken)
+				parsed.RawQuery = "apikey=" + queryToken
+				feed, key = parsed.String(), ""
+			}
+
 			log, rec := capture.New()
-			u := &upstream{http: srv.Client(), log: log, name: upstreamNyaa, feed: srv.URL, apiKey: apiKey}
+			u := &upstream{http: srv.Client(), log: log, name: upstreamNyaa, feed: feed, apiKey: key}
 			_, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
 			if err == nil {
 				t.Fatal("search against an error document returned nil error")
 			}
 			// A leaked PREFIX is as bad as the full key (the attacker picks
 			// the truncation offset, so >=8 leaked chars are brute-forceable).
-			if strings.Contains(err.Error(), apiKey[:8]) {
-				t.Errorf("returned error leaks the API key (or a prefix): %v", err)
+			if strings.Contains(err.Error(), tc.secret[:8]) {
+				t.Errorf("returned error leaks the transmitted credential (or a prefix): %v", err)
 			}
 			if !strings.Contains(err.Error(), "REDACTED") {
-				t.Errorf("returned error = %v, want REDACTED in place of the API key", err)
+				t.Errorf("returned error = %v, want REDACTED in place of the credential", err)
 			}
 			for _, line := range renderedLogRecords(rec) {
-				if strings.Contains(line, apiKey[:8]) {
-					t.Errorf("log record leaks the API key (or a prefix): %q", line)
+				if strings.Contains(line, tc.secret[:8]) {
+					t.Errorf("log record leaks the transmitted credential (or a prefix): %q", line)
 				}
 			}
 		})
@@ -417,35 +449,67 @@ func renderedLogRecords(rec *capture.Recorder) []string {
 // redacted FIRST and then bounded (sanitizeUpstreamText's 200-byte cap plus
 // the truncation marker, well under the 259-byte ceiling), must never contain
 // the key, and must keep the malformedBody marker the harvest classifies on.
+//
+// The second case covers the feed-URL credential shape config accepts with a
+// WARN (userinfo plus an ?apikey= value, header key empty): it is transmitted
+// on every request just as the header key is, so it must be scrubbed here too
+// - a header-key-only redaction is a documented no-op on an empty secret and
+// was therefore inert in exactly that configuration.
 func TestUpstreamSearchRedactsAndBoundsGenericDecodeError(t *testing.T) {
 	const apiKey = "test-prowlarr-key"
-	garbage := "GARBAGE-" + apiKey + "-" + strings.Repeat("z", 4096)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/rss+xml")
-		_, _ = io.WriteString(w,
-			`<?xml version="1.0" encoding="UTF-8"?><rss xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel><item><title>x</title><size>`+garbage+`</size></item></channel></rss>`)
-	}))
-	defer srv.Close()
+	const (
+		userinfoToken = "secret-userinfo-token"
+		queryToken    = "secret-apikey-value-32-chars-long"
+	)
+	tests := map[string]struct {
+		embedded bool
+		secret   string
+	}{
+		"header api key":               {secret: apiKey},
+		"feed-URL embedded credential": {embedded: true, secret: queryToken},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			garbage := "GARBAGE-" + tc.secret + "-" + strings.Repeat("z", 4096)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/rss+xml")
+				_, _ = io.WriteString(w,
+					`<?xml version="1.0" encoding="UTF-8"?><rss xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel><item><title>x</title><size>`+garbage+`</size></item></channel></rss>`)
+			}))
+			defer srv.Close()
 
-	log, rec := capture.New()
-	u := &upstream{http: srv.Client(), log: log, name: upstreamNyaa, feed: srv.URL, apiKey: apiKey}
-	_, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
-	if err == nil {
-		t.Fatal("search against a garbled <size> body returned nil error")
-	}
-	if !malformedUpstreamBody(err) {
-		t.Errorf("error = %T (%v), want the malformedBody marker preserved", err, err)
-	}
-	if got := len(err.Error()); got > 259 {
-		t.Errorf("error text is %d bytes, want <= 259 (redacted then bounded at the parse boundary)", got)
-	}
-	if strings.Contains(err.Error(), apiKey[:8]) {
-		t.Errorf("returned error leaks the API key (or a prefix): %v", err)
-	}
-	for _, line := range renderedLogRecords(rec) {
-		if strings.Contains(line, apiKey[:8]) {
-			t.Errorf("log record leaks the API key (or a prefix): %q", line)
-		}
+			feed, key := srv.URL, apiKey
+			if tc.embedded {
+				parsed, err := url.Parse(srv.URL)
+				if err != nil {
+					t.Fatalf("parse test server URL: %v", err)
+				}
+				parsed.User = url.User(userinfoToken)
+				parsed.RawQuery = "apikey=" + queryToken
+				feed, key = parsed.String(), ""
+			}
+
+			log, rec := capture.New()
+			u := &upstream{http: srv.Client(), log: log, name: upstreamNyaa, feed: feed, apiKey: key}
+			_, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}})
+			if err == nil {
+				t.Fatal("search against a garbled <size> body returned nil error")
+			}
+			if !malformedUpstreamBody(err) {
+				t.Errorf("error = %T (%v), want the malformedBody marker preserved", err, err)
+			}
+			if got := len(err.Error()); got > 259 {
+				t.Errorf("error text is %d bytes, want <= 259 (redacted then bounded at the parse boundary)", got)
+			}
+			if strings.Contains(err.Error(), tc.secret[:8]) {
+				t.Errorf("returned error leaks the transmitted credential (or a prefix): %v", err)
+			}
+			for _, line := range renderedLogRecords(rec) {
+				if strings.Contains(line, tc.secret[:8]) {
+					t.Errorf("log record leaks the transmitted credential (or a prefix): %q", line)
+				}
+			}
+		})
 	}
 }
 
@@ -1080,5 +1144,25 @@ func TestFilterDownloadURLsKeepsDisplayOnsetWhenPageFullyDropped(t *testing.T) {
 	}})
 	if n := rec.CountExact(recoveryMsg); n != 1 {
 		t.Errorf("display-recovery INFO count = %d, want 1 once a clean page is observed", n)
+	}
+}
+
+// TestTerminalTorznabCode pins both numeric boundaries of the retry-vs-fail-fast
+// split on a Torznab <error> document's code. Only 100-199 (credentials/account)
+// and 200-299 (request/parameter) are deterministic enough to fail the search on
+// its first attempt; a content/server-side code (300 "no such item", 500, 900
+// "unknown error") and a non-numeric code (-1) must stay inside the bounded retry
+// budget. TestFetchAndParseClassifiesTorznabErrorDoc exercises the classification
+// end-to-end but only at 100/201/900, so neither edge of the window is pinned.
+func TestTerminalTorznabCode(t *testing.T) {
+	tests := map[int]bool{
+		-1: false, 0: false, 99: false,
+		100: true, 101: true, 199: true, 200: true, 201: true, 299: true,
+		300: false, 301: false, 500: false, 900: false, 910: false,
+	}
+	for code, want := range tests {
+		if got := terminalTorznabCode(code); got != want {
+			t.Errorf("terminalTorznabCode(%d) = %v, want %v", code, got, want)
+		}
 	}
 }

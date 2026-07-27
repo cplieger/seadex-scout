@@ -42,6 +42,12 @@ const (
 	// 16 MiB leaves ample headroom for years of growth while bounding the
 	// decoded blow-up.
 	maxFeedBytes = 16 << 20
+	// feedSizeWarnBytes is the pre-cliff warning threshold (80% of
+	// maxFeedBytes): crossing the bound refuses every subsequent persist and
+	// freezes the served RSS journal with no self-heal (the offending input
+	// never shrinks on its own), so persist warns while there is still
+	// headroom to act. Mirrors internal/state's stateSizeWarnBytes.
+	feedSizeWarnBytes = maxFeedBytes / 10 * 8
 	// maxPersistedFieldBytes caps each persisted feed item's string field
 	// (title, GUID/info/download URL, journal key). It is aliased to
 	// torznab.go's maxUpstreamFieldBytes so every harvested title and
@@ -65,6 +71,22 @@ const (
 	// cap (see TestLoadPreviousPreservesLargeHarvestCheckpoint), while 64 KiB
 	// still bounds the one persisted string that is carried forward verbatim.
 	maxPersistedCursorBytes = 64 << 10
+	// maxPersistedSeenBytes bounds the seen ledger IN AGGREGATE - the
+	// ledger's twin of maxPersistedCursorBytes, and for the same reason.
+	// Seen is the other map carried forward VERBATIM and it is never pruned
+	// (growJournal only ever adds; allIdentities replaces it only on a
+	// baseline), so a hand-edited or corrupted ledger that is itself under
+	// maxFeedBytes yet large enough that the REBUILT snapshot (the carried
+	// ledger plus this cycle's new identities) crosses maxFeedBytes makes
+	// persist fail ErrFileTooLarge on every cycle with no self-heal: the
+	// file never shrinks, and loadPrevious keeps accepting it because every
+	// individual key is within maxPersistedFieldBytes. Re-baselining
+	// instead rebuilds the ledger from the current catalogue, which is
+	// exactly what it should hold, and persist then atomically replaces the
+	// offending file. The whole live SeaDex catalogue's identity signals
+	// serialize to ~1 MB, so 8 MiB leaves years of headroom while staying
+	// well inside maxFeedBytes.
+	maxPersistedSeenBytes = 8 << 20
 	// reasonMalformed is loadPrevious's baseline reason for a structurally invalid
 	// previous snapshot (bad JSON, missing curation maps, or an over-limit item/title).
 	reasonMalformed = "malformed"
@@ -189,16 +211,6 @@ type snapshotScrub struct {
 	blankedInfoURLs map[string]int
 }
 
-// total sums one correction across feeds, for callers that only need to know
-// whether anything was scrubbed at all.
-func (s snapshotScrub) total() int {
-	n := 0
-	for _, c := range s.blankedInfoURLs {
-		n += c
-	}
-	return n
-}
-
 // normalizeSnapshotPubDates restores the journal's PubDate-mirrors-FirstSeen
 // invariant (see journalItem) on every accepted item, for BOTH consumers: the
 // reader renders PubDate straight into the served <pubDate>, and the writer's
@@ -207,13 +219,24 @@ func (s snapshotScrub) total() int {
 // otherwise be advertised to the arrs for the item's whole journal window - a
 // far-future value can hold a release behind a delay profile indefinitely and
 // mis-sorts a newest-first view. An item with no FirstSeen carries no journal
-// timestamp to mirror, so its PubDate is left alone (the writer drops such an
-// item at carry).
+// timestamp to mirror, so it has nothing vouching for its stored PubDate
+// either and the field is cleared rather than left alone.
 func normalizeSnapshotPubDates(feed []journalItem) {
 	for i := range feed {
-		if !feed[i].FirstSeen.IsZero() {
-			feed[i].PubDate = feed[i].FirstSeen
+		if feed[i].FirstSeen.IsZero() {
+			// No journal timestamp to mirror, so there is nothing that
+			// vouches for the stored PubDate either: the writer stamps
+			// FirstSeen and PubDate together on every item it creates, and
+			// rebaseFutureFeed can only correct a value it can compare
+			// against FirstSeen. Clearing it makes writeItem omit
+			// <pubDate> instead of advertising a hand-edited far-future
+			// date the reader has no way to bound (the writer drops such
+			// an item at carry, so this only changes what the READER
+			// serves).
+			feed[i].PubDate = time.Time{}
+			continue
 		}
+		feed[i].PubDate = feed[i].FirstSeen
 	}
 }
 
@@ -286,14 +309,15 @@ type FeedWriterConfig struct {
 // FeedWriter builds the feed snapshot from a SeaDex fetch and persists it
 // atomically for the server to read. It holds no SeaDex/Fribb clients of its
 // own - the compare cycle owns the shared fetch and hands the results to
-// Rebuild - but it does hold the Prowlarr upstreams (the same ones the server
-// proxies searches through) for the title harvest.
+// Rebuild - and no Prowlarr clients either: the title harvest is its own
+// component (harvester, see harvest.go), held here as a single collaborator
+// because Rebuild is where it runs.
 type FeedWriter struct {
 	log            *slog.Logger
 	now            func() time.Time
+	harvest        *harvester
 	path           string
 	abPasskey      string
-	upstreams      []*upstream
 	nyaaConfigured bool
 	abConfigured   bool
 }
@@ -322,10 +346,15 @@ func NewFeedWriter(cfg *FeedWriterConfig, log *slog.Logger, ups Upstreams) *Feed
 		now:            time.Now,
 		path:           cfg.Path,
 		abPasskey:      cfg.ABPasskey,
-		nyaaConfigured: cfg.NyaaTorznabURL != "",
-		abConfigured:   cfg.ABTorznabURL != "",
-		upstreams:      ups.ups,
+		nyaaConfigured: cfg.enabled(upstreamNyaa),
+		abConfigured:   cfg.enabled(upstreamAB),
 	}
+	// The harvest reads the writer's clock through a closure over w rather than
+	// a copy of the func value: w.now is a live field the test suite replaces
+	// AFTER construction (the pacing/time-slice tests drive a fake clock), and
+	// the harvest's pacer read it directly before it became its own component.
+	// Copying time.Now here instead would fork the two clocks silently.
+	w.harvest = newHarvester(log, func() time.Time { return w.now() }, ownUpstreams(ups.ups))
 	return w
 }
 
@@ -371,7 +400,7 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info E
 		w.log.Info("indexer feed journal baselined; RSS feed starts empty and grows from newly curated releases",
 			"reason", prev.reason, "seen", len(seen))
 	} else {
-		cur := indexCurated(entries)
+		pass := &journalPass{w: w, cur: indexCurated(entries), seen: seen, ws: &ws, infoFor: infoFor, js: &js, now: now}
 		// Carry BOTH journals regardless of configuration: a tracker's off
 		// switch must be reversible. Blanking a Torznab URL used to skip the
 		// carry, so a single rebuild dropped every journaled item for that
@@ -395,17 +424,17 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info E
 		// the same way: carryStoredItem and refreshCarriedItem keep a carried AB
 		// item through a passkey-less window instead of dropping it (see those
 		// two), since a passkey only supplies the grabbable link.
-		nyaa = w.carryJournal(prev.nyaaFeed, upstreamNyaa, cur, &ws, infoFor, now, &js)
-		ab = w.carryJournal(prev.abFeed, upstreamAB, cur, &ws, infoFor, now, &js)
+		nyaa = pass.carryJournal(prev.nyaaFeed, upstreamNyaa)
+		ab = pass.carryJournal(prev.abFeed, upstreamAB)
 		// Growth stays gated per scope: journalIfNew -> newJournalItem returns
 		// early for an unconfigured tracker, so an off tracker's journal shrinks
 		// but never grows.
-		newNyaa, newAB := w.growJournal(entries, cur, seen, infoFor, now, &js)
+		newNyaa, newAB := pass.growJournal(entries)
 		nyaa = append(nyaa, newNyaa...)
 		ab = append(ab, newAB...)
 	}
 	feeds := map[string][]journalItem{upstreamNyaa: nyaa, upstreamAB: ab}
-	hs, cursor := w.harvestTitles(ctx, feeds, titles, infoFor, prev.cursor)
+	hs, cursor := w.harvest.harvestTitles(ctx, feeds, titles, infoFor, prev.cursor)
 	applyTitles(nyaa, titles)
 	applyTitles(ab, titles)
 	nyaa, ab = sortFeed(nyaa), sortFeed(ab)
@@ -446,6 +475,10 @@ func (w *FeedWriter) persist(ctx context.Context, snap *snapshot) error {
 	data, err := json.Marshal(snap)
 	if err != nil {
 		return fmt.Errorf("indexer: encode feed snapshot: %w", err)
+	}
+	if len(data) > feedSizeWarnBytes {
+		w.log.Warn("indexer feed snapshot approaching the size limit; a rebuild that exceeds it is refused and the served feed freezes",
+			"path", w.path, "bytes", len(data), "limit", maxFeedBytes)
 	}
 	if _, err := atomicfile.WriteFile(ctx, w.path, data,
 		atomicfile.WithLogger(w.log),
@@ -540,9 +573,11 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 		// over-limit identity key from a hand-edited snapshot would otherwise
 		// persist in every future snapshot, and a false membership value (which
 		// the writer never emits) would make journalIfNew re-broadcast an
-		// already-baselined release. The value itself is never logged.
+		// already-baselined release. An over-aggregate ledger wedges persist
+		// on every cycle instead (see maxPersistedSeenBytes). The value itself
+		// is never logged.
 		w.log.Warn(msgSnapshotMalformed,
-			"path", w.path, "reason", "seen-ledger entry is invalid")
+			"path", w.path, "reason", "seen ledger is invalid or exceeds its size cap")
 		return previousJournal{baseline: true, reason: reasonMalformed}, nil
 	}
 	if snap.Seen == nil {
@@ -580,17 +615,30 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 }
 
 // seenLedgerWithinLimits reports whether every seen-ledger entry respects the
-// producer contract: a bounded identity key mapped to true membership. Honest
+// producer contract: a bounded identity key mapped to true membership, and the
+// ledger as a WHOLE within maxPersistedSeenBytes. Honest
 // keys are tracker keys ("scope:digits") and 40-hex info hashes, orders of
 // magnitude under the bound; see loadPrevious's ingress checks for why the
 // ledger is validated separately (it is the one map the writer carries forward
 // verbatim). A false value is only reachable by external corruption or
 // hand-editing - the writer only ever records true - and journalIfNew reads
 // the VALUE, so carrying one forward would re-broadcast an already-baselined
-// release as newly curated.
+// release as newly curated. The aggregate cap exists because the per-entry
+// bound cannot catch a ledger of per-entry-valid keys that is large enough to
+// push the REBUILT snapshot past maxFeedBytes (see maxPersistedSeenBytes):
+// that wedges persist on every cycle with no self-heal, so an over-aggregate
+// ledger re-baselines instead.
 func seenLedgerWithinLimits(seen map[string]bool) bool {
+	total := 0
 	for k, wasSeen := range seen {
 		if len(k) > maxPersistedFieldBytes || !wasSeen {
+			return false
+		}
+		// Each entry serializes as `"<key>":true,`, so charging len(k)
+		// alone would under-count a ledger of millions of short keys by
+		// more than half.
+		total += len(k) + 8
+		if total > maxPersistedSeenBytes {
 			return false
 		}
 	}
@@ -692,7 +740,7 @@ func splitCurationWarned(entries []seadex.Entry) (kept []seadex.Entry, ws warned
 	kept = make([]seadex.Entry, len(entries))
 	for i := range entries {
 		kept[i] = entries[i]
-		if unwarned, changed := filterWarnedTorrents(entries[i].Torrents, ws.ids, ws.keys); changed {
+		if unwarned, changed := filterWarnedTorrents(entries[i].Torrents, ws.ids); changed {
 			kept[i].Torrents = unwarned
 		}
 	}
@@ -775,27 +823,17 @@ func sharesWarnedIdentity(t *seadex.Torrent, all map[string]struct{}) bool {
 // torrents: it drops every occurrence that is warned itself OR shares a
 // warned identity signal (journal key or info hash), reporting whether
 // anything was removed (the caller only swaps in the fresh slice then,
-// keeping the shared input unmutated). Every removed occurrence's journal key
-// is folded into warnedKeys - the carry-drop set carryJournal consumes - so a
-// duplicate excluded only through a shared identity (e.g. a warned sibling's
-// info hash) still retracts its previously journaled item from RSS, keeping
-// the identity filter the single policy point.
-func filterWarnedTorrents(ts []seadex.Torrent, warnedIDs, warnedKeys map[string]struct{}) ([]seadex.Torrent, bool) {
+// keeping the shared input unmutated). It is a pure query over the sets
+// collectWarnedIdentities already closed: that fixpoint marks the journal key of
+// every occurrence sharing a warned identity, so a duplicate excluded only through
+// a warned sibling's info hash is already in the carry-drop set carryJournal
+// consumes and needs no second fold here.
+func filterWarnedTorrents(ts []seadex.Torrent, warnedIDs map[string]struct{}) ([]seadex.Torrent, bool) {
 	unwarned := make([]seadex.Torrent, 0, len(ts))
 	changed := false
 	for j := range ts {
 		t := &ts[j]
-		identityWarned := false
-		for _, id := range identitySignals(t) {
-			if _, ok := warnedIDs[id]; ok {
-				identityWarned = true
-				break
-			}
-		}
-		if release.CurationWarned(t.Tags) || identityWarned {
-			if k := journalKey(t); k != "" {
-				warnedKeys[k] = struct{}{}
-			}
+		if release.CurationWarned(t.Tags) || sharesWarnedIdentity(t, warnedIDs) {
 			changed = true
 			continue
 		}

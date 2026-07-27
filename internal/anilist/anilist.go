@@ -95,6 +95,8 @@ func (e *BatchRecordError) Error() string { return e.Err.Error() }
 
 func (e *BatchRecordError) Unwrap() error { return e.Err }
 
+// --- upstream failure classification ---
+
 // transientStatusError marks an upstream failure this client considers
 // self-healing even though httpx's shared policy does not. httpx's
 // *HTTPStatusError is transient for 502/503/504 only, which leaves a plain 500
@@ -131,7 +133,7 @@ func retryableUpstreamStatus(code int) bool {
 // and an unparseable body is the parser's business, not the retrier's.
 func transientEnvelopeError(raw []byte) error {
 	var env struct {
-		Errors []gqlError `json:"errors"`
+		Errors gqlErrors `json:"errors"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil
@@ -192,6 +194,8 @@ type Stats struct {
 	Calls          int64
 	RateLimitWaits int64
 }
+
+// --- client, requests, and rate-limit policy ---
 
 // Client queries AniList with an adaptive throttle.
 type Client struct {
@@ -291,7 +295,9 @@ func (c *Client) Fetch(ctx context.Context, aniListID int) (Media, error) {
 // completed — even when the map is empty because every completed chunk
 // definitively found no media — so the caller can fall back to a per-id Fetch
 // for the remainder rather than losing the batch, and can tell an all-not-found
-// chunk apart from a total outage. A record-local failure (ErrBatchRecord, a
+// chunk apart from a total outage. "The remainder" is named by the returned
+// *BatchRecordError's UnverifiedIDs (the chunks that never completed), so the
+// completed chunks' absences stay usable as definitive evidence. A record-local failure (ErrBatchRecord, a
 // poisoned record inside an otherwise well-formed response) does NOT abort the
 // batch: the chunk still counts as completed, later chunks are still fetched,
 // and the first record error is surfaced alongside the merged result, so one
@@ -305,12 +311,15 @@ func (c *Client) FetchMany(ctx context.Context, ids []int) (map[int]Media, error
 	completed := false
 	var firstRecordErr error
 	var unverified []int
+	answered := 0
 	for chunk := range slices.Chunk(ids, batchSize) {
 		page, err := c.fetchBatchChunk(ctx, chunk)
 		maps.Copy(out, page)
 		if err != nil && !errors.Is(err, ErrBatchRecord) {
-			return completedBatch(out, completed, err)
+			return completedBatch(out, completed, slices.Concat(unverified, ids[answered:]),
+				joinRecordErr(firstRecordErr, err))
 		}
+		answered += len(chunk)
 		completed = true
 		if err != nil {
 			// Record-local: this CHUNK's absences prove nothing, but every
@@ -348,11 +357,33 @@ func (c *Client) fetchBatchChunk(ctx context.Context, chunk []int) (map[int]Medi
 // aborting chunk failure: no chunk completed yet means a total failure (a NIL
 // map with the error), while an earlier completed chunk means the merged
 // partial result rides along so the caller can fall back for the remainder.
-func completedBatch(out map[int]Media, completed bool, err error) (map[int]Media, error) {
+//
+// "The remainder" has to be nameable for the caller to honor it, so a partial
+// abort scopes the error the same way a record-local failure does: unverified
+// carries every id whose chunk did NOT complete (the aborting chunk and every
+// chunk after it, plus any earlier record-local chunk), and the completed
+// chunks' absences stay definitive evidence the caller may memoize. Without
+// the scoping an abort in chunk 3 of 9 withdrew the completion evidence of
+// chunks 1-2 as well - the same defect BatchRecordError exists to prevent on
+// the record-local path.
+func completedBatch(out map[int]Media, completed bool, unverified []int, err error) (map[int]Media, error) {
 	if !completed {
 		return nil, err
 	}
-	return out, err
+	return out, &BatchRecordError{UnverifiedIDs: unverified, Err: err}
+}
+
+// joinRecordErr preserves an earlier chunk's record-local diagnostic when a
+// later chunk aborts the batch. The aborting error leads, so the abort stays
+// the classification every caller reads first, while the poisoned record that
+// the record-scoping design exists to surface is no longer silently dropped.
+// The ids of that earlier chunk are already inside completedBatch's unverified
+// set, so carrying the diagnostic never widens what the caller may memoize.
+func joinRecordErr(recordErr, abortErr error) error {
+	if recordErr == nil {
+		return abortErr
+	}
+	return errors.Join(abortErr, recordErr)
 }
 
 // retainRequested enforces FetchMany's identity-set invariant on one parsed
@@ -436,7 +467,34 @@ func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("anilist: read response: %w", err)
 	}
+	// A 429 AniList reports INSIDE a successful envelope must take the same
+	// dedicated rate-limit path as an HTTP 429, or the throttle is never
+	// penalized and the next lookup spends budget inside the window AniList
+	// just closed.
+	if rlErr := c.envelopeRateLimitError(resp, respBody); rlErr != nil {
+		return nil, rlErr
+	}
 	return respBody, nil
+}
+
+// envelopeRateLimitError applies the dedicated 429 path to a rate limit
+// AniList reports inside a successful GraphQL envelope. retryableUpstreamStatus
+// deliberately excludes 429 because 429 has its own path - but that path only
+// ever ran on the HTTP status, so an envelope-delivered 429 surfaced as a
+// terminal query error that penalized nothing.
+func (c *Client) envelopeRateLimitError(resp *http.Response, raw []byte) error {
+	var env struct {
+		Errors gqlErrors `json:"errors"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil
+	}
+	for _, e := range env.Errors {
+		if e.Status == http.StatusTooManyRequests {
+			return c.rateLimitError(resp)
+		}
+	}
+	return nil
 }
 
 // resetWait returns the time remaining until the X-RateLimit-Reset window
@@ -457,7 +515,6 @@ func resetWait(resp *http.Response) time.Duration {
 // and returns the *httpx.RateLimitError carrying that wait as its RetryAfter
 // hint, which request's WithRateLimitRetry mode retries.
 func (c *Client) rateLimitError(resp *http.Response) error {
-	c.rlWaits.Add(1)
 	wait := httpx.ParseRetryAfter(resp.Header.Get("Retry-After"))
 	if wait <= 0 {
 		// A 429 without a usable Retry-After often still carries the
@@ -469,10 +526,23 @@ func (c *Client) rateLimitError(resp *http.Response) error {
 	if wait <= 0 {
 		wait = defaultRetryAfter
 	}
-	wait = min(wait, maxRetryAfter)
-	c.log.Warn("anilist rate limited (429); backing off", "retry_after", wait.Round(time.Second))
-	c.throttle.penalize(wait)
+	upstream := wait
+	wait = c.backOff(wait)
+	c.log.Warn("anilist rate limited (429); backing off",
+		"retry_after", wait.Round(time.Second),
+		"upstream_retry_after", upstream.Round(time.Second))
 	return &httpx.RateLimitError{Msg: "anilist: rate limited (429)", RetryAfter: wait}
+}
+
+// backOff caps an upstream-supplied wait at maxRetryAfter, counts it, and
+// penalizes the throttle, returning the capped value the caller logs. It is
+// the one place the ceiling is applied, so no back-off path can hand
+// throttle.penalize an unbounded upstream duration.
+func (c *Client) backOff(wait time.Duration) time.Duration {
+	wait = min(wait, maxRetryAfter)
+	c.rlWaits.Add(1)
+	c.throttle.penalize(wait)
+	return wait
 }
 
 // observeRateHeaders slows the throttle when the remaining budget is low,
@@ -486,10 +556,11 @@ func (c *Client) observeRateHeaders(resp *http.Response) {
 	if wait <= 0 {
 		wait = time.Minute
 	}
-	wait = min(wait, maxRetryAfter)
-	c.rlWaits.Add(1)
-	c.log.Warn("anilist low rate budget; backing off", "remaining", remaining, "wait", wait.Round(time.Second))
-	c.throttle.penalize(wait)
+	upstream := wait
+	wait = c.backOff(wait)
+	c.log.Warn("anilist low rate budget; backing off", "remaining", remaining,
+		"wait", wait.Round(time.Second),
+		"upstream_wait", upstream.Round(time.Second))
 }
 
 // --- GraphQL response parsing ---
@@ -612,6 +683,38 @@ type gqlError struct {
 	Status  int    `json:"status"`
 }
 
+// maxEnvelopeErrors bounds the untrusted GraphQL errors[] array. The 1 MiB
+// body cap alone permits ~350k empty objects, which json.Unmarshal expands
+// into []gqlError before any consumer looks at errs[0] (CWE-400, the same
+// amplification boundedMediaList exists to close). A real envelope carries a
+// handful of errors; an over-cap array is malformed by construction.
+const maxEnvelopeErrors = 32
+
+// gqlErrors is the bounded decode of the untrusted errors[] array. A named
+// slice type keeps every existing len()/index/range site working while the
+// cardinality cap runs BEFORE an element is materialized.
+type gqlErrors []gqlError
+
+// UnmarshalJSON implements the bounded element-at-a-time decode described on
+// maxEnvelopeErrors. An over-cap array fails the decode, which matches the
+// existing policy: transientEnvelopeError already treats an undecodable body
+// as "no envelope error" and the parsers already surface it as a plain
+// retryable error.
+func (l *gqlErrors) UnmarshalJSON(data []byte) error {
+	*l = nil
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return nil
+	}
+	dec := bounded.NewDecoder(bytes.NewReader(data), 0)
+	records, err := bounded.Array(dec, nil, maxEnvelopeErrors, "errors",
+		func(e *gqlError) error { return dec.Decode(e) })
+	if err != nil {
+		return fmt.Errorf("errors: %w", err)
+	}
+	*l = records
+	return nil
+}
+
 // gqlResponse is the GraphQL envelope for the media query. Media is a
 // json.RawMessage so parseMediaForID can distinguish a missing Media field (a
 // malformed or failed response) from an explicit null (AniList's genuine
@@ -620,7 +723,7 @@ type gqlResponse struct {
 	Data *struct {
 		Media json.RawMessage `json:"Media"`
 	} `json:"data"`
-	Errors []gqlError `json:"errors"`
+	Errors gqlErrors `json:"errors"`
 }
 
 // sanitizeUpstreamMessage bounds and cleans an untrusted upstream error
@@ -713,7 +816,7 @@ func parseMediaForID(raw []byte, expectedID int) (Media, error) {
 	}
 	var r gqlResponse
 	if err := json.Unmarshal(raw, &r); err != nil {
-		return Media{}, fmt.Errorf("anilist: decode response: %w", err)
+		return Media{}, fmt.Errorf("anilist: decode response: %s", sanitizeUpstreamMessage(err.Error()))
 	}
 	mediaRaw, err := mediaPayload(&r)
 	if err != nil {
@@ -721,7 +824,7 @@ func parseMediaForID(raw []byte, expectedID int) (Media, error) {
 	}
 	var media gqlMedia
 	if err = json.Unmarshal(mediaRaw, &media); err != nil {
-		return Media{}, fmt.Errorf("anilist: decode Media: %w", err)
+		return Media{}, fmt.Errorf("anilist: decode Media: %s", sanitizeUpstreamMessage(err.Error()))
 	}
 	if expectedID > 0 && media.ID != expectedID {
 		return Media{}, fmt.Errorf("anilist: response media id %d does not match requested id %d", media.ID, expectedID)
@@ -768,14 +871,20 @@ type gqlPage struct {
 // appending it. The batched query requests perPage=batchSize, so a longer
 // array is malformed by construction; without the bound a hostile endpoint
 // could pack hundreds of thousands of tiny objects under the 1 MiB body cap
-// and json.Unmarshal would expand them all into []gqlMedia before
-// parsePageRecords validates anything (CWE-400 resource exhaustion). A
+// and json.Unmarshal would expand them all before parsePageRecords validates
+// anything (CWE-400 resource exhaustion). A
 // post-decode length check would be too late: the allocation has already
 // happened. set stays false for a missing field (UnmarshalJSON never runs)
 // or an explicit null, both rejected by parseMediaPage as a malformed
 // envelope; an explicit empty array sets it with zero records (valid).
+//
+// The elements are retained RAW and materialized one at a time by
+// parsePageRecords, so an element whose field types are out of schema is a
+// record-local failure (ErrBatchRecord) like every other per-record defect
+// instead of failing the whole envelope - the classification FetchMany reads
+// to decide whether the remaining chunks are still worth fetching.
 type boundedMediaList struct {
-	records []gqlMedia
+	records []json.RawMessage
 	set     bool
 }
 
@@ -800,7 +909,7 @@ func (l *boundedMediaList) UnmarshalJSON(data []byte) error {
 	}
 	dec := bounded.NewDecoder(bytes.NewReader(data), 0)
 	records, err := bounded.Array(dec, nil, batchSize, "media",
-		func(m *gqlMedia) error { return dec.Decode(m) })
+		func(m *json.RawMessage) error { return dec.Decode(m) })
 	if err != nil {
 		return fmt.Errorf("media: %w", err)
 	}
@@ -814,14 +923,15 @@ type gqlPageResponse struct {
 	Data struct {
 		Page *gqlPage `json:"Page"`
 	} `json:"data"`
-	Errors []gqlError `json:"errors"`
+	Errors gqlErrors `json:"errors"`
 }
 
 // parseMediaPage decodes a batched Page(media) response into a map keyed by
 // AniList id. A GraphQL-level error or a missing/null Page or media field
-// fails the batch; the record loop's per-record invariants (positive id,
-// valid fields, no duplicate ids) live in parsePageRecords - a rejected
-// record is skipped and surfaced via an ErrBatchRecord-wrapped error
+// fails the batch; the record loop's per-record invariants (a decodable
+// element, positive id, valid fields, no duplicate ids) live in
+// parsePageRecords - a rejected record is skipped and surfaced via an
+// ErrBatchRecord-wrapped error
 // alongside the chunk's valid records, so one poisoned record cannot discard
 // the chunk or read as a total outage - a skipped id is absent from the map
 // AND covered by the non-nil error, so the caller never negative-memoizes it,
@@ -835,7 +945,7 @@ func parseMediaPage(raw []byte) (map[int]Media, error) {
 	}
 	var r gqlPageResponse
 	if err := json.Unmarshal(raw, &r); err != nil {
-		return nil, fmt.Errorf("anilist: decode batch response: %w", err)
+		return nil, fmt.Errorf("anilist: decode batch response: %s", sanitizeUpstreamMessage(err.Error()))
 	}
 	if len(r.Errors) > 0 {
 		return nil, fmt.Errorf("anilist: batch query error: %s", sanitizeUpstreamMessage(r.Errors[0].Message))
@@ -850,14 +960,15 @@ func parseMediaPage(raw []byte) (map[int]Media, error) {
 }
 
 // parsePageRecords validates one batch response's record list into a map
-// keyed by AniList id: a record with a non-positive id or rejected fields
-// (toMedia) is skipped, and a DUPLICATE id is conflicting untrusted data -
+// keyed by AniList id: an UNDECODABLE element (a field whose JSON type is out
+// of schema) or a record with a non-positive id or rejected fields (toMedia)
+// is skipped, and a DUPLICATE id is conflicting untrusted data -
 // two records claiming one identity - so NO record for that id is returned
 // (the earlier occurrence is deleted and the id stays excluded however many
 // duplicates follow) rather than silently letting the last write win. Each
 // failure surfaces the first offender via an ErrBatchRecord-wrapped error
 // beside the valid sibling records.
-func parsePageRecords(media []gqlMedia) (map[int]Media, error) {
+func parsePageRecords(media []json.RawMessage) (map[int]Media, error) {
 	out := make(map[int]Media, len(media))
 	seen := make(map[int]bool, len(media))
 	var recordErr error
@@ -867,7 +978,12 @@ func parsePageRecords(media []gqlMedia) (map[int]Media, error) {
 		}
 	}
 	for i := range media {
-		md := &media[i]
+		var decoded gqlMedia
+		if err := json.Unmarshal(media[i], &decoded); err != nil {
+			record(fmt.Errorf("%w media record %d is undecodable: %v", ErrBatchRecord, i, err))
+			continue
+		}
+		md := &decoded
 		if md.ID <= 0 {
 			record(fmt.Errorf("%w media record %d missing id", ErrBatchRecord, i))
 			continue

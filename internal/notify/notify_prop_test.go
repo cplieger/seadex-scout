@@ -6,6 +6,7 @@ import (
 
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/filter"
+	"github.com/cplieger/urlform"
 	"pgregory.net/rapid"
 )
 
@@ -26,6 +27,8 @@ func TestTrackerURLsRoutingProperty(t *testing.T) {
 			"https://animebytes.tv exploit %d",
 			"https:/animebytes.tv/torrents.php?id=%d",
 			"https://animebytes\uff0etv/t/%d",
+			"https://tracker.example/v/%d",
+			"/view/%d",
 		})
 		n := rapid.IntRange(0, 6).Draw(rt, "n")
 		links := make([]compare.ReleaseLink, n)
@@ -61,8 +64,16 @@ func TestTrackerURLsRoutingProperty(t *testing.T) {
 			if pub.nyaaURL() != "" && pub.otherURL() != "" {
 				rt.Fatalf("both nyaa_url (%q) and public_url (%q) populated", pub.nyaaURL(), pub.otherURL())
 			}
-			// A non-Nyaa public link must always carry a name to render.
-			if pub.otherURL() != "" && pub.otherTracker() == "" {
+			// A non-Nyaa public link whose URL carries a host must always
+			// carry a name to render: a host naming no known tracker labels
+			// the link with itself (canonicalTracker's last resort), which is
+			// what keeps the nameless-public-link defect closed. A hostless
+			// value (a bare tracker-relative path) has nothing to name it and
+			// is unreachable in production - every Finding.Links URL comes
+			// from classify.PublishURL, which publishes only absolute URLs on
+			// a canonical tracker host - so the invariant is scoped to
+			// host-bearing links rather than claiming more than holds.
+			if host := urlform.Classify(pub.otherURL()).Host; host != "" && pub.otherTracker() == "" {
 				rt.Fatalf("public_url %q carries no public_tracker to label it", pub.otherURL())
 			}
 		}

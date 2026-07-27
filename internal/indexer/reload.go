@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -164,42 +163,25 @@ func (c *snapshotCache) statSnapshot() (os.FileInfo, bool) {
 	info, err := os.Stat(c.path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			// A missing file is the normal fresh-install case, but after a
-			// snapshot was loaded it means the materialized view can no
-			// longer refresh: every request keeps serving the last in-memory
-			// feed, so warn once that the feed is stale, then stay quiet
-			// until the file reappears.
-			//
-			// Absence is a successful stat determination, so it ENDS any
-			// stat/read degradation episode: clear the transient flag (no
-			// recovery INFO - nothing was reloaded; the missing state has
-			// its own once-per-disappearance WARN) so the next fault onset
-			// warns again instead of being suppressed by a stale flag.
-			c.reloadDegraded = false
-			c.mu.RLock()
-			loaded := c.snapID.Recorded()
-			c.mu.RUnlock()
-			if !loaded {
-				// A genuinely absent first snapshot IS the fresh-install
-				// state - serving the empty feed is intentional there - so
-				// an earlier load fault stops blocking requests once the bad
-				// file is gone (deleting it returns to fresh-install
-				// semantics).
-				c.clearSnapshotFailed()
-			}
-			if loaded && !c.snapMissing {
-				c.snapMissing = true
-				c.log.Warn("indexer feed snapshot missing; serving last loaded feed until it reappears", "path", c.path)
-			}
+			c.noteSnapshotAbsent()
 			return nil, false
 		}
 		// Anything else (EACCES, EIO) silently freezes the served feed, so
 		// make it visible - once per onset, not once per request.
-		c.markSnapshotFailedIfUnloaded()
-		if !c.reloadDegraded {
-			c.reloadDegraded = true
-			c.log.Warn("indexer feed snapshot stat failed; keeping current feed", "path", c.path, "error", err)
-		}
+		c.noteStatFault("indexer feed snapshot stat failed; keeping current feed", "error", err)
+		return nil, false
+	}
+	// The snapshot path must be a regular file. atomicfile.ReadBounded opens
+	// it with os.Open, which FOLLOWS symlinks, while the writer's
+	// atomicfile.WriteFile refuses a symlink target outright
+	// (ErrSymlinkTarget, atomicfile's default) - so without this the two ends
+	// of the same /config/feed.json contract disagree about whether the path
+	// may be a link, and the reader would decode whatever the link points at
+	// as the served feed. It takes the same arm as any other stat fault:
+	// warn once per onset, keep the current feed, and mark the
+	// snapshot-unavailable state while nothing has loaded.
+	if link, lerr := os.Lstat(c.path); lerr == nil && link.Mode()&fs.ModeSymlink != 0 {
+		c.noteStatFault("indexer feed snapshot path is a symlink; refusing to load it")
 		return nil, false
 	}
 	if c.snapMissing {
@@ -207,6 +189,47 @@ func (c *snapshotCache) statSnapshot() (os.FileInfo, bool) {
 		c.log.Info("indexer feed snapshot reappeared; resuming reloads", "path", c.path)
 	}
 	return info, true
+}
+
+// noteSnapshotAbsent applies the missing-file policy statSnapshot's ErrNotExist
+// arm carries. A missing file is the normal fresh-install case, but after a
+// snapshot was loaded it means the materialized view can no longer refresh:
+// every request keeps serving the last in-memory feed, so warn once that the
+// feed is stale, then stay quiet until the file reappears.
+//
+// Absence is a successful stat determination, so it ENDS any stat/read
+// degradation episode: clear the transient flag (no recovery INFO - nothing was
+// reloaded; the missing state has its own once-per-disappearance WARN) so the
+// next fault onset warns again instead of being suppressed by a stale flag.
+func (c *snapshotCache) noteSnapshotAbsent() {
+	c.reloadDegraded = false
+	c.mu.RLock()
+	loaded := c.snapID.Recorded()
+	c.mu.RUnlock()
+	if !loaded {
+		// A genuinely absent first snapshot IS the fresh-install state -
+		// serving the empty feed is intentional there - so an earlier load
+		// fault stops blocking requests once the bad file is gone (deleting it
+		// returns to fresh-install semantics).
+		c.clearSnapshotFailed()
+	}
+	if loaded && !c.snapMissing {
+		c.snapMissing = true
+		c.log.Warn("indexer feed snapshot missing; serving last loaded feed until it reappears", "path", c.path)
+	}
+}
+
+// noteStatFault is the shared onset ladder for every stat-time fault that
+// freezes the served feed (an unreadable file, a symlinked path): mark the
+// snapshot-unavailable state while nothing has loaded, then WARN once per onset
+// rather than once per request.
+func (c *snapshotCache) noteStatFault(msg string, attrs ...any) {
+	c.markSnapshotFailedIfUnloaded()
+	if c.reloadDegraded {
+		return
+	}
+	c.reloadDegraded = true
+	c.log.Warn(msg, append([]any{"path", c.path}, attrs...)...)
 }
 
 // reloadBlockGate is a test seam (see snapshotUnavailableGate for the
@@ -508,7 +531,9 @@ func (c *snapshotCache) readSnapshot(ctx context.Context) (snapshot, bool, bool)
 	// profile sees a negative release age and can hold the release instead of
 	// honoring the bounded journal window (h-f15).
 	now := time.Now().UTC()
-	if rebased := rebaseFutureFeed(snap.NyaaFeed, now) + rebaseFutureFeed(snap.ABFeed, now); rebased > 0 {
+	rebased := rebaseFutureFeed(snap.NyaaFeed, now) + rebaseFutureFeed(snap.ABFeed, now) +
+		rebaseFuturePubDates(snap.NyaaFeed, now) + rebaseFuturePubDates(snap.ABFeed, now)
+	if rebased > 0 {
 		// Counts only; the rejected timestamp comes from a tamperable file.
 		c.log.Warn("indexer feed snapshot: future item timestamps rebased to load time",
 			"path", c.path, "rebased", rebased)
@@ -517,6 +542,29 @@ func (c *snapshotCache) readSnapshot(ctx context.Context) (snapshot, bool, bool)
 	snap.NyaaFeed = c.rebuildNyaaDownloadURLs(snap.NyaaFeed)
 	c.warnBlankedInfoURLs(scrub)
 	return snap, true, false
+}
+
+// rebaseFuturePubDates catches the one future-timestamp shape rebaseFutureFeed
+// leaves behind: an item with NO FirstSeen carries no journal timestamp to
+// rebase, so its persisted PubDate rides through verbatim. decodeSnapshot's
+// normalizeSnapshotPubDates deliberately leaves such an item alone (there is
+// nothing to mirror) on the stated grounds that the writer drops it at carry -
+// but the READER serves it, and never prunes by age, so a hand-edited
+// PubDate ahead of the wall clock would be advertised as <pubDate> until the
+// next rebuild (indefinitely in resident-idle mode). That is exactly the
+// negative-release-age an arr's delay profile holds a release on, which
+// rebaseFutureFeed exists to prevent, so clamp it to load time here. A
+// writer-produced item always carries FirstSeen, so this only ever corrects a
+// tampered or hand-edited snapshot.
+func rebaseFuturePubDates(feed []journalItem, now time.Time) int {
+	rebased := 0
+	for i := range feed {
+		if feed[i].FirstSeen.IsZero() && feed[i].PubDate.After(now) {
+			feed[i].PubDate = now
+			rebased++
+		}
+	}
+	return rebased
 }
 
 // warnBlankedInfoURLs reports the info-URL scrub PER TRACKER, one line per
@@ -585,6 +633,10 @@ func reportTransitionalSchema(log *slog.Logger, path string, snap *snapshot) {
 //     would either present a curated release as fully freeleech or feed the
 //     arr an unparseable factor; blanking falls back to the normal-item
 //     (factor 1) shape writeItem already documents.
+//   - Categories goes through validCategories, dropping any id outside this
+//     feed's own vocabulary (catTV / catAnime / catMovies) - the list is the
+//     arr's ROUTING input, so an at-rest value could route a series pack to
+//     Radarr or hide a movie from it.
 //
 // validPersistedItem bounds only these fields' LENGTH, and carryStoredItem
 // carries a non-curated item's stored render verbatim, so an at-rest value
@@ -596,6 +648,7 @@ func normalizeSnapshotItems(feed []journalItem) {
 	for i := range feed {
 		feed[i].InfoHash = validInfoHash(feed[i].InfoHash)
 		feed[i].DownloadVolumeFactor = validMarker(feed[i].DownloadVolumeFactor)
+		feed[i].Categories = validCategories(feed[i].Categories)
 	}
 }
 
@@ -607,6 +660,28 @@ func validMarker(m string) string {
 		return m
 	}
 	return ""
+}
+
+// validCategories keeps only the Torznab category ids this feed's own
+// vocabulary defines (catTV / catAnime / catMovies - categoriesFor emits the
+// latter two, and catTV is the parent the caps document advertises), dropping
+// anything else. An at-rest category is an arr ROUTING input exactly as the
+// download-volume-factor marker is an arr accounting input: filterByCats
+// matches on it and writeItem renders every positive id as a torznab category
+// attr, so a hand-edited or legacy value could route a series pack to Radarr
+// (2000) or hide a movie from it. Emptying the list falls back to writeItem's
+// documented catAnime default, the same degradation validMarker relies on.
+func validCategories(cats []int) []int {
+	if len(cats) == 0 {
+		return cats
+	}
+	out := cats[:0]
+	for _, c := range cats {
+		if c == catTV || c == catAnime || c == catMovies {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // rebuildDownloadURLs is the shared derivation mechanics behind
@@ -631,23 +706,24 @@ func validMarker(m string) string {
 // (the AB passkey gate) and the exact log contract.
 func rebuildDownloadURLs(feed []journalItem, scope, passkey string) (out []journalItem, dropped int, samples []string) {
 	out = make([]journalItem, 0, len(feed))
+	// drop accounts for one rejected item, keeping up to three sample GUIDs for
+	// the wrappers' warnings. The GUID is a non-secret tracker page URL; bound
+	// it through the shared emit-boundary policy before it reaches the log.
+	drop := func(guid string) {
+		dropped++
+		if len(samples) < 3 {
+			samples = append(samples, capLogText(guid, 256))
+		}
+	}
 	for i := range feed {
 		it := feed[i]
 		if !journalIdentityMatches(&it) {
-			dropped++
-			if len(samples) < 3 {
-				samples = append(samples, capLogText(it.GUID, 256))
-			}
+			drop(it.GUID)
 			continue
 		}
 		dl, ok := downloadURLForScope(scope, it.GUID, passkey)
 		if !ok {
-			dropped++
-			if len(samples) < 3 {
-				// The GUID is a non-secret tracker page URL; bound it through
-				// the shared emit-boundary policy before it reaches the log.
-				samples = append(samples, capLogText(it.GUID, 256))
-			}
+			drop(it.GUID)
 			continue
 		}
 		it.DownloadURL = dl
@@ -715,7 +791,11 @@ var seadexInfoHost = sync.OnceValue(func() string {
 	if err != nil {
 		return ""
 	}
-	return strings.ToLower(u.Hostname())
+	// ASCII-only fold, like every other host comparison in this file: a
+	// strings.ToLower here is the full-Unicode fold snapshotInfoURLAllowed
+	// exists to keep out of the expected host, and IsASCIIHost is the only
+	// thing that currently stops a folded rune from reaching the allowlist.
+	return asciiLowerHost(u.Hostname())
 })
 
 // sanitizeSnapshotInfoURLs blanks any persisted item's InfoURL that is not a

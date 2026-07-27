@@ -129,8 +129,8 @@ groups:
           summary: '{{ $labels.title }}: new SeaDex release'
           description: >-
             [New release](https://releases.moe/{{ $labels.al_id }}) for
-            {{ if $labels.arr_url }}[{{ $labels.title }}]({{ $labels.arr_url }})
-            {{- else }}{{ $labels.title }}{{ end }}
+            {{ $labels.title }}
+            {{- if $labels.arr_url }} ([open in {{ $labels.arr }}]({{ $labels.arr_url }})){{ end }}
             {{- if and $labels.season (ne $labels.season "0") }} Season {{ $labels.season }}{{ end }}
             ({{ $labels.recommended_group }}).
             {{ if $labels.nyaa_url }}[Nyaa]({{ $labels.nyaa_url }}){{ end }}

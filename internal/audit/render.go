@@ -195,16 +195,10 @@ func scopeCell(row *Row) string {
 // is the align.Scope decision recorded on the Row, so the label cannot drift
 // from the comparison actually performed.
 func scopeLabel(row *Row) string {
-	switch row.scope {
-	case align.ScopeMovie:
-		return "movie"
-	case align.ScopeSeason:
+	if row.scope == align.ScopeSeason {
 		return "S" + strconv.Itoa(row.Season)
-	case align.ScopeSpecial:
-		return "special"
-	default:
-		return "series"
 	}
+	return row.scope.String()
 }
 
 // releaseLinkKey is the structural dedupe identity for a links-cell entry.
@@ -250,17 +244,15 @@ func links(row *Row) string {
 	return strings.Join(parts, linkSep)
 }
 
-// displayBestGroups returns the distinct best-release groups in their original
-// case (deduped case-insensitively), for display. An annotated best - one
-// carrying curation warnings, one the daemon's obtainability rule rejected
-// (Release.Unobtainable), or both - renders with its notes: "PMR (broken)",
-// "PMR (unobtainable)", "SEV (broken, unobtainable)". The column stays
-// complete (the report shows raw SeaDex data) while explaining why the
-// verdict did not count the release. Clean bests are collected first and win
-// the dedupe, so a group genuinely available as a clean best never displays
-// annotated.
-func displayBestGroups(releases []Release) []string {
-	var out []string
+// selectBestGroups streams the distinct best-release groups in the report's
+// clean-before-annotated precedence, calling fn once per survivor and stopping
+// early when fn returns false. It is the ONE home for the selection rule both
+// best-group renderings share - the Markdown cell (displayBestGroups) and the
+// bounded slog attribute (joinBestGroupsAttr) - so the two cannot disagree
+// about which groups a row lists or in what order. It yields per release and
+// never builds a slice, so the bounded consumer still caps before any
+// untrusted aggregate is materialized.
+func selectBestGroups(releases []Release, fn func(rel *Release, isAnnotated bool) bool) {
 	seen := make(map[[sha256.Size]byte]struct{}, len(releases))
 	for _, annotatedPass := range []bool{false, true} {
 		for i := range releases {
@@ -273,13 +265,32 @@ func displayBestGroups(releases []Release) []string {
 				continue
 			}
 			seen[key] = struct{}{}
-			label := rel.Group
-			if annotatedPass {
-				label += " (" + strings.Join(releaseNotes(rel), ", ") + ")"
+			if !fn(rel, annotatedPass) {
+				return
 			}
-			out = append(out, label)
 		}
 	}
+}
+
+// displayBestGroups returns the distinct best-release groups in their original
+// case (deduped case-insensitively), for display. An annotated best - one
+// carrying curation warnings, one the daemon's obtainability rule rejected
+// (Release.Unobtainable), or both - renders with its notes: "PMR (broken)",
+// "PMR (unobtainable)", "SEV (broken, unobtainable)". The column stays
+// complete (the report shows raw SeaDex data) while explaining why the
+// verdict did not count the release. Clean bests are collected first and win
+// the dedupe, so a group genuinely available as a clean best never displays
+// annotated.
+func displayBestGroups(releases []Release) []string {
+	var out []string
+	selectBestGroups(releases, func(rel *Release, isAnnotated bool) bool {
+		label := rel.Group
+		if isAnnotated {
+			label += " (" + strings.Join(releaseNotes(rel), ", ") + ")"
+		}
+		out = append(out, label)
+		return true
+	})
 	return out
 }
 
@@ -395,6 +406,7 @@ func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
 			"qualifier", string(row.Qualifier),
 			"scope", scopeLabel(row),
 			"approx", row.Approx,
+			"hidden_animebytes", row.HiddenAnimeBytes,
 			"current_group", joinGroupsAttr(row.CurrentGroups),
 			"seadex_best", joinBestGroupsAttr(row.Releases),
 			"arr_url", capDisplayText(library.SafeLogURL(row.ArrURL)),
@@ -793,62 +805,25 @@ func joinGroupsAttr(groups []string) string {
 }
 
 // joinBestGroupsAttr renders the seadex_best attribute through the same
-// bounded joiner. It streams displayBestGroups' semantics rather than calling
-// it - clean bests first, case-insensitive dedupe on the original-case group,
-// annotated bests rendered "GRP (broken, unobtainable)" - because that helper
-// builds the complete label slice, which is exactly the untrusted aggregate the
-// budget must bound.
+// bounded joiner. It streams selectBestGroups - the shared selection rule
+// (clean bests first, case-insensitive dedupe on the original-case group,
+// annotated bests rendered "GRP (broken, unobtainable)") - rather than calling
+// displayBestGroups, because that helper builds the complete label slice,
+// which is exactly the untrusted aggregate the budget must bound.
 func joinBestGroupsAttr(releases []Release) string {
-	w := &bestGroupsWriter{
-		j:     logattr.NewJoiner(),
-		seen:  make(map[[sha256.Size]byte]struct{}, len(releases)),
-		first: true,
-	}
-	for _, annotatedPass := range []bool{false, true} {
-		if !w.writePass(releases, annotatedPass) {
-			break
-		}
-	}
-	return w.j.String()
-}
-
-// bestGroupsWriter carries the streaming state joinBestGroupsAttr's two passes
-// share (the bounded joiner, the case-insensitive dedupe set, and whether a
-// separator is still owed), so each pass is one linear loop rather than nested
-// control flow inside a single function.
-type bestGroupsWriter struct {
-	j     *logattr.Joiner
-	seen  map[[sha256.Size]byte]struct{}
-	first bool
-}
-
-// writePass streams the best releases whose annotation state matches
-// annotatedPass into the joiner - preserving clean-first dedupe precedence,
-// separator state, and annotation rendering - and reports whether the joiner
-// can still accept more.
-func (w *bestGroupsWriter) writePass(releases []Release, annotatedPass bool) bool {
-	for i := range releases {
-		rel := &releases[i]
-		if !rel.Best || rel.Group == "" || annotated(rel) != annotatedPass {
-			continue
-		}
-		key := foldedGroupKey(rel.Group)
-		if _, dup := w.seen[key]; dup {
-			continue
-		}
-		w.seen[key] = struct{}{}
-		if !w.first && !w.j.WriteSep(",") {
+	j := logattr.NewJoiner()
+	first := true
+	selectBestGroups(releases, func(rel *Release, isAnnotated bool) bool {
+		if !first && !j.WriteSep(",") {
 			return false
 		}
-		w.first = false
-		if !w.j.Write(rel.Group) {
+		first = false
+		if !j.Write(rel.Group) {
 			return false
 		}
-		if annotatedPass && !writeNotesAttr(w.j, releaseNotes(rel)) {
-			return false
-		}
-	}
-	return true
+		return !isAnnotated || writeNotesAttr(j, releaseNotes(rel))
+	})
+	return j.String()
 }
 
 // writeNotesAttr appends an annotated best's parenthesized note list to j,

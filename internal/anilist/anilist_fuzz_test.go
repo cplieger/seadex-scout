@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/cplieger/seadex-scout/internal/titlekey"
 )
 
 // FuzzParseMedia exercises the single-media GraphQL decoder against arbitrary
@@ -29,6 +31,12 @@ func FuzzParseMedia(f *testing.F) {
 	f.Add([]byte("\xff\xfe"))
 	f.Add([]byte(`{"data":{"Media":{"format":"TV","title":{"romaji":"A\ud800"}}}}`))
 	f.Add([]byte(`{"data":{"Media":{"id":1,"format":"TV","title":{"romaji":"A"}}}}`))
+	// The ambiguity guard's own neighborhood: encoding/json keeps the LAST
+	// duplicate key, so these are the bodies that would launder a valid Media
+	// into a negative-memoized not-found if the preflight regressed.
+	f.Add([]byte(`{"data":{"Media":{"id":1,"title":{"romaji":"A"}},"Media":null}}`))
+	f.Add([]byte(`{"data":{"Media":{"id":1,"title":{"romaji":"A","romaji":"B"}}}}`))
+	f.Add([]byte(`{"data":{"Media":{"format":"TV","title":{"native":"\u4e16\u754c"}}}}`))
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		m, err := parseMedia(raw)
 		if err != nil {
@@ -68,6 +76,14 @@ func FuzzParseMediaPage(f *testing.F) {
 	f.Add([]byte("{\"data\":{\"Page\":{\"media\":[{\"id\":1,\"title\":{\"romaji\":\"A\xff\"}}]}}}"))
 	f.Add([]byte("\xff\xfe"))
 	f.Add([]byte(`{"data":{"Page":{"media":[{"id":1,"title":{"romaji":"A\ud800"}}]}}}`))
+	// The two envelope-level guards of the batch decoder, seeded so the
+	// coverage-guided run starts from their edge instead of rediscovering it:
+	// the duplicate-key ambiguity gate and the perPage cardinality bound.
+	f.Add([]byte(`{"data":{"Page":{"media":[{"id":1,"title":{"romaji":"A"}}],"media":[]}}}`))
+	f.Add([]byte(`{"data":{"Page":{"media":[` +
+		strings.Repeat(`{"id":1,"title":{"romaji":"A"}},`, batchSize) +
+		`{"id":2,"title":{"romaji":"B"}}]}}}`))
+	f.Add([]byte(`{"data":{"Page":{"media":[{"id":1,"title":{"native":"\u4e16\u754c"}}]}}}`))
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		out, err := parseMediaPage(raw)
 		if err != nil {
@@ -105,6 +121,7 @@ func assertMediaBounded(t *testing.T, m Media, raw []byte) {
 func assertTitlesClean(t *testing.T, titles []string, raw []byte) {
 	t.Helper()
 	seen := make(map[string]struct{}, len(titles))
+	matchable := false
 	for _, title := range titles {
 		if title == "" {
 			t.Errorf("empty title from %q", raw)
@@ -113,6 +130,19 @@ func assertTitlesClean(t *testing.T, titles []string, raw []byte) {
 			t.Errorf("duplicate title %q from %q", title, raw)
 		}
 		seen[title] = struct{}{}
+		if titlekey.Normalize(title) != "" {
+			matchable = true
+		}
+	}
+	// hasMatchableTitle's contract as a fuzz invariant: an accepted Media must
+	// carry at least one title that survives the shared match-key normalizer.
+	// A record whose every title normalizes away (a native-script-only or
+	// symbol-only title set) can never match and would be memoized as a
+	// permanent false negative, so it must be rejected, not parsed. The tables
+	// can only enumerate ASCII and punctuation cases; the generated inputs
+	// reach the non-Latin ones the live catalogue actually carries.
+	if len(titles) > 0 && !matchable {
+		t.Errorf("parsed titles %q from %q carry no usable match key", titles, raw)
 	}
 }
 

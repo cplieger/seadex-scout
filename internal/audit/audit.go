@@ -155,6 +155,12 @@ type Row struct {
 	// season, so the verdict reflects "this group is present somewhere in the
 	// series/specials" rather than an exact per-season/per-special attribution.
 	Approx bool `json:"approx,omitempty"`
+	// HiddenAnimeBytes counts the entry's releases withheld by the operator's
+	// AnimeBytes toggle. Without it a row whose only bests are AnimeBytes
+	// releases is indistinguishable from an entry SeaDex lists no best for:
+	// both render an empty best column, no qualifier, and a have_unlisted
+	// verdict.
+	HiddenAnimeBytes int `json:"hidden_animebytes,omitempty"`
 }
 
 // IncompleteEntry is one SeaDex entry whose library mapping could not be
@@ -315,6 +321,11 @@ func (a *Auditor) assess(m *match.Match) Row {
 		Special:     m.Record.IsSpecial(),
 		Incomplete:  m.Entry.Incomplete,
 	}
+	for i := range m.Entry.Torrents {
+		if a.hiddenByABToggle(&m.Entry.Torrents[i]) {
+			row.HiddenAnimeBytes++
+		}
+	}
 	d := align.Decide(m.Item, &m.Record, best, alt)
 	row.scope = d.Kind
 	row.Season = d.Season
@@ -410,14 +421,18 @@ func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 		// toggle is off. Malformed/ambiguous public-labeled evidence
 		// stays listed: the publisher drops the link and the fail-closed
 		// Obtainable below annotates the row unobtainable instead.
-		if !a.includeAnimeBytes && classify.ABEvidence(t) == filter.ABDefinite {
+		if a.hiddenByABToggle(t) {
 			continue
 		}
 		rel := classify.Torrent(entry, t)
+		// One evaluation of the publisher: URL and URLError are two readings of
+		// the same decision, so the "a url error means no link" invariant is
+		// structural rather than a coincidence of two calls agreeing.
+		published := classify.PublishURL(t)
 		out = append(out, Release{
 			Tracker: rel.Tracker,
 			Group:   rel.Group,
-			URL:     classify.PublishURL(t),
+			URL:     published,
 			Best:    t.IsBest,
 			// A record that carries a URL the publisher refused is an UPSTREAM
 			// DATA fault, not an obtainability policy decision, and the report is
@@ -426,12 +441,19 @@ func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 			// release-group name typed into the url field. Reported distinctly
 			// because "(unobtainable)" would read as "a tracker you cannot use",
 			// pointing the operator at their own config instead of at the record.
-			URLError:     strings.TrimSpace(t.URL) != "" && classify.PublishURL(t) == "",
+			URLError:     strings.TrimSpace(t.URL) != "" && published == "",
 			Warnings:     release.CurationWarnings(t.Tags),
 			Unobtainable: !classify.Obtainable(&rel, t, a.includeAnimeBytes),
 		})
 	}
 	return out
+}
+
+// hiddenByABToggle reports whether the operator's AnimeBytes toggle withholds
+// t from the report. It is the ONE expression of that gate, so the per-row
+// hidden count cannot drift from the drop it accounts for.
+func (a *Auditor) hiddenByABToggle(t *seadex.Torrent) bool {
+	return !a.includeAnimeBytes && classify.ABEvidence(t) == filter.ABDefinite
 }
 
 // seadexURL builds the releases.moe entry link for an AniList ID. The URL
@@ -452,12 +474,18 @@ func (a *Auditor) seadexURL(aniListID int) string {
 // operator cannot use) contributes to neither set for the same reason - the
 // eligibility here IS the daemon's filter.Obtainable, computed in
 // classifyReleases, not a mirror of it, so the two flows cannot drift when
-// the tracker table grows. Both stay visible in the row's release list,
-// annotated (the warning tags / "(unobtainable)").
+// the tracker table grows. The test IS the render layer's annotated()
+// predicate, so the set of classes that forfeit verdict evidence and the set
+// the SeaDex-best column marks are one list. Both stay visible in the row's
+// release list, annotated (the warning tags / "(url error)" / "(unobtainable)").
 func groupSets(releases []Release) (best, alt []string) {
 	bestSeen, altSeen := map[string]struct{}{}, map[string]struct{}{}
 	for i := range releases {
-		if releases[i].Unobtainable || len(releases[i].Warnings) > 0 {
+		// The eligibility test is exactly the render layer's annotation predicate
+		// (annotated): an annotated release is listed and explained but never
+		// verdict evidence, so a new annotation class cannot start driving the
+		// verdict while the column marks it.
+		if annotated(&releases[i]) {
 			continue
 		}
 		g := release.NormalizeGroup(releases[i].Group)

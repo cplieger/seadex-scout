@@ -58,54 +58,58 @@ const (
 	StatusUnverifiable Status = "unverifiable"
 )
 
-// Severity is the log level a finding maps to.
-type Severity string
-
-const (
-	// SevWarn is an actionable finding (a better release to go get).
-	SevWarn Severity = "warn"
-	// SevInfo is an informational finding (nothing directly actionable).
-	SevInfo Severity = "info"
-)
-
 // ReleaseLink is one obtainable source for a recommended release: the tracker
 // and a human-followable URL. A recommended group present on both a public
 // tracker and AnimeBytes yields two links, so a finding can surface both.
 type ReleaseLink struct {
-	Tracker string `json:"tracker"`
-	URL     string `json:"url"`
+	Tracker string
+	URL     string
 }
 
 // Finding is one comparison result for a library item. It carries the
 // semantic fields the notification layer emits; alert dedupe-key construction
 // (the persisted suppression identity) is the notify package's own policy,
-// derived from these fields at the notification boundary.
+// derived from these fields at the notification boundary. It is a plain
+// domain value: nothing serializes a Finding, and the persisted attribute
+// schema is declared solely by notify.StoredFinding.
 type Finding struct {
-	Kind              string        `json:"kind,omitempty"`
-	Reason            string        `json:"classification_reason,omitempty"`
-	Arr               string        `json:"arr"`
-	CurrentGroup      string        `json:"current_group,omitempty"`
-	RecommendedGroup  string        `json:"recommended_group,omitempty"`
-	Tracker           string        `json:"tracker,omitempty"`
-	Title             string        `json:"title"`
-	Resolution        string        `json:"resolution,omitempty"`
-	Severity          Severity      `json:"severity"`
-	Codec             string        `json:"codec,omitempty"`
-	ReleaseURL        string        `json:"release_url,omitempty"`
-	ArrURL            string        `json:"arr_url,omitempty"`
-	InfoHash          string        `json:"info_hash,omitempty"`
-	Status            Status        `json:"status"`
-	RecommendedGroups []string      `json:"recommended_groups,omitempty"`
-	Links             []ReleaseLink `json:"links,omitempty"`
+	Kind             string
+	Reason           string
+	Arr              string
+	CurrentGroup     string
+	RecommendedGroup string
+	Tracker          string
+	Title            string
+	Resolution       string
+	Codec            string
+	ReleaseURL       string
+	ArrURL           string
+	InfoHash         string
+	Status           Status
+	// Scope is the comparison scope the shared decision resolved
+	// (align.Decision.Kind, rendered via its String): "season", "movie",
+	// "special" or "series". Season alone cannot carry it - a movie, a
+	// season-0 special and a whole-series aggregate all report season 0 - so
+	// without this the alert cannot say what unit was compared, where the
+	// audit report's scope cell does.
+	Scope             string
+	RecommendedGroups []string
+	Links             []ReleaseLink
 	// CurrentGroups preserves the scoped on-disk group set with its element
 	// boundaries as semantic structured data: CurrentGroup is the flattened
 	// display join, where ["a,b","c"] and ["a","b,c"] are indistinguishable.
-	// Never serialized; nil on manually constructed findings, which the
-	// notify key builder falls back to the flattened CurrentGroup for.
-	CurrentGroups []string `json:"-"`
-	AniListID     int      `json:"al_id"`
-	Season        int      `json:"season,omitempty"`
-	DualAudio     bool     `json:"dual_audio,omitempty"`
+	// Nil on manually constructed findings, which the notify key builder
+	// falls back to the flattened CurrentGroup for.
+	CurrentGroups []string
+	AniListID     int
+	Season        int
+	DualAudio     bool
+	// Approx marks a coarse comparison (align.Decision.Approx): the season-0
+	// specials bucket held more than one group, or the whole-series fallback
+	// spanned more than one real season or group, so CurrentGroup is an
+	// aggregate rather than an exact per-unit attribution. The audit report
+	// renders the same fact as "(approx)".
+	Approx bool
 }
 
 // --- Comparison flow ---
@@ -195,10 +199,10 @@ func (c *Comparer) compareOne(m *match.Match) *Finding {
 		return nil
 	case align.OutcomeUnverifiable:
 		fillBest(&base, recommended, recGroups)
-		return finalize(&base, StatusUnverifiable, SevInfo)
+		return finalize(&base, StatusUnverifiable)
 	case align.OutcomeMixed:
 		fillBest(&base, recommended, recGroups)
-		return finalize(&base, StatusMixedGroup, SevInfo)
+		return finalize(&base, StatusMixedGroup)
 	default: // align.OutcomeDiverged
 		return betterResult(entry, &base, recommended, recGroups)
 	}
@@ -246,12 +250,12 @@ func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
 // can obtain and lacks, downgraded to an incomplete info nudge when the entry
 // is incomplete (nothing complete to grab).
 func betterResult(entry *seadex.Entry, base *Finding, recommended []candidate, recGroups []string) *Finding {
-	status, sev := StatusBetter, SevWarn
+	status := StatusBetter
 	if classify.DivergedIncomplete(entry) {
-		status, sev = StatusIncomplete, SevInfo
+		status = StatusIncomplete
 	}
 	fillBest(base, recommended, recGroups)
-	return finalize(base, status, sev)
+	return finalize(base, status)
 }
 
 // emptyResult decides the finding when no recommended release survives the
@@ -262,9 +266,9 @@ func betterResult(entry *seadex.Entry, base *Finding, recommended []candidate, r
 func emptyResult(entry *seadex.Entry, base *Finding) *Finding {
 	switch classify.Fallback(entry) {
 	case classify.FallbackTheoretical:
-		return finalize(base, StatusTheoretical, SevInfo)
+		return finalize(base, StatusTheoretical)
 	case classify.FallbackIncomplete:
-		return finalize(base, StatusIncomplete, SevInfo)
+		return finalize(base, StatusIncomplete)
 	default:
 		return nil
 	}
@@ -286,6 +290,8 @@ func baseFinding(m *match.Match, d *align.Decision) Finding {
 		CurrentGroups: slices.Clone(d.Groups),
 		AniListID:     m.Entry.AniListID,
 		Season:        d.Season,
+		Scope:         d.Kind.String(),
+		Approx:        d.Approx,
 	}
 }
 
@@ -297,7 +303,7 @@ func fillBest(f *Finding, pool []candidate, recGroups []string) {
 	rep := representative(pool)
 	fillFromCandidate(f, &rep)
 	f.RecommendedGroups = recGroups
-	f.Links = obtainableLinks(pool)
+	f.Links = obtainableLinks(pool, release.NormalizeGroup(rep.rel.Group))
 }
 
 // fillFromCandidate copies a candidate's release + torrent fields onto a finding.
@@ -314,14 +320,28 @@ func fillFromCandidate(f *Finding, cand *candidate) {
 }
 
 // obtainableLinks returns the distinct (tracker, URL) links across the pool,
-// deduped, preserving pool order. This is what lets a finding surface both a
-// Nyaa and an AnimeBytes link for the same recommended release. The dedupe
-// keys on the ReleaseLink value itself (a comparable struct), so a crafted
-// tracker or URL containing a would-be delimiter cannot collide two distinct
-// pairs.
-func obtainableLinks(pool []candidate) []ReleaseLink {
+// deduped, ordered headlineGroup-first and then by (URL, tracker). This is
+// what lets a finding surface both a Nyaa and an AnimeBytes link for the same
+// recommended release. The dedupe keys on the ReleaseLink value itself (a
+// comparable struct), so a crafted tracker or URL containing a would-be
+// delimiter cannot collide two distinct pairs.
+//
+// The ORDER is part of the contract, not incidental: notify.trackerURLs fills
+// the alert's nyaa_url / public_url / ab_url slots first-link-wins, so leaving
+// the slice in upstream (PocketBase relation) order would let the operator's
+// clickable link be chosen by upstream ordering and belong to a group the same
+// line's recommended_group does not name. Sorting the headline candidate's own
+// sources first makes the rendered link agree with the headline fields, and the
+// total (URL, tracker) order makes the rest reproducible across cycles - the
+// same order-independence representative/candidateStableKey already guarantee
+// for the headline pick.
+func obtainableLinks(pool []candidate, headlineGroup string) []ReleaseLink {
 	seen := make(map[ReleaseLink]struct{}, len(pool))
-	var links []ReleaseLink
+	type sourced struct {
+		link ReleaseLink
+		rank int
+	}
+	sources := make([]sourced, 0, len(pool))
 	for i := range pool {
 		u := classify.PublishURL(&pool[i].torrent)
 		if u == "" {
@@ -332,15 +352,34 @@ func obtainableLinks(pool []candidate) []ReleaseLink {
 			continue
 		}
 		seen[link] = struct{}{}
-		links = append(links, link)
+		rank := 1
+		if release.NormalizeGroup(pool[i].rel.Group) == headlineGroup {
+			rank = 0
+		}
+		sources = append(sources, sourced{link: link, rank: rank})
+	}
+	slices.SortFunc(sources, func(a, b sourced) int {
+		if a.rank != b.rank {
+			if a.rank < b.rank {
+				return -1
+			}
+			return 1
+		}
+		if c := strings.Compare(a.link.URL, b.link.URL); c != 0 {
+			return c
+		}
+		return strings.Compare(a.link.Tracker, b.link.Tracker)
+	})
+	links := make([]ReleaseLink, 0, len(sources))
+	for i := range sources {
+		links = append(links, sources[i].link)
 	}
 	return links
 }
 
-// finalize sets a finding's status and severity.
-func finalize(f *Finding, status Status, sev Severity) *Finding {
+// finalize sets a finding's status.
+func finalize(f *Finding, status Status) *Finding {
 	f.Status = status
-	f.Severity = sev
 	return f
 }
 

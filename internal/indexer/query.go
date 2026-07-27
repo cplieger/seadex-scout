@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -147,28 +148,41 @@ func (c *curation) acceptScopedKeys(scope string, urls []string, m *curationMatc
 
 // --- Request dispatch and accounting ---
 
-// queryStats summarizes one request for the per-request log line: whether the
-// feed answered it (answered), whether it was served from the synthesized RSS
-// feed (feed - an empty-q periodic check) rather than a proxied search,
-// whether the persisted feed snapshot failed to load before any snapshot was
-// installed (snapshotUnavailable - serve renders a Torznab <error> then,
-// since a false-empty feed would record the local fault as a clean no-match),
-// whether the search's queried upstream(s) ALL failed (upstreamFailed - serve
-// renders a Torznab <error> instead of an empty feed then), how many upstream
-// results survived the Prowlarr fetch's download-URL origin filter (search
-// only), and how many items survived curation or synthesis (curated -
-// counted before the category filter and paging trim the served view).
-type queryStats struct {
-	answered            bool
-	feed                bool
-	snapshotUnavailable bool
-	upstreamFailed      bool
-	upstream            int
-	curated             int
+// torznabFault is the one way query tells serve a request could not be
+// answered with a feed. It carries exactly the three arguments rejectTorznab
+// needs, so serve renders any fault without knowing which condition produced
+// it - and an outcome that forgets to build one cannot degrade into the
+// false-empty 200 a zero-valued flag on the log record would produce (an arr
+// records that as a clean no-match).
+type torznabFault struct {
+	summary string
+	detail  string
+	code    int
 }
 
-// query returns the feed items for a request (restricted to scope's tracker)
-// plus a queryStats summary for logging.
+// queryStats summarizes one request for the per-request log line: whether the
+// feed answered it (answered), whether it was served from the synthesized RSS
+// feed (feed - an empty-q periodic check) rather than a proxied search, how
+// many upstream results survived the Prowlarr fetch's download-URL origin
+// filter (search only), and how many items survived curation or synthesis
+// (curated - counted before the category filter and paging trim the served
+// view). Observability only: a request that cannot be answered with a feed
+// travels as a torznabFault, not as a field here.
+type queryStats struct {
+	answered bool
+	feed     bool
+	// upstreamFetched is the RAW parsed-item count of the upstream page,
+	// BEFORE filterDownloadURLs' origin gate; upstream is the post-gate
+	// survivor count. A gap between them is the origin filter dropping items,
+	// which is otherwise invisible after its once-per-onset WARN.
+	upstreamFetched int
+	upstream        int
+	curated         int
+}
+
+// query returns the feed items for a request (restricted to scope's tracker),
+// a queryStats summary for logging, and a non-nil torznabFault when the
+// request could not be answered with a feed at all.
 //
 // An empty-q request (Prowlarr's caps/save test, or an RSS "latest" fetch) is
 // served from the synthesized per-tracker SeaDex journal - the releases newly
@@ -182,9 +196,9 @@ type queryStats struct {
 // tracker): Sonarr searches an anime season episode by episode AND as a whole
 // season (see NewznabRequestGenerator), so answering only the season search
 // still delivers the pack while sparing the trackers a query per episode.
-func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]item, queryStats) {
+func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]item, queryStats, *torznabFault) {
 	if !servesQuery(q) {
-		return nil, queryStats{}
+		return nil, queryStats{}, nil
 	}
 	// Pick up a newer feed snapshot a cycle may have written (this process's
 	// daemon loop, or the `poll` subcommand in another process) before serving.
@@ -192,35 +206,68 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 	// A snapshot that failed to load before any successful install is a local
 	// fault, not an empty catalogue: serving the synthesized feed would blank
 	// it, and a search would filter every Prowlarr result against nil
-	// curation maps - both false-empty. Answer with the dedicated flag (serve
-	// renders a Torznab <error>) without contacting a tracker.
+	// curation maps - both false-empty. Answer with a fault (serve renders a
+	// Torznab <error>, exactly like an unavailable Prowlarr dependency)
+	// without contacting a tracker.
 	if ix.cache.unavailable() {
-		return nil, queryStats{answered: true, snapshotUnavailable: true}
+		return nil, queryStats{answered: true}, &torznabFault{
+			summary: "feed snapshot unavailable",
+			code:    errCodeUnknown,
+			detail:  "feed snapshot unavailable: the persisted SeaDex feed failed to load; results unavailable until a snapshot loads",
+		}
 	}
 
 	var (
 		items []item
 		stats queryStats
+		fault *torznabFault
 	)
-	if strings.TrimSpace(q.Get("q")) == "" {
+	if isFeedRequest(q) {
 		items = ix.feedFor(scope)
 		stats = queryStats{answered: true, feed: true, curated: len(items)}
 	} else {
-		raw, failed := ix.fetchRaw(ctx, upstreamParams(q), scope)
+		raw, fetched, failed := ix.fetchRaw(ctx, upstreamParams(q), scope)
 		set := ix.cache.curation()
 		items = markAndDedupe(raw, &set, scope)
-		stats = queryStats{answered: true, upstreamFailed: failed, upstream: len(raw), curated: len(items)}
+		stats = queryStats{
+			answered:        true,
+			upstreamFetched: fetched, upstream: len(raw), curated: len(items),
+		}
+		if failed {
+			// A total upstream failure (every queried Prowlarr upstream
+			// failed) is reported as a Torznab <error>, not an empty 200
+			// feed: an empty feed reads as a clean "no SeaDex match" to the
+			// arr, which would silently record a Prowlarr outage as a
+			// successful no-results search. A partial failure (one of several
+			// upstreams answered) keeps the degraded-but-successful feed.
+			fault = &torznabFault{
+				summary: "upstream query failed",
+				code:    errCodeUnknown,
+				detail:  "upstream Prowlarr query failed; search results unavailable",
+			}
+		}
 	}
 
 	items = filterByCats(items, parseCats(q.Get("cat")))
 	if stats.feed {
-		items = applyPaging(items, q)
+		items = applyPaging(ix.log, items, q)
 	}
 	if len(items) > maxItems {
+		// The rendered view is capped; say so, so a short feed is never
+		// mistaken for a short catalogue (the render path WARNs on its own
+		// byte-budget truncation for the same reason).
+		ix.log.Warn("feed trimmed to the rendered-item cap",
+			"available", len(items), "max_items", maxItems)
 		items = items[:maxItems]
 	}
-	return items, stats
+	return items, stats, fault
 }
+
+// isFeedRequest reports whether a request is the empty-query periodic RSS check
+// served from the synthesized journal rather than a proxied search. It is the
+// one home for that test so the concurrency pool serveQuery picks cannot drift
+// from the path query actually takes.
+func isFeedRequest(q url.Values) bool { return strings.TrimSpace(q.Get("q")) == "" }
 
 // --- Serving the synthesized feed ---
 
@@ -231,8 +278,9 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 // explicit limit, so real consumers are unaffected. An explicit limit behaves
 // as before, an absent or invalid offset leaves the window anchored at the
 // newest item, and the proxied search path forwards these params to Prowlarr
-// instead, so it never pages locally.
-func applyPaging(items []item, q url.Values) []item {
+// instead, so it never pages locally. A present-but-unusable limit is logged
+// at Debug so a misconfigured client is diagnosable.
+func applyPaging(log *slog.Logger, items []item, q url.Values) []item {
 	if off, err := strconv.Atoi(strings.TrimSpace(q.Get("offset"))); err == nil && off > 0 {
 		if off >= len(items) {
 			return nil
@@ -240,8 +288,14 @@ func applyPaging(items []item, q url.Values) []item {
 		items = items[off:]
 	}
 	limit := defaultCapsLimit
-	if lim, err := strconv.Atoi(strings.TrimSpace(q.Get("limit"))); err == nil && lim > 0 {
+	raw := strings.TrimSpace(q.Get("limit"))
+	if lim, err := strconv.Atoi(raw); err == nil && lim > 0 {
 		limit = lim
+	} else if raw != "" {
+		// A present-but-unusable limit silently becomes the advertised
+		// default; name it so a misconfigured client is diagnosable.
+		log.Debug("unusable Torznab limit param; using the advertised default",
+			"limit", logParam(raw), "default", defaultCapsLimit)
 	}
 	if limit < len(items) {
 		items = items[:limit]
@@ -250,31 +304,23 @@ func applyPaging(items []item, q url.Values) []item {
 }
 
 // feedFor returns the synthesized RSS feed for a tracker scope (nyaa or ab),
-// read under the lock since reload replaces the snapshot when a cycle rewrites
-// it. A scope whose Prowlarr Torznab URL is not configured serves nothing,
+// read through the snapshot cache, which owns the locking (a cycle rewrite
+// replaces the snapshot under it). A scope whose Prowlarr Torznab URL is not
+// configured serves nothing,
 // even when the loaded snapshot carries items for it (a stale snapshot written
 // before the operator turned the tracker off): the README documents an empty
 // per-tracker URL as that tracker's off switch, and the /ab feed embeds the
 // operator's passkey, so an off tracker's empty-q response must be the same
 // shape as a tracker with no data - never the credential-bearing feed. The
-// returned slice is safe to use after the lock is released: reload installs a
-// fresh snapshot with new backing arrays and never mutates the old ones, so a
+// returned slice is safe to use after the cache's read returns: reload installs
+// a fresh snapshot with new backing arrays and never mutates the old ones, so a
 // slice handed out here stays immutable even across a swap. Callers must only
 // read it (never append/write in place).
 func (ix *Indexer) feedFor(scope string) []item {
 	// The enablement gate is the SERVER's, not the cache's: whether a tracker's
 	// feed may be served at all is config policy, while the cache only answers
-	// what is loaded.
-	switch scope {
-	case upstreamNyaa:
-		if ix.cfg.NyaaTorznabURL == "" {
-			return nil
-		}
-	case upstreamAB:
-		if ix.cfg.ABTorznabURL == "" {
-			return nil
-		}
-	default:
+	// what is loaded. An unknown scope is not enabled, so it returns nil here.
+	if !ix.enablement.enabled(scope) {
 		return nil
 	}
 	feed := ix.cache.feed(scope)
@@ -292,38 +338,50 @@ func (ix *Indexer) feedFor(scope string) []item {
 // --- Proxied upstream search ---
 
 // fetchRaw queries the scope's upstream and returns the raw results, before
-// any curation filtering, plus whether the query was a total upstream failure
+// any curation filtering, the RAW parsed-item count of the upstream page
+// (fetched - counted BEFORE the download-URL origin filter, so a gap between
+// it and len(items) is that filter dropping items), plus whether the query was
+// a total upstream failure
 // (every queried upstream failed - with per-tracker scoping that is the one
-// upstream the scope names). On failed=true serve renders a Torznab <error>
+// upstream the scope names). On failed=true query builds a torznabFault so
+// serve renders a Torznab <error>
 // instead of a fake-empty 200 feed, so a Prowlarr outage surfaces as a failed
-// search in the arr rather than a clean no-results one. Returns nil,false when
+// search in the arr rather than a clean no-results one. Returns nil,0,false when
 // no upstream is configured for the scope (a standing misconfiguration, not a
 // query failure) or when the caller cancelled the request.
-func (ix *Indexer) fetchRaw(ctx context.Context, params url.Values, scope string) (items []item, failed bool) {
+func (ix *Indexer) fetchRaw(ctx context.Context, params url.Values, scope string) (items []item, fetched int, failed bool) {
 	// upstreams is wired once in New, before any request can arrive, and is
-	// never mutated afterwards; mu guards only the snapshot fields.
+	// never mutated afterwards, so it needs no synchronization; the snapshot
+	// fields live behind snapshotCache's own lock.
 	u := upstreamForScope(ix.upstreams, scope)
 	if u == nil {
 		// A search reached a scope whose Prowlarr upstream is not configured
 		// (e.g. an /ab search with only nyaa_torznab_url set): the empty result
-		// is a permanent misconfiguration, not a no-match, so say so.
-		ix.log.Warn("search for tracker scope with no configured upstream; returning empty",
+		// is a permanent misconfiguration, not a no-match, so say so - once.
+		// The state cannot change while the process runs, and an arr left
+		// pointing at a turned-off tracker searches a season per series, so
+		// repeats drop to Debug (see noUpstreamWarned).
+		log := ix.log.Debug
+		if w, ok := ix.noUpstreamWarned[scope]; ok && w.CompareAndSwap(false, true) {
+			log = ix.log.Warn
+		}
+		log("search for tracker scope with no configured upstream; returning empty",
 			"scope", scope)
-		return nil, false
+		return nil, 0, false
 	}
 
-	items, _, err := u.search(ctx, params)
+	items, fetched, err := u.search(ctx, params)
 	if err != nil {
 		if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, ctx.Err())) {
 			// Caller (the arr) went away or its request deadline fired; not an
 			// upstream fault. A Prowlarr HTTP client timeout leaves ctx.Err()
 			// nil and should warn.
-			return nil, false
+			return nil, 0, false
 		}
 		ix.log.Warn("upstream query failed", "upstream", u.name, "error", err)
-		return nil, true
+		return nil, 0, true
 	}
-	return items, false
+	return items, fetched, false
 }
 
 // markAndDedupe keeps the curated releases, stamps each with the best/alt

@@ -47,7 +47,7 @@ func FuzzParseOverrides(f *testing.F) {
 			if r.AniListID <= 0 {
 				t.Errorf("parseOverrides retained a non-positive-AniList-ID record: %+v", r)
 			}
-			if r.Type != NormalizeType(r.Type) {
+			if r.Type != normalizeType(r.Type) {
 				t.Errorf("parseOverrides record Type %q not normalized", r.Type)
 			}
 		}

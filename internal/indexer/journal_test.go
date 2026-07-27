@@ -385,6 +385,34 @@ func TestRenderJournalItemDeterministicSynthesisSource(t *testing.T) {
 	}
 }
 
+// TestRenderJournalItemUnionsCategoriesWithoutDuplicates pins the dedupe half
+// of the category fold: a torrent attached to several SeaDex entries of the
+// SAME media type must render exactly one category, not one per occurrence.
+// The mixed-type case (TestRebuildSharedTorrentMergesBestWins) cannot see this
+// - two different categories are two entries either way - so without this test
+// a fold that appends unconditionally serves an RSS item repeating the same
+// <category> element once per sharing entry.
+func TestRenderJournalItemUnionsCategoriesWithoutDuplicates(t *testing.T) {
+	w := newTestWriter(filepath.Join(t.TempDir(), "feed.json"), "", false)
+	torrent := seadex.Torrent{
+		Tracker: "Nyaa", URL: "https://nyaa.si/view/1234567",
+		Files: []seadex.File{{Length: 7, Name: "Show - S01E01 (1080p) [G].mkv"}},
+	}
+	e1 := &seadex.Entry{AniListID: 1, Torrents: []seadex.Torrent{torrent}}
+	e2 := &seadex.Entry{AniListID: 2, Torrents: []seadex.Torrent{torrent}}
+	refs := []curatedRef{
+		{entry: e1, torrent: &e1.Torrents[0]},
+		{entry: e2, torrent: &e2.Torrents[0]},
+	}
+	it, ok, _ := w.renderJournalItem("nyaa:1234567", refs, func(int) EntryInfo { return EntryInfo{} })
+	if !ok {
+		t.Fatal("renderJournalItem: item not rendered")
+	}
+	if len(it.Categories) != 1 || it.Categories[0] != catAnime {
+		t.Errorf("Categories = %v, want exactly [%d] (the union must not repeat a category per sharing entry)", it.Categories, catAnime)
+	}
+}
+
 // TestRebuildRejectsForeignHostTrackerURLs pins the curation trust boundary
 // (trackerKey's host gate): a SeaDex record whose tracker label says Nyaa but
 // whose URL sits on a foreign host must mint NO curation key and NO journal
@@ -429,6 +457,84 @@ func TestRebuildRejectsForeignHostTrackerURLs(t *testing.T) {
 	}
 	if !rec.Contains("indexer feed snapshot written") {
 		t.Fatalf("no snapshot log line; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// foreignHostInfoHash is a valid 40-hex info hash for the ownership-gate
+// regression tests below: the ledger rule they pin is only observable when the
+// gated torrent HAS a second identity signal to fold.
+const foreignHostInfoHash = "abcdef0123456789abcdef0123456789abcdef01"
+
+// TestRebuildKeepsHashedForeignHostTorrentOutOfLedger closes the hole the
+// sibling TestRebuildRejectsForeignHostTrackerURLs only appeared to cover: its
+// fixture torrents carry no InfoHash, so an empty ledger was guaranteed by the
+// fixture rather than by the rule. A gated torrent WITH a valid info hash used
+// to fold that hash into the never-pruned ledger (journalKey is "" for it, so
+// it can never be journaled), which permanently denied the release RSS
+// exposure once upstream corrected the URL - and silenced the unresolvable
+// diagnostic after the first rebuild, since the folded hash made the next
+// rebuild return before the count. Nothing is folded for a keyless torrent
+// now; only the two OPERATOR switches (an off tracker, a missing AB passkey)
+// consume novelty.
+func TestRebuildKeepsHashedForeignHostTorrentOutOfLedger(t *testing.T) {
+	entries := []seadex.Entry{{
+		AniListID: 9,
+		Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://evil.example/view/111", IsBest: true,
+			InfoHash: foreignHostInfoHash,
+			Files:    []seadex.File{{Length: 1, Name: "Show A - S01E01 (1080p) [G].mkv"}},
+		}},
+	}}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 0 {
+		t.Errorf("feed = %d items, want 0 (a foreign-host URL must not journal)", len(snap.NyaaFeed))
+	}
+	if len(snap.Seen) != 0 {
+		t.Errorf("seen ledger = %v, want empty (an unjournalable torrent's hash must not consume novelty)", snap.Seen)
+	}
+}
+
+// TestRebuildJournalsReleaseAfterTrackerURLCorrected is the end-to-end half of
+// the same rule: the release the ownership gate refused on the first rebuild
+// must journal as new once SeaDex publishes its real tracker URL, with the info
+// hash unchanged across both rebuilds. Before the fix the first rebuild's
+// folded hash made the corrected record read as already seen forever.
+func TestRebuildJournalsReleaseAfterTrackerURLCorrected(t *testing.T) {
+	files := []seadex.File{{Length: 1, Name: "Show A - S01E01 (1080p) [G].mkv"}}
+	gated := []seadex.Entry{{
+		AniListID: 9,
+		Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://evil.example/view/111", IsBest: true,
+			InfoHash: foreignHostInfoHash, Files: files,
+		}},
+	}}
+	corrected := []seadex.Entry{{
+		AniListID: 9,
+		Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://nyaa.si/view/111", IsBest: true,
+			InfoHash: foreignHostInfoHash, Files: files,
+		}},
+	}}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	w := newTestWriter(path, "", false)
+	if err := w.Rebuild(context.Background(), gated, nil); err != nil {
+		t.Fatalf("Rebuild (gated URL): %v", err)
+	}
+	if err := w.Rebuild(context.Background(), corrected, nil); err != nil {
+		t.Fatalf("Rebuild (corrected URL): %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 1 {
+		t.Fatalf("feed = %d items, want 1 (a corrected upstream record is a legitimate later republish)", len(snap.NyaaFeed))
+	}
+	if got := snap.NyaaFeed[0].Key; got != "nyaa:111" {
+		t.Errorf("journaled key = %q, want %q", got, "nyaa:111")
 	}
 }
 
@@ -1081,9 +1187,9 @@ func TestRebuildDropsCarriedItemWarnedByStoredHashOnly(t *testing.T) {
 }
 
 // TestRebuildHashVetoesNoveltyAcrossKeyChange pins the multi-signal novelty
-// contract identitySignals documents ("novelty detection survives one signal
+// contract ledgerSignals documents ("novelty detection survives one signal
 // going missing - a URL-shape change upstream"): a torrent whose info hash is
-// already in the seen ledger must NOT re-enter the journal as new when its
+// already in the seen ledger (under its tracker scope) must NOT re-enter the journal as new when its
 // tracker URL changes shape (a new /view id, i.e. a new journal key). Novelty
 // is judged across ALL identity signals, so a re-upload or upstream URL change
 // keeping the same bytes never re-broadcasts old curation, while both the new
@@ -1121,7 +1227,7 @@ func TestRebuildHashVetoesNoveltyAcrossKeyChange(t *testing.T) {
 	if len(snap.NyaaFeed) != 0 {
 		t.Errorf("feed = %d items, want 0 (a seen hash under a new key must veto novelty)", len(snap.NyaaFeed))
 	}
-	if !snap.Seen["nyaa:9042"] || !snap.Seen[hash] {
+	if !snap.Seen["nyaa:9042"] || !snap.Seen["nyaa:h:"+hash] {
 		t.Errorf("seen ledger missing the new key or the carried hash: %v", snap.Seen)
 	}
 }
@@ -1161,7 +1267,7 @@ func TestRebuildKeyVetoesNoveltyAcrossHashChange(t *testing.T) {
 	if len(snap.NyaaFeed) != 0 {
 		t.Errorf("feed = %d items, want 0 (a seen key under a new hash must veto novelty)", len(snap.NyaaFeed))
 	}
-	if !snap.Seen[hashB] || !snap.Seen["nyaa:42"] {
+	if !snap.Seen["nyaa:h:"+hashB] || !snap.Seen["nyaa:42"] {
 		t.Errorf("seen ledger missing the new hash or the key (every signal must fold even when not new): %v", snap.Seen)
 	}
 }

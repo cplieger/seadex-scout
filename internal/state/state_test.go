@@ -1259,3 +1259,107 @@ func TestStoreLoadCanceledReadBlocksSaveUntilClassified(t *testing.T) {
 		t.Errorf("Save after a classifying Load = %v, want the block cleared", saveErr)
 	}
 }
+
+// TestStoreSavePreservationRefusalsMatchErrSavePreserved pins the
+// preservation sentinel itself, not just the refusal text: scout.save
+// classifies a refused Save with errors.Is(err, state.ErrSavePreserved) to
+// log it at WARN instead of ERROR, so an unwrapped refusal turns a routine
+// redeploy (a SIGTERM landing in Load's read window arms the block) into a
+// cycle-error alert. Both documented blocks must carry the sentinel, and a
+// genuine write fault must NOT, or the same classification would silence a
+// real persistence failure.
+func TestStoreSavePreservationRefusalsMatchErrSavePreserved(t *testing.T) {
+	t.Run("newer-schema block", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "state.json")
+		newer := fmt.Sprintf(`{"version":%d,"baselined":true}`, SchemaVersion+1)
+		if err := os.WriteFile(path, []byte(newer), 0o600); err != nil {
+			t.Fatalf("write newer-schema state: %v", err)
+		}
+		store := NewStore(path, testLogger())
+		if _, err := store.Load(context.Background()); err == nil {
+			t.Fatal("Load of a newer-schema file returned nil error, want refusal")
+		}
+		err := store.Save(context.Background(), &State{})
+		if !errors.Is(err, ErrSavePreserved) {
+			t.Errorf("Save error = %v, want errors.Is(err, ErrSavePreserved) (scout.save logs an unmatched refusal at ERROR and fires the cycle-error alert)", err)
+		}
+	})
+
+	t.Run("unclassified-read-failure block", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "state.json")
+		if err := os.WriteFile(path, []byte(`{"baselined":true}`), 0o600); err != nil {
+			t.Fatalf("write state: %v", err)
+		}
+		store := NewStore(path, testLogger())
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := store.Load(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Load with a canceled context error = %v, want context.Canceled", err)
+		}
+		err := store.Save(context.Background(), &State{})
+		if !errors.Is(err, ErrSavePreserved) {
+			t.Errorf("Save error = %v, want errors.Is(err, ErrSavePreserved) (this is the redeploy path that must not page the operator)", err)
+		}
+	})
+
+	t.Run("a genuine write fault is not a preservation refusal", func(t *testing.T) {
+		blocker := filepath.Join(t.TempDir(), "blocker")
+		if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+			t.Fatalf("create blocker file: %v", err)
+		}
+		store := NewStore(filepath.Join(blocker, "state.json"), testLogger())
+		err := store.Save(context.Background(), &State{Baselined: true})
+		if err == nil {
+			t.Fatal("Save returned nil error, want a write failure")
+		}
+		if errors.Is(err, ErrSavePreserved) {
+			t.Errorf("write fault %v matches ErrSavePreserved, want a fault classification (a real persistence failure must stay at ERROR)", err)
+		}
+	})
+}
+
+// TestStoreSaveWarnsApproachingSizeLimit pins the pre-cliff size warning,
+// the operator's only notice before the shared maxStateBytes bound starts
+// refusing every Save and freezes the persisted cache: a staged encoding past
+// stateSizeWarnBytes (80% of the cap) warns exactly once, and an ordinary
+// state stays silent so the warning keeps meaning something.
+func TestStoreSaveWarnsApproachingSizeLimit(t *testing.T) {
+	const wantMsg = "state file approaching the size limit; a Save that exceeds it is refused and the persisted cache freezes"
+	padded := func(n int) *State {
+		// Version mirrors the SchemaVersion stamp Save applies to the copy it
+		// writes, so the json.Marshal probe below measures the staged shape.
+		return &State{
+			Findings: map[string]notify.Alerted{
+				"pad": {Finding: notify.StoredFinding{Title: strings.Repeat("a", n)}},
+			},
+			Version: SchemaVersion,
+		}
+	}
+	base, err := json.Marshal(padded(0))
+	if err != nil {
+		t.Fatalf("marshal size probe: %v", err)
+	}
+	sized := func(total int) *State { return padded(total - len(base)) }
+
+	t.Run("crossing the threshold warns once", func(t *testing.T) {
+		logger, recorder := capture.New()
+		store := NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
+		if err := store.Save(context.Background(), sized(stateSizeWarnBytes+1024)); err != nil {
+			t.Fatalf("Save returned error: %v", err)
+		}
+		if got := recorder.CountExact(wantMsg); got != 1 {
+			t.Errorf("pre-cliff WARN count = %d, want 1 (without it the cache freezes at the cap with no prior signal)", got)
+		}
+	})
+
+	t.Run("an ordinary state stays quiet", func(t *testing.T) {
+		logger, recorder := capture.New()
+		store := NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
+		if err := store.Save(context.Background(), sized(stateSizeWarnBytes/2)); err != nil {
+			t.Fatalf("Save returned error: %v", err)
+		}
+		if got := recorder.CountExact(wantMsg); got != 0 {
+			t.Errorf("pre-cliff WARN count = %d for a half-sized state, want 0 (a warning on every save is noise)", got)
+		}
+	})
+}

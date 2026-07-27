@@ -794,32 +794,6 @@ func TestWalkSonarrSeriesWithNoFilesHasNoGroups(t *testing.T) {
 	}
 }
 
-func TestWalkSonarrUnmatchedIncludeTagLogsWarning(t *testing.T) {
-	fs := &fakeSonarr{
-		series: []arrapi.Series{
-			{ID: 1, Title: "Kept", Tags: []int{7}},
-			{ID: 2, Title: "Dropped", Tags: []int{3}},
-		},
-		files: map[int][]arrapi.EpisodeFile{
-			1: {epFile(1, "PMR")},
-		},
-		tags: []arrapi.Tag{{ID: 7, Label: "anime"}},
-	}
-	logger, rec := capture.New()
-	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime", "nonexistent"}, Logger: logger})
-
-	snap, err := w.Walk(context.Background())
-	if err != nil {
-		t.Fatalf("Walk: %v", err)
-	}
-	if len(snap.Items) != 1 || snap.Items[0].ArrID != 1 {
-		t.Fatalf("items = %+v, want only the tag-included series (id 1)", snap.Items)
-	}
-	if rec.CountLevel(slog.LevelWarn, "") == 0 {
-		t.Error("no warning logged, want a warning that a configured tag matched no arr tag")
-	}
-}
-
 // TestWalkUnmatchedTagWarningNeverEmitsTagValues pins the credential-safety
 // contract of the unmatched-tag diagnostic: configured arr_tags values pass
 // through allowlisted ${VAR} expansion, so a typo like ${SONARR_API_KEY} can
@@ -1552,5 +1526,102 @@ func TestWalkErrorCarriesArrIdentity(t *testing.T) {
 	// boundaries omit the attr instead of logging a bogus one.
 	if got := WalkErrArr(context.Canceled); got != "" {
 		t.Errorf("WalkErrArr(context.Canceled) = %q, want empty", got)
+	}
+}
+
+// TestWalkSonarrDeadIncludeTagFilterWarnsAndEmptiesSide pins the dead-filter
+// diagnostic: when no configured include label resolves to an arr tag, the
+// non-nil empty id set makes keepByTags drop every item, so the side
+// contributes zero items while the cycle still reads healthy. The distinct
+// second warning is the only signal that separates a dead filter from one
+// stray label, and it carries the label COUNT rather than the labels
+// themselves (they pass through ${VAR} expansion).
+func TestWalkSonarrDeadIncludeTagFilterWarnsAndEmptiesSide(t *testing.T) {
+	fs := &fakeSonarr{
+		series: []arrapi.Series{{ID: 1, Title: "Alpha", Tags: []int{7}}},
+		files:  map[int][]arrapi.EpisodeFile{1: {epFile(1, "PMR")}},
+		tags:   []arrapi.Tag{{ID: 7, Label: "anime"}},
+	}
+	logger, rec := capture.New()
+	w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"nope", "also-nope"}, Logger: logger})
+
+	snap, err := w.Walk(t.Context())
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	if len(snap.Items) != 0 {
+		t.Fatalf("items = %+v, want none (an include set resolving to zero ids admits nothing)", snap.Items)
+	}
+	const msg = "no configured tag resolved to an arr tag; an include set therefore admits nothing, an exclude set drops nothing"
+	if n := rec.CountExact(msg); n != 1 {
+		t.Fatalf("dead-filter warnings = %d, want exactly 1; messages = %q", n, rec.Messages())
+	}
+	if !rec.HasAttr(msg, "which", "arr_tags.include") {
+		t.Error("dead-filter warning does not name arr_tags.include in its which attr")
+	}
+	if !rec.HasAttr(msg, "configured_count", "2") {
+		t.Error("dead-filter warning does not carry configured_count=2")
+	}
+	for _, r := range rec.Records() {
+		r.Attrs(func(a slog.Attr) bool {
+			if v := a.Value.String(); v == "nope" || v == "also-nope" {
+				t.Errorf("record %q attr %q emits a configured tag VALUE (%q); the diagnostic is count-only", r.Message, a.Key, v)
+			}
+			return true
+		})
+	}
+}
+
+// TestWalkRadarrMissingFilePayloadWarns pins the degradation diagnostic for a
+// Radarr movie that reports HasFile with no MovieFile payload: the item
+// necessarily compares as fileless, so without this warning the operator sees
+// a false no-file verdict with no explanation. The count is the signal, and a
+// movie that is honestly fileless must not be counted.
+func TestWalkRadarrMissingFilePayloadWarns(t *testing.T) {
+	fr := &fakeRadarr{movies: []arrapi.Movie{
+		{ID: 10, Title: "Flagged But Nil File", HasFile: true, MovieFile: nil},
+		{ID: 20, Title: "Honestly Fileless", HasFile: false},
+		{ID: 30, Title: "With File", HasFile: true, MovieFile: &arrapi.MovieFile{ReleaseGroup: "PMR"}},
+	}}
+	logger, rec := capture.New()
+	w := NewWalker(&Config{Radarr: fr, Logger: logger})
+
+	snap, err := w.Walk(t.Context())
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	if len(snap.Items) != 3 {
+		t.Fatalf("items = %d, want 3 (a payload-less movie is kept, not dropped)", len(snap.Items))
+	}
+	const msg = "radarr movies report a file but carry no file payload; they compare as fileless"
+	if n := rec.CountExact(msg); n != 1 {
+		t.Fatalf("no-payload warnings = %d, want exactly 1; messages = %q", n, rec.Messages())
+	}
+	if !rec.HasAttr(msg, "movies", "1") {
+		v, _ := rec.AttrValue(msg, "movies")
+		t.Errorf("no-payload warning movies attr = %q, want 1 (only the payload-less movie counts)", v)
+	}
+	if !rec.HasAttr(msg, "kept", "3") {
+		v, _ := rec.AttrValue(msg, "kept")
+		t.Errorf("no-payload warning kept attr = %q, want 3", v)
+	}
+}
+
+// TestWalkRadarrCleanWalkLogsNoPayloadWarning is the negative side: a Radarr
+// side whose every movie is honest logs no degradation warning, so the gate
+// cannot invert to fire on every healthy cycle.
+func TestWalkRadarrCleanWalkLogsNoPayloadWarning(t *testing.T) {
+	fr := &fakeRadarr{movies: []arrapi.Movie{
+		{ID: 10, Title: "With File", HasFile: true, MovieFile: &arrapi.MovieFile{ReleaseGroup: "PMR"}},
+		{ID: 20, Title: "Fileless", HasFile: false},
+	}}
+	logger, rec := capture.New()
+	w := NewWalker(&Config{Radarr: fr, Logger: logger})
+
+	if _, err := w.Walk(t.Context()); err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	if n := rec.CountLevel(slog.LevelWarn, ""); n != 0 {
+		t.Errorf("clean radarr walk logged %d warnings, want none; messages = %q", n, rec.Messages())
 	}
 }

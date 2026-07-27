@@ -52,6 +52,34 @@ func TestWriteFilesWritesTimestampedPair(t *testing.T) {
 	}
 }
 
+// TestWriteFilesReportPairIsOwnerOnly pins the report pair's least-privilege
+// file mode: a report enumerates the operator's whole library and carries
+// private-tracker page links, and atomicfile's DEFAULT mode is 0o644, so a
+// dropped WithMode(reportFileMode) would publish every report to any local
+// account able to traverse the bind-mounted /config tree with nothing failing.
+// Only the FILE mode is asserted: a default ACL on the parent (containers,
+// group-writable bind mounts) can widen a freshly created directory beyond
+// MkdirAll's reportDirMode, so a directory-mode assertion would fail on an
+// honest tree.
+func TestWriteFilesReportPairIsOwnerOnly(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "reports")
+	r := &Report{GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC)}
+
+	if err := r.WriteFiles(context.Background(), dir, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+		t.Fatalf("WriteFiles: %v", err)
+	}
+
+	for _, ext := range []string{".json", ".md"} {
+		fi, err := os.Stat(filepath.Join(dir, "report-2026-07-11T15-04-05Z"+ext))
+		if err != nil {
+			t.Fatalf("stat %s half: %v", ext, err)
+		}
+		if got := fi.Mode().Perm(); got != reportFileMode {
+			t.Errorf("%s half mode = %v, want %v (owner-only report pair)", ext, got, os.FileMode(reportFileMode))
+		}
+	}
+}
+
 // TestWriteFilesMarkdownFailureLeavesJSONAndWrapsError pins the other arm of
 // the documented JSON-first ordering: when the Markdown half fails after the
 // JSON half has already committed, WriteFiles surfaces the wrapped
@@ -88,6 +116,41 @@ func TestWriteFilesMarkdownFailureLeavesJSONAndWrapsError(t *testing.T) {
 	}
 	if len(back.Rows) != 1 || back.Rows[0].Title != "Frieren" {
 		t.Errorf("surviving JSON rows = %+v, want the Frieren row", back.Rows)
+	}
+}
+
+// TestWriteFilesReportWrittenLineCarriesAlertAttributes pins the success
+// record's wire shape, which alerts.yaml keys on: SeadexScoutReportWritten
+// selects msg="report written", groups on sum by (anime), and renders
+// {{ $labels.anime }} in its description. Renaming or dropping the anime
+// attribute (or the message) leaves the rule grouping on an absent label and
+// the operator reading "( ) anime", and no other test looks at either.
+func TestWriteFilesReportWrittenLineCarriesAlertAttributes(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "reports")
+	var buf strings.Builder
+	r := &Report{
+		GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC),
+		Rows: []Row{
+			{Title: "Frieren", Arr: "sonarr", Verdict: VerdictBest},
+			{Title: "Bocchi", Arr: "sonarr", Verdict: VerdictAlt},
+		},
+	}
+
+	if err := r.WriteFiles(context.Background(), dir, slog.New(slog.NewJSONHandler(&buf, nil))); err != nil {
+		t.Fatalf("WriteFiles: %v", err)
+	}
+
+	out := buf.String()
+	for _, want := range []string{
+		`"msg":"report written"`,
+		`"anime":2`,
+		`"durable":true`,
+		`"markdown":"report-2026-07-11T15-04-05Z.md"`,
+		`"json":"report-2026-07-11T15-04-05Z.json"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report-written line is missing %s: %s", want, out)
+		}
 	}
 }
 

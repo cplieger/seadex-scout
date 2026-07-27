@@ -113,6 +113,13 @@ func TestUsableRelative(t *testing.T) {
 		{name: "single segment with a query publishes", raw: "/torrents.php?id=1&torrentid=2", want: "https://nyaa.si/torrents.php?id=1&torrentid=2"},
 		{name: "single segment with a fragment publishes", raw: "/view#1", want: "https://nyaa.si/view#1"},
 		{name: "root alone drops", raw: "/", want: ""},
+		// pathShaped's query/fragment arm requires the delimiter past index 1
+		// of the rooted value: a value that is ONLY a query or fragment has no
+		// path segment at all, so publishing it would emit the tracker root
+		// ("https://nyaa.si/?id=1") - the plausible-looking 404 the shape floor
+		// exists to refuse.
+		{name: "query-only value drops", raw: "?id=1", want: ""},
+		{name: "fragment-only value drops", raw: "#1167293", want: ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

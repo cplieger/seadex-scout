@@ -7,6 +7,18 @@ import (
 	"testing"
 )
 
+// total sums one correction across feeds. It lives with the fuzz target that asserts
+// on it: no production consumer wants the aggregate - the server WARNs per tracker
+// feed so an operator can tell WHICH journal was tampered with, and the writer ignores
+// the counts entirely (its rebuild re-persists the scrubbed form regardless).
+func (s snapshotScrub) total() int {
+	n := 0
+	for _, c := range s.blankedInfoURLs {
+		n += c
+	}
+	return n
+}
+
 // FuzzDecodeSnapshot is the coverage-guided complement of the unit tests over
 // the ONE persisted-snapshot decode gate both consumers share (the writer's
 // loadPrevious and the server's readSnapshot): /config/feed.json is a
@@ -18,7 +30,7 @@ import (
 // zero data (never partially materialized state), a rejection is reported
 // exactly once (an error or a reason, never both), an accepted snapshot
 // carries non-nil curation maps, only within-limit items, and canonical info
-// hashes, and re-decoding an accepted snapshot's own re-encoding is accepted
+// hashes and download-volume-factor markers, and re-decoding an accepted snapshot's own re-encoding is accepted
 // unchanged (the gate never rejects what a rebuild would persist, and the
 // canonical re-encoding is byte-identical, so no field, map entry, item, or
 // ordering shifts on the second pass and nothing further is blanked).
@@ -30,6 +42,7 @@ func FuzzDecodeSnapshot(f *testing.F) {
 	f.Add([]byte(`{"by_hash":{"ABCDEF1234567890abcdef1234567890abcdef12":true},"by_key":{"nyaa:1":true},"seen":{},"nyaa_feed":[{"Title":"Show - S01","GUID":"https://nyaa.si/view/1","InfoHash":"ABCDEF1234567890ABCDEF1234567890ABCDEF12","Key":"nyaa:1","Categories":[5070]}]}`))
 	f.Add([]byte(`{"by_hash":{},"by_key":{},"seen":{},"ab_feed":[{"Title":"x","Size":-1}]}`))
 	f.Add([]byte(`{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Title":"x","Categories":[0]}]}`))
+	f.Add([]byte(`{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Title":"x","Key":"nyaa:1","GUID":"https://nyaa.si/view/1","DownloadVolumeFactor":"0"}]}`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		snap, scrub, reason, err := decodeSnapshot(data)
 		if err != nil || reason != "" {
@@ -54,6 +67,9 @@ func FuzzDecodeSnapshot(f *testing.F) {
 			for i := range feed {
 				if h := feed[i].InfoHash; h != validInfoHash(h) {
 					t.Errorf("%s[%d] accepted with non-canonical info hash %q (the served infohash attr and the writer's carry gates both read it as identity)", name, i, h)
+				}
+				if m := feed[i].DownloadVolumeFactor; m != validMarker(m) {
+					t.Errorf("%s[%d] accepted with out-of-vocabulary download-volume-factor %q (writeItem renders it as the arr's freeleech accounting input, and carryStoredItem re-persists it verbatim)", name, i, m)
 				}
 			}
 		}

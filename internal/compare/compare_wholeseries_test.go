@@ -30,7 +30,6 @@ func TestCompareWholeSeries(t *testing.T) {
 		seasons    map[int][]string
 		name       string
 		wantStatus Status
-		wantSev    Severity
 		entry      seadex.Entry
 		wantCount  int
 	}{
@@ -46,7 +45,6 @@ func TestCompareWholeSeries(t *testing.T) {
 			entry:      bestEntry(2, "SubsPlease"),
 			wantCount:  1,
 			wantStatus: StatusBetter,
-			wantSev:    SevWarn,
 		},
 		{
 			// Mirrors the season-scoped arm's mixed-group guard: a NOT-aligned
@@ -57,7 +55,6 @@ func TestCompareWholeSeries(t *testing.T) {
 			entry:      bestEntry(6, "SubsPlease"),
 			wantCount:  1,
 			wantStatus: StatusMixedGroup,
-			wantSev:    SevInfo,
 		},
 		{
 			// Alignment wins over the mixed-group nudge: every on-disk season
@@ -92,7 +89,6 @@ func TestCompareWholeSeries(t *testing.T) {
 			}(),
 			wantCount:  1,
 			wantStatus: StatusIncomplete,
-			wantSev:    SevInfo,
 		},
 		{
 			name:       "no recommended release but incomplete falls back to an info nudge",
@@ -100,7 +96,6 @@ func TestCompareWholeSeries(t *testing.T) {
 			entry:      seadex.Entry{AniListID: 5, Incomplete: true},
 			wantCount:  1,
 			wantStatus: StatusIncomplete,
-			wantSev:    SevInfo,
 		},
 	}
 	for _, tt := range tests {
@@ -111,8 +106,8 @@ func TestCompareWholeSeries(t *testing.T) {
 				t.Fatalf("finding count = %d, want %d: %+v", len(got), tt.wantCount, got)
 			}
 			if tt.wantCount == 1 {
-				if got[0].Status != tt.wantStatus || got[0].Severity != tt.wantSev {
-					t.Errorf("status/severity = %q/%q, want %q/%q", got[0].Status, got[0].Severity, tt.wantStatus, tt.wantSev)
+				if got[0].Status != tt.wantStatus {
+					t.Errorf("status = %q, want %q", got[0].Status, tt.wantStatus)
 				}
 			}
 		})

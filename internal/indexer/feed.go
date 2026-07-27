@@ -39,7 +39,7 @@ type EntryInfo struct {
 	// ALREADY RESOLVED from the producer (scout.feedEntryInfo): interpreting
 	// Fribb's raw season/typing fields is the mapping layer's semantics, and
 	// this package deliberately imports neither align nor mapping, so it must
-	// not re-derive that rule from raw fields (l-f4). An entry with no
+	// not re-derive that rule from raw fields. An entry with no
 	// resolvable season - an absolute-numbered run, a title-only match, or an
 	// unmapped entry - has SeasonKnown false and Season 0, and a resolved
 	// season is authoritative over any season the file names carry (fansub
@@ -139,15 +139,8 @@ func episodeMarker(t *seadex.Torrent, meta EntryInfo) string {
 		}
 		return marker
 	}
-	if meta.SeasonKnown {
-		// The resolved season outvotes the pack's file-season evidence
-		// (fansub numbering is cour-local).
-		return seasonLabel(meta.Season)
-	}
-	if s, ok := packSeason(t.Files); ok {
-		return seasonLabel(s)
-	}
-	return ""
+	label, _ := packSeasonLabel(t, meta)
+	return label
 }
 
 // seasonPrefix matches the season half of an SxxExx marker for relabeling.
@@ -156,6 +149,22 @@ var seasonPrefix = regexp.MustCompile(`(?i)^S\d{1,2}`)
 // seasonLabel renders a season number as the SNN token the arrs parse
 // (the one wire format every season marker in this file must agree on).
 func seasonLabel(s int) string { return fmt.Sprintf("S%02d", s) }
+
+// packSeasonLabel resolves the season token a PACK is labeled with, in the one
+// precedence both title paths share: the entry's resolved season outvotes the
+// pack's file-season evidence (fansub numbering is cour-local), which in turn
+// outvotes nothing at all. ok is false when neither source pins a season, so
+// each caller supplies its own fallback (no marker on the assembled path, the
+// file's own season half on the derived one).
+func packSeasonLabel(t *seadex.Torrent, meta EntryInfo) (string, bool) {
+	if meta.SeasonKnown {
+		return seasonLabel(meta.Season), true
+	}
+	if s, ok := packSeason(t.Files); ok {
+		return seasonLabel(s), true
+	}
+	return "", false
+}
 
 // relabelBaseSeason rewrites the season half of the LAST SxxExx token in a
 // derived single-release title to the entry's resolved season. A no-op without
@@ -166,11 +175,10 @@ func relabelBaseSeason(base string, meta EntryInfo) string {
 	if !meta.SeasonKnown {
 		return base
 	}
-	locs := episodeToken.FindAllStringSubmatchIndex(base, -1)
-	if len(locs) == 0 {
+	l := lastSubmatchIndex(episodeToken, base)
+	if l == nil {
 		return base
 	}
-	l := locs[len(locs)-1]
 	return base[:l[4]] + seasonLabel(meta.Season) + base[l[5]:]
 }
 
@@ -183,12 +191,17 @@ func singleEpisodeMarker(files []seadex.File) string {
 	if name == "" {
 		return ""
 	}
-	base := stripExt(path.Base(name))
-	if toks := episodeToken.FindAllStringSubmatch(base, -1); len(toks) > 0 {
-		return strings.ToUpper(toks[len(toks)-1][1])
+	// Read the episode identity from the same base-then-full-path rule the
+	// census uses (episodeKeyBase), so a token that lives only in a
+	// directory component still names the episode instead of being lost:
+	// coveredEpisodes already keys on it, so dropping it here made the
+	// marker disagree with the pack/single decision that produced it.
+	base := episodeKeyBase(name)
+	if l := lastSubmatchIndex(episodeToken, base); l != nil {
+		return strings.ToUpper(base[l[2]:l[3]])
 	}
-	if m := absoluteEpisode.FindAllStringSubmatch(base, -1); len(m) > 0 {
-		return "- " + m[len(m)-1][1]
+	if l := lastSubmatchIndex(absoluteEpisode, base); l != nil {
+		return "- " + base[l[2]:l[3]]
 	}
 	return ""
 }
@@ -206,7 +219,7 @@ func releaseFlags(t *seadex.Torrent) []string {
 	// place a release.Input is built from SeaDex data, over the shared
 	// PayloadNames eligibility rule), so the RSS title's resolution and the
 	// daemon finding's classification can never disagree about which files
-	// vote (h-f3).
+	// vote.
 	if res := classify.FileResolution(t.Files); res != "" {
 		flags = append(flags, res)
 	}
@@ -251,6 +264,44 @@ var episodeVersion = regexp.MustCompile(`(?i)v\d+$`)
 // multiSpace collapses runs of whitespace left after removing a token.
 var multiSpace = regexp.MustCompile(`\s{2,}`)
 
+// lastSubmatchIndex returns the submatch index pairs of the LAST
+// non-overlapping match of re in s, or nil when there is none. It replays
+// FindAllStringSubmatchIndex(s, -1)'s progression but retains only the
+// current match, so it is equivalent to taking that call's last element
+// while allocating O(1) instead of O(matches). SeaDex bounds a page at
+// 48 MiB but caps no individual string, and match slices cost ~108 bytes
+// per match: 4 MiB of repeated "S1E1 " retains ~86 MiB, so one hostile
+// file name can OOM the 256 MiB container during a feed rebuild (CWE-400/
+// CWE-789), well inside the working-set budget internal/seadex sizes its
+// byte caps against. Neither episodeToken nor absoluteEpisode is anchored
+// with ^, so scanning the s[off:] suffix is equivalent, and their trailing
+// (?:...|$) alternatives still see the real end of s.
+func lastSubmatchIndex(re *regexp.Regexp, s string) []int {
+	var last []int
+	for off := 0; off <= len(s); {
+		m := re.FindStringSubmatchIndex(s[off:])
+		if m == nil {
+			break
+		}
+		if last == nil {
+			last = make([]int, len(m))
+		}
+		for i := range m {
+			if m[i] < 0 {
+				last[i] = -1
+				continue
+			}
+			last[i] = m[i] + off
+		}
+		if m[1] == m[0] {
+			off = last[1] + 1
+			continue
+		}
+		off = last[1]
+	}
+	return last
+}
+
 // derivedTitle is the file-name derivation with the entry's known mapping
 // applied: when the entry pins a season (a positive Fribb TVDB season, or a
 // Fribb-typed special's mapped season 0), the pack's collapsed season label
@@ -279,23 +330,19 @@ func derivedTitle(t *seadex.Torrent, meta EntryInfo) string {
 		// replacement spans the TOKEN group (l[2]:l[3]), never the full
 		// match, whose trailing terminator character must survive the
 		// collapse.
-		locs := episodeToken.FindAllStringSubmatchIndex(base, -1)
-		l := locs[len(locs)-1]
+		l := lastSubmatchIndex(episodeToken, base)
+		// No resolved and no file-list season: keep the file's own season half.
 		label := base[l[4]:l[5]]
-		if s, ok := packSeason(t.Files); ok {
-			label = seasonLabel(s)
-		}
-		if meta.SeasonKnown {
-			label = seasonLabel(meta.Season)
+		if resolved, ok := packSeasonLabel(t, meta); ok {
+			label = resolved
 		}
 		return strings.TrimSpace(base[:l[2]] + label + base[l[3]:])
 	}
-	if locs := absoluteEpisode.FindAllStringIndex(base, -1); len(locs) > 0 {
+	if last := lastSubmatchIndex(absoluteEpisode, base); last != nil {
 		// Collapse only the LAST absolute episode token (mirroring the SxxExx
 		// arm above): a title segment that is itself " - NN"-shaped (e.g.
 		// "Show - 07 (WEB) - 01") must be preserved, not stripped with the
 		// real episode token.
-		last := locs[len(locs)-1]
 		collapsed := base[:last[0]] + " " + base[last[1]:]
 		return strings.TrimSpace(multiSpace.ReplaceAllString(collapsed, " "))
 	}
@@ -336,19 +383,19 @@ func seasonCounts(files []seadex.File) map[int]int {
 	counts := make(map[int]int)
 	// Judge the episode population, not the raw list: a sub-half-size sample or
 	// featurette that passes the type gate must not contribute a false season
-	// count (h-f10). The census rule, not PayloadFiles: a legitimately shorter
-	// episode still votes for its season, so the floor is median-anchored
-	// (d-u5-c4-1).
+	// count. The census rule, not PayloadFiles: a legitimately shorter episode
+	// still votes for its season, so the floor is median-anchored.
 	files = classify.PopulationFiles(files)
 	for i := range files {
 		if !isContentMediaFile(files[i].Name) {
 			continue
 		}
-		toks := episodeToken.FindAllStringSubmatch(stripExt(files[i].Name), -1)
-		if len(toks) == 0 {
+		name := stripExt(files[i].Name)
+		l := lastSubmatchIndex(episodeToken, name)
+		if l == nil {
 			continue
 		}
-		s, err := strconv.Atoi(toks[len(toks)-1][2][1:])
+		s, err := strconv.Atoi(name[l[4]+1 : l[5]])
 		if err != nil {
 			continue
 		}
@@ -390,11 +437,10 @@ func isPack(t *seadex.Torrent) bool {
 func coveredEpisodes(files []seadex.File) int {
 	seen := make(map[string]struct{})
 	// Census files only, so an episode-shaped sample or bonus video far below
-	// the real episodes cannot inflate a lone episode into a "pack" (h-f10).
-	// The floor is anchored on the pool's MEDIAN, not its maximum: a pack whose
-	// premiere runs double length (or that bundles the franchise movie) would
-	// otherwise lose every regular episode and read as a single episode
-	// (d-u5-c4-1).
+	// the real episodes cannot inflate a lone episode into a "pack". The floor
+	// is anchored on the pool's MEDIAN, not its maximum: a pack whose premiere
+	// runs double length (or that bundles the franchise movie) would otherwise
+	// lose every regular episode and read as a single episode.
 	files = classify.PopulationFiles(files)
 	for i := range files {
 		if !isContentMediaFile(files[i].Name) {
@@ -406,12 +452,12 @@ func coveredEpisodes(files []seadex.File) int {
 			// Key on the LAST token: scene naming puts the episode marker
 			// after the title, so a title containing an SxxExx-shaped
 			// substring must not shadow the real episode marker.
-			all := episodeToken.FindAllStringSubmatch(base, -1)
-			tok := strings.ToUpper(all[len(all)-1][1])
+			l := lastSubmatchIndex(episodeToken, base)
+			tok := strings.ToUpper(base[l[2]:l[3]])
 			seen["e"+episodeVersion.ReplaceAllString(tok, "")] = struct{}{}
 		case absoluteEpisode.MatchString(base):
-			all := absoluteEpisode.FindAllStringSubmatch(base, -1)
-			tok := all[len(all)-1][1]
+			l := lastSubmatchIndex(absoluteEpisode, base)
+			tok := base[l[2]:l[3]]
 			seen["a"+episodeVersion.ReplaceAllString(tok, "")] = struct{}{}
 		}
 	}
@@ -430,11 +476,11 @@ func representativeFile(files []seadex.File) string {
 	}
 	// Derive the title from the episode population, so a first-listed sample or
 	// featurette far below the real episodes can never headline the synthesized
-	// title (h-f10) while a legitimately shorter first episode still can
-	// (d-u5-c4-1). PopulationFiles keeps PayloadFiles' totality fallbacks
-	// (type-gate-only when no lengths, size-only when no type survivor), so a
-	// sidecar-only or container-only list still yields a candidate; an
-	// all-unnamed list yields none, matching the old files[0].Name of "".
+	// title while a legitimately shorter first episode still can.
+	// PopulationFiles keeps PayloadFiles' totality fallbacks (type-gate-only
+	// when no lengths, size-only when no type survivor), so a sidecar-only or
+	// container-only list still yields a candidate; an all-unnamed list yields
+	// none.
 	files = classify.PopulationFiles(files)
 	if len(files) == 0 {
 		return ""
@@ -481,7 +527,7 @@ func firstEpisodeFile(files []seadex.File, match func(string) bool) string {
 
 // isContentMediaFile reports whether name is eligible to identify the release
 // content, delegating to the shared type predicate in classify (one home for
-// "what counts as a content file", h-f3).
+// "what counts as a content file").
 func isContentMediaFile(name string) bool {
 	return classify.ContentMediaFile(name)
 }
@@ -489,11 +535,10 @@ func isContentMediaFile(name string) bool {
 // stripExt drops a trailing known video extension from a file name, leaving any
 // other trailing dotted token (a release name is not a path) intact.
 func stripExt(name string) string {
-	ext := path.Ext(name)
-	if classify.IsMediaFile(name) && ext != "" {
-		return name[:len(name)-len(ext)]
+	if !classify.IsMediaFile(name) {
+		return name
 	}
-	return name
+	return name[:len(name)-len(path.Ext(name))]
 }
 
 // --- Feed assembly utilities ---

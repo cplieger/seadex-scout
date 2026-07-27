@@ -51,11 +51,6 @@ func (notFoundAniList) FetchMany(context.Context, []int) (map[int]anilist.Media,
 // the cycle is degraded-but-healthy, saves only the refreshed library snapshot,
 // and leaves prior findings untouched (never falsely resolved).
 func TestCycleMappingUnusablePreservesFindings(t *testing.T) {
-	mapSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("[]"))
-	}))
-	defer mapSrv.Close()
-
 	logger := scoutTestLogger()
 	prior := priorAlerted("Existing", 154587)
 	store := &fakeStore{st: state.State{
@@ -67,7 +62,7 @@ func TestCycleMappingUnusablePreservesFindings(t *testing.T) {
 		Logger:  logger,
 		Store:   store,
 		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
-		Mapping: mapping.NewLoader(mapSrv.Client(), mapSrv.URL, filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		Mapping: emptyRecordsMapLoader(t, logger),
 		SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 154587}}},
 	})
 
@@ -90,11 +85,6 @@ func TestCycleMappingUnusablePreservesFindings(t *testing.T) {
 // public_url-derived ArrURL never lands raw in state.json, while the rest of
 // the item survives intact.
 func TestCycleDegradedSavePersistsSanitizedArrURL(t *testing.T) {
-	mapSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("[]"))
-	}))
-	defer mapSrv.Close()
-
 	logger := scoutTestLogger()
 	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
 	if err := store.Save(context.Background(), &state.State{Baselined: true}); err != nil {
@@ -107,7 +97,7 @@ func TestCycleDegradedSavePersistsSanitizedArrURL(t *testing.T) {
 		Library: library.NewWalker(&library.Config{
 			Sonarr: sonarr, Logger: logger, SonarrURL: "https://user:pass@sonarr.example",
 		}),
-		Mapping: mapping.NewLoader(mapSrv.Client(), mapSrv.URL, filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		Mapping: emptyRecordsMapLoader(t, logger),
 		SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 154587}}},
 	})
 
@@ -384,7 +374,7 @@ func TestHandlePreCompareGateEmptyWalkPreservesPriorSnapshot(t *testing.T) {
 	st := state.State{Library: library.Snapshot{Items: []library.Item{{ArrID: 7, Title: "Frieren"}}}, Findings: map[string]notify.Alerted{"prior": prior}, Baselined: true}
 	store := &fakeStore{st: st}
 	s := New(&Deps{Logger: logger, Store: store})
-	handled, healthy := s.handlePreCompareGate(context.Background(), &st, library.Snapshot{}, &mapping.Cache{}, []seadex.Entry{{AniListID: 1}}, nil, nil, nil)
+	handled, healthy := s.handlePreCompareGate(context.Background(), &st, library.Snapshot{}, &mapping.Cache{}, []seadex.Entry{{AniListID: 1}}, cycleOutcomes{})
 	if !handled || !healthy {
 		t.Errorf("handlePreCompareGate = (%v, %v), want (true, true)", handled, healthy)
 	}
@@ -649,7 +639,7 @@ func TestHandlePreCompareGateShrunkWalkEscalatesAfterRepeatedShrinks(t *testing.
 			snap := library.Snapshot{Items: []library.Item{{ArrID: 1, Title: "A"}}}
 			mapCache := mapping.Cache{Records: []mapping.Record{{AniListID: 154587, TvdbID: 123}}}
 
-			handled, healthy := s.handlePreCompareGate(context.Background(), &st, snap, &mapCache, []seadex.Entry{{AniListID: 154587}}, nil, nil, nil)
+			handled, healthy := s.handlePreCompareGate(context.Background(), &st, snap, &mapCache, []seadex.Entry{{AniListID: 154587}}, cycleOutcomes{})
 			if !handled || !healthy {
 				t.Errorf("handlePreCompareGate = (%v, %v), want (true, true)", handled, healthy)
 			}
@@ -707,7 +697,7 @@ func TestHandlePreCompareGateShrunkWalkWithSeaDexOutageWarnsFeedKept(t *testing.
 	snap := library.Snapshot{Items: []library.Item{{ArrID: 1, Title: "A"}}}
 	mapCache := mapping.Cache{}
 
-	handled, healthy := s.handlePreCompareGate(context.Background(), &st, snap, &mapCache, nil, nil, nil, errors.New("seadex down"))
+	handled, healthy := s.handlePreCompareGate(context.Background(), &st, snap, &mapCache, nil, cycleOutcomes{seadex: errors.New("seadex down")})
 	if !handled || !healthy {
 		t.Errorf("handlePreCompareGate = (%v, %v), want (true, true)", handled, healthy)
 	}
@@ -720,8 +710,8 @@ func TestHandlePreCompareGateShrunkWalkWithSeaDexOutageWarnsFeedKept(t *testing.
 	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "library-shrunk" {
 		t.Errorf("degraded reasons = %v, want [library-shrunk]", reasons)
 	}
-	if feed.calls != 0 {
-		t.Errorf("feed Rebuild calls = %d, want 0 (nothing to rebuild from)", feed.calls)
+	if kept, ok := recordAttr(recorder, "seadex fetch failed; skipping comparison, findings preserved", "feed_kept"); !ok || kept != "true" {
+		t.Errorf("seadex-failure WARN feed_kept attr = %q (found=%t), want \"true\" (the configured feed kept its previous snapshot through the outage)", kept, ok)
 	}
 }
 
@@ -843,7 +833,7 @@ func TestHandlePreCompareGateSeaDexEscalatesBehindWinningMappingGate(t *testing.
 	mapCache := mapping.Cache{}
 
 	handled, healthy := s.handlePreCompareGate(context.Background(), &st, library.Snapshot{}, &mapCache, nil,
-		nil, errors.New("fribb down"), errors.New("seadex down"))
+		cycleOutcomes{mapping: errors.New("fribb down"), seadex: errors.New("seadex down")})
 	if !handled || !healthy {
 		t.Errorf("handlePreCompareGate = (%v, %v), want (true, true)", handled, healthy)
 	}
@@ -1311,7 +1301,7 @@ func TestCycleStaleMapStillComparesAndRebuildsFeed(t *testing.T) {
 		Logger:       logger,
 		Store:        store,
 		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
-		Mapping:      mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		Mapping:      unreachableMapLoader(t, scoutTestLogger()),
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
 		Comparer:     compare.NewComparer(compare.Config{}),
@@ -1485,14 +1475,10 @@ func TestCycleDegradedEarlyReturnsEmitCycleDegraded(t *testing.T) {
 			wantReason: "mapping-unusable",
 			deps: func(t *testing.T, logger *slog.Logger) *Deps {
 				t.Helper()
-				mapSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-					_, _ = w.Write([]byte("[]"))
-				}))
-				t.Cleanup(mapSrv.Close)
 				return &Deps{
 					Store:   &fakeStore{},
 					Library: library.NewWalker(&library.Config{Sonarr: sonarrOK(), Logger: scoutTestLogger()}),
-					Mapping: mapping.NewLoader(mapSrv.Client(), mapSrv.URL, filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+					Mapping: emptyRecordsMapLoader(t, scoutTestLogger()),
 					SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 154587}}},
 					Logger:  logger,
 				}
@@ -1802,12 +1788,12 @@ func TestCycleCompletionLineCarriesAniListCycleDeltas(t *testing.T) {
 		},
 	}
 	var statsCalls int
-	stats := func() (int64, int64) {
+	stats := func() AniListStats {
 		statsCalls++
 		if statsCalls == 1 {
-			return 10, 1 // the cycle-start snapshot
+			return AniListStats{Calls: 10, RateLimitWaits: 1} // the cycle-start snapshot
 		}
-		return 60, 3 // the completion-line snapshot
+		return AniListStats{Calls: 60, RateLimitWaits: 3} // the completion-line snapshot
 	}
 	s := New(&Deps{
 		Logger:       logger,
@@ -2097,7 +2083,7 @@ func TestCycleAniListDegradedWinsMappingStaleCompletionLine(t *testing.T) {
 		Logger:   logger,
 		Store:    store,
 		Library:  library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
-		Mapping:  mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		Mapping:  unreachableMapLoader(t, scoutTestLogger()),
 		SeaDex:   &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
 		Matcher:  match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
 		Comparer: compare.NewComparer(compare.Config{}),
@@ -2183,7 +2169,7 @@ func TestHandlePreCompareGateShrunkWalkSavePersistsSeaDexStreakReset(t *testing.
 	// models the successful fetch whose reset must ride the shrink save.
 	snap := library.Snapshot{Items: []library.Item{{ArrID: 1, Title: "A"}}}
 
-	handled, healthy := s.handlePreCompareGate(context.Background(), &st, snap, &mapping.Cache{}, []seadex.Entry{{AniListID: 1}}, nil, nil, nil)
+	handled, healthy := s.handlePreCompareGate(context.Background(), &st, snap, &mapping.Cache{}, []seadex.Entry{{AniListID: 1}}, cycleOutcomes{})
 	if !handled || !healthy {
 		t.Errorf("handlePreCompareGate = (%v, %v), want (true, true)", handled, healthy)
 	}

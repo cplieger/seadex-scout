@@ -30,8 +30,10 @@ const (
 	authFailRefill = 6 * time.Second
 	// maxConcurrentQueries bounds simultaneous expensive queries (queryGate).
 	// The worst-case footprint of ONE in-flight search is roughly one
-	// upstreamMaxBytes body per upstream plus the render builder - about 24 MiB
-	// at two upstreams - so four leaves the 256 MiB container ample headroom for
+	// upstreamMaxBytes body plus the render builder - about 16 MiB, since a
+	// scoped request queries exactly one upstream (fetchRaw takes
+	// upstreamForScope, and serve rejects an unscoped request) - so four
+	// leaves the 256 MiB container ample headroom for
 	// the compare loop that shares the process, while sitting far above what the
 	// arrs actually ask for: Sonarr and Radarr search a season at a time, the
 	// per-episode barrage is skipped entirely (servesQuery), and real Torznab
@@ -39,17 +41,34 @@ const (
 	// rate limit - authFailureLimiter bounds bad-key FLOODS, this bounds the
 	// memory a legitimate burst can hold at once.
 	maxConcurrentQueries = 4
-	// writeTimeout bounds a stalled response consumer. It is derived from
-	// the complete bounded Prowlarr retry budget - upstreamMaxAttempts
-	// full-timeout attempts plus the capped Retry-After waits between them -
-	// with a one-minute render margin, so no legitimate search can hit it
-	// while a client that stops reading cannot hold the connection, handler
-	// goroutine, and rendered response indefinitely. Deriving it from the
-	// budget's own constants keeps the deadline valid when the retry policy
-	// or the per-attempt timeout changes. (Evaluates to 6 minutes today.)
-	writeTimeout = upstreamMaxAttempts*UpstreamAttemptTimeout +
-		(upstreamMaxAttempts-1)*httpx.RetryAfterCap + time.Minute
+	// maxConcurrentFeeds bounds simultaneous synthesized-RSS renders (feedGate),
+	// separately from the search bound. An empty-query RSS check touches no
+	// upstream: it reads the already-loaded snapshot and renders it, holding at
+	// most maxRenderedFeedBytes of builder and no Prowlarr body. Sharing the
+	// search pool let a stalled Prowlarr starve it - one search holds its slot
+	// for the whole bounded retry budget writeTimeout is derived from, so four
+	// slow searches answered every RSS check busy even though the RSS path needs
+	// nothing from Prowlarr. Two renders add at most ~16 MiB on top of the search
+	// bound, and an RSS waiter only ever queues behind other sub-millisecond
+	// renders, so queryGateWait always clears.
+	maxConcurrentFeeds = 2
 )
+
+// writeTimeout bounds a stalled response consumer. net/http arms it when the
+// request headers are read, so it must cover EVERYTHING the handler can spend
+// before the body is written: the admission wait for a concurrency slot
+// (queryGateWait), then the complete bounded Prowlarr retry budget -
+// upstreamMaxAttempts full-timeout attempts plus the capped Retry-After waits
+// between them - plus a one-minute render margin. Omitting the admission wait
+// understated the bound, so a legitimate search that queued for a slot could
+// have its rendered feed cut mid-write with the only signal a Debug line
+// blaming the client. Deriving it from the budget's own constants keeps the
+// deadline valid when the retry policy or the per-attempt timeout changes.
+// (Evaluates to 6m5s today.) A var because queryGateWait is one; it is
+// evaluated once at init, so a test shortening queryGateWait does not shrink
+// the deadline.
+var writeTimeout = queryGateWait + upstreamMaxAttempts*UpstreamAttemptTimeout +
+	(upstreamMaxAttempts-1)*httpx.RetryAfterCap + time.Minute
 
 // queryGateWait is how long an over-limit query waits for a slot before the
 // feed answers busy. Long enough to absorb a burst of near-simultaneous
@@ -83,7 +102,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	// daemon path, but any alternate construction of the exported Indexer must
 	// never bind and serve the feed unauthenticated - the AnimeBytes RSS feed
 	// embeds ab_passkey in its download links.
-	if ix.cfg.APIKey == "" {
+	if ix.apiKey == "" {
 		return errors.New("indexer: indexer.feed_api_key is empty; refusing to serve the Torznab feed unauthenticated")
 	}
 	// Bind up front so a port-in-use error surfaces synchronously here and is
@@ -201,10 +220,10 @@ func (ix *Indexer) handler() http.Handler {
 //     the wrong wire shape for this XML endpoint. It sits inside Logging so
 //     a recovered panic logs as its 500.
 //   - SecurityHeaders: the innermost baseline (nosniff, X-Frame-Options:
-//     DENY, Referrer-Policy), set before the handler runs so every
-//     response - including a recovered panic's 500 - carries it. Defense
-//     in depth for the credential-bearing /ab feed opened in a browser;
-//     the arrs ignore all three headers.
+//     DENY, Referrer-Policy, Content-Security-Policy), set before the handler
+//     runs so every response - including a recovered panic's 500 - carries
+//     it. Defense in depth for the credential-bearing /ab feed opened in a
+//     browser; the arrs ignore all of them.
 func (ix *Indexer) chain() http.Handler {
 	return webhttp.Chain(ix.handler(),
 		ix.authFailureLimiter(),
@@ -213,7 +232,11 @@ func (ix *Indexer) chain() http.Handler {
 			webhttp.WithRecoverLogger(ix.log),
 			webhttp.WithRecoverResponder(torznabErrorResponder),
 		),
-		webhttp.SecurityHeaders(),
+		// default-src 'none' is the whole policy this endpoint needs: every
+		// response is a self-contained XML or plain-text document with no
+		// subresources, so an inert document is the correct browser reading of
+		// the credential-bearing /ab feed. The arrs ignore the header.
+		webhttp.SecurityHeaders(webhttp.WithCSP("default-src 'none'")),
 	)
 }
 
@@ -238,7 +261,7 @@ func (ix *Indexer) chain() http.Handler {
 func (ix *Indexer) authFailureLimiter() webhttp.Middleware {
 	return webhttp.RateLimiter(authFailBurst, authFailRefill,
 		webhttp.WithRateLimitWhen(func(r *http.Request) bool {
-			return ix.cfg.APIKey != "" && !ix.verifyKey.Verify(r.URL.Query().Get("apikey"))
+			return ix.apiKey != "" && !ix.verifyKey.Verify(r.URL.Query().Get("apikey"))
 		}),
 		webhttp.WithRateLimitError("too_many_auth_failures", "too many failed apikey attempts"),
 	)
@@ -277,7 +300,7 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 // authorizeRequest applies serve's authentication policy and reports whether
 // the request may proceed; on rejection the response has been written.
 func (ix *Indexer) authorizeRequest(w http.ResponseWriter, r *http.Request, q url.Values) bool {
-	if ix.cfg.APIKey == "" {
+	if ix.apiKey == "" {
 		// Fail closed at the handler too: Run already refuses to bind with an
 		// empty feed_api_key, so this branch is unreachable in production, but
 		// a second independent guard keeps any future construction path from
@@ -341,7 +364,7 @@ func (ix *Indexer) serveCaps(w http.ResponseWriter, q url.Values, scope string) 
 // README's off switch) is not nudged: it falls through to the empty feed
 // (see serveQuery), the same shape as a tracker with no data.
 func (ix *Indexer) rejectMissingABPasskey(w http.ResponseWriter, q url.Values, scope string) bool {
-	if scope != upstreamAB || ix.cfg.ABTorznabURL == "" || ix.cfg.ABPasskey != "" || strings.TrimSpace(q.Get("q")) != "" {
+	if scope != upstreamAB || !ix.enablement.enabled(upstreamAB) || ix.enablement.ABPasskey != "" || strings.TrimSpace(q.Get("q")) != "" {
 		return false
 	}
 	ix.rejectTorznab(w, scope, "ab passkey not configured", errCodeIncorrectCredentials,
@@ -349,14 +372,14 @@ func (ix *Indexer) rejectMissingABPasskey(w http.ResponseWriter, q url.Values, s
 	return true
 }
 
-// acquireQuery reserves one of the maxConcurrentQueries expensive-work slots,
-// waiting at most queryGateWait for one. It reports false when the wait expired
-// (the caller answers busy) or the request's own context ended first (the client
-// gave up; the caller returns without writing, since there is nobody to write
-// to). The matching releaseQuery must run on every acquired path.
-func (ix *Indexer) acquireQuery(ctx context.Context) (acquired, clientGone bool) {
+// acquireQuery reserves one of gate's expensive-work slots, waiting at most
+// queryGateWait for one. It reports false when the wait expired (the caller
+// answers busy) or the request's own context ended first (the client gave up;
+// the caller returns without writing, since there is nobody to write to). The
+// matching releaseQuery must run on every acquired path, on the SAME gate.
+func (ix *Indexer) acquireQuery(ctx context.Context, gate chan struct{}) (acquired, clientGone bool) {
 	select {
-	case ix.queryGate <- struct{}{}:
+	case gate <- struct{}{}:
 		return true, false
 	default:
 	}
@@ -364,7 +387,7 @@ func (ix *Indexer) acquireQuery(ctx context.Context) (acquired, clientGone bool)
 	timer := time.NewTimer(queryGateWait)
 	defer timer.Stop()
 	select {
-	case ix.queryGate <- struct{}{}:
+	case gate <- struct{}{}:
 		return true, false
 	case <-ctx.Done():
 		return false, true
@@ -373,8 +396,8 @@ func (ix *Indexer) acquireQuery(ctx context.Context) (acquired, clientGone bool)
 	}
 }
 
-// releaseQuery returns a slot reserved by acquireQuery.
-func (ix *Indexer) releaseQuery() { <-ix.queryGate }
+// releaseQuery returns a slot reserved by acquireQuery on the same gate.
+func (ix *Indexer) releaseQuery(gate chan struct{}) { <-gate }
 
 // serveQuery runs the tracker query and renders the feed, translating the
 // two local-fault outcomes (snapshot unavailable, total upstream failure)
@@ -383,49 +406,58 @@ func (ix *Indexer) releaseQuery() { <-ix.queryGate }
 // The whole expensive body runs under the concurrency gate (see queryGate): the
 // upstream fetch, the decode, and the render are what a burst could stack into
 // an OOM, so the slot is held across all three and released before the request
-// returns.
+// returns. A request servesQuery declines is exempt - it performs no snapshot
+// read and no upstream call, so it cannot contribute to the footprint the gate
+// bounds.
 func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Values, scope string) {
-	acquired, clientGone := ix.acquireQuery(r.Context())
-	if clientGone {
-		// The arr hung up while waiting; writing a response would only log a
-		// failed write. The access line still records the request.
-		ix.log.Debug("indexer request abandoned while waiting for a query slot", "scope", scope)
-		return
+	// Only a request that will actually do the expensive work takes a slot.
+	// query answers a per-episode query with nothing WITHOUT touching the
+	// snapshot or an upstream (servesQuery), so gating it would answer
+	// Sonarr's per-episode barrage - the highest-volume request class, one
+	// query per episode per scene-title alias - with a Torznab <error>
+	// during a burst instead of the cheap empty feed the skip promises, and
+	// an <error> is a FAILED search to the arr (it counts toward the
+	// indexer-failure escalation that disables the indexer, RSS included).
+	if servesQuery(q) {
+		// A synthesized-RSS check reads only local state, so it takes its own
+		// pool: it must stay servable while every search slot is parked in a
+		// bounded Prowlarr retry tree.
+		gate, limit := ix.queryGate, maxConcurrentQueries
+		if isFeedRequest(q) {
+			gate, limit = ix.feedGate, maxConcurrentFeeds
+		}
+		acquired, clientGone := ix.acquireQuery(r.Context(), gate)
+		if clientGone {
+			// The arr hung up while waiting; writing a response would only log a
+			// failed write. The access line still records the request.
+			ix.log.Debug("indexer request abandoned while waiting for a query slot", "scope", scope)
+			return
+		}
+		if !acquired {
+			// Busy, not broken: a Torznab <error> (the endpoint's own wire shape,
+			// unlike webhttp's JSON 429 envelope) plus a Retry-After so the arr
+			// backs off rather than treating the feed as failed. WARN, not ERROR:
+			// the condition clears itself as in-flight searches finish, which is
+			// exactly the transient/self-healing side of the level rule.
+			w.Header().Set("Retry-After", strconv.Itoa(int(queryGateWait.Seconds())))
+			ix.log.Warn("indexer at its concurrent-query limit; request answered busy",
+				"scope", scope, "limit", limit, "waited", queryGateWait)
+			ix.rejectTorznab(w, scope, "concurrent query limit reached", errCodeUnknown,
+				"too many concurrent searches in flight; retry shortly")
+			return
+		}
+		defer ix.releaseQuery(gate)
 	}
-	if !acquired {
-		// Busy, not broken: a Torznab <error> (the endpoint's own wire shape,
-		// unlike webhttp's JSON 429 envelope) plus a Retry-After so the arr
-		// backs off rather than treating the feed as failed. WARN, not ERROR:
-		// the condition clears itself as in-flight searches finish, which is
-		// exactly the transient/self-healing side of the level rule.
-		w.Header().Set("Retry-After", strconv.Itoa(int(queryGateWait.Seconds())))
-		ix.log.Warn("indexer at its concurrent-query limit; request answered busy",
-			"scope", scope, "limit", maxConcurrentQueries, "waited", queryGateWait)
-		ix.rejectTorznab(w, scope, "concurrent query limit reached", errCodeUnknown,
-			"too many concurrent searches in flight; retry shortly")
-		return
-	}
-	defer ix.releaseQuery()
 
-	items, stats := ix.query(r.Context(), q, scope)
-	// A snapshot-unavailable state (the persisted feed failed to load before
-	// any snapshot was installed - see snapFailed) is a local fault, not an
-	// empty catalogue: an empty 200 feed would read as a clean no-match to
-	// the arr, silently recording the fault as a successful search. Render a
-	// Torznab <error>, exactly like an unavailable Prowlarr dependency.
-	if stats.snapshotUnavailable {
-		ix.rejectTorznab(w, scope, "feed snapshot unavailable", errCodeUnknown,
-			"feed snapshot unavailable: the persisted SeaDex feed failed to load; results unavailable until a snapshot loads")
-		return
-	}
-	// A total upstream failure (every queried Prowlarr upstream failed) is
-	// reported as a Torznab <error>, not an empty 200 feed: an empty feed reads
-	// as a clean "no SeaDex match" to the arr, which would silently record a
-	// Prowlarr outage as a successful no-results search. A partial failure (one
-	// of several upstreams answered) keeps the degraded-but-successful feed.
-	if stats.upstreamFailed {
-		ix.rejectTorznab(w, scope, "upstream query failed", errCodeUnknown,
-			"upstream Prowlarr query failed; search results unavailable")
+	items, stats, fault := ix.query(r.Context(), q, scope)
+	// A request query could not answer with a feed at all (the persisted
+	// snapshot failed to load before any snapshot was installed, or every
+	// queried Prowlarr upstream failed) arrives as a fault carrying its own
+	// Torznab error text: an empty 200 feed would read as a clean no-match to
+	// the arr, silently recording the fault as a successful search. One arm
+	// here means a new fault cannot be forgotten into a false-empty feed.
+	if fault != nil {
+		ix.rejectTorznab(w, scope, fault.summary, fault.code, fault.detail)
 		return
 	}
 	doc, rendered := renderFeed(items)
@@ -452,8 +484,10 @@ func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Valu
 	// One INFO line per request: the incoming Torznab params plus a result
 	// summary. `answered` is false when the feed deliberately skips a per-episode
 	// query (so an empty result reads as a skip, not a no-match); `feed` is true
-	// for an empty-q RSS check served from the synthesized SeaDex feed; `upstream`
-	// is how many upstream results survived the Prowlarr fetch (post origin-filter) for a search,
+	// for an empty-q RSS check served from the synthesized SeaDex feed;
+	// `upstream_fetched` is how many results the upstream page carried BEFORE the
+	// Prowlarr fetch's download-URL origin filter and `upstream` how many survived
+	// it (a gap between them is that filter dropping items) for a search,
 	// `curated` how many items survived curation/synthesis (pre cat-filter/paging), `returned`
 	// the count actually EMITTED into the rendered document (the render byte
 	// budget can truncate below the post-category-filter count).
@@ -466,6 +500,7 @@ func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Valu
 		"cat", logParam(q.Get("cat")),
 		"answered", stats.answered,
 		"feed", stats.feed,
+		"upstream_fetched", stats.upstreamFetched,
 		"upstream", stats.upstream,
 		"curated", stats.curated,
 		"returned", rendered)

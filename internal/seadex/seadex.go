@@ -21,6 +21,7 @@ import (
 
 	"github.com/cplieger/httpx/v4"
 	"github.com/cplieger/jsonx/bounded"
+	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/degradation"
 	"github.com/cplieger/seadex-scout/internal/trackerlink"
@@ -74,9 +75,24 @@ const (
 	// a created value a ~24-byte ASCII timestamp, so anything longer is upstream
 	// misbehavior and must not be echoed back into a request URL.
 	maxCursorValueBytes = 64
+	// maxLoggedCursorBytes bounds a REJECTED cursor value before it is quoted
+	// into an error that internal/scout logs as a slog attribute: the value is
+	// untrusted upstream text bounded only by maxPageBytes, and the app's one
+	// policy for that (runesafe, cf. internal/mapping's maxLoggedErrorBytes)
+	// caps it so a hostile page cannot balloon a Loki record. Sized just over
+	// maxCursorValueBytes so an honest-but-rejected value stays fully readable.
+	maxLoggedCursorBytes = 128
 	// maxAttempts / baseDelay bound the per-page retry.
 	maxAttempts = 3
 	baseDelay   = time.Second
+	// maxFetchDuration bounds the WHOLE walk, not just one page. The per-attempt
+	// bound is the client's 90s timeout (build.go seadexTimeout), so maxPages
+	// chunks x maxAttempts retries is a multi-hour worst case with no deadline of
+	// its own. One hour is comfortably above the honest catalogue's absolute
+	// ceiling (~6 chunks x (3 x 90s + backoff) if every attempt times out) and
+	// below the deployed poll_interval, so a pathological upstream degrades one
+	// cycle instead of spanning the next tick.
+	maxFetchDuration = time.Hour
 )
 
 // Cardinality caps on one decoded page, enforced by decodePage DURING the
@@ -128,6 +144,18 @@ const (
 	maxTotalElements = 500_000
 )
 
+// Compile-time guard on the relation fetchPage's cumulative-vs-per-page
+// classification infers from: each per-page bound must stay at or below its
+// fetch-wide budget, so a limit below the full bound can only mean the
+// CUMULATIVE cap reduced it. Raising a per-page bound past its budget would
+// make min() reduce even page 1's limit and misreport the first oversized
+// page as fetch-wide exhaustion; the negative difference fails the build
+// instead of shipping a misclassification.
+const (
+	_ = uint(maxTotalBytes - maxPageBytes)
+	_ = uint(maxTotalElements - maxPageElements)
+)
+
 // budgetWarnNumerator/budgetWarnDenominator express the fraction of a
 // cumulative budget whose consumption is worth one WARN per fetch: the caps
 // exist for hostile input, so an honest catalogue approaching one means the
@@ -141,7 +169,8 @@ const (
 // exceeded. It is raised at the wire layer - fetchPage caps each download at
 // the REMAINING budget, so an over-budget page is rejected before decode -
 // which preserves the pre-budget error contract for the same condition.
-var errCumulativeBytes = fmt.Errorf("seadex: cumulative page bytes exceeded cap %d (upstream misbehaving); "+
+var errCumulativeBytes = fmt.Errorf("seadex: cumulative page bytes exceeded cap %d "+
+	"(upstream misbehaving, or the catalogue outgrew the cap - raise maxTotalBytes); "+
 	"refusing to compare against a truncated view", maxTotalBytes)
 
 // errCumulativeElements reports the fetch-wide decoded-element budget
@@ -149,9 +178,10 @@ var errCumulativeBytes = fmt.Errorf("seadex: cumulative page bytes exceeded cap 
 // at the decode layer - fetchPage bounds each page's decode at the REMAINING
 // element budget, so an over-budget page is rejected mid-decode, before the
 // excess elements are materialized or retained.
-var errCumulativeElements = fmt.Errorf("seadex: cumulative decoded elements exceeded cap %d "+
-	"(upstream misbehaving, or the catalogue outgrew the cap - raise maxTotalElements); "+
-	"refusing to compare against a truncated view", maxTotalElements)
+var errCumulativeElements = fmt.Errorf("seadex: decoded elements exceeded the remaining fetch-wide budget "+
+	"(cap %d; upstream misbehaving, or the catalogue outgrew the cap - raise maxTotalElements, "+
+	"and maxPageElements too if one page alone carries more than %d elements); "+
+	"refusing to compare against a truncated view", maxTotalElements, maxPageElements)
 
 // fetchPage's classification of the aggregate element budget rides
 // jsonx/bounded's ErrElementBudget sentinel: the full per-page bound is a
@@ -384,11 +414,15 @@ func advanceCursor(items []pbEntry, prev cursor) (cursor, error) {
 	if next.created == "" || next.id == "" {
 		return prev, fmt.Errorf("seadex: page of %d records carries no usable keyset cursor "+
 			"(created %q, id %q); refusing to compare against a truncated view",
-			len(items), last.Created, last.ID)
+			len(items),
+			runesafe.SanitizeSingleLineBounded(last.Created, maxLoggedCursorBytes),
+			runesafe.SanitizeSingleLineBounded(last.ID, maxLoggedCursorBytes))
 	}
 	if !filterSafe(next.created) || !filterSafe(next.id) {
 		return prev, fmt.Errorf("seadex: keyset cursor rejected (created %q, id %q); "+
-			"refusing to compare against a truncated view", next.created, next.id)
+			"refusing to compare against a truncated view",
+			runesafe.SanitizeSingleLineBounded(next.created, maxLoggedCursorBytes),
+			runesafe.SanitizeSingleLineBounded(next.id, maxLoggedCursorBytes))
 	}
 	if next == prev {
 		return prev, fmt.Errorf("seadex: keyset cursor did not advance past (created %q, id %q) "+
@@ -417,6 +451,8 @@ func advanceCursor(items []pbEntry, prev cursor) (cursor, error) {
 // itself says entries remain and completing would falsely resolve findings
 // against a truncated view.
 func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
+	ctx, cancel := context.WithTimeout(ctx, maxFetchDuration)
+	defer cancel()
 	var all []Entry
 	var tot fetchTotals
 	var cur cursor
@@ -432,6 +468,9 @@ func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 		if err != nil {
 			return nil, err
 		}
+		c.log.Debug("seadex chunk fetched", "page", page, "entries", len(all),
+			"reported_total", tot.reportedTotal, "done", done,
+			"bytes", tot.bytes, "elements", tot.elements)
 		if done {
 			return c.finishFetch(all, tot)
 		}
@@ -443,6 +482,9 @@ func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 // finishFetch validates a completed catalogue before returning it: zero
 // collected entries is an error (SeaDex is never legitimately empty for this
 // app's use, whether the API reported zero totals or served empty pages), a
+// completed catalogue whose responses never reported a totalItems at all is an
+// error (nothing vouches for the walk's completeness, the same rule
+// chunkComplete's empty-follow-up arm applies), a
 // collected count below HALF the API's reported totalItems is an error (the
 // app-wide shrink policy - no credible mid-fetch delete loses half a
 // catalogue, and this was the last path accepting a truncated view), and a
@@ -470,6 +512,10 @@ func (c *Client) finishFetch(all []Entry, tot fetchTotals) ([]Entry, error) {
 		return nil, fmt.Errorf("seadex: returned an empty catalogue (totalItems=%d); "+
 			"SeaDex is never legitimately empty, refusing to compare against it", tot.reportedTotal)
 	}
+	if tot.reportedTotal <= 0 {
+		return nil, fmt.Errorf("seadex: catalogue of %d entries completed with no reported total to vouch for "+
+			"completeness (upstream misbehaving); refusing to compare against a truncated view", len(all))
+	}
 	if tot.reportedTotal > tot.reportedPages*perPage {
 		return nil, fmt.Errorf("seadex: reported totalItems %d cannot fit the reported %d pages of %d (upstream misbehaving); "+
 			"refusing to compare against a truncated view", tot.reportedTotal, tot.reportedPages, perPage)
@@ -491,7 +537,10 @@ func (c *Client) finishFetch(all []Entry, tot fetchTotals) ([]Entry, error) {
 		return nil, fmt.Errorf("seadex: collected %d of %d reported entries (below half); "+
 			"refusing to compare against a truncated view", len(all), tot.reportedTotal)
 	}
-	if len(all) != tot.reportedTotal {
+	// A response carrying no totalItems (omitted decodes to zero) stated no count
+	// to disagree with, so comparing against it would fire the alert-stable
+	// mismatch WARN with want=0 on every cycle.
+	if tot.reportedTotal > 0 && len(all) != tot.reportedTotal {
 		c.log.Warn("seadex catalogue count mismatch", "got", len(all), "want", tot.reportedTotal)
 	}
 	if tot.unparsedTimes > 0 {

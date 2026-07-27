@@ -108,3 +108,66 @@ func TestPrefetchEmptyRecordLocalBatchFallsBackPerID(t *testing.T) {
 		t.Errorf("matches = %+v, want one title match via the per-id fallback", res.Matches)
 	}
 }
+
+// scopedBatchRecordAniList models a CHUNK-SCOPED record-local batch failure:
+// FetchMany answers id 11, names id 22's chunk untrustworthy through
+// *anilist.BatchRecordError, and leaves id 33 unanswered by a chunk that
+// completed cleanly.
+type scopedBatchRecordAniList struct {
+	fetchedIDs []int
+	batchCalls int
+}
+
+func (s *scopedBatchRecordAniList) Fetch(_ context.Context, id int) (anilist.Media, error) {
+	s.fetchedIDs = append(s.fetchedIDs, id)
+	return anilist.Media{}, anilist.ErrNotFound
+}
+
+func (s *scopedBatchRecordAniList) FetchMany(_ context.Context, _ []int) (map[int]anilist.Media, error) {
+	s.batchCalls++
+	return map[int]anilist.Media{11: {Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020}},
+		&anilist.BatchRecordError{
+			Err:           fmt.Errorf("%w: media record 0 missing id", anilist.ErrBatchRecord),
+			UnverifiedIDs: []int{22},
+		}
+}
+
+// TestPrefetchScopesNegativeMemoToVerifiedChunks pins the chunk-scoping half of
+// the prefetch negative-memo rule (unverifiedBatchIDs): a *BatchRecordError
+// names only the ids whose chunk is untrustworthy, so those stay uncached for
+// the per-id retry while every OTHER requested-but-absent id was definitively
+// answered by a clean chunk and IS memoized negatively. Both directions matter:
+// memoizing an unverified id would cache a malformed record as not-found for a
+// whole TTL, and refusing to memoize the verified ones dumps the entire pending
+// set into rate-limited per-id fetches.
+func TestPrefetchScopesNegativeMemoToVerifiedChunks(t *testing.T) {
+	idx := mapping.NewIndex([]mapping.Record{
+		{AniListID: 11, Type: "MOVIE"}, // id-less: pending, answered by the batch
+		{AniListID: 22, Type: "MOVIE"}, // id-less: pending, its chunk is unverified
+		{AniListID: 33, Type: "MOVIE"}, // id-less: pending, absent from a CLEAN chunk
+	})
+	fake := &scopedBatchRecordAniList{}
+
+	res := NewMatcher(fake, nil).Match(context.Background(),
+		[]seadex.Entry{{AniListID: 11}, {AniListID: 22}, {AniListID: 33}},
+		&library.Snapshot{}, idx, Memo{})
+
+	if fake.batchCalls != 1 {
+		t.Errorf("batch calls = %d, want 1", fake.batchCalls)
+	}
+	if len(fake.fetchedIDs) != 1 || fake.fetchedIDs[0] != 22 {
+		t.Errorf("per-id Fetch ids = %v, want exactly [22]: only the untrustworthy chunk's id may be retried", fake.fetchedIDs)
+	}
+	if ent, ok := res.Memo.Entries[11]; !ok || ent.NotFound {
+		t.Errorf("memo[11] = %+v (present=%v), want the batch-answered positive", ent, ok)
+	}
+	if ent, ok := res.Memo.Entries[33]; !ok || !ent.NotFound {
+		t.Errorf("memo[33] = %+v (present=%v), want a negative: a clean chunk definitively answered it", ent, ok)
+	}
+	if ent, ok := res.Memo.Entries[22]; !ok || !ent.NotFound {
+		t.Errorf("memo[22] = %+v (present=%v), want the per-id retry's definitive not-found", ent, ok)
+	}
+	if res.Degraded {
+		t.Error("Degraded = true, want false: every id was definitively answered")
+	}
+}

@@ -12,7 +12,6 @@ import (
 
 	"github.com/cplieger/httpx/v4"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
-	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/urlform"
 )
 
@@ -33,6 +32,12 @@ const (
 	// decode caps cannot: encoding/xml materializes a start element's whole
 	// attribute slice per token at ~10x per-attr overhead (CWE-400).
 	upstreamMaxBytes = 8 << 20
+	// minEmbeddedSecretLen is the length from which a query VALUE on the
+	// configured feed URL is treated as a credential by upstreamSecrets. It
+	// matches the floor config already applies to indexer.feed_api_key, so a
+	// structural value ("?indexer=1") is never substituted out of a
+	// diagnostic while a real 32-hex Prowlarr key always is.
+	minEmbeddedSecretLen = 16
 )
 
 // --- Upstream search and retry classification ---
@@ -234,6 +239,52 @@ func retryAfterHint(err error) time.Duration {
 	return 0
 }
 
+// upstreamSecrets returns every credential the app TRANSMITS to this upstream
+// and must therefore keep out of an error message or log line (CWE-532): the
+// X-Api-Key header value, plus any credential embedded in the CONFIGURED feed
+// URL. config.validateHTTPURL deliberately accepts both embedded shapes
+// (urlEmbedsCredential only WARNs), and both reach the upstream: Go's
+// http.Client turns userinfo into an Authorization: Basic header on the
+// outgoing request, and a query value rides the request URL. A compromised or
+// spoofed Prowlarr can therefore reflect either one back inside an <error>
+// document or a decode-error message, so both belong in the same
+// exact-substring redaction the header key already gets.
+func (u *upstream) upstreamSecrets() []string {
+	secrets := []string{u.apiKey}
+	parsed, err := url.Parse(u.feed)
+	if err != nil {
+		return secrets
+	}
+	if parsed.User != nil {
+		// Userinfo is a credential POSITION by construction; length is
+		// irrelevant there, and mangling an unlucky diagnostic is the safe
+		// direction.
+		secrets = append(secrets, parsed.User.Username())
+		if pw, ok := parsed.User.Password(); ok {
+			secrets = append(secrets, pw)
+		}
+	}
+	for _, values := range parsed.Query() {
+		for _, v := range values {
+			if len(v) >= minEmbeddedSecretLen {
+				secrets = append(secrets, v)
+			}
+		}
+	}
+	return secrets
+}
+
+// redactSecrets removes every credential this upstream carries from untrusted
+// upstream text. It runs on the error path only, and BEFORE the text is
+// bounded, so each exact-substring replacement always sees the intact
+// credential. An empty secret is a no-op (httpx.RedactSecretString).
+func (u *upstream) redactSecrets(s string) string {
+	for _, secret := range u.upstreamSecrets() {
+		s = httpx.RedactSecretString(s, secret)
+	}
+	return s
+}
+
 // classifyParseError maps a parseTorznab failure onto the retry taxonomy.
 // A syntactically valid Torznab <error> document (upstreamDocError:
 // bad credentials, a named indexer failure) is a deliberate
@@ -259,8 +310,8 @@ func (u *upstream) classifyParseError(err error) error {
 		// emit boundary - so the exact-substring replacement always sees
 		// the intact key.
 		terminal := terminalTorznabCode(docErr.codeNum)
-		docErr.code = httpx.RedactSecretString(docErr.code, u.apiKey)
-		docErr.description = httpx.RedactSecretString(docErr.description, u.apiKey)
+		docErr.code = u.redactSecrets(docErr.code)
+		docErr.description = u.redactSecrets(docErr.description)
 		if terminal {
 			return docErr
 		}
@@ -278,7 +329,7 @@ func (u *upstream) classifyParseError(err error) error {
 	// then bound the text, before the error reaches httpx.Do's retry
 	// logger or fetchRaw's WARN - the same emit-boundary policy the
 	// upstreamDocError path applies.
-	msg := sanitizeUpstreamText(httpx.RedactSecretString(err.Error(), u.apiKey))
+	msg := sanitizeUpstreamText(u.redactSecrets(err.Error()))
 	return &transientUpstreamError{err: errors.New(msg), malformedBody: true}
 }
 
@@ -330,8 +381,19 @@ func (e *transientUpstreamError) RetryAfterHint() time.Duration { return e.retry
 // delivered with HTTP 200 (an upstream-scoped answer - see upstreamDocError)
 // never carry the marker.
 func malformedUpstreamBody(err error) bool {
-	tue, ok := errors.AsType[*transientUpstreamError](err)
-	return ok && tue.malformedBody
+	if tue, ok := errors.AsType[*transientUpstreamError](err); ok {
+		return tue.malformedBody
+	}
+	// GetBytes reads the body only after its status check admitted a 2xx, so
+	// an over-cap body is by construction the read failure of a SUCCESSFUL
+	// response - the same class as a garbled or over-cardinality one, and
+	// scoped to the one result set that came back too large rather than to
+	// the upstream's availability. It stays TERMINAL (no transient wrapper,
+	// so a deterministic overflow still does not burn the retry budget and
+	// the single-attempt contract is unchanged); only the harvest's
+	// show-vs-scope attribution changes.
+	_, tooLarge := errors.AsType[*httpx.ResponseTooLargeError](err)
+	return tooLarge
 }
 
 // --- Download/display URL gates ---
@@ -356,32 +418,20 @@ func (u *upstream) filterDownloadURLs(items []item) []item {
 	out := make([]item, 0, len(items))
 	dropped := 0
 	blankedDisplay := 0
+	// observedDisplay counts the display-URL fields actually INSPECTED on the
+	// surviving items. A page of items carrying neither an InfoURL nor a GUID
+	// observes nothing about the display gate, so it must not be allowed to
+	// clear displayWarned - the same reasoning the len(items) == 0 early
+	// return already applies to the page as a whole.
+	observedDisplay := 0
 	for i := range items {
 		if !sameHTTPOrigin(items[i].DownloadURL, feedURL) {
 			dropped++
 			continue
 		}
-		// The two passthrough display-URL fields are not fetch targets, but
-		// the arr renders <comments> as the item's clickable info link and a
-		// URL that parses to no tracker key skips the curation gate entirely,
-		// so a tampered upstream could attach a javascript:/data: or
-		// foreign-host link to a legitimately curated item. Blank (never
-		// drop) anything that is not a userinfo-free absolute http(s) URL on
-		// this upstream's own tracker host: a healthy Prowlarr always hands
-		// out the served tracker's canonical page URLs here. Display
-		// sanitization is independent of key extraction - a URL that fails
-		// this gate is blanked even when a tracker key could still be
-		// derived from it (e.g. a scheme-relative //host/... form), leaving
-		// such an item to match by info hash alone, which fails closed for
-		// a URL shape a healthy Prowlarr never emits.
-		if s := sanitizeDisplayURL(u.name, items[i].InfoURL); s != items[i].InfoURL {
-			blankedDisplay++
-			items[i].InfoURL = s
-		}
-		if s := sanitizeDisplayURL(u.name, items[i].GUID); s != items[i].GUID {
-			blankedDisplay++
-			items[i].GUID = s
-		}
+		observed, blanked := u.sanitizeItemDisplayURLs(&items[i])
+		observedDisplay += observed
+		blankedDisplay += blanked
 		out = append(out, items[i])
 	}
 	if len(items) == 0 {
@@ -393,17 +443,47 @@ func (u *upstream) filterDownloadURLs(items []item) []item {
 		return out
 	}
 	u.reportDroppedDownloadURLs(dropped, len(out), feedURL)
-	if len(out) > 0 {
-		// The display gate's observation set is the post-origin-filter slice,
-		// not the input page: when every item is dropped for an off-origin
-		// download URL, no InfoURL/GUID was inspected at all. Reporting a
-		// zero blanked count there would clear displayWarned and announce a
-		// recovery on the strength of a page nothing was observed on, letting
-		// a persistent display-URL fault re-arm a WARN on the next surviving
-		// bad item.
+	if observedDisplay > 0 {
+		// The display gate's observation set is the display-URL FIELDS actually
+		// inspected, not the input page and not the surviving item count: when
+		// every item is dropped for an off-origin download URL, or when the
+		// survivors carry neither an InfoURL nor a GUID, no display URL was
+		// inspected at all. Reporting a zero blanked count there would clear
+		// displayWarned and announce a recovery on the strength of a page
+		// nothing was observed on, letting a persistent display-URL fault
+		// re-arm a WARN on the next surviving bad item.
 		u.reportBlankedDisplayURLs(blankedDisplay, len(out))
 	}
 	return out
+}
+
+// sanitizeItemDisplayURLs sanitizes one surviving item's two passthrough
+// display-URL fields in place, returning how many of them were INSPECTED and
+// how many were blanked (the counts filterDownloadURLs' onset ladder reads).
+//
+// The display-URL fields are not fetch targets, but the arr renders <comments>
+// as the item's clickable info link and a URL that parses to no tracker key
+// skips the curation gate entirely, so a tampered upstream could attach a
+// javascript:/data: or foreign-host link to a legitimately curated item. Blank
+// (never drop) anything that is not a userinfo-free absolute http(s) URL on
+// this upstream's own tracker host: a healthy Prowlarr always hands out the
+// served tracker's canonical page URLs here. Display sanitization is
+// independent of key extraction - a URL that fails this gate is blanked even
+// when a tracker key could still be derived from it (e.g. a scheme-relative
+// //host/... form), leaving such an item to match by info hash alone, which
+// fails closed for a URL shape a healthy Prowlarr never emits.
+func (u *upstream) sanitizeItemDisplayURLs(it *item) (observed, blanked int) {
+	for _, field := range []*string{&it.InfoURL, &it.GUID} {
+		if *field == "" {
+			continue
+		}
+		observed++
+		if s := sanitizeDisplayURL(u.name, *field); s != *field {
+			blanked++
+			*field = s
+		}
+	}
+	return observed, blanked
 }
 
 // reportDroppedDownloadURLs logs the origin-filter outcome: the first
@@ -451,10 +531,12 @@ func isHTTPScheme(scheme string) bool {
 }
 
 // httpNoUserinfoURL parses raw and returns it when it is an absolute
-// http or https URL free of userinfo - the shared admission prefix of
-// sameHTTPOrigin (fetch targets), sanitizeDisplayURL (search-path display
-// links) and snapshotInfoURLAllowed (persisted display links). Anything
-// else returns nil, false.
+// http or https URL free of userinfo. Its one consumer is sameHTTPOrigin,
+// which gates a FETCH target and therefore stays on net/url (the parser of
+// record for what the HTTP client will dial); the two DISPLAY gates -
+// sanitizeDisplayURL here and snapshotInfoURLAllowed in reload.go - read
+// their structural facts from urlform instead, because a browser is their
+// parser of record. Anything else returns nil, false.
 func httpNoUserinfoURL(raw string) (*url.URL, bool) {
 	u, err := url.Parse(raw)
 	if err != nil || u.User != nil {
@@ -476,21 +558,6 @@ func sameHTTPOrigin(raw string, origin *url.URL) bool {
 	return strings.EqualFold(parsed.Scheme, origin.Scheme) && strings.EqualFold(parsed.Host, origin.Host)
 }
 
-// sanitizeDisplayURL returns raw when it is an absolute http(s) URL, free of
-// userinfo, whose host belongs to the scope's own tracker (release.IsNyaaHost
-// for the nyaa upstream, release.IsAnimeBytesHost for AB), else "" - the item
-// survives with the field blanked (writeItem omits an empty <comments> and
-// item.guid() falls back to InfoHash/DownloadURL). Used on the passthrough
-// display-URL fields (InfoURL, GUID) that neither the origin filter (fetch
-// targets only) nor the curation gate (key-bearing URLs only) constrains.
-// Healthy Prowlarr output carries the served tracker's canonical page URLs
-// here, so a foreign-host or userinfo-bearing link (a phishing target a
-// tampered upstream could attach to a curated item) is blanked rather than
-// rendered clickable. These url.Parse hostnames never pass through urlform
-// classification; they are safe against homograph lookalikes because the
-// Is*Host twins delegate to release.LookupTrackerByHost, which carries the
-// centralized ASCII/homograph gate (urlform.IsASCIIHost) every host-table
-// match inherits.
 // httpDisplayHost admits a raw URL as a browser-destined DISPLAY link and
 // returns its host evidence: an absolute http(s) form, free of userinfo and of
 // the smuggling shapes a browser reads differently from net/url. It is the
@@ -521,21 +588,26 @@ func httpDisplayHost(raw string) (host string, ok bool) {
 	return f.Host, true
 }
 
+// sanitizeDisplayURL returns raw when it is a display-admissible URL
+// (httpDisplayHost) whose host belongs to the scope's own tracker (scopeOfHost,
+// the single home of the host->scope mapping),
+// else "" - the item survives with the field blanked (writeItem omits an empty
+// <comments> and item.guid() falls back to InfoHash/DownloadURL). Used on the
+// passthrough display-URL fields (InfoURL, GUID) that neither the origin filter
+// (fetch targets only) nor the curation gate (key-bearing URLs only)
+// constrains. Healthy Prowlarr output carries the served tracker's canonical
+// page URLs here, so a foreign-host or userinfo-bearing link (a phishing target
+// a tampered upstream could attach to a curated item) is blanked rather than
+// rendered clickable. The host match is safe against homograph lookalikes
+// because scopeOfHost delegates to release.LookupTrackerByHost, which
+// carries the centralized ASCII/homograph gate (urlform.IsASCIIHost) every
+// host-table match inherits.
 func sanitizeDisplayURL(scope, raw string) string {
 	host, ok := httpDisplayHost(raw)
 	if !ok {
 		return ""
 	}
-	switch scope {
-	case upstreamNyaa:
-		if !release.IsNyaaHost(host) {
-			return ""
-		}
-	case upstreamAB:
-		if !release.IsAnimeBytesHost(host) {
-			return ""
-		}
-	default:
+	if scope == "" || scopeOfHost(host) != scope {
 		return ""
 	}
 	return raw

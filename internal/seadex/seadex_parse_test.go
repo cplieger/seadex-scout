@@ -113,6 +113,12 @@ func TestAdvanceCursor(t *testing.T) {
 		{name: "control byte in the cursor errors", items: []pbEntry{{ID: "b\nb", Created: prev.created}}, wantErr: true},
 		{name: "unchanged position errors", items: []pbEntry{{ID: prev.id, Created: prev.created}}, wantErr: true},
 		{name: "oversized cursor value errors", items: []pbEntry{{ID: strings.Repeat("x", maxCursorValueBytes+1), Created: prev.created}}, wantErr: true},
+		{
+			name:  "cursor value exactly at the length cap advances",
+			items: []pbEntry{{ID: strings.Repeat("x", maxCursorValueBytes), Created: "2026-01-03 00:00:00.000Z"}},
+			want:  cursor{created: "2026-01-03 00:00:00.000Z", id: strings.Repeat("x", maxCursorValueBytes)},
+		},
+		{name: "DEL byte in the cursor errors", items: []pbEntry{{ID: "b\x7fb", Created: prev.created}}, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -128,6 +134,49 @@ func TestAdvanceCursor(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Errorf("advanceCursor = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAdvanceCursorBoundsRejectedValueInDiagnostic pins the diagnostic budget on
+// the rejection arms: the cursor values they quote are untrusted upstream text
+// bounded only by maxPageBytes, and internal/scout logs the resulting error
+// verbatim as a slog attribute, so an oversized value must reach the log capped
+// and marked rather than balloon one Loki record (the app-wide runesafe policy).
+func TestAdvanceCursorBoundsRejectedValueInDiagnostic(t *testing.T) {
+	huge := strings.Repeat("x", 64<<10)
+	tests := []struct {
+		name  string
+		items []pbEntry
+	}{
+		{
+			name:  "rejected oversized id",
+			items: []pbEntry{{ID: huge, Created: "2026-01-03 00:00:00.000Z"}},
+		},
+		{
+			name:  "rejected oversized created",
+			items: []pbEntry{{ID: "bbb", Created: huge}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := advanceCursor(tc.items, cursor{created: "2026-01-02 03:04:05.000Z", id: "aaa"})
+			if err == nil {
+				t.Fatal("advanceCursor must reject an oversized cursor value")
+			}
+			msg := err.Error()
+			if strings.Contains(msg, huge) {
+				t.Error("the diagnostic must not carry the whole upstream value")
+			}
+			if !strings.Contains(msg, "...") {
+				t.Errorf("the diagnostic must mark the value as truncated, got %q", msg)
+			}
+			// The message is the fixed prose plus two bounded values; a few
+			// hundred bytes of headroom keeps this pinned to the budget rather
+			// than to the exact wording.
+			if len(msg) > 4*maxLoggedCursorBytes {
+				t.Errorf("the diagnostic is %d bytes, want it bounded by the logged-value cap", len(msg))
 			}
 		})
 	}

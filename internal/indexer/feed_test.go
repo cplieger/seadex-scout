@@ -750,3 +750,57 @@ func TestSortFeedIsStableForEqualFirstSeen(t *testing.T) {
 		prev = id
 	}
 }
+
+// TestRepresentativeFileFallsBackToFirstFileWhenNoMediaFileSurvives pins the
+// last-resort arm of the title-source pick: when a torrent's file list holds no
+// content media file at all - a sidecar-only list, or a creditless-extras-only
+// list - the first file still becomes the title source (classify's eligiblePool
+// hands the whole list back once the type gate keeps nothing), so the
+// synthesized title keeps a parseable episode marker instead of degrading to
+// the bare release group.
+func TestRepresentativeFileFallsBackToFirstFileWhenNoMediaFileSurvives(t *testing.T) {
+	sidecars := []seadex.File{
+		{Name: "Show - S01E01 (1080p) [Grp].ass"},
+		{Name: "fonts/Some Font.ttf"},
+	}
+	if got := representativeFile(sidecars); got != sidecars[0].Name {
+		t.Errorf("representativeFile(sidecar-only) = %q, want the first file %q", got, sidecars[0].Name)
+	}
+	got := synthesizeTitle(&seadex.Torrent{Files: sidecars, ReleaseGroup: "Grp"}, EntryInfo{Title: "Show", Season: 1, SeasonKnown: true})
+	if want := "Show S01E01 1080p [Grp]"; got != want {
+		t.Errorf("synthesizeTitle(sidecar-only) = %q, want %q (the episode marker still derives from the only file present)", got, want)
+	}
+	creditless := []seadex.File{
+		{Name: "[Grp] Show NCED 01 (1080p).mkv"},
+		{Name: "[Grp] Show NCOP 01 (1080p).mkv"},
+	}
+	if got := representativeFile(creditless); got != creditless[0].Name {
+		t.Errorf("representativeFile(creditless-only) = %q, want the first file %q", got, creditless[0].Name)
+	}
+	if got, want := derivedTitle(&seadex.Torrent{Files: creditless}, EntryInfo{}), "[Grp] Show NCED 01 (1080p)"; got != want {
+		t.Errorf("derivedTitle(creditless-only) = %q, want %q", got, want)
+	}
+}
+
+// TestCoveredEpisodesTreatsAbsoluteVersionRevisionAsOneEpisode pins the vN
+// strip on the ABSOLUTE arm of the episode key (the SxxExx arm has its own v2
+// case in TestFeedTitle): a lone absolute-numbered episode shipped beside its
+// v2 re-encode spans ONE episode, so the torrent keeps its "- NN" marker
+// instead of reading as a two-episode pack that collapses to a bare
+// season-level title - which Sonarr ranks as FullSeason and grabs as a season
+// it does not actually have.
+func TestCoveredEpisodesTreatsAbsoluteVersionRevisionAsOneEpisode(t *testing.T) {
+	files := []seadex.File{
+		{Name: "[Grp] Show - 07 (1080p).mkv"},
+		{Name: "[Grp] Show - 07v2 (1080p).mkv"},
+	}
+	if got := coveredEpisodes(files); got != 1 {
+		t.Errorf("coveredEpisodes = %d, want 1 (a v2 revision of the same absolute episode is not a second episode)", got)
+	}
+	if isPack(&seadex.Torrent{Files: files}) {
+		t.Error("isPack = true, want false (one absolute episode plus its v2 revision is not a pack)")
+	}
+	if got, want := derivedTitle(&seadex.Torrent{Files: files}, EntryInfo{}), "[Grp] Show - 07 (1080p)"; got != want {
+		t.Errorf("derivedTitle = %q, want %q (the single episode keeps its absolute marker)", got, want)
+	}
+}

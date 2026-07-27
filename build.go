@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"time"
 
@@ -92,9 +91,9 @@ func buildScout(ctx context.Context, cfg *config.Config, readOnlyState bool) (bu
 			AnimeBytes:      cfg.AnimeBytes,
 		}),
 		Notifier: notify.NewNotifier(log),
-		AniListStats: func() (calls, rateLimitWaits int64) {
+		AniListStats: func() scout.AniListStats {
 			st := anilistClient.Stats()
-			return st.Calls, st.RateLimitWaits
+			return scout.AniListStats{Calls: st.Calls, RateLimitWaits: st.RateLimitWaits}
 		},
 		Feed: feed,
 	})
@@ -192,7 +191,15 @@ func newArrClients(cfg *config.Config) (*arrapi.Sonarr, *arrapi.Radarr, error) {
 		s, err := arrapi.NewSonarr(cfg.SonarrURL, cfg.SonarrAPIKey,
 			arrapi.WithMaxAttempts(arrMaxAttempts), arrapi.WithBaseDelay(arrBaseDelay))
 		if err != nil {
-			return nil, nil, fmt.Errorf("sonarr client: %w", err)
+			// arrapi's constructor error echoes the full baseURL with %q
+			// (validateClientParams: `arrapi: invalid baseURL %q`), and an arr
+			// url may carry configured userinfo - config.Validate only WARNS on
+			// that shape. main logs a dispatch error at ERROR, so the message
+			// must stay field-name-only, like reportSnapshot's LogSafeError
+			// reduction and logPing below. config.validateArrPair already
+			// rejects every shape arrapi rejects, so this arm only fires if the
+			// two validators drift apart.
+			return nil, nil, errors.New("sonarr client: sonarr.url or sonarr.api_key rejected by the arr client")
 		}
 		sonarr = s
 	}
@@ -203,7 +210,8 @@ func newArrClients(cfg *config.Config) (*arrapi.Sonarr, *arrapi.Radarr, error) {
 			if sonarr != nil {
 				sonarr.Close()
 			}
-			return nil, nil, fmt.Errorf("radarr client: %w", err)
+			// Field-name-only for the same reason as the sonarr arm above.
+			return nil, nil, errors.New("radarr client: radarr.url or radarr.api_key rejected by the arr client")
 		}
 		radarr = r
 	}

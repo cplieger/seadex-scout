@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -191,12 +192,33 @@ func noNetworkClient() *http.Client {
 	return &http.Client{Transport: errTransport{}}
 }
 
+// unreachableMapLoader returns a Fribb loader whose every refresh fails at the
+// transport, with a per-test override path so no real overrides.json can be
+// found: with no cached records in state it is the "map unusable" fixture (a
+// plain load error, not a mapping.StaleMapError).
+func unreachableMapLoader(t *testing.T, logger *slog.Logger) *mapping.Loader {
+	t.Helper()
+	return mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger)
+}
+
+// emptyRecordsMapLoader returns a Fribb loader whose upstream answers an empty
+// record array, so a fresh 200 indexes to nothing and the map is unusable
+// through the accept path rather than the transport.
+func emptyRecordsMapLoader(t *testing.T, logger *slog.Logger) *mapping.Loader {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("[]"))
+	}))
+	t.Cleanup(srv.Close)
+	return mapping.NewLoader(srv.Client(), srv.URL, filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger)
+}
+
 // aniStatsFn adapts an AniList client's Stats to the Deps.AniListStats
 // callback, mirroring the composition root's wiring.
-func aniStatsFn(c *anilist.Client) func() (int64, int64) {
-	return func() (int64, int64) {
+func aniStatsFn(c *anilist.Client) func() AniListStats {
+	return func() AniListStats {
 		st := c.Stats()
-		return st.Calls, st.RateLimitWaits
+		return AniListStats{Calls: st.Calls, RateLimitWaits: st.RateLimitWaits}
 	}
 }
 
@@ -578,5 +600,43 @@ func TestLoadStateDeadlineExceededIsNotAFault(t *testing.T) {
 	}
 	if n := recorder.CountExact("state load failed; starting from empty state"); n != 0 {
 		t.Errorf("deadline-exceeded state load was logged as a fault %d times, want 0", n)
+	}
+}
+
+// TestSavePreservationRefusalWarnsInsteadOfErroring pins the log-level
+// classification alerts.yaml depends on: a Save the store deliberately
+// REFUSED in order to preserve unclassifiable on-disk bytes
+// (state.ErrSavePreserved) is a degradation, not a write fault, so it must
+// log "state save skipped; on-disk state preserved" at WARN and never the
+// "state save failed" ERROR the SeadexScoutCycleError rule fires on -
+// including on the cancelled-context path, where a redeploy SIGTERM landing
+// in Load's read window is exactly what sets the block.
+func TestSavePreservationRefusalWarnsInsteadOfErroring(t *testing.T) {
+	tests := []struct {
+		name string
+		ctx  func() context.Context
+	}{
+		{name: "live context", ctx: context.Background},
+		{name: "cancelled context, detached retry also refused", ctx: func() context.Context {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			logger, recorder := capture.New()
+			refusal := fmt.Errorf("state: save /config/state.json: blocked after an unclassified read failure: %w", state.ErrSavePreserved)
+			s := New(&Deps{Logger: logger, Store: &fakeStore{saveErr: refusal}})
+
+			s.save(tc.ctx(), &state.State{Baselined: true})
+
+			if n := recorder.CountLevel(slog.LevelWarn, "state save skipped; on-disk state preserved"); n != 1 {
+				t.Errorf("preservation-refusal WARN count = %d, want exactly 1", n)
+			}
+			if n := recorder.CountLevel(slog.LevelError, "state save failed"); n != 0 {
+				t.Errorf("\"state save failed\" ERROR count = %d, want 0 (alerts.yaml documents this refusal as deliberately NOT reaching SeadexScoutCycleError)", n)
+			}
+		})
 	}
 }

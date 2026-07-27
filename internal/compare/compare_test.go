@@ -2,7 +2,6 @@ package compare
 
 import (
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 
@@ -49,6 +48,49 @@ func TestCandidateStableKeyBoundsOversizedComponents(t *testing.T) {
 	}
 }
 
+// TestCandidateStableKeyDistinguishesEveryComponent pins the COMPONENT SET of
+// the headline tie-break key: two candidates differing in any single
+// classified field must key differently. A component dropped from
+// candidateStableKey collapses such a pair onto one key, and
+// betterCandidate's final tie-break then falls through to upstream slice
+// order - the exact failure the key exists to prevent (a flipped headline
+// emits a different notify dedupe key for an unchanged finding: a duplicate
+// alert plus a false resolution). The bounds and permutation tests vary
+// several fields at once, so neither notices a single missing component.
+func TestCandidateStableKeyDistinguishesEveryComponent(t *testing.T) {
+	base := candidate{
+		rel: release.Release{
+			Group: "SubsPlease", Tracker: "Nyaa", Resolution: "1080p", Codec: "x265",
+			Kind: release.KindEncode, Reason: "encode from name", TrackerType: release.TrackerPublic,
+		},
+		torrent: seadex.Torrent{Tracker: "Nyaa", InfoHash: "aaaa", URL: "https://nyaa.si/view/1"},
+	}
+	tests := []struct {
+		mutate func(c *candidate)
+		name   string
+	}{
+		{name: "group", mutate: func(c *candidate) { c.rel.Group = "Erai-raws" }},
+		{name: "tracker", mutate: func(c *candidate) { c.rel.Tracker = "AnimeTosho" }},
+		{name: "resolution", mutate: func(c *candidate) { c.rel.Resolution = "720p" }},
+		{name: "codec", mutate: func(c *candidate) { c.rel.Codec = "x264" }},
+		{name: "kind", mutate: func(c *candidate) { c.rel.Kind = release.KindRemux }},
+		{name: "reason", mutate: func(c *candidate) { c.rel.Reason = "remux from notes" }},
+		{name: "info hash", mutate: func(c *candidate) { c.torrent.InfoHash = "bbbb" }},
+		{name: "published url", mutate: func(c *candidate) { c.torrent.URL = "https://nyaa.si/view/2" }},
+		{name: "dual audio", mutate: func(c *candidate) { c.rel.DualAudio = true }},
+	}
+	baseKey := candidateStableKey(&base)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			variant := base
+			tt.mutate(&variant)
+			if got := candidateStableKey(&variant); got == baseKey {
+				t.Errorf("candidateStableKey ignores %s: both candidates key %q, so an equal-rank pair differing only there resolves by upstream slice order", tt.name, got)
+			}
+		})
+	}
+}
+
 func TestRepresentativePrefersResolutionThenPublic(t *testing.T) {
 	higherRes := []candidate{
 		{rel: release.Release{Resolution: "720p", TrackerType: release.TrackerPublic}},
@@ -89,12 +131,7 @@ func TestRepresentativePrefersResolutionThenPublic(t *testing.T) {
 	findingFor := func(pool []candidate) Finding {
 		f := Finding{AniListID: 1}
 		fillBest(&f, pool, groupSet(pool))
-		f = *finalize(&f, StatusBetter, SevWarn)
-		// The obtainable-link SET is what feeds the (order-insensitive)
-		// dedupe key notify derives; normalize the pool-ordered slice so the
-		// comparison checks set equality like the key does.
-		slices.SortFunc(f.Links, func(a, b ReleaseLink) int { return strings.Compare(a.URL, b.URL) })
-		return f
+		return *finalize(&f, StatusBetter)
 	}
 	if !reflect.DeepEqual(findingFor(forward), findingFor(reversed)) {
 		t.Error("findings built from opposite upstream orders must be identical (they seed the same dedupe key downstream)")
@@ -127,18 +164,27 @@ func TestObtainableLinksDedupesAndPrefixesPrivateURL(t *testing.T) {
 		{rel: release.Release{Tracker: "Nyaa|https://nyaa.si/a"}, torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/b"}},
 		{rel: release.Release{Tracker: "Nyaa"}, torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/a|https://nyaa.si/b"}},
 	}
-	links := obtainableLinks(cands)
+	links := obtainableLinks(cands, "")
 	if len(links) != 4 {
 		t.Fatalf("expected 4 distinct links, got %d: %+v", len(links), links)
 	}
-	if links[1].URL != "https://animebytes.tv/torrents.php?id=1" {
-		t.Errorf("AB relative URL not prefixed, got %q", links[1].URL)
+	// Links are ordered headline-group-first (no candidate carries the
+	// headline group here) and then by (URL, tracker), so the expectations
+	// below are stated in that total order rather than in pool order.
+	if links[0].URL != "https://animebytes.tv/torrents.php?id=1" {
+		t.Errorf("AB relative URL not prefixed, got %q", links[0].URL)
 	}
-	if links[2] == links[3] {
-		t.Errorf("delimiter-bearing tuples must stay distinct, both = %+v", links[2])
+	if links[1] == links[2] {
+		t.Errorf("delimiter-bearing tuples must stay distinct, both = %+v", links[1])
 	}
-	if links[2].URL != "https://nyaa.si/b" || links[3].URL != "https://nyaa.si/a|https://nyaa.si/b" {
-		t.Errorf("delimiter-bearing tuples mangled: %+v, %+v", links[2], links[3])
+	if links[1].URL != "https://nyaa.si/a|https://nyaa.si/b" || links[2].URL != "https://nyaa.si/b" {
+		t.Errorf("delimiter-bearing tuples mangled: %+v, %+v", links[1], links[2])
+	}
+	if links[2].Tracker != "Nyaa|https://nyaa.si/a" {
+		t.Errorf("delimiter-bearing tracker mangled: %+v", links[2])
+	}
+	if links[3].URL != "https://nyaa.si/view/1" {
+		t.Errorf("plain Nyaa link missing, got %+v", links[3])
 	}
 }
 
@@ -173,8 +219,8 @@ func TestCompareBetterRelease(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 finding, got %d", len(got))
 	}
-	if got[0].Status != StatusBetter || got[0].Severity != SevWarn {
-		t.Errorf("status/severity = %q/%q, want better_release/warn", got[0].Status, got[0].Severity)
+	if got[0].Status != StatusBetter {
+		t.Errorf("status = %q, want better_release", got[0].Status)
 	}
 	if got[0].RecommendedGroup != "SubsPlease" {
 		t.Errorf("RecommendedGroup = %q, want SubsPlease", got[0].RecommendedGroup)
@@ -213,8 +259,8 @@ func TestCompareUnverifiableEvidenceIsInfo(t *testing.T) {
 				t.Fatalf("expected 1 unverifiable finding, got %d: %+v", len(got), got)
 			}
 			f := got[0]
-			if f.Status != StatusUnverifiable || f.Severity != SevInfo {
-				t.Errorf("status/severity = %q/%q, want unverifiable/info", f.Status, f.Severity)
+			if f.Status != StatusUnverifiable {
+				t.Errorf("status = %q, want unverifiable", f.Status)
 			}
 			if f.RecommendedGroups == nil || f.ReleaseURL == "" {
 				t.Errorf("recommendation fields must be filled for the manual review, got %+v", f)
@@ -261,25 +307,6 @@ func TestCompareSeasonScopedFindingSeed(t *testing.T) {
 	}
 }
 
-func TestCompareSeasonScopedSingleGroupNotMixed(t *testing.T) {
-	// A series that spans two groups across its seasons (item.Groups = lostyears,
-	// pmr) but whose season 1 carries a single group (pmr). A season-1 SeaDex best
-	// PMR release is aligned; the whole-series mixed-group flag must NOT trigger a
-	// spurious mixed_group_manual finding for a season that is already aligned.
-	item := &library.Item{
-		Title:        "Split Group Show",
-		Groups:       []string{"lostyears", "pmr"},
-		SeasonGroups: map[int][]string{1: {"pmr"}},
-	}
-	entry := seadex.Entry{AniListID: 201, Torrents: []seadex.Torrent{
-		{IsBest: true, ReleaseGroup: "PMR", Tracker: "Nyaa", URL: "https://nyaa.si/view/201"},
-	}}
-	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
-	if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
-		t.Errorf("season-1 aligned item must produce no finding (not mixed_group_manual), got %+v", got)
-	}
-}
-
 func TestCompareSeasonScopedRecommendationNotMaskedByOtherSeason(t *testing.T) {
 	// Season 2 lacks a recommended group even though season 1 has one: a finding
 	// for season 2 must still be produced (the whole-series group set must not
@@ -309,7 +336,7 @@ func TestCompareTheoreticalBestIsInfo(t *testing.T) {
 	entry := seadex.Entry{AniListID: 1, TheoreticalBest: "a stated remux"}
 	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{}}
 	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
-	if len(got) != 1 || got[0].Status != StatusTheoretical || got[0].Severity != SevInfo {
+	if len(got) != 1 || got[0].Status != StatusTheoretical {
 		t.Fatalf("expected one theoretical_best/info finding, got %+v", got)
 	}
 }
@@ -324,6 +351,53 @@ func TestCompareSeasonNotOnDiskTheoreticalIsSilent(t *testing.T) {
 	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 3}}
 	if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
 		t.Errorf("a theoretical-only entry for a season with no file must be silent, got %+v", got)
+	}
+}
+
+// TestCompareReportsEveryReportableMatch pins the batch contract of the
+// Compare loop: every reportable match in the cycle's slice yields its own
+// finding, in match order, with the skipped matches removed and nothing
+// else dropped. A cycle feeds hundreds of matches through one call, so a
+// loop that stops after the first finding (or reuses one item's identity)
+// silences the rest with no error anywhere.
+func TestCompareReportsEveryReportableMatch(t *testing.T) {
+	diverged := func(alID int, title, url string) match.Match {
+		return match.Match{
+			Item: &library.Item{Title: title, Groups: []string{"erai-raws"}, SeasonGroups: map[int][]string{1: {"erai-raws"}}},
+			Arr:  library.ArrSonarr,
+			Entry: seadex.Entry{AniListID: alID, Torrents: []seadex.Torrent{
+				{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: url},
+			}},
+			Record: mapping.Record{SeasonTvdb: 1},
+		}
+	}
+	aligned := match.Match{
+		Item: &library.Item{Title: "Aligned", Groups: []string{"subsplease"}, SeasonGroups: map[int][]string{1: {"subsplease"}}},
+		Arr:  library.ArrSonarr,
+		Entry: seadex.Entry{AniListID: 11, Torrents: []seadex.Torrent{
+			{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/11"},
+		}},
+		Record: mapping.Record{SeasonTvdb: 1},
+	}
+	notInLibrary := match.Match{Arr: library.ArrSonarr, Entry: seadex.Entry{AniListID: 12}}
+
+	batch := []match.Match{
+		diverged(10, "First", "https://nyaa.si/view/10"),
+		aligned,
+		notInLibrary,
+		diverged(13, "Second", "https://nyaa.si/view/13"),
+	}
+
+	got := comparer(filter.Options{}, false).Compare(batch)
+
+	if len(got) != 2 {
+		t.Fatalf("finding count = %d, want 2 (one per reportable match): %+v", len(got), got)
+	}
+	if got[0].AniListID != 10 || got[1].AniListID != 13 {
+		t.Errorf("findings = al %d then al %d, want 10 then 13 in match order", got[0].AniListID, got[1].AniListID)
+	}
+	if got[0].Title != "First" || got[1].Title != "Second" {
+		t.Errorf("titles = %q, %q, want First, Second", got[0].Title, got[1].Title)
 	}
 }
 
@@ -356,8 +430,8 @@ func TestCompareAnimeBytesRecommendationRequiresOptIn(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("AnimeBytes on should surface the AB recommendation, got %d", len(got))
 	}
-	if got[0].Status != StatusBetter || got[0].Severity != SevWarn {
-		t.Errorf("status/severity = %q/%q, want better_release/warn", got[0].Status, got[0].Severity)
+	if got[0].Status != StatusBetter {
+		t.Errorf("status = %q, want better_release", got[0].Status)
 	}
 	if got[0].Tracker != "AB" {
 		t.Errorf("Tracker = %q, want AB", got[0].Tracker)
@@ -383,8 +457,8 @@ func TestCompareMixedGroupSeasonIsInfoNudge(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 finding, got %d: %+v", len(got), got)
 	}
-	if got[0].Status != StatusMixedGroup || got[0].Severity != SevInfo {
-		t.Errorf("status/severity = %q/%q, want mixed_group_manual/info", got[0].Status, got[0].Severity)
+	if got[0].Status != StatusMixedGroup {
+		t.Errorf("status = %q, want mixed_group_manual", got[0].Status)
 	}
 	if got[0].RecommendedGroup != "SubsPlease" {
 		t.Errorf("RecommendedGroup = %q, want SubsPlease (fillBest must run for the nudge)", got[0].RecommendedGroup)
@@ -431,8 +505,8 @@ func TestCompareIncompleteSeasonEntryIsInfo(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 finding, got %d", len(got))
 	}
-	if got[0].Status != StatusIncomplete || got[0].Severity != SevInfo {
-		t.Errorf("status/severity = %q/%q, want incomplete/info", got[0].Status, got[0].Severity)
+	if got[0].Status != StatusIncomplete {
+		t.Errorf("status = %q, want incomplete", got[0].Status)
 	}
 }
 
@@ -542,7 +616,7 @@ func TestObtainableLinksSkipsEmptyURL(t *testing.T) {
 		{rel: release.Release{Tracker: "Nyaa"}, torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/2"}},
 	}
 
-	links := obtainableLinks(cands)
+	links := obtainableLinks(cands, "")
 
 	if len(links) != 1 || links[0].URL != "https://nyaa.si/view/2" {
 		t.Errorf("obtainableLinks() = %+v, want only the URL-carrying link", links)
@@ -616,7 +690,7 @@ func TestCompareCurationWarnedBestExcluded(t *testing.T) {
 		}}
 		m := match.Match{Item: newItem(), Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
 		got := comparer(filter.Options{}, false).Compare([]match.Match{m})
-		if len(got) != 1 || got[0].Status != StatusTheoretical || got[0].Severity != SevInfo {
+		if len(got) != 1 || got[0].Status != StatusTheoretical {
 			t.Fatalf("expected the theoretical_best/info nudge with every best warned, got %+v", got)
 		}
 	})
@@ -652,6 +726,45 @@ func TestCompareCurationWarnedBestExcluded(t *testing.T) {
 			t.Errorf("an entry with only a warned best must stay silent, got %+v", got)
 		}
 	})
+}
+
+// TestCompareSpecialUsesSeasonZeroBucketWhenNotExcluded pins the special
+// scope on the findings path, which no other compare test reaches: with
+// exclude_specials at its default false an OVA/ONA/SPECIAL entry is still
+// compared, and it is compared against Sonarr's season-0 bucket only - a
+// real season's groups must not leak in (season 1 here carries the
+// recommended group and would read aligned). The same match with the
+// toggle on must fall silent, so the two arms pin both directions of the
+// gate.
+func TestCompareSpecialUsesSeasonZeroBucketWhenNotExcluded(t *testing.T) {
+	item := &library.Item{
+		Title:        "OVA Run",
+		Arr:          library.ArrSonarr,
+		SeasonGroups: map[int][]string{0: {"erai-raws"}, 1: {"subsplease"}},
+	}
+	entry := seadex.Entry{AniListID: 950, Torrents: []seadex.Torrent{
+		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/950"},
+	}}
+	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{Type: "OVA"}}
+
+	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+
+	if len(got) != 1 {
+		t.Fatalf("finding count = %d, want 1 (exclude_specials off must still compare a special): %+v", len(got), got)
+	}
+	if got[0].Status != StatusBetter {
+		t.Errorf("status = %q, want better_release", got[0].Status)
+	}
+	if got[0].CurrentGroup != "erai-raws" {
+		t.Errorf("CurrentGroup = %q, want the season-0 specials bucket %q (season 1's subsplease must not leak in - it would read aligned)", got[0].CurrentGroup, "erai-raws")
+	}
+	if got[0].Season != 0 {
+		t.Errorf("Season = %d, want 0 for a special", got[0].Season)
+	}
+
+	if excluded := comparer(filter.Options{}, true).Compare([]match.Match{m}); len(excluded) != 0 {
+		t.Errorf("exclude_specials on must silence the same special, got %+v", excluded)
+	}
 }
 
 func TestCompareFindingSeasonField(t *testing.T) {

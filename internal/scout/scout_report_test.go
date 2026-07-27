@@ -238,7 +238,7 @@ func TestReportMappingUnusableErrors(t *testing.T) {
 		// to fall back on, so the map is unusable (not a StaleMapError).
 		Store:   &fakeStore{},
 		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, logger),
+		Mapping: unreachableMapLoader(t, logger),
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 	})
 
@@ -274,7 +274,7 @@ func TestReportStaleMapWarnsAndStillAudits(t *testing.T) {
 		Logger:  logger,
 		Store:   store,
 		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
-		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
+		Mapping: unreachableMapLoader(t, scoutTestLogger()),
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher: match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
 		Auditor: audit.NewAuditor(audit.Config{SeaDexBaseURL: "https://releases.moe"}),

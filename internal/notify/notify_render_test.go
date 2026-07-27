@@ -198,3 +198,61 @@ func TestTrackerURLsMalformedURLFailsClosedToABSlot(t *testing.T) {
 		})
 	}
 }
+
+// TestPublicLinkAlertLabel pins the alert label a public source is rendered
+// under: canonicalTracker prefers the canonical tracker table over the
+// untrusted SeaDex label, falls back to the URL's own host when the label
+// names no known tracker, and labels an unknown host with itself so a
+// non-Nyaa public link is never published nameless (the l-f5 defect). The
+// existing tests only ever supply canonical-tracker hosts, so the host
+// fallback and the self-labelling last resort are unexercised.
+func TestPublicLinkAlertLabel(t *testing.T) {
+	tests := []struct {
+		name        string
+		tracker     string
+		url         string
+		wantNyaa    string
+		wantOther   string
+		wantTracker string
+	}{
+		{
+			name: "canonical label wins", tracker: "nyaa", url: "https://nyaa.si/view/1",
+			wantNyaa: "https://nyaa.si/view/1",
+		},
+		{
+			name: "blank label resolved by known host", tracker: "", url: "https://nyaa.si/view/2",
+			wantNyaa: "https://nyaa.si/view/2",
+		},
+		{
+			name: "unknown label resolved by a known tracker subdomain", tracker: "Unknown",
+			url:       "https://mirror.animetosho.org/v/3",
+			wantOther: "https://mirror.animetosho.org/v/3", wantTracker: "AnimeTosho",
+		},
+		{
+			name: "host naming no known tracker labels the link with itself", tracker: "Unknown",
+			url:       "https://tracker.example/v/4",
+			wantOther: "https://tracker.example/v/4", wantTracker: "tracker.example",
+		},
+		{
+			name: "hostless value has nothing to name it", tracker: "Unknown", url: "/view/5",
+			wantOther: "/view/5", wantTracker: "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pub, ab := trackerURLs([]compare.ReleaseLink{{Tracker: tc.tracker, URL: tc.url}})
+			if ab != "" {
+				t.Fatalf("ab = %q, want the link routed to a public slot", ab)
+			}
+			if got := pub.nyaaURL(); got != tc.wantNyaa {
+				t.Errorf("nyaa_url = %q, want %q", got, tc.wantNyaa)
+			}
+			if got := pub.otherURL(); got != tc.wantOther {
+				t.Errorf("public_url = %q, want %q", got, tc.wantOther)
+			}
+			if got := pub.otherTracker(); got != tc.wantTracker {
+				t.Errorf("public_tracker = %q, want %q", got, tc.wantTracker)
+			}
+		})
+	}
+}

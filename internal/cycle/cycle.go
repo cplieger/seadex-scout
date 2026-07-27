@@ -72,11 +72,18 @@ func NewExclusive(ctx context.Context, dir string) (*scheduler.Exclusive, error)
 // classifies it as a routine-shutdown WARN and the contract reads identically
 // from every phase. The message keeps poll's historical wording because it is
 // what an operator greps for. The message speaks only of THIS INVOCATION's result, not of the
-// marker: an interruption observed while a cycle was still running leaves the
-// marker untouched (nothing completed), but one observed AFTER a cycle
-// completed does not - that cycle published its own verdict under the cycle
-// lock, as the daemon tick does, and a completed cycle's health is not this
-// process's to withdraw (d-gpt-u1c4-1). The cancellation cause rides along as a
+// marker: an interruption leaves the marker untouched whenever no verdict was
+// published before the cancellation was observed - including a cycle that
+// completed healthy and was then interrupted at the recording boundary, whose
+// verdict recordRunHealth deliberately withholds because an interrupted run's
+// outcome is not a trustworthy health verdict (pinned by
+// TestRunOnceUniformInterruption's post-cycle case). What the interruption
+// never does is reach BACK: a verdict already published inside the cycle lock -
+// an earlier run of this invocation, or a daemon tick's - stands, because a
+// completed cycle's health is not this process's to withdraw (d-gpt-u1c4-1).
+// The daemon tick deliberately differs in the boundary case: RunLoop publishes
+// a healthy verdict even when the cancellation is already visible, withholding
+// only an UNHEALTHY interrupted cycle. The cancellation cause rides along as a
 // second %w so the message still names the signal ("terminated signal
 // received"), never as the classification token: a cause is whatever the
 // cancelling site passed to context.WithCancelCause, so only ctx.Err() is
@@ -348,9 +355,12 @@ func RunOnce(ctx context.Context, ex *scheduler.Exclusive, sc Cycler, marker *he
 // provides freshness, and the in-flight cycle records its own outcome. An
 // acquired tick also executes demand queued by `poll` requests that arrived
 // during it (one rerun per queued request), each recording its own health.
-// A coordination-infrastructure failure (the lock or queue file unusable)
-// means the tick could not run at all and is logged at ERROR - cycles have
-// stopped, which the operator must see (the level=ERROR Loki alert fires).
+// An unusable cycle LOCK means the tick could not run at all and is logged at
+// ERROR - cycles have stopped, which the operator must see (the level=ERROR
+// Loki alert fires). A queue-file failure is different: it is only observable
+// after the tick's cycle already ran, so it degrades the demand-coalescing
+// bookkeeping only and stays a WARN, keeping a broken queue file from firing
+// the cycle-error alert on every tick (TestRunLoopQueueErrorAfterRun).
 func RunLoop(ctx context.Context, interval time.Duration, ex *scheduler.Exclusive, sc Cycler, marker *health.Marker) {
 	scheduler.RunLoop(ctx, func(ctx context.Context) {
 		outcome, err := ex.RunOrSkip(func() error {
@@ -358,7 +368,15 @@ func RunLoop(ctx context.Context, interval time.Duration, ex *scheduler.Exclusiv
 			if !healthy && ctx.Err() != nil {
 				return nil // shutdown mid-cycle: cancellation is not an ingest fault
 			}
-			marker.Set(healthy)
+			if err := marker.SetChecked(healthy); err != nil {
+				// The tick has no exit code to report the write through, and a
+				// marker-write failure does not self-heal (a full disk, a bad
+				// mode on /tmp): ERROR is the only signal it gets, exactly as
+				// recordRunHealth argues for a queued rerun's write. Without it
+				// a wedged marker restarts the container at
+				// WithMaxAge(3*poll_interval) with no logged cause.
+				slog.Error("tick could not record cycle health", "error", err)
+			}
 			return nil
 		})
 		switch {

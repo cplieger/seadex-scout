@@ -128,7 +128,7 @@ type Decision struct {
 // order and decision rules over those inputs, so the two flows cannot drift
 // apart on the same title.
 func Decide(item *library.Item, rec *mapping.Record, best, alt []string) Decision {
-	scoped := Scope(item, rec)
+	scoped := scope(item, rec)
 	d := Decision{Kind: scoped.Kind, NoBest: len(best) == 0}
 	d.Season = max(0, rec.SeasonTvdb)
 	if scoped.Kind == ScopeWholeSeries {
@@ -237,7 +237,14 @@ func outcomeOf(st Standing, groupCount int, noBest bool) Outcome {
 		return OutcomeUnverifiable
 	case groupCount > 1 && (st == StandingAlt || st == StandingUnlisted):
 		return OutcomeMixed
-	default:
+	case st == StandingAlt || st == StandingUnlisted:
 		return OutcomeDiverged
+	default:
+		// Every Standing the ladder produces is handled above. A Standing
+		// added later must not fall into the STRONGEST claim in the
+		// linearization (the daemon's better_release warning) on evidence no
+		// rung produced; the unverifiable reading is the conservative one and
+		// matches summarizeWholeSeries's exhaustive switch over the same enum.
+		return OutcomeUnverifiable
 	}
 }

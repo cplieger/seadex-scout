@@ -106,7 +106,7 @@ func TestUpstreamErrorDocMessageNamesCodeAndDescription(t *testing.T) {
 // TestParseErrorDocumentBoundsFields pins the decode-time bound on the
 // fallback <error>-document parse: an over-cap code or description must NOT
 // be retained in an upstreamDocError (the previous unrestricted unmarshal
-// parked up to the 16 MiB transport cap in the error strings the retry loop
+// parked up to the transport cap (upstreamMaxBytes) in the error strings the retry loop
 // then redacted and logged on every attempt) - the breach surfaces as the
 // decoder's *torznabLimitError, which parseTorznab propagates so it
 // classifies like every other limit overflow. At-cap documents and the
@@ -371,8 +371,9 @@ func TestParseTorznabRejectsOversizedTokensAtLexicalGuard(t *testing.T) {
 	})
 }
 
-// TestParseTorznabRejectsSplitTextPastFieldCap pins decodeBoundedElementText:
-// a field split across CDATA seams - each chunk under the lexical text-run
+// TestParseTorznabRejectsSplitTextPastFieldCap pins the budgeted text decode
+// (xmlx.Budget.DecodeText): a field split across CDATA seams - each chunk
+// under the lexical text-run
 // cap and each CharData token under the per-field cap - must still be
 // rejected once the CUMULATIVE decoded bytes cross maxUpstreamFieldBytes,
 // closing the chunked bypass DecodeElement's whole-string materialization
@@ -681,13 +682,13 @@ func TestPreflightTorznabBoundsCommentsDirectivesAndCData(t *testing.T) {
 	})
 }
 
-// TestDecodeBoundedElementTextSkipsNestedMarkup pins the nested-markup arm
-// of decodeBoundedElementText: markup nested inside a plain text child is
-// skipped whole (matching the DecodeElement behavior the bounded decoder
-// replaced), so only the field's own CharData accumulates; and a response
-// truncated inside that nested markup propagates the Skip error so partial
-// data fails the fetch instead of parsing.
-func TestDecodeBoundedElementTextSkipsNestedMarkup(t *testing.T) {
+// TestParseTorznabSkipsNestedMarkupInTextFields pins the nested-markup arm
+// of the budgeted text decode (xmlx.Budget.DecodeText): markup nested inside
+// a plain text child is skipped whole (matching the DecodeElement behavior the
+// bounded decoder replaced), so only the field's own CharData accumulates; and
+// a response truncated inside that nested markup propagates the Skip error so
+// partial data fails the fetch instead of parsing.
+func TestParseTorznabSkipsNestedMarkupInTextFields(t *testing.T) {
 	body := `<?xml version="1.0"?><rss><channel><item>` +
 		`<guid>pre<b attr="v">nested</b>post</guid><title>x</title>` +
 		`</item></channel></rss>`
@@ -739,4 +740,22 @@ func limitKind(t *testing.T, err error) xmlx.Kind {
 		t.Fatalf("error = %T (%v), want a wrapped *xmlx.LimitError", err, err)
 	}
 	return le.Kind
+}
+
+// TestWriteItemOmitsOptionalElements pins writeItem's documented omissions on
+// an item whose optional fields are empty: no enclosure without a download
+// URL, no volume-factor attrs without a marker, and no comments/pubDate
+// elements. The render/parse round-trip cannot observe any of them.
+func TestWriteItemOmitsOptionalElements(t *testing.T) {
+	var b strings.Builder
+	writeItem(&b, &item{Title: "Show - S01", GUID: "https://nyaa.si/view/42"})
+	out := b.String()
+	for _, absent := range []string{"<enclosure", "downloadvolumefactor", "uploadvolumefactor", "<comments>", "<pubDate>"} {
+		if strings.Contains(out, absent) {
+			t.Errorf("rendered %s for an item carrying no such value:\n%s", absent, out)
+		}
+	}
+	if !strings.Contains(out, `<torznab:attr name="size" value="0"/>`) {
+		t.Errorf("rendered item lost the unconditional size attr:\n%s", out)
+	}
 }

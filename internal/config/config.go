@@ -21,8 +21,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -36,8 +38,13 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+// DefaultConfigDir is the single container mount every seadex-scout file lives
+// under; every path constant below is derived from it, and it is the directory
+// the cross-process cycle lock is created in.
+const DefaultConfigDir = "/config"
+
 // DefaultConfigPath is the container-internal config file path.
-const DefaultConfigPath = "/config/config.yaml"
+const DefaultConfigPath = DefaultConfigDir + "/config.yaml"
 
 // maxConfigBytes bounds the config file read (it is a small document).
 const maxConfigBytes = 1 << 20
@@ -63,9 +70,14 @@ const (
 	// so retuning one upstream touches only the package that knows it.
 	// DefaultMappingOverrides is the local alID->IDs override file: drop one in
 	// at this path to pin mappings; absent is fine.
-	DefaultMappingOverrides = "/config/overrides.json"
+	DefaultMappingOverrides = DefaultConfigDir + "/overrides.json"
 	// DefaultStatePath is the atomic JSON cache/state file.
-	DefaultStatePath = "/config/state.json"
+	DefaultStatePath = DefaultConfigDir + "/state.json"
+	// DefaultCycleLockDir is the directory holding cycle.lock, the cross-process
+	// cycle coalescing lock. It is the mount root so the lock lives beside the
+	// state.json and feed.json writes it orders (see internal/cycle), rather
+	// than depending on where either of those files happens to live.
+	DefaultCycleLockDir = DefaultConfigDir
 	// DefaultIndexerFeedPath is the atomic JSON file the compare cycle writes the
 	// indexer's materialized feed to (the search curation set, the synthesized
 	// per-tracker RSS journals with their seen ledger, and the harvested-title
@@ -73,10 +85,10 @@ const (
 	// data engine (the cycle) produces both the findings and this feed, and
 	// persisting it lets a cycle run by the `poll` subcommand refresh a resident
 	// daemon's feed across the process boundary.
-	DefaultIndexerFeedPath = "/config/feed.json"
+	DefaultIndexerFeedPath = DefaultConfigDir + "/feed.json"
 	// DefaultReportDir is the directory report mode writes timestamped report
 	// pairs into (report-<UTC timestamp>.md / .json).
-	DefaultReportDir = "/config/reports"
+	DefaultReportDir = DefaultConfigDir + "/reports"
 
 	// RunModeDaemon is the default: poll on a schedule and flag better releases.
 	RunModeDaemon = "daemon"
@@ -256,6 +268,7 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("read config %s: %w", path, err)
 	}
+	warnConfigPermissions(path)
 	fc := defaultFileConfig()
 	refs, err := yamlenv.Load(raw, &fc, isAllowedEnvVar,
 		yamlenv.WithSanitizeOptions(yamlenv.WithUnknownKeyEcho()))
@@ -352,10 +365,20 @@ func applyArr(name string, af arrFile) (arrURL, key, publicURL string) {
 // field-name-only, because an expanded ${VAR} secret placed in poll_interval
 // by a config typo must never reach the startup log.
 func parseInterval(raw string) (time.Duration, bool) {
+	return parseIntervalWith(raw, slog.Default())
+}
+
+// parseIntervalWith is parseInterval with an explicit logger, so the silent
+// PollIntervalFromFile probe can discard the fallback/clamp warnings the
+// startup Load path already emitted once. The health subcommand runs this on
+// every Docker healthcheck (30s), and repeating a config diagnostic there
+// tells the operator nothing the daemon's startup log did not.
+func parseIntervalWith(raw string, log *slog.Logger) (time.Duration, bool) {
 	s := scheduler.ParseInterval(raw, DefaultPollInterval,
 		scheduler.WithBounds(minPollInterval, maxPollInterval),
 		scheduler.WithName("poll_interval"),
-		scheduler.WithRedactedValue())
+		scheduler.WithRedactedValue(),
+		scheduler.WithIntervalLogger(log))
 	if s.Mode == scheduler.ModeExternal {
 		return 0, true
 	}
@@ -376,15 +399,31 @@ func parseInterval(raw string) (time.Duration, bool) {
 func PollIntervalFromFile(path string) time.Duration {
 	doc, err := loadExpandedDoc(path)
 	if err != nil {
+		// An absent file is the legitimate no-config case (first boot, or a
+		// probe run before the starter exists) and stays silent. Anything else
+		// means the file IS there and unusable, and the freshness deadline is
+		// being dropped because of it: say so, or the probe reports healthy
+		// with no wedge detection and nothing anywhere explains why. Path only,
+		// never the parse error - a yaml error can quote an expanded secret.
+		if !errors.Is(err, fs.ErrNotExist) {
+			slog.Warn("cannot read the config file for the health freshness deadline; "+
+				"the marker-age deadline is disabled, so a wedged compare loop will "+
+				"not be restarted", "path", path)
+		}
 		return 0
 	}
 	var probe struct {
 		PollInterval string `yaml:"poll_interval"`
 	}
 	if err := doc.Decode(&probe); err != nil {
+		// Field-name-only for the same reason: the decode error quotes the
+		// offending value.
+		slog.Warn("cannot read poll_interval for the health freshness deadline; "+
+			"the marker-age deadline is disabled, so a wedged compare loop will "+
+			"not be restarted", "field", "poll_interval")
 		return 0
 	}
-	interval, external := parseInterval(probe.PollInterval)
+	interval, external := parseIntervalWith(probe.PollInterval, slog.New(slog.DiscardHandler))
 	if external {
 		return 0
 	}
@@ -420,10 +459,15 @@ func (c *Config) IndexerConfigured() bool {
 
 // Validate reports the first configuration problem that would stop the app from
 // running, or nil when runnable. It is deliberately not a pure query: on the way
-// through the checks it also emits every config-time diagnostic (the
-// field-name-only warn/info lines for suspicious-but-runnable values), so it is
-// the one startup call that surfaces them - calling it twice duplicates them,
-// and a path that skips it loses them.
+// through the checks it also emits the config-time diagnostics that need the
+// assembled Config (the field-name-only warn/info lines for
+// suspicious-but-runnable values), so calling it twice duplicates them and a
+// path that skips it loses them. Two limits on that: it stops at the FIRST hard
+// error, so a rejected config surfaces only the diagnostics ahead of the check
+// that failed (the operator sees the rest after fixing it and restarting), and
+// the load-time diagnostics - unresolved ${VAR} references, a disabled-but-keyed
+// arr, an all-blank tag list, an unrecognized log.level or log.format - are
+// emitted by Load/toConfig, not here.
 func (c *Config) Validate() error {
 	if err := validateRunMode(c.RunMode); err != nil {
 		return err
@@ -609,11 +653,31 @@ func (c *Config) infoIndexerModeMismatch() {
 	}
 }
 
+// The field names of the two per-indexer Torznab URL keys, shared by the
+// validation and the warn batteries that each enumerate the pair.
+const (
+	fieldNyaaTorznabURL = "indexer.nyaa_torznab_url"
+	fieldABTorznabURL   = "indexer.ab_torznab_url"
+)
+
 // validateIndexerEndpoints enforces the feed's authentication requirement and
 // validates the two upstream Torznab URLs, in the original diagnostic order.
 func (c *Config) validateIndexerEndpoints() error {
 	if c.IndexerAPIKey == "" {
 		return errors.New("indexer.feed_api_key is required when indexer.nyaa_torznab_url or indexer.ab_torznab_url is set")
+	}
+	// An unexpanded ${VAR} is the INVERSE of the usual unresolved-ref failure:
+	// every other secret field fails closed (the upstream rejects the literal),
+	// but this key IS the gate, so the literal placeholder becomes a valid
+	// credential - and it is guessable from the public README/config.example.
+	// Load's unresolved-ref WARN does not cover the non-allowlisted spelling
+	// (yamlenv leaves ${FEED_KEY} literal and reports nothing), and the length
+	// check below passes any placeholder. Field-name-only (never echo the key).
+	if strings.Contains(c.IndexerAPIKey, "${") {
+		slog.Warn("indexer.feed_api_key still holds a ${VAR} reference; the variable is " +
+			"unset or not allowlisted (SONARR_/RADARR_/SEADEX_SCOUT_), so the feed is gated " +
+			"by that literal placeholder - a guessable key on the " +
+			"AnimeBytes-passkey-bearing feed")
 	}
 	// Presence is required above; strength is warn-only defense-in-depth. The
 	// key is the only gate on the passkey-bearing /ab feed, so a trivially
@@ -624,8 +688,8 @@ func (c *Config) validateIndexerEndpoints() error {
 			"AnimeBytes-passkey-bearing feed - generate a strong key (openssl rand -hex 16)")
 	}
 	for _, endpoint := range []struct{ name, value string }{
-		{"indexer.nyaa_torznab_url", c.IndexerNyaaTorznabURL},
-		{"indexer.ab_torznab_url", c.IndexerABTorznabURL},
+		{fieldNyaaTorznabURL, c.IndexerNyaaTorznabURL},
+		{fieldABTorznabURL, c.IndexerABTorznabURL},
 	} {
 		if err := validateHTTPURL(endpoint.name, endpoint.value); err != nil {
 			return err
@@ -635,7 +699,8 @@ func (c *Config) validateIndexerEndpoints() error {
 }
 
 // warnIndexerEndpointProblems emits the warn/info diagnostics for suspicious
-// but runnable endpoint combinations: a pasted-twice shared endpoint and the
+// but runnable endpoint combinations: a pasted-twice shared endpoint, a
+// torznab url whose path cannot be a per-indexer Torznab endpoint, and the
 // two AB passkey half-configurations. All field-name-only; never echo a URL
 // or secret.
 func (c *Config) warnIndexerEndpointProblems() {
@@ -648,6 +713,31 @@ func (c *Config) warnIndexerEndpointProblems() {
 		slog.Warn("indexer.nyaa_torznab_url and indexer.ab_torznab_url are identical; " +
 			"they should be Prowlarr's per-indexer endpoints (e.g. /1/api vs /2/api) - " +
 			"a shared endpoint double-queries one indexer and misattributes trackers")
+	}
+	// A Prowlarr per-indexer Torznab endpoint always carries a path (.../1/api).
+	// A bare origin, or Prowlarr's REST API (/api/v1/...), is a paste error that
+	// loads cleanly and then answers every search and RSS check with a Torznab
+	// <error code="900">: internal/indexer/prowlarr.go appends the Torznab params
+	// to whatever was configured, so a wrong base is visible only in
+	// upstream-failure logs. Warn-only (the config still runs) and
+	// field-name-only; never echoes a URL.
+	for _, tu := range []struct{ name, val string }{
+		{fieldNyaaTorznabURL, c.IndexerNyaaTorznabURL},
+		{fieldABTorznabURL, c.IndexerABTorznabURL},
+	} {
+		if tu.val == "" {
+			continue
+		}
+		u, err := url.Parse(tu.val)
+		if err != nil {
+			continue // validateIndexerEndpoints already rejected it
+		}
+		if p := strings.TrimSuffix(u.Path, "/"); p == "" || strings.HasPrefix(p, "/api/v1") {
+			slog.Warn("torznab url is not a Prowlarr per-indexer Torznab endpoint "+
+				"(expected a path like /1/api); every proxied search and RSS check "+
+				"fails upstream and answers the arr with a Torznab error",
+				"field", tu.name)
+		}
 	}
 	// The /ab RSS feed builds its download links from indexer.ab_passkey; a
 	// stable AB-URL-without-passkey config makes that endpoint return a
@@ -707,8 +797,8 @@ func (c *Config) infoDisabledIndexerKeys() {
 // warn-only posture.
 func (c *Config) warnTorznabURLCredentials() {
 	for _, tu := range []struct{ name, val string }{
-		{"indexer.nyaa_torznab_url", c.IndexerNyaaTorznabURL},
-		{"indexer.ab_torznab_url", c.IndexerABTorznabURL},
+		{fieldNyaaTorznabURL, c.IndexerNyaaTorznabURL},
+		{fieldABTorznabURL, c.IndexerABTorznabURL},
 	} {
 		if urlEmbedsCredential(tu.val) {
 			slog.Warn("torznab url embeds a credential-like query parameter or userinfo; "+
@@ -803,9 +893,8 @@ func validateHTTPURL(name, rawURL string) error {
 }
 
 // urlEmbedsCredential reports whether rawURL carries a credential in userinfo
-// or a credential-like query parameter
-// (apikey/api_key and the api_token/access_token/auth_token variants,
-// passkey/authkey/torrent_pass, password/pass/secret/client_secret/rss_key).
+// or a credential-like query parameter (isCredentialParam owns the name set;
+// it is the single home of that list).
 // Such a URL survives validation but leaks the credential to
 // upstream-failure logs,
 // which wrap the full request URL; validateIndexer warns on it field-name-only.
@@ -837,8 +926,9 @@ func urlEmbedsCredential(rawURL string) bool {
 }
 
 // isCredentialParam reports whether a query-parameter name is credential-like
-// (apikey/api_key and the api_token/access_token/auth_token variants,
-// passkey/authkey/torrent_pass, password/pass/secret/client_secret/rss_key,
+// (apikey/api_key and the apitoken/api_token/access_token/auth_token variants,
+// the bare token, passkey/authkey/torrent_pass,
+// password/pass/secret/client_secret/rss_key,
 // case-insensitive) — the single key set urlEmbedsCredential's raw query scan
 // matches against.
 // authkey and torrent_pass are AnimeBytes' own credential parameter names,
@@ -888,6 +978,28 @@ func trimList(items []string) []string {
 func warnAllBlankTagList(which string, raw, trimmed []string) {
 	if len(raw) > 0 && len(trimmed) == 0 {
 		slog.Warn("configured tag list holds only blank entries; the filter is off", "field", which)
+	}
+}
+
+// warnConfigPermissions warns when the config file is readable beyond its
+// owner. This file carries every secret the app has - the arr api_keys, the
+// Prowlarr api key, and the AnimeBytes passkey - which is why the starter this
+// app writes is 0600 (starterFileMode) and why the indexer's feed snapshot is
+// owner-only too; an operator-authored or age-decrypted config commonly lands
+// 0644, exposing all of them to any other uid on the host that mounts /config.
+// Warn-only: a deliberately widened mode must not stop the daemon. The mode
+// itself is not secret, so it is the one value this diagnostic echoes.
+func warnConfigPermissions(path string) {
+	info, err := os.Stat(path)
+	if err != nil {
+		// The bounded read already succeeded, so a stat failure here is a race
+		// or an exotic filesystem - not worth a second startup diagnostic.
+		return
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		slog.Warn("config file is readable beyond its owner; it holds the arr api keys, "+
+			"the Prowlarr key and the AnimeBytes passkey - chmod 600 it",
+			"field", "config file", "mode", strconv.FormatUint(uint64(perm), 8))
 	}
 }
 

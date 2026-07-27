@@ -54,6 +54,13 @@ import (
 //
 // The (tracker, rawURL) argument order mirrors filter.ABVisible and
 // filter.ClassifyAB, the hide half of the same concern.
+//
+// A value that carries only a canonical host ("nyaa.si", "https://nyaa.si/")
+// drops like every other unvouchable form: the tracker's front page identifies
+// no torrent, so publishing it would emit a plausible-looking 404 AND hide the
+// upstream data defect from the caller's unusable-URL accounting. This is the
+// host-form half of the shape floor the path-published ladder already applies
+// (see pathShaped and hostFormTargeted).
 func Publish(tracker, rawURL string) string {
 	f := urlform.Classify(rawURL)
 	// Backslashes are rejected outright, even where the canonicalized reading
@@ -77,14 +84,14 @@ func Publish(tracker, rawURL string) string {
 	}
 	switch f.Class {
 	case urlform.ClassAbsolute:
-		if !usableAbsolute(&f) {
+		if !usableAbsolute(&f) || !hostFormTargeted(f.Trimmed) {
 			return ""
 		}
 		return httpsCanonical(f.Trimmed, f.Scheme)
 	case urlform.ClassRelative:
 		// In an href context a rooted path resolves tracker-relative, so it
 		// is published base-prefixed - subject to the colon rule.
-		return publishRelative(f.Trimmed, f.Trimmed, tr.BaseURL)
+		return publishRelative(f.Trimmed, tr.BaseURL)
 	case urlform.ClassSchemelessHost:
 		return usableSchemelessHost(&f, tr.BaseURL)
 	default:
@@ -110,12 +117,12 @@ func Publish(tracker, rawURL string) string {
 // exactly like Publish's relative form.
 func usableSchemelessHost(f *urlform.Form, baseURL string) string {
 	if _, hostOK := release.LookupTrackerByHost(f.Host); hostOK && !f.HasUserInfo {
-		if !schemelessPortOK(f.Trimmed) {
+		if !schemelessPortOK(f.Trimmed) || !hostFormTargeted(f.Trimmed) {
 			return ""
 		}
 		return "https://" + f.Trimmed
 	}
-	return publishRelative(f.Trimmed, "/"+f.Trimmed, baseURL)
+	return publishRelative(f.Trimmed, baseURL)
 }
 
 // schemelessPortOK reports whether the recovered authority of a schemeless
@@ -159,10 +166,10 @@ func portOK(port string) bool {
 // path-published forms: a tracker-specific relative shape (the AB
 // torrent-page form) names its OWN tracker, so the inferred owner's base
 // wins over the untrusted label's; anything else publishes under the
-// labeled tracker's base. rooted is the lookup key (the raw value, rooted
-// with "/" when the caller's form lacks one).
-func publishRelative(raw, rooted, labelBase string) string {
-	if inferred, ok := release.LookupTrackerByRelativeURL(rooted); ok {
+// labeled tracker's base. The lookup reads both host-less spellings
+// (rooted and slashless) identically, so raw goes in unmodified.
+func publishRelative(raw, labelBase string) string {
+	if inferred, ok := release.LookupTrackerByRelativeURL(raw); ok {
 		return usableRelative(raw, inferred.BaseURL)
 	}
 	return usableRelative(raw, labelBase)
@@ -221,6 +228,24 @@ func pathShaped(rooted string) bool {
 	return segments > 1
 }
 
+// hostFormTargeted reports whether a host-bearing value names a target beyond
+// its authority. It is the host-form twin of pathShaped: a value that is only
+// a canonical host ("nyaa.si", "https://animebytes.tv/") resolves to the
+// tracker's front page, which cannot identify the intended torrent - the same
+// plausible-404 publish the shape floor (l-f88) closed for the path-published
+// ladder, and the same reason to drop rather than publish, so the caller can
+// report an unpublishable URL instead. The authority is located by the "://"
+// separator (present in every absolute form usableAbsolute admits, since it
+// already required an http(s) scheme) and absent from a schemeless value.
+func hostFormTargeted(trimmed string) bool {
+	rest := trimmed
+	if i := strings.Index(rest, "://"); i >= 0 {
+		rest = rest[i+len("://"):]
+	}
+	i := strings.IndexAny(rest, "/?#")
+	return i >= 0 && i < len(rest)-1
+}
+
 // httpsCanonical rewrites a vouched absolute link's cleartext scheme to https.
 //
 // usableAbsolute has already bound the host to a canonical tracker from
@@ -270,6 +295,9 @@ func httpsCanonical(trimmed, scheme string) string {
 // All facts read here are the classifier's semantic fields (Scheme,
 // HasUserInfo, Port, Host), never the parser representation, which stays
 // private to the release package.
+// One further rule: a cleartext URL that names an explicit port other than 443
+// is refused, because the https upgrade (httpsCanonical) rewrites the scheme
+// only and would publish an https link to a plaintext port.
 func usableAbsolute(f *urlform.Form) bool {
 	if !strings.EqualFold(f.Scheme, "http") &&
 		!strings.EqualFold(f.Scheme, "https") {
@@ -279,6 +307,15 @@ func usableAbsolute(f *urlform.Form) bool {
 		return false
 	}
 	if !portOK(f.Port) {
+		return false
+	}
+	// A cleartext URL carrying an explicit port names the http service's port,
+	// and httpsCanonical rewrites only the scheme - it cannot move the port -
+	// so publishing it would emit an https link to a plaintext port (a link
+	// that cannot connect). 443 is the one port the upgrade leaves coherent;
+	// anything else is unvouchable and drops, so the caller reports it as a
+	// URL error instead of a plausible-looking dead link.
+	if strings.EqualFold(f.Scheme, "http") && f.Port != "" && f.Port != "443" {
 		return false
 	}
 	_, ok := release.LookupTrackerByHost(f.Host)

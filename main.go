@@ -33,8 +33,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -75,6 +75,11 @@ const validArgsHint = "(valid: health, daemon, report, poll, or no argument)"
 // config typo, so logConfig and loggableMode both emit this marker instead
 // (config.validateRunMode is field-name-only for the same reason).
 const unknownModeMarker = "invalid"
+
+// runModes is every mode resolveMode accepts. It is the ONE list both the
+// resolution switch and loggableMode's redaction gate read, so adding a
+// subcommand cannot leave a valid mode logged as the unknown-mode marker.
+var runModes = []string{config.RunModeDaemon, config.RunModeReport, modePoll}
 
 func main() {
 	installLogger()
@@ -223,12 +228,10 @@ func resolveMode(args []string, cfg *config.Config) (mode string, err error) {
 	if len(args) == 0 {
 		return cfg.RunMode, nil
 	}
-	switch args[0] {
-	case config.RunModeDaemon, config.RunModeReport, modePoll:
+	if slices.Contains(runModes, args[0]) {
 		return args[0], nil
-	default:
-		return "", fmt.Errorf("unknown subcommand %q %s", args[0], validArgsHint)
 	}
+	return "", fmt.Errorf("unknown subcommand %q %s", args[0], validArgsHint)
 }
 
 // --- Report mode ---
@@ -282,8 +285,8 @@ func runReport(cfg *config.Config) (err error) {
 	logErr := rep.Log(ctx, slog.Default())
 	writeCtx, cancel := reportWriteContext(ctx)
 	defer cancel()
-	if err := rep.WriteFiles(writeCtx, cfg.ReportDir, slog.Default()); err != nil {
-		return err
+	if werr := rep.WriteFiles(writeCtx, cfg.ReportDir, slog.Default()); werr != nil {
+		return detachedWriteError(ctx, werr)
 	}
 	return logErr
 }
@@ -291,6 +294,17 @@ func runReport(cfg *config.Config) (err error) {
 // reportWriteGrace bounds the detached report write, mirroring scout's saveGrace:
 // inside Docker's default 10s stop grace, so the pair lands before SIGKILL.
 const reportWriteGrace = 5 * time.Second
+
+// indexerStopWait bounds how long the daemon's shutdown blocks on the feed's
+// graceful drain. The feed's own budget (internal/indexer's shutdownGrace) is
+// the WHOLE Docker default stop grace the public compose example relies on, and
+// a search in flight against a slow Prowlarr holds its connection for minutes
+// (the indexer's writeTimeout is derived from the bounded Prowlarr retry
+// budget), so waiting the drain out leaves no margin for the client cleanup, the
+// marker removal and the completion record that follow - they race SIGKILL and
+// lose. Cap the wait instead: the abandoned goroutine dies with the process,
+// which is exactly what SIGKILL would have done, minus the diagnostics.
+const indexerStopWait = 3 * time.Second
 
 // reportWriteContext returns the context the report's file write runs under -
 // the caller's while it is live, else a detached, briefly-bounded one
@@ -311,6 +325,24 @@ func reportWriteContext(ctx context.Context) (context.Context, context.CancelFun
 	return context.WithTimeout(context.WithoutCancel(ctx), reportWriteGrace)
 }
 
+// detachedWriteError re-classifies a report-write failure that happened on the
+// DETACHED write context (reportWriteContext's else branch, taken only because a
+// shutdown had already cancelled the caller). Exhausting that shutdown grace is
+// the shutdown truncating the run - a transient, designed outcome - not the
+// upstream operation timeout dispatchOutcome's DeadlineExceeded arm is written
+// for, and alerts.yaml documents a shutdown-interrupted run as excluded from the
+// level=ERROR cycle-error rule. Adding the caller's ctx.Err() makes main's single
+// errors.Is(err, context.Canceled) check classify it WARN (still exit 1: the pair
+// did not land). Any other write failure - ENOSPC, EACCES, an encode error - is a
+// genuine fault and passes through untouched.
+func detachedWriteError(ctx context.Context, err error) error {
+	if ctx.Err() == nil || !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("report write cut short by shutdown: %w (cause: %w): %w",
+		ctx.Err(), context.Cause(ctx), err)
+}
+
 // runPoll runs one compare cycle for an external scheduler (poll_interval: off).
 // It updates the health marker to the cycle's outcome, leaving it in place (no
 // Cleanup) so the container healthcheck reads the last poll, and exits non-zero
@@ -322,9 +354,13 @@ func reportWriteContext(ctx context.Context) (context.Context, context.CancelFun
 //
 // Interruption contract (uniform across every phase of poll): a shutdown
 // cancellation observed at any point - during startup, mid-cycle, or after the
-// cycle body (including the state save) - exits non-zero with the shared health
-// marker untouched, classified as a routine shutdown (WARN, not the level=ERROR
-// cycle-error alert) via the context.Canceled wrap main inspects.
+// cycle body (including the state save) - exits non-zero, classified as a routine
+// shutdown (WARN, not the level=ERROR cycle-error alert) via the context.Canceled
+// wrap main inspects. The shared health marker is CYCLE-scoped, not
+// invocation-scoped: an interruption before or during the cycle leaves it
+// untouched (nothing completed), but one observed after the cycle body does not
+// withdraw the verdict that cycle already committed from inside the cycle lock -
+// see cycle.RunOnce and cycle.Interrupted, which own that rule.
 func runPoll(cfg *config.Config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -341,7 +377,7 @@ func runPoll(cfg *config.Config) error {
 	}
 	defer b.cleanup()
 
-	ex, err := cycle.NewExclusive(ctx, filepath.Dir(config.DefaultStatePath))
+	ex, err := cycle.NewExclusive(ctx, config.DefaultCycleLockDir)
 	if err != nil {
 		return err
 	}
@@ -433,7 +469,7 @@ func run(cfg *config.Config) error {
 	// Ticks run under the cross-process cycle lock in skip mode, so a tick
 	// arriving while an exec'd `poll` cycle is in flight skips instead of
 	// racing it (see cycle.RunLoop).
-	ex, err := cycle.NewExclusive(ctx, filepath.Dir(config.DefaultStatePath))
+	ex, err := cycle.NewExclusive(ctx, config.DefaultCycleLockDir)
 	if err != nil {
 		return err
 	}
@@ -446,8 +482,8 @@ func run(cfg *config.Config) error {
 }
 
 // startIndexer launches the Torznab feed in a goroutine when it is configured,
-// returning a func that stops it (cancelling its context) and waits for its
-// graceful shutdown. The goroutine releases its clients itself on every exit path -
+// returning a func that stops it (cancelling its context) and waits up to
+// indexerStopWait for its graceful shutdown. The goroutine releases its clients itself on every exit path -
 // a Run return or a recovered panic - so the transport is freed immediately
 // even if the daemon keeps running. When no Prowlarr Torznab URL is set it
 // starts nothing - the daemon binds no HTTP port - and returns a no-op.
@@ -472,7 +508,12 @@ func startIndexer(ctx context.Context, cfg *config.Config) func() {
 	runIndexer(ictx, done, bi.indexer.Run, bi.cleanup, log)
 	return func() {
 		cancel()
-		<-done
+		select {
+		case <-done:
+		case <-time.After(indexerStopWait):
+			log.Warn("indexer feed did not drain within the shutdown budget; continuing shutdown",
+				"wait", indexerStopWait)
+		}
 	}
 }
 
@@ -559,8 +600,7 @@ func logConfig(cfg *config.Config) {
 // placed by a config typo (the same contract as logConfig and
 // config.validateRunMode, which are both deliberately field-name-only).
 func loggableMode(mode string) string {
-	switch mode {
-	case config.RunModeDaemon, config.RunModeReport, modePoll:
+	if slices.Contains(runModes, mode) {
 		return mode
 	}
 	return unknownModeMarker

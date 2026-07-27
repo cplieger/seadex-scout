@@ -15,28 +15,6 @@ import (
 // a Sonarr series with no positive Fribb TVDB season and not a special.
 var wholeRec = mapping.Record{Type: "TV", SeasonTvdb: 0}
 
-func TestWholeSeries(t *testing.T) {
-	tests := []struct {
-		name string
-		rec  mapping.Record
-		item library.Item
-		want bool
-	}{
-		{"sonarr seasonless non-special is whole-series", mapping.Record{Type: "TV", SeasonTvdb: 0}, library.Item{Arr: library.ArrSonarr}, true},
-		{"sonarr with a positive season is not whole-series", mapping.Record{Type: "TV", SeasonTvdb: 2}, library.Item{Arr: library.ArrSonarr}, false},
-		{"sonarr special is not whole-series", mapping.Record{Type: "OVA", SeasonTvdb: 0}, library.Item{Arr: library.ArrSonarr}, false},
-		{"radarr is never whole-series", mapping.Record{Type: "MOVIE", SeasonTvdb: 0}, library.Item{Arr: library.ArrRadarr}, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := align.Scope(&tt.item, &tt.rec).Kind == align.ScopeWholeSeries
-			if got != tt.want {
-				t.Errorf("Scope().Kind == ScopeWholeSeries = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 // decideWhole runs the shared decision for a whole-series item over the given
 // per-season groups.
 func decideWhole(seasons map[int][]string, best, alt []string) align.Decision {

@@ -1,6 +1,7 @@
 package release
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -606,5 +607,38 @@ func TestResolutionVocabularySingleHome(t *testing.T) {
 			t.Errorf("resolutionHeights[%d] = %q ranks %d, want strictly below the preceding entry's %d (documented highest-first order)", i, h, rank, prev)
 		}
 		prev = rank
+	}
+}
+
+// TestLowerLiteralPatternFoldsUppercaseTokens pins lowerLiteralPattern's
+// documented uppercase-token rule: a token spelled in uppercase must render
+// the same ToLower-faithful case class its lowercase spelling does, so a
+// marker token added to a vocabulary list in uppercase keeps matching every
+// real-world spelling. Every token in the current lists is already lowercase,
+// so the ASCII-uppercase fold at the top of the loop is exercised by nothing:
+// dropping it renders a case-SENSITIVE literal, and that whole marker family
+// silently stops classifying.
+func TestLowerLiteralPatternFoldsUppercaseTokens(t *testing.T) {
+	for _, token := range []string{"CRF", "BDRip", "X265", "H.264", "KBPS"} {
+		t.Run(token, func(t *testing.T) {
+			re := regexp.MustCompile(lowerLiteralPattern(token))
+			for _, spelling := range []string{
+				strings.ToLower(token), strings.ToUpper(token), token,
+			} {
+				if !re.MatchString(spelling) {
+					t.Errorf("lowerLiteralPattern(%q) does not match %q; an uppercase token must render the same case class its lowercase spelling does", token, spelling)
+				}
+			}
+		})
+	}
+	// The Unicode class members ride the fold too: an uppercase token's i and
+	// k classes must still admit the two runes strings.ToLower maps onto ASCII.
+	re := regexp.MustCompile(lowerLiteralPattern("KBPS"))
+	if !re.MatchString("\u212abps") {
+		t.Error("uppercase token KBPS does not admit U+212A KELVIN SIGN; the k class was lost with the fold")
+	}
+	re = regexp.MustCompile(lowerLiteralPattern("BDRIP"))
+	if !re.MatchString("bdr\u0130p") {
+		t.Error("uppercase token BDRIP does not admit U+0130; the i class was lost with the fold")
 	}
 }

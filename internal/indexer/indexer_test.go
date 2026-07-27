@@ -447,7 +447,7 @@ func TestIndexerEndToEnd(t *testing.T) {
 	// A real search (non-empty q) filters to the curation set loaded from the
 	// snapshot: the sample item matches by info hash, gets the best marker, and
 	// its real seeders pass through.
-	items, stats := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Some Anime"}}, "nyaa")
+	items, stats, _ := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Some Anime"}}, "nyaa")
 	if len(items) != 1 {
 		t.Fatalf("got %d items, want 1", len(items))
 	}
@@ -466,7 +466,7 @@ func TestIndexerEndToEnd(t *testing.T) {
 
 	// Per-tracker scoping (real search): the ab scope has no configured
 	// upstream, so it serves nothing (the nyaa scope is exercised above).
-	if got, _ := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Some Anime"}}, "ab"); len(got) != 0 {
+	if got, _, _ := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Some Anime"}}, "ab"); len(got) != 0 {
 		t.Errorf("ab scope returned %d items, want 0 (no ab upstream)", len(got))
 	}
 
@@ -474,7 +474,7 @@ func TestIndexerEndToEnd(t *testing.T) {
 	// the live search path: an empty-q request (an RSS "latest" fetch, or
 	// Prowlarr's save test) returns the curated Nyaa release, its title collapsed
 	// to the season, a directly-built .torrent link, and the best marker.
-	got, st := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
+	got, st, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
 	if len(got) != 1 || !st.feed {
 		t.Fatalf("empty-q feed returned %d items (feed=%v), want 1 synthesized item", len(got), st.feed)
 	}
@@ -562,9 +562,9 @@ func TestZeroUpstreamsProxiesNothing(t *testing.T) {
 	if len(ix.upstreams) != 0 {
 		t.Fatalf("zero Upstreams wired %d upstreams, want 0", len(ix.upstreams))
 	}
-	items, failed := ix.fetchRaw(context.Background(), url.Values{"q": {"anything"}}, upstreamNyaa)
-	if items != nil || failed {
-		t.Errorf("fetchRaw with no wired upstream = (%v, %v), want (nil, false)", items, failed)
+	items, fetched, failed := ix.fetchRaw(context.Background(), url.Values{"q": {"anything"}}, upstreamNyaa)
+	if items != nil || fetched != 0 || failed {
+		t.Errorf("fetchRaw with no wired upstream = (%v, %d, %v), want (nil, 0, false)", items, fetched, failed)
 	}
 }
 
@@ -577,7 +577,7 @@ func TestFeedWriterReload(t *testing.T) {
 	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, nil, Upstreams{})
 
 	// No snapshot yet: the empty-q feed serves nothing.
-	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
+	if got, _, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
 		t.Fatalf("pre-write feed = %d items, want 0", len(got))
 	}
 
@@ -596,7 +596,7 @@ func TestFeedWriterReload(t *testing.T) {
 	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
-	got, st := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
+	got, st, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
 	if len(got) != 1 || !st.feed {
 		t.Fatalf("post-write feed = %d items (feed=%v), want 1 reloaded item", len(got), st.feed)
 	}
@@ -1148,6 +1148,7 @@ func TestValidInfoHash(t *testing.T) {
 // a feed smaller than the default untouched and trims a larger one), and the
 // offset is applied before the limit.
 func TestApplyPaging(t *testing.T) {
+	pagingLog := slog.New(slog.NewTextHandler(io.Discard, nil))
 	feed := []item{{GUID: "a"}, {GUID: "b"}, {GUID: "c"}}
 	big := make([]item, defaultCapsLimit+3)
 	for i := range big {
@@ -1188,7 +1189,7 @@ func TestApplyPaging(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseQuery(%q): %v", tc.query, err)
 			}
-			got := applyPaging(tc.feed, q)
+			got := applyPaging(pagingLog, tc.feed, q)
 			if len(got) != len(tc.want) {
 				t.Fatalf("applyPaging(%q) returned %d items, want %d", tc.query, len(got), len(tc.want))
 			}
@@ -1311,22 +1312,22 @@ func TestSearchUsesConfiguredABUpstream(t *testing.T) {
 
 	ix := wiredIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, nil, srv.Client())
 
-	items, stats := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "ab")
+	items, stats, fault := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "ab")
 	if len(items) != 1 {
 		t.Fatalf("ab search returned %d items, want 1 (the AB upstream must be wired)", len(items))
 	}
 	if items[0].DownloadVolumeFactor != dvfBest {
 		t.Errorf("marker = %q, want %q (best)", items[0].DownloadVolumeFactor, dvfBest)
 	}
-	if !stats.answered || stats.upstreamFailed || stats.upstream != 1 || stats.curated != 1 {
-		t.Errorf("ab stats = %+v, want answered, no upstream failure, upstream 1, curated 1", stats)
+	if !stats.answered || fault != nil || stats.upstream != 1 || stats.curated != 1 {
+		t.Errorf("ab stats = %+v (fault=%+v), want answered, no fault, upstream 1, curated 1", stats, fault)
 	}
 
 	// The nyaa scope has no configured upstream: an empty result (a standing
 	// misconfiguration), never reported as an upstream failure.
-	nyaaItems, nyaaStats := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "nyaa")
-	if len(nyaaItems) != 0 || nyaaStats.upstreamFailed {
-		t.Errorf("nyaa scope = %d items (upstreamFailed=%v), want 0 items and no failure", len(nyaaItems), nyaaStats.upstreamFailed)
+	nyaaItems, _, nyaaFault := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "nyaa")
+	if len(nyaaItems) != 0 || nyaaFault != nil {
+		t.Errorf("nyaa scope = %d items (fault=%+v), want 0 items and no fault", len(nyaaItems), nyaaFault)
 	}
 }
 
@@ -1357,10 +1358,10 @@ func TestFeedForUnknownScopeServesNothing(t *testing.T) {
 }
 
 // TestNewCopiesConfig pins New's defensive Config snapshot, the invariant the
-// unlocked per-request cfg reads rest on (server.go's feed_api_key /
+// unlocked per-request config reads rest on (server.go's feed_api_key /
 // ab_torznab_url gates, query.go's per-scope upstream checks, reload.go's AB
-// passkey rebuild all read ix.cfg with no lock, safe only because it is a
-// by-value copy taken once in New). A caller that reuses or clears its Config
+// passkey rebuild all read the narrowed ix.apiKey / ix.enablement values with
+// no lock, safe only because they are by-value copies taken once in New). A caller that reuses or clears its Config
 // after construction must therefore change nothing the server serves: the
 // construction-time feed key still authorizes, and a CONFIGURED AnimeBytes
 // tracker still answers the missing-passkey nudge rather than the
@@ -1376,7 +1377,7 @@ func TestNewCopiesConfig(t *testing.T) {
 	rec := httptest.NewRecorder()
 	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=k", nil))
 	if rec.Code != http.StatusOK {
-		t.Errorf("caps after the caller blanked its APIKey = %d, want 200 (New must snapshot cfg by value)", rec.Code)
+		t.Errorf("caps after the caller blanked its APIKey = %d, want 200 (New must snapshot the config values by value)", rec.Code)
 	}
 
 	rec = httptest.NewRecorder()

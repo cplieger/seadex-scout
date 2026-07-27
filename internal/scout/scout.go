@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cplieger/httpx/v4"
+	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/degradation"
@@ -103,7 +104,7 @@ type Deps struct {
 	// concrete client (build.go injects a closure over the client's Stats);
 	// nil when no AniList client is wired (the early-return degradation paths
 	// and unit tests) - the daemon always wires it.
-	AniListStats func() (calls, rateLimitWaits int64)
+	AniListStats func() AniListStats
 	// Feed rebuilds and persists the indexer's Torznab feed from each cycle's
 	// SeaDex snapshot. Nil when no Torznab feed is configured (the cycle then
 	// skips all feed work).
@@ -150,6 +151,21 @@ const seadexFailureEscalationThreshold = degradation.EscalationThreshold
 // so it must alert instead of WARNing forever. Recovery is operator-free:
 // the first undegraded completed cycle resets the streak.
 const aniListDegradedEscalationThreshold = degradation.EscalationThreshold
+
+// partialWalkEscalationThreshold is the consecutive partial-walk completed-cycle
+// streak (state.State.PartialWalks) at which the scout escalates its
+// partial-walk log site from WARN to ERROR (firing the existing
+// SeadexScoutCycleError rule). It references degradation.EscalationThreshold -
+// the single home of the shared escalation policy its three sibling streaks
+// already ride. A partial walk must stay a WARN while it is a blip (the compare
+// ran on the clean items with the failed items' findings preserved), but a
+// series whose episode fetch keeps failing never self-heals: it freezes that
+// item's findings forever and, inside the cold-start window, keeps
+// state.BaselineIncomplete set on every cycle so NO finding is ever notified for
+// the whole library - and the one-shot report refuses a partial snapshot too, so
+// the operator has no fallback view either. Recovery is operator-free: the first
+// whole walk resets the streak.
+const partialWalkEscalationThreshold = degradation.EscalationThreshold
 
 // mappingRejectionEscalationThreshold is the consecutive guard-rejected
 // mapping-refresh streak (mapping.Cache.RejectedRefreshes, carried on
@@ -229,7 +245,8 @@ func (s *Scout) Cycle(ctx context.Context) bool {
 	// walk (see rebuildFeed): a notification and what the arrs see in the feed
 	// come from this one fetch. The persisted state (library titles + AniList
 	// memo) feeds only the title synthesis, never a fresh arr walk.
-	s.rebuildFeed(ctx, entries, idx, &st, mapErr, seaErr)
+	errs := cycleOutcomes{walk: walkErr, mapping: mapErr, seadex: seaErr}
+	s.rebuildFeed(ctx, entries, idx, &st, errs)
 
 	// From here the compare pass is gated on the arr walk (the health signal): a
 	// failed walk is unhealthy and leaves findings untouched (only the refreshed
@@ -237,7 +254,7 @@ func (s *Scout) Cycle(ctx context.Context) bool {
 	// pre-compare degradation gate (failed walk, unusable map, failed/empty
 	// SeaDex fetch) is factored into a helper so Cycle reads as the top-down
 	// happy path.
-	if handled, healthy := s.handlePreCompareGate(ctx, &st, snap, &mapCache, entries, walkErr, mapErr, seaErr); handled {
+	if handled, healthy := s.handlePreCompareGate(ctx, &st, snap, &mapCache, entries, errs); handled {
 		return healthy
 	}
 
@@ -311,6 +328,27 @@ func walkFailureAttrs(walkErr error) []any {
 	return attrs
 }
 
+// maxLoggedErrorBytes bounds an upstream error's rendered text before it
+// becomes a slog attribute value. It mirrors internal/mapping's constant of
+// the same name: the mapping loader already reduces every error it hands back
+// at its own boundary, and the SeaDex client does not, so the reduction is
+// applied here at the cycle's single SeaDex log site.
+const maxLoggedErrorBytes = 8 << 10
+
+// logSafeUpstreamError renders an upstream error as a bounded, single-line,
+// rune-sanitized error value. A SeaDex fetch failure can embed raw upstream
+// bytes (seadex/seadex.go's keyset-cursor arms format the rejected
+// created/id values with %q, and those values are only bounded by the 48 MB
+// page cap), so the value must be reduced before it crosses the log
+// boundary - the same reduction internal/mapping applies to its own errors.
+// An honest error passes through byte-identical.
+func logSafeUpstreamError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return errors.New(runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedErrorBytes))
+}
+
 // loadMapping refreshes the Fribb map from the persisted cache, logging a
 // degraded load once. A cancelled load is the shutdown, not a Fribb fault; the
 // pre-compare gate logs the interruption instead (same rule as the
@@ -362,22 +400,24 @@ func mappingDegradedAttrs(mapErr error, usableRecords, rejections int) []any {
 	return attrs
 }
 
-// aniListStats snapshots the AniList request counters (via Deps.AniListStats)
-// at a point in the cycle, so the completion line can log per-cycle deltas.
-type aniListStats struct {
-	calls          int64
-	rateLimitWaits int64
+// AniListStats are the AniList request counters the cycle completion line
+// logs cumulatively and per cycle. It is the seam's own named type
+// (Deps.AniListStats returns it), so the boundary carries the field names
+// rather than an anonymous same-typed pair a caller can transpose.
+type AniListStats struct {
+	Calls          int64
+	RateLimitWaits int64
 }
 
 // aniListCycleAttrs returns the cumulative and per-cycle AniList counters both
 // cycle completion paths log.
-func (s *Scout) aniListCycleAttrs(startStats aniListStats) []any {
+func (s *Scout) aniListCycleAttrs(startStats AniListStats) []any {
 	cur := s.aniStats()
 	return []any{
-		"anilist_calls", cur.calls,
-		"anilist_calls_cycle", cur.calls - startStats.calls,
-		"anilist_waits", cur.rateLimitWaits,
-		"anilist_waits_cycle", cur.rateLimitWaits - startStats.rateLimitWaits,
+		"anilist_calls", cur.Calls,
+		"anilist_calls_cycle", cur.Calls - startStats.Calls,
+		"anilist_waits", cur.RateLimitWaits,
+		"anilist_waits_cycle", cur.RateLimitWaits - startStats.RateLimitWaits,
 	}
 }
 
@@ -393,7 +433,7 @@ func (s *Scout) aniListCycleAttrs(startStats aniListStats) []any {
 // redeploy is not an ingest fault. A transient AniList degradation never lands
 // here - the completed match carries Result.IncompleteIDs and
 // finishCompletedCycle preserves exactly the affected entries' findings.
-func (s *Scout) finishInterruptedMatch(ctx context.Context, start time.Time, startStats aniListStats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, result match.Result) bool {
+func (s *Scout) finishInterruptedMatch(ctx context.Context, start time.Time, startStats AniListStats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, result match.Result) bool {
 	st.Library, st.Mapping, st.Memo = snap, *mapCache, result.Memo
 	s.save(ctx, st)
 	attrs := append(s.aniListCycleAttrs(startStats),
@@ -417,11 +457,19 @@ func (s *Scout) finishInterruptedMatch(ctx context.Context, start time.Time, sta
 // preservation set keeps their prior findings from resolving). During the
 // cold-start window a partial or AniList-degraded cycle seeds an incomplete
 // baseline instead (see the gate below). Always healthy.
-func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, startStats aniListStats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, result match.Result, mapErr error) bool {
+func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, startStats AniListStats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, result match.Result, mapErr error) bool {
 	cleanMatches, failedItems := splitFailedMatches(result.Matches)
 	findings := s.deps.Comparer.Compare(cleanMatches)
+	// A walk that returned NO items is not evidence a baseline covers the
+	// library: the shrink guard only fires against a populated prior snapshot,
+	// so an empty FIRST walk (an arr with nothing in it yet, or an
+	// arr_tags.include matching nothing) reaches here and would seed a
+	// "complete" empty baseline - then the cycle after the library appears
+	// bursts the whole pre-existing backlog as fresh notifications, exactly
+	// what the baseline exists to prevent. Seed it as incomplete instead.
+	incomplete := snap.Partial || result.Degraded || len(snap.Items) == 0
 	newFindings := s.reconcileFindings(st, findings,
-		unionIDs(failedItems, result.IncompleteIDs), snap.Partial || result.Degraded, time.Now())
+		unionIDs(failedItems, result.IncompleteIDs), incomplete, time.Now())
 
 	diff := library.DiffSnapshots(&st.Library, &snap)
 	attrs := make([]any, 0, 26)
@@ -437,6 +485,7 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 		"added", diff.Added, "removed", diff.Removed, "changed", diff.Changed,
 		"duration", time.Since(start).Round(time.Millisecond).String())
 	s.recordAniListDegradation(st, &result)
+	s.recordPartialWalk(st, &snap)
 	s.logCompletedCycle(&snap, &result, mapErr, failedItems, st.AniListDegraded, attrs)
 
 	st.Library, st.Mapping, st.Memo, st.Findings = snap, *mapCache, result.Memo, newFindings
@@ -501,6 +550,28 @@ func (s *Scout) recordAniListDegradation(st *state.State, result *match.Result) 
 		s.log.Error("anilist lookups degraded repeatedly; matching incomplete and findings frozen for affected entries - inspect graphql.anilist.co reachability and egress",
 			"incomplete_lookups", len(result.IncompleteIDs),
 			"consecutive_anilist_degraded", st.AniListDegraded)
+	}
+}
+
+// recordPartialWalk advances or resets the persisted partial-walk streak and
+// escalates a sustained partial ingest. It mirrors recordAniListDegradation
+// exactly: the streak advances/resets only on COMPLETED cycles (a gated or
+// interrupted cycle observed no walk verdict), it runs before the completion
+// line so the WARN and the escalated ERROR both carry the up-to-date streak,
+// and the persisted value rides the caller's save. Without it a single
+// permanently failing series is signalled only by the per-cycle
+// "reason=partial-walk" WARN forever - which in the cold-start window means
+// BaselineIncomplete is re-set every cycle and not one finding is ever
+// notified, the same never-self-healing silence the AniList streak escalates.
+func (s *Scout) recordPartialWalk(st *state.State, snap *library.Snapshot) {
+	if !snap.Partial {
+		st.PartialWalks = 0
+		return
+	}
+	st.PartialWalks++
+	if st.PartialWalks >= partialWalkEscalationThreshold {
+		s.log.Error("library walk partial repeatedly; the failing series never compare, the one-shot report refuses a partial snapshot, and during the cold-start window no finding is notified at all - inspect the arrs' episode endpoints for the skipped series",
+			"consecutive_partial_walks", st.PartialWalks)
 	}
 }
 
@@ -601,13 +672,13 @@ func mapUsable(mapErr error) bool {
 // (a load error that is NOT a mapping.StaleMapError) - the last-good feed is
 // then kept: rebuilding against an unusable map would categorize every entry as
 // anime and silently drop all SeaDex movies from Radarr's RSS view. A
-// stale-but-usable map (mapErr matches mapping.StaleMapError, which carries a
+// stale-but-usable map (errs.mapping matches mapping.StaleMapError, which carries a
 // usable cached index) still rebuilds, exactly like the pre-compare gate's
 // discrimination. The per-show metadata closure is built over PERSISTED state
 // (st's library snapshot and AniList memo, loaded at cycle start) - never this
 // cycle's walk - so the title synthesis inherits the same arr-independence.
-func (s *Scout) rebuildFeed(ctx context.Context, entries []seadex.Entry, idx *mapping.Index, st *state.State, mapErr, seaErr error) {
-	if s.deps.Feed == nil || seaErr != nil || len(entries) == 0 || !mapUsable(mapErr) {
+func (s *Scout) rebuildFeed(ctx context.Context, entries []seadex.Entry, idx *mapping.Index, st *state.State, errs cycleOutcomes) {
+	if s.deps.Feed == nil || errs.seadex != nil || len(entries) == 0 || !mapUsable(errs.mapping) {
 		return
 	}
 	info := feedEntryInfo(idx, &st.Library, st.Memo)
@@ -638,23 +709,33 @@ func (s *Scout) logFeedOutageOnGatedCycle(ctx context.Context, entries []seadex.
 
 // --- pre-compare gates ---
 
+// cycleOutcomes carries one cycle's three independent ingest/upstream results so
+// the gate helpers read them by NAME: three same-typed positional error
+// parameters compile in any order, and a transposition silently swaps which gate
+// fires.
+type cycleOutcomes struct {
+	walk    error
+	mapping error
+	seadex  error
+}
+
 // handlePreCompareGate applies the pre-compare degradation gate: it reports
 // whether the cycle should stop before the compare pass (handled) and, when it
 // should, the health outcome to return. The library gate (failed walk,
 // suspicious shrunken walk) runs first, then the upstream gate
 // (shutdown cancellation, unusable map, failed/empty SeaDex fetch); see each
-// helper for the per-branch policy. A stale-but-usable map (mapErr matches
+// helper for the per-branch policy. A stale-but-usable map (errs.mapping matches
 // mapping.StaleMapError) is degraded-but-comparable and flows into the normal
 // compare path (handled=false).
-func (s *Scout) handlePreCompareGate(ctx context.Context, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, walkErr, mapErr, seaErr error) (handled, healthy bool) {
+func (s *Scout) handlePreCompareGate(ctx context.Context, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, errs cycleOutcomes) (handled, healthy bool) {
 	// Record the SeaDex fetch outcome (and log a failure) exactly once, before
 	// the mutually exclusive gates below pick a winner: gate precedence must
 	// not decide whether an observed SeaDex outage exists in persisted state.
-	s.recordSeaDexFetch(ctx, st, seaErr)
-	if handled, healthy := s.handleLibraryGate(ctx, st, snap, mapCache, entries, walkErr, seaErr); handled {
+	s.recordSeaDexFetch(ctx, st, errs.seadex)
+	if handled, healthy := s.handleLibraryGate(ctx, st, snap, mapCache, entries, errs); handled {
 		return true, healthy
 	}
-	return s.handleUpstreamGate(ctx, st, snap, mapCache, entries, mapErr, seaErr)
+	return s.handleUpstreamGate(ctx, st, snap, mapCache, entries, errs)
 }
 
 // recordSeaDexFetch records the cycle's SeaDex fetch outcome in the persisted
@@ -685,7 +766,7 @@ func (s *Scout) recordSeaDexFetch(ctx context.Context, st *state.State, seaErr e
 	// keeps an upstream blip off the alert. Both levels carry the streak so
 	// Loki can see how long the outage has run.
 	st.SeadexFailures++
-	attrs := []any{attrError, seaErr, "consecutive_seadex_failures", st.SeadexFailures, "feed_kept", s.deps.Feed != nil}
+	attrs := []any{attrError, logSafeUpstreamError(seaErr), "consecutive_seadex_failures", st.SeadexFailures, "feed_kept", s.deps.Feed != nil}
 	if st.SeadexFailures >= seadexFailureEscalationThreshold {
 		s.log.Error("seadex fetch failed repeatedly; skipping comparison, findings preserved - inspect SeaDex (releases.moe) reachability and egress", attrs...)
 	} else {
@@ -706,8 +787,8 @@ func (s *Scout) recordSeaDexFetch(ctx context.Context, st *state.State, seaErr e
 // partial snapshot (per-series episode-fetch failures) is NOT gated here: the
 // compare proceeds on the items that walked cleanly, with the Failed items'
 // findings preserved by resolution scoping (see finishCompletedCycle).
-func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, walkErr, seaErr error) (handled, healthy bool) {
-	if walkErr != nil {
+func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, errs cycleOutcomes) (handled, healthy bool) {
+	if errs.walk != nil {
 		// With a feed configured, Cycle fell through the walk failure so the
 		// arr-independent feed could still refresh. If SeaDex ALSO failed (or
 		// returned nothing), rebuildFeed silently kept the previous feed and this
@@ -715,7 +796,7 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap lib
 		// multi-dependency outage does not read as arr-only. Single SeaDex
 		// failures (walk healthy) keep their own WARNs in the upstream gate, so
 		// no duplicates.
-		s.logFeedOutageOnGatedCycle(ctx, entries, seaErr)
+		s.logFeedOutageOnGatedCycle(ctx, entries, errs.seadex)
 		// Persist only the refreshed mapping cache, like the shrunk-walk arm
 		// below: discarding it re-downloads an updated Fribb body next cycle.
 		// Findings, memo, and the prior library snapshot ride along untouched
@@ -735,7 +816,7 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap lib
 			// stopAfterWalkFailure's log sites: the walk error may embed a
 			// credential-bearing request URL, and the reduced error alone
 			// does not name the failed arr.
-			s.cycleDegraded("walk-failed", walkFailureAttrs(walkErr)...)
+			s.cycleDegraded("walk-failed", walkFailureAttrs(errs.walk)...)
 		}
 		return true, false
 	}
@@ -744,7 +825,7 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap lib
 		// rebuildFeed already ran: if SeaDex ALSO failed (or returned
 		// nothing), the previous feed was silently kept - surface it so a
 		// shrink + SeaDex double outage does not read as shrink-only.
-		s.logFeedOutageOnGatedCycle(ctx, entries, seaErr)
+		s.logFeedOutageOnGatedCycle(ctx, entries, errs.seadex)
 		// A non-failed walk that shrank far below the prior snapshot
 		// (zero items, or a misconfigured arr_tags.include leaving a handful)
 		// would mass-resolve most findings. Do NOT degradedSave here:
@@ -804,8 +885,8 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap lib
 // this arm only saves, emits the completion line, and returns. A shutdown
 // cancellation during the load or fetch is attributed to the shutdown, not
 // the upstream.
-func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, mapErr, seaErr error) (handled, healthy bool) {
-	if ctx.Err() != nil && (mapErr != nil || seaErr != nil) {
+func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, errs cycleOutcomes) (handled, healthy bool) {
+	if ctx.Err() != nil && (errs.mapping != nil || errs.seadex != nil) {
 		// A shutdown/redeploy cancelled the cycle during the mapping load or
 		// SeaDex fetch: the errors are the cancellation, not an upstream fault.
 		// Preserve findings exactly like an upstream outage (degradedSave) but
@@ -818,24 +899,24 @@ func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap li
 			"cause", context.Cause(ctx))
 		return true, true
 	}
-	if !mapUsable(mapErr) {
+	if !mapUsable(errs.mapping) {
 		// Like the walk-failed and shrunk-walk arms, this gate closes the
-		// cycle before the seaErr arm below: if SeaDex ALSO failed (or
+		// cycle before the errs.seadex arm below: if SeaDex ALSO failed (or
 		// returned nothing), rebuildFeed silently kept the previous feed -
 		// surface it so a mapping + SeaDex double outage does not read as
 		// mapping-only.
-		s.logFeedOutageOnGatedCycle(ctx, entries, seaErr)
+		s.logFeedOutageOnGatedCycle(ctx, entries, errs.seadex)
 		s.degradedSave(ctx, st, snap, mapCache)
-		s.log.Warn("mapping unusable; skipping comparison, findings preserved", "error", mapErr)
-		s.cycleDegraded("mapping-unusable", "error", mapErr)
+		s.log.Warn("mapping unusable; skipping comparison, findings preserved", "error", errs.mapping)
+		s.cycleDegraded("mapping-unusable", "error", errs.mapping)
 		return true, true
 	}
-	if seaErr != nil {
+	if errs.seadex != nil {
 		// The failure was already recorded and logged once by
 		// recordSeaDexFetch (ahead of gate selection), so this arm only owns
 		// the degraded save, the completion line, and the verdict.
 		s.degradedSave(ctx, st, snap, mapCache)
-		s.cycleDegraded("seadex-fetch-failed", "error", seaErr)
+		s.cycleDegraded("seadex-fetch-failed", "error", logSafeUpstreamError(errs.seadex))
 		return true, true
 	}
 	if len(entries) == 0 {
@@ -980,12 +1061,11 @@ func (s *Scout) Report(ctx context.Context) (audit.Report, error) {
 // aniStats returns the AniList client's cumulative stats via the injected
 // callback, or zero stats when none is wired (the early-return degradation
 // paths and unit tests build Deps without one; the daemon always wires it).
-func (s *Scout) aniStats() aniListStats {
+func (s *Scout) aniStats() AniListStats {
 	if s.deps.AniListStats == nil {
-		return aniListStats{}
+		return AniListStats{}
 	}
-	calls, waits := s.deps.AniListStats()
-	return aniListStats{calls: calls, rateLimitWaits: waits}
+	return s.deps.AniListStats()
 }
 
 // loadState loads persisted state, falling back to an empty state on error.

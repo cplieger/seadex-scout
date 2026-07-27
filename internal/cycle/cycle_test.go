@@ -45,6 +45,32 @@ func TestRunCyclePanicShield(t *testing.T) {
 	}
 }
 
+// TestRunCyclePanicIsLoggedAtError pins the panic shield's operator signal, the
+// only report a swallowed panic gets: recovering the panic keeps the daemon
+// alive, so without the ERROR line (the level alerts.yaml's
+// SeadexScoutCycleError rule keys on, and which its description names as "a
+// panicked run") a cycle panicking on every tick would be invisible beyond the
+// health flip. The panic value and the stack ride along as attributes because
+// they are the only diagnosis a recovered panic leaves. Serial (capture swaps
+// slog.Default).
+func TestRunCyclePanicIsLoggedAtError(t *testing.T) {
+	rec := capture.Default(t)
+
+	if healthy := runCycle(context.Background(), panicCycler{}); healthy {
+		t.Error("runCycle(panicking cycle) = healthy, want unhealthy")
+	}
+
+	if got := rec.CountLevel(slog.LevelError, "cycle panicked"); got != 1 {
+		t.Fatalf("cycle-panicked ERROR count = %d, want 1: %v", got, rec.Messages())
+	}
+	if !rec.HasAttr("cycle panicked", "panic", "boom") {
+		t.Errorf("panic value attr missing; a recovered panic must name what panicked: %v", rec.Records())
+	}
+	if !rec.AttrContains("cycle panicked", "stack", "runCycle") {
+		t.Errorf("stack attr missing the panicking frame; it is the only diagnosis left: %v", rec.Records())
+	}
+}
+
 // cancelCycler cancels the poll context during the cycle and returns the
 // configured outcome, simulating a shutdown signal landing mid-cycle (cycle
 // reports unhealthy) or during the end-of-cycle save (cycle still completed
@@ -754,8 +780,9 @@ func TestRunOnceLogsQueuedRerunFailure(t *testing.T) {
 	if !rec.Contains("queued rerun cycle reported an error") {
 		t.Errorf("missing queued-rerun error warning: %v", rec.Messages())
 	}
-	// The marker records the LAST run's verdict, not this invocation's own:
-	// RunOnce commits the queued rerun's unhealthy cycle after Run returns.
+	// The marker records the LAST run's verdict, not this invocation's own: each
+	// execution commits its own verdict inside the locked body, so the queued
+	// rerun's unhealthy cycle is the last one published.
 	if marker.Healthy() {
 		t.Error("marker healthy after the queued rerun's unhealthy cycle: RunOnce must record the last run's verdict")
 	}
@@ -902,12 +929,14 @@ func TestRunLoopQueueErrorAfterRun(t *testing.T) {
 }
 
 // TestInterruptedClassifiesNonCanceledCause pins poll's interruption
-// classification against the production signal path: Go 1.26's
-// signal.NotifyContext cancels with a bare signalError cause that does NOT
-// satisfy errors.Is(_, context.Canceled), so Interrupted must wrap the
-// stable ctx.Err() for main's routine-shutdown WARN classification while the
-// cause stays errors.Is-able for diagnostics. Mirrored here with
-// context.WithCancelCause and a non-Canceled cause.
+// classification against a cancellation cause that does NOT itself wrap
+// context.Canceled. A WithCancelCause cause is whatever the cancelling site
+// passed, so only ctx.Err() is guaranteed to be context.Canceled (Go 1.26's
+// signal.NotifyContext cause happens to satisfy errors.Is via signalError.Is,
+// but a cause in general - and net/http, which surfaces context.Cause
+// verbatim - does not). Interrupted must therefore wrap the stable ctx.Err()
+// for main's routine-shutdown WARN classification while the cause stays
+// errors.Is-able for diagnostics.
 func TestInterruptedClassifiesNonCanceledCause(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	cause := errors.New("terminated signal received")
@@ -923,8 +952,8 @@ func TestInterruptedClassifiesNonCanceledCause(t *testing.T) {
 	}
 }
 
-// TestRunOnceMarkerWriteFailure pins recordPollHealth's marker-write failure
-// branch - the write RunOnce commits after Exclusive.Run returns: the marker
+// TestRunOnceMarkerWriteFailure pins recordRunHealth's marker-write failure
+// branch - the write RunOnce commits from inside the locked job body: the marker
 // directory is present at construction (so the marker
 // does not enter its degraded no-op mode) and is then replaced by a regular
 // file, so SetChecked reaches its transient-error return for every UID
@@ -1139,5 +1168,80 @@ func TestNormalizeShutdownErrorClassifiesCauseOnlyForm(t *testing.T) {
 				t.Errorf("NormalizeShutdownError(%v) = %v, want the original error still in the chain", tt.err, got)
 			}
 		})
+	}
+}
+
+// markerBreakingCycler queues demand from another process on its first run (so
+// Exclusive services a rerun) and then breaks the shared marker's parent
+// directory just before the RERUN's health write, exercising the queued-rerun
+// leg of recordRunHealth's write-failure branch.
+type markerBreakingCycler struct {
+	t         *testing.T
+	dir       string
+	markerDir string
+	calls     *int
+}
+
+func (c markerBreakingCycler) Cycle(context.Context) bool {
+	*c.calls++
+	if *c.calls == 1 {
+		exB := testExclusiveIn(c.t, context.Background(), c.dir)
+		marker := health.NewMarker(filepath.Join(c.t.TempDir(), ".healthy"))
+		if err := RunOnce(context.Background(), exB, mustNotRunCycler{t: c.t}, marker); err != nil {
+			c.t.Errorf("queued requester RunOnce = %v, want nil", err)
+		}
+		return true
+	}
+	// Replace the marker's directory with a regular file so SetChecked fails
+	// for every UID (root-safe, unlike a read-only-dir chmod).
+	if err := os.RemoveAll(c.markerDir); err != nil {
+		c.t.Errorf("clear marker dir: %v", err)
+	}
+	if err := os.WriteFile(c.markerDir, []byte("blocker"), 0o600); err != nil {
+		c.t.Errorf("block marker dir: %v", err)
+	}
+	return true
+}
+
+// TestRunOnceQueuedRerunMarkerWriteFailure pins the queued-rerun leg of
+// recordRunHealth's marker-write failure, the one fault whose ONLY report is
+// its log line: the verdict came from another process's queued demand, so there
+// is no exit code to surface through, and the write does not self-heal (a full
+// disk or a bad mode on /tmp keeps failing until the operator acts). It must
+// therefore log at ERROR - the level alerts.yaml's SeadexScoutCycleError rule
+// keys on, and which that rule's description names by this exact message -
+// while this invocation's own healthy run still exits 0 and the failure is not
+// re-reported as a cycle fault. Serial (capture swaps slog.Default).
+func TestRunOnceQueuedRerunMarkerWriteFailure(t *testing.T) {
+	rec := capture.Default(t)
+	ctx := t.Context()
+	dir := t.TempDir()
+	ex := testExclusiveIn(t, ctx, dir)
+	markerDir := filepath.Join(t.TempDir(), "marker-dir")
+	if err := os.Mkdir(markerDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := health.NewMarker(filepath.Join(markerDir, ".healthy"))
+	var calls int
+
+	err := RunOnce(ctx, ex, markerBreakingCycler{t: t, dir: dir, markerDir: markerDir, calls: &calls}, marker)
+	if err != nil {
+		t.Fatalf("RunOnce = %v, want nil: a queued rerun's marker-write failure has no exit code to report through and must not fail this invocation's own healthy run", err)
+	}
+	if calls != 2 {
+		t.Fatalf("cycle calls = %d, want 2 (the own run plus the queued rerun)", calls)
+	}
+	const msg = "queued rerun could not record poll health"
+	if got := rec.CountLevel(slog.LevelError, msg); got != 1 {
+		t.Errorf("queued-rerun marker-failure ERROR count = %d, want 1 (alerts.yaml names this message as an operator-actionable fault): %v", got, rec.Messages())
+	}
+	if !rec.AttrContains(msg, "error", "record poll health") {
+		t.Errorf("ERROR line lost the wrapped record-poll-health cause: %v", rec.Records())
+	}
+	// The write failure is reported once, by its own ERROR: returning it as the
+	// rerun's cycle error instead would re-report it as a cycle fault, which is
+	// a different class (a cycle fault logs its own ERROR inside Cycle).
+	if got := rec.CountExact("queued rerun cycle reported an error"); got != 0 {
+		t.Errorf("queued-rerun cycle-error WARN count = %d, want 0: a marker-write failure is not a cycle fault: %v", got, rec.Messages())
 	}
 }

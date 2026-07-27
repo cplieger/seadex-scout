@@ -9,7 +9,10 @@ import (
 )
 
 // boundedTrackerID reports whether id is a non-empty, width-bounded run of
-// ASCII digits - the id-validity contract of validTrackerID. The digit test is
+// ASCII digits - the charset/width half of validTrackerID's contract (it
+// deliberately does not re-assert the canonical-decimal-form rule, which
+// TestTrackerIDExtractionRejectsNonCanonicalDecimalForms pins, so this stays a
+// necessary condition on every returned id). The digit test is
 // an INDEPENDENT oracle (strings.Trim), never the production isAllDigits
 // helper: sharing that helper would let a mutation loosening it govern both
 // the code under test and the assertion, so a parser admitting a non-digit id
@@ -62,7 +65,10 @@ func FuzzExtractID_roundTripsNumericIDs(f *testing.F) {
 	f.Add(byte(3), byte(7))
 	f.Add(byte(0), byte(0))
 	f.Fuzz(func(t *testing.T, digit, width byte) {
-		id := strings.Repeat(string(rune('0'+digit%10)), int(width)%maxTrackerIDDigits+1)
+		// Digits 1-9 only: a leading zero is a non-canonical decimal form that
+		// validTrackerID fails closed on by design (one torrent must not key
+		// under two identity strings), so it belongs to the rejection side.
+		id := strings.Repeat(string(rune('1'+digit%9)), int(width)%maxTrackerIDDigits+1)
 		for _, tc := range []struct {
 			raw, needle string
 		}{
@@ -116,6 +122,7 @@ func FuzzTrackerKey_keysOnlyTrackerOwnCanonicalURLs(f *testing.F) {
 	f.Add("AB", "https://animebytes.tv/torrent/1167293/group")
 	f.Add("Nyaa", "https://evil.example/view/123")
 	f.Add("Nyaa", "https://sukebei.nyaa.si/view/123")
+	f.Add("Nyaa", "https://nyaa.si./view/123")
 	f.Add("AnimeTosho", "https://animetosho.org/view/1")
 	f.Add("AB", "javascript:/torrents.php?torrentid=456")
 	f.Fuzz(func(t *testing.T, tracker, raw string) {
@@ -134,14 +141,20 @@ func FuzzTrackerKey_keysOnlyTrackerOwnCanonicalURLs(f *testing.F) {
 		// evidence to urlform, l-f162), so pinning the old reading here would
 		// re-assert the divergence the adoption removed.
 		f := urlform.Classify(raw)
+		// A trailing DNS-root dot is the fully-qualified spelling of the same
+		// canonical host: release.LookupTrackerByHost tolerates it and
+		// isCanonicalTrackerHost trims it, so trackerKey legitimately keys
+		// "https://nyaa.si./view/1". The oracle must normalize the same way or a
+		// legitimate input is reported as a crasher.
+		host := strings.TrimSuffix(f.Host, ".")
 		switch scope {
 		case upstreamNyaa:
-			if f.Class != urlform.ClassAbsolute || f.Host != "nyaa.si" {
+			if f.Class != urlform.ClassAbsolute || host != "nyaa.si" {
 				t.Fatalf("nyaa key %q minted from %q (class %v, host %q), want an absolute URL on exactly nyaa.si",
 					key, raw, f.Class, f.Host)
 			}
 		case upstreamAB:
-			absoluteCanonical := f.Class == urlform.ClassAbsolute && f.Host == "animebytes.tv"
+			absoluteCanonical := f.Class == urlform.ClassAbsolute && host == "animebytes.tv"
 			rootedRelative := f.Class == urlform.ClassRelative && f.Host == ""
 			if !absoluteCanonical && !rootedRelative {
 				t.Fatalf("ab key %q minted from %q (class %v, host %q), want the canonical host or a rooted relative reference",

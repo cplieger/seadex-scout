@@ -68,6 +68,34 @@ func TestRedactingHandlerRedactsAttachedAndGroupedAttrs(t *testing.T) {
 	})
 }
 
+// nilReceiverError is an error whose Error() dereferences its receiver, so a
+// typed-nil value of it panics when Error() is called. slog itself never calls
+// it (fmt recovers a nil-receiver panic and renders "<nil>"), which is exactly
+// why the redacting handler must not call it either.
+type nilReceiverError struct{ msg string }
+
+func (e *nilReceiverError) Error() string { return e.msg }
+
+// TestRedactingHandlerPassesTypedNilErrorThrough pins the typed-nil guard in
+// redactAttr (isNilErrValue): a KindAny attribute holding a non-nil error
+// interface over a nil pointer must be forwarded untouched, because redacting
+// it would call Error() on a nil receiver and panic inside the report
+// pipeline's own logger - taking down the report run rather than logging it.
+// Nothing else in the suite constructs one, so dropping the guard as a
+// simplification stays green today.
+func TestRedactingHandlerPassesTypedNilErrorThrough(t *testing.T) {
+	const dir = "/config/sekret-passkey-sentinel"
+	var typedNil *nilReceiverError
+	var buf bytes.Buffer
+	log := redactingLogger(slog.New(slog.NewJSONHandler(&buf, nil)), dir)
+
+	log.Info("typed nil error attr", "error", error(typedNil))
+
+	if got, want := buf.String(), `"error":"<nil>"`; !strings.Contains(got, want) {
+		t.Errorf("record = %s, want the typed-nil error attr forwarded as %s", got, want)
+	}
+}
+
 // TestRedactingHandlerRedactsRecordMessage pins the Record.Message half of
 // the redaction contract, which every other handler test misses: the suite
 // above only places the dir in attached, grouped, or inline attributes, so a

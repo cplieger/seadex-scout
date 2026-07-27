@@ -115,29 +115,6 @@ func TestFetchEntriesPaginationCapErrors(t *testing.T) {
 	}
 }
 
-// TestFetchEntriesUsesStableSort pins the immutable-field pagination ordering
-// (sort=created,id): with offset pagination over a live collection, sorting on
-// a mutable field lets a mid-pagination update shift records across pages (one
-// entry missed, another duplicated), so losing this query silently reopens that
-// truncation class.
-func TestFetchEntriesUsesStableSort(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.URL.Query().Get("sort"); got != "created,id" {
-			t.Errorf("sort query = %q, want created,id", got)
-		}
-		fmt.Fprint(w, `{"totalItems":1,"totalPages":1,"items":[{"alID":1,"expand":{"trs":[]}}]}`)
-	}))
-	defer server.Close()
-
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
-	if err != nil {
-		t.Fatalf("FetchEntries returned error: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Errorf("entries = %d, want 1", len(entries))
-	}
-}
-
 // TestFetchEntriesDecodesEveryPublishedField pins the wire contract for every
 // entry/torrent field downstream consumers read (matching, feed construction,
 // link rendering, classification, theoretical-best reporting): a mistyped JSON

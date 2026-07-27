@@ -165,16 +165,16 @@ func TestTmdbID_badInteriorTolerated(t *testing.T) {
 	}
 }
 
-// TestOffsetPair_malformedObjectTolerated pins the object branch's tolerance:
-// syntactically broken object bytes decode to a zero offsetPair (SeasonTvdb 0,
+// TestSeasonObject_malformedObjectTolerated pins the object branch's tolerance:
+// syntactically broken object bytes decode to a zero seasonObject (SeasonTvdb 0,
 // the whole-series/season-0 fallback) with a nil error rather than failing.
-func TestOffsetPair_malformedObjectTolerated(t *testing.T) {
-	var o offsetPair
+func TestSeasonObject_malformedObjectTolerated(t *testing.T) {
+	var o seasonObject
 	if err := o.UnmarshalJSON([]byte(`{"tvdb":`)); err != nil {
 		t.Fatalf("UnmarshalJSON(malformed object) error: %v", err)
 	}
 	if o.tvdbOrZero() != 0 {
-		t.Errorf("offsetPair(malformed object).tvdbOrZero() = %d, want 0", o.tvdbOrZero())
+		t.Errorf("seasonObject(malformed object).tvdbOrZero() = %d, want 0", o.tvdbOrZero())
 	}
 }
 
@@ -234,12 +234,12 @@ func TestTolerantDecoders_resetOnReuse(t *testing.T) {
 		t.Errorf("tmdbID reused with odd value = %+v, %v, want reset to empty, nil", tm, err)
 	}
 
-	var o offsetPair
+	var o seasonObject
 	if err := o.UnmarshalJSON([]byte(`{"tvdb":3}`)); err != nil || o.tvdbOrZero() != 3 {
-		t.Fatalf("offsetPair first decode = %+v, %v, want tvdb 3, nil", o, err)
+		t.Fatalf("seasonObject first decode = %+v, %v, want tvdb 3, nil", o, err)
 	}
 	if err := o.UnmarshalJSON([]byte(`4`)); err != nil || o.tvdbOrZero() != 0 {
-		t.Errorf("offsetPair reused with odd value = %+v, %v, want reset to zero, nil", o, err)
+		t.Errorf("seasonObject reused with odd value = %+v, %v, want reset to zero, nil", o, err)
 	}
 }
 

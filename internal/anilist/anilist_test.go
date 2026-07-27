@@ -685,3 +685,35 @@ func TestParseMediaRejectsUnknownFormatAsTypeEvidence(t *testing.T) {
 		})
 	}
 }
+
+// TestParseMediaRejectionsWrapErrRecordUnusable pins the PRODUCER half of the
+// permanent-vs-transient classification contract. Every toMedia rejection is a
+// function of the record's own content, so match.lookup memoizes it negatively
+// and resets the degradation streak (errors.Is(err, anilist.ErrRecordUnusable));
+// a rejection that surfaced as a plain error would instead be re-fetched every
+// cycle forever, keep Result.Degraded true, and escalate to a standing ERROR
+// whose remediation text points at graphql.anilist.co reachability that is
+// healthy. The consumer's own test constructs the sentinel by hand, so nothing
+// else in the tree fails if this package stops wrapping it.
+func TestParseMediaRejectionsWrapErrRecordUnusable(t *testing.T) {
+	tests := map[string]string{
+		"over-limit title":             `{"data":{"Media":{"format":"TV","title":{"romaji":"` + strings.Repeat("a", maxTitleBytes+1) + `"}}}}`,
+		"unsafe title text":            `{"data":{"Media":{"format":"TV","title":{"romaji":"A\nB","english":"Safe"}}}}`,
+		"over-limit format":            `{"data":{"Media":{"format":"` + strings.Repeat("F", maxFormatBytes+1) + `","title":{"romaji":"A"}}}}`,
+		"unsafe format text":           `{"data":{"Media":{"format":"TV\n","title":{"romaji":"A"}}}}`,
+		"no usable title":              `{"data":{"Media":{"format":"TV","title":{"romaji":" ","english":""}}}}`,
+		"no matchable title key":       `{"data":{"Media":{"format":"TV","title":{"romaji":"!!!"}}}}`,
+		"native-script-only title set": `{"data":{"Media":{"format":"TV","title":{"native":"\u4e16\u754c"}}}}`,
+	}
+	for name, raw := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := parseMedia([]byte(raw))
+			if !errors.Is(err, ErrRecordUnusable) {
+				t.Fatalf("parseMedia = %v, want ErrRecordUnusable (a plain error re-fetches the record every cycle forever)", err)
+			}
+			if errors.Is(err, ErrNotFound) {
+				t.Errorf("parseMedia = %v, must not also classify as ErrNotFound", err)
+			}
+		})
+	}
+}

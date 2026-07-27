@@ -24,11 +24,18 @@ import (
 // MaxBytes is the per-attribute volume budget every untrusted value is
 // rendered under. It mirrors keyenc.MaxComponentBytes - the bound the
 // dedupe-key path already applies to the same SeaDex data - so one hostile
-// entry cannot balloon a Loki record past the pipeline's line limit (which
-// would suppress the very finding an alert keys on) or amplify memory in the
-// 256 MiB container. It is declared here rather than imported so this package
-// stays a dependency-free leaf; keyenc's constant is the sibling value it is
-// kept equal to.
+// entry cannot amplify memory in the 256 MiB container.
+//
+// The bound is PER ATTRIBUTE, not per record: a record's worst case is its
+// untrusted-attribute count times this budget plus one TruncMarker each
+// (notify.findingKVs emits 14 such attributes, so ~112 KiB). Adding an
+// untrusted attribute therefore raises the record ceiling, and past the log
+// pipeline's line limit the WHOLE record is dropped - suppressing the very
+// finding an alert keys on. Check the record budget when adding one.
+//
+// It is declared here rather than imported so this package stays a
+// dependency-free leaf; keyenc's constant is the sibling value it is kept
+// equal to (pinned by TestMaxBytesMirrorsKeyencBudget).
 const MaxBytes = 8 << 10
 
 // TruncMarker is the suffix a truncated value carries, so a reader can tell a

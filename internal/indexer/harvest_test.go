@@ -607,7 +607,7 @@ func TestHarvestPrunesStalePagesWithNoPendingGroups(t *testing.T) {
 	}, nil, srv.Client())
 
 	stale := encodeHarvestCheckpoint(harvestCheckpoint{Pages: map[string]int{"nyaa:7": 3}})
-	_, cursor := w.harvestTitles(t.Context(), map[string][]journalItem{}, map[string]string{},
+	_, cursor := w.harvest.harvestTitles(t.Context(), map[string][]journalItem{}, map[string]string{},
 		func(int) EntryInfo { return EntryInfo{} }, stale)
 	if cp := decodeHarvestCheckpoint(cursor); len(cp.Pages) != 0 {
 		t.Fatalf("checkpoint pages = %v, want stale page state pruned on the no-pending rebuild", cp.Pages)
@@ -616,7 +616,7 @@ func TestHarvestPrunesStalePagesWithNoPendingGroups(t *testing.T) {
 	feeds := map[string][]journalItem{
 		upstreamNyaa: {{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7}},
 	}
-	w.harvestTitles(t.Context(), feeds, map[string]string{},
+	w.harvest.harvestTitles(t.Context(), feeds, map[string]string{},
 		func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }, cursor)
 	if mock.calls() == 0 {
 		t.Fatal("no harvest query fired for the re-pending group")
@@ -895,7 +895,7 @@ func TestHarvestCancellationMidQueryIsNotWarnedAsUpstreamFault(t *testing.T) {
 		upstreamNyaa: {{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7}},
 	}
 	titles := map[string]string{}
-	stats, _ := w.harvestTitles(ctx, feeds, titles, func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }, "")
+	stats, _ := w.harvest.harvestTitles(ctx, feeds, titles, func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }, "")
 	if len(titles) != 0 {
 		t.Errorf("titles = %v, want empty (cancelled harvest must cache nothing)", titles)
 	}
@@ -1029,7 +1029,7 @@ func TestHarvestMalformedResponsesLatchAtThreshold(t *testing.T) {
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, log, srv.Client())
 	titles := map[string]string{}
-	stats, _ := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
+	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
 	if stats.queries != 3 {
 		t.Errorf("harvest queries = %d, want 3 (the third consecutive malformed show latches the scope)", stats.queries)
@@ -1074,7 +1074,7 @@ func TestHarvestMatchesHashlessRecordAgainstHashBearingResult(t *testing.T) {
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, log, srv.Client())
 	titles := map[string]string{}
-	stats, _ := w.harvestTitles(t.Context(), feeds, titles,
+	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles,
 		func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }, "")
 
 	if got, want := titles["nyaa:42"], "[SubsPlease] Show - S01 (1080p)"; got != want {
@@ -1118,7 +1118,7 @@ func TestHarvestReportsContradictoryResults(t *testing.T) {
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, log, srv.Client())
 	titles := map[string]string{}
-	stats, _ := w.harvestTitles(t.Context(), feeds, titles,
+	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles,
 		func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }, "")
 
 	if len(titles) != 0 {
@@ -1170,7 +1170,7 @@ func TestHarvestRejectedResponsesLatchAtThreshold(t *testing.T) {
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, log, srv.Client())
 	titles := map[string]string{}
-	stats, _ := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
+	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
 	if stats.queries != 3 {
 		t.Errorf("harvest queries = %d, want 3 (the third consecutive rejected show latches the scope)", stats.queries)
@@ -1223,7 +1223,7 @@ func TestHarvestMalformedResponseRunResetsAfterSuccessfulPage(t *testing.T) {
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, log, srv.Client())
 	titles := map[string]string{}
-	stats, _ := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
+	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
 	if stats.queries != 6 {
 		t.Errorf("harvest queries = %d, want 6 (a successful empty page resets the malformed run)", stats.queries)
@@ -1262,7 +1262,7 @@ func TestHarvestOpportunisticMatchSkipsSatisfiedGroup(t *testing.T) {
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, log, srv.Client())
 	titles := map[string]string{}
-	stats, _ := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
+	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
 	if mock.calls() != 1 || stats.queries != 1 {
 		t.Errorf("harvest queries = %d (HTTP calls %d), want 1 (the satisfied group must be skipped without a query)", stats.queries, mock.calls())
@@ -1316,7 +1316,7 @@ func TestHarvestRequestRejectionResetsMalformedRun(t *testing.T) {
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, log, srv.Client())
 	titles := map[string]string{}
-	stats, _ := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
+	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
 	if stats.queries != 6 {
 		t.Errorf("harvest queries = %d, want 6 (a request-scoped rejection must reset the malformed run like a success)", stats.queries)
@@ -1345,18 +1345,15 @@ func TestUpdateHarvestScopeState_resetsRejectedRun(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			log, _ := capture.New()
 			w := NewFeedWriter(&FeedWriterConfig{}, log, Upstreams{})
-			failed := map[string]bool{}
-			malformed := map[string]int{}
-			rejected := map[string]int{}
-			fruitless := map[string]int{}
-			w.updateHarvestScopeState(upstreamNyaa, harvestShowFailed, failed, malformed, rejected, fruitless)
-			w.updateHarvestScopeState(upstreamNyaa, harvestShowFailed, failed, malformed, rejected, fruitless)
-			w.updateHarvestScopeState(upstreamNyaa, tc.reset, failed, malformed, rejected, fruitless)
-			w.updateHarvestScopeState(upstreamNyaa, harvestShowFailed, failed, malformed, rejected, fruitless)
-			if failed[upstreamNyaa] {
+			l := newHarvestLatches(1)
+			w.harvest.updateHarvestScopeState(upstreamNyaa, harvestShowFailed, false, l)
+			w.harvest.updateHarvestScopeState(upstreamNyaa, harvestShowFailed, false, l)
+			w.harvest.updateHarvestScopeState(upstreamNyaa, tc.reset, false, l)
+			w.harvest.updateHarvestScopeState(upstreamNyaa, harvestShowFailed, false, l)
+			if l.blocked(upstreamNyaa) {
 				t.Fatal("scope latched after a non-consecutive third rejection; the intervening outcome must reset the run")
 			}
-			if got := rejected[upstreamNyaa]; got != 1 {
+			if got := l.rejected[upstreamNyaa]; got != 1 {
 				t.Errorf("rejected run after reset = %d, want 1", got)
 			}
 		})
@@ -1478,7 +1475,7 @@ func TestHarvestHTTPStatusFailureScoping(t *testing.T) {
 				NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 			}}, log, srv.Client())
 			titles := map[string]string{}
-			stats, _ := w.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
+			stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
 			if _, ok := titles["nyaa:42"]; ok {
 				t.Errorf("titles = %v, want no cached title for the rejected show", titles)
@@ -1683,6 +1680,24 @@ func TestHarvestCheckpointCodec(t *testing.T) {
 			}
 		}
 	})
+	t.Run("a cursor naming no known tracker scope is discarded in both arms", func(t *testing.T) {
+		// The cursor is carried into every future snapshot verbatim, so a
+		// scope no upstream serves must be dropped at decode rather than
+		// re-persisted forever; the existing rows only cover the id half.
+		for _, cursor := range []string{"bogus:5", "NYAA:5", "ab :5", ":5", "nyaa"} {
+			if cp := decodeHarvestCheckpoint(cursor); cp.Last != "" {
+				t.Errorf("decode legacy %q Last = %q, want it discarded (no such upstream scope)", cursor, cp.Last)
+			}
+			if cp := decodeHarvestCheckpoint(`{"last":"` + cursor + `"}`); cp.Last != "" {
+				t.Errorf("decode JSON last %q = %q, want it discarded (no such upstream scope)", cursor, cp.Last)
+			}
+		}
+		for _, cursor := range []string{"nyaa:5", "ab:154587"} {
+			if cp := decodeHarvestCheckpoint(cursor); cp.Last != cursor {
+				t.Errorf("decode legacy %q Last = %q, want it kept", cursor, cp.Last)
+			}
+		}
+	})
 	t.Run("pages-less checkpoint encodes as the bare legacy cursor", func(t *testing.T) {
 		if got := encodeHarvestCheckpoint(harvestCheckpoint{Last: "nyaa:1500"}); got != "nyaa:1500" {
 			t.Errorf("encode = %q, want the bare legacy cursor", got)
@@ -1723,6 +1738,43 @@ func TestPendingHarvestSkipsCrossScopeJournalKey(t *testing.T) {
 	}
 	if _, ok := index["ab:300"]; ok {
 		t.Errorf("index = %v, indexed the cross-scope key ab:300 that matchHarvest can never satisfy", index)
+	}
+}
+
+// TestPendingHarvestRetiresAmbiguousInfoHash pins the collision arm of the
+// identity index: a hash names BYTES, not a journal item, so two pending items
+// publishing the same hash (the same bytes curated under two tracker ids, or
+// listed on both trackers) must make the hash inconclusive rather than let one
+// item win the slot last-write-wins. Under last-write-wins the loser's own
+// honest Prowlarr result read as a contradictory identity and was rejected
+// permanently (the index is rebuilt from the same journal every rebuild),
+// pinning the harvest_rejected tamper counter non-zero on benign data. Which
+// item won was map-iteration-dependent, so this asserts on BOTH results: it
+// fails whichever way the old code happened to order them.
+func TestPendingHarvestRetiresAmbiguousInfoHash(t *testing.T) {
+	const hash = "143ed15e5e3df072ae91adaeb149973a887590dd"
+	info := func(int) EntryInfo { return EntryInfo{Title: "Show"} }
+	feeds := map[string][]journalItem{
+		upstreamNyaa: {
+			{item: item{Title: "synthetic", InfoHash: hash}, Key: "nyaa:1", AniListID: 7},
+			{item: item{Title: "synthetic", InfoHash: hash}, Key: "nyaa:2", AniListID: 7},
+		},
+	}
+	_, index := pendingHarvest(feeds, map[string]string{}, info)
+	if owner, ok := index[hash]; ok {
+		t.Errorf("index[hash] = %q, want the shared hash retired (it names neither item)", owner)
+	}
+	titles := map[string]string{}
+	results := []item{
+		{Title: "Real Title 1", InfoURL: "https://nyaa.si/view/1", GUID: "https://nyaa.si/view/1", InfoHash: hash},
+		{Title: "Real Title 2", InfoURL: "https://nyaa.si/view/2", GUID: "https://nyaa.si/view/2", InfoHash: hash},
+	}
+	matched, rejected := matchHarvest(results, upstreamNyaa, index, titles, "Show")
+	if matched != 2 || rejected != 0 {
+		t.Errorf("matchHarvest = %d matched / %d rejected, want 2/0 (a shared hash corroborates neither item, it contradicts nothing)", matched, rejected)
+	}
+	if titles["nyaa:1"] != "Real Title 1" || titles["nyaa:2"] != "Real Title 2" {
+		t.Errorf("titles = %v, want both items titled from their own page URLs", titles)
 	}
 }
 
@@ -1865,19 +1917,19 @@ func TestUpdateHarvestScopeStateLatchesAlternatingFailures(t *testing.T) {
 	t.Run("perfectly alternating failures latch", func(t *testing.T) {
 		log, rec := capture.New()
 		w := NewFeedWriter(&FeedWriterConfig{}, log, Upstreams{})
-		failed, malformed, rejected, fruitless := map[string]bool{}, map[string]int{}, map[string]int{}, map[string]int{}
+		l := newHarvestLatches(1)
 		alternating := []harvestOutcome{
 			harvestShowMalformed, harvestShowFailed,
 			harvestShowMalformed, harvestShowFailed,
 			harvestShowMalformed, harvestShowFailed,
 		}
 		for i, outcome := range alternating {
-			if failed[upstreamNyaa] {
+			if l.blocked(upstreamNyaa) {
 				t.Fatalf("scope latched after %d shows, want it to survive to the fruitless threshold", i)
 			}
-			w.updateHarvestScopeState(upstreamNyaa, outcome, failed, malformed, rejected, fruitless)
+			w.harvest.updateHarvestScopeState(upstreamNyaa, outcome, false, l)
 		}
-		if !failed[upstreamNyaa] {
+		if !l.blocked(upstreamNyaa) {
 			t.Errorf("scope not latched after %d alternating failures with zero progress", len(alternating))
 		}
 		if !rec.Contains(msg) {
@@ -1885,27 +1937,27 @@ func TestUpdateHarvestScopeStateLatchesAlternatingFailures(t *testing.T) {
 		}
 		// Neither per-kind counter ever reached its own threshold - which is
 		// exactly why the backstop is needed.
-		if malformed[upstreamNyaa] >= consecutiveMalformedLatch || rejected[upstreamNyaa] >= consecutiveRejectedLatch {
+		if l.malformed[upstreamNyaa] >= consecutiveMalformedLatch || l.rejected[upstreamNyaa] >= consecutiveRejectedLatch {
 			t.Errorf("a per-kind latch also tripped (malformed=%d rejected=%d); the fixture no longer isolates the mixed case",
-				malformed[upstreamNyaa], rejected[upstreamNyaa])
+				l.malformed[upstreamNyaa], l.rejected[upstreamNyaa])
 		}
 	})
 
 	t.Run("a success resets the no-progress run", func(t *testing.T) {
 		log, rec := capture.New()
 		w := NewFeedWriter(&FeedWriterConfig{}, log, Upstreams{})
-		failed, malformed, rejected, fruitless := map[string]bool{}, map[string]int{}, map[string]int{}, map[string]int{}
+		l := newHarvestLatches(1)
 		// Five alternating failures, a success, then five more: no run of
 		// consecutiveFruitlessLatch ever completes, so the scope keeps working.
 		for range 2 {
 			for _, outcome := range []harvestOutcome{
 				harvestShowMalformed, harvestShowFailed, harvestShowMalformed, harvestShowFailed, harvestShowMalformed,
 			} {
-				w.updateHarvestScopeState(upstreamNyaa, outcome, failed, malformed, rejected, fruitless)
+				w.harvest.updateHarvestScopeState(upstreamNyaa, outcome, false, l)
 			}
-			w.updateHarvestScopeState(upstreamNyaa, harvestOK, failed, malformed, rejected, fruitless)
+			w.harvest.updateHarvestScopeState(upstreamNyaa, harvestOK, false, l)
 		}
-		if failed[upstreamNyaa] {
+		if l.blocked(upstreamNyaa) {
 			t.Error("scope latched despite a successful show between the failure runs; progress must reset the run")
 		}
 		if rec.Contains(msg) {
@@ -1916,11 +1968,11 @@ func TestUpdateHarvestScopeStateLatchesAlternatingFailures(t *testing.T) {
 	t.Run("a homogeneous run still latches on its own diagnostic", func(t *testing.T) {
 		log, rec := capture.New()
 		w := NewFeedWriter(&FeedWriterConfig{}, log, Upstreams{})
-		failed, malformed, rejected, fruitless := map[string]bool{}, map[string]int{}, map[string]int{}, map[string]int{}
+		l := newHarvestLatches(1)
 		for range consecutiveMalformedLatch {
-			w.updateHarvestScopeState(upstreamNyaa, harvestShowMalformed, failed, malformed, rejected, fruitless)
+			w.harvest.updateHarvestScopeState(upstreamNyaa, harvestShowMalformed, false, l)
 		}
-		if !failed[upstreamNyaa] {
+		if !l.blocked(upstreamNyaa) {
 			t.Fatal("homogeneous malformed run did not latch")
 		}
 		// The specific diagnostic must win: the backstop threshold is higher, and
@@ -1955,7 +2007,7 @@ func TestUpstreamFailureWarnsOnce(t *testing.T) {
 		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 	}, log, srv.Client())
 
-	u := upstreamForScope(w.upstreams, upstreamNyaa)
+	u := upstreamForScope(w.harvest.upstreams, upstreamNyaa)
 	if u == nil {
 		t.Fatal("no nyaa upstream wired")
 	}
@@ -1971,5 +2023,47 @@ func TestUpstreamFailureWarnsOnce(t *testing.T) {
 	// It is demoted, not suppressed: the diagnosis is still available.
 	if !rec.Contains("retries exhausted") {
 		t.Errorf("httpx terminal line missing entirely, want it kept at Debug: %v", rec.Messages())
+	}
+}
+
+// TestHarvestServesTheArrsVocabularyAlias pins the WIRING of the alias policy
+// (l-f142) into the harvest itself: harvestShow must hand matchHarvest the
+// show title the synthesis trusts, not a blank. preferredHarvestTitle's own
+// table proves the policy; nothing proved the harvest actually feeds it, so a
+// blank showTitle silently reverts the served title to the
+// most-parseable-alias fallback - for a Romaji-titled library that is the
+// English alias its Sonarr series does not carry, exactly the coin flip the
+// policy replaced. The fixture is chosen so the fallback disagrees with the
+// policy: the English alias carries MORE ASCII release text than the Romaji
+// one, so only correct wiring can pick Romaji.
+func TestHarvestServesTheArrsVocabularyAlias(t *testing.T) {
+	const (
+		romaji  = "[PMR] Sousou no Frieren - S01 (BD Remux 1080p)"
+		english = "[PMR] Frieren Beyond Journeys End Extended Edition - S01 (BD Remux 1080p)"
+	)
+	// One AB torrent (id 1167293) under two ?nh= aliases, AB's documented shape.
+	mock, srv := newHarvestMock(func(int) string {
+		return torznabBody(
+			torznabItem(english, "https://animebytes.tv/torrent/1167293/group?nh=a"),
+			torznabItem(romaji, "https://animebytes.tv/torrent/1167293/group?nh=b"),
+		)
+	})
+	defer srv.Close()
+
+	feeds := map[string][]journalItem{
+		upstreamAB: {{item: item{Title: "Frieren S01"}, Key: "ab:1167293", AniListID: 154587}},
+	}
+	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+		ABTorznabURL: srv.URL, ABPasskey: "PK", ProwlarrAPIKey: "k",
+	}}, nil, srv.Client())
+	titles := map[string]string{}
+	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles,
+		func(int) EntryInfo { return EntryInfo{Title: "Sousou no Frieren"} }, "")
+
+	if mock.calls() != 1 || stats.matched != 1 {
+		t.Fatalf("harvest queries = %d, matched = %d; want 1 and 1 (two aliases are ONE torrent)", mock.calls(), stats.matched)
+	}
+	if got := titles["ab:1167293"]; got != romaji {
+		t.Errorf("cached title = %q, want the arr-vocabulary alias %q", got, romaji)
 	}
 }

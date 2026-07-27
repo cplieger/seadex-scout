@@ -136,9 +136,13 @@ func PayloadNames(files []seadex.File) []string {
 
 // PayloadFiles returns the files PayloadNames draws its names from: the same
 // layered type-gate-then-size-refinement eligibility rule, kept in file form
-// for the callers that need a file's length or its position in the record
-// (the indexer's title and pack synthesis), so those scanners judge the same
-// payload the classification does instead of the raw file list.
+// so a caller that needs a file's length or its position in the record judges
+// the same payload the classification does instead of the raw file list.
+// PayloadNames is its only caller today; the indexer's title and pack
+// synthesis scanners (representativeFile, coveredEpisodes, seasonCounts)
+// deliberately do NOT use this rule - they run an episode census and take
+// PopulationFiles, because the max-anchored floor below deletes every regular
+// episode of a pack carrying one double-length file.
 //
 // It answers "which files are evidence for THIS RELEASE'S quality attributes"
 // - resolution, codec, group - so it deliberately keeps only the primary
@@ -147,23 +151,15 @@ func PayloadNames(files []seadex.File) []string {
 // diluting extra.
 func PayloadFiles(files []seadex.File) []seadex.File {
 	pool := eligiblePool(files)
+	// The anchor is the pool MAXIMUM: anything far below the primary payload is
+	// an extra and must not dilute the release's quality verdict.
 	var maxLength int64
 	for i := range pool {
 		if pool[i].Length > maxLength {
 			maxLength = pool[i].Length
 		}
 	}
-	// Overflow-safe ceil-half: (maxLength+1)/2 wraps negative when an
-	// untrusted length is math.MaxInt64, which would let every file survive.
-	minPrimary := maxLength/2 + maxLength%2
-	payload := make([]seadex.File, 0, len(pool))
-	for i := range pool {
-		if maxLength > 0 && pool[i].Length < minPrimary {
-			continue
-		}
-		payload = append(payload, pool[i])
-	}
-	return payload
+	return keepAtLeast(pool, halfFloor(maxLength))
 }
 
 // PopulationFiles returns the files an EPISODE CENSUS runs over: the same type
@@ -194,28 +190,49 @@ func PayloadFiles(files []seadex.File) []seadex.File {
 // the safer failure than deleting real episodes.
 func PopulationFiles(files []seadex.File) []seadex.File {
 	pool := eligiblePool(files)
-	minEpisode := medianLength(pool)
-	// Overflow-safe ceil-half, matching PayloadFiles: a math.MaxInt64 length
-	// from an untrusted record must not wrap the threshold negative.
-	minEpisode = minEpisode/2 + minEpisode%2
-	population := make([]seadex.File, 0, len(pool))
-	for i := range pool {
-		// A zero median means the record carries no positive lengths (sparse
-		// upstream data, fixtures): the type gate alone decides, the same
-		// totality fallback PayloadFiles applies.
-		if minEpisode > 0 && pool[i].Length < minEpisode {
-			continue
-		}
-		population = append(population, pool[i])
-	}
-	return population
+	// The anchor is the pool MEDIAN, robust to an outlier in either direction:
+	// one over-long file cannot lift the floor above the episode population and
+	// one tiny sample cannot lower it.
+	return keepAtLeast(pool, halfFloor(medianLength(pool)))
 }
 
-// medianLength returns the upper-middle length of pool, or 0 for an empty pool.
-// The upper middle (not the mean of the two central values) keeps the statistic
-// to a single existing length: it needs no addition, so no untrusted pair of
-// lengths can overflow it, and on a two-file pool it reads the real payload
-// rather than a value halfway to a sample.
+// halfFloor returns the overflow-safe ceil-half of a size anchor: the minimum
+// length a file must carry to survive a size refinement. The halving happens
+// before the rounding correction because (anchor+1)/2 wraps negative when an
+// untrusted record carries math.MaxInt64, which would let every file survive.
+// It is shared so PayloadFiles and PopulationFiles cannot drift apart on the
+// arithmetic - only on their ANCHOR, which is their whole difference.
+func halfFloor(anchor int64) int64 { return anchor/2 + anchor%2 }
+
+// keepAtLeast returns the pool members whose length reaches floor. A floor that
+// is not positive keeps the whole pool: that is the shared totality fallback
+// for a record carrying no positive lengths (sparse upstream data, fixtures),
+// where the type gate alone decides.
+func keepAtLeast(pool []seadex.File, floor int64) []seadex.File {
+	out := make([]seadex.File, 0, len(pool))
+	for i := range pool {
+		if floor > 0 && pool[i].Length < floor {
+			continue
+		}
+		out = append(out, pool[i])
+	}
+	return out
+}
+
+// medianLength returns the median length of pool, or 0 for an empty pool: the
+// exact middle length on an odd-size pool, and the MIDPOINT of the two central
+// lengths on an even-size one.
+//
+// The even case may not take the upper middle. On a two-file pool the upper
+// middle IS the maximum, so a single over-long file lifts the floor above its
+// sibling episode - exactly the max-anchored behavior PopulationFiles exists to
+// avoid, and the reason a two-episode pack whose finale (or bundled franchise
+// movie) runs more than twice its sibling counted as ONE episode.
+//
+// Overflow safety is kept without adding two untrusted lengths: the midpoint is
+// computed as lo+(hi-lo)/2 over the two central values clamped at 0, so a
+// math.MaxInt64 length cannot wrap the sum and a negative length (the wire type
+// is a plain int64 with no upstream validation) cannot wrap the difference.
 func medianLength(pool []seadex.File) int64 {
 	if len(pool) == 0 {
 		return 0
@@ -225,7 +242,12 @@ func medianLength(pool []seadex.File) int64 {
 		lengths = append(lengths, pool[i].Length)
 	}
 	slices.Sort(lengths)
-	return lengths[len(lengths)/2]
+	mid := len(lengths) / 2
+	if len(lengths)%2 == 1 {
+		return lengths[mid]
+	}
+	lo, hi := max(0, lengths[mid-1]), max(0, lengths[mid])
+	return lo + (hi-lo)/2
 }
 
 // eligiblePool selects the files the size refinements of PayloadFiles and

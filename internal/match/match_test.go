@@ -754,3 +754,20 @@ func TestMatchTitleFallbackKeepsUnknownYearItem(t *testing.T) {
 		t.Errorf("source = %q, want %q", got.Source, SourceTitle)
 	}
 }
+
+// TestFindByTitleUnknownYearSiblingLeavesSetAmbiguous pins the documented
+// consequence of filterByYear KEEPING unknown-year candidates: when a
+// year-less library item shares a normalized title with the year-matching one,
+// the surviving set stays ambiguous, so the conservative single-candidate gate
+// refuses the match rather than picking the exact-year item. The refusal is
+// what keeps a "fix" that prefers the exact-year candidate from silently
+// linking an id-less SeaDex entry to a same-titled remake.
+func TestFindByTitleUnknownYearSiblingLeavesSetAmbiguous(t *testing.T) {
+	li := NewLibIndex(&library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 1, Title: "Clannad", Year: 2007},
+		{Arr: library.ArrSonarr, ArrID: 2, Title: "Clannad"}, // year unknown: kept by narrowing
+	}})
+	if got := li.findByTitle([]string{"Clannad"}, 2007, library.ArrSonarr, slog.New(slog.DiscardHandler)); got != nil {
+		t.Fatalf("findByTitle matched %+v; want nil: the kept unknown-year sibling leaves the set ambiguous", got)
+	}
+}

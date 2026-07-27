@@ -22,6 +22,9 @@ func TestFeedEntryInfoFallbackChain(t *testing.T) {
 		{AniListID: 3, Type: "MOVIE", IMDbIDs: []string{"tt0000001"}},
 		{AniListID: 4, Type: "TV", TvdbID: 999},
 		{AniListID: 5, Type: "OVA", TvdbID: 777},
+		// A MAPPED record with no Fribb typing at all: the tolerant Fribb
+		// decoder and an override omitting `type` both produce this shape.
+		{AniListID: 20},
 	})
 	lib := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 10, TvdbID: 123, Title: "Frieren: Beyond Journey's End", Year: 2023},
@@ -29,11 +32,12 @@ func TestFeedEntryInfoFallbackChain(t *testing.T) {
 		{Arr: library.ArrRadarr, ArrID: 12, ImdbID: "tt0000001", Title: "Your Name", Year: 2016},
 	}}
 	memo := match.Memo{Entries: map[int]match.MemoEntry{
-		4: {Titles: []string{"Sousou no Frieren", "Frieren"}, Year: 2023},
-		6: {Titles: []string{"Memo Only Show"}, Year: 2020},
-		7: {NotFound: true},
-		8: {Titles: []string{"Memo Only Film"}, Year: 2019, Format: "MOVIE"},
-		9: {Titles: []string{"Memo Only OVA"}, Year: 2018, Format: "OVA"},
+		4:  {Titles: []string{"Sousou no Frieren", "Frieren"}, Year: 2023},
+		6:  {Titles: []string{"Memo Only Show"}, Year: 2020},
+		7:  {NotFound: true},
+		8:  {Titles: []string{"Memo Only Film"}, Year: 2019, Format: "MOVIE"},
+		9:  {Titles: []string{"Memo Only OVA"}, Year: 2018, Format: "OVA"},
+		20: {Titles: []string{"Untyped Film"}, Year: 2017, Format: "MOVIE"},
 	}}
 	info := feedEntryInfo(idx, lib, memo)
 
@@ -81,6 +85,14 @@ func TestFeedEntryInfoFallbackChain(t *testing.T) {
 	// does, so an unmapped OVA still labels S00 instead of losing its season.
 	if ova := info(9); ova.Title != "Memo Only OVA" || ova.IsMovie || ova.Season != 0 || !ova.SeasonKnown {
 		t.Errorf("info(9) = %+v, want the memo title typed as a special resolved to season 0", ova)
+	}
+
+	// A MAPPED record whose Fribb `type` is empty carries no typing either, so
+	// the memo's format types it: without this the app knew the entry was a
+	// movie and still published it under Anime/5070, where Radarr never sees
+	// it (the l-f70 symptom, left open for the mapped-but-untyped shape).
+	if untyped := info(20); untyped.Title != "Untyped Film" || !untyped.IsMovie || untyped.SeasonKnown {
+		t.Errorf("info(20) = %+v, want the memo title typed as a movie", untyped)
 	}
 
 	// A negative memo entry supplies nothing.
@@ -216,5 +228,49 @@ func TestResolvedSeason(t *testing.T) {
 				t.Errorf("resolvedSeason(%+v) = (%d, %v), want (%d, %v)", tt.rec, season, known, tt.want, tt.wantKnown)
 			}
 		})
+	}
+}
+
+// TestFeedEntryInfoArrTitleWinsOverMemo pins the documented source ORDER when
+// BOTH tiers can answer: the arr's own title from the persisted snapshot beats
+// the AniList memo title, because the arr is guaranteed to parse its own title
+// back out of a synthesized RSS title while a romaji alias may not match the
+// monitored series at all. Every other case in this file has only one tier
+// populated, so an inverted chain (memo consulted first) passes them all.
+func TestFeedEntryInfoArrTitleWinsOverMemo(t *testing.T) {
+	idx := mapping.NewIndex([]mapping.Record{{AniListID: 1, Type: "TV", TvdbID: 123}})
+	lib := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 10, TvdbID: 123, Title: "Arr Own Title", Year: 2023},
+	}}
+	memo := match.Memo{Entries: map[int]match.MemoEntry{
+		1: {Titles: []string{"AniList Romaji Title"}, Year: 2021},
+	}}
+	got := feedEntryInfo(idx, lib, memo)(1)
+	if got.Title != "Arr Own Title" || got.Year != 2023 {
+		t.Errorf("info(1) = %+v, want the arr's own title/year to win over the memo", got)
+	}
+}
+
+// TestFeedEntryInfoFribbTypingWinsOverMemoFormat pins the documented gate on
+// the memo-format tier (l-f70): it applies ONLY when Fribb had nothing to say.
+// A mapped record's own typing and resolved season must survive a memo entry
+// carrying a contradicting AniList format, or a mapped series would route to
+// Movies/2000 and lose its season - Sonarr filters on Anime/5070, so it would
+// never see the show in the RSS feed. The existing format rows use unmapped
+// ids only, so dropping the record-absent guard passes them all.
+func TestFeedEntryInfoFribbTypingWinsOverMemoFormat(t *testing.T) {
+	idx := mapping.NewIndex([]mapping.Record{{AniListID: 1, Type: "TV", TvdbID: 123, SeasonTvdb: 2}})
+	memo := match.Memo{Entries: map[int]match.MemoEntry{
+		1: {Titles: []string{"Memo Title"}, Year: 2021, Format: "MOVIE"},
+	}}
+	got := feedEntryInfo(idx, &library.Snapshot{}, memo)(1)
+	if got.IsMovie {
+		t.Errorf("info(1) = %+v, want IsMovie=false: a mapped record's Fribb typing wins over the memo format", got)
+	}
+	if got.Season != 2 || !got.SeasonKnown {
+		t.Errorf("info(1) = %+v, want the record's resolved season 2 intact", got)
+	}
+	if got.Title != "Memo Title" {
+		t.Errorf("info(1).Title = %q, want the memo title (the record is not in the library)", got.Title)
 	}
 }

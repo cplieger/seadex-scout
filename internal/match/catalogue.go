@@ -1,8 +1,6 @@
 package match
 
 import (
-	"strings"
-
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 )
@@ -38,24 +36,21 @@ func NewCatalogue(idx *mapping.Index, keep func(mapping.Record) bool) *Catalogue
 		// Sonarr item through a stray TVDB id, nor a series record a Radarr
 		// item through its movie ids.
 		tvdb, tmdbMovies, imdbIDs := r.RoutedIDs()
-		// A presence check over RoutedIDs' already-canonicalized scalar id (the
-		// usability policy's one home is RoutedIDs, l-f37); the slice loops below
-		// still re-check per value because RoutedIDs canonicalizes the scalar but
-		// not the SLICES (l-f49).
+		// Presence checks over RoutedIDs' already-canonicalized ids: the
+		// usability policy's one home is RoutedIDs (l-f37/l-f109), for the id
+		// slices as much as for the scalar id.
 		if tvdb > 0 {
 			c.tvdb[tvdb] = struct{}{}
 		}
 		for _, id := range tmdbMovies {
-			if id <= 0 { // per-value: RoutedIDs does not canonicalize the slices
-				continue
-			}
 			c.tmdb[id] = struct{}{}
 		}
 		for _, im := range imdbIDs {
-			if strings.TrimSpace(im) == "" { // usable per HasArrIdentifier, as for tvdb above
+			key := imdbKey(im) // a usable id can still be padded; the catalogue key is trimmed
+			if key == "" {
 				continue
 			}
-			c.imdb[im] = struct{}{}
+			c.imdb[key] = struct{}{}
 		}
 	})
 	return c
@@ -75,8 +70,8 @@ func (c *Catalogue) Has(it *library.Item) bool {
 				return true
 			}
 		}
-		if it.ImdbID != "" {
-			if _, ok := c.imdb[it.ImdbID]; ok {
+		if key := imdbKey(it.ImdbID); key != "" {
+			if _, ok := c.imdb[key]; ok {
 				return true
 			}
 		}

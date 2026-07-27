@@ -108,6 +108,18 @@ type State struct {
 	// outage, shutdown) neither advance nor reset it: they are evidence of
 	// neither an AniList outage nor a recovery.
 	AniListDegraded int `json:"anilist_degraded,omitempty"`
+	// PartialWalks counts consecutive COMPLETED cycles whose library walk came
+	// back partial (per-series episode-fetch failures left Failed placeholder
+	// items the compare excluded). It persists across cycles and restarts,
+	// resets to 0 on any completed cycle whose walk was whole, and mirrors
+	// ShrunkWalks/SeadexFailures/AniListDegraded so the scout can escalate its
+	// partial-walk log site after a sustained streak: a single permanently
+	// failing series holds Snapshot.Partial true forever, which preserves that
+	// item's findings in steady state but - on a cold start - keeps
+	// BaselineIncomplete set on every cycle, so the scout re-baselines silently
+	// and never notifies anything at all. Gated and interrupted cycles neither
+	// advance nor reset it: they observed no walk verdict to judge.
+	PartialWalks int `json:"partial_walks,omitempty"`
 	// Version is the persisted envelope's schema version, stamped with
 	// SchemaVersion by every Save (on the shallow copy it writes; the
 	// caller's State is never mutated). A file with the field absent or zero
@@ -262,7 +274,7 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 			s.log.Warn("could not clean stale atomic-write temp files", "dir", filepath.Dir(s.path), "error", cleanErr)
 		}
 	}
-	data, err := atomicfile.ReadBounded(ctx, s.path, maxStateBytes)
+	data, err := s.readState(ctx)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			s.unsupportedVersion = 0
@@ -315,6 +327,25 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 	}
 	s.log.Info("state loaded", attrs...)
 	return st, nil
+}
+
+// readState reads the state file through an os.Root confined to its parent
+// directory: the open is symlink-confined and O_NONBLOCK, so a redirected or
+// blocking special file at the state path is an error Load can classify
+// rather than an uninterruptible open (atomicfile.ReadBounded uses os.Open,
+// which follows a symlink and blocks on a FIFO with no writer past both of
+// its context checks).
+func (s *Store) readState(ctx context.Context) ([]byte, error) {
+	root, err := os.OpenRoot(filepath.Dir(s.path))
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if clErr := root.Close(); clErr != nil {
+			s.log.Warn("could not close state directory handle", "dir", filepath.Dir(s.path), "error", clErr)
+		}
+	}()
+	return atomicfile.ReadBoundedInRoot(ctx, root, filepath.Base(s.path), maxStateBytes)
 }
 
 // decode applies Load's corruption and schema-version policy to the raw state

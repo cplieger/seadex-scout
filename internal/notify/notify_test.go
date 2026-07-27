@@ -34,7 +34,6 @@ func testFinding(key, title string) compare.Finding {
 		Tracker:          "Nyaa",
 		Title:            title,
 		Resolution:       "1080p",
-		Severity:         compare.SevWarn,
 		Codec:            "x265",
 		ReleaseURL:       "https://nyaa.si/view/" + key,
 		InfoHash:         "hash-" + key,
@@ -273,7 +272,6 @@ func TestAlertedDecodesLegacyFullFindingRecord(t *testing.T) {
 func TestNotifierUnverifiableFindingIsInfoNotBetterRelease(t *testing.T) {
 	notifier, recorder := newCapturedNotifier()
 	finding := testFinding("unv", "Unknown Evidence")
-	finding.Severity = compare.SevInfo
 	finding.Status = compare.StatusUnverifiable
 
 	prior := notifier.Notify([]compare.Finding{finding}, nil, nil, time.Now())
@@ -320,17 +318,16 @@ func TestMessage(t *testing.T) {
 	}
 }
 
-// TestNotifierEmitLevelFollowsSeverity pins the severity-to-level mapping the
-// Loki alert rules and dashboards key on: a SevWarn finding must emit at WARN
+// TestNotifierEmitLevelFollowsStatus pins the status-to-level mapping the Loki
+// alert rules and dashboards key on: a better-release finding must emit at WARN
 // (the actionable level the README documents for better-release lines; the
-// SeadexScoutBetterReleaseFound rule itself selects on msg only) and a SevInfo
-// finding at INFO. The existing tests count messages only, so a flipped level
-// would silently break every shipped alert without failing a test.
-func TestNotifierEmitLevelFollowsSeverity(t *testing.T) {
+// SeadexScoutBetterReleaseFound rule itself selects on msg only) and every
+// informational nudge at INFO. The existing tests count messages only, so a
+// flipped level would silently break every shipped alert without failing a test.
+func TestNotifierEmitLevelFollowsStatus(t *testing.T) {
 	notifier, recorder := newCapturedNotifier()
-	warn := testFinding("w", "Warn Title") // testFinding severity is SevWarn
+	warn := testFinding("w", "Warn Title") // testFinding status is StatusBetter
 	info := testFinding("i", "Info Title")
-	info.Severity = compare.SevInfo
 	info.Status = compare.StatusIncomplete
 
 	notifier.Notify([]compare.Finding{warn, info}, nil, nil, time.Now())
@@ -341,12 +338,12 @@ func TestNotifierEmitLevelFollowsSeverity(t *testing.T) {
 		case "better release available":
 			sawWarn = true
 			if rec.Level != slog.LevelWarn {
-				t.Errorf("SevWarn finding emitted at %s, want WARN (the documented actionable-finding level)", rec.Level)
+				t.Errorf("better-release finding emitted at %s, want WARN (the documented actionable-finding level)", rec.Level)
 			}
 		case "SeaDex entry is incomplete":
 			sawInfo = true
 			if rec.Level != slog.LevelInfo {
-				t.Errorf("SevInfo finding emitted at %s, want INFO", rec.Level)
+				t.Errorf("incomplete finding emitted at %s, want INFO", rec.Level)
 			}
 		}
 	}
@@ -441,6 +438,10 @@ func TestNewNotifierNilLoggerFallsBackToDefault(t *testing.T) {
 func TestNotifierEmitSanitizesControlAndBidiRunes(t *testing.T) {
 	const dirty = "a\u009bb\u202ec\x1bd" // C1 CSI, RLO override, C0 ESC
 	const clean = "a b c d"
+	// A link-destination attribute additionally goes through capURLAttr's
+	// Markdown escaping, so the spaces the sanitizer substituted arrive
+	// percent-encoded (a space also terminates a CommonMark destination).
+	const cleanURL = "a%20b%20c%20d"
 	notifier, recorder := newCapturedNotifier()
 	finding := testFinding("dirty", dirty)
 	finding.CurrentGroup = dirty
@@ -456,7 +457,7 @@ func TestNotifierEmitSanitizesControlAndBidiRunes(t *testing.T) {
 			"title":             clean,
 			"current_group":     clean,
 			"recommended_group": clean,
-			"release_url":       clean,
+			"release_url":       cleanURL,
 			"info_hash":         clean,
 		},
 		"finding resolved": {
@@ -504,6 +505,9 @@ func TestNotifierEmitSanitizesControlAndBidiRunes(t *testing.T) {
 func TestFindingLineSanitizesEveryUntrustedAttr(t *testing.T) {
 	const dirty = "a\u009bb\u202ec\x1bd"
 	const clean = "a b c d"
+	// Link-destination attributes carry capURLAttr's Markdown escaping on top of
+	// the sanitizer, so their substituted spaces arrive percent-encoded.
+	const cleanURL = "a%20b%20c%20d"
 	notifier, recorder := newCapturedNotifier()
 	finding := testFinding("dirty-all", dirty)
 	finding.CurrentGroup = dirty
@@ -527,10 +531,10 @@ func TestFindingLineSanitizesEveryUntrustedAttr(t *testing.T) {
 		"recommended_groups":    clean,
 		"tracker":               clean,
 		"classification_reason": clean,
-		"release_url":           clean,
+		"release_url":           cleanURL,
 		"release_urls":          clean + "=" + clean + " Nyaa=https://nyaa.si/view/a b c",
-		"nyaa_url":              "https://nyaa.si/view/a b c",
-		"ab_url":                clean,
+		"nyaa_url":              "https://nyaa.si/view/a%20b%20c",
+		"ab_url":                cleanURL,
 		"info_hash":             clean,
 	}
 	for key, expected := range want {
@@ -860,7 +864,7 @@ func TestNotifyMigratesLegacyOversizedDedupeKeyWithoutRealert(t *testing.T) {
 		return tag + strings.Repeat(",", keyenc.MaxComponentBytes-len(tag)-1)
 	}
 	f := compare.Finding{
-		AniListID: 42, Status: compare.StatusBetter, Severity: compare.SevWarn,
+		AniListID: 42, Status: compare.StatusBetter,
 		Title: "Oversized", RecommendedGroups: []string{heavy("r")},
 		CurrentGroups: []string{heavy("c")}, ReleaseURL: heavy("u"),
 		Links: []compare.ReleaseLink{{Tracker: "Nyaa", URL: heavy("l")}},

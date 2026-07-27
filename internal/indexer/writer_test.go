@@ -111,8 +111,9 @@ func TestRebuildNoPasskeyWarnWithoutABIntent(t *testing.T) {
 // ab_torznab_url) but a passkey still set, a rebuild must persist NO
 // AnimeBytes feed - the passkey must not land on disk in synthesized download
 // links for a tracker the operator turned off - while the curation set and the
-// Nyaa feed are unaffected. The construction-time WARN names the mismatched
-// fields so the half-configured intent surfaces.
+// Nyaa feed are unaffected. Construction stays SILENT about the half-configured
+// intent: internal/config owns that diagnostic (see the comment on the assertion
+// below, l-f13).
 func TestRebuildUnconfiguredABPersistsNoABFeed(t *testing.T) {
 	log, rec := capture.New()
 	path := filepath.Join(t.TempDir(), "feed.json")
@@ -1137,8 +1138,8 @@ func TestRebuildBlanksCarriedForeignInfoURL(t *testing.T) {
 
 // TestRebuildNeverLogsABPasskey pins the LOG side of the at-rest credential
 // contract TestRebuildPersistsABItemsGUIDOnly pins on disk: the passkey is a
-// per-cycle log hazard too (NewFeedWriter warns about a half-configured AB,
-// Rebuild's snapshot line names AB counts, and a failed persist wraps the
+// per-cycle log hazard too (Rebuild's snapshot line names AB counts, the
+// missing-passkey nudge fires per rebuild, and a failed persist wraps the
 // path), so a full rebuild that journals AnimeBytes releases must emit ZERO
 // log records - message or attribute - carrying the secret.
 func TestRebuildNeverLogsABPasskey(t *testing.T) {
@@ -1342,5 +1343,59 @@ func TestRebuildOffTrackerJournalDoesNotGrow(t *testing.T) {
 	// backfill is search's job, exactly as growJournal documents.
 	if !off.Seen["ab:456"] {
 		t.Error("seen ledger missing the release curated while the tracker was off")
+	}
+}
+
+// TestBuildCurationBestWinsAcrossDuplicateOccurrences pins the OR fold in the
+// search curation index: one SeaDex torrent can be attached to several
+// entries, and search marks a matched Prowlarr result best-or-alt from these
+// maps, so the fold must be best-wins in BOTH scan orders.
+func TestBuildCurationBestWinsAcrossDuplicateOccurrences(t *testing.T) {
+	const hash = "abcdef1234567890abcdef1234567890abcdef12"
+	mkv := []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}}
+	entries := []seadex.Entry{
+		{AniListID: 1, Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://nyaa.si/view/42", InfoHash: hash, Files: mkv,
+		}}},
+		{AniListID: 2, Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://nyaa.si/view/42", InfoHash: hash, IsBest: true, Files: mkv,
+		}}},
+	}
+	for _, order := range []string{"alt first", "best first"} {
+		t.Run(order, func(t *testing.T) {
+			set := buildCuration(entries)
+			if !set.byHash[hash] {
+				t.Errorf("by_hash[%s] = false, want true (best-wins across occurrences)", hash)
+			}
+			if !set.byKey["nyaa:42"] {
+				t.Error(`by_key["nyaa:42"] = false, want true (best-wins across occurrences)`)
+			}
+			if !set.byPair[pairKey(hash, "nyaa:42")] {
+				t.Error("by_pair missing the same-torrent hash/key pair")
+			}
+		})
+		slices.Reverse(entries)
+	}
+}
+
+// TestSplitCurationWarnedLeavesInputUnmutated pins the aliasing contract the
+// feed rebuild depends on: the cycle hands the SAME entries slice to the
+// compare pass, so removing a curation-warned torrent must produce a fresh
+// Torrents slice rather than filtering in place.
+func TestSplitCurationWarnedLeavesInputUnmutated(t *testing.T) {
+	mkv := []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [W].mkv"}}
+	entries := []seadex.Entry{{AniListID: 7, Torrents: []seadex.Torrent{
+		{Tracker: "Nyaa", URL: "https://nyaa.si/view/41", IsBest: true, Tags: []string{"Broken"}, Files: mkv},
+		{Tracker: "Nyaa", URL: "https://nyaa.si/view/42", IsBest: true, Files: mkv},
+	}}}
+	kept, ws := splitCurationWarned(entries)
+	if len(entries[0].Torrents) != 2 || entries[0].Torrents[0].URL != "https://nyaa.si/view/41" {
+		t.Fatalf("splitCurationWarned mutated the shared input: %+v", entries[0].Torrents)
+	}
+	if len(kept[0].Torrents) != 1 || kept[0].Torrents[0].URL != "https://nyaa.si/view/42" {
+		t.Errorf("kept torrents = %+v, want only the unwarned nyaa:42", kept[0].Torrents)
+	}
+	if _, ok := ws.keys["nyaa:41"]; !ok {
+		t.Errorf("warned key set = %v, want the warned nyaa:41 key", ws.keys)
 	}
 }

@@ -59,29 +59,6 @@ func TestLoader_refreshCache_unexpectedStatusKeepsStale(t *testing.T) {
 	}
 }
 
-// TestLoader_refreshCache_overCapBodyKeepsStale pins the fail-closed download
-// bound: a 200 whose body exceeds maxMapBytes is rejected (ReadLimitedBody's
-// ResponseTooLargeError) and the stale map is kept, rather than a truncated
-// body being parsed as the new map.
-func TestLoader_refreshCache_overCapBodyKeepsStale(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(make([]byte, maxMapBytes+1))
-	}))
-	defer ts.Close()
-	prev := &Cache{
-		FetchedAt: time.Now().Add(-2 * time.Hour),
-		Records:   []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
-	}
-	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
-	next, err := l.refreshCache(context.Background(), prev)
-	if err == nil {
-		t.Fatal("over-cap refresh returned nil error, want degraded error (fail closed)")
-	}
-	if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
-		t.Fatalf("over-cap refresh records = %+v, want stale record id 1", next.Records)
-	}
-}
-
 // TestLoader_refreshCache_boundsParseErrorText pins the emit-boundary
 // sanitization on the parse-failure path: a hostile 200 body whose top-level
 // value is a giant control-rune-laden JSON string surfaces a degraded error

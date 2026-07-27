@@ -964,3 +964,29 @@ func TestFetchManyScopesRecordErrorToItsChunk(t *testing.T) {
 		}
 	}
 }
+
+// TestFetchDoesNotRetryUnparseableBody pins transientEnvelopeError's documented
+// exclusion: an unparseable body is the parser's business, not the retrier's.
+// The envelope classifier runs on EVERY 200 before parsing, so if its
+// json.Unmarshal guard stopped returning nil the same malformed body would be
+// read as an upstream fault and burn all maxAttempts rate-limited AniList
+// requests per lookup on a response that can never succeed.
+func TestFetchDoesNotRetryUnparseableBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":`)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	_, err := c.Fetch(context.Background(), 1)
+	if err == nil {
+		t.Fatal("Fetch() on an unparseable body = nil error, want a parse failure")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, must not be negative-memoizable", err)
+	}
+	if got := c.Stats().Calls; got != 1 {
+		t.Errorf("Stats().Calls = %d, want 1 (a malformed body must not be retried as an upstream fault)", got)
+	}
+}

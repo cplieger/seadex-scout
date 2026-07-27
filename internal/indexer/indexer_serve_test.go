@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -123,15 +124,15 @@ func TestUpstreamParams(t *testing.T) {
 	}
 }
 
-// TestQueryTotalUpstreamFailureSetsUpstreamFailed pins the failure contract of
+// TestQueryTotalUpstreamFailureReturnsFault pins the failure contract of
 // the search proxy: an upstream whose response cannot be parsed (Prowlarr down
-// or misbehaving) yields an empty result flagged upstreamFailed - so serve
+// or misbehaving) yields an empty result plus a torznabFault - so serve
 // renders a Torznab <error>, never a fake-empty 200 feed that would read as a
 // clean no-match to the arr - plus one warning. With per-tracker scoping a
 // request queries exactly one upstream, so this single-upstream failure IS the
 // total upstream failure (there is no partial case). Also exercises the AB
 // upstream wiring in New.
-func TestQueryTotalUpstreamFailureSetsUpstreamFailed(t *testing.T) {
+func TestQueryTotalUpstreamFailureReturnsFault(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "not xml at all")
 	}))
@@ -140,15 +141,17 @@ func TestQueryTotalUpstreamFailureSetsUpstreamFailed(t *testing.T) {
 	log, rec := capture.New()
 	ix := wiredIndexer(&Config{UpstreamConfig: UpstreamConfig{ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, log, srv.Client())
 
-	items, stats := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "ab")
+	items, stats, fault := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "ab")
 	if len(items) != 0 {
 		t.Fatalf("got %d items from a failed upstream, want 0", len(items))
 	}
 	if !stats.answered || stats.feed || stats.upstream != 0 || stats.curated != 0 {
 		t.Errorf("stats = %+v, want answered search with 0 upstream/curated", stats)
 	}
-	if !stats.upstreamFailed {
-		t.Errorf("stats.upstreamFailed = false, want true (a total upstream failure must render a Torznab <error>, not an empty feed)")
+	if fault == nil {
+		t.Errorf("fault = nil, want a torznabFault (a total upstream failure must render a Torznab <error>, not an empty feed)")
+	} else if fault.summary != "upstream query failed" {
+		t.Errorf("fault.summary = %q, want %q", fault.summary, "upstream query failed")
 	}
 	if !rec.Contains("upstream query failed") {
 		t.Errorf("upstream failure not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
@@ -253,7 +256,7 @@ func TestServeStartupSnapshotFailureRendersTorznabError(t *testing.T) {
 // the request log reads as a deliberate skip rather than a no-match.
 func TestQuerySkipsPerEpisodeQuery(t *testing.T) {
 	ix := New(&Config{}, nil, Upstreams{})
-	items, stats := ix.query(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren 01"}}, "nyaa")
+	items, stats, _ := ix.query(context.Background(), url.Values{"t": {"search"}, "q": {"Frieren 01"}}, "nyaa")
 	if len(items) != 0 {
 		t.Fatalf("skipped query returned %d items, want 0", len(items))
 	}
@@ -276,7 +279,7 @@ func TestQueryCapsResults(t *testing.T) {
 	ix.cache.mu.Lock()
 	ix.cache.snap.NyaaFeed = feed
 	ix.cache.mu.Unlock()
-	items, _ := ix.query(context.Background(), url.Values{"t": {"search"}, "limit": {strconv.Itoa(maxItems + 5)}}, "nyaa")
+	items, _, _ := ix.query(context.Background(), url.Values{"t": {"search"}, "limit": {strconv.Itoa(maxItems + 5)}}, "nyaa")
 	if len(items) != maxItems {
 		t.Fatalf("got %d items, want the maxItems cap %d", len(items), maxItems)
 	}
@@ -298,7 +301,7 @@ func TestQueryFeedDefaultLimit(t *testing.T) {
 	ix.cache.snap.NyaaFeed = feed
 	ix.cache.mu.Unlock()
 
-	items, stats := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
+	items, stats, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
 	if !stats.feed {
 		t.Fatal("empty-q query not served from the synthesized feed")
 	}
@@ -310,7 +313,7 @@ func TestQueryFeedDefaultLimit(t *testing.T) {
 			items[0].GUID, items[defaultCapsLimit-1].GUID, defaultCapsLimit-1)
 	}
 
-	explicit, _ := ix.query(context.Background(), url.Values{"t": {"search"}, "limit": {"7"}}, "nyaa")
+	explicit, _, _ := ix.query(context.Background(), url.Values{"t": {"search"}, "limit": {"7"}}, "nyaa")
 	if len(explicit) != 7 {
 		t.Errorf("explicit limit=7 returned %d items, want 7 (an explicit limit wins over the default)", len(explicit))
 	}
@@ -368,15 +371,15 @@ func TestQueryCallerCancellationIsNotWarnedAsUpstreamFault(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	items, stats := ix.query(ctx, url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "nyaa")
+	items, stats, fault := ix.query(ctx, url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "nyaa")
 	if len(items) != 0 {
 		t.Fatalf("cancelled search returned %d items, want 0", len(items))
 	}
 	if !stats.answered || stats.feed || stats.upstream != 0 || stats.curated != 0 {
 		t.Errorf("stats = %+v, want an answered search with 0 upstream/curated", stats)
 	}
-	if stats.upstreamFailed {
-		t.Errorf("stats.upstreamFailed = true on caller cancellation, want false (a client disconnect must not render a Torznab <error>)")
+	if fault != nil {
+		t.Errorf("fault = %+v on caller cancellation, want nil (a client disconnect must not render a Torznab <error>)", fault)
 	}
 	if rec.Contains("upstream query failed") {
 		t.Errorf("caller cancellation warned as an upstream fault; log output:\n%s", strings.Join(rec.Messages(), "\n"))
@@ -721,9 +724,11 @@ func TestServeBoundsConcurrentQueries(t *testing.T) {
 // save-test and health polling hit caps, and failing those would report the
 // whole indexer as down because searches happened to be busy.
 func TestServeCapsNotGatedByQueryLimit(t *testing.T) {
-	ix := wiredIndexer(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{
+	// No upstream request is made (the gate is pre-filled and only t=caps is
+	// asserted), so the search proxy is left unwired per wiring_test.go's rule.
+	ix := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: "http://prowlarr.invalid/1/api", ProwlarrAPIKey: "pk",
-	}}, nil, http.DefaultClient)
+	}}, nil, Upstreams{})
 	// Occupy every slot without any request in flight.
 	for range maxConcurrentQueries {
 		ix.queryGate <- struct{}{}
@@ -732,5 +737,142 @@ func TestServeCapsNotGatedByQueryLimit(t *testing.T) {
 	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=k", nil))
 	if body := rec.Body.String(); !strings.Contains(body, "<caps") {
 		t.Errorf("caps body = %q, want the capabilities document served while the query gate is full", body)
+	}
+}
+
+// TestServeNeverLogsTheFeedAPIKey pins the log-hygiene contract server.go
+// states in three places (logParam's doc, and chain's notes on the access
+// logger and on serve's own domain line): feed_api_key arrives as a QUERY
+// parameter, so a line that logged the query string - or a future domain attr
+// carrying it - would persist the operator's feed secret into Loki, where it
+// is durable and readable by anyone with log access while the endpoint itself
+// is only apikey-gated. Every request kind that logs is exercised (authorized
+// caps, authorized RSS, unscoped 404, bad-key 401) through the SERVED
+// middleware chain, so the access line is covered alongside the domain lines;
+// the wrong-key value embeds the real key, so leaking either value fails.
+func TestServeNeverLogsTheFeedAPIKey(t *testing.T) {
+	const feedKey = "feed-key-not-a-secret"
+	log, rec := capture.New()
+	h := New(&Config{APIKey: feedKey}, log, Upstreams{}).chain()
+	for _, target := range []string{
+		"/nyaa?t=caps&apikey=" + feedKey,
+		"/nyaa?t=search&apikey=" + feedKey,
+		"/other?t=caps&apikey=" + feedKey,
+		"/nyaa?t=caps&apikey=" + feedKey + "-wrong",
+	} {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, target, nil))
+	}
+	if rec.Len() == 0 {
+		t.Fatal("no log records captured; the guard is vacuous unless the requests logged")
+	}
+	for _, line := range renderedLogRecords(rec) {
+		if strings.Contains(line, feedKey) {
+			t.Errorf("log record leaks the feed API key: %q", line)
+		}
+	}
+}
+
+// TestServeAbandonsBusyRequestWhenClientHungUp pins the clientGone arm of
+// acquireQuery: a request that is over the concurrency limit AND whose client
+// has already gone away (arr timeout, disconnect) must return WITHOUT writing
+// a body - there is nobody to write to, and the busy <error> would only log a
+// failed write - while still leaving a Debug breadcrumb. The distinction
+// matters because the two negative returns are one bool apart: an over-limit
+// request misreported as clientGone would answer the arr an empty 200 with no
+// document at all, which Prowlarr reads as a broken indexer rather than as
+// back-off-and-retry.
+func TestServeAbandonsBusyRequestWhenClientHungUp(t *testing.T) {
+	log, rec := capture.New()
+	ix := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: "http://prowlarr.invalid/1/api", ProwlarrAPIKey: "pk",
+	}}, log, Upstreams{})
+	// Occupy every slot without any request in flight, so the gate is full and
+	// the cancelled context is the only ready case in acquireQuery's select.
+	for range maxConcurrentQueries {
+		ix.queryGate <- struct{}{}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	w := httptest.NewRecorder()
+	ix.serve(w, httptest.NewRequest(http.MethodGet, "/nyaa?t=tvsearch&q=Frieren&apikey=k", nil).WithContext(ctx))
+
+	if body := w.Body.String(); body != "" {
+		t.Errorf("body written for a departed client = %q, want nothing (a busy <error> to a dead socket only logs a failed write)", body)
+	}
+	if !rec.Contains("indexer request abandoned while waiting for a query slot") {
+		t.Errorf("abandoned wait not recorded; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+	if rec.Contains("indexer at its concurrent-query limit; request answered busy") {
+		t.Errorf("a departed client was answered busy; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestServeAppliesLogParamToRequestControlledValues pins that the
+// emit-boundary policy is APPLIED at serve's rejection lines, not merely
+// implemented: TestLogParamBoundsAndCleansRequestValues exercises logParam in
+// isolation, so dropping either call site would leave every unit test green
+// while an unauthenticated caller pushed an unbounded path (NewServer permits
+// up to 1 MiB of request head) or a control-character-laced Host into a Loki
+// record.
+func TestServeAppliesLogParamToRequestControlledValues(t *testing.T) {
+	log, rec := capture.New()
+	ix := New(&Config{APIKey: "k"}, log, Upstreams{})
+	long := "/nyaa" + strings.Repeat("y", 4096)
+	ix.serve(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, long+"?t=caps&apikey=wrong", nil))
+	got, ok := rec.AttrValue("indexer request rejected", "path")
+	if !ok {
+		t.Fatalf("bad-key rejection logged no path attr; records: %v", rec.Messages())
+	}
+	if want := 256 + len("..."); len(got) != want {
+		t.Errorf("logged path = %d bytes, want %d (the 256-byte cap plus the truncation marker)", len(got), want)
+	}
+
+	hostLog, hostRec := capture.New()
+	hostIx := New(&Config{APIKey: "k"}, hostLog, Upstreams{})
+	req := httptest.NewRequest(http.MethodGet, "/nope?t=caps&apikey=k", nil)
+	req.Host = "host\nwith.control"
+	hostIx.serve(httptest.NewRecorder(), req)
+	host, ok := hostRec.AttrValue("indexer request rejected", "host")
+	if !ok {
+		t.Fatalf("unscoped rejection logged no host attr; records: %v", hostRec.Messages())
+	}
+	if strings.ContainsAny(host, "\n\r") {
+		t.Errorf("logged host = %q, want control characters flattened", host)
+	}
+}
+
+// TestChainNeverLogsTheFeedAPIKey pins the credential-in-logs contract the
+// chain documents: the Torznab apikey arrives as a QUERY parameter, and no
+// line the served stack emits - webhttp's access line, the domain rejection
+// lines, or the per-request query line - may carry it, because those records
+// ship to Loki. The property rests on webhttp's RequestLogger recording
+// r.URL.Path only and on serve's whitelist of logged params; both are
+// upstream-changeable, so it is asserted here rather than only in a comment.
+func TestChainNeverLogsTheFeedAPIKey(t *testing.T) {
+	const key = "feed-api-key-with-entropy"
+	log, rec := capture.New()
+	h := New(&Config{APIKey: key}, log, Upstreams{}).chain()
+	for _, target := range []string{
+		"/nyaa?t=caps&apikey=" + key,
+		"/nyaa?t=search&apikey=" + key,
+		"/other?t=caps&apikey=" + key,
+	} {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, target, nil))
+	}
+	records := rec.Records()
+	if len(records) == 0 {
+		t.Fatal("no log records captured; the test did not exercise the logging chain")
+	}
+	for _, r := range records {
+		if strings.Contains(r.Message, key) {
+			t.Errorf("log message leaks the feed api key: %q", r.Message)
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			if strings.Contains(a.Value.String(), key) {
+				t.Errorf("log attr %q leaks the feed api key: %q", a.Key, a.Value.String())
+			}
+			return true
+		})
 	}
 }

@@ -243,8 +243,8 @@ func TestReloadReassertsFailedStateWhenMalformedSnapshotReappears(t *testing.T) 
 	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, log, Upstreams{})
 
 	rss := url.Values{"t": {"search"}}
-	if _, stats := ix.query(context.Background(), rss, upstreamNyaa); !stats.snapshotUnavailable {
-		t.Fatalf("startup over a malformed snapshot: stats = %+v, want snapshotUnavailable (a Torznab error)", stats)
+	if _, _, fault := ix.query(context.Background(), rss, upstreamNyaa); fault == nil {
+		t.Fatalf("startup over a malformed snapshot: fault = nil, want a snapshot-unavailable fault (a Torznab error)")
 	}
 	if got := rec.Count("indexer feed snapshot malformed"); got != 1 {
 		t.Fatalf("malformed snapshot warned %d times, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
@@ -256,8 +256,8 @@ func TestReloadReassertsFailedStateWhenMalformedSnapshotReappears(t *testing.T) 
 	if err := os.Rename(path, aside); err != nil {
 		t.Fatal(err)
 	}
-	if _, stats := ix.query(context.Background(), rss, upstreamNyaa); stats.snapshotUnavailable {
-		t.Fatalf("missing first snapshot: stats = %+v, want fresh-install semantics (no error)", stats)
+	if _, _, fault := ix.query(context.Background(), rss, upstreamNyaa); fault != nil {
+		t.Fatalf("missing first snapshot: fault = %+v, want fresh-install semantics (no error)", fault)
 	}
 
 	// The SAME malformed inode reappears (remounted / renamed back): the memo
@@ -265,8 +265,8 @@ func TestReloadReassertsFailedStateWhenMalformedSnapshotReappears(t *testing.T) 
 	if err := os.Rename(aside, path); err != nil {
 		t.Fatal(err)
 	}
-	if _, stats := ix.query(context.Background(), rss, upstreamNyaa); !stats.snapshotUnavailable {
-		t.Errorf("reappeared malformed snapshot: stats = %+v, want snapshotUnavailable (a Torznab error), not false-empty success", stats)
+	if _, _, fault := ix.query(context.Background(), rss, upstreamNyaa); fault == nil {
+		t.Errorf("reappeared malformed snapshot: fault = nil, want a snapshot-unavailable fault (a Torznab error), not false-empty success")
 	}
 	if got := rec.Count("indexer feed snapshot malformed"); got != 1 {
 		t.Errorf("malformed snapshot warned %d times, want still 1 (the memo must hold, no reread); log output:\n%s",
@@ -345,9 +345,8 @@ func TestReloadPreJournalSnapshotServesEmptyFeeds(t *testing.T) {
 	if got := rec.Count("indexer feed snapshot is pre-journal schema; serving empty RSS feeds until the next cycle re-baselines"); got != 1 {
 		t.Errorf("pre-journal INFO logged %d times, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
 	}
-	ix.cache.mu.RLock()
-	curated := ix.cache.snap.ByHash["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] && ix.cache.snap.ByKey["nyaa:1"]
-	ix.cache.mu.RUnlock()
+	set := ix.cache.curation()
+	curated := set.byHash["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] && set.byKey["nyaa:1"]
 	if !curated {
 		t.Error("curation maps dropped from a pre-journal snapshot; searches must still match against them")
 	}
@@ -824,14 +823,14 @@ func TestReloadKeepsFeedOnMalformedSnapshot(t *testing.T) {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, nil, Upstreams{})
-	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
+	if got, _, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
 	if err := os.WriteFile(path, []byte("{not valid json"), 0o600); err != nil {
 		t.Fatalf("corrupt write: %v", err)
 	}
 	bumpMtime(t, path)
-	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
+	if got, _, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
 		t.Errorf("after malformed rewrite feed = %d items, want 1 (a bad write must not blank a live feed)", len(got))
 	}
 }
@@ -946,7 +945,7 @@ func TestReloadRetriesPreservedMtimeReplacementAfterFailure(t *testing.T) {
 	setMtime(t, path, failedAt)
 	// New's warm-up reload reads the malformed file and memoizes it as failed.
 	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, nil, Upstreams{})
-	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
+	if got, _, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
 		t.Fatalf("initial feed = %d items, want 0 (malformed snapshot must not load)", len(got))
 	}
 	// Repair: a valid snapshot on a NEW inode, renamed over the bad file with
@@ -960,7 +959,7 @@ func TestReloadRetriesPreservedMtimeReplacementAfterFailure(t *testing.T) {
 	}
 	setMtime(t, path, failedAt)
 	ix.cache.refresh(context.Background())
-	if got, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
+	if got, _, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 1 {
 		t.Errorf("after preserved-mtime repair feed = %d items, want 1 (a new inode at the failed mtime must be retried)", len(got))
 	}
 }
@@ -1421,4 +1420,46 @@ func TestReloadReportsPreRelationSnapshot(t *testing.T) {
 				strings.Join(rec.Messages(), "\n"))
 		}
 	})
+}
+
+// TestReloadBlanksOutOfVocabularyDownloadVolumeFactor pins the second half of
+// normalizeSnapshotItems (validMarker): a persisted DownloadVolumeFactor that
+// is not one of the two markers the feed emits must be blanked at load, while
+// the item itself is kept. writeItem renders any non-empty value as the
+// downloadvolumefactor attr - the arr's freeleech accounting input - so a
+// hand-edited or tampered feed.json carrying "0" would otherwise present a
+// curated release to Sonarr/Radarr as fully freeleech; blanking falls back to
+// the normal-item (factor 1) shape. The in-vocabulary marker on the sibling
+// item proves the gate is a filter, not a blanket clear.
+func TestReloadBlanksOutOfVocabularyDownloadVolumeFactor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "tampered", GUID: "https://nyaa.si/view/42", DownloadVolumeFactor: "0"}, Key: "nyaa:42"},
+			{item: item{Title: "marker", GUID: "https://nyaa.si/view/43", DownloadVolumeFactor: dvfBest}, Key: "nyaa:43"},
+		},
+	})
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, Upstreams{})
+
+	got := ix.feedFor(upstreamNyaa)
+	if len(got) != 2 {
+		t.Fatalf("nyaa feed = %d items (%+v), want 2 (the factor is blanked, the item kept)", len(got), got)
+	}
+	byTitle := map[string]item{}
+	for _, it := range got {
+		byTitle[it.Title] = it
+	}
+	if f := byTitle["tampered"].DownloadVolumeFactor; f != "" {
+		t.Errorf("out-of-vocabulary persisted factor served as %q, want \"\" (writeItem renders any non-empty value as the arr's freeleech input)", f)
+	}
+	if f := byTitle["marker"].DownloadVolumeFactor; f != dvfBest {
+		t.Errorf("in-vocabulary persisted factor = %q, want %q left alone", f, dvfBest)
+	}
+	doc, _ := renderFeed(got)
+	if strings.Contains(doc, `name="downloadvolumefactor" value="0"`) {
+		t.Errorf("rendered feed carries the tampered factor attr:\n%s", doc)
+	}
 }

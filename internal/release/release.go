@@ -204,8 +204,8 @@ var (
 	// ("both remuxes are from the JPBD"), and a release whose only kind
 	// evidence was a plural statement classified unknown - so its `kind`
 	// attribute and report row understated it, and filters.exclude_remux did
-	// not drop it. The optional "e" keeps "remuxs" out while admitting
-	// "remuxes".
+	// not drop it. The tail is the whole-token alternation (?:ed|es), never
+	// a bare optional "s": "remuxes" matches while "remuxs" stays out.
 	reRemux = regexp.MustCompile(`(?:^|` + nonWordEdge + `)(?:` + lowerLiteralPattern("bd") + `[\s._-]?)?(?:` + lowerTokensPattern([]string{"premux", "remux"}) + `)(?:` + lowerLiteralPattern("ed") + `|` + lowerLiteralPattern("es") + `)?(?:$|` + nonWordEdge + `)`)
 	// reEncode matches a generic encode marker ("encode", "encoded", "encodes",
 	// "BDRip", "BDRips" - the BD half accepting the same optional [\s._-]
@@ -353,7 +353,7 @@ func Classify(in *Input) Release {
 	if codec == "" {
 		codec = notesCodec
 	}
-	kind, reason := classifyKind(&nameEv, &notesEv, nameCodec, notesCodec)
+	kind, reason := classifyKind(&nameEv, &notesEv)
 	resolution := nameEv.resolution
 	if resolution == "" {
 		resolution = notesEv.resolution
@@ -387,15 +387,17 @@ func detectResolution(text string) string {
 // -> unknown rules. The release names are classified first and win for this
 // release; the entry-wide SeaDex notes only fill the gap when the names carry
 // no marker, so a notes-level remux note cannot override a contradicting
-// per-file encode marker. The codec arguments are the TEXT-observed families
-// only — the MediaInfo codec is deliberately not kind evidence (see Classify).
+// per-file encode marker. Each rung reads only its own evidence's
+// TEXT-observed codec family (evidence.textCodec) — the MediaInfo codec is
+// deliberately not kind evidence and is structurally unreachable from here
+// (see Classify).
 // The remux decision stays name-and-notes based (never size/bitrate
 // inference), so no operator-supplied group list is needed.
-func classifyKind(nameEv, notesEv *evidence, nameCodec, notesCodec string) (kind Kind, reason string) {
-	if kind, reason := kindFromEvidence(nameEv, nameCodec); kind != KindUnknown {
+func classifyKind(nameEv, notesEv *evidence) (kind Kind, reason string) {
+	if kind, reason := kindFromEvidence(nameEv); kind != KindUnknown {
 		return kind, reason
 	}
-	return kindFromEvidence(notesEv, notesCodec)
+	return kindFromEvidence(notesEv)
 }
 
 // kindFromEvidence classifies one accumulated evidence source (names or notes)
@@ -403,10 +405,11 @@ func classifyKind(nameEv, notesEv *evidence, nameCodec, notesCodec string) (kind
 // encoder marker (codec, CRF tag, bitrate, or a generic encode token —
 // reEncode, the weakest rung), else unknown. It returns the kind and a short
 // reason for observability.
-func kindFromEvidence(e *evidence, codec string) (kind Kind, reason string) {
+func kindFromEvidence(e *evidence) (kind Kind, reason string) {
 	if e.remux {
 		return KindRemux, "name/notes marker: remux"
 	}
+	codec := e.textCodec()
 	switch {
 	case codec != "":
 		return KindEncode, "encoder marker: " + codec
@@ -595,8 +598,10 @@ func GroupsOverlap(a, b []string) Overlap {
 
 // ResolutionRank returns a comparable rank for a resolution string (its height
 // in pixels; higher is better). An empty or unrecognized resolution ranks 0, so
-// a resolution floor never drops a release whose resolution could not be
-// parsed.
+// it sorts below every recognized height: the headline-candidate ordering
+// (compare.betterCandidate) prefers a release whose resolution parsed, and no
+// caller may read 0 as "passes any threshold" - it is the minimum of the
+// domain, not an unknown-is-acceptable sentinel.
 func ResolutionRank(res string) int {
 	r := strings.ToLower(strings.TrimSpace(res))
 	if !slices.Contains(resolutionHeights, r) {

@@ -32,8 +32,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/library"
+	"github.com/cplieger/seadex-scout/internal/logattr"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/titlekey"
@@ -293,7 +293,7 @@ func (r *matchRun) matchUnmappedEntry(ctx context.Context, e *seadex.Entry) Matc
 	if item == nil {
 		return Match{Entry: *e, Arr: arr, Source: SourceUnmapped}
 	}
-	return Match{Item: item, Entry: *e, Record: mapping.Record{Type: mapping.NormalizeType(media.Format)}, Arr: item.Arr, Source: SourceTitle}
+	return Match{Item: item, Entry: *e, Record: mapping.RecordFromFormat(media.Format), Arr: item.Arr, Source: SourceTitle}
 }
 
 // titleMatch resolves the entry through the AniList fallback and matches it to a
@@ -321,11 +321,11 @@ func recordArr(r *mapping.Record) string {
 // by building a Record and reusing the mapping-owned decision, so the "MOVIE"
 // token lives only in mapping. An empty format is unknown.
 func formatArr(format string) string {
-	norm := mapping.NormalizeType(format)
-	if norm == "" {
+	rec := mapping.RecordFromFormat(format)
+	if rec.Type == "" {
 		return arrUnknown
 	}
-	return recordArr(&mapping.Record{Type: norm})
+	return recordArr(&rec)
 }
 
 // --- LibIndex: library snapshot lookup indexes (by arr ID and normalized title) ---
@@ -378,8 +378,8 @@ func (li *LibIndex) indexIDs(it *library.Item) {
 		if it.TmdbID > 0 { // only positive ids are reachable: findMovie guards id > 0
 			li.byTmdb[it.TmdbID] = it
 		}
-		if it.ImdbID != "" {
-			li.byImdb[it.ImdbID] = it
+		if key := imdbKey(it.ImdbID); key != "" {
+			li.byImdb[key] = it
 		}
 	}
 }
@@ -411,12 +411,11 @@ func (li *LibIndex) FindByID(rec *mapping.Record) *library.Item {
 		return li.findMovie(rec)
 	}
 	tvdb, _, _ := rec.RoutedIDs()
-	// RoutedIDs already zeroes a non-usable TVDB id, so the usability POLICY has
-	// one home there and this is a presence check, not a second policy check
-	// (l-f37). The guard is kept in the > 0 form deliberately: its slice
-	// siblings below and in catalogue.go DO have to re-check per value, because
-	// RoutedIDs canonicalizes the scalar id but not the id SLICES (l-f49), and a
-	// bare != 0 here would read as if this line were the odd one out.
+	// RoutedIDs already drops every non-usable id it returns, scalar and slice
+	// alike, so the usability POLICY has one home there and this is a presence
+	// check, not a second policy check (l-f37/l-f109). The guard is kept in the
+	// > 0 form deliberately, so it reads the same way as its slice siblings'
+	// presence checks below and in catalogue.go.
 	if tvdb > 0 {
 		return arrItem(li.byTvdb[tvdb], library.ArrSonarr)
 	}
@@ -429,24 +428,29 @@ func (li *LibIndex) FindByID(rec *mapping.Record) *library.Item {
 // see FindByID).
 func (li *LibIndex) findMovie(rec *mapping.Record) *library.Item {
 	_, tmdbMovies, imdbIDs := rec.RoutedIDs()
-	for _, id := range tmdbMovies {
-		if id <= 0 { // usable per HasArrIdentifier: overrides can carry a zero/negative tmdb id
-			continue
-		}
+	for _, id := range tmdbMovies { // RoutedIDs returns only usable ids
 		if it := arrItem(li.byTmdb[id], library.ArrRadarr); it != nil {
 			return it
 		}
 	}
-	for _, imdb := range imdbIDs {
-		if strings.TrimSpace(imdb) == "" { // usable per HasArrIdentifier: overrides can carry a blank imdb id
+	for _, imdb := range imdbIDs { // RoutedIDs returns only usable ids
+		key := imdbKey(imdb) // a usable id can still be padded; the index key is trimmed
+		if key == "" {
 			continue
 		}
-		if it := arrItem(li.byImdb[imdb], library.ArrRadarr); it != nil {
+		if it := arrItem(li.byImdb[key], library.ArrRadarr); it != nil {
 			return it
 		}
 	}
 	return nil
 }
+
+// imdbKey canonicalizes an IMDb id into its index/lookup key. HasArrIdentifier
+// judges usability on the TRIMMED value, so the key must be trimmed too: a
+// padded override id ("  tt0123456") otherwise reads as usable (suppressing the
+// AniList title fallback) while never matching the item indexed under its own
+// value. A blank or whitespace-only id yields "", which every caller skips.
+func imdbKey(id string) string { return strings.TrimSpace(id) }
 
 // arrItem returns it only when it is non-nil and belongs to arr, enforcing
 // arr-consistency on an ID lookup.
@@ -476,17 +480,24 @@ func (li *LibIndex) findByTitle(titles []string, year int, arr string, log *slog
 	case 0:
 		return nil
 	default:
-		safe := make([]string, len(titles))
+		j := logattr.NewJoiner()
 		for i, t := range titles {
-			safe[i] = runesafe.Sanitize(t)
+			if i > 0 && !j.WriteSep(", ") {
+				break
+			}
+			if !j.Write(t) {
+				break
+			}
 		}
-		log.Debug("title fallback ambiguous, treating as unmapped", "titles", safe, "candidates", len(candidates))
+		log.Debug("title fallback ambiguous, treating as unmapped", "titles", j.String(), "candidates", len(candidates))
 		return nil
 	}
 }
 
 // titleCandidates returns the distinct library items whose (normalized) title
-// or alternate title equals any of titles, optionally restricted to arr.
+// or alternate title equals any of titles, restricted to arr unless arr is
+// arrUnknown (the one "arr not known" sentinel: an entry whose AniList format
+// gave no arr evidence searches both arrs).
 func (li *LibIndex) titleCandidates(titles []string, arr string) []*library.Item {
 	seen := make(map[*library.Item]struct{})
 	var candidates []*library.Item
@@ -497,14 +508,15 @@ func (li *LibIndex) titleCandidates(titles []string, arr string) []*library.Item
 }
 
 // appendTitleCandidates appends the items indexed under title's normalized
-// key that pass the arr restriction and are not already in seen.
+// key that pass the arr restriction (arrUnknown = unrestricted) and are not
+// already in seen.
 func (li *LibIndex) appendTitleCandidates(candidates []*library.Item, seen map[*library.Item]struct{}, title, arr string) []*library.Item {
 	key := titlekey.Normalize(title)
 	if key == "" {
 		return candidates
 	}
 	for _, it := range li.byTitle[key] {
-		if arr != "" && arr != arrUnknown && it.Arr != arr {
+		if arr != arrUnknown && it.Arr != arr {
 			continue
 		}
 		if _, dup := seen[it]; dup {

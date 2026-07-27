@@ -82,6 +82,57 @@ func TestAuditNotOnSeaDex(t *testing.T) {
 	}
 }
 
+// TestAuditRowGroupsDoNotAliasTheSnapshot pins the clone both row-building
+// sites document: for a single-unit scope align.Scope returns the library
+// snapshot's OWN slice, and uncoveredRows reads the item's Groups directly, so
+// an aliased Row.CurrentGroups would hand the report a window into state a
+// concurrent daemon cycle owns - a data race whose torn or rewritten group
+// column no assertion in this suite would notice. Mutating the row's groups
+// must leave the snapshot untouched on BOTH arms (a matched season-scoped row
+// and a not_on_seadex row).
+func TestAuditRowGroupsDoNotAliasTheSnapshot(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{
+			Arr: library.ArrSonarr, ArrID: 1, Title: "Matched", TvdbID: 100,
+			SeasonGroups: map[int][]string{1: {"sev"}}, Groups: []string{"sev"}, HasFile: true,
+		},
+		{
+			Arr: library.ArrSonarr, ArrID: 2, Title: "Uncovered", TvdbID: 200,
+			SeasonGroups: map[int][]string{1: {"grp"}}, Groups: []string{"grp"}, HasFile: true,
+		},
+	}}
+	idx := mapping.NewIndex([]mapping.Record{
+		{AniListID: 1, Type: "TV", TvdbID: 100},
+		{AniListID: 2, Type: "TV", TvdbID: 200},
+	})
+	matches := []match.Match{{
+		Item:   &snap.Items[0],
+		Arr:    library.ArrSonarr,
+		Source: match.SourceID,
+		Entry:  seadex.Entry{AniListID: 1},
+		Record: mapping.Record{Type: "TV", TvdbID: 100, SeasonTvdb: 1},
+	}}
+
+	rep := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"}).Audit(matches, snap, idx, nil)
+
+	if len(rep.Rows) != 2 {
+		t.Fatalf("rows = %d, want 2 (the matched row plus the not_on_seadex row)", len(rep.Rows))
+	}
+	for i := range rep.Rows {
+		row := &rep.Rows[i]
+		if len(row.CurrentGroups) == 0 {
+			t.Fatalf("row %q carries no groups", row.Title)
+		}
+		row.CurrentGroups[0] = "MUTATED"
+	}
+	if got := snap.Items[0].SeasonGroups[1][0]; got != "sev" {
+		t.Errorf("matched row aliased the snapshot's season groups: %q, want %q", got, "sev")
+	}
+	if got := snap.Items[1].Groups[0]; got != "grp" {
+		t.Errorf("not_on_seadex row aliased the snapshot item's groups: %q, want %q", got, "grp")
+	}
+}
+
 // TestAuditNotOnSeaDexHonorsExcludeSpecials pins the exclude_specials symmetry
 // (h-f6): with the filter on, a specials-only library item (its only Fribb
 // record is an OVA) must not surface as not_on_seadex — matching the

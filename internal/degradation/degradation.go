@@ -1,9 +1,10 @@
 // Package degradation is the neutral home of the application-wide
 // degradation policy constants shared across domains: the escalation
 // threshold the persisted degradation streaks (mapping refresh rejections,
-// shrunk library walks, SeaDex fetch failures) escalate their log sites at,
-// and the shrink guards' trigger fraction (mapping refresh + library walk).
-// It is a leaf with no imports so both mapping and scout can reference the
+// shrunk library walks, partial library walks, SeaDex fetch failures, AniList
+// degradation) escalate their log sites at, and the shrink guards' trigger
+// fraction (mapping refresh + library walk + SeaDex catalogue walk).
+// It is a leaf with no imports so mapping, scout and seadex can reference the
 // one policy without either domain owning cross-domain operational policy.
 package degradation
 
@@ -15,8 +16,10 @@ package degradation
 // short enough that a persistent fault alerts instead of degrading silently
 // forever. Shared by the mapping loader's refresh-rejection streak
 // (mapping.Cache.RejectedRefreshes), the scout's shrunk-walk streak
-// (state.State.ShrunkWalks), and the scout's SeaDex fetch-failure streak
-// (state.State.SeadexFailures).
+// (state.State.ShrunkWalks), the scout's partial-walk streak
+// (state.State.PartialWalks), the scout's SeaDex fetch-failure streak
+// (state.State.SeadexFailures), and the scout's AniList-degradation streak
+// (state.State.AniListDegraded).
 const EscalationThreshold = 8
 
 // ShrinkGuardFactor is the shrink guards' trigger fraction: a refreshed data
@@ -24,7 +27,8 @@ const EscalationThreshold = 8
 // its entries - below half, at the default 2 - is treated as a suspicious
 // truncation rather than a real change, keeping the prior data and never
 // auto-accepting. Shared by the mapping loader's refresh shrink guard
-// (acceptRefresh) and the scout's library shrink guard.
+// (acceptRefresh), the scout's library shrink guard, and the SeaDex client's
+// catalogue-walk shortfall guard (which errors the fetch below half).
 const ShrinkGuardFactor = 2
 
 // Shrunk reports whether a refreshed population of count entries is a

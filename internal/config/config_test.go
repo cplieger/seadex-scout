@@ -93,6 +93,9 @@ func TestToConfigEnabledToggleAndTrim(t *testing.T) {
 	if len(c.IncludeTags) != 1 || c.IncludeTags[0] != "anime" {
 		t.Errorf("include tags not trimmed/filtered: %v", c.IncludeTags)
 	}
+	if len(c.ExcludeTags) != 1 || c.ExcludeTags[0] != "skip" {
+		t.Errorf("ExcludeTags = %v, want [skip] from arr_tags.exclude", c.ExcludeTags)
+	}
 	if c.ReportDir != DefaultReportDir {
 		t.Errorf("ReportDir = %q, want default %q", c.ReportDir, DefaultReportDir)
 	}
@@ -951,6 +954,43 @@ func TestToConfigWiresLogLevel(t *testing.T) {
 	}
 }
 
+// TestToConfigWiresToggles pins the flatten-site wiring of every boolean the
+// operator sets in the file: each toggle is set alone, so a dropped assignment
+// AND a crossed one (exclude_remux reading require_dual_audio) both fail.
+// Nothing else in the suite reads these four fields, so the whole wire can be
+// cut while every test stays green and the configured filter does nothing.
+func TestToConfigWiresToggles(t *testing.T) {
+	tests := []struct {
+		name string
+		set  func(*fileConfig)
+		get  func(Config) bool
+	}{
+		{"filters.exclude_remux", func(fc *fileConfig) { fc.Filters.ExcludeRemux = true }, func(c Config) bool { return c.ExcludeRemux }},
+		{"filters.require_dual_audio", func(fc *fileConfig) { fc.Filters.RequireDualAudio = true }, func(c Config) bool { return c.RequireDualAudio }},
+		{"filters.exclude_specials", func(fc *fileConfig) { fc.Filters.ExcludeSpecials = true }, func(c Config) bool { return c.ExcludeSpecials }},
+		{"animebytes", func(fc *fileConfig) { fc.AnimeBytes = true }, func(c Config) bool { return c.AnimeBytes }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := defaultFileConfig()
+			if tt.get(base.toConfig()) {
+				t.Errorf("%s = true for a default config, want false", tt.name)
+			}
+			fc := defaultFileConfig()
+			tt.set(&fc)
+			c := fc.toConfig()
+			if !tt.get(c) {
+				t.Errorf("%s = false after setting it in the file, want true", tt.name)
+			}
+			for _, other := range tests {
+				if other.name != tt.name && other.get(c) {
+					t.Errorf("setting %s also flipped %s (crossed wire)", tt.name, other.name)
+				}
+			}
+		})
+	}
+}
+
 func TestExampleConfigMatchesLoader(t *testing.T) {
 	path, err := filepath.Abs(filepath.Join("..", "..", "config.example.yaml"))
 	if err != nil {
@@ -1353,6 +1393,15 @@ func TestURLEmbedsCredential(t *testing.T) {
 		{"token", "http://prowlarr:9696/22/api?token=k", true},
 		{"authkey", "http://prowlarr:9696/22/api?authkey=k", true},
 		{"torrent_pass", "http://prowlarr:9696/22/api?torrent_pass=k", true},
+		{"apitoken", "http://prowlarr:9696/22/api?apitoken=k", true},
+		{"api_token", "http://prowlarr:9696/22/api?api_token=k", true},
+		{"access_token", "http://prowlarr:9696/22/api?access_token=k", true},
+		{"auth_token", "http://prowlarr:9696/22/api?auth_token=k", true},
+		{"password", "http://prowlarr:9696/22/api?password=k", true},
+		{"pass", "http://prowlarr:9696/22/api?pass=k", true},
+		{"secret", "http://prowlarr:9696/22/api?secret=k", true},
+		{"client_secret", "http://prowlarr:9696/22/api?client_secret=k", true},
+		{"rss_key", "http://prowlarr:9696/22/api?rss_key=k", true},
 		{"uppercase APIKEY", "http://prowlarr:9696/22/api?APIKEY=k", true},
 		{"malformed semicolon pair keeps apikey flagged", "http://prowlarr:9696/22/api?apikey=k;foo=x", true},
 		{"credential after semicolon in malformed pair", "http://prowlarr:9696/22/api?foo=x;passkey=k", true},

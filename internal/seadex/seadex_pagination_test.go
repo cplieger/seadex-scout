@@ -298,6 +298,55 @@ func TestFetchEntriesHTTPStatusErrorAborts(t *testing.T) {
 	}
 }
 
+// flakyStatusTransport answers the first failures requests with status, then
+// serves a one-record catalogue page. It keeps the retry hermetic inside a
+// synctest bubble, where httpx's backoff sleeps advance in virtual time.
+type flakyStatusTransport struct {
+	status   int
+	failures int
+	requests int
+}
+
+func (tr *flakyStatusTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	tr.requests++
+	if tr.requests <= tr.failures {
+		return &http.Response{
+			StatusCode: tr.status,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("upstream busy")),
+			Request:    req,
+		}, nil
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(`{"totalItems":1,"totalPages":1,"items":[{"alID":1,"expand":{"trs":[]}}]}`)),
+		Request:    req,
+	}, nil
+}
+
+// TestFetchEntriesRetriesTransientStatus pins the per-page retry budget the
+// client hands httpx: a Cloudflare-fronted community service answers 503 under
+// load, and SeaDex is the one upstream whose failure degrades the cycle while
+// PRESERVING stale findings for a whole poll_interval. A regression that drops
+// WithMaxAttempts turns a single transient blip into that degradation, and no
+// other test looks at the attempt budget at all.
+func TestFetchEntriesRetriesTransientStatus(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tr := &flakyStatusTransport{status: http.StatusServiceUnavailable, failures: maxAttempts - 1}
+		entries, err := NewClient(&http.Client{Transport: tr}, "https://example.test", 0, nil).FetchEntries(t.Context())
+		if err != nil {
+			t.Fatalf("FetchEntries returned error: %v (a transient 503 must be retried, not degrade the cycle)", err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("entries = %d, want 1", len(entries))
+		}
+		if tr.requests != maxAttempts {
+			t.Errorf("requests = %d, want %d (the page retried through the configured attempt budget)", tr.requests, maxAttempts)
+		}
+	})
+}
+
 // TestFetchEntriesEmptyCatalogueErrors pins the empty-catalogue guard: a first
 // response reporting zero items ({"totalItems":0,"totalPages":0,"items":[]})
 // completes pagination but must surface as an ERROR, never a successful empty
@@ -741,5 +790,37 @@ func TestFetchEntriesRejectsDuplicateIdentityAcrossPages(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "page 2 repeats AniList ID 1") {
 		t.Errorf("error = %q, want cross-page duplicate-identity context", err.Error())
+	}
+}
+
+// TestFetchEntriesUnusableCursorAborts pins the FETCH-level consequence of an
+// unusable keyset cursor: advanceCursor's own table proves it refuses a
+// missing, unsafe, or non-advancing (created, id) pair, but nothing proved
+// FetchEntries PROPAGATES that refusal. A full chunk whose last record omits
+// id must abort the walk with a nil slice on the first request - never
+// re-request the same chunk, and never complete against the prefix it already
+// holds.
+func TestFetchEntriesUnusableCursorAborts(t *testing.T) {
+	var reqs int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reqs++
+		fmt.Fprintf(w, `{"totalItems":%d,"totalPages":2,"items":[%s,%s]}`, perPage+1,
+			keysetRecords(1, perPage-1),
+			`{"alID":999999,"created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}}`)
+	}))
+	defer server.Close()
+
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	if err == nil {
+		t.Fatalf("FetchEntries = %d entries, want an unusable-cursor error", len(entries))
+	}
+	if entries != nil {
+		t.Fatalf("entries = %d items, want nil (a truncated view must never reach the comparison)", len(entries))
+	}
+	if !strings.Contains(err.Error(), "carries no usable keyset cursor") {
+		t.Errorf("error = %q, want the unusable-cursor refusal", err.Error())
+	}
+	if reqs != 1 {
+		t.Errorf("requests = %d, want 1 (the walk aborts instead of re-requesting the same chunk)", reqs)
 	}
 }

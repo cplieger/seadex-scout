@@ -38,6 +38,18 @@ func trackerScope(tracker string) string {
 	return ""
 }
 
+// scopeOfHost returns the feed scope a URL host belongs to ("" for none):
+// release's canonical host table names the tracker and trackerScope maps that
+// name to a scope, so host->scope has one home. Subdomains classify like the
+// Is*Host twins; namespace-exact identity is isCanonicalTrackerHost's job.
+func scopeOfHost(host string) string {
+	t, ok := release.LookupTrackerByHost(host)
+	if !ok {
+		return ""
+	}
+	return trackerScope(t.Name)
+}
+
 // trackerID extracts the tracker's numeric torrent id from a SeaDex source
 // URL for a scope: Nyaa's /view/{id}, AnimeBytes' torrentid=/permalink forms.
 // It is the single home of the scope->id-extraction pairing, shared by
@@ -66,10 +78,32 @@ func nyaaID(rawURL string) string {
 		return ""
 	}
 	path := u.EscapedPath()
-	if !strings.HasPrefix(path, "/view/") {
+	if !strings.HasPrefix(path, "/view/") || pathHasDotSegments(u.Path) {
 		return ""
 	}
 	return extractID(path, "/view/")
+}
+
+// pathHasDotSegments reports whether a URL path carries a "." or ".." segment.
+// A dot segment makes the raw path text disagree with the page a client
+// actually resolves (RFC 3986 remove-dot-segments, which every browser and
+// every HTTP client applies): "/view/123/../456" names torrent 456 to the
+// tracker while a raw scan of the path reads 123, so the minted key, the
+// download link built from that id, and the page URL served to the arr would
+// name different torrents. Identity evidence must survive normalization, so
+// such a path mints no key - the same fail-closed direction as a route that is
+// not anchored at the path start.
+//
+// The DECODED path (url.URL.Path) is deliberately the input, so a
+// percent-encoded dot segment ("/view/123/%2e%2e/456", which clients also
+// normalize) is covered by the same check.
+func pathHasDotSegments(p string) bool {
+	for seg := range strings.SplitSeq(p, "/") {
+		if seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // trackerKey builds the match key for a SeaDex torrent from its tracker name
@@ -141,13 +175,8 @@ func trackerOwnURL(scope, sourceURL string) bool {
 		if f.Class != urlform.ClassAbsolute || f.HasUserInfo || !isHTTPScheme(f.Scheme) {
 			return false
 		}
-		switch scope {
-		case upstreamNyaa:
-			return release.IsNyaaHost(f.Host) && isCanonicalTrackerHost(scope, f.Host)
-		case upstreamAB:
-			return release.IsAnimeBytesHost(f.Host) && isCanonicalTrackerHost(scope, f.Host)
-		}
-		return false
+		return scope != "" && scopeOfHost(f.Host) == scope &&
+			isCanonicalTrackerHost(scope, f.Host)
 	}
 	// No host evidence: only AnimeBytes accepts a rooted relative reference, and
 	// a form whose host could not be recovered (HostUnrecoverable) is a parse
@@ -186,12 +215,23 @@ func canonicalTrackerHost(scope string) string {
 // its download link for the wrong bytes. The shared release.Is*Host
 // predicates accept subdomains, which is right for tracker CLASSIFICATION
 // (obtainability, display) but too broad for identity; callers apply this
-// check after them, so the ASCII/homograph gates have already run and the
-// EqualFold here is a pure ASCII fold. Cross-site matching still works for
+// check after them, so the ASCII/homograph gates have already run - and the
+// fold here is ASCII-only regardless (asciiLowerHost), so the predicate does
+// not depend on that call order. Cross-site matching still works for
 // mirrors through the info hash, which names the bytes themselves.
 func isCanonicalTrackerHost(scope, host string) bool {
-	c := canonicalTrackerHost(scope)
-	return c != "" && strings.EqualFold(strings.TrimSuffix(host, "."), c)
+	// ASCII-only fold, deliberately NOT strings.EqualFold: that is the
+	// full-Unicode simple fold asciiLowerHost was extracted to keep out of a
+	// host comparison (U+017F folds to 's', so a byte-wise foreign host could
+	// match a canonical name) - see snapshotInfoURLAllowed for the same rule.
+	// Both callers already hand us urlform's ASCII-lowercased host behind
+	// release.Is*Host's IsASCIIHost gate, so this is byte equality on every
+	// reachable input; it simply no longer DEPENDS on that call order.
+	c := asciiLowerHost(canonicalTrackerHost(scope))
+	if c == "" {
+		return false
+	}
+	return asciiLowerHost(strings.TrimSuffix(host, ".")) == c
 }
 
 // --- Match-key building ---
@@ -202,8 +242,8 @@ func isCanonicalTrackerHost(scope, host string) bool {
 // display gate (httpDisplayHost): an absolute http(s) form, free of userinfo and
 // of the browser-vs-net/url smuggling shapes, so an odd-scheme, userinfo-bearing
 // or de-smuggled URL never proves an identity the rest of the boundary would
-// refuse to display. Host classification rides the shared tracker predicate
-// (release.LookupTrackerByHost via the Is*Host twins), so a non-ASCII
+// refuse to display. Host classification rides the shared host->scope home
+// (scopeOfHost, over release.LookupTrackerByHost), so a non-ASCII
 // homograph label or an empty-labeled host under a tracker domain never
 // yields a curation key.
 func trackerKeyFromURL(raw string) string {
@@ -211,13 +251,8 @@ func trackerKeyFromURL(raw string) string {
 	if !ok {
 		return ""
 	}
-	var scope string
-	switch {
-	case release.IsNyaaHost(host):
-		scope = upstreamNyaa
-	case release.IsAnimeBytesHost(host):
-		scope = upstreamAB
-	default:
+	scope := scopeOfHost(host)
+	if scope == "" {
 		return ""
 	}
 	// Identity is namespace-exact: a subdomain (sukebei.nyaa.si) has its own
@@ -254,6 +289,9 @@ func animeBytesID(rawURL string) string {
 	// (e.g. /not-a-torrent?torrentid=123) is not evidence for the tracker
 	// record and never mints a key.
 	path := u.EscapedPath()
+	if pathHasDotSegments(u.Path) {
+		return ""
+	}
 	if strings.HasPrefix(path, "/torrent/") {
 		return extractID(path, "/torrent/")
 	}
@@ -307,9 +345,18 @@ func extractID(rawURL, needle string) string {
 
 // validTrackerID is the single bounded validator every extracted tracker-id
 // candidate routes through: it returns id unchanged when it is a non-empty
-// run of ASCII digits no longer than maxTrackerIDDigits, and "" otherwise.
+// run of ASCII digits no longer than maxTrackerIDDigits in the CANONICAL
+// decimal form (no leading zero), and "" otherwise.
 func validTrackerID(id string) string {
 	if id == "" || len(id) > maxTrackerIDDigits || !isAllDigits(id) {
+		return ""
+	}
+	if len(id) > 1 && id[0] == '0' {
+		// A non-canonical decimal form ("0123") is the SAME torrent to the
+		// tracker (both trackers route on an integer) but a different identity
+		// string here, so it would key the curation set and the journal under a
+		// second name that a Prowlarr item's canonical page URL can never
+		// match. Fail closed like a non-numeric id.
 		return ""
 	}
 	return id

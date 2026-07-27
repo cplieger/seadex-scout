@@ -1,5 +1,5 @@
 // Package align resolves which on-disk release groups a SeaDex entry should be
-// compared against (Scope) and owns the shared comparison decision over them
+// compared against (scope) and owns the shared comparison decision over them
 // (Decide): file presence before entry state, proven alignment over everything
 // group-shaped, unverifiable evidence (release.OverlapUnknown: a NoGroup
 // member that could hide the membership being tested) before the mixed and
@@ -28,9 +28,9 @@ import (
 // specialSeason is the TVDB season number Sonarr files specials under.
 const specialSeason = 0
 
-// ScopeKind names the semantic comparison scope Scope resolved for an item:
-// which branch of the movie / season / special / whole-series dispatch fired.
-// It travels with the resolved groups in ScopeResult so consumers (compare's
+// ScopeKind names the semantic comparison scope resolved for an item: which
+// branch of the movie / season / special / whole-series dispatch fired.
+// It travels with the resolved groups in scopeResult so consumers (compare's
 // findings and audit's rendered Scope column) branch and label from the one
 // decision instead of re-deriving it. ScopeWholeSeries is the zero value, so
 // an unset kind reads as the conservative whole-series label.
@@ -51,18 +51,18 @@ const (
 	ScopeSpecial
 )
 
-// ScopeResult is the single scoping decision returned by Scope: the semantic
+// scopeResult is the single scoping decision returned by scope: the semantic
 // Kind, the on-disk release groups to compare against, whether the scoped unit
 // has any file on disk, and whether the comparison is approximate (the
 // season-0 specials bucket held more than one group).
-type ScopeResult struct {
+type scopeResult struct {
 	Groups  []string
 	Kind    ScopeKind
 	HasFile bool
 	Approx  bool
 }
 
-// Scope resolves the comparison scope of a matched entry once, for every
+// scope resolves the comparison scope of a matched entry once, for every
 // consumer: the semantic Kind plus the on-disk release groups, file presence,
 // and approximation flag that go with it. It handles the three single-unit
 // scopes: a movie (the movie's groups), a series with a positive Fribb TVDB
@@ -70,13 +70,13 @@ type ScopeResult struct {
 // Sonarr lumps specials into, approximate when it holds more than one group).
 //
 // A Sonarr series with no positive Fribb season and not a special has no
-// single-unit scope: Scope classifies it as ScopeWholeSeries (nil groups) and
+// single-unit scope: scope classifies it as ScopeWholeSeries (nil groups) and
 // Decide resolves it with the conservative per-real-season aggregation, so a
 // consumer cannot silently mis-scope such an item against the specials bucket.
-func Scope(item *library.Item, rec *mapping.Record) ScopeResult {
+func scope(item *library.Item, rec *mapping.Record) scopeResult {
 	switch {
 	case item.Arr == library.ArrRadarr:
-		return ScopeResult{Kind: ScopeMovie, Groups: item.Groups, HasFile: item.HasFile}
+		return scopeResult{Kind: ScopeMovie, Groups: item.Groups, HasFile: item.HasFile}
 	case rec.HasMappedSeason():
 		// Group presence doubles as file presence here and in the specials
 		// branch below: release.Classify falls back to the literal NOGRP
@@ -85,14 +85,34 @@ func Scope(item *library.Item, rec *mapping.Record) ScopeResult {
 		// unknown-evidence sentinel, which the decision layer treats as
 		// unverifiable, never as an identity.
 		g := item.SeasonGroups[rec.SeasonTvdb]
-		return ScopeResult{Kind: ScopeSeason, Groups: g, HasFile: len(g) > 0}
-	case wholeSeries(item, rec):
-		// A whole-series comparison has no single-unit scope; Decide resolves
-		// it with the conservative per-real-season aggregation.
-		return ScopeResult{Kind: ScopeWholeSeries}
-	default: // a special: compare against the season-0 specials bucket
+		return scopeResult{Kind: ScopeSeason, Groups: g, HasFile: len(g) > 0}
+	case rec.IsSpecial():
+		// a special: compare against the season-0 specials bucket
 		g := item.SeasonGroups[specialSeason]
-		return ScopeResult{Kind: ScopeSpecial, Groups: g, HasFile: len(g) > 0, Approx: len(g) > 1}
+		return scopeResult{Kind: ScopeSpecial, Groups: g, HasFile: len(g) > 0, Approx: len(g) > 1}
+	default:
+		// Everything left is a whole-series comparison (a Sonarr
+		// absolute-numbered run or a title-only match): it has no single-unit
+		// scope, and Decide resolves it with the conservative per-real-season
+		// aggregation.
+		return scopeResult{Kind: ScopeWholeSeries}
+	}
+}
+
+// String names the scope kind for an operator-facing label: "movie",
+// "season", "special", or "series" for a whole-series comparison. It is the
+// one home of that vocabulary, shared by the daemon's finding line and the
+// audit report's scope cell (which adds the season NUMBER for ScopeSeason).
+func (k ScopeKind) String() string {
+	switch k {
+	case ScopeMovie:
+		return "movie"
+	case ScopeSeason:
+		return "season"
+	case ScopeSpecial:
+		return "special"
+	default:
+		return "series"
 	}
 }
 
@@ -100,20 +120,11 @@ func Scope(item *library.Item, rec *mapping.Record) ScopeResult {
 // SeaDex-associated Fribb record (an item enumerated by the audit's reverse
 // catalogue, not matched to a SeaDex entry): a Radarr movie scopes to the
 // movie, a Sonarr series has no per-season mapping and reads as the
-// whole-series comparison. It delegates to Scope so the scope dispatch stays
+// whole-series comparison. It delegates to scope so the scope dispatch stays
 // single-homed - a caller must never synthesize an empty mapping.Record to
 // reach this classification.
 func ItemKind(item *library.Item) ScopeKind {
-	return Scope(item, &mapping.Record{}).Kind
-}
-
-// wholeSeries reports whether the item must be compared against the whole series
-// rather than a single unit: a Sonarr item with no positive Fribb TVDB season
-// and not a special (an absolute-numbered run like One Piece, or a title-only
-// match). SeaDex carries one whole-series recommendation for these, with no
-// per-season mapping. Consumers read the classification via Scope's Kind.
-func wholeSeries(item *library.Item, rec *mapping.Record) bool {
-	return item.Arr == library.ArrSonarr && !rec.HasMappedSeason() && !rec.IsSpecial()
+	return scope(item, &mapping.Record{}).Kind
 }
 
 // summary is the per-real-season aggregate summarizeWholeSeries collects: the
@@ -133,7 +144,7 @@ type summary struct {
 	AnyUnverified bool
 	// Approx marks the comparison approximate when the aggregate spans more
 	// than one season or more than one release group: the whole-series arm of
-	// the same coarseness rule as ScopeResult.Approx (the single whole-series
+	// the same coarseness rule as scopeResult.Approx (the single whole-series
 	// recommendation then applies to a coarse aggregate).
 	Approx bool
 }

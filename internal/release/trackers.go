@@ -106,7 +106,9 @@ var trackerByHost = func() map[string]Tracker {
 // here so every consumer inherits them: a non-ASCII host never matches (see
 // urlform.IsASCIIHost - homograph territory), and an empty-labeled host (".nyaa.si",
 // "a..nyaa.si") is not a subdomain - no DNS name has an empty label, so only
-// a non-empty label chain counts (see urlform.HostMatchesDomain).
+// a non-empty label chain counts (see urlform.HostMatchesDomain). When two
+// canonical hosts both match (a table entry that is a subdomain of another),
+// the most specific one wins.
 func LookupTrackerByHost(host string) (Tracker, bool) {
 	// The ASCII gate runs on the RAW UNTRIMMED host, BEFORE any Unicode
 	// transform: BOTH strings.ToLower and strings.TrimSpace are full-Unicode
@@ -127,12 +129,20 @@ func LookupTrackerByHost(host string) (Tracker, bool) {
 		return Tracker{}, false
 	}
 	host = strings.ToLower(host)
+	// Most specific match wins, so the result cannot depend on Go's
+	// randomized map iteration order once the table holds a host that is
+	// a subdomain of another (sukebei.nyaa.si beside nyaa.si). Every
+	// canonical key is non-empty by construction (trackerByHost omits an
+	// entry whose BaseURL yields no hostname), so bestLen > 0 is exactly
+	// "something matched".
+	var best Tracker
+	bestLen := 0
 	for canonical, t := range trackerByHost {
-		if urlform.HostMatchesDomain(host, canonical) {
-			return t, true
+		if len(canonical) > bestLen && urlform.HostMatchesDomain(host, canonical) {
+			best, bestLen = t, len(canonical)
 		}
 	}
-	return Tracker{}, false
+	return best, bestLen > 0
 }
 
 // LookupTrackerByRelativeURL resolves tracker-specific relative page shapes

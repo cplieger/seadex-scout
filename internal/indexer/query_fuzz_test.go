@@ -1,6 +1,11 @@
 package indexer
 
-import "testing"
+import (
+	"net/url"
+	"strconv"
+	"strings"
+	"testing"
+)
 
 // FuzzCurationLookup_neverAdmitsCrossWiredIdentity exercises the request-side
 // curation gate with arbitrary Prowlarr-controlled identity signals (the info
@@ -57,4 +62,47 @@ func FuzzCurationLookup_neverAdmitsCrossWiredIdentity(f *testing.F) {
 			t.Fatalf("lookup matched cross-wired identity: hash %q with key %q (no persisted co-membership)", h, key)
 		}
 	})
+}
+
+// FuzzUpstreamParams_limitNeverExceedsAdvertisedMax exercises the search
+// proxy's forwarded-limit clamp with arbitrary client-controlled limit values.
+// Invariant: a forwarded limit that names a non-negative count never asks an
+// upstream for more items than the caps document advertises (maxItems), the
+// bound parseTorznab rejects a response above. The oracle compares decimal
+// digit strings rather than parsed ints, so it also holds for a digit run no
+// int can hold (a 20-digit limit is still "more than maxItems") and does not
+// restate strconv's saturation behavior.
+func FuzzUpstreamParams_limitNeverExceedsAdvertisedMax(f *testing.F) {
+	f.Add("100")
+	f.Add("1000")
+	f.Add("1001")
+	f.Add("99999999999999999999")
+	f.Add("-99999999999999999999")
+	f.Add("0")
+	f.Add("abc")
+	f.Add("")
+	f.Add("  2000  ")
+	f.Fuzz(func(t *testing.T, limit string) {
+		out := upstreamParams(url.Values{"t": {"search"}, "q": {"x"}, "limit": {limit}})
+		got := strings.TrimSpace(out.Get("limit"))
+		if got == "" || strings.ContainsFunc(got, func(r rune) bool { return r < '0' || r > '9' }) {
+			// No limit forwarded, or a value no upstream reads as a count: left
+			// untouched deliberately so the upstream applies its own default.
+			return
+		}
+		if decimalDigitsExceed(got, strconv.Itoa(maxItems)) {
+			t.Fatalf("upstreamParams forwarded limit %q for input %q, want at most %d",
+				out.Get("limit"), limit, maxItems)
+		}
+	})
+}
+
+// decimalDigitsExceed reports whether unsigned decimal digit string a names a
+// larger number than b, without parsing either (a limit can exceed math.MaxInt).
+func decimalDigitsExceed(a, b string) bool {
+	x, y := strings.TrimLeft(a, "0"), strings.TrimLeft(b, "0")
+	if len(x) != len(y) {
+		return len(x) > len(y)
+	}
+	return x > y
 }

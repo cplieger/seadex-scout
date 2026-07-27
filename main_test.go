@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cplieger/arrapi"
 	"github.com/cplieger/seadex-scout/internal/audit"
@@ -198,10 +199,7 @@ func TestArrClientHelpersReturnNilInterface(t *testing.T) {
 // logConfig ("API keys are never logged"): the startup config line must not
 // contain any configured API key or passkey value. Serial (swaps slog.Default).
 func TestLogConfigNeverLogsSecrets(t *testing.T) {
-	prev := slog.Default()
-	defer slog.SetDefault(prev)
-	var buf bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	rec := capture.Default(t)
 
 	// Fixture values stay under 10 characters so the CI secret scanner's
 	// generic-api-key rule (which needs a >=10-char secret-shaped value next
@@ -216,17 +214,17 @@ func TestLogConfigNeverLogsSecrets(t *testing.T) {
 	}
 	logConfig(cfg)
 
-	out := buf.String()
-	if out == "" {
+	if rec.Count("configuration loaded") == 0 {
 		t.Fatal("logConfig emitted nothing, want a configuration line")
 	}
 	for _, secret := range []string{"sekrit-1s", "sekrit-2r", "sekrit-3p", "sekrit-4a"} {
-		if strings.Contains(out, secret) {
-			t.Errorf("startup config log leaks secret %q: %s", secret, out)
+		// key "" scans every top-level attr of the record.
+		if rec.AttrContains("configuration loaded", "", secret) {
+			t.Errorf("startup config log leaks secret %q: %v", secret, rec.Records())
 		}
 	}
-	if !strings.Contains(out, "sonarr_enabled") {
-		t.Errorf("startup config log missing sonarr_enabled: %s", out)
+	if _, ok := rec.AttrValue("configuration loaded", "sonarr_enabled"); !ok {
+		t.Errorf("startup config log missing sonarr_enabled: %v", rec.Records())
 	}
 }
 
@@ -413,20 +411,16 @@ func TestUpstreamConfig(t *testing.T) {
 // ${VAR} secret placed by a config typo) is logged as the fixed marker
 // "invalid", never the raw value. Serial (swaps slog.Default).
 func TestLogConfigMasksInvalidRunMode(t *testing.T) {
-	prev := slog.Default()
-	defer slog.SetDefault(prev)
-	var buf bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	rec := capture.Default(t)
 
 	cfg := &config.Config{RunMode: "leaked-secret-value-9"}
 	logConfig(cfg)
 
-	out := buf.String()
-	if strings.Contains(out, "leaked-secret-value-9") {
-		t.Errorf("startup config log leaks the raw run_mode value: %s", out)
+	if rec.AttrContains("configuration loaded", "", "leaked-secret-value-9") {
+		t.Errorf("startup config log leaks the raw run_mode value: %v", rec.Records())
 	}
-	if !strings.Contains(out, `"run_mode":"invalid"`) {
-		t.Errorf("run_mode not logged as the fixed marker %q: %s", "invalid", out)
+	if !rec.HasAttr("configuration loaded", "run_mode", unknownModeMarker) {
+		t.Errorf("run_mode not logged as the fixed marker %q: %v", unknownModeMarker, rec.Records())
 	}
 }
 
@@ -446,20 +440,16 @@ func TestLoggableModeMasksUnknownMode(t *testing.T) {
 		t.Errorf("loggableMode(%q) = %q, want the fixed marker %q", secret, got, "invalid")
 	}
 
-	prev := slog.Default()
-	defer slog.SetDefault(prev)
-	var buf bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	rec := capture.Default(t)
 
 	// The exact failure line main emits when dispatch rejects the mode.
 	slog.Error("seadex-scout failed", "mode", loggableMode(secret), "error", errors.New("invalid configuration"))
 
-	out := buf.String()
-	if strings.Contains(out, secret) {
-		t.Errorf("dispatch-failure log leaks the raw mode value: %s", out)
+	if rec.AttrContains("seadex-scout failed", "", secret) {
+		t.Errorf("dispatch-failure log leaks the raw mode value: %v", rec.Records())
 	}
-	if !strings.Contains(out, `"mode":"invalid"`) {
-		t.Errorf("mode not logged as the fixed marker %q: %s", "invalid", out)
+	if !rec.HasAttr("seadex-scout failed", "mode", unknownModeMarker) {
+		t.Errorf("mode not logged as the fixed marker %q: %v", unknownModeMarker, rec.Records())
 	}
 }
 
@@ -953,3 +943,46 @@ func TestDispatchOutcome(t *testing.T) {
 		})
 	}
 }
+
+func TestReportWriteContext(t *testing.T) {
+	t.Run("a live context passes through unchanged", func(t *testing.T) {
+		ctx := context.Background()
+		got, cancel := reportWriteContext(ctx)
+		defer cancel()
+		if got != ctx {
+			t.Errorf("reportWriteContext(live) = %v, want the caller's own context", got)
+		}
+		if got.Err() != nil {
+			t.Errorf("Err() = %v, want nil", got.Err())
+		}
+	})
+	t.Run("a cancelled context is detached, bounded, and keeps its values", func(t *testing.T) {
+		parent := context.WithValue(context.Background(), reportCtxTestKey{}, "report")
+		ctx, cancelParent := context.WithCancel(parent)
+		cancelParent()
+
+		got, cancel := reportWriteContext(ctx)
+		defer cancel()
+		if got.Err() != nil {
+			t.Fatalf("Err() = %v, want nil (a shutdown must not cost the ~25m report artifact)", got.Err())
+		}
+		deadline, ok := got.Deadline()
+		if !ok {
+			t.Fatal("detached write context has no deadline, want one bounded by reportWriteGrace")
+		}
+		if d := time.Until(deadline); d <= 0 || d > reportWriteGrace {
+			t.Errorf("deadline in %v, want within (0, %v]", d, reportWriteGrace)
+		}
+		if v, _ := got.Value(reportCtxTestKey{}).(string); v != "report" {
+			t.Errorf("Value = %q, want %q (WithoutCancel keeps values)", v, "report")
+		}
+		cancel()
+		if got.Err() == nil {
+			t.Error("cancel() left the detached context live; the caller's defer must release it")
+		}
+	})
+}
+
+// reportCtxTestKey is the private key TestReportWriteContext threads through
+// the detached write context to prove values survive context.WithoutCancel.
+type reportCtxTestKey struct{}

@@ -121,10 +121,9 @@ func currentGroupKey(f *compare.Finding) string {
 // releaseIdentity returns the stable torrent identity used by finding dedupe,
 // domain-tagged so the two identity sources can never alias each other: a
 // VALIDATED 40-hex info hash ("hash:" + the lowercased hex), else the release
-// page URL ("url:" + trimmed). The InfoHash is untrusted SeaDex data - the
-// previous code trusted any non-redacted value verbatim as the identity, so a
-// crafted or garbled hash field keyed the finding unvalidated; dedupe now
-// applies the same seadex.ValidInfoHash gate the indexer feed already uses.
+// page URL ("url:" + trimmed). The InfoHash is untrusted SeaDex data, so a
+// crafted or garbled hash field must not key a finding unvalidated: it passes
+// the same seadex.ValidInfoHash gate the indexer feed applies.
 // SeaDex redacts AnimeBytes info hashes (ValidInfoHash rejects the redaction
 // marker along with everything else non-hex), so every same-group AB
 // replacement keys on its unique torrent page URL, as before.
@@ -140,9 +139,9 @@ func releaseIdentity(f *compare.Finding) string {
 // or "" when the finding carries no links. Folding EVERY obtainable source
 // into the key - not just the headline candidate's identity - re-surfaces a
 // finding when any recommended source changes: a non-headline public-tracker
-// torrent replacement (a new page URL) previously kept the key unchanged and
-// was suppressed forever, and an AnimeBytes toggle flip changes the set
-// exactly as the retired AB-only component did. Deduplicating by URL keeps
+// torrent replacement (a new page URL) and an AnimeBytes toggle flip both
+// change the set, where keying the headline identity alone left the first
+// suppressed forever. Deduplicating by URL keeps
 // the key label-insensitive: one source arriving twice (once mislabeled)
 // keys once, so correcting the label later never re-alerts an unchanged
 // source. The sorted raw set goes through keyenc.BoundedJoinParts, matching

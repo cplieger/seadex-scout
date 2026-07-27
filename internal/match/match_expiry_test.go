@@ -377,3 +377,35 @@ func TestMemoStaleTitleRejectsUnusableEntries(t *testing.T) {
 		})
 	}
 }
+
+// TestMemoStaleFormatUsesExpiredEntryAndRejectsUnusable pins StaleFormat, the
+// typing half of the feed's stale tier (scout/feedinfo.go reads it to route an
+// unmapped entry's RSS category): an EXPIRED positive still yields its format
+// (expiry governs re-fetch cadence only, exactly as for StaleTitle), while a
+// not-found negative, an entry AniList gave no format for, and an absent id all
+// read as absent rather than as false typing evidence.
+func TestMemoStaleFormatUsesExpiredEntryAndRejectsUnusable(t *testing.T) {
+	memo := Memo{Entries: map[int]MemoEntry{
+		1: {Titles: []string{"Expired Movie"}, Format: "MOVIE", Year: 2020, Expiry: memoTestClock.Add(-time.Hour)},
+		2: {Format: "MOVIE", NotFound: true, Expiry: memoTestClock.Add(time.Hour)},
+		3: {Titles: []string{"No Format"}, Year: 2021, Expiry: memoTestClock.Add(time.Hour)},
+	}}
+	tests := map[string]struct {
+		id     int
+		want   string
+		wantOK bool
+	}{
+		"expired positive still types the item": {id: 1, want: "MOVIE", wantOK: true},
+		"not-found negative":                    {id: 2},
+		"entry AniList gave no format for":      {id: 3},
+		"absent id":                             {id: 4},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, ok := memo.StaleFormat(tc.id)
+			if ok != tc.wantOK || got != tc.want {
+				t.Errorf("StaleFormat(%d) = (%q, %v), want (%q, %v)", tc.id, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}

@@ -27,7 +27,7 @@ import (
 
 	"github.com/cplieger/arrapi"
 	"github.com/cplieger/httpx/v4"
-	"github.com/cplieger/runesafe"
+	"github.com/cplieger/seadex-scout/internal/logattr"
 	"github.com/cplieger/seadex-scout/internal/release"
 )
 
@@ -78,15 +78,20 @@ type Item struct {
 	Arr          string           `json:"arr"`
 	ImdbID       string           `json:"imdb_id,omitempty"`
 	Title        string           `json:"title"`
-	ArrURL       string           `json:"arr_url,omitempty"`
-	Current      release.Release  `json:"current"`
-	AltTitles    []string         `json:"alt_titles,omitempty"`
-	Groups       []string         `json:"groups,omitempty"`
-	ArrID        int              `json:"arr_id"`
-	TvdbID       int              `json:"tvdb_id,omitempty"`
-	TmdbID       int              `json:"tmdb_id,omitempty"`
-	Year         int              `json:"year,omitempty"`
-	HasFile      bool             `json:"has_file"`
+	// ArrURL is the arr web-UI deep link, stored ALREADY REDACTED: the walker
+	// builds it through SafeLogURL, so no configured-URL credential (reverse-proxy
+	// Basic Auth, a query token) ever enters an Item, a Snapshot, a Finding, or an
+	// audit Row. The sink-side SafeLogURL calls are belt-and-braces for an Item
+	// built outside the walker (tests, future construction paths).
+	ArrURL    string          `json:"arr_url,omitempty"`
+	Current   release.Release `json:"current"`
+	AltTitles []string        `json:"alt_titles,omitempty"`
+	Groups    []string        `json:"groups,omitempty"`
+	ArrID     int             `json:"arr_id"`
+	TvdbID    int             `json:"tvdb_id,omitempty"`
+	TmdbID    int             `json:"tmdb_id,omitempty"`
+	Year      int             `json:"year,omitempty"`
+	HasFile   bool            `json:"has_file"`
 	// Failed marks a series whose episode fetch failed this walk: the item
 	// carries its arr identity (so consumers can tell WHICH items the partial
 	// walk is missing) but no file data. Consumers must not read a Failed
@@ -266,6 +271,7 @@ func (w *Walker) walkSonarr(ctx context.Context) ([]Item, int, error) {
 	}
 
 	kept := filterSeriesByTags(series, includeIDs, excludeIDs)
+	w.warnFilteredEmpty(ArrSonarr, len(series), len(kept), includeIDs != nil || excludeIDs != nil)
 
 	results, failed := w.fetchEpisodeItems(ctx, kept)
 	if err := ctx.Err(); err != nil {
@@ -293,8 +299,8 @@ func (w *Walker) walkSonarr(ctx context.Context) ([]Item, int, error) {
 	}
 	if failed > 0 {
 		// The attr keys ("skipped", "kept") and the "snapshot is partial"
-		// message substring are pinned by the library tests and Loki queries;
-		// only the misleading "series skipped" prefix changes.
+		// message substring are pinned by the library tests and Loki queries:
+		// rename them only together with those consumers.
 		w.log.Warn("sonarr episode fetches failed; failed series kept as placeholders; snapshot is partial",
 			"skipped", failed, "kept", len(kept))
 	}
@@ -360,7 +366,11 @@ func (w *Walker) fetchSeriesItem(ctx context.Context, s *arrapi.Series) (*Item, 
 		// wrapped *url.Error carries: this recoverable per-series warning sits
 		// outside the walk-level LogSafeError boundary, so a configured
 		// credential must be redacted here too before the line reaches Loki.
-		w.log.Warn("sonarr episode fetch failed; series kept as failed placeholder", "series", runesafe.Sanitize(s.Title), "id", s.ID, "error", httpx.LogSafeError(err))
+		// logattr.Cap is the app's one volume policy for an upstream-controlled
+		// attribute: it bounds the WORK (cap on a rune boundary, then sanitize),
+		// so an arr-supplied title cannot allocate its way through the
+		// container's memory budget or push the record past Loki's line limit.
+		w.log.Warn("sonarr episode fetch failed; series kept as failed placeholder", "series", logattr.Cap(s.Title), "id", s.ID, "error", httpx.LogSafeError(err))
 		// seriesItem with no files yields the identity fields and no file
 		// data - exactly the Failed placeholder shape.
 		item := w.seriesItem(s, nil)
@@ -401,6 +411,7 @@ func (w *Walker) walkRadarr(ctx context.Context) ([]Item, error) {
 		w.log.Warn("radarr movies report a file but carry no file payload; they compare as fileless",
 			"movies", noPayload, "kept", len(items))
 	}
+	w.warnFilteredEmpty(ArrRadarr, len(movies), len(items), includeIDs != nil || excludeIDs != nil)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -451,6 +462,15 @@ func (w *Walker) resolveOne(tags []arrapi.Tag, which string, labels []string) ma
 		w.log.Warn("configured tags matched no arr tag", "which", which, "unmatched_count", len(unmatched))
 	}
 	ids := arrapi.TagIDs(tags, labels...)
+	if ids == nil {
+		// Fail closed independently of arrapi's zero-match return shape: the
+		// non-nil EMPTY set is what keepByTags reads as "filter on, nothing
+		// matches". arrapi.TagIDs documents a nil return only for "no labels
+		// supplied", so a nil here (a future library change collapsing an
+		// empty result to nil) would silently turn a configured include list
+		// into no filter at all and admit the whole library.
+		ids = map[int]struct{}{}
+	}
 	if len(ids) == 0 {
 		// Every configured label missed. For an include set that is not a
 		// partial miss but a dead filter: keepByTags reads the non-nil empty
@@ -474,6 +494,25 @@ func keepByTags(itemTags []int, includeIDs, excludeIDs map[int]struct{}) bool {
 		return false
 	}
 	return true
+}
+
+// warnFilteredEmpty warns when tag filtering kept nothing out of a non-empty
+// arr list. A dead-but-resolving filter - every configured label resolves to a
+// real tag id, but no item carries it because the tag was renamed or unassigned
+// on the arr side - leaves the side contributing zero items with no other
+// diagnostic anywhere: resolveOne warns only when a LABEL missed, and the
+// scout's below-half shrink gate cannot fire on a first cycle (it needs a prior
+// snapshot), so an empty baseline and an empty report would otherwise be
+// indistinguishable from a genuinely empty library. This walk is the only place
+// that holds the discriminating fact (listed vs kept). Counts only, never label
+// values: arr_tags values pass through ${VAR} expansion and could carry a
+// secret (see the credential-safety test).
+func (w *Walker) warnFilteredEmpty(arr string, listed, kept int, filtered bool) {
+	if !filtered || listed == 0 || kept > 0 {
+		return
+	}
+	w.log.Warn("arr_tags filtering kept no items from a non-empty arr library; this side contributes nothing this cycle",
+		"arr", arr, "listed", listed)
 }
 
 // --- Item construction and fingerprinting ---
@@ -503,7 +542,7 @@ func (w *Walker) seriesItem(s *arrapi.Series, epFiles []arrapi.EpisodeFile) Item
 		Arr:          ArrSonarr,
 		Title:        s.Title,
 		ImdbID:       s.ImdbID,
-		ArrURL:       s.WebURL(w.sonarrURL),
+		ArrURL:       SafeLogURL(s.WebURL(w.sonarrURL)),
 		ArrID:        s.ID,
 		TvdbID:       s.TvdbID,
 		TmdbID:       s.TmdbID,
@@ -529,7 +568,7 @@ func (w *Walker) movieItem(m *arrapi.Movie) Item {
 		Arr:       ArrRadarr,
 		Title:     m.Title,
 		ImdbID:    m.ImdbID,
-		ArrURL:    m.WebURL(w.radarrURL),
+		ArrURL:    SafeLogURL(m.WebURL(w.radarrURL)),
 		ArrID:     m.ID,
 		TmdbID:    m.TmdbID,
 		Year:      m.Year,

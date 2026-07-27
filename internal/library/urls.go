@@ -17,17 +17,22 @@ import (
 // than as "unparseable". It lives beside the ArrURL construction it guards so
 // every slog emitter of a config-derived arr URL shares one sanitization rule.
 //
+// It runs at CONSTRUCTION (seriesItem/movieItem build Item.ArrURL through it), so
+// the credential-free property is a property of the stored value rather than of
+// each emitter; the sink-side calls (SanitizedForStorage, the notify and audit
+// render paths) stay as idempotent belt-and-braces for any Item built outside the
+// walker.
+//
 // The ADMISSION half reads urlform, the app's classifier of record for the
 // browser-vs-net/url divergence classes. ArrURL is a browser-destined deep-link
 // published to humans through Loki and the report, which is exactly urlform's
 // parser-of-record case and the same publish-or-drop pattern internal/seadex
-// already runs. It used to hand-roll that taxonomy with net/url and a comment
-// block re-deriving each quirk - the opaque schemeless-credential form
+// already runs. Reading the classifier instead of re-deriving the divergence
+// taxonomy here is what keeps this gate current as urlform learns new classes;
+// the forms it must keep dropping are the opaque schemeless-credential form
 // ("user:pass@host/..."), the single- and four-slash hidden-host forms, the
-// port-only authority, the protocol-relative form - i.e. a second,
-// independently-maintained copy of knowledge the library owns, which silently
-// misses what the library learns (urlform v1.1.0's WHATWG preprocessing and
-// hidden-host recovery closed exactly such gaps for the other consumers, l-f40).
+// port-only authority, and the protocol-relative form (each covered by a case
+// in TestSafeLogURL and by FuzzSafeLogURL's no-leak oracle).
 // Only ClassAbsolute with an http(s) scheme and a real host is admitted, and a
 // smuggling form (backslash authority, embedded tab/newline) is refused
 // outright: a de-smuggled string is not vouchable, the stance trackerlink.Publish

@@ -130,6 +130,8 @@ func TestTrackerIDExtractionRejectsNonCanonicalRoutes(t *testing.T) {
 		{"nyaa /view/ not at path start", nyaaID("https://nyaa.si/redirect/view/123")},
 		{"ab torrentid on a non-torrents.php path", animeBytesID("/not-a-torrent?torrentid=123")},
 		{"ab permalink route not at path start", animeBytesID("https://animebytes.tv/x/torrent/123/group")},
+		{"nyaa view path with a dot segment", nyaaID("https://nyaa.si/view/123/../456")},
+		{"ab permalink path with a dot segment", animeBytesID("https://animebytes.tv/torrent/123/../456/group")},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -168,6 +170,25 @@ func TestTrackerIDExtractionRejectsOverlongDigitRuns(t *testing.T) {
 	}
 }
 
+// TestTrackerIDExtractionRejectsNonCanonicalDecimalForms pins the identity half
+// of validTrackerID's contract: a zero-padded id is the SAME torrent to a
+// tracker that routes on an integer, so admitting it would key one torrent
+// under two identity strings - the curation match would miss the canonical
+// page URL a Prowlarr item carries, and the journal could list the release
+// twice under two GUIDs. It fails closed like a non-numeric id, while a lone
+// "0" (canonical) and an ordinary id still key.
+func TestTrackerIDExtractionRejectsNonCanonicalDecimalForms(t *testing.T) {
+	if got := nyaaID("https://nyaa.si/view/0123"); got != "" {
+		t.Errorf("nyaaID(zero-padded id) = %q, want empty (non-canonical identity form)", got)
+	}
+	if got := animeBytesID("/torrents.php?torrentid=00"); got != "" {
+		t.Errorf("animeBytesID(zero-padded torrentid) = %q, want empty (non-canonical identity form)", got)
+	}
+	if got := nyaaID("https://nyaa.si/view/0"); got != "0" {
+		t.Errorf("nyaaID(\"0\") = %q, want 0 (canonical)", got)
+	}
+}
+
 // TestTrackerKeyRejectsForeignHostURLs pins the SeaDex-side host gate
 // (trackerOwnURL): the record's tracker LABEL alone must never authorize an
 // id extracted from a foreign URL - a malformed or compromised SeaDex record
@@ -185,6 +206,13 @@ func TestTrackerKeyRejectsForeignHostURLs(t *testing.T) {
 		want    string
 	}{
 		{"nyaa on its own host keys", "Nyaa", "https://nyaa.si/view/123", "nyaa:123"},
+		// The absolute-root FQDN spelling denotes the same host, and the
+		// identity gate normalizes it (isCanonicalTrackerHost trims one
+		// trailing dot before folding): without these cases a change dropping
+		// that trim silently stops curating and journaling every release whose
+		// SeaDex URL carries the trailing dot, and no test fails.
+		{"nyaa trailing-dot FQDN keys the apex site", "Nyaa", "https://nyaa.si./view/123", "nyaa:123"},
+		{"ab trailing-dot FQDN keys the apex site", "AB", "https://animebytes.tv./torrents.php?id=1&torrentid=456", "ab:456"},
 		{"nyaa label with a foreign host fails closed", "Nyaa", "https://evil.example/view/123", ""},
 		{"nyaa label with a homograph-adjacent host fails closed", "Nyaa", "https://notnyaa.example/view/123", ""},
 		{"nyaa relative form fails closed (SeaDex ships nyaa absolute)", "Nyaa", "/view/123", ""},

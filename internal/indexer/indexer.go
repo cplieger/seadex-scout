@@ -49,6 +49,8 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
+	"time"
 
 	"github.com/cplieger/webhttp"
 )
@@ -84,6 +86,32 @@ type UpstreamConfig struct {
 	ABPasskey      string
 }
 
+// torznabURL returns the Prowlarr per-indexer Torznab URL configured for scope,
+// or "" when that tracker is off (an unknown scope is off). It is the scope ->
+// config-field half of the per-tracker vocabulary whose other half is
+// match.go's trackerScope: keeping it here is what stops wiring, feed serving,
+// the AB passkey guard and the writer from each re-deciding which field a scope
+// reads - a third tracker (SeaDex carries AnimeTosho and RuTracker torrents
+// today) is then one case, not five switches, and a site missed there fails
+// asymmetrically (a wired-but-never-served tracker, or the passkey-bearing /ab
+// feed served for a tracker the operator turned off).
+func (c UpstreamConfig) torznabURL(scope string) string {
+	switch scope {
+	case upstreamNyaa:
+		return c.NyaaTorznabURL
+	case upstreamAB:
+		return c.ABTorznabURL
+	}
+	return ""
+}
+
+// enabled reports whether scope may be wired, queried, or served: an empty
+// per-tracker Torznab URL is the README's documented off switch for that
+// tracker, and an unknown scope is never enabled.
+func (c UpstreamConfig) enabled(scope string) bool {
+	return c.torznabURL(scope) != ""
+}
+
 // Config is the indexer server's runtime settings: the embedded shared
 // upstream wiring, APIKey (the feed's own gate - a secret, never logged), and
 // SnapshotPath, where the compare cycle persists the materialized feed
@@ -113,10 +141,13 @@ type Config struct {
 // The zero value is valid and wires nothing: RSS still serves from the
 // persisted snapshot, a search whose scope has no wired upstream returns empty
 // with a WARN (fetchRaw's standing-misconfiguration arm), and the title harvest
-// is disabled (synthesized titles only). The curation set and the synthesized
-// RSS feeds are not built here - the compare cycle builds and persists them
-// (see FeedWriter) and the server reads that snapshot - so the server needs no
-// SeaDex or Fribb client of its own.
+// is disabled (synthesized titles only).
+//
+// ONE wired set per consumer is no longer the caller's job: New and
+// NewFeedWriter each take their own copy of the upstream instances
+// (ownUpstreams), so one wired set may be handed to both. Each upstream's
+// once-per-onset diagnostic latches therefore stay per-consumer, and the
+// server's request path can never suppress the writer's harvest WARNs.
 type Upstreams struct {
 	ups []*upstream
 }
@@ -132,9 +163,7 @@ type Upstreams struct {
 // no-downgrade redirect policy (httpx.NewClient does). A nil client wires
 // nothing. A nil log falls back to slog.Default().
 //
-// Call it once per consumer rather than sharing one set: an upstream's
-// once-per-onset diagnostic latches are per-instance, and the server's request
-// path and the writer's harvest must not suppress each other's WARNs.
+// One wired set may be handed to more than one consumer (see Upstreams).
 func WireUpstreams(client *http.Client, log *slog.Logger, cfg UpstreamConfig) Upstreams {
 	if client == nil {
 		return Upstreams{}
@@ -142,15 +171,45 @@ func WireUpstreams(client *http.Client, log *slog.Logger, cfg UpstreamConfig) Up
 	if log == nil {
 		log = slog.Default()
 	}
-	return Upstreams{ups: wireUpstreams(client, log, cfg)}
+	// One upstream per configured Prowlarr per-indexer Torznab URL. An empty URL
+	// means that tracker is off, so it is simply not wired and the feed never
+	// queries it.
+	var ups []*upstream
+	for _, scope := range []string{upstreamNyaa, upstreamAB} {
+		if !cfg.enabled(scope) {
+			continue
+		}
+		ups = append(ups, &upstream{http: client, log: log, name: scope, feed: cfg.torznabURL(scope), apiKey: cfg.ProwlarrAPIKey})
+	}
+	return Upstreams{ups: ups}
+}
+
+// ownUpstreams returns this consumer's OWN upstream instances for the wired
+// set, so Upstreams' once-per-consumer rule is structural rather than prose: an
+// upstream's diagnostic latches (dropWarned / displayWarned) are per-instance,
+// and handing one Upstreams value to both New and NewFeedWriter would otherwise
+// let the server's request path and the writer's title harvest suppress each
+// other's once-per-onset WARNs, silently. The client, endpoint, key, and logger
+// are shared by value - reachability stays the caller's (see Upstreams) - and
+// only the latch state is fresh. A whole-struct copy is not an option: the
+// latches are sync/atomic values, which must not be copied.
+func ownUpstreams(ups []*upstream) []*upstream {
+	if len(ups) == 0 {
+		return nil
+	}
+	own := make([]*upstream, 0, len(ups))
+	for _, u := range ups {
+		own = append(own, &upstream{http: u.http, log: u.log, name: u.name, feed: u.feed, apiKey: u.apiKey})
+	}
+	return own
 }
 
 // Indexer serves searches by proxying Prowlarr filtered to SeaDex's curation,
 // and periodic RSS checks from the two synthesized per-tracker feeds. Both come
-// from snap, the materialized feed the compare cycle builds and persists (see
-// FeedWriter); the server loads it on start and reloads it when the file changes
-// (a cycle - in this process or the `poll` subcommand - rewrote it), reading it
-// under mu. The server never fetches SeaDex or Fribb itself.
+// from the persisted snapshot the compare cycle builds (see FeedWriter), owned
+// by cache: New loads it on start and cache.refresh reloads it when the file
+// changes (a cycle - in this process or the `poll` subcommand - rewrote it),
+// under the cache's own locks. The server never fetches SeaDex or Fribb itself.
 type Indexer struct {
 	// cache owns the persisted-snapshot lifecycle and its two locking regimes
 	// (see snapshotCache). The server reaches it through four methods only, so
@@ -171,51 +230,86 @@ type Indexer struct {
 	// cancellable, so a request whose client has gone away abandons it instead
 	// of parking a handler goroutine behind other requests' upstream calls.
 	queryGate chan struct{}
-	// log and cfg are set once in New and read per request without a lock: cfg
-	// is a by-value copy and neither is ever written after construction (the
-	// same immutable-after-New contract as upstreams and verifyKey below).
-	log       *slog.Logger
-	cfg       Config
-	upstreams []*upstream // wired once in New; immutable afterwards
+	// feedGate bounds simultaneous synthesized-RSS renders (see
+	// maxConcurrentFeeds). Separate from queryGate so a stalled Prowlarr, which
+	// can park every search slot for the whole bounded retry budget, cannot
+	// starve the RSS path - which serves the already-loaded snapshot and never
+	// contacts an upstream.
+	feedGate chan struct{}
+	// log is set once in New and read per request without a lock, like apiKey
+	// and enablement below; none of them is ever written after construction
+	// (the same immutable-after-New contract as upstreams and verifyKey).
+	log *slog.Logger
+	// apiKey is the feed's own gate (a secret, never logged). The serving path
+	// reads it only to answer "is a key configured at all"; verification of a
+	// presented value goes through verifyKey.
+	apiKey string
+	// enablement is the per-tracker off switch (a non-empty Torznab URL) plus
+	// the AB passkey gate the request path reads - the same narrowing
+	// FeedWriter applies to the same input (writer.go), so the
+	// process-lifetime server retains no ProwlarrAPIKey: that field is
+	// reachability, consumed only inside the wired upstreams. It keeps the
+	// UpstreamConfig type so the scope -> config-field vocabulary stays
+	// single-homed (see UpstreamConfig.torznabURL); ProwlarrAPIKey is
+	// deliberately left unset here.
+	enablement UpstreamConfig
+	// noUpstreamWarned bounds fetchRaw's standing-misconfiguration WARN to one
+	// per scope per process. The condition is config-derived (a search reached
+	// a scope with no wired Prowlarr upstream) and cannot clear without a
+	// restart, so an arr left pointing at a turned-off tracker would otherwise
+	// WARN once per search - the same per-query flood the upstream's
+	// dropWarned/displayWarned latches exist to bound. Built in New and never
+	// rewritten, so the map itself needs no lock.
+	noUpstreamWarned map[string]*atomic.Bool
+	upstreams        []*upstream // wired once in New; immutable afterwards
 	// verifyKey is the pre-hashed feed_api_key verifier, built once in New so
 	// per-request verification hashes only the presented value (see
 	// webhttp.NewStaticTokenVerifier). Immutable after New.
 	verifyKey webhttp.StaticTokenVerifier
 }
 
+// warmLoadTimeout bounds New's warm load of the persisted snapshot. The read is
+// size-bounded (maxFeedBytes) but a slow or wedged /config mount has no bound of
+// its own, and New runs on the daemon's startup path (build.go's buildIndexer,
+// before main.go arms the health marker or starts the compare loop), so an
+// unbounded read holds the whole daemon down instead of one request. Abandoning
+// the warm load costs nothing durable: a cancelled read is silent and stays
+// retryable (never snapshot-unavailable), so the first request reloads.
+const warmLoadTimeout = 15 * time.Second
+
 // New builds the Torznab feed server from cfg, log, and the wired upstream set.
 // The persisted feed snapshot named by cfg.SnapshotPath is loaded now so a
 // restart serves the last feed immediately. A nil log falls back to
 // slog.Default(); a zero ups serves the snapshot without proxying searches
-// (see Upstreams).
+// (see Upstreams). cfg is the one argument with no nil tolerance - it is
+// dereferenced here, so a nil cfg panics rather than yielding a defaulted
+// server.
 func New(cfg *Config, log *slog.Logger, ups Upstreams) *Indexer {
 	if log == nil {
 		log = slog.Default()
 	}
 	ix := &Indexer{
-		log:       log,
-		cfg:       *cfg,
+		log:    log,
+		apiKey: cfg.APIKey,
+		enablement: UpstreamConfig{
+			NyaaTorznabURL: cfg.NyaaTorznabURL,
+			ABTorznabURL:   cfg.ABTorznabURL,
+			ABPasskey:      cfg.ABPasskey,
+		},
 		verifyKey: webhttp.NewStaticTokenVerifier(cfg.APIKey),
 		cache:     newSnapshotCache(cfg.SnapshotPath, cfg.ABPasskey, log),
 		queryGate: make(chan struct{}, maxConcurrentQueries),
-		upstreams: ups.ups,
+		feedGate:  make(chan struct{}, maxConcurrentFeeds),
+		upstreams: ownUpstreams(ups.ups),
+		noUpstreamWarned: map[string]*atomic.Bool{
+			upstreamNyaa: new(atomic.Bool),
+			upstreamAB:   new(atomic.Bool),
+		},
 	}
 	// Warm the feed from the last persisted snapshot so a restart serves
 	// immediately rather than empty until the next cycle.
-	ix.cache.refresh(context.Background())
+	warmCtx, cancelWarm := context.WithTimeout(context.Background(), warmLoadTimeout)
+	defer cancelWarm()
+	ix.cache.refresh(warmCtx)
 	return ix
-}
-
-// wireUpstreams is WireUpstreams' unexported builder: one upstream per
-// configured Prowlarr per-indexer Torznab URL. An empty URL means that tracker
-// is off, so it is simply not wired and the feed never queries it.
-func wireUpstreams(httpClient *http.Client, log *slog.Logger, cfg UpstreamConfig) []*upstream {
-	var ups []*upstream
-	if cfg.NyaaTorznabURL != "" {
-		ups = append(ups, &upstream{http: httpClient, log: log, name: upstreamNyaa, feed: cfg.NyaaTorznabURL, apiKey: cfg.ProwlarrAPIKey})
-	}
-	if cfg.ABTorznabURL != "" {
-		ups = append(ups, &upstream{http: httpClient, log: log, name: upstreamAB, feed: cfg.ABTorznabURL, apiKey: cfg.ProwlarrAPIKey})
-	}
-	return ups
 }

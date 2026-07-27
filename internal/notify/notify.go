@@ -2,8 +2,7 @@
 // dedupe - the daemon's NOTIFICATION path (Loki alerting rides these lines).
 // Observability is slog-only; there is no metrics endpoint. It is distinct
 // from the user-facing report FEATURE (the `report` subcommand's season-level
-// audit), which lives in internal/audit - this package was named `report`
-// until 2026-07, and the rename ended the standing collision between the two.
+// audit), which lives in internal/audit.
 package notify
 
 import (
@@ -33,13 +32,12 @@ type Alerted struct {
 // persists: exactly the fields read back across cycles - emitResolved's
 // resolution line (title, al_id, arr, season, current_group, status,
 // recommended_group) and Notify's failed-item preservation scope, keyed on
-// AniListID. The record used to persist the full sanitized Finding, but
-// everything beyond this set was write-only ballast in state.json (including
-// the ArrURL whose on-disk sanitization the trim makes moot: no URL is
-// persisted at all). The JSON tags mirror compare.Finding's, so a state file
-// written before the trim decodes cleanly (its extra fields are ignored);
-// the dedupe key stays the state map's key, so dedupe continuity and
-// resolution semantics are unchanged.
+// AniListID. No URL is persisted at all. It is the SOLE declaration of the
+// persisted attribute schema (compare.Finding is a tag-free domain value);
+// the tags below are the same attribute names the legacy full-Finding state
+// files used, so a state file written by an earlier build decodes
+// cleanly (its extra fields are ignored); the dedupe key stays the state
+// map's key, so dedupe continuity and resolution semantics are unchanged.
 type StoredFinding struct {
 	Arr              string         `json:"arr"`
 	CurrentGroup     string         `json:"current_group,omitempty"`
@@ -63,11 +61,13 @@ type Notifier struct {
 // path's per-attribute cap only bounds what is LOGGED, while these values also
 // ride into state.json, where a single multi-MB value could push the encoded
 // state past its 32 MiB write bound and freeze dedupe persistence for every
-// later cycle (CWE-400). Arr and Status are app-defined vocabularies, so they
-// stay raw.
+// later cycle (CWE-400). Arr is bounded the same way: it is an app-defined
+// vocabulary on the way OUT, but a record read back from state.json is
+// untrusted (see capStored), so nothing foreign or corrupt is re-persisted
+// verbatim. Status is a typed constant and needs no projection-time bound.
 func storedFinding(f *compare.Finding) StoredFinding {
 	return StoredFinding{
-		Arr:              f.Arr,
+		Arr:              capPersisted(f.Arr),
 		CurrentGroup:     capPersisted(f.CurrentGroup),
 		RecommendedGroup: capPersisted(f.RecommendedGroup),
 		Title:            capPersisted(f.Title),
@@ -99,6 +99,7 @@ func capPersisted(s string) string {
 // It takes a pointer because StoredFinding is heavy enough that a by-value
 // round trip is a needless copy on a per-record path (gocritic hugeParam).
 func capStored(f *StoredFinding) {
+	f.Arr = capPersisted(f.Arr)
 	f.Title = capPersisted(f.Title)
 	f.CurrentGroup = capPersisted(f.CurrentGroup)
 	f.RecommendedGroup = capPersisted(f.RecommendedGroup)
@@ -186,12 +187,26 @@ func (n *Notifier) collectCurrent(findings []compare.Finding, prior map[string]A
 	migratedPrior = make(map[string]struct{})
 	keys := make([]string, len(findings))
 	latest := make(map[string]*compare.Finding, len(findings))
-	latestLegacy := make(map[string]string, len(findings))
+	latestLegacy := make(map[string]string)
 	for i := range findings {
 		key, legacy := dedupeKeyWithLegacy(&findings[i])
 		keys[i] = key
 		latest[key] = &findings[i]
-		latestLegacy[key] = legacy
+		if legacy == "" {
+			continue
+		}
+		// The pre-fold key is 16-64 KiB of hostile upstream data and is only
+		// ever consulted as a prior lookup, so it is retained for the rest of
+		// the pass ONLY when prior holds it - adoptPrior's two branches both
+		// gate on prior[legacy], so dropping an absent legacy key is
+		// behaviour-identical. Keeping every folded finding's unfolded key
+		// would rebuild the aggregate the fold exists to bound.
+		_, held := prior[legacy]
+		n.log.Debug("dedupe key folded",
+			"al_id", findings[i].AniListID, "legacy_key_in_prior", held)
+		if held {
+			latestLegacy[key] = legacy
+		}
 	}
 	for _, key := range keys {
 		if _, ok := current[key]; ok {
@@ -251,28 +266,25 @@ func (n *Notifier) Baseline(findings []compare.Finding, now time.Time) map[strin
 
 // --- Emission / rendering ---
 
-// emit logs a finding at the level matching its severity, with the full field
+// emit logs a finding at the level its status maps to, with the full field
 // set the dashboard and Loki alert key on.
 func (n *Notifier) emit(f *compare.Finding) {
-	level := slog.LevelInfo
-	if f.Severity == compare.SevWarn {
-		level = slog.LevelWarn
-	}
-	n.log.Log(context.Background(), level, message(f.Status), findingKVs(f)...)
+	n.log.Log(context.Background(), level(f.Status), message(f.Status), findingKVs(f)...)
 }
 
 // emitResolved logs a single info line when a prior finding no longer applies,
-// reading the trimmed record the dedupe state persisted. The untrusted
-// upstream strings (title, groups) ride through capAttr,
-// matching findingKVs' policy.
+// reading the trimmed record the dedupe state persisted. Every string rides
+// through capAttr, matching findingKVs' policy: a record read back off disk is
+// untrusted regardless of which vocabulary produced it, so the app-defined arr
+// and status fields are bounded and sanitized like their upstream siblings.
 func (n *Notifier) emitResolved(f *StoredFinding) {
 	n.log.Info("finding resolved",
 		"title", capAttr(f.Title),
 		"al_id", f.AniListID,
-		"arr", f.Arr,
+		"arr", capAttr(f.Arr),
 		"season", f.Season,
 		"current_group", capAttr(f.CurrentGroup),
-		"status", string(f.Status),
+		"status", capAttr(string(f.Status)),
 		"recommended_group", capAttr(f.RecommendedGroup))
 }
 
@@ -293,13 +305,34 @@ const attrTruncMarker = logattr.TruncMarker
 // byte-identical; a hostile oversized value (SeaDex admits multi-MB URLs, up
 // to 512 per entry) is truncated on a rune boundary with the "..." marker so
 // one record can never balloon past downstream log-pipeline line limits (alert
-// suppression) or amplify memory.
-//
-// A MULTI-SOURCE attribute (a joined group or link list) must never be
-// materialized and handed to capAttr - joining first would allocate the whole
-// untrusted aggregate before the bound applies. Those render through
-// joinGroupsAttr / joinLinksAttr on the same joiner instead.
+// suppression) or amplify memory. A MULTI-SOURCE attribute renders through
+// joinGroupsAttr / joinLinksAttr instead (see findingKVs).
 func capAttr(s string) string { return logattr.Cap(s) }
+
+// mdLinkEscaper percent-encodes the characters an untrusted URL must not
+// carry into a Markdown link destination. The shipped alerts.yaml renders
+// arr_url / nyaa_url / public_url / ab_url as `[label](<attr>)` for
+// Discord/Slack, so a ')' (or a space runesafe.Sanitize substituted for a
+// hostile rune) closes the destination early and the remainder of the
+// value renders as attacker-authored markdown. Same policy as
+// internal/audit's escapeLinkURL.
+var mdLinkEscaper = strings.NewReplacer(
+	" ", "%20", "\t", "%09", "\\", "%5C", "`", "%60", `"`, "%22", "'", "%27",
+	"\v", "%0B", "\f", "%0C", "(", "%28", ")", "%29", "<", "%3C", ">", "%3E",
+	"|", "%7C", "[", "%5B", "]", "%5D", "\n", "%0A", "\r", "%0D",
+)
+
+// capURLAttr renders one untrusted URL attribute: capAttr's bounded,
+// sanitized pass first (so the escaper never walks an unbounded string),
+// then the link-destination escaping, then a re-cap because escaping can
+// grow the value - the same shape capPersisted uses.
+func capURLAttr(s string) string {
+	escaped := mdLinkEscaper.Replace(capAttr(s))
+	if len(escaped) <= maxAttrBytes {
+		return escaped
+	}
+	return runesafe.CapBytes(escaped, maxAttrBytes-len(attrTruncMarker)) + attrTruncMarker
+}
 
 // findingKVs builds the structured key-value attributes for a finding line.
 // It carries the arr deep-link, the split Nyaa/AnimeBytes URLs, the season, and
@@ -309,7 +342,10 @@ func capAttr(s string) string { return logattr.Cap(s) }
 // is passed through capAttr: runesafe.Sanitize (the same policy the audit
 // report's slog path applies, because slog's JSONHandler escapes C0 controls
 // but emits C1 controls and bidi controls raw) plus a volume cap mirroring
-// the bound the dedupe-key path applies to the same data. A MULTI-SOURCE
+// the bound the dedupe-key path applies to the same data. A LINK-DESTINATION
+// attribute (arr_url, release_url, nyaa_url, public_url, ab_url) goes through
+// capURLAttr instead, which adds the Markdown escaping the shipped
+// alerts.yaml's `[label](<attr>)` rendering requires. A MULTI-SOURCE
 // attribute (recommended_groups, release_urls) applies that same policy
 // through joinGroupsAttr / joinLinksAttr, which never materialize the
 // untrusted aggregate before the cap. Fixed-pattern app values (resolution,
@@ -320,8 +356,10 @@ func findingKVs(f *compare.Finding) []any {
 		"title", capAttr(f.Title),
 		"al_id", f.AniListID,
 		"arr", f.Arr,
-		"arr_url", capAttr(library.SafeLogURL(f.ArrURL)),
+		"arr_url", capURLAttr(library.SafeLogURL(f.ArrURL)),
 		"season", f.Season,
+		"scope", f.Scope,
+		"approx", f.Approx,
 		"current_group", capAttr(f.CurrentGroup),
 		"recommended_group", capAttr(f.RecommendedGroup),
 		"recommended_groups", joinGroupsAttr(f.RecommendedGroups),
@@ -330,7 +368,7 @@ func findingKVs(f *compare.Finding) []any {
 		"codec", f.Codec,
 		"kind", f.Kind,
 		"classification_reason", capAttr(f.Reason),
-		"release_url", capAttr(f.ReleaseURL),
+		"release_url", capURLAttr(f.ReleaseURL),
 		"release_urls", joinLinksAttr(f.Links),
 		// nyaa_url keeps its name and its meaning: the shipped alerts.yaml
 		// renders it as a "[Nyaa]" link, so it may only ever hold a Nyaa URL.
@@ -338,10 +376,10 @@ func findingKVs(f *compare.Finding) []any {
 		// supported and present in the catalogue) rides public_url beside the
 		// tracker's real name, so the alert can label it truthfully instead of
 		// calling it Nyaa (l-f5).
-		"nyaa_url", capAttr(publicLink.nyaaURL()),
-		"public_url", capAttr(publicLink.otherURL()),
+		"nyaa_url", capURLAttr(publicLink.nyaaURL()),
+		"public_url", capURLAttr(publicLink.otherURL()),
 		"public_tracker", capAttr(publicLink.otherTracker()),
-		"ab_url", capAttr(abURL),
+		"ab_url", capURLAttr(abURL),
 		"info_hash", capAttr(f.InfoHash),
 		"seadex_tags", seadexTags(f),
 		"status", string(f.Status),
@@ -370,7 +408,7 @@ func classifyTrackerLink(link compare.ReleaseLink) trackerLinkKind {
 	case filter.ABAmbiguous:
 		return trackerLinkABFallback
 	case filter.ABNone:
-		if t, known := release.LookupTracker(link.Tracker); known && t.Name == release.TrackerNameNyaa {
+		if (publicLink{url: link.URL, tracker: link.Tracker}).isNyaa() {
 			return trackerLinkNyaa
 		}
 		return trackerLinkPublic
@@ -395,12 +433,10 @@ func classifyTrackerLink(link compare.ReleaseLink) trackerLinkKind {
 // public URL yet can never displace a genuine AB link either.
 //
 // The public slot is returned WITH the tracker it came from, because it is not
-// always Nyaa. Nyaa dominates SeaDex, but the catalogue also carries AnimeTosho
-// and RuTracker releases (both supported by release/trackers.go), and their URL
-// used to be copied into the `nyaa_url` attribute - which the shipped alerts.yaml
-// renders as a `[Nyaa]` link, so the operator was shown the wrong tracker name
-// over a correct URL (l-f5). Reporting the name alongside the URL lets the alert
-// label the link truthfully without losing it.
+// always Nyaa: the catalogue also carries AnimeTosho and RuTracker releases
+// (both supported by release/trackers.go). The shipped alerts.yaml renders
+// `nyaa_url` under a hardcoded `[Nyaa]` label, so a non-Nyaa public URL must
+// arrive as `public_url` + `public_tracker` rather than be mislabeled.
 func trackerURLs(links []compare.ReleaseLink) (public publicLink, ab string) {
 	var firstPublic, firstABFallback publicLink
 	for i := range links {
@@ -441,23 +477,18 @@ func (p *publicLink) setFirst(other publicLink) {
 	}
 }
 
-// canonicalTracker resolves the name to label this link with, preferring the
-// canonical tracker table over the raw upstream label. The SeaDex tracker field
-// is untrusted data and can be an alias, oddly cased, or empty, so the URL's own
-// host is consulted as evidence too - the same preference the rest of this
-// package applies (filter.ClassifyAB keys on the host, not the label). A host
-// that names no known tracker labels the link with itself, which is truthful and
-// always renderable; only a link with neither a known label nor an extractable
-// host yields "".
+// canonicalTracker resolves the name to label this link with. The URL host is
+// the primary evidence because it is what the reader will actually navigate to;
+// the untrusted SeaDex tracker label (an alias, oddly cased, or empty) is the
+// fallback for a host-less or unrecognized-host link, and the bare host labels a
+// link no table entry claims. Only a link with neither an extractable known host,
+// a known label, nor any host at all yields "".
 func (p publicLink) canonicalTracker() string {
-	if t, known := release.LookupTracker(p.tracker); known {
+	host := urlform.Classify(p.url).Host
+	if t, known := release.LookupTrackerByHost(host); known {
 		return t.Name
 	}
-	host := urlform.Classify(p.url).Host
-	if host == "" {
-		return ""
-	}
-	if t, known := release.LookupTrackerByHost(host); known {
+	if t, known := release.LookupTracker(p.tracker); known {
 		return t.Name
 	}
 	return host
@@ -540,6 +571,11 @@ func seadexTags(f *compare.Finding) string {
 // Each tracker and URL is written straight into the bounded joiner - never
 // concatenated into a "tracker=url" string or a []string first - so the
 // attribute's byte budget bounds the work, not just the result.
+//
+// Deliberately NOT Markdown-escaped like the single-link attributes
+// (capURLAttr): alerts.yaml never renders release_urls as a link destination,
+// and escaping inside the joiner would have to materialize the untrusted
+// aggregate before the cap applies.
 func joinLinksAttr(links []compare.ReleaseLink) string {
 	j := logattr.NewJoiner()
 	for i := range links {
@@ -567,6 +603,18 @@ func joinGroupsAttr(groups []string) string {
 		}
 	}
 	return j.String()
+}
+
+// level maps a finding status to its slog level: an actionable better release
+// warns, every informational nudge logs at info. It is the emission-level
+// policy's one home, beside message() - the sibling half of the same
+// status-to-log-line contract - so a new status cannot ship with a message
+// entry and a silently wrong level.
+func level(s compare.Status) slog.Level {
+	if s == compare.StatusBetter {
+		return slog.LevelWarn
+	}
+	return slog.LevelInfo
 }
 
 // message returns the human-facing log message for a finding status.
