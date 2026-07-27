@@ -4,7 +4,8 @@ services:
     image: ghcr.io/cplieger/seadex-scout:latest
     container_name: seadex-scout
     restart: unless-stopped
-    user: "1000:1000"  # match your host user; create ./config host-owned before first start
+    # Override with PUID/PGID in .env; defaults to 1000:1000.
+    user: "${PUID:-1000}:${PGID:-1000}"  # match your host user; create ./config host-owned before first start
 
     # See README "Configuration reference"; config.yaml expands these .env-backed secret variables.
     environment:
