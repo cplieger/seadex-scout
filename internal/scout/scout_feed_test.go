@@ -496,3 +496,73 @@ func TestSeaDexFailureLogCarriesFeedKept(t *testing.T) {
 		})
 	}
 }
+
+// TestCycleWalkFailureWithFeedPreservesPriorSnapshotAndFindings pins the
+// walk-failed arm's persistence SCOPE: with a feed configured Cycle falls
+// through to handleLibraryGate, which saves ONLY the refreshed mapping cache.
+// Persisting the failed walk's empty snapshot instead would make st.Library
+// empty, so the NEXT cycle's compare would mass-resolve every finding against
+// an empty prior library - findings vanish with no error anywhere. The sibling
+// arms already pin this (the shrink guard's persisted-prior-4-items assertion,
+// TestHandlePreCompareGateEmptyWalkPreservesPriorSnapshot); the walk-failed arm
+// did not.
+func TestCycleWalkFailureWithFeedPreservesPriorSnapshotAndFindings(t *testing.T) {
+	prior := priorAlerted("Existing", 154587)
+	store := &fakeStore{st: state.State{
+		Mapping:   frierenMappingCache(),
+		Library:   library.Snapshot{Items: []library.Item{{Arr: library.ArrSonarr, ArrID: 7, Title: "Frieren", TvdbID: 123}}},
+		Findings:  map[string]notify.Alerted{"prior": prior},
+		Baselined: true,
+	}}
+	s := New(&Deps{
+		Logger:  scoutTestLogger(),
+		Store:   store,
+		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
+		Mapping: fakeMapping{},
+		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
+		Feed:    &fakeFeed{},
+	})
+
+	if healthy := s.Cycle(context.Background()); healthy {
+		t.Fatal("Cycle healthy=true, want false when the library walk fails")
+	}
+	if store.saves != 1 {
+		t.Fatalf("saves = %d, want 1 (the walk-failed arm persists the refreshed mapping cache)", store.saves)
+	}
+	if len(store.st.Library.Items) != 1 || store.st.Library.Items[0].Title != "Frieren" {
+		t.Errorf("persisted library = %+v, want the prior snapshot untouched (a failed walk must never replace it, or the next cycle mass-resolves every finding)", store.st.Library)
+	}
+	if _, ok := store.st.Findings["prior"]; !ok {
+		t.Errorf("persisted findings = %+v, want the prior finding preserved through the failed walk", store.st.Findings)
+	}
+}
+
+// TestHandlePreCompareGateAlertOnlyGatedCycleClaimsNoFeed pins the
+// alert-only side of logFeedOutageOnGatedCycle's guard: a deployment with no
+// Torznab feed configured must never emit the "indexer feed kept previous
+// feed" WARN, because there is no feed that could have kept anything - an
+// operator reading it would triage a stale feed that does not exist. The
+// feed-configured direction is pinned by
+// TestCycleUnusableMapWithSeaDexOutageWarnsFeedKept; this is its nil-Feed
+// twin, mirroring TestSeaDexFailureLogCarriesFeedKept's feed_kept=false case.
+func TestHandlePreCompareGateAlertOnlyGatedCycleClaimsNoFeed(t *testing.T) {
+	logger, recorder := capture.New()
+	st := state.State{Baselined: true}
+	store := &fakeStore{st: st}
+	s := New(&Deps{Logger: logger, Store: store})
+	mapCache := mapping.Cache{}
+
+	// Unusable map + a successful-but-empty SeaDex fetch, no feed wired: the
+	// mapping gate closes the cycle and must stay silent about any feed.
+	handled, healthy := s.handlePreCompareGate(context.Background(), &st, library.Snapshot{}, &mapCache, nil,
+		cycleOutcomes{mapping: errors.New("fribb down")})
+	if !handled || !healthy {
+		t.Errorf("handlePreCompareGate = (%v, %v), want (true, true)", handled, healthy)
+	}
+	if n := recorder.CountExact("seadex returned zero entries; indexer feed kept previous feed"); n != 0 {
+		t.Errorf("feed-kept WARN count = %d, want 0 in an alert-only deployment (no feed can have kept a previous snapshot)", n)
+	}
+	if n := recorder.CountExact("mapping unusable; skipping comparison, findings preserved"); n != 1 {
+		t.Errorf("unusable-map WARN count = %d, want 1", n)
+	}
+}

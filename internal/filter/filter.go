@@ -77,8 +77,8 @@ func Obtainable(r *release.Release, rawURL, usableURL string, animeBytes bool) b
 // in the shared urlform.Classify (which canonicalizes backslashes the
 // way browsers do, so a `/\animebytes.tv/x` form reads protocol-relative, not
 // as a host-less rooted path); this gate applies the extract-evidence-or-hide
-// policy over those facts - the inverse fail direction of the seadex
-// publisher's publish-or-drop over the same classifier.
+// policy over those facts - the inverse fail direction of
+// trackerlink.Publish's publish-or-drop over the same classifier.
 func hostFromRawURL(rawURL string) (string, bool) {
 	f := urlform.Classify(rawURL)
 	switch f.Class {

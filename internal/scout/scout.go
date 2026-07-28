@@ -289,12 +289,16 @@ func walkFailureAttrs(walkErr error) []any {
 const maxLoggedErrorBytes = 8 << 10
 
 // logSafeUpstreamError renders an upstream error as a bounded, single-line,
-// rune-sanitized error value. A SeaDex fetch failure can embed raw upstream
-// bytes (seadex/seadex.go's keyset-cursor arms format the rejected
-// created/id values with %q, and those values are only bounded by the 48 MB
-// page cap), so the value must be reduced before it crosses the log
-// boundary - the same reduction internal/mapping applies to its own errors.
-// An honest error passes through byte-identical.
+// rune-sanitized error value. It is the cycle's LOG-BOUNDARY reduction for a
+// SeaDex error, applied without asking which of the client's arms produced it:
+// a fetch failure can embed raw upstream bytes (a rejected keyset cursor, a
+// structural mismatch quoting the offending JSON token, a status error echoing
+// a URL), and this site cannot tell those apart from the error value alone.
+// The known arms do self-bound today - the keyset-cursor arms at
+// seadex.maxLoggedCursorBytes, the page decode at maxLoggedDecodeBytes - so
+// this is the outer bound that keeps the guarantee independent of which arm the
+// error came from, the same reduction internal/mapping applies to its own
+// errors. An honest error passes through byte-identical.
 func logSafeUpstreamError(err error) error {
 	if err == nil {
 		return nil
@@ -862,7 +866,13 @@ func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap li
 		// mapping-only.
 		s.logFeedOutageOnGatedCycle(ctx, entries, errs.seadex)
 		s.degradedSave(ctx, st, snap, mapCache)
-		s.log.Warn("mapping unusable; skipping comparison, findings preserved", "error", errs.mapping)
+		// Same feed_kept signal recordSeaDexFetch and the zero-entries arm
+		// attach: an unusable map skips the feed rebuild too (see rebuildFeed,
+		// which will not categorize every entry as anime), so a configured feed
+		// is serving its previous snapshot. This was the one rebuild-skip cause
+		// with no feed-attributed signal anywhere in the cycle's output.
+		s.log.Warn("mapping unusable; skipping comparison, findings preserved",
+			"error", errs.mapping, "feed_kept", s.deps.Feed != nil)
 		s.cycleDegraded("mapping-unusable", "error", errs.mapping)
 		return true, true
 	}
@@ -961,6 +971,20 @@ func (s *Scout) Report(ctx context.Context) (audit.Report, error) {
 	if err != nil {
 		return audit.Report{}, err
 	}
+	if len(st.Library.Items) > 0 && degradation.Shrunk(len(snap.Items), len(st.Library.Items)) {
+		// The daemon gates its whole compare on exactly this shape
+		// (handleLibraryGate's shrink guard): a non-failed walk retaining under
+		// half the last persisted snapshot is a suspicious truncation, not a
+		// real change. The report still renders - it is read-only, cannot clear
+		// the daemon's gate, and is the operator's fallback view when the cycle
+		// is stuck - but it must SAY so, or the timestamped artifact silently
+		// omits every missing series, exactly the incompleteness reportSnapshot
+		// refuses a partial snapshot over. No prior snapshot (report-only
+		// deployments never persist one) means no baseline, so the check
+		// no-ops there rather than guessing.
+		s.log.Warn("report: library walk shrank below half the last persisted snapshot; the audit covers the smaller library - inspect the arrs and arr_tags",
+			"items", len(snap.Items), "prior_items", len(st.Library.Items))
+	}
 
 	idx, err := s.reportMapping(ctx, &st)
 	if err != nil {
@@ -969,7 +993,15 @@ func (s *Scout) Report(ctx context.Context) (audit.Report, error) {
 
 	entries, err := s.deps.SeaDex.FetchEntries(ctx)
 	if err != nil {
-		return audit.Report{}, fmt.Errorf("seadex fetch: %w", err)
+		// A cancelled fetch is the shutdown: keep the chain intact so
+		// main's dispatchOutcome still matches context.Canceled (WARN, not
+		// the cycle-error ERROR). A genuine upstream failure is reduced
+		// like the cycle's SeaDex log site: the error text can embed raw
+		// upstream bytes bounded only by the page wire cap.
+		if ctx.Err() != nil {
+			return audit.Report{}, fmt.Errorf("seadex fetch: %w", err)
+		}
+		return audit.Report{}, fmt.Errorf("seadex fetch: %w", logSafeUpstreamError(err))
 	}
 	if len(entries) == 0 {
 		// Defense in depth: FetchEntries errors on an empty completed
@@ -1064,13 +1096,16 @@ const saveGrace = 5 * time.Second
 // context.Canceled and the caches are lost — so a cancellation is retried once
 // with a detached, briefly-bounded context (context.WithoutCancel keeps the
 // values, drops the cancellation), letting the write finish so the expensive
-// AniList memo survives the restart. The retry always runs, and gets a full
-// saveGrace measured from the cancellation: the first attempt's elapsed time is
-// mostly pre-SIGTERM cycle work (encoding the library snapshot, the ~5.9 MB
-// mapping cache and the memo), which spends none of the container stop grace, so
-// subtracting it would starve the retry to zero in exactly the slow-volume case
-// the retry exists for. A cancellation is not a
-// fault (a redeploy is routine), so only a genuine write failure is logged at
+// AniList memo survives the restart. The retry always runs and gets a full
+// saveGrace measured from the CANCELLATION rather than from entry into save,
+// because the first attempt never spends the container stop grace either way:
+// on the paths that reach save already cancelled, the store refuses at its
+// context check before encoding anything (state.prepareSave), and when the
+// cancellation instead lands mid-write, the elapsed encode (library snapshot,
+// the ~5.9 MB mapping cache, the memo) began before the SIGTERM. Subtracting
+// it would starve the retry to zero in exactly the slow-volume case the retry
+// exists for. A cancellation is not a fault (a redeploy is routine), so only a
+// genuine write failure is logged at
 // ERROR — which keeps it off the cycle-error alert. A deliberate preservation
 // refusal (state.ErrSavePreserved) is likewise not a fault and logs at WARN:
 // the redeploy SIGTERM that cancels the cycle can land in Load's read window,
@@ -1080,10 +1115,9 @@ func (s *Scout) save(ctx context.Context, st *state.State) {
 	err := s.deps.Store.Save(ctx, st)
 	if err != nil && (errors.Is(err, context.Canceled) || ctx.Err() != nil) {
 		// The container stop grace starts at the SIGTERM that cancelled ctx, so
-		// the retry budget is anchored HERE: the first attempt's elapsed time is
-		// mostly pre-SIGTERM cycle work and spends none of the stop grace, so
-		// subtracting it can starve the retry to zero. saveGrace < Docker's 10s
-		// default keeps the post-SIGTERM total inside the grace.
+		// the retry budget is anchored HERE rather than shortened by the first
+		// attempt (the doc above says why); saveGrace < Docker's 10s default
+		// keeps the post-SIGTERM total inside the grace.
 		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), saveGrace)
 		err = s.deps.Store.Save(dctx, st)
 		cancel()

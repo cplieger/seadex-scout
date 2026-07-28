@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -487,6 +488,7 @@ func (c *Config) Validate() error {
 		return err
 	}
 	c.warnPublicURLProblems()
+	c.warnUnexpandedSecretRefs()
 	c.warnRelativeReportDir()
 	c.warnOverlappingTags()
 	return c.validateIndexer()
@@ -529,6 +531,20 @@ func (c *Config) warnPublicURLProblems() {
 		if err := validateHTTPURL(pu.name, pu.val); err != nil {
 			slog.Warn("public_url is malformed; report deep-links will be broken",
 				"field", pu.name, "error", err)
+		} else if pu.val != "" {
+			// Whether a public_url yields a usable deep-link is decided at publish
+			// time by urlform (library.SafeLogURL), the app's classifier of record
+			// for browser-destined URLs: it refuses a value carrying a backslash or
+			// an embedded tab/newline outright. net/url accepts both anywhere after
+			// the authority, so read the classifier instead of predicting the
+			// verdict with a second taxonomy. Field-name-only, warn-only, matching
+			// every other check here.
+			if f := urlform.Classify(pu.val); f.HasBackslash || f.HasTabOrNewline {
+				slog.Warn("public_url carries a backslash or an embedded tab/newline; "+
+					"the deep-link publisher refuses such a value outright, so report "+
+					"rows carry no arr link at all - use plain forward slashes",
+					"field", pu.name)
+			}
 		}
 		// arrapi's WebURL joins the base and the route by string concatenation,
 		// so a query in the base (or a bare trailing '?') puts the /series or
@@ -563,6 +579,45 @@ func (c *Config) warnRelativeReportDir() {
 		slog.Warn("report.dir is not an absolute path; report writes are rejected "+
 			"at the end of a report run and neither report file is written - use an "+
 			"absolute path under the /config mount", "field", "report.dir")
+	}
+}
+
+// envRefRe matches an unexpanded environment-variable reference in either
+// spelling: any braced ${...} form, or the shell-style $NAME. The brace-less
+// arm is upper-case-only (the convention every allowlisted prefix follows), so
+// a hex or base64 secret carrying a stray '$' does not trip the warning.
+var envRefRe = regexp.MustCompile(`\$\{[^}]*\}|\$[A-Z_][A-Z0-9_]*`)
+
+// warnUnexpandedSecretRefs warns when a secret field still holds a literal
+// environment-variable reference. yamlenv expands only the ${VAR} form of an
+// ALLOWLISTED name and reports only allowlisted-but-unset names (naming the
+// VARIABLE, never the field holding it), so two operator spellings reach the
+// runtime verbatim with no diagnostic anywhere: a non-allowlisted name
+// (${AB_PASSKEY} instead of ${SEADEX_SCOUT_AB_PASSKEY}) and the brace-less
+// shell form ($SEADEX_SCOUT_AB_PASSKEY, which docker compose itself accepts,
+// making it a plausible paste). The literal placeholder is then sent as the
+// credential and the operator sees only a downstream 401/403 - or, for
+// indexer.ab_passkey, nothing at all: it is baked into every /ab RSS download
+// link, so each arr grab fails at AnimeBytes while this app logs a served
+// feed. indexer.feed_api_key is included for the brace-less spelling, which
+// validateIndexerEndpoints' stricter ${VAR} rejection does not see.
+// Warn-only (no real arr/Prowlarr/AnimeBytes credential takes a shape
+// containing an env reference, but a false positive must not stop the daemon)
+// and field-name-only; never echoes the value.
+func (c *Config) warnUnexpandedSecretRefs() {
+	for _, sf := range []struct{ name, val string }{
+		{"sonarr.api_key", c.SonarrAPIKey},
+		{"radarr.api_key", c.RadarrAPIKey},
+		{"indexer.feed_api_key", c.IndexerAPIKey},
+		{"indexer.prowlarr_api_key", c.IndexerProwlarrAPIKey},
+		{"indexer.ab_passkey", c.IndexerABPasskey},
+	} {
+		if envRefRe.MatchString(sf.val) {
+			slog.Warn("a secret still holds a literal environment-variable reference; only "+
+				"${VAR} names prefixed SONARR_/RADARR_/SEADEX_SCOUT_ are expanded, so the "+
+				"literal placeholder is sent as the credential and every call to that "+
+				"upstream fails to authenticate", "field", sf.name)
+		}
 	}
 }
 
@@ -652,7 +707,9 @@ func (c *Config) validateIndexer() error {
 func (c *Config) infoIndexerModeMismatch() {
 	if c.RunMode == RunModeReport {
 		slog.Info("indexer torznab urls are set but mode is report; " +
-			"the Torznab feed only runs in daemon mode and will not start")
+			"the Torznab feed is served only by a daemon run, so a mode-driven start " +
+			"(no subcommand) exits after the one-shot audit without serving it - an " +
+			"explicit `daemon` subcommand serves it regardless of this key")
 	}
 }
 
@@ -662,6 +719,20 @@ const (
 	fieldNyaaTorznabURL = "indexer.nyaa_torznab_url"
 	fieldABTorznabURL   = "indexer.ab_torznab_url"
 )
+
+// torznabEndpoint pairs a per-indexer Torznab URL with its config key name.
+type torznabEndpoint struct{ name, val string }
+
+// torznabEndpoints is the single enumeration of the per-indexer Torznab URL
+// fields, shared by the endpoint validator and the two warn batteries that
+// each walk the pair - so adding or renaming an upstream touches one list
+// instead of three.
+func (c *Config) torznabEndpoints() []torznabEndpoint {
+	return []torznabEndpoint{
+		{fieldNyaaTorznabURL, c.IndexerNyaaTorznabURL},
+		{fieldABTorznabURL, c.IndexerABTorznabURL},
+	}
+}
 
 // validateIndexerEndpoints enforces the feed's authentication requirement and
 // validates the two upstream Torznab URLs, in the original diagnostic order.
@@ -686,6 +757,17 @@ func (c *Config) validateIndexerEndpoints() error {
 			"by that literal placeholder - a guessable key on the " +
 			"AnimeBytes-passkey-bearing feed")
 	}
+	// Only the braced form is expanded (yamlenv.Expand's refRe recognizes
+	// ${VAR} alone), so an unbraced $NAME is left literal too and reaches the
+	// gate as a key derived from a variable name. A generated key cannot take
+	// that shape - no hex/base64 output starts with '$' followed by an
+	// allowlisted prefix - so the check is exact. Warn (the deployment may
+	// already be running behind it); field-name-only, never echo the key.
+	if name := strings.TrimPrefix(c.IndexerAPIKey, "$"); name != c.IndexerAPIKey && isAllowedEnvVar(name) {
+		slog.Warn("indexer.feed_api_key looks like an unbraced $VAR reference; only the " +
+			"${VAR} form is expanded, so the feed is gated by that literal name - wrap the " +
+			"reference in ${...} or paste the key value")
+	}
 	// Presence is required above; strength is warn-only defense-in-depth. The
 	// key is the only gate on the passkey-bearing /ab feed, so a trivially
 	// guessable hand-typed key deserves a config-time signal without rejecting
@@ -694,11 +776,8 @@ func (c *Config) validateIndexerEndpoints() error {
 		slog.Warn("indexer.feed_api_key is shorter than 16 characters; it gates the " +
 			"AnimeBytes-passkey-bearing feed - generate a strong key (openssl rand -hex 16)")
 	}
-	for _, endpoint := range []struct{ name, value string }{
-		{fieldNyaaTorznabURL, c.IndexerNyaaTorznabURL},
-		{fieldABTorznabURL, c.IndexerABTorznabURL},
-	} {
-		if err := validateHTTPURL(endpoint.name, endpoint.value); err != nil {
+	for _, endpoint := range c.torznabEndpoints() {
+		if err := validateHTTPURL(endpoint.name, endpoint.val); err != nil {
 			return err
 		}
 	}
@@ -714,6 +793,7 @@ func (c *Config) warnIndexerEndpointProblems() {
 	c.warnIdenticalIndexerEndpoints()
 	c.warnNonPerIndexerEndpoints()
 	c.warnABPasskeyConfiguration()
+	c.warnReusedIndexerSecrets()
 }
 
 // warnIdenticalIndexerEndpoints warns when both per-indexer Torznab URLs hold
@@ -744,10 +824,7 @@ func (c *Config) warnNonPerIndexerEndpoints() {
 	// empty-query check is served from the persisted journal and never contacts
 	// Prowlarr. Warn-only (the config still runs) and field-name-only; never
 	// echoes a URL.
-	for _, tu := range []struct{ name, val string }{
-		{fieldNyaaTorznabURL, c.IndexerNyaaTorznabURL},
-		{fieldABTorznabURL, c.IndexerABTorznabURL},
-	} {
+	for _, tu := range c.torznabEndpoints() {
 		if tu.val == "" {
 			continue
 		}
@@ -788,6 +865,29 @@ func (c *Config) warnABPasskeyConfiguration() {
 	}
 }
 
+// warnReusedIndexerSecrets warns when indexer.feed_api_key repeats another
+// indexer secret. feed_api_key is the least protected of the three: the arrs
+// send it as the apikey QUERY parameter on every request and store it in their
+// own indexer configuration, so pasting the Prowlarr API key (header-only by
+// design) or the AnimeBytes passkey into it widens that credential's exposure
+// to anything that can read an arr's indexer settings or an intermediate
+// access log. The two keys sit on adjacent lines of the same config section,
+// which is what makes the paste plausible. Warn-only (the config still runs)
+// and field-name-only; never echoes a secret.
+func (c *Config) warnReusedIndexerSecrets() {
+	for _, s := range []struct{ name, val string }{
+		{"indexer.prowlarr_api_key", c.IndexerProwlarrAPIKey},
+		{"indexer.ab_passkey", c.IndexerABPasskey},
+	} {
+		if s.val != "" && s.val == c.IndexerAPIKey {
+			slog.Warn("indexer.feed_api_key repeats another indexer secret; the arrs send "+
+				"feed_api_key as a query parameter and store it in their indexer config, so the "+
+				"reused credential is exposed far more widely - give the feed its own key "+
+				"(openssl rand -hex 16)", "field", s.name)
+		}
+	}
+}
+
 // warnMissingProwlarrKey warns on an empty Prowlarr API key. A search proxies
 // Prowlarr using indexer.prowlarr_api_key in the X-Api-Key header. An empty
 // key is accepted rather than rejected (it is valid when Prowlarr has auth
@@ -824,10 +924,7 @@ func (c *Config) infoDisabledIndexerKeys() {
 // key to the WARN log on every failed search. Matches the public_url
 // warn-only posture.
 func (c *Config) warnTorznabURLCredentials() {
-	for _, tu := range []struct{ name, val string }{
-		{fieldNyaaTorznabURL, c.IndexerNyaaTorznabURL},
-		{fieldABTorznabURL, c.IndexerABTorznabURL},
-	} {
+	for _, tu := range c.torznabEndpoints() {
 		if urlEmbedsCredential(tu.val) {
 			slog.Warn("torznab url embeds a credential-like query parameter or userinfo; "+
 				"move the key to indexer.prowlarr_api_key (sent as a header, never logged) "+

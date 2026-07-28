@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -27,8 +28,9 @@ import (
 // reload-only flags are unreachable from the serving path structurally, and the
 // cache is exercisable without constructing an HTTP server.
 //
-// The server reaches it through four methods only - curation(), feed(scope),
-// refresh(ctx) and unavailable() - so query.go and server.go never name a lock
+// The server reaches it through six methods only - curation(), feed(scope),
+// refresh(ctx) and unavailable() on the serving side, warm() and warmPending()
+// for the initial-load lifecycle - so query.go and server.go never name a lock
 // primitive or a reload-only flag. ENABLEMENT policy stays outside: the cache
 // answers what is loaded, while whether a tracker's feed may be SERVED at all is
 // the server's call (feedFor's URL gate).
@@ -64,6 +66,11 @@ type snapshotCache struct {
 	// behind the winner's whole stat/read/decode, which no server write timeout
 	// bounds. A send acquires the gate; the matching receive releases it.
 	reloadGate chan struct{}
+	// warmDone is closed when warm's initial load returns; warmStarted says
+	// whether anything will ever close it (a cache nobody warmed keeps the
+	// lazy per-request refresh path). Allocated by newSnapshotCache so the
+	// request path can always read it.
+	warmDone chan struct{}
 	// log, path, and abPasskey are set once by newSnapshotCache and read
 	// without a lock, never written afterwards. abPasskey is the one config
 	// value the cache genuinely needs: the load path re-derives every AB
@@ -113,6 +120,10 @@ type snapshotCache struct {
 	// instead of one per request; re-armed whenever snapFailed clears.
 	// Guarded by mu.
 	snapFailedWarned bool
+	// warmStarted records that warm ran, so warmPending can tell a
+	// still-loading cache from one nobody warmed at all (a cache used without
+	// Run keeps the lazy per-request refresh).
+	warmStarted atomic.Bool
 }
 
 // newSnapshotCache builds the cache for the snapshot file at path. It does not
@@ -124,6 +135,88 @@ func newSnapshotCache(path, abPasskey string, log *slog.Logger) *snapshotCache {
 		path:       path,
 		abPasskey:  abPasskey,
 		reloadGate: make(chan struct{}, 1),
+		warmDone:   make(chan struct{}),
+	}
+}
+
+// warmLoadTimeout bounds how long warm WAITS for the initial load of the
+// persisted snapshot - not the load itself. The read is size-bounded
+// (maxFeedBytes) but a slow or wedged /config mount has no bound of its own, and
+// Run calls warm on the daemon's startup path (main.go's startIndexer, alongside
+// the compare loop), so an unbounded WAIT holds the whole daemon down instead of
+// one request. A context deadline cannot deliver this bound: refresh stats the
+// file before any ctx check, and atomicfile's bounded read only tests ctx around
+// its syscalls - it cannot interrupt an os.Open, File.Stat, or io.ReadAll already
+// blocked in the filesystem. So the load runs asynchronously and warm stops
+// waiting after the deadline; the load may finish in the background, which is
+// safe because the cache is synchronized and refresh coalesces through
+// reloadGate, so whoever finishes installs and the first request either sees the
+// warmed snapshot or reloads itself.
+//
+// A var, not a const, ONLY so the warm-load test can exercise the wait-expired
+// path (see queryGateWait for the pattern) without spending it in real time.
+var warmLoadTimeout = 15 * time.Second
+
+// warm loads the served feed from the last persisted snapshot so a restart
+// serves immediately rather than empty until the next cycle. Run calls it before
+// binding, so the work begins under the explicit lifecycle boundary rather than
+// during construction. The load runs asynchronously and only the WAIT is
+// bounded, by warmLoadTimeout or by ctx, whichever comes first: a wedged /config
+// mount cannot be interrupted mid-syscall, so bounding the wait is the only
+// bound that holds (see warmLoadTimeout), and honouring ctx keeps a shutdown
+// during a slow load from being reported as a failed request drain. It is
+// one-shot: a second call returns immediately, leaving the first load's result
+// in place. A request arriving while the load is still running does not park
+// behind it (see warmPending).
+func (c *snapshotCache) warm(ctx context.Context) {
+	// One-shot by construction: warmDone may only be closed once, so a second
+	// Run (a supervisor retrying after a bind failure) must not start a second
+	// loader - the close would panic in a goroutine outside the daemon's
+	// recover shield. The first load's result is still the one being served.
+	if !c.warmStarted.CompareAndSwap(false, true) {
+		return
+	}
+	// The load itself is deliberately detached from ctx: a wedged /config mount
+	// cannot be interrupted mid-syscall, so only the WAIT below is bounded.
+	// WithoutCancel keeps the ctx's values while dropping its cancellation and
+	// deadline, which is the same lifetime a bare Background carried.
+	loadCtx := context.WithoutCancel(ctx)
+	go func() {
+		defer close(c.warmDone)
+		c.refresh(loadCtx)
+	}()
+	warmTimer := time.NewTimer(warmLoadTimeout)
+	defer warmTimer.Stop()
+	select {
+	case <-c.warmDone:
+	case <-ctx.Done():
+		// Shutting down before the load returned: stop waiting so the feed's
+		// goroutine returns inside the daemon's drain budget instead of being
+		// reported as a failed request drain. The load dies with the process.
+		c.log.Debug("feed snapshot warm load abandoned; shutting down",
+			"cause", context.Cause(ctx))
+	case <-warmTimer.C:
+		c.log.Warn("feed snapshot warm load still running; serving requests without it",
+			"timeout", warmLoadTimeout)
+	}
+}
+
+// warmPending reports whether the initial load was started and has not
+// finished. While that holds, the initial loader owns the reload gate and a
+// request that entered refresh would block on it for as long as the filesystem
+// does - net/http's WriteTimeout cannot cancel a handler, so a wedged /config
+// mount would pin every request slot. Requests answer the snapshot-unavailable
+// fault instead until the loader returns. A cache nobody warmed (direct query
+// users and tests) keeps the lazy per-request refresh path.
+func (c *snapshotCache) warmPending() bool {
+	if !c.warmStarted.Load() {
+		return false
+	}
+	select {
+	case <-c.warmDone:
+		return false
+	default:
+		return true
 	}
 }
 
@@ -160,7 +253,10 @@ func (c *snapshotCache) feed(scope string) []journalItem {
 // whether reload should proceed. The caller owns the returned file and must
 // close it. A missing file after one was loaded warns once (the feed is now
 // stale); any other open error (EACCES, EIO) warns and freezes the current
-// feed. On the recovery path it clears snapMissing and logs one INFO line.
+// feed. On the recovery path it clears snapMissing and logs one line: INFO when
+// a reload will follow, WARN when the file that came back is the same
+// deterministically-bad generation refresh already memoized (nothing reloads,
+// so "resuming reloads" would be false).
 //
 // One descriptor is the point. The previous shape observed the pathname three
 // separate times - os.Stat, os.Lstat, then atomicfile.ReadBounded's own os.Open
@@ -208,7 +304,18 @@ func (c *snapshotCache) openSnapshot() (*os.File, os.FileInfo, bool) {
 	}
 	if c.snapMissing {
 		c.snapMissing = false
-		c.log.Info("indexer feed snapshot reappeared; resuming reloads", "path", c.path)
+		if c.matchesFailedFile(info) {
+			// The file is back but it is the same deterministically-bad
+			// generation refresh already memoized, so nothing will reload
+			// (skipMemoizedMalformed returns before the read) and the served
+			// feed stays frozen on the last-good snapshot with no further
+			// signal. Saying "resuming reloads" here would be the last line the
+			// operator sees, and it would be false.
+			c.log.Warn("indexer feed snapshot reappeared but is the same malformed file; still serving the last loaded feed",
+				"path", c.path)
+		} else {
+			c.log.Info("indexer feed snapshot reappeared; resuming reloads", "path", c.path)
+		}
 	}
 	return f, info, true
 }
@@ -747,7 +854,7 @@ func (c *snapshotCache) rebuildABDownloadURLs(feed []journalItem) []journalItem 
 	if len(feed) == 0 {
 		return feed
 	}
-	if c.abPasskey == "" {
+	if unusableABPasskey(c.abPasskey) {
 		return nil
 	}
 	out, dropped, samples := rebuildDownloadURLs(feed, upstreamAB, c.abPasskey)

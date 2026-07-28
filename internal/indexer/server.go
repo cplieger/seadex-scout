@@ -28,7 +28,8 @@ const (
 	// silenced within a second.
 	authFailBurst  = 10
 	authFailRefill = 6 * time.Second
-	// maxConcurrentQueries bounds simultaneous expensive queries (queryGate).
+	// maxConcurrentQueries bounds simultaneous expensive queries (the search
+	// pool).
 	// The worst-case footprint of ONE in-flight search is roughly one
 	// upstreamMaxBytes body plus the render builder - about 16 MiB, since a
 	// scoped request queries exactly one upstream (fetchRaw takes
@@ -41,8 +42,8 @@ const (
 	// rate limit - authFailureLimiter bounds bad-key FLOODS, this bounds the
 	// memory a legitimate burst can hold at once.
 	maxConcurrentQueries = 4
-	// maxConcurrentFeeds bounds simultaneous synthesized-RSS renders (feedGate),
-	// separately from the search bound. An empty-query RSS check touches no
+	// maxConcurrentFeeds bounds simultaneous synthesized-RSS renders (the rss
+	// pool), separately from the search bound. An empty-query RSS check touches no
 	// upstream: it reads the already-loaded snapshot and renders it, holding at
 	// most maxRenderedFeedBytes of builder and no Prowlarr body. Sharing the
 	// search pool let a stalled Prowlarr starve it - one search holds its slot
@@ -64,7 +65,22 @@ const (
 // have its rendered feed cut mid-write with the only signal a Debug line
 // blaming the client. Deriving it from the budget's own constants keeps the
 // deadline valid when the retry policy or the per-attempt timeout changes.
-// (Evaluates to 6m5s today.) A var because queryGateWait is one; it is
+// (Evaluates to 6m5s today.)
+//
+// One handler segment is deliberately NOT in that sum, because no constant
+// bounds it: query calls cache.refresh, and before the FIRST successful
+// snapshot load a coalescing loser WAITS on the reload gate for the winner's
+// whole open/stat/read/decode (reload.go's lockReloadOrDone). Nothing
+// server-side bounds that wait - a write deadline cannot cancel a handler - so
+// it ends only when the winner finishes or the client disconnects and cancels
+// the request context, which is why that wait is cancellable in the first
+// place. Run's cache.warm (bounded by warmLoadTimeout) plus the warmPending
+// fault keep it off the request path during startup; the residual window is a
+// fresh install whose first snapshot has not been written yet on a slow
+// /config mount, where a queued request can outlive this deadline and take the
+// same cut-mid-write outcome the admission wait above was added to prevent.
+//
+// A var because queryGateWait is one; it is
 // evaluated once at init, so a test shortening queryGateWait does not shrink
 // the deadline.
 var writeTimeout = queryGateWait + upstreamMaxAttempts*UpstreamAttemptTimeout +
@@ -90,6 +106,12 @@ var queryGateWait = 5 * time.Second
 // real deployment's :9118.
 var listenAddr = ":9118"
 
+// unresolvedRef reports whether a configured secret still holds a literal ${VAR}
+// reference the config loader could not expand (an unset or non-allowlisted
+// variable name; yamlenv leaves the placeholder in place and, for a
+// non-allowlisted spelling, reports nothing).
+func unresolvedRef(v string) bool { return strings.Contains(v, "${") }
+
 // unusableFeedKey reports whether the configured feed_api_key cannot be trusted
 // as the feed's authentication gate: it is absent, or it still holds a literal
 // ${VAR} reference the config loader could not expand. The second case matters
@@ -99,12 +121,23 @@ var listenAddr = ":9118"
 // validateIndexerEndpoints rejects both on the daemon path; these guards keep
 // any other construction of Indexer from binding or serving behind them.
 func unusableFeedKey(key string) bool {
-	return key == "" || strings.Contains(key, "${")
+	return key == "" || unresolvedRef(key)
+}
+
+// unusableABPasskey reports whether indexer.ab_passkey can build a grabbable
+// AnimeBytes link: it cannot when absent, and it cannot when it still holds a
+// ${VAR} reference - url.PathEscape would mint that placeholder into every AB
+// download link, so every arr grab fails at the tracker while the feed reports
+// success. Both cases take the documented empty-passkey path instead: the AB
+// journal is cleared at load (rebuildABDownloadURLs) and an /ab RSS check
+// answers the Torznab <error> that names the passkey.
+func unusableABPasskey(passkey string) bool {
+	return passkey == "" || unresolvedRef(passkey)
 }
 
 // Run serves the Torznab endpoint from the persisted feed snapshot until ctx is
-// cancelled. It first warms the feed from the last persisted snapshot (see
-// warmSnapshot) - the one piece of startup work, owned by this lifecycle method
+// cancelled. It first warms the feed from the last persisted snapshot
+// (cache.warm) - the one piece of startup work, owned by this lifecycle method
 // rather than by New. The endpoint then listens immediately (so an arr's caps
 // Test succeeds right away); it serves whatever feed the last compare cycle
 // persisted (empty until the first cycle on a fresh install) and reloads the
@@ -120,9 +153,19 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	if unusableFeedKey(ix.apiKey) {
 		return errors.New("indexer: indexer.feed_api_key is empty or an unresolved ${VAR} reference; refusing to serve the Torznab feed")
 	}
+	// An unexpanded ${VAR} passkey cannot build a grabbable AB link, so the feed
+	// takes the empty-passkey path (cleared AB journal, Torznab <error> on the /ab
+	// RSS check). Say why once at startup: config only rejects the unresolved form
+	// for feed_api_key, and a non-allowlisted variable name produces no load-time
+	// diagnostic at all. Field-name-only: the value is a credential.
+	if unresolvedRef(ix.enablement.ABPasskey) {
+		ix.log.Warn("indexer.ab_passkey still holds a ${VAR} reference; the variable is unset " +
+			"or not allowlisted (SONARR_/RADARR_/SEADEX_SCOUT_), so no grabbable AnimeBytes link " +
+			"can be derived - the /ab RSS feed answers a Torznab error until it is set")
+	}
 	// The one piece of startup work, deliberately here and not in New: all
 	// background work begins under the explicit lifecycle method.
-	ix.warmSnapshot()
+	ix.cache.warm(ctx)
 	// Bind up front so a port-in-use error surfaces synchronously here and is
 	// returned to the daemon's startIndexer, which logs it. The feed owns no
 	// health marker (the compare loop does), so a bind failure never flips
@@ -384,7 +427,7 @@ func (ix *Indexer) serveCaps(w http.ResponseWriter, q url.Values, scope string) 
 // README's off switch) is not nudged: it falls through to the empty feed
 // (see serveQuery), the same shape as a tracker with no data.
 func (ix *Indexer) rejectMissingABPasskey(w http.ResponseWriter, q url.Values, scope string) bool {
-	if scope != upstreamAB || !ix.enablement.enabled(upstreamAB) || ix.enablement.ABPasskey != "" || strings.TrimSpace(q.Get("q")) != "" {
+	if scope != upstreamAB || !ix.enablement.enabled(upstreamAB) || !unusableABPasskey(ix.enablement.ABPasskey) || strings.TrimSpace(q.Get("q")) != "" {
 		return false
 	}
 	ix.rejectTorznab(w, scope, "ab passkey not configured", errCodeIncorrectCredentials,
@@ -392,14 +435,34 @@ func (ix *Indexer) rejectMissingABPasskey(w http.ResponseWriter, q url.Values, s
 	return true
 }
 
-// acquireQuery reserves one of gate's expensive-work slots, waiting at most
+// queryPool is one admission pool for expensive request work: its slots, its
+// limit, and the name the busy diagnostic reports, held as one value so the
+// limit a request REPORTS can never disagree with the pool it actually holds,
+// and so a third tracker's pool is one newQueryPool call rather than a
+// constant, a field, a make() and a branch that must be edited together.
+//
+// Field order is govet fieldalignment's: the pointer-bearing fields lead and
+// the pointer-free limit is last.
+type queryPool struct {
+	slots chan struct{}
+	name  string
+	limit int
+}
+
+// newQueryPool builds an admission pool of limit slots that reports itself as
+// name in the busy diagnostic.
+func newQueryPool(name string, limit int) queryPool {
+	return queryPool{slots: make(chan struct{}, limit), name: name, limit: limit}
+}
+
+// acquire reserves one of the pool's expensive-work slots, waiting at most
 // queryGateWait for one. It reports false when the wait expired (the caller
 // answers busy) or the request's own context ended first (the client gave up;
 // the caller returns without writing, since there is nobody to write to). The
-// matching releaseQuery must run on every acquired path, on the SAME gate.
-func (ix *Indexer) acquireQuery(ctx context.Context, gate chan struct{}) (acquired, clientGone bool) {
+// matching release must run on every acquired path.
+func (p queryPool) acquire(ctx context.Context) (acquired, clientGone bool) {
 	select {
-	case gate <- struct{}{}:
+	case p.slots <- struct{}{}:
 		return true, false
 	default:
 	}
@@ -407,7 +470,7 @@ func (ix *Indexer) acquireQuery(ctx context.Context, gate chan struct{}) (acquir
 	timer := time.NewTimer(queryGateWait)
 	defer timer.Stop()
 	select {
-	case gate <- struct{}{}:
+	case p.slots <- struct{}{}:
 		return true, false
 	case <-ctx.Done():
 		return false, true
@@ -416,14 +479,14 @@ func (ix *Indexer) acquireQuery(ctx context.Context, gate chan struct{}) (acquir
 	}
 }
 
-// releaseQuery returns a slot reserved by acquireQuery on the same gate.
-func (ix *Indexer) releaseQuery(gate chan struct{}) { <-gate }
+// release returns a slot reserved by acquire.
+func (p queryPool) release() { <-p.slots }
 
 // serveQuery runs the tracker query and renders the feed, translating the
 // two local-fault outcomes (snapshot unavailable, total upstream failure)
 // into Torznab errors, then logs the one INFO line per request.
 //
-// The whole expensive body runs under the concurrency gate (see queryGate): the
+// The whole expensive body runs under the admission pool (see queryPool): the
 // upstream fetch, the decode, and the render are what a burst could stack into
 // an OOM, so the slot is held across all three and released before the request
 // returns. A request servesQuery declines is exempt - it performs no snapshot
@@ -441,16 +504,16 @@ func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Valu
 	if servesQuery(q) {
 		// A synthesized-RSS check reads only local state, so it takes its own
 		// pool: it must stay servable while every search slot is parked in a
-		// bounded Prowlarr retry tree. pool names which bound was hit: the two
-		// have different causes (a stalled Prowlarr retry tree vs simultaneous
-		// local renders) and different operator actions, and the limit value
-		// alone stops distinguishing them the moment either constant is
-		// retuned.
-		gate, limit, pool := ix.queryGate, maxConcurrentQueries, "search"
+		// bounded Prowlarr retry tree. The pool's name is what the busy
+		// diagnostic reports: the two have different causes (a stalled Prowlarr
+		// retry tree vs simultaneous local renders) and different operator
+		// actions, and the limit value alone stops distinguishing them the
+		// moment either constant is retuned.
+		pool := ix.search
 		if isFeedRequest(q) {
-			gate, limit, pool = ix.feedGate, maxConcurrentFeeds, "rss"
+			pool = ix.rss
 		}
-		acquired, clientGone := ix.acquireQuery(r.Context(), gate)
+		acquired, clientGone := pool.acquire(r.Context())
 		if clientGone {
 			// The arr hung up while waiting; writing a response would only log a
 			// failed write. The access line still records the request.
@@ -465,12 +528,12 @@ func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Valu
 			// exactly the transient/self-healing side of the level rule.
 			w.Header().Set("Retry-After", strconv.Itoa(int(queryGateWait.Seconds())))
 			ix.log.Warn("indexer at its concurrent-query limit; request answered busy",
-				"scope", scope, "pool", pool, "limit", limit, "waited", queryGateWait)
+				"scope", scope, "pool", pool.name, "limit", pool.limit, "waited", queryGateWait)
 			ix.rejectTorznab(w, scope, "concurrent query limit reached", errCodeUnknown,
 				"too many concurrent requests in flight; retry shortly")
 			return
 		}
-		defer ix.releaseQuery(gate)
+		defer pool.release()
 	}
 
 	items, stats, fault := ix.query(r.Context(), q, scope)

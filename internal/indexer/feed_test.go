@@ -783,11 +783,33 @@ func TestRepresentativeFileFallsBackToFirstFileWhenNoMediaFileSurvives(t *testin
 	}
 }
 
+// TestRepresentativeFileFindsAbsoluteEpisodeAbuttingTheExtension pins the
+// asymmetric input representativeFile's ABSOLUTE arm needs (the case its own
+// "do not unify them onto one input" comment names): absoluteEpisode ends in
+// (?:[\s_]|$), so an episode number abutting the extension ("Show - 07.mkv")
+// only matches against the extension-stripped name. Fed the raw name the arm
+// finds nothing and the pick falls through to the first media file - here a
+// token-less extras file, which then headlines the served RSS title with no
+// episode marker the arr can parse.
+func TestRepresentativeFileFindsAbsoluteEpisodeAbuttingTheExtension(t *testing.T) {
+	files := []seadex.File{
+		{Name: "Show Extras Menu.mkv"},
+		{Name: "Show - 07.mkv"},
+	}
+	if got, want := representativeFile(files), files[1].Name; got != want {
+		t.Errorf("representativeFile = %q, want the absolute-numbered episode %q (the absolute arm matches against the extension-stripped name)", got, want)
+	}
+	if got, want := derivedTitle(&seadex.Torrent{Files: files}, EntryInfo{}), "Show - 07"; got != want {
+		t.Errorf("derivedTitle = %q, want %q (the title must derive from the episode, not the extras file)", got, want)
+	}
+}
+
 // TestCoveredEpisodesTreatsAbsoluteVersionRevisionAsOneEpisode pins the vN
-// strip on the ABSOLUTE arm of the episode key (the SxxExx arm has its own v2
-// case in TestFeedTitle): a lone absolute-numbered episode shipped beside its
-// v2 re-encode spans ONE episode, so the torrent keeps its "- NN" marker
-// instead of reading as a two-episode pack that collapses to a bare
+// strip on the ABSOLUTE arm of the episode key (the SxxExx arm's v2 case is
+// TestDerivedTitle's "a v2 revision of the same episode is one episode, not a
+// pack" row, in indexer_test.go): a lone absolute-numbered episode shipped
+// beside its v2 re-encode spans ONE episode, so the torrent keeps its "- NN"
+// marker instead of reading as a two-episode pack that collapses to a bare
 // season-level title - which Sonarr ranks as FullSeason and grabs as a season
 // it does not actually have.
 func TestCoveredEpisodesTreatsAbsoluteVersionRevisionAsOneEpisode(t *testing.T) {

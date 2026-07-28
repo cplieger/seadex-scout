@@ -260,8 +260,13 @@ var multiSpace = regexp.MustCompile(`\s{2,}`)
 // lastSubmatchIndex returns the submatch index pairs of the LAST
 // non-overlapping match of re in s, or nil when there is none. It replays
 // FindAllStringSubmatchIndex(s, -1)'s progression but retains only the
-// current match, so it is equivalent to taking that call's last element
-// while allocating O(1) instead of O(matches). SeaDex bounds a page at
+// current match, so - for a pattern that cannot match the empty string,
+// which every pattern in this file is - it is equivalent to taking that
+// call's last element while allocating O(1) instead of O(matches). An
+// empty-matching pattern is OUT OF CONTRACT: the guard below only keeps the
+// scan terminating, and deliberately does not reproduce FindAll's
+// rune-width advance or its rejection of an empty match sitting at the
+// previous match's end. SeaDex bounds a page at
 // 48 MiB but caps no individual string, and match slices cost ~108 bytes
 // per match: 4 MiB of repeated "S1E1 " retains ~86 MiB, so one hostile
 // file name can OOM the 256 MiB container during a feed rebuild (CWE-400/
@@ -287,6 +292,9 @@ func lastSubmatchIndex(re *regexp.Regexp, s string) []int {
 			last[i] = m[i] + off
 		}
 		if m[1] == m[0] {
+			// Out-of-contract empty match (no pattern here can produce one):
+			// advance so the scan cannot spin. This is a termination guard, not
+			// FindAll's rune-width progression.
 			off = last[1] + 1
 			continue
 		}
@@ -314,7 +322,7 @@ func derivedTitle(t *seadex.Torrent, meta EntryInfo) string {
 		// with its cour-local season half relabeled when the entry maps one.
 		return strings.TrimSpace(relabelEpisodeSeason(base, meta))
 	}
-	if episodeToken.MatchString(base) {
+	if l := lastSubmatchIndex(episodeToken, base); l != nil {
 		// Collapse only the LAST episode token: scene naming puts the marker
 		// after the title, so a title that itself contains an SxxExx-shaped
 		// substring is preserved verbatim. The season label comes from the
@@ -323,7 +331,6 @@ func derivedTitle(t *seadex.Torrent, meta EntryInfo) string {
 		// replacement spans the TOKEN group (l[2]:l[3]), never the full
 		// match, whose trailing terminator character must survive the
 		// collapse.
-		l := lastSubmatchIndex(episodeToken, base)
 		// No resolved and no file-list season: keep the file's own season half.
 		label := base[l[4]:l[5]]
 		if resolved, ok := packSeasonLabel(t, meta); ok {
@@ -440,16 +447,15 @@ func coveredEpisodes(files []seadex.File) int {
 			continue
 		}
 		base := episodeKeyBase(files[i].Name)
-		switch {
-		case episodeToken.MatchString(base):
+		if l := lastSubmatchIndex(episodeToken, base); l != nil {
 			// Key on the LAST token: scene naming puts the episode marker
 			// after the title, so a title containing an SxxExx-shaped
 			// substring must not shadow the real episode marker.
-			l := lastSubmatchIndex(episodeToken, base)
 			tok := strings.ToUpper(base[l[2]:l[3]])
 			seen["e"+episodeVersion.ReplaceAllString(tok, "")] = struct{}{}
-		case absoluteEpisode.MatchString(base):
-			l := lastSubmatchIndex(absoluteEpisode, base)
+			continue
+		}
+		if l := lastSubmatchIndex(absoluteEpisode, base); l != nil {
 			tok := base[l[2]:l[3]]
 			seen["a"+episodeVersion.ReplaceAllString(tok, "")] = struct{}{}
 		}
@@ -555,13 +561,14 @@ func totalSize(files []seadex.File) int64 {
 }
 
 // entryURL is the SeaDex entry page for an AniList id under the canonical
-// site base (defaultSeaDexBaseURL, the same constant the reader's InfoURL
-// allowlist is derived from), or "" when the id is unknown - the per-item info
-// URL (the feed <comments>), so the operator can see why a release is curated.
-// The URL rule is the shared releases.moe contract in internal/seadex; this
-// is a thin delegate, like validInfoHash.
+// site base (seadex.DefaultBaseURL, the same constant defaultSeaDexBaseURL -
+// and through it the reader's InfoURL allowlist - is derived from), or "" when
+// the id is unknown - the per-item info URL (the feed <comments>), so the
+// operator can see why a release is curated. The URL rule is the shared
+// releases.moe contract in internal/seadex; this is a thin delegate, like
+// validInfoHash.
 func entryURL(alID int) string {
-	return seadex.EntryURL(defaultSeaDexBaseURL, alID)
+	return seadex.EntryURL(alID)
 }
 
 // validInfoHash returns h lowercased when it is a 40-char SHA-1 hex info hash,

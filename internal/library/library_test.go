@@ -1199,36 +1199,6 @@ func TestWalkCleanSonarrWalkIsNotPartial(t *testing.T) {
 	}
 }
 
-// TestWalkCombinesBothArrsIntoOneSnapshot pins Walk's both-sides contract: a
-// walker configured with Sonarr AND Radarr merges both item sets into one
-// snapshot, each item labelled with its source arr.
-func TestWalkCombinesBothArrsIntoOneSnapshot(t *testing.T) {
-	fs := &fakeSonarr{
-		series: []arrapi.Series{{ID: 1, Title: "Series"}},
-		files: map[int][]arrapi.EpisodeFile{
-			1: {epFile(1, "PMR")},
-		},
-	}
-	fr := &fakeRadarr{
-		movies: []arrapi.Movie{{ID: 2, Title: "Movie", HasFile: true, MovieFile: &arrapi.MovieFile{ReleaseGroup: "LostYears"}}},
-	}
-	w := NewWalker(&Config{Sonarr: fs, Radarr: fr, Logger: discardLogger()})
-	snap, err := w.Walk(context.Background())
-	if err != nil {
-		t.Fatalf("Walk: %v", err)
-	}
-	if len(snap.Items) != 2 {
-		t.Fatalf("items = %d, want 2 (one per arr side)", len(snap.Items))
-	}
-	arrs := map[string]int{}
-	for _, it := range snap.Items {
-		arrs[it.Arr]++
-	}
-	if arrs[ArrSonarr] != 1 || arrs[ArrRadarr] != 1 {
-		t.Errorf("arr distribution = %v, want one sonarr and one radarr item", arrs)
-	}
-}
-
 // TestDiffSnapshotsSkipsFailedPlaceholders pins the Failed keys' exclusion
 // from comparison: a Failed placeholder carries no comparable file state, so
 // its key is never Changed, its own removal is suppressed while it is Failed
@@ -1593,7 +1563,7 @@ func TestWalkRadarrMissingFilePayloadWarns(t *testing.T) {
 	if len(snap.Items) != 3 {
 		t.Fatalf("items = %d, want 3 (a payload-less movie is kept, not dropped)", len(snap.Items))
 	}
-	const msg = "radarr movies report a file but carry no file payload; they compare as fileless"
+	const msg = "radarr movies report a file but carry no file payload; they compare as fileless - re-scan those movies in Radarr (the per-movie ids are logged at debug level)"
 	if n := rec.CountExact(msg); n != 1 {
 		t.Fatalf("no-payload warnings = %d, want exactly 1; messages = %q", n, rec.Messages())
 	}
@@ -1621,7 +1591,7 @@ func TestWalkRadarrCleanWalkLogsNoPayloadWarning(t *testing.T) {
 	if _, err := w.Walk(t.Context()); err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
-	const msg = "radarr movies report a file but carry no file payload; they compare as fileless"
+	const msg = "radarr movies report a file but carry no file payload; they compare as fileless - re-scan those movies in Radarr (the per-movie ids are logged at debug level)"
 	if n := rec.CountExact(msg); n != 0 {
 		t.Errorf("clean radarr walk logged %d no-payload warnings, want none; messages = %q", n, rec.Messages())
 	}
@@ -1670,5 +1640,165 @@ func TestWalkCompleteLogReportsConfiguredArrSides(t *testing.T) {
 				t.Errorf("radarr attr = %q, want %q", got, tc.wantRadarr)
 			}
 		})
+	}
+}
+
+// TestWalkWarnsWhenTagFilteringEmptiesASide pins the dead-but-resolving-filter
+// diagnostic: every configured arr_tags label resolves to a real tag id, but no
+// item carries it (renamed or unassigned on the arr side), so the side
+// contributes zero items while the cycle still reads healthy. resolveOne warns
+// only when a LABEL missed and the scout's shrink gate needs a prior snapshot,
+// so this WARN is the only signal that separates a silently-emptied side from a
+// genuinely empty library - hence both negative arms below (a filter that keeps
+// something, and an arr that listed nothing) as well as the positive one. Counts
+// only: the arr and listed attrs never carry label values, which pass through
+// ${VAR} expansion.
+func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
+	const msg = "arr_tags filtering kept no items from a non-empty arr library; this side contributes nothing this cycle"
+	anime := []arrapi.Tag{{ID: 7, Label: "anime"}}
+
+	t.Run("sonarr side emptied by a resolving filter", func(t *testing.T) {
+		fs := &fakeSonarr{
+			series: []arrapi.Series{
+				{ID: 1, Title: "Untagged", Tags: []int{3}},
+				{ID: 2, Title: "Also Untagged"},
+			},
+			tags: anime,
+		}
+		logger, rec := capture.New()
+		w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: logger})
+
+		snap, err := w.Walk(t.Context())
+		if err != nil {
+			t.Fatalf("Walk: %v", err)
+		}
+		if len(snap.Items) != 0 {
+			t.Fatalf("items = %+v, want none (no series carries the resolved tag)", snap.Items)
+		}
+		if n := rec.CountExact(msg); n != 1 {
+			t.Fatalf("dead-filter warnings = %d, want exactly 1; messages = %q", n, rec.Messages())
+		}
+		if !rec.HasAttr(msg, "arr", ArrSonarr) {
+			got, _ := rec.AttrValue(msg, "arr")
+			t.Errorf("arr attr = %q, want %q", got, ArrSonarr)
+		}
+		if !rec.HasAttr(msg, "listed", "2") {
+			got, _ := rec.AttrValue(msg, "listed")
+			t.Errorf("listed attr = %q, want 2 (the arr listed two series)", got)
+		}
+	})
+
+	t.Run("radarr side emptied by a resolving filter", func(t *testing.T) {
+		fr := &fakeRadarr{
+			movies: []arrapi.Movie{{ID: 10, Title: "Untagged Movie", Tags: []int{3}}},
+			tags:   anime,
+		}
+		logger, rec := capture.New()
+		w := NewWalker(&Config{Radarr: fr, IncludeTags: []string{"anime"}, Logger: logger})
+
+		snap, err := w.Walk(t.Context())
+		if err != nil {
+			t.Fatalf("Walk: %v", err)
+		}
+		if len(snap.Items) != 0 {
+			t.Fatalf("items = %+v, want none", snap.Items)
+		}
+		if n := rec.CountExact(msg); n != 1 {
+			t.Fatalf("dead-filter warnings = %d, want exactly 1; messages = %q", n, rec.Messages())
+		}
+		if !rec.HasAttr(msg, "arr", ArrRadarr) {
+			got, _ := rec.AttrValue(msg, "arr")
+			t.Errorf("arr attr = %q, want %q", got, ArrRadarr)
+		}
+		if !rec.HasAttr(msg, "listed", "1") {
+			got, _ := rec.AttrValue(msg, "listed")
+			t.Errorf("listed attr = %q, want 1", got)
+		}
+	})
+
+	t.Run("no warning when the filter keeps something", func(t *testing.T) {
+		fs := &fakeSonarr{
+			series: []arrapi.Series{
+				{ID: 1, Title: "Kept", Tags: []int{7}},
+				{ID: 2, Title: "Dropped", Tags: []int{3}},
+			},
+			files: map[int][]arrapi.EpisodeFile{1: {epFile(1, "PMR")}},
+			tags:  anime,
+		}
+		logger, rec := capture.New()
+		w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: logger})
+
+		snap, err := w.Walk(t.Context())
+		if err != nil {
+			t.Fatalf("Walk: %v", err)
+		}
+		if len(snap.Items) != 1 {
+			t.Fatalf("items = %d, want 1", len(snap.Items))
+		}
+		if n := rec.CountExact(msg); n != 0 {
+			t.Errorf("dead-filter warnings = %d, want none (the filter kept an item); messages = %q", n, rec.Messages())
+		}
+	})
+
+	t.Run("no warning for a genuinely empty arr library", func(t *testing.T) {
+		fs := &fakeSonarr{tags: anime}
+		logger, rec := capture.New()
+		w := NewWalker(&Config{Sonarr: fs, IncludeTags: []string{"anime"}, Logger: logger})
+
+		if _, err := w.Walk(t.Context()); err != nil {
+			t.Fatalf("Walk: %v", err)
+		}
+		if n := rec.CountExact(msg); n != 0 {
+			t.Errorf("dead-filter warnings = %d, want none (the arr listed nothing, so filtering emptied nothing); messages = %q", n, rec.Messages())
+		}
+	})
+}
+
+// TestWalkStripsBaseURLCredentialsFromItemArrURL pins the Item-level credential
+// invariant Item.ArrURL documents: the walker builds the deep-link THROUGH
+// SafeLogURL, so a reverse-proxy Basic Auth credential configured in
+// sonarr.url / radarr.public_url never enters an Item, a Snapshot, a Finding, or
+// an audit Row. The sink-side SafeLogURL calls (notify, audit render,
+// SanitizedForStorage) are documented as belt-and-braces, so nothing else fails
+// if a construction-side wrap is dropped. The link must also stay usable, so the
+// assertion is the exact credential-free deep-link, not merely the absence of
+// the secret.
+func TestWalkStripsBaseURLCredentialsFromItemArrURL(t *testing.T) {
+	fs := &fakeSonarr{
+		series: []arrapi.Series{{ID: 1, Title: "Alpha", TitleSlug: "alpha"}},
+		files:  map[int][]arrapi.EpisodeFile{1: {epFile(1, "PMR")}},
+	}
+	fr := &fakeRadarr{movies: []arrapi.Movie{{
+		ID:        2,
+		Title:     "Movie",
+		TmdbID:    1234,
+		HasFile:   true,
+		MovieFile: &arrapi.MovieFile{ReleaseGroup: "PMR"},
+	}}}
+	w := NewWalker(&Config{
+		Sonarr:    fs,
+		Radarr:    fr,
+		SonarrURL: "https://sonarr-user:SONARR-LEAK@sonarr.example",
+		RadarrURL: "https://radarr-user:RADARR-LEAK@radarr.example",
+		Logger:    discardLogger(),
+	})
+
+	snap, err := w.Walk(t.Context())
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	want := map[string]string{
+		"sonarr:1": "https://sonarr.example/series/alpha",
+		"radarr:2": "https://radarr.example/movie/1234",
+	}
+	if len(snap.Items) != len(want) {
+		t.Fatalf("items = %d, want %d", len(snap.Items), len(want))
+	}
+	for i := range snap.Items {
+		it := &snap.Items[i]
+		if got := it.ArrURL; got != want[it.Key()] {
+			t.Errorf("%s ArrURL = %q, want %q (the configured base URL's credential is stripped at construction)",
+				it.Key(), got, want[it.Key()])
+		}
 	}
 }

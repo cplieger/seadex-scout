@@ -761,3 +761,33 @@ func TestParseMediaRejectionsWrapErrRecordUnusable(t *testing.T) {
 		})
 	}
 }
+
+// TestGqlErrorsBoundsEnvelopeCardinality pins the untrusted errors[] bound
+// documented on maxEnvelopeErrors: the 1 MiB body cap alone admits ~350k empty
+// objects, so this cap is what stops json.Unmarshal expanding them into
+// []gqlError before any consumer reads errs[0] (CWE-400, the amplification
+// boundedMediaList exists to close on the media array). An at-cap array must
+// still decode fully, an over-cap array must fail with the library's
+// ErrArrayCap and leave the list nil.
+func TestGqlErrorsBoundsEnvelopeCardinality(t *testing.T) {
+	array := func(n int) []byte {
+		return []byte("[" + strings.TrimSuffix(strings.Repeat(`{"message":"e","status":500},`, n), ",") + "]")
+	}
+
+	var atCap gqlErrors
+	if err := atCap.UnmarshalJSON(array(maxEnvelopeErrors)); err != nil {
+		t.Fatalf("UnmarshalJSON at the cap = %v, want %d errors accepted", err, maxEnvelopeErrors)
+	}
+	if len(atCap) != maxEnvelopeErrors {
+		t.Errorf("len = %d, want %d", len(atCap), maxEnvelopeErrors)
+	}
+
+	var over gqlErrors
+	err := over.UnmarshalJSON(array(maxEnvelopeErrors + 1))
+	if !errors.Is(err, bounded.ErrArrayCap) {
+		t.Fatalf("UnmarshalJSON over the cap = %v, want bounded.ErrArrayCap", err)
+	}
+	if over != nil {
+		t.Errorf("list = %v after a failed decode, want nil", over)
+	}
+}

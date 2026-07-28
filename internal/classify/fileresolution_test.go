@@ -8,7 +8,7 @@ import (
 
 // TestFileResolution pins the shared per-torrent resolution classifier the
 // indexer's RSS title synthesis consumes: resolution comes from the file
-// names alone over the PayloadNames eligibility rule (a small sidecar-sized
+// names alone over the payloadNames eligibility rule (a small sidecar-sized
 // extra with a different resolution marker does not vote), an empty or
 // nameless file list yields no resolution rather than a fabricated one, and
 // marker-less names classify to the empty string.

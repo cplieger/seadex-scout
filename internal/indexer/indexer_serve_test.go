@@ -13,7 +13,9 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/cplieger/slogx/capture"
@@ -301,6 +303,20 @@ func TestQuerySkipsPerEpisodeQuery(t *testing.T) {
 	}
 }
 
+// seedNyaaFeed installs n synthesized Nyaa journal items (GUIDs "0".."n-1", newest-first order)
+// straight into ix's snapshot cache, the shape the paging tests need without a writer round-trip.
+// It is the one place a test names the cache's lock.
+func seedNyaaFeed(t *testing.T, ix *Indexer, n int) {
+	t.Helper()
+	feed := make([]journalItem, n)
+	for i := range feed {
+		feed[i] = journalItem{item: item{Title: "t", GUID: strconv.Itoa(i)}}
+	}
+	ix.cache.mu.Lock()
+	defer ix.cache.mu.Unlock()
+	ix.cache.snap.NyaaFeed = feed
+}
+
 // TestQueryCapsResults pins the maxItems safety bound: a synthesized feed
 // larger than the cap is truncated - even when the request's explicit limit
 // exceeds it - so a rendered response can never grow unboundedly. (A
@@ -308,13 +324,7 @@ func TestQuerySkipsPerEpisodeQuery(t *testing.T) {
 // see TestQueryFeedDefaultLimit.)
 func TestQueryCapsResults(t *testing.T) {
 	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, Upstreams{})
-	feed := make([]journalItem, maxItems+5)
-	for i := range feed {
-		feed[i] = journalItem{item: item{Title: "t", GUID: strconv.Itoa(i)}}
-	}
-	ix.cache.mu.Lock()
-	ix.cache.snap.NyaaFeed = feed
-	ix.cache.mu.Unlock()
+	seedNyaaFeed(t, ix, maxItems+5)
 	items, _, _ := ix.query(context.Background(), url.Values{"t": {"search"}, "limit": {strconv.Itoa(maxItems + 5)}}, "nyaa")
 	if len(items) != maxItems {
 		t.Fatalf("got %d items, want the maxItems cap %d", len(items), maxItems)
@@ -329,13 +339,7 @@ func TestQueryCapsResults(t *testing.T) {
 // newest-first), and an explicit limit still wins over the default.
 func TestQueryFeedDefaultLimit(t *testing.T) {
 	ix := New(&Config{UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, Upstreams{})
-	feed := make([]journalItem, defaultCapsLimit+50)
-	for i := range feed {
-		feed[i] = journalItem{item: item{Title: "t", GUID: strconv.Itoa(i)}}
-	}
-	ix.cache.mu.Lock()
-	ix.cache.snap.NyaaFeed = feed
-	ix.cache.mu.Unlock()
+	seedNyaaFeed(t, ix, defaultCapsLimit+50)
 
 	items, stats, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
 	if !stats.feed {
@@ -388,13 +392,15 @@ func TestReloadKeepsFeedOnUnreadableSnapshot(t *testing.T) {
 	}
 }
 
-// TestReloadKeepsFeedOnNonRegularSnapshotPath pins statSnapshot's regular-file
+// TestReloadKeepsFeedOnNonRegularSnapshotPath pins openSnapshot's regular-file
 // gate: a snapshot path replaced by anything that is not a regular file (here a
 // directory - the root-safe stand-in for the FIFO, socket, and device forms) is
-// refused BEFORE the bounded read opens it, warned about once, and leaves the
-// live feed serving. The gate is what stops a FIFO at the path from blocking
-// os.Open past the warm-load timeout, which would leave the daemon binding
-// neither the Torznab listener nor the compare loop.
+// refused BEFORE the bounded read decodes it, warned about once, and leaves the
+// live feed serving. The gate is what rejects a FIFO at the path (whose open
+// returns immediately thanks to O_NONBLOCK - the arm
+// TestReloadRefusesFifoSnapshotPathWithoutBlocking pins) instead of blocking
+// past the warm-load timeout, which would leave the daemon binding neither the
+// Torznab listener nor the compare loop.
 func TestReloadKeepsFeedOnNonRegularSnapshotPath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	if err := seedRebuild(path, nyaaTestEntries(1)); err != nil {
@@ -419,6 +425,83 @@ func TestReloadKeepsFeedOnNonRegularSnapshotPath(t *testing.T) {
 	}
 	if !rec.Contains("indexer feed snapshot path is not a regular file; refusing to load it") {
 		t.Errorf("non-regular snapshot path not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestReloadRefusesSymlinkedSnapshotPath pins openSnapshot's O_NOFOLLOW arm:
+// the reader must refuse a symlink at the snapshot path (ELOOP, the "open
+// failed" arm), matching the writer's ErrSymlinkTarget contract, so a link
+// planted at /config/feed.json can never make the served feed come from an
+// arbitrary file.
+func TestReloadRefusesSymlinkedSnapshotPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "feed.json")
+	if err := seedRebuild(path, nyaaTestEntries(1)); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	log, rec := capture.New()
+	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, log, Upstreams{})
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+		t.Fatalf("initial feed = %d items, want 1", len(got))
+	}
+
+	// Replace the snapshot with a symlink to a DIFFERENT valid snapshot: the
+	// bytes are loadable, so only the O_NOFOLLOW gate can refuse them.
+	other := filepath.Join(dir, "other.json")
+	if err := seedRebuild(other, nyaaTestEntries(3)); err != nil {
+		t.Fatalf("Rebuild other: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove snapshot: %v", err)
+	}
+	if err := os.Symlink(other, path); err != nil {
+		t.Fatalf("symlink snapshot: %v", err)
+	}
+	ix.cache.refresh(context.Background())
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+		t.Errorf("feed after symlinked snapshot path = %d items, want 1 (the link target must never be loaded)", len(got))
+	}
+	if !rec.Contains("indexer feed snapshot open failed; keeping current feed") {
+		t.Errorf("symlinked snapshot path not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestReloadRefusesFifoSnapshotPathWithoutBlocking pins openSnapshot's
+// O_NONBLOCK arm: a FIFO left at the snapshot path must be rejected by the
+// regular-file gate rather than blocking the open. A blocking open would hold
+// reloadGate forever, so the test asserting this returns at all is the
+// regression guard.
+func TestReloadRefusesFifoSnapshotPathWithoutBlocking(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	if err := seedRebuild(path, nyaaTestEntries(1)); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	log, rec := capture.New()
+	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, log, Upstreams{})
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+		t.Fatalf("initial feed = %d items, want 1", len(got))
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove snapshot: %v", err)
+	}
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Skipf("mkfifo unsupported here: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ix.cache.refresh(context.Background())
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("refresh blocked on a FIFO snapshot path; the open must not wait for a writer")
+	}
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+		t.Errorf("feed after FIFO snapshot path = %d items, want 1", len(got))
+	}
+	if !rec.Contains("indexer feed snapshot path is not a regular file; refusing to load it") {
+		t.Errorf("FIFO snapshot path not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }
 
@@ -800,12 +883,73 @@ func TestServeCapsNotGatedByQueryLimit(t *testing.T) {
 	}}, nil, Upstreams{})
 	// Occupy every slot without any request in flight.
 	for range maxConcurrentQueries {
-		ix.queryGate <- struct{}{}
+		ix.search.slots <- struct{}{}
 	}
 	rec := httptest.NewRecorder()
 	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=k", nil))
 	if body := rec.Body.String(); !strings.Contains(body, "<caps") {
 		t.Errorf("caps body = %q, want the capabilities document served while the query gate is full", body)
+	}
+}
+
+// TestServeRSSNotStarvedBySearchGate pins the reason the synthesized-RSS path
+// takes its own in-flight pool (rss) instead of sharing the search pool: a
+// stalled Prowlarr parks every SEARCH slot for the whole bounded retry budget,
+// while an RSS check reads only the already-loaded snapshot and contacts no
+// upstream, so it must keep serving throughout. If serveQuery's isFeedRequest
+// arm is dropped the arrs' periodic RSS sync silently starts receiving Torznab
+// <error> documents during any search burst - a FAILED search to the arr, which
+// counts toward the indexer-failure escalation that disables the indexer, RSS
+// included. The second half pins that the RSS pool is still a BOUND (simultaneous
+// local renders are the footprint it caps) and that the busy line names WHICH
+// pool was hit, since a stalled Prowlarr and simultaneous renders call for
+// different operator actions.
+func TestServeRSSNotStarvedBySearchGate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	if err := seedRebuild(path, nyaaTestEntries(1)); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	log, rec := capture.New()
+	ix := warmedIndexer(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: "http://prowlarr.invalid/1/api", ProwlarrAPIKey: "pk",
+	}}, log, Upstreams{})
+	// Exercise the wait-expired path without spending the production budget.
+	defer func(d time.Duration) { queryGateWait = d }(queryGateWait)
+	queryGateWait = 20 * time.Millisecond
+
+	rss := func() *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		ix.serve(w, httptest.NewRequest(http.MethodGet, "/nyaa?t=search&apikey=k", nil))
+		return w
+	}
+
+	// Every SEARCH slot is occupied (a stalled Prowlarr holding all four): the
+	// RSS check must still answer from the loaded snapshot.
+	for range maxConcurrentQueries {
+		ix.search.slots <- struct{}{}
+	}
+	body := rss().Body.String()
+	if strings.Contains(body, "too many concurrent requests") {
+		t.Fatalf("RSS answered busy while only the search pool was full: %q", body)
+	}
+	if !strings.Contains(body, "<rss") || !strings.Contains(body, "<item>") {
+		t.Fatalf("RSS body with every search slot held = %q, want the served feed", body)
+	}
+
+	// The RSS pool is a bound of its own: with every feed slot held the next RSS
+	// check is answered busy, and the WARN names the rss pool.
+	for range maxConcurrentFeeds {
+		ix.rss.slots <- struct{}{}
+	}
+	busy := rss()
+	if b := busy.Body.String(); !strings.Contains(b, `<error code="900"`) || !strings.Contains(b, "too many concurrent requests") {
+		t.Errorf("over-limit RSS body = %q, want a Torznab <error> naming the concurrency limit", b)
+	}
+	if busy.Header().Get("Retry-After") == "" {
+		t.Error("over-limit RSS response carries no Retry-After; the arr has nothing to back off on")
+	}
+	if pool, ok := rec.AttrValue("indexer at its concurrent-query limit", "pool"); !ok || pool != "rss" {
+		t.Errorf("busy line pool attr = %q (found=%v), want rss; records: %v", pool, ok, rec.Messages())
 	}
 }
 
@@ -838,15 +982,13 @@ func TestServeNeverLogsTheFeedAPIKey(t *testing.T) {
 	if rec.Len() == 0 {
 		t.Fatal("no log records captured; the guard is vacuous unless the requests logged")
 	}
-	for _, line := range renderedLogRecords(rec) {
-		if strings.Contains(line, feedKey) {
-			t.Errorf("log record leaks the feed API key: %q", line)
-		}
+	if rec.Contains(feedKey) || rec.AttrContains("", "", feedKey) {
+		t.Errorf("log records leak the feed API key: %v", rec.Records())
 	}
 }
 
 // TestServeAbandonsBusyRequestWhenClientHungUp pins the clientGone arm of
-// acquireQuery: a request that is over the concurrency limit AND whose client
+// queryPool.acquire: a request that is over the concurrency limit AND whose client
 // has already gone away (arr timeout, disconnect) must return WITHOUT writing
 // a body - there is nobody to write to, and the busy <error> would only log a
 // failed write - while still leaving a Debug breadcrumb. The distinction
@@ -860,9 +1002,9 @@ func TestServeAbandonsBusyRequestWhenClientHungUp(t *testing.T) {
 		NyaaTorznabURL: "http://prowlarr.invalid/1/api", ProwlarrAPIKey: "pk",
 	}}, log, Upstreams{})
 	// Occupy every slot without any request in flight, so the gate is full and
-	// the cancelled context is the only ready case in acquireQuery's select.
+	// the cancelled context is the only ready case in queryPool.acquire's select.
 	for range maxConcurrentQueries {
-		ix.queryGate <- struct{}{}
+		ix.search.slots <- struct{}{}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -913,4 +1055,38 @@ func TestServeAppliesLogParamToRequestControlledValues(t *testing.T) {
 	if strings.ContainsAny(host, "\n\r") {
 		t.Errorf("logged host = %q, want control characters flattened", host)
 	}
+}
+
+// TestAcquireQueryAdmitsAWaiterWhenASlotFrees pins the WAIT arm of the
+// concurrency gate: an over-limit request must be ADMITTED once an in-flight
+// query finishes inside queryGateWait, not answered busy. Absorbing that burst
+// is the only reason the wait exists, and a busy answer is a FAILED search to
+// the arr (it counts toward the indexer-failure escalation that disables the
+// indexer, RSS included). TestServeBoundsConcurrentQueries asserts the busy
+// answer and its post-drain search takes the non-blocking fast path, so a gate
+// that stopped admitting waiters would leave the suite green while every burst
+// degraded into failures. Inside a synctest bubble the handoff is virtual time:
+// the clock advances only once the caller below is durably blocked on the full
+// gate, so the wait arm is exercised deterministically.
+func TestAcquireQueryAdmitsAWaiterWhenASlotFrees(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ix := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{
+			NyaaTorznabURL: "http://prowlarr/1/api",
+		}}, nil, Upstreams{})
+		for range maxConcurrentQueries {
+			ix.search.slots <- struct{}{}
+		}
+
+		go func() {
+			// A search finishing well inside the wait window.
+			time.Sleep(queryGateWait / 2)
+			ix.search.release()
+		}()
+
+		acquired, clientGone := ix.search.acquire(context.Background())
+		if !acquired || clientGone {
+			t.Fatalf("queryPool.acquire over the limit = (acquired=%v, clientGone=%v), want (true, false): a waiter must be admitted when a slot frees inside queryGateWait", acquired, clientGone)
+		}
+		ix.search.release()
+	})
 }

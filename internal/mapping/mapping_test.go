@@ -460,3 +460,50 @@ func TestAcceptRefresh_identifierBudgetFailsClosed(t *testing.T) {
 		}
 	})
 }
+
+// TestAcceptRefresh_staleReasonClassVocabulary pins stale_reason as the
+// fixed-cardinality degradation CLASS the operator queries in Loki (the
+// discriminator StaleMapError deliberately keeps live counts out of, so the
+// attribute stays equality-queryable). Five of the classes acceptRefresh can
+// emit have no assertion anywhere - only "refresh failed", "refresh exceeded
+// size cap" and the shrunk form are pinned - so a swapped or merged reason
+// string would silently file a never-self-heals refusal (record cap,
+// identifier budget, validation floor, moved schema) under the transient
+// vocabulary, and the escalation runbook keys on exactly that distinction.
+func TestAcceptRefresh_staleReasonClassVocabulary(t *testing.T) {
+	var capBody strings.Builder
+	capBody.WriteByte('[')
+	for i := 0; i <= maxFribbRecords; i++ {
+		if i > 0 {
+			capBody.WriteByte(',')
+		}
+		fmt.Fprintf(&capBody, `{"anilist_id":%d}`, i+1)
+	}
+	capBody.WriteByte(']')
+
+	tests := []struct {
+		name string
+		body []byte
+		want string
+	}{
+		{name: "record cap", body: []byte(capBody.String()), want: "refresh exceeded record cap"},
+		{name: "identifier budget", body: overIdentifierBudgetFribbBody(), want: "refresh exceeded identifier budget"},
+		{name: "validation floor", body: []byte(`[{"anilist_id":1,"type":"tv"}]`), want: "refresh validation failed"},
+		{name: "non-array document", body: []byte(`{"data":[]}`), want: "refresh not a JSON array"},
+		{name: "malformed body", body: []byte(`[{"anilist_id":1,`), want: "parse failed"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			prev := &Cache{Records: []Record{{AniListID: 1, Type: "TV", TvdbID: 100}}}
+			l := &Loader{log: discardLogger()}
+			_, err := l.acceptRefresh(prev, httpx.ConditionalResult{Body: tc.body})
+			stale, ok := errors.AsType[*StaleMapError](err)
+			if !ok {
+				t.Fatalf("acceptRefresh error = %v, want a *StaleMapError over a usable cache", err)
+			}
+			if got := stale.LogAttrs(); !attrsContain(got, "stale_reason", tc.want) {
+				t.Errorf("stale_reason attrs = %v, want %q", got, tc.want)
+			}
+		})
+	}
+}

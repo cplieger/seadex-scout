@@ -14,6 +14,7 @@ import (
 
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/jsonx/bounded"
+	"github.com/cplieger/seadex-scout/internal/degradation"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
@@ -49,8 +50,9 @@ const (
 	// maxFeedBytes): crossing the bound refuses every subsequent persist and
 	// freezes the served RSS journal with no self-heal (the offending input
 	// never shrinks on its own), so persist warns while there is still
-	// headroom to act. Mirrors internal/state's stateSizeWarnBytes.
-	feedSizeWarnBytes = maxFeedBytes / 10 * 8
+	// headroom to act. The 80% fraction is internal/degradation's app-wide
+	// persisted-file policy, shared with internal/state's stateSizeWarnBytes.
+	feedSizeWarnBytes = maxFeedBytes / degradation.SizeWarnDenominator * degradation.SizeWarnNumerator
 	// maxPersistedFieldBytes caps each persisted feed item's string field
 	// (title, GUID/info/download URL, journal key). It is aliased to
 	// torznab.go's maxUpstreamFieldBytes so every harvested title and
@@ -67,6 +69,17 @@ const (
 	// writer unions at most the three Torznab ids the feed uses (TV, Anime,
 	// Movies); anything larger is a hand-edited snapshot.
 	maxPersistedCategories = 8
+	// maxPersistedItemBytes bounds ONE persisted feed item's serialized JSON -
+	// the bound the per-array cardinality caps cannot express, because
+	// bounded.Array bounds how many items decode while each item's interior
+	// arrays are still decoded by encoding/json. Sized well above any item the
+	// writer can produce: validPersistedItem caps each of the seven string
+	// fields at maxPersistedFieldBytes, JSON escaping can expand a field ~6x
+	// (every '<' becomes the six-byte \u003c), and the numeric fields plus an
+	// at-limit maxPersistedCategories list add a few hundred bytes, so
+	// 8 * 6 * maxPersistedFieldBytes leaves ample slack while bounding one
+	// item's decode to a few hundred KiB.
+	maxPersistedItemBytes = 8 * 6 * maxPersistedFieldBytes
 	// maxPersistedCursorBytes bounds the persisted harvest checkpoint
 	// (harvest_cursor). It is deliberately far above maxPersistedFieldBytes:
 	// an honest checkpoint carries one Pages entry per still-pending deep
@@ -213,7 +226,7 @@ func unmarshalSnapshot(data []byte) (snapshot, error) {
 		return snapshot{}, err
 	}
 	var snap snapshot
-	var entries int
+	var mapEntries int
 	// The aggregate array budget covers both journal feeds; each feed also
 	// carries its own per-array cap, so neither one feed nor the pair can
 	// multiply past the bound.
@@ -221,23 +234,23 @@ func unmarshalSnapshot(data []byte) (snapshot, error) {
 	err := d.Object(func(key string) error {
 		switch {
 		case strings.EqualFold(key, "by_hash"):
-			set, err := decodeSnapshotMap(d, snap.ByHash, &entries, "by_hash")
+			set, err := decodeSnapshotMap(d, snap.ByHash, &mapEntries, "by_hash")
 			snap.ByHash = set
 			return err
 		case strings.EqualFold(key, "by_key"):
-			set, err := decodeSnapshotMap(d, snap.ByKey, &entries, "by_key")
+			set, err := decodeSnapshotMap(d, snap.ByKey, &mapEntries, "by_key")
 			snap.ByKey = set
 			return err
 		case strings.EqualFold(key, "by_pair"):
-			set, err := decodeSnapshotMap(d, snap.ByPair, &entries, "by_pair")
+			set, err := decodeSnapshotMap(d, snap.ByPair, &mapEntries, "by_pair")
 			snap.ByPair = set
 			return err
 		case strings.EqualFold(key, "seen"):
-			set, err := decodeSnapshotMap(d, snap.Seen, &entries, "seen")
+			set, err := decodeSnapshotMap(d, snap.Seen, &mapEntries, "seen")
 			snap.Seen = set
 			return err
 		case strings.EqualFold(key, "titles"):
-			titles, err := decodeSnapshotMap(d, snap.Titles, &entries, "titles")
+			titles, err := decodeSnapshotMap(d, snap.Titles, &mapEntries, "titles")
 			snap.Titles = titles
 			return err
 		case strings.EqualFold(key, "harvest_cursor"):
@@ -266,7 +279,21 @@ func unmarshalSnapshot(data []byte) (snapshot, error) {
 // validJournalRecords) is decodeSnapshot's separate gate.
 func decodeSnapshotFeed(d *bounded.Decoder, dst *[]journalItem, what string) error {
 	feed, err := bounded.Array(d, *dst, maxSnapshotFeedItems, what, func(it *journalItem) error {
-		return d.Decode(it)
+		// The per-array cap bounds how many ITEMS decode, not what ONE item
+		// allocates: an item's own Categories array is decoded by
+		// encoding/json, so a single item can amplify the byte cap into a
+		// hundreds-of-MB int slice before validPersistedItem's
+		// maxPersistedCategories check can reject it. Capture the element as
+		// raw bytes first (bounded by maxFeedBytes) and refuse an item larger
+		// than any the writer can produce before unmarshalling it.
+		var raw json.RawMessage
+		if err := d.Decode(&raw); err != nil {
+			return err
+		}
+		if len(raw) > maxPersistedItemBytes {
+			return fmt.Errorf("%s: item exceeds %d bytes (max %d)", what, len(raw), maxPersistedItemBytes)
+		}
+		return json.Unmarshal(raw, it)
 	})
 	if err != nil {
 		return err
@@ -290,13 +317,13 @@ func decodeSnapshotMap[V bool | string](d *bounded.Decoder, dst map[string]V, en
 	if dst == nil {
 		dst = make(map[string]V)
 	}
-	seen := 0
+	perMap := 0
 	for d.More() {
 		key, err := d.Key()
 		if err != nil {
 			return dst, err
 		}
-		if err := chargeSnapshotEntry(what, &seen, entries); err != nil {
+		if err := chargeSnapshotEntry(what, &perMap, entries); err != nil {
 			return dst, err
 		}
 		var value V
@@ -637,6 +664,20 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info E
 	nyaa, ab = sortFeed(nyaa), sortFeed(ab)
 	titles = retainTitles(titles, nyaa, ab)
 
+	if len(seen) > maxSnapshotMapEntries {
+		// Mirror of the read-side cardinality cap: persist enforces only
+		// maxFeedBytes, so an over-cardinality ledger would be written and then
+		// refused by the shared decode - the reader serves nothing until the next
+		// rebuild and this journal window is lost. The ledger's byte guard
+		// (maxPersistedSeenBytes) cannot imply the cardinality one: a short
+		// tracker-key entry serializes in ~20 bytes, so 8 MiB admits ~419k
+		// entries. Rebuilding it from the current catalogue is exactly the remedy
+		// seenLedgerWithinLimits already prescribes for the byte cap, and it keeps
+		// the journal intact (every journaled item is in the catalogue).
+		w.log.Warn("indexer seen ledger exceeded its decode cardinality cap; rebuilt from the current catalogue",
+			"entries", len(seen), "max_entries", maxSnapshotMapEntries)
+		seen = allIdentities(entries)
+	}
 	snap := snapshot{ByHash: set.byHash, ByKey: set.byKey, ByPair: set.byPair, Seen: seen, Titles: titles, NyaaFeed: nyaa, ABFeed: ab, HarvestCursor: cursor}
 	if err := w.persist(ctx, &snap); err != nil {
 		return err

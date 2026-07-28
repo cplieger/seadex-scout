@@ -18,6 +18,14 @@ import (
 // redacted.
 const redactedPath = "[report.dir]"
 
+// minRedactablePath is the shortest cleaned report.dir worth masking. The
+// value this guard exists for is a pasted secret (an arr api key, the
+// Prowlarr key, the AB passkey - all far longer), while a short
+// separator-less token is substring-replaced INSIDE unrelated words of the
+// diagnostic text, so masking it corrupts the records instead of protecting
+// anything.
+const minRedactablePath = 8
+
 // redactPathText replaces every occurrence of the configured report dir - and
 // of each of its path-prefix ancestors, which an os.PathError for a failed
 // intermediate component (MkdirAll) can carry instead of the full dir - with
@@ -29,14 +37,19 @@ func redactPathText(dir, s string) string {
 	if dir == "" {
 		return s
 	}
-	// A degenerate configured dir ("." or "/") can never hold a pasted
-	// secret, and replacing it would rewrite every dot or slash in the
-	// diagnostic text; skip redaction entirely (nothing secret to mask).
-	if c := filepath.Clean(dir); c == "." || c == string(filepath.Separator) {
+	// A dir with nothing maskable in it is skipped entirely: a degenerate
+	// value ("." or "/") would rewrite every dot or slash, and a short
+	// separator-less value would rewrite the letters of unrelated words -
+	// including the alert-keyed "report written" message - while being far too
+	// short to be one of this app's secrets.
+	c := filepath.Clean(dir)
+	if !redactablePath(c) {
 		return s
 	}
-	s = strings.ReplaceAll(s, dir, redactedPath)
-	for p := filepath.Clean(dir); p != "." && p != string(filepath.Separator); {
+	if redactablePath(dir) {
+		s = strings.ReplaceAll(s, dir, redactedPath)
+	}
+	for p := c; redactablePath(p); {
 		s = strings.ReplaceAll(s, p, redactedPath)
 		parent := filepath.Dir(p)
 		if parent == p {
@@ -45,6 +58,16 @@ func redactPathText(dir, s string) string {
 		p = parent
 	}
 	return s
+}
+
+// redactablePath reports whether p is a path fragment worth substring-masking:
+// not degenerate, and either long enough to be a pasted secret or clearly
+// path-shaped (it carries a separator, so it cannot collide with prose).
+func redactablePath(p string) bool {
+	if p == "." || p == string(filepath.Separator) {
+		return false
+	}
+	return len(p) >= minRedactablePath || strings.ContainsRune(p, filepath.Separator)
 }
 
 // redactPathErr wraps err so its rendered text carries no report-dir-derived

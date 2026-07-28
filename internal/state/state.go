@@ -22,6 +22,7 @@ import (
 
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/jsonx/bounded"
+	"github.com/cplieger/seadex-scout/internal/degradation"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
@@ -41,8 +42,10 @@ const (
 	// stateSizeWarnBytes is the pre-cliff warning threshold (80% of
 	// maxStateBytes): crossing the bound refuses every subsequent Save and
 	// freezes the persisted cache, so writeState warns while there is still
-	// headroom to act.
-	stateSizeWarnBytes = maxStateBytes / 10 * 8
+	// headroom to act. The 80% fraction is internal/degradation's app-wide
+	// persisted-file policy, shared with the indexer feed snapshot's
+	// feedSizeWarnBytes.
+	stateSizeWarnBytes = maxStateBytes / degradation.SizeWarnDenominator * degradation.SizeWarnNumerator
 	// dirMode / fileMode are applied to the created state directory and file.
 	// The file holds the operator's library inventory and finding history, so
 	// it stays owner-only (least privilege); the directory mode is the broader
@@ -260,11 +263,13 @@ func schemaVersion(data []byte) (version int, found bool, err error) {
 
 // Load reads and decodes the state file. A missing file returns a zero State
 // and no error (cold start); a present but corrupt or oversized file is
-// quarantined and returns the error so the caller can decide (the scout logs
-// it and starts cold). A valid file stamped by a NEWER binary (an image
-// rollback) is NOT quarantined: it stays at the live path and this Store
-// refuses every subsequent Save, so rolling forward to the newer image finds
-// its state intact instead of a freshly-overwritten older envelope.
+// quarantined where possible - see maybeQuarantine for the rename-failed
+// fallback, which blocks Save instead - and returns the error so the caller
+// can decide (the scout logs it and starts cold). A valid file stamped by a
+// NEWER binary (an image rollback) is NOT quarantined: it stays at the live
+// path and this Store refuses every subsequent Save, so rolling forward to the
+// newer image finds its state intact instead of a freshly-overwritten older
+// envelope.
 func (s *Store) Load(ctx context.Context) (State, error) {
 	// CleanupStaleTemps maps a missing dir to (0, nil) and logs its own
 	// removal summary at Info through the supplied logger, so Load only
@@ -296,6 +301,18 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 			// state, so neither belongs in the recoverable read-fault class
 			// below (which blocks every later Save until a Load classifies
 			// the path, and would freeze persistence forever here).
+			s.maybeQuarantine()
+			return State{}, fmt.Errorf("state: read %s: %w", s.path, err)
+		}
+		if s.foreignInode() {
+			// A non-regular inode the confined open could not report as
+			// ErrNotRegular: os.Root refuses to traverse a symlink pointing
+			// out of the state directory and reports it as "path escapes
+			// from parent", an unexported error carrying no sentinel to
+			// match. It is as DETERMINISTIC as the two cases above (no retry
+			// makes it readable, and Save's temp+rename replaces the inode
+			// outright), so classify it as corruption instead of arming the
+			// recoverable-fault block forever.
 			s.maybeQuarantine()
 			return State{}, fmt.Errorf("state: read %s: %w", s.path, err)
 		}
@@ -358,6 +375,28 @@ func (s *Store) readState(ctx context.Context) ([]byte, error) {
 	return atomicfile.ReadBoundedInRoot(ctx, root, filepath.Base(s.path), maxStateBytes)
 }
 
+// foreignInode reports whether the state path holds an inode Save never
+// writes: anything but a regular file. It lstats through the confined root,
+// so the probe itself never follows a symlink out of the state directory,
+// and a failure to probe (a missing or unreadable directory) reports false
+// so the caller keeps its conservative recoverable-fault classification.
+func (s *Store) foreignInode() bool {
+	root, err := os.OpenRoot(filepath.Dir(s.path))
+	if err != nil {
+		return false
+	}
+	defer func() {
+		if clErr := root.Close(); clErr != nil {
+			s.log.Warn("could not close state directory handle", "dir", filepath.Dir(s.path), "error", clErr)
+		}
+	}()
+	info, err := root.Lstat(filepath.Base(s.path))
+	if err != nil {
+		return false
+	}
+	return !info.Mode().IsRegular()
+}
+
 // decode applies Load's corruption and schema-version policy to the raw state
 // bytes, quarantining a corrupt payload (or, for a newer-schema file, setting
 // the Save block instead) before returning the error.
@@ -377,6 +416,22 @@ func (s *Store) decode(data []byte) (State, error) {
 	if trimmed := bytes.TrimSpace(data); len(trimmed) == 0 || trimmed[0] != '{' {
 		s.maybeQuarantine()
 		return State{}, fmt.Errorf("state: decode %s: not a JSON object", s.path)
+	}
+	// Bound the structural walk below before it runs. schemaVersion streams
+	// the whole envelope through json.Decoder.Token (via bounded.Decoder.Skip),
+	// and Token tracks nesting in its own Decoder.tokenStack - one int per
+	// open container, with NO depth limit (the scanner's maxNestingDepth of
+	// 10000 is only applied on the scanner path, not by Token). A nested
+	// payload up to maxStateBytes would therefore allocate ~8 bytes per level
+	// (~256 MB at the cap) and OOM-kill the 256 MiB container mid-Load, before
+	// the quarantine below can preserve or replace the file - so every restart
+	// re-reads it and dies again. json.Valid runs the scanner, which caps
+	// nesting at the same 10000 the json.Unmarshal below already enforces, so
+	// no payload this rejects could ever have loaded; it only moves the
+	// rejection ahead of the unbounded walk.
+	if !json.Valid(data) {
+		s.maybeQuarantine()
+		return State{}, fmt.Errorf("state: decode %s: not valid JSON", s.path)
 	}
 	// The wire discriminator is decoded independently BEFORE the State
 	// unmarshal, on every load: State.Version is never trusted (Unmarshal may
@@ -445,12 +500,26 @@ func (s *Store) maybeQuarantine() {
 // caller's Save block: without a preserved copy, letting the cycle's Save
 // replace the live file would erase the corruption evidence entirely.
 func (s *Store) quarantine() bool {
-	dst := s.path + ".corrupt"
-	if err := os.Rename(s.path, dst); err != nil {
+	dir, base := filepath.Dir(s.path), filepath.Base(s.path)
+	// Preserve through the same confinement Load's read establishes: the
+	// rename is resolved against an open directory handle, so a swapped or
+	// redirected component cannot move the corrupt bytes to a path the read
+	// never validated.
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		s.log.Warn("could not open state directory to preserve corrupt state file", "dir", dir, "error", err)
+		return false
+	}
+	defer func() {
+		if clErr := root.Close(); clErr != nil {
+			s.log.Warn("could not close state directory handle", "dir", dir, "error", clErr)
+		}
+	}()
+	if err := root.Rename(base, base+".corrupt"); err != nil {
 		s.log.Warn("could not preserve corrupt state file", "path", s.path, "error", err)
 		return false
 	}
-	s.log.Warn("corrupt state file preserved for inspection", "path", dst)
+	s.log.Warn("corrupt state file preserved for inspection", "path", s.path+".corrupt")
 	return true
 }
 
@@ -484,12 +553,16 @@ func (s *Store) Save(ctx context.Context, st *State) error {
 
 // ErrSavePreserved marks a Save that deliberately REFUSED to write in order to
 // preserve the bytes already on disk: the newer-schema block (an image
-// rollback must not discard state a later version wrote) and the
+// rollback must not discard state a later version wrote), the
 // unclassified-read-failure block (a read that failed without classifying the
-// file must not be overwritten by a cold envelope). It is not a write fault -
-// nothing is broken and no data was lost - so a caller that would otherwise
-// log a failed save at ERROR should classify it instead. Callers match with
-// errors.Is.
+// file must not be overwritten by a cold envelope), and classified corruption
+// the load could NOT preserve (the quarantine rename failed, so the live file
+// is still the only forensic copy and the only dedupe baseline). It is never a
+// write fault - nothing was lost by the refusal itself - so a caller that
+// would otherwise log a failed save at ERROR should classify it instead. Note
+// the third case is not benign like the first two: the on-disk state stays
+// corrupt and every later Save is refused until an operator clears the
+// quarantine destination. Callers match with errors.Is.
 //
 // The distinction matters for alerting: a redeploy SIGTERM landing in Load's
 // read window sets loadFailed, so the cycle's Save refuses; reporting that

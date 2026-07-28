@@ -214,8 +214,16 @@ func (c *Comparer) compareOne(m *match.Match) *Finding {
 	case align.OutcomeMixed:
 		fillBest(&base, recommended, recGroups)
 		return finalize(&base, StatusMixedGroup)
-	default: // align.OutcomeDiverged
+	case align.OutcomeDiverged:
 		return betterResult(entry, &base, recommended, recGroups)
+	default:
+		// Every Outcome the shared linearization produces is handled above. An
+		// Outcome added later must not fall into the STRONGEST claim in this
+		// projection (the warn-level better_release): mirror
+		// align.outcomeOf's own conservative default and project an
+		// unrecognized outcome as the informational unverifiable nudge.
+		fillBest(&base, recommended, recGroups)
+		return finalize(&base, StatusUnverifiable)
 	}
 }
 

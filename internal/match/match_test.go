@@ -62,6 +62,26 @@ func TestFindByIDArrConsistency(t *testing.T) {
 	}
 }
 
+// TestFindByIDMovieRecordIgnoresStrayTvdbID pins the forward direction of the
+// arr-consistency gate for the one id kind only the reverse catalogue tests
+// today: a MOVIE record's stray TVDB id must never resolve a Sonarr series.
+// RoutedIDs zeroes the TVDB id for a movie record, which is what stops
+// FindByID's Sonarr arm from being reached at all - arrItem cannot catch this
+// class, because byTvdb holds only Sonarr items, so a movie record leaking into
+// that arm would return a genuine Sonarr series and re-open the mislink bug the
+// arr gate exists for (the six movie entries that IMDb-collided onto same-named
+// Sonarr series).
+func TestFindByIDMovieRecordIgnoresStrayTvdbID(t *testing.T) {
+	li := NewLibIndex(&library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 1, Title: "Death Parade", TvdbID: 10},
+	}})
+	rec := &mapping.Record{Type: "MOVIE", TvdbID: 10}
+
+	if it := li.FindByID(rec); it != nil {
+		t.Errorf("FindByID(MOVIE record with a stray TVDB id) = %q (%s); a movie record must never resolve a Sonarr series", it.Title, it.Arr)
+	}
+}
+
 // TestFindByIDNoWrongArrShadowing covers the index-build side of the arr gate:
 // when a Sonarr series and a Radarr movie share the same TMDB id (disjoint
 // TV/movie namespaces over one key space) or the same IMDb id (TVDB reuses the
@@ -542,6 +562,45 @@ func TestFindMovieSkipsBlankIMDbIDs(t *testing.T) {
 	got := li.FindByID(rec)
 	if got == nil || got.ArrID != 2 {
 		t.Fatalf("FindByID() = %+v, want the valid IMDb match after the blank override id", got)
+	}
+}
+
+// TestFindByIDMatchesPaddedIMDbID pins imdbKey's trimming on BOTH sides of the
+// IMDb lookup, the reason the canonicalization exists: RoutedIDs judges an
+// IMDb id usable on its TRIMMED value but returns the value verbatim, so a
+// padded operator-override id ("  tt0123456") reads as a usable identifier -
+// which suppresses the AniList title fallback - and must therefore still
+// resolve the item indexed under the trimmed key. The converse holds for a
+// padded id on the library item. Without this, a padded override silently
+// yields no match and no fallback, and the reverse catalogue reports the item
+// as not_on_seadex.
+func TestFindByIDMatchesPaddedIMDbID(t *testing.T) {
+	li := NewLibIndex(&library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrRadarr, ArrID: 2, Title: "Some Movie", ImdbID: "tt0123456"},
+		{Arr: library.ArrRadarr, ArrID: 3, Title: "Padded Item", ImdbID: "  tt0999999"},
+	}})
+	tests := map[string]struct {
+		recIMDb   string
+		wantArrID int
+	}{
+		"padded record id resolves the item indexed under the trimmed value": {recIMDb: "  tt0123456", wantArrID: 2},
+		"trimmed record id resolves an item whose own id is padded":          {recIMDb: "tt0999999", wantArrID: 3},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			rec := &mapping.Record{Type: "MOVIE", IMDbIDs: []string{tc.recIMDb}}
+			got := li.FindByID(rec)
+			if got == nil || got.ArrID != tc.wantArrID {
+				t.Fatalf("FindByID(%q) = %+v, want the Radarr movie ArrID %d", tc.recIMDb, got, tc.wantArrID)
+			}
+		})
+	}
+	cat := NewCatalogue(mapping.NewIndex([]mapping.Record{
+		{AniListID: 1, Type: "MOVIE", IMDbIDs: []string{"  tt0123456"}},
+	}), nil)
+	item := library.Item{Arr: library.ArrRadarr, ImdbID: "tt0123456"}
+	if !cat.Has(&item) {
+		t.Error("Catalogue.Has() = false for an item whose IMDb id a padded record id names, want true")
 	}
 }
 

@@ -218,6 +218,8 @@ func TestCapAlertTextAttrNeutralizesMarkupAndMentions(t *testing.T) {
 		{name: "ampersand", in: "Fate & Co", want: "Fate &amp; Co"},
 		{name: "emphasis and code", in: "*a*_b_`c`~d~|e|", want: `\*a\*\_b\_` + "\\`c\\`" + `\~d\~\|e\|`},
 		{name: "backslash first", in: `a\b`, want: `a\\b`},
+		{name: "newline", in: "a\n# b", want: "a # b"},
+		{name: "carriage return", in: "a\rb", want: "a b"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -279,6 +281,80 @@ func TestFindingKVsCarriesEscapedAlertLabels(t *testing.T) {
 	} {
 		if got[key] != want {
 			t.Errorf("%s = %q, want %q", key, got[key], want)
+		}
+	}
+}
+
+// TestFindingKVsAlertLabelsCarryNoLineBreaks pins the line-structure half of
+// the alert-sink encoding: capAttr keeps CR/LF for the JSON slog sink, but the
+// annotation body alerts.yaml renders is a single line, so a newline in an
+// untrusted title would re-open the line-start markdown constructs inline
+// escaping cannot reach (a '#' heading, a list bullet, an auto-linked bare
+// URL). The raw labels keep the newline; only the alert_* twins flatten it.
+func TestFindingKVsAlertLabelsCarryNoLineBreaks(t *testing.T) {
+	f := compare.Finding{
+		Title:            "Frieren\n# Library compromised\r\nvisit https://attacker.example",
+		RecommendedGroup: "PMR\nMTBB",
+	}
+	kvs := findingKVs(&f)
+	for i := 0; i+1 < len(kvs); i += 2 {
+		key, ok := kvs[i].(string)
+		if !ok || !strings.HasPrefix(key, "alert_") {
+			continue
+		}
+		value, ok := kvs[i+1].(string)
+		if !ok {
+			continue
+		}
+		if strings.ContainsAny(value, "\r\n") {
+			t.Errorf("%s = %q, want no CR/LF", key, value)
+		}
+	}
+}
+
+// TestPreservedRecordBoundsEveryReadBackString widens the read-back bound to
+// every untrusted string capStored re-bounds. A prior record decoded from a
+// legacy or tampered state.json takes the failed-item preservation branch,
+// which returns it straight into the next state Save without passing
+// emitResolved, so an unbounded Arr, Title, CurrentGroup or RecommendedGroup
+// rides back onto disk and can cross the store's 32 MiB write bound (CWE-400).
+// The existing Status-only pin stays green if any of the other four re-bounds
+// is deleted.
+func TestPreservedRecordBoundsEveryReadBackString(t *testing.T) {
+	notifier, _ := newCapturedNotifier()
+	const alID = 154587
+	hostile := strings.Repeat("A", 40<<10) + "\u202e"
+	prior := map[string]Alerted{
+		"legacy": {AlertedAt: time.Unix(0, 0).UTC(), Finding: StoredFinding{
+			Arr:              hostile,
+			Title:            hostile,
+			CurrentGroup:     hostile,
+			RecommendedGroup: hostile,
+			Status:           compare.StatusBetter,
+			AniListID:        alID,
+		}},
+	}
+
+	current := notifier.Notify(nil, prior, map[int]struct{}{alID: {}}, time.Now())
+
+	rec, ok := current["legacy"]
+	if !ok {
+		t.Fatalf("failed item's prior record was not preserved: %+v", current)
+	}
+	for name, got := range map[string]string{
+		"Arr":              rec.Finding.Arr,
+		"Title":            rec.Finding.Title,
+		"CurrentGroup":     rec.Finding.CurrentGroup,
+		"RecommendedGroup": rec.Finding.RecommendedGroup,
+	} {
+		if len(got) > maxAttrBytes {
+			t.Errorf("preserved %s = %d bytes, want <= %d", name, len(got), maxAttrBytes)
+		}
+		if !strings.HasSuffix(got, attrTruncMarker) {
+			t.Errorf("preserved %s = ...%q, want the %q truncation marker", name, lastAttrBytes(got), attrTruncMarker)
+		}
+		if strings.ContainsAny(got, "\u202e") {
+			t.Errorf("preserved %s carries an unsafe rune", name)
 		}
 	}
 }

@@ -309,6 +309,44 @@ func TestLoader_refreshCache_streakAdvancesWithNoUsableCache(t *testing.T) {
 	}
 }
 
+// TestLoader_refreshCache_notModifiedWithoutUsableCacheAdvancesStreak pins the
+// documented streak classification of a 304 answered to a request that carried
+// NO validators (conditionalGet suppresses them whenever the cache is
+// unusable): that is an upstream or intermediary protocol violation, which
+// repeats identically every cycle and never self-heals, so reuseCachedRecords
+// routes it through rejectRefresh rather than plain staleOrFail. The two
+// existing unusable-cache 304 tests assert only the error and the suppressed
+// validators, so a regression back to staleOrFail would freeze the streak at 0
+// and the scout's WARN would never escalate to ERROR at
+// degradation.EscalationThreshold - a permanently broken upstream degrading
+// silently at WARN forever.
+func TestLoader_refreshCache_notModifiedWithoutUsableCacheAdvancesStreak(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "" {
+			t.Error("conditional GET sent validators despite an unusable cache; they must be suppressed")
+		}
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer ts.Close()
+
+	prev := &Cache{FetchedAt: time.Now().Add(-2 * time.Hour), ETag: "v1"}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	for i := 1; i <= degradation.EscalationThreshold; i++ {
+		next, err := l.refreshCache(context.Background(), prev)
+		if err == nil {
+			t.Fatalf("304 %d over an unusable cache returned nil error, want the no-cache error", i)
+		}
+		var stale *StaleMapError
+		if errors.As(err, &stale) {
+			t.Fatalf("304 %d returned a *StaleMapError, want the no-cache error (there is no usable map to serve)", i)
+		}
+		if next.RejectedRefreshes != i {
+			t.Fatalf("RejectedRefreshes after %d unusable-cache 304s = %d, want %d (a protocol-violating 304 never self-heals)", i, next.RejectedRefreshes, i)
+		}
+		*prev = next
+	}
+}
+
 // attrsContain reports whether the flattened slog key/value pairs carry key
 // with the wanted value.
 func attrsContain(attrs []any, key, want string) bool {

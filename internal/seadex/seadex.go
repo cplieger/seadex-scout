@@ -82,6 +82,12 @@ const (
 	// caps it so a hostile page cannot balloon a Loki record. Sized just over
 	// maxCursorValueBytes so an honest-but-rejected value stays fully readable.
 	maxLoggedCursorBytes = 128
+	// maxLoggedDecodeBytes bounds a page-DECODE failure's rendered text before
+	// it leaves the client. Stdlib json renders a rejected number literal
+	// verbatim, so the message is otherwise bounded only by maxPageBytes;
+	// sized to keep the decoder's own prose (the offending value's kind, the
+	// target type, the byte offset) fully readable.
+	maxLoggedDecodeBytes = 512
 	// maxAttempts / baseDelay bound the per-page retry.
 	maxAttempts = 3
 	baseDelay   = time.Second
@@ -327,12 +333,19 @@ func parsePBTime(s string) time.Time {
 
 // fetchTotals accumulates the cross-page counters of one FetchEntries run.
 // reportedTotal and reportedPages retain the HIGHEST value any chunk promised
-// (never overwritten downward): a later chunk whose metadata regresses — an
-// empty chunk omitting totalItems decodes it as zero — must not erase an
-// earlier chunk's promise of more records, or chunkComplete's outstanding-items
-// guard would accept a truncated view. reportedPages no longer steers the walk
-// (the keyset cursor does); it survives only for finishFetch's totalItems-fits-
-// totalPages self-consistency check.
+// (never overwritten downward). Under the keyset walk that is load-bearing on
+// EVERY chunk, not only a degenerate one: only the FIRST chunk is requested
+// unfiltered, so only its totals describe the whole catalogue — every later
+// chunk carries the cursor filter and reports the totals of the remaining
+// suffix, which legitimately shrinks as the walk proceeds. The whole-catalogue
+// value is the denominator chunkComplete's outstanding-items guard and
+// validateFinishedFetch's below-half shrink guard both compare the cumulative
+// count against, so a last-writer assignment here would hand both guards a
+// shrinking denominator and let a truncated walk satisfy them. A chunk whose
+// metadata regresses outright (an empty chunk omitting totalItems decodes it as
+// zero) is the same failure in its extreme form. reportedPages no longer steers
+// the walk (the keyset cursor does); it survives only for finishFetch's
+// totalItems-fits-totalPages self-consistency check.
 type fetchTotals struct {
 	// seenAniListIDs is the identity set of every entry accepted so far, so
 	// the walk can prove count completeness is also KEY completeness (see
@@ -401,24 +414,32 @@ func filterSafe(v string) bool {
 	return true
 }
 
+// logCursor bounds and cleans one untrusted cursor value before it is quoted
+// into an error internal/scout logs as a slog attribute. It is the single
+// application of maxLoggedCursorBytes, mirroring the named wrappers the sibling
+// upstream clients use (indexer.capLogText, anilist.sanitizeUpstreamMessage,
+// scout.logSafeUpstreamError).
+func logCursor(v string) string {
+	return runesafe.SanitizeSingleLineBounded(v, maxLoggedCursorBytes)
+}
+
 // recordCursor reads one record's (created, id) keyset pair, trimmed, and
 // fails when the pair cannot be used: missing (an upstream that stopped
 // returning the fields the walk pages on) or unsafe to place in a filter.
-// chunkLen only shapes the diagnostic.
-func recordCursor(item *pbEntry, chunkLen int) (cursor, error) {
+// index (1-based) and chunkLen only shape the diagnostic: they name WHICH
+// record of the chunk drifted, which the quoted values cannot do when both
+// keyset fields are blank.
+func recordCursor(item *pbEntry, index, chunkLen int) (cursor, error) {
 	c := cursor{created: strings.TrimSpace(item.Created), id: strings.TrimSpace(item.ID)}
 	if c.created == "" || c.id == "" {
-		return cursor{}, fmt.Errorf("seadex: page of %d records carries no usable keyset cursor "+
+		return cursor{}, fmt.Errorf("seadex: record %d of %d carries no usable keyset cursor "+
 			"(created %q, id %q); refusing to compare against a truncated view",
-			chunkLen,
-			runesafe.SanitizeSingleLineBounded(item.Created, maxLoggedCursorBytes),
-			runesafe.SanitizeSingleLineBounded(item.ID, maxLoggedCursorBytes))
+			index, chunkLen, logCursor(item.Created), logCursor(item.ID))
 	}
 	if !filterSafe(c.created) || !filterSafe(c.id) {
-		return cursor{}, fmt.Errorf("seadex: keyset cursor rejected (created %q, id %q); "+
-			"refusing to compare against a truncated view",
-			runesafe.SanitizeSingleLineBounded(c.created, maxLoggedCursorBytes),
-			runesafe.SanitizeSingleLineBounded(c.id, maxLoggedCursorBytes))
+		return cursor{}, fmt.Errorf("seadex: keyset cursor rejected at record %d of %d "+
+			"(created %q, id %q); refusing to compare against a truncated view",
+			index, chunkLen, logCursor(c.created), logCursor(c.id))
 	}
 	return c, nil
 }
@@ -454,7 +475,7 @@ func cursorAdvances(next, prev cursor) bool {
 func advanceCursor(items []pbEntry, prev cursor) (cursor, error) {
 	pos := prev
 	for i := range items {
-		next, err := recordCursor(&items[i], len(items))
+		next, err := recordCursor(&items[i], i+1, len(items))
 		if err != nil {
 			return prev, err
 		}
@@ -463,10 +484,8 @@ func advanceCursor(items []pbEntry, prev cursor) (cursor, error) {
 				"got (created %q, id %q) at record %d of %d "+
 				"(upstream ignoring the pagination filter or its sort order); "+
 				"refusing to compare against a truncated view",
-				runesafe.SanitizeSingleLineBounded(pos.created, maxLoggedCursorBytes),
-				runesafe.SanitizeSingleLineBounded(pos.id, maxLoggedCursorBytes),
-				runesafe.SanitizeSingleLineBounded(next.created, maxLoggedCursorBytes),
-				runesafe.SanitizeSingleLineBounded(next.id, maxLoggedCursorBytes),
+				logCursor(pos.created), logCursor(pos.id),
+				logCursor(next.created), logCursor(next.id),
 				i+1, len(items))
 		}
 		pos = next
@@ -493,6 +512,7 @@ func advanceCursor(items []pbEntry, prev cursor) (cursor, error) {
 // itself says entries remain and completing would falsely resolve findings
 // against a truncated view.
 func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
+	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, maxFetchDuration)
 	defer cancel()
 	var all []Entry
@@ -501,14 +521,15 @@ func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 	for page := 1; page <= maxPages; page++ {
 		if page > 1 {
 			if err := httpx.SleepCtx(ctx, c.pageDelay); err != nil {
-				return nil, fmt.Errorf("seadex: interrupted between pages: %w", err)
+				return nil, walkBudgetError(parent, ctx,
+					fmt.Errorf("seadex: interrupted between pages: %w", err), page, len(all))
 			}
 		}
 		var done bool
 		var err error
 		all, done, err = c.fetchAndAppend(ctx, page, all, &tot, &cur)
 		if err != nil {
-			return nil, err
+			return nil, walkBudgetError(parent, ctx, err, page, len(all))
 		}
 		c.log.Debug("seadex chunk fetched", "page", page, "entries", len(all),
 			"reported_total", tot.reportedTotal, "done", done,
@@ -517,8 +538,26 @@ func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 			return c.finishFetch(all, tot)
 		}
 	}
-	return nil, fmt.Errorf("seadex: pagination exceeded max %d pages after %d entries fetched (upstream reported more); "+
-		"refusing to compare against a truncated view", maxPages, len(all))
+	return nil, fmt.Errorf("seadex: pagination exceeded max %d pages after %d entries fetched "+
+		"(upstream still serving full pages; reported total %d); "+
+		"refusing to compare against a truncated view", maxPages, len(all), tot.reportedTotal)
+}
+
+// walkBudgetError names maxFetchDuration when the WALK's own deadline is what
+// ended the fetch. Every other cap in this file tells the operator which
+// constant to raise (maxTotalBytes, maxTotalElements, maxPages); a bare
+// "context deadline exceeded" is otherwise indistinguishable from the
+// per-request client timeout (build.go seadexTimeout - a transient upstream
+// stall a later cycle recovers from) and names no remedy. The CALLER's context
+// is checked first, so a shutdown or a caller-imposed deadline keeps its own
+// error untouched and stays classifiable as one (cycle.IsShutdownError).
+func walkBudgetError(parent, walk context.Context, err error, page, fetched int) error {
+	if parent.Err() != nil || !errors.Is(walk.Err(), context.DeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("seadex: catalogue walk exceeded its %s budget on page %d after %d entries "+
+		"(upstream stalling, or the catalogue outgrew the budget - raise maxFetchDuration); "+
+		"refusing to compare against a truncated view: %w", maxFetchDuration, page, fetched, err)
 }
 
 // finishFetch validates a completed catalogue before returning it: zero
@@ -591,7 +630,7 @@ func validateFinishedFetch(count int, tot fetchTotals) error {
 		// cycle, which PRESERVES existing findings - the fail-safe direction -
 		// where completing would resolve every finding whose entry vanished.
 		// The below-half trigger is the app-wide shrink policy
-		// (degradation.ShrinkGuardFactor), the same one the mapping refresh and
+		// (degradation.Shrunk), the same one the mapping refresh and
 		// library-walk guards apply, rather than a second threshold of its own.
 		return fmt.Errorf("seadex: collected %d of %d reported entries (below half); "+
 			"refusing to compare against a truncated view", count, tot.reportedTotal)
@@ -842,6 +881,16 @@ func (c *Client) fetchPage(ctx context.Context, cur cursor, wireLimit int64, ele
 		httpx.WithMaxBodyBytes(wireLimit),
 		httpx.WithHeaders(setHeaders),
 		httpx.WithLogger(c.log),
+		// Demote httpx's terminal "http retries exhausted" line to Debug. A page
+		// whose retries ran out aborts the WHOLE walk, and the caller publishes
+		// that same failure with strictly more context
+		// (scout.recordSeaDexFetch's "seadex fetch failed" WARN carries the
+		// consecutive-failure streak and whether the feed was kept, and escalates
+		// to ERROR at degradation.EscalationThreshold), so leaving both at Warn
+		// reports one outage twice per cycle. Demoting rather than dropping the
+		// logger keeps the per-attempt retry diagnostics - the same rule
+		// internal/indexer's Prowlarr door already applies (l-f20).
+		httpx.WithExhaustedLevel(slog.LevelDebug),
 	)
 	if err != nil {
 		if tooLarge, ok := errors.AsType[*httpx.ResponseTooLargeError](err); ok && tooLarge.Limit < maxPageBytes {
@@ -855,7 +904,16 @@ func (c *Client) fetchPage(ctx context.Context, cur cursor, wireLimit int64, ele
 		if errors.Is(err, bounded.ErrElementBudget) && elemLimit < maxPageElements {
 			return pbList{}, 0, 0, errCumulativeElements
 		}
-		return pbList{}, 0, 0, fmt.Errorf("decode page: %w", err)
+		// The decoder's error can embed RAW upstream bytes: stdlib
+		// *json.UnmarshalTypeError renders a rejected NUMBER literal verbatim
+		// ("cannot unmarshal number <literal> into Go value of type int"), so a
+		// page whose totalItems is a megabyte of digits yields a megabyte-long
+		// error. It crosses the log boundary on both fetch paths, and only the
+		// daemon's is reduced downstream (scout.logSafeUpstreamError; the report
+		// subcommand's error is logged raw in main), so it is bounded HERE beside
+		// the keyset-cursor arms' own reduction.
+		return pbList{}, 0, 0, fmt.Errorf("decode page: %s",
+			runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedDecodeBytes))
 	}
 	return list, len(body), elems, nil
 }

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cplieger/httpx/v4"
+	"github.com/cplieger/jsonx/bounded"
 	"github.com/cplieger/seadex-scout/internal/titlekey"
 )
 
@@ -168,7 +169,17 @@ func newHarvester(log *slog.Logger, now func() time.Time, ups []*upstream) *harv
 // rejecting every query shape is upstream-wide breakage that would otherwise
 // burn the whole time slice with zero progress.
 func (h *harvester) harvestTitles(ctx context.Context, feeds map[string][]journalItem, titles map[string]string, infoFor EntryInfoFunc, prevCursor string) (stats harvestStats, cursor string) {
-	cp := decodeHarvestCheckpoint(prevCursor)
+	cp, degraded := decodeHarvestCheckpoint(prevCursor)
+	if degraded != "" {
+		// The persisted checkpoint is the harvest's only memory of WHERE it
+		// stopped. Silently rebaselining it costs every deep-paging show its
+		// progress, and because the value is re-persisted each rebuild a
+		// recurring corruption never self-heals; the operator needs the same
+		// signal loadPrevious already emits for the over-cap case. The value
+		// is never logged (it can be attacker-shaped text).
+		h.log.Warn("indexer title harvest checkpoint unusable; restarting the rotation at the head and paging from zero",
+			"reason", degraded, "cursor_bytes", len(prevCursor))
+	}
 	defer func() { stats.pending = syntheticCount(feeds, titles) }()
 	groups, index, showTitles := pendingHarvest(feeds, titles, infoFor)
 	pruneHarvestPages(cp.Pages, groups)
@@ -218,8 +229,8 @@ func (h *harvester) harvestTitles(ctx context.Context, feeds map[string][]journa
 // checkpoint, time slice, stats, the identity index, title cache and per-key
 // show titles the matcher writes through and ranks with, and the per-scope
 // latch state. It exists so the orchestration loop passes ONE value to the
-// per-group step instead of ten, keeping harvestTitles about setup and ordered
-// iteration.
+// per-group step instead of one argument per field, keeping harvestTitles about
+// setup and ordered iteration.
 type harvestRun struct {
 	infoFor    EntryInfoFunc
 	checkpoint *harvestCheckpoint
@@ -355,26 +366,46 @@ type harvestCheckpoint struct {
 // the persisted-snapshot size caps, enforced first at loadPrevious) is
 // external corruption and takes the same empty-checkpoint baseline before any
 // decoding.
-func decodeHarvestCheckpoint(raw string) harvestCheckpoint {
+//
+// The second return names WHY the decode degraded ("" when nothing was
+// dropped), so the caller can report a rebaselined checkpoint the way the seen
+// ledger and the info-URL scrub already report a tampered persisted field: a
+// silent rebaseline costs every deep-paging show its progress, and because the
+// value is re-persisted each rebuild a recurring corruption never self-heals.
+func decodeHarvestCheckpoint(raw string) (checkpoint harvestCheckpoint, degradedReason string) {
 	if len(raw) > maxPersistedCursorBytes {
 		// An over-cap cursor cannot come from this writer (a cursor names
 		// live groups only, and pruneHarvestPages keeps it that way), so it
 		// is external corruption: degrade to the same safe baseline
 		// malformed JSON takes (start at the head, page from zero) instead
 		// of decoding it and re-persisting it forever.
-		return harvestCheckpoint{Pages: make(map[string]int)}
+		return harvestCheckpoint{Pages: make(map[string]int)}, "exceeds size cap"
 	}
 	if !strings.HasPrefix(strings.TrimSpace(raw), "{") {
-		return harvestCheckpoint{Last: validRotationCursor(raw), Pages: make(map[string]int)}
+		last := validRotationCursor(raw)
+		reason := ""
+		if last == "" && strings.TrimSpace(raw) != "" {
+			reason = "invalid rotation cursor"
+		}
+		return harvestCheckpoint{Last: last, Pages: make(map[string]int)}, reason
+	}
+	if err := bounded.Preflight(strings.NewReader(raw)); err != nil {
+		// A duplicate key or pathological nesting is tampering evidence, not
+		// an honest cursor this writer produced, so take the same
+		// empty-checkpoint baseline malformed JSON takes. Same boundary rule
+		// unmarshalSnapshot applies to the enclosing file (writer.go).
+		return harvestCheckpoint{Pages: make(map[string]int)}, "malformed checkpoint JSON"
 	}
 	var cp harvestCheckpoint
 	if err := json.Unmarshal([]byte(raw), &cp); err != nil {
-		return harvestCheckpoint{Pages: make(map[string]int)}
+		return harvestCheckpoint{Pages: make(map[string]int)}, "malformed checkpoint JSON"
 	}
+	decodedLast := cp.Last
 	cp.Last = validRotationCursor(cp.Last)
 	if cp.Pages == nil {
 		cp.Pages = make(map[string]int)
 	}
+	droppedPage := false
 	for key, page := range cp.Pages {
 		// Drop pages that would overflow the offset multiplication in
 		// harvestShow (page*harvestPageSize), including after the up-to
@@ -385,23 +416,42 @@ func decodeHarvestCheckpoint(raw string) harvestCheckpoint {
 		// in-range absurd page, which self-heals via the short-page exit.
 		if page <= 0 || page > math.MaxInt/harvestPageSize-(harvestShowPageCap-1) {
 			delete(cp.Pages, key)
+			droppedPage = true
 		}
 	}
-	return cp
+	var reasons []string
+	if cp.Last == "" && decodedLast != "" {
+		reasons = append(reasons, "invalid rotation cursor")
+	}
+	if droppedPage {
+		reasons = append(reasons, "out-of-range page state")
+	}
+	return cp, strings.Join(reasons, "; ")
 }
 
 // encodeHarvestCheckpoint renders the checkpoint back into the persisted
 // harvest_cursor string: the bare legacy cursor while no page state exists
 // (so an unchanged deployment round-trips byte-identical and an older binary
 // keeps reading it), the JSON object once any group has a page to resume. A
-// marshal failure - unreachable for this shape - degrades to the legacy form
-// rather than persisting garbage.
+// marshal failure - unreachable for this shape - and a rendered object over
+// maxPersistedCursorBytes both degrade to the legacy form rather than
+// persisting a value the reader is required to discard.
 func encodeHarvestCheckpoint(cp harvestCheckpoint) string {
 	if len(cp.Pages) == 0 {
 		return cp.Last
 	}
 	b, err := json.Marshal(cp)
 	if err != nil {
+		return cp.Last
+	}
+	if len(b) > maxPersistedCursorBytes {
+		// Never persist a cursor the reader is contractually required to
+		// discard: loadPrevious drops an over-cap cursor WHOLE (page state
+		// and rotation cursor alike) and warns about external corruption, so
+		// emitting one would reset the rotation on every rebuild and blame a
+		// hand-edited snapshot for this writer's own output. Keep the bare
+		// rotation cursor - the same degradation decodeHarvestCheckpoint
+		// applies to malformed checkpoint JSON.
 		return cp.Last
 	}
 	return string(b)
@@ -682,6 +732,7 @@ const consecutiveFruitlessLatch = 2 * consecutiveMalformedLatch
 func (h *harvester) harvestShow(ctx context.Context, u *upstream, g harvestGroup, meta EntryInfo, r *harvestRun, startPage int) (outcome harvestOutcome, nextPage int, refused bool) {
 	params := harvestParams(meta, g.scope)
 	page := max(startPage, 0)
+	stranded := 0
 	for range harvestShowPageCap {
 		if !r.pacer.next(ctx) {
 			return harvestOK, page, refused
@@ -691,8 +742,19 @@ func (h *harvester) harvestShow(ctx context.Context, u *upstream, g harvestGroup
 		if !ok {
 			return failure, page, refused
 		}
-		matched, rejected, pendingRejected := matchHarvest(results, g.scope, r.index, r.titles, r.showTitles, g.keys)
+		matched, rejected, pendingRejected, unusable := matchHarvest(results, g.scope, r.index, r.titles, r.showTitles, g.keys)
 		r.stats.matched += matched
+		if stranded == 0 && pendingRejected+unusable > 0 {
+			// The stranding classes: this show's own release was named by a
+			// result the harvest could not use, so it keeps its synthesized
+			// title and - because the index is rebuilt from the same journal
+			// every rebuild - will keep it until the upstream agrees. One line
+			// per show per rebuild, never per page.
+			h.log.Warn("indexer title harvest could not use results naming this show's own releases; they keep their synthesized titles",
+				"upstream", u.name, "al_id", g.alID, "page", page,
+				"contradictory", pendingRejected, "unusable_title", unusable)
+		}
+		stranded += pendingRejected + unusable
 		refused = refused || pendingRejected > 0
 		if rejected > 0 {
 			// A result whose own identity signals contradict each other is an
@@ -969,7 +1031,14 @@ const harvestMaxTitleLen = 512
 // AnimeBytes answers the same broad series-level corpus to every query, so one
 // unrelated malformed item repeating across shows must not read as "this scope
 // harvests nothing".
-func matchHarvest(results []item, scope string, index, titles, showTitles map[string]string, groupKeys []string) (matched, rejected, pendingRejected int) {
+//
+// unusable is the same group-local grade applied to the OTHER silent drop: a
+// result naming one of this group's still-untitled releases whose title is
+// blank or over harvestMaxTitleLen, so it cannot enter the persisted cache.
+// It charges no rejection and does not mark the show contradicted, so without
+// this count an upstream emitting blank titles for our items would burn its
+// share of every rebuild's slice with no signal at all.
+func matchHarvest(results []item, scope string, index, titles, showTitles map[string]string, groupKeys []string) (matched, rejected, pendingRejected, unusable int) {
 	// Collect every candidate title per key BEFORE choosing: AnimeBytes lists
 	// one torrent three times (EN / JP / Romaji aliases, distinct ?nh= GUIDs,
 	// the SAME torrent id), so all three resolve to one journal key and the
@@ -978,15 +1047,15 @@ func matchHarvest(results []item, scope string, index, titles, showTitles map[st
 	candidates := make(map[string][]string)
 	order := make([]string, 0, len(results))
 	for i := range results {
-		title := strings.TrimSpace(results[i].Title)
-		if title == "" || len(title) > harvestMaxTitleLen {
-			continue
-		}
 		key, conflict := resolveHarvestKey(&results[i], index)
 		if conflict {
 			// Every contradiction is refused and counted; only one that named a
 			// release this rebuild is trying to title says the show harvested
-			// nothing.
+			// nothing. Classification runs BEFORE the title-admission gate: a
+			// tampered response is evidence whatever it puts in <title>, and
+			// gating it on an admissible title let the systematically tampered
+			// shape (contradictory identities under blank or oversized titles)
+			// report zero rejections.
 			rejected++
 			pendingRejected += pendingHarvestRefusal(&results[i], index, titles, groupKeys)
 			continue
@@ -995,6 +1064,17 @@ func matchHarvest(results []item, scope string, index, titles, showTitles map[st
 			continue
 		}
 		if _, done := titles[key]; done {
+			continue
+		}
+		title := strings.TrimSpace(results[i].Title)
+		if title == "" || len(title) > harvestMaxTitleLen {
+			// One of ours, but its title cannot enter the persisted cache: the
+			// key stays pending so a later page or rebuild can still title it.
+			// Unlike a contradiction this charges no rejection counter, and the
+			// show is not "contradicted", so the fruitless run resets too -
+			// grade it with the same group-local test the refusal path uses so
+			// a stranded release is still reportable.
+			unusable += pendingHarvestRefusal(&results[i], index, titles, groupKeys)
 			continue
 		}
 		if _, seen := candidates[key]; !seen {
@@ -1006,7 +1086,7 @@ func matchHarvest(results []item, scope string, index, titles, showTitles map[st
 		titles[key] = preferredHarvestTitle(candidates[key], showTitles[key])
 		matched++
 	}
-	return matched, rejected, pendingRejected
+	return matched, rejected, pendingRejected, unusable
 }
 
 // pendingHarvestRefusal grades a REFUSED result (resolveHarvestKey reported a
@@ -1092,7 +1172,7 @@ func preferredHarvestTitle(candidates []string, showTitle string) string {
 	}
 	if want := titlekey.Normalize(showTitle); want != "" {
 		for _, c := range candidates {
-			if candidateContainsTitleKey(c, want) {
+			if titlekey.ContainsKey(c, want) {
 				return c
 			}
 		}
@@ -1104,42 +1184,6 @@ func preferredHarvestTitle(candidates []string, showTitle string) string {
 		}
 	}
 	return best
-}
-
-// candidateContainsTitleKey reports whether the candidate release name carries
-// the show's normalized title key as its own vocabulary.
-//
-// titlekey.Normalize deliberately drops every separator, so a plain normalized
-// substring test has no token-boundary evidence at all. That is harmless for a
-// title key of real length, but a SHORT key (a one- to three-character show
-// title such as "X") occurs inside ordinary release metadata: the "x" in
-// "Remux" or "x265" satisfies it on every alias, so the first alias wins
-// whatever its vocabulary - defeating the very policy the caller documents.
-// A short key therefore requires an EXACT match against a run of the
-// candidate's own alphanumeric tokens, which is the boundary evidence the
-// normalized form threw away; longer keys keep the punctuation-tolerant
-// normalized substring, where an accidental hit is not credible.
-func candidateContainsTitleKey(candidate, want string) bool {
-	if len(want) >= 4 {
-		return strings.Contains(titlekey.Normalize(candidate), want)
-	}
-	tokens := strings.FieldsFunc(strings.ToLower(candidate), func(r rune) bool {
-		return (r < '0' || r > '9') && (r < 'a' || r > 'z')
-	})
-	var joined strings.Builder
-	for start := range tokens {
-		joined.Reset()
-		for _, token := range tokens[start:] {
-			joined.WriteString(token)
-			if joined.Len() >= len(want) {
-				if joined.String() == want {
-					return true
-				}
-				break
-			}
-		}
-	}
-	return false
 }
 
 // asciiAlnums counts the ASCII letters and digits in s - a proxy for how much of

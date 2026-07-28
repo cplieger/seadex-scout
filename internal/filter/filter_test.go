@@ -140,6 +140,7 @@ func TestABVisible(t *testing.T) {
 		{"AB torrent-page relative URL hidden when off despite public label", "Nyaa", "/torrents.php?id=1&torrentid=2", false, false},
 		{"AB torrent-page relative URL visible when on", "Nyaa", "/torrents.php?id=1&torrentid=2", true, true},
 		{"schemeless AB torrent-page shape hidden when off", "Nyaa", "torrents.php?id=1&torrentid=2", false, false},
+		{"backslash-rooted AB relative URL hidden when off", "Nyaa", `\torrents.php?id=1&torrentid=2`, false, false},
 		{"schemeless AB URL hidden when off", "unknown", "animebytes.tv/torrents.php?id=1&torrentid=2", false, false},
 		{"schemeless AB subdomain URL hidden when off", "Nyaa", "cdn.animebytes.tv/t/1", false, false},
 		{"schemeless non-AB URL visible when off", "Nyaa", "nyaa.si/view/1", false, true},

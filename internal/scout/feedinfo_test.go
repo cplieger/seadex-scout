@@ -297,3 +297,33 @@ func TestFeedEntryInfoFribbTypingWinsOverMemoFormat(t *testing.T) {
 		t.Errorf("info(1).Title = %q, want the memo title (the record is not in the library)", got.Title)
 	}
 }
+
+// TestFeedEntryInfoLibraryHitKeepsSeriesTyping pins the precedence between
+// the library-hit early return and the memo-format typing tier: an UNTYPED
+// Fribb record (the tolerant decoder's shape, and an override omitting
+// `type`) still routes a positive TVDB id through RoutedIDs' series arm, so
+// it can HIT a Sonarr item - and that hit is the stronger typing evidence,
+// whatever format the memo carries. Re-typing such an entry from a memoized
+// MOVIE format would publish a show that is in Sonarr under Movies/2000,
+// where Sonarr (which filters on Anime/5070) never sees it - the inverse of
+// the l-f70 symptom. Every existing memo-format row has no library hit, so
+// hoisting applyMemoTyping above the early return passes all of them.
+func TestFeedEntryInfoLibraryHitKeepsSeriesTyping(t *testing.T) {
+	idx := mapping.NewIndex([]mapping.Record{{AniListID: 30, TvdbID: 555, SeasonTvdb: 2}})
+	lib := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 10, TvdbID: 555, Title: "Untyped But In Sonarr", Year: 2022},
+	}}
+	memo := match.Memo{Entries: map[int]match.MemoEntry{
+		30: {Titles: []string{"Memo Film Title"}, Year: 2019, Format: "MOVIE"},
+	}}
+	got := feedEntryInfo(idx, lib, memo)(30)
+	if got.Title != "Untyped But In Sonarr" || got.Year != 2022 {
+		t.Errorf("info(30) = %+v, want the Sonarr item's own title and year", got)
+	}
+	if got.IsMovie {
+		t.Errorf("info(30) = %+v, want IsMovie=false: a Sonarr library hit outranks a memo MOVIE format", got)
+	}
+	if got.Season != 2 || !got.SeasonKnown {
+		t.Errorf("info(30) = %+v, want the record's resolved season 2 intact", got)
+	}
+}

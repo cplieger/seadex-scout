@@ -200,8 +200,18 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor En
 	// must render the same item regardless of catalogue order (marker and
 	// categories are already order-independent folds below).
 	ordered := slices.Clone(refs)
+	// The order must be TOTAL, not just AniList-ascending: two occurrences of
+	// one journal key can share an AniList id (a duplicated trs relation row,
+	// or two catalogue records carrying the same alID), and a stable sort then
+	// leaves catalogue order deciding which one is synthesized - the exact
+	// dependency this sort exists to remove. URL then info hash breaks the tie
+	// on the torrent's own bytes.
 	slices.SortStableFunc(ordered, func(a, b curatedRef) int {
-		return cmp.Compare(a.entry.AniListID, b.entry.AniListID)
+		return cmp.Or(
+			cmp.Compare(a.entry.AniListID, b.entry.AniListID),
+			cmp.Compare(a.torrent.URL, b.torrent.URL),
+			cmp.Compare(a.torrent.InfoHash, b.torrent.InfoHash),
+		)
 	})
 	for _, occ := range ordered {
 		dl, resolved := downloadURL(occ.torrent.Tracker, occ.torrent.URL, w.abPasskey)
@@ -303,7 +313,7 @@ type journalStats struct {
 // warned under a DIFFERENT tracker key) is dropped (RSS must never keep
 // serving bytes search suppresses).
 func (p *journalPass) carryItem(it *journalItem, scope string) (journalItem, bool) {
-	if !prepareCarriedItem(it, p.now, p.js) {
+	if !p.prepareCarriedItem(it) {
 		return journalItem{}, false
 	}
 	if scopeOfKey(it.Key) != scope {
@@ -334,12 +344,22 @@ func (p *journalPass) carryItem(it *journalItem, scope string) (journalItem, boo
 // expiry phase, reporting whether the item is still carryable: a pre-journal
 // item with no Key or FirstSeen is dropped, a future FirstSeen is rebased,
 // and an item older than feedJournalMaxAge is pruned.
-func prepareCarriedItem(it *journalItem, now time.Time, js *journalStats) bool {
+func (p *journalPass) prepareCarriedItem(it *journalItem) bool {
 	if it.Key == "" || it.FirstSeen.IsZero() {
-		js.dropped++
+		p.js.dropped++
 		return false
 	}
-	if it.FirstSeen.After(now) {
+	// Normalize the persisted info hash before any consumer reads it. The
+	// warned-identity retraction (warnedSet.retracts) tests this value against
+	// ws.ids, a set built from validInfoHash output, so a non-canonical
+	// (upper-case hex) hash from a hand-edited snapshot slips past the
+	// retraction and keeps serving bytes search suppresses; the same value is
+	// served verbatim in the feed's infohash attr for a non-curated carried
+	// item (carryStoredItem). renderJournalItem is the only honest producer and
+	// it already stores validInfoHash output, so this is a no-op on every
+	// snapshot this binary wrote.
+	it.InfoHash = validInfoHash(it.InfoHash)
+	if it.FirstSeen.After(p.now) {
 		// A FirstSeen ahead of the wall clock (a clock rollback, or a
 		// snapshot restored from a future-skewed host) would make the
 		// max-age check below see a negative age and keep the item past the
@@ -347,11 +367,11 @@ func prepareCarriedItem(it *journalItem, now time.Time, js *journalStats) bool {
 		// across the clock correction while bounding its remaining lifetime
 		// to feedJournalMaxAge - and count the rebase for the snapshot log
 		// line.
-		rebaseFutureFirstSeen(it, now)
-		js.rebased++
+		rebaseFutureFirstSeen(it, p.now)
+		p.js.rebased++
 	}
-	if now.Sub(it.FirstSeen) > feedJournalMaxAge {
-		js.pruned++
+	if p.now.Sub(it.FirstSeen) > feedJournalMaxAge {
+		p.js.pruned++
 		return false
 	}
 	return true
@@ -438,6 +458,16 @@ func (p *journalPass) refreshCarriedItem(it *journalItem, refs []curatedRef) (jo
 			// passkey comes back the carried item is renderable again.
 			return p.carryStoredItem(it)
 		}
+		// The drop is PERMANENT: the never-pruned seen ledger still holds this
+		// identity, so growJournal can never re-admit the release even after the
+		// upstream record is corrected. journal_dropped on the snapshot line is
+		// an aggregate over four causes, so name the release the way the two
+		// sibling drop gates do (carryItem's scope-mismatch line and
+		// carryStoredItem's guid-identity line) - otherwise this cause, the only
+		// one reachable from honest upstream data, is the one an operator cannot
+		// attribute.
+		p.w.log.Debug("indexer journal item dropped: still curated but no longer renderable",
+			"key", it.Key, "cause", "render-unresolvable")
 		p.js.dropped++
 		return journalItem{}, false
 	}
@@ -581,8 +611,7 @@ func (p *journalPass) journalIfNew(t *seadex.Torrent) (it journalItem, scope str
 }
 
 // newJournalItem resolves one newly curated torrent into its journal item and
-// scope, updating the skip counters when it cannot be served: a non-Nyaa/AB
-// tracker (the negligible SeaDex tail) is silently ignored, an unconfigured
+// scope, updating the skip counters when it cannot be served: an unconfigured
 // tracker (Nyaa or AnimeBytes without its Torznab URL) is skipped without
 // persisting anything for it (the README's off switch; its identity is
 // already in seen, so enabling it later starts from current novelty instead

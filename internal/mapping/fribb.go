@@ -155,15 +155,6 @@ type fribbParseResult struct {
 	elements int
 }
 
-// parseFribb decodes the Fribb list resiliently, returning only the surviving
-// records. It is the stable surface the parser tests and fuzz targets
-// exercise; the refresh acceptance path uses parseFribbForRefresh to also
-// observe the top-level element count.
-func parseFribb(data []byte, log *slog.Logger) ([]Record, error) {
-	parsed, err := parseFribbForRefresh(data, log)
-	return parsed.records, err
-}
-
 // parseFribbForRefresh decodes the Fribb list resiliently: it streams the
 // top-level array element by element (never materializing all raw messages at
 // once, so a bounded body of tiny elements cannot amplify into a huge
@@ -250,6 +241,13 @@ func logFribbParseDiagnostics(log *slog.Logger, counts *fribbDecodeCounts) {
 	if counts.elements >= maxFribbRecords/4*3 {
 		log.Warn("mapping: Fribb list approaching record cap", "elements", counts.elements, "cap", maxFribbRecords)
 	}
+	// Same advance-notice contract as the record cap above: since the
+	// aggregate identifier budget became a whole-document refusal
+	// (errIdentifierBudgetExceeded), a breach never self-heals either, so
+	// warn while refreshes still succeed.
+	if counts.identifiers >= maxFribbIdentifiersTotal/4*3 {
+		log.Warn("mapping: Fribb identifiers approaching budget", "identifiers", counts.identifiers, "cap", maxFribbIdentifiersTotal)
+	}
 }
 
 // decodeFribbRecords streams the array body element-by-element, decoding each
@@ -275,14 +273,10 @@ func decodeFribbRecords(dec *bounded.Decoder) (fribbDecodeCounts, error) {
 		if streamErr != nil {
 			return fribbDecodeCounts{}, streamErr
 		}
-		counts.add(&rec, ok, decodeErr)
-		if counts.overBudget > 0 {
-			// The aggregate identifier budget is a whole-document guarantee,
-			// not a per-record tolerance: once it trips, every following
-			// record would be dropped too, so retaining the prefix would
-			// publish a knowably truncated map. Fail closed at the point the
-			// budget trips and let acceptRefresh keep the stale cache.
-			return fribbDecodeCounts{}, errIdentifierBudgetExceeded
+		if err := counts.add(&rec, ok, decodeErr); err != nil {
+			// Fail closed at the point the budget trips and let acceptRefresh
+			// keep the stale cache.
+			return fribbDecodeCounts{}, err
 		}
 	}
 	return counts, nil
@@ -305,43 +299,40 @@ type fribbDecodeCounts struct {
 	skipped     int
 	dropped     int
 	identifiers int
-	// overBudget counts records refused by maxFribbIdentifiersTotal. It is
-	// separate from skipped because the remedy differs: a malformed record
-	// is an upstream data defect, while an exhausted budget is an app-side
-	// ceiling. A nonzero value is FATAL to the whole document (the decode
-	// loop returns errIdentifierBudgetExceeded as soon as it goes above
-	// zero), so it never exceeds one and is never reported as a tolerated
-	// per-record outcome.
-	overBudget int
 }
 
 // add folds one record's decode outcome in: a tolerated decode failure counts
 // as skipped (keeping the first error for the warning), a record without an
 // AniList ID counts as dropped, a record whose identifiers would exceed the
-// aggregate maxFribbIdentifiersTotal budget counts as overBudget (which the
-// decode loop turns into a whole-document refusal, since the remedy is not an
-// upstream data fix), and anything
+// aggregate maxFribbIdentifiersTotal budget returns errIdentifierBudgetExceeded
+// (fatal to the whole document, since the remedy is not an upstream data fix),
+// and anything
 // else is accepted. rec is taken by pointer only because Record is a heavy
 // value (gocritic hugeParam); it is never retained.
-func (c *fribbDecodeCounts) add(rec *Record, ok bool, decodeErr error) {
+func (c *fribbDecodeCounts) add(rec *Record, ok bool, decodeErr error) error {
 	if decodeErr != nil {
 		c.skipped++
 		if c.firstErr == nil {
 			c.firstErr = decodeErr
 		}
-		return
+		return nil
 	}
 	if !ok {
 		c.dropped++
-		return
+		return nil
 	}
 	n := len(rec.IMDbIDs) + len(rec.TmdbMovies)
 	if c.identifiers+n > maxFribbIdentifiersTotal {
-		c.overBudget++
-		return
+		// The aggregate identifier budget is a whole-document guarantee, not
+		// a per-record tolerance: once it trips, every following record would
+		// be dropped too, so retaining the prefix would publish a knowably
+		// truncated map. Returned rather than counted, so the fatal outcome
+		// cannot be folded in and forgotten.
+		return errIdentifierBudgetExceeded
 	}
 	c.identifiers += n
 	c.records = append(c.records, *rec)
+	return nil
 }
 
 // decodeNextFribbRecord reads the next array element off the stream and
@@ -382,9 +373,12 @@ func decodeFribbRecord(msg json.RawMessage) (Record, bool, error) {
 // field shares the shape but is likewise not decoded - no consumer reads it).
 // It sits inside the record's tolerance boundary: the object itself decodes
 // tolerantly and the interior id reuses flexInt, so an odd upstream season
-// shape (a bare number, a quoted interior value, a float) zeroes the field -
-// SeasonTvdb 0 falls back to whole-series/season-0 scoping - while the record
-// survives.
+// SHAPE (a bare number, a string, an array - anything that is not an object)
+// zeroes the field - SeasonTvdb 0 falls back to whole-series/season-0 scoping
+// - while the record survives. flexInt's interior tolerance is narrower than
+// the object's: a quoted or integral-float value ("2", " 2 ", 2.0) still
+// decodes to that season, and only a fractional or out-of-range one (1.5,
+// negative) zeroes.
 type seasonObject struct {
 	Tvdb flexInt `json:"tvdb"`
 }
@@ -446,9 +440,13 @@ func (s *flexString) UnmarshalJSON(b []byte) error {
 // still matches via tvdb_id). Any other shape (the "unknown" string that
 // appears in some upstream rows) is tolerated and left empty.
 type tmdbID struct {
-	Movie []flexInt `json:"movie"`
+	// Movie holds the object form's movie ids. Neither field carries a json
+	// tag: UnmarshalJSON below owns the whole decode (the movie member is
+	// captured through a local json.RawMessage wire struct), so a tag here
+	// would be inert and would misdescribe the mechanism.
+	Movie []flexInt
 	// Scalar is the retained bare-number form; consumed only via movieIDs.
-	Scalar flexInt `json:"-"`
+	Scalar flexInt
 }
 
 // UnmarshalJSON decodes the object form, retains a numeric scalar as Scalar

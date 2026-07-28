@@ -615,7 +615,7 @@ func TestSharedUpstreamsKeepConsumerWarningsIndependent(t *testing.T) {
 // warm snapshot load: while the load is still running it owns the cache's reload
 // gate, so a request that entered refresh would block for as long as the
 // filesystem does (net/http's WriteTimeout cannot cancel a handler) and would
-// hold a query/feed slot while doing it. warmSnapshot must stop WAITING at
+// hold a query/feed slot while doing it. cache.warm must stop WAITING at
 // warmLoadTimeout, and every request arriving before the load returns must be
 // answered with the snapshot-unavailable Torznab fault immediately - then serve
 // normally once the loader completes. The wedged load is simulated by holding the
@@ -630,7 +630,8 @@ func TestWedgedWarmLoadFaultsInsteadOfParkingRequests(t *testing.T) {
 	warmLoadTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { warmLoadTimeout = prev })
 
-	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, nil, Upstreams{})
+	log, rec := capture.New()
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, log, Upstreams{})
 	// The warm loader is wedged inside refresh: it holds the reload gate and has
 	// not published a snapshot.
 	if !ix.cache.tryLockReload() {
@@ -638,11 +639,17 @@ func TestWedgedWarmLoadFaultsInsteadOfParkingRequests(t *testing.T) {
 	}
 
 	warmed := make(chan struct{})
-	go func() { defer close(warmed); ix.warmSnapshot() }()
+	go func() { defer close(warmed); ix.cache.warm(context.Background()) }()
 	select {
 	case <-warmed:
 	case <-time.After(5 * time.Second):
-		t.Fatal("warmSnapshot still waiting on a wedged load; want the wait bounded by warmLoadTimeout")
+		t.Fatal("cache.warm still waiting on a wedged load; want the wait bounded by warmLoadTimeout")
+	}
+	// The WARN is the only signal that startup stopped waiting and began serving
+	// without the persisted snapshot; unasserted, it can be deleted or dropped to
+	// Debug with the whole suite still green.
+	if got := rec.CountLevel(slog.LevelWarn, "feed snapshot warm load still running"); got != 1 {
+		t.Errorf("warm-load timeout WARN count = %d, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
 	}
 
 	served := make(chan *torznabFault, 1)
@@ -661,7 +668,7 @@ func TestWedgedWarmLoadFaultsInsteadOfParkingRequests(t *testing.T) {
 
 	// The loader completes: requests resume the normal refresh path.
 	ix.cache.unlockReload()
-	<-ix.warmDone
+	<-ix.cache.warmDone
 	items, _, fault := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
 	if fault != nil {
 		t.Fatalf("post-warm fault = %+v, want none", fault)
@@ -1317,7 +1324,7 @@ func TestApplyPaging(t *testing.T) {
 // TestParsePubDate pins the Torznab <pubDate> parser on the untrusted upstream
 // date string: each supported layout parses to the same instant, and any empty,
 // whitespace-only, or unparseable value yields the zero time (the failure signal
-// writeItem keys on to omit the pubDate element).
+// writeItem keys on to substitute the epoch for the pubDate element).
 func TestParsePubDate(t *testing.T) {
 	want := time.Date(2026, time.July, 6, 12, 0, 0, 0, time.UTC)
 	for _, tc := range []struct{ name, in string }{

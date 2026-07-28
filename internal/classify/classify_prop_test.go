@@ -22,7 +22,7 @@ import (
 // half the lower-middle length does, a pool with no positive median is kept
 // whole, and the census never excludes a file the primary-payload rule keeps (a
 // median can never exceed a maximum, so its floor can never sit above
-// PayloadFiles').
+// payloadFiles').
 func TestPopulationFilesProperty(t *testing.T) {
 	baseGen := rapid.SampledFrom([]string{"", "a.mkv", "b.mkv", "NCED [BDRemux].mkv", "movie.iso", "sub.ass"})
 	lenGen := rapid.Int64Range(math.MinInt64, math.MaxInt64)
@@ -101,7 +101,7 @@ func TestPopulationFilesProperty(t *testing.T) {
 				t.Fatalf("PopulationFiles(%+v) = %v, want the whole eligible pool %v when the median length is not positive", files, got, poolNames)
 			}
 		}
-		for _, name := range censusNames(PayloadFiles(files)) {
+		for _, name := range censusNames(payloadFiles(files)) {
 			if !slices.Contains(got, name) {
 				t.Fatalf("PopulationFiles(%+v) = %v, excludes the payload file %q: the census floor must never sit above the payload floor", files, got, name)
 			}
@@ -175,7 +175,7 @@ func TestPayloadNamesProperty(t *testing.T) {
 			}
 		}
 
-		got := PayloadNames(files)
+		got := payloadNames(files)
 
 		// (1) In-order subsequence of the eligible pool.
 		j := 0
@@ -184,7 +184,7 @@ func TestPayloadNamesProperty(t *testing.T) {
 				j++
 			}
 			if j == len(poolNames) {
-				t.Fatalf("PayloadNames(%+v) = %v, not an in-order subsequence of the eligible pool %v", files, got, poolNames)
+				t.Fatalf("payloadNames(%+v) = %v, not an in-order subsequence of the eligible pool %v", files, got, poolNames)
 			}
 			j++
 		}
@@ -192,20 +192,20 @@ func TestPayloadNamesProperty(t *testing.T) {
 			for i := range pool {
 				// (2) Every maximum-length pool file survives.
 				if pool[i].Length == maxLength && !slices.Contains(got, pool[i].Name) {
-					t.Fatalf("PayloadNames(%+v) = %v, dropped the primary payload %q", files, got, pool[i].Name)
+					t.Fatalf("payloadNames(%+v) = %v, dropped the primary payload %q", files, got, pool[i].Name)
 				}
 				// (3) A pool file under the ceil-half primary threshold never
 				// survives - the same bound FuzzPayloadNames asserts, so the two
 				// twins cannot document different rules (a floor-half bound lets
 				// an odd-maximum off-by-one slip past this property).
 				if pool[i].Length < maxLength/2+maxLength%2 && slices.Contains(got, pool[i].Name) {
-					t.Fatalf("PayloadNames(%+v) = %v, kept the sub-primary extra %q (len %d vs max %d)", files, got, pool[i].Name, pool[i].Length, maxLength)
+					t.Fatalf("payloadNames(%+v) = %v, kept the sub-primary extra %q (len %d vs max %d)", files, got, pool[i].Name, pool[i].Length, maxLength)
 				}
 			}
 		}
 		// (4) No positive length in the pool: the whole pool is kept.
 		if maxLength <= 0 && !slices.Equal(got, poolNames) {
-			t.Fatalf("PayloadNames(%+v) = %v, want the whole eligible pool %v when no pool file has a positive length", files, got, poolNames)
+			t.Fatalf("payloadNames(%+v) = %v, want the whole eligible pool %v when no pool file has a positive length", files, got, poolNames)
 		}
 	})
 }

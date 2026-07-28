@@ -12,8 +12,10 @@ import (
 // or corrupted snapshots). Invariants: decode never panics, always returns an
 // allocated Pages map (callers write into it), every kept page is positive
 // and below the offset-overflow bound (a poisoned page must never survive
-// into the offset multiplication), and one decode/encode round is a fixpoint
-// whenever the checkpoint is representable (Pages non-empty, or a Last that
+// into the offset multiplication), the encoded cursor never exceeds
+// maxPersistedCursorBytes (the reader discards an over-cap cursor whole), and
+// one decode/encode round is a fixpoint whenever the checkpoint is
+// representable (the encode rendered the JSON object form, or a Last that
 // does not itself look like JSON - the one legacy-form ambiguity, unreachable
 // for production "scope:alID" cursors).
 func FuzzHarvestCheckpointCodec(f *testing.F) {
@@ -26,7 +28,7 @@ func FuzzHarvestCheckpointCodec(f *testing.F) {
 	f.Add(`{"pages":{"nyaa:7":92233720368547758}}`)
 	f.Add("  {not json")
 	f.Fuzz(func(t *testing.T, raw string) {
-		cp := decodeHarvestCheckpoint(raw)
+		cp, _ := decodeHarvestCheckpoint(raw)
 		if cp.Pages == nil {
 			t.Fatalf("decodeHarvestCheckpoint(%q).Pages = nil, want an allocated map", raw)
 		}
@@ -37,8 +39,13 @@ func FuzzHarvestCheckpointCodec(f *testing.F) {
 					raw, key, page, maxSafePage)
 			}
 		}
-		if len(cp.Pages) > 0 || !strings.HasPrefix(strings.TrimSpace(cp.Last), "{") {
-			again := decodeHarvestCheckpoint(encodeHarvestCheckpoint(cp))
+		encoded := encodeHarvestCheckpoint(cp)
+		if len(encoded) > maxPersistedCursorBytes {
+			t.Fatalf("encodeHarvestCheckpoint produced %d bytes, want <= %d (the reader discards an over-cap cursor whole)",
+				len(encoded), maxPersistedCursorBytes)
+		}
+		if (len(cp.Pages) > 0 && len(encoded) > 0 && encoded[0] == '{') || !strings.HasPrefix(strings.TrimSpace(cp.Last), "{") {
+			again, _ := decodeHarvestCheckpoint(encoded)
 			if again.Last != cp.Last || !maps.Equal(again.Pages, cp.Pages) {
 				t.Fatalf("codec not a fixpoint: decode(%q) = %+v, re-round-trip gives %+v", raw, cp, again)
 			}
@@ -81,7 +88,7 @@ func FuzzMatchHarvest_cacheHygiene(f *testing.F) {
 		titles := map[string]string{"nyaa:43": "Already Harvested"}
 		before := maps.Clone(titles)
 
-		n, rejected, pendingRejected := matchHarvest([]item{{Title: title, InfoURL: infoURL, GUID: guid, InfoHash: hash}},
+		n, rejected, pendingRejected, _ := matchHarvest([]item{{Title: title, InfoURL: infoURL, GUID: guid, InfoHash: hash}},
 			upstreamNyaa, index, titles, nil, []string{"nyaa:42", "nyaa:43", "ab:300"})
 
 		// The pending grade is a SUBSET of the rejections (harvest.go's
@@ -125,7 +132,7 @@ func FuzzMatchHarvest_cacheHygiene(f *testing.F) {
 		trimmed := strings.TrimSpace(title)
 		admissible := trimmed != "" && len(trimmed) <= harvestMaxTitleLen
 		fresh := map[string]string{}
-		got, _, _ := matchHarvest([]item{{Title: title, InfoURL: "https://nyaa.si/view/42"}}, upstreamNyaa, index, fresh, nil, nil)
+		got, _, _, _ := matchHarvest([]item{{Title: title, InfoURL: "https://nyaa.si/view/42"}}, upstreamNyaa, index, fresh, nil, nil)
 		if admissible {
 			if got != 1 || fresh["nyaa:42"] != trimmed {
 				t.Fatalf("matchHarvest(canonical identity, title %q) = %d matches caching %q, want it admitted as %q",

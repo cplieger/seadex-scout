@@ -86,11 +86,7 @@ func storedFinding(f *compare.Finding) StoredFinding {
 // the helper is idempotent, so re-bounding a record carried forward from legacy
 // state by capStored is a no-op.
 func capPersisted(s string) string {
-	capped := capAttr(s)
-	if len(capped) <= maxAttrBytes {
-		return capped
-	}
-	return runesafe.CapBytes(capped, maxAttrBytes-len(attrTruncMarker)) + attrTruncMarker
+	return reboundAttr(capAttr(s))
 }
 
 // capStored re-bounds a record read back from a state file written before
@@ -345,32 +341,32 @@ const attrTruncMarker = logattr.TruncMarker
 // joinGroupsAttr / joinLinksAttr instead (see findingKVs).
 func capAttr(s string) string { return logattr.Cap(s) }
 
-// mdLinkEscaper percent-encodes the characters an untrusted URL must not
-// carry into a Markdown link destination. The shipped alerts.yaml renders
-// arr_url / nyaa_url / public_url / ab_url as `[label](<attr>)` for
-// Discord/Slack, so a ')' (or a space runesafe.Sanitize substituted for a
-// hostile rune) closes the destination early and the remainder of the
-// value renders as attacker-authored markdown. Same policy as
-// internal/audit's escapeLinkURL - which deliberately leaves '[' and ']'
-// alone, and so does this one: they are not destination delimiters, but they
-// are required syntax around an IPv6 literal host, so encoding them would
-// break a legitimate arr deep link (http://[fd00::1]:8989/...).
-var mdLinkEscaper = strings.NewReplacer(
-	" ", "%20", "\t", "%09", "\\", "%5C", "`", "%60", `"`, "%22", "'", "%27",
-	"\v", "%0B", "\f", "%0C", "(", "%28", ")", "%29", "<", "%3C", ">", "%3E",
-	"|", "%7C", "\n", "%0A", "\r", "%0D",
-)
+// reboundAttr re-applies the per-attribute byte budget to a value a
+// post-cap transform may have grown: capAttr's own output can be
+// maxAttrBytes+len(attrTruncMarker) once the marker is appended, and both
+// Markdown escapers expand the value they walk. An in-budget value passes
+// through unchanged, so an honest value stays byte-identical, and the
+// marker arithmetic has one home.
+func reboundAttr(s string) string {
+	if len(s) <= maxAttrBytes {
+		return s
+	}
+	return runesafe.CapBytes(s, maxAttrBytes-len(attrTruncMarker)) + attrTruncMarker
+}
 
 // capURLAttr renders one untrusted URL attribute: capAttr's bounded,
 // sanitized pass first (so the escaper never walks an unbounded string),
 // then the link-destination escaping, then a re-cap because escaping can
 // grow the value - the same shape capPersisted uses.
+//
+// The escaping itself lives in logattr.EscapeLinkDestination, the one home it
+// shares with internal/audit's escapeLinkURL: the shipped alerts.yaml renders
+// arr_url / nyaa_url / public_url / ab_url as `[label](<attr>)` for
+// Discord/Slack, so a ')' (or a space runesafe.Sanitize substituted for a
+// hostile rune) would close the destination early and the remainder of the
+// value would render as attacker-authored markdown.
 func capURLAttr(s string) string {
-	escaped := mdLinkEscaper.Replace(capAttr(s))
-	if len(escaped) <= maxAttrBytes {
-		return escaped
-	}
-	return runesafe.CapBytes(escaped, maxAttrBytes-len(attrTruncMarker)) + attrTruncMarker
+	return reboundAttr(logattr.EscapeLinkDestination(capAttr(s)))
 }
 
 // mdTextEscaper neutralizes the characters an untrusted TEXT value must not
@@ -383,13 +379,23 @@ func capURLAttr(s string) string {
 // output encoding). CommonMark/Discord punctuation is backslash-escaped
 // (including '@', which is how Discord suppresses an @everyone / @here
 // mention), and '&', '<', '>' are entity-encoded because Slack mrkdwn treats
-// them as markup and '<@U123>' is a Slack mention. Unlike mdLinkEscaper this
+// them as markup and '<@U123>' is a Slack mention. Unlike
+// logattr.EscapeLinkDestination this
 // is for a text SPAN, not a link destination, so '[' and ']' ARE escaped -
-// there is no IPv6-literal case to preserve here.
+// there is no IPv6-literal case to preserve here. It also flattens CR/LF,
+// which capAttr's raw label deliberately keeps.
 var mdTextEscaper = strings.NewReplacer(
 	"\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "[", "\\[", "]", "\\]",
 	"(", "\\(", ")", "\\)", "~", "\\~", "|", "\\|", "@", "\\@",
 	"&", "&amp;", "<", "&lt;", ">", "&gt;",
+	// CR/LF survive capAttr on purpose (runesafe.Sanitize is the
+	// keepCRLF=true policy, because the JSON slog handler escapes them for
+	// its own sink), but the annotation body is a single line: a newline
+	// re-opens the line-start constructs inline escaping cannot reach (a
+	// '#' heading, a list bullet, an auto-linked bare URL). They collapse
+	// to a space, matching logattr.EscapeLinkDestination's percent-encoding
+	// of both.
+	"\r", " ", "\n", " ",
 )
 
 // capAlertTextAttr renders one untrusted text attribute for a MARKDOWN sink:
@@ -399,11 +405,7 @@ var mdTextEscaper = strings.NewReplacer(
 // of capAttr: the raw capAttr label stays for Loki search and grouping, and
 // this value is what an annotation interpolates.
 func capAlertTextAttr(s string) string {
-	escaped := mdTextEscaper.Replace(capAttr(s))
-	if len(escaped) <= maxAttrBytes {
-		return escaped
-	}
-	return runesafe.CapBytes(escaped, maxAttrBytes-len(attrTruncMarker)) + attrTruncMarker
+	return reboundAttr(mdTextEscaper.Replace(capAttr(s)))
 }
 
 // findingKVs builds the structured key-value attributes for a finding line.
@@ -457,7 +459,15 @@ func findingKVs(f *compare.Finding) []any {
 		// calling it Nyaa (l-f5).
 		"nyaa_url", capURLAttr(publicLink.nyaaURL()),
 		"public_url", capURLAttr(publicLink.otherURL()),
-		"public_tracker", capAttr(publicLink.otherTracker()),
+		// public_tracker is interpolated INSIDE a Markdown link label
+		// ([{{ public_tracker }}]({{ public_url }})), so it takes the
+		// markup-safe render rather than capAttr: canonicalTracker's
+		// bare-host last resort can return a value carrying ']' or '(',
+		// which would close the label early. No alert_* twin is needed -
+		// every honest value (a canonical tracker name or a hostname)
+		// passes the escaper byte-identical, so the Loki grouping label
+		// is unchanged.
+		"public_tracker", capAlertTextAttr(publicLink.otherTracker()),
 		"ab_url", capURLAttr(abURL),
 		"info_hash", capAttr(f.InfoHash),
 		"seadex_tags", seadexTags(f),

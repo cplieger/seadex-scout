@@ -26,3 +26,33 @@ func TestNormalize(t *testing.T) {
 		})
 	}
 }
+
+// TestContainsKey pins the two arms of the containment test the indexer's title
+// harvest reads: a key of real length keeps the punctuation-tolerant normalized
+// substring, while a SHORT key needs boundary evidence - an exact match against
+// a run of the candidate's own alphanumeric tokens - so ordinary release
+// metadata ("Remux", "x265") cannot satisfy it.
+func TestContainsKey(t *testing.T) {
+	tests := []struct {
+		name      string
+		candidate string
+		want      string
+		match     bool
+	}{
+		{"long key matches across decoration", "[Grp] Sousou no Frieren - S01 (BD 1080p)", "sousounofrieren", true},
+		{"long key absent", "[Grp] Some Other Show - S01 (BD 1080p)", "sousounofrieren", false},
+		{"long key spanning separators", "[Grp] 86 - Eighty Six - S01", "86eightysix", true},
+		{"short key as its own token", "[Grp] X - S01 (BD 1080p)", "x", true},
+		{"short key inside release metadata is refused", "[Grp] Show - S01 (BD Remux 1080p x265)", "x", false},
+		{"short key across adjacent tokens", "[Grp] A B - S01", "ab", true},
+		{"short key needs an exact token run", "[Grp] Abc - S01", "ab", false},
+		{"empty candidate never matches a short key", "", "x", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ContainsKey(tt.candidate, tt.want); got != tt.match {
+				t.Errorf("ContainsKey(%q, %q) = %v, want %v", tt.candidate, tt.want, got, tt.match)
+			}
+		})
+	}
+}

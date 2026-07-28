@@ -148,18 +148,26 @@ func writeItem(b *strings.Builder, it *item) {
 	if it.InfoURL != "" {
 		writeText(b, "comments", it.InfoURL)
 	}
-	if !it.PubDate.IsZero() {
-		writeText(b, "pubDate", it.PubDate.UTC().Format(time.RFC1123Z))
+	// Always render pubDate: Sonarr's RSS parser rejects the WHOLE response
+	// when any item lacks the element (UnsupportedFeedException), so omitting
+	// it turns one unparseable upstream date into an empty search answer. A
+	// search-path item whose upstream <pubDate> did not parse arrives with the
+	// zero time (parsePubDate); the epoch stands in for "date unknown" -
+	// deterministic, always parseable by the arrs, and honest, since it claims
+	// no freshness the feed cannot vouch for (the synthesized RSS path always
+	// carries the journal's FirstSeen, so it never takes this branch).
+	pub := it.PubDate
+	if pub.IsZero() {
+		pub = time.Unix(0, 0)
 	}
+	writeText(b, "pubDate", pub.UTC().Format(time.RFC1123Z))
 	// Clamp like the peer counts below: render-side validation is the final
-	// totality guard for direct/live item values, independent of persistence
-	// and parse normalization. toItem and totalSize normalize at their own
-	// ingresses and validPersistedItem re-checks the persisted domain
-	// (non-negative size/peer counts, positive category ids), but a
-	// search-path item is rendered directly and never passes any of those
-	// gates - so an unclamped value here could still render a negative
-	// enclosure length/size attr or a non-positive category id, contradicting
-	// toItem's normalization.
+	// totality guard, independent of which ingress produced the item. Each
+	// producer normalizes its own domain - toItem clamps a parsed search
+	// result, totalSize plus validPersistedItem cover the persisted journal -
+	// but no single gate covers both paths, so an item reaching the renderer
+	// with a negative size or a non-positive category id must not render an
+	// invalid enclosure length/size attr or an invalid Torznab category id.
 	size := max(it.Size, 0)
 	if it.DownloadURL != "" {
 		b.WriteString(`<enclosure url="`)
@@ -585,7 +593,17 @@ func (x *itemXML) decodeSizeField(d *xml.Decoder) error {
 	if err != nil {
 		return asLimitError(err)
 	}
-	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	text := strings.TrimSpace(s)
+	if text == "" {
+		// Mirror encoding/xml's own numeric conversion, which treats an
+		// EMPTY value as zero (copyValue's len(src) == 0 arm): an
+		// <size></size> element must degrade into the zero-as-unknown
+		// domain itemSize already falls back through, not fail the whole
+		// response and cost every other curated item in it.
+		x.Size = 0
+		return nil
+	}
+	n, err := strconv.ParseInt(text, 10, 64)
 	if err != nil {
 		return err
 	}
@@ -653,7 +671,15 @@ func (x *itemXML) boundedInt64(s string) (int64, error) {
 	if err := x.account(s); err != nil {
 		return 0, err
 	}
-	return strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	text := strings.TrimSpace(s)
+	if text == "" {
+		// Same empty-is-zero mirror as decodeSizeField: an
+		// <enclosure length=""/> decoded as zero before this manual
+		// decoder replaced the struct unmarshal, and itemSize treats a
+		// zero length as unknown and falls through.
+		return 0, nil
+	}
+	return strconv.ParseInt(text, 10, 64)
 }
 
 // decodeField decodes one text child into dst, bounded and charged as it

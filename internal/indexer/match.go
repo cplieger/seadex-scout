@@ -327,14 +327,19 @@ func animeBytesID(rawURL string) string {
 // fails closed exactly like a non-numeric id.
 const maxTrackerIDDigits = 20
 
-// extractID returns the token in rawURL immediately after needle, up to the
+// extractID returns the token in path immediately after needle, up to the
 // next URL delimiter (?, #, /, &). It returns "" unless the token is a valid
 // tracker id (validTrackerID: a non-empty, width-bounded run of ASCII digits
 // in canonical decimal form - no leading zero except the single value "0"),
 // so a malformed or unexpected URL never yields a bogus key (adopted
 // from seadexerr's id extraction).
-func extractID(rawURL, needle string) string {
-	_, after, found := strings.Cut(rawURL, needle)
+//
+// path is a URL PATH, never a raw URL: this is a plain substring scan, so a
+// raw URL would let a needle inside a query value or fragment
+// ("?next=/view/123") mint the torrent id - the smuggling both callers anchor
+// against by extracting from u.EscapedPath() only.
+func extractID(path, needle string) string {
+	_, after, found := strings.Cut(path, needle)
 	if !found {
 		return ""
 	}

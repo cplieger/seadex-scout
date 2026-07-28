@@ -172,12 +172,13 @@ type torznabFault struct {
 // snapshotUnavailableFault is the one fault for "no snapshot to serve from",
 // raised both while the startup warm load is still running and after a load
 // fault before any successful install. Single-homed so the two conditions cannot
-// drift into two different wire messages for the same operator situation.
+// drift into two different wire messages, so the detail names BOTH states rather
+// than asserting a failure the still-loading case has not had.
 func snapshotUnavailableFault() *torznabFault {
 	return &torznabFault{
 		summary: "feed snapshot unavailable",
 		code:    errCodeUnknown,
-		detail:  "feed snapshot unavailable: the persisted SeaDex feed failed to load; results unavailable until a snapshot loads",
+		detail:  "feed snapshot unavailable: the persisted SeaDex feed has not finished loading, or failed to load; results unavailable until a snapshot loads",
 	}
 }
 
@@ -226,8 +227,9 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 	// entering refresh here would park this request on that gate while it holds
 	// a query/feed slot, since net/http's WriteTimeout cannot cancel a handler.
 	// Answer the snapshot-unavailable fault immediately instead, so the arr sees
-	// a fault it can back off from rather than a hung request (see warmPending).
-	if ix.warmPending() {
+	// a fault it can back off from rather than a hung request (see
+	// snapshotCache.warmPending).
+	if ix.cache.warmPending() {
 		return nil, queryStats{answered: true}, snapshotUnavailableFault()
 	}
 	// Pick up a newer feed snapshot a cycle may have written (this process's
@@ -274,8 +276,15 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 		}
 	}
 
-	items = filterByCats(items, parseCats(q.Get("cat")))
 	if stats.feed {
+		// The category filter applies to the SYNTHESIZED feed only: those items
+		// carry the app's own Fribb-typed vocabulary (categoriesFor - Movies for a
+		// film, Anime otherwise), so the client's cat list is meaningful against
+		// them. Proxied search results carry the TRACKER's categories instead -
+		// both proxied trackers are anime trackers, so a film arrives as Anime
+		// 5070 - and cat was already forwarded upstream (upstreamParams), so
+		// re-filtering here would empty every Movies-category search.
+		items = filterByCats(items, parseCats(q.Get("cat")))
 		items = applyPaging(ix.log, items, q)
 	}
 	if len(items) > maxItems {
@@ -413,6 +422,14 @@ func (ix *Indexer) fetchRaw(ctx context.Context, params url.Values, scope string
 			// Caller (the arr) went away or its request deadline fired; not an
 			// upstream fault. A Prowlarr HTTP client timeout leaves ctx.Err()
 			// nil and should warn.
+			//
+			// Say so at Debug: the empty-and-not-failed return is otherwise
+			// indistinguishable from a genuine no-match in the request INFO
+			// line (upstream_fetched=0 upstream=0 curated=0), and this is the
+			// longest abandonment window of the three - its two siblings, the
+			// gate wait and the response write, each already record one.
+			ix.log.Debug("upstream query abandoned by the caller; returning empty",
+				"upstream", u.name, "scope", scope)
 			return nil, 0, false
 		}
 		ix.log.Warn("upstream query failed", "upstream", u.name, "error", err)

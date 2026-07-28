@@ -4,12 +4,14 @@
 // rune-sanitization pass, and the cap-before-sanitize order that makes the
 // budget bound the WORK rather than just the output.
 //
-// Both slog emitters consume it - the daemon's notification path
-// (internal/notify) and the season report's per-row lines (internal/audit) -
-// because the primitive is security-sensitive (CWE-400: SeaDex admits up to
-// 512 torrents per entry, each with a multi-MB group name or URL) and a
-// sanitization, invalid-UTF-8, truncation, or allocation-bound fix must not
-// have to be reproduced in two packages.
+// Every slog emitter of upstream-derived text consumes it - the daemon's
+// notification path (internal/notify), the season report's per-row lines
+// (internal/audit), the matcher's ambiguous-title-fallback line
+// (internal/match) and the walker's per-series failure warning
+// (internal/library) - because the primitive is security-sensitive (CWE-400:
+// SeaDex admits up to 512 torrents per entry, each with a multi-MB group name
+// or URL) and a sanitization, invalid-UTF-8, truncation, or allocation-bound
+// fix must not have to be reproduced in four packages.
 //
 // It is a dependency-free leaf: only runesafe (the shared rune policy) and the
 // stdlib.
@@ -28,10 +30,15 @@ import (
 //
 // The bound is PER ATTRIBUTE, not per record: a record's worst case is its
 // untrusted-attribute count times this budget plus one TruncMarker each
-// (notify.findingKVs emits 14 such attributes, so ~112 KiB). Adding an
-// untrusted attribute therefore raises the record ceiling, and past the log
-// pipeline's line limit the WHOLE record is dropped - suppressing the very
-// finding an alert keys on. Check the record budget when adding one.
+// (notify.findingKVs emits 16 such attributes, so ~128 KiB of attribute
+// VALUES), and the JSON sink can double that on the wire - Sanitize keeps CR
+// and LF (the keepCRLF policy a JSON encoder needs) and slog's
+// appendEscapedJSONString expands each CR, LF, '"' and '\\' into two bytes,
+// so a control-dense value emits at up to twice its capped size (~256 KiB per
+// record). Adding an untrusted attribute therefore raises the record ceiling,
+// and past the log pipeline's line limit the WHOLE record is dropped -
+// suppressing the very finding an alert keys on. Check the record budget when
+// adding one.
 //
 // It is declared here rather than imported so this package stays a
 // dependency-free leaf; keyenc's constant is the sibling value it is kept
@@ -54,6 +61,29 @@ func Cap(s string) string {
 	j.Write(s)
 	return j.String()
 }
+
+// linkDestEscaper backs EscapeLinkDestination; built once, safe for
+// concurrent use.
+var linkDestEscaper = strings.NewReplacer(
+	" ", "%20", "\t", "%09", "\\", "%5C", "`", "%60", `"`, "%22", "'", "%27",
+	"\v", "%0B", "\f", "%0C", "(", "%28", ")", "%29", "<", "%3C", ">", "%3E",
+	"|", "%7C", "\n", "%0A", "\r", "%0D",
+)
+
+// EscapeLinkDestination percent-encodes the ASCII characters an untrusted
+// value must not carry into a Markdown link destination: the CommonMark inline
+// metacharacters still active inside a destination, both quotes
+// (attribute-context defense for a downstream MD-to-HTML conversion), the pipe
+// (table-cell break), and every ASCII whitespace form. It is the ONE home for
+// this decision, shared by the daemon's alert attributes (internal/notify) and
+// the report's Markdown links (internal/audit), so a newly-hostile character is
+// added once.
+//
+// '[' and ']' are deliberately NOT encoded: they are not destination
+// delimiters, and they are required syntax around an IPv6-literal host, so
+// encoding them would break a legitimate arr deep link
+// (http://[fd00::1]:8989/...).
+func EscapeLinkDestination(s string) string { return linkDestEscaper.Replace(s) }
 
 // Joiner renders a multi-source attribute under Cap's byte budget WITHOUT
 // first materializing the untrusted aggregate: each piece is capped to the

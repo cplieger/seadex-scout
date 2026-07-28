@@ -47,9 +47,11 @@ groups:
             cycles; inspect the arrs and arr_tags (or the mapping upstream), or
             remove state.json to accept the change if it is legitimate. A
             mapping refresh refused for a reason that cannot self-heal - a body
-            over the download size cap, a list over the record cap, or a
-            non-array document (the upstream schema moved) - counts toward that
-            streak even on a first boot with no cache to fall back on. The other
+            over the download size cap, a list over the record cap, an
+            identifier count over the aggregate budget, a non-array document
+            (the upstream schema moved), or a 304 answered to a request that
+            carried no validators - counts toward that streak even on a first
+            boot with no cache to fall back on. The other
             frequent ERROR is a health-marker write failure ("queued rerun could
             not record poll health"); check the /tmp mount and free space, since
             in external-scheduler mode a stale marker never turns the container

@@ -183,12 +183,33 @@ func LookupTrackerByRelativeURL(raw string) (Tracker, bool) {
 func hrefPath(f *urlform.Form) (string, bool) {
 	switch f.Class {
 	case urlform.ClassRelative:
-		return f.Trimmed, true
+		return hrefSlashes(f.Trimmed), true
 	case urlform.ClassSchemelessHost:
-		return "/" + f.Trimmed, true
+		return "/" + hrefSlashes(f.Trimmed), true
 	default:
 		return "", false
 	}
+}
+
+// hrefSlashes applies the WHATWG backslash-is-a-slash reading to a host-less
+// value's path, the same canonicalization urlform.Classify used to decide the
+// Class. Form.Trimmed is the preprocessed but NOT slash-canonicalized string,
+// so a rooted value spelled with a leading backslash ("\torrents.php?...")
+// reaches the shape rule as a path net/url reads verbatim while a browser
+// resolves it as "/torrents.php?...". Canonicalizing here keeps the shape rule
+// reading what a browser reads, so a smuggled AB torrent-page URL cannot grade
+// as non-AnimeBytes evidence. Only the pre-query/fragment part is rewritten
+// (past the first '?' or '#' a backslash is an ordinary character, urlform's
+// own rule).
+func hrefSlashes(trimmed string) string {
+	stop := strings.IndexAny(trimmed, "?#")
+	if stop < 0 {
+		stop = len(trimmed)
+	}
+	if !strings.Contains(trimmed[:stop], `\`) {
+		return trimmed
+	}
+	return strings.ReplaceAll(trimmed[:stop], `\`, "/") + trimmed[stop:]
 }
 
 // equalASCIIFold reports whether a and b are equal under ASCII case folding.

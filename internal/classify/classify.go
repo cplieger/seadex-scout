@@ -78,7 +78,7 @@ func ABEvidence(t *seadex.Torrent) filter.ABEvidence {
 // unreliable per-release evidence.
 func Torrent(entry *seadex.Entry, t *seadex.Torrent) release.Release {
 	return release.Classify(&release.Input{
-		Names:     PayloadNames(t.Files),
+		Names:     payloadNames(t.Files),
 		Notes:     entry.Notes,
 		Group:     t.ReleaseGroup,
 		Tracker:   t.Tracker,
@@ -87,20 +87,20 @@ func Torrent(entry *seadex.Entry, t *seadex.Torrent) release.Release {
 }
 
 // FileResolution classifies a torrent's resolution from its file names
-// alone, over the shared PayloadNames eligibility rule. The entry notes are
+// alone, over the shared payloadNames eligibility rule. The entry notes are
 // deliberately excluded: they are entry-wide and routinely describe sibling
 // releases, so they must not stamp a per-torrent title (the indexer's RSS
 // title synthesis is the consumer). Kept beside Torrent so every
 // release.Input built from SeaDex data has one home.
 func FileResolution(files []seadex.File) string {
-	names := PayloadNames(files)
+	names := payloadNames(files)
 	if len(names) == 0 {
 		return ""
 	}
 	return release.Classify(&release.Input{Names: names}).Resolution
 }
 
-// PayloadNames returns the file names eligible as classification evidence for
+// payloadNames returns the file names eligible as classification evidence for
 // a torrent's release: the ONE layered eligibility rule shared by the
 // compare/audit classification (Torrent above) and the indexer's synthesized
 // feed title (its fileResolution), so a daemon finding and the RSS title can
@@ -125,8 +125,8 @@ func FileResolution(files []seadex.File) string {
 // back to the size rule over every non-empty name — the historical
 // size-only behavior — so real content can never lose all its evidence to
 // the extension list.
-func PayloadNames(files []seadex.File) []string {
-	payload := PayloadFiles(files)
+func payloadNames(files []seadex.File) []string {
+	payload := payloadFiles(files)
 	names := make([]string, 0, len(payload))
 	for i := range payload {
 		names = append(names, payload[i].Name)
@@ -134,11 +134,11 @@ func PayloadNames(files []seadex.File) []string {
 	return names
 }
 
-// PayloadFiles returns the files PayloadNames draws its names from: the same
+// payloadFiles returns the files payloadNames draws its names from: the same
 // layered type-gate-then-size-refinement eligibility rule, kept in file form
 // so a caller that needs a file's length or its position in the record judges
 // the same payload the classification does instead of the raw file list.
-// PayloadNames is its only caller today; the indexer's title and pack
+// payloadNames is its only caller today; the indexer's title and pack
 // synthesis scanners (representativeFile, coveredEpisodes, seasonCounts)
 // deliberately do NOT use this rule - they run an episode census and take
 // PopulationFiles, because the max-anchored floor below deletes every regular
@@ -149,7 +149,7 @@ func PayloadNames(files []seadex.File) []string {
 // payload. A caller counting how many distinct EPISODES a torrent spans wants
 // PopulationFiles instead: there a shorter file is a legitimate episode, not a
 // diluting extra.
-func PayloadFiles(files []seadex.File) []seadex.File {
+func payloadFiles(files []seadex.File) []seadex.File {
 	pool := eligiblePool(files)
 	// The anchor is the pool MAXIMUM: anything far below the primary payload is
 	// an extra and must not dilute the release's quality verdict.
@@ -163,10 +163,10 @@ func PayloadFiles(files []seadex.File) []seadex.File {
 }
 
 // PopulationFiles returns the files an EPISODE CENSUS runs over: the same type
-// gate and the same two totality fallbacks as PayloadFiles, but a size floor
+// gate and the same two totality fallbacks as payloadFiles, but a size floor
 // anchored on the pool's MEDIAN length rather than its maximum.
 //
-// The distinction is the whole point of having two rules. PayloadFiles asks
+// The distinction is the whole point of having two rules. payloadFiles asks
 // which files vote on the release's quality attributes, so anything far below
 // the primary payload is an extra and must not dilute the verdict. A census
 // asks how many distinct episodes the torrent spans, and there a shorter file
@@ -200,7 +200,7 @@ func PopulationFiles(files []seadex.File) []seadex.File {
 // length a file must carry to survive a size refinement. The halving happens
 // before the rounding correction because (anchor+1)/2 wraps negative when an
 // untrusted record carries math.MaxInt64, which would let every file survive.
-// It is shared so PayloadFiles and PopulationFiles cannot drift apart on the
+// It is shared so payloadFiles and PopulationFiles cannot drift apart on the
 // arithmetic - only on their ANCHOR, which is their whole difference.
 func halfFloor(anchor int64) int64 { return anchor/2 + anchor%2 }
 
@@ -208,7 +208,7 @@ func halfFloor(anchor int64) int64 { return anchor/2 + anchor%2 }
 // is not positive keeps the whole pool: that is the shared totality fallback
 // for a record whose size evidence cannot discriminate (sparse upstream data,
 // fixtures), where the type gate alone decides. What reaches that state differs
-// by anchor: PayloadFiles' maximum is non-positive only when NO length is
+// by anchor: payloadFiles' maximum is non-positive only when NO length is
 // positive, while PopulationFiles' median is non-positive once more than half
 // the pool is - so a census over lengths [0, 0, 0, 1000] deliberately keeps all
 // four files rather than reading the one real file as the whole population.
@@ -262,7 +262,7 @@ func medianLength(pool []seadex.File) int64 {
 	return lo + (hi-lo)/2
 }
 
-// eligiblePool selects the files the size refinements of PayloadFiles and
+// eligiblePool selects the files the size refinements of payloadFiles and
 // PopulationFiles run over: the type gate's content survivors, or — when none
 // survive — every named file (the unlisted-container / sidecar-only /
 // creditless-only fallback).
@@ -286,7 +286,7 @@ func eligiblePool(files []seadex.File) []seadex.File {
 
 // ContentMediaFile reports whether name is eligible BY TYPE to identify
 // release content: a known video container extension (IsMediaFile) and not a
-// creditless extra (IsCreditlessExtra). It is PayloadNames' type gate and
+// creditless extra (IsCreditlessExtra). It is payloadNames' type gate and
 // the predicate the indexer's title/pack synthesis scanners share, so "what
 // counts as a content file" has one home.
 func ContentMediaFile(name string) bool {

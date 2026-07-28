@@ -109,10 +109,10 @@ func TestPayloadNamesDropsEmptyNamesPreservesOrder(t *testing.T) {
 		{Name: "episode 02.mkv"},
 	}
 
-	got := PayloadNames(files)
+	got := payloadNames(files)
 	want := []string{"episode 01.mkv", "episode 02.mkv"}
 	if !slices.Equal(got, want) {
-		t.Errorf("PayloadNames() = %v, want %v", got, want)
+		t.Errorf("payloadNames() = %v, want %v", got, want)
 	}
 }
 
@@ -128,10 +128,10 @@ func TestPayloadNamesMaxInt64LengthKeepsOnlyPrimary(t *testing.T) {
 		{Name: "Making Of [BDRemux].mkv", Length: 50_000_000},
 	}
 
-	got := PayloadNames(files)
+	got := payloadNames(files)
 	want := []string{"Show - 01 [1080p][HEVC].mkv"}
 	if !slices.Equal(got, want) {
-		t.Errorf("PayloadNames() = %v, want only the primary name %v", got, want)
+		t.Errorf("payloadNames() = %v, want only the primary name %v", got, want)
 	}
 }
 
@@ -155,8 +155,8 @@ func TestPayloadNamesUsesCeilingHalfThreshold(t *testing.T) {
 				{Name: "primary.mkv", Length: 3},
 				{Name: "extra.mkv", Length: tt.extraSize},
 			}
-			if got := PayloadNames(files); !slices.Equal(got, tt.want) {
-				t.Errorf("PayloadNames(%+v) = %v, want %v", files, got, tt.want)
+			if got := payloadNames(files); !slices.Equal(got, tt.want) {
+				t.Errorf("payloadNames(%+v) = %v, want %v", files, got, tt.want)
 			}
 		})
 	}
@@ -323,8 +323,8 @@ func TestPayloadNamesLayeredRule(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := PayloadNames(tc.files); !slices.Equal(got, tc.want) {
-				t.Errorf("PayloadNames(%+v) = %v, want %v", tc.files, got, tc.want)
+			if got := payloadNames(tc.files); !slices.Equal(got, tc.want) {
+				t.Errorf("payloadNames(%+v) = %v, want %v", tc.files, got, tc.want)
 			}
 		})
 	}
@@ -447,7 +447,7 @@ func TestDivergedIncomplete(t *testing.T) {
 // TestPopulationFilesMedianAnchoredFloor pins the census rule against the
 // primary-payload rule. PopulationFiles answers "how many distinct episodes
 // does this torrent span", where a shorter file is a legitimately shorter
-// episode; PayloadFiles answers "which names vote on the release's quality",
+// episode; payloadFiles answers "which names vote on the release's quality",
 // where anything far below the primary is a diluting extra. Anchoring the
 // census floor on the MAXIMUM instead deletes every regular
 // episode of any pack carrying one over-long file, so the pack reads as a single
@@ -526,8 +526,8 @@ func TestPopulationFilesMedianAnchoredFloor(t *testing.T) {
 			if got := len(PopulationFiles(tt.files)); got != tt.wantPopulation {
 				t.Errorf("len(PopulationFiles()) = %d, want %d", got, tt.wantPopulation)
 			}
-			if got := len(PayloadFiles(tt.files)); got != tt.wantPayload {
-				t.Errorf("len(PayloadFiles()) = %d, want %d", got, tt.wantPayload)
+			if got := len(payloadFiles(tt.files)); got != tt.wantPayload {
+				t.Errorf("len(payloadFiles()) = %d, want %d", got, tt.wantPayload)
 			}
 		})
 	}

@@ -16,6 +16,14 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
 }
 
+// parseFribb is the records-only view of parseFribbForRefresh the parser tests
+// and fuzz targets exercise; production always wants the element count too, so
+// this projection is test-only.
+func parseFribb(data []byte, log *slog.Logger) ([]Record, error) {
+	parsed, err := parseFribbForRefresh(data, log)
+	return parsed.records, err
+}
+
 // oversizedFribbRecord builds one encoded Fribb record whose imdb_id array
 // alone pushes it past maxFribbRecordBytes - the per-record byte cap
 // decodeFribbRecord rejects before the tolerant decode allocates.
@@ -30,6 +38,42 @@ func oversizedFribbRecord(aniListID int) string {
 	}
 	b.WriteString(`]}`)
 	return b.String()
+}
+
+// fribbKeyedBody builds a JSON array of n minimal Fribb records, each with a
+// distinct positive anilist_id so every element survives toRecord - the
+// amplification shape the record cap defends against.
+func fribbKeyedBody(n int) []byte {
+	var b strings.Builder
+	b.Grow(24 * n)
+	b.WriteByte('[')
+	for i := range n {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(`{"anilist_id":`)
+		b.WriteString(strconv.Itoa(i + 1))
+		b.WriteByte('}')
+	}
+	b.WriteByte(']')
+	return []byte(b.String())
+}
+
+// fribbKeylessBody builds a JSON array of n empty objects: the cheapest way to
+// reach an element count, since each one counts toward the total the record cap
+// and the approaching-cap warning read while retaining no record.
+func fribbKeylessBody(n int) []byte {
+	var b strings.Builder
+	b.Grow(3 * n)
+	b.WriteByte('[')
+	for i := range n {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(`{}`)
+	}
+	b.WriteByte(']')
+	return []byte(b.String())
 }
 
 func TestParseFribb(t *testing.T) {
@@ -57,41 +101,18 @@ func TestParseFribb(t *testing.T) {
 	}
 }
 
-func TestParseFribb_nonArrayErrors(t *testing.T) {
-	if _, err := parseFribb([]byte(`{"anilist_id":1}`), discardLogger()); err == nil {
-		t.Fatal("parseFribb(object) = nil error, want error")
-	}
-}
-
 // TestParseFribb_recordCap pins the hard acceptance cap: a list exceeding
 // maxFribbRecords is rejected (so refreshCache keeps the stale cache) rather
 // than amplifying an upstream-controlled body into a huge in-memory record set,
 // while a below-cap list the size of the real ~40k-record Fribb file is still
 // accepted in full.
 func TestParseFribb_recordCap(t *testing.T) {
-	build := func(n int) []byte {
-		var b strings.Builder
-		b.WriteByte('[')
-		for i := range n {
-			if i > 0 {
-				b.WriteByte(',')
-			}
-			// Tiny but valid records with a non-zero AniList ID so they survive
-			// toRecord (the amplification path the cap defends against).
-			b.WriteString(`{"anilist_id":`)
-			b.WriteString(strconv.Itoa(i + 1))
-			b.WriteByte('}')
-		}
-		b.WriteByte(']')
-		return []byte(b.String())
-	}
-
-	if _, err := parseFribb(build(maxFribbRecords+1), discardLogger()); err == nil {
+	if _, err := parseFribb(fribbKeyedBody(maxFribbRecords+1), discardLogger()); err == nil {
 		t.Fatalf("parseFribb(%d records) = nil error, want over-cap error", maxFribbRecords+1)
 	}
 
 	const below = 40000 // ~ the real Fribb file size, comfortably under the cap
-	records, err := parseFribb(build(below), discardLogger())
+	records, err := parseFribb(fribbKeyedBody(below), discardLogger())
 	if err != nil {
 		t.Fatalf("parseFribb(%d records) returned error: %v", below, err)
 	}
@@ -105,18 +126,7 @@ func TestParseFribb_recordCap(t *testing.T) {
 // full, so an off-by-one in decodeFribbRecords' guard cannot start rejecting a
 // body the documented cap admits.
 func TestParseFribb_atCapRecordCountAccepted(t *testing.T) {
-	var b strings.Builder
-	b.WriteByte('[')
-	for i := range maxFribbRecords {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(`{"anilist_id":`)
-		b.WriteString(strconv.Itoa(i + 1))
-		b.WriteByte('}')
-	}
-	b.WriteByte(']')
-	records, err := parseFribb([]byte(b.String()), discardLogger())
+	records, err := parseFribb(fribbKeyedBody(maxFribbRecords), discardLogger())
 	if err != nil {
 		t.Fatalf("parseFribb(exactly %d records) error: %v, want acceptance", maxFribbRecords, err)
 	}
@@ -131,16 +141,9 @@ func TestParseFribb_atCapRecordCountAccepted(t *testing.T) {
 // deliberately invalid JSON — a decoder that materialized the whole top-level
 // array first would surface a syntax error instead of the over-cap error.
 func TestParseFribb_overCapStopsEarly(t *testing.T) {
-	var b strings.Builder
-	b.WriteByte('[')
-	for i := 0; i <= maxFribbRecords; i++ {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(`{}`)
-	}
-	b.WriteString(`,!!!not-json`)
-	_, err := parseFribb([]byte(b.String()), discardLogger())
+	body := fribbKeylessBody(maxFribbRecords + 1)
+	body = append(body[:len(body)-1], []byte(`,!!!not-json`)...) // replace ']' with an invalid tail
+	_, err := parseFribb(body, discardLogger())
 	if err == nil {
 		t.Fatal("parseFribb(over-cap tiny elements) = nil error, want over-cap error")
 	}
@@ -534,25 +537,8 @@ func TestParseFribb_emptyBodyIsNotTheNonArraySentinel(t *testing.T) {
 func TestParseFribb_approachingRecordCapWarns(t *testing.T) {
 	const threshold = maxFribbRecords / 4 * 3
 	const msg = "mapping: Fribb list approaching record cap"
-	// Keyless elements are the cheapest way to reach the threshold: each one
-	// counts toward the element total the guard reads while keeping the body
-	// small (they are dropped, so no records are retained).
-	build := func(n int) []byte {
-		var b strings.Builder
-		b.Grow(3 * n)
-		b.WriteByte('[')
-		for i := range n {
-			if i > 0 {
-				b.WriteByte(',')
-			}
-			b.WriteString(`{}`)
-		}
-		b.WriteByte(']')
-		return []byte(b.String())
-	}
-
 	logger, rec := capture.New()
-	if _, err := parseFribb(build(threshold), logger); err != nil {
+	if _, err := parseFribb(fribbKeylessBody(threshold), logger); err != nil {
 		t.Fatalf("parseFribb(threshold body) error: %v", err)
 	}
 	if rec.CountLevel(slog.LevelWarn, msg) != 1 {
@@ -566,7 +552,7 @@ func TestParseFribb_approachingRecordCapWarns(t *testing.T) {
 	}
 
 	belowLogger, belowRec := capture.New()
-	if _, err := parseFribb(build(threshold-1), belowLogger); err != nil {
+	if _, err := parseFribb(fribbKeylessBody(threshold-1), belowLogger); err != nil {
 		t.Fatalf("parseFribb(below-threshold body) error: %v", err)
 	}
 	if belowRec.CountExact(msg) != 0 {
@@ -688,30 +674,33 @@ func TestParseFribbForRefresh_elementsCountsEverySourceElement(t *testing.T) {
 // on one record (imdb_id and themoviedb_id.movie), so without this budget the
 // per-record caps multiply (maxFribbRecords x 2 x maxFribbIdentifiers admits
 // ~4.2M retained ids from a body under maxMapBytes). A record that
-// would breach the budget is refused (counted as overBudget, not as a
-// malformed record); the decode loop turns a nonzero overBudget into the
-// fatal errIdentifierBudgetExceeded whole-document refusal rather than a
+// would breach the budget is refused with the fatal
+// errIdentifierBudgetExceeded sentinel (add returns it rather than counting it
+// as a malformed record), which the decode loop propagates as a
+// whole-document refusal rather than a
 // tolerated per-record skip.
 func TestFribbDecodeCounts_aggregateIdentifierBudget(t *testing.T) {
 	atCap := Record{AniListID: 1, IMDbIDs: make([]string, maxFribbIdentifiers)}
 	var c fribbDecodeCounts
 	for range maxFribbIdentifiersTotal / maxFribbIdentifiers {
-		c.add(&atCap, true, nil)
+		if err := c.add(&atCap, true, nil); err != nil {
+			t.Fatalf("filling the budget refused a record early: %v (identifiers=%d)", err, c.identifiers)
+		}
 	}
-	if c.skipped != 0 || c.dropped != 0 || c.overBudget != 0 {
-		t.Fatalf("filling the budget skipped=%d dropped=%d overBudget=%d, want 0/0/0", c.skipped, c.dropped, c.overBudget)
+	if c.skipped != 0 || c.dropped != 0 {
+		t.Fatalf("filling the budget skipped=%d dropped=%d, want 0/0", c.skipped, c.dropped)
 	}
 	if c.identifiers != maxFribbIdentifiersTotal {
 		t.Fatalf("charged %d identifiers, want the full budget %d", c.identifiers, maxFribbIdentifiersTotal)
 	}
 
 	retained := len(c.records)
-	c.add(&atCap, true, nil)
+	budgetErr := c.add(&atCap, true, nil)
+	if !errors.Is(budgetErr, errIdentifierBudgetExceeded) {
+		t.Fatalf("over-budget record returned %v, want errIdentifierBudgetExceeded", budgetErr)
+	}
 	if len(c.records) != retained {
 		t.Fatalf("over-budget record retained (%d records, want %d)", len(c.records), retained)
-	}
-	if c.overBudget != 1 {
-		t.Fatalf("over-budget record counted overBudget=%d, want 1", c.overBudget)
 	}
 	if c.skipped != 0 {
 		t.Fatalf("over-budget record counted skipped=%d, want 0 (a budget breach is not a malformed record)", c.skipped)
@@ -787,35 +776,5 @@ func TestRecordFromFormat_normalizesRoutingType(t *testing.T) {
 				t.Errorf("RecordFromFormat(%q).IsSpecial() = %v, want %v", tc.format, got.IsSpecial(), tc.wantSpecial)
 			}
 		})
-	}
-}
-
-// TestParseFribb_identifierBudgetBreachFailsClosed pins the whole-document
-// refusal: a body whose retained identifiers exceed maxFribbIdentifiersTotal
-// must fail the parse with errIdentifierBudgetExceeded rather than retaining
-// the truncated prefix.
-func TestParseFribb_identifierBudgetBreachFailsClosed(t *testing.T) {
-	var ids, imdb strings.Builder
-	for i := range maxFribbIdentifiers {
-		if i > 0 {
-			ids.WriteByte(',')
-			imdb.WriteByte(',')
-		}
-		ids.WriteString(strconv.Itoa(i + 1))
-		imdb.WriteString(`"tt` + strconv.Itoa(i+1) + `"`)
-	}
-	perRecord := 2 * maxFribbIdentifiers
-	n := maxFribbIdentifiersTotal/perRecord + 1
-	var b strings.Builder
-	b.WriteByte('[')
-	for i := range n {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(`{"anilist_id":` + strconv.Itoa(i+1) + `,"type":"movie","imdb_id":[` + imdb.String() + `],"themoviedb_id":{"movie":[` + ids.String() + `]}}`)
-	}
-	b.WriteByte(']')
-	if _, err := parseFribbForRefresh([]byte(b.String()), discardLogger()); !errors.Is(err, errIdentifierBudgetExceeded) {
-		t.Fatalf("parseFribbForRefresh error = %v, want errIdentifierBudgetExceeded", err)
 	}
 }

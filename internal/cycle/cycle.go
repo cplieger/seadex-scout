@@ -38,9 +38,9 @@ import (
 
 // msgCoordErrorAfterRun is the WARN message for a coordination-bookkeeping
 // error observed after a cycle actually ran (the run stands; only the
-// demand-coalescing accounting degraded). Shared by warnCoordinationError
-// (RunOnce's diagnostics) and RunLoop so the two Loki-queried diagnostics
-// cannot drift.
+// demand-coalescing accounting degraded). Emitted by warnCoordinationError,
+// the one classifier both RunOnce and RunLoop route a coordination error
+// through, so the two Loki-queried diagnostics cannot drift.
 const msgCoordErrorAfterRun = "cycle coordination error after run"
 
 // errRecordPollHealth marks a health-marker WRITE failure so the shutdown-wins
@@ -86,11 +86,7 @@ func NewExclusive(ctx context.Context, dir string) (*scheduler.Exclusive, error)
 // published before the cancellation was observed - including a cycle that
 // completed healthy and was then interrupted at the recording boundary, whose
 // verdict recordRunHealth deliberately withholds because an interrupted run's
-// outcome is not a trustworthy health verdict. TestRunOnceUniformInterruption's
-// post-cycle case pins the mid-cycle form of this (its Cycler cancels before
-// returning, so runOnce reports the interruption itself); the narrower window
-// between runOnce's check and recordRunHealth's has no test seam, so
-// recordRunHealth's own ctx.Err() check is the only guard on it. What the
+// outcome is not a trustworthy health verdict. What the
 // interruption never does is reach BACK: a verdict already published inside the
 // cycle lock - an earlier run of this invocation, or a daemon tick's - stands,
 // because a completed cycle's health is not this process's to withdraw.
@@ -151,11 +147,16 @@ func NormalizeShutdownError(ctx context.Context, err error) error {
 // processes; each execution records its own verdict, so the marker always
 // reflects the last cycle that actually completed.
 func runOnce(ctx context.Context, sc Cycler) (healthy bool, err error) {
-	healthy = runCycle(ctx, sc)
+	healthy, panicked := runCycle(ctx, sc)
 	if ctx.Err() != nil {
 		return healthy, Interrupted(ctx)
 	}
 	if !healthy {
+		if panicked {
+			// A recovered panic is a code fault, not an arr/ingest fault: the
+			// remediation the operator reads must not point at the arr config.
+			return healthy, errors.New("compare cycle panicked")
+		}
 		return healthy, errors.New("compare cycle failed (library ingest)")
 	}
 	return healthy, nil
@@ -256,11 +257,11 @@ func recordRunHealth(ctx context.Context, marker *health.Marker, healthy bool, r
 func warnCoordinationError(outcome scheduler.Outcome, err error) {
 	switch outcome {
 	case scheduler.OutcomeQueued, scheduler.OutcomeDiscarded:
-		slog.Warn("cycle coordination error after queueing; demand stands", "error", err)
+		slog.Warn("cycle coordination error after queueing; demand stands", "outcome", outcome.String(), "error", err)
 	case scheduler.OutcomeRan, scheduler.OutcomeRanQueued, scheduler.OutcomeSkipped:
-		slog.Warn(msgCoordErrorAfterRun, "error", err)
+		slog.Warn(msgCoordErrorAfterRun, "outcome", outcome.String(), "error", err)
 	default:
-		slog.Warn("cycle coordination failed during shutdown", "error", err)
+		slog.Warn("cycle coordination failed during shutdown", "outcome", outcome.String(), "error", err)
 	}
 }
 
@@ -397,7 +398,7 @@ func RunOnce(ctx context.Context, ex *scheduler.Exclusive, sc Cycler, marker *he
 func RunLoop(ctx context.Context, interval time.Duration, ex *scheduler.Exclusive, sc Cycler, marker *health.Marker) {
 	scheduler.RunLoop(ctx, func(ctx context.Context) {
 		outcome, err := ex.RunOrSkip(func() error {
-			healthy := runCycle(ctx, sc)
+			healthy, _ := runCycle(ctx, sc)
 			if !healthy && ctx.Err() != nil {
 				return nil // shutdown mid-cycle: cancellation is not an ingest fault
 			}
@@ -418,8 +419,9 @@ func RunLoop(ctx context.Context, interval time.Duration, ex *scheduler.Exclusiv
 			slog.Error("cycle coordination failed; tick did not run", "error", err)
 		default:
 			// The tick's cycle ran; a queue-file error only degrades the
-			// demand-coalescing bookkeeping.
-			slog.Warn(msgCoordErrorAfterRun, "outcome", outcome.String(), "error", err)
+			// demand-coalescing bookkeeping. Routed through the shared
+			// classifier so the level and the attrs cannot drift from poll's.
+			warnCoordinationError(outcome, err)
 		}
 	}, scheduler.LoopOptions{Interval: interval, FireOnStart: true, Jitter: 0.10})
 }
@@ -432,13 +434,15 @@ type Cycler interface {
 }
 
 // runCycle runs one cycle, recovering from a panic so a single bad cycle cannot
-// crash the long-lived daemon. A panic is reported as an unhealthy cycle.
-func runCycle(ctx context.Context, sc Cycler) (healthy bool) {
+// crash the long-lived daemon. A panic is reported as an unhealthy cycle, and
+// panicked distinguishes it from the other producer of healthy=false (a failed
+// arr walk) so a caller naming the cause to an operator names the right one.
+func runCycle(ctx context.Context, sc Cycler) (healthy, panicked bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("cycle panicked", "panic", r, "stack", string(debug.Stack()))
-			healthy = false
+			healthy, panicked = false, true
 		}
 	}()
-	return sc.Cycle(ctx)
+	return sc.Cycle(ctx), false
 }

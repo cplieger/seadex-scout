@@ -43,7 +43,7 @@ func TestReportGeneratesRowsAndNeverWritesState(t *testing.T) {
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher: match.NewMatcher(notFoundAniList{}, logger),
-		Auditor: audit.NewAuditor(audit.Config{SeaDexBaseURL: "https://releases.moe"}),
+		Auditor: audit.NewAuditor(audit.Config{}),
 	})
 
 	rep, err := s.Report(context.Background())
@@ -96,7 +96,7 @@ func TestReportSummaryLineCarriesCounts(t *testing.T) {
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: entries},
 		Matcher: match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Auditor: audit.NewAuditor(audit.Config{SeaDexBaseURL: "https://releases.moe"}),
+		Auditor: audit.NewAuditor(audit.Config{}),
 	})
 
 	if _, err := s.Report(context.Background()); err != nil {
@@ -277,7 +277,7 @@ func TestReportStaleMapWarnsAndStillAudits(t *testing.T) {
 		Mapping: unreachableMapLoader(t, scoutTestLogger()),
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher: match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Auditor: audit.NewAuditor(audit.Config{SeaDexBaseURL: "https://releases.moe"}),
+		Auditor: audit.NewAuditor(audit.Config{}),
 	})
 
 	rep, err := s.Report(context.Background())
@@ -313,7 +313,7 @@ func TestReportDegradedMatching(t *testing.T) {
 			Mapping: fakeMapping{},
 			SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
 			Matcher: match.NewMatcher(degradedMatcherAniList{}, logger),
-			Auditor: audit.NewAuditor(audit.Config{SeaDexBaseURL: "https://releases.moe"}),
+			Auditor: audit.NewAuditor(audit.Config{}),
 		})
 
 		rep, err := s.Report(context.Background())

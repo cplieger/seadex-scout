@@ -284,3 +284,30 @@ func TestDedupeKeyLinkSetIgnoresEmptyURL(t *testing.T) {
 		t.Errorf("dedupeKey with only empty-URL links = %q, want the link-less key %q", got, want)
 	}
 }
+
+// TestDedupeKeyGroupSetsAreOrderIndependent pins the SET semantics of both
+// group components: the on-disk and recommended group sets are sets, so their
+// key contribution must not depend on producer order (an order-sensitive key
+// re-alerts every unchanged finding as new), and deriving a key must not
+// reorder the caller's own Finding slices. Every other fixture supplies both
+// slices already sorted, so dropping either slices.Sort or slices.Clone leaves
+// the rest of the suite green.
+func TestDedupeKeyGroupSetsAreOrderIndependent(t *testing.T) {
+	base := compare.Finding{AniListID: 42, Status: compare.StatusBetter, InfoHash: strings.Repeat("a", 40)}
+	forward := base
+	forward.CurrentGroups = []string{"SubsPlease", "Erai-raws"}
+	forward.RecommendedGroups = []string{"PMR", "LostYears"}
+	reversed := base
+	reversed.CurrentGroups = []string{"Erai-raws", "SubsPlease"}
+	reversed.RecommendedGroups = []string{"LostYears", "PMR"}
+
+	if got, want := dedupeKey(&forward), dedupeKey(&reversed); got != want {
+		t.Errorf("dedupeKey depends on group element order:\n got %q\nwant %q", got, want)
+	}
+	if got := strings.Join(forward.CurrentGroups, ","); got != "SubsPlease,Erai-raws" {
+		t.Errorf("dedupeKey reordered the finding's own CurrentGroups: %q", got)
+	}
+	if got := strings.Join(forward.RecommendedGroups, ","); got != "PMR,LostYears" {
+		t.Errorf("dedupeKey reordered the finding's own RecommendedGroups: %q", got)
+	}
+}

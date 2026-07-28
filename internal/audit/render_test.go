@@ -201,7 +201,7 @@ func TestRenderMarkdownAndJSON(t *testing.T) {
 func TestRenderMarkdownScopePrecedence(t *testing.T) {
 	// Build the rows through assess so the test pins the real classification
 	// precedence (movie beats season beats special), not just the label map.
-	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"})
+	a := NewAuditor(Config{})
 	movie := &library.Item{
 		Arr: library.ArrRadarr, Title: "Movie",
 		Groups: []string{"g"}, HasFile: true,
@@ -1115,5 +1115,45 @@ func TestReleaseNotesDistinguishesURLErrorFromUnobtainable(t *testing.T) {
 				t.Error("a url-error release is not annotated; it would still drive the verdict and be offered as a link")
 			}
 		})
+	}
+}
+
+// TestReportLogRedactsArrURLCredentials pins the slog path's credential
+// posture, which only the PERSISTED halves are pinned for today: an arr
+// public_url may carry URL userinfo and a query token, and every report row
+// carries that link, so Report.Log must emit the library.SafeLogURL-stripped
+// form. Loki retains what it ingests, so a dropped strip is an unrecoverable
+// credential disclosure with nothing failing.
+func TestReportLogRedactsArrURLCredentials(t *testing.T) {
+	log, rec := capture.New()
+	r := &Report{
+		GeneratedAt: time.Unix(0, 0).UTC(),
+		Rows: []Row{{
+			Title:   "Frieren",
+			Arr:     "sonarr",
+			Verdict: VerdictBest,
+			ArrURL:  "https://admin:hunter2@sonarr.example/series/frieren?apikey=tok3n#frag",
+		}},
+	}
+
+	if err := r.Log(t.Context(), log); err != nil {
+		t.Fatalf("Log: %v", err)
+	}
+
+	if rec.Len() != 2 {
+		t.Fatalf("Log emitted %d records, want 2 (summary + one row)", rec.Len())
+	}
+	attrs := recordAttrs(rec.Records()[1])
+	got, ok := attrs["arr_url"].(string)
+	if !ok {
+		t.Fatalf("arr_url = %T, want string", attrs["arr_url"])
+	}
+	if want := "https://sonarr.example/series/frieren"; got != want {
+		t.Errorf("arr_url = %q, want %q", got, want)
+	}
+	for _, secret := range []string{"admin", "hunter2", "tok3n", "frag"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("arr_url = %q, carries credential material %q", got, secret)
+		}
 	}
 }

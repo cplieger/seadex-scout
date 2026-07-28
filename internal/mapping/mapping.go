@@ -190,7 +190,8 @@ type Cache struct {
 	// guards (the validation floor, the below-half-size shrink guard, the
 	// parse-time record cap, the aggregate identifier budget) rejected in
 	// favour of the stale map. It persists across cycles and restarts, resets
-	// to 0 on any accepted refresh or 304, and rides on the *StaleMapError
+	// to 0 on any accepted refresh or on a 304 that revalidates a USABLE
+	// cache, and rides on the *StaleMapError
 	// (ConsecutiveRejections) so the scout can escalate its degraded-mapping
 	// log at degradation.EscalationThreshold.
 	// It advances even when no usable stale cache exists (a first boot whose
@@ -207,7 +208,11 @@ type Cache struct {
 	// download size cap (httpx.ResponseTooLargeError), and a non-array
 	// top-level document (errNotJSONArray - content-shape evidence, since
 	// truncation cannot change a body's first token). Mid-stream truncation and
-	// every other malformed-body class stays transient.
+	// every other malformed-body class stays transient. A 304 answered to a
+	// request that carried NO validators also advances it (reuseCachedRecords
+	// suppresses them whenever the cache is unusable, so such a 304 is a
+	// protocol violation that repeats identically every cycle) - which is why
+	// the reset above is scoped to a 304 over a usable cache.
 	RejectedRefreshes int `json:"rejected_refreshes,omitempty"`
 }
 

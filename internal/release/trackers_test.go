@@ -177,6 +177,7 @@ func TestLookupTrackerByRelativeURL(t *testing.T) {
 		{name: "torrentid alone", raw: "/torrents.php?torrentid=1", wantOK: true},
 		{name: "path case-insensitive", raw: "/TORRENTS.PHP?torrentid=1", wantOK: true},
 		{name: "slashless href reading of the AB page shape", raw: "torrents.php?id=1&torrentid=2", wantOK: true},
+		{name: "backslash-rooted AB torrent page resolves", raw: `\torrents.php?id=1&torrentid=2`, wantOK: true},
 		{name: "Unicode long-s is not ASCII path case", raw: "/torrent\u017f.php?torrentid=1", wantOK: false},
 		{name: "surrounding whitespace tolerated", raw: "  /torrents.php?torrentid=1  ", wantOK: true},
 		{name: "missing torrentid", raw: "/torrents.php?id=12345", wantOK: false},
@@ -266,5 +267,46 @@ func TestEqualASCIIFold(t *testing.T) {
 		if got := equalASCIIFold(tc.a, tc.b); got != tc.want {
 			t.Errorf("equalASCIIFold(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
 		}
+	}
+}
+
+// TestLookupTrackerByHostMostSpecificWins pins the most-specific-match rule
+// LookupTrackerByHost documents as its defense against Go's randomized map
+// iteration order: when two canonical table hosts both match a host (one a
+// subdomain of the other - the sukebei.nyaa.si-beside-nyaa.si shape the
+// comment names), the longer canonical wins, deterministically. No table
+// entry is a subdomain of another today, so bestLen is always 0 when a match
+// lands and the length comparison is never exercised by any other test; this
+// test swaps in a nested two-entry index so the comparison decides the
+// answer. The repeat loop makes the map-order dependence a certain failure
+// rather than a coin flip when the comparison is dropped.
+func TestLookupTrackerByHostMostSpecificWins(t *testing.T) {
+	parent := Tracker{Name: "ParentSite", Type: TrackerPublic, BaseURL: "https://example.test"}
+	child := Tracker{Name: "ChildSite", Type: TrackerPrivate, BaseURL: "https://sub.example.test"}
+	saved := trackerByHost
+	trackerByHost = map[string]Tracker{"example.test": parent, "sub.example.test": child}
+	t.Cleanup(func() { trackerByHost = saved })
+
+	tests := []struct {
+		host string
+		want string
+	}{
+		{host: "sub.example.test", want: "ChildSite"},
+		{host: "deep.sub.example.test", want: "ChildSite"},
+		{host: "example.test", want: "ParentSite"},
+		{host: "other.example.test", want: "ParentSite"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.host, func(t *testing.T) {
+			for range 32 {
+				got, ok := LookupTrackerByHost(tc.host)
+				if !ok {
+					t.Fatalf("LookupTrackerByHost(%q) not found, want %q", tc.host, tc.want)
+				}
+				if got.Name != tc.want {
+					t.Fatalf("LookupTrackerByHost(%q) = %q, want the most specific match %q", tc.host, got.Name, tc.want)
+				}
+			}
+		})
 	}
 }

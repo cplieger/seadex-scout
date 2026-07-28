@@ -1094,3 +1094,82 @@ func TestEnvelopeRateLimitCountsOneWait(t *testing.T) {
 		t.Errorf("Stats().RateLimitWaits = %d, want 1 (one rate-limit response is one wait)", got.RateLimitWaits)
 	}
 }
+
+// TestFetchManyJoinsEarlierRecordErrorWithLaterAbort pins joinRecordErr's
+// preservation rule on the one path that reaches it: a record-local defect in
+// an earlier chunk followed by an ABORTING envelope failure in a later one. The
+// abort must lead (it is the classification every caller reads first) while the
+// poisoned record the scoping design exists to surface stays in the joined
+// error, and the aborting chunk's ids join the earlier record chunk's in
+// UnverifiedIDs so nothing untrustworthy is negative-memoized.
+func TestFetchManyJoinsEarlierRecordErrorWithLaterAbort(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if n == 1 {
+			// Chunk 1: a missing-id record (record-local) beside a valid sibling.
+			_, _ = io.WriteString(w, `{"data":{"Page":{"media":[{"id":0,"title":{"romaji":"poisoned"}},{"id":1,"format":"TV","seasonYear":2020,"title":{"romaji":"t1"}}]}}}`)
+			return
+		}
+		// Chunk 2: a GraphQL-level envelope error, which aborts the batch.
+		_, _ = io.WriteString(w, `{"errors":[{"message":"boom"}]}`)
+	}))
+	defer srv.Close()
+
+	ids := make([]int, batchSize+2) // two chunks: record-local, then aborting
+	for i := range ids {
+		ids[i] = i + 1
+	}
+	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	out, err := c.FetchMany(context.Background(), ids)
+	if err == nil {
+		t.Fatal("FetchMany must surface the aborting chunk's envelope error")
+	}
+	if !strings.Contains(err.Error(), "boom") {
+		t.Errorf("error = %q, want the aborting envelope error to lead", err.Error())
+	}
+	if !strings.Contains(err.Error(), "media record 0 missing id") {
+		t.Errorf("error = %q, want the earlier chunk's record diagnostic preserved", err.Error())
+	}
+	var batchErr *BatchRecordError
+	if !errors.As(err, &batchErr) {
+		t.Fatalf("error = %T %v, want *BatchRecordError scoping the unverified ids", err, err)
+	}
+	if !slices.Equal(batchErr.UnverifiedIDs, ids) {
+		t.Errorf("UnverifiedIDs = %v, want every id (the record-local chunk plus the aborting one)", batchErr.UnverifiedIDs)
+	}
+	if got := out[1].Titles; !slices.Equal(got, []string{"t1"}) {
+		t.Errorf("out[1].Titles = %v, want [t1] (the completed chunk's valid record survives)", got)
+	}
+}
+
+// TestDoObservesRateHeadersOnErrorStatus pins the documented reason do() reads
+// the budget headers on a non-429 ERROR status too: AniList stamps
+// X-RateLimit-Remaining/Reset on a 4xx/5xx as well, and dropping a
+// low-remaining signal there lets the next lookup race into the 429 the
+// pre-emption exists to avoid. A 400 is used so the response is terminal in one
+// attempt, isolating the observation from the retry budget.
+func TestDoObservesRateHeadersOnErrorStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(30*time.Second).Unix()))
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	if _, err := c.do(context.Background(), []byte(`{}`)); err == nil {
+		t.Fatal("do() on a 400 = nil error, want a status error")
+	}
+	if got := c.Stats().RateLimitWaits; got != 1 {
+		t.Errorf("Stats().RateLimitWaits = %d, want 1 (an exhausted budget reported on an error status must still back off)", got)
+	}
+	if wait := c.throttle.reserve(); wait <= 0 {
+		t.Errorf("throttle wait after the low-budget 400 = %v, want the reset window", wait)
+	}
+}

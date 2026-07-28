@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cplieger/xmlx"
 )
@@ -200,14 +201,6 @@ func TestParseTorznabDecodeLimits(t *testing.T) {
 			inner:   "<item>" + strings.Repeat(`<torznab:attr name="a" value="b"/>`, maxUpstreamAttrs+1) + "</item>",
 			wantErr: true,
 		},
-		"tiny attr flood rejected": {
-			// A body-sized run of tiny <attr/> elements: the per-item cap
-			// must reject DURING decoding (itemXML.decodeChild refuses the
-			// 65th attr before decoding it), so the flood never materializes
-			// an attr slice proportional to the wire bytes.
-			inner:   "<item>" + strings.Repeat(`<torznab:attr name="a" value="b"/>`, 100000) + "</item>",
-			wantErr: true,
-		},
 		"nesting depth over the cap rejected": {
 			// An all-opens body of tiny start tags: each token passes the
 			// token cap and there are no text runs, but every StartElement
@@ -357,6 +350,24 @@ func TestParseTorznabRejectsOversizedTokensAtLexicalGuard(t *testing.T) {
 		}
 		if got := limitKind(t, limitErr); got != xmlx.KindTagAttrs {
 			t.Errorf("bound = %v, want the lexical per-tag attribute bound", got)
+		}
+	})
+	t.Run("element flood fails the element-count bound", func(t *testing.T) {
+		// Amplification by COUNT rather than size: a run of tiny elements
+		// passes every per-token bound and charges nothing to the text
+		// budget, so maxUpstreamElements is the only thing that stops the
+		// decoded object graph from growing with the wire bytes. Built from
+		// the constant so the case cannot drift below the bound.
+		body := "<rss><channel><item>" +
+			strings.Repeat(`<torznab:attr name="a" value="b"/>`, maxUpstreamElements) +
+			"</item></channel></rss>"
+		_, err := parseTorznab([]byte(body))
+		limitErr, ok := errors.AsType[*torznabLimitError](err)
+		if !ok {
+			t.Fatalf("error = %T (%v), want *torznabLimitError", err, err)
+		}
+		if got := limitKind(t, limitErr); got != xmlx.KindElements {
+			t.Errorf("bound = %v, want the lexical element-count bound", got)
 		}
 	})
 	t.Run("quoted '>' does not terminate a tag", func(t *testing.T) {
@@ -745,18 +756,191 @@ func limitKind(t *testing.T, err error) xmlx.Kind {
 
 // TestWriteItemOmitsOptionalElements pins writeItem's documented omissions on
 // an item whose optional fields are empty: no enclosure without a download
-// URL, no volume-factor attrs without a marker, and no comments/pubDate
-// elements. The render/parse round-trip cannot observe any of them.
+// URL, no volume-factor attrs without a marker, and no comments element. The
+// render/parse round-trip cannot observe any of them. pubDate is NOT among the
+// omissions: Sonarr's RSS parser rejects a whole response over one element-less
+// item, so an unknown date renders the epoch instead.
 func TestWriteItemOmitsOptionalElements(t *testing.T) {
 	var b strings.Builder
 	writeItem(&b, &item{Title: "Show - S01", GUID: "https://nyaa.si/view/42"})
 	out := b.String()
-	for _, absent := range []string{"<enclosure", "downloadvolumefactor", "uploadvolumefactor", "<comments>", "<pubDate>"} {
+	for _, absent := range []string{"<enclosure", "downloadvolumefactor", "uploadvolumefactor", "<comments>"} {
 		if strings.Contains(out, absent) {
 			t.Errorf("rendered %s for an item carrying no such value:\n%s", absent, out)
 		}
 	}
+	if want := "<pubDate>" + time.Unix(0, 0).UTC().Format(time.RFC1123Z) + "</pubDate>"; !strings.Contains(out, want) {
+		t.Errorf("rendered item lost the unknown-date pubDate %q:\n%s", want, out)
+	}
 	if !strings.Contains(out, `<torznab:attr name="size" value="0"/>`) {
 		t.Errorf("rendered item lost the unconditional size attr:\n%s", out)
 	}
+}
+
+// TestParseTorznabTrimsWhitespacePaddedFields pins toItem's TrimSpace on the
+// four upstream string fields. A pretty-printed Prowlarr response puts element
+// text on its own line, and an untrimmed value silently changes identity: the
+// GUID is the journal/dedupe key (a padded copy is a second item for the same
+// release), and the enclosure URL is what the arr hands its download client.
+func TestParseTorznabTrimsWhitespacePaddedFields(t *testing.T) {
+	body := `<?xml version="1.0"?><rss><channel><item>` + "\n" +
+		"  <title>\n    [Group] Some Anime S01\n  </title>\n" +
+		"  <guid>\n    https://nyaa.si/view/1234567\n  </guid>\n" +
+		"  <comments>\n    https://nyaa.si/view/1234567\n  </comments>\n" +
+		`  <enclosure url=" http://prowlarr:9696/1/download?link=abc " length="7"/>` + "\n" +
+		`</item></channel></rss>`
+	items, err := parseTorznab([]byte(body))
+	if err != nil {
+		t.Fatalf("parseTorznab: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("parsed %d items, want 1", len(items))
+	}
+	got := items[0]
+	for _, tc := range []struct{ field, got, want string }{
+		{"title", got.Title, "[Group] Some Anime S01"},
+		{"guid", got.GUID, "https://nyaa.si/view/1234567"},
+		{"infoURL", got.InfoURL, "https://nyaa.si/view/1234567"},
+		{"downloadURL", got.DownloadURL, "http://prowlarr:9696/1/download?link=abc"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q (surrounding whitespace trimmed at the decode boundary)", tc.field, tc.got, tc.want)
+		}
+	}
+}
+
+// TestItemSizeResolutionChain pins itemSize's three-source resolution order
+// and its zero-as-unknown normalization. The size a Torznab item reports is
+// what the arr's size-based quality and limit rules judge, and the canonical
+// Torznab carrier is the size torznab:attr - the source no other test asserts,
+// so losing that arm renders a real release as a zero-byte one. The malformed
+// <size> case pins the package's documented fail-closed decode stance (the
+// same reason TestParseTorznabRejectsTruncatedResponses refuses partial data):
+// the whole response fails so the fetch retries. An EMPTY numeric is the
+// deliberate exception on both carriers (element and enclosure length): it
+// decodes as zero, exactly as encoding/xml's own numeric conversion does, so a
+// single empty numeric degrades into the zero-as-unknown domain this chain
+// falls through instead of rejecting every other curated item in the response.
+func TestItemSizeResolutionChain(t *testing.T) {
+	tests := map[string]struct {
+		inner   string
+		want    int64
+		wantErr bool
+	}{
+		"enclosure length wins over both fallbacks": {
+			inner: `<enclosure url="http://x/1" length="11"/><size>22</size><torznab:attr name="size" value="33"/>`,
+			want:  11,
+		},
+		"size element is the second source": {
+			inner: `<size>22</size><torznab:attr name="size" value="33"/>`,
+			want:  22,
+		},
+		"size attr is the last source": {
+			inner: `<torznab:attr name="size" value="33"/>`,
+			want:  33,
+		},
+		"padded size attr parses": {
+			inner: `<torznab:attr name="size" value=" 33 "/>`,
+			want:  33,
+		},
+		"negative size attr clamps to unknown": {
+			inner: `<torznab:attr name="size" value="-33"/>`,
+			want:  0,
+		},
+		"unparseable size attr is unknown": {
+			inner: `<torznab:attr name="size" value="huge"/>`,
+			want:  0,
+		},
+		"empty size element degrades to the next source": {
+			inner: `<size/><torznab:attr name="size" value="33"/>`,
+			want:  33,
+		},
+		"empty enclosure length degrades to the next source": {
+			inner: `<enclosure url="http://x/1" length=""/><size>22</size>`,
+			want:  22,
+		},
+		"unparseable size element still fails the whole response": {
+			inner:   `<size>notanumber</size><torznab:attr name="size" value="33"/>`,
+			wantErr: true,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			items, err := parseTorznab([]byte(`<?xml version="1.0"?><rss><channel><item><title>x</title>` +
+				tc.inner + `</item></channel></rss>`))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseTorznab accepted a malformed <size> element (%d items)", len(items))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseTorznab: %v", err)
+			}
+			if len(items) != 1 {
+				t.Fatalf("parsed %d items, want 1", len(items))
+			}
+			if got := items[0].Size; got != tc.want {
+				t.Errorf("size = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseTorznabNormalizesCategoryAttrs pins splitItemAttrs' category gate:
+// only positive ids are meaningful Torznab categories, so a tracker-controlled
+// negative, zero, or non-numeric value must be dropped at the decode boundary.
+// The last subtest pins why it matters end to end - writeItem substitutes the
+// anime default only when the item carries NO category, so a retained -5 makes
+// the rendered item category-less and Sonarr's category filter drops a curated
+// release.
+func TestParseTorznabNormalizesCategoryAttrs(t *testing.T) {
+	feedOf := func(attrs string) []byte {
+		return []byte(`<?xml version="1.0"?><rss><channel><item><title>x</title>` +
+			attrs + `</item></channel></rss>`)
+	}
+	tests := map[string]struct {
+		attrs string
+		want  []int
+	}{
+		"positive ids kept in document order": {
+			attrs: `<torznab:attr name="category" value="5070"/><torznab:attr name="category" value="2000"/>`,
+			want:  []int{5070, 2000},
+		},
+		"padded id parses": {
+			attrs: `<torznab:attr name="category" value=" 5070 "/>`,
+			want:  []int{5070},
+		},
+		"negative id dropped":    {attrs: `<torznab:attr name="category" value="-5"/>`},
+		"zero id dropped":        {attrs: `<torznab:attr name="category" value="0"/>`},
+		"non-numeric id dropped": {attrs: `<torznab:attr name="category" value="anime"/>`},
+		"mixed keeps the valid id": {
+			attrs: `<torznab:attr name="category" value="-5"/><torznab:attr name="category" value="2000"/>`,
+			want:  []int{2000},
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			items, err := parseTorznab(feedOf(tc.attrs))
+			if err != nil {
+				t.Fatalf("parseTorznab: %v", err)
+			}
+			if len(items) != 1 {
+				t.Fatalf("parsed %d items, want 1", len(items))
+			}
+			if got := items[0].Categories; !slices.Equal(got, tc.want) {
+				t.Errorf("categories = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	t.Run("an item whose only category is invalid renders the anime default", func(t *testing.T) {
+		items, err := parseTorznab(feedOf(`<torznab:attr name="category" value="-5"/>`))
+		if err != nil {
+			t.Fatalf("parseTorznab: %v", err)
+		}
+		rendered, _ := renderFeed(items)
+		if !strings.Contains(rendered, `<torznab:attr name="category" value="5070"/>`) {
+			t.Errorf("rendered feed lost the anime default category:\n%s", rendered)
+		}
+	})
 }

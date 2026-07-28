@@ -94,10 +94,14 @@ type Input struct {
 // --- Evidence parsing: marker regexes, codec tokens, Classify ---
 
 // resolutionHeights is the single home of the recognized resolution
-// vocabulary, highest first. reResolution's alternation and ResolutionRank
-// both derive from it, so a height added to one consumer cannot silently
-// miss the other (the same single-home rule trackerTable applies to the
-// tracker vocabulary).
+// vocabulary. reResolution's alternation and ResolutionRank both derive
+// from it, so a height added to one consumer cannot silently miss the
+// other (the same single-home rule trackerTable applies to the tracker
+// vocabulary). The descending order is presentational only: no two
+// heights can match at the same offset, so detectResolution takes the
+// FIRST height in the evidence text, never the highest present (the
+// first-in-observation-order rule the evidence accumulator documents) -
+// adding or reordering a height changes nothing about precedence.
 var resolutionHeights = []string{"2160p", "1440p", "1080p", "720p", "480p"}
 
 // evidenceWordClass is the raw-text word alphabet the marker edges are
@@ -185,9 +189,7 @@ var (
 	// halves — dot- and hyphen-joined spellings (CRF.18, 4500-kbps,
 	// BD.Remux) are as real as the space/underscore forms, and accepting
 	// them on one marker but not another made classification depend on
-	// which delimiter a group happens to use. Matching in place means no
-	// evidence-sized lowercased/underscore-replaced copy is ever allocated
-	// for an upstream-controlled name or notes value.
+	// which delimiter a group happens to use.
 	reBitrate = regexp.MustCompile(`(?:^|` + nonWordEdge + `)\d+[\s._-]?(?:` + lowerTokensPattern([]string{"kbps", "mbps"}) + `)(?:$|` + nonWordEdge + `)`)
 	// reCRF matches an x264/x265 CRF tag such as "crf18", "crf 20", or "crf.18".
 	reCRF = regexp.MustCompile(`(?:^|` + nonWordEdge + `)` + lowerLiteralPattern("crf") + `[\s._-]?\d+(?:$|` + nonWordEdge + `)`)
@@ -253,9 +255,8 @@ var (
 	x264TextTokens = []string{codecX264, "avc"}
 	// reTextX265 / reTextX264 apply the text-token lists to raw evidence in
 	// place (ToLower-faithful case classes via lowerTokensPattern, no
-	// boundary — see above), so codec detection needs no lowercased copy of
-	// the evidence. The alternations derive from the token lists to keep the
-	// vocabulary single-homed.
+	// boundary — see above). The alternations derive from the token lists to
+	// keep the vocabulary single-homed.
 	reTextX265 = regexp.MustCompile(lowerTokensPattern(x265TextTokens))
 	reTextX264 = regexp.MustCompile(lowerTokensPattern(x264TextTokens))
 	// reDottedX265 / reDottedX264 require a non-word left boundary
@@ -295,8 +296,7 @@ type evidence struct {
 
 // observe folds one piece of evidence text (a single release/file name, or the
 // entry notes) into the accumulator. Already-set flags short-circuit their
-// matchers; the matchers run against the text in place, allocating nothing
-// evidence-sized.
+// matchers.
 func (e *evidence) observe(text string) {
 	if e.resolution == "" {
 		e.resolution = detectResolution(text)

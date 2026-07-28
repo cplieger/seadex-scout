@@ -1339,36 +1339,24 @@ func TestCycleStaleMapStillComparesAndRebuildsFeed(t *testing.T) {
 // TestSaveGenuineFailureLogsError pins save's fault contract: a save failure
 // that is NOT a shutdown cancellation is a genuine write fault and must log
 // "state save failed" at ERROR exactly once (the signal the
-// SeadexScoutCycleError Loki alert fires on) - both on a live context and on a
-// cancelled context whose detached retry also fails.
+// SeadexScoutCycleError Loki alert fires on) - on a cancelled context whose
+// detached retry also fails (the live-context single-attempt case is
+// TestSaveGenuineFailureOnLiveContextIsNotRetried's).
 func TestSaveGenuineFailureLogsError(t *testing.T) {
-	tests := []struct {
-		name string
-		ctx  func() context.Context
-	}{
-		{name: "live context", ctx: context.Background},
-		{name: "cancelled context, detached retry also fails", ctx: func() context.Context {
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
-			return ctx
-		}},
+	logger, recorder := capture.New()
+	store := &fakeStore{saveErr: errors.New("disk full")}
+	s := New(&Deps{Logger: logger, Store: store})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	s.save(ctx, &state.State{Baselined: true})
+
+	if store.saves != 0 {
+		t.Errorf("saves = %d, want 0 (every attempt failed)", store.saves)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			logger, recorder := capture.New()
-			store := &fakeStore{saveErr: errors.New("disk full")}
-			s := New(&Deps{Logger: logger, Store: store})
-
-			s.save(tc.ctx(), &state.State{Baselined: true})
-
-			if store.saves != 0 {
-				t.Errorf("saves = %d, want 0 (every attempt failed)", store.saves)
-			}
-			errCount := recorder.CountLevel(slog.LevelError, "state save failed")
-			if errCount != 1 {
-				t.Errorf("\"state save failed\" ERROR count = %d, want exactly 1", errCount)
-			}
-		})
+	errCount := recorder.CountLevel(slog.LevelError, "state save failed")
+	if errCount != 1 {
+		t.Errorf("\"state save failed\" ERROR count = %d, want exactly 1 (the failed detached retry must not double-log)", errCount)
 	}
 }
 
@@ -1967,7 +1955,7 @@ func TestCycleAniListDegradedStreakEscalatesToError(t *testing.T) {
 
 // TestCycleExactlyHalfWalkPassesShrinkGuard pins the shrink guard's exact
 // boundary through the public cycle: the policy
-// (degradation.ShrinkGuardFactor) is "fewer than 1/factor of the prior items"
+// (degradation.Shrunk) is "fewer than 1/factor of the prior items"
 // - strictly BELOW half at the default 2 - so a walk returning exactly half
 // the prior snapshot's items must pass the guard. The externally meaningful
 // consequences are asserted, not the orchestration decomposition: the halved

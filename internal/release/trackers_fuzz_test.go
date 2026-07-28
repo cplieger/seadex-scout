@@ -28,6 +28,7 @@ func FuzzLookupTrackerByRelativeURL(f *testing.F) {
 	f.Add("https://animebytes.tv/torrents.php?torrentid=1")
 	f.Add("//animebytes.tv/torrents.php?torrentid=1")
 	f.Add("torrents.php?torrentid=1")
+	f.Add(`\torrents.php?id=1&torrentid=2`)
 	f.Add("")
 	f.Add("/torrents.php?%gg=1&torrentid=1")
 	f.Fuzz(func(t *testing.T, raw string) {

@@ -670,3 +670,44 @@ func TestWriteFilesSurfacesJSONEncodeError(t *testing.T) {
 		t.Errorf("report dir stat = %v, want absent (an encode failure must write nothing)", statErr)
 	}
 }
+
+// TestWriteFilesReapsStaleTempsKeepsReportFiles pins the stale-temp reap's
+// observable effect, which no test asserts today: an aged
+// .atomicfile-<digits>.tmp orphaned in the report dir by a SIGKILL/OOM between
+// temp create and rename is removed, while an in-flight temp (fresh mtime) and
+// an operator's existing report file are left alone. Dropping the
+// CleanupStaleTemps call, or passing it a non-positive maxAge (atomicfile then
+// warns and skips), leaks orphans into /config forever with nothing failing.
+func TestWriteFilesReapsStaleTempsKeepsReportFiles(t *testing.T) {
+	dir := t.TempDir()
+	stale := filepath.Join(dir, ".atomicfile-123456.tmp")
+	fresh := filepath.Join(dir, ".atomicfile-999.tmp")
+	existing := filepath.Join(dir, "report-2020-01-01T00-00-00Z.md")
+	for _, path := range []string{stale, fresh, existing} {
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &Report{GeneratedAt: time.Date(2026, time.July, 11, 15, 4, 5, 0, time.UTC), Totals: map[string]int{}}
+	if err := r.WriteFiles(t.Context(), dir, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+		t.Fatalf("WriteFiles: %v", err)
+	}
+
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("stale atomicfile temp stat = %v, want removed", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("in-flight temp must survive the reap: %v", err)
+	}
+	if _, err := os.Stat(existing); err != nil {
+		t.Errorf("pre-existing report file must survive the reap: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "report-2026-07-11T15-04-05Z.md")); err != nil {
+		t.Errorf("new report pair not written: %v", err)
+	}
+}

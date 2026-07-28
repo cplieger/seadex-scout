@@ -86,7 +86,6 @@ func buildScout(ctx context.Context, cfg *config.Config, readOnlyState bool) (bu
 			AnimeBytes:      cfg.AnimeBytes,
 		}),
 		Auditor: audit.NewAuditor(audit.Config{
-			SeaDexBaseURL:   seadex.DefaultBaseURL,
 			ExcludeSpecials: cfg.ExcludeSpecials,
 			AnimeBytes:      cfg.AnimeBytes,
 		}),

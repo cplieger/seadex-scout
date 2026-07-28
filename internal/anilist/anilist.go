@@ -126,6 +126,20 @@ func retryableUpstreamStatus(code int) bool {
 	return code == http.StatusRequestTimeout || (code >= 500 && code < 600)
 }
 
+// envelopeErrors decodes the untrusted GraphQL errors[] list, the one shape
+// both envelope classifiers (transientEnvelopeError, envelopeRateLimitError)
+// read. An undecodable body carries NO envelope error: that failure is the
+// parser's business, and the retry boundary must not invent one.
+func envelopeErrors(raw []byte) gqlErrors {
+	var env struct {
+		Errors gqlErrors `json:"errors"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil
+	}
+	return env.Errors
+}
+
 // transientEnvelopeError classifies a GraphQL envelope that arrived with a
 // successful HTTP status but reports a SERVER-side failure in its errors[] list.
 // AniList answers such faults as 200 with {"errors":[{"status":500,...}]}, so
@@ -137,13 +151,7 @@ func retryableUpstreamStatus(code int) bool {
 // not-found (Fetch's ErrNotFound contract depends on it reaching the parser),
 // and an unparseable body is the parser's business, not the retrier's.
 func transientEnvelopeError(raw []byte) error {
-	var env struct {
-		Errors gqlErrors `json:"errors"`
-	}
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil
-	}
-	for _, e := range env.Errors {
+	for _, e := range envelopeErrors(raw) {
 		if retryableUpstreamStatus(e.Status) {
 			return &transientStatusError{err: fmt.Errorf("anilist: upstream reported status %d: %s",
 				e.Status, sanitizeUpstreamMessage(e.Message))}
@@ -399,21 +407,30 @@ func joinRecordErr(recordErr, abortErr error) error {
 // legitimately resolved - and one such id (the first encountered in map
 // iteration order, so arbitrary when several are unsolicited) is reported as
 // an ErrBatchRecord-wrapped error so the caller sees the malformed response
-// without losing the chunk's valid records.
+// without losing the chunk's valid records. When MORE than one id is
+// unsolicited the count rides the error too, so one stray id reads differently
+// from a wholesale identity-set violation.
 func retainRequested(page map[int]Media, chunk []int) error {
 	requested := make(map[int]struct{}, len(chunk))
 	for _, id := range chunk {
 		requested[id] = struct{}{}
 	}
 	var first error
+	unsolicited := 0
 	for id := range page {
 		if _, ok := requested[id]; ok {
 			continue
 		}
 		delete(page, id)
+		unsolicited++
 		if first == nil {
 			first = fmt.Errorf("%w unexpected media id %d", ErrBatchRecord, id)
 		}
+	}
+	if unsolicited > 1 {
+		// The magnitude separates one stray id from a wholesale identity-set
+		// violation; the named id alone reads identically for both.
+		first = fmt.Errorf("%w (%d unsolicited ids dropped)", first, unsolicited)
 	}
 	return first
 }
@@ -448,11 +465,7 @@ func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 	// next lookup race into the 429 this pre-emption exists to avoid. A response
 	// without the headers is a no-op (the Atoi guard), so error statuses that
 	// carry no budget information are unaffected. Each exit below observes them
-	// exactly once, and the success path observes them only AFTER
-	// envelopeRateLimitError has had its say: a 429 delivered inside a
-	// successful envelope is the same rate-limit response, so penalizing the
-	// throttle through rateLimitError and again through a low-remaining header
-	// would report one response as two Stats().RateLimitWaits.
+	// exactly once.
 	//
 	// AniList mirrors a GraphQL-level not-found into the HTTP status: a
 	// nonexistent id answers 404 while still carrying the normal envelope
@@ -488,6 +501,10 @@ func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 	if rlErr := c.envelopeRateLimitError(resp, respBody); rlErr != nil {
 		return nil, rlErr
 	}
+	// Order matters: an envelope-delivered 429 is the SAME rate-limit response,
+	// so observing a low-remaining header before classifying it penalizes the
+	// throttle through both paths and reports one response as two
+	// Stats().RateLimitWaits (pinned by TestEnvelopeRateLimitCountsOneWait).
 	c.observeRateHeaders(resp)
 	return respBody, nil
 }
@@ -498,13 +515,7 @@ func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 // ever ran on the HTTP status, so an envelope-delivered 429 surfaced as a
 // terminal query error that penalized nothing.
 func (c *Client) envelopeRateLimitError(resp *http.Response, raw []byte) error {
-	var env struct {
-		Errors gqlErrors `json:"errors"`
-	}
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil
-	}
-	for _, e := range env.Errors {
+	for _, e := range envelopeErrors(raw) {
 		if e.Status == http.StatusTooManyRequests {
 			return c.rateLimitError(resp)
 		}
@@ -1004,14 +1015,25 @@ func parseMediaPage(raw []byte) (map[int]Media, error) {
 // (the earlier occurrence is deleted and the id stays excluded however many
 // duplicates follow) rather than silently letting the last write win. Each
 // failure surfaces the first offender via an ErrBatchRecord-wrapped error
-// beside the valid sibling records.
+// beside the valid sibling records. When MORE than one record is rejected the
+// count rides the error too, so one poisoned record reads differently from a
+// wholesale schema drift.
 func parsePageRecords(media []json.RawMessage) (map[int]Media, error) {
 	set := newPageRecordSet(len(media))
 	var recordErr error
+	rejected := 0
 	for i := range media {
-		if err := set.add(media[i], i); err != nil && recordErr == nil {
-			recordErr = err
+		if err := set.add(media[i], i); err != nil {
+			rejected++
+			if recordErr == nil {
+				recordErr = err
+			}
 		}
+	}
+	if rejected > 1 {
+		// The first offender alone cannot tell one poisoned record apart from a
+		// wholesale schema drift; the count is the operator's magnitude signal.
+		recordErr = fmt.Errorf("%w (%d of %d records rejected)", recordErr, rejected, len(media))
 	}
 	return set.out, recordErr
 }
@@ -1054,18 +1076,17 @@ func (s *pageRecordSet) add(raw json.RawMessage, i int) error {
 		}
 		return fmt.Errorf("%w media record %d is undecodable: %s", ErrBatchRecord, i, sanitizeUpstreamMessage(err.Error()))
 	}
-	md := &decoded
-	if md.ID <= 0 {
+	if decoded.ID <= 0 {
 		return fmt.Errorf("%w media record %d missing id", ErrBatchRecord, i)
 	}
-	if s.claim(md.ID) {
-		return fmt.Errorf("%w media record %d duplicates id %d", ErrBatchRecord, i, md.ID)
+	if s.claim(decoded.ID) {
+		return fmt.Errorf("%w media record %d duplicates id %d", ErrBatchRecord, i, decoded.ID)
 	}
-	parsed, err := md.toMedia()
+	parsed, err := decoded.toMedia()
 	if err != nil {
-		return fmt.Errorf("%w media record %d (id %d): %v", ErrBatchRecord, i, md.ID, err)
+		return fmt.Errorf("%w media record %d (id %d): %v", ErrBatchRecord, i, decoded.ID, err)
 	}
-	s.out[md.ID] = parsed
+	s.out[decoded.ID] = parsed
 	return nil
 }
 

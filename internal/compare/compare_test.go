@@ -717,6 +717,37 @@ func TestObtainableLinksSkipsEmptyURL(t *testing.T) {
 	}
 }
 
+// TestCompareFindingCarriesArrIdentity pins the match-side identity fields
+// baseFinding projects: the arr the item lives in and its deep-link. The
+// notify tests build findings by hand, so nothing else fails if compare stops
+// carrying them - and the alert then loses both its `sum by (arr)` grouping
+// key and the operator's one-click route into Sonarr/Radarr.
+func TestCompareFindingCarriesArrIdentity(t *testing.T) {
+	item := &library.Item{
+		Title:        "Deep Linked",
+		Arr:          library.ArrSonarr,
+		ArrURL:       "https://sonarr.example/series/deep-linked",
+		Groups:       []string{"erai-raws"},
+		SeasonGroups: map[int][]string{1: {"erai-raws"}},
+	}
+	entry := seadex.Entry{AniListID: 961, Torrents: []seadex.Torrent{
+		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/961"},
+	}}
+	m := match.Match{Item: item, Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+
+	got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+
+	if len(got) != 1 {
+		t.Fatalf("finding count = %d, want 1: %+v", len(got), got)
+	}
+	if got[0].Arr != library.ArrSonarr {
+		t.Errorf("Arr = %q, want %q (the alert groups by arr)", got[0].Arr, library.ArrSonarr)
+	}
+	if got[0].ArrURL != item.ArrURL {
+		t.Errorf("ArrURL = %q, want the item's deep-link %q", got[0].ArrURL, item.ArrURL)
+	}
+}
+
 func TestCompareFindingCarriesClassifiedReleaseFields(t *testing.T) {
 	item := &library.Item{Title: "Payload", Groups: []string{"erai-raws"}, SeasonGroups: map[int][]string{1: {"erai-raws"}}}
 	entry := seadex.Entry{AniListID: 700, Torrents: []seadex.Torrent{{
@@ -858,6 +889,80 @@ func TestCompareSpecialUsesSeasonZeroBucketWhenNotExcluded(t *testing.T) {
 
 	if excluded := comparer(filter.Options{}, true).Compare([]match.Match{m}); len(excluded) != 0 {
 		t.Errorf("exclude_specials on must silence the same special, got %+v", excluded)
+	}
+}
+
+// TestCompareFindingCarriesScopeAndApprox pins the two alert attributes that
+// say WHAT unit was compared and how exactly: Scope (the shared decision's
+// kind) and Approx (a coarse aggregate). Season alone cannot carry either - a
+// movie, a season-0 special and a whole-series aggregate all report season 0 -
+// so if baseFinding stops projecting them the alert silently claims an exact
+// per-unit attribution for an aggregate comparison and loses the scope label
+// entirely, with every other assertion in the package still green.
+func TestCompareFindingCarriesScopeAndApprox(t *testing.T) {
+	best := seadex.Entry{AniListID: 960, Torrents: []seadex.Torrent{
+		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/960"},
+	}}
+	tests := []struct {
+		seasons    map[int][]string
+		record     mapping.Record
+		name       string
+		arr        string
+		wantScope  string
+		wantApprox bool
+	}{
+		{
+			name:      "mapped season is an exact season scope",
+			arr:       library.ArrSonarr,
+			seasons:   map[int][]string{1: {"erai-raws"}},
+			record:    mapping.Record{Type: "TV", SeasonTvdb: 1},
+			wantScope: "season",
+		},
+		{
+			name:      "single-group specials bucket is an exact special scope",
+			arr:       library.ArrSonarr,
+			seasons:   map[int][]string{0: {"erai-raws"}},
+			record:    mapping.Record{Type: "OVA"},
+			wantScope: "special",
+		},
+		{
+			name:       "multi-group specials bucket is approximate",
+			arr:        library.ArrSonarr,
+			seasons:    map[int][]string{0: {"erai-raws", "commie"}},
+			record:     mapping.Record{Type: "OVA"},
+			wantScope:  "special",
+			wantApprox: true,
+		},
+		{
+			name:       "whole-series aggregate spanning two seasons is approximate",
+			arr:        library.ArrSonarr,
+			seasons:    map[int][]string{1: {"erai-raws"}, 2: {"erai-raws"}},
+			record:     mapping.Record{Type: "TV"},
+			wantScope:  "series",
+			wantApprox: true,
+		},
+		{
+			name:      "movie is an exact movie scope",
+			arr:       library.ArrRadarr,
+			record:    mapping.Record{Type: "MOVIE"},
+			wantScope: "movie",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := &library.Item{Title: "Scoped", Arr: tt.arr, SeasonGroups: tt.seasons, Groups: []string{"erai-raws"}, HasFile: true}
+			m := match.Match{Item: item, Arr: tt.arr, Entry: best, Record: tt.record}
+			got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+			if len(got) != 1 {
+				t.Fatalf("finding count = %d, want 1: %+v", len(got), got)
+			}
+			if got[0].Scope != tt.wantScope {
+				t.Errorf("Scope = %q, want %q (the alert cannot say what unit was compared without it)", got[0].Scope, tt.wantScope)
+			}
+			if got[0].Approx != tt.wantApprox {
+				t.Errorf("Approx = %v, want %v (an aggregate reported as exact misattributes the current group)", got[0].Approx, tt.wantApprox)
+			}
+		})
 	}
 }
 

@@ -8,9 +8,12 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -25,6 +28,34 @@ import (
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
+}
+
+// TestStoreLoadDoesNotBlockOnFifoStatePath pins the other half of readState's
+// confined-open contract: the open is O_NONBLOCK, so a FIFO at the state path
+// with no writer is an error Load classifies instead of an uninterruptible
+// open. A blocking open wedges the whole cycle inside Load - a context cannot
+// interrupt a blocked open(2) - so the daemon stops polling entirely and only
+// the healthcheck max-age deadline eventually restarts it.
+func TestStoreLoadDoesNotBlockOnFifoStatePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Skipf("mkfifo unsupported on this platform: %v", err)
+	}
+	loaded := make(chan error, 1)
+	go func() {
+		_, err := NewStore(path, testLogger()).Load(context.Background())
+		loaded <- err
+	}()
+	// The watchdog is only reached if the confined open regresses to a
+	// blocking one; against the real code Load returns immediately.
+	select {
+	case err := <-loaded:
+		if !errors.Is(err, atomicfile.ErrNotRegular) {
+			t.Errorf("Load of a FIFO state path error = %v, want atomicfile.ErrNotRegular", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Load blocked on a FIFO state path, want the O_NONBLOCK open to fail it immediately")
+	}
 }
 
 func TestStoreLoadMissingReturnsEmptyState(t *testing.T) {
@@ -798,6 +829,118 @@ func TestStorePartialWalkStreakPersistsUnderStableWireKey(t *testing.T) {
 	}
 }
 
+// TestStoreSaveEnvelopeNestedShape pins the wire shape of the persisted
+// members other packages own (notify.Alerted, match.Memo, library.Snapshot).
+// Their json tags define state.json's schema while SchemaVersion, the
+// discriminator that governs a rename, lives here - so a tag moved on the
+// domain side must fail in this package rather than silently zero-load out of
+// every existing state file at the next deploy. mapping.Cache's validator keys
+// are already pinned by the raw fixture in
+// TestStoreLoadReadsPersistedValidatorsAndPartialWalk. If this test fails
+// because a member was renamed or moved deliberately, bump SchemaVersion in
+// the same commit (see its doc) and update the expectations below. The
+// assertions are on the KEY SET only, never the values, so ordinary value
+// changes do not churn them.
+func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := NewStore(path, testLogger())
+	st := &State{
+		Findings: map[string]notify.Alerted{"k": {
+			AlertedAt: time.Now().UTC(),
+			Finding: notify.StoredFinding{
+				Arr:              "sonarr",
+				CurrentGroup:     "old",
+				RecommendedGroup: "new",
+				Title:            "t",
+				Status:           compare.StatusBetter,
+				AniListID:        1,
+				Season:           2,
+			},
+		}},
+		Memo: match.Memo{Entries: map[int]match.MemoEntry{1: {
+			Expiry:   time.Now().UTC().Add(time.Hour),
+			Format:   "TV",
+			Titles:   []string{"t"},
+			Year:     2020,
+			NotFound: true,
+		}}},
+		Library: library.Snapshot{
+			TakenAt: time.Now().UTC(),
+			Items: []library.Item{{
+				SeasonGroups: map[int][]string{1: {"g"}},
+				Arr:          "sonarr",
+				ImdbID:       "tt1",
+				Title:        "t",
+				ArrURL:       "http://sonarr.local/series/t",
+				AltTitles:    []string{"alt"},
+				Groups:       []string{"g"},
+				ArrID:        1,
+				TvdbID:       2,
+				TmdbID:       3,
+				Year:         2020,
+				HasFile:      true,
+				Failed:       true,
+			}},
+		},
+	}
+	if err := store.Save(context.Background(), st); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read persisted state: %v", err)
+	}
+	var envelope struct {
+		Findings map[string]map[string]json.RawMessage `json:"findings"`
+		Memo     struct {
+			Entries map[string]map[string]json.RawMessage `json:"entries"`
+		} `json:"anilist_memo"`
+		Library struct {
+			Items []map[string]json.RawMessage `json:"items"`
+		} `json:"library"`
+	}
+	if err := json.Unmarshal(persisted, &envelope); err != nil {
+		t.Fatalf("decode persisted envelope: %v", err)
+	}
+	if len(envelope.Library.Items) != 1 {
+		t.Fatalf("persisted library.items = %d, want 1", len(envelope.Library.Items))
+	}
+	assertKeySet(t, "library item", envelope.Library.Items[0], []string{
+		"alt_titles", "arr", "arr_id", "arr_url", "current", "failed", "groups",
+		"has_file", "imdb_id", "season_groups", "title", "tmdb_id", "tvdb_id", "year",
+	})
+	alerted, ok := envelope.Findings["k"]
+	if !ok {
+		t.Fatalf("persisted findings missing key %q (got %v)", "k", slices.Sorted(maps.Keys(envelope.Findings)))
+	}
+	assertKeySet(t, "findings record", alerted, []string{"alerted_at", "finding"})
+	var stored map[string]json.RawMessage
+	if err := json.Unmarshal(alerted["finding"], &stored); err != nil {
+		t.Fatalf("decode persisted findings record finding: %v", err)
+	}
+	assertKeySet(t, "findings record finding", stored, []string{
+		"al_id", "arr", "current_group", "recommended_group", "season", "status", "title",
+	})
+	entry, ok := envelope.Memo.Entries["1"]
+	if !ok {
+		t.Fatalf("persisted anilist_memo.entries missing id 1 (got %v)", slices.Sorted(maps.Keys(envelope.Memo.Entries)))
+	}
+	assertKeySet(t, "anilist_memo entry", entry, []string{
+		"expiry", "format", "not_found", "titles", "year",
+	})
+}
+
+// assertKeySet compares the json keys a persisted member actually wrote
+// against the schema this package pins for it, naming the SchemaVersion
+// obligation in the failure so a deliberate rename is not just "fixed" here.
+func assertKeySet(t *testing.T, what string, got map[string]json.RawMessage, want []string) {
+	t.Helper()
+	keys := slices.Sorted(maps.Keys(got))
+	if !slices.Equal(keys, want) {
+		t.Errorf("persisted %s keys = %v, want %v (a deliberate rename needs a SchemaVersion bump)", what, keys, want)
+	}
+}
+
 // TestStoreSaveStampsSchemaVersion pins the envelope versioning contract:
 // Save stamps SchemaVersion into every file it writes (round-tripping through
 // Load), the stamp lands on the copy Save writes - never the caller's State -
@@ -1473,4 +1616,58 @@ func TestStoreSaveWarnsApproachingSizeLimit(t *testing.T) {
 			t.Errorf("pre-cliff WARN count = %d for a half-sized state, want 0 (a warning on every save is noise)", got)
 		}
 	})
+}
+
+// TestStoreLoadRefusesStatePathEscapingItsDirectory pins readState's
+// confinement contract: the state file is opened through an os.Root rooted at
+// its parent directory, so a state path that resolves OUTSIDE that directory
+// (a symlink planted at /config/state.json) is a read error Load classifies,
+// never a silent load of foreign bytes as the library snapshot, mapping cache,
+// AniList memo and finding-dedupe baseline. The escaping path is a
+// DETERMINISTIC failure (no retry makes a foreign inode readable), so Load
+// classifies it as corruption: the link itself is quarantined, its target is
+// left untouched, and Save resumes on the fresh regular file rather than being
+// blocked forever by the recoverable-fault gate.
+func TestStoreLoadRefusesStatePathEscapingItsDirectory(t *testing.T) {
+	const foreign = `{"baselined":true}`
+	target := filepath.Join(t.TempDir(), "foreign.json")
+	if err := os.WriteFile(target, []byte(foreign), 0o600); err != nil {
+		t.Fatalf("write foreign state: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlinks unsupported on this filesystem: %v", err)
+	}
+
+	store := NewStore(path, testLogger())
+	got, err := store.Load(context.Background())
+	if err == nil {
+		t.Fatalf("Load through an escaping symlink returned nil error and state %+v, want the confinement refusal", got)
+	}
+	if got.Baselined {
+		t.Error("Load returned the foreign file's state, want the confined open to refuse it")
+	}
+	if !strings.Contains(err.Error(), "state: read") {
+		t.Errorf("error = %q, want the 'state: read' classification", err.Error())
+	}
+	// The link itself is renamed aside (os.Rename never follows it), so the
+	// foreign target keeps its bytes while the live path is freed for Save.
+	info, lstatErr := os.Lstat(path + ".corrupt")
+	if lstatErr != nil {
+		t.Fatalf("escaping path not quarantined (lstat err = %v), want the foreign inode preserved aside", lstatErr)
+	}
+	if info.Mode()&fs.ModeSymlink == 0 {
+		t.Errorf("quarantined inode mode = %v, want the symlink itself preserved", info.Mode())
+	}
+	live, readErr := os.ReadFile(target)
+	if readErr != nil || string(live) != foreign {
+		t.Errorf("symlink target after Load = %q (err %v), want the foreign file untouched", live, readErr)
+	}
+	if saveErr := store.Save(context.Background(), &State{}); saveErr != nil {
+		t.Errorf("Save after a quarantined escaping path = %v, want persistence to resume", saveErr)
+	}
+	after, readErr := os.ReadFile(target)
+	if readErr != nil || string(after) != foreign {
+		t.Errorf("symlink target after Save = %q (err %v), want Save's temp+rename to replace the link, not write through it", after, readErr)
+	}
 }

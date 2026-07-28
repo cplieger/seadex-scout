@@ -188,7 +188,7 @@ func TestLogConfigNeverLogsSecrets(t *testing.T) {
 		IndexerABPasskey:      "sekrit-4a",
 		RunMode:               config.RunModeDaemon,
 	}
-	logConfig(cfg)
+	logConfig(cfg, cfg.RunMode)
 
 	if rec.Count("configuration loaded") == 0 {
 		t.Fatal("logConfig emitted nothing, want a configuration line")
@@ -405,7 +405,7 @@ func TestLogConfigMasksInvalidRunMode(t *testing.T) {
 	rec := capture.Default(t)
 
 	cfg := &config.Config{RunMode: "leaked-secret-value-9"}
-	logConfig(cfg)
+	logConfig(cfg, cfg.RunMode)
 
 	if rec.AttrContains("configuration loaded", "", "leaked-secret-value-9") {
 		t.Errorf("startup config log leaks the raw run_mode value: %v", rec.Records())
@@ -415,11 +415,11 @@ func TestLogConfigMasksInvalidRunMode(t *testing.T) {
 	}
 }
 
-// TestLoggableModeMasksUnknownMode pins the same redaction contract at main's
-// terminal log sites: loggableMode passes the known run modes through and maps
-// anything else (which may be an expanded ${VAR} secret placed by a config
-// typo) to the fixed marker "invalid", so the dispatch-failure lines never
-// echo the raw value. Serial (swaps slog.Default).
+// TestLoggableModeMasksUnknownMode pins the redaction contract main applies at
+// its terminal log sites: loggableMode passes the known run modes through and
+// maps anything else (which may be an expanded ${VAR} secret placed by a config
+// typo) to the fixed marker "invalid", so the dispatch-failure lines never echo
+// the raw value.
 func TestLoggableModeMasksUnknownMode(t *testing.T) {
 	for _, mode := range []string{config.RunModeDaemon, config.RunModeReport, modePoll} {
 		if got := loggableMode(mode); got != mode {
@@ -430,18 +430,6 @@ func TestLoggableModeMasksUnknownMode(t *testing.T) {
 	if got := loggableMode(secret); got != "invalid" {
 		t.Errorf("loggableMode(%q) = %q, want the fixed marker %q", secret, got, "invalid")
 	}
-
-	rec := capture.Default(t)
-
-	// The exact failure line main emits when dispatch rejects the mode.
-	slog.Error("seadex-scout failed", "mode", loggableMode(secret), "error", errors.New("invalid configuration"))
-
-	if rec.AttrContains("seadex-scout failed", "", secret) {
-		t.Errorf("dispatch-failure log leaks the raw mode value: %v", rec.Records())
-	}
-	if !rec.HasAttr("seadex-scout failed", "mode", unknownModeMarker) {
-		t.Errorf("mode not logged as the fixed marker %q: %v", unknownModeMarker, rec.Records())
-	}
 }
 
 // TestLogConfigExternalPollInterval pins the resident-idle rendering: with
@@ -451,7 +439,7 @@ func TestLogConfigExternalPollInterval(t *testing.T) {
 	rec := capture.Default(t)
 
 	cfg := &config.Config{PollExternal: true, RunMode: config.RunModeDaemon}
-	logConfig(cfg)
+	logConfig(cfg, cfg.RunMode)
 
 	// The library's attr assertion compares the RENDERED value, so it pins the
 	// attribute itself rather than a substring of the serialized JSON - a

@@ -2,9 +2,11 @@ package indexer
 
 import (
 	"maps"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/cplieger/seadex-scout/internal/titlekey"
 	"pgregory.net/rapid"
 )
 
@@ -59,7 +61,7 @@ func TestMatchHarvestCacheHygieneProperty(t *testing.T) {
 		titles := map[string]string{"nyaa:43": "Already Harvested"}
 		before := maps.Clone(titles)
 
-		matched, rejected, pendingRejected := matchHarvest(
+		matched, rejected, pendingRejected, _ := matchHarvest(
 			[]item{result}, upstreamNyaa, index, titles, nil, []string{"nyaa:42", "nyaa:43"},
 		)
 
@@ -67,13 +69,17 @@ func TestMatchHarvestCacheHygieneProperty(t *testing.T) {
 		admissible := trimmed != "" && len(trimmed) <= harvestMaxTitleLen
 		wantMatched, wantRejected, wantPendingRejected := 0, 0, 0
 		wantKey := ""
-		if admissible {
-			switch identityKind {
-			case 0, 4:
+		switch identityKind {
+		case 0, 4:
+			if admissible {
 				wantMatched, wantKey = 1, "nyaa:42"
-			case 3:
-				wantRejected, wantPendingRejected = 1, 1
 			}
+		case 3:
+			// A contradictory identity is refused and counted whatever its
+			// title carries: classification precedes the cache-admission gate,
+			// so a tampered response cannot hide behind a blank or oversized
+			// title.
+			wantRejected, wantPendingRejected = 1, 1
 		}
 		if matched != wantMatched || rejected != wantRejected || pendingRejected != wantPendingRejected {
 			t.Fatalf("matchHarvest(kind=%d, title=%q) = (%d, %d, %d), want (%d, %d, %d)",
@@ -108,6 +114,47 @@ func TestMatchHarvestCacheHygieneProperty(t *testing.T) {
 		}
 		if wantKey != "" && titles[wantKey] != trimmed {
 			t.Fatalf("title for %q = %q, want %q", wantKey, titles[wantKey], trimmed)
+		}
+	})
+}
+
+// TestPreferredHarvestTitleYieldsAVocabularyCandidateProperty pins the two
+// clauses of preferredHarvestTitle's contract across arbitrary alias sets: the
+// winner is always ONE OF the candidates (matchHarvest caches the return value
+// unchecked and never overwrites it, so a non-candidate or an empty string
+// would be served for the item's whole journal window), and whenever any alias
+// carries the show's own vocabulary the winner carries it too - never the
+// ascii-count fallback.
+func TestPreferredHarvestTitleYieldsAVocabularyCandidateProperty(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		// titlekey.Normalize is idempotent over [a-z0-9], so a key drawn in
+		// that domain IS its own normalized form and needs no re-derivation.
+		key := rapid.StringMatching(`[a-z0-9]{4,12}`).Draw(t, "normalized show title")
+		candidates := rapid.SliceOfN(rapid.OneOf(
+			rapid.Just("[Grp] "+strings.ToUpper(key)+" - S01 (BD Remux 1080p x265)"),
+			rapid.Just("[Grp] \u846c\u9001\u306e\u30d5\u30ea\u30fc\u30ec\u30f3 - S01 (BD Remux 1080p x265)"),
+			rapid.StringMatching(`\[Grp\] [A-Za-z]{1,10} - S0[1-9] \(BD 1080p\)`),
+		), 1, 4).Draw(t, "aliases")
+		showTitle := rapid.SampledFrom([]string{key, strings.ToUpper(key), "", "no such show at all"}).Draw(t, "show title")
+
+		got := preferredHarvestTitle(candidates, showTitle)
+
+		if !slices.Contains(candidates, got) {
+			t.Fatalf("preferredHarvestTitle(%q, %q) = %q, want one of the candidates", candidates, showTitle, got)
+		}
+		if strings.ToLower(showTitle) != key {
+			return
+		}
+		carries := false
+		for _, c := range candidates {
+			if titlekey.ContainsKey(c, key) {
+				carries = true
+				break
+			}
+		}
+		if carries && !titlekey.ContainsKey(got, key) {
+			t.Fatalf("preferredHarvestTitle(%q, %q) = %q, want the alias carrying the show vocabulary %q",
+				candidates, showTitle, got, key)
 		}
 	})
 }

@@ -106,6 +106,11 @@ func normalizedRenderedItem(it item) item {
 	it.GUID = strings.TrimSpace(runesafe.Sanitize(it.GUID))
 	it.InfoURL = strings.TrimSpace(runesafe.Sanitize(it.InfoURL))
 	it.DownloadURL = strings.TrimSpace(runesafe.Sanitize(it.DownloadURL))
+	// writeItem renders the epoch for an unknown date, so the re-parse
+	// returns the epoch rather than the zero time.
+	if it.PubDate.IsZero() {
+		it.PubDate = time.Unix(0, 0).UTC()
+	}
 	it.PubDate = it.PubDate.Truncate(time.Second)
 	if len(it.Categories) == 0 {
 		it.Categories = []int{catAnime}

@@ -192,14 +192,12 @@ type Report struct {
 
 // Config configures an Auditor.
 type Config struct {
-	SeaDexBaseURL   string
 	ExcludeSpecials bool
 	AnimeBytes      bool
 }
 
 // Auditor builds alignment reports from matches.
 type Auditor struct {
-	seadexBaseURL     string
 	excludeSpecials   bool
 	includeAnimeBytes bool
 }
@@ -207,7 +205,6 @@ type Auditor struct {
 // NewAuditor builds an Auditor from cfg.
 func NewAuditor(cfg Config) *Auditor {
 	return &Auditor{
-		seadexBaseURL:     cfg.SeaDexBaseURL,
 		excludeSpecials:   cfg.ExcludeSpecials,
 		includeAnimeBytes: cfg.AnimeBytes,
 	}
@@ -459,9 +456,9 @@ func (a *Auditor) hiddenByABToggle(t *seadex.Torrent) bool {
 
 // seadexURL builds the releases.moe entry link for an AniList ID. The URL
 // rule is the shared releases.moe contract in internal/seadex; this is a
-// thin delegate over the injected base.
+// thin delegate.
 func (a *Auditor) seadexURL(aniListID int) string {
-	return seadex.EntryURL(a.seadexBaseURL, aniListID)
+	return seadex.EntryURL(aniListID)
 }
 
 // --- Group sets + row ordering ---
@@ -482,10 +479,6 @@ func (a *Auditor) seadexURL(aniListID int) string {
 func groupSets(releases []Release) (best, alt []string) {
 	bestSeen, altSeen := map[string]struct{}{}, map[string]struct{}{}
 	for i := range releases {
-		// The eligibility test is exactly the render layer's annotation predicate
-		// (annotated): an annotated release is listed and explained but never
-		// verdict evidence, so a new annotation class cannot start driving the
-		// verdict while the column marks it.
 		if annotated(&releases[i]) {
 			continue
 		}

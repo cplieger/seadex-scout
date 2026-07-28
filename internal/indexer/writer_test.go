@@ -1556,3 +1556,70 @@ func TestCollectWarnedIdentitiesClosesReverseOrderedChain(t *testing.T) {
 		}
 	}
 }
+
+// TestDecodeSnapshotSkipsUnknownFields pins the forward-compatibility arm of
+// the bounded snapshot walk: an unknown object key is token-skipped (and its
+// nested value never materialized) rather than failing the snapshot, so a
+// feed.json written by a NEWER binary still loads after an image rollback -
+// the file carries no schema version precisely because unknown fields are
+// dropped silently. A regression here (an error on an unrecognized key, or a
+// Skip that mis-advances the token stream) makes the older binary classify the
+// snapshot as malformed and re-baseline: the whole RSS journal window is lost
+// and every current release is marked seen without being served. The known
+// fields must still decode, and an empty "seen" object must allocate (a nil
+// ledger is the pre-journal-schema sentinel loadPrevious re-baselines on).
+func TestDecodeSnapshotSkipsUnknownFields(t *testing.T) {
+	const doc = `{"by_hash":{},"by_key":{"nyaa:42":true},"seen":{},"nyaa_feed":[],"ab_feed":[],` +
+		`"future_field":{"nested":[1,2,{"deep":"value"}],"n":null},"another":"scalar"}`
+	snap, _, reason, err := decodeSnapshot([]byte(doc))
+	if err != nil || reason != "" {
+		t.Fatalf("decodeSnapshot rejected a snapshot carrying unknown fields (reason=%q err=%v); a newer binary's snapshot must still load", reason, err)
+	}
+	if !snap.ByKey["nyaa:42"] {
+		t.Errorf("by_key = %v, want the known field decoded alongside the unknown ones", snap.ByKey)
+	}
+	if snap.Seen == nil {
+		t.Error("seen decoded nil, want the empty ledger allocated (nil is the pre-journal-schema sentinel that re-baselines the journal)")
+	}
+}
+
+// TestDecodeSnapshotBoundsAggregateMapEntries pins the SNAPSHOT-WIDE half of
+// the decode-cardinality bound (maxSnapshotMapEntriesTotal), which the
+// per-map test cannot reach: three maps each exactly at maxSnapshotMapEntries
+// are individually legal, so only the aggregate budget refuses the 750k
+// entries they add up to. Without it json.Unmarshal materializes every entry -
+// tens of bytes of live heap each - inside Run's warm-up reload, OOMing the
+// 256 MiB container and crashlooping the compare loop with it, and the
+// per-map test keeps passing while that hole is open (CWE-400). The document
+// stays under maxFeedBytes, so the byte cap the read applies does not catch it
+// either.
+func TestDecodeSnapshotBoundsAggregateMapEntries(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(`{"nyaa_feed":[],"ab_feed":[]`)
+	for _, name := range []string{"by_hash", "by_key", "seen"} {
+		b.WriteString(`,"`)
+		b.WriteString(name)
+		b.WriteString(`":{`)
+		for i := range maxSnapshotMapEntries {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(`"`)
+			b.WriteString(strconv.Itoa(i))
+			b.WriteString(`":true`)
+		}
+		b.WriteString(`}`)
+	}
+	b.WriteString(`}`)
+	doc := b.String()
+	if len(doc) > maxFeedBytes {
+		t.Fatalf("document = %d bytes, want it under the %d byte read cap (the premise: only the aggregate budget can reject it)", len(doc), maxFeedBytes)
+	}
+	_, _, _, err := decodeSnapshot([]byte(doc))
+	if err == nil {
+		t.Fatalf("decodeSnapshot accepted %d map entries across three at-cap maps, want the aggregate budget (max %d) to reject them", 3*maxSnapshotMapEntries, maxSnapshotMapEntriesTotal)
+	}
+	if !strings.Contains(err.Error(), "budget exceeded") {
+		t.Errorf("error = %q, want the aggregate map-entry budget error", err)
+	}
+}

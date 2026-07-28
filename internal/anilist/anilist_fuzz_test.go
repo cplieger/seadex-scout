@@ -112,9 +112,35 @@ func assertMediaBounded(t *testing.T, m Media, raw []byte) {
 		if len(title) > maxTitleBytes {
 			t.Errorf("parsed title of %d bytes exceeds maxTitleBytes (%d) from %q", len(title), maxTitleBytes, raw)
 		}
+		assertWireTextSafe(t, "title", title, raw)
 	}
 	if len(m.Format) > maxFormatBytes {
 		t.Errorf("parsed format of %d bytes exceeds maxFormatBytes (%d) from %q", len(m.Format), maxFormatBytes, raw)
+	}
+	assertWireTextSafe(t, "format", m.Format, raw)
+	// toMedia's year gate as a fuzz invariant: an accepted Media publishes
+	// either the unknown sentinel 0 or a four-digit year, never an impossible
+	// value that match.findByTitle would apply as a hard match constraint and
+	// Memo would retain.
+	if m.Year != 0 && !plausibleYear(m.Year) {
+		t.Errorf("parsed year %d is neither the unknown sentinel 0 nor a plausible year, from %q", m.Year, raw)
+	}
+}
+
+// assertWireTextSafe restates unsafeWireText's contract as a fuzz invariant: a
+// field an error-free parse hands to the matcher's memo (and through it to
+// state.json and to every log line that renders it) must carry no U+FFFD and no
+// rune the single-line sanitizer would rewrite, so a decoded title can neither
+// forge a normalized match key by having runes stripped nor forge a log record.
+func assertWireTextSafe(t *testing.T, field, value string, raw []byte) {
+	t.Helper()
+	if strings.ContainsRune(value, utf8.RuneError) {
+		t.Errorf("parsed %s %q retains U+FFFD, from %q", field, value, raw)
+	}
+	for _, r := range value {
+		if isForbiddenLogRune(r) {
+			t.Errorf("parsed %s %q retains forbidden rune %U, from %q", field, value, r, raw)
+		}
 	}
 }
 

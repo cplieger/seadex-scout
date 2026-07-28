@@ -88,3 +88,83 @@ func FuzzJoinLinksAttrBounded(f *testing.F) {
 		}
 	})
 }
+
+// FuzzCapAlertTextAttrBoundedAndInertMarkup fuzzes the alert-annotation text
+// encoder. alerts.yaml interpolates alert_title / alert_recommended_group into
+// a Discord/Slack annotation BODY, so an untrusted SeaDex title must never
+// render as a link, a code span, or a receiver mention (CWE-116). The escaper
+// emits every dangerous byte as a two-byte backslash escape and entity-encodes
+// '<' and '>', so walking escape pairs is an exact oracle rather than a second
+// copy of the replacer - and it covers the growth re-cap boundary, where a cut
+// can land inside an escape pair, which the value-level table cannot reach.
+func FuzzCapAlertTextAttrBoundedAndInertMarkup(f *testing.F) {
+	f.Add("")
+	f.Add("Frieren")
+	f.Add("[security update](https://attacker.example)")
+	f.Add("@everyone <@U123> & co")
+	f.Add(`a\b*c`)
+	f.Add("a\u009bb\u202ec\x1bd")
+	f.Add(strings.Repeat("*", 4<<10))
+	f.Add(strings.Repeat("\xff", 12<<10))
+	f.Fuzz(func(t *testing.T, raw string) {
+		got := capAlertTextAttr(raw)
+
+		if len(got) > maxAttrBytes {
+			t.Errorf("capAlertTextAttr(%d bytes) = %d bytes, want <= %d", len(raw), len(got), maxAttrBytes)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("capAlertTextAttr(%d bytes) is not valid UTF-8", len(raw))
+		}
+		for i := 0; i < len(got); i++ {
+			if got[i] == '\\' {
+				i++ // whatever this escape covers is inert
+				continue
+			}
+			if strings.IndexByte("`*_[]()~|@<>", got[i]) >= 0 {
+				t.Errorf("capAlertTextAttr(%d bytes) leaves live markup byte %q at offset %d", len(raw), got[i], i)
+			}
+		}
+		for _, r := range got {
+			if runesafe.IsUnsafe(r, true) {
+				t.Errorf("capAlertTextAttr(%d bytes) emits unsafe rune %U", len(raw), r)
+			}
+		}
+	})
+}
+
+// FuzzCapURLAttrBoundedAndInertDestination fuzzes the link-destination output
+// encoder over arbitrary untrusted text. alerts.yaml renders arr_url /
+// release_url / nyaa_url / public_url / ab_url as `[label](<attr>)`, so any
+// surviving destination-breaking byte closes the destination early and the rest
+// of an untrusted SeaDex URL renders as attacker-authored markdown (CWE-116).
+// The invariants are the three properties that must hold for every input, which
+// no per-character table can cover: bounded volume (the re-cap keeps the "..."
+// marker INSIDE the budget, so the ceiling is maxAttrBytes exactly), valid UTF-8
+// with no unsafe rune, and not one live destination-breaking byte left.
+func FuzzCapURLAttrBoundedAndInertDestination(f *testing.F) {
+	f.Add("")
+	f.Add("https://nyaa.si/view/1")
+	f.Add("https://evil.example/a)](javascript:alert(1))")
+	f.Add("http://[fd00::1]:8989/series/frieren")
+	f.Add("a\u009bb\u202ec\x1bd")
+	f.Add(strings.Repeat("(", 4<<10))
+	f.Add(strings.Repeat("\xff", 12<<10))
+	f.Fuzz(func(t *testing.T, raw string) {
+		got := capURLAttr(raw)
+
+		if len(got) > maxAttrBytes {
+			t.Errorf("capURLAttr(%d bytes) = %d bytes, want <= %d", len(raw), len(got), maxAttrBytes)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("capURLAttr(%d bytes) is not valid UTF-8", len(raw))
+		}
+		if i := strings.IndexAny(got, " \t\n\r\v\f\\`\"'()<>|"); i >= 0 {
+			t.Errorf("capURLAttr(%d bytes) leaves destination-breaking byte %q at offset %d", len(raw), got[i], i)
+		}
+		for _, r := range got {
+			if runesafe.IsUnsafe(r, true) {
+				t.Errorf("capURLAttr(%d bytes) emits unsafe rune %U", len(raw), r)
+			}
+		}
+	})
+}

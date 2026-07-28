@@ -60,11 +60,11 @@ func FuzzPayloadNames(f *testing.F) {
 			}
 		}
 
-		got := PayloadNames(files)
+		got := payloadNames(files)
 
 		// Totality: a torrent with any named file never loses all evidence.
 		if named > 0 && len(got) == 0 {
-			t.Fatalf("PayloadNames(%+v) = empty, want evidence whenever a named file exists", files)
+			t.Fatalf("payloadNames(%+v) = empty, want evidence whenever a named file exists", files)
 		}
 		// In-order subsequence of the eligible pool.
 		j := 0
@@ -73,7 +73,7 @@ func FuzzPayloadNames(f *testing.F) {
 				j++
 			}
 			if j == len(poolNames) {
-				t.Fatalf("PayloadNames(%+v) = %v, not an in-order subsequence of the eligible pool %v", files, got, poolNames)
+				t.Fatalf("payloadNames(%+v) = %v, not an in-order subsequence of the eligible pool %v", files, got, poolNames)
 			}
 			j++
 		}
@@ -81,15 +81,15 @@ func FuzzPayloadNames(f *testing.F) {
 			minPrimary := maxLength/2 + maxLength%2
 			for i := range pool {
 				if pool[i].Length == maxLength && !slices.Contains(got, pool[i].Name) {
-					t.Fatalf("PayloadNames(%+v) = %v, dropped the primary payload %q", files, got, pool[i].Name)
+					t.Fatalf("payloadNames(%+v) = %v, dropped the primary payload %q", files, got, pool[i].Name)
 				}
 				if pool[i].Length < minPrimary && slices.Contains(got, pool[i].Name) {
-					t.Fatalf("PayloadNames(%+v) = %v, kept the sub-primary extra %q (len %d vs max %d)", files, got, pool[i].Name, pool[i].Length, maxLength)
+					t.Fatalf("payloadNames(%+v) = %v, kept the sub-primary extra %q (len %d vs max %d)", files, got, pool[i].Name, pool[i].Length, maxLength)
 				}
 			}
 		}
 		if maxLength <= 0 && !slices.Equal(got, poolNames) {
-			t.Fatalf("PayloadNames(%+v) = %v, want the whole eligible pool %v when no pool file has a positive length", files, got, poolNames)
+			t.Fatalf("payloadNames(%+v) = %v, want the whole eligible pool %v when no pool file has a positive length", files, got, poolNames)
 		}
 	})
 }

@@ -95,7 +95,11 @@ func main() {
 	if runHealthProbe(args, configPath) {
 		// health.RunProbe terminates via os.Exit(0/1); if it ever returns
 		// (a contract change in the separately versioned health dependency),
-		// fail closed: report unhealthy rather than a silently-green probe.
+		// fail closed: report unhealthy rather than a silently-green probe -
+		// and name the cause, since the probe runs in its own process and
+		// docker records only its output for the operator to read.
+		slog.Error("health probe returned without exiting; reporting unhealthy",
+			"path", health.DefaultPath)
 		os.Exit(1)
 	}
 
@@ -107,13 +111,13 @@ func main() {
 		os.Exit(1)
 	}
 	configureLogger(cfg.LogLevel, cfg.LogFormat)
-	logConfig(&cfg)
 
 	mode, err := resolveMode(args, &cfg)
 	if err != nil {
 		slog.Error("invalid invocation", "error", err)
 		os.Exit(2)
 	}
+	logConfig(&cfg, mode)
 
 	if err := dispatch(mode, &cfg); err != nil {
 		level, msg, code := dispatchOutcome(err)
@@ -570,21 +574,23 @@ func logIndexerStop(ctx context.Context, log *slog.Logger, err error) {
 
 // --- Logging helpers ---
 
-// logConfig logs the effective configuration at startup. API keys are never
+// logConfig logs the effective configuration at startup, with mode the
+// RESOLVED run mode (the subcommand when one was given, else the config's
+// `mode`) rather than the config key alone: the documented one-shot
+// `command: report` container leaves `mode: daemon` in the file, so an
+// operator filtering that container's Loki stream on run_mode would
+// otherwise read the mode the process is NOT running. API keys are never
 // logged, only whether each is present.
-func logConfig(cfg *config.Config) {
+func logConfig(cfg *config.Config, mode string) {
 	pollInterval := cfg.PollInterval.String()
 	if cfg.PollExternal {
 		pollInterval = "external"
 	}
-	runMode := cfg.RunMode
-	if runMode != config.RunModeDaemon && runMode != config.RunModeReport {
-		// logConfig runs before Validate rejects an unrecognized mode, and the
-		// raw value may be an expanded ${VAR} secret placed here by a config
-		// typo - emit a fixed marker, never the value (Validate's error is
-		// field-name-only for the same reason).
-		runMode = unknownModeMarker
-	}
+	// loggableMode masks an unrecognized value with the fixed marker: it may
+	// be an expanded ${VAR} secret placed by a config typo, and logConfig runs
+	// before Validate rejects it (config.validateRunMode is field-name-only
+	// for the same reason).
+	runMode := loggableMode(mode)
 	slog.Info("configuration loaded",
 		"sonarr_enabled", cfg.SonarrEnabled(),
 		"radarr_enabled", cfg.RadarrEnabled(),

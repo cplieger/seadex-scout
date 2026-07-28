@@ -68,6 +68,14 @@ type upstream struct {
 	displayWarned atomic.Bool
 }
 
+// newUpstream builds one Prowlarr per-indexer Torznab endpoint. It is the ONE
+// construction site for the type, so a field added to upstream cannot be set
+// on the wired original (WireUpstreams) and then silently dropped from the
+// per-consumer copies (ownUpstreams) every consumer actually queries.
+func newUpstream(client *http.Client, log *slog.Logger, name, feed, apiKey string) *upstream {
+	return &upstream{http: client, log: log, name: name, feed: feed, apiKey: apiKey}
+}
+
 // search queries the Torznab endpoint with the forwarded params and returns the
 // parsed items. The Prowlarr API key is sent as the X-Api-Key header (not a
 // query param), so it never appears in a logged request URL. It returns the
@@ -121,8 +129,8 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, int, 
 		// callers of search publish their own WARN for the same failed query
 		// with strictly more context - the harvest names the show, the query
 		// shape and the page and drives its latch state (classifyHarvestError),
-		// the request path names the scope (queryUpstream) - so leaving httpx's
-		// verdict at Warn produced two terminal WARNs per failure, six per
+		// the request path names the upstream (query.go's fetchRaw) - so leaving
+		// httpx's verdict at Warn produced two terminal WARNs per failure, six per
 		// three-show homogeneous malformed run, and doubled the Loki volume of
 		// exactly the incident the once-per-onset cadence exists to keep
 		// readable. Demoting rather than dropping the logger keeps the
@@ -271,7 +279,15 @@ func (u *upstream) upstreamSecrets() []string {
 		secrets = append(secrets, userinfoSecrets(parsed.User)...)
 	}
 	for _, pair := range strings.FieldsFunc(parsed.RawQuery, isRawQuerySeparator) {
-		name, value, _ := strings.Cut(pair, "=")
+		name, value, hasValue := strings.Cut(pair, "=")
+		if !hasValue {
+			// A pair with no '=' carries no name/value split at all: the whole
+			// token is what rides the outgoing request, so treat it as an
+			// UNLABELLED value (credentialParamName has no name to judge, so the
+			// minEmbeddedSecretLen floor alone decides - a structural flag like
+			// "?rss" stays out, a bare token does not).
+			name, value = "", name
+		}
 		if value == "" {
 			continue
 		}
@@ -653,11 +669,14 @@ func effectiveHTTPPort(u *url.URL) string {
 // httpDisplayHost admits a raw URL as a browser-destined DISPLAY link and
 // returns its host evidence: an absolute http(s) form, free of userinfo and of
 // the smuggling shapes a browser reads differently from net/url. It is the
-// shared admission prefix of sanitizeDisplayURL (search-path display links) and
-// snapshotInfoURLAllowed's sibling in reload.go.
+// shared admission prefix of BOTH its consumers: sanitizeDisplayURL
+// (search-path display links) and trackerKeyFromURL (match.go, the curation
+// IDENTITY gate), so relaxing it changes what mints a curation key, not only
+// what renders as a clickable link. reload.go's snapshotInfoURLAllowed applies
+// the same rule inline against a fixed expected host rather than calling this.
 //
 // Structural facts come from urlform, the app's classifier of record for exactly
-// this browser-vs-net/url divergence, already applied at internal/seadex's
+// this browser-vs-net/url divergence, already applied at internal/trackerlink's
 // publish gate and internal/filter's evidence gate. The hand-rolled net/url
 // version this replaces was a second taxonomy of the same knowledge, drifting
 // from what the library learns (l-f24): it accepted hidden-host,

@@ -2,8 +2,10 @@
 // degradation policy constants shared across domains: the escalation
 // threshold the persisted degradation streaks (mapping refresh rejections,
 // shrunk library walks, partial library walks, SeaDex fetch failures, AniList
-// degradation) escalate their log sites at, and the shrink guards' trigger
-// fraction (mapping refresh + library walk + SeaDex catalogue walk).
+// degradation) escalate their log sites at, the shrink guards' trigger
+// fraction, applied through Shrunk (mapping refresh + library walk + SeaDex
+// catalogue walk), and the pre-cliff warning fraction the persisted-file byte
+// caps warn at (state.json, the indexer feed snapshot).
 // It is a leaf with no imports so mapping, scout and seadex can reference the
 // one policy without either domain owning cross-domain operational policy.
 package degradation
@@ -22,22 +24,36 @@ package degradation
 // (state.State.AniListDegraded).
 const EscalationThreshold = 8
 
-// ShrinkGuardFactor is the shrink guards' trigger fraction: a refreshed data
-// set that would replace the prior one with fewer than 1/ShrinkGuardFactor of
-// its entries - below half, at the default 2 - is treated as a suspicious
-// truncation rather than a real change, keeping the prior data and never
-// auto-accepting. Shared by the mapping loader's refresh shrink guard
-// (acceptRefresh), the scout's library shrink guard, and the SeaDex client's
-// catalogue-walk shortfall guard (which errors the fetch below half).
-const ShrinkGuardFactor = 2
+// shrinkGuardFactor is the shrink guards' trigger fraction, applied only
+// through Shrunk (the package's shared surface for it): a refreshed data set
+// that would replace the prior one with fewer than 1/shrinkGuardFactor of its
+// entries - below half, at the default 2 - is a suspicious truncation rather
+// than a real change, so the prior data is kept and never auto-accepted.
+const shrinkGuardFactor = 2
 
 // Shrunk reports whether a refreshed population of count entries is a
 // suspicious truncation of a prior population of prevCount entries: it
-// retains less than 1/ShrinkGuardFactor of it (below half at the default 2).
+// retains less than 1/shrinkGuardFactor of it (below half at the default 2).
 // The candidate is multiplied rather than the previous count divided, so an
 // odd prevCount never rounds in the guard's favour. It is the single home of
-// the shrink comparison the mapping loader's refresh guards and the scout's
-// library walk guard share.
+// the shrink comparison every shrink guard shares: the mapping loader's
+// refresh shrink guard (acceptRefresh), the scout's library shrink guard, and
+// the SeaDex client's catalogue-walk shortfall guard (which errors the fetch
+// below half).
 func Shrunk(count, prevCount int) bool {
-	return count*ShrinkGuardFactor < prevCount
+	return count*shrinkGuardFactor < prevCount
 }
+
+// SizeWarnNumerator / SizeWarnDenominator are the pre-cliff warning fraction
+// (80%) a persisted-file byte cap warns at: crossing such a cap refuses every
+// subsequent write with no self-heal (the offending input never shrinks on its
+// own), so the writer warns while there is still headroom to act. Shared by
+// internal/state's save guard (stateSizeWarnBytes) and the indexer feed
+// snapshot's persist guard (feedSizeWarnBytes); the CAPS themselves stay with
+// their own file, only the fraction is app-wide policy. They are constants
+// rather than a helper function because both call sites are themselves
+// constants.
+const (
+	SizeWarnNumerator   = 8
+	SizeWarnDenominator = 10
+)

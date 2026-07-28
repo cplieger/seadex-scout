@@ -652,6 +652,39 @@ func TestValidateSilentOnCleanOrEmptyPublicURL(t *testing.T) {
 	}
 }
 
+// TestValidateWarnsOnSmuggledPublicURL pins the urlform-backed half of
+// warnPublicURLProblems: a public_url carrying a backslash or an embedded
+// tab/newline parses fine for net/url but is refused outright by the deep-link
+// publisher (library.SafeLogURL reads urlform.Classify), so the config warns
+// that report rows will carry no arr link. A clean value stays silent.
+func TestValidateWarnsOnSmuggledPublicURL(t *testing.T) {
+	const want = "public_url carries a backslash or an embedded tab/newline"
+	tests := map[string]struct {
+		cfg  Config
+		warn bool
+	}{
+		"path backslash": {cfg: Config{
+			RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k",
+			SonarrPublicURL: `http://sonarr.example.com/base\x`,
+		}, warn: true},
+		"clean public url": {cfg: Config{
+			RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k",
+			SonarrPublicURL: "https://sonarr.example.com/base",
+		}, warn: false},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			rec := capture.Default(t)
+			if err := tc.cfg.Validate(); err != nil {
+				t.Fatalf("Validate() error = %v, want a smuggled public_url to remain non-fatal", err)
+			}
+			if got := rec.Contains(want); got != tc.warn {
+				t.Errorf("Validate() warned %v, want %v; log = %v", got, tc.warn, rec.Messages())
+			}
+		})
+	}
+}
+
 // TestValidateWarnsOnIdenticalArrURLs pins warnIdenticalArrURLs' warn-only
 // contract: identical sonarr.url/radarr.url values warn (a paste error - one
 // client queries the wrong application), distinct values stay silent, and the
@@ -1956,4 +1989,178 @@ func TestValidateWarnsOnRelativeReportDir(t *testing.T) {
 			t.Errorf("Validate() log = %v, want no relative-report.dir warning", rec.Messages())
 		}
 	})
+}
+
+// TestLoadWarnsOnWorldReadableConfig pins the permission diagnostic Load emits
+// through warnConfigPermissions: the file holds every secret the app has (the
+// arr api keys, the Prowlarr key, the AnimeBytes passkey), so a mode readable
+// beyond the owner WARNs and names the octal mode, while an owner-only 0600
+// file stays silent. The mode is the one value this diagnostic echoes, so the
+// warning must never carry file content.
+func TestLoadWarnsOnWorldReadableConfig(t *testing.T) {
+	const content = "sonarr:\n  enabled: true\n  url: http://sonarr:8989\n  api_key: sk-sentinel\n"
+	tests := []struct {
+		name     string
+		mode     os.FileMode
+		wantMode string
+		wantWarn bool
+	}{
+		{"group and world readable warns", 0o644, "644", true},
+		{"group readable warns", 0o640, "640", true},
+		{"owner-only stays silent", 0o600, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := capture.Default(t)
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(content), tt.mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, tt.mode); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			const msg = "config file is readable beyond its owner"
+			if got := rec.CountLevel(slog.LevelWarn, msg) > 0; got != tt.wantWarn {
+				t.Errorf("permission warning present = %v, want %v (messages %v)", got, tt.wantWarn, rec.Messages())
+			}
+			if !tt.wantWarn {
+				return
+			}
+			if !rec.HasAttr(msg, "mode", tt.wantMode) {
+				t.Errorf("permission warning mode attr = %v, want %q", rec.Messages(), tt.wantMode)
+			}
+			if rec.AttrContains(msg, "", "sk-sentinel") {
+				t.Errorf("permission warning echoes config content: %v", rec.Messages())
+			}
+		})
+	}
+}
+
+// TestPollIntervalFromFileDiagnostics pins the read-failure asymmetry of the
+// health probe's freshness-deadline source: an ABSENT config is the legitimate
+// no-config case and stays silent (the Docker HEALTHCHECK runs this every 30s,
+// so warning there would repeat forever on a first-boot host), while a config
+// that IS present and unusable WARNs that the marker-age deadline was dropped.
+// Both failure classes are covered - the read/parse failure and the
+// poll_interval decode failure - and neither may echo file content, since a
+// yaml error quotes the offending value.
+func TestPollIntervalFromFileDiagnostics(t *testing.T) {
+	const readMsg = "cannot read the config file for the health freshness deadline"
+	const decodeMsg = "cannot read poll_interval for the health freshness deadline"
+
+	t.Run("absent file stays silent", func(t *testing.T) {
+		rec := capture.Default(t)
+		if got := PollIntervalFromFile(filepath.Join(t.TempDir(), "absent.yaml")); got != 0 {
+			t.Fatalf("PollIntervalFromFile(absent) = %v, want 0", got)
+		}
+		if rec.Contains(readMsg) || rec.Contains(decodeMsg) {
+			t.Errorf("PollIntervalFromFile warned for an absent config: %v", rec.Messages())
+		}
+	})
+	t.Run("malformed present file warns", func(t *testing.T) {
+		rec := capture.Default(t)
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte("poll_interval: [\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := PollIntervalFromFile(path); got != 0 {
+			t.Fatalf("PollIntervalFromFile = %v, want 0", got)
+		}
+		if !rec.Contains(readMsg) || !rec.AttrContains(readMsg, "path", path) {
+			t.Errorf("PollIntervalFromFile log = %v, want the dropped-deadline warning naming the path", rec.Messages())
+		}
+	})
+	t.Run("wrong value type warns field-name-only", func(t *testing.T) {
+		rec := capture.Default(t)
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte("poll_interval: {h: secret-sentinel}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := PollIntervalFromFile(path); got != 0 {
+			t.Fatalf("PollIntervalFromFile = %v, want 0", got)
+		}
+		if !rec.Contains(decodeMsg) || !rec.AttrContains(decodeMsg, "field", "poll_interval") {
+			t.Errorf("PollIntervalFromFile log = %v, want the decode-failure warning naming poll_interval", rec.Messages())
+		}
+		if rec.AttrContains(decodeMsg, "", "secret-sentinel") {
+			t.Errorf("PollIntervalFromFile warning echoes the rejected value: %v", rec.Messages())
+		}
+	})
+}
+
+// TestPollIntervalFromFileDiscardsSchedulerDiagnostics pins the discard-logger
+// contract of the probe's parse: the clamp and fallback warnings the scheduler
+// emits for a below-minimum, above-maximum, negative, or unparseable
+// poll_interval belong to the daemon's startup log, which already carried them
+// once. The Docker HEALTHCHECK runs this probe every 30s, so re-emitting them
+// here would repeat a config diagnostic forever while telling the operator
+// nothing new.
+func TestPollIntervalFromFileDiscardsSchedulerDiagnostics(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{"below-minimum clamp", "30m", minPollInterval},
+		{"above-maximum clamp", "9000h", maxPollInterval},
+		{"negative falls back", "-5h", DefaultPollInterval},
+		{"unparseable falls back", "every day", DefaultPollInterval},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := capture.Default(t)
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte("poll_interval: \""+tt.value+"\"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got := PollIntervalFromFile(path); got != tt.want {
+				t.Fatalf("PollIntervalFromFile = %v, want %v", got, tt.want)
+			}
+			if n := len(rec.Messages()); n != 0 {
+				t.Errorf("PollIntervalFromFile logged %d record(s) for a %s, want none: %v", n, tt.name, rec.Messages())
+			}
+		})
+	}
+}
+
+// TestValidateWarnsOnNonTorznabABEndpoint covers the AnimeBytes half of the
+// endpoint-shape diagnostic: warnNonPerIndexerEndpoints enumerates both
+// per-indexer URL fields, and only the nyaa entry is exercised elsewhere, so
+// dropping the ab entry would silently cost the operator the config-time
+// signal for a pasted AB base while every test stayed green.
+func TestValidateWarnsOnNonTorznabABEndpoint(t *testing.T) {
+	base := Config{
+		RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k",
+		IndexerAPIKey:         strings.Repeat("a", 32),
+		IndexerProwlarrAPIKey: "pk",
+		IndexerABPasskey:      "passkey",
+		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api",
+	}
+	tests := []struct {
+		name     string
+		endpoint string
+		wantWarn bool
+	}{
+		{"bare Prowlarr origin warns", "http://prowlarr:9696", true},
+		{"Prowlarr REST API path warns", "http://prowlarr:9696/api/v1/search", true},
+		{"per-indexer Torznab path stays silent", "http://prowlarr:9696/2/api", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := capture.Default(t)
+			c := base
+			c.IndexerABTorznabURL = tt.endpoint
+			if err := c.Validate(); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			const msg = "torznab url is not a Prowlarr per-indexer Torznab endpoint"
+			got := rec.AttrContains(msg, "field", "indexer.ab_torznab_url")
+			if got != tt.wantWarn {
+				t.Errorf("ab endpoint-shape warning present = %v, want %v (messages %v)", got, tt.wantWarn, rec.Messages())
+			}
+		})
+	}
 }

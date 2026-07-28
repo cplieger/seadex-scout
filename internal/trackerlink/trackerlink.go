@@ -68,7 +68,7 @@ func Publish(tracker, rawURL string) string {
 	}
 	switch f.Class {
 	case urlform.ClassAbsolute:
-		if !usableAbsolute(&f) || !hostFormTargeted(f.Trimmed) {
+		if !usableAbsolute(&f) || !hostFormTargeted(&f) {
 			return ""
 		}
 		return httpsCanonical(f.Trimmed, f.Scheme)
@@ -101,7 +101,7 @@ func Publish(tracker, rawURL string) string {
 // exactly like Publish's relative form.
 func usableSchemelessHost(f *urlform.Form, baseURL string) string {
 	if _, hostOK := release.LookupTrackerByHost(f.Host); hostOK && !f.HasUserInfo {
-		if !schemelessPortOK(f.Trimmed) || !hostFormTargeted(f.Trimmed) {
+		if !schemelessPortOK(f.Trimmed) || !hostFormTargeted(f) {
 			return ""
 		}
 		return "https://" + f.Trimmed
@@ -115,7 +115,7 @@ func usableSchemelessHost(f *urlform.Form, baseURL string) string {
 // recovered Host and HasUserInfo for ClassSchemelessHost but not the
 // recovered Port, so the authority is re-parsed here ("//" + value makes
 // net/url read it as one) rather than trusting the label-free host fact
-// alone. Under urlform v1.1.0 no value actually reaches this gate with a
+// alone. Under urlform v1.2.0 no value actually reaches this gate with a
 // port: a colon before the first "/", "?" or "#" makes net/url read a
 // scheme ("nyaa.si:65536/x" classifies ClassHiddenHost with no recoverable
 // authority, since that scheme is not special) or fail outright ("first
@@ -172,16 +172,15 @@ func publishRelative(raw, labelBase string) string {
 // absent (tracker-relative AB paths are unaffected).
 //
 // The value must also LOOK like a torrent-page path: either more than one
-// non-empty path segment, or a query/fragment. This is the floor the chain was
-// missing (l-f88). It is the last resort of Publish's fallback ladder - an
-// unrecognized value is assumed tracker-relative - and it used to accept any
-// string without a leading colon, so a structureless token published as a
-// plausible-looking 404: the live catalogue carries exactly one such record (AB,
-// url "Chihiro" - a release-group name typed into the url field), which became
-// "https://animebytes.tv/Chihiro". The shape test keeps every real form (Nyaa's
-// "/view/1" has two segments, AB's "/torrents.php?...torrentid=..." carries a
-// query) and drops a bare token, so the caller can report an unpublishable URL
-// instead of emitting a link that goes nowhere.
+// non-empty path segment, or a query/fragment. This is the last resort of
+// Publish's fallback ladder - an unrecognized value is assumed
+// tracker-relative - so without the shape floor a structureless token (the
+// live catalogue carries one: tracker AB, url "Chihiro", a release-group name
+// typed into the url field) would publish a plausible-looking 404. The test
+// keeps every real form (Nyaa's "/view/1" has two segments, AB's
+// "/torrents.php?...torrentid=..." carries a query) and drops a bare token,
+// so the caller reports an unpublishable URL instead of a link that goes
+// nowhere.
 func usableRelative(raw, baseURL string) string {
 	if i := strings.Index(raw, ":"); i >= 0 && !strings.Contains(raw[:i], "/") {
 		return ""
@@ -232,9 +231,8 @@ func pathShaped(rooted string) bool {
 // plausible-404 publish the shape floor (l-f88) closed for the path-published
 // ladder, and the same reason to drop rather than publish, so the caller can
 // report an unpublishable URL instead. The value is parsed to locate that
-// authority, with a scheme supplied first when the value carries none (a
-// schemeless value has no "://" separator, and net/url cannot recover an
-// authority without a scheme).
+// authority, with a scheme supplied first when the classification records
+// none (net/url cannot recover an authority without one).
 //
 // The tail past the authority must name something a browser would resolve to
 // more than the front page. The reading is done on the PARSED, normalized URL
@@ -245,10 +243,13 @@ func pathShaped(rooted string) bool {
 // target - the same reading pathShaped already applies to the equivalent
 // relative spellings. A genuinely targeted root query
 // ("nyaa.si/?page=view&tid=1") is kept, which is why this arm is not a
-// pathShaped delegation. An unparsable value names no target either (this
+// pathShaped delegation; a fragment-only tail ("nyaa.si/#1167293") is NOT a
+// target, since a fragment is resolved client-side and leaves the browser on
+// the front page. An unparsable value names no target either (this
 // publisher drops what it cannot vouch for).
-func hostFormTargeted(trimmed string) bool {
-	if !strings.Contains(trimmed, "://") {
+func hostFormTargeted(f *urlform.Form) bool {
+	trimmed := f.Trimmed
+	if f.Scheme == "" {
 		// A schemeless value's authority is only recoverable by net/url once
 		// it carries a scheme; every canonical tracker is https, which is the
 		// scheme the schemeless branch publishes on.
@@ -258,7 +259,13 @@ func hostFormTargeted(trimmed string) bool {
 	if err != nil {
 		return false
 	}
-	if strings.Trim(u.RawQuery, "/?#") != "" || strings.Trim(u.Fragment, "/?#") != "" {
+	// A query can identify a torrent page on the tracker root
+	// ("nyaa.si/?page=view&tid=1"); a FRAGMENT cannot - it is resolved
+	// client-side, so it leaves the target the front page. A fragment on a
+	// real link is already covered by the path arm below, and the relative
+	// twin (pathShaped) refuses a fragment with no path segment for the same
+	// reason, so both spellings of the same upstream defect now drop.
+	if strings.Trim(u.RawQuery, "/?#") != "" {
 		return true
 	}
 	cleaned := path.Clean(u.Path)

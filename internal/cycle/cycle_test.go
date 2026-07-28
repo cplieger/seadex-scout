@@ -34,13 +34,13 @@ func (b boolCycler) Cycle(context.Context) bool { return bool(b) }
 // and a normal cycle outcome passes through unchanged.
 func TestRunCyclePanicShield(t *testing.T) {
 	ctx := context.Background()
-	if healthy := runCycle(ctx, panicCycler{}); healthy {
+	if healthy, _ := runCycle(ctx, panicCycler{}); healthy {
 		t.Error("runCycle(panicking cycle) = healthy, want unhealthy")
 	}
-	if healthy := runCycle(ctx, boolCycler(true)); !healthy {
+	if healthy, _ := runCycle(ctx, boolCycler(true)); !healthy {
 		t.Error("runCycle(healthy cycle) = unhealthy, want healthy")
 	}
-	if healthy := runCycle(ctx, boolCycler(false)); healthy {
+	if healthy, _ := runCycle(ctx, boolCycler(false)); healthy {
 		t.Error("runCycle(unhealthy cycle) = healthy, want unhealthy")
 	}
 }
@@ -56,7 +56,7 @@ func TestRunCyclePanicShield(t *testing.T) {
 func TestRunCyclePanicIsLoggedAtError(t *testing.T) {
 	rec := capture.Default(t)
 
-	if healthy := runCycle(context.Background(), panicCycler{}); healthy {
+	if healthy, _ := runCycle(context.Background(), panicCycler{}); healthy {
 		t.Error("runCycle(panicking cycle) = healthy, want unhealthy")
 	}
 
@@ -832,6 +832,55 @@ func TestNewExclusiveMkdirError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "create cycle lock dir") {
 		t.Errorf("err = %q, want it wrapped as create cycle lock dir", err)
+	}
+}
+
+// TestRecordRunHealthWithholdsAfterLateCancellation pins the recording
+// boundary's OWN cancellation check, for the one window no end-to-end path can
+// reach: runOnce returned a healthy nil result with the context still alive, and
+// the shutdown lands before the verdict is committed. Nothing may be published -
+// a result the shutdown reached first is not this process's to publish - so the
+// marker keeps its previous value and the invocation reports the uniform
+// interruption. Called directly because every RunOnce-level path arrives here
+// with a cycleErr that already carries the cancellation, which takes the other
+// arm of the same branch.
+func TestRecordRunHealthWithholdsAfterLateCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	path := seedSentinelMarker(t)
+
+	err := recordRunHealth(ctx, health.NewMarker(path), true, 1, nil)
+
+	if err == nil {
+		t.Fatal("recordRunHealth(cancelled ctx, healthy, nil) = nil, want the interruption error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want it to wrap context.Canceled (main classifies the interruption WARN, not ERROR)", err)
+	}
+	assertMarkerUntouched(t, path)
+}
+
+// TestNewExclusiveInstallsShutdownGate pins the gate NewExclusive wires onto
+// the shared coalescer, which is what stops a cycle from STARTING once shutdown
+// is signalled: a queued rerun (or a not-yet-started initial run) must not begin
+// new upstream work and new state.json/feed.json writes after SIGTERM. Asserted
+// against the coalescer directly because RunOnce's own pre-Run check short-
+// circuits every poll-level path before the gate is ever consulted, so no
+// end-to-end path observes whether the gate is installed at all.
+func TestNewExclusiveInstallsShutdownGate(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ex := testExclusiveIn(t, ctx, t.TempDir())
+
+	outcome, err := ex.RunOrSkip(func() error {
+		t.Error("the cycle ran after shutdown was signalled; NewExclusive's gate must refuse the run")
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("RunOrSkip(shutdown signalled) = %v, want nil", err)
+	}
+	if outcome != scheduler.OutcomeGated {
+		t.Errorf("outcome = %v, want %v: NewExclusive must install the shutdown gate", outcome, scheduler.OutcomeGated)
 	}
 }
 

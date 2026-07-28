@@ -706,7 +706,7 @@ func TestLoader_refreshCache_wholeMapShrinkGuardKeepsStale(t *testing.T) {
 // TestLoader_refreshCache_exactHalfShrinkAccepted pins the exact-half
 // acceptance boundary shared by acceptRefresh's whole-map shrink guard and
 // populationCollapsed: both use a strict below-half comparison
-// (count*degradation.ShrinkGuardFactor < prevCount), so a refresh retaining
+// (degradation.Shrunk's count*factor < prevCount), so a refresh retaining
 // EXACTLY half of the previous records (4 of 8, every guarded population
 // halved together) must be accepted and reset the rejection streak. The
 // existing shrink tests only pin below-half rejection and above-half

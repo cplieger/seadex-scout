@@ -381,3 +381,48 @@ func TestLoader_Load_sanitizesUnknownOverrideKeyControlChars(t *testing.T) {
 		t.Errorf("unknown keys logs = %v, want the ESC control replaced with a space: keys=[e vil]", rec.Messages())
 	}
 }
+
+// TestLoader_Load_oversizedOverrideIDsLogBounded pins the log-volume bound on
+// the oversized-override diagnostic, the sibling of the duplicate-ID bound:
+// more oversized records than maxLoggedDuplicateIDs logs only the fixed id
+// prefix while skipped still carries the exact total, so a pathological
+// overrides file cannot balloon the WARN into a record downstream log limits
+// would truncate or reject - and the operator keeps both the sample ids and
+// the true count needed to find the offending rows.
+func TestLoader_Load_oversizedOverrideIDsLogBounded(t *testing.T) {
+	overrides := filepath.Join(t.TempDir(), "overrides.json")
+	total := maxLoggedDuplicateIDs + 5
+	var b strings.Builder
+	b.WriteByte('[')
+	for id := 1; id <= total; id++ {
+		if id > 1 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"anilist_id":%d,"type":"movie","tmdb_movies":%s}`, id, overCapIDs())
+	}
+	b.WriteByte(']')
+	if err := os.WriteFile(overrides, []byte(b.String()), 0o644); err != nil {
+		t.Fatalf("write overrides: %v", err)
+	}
+	logger, logs := capture.New()
+	l := NewLoader(nil, "http://unused.invalid", overrides, time.Hour, logger)
+	if _, _, err := l.Load(context.Background(), freshCache()); err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if logs.CountExact("mapping: overrides with oversized id arrays skipped") != 1 {
+		t.Fatalf("Load logs = %v, want one oversized-overrides warning", logs.Messages())
+	}
+	wantIDs := make([]int, 0, maxLoggedDuplicateIDs)
+	for id := 1; id <= maxLoggedDuplicateIDs; id++ {
+		wantIDs = append(wantIDs, id)
+	}
+	if !logs.HasAttr("", "ids", fmt.Sprint(wantIDs)) {
+		t.Errorf("oversized-overrides logs = %v, want the first %d ids only", logs.Messages(), maxLoggedDuplicateIDs)
+	}
+	if !logs.HasAttr("", "skipped", strconv.Itoa(total)) {
+		t.Errorf("oversized skipped count logs = %v, want the exact total %d", logs.Messages(), total)
+	}
+	if !logs.HasAttr("", "max_ids", strconv.Itoa(maxOverrideIDsPerRecord)) {
+		t.Errorf("oversized max_ids logs = %v, want %d", logs.Messages(), maxOverrideIDsPerRecord)
+	}
+}

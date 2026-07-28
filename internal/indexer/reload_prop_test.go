@@ -23,15 +23,21 @@ func TestSnapshotInfoURLAllowedProperty(t *testing.T) {
 			strings.ToUpper(seadexInfoHost()),
 			"evil.example",
 			seadexInfoHost() + ".evil.example",
+			"relea\u017fes.moe",
+			"releases.mo\u0130",
 			"",
 		}).Draw(t, "host")
 		userinfo := rapid.SampledFrom([]string{"", "user@", "user:pass@"}).Draw(t, "userinfo")
 		path := rapid.StringMatching(`[A-Za-z0-9/_-]{0,32}`).Draw(t, "path")
 		raw := scheme + "://" + userinfo + host + "/" + path
 
-		want := (scheme == "http" || scheme == "https") &&
-			userinfo == "" && host != "" &&
-			strings.EqualFold(host, seadexInfoHost())
+		// Acceptance is ENUMERATED over the sampled hosts, never computed with a
+		// fold: an oracle built on strings.EqualFold (or on the production
+		// asciiLowerHost) agrees with the very bug l-f114 fixed, since EqualFold
+		// maps U+017F to 's'. Spelled out, the two homograph hosts fail a gate
+		// that reverts to that fold or drops urlform.IsASCIIHost.
+		canonical := host == seadexInfoHost() || host == strings.ToUpper(seadexInfoHost())
+		want := (scheme == "http" || scheme == "https") && userinfo == "" && canonical
 		got := snapshotInfoURLAllowed(raw, seadexInfoHost())
 		if got != want {
 			t.Fatalf("snapshotInfoURLAllowed(%q) = %v, want %v", raw, got, want)

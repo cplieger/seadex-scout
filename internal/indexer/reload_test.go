@@ -127,8 +127,10 @@ func TestReloadRecoversDegradationOnUnchangedSnapshot(t *testing.T) {
 
 	blockDir()
 	ix.cache.refresh(context.Background())
+	ix.cache.refresh(context.Background())
+	ix.cache.refresh(context.Background())
 	if got := rec.Count("indexer feed snapshot open failed"); got != 1 {
-		t.Fatalf("stat-failure warned %d times, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+		t.Fatalf("stat-failure warned %d times across three faulted reloads, want exactly 1 (the onset ladder warns once per onset, not once per request: an unreadable /config would otherwise WARN at request rate); log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
 	}
 
 	restoreDir()
@@ -594,17 +596,9 @@ func TestReloadSanitizesSnapshotInfoURLs(t *testing.T) {
 	if count := rec.Count(msg); count != 2 {
 		t.Errorf("blanked-InfoURL warnings = %d, want 2 (one per affected tracker feed): %v", count, rec.Messages())
 	}
-	lines := renderedLogRecords(rec)
 	for _, scope := range []string{upstreamNyaa, upstreamAB} {
-		found := false
-		for _, line := range lines {
-			if strings.Contains(line, msg) && strings.Contains(line, "tracker="+scope) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("no blanked-InfoURL warning attributed to tracker %q: %v", scope, lines)
+		if !rec.HasAttr(msg, "tracker", scope) {
+			t.Errorf("no blanked-InfoURL warning attributed to tracker %q: %v", scope, rec.Records())
 		}
 	}
 }

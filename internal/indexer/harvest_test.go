@@ -564,7 +564,7 @@ func TestHarvestResumesPagingAcrossRebuilds(t *testing.T) {
 		t.Fatalf("first-rebuild queries = %d, want %d (offsets 0/100/200)", mock.calls(), harvestShowPageCap)
 	}
 	snap := readSnapshotFile(t, path)
-	cp := decodeHarvestCheckpoint(snap.HarvestCursor)
+	cp, _ := decodeHarvestCheckpoint(snap.HarvestCursor)
 	if got := cp.Pages["nyaa:7"]; got != harvestShowPageCap {
 		t.Fatalf("checkpointed page = %d (cursor %q), want %d preserved for the cut-off group", got, snap.HarvestCursor, harvestShowPageCap)
 	}
@@ -585,7 +585,7 @@ func TestHarvestResumesPagingAcrossRebuilds(t *testing.T) {
 	if snap.Titles["nyaa:42"] != "Show S01 1080p BluRay [G]" {
 		t.Errorf("titles = %v, want the deep-page match cached on rebuild two", snap.Titles)
 	}
-	if cp := decodeHarvestCheckpoint(snap.HarvestCursor); len(cp.Pages) != 0 {
+	if cp, _ := decodeHarvestCheckpoint(snap.HarvestCursor); len(cp.Pages) != 0 {
 		t.Errorf("checkpoint pages = %v, want empty once the group is satisfied", cp.Pages)
 	}
 }
@@ -609,7 +609,7 @@ func TestHarvestPrunesStalePagesWithNoPendingGroups(t *testing.T) {
 	stale := encodeHarvestCheckpoint(harvestCheckpoint{Pages: map[string]int{"nyaa:7": 3}})
 	_, cursor := w.harvest.harvestTitles(t.Context(), map[string][]journalItem{}, map[string]string{},
 		func(int) EntryInfo { return EntryInfo{} }, stale)
-	if cp := decodeHarvestCheckpoint(cursor); len(cp.Pages) != 0 {
+	if cp, _ := decodeHarvestCheckpoint(cursor); len(cp.Pages) != 0 {
 		t.Fatalf("checkpoint pages = %v, want stale page state pruned on the no-pending rebuild", cp.Pages)
 	}
 
@@ -715,7 +715,7 @@ func TestMatchHarvestSkipsEmptyTitlesAndKeepsFirstTitle(t *testing.T) {
 		{Title: "   ", InfoURL: "https://nyaa.si/view/1"},
 		{Title: "Second Title", InfoURL: "https://nyaa.si/view/2"},
 	}
-	if n, _, _ := matchHarvest(results, "nyaa", index, titles, nil, nil); n != 0 {
+	if n, _, _, _ := matchHarvest(results, "nyaa", index, titles, nil, nil); n != 0 {
 		t.Errorf("matchHarvest = %d matches, want 0", n)
 	}
 	if _, ok := titles["nyaa:1"]; ok {
@@ -737,7 +737,7 @@ func TestMatchHarvestFailsClosedOnContradictoryIdentity(t *testing.T) {
 	results := []item{
 		{Title: "Tampered Title", InfoURL: "https://nyaa.si/view/1", GUID: "https://nyaa.si/view/2"},
 	}
-	if n, _, _ := matchHarvest(results, "nyaa", index, titles, nil, nil); n != 0 {
+	if n, _, _, _ := matchHarvest(results, "nyaa", index, titles, nil, nil); n != 0 {
 		t.Errorf("matchHarvest = %d matches, want 0 (contradictory identity fails closed)", n)
 	}
 	if len(titles) != 0 {
@@ -768,13 +768,42 @@ func TestMatchHarvestGradesRejectionsAgainstTheGroupsPendingKeys(t *testing.T) {
 		// DIFFERENT group: this show refused nothing of its own.
 		{Title: "Tampered Other Show", InfoURL: "https://nyaa.si/view/7", GUID: "https://nyaa.si/view/902"},
 	}
-	matched, rejected, pendingRejected := matchHarvest(results, upstreamNyaa, index, titles, nil, []string{"nyaa:1", "nyaa:2"})
+	matched, rejected, pendingRejected, unusable := matchHarvest(results, upstreamNyaa, index, titles, nil, []string{"nyaa:1", "nyaa:2"})
 	if matched != 0 || rejected != 3 || pendingRejected != 1 {
 		t.Errorf("matchHarvest = %d matched / %d rejected / %d pendingRejected, want 0/3/1 (all refused, only one of them this group's)",
 			matched, rejected, pendingRejected)
 	}
+	if unusable != 0 {
+		t.Errorf("unusable = %d, want 0 (every result carried an admissible title)", unusable)
+	}
 	if len(titles) != 0 {
 		t.Errorf("contradictory-identity results cached a title: %v", titles)
+	}
+}
+
+// TestMatchHarvestCountsUnusableTitlesNamingThisGroup pins the OTHER silent
+// drop's grade: a result whose page URL names one of this group's still-pending
+// releases but whose title cannot enter the persisted cache (blank or over
+// harvestMaxTitleLen) strands that release on its synthesized title, charges no
+// rejection, and does not mark the show contradicted - so it must be counted
+// separately or an upstream emitting unusable titles for our items burns every
+// rebuild's slice with no signal.
+func TestMatchHarvestCountsUnusableTitlesNamingThisGroup(t *testing.T) {
+	index := map[string]string{"nyaa:1": "nyaa:1", "nyaa:2": "nyaa:2"}
+	titles := map[string]string{}
+	results := []item{
+		{Title: strings.Repeat("x", harvestMaxTitleLen+1), InfoURL: "https://nyaa.si/view/1"},
+		// Not one of ours: an unusable title on an unrelated item carries no
+		// signal about this show.
+		{Title: "   ", InfoURL: "https://nyaa.si/view/900"},
+	}
+	matched, rejected, pendingRejected, unusable := matchHarvest(results, upstreamNyaa, index, titles, nil, []string{"nyaa:1", "nyaa:2"})
+	if matched != 0 || rejected != 0 || pendingRejected != 0 || unusable != 1 {
+		t.Errorf("matchHarvest = %d matched / %d rejected / %d pendingRejected / %d unusable, want 0/0/0/1",
+			matched, rejected, pendingRejected, unusable)
+	}
+	if len(titles) != 0 {
+		t.Errorf("an inadmissible title entered the cache: %v", titles)
 	}
 }
 
@@ -790,7 +819,7 @@ func TestMatchHarvestFailsClosedWhenURLAndHashResolveToDifferentReleases(t *test
 		Title: "Tampered Title", InfoURL: "https://nyaa.si/view/1",
 		GUID: "https://nyaa.si/view/1", InfoHash: hash,
 	}}
-	if n, _, _ := matchHarvest(results, "nyaa", index, titles, nil, nil); n != 0 {
+	if n, _, _, _ := matchHarvest(results, "nyaa", index, titles, nil, nil); n != 0 {
 		t.Errorf("matchHarvest = %d matches, want 0 (URL and hash resolving to different releases must fail closed)", n)
 	}
 	if len(titles) != 0 {
@@ -807,7 +836,7 @@ func TestMatchHarvestRejectsCrossScopeKey(t *testing.T) {
 	index := map[string]string{"ab:300": "ab:300"}
 	titles := map[string]string{}
 	results := []item{{Title: "AB title from the nyaa upstream", InfoURL: "https://animebytes.tv/torrent/300/group", GUID: "https://animebytes.tv/torrent/300/group"}}
-	if n, _, _ := matchHarvest(results, "nyaa", index, titles, nil, nil); n != 0 {
+	if n, _, _, _ := matchHarvest(results, "nyaa", index, titles, nil, nil); n != 0 {
 		t.Errorf("matchHarvest = %d matches, want 0 (a cross-scope key must not title the other tracker's item)", n)
 	}
 	if len(titles) != 0 {
@@ -830,7 +859,7 @@ func TestMatchHarvestRejectsOversizedTitle(t *testing.T) {
 		{Title: "Normal Title - S01 (1080p) [G]", InfoURL: "https://nyaa.si/view/2"},
 		{Title: atCap, InfoURL: "https://nyaa.si/view/3"},
 	}
-	if n, _, _ := matchHarvest(results, "nyaa", index, titles, nil, nil); n != 2 {
+	if n, _, _, _ := matchHarvest(results, "nyaa", index, titles, nil, nil); n != 2 {
 		t.Errorf("matchHarvest = %d matches, want 2 (the normal and the exactly-at-cap titles cache)", n)
 	}
 	if titles["nyaa:3"] != atCap {
@@ -1715,7 +1744,7 @@ func TestRotationStart(t *testing.T) {
 // reads, and both forms round-trip (the legacy form byte-identical).
 func TestHarvestCheckpointCodec(t *testing.T) {
 	t.Run("legacy bare cursor decodes as Last-only", func(t *testing.T) {
-		cp := decodeHarvestCheckpoint("nyaa:1500")
+		cp, _ := decodeHarvestCheckpoint("nyaa:1500")
 		if cp.Last != "nyaa:1500" || len(cp.Pages) != 0 {
 			t.Errorf("decode legacy = %+v, want Last-only with empty non-nil Pages", cp)
 		}
@@ -1724,19 +1753,24 @@ func TestHarvestCheckpointCodec(t *testing.T) {
 		}
 	})
 	t.Run("malformed JSON degrades to the empty checkpoint", func(t *testing.T) {
-		cp := decodeHarvestCheckpoint(`{"pages": {"nyaa:7": `)
+		cp, degraded := decodeHarvestCheckpoint(`{"pages": {"nyaa:7": `)
 		if cp.Last != "" || len(cp.Pages) != 0 || cp.Pages == nil {
 			t.Errorf("decode malformed = %+v, want the empty checkpoint with a non-nil Pages map", cp)
 		}
+		if degraded == "" {
+			// The rebaseline is only reportable if the decoder says WHY it
+			// happened; a silent one loses every deep-paging show's progress.
+			t.Error("degraded reason = \"\", want a non-empty reason for a malformed cursor")
+		}
 	})
 	t.Run("JSON object without pages gets a non-nil map", func(t *testing.T) {
-		cp := decodeHarvestCheckpoint(`{"last":"nyaa:7"}`)
+		cp, _ := decodeHarvestCheckpoint(`{"last":"nyaa:7"}`)
 		if cp.Last != "nyaa:7" || cp.Pages == nil || len(cp.Pages) != 0 {
 			t.Errorf("decode pages-less JSON = %+v, want Last kept and an allocated empty Pages", cp)
 		}
 	})
 	t.Run("non-positive persisted pages are dropped", func(t *testing.T) {
-		cp := decodeHarvestCheckpoint(`{"last":"ab:9","pages":{"nyaa:7":0,"ab:3":-2,"nyaa:9":4}}`)
+		cp, _ := decodeHarvestCheckpoint(`{"last":"ab:9","pages":{"nyaa:7":0,"ab:3":-2,"nyaa:9":4}}`)
 		if len(cp.Pages) != 1 || cp.Pages["nyaa:9"] != 4 {
 			t.Errorf("decode pages = %v, want only the positive entry kept", cp.Pages)
 		}
@@ -1746,19 +1780,19 @@ func TestHarvestCheckpointCodec(t *testing.T) {
 	})
 	t.Run("non-positive cursor ids are discarded in both arms", func(t *testing.T) {
 		for _, cursor := range []string{"nyaa:0", "nyaa:-1", "ab:0", "ab:-12"} {
-			if cp := decodeHarvestCheckpoint(cursor); cp.Last != "" {
+			if cp, _ := decodeHarvestCheckpoint(cursor); cp.Last != "" {
 				t.Errorf("decode legacy %q Last = %q, want it discarded (outside harvestCursorKey's domain)", cursor, cp.Last)
 			}
-			cp := decodeHarvestCheckpoint(`{"last":"` + cursor + `"}`)
+			cp, _ := decodeHarvestCheckpoint(`{"last":"` + cursor + `"}`)
 			if cp.Last != "" {
 				t.Errorf("decode JSON last %q = %q, want it discarded", cursor, cp.Last)
 			}
 		}
 		for _, cursor := range []string{"nyaa:1", "ab:154587"} {
-			if cp := decodeHarvestCheckpoint(cursor); cp.Last != cursor {
+			if cp, _ := decodeHarvestCheckpoint(cursor); cp.Last != cursor {
 				t.Errorf("decode legacy %q Last = %q, want it kept", cursor, cp.Last)
 			}
-			if cp := decodeHarvestCheckpoint(`{"last":"` + cursor + `"}`); cp.Last != cursor {
+			if cp, _ := decodeHarvestCheckpoint(`{"last":"` + cursor + `"}`); cp.Last != cursor {
 				t.Errorf("decode JSON last %q = %q, want it kept", cursor, cp.Last)
 			}
 		}
@@ -1768,15 +1802,15 @@ func TestHarvestCheckpointCodec(t *testing.T) {
 		// scope no upstream serves must be dropped at decode rather than
 		// re-persisted forever; the existing rows only cover the id half.
 		for _, cursor := range []string{"bogus:5", "NYAA:5", "ab :5", ":5", "nyaa"} {
-			if cp := decodeHarvestCheckpoint(cursor); cp.Last != "" {
+			if cp, _ := decodeHarvestCheckpoint(cursor); cp.Last != "" {
 				t.Errorf("decode legacy %q Last = %q, want it discarded (no such upstream scope)", cursor, cp.Last)
 			}
-			if cp := decodeHarvestCheckpoint(`{"last":"` + cursor + `"}`); cp.Last != "" {
+			if cp, _ := decodeHarvestCheckpoint(`{"last":"` + cursor + `"}`); cp.Last != "" {
 				t.Errorf("decode JSON last %q = %q, want it discarded (no such upstream scope)", cursor, cp.Last)
 			}
 		}
 		for _, cursor := range []string{"nyaa:5", "ab:154587"} {
-			if cp := decodeHarvestCheckpoint(cursor); cp.Last != cursor {
+			if cp, _ := decodeHarvestCheckpoint(cursor); cp.Last != cursor {
 				t.Errorf("decode legacy %q Last = %q, want it kept", cursor, cp.Last)
 			}
 		}
@@ -1788,13 +1822,14 @@ func TestHarvestCheckpointCodec(t *testing.T) {
 	})
 	t.Run("checkpoint with pages round-trips through encode and decode", func(t *testing.T) {
 		in := harvestCheckpoint{Last: "nyaa:7", Pages: map[string]int{"nyaa:7": 3}}
-		out := decodeHarvestCheckpoint(encodeHarvestCheckpoint(in))
+		out, _ := decodeHarvestCheckpoint(encodeHarvestCheckpoint(in))
 		if out.Last != in.Last || len(out.Pages) != 1 || out.Pages["nyaa:7"] != 3 {
 			t.Errorf("round-trip = %+v, want %+v", out, in)
 		}
 	})
 	t.Run("legacy cursor round-trips byte-identical", func(t *testing.T) {
-		if got := encodeHarvestCheckpoint(decodeHarvestCheckpoint("nyaa:1500")); got != "nyaa:1500" {
+		legacy, _ := decodeHarvestCheckpoint("nyaa:1500")
+		if got := encodeHarvestCheckpoint(legacy); got != "nyaa:1500" {
 			t.Errorf("legacy round-trip = %q, want byte-identical %q", got, "nyaa:1500")
 		}
 	})
@@ -1852,12 +1887,48 @@ func TestPendingHarvestRetiresAmbiguousInfoHash(t *testing.T) {
 		{Title: "Real Title 1", InfoURL: "https://nyaa.si/view/1", GUID: "https://nyaa.si/view/1", InfoHash: hash},
 		{Title: "Real Title 2", InfoURL: "https://nyaa.si/view/2", GUID: "https://nyaa.si/view/2", InfoHash: hash},
 	}
-	matched, rejected, _ := matchHarvest(results, upstreamNyaa, index, titles, showTitles, []string{"nyaa:1", "nyaa:2"})
+	matched, rejected, _, _ := matchHarvest(results, upstreamNyaa, index, titles, showTitles, []string{"nyaa:1", "nyaa:2"})
 	if matched != 2 || rejected != 0 {
 		t.Errorf("matchHarvest = %d matched / %d rejected, want 2/0 (a shared hash corroborates neither item, it contradicts nothing)", matched, rejected)
 	}
 	if titles["nyaa:1"] != "Real Title 1" || titles["nyaa:2"] != "Real Title 2" {
 		t.Errorf("titles = %v, want both items titled from their own page URLs", titles)
+	}
+}
+
+// TestPendingHarvestKeepsAnAmbiguousInfoHashRetired pins the third-occurrence
+// arm of the identity index: once a hash is proven to name more than one
+// pending item it stays retired, so a THIRD item publishing it cannot
+// re-register the slot. Without that memory the third item OWNS the hash, and
+// the first item's own honest Prowlarr result then reads as a contradictory
+// identity - permanently, since the index is rebuilt from the same journal
+// every rebuild.
+func TestPendingHarvestKeepsAnAmbiguousInfoHashRetired(t *testing.T) {
+	const hash = "143ed15e5e3df072ae91adaeb149973a887590dd"
+	info := func(int) EntryInfo { return EntryInfo{Title: "Show"} }
+	feeds := map[string][]journalItem{
+		upstreamNyaa: {
+			{item: item{Title: "synthetic", InfoHash: hash}, Key: "nyaa:1", AniListID: 7},
+			{item: item{Title: "synthetic", InfoHash: hash}, Key: "nyaa:2", AniListID: 7},
+			{item: item{Title: "synthetic", InfoHash: hash}, Key: "nyaa:3", AniListID: 7},
+		},
+	}
+	_, index, showTitles := pendingHarvest(feeds, map[string]string{}, info)
+	if owner, ok := index[hash]; ok {
+		t.Errorf("index[hash] = %q, want the hash still retired after a third pending item published it", owner)
+	}
+	titles := map[string]string{}
+	results := []item{{
+		Title: "Real Title 1", InfoURL: "https://nyaa.si/view/1",
+		GUID: "https://nyaa.si/view/1", InfoHash: hash,
+	}}
+	matched, rejected, _, _ := matchHarvest(results, upstreamNyaa, index, titles, showTitles,
+		[]string{"nyaa:1", "nyaa:2", "nyaa:3"})
+	if matched != 1 || rejected != 0 {
+		t.Errorf("matchHarvest = %d matched / %d rejected, want 1/0 (a retired hash corroborates nothing, it contradicts nothing)", matched, rejected)
+	}
+	if titles["nyaa:1"] != "Real Title 1" || len(titles) != 1 {
+		t.Errorf("titles = %v, want only nyaa:1 titled from its own page URL", titles)
 	}
 }
 
@@ -1869,11 +1940,11 @@ func TestPendingHarvestRetiresAmbiguousInfoHash(t *testing.T) {
 // target's committed seeds are all far below the cap.
 func TestHarvestCheckpointDropsOverCapCursor(t *testing.T) {
 	const payload = `{"last":"nyaa:7","pages":{"nyaa:7":3}}`
-	if cp := decodeHarvestCheckpoint(payload); cp.Last != "nyaa:7" || cp.Pages["nyaa:7"] != 3 {
+	if cp, _ := decodeHarvestCheckpoint(payload); cp.Last != "nyaa:7" || cp.Pages["nyaa:7"] != 3 {
 		t.Fatalf("decode under-cap checkpoint = %+v, want the cursor and its page kept", cp)
 	}
 	overcap := strings.Repeat(" ", maxPersistedCursorBytes) + payload
-	cp := decodeHarvestCheckpoint(overcap)
+	cp, _ := decodeHarvestCheckpoint(overcap)
 	if cp.Last != "" || len(cp.Pages) != 0 {
 		t.Errorf("decode over-cap checkpoint (%d bytes) = %+v, want the empty-checkpoint baseline", len(overcap), cp)
 	}
@@ -1987,7 +2058,7 @@ func TestMatchHarvestChoosesAmongABAliasesOnOnePage(t *testing.T) {
 	index := map[string]string{"ab:1167293": "ab:1167293"}
 	titles := map[string]string{}
 
-	matched, rejected, _ := matchHarvest(results, upstreamAB, index, titles,
+	matched, rejected, _, _ := matchHarvest(results, upstreamAB, index, titles,
 		map[string]string{"ab:1167293": "Frieren: Beyond Journey's End"}, []string{"ab:1167293"})
 
 	if matched != 1 || rejected != 0 {
@@ -2215,125 +2286,76 @@ func TestHarvestServesTheArrsVocabularyAlias(t *testing.T) {
 	}
 }
 
-// TestHarvestUnrelatedConflictsDoNotLatchTheScope pins the pending grade end to
-// end (d-gpt-u8-1). AnimeBytes answers the same broad series-level corpus to
-// every query, so ONE unrelated item in it whose comments and guid disagree is
-// refused once per show; grading that refusal as "this show resolved nothing"
-// let consecutiveFruitlessLatch otherwise-clean shows condemn the scope, and
-// the rotation's remaining shows (here the only one with a real match) kept
-// their synthesized, possibly unmatchable titles for the whole journal window.
-// A refusal that names none of the pending releases is not evidence about our
-// releases, so the run must keep resetting on the ordinary miss.
-func TestHarvestUnrelatedConflictsDoNotLatchTheScope(t *testing.T) {
+// TestHarvestRefusalsThatAreNotThisShowsDoNotLatchTheScope pins both halves of
+// the group-local pending grade: a contradictory result pending in NO group (the
+// original unrelated case, d-gpt-u8-1) and one pending only for a LATER group
+// (h-f35) are both ordinary misses for the show being queried, so neither may
+// charge the fruitless run. AnimeBytes answers the same broad series-level
+// corpus to every query, so such an item repeats across every otherwise
+// ordinary miss; charging it latched the scope after consecutiveFruitlessLatch
+// clean shows and left the one show whose real title was on offer unqueried,
+// with time and rotation still to spend.
+func TestHarvestRefusalsThatAreNotThisShowsDoNotLatchTheScope(t *testing.T) {
 	const (
 		latchMsg = "indexer title harvest: no show made progress; skipping this upstream's remaining shows this rebuild"
 		lastShow = "Show G"
 	)
-	// One item, self-contradictory (guid and comments name two DIFFERENT
-	// releases) and pending in neither: it is refused on every show's page.
-	stranger := `<item><title>Unrelated Stranger</title><guid>https://nyaa.si/view/900</guid>` +
-		`<comments>https://nyaa.si/view/901</comments>` +
-		`<enclosure url="http://prowlarr:9696/1/download?link=abc" length="1" type="application/x-bittorrent"/></item>`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/rss+xml")
-		items := []string{stranger}
-		if r.URL.Query().Get("q") == lastShow {
-			items = append(items, torznabItem("Show G Real Title", "https://nyaa.si/view/16"))
-		}
-		_, _ = io.WriteString(w, strings.ReplaceAll(torznabBody(items...), "http://prowlarr:9696", "http://"+r.Host))
-	}))
-	defer srv.Close()
+	tests := []struct {
+		name         string
+		strangerGUID string
+	}{
+		{name: "refusal pending in no group", strangerGUID: "https://nyaa.si/view/900"},
+		{name: "refusal pending only for a later group", strangerGUID: "https://nyaa.si/view/16"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Self-contradictory: guid and comments name two DIFFERENT releases.
+			stranger := `<item><title>Contradictory Stranger</title><guid>` + tc.strangerGUID + `</guid>` +
+				`<comments>https://nyaa.si/view/901</comments>` +
+				`<enclosure url="http://prowlarr:9696/1/download?link=abc" length="1" type="application/x-bittorrent"/></item>`
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/rss+xml")
+				items := []string{stranger}
+				if r.URL.Query().Get("q") == lastShow {
+					items = append(items, torznabItem("Show G Real Title", "https://nyaa.si/view/16"))
+				}
+				_, _ = io.WriteString(w, strings.ReplaceAll(torznabBody(items...), "http://prowlarr:9696", "http://"+r.Host))
+			}))
+			defer srv.Close()
 
-	// Seven shows (one more than consecutiveFruitlessLatch), the LAST of them -
-	// groups run in AniList-ID order - the one whose real title is on offer.
-	names := []string{"Show A", "Show B", "Show C", "Show D", "Show E", "Show F", lastShow}
-	feeds := map[string][]journalItem{upstreamNyaa: {}}
-	info := map[int]EntryInfo{}
-	for i, name := range names {
-		feeds[upstreamNyaa] = append(feeds[upstreamNyaa],
-			journalItem{item: item{Title: "synthetic"}, Key: "nyaa:" + strconv.Itoa(10+i), AniListID: 7 + i})
-		info[7+i] = EntryInfo{Title: name}
-	}
-	log, rec := capture.New()
-	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
-		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, log, srv.Client())
-	titles := map[string]string{}
-	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
+			// Seven shows (one more than consecutiveFruitlessLatch), the LAST of
+			// them - groups run in AniList-ID order - the one whose real title is
+			// on offer.
+			names := []string{"Show A", "Show B", "Show C", "Show D", "Show E", "Show F", lastShow}
+			feeds := map[string][]journalItem{upstreamNyaa: {}}
+			info := map[int]EntryInfo{}
+			for i, name := range names {
+				feeds[upstreamNyaa] = append(feeds[upstreamNyaa],
+					journalItem{item: item{Title: "synthetic"}, Key: "nyaa:" + strconv.Itoa(10+i), AniListID: 7 + i})
+				info[7+i] = EntryInfo{Title: name}
+			}
+			log, rec := capture.New()
+			w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+				NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
+			}}, log, srv.Client())
+			titles := map[string]string{}
+			stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
 
-	if stats.queries != len(names) {
-		t.Errorf("harvest queries = %d, want %d: a refusal that names none of our pending releases is not no-progress",
-			stats.queries, len(names))
-	}
-	if got := titles["nyaa:16"]; got != "Show G Real Title" {
-		t.Errorf("titles[nyaa:16] = %q, want the last show harvested (%v)", got, titles)
-	}
-	if rec.Contains(latchMsg) {
-		t.Errorf("scope latched on unrelated conflicts; log output:\n%s", strings.Join(rec.Messages(), "\n"))
-	}
-	// The refusals are still counted, so a tampered feed stays observable.
-	if stats.rejected != len(names) {
-		t.Errorf("harvest_rejected = %d, want %d (every page refused the stranger)", stats.rejected, len(names))
-	}
-}
-
-// TestHarvestOtherGroupsConflictsDoNotLatchTheScope pins h-f35: the pending
-// grade is GROUP-local, not merely index-global. AnimeBytes answers the same
-// broad series-level corpus to every query, so one self-contradictory item
-// belonging to a DIFFERENT pending show repeats across every otherwise ordinary
-// miss; charging it as "this show resolved nothing" latched the scope after
-// consecutiveFruitlessLatch clean shows and left the one show whose real title
-// was on offer unqueried, with time and rotation still to spend.
-func TestHarvestOtherGroupsConflictsDoNotLatchTheScope(t *testing.T) {
-	const (
-		latchMsg = "indexer title harvest: no show made progress; skipping this upstream's remaining shows this rebuild"
-		lastShow = "Show G"
-	)
-	// Self-contradictory (guid and comments name two different releases) AND
-	// pending - but pending for the LAST group only, never for the show being
-	// queried until the rotation reaches it.
-	foreign := `<item><title>Contradictory Item Of A Later Show</title><guid>https://nyaa.si/view/16</guid>` +
-		`<comments>https://nyaa.si/view/901</comments>` +
-		`<enclosure url="http://prowlarr:9696/1/download?link=abc" length="1" type="application/x-bittorrent"/></item>`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/rss+xml")
-		items := []string{foreign}
-		if r.URL.Query().Get("q") == lastShow {
-			items = append(items, torznabItem("Show G Real Title", "https://nyaa.si/view/16"))
-		}
-		_, _ = io.WriteString(w, strings.ReplaceAll(torznabBody(items...), "http://prowlarr:9696", "http://"+r.Host))
-	}))
-	defer srv.Close()
-
-	// Seven shows (one more than consecutiveFruitlessLatch); groups run in
-	// AniList-ID order, so the contradiction's owner is queried last.
-	names := []string{"Show A", "Show B", "Show C", "Show D", "Show E", "Show F", lastShow}
-	feeds := map[string][]journalItem{upstreamNyaa: {}}
-	info := map[int]EntryInfo{}
-	for i, name := range names {
-		feeds[upstreamNyaa] = append(feeds[upstreamNyaa],
-			journalItem{item: item{Title: "synthetic"}, Key: "nyaa:" + strconv.Itoa(10+i), AniListID: 7 + i})
-		info[7+i] = EntryInfo{Title: name}
-	}
-	log, rec := capture.New()
-	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
-		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
-	}}, log, srv.Client())
-	titles := map[string]string{}
-	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
-
-	if stats.queries != len(names) {
-		t.Errorf("harvest queries = %d, want %d: a refusal naming ANOTHER group's release is not this show's no-progress",
-			stats.queries, len(names))
-	}
-	if got := titles["nyaa:16"]; got != "Show G Real Title" {
-		t.Errorf("titles[nyaa:16] = %q, want the last show harvested (%v)", got, titles)
-	}
-	if rec.Contains(latchMsg) {
-		t.Errorf("scope latched on another group's conflicts; log output:\n%s", strings.Join(rec.Messages(), "\n"))
-	}
-	if stats.rejected != len(names) {
-		t.Errorf("harvest_rejected = %d, want %d (every page refused the contradictory item)", stats.rejected, len(names))
+			if stats.queries != len(names) {
+				t.Errorf("harvest queries = %d, want %d: a refusal naming none of THIS show's pending releases is not no-progress",
+					stats.queries, len(names))
+			}
+			if got := titles["nyaa:16"]; got != "Show G Real Title" {
+				t.Errorf("titles[nyaa:16] = %q, want the last show harvested (%v)", got, titles)
+			}
+			if rec.Contains(latchMsg) {
+				t.Errorf("scope latched on a refusal that was not this show's; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+			}
+			// The refusals are still counted, so a tampered feed stays observable.
+			if stats.rejected != len(names) {
+				t.Errorf("harvest_rejected = %d, want %d (every page refused the stranger)", stats.rejected, len(names))
+			}
+		})
 	}
 }
 

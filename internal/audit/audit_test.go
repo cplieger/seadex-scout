@@ -36,7 +36,7 @@ func TestVerdictFor(t *testing.T) {
 }
 
 func TestAuditNotOnSeaDex(t *testing.T) {
-	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"})
+	a := NewAuditor(Config{})
 
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrSonarr, ArrID: 1, Title: "Covered", TvdbID: 100, SeasonGroups: map[int][]string{1: {"x"}}, Groups: []string{"x"}, HasFile: true},
@@ -113,7 +113,7 @@ func TestAuditRowGroupsDoNotAliasTheSnapshot(t *testing.T) {
 		Record: mapping.Record{Type: "TV", TvdbID: 100, SeasonTvdb: 1},
 	}}
 
-	rep := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"}).Audit(matches, snap, idx, nil)
+	rep := NewAuditor(Config{}).Audit(matches, snap, idx, nil)
 
 	if len(rep.Rows) != 2 {
 		t.Fatalf("rows = %d, want 2 (the matched row plus the not_on_seadex row)", len(rep.Rows))
@@ -150,7 +150,7 @@ func TestAuditNotOnSeaDexHonorsExcludeSpecials(t *testing.T) {
 	})
 
 	rowsFor := func(exclude bool) map[string]bool {
-		a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe", ExcludeSpecials: exclude})
+		a := NewAuditor(Config{ExcludeSpecials: exclude})
 		rep := a.Audit(nil, snap, idx, nil)
 		got := map[string]bool{}
 		for i := range rep.Rows {
@@ -184,7 +184,7 @@ func TestAuditNotOnSeaDexHonorsExcludeSpecials(t *testing.T) {
 // known best, or a known library group against a NOGRP-only best torrent)
 // yields the same unverified verdict instead of have_unlisted.
 func TestAuditUnknownGroupEvidenceIsUnverified(t *testing.T) {
-	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"})
+	a := NewAuditor(Config{})
 	tests := []struct {
 		name      string
 		diskGroup string
@@ -236,7 +236,7 @@ func TestAuditUnknownGroupEvidenceIsUnverified(t *testing.T) {
 // skipped, an excluded special is skipped, and a nil snapshot/index adds no
 // not_on_seadex rows.
 func TestAuditRoutesWholeSeriesAndSkips(t *testing.T) {
-	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe", ExcludeSpecials: true})
+	a := NewAuditor(Config{ExcludeSpecials: true})
 	inLib := library.Item{
 		Arr: library.ArrSonarr, ArrID: 1, Title: "Absolute Run", TvdbID: 100,
 		SeasonGroups: map[int][]string{1: {"a&c"}, 2: {"zzz"}},
@@ -318,7 +318,7 @@ func TestAuditMislabeledAnimeBytesURLHiddenWhenOff(t *testing.T) {
 			{"AB on keeps it", true, true},
 		} {
 			t.Run(tc.sneakyURL+" "+tt.name, func(t *testing.T) {
-				a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe", AnimeBytes: tt.animeBytes})
+				a := NewAuditor(Config{AnimeBytes: tt.animeBytes})
 				rep := a.Audit(matches, snap, mapping.NewIndex(nil), nil)
 				var row *Row
 				for i := range rep.Rows {
@@ -385,7 +385,7 @@ func TestAuditMalformedPublicURLListedUnobtainable(t *testing.T) {
 		Record: mapping.Record{Type: "TV", TvdbID: 1200, SeasonTvdb: 1},
 	}}
 
-	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"})
+	a := NewAuditor(Config{})
 	rep := a.Audit(matches, snap, mapping.NewIndex(nil), nil)
 	var row *Row
 	for i := range rep.Rows {
@@ -478,7 +478,7 @@ func TestSortRowsOrdersByVerdictTitleSeasonAniListID(t *testing.T) {
 // resolved run (nil or empty set) carries none - so the section (and the
 // JSON key, via omitempty) only ever appears when something actually failed.
 func TestAuditIncompleteMappings(t *testing.T) {
-	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"})
+	a := NewAuditor(Config{})
 
 	rep := a.Audit(nil, nil, nil, map[int]struct{}{99: {}, 7: {}})
 
@@ -549,7 +549,7 @@ func TestRowQualifier(t *testing.T) {
 // only a Broken best reads have_unlisted, never have_best, mirroring the
 // daemon's exclusion - while an unwarned best still classifies as usual.
 func TestAuditCurationWarnedReleaseAnnotatedNotCounted(t *testing.T) {
-	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"})
+	a := NewAuditor(Config{})
 	rowFor := func(t *testing.T, torrents []seadex.Torrent) Row {
 		t.Helper()
 		item := &library.Item{
@@ -619,7 +619,7 @@ func TestAuditCurationWarnedReleaseAnnotatedNotCounted(t *testing.T) {
 // longer silently diverge. An obtainable best on the same entry still
 // classifies as usual and carries no marker.
 func TestAuditUnobtainableBestAnnotatedNotCounted(t *testing.T) {
-	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"})
+	a := NewAuditor(Config{})
 	rowFor := func(t *testing.T, torrents []seadex.Torrent) Row {
 		t.Helper()
 		item := &library.Item{
@@ -677,7 +677,7 @@ func TestAuditUnobtainableBestAnnotatedNotCounted(t *testing.T) {
 // catalogued, so this test fails if the covered mark ever moves below the
 // specials filter.
 func TestAuditExcludedSpecialMatchStillCoversItem(t *testing.T) {
-	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe", ExcludeSpecials: true})
+	a := NewAuditor(Config{ExcludeSpecials: true})
 	snap := &library.Snapshot{Items: []library.Item{{
 		Arr: library.ArrSonarr, ArrID: 1, Title: "SpecialOnly", TvdbID: 700,
 		Groups: []string{"g"}, HasFile: true,
@@ -709,7 +709,7 @@ func TestAuditExcludedSpecialMatchStillCoversItem(t *testing.T) {
 // absolute-numbered run) yields Season 0 on the row, so a negative season can
 // never reach the JSON wire shape (omitempty then drops the zero).
 func TestAssessClampsNegativeSeason(t *testing.T) {
-	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"})
+	a := NewAuditor(Config{})
 	item := &library.Item{
 		Arr: library.ArrSonarr, ArrID: 1, Title: "Absolute", TvdbID: 100,
 		SeasonGroups: map[int][]string{1: {"g"}}, Groups: []string{"g"}, HasFile: true,
@@ -729,7 +729,7 @@ func TestAssessClampsNegativeSeason(t *testing.T) {
 }
 
 func TestAuditNotOnSeaDexRowScopeAndEmptyCells(t *testing.T) {
-	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"})
+	a := NewAuditor(Config{})
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 1, Title: "UncoveredMovie", TmdbID: 400, HasFile: true},
 		{Arr: library.ArrSonarr, ArrID: 2, Title: "UncoveredSeries", TvdbID: 200, Groups: []string{"grp"}, HasFile: true},
@@ -751,7 +751,7 @@ func TestAuditNotOnSeaDexRowScopeAndEmptyCells(t *testing.T) {
 }
 
 func TestAssessCarriesEntryStateFlags(t *testing.T) {
-	a := NewAuditor(Config{SeaDexBaseURL: "https://releases.moe"})
+	a := NewAuditor(Config{})
 	item := &library.Item{
 		Arr: library.ArrSonarr, ArrID: 1, Title: "Flagged", TvdbID: 100,
 		SeasonGroups: map[int][]string{0: {"g"}}, Groups: []string{"g"}, HasFile: true,

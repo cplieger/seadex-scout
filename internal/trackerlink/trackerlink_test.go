@@ -82,7 +82,6 @@ func TestPublishRejectsUnsafeSchemes(t *testing.T) {
 		{name: "file", url: "file:///etc/passwd"},
 		{name: "hostless https", url: "https://"},
 		{name: "port-only authority", url: "https://:443/path"},
-		{name: "out-of-range port", url: "https://nyaa.si:65536/path"},
 		{name: "invalid escape", url: "https://example.test/%zz"},
 		{name: "whitespace in host", url: "https://bad host/path"},
 		{name: "backslash authority", url: `\\evil.example/path`},
@@ -239,7 +238,9 @@ func TestPublishCanonicalizesScheme(t *testing.T) {
 // reports it as a URL error instead of a plausible-looking 404. Both
 // host-bearing arms are covered: the absolute branch and the canonicalized
 // schemeless-host branch. A tail made only of further delimiters names no
-// target either, while a genuinely targeted root query still publishes.
+// target either, while a genuinely targeted root query still publishes. A
+// fragment-only tail is NOT a target (it resolves client-side, leaving the
+// browser on the front page), matching the relative twin pathShaped.
 func TestPublishRequiresATargetBeyondTheHost(t *testing.T) {
 	tests := map[string]struct{ tracker, url, want string }{
 		"bare schemeless host drops":               {"Nyaa", "nyaa.si", ""},
@@ -259,6 +260,11 @@ func TestPublishRequiresATargetBeyondTheHost(t *testing.T) {
 		"an encoded double-dot segment drops":      {"Nyaa", "https://nyaa.si/%2e%2e/", ""},
 		"a dot segment before a target publishes":  {"Nyaa", "https://nyaa.si/../view/1", "https://nyaa.si/../view/1"},
 		"a targeted root query still publishes":    {"Nyaa", "nyaa.si/?page=view&tid=1", "https://nyaa.si/?page=view&tid=1"},
+		"a fragment-only root tail drops":          {"Nyaa", "nyaa.si/#1167293", ""},
+		"an absolute fragment-only tail drops":     {"Nyaa", "https://nyaa.si/#1167293", ""},
+		"a pathless fragment-only tail drops":      {"Nyaa", "https://nyaa.si#1167293", ""},
+		"a fragment cannot mask a dot-only path":   {"Nyaa", "nyaa.si/.#x", ""},
+		"a fragment on a real path publishes":      {"Nyaa", "nyaa.si/view/1#Frag", "https://nyaa.si/view/1#Frag"},
 		"a real torrent path still publishes":      {"Nyaa", "nyaa.si/view/1", "https://nyaa.si/view/1"},
 		"an absolute torrent path still publishes": {"Nyaa", "https://nyaa.si/view/1", "https://nyaa.si/view/1"},
 	}

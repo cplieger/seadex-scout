@@ -62,7 +62,12 @@ func feedEntryInfo(idx *mapping.Index, lib *library.Snapshot, memo match.Memo) i
 			info.Title = title
 			info.Year = year
 		}
-		if !ok || rec.Type == "" {
+		// The memo's typing fills a gap; it never overrides the record's own
+		// arr routing. An untyped record that still routes an id routes the
+		// SERIES arm (RoutedIDs), which is Fribb/override evidence that the
+		// entry is a series - so a stale AniList MOVIE format must not send it
+		// to Movies/2000, where Sonarr never sees it.
+		if !ok || (rec.Type == "" && !rec.HasArrIdentifier()) {
 			applyMemoTyping(memo, alID, &info)
 		}
 		return info

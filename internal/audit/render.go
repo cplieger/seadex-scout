@@ -121,7 +121,9 @@ const annotationLegend = "Scope annotations: `approx` - the comparison used a co
 	"SeaDex best annotations: `(broken)` / `(incomplete)` are SeaDex curation warnings, `(url error)` means " +
 	"the SeaDex record carries a link value that is not a usable tracker URL (report it upstream), and " +
 	"`(unobtainable)` means the release has no usable link or sits on a tracker you do not use. An " +
-	"annotated release stays listed but never drives the verdict and is never offered as a link.\n\n"
+	"annotated release stays listed but never drives the verdict and is never offered as a link. " +
+	"`(N hidden: animebytes)` means N of the entry's releases were withheld because you have " +
+	"`animebytes` off, so an empty best column there means \"not on a tracker you use\", not \"SeaDex lists no best\".\n\n"
 
 // incompleteHeader is the incomplete-mapping section's Markdown heading text,
 // also named by the header caveat so a reader can find the section.
@@ -166,8 +168,24 @@ func writeRow(b *strings.Builder, row *Row) {
 		escapeCell(row.Title),
 		scopeCell(row),
 		escapeCell(orEmpty(strings.Join(row.CurrentGroups, ", "))),
-		escapeCell(orEmpty(strings.Join(displayBestGroups(row.Releases), ", "))),
+		bestCell(row),
 		links(row))
+}
+
+// bestCell renders the SeaDex best column: the displayed best groups, plus the
+// count of releases the operator's AnimeBytes toggle withheld. Row.
+// HiddenAnimeBytes exists so a row whose only bests are AnimeBytes releases is
+// distinguishable from an entry SeaDex lists no best for - both otherwise show
+// an empty best column, no qualifier and a have_unlisted verdict - and until
+// now it reached only the JSON copy and the slog line, leaving the Markdown
+// artifact (the human-facing half of the pair) unable to make that
+// distinction. The count leaks no AnimeBytes group, tracker, or link.
+func bestCell(row *Row) string {
+	groups := escapeCell(orEmpty(strings.Join(displayBestGroups(row.Releases), ", ")))
+	if row.HiddenAnimeBytes == 0 {
+		return groups
+	}
+	return groups + " (" + strconv.Itoa(row.HiddenAnimeBytes) + " hidden: animebytes)"
 }
 
 // scopeCell renders the scope for the Markdown table, appending the comparison
@@ -568,6 +586,12 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	// attribute keeps the line honest about what may not survive a power loss.
 	mdDurable, err := writeReportHalf(ctx, "markdown", dir, mdPath, []byte(renderMarkdown(safe)), log)
 	if err != nil {
+		// The JSON half is already durably committed, so this failure publishes
+		// half a pair: name the surviving basename, or the operator reading the
+		// markdown error cannot tell the machine-readable half landed and is now
+		// a pair-less file the app never deletes (reports are pruned by hand).
+		log.Warn("report markdown half failed; the json half is published without it",
+			"json", filepath.Base(jsonPath), "anime", len(r.Rows), "error", err)
 		return err
 	}
 	// Basenames only: the stem is timestamp-derived (never dir-derived), so
@@ -633,15 +657,11 @@ func reportPairStem(ctx context.Context, dir string, generatedAt time.Time) (str
 // filesystem. Production always uses atomicfile.WriteFile.
 var atomicWriteFile = atomicfile.WriteFile
 
-// writeAtomic writes data to path atomically and returns atomicfile's Result
-// so the caller can gate on durability: atomicfile deliberately reports a
-// rename whose parent-directory fsync failed as Result{Durable:false} with a
-// NIL error, and the report pair's JSON-first ordering is only a persistence
-// guarantee when that first directory update survives a crash. atomicfile
-// itself emits the one WARN carrying the causal fsync error (WithLogger keeps
-// it on the report logger), so no second app-side record is layered on top;
-// the caller reads the flag off the Result and decides the ORDERING, never a
-// failure (see writeReportHalf).
+// writeAtomic writes data to path atomically under the report pair's fixed
+// option set (the report logger, owner-only dir and file modes) and returns
+// atomicfile's whole Result rather than just an error, because the caller gates
+// the pair ORDERING on Result.Durable. writeReportHalf owns that policy and
+// documents the Durable=false-with-a-nil-error contract it turns on.
 func writeAtomic(ctx context.Context, path string, data []byte, log *slog.Logger) (atomicfile.Result, error) {
 	return atomicWriteFile(ctx, path, data,
 		atomicfile.WithLogger(log),
@@ -675,42 +695,25 @@ func writeReportHalf(ctx context.Context, stage, dir, path string, data []byte, 
 
 // --- Sanitizers + link/cell escaping ---
 
-// linkURLEscaper backs escapeLinkURL; built once, safe for concurrent use.
-var linkURLEscaper = strings.NewReplacer(
-	" ", "%20",
-	"\t", "%09",
-	"\\", "%5C",
-	"`", "%60",
-	"\"", "%22",
-	"'", "%27",
-	"\v", "%0B",
-	"\f", "%0C",
-	"(", "%28",
-	")", "%29",
-	"<", "%3C",
-	">", "%3E",
-	"|", "%7C",
-	"\n", "%0A",
-	"\r", "%0D",
-)
-
 // escapeLinkURL percent-encodes the characters in a URL that would break out
-// of a Markdown link's ](...) destination or the surrounding table cell/row:
-// parentheses, angle brackets, pipes, backslash and backtick (the CommonMark
-// inline metacharacters still active inside a link destination), both quotes
-// (inert in CommonMark itself, but attribute-context defense for a downstream
-// MD-to-HTML conversion emitting the destination into href="..."), and every
-// ASCII whitespace form (space, tab, vertical tab, form feed, CR, LF). It also
+// of a Markdown link's ](...) destination or the surrounding table cell/row.
+// The ASCII half is logattr.EscapeLinkDestination, the one home this policy
+// shares with internal/notify's alert attributes: parentheses, angle brackets,
+// pipes, backslash and backtick (the CommonMark inline metacharacters still
+// active inside a link destination), both quotes (inert in CommonMark itself,
+// but attribute-context defense for a downstream MD-to-HTML conversion emitting
+// the destination into href="..."), and every ASCII whitespace form (space,
+// tab, vertical tab, form feed, CR, LF). On top of it this function also
 // percent-encodes the above-ASCII policy runes url.Parse accepts but a
 // terminal or Markdown viewer must never receive raw — C1 controls
 // (U+0080-U+009F, terminal-escape introducers), the full Unicode Bidi_Control
 // set (visual reordering of the rendered links cell), and the U+2028/U+2029
 // line separators — classified by runesafe.IsUnsafeNonASCII (the shared
-// policy's above-ASCII subset; the escaper's ASCII replacements above cover
-// the rest). Percent-encoding is semantically transparent for a URL, so an
+// policy's above-ASCII subset; the escaper's ASCII replacements cover the
+// rest). Percent-encoding is semantically transparent for a URL, so an
 // ordinary destination is unchanged.
 func escapeLinkURL(u string) string {
-	u = linkURLEscaper.Replace(u)
+	u = logattr.EscapeLinkDestination(u)
 	var b strings.Builder
 	for _, r := range u {
 		switch {
@@ -751,8 +754,6 @@ var cellEscaper = strings.NewReplacer(
 	"|", "&#124;",
 	"[", "&#91;",
 	"]", "&#93;",
-	"\n", " ",
-	"\r", " ",
 )
 
 // sanitizeDisplayText makes an untrusted string safe for the machine-readable
@@ -928,16 +929,16 @@ func sanitizedIncomplete(inc []IncompleteEntry) []IncompleteEntry {
 // backslash in the text cannot cancel an inserted escape (\] or \| could
 // otherwise break out of a link label or table cell). It neutralizes the raw
 // HTML metacharacters (& < >) so untrusted text such as <img ...> cannot
-// survive as raw Markdown HTML, encodes the table/link delimiters (| [ ]) and
-// the backslash itself, and flattens CR/LF. strings.NewReplacer performs a
+// survive as raw Markdown HTML, and encodes the table/link delimiters (| [ ])
+// and the backslash itself. strings.NewReplacer performs a
 // single non-overlapping left-to-right pass and never re-scans its replacement
 // output, so encoding & first does not double-encode the entities it inserts.
-// A runesafe.Sanitize pre-pass removes the remaining C0/DEL/C1 control
-// characters, the full Unicode Bidi_Control set, and the U+2028/U+2029 line
-// separators (terminal-escape, visual-reordering, and line-break smuggling);
-// CR/LF survive that pass by design and are flattened by cellEscaper here.
+// A runesafe.SanitizeSingleLine pre-pass removes the C0/DEL/C1 control
+// characters, the full Unicode Bidi_Control set, the U+2028/U+2029 line
+// separators (terminal-escape, visual-reordering, and line-break smuggling)
+// AND CR/LF, which a Markdown table cell - a single-line sink - cannot carry.
 func escapeCell(s string) string {
-	return cellEscaper.Replace(runesafe.Sanitize(s))
+	return cellEscaper.Replace(runesafe.SanitizeSingleLine(s))
 }
 
 // orEmpty returns the empty-cell marker for a blank string.

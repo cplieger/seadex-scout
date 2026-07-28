@@ -254,8 +254,9 @@ func TestDecideTriStateEvidence(t *testing.T) {
 // TestDecideSeasonLabel pins the shared non-negative season label the
 // consumers stamp on their output (Decision.Season): a positive Fribb TVDB
 // season passes through, and a zero or negative mapping (Fribb uses -1 for
-// absolute-numbered runs) is clamped to 0 rather than leaking a negative
-// label into the daemon findings and audit rows.
+// absolute-numbered runs) never reaches the season scope at all, so the
+// label stays 0 instead of leaking a negative number into the daemon
+// findings and audit rows.
 func TestDecideSeasonLabel(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -265,7 +266,7 @@ func TestDecideSeasonLabel(t *testing.T) {
 		want       int
 	}{
 		{"positive season passes through", "TV", library.ArrSonarr, 2, 2},
-		{"negative absolute-numbered mapping clamps to 0", "TV", library.ArrSonarr, -1, 0},
+		{"negative absolute-numbered mapping scopes whole-series and carries 0", "TV", library.ArrSonarr, -1, 0},
 		{"movie carries 0", "MOVIE", library.ArrRadarr, 0, 0},
 		{"special carries 0", "OVA", library.ArrSonarr, 0, 0},
 		{"movie ignores irrelevant positive season metadata", "MOVIE", library.ArrRadarr, 2, 0},

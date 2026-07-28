@@ -69,12 +69,15 @@ type Match struct {
 func (m *Match) InLibrary() bool { return m.Item != nil }
 
 // Coverage counts ID-mapping outcomes per arr for the cycle-complete coverage
-// log line. Hits counts entries whose Fribb record carries a usable arr id -
-// the ID bridge actually resolved an arr id - whether or not the item is in
-// the library (a resolved id absent from the library is a missing item, not a
-// mapping gap). Unmapped counts every entry the ID bridge could not resolve:
-// no Fribb record at all, a record without a usable arr id (counted here even
-// when the AniList title fallback links it), or an unusable AniList id.
+// log line. Hits counts entries whose record carries a usable arr id - the ID
+// bridge resolved an arr id - whether or not the item is in the library (a
+// resolved id absent from the library is a missing item, not a mapping gap).
+// An untyped record whose AniList format makes an id it ALREADY carried usable
+// counts here too (matchIDLessEntry's re-entry): the id resolved, even though
+// the typing came from AniList. Unmapped counts every entry the ID bridge could
+// not resolve: no Fribb record at all, a record still without a usable arr id
+// (counted here even when the AniList title fallback links it), or an unusable
+// AniList id.
 type Coverage struct {
 	Hits     map[string]int
 	Unmapped map[string]int
@@ -301,11 +304,12 @@ func (r *matchRun) matchUnmappedEntry(ctx context.Context, e *seadex.Entry) Matc
 // longer id-less and re-enters matchMappedEntry's ID-first branch.
 func (r *matchRun) matchIDLessEntry(ctx context.Context, e *seadex.Entry, rec *mapping.Record, arr string) Match {
 	// needsLookup under a present record means the record is id-less (see
-	// aniListNeed): the ID bridge by definition could not resolve an arr id,
-	// so the entry counts as Unmapped even when the AniList title fallback
-	// below links it - keeping the cycle line's "mapped" an honest count of
-	// actual ID-bridge resolutions. The title is the only remaining link to
-	// the arr item, so consult AniList.
+	// aniListNeed): the ID bridge could not resolve an arr id from the record
+	// AS LOADED, so unless the AniList typing below makes one of the record's
+	// own ids usable (the re-entry, which counts as a Hit), the entry counts as
+	// Unmapped even when the AniList title fallback links it - keeping the cycle
+	// line's "mapped" an honest count of ID resolutions. The title is the only
+	// remaining link to the arr item, so consult AniList.
 	media, ok := r.lookupAniList(ctx, e.AniListID)
 	if !ok {
 		r.cov.Unmapped[arr]++
@@ -492,19 +496,32 @@ func arrItem(it *library.Item, arr string) *library.Item {
 	return nil
 }
 
+// narrowByYear applies the AniList year constraint to a title-fallback
+// candidate set, returning the set unchanged when the year is unknown. When the
+// constraint rejects every candidate the result is empty, which findByTitle
+// treats as a miss - and that arm is logged here, because it is the actionable
+// one: the title DID resolve library items and only the years disagreed (a
+// December or split-cour premiere routinely differs by one), so the remedy is an
+// overrides.json entry pinning the arr id. Counts and the AniList year only: no
+// untrusted string crosses the log boundary.
+func narrowByYear(candidates []*library.Item, year int, log *slog.Logger) []*library.Item {
+	if year == 0 {
+		return candidates
+	}
+	narrowed := filterByYear(candidates, year)
+	if len(narrowed) == 0 && len(candidates) > 0 {
+		log.Debug("title fallback year mismatch, treating as unmapped",
+			"anilist_year", year, "candidates", len(candidates))
+	}
+	return narrowed
+}
+
 // findByTitle performs the conservative title fallback: it collects candidates
 // matching any of the titles (restricted to the arr when known), narrows by
 // year when known, and returns a match only when exactly one candidate remains.
-// An ambiguous set is logged and treated as a miss.
+// Both miss arms - an over-constrained year and an ambiguous set - are logged.
 func (li *LibIndex) findByTitle(titles []string, year int, arr string, log *slog.Logger) *library.Item {
-	candidates := li.titleCandidates(titles, arr)
-	if year != 0 {
-		narrowed := filterByYear(candidates, year)
-		if len(narrowed) == 0 {
-			return nil
-		}
-		candidates = narrowed
-	}
+	candidates := narrowByYear(li.titleCandidates(titles, arr), year, log)
 	switch len(candidates) {
 	case 1:
 		return candidates[0]

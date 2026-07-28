@@ -1,6 +1,8 @@
 package align
 
 import (
+	"slices"
+
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/release"
@@ -104,16 +106,21 @@ const (
 // because the audit annotates the entry state even on a no-file row the
 // daemon silences (file presence wins the Outcome linearization).
 type Decision struct {
+	// Groups is the group set the unit was judged against - the scoped set or
+	// the whole-series union - and is always owned by the caller: Decide never
+	// returns a slice aliasing the library snapshot, whichever branch fired.
 	Groups   []string
 	Kind     ScopeKind
 	Standing Standing
 	Outcome  Outcome
 	// Season is the shared non-negative TVDB season label both consumers
-	// stamp on their output: max(0, Record.SeasonTvdb) for a ScopeSeason
-	// comparison, and 0 for every other scope. An ordinary movie, a
-	// season-0 special, and a whole-series comparison carry 0 whatever the
-	// record's season field holds, so a scope that has no season number
-	// cannot stamp a stale one.
+	// stamp on their output: Record.SeasonTvdb for a ScopeSeason comparison
+	// (positive by construction - that scope is exactly
+	// Record.HasMappedSeason()), and 0 for every other scope. An ordinary
+	// movie, a season-0 special, and a whole-series comparison carry 0
+	// whatever the record's season field holds, so a scope that has no
+	// season number cannot stamp a stale one, and a negative Fribb mapping
+	// (-1 for an absolute-numbered run) never reaches the season branch.
 	Season int
 	Approx bool
 	NoBest bool
@@ -133,7 +140,10 @@ func Decide(item *library.Item, rec *mapping.Record, best, alt []string) Decisio
 	scoped := scope(item, rec)
 	d := Decision{Kind: scoped.Kind, NoBest: len(best) == 0}
 	if scoped.Kind == ScopeSeason {
-		d.Season = max(0, rec.SeasonTvdb)
+		// scope only returns ScopeSeason for rec.HasMappedSeason(), which IS
+		// SeasonTvdb > 0, so the label is positive by construction; every
+		// other scope leaves it 0.
+		d.Season = rec.SeasonTvdb
 	}
 	if scoped.Kind == ScopeWholeSeries {
 		// An absolute-numbered run / title-only match has no per-season Fribb
@@ -147,7 +157,11 @@ func Decide(item *library.Item, rec *mapping.Record, best, alt []string) Decisio
 		d.Groups, d.Approx = s.Groups, s.Approx
 		d.Standing = wholeSeriesStanding(s)
 	} else {
-		d.Groups, d.Approx = scoped.Groups, scoped.Approx
+		// Cloned at the edge: scope() takes the single-unit groups verbatim from
+		// the library snapshot a concurrent daemon cycle owns and rebuilds, so
+		// the exported Decision must not be a window into it. The whole-series
+		// branch above already builds a fresh slice.
+		d.Groups, d.Approx = slices.Clone(scoped.Groups), scoped.Approx
 		d.Standing = unitStanding(scoped.HasFile, scoped.Groups, best, alt)
 	}
 	d.Outcome = outcomeOf(d.Standing, len(d.Groups), d.NoBest)

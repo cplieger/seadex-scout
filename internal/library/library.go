@@ -265,6 +265,7 @@ func (w *Walker) walkSonarr(ctx context.Context) ([]Item, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	w.warnEmptyArrList(ArrSonarr, len(series))
 	includeIDs, excludeIDs, err := w.resolveTags(ctx, w.sonarr.GetTags)
 	if err != nil {
 		return nil, 0, err
@@ -389,6 +390,21 @@ func (w *Walker) fetchSeriesItem(ctx context.Context, s *arrapi.Series) (*Item, 
 		return &item, true
 	}
 	item := w.seriesItem(s, files)
+	// Sonarr's series list declared episode files for this series but its
+	// episode-file list came back empty, so the item necessarily compares as
+	// fileless (seriesItem's HasFile is len(files) > 0) - which reads
+	// downstream as a genuine no-file library state: the daemon falls silent
+	// and resolves the series' prior finding, and the report renders verdict
+	// no_file. Record the degradation instead of letting it look like a
+	// genuinely fileless series, the same posture walkRadarr takes for its
+	// no-file-payload sibling. The two facts come from different responses
+	// (the series list once at the top of the walk, the episode files per
+	// series later), so a whole series' files legitimately deleted mid-walk
+	// lands here too - hence a WARN, not a failure or a Failed placeholder.
+	if s.Statistics != nil && s.Statistics.EpisodeFileCount > 0 && len(files) == 0 {
+		w.log.Warn("sonarr series declares episode files but its episode-file list came back empty; it compares as fileless",
+			"series", logattr.Cap(s.Title), "id", s.ID, "declared_files", s.Statistics.EpisodeFileCount)
+	}
 	return &item, false
 }
 
@@ -398,6 +414,7 @@ func (w *Walker) walkRadarr(ctx context.Context) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
+	w.warnEmptyArrList(ArrRadarr, len(movies))
 	includeIDs, excludeIDs, err := w.resolveTags(ctx, w.radarr.GetTags)
 	if err != nil {
 		return nil, err
@@ -413,13 +430,18 @@ func (w *Walker) walkRadarr(ctx context.Context) ([]Item, error) {
 			// Radarr says the movie has a file but sent no file payload: the
 			// item necessarily compares as fileless (movieItem's HasFile AND),
 			// so record the degradation instead of letting it look like a
-			// genuinely fileless movie.
+			// genuinely fileless movie. The aggregate WARN below carries the
+			// count; this Debug line names WHICH movie, the identification the
+			// Sonarr sibling's per-series WARN already provides (title bounded
+			// by logattr.Cap - it is arr-supplied text).
 			noPayload++
+			w.log.Debug("radarr movie reports a file but carries no file payload",
+				"movie", logattr.Cap(movies[i].Title), "id", movies[i].ID)
 		}
 		items = append(items, w.movieItem(&movies[i]))
 	}
 	if noPayload > 0 {
-		w.log.Warn("radarr movies report a file but carry no file payload; they compare as fileless",
+		w.log.Warn("radarr movies report a file but carry no file payload; they compare as fileless - re-scan those movies in Radarr (the per-movie ids are logged at debug level)",
 			"movies", noPayload, "kept", len(items))
 	}
 	w.warnFilteredEmpty(ArrRadarr, len(movies), len(items), includeIDs != nil || excludeIDs != nil)
@@ -505,6 +527,22 @@ func keepByTags(itemTags []int, includeIDs, excludeIDs map[int]struct{}) bool {
 		return false
 	}
 	return true
+}
+
+// warnEmptyArrList warns when an enabled arr's own list call succeeded but
+// returned nothing at all. A zero-item list is not a walk failure, so no other
+// signal reports it: warnFilteredEmpty deliberately returns early when
+// listed == 0 (filtering is not the cause), and the scout's below-half shrink
+// gate is WHOLE-library, so emptying only one side of a two-arr library stays
+// under the threshold and mass-resolves that side's findings silently. Counts
+// only, never a URL: an arr pointed at a fresh or migrated instance, or one
+// whose database was restored empty, is the usual cause.
+func (w *Walker) warnEmptyArrList(arr string, listed int) {
+	if listed > 0 {
+		return
+	}
+	w.log.Warn("arr listed no items; this side contributes nothing this cycle - check the arr url and that the instance holds the expected library",
+		"arr", arr)
 }
 
 // warnFilteredEmpty warns when tag filtering kept nothing out of a non-empty
@@ -659,14 +697,22 @@ func representative(files []fileInfo, groupCounts map[string]int) fileInfo {
 // isDualAudio reports whether a MediaInfo audio-languages string names more
 // than one language (e.g. "Japanese / English", "jpn/eng").
 func isDualAudio(langs string) bool {
-	fields := strings.FieldsFunc(langs, func(r rune) bool { return r == '/' || r == ',' })
-	distinct := make(map[string]struct{}, len(fields))
-	for _, f := range fields {
+	// Stream the tokens instead of materializing them: AudioLanguages is
+	// arr-supplied and arrapi admits a 64 MiB list body, so the slice of
+	// substring headers plus a map pre-sized to that token count amplifies one
+	// hostile MediaInfo field far past the 256 MiB container budget (CWE-400).
+	// Two distinct languages already settle the answer, so the walk also stops
+	// early on the honest input.
+	distinct := make(map[string]struct{}, 2)
+	for f := range strings.FieldsFuncSeq(langs, func(r rune) bool { return r == '/' || r == ',' }) {
 		if f = strings.TrimSpace(strings.ToLower(f)); f != "" {
 			distinct[f] = struct{}{}
+			if len(distinct) > 1 {
+				return true
+			}
 		}
 	}
-	return len(distinct) > 1
+	return false
 }
 
 // addSeasonGroup records a release group under a season number.

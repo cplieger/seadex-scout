@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -433,10 +434,8 @@ func TestUpstreamSearchRedactsAPIKeyInTorznabErrorDoc(t *testing.T) {
 			if !strings.Contains(err.Error(), "REDACTED") {
 				t.Errorf("returned error = %v, want REDACTED in place of the credential", err)
 			}
-			for _, line := range renderedLogRecords(rec) {
-				if strings.Contains(line, tc.secret[:8]) {
-					t.Errorf("log record leaks the transmitted credential (or a prefix): %q", line)
-				}
+			if rec.Contains(tc.secret[:8]) || rec.AttrContains("", "", tc.secret[:8]) {
+				t.Errorf("log records leak the transmitted credential (or a prefix): %v", rec.Records())
 			}
 		})
 	}
@@ -480,32 +479,11 @@ func TestUpstreamSearchRedactsReflectedBasicAuthorization(t *testing.T) {
 			} else if strings.Contains(err.Error(), token[:8]) {
 				t.Errorf("returned error leaks the transmitted Basic token (or a prefix): %v", err)
 			}
-			for _, line := range renderedLogRecords(rec) {
-				if strings.Contains(line, token[:8]) {
-					t.Errorf("log record leaks the transmitted Basic token (or a prefix): %q", line)
-				}
+			if rec.Contains(token[:8]) || rec.AttrContains("", "", token[:8]) {
+				t.Errorf("log records leak the transmitted Basic token (or a prefix): %v", rec.Records())
 			}
 		})
 	}
-}
-
-// renderedLogRecords flattens each captured slog record (message + top-level
-// attrs) into one string, so a test can assert a secret never reached ANY
-// part of a log line - the error text rides the "error" attr, which
-// Recorder.Contains (messages only) would miss.
-func renderedLogRecords(rec *capture.Recorder) []string {
-	var out []string
-	for _, r := range rec.Records() {
-		var b strings.Builder
-		b.WriteString(r.Message)
-		r.Attrs(func(a slog.Attr) bool {
-			b.WriteString(" ")
-			b.WriteString(a.String())
-			return true
-		})
-		out = append(out, b.String())
-	}
-	return out
 }
 
 // TestUpstreamSearchRedactsAndBoundsGenericDecodeError pins the emit-boundary
@@ -573,10 +551,8 @@ func TestUpstreamSearchRedactsAndBoundsGenericDecodeError(t *testing.T) {
 			if strings.Contains(err.Error(), tc.secret[:8]) {
 				t.Errorf("returned error leaks the transmitted credential (or a prefix): %v", err)
 			}
-			for _, line := range renderedLogRecords(rec) {
-				if strings.Contains(line, tc.secret[:8]) {
-					t.Errorf("log record leaks the transmitted credential (or a prefix): %q", line)
-				}
+			if rec.Contains(tc.secret[:8]) || rec.AttrContains("", "", tc.secret[:8]) {
+				t.Errorf("log records leak the transmitted credential (or a prefix): %v", rec.Records())
 			}
 		})
 	}
@@ -735,18 +711,15 @@ func TestUpstreamSearchRedactsUserinfoAcrossRetryLogging(t *testing.T) {
 	if err == nil {
 		t.Fatal("search against a permanently 503 endpoint returned nil error")
 	}
-	lines := renderedLogRecords(rec)
-	if len(lines) == 0 {
+	if rec.Len() == 0 {
 		t.Fatal("no log records captured; the retry tree must have logged the exhaustion")
 	}
 	for _, secret := range []string{"secret-token", "secret-value"} {
 		if strings.Contains(err.Error(), secret) {
 			t.Errorf("returned error leaks %q: %v", secret, err)
 		}
-		for _, line := range lines {
-			if strings.Contains(line, secret) {
-				t.Errorf("log record leaks %q: %q", secret, line)
-			}
+		if rec.Contains(secret) || rec.AttrContains("", "", secret) {
+			t.Errorf("log records leak %q: %v", secret, rec.Records())
 		}
 	}
 }
@@ -849,10 +822,8 @@ func TestUpstreamSearchStatusErrorOmitsUserinfoAndQuery(t *testing.T) {
 		if strings.Contains(err.Error(), secret) {
 			t.Errorf("returned status error leaks %q: %v", secret, err)
 		}
-		for _, line := range renderedLogRecords(rec) {
-			if strings.Contains(line, secret) {
-				t.Errorf("log record leaks %q: %q", secret, line)
-			}
+		if rec.Contains(secret) || rec.AttrContains("", "", secret) {
+			t.Errorf("log records leak %q: %v", secret, rec.Records())
 		}
 	}
 	var statusErr *httpx.StatusError
@@ -1164,9 +1135,8 @@ func TestSearchDoesNotRetryExpiredCallerContext(t *testing.T) {
 	client := srv.Client()
 	client.Timeout = time.Minute
 	u := &upstream{http: client, log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
-	time.Sleep(time.Millisecond)
 	_, _, err := u.search(ctx, url.Values{"t": {"search"}, "q": {"x"}})
 	if err == nil {
 		t.Fatal("search with an expired caller context = nil error, want the deadline surfaced")
@@ -1284,5 +1254,63 @@ func TestTerminalTorznabCode(t *testing.T) {
 		if got := terminalTorznabCode(code); got != want {
 			t.Errorf("terminalTorznabCode(%d) = %v, want %v", code, got, want)
 		}
+	}
+}
+
+// TestUpstreamSecretsRedactionScope pins WHICH values upstreamSecrets collects
+// as transmitted credentials, the set every log line and error message on the
+// upstream failure path is scrubbed against (CWE-532). Three rules decide it and
+// none of them is reachable from the existing redaction tests, which all use a
+// credential-NAMED query parameter: an unlabelled value is a secret from
+// minEmbeddedSecretLen bytes up (an operator-embedded token on a parameter whose
+// name says nothing), a credential-named parameter is a secret at any length even
+// when its NAME is percent-encoded, and both the raw and the percent-decoded form
+// of a value are registered because a hostile upstream can reflect either.
+func TestUpstreamSecretsRedactionScope(t *testing.T) {
+	const (
+		unlabelledAtFloor = "abcdefghijklmnop"    // exactly minEmbeddedSecretLen bytes
+		unlabelledBelow   = "abcdefghijklmno"     // one byte short of the floor
+		escapedParamValue = "abc%2Fdefghijklmnop" // percent-encoded form of abc/defghijklmnop
+	)
+	has := func(secrets []string, want string) bool {
+		return slices.Contains(secrets, want)
+	}
+	tests := map[string]struct {
+		rawQuery string
+		want     []string
+		unwanted []string
+	}{
+		"unlabelled value at the length floor is a secret": {
+			rawQuery: "indexer=" + unlabelledAtFloor,
+			want:     []string{unlabelledAtFloor},
+		},
+		"unlabelled value below the floor stays readable in a diagnostic": {
+			rawQuery: "indexer=" + unlabelledBelow,
+			unwanted: []string{unlabelledBelow},
+		},
+		"percent-encoded credential name is a secret at any length": {
+			rawQuery: "%6Bey=short",
+			want:     []string{"short"},
+		},
+		"raw and decoded forms of a credential value are both secrets": {
+			rawQuery: "apikey=" + escapedParamValue,
+			want:     []string{escapedParamValue, "abc/defghijklmnop"},
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			u := &upstream{name: upstreamNyaa, feed: "http://prowlarr:9696/1/api?" + tc.rawQuery}
+			got := u.upstreamSecrets()
+			for _, want := range tc.want {
+				if !has(got, want) {
+					t.Errorf("upstreamSecrets() = %q, want it to carry the transmitted credential %q", got, want)
+				}
+			}
+			for _, unwanted := range tc.unwanted {
+				if has(got, unwanted) {
+					t.Errorf("upstreamSecrets() = %q, want it NOT to carry the structural value %q", got, unwanted)
+				}
+			}
+		})
 	}
 }

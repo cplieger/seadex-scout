@@ -436,6 +436,41 @@ func TestRenderJournalItemUnionsCategoriesWithoutDuplicates(t *testing.T) {
 	}
 }
 
+// TestRenderJournalItemSortsCategoryUnion pins the OUTPUT order of foldRefs'
+// category union, which its comment is explicit about ("sorting makes the fold
+// order-independent in its OUTPUT too, not just as a set"): a torrent attached
+// to a series entry and a movie entry must render its categories in ascending
+// order whatever order PocketBase returned the relation in. The order-invariance
+// property compares categories as a SET (it sorts both sides before comparing),
+// so dropping the production sort keeps every existing test green while the
+// persisted snapshot and the served <category> order start flapping with
+// catalogue order - rewriting feed.json on rebuilds that changed nothing.
+func TestRenderJournalItemSortsCategoryUnion(t *testing.T) {
+	w := newTestWriter(filepath.Join(t.TempDir(), "feed.json"), "", false)
+	torrent := seadex.Torrent{
+		Tracker: "Nyaa", URL: "https://nyaa.si/view/1234567",
+		Files: []seadex.File{{Length: 7, Name: "Show - S01E01 (1080p) [G].mkv"}},
+	}
+	// The series entry is listed FIRST, so the append order (Anime, Movies) is
+	// the reverse of the sorted order (Movies 2000 < Anime 5070).
+	series := &seadex.Entry{AniListID: 1, Torrents: []seadex.Torrent{torrent}}
+	movie := &seadex.Entry{AniListID: 2, Torrents: []seadex.Torrent{torrent}}
+	refs := []curatedRef{
+		{entry: series, torrent: &series.Torrents[0]},
+		{entry: movie, torrent: &movie.Torrents[0]},
+	}
+	it, ok, _ := w.renderJournalItem("nyaa:1234567", refs, func(alID int) EntryInfo {
+		return EntryInfo{IsMovie: alID == 2}
+	})
+	if !ok {
+		t.Fatal("renderJournalItem: item not rendered")
+	}
+	if len(it.Categories) != 2 || it.Categories[0] != catMovies || it.Categories[1] != catAnime {
+		t.Errorf("Categories = %v, want [%d %d] ascending regardless of the occurrence order the catalogue supplied",
+			it.Categories, catMovies, catAnime)
+	}
+}
+
 // TestRebuildRejectsForeignHostTrackerURLs pins the curation trust boundary
 // (trackerKey's host gate): a SeaDex record whose tracker label says Nyaa but
 // whose URL sits on a foreign host must mint NO curation key and NO journal
@@ -600,7 +635,8 @@ func TestRebuildBaselineKeylessTorrentDoesNotConsumeNovelty(t *testing.T) {
 
 // TestRebuildDropsUnknownTracker pins the tail-drop: a SeaDex torrent on a
 // tracker other than Nyaa/AB (the negligible AnimeTosho/RuTracker tail) never
-// enters a journal feed and does not trigger the AB passkey nudge.
+// enters a journal feed and is not classified into a configured scope (a tail
+// tracker resolves to no scope, so it is not counted as unresolvable either).
 func TestRebuildDropsUnknownTracker(t *testing.T) {
 	entries := []seadex.Entry{{
 		AniListID: 5,
@@ -619,8 +655,9 @@ func TestRebuildDropsUnknownTracker(t *testing.T) {
 	if len(snap.NyaaFeed) != 0 || len(snap.ABFeed) != 0 {
 		t.Errorf("unknown tracker leaked into a feed: nyaa=%d ab=%d, want 0 and 0", len(snap.NyaaFeed), len(snap.ABFeed))
 	}
-	if rec.Contains("ab RSS feed empty of grabbable links") {
-		t.Errorf("unknown tracker triggered the AB passkey nudge; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	if got, ok := rec.AttrValue("indexer feed snapshot written", "skipped_unresolvable"); !ok || got != "0" {
+		t.Errorf("skipped_unresolvable = %q (found=%v), want 0: an unknown tracker must not be classified into a configured scope; log output:\n%s",
+			got, ok, strings.Join(rec.Messages(), "\n"))
 	}
 }
 
@@ -1008,6 +1045,42 @@ func TestRebuildRejectsKeylessSeededItem(t *testing.T) {
 	}
 }
 
+// TestPrepareCarriedItemDropsBookkeepinglessItem pins prepareCarriedItem's
+// bookkeeping guard directly, the only arm of this unit no test reaches since
+// the shared decode gate (validJournalRecords) started re-baselining such a
+// snapshot before carryJournal ever sees it: a carried item with no Key or a
+// zero FirstSeen is a DROP, not a prune. The distinction is the operator's
+// signal on the snapshot log line - a zero FirstSeen otherwise reads as an
+// item aged out of a 14-day window it never entered - and the guard is the
+// last defense for any snapshot that reaches carryJournal without the gate.
+func TestPrepareCarriedItemDropsBookkeepinglessItem(t *testing.T) {
+	now := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
+	tests := map[string]journalItem{
+		"no key":        {item: item{Title: "Show - S01 (1080p) [G]"}, FirstSeen: now.Add(-time.Hour)},
+		"no first seen": {item: item{Title: "Show - S01 (1080p) [G]"}, Key: "nyaa:42"},
+	}
+	for name, it := range tests {
+		t.Run(name, func(t *testing.T) {
+			var js journalStats
+			p := &journalPass{js: &js, now: now}
+			if p.prepareCarriedItem(&it) {
+				t.Errorf("prepareCarriedItem(%+v) = true, want false", it)
+			}
+			if js.dropped != 1 || js.pruned != 0 || js.rebased != 0 {
+				t.Errorf("stats = dropped %d / pruned %d / rebased %d, want 1 / 0 / 0", js.dropped, js.pruned, js.rebased)
+			}
+		})
+	}
+	carryable := journalItem{item: item{Title: "Show - S01 (1080p) [G]"}, Key: "nyaa:42", FirstSeen: now.Add(-time.Hour)}
+	var js journalStats
+	if p := (&journalPass{js: &js, now: now}); !p.prepareCarriedItem(&carryable) {
+		t.Error("prepareCarriedItem(a keyed, in-window item) = false, want true")
+	}
+	if js.dropped != 0 {
+		t.Errorf("dropped = %d, want 0 for a carryable item", js.dropped)
+	}
+}
+
 // TestRebuildSkipsTitlelessTorrentAsUnresolvable pins the unresolvable
 // accounting: a newly curated torrent with a parseable tracker key but no
 // files and no release group synthesizes no title at all, so it is excluded
@@ -1246,6 +1319,61 @@ func TestRebuildDropsCarriedItemWarnedByStoredHashOnly(t *testing.T) {
 	}
 	if got, ok := rec.AttrValue("indexer feed snapshot written", "journal_warned_dropped"); !ok || got != "1" {
 		t.Errorf("snapshot log line journal_warned_dropped = %q (found=%v), want 1 (the hash-retracted carried item); log output:\n%s", got, ok, strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestRebuildDropsCarriedItemWarnedAcrossTrackers pins the CROSS-SCOPE half of
+// the warned-identity rule identitySignals documents ("a curator warning
+// against the bytes must retract every tracker listing of them", which is why
+// its info hash stays un-namespaced while the seen ledger's is scope-qualified
+// in ledgerSignals): the same release cross-posted to Nyaa and AnimeBytes is
+// one set of bytes, so an AnimeBytes occurrence tagged Broken must retract the
+// carried Nyaa item storing that hash AND keep the un-warned Nyaa occurrence
+// out of the search curation set. The three sibling warned tests all warn and
+// retract within ONE tracker, so they stay green if the warned graph ever
+// becomes scope-aware; this one is what makes the cross-tracker retraction
+// fail loudly instead of leaving RSS serving bytes search suppresses.
+func TestRebuildDropsCarriedItemWarnedAcrossTrackers(t *testing.T) {
+	const sharedHash = "143ed15e5e3df072ae91adaeb149973a887590dd"
+	path := filepath.Join(t.TempDir(), "feed.json")
+	first := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{},
+		ByKey:  map[string]bool{},
+		Seen:   map[string]bool{"nyaa:42": true, "nyaa:h:" + sharedHash: true},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", InfoHash: sharedHash, PubDate: first}, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
+		},
+	})
+	files := []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}}
+	entries := []seadex.Entry{{
+		AniListID: 7,
+		Torrents: []seadex.Torrent{
+			{
+				Tracker: "AB", URL: "/torrents.php?id=1&torrentid=555", InfoHash: sharedHash,
+				IsBest: true, Tags: []string{"Broken"}, Files: files,
+			},
+			{
+				Tracker: "Nyaa", URL: "https://nyaa.si/view/42", InfoHash: sharedHash,
+				IsBest: true, Files: files,
+			},
+		},
+	}}
+	log, rec := capture.New()
+	w := newTestWriter(path, "", false)
+	w.log = log
+	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 0 {
+		t.Errorf("nyaa feed = %+v, want empty (a warning against the bytes must retract every tracker's listing of them)", snap.NyaaFeed)
+	}
+	if snap.ByKey["nyaa:42"] || snap.ByHash[sharedHash] {
+		t.Errorf("curation set still marks the cross-posted listing: keys = %v, hashes = %v", snap.ByKey, snap.ByHash)
+	}
+	if got, ok := rec.AttrValue("indexer feed snapshot written", "journal_warned_dropped"); !ok || got != "1" {
+		t.Errorf("journal_warned_dropped = %q (found=%v), want 1; log:\n%s", got, ok, strings.Join(rec.Messages(), "\n"))
 	}
 }
 

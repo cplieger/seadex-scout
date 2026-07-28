@@ -102,6 +102,56 @@ func FuzzDecodePage(f *testing.F) {
 	})
 }
 
+// FuzzDecodePageHonorsElementBudget is the budget-enforcement half of the
+// decoder's contract, which the parity target cannot see: FuzzDecodePage
+// always decodes at the full per-page bound, while the FETCH-wide element
+// budget works by handing decodePage a REDUCED limit (remainingFetchBudgets),
+// and that reduced limit is what keeps a run of compact-but-huge chunks from
+// amplifying into decoded structs that OOM-kill the 256 MiB container. For any
+// body and any positive limit, an accepted page must charge no more elements
+// than the limit it was handed, must charge at least what it retained (an
+// undercharge silently raises the real fetch-wide ceiling), and must decode to
+// exactly the value the full budget produces (the budget bounds work, never
+// content). A zero limit is out of contract: jsonx/bounded reads a
+// non-positive budget as unbounded and fetchPage only ever passes a positive
+// remaining allowance.
+func FuzzDecodePageHonorsElementBudget(f *testing.F) {
+	bodies := []string{
+		`{"items":[{"alID":1,"expand":{"trs":[{"tags":["a","b"]}]}}]}`,
+		`{"items":[{"alID":1,"expand":{"trs":[{"files":[{"name":"a","length":1},{"name":"b","length":2}]}]}}]}`,
+		`{"items":[{"alID":1,"expand":{"trs":[{"tags":["a"],"tags":[],"tags":[null]}]}}]}`,
+		`{"totalItems":1,"totalPages":1,"items":[]}`,
+	}
+	for _, body := range bodies {
+		for _, limit := range []uint16{1, 2, 3, 4, 5, 8} {
+			f.Add([]byte(body), limit)
+		}
+	}
+	f.Fuzz(func(t *testing.T, body []byte, limit uint16) {
+		if limit == 0 {
+			return
+		}
+		got, elems, err := decodePage(body, int(limit))
+		if err != nil {
+			return
+		}
+		if elems > int(limit) {
+			t.Fatalf("decodePage(%q, %d) accepted the page and charged %d elements, over the budget it was handed", body, limit, elems)
+		}
+		if retained := retainedElements(got); retained > elems {
+			t.Fatalf("decodePage(%q, %d) charged %d elements but retained %d (an undercharge raises the fetch-wide ceiling)", body, limit, elems, retained)
+		}
+		full, fullElems, fullErr := decodePage(body, maxPageElements)
+		if fullErr != nil {
+			t.Fatalf("decodePage(%q, %d) succeeded but the same body at the full budget failed: %v", body, limit, fullErr)
+		}
+		if fullElems != elems || !reflect.DeepEqual(full, got) {
+			t.Errorf("decodePage(%q) differs by budget: limit %d gave %d elements %+v, the full budget gave %d elements %+v",
+				body, limit, elems, got, fullElems, full)
+		}
+	})
+}
+
 // retainedElements counts the array elements retained in a decoded pbList
 // (items + torrents + files + tags): a lower bound on the decoder's charged
 // element count, since duplicate key occurrences and truncated-away elements

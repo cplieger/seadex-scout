@@ -46,11 +46,9 @@
 package indexer
 
 import (
-	"context"
 	"log/slog"
 	"net/http"
 	"sync/atomic"
-	"time"
 
 	"github.com/cplieger/webhttp"
 )
@@ -179,7 +177,7 @@ func WireUpstreams(client *http.Client, log *slog.Logger, cfg UpstreamConfig) Up
 		if !cfg.enabled(scope) {
 			continue
 		}
-		ups = append(ups, &upstream{http: client, log: log, name: scope, feed: cfg.torznabURL(scope), apiKey: cfg.ProwlarrAPIKey})
+		ups = append(ups, newUpstream(client, log, scope, cfg.torznabURL(scope), cfg.ProwlarrAPIKey))
 	}
 	return Upstreams{ups: ups}
 }
@@ -199,7 +197,7 @@ func ownUpstreams(ups []*upstream) []*upstream {
 	}
 	own := make([]*upstream, 0, len(ups))
 	for _, u := range ups {
-		own = append(own, &upstream{http: u.http, log: u.log, name: u.name, feed: u.feed, apiKey: u.apiKey})
+		own = append(own, newUpstream(u.http, u.log, u.name, u.feed, u.apiKey))
 	}
 	return own
 }
@@ -207,16 +205,18 @@ func ownUpstreams(ups []*upstream) []*upstream {
 // Indexer serves searches by proxying Prowlarr filtered to SeaDex's curation,
 // and periodic RSS checks from the two synthesized per-tracker feeds. Both come
 // from the persisted snapshot the compare cycle builds (see FeedWriter), owned
-// by cache: Run warms it on start (see warmSnapshot; New is pure assembly and
-// loads nothing) and cache.refresh reloads it when the file changes (a cycle -
-// in this process or the `poll` subcommand - rewrote it), under the cache's own
-// locks. The server never fetches SeaDex or Fribb itself.
+// by cache: Run warms it on start (cache.warm; New is pure assembly and loads
+// nothing) and cache.refresh reloads it when the file changes (a cycle - in this
+// process or the `poll` subcommand - rewrote it), under the cache's own locks.
+// The server never fetches SeaDex or Fribb itself.
 type Indexer struct {
-	// cache owns the persisted-snapshot lifecycle and its two locking regimes
-	// (see snapshotCache). The server reaches it through four methods only, so
-	// nothing on the request path names a lock primitive or a reload-only flag.
+	// cache owns the persisted-snapshot lifecycle - the initial warm load
+	// included - and its two locking regimes (see snapshotCache). The server
+	// reaches it through its six methods only, so nothing here holds snapshot
+	// state and nothing on the request path names a lock primitive or a
+	// reload-only flag.
 	cache *snapshotCache
-	// queryGate bounds the number of SIMULTANEOUS expensive requests. Auth,
+	// search bounds the number of SIMULTANEOUS expensive requests. Auth,
 	// caps, and the snapshot read are cheap; a SEARCH is not - each one holds
 	// up to one bounded Prowlarr body per upstream (upstreamMaxBytes), the
 	// encoding/xml token allocations to decode them, and up to
@@ -226,27 +226,27 @@ type Indexer struct {
 	// how many of those run at once: a burst of correct-key searches (an arr's
 	// library-wide search, a retry storm, a misconfigured client) could stack
 	// that footprint until the 256 MiB container is OOM-killed - taking the
-	// compare loop down with it. A buffered token channel rather than a
-	// semaphore type for the same reason reloadGate is one: the wait must be
-	// cancellable, so a request whose client has gone away abandons it instead
-	// of parking a handler goroutine behind other requests' upstream calls.
-	queryGate chan struct{}
-	// feedGate bounds simultaneous synthesized-RSS renders (see
-	// maxConcurrentFeeds). Separate from queryGate so a stalled Prowlarr, which
+	// compare loop down with it. Buffered token channels (inside queryPool)
+	// rather than a semaphore type for the same reason reloadGate is one: the
+	// wait must be cancellable, so a request whose client has gone away
+	// abandons it instead of parking a handler goroutine behind other
+	// requests' upstream calls.
+	search queryPool
+	// rss bounds simultaneous synthesized-RSS renders (see
+	// maxConcurrentFeeds). Separate from search so a stalled Prowlarr, which
 	// can park every search slot for the whole bounded retry budget, cannot
 	// starve the RSS path - which serves the already-loaded snapshot and never
 	// contacts an upstream.
-	feedGate chan struct{}
+	rss queryPool
 	// log is set once in New and read per request without a lock, like apiKey
 	// and enablement below; none of them is ever written after construction
 	// (the same immutable-after-New contract as upstreams and verifyKey).
 	log *slog.Logger
 	// The field order below is govet fieldalignment's: the pointer-only fields
 	// lead, then the string/slice/struct fields whose trailing words carry no
-	// pointer, and finally the two pointer-free values (warmStarted,
-	// verifyKey) - verifyKey last because it is a byte-array-plus-bool with no
-	// alignment requirement, so any 8-aligned field after it would pay for its
-	// padding.
+	// pointer, and finally the one pointer-free value (verifyKey) - last
+	// because it is a byte-array-plus-bool with no alignment requirement, so
+	// any 8-aligned field after it would pay for its padding.
 	//
 	// noUpstreamWarned bounds fetchRaw's standing-misconfiguration WARN to one
 	// per scope per process. The condition is config-derived (a search reached
@@ -256,10 +256,6 @@ type Indexer struct {
 	// dropWarned/displayWarned latches exist to bound. Built in New and never
 	// rewritten, so the map itself needs no lock.
 	noUpstreamWarned map[string]*atomic.Bool
-	// warmDone is closed when Run's warm snapshot load returns (see
-	// warmSnapshot). Allocated in New so the request path can always read it;
-	// warmStarted says whether anything will ever close it.
-	warmDone chan struct{}
 	// enablement is the per-tracker off switch (a non-empty Torznab URL) plus
 	// the AB passkey gate the request path reads - the same narrowing
 	// FeedWriter applies to the same input (writer.go), so the
@@ -275,37 +271,15 @@ type Indexer struct {
 	apiKey string
 	// upstreams is wired once in New; immutable afterwards.
 	upstreams []*upstream
-	// warmStarted records that warmSnapshot ran, so warmPending can tell a
-	// still-loading server from one that never started a warm load at all (a
-	// New'd Indexer used without Run keeps the lazy per-request refresh).
-	warmStarted atomic.Bool
 	// verifyKey is the pre-hashed feed_api_key verifier, built once in New so
 	// per-request verification hashes only the presented value (see
 	// webhttp.NewStaticTokenVerifier). Immutable after New.
 	verifyKey webhttp.StaticTokenVerifier
 }
 
-// warmLoadTimeout bounds how long Run WAITS for the warm load of the persisted
-// snapshot - not the load itself. The read is size-bounded (maxFeedBytes) but a
-// slow or wedged /config mount has no bound of its own, and Run starts on the
-// daemon's startup path (main.go's startIndexer, alongside the compare loop), so
-// an unbounded WAIT holds the whole daemon down instead of one request. A
-// context deadline cannot deliver this bound: refresh stats the file before any
-// ctx check, and atomicfile's bounded read only tests ctx around its syscalls -
-// it cannot interrupt an os.Open, File.Stat, or io.ReadAll already blocked in
-// the filesystem. So the load runs asynchronously and Run stops waiting after
-// the deadline; the load may finish in the background, which is safe because the
-// cache is synchronized and refresh coalesces through reloadGate, so whoever
-// finishes installs and the first request either sees the warmed snapshot or
-// reloads itself.
-//
-// A var, not a const, ONLY so the warm-load test can exercise the wait-expired
-// path (see queryGateWait for the pattern) without spending it in real time.
-var warmLoadTimeout = 15 * time.Second
-
 // New builds the Torznab feed server from cfg, log, and the wired upstream set.
 // It is pure assembly and starts no work: the persisted feed snapshot named by
-// cfg.SnapshotPath is warmed by Run (see warmSnapshot), so all background work
+// cfg.SnapshotPath is warmed by Run (cache.warm), so all background work
 // begins under the explicit lifecycle method. A nil log falls back to
 // slog.Default(); a zero ups serves the snapshot without proxying searches
 // (see Upstreams). cfg is the one argument with no nil tolerance - it is
@@ -325,9 +299,8 @@ func New(cfg *Config, log *slog.Logger, ups Upstreams) *Indexer {
 		},
 		verifyKey: webhttp.NewStaticTokenVerifier(cfg.APIKey),
 		cache:     newSnapshotCache(cfg.SnapshotPath, cfg.ABPasskey, log),
-		queryGate: make(chan struct{}, maxConcurrentQueries),
-		feedGate:  make(chan struct{}, maxConcurrentFeeds),
-		warmDone:  make(chan struct{}),
+		search:    newQueryPool("search", maxConcurrentQueries),
+		rss:       newQueryPool("rss", maxConcurrentFeeds),
 		upstreams: ownUpstreams(ups.ups),
 		noUpstreamWarned: map[string]*atomic.Bool{
 			upstreamNyaa: new(atomic.Bool),
@@ -335,48 +308,4 @@ func New(cfg *Config, log *slog.Logger, ups Upstreams) *Indexer {
 		},
 	}
 	return ix
-}
-
-// warmSnapshot warms the served feed from the last persisted snapshot so a
-// restart serves immediately rather than empty until the next cycle. Run calls
-// it before binding, so the work begins under the explicit lifecycle boundary
-// rather than during construction. The load runs asynchronously and only the
-// WAIT is bounded: a wedged /config mount cannot be interrupted mid-syscall, so
-// bounding the wait is the only bound that holds (see warmLoadTimeout). A
-// request arriving while the load is still running does not park behind it (see
-// warmPending).
-func (ix *Indexer) warmSnapshot() {
-	ix.warmStarted.Store(true)
-	go func() {
-		defer close(ix.warmDone)
-		ix.cache.refresh(context.Background())
-	}()
-	warmTimer := time.NewTimer(warmLoadTimeout)
-	defer warmTimer.Stop()
-	select {
-	case <-ix.warmDone:
-	case <-warmTimer.C:
-		ix.log.Warn("feed snapshot warm load still running; serving requests without it",
-			"timeout", warmLoadTimeout)
-	}
-}
-
-// warmPending reports whether Run's warm load was started and has not finished.
-// While that holds, the initial loader owns the cache's reload gate and a
-// request that entered refresh would block on it for as long as the filesystem
-// does - net/http's WriteTimeout cannot cancel a handler, so a wedged /config
-// mount would pin every request slot. Requests answer the snapshot-unavailable
-// fault instead until the loader returns. A New'd Indexer that never ran (direct
-// query users and tests) has never started a warm load, so it keeps the lazy
-// per-request refresh path.
-func (ix *Indexer) warmPending() bool {
-	if !ix.warmStarted.Load() {
-		return false
-	}
-	select {
-	case <-ix.warmDone:
-		return false
-	default:
-		return true
-	}
 }

@@ -453,7 +453,7 @@ func TestFetchEntriesCountMismatchWarnsButSucceeds(t *testing.T) {
 // a genuinely SKIPPED record impossible, so an ordinary shortfall is a handful
 // of mid-fetch deletions; losing more than HALF the catalogue is not credible
 // and now fails the fetch, degrading the cycle and PRESERVING existing findings.
-// The trigger is the app-wide shrink policy (degradation.ShrinkGuardFactor),
+// The trigger is the app-wide shrink policy (degradation.Shrunk),
 // shared with the mapping-refresh and library-walk guards.
 func TestFetchEntriesBelowHalfShortfallErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -707,6 +707,39 @@ func TestFetchEntriesExactlyFullChunkCompletesOnEmptyFollowUp(t *testing.T) {
 	}
 	if reqs != 2 {
 		t.Errorf("requests = %d, want 2 (the full chunk plus the empty follow-up)", reqs)
+	}
+	if got := recorder.CountExact("seadex catalogue count mismatch"); got != 0 {
+		t.Errorf("count-mismatch WARN count = %d, want 0 (the reported total is satisfied)", got)
+	}
+}
+
+// TestFetchEntriesRetainsReportedPagesAcrossChunks pins the retained-highest
+// rule for the reported PAGE count (fetchTotals.reportedPages is never
+// overwritten downward), the page twin of the totalItems retention
+// TestFetchEntriesErrorsOnMetadataRegression pins. The terminal chunk here
+// reports totalItems but OMITS totalPages (which decodes as zero), so a
+// counter that overwrote instead of retaining would make finishFetch's
+// metadata self-consistency guard read "totalItems 501 cannot fit the reported
+// 0 pages" and hard-fail an otherwise healthy two-chunk walk - every cycle,
+// against an upstream that merely omits the field.
+func TestFetchEntriesRetainsReportedPagesAcrossChunks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("filter") == "" {
+			fmt.Fprintf(w, `{"totalItems":%d,"totalPages":2,"items":[%s]}`, perPage+1, fullKeysetChunk(1))
+			return
+		}
+		// The terminal chunk reports the item total but omits totalPages.
+		fmt.Fprintf(w, `{"totalItems":%d,"items":[%s]}`, perPage+1, keysetRecords(perPage+1, 1))
+	}))
+	defer server.Close()
+
+	logger, recorder := capture.New()
+	entries, err := NewClient(server.Client(), server.URL, 0, logger).FetchEntries(context.Background())
+	if err != nil {
+		t.Fatalf("FetchEntries returned error: %v (a chunk omitting totalPages must not invalidate the retained page count)", err)
+	}
+	if len(entries) != perPage+1 {
+		t.Fatalf("entries = %d, want %d", len(entries), perPage+1)
 	}
 	if got := recorder.CountExact("seadex catalogue count mismatch"); got != 0 {
 		t.Errorf("count-mismatch WARN count = %d, want 0 (the reported total is satisfied)", got)
