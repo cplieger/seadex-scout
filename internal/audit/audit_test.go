@@ -811,3 +811,67 @@ func TestClassifyReleasesGatesAnimeBytes(t *testing.T) {
 		t.Errorf("with AnimeBytes on both releases should be present, got %d", len(on))
 	}
 }
+
+// TestBestCellMarksOnlyHiddenBests pins the best column's hidden-AnimeBytes
+// marker against the fact it claims: the marker asserts a best exists on a
+// tracker the operator disabled, so it may only count withheld releases SeaDex
+// marks BEST. A withheld ALT says nothing about whether a best exists - for an
+// entry SeaDex lists no best for, annotating the empty best cell from the
+// all-releases count would tell the reader the opposite of the truth. Built
+// through assess so the counting and the projection are pinned together.
+func TestBestCellMarksOnlyHiddenBests(t *testing.T) {
+	item := &library.Item{
+		Arr: library.ArrSonarr, ArrID: 1, Title: "Hidden", TvdbID: 100,
+		SeasonGroups: map[int][]string{1: {"mine"}}, Groups: []string{"mine"}, HasFile: true,
+	}
+	record := mapping.Record{Type: "TV", TvdbID: 100, SeasonTvdb: 1}
+
+	tests := []struct {
+		name       string
+		torrents   []seadex.Torrent
+		wantCell   string
+		wantHidden int
+	}{
+		{
+			name: "hidden alt with no best carries no marker",
+			torrents: []seadex.Torrent{
+				{Tracker: "AB", ReleaseGroup: "Commie", URL: "/torrents.php?id=1&torrentid=2"},
+			},
+			wantCell:   "-",
+			wantHidden: 1,
+		},
+		{
+			name: "hidden bests are counted",
+			torrents: []seadex.Torrent{
+				{Tracker: "AB", ReleaseGroup: "Commie", IsBest: true, URL: "/torrents.php?id=1&torrentid=2"},
+				{Tracker: "AB", ReleaseGroup: "PMR", IsBest: true, URL: "/torrents.php?id=1&torrentid=3"},
+				{Tracker: "AB", ReleaseGroup: "LostYears", URL: "/torrents.php?id=1&torrentid=4"},
+			},
+			wantCell:   "- (2 best hidden: animebytes)",
+			wantHidden: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// AnimeBytes off: every AB release above is withheld.
+			row := NewAuditor(Config{}).assess(&match.Match{
+				Item:   item,
+				Arr:    library.ArrSonarr,
+				Source: match.SourceID,
+				Entry:  seadex.Entry{AniListID: 1, Torrents: tt.torrents},
+				Record: record,
+			})
+
+			if got := bestCell(&row); got != tt.wantCell {
+				t.Errorf("bestCell() = %q, want %q", got, tt.wantCell)
+			}
+			// The exported count keeps its all-releases meaning: the
+			// hidden_animebytes JSON key and slog attribute are unchanged.
+			if row.HiddenAnimeBytes != tt.wantHidden {
+				t.Errorf("HiddenAnimeBytes = %d, want %d (the total withheld count, best or not)",
+					row.HiddenAnimeBytes, tt.wantHidden)
+			}
+		})
+	}
+}

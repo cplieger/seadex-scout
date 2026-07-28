@@ -327,3 +327,26 @@ func TestFeedEntryInfoLibraryHitKeepsSeriesTyping(t *testing.T) {
 		t.Errorf("info(30) = %+v, want the record's resolved season 2 intact", got)
 	}
 }
+
+// TestFeedEntryInfoRoutedUntypedRecordIgnoresMemoMovieFormat pins the gate at
+// feedinfo.go:70: an UNTYPED Fribb record that still routes a positive TVDB id
+// through RoutedIDs' series arm is series evidence, so a retained (expired)
+// memo entry carrying a MOVIE format must not re-type it - that would publish a
+// Sonarr-routed show under Movies/2000, where Sonarr never sees it. The memo's
+// TITLE tier still runs; only the typing is suppressed. Every other untyped row
+// in this file has TvdbID 0, so HasArrIdentifier is false there and this arm is
+// otherwise unexercised.
+func TestFeedEntryInfoRoutedUntypedRecordIgnoresMemoMovieFormat(t *testing.T) {
+	idx := mapping.NewIndex([]mapping.Record{{AniListID: 31, TvdbID: 556}})
+	lib := &library.Snapshot{}
+	memo := match.Memo{Entries: map[int]match.MemoEntry{
+		31: {Titles: []string{"Memo Film Title"}, Year: 2019, Format: "MOVIE"},
+	}}
+	got := feedEntryInfo(idx, lib, memo)(31)
+	if got.IsMovie {
+		t.Errorf("info(31) = %+v, want IsMovie=false: a routed TVDB id outranks a stale memo MOVIE format", got)
+	}
+	if got.Title != "Memo Film Title" || got.Year != 2019 {
+		t.Errorf("info(31) = %+v, want the memo title tier to still supply the title", got)
+	}
+}

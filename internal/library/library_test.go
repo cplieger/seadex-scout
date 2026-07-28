@@ -1655,6 +1655,11 @@ func TestWalkCompleteLogReportsConfiguredArrSides(t *testing.T) {
 // ${VAR} expansion.
 func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 	const msg = "arr_tags filtering kept no items from a non-empty arr library; this side contributes nothing this cycle"
+	// The empty-list WARN is the ONLY signal for a silently-emptied side
+	// (warnFilteredEmpty returns early on listed == 0 and the scout shrink gate
+	// is whole-library), so both arms are pinned here rather than leaving the
+	// path executed-but-unchecked.
+	const emptyMsg = "arr listed no items; this side contributes nothing this cycle - check the arr url and that the instance holds the expected library"
 	anime := []arrapi.Tag{{ID: 7, Label: "anime"}}
 
 	t.Run("sonarr side emptied by a resolving filter", func(t *testing.T) {
@@ -1738,6 +1743,9 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 		if n := rec.CountExact(msg); n != 0 {
 			t.Errorf("dead-filter warnings = %d, want none (the filter kept an item); messages = %q", n, rec.Messages())
 		}
+		if n := rec.CountExact(emptyMsg); n != 0 {
+			t.Errorf("empty-list warnings = %d, want none (the arr listed two series); messages = %q", n, rec.Messages())
+		}
 	})
 
 	t.Run("no warning for a genuinely empty arr library", func(t *testing.T) {
@@ -1750,6 +1758,13 @@ func TestWalkWarnsWhenTagFilteringEmptiesASide(t *testing.T) {
 		}
 		if n := rec.CountExact(msg); n != 0 {
 			t.Errorf("dead-filter warnings = %d, want none (the arr listed nothing, so filtering emptied nothing); messages = %q", n, rec.Messages())
+		}
+		if n := rec.CountExact(emptyMsg); n != 1 {
+			t.Fatalf("empty-list warnings = %d, want exactly 1; messages = %q", n, rec.Messages())
+		}
+		if !rec.HasAttr(emptyMsg, "arr", ArrSonarr) {
+			got, _ := rec.AttrValue(emptyMsg, "arr")
+			t.Errorf("arr attr = %q, want %q", got, ArrSonarr)
 		}
 	})
 }
@@ -1800,5 +1815,48 @@ func TestWalkStripsBaseURLCredentialsFromItemArrURL(t *testing.T) {
 			t.Errorf("%s ArrURL = %q, want %q (the configured base URL's credential is stripped at construction)",
 				it.Key(), got, want[it.Key()])
 		}
+	}
+}
+
+// TestWalkWarnsWhenSonarrDeclaresFilesButSendsNone pins fetchSeriesItem's
+// declared-files-but-empty diagnostic: the series list says the series has
+// episode files while the per-series episode-file call succeeds empty, so the
+// item compares as fileless and the daemon would otherwise resolve the series'
+// prior finding as a genuine no-file state with no signal at all. All three arms
+// of the gate are pinned, because the nil-Statistics and zero-count arms are what
+// keep an honest fileless series quiet.
+func TestWalkWarnsWhenSonarrDeclaresFilesButSendsNone(t *testing.T) {
+	const msg = "sonarr series declares episode files but its episode-file list came back empty; it compares as fileless"
+	tests := []struct {
+		name  string
+		stats *arrapi.SeriesStatistics
+		files map[int][]arrapi.EpisodeFile
+		want  int
+	}{
+		{"declared files but none sent", &arrapi.SeriesStatistics{EpisodeFileCount: 12}, nil, 1},
+		{"declared files and files sent", &arrapi.SeriesStatistics{EpisodeFileCount: 12}, map[int][]arrapi.EpisodeFile{1: {epFile(1, "PMR")}}, 0},
+		{"no files declared", &arrapi.SeriesStatistics{}, nil, 0},
+		{"no statistics block", nil, nil, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := &fakeSonarr{
+				series: []arrapi.Series{{ID: 1, Title: "Alpha", Statistics: tc.stats}},
+				files:  tc.files,
+			}
+			logger, rec := capture.New()
+			w := NewWalker(&Config{Sonarr: fs, Logger: logger})
+
+			if _, err := w.Walk(t.Context()); err != nil {
+				t.Fatalf("Walk: %v", err)
+			}
+			if n := rec.CountExact(msg); n != tc.want {
+				t.Fatalf("declared-files warnings = %d, want %d; messages = %q", n, tc.want, rec.Messages())
+			}
+			if tc.want == 1 && !rec.HasAttr(msg, "declared_files", "12") {
+				got, _ := rec.AttrValue(msg, "declared_files")
+				t.Errorf("declared_files attr = %q, want 12", got)
+			}
+		})
 	}
 }

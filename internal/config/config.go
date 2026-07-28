@@ -599,8 +599,10 @@ var envRefRe = regexp.MustCompile(`\$\{[^}]*\}|\$[A-Z_][A-Z0-9_]*`)
 // credential and the operator sees only a downstream 401/403 - or, for
 // indexer.ab_passkey, nothing at all: it is baked into every /ab RSS download
 // link, so each arr grab fails at AnimeBytes while this app logs a served
-// feed. indexer.feed_api_key is included for the brace-less spelling, which
-// validateIndexerEndpoints' stricter ${VAR} rejection does not see.
+// feed. indexer.feed_api_key is deliberately NOT in this list: it is the inbound
+// gate rather than an outbound credential, so this message would misstate its
+// failure - validateIndexerEndpoints owns both its spellings (a braced
+// placeholder is an error, an unbraced one a warning naming the real risk).
 // Warn-only (no real arr/Prowlarr/AnimeBytes credential takes a shape
 // containing an env reference, but a false positive must not stop the daemon)
 // and field-name-only; never echoes the value.
@@ -608,7 +610,6 @@ func (c *Config) warnUnexpandedSecretRefs() {
 	for _, sf := range []struct{ name, val string }{
 		{"sonarr.api_key", c.SonarrAPIKey},
 		{"radarr.api_key", c.RadarrAPIKey},
-		{"indexer.feed_api_key", c.IndexerAPIKey},
 		{"indexer.prowlarr_api_key", c.IndexerProwlarrAPIKey},
 		{"indexer.ab_passkey", c.IndexerABPasskey},
 	} {
@@ -759,11 +760,13 @@ func (c *Config) validateIndexerEndpoints() error {
 	}
 	// Only the braced form is expanded (yamlenv.Expand's refRe recognizes
 	// ${VAR} alone), so an unbraced $NAME is left literal too and reaches the
-	// gate as a key derived from a variable name. A generated key cannot take
-	// that shape - no hex/base64 output starts with '$' followed by an
-	// allowlisted prefix - so the check is exact. Warn (the deployment may
+	// gate as a key derived from a variable name. The whole value must BE the
+	// reference (envRefRe matching end to end): a generated key cannot take that
+	// shape - no hex/base64 output starts with '$' followed by an upper-case
+	// name - so the check is exact whether or not the name is allowlisted, and a
+	// non-allowlisted spelling is left just as literal. Warn (the deployment may
 	// already be running behind it); field-name-only, never echo the key.
-	if name := strings.TrimPrefix(c.IndexerAPIKey, "$"); name != c.IndexerAPIKey && isAllowedEnvVar(name) {
+	if strings.HasPrefix(c.IndexerAPIKey, "$") && envRefRe.FindString(c.IndexerAPIKey) == c.IndexerAPIKey {
 		slog.Warn("indexer.feed_api_key looks like an unbraced $VAR reference; only the " +
 			"${VAR} form is expanded, so the feed is gated by that literal name - wrap the " +
 			"reference in ${...} or paste the key value")

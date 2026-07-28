@@ -162,6 +162,15 @@ type Row struct {
 	// both render an empty best column, no qualifier, and a have_unlisted
 	// verdict.
 	HiddenAnimeBytes int `json:"hidden_animebytes,omitempty"`
+	// hiddenAnimeBytesBest counts only the withheld releases SeaDex marks BEST.
+	// The Markdown best column is annotated from this count, not from
+	// HiddenAnimeBytes: a hidden AnimeBytes ALT says nothing about whether a
+	// best exists, so annotating the best cell from the total would tell a
+	// reader an empty best column means "hidden on a tracker you do not use"
+	// for an entry SeaDex genuinely lists no best for. Unexported: in-process
+	// only, so the hidden_animebytes JSON key and slog attribute keep their
+	// established all-releases meaning.
+	hiddenAnimeBytesBest int
 }
 
 // IncompleteEntry is one SeaDex entry whose library mapping could not be
@@ -322,6 +331,9 @@ func (a *Auditor) assess(m *match.Match) Row {
 	for i := range m.Entry.Torrents {
 		if a.hiddenByABToggle(&m.Entry.Torrents[i]) {
 			row.HiddenAnimeBytes++
+			if m.Entry.Torrents[i].IsBest {
+				row.hiddenAnimeBytesBest++
+			}
 		}
 	}
 	d := align.Decide(m.Item, &m.Record, best, alt)

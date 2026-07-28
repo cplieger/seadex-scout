@@ -177,13 +177,27 @@ func (h *harvester) harvestTitles(ctx context.Context, feeds map[string][]journa
 		// recurring corruption never self-heals; the operator needs the same
 		// signal loadPrevious already emits for the over-cap case. The value
 		// is never logged (it can be attacker-shaped text).
-		h.log.Warn("indexer title harvest checkpoint unusable; restarting the rotation at the head and paging from zero",
+		h.log.Warn("indexer title harvest checkpoint degraded; the unusable part was dropped and restarts at its baseline (rotation at the head, paging from zero)",
 			"reason", degraded, "cursor_bytes", len(prevCursor))
 	}
 	defer func() { stats.pending = syntheticCount(feeds, titles) }()
 	groups, index, showTitles := pendingHarvest(feeds, titles, infoFor)
 	pruneHarvestPages(cp.Pages, groups)
-	defer func() { cursor = encodeHarvestCheckpoint(cp) }()
+	defer func() {
+		cursor = encodeHarvestCheckpoint(cp)
+		if len(cp.Pages) > 0 && cursor == cp.Last {
+			// The encode degraded: page state existed but the rendered object
+			// could not be persisted (over the size cap, or an unreachable
+			// marshal failure), so only the rotation cursor survives and every
+			// deep-paging group in it resumes from page zero next rebuild. That
+			// is the same progress loss the decode side reports, and it is the
+			// writer's own output rather than a tampered file, so it needs its
+			// own line instead of inheriting loadPrevious' corruption WARN. The
+			// cursor value itself is never logged (it names live groups).
+			h.log.Warn("indexer title harvest checkpoint page state could not be persisted; only the rotation cursor was kept",
+				"page_groups", len(cp.Pages), "max_bytes", maxPersistedCursorBytes)
+		}
+	}()
 	if len(groups) == 0 || len(h.upstreams) == 0 {
 		// The value read here is discarded: the deferred encode above still runs
 		// on this path and replaces it with the PRUNED checkpoint, which is what
@@ -746,11 +760,13 @@ func (h *harvester) harvestShow(ctx context.Context, u *upstream, g harvestGroup
 		r.stats.matched += matched
 		if stranded == 0 && pendingRejected+unusable > 0 {
 			// The stranding classes: this show's own release was named by a
-			// result the harvest could not use, so it keeps its synthesized
-			// title and - because the index is rebuilt from the same journal
-			// every rebuild - will keep it until the upstream agrees. One line
+			// result the harvest could not use. The affected releases may
+			// remain on their synthesized titles unless another result - on
+			// this page or a later one - supplies a usable title, and because
+			// the index is rebuilt from the same journal every rebuild an
+			// upstream that never agrees strands them indefinitely. One line
 			// per show per rebuild, never per page.
-			h.log.Warn("indexer title harvest could not use results naming this show's own releases; they keep their synthesized titles",
+			h.log.Warn("indexer title harvest encountered results it could not use for this show's releases",
 				"upstream", u.name, "al_id", g.alID, "page", page,
 				"contradictory", pendingRejected, "unusable_title", unusable)
 		}
@@ -1089,11 +1105,14 @@ func matchHarvest(results []item, scope string, index, titles, showTitles map[st
 	return matched, rejected, pendingRejected, unusable
 }
 
-// pendingHarvestRefusal grades a REFUSED result (resolveHarvestKey reported a
-// contradiction): 1 when any of its identity signals - either page-URL tracker
+// pendingHarvestRefusal grades an UNUSED result - one resolveHarvestKey refused
+// for contradictory identity signals, or one whose title cannot enter the
+// persisted cache: 1 when any of its identity signals - either page-URL tracker
 // key, or its info hash - names one of THIS group's items (groupKeys) that is
 // still UNTITLED, 0 when it names none of them. It reports a charge rather than
-// a bool so the caller can add it without a second nesting level.
+// a bool so the caller can add it without a second nesting level. Only the
+// refusal charge feeds the caller's contradicted inference; the unusable-title
+// charge is reported and does not latch (matchHarvest).
 //
 // The grade matters because a result whose comments and guid disagree with each
 // other is refused before either signal is looked up, so the refusal alone does

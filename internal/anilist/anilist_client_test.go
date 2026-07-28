@@ -380,6 +380,9 @@ func TestParseMediaPageDuplicateIDExcluded(t *testing.T) {
 	if !errors.Is(err, ErrBatchRecord) {
 		t.Errorf("error = %v, want ErrBatchRecord classification", err)
 	}
+	if want := "(3 of 4 records rejected)"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %v, want magnitude %q: every record the conflict excluded counts, not just the later duplicates", err, want)
+	}
 	if got, ok := out[1]; ok {
 		t.Errorf("out[1] = %+v, want the conflicting duplicate excluded, not one record chosen", got)
 	}

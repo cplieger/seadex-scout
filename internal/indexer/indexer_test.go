@@ -464,6 +464,16 @@ func TestIndexerEndToEnd(t *testing.T) {
 		t.Errorf("upstream X-Api-Key = %q, want prowlarr-key", gotAPIKey)
 	}
 
+	// A Movies-category search is NOT re-filtered against the tracker's own
+	// categories: both proxied trackers are anime trackers, so a film arrives
+	// categorized Anime 5070 (as the fixture item is), and `cat` was already
+	// forwarded to Prowlarr. Re-applying the local filter here emptied every
+	// Movies search after a successful fetch and a successful curation match.
+	movieSearch := url.Values{"t": {"search"}, "q": {"Some Anime 2011"}, "cat": {"2000"}}
+	if got, st, _ := ix.query(context.Background(), movieSearch, "nyaa"); len(got) != 1 || st.feed {
+		t.Errorf("movie-category search returned %d items (feed=%v), want the 1 curated proxied item", len(got), st.feed)
+	}
+
 	// Per-tracker scoping (real search): the ab scope has no configured
 	// upstream, so it serves nothing (the nyaa scope is exercised above).
 	if got, _, _ := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Some Anime"}}, "ab"); len(got) != 0 {

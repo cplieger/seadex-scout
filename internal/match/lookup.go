@@ -136,6 +136,7 @@ func (m *Matcher) freshExpiry(now time.Time) time.Time {
 // the policy's own horizon is re-stamped like a fresh write.
 func (m *Matcher) migrateMemo(memo *Memo, now time.Time) {
 	horizon := now.Add(memoMaxTTL)
+	restamped := 0
 	for id, ent := range memo.Entries {
 		switch {
 		case ent.Expiry.IsZero():
@@ -151,10 +152,19 @@ func (m *Matcher) migrateMemo(memo *Memo, now time.Time) {
 			// fresh write, the same correction rebaseFutureFirstSeen applies
 			// to a persisted FirstSeen ahead of the clock.
 			ent.Expiry = m.freshExpiry(now)
+			restamped++
 		default:
 			continue
 		}
 		memo.Entries[id] = ent
+	}
+	if restamped > 0 {
+		// One counted line, not one per entry: the cause is a whole-file
+		// property (a skewed clock during one cycle, or an edited state.json),
+		// so the count is the signal. Same shape as the indexer feed's
+		// future-timestamp rebase WARN.
+		m.log.Warn("anilist memo: expiries beyond the policy horizon re-stamped",
+			"restamped", restamped)
 	}
 }
 

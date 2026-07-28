@@ -993,15 +993,17 @@ func (s *Scout) Report(ctx context.Context) (audit.Report, error) {
 
 	entries, err := s.deps.SeaDex.FetchEntries(ctx)
 	if err != nil {
-		// A cancelled fetch is the shutdown: keep the chain intact so
-		// main's dispatchOutcome still matches context.Canceled (WARN, not
-		// the cycle-error ERROR). A genuine upstream failure is reduced
-		// like the cycle's SeaDex log site: the error text can embed raw
-		// upstream bytes bounded only by the page wire cap.
-		if ctx.Err() != nil {
-			return audit.Report{}, fmt.Errorf("seadex fetch: %w", err)
+		// Every returned error is reduced first: the error text can embed raw
+		// upstream bytes bounded only by the page wire cap, and that guarantee
+		// must not become conditional when a shutdown races a fetch failure.
+		// A cancelled fetch additionally keeps the shutdown token so main's
+		// dispatchOutcome still matches context.Canceled (WARN, not the
+		// cycle-error ERROR); the bounded text rides along as the cause.
+		safeErr := logSafeUpstreamError(err)
+		if ctx.Err() != nil && (errors.Is(err, ctx.Err()) || errors.Is(err, context.Cause(ctx))) {
+			return audit.Report{}, fmt.Errorf("seadex fetch: %w (cause: %v)", ctx.Err(), safeErr)
 		}
-		return audit.Report{}, fmt.Errorf("seadex fetch: %w", logSafeUpstreamError(err))
+		return audit.Report{}, fmt.Errorf("seadex fetch: %w", safeErr)
 	}
 	if len(entries) == 0 {
 		// Defense in depth: FetchEntries errors on an empty completed
@@ -1105,12 +1107,11 @@ const saveGrace = 5 * time.Second
 // the ~5.9 MB mapping cache, the memo) began before the SIGTERM. Subtracting
 // it would starve the retry to zero in exactly the slow-volume case the retry
 // exists for. A cancellation is not a fault (a redeploy is routine), so only a
-// genuine write failure is logged at
-// ERROR — which keeps it off the cycle-error alert. A deliberate preservation
-// refusal (state.ErrSavePreserved) is likewise not a fault and logs at WARN:
-// the redeploy SIGTERM that cancels the cycle can land in Load's read window,
-// which blocks the save by design, and alerting on that would page the operator
-// on every redeploy.
+// genuine write failure is logged at ERROR — which keeps it off the cycle-error
+// alert. A deliberate preservation refusal (state.ErrSavePreserved) is likewise
+// not a fault and logs at WARN: the redeploy SIGTERM that cancels the cycle can
+// land in Load's read window, which blocks the save by design, and alerting on
+// that would page the operator on every redeploy.
 func (s *Scout) save(ctx context.Context, st *state.State) {
 	err := s.deps.Store.Save(ctx, st)
 	if err != nil && (errors.Is(err, context.Canceled) || ctx.Err() != nil) {

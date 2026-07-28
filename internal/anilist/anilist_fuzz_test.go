@@ -118,11 +118,13 @@ func assertMediaBounded(t *testing.T, m Media, raw []byte) {
 		t.Errorf("parsed format of %d bytes exceeds maxFormatBytes (%d) from %q", len(m.Format), maxFormatBytes, raw)
 	}
 	assertWireTextSafe(t, "format", m.Format, raw)
-	// toMedia's year gate as a fuzz invariant: an accepted Media publishes
-	// either the unknown sentinel 0 or a four-digit year, never an impossible
-	// value that match.findByTitle would apply as a hard match constraint and
-	// Memo would retain.
-	if m.Year != 0 && !plausibleYear(m.Year) {
+	// toMedia's year gate as a fuzz invariant, restated here rather than read
+	// from plausibleYear: an oracle that calls the production predicate moves
+	// with it, so weakening the gate would silently weaken this check too. An
+	// accepted Media publishes either the unknown sentinel 0 or a four-digit
+	// year, never an impossible value that match.findByTitle would apply as a
+	// hard match constraint and Memo would retain.
+	if m.Year != 0 && (m.Year < 1000 || m.Year > 9999) {
 		t.Errorf("parsed year %d is neither the unknown sentinel 0 nor a plausible year, from %q", m.Year, raw)
 	}
 }

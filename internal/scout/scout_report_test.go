@@ -3,6 +3,7 @@ package scout
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -221,6 +222,63 @@ func TestReportSeaDexFailureErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "seadex fetch") {
 		t.Errorf("error = %q, want seadex-fetch context", err.Error())
+	}
+}
+
+// cancelingSeaDex cancels the run context from inside FetchEntries and then
+// fails, reproducing a shutdown that races an upstream failure whose error text
+// embeds unbounded upstream bytes.
+type cancelingSeaDex struct {
+	cancel context.CancelFunc
+	err    error
+}
+
+func (c *cancelingSeaDex) FetchEntries(context.Context) ([]seadex.Entry, error) {
+	c.cancel()
+	return nil, c.err
+}
+
+// TestReportSeaDexCancellationBoundsErrorText pins Report's SeaDex arm on the
+// shutdown path: the log-boundary reduction is unconditional, so a cancelled
+// fetch whose error carries raw upstream bytes still yields a bounded,
+// single-line error, while the wrap keeps context.Canceled matchable for main's
+// WARN-not-ERROR shutdown classification.
+func TestReportSeaDexCancellationBoundsErrorText(t *testing.T) {
+	logger := scoutTestLogger()
+	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	oversized := strings.Repeat("A", 4*maxLoggedErrorBytes) + "\nsecond line"
+	s := New(&Deps{
+		Logger: logger,
+		Store: &fakeStore{st: state.State{
+			Mapping: frierenMappingCache(),
+		}},
+		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Mapping: fakeMapping{},
+		SeaDex: &cancelingSeaDex{
+			cancel: cancel,
+			err:    fmt.Errorf("seadex page: %s: %w", oversized, context.Canceled),
+		},
+	})
+
+	_, err := s.Report(ctx)
+	if err == nil {
+		t.Fatal("Report returned nil error, want a cancelled seadex fetch error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Report error = %v, want it to wrap context.Canceled", err)
+	}
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "seadex fetch: ") {
+		t.Errorf("Report error = %q, want seadex-fetch stage context", msg)
+	}
+	if strings.ContainsAny(msg, "\n\r") {
+		t.Error("Report error text contains a newline, want a single line")
+	}
+	if len(msg) > maxLoggedErrorBytes+128 {
+		t.Errorf("Report error text is %d bytes, want it bounded near maxLoggedErrorBytes (%d)", len(msg), maxLoggedErrorBytes)
 	}
 }
 

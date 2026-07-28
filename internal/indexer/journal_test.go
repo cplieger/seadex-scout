@@ -1281,6 +1281,55 @@ func TestRenderJournalItemFallsBackToRenderableOccurrence(t *testing.T) {
 	}
 }
 
+// TestRenderJournalItemOrderIndependentForDuplicateRelationRows pins the
+// TOTALITY of renderJournalItem's synthesis order for the shape the ordering
+// exists to close: two occurrences of one journal key that share their AniList
+// ID, URL, tracker AND info hash (a duplicated trs relation row) while carrying
+// different Files. Ordering only on the torrent's identity bytes leaves those
+// rows comparing equal, so SortStableFunc keeps catalogue order and the served
+// GUID alternates between two titles and sizes as the catalogue is re-fetched.
+// Both permutations must render the same observable item.
+func TestRenderJournalItemOrderIndependentForDuplicateRelationRows(t *testing.T) {
+	w := newTestWriter(filepath.Join(t.TempDir(), "feed.json"), "", false)
+	hash := strings.Repeat("b", 40)
+	// One entry, two identical-identity relation rows with different payloads.
+	entry := &seadex.Entry{AniListID: 7, Torrents: []seadex.Torrent{
+		{
+			Tracker: "Nyaa", URL: "https://nyaa.si/view/77", InfoHash: hash,
+			Files: []seadex.File{{Length: 9, Name: "Show - S01E01 (1080p) [A].mkv"}},
+		},
+		{
+			Tracker: "Nyaa", URL: "https://nyaa.si/view/77", InfoHash: hash,
+			Files: []seadex.File{{Length: 12, Name: "Show - S01E02 (1080p) [B].mkv"}},
+		},
+	}}
+	forward := []curatedRef{
+		{entry: entry, torrent: &entry.Torrents[0]},
+		{entry: entry, torrent: &entry.Torrents[1]},
+	}
+	reversed := []curatedRef{forward[1], forward[0]}
+	infoFor := func(int) EntryInfo { return EntryInfo{} }
+
+	first, ok, noPasskey := w.renderJournalItem("nyaa:77", forward, infoFor)
+	if !ok || noPasskey {
+		t.Fatalf("renderJournalItem(forward) = (ok=%v, noPasskey=%v), want (true, false)", ok, noPasskey)
+	}
+	if first.Title == "" {
+		t.Fatal("renderJournalItem(forward) Title is empty, want a synthesized title")
+	}
+	second, ok, noPasskey := w.renderJournalItem("nyaa:77", reversed, infoFor)
+	if !ok || noPasskey {
+		t.Fatalf("renderJournalItem(reversed) = (ok=%v, noPasskey=%v), want (true, false)", ok, noPasskey)
+	}
+	if first.Title != second.Title {
+		t.Errorf("Title = %q under reversed catalogue order, want %q: duplicated relation rows must not depend on catalogue order",
+			second.Title, first.Title)
+	}
+	if first.Size != second.Size {
+		t.Errorf("Size = %d under reversed catalogue order, want %d", second.Size, first.Size)
+	}
+}
+
 // TestRebuildDropsCarriedItemWarnedByStoredHashOnly pins carryItem's
 // stored-hash branch (warnedSet.retracts via ws.ids[it.InfoHash]) in isolation: the carried
 // nyaa:99 item has NO current occurrence in the catalogue (so its key never

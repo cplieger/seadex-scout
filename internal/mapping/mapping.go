@@ -186,10 +186,11 @@ type Cache struct {
 	ETag         string    `json:"etag,omitempty"`
 	LastModified string    `json:"last_modified,omitempty"`
 	Records      []Record  `json:"records,omitempty"`
-	// RejectedRefreshes counts consecutive fresh-200 refreshes the acceptance
-	// guards (the validation floor, the below-half-size shrink guard, the
-	// parse-time record cap, the aggregate identifier budget) rejected in
-	// favour of the stale map. It persists across cycles and restarts, resets
+	// RejectedRefreshes is the persisted streak of consecutive persistent
+	// refresh refusals. A fresh 200 advances it when the acceptance guards
+	// (the validation floor, the below-half-size shrink guard, the parse-time
+	// record cap, the aggregate identifier budget) reject it in favour of the
+	// stale map. It persists across cycles and restarts, resets
 	// to 0 on any accepted refresh or on a 304 that revalidates a USABLE
 	// cache, and rides on the *StaleMapError
 	// (ConsecutiveRejections) so the scout can escalate its degraded-mapping
@@ -209,7 +210,7 @@ type Cache struct {
 	// top-level document (errNotJSONArray - content-shape evidence, since
 	// truncation cannot change a body's first token). Mid-stream truncation and
 	// every other malformed-body class stays transient. A 304 answered to a
-	// request that carried NO validators also advances it (reuseCachedRecords
+	// request that carried NO validators also advances it (conditionalGet
 	// suppresses them whenever the cache is unusable, so such a 304 is a
 	// protocol violation that repeats identically every cycle) - which is why
 	// the reset above is scoped to a 304 over a usable cache.
@@ -501,14 +502,15 @@ func staleOrFail(prev *Cache, staleMsg string, cause, noCache error) (Cache, err
 	return *prev, noCache
 }
 
-// rejectRefresh degrades an acceptance-guard rejection of a fresh 200 body to
-// the stale map via staleOrFail, additionally advancing the persisted
-// consecutive-rejection streak (Cache.RejectedRefreshes) and carrying it on
-// the *StaleMapError so the scout can escalate its degraded-mapping log after
-// degradation.EscalationThreshold consecutive rejections. Only guard rejections
-// route here: a fetch or parse failure is a transient outage, not a persistent
-// guard refusal, so it neither advances the streak (plain staleOrFail) nor
-// resets it (only an accepted refresh or a 304 does).
+// rejectRefresh degrades a persistent refresh refusal to the stale map via
+// staleOrFail, additionally advancing the persisted consecutive-rejection
+// streak (Cache.RejectedRefreshes) and carrying it on the *StaleMapError so
+// the scout can escalate its degraded-mapping log after
+// degradation.EscalationThreshold consecutive rejections. Fresh-200
+// acceptance-guard rejections and a protocol-violating validator-less 304 over
+// an unusable cache route here; a transient fetch or parse failure does not, so
+// it neither advances the streak (plain staleOrFail) nor resets it. The streak
+// resets only on an accepted refresh or a 304 that revalidates a usable cache.
 //
 // The streak advances even when there is NO usable stale cache to return. It is
 // persisted state about the upstream, not about the cache: on a first boot whose

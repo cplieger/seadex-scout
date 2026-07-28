@@ -122,8 +122,10 @@ const annotationLegend = "Scope annotations: `approx` - the comparison used a co
 	"the SeaDex record carries a link value that is not a usable tracker URL (report it upstream), and " +
 	"`(unobtainable)` means the release has no usable link or sits on a tracker you do not use. An " +
 	"annotated release stays listed but never drives the verdict and is never offered as a link. " +
-	"`(N hidden: animebytes)` means N of the entry's releases were withheld because you have " +
-	"`animebytes` off, so an empty best column there means \"not on a tracker you use\", not \"SeaDex lists no best\".\n\n"
+	"`(N best hidden: animebytes)` means N of the entry's SeaDex BEST releases were withheld because you " +
+	"have `animebytes` off, so an empty best column there means \"not on a tracker you use\", not \"SeaDex " +
+	"lists no best\". An entry whose withheld releases are only alts carries no marker: SeaDex really lists " +
+	"no best for it.\n\n"
 
 // incompleteHeader is the incomplete-mapping section's Markdown heading text,
 // also named by the header caveat so a reader can find the section.
@@ -173,19 +175,22 @@ func writeRow(b *strings.Builder, row *Row) {
 }
 
 // bestCell renders the SeaDex best column: the displayed best groups, plus the
-// count of releases the operator's AnimeBytes toggle withheld. Row.
-// HiddenAnimeBytes exists so a row whose only bests are AnimeBytes releases is
+// count of BEST releases the operator's AnimeBytes toggle withheld
+// (Row.hiddenAnimeBytesBest, not the all-releases Row.HiddenAnimeBytes). The
+// marker exists so a row whose only bests are AnimeBytes releases is
 // distinguishable from an entry SeaDex lists no best for - both otherwise show
 // an empty best column, no qualifier and a have_unlisted verdict - and until
-// now it reached only the JSON copy and the slog line, leaving the Markdown
-// artifact (the human-facing half of the pair) unable to make that
-// distinction. The count leaks no AnimeBytes group, tracker, or link.
+// now that distinction reached only the JSON copy and the slog line, leaving
+// the Markdown artifact (the human-facing half of the pair) unable to make it.
+// Counting hidden ALTS here would make the same claim for an entry SeaDex
+// genuinely lists no best for, so the projection is best-only. The count leaks
+// no AnimeBytes group, tracker, or link.
 func bestCell(row *Row) string {
 	groups := escapeCell(orEmpty(strings.Join(displayBestGroups(row.Releases), ", ")))
-	if row.HiddenAnimeBytes == 0 {
+	if row.hiddenAnimeBytesBest == 0 {
 		return groups
 	}
-	return groups + " (" + strconv.Itoa(row.HiddenAnimeBytes) + " hidden: animebytes)"
+	return groups + " (" + strconv.Itoa(row.hiddenAnimeBytesBest) + " best hidden: animebytes)"
 }
 
 // scopeCell renders the scope for the Markdown table, appending the comparison

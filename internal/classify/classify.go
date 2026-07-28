@@ -209,9 +209,12 @@ func halfFloor(anchor int64) int64 { return anchor/2 + anchor%2 }
 // for a record whose size evidence cannot discriminate (sparse upstream data,
 // fixtures), where the type gate alone decides. What reaches that state differs
 // by anchor: payloadFiles' maximum is non-positive only when NO length is
-// positive, while PopulationFiles' median is non-positive once more than half
-// the pool is - so a census over lengths [0, 0, 0, 1000] deliberately keeps all
-// four files rather than reading the one real file as the whole population.
+// positive, while PopulationFiles' median is non-positive once the pool's
+// central lengths are - more than half the pool on an odd-size pool, and as
+// little as half on an even one, where the clamped midpoint of a 0 and a 1
+// still floors to 0 - so a census over lengths [0, 0, 0, 1000] deliberately
+// keeps all four files rather than reading the one real file as the whole
+// population.
 func keepAtLeast(pool []seadex.File, floor int64) []seadex.File {
 	out := make([]seadex.File, 0, len(pool))
 	for i := range pool {

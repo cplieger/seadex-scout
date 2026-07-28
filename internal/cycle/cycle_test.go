@@ -71,6 +71,33 @@ func TestRunCyclePanicIsLoggedAtError(t *testing.T) {
 	}
 }
 
+// TestRunOncePanicIsNotAnIngestFault pins the panic path's own error text: a
+// recovered panic must not be reported as the arr-ingest fault, because that
+// message is what alerts.yaml's SeadexScoutCycleError description sends the
+// operator to the arr config to check. The ingest wording stays pinned beside
+// it so the two producers of healthy=false cannot collapse back into one.
+func TestRunOncePanicIsNotAnIngestFault(t *testing.T) {
+	healthy, err := runOnce(context.Background(), panicCycler{})
+
+	if healthy {
+		t.Error("runOnce(panicking cycle) = healthy, want unhealthy")
+	}
+	if err == nil {
+		t.Fatal("runOnce(panicking cycle) = nil error, want the panic fault")
+	}
+	if got := err.Error(); got != "compare cycle panicked" {
+		t.Errorf("err = %q, want %q: a code fault must not name the library ingest", got, "compare cycle panicked")
+	}
+
+	healthy, err = runOnce(context.Background(), boolCycler(false))
+	if healthy {
+		t.Error("runOnce(unhealthy cycle) = healthy, want unhealthy")
+	}
+	if err == nil || err.Error() != "compare cycle failed (library ingest)" {
+		t.Errorf("err = %v, want the ingest fault preserved for a non-panic unhealthy cycle", err)
+	}
+}
+
 // cancelCycler cancels the poll context during the cycle and returns the
 // configured outcome, simulating a shutdown signal landing mid-cycle (cycle
 // reports unhealthy) or during the end-of-cycle save (cycle still completed

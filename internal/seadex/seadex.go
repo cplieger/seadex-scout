@@ -85,8 +85,13 @@ const (
 	// maxLoggedDecodeBytes bounds a page-DECODE failure's rendered text before
 	// it leaves the client. Stdlib json renders a rejected number literal
 	// verbatim, so the message is otherwise bounded only by maxPageBytes;
-	// sized to keep the decoder's own prose (the offending value's kind, the
-	// target type, the byte offset) fully readable.
+	// sized to keep an ORDINARY decode failure's prose (the offending value's
+	// kind, the target type, the byte offset) fully readable. The amplifying
+	// case cannot be: stdlib puts the raw literal BEFORE the target type
+	// ("cannot unmarshal number <literal> into Go value of type int"), so a
+	// megabyte-long literal spends the whole budget and the cut keeps only the
+	// kind plus the literal's head - enough to name the offending field's
+	// shape, which is all this diagnostic owes the operator.
 	maxLoggedDecodeBytes = 512
 	// maxAttempts / baseDelay bound the per-page retry.
 	maxAttempts = 3

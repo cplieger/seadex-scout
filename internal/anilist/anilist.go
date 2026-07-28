@@ -1023,8 +1023,13 @@ func parsePageRecords(media []json.RawMessage) (map[int]Media, error) {
 	var recordErr error
 	rejected := 0
 	for i := range media {
+		accepted := len(set.out)
 		if err := set.add(media[i], i); err != nil {
-			rejected++
+			// A duplicate id also invalidates the record already accepted for
+			// that id, so charge every record this failure excluded - the
+			// offender plus whatever it retracted - or the magnitude signal
+			// would under-report a conflict as a single poisoned record.
+			rejected += 1 + accepted - len(set.out)
 			if recordErr == nil {
 				recordErr = err
 			}

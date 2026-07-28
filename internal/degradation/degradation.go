@@ -36,10 +36,7 @@ const shrinkGuardFactor = 2
 // retains less than 1/shrinkGuardFactor of it (below half at the default 2).
 // The candidate is multiplied rather than the previous count divided, so an
 // odd prevCount never rounds in the guard's favour. It is the single home of
-// the shrink comparison every shrink guard shares: the mapping loader's
-// refresh shrink guard (acceptRefresh), the scout's library shrink guard, and
-// the SeaDex client's catalogue-walk shortfall guard (which errors the fetch
-// below half).
+// the shrink comparison every shrink guard shares.
 func Shrunk(count, prevCount int) bool {
 	return count*shrinkGuardFactor < prevCount
 }

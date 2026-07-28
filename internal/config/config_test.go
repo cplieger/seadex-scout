@@ -2164,3 +2164,87 @@ func TestValidateWarnsOnNonTorznabABEndpoint(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateWarnsOnUnexpandedSecretRef pins warnUnexpandedSecretRefs: a secret
+// still holding a literal environment-variable reference warns in both spellings
+// yamlenv leaves alone (a non-allowlisted braced name and the brace-less shell
+// form), a plain secret stays silent, and the warning names the field while
+// never echoing the value.
+func TestValidateWarnsOnUnexpandedSecretRef(t *testing.T) {
+	const msg = "still holds a literal environment-variable reference"
+	tests := []struct {
+		name     string
+		apiKey   string
+		wantWarn bool
+	}{
+		{"non-allowlisted braced ref warns", "${AB_PASSKEY}", true},
+		{"brace-less shell ref warns", "$SEADEX_SCOUT_SONARR_KEY", true},
+		// A plain key is built rather than written as a literal: a 16-hex
+		// literal beside the word "key" reads as a real credential to the
+		// gitleaks generic-api-key rule the CI secret scan runs, and the test
+		// only needs a value carrying no environment-variable reference.
+		{"plain key stays silent", strings.Repeat("a", 16), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := capture.Default(t)
+			c := Config{RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: tt.apiKey}
+			if err := c.Validate(); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			if got := rec.AttrContains(msg, "field", "sonarr.api_key"); got != tt.wantWarn {
+				t.Errorf("env-ref warning present = %v, want %v (messages %v)", got, tt.wantWarn, rec.Messages())
+			}
+			if rec.AttrContains(msg, "", tt.apiKey) {
+				t.Errorf("env-ref warning echoes the configured value: %v", rec.Messages())
+			}
+		})
+	}
+}
+
+// TestValidateWarnsOnReusedIndexerSecret pins warnReusedIndexerSecrets: reusing
+// the Prowlarr key or the AnimeBytes passkey as indexer.feed_api_key warns and
+// names the reused field (feed_api_key travels as a query parameter and is
+// stored in each arr's indexer config), while distinct secrets stay silent. The
+// warning never echoes a secret.
+func TestValidateWarnsOnReusedIndexerSecret(t *testing.T) {
+	const msg = "feed_api_key repeats another indexer secret"
+	shared := strings.Repeat("b", 32)
+	base := Config{
+		RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k",
+		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api",
+		IndexerAPIKey:         shared,
+		IndexerProwlarrAPIKey: "pk",
+	}
+	tests := []struct {
+		name      string
+		mutate    func(*Config)
+		wantField string
+	}{
+		{"prowlarr key reused warns", func(c *Config) { c.IndexerProwlarrAPIKey = shared }, "indexer.prowlarr_api_key"},
+		{"ab passkey reused warns", func(c *Config) { c.IndexerABPasskey = shared }, "indexer.ab_passkey"},
+		{"distinct secrets stay silent", func(*Config) {}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := capture.Default(t)
+			c := base
+			tt.mutate(&c)
+			if err := c.Validate(); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			if tt.wantField == "" {
+				if rec.Contains(msg) {
+					t.Errorf("Validate() log = %v, want no reused-secret warning", rec.Messages())
+				}
+				return
+			}
+			if !rec.AttrContains(msg, "field", tt.wantField) {
+				t.Errorf("Validate() log = %v, want the reused-secret warning naming %s", rec.Messages(), tt.wantField)
+			}
+			if rec.AttrContains(msg, "", shared) {
+				t.Errorf("reused-secret warning echoes the secret: %v", rec.Messages())
+			}
+		})
+	}
+}

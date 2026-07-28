@@ -676,9 +676,8 @@ func TestParseFribbForRefresh_elementsCountsEverySourceElement(t *testing.T) {
 // ~4.2M retained ids from a body under maxMapBytes). A record that
 // would breach the budget is refused with the fatal
 // errIdentifierBudgetExceeded sentinel (add returns it rather than counting it
-// as a malformed record), which the decode loop propagates as a
-// whole-document refusal rather than a
-// tolerated per-record skip.
+// as a malformed record), which the decode loop propagates as a whole-document
+// refusal rather than a tolerated per-record skip.
 func TestFribbDecodeCounts_aggregateIdentifierBudget(t *testing.T) {
 	atCap := Record{AniListID: 1, IMDbIDs: make([]string, maxFribbIdentifiers)}
 	var c fribbDecodeCounts

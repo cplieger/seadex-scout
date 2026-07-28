@@ -380,10 +380,10 @@ func capURLAttr(s string) string {
 // (including '@', which is how Discord suppresses an @everyone / @here
 // mention), and '&', '<', '>' are entity-encoded because Slack mrkdwn treats
 // them as markup and '<@U123>' is a Slack mention. Unlike
-// logattr.EscapeLinkDestination this
-// is for a text SPAN, not a link destination, so '[' and ']' ARE escaped -
-// there is no IPv6-literal case to preserve here. It also flattens CR/LF,
-// which capAttr's raw label deliberately keeps.
+// logattr.EscapeLinkDestination this is for a text SPAN, not a link
+// destination, so '[' and ']' ARE escaped - there is no IPv6-literal case to
+// preserve here. It also flattens CR/LF, which capAttr's raw label
+// deliberately keeps.
 var mdTextEscaper = strings.NewReplacer(
 	"\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "[", "\\[", "]", "\\]",
 	"(", "\\(", ")", "\\)", "~", "\\~", "|", "\\|", "@", "\\@",

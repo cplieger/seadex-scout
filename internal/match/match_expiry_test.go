@@ -3,6 +3,7 @@ package match
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/slogx/capture"
 )
 
 // memoTestClock is the fixed instant the expiry tests run at; entries are
@@ -450,5 +452,59 @@ func TestMemoStaleFormatUsesExpiredEntryAndRejectsUnusable(t *testing.T) {
 				t.Errorf("StaleFormat(%d) = (%q, %v), want (%q, %v)", tc.id, got, ok, tc.want, tc.wantOK)
 			}
 		})
+	}
+}
+
+// TestMemoExpiryBeyondHorizonRestamped pins migrateMemo's second normalization
+// arm: an expiry further out than any this policy can stamp (a clock skew when
+// the entry was written, or an edited state.json) is re-stamped like a fresh
+// write, so the entry rejoins the renewal/prune cycle instead of living
+// forever. An in-policy future expiry is left untouched, the correction
+// spends no AniList request (a re-stamped entry is still a live memo hit), and
+// the repair is reported once with its count.
+func TestMemoExpiryBeyondHorizonRestamped(t *testing.T) {
+	fake := &countingAniList{}
+	m := expiryMatcher(fake, 0.5)
+	logger, recorder := capture.New()
+	m.log = logger
+	skewed := memoTestClock.Add(90 * 24 * time.Hour) // far beyond now+memoMaxTTL
+	inPolicy := memoTestClock.Add(memoMaxTTL - time.Hour)
+	memo := Memo{Entries: map[int]MemoEntry{
+		1: {NotFound: true, Expiry: skewed},
+		2: {Titles: []string{"Kept"}, Format: "TV", Year: 2020, Expiry: inPolicy},
+	}}
+
+	res := m.Match(context.Background(), []seadex.Entry{{AniListID: 1}, {AniListID: 2}},
+		&library.Snapshot{}, mapping.NewIndex(nil), memo)
+
+	if fake.calls != 0 {
+		t.Errorf("AniList calls = %d, want 0: re-stamping must not trigger a fetch", fake.calls)
+	}
+	want := memoTestClock.Add(memoMinTTL + (memoMaxTTL-memoMinTTL)/2)
+	if got := res.Memo.Entries[1].Expiry; !got.Equal(want) {
+		t.Errorf("memo[1].Expiry = %s, want the fresh stamp %s (the out-of-policy value must be corrected)", got, want)
+	}
+	if got := res.Memo.Entries[2].Expiry; !got.Equal(inPolicy) {
+		t.Errorf("memo[2].Expiry = %s, want the untouched in-policy %s", got, inPolicy)
+	}
+	records := recorder.Records()
+	if len(records) != 1 {
+		t.Fatalf("log records = %d, want 1 counted WARN for the re-stamped entries", len(records))
+	}
+	if records[0].Level != slog.LevelWarn ||
+		records[0].Message != "anilist memo: expiries beyond the policy horizon re-stamped" {
+		t.Errorf("record = level %s message %q, want the WARN re-stamp summary",
+			records[0].Level, records[0].Message)
+	}
+	var restamped int64 = -1
+	records[0].Attrs(func(a slog.Attr) bool {
+		if a.Key == "restamped" {
+			restamped = a.Value.Int64()
+			return false
+		}
+		return true
+	})
+	if restamped != 1 {
+		t.Errorf("restamped attribute = %d, want 1 (only the out-of-policy entry is corrected)", restamped)
 	}
 }

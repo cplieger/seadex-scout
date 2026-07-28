@@ -283,51 +283,40 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 			s.log.Warn("could not clean stale atomic-write temp files", "dir", filepath.Dir(s.path), "error", cleanErr)
 		}
 	}
-	data, err := s.readState(ctx)
+	// ONE os.Root spans the whole read -> classify -> preserve decision.
+	// os.Root only confines what happens after the OpenRoot, so reopening the
+	// directory by AMBIENT PATH once the read has already failed would leave a
+	// window in which a redirected directory component sends the quarantine
+	// rename into a REPLACEMENT directory, moving a file this Load never read.
+	// Holding the read's own root open across the classification closes it:
+	// every inode probe and the quarantine rename resolve against the exact
+	// directory handle the state bytes were read through.
+	//
+	// A missing state DIRECTORY surfaces here as fs.ErrNotExist and is
+	// classified as the cold start it is, exactly like a missing file; any
+	// other open failure reaches the unclassified read-fault arm below, where
+	// a nil root reports no foreign inode and cannot preserve anything - the
+	// same conservative outcome the reopen-on-demand shape had.
+	root, err := os.OpenRoot(filepath.Dir(s.path))
+	if root != nil {
+		defer func() {
+			if clErr := root.Close(); clErr != nil {
+				s.log.Warn("could not close state directory handle", "dir", filepath.Dir(s.path), "error", clErr)
+			}
+		}()
+	}
+	var data []byte
+	if err == nil {
+		data, err = s.readState(ctx, root)
+	}
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			s.unsupportedVersion = 0
-			s.loadFailed = false
-			s.log.Info("no state file, starting cold", "path", s.path)
-			return State{}, nil
-		}
-		if errors.Is(err, atomicfile.ErrFileTooLarge) || errors.Is(err, atomicfile.ErrNotRegular) {
-			// Save enforces maxStateBytes and only ever writes a regular
-			// file, so an oversized file - or a directory, FIFO, device or
-			// socket at the state path, which ReadBoundedInRoot reports as
-			// ErrNotRegular - can only be foreign or corrupt; preserve it
-			// like any other corruption. Both are DETERMINISTIC: no retry
-			// turns an over-cap payload or a non-regular inode into valid
-			// state, so neither belongs in the recoverable read-fault class
-			// below (which blocks every later Save until a Load classifies
-			// the path, and would freeze persistence forever here).
-			s.maybeQuarantine()
-			return State{}, fmt.Errorf("state: read %s: %w", s.path, err)
-		}
-		if s.foreignInode() {
-			// A non-regular inode the confined open could not report as
-			// ErrNotRegular: os.Root refuses to traverse a symlink pointing
-			// out of the state directory and reports it as "path escapes
-			// from parent", an unexported error carrying no sentinel to
-			// match. It is as DETERMINISTIC as the two cases above (no retry
-			// makes it readable, and Save's temp+rename replaces the inode
-			// outright), so classify it as corruption instead of arming the
-			// recoverable-fault block forever.
-			s.maybeQuarantine()
-			return State{}, fmt.Errorf("state: read %s: %w", s.path, err)
-		}
-		// An UNCLASSIFIED read failure (EACCES, EIO, a cancelled read - not
-		// absence, not an over-cap file, not a decode error): the bytes at
-		// the live path may be fully recoverable, so they must be preserved
-		// like every classified failure preserves its evidence (quarantine /
-		// the newer-schema Save block). Block Save until a later Load can
-		// classify the file - without this, the cycle that started cold
-		// after the failed read would overwrite the unread bytes at its end.
-		s.loadFailed = true
-		return State{}, fmt.Errorf("state: read %s: %w", s.path, err)
+		// A cold start (a missing file or directory) is reported as a nil
+		// error, so it returns the zero State exactly like a successful read
+		// of an empty state.
+		return State{}, s.classifyReadFailure(root, err)
 	}
 	s.loadFailed = false
-	st, err := s.decode(data)
+	st, err := s.decode(root, data)
 	if err != nil {
 		return State{}, err
 	}
@@ -356,56 +345,118 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 	return st, nil
 }
 
-// readState reads the state file through an os.Root confined to its parent
-// directory: the open is symlink-confined and O_NONBLOCK, so a redirected or
-// blocking special file at the state path is an error Load can classify
-// rather than an uninterruptible open (atomicfile.ReadBounded uses os.Open,
-// which follows a symlink and blocks on a FIFO with no writer past both of
-// its context checks).
-func (s *Store) readState(ctx context.Context) ([]byte, error) {
-	root, err := os.OpenRoot(filepath.Dir(s.path))
-	if err != nil {
-		return nil, err
+// classifyReadFailure applies Load's read-failure policy to a failed open or
+// read and returns the error Load reports: nil for the cold start a missing
+// file (or a missing state DIRECTORY, which os.OpenRoot reports the same way)
+// is, otherwise the wrapped failure. It owns the state transitions each class
+// implies - clearing the flags for a cold start, preserving a deterministically
+// unusable payload through maybeQuarantine (which owns loadFailed for that
+// class), and arming the Save block for an unclassified fault - so the caller
+// keeps only the read/decode flow. It preserves through the root the read was
+// resolved against, so the rename cannot land in a directory swapped in after
+// the read.
+func (s *Store) classifyReadFailure(root *os.Root, err error) error {
+	if errors.Is(err, fs.ErrNotExist) {
+		s.unsupportedVersion = 0
+		s.loadFailed = false
+		s.log.Info("no state file, starting cold", "path", s.path)
+		return nil
 	}
-	defer func() {
-		if clErr := root.Close(); clErr != nil {
-			s.log.Warn("could not close state directory handle", "dir", filepath.Dir(s.path), "error", clErr)
-		}
-	}()
+	if errors.Is(err, atomicfile.ErrFileTooLarge) || errors.Is(err, atomicfile.ErrNotRegular) {
+		// Save enforces maxStateBytes and only ever writes a regular file, so
+		// an oversized file - or a directory, FIFO, device or socket at the
+		// state path, which ReadBoundedInRoot reports as ErrNotRegular - can
+		// only be foreign or corrupt; preserve it like any other corruption.
+		// Both are DETERMINISTIC: no retry turns an over-cap payload or a
+		// non-regular inode into valid state, so neither belongs in the
+		// recoverable read-fault class below (which blocks every later Save
+		// until a Load classifies the path, and would freeze persistence
+		// forever here).
+		s.maybeQuarantine(root)
+		return fmt.Errorf("state: read %s: %w", s.path, err)
+	}
+	if s.foreignInode(root) {
+		// A non-regular inode the confined open could not report as
+		// ErrNotRegular: os.Root refuses to traverse a symlink pointing out
+		// of the state directory and reports it as "path escapes from
+		// parent", an unexported error carrying no sentinel to match. It is
+		// as DETERMINISTIC as the two cases above (no retry makes it
+		// readable, and Save's temp+rename replaces the inode outright), so
+		// classify it as corruption instead of arming the recoverable-fault
+		// block forever.
+		s.maybeQuarantine(root)
+		return fmt.Errorf("state: read %s: %w", s.path, err)
+	}
+	// An UNCLASSIFIED read failure (EACCES, EIO, a cancelled read - not
+	// absence, not an over-cap file, not a decode error): the bytes at the
+	// live path may be fully recoverable, so they must be preserved like every
+	// classified failure preserves its evidence (quarantine / the newer-schema
+	// Save block). Block Save until a later Load can classify the file -
+	// without this, the cycle that started cold after the failed read would
+	// overwrite the unread bytes at its end.
+	s.loadFailed = true
+	return fmt.Errorf("state: read %s: %w", s.path, err)
+}
+
+// readState reads the state file through the os.Root Load holds open for the
+// whole read/classify/preserve decision: the open is symlink-confined and
+// O_NONBLOCK, so a redirected or blocking special file at the state path is an
+// error Load can classify rather than an uninterruptible open
+// (atomicfile.ReadBounded uses os.Open, which follows a symlink and blocks on
+// a FIFO with no writer past both of its context checks). The caller owns the
+// root's lifetime.
+func (s *Store) readState(ctx context.Context, root *os.Root) ([]byte, error) {
 	return atomicfile.ReadBoundedInRoot(ctx, root, filepath.Base(s.path), maxStateBytes)
 }
 
-// foreignInode reports whether the state path holds an inode Save never
-// writes: anything but a regular file. It lstats through the confined root,
-// so the probe itself never follows a symlink out of the state directory,
-// and a failure to probe (a missing or unreadable directory) reports false
-// so the caller keeps its conservative recoverable-fault classification.
-func (s *Store) foreignInode() bool {
-	root, err := os.OpenRoot(filepath.Dir(s.path))
-	if err != nil {
+// foreignInode reports whether the state path holds an inode the confined
+// read can never turn into state: a non-regular inode, or a symlink that
+// escapes the state directory. An in-root symlink to a regular file is NOT
+// foreign - the confined read follows it - so a failure over one keeps the
+// recoverable classification. It probes through the SAME confined root the
+// read used, so the probe never follows a symlink out of the state directory
+// and never re-resolves the directory by ambient path; a probe that cannot run
+// (a nil root, because the directory could not be opened at all, or an lstat
+// failure) reports false so the caller keeps its conservative
+// recoverable-fault classification.
+func (s *Store) foreignInode(root *os.Root) bool {
+	if root == nil {
 		return false
 	}
-	defer func() {
-		if clErr := root.Close(); clErr != nil {
-			s.log.Warn("could not close state directory handle", "dir", filepath.Dir(s.path), "error", clErr)
-		}
-	}()
 	info, err := root.Lstat(filepath.Base(s.path))
 	if err != nil {
 		return false
 	}
-	return !info.Mode().IsRegular()
+	if info.Mode().IsRegular() {
+		return false
+	}
+	// A symlink that stays INSIDE the state directory is followed by the
+	// confined read exactly like a regular file (ReadBoundedInRoot opens
+	// through the root without O_NOFOLLOW and stats the open handle), so it
+	// is NOT an inode Save cannot replace: a read that failed over one failed
+	// for a transient reason - a cancelled read during a redeploy, EACCES,
+	// EIO - and must keep the recoverable classification. Resolving through
+	// the root separates the two cases: root.Stat follows an in-root link and
+	// refuses one that escapes, so only an escaping link (or a link onto a
+	// non-regular inode) reports foreign.
+	resolved, err := root.Stat(filepath.Base(s.path))
+	if err != nil {
+		return true
+	}
+	return !resolved.Mode().IsRegular()
 }
 
 // decode applies Load's corruption and schema-version policy to the raw state
 // bytes, quarantining a corrupt payload (or, for a newer-schema file, setting
-// the Save block instead) before returning the error.
-func (s *Store) decode(data []byte) (State, error) {
+// the Save block instead) before returning the error. It preserves through the
+// root Load read the bytes with, so the rename cannot land in a directory
+// swapped in after the read.
+func (s *Store) decode(root *os.Root, data []byte) (State, error) {
 	// Save always emits valid UTF-8 JSON. encoding/json otherwise replaces
 	// malformed UTF-8 inside strings with U+FFFD, silently altering cache
 	// keys and values instead of reporting corruption.
 	if !utf8.Valid(data) {
-		s.maybeQuarantine()
+		s.maybeQuarantine(root)
 		return State{}, fmt.Errorf("state: decode %s: invalid UTF-8", s.path)
 	}
 	// Require a JSON object envelope before unmarshalling: json.Unmarshal
@@ -414,7 +465,7 @@ func (s *Store) decode(data []byte) (State, error) {
 	// baselines findings and discards every cache) instead of surfacing the
 	// corruption. Save can never produce anything but an object.
 	if trimmed := bytes.TrimSpace(data); len(trimmed) == 0 || trimmed[0] != '{' {
-		s.maybeQuarantine()
+		s.maybeQuarantine(root)
 		return State{}, fmt.Errorf("state: decode %s: not a JSON object", s.path)
 	}
 	// Bound the structural walk below before it runs. schemaVersion streams
@@ -430,7 +481,7 @@ func (s *Store) decode(data []byte) (State, error) {
 	// no payload this rejects could ever have loaded; it only moves the
 	// rejection ahead of the unbounded walk.
 	if !json.Valid(data) {
-		s.maybeQuarantine()
+		s.maybeQuarantine(root)
 		return State{}, fmt.Errorf("state: decode %s: not valid JSON", s.path)
 	}
 	// The wire discriminator is decoded independently BEFORE the State
@@ -441,7 +492,7 @@ func (s *Store) decode(data []byte) (State, error) {
 	// corruption Save can never have produced; quarantine it.
 	wireVersion, found, err := schemaVersion(data)
 	if err != nil {
-		s.maybeQuarantine()
+		s.maybeQuarantine(root)
 		return State{}, fmt.Errorf("state: decode %s: %w", s.path, err)
 	}
 	if found && wireVersion > SchemaVersion {
@@ -458,7 +509,7 @@ func (s *Store) decode(data []byte) (State, error) {
 	}
 	var st State
 	if err := json.Unmarshal(data, &st); err != nil {
-		s.maybeQuarantine()
+		s.maybeQuarantine(root)
 		return State{}, fmt.Errorf("state: decode %s: %w", s.path, err)
 	}
 	return st, nil
@@ -473,7 +524,7 @@ func (s *Store) decode(data []byte) (State, error) {
 // preservation FAILING arms it, so Save refuses rather than atomically
 // overwriting the still-live corrupt file - the only forensic copy and the
 // finding-dedupe baseline - with a cold envelope.
-func (s *Store) maybeQuarantine() {
+func (s *Store) maybeQuarantine(root *os.Root) {
 	// Load positively classified the live file as corrupt, so a newer-schema
 	// block remembered from an earlier Load no longer describes the file at
 	// the live path (unsupportedVersion is documented as what the LAST Load
@@ -488,7 +539,7 @@ func (s *Store) maybeQuarantine() {
 		s.loadFailed = false
 		return
 	}
-	s.loadFailed = !s.quarantine()
+	s.loadFailed = !s.quarantine(root)
 }
 
 // quarantine preserves a corrupt state file beside the original so the decode
@@ -499,22 +550,18 @@ func (s *Store) maybeQuarantine() {
 // read-only parent - is logged at Warn and returns false, which arms the
 // caller's Save block: without a preserved copy, letting the cycle's Save
 // replace the live file would erase the corruption evidence entirely.
-func (s *Store) quarantine() bool {
+func (s *Store) quarantine(root *os.Root) bool {
 	dir, base := filepath.Dir(s.path), filepath.Base(s.path)
-	// Preserve through the same confinement Load's read establishes: the
-	// rename is resolved against an open directory handle, so a swapped or
-	// redirected component cannot move the corrupt bytes to a path the read
-	// never validated.
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		s.log.Warn("could not open state directory to preserve corrupt state file", "dir", dir, "error", err)
+	// Preserve through the very root Load's read was resolved against - never a
+	// freshly opened one: the rename acts on the open directory handle that
+	// held the bytes just read, so a component redirected AFTER that open
+	// cannot move the corrupt bytes to a path the read never validated. A nil
+	// root means the directory could not be opened at all, so there is nothing
+	// to preserve into and the caller's Save block is armed instead.
+	if root == nil {
+		s.log.Warn("could not open state directory to preserve corrupt state file", "dir", dir)
 		return false
 	}
-	defer func() {
-		if clErr := root.Close(); clErr != nil {
-			s.log.Warn("could not close state directory handle", "dir", dir, "error", clErr)
-		}
-	}()
 	if err := root.Rename(base, base+".corrupt"); err != nil {
 		s.log.Warn("could not preserve corrupt state file", "path", s.path, "error", err)
 		return false

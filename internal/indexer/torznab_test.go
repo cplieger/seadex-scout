@@ -859,6 +859,14 @@ func TestItemSizeResolutionChain(t *testing.T) {
 			inner: `<enclosure url="http://x/1" length=""/><size>22</size>`,
 			want:  22,
 		},
+		"whitespace-only size element still fails the whole response": {
+			inner:   `<size> </size><torznab:attr name="size" value="33"/>`,
+			wantErr: true,
+		},
+		"whitespace-only enclosure length still fails the whole response": {
+			inner:   `<enclosure url="http://x/1" length=" "/><size>22</size>`,
+			wantErr: true,
+		},
 		"unparseable size element still fails the whole response": {
 			inner:   `<size>notanumber</size><torznab:attr name="size" value="33"/>`,
 			wantErr: true,

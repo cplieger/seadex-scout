@@ -807,6 +807,75 @@ func TestMatchHarvestCountsUnusableTitlesNamingThisGroup(t *testing.T) {
 	}
 }
 
+// TestHarvestReportsADegradedCheckpoint pins the operator-facing half of the
+// checkpoint rebaseline: decodeHarvestCheckpoint reporting WHY it degraded only
+// helps if harvestTitles actually says so, and a clean cursor must stay silent
+// so the signal is not noise on every rebuild.
+func TestHarvestReportsADegradedCheckpoint(t *testing.T) {
+	const warnMsg = "indexer title harvest checkpoint degraded"
+	tests := []struct {
+		name   string
+		cursor string
+		want   bool
+	}{
+		{name: "malformed JSON warns", cursor: `{"pages": {"nyaa:7": `, want: true},
+		{name: "unparseable rotation cursor warns", cursor: "bogus:5", want: true},
+		{name: "out-of-range page state warns", cursor: `{"last":"nyaa:7","pages":{"nyaa:7":0}}`, want: true},
+		{name: "clean legacy cursor stays silent", cursor: "nyaa:7", want: false},
+		{name: "absent cursor stays silent", cursor: "", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, srv := newHarvestMock(func(int) string { return emptyTorznab() })
+			defer srv.Close()
+			log, rec := capture.New()
+			w := wiredWriter(&FeedWriterConfig{
+				Path:           filepath.Join(t.TempDir(), "feed.json"),
+				UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
+			}, log, srv.Client())
+			w.harvest.harvestTitles(t.Context(), map[string][]journalItem{}, map[string]string{},
+				func(int) EntryInfo { return EntryInfo{} }, tc.cursor)
+			if got := rec.Contains(warnMsg); got != tc.want {
+				t.Errorf("checkpoint WARN emitted = %v, want %v; log output:\n%s",
+					got, tc.want, strings.Join(rec.Messages(), "\n"))
+			}
+		})
+	}
+}
+
+// TestHarvestReportsStrandedReleases pins the WARN that carries matchHarvest's
+// pendingRejected/unusable grades to an operator: a result naming this show's
+// own still-untitled release whose title cannot enter the cache may strand that
+// release on its synthesized title for the whole journal window, and unusable
+// rides no stat at all, so this line is its only report. One line per show per
+// rebuild, never per page.
+func TestHarvestReportsStrandedReleases(t *testing.T) {
+	const warnMsg = "indexer title harvest encountered results it could not use for this show's releases"
+	_, srv := newHarvestMock(func(int) string {
+		return torznabBody(torznabItem("   ", "https://nyaa.si/view/42"))
+	})
+	defer srv.Close()
+	log, rec := capture.New()
+	w := wiredWriter(&FeedWriterConfig{
+		Path:           filepath.Join(t.TempDir(), "feed.json"),
+		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
+	}, log, srv.Client())
+	feeds := map[string][]journalItem{
+		upstreamNyaa: {{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7}},
+	}
+	titles := map[string]string{}
+	w.harvest.harvestTitles(t.Context(), feeds, titles, func(int) EntryInfo {
+		return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true}
+	}, "")
+	if got := rec.Count(warnMsg); got != 1 {
+		t.Errorf("stranded WARN emitted %d times, want exactly one line per show per rebuild; log output:\n%s",
+			got, strings.Join(rec.Messages(), "\n"))
+	}
+	if len(titles) != 0 {
+		t.Errorf("titles = %v, want the unusable title kept out of the cache", titles)
+	}
+}
+
 // TestMatchHarvestFailsClosedWhenURLAndHashResolveToDifferentReleases pins
 // the other fail-closed branch of resolveHarvestKey: the page URLs agree with
 // each other but the info hash maps to a DIFFERENT curated release, so the

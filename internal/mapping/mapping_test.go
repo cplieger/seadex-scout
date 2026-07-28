@@ -366,7 +366,7 @@ func TestRecord_RoutedIDsReturnsOnlyUsableIDsForSelectedArr(t *testing.T) {
 // exceeds the aggregate identifier budget: every record retains both capped
 // identifier lists (maxFribbIdentifiers each), so one record past
 // maxFribbIdentifiersTotal/(2*maxFribbIdentifiers) trips the budget while the
-// element count stays an order of magnitude under maxFribbRecords - the
+// element count (16385 records) stays well under maxFribbRecords (65536) - the
 // per-record caps and the record cap must not be what refuses this body.
 func overIdentifierBudgetFribbBody() []byte {
 	perRecord := 2 * maxFribbIdentifiers

@@ -415,6 +415,23 @@ func TestLogConfigMasksInvalidRunMode(t *testing.T) {
 	}
 }
 
+// TestLogConfigLogsResolvedMode pins the contract the resolved-mode
+// parameter exists for: logConfig renders the mode it is PASSED, not the
+// config key. The documented one-shot `report`/`poll` container leaves
+// `mode: daemon` in config.yaml, so an operator filtering that container's
+// Loki stream on run_mode must read the mode the process actually runs.
+// Serial (swaps slog.Default).
+func TestLogConfigLogsResolvedMode(t *testing.T) {
+	rec := capture.Default(t)
+
+	cfg := &config.Config{RunMode: config.RunModeDaemon}
+	logConfig(cfg, modePoll)
+
+	if !rec.HasAttr("configuration loaded", "run_mode", modePoll) {
+		t.Errorf("run_mode not logged as the resolved mode %q: %v", modePoll, rec.Records())
+	}
+}
+
 // TestLoggableModeMasksUnknownMode pins the redaction contract main applies at
 // its terminal log sites: loggableMode passes the known run modes through and
 // maps anything else (which may be an expanded ${VAR} secret placed by a config

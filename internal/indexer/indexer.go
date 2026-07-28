@@ -115,7 +115,7 @@ func (c UpstreamConfig) enabled(scope string) bool {
 // SnapshotPath, where the compare cycle persists the materialized feed
 // (config.DefaultIndexerFeedPath in production). SnapshotPath names the same
 // file FeedWriterConfig.Path writes, the one contract binding the package's
-// write half to its read half; it is loaded in New so a restart serves the last
+// write half to its read half; it is warmed by Run so a restart serves the last
 // feed immediately, and reloaded on change while running. An empty SnapshotPath
 // serves an empty feed (used in tests).
 type Config struct {

@@ -1259,13 +1259,15 @@ func TestTerminalTorznabCode(t *testing.T) {
 
 // TestUpstreamSecretsRedactionScope pins WHICH values upstreamSecrets collects
 // as transmitted credentials, the set every log line and error message on the
-// upstream failure path is scrubbed against (CWE-532). Three rules decide it and
+// upstream failure path is scrubbed against (CWE-532). Four rules decide it and
 // none of them is reachable from the existing redaction tests, which all use a
-// credential-NAMED query parameter: an unlabelled value is a secret from
-// minEmbeddedSecretLen bytes up (an operator-embedded token on a parameter whose
-// name says nothing), a credential-named parameter is a secret at any length even
-// when its NAME is percent-encoded, and both the raw and the percent-decoded form
-// of a value are registered because a hostile upstream can reflect either.
+// credential-NAMED query parameter: a value on a parameter whose NAME says
+// nothing is a secret from minEmbeddedSecretLen bytes up (an operator-embedded
+// token), a credential-named parameter is a secret at any length even when its
+// NAME is percent-encoded, both the raw and the percent-decoded form of a value
+// are registered because a hostile upstream can reflect either, and a raw-query
+// pair with no '=' at all has no name to judge, so the whole token is graded as
+// an unlabelled VALUE against the same length floor.
 func TestUpstreamSecretsRedactionScope(t *testing.T) {
 	const (
 		unlabelledAtFloor = "abcdefghijklmnop"    // exactly minEmbeddedSecretLen bytes
@@ -1280,11 +1282,11 @@ func TestUpstreamSecretsRedactionScope(t *testing.T) {
 		want     []string
 		unwanted []string
 	}{
-		"unlabelled value at the length floor is a secret": {
+		"non-credential-named value at the length floor is a secret": {
 			rawQuery: "indexer=" + unlabelledAtFloor,
 			want:     []string{unlabelledAtFloor},
 		},
-		"unlabelled value below the floor stays readable in a diagnostic": {
+		"non-credential-named value below the floor stays readable in a diagnostic": {
 			rawQuery: "indexer=" + unlabelledBelow,
 			unwanted: []string{unlabelledBelow},
 		},
@@ -1295,6 +1297,16 @@ func TestUpstreamSecretsRedactionScope(t *testing.T) {
 		"raw and decoded forms of a credential value are both secrets": {
 			rawQuery: "apikey=" + escapedParamValue,
 			want:     []string{escapedParamValue, "abc/defghijklmnop"},
+		},
+		// A pair with no '=' has no name to judge, so the length floor alone
+		// decides: the whole token is what rides the outgoing request.
+		"bare token with no '=' at the length floor is a secret": {
+			rawQuery: unlabelledAtFloor,
+			want:     []string{unlabelledAtFloor},
+		},
+		"bare structural flag with no '=' stays readable in a diagnostic": {
+			rawQuery: "rss",
+			unwanted: []string{"rss"},
 		},
 	}
 	for name, tc := range tests {

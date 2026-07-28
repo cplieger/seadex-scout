@@ -23,6 +23,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/notify"
+	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/slogx/capture"
 )
 
@@ -872,15 +873,30 @@ func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
 				ImdbID:       "tt1",
 				Title:        "t",
 				ArrURL:       "http://sonarr.local/series/t",
-				AltTitles:    []string{"alt"},
-				Groups:       []string{"g"},
-				ArrID:        1,
-				TvdbID:       2,
-				TmdbID:       3,
-				Year:         2020,
-				HasFile:      true,
-				Failed:       true,
+				// Every release fingerprint field is populated: they are all
+				// omitempty, so a zero Current would write an empty object and
+				// a renamed nested tag would stay invisible to the key-set
+				// assertion below.
+				Current: release.Release{
+					Group:       "g",
+					Tracker:     "Nyaa",
+					Resolution:  "1080p",
+					Codec:       "x265",
+					Kind:        release.KindRemux,
+					TrackerType: release.TrackerPublic,
+					Reason:      "name/notes marker: remux",
+					DualAudio:   true,
+				},
+				AltTitles: []string{"alt"},
+				Groups:    []string{"g"},
+				ArrID:     1,
+				TvdbID:    2,
+				TmdbID:    3,
+				Year:      2020,
+				HasFile:   true,
+				Failed:    true,
 			}},
+			Partial: true,
 		},
 	}
 	if err := store.Save(context.Background(), st); err != nil {
@@ -895,19 +911,37 @@ func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
 		Memo     struct {
 			Entries map[string]map[string]json.RawMessage `json:"entries"`
 		} `json:"anilist_memo"`
-		Library struct {
-			Items []map[string]json.RawMessage `json:"items"`
-		} `json:"library"`
+		Library map[string]json.RawMessage `json:"library"`
 	}
 	if err := json.Unmarshal(persisted, &envelope); err != nil {
 		t.Fatalf("decode persisted envelope: %v", err)
 	}
-	if len(envelope.Library.Items) != 1 {
-		t.Fatalf("persisted library.items = %d, want 1", len(envelope.Library.Items))
+	// The snapshot's own members are pinned too, not just its items: a renamed
+	// taken_at would otherwise be invisible here (the older raw fixture in
+	// TestStoreLoadReadsPersistedValidatorsAndPartialWalk carries a zero
+	// timestamp) and a renamed partial would zero-load a complete-looking
+	// library out of every existing state file.
+	assertKeySet(t, "library snapshot", envelope.Library, []string{"items", "partial", "taken_at"})
+	var items []map[string]json.RawMessage
+	if err := json.Unmarshal(envelope.Library["items"], &items); err != nil {
+		t.Fatalf("decode persisted library items: %v", err)
 	}
-	assertKeySet(t, "library item", envelope.Library.Items[0], []string{
+	if len(items) != 1 {
+		t.Fatalf("persisted library.items = %d, want 1", len(items))
+	}
+	assertKeySet(t, "library item", items[0], []string{
 		"alt_titles", "arr", "arr_id", "arr_url", "current", "failed", "groups",
 		"has_file", "imdb_id", "season_groups", "title", "tmdb_id", "tvdb_id", "year",
+	})
+	// The nested release fingerprint is the state file's comparison baseline:
+	// a renamed field there silently zero-loads a group or tracker and
+	// re-alerts every finding, so its keys are pinned like the outer members.
+	var current map[string]json.RawMessage
+	if err := json.Unmarshal(items[0]["current"], &current); err != nil {
+		t.Fatalf("decode persisted library item current: %v", err)
+	}
+	assertKeySet(t, "library item current", current, []string{
+		"codec", "dual_audio", "group", "kind", "reason", "resolution", "tracker", "tracker_type",
 	})
 	alerted, ok := envelope.Findings["k"]
 	if !ok {
@@ -1669,5 +1703,37 @@ func TestStoreLoadRefusesStatePathEscapingItsDirectory(t *testing.T) {
 	after, readErr := os.ReadFile(target)
 	if readErr != nil || string(after) != foreign {
 		t.Errorf("symlink target after Save = %q (err %v), want Save's temp+rename to replace the link, not write through it", after, readErr)
+	}
+}
+
+// TestStoreLoadTransientFailureKeepsInDirectorySymlink pins that a symlink
+// which stays inside the state directory is NOT classified as corruption: the
+// confined read follows it, so a cancelled read over one is the recoverable
+// fault it always was - quarantining it would destroy an operator's
+// deliberate redirection on the next redeploy.
+func TestStoreLoadTransientFailureKeepsInDirectorySymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "state-real.json")
+	if err := os.WriteFile(target, []byte(`{"version":1}`), 0o600); err != nil {
+		t.Fatalf("write real state: %v", err)
+	}
+	path := filepath.Join(dir, "state.json")
+	if err := os.Symlink("state-real.json", path); err != nil {
+		t.Skipf("symlinks unsupported on this filesystem: %v", err)
+	}
+	store := NewStore(path, testLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := store.Load(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Load with a canceled context error = %v, want context.Canceled", err)
+	}
+	if _, statErr := os.Lstat(path + ".corrupt"); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Errorf("in-directory symlink quarantined (lstat err = %v), want it left in place", statErr)
+	}
+	if info, err := os.Lstat(path); err != nil || info.Mode()&fs.ModeSymlink == 0 {
+		t.Errorf("state path after a canceled read = %v (err %v), want the symlink intact", info, err)
+	}
+	if saveErr := store.Save(context.Background(), &State{}); !errors.Is(saveErr, ErrSavePreserved) {
+		t.Errorf("Save after a transient read failure = %v, want ErrSavePreserved", saveErr)
 	}
 }

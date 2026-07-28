@@ -211,8 +211,9 @@ func parseFribbForRefresh(data []byte, log *slog.Logger) (fribbParseResult, erro
 
 // logFribbParseDiagnostics emits the decode's tolerated-outcome diagnostics -
 // the skipped-malformed WARN (carrying the first skipped record's sanitized
-// error), the keyless-record Debug line, and the approaching-record-cap
-// advance warning. It is separate from parseFribbForRefresh so that function
+// error), the keyless-record Debug line, and the two advance warnings - one
+// for the approaching record cap and one for the approaching aggregate
+// identifier budget. It is separate from parseFribbForRefresh so that function
 // carries only container framing, record decode, fatal error propagation and
 // result construction; every message, level and attribute is unchanged.
 func logFribbParseDiagnostics(log *slog.Logger, counts *fribbDecodeCounts) {
@@ -285,8 +286,9 @@ func decodeFribbRecords(dec *bounded.Decoder) (fribbDecodeCounts, error) {
 // fribbDecodeCounts accumulates decodeFribbRecords' TOLERATED per-record
 // outcomes: the accepted records, the first skipped record's decode error, and
 // the skipped (malformed) / dropped (no anilist_id) counts the caller logs.
-// Fatal outcomes (the record cap, the aggregate identifier budget, a stream
-// decode failure) stay in the loop.
+// Fatal outcomes are never accumulated as counts: the record cap and a stream
+// decode failure are detected in the loop, and the aggregate identifier budget
+// is returned by add as errIdentifierBudgetExceeded for the loop to propagate.
 type fribbDecodeCounts struct {
 	firstErr error
 	records  []Record
@@ -306,9 +308,8 @@ type fribbDecodeCounts struct {
 // AniList ID counts as dropped, a record whose identifiers would exceed the
 // aggregate maxFribbIdentifiersTotal budget returns errIdentifierBudgetExceeded
 // (fatal to the whole document, since the remedy is not an upstream data fix),
-// and anything
-// else is accepted. rec is taken by pointer only because Record is a heavy
-// value (gocritic hugeParam); it is never retained.
+// and anything else is accepted. rec is taken by pointer only because Record
+// is a heavy value (gocritic hugeParam); it is never retained.
 func (c *fribbDecodeCounts) add(rec *Record, ok bool, decodeErr error) error {
 	if decodeErr != nil {
 		c.skipped++

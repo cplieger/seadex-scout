@@ -153,12 +153,16 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	if unusableFeedKey(ix.apiKey) {
 		return errors.New("indexer: indexer.feed_api_key is empty or an unresolved ${VAR} reference; refusing to serve the Torznab feed")
 	}
-	// An unexpanded ${VAR} passkey cannot build a grabbable AB link, so the feed
-	// takes the empty-passkey path (cleared AB journal, Torznab <error> on the /ab
-	// RSS check). Say why once at startup: config only rejects the unresolved form
-	// for feed_api_key, and a non-allowlisted variable name produces no load-time
-	// diagnostic at all. Field-name-only: the value is a credential.
-	if unresolvedRef(ix.enablement.ABPasskey) {
+	// An unexpanded ${VAR} passkey cannot build a grabbable AB link, so a feed
+	// with AnimeBytes ON takes the empty-passkey path (cleared AB journal,
+	// Torznab <error> on the /ab RSS check). Say why once at startup: config only
+	// rejects the unresolved form for feed_api_key, and a non-allowlisted
+	// variable name produces no load-time diagnostic at all. Gated on the
+	// tracker being enabled: with ab_torznab_url blank (the README's off switch)
+	// nothing is served for /ab and no error is rendered, so warning there would
+	// be the parked-passkey noise config's INFO policy exists to avoid (l-f13).
+	// Field-name-only: the value is a credential.
+	if ix.enablement.enabled(upstreamAB) && unresolvedRef(ix.enablement.ABPasskey) {
 		ix.log.Warn("indexer.ab_passkey still holds a ${VAR} reference; the variable is unset " +
 			"or not allowlisted (SONARR_/RADARR_/SEADEX_SCOUT_), so no grabbable AnimeBytes link " +
 			"can be derived - the /ab RSS feed answers a Torznab error until it is set")

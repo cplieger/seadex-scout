@@ -204,13 +204,23 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor En
 	// one journal key can share an AniList id (a duplicated trs relation row,
 	// or two catalogue records carrying the same alID), and a stable sort then
 	// leaves catalogue order deciding which one is synthesized - the exact
-	// dependency this sort exists to remove. URL then info hash breaks the tie
-	// on the torrent's own bytes.
+	// dependency this sort exists to remove. URL, info hash and tracker break
+	// the tie on the torrent's own identity; the synthesized title and summed
+	// size close it on the remaining first-occurrence output, so two refs that
+	// still compare equal render byte-identical items (a duplicated relation
+	// row can repeat the id, URL and hash while carrying different Files or
+	// ReleaseGroup values).
 	slices.SortStableFunc(ordered, func(a, b curatedRef) int {
 		return cmp.Or(
 			cmp.Compare(a.entry.AniListID, b.entry.AniListID),
 			cmp.Compare(a.torrent.URL, b.torrent.URL),
 			cmp.Compare(a.torrent.InfoHash, b.torrent.InfoHash),
+			cmp.Compare(a.torrent.Tracker, b.torrent.Tracker),
+			cmp.Compare(
+				synthesizeTitle(a.torrent, infoFor(a.entry.AniListID)),
+				synthesizeTitle(b.torrent, infoFor(b.entry.AniListID)),
+			),
+			cmp.Compare(totalSize(a.torrent.Files), totalSize(b.torrent.Files)),
 		)
 	})
 	for _, occ := range ordered {
@@ -349,16 +359,12 @@ func (p *journalPass) prepareCarriedItem(it *journalItem) bool {
 		p.js.dropped++
 		return false
 	}
-	// Normalize the persisted info hash before any consumer reads it. The
-	// warned-identity retraction (warnedSet.retracts) tests this value against
-	// ws.ids, a set built from validInfoHash output, so a non-canonical
-	// (upper-case hex) hash from a hand-edited snapshot slips past the
-	// retraction and keeps serving bytes search suppresses; the same value is
-	// served verbatim in the feed's infohash attr for a non-curated carried
-	// item (carryStoredItem). renderJournalItem is the only honest producer and
-	// it already stores validInfoHash output, so this is a no-op on every
-	// snapshot this binary wrote.
-	it.InfoHash = validInfoHash(it.InfoHash)
+	// The persisted InfoHash this phase hands to warnedSet.retracts is already
+	// canonical: decodeSnapshot runs normalizeSnapshotItems (validInfoHash) on
+	// both feeds for BOTH consumers before loadPrevious returns them, which is
+	// where that invariant is documented and pinned
+	// (TestRebuildCanonicalizesStoredHashBeforeWarningRetraction). Re-doing it
+	// here would give one rule two homes and only the writer's copy.
 	if it.FirstSeen.After(p.now) {
 		// A FirstSeen ahead of the wall clock (a clock rollback, or a
 		// snapshot restored from a future-skewed host) would make the
@@ -507,10 +513,14 @@ func (p *journalPass) refreshCarriedItem(it *journalItem, refs []curatedRef) (jo
 // defensive against hand-edited snapshots), or an item whose Key names the other
 // tracker scope, is dropped; so is a NON-curated item whose stored GUID no longer
 // proves its Key (there is no fresh render to self-heal from, and reload derives the
-// served download link from that GUID). A still-curated item with such a GUID is kept:
-// refreshCarriedItem re-renders it and simply does not carry the unproven GUID forward.
-// A missing AB passkey is not a drop: the GUID-only record is carried while the
-// reader suppresses the ungrabbable feed, so the switch remains reversible.
+// served download link from that GUID). A still-curated item with such a GUID is
+// normally kept: refreshCarriedItem re-renders it and simply does not carry the
+// unproven GUID forward.
+// A missing AB passkey is not a drop either: the GUID-only record is carried while
+// the reader suppresses the ungrabbable feed, so the switch remains reversible. The
+// two combined are the one exception - a still-curated AnimeBytes item with no
+// passkey has no fresh render to fall back on, so refreshCarriedItem hands it to
+// carryStoredItem and the GUID gate drops it there.
 func (p *journalPass) carryJournal(prevFeed []journalItem, scope string) []journalItem {
 	kept := make([]journalItem, 0, len(prevFeed))
 	for i := range prevFeed {

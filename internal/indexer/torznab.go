@@ -593,16 +593,18 @@ func (x *itemXML) decodeSizeField(d *xml.Decoder) error {
 	if err != nil {
 		return asLimitError(err)
 	}
-	text := strings.TrimSpace(s)
-	if text == "" {
+	if s == "" {
 		// Mirror encoding/xml's own numeric conversion, which treats an
 		// EMPTY value as zero (copyValue's len(src) == 0 arm): an
 		// <size></size> element must degrade into the zero-as-unknown
 		// domain itemSize already falls back through, not fail the whole
-		// response and cost every other curated item in it.
+		// response and cost every other curated item in it. The test is on
+		// the RAW value, exactly like copyValue's len(src) == 0 arm, so a
+		// whitespace-only value still fails the response as it did before.
 		x.Size = 0
 		return nil
 	}
+	text := strings.TrimSpace(s)
 	n, err := strconv.ParseInt(text, 10, 64)
 	if err != nil {
 		return err
@@ -671,15 +673,15 @@ func (x *itemXML) boundedInt64(s string) (int64, error) {
 	if err := x.account(s); err != nil {
 		return 0, err
 	}
-	text := strings.TrimSpace(s)
-	if text == "" {
-		// Same empty-is-zero mirror as decodeSizeField: an
-		// <enclosure length=""/> decoded as zero before this manual
-		// decoder replaced the struct unmarshal, and itemSize treats a
-		// zero length as unknown and falls through.
+	if s == "" {
+		// Same empty-is-zero mirror as decodeSizeField, keyed on the RAW
+		// value: an <enclosure length=""/> decoded as zero before this
+		// manual decoder replaced the struct unmarshal, and itemSize treats
+		// a zero length as unknown and falls through. A whitespace-only
+		// length still fails, as it did under the struct unmarshal.
 		return 0, nil
 	}
-	return strconv.ParseInt(text, 10, 64)
+	return strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 }
 
 // decodeField decodes one text child into dst, bounded and charged as it

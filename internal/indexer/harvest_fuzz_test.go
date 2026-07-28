@@ -44,7 +44,7 @@ func FuzzHarvestCheckpointCodec(f *testing.F) {
 			t.Fatalf("encodeHarvestCheckpoint produced %d bytes, want <= %d (the reader discards an over-cap cursor whole)",
 				len(encoded), maxPersistedCursorBytes)
 		}
-		if (len(cp.Pages) > 0 && len(encoded) > 0 && encoded[0] == '{') || !strings.HasPrefix(strings.TrimSpace(cp.Last), "{") {
+		if (len(encoded) > 0 && encoded[0] == '{') || (len(cp.Pages) == 0 && !strings.HasPrefix(strings.TrimSpace(cp.Last), "{")) {
 			again, _ := decodeHarvestCheckpoint(encoded)
 			if again.Last != cp.Last || !maps.Equal(again.Pages, cp.Pages) {
 				t.Fatalf("codec not a fixpoint: decode(%q) = %+v, re-round-trip gives %+v", raw, cp, again)
