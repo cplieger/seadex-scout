@@ -21,6 +21,6 @@ require pgregory.net/rapid v1.3.0
 require github.com/cplieger/envx/yamlenv v1.2.1
 
 require (
-	github.com/cplieger/httpx/v4 v4.2.0 // indirect
+	github.com/cplieger/httpx/v4 v4.2.1 // indirect
 	github.com/cplieger/runesafe v1.2.1 // indirect
 )
