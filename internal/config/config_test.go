@@ -858,10 +858,12 @@ func TestValidateIndexerDistinctTorznabURLsStaySilent(t *testing.T) {
 	}
 }
 
-// TestValidateIndexerShortFeedKeyWarning pins the warn-only strength floor on
-// indexer.feed_api_key: a key under 16 characters warns (it gates the
-// AnimeBytes-passkey-bearing feed), a strong key stays silent, and the key
-// value never rides the log record (field-name-only posture).
+// TestValidateIndexerShortFeedKeyWarning pins the two strength rules on
+// indexer.feed_api_key: the warn-only floor (a key under 16 characters warns
+// because it gates the AnimeBytes-passkey-bearing feed, a strong key stays
+// silent) and the hard rejection of an unresolved ${VAR} placeholder, which is
+// a guessable credential rather than a weak one. Both stay field-name-only: the
+// key value never rides the log record or the error.
 func TestValidateIndexerShortFeedKeyWarning(t *testing.T) {
 	base := Config{
 		RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k",

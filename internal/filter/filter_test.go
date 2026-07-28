@@ -247,7 +247,7 @@ func TestClassifyAB(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := ClassifyAB(tt.tracker, tt.url); got != tt.want {
-				t.Errorf("ClassifyAB(%q, %q) = %v, want %v", tt.tracker, tt.url, got, tt.want)
+				t.Errorf("ClassifyAB(%q, %q) = %d, want %d", tt.tracker, tt.url, got, tt.want)
 			}
 		})
 	}
@@ -259,7 +259,7 @@ func TestClassifyAB(t *testing.T) {
 // definite and ambiguous grades are hidden by the same comparison, so a definite
 // AB release can no longer be visible while an ambiguous one is hidden. The
 // table is keyed by subtest NAME rather than by the grade, so the readable
-// subtest names need no production formatter (l-f36).
+// subtest names need no production formatter.
 func TestABVisibleReadsEveryGrade(t *testing.T) {
 	grades := map[string]struct {
 		tracker string

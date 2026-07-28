@@ -15,10 +15,12 @@ import (
 // ballooning a Loki record or the 256 MiB container), it is always valid UTF-8
 // (the pre-sanitize cap and the post-sanitize re-cap both cut on rune
 // boundaries, so no arbitrary byte offset may re-mint a partial rune), and an
-// UNMARKED result is exactly the sanitized input (nothing is silently dropped
-// without the truncation signal). The seed corpus carries the boundary shapes
-// the table tests cannot enumerate: a cut landing mid-rune, an invalid byte at
-// the budget edge, and a value whose sanitized form shrinks below the budget.
+// IN-BUDGET input is rendered byte-identically to its sanitized form while an
+// over-budget one is marked (nothing is silently dropped, and the verdict is
+// read off the input so an honest "..." tail cannot excuse a drop). The seed
+// corpus carries the boundary shapes the table tests cannot enumerate: a cut
+// landing mid-rune, an invalid byte at the budget edge, and a value whose
+// sanitized form shrinks below the budget.
 func FuzzCapBoundsAndPreservesHonestValues(f *testing.F) {
 	f.Add("")
 	f.Add("[SubsPlease] Show - S01E01 (1080p)")
@@ -39,20 +41,32 @@ func FuzzCapBoundsAndPreservesHonestValues(f *testing.F) {
 		if !utf8.ValidString(got) {
 			t.Fatalf("Cap(%d bytes) is not valid UTF-8", len(raw))
 		}
-		// The marker is content, not metadata: a value whose own sanitized tail is
-		// "..." would skip the equality check below, so assert the invariant that
-		// holds either way first. Cap only ever cuts a suffix (Sanitize is a
-		// per-rune map and both caps land on rune boundaries), so the result minus
-		// one marker is always a prefix of the sanitized input - an interior byte
-		// dropped silently fails this whether or not the value was truncated.
+		// The marker is content, not metadata: an honest value whose own tail is
+		// "..." is indistinguishable from a cut one in the OUTPUT, so whether
+		// truncation is expected is derived from the INPUT instead. Cap truncates
+		// on exactly two conditions (both from Joiner.Write under the full
+		// budget): the raw value exceeds the budget, or its sanitized form does
+		// (sanitizing grows each invalid byte to a three-byte U+FFFD). Anything
+		// else must pass through byte-identical to the sanitized input, which is
+		// the check a silent drop has to fail.
 		want := runesafe.Sanitize(raw)
-		if !strings.HasPrefix(want, strings.TrimSuffix(got, TruncMarker)) {
-			t.Fatalf("Cap(%d bytes) = %q, want a prefix of the sanitized input (%d bytes)",
-				len(raw), got, len(want))
-		}
-		if !strings.HasSuffix(got, TruncMarker) && got != want {
-			t.Fatalf("Cap(%d bytes) dropped bytes without the %q marker: got %d bytes, want the sanitized %d",
-				len(raw), TruncMarker, len(got), len(want))
+		truncated := len(raw) > MaxBytes || len(want) > MaxBytes
+		if !truncated {
+			if got != want {
+				t.Fatalf("Cap(%d bytes) changed an in-budget value: got %q, want %q", len(raw), got, want)
+			}
+		} else {
+			if !strings.HasSuffix(got, TruncMarker) {
+				t.Fatalf("Cap(%d bytes) truncated without the %q marker: got %q", len(raw), TruncMarker, got)
+			}
+			// Cap only ever cuts a suffix (Sanitize is a per-rune map and both
+			// caps land on rune boundaries), so the result minus one marker is
+			// always a prefix of the sanitized input - an interior byte dropped
+			// silently fails this too.
+			if !strings.HasPrefix(want, strings.TrimSuffix(got, TruncMarker)) {
+				t.Fatalf("Cap(%d bytes) = %q, want a prefix of the sanitized input (%d bytes)",
+					len(raw), got, len(want))
+			}
 		}
 	})
 }

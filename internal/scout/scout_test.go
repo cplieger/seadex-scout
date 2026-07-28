@@ -665,13 +665,15 @@ func (s *slowCancelStore) Save(ctx context.Context, _ *state.State) error {
 	return nil
 }
 
-// TestSaveRetryGetsOnlyTheRemainingGrace pins saveGrace as a bound on the WHOLE
-// shutdown save, not just the retry: a first attempt cancelled after already
-// spending part of the container stop grace must shorten the detached retry, not
-// be followed by a fresh full grace. Otherwise the total save can run past
-// SIGKILL and lose the AniList memo the retry exists to preserve.
-func TestSaveRetryGetsOnlyTheRemainingGrace(t *testing.T) {
-	const spend = saveGrace / 10
+// TestSaveRetryAlwaysGetsTheAnchoredGrace pins saveGrace as the budget the
+// detached retry gets measured from the CANCELLATION, not from entry into save:
+// a first attempt that already spent time on pre-SIGTERM cycle work must still
+// hand the retry a full grace, since that time never belonged to the container
+// stop grace. Starving it to zero would skip the retry in exactly the slow-volume
+// case it exists for, losing the AniList memo and logging a routine redeploy as a
+// write fault.
+func TestSaveRetryAlwaysGetsTheAnchoredGrace(t *testing.T) {
+	const spend = saveGrace / 100
 	store := &slowCancelStore{spend: spend}
 	s := New(&Deps{Logger: slog.New(slog.DiscardHandler), Store: store})
 
@@ -681,9 +683,9 @@ func TestSaveRetryGetsOnlyTheRemainingGrace(t *testing.T) {
 		t.Fatalf("Save attempts = %d, want 2 (the cancellation takes the detached retry)", store.attempts)
 	}
 	if !store.retryHadDead {
-		t.Fatal("retry context carried no deadline, want the remaining shutdown budget")
+		t.Fatal("retry context carried no deadline, want the anchored shutdown budget")
 	}
-	if store.retryBudget <= 0 || store.retryBudget > saveGrace-spend/2 {
-		t.Errorf("retry budget = %v, want a positive value under %v (saveGrace minus the time the first attempt already spent)", store.retryBudget, saveGrace-spend/2)
+	if store.retryBudget <= saveGrace-spend {
+		t.Errorf("retry budget = %v, want ~%v (a full grace anchored at the cancellation, not shortened by the first attempt)", store.retryBudget, saveGrace)
 	}
 }

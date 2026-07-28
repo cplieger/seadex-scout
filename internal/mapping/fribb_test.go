@@ -206,6 +206,8 @@ func TestTmdbID_UnmarshalJSON(t *testing.T) {
 	}{
 		{name: "tv object ignored", in: `{"tv":5}`},
 		{name: "movie array", in: `{"movie":[7,8]}`, wantMovie: []int{7, 8}},
+		{name: "duplicate movie key wrong-then-valid retains the later value", in: `{"movie":"odd","movie":[603]}`, wantMovie: []int{603}},
+		{name: "duplicate movie key valid-then-wrong clears to empty", in: `{"movie":[603],"movie":"odd"}`},
 		{name: "bare number retained as scalar", in: `123`, wantScalar: 123},
 		{name: "quoted number retained as scalar", in: `"123"`, wantScalar: 123},
 		{name: "unknown string tolerated", in: `"unknown"`},
@@ -686,9 +688,10 @@ func TestParseFribbForRefresh_elementsCountsEverySourceElement(t *testing.T) {
 // on one record (imdb_id and themoviedb_id.movie), so without this budget the
 // per-record caps multiply (maxFribbRecords x 2 x maxFribbIdentifiers admits
 // ~4.2M retained ids from a body under maxMapBytes). A record that
-// would breach the budget is rejected inside the EXISTING per-record tolerance
-// boundary - counted separately as overBudget (not as a malformed record), so
-// the "records refused by identifier budget" WARN names the app-side cap.
+// would breach the budget is refused (counted as overBudget, not as a
+// malformed record); the decode loop turns a nonzero overBudget into the
+// fatal errIdentifierBudgetExceeded whole-document refusal rather than a
+// tolerated per-record skip.
 func TestFribbDecodeCounts_aggregateIdentifierBudget(t *testing.T) {
 	atCap := Record{AniListID: 1, IMDbIDs: make([]string, maxFribbIdentifiers)}
 	var c fribbDecodeCounts
@@ -717,7 +720,7 @@ func TestFribbDecodeCounts_aggregateIdentifierBudget(t *testing.T) {
 		t.Fatalf("over-budget record charged the budget to %d, want %d", c.identifiers, maxFribbIdentifiersTotal)
 	}
 	if c.firstErr != nil {
-		t.Fatalf("firstErr = %v, want nil (the budget breach reports on its own line)", c.firstErr)
+		t.Fatalf("firstErr = %v, want nil (a budget breach is not a malformed-record error)", c.firstErr)
 	}
 }
 
@@ -784,5 +787,35 @@ func TestRecordFromFormat_normalizesRoutingType(t *testing.T) {
 				t.Errorf("RecordFromFormat(%q).IsSpecial() = %v, want %v", tc.format, got.IsSpecial(), tc.wantSpecial)
 			}
 		})
+	}
+}
+
+// TestParseFribb_identifierBudgetBreachFailsClosed pins the whole-document
+// refusal: a body whose retained identifiers exceed maxFribbIdentifiersTotal
+// must fail the parse with errIdentifierBudgetExceeded rather than retaining
+// the truncated prefix.
+func TestParseFribb_identifierBudgetBreachFailsClosed(t *testing.T) {
+	var ids, imdb strings.Builder
+	for i := range maxFribbIdentifiers {
+		if i > 0 {
+			ids.WriteByte(',')
+			imdb.WriteByte(',')
+		}
+		ids.WriteString(strconv.Itoa(i + 1))
+		imdb.WriteString(`"tt` + strconv.Itoa(i+1) + `"`)
+	}
+	perRecord := 2 * maxFribbIdentifiers
+	n := maxFribbIdentifiersTotal/perRecord + 1
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := range n {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(`{"anilist_id":` + strconv.Itoa(i+1) + `,"type":"movie","imdb_id":[` + imdb.String() + `],"themoviedb_id":{"movie":[` + ids.String() + `]}}`)
+	}
+	b.WriteByte(']')
+	if _, err := parseFribbForRefresh([]byte(b.String()), discardLogger()); !errors.Is(err, errIdentifierBudgetExceeded) {
+		t.Fatalf("parseFribbForRefresh error = %v, want errIdentifierBudgetExceeded", err)
 	}
 }

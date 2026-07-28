@@ -74,8 +74,11 @@ func feedEntryInfo(idx *mapping.Index, lib *library.Snapshot, memo match.Memo) i
 // TYPING - either no record at all, or a record whose type field was
 // absent/odd-shaped (the tolerant Fribb decoder and an override without `type`
 // both yield an empty Type). An untyped record can still route a positive TVDB
-// id through RoutedIDs' series arm; only the id-less ones were looked up on
-// AniList and memoized a format, so for any other shape this is a no-op.
+// id through RoutedIDs' series arm, and the id-less ones are what the matcher
+// looked up on AniList - but a memoized format OUTLIVES that shape: pruneExpired
+// deliberately retains an expired memo entry for an id-less record that later
+// gained an arr id, precisely to feed this stale tier, so such a record can
+// still arrive here carrying a MOVIE format (the arm below is what handles it).
 // Reading the memoized format fixes the case where the app KNEW an entry was a
 // movie and still routed its feed item to Anime/5070: Radarr filters on
 // Movies/2000, so it never saw that movie in the RSS feed at all (l-f70). The

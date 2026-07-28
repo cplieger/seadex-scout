@@ -689,10 +689,13 @@ func TestNewStoreNilLoggerDefaults(t *testing.T) {
 }
 
 // TestStoreQuarantineRenameFailureWarnsAndKeepsFile pins quarantine's
-// best-effort contract: when the corrupt file cannot be renamed aside (the
-// .corrupt destination is occupied by a directory, a root-safe injection),
-// Load still returns the decode error, the corrupt file stays at the live
-// path, and the failure is logged at Warn once - never escalated.
+// preservation contract on the rename-failure path: when the corrupt file
+// cannot be renamed aside (the .corrupt destination is occupied by a
+// directory, a root-safe injection), Load still returns the decode error,
+// the corrupt file stays at the live path, and the failure is logged at Warn
+// once rather than raised as a Load error. The Save consequence of that
+// failure - the preservation block - is pinned by
+// TestStoreLoadUnpreservableCorruptionBlocksSave.
 func TestStoreQuarantineRenameFailureWarnsAndKeepsFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	if err := os.WriteFile(path, []byte("null"), 0o644); err != nil {

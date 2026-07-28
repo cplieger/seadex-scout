@@ -296,6 +296,9 @@ func (r *matchRun) matchUnmappedEntry(ctx context.Context, e *seadex.Entry) Matc
 // remaining link to the arr item. It resolves AniList once: the format types an
 // untyped record and picks the search arr, then the normalized title + year
 // matches within that arr. Coverage counts under the resolved arr either way.
+// One exception: if typing the record makes an identifier it already carried
+// usable (a MOVIE type routing its TMDB-movie/IMDb ids), the record is no
+// longer id-less and re-enters matchMappedEntry's ID-first branch.
 func (r *matchRun) matchIDLessEntry(ctx context.Context, e *seadex.Entry, rec *mapping.Record, arr string) Match {
 	// needsLookup under a present record means the record is id-less (see
 	// aniListNeed): the ID bridge by definition could not resolve an arr id,
@@ -317,6 +320,18 @@ func (r *matchRun) matchIDLessEntry(ctx context.Context, e *seadex.Entry, rec *m
 	if rec.Type == "" {
 		rec.Type = mapping.RecordFromFormat(media.Format).Type
 		arr = formatArr(media.Format)
+		// Typing can make identifiers the record ALREADY carried usable, so
+		// the record may no longer be id-less: RoutedIDs only routes the
+		// TMDB-movie/IMDb fields once the type says MOVIE, and both Fribb
+		// (the object-form themoviedb_id movie list) and an operator override
+		// (tmdb_movies / imdb_ids) can carry them on an untyped record. A
+		// newly-usable id is stronger evidence than a title, so such a record
+		// re-enters the ID-first branch: title-matching it could bind a
+		// different same-titled movie while the id proves the intended one is
+		// absent.
+		if rec.HasArrIdentifier() {
+			return r.matchMappedEntry(ctx, e, rec, r.lib.FindByID(rec), false)
+		}
 	}
 	r.cov.Unmapped[arr]++
 	if matched := r.lib.findByTitle(media.Titles, media.Year, arr, r.m.log); matched != nil {

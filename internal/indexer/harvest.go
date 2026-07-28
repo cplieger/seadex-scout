@@ -216,10 +216,10 @@ func (h *harvester) harvestTitles(ctx context.Context, feeds map[string][]journa
 
 // harvestRun is one harvestTitles run's mutable accounting: the per-rebuild
 // checkpoint, time slice, stats, the identity index, title cache and per-key
-// show titles the matcher writes through and ranks with, and the per-scope latch
-// state. It exists so the
-// orchestration loop passes ONE value to the per-group step instead of nine,
-// keeping harvestTitles about setup and ordered iteration.
+// show titles the matcher writes through and ranks with, and the per-scope
+// latch state. It exists so the orchestration loop passes ONE value to the
+// per-group step instead of ten, keeping harvestTitles about setup and ordered
+// iteration.
 type harvestRun struct {
 	infoFor    EntryInfoFunc
 	checkpoint *harvestCheckpoint
@@ -946,7 +946,10 @@ const harvestMaxTitleLen = 512
 // preferredHarvestTitle. It is keyed per journal key, not per query, because a
 // broad result page fetched for one show routinely resolves another pending
 // show's items too, and that show's alias must be chosen against its OWN
-// vocabulary. A key absent from the map keeps plain first-wins.
+// vocabulary. A key absent from the map (or one whose show title is empty)
+// selects no vocabulary at all, so preferredHarvestTitle falls back to the
+// most arr-parseable alias (asciiAlnums, first only on a tie) - not to
+// whichever alias the upstream happened to list first.
 //
 // It reports the matches AND the contradictory rejections, so a result whose
 // own signals disagree is observable. That count is the only report such a
@@ -958,7 +961,8 @@ const harvestMaxTitleLen = 512
 // carry no signal.
 //
 // pendingRejected is the subset of those rejections that touched one of THIS
-// group's pending identities (pendingHarvestRefusal, graded against groupKeys):
+// group's pending identities (pendingHarvestRefusal, graded against groupKeys
+// and the live titles map):
 // the ones that actually refused one of this show's own candidate releases. Only
 // that subset licenses the caller's no-progress inference - a result whose
 // comments and guid disagree with each other names nothing we asked for, and
@@ -984,7 +988,7 @@ func matchHarvest(results []item, scope string, index, titles, showTitles map[st
 			// release this rebuild is trying to title says the show harvested
 			// nothing.
 			rejected++
-			pendingRejected += pendingHarvestRefusal(&results[i], index, groupKeys)
+			pendingRejected += pendingHarvestRefusal(&results[i], index, titles, groupKeys)
 			continue
 		}
 		if key == "" || !strings.HasPrefix(key, scope+":") {
@@ -1007,9 +1011,9 @@ func matchHarvest(results []item, scope string, index, titles, showTitles map[st
 
 // pendingHarvestRefusal grades a REFUSED result (resolveHarvestKey reported a
 // contradiction): 1 when any of its identity signals - either page-URL tracker
-// key, or its info hash - names one of THIS group's pending items (groupKeys),
-// 0 when it names none of them. It reports a charge rather than a bool so the
-// caller can add it without a second nesting level.
+// key, or its info hash - names one of THIS group's items (groupKeys) that is
+// still UNTITLED, 0 when it names none of them. It reports a charge rather than
+// a bool so the caller can add it without a second nesting level.
 //
 // The grade matters because a result whose comments and guid disagree with each
 // other is refused before either signal is looked up, so the refusal alone does
@@ -1025,12 +1029,24 @@ func matchHarvest(results []item, scope string, index, titles, showTitles map[st
 // belonging to a DIFFERENT pending show repeats across every otherwise ordinary
 // miss and would latch the scope after consecutiveFruitlessLatch clean shows
 // while the fairness cursor still had time and groups to spend.
-func pendingHarvestRefusal(it *item, index map[string]string, groupKeys []string) int {
+//
+// groupKeys is the immutable start-of-run key list, so it still names keys an
+// EARLIER group's broad page already titled opportunistically. A contradiction
+// touching only such a key refused nothing this rebuild still wants, so the
+// live titles map is consulted too: only a still-untitled key charges. Without
+// that check a run of partially satisfied groups charges fruitless on work
+// already completed and latches the scope while pending releases still had
+// harvest time.
+func pendingHarvestRefusal(it *item, index, titles map[string]string, groupKeys []string) int {
 	for _, id := range []string{trackerKeyFromURL(it.InfoURL), trackerKeyFromURL(it.GUID), it.InfoHash} {
 		if id == "" {
 			continue
 		}
-		if key, ok := index[id]; ok && slices.Contains(groupKeys, key) {
+		key, ok := index[id]
+		if !ok || !slices.Contains(groupKeys, key) {
+			continue
+		}
+		if _, done := titles[key]; !done {
 			return 1
 		}
 	}

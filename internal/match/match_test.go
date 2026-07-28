@@ -813,3 +813,106 @@ func TestMatchIDLessUntypedRecordRoutesByAniListFormat(t *testing.T) {
 		t.Errorf("coverage unmapped[sonarr] = %d, want 0 (the untyped record must not be attributed to Sonarr)", res.Coverage.Unmapped[library.ArrSonarr])
 	}
 }
+
+// TestMatchIDLessUntypedRecordUnknownFormatSearchesBothArrs pins the other half
+// of the id-less routing repair: when AniList names no usable format either,
+// formatArr yields arrUnknown and the title search must stay UNRESTRICTED
+// rather than taking recordArr's non-MOVIE-means-Sonarr default. The Radarr
+// movie is then the only candidate, so the unrestricted search links it where a
+// Sonarr-restricted search missed it, the record stays untyped, and coverage
+// counts under the unknown arr.
+func TestMatchIDLessUntypedRecordUnknownFormatSearchesBothArrs(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrRadarr, ArrID: 2, Title: "Kizumonogatari", TmdbID: 400, Year: 2016},
+	}}
+	idx := mapping.NewIndex([]mapping.Record{{AniListID: 21403}})
+	fake := fakeAniList{media: map[int]anilist.Media{
+		21403: {Titles: []string{"Kizumonogatari"}, Year: 2016},
+	}}
+
+	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 21403}}, snap, idx, Memo{})
+
+	if len(res.Matches) != 1 {
+		t.Fatalf("matches = %d, want 1", len(res.Matches))
+	}
+	got := res.Matches[0]
+	if !got.InLibrary() || got.Item.Arr != library.ArrRadarr {
+		t.Fatalf("match item = %+v, want the Radarr movie an unrestricted search finds", got.Item)
+	}
+	if got.Arr != library.ArrRadarr {
+		t.Errorf("match arr = %q, want %q (the matched item's arr)", got.Arr, library.ArrRadarr)
+	}
+	if got.Record.Type != "" {
+		t.Errorf("record type = %q, want it left untyped when AniList names no format", got.Record.Type)
+	}
+	if res.Coverage.Unmapped[arrUnknown] != 1 {
+		t.Errorf("coverage unmapped[%s] = %d, want 1", arrUnknown, res.Coverage.Unmapped[arrUnknown])
+	}
+}
+
+// TestMatchUntypedRecordWithMovieIDResolvesByID covers the re-entry an
+// AniList-supplied MOVIE type unlocks: RoutedIDs routes tmdb_movies only for a
+// MOVIE record, so an untyped record carrying one reads as id-less until the
+// format types it. Once it does, the id is the stronger evidence and must be
+// used - the exact Radarr movie is linked even though its arr title does not
+// match the AniList title at all, and it counts as an ID hit rather than
+// unmapped title coverage.
+func TestMatchUntypedRecordWithMovieIDResolvesByID(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrRadarr, ArrID: 2, Title: "Wound Tale", TmdbID: 400, Year: 2016},
+	}}
+	idx := mapping.NewIndex([]mapping.Record{{AniListID: 21403, TmdbMovies: []int{400}}})
+	fake := fakeAniList{media: map[int]anilist.Media{
+		21403: {Titles: []string{"Kizumonogatari"}, Format: "MOVIE", Year: 2016},
+	}}
+
+	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 21403}}, snap, idx, Memo{})
+
+	if len(res.Matches) != 1 {
+		t.Fatalf("matches = %d, want 1", len(res.Matches))
+	}
+	got := res.Matches[0]
+	if !got.InLibrary() || got.Item.ArrID != 2 {
+		t.Fatalf("match item = %+v, want the Radarr movie the newly-usable TMDB id names", got.Item)
+	}
+	if got.Source != SourceID {
+		t.Errorf("source = %q, want %q (the typed record is no longer id-less)", got.Source, SourceID)
+	}
+	if res.Coverage.Hits[library.ArrRadarr] != 1 {
+		t.Errorf("coverage hits[radarr] = %d, want 1", res.Coverage.Hits[library.ArrRadarr])
+	}
+	if res.Coverage.Unmapped[library.ArrRadarr] != 0 {
+		t.Errorf("coverage unmapped[radarr] = %d, want 0 (an ID resolution is not unmapped)", res.Coverage.Unmapped[library.ArrRadarr])
+	}
+}
+
+// TestMatchUntypedRecordWithAbsentMovieIDStaysUnmapped is the same re-entry seen
+// from the miss side: the newly-usable TMDB id PROVES the intended movie is not
+// in the library, so a same-titled Radarr movie must not be linked in its place.
+// The entry stays unmapped with no title fallback, exactly as a record that
+// carried its id from the start behaves.
+func TestMatchUntypedRecordWithAbsentMovieIDStaysUnmapped(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrRadarr, ArrID: 2, Title: "Kizumonogatari", TmdbID: 400, Year: 2016},
+	}}
+	idx := mapping.NewIndex([]mapping.Record{{AniListID: 21403, TmdbMovies: []int{999}}})
+	fake := fakeAniList{media: map[int]anilist.Media{
+		21403: {Titles: []string{"Kizumonogatari"}, Format: "MOVIE", Year: 2016},
+	}}
+
+	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 21403}}, snap, idx, Memo{})
+
+	if len(res.Matches) != 1 {
+		t.Fatalf("matches = %d, want 1", len(res.Matches))
+	}
+	got := res.Matches[0]
+	if got.InLibrary() {
+		t.Fatalf("match item = %+v, want none: the usable id proves the intended movie is absent", got.Item)
+	}
+	if got.Source != SourceUnmapped {
+		t.Errorf("source = %q, want %q", got.Source, SourceUnmapped)
+	}
+	if res.Coverage.Hits[library.ArrRadarr] != 1 {
+		t.Errorf("coverage hits[radarr] = %d, want 1 (the ID mapping resolved even though the library missed)", res.Coverage.Hits[library.ArrRadarr])
+	}
+}

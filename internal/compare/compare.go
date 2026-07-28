@@ -333,8 +333,8 @@ func fillFromCandidate(f *Finding, cand *candidate) {
 // obtainableLinks returns the distinct (tracker, URL) links across the pool,
 // deduped, ordered headlineGroup-first and then by (URL, tracker). This is
 // what lets a finding surface both a Nyaa and an AnimeBytes link for the same
-// recommended release. The dedupe keys on the ReleaseLink value itself (a
-// comparable struct), so a crafted tracker or URL containing a would-be
+// recommended release. The dedupe keys on the (tracker, URL) identity as a
+// comparable struct, so a crafted tracker or URL containing a would-be
 // delimiter cannot collide two distinct pairs.
 //
 // The ORDER is part of the contract, not incidental: notify.trackerURLs fills
@@ -377,7 +377,11 @@ type sourcedLink struct {
 // as a non-headline source purely because the non-headline candidate came
 // first in relation order.
 func sourcedLinks(pool []candidate, headlineGroup string) []sourcedLink {
-	seen := make(map[ReleaseLink]int, len(pool))
+	// Keyed on the link IDENTITY (tracker + URL) only: ReleaseLink.Headline
+	// is producer affinity, not identity, so it must never take part in the
+	// dedupe - obtainableLinks assigns it after this collection runs.
+	type linkKey struct{ tracker, url string }
+	seen := make(map[linkKey]int, len(pool))
 	sources := make([]sourcedLink, 0, len(pool))
 	for i := range pool {
 		u := classify.PublishURL(&pool[i].torrent)
@@ -389,11 +393,12 @@ func sourcedLinks(pool []candidate, headlineGroup string) []sourcedLink {
 		if release.NormalizeGroup(pool[i].rel.Group) == headlineGroup {
 			rank = 0
 		}
-		if idx, dup := seen[link]; dup {
+		key := linkKey{tracker: link.Tracker, url: link.URL}
+		if idx, dup := seen[key]; dup {
 			sources[idx].rank = min(sources[idx].rank, rank)
 			continue
 		}
-		seen[link] = len(sources)
+		seen[key] = len(sources)
 		sources = append(sources, sourcedLink{link: link, rank: rank})
 	}
 	return sources

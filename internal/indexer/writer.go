@@ -192,7 +192,7 @@ func validJournalRecords(feeds ...[]journalItem) bool {
 // (maxFeedBytes) does not bound what the decode ALLOCATES: a 16 MiB file can
 // encode millions of compact array elements or map entries, each costing tens of
 // bytes of live heap once decoded, and feed.json is a tamperable trust boundary
-// (a corrupted or hand-written file could OOM the 256 MiB container inside New's
+// (a corrupted or hand-written file could OOM the 256 MiB container inside Run's
 // warm-up load and crashloop the compare daemon with it, instead of reaching the
 // self-healing malformed-snapshot taxonomy - CWE-400, h-f4). The schema walk
 // below rejects hostile cardinality BEFORE allocation scales with it, via the

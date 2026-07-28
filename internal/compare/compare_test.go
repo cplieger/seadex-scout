@@ -218,6 +218,12 @@ func TestObtainableLinksOrdersHeadlineGroupFirst(t *testing.T) {
 	if f.Links[0].URL != "https://nyaa.si/view/9" {
 		t.Errorf("first link = %q, want the headline group's own source %q (an alert must not link a group recommended_group does not name)", f.Links[0].URL, "https://nyaa.si/view/9")
 	}
+	if !f.Links[0].Headline {
+		t.Error("headline-group link must carry Headline=true")
+	}
+	if f.Links[1].Headline {
+		t.Error("alternate-group link must carry Headline=false")
+	}
 }
 
 // TestObtainableLinksPromotesDuplicateToHeadlineRank pins the dedupe's

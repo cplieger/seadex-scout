@@ -1288,3 +1288,78 @@ func TestRunOnceQueuedRerunMarkerWriteFailure(t *testing.T) {
 		t.Errorf("queued-rerun cycle-error WARN count = %d, want 0: a marker-write failure is not a cycle fault: %v", got, rec.Messages())
 	}
 }
+
+// ownMarkerBreakingCycler is markerBreakingCycler's own-run twin: it breaks the
+// shared marker's parent directory during THIS invocation's own run (so its
+// health write fails while the context is still alive) and queues demand from
+// another process, then cancels during the rerun Exclusive services - so the
+// shutdown lands after recordRunHealth and before Run returns.
+type ownMarkerBreakingCycler struct {
+	t         *testing.T
+	dir       string
+	markerDir string
+	calls     *int
+	cancel    context.CancelFunc
+}
+
+func (c ownMarkerBreakingCycler) Cycle(context.Context) bool {
+	*c.calls++
+	if *c.calls == 1 {
+		// Replace the marker's directory with a regular file so SetChecked
+		// fails for every UID (root-safe, unlike a read-only-dir chmod).
+		if err := os.RemoveAll(c.markerDir); err != nil {
+			c.t.Errorf("clear marker dir: %v", err)
+		}
+		if err := os.WriteFile(c.markerDir, []byte("blocker"), 0o600); err != nil {
+			c.t.Errorf("block marker dir: %v", err)
+		}
+		exB := testExclusiveIn(c.t, context.Background(), c.dir)
+		marker := health.NewMarker(filepath.Join(c.t.TempDir(), ".healthy"))
+		if err := RunOnce(context.Background(), exB, mustNotRunCycler{t: c.t}, marker); err != nil {
+			c.t.Errorf("queued requester RunOnce = %v, want nil", err)
+		}
+		return true
+	}
+	c.cancel() // shutdown lands during the queued rerun
+	return true
+}
+
+// TestRunOnceOwnMarkerWriteFailureBeforeShutdown pins the own-run leg of the
+// shutdown-wins branch's marker-failure ERROR: when this invocation's OWN run
+// fails the marker write and shutdown then lands while Exclusive services a
+// queued rerun, the interruption REPLACES the own result, so this ERROR is the
+// permanent (non-self-healing) marker fault's only report - the level
+// alerts.yaml keys on. Without it the fault would degrade to a routine-shutdown
+// WARN. Serial (capture swaps slog.Default).
+func TestRunOnceOwnMarkerWriteFailureBeforeShutdown(t *testing.T) {
+	rec := capture.Default(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dir := t.TempDir()
+	ex := testExclusiveIn(t, ctx, dir)
+	markerDir := filepath.Join(t.TempDir(), "marker-dir")
+	if err := os.Mkdir(markerDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := health.NewMarker(filepath.Join(markerDir, ".healthy"))
+	var calls int
+
+	err := RunOnce(ctx, ex, ownMarkerBreakingCycler{t: t, dir: dir, markerDir: markerDir, calls: &calls, cancel: cancel}, marker)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want the uniform interruption (the shutdown displaces the own result)", err)
+	}
+	if calls != 2 {
+		t.Fatalf("cycle calls = %d, want 2 (the own run plus the queued rerun)", calls)
+	}
+	const msg = "own cycle could not record poll health before shutdown"
+	if got := rec.CountLevel(slog.LevelError, msg); got != 1 {
+		t.Errorf("displaced marker-failure ERROR count = %d, want 1 (this is the fault's only report): %v", got, rec.Messages())
+	}
+	if !rec.AttrContains(msg, "error", "record poll health") {
+		t.Errorf("ERROR line lost the wrapped record-poll-health cause: %v", rec.Records())
+	}
+	if got := rec.CountLevel(slog.LevelWarn, "own cycle reported an error before shutdown"); got != 1 {
+		t.Errorf("the pre-existing displaced-result WARN must survive beside the ERROR: %v", rec.Messages())
+	}
+}

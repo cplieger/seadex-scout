@@ -2337,6 +2337,81 @@ func TestHarvestOtherGroupsConflictsDoNotLatchTheScope(t *testing.T) {
 	}
 }
 
+// TestHarvestConflictsNamingAlreadyTitledKeysDoNotLatchTheScope pins the
+// still-pending half of the pending grade (d-gpt-u8c2-1). groupKeys is the
+// immutable start-of-run list, so it keeps naming keys an EARLIER group's broad
+// page titled opportunistically. A contradiction touching only such a key
+// refused nothing this rebuild still wants, so it must not charge the fruitless
+// run: grading it as no-progress condemned the scope after
+// consecutiveFruitlessLatch partially satisfied shows and left the last show -
+// the one whose real title was on offer - unqueried, with time and rotation
+// still to spend.
+func TestHarvestConflictsNamingAlreadyTitledKeysDoNotLatchTheScope(t *testing.T) {
+	const (
+		latchMsg  = "indexer title harvest: no show made progress; skipping this upstream's remaining shows this rebuild"
+		firstShow = "Show A"
+		lastShow  = "Show H"
+	)
+	// Eight shows of two keys each (two more than consecutiveFruitlessLatch);
+	// groups run in AniList-ID order.
+	names := []string{firstShow, "Show B", "Show C", "Show D", "Show E", "Show F", "Show G", lastShow}
+	// Show A's broad page resolves the SECOND key of every middle show, so each
+	// of them is PARTIALLY satisfied - one key titled, one still pending -
+	// before its own query runs.
+	opportunistic := make([]string, 0, len(names))
+	for i := 1; i < len(names)-1; i++ {
+		opportunistic = append(opportunistic,
+			torznabItem(names[i]+" Second Key Title", "https://nyaa.si/view/"+strconv.Itoa(20+i)))
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		var items []string
+		switch q := r.URL.Query().Get("q"); q {
+		case firstShow:
+			items = opportunistic
+		case lastShow:
+			items = []string{torznabItem("Show H Real Title", "https://nyaa.si/view/17")}
+		default:
+			// Self-contradictory (guid and comments name two different
+			// releases) and the only pending identity it names is the key Show
+			// A's page ALREADY titled for this very show: this show's own
+			// pending release was never refused.
+			items = []string{`<item><title>Contradictory Already-Titled Item</title>` +
+				`<guid>https://nyaa.si/view/` + strconv.Itoa(20+slices.Index(names, q)) + `</guid>` +
+				`<comments>https://nyaa.si/view/901</comments>` +
+				`<enclosure url="http://prowlarr:9696/1/download?link=abc" length="1" type="application/x-bittorrent"/></item>`}
+		}
+		_, _ = io.WriteString(w, strings.ReplaceAll(torznabBody(items...), "http://prowlarr:9696", "http://"+r.Host))
+	}))
+	defer srv.Close()
+
+	feeds := map[string][]journalItem{upstreamNyaa: {}}
+	info := map[int]EntryInfo{}
+	for i, name := range names {
+		feeds[upstreamNyaa] = append(feeds[upstreamNyaa],
+			journalItem{item: item{Title: "synthetic"}, Key: "nyaa:" + strconv.Itoa(10+i), AniListID: 7 + i},
+			journalItem{item: item{Title: "synthetic"}, Key: "nyaa:" + strconv.Itoa(20+i), AniListID: 7 + i})
+		info[7+i] = EntryInfo{Title: name}
+	}
+	log, rec := capture.New()
+	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
+	}}, log, srv.Client())
+	titles := map[string]string{}
+	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
+
+	if stats.queries != len(names) {
+		t.Errorf("harvest queries = %d, want %d: a refusal naming a key already titled THIS run is not this show's no-progress",
+			stats.queries, len(names))
+	}
+	if got := titles["nyaa:17"]; got != "Show H Real Title" {
+		t.Errorf("titles[nyaa:17] = %q, want the last show harvested (%v)", got, titles)
+	}
+	if rec.Contains(latchMsg) {
+		t.Errorf("scope latched on conflicts naming already-titled keys; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
 // TestHarvestPartialProgressDoesNotLatchTheScope pins h-f51: a show that cached
 // a real title before a LATER page failed show-locally made progress, so it must
 // not charge a consecutive-failure run. Each of the four shows answers page 0

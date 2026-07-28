@@ -142,8 +142,10 @@ var errIdentifierBudgetExceeded = fmt.Errorf("mapping: Fribb identifiers exceed 
 // fribbParseResult is parseFribbForRefresh's counted decode result: the
 // surviving AniList-keyed records plus the number of top-level array elements
 // they were distilled from - every element the decode loop observed, whatever
-// its outcome (retained, skipped-malformed, dropped-keyless, or refused by the
-// aggregate identifier budget); see fribbDecodeCounts.elements.
+// its outcome (retained, skipped-malformed, or dropped-keyless); see
+// fribbDecodeCounts.elements. A record refused by the aggregate identifier
+// budget cannot appear in a successful result at all: decodeFribbRecords fails
+// the whole document with errIdentifierBudgetExceeded instead.
 // acceptRefresh validates identifier coverage against elements rather than
 // len(records), so destructive filtering and deduplication cannot shrink the
 // denominator along with the numerator — a first-boot body of 200 keyless

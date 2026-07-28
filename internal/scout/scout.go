@@ -1050,14 +1050,13 @@ func (s *Scout) degradedSave(ctx context.Context, st *state.State, snap library.
 	s.save(ctx, st)
 }
 
-// saveGrace bounds the WHOLE shutdown save sequence, not just the retry: the
-// budget starts before the first attempt, so a slow cancelled attempt shortens
-// the detached retry instead of letting it add a fresh grace on top. It stays
-// inside Docker's default 10s stop grace (the public compose example sets no
-// stop_grace_period), so the write completes before SIGKILL. atomicfile's
-// temp+rename means a SIGKILL mid-write cannot corrupt state - the only cost of
-// a missed save is losing the AniList memo, which self-heals over one cold
-// cycle.
+// saveGrace bounds the detached shutdown retry, measured from the cancellation
+// that triggered it — the SIGTERM at which the container stop grace itself
+// starts. It stays inside Docker's default 10s stop grace (the public compose
+// example sets no stop_grace_period), so the write completes before SIGKILL.
+// atomicfile's temp+rename means a SIGKILL mid-write cannot corrupt state - the
+// only cost of a missed save is losing the AniList memo, which self-heals over
+// one cold cycle.
 const saveGrace = 5 * time.Second
 
 // save persists state, tolerating a shutdown mid-cycle. When the run context is
@@ -1065,11 +1064,12 @@ const saveGrace = 5 * time.Second
 // context.Canceled and the caches are lost — so a cancellation is retried once
 // with a detached, briefly-bounded context (context.WithoutCancel keeps the
 // values, drops the cancellation), letting the write finish so the expensive
-// AniList memo survives the restart. The retry gets only what is LEFT of
-// saveGrace measured from before the first attempt: an encode/write/fsync that
-// was cancelled after already spending part of the container's stop grace must
-// not be followed by a fresh full grace, or the total save can outlive SIGKILL
-// and lose the very memo the retry exists to preserve. A cancellation is not a
+// AniList memo survives the restart. The retry always runs, and gets a full
+// saveGrace measured from the cancellation: the first attempt's elapsed time is
+// mostly pre-SIGTERM cycle work (encoding the library snapshot, the ~5.9 MB
+// mapping cache and the memo), which spends none of the container stop grace, so
+// subtracting it would starve the retry to zero in exactly the slow-volume case
+// the retry exists for. A cancellation is not a
 // fault (a redeploy is routine), so only a genuine write failure is logged at
 // ERROR — which keeps it off the cycle-error alert. A deliberate preservation
 // refusal (state.ErrSavePreserved) is likewise not a fault and logs at WARN:
@@ -1077,14 +1077,16 @@ const saveGrace = 5 * time.Second
 // which blocks the save by design, and alerting on that would page the operator
 // on every redeploy.
 func (s *Scout) save(ctx context.Context, st *state.State) {
-	retryDeadline := time.Now().Add(saveGrace)
 	err := s.deps.Store.Save(ctx, st)
 	if err != nil && (errors.Is(err, context.Canceled) || ctx.Err() != nil) {
-		if remaining := time.Until(retryDeadline); remaining > 0 {
-			dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), remaining)
-			err = s.deps.Store.Save(dctx, st)
-			cancel()
-		}
+		// The container stop grace starts at the SIGTERM that cancelled ctx, so
+		// the retry budget is anchored HERE: the first attempt's elapsed time is
+		// mostly pre-SIGTERM cycle work and spends none of the stop grace, so
+		// subtracting it can starve the retry to zero. saveGrace < Docker's 10s
+		// default keeps the post-SIGTERM total inside the grace.
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), saveGrace)
+		err = s.deps.Store.Save(dctx, st)
+		cancel()
 	}
 	if err != nil {
 		// A deliberate preservation refusal is not a write fault: nothing is

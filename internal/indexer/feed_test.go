@@ -703,8 +703,8 @@ func TestDerivedTitleRelabelsCourLocalSeason(t *testing.T) {
 }
 
 // TestDerivedTitleMappedSeasonNeverRelabelsAbsoluteOrMarkerlessNames pins the
-// no-token guard of relabelBaseSeason (the one uncovered branch of the derived
-// path): a MAPPED season over a single release whose base name carries no
+// no-token guard of relabelEpisodeSeason (the branch both title paths share): a
+// MAPPED season over a single release whose base name carries no
 // SxxExx token - an absolute "- NN" name or a marker-less movie-shaped file -
 // must pass through unchanged, never gain an invented season label.
 func TestDerivedTitleMappedSeasonNeverRelabelsAbsoluteOrMarkerlessNames(t *testing.T) {

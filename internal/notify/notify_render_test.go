@@ -6,10 +6,13 @@ import (
 	"github.com/cplieger/seadex-scout/internal/compare"
 )
 
-// TestTrackerURLs pins the alert link-splitting rules: the first Nyaa link wins
-// the nyaa slot, the first AnimeBytes link wins the ab slot, and when no Nyaa
+// TestTrackerURLs pins the alert link-splitting rules WITHIN one affinity
+// tier (every fixture here is non-headline): the first Nyaa link wins the
+// nyaa slot, the first AnimeBytes link wins the ab slot, and when no Nyaa
 // link exists the first other public link (e.g. AnimeTosho) stands in as the
 // public URL so an alert never renders an empty public link while one exists.
+// Headline affinity outranks all of that; see
+// TestTrackerURLsPrefersHeadlineGroupOverNyaaTier.
 func TestTrackerURLs(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -315,5 +318,46 @@ func TestCapURLAttrPreservesIPv6LiteralHost(t *testing.T) {
 	const want = "http://[fd00::1]:8989/series/frieren"
 	if got := capURLAttr(want); got != want {
 		t.Errorf("capURLAttr(%q) = %q, want it unchanged", want, got)
+	}
+}
+
+// TestTrackerURLsPrefersHeadlineGroupOverNyaaTier pins the headline-first half
+// of the public-slot precedence: compare.obtainableLinks ranks the headline
+// candidate's own sources first so the rendered link belongs to the group
+// Finding.RecommendedGroup names, and a tracker-class-only preference would
+// discard that - presenting another recommended group's Nyaa link as the
+// action for the headline group.
+func TestTrackerURLsPrefersHeadlineGroupOverNyaaTier(t *testing.T) {
+	pub, ab := trackerURLs([]compare.ReleaseLink{
+		{Tracker: "AnimeTosho", URL: "https://animetosho.org/view/1", Headline: true},
+		{Tracker: "Nyaa", URL: "https://nyaa.si/view/2"},
+	})
+	if ab != "" {
+		t.Fatalf("ab = %q, want both links routed to public slots", ab)
+	}
+	if got := pub.nyaaURL(); got != "" {
+		t.Errorf("nyaa_url = %q, want empty (the non-headline Nyaa link must not win)", got)
+	}
+	if got := pub.otherURL(); got != "https://animetosho.org/view/1" {
+		t.Errorf("public_url = %q, want the headline group's AnimeTosho URL", got)
+	}
+	if got := pub.otherTracker(); got != "AnimeTosho" {
+		t.Errorf("public_tracker = %q, want AnimeTosho", got)
+	}
+}
+
+// TestTrackerURLsPrefersNyaaWithinTheHeadlineTier pins the other half: Nyaa
+// still outranks another public tracker when both belong to the headline
+// candidate, whatever order the link set arrives in.
+func TestTrackerURLsPrefersNyaaWithinTheHeadlineTier(t *testing.T) {
+	pub, _ := trackerURLs([]compare.ReleaseLink{
+		{Tracker: "AnimeTosho", URL: "https://animetosho.org/view/1", Headline: true},
+		{Tracker: "Nyaa", URL: "https://nyaa.si/view/2", Headline: true},
+	})
+	if got := pub.nyaaURL(); got != "https://nyaa.si/view/2" {
+		t.Errorf("nyaa_url = %q, want the headline Nyaa URL", got)
+	}
+	if got := pub.otherURL(); got != "" {
+		t.Errorf("public_url = %q, want empty (Nyaa wins its tier)", got)
 	}
 }

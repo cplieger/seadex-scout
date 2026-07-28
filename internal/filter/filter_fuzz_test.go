@@ -74,7 +74,7 @@ func FuzzABVisible(f *testing.F) {
 		// cannot be two grades), so what is worth fuzzing is that the policy
 		// function and the grader never disagree.
 		if want := ClassifyAB(tracker, rawURL) == ABNone; off != want {
-			t.Errorf("ABVisible(%q, %q, false) = %v but ClassifyAB = %v; the gate must be exactly the ABNone comparison", tracker, rawURL, off, ClassifyAB(tracker, rawURL))
+			t.Errorf("ABVisible(%q, %q, false) = %v but ClassifyAB = %d; the gate must be exactly the ABNone comparison", tracker, rawURL, off, ClassifyAB(tracker, rawURL))
 		}
 		// Totality: every input lands in one of the three named grades, so an
 		// exhaustive consumer switch (notify.classifyTrackerLink) cannot fall
@@ -82,7 +82,7 @@ func FuzzABVisible(f *testing.F) {
 		switch g := ClassifyAB(tracker, rawURL); g {
 		case ABNone, ABAmbiguous, ABDefinite:
 		default:
-			t.Errorf("ClassifyAB(%q, %q) = %v, outside the three named grades", tracker, rawURL, g)
+			t.Errorf("ClassifyAB(%q, %q) = %d, outside the three named grades", tracker, rawURL, g)
 		}
 		// Security: no fuzzer-built subdomain of the AB host may surface while
 		// the toggle is off, and a lookalike suffix host must not be hidden as
@@ -140,7 +140,7 @@ func FuzzABToggleNeverPublishesAnimeBytes(f *testing.F) {
 		// a row the audit keeps with the toggle off must not carry an
 		// AnimeBytes link, so an AB-publishing pair must grade ABDefinite.
 		if g := ClassifyAB(tracker, rawURL); g != ABDefinite {
-			t.Errorf("ClassifyAB(%q, %q) = %v but the pair publishes AnimeBytes link %q; the audit report would keep the row", tracker, rawURL, g, published)
+			t.Errorf("ClassifyAB(%q, %q) = %d but the pair publishes AnimeBytes link %q; the audit report would keep the row", tracker, rawURL, g, published)
 		}
 	})
 }

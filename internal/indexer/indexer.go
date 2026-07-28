@@ -207,9 +207,10 @@ func ownUpstreams(ups []*upstream) []*upstream {
 // Indexer serves searches by proxying Prowlarr filtered to SeaDex's curation,
 // and periodic RSS checks from the two synthesized per-tracker feeds. Both come
 // from the persisted snapshot the compare cycle builds (see FeedWriter), owned
-// by cache: New loads it on start and cache.refresh reloads it when the file
-// changes (a cycle - in this process or the `poll` subcommand - rewrote it),
-// under the cache's own locks. The server never fetches SeaDex or Fribb itself.
+// by cache: Run warms it on start (see warmSnapshot; New is pure assembly and
+// loads nothing) and cache.refresh reloads it when the file changes (a cycle -
+// in this process or the `poll` subcommand - rewrote it), under the cache's own
+// locks. The server never fetches SeaDex or Fribb itself.
 type Indexer struct {
 	// cache owns the persisted-snapshot lifecycle and its two locking regimes
 	// (see snapshotCache). The server reaches it through four methods only, so

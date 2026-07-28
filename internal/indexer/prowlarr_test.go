@@ -489,7 +489,8 @@ func TestUpstreamSearchRedactsReflectedBasicAuthorization(t *testing.T) {
 	}
 }
 
-// renderedLogRecords flattens each captured slog record (message + top-level// attrs) into one string, so a test can assert a secret never reached ANY
+// renderedLogRecords flattens each captured slog record (message + top-level
+// attrs) into one string, so a test can assert a secret never reached ANY
 // part of a log line - the error text rides the "error" attr, which
 // Recorder.Contains (messages only) would miss.
 func renderedLogRecords(rec *capture.Recorder) []string {

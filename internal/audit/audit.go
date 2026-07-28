@@ -143,8 +143,9 @@ type Row struct {
 	Releases      []Release `json:"releases,omitempty"`
 	AniListID     int       `json:"al_id"`
 	Season        int       `json:"season,omitempty"`
-	// scope is the comparison scope the shared decision resolved (align.Decide
-	// via align.Decide), recorded at build time and read by the renderer
+	// scope is the comparison scope the shared decision resolved
+	// (align.ScopeKind via align.Decide), recorded at build time and read by
+	// the renderer
 	// (align.ScopeWholeSeries, the zero value, renders as "series").
 	// Unexported: in-process only, absent from the JSON wire shape.
 	scope      align.ScopeKind

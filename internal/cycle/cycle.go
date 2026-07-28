@@ -65,10 +65,10 @@ const dirMode = 0o700
 // and finding-dedupe loss, duplicate alerts) and feed.json. dir is the single
 // /config mount root (config.DefaultCycleLockDir) so the lock lives beside every
 // file it guards instead of beside whichever one it was derived from; the kernel
-// releases the flock if a process dies, so
-// there is no stale-lock state. The gate stops queued reruns (and a
-// not-yet-started initial run) once shutdown is signalled; an in-flight run
-// is never interrupted by the gate - context cancellation owns that.
+// releases the flock if a process dies, so there is no stale-lock state. The
+// gate stops queued reruns (and a not-yet-started initial run) once shutdown is
+// signalled; an in-flight run is never interrupted by the gate - context
+// cancellation owns that.
 func NewExclusive(ctx context.Context, dir string) (*scheduler.Exclusive, error) {
 	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return nil, fmt.Errorf("create cycle lock dir %s: %w", dir, err)
@@ -86,11 +86,14 @@ func NewExclusive(ctx context.Context, dir string) (*scheduler.Exclusive, error)
 // published before the cancellation was observed - including a cycle that
 // completed healthy and was then interrupted at the recording boundary, whose
 // verdict recordRunHealth deliberately withholds because an interrupted run's
-// outcome is not a trustworthy health verdict (pinned by
-// TestRunOnceUniformInterruption's post-cycle case). What the interruption
-// never does is reach BACK: a verdict already published inside the cycle lock -
-// an earlier run of this invocation, or a daemon tick's - stands, because a
-// completed cycle's health is not this process's to withdraw.
+// outcome is not a trustworthy health verdict. TestRunOnceUniformInterruption's
+// post-cycle case pins the mid-cycle form of this (its Cycler cancels before
+// returning, so runOnce reports the interruption itself); the narrower window
+// between runOnce's check and recordRunHealth's has no test seam, so
+// recordRunHealth's own ctx.Err() check is the only guard on it. What the
+// interruption never does is reach BACK: a verdict already published inside the
+// cycle lock - an earlier run of this invocation, or a daemon tick's - stands,
+// because a completed cycle's health is not this process's to withdraw.
 // The daemon tick deliberately differs in the boundary case: RunLoop publishes
 // a healthy verdict even when the cancellation is already visible, withholding
 // only an UNHEALTHY interrupted cycle. The cancellation cause rides along as a
@@ -208,10 +211,9 @@ func executeRuns(ctx context.Context, ex *scheduler.Exclusive, sc Cycler, marker
 // result but before this recording boundary would otherwise go unobserved here
 // and publish a healthy marker that RunOnce then reports as an interruption. A
 // cycle error that already carries the shutdown is returned unchanged;
-// otherwise the package's uniform interruption result is synthesized.
-// Once a verdict HAS been published, a later
-// shutdown does not withdraw it - RunOnce's final check governs this
-// invocation's exit code, not the marker.
+// otherwise the package's uniform interruption result is synthesized. Once a
+// verdict HAS been published, a later shutdown does not withdraw it - RunOnce's
+// final check governs this invocation's exit code, not the marker.
 //
 // Write-failure reporting preserves runOnce's former semantics: on this
 // invocation's OWN run the failure becomes the process result (it outranks an

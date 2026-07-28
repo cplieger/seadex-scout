@@ -474,8 +474,11 @@ func (p *journalPass) refreshCarriedItem(it *journalItem, refs []curatedRef) (jo
 // - unlike a curated-then-replaced torrent, SeaDex's curators now warn
 // against it, so serving it would hand the arrs a Broken/Incomplete release.
 // A pre-journal item with no Key or FirstSeen (unreachable after a baseline,
-// defensive against hand-edited snapshots), an item whose stored GUID no longer
-// proves its Key, or an item whose Key names the other tracker scope is dropped.
+// defensive against hand-edited snapshots), or an item whose Key names the other
+// tracker scope, is dropped; so is a NON-curated item whose stored GUID no longer
+// proves its Key (there is no fresh render to self-heal from, and reload derives the
+// served download link from that GUID). A still-curated item with such a GUID is kept:
+// refreshCarriedItem re-renders it and simply does not carry the unproven GUID forward.
 // A missing AB passkey is not a drop: the GUID-only record is carried while the
 // reader suppresses the ungrabbable feed, so the switch remains reversible.
 func (p *journalPass) carryJournal(prevFeed []journalItem, scope string) []journalItem {

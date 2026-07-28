@@ -423,7 +423,7 @@ func TestABEvidenceAdapterReadsRawEvidence(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := ABEvidence(&tt.torrent); got != tt.want {
-				t.Errorf("ABEvidence(%q, %q) = %v, want %v", tt.torrent.Tracker, tt.torrent.URL, got, tt.want)
+				t.Errorf("ABEvidence(%q, %q) = %d, want %d", tt.torrent.Tracker, tt.torrent.URL, got, tt.want)
 			}
 		})
 	}

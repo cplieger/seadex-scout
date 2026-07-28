@@ -333,10 +333,9 @@ func reportWriteContext(ctx context.Context) (context.Context, context.CancelFun
 // genuine operation timeout that dispatchOutcome's default arm reports at
 // level=ERROR, and alerts.yaml documents a shutdown-interrupted run as excluded
 // from the level=ERROR cycle-error rule. Adding the caller's ctx.Err() makes
-// main's single
-// errors.Is(err, context.Canceled) check classify it WARN (still exit 1: the pair
-// did not land). Any other write failure - ENOSPC, EACCES, an encode error - is a
-// genuine fault and passes through untouched.
+// main's single errors.Is(err, context.Canceled) check classify it WARN
+// (still exit 1: the pair did not land). Any other write failure - ENOSPC,
+// EACCES, an encode error - is a genuine fault and passes through untouched.
 func detachedWriteError(ctx context.Context, err error) error {
 	if ctx.Err() == nil || !errors.Is(err, context.DeadlineExceeded) {
 		return err

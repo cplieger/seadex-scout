@@ -188,10 +188,11 @@ type Cache struct {
 	Records      []Record  `json:"records,omitempty"`
 	// RejectedRefreshes counts consecutive fresh-200 refreshes the acceptance
 	// guards (the validation floor, the below-half-size shrink guard, the
-	// parse-time record cap) rejected in favour of the stale map. It persists
-	// across cycles and restarts, resets to 0 on any accepted refresh or 304,
-	// and rides on the *StaleMapError (ConsecutiveRejections) so the scout
-	// can escalate its degraded-mapping log at degradation.EscalationThreshold.
+	// parse-time record cap, the aggregate identifier budget) rejected in
+	// favour of the stale map. It persists across cycles and restarts, resets
+	// to 0 on any accepted refresh or 304, and rides on the *StaleMapError
+	// (ConsecutiveRejections) so the scout can escalate its degraded-mapping
+	// log at degradation.EscalationThreshold.
 	// It advances even when no usable stale cache exists (a first boot whose
 	// every refresh is refused), because the streak describes the upstream, not
 	// the cache; the scout therefore reads it off this Cache rather than

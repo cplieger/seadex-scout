@@ -49,6 +49,34 @@ func TestParseMediaYearFallsBackToStartDate(t *testing.T) {
 	}
 }
 
+// TestParseMediaImplausibleYearFallsBack pins toMedia's year gate: an
+// impossible untrusted wire year carries no evidence, so it must never become
+// match.findByTitle's hard constraint - it falls back to a plausible startDate
+// year, then to the unknown sentinel 0.
+func TestParseMediaImplausibleYearFallsBack(t *testing.T) {
+	for name, tc := range map[string]struct {
+		raw  string
+		want int
+	}{
+		"negative seasonYear falls back to startDate":     {raw: `{"data":{"Media":{"format":"TV","seasonYear":-2020,"startDate":{"year":2020},"title":{"romaji":"A"}}}}`, want: 2020},
+		"over-four-digit seasonYear falls back":           {raw: `{"data":{"Media":{"format":"TV","seasonYear":20200,"startDate":{"year":2020},"title":{"romaji":"A"}}}}`, want: 2020},
+		"three-digit seasonYear falls back to startDate":  {raw: `{"data":{"Media":{"format":"TV","seasonYear":999,"startDate":{"year":2020},"title":{"romaji":"A"}}}}`, want: 2020},
+		"both implausible yields unknown":                 {raw: `{"data":{"Media":{"format":"TV","seasonYear":20200,"startDate":{"year":-5},"title":{"romaji":"A"}}}}`, want: 0},
+		"implausible seasonYear with over-range fallback": {raw: `{"data":{"Media":{"format":"TV","seasonYear":-1,"startDate":{"year":10000},"title":{"romaji":"A"}}}}`, want: 0},
+		"plausible seasonYear is kept":                    {raw: `{"data":{"Media":{"format":"TV","seasonYear":2023,"startDate":{"year":2020},"title":{"romaji":"A"}}}}`, want: 2023},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m, err := parseMedia([]byte(tc.raw))
+			if err != nil {
+				t.Fatalf("parseMedia: %v", err)
+			}
+			if m.Year != tc.want {
+				t.Errorf("Year = %d, want %d", m.Year, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseMediaNotFoundCarriesMessage(t *testing.T) {
 	raw := []byte(`{"data":{"Media":null},"errors":[{"message":"Not Found."}]}`)
 	_, err := parseMedia(raw)
@@ -81,6 +109,11 @@ func TestParseMediaNotFoundClassification(t *testing.T) {
 		{name: "null Media with status 404", raw: `{"data":{"Media":null},"errors":[{"message":"Something went wrong","status":404}]}`, wantErr: true, wantNotFound: true},
 		{name: "null Media with Not Found message", raw: `{"data":{"Media":null},"errors":[{"message":"Not Found."}]}`, wantErr: true, wantNotFound: true},
 		{name: "embedded control cannot launder into Not Found", raw: `{"data":{"Media":null},"errors":[{"message":"Not\nFound."}]}`, wantErr: true, wantNotFound: false},
+		{name: "leading newline cannot launder into Not Found", raw: `{"data":{"Media":null},"errors":[{"message":"\nNot Found."}]}`, wantErr: true, wantNotFound: false},
+		{name: "trailing newline cannot launder into Not Found", raw: `{"data":{"Media":null},"errors":[{"message":"Not Found.\n"}]}`, wantErr: true, wantNotFound: false},
+		{name: "carriage return cannot launder into Not Found", raw: `{"data":{"Media":null},"errors":[{"message":"\rNot Found."}]}`, wantErr: true, wantNotFound: false},
+		{name: "tab cannot launder into Not Found", raw: `{"data":{"Media":null},"errors":[{"message":"\tNot Found."}]}`, wantErr: true, wantNotFound: false},
+		{name: "tab and carriage-return wrapping cannot launder into Not Found", raw: `{"data":{"Media":null},"errors":[{"message":"\tNot Found.\r"}]}`, wantErr: true, wantNotFound: false},
 		{name: "null Media with Not Found plus second error", raw: `{"data":{"Media":null},"errors":[{"message":"Not Found."},{"message":"Internal Server Error"}]}`, wantErr: true, wantNotFound: false},
 		{name: "non-object Media fails decode", raw: `{"data":{"Media":123}}`, wantErr: true, wantNotFound: false},
 		{name: "null Media beside a type-mismatched errors field fails decode", raw: `{"data":{"Media":null},"errors":{"message":"boom"}}`, wantErr: true, wantNotFound: false},
@@ -113,20 +146,31 @@ func TestParseMediaNotFoundClassification(t *testing.T) {
 func TestParseMediaPage(t *testing.T) {
 	raw := []byte(`{"data":{"Page":{"media":[` +
 		`{"id":1,"format":"TV","seasonYear":2023,"title":{"romaji":"A"}},` +
-		`{"id":2,"format":"MOVIE","startDate":{"year":2019},"title":{"romaji":"B","english":"B"}}` +
+		`{"id":2,"format":"MOVIE","startDate":{"year":2019},"title":{"romaji":"B","english":"B"}},` +
+		`{"id":3,"format":"TV","seasonYear":20210,"startDate":{"year":2021},"title":{"romaji":"C"}},` +
+		`{"id":4,"format":"TV","seasonYear":-2021,"startDate":{"year":-5},"title":{"romaji":"D"}}` +
 		`]}}}`)
 	out, err := parseMediaPage(raw)
 	if err != nil {
 		t.Fatalf("parseMediaPage: %v", err)
 	}
-	if len(out) != 2 {
-		t.Fatalf("len = %d, want 2", len(out))
+	if len(out) != 4 {
+		t.Fatalf("len = %d, want 4", len(out))
 	}
 	if out[1].Year != 2023 {
 		t.Errorf("id 1 year = %d, want 2023", out[1].Year)
 	}
 	if out[2].Year != 2019 {
 		t.Errorf("id 2 year = %d, want startDate fallback 2019", out[2].Year)
+	}
+	// The batch parser routes through the same toMedia year gate as the single
+	// parser: an implausible seasonYear falls back to startDate, and implausible
+	// evidence on both fields yields the unknown sentinel 0.
+	if out[3].Year != 2021 {
+		t.Errorf("id 3 year = %d, want implausible seasonYear to fall back to 2021", out[3].Year)
+	}
+	if out[4].Year != 0 {
+		t.Errorf("id 4 year = %d, want unknown sentinel 0", out[4].Year)
 	}
 	if !slices.Equal(out[2].Titles, []string{"B"}) {
 		t.Errorf("id 2 titles = %v, want deduped [B]", out[2].Titles)

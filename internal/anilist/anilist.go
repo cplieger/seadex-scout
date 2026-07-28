@@ -421,7 +421,8 @@ func retainRequested(page map[int]Media, chunk []int) error {
 // do performs one GraphQL POST attempt, translating a 429 into a
 // *httpx.RateLimitError carrying a capped Retry-After hint (retried by
 // request's WithRateLimitRetry mode) and reading the rate headers on every
-// non-429 response (error statuses included) to pre-empt the next 429.
+// response that is not itself a rate limit (error statuses included, an
+// envelope-delivered 429 excluded) to pre-empt the next 429.
 func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(body))
 	if err != nil {

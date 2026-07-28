@@ -36,7 +36,7 @@ func ABVisible(t *seadex.Torrent, includeAnimeBytes bool) bool {
 // the adapter that keeps the (tracker, rawURL) argument order in ONE place for
 // every consumer of the SeaDex model, mirroring the ABVisible/Obtainable pattern
 // - and it is why internal/seadex no longer carries this policy as a method on
-// the wire struct (l-f86): the publish half of the link concern now sits beside
+// the wire struct: the publish half of the link concern now sits beside
 // its hide half in filter, one layer below the flows.
 func PublishURL(t *seadex.Torrent) string {
 	return trackerlink.Publish(t.Tracker, t.URL)
@@ -104,7 +104,7 @@ func FileResolution(files []seadex.File) string {
 // a torrent's release: the ONE layered eligibility rule shared by the
 // compare/audit classification (Torrent above) and the indexer's synthesized
 // feed title (its fileResolution), so a daemon finding and the RSS title can
-// never disagree about which files vote (h-f3).
+// never disagree about which files vote.
 //
 //  1. Type gate: when the record carries names, a file whose name fails
 //     ContentMediaFile (a non-video extension such as a subtitle sidecar or
@@ -209,8 +209,8 @@ func halfFloor(anchor int64) int64 { return anchor/2 + anchor%2 }
 // for a record whose size evidence cannot discriminate (sparse upstream data,
 // fixtures), where the type gate alone decides. What reaches that state differs
 // by anchor: PayloadFiles' maximum is non-positive only when NO length is
-// positive, while PopulationFiles' median is non-positive as soon as half the
-// pool is - so a census over lengths [0, 0, 0, 1000] deliberately keeps all
+// positive, while PopulationFiles' median is non-positive once more than half
+// the pool is - so a census over lengths [0, 0, 0, 1000] deliberately keeps all
 // four files rather than reading the one real file as the whole population.
 func keepAtLeast(pool []seadex.File, floor int64) []seadex.File {
 	out := make([]seadex.File, 0, len(pool))

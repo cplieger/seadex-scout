@@ -195,3 +195,90 @@ func TestPreservedRecordBoundsReadBackStatus(t *testing.T) {
 		t.Error("preserved Status carries an unsafe rune")
 	}
 }
+
+// TestCapAlertTextAttrNeutralizesMarkupAndMentions pins the alert-sink output
+// encoding: capAttr bounds and sanitizes a value for the JSON slog sink but
+// performs no markup encoding, and alerts.yaml interpolates alert_title /
+// alert_recommended_group into a Discord/Slack annotation, so an untrusted
+// SeaDex title must not be able to render as a link, a code span, or a
+// receiver mention (CWE-116).
+func TestCapAlertTextAttrNeutralizesMarkupAndMentions(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "inline link",
+			in:   "[security update](https://attacker.example)",
+			want: `\[security update\]\(https://attacker.example\)`,
+		},
+		{name: "everyone mention", in: "@everyone", want: `\@everyone`},
+		{name: "slack user mention", in: "<@U123>", want: `&lt;\@U123&gt;`},
+		{name: "ampersand", in: "Fate & Co", want: "Fate &amp; Co"},
+		{name: "emphasis and code", in: "*a*_b_`c`~d~|e|", want: `\*a\*\_b\_` + "\\`c\\`" + `\~d\~\|e\|`},
+		{name: "backslash first", in: `a\b`, want: `a\\b`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := capAlertTextAttr(tt.in); got != tt.want {
+				t.Errorf("capAlertTextAttr(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCapAlertTextAttrDropsBidiControls pins that the alert twin keeps
+// capAttr's rune sanitization: a bidi override in a SeaDex title must not
+// survive into an annotation a human reads (the escaper only adds markup
+// encoding on top, it must never bypass the sanitize pass).
+func TestCapAlertTextAttrDropsBidiControls(t *testing.T) {
+	if got := capAlertTextAttr("Frieren\u202eevil"); strings.ContainsAny(got, "\u202e") {
+		t.Errorf("capAlertTextAttr = %q, want no bidi control rune", got)
+	}
+}
+
+// TestCapAlertTextAttrRecapsAfterEscapeGrowth pins the re-cap: every escaped
+// byte grows the value, so the pre-escape cap alone would emit ~2x the
+// per-attribute budget into the log pipeline.
+func TestCapAlertTextAttrRecapsAfterEscapeGrowth(t *testing.T) {
+	got := capAlertTextAttr(strings.Repeat("*", 2*maxAttrBytes))
+	if len(got) > maxAttrBytes {
+		t.Errorf("capAlertTextAttr len = %d, want <= %d", len(got), maxAttrBytes)
+	}
+	if !strings.HasSuffix(got, attrTruncMarker) {
+		t.Errorf("capAlertTextAttr = ...%q, want the %q truncation marker", lastAttrBytes(got), attrTruncMarker)
+	}
+}
+
+// TestFindingKVsCarriesEscapedAlertLabels pins the alerts.yaml contract: the
+// raw title / recommended_group labels stay for Loki search and grouping, and
+// the annotation-facing alert_* twins carry the escaped values. Without this
+// the two labels alerts.yaml renders could be dropped silently.
+func TestFindingKVsCarriesEscapedAlertLabels(t *testing.T) {
+	f := compare.Finding{
+		Title:            "[phish](https://attacker.example)",
+		RecommendedGroup: "@everyone",
+	}
+	kvs := findingKVs(&f)
+	got := map[string]string{}
+	for i := 0; i+1 < len(kvs); i += 2 {
+		key, ok := kvs[i].(string)
+		if !ok {
+			continue
+		}
+		if value, ok := kvs[i+1].(string); ok {
+			got[key] = value
+		}
+	}
+	for key, want := range map[string]string{
+		"title":                   f.Title,
+		"recommended_group":       f.RecommendedGroup,
+		"alert_title":             `\[phish\]\(https://attacker.example\)`,
+		"alert_recommended_group": `\@everyone`,
+	} {
+		if got[key] != want {
+			t.Errorf("%s = %q, want %q", key, got[key], want)
+		}
+	}
+}

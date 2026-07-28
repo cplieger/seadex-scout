@@ -514,7 +514,7 @@ func (s *Store) prepareSave(ctx context.Context, st *State) (State, error) {
 		return State{}, fmt.Errorf("state: save %s: blocked after loading newer schema version %d (supported %d): %w", s.path, s.unsupportedVersion, SchemaVersion, ErrSavePreserved)
 	}
 	if s.loadFailed {
-		return State{}, fmt.Errorf("state: save %s: blocked after an unclassified read failure; the on-disk state is preserved until a load can classify it: %w", s.path, ErrSavePreserved)
+		return State{}, fmt.Errorf("state: save %s: blocked after an unclassified read failure, or after corruption the load could not preserve (check for a blocked %s.corrupt); the on-disk state is preserved until a load can classify and preserve it: %w", s.path, s.path, ErrSavePreserved)
 	}
 	sanitized := *st
 	sanitized.Library = st.Library.SanitizedForStorage()

@@ -1,10 +1,13 @@
 package mapping
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/cplieger/httpx/v4"
 )
 
 // TestParseOverrides_boundsUnknownKeyRetention pins the diagnostic-state
@@ -357,4 +360,103 @@ func TestRecord_RoutedIDsReturnsOnlyUsableIDsForSelectedArr(t *testing.T) {
 			}
 		})
 	}
+}
+
+// overIdentifierBudgetFribbBody builds the smallest valid Fribb array that
+// exceeds the aggregate identifier budget: every record retains both capped
+// identifier lists (maxFribbIdentifiers each), so one record past
+// maxFribbIdentifiersTotal/(2*maxFribbIdentifiers) trips the budget while the
+// element count stays an order of magnitude under maxFribbRecords - the
+// per-record caps and the record cap must not be what refuses this body.
+func overIdentifierBudgetFribbBody() []byte {
+	perRecord := 2 * maxFribbIdentifiers
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := range maxFribbIdentifiersTotal/perRecord + 1 {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"anilist_id":%d,"type":"MOVIE","imdb_id":[`, i+1)
+		for j := range maxFribbIdentifiers {
+			if j > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, `"tt%d"`, j+1)
+		}
+		b.WriteString(`],"themoviedb_id":{"movie":[`)
+		for j := range maxFribbIdentifiers {
+			if j > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, `%d`, j+1)
+		}
+		b.WriteString(`]}}`)
+	}
+	b.WriteByte(']')
+	return []byte(b.String())
+}
+
+// TestAcceptRefresh_identifierBudgetFailsClosed pins the fail-closed contract
+// of the aggregate identifier budget across the whole decode-to-acceptance
+// path, which the counter-level fribbDecodeCounts.add test cannot reach: a
+// body that trips the budget is refused WHOLE (the truncated prefix is never
+// published) with the errIdentifierBudgetExceeded sentinel, and acceptRefresh
+// routes that sentinel through rejectRefresh - a first boot publishes no
+// index, a usable previous cache is returned stale rather than replaced, and
+// the persisted rejection streak advances toward the scout's escalation
+// threshold instead of staying frozen as a transient parse failure would.
+func TestAcceptRefresh_identifierBudgetFailsClosed(t *testing.T) {
+	body := overIdentifierBudgetFribbBody()
+
+	t.Run("parse refuses the whole body", func(t *testing.T) {
+		parsed, err := parseFribbForRefresh(body, discardLogger())
+		if !errors.Is(err, errIdentifierBudgetExceeded) {
+			t.Fatalf("parseFribbForRefresh error = %v, want errIdentifierBudgetExceeded", err)
+		}
+		if len(parsed.records) != 0 {
+			t.Errorf("budget breach retained %d records, want the whole body refused", len(parsed.records))
+		}
+	})
+
+	t.Run("first boot publishes nothing", func(t *testing.T) {
+		l := &Loader{log: discardLogger()}
+		next, err := l.acceptRefresh(&Cache{}, httpx.ConditionalResult{Body: body})
+		if !errors.Is(err, errIdentifierBudgetExceeded) {
+			t.Fatalf("first-boot error = %v, want errIdentifierBudgetExceeded", err)
+		}
+		if _, ok := errors.AsType[*StaleMapError](err); ok {
+			t.Errorf("first-boot error = %v, want the no-cache error rather than a *StaleMapError", err)
+		}
+		if len(next.Records) != 0 {
+			t.Errorf("first boot published %d records, want none", len(next.Records))
+		}
+		if next.RejectedRefreshes != 1 {
+			t.Errorf("first-boot RejectedRefreshes = %d, want 1 (a budget breach is a persistent guard refusal)", next.RejectedRefreshes)
+		}
+	})
+
+	t.Run("usable cache is kept stale", func(t *testing.T) {
+		prev := &Cache{
+			Records:           []Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+			RejectedRefreshes: 2,
+		}
+		l := &Loader{log: discardLogger()}
+		next, err := l.acceptRefresh(prev, httpx.ConditionalResult{Body: body})
+		stale, ok := errors.AsType[*StaleMapError](err)
+		if !ok {
+			t.Fatalf("budget-breach error = %v, want a *StaleMapError guard rejection", err)
+		}
+		if !errors.Is(err, errIdentifierBudgetExceeded) {
+			t.Errorf("budget-breach error does not match errIdentifierBudgetExceeded through the StaleMapError wrap: %v", err)
+		}
+		if len(next.Records) != 1 || next.Records[0].AniListID != 1 {
+			t.Fatalf("budget-breach records = %+v, want the stale record id 1 retained", next.Records)
+		}
+		if next.RejectedRefreshes != 3 {
+			t.Errorf("budget-breach RejectedRefreshes = %d, want 3 (the prior streak advances)", next.RejectedRefreshes)
+		}
+		if stale.ConsecutiveRejections() != 3 {
+			t.Errorf("budget-breach ConsecutiveRejections = %d, want 3", stale.ConsecutiveRejections())
+		}
+	})
 }
