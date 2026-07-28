@@ -108,10 +108,12 @@ type Decision struct {
 	Kind     ScopeKind
 	Standing Standing
 	Outcome  Outcome
-	// Season is max(0, Record.SeasonTvdb), the shared non-negative TVDB
-	// season label both consumers stamp on their output. Records without a
-	// positive mapping, including ordinary movies, season-0 specials, and
-	// whole-series comparisons, carry 0.
+	// Season is the shared non-negative TVDB season label both consumers
+	// stamp on their output: max(0, Record.SeasonTvdb) for a ScopeSeason
+	// comparison, and 0 for every other scope. An ordinary movie, a
+	// season-0 special, and a whole-series comparison carry 0 whatever the
+	// record's season field holds, so a scope that has no season number
+	// cannot stamp a stale one.
 	Season int
 	Approx bool
 	NoBest bool
@@ -130,7 +132,9 @@ type Decision struct {
 func Decide(item *library.Item, rec *mapping.Record, best, alt []string) Decision {
 	scoped := scope(item, rec)
 	d := Decision{Kind: scoped.Kind, NoBest: len(best) == 0}
-	d.Season = max(0, rec.SeasonTvdb)
+	if scoped.Kind == ScopeSeason {
+		d.Season = max(0, rec.SeasonTvdb)
+	}
 	if scoped.Kind == ScopeWholeSeries {
 		// An absolute-numbered run / title-only match has no per-season Fribb
 		// mapping: its single whole-series recommendation is judged against

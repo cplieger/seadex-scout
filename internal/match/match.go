@@ -16,8 +16,10 @@
 // expired entry is a lookup miss that re-enters the existing batched prefetch
 // (or the per-entry fetch) and is re-stamped on renewal, and entries still
 // expired when a CLEAN (non-degraded) Match pass ends are pruned from the
-// returned memo - a degraded pass could not renew them, so it retains them as
-// stale feed-title fallback data (Memo.StaleTitle). Legacy
+// returned memo, EXCEPT the positives whose AniList id SeaDex still curates -
+// those stay as stale feed-title/type fallback data (Memo.StaleTitle,
+// Memo.StaleFormat), whose readers ignore expiry on purpose. A degraded pass
+// could not renew anything, so it retains every expired entry. Legacy
 // entries persisted before the policy (no expiry field) are stamped on first
 // load from the wider [memoMinMigration, memoMaxTTL) window, spreading the
 // accumulated backlog's first renewal with no day-one stampede. The batched
@@ -174,8 +176,11 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 		// A degraded pass (outage, tripped breaker, shutdown) could not renew
 		// what expired; keep those entries so the feed's stale-title tier
 		// (scout/feedinfo.go) still serves them - they stay pending for next
-		// cycle's batch either way, so retention costs no AniList traffic.
-		pruneExpired(&memo, now)
+		// cycle's batch either way, so retention costs no AniList traffic. A
+		// clean pass still keeps the expired positives that tier reads for
+		// entries SeaDex currently curates, which is why the catalogue is
+		// passed in (pruneExpired).
+		pruneExpired(&memo, now, entries)
 	}
 	return Result{Coverage: cov, Memo: memo, Matches: matches, Degraded: run.degraded, IncompleteIDs: run.incomplete}
 }
@@ -253,17 +258,7 @@ func (r *matchRun) matchEntry(ctx context.Context, e *seadex.Entry) Match {
 func (r *matchRun) matchMappedEntry(ctx context.Context, e *seadex.Entry, rec *mapping.Record, item *library.Item, needsLookup bool) Match {
 	arr := recordArr(rec)
 	if needsLookup {
-		// needsLookup under a present record means the record is id-less
-		// (see aniListNeed): the ID bridge by definition could not resolve
-		// an arr id, so the entry counts as Unmapped even when the AniList
-		// title fallback below links it - keeping the cycle line's "mapped"
-		// an honest count of actual ID-bridge resolutions. The title is the
-		// only remaining link to the arr item, so consult AniList.
-		r.cov.Unmapped[arr]++
-		if matched := r.titleMatch(ctx, e, arr); matched != nil {
-			return Match{Item: matched, Entry: *e, Record: *rec, Arr: arr, Source: SourceTitle}
-		}
-		return Match{Entry: *e, Record: *rec, Arr: arr, Source: SourceUnmapped}
+		return r.matchIDLessEntry(ctx, e, rec, arr)
 	}
 	// The record carries a usable arr id: the ID mapping resolved, so this
 	// is a coverage hit whether or not the item is in the library.
@@ -296,17 +291,38 @@ func (r *matchRun) matchUnmappedEntry(ctx context.Context, e *seadex.Entry) Matc
 	return Match{Item: item, Entry: *e, Record: mapping.RecordFromFormat(media.Format), Arr: item.Arr, Source: SourceTitle}
 }
 
-// titleMatch resolves the entry through the AniList fallback and matches it to a
-// library item by normalized title + year, restricted to arr. It returns nil on
-// any miss (AniList failure, no candidate, or an ambiguous set). It bridges the
-// case where Fribb has the entry but no usable arr id, so the AniList title is
-// the only remaining link to the arr item.
-func (r *matchRun) titleMatch(ctx context.Context, e *seadex.Entry, arr string) *library.Item {
+// matchIDLessEntry links an entry whose Fribb record exists but carries no arr
+// id (a split AniList<->arr mapping), where the AniList title is the only
+// remaining link to the arr item. It resolves AniList once: the format types an
+// untyped record and picks the search arr, then the normalized title + year
+// matches within that arr. Coverage counts under the resolved arr either way.
+func (r *matchRun) matchIDLessEntry(ctx context.Context, e *seadex.Entry, rec *mapping.Record, arr string) Match {
+	// needsLookup under a present record means the record is id-less (see
+	// aniListNeed): the ID bridge by definition could not resolve an arr id,
+	// so the entry counts as Unmapped even when the AniList title fallback
+	// below links it - keeping the cycle line's "mapped" an honest count of
+	// actual ID-bridge resolutions. The title is the only remaining link to
+	// the arr item, so consult AniList.
 	media, ok := r.lookupAniList(ctx, e.AniListID)
 	if !ok {
-		return nil
+		r.cov.Unmapped[arr]++
+		return Match{Entry: *e, Record: *rec, Arr: arr, Source: SourceUnmapped}
 	}
-	return r.lib.findByTitle(media.Titles, media.Year, arr, r.m.log)
+	// An UNTYPED id-less record carries no routing evidence at all: recordArr
+	// routes every non-MOVIE value (including "") to Sonarr, which would
+	// restrict the title search to Sonarr and can miss the real Radarr movie
+	// or bind a same-titled series. AniList is authoritative for the format
+	// here, so type the record from it and search the arr that format names
+	// (arrUnknown - unrestricted - when the format is genuinely unknown).
+	if rec.Type == "" {
+		rec.Type = mapping.RecordFromFormat(media.Format).Type
+		arr = formatArr(media.Format)
+	}
+	r.cov.Unmapped[arr]++
+	if matched := r.lib.findByTitle(media.Titles, media.Year, arr, r.m.log); matched != nil {
+		return Match{Item: matched, Entry: *e, Record: *rec, Arr: matched.Arr, Source: SourceTitle}
+	}
+	return Match{Entry: *e, Record: *rec, Arr: arr, Source: SourceUnmapped}
 }
 
 // recordArr routes a mapping record to its arr (MOVIE -> Radarr, else Sonarr).

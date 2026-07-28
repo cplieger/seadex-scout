@@ -258,7 +258,7 @@ func TestTorrentUnderscoreDelimitedCreditlessExtraDoesNotVote(t *testing.T) {
 // TestPayloadNamesLayeredRule pins the combined eligibility rule's layer
 // interplay on the exact cases where the two historical rules (compare/
 // audit's size-only torrentFileNames, the indexer's name-only
-// isContentMediaFile filter) diverged — the h-f3 standardization: type gate
+// isContentMediaFile filter) diverged: type gate
 // first, size refinement among the survivors, with the no-lengths and
 // no-content-survivor fallbacks keeping the rule total.
 func TestPayloadNamesLayeredRule(t *testing.T) {
@@ -384,8 +384,8 @@ func TestABVisibleAdapterGatesOnRawEvidence(t *testing.T) {
 // TestObtainableAdapterPreservesRawURLForCrossCheck pins the adapter's wiring
 // invariant that filter.Obtainable's own tests cannot cover: the RAW upstream
 // URL must feed the AnimeBytes host cross-check (so a mislabeled schemeless AB
-// URL is caught) while PublishURL supplies the actionable link. A
-// mutant passing the canonical URL to both arguments returns true here.
+// URL is caught) while PublishURL supplies the actionable link. Passing the
+// canonical URL to both arguments returns true here.
 func TestObtainableAdapterPreservesRawURLForCrossCheck(t *testing.T) {
 	torrent := &seadex.Torrent{
 		Tracker: "Nyaa",
@@ -404,7 +404,7 @@ func TestObtainableAdapterPreservesRawURLForCrossCheck(t *testing.T) {
 // or schemeless animebytes.tv) grades ABDefinite, a hidden-host host:port form
 // grades ABAmbiguous (evidence that settles nothing), and an honest public URL
 // or an empty URL grades ABNone. The adapter must feed the RAW upstream URL
-// (t.URL) to the host cross-check: a mutant passing PublishURL(t) (which drops
+// (t.URL) to the host cross-check: passing PublishURL(t) instead (which drops
 // the schemeless AB form under a public label to "") would grade that case
 // ABNone and fail this test.
 func TestABEvidenceAdapterReadsRawEvidence(t *testing.T) {
@@ -449,8 +449,8 @@ func TestDivergedIncomplete(t *testing.T) {
 // does this torrent span", where a shorter file is a legitimately shorter
 // episode; PayloadFiles answers "which names vote on the release's quality",
 // where anything far below the primary is a diluting extra. Anchoring the
-// census floor on the MAXIMUM (the d-u5-c4-1 regression) deleted every regular
-// episode of any pack carrying one over-long file, so the pack read as a single
+// census floor on the MAXIMUM instead deletes every regular
+// episode of any pack carrying one over-long file, so the pack reads as a single
 // episode. Both rules must still exclude an episode-shaped sample.
 func TestPopulationFilesMedianAnchoredFloor(t *testing.T) {
 	const gib = 1 << 30
@@ -485,7 +485,7 @@ func TestPopulationFilesMedianAnchoredFloor(t *testing.T) {
 		},
 		"episode-shaped sample is still excluded": {
 			// Both rules must drop it: a sample that counted would inflate a
-			// lone episode into a "pack" (h-f10).
+			// lone episode into a "pack".
 			files:          withFirst(seadex.File{Name: "Show S01E00 Sample [480p].mkv", Length: 200 << 20}, episodes(1, gib)),
 			wantPopulation: 1,
 			wantPayload:    1,

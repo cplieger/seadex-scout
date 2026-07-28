@@ -128,15 +128,19 @@ func NewNotifier(logger *slog.Logger) *Notifier {
 //
 // The "findings reported" summary line's counters are defined in emitted-line
 // terms: total is the input batch size, new the notifications emitted,
-// resolved and preserved the two prior-finding outcomes above, and
-// suppressed the remainder of the batch (total-new) - every finding that
-// produced no notification, whether because a prior cycle already alerted its
-// key OR because an earlier copy in this same batch carried the same key
-// (in-batch duplicates are reachable; see collectCurrent).
+// resolved and preserved the two prior-finding outcomes above, superseded the
+// prior records whose condition (item + status) this cycle still reports under
+// a different dedupe key - a re-keyed notification version, so no resolution
+// line is emitted for them - and suppressed the remainder of the batch
+// (total-new) - every finding that produced no notification, whether because a
+// prior cycle already alerted its key OR because an earlier copy in this same
+// batch carried the same key (in-batch duplicates are reachable; see
+// collectCurrent).
 func (n *Notifier) Notify(findings []compare.Finding, prior map[string]Alerted, failedItems map[int]struct{}, now time.Time) map[string]Alerted {
 	current, migratedPrior, newCount := n.collectCurrent(findings, prior, now)
 
-	resolved, preserved := 0, 0
+	active := activeFindings(current)
+	resolved, preserved, superseded := 0, 0, 0
 	for key, a := range prior {
 		if _, ok := current[key]; ok {
 			continue
@@ -154,14 +158,45 @@ func (n *Notifier) Notify(findings []compare.Finding, prior map[string]Alerted, 
 			preserved++
 			continue
 		}
+		if _, stillActive := active[activeFinding{status: a.Finding.Status, aniListID: a.Finding.AniListID}]; stillActive {
+			// This cycle still reports the same status for the same item under
+			// a different dedupe key (added obtainable source, or a new
+			// torrent inside the recommended group), so the prior record is a
+			// superseded notification VERSION, not a resolved condition.
+			superseded++
+			continue
+		}
 		n.emitResolved(&a.Finding)
 		resolved++
 	}
 
 	n.log.Info("findings reported",
 		"total", len(findings), "new", newCount, "resolved", resolved,
-		"preserved", preserved, "suppressed", len(findings)-newCount)
+		"preserved", preserved, "superseded", superseded,
+		"suppressed", len(findings)-newCount)
 	return current
+}
+
+// activeFinding identifies a finding by the condition it reports - the item
+// and its semantic status - independently of the dedupe key's notification
+// version identity (the recommended-group set, the current group, the
+// obtainable link set, and the torrent's info hash all move the key without
+// ending the condition).
+type activeFinding struct {
+	status    compare.Status
+	aniListID int
+}
+
+// activeFindings indexes this cycle's dedupe state by the condition each
+// record reports, so the resolution loop can tell a prior key that was
+// SUPERSEDED by a re-keyed notification for the same still-active condition
+// from one whose condition genuinely ended.
+func activeFindings(current map[string]Alerted) map[activeFinding]struct{} {
+	active := make(map[activeFinding]struct{}, len(current))
+	for _, a := range current {
+		active[activeFinding{status: a.Finding.Status, aniListID: a.Finding.AniListID}] = struct{}{}
+	}
+	return active
 }
 
 // collectCurrent builds this cycle's dedupe state from findings, emitting one
@@ -338,6 +373,39 @@ func capURLAttr(s string) string {
 	return runesafe.CapBytes(escaped, maxAttrBytes-len(attrTruncMarker)) + attrTruncMarker
 }
 
+// mdTextEscaper neutralizes the characters an untrusted TEXT value must not
+// carry into a Markdown/mrkdwn annotation BODY. capAttr bounds and sanitizes a
+// value for the JSON slog sink, but it deliberately performs no output
+// encoding for a downstream markup sink, so a title such as
+// `[security update](https://attacker.example)` or `@everyone` survives it and
+// the shipped alerts.yaml interpolates it verbatim into a Discord/Slack
+// annotation, where it renders as active markup (CWE-116, context-confused
+// output encoding). CommonMark/Discord punctuation is backslash-escaped
+// (including '@', which is how Discord suppresses an @everyone / @here
+// mention), and '&', '<', '>' are entity-encoded because Slack mrkdwn treats
+// them as markup and '<@U123>' is a Slack mention. Unlike mdLinkEscaper this
+// is for a text SPAN, not a link destination, so '[' and ']' ARE escaped -
+// there is no IPv6-literal case to preserve here.
+var mdTextEscaper = strings.NewReplacer(
+	"\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "[", "\\[", "]", "\\]",
+	"(", "\\(", ")", "\\)", "~", "\\~", "|", "\\|", "@", "\\@",
+	"&", "&amp;", "<", "&lt;", ">", "&gt;",
+)
+
+// capAlertTextAttr renders one untrusted text attribute for a MARKDOWN sink:
+// capAttr's bounded, sanitized pass first (so the escaper never walks an
+// unbounded string), then the markup escaping, then a re-cap because escaping
+// grows the value - the same shape capURLAttr uses. It is the alert-safe twin
+// of capAttr: the raw capAttr label stays for Loki search and grouping, and
+// this value is what an annotation interpolates.
+func capAlertTextAttr(s string) string {
+	escaped := mdTextEscaper.Replace(capAttr(s))
+	if len(escaped) <= maxAttrBytes {
+		return escaped
+	}
+	return runesafe.CapBytes(escaped, maxAttrBytes-len(attrTruncMarker)) + attrTruncMarker
+}
+
 // findingKVs builds the structured key-value attributes for a finding line.
 // It carries the arr deep-link, the split Nyaa/AnimeBytes URLs, the season, and
 // a compact seadex_tags line so an alert can render a self-contained,
@@ -358,6 +426,12 @@ func findingKVs(f *compare.Finding) []any {
 	publicLink, abURL := trackerURLs(f.Links)
 	return []any{
 		"title", capAttr(f.Title),
+		// alert_title / alert_recommended_group are the MARKDOWN-safe twins of
+		// title / recommended_group: the raw labels keep their meaning for
+		// Loki search and `sum by` grouping, while alerts.yaml interpolates
+		// these into its Discord/Slack annotations so an untrusted title can
+		// never render as active markup or a mention (see capAlertTextAttr).
+		"alert_title", capAlertTextAttr(f.Title),
 		"al_id", f.AniListID,
 		"arr", f.Arr,
 		"arr_url", capURLAttr(library.SafeLogURL(f.ArrURL)),
@@ -366,6 +440,7 @@ func findingKVs(f *compare.Finding) []any {
 		"approx", f.Approx,
 		"current_group", capAttr(f.CurrentGroup),
 		"recommended_group", capAttr(f.RecommendedGroup),
+		"alert_recommended_group", capAlertTextAttr(f.RecommendedGroup),
 		"recommended_groups", joinGroupsAttr(f.RecommendedGroups),
 		"tracker", capAttr(f.Tracker),
 		"resolution", f.Resolution,
@@ -441,8 +516,15 @@ func classifyTrackerLink(link compare.ReleaseLink) trackerLinkKind {
 // (both supported by release/trackers.go). The shipped alerts.yaml renders
 // `nyaa_url` under a hardcoded `[Nyaa]` label, so a non-Nyaa public URL must
 // arrive as `public_url` + `public_tracker` rather than be mislabeled.
+//
+// Selection is HEADLINE-first, then Nyaa-first WITHIN each affinity tier.
+// compare.obtainableLinks ranks the headline candidate's own sources first so
+// the rendered link belongs to the group Finding.RecommendedGroup names; a
+// tracker-class-only preference would discard that, letting another
+// recommended group's Nyaa link outrank a headline-group AnimeTosho link and
+// present it as the action for a group it does not belong to.
 func trackerURLs(links []compare.ReleaseLink) (public publicLink, ab string) {
-	var firstPublic, firstABFallback publicLink
+	var headlineNyaa, headlinePublic, firstNyaa, firstPublic, firstABFallback publicLink
 	for i := range links {
 		link := publicLink{url: links[i].URL, tracker: links[i].Tracker}
 		switch classifyTrackerLink(links[i]) {
@@ -453,12 +535,25 @@ func trackerURLs(links []compare.ReleaseLink) (public publicLink, ab string) {
 		case trackerLinkABFallback:
 			firstABFallback.setFirst(link)
 		case trackerLinkNyaa:
-			public.setFirst(link)
+			if links[i].Headline {
+				headlineNyaa.setFirst(link)
+			} else {
+				firstNyaa.setFirst(link)
+			}
 		case trackerLinkPublic:
-			firstPublic.setFirst(link)
+			if links[i].Headline {
+				headlinePublic.setFirst(link)
+			} else {
+				firstPublic.setFirst(link)
+			}
 		}
 	}
-	// Nyaa first (the dominant public tracker), then any other public source.
+	// Headline affinity outranks tracker class; Nyaa (the dominant public
+	// tracker) comes first within each tier. setFirst is first-wins, so the
+	// order of these four calls IS the preference order.
+	public.setFirst(headlineNyaa)
+	public.setFirst(headlinePublic)
+	public.setFirst(firstNyaa)
 	public.setFirst(firstPublic)
 	if ab == "" {
 		ab = firstABFallback.url

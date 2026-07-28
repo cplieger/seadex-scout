@@ -318,3 +318,43 @@ func TestParseOverrides_overCapArrayDrainErrorPropagates(t *testing.T) {
 		t.Errorf("drain-error result carried a partial result: %+v", set)
 	}
 }
+
+// TestRecord_RoutedIDsReturnsOnlyUsableIDsForSelectedArr pins the exported
+// output contract internal/match's matcher and catalogue consume. The existing
+// HasArrIdentifier test only observes a boolean, so it stays green whenever ONE
+// usable id survives - it cannot see a zero/negative/blank id leaking beside a
+// valid one (a phantom catalogue key and a futile matcher lookup), nor ids
+// escaping from the wrong arr arm.
+func TestRecord_RoutedIDsReturnsOnlyUsableIDsForSelectedArr(t *testing.T) {
+	tests := []struct {
+		name        string
+		record      Record
+		wantTVDB    int
+		wantTMDB    []int
+		wantIMDbIDs []string
+	}{
+		{
+			name:        "movie filters unusable ids and ignores the series arm",
+			record:      Record{Type: "MOVIE", TvdbID: 100, TmdbMovies: []int{0, -1, 42}, IMDbIDs: []string{"", "  ", "tt1"}},
+			wantTMDB:    []int{42},
+			wantIMDbIDs: []string{"tt1"},
+		},
+		{
+			name:     "series returns only a positive TVDB id",
+			record:   Record{Type: "TV", TvdbID: 100, TmdbMovies: []int{42}, IMDbIDs: []string{"tt1"}},
+			wantTVDB: 100,
+		},
+		{
+			name:   "series drops a non-positive TVDB id",
+			record: Record{Type: "TV", TvdbID: -1},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotTVDB, gotTMDB, gotIMDbIDs := tt.record.RoutedIDs()
+			if gotTVDB != tt.wantTVDB || !slices.Equal(gotTMDB, tt.wantTMDB) || !slices.Equal(gotIMDbIDs, tt.wantIMDbIDs) {
+				t.Errorf("RoutedIDs() = (%d, %v, %v), want (%d, %v, %v)", gotTVDB, gotTMDB, gotIMDbIDs, tt.wantTVDB, tt.wantTMDB, tt.wantIMDbIDs)
+			}
+		})
+	}
+}

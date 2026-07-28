@@ -1621,7 +1621,54 @@ func TestWalkRadarrCleanWalkLogsNoPayloadWarning(t *testing.T) {
 	if _, err := w.Walk(t.Context()); err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
-	if n := rec.CountLevel(slog.LevelWarn, ""); n != 0 {
-		t.Errorf("clean radarr walk logged %d warnings, want none; messages = %q", n, rec.Messages())
+	const msg = "radarr movies report a file but carry no file payload; they compare as fileless"
+	if n := rec.CountExact(msg); n != 0 {
+		t.Errorf("clean radarr walk logged %d no-payload warnings, want none; messages = %q", n, rec.Messages())
+	}
+}
+
+// TestWalkCompleteLogReportsConfiguredArrSides pins the two independent
+// configured-side booleans on the walk-completion record: it is the
+// operator-visible account of WHICH arr supplied the snapshot, so an inversion
+// or a collapse of one side onto the other must fail here.
+func TestWalkCompleteLogReportsConfiguredArrSides(t *testing.T) {
+	tests := map[string]struct {
+		cfg        Config
+		wantSonarr string
+		wantRadarr string
+	}{
+		"sonarr only": {
+			cfg:        Config{Sonarr: &fakeSonarr{}},
+			wantSonarr: "true",
+			wantRadarr: "false",
+		},
+		"radarr only": {
+			cfg:        Config{Radarr: &fakeRadarr{}},
+			wantSonarr: "false",
+			wantRadarr: "true",
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			logger, rec := capture.New()
+			tc.cfg.Logger = logger
+			w := NewWalker(&tc.cfg)
+
+			if _, err := w.Walk(t.Context()); err != nil {
+				t.Fatalf("Walk: %v", err)
+			}
+			const msg = "library walk complete"
+			if n := rec.CountExact(msg); n != 1 {
+				t.Fatalf("completion records = %d, want 1; messages = %q", n, rec.Messages())
+			}
+			if !rec.HasAttr(msg, "sonarr", tc.wantSonarr) {
+				got, _ := rec.AttrValue(msg, "sonarr")
+				t.Errorf("sonarr attr = %q, want %q", got, tc.wantSonarr)
+			}
+			if !rec.HasAttr(msg, "radarr", tc.wantRadarr) {
+				got, _ := rec.AttrValue(msg, "radarr")
+				t.Errorf("radarr attr = %q, want %q", got, tc.wantRadarr)
+			}
+		})
 	}
 }

@@ -20,7 +20,7 @@
 //
 // It lives here rather than in the composition root because it is a coordination
 // concept with its own state machine and its own tests, not construction: main
-// keeps dispatch, wiring, and the os.Exit mapping (l-f31).
+// keeps dispatch, wiring, and the os.Exit mapping.
 package cycle
 
 import (
@@ -42,6 +42,14 @@ import (
 // (RunOnce's diagnostics) and RunLoop so the two Loki-queried diagnostics
 // cannot drift.
 const msgCoordErrorAfterRun = "cycle coordination error after run"
+
+// errRecordPollHealth marks a health-marker WRITE failure so the shutdown-wins
+// branch in RunOnce can tell it apart from an ordinary cycle error. A cycle
+// fault already logs its own ERROR inside Cycle, but this write is the marker's
+// only report AND it does not self-heal (a full disk or a bad mode on the marker
+// directory keeps failing until the operator acts), so it must not be reduced to
+// the displaced-result WARN when shutdown replaces the own-run result.
+var errRecordPollHealth = errors.New("record poll health")
 
 // --- Cycle coalescing: the cross-process lock shared by poll and the daemon ---
 
@@ -82,7 +90,7 @@ func NewExclusive(ctx context.Context, dir string) (*scheduler.Exclusive, error)
 // TestRunOnceUniformInterruption's post-cycle case). What the interruption
 // never does is reach BACK: a verdict already published inside the cycle lock -
 // an earlier run of this invocation, or a daemon tick's - stands, because a
-// completed cycle's health is not this process's to withdraw (d-gpt-u1c4-1).
+// completed cycle's health is not this process's to withdraw.
 // The daemon tick deliberately differs in the boundary case: RunLoop publishes
 // a healthy verdict even when the cancellation is already visible, withholding
 // only an UNHEALTHY interrupted cycle. The cancellation cause rides along as a
@@ -186,15 +194,22 @@ func executeRuns(ctx context.Context, ex *scheduler.Exclusive, sc Cycler, marker
 // is committed unordered: a newer cycle run by a daemon tick or another poll
 // process can publish in between and then be overwritten by this older,
 // already-superseded verdict, leaving the marker reporting the opposite of the
-// latest completed cycle with a freshness timestamp out of cycle order
-// (d-gpt-u1c4-1). The daemon tick never had this problem - it always wrote
-// inside RunOrSkip's closure - so committing here restores parity between the
-// two entry points that share the marker.
+// latest completed cycle with a freshness timestamp out of cycle order. The
+// daemon tick never had this problem - it always wrote inside RunOrSkip's
+// closure - so committing here restores parity between the two entry points
+// that share the marker.
 //
 // An INTERRUPTED cycle records nothing - including a Cycler that returned
 // healthy before the cancellation was observed here: a result the shutdown
 // reached first is not one this process publishes, so the marker keeps whatever
-// the last published verdict was. Once a verdict HAS been published, a later
+// the last published verdict was. The cancellation check is on the CONTEXT, not
+// only on the cycle error: IsShutdownError deliberately answers false for a nil
+// error, so a cancellation that lands after runOnce returned a healthy nil
+// result but before this recording boundary would otherwise go unobserved here
+// and publish a healthy marker that RunOnce then reports as an interruption. A
+// cycle error that already carries the shutdown is returned unchanged;
+// otherwise the package's uniform interruption result is synthesized.
+// Once a verdict HAS been published, a later
 // shutdown does not withdraw it - RunOnce's final check governs this
 // invocation's exit code, not the marker.
 //
@@ -204,14 +219,17 @@ func executeRuns(ctx context.Context, ex *scheduler.Exclusive, sc Cycler, marker
 // rerun serviced for ANOTHER process it has no exit code to surface through, so
 // it is logged and the run's own error is returned unchanged.
 func recordRunHealth(ctx context.Context, marker *health.Marker, healthy bool, runs int, cycleErr error) error {
-	if IsShutdownError(ctx, cycleErr) {
-		return cycleErr
+	if ctx.Err() != nil {
+		if IsShutdownError(ctx, cycleErr) {
+			return cycleErr
+		}
+		return Interrupted(ctx)
 	}
 	err := marker.SetChecked(healthy)
 	if err == nil {
 		return cycleErr
 	}
-	err = fmt.Errorf("record poll health: %w", err)
+	err = fmt.Errorf("%w: %w", errRecordPollHealth, err)
 	if runs > 1 {
 		// A health-marker write failure is NOT the same class as a queued
 		// rerun's cycle error: a cycle fault already logs its own ERROR inside
@@ -332,6 +350,14 @@ func RunOnce(ctx context.Context, ex *scheduler.Exclusive, sc Cycler, marker *he
 			// reasoning executeRuns applies to a queued rerun's error. An
 			// already-interrupted own result is skipped: Interrupted below
 			// reports it.
+			if errors.Is(own, errRecordPollHealth) {
+				// A marker-WRITE failure needs an operator; every other own
+				// error either self-heals or already logged its own ERROR
+				// inside Cycle. Without this line the displaced result would
+				// reduce a permanent health-freshness fault to a shutdown WARN
+				// and the ERROR-keyed alert would never fire.
+				slog.Error("own cycle could not record poll health before shutdown", "error", own)
+			}
 			slog.Warn("own cycle reported an error before shutdown", "error", own)
 		}
 		return Interrupted(ctx)

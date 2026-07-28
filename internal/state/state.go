@@ -155,16 +155,20 @@ type Store struct {
 	// that wrote it consumes it again, instead of this older binary
 	// overwriting it with a fresh cold-start envelope.
 	unsupportedVersion int
-	// loadFailed remembers that the last Load failed WITHOUT classifying the
-	// file: an EACCES/EIO-style read error or a read cut short by context
-	// cancellation, not absence, not an over-cap or
-	// corrupt payload (those quarantine), not a newer schema (that sets
-	// unsupportedVersion). While set, Save is refused - the unread bytes may
-	// be fully recoverable (a permissions mistake, a transient I/O fault)
-	// and must be preserved like every classified failure preserves its
-	// evidence, instead of the cold-started cycle overwriting them at its
-	// end. The scout loads at the start of every cycle, so the block clears
-	// as soon as a Load succeeds or classifies the file.
+	// loadFailed remembers that the last Load did not leave the live path in
+	// a state Save may replace: either it failed WITHOUT classifying the
+	// file (an EACCES/EIO-style read error or a read cut short by context
+	// cancellation - not absence, not a newer schema, which sets
+	// unsupportedVersion), or it classified an over-cap/corrupt payload but
+	// could NOT preserve it (the quarantine rename failed, so the live file
+	// is still the only copy). While set, Save is refused - the unread bytes
+	// may be fully recoverable (a permissions mistake, a transient I/O
+	// fault), and an unpreserved corrupt file is the only forensic evidence
+	// plus the finding-dedupe baseline, so both must be preserved like every
+	// classified failure preserves its evidence, instead of the cold-started
+	// cycle overwriting them at its end. The scout loads at the start of
+	// every cycle, so the block clears as soon as a Load succeeds, or
+	// classifies AND preserves the file.
 	loadFailed bool
 	readOnly   bool
 }
@@ -282,11 +286,17 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 			s.log.Info("no state file, starting cold", "path", s.path)
 			return State{}, nil
 		}
-		if errors.Is(err, atomicfile.ErrFileTooLarge) {
-			// Save enforces maxStateBytes, so an oversized file can only be
-			// foreign or corrupt; preserve it like any other corruption.
+		if errors.Is(err, atomicfile.ErrFileTooLarge) || errors.Is(err, atomicfile.ErrNotRegular) {
+			// Save enforces maxStateBytes and only ever writes a regular
+			// file, so an oversized file - or a directory, FIFO, device or
+			// socket at the state path, which ReadBoundedInRoot reports as
+			// ErrNotRegular - can only be foreign or corrupt; preserve it
+			// like any other corruption. Both are DETERMINISTIC: no retry
+			// turns an over-cap payload or a non-regular inode into valid
+			// state, so neither belongs in the recoverable read-fault class
+			// below (which blocks every later Save until a Load classifies
+			// the path, and would freeze persistence forever here).
 			s.maybeQuarantine()
-			s.loadFailed = false
 			return State{}, fmt.Errorf("state: read %s: %w", s.path, err)
 		}
 		// An UNCLASSIFIED read failure (EACCES, EIO, a cancelled read - not
@@ -401,7 +411,13 @@ func (s *Store) decode(data []byte) (State, error) {
 
 // maybeQuarantine preserves a corrupt state file unless this Store belongs
 // to a read-only flow, which must leave the live path untouched so the
-// daemon's own Load detects and reports the corruption.
+// daemon's own Load detects and reports the corruption. It owns the
+// loadFailed transition for every classified-corruption path: preservation
+// SUCCEEDING clears the Save block (the corrupt bytes are safe at the
+// .corrupt path, so the next Save may replace the live file), while
+// preservation FAILING arms it, so Save refuses rather than atomically
+// overwriting the still-live corrupt file - the only forensic copy and the
+// finding-dedupe baseline - with a cold envelope.
 func (s *Store) maybeQuarantine() {
 	// Load positively classified the live file as corrupt, so a newer-schema
 	// block remembered from an earlier Load no longer describes the file at
@@ -411,23 +427,31 @@ func (s *Store) maybeQuarantine() {
 	// be the newer-schema state.
 	s.unsupportedVersion = 0
 	if s.readOnly {
+		// Leaving the file in place IS the read-only flow's preservation, and
+		// such a Store never saves anyway.
 		s.log.Warn("corrupt state file left in place for the daemon to quarantine", "path", s.path)
+		s.loadFailed = false
 		return
 	}
-	s.quarantine()
+	s.loadFailed = !s.quarantine()
 }
 
 // quarantine preserves a corrupt state file beside the original so the decode
 // failure can be examined after the next successful Save atomically replaces
-// state.json. Best-effort: a rename failure is logged at Warn, never escalated,
-// and a repeat corruption overwrites the previous .corrupt copy (latest wins).
-func (s *Store) quarantine() {
+// state.json, and reports whether that preservation succeeded. A repeat
+// corruption overwrites the previous .corrupt copy (latest wins). A rename
+// failure - an existing non-empty .corrupt directory, a cross-device or
+// read-only parent - is logged at Warn and returns false, which arms the
+// caller's Save block: without a preserved copy, letting the cycle's Save
+// replace the live file would erase the corruption evidence entirely.
+func (s *Store) quarantine() bool {
 	dst := s.path + ".corrupt"
 	if err := os.Rename(s.path, dst); err != nil {
 		s.log.Warn("could not preserve corrupt state file", "path", s.path, "error", err)
-		return
+		return false
 	}
 	s.log.Warn("corrupt state file preserved for inspection", "path", dst)
+	return true
 }
 
 // Save atomically writes the state file, creating the parent directory if
@@ -446,9 +470,10 @@ func (s *Store) quarantine() {
 // save: the newer-schema file must survive at the live path for a
 // roll-forward to consume (see Load). A Store whose last Load failed WITHOUT
 // classifying the file (loadFailed: an EACCES/EIO-style read error, or a read
-// cut short by context cancellation) refuses
-// too, preserving the possibly-recoverable bytes until a Load classifies
-// them.
+// cut short by context cancellation), or whose last Load classified
+// corruption it could not preserve (the quarantine rename failed), refuses
+// too, preserving the possibly-recoverable or still-unpreserved bytes until a
+// Load classifies and preserves them.
 func (s *Store) Save(ctx context.Context, st *State) error {
 	sanitized, err := s.prepareSave(ctx, st)
 	if err != nil {

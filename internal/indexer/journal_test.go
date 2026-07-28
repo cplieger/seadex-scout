@@ -79,14 +79,37 @@ func readSnapshotFile(t *testing.T, path string) snapshot {
 
 // writeSnapshotFile persists a hand-built snapshot for tests that seed journal
 // state directly (titles, first-seen times).
+//
+// A post-journal snapshot (Seen non-nil) must satisfy the shared decode gate's
+// journal-record invariant - every feed item carries a Key and a nonzero
+// FirstSeen (validJournalRecords, h-f2) - or the whole snapshot decodes as
+// malformed. Fixtures that do not care about the timestamp therefore get one
+// stamped here, so each test keeps expressing only the property it is about; a
+// fixture that sets FirstSeen itself (a skewed or aged clock) is left alone, and
+// a deliberately keyless item stays keyless.
 func writeSnapshotFile(t *testing.T, path string, snap *snapshot) {
 	t.Helper()
+	if snap.Seen != nil {
+		stampFixtureFirstSeen(snap.NyaaFeed)
+		stampFixtureFirstSeen(snap.ABFeed)
+	}
 	data, err := json.Marshal(snap)
 	if err != nil {
 		t.Fatalf("marshal snapshot: %v", err)
 	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatalf("write snapshot: %v", err)
+	}
+}
+
+// stampFixtureFirstSeen gives every timestamp-less fixture item a stable
+// nonzero FirstSeen (recent, so it is inside feedJournalMaxAge and not
+// future-skewed), leaving an explicitly-set one alone.
+func stampFixtureFirstSeen(feed []journalItem) {
+	for i := range feed {
+		if feed[i].FirstSeen.IsZero() {
+			feed[i].FirstSeen = time.Now().UTC().Add(-time.Hour)
+		}
 	}
 }
 
@@ -538,6 +561,43 @@ func TestRebuildJournalsReleaseAfterTrackerURLCorrected(t *testing.T) {
 	}
 }
 
+// TestRebuildBaselineKeylessTorrentDoesNotConsumeNovelty pins the same keyless
+// guard on the OTHER entry point: the fresh-install baseline (allIdentities),
+// which runs before any ledger exists and so bypasses journalIfNew entirely. A
+// supported-tracker record whose URL is foreign or unparseable has no key, so its
+// info hash must NOT enter the never-pruned seen ledger - otherwise the record
+// can never journal after SeaDex corrects the URL and the arr never sees the
+// release on RSS.
+func TestRebuildBaselineKeylessTorrentDoesNotConsumeNovelty(t *testing.T) {
+	files := []seadex.File{{Length: 1, Name: "Show A - S01E01 (1080p) [G].mkv"}}
+	gated := []seadex.Entry{{
+		AniListID: 9,
+		Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://evil.example/view/111", IsBest: true,
+			InfoHash: foreignHostInfoHash, Files: files,
+		}},
+	}}
+	corrected := []seadex.Entry{{
+		AniListID: 9,
+		Torrents: []seadex.Torrent{{
+			Tracker: "Nyaa", URL: "https://nyaa.si/view/111", IsBest: true,
+			InfoHash: foreignHostInfoHash, Files: files,
+		}},
+	}}
+	path := filepath.Join(t.TempDir(), "feed.json")
+	w := newTestWriter(path, "", false)
+	if err := w.Rebuild(t.Context(), gated, nil); err != nil {
+		t.Fatalf("baseline Rebuild: %v", err)
+	}
+	if err := w.Rebuild(t.Context(), corrected, nil); err != nil {
+		t.Fatalf("corrected Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 1 || snap.NyaaFeed[0].Key != "nyaa:111" {
+		t.Errorf("corrected release feed = %+v, want one nyaa:111 item", snap.NyaaFeed)
+	}
+}
+
 // TestRebuildDropsUnknownTracker pins the tail-drop: a SeaDex torrent on a
 // tracker other than Nyaa/AB (the negligible AnimeTosho/RuTracker tail) never
 // enters a journal feed and does not trigger the AB passkey nudge.
@@ -922,12 +982,15 @@ func TestRebuildRebasesFutureFirstSeenCarriedItem(t *testing.T) {
 	}
 }
 
-// TestRebuildDropsKeylessCarriedItem pins carryJournal's defensive drop of a
-// pre-journal item (no Key / no FirstSeen, e.g. a hand-edited snapshot that
-// kept the seen ledger but stripped an item's bookkeeping): it leaves the
-// journal instead of being carried forever un-prunable, and each guard arm is
-// counted as a genuine drop on the snapshot log line.
-func TestRebuildDropsKeylessCarriedItem(t *testing.T) {
+// TestRebuildRejectsKeylessSeededItem pins where a journal-bookkeeping-less
+// item is now refused: a post-journal snapshot (seen ledger present) whose feed
+// carries an item with no Key or no FirstSeen violates the shared decode gate's
+// journal-record invariant (validJournalRecords, h-f2), so the whole snapshot
+// decodes as malformed and the rebuild re-baselines instead of carrying it -
+// the same self-heal as malformed JSON, and the reason the reader can no longer
+// serve such an item forever in resident-idle mode. carryJournal's per-item
+// guards stay as defense in depth for any snapshot that reaches them.
+func TestRebuildRejectsKeylessSeededItem(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	const seeded = `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Title":"orphan","GUID":"https://nyaa.si/view/9"},{"Title":"no first seen","GUID":"https://nyaa.si/view/10","Key":"nyaa:10"}],"ab_feed":[]}`
 	if err := os.WriteFile(path, []byte(seeded), 0o600); err != nil {
@@ -938,10 +1001,10 @@ func TestRebuildDropsKeylessCarriedItem(t *testing.T) {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 {
-		t.Errorf("feed = %+v, want empty (a keyless pre-journal item cannot be carried: it could never be pruned or re-rendered)", snap.NyaaFeed)
+		t.Errorf("feed = %+v, want empty (a bookkeeping-less item cannot be carried: it could never be pruned or re-rendered)", snap.NyaaFeed)
 	}
-	if got, ok := rec.AttrValue("indexer feed snapshot written", "journal_dropped"); !ok || got != "2" {
-		t.Errorf("journal_dropped = %q (found=%v), want 2 (one per defensive-guard arm: no Key, no FirstSeen); log:\n%s", got, ok, strings.Join(rec.Messages(), "\n"))
+	if !rec.Contains(msgSnapshotMalformed) {
+		t.Errorf("no malformed re-baseline warning for a journal item without identity or first-seen; log:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }
 

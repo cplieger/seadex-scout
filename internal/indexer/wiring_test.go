@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 )
@@ -19,4 +20,14 @@ func wiredIndexer(cfg *Config, log *slog.Logger, client *http.Client) *Indexer {
 // Prowlarr title harvest.
 func wiredWriter(cfg *FeedWriterConfig, log *slog.Logger, client *http.Client) *FeedWriter {
 	return NewFeedWriter(cfg, log, WireUpstreams(client, log, cfg.UpstreamConfig))
+}
+
+// warmedIndexer builds a server and warms its snapshot cache, the pairing Run
+// makes at the lifecycle boundary (New itself is pure assembly and loads
+// nothing). Tests that assert on the served feed immediately after construction
+// use it; tests that exercise the pre-first-load paths call New directly.
+func warmedIndexer(cfg *Config, log *slog.Logger, ups Upstreams) *Indexer {
+	ix := New(cfg, log, ups)
+	ix.cache.refresh(context.Background())
+	return ix
 }

@@ -257,45 +257,33 @@ func TestClassifyAB(t *testing.T) {
 // toggle on everything surfaces, and with it off ONLY ABNone does. That is the
 // structural form of the old "definite is a subset of gated" cross-check - the
 // definite and ambiguous grades are hidden by the same comparison, so a definite
-// AB release can no longer be visible while an ambiguous one is hidden.
+// AB release can no longer be visible while an ambiguous one is hidden. The
+// table is keyed by subtest NAME rather than by the grade, so the readable
+// subtest names need no production formatter (l-f36).
 func TestABVisibleReadsEveryGrade(t *testing.T) {
-	grades := map[ABEvidence]struct {
+	grades := map[string]struct {
 		tracker string
 		url     string
+		grade   ABEvidence
 	}{
-		ABNone:      {"Nyaa", "https://nyaa.si/view/1"},
-		ABAmbiguous: {"Nyaa", "https://nyaa.si/\x7f"},
-		ABDefinite:  {"Nyaa", "https://animebytes.tv/torrents.php?id=1"},
+		"none":      {tracker: "Nyaa", url: "https://nyaa.si/view/1", grade: ABNone},
+		"ambiguous": {tracker: "Nyaa", url: "https://nyaa.si/\x7f", grade: ABAmbiguous},
+		"definite":  {tracker: "Nyaa", url: "https://animebytes.tv/torrents.php?id=1", grade: ABDefinite},
 	}
-	for grade, in := range grades {
-		t.Run(grade.String(), func(t *testing.T) {
+	for name, in := range grades {
+		t.Run(name, func(t *testing.T) {
 			// Guard the fixtures: a grading change must fail here rather than
 			// silently retarget the policy assertion at the wrong grade.
-			if got := ClassifyAB(in.tracker, in.url); got != grade {
-				t.Fatalf("fixture drift: ClassifyAB(%q, %q) = %v, want %v", in.tracker, in.url, got, grade)
+			if got := ClassifyAB(in.tracker, in.url); got != in.grade {
+				t.Fatalf("fixture drift: ClassifyAB(%q, %q) = %d, want %d", in.tracker, in.url, got, in.grade)
 			}
 			if !ABVisible(in.tracker, in.url, true) {
-				t.Errorf("ABVisible(%v, toggle on) = false, want true", grade)
+				t.Errorf("ABVisible(%d, toggle on) = false, want true", in.grade)
 			}
-			wantOff := grade == ABNone
+			wantOff := in.grade == ABNone
 			if got := ABVisible(in.tracker, in.url, false); got != wantOff {
-				t.Errorf("ABVisible(%v, toggle off) = %v, want %v", grade, got, wantOff)
+				t.Errorf("ABVisible(%d, toggle off) = %v, want %v", in.grade, got, wantOff)
 			}
 		})
-	}
-}
-
-// TestABEvidenceString pins the grade names, which appear in diagnostics and
-// test failures; an out-of-range value must not render as a plausible grade.
-func TestABEvidenceString(t *testing.T) {
-	for grade, want := range map[ABEvidence]string{
-		ABNone:        "none",
-		ABAmbiguous:   "ambiguous",
-		ABDefinite:    "definite",
-		ABEvidence(9): "unknown",
-	} {
-		if got := grade.String(); got != want {
-			t.Errorf("ABEvidence(%d).String() = %q, want %q", uint8(grade), got, want)
-		}
 	}
 }

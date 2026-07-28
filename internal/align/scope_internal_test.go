@@ -11,7 +11,10 @@ import (
 // TestScope pins the four-branch scope dispatch Decide consumes. It lives in an
 // internal test file because scope/scopeResult are package-private: the only
 // production way to obtain a scope is through the decision that consumes it,
-// and Decide's own tests cover this dispatch only indirectly.
+// and Decide's own tests cover this dispatch only indirectly. It is the SINGLE
+// owner of every scoping branch: a second table asserting only a derived
+// Kind == ScopeWholeSeries boolean over the same four branches said strictly
+// less than the Kind + Groups + HasFile + Approx assertions here.
 func TestScope(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -85,28 +88,6 @@ func TestScope(t *testing.T) {
 			}
 			if got.Approx != tt.wantApprox {
 				t.Errorf("Approx = %v, want %v", got.Approx, tt.wantApprox)
-			}
-		})
-	}
-}
-
-func TestWholeSeries(t *testing.T) {
-	tests := []struct {
-		name string
-		rec  mapping.Record
-		item library.Item
-		want bool
-	}{
-		{"sonarr seasonless non-special is whole-series", mapping.Record{Type: "TV", SeasonTvdb: 0}, library.Item{Arr: library.ArrSonarr}, true},
-		{"sonarr with a positive season is not whole-series", mapping.Record{Type: "TV", SeasonTvdb: 2}, library.Item{Arr: library.ArrSonarr}, false},
-		{"sonarr special is not whole-series", mapping.Record{Type: "OVA", SeasonTvdb: 0}, library.Item{Arr: library.ArrSonarr}, false},
-		{"radarr is never whole-series", mapping.Record{Type: "MOVIE", SeasonTvdb: 0}, library.Item{Arr: library.ArrRadarr}, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := scope(&tt.item, &tt.rec).Kind == ScopeWholeSeries
-			if got != tt.want {
-				t.Errorf("scope().Kind == ScopeWholeSeries = %v, want %v", got, tt.want)
 			}
 		})
 	}

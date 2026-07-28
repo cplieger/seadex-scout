@@ -111,11 +111,11 @@ func FuzzTrackerKeyFromURL_neverKeysFromQueryOrFragment(f *testing.F) {
 // of the curation trust boundary (trackerKey runs on tracker labels and URLs
 // from untrusted SeaDex records; the Prowlarr-side twin is
 // FuzzTrackerKeyFromURL_neverKeysFromQueryOrFragment): any non-empty key is
-// scope:<bounded digits> for a supported scope, and - under the consumer's
-// own interpretation (url.Parse) - the source URL is either an absolute URL
-// on exactly that tracker's canonical host, or (AnimeBytes only) a true
-// relative reference, so a tracker label can never authorize an id extracted
-// from a foreign, subdomain, or opaque URL.
+// scope:<bounded digits> for a supported scope, and under the package's urlform
+// structural vocabulary the source is either an absolute URL on exactly that
+// tracker's canonical host or, for AnimeBytes only, a rooted relative reference,
+// so a tracker label can never authorize an id extracted from a foreign,
+// subdomain, or opaque URL.
 func FuzzTrackerKey_keysOnlyTrackerOwnCanonicalURLs(f *testing.F) {
 	f.Add("Nyaa", "https://nyaa.si/view/1234567")
 	f.Add("AB", "/torrents.php?id=1&torrentid=456")

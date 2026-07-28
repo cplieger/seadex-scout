@@ -129,22 +129,14 @@ func synthesizeTitle(t *seadex.Torrent, meta EntryInfo) string {
 //     OVA) gets none.
 func episodeMarker(t *seadex.Torrent, meta EntryInfo) string {
 	if !isPack(t) {
-		marker := singleEpisodeMarker(t.Files)
-		if meta.SeasonKnown {
-			// The resolved season outvotes the file's cour-local season half.
-			// Only an SxxExx prefix is rewritten: a markerless or absolute
-			// "- NN" marker passes through (ReplaceAllString is a no-op
-			// without a match).
-			return seasonPrefix.ReplaceAllString(marker, seasonLabel(meta.Season))
-		}
-		return marker
+		// The resolved season outvotes the file's cour-local season half; a
+		// markerless or absolute "- NN" marker carries no season token, so it
+		// passes through unchanged (relabelEpisodeSeason's no-token arm).
+		return relabelEpisodeSeason(singleEpisodeMarker(t.Files), meta)
 	}
 	label, _ := packSeasonLabel(t, meta)
 	return label
 }
-
-// seasonPrefix matches the season half of an SxxExx marker for relabeling.
-var seasonPrefix = regexp.MustCompile(`(?i)^S\d{1,2}`)
 
 // seasonLabel renders a season number as the SNN token the arrs parse
 // (the one wire format every season marker in this file must agree on).
@@ -166,20 +158,21 @@ func packSeasonLabel(t *seadex.Torrent, meta EntryInfo) (string, bool) {
 	return "", false
 }
 
-// relabelBaseSeason rewrites the season half of the LAST SxxExx token in a
-// derived single-release title to the entry's resolved season. A no-op without
-// a resolved season or when the name carries no SxxExx token (an absolute
-// "- NN" or marker-less name - nothing to relabel, same as episodeMarker's
-// single-release arm).
-func relabelBaseSeason(base string, meta EntryInfo) string {
+// relabelEpisodeSeason rewrites the season half of the LAST SxxExx token in a
+// single-release title (or in the episode marker assembled beside a known show
+// title) to the entry's resolved season - the one implementation of that
+// cour-local correction both title paths share. A no-op without a resolved
+// season or when the value carries no SxxExx token (an absolute "- NN" or
+// marker-less name - nothing to relabel).
+func relabelEpisodeSeason(value string, meta EntryInfo) string {
 	if !meta.SeasonKnown {
-		return base
+		return value
 	}
-	l := lastSubmatchIndex(episodeToken, base)
+	l := lastSubmatchIndex(episodeToken, value)
 	if l == nil {
-		return base
+		return value
 	}
-	return base[:l[4]] + seasonLabel(meta.Season) + base[l[5]:]
+	return value[:l[4]] + seasonLabel(meta.Season) + value[l[5]:]
 }
 
 // singleEpisodeMarker returns a single-episode torrent's own episode token:
@@ -319,7 +312,7 @@ func derivedTitle(t *seadex.Torrent, meta EntryInfo) string {
 		// A single episode, movie, or single OVA: the file name is already the
 		// release title the arr should parse (do not collapse its episode) -
 		// with its cour-local season half relabeled when the entry maps one.
-		return strings.TrimSpace(relabelBaseSeason(base, meta))
+		return strings.TrimSpace(relabelEpisodeSeason(base, meta))
 	}
 	if episodeToken.MatchString(base) {
 		// Collapse only the LAST episode token: scene naming puts the marker

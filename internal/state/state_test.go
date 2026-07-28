@@ -1,6 +1,7 @@
 package state
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -499,6 +500,77 @@ func TestStoreLoadOversizedReturnsError(t *testing.T) {
 	}
 }
 
+// TestStoreLoadNonRegularPathIsClassifiedCorruption pins the DETERMINISTIC
+// half of the loader's self-heal-versus-preserve taxonomy for a non-regular
+// inode at the state path (a directory here; a FIFO, device or socket reaches
+// the same atomicfile.ErrNotRegular). No retry can turn such a path into valid
+// state, so treating it as an unclassified read fault would arm the Save block
+// forever and freeze the library snapshot, mapping cache, AniList memo and
+// finding dedupe until an operator intervened.
+func TestStoreLoadNonRegularPathIsClassifiedCorruption(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	if err := os.Mkdir(path, 0o750); err != nil {
+		t.Fatalf("create directory at the state path: %v", err)
+	}
+	store := NewStore(path, testLogger())
+
+	_, err := store.Load(context.Background())
+	if err == nil {
+		t.Fatal("Load of a non-regular state path returned nil error, want the corruption reported")
+	}
+	if !errors.Is(err, atomicfile.ErrNotRegular) {
+		t.Errorf("error = %v, want it to match atomicfile.ErrNotRegular", err)
+	}
+	if _, statErr := os.Stat(path + ".corrupt"); statErr != nil {
+		t.Errorf("non-regular state path was not quarantined (stat err = %v), want %s.corrupt preserved", statErr, path)
+	}
+	if saveErr := store.Save(context.Background(), &State{Baselined: true}); saveErr != nil {
+		t.Fatalf("Save after quarantining a non-regular path failed: %v (deterministic corruption must not arm the preservation block)", saveErr)
+	}
+	if got, loadErr := store.Load(context.Background()); loadErr != nil || !got.Baselined {
+		t.Errorf("Load after the recovering Save = (%+v, %v), want the freshly saved state at the live path", got, loadErr)
+	}
+}
+
+// TestStoreLoadUnpreservableCorruptionBlocksSave pins the fail-closed side of
+// the quarantine contract: when preservation cannot happen (a non-empty
+// state.json.corrupt directory blocks the rename), the corrupt live file is
+// the ONLY forensic copy and the only finding-dedupe baseline, so Save must
+// refuse rather than atomically replace it with a cold envelope.
+func TestStoreLoadUnpreservableCorruptionBlocksSave(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	corrupt := []byte("{not json")
+	if err := os.WriteFile(path, corrupt, 0o600); err != nil {
+		t.Fatalf("seed corrupt state: %v", err)
+	}
+	// A NON-EMPTY directory at the quarantine destination: os.Rename cannot
+	// replace it, so quarantine fails while the live file stays corrupt.
+	if err := os.Mkdir(path+".corrupt", 0o750); err != nil {
+		t.Fatalf("create quarantine blocker: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path+".corrupt", "occupied"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("occupy quarantine blocker: %v", err)
+	}
+	store := NewStore(path, testLogger())
+
+	if _, err := store.Load(context.Background()); err == nil {
+		t.Fatal("Load of a corrupt state returned nil error, want the decode failure reported")
+	}
+	saveErr := store.Save(context.Background(), &State{Baselined: true})
+	if !errors.Is(saveErr, ErrSavePreserved) {
+		t.Fatalf("Save after a FAILED quarantine = %v, want ErrSavePreserved (the corrupt bytes are still the only copy)", saveErr)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read the live state file: %v", readErr)
+	}
+	if !bytes.Equal(got, corrupt) {
+		t.Errorf("live state file = %q, want the original corrupt bytes %q preserved", got, corrupt)
+	}
+}
+
 // TestStoreSaveOverCapReturnsErrorAndKeepsPreviousFile pins the writer side of
 // the shared maxStateBytes invariant: a state whose encoding exceeds what Load
 // is contractually able to read must be rejected BEFORE the atomic replacement
@@ -684,6 +756,42 @@ func TestStoreSaveLoadPreservesEscalationStreaks(t *testing.T) {
 	}
 	if got.AniListDegraded != wantAniList {
 		t.Errorf("AniListDegraded after disk round trip = %d, want %d", got.AniListDegraded, wantAniList)
+	}
+}
+
+// TestStorePartialWalkStreakPersistsUnderStableWireKey pins the fourth
+// persisted degradation streak: internal/scout escalates a permanently partial
+// library walk from WARN to ERROR only if the streak survives restarts, so a
+// json-tag rename or a Store projection omission must fail here. The raw
+// fixture pins the wire key on the load side and the post-Save envelope check
+// pins it on the write side.
+func TestStorePartialWalkStreakPersistsUnderStableWireKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	const body = `{"partial_walks":7}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write persisted state fixture: %v", err)
+	}
+	store := NewStore(path, testLogger())
+	got, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if got.PartialWalks != 7 {
+		t.Errorf("PartialWalks from persisted envelope = %d, want 7", got.PartialWalks)
+	}
+	if err := store.Save(context.Background(), &got); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read persisted state: %v", err)
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(persisted, &envelope); err != nil {
+		t.Fatalf("decode persisted envelope: %v", err)
+	}
+	if value := string(envelope["partial_walks"]); value != "7" {
+		t.Errorf("persisted partial_walks = %s, want 7", value)
 	}
 }
 

@@ -268,6 +268,7 @@ func TestDecideSeasonLabel(t *testing.T) {
 		{"negative absolute-numbered mapping clamps to 0", "TV", library.ArrSonarr, -1, 0},
 		{"movie carries 0", "MOVIE", library.ArrRadarr, 0, 0},
 		{"special carries 0", "OVA", library.ArrSonarr, 0, 0},
+		{"movie ignores irrelevant positive season metadata", "MOVIE", library.ArrRadarr, 2, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

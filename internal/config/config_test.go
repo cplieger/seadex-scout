@@ -895,6 +895,66 @@ func TestValidateIndexerShortFeedKeyWarning(t *testing.T) {
 			t.Errorf("Validate() log = %v, want no short-key warning", rec.Messages())
 		}
 	})
+	// An unexpanded ${VAR} is not a weak key, it is a GUESSABLE one: the
+	// placeholder spelling ships in the public config.example, and this key is
+	// the only gate on the AnimeBytes-passkey-bearing feed. It fails the config
+	// rather than warning, and the error stays field-name-only.
+	t.Run("unresolved placeholder is an error", func(t *testing.T) {
+		const placeholder = "${SEADEX_SCOUT_FEED_API_KEY}"
+		c := base
+		c.IndexerAPIKey = placeholder
+		err := c.Validate()
+		if err == nil {
+			t.Fatal("Validate() = nil for an unresolved ${VAR} feed_api_key, want an error")
+		}
+		if !strings.Contains(err.Error(), "feed_api_key") {
+			t.Errorf("Validate() error = %v, want it to name feed_api_key", err)
+		}
+		if strings.Contains(err.Error(), "SEADEX_SCOUT_FEED_API_KEY") {
+			t.Errorf("Validate() error echoes the configured value: %v", err)
+		}
+	})
+}
+
+// TestValidateIndexerWarnsOnNonTorznabEndpoint pins the endpoint-shape
+// diagnostic: a bare Prowlarr origin and Prowlarr's REST API path are the two
+// documented paste errors that load cleanly and then fail every proxied
+// search, so both warn (naming the field, never the URL) while a real
+// per-indexer Torznab path stays silent.
+func TestValidateIndexerWarnsOnNonTorznabEndpoint(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint string
+		wantWarn bool
+	}{
+		{"bare Prowlarr origin warns", "http://prowlarr:9696", true},
+		{"Prowlarr REST API path warns", "http://prowlarr:9696/api/v1/search", true},
+		{"per-indexer Torznab path stays silent", "http://prowlarr:9696/22/api", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := capture.Default(t)
+			cfg := Config{
+				RunMode:               RunModeDaemon,
+				SonarrURL:             "http://sonarr:8989",
+				SonarrAPIKey:          "k",
+				IndexerAPIKey:         strings.Repeat("a", 32),
+				IndexerNyaaTorznabURL: tt.endpoint,
+				IndexerProwlarrAPIKey: "pk",
+			}
+
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			got := rec.Contains("torznab url is not a Prowlarr per-indexer Torznab endpoint")
+			if got != tt.wantWarn {
+				t.Errorf("endpoint-shape warning present = %v, want %v (messages %v)", got, tt.wantWarn, rec.Messages())
+			}
+			if got && !rec.AttrContains("", "field", "indexer.nyaa_torznab_url") {
+				t.Errorf("Validate() log = %v, want the warning to name indexer.nyaa_torznab_url", rec.Messages())
+			}
+		})
+	}
 }
 
 func TestParseIntervalBoundsAndFallback(t *testing.T) {

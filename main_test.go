@@ -158,31 +158,6 @@ func TestLoadRuntimeConfig(t *testing.T) {
 	})
 }
 
-// TestIndexerConfigured covers the daemon's HTTP-surface gate: the Torznab feed
-// starts iff at least one Prowlarr Torznab URL is set (the shared
-// config.IndexerConfigured decision the composition root and validation read).
-func TestIndexerConfigured(t *testing.T) {
-	tests := []struct {
-		name string
-		nyaa string
-		ab   string
-		want bool
-	}{
-		{"both empty stays socket-less", "", "", false},
-		{"nyaa URL alone enables the feed", "http://prowlarr:9696/22/api", "", true},
-		{"ab URL alone enables the feed", "", "http://prowlarr:9696/2/api", true},
-		{"both URLs enable the feed", "http://prowlarr:9696/22/api", "http://prowlarr:9696/2/api", true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := &config.Config{IndexerNyaaTorznabURL: tt.nyaa, IndexerABTorznabURL: tt.ab}
-			if got := cfg.IndexerConfigured(); got != tt.want {
-				t.Errorf("IndexerConfigured(nyaa=%q, ab=%q) = %v, want %v", tt.nyaa, tt.ab, got, tt.want)
-			}
-		})
-	}
-}
-
 // TestArrClientHelpersReturnNilInterface pins the typed-nil guard: passing a
 // nil *arrapi.Sonarr/*arrapi.Radarr straight into the interface field would
 // produce a NON-nil interface holding a nil pointer, and the walker would then
@@ -348,21 +323,36 @@ func TestInstallLoggerInitialLevel(t *testing.T) {
 	}
 }
 
-// TestFeedWriter pins the nil-when-unconfigured contract: the compare cycle
-// does feed work only when the Torznab feed is configured, and the returned
-// cleanup is a callable no-op then.
+// TestFeedWriter pins the nil-when-unconfigured contract through the real
+// composition-root gate: the compare cycle does feed work iff at least one
+// Prowlarr Torznab URL is configured, and the returned cleanup is a callable
+// no-op when it is not. Driving feedWriter (rather than asserting
+// config.IndexerConfigured directly, which the config package owns) is what
+// makes an inverted or dropped guard in the root fail here.
 func TestFeedWriter(t *testing.T) {
-	log := slog.Default()
-	fw, cleanup := feedWriter(&config.Config{}, log)
-	cleanup()
-	if fw != nil {
-		t.Errorf("feedWriter(unconfigured) = %v, want nil (cycle must skip feed work)", fw)
+	tests := []struct {
+		name    string
+		nyaaURL string
+		abURL   string
+		wantNil bool
+	}{
+		{name: "both empty skips feed work", wantNil: true},
+		{name: "Nyaa URL enables feed work", nyaaURL: "http://prowlarr:9696/22/api"},
+		{name: "AnimeBytes URL enables feed work", abURL: "http://prowlarr:9696/2/api"},
+		{name: "both URLs enable feed work", nyaaURL: "http://prowlarr:9696/22/api", abURL: "http://prowlarr:9696/2/api"},
 	}
-	cfg := &config.Config{IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api"}
-	fw, cleanup = feedWriter(cfg, log)
-	defer cleanup()
-	if fw == nil {
-		t.Error("feedWriter(configured) = nil, want a FeedWriter")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{
+				IndexerNyaaTorznabURL: tt.nyaaURL,
+				IndexerABTorznabURL:   tt.abURL,
+			}
+			fw, cleanup := feedWriter(cfg, slog.Default())
+			t.Cleanup(cleanup)
+			if gotNil := fw == nil; gotNil != tt.wantNil {
+				t.Errorf("feedWriter(nyaa=%q, ab=%q) nil = %v, want %v", tt.nyaaURL, tt.abURL, gotNil, tt.wantNil)
+			}
+		})
 	}
 }
 
@@ -628,7 +618,7 @@ func TestLogIndexerStopClassifiesShutdownAndFault(t *testing.T) {
 
 // TestRunReportRefusesWhenLockHeld pins the report concurrency refusal end to
 // end: with another run holding the report lock, runReport returns
-// ErrReportRunning (exit 1) before building any component, so the refusal is
+// ErrReportRunning before building any component, so the refusal is
 // hermetic (no network I/O) and two reports can never race onto the same
 // timestamped filename pair.
 func TestRunReportRefusesWhenLockHeld(t *testing.T) {

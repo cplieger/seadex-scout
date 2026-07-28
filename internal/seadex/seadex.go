@@ -401,35 +401,77 @@ func filterSafe(v string) bool {
 	return true
 }
 
-// advanceCursor returns the keyset position after a full chunk: the (created,
-// id) pair of its last record. It fails the fetch when the pair is unusable -
-// missing (an upstream that stopped returning the fields the walk pages on),
-// unsafe to place in a filter, or identical to the previous position (no
-// progress, which would re-request the same chunk forever) - since continuing
-// blind would either loop or skip records, and this client never returns a
-// possibly-truncated view.
-func advanceCursor(items []pbEntry, prev cursor) (cursor, error) {
-	last := &items[len(items)-1]
-	next := cursor{created: strings.TrimSpace(last.Created), id: strings.TrimSpace(last.ID)}
-	if next.created == "" || next.id == "" {
-		return prev, fmt.Errorf("seadex: page of %d records carries no usable keyset cursor "+
+// recordCursor reads one record's (created, id) keyset pair, trimmed, and
+// fails when the pair cannot be used: missing (an upstream that stopped
+// returning the fields the walk pages on) or unsafe to place in a filter.
+// chunkLen only shapes the diagnostic.
+func recordCursor(item *pbEntry, chunkLen int) (cursor, error) {
+	c := cursor{created: strings.TrimSpace(item.Created), id: strings.TrimSpace(item.ID)}
+	if c.created == "" || c.id == "" {
+		return cursor{}, fmt.Errorf("seadex: page of %d records carries no usable keyset cursor "+
 			"(created %q, id %q); refusing to compare against a truncated view",
-			len(items),
-			runesafe.SanitizeSingleLineBounded(last.Created, maxLoggedCursorBytes),
-			runesafe.SanitizeSingleLineBounded(last.ID, maxLoggedCursorBytes))
+			chunkLen,
+			runesafe.SanitizeSingleLineBounded(item.Created, maxLoggedCursorBytes),
+			runesafe.SanitizeSingleLineBounded(item.ID, maxLoggedCursorBytes))
 	}
-	if !filterSafe(next.created) || !filterSafe(next.id) {
-		return prev, fmt.Errorf("seadex: keyset cursor rejected (created %q, id %q); "+
+	if !filterSafe(c.created) || !filterSafe(c.id) {
+		return cursor{}, fmt.Errorf("seadex: keyset cursor rejected (created %q, id %q); "+
 			"refusing to compare against a truncated view",
-			runesafe.SanitizeSingleLineBounded(next.created, maxLoggedCursorBytes),
-			runesafe.SanitizeSingleLineBounded(next.id, maxLoggedCursorBytes))
+			runesafe.SanitizeSingleLineBounded(c.created, maxLoggedCursorBytes),
+			runesafe.SanitizeSingleLineBounded(c.id, maxLoggedCursorBytes))
 	}
-	if next == prev {
-		return prev, fmt.Errorf("seadex: keyset cursor did not advance past (created %q, id %q) "+
-			"(upstream ignoring the pagination filter); refusing to compare against a truncated view",
-			prev.created, prev.id)
+	return c, nil
+}
+
+// cursorAdvances reports whether next sorts strictly after prev under the
+// walk's sort=created,id ordering: a later created value, or the same created
+// with a greater id (the composite tie-break the filter expresses). Equality
+// and any regression both read as no progress.
+func cursorAdvances(next, prev cursor) bool {
+	return next.created > prev.created ||
+		(next.created == prev.created && next.id > prev.id)
+}
+
+// advanceCursor validates a non-empty chunk's whole keyset sequence and returns
+// the position after it: the (created, id) pair of its last record. EVERY
+// record is checked, in order, starting from the previous position, because
+// that ordering premise is what the walk's completeness argument rests on - a
+// chunk shorter than perPage is read as exhaustion only because the filter
+// asked for everything after the cursor under sort=created,id, so an
+// out-of-order or regressing chunk means the records after the previous
+// position were never delivered. It therefore runs for a SHORT terminal chunk
+// too, not only when another request will be issued.
+//
+// It fails the fetch when any record's pair is unusable - missing (an upstream
+// that stopped returning the fields the walk pages on), unsafe to place in a
+// filter, or not strictly after its predecessor (equality would re-request the
+// same chunk forever, a REGRESSION would re-read a consumed prefix while the
+// records after the previous position went unread, and within-page disorder
+// means the response is not the sorted suffix that was requested) - since
+// continuing blind would either loop or skip records, and this client never
+// returns a possibly-truncated view. The previous position is returned
+// unchanged on every failure.
+func advanceCursor(items []pbEntry, prev cursor) (cursor, error) {
+	pos := prev
+	for i := range items {
+		next, err := recordCursor(&items[i], len(items))
+		if err != nil {
+			return prev, err
+		}
+		if pos.set() && !cursorAdvances(next, pos) {
+			return prev, fmt.Errorf("seadex: keyset cursor did not advance past (created %q, id %q); "+
+				"got (created %q, id %q) at record %d of %d "+
+				"(upstream ignoring the pagination filter or its sort order); "+
+				"refusing to compare against a truncated view",
+				runesafe.SanitizeSingleLineBounded(pos.created, maxLoggedCursorBytes),
+				runesafe.SanitizeSingleLineBounded(pos.id, maxLoggedCursorBytes),
+				runesafe.SanitizeSingleLineBounded(next.created, maxLoggedCursorBytes),
+				runesafe.SanitizeSingleLineBounded(next.id, maxLoggedCursorBytes),
+				i+1, len(items))
+		}
+		pos = next
 	}
-	return next, nil
+	return pos, nil
 }
 
 // FetchEntries walks the entire entries collection with torrents expanded and
@@ -507,20 +549,37 @@ func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 // is-the-field-blank test that would miss a wholesale host drift. The client
 // carries no other link knowledge - the publish policy itself lives in
 // internal/trackerlink beside its hide half (l-f86).
+//
+// The guards live in validateFinishedFetch and the diagnostics in
+// logFinishedFetchWarnings, so this function reads validate -> warn -> Debug.
 func (c *Client) finishFetch(all []Entry, tot fetchTotals) ([]Entry, error) {
-	if len(all) == 0 {
-		return nil, fmt.Errorf("seadex: returned an empty catalogue (totalItems=%d); "+
+	if err := validateFinishedFetch(len(all), tot); err != nil {
+		return nil, err
+	}
+	c.logFinishedFetchWarnings(len(all), tot)
+	c.log.Debug("seadex entries fetched", "entries", len(all),
+		"bytes", tot.bytes, "elements", tot.elements)
+	return all, nil
+}
+
+// validateFinishedFetch holds finishFetch's completeness guards, in order: an
+// empty catalogue, a walk no reported total vouches for, a reported total that
+// cannot fit the reported pages, and a below-half shortfall. Every one of them
+// refuses the catalogue outright (see finishFetch for why each is fail-safe).
+func validateFinishedFetch(count int, tot fetchTotals) error {
+	if count == 0 {
+		return fmt.Errorf("seadex: returned an empty catalogue (totalItems=%d); "+
 			"SeaDex is never legitimately empty, refusing to compare against it", tot.reportedTotal)
 	}
 	if tot.reportedTotal <= 0 {
-		return nil, fmt.Errorf("seadex: catalogue of %d entries completed with no reported total to vouch for "+
-			"completeness (upstream misbehaving); refusing to compare against a truncated view", len(all))
+		return fmt.Errorf("seadex: catalogue of %d entries completed with no reported total to vouch for "+
+			"completeness (upstream misbehaving); refusing to compare against a truncated view", count)
 	}
 	if tot.reportedTotal > tot.reportedPages*perPage {
-		return nil, fmt.Errorf("seadex: reported totalItems %d cannot fit the reported %d pages of %d (upstream misbehaving); "+
+		return fmt.Errorf("seadex: reported totalItems %d cannot fit the reported %d pages of %d (upstream misbehaving); "+
 			"refusing to compare against a truncated view", tot.reportedTotal, tot.reportedPages, perPage)
 	}
-	if degradation.Shrunk(len(all), tot.reportedTotal) {
+	if degradation.Shrunk(count, tot.reportedTotal) {
 		// The keyset cursor makes a SKIPPED record structurally impossible (see
 		// cursor), so a shortfall against the API's own reported total can only
 		// be a mid-fetch delete - or an upstream that ended the walk early with
@@ -534,24 +593,32 @@ func (c *Client) finishFetch(all []Entry, tot fetchTotals) ([]Entry, error) {
 		// The below-half trigger is the app-wide shrink policy
 		// (degradation.ShrinkGuardFactor), the same one the mapping refresh and
 		// library-walk guards apply, rather than a second threshold of its own.
-		return nil, fmt.Errorf("seadex: collected %d of %d reported entries (below half); "+
-			"refusing to compare against a truncated view", len(all), tot.reportedTotal)
+		return fmt.Errorf("seadex: collected %d of %d reported entries (below half); "+
+			"refusing to compare against a truncated view", count, tot.reportedTotal)
 	}
-	// Belt to the no-reported-total arm above, which already errors when the
-	// responses never stated a count: a response carrying no totalItems (omitted
-	// decodes to zero) stated no count to disagree with, so should that arm ever
-	// be relaxed this WARN must still not fire the alert-stable mismatch with
-	// want=0 on every cycle.
-	if tot.reportedTotal > 0 && len(all) != tot.reportedTotal {
-		c.log.Warn("seadex catalogue count mismatch", "got", len(all), "want", tot.reportedTotal)
+	return nil
+}
+
+// logFinishedFetchWarnings emits finishFetch's degradation diagnostics for a
+// catalogue that PASSED validateFinishedFetch: the alert-stable count mismatch,
+// the aggregate unparseable-timestamp and unusable-URL counters, and the
+// budget-mostly-spent capacity warning.
+func (c *Client) logFinishedFetchWarnings(count int, tot fetchTotals) {
+	// Belt to validateFinishedFetch's no-reported-total arm, which already
+	// errors when the responses never stated a count: a response carrying no
+	// totalItems (omitted decodes to zero) stated no count to disagree with, so
+	// should that arm ever be relaxed this WARN must still not fire the
+	// alert-stable mismatch with want=0 on every cycle.
+	if tot.reportedTotal > 0 && count != tot.reportedTotal {
+		c.log.Warn("seadex catalogue count mismatch", "got", count, "want", tot.reportedTotal)
 	}
 	if tot.unparsedTimes > 0 {
 		c.log.Warn("seadex updated timestamps unparseable; feed newest-first ordering degraded",
-			"count", tot.unparsedTimes, "entries", len(all))
+			"count", tot.unparsedTimes, "entries", count)
 	}
 	if tot.unusableURLs > 0 {
 		c.log.Warn("seadex torrent URLs unusable; affected findings and feed items carry no release link",
-			"count", tot.unusableURLs, "entries", len(all))
+			"count", tot.unusableURLs, "entries", count)
 	}
 	if tot.bytes*budgetWarnDenominator >= maxTotalBytes*budgetWarnNumerator ||
 		tot.elements*budgetWarnDenominator >= maxTotalElements*budgetWarnNumerator {
@@ -559,9 +626,6 @@ func (c *Client) finishFetch(all []Entry, tot fetchTotals) ([]Entry, error) {
 			"bytes", tot.bytes, "max_bytes", maxTotalBytes,
 			"elements", tot.elements, "max_elements", maxTotalElements)
 	}
-	c.log.Debug("seadex entries fetched", "entries", len(all),
-		"bytes", tot.bytes, "elements", tot.elements)
-	return all, nil
 }
 
 // fetchAndAppend fetches one chunk at the walk's cursor, appends its entries,
@@ -578,20 +642,13 @@ func (c *Client) finishFetch(all []Entry, tot fetchTotals) ([]Entry, error) {
 // can never exceed maxTotalElements), and the entry-count cap rejects the
 // chunk before any of its items are converted or appended.
 func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, tot *fetchTotals, cur *cursor) (out []Entry, done bool, err error) {
-	remaining := int64(maxTotalBytes - tot.bytes)
-	if remaining <= 0 {
-		return all, false, fmt.Errorf("%w (page %d, %d entries fetched)", errCumulativeBytes, page, len(all))
-	}
-	remainingElems := maxTotalElements - tot.elements
-	if remainingElems <= 0 {
-		return all, false, fmt.Errorf("%w (page %d, %d entries fetched)", errCumulativeElements, page, len(all))
-	}
-	list, n, elems, err := c.fetchPage(ctx, *cur, min(int64(maxPageBytes), remaining), min(maxPageElements, remainingElems))
+	pageBytes, pageElems, err := remainingFetchBudgets(*tot)
 	if err != nil {
-		if errors.Is(err, errCumulativeBytes) || errors.Is(err, errCumulativeElements) {
-			return all, false, fmt.Errorf("%w (page %d, %d entries fetched)", err, page, len(all))
-		}
-		return all, false, fmt.Errorf("seadex: fetch page %d: %w", page, err)
+		return all, false, fmt.Errorf("%w (page %d, %d entries fetched)", err, page, len(all))
+	}
+	list, n, elems, err := c.fetchPage(ctx, *cur, pageBytes, pageElems)
+	if err != nil {
+		return all, false, pageFetchError(err, page, len(all))
 	}
 	tot.bytes += n
 	tot.elements += elems
@@ -604,6 +661,18 @@ func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, tot 
 	if verr := validatePageIdentities(list.Items, page, tot); verr != nil {
 		return all, false, verr
 	}
+	// The chunk's keyset sequence is validated BEFORE it is accepted, not only
+	// when another request will be issued: the short-chunk exhaustion decision
+	// below rests on the response really being the sorted suffix after the
+	// cursor (advanceCursor).
+	var next cursor
+	if len(list.Items) > 0 {
+		var cerr error
+		next, cerr = advanceCursor(list.Items, *cur)
+		if cerr != nil {
+			return all, false, cerr
+		}
+	}
 	all = appendPageEntries(all, list.Items, tot)
 	done, err = chunkComplete(page, len(list.Items), len(all), tot.reportedTotal)
 	if err != nil {
@@ -611,15 +680,38 @@ func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, tot 
 	}
 	if !done {
 		// The walk continues, so the next chunk is requested strictly after
-		// this one's last record; an unusable cursor fails the fetch rather
-		// than looping or skipping (advanceCursor).
-		next, cerr := advanceCursor(list.Items, *cur)
-		if cerr != nil {
-			return all, false, cerr
-		}
+		// this one's last record; an unusable cursor already failed the fetch
+		// above rather than looping or skipping (advanceCursor).
 		*cur = next
 	}
 	return all, done, nil
+}
+
+// remainingFetchBudgets derives the next chunk's per-request byte and element
+// allowances from what the cumulative budgets have left, so the caller reads as
+// fetch -> account -> validate -> advance. An exhausted cumulative budget is
+// reported as its own sentinel (errCumulativeBytes / errCumulativeElements) and
+// the caller adds the page context, keeping the wrapped message identical.
+func remainingFetchBudgets(tot fetchTotals) (pageBytes int64, pageElements int, err error) {
+	bytesLeft := int64(maxTotalBytes - tot.bytes)
+	if bytesLeft <= 0 {
+		return 0, 0, errCumulativeBytes
+	}
+	elemsLeft := maxTotalElements - tot.elements
+	if elemsLeft <= 0 {
+		return 0, 0, errCumulativeElements
+	}
+	return min(int64(maxPageBytes), bytesLeft), min(maxPageElements, elemsLeft), nil
+}
+
+// pageFetchError classifies one chunk fetch failure: a budget exhaustion keeps
+// its sentinel (so the caller's errors.Is classification survives) and gains the
+// page context, anything else becomes the ordinary per-page fetch error.
+func pageFetchError(err error, page, fetched int) error {
+	if errors.Is(err, errCumulativeBytes) || errors.Is(err, errCumulativeElements) {
+		return fmt.Errorf("%w (page %d, %d entries fetched)", err, page, fetched)
+	}
+	return fmt.Errorf("seadex: fetch page %d: %w", page, err)
 }
 
 // validatePageIdentities enforces the catalogue's primary-key invariant across

@@ -111,71 +111,24 @@ type Deps struct {
 	Feed FeedWriter
 }
 
-// shrunkWalkEscalationThreshold is the consecutive-shrunk-walk streak
-// (state.State.ShrunkWalks) at which the scout escalates its shrunk-walk log
-// from WARN to ERROR (firing the existing SeadexScoutCycleError Loki rule).
-// It references degradation.EscalationThreshold - the single home of the
-// shared escalation policy: tolerate 8 consecutive degraded cycles, about a
-// day at the default 3h cadence, before escalating - long enough to ride out
-// a transient arr oddity, short enough that a persistent misconfiguration
-// (arr_tags leaving one item) alerts instead of silently skipping the compare
-// forever. The remedy is operator-driven: fix the arr/tags, or remove
-// state.json to accept the smaller library - the guard never auto-accepts a
-// shrunken walk.
-const shrunkWalkEscalationThreshold = degradation.EscalationThreshold
-
-// seadexFailureEscalationThreshold is the consecutive-failed-fetch streak
-// (state.State.SeadexFailures) at which the scout escalates its single
-// seadex-fetch-failed log site from WARN to ERROR (firing the existing
-// SeadexScoutCycleError rule). It references
-// degradation.EscalationThreshold - the single home of the shared
-// escalation policy the shrunk-walk and mapping-rejection streaks already
-// ride: tolerate 8 consecutive degraded cycles, about a day at the default
-// 3h cadence, before escalating. A SeaDex blip must stay a WARN (findings
-// are preserved and a restart cannot fix an upstream outage), but an outage
-// that persists for a day is a lasting upstream fault or an egress
-// misconfiguration and must alert instead of WARNing forever. Recovery is
-// operator-free: the first successful fetch resets the streak.
-const seadexFailureEscalationThreshold = degradation.EscalationThreshold
-
-// aniListDegradedEscalationThreshold is the consecutive anilist-degraded
-// completed-cycle streak (state.State.AniListDegraded) at which the scout
-// escalates its single anilist-degraded log site from WARN to ERROR (firing
-// the existing SeadexScoutCycleError rule). It references
-// degradation.EscalationThreshold - the single home of the shared escalation
-// policy its three sibling streaks already ride. A transient AniList blip
-// must stay a WARN (the compare ran on the unaffected majority with the
-// affected findings preserved), but a degradation that persists for a day is
-// a lasting egress or upstream fault - and under a cold start it keeps the
-// baseline permanently incomplete, silently suppressing every notification -
-// so it must alert instead of WARNing forever. Recovery is operator-free:
-// the first undegraded completed cycle resets the streak.
-const aniListDegradedEscalationThreshold = degradation.EscalationThreshold
-
-// partialWalkEscalationThreshold is the consecutive partial-walk completed-cycle
-// streak (state.State.PartialWalks) at which the scout escalates its
-// partial-walk log site from WARN to ERROR (firing the existing
-// SeadexScoutCycleError rule). It references degradation.EscalationThreshold -
-// the single home of the shared escalation policy its three sibling streaks
-// already ride. A partial walk must stay a WARN while it is a blip (the compare
-// ran on the clean items with the failed items' findings preserved), but a
-// series whose episode fetch keeps failing never self-heals: it freezes that
-// item's findings forever and, inside the cold-start window, keeps
-// state.BaselineIncomplete set on every cycle so NO finding is ever notified for
-// the whole library - and the one-shot report refuses a partial snapshot too, so
-// the operator has no fallback view either. Recovery is operator-free: the first
-// whole walk resets the streak.
-const partialWalkEscalationThreshold = degradation.EscalationThreshold
-
-// mappingRejectionEscalationThreshold is the consecutive guard-rejected
-// mapping-refresh streak (mapping.Cache.RejectedRefreshes, carried on
-// *mapping.StaleMapError.ConsecutiveRejections) at which loadMapping
-// escalates its single degraded-mapping log site from WARN to ERROR. It
-// references degradation.EscalationThreshold - the single home of the shared
-// escalation policy its three sibling streaks already ride; the streak itself
-// is owned and persisted by the mapping loader, so only the log-level policy
-// lives here.
-const mappingRejectionEscalationThreshold = degradation.EscalationThreshold
+// Every persisted degradation streak escalates its single log site from WARN to
+// ERROR (firing the existing SeadexScoutCycleError Loki rule) at the shared
+// fleet-wide threshold, whose policy lives in degradation.EscalationThreshold:
+// tolerate 8 consecutive degraded cycles - about a day at the default 3h
+// cadence - long enough to ride out a transient blip, short enough that a
+// condition which never self-heals alerts instead of WARNing forever. Each
+// owning site documents when its streak advances or resets and what the remedy
+// is: handleLibraryGate (shrunk walk), recordSeaDexFetch (fetch failures),
+// recordAniListDegradation, recordPartialWalk, and loadMapping (refresh
+// rejections, a streak the mapping loader owns and persists - only the
+// log-level policy lives here).
+const (
+	shrunkWalkEscalationThreshold       = degradation.EscalationThreshold
+	seadexFailureEscalationThreshold    = degradation.EscalationThreshold
+	aniListDegradedEscalationThreshold  = degradation.EscalationThreshold
+	partialWalkEscalationThreshold      = degradation.EscalationThreshold
+	mappingRejectionEscalationThreshold = degradation.EscalationThreshold
+)
 
 // Scout runs compare cycles from its assembled dependencies.
 type Scout struct {
@@ -1097,11 +1050,14 @@ func (s *Scout) degradedSave(ctx context.Context, st *state.State, snap library.
 	s.save(ctx, st)
 }
 
-// saveGrace bounds the detached shutdown save. It stays inside Docker's default
-// 10s stop grace (the public compose example sets no stop_grace_period), so the
-// write completes before SIGKILL. atomicfile's temp+rename means a SIGKILL
-// mid-write cannot corrupt state - the only cost of a missed save is losing the
-// AniList memo, which self-heals over one cold cycle.
+// saveGrace bounds the WHOLE shutdown save sequence, not just the retry: the
+// budget starts before the first attempt, so a slow cancelled attempt shortens
+// the detached retry instead of letting it add a fresh grace on top. It stays
+// inside Docker's default 10s stop grace (the public compose example sets no
+// stop_grace_period), so the write completes before SIGKILL. atomicfile's
+// temp+rename means a SIGKILL mid-write cannot corrupt state - the only cost of
+// a missed save is losing the AniList memo, which self-heals over one cold
+// cycle.
 const saveGrace = 5 * time.Second
 
 // save persists state, tolerating a shutdown mid-cycle. When the run context is
@@ -1109,19 +1065,26 @@ const saveGrace = 5 * time.Second
 // context.Canceled and the caches are lost — so a cancellation is retried once
 // with a detached, briefly-bounded context (context.WithoutCancel keeps the
 // values, drops the cancellation), letting the write finish so the expensive
-// AniList memo survives the restart. A cancellation is not a fault (a redeploy
-// is routine), so only a genuine write failure is logged at ERROR — which keeps
-// it off the cycle-error alert. A deliberate preservation refusal
-// (state.ErrSavePreserved) is likewise not a fault and logs at WARN: the
-// redeploy SIGTERM that cancels the cycle can land in Load's read window, which
-// blocks the save by design, and alerting on that would page the operator on
-// every redeploy.
+// AniList memo survives the restart. The retry gets only what is LEFT of
+// saveGrace measured from before the first attempt: an encode/write/fsync that
+// was cancelled after already spending part of the container's stop grace must
+// not be followed by a fresh full grace, or the total save can outlive SIGKILL
+// and lose the very memo the retry exists to preserve. A cancellation is not a
+// fault (a redeploy is routine), so only a genuine write failure is logged at
+// ERROR — which keeps it off the cycle-error alert. A deliberate preservation
+// refusal (state.ErrSavePreserved) is likewise not a fault and logs at WARN:
+// the redeploy SIGTERM that cancels the cycle can land in Load's read window,
+// which blocks the save by design, and alerting on that would page the operator
+// on every redeploy.
 func (s *Scout) save(ctx context.Context, st *state.State) {
+	retryDeadline := time.Now().Add(saveGrace)
 	err := s.deps.Store.Save(ctx, st)
 	if err != nil && (errors.Is(err, context.Canceled) || ctx.Err() != nil) {
-		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), saveGrace)
-		defer cancel()
-		err = s.deps.Store.Save(dctx, st)
+		if remaining := time.Until(retryDeadline); remaining > 0 {
+			dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), remaining)
+			err = s.deps.Store.Save(dctx, st)
+			cancel()
+		}
 	}
 	if err != nil {
 		// A deliberate preservation refusal is not a write fault: nothing is

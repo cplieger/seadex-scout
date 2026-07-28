@@ -568,6 +568,109 @@ func TestZeroUpstreamsProxiesNothing(t *testing.T) {
 	}
 }
 
+// TestSharedUpstreamsKeepConsumerWarningsIndependent pins ownUpstreams' reason
+// for existing: the per-upstream WARN-onset latches are per-instance, so handing
+// ONE Upstreams value to both exported constructors must still give each consumer
+// its own latch state. Sharing them would let the server's first filter warning
+// arm the writer's latch, silently demoting the writer's independently actionable
+// onset WARN to Debug.
+func TestSharedUpstreamsKeepConsumerWarningsIndependent(t *testing.T) {
+	const (
+		droppedMsg = "upstream items dropped: download URL not on the Prowlarr endpoint origin"
+		blankedMsg = "upstream display URLs blanked: not the tracker's own canonical http(s) page URL"
+	)
+	log, rec := capture.New()
+	cfg := UpstreamConfig{NyaaTorznabURL: "http://prowlarr:9696/1/api"}
+	shared := WireUpstreams(&http.Client{}, log, cfg)
+	ix := New(&Config{UpstreamConfig: cfg}, log, shared)
+	writer := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: cfg}, log, shared)
+	if len(ix.upstreams) != 1 || len(writer.harvest.upstreams) != 1 {
+		t.Fatalf("consumer upstream counts = (%d, %d), want (1, 1)", len(ix.upstreams), len(writer.harvest.upstreams))
+	}
+
+	for _, u := range []*upstream{ix.upstreams[0], writer.harvest.upstreams[0]} {
+		u.filterDownloadURLs([]item{
+			{Title: "foreign download", DownloadURL: "https://evil.example/steal"},
+			{
+				Title: "foreign display", DownloadURL: "http://prowlarr:9696/1/download?link=ok",
+				InfoURL: "https://evil.example/phish",
+			},
+		})
+	}
+
+	warnCounts := map[string]int{droppedMsg: 0, blankedMsg: 0}
+	for _, record := range rec.Records() {
+		if record.Level == slog.LevelWarn {
+			warnCounts[record.Message]++
+		}
+	}
+	for message, got := range warnCounts {
+		if got != 2 {
+			t.Errorf("WARN count for %q = %d, want 2 (one onset per consumer)", message, got)
+		}
+	}
+}
+
+// TestWedgedWarmLoadFaultsInsteadOfParkingRequests pins the startup bound on the
+// warm snapshot load: while the load is still running it owns the cache's reload
+// gate, so a request that entered refresh would block for as long as the
+// filesystem does (net/http's WriteTimeout cannot cancel a handler) and would
+// hold a query/feed slot while doing it. warmSnapshot must stop WAITING at
+// warmLoadTimeout, and every request arriving before the load returns must be
+// answered with the snapshot-unavailable Torznab fault immediately - then serve
+// normally once the loader completes. The wedged load is simulated by holding the
+// reload gate, which is exactly what the real loader does across its syscalls.
+func TestWedgedWarmLoadFaultsInsteadOfParkingRequests(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyLedger(t, path)
+	if err := newTestWriter(path, "", false).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	prev := warmLoadTimeout
+	warmLoadTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { warmLoadTimeout = prev })
+
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, nil, Upstreams{})
+	// The warm loader is wedged inside refresh: it holds the reload gate and has
+	// not published a snapshot.
+	if !ix.cache.tryLockReload() {
+		t.Fatal("reload gate already held; want it free before simulating the wedged warm load")
+	}
+
+	warmed := make(chan struct{})
+	go func() { defer close(warmed); ix.warmSnapshot() }()
+	select {
+	case <-warmed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("warmSnapshot still waiting on a wedged load; want the wait bounded by warmLoadTimeout")
+	}
+
+	served := make(chan *torznabFault, 1)
+	go func() {
+		_, _, fault := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
+		served <- fault
+	}()
+	select {
+	case fault := <-served:
+		if fault == nil || fault.summary != "feed snapshot unavailable" {
+			t.Fatalf("fault while the warm load is running = %+v, want the snapshot-unavailable fault", fault)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("request parked behind the wedged warm load; want an immediate snapshot-unavailable fault")
+	}
+
+	// The loader completes: requests resume the normal refresh path.
+	ix.cache.unlockReload()
+	<-ix.warmDone
+	items, _, fault := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa")
+	if fault != nil {
+		t.Fatalf("post-warm fault = %+v, want none", fault)
+	}
+	if len(items) != 1 {
+		t.Errorf("post-warm feed = %d items, want 1", len(items))
+	}
+}
+
 // TestFeedWriterReload verifies the server picks up a newer snapshot the writer
 // persists after the server started (the cross-process poll -> resident daemon
 // path): an initially-absent snapshot serves an empty feed, and once the writer
@@ -892,7 +995,7 @@ func TestABFeedRequiresPasskey(t *testing.T) {
 func TestServeUnconfiguredABServesNoPasskeyItems(t *testing.T) {
 	// A stale snapshot written before the operator blanked ab_torznab_url: its
 	// AB feed carries a credential-bearing download link.
-	stale := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[],"ab_feed":[{"Key":"ab:1167293","Title":"Frieren - S01 (BD Remux 1080p) [PMR]","GUID":"https://animebytes.tv/torrents.php?id=86576&torrentid=1167293","DownloadURL":"https://animebytes.tv/torrent/1167293/download/SECRETPASSKEY"}]}`
+	stale := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[],"ab_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Key":"ab:1167293","Title":"Frieren - S01 (BD Remux 1080p) [PMR]","GUID":"https://animebytes.tv/torrents.php?id=86576&torrentid=1167293","DownloadURL":"https://animebytes.tv/torrent/1167293/download/SECRETPASSKEY"}]}`
 	path := filepath.Join(t.TempDir(), "feed.json")
 	if err := os.WriteFile(path, []byte(stale), 0o600); err != nil {
 		t.Fatalf("write stale snapshot: %v", err)

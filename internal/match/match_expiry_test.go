@@ -186,7 +186,10 @@ func TestMemoUnexpiredEntryServedWithoutRefetch(t *testing.T) {
 // already-expired entry this pass neither consulted nor renewed is dropped
 // from the returned memo (it is a miss either way; next cycle's batch
 // re-fetches it if it is ever needed again), while a live unconsulted entry
-// survives untouched. Pruning itself spends no AniList requests.
+// survives untouched. The catalogue is empty here, so nothing is held back for
+// the feed's stale tier (that retention is
+// TestMemoPruneKeepsExpiredStaleDataForCuratedEntries). Pruning itself spends
+// no AniList requests.
 func TestMemoPruneDropsExpiredUnrenewedKeepsLive(t *testing.T) {
 	fake := &countingAniList{}
 	m := expiryMatcher(fake, 0.5)
@@ -211,6 +214,46 @@ func TestMemoPruneDropsExpiredUnrenewedKeepsLive(t *testing.T) {
 	}
 	if fake.calls != 0 {
 		t.Errorf("AniList calls = %d, want 0 (pruning never fetches)", fake.calls)
+	}
+}
+
+// TestMemoPruneKeepsExpiredStaleDataForCuratedEntries pins the retention half
+// of the save-side hygiene: the match is not the memo's only reader, so an
+// expired POSITIVE whose AniList id SeaDex still curates survives the prune
+// because Memo.StaleTitle/StaleFormat (which ignore expiry by design) feed the
+// indexer feed's title and category tiers for exactly that set. Everything else
+// expired still goes: an entry for an id absent from the catalogue is dead cache
+// data, and an expired negative carries nothing the stale tier could serve.
+func TestMemoPruneKeepsExpiredStaleDataForCuratedEntries(t *testing.T) {
+	expired := memoTestClock.Add(-time.Hour)
+	live := memoTestClock.Add(48 * time.Hour)
+	memo := Memo{Entries: map[int]MemoEntry{
+		1: {Titles: []string{"Curated"}, Format: "TV", Year: 2020, Expiry: expired}, // curated positive: kept
+		2: {Format: "MOVIE", Expiry: expired},                                       // curated, format only: kept
+		3: {Titles: []string{"Dropped"}, Format: "TV", Expiry: expired},             // uncurated: pruned
+		4: {NotFound: true, Expiry: expired},                                        // curated negative: pruned
+		5: {Expiry: expired},                                                        // curated but empty: pruned
+		6: {Titles: []string{"Live"}, Expiry: live},                                 // live: kept
+	}}
+	entries := []seadex.Entry{{AniListID: 1}, {AniListID: 2}, {AniListID: 4}, {AniListID: 5}}
+
+	pruneExpired(&memo, memoTestClock, entries)
+
+	for _, id := range []int{1, 2, 6} {
+		if _, ok := memo.Entries[id]; !ok {
+			t.Errorf("entry %d was pruned, want it kept for the feed's stale title/type tier", id)
+		}
+	}
+	for _, id := range []int{3, 4, 5} {
+		if _, ok := memo.Entries[id]; ok {
+			t.Errorf("entry %d survived, want it pruned (nothing the stale tier can serve)", id)
+		}
+	}
+	if title, _, ok := memo.StaleTitle(1); !ok || title != "Curated" {
+		t.Errorf("StaleTitle(1) = %q (ok=%v), want the retained stale title", title, ok)
+	}
+	if format, ok := memo.StaleFormat(2); !ok || format != "MOVIE" {
+		t.Errorf("StaleFormat(2) = %q (ok=%v), want the retained stale format", format, ok)
 	}
 }
 

@@ -198,10 +198,11 @@ type Cache struct {
 	// depending on a *StaleMapError to carry it.
 	//
 	// A TRANSIENT failure - one that can succeed on the next attempt - neither
-	// advances nor resets it. Three classes are persistent guard refusals that
+	// advances nor resets it. Four classes are persistent guard refusals that
 	// surface as fetch or parse errors and so DO advance it, because each one
 	// re-downloads the multi-MB body and refuses it every cycle without ever
-	// self-healing: a record-cap breach (errRecordCapExceeded), a body over the
+	// self-healing: a record-cap breach (errRecordCapExceeded), an aggregate
+	// identifier-budget breach (errIdentifierBudgetExceeded), a body over the
 	// download size cap (httpx.ResponseTooLargeError), and a non-array
 	// top-level document (errNotJSONArray - content-shape evidence, since
 	// truncation cannot change a body's first token). Mid-stream truncation and
@@ -603,6 +604,14 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 			// A persistent guard refusal (Cache.RejectedRefreshes): a
 			// permanently over-cap upstream list never self-heals.
 			return rejectRefresh(prev, "refresh exceeded record cap", err,
+				fmt.Errorf("%w and no cache available", err))
+		}
+		if errors.Is(err, errIdentifierBudgetExceeded) {
+			// A persistent guard refusal (Cache.RejectedRefreshes): the
+			// aggregate identifier budget truncates the tail of the list, so
+			// accepting the prefix would persist a knowably incomplete map
+			// that every count floor still passes.
+			return rejectRefresh(prev, "refresh exceeded identifier budget", err,
 				fmt.Errorf("%w and no cache available", err))
 		}
 		// The no-first-token case (an empty or whitespace-only body) never reaches here:

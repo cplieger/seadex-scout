@@ -352,10 +352,11 @@ func (c queuedRerunMarkerCycler) Cycle(context.Context) bool {
 }
 
 // TestHealthPublishedInsideCycleLock pins WHERE poll commits a cycle's
-// health verdict, which is the whole point of d-gpt-u1c4-1's fix. The marker is
-// cross-process shared state like state.json and feed.json, and `cycle.lock` is
-// what orders every writer of those — but Exclusive releases the lock before
-// Run returns, so a verdict committed after Run is unordered: a newer cycle from
+// health verdict, which proves the marker write remains ordered with other
+// cycle state. The marker is cross-process shared state like state.json and
+// feed.json, and `cycle.lock` is what orders every writer of those — but
+// Exclusive releases the lock before Run returns, so a verdict committed after
+// Run is unordered: a newer cycle from
 // a daemon tick or another poll process can publish in between and then be
 // overwritten by this older, superseded verdict.
 //
@@ -402,8 +403,8 @@ func TestHealthPublishedInsideCycleLock(t *testing.T) {
 // The interruption governs this INVOCATION's result only. The own run
 // completed, so it published its healthy verdict inside the locked body, where
 // the cycle lock orders the write against every other writer of the shared
-// marker (d-gpt-u1c4-1); a later shutdown does not withdraw a completed
-// cycle's health. The interrupted RERUN publishes nothing.
+// marker; a later shutdown does not withdraw a completed cycle's health. The
+// interrupted RERUN publishes nothing.
 func TestRunOnceRanQueuedThenCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

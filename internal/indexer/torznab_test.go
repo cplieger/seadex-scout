@@ -551,10 +551,11 @@ func TestItemXMLTitleProvenance(t *testing.T) {
 }
 
 // TestWriteItemSkipsNonPositiveCategories pins writeItem's render-side clamp:
-// validPersistedItem does not validate category positivity and search-path
-// items never pass the persistence gate, so a non-positive category reaching
-// the renderer must be skipped rather than rendered as an invalid Torznab
-// category id.
+// render-side validation is the final totality guard for direct/live item
+// values, independent of persistence and parse normalization, so a
+// non-positive category reaching the renderer (a search-path item never passes
+// the persistence gate) must be skipped rather than rendered as an invalid
+// Torznab category id.
 func TestWriteItemSkipsNonPositiveCategories(t *testing.T) {
 	var b strings.Builder
 	it := item{Title: "x", Categories: []int{-5, 0, catAnime}}

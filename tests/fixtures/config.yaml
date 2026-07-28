@@ -13,3 +13,16 @@ radarr:
   enabled: false
 mode: "daemon"
 poll_interval: "off"
+# The Torznab feed is configured so the assembled image's ONLY HTTP surface is
+# actually started and asserted: startIndexer runs it asynchronously and its
+# failure is logged WITHOUT flipping the health marker (the compare loop owns
+# that), so a bind failure in the distroless image would otherwise pass the
+# smoke silently. SMOKE_LOG_PATTERN in image-smoke.conf waits for the listening
+# line the server emits only after :9118 binds. The Prowlarr URL is an
+# instantly-refusing address with a per-indexer Torznab path shape; nothing
+# dials it here because poll_interval: off means no cycle and the smoke issues
+# no search.
+indexer:
+  feed_api_key: "smoke-dummy-feed-key-0123456789"
+  nyaa_torznab_url: "http://127.0.0.1:1/1/api"
+  prowlarr_api_key: "smoke-dummy-prowlarr-key"

@@ -128,6 +128,17 @@ const maxFribbIdentifiers = 32
 // an order of magnitude under the cap.
 const maxFribbIdentifiersTotal = 1 << 20
 
+// errIdentifierBudgetExceeded rejects a Fribb list whose retained identifiers
+// exceed maxFribbIdentifiersTotal. It is a sentinel (errors.Is-matched in
+// acceptRefresh) because the budget is an APP-SIDE ceiling that truncates the
+// tail of the list: silently retaining the prefix publishes a knowably
+// incomplete map (later records become false unmapped/title-fallback cases and
+// vanish from the report catalogue) that every count floor still passes. Like
+// errRecordCapExceeded it never self-heals, so it advances the persisted
+// rejection streak toward degradation.EscalationThreshold instead of degrading
+// at WARN forever.
+var errIdentifierBudgetExceeded = fmt.Errorf("mapping: Fribb identifiers exceed cap %d", maxFribbIdentifiersTotal)
+
 // fribbParseResult is parseFribbForRefresh's counted decode result: the
 // surviving AniList-keyed records plus the number of top-level array elements
 // they were distilled from - every element the decode loop observed, whatever
@@ -201,6 +212,17 @@ func parseFribbForRefresh(data []byte, log *slog.Logger) (fribbParseResult, erro
 	if err := dec.End(); err != nil {
 		return fribbParseResult{}, fmt.Errorf("mapping: trailing data after Fribb list: %w", err)
 	}
+	logFribbParseDiagnostics(log, &counts)
+	return fribbParseResult{records: counts.records, elements: counts.elements}, nil
+}
+
+// logFribbParseDiagnostics emits the decode's tolerated-outcome diagnostics -
+// the skipped-malformed WARN (carrying the first skipped record's sanitized
+// error), the keyless-record Debug line, and the approaching-record-cap
+// advance warning. It is separate from parseFribbForRefresh so that function
+// carries only container framing, record decode, fatal error propagation and
+// result construction; every message, level and attribute is unchanged.
+func logFribbParseDiagnostics(log *slog.Logger, counts *fribbDecodeCounts) {
 	if counts.skipped > 0 {
 		attrs := []any{"skipped", counts.skipped, "parsed", len(counts.records)}
 		if counts.firstErr != nil {
@@ -216,16 +238,6 @@ func parseFribbForRefresh(data []byte, log *slog.Logger) (fribbParseResult, erro
 	if counts.dropped > 0 {
 		log.Debug("mapping: dropped records without anilist_id", "dropped", counts.dropped, "parsed", len(counts.records))
 	}
-	if counts.overBudget > 0 {
-		// A budget breach is an app-side ceiling, not upstream corruption:
-		// every record past it is dropped, so the refresh is normally refused
-		// downstream by the coverage/collapse invariants. Name the cap so the
-		// remedy (raise it, or investigate an identifier explosion upstream)
-		// is discoverable from the log instead of only from the source.
-		log.Warn("mapping: records refused by identifier budget",
-			"refused", counts.overBudget, "cap", maxFribbIdentifiersTotal, "parsed", len(counts.records))
-	}
-	elements := counts.elements
 	// Advance warning before the cap becomes a hard refusal: real Fribb is
 	// already ~43k of the 65,536-element cap, and a breach is NOT
 	// self-healing - acceptRefresh routes errRecordCapExceeded through
@@ -233,19 +245,20 @@ func parseFribbForRefresh(data []byte, log *slog.Logger) (fribbParseResult, erro
 	// it, and the map stays frozen stale until the cap is raised. Warning at
 	// three quarters gives the operator a queryable heads-up while refreshes
 	// still succeed.
-	if elements >= maxFribbRecords/4*3 {
-		log.Warn("mapping: Fribb list approaching record cap", "elements", elements, "cap", maxFribbRecords)
+	if counts.elements >= maxFribbRecords/4*3 {
+		log.Warn("mapping: Fribb list approaching record cap", "elements", counts.elements, "cap", maxFribbRecords)
 	}
-	return fribbParseResult{records: counts.records, elements: elements}, nil
 }
 
 // decodeFribbRecords streams the array body element-by-element, decoding each
 // on its own so one malformed record is skipped (counted) rather than failing
 // the whole map, and rejecting a list that exceeds maxFribbRecords (the
-// errRecordCapExceeded sentinel) before the excess elements are decoded. It
+// errRecordCapExceeded sentinel) before the excess elements are decoded, or
+// whose retained identifiers exceed maxFribbIdentifiersTotal (the
+// errIdentifierBudgetExceeded sentinel). It
 // leaves the decoder positioned on the array's closing token. The per-record
 // tolerance bookkeeping lives in fribbDecodeCounts, so this loop carries only
-// the cap and fatal-stream guarantees.
+// the cap, budget and fatal-stream guarantees.
 func decodeFribbRecords(dec *bounded.Decoder) (fribbDecodeCounts, error) {
 	var counts fribbDecodeCounts
 	// The ordering is load-bearing: dec.More observes another element, the
@@ -261,6 +274,14 @@ func decodeFribbRecords(dec *bounded.Decoder) (fribbDecodeCounts, error) {
 			return fribbDecodeCounts{}, streamErr
 		}
 		counts.add(&rec, ok, decodeErr)
+		if counts.overBudget > 0 {
+			// The aggregate identifier budget is a whole-document guarantee,
+			// not a per-record tolerance: once it trips, every following
+			// record would be dropped too, so retaining the prefix would
+			// publish a knowably truncated map. Fail closed at the point the
+			// budget trips and let acceptRefresh keep the stale cache.
+			return fribbDecodeCounts{}, errIdentifierBudgetExceeded
+		}
 	}
 	return counts, nil
 }
@@ -268,7 +289,8 @@ func decodeFribbRecords(dec *bounded.Decoder) (fribbDecodeCounts, error) {
 // fribbDecodeCounts accumulates decodeFribbRecords' TOLERATED per-record
 // outcomes: the accepted records, the first skipped record's decode error, and
 // the skipped (malformed) / dropped (no anilist_id) counts the caller logs.
-// Fatal outcomes (the record cap, a stream decode failure) stay in the loop.
+// Fatal outcomes (the record cap, the aggregate identifier budget, a stream
+// decode failure) stay in the loop.
 type fribbDecodeCounts struct {
 	firstErr error
 	records  []Record
@@ -284,15 +306,19 @@ type fribbDecodeCounts struct {
 	// overBudget counts records refused by maxFribbIdentifiersTotal. It is
 	// separate from skipped because the remedy differs: a malformed record
 	// is an upstream data defect, while an exhausted budget is an app-side
-	// ceiling that silently truncates the tail of the list.
+	// ceiling. A nonzero value is FATAL to the whole document (the decode
+	// loop returns errIdentifierBudgetExceeded as soon as it goes above
+	// zero), so it never exceeds one and is never reported as a tolerated
+	// per-record outcome.
 	overBudget int
 }
 
 // add folds one record's decode outcome in: a tolerated decode failure counts
 // as skipped (keeping the first error for the warning), a record without an
 // AniList ID counts as dropped, a record whose identifiers would exceed the
-// aggregate maxFribbIdentifiersTotal budget counts as overBudget (reported on
-// its own line, since the remedy is not an upstream data fix), and anything
+// aggregate maxFribbIdentifiersTotal budget counts as overBudget (which the
+// decode loop turns into a whole-document refusal, since the remedy is not an
+// upstream data fix), and anything
 // else is accepted. rec is taken by pointer only because Record is a heavy
 // value (gocritic hugeParam); it is never retained.
 func (c *fribbDecodeCounts) add(rec *Record, ok bool, decodeErr error) {
@@ -439,18 +465,38 @@ func (t *tmdbID) UnmarshalJSON(b []byte) error {
 		// stays empty.
 		return t.Scalar.UnmarshalJSON(b)
 	}
-	type alias tmdbID
-	var a alias
-	if err := json.Unmarshal(b, &a); err != nil {
+	// Capture the movie member as RAW bytes first. encoding/json continues
+	// past a type mismatch, so decoding the object straight into []flexInt
+	// let a duplicate movie key whose EARLIER value has the wrong shape
+	// return a type error ALONGSIDE the valid later value - and the tolerant
+	// error arm then threw that value away, turning a resolvable movie into
+	// an id-less record. A json.RawMessage member has no shape to mismatch,
+	// so the last value always wins: the duplicate-key rule the sibling
+	// tolerant decoders are tested against (later value wins, an odd later
+	// value clears prior state), in both key orders.
+	var wire struct {
+		Movie json.RawMessage `json:"movie"`
+	}
+	if err := json.Unmarshal(b, &wire); err != nil {
 		return nil //nolint:nilerr // tolerate an odd themoviedb_id shape rather than fail the record
+	}
+	movie := bytes.TrimSpace(wire.Movie)
+	if isNullOrEmpty(movie) || movie[0] != '[' {
+		// Absent, null, or a non-array last value: no movie ids to retain.
+		// Tolerated as empty, like any other odd themoviedb_id shape.
+		return nil
+	}
+	var movies []flexInt
+	if err := json.Unmarshal(movie, &movies); err != nil {
+		return nil //nolint:nilerr // tolerate an odd themoviedb_id.movie shape rather than fail the record
 	}
 	// The transient decode above is bounded by maxFribbRecordBytes; the cap
 	// here bounds what is RETAINED, rejecting the record so a hostile body
 	// cannot accumulate huge per-record identifier sets.
-	if len(a.Movie) > maxFribbIdentifiers {
+	if len(movies) > maxFribbIdentifiers {
 		return fmt.Errorf("themoviedb_id.movie list exceeds cap %d", maxFribbIdentifiers)
 	}
-	*t = tmdbID(a)
+	t.Movie = movies
 	return nil
 }
 

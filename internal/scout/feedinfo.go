@@ -1,6 +1,8 @@
 package scout
 
 import (
+	"strings"
+
 	"github.com/cplieger/seadex-scout/internal/indexer"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
@@ -21,7 +23,9 @@ const specialSeason = 0
 //     against Sonarr items, a movie record's TMDB-movie/IMDb ids against
 //     Radarr items - the same arr-consistent routing the matcher uses). The
 //     arr is guaranteed to parse its own title back, so this is the strongest
-//     synthesis source.
+//     synthesis source. A blank or whitespace-only arr title counts as ABSENT
+//     here, matching synthesizeTitle's own trimmed check downstream, so it
+//     falls through to the memo instead of suppressing it.
 //  2. The AniList canonical title (romaji-first, the memo's title order) from
 //     the persisted AniList memo. Expiry is deliberately ignored: the memo's
 //     expiry governs re-fetch cadence, and a stale show title still beats a
@@ -49,7 +53,7 @@ func feedEntryInfo(idx *mapping.Index, lib *library.Snapshot, memo match.Memo) i
 		if ok {
 			info.IsMovie = rec.IsMovie()
 			info.Season, info.SeasonKnown = resolvedSeason(&rec)
-			if it := find(&rec); it != nil && it.Title != "" {
+			if it := find(&rec); it != nil && strings.TrimSpace(it.Title) != "" {
 				info.Title, info.Year = it.Title, it.Year
 				return info
 			}

@@ -82,7 +82,7 @@ func FuzzMatchHarvest_cacheHygiene(f *testing.F) {
 		before := maps.Clone(titles)
 
 		n, rejected, pendingRejected := matchHarvest([]item{{Title: title, InfoURL: infoURL, GUID: guid, InfoHash: hash}},
-			upstreamNyaa, index, titles, "")
+			upstreamNyaa, index, titles, nil, []string{"nyaa:42", "nyaa:43", "ab:300"})
 
 		// The pending grade is a SUBSET of the rejections (harvest.go's
 		// no-progress signal is "one of OUR releases was refused"), so no
@@ -125,7 +125,7 @@ func FuzzMatchHarvest_cacheHygiene(f *testing.F) {
 		trimmed := strings.TrimSpace(title)
 		admissible := trimmed != "" && len(trimmed) <= harvestMaxTitleLen
 		fresh := map[string]string{}
-		got, _, _ := matchHarvest([]item{{Title: title, InfoURL: "https://nyaa.si/view/42"}}, upstreamNyaa, index, fresh, "")
+		got, _, _ := matchHarvest([]item{{Title: title, InfoURL: "https://nyaa.si/view/42"}}, upstreamNyaa, index, fresh, nil, nil)
 		if admissible {
 			if got != 1 || fresh["nyaa:42"] != trimmed {
 				t.Fatalf("matchHarvest(canonical identity, title %q) = %d matches caching %q, want it admitted as %q",

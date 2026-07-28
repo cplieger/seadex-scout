@@ -76,6 +76,43 @@ func TestRunRefusesEmptyAPIKey(t *testing.T) {
 	}
 }
 
+// TestRunRefusesUnresolvedAPIKeyPlaceholder pins the other half of that
+// boundary: a feed_api_key left as a literal ${VAR} reference (the variable
+// unset or outside the expansion allowlist) is a GUESSABLE credential - the
+// placeholder spelling ships in the public config.example - on the only gate
+// protecting the /ab RSS body, whose download links embed ab_passkey. Run must
+// refuse to bind on it exactly as it does on an empty key, and the error must
+// name only the field, never the value.
+func TestRunRefusesUnresolvedAPIKeyPlaceholder(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := New(&Config{APIKey: "${SEADEX_SCOUT_FEED_API_KEY}", UpstreamConfig: UpstreamConfig{ABPasskey: "pk"}}, nil, Upstreams{}).Run(ctx)
+	if err == nil {
+		t.Fatal("Run with an unresolved ${VAR} APIKey returned nil, want a configuration error")
+	}
+	if !strings.Contains(err.Error(), "feed_api_key") {
+		t.Errorf("Run error = %v, want it to name feed_api_key", err)
+	}
+	if strings.Contains(err.Error(), "SEADEX_SCOUT_FEED_API_KEY") {
+		t.Errorf("Run error echoes the configured value: %v", err)
+	}
+}
+
+// TestServeFailsClosedWithUnresolvedAPIKey pins the handler's twin guard: a
+// placeholder key must answer 503 (auth not configured) rather than
+// authenticate a caller who guessed the placeholder.
+func TestServeFailsClosedWithUnresolvedAPIKey(t *testing.T) {
+	ix := New(&Config{APIKey: "${FEED_KEY}"}, nil, Upstreams{})
+	rec := httptest.NewRecorder()
+	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=${FEED_KEY}", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("serve with a placeholder feed_api_key = %d, want 503", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "<caps>") {
+		t.Error("serve authenticated a caller who guessed the ${VAR} placeholder")
+	}
+}
+
 // TestTorznabErrorResponder pins the panic-recovery wire shape: the responder
 // webhttp's Recoverer calls must render the status plus a Torznab <error>
 // document (code 900, XML-escaped message) on the XML content type - not
@@ -330,7 +367,7 @@ func TestReloadKeepsFeedOnUnreadableSnapshot(t *testing.T) {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	log, rec := capture.New()
-	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, log, Upstreams{})
+	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, log, Upstreams{})
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
@@ -364,7 +401,7 @@ func TestReloadKeepsFeedOnNonRegularSnapshotPath(t *testing.T) {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	log, rec := capture.New()
-	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, log, Upstreams{})
+	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, log, Upstreams{})
 	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
 		t.Fatalf("initial feed = %d items, want 1", len(got))
 	}
@@ -418,8 +455,8 @@ func TestQueryCallerCancellationIsNotWarnedAsUpstreamFault(t *testing.T) {
 	}
 }
 
-// TestReloadWarnsOnStatFailure pins the stat-error visibility leg of reload:
-// an os.Stat failure other than fs.ErrNotExist (here ENOTDIR via a
+// TestReloadWarnsOnStatFailure pins the open-error visibility leg of reload:
+// an open failure other than fs.ErrNotExist (here ENOTDIR via a
 // regular-file parent, root-safe in the same way as the bounded-read overflow
 // TestReloadKeepsFeedOnUnreadableSnapshot uses for reads) must be warned
 // about - a silent stat failure would invisibly freeze the served feed - while
@@ -430,8 +467,8 @@ func TestReloadWarnsOnStatFailure(t *testing.T) {
 		t.Fatalf("write blocker: %v", err)
 	}
 	log, rec := capture.New()
-	ix := New(&Config{SnapshotPath: filepath.Join(blocker, "feed.json")}, log, Upstreams{})
-	if !rec.Contains("indexer feed snapshot stat failed") {
+	ix := warmedIndexer(&Config{SnapshotPath: filepath.Join(blocker, "feed.json")}, log, Upstreams{})
+	if !rec.Contains("indexer feed snapshot open failed") {
 		t.Errorf("stat failure (ENOTDIR) not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {

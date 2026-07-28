@@ -675,10 +675,14 @@ func (c *Config) validateIndexerEndpoints() error {
 	// credential - and it is guessable from the public README/config.example.
 	// Load's unresolved-ref WARN does not cover the non-allowlisted spelling
 	// (yamlenv leaves ${FEED_KEY} literal and reports nothing), and the length
-	// check below passes any placeholder. Field-name-only (never echo the key).
+	// check below passes any placeholder. That is a credential a LAN attacker
+	// can GUESS on the AnimeBytes-passkey-bearing feed, so it fails the config
+	// rather than warning: an operator who meant to interpolate a key never
+	// wanted the placeholder serving as one. Field-name-only (never echo the
+	// key).
 	if strings.Contains(c.IndexerAPIKey, "${") {
-		slog.Warn("indexer.feed_api_key still holds a ${VAR} reference; the variable is " +
-			"unset or not allowlisted (SONARR_/RADARR_/SEADEX_SCOUT_), so the feed is gated " +
+		return errors.New("indexer.feed_api_key still holds a ${VAR} reference; the variable is " +
+			"unset or not allowlisted (SONARR_/RADARR_/SEADEX_SCOUT_), so the feed would be gated " +
 			"by that literal placeholder - a guessable key on the " +
 			"AnimeBytes-passkey-bearing feed")
 	}
@@ -707,6 +711,14 @@ func (c *Config) validateIndexerEndpoints() error {
 // two AB passkey half-configurations. All field-name-only; never echo a URL
 // or secret.
 func (c *Config) warnIndexerEndpointProblems() {
+	c.warnIdenticalIndexerEndpoints()
+	c.warnNonPerIndexerEndpoints()
+	c.warnABPasskeyConfiguration()
+}
+
+// warnIdenticalIndexerEndpoints warns when both per-indexer Torznab URLs hold
+// the same value. Field-name-only; never echoes a URL.
+func (c *Config) warnIdenticalIndexerEndpoints() {
 	// The two upstream URLs are per-indexer Prowlarr Torznab endpoints
 	// (/1/api vs /2/api); identical values are almost always a paste error.
 	// The AB matcher is torrent-id-only, so pointing it at a Nyaa endpoint
@@ -717,13 +729,21 @@ func (c *Config) warnIndexerEndpointProblems() {
 			"they should be Prowlarr's per-indexer endpoints (e.g. /1/api vs /2/api) - " +
 			"a shared endpoint double-queries one indexer and misattributes trackers")
 	}
+}
+
+// warnNonPerIndexerEndpoints warns when a configured torznab url's path cannot
+// be a Prowlarr per-indexer Torznab endpoint. Field-name-only; never echoes a
+// URL.
+func (c *Config) warnNonPerIndexerEndpoints() {
 	// A Prowlarr per-indexer Torznab endpoint always carries a path (.../1/api).
 	// A bare origin, or Prowlarr's REST API (/api/v1/...), is a paste error that
-	// loads cleanly and then answers every search and RSS check with a Torznab
+	// loads cleanly and then answers every proxied search with a Torznab
 	// <error code="900">: internal/indexer/prowlarr.go appends the Torznab params
 	// to whatever was configured, so a wrong base is visible only in
-	// upstream-failure logs. Warn-only (the config still runs) and
-	// field-name-only; never echoes a URL.
+	// upstream-failure logs. The synthesized RSS feed is unaffected - an
+	// empty-query check is served from the persisted journal and never contacts
+	// Prowlarr. Warn-only (the config still runs) and field-name-only; never
+	// echoes a URL.
 	for _, tu := range []struct{ name, val string }{
 		{fieldNyaaTorznabURL, c.IndexerNyaaTorznabURL},
 		{fieldABTorznabURL, c.IndexerABTorznabURL},
@@ -737,11 +757,16 @@ func (c *Config) warnIndexerEndpointProblems() {
 		}
 		if p := strings.TrimSuffix(u.Path, "/"); p == "" || strings.HasPrefix(p, "/api/v1") {
 			slog.Warn("torznab url is not a Prowlarr per-indexer Torznab endpoint "+
-				"(expected a path like /1/api); every proxied search and RSS check "+
+				"(expected a path like /1/api); every proxied search "+
 				"fails upstream and answers the arr with a Torznab error",
 				"field", tu.name)
 		}
 	}
+}
+
+// warnABPasskeyConfiguration emits the two AB-passkey half-configuration
+// diagnostics. Field-name-only; never echoes a secret.
+func (c *Config) warnABPasskeyConfiguration() {
 	// The /ab RSS feed builds its download links from indexer.ab_passkey; a
 	// stable AB-URL-without-passkey config makes that endpoint return a
 	// Torznab <error> on every arr RSS check while searches (Prowlarr-proxied,

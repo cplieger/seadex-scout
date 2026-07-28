@@ -96,22 +96,31 @@ func (c *curation) lookup(scope, hash, infoURL, guid string) (isBest, matched bo
 	if scope == upstreamAB && key == "" {
 		return false, false
 	}
-	// Both signals present and individually curated: require the persisted
-	// pair relation to prove they belong to one release. A nil byPair (a
-	// legacy snapshot written before the relation was persisted - an
-	// upgraded resident server still serving the old file) fails closed
-	// too: absence of the relation that proves co-membership is not
-	// permission to fall back to the weaker per-signal checks, which would
-	// admit torrent A's hash cross-wired with torrent B's key whenever both
-	// share a best/alt bit. Single-signal legacy matching (hash-only Nyaa,
-	// key-only AB) is unaffected, and the next cycle's snapshot rewrite
-	// restores dual-signal matching.
-	if h != "" && key != "" {
-		if c.byPair == nil || !c.byPair[pairKey(h, key)] {
-			return false, false
-		}
+	// Both signals present and individually curated: the persisted pair
+	// relation must prove they belong to one release.
+	if !c.acceptsObservedPair(h, key) {
+		return false, false
 	}
 	return match.isBest, match.matched
+}
+
+// acceptsObservedPair applies lookup's dual-signal relation check: an item
+// carrying BOTH a curated info hash and a curated scoped tracker key must
+// additionally prove the exact pair was observed on a single SeaDex torrent.
+// With either signal absent there is no pair to prove, so it accepts.
+//
+// A nil byPair (a legacy snapshot written before the relation was persisted -
+// an upgraded resident server still serving the old file) fails closed too:
+// absence of the relation that proves co-membership is not permission to fall
+// back to the weaker per-signal checks, which would admit torrent A's hash
+// cross-wired with torrent B's key whenever both share a best/alt bit.
+// Single-signal legacy matching (hash-only Nyaa, key-only AB) is unaffected,
+// and the next cycle's snapshot rewrite restores dual-signal matching.
+func (c *curation) acceptsObservedPair(hash, key string) bool {
+	if hash == "" || key == "" {
+		return true
+	}
+	return c.byPair != nil && c.byPair[pairKey(hash, key)]
 }
 
 // acceptScopedKeys applies lookup's tracker-key arm: every tracker key parsed
@@ -160,6 +169,18 @@ type torznabFault struct {
 	code    int
 }
 
+// snapshotUnavailableFault is the one fault for "no snapshot to serve from",
+// raised both while the startup warm load is still running and after a load
+// fault before any successful install. Single-homed so the two conditions cannot
+// drift into two different wire messages for the same operator situation.
+func snapshotUnavailableFault() *torznabFault {
+	return &torznabFault{
+		summary: "feed snapshot unavailable",
+		code:    errCodeUnknown,
+		detail:  "feed snapshot unavailable: the persisted SeaDex feed failed to load; results unavailable until a snapshot loads",
+	}
+}
+
 // queryStats summarizes one request for the per-request log line: whether the
 // feed answered it (answered), whether it was served from the synthesized RSS
 // feed (feed - an empty-q periodic check) rather than a proxied search, how
@@ -200,6 +221,15 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 	if !servesQuery(q) {
 		return nil, queryStats{}, nil
 	}
+	// Run's warm load owns the cache's reload gate until its filesystem
+	// syscalls return, and a wedged /config mount has no bound of its own:
+	// entering refresh here would park this request on that gate while it holds
+	// a query/feed slot, since net/http's WriteTimeout cannot cancel a handler.
+	// Answer the snapshot-unavailable fault immediately instead, so the arr sees
+	// a fault it can back off from rather than a hung request (see warmPending).
+	if ix.warmPending() {
+		return nil, queryStats{answered: true}, snapshotUnavailableFault()
+	}
 	// Pick up a newer feed snapshot a cycle may have written (this process's
 	// daemon loop, or the `poll` subcommand in another process) before serving.
 	ix.cache.refresh(ctx)
@@ -210,11 +240,7 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 	// Torznab <error>, exactly like an unavailable Prowlarr dependency)
 	// without contacting a tracker.
 	if ix.cache.unavailable() {
-		return nil, queryStats{answered: true}, &torznabFault{
-			summary: "feed snapshot unavailable",
-			code:    errCodeUnknown,
-			detail:  "feed snapshot unavailable: the persisted SeaDex feed failed to load; results unavailable until a snapshot loads",
-		}
+		return nil, queryStats{answered: true}, snapshotUnavailableFault()
 	}
 
 	var (
@@ -278,14 +304,25 @@ func isFeedRequest(q url.Values) bool { return strings.TrimSpace(q.Get("q")) == 
 // explicit limit, so real consumers are unaffected. An explicit limit behaves
 // as before, an absent or invalid offset leaves the window anchored at the
 // newest item, and the proxied search path forwards these params to Prowlarr
-// instead, so it never pages locally. A present-but-unusable limit is logged
-// at Debug so a misconfigured client is diagnosable.
+// instead, so it never pages locally. A present-but-unusable limit or offset is
+// logged at Debug so a misconfigured client is diagnosable.
 func applyPaging(log *slog.Logger, items []item, q url.Values) []item {
-	if off, err := strconv.Atoi(strings.TrimSpace(q.Get("offset"))); err == nil && off > 0 {
+	rawOffset := strings.TrimSpace(q.Get("offset"))
+	off, offErr := strconv.Atoi(rawOffset)
+	switch {
+	case offErr == nil && off > 0:
 		if off >= len(items) {
 			return nil
 		}
 		items = items[off:]
+	case rawOffset != "" && (offErr != nil || off < 0):
+		// An empty or numeric-zero offset IS the first page, so only a
+		// present-but-unusable value (non-numeric, overflowing, or negative)
+		// is named here: the window it asked for was discarded and the
+		// response comes from the newest page instead, which the per-request
+		// access line does not carry.
+		log.Debug("unusable Torznab offset param; using the first page",
+			"offset", logParam(rawOffset), "default", 0)
 	}
 	limit := defaultCapsLimit
 	raw := strings.TrimSpace(q.Get("limit"))

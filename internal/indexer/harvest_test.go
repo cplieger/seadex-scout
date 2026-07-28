@@ -715,7 +715,7 @@ func TestMatchHarvestSkipsEmptyTitlesAndKeepsFirstTitle(t *testing.T) {
 		{Title: "   ", InfoURL: "https://nyaa.si/view/1"},
 		{Title: "Second Title", InfoURL: "https://nyaa.si/view/2"},
 	}
-	if n, _, _ := matchHarvest(results, "nyaa", index, titles, ""); n != 0 {
+	if n, _, _ := matchHarvest(results, "nyaa", index, titles, nil, nil); n != 0 {
 		t.Errorf("matchHarvest = %d matches, want 0", n)
 	}
 	if _, ok := titles["nyaa:1"]; ok {
@@ -737,7 +737,7 @@ func TestMatchHarvestFailsClosedOnContradictoryIdentity(t *testing.T) {
 	results := []item{
 		{Title: "Tampered Title", InfoURL: "https://nyaa.si/view/1", GUID: "https://nyaa.si/view/2"},
 	}
-	if n, _, _ := matchHarvest(results, "nyaa", index, titles, ""); n != 0 {
+	if n, _, _ := matchHarvest(results, "nyaa", index, titles, nil, nil); n != 0 {
 		t.Errorf("matchHarvest = %d matches, want 0 (contradictory identity fails closed)", n)
 	}
 	if len(titles) != 0 {
@@ -745,27 +745,32 @@ func TestMatchHarvestFailsClosedOnContradictoryIdentity(t *testing.T) {
 	}
 }
 
-// TestMatchHarvestGradesRejectionsAgainstThePendingIndex pins the pending grade
-// the fruitless backstop reads (d-gpt-u8-1). A contradictory result is always
-// refused and always counted in harvest_rejected, but only a refusal that
-// touched one of OUR pending releases means this show harvested nothing: a
-// result whose comments and guid disagree with each other is refused before
-// either signal is looked up, and AnimeBytes answers the SAME broad
-// series-level corpus to every query, so one unrelated malformed item in that
-// corpus repeats across every show. Grading it as no-progress would let it
-// condemn the scope after consecutiveFruitlessLatch otherwise-clean shows.
-func TestMatchHarvestGradesRejectionsAgainstThePendingIndex(t *testing.T) {
-	index := map[string]string{"nyaa:1": "nyaa:1", "nyaa:2": "nyaa:2"}
+// TestMatchHarvestGradesRejectionsAgainstTheGroupsPendingKeys pins the pending
+// grade the fruitless backstop reads (d-gpt-u8-1, refined by h-f35). A
+// contradictory result is always refused and always counted in
+// harvest_rejected, but only a refusal that touched one of THIS GROUP's pending
+// releases means this show harvested nothing: a result whose comments and guid
+// disagree with each other is refused before either signal is looked up, and
+// AnimeBytes answers the SAME broad series-level corpus to every query, so one
+// unrelated malformed item in that corpus repeats across every show. Grading it
+// as no-progress - whether it belongs to no pending show at all, or to a
+// DIFFERENT pending show than the one queried - would let it condemn the scope
+// after consecutiveFruitlessLatch otherwise-clean shows.
+func TestMatchHarvestGradesRejectionsAgainstTheGroupsPendingKeys(t *testing.T) {
+	index := map[string]string{"nyaa:1": "nyaa:1", "nyaa:2": "nyaa:2", "nyaa:7": "nyaa:7"}
 	titles := map[string]string{}
 	results := []item{
-		// Both signals name pending releases: one of ours was refused.
+		// Both signals name this group's releases: one of ours was refused.
 		{Title: "Tampered Ours", InfoURL: "https://nyaa.si/view/1", GUID: "https://nyaa.si/view/2"},
 		// Self-contradictory, but neither id is pending: not ours at all.
 		{Title: "Tampered Stranger", InfoURL: "https://nyaa.si/view/900", GUID: "https://nyaa.si/view/901"},
+		// Self-contradictory and globally pending, but it belongs to a
+		// DIFFERENT group: this show refused nothing of its own.
+		{Title: "Tampered Other Show", InfoURL: "https://nyaa.si/view/7", GUID: "https://nyaa.si/view/902"},
 	}
-	matched, rejected, pendingRejected := matchHarvest(results, upstreamNyaa, index, titles, "")
-	if matched != 0 || rejected != 2 || pendingRejected != 1 {
-		t.Errorf("matchHarvest = %d matched / %d rejected / %d pendingRejected, want 0/2/1 (both refused, one of them ours)",
+	matched, rejected, pendingRejected := matchHarvest(results, upstreamNyaa, index, titles, nil, []string{"nyaa:1", "nyaa:2"})
+	if matched != 0 || rejected != 3 || pendingRejected != 1 {
+		t.Errorf("matchHarvest = %d matched / %d rejected / %d pendingRejected, want 0/3/1 (all refused, only one of them this group's)",
 			matched, rejected, pendingRejected)
 	}
 	if len(titles) != 0 {
@@ -785,7 +790,7 @@ func TestMatchHarvestFailsClosedWhenURLAndHashResolveToDifferentReleases(t *test
 		Title: "Tampered Title", InfoURL: "https://nyaa.si/view/1",
 		GUID: "https://nyaa.si/view/1", InfoHash: hash,
 	}}
-	if n, _, _ := matchHarvest(results, "nyaa", index, titles, ""); n != 0 {
+	if n, _, _ := matchHarvest(results, "nyaa", index, titles, nil, nil); n != 0 {
 		t.Errorf("matchHarvest = %d matches, want 0 (URL and hash resolving to different releases must fail closed)", n)
 	}
 	if len(titles) != 0 {
@@ -802,7 +807,7 @@ func TestMatchHarvestRejectsCrossScopeKey(t *testing.T) {
 	index := map[string]string{"ab:300": "ab:300"}
 	titles := map[string]string{}
 	results := []item{{Title: "AB title from the nyaa upstream", InfoURL: "https://animebytes.tv/torrent/300/group", GUID: "https://animebytes.tv/torrent/300/group"}}
-	if n, _, _ := matchHarvest(results, "nyaa", index, titles, ""); n != 0 {
+	if n, _, _ := matchHarvest(results, "nyaa", index, titles, nil, nil); n != 0 {
 		t.Errorf("matchHarvest = %d matches, want 0 (a cross-scope key must not title the other tracker's item)", n)
 	}
 	if len(titles) != 0 {
@@ -825,7 +830,7 @@ func TestMatchHarvestRejectsOversizedTitle(t *testing.T) {
 		{Title: "Normal Title - S01 (1080p) [G]", InfoURL: "https://nyaa.si/view/2"},
 		{Title: atCap, InfoURL: "https://nyaa.si/view/3"},
 	}
-	if n, _, _ := matchHarvest(results, "nyaa", index, titles, ""); n != 2 {
+	if n, _, _ := matchHarvest(results, "nyaa", index, titles, nil, nil); n != 2 {
 		t.Errorf("matchHarvest = %d matches, want 2 (the normal and the exactly-at-cap titles cache)", n)
 	}
 	if titles["nyaa:3"] != atCap {
@@ -1303,6 +1308,56 @@ func TestHarvestOpportunisticMatchSkipsSatisfiedGroup(t *testing.T) {
 	}
 }
 
+// TestHarvestOpportunisticMatchUsesTheOtherShowsVocabulary pins h-f37: the
+// identity index is GLOBAL, so one show's page routinely resolves ANOTHER
+// pending show's items too - and that show's alias choice must be made against
+// its OWN trusted title, not against the title of whichever show happened to be
+// queried. Show A's page carries two aliases of show B's torrent; the English
+// one wins the ASCII fallback, so a per-query show title (A's, which neither
+// alias contains) would cache the English alias for an arr that carries B under
+// its Romaji name - a title Sonarr cannot match, worse than the synthesized one
+// it replaced.
+func TestHarvestOpportunisticMatchUsesTheOtherShowsVocabulary(t *testing.T) {
+	const (
+		english = "Show B English Longer Title S01 1080p BluRay [G]"
+		romaji  = "Shou Bii S01 1080p [G]"
+	)
+	if asciiAlnums(english) <= asciiAlnums(romaji) {
+		t.Fatalf("premise broken: the English alias must win the ASCII fallback (%d vs %d)",
+			asciiAlnums(english), asciiAlnums(romaji))
+	}
+	mock, srv := newHarvestMock(func(int) string {
+		return torznabBody(
+			torznabItem("Show A S01 1080p BluRay [G]", "https://nyaa.si/view/42"),
+			torznabItem(english, "https://nyaa.si/view/43"),
+			torznabItem(romaji, "https://nyaa.si/view/43"),
+		)
+	})
+	defer srv.Close()
+
+	feeds := map[string][]journalItem{
+		upstreamNyaa: {
+			{item: item{Title: "Show A"}, Key: "nyaa:42", AniListID: 7},
+			{item: item{Title: "Show B"}, Key: "nyaa:43", AniListID: 8},
+		},
+	}
+	// B's arr carries the Romaji title; A's does not appear in either alias.
+	info := map[int]EntryInfo{7: {Title: "Show A"}, 8: {Title: "Shou Bii"}}
+	log, _ := capture.New()
+	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
+	}}, log, srv.Client())
+	titles := map[string]string{}
+	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
+
+	if mock.calls() != 1 || stats.queries != 1 {
+		t.Errorf("harvest queries = %d (HTTP calls %d), want 1 (B is titled opportunistically)", stats.queries, mock.calls())
+	}
+	if got := titles["nyaa:43"]; got != romaji {
+		t.Errorf("titles[nyaa:43] = %q, want B's own arr vocabulary %q", got, romaji)
+	}
+}
+
 // TestHarvestRequestRejectionResetsMalformedRun pins the harvestShowFailed
 // arm of updateHarvestScopeState: a request-scoped Torznab rejection resets
 // the consecutive-malformed run like a success, so two separated malformed
@@ -1760,7 +1815,7 @@ func TestPendingHarvestSkipsCrossScopeJournalKey(t *testing.T) {
 			{item: item{Title: "synthetic"}, Key: "nyaa:42", AniListID: 7},
 		},
 	}
-	groups, index := pendingHarvest(feeds, map[string]string{}, info)
+	groups, index, _ := pendingHarvest(feeds, map[string]string{}, info)
 	if len(groups) != 1 || groups[0].scope != upstreamNyaa || len(groups[0].keys) != 1 || groups[0].keys[0] != "nyaa:42" {
 		t.Fatalf("pendingHarvest groups = %+v, want only nyaa:42 grouped under the nyaa feed", groups)
 	}
@@ -1788,7 +1843,7 @@ func TestPendingHarvestRetiresAmbiguousInfoHash(t *testing.T) {
 			{item: item{Title: "synthetic", InfoHash: hash}, Key: "nyaa:2", AniListID: 7},
 		},
 	}
-	_, index := pendingHarvest(feeds, map[string]string{}, info)
+	_, index, showTitles := pendingHarvest(feeds, map[string]string{}, info)
 	if owner, ok := index[hash]; ok {
 		t.Errorf("index[hash] = %q, want the shared hash retired (it names neither item)", owner)
 	}
@@ -1797,7 +1852,7 @@ func TestPendingHarvestRetiresAmbiguousInfoHash(t *testing.T) {
 		{Title: "Real Title 1", InfoURL: "https://nyaa.si/view/1", GUID: "https://nyaa.si/view/1", InfoHash: hash},
 		{Title: "Real Title 2", InfoURL: "https://nyaa.si/view/2", GUID: "https://nyaa.si/view/2", InfoHash: hash},
 	}
-	matched, rejected, _ := matchHarvest(results, upstreamNyaa, index, titles, "Show")
+	matched, rejected, _ := matchHarvest(results, upstreamNyaa, index, titles, showTitles, []string{"nyaa:1", "nyaa:2"})
 	if matched != 2 || rejected != 0 {
 		t.Errorf("matchHarvest = %d matched / %d rejected, want 2/0 (a shared hash corroborates neither item, it contradicts nothing)", matched, rejected)
 	}
@@ -1887,6 +1942,26 @@ func TestPreferredHarvestTitlePicksTheArrsVocabulary(t *testing.T) {
 			showTitle:  "Frieren: Beyond Journey's End",
 			want:       jp,
 		},
+		// h-f36: a one- to three-character title key occurs inside ordinary
+		// release metadata ("x" in Remux/x265), so a normalized substring test
+		// admits the FIRST alias whatever its vocabulary. A short key needs
+		// token-boundary evidence, which the normalized form threw away.
+		"a short title key is not matched inside release metadata": {
+			candidates: []string{
+				"[Group] エックス - S01 (BD Remux 1080p x265)",
+				"[Group] X - S01 (BD Remux 1080p x265)",
+			},
+			showTitle: "X",
+			want:      "[Group] X - S01 (BD Remux 1080p x265)",
+		},
+		"a short title key still matches its own token": {
+			candidates: []string{
+				"[Group] 케이온 - S01 (BD 1080p)",
+				"[Group] K-On! - S01 (BD 1080p)",
+			},
+			showTitle: "K-On!",
+			want:      "[Group] K-On! - S01 (BD 1080p)",
+		},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -1912,7 +1987,8 @@ func TestMatchHarvestChoosesAmongABAliasesOnOnePage(t *testing.T) {
 	index := map[string]string{"ab:1167293": "ab:1167293"}
 	titles := map[string]string{}
 
-	matched, rejected, _ := matchHarvest(results, upstreamAB, index, titles, "Frieren: Beyond Journey's End")
+	matched, rejected, _ := matchHarvest(results, upstreamAB, index, titles,
+		map[string]string{"ab:1167293": "Frieren: Beyond Journey's End"}, []string{"ab:1167293"})
 
 	if matched != 1 || rejected != 0 {
 		t.Errorf("matched = %d, rejected = %d; want 1 and 0 (three aliases are ONE torrent)", matched, rejected)
@@ -2198,6 +2274,66 @@ func TestHarvestUnrelatedConflictsDoNotLatchTheScope(t *testing.T) {
 	// The refusals are still counted, so a tampered feed stays observable.
 	if stats.rejected != len(names) {
 		t.Errorf("harvest_rejected = %d, want %d (every page refused the stranger)", stats.rejected, len(names))
+	}
+}
+
+// TestHarvestOtherGroupsConflictsDoNotLatchTheScope pins h-f35: the pending
+// grade is GROUP-local, not merely index-global. AnimeBytes answers the same
+// broad series-level corpus to every query, so one self-contradictory item
+// belonging to a DIFFERENT pending show repeats across every otherwise ordinary
+// miss; charging it as "this show resolved nothing" latched the scope after
+// consecutiveFruitlessLatch clean shows and left the one show whose real title
+// was on offer unqueried, with time and rotation still to spend.
+func TestHarvestOtherGroupsConflictsDoNotLatchTheScope(t *testing.T) {
+	const (
+		latchMsg = "indexer title harvest: no show made progress; skipping this upstream's remaining shows this rebuild"
+		lastShow = "Show G"
+	)
+	// Self-contradictory (guid and comments name two different releases) AND
+	// pending - but pending for the LAST group only, never for the show being
+	// queried until the rotation reaches it.
+	foreign := `<item><title>Contradictory Item Of A Later Show</title><guid>https://nyaa.si/view/16</guid>` +
+		`<comments>https://nyaa.si/view/901</comments>` +
+		`<enclosure url="http://prowlarr:9696/1/download?link=abc" length="1" type="application/x-bittorrent"/></item>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		items := []string{foreign}
+		if r.URL.Query().Get("q") == lastShow {
+			items = append(items, torznabItem("Show G Real Title", "https://nyaa.si/view/16"))
+		}
+		_, _ = io.WriteString(w, strings.ReplaceAll(torznabBody(items...), "http://prowlarr:9696", "http://"+r.Host))
+	}))
+	defer srv.Close()
+
+	// Seven shows (one more than consecutiveFruitlessLatch); groups run in
+	// AniList-ID order, so the contradiction's owner is queried last.
+	names := []string{"Show A", "Show B", "Show C", "Show D", "Show E", "Show F", lastShow}
+	feeds := map[string][]journalItem{upstreamNyaa: {}}
+	info := map[int]EntryInfo{}
+	for i, name := range names {
+		feeds[upstreamNyaa] = append(feeds[upstreamNyaa],
+			journalItem{item: item{Title: "synthetic"}, Key: "nyaa:" + strconv.Itoa(10+i), AniListID: 7 + i})
+		info[7+i] = EntryInfo{Title: name}
+	}
+	log, rec := capture.New()
+	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
+	}}, log, srv.Client())
+	titles := map[string]string{}
+	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles, func(alID int) EntryInfo { return info[alID] }, "")
+
+	if stats.queries != len(names) {
+		t.Errorf("harvest queries = %d, want %d: a refusal naming ANOTHER group's release is not this show's no-progress",
+			stats.queries, len(names))
+	}
+	if got := titles["nyaa:16"]; got != "Show G Real Title" {
+		t.Errorf("titles[nyaa:16] = %q, want the last show harvested (%v)", got, titles)
+	}
+	if rec.Contains(latchMsg) {
+		t.Errorf("scope latched on another group's conflicts; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+	if stats.rejected != len(names) {
+		t.Errorf("harvest_rejected = %d, want %d (every page refused the contradictory item)", stats.rejected, len(names))
 	}
 }
 

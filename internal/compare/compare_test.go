@@ -242,6 +242,40 @@ func TestObtainableLinksPromotesDuplicateToHeadlineRank(t *testing.T) {
 	}
 }
 
+// TestCompareOrdersEqualURLLinksByTracker pins the tracker tie-break of the
+// link order: two reachable best torrents can publish the same canonical URL
+// under different known tracker labels, and without the final tracker
+// comparison Finding.Links (and notify's release_urls rendering) would follow
+// the upstream PocketBase relation order.
+func TestCompareOrdersEqualURLLinksByTracker(t *testing.T) {
+	const sharedURL = "https://nyaa.si/view/990"
+	entry := seadex.Entry{AniListID: 990, Torrents: []seadex.Torrent{
+		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: sharedURL},
+		{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "AnimeTosho", URL: sharedURL},
+	}}
+	m := match.Match{
+		Item:   &library.Item{Title: "Equal URL", SeasonGroups: map[int][]string{1: {"erai-raws"}}},
+		Arr:    library.ArrSonarr,
+		Entry:  entry,
+		Record: mapping.Record{SeasonTvdb: 1},
+	}
+
+	forward := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	entry.Torrents[0], entry.Torrents[1] = entry.Torrents[1], entry.Torrents[0]
+	m.Entry = entry
+	reversed := comparer(filter.Options{}, false).Compare([]match.Match{m})
+	want := []ReleaseLink{
+		{Tracker: "AnimeTosho", URL: sharedURL, Headline: true},
+		{Tracker: "Nyaa", URL: sharedURL, Headline: true},
+	}
+	if len(forward) != 1 || !reflect.DeepEqual(forward[0].Links, want) {
+		t.Fatalf("forward links = %+v, want %+v", forward, want)
+	}
+	if len(reversed) != 1 || !reflect.DeepEqual(reversed[0].Links, want) {
+		t.Errorf("reversed links = %+v, want %+v", reversed, want)
+	}
+}
+
 func comparer(opts filter.Options, excludeSpecials bool) *Comparer {
 	return NewComparer(Config{Filter: opts, ExcludeSpecials: excludeSpecials})
 }

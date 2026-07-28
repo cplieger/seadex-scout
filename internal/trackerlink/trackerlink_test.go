@@ -50,6 +50,19 @@ func TestPublish(t *testing.T) {
 	}
 }
 
+// TestPublishUnknownTrackerDropsCanonicalAbsoluteURL pins the unknown-label
+// gate itself, which TestPublish's unknown-tracker rows cannot: they use a
+// non-canonical host (example.test), so they drop on the canonical-host gate
+// whether or not the label is resolved first. A CANONICAL absolute URL under an
+// unknown label isolates the label gate - the concrete regression where
+// absolute-URL handling moves ahead of tracker resolution would publish this.
+func TestPublishUnknownTrackerDropsCanonicalAbsoluteURL(t *testing.T) {
+	const rawURL = "https://nyaa.si/view/1"
+	if got := Publish("unknown", rawURL); got != "" {
+		t.Errorf("Publish(%q, %q) = %q, want empty for unknown tracker", "unknown", rawURL, got)
+	}
+}
+
 // TestPublishRejectsUnsafeSchemes pins the unsafe-scheme and
 // malformed-URL gate on the untrusted upstream URL: javascript:, data:, and
 // file: values must never be converted into clickable tracker links, and a
@@ -90,41 +103,42 @@ func TestPublishRejectsUnsafeSchemes(t *testing.T) {
 	}
 }
 
-// TestUsableRelative pins the relative-publisher helper's own contract,
-// independent of urlform.Classify's routing: any value whose first colon
-// precedes a slash is unusable as a relative path and drops - including the
-// degenerate colon-at-index-0 form no Classify class currently routes here -
-// while a colon safely inside a later path segment publishes, and a missing
-// leading slash is added exactly once.
-func TestUsableRelative(t *testing.T) {
-	tests := []struct{ name, raw, want string }{
-		{name: "leading colon drops", raw: ":8080/x", want: ""},
-		{name: "colon before any slash drops", raw: "a:b/c", want: ""},
-		{name: "query-leading colon drops", raw: "?x:y", want: ""},
-		{name: "colon after slash publishes", raw: "path/a:b", want: "https://nyaa.si/path/a:b"},
-		{name: "leading slash kept", raw: "/view/1", want: "https://nyaa.si/view/1"},
-		{name: "missing slash added", raw: "view/1", want: "https://nyaa.si/view/1"},
-		// The shape floor (l-f88): a structureless token is not a torrent page,
-		// so it drops instead of publishing a plausible-looking 404. The live
-		// catalogue carries exactly one such record (AB, url "Chihiro" - a
-		// release-group name typed into the url field).
-		{name: "bare single-segment token drops", raw: "view", want: ""},
-		{name: "bare rooted single-segment token drops", raw: "/Chihiro", want: ""},
-		{name: "single segment with a query publishes", raw: "/torrents.php?id=1&torrentid=2", want: "https://nyaa.si/torrents.php?id=1&torrentid=2"},
-		{name: "single segment with a fragment publishes", raw: "/view#1", want: "https://nyaa.si/view#1"},
-		{name: "root alone drops", raw: "/", want: ""},
-		// pathShaped's query/fragment arm requires the delimiter past index 1
-		// of the rooted value: a value that is ONLY a query or fragment has no
-		// path segment at all, so publishing it would emit the tracker root
-		// ("https://nyaa.si/?id=1") - the plausible-looking 404 the shape floor
-		// exists to refuse.
-		{name: "query-only value drops", raw: "?id=1", want: ""},
-		{name: "fragment-only value drops", raw: "#1167293", want: ""},
+// TestPublishRelativeShapeFloor pins the relative arm's shape floor (l-f88)
+// through the PUBLIC publisher rather than the unexported helper, so a
+// behavior-preserving rename, inline, or decomposition of that helper cannot
+// break the suite while Publish keeps returning identical links. It keeps only
+// the distinct externally observable cases: a colon safely inside a later path
+// segment publishes, and a structureless token drops instead of publishing a
+// plausible-looking 404 (the live catalogue carries exactly one such record -
+// AB, url "Chihiro", a release-group name typed into the url field). A value
+// that is ONLY a query or fragment has no path segment at all, so publishing it
+// would emit the tracker root ("https://nyaa.si/?id=1"), which the floor
+// refuses; and a delimiter-only tail ("/view?", "/view#") carries no
+// identifying content, so it resolves to the same page as the bare
+// single-segment path and drops with it (h-f30). The colon-before-slash and
+// leading-slash-normalization rows live in
+// TestPublishRejectsUnsafeSchemes and TestPublish.
+func TestPublishRelativeShapeFloor(t *testing.T) {
+	tests := map[string]struct {
+		raw  string
+		want string
+	}{
+		"colon after slash publishes":           {raw: "path/a:b", want: "https://nyaa.si/path/a:b"},
+		"bare single-segment token drops":       {raw: "view", want: ""},
+		"rooted single-segment token drops":     {raw: "/Chihiro", want: ""},
+		"single-segment query publishes":        {raw: "/view?id=1", want: "https://nyaa.si/view?id=1"},
+		"single-segment fragment publishes":     {raw: "/view#1", want: "https://nyaa.si/view#1"},
+		"root alone drops":                      {raw: "/", want: ""},
+		"query without a path segment drops":    {raw: "?id=1", want: ""},
+		"fragment without a path segment drops": {raw: "#1167293", want: ""},
+		"delimiter-only query drops":            {raw: "/view?", want: ""},
+		"delimiter-only fragment drops":         {raw: "/view#", want: ""},
+		"delimiter-only pair drops":             {raw: "/view?#", want: ""},
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := usableRelative(tc.raw, "https://nyaa.si"); got != tc.want {
-				t.Errorf("usableRelative(%q) = %q, want %q", tc.raw, got, tc.want)
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := Publish("Nyaa", tc.raw); got != tc.want {
+				t.Errorf("Publish(%q, %q) = %q, want %q", "Nyaa", tc.raw, got, tc.want)
 			}
 		})
 	}
@@ -133,7 +147,8 @@ func TestUsableRelative(t *testing.T) {
 // TestPublishPortBoundaries pins the publisher's shared port rule
 // (portOK) at the 16-bit boundary through the PUBLIC publisher, on real raw
 // upstream values rather than a fabricated classifier result: the maximum port
-// publishes, a port above the 16-bit range drops, and a non-numeric port
+// publishes, a port above the 16-bit range drops, port zero drops (it parses
+// as a uint16 but names no destination port), and a non-numeric port
 // drops (net/url cannot read the authority at all). TestPublish continues to
 // cover schemeless-host recovery and the labeled-relative fallback.
 func TestPublishPortBoundaries(t *testing.T) {
@@ -145,6 +160,8 @@ func TestPublishPortBoundaries(t *testing.T) {
 		{name: "maximum port is published", url: "https://nyaa.si:65535/view/1", want: "https://nyaa.si:65535/view/1"},
 		{name: "port above maximum drops", url: "https://nyaa.si:65536/view/1", want: ""},
 		{name: "nonnumeric port drops", url: "https://nyaa.si:abc/view/1", want: ""},
+		{name: "port zero drops", url: "https://nyaa.si:0/view/1", want: ""},
+		{name: "padded port zero drops", url: "https://nyaa.si:00/view/1", want: ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -235,6 +252,12 @@ func TestPublishRequiresATargetBeyondTheHost(t *testing.T) {
 		"a delimiter-only fragment tail drops":     {"Nyaa", "nyaa.si/#", ""},
 		"a doubled root slash drops":               {"Nyaa", "nyaa.si//", ""},
 		"an absolute delimiter-only tail drops":    {"Nyaa", "https://nyaa.si/?", ""},
+		"a dot-segment-only tail drops":            {"Nyaa", "nyaa.si/.", ""},
+		"a double-dot-only tail drops":             {"Nyaa", "nyaa.si/..", ""},
+		"an absolute dot-segment tail drops":       {"Nyaa", "https://nyaa.si/.", ""},
+		"an encoded dot segment drops":             {"Nyaa", "https://nyaa.si/%2e", ""},
+		"an encoded double-dot segment drops":      {"Nyaa", "https://nyaa.si/%2e%2e/", ""},
+		"a dot segment before a target publishes":  {"Nyaa", "https://nyaa.si/../view/1", "https://nyaa.si/../view/1"},
 		"a targeted root query still publishes":    {"Nyaa", "nyaa.si/?page=view&tid=1", "https://nyaa.si/?page=view&tid=1"},
 		"a real torrent path still publishes":      {"Nyaa", "nyaa.si/view/1", "https://nyaa.si/view/1"},
 		"an absolute torrent path still publishes": {"Nyaa", "https://nyaa.si/view/1", "https://nyaa.si/view/1"},

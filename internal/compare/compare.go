@@ -64,6 +64,17 @@ const (
 type ReleaseLink struct {
 	Tracker string
 	URL     string
+	// Headline reports whether this link belongs to the HEADLINE candidate's
+	// group - the group Finding.RecommendedGroup names. It carries
+	// obtainableLinks' already-computed affinity to the consumer as data,
+	// because slice ORDER alone is not enough: notify.trackerURLs picks per
+	// tracker CLASS, so a Nyaa link from another recommended group would
+	// otherwise outrank a headline-group link on a different public tracker
+	// and the alert's clickable URL would not belong to the group the same
+	// line names. The zero value (false) is safe: with no producer affinity
+	// supplied, every link is a non-headline source and the tracker-class
+	// preference decides alone.
+	Headline bool
 }
 
 // Finding is one comparison result for a library item. It carries the
@@ -340,7 +351,12 @@ func obtainableLinks(pool []candidate, headlineGroup string) []ReleaseLink {
 	slices.SortFunc(sources, compareSourcedLinks)
 	links := make([]ReleaseLink, 0, len(sources))
 	for i := range sources {
-		links = append(links, sources[i].link)
+		link := sources[i].link
+		// Carry the rank to the consumer as data, not just as slice order:
+		// notify.trackerURLs selects per tracker class, so order alone loses
+		// the affinity (see ReleaseLink.Headline).
+		link.Headline = sources[i].rank == 0
+		links = append(links, link)
 	}
 	return links
 }

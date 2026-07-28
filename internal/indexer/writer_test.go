@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -221,7 +222,7 @@ func TestRebuildPersistsABItemsGUIDOnly(t *testing.T) {
 	// The reader derives the served AB link from the GUID and its own
 	// configured passkey on load, so the feed serves grabbable links even
 	// though the snapshot holds none.
-	ix := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: passkey}}, nil, Upstreams{})
+	ix := warmedIndexer(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: passkey}}, nil, Upstreams{})
 	served := ix.feedFor(upstreamAB)
 	if len(served) != 1 {
 		t.Fatalf("served ab feed = %d items, want 1", len(served))
@@ -834,14 +835,14 @@ func TestValidPersistedItemAcceptsMaxFieldLength(t *testing.T) {
 	}
 }
 
-// TestRebuildWarnedIdentityPropagatesTransitively pins the fixpoint loop in
-// collectWarnedIdentities across MORE than one sweep: A (Broken, nyaa:1+H1)
+// TestRebuildWarnedIdentityPropagatesTransitively pins the transitive closure in
+// collectWarnedIdentities across MORE than one hop: A (Broken, nyaa:1+H1)
 // links B (nyaa:2+H1) by hash, and B links C (a nyaa:2 occurrence carrying
-// H2) by key, so H2 enters the warned identity set only on the SECOND sweep
-// (entries are ordered so C is scanned before B). A previously journaled item
-// whose stored info hash is H2 must be retracted through ws.ids; a
-// single-sweep regression (dropping the for-loop around
-// propagateWarnedIdentities) would leave it serving warned bytes on RSS while
+// H2) by key, so H2 is only reachable through B (entries are ordered so C is
+// scanned before B, which is what used to require a second sweep). A previously
+// journaled item whose stored info hash is H2 must be retracted through ws.ids;
+// a single-hop regression (a traversal that stops expanding after the directly
+// warned nodes) would leave it serving warned bytes on RSS while
 // every existing warned-exclusion test still passes.
 func TestRebuildWarnedIdentityPropagatesTransitively(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
@@ -1427,5 +1428,131 @@ func TestSplitCurationWarnedLeavesInputUnmutated(t *testing.T) {
 	}
 	if _, ok := ws.keys["nyaa:41"]; !ok {
 		t.Errorf("warned key set = %v, want the warned nyaa:41 key", ws.keys)
+	}
+}
+
+// TestDecodeSnapshotRejectsJournalItemWithoutIdentity pins the shared decode
+// gate's journal-record invariant (h-f2): in a post-journal snapshot (seen
+// ledger present) every feed item must carry a Key and a nonzero FirstSeen, or
+// the whole snapshot is structurally invalid. Without it the READER installs
+// and serves a timestamp-less item indefinitely - the writer's carry gate drops
+// that shape, but in resident-idle mode no rebuild ever runs it - so the item
+// escapes the bounded journal window entirely. A pre-journal snapshot (no seen
+// ledger) stays exempt so a legacy file still yields a usable search curation
+// set.
+func TestDecodeSnapshotRejectsJournalItemWithoutIdentity(t *testing.T) {
+	tests := []struct {
+		name   string
+		doc    string
+		reject bool
+	}{
+		{
+			name:   "post-journal item without FirstSeen rejected",
+			doc:    `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Key":"nyaa:1","Title":"x","GUID":"https://nyaa.si/view/1"}],"ab_feed":[]}`,
+			reject: true,
+		},
+		{
+			name:   "post-journal item without Key rejected",
+			doc:    `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Title":"x","GUID":"https://nyaa.si/view/1"}],"ab_feed":[]}`,
+			reject: true,
+		},
+		{
+			name:   "post-journal item with both accepted",
+			doc:    `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Key":"nyaa:1","Title":"x","GUID":"https://nyaa.si/view/1"}],"ab_feed":[]}`,
+			reject: false,
+		},
+		{
+			name:   "pre-journal snapshot exempt",
+			doc:    `{"by_hash":{},"by_key":{},"nyaa_feed":[{"Title":"x","GUID":"https://nyaa.si/view/1"}],"ab_feed":[]}`,
+			reject: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, reason, err := decodeSnapshot([]byte(tc.doc))
+			if err != nil {
+				t.Fatalf("decodeSnapshot error = %v, want a structural verdict", err)
+			}
+			if tc.reject && reason == "" {
+				t.Error("reason = \"\", want the journal-identity rejection")
+			}
+			if !tc.reject && reason != "" {
+				t.Errorf("reason = %q, want the snapshot accepted", reason)
+			}
+		})
+	}
+}
+
+// TestDecodeSnapshotBoundsCardinality pins the decode-amplification bound
+// (h-f4): maxFeedBytes caps the SERIALIZED file, which does not bound what a
+// decode allocates - a document far below the byte cap can encode millions of
+// compact array elements or map entries, each costing tens of bytes of live
+// heap, so json.Unmarshal would materialize hundreds of MB past the 256 MiB
+// container budget before any per-item validation could reject it. Both
+// documents here stay well under maxFeedBytes and must still be refused.
+func TestDecodeSnapshotBoundsCardinality(t *testing.T) {
+	feed := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[` +
+		strings.TrimSuffix(strings.Repeat("{},", maxSnapshotFeedItems+1), ",") + `],"ab_feed":[]}`
+	if len(feed) > maxFeedBytes {
+		t.Fatalf("over-cardinality feed document = %d bytes, want it under the %d byte cap", len(feed), maxFeedBytes)
+	}
+	if _, _, _, err := decodeSnapshot([]byte(feed)); err == nil {
+		t.Error("decodeSnapshot accepted a feed past its cardinality cap, want a bounded-decode error")
+	}
+
+	var ledger strings.Builder
+	ledger.WriteString(`{"by_hash":{},"by_key":{},"nyaa_feed":[],"ab_feed":[],"seen":{`)
+	for i := range maxSnapshotMapEntries + 1 {
+		if i > 0 {
+			ledger.WriteByte(',')
+		}
+		ledger.WriteString(`"nyaa:`)
+		ledger.WriteString(strconv.Itoa(i))
+		ledger.WriteString(`":true`)
+	}
+	ledger.WriteString("}}")
+	if ledger.Len() > maxFeedBytes {
+		t.Fatalf("over-cardinality ledger document = %d bytes, want it under the %d byte cap", ledger.Len(), maxFeedBytes)
+	}
+	if _, _, _, err := decodeSnapshot([]byte(ledger.String())); err == nil {
+		t.Error("decodeSnapshot accepted a seen ledger past its entry cap, want a bounded-decode error")
+	}
+}
+
+// TestCollectWarnedIdentitiesClosesReverseOrderedChain pins the transitive
+// closure on the shape the retired fixpoint form was quadratic on (h-f1): an
+// alternating key/hash chain listed in REVERSE order, where each sweep of a
+// re-scanning implementation could only discover one new link. Every node in
+// the chain must end up warned regardless of catalogue order.
+func TestCollectWarnedIdentitiesClosesReverseOrderedChain(t *testing.T) {
+	const links = 64
+	hash := func(i int) string { return fmt.Sprintf("%040x", i+1) }
+	// Entry i carries two occurrences of tracker key nyaa:i, one holding
+	// hash(i) and one holding hash(i+1), so hash(i+1) is the only bridge from
+	// nyaa:i to nyaa:i+1 - the chain is traversable hop by hop only. Entries
+	// are appended deepest-first so a re-scanning implementation discovers at
+	// most one new link per pass.
+	entries := make([]seadex.Entry, 0, links)
+	for i := links - 1; i >= 0; i-- {
+		torrents := []seadex.Torrent{
+			{Tracker: "Nyaa", URL: "https://nyaa.si/view/" + strconv.Itoa(i), InfoHash: hash(i)},
+			{Tracker: "Nyaa", URL: "https://nyaa.si/view/" + strconv.Itoa(i), InfoHash: hash(i + 1)},
+		}
+		if i == links-1 {
+			// Only the deepest link is directly curation-warned.
+			torrents[1].Tags = []string{"Broken"}
+		}
+		entries = append(entries, seadex.Entry{AniListID: i + 1, Torrents: torrents})
+	}
+
+	keys, all := collectWarnedIdentities(entries)
+	for i := range links {
+		key := "nyaa:" + strconv.Itoa(i)
+		if _, warned := keys[key]; !warned {
+			t.Fatalf("key %s not warned; the closure stopped short of the chain's far end (%d keys)", key, len(keys))
+		}
+		if _, warned := all[hash(i)]; !warned {
+			t.Errorf("hash for link %d not warned", i)
+		}
 	}
 }

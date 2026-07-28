@@ -91,11 +91,11 @@ func TestRepresentativeFileSkipsCreditlessForAbsolute(t *testing.T) {
 	}
 }
 
-// TestFeedSynthesisIgnoresSubHalfSizeSample pins that the feed's title and pack
-// synthesis judge the same payload the classification does (classify.PayloadFiles,
-// h-f10): a first-listed, episode-shaped sample far below half the largest
-// content file's size must neither headline the title nor count as an episode,
-// so the feed cannot disagree with the same torrent's finding or report row.
+// TestFeedSynthesisIgnoresSubHalfSizeSample pins PopulationFiles'
+// median-anchored census floor: a first-listed, episode-shaped sample below
+// half the population median must neither headline the title nor count as an
+// episode, so the feed cannot disagree with the same torrent's finding or
+// report row.
 func TestFeedSynthesisIgnoresSubHalfSizeSample(t *testing.T) {
 	const gib = 1 << 30
 	files := []seadex.File{
@@ -116,15 +116,15 @@ func TestFeedSynthesisIgnoresSubHalfSizeSample(t *testing.T) {
 	}
 }
 
-// TestFeedSynthesisCollapsesMixedLengthPack pins the user-visible half of
-// d-u5-c4-1: a real season pack whose premiere runs double length (or that
-// bundles the franchise movie) must still count every episode and collapse to
-// the season label. Under the max-anchored payload floor the regular episodes
-// all fell below half the longest file, so coveredEpisodes returned 1, isPack
-// went false, and the whole pack was served as "Show S01E01" - which Sonarr
-// grabs as a single episode, without the FullSeason ranking a pack earns. This
-// is the inverse of the v1.7.2 contract (a real multi-file pack collapses to
-// the season; only a single-episode torrent keeps its SxxExx).
+// TestFeedSynthesisCollapsesMixedLengthPack pins that a real season pack
+// whose premiere runs double length (or that bundles the franchise movie)
+// still counts every episode and collapses to the season label. A
+// max-anchored payload floor would drop the regular episodes below half the
+// longest file, so coveredEpisodes returned 1, isPack went false, and the
+// whole pack was served as "Show S01E01" - which Sonarr grabs as a single
+// episode, without the FullSeason ranking a pack earns. This is the inverse
+// of the v1.7.2 contract (a real multi-file pack collapses to the season;
+// only a single-episode torrent keeps its SxxExx).
 func TestFeedSynthesisCollapsesMixedLengthPack(t *testing.T) {
 	const gib = 1 << 30
 	episodes := func(from, to int, size int64) []seadex.File {
@@ -491,8 +491,9 @@ func TestDerivedTitlePackWithDirectoryOnlyEpisodeTokens(t *testing.T) {
 	}
 }
 
-// TestDerivedTitleAbsolutePackUnderSharedEpisodeTokenDirectory pins the h-f8 fix:
-// when a pack's files carry only absolute episode numbers in their own base names
+// TestDerivedTitleAbsolutePackUnderSharedEpisodeTokenDirectory pins that
+// per-file episode evidence outvotes a shared directory episode token: when a
+// pack's files carry only absolute episode numbers in their own base names
 // while a SHARED directory component carries an SxxExx token, each file must key on
 // its own absolute number (episodeKeyBase), so the torrent reads as the multi-episode
 // pack it is instead of collapsing onto the one directory token and being served as

@@ -274,22 +274,8 @@ func (w *Walker) walkSonarr(ctx context.Context) ([]Item, int, error) {
 	w.warnFilteredEmpty(ArrSonarr, len(series), len(kept), includeIDs != nil || excludeIDs != nil)
 
 	results, failed := w.fetchEpisodeItems(ctx, kept)
-	if err := ctx.Err(); err != nil {
+	if err := episodeFetchError(ctx, len(kept), failed); err != nil {
 		return nil, 0, err
-	}
-	if failed >= episodeFailureBudget {
-		return nil, 0, fmt.Errorf("episode fetches: %d series failed, hitting the walk failure budget of %d", failed, episodeFailureBudget)
-	}
-	// Sub-budget total failure: every kept series' episode fetch failed. The
-	// budget above is an absolute count a library with fewer kept series can
-	// never reach, and publishing a "partial" snapshot with zero usable file
-	// data would let the cycle read healthy through a total
-	// episode-file-endpoint outage - an arr ingest failure whatever the
-	// library size (a restart or config fix could recover it, the app's
-	// unhealthy semantic). The ctx check above keeps a shutdown from
-	// masquerading as a total failure.
-	if len(kept) > 0 && failed == len(kept) {
-		return nil, 0, fmt.Errorf("episode fetches: all %d kept series failed", failed)
 	}
 	items := make([]Item, 0, len(results))
 	for _, item := range results {
@@ -305,6 +291,31 @@ func (w *Walker) walkSonarr(ctx context.Context) ([]Item, int, error) {
 			"skipped", failed, "kept", len(kept))
 	}
 	return items, failed, nil
+}
+
+// episodeFetchError applies the episode-fetch failure policy over one walk's
+// fan-out result: a cancelled caller context, the absolute failure budget, and
+// the sub-budget total failure. It returns nil when the walk may publish a
+// (possibly partial) snapshot.
+func episodeFetchError(ctx context.Context, kept, failed int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if failed >= episodeFailureBudget {
+		return fmt.Errorf("episode fetches: %d series failed, hitting the walk failure budget of %d", failed, episodeFailureBudget)
+	}
+	// Sub-budget total failure: every kept series' episode fetch failed. The
+	// budget above is an absolute count a library with fewer kept series can
+	// never reach, and publishing a "partial" snapshot with zero usable file
+	// data would let the cycle read healthy through a total
+	// episode-file-endpoint outage - an arr ingest failure whatever the
+	// library size (a restart or config fix could recover it, the app's
+	// unhealthy semantic). The ctx check above keeps a shutdown from
+	// masquerading as a total failure.
+	if kept > 0 && failed == kept {
+		return fmt.Errorf("episode fetches: all %d kept series failed", failed)
+	}
+	return nil
 }
 
 // fetchEpisodeItems runs the bounded episode-fetch fan-out over the kept

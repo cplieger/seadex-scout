@@ -1,26 +1,10 @@
-// Package trackerlink decides whether an untrusted upstream torrent URL may be
-// PUBLISHED as a clickable tracker link, and in what form.
-//
-// It is one half of a single concern, and it sits beside the other half
-// deliberately: internal/filter owns the HIDE decision over the same two
-// untrusted inputs (filter.ABVisible / filter.ClassifyAB, both keyed on the
-// same (tracker, rawURL) pair), and this package owns the PUBLISH decision.
-// The two take deliberately OPPOSITE fail directions - publish-or-drop here,
-// extract-evidence-or-hide there - which is correct and documented at both
-// sites, but they read the same two fact sources (urlform's structural
-// classification and internal/release's canonical tracker table), so they
-// belong at one layer.
-//
-// It used to live as a method on the decoded wire struct inside internal/seadex
-// (the releases.moe read client), which split the concern across two layers and
-// made every consumer of the SeaDex model reach the tracker registry through the
-// HTTP client (l-f86). This package imports release + urlform only, exactly as
-// filter does, so it is a leaf: nothing here knows about SeaDex, HTTP, or the
-// app's flows.
+// Package trackerlink validates and canonicalizes untrusted tracker URLs for publication.
+// Values that cannot be bound to a known tracker are dropped.
 package trackerlink
 
 import (
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 
@@ -150,7 +134,10 @@ func schemelessPortOK(trimmed string) bool {
 }
 
 // portOK reports whether a URL port component is publishable: absent, or
-// numeric and inside the 16-bit range a real TCP port occupies. It is the
+// numeric and inside the 16-bit range a real TCP port occupies. Port 0 is
+// refused: it parses as a uint16 but names no destination port (it is the
+// kernel's "pick one" sentinel), so a link carrying it cannot connect - the
+// same reading the config URL validator already applies. It is the
 // SINGLE home of the publisher's port rule, so the absolute gate
 // (usableAbsolute) and the canonicalized schemeless publish
 // (schemelessPortOK) cannot drift apart.
@@ -158,8 +145,8 @@ func portOK(port string) bool {
 	if port == "" {
 		return true
 	}
-	_, err := strconv.ParseUint(port, 10, 16)
-	return err == nil
+	n, err := strconv.ParseUint(port, 10, 16)
+	return err == nil && n != 0
 }
 
 // publishRelative applies the shared inferred-owner-wins policy for
@@ -210,22 +197,32 @@ func usableRelative(raw, baseURL string) string {
 
 // pathShaped reports whether a rooted relative value has the shape of a torrent
 // page rather than a bare label: more than one non-empty path segment, or a
-// query/fragment carrying the identifying parameters. It reads the string
-// directly (no parse): the value already survived the colon rule, and the two
-// real tracker shapes are structural, not semantic.
+// single path segment plus a query/fragment carrying the identifying
+// parameters. It reads the string directly (no parse): the value already
+// survived the colon rule, and the two real tracker shapes are structural, not
+// semantic.
 func pathShaped(rooted string) bool {
+	pathPart := rooted
+	hasTargetParams := false
 	if i := strings.IndexAny(rooted, "?#"); i >= 0 {
-		// A query or fragment is where both trackers put the torrent id; the
-		// path half may legitimately be a single segment ("/torrents.php").
-		return i > 1
+		// A query or fragment is where both trackers put the torrent id, so it
+		// stands in for the second path segment - but only when it carries
+		// identifying content: a delimiter-only tail ("/view?", "/view#",
+		// "/view?#") resolves to the same page as the bare single-segment path
+		// the floor already refuses.
+		pathPart = rooted[:i]
+		hasTargetParams = strings.Trim(rooted[i:], "/?#") != ""
 	}
 	segments := 0
-	for seg := range strings.SplitSeq(rooted, "/") {
+	for seg := range strings.SplitSeq(pathPart, "/") {
 		if seg != "" {
 			segments++
 		}
 	}
-	return segments > 1
+	// A query/fragment never substitutes for the path segment itself: a value
+	// with no segment at all publishes the tracker root ("nyaa.si/?id=1"),
+	// which names no torrent page.
+	return segments > 1 || (segments == 1 && hasTargetParams)
 }
 
 // hostFormTargeted reports whether a host-bearing value names a target beyond
@@ -234,27 +231,38 @@ func pathShaped(rooted string) bool {
 // tracker's front page, which cannot identify the intended torrent - the same
 // plausible-404 publish the shape floor (l-f88) closed for the path-published
 // ladder, and the same reason to drop rather than publish, so the caller can
-// report an unpublishable URL instead. The authority is located by the "://"
-// separator (present in every absolute form usableAbsolute admits, since it
-// already required an http(s) scheme) and absent from a schemeless value.
+// report an unpublishable URL instead. The value is parsed to locate that
+// authority, with a scheme supplied first when the value carries none (a
+// schemeless value has no "://" separator, and net/url cannot recover an
+// authority without a scheme).
 //
-// The tail past that first delimiter must carry at least one NON-delimiter
-// character: a remainder made only of further delimiters ("nyaa.si/?",
-// "nyaa.si/#", "nyaa.si//") still resolves to the front page, so it names no
-// target either - the same reading pathShaped already applies to the
-// equivalent relative spellings. A genuinely targeted root query
+// The tail past the authority must name something a browser would resolve to
+// more than the front page. The reading is done on the PARSED, normalized URL
+// rather than on raw delimiters: a remainder made only of delimiters
+// ("nyaa.si/?", "nyaa.si/#", "nyaa.si//") and a remainder made only of
+// dot-segments ("nyaa.si/.", "nyaa.si/..", and their percent-encoded
+// spellings) both normalize back to the tracker root, so neither names a
+// target - the same reading pathShaped already applies to the equivalent
+// relative spellings. A genuinely targeted root query
 // ("nyaa.si/?page=view&tid=1") is kept, which is why this arm is not a
-// pathShaped delegation.
+// pathShaped delegation. An unparsable value names no target either (this
+// publisher drops what it cannot vouch for).
 func hostFormTargeted(trimmed string) bool {
-	rest := trimmed
-	if i := strings.Index(rest, "://"); i >= 0 {
-		rest = rest[i+len("://"):]
+	if !strings.Contains(trimmed, "://") {
+		// A schemeless value's authority is only recoverable by net/url once
+		// it carries a scheme; every canonical tracker is https, which is the
+		// scheme the schemeless branch publishes on.
+		trimmed = "https://" + trimmed
 	}
-	i := strings.IndexAny(rest, "/?#")
-	if i < 0 {
+	u, err := url.Parse(trimmed)
+	if err != nil {
 		return false
 	}
-	return strings.Trim(rest[i:], "/?#") != ""
+	if strings.Trim(u.RawQuery, "/?#") != "" || strings.Trim(u.Fragment, "/?#") != "" {
+		return true
+	}
+	cleaned := path.Clean(u.Path)
+	return cleaned != "." && cleaned != "/"
 }
 
 // httpsCanonical rewrites a vouched absolute link's cleartext scheme to https.

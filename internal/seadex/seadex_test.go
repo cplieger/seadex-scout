@@ -122,7 +122,7 @@ func TestFetchEntriesPaginationCapErrors(t *testing.T) {
 // zeroing a field.
 func TestFetchEntriesDecodesEveryPublishedField(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"totalItems":1,"totalPages":1,"items":[{"alID":154587,"notes":"curator note","theoreticalBest":"ideal remux","updated":"2026-01-02T03:04:05Z","incomplete":true,"expand":{"trs":[{"releaseGroup":"SubsPlease","tracker":"Nyaa","infoHash":"abc123","url":"https://nyaa.si/view/1","files":[{"name":"Frieren.mkv","length":123}],"tags":["best","dual"],"isBest":true,"dualAudio":true}]}}]}`)
+		fmt.Fprint(w, `{"totalItems":1,"totalPages":1,"items":[{"alID":154587,"id":"rec000001","created":"2026-01-02 03:04:05.000Z","notes":"curator note","theoreticalBest":"ideal remux","updated":"2026-01-02T03:04:05Z","incomplete":true,"expand":{"trs":[{"releaseGroup":"SubsPlease","tracker":"Nyaa","infoHash":"abc123","url":"https://nyaa.si/view/1","files":[{"name":"Frieren.mkv","length":123}],"tags":["best","dual"],"isBest":true,"dualAudio":true}]}}]}`)
 	}))
 	defer server.Close()
 

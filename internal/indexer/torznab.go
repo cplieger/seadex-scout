@@ -151,13 +151,15 @@ func writeItem(b *strings.Builder, it *item) {
 	if !it.PubDate.IsZero() {
 		writeText(b, "pubDate", it.PubDate.UTC().Format(time.RFC1123Z))
 	}
-	// Clamp like the peer counts below: toItem and totalSize normalize at
-	// their own ingresses, and validPersistedItem rejects persisted negative
-	// size/peer counts, but it does not validate category positivity, and
-	// search-path items rendered directly never pass the persistence gate -
-	// so an unclamped value here could still render a negative enclosure
-	// length/size attr or a non-positive category id, contradicting toItem's
-	// normalization.
+	// Clamp like the peer counts below: render-side validation is the final
+	// totality guard for direct/live item values, independent of persistence
+	// and parse normalization. toItem and totalSize normalize at their own
+	// ingresses and validPersistedItem re-checks the persisted domain
+	// (non-negative size/peer counts, positive category ids), but a
+	// search-path item is rendered directly and never passes any of those
+	// gates - so an unclamped value here could still render a negative
+	// enclosure length/size attr or a non-positive category id, contradicting
+	// toItem's normalization.
 	size := max(it.Size, 0)
 	if it.DownloadURL != "" {
 		b.WriteString(`<enclosure url="`)

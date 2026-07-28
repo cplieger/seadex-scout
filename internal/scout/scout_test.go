@@ -640,3 +640,50 @@ func TestSavePreservationRefusalWarnsInsteadOfErroring(t *testing.T) {
 		})
 	}
 }
+
+// slowCancelStore spends part of the shutdown budget inside its FIRST Save
+// before reporting the cancellation, then records the deadline its retry was
+// handed - the only way to observe how much grace the second attempt was given.
+type slowCancelStore struct {
+	spend        time.Duration
+	retryBudget  time.Duration
+	attempts     int
+	retryHadDead bool
+}
+
+func (s *slowCancelStore) Load(context.Context) (state.State, error) { return state.State{}, nil }
+
+func (s *slowCancelStore) Save(ctx context.Context, _ *state.State) error {
+	s.attempts++
+	if s.attempts == 1 {
+		time.Sleep(s.spend)
+		return context.Canceled
+	}
+	if dl, ok := ctx.Deadline(); ok {
+		s.retryHadDead, s.retryBudget = true, time.Until(dl)
+	}
+	return nil
+}
+
+// TestSaveRetryGetsOnlyTheRemainingGrace pins saveGrace as a bound on the WHOLE
+// shutdown save, not just the retry: a first attempt cancelled after already
+// spending part of the container stop grace must shorten the detached retry, not
+// be followed by a fresh full grace. Otherwise the total save can run past
+// SIGKILL and lose the AniList memo the retry exists to preserve.
+func TestSaveRetryGetsOnlyTheRemainingGrace(t *testing.T) {
+	const spend = saveGrace / 10
+	store := &slowCancelStore{spend: spend}
+	s := New(&Deps{Logger: slog.New(slog.DiscardHandler), Store: store})
+
+	s.save(context.Background(), &state.State{Baselined: true})
+
+	if store.attempts != 2 {
+		t.Fatalf("Save attempts = %d, want 2 (the cancellation takes the detached retry)", store.attempts)
+	}
+	if !store.retryHadDead {
+		t.Fatal("retry context carried no deadline, want the remaining shutdown budget")
+	}
+	if store.retryBudget <= 0 || store.retryBudget > saveGrace-spend/2 {
+		t.Errorf("retry budget = %v, want a positive value under %v (saveGrace minus the time the first attempt already spent)", store.retryBudget, saveGrace-spend/2)
+	}
+}

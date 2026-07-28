@@ -133,8 +133,8 @@ func TestAuditRowGroupsDoNotAliasTheSnapshot(t *testing.T) {
 	}
 }
 
-// TestAuditNotOnSeaDexHonorsExcludeSpecials pins the exclude_specials symmetry
-// (h-f6): with the filter on, a specials-only library item (its only Fribb
+// TestAuditNotOnSeaDexHonorsExcludeSpecials pins the exclude_specials symmetry:
+// with the filter on, a specials-only library item (its only Fribb
 // record is an OVA) must not surface as not_on_seadex — matching the
 // matched-rows arm, which drops specials — while a mixed series (a sibling TV
 // record sharing the TVDB id) stays catalogued and is still listed.
@@ -420,10 +420,9 @@ func TestAuditMalformedPublicURLListedUnobtainable(t *testing.T) {
 // ordering: rows group by verdict actionability (verdictOrder: unlisted, alt,
 // unverified, no_file, best, not_on_seadex); within a verdict they sort by
 // title case-insensitively; same-title rows sort by season ascending; and
-// same-season rows tie-break on AniList id ascending. The 2026-07-13 gremlins
-// tracker confirmed sortRows' comparator had no killing test
-// (CONDITIONALS_NEGATION mutants LIVED in all 3 runs on both the rank and the
-// title comparisons).
+// same-season rows tie-break on AniList id ascending. Pinned directly because
+// no other test exercises sortRows' comparator: inverting either the rank or
+// the title comparison must fail here.
 func TestSortRowsOrdersByVerdictTitleSeasonAniListID(t *testing.T) {
 	rows := []Row{
 		{Title: "zeta", Verdict: VerdictBest},
@@ -611,7 +610,7 @@ func TestAuditCurationWarnedReleaseAnnotatedNotCounted(t *testing.T) {
 }
 
 // TestAuditUnobtainableBestAnnotatedNotCounted pins the report-path
-// obtainability contract (option (b) of review finding h-f15): a SeaDex best
+// obtainability contract: a SeaDex best
 // the daemon's filter.Obtainable rule rejects (here: no usable URL) stays
 // LISTED, carrying an explicit Unobtainable marker, but counts as neither
 // best nor alt for the verdict - an on-disk group matching only an

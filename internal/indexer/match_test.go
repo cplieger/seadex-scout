@@ -334,3 +334,26 @@ func TestTrackerOwnURLReadsOneStructuralVocabulary(t *testing.T) {
 		})
 	}
 }
+
+// TestTrackerKeyRejectsNonHTTPTrackerURLs pins the HTTP(S)-only half of the
+// curation gate through the exported-to-the-package entry point: a host-bearing
+// URL on the canonical tracker host but on another scheme must not authorize a
+// tracker id. The table above cannot protect that branch - its javascript: case
+// is an opaque form with no recovered host, so it is refused before the scheme
+// check is reached - and without this case an ftp:// URL on nyaa.si /
+// animebytes.tv would mint a curation key for RSS and search matching.
+func TestTrackerKeyRejectsNonHTTPTrackerURLs(t *testing.T) {
+	tests := []struct {
+		name, tracker, raw string
+	}{
+		{"Nyaa FTP URL", "Nyaa", "ftp://nyaa.si/view/123"},
+		{"AnimeBytes FTP URL", "AB", "ftp://animebytes.tv/torrents.php?id=1&torrentid=456"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := trackerKey(tc.tracker, tc.raw); got != "" {
+				t.Errorf("trackerKey(%q, %q) = %q, want empty for a non-HTTP(S) URL", tc.tracker, tc.raw, got)
+			}
+		})
+	}
+}

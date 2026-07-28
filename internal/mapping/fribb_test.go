@@ -752,3 +752,37 @@ func TestParseFribb_ordinaryBodyUnaffectedByIdentifierBudget(t *testing.T) {
 		}
 	}
 }
+
+// TestRecordFromFormat_normalizesRoutingType pins the exported normalization
+// seam scout.applyMemoTyping and match.formatArr route an unmapped entry
+// through. anilist.knownFormat deliberately preserves an accepted LOWERCASE
+// format token verbatim, and every existing consumer test supplies uppercase
+// MOVIE/OVA, so dropping the normalizeType call here would silently route a
+// movie to Sonarr/Anime and lose an OVA's season-zero classification without
+// failing any other test.
+func TestRecordFromFormat_normalizesRoutingType(t *testing.T) {
+	tests := map[string]struct {
+		format      string
+		wantType    string
+		wantMovie   bool
+		wantSpecial bool
+	}{
+		"movie is canonicalized for Radarr routing":        {format: " movie ", wantType: "MOVIE", wantMovie: true},
+		"special is canonicalized for season-zero routing": {format: " ova ", wantType: "OVA", wantSpecial: true},
+		"blank format remains unknown":                     {format: "   ", wantType: ""},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := RecordFromFormat(tc.format)
+			if got.Type != tc.wantType {
+				t.Errorf("RecordFromFormat(%q).Type = %q, want %q", tc.format, got.Type, tc.wantType)
+			}
+			if got.IsMovie() != tc.wantMovie {
+				t.Errorf("RecordFromFormat(%q).IsMovie() = %v, want %v", tc.format, got.IsMovie(), tc.wantMovie)
+			}
+			if got.IsSpecial() != tc.wantSpecial {
+				t.Errorf("RecordFromFormat(%q).IsSpecial() = %v, want %v", tc.format, got.IsSpecial(), tc.wantSpecial)
+			}
+		})
+	}
+}

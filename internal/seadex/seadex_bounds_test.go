@@ -24,25 +24,38 @@ func repeatJSON(elem string, n int) string {
 // keysetCursorItem renders one entries record carrying a unique (created, id)
 // pair - the immutable keyset the walk pages on - with the given trs
 // cardinality, so a repeated hostile chunk body still advances the cursor
-// instead of tripping the no-progress guard. Its alID is unique per seq too,
+// instead of tripping the no-progress guard. Its id sorts after every id
+// distinctFillerItems hands the same chunk (the walk validates a chunk's whole
+// keyset sequence, so the cursor record must be the chunk's LAST key) and
+// before the next chunk's filler ids. Its alID is unique per seq too,
 // since FetchEntries requires one positive, unique AniList ID per entry across
 // the whole walk (validatePageIdentities); it sits above the ids
 // distinctFillerItems hands the same chunk's filler records.
 func keysetCursorItem(seq, torrents int) string {
-	return fmt.Sprintf(`{"alID":%d,"id":"rec%06d","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[%s]}}`,
-		(seq+1)*perPage, seq, repeatJSON(`{}`, torrents))
+	return fmt.Sprintf(`{"alID":%d,"id":%q,"created":"2026-01-02 03:04:05.000Z","expand":{"trs":[%s]}}`,
+		(seq+1)*perPage, keysetID(seq, perPage), repeatJSON(`{}`, torrents))
+}
+
+// keysetID renders the chunk-scoped, strictly increasing keyset id the walk's
+// sequence validation requires: chunk-major then record-minor, zero-padded so
+// the byte ordering the client compares matches the numeric one.
+func keysetID(seq, index int) string {
+	return fmt.Sprintf("rec%04d%06d", seq, index)
 }
 
 // distinctFillerItems joins count entries records with per-chunk-unique
-// positive alIDs and the given trs cardinality, for hostile-cardinality chunk
+// positive alIDs, strictly increasing keyset ids, and the given trs
+// cardinality, for hostile-cardinality chunk
 // bodies that must still satisfy the catalogue's primary-key invariant (one
-// positive, unique AniList ID per entry) so a cap assertion is not preempted
-// by validatePageIdentities.
+// positive, unique AniList ID per entry) and the keyset sequence the walk
+// validates, so a cap assertion is not preempted by validatePageIdentities or
+// the cursor guard.
 func distinctFillerItems(seq, count, torrents int) string {
 	trs := repeatJSON(`{}`, torrents)
 	elems := make([]string, count)
 	for i := range elems {
-		elems[i] = fmt.Sprintf(`{"alID":%d,"expand":{"trs":[%s]}}`, seq*perPage+i+1, trs)
+		elems[i] = fmt.Sprintf(`{"alID":%d,"id":%q,"created":"2026-01-02 03:04:05.000Z","expand":{"trs":[%s]}}`,
+			seq*perPage+i+1, keysetID(seq, i), trs)
 	}
 	return strings.Join(elems, ",")
 }
@@ -380,7 +393,7 @@ func TestSeadexWorkingSetBudget(t *testing.T) {
 // appended and complete pagination, not rejected as upstream misbehavior.
 func TestFetchAndAppendAcceptsPageExactlyFillingEntryCap(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"totalItems":1,"totalPages":1,"items":[{"alID":7,"expand":{"trs":[]}}]}`)
+		fmt.Fprint(w, `{"totalItems":1,"totalPages":1,"items":[{"alID":7,"id":"rec000007","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}}]}`)
 	}))
 	defer server.Close()
 

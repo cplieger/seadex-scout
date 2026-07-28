@@ -1,16 +1,19 @@
 package indexer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/cplieger/atomicfile/v2"
+	"github.com/cplieger/jsonx/bounded"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
@@ -35,7 +38,7 @@ const (
 	// minimal entry ("nyaa:1":true, 14 JSON bytes) costs ~48+ bytes of live
 	// heap, so the cap must stay several times below the 256 MiB container
 	// limit (the same budget maxPersistedFieldBytes is reasoned against) or a
-	// corrupted/hand-edited file OOMs the process inside New's warm-up reload -
+	// corrupted/hand-edited file OOMs the process inside Run's warm-up reload -
 	// before the listener serves, and again on every restart, crashlooping the
 	// compare loop with it. The whole current SeaDex catalogue plus the
 	// never-pruned seen ledger and a 14-day journal serialize to a few MB, so
@@ -87,6 +90,23 @@ const (
 	// serialize to ~1 MB, so 8 MiB leaves years of headroom while staying
 	// well inside maxFeedBytes.
 	maxPersistedSeenBytes = 8 << 20
+	// maxSnapshotFeedItems caps ONE persisted journal feed's item count at
+	// decode time, and maxSnapshotMapEntries / maxSnapshotMapEntriesTotal cap
+	// one curation/ledger map and all of them together. maxFeedBytes bounds
+	// the SERIALIZED file, which is not the same bound: a 16 MiB document can
+	// encode millions of compact elements ("{}" is three bytes, `"a":true`
+	// ten) while each decoded journalItem or map entry costs tens of bytes of
+	// live heap, so json.Unmarshal would materialize hundreds of MB - past the
+	// 256 MiB container limit - BEFORE any per-item validation could reject it
+	// (CWE-400). The bounded decoder enforces these before an element is
+	// allocated. Sizing: the live catalogue is ~9k torrents contributing ~2
+	// identity signals each (~20k ledger entries) and a 14-day journal holds
+	// the newly curated slice of that, so both caps leave more than an order of
+	// magnitude of growth headroom while keeping the worst accepted decode a
+	// few tens of MB.
+	maxSnapshotFeedItems       = 50_000
+	maxSnapshotMapEntries      = 250_000
+	maxSnapshotMapEntriesTotal = 600_000
 	// reasonMalformed is loadPrevious's baseline reason for a structurally invalid
 	// previous snapshot (bad JSON, missing curation maps, or an over-limit item/title).
 	reasonMalformed = "malformed"
@@ -141,12 +161,177 @@ func validFeedItems(feeds ...[]journalItem) bool {
 	return true
 }
 
+// validJournalRecords reports whether every item in the given feeds carries the
+// two journal identity fields the post-journal schema guarantees: a stable Key
+// (the identity the carry gates and the download-URL rebuilds match on) and a
+// nonzero FirstSeen (the age the bounded journal window prunes against).
+//
+// The writer already refuses such a record on its carry path
+// (prepareCarriedItem drops every zero-FirstSeen item, because there is no
+// journal age to prune it against), but the READER installs decoded records
+// directly: a hand-edited or partially corrupted feed.json item whose GUID
+// still proves its Key survives rebuildNyaaDownloadURLs/rebuildABDownloadURLs
+// and is projected into the served RSS feed with no pubDate. In resident-idle
+// mode no rebuild ever follows to apply the writer-only gate, so that item is
+// served to the arrs indefinitely - outside feedJournalMaxAge entirely. Making
+// the invariant part of the shared decode gate is what bounds it (h-f2).
+func validJournalRecords(feeds ...[]journalItem) bool {
+	for _, feed := range feeds {
+		for i := range feed {
+			if feed[i].Key == "" || feed[i].FirstSeen.IsZero() {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// unmarshalSnapshot decodes persisted snapshot bytes with json.Unmarshal
+// semantics but BOUNDED CARDINALITY. json.Unmarshal materializes the whole
+// document before a caller-side check can run, so the byte cap the read applies
+// (maxFeedBytes) does not bound what the decode ALLOCATES: a 16 MiB file can
+// encode millions of compact array elements or map entries, each costing tens of
+// bytes of live heap once decoded, and feed.json is a tamperable trust boundary
+// (a corrupted or hand-written file could OOM the 256 MiB container inside New's
+// warm-up load and crashloop the compare daemon with it, instead of reaching the
+// self-healing malformed-snapshot taxonomy - CWE-400, h-f4). The schema walk
+// below rejects hostile cardinality BEFORE allocation scales with it, via the
+// shared jsonx/bounded primitives (the same scaffold internal/seadex,
+// internal/state, internal/anilist and internal/mapping decode through).
+//
+// Semantics stay json.Unmarshal's so both consumers keep their documented
+// behavior: a JSON null leaves a field untouched, an empty object still
+// ALLOCATES its map (nil-ness is the structural / pre-journal-schema sentinel
+// decodeSnapshot and loadPrevious dispatch on, so `"seen": {}` must not decode
+// nil), keys match case-insensitively, unknown fields are token-skipped without
+// materializing, and trailing data is rejected. One deliberate tightening:
+// bounded.Preflight rejects a repeated object key and pathological nesting,
+// which json.Unmarshal would silently resolve to the last occurrence - at this
+// boundary the ambiguity is evidence of tampering, so it fails closed.
+func unmarshalSnapshot(data []byte) (snapshot, error) {
+	if err := bounded.Preflight(bytes.NewReader(data)); err != nil {
+		return snapshot{}, err
+	}
+	var snap snapshot
+	var entries int
+	// The aggregate array budget covers both journal feeds; each feed also
+	// carries its own per-array cap, so neither one feed nor the pair can
+	// multiply past the bound.
+	d := bounded.NewDecoder(bytes.NewReader(data), 2*maxSnapshotFeedItems)
+	err := d.Object(func(key string) error {
+		switch {
+		case strings.EqualFold(key, "by_hash"):
+			set, err := decodeSnapshotMap(d, snap.ByHash, &entries, "by_hash")
+			snap.ByHash = set
+			return err
+		case strings.EqualFold(key, "by_key"):
+			set, err := decodeSnapshotMap(d, snap.ByKey, &entries, "by_key")
+			snap.ByKey = set
+			return err
+		case strings.EqualFold(key, "by_pair"):
+			set, err := decodeSnapshotMap(d, snap.ByPair, &entries, "by_pair")
+			snap.ByPair = set
+			return err
+		case strings.EqualFold(key, "seen"):
+			set, err := decodeSnapshotMap(d, snap.Seen, &entries, "seen")
+			snap.Seen = set
+			return err
+		case strings.EqualFold(key, "titles"):
+			titles, err := decodeSnapshotMap(d, snap.Titles, &entries, "titles")
+			snap.Titles = titles
+			return err
+		case strings.EqualFold(key, "harvest_cursor"):
+			return d.Decode(&snap.HarvestCursor)
+		case strings.EqualFold(key, "nyaa_feed"):
+			return decodeSnapshotFeed(d, &snap.NyaaFeed, "nyaa_feed")
+		case strings.EqualFold(key, "ab_feed"):
+			return decodeSnapshotFeed(d, &snap.ABFeed, "ab_feed")
+		default:
+			return d.Skip()
+		}
+	})
+	if err != nil {
+		return snapshot{}, err
+	}
+	if err := d.End(); err != nil {
+		return snapshot{}, err
+	}
+	return snap, nil
+}
+
+// decodeSnapshotFeed decodes one persisted journal feed under its per-array
+// cardinality cap, so an over-long feed errors before its elements are
+// allocated. Each item still decodes through encoding/json for
+// stdlib-identical field handling; validity (validPersistedItem,
+// validJournalRecords) is decodeSnapshot's separate gate.
+func decodeSnapshotFeed(d *bounded.Decoder, dst *[]journalItem, what string) error {
+	feed, err := bounded.Array(d, *dst, maxSnapshotFeedItems, what, func(it *journalItem) error {
+		return d.Decode(it)
+	})
+	if err != nil {
+		return err
+	}
+	*dst = feed
+	return nil
+}
+
+// decodeSnapshotMap decodes one persisted map field (a curation index, the seen
+// ledger, or the harvested-title cache) entry by entry under the shared entry
+// budget, and RETURNS the map for the caller to store back. A JSON null leaves
+// the map as it was (Unmarshal's null-into-map); an empty object allocates,
+// because a nil map is the structural sentinel both consumers read. Per-value
+// LENGTH stays loadPrevious's own ingress check (titleCacheWithinLimits): this
+// pass bounds cardinality, which is what json.Unmarshal cannot.
+func decodeSnapshotMap[V bool | string](d *bounded.Decoder, dst map[string]V, entries *int, what string) (map[string]V, error) {
+	open, err := d.Open('{')
+	if err != nil || !open {
+		return dst, err
+	}
+	if dst == nil {
+		dst = make(map[string]V)
+	}
+	seen := 0
+	for d.More() {
+		key, err := d.Key()
+		if err != nil {
+			return dst, err
+		}
+		if err := chargeSnapshotEntry(what, &seen, entries); err != nil {
+			return dst, err
+		}
+		var value V
+		if err := d.Decode(&value); err != nil {
+			return dst, err
+		}
+		dst[key] = value
+	}
+	return dst, d.Close()
+}
+
+// chargeSnapshotEntry charges one decoded map entry against its map's own cap
+// and the snapshot-wide aggregate, so neither one oversized map nor many
+// moderate ones can outgrow the decode budget. The message names the map but
+// never a key or value: both are attacker-shaped text at this boundary.
+func chargeSnapshotEntry(what string, perMap, entries *int) error {
+	*perMap++
+	if *perMap > maxSnapshotMapEntries {
+		return fmt.Errorf("%s: too many entries (max %d)", what, maxSnapshotMapEntries)
+	}
+	*entries++
+	if *entries > maxSnapshotMapEntriesTotal {
+		return fmt.Errorf("%s: snapshot map entry budget exceeded (max %d)", what, maxSnapshotMapEntriesTotal)
+	}
+	return nil
+}
+
 // decodeSnapshot unmarshals persisted snapshot bytes and applies the
 // structural-validity gate BOTH consumers share (the server's readSnapshot
 // and the writer's loadPrevious): valid JSON, the required curation maps
 // present (the writer always persists both, even empty, so nil maps identify
 // a structurally invalid snapshot without rejecting a valid empty feed), and
-// every feed item within the shared persisted-item limits. err reports
+// every feed item within the shared persisted-item limits, and - for a
+// post-journal snapshot - the journal identity invariant every item must carry
+// (validJournalRecords). err reports
 // malformed JSON; a non-empty reason names a structural violation.
 // Consumer-specific ingress checks (the writer's titles-cache cap) stay with
 // their consumer.
@@ -179,7 +364,8 @@ func validFeedItems(feeds ...[]journalItem) bool {
 // documented to mirror FirstSeen, and neither consumer re-derives it for an
 // item it carries or serves verbatim.
 func decodeSnapshot(data []byte) (snap snapshot, scrub snapshotScrub, reason string, err error) {
-	if err := json.Unmarshal(data, &snap); err != nil {
+	snap, err = unmarshalSnapshot(data)
+	if err != nil {
 		return snapshot{}, snapshotScrub{}, "", err
 	}
 	if snap.ByHash == nil || snap.ByKey == nil {
@@ -187,6 +373,17 @@ func decodeSnapshot(data []byte) (snap snapshot, scrub snapshotScrub, reason str
 	}
 	if !validFeedItems(snap.NyaaFeed, snap.ABFeed) {
 		return snapshot{}, snapshotScrub{}, "item exceeds persisted-item limits", nil
+	}
+	// The journal identity invariant is schema-scoped: only a post-journal
+	// snapshot (Seen present) promises a Key and a FirstSeen on every item. A
+	// Seen-less document is the retired pre-journal schema, whose feeds
+	// reportTransitionalSchema/loadPrevious deliberately treat as absent - it
+	// stays exempt so a legacy file still yields a usable search curation set
+	// instead of being rejected wholesale. The requirement lives HERE rather
+	// than in validPersistedItem because renderJournalItem validates a
+	// newly-built item before growJournal stamps its FirstSeen.
+	if snap.Seen != nil && !validJournalRecords(snap.NyaaFeed, snap.ABFeed) {
+		return snapshot{}, snapshotScrub{}, "journal item missing identity or first-seen timestamp", nil
 	}
 	normalizeSnapshotItems(snap.NyaaFeed)
 	normalizeSnapshotItems(snap.ABFeed)
@@ -700,9 +897,9 @@ func titleCacheWithinLimits(titles map[string]string) bool {
 // keys (every directly warned occurrence plus every duplicate removed through
 // a shared identity - also the warned_excluded operator count), and ids holds
 // the warned identity-signal set (journal key AND info hash), transitively
-// closed over shared identities by collectWarnedIdentities' fixpoint, which
-// retracts uses to drop a previously journaled item whose stored info hash is
-// warned under a DIFFERENT tracker key.
+// closed over shared identities by collectWarnedIdentities' graph traversal,
+// which retracts uses to drop a previously journaled item whose stored info
+// hash is warned under a DIFFERENT tracker key.
 type warnedSet struct {
 	keys map[string]struct{}
 	ids  map[string]struct{}
@@ -767,59 +964,82 @@ func splitCurationWarned(entries []seadex.Entry) (kept []seadex.Entry, ws warned
 // package's identitySignals definition), so a duplicate occurrence sharing a
 // warned torrent's info hash under a different or unparseable URL is excluded
 // too.
+//
+// Warning identity is TRANSITIVE across occurrences: if A shares a hash with B
+// and B shares its tracker key with C, all three name the same warned release
+// graph and must be excluded together. That closure is computed by building the
+// signal graph once and traversing it, NOT by re-sweeping the catalogue until a
+// sweep adds nothing: a reverse-ordered alternating key/hash chain reveals only
+// one new node per sweep, so the fixpoint form was quadratic in torrent count
+// (at the ~9k-torrent catalogue's worst shape, tens of millions of visits, each
+// re-parsing every journal key through trackerKey/urlform) and structurally
+// valid upstream input could make one rebuild overrun the poll interval (h-f1).
+// Building the index once and visiting each node and each signal once is linear
+// in torrents plus signals.
 func collectWarnedIdentities(entries []seadex.Entry) (keys, all map[string]struct{}) {
 	keys, all = make(map[string]struct{}), make(map[string]struct{})
-	for i := range entries {
-		for j := range entries[i].Torrents {
-			t := &entries[i].Torrents[j]
-			if release.CurationWarned(t.Tags) {
-				markWarnedIdentity(t, keys, all)
-			}
+	nodes, bySignal, pending := indexWarnedIdentities(entries)
+	visited := make([]bool, len(nodes))
+	expanded := make(map[string]struct{}, len(bySignal))
+	for len(pending) > 0 {
+		idx := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if visited[idx] {
+			continue
 		}
-	}
-
-	// Warning identity is transitive across occurrences: if A shares a hash
-	// with B and B shares its tracker key with C, all three name the same
-	// warned release graph and must be excluded together.
-	for propagateWarnedIdentities(entries, keys, all) {
+		visited[idx] = true
+		node := &nodes[idx]
+		if node.key != "" {
+			keys[node.key] = struct{}{}
+		}
+		for _, signal := range node.signals {
+			all[signal] = struct{}{}
+			// Each signal expands once: every torrent carrying it is
+			// enqueued, and a later node sharing it needs no second sweep.
+			if _, done := expanded[signal]; done {
+				continue
+			}
+			expanded[signal] = struct{}{}
+			pending = append(pending, bySignal[signal]...)
+		}
 	}
 	return keys, all
 }
 
-// propagateWarnedIdentities runs one sweep of the transitive closure over the
-// warned sets: every torrent sharing a warned identity signal has its own
-// journal key and signals folded in. It reports whether the sweep added
-// anything, so the caller loops it to a fixpoint.
-func propagateWarnedIdentities(entries []seadex.Entry, keys, all map[string]struct{}) bool {
-	changed := false
+// warnedNode is one torrent's contribution to the warned-identity graph: its
+// journal key (the carry-drop identity, empty when the URL carries no parseable
+// tracker id) and its identity signals (key + bare info hash), read once so the
+// traversal never re-parses a URL.
+type warnedNode struct {
+	key     string
+	signals []string
+}
+
+// indexWarnedIdentities builds the warned-identity graph in one catalogue pass:
+// one node per torrent, an index from each identity signal to the nodes carrying
+// it (the graph's edges, since two torrents are adjacent exactly when they share
+// a signal), and the traversal seeds - the directly curation-warned nodes.
+func indexWarnedIdentities(entries []seadex.Entry) (nodes []warnedNode, bySignal map[string][]int, seeds []int) {
+	total := 0
+	for i := range entries {
+		total += len(entries[i].Torrents)
+	}
+	nodes = make([]warnedNode, 0, total)
+	bySignal = make(map[string][]int, total)
 	for i := range entries {
 		for j := range entries[i].Torrents {
 			t := &entries[i].Torrents[j]
-			if sharesWarnedIdentity(t, all) && markWarnedIdentity(t, keys, all) {
-				changed = true
+			idx := len(nodes)
+			nodes = append(nodes, warnedNode{key: journalKey(t), signals: identitySignals(t)})
+			for _, signal := range nodes[idx].signals {
+				bySignal[signal] = append(bySignal[signal], idx)
+			}
+			if release.CurationWarned(t.Tags) {
+				seeds = append(seeds, idx)
 			}
 		}
 	}
-	return changed
-}
-
-// markWarnedIdentity folds torrent t's identity signals (journal key + info
-// hash) into the warned sets, reporting whether any signal was new.
-func markWarnedIdentity(t *seadex.Torrent, keys, all map[string]struct{}) bool {
-	added := false
-	if k := journalKey(t); k != "" {
-		if _, warned := keys[k]; !warned {
-			keys[k] = struct{}{}
-			added = true
-		}
-	}
-	for _, id := range identitySignals(t) {
-		if _, warned := all[id]; !warned {
-			all[id] = struct{}{}
-			added = true
-		}
-	}
-	return added
+	return nodes, bySignal, seeds
 }
 
 // sharesWarnedIdentity reports whether any of t's identity signals is already
@@ -838,7 +1058,7 @@ func sharesWarnedIdentity(t *seadex.Torrent, all map[string]struct{}) bool {
 // warned identity signal (journal key or info hash), reporting whether
 // anything was removed (the caller only swaps in the fresh slice then,
 // keeping the shared input unmutated). It is a pure query over the sets
-// collectWarnedIdentities already closed: that fixpoint marks the journal key of
+// collectWarnedIdentities already closed: that traversal marks the journal key of
 // every occurrence sharing a warned identity, so a duplicate excluded only through
 // a warned sibling's info hash is already in the carry-drop set carryJournal
 // consumes and needs no second fold here.

@@ -158,21 +158,6 @@ const (
 	ABDefinite
 )
 
-// String implements fmt.Stringer so a log line or a test failure names the grade
-// rather than an integer.
-func (e ABEvidence) String() string {
-	switch e {
-	case ABNone:
-		return "none"
-	case ABAmbiguous:
-		return "ambiguous"
-	case ABDefinite:
-		return "definite"
-	default:
-		return "unknown"
-	}
-}
-
 // ClassifyAB grades the AnimeBytes evidence in one release's untrusted
 // (tracker, rawURL) pair. It is total: every input lands in exactly one grade,
 // and it takes no view of what the caller should DO about it - the operator's

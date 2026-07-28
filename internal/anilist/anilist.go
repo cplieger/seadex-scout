@@ -636,15 +636,32 @@ func (m *gqlMedia) toMedia() (Media, error) {
 	if unsafeWireText(m.Format) {
 		return Media{}, fmt.Errorf("%w: media format contains invalid single-line text", ErrRecordUnusable)
 	}
+	// Both wire year fields are untrusted, and match.findByTitle treats every
+	// nonzero Year as a HARD constraint - so an impossible value (negative, or
+	// outside four digits) cannot match a real library year and turns an
+	// otherwise usable title into a persistent false negative that Memo also
+	// retains as StaleTitle. Map impossible evidence to the existing unknown
+	// sentinel 0 instead, falling back through startDate first.
 	year := m.SeasonYear
-	if year == 0 {
+	if !plausibleYear(year) {
 		year = m.StartDate.Year
+	}
+	if !plausibleYear(year) {
+		year = 0
 	}
 	titles := dedupeTitles(wireTitles...)
 	if !hasMatchableTitle(titles) {
 		return Media{}, fmt.Errorf("%w: media missing usable title", ErrRecordUnusable)
 	}
 	return Media{Titles: titles, Format: knownFormat(m.Format), Year: year}, nil
+}
+
+// plausibleYear reports whether an untrusted wire year is a possible release
+// year: a four-digit value. Anything else (0/unset, negative, or out of range)
+// carries no usable evidence, and the caller maps it to the unknown sentinel 0
+// rather than publishing it as a hard match constraint.
+func plausibleYear(year int) bool {
+	return year >= 1000 && year <= 9999
 }
 
 // anilistFormats is AniList's MediaFormat enum as it applies to anime (its
@@ -768,14 +785,18 @@ func mediaQueryError(e gqlError) error {
 // upstream message: sanitizeUpstreamMessage replaces embedded controls and
 // bidi marks with spaces, so classifying the sanitized text would let a
 // malformed message such as "Not\nFound." launder into the trusted "Not
-// Found." sentinel and be negative-memoized. Only the text rendered into the
-// returned error is sanitized.
+// Found." sentinel and be negative-memoized. It also does NOT trim the raw
+// message: TrimSpace is the same laundering by another route, normalizing
+// "\nNot Found.\n" (or the tab/CR forms) into the trusted sentinel. A status
+// 404 stays authoritative on its own; the message-only fallback must match the
+// verified raw phrase exactly. Only the text rendered into the returned error
+// is sanitized.
 func classifyNullMedia(errs []gqlError) error {
 	if len(errs) == 0 {
 		return ErrNotFound
 	}
 	message := sanitizeUpstreamMessage(errs[0].Message)
-	rawNormalized := strings.TrimSuffix(strings.TrimSpace(errs[0].Message), ".")
+	rawNormalized := strings.TrimSuffix(errs[0].Message, ".")
 	if len(errs) == 1 && (errs[0].Status == http.StatusNotFound || strings.EqualFold(rawNormalized, "not found")) {
 		return fmt.Errorf("%w: %s", ErrNotFound, message)
 	}

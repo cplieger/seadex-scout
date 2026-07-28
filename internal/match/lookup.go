@@ -134,17 +134,41 @@ func (m *Matcher) migrateMemo(memo *Memo, now time.Time) {
 	}
 }
 
-// pruneExpired drops every entry still expired at the run's clock: renewals
-// were re-stamped with a future expiry during the pass, and it only runs on a
-// clean (non-degraded) pass, so what remains expired was simply not consulted
-// this cycle and reads as a miss anyway — next cycle's batched prefetch
-// re-fetches whichever ids are still needed. Pruning keeps state.json from
-// accumulating dead entries for ids the match no longer consults.
-func pruneExpired(memo *Memo, now time.Time) {
+// pruneExpired drops the expired entries that are dead cache data, and keeps
+// the ones that are still an ACTIVE consumer's fallback. Renewals were
+// re-stamped with a future expiry during the pass, and it only runs on a clean
+// (non-degraded) pass, so what remains expired was simply not consulted by the
+// MATCH this cycle — but Match is not the memo's only reader: Memo.StaleTitle
+// and Memo.StaleFormat deliberately ignore expiry to feed the indexer feed's
+// stale-title/type tier for every entry SeaDex currently curates
+// (scout/feedinfo.go). An entry can leave the match's worklist while staying in
+// that set: an id-less Fribb record that caused an AniList memoization can gain
+// a usable arr id on a later Fribb refresh while the item is still absent from
+// the library, so aniListNeed stops consulting it on a perfectly clean pass.
+// Deleting it there would silently downgrade the next feed rebuild's title and
+// type to the file-name derivation and the default category.
+//
+// So an expired entry survives only when both halves hold: its AniList id is
+// still in the current SeaDex catalogue (entries), and it carries something the
+// stale tier can actually serve (a positive with a title or a format).
+// Everything else goes — expired negatives (StaleTitle/StaleFormat report
+// nothing for them anyway) and every entry for an id SeaDex no longer curates —
+// which is what keeps state.json from accumulating dead entries.
+func pruneExpired(memo *Memo, now time.Time, entries []seadex.Entry) {
+	active := make(map[int]struct{}, len(entries))
+	for i := range entries {
+		active[entries[i].AniListID] = struct{}{}
+	}
 	for id, ent := range memo.Entries {
-		if ent.expired(now) {
-			delete(memo.Entries, id)
+		if !ent.expired(now) {
+			continue
 		}
+		_, stillCurated := active[id]
+		usefulStale := !ent.NotFound && (len(ent.Titles) > 0 || ent.Format != "")
+		if stillCurated && usefulStale {
+			continue
+		}
+		delete(memo.Entries, id)
 	}
 }
 

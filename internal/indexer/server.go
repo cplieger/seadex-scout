@@ -90,21 +90,39 @@ var queryGateWait = 5 * time.Second
 // real deployment's :9118.
 var listenAddr = ":9118"
 
+// unusableFeedKey reports whether the configured feed_api_key cannot be trusted
+// as the feed's authentication gate: it is absent, or it still holds a literal
+// ${VAR} reference the config loader could not expand. The second case matters
+// because this key IS the gate - an unexpanded placeholder is a credential a LAN
+// attacker can guess from the public config.example, and the /ab RSS body's
+// download links carry the operator's AnimeBytes passkey. config's
+// validateIndexerEndpoints rejects both on the daemon path; these guards keep
+// any other construction of Indexer from binding or serving behind them.
+func unusableFeedKey(key string) bool {
+	return key == "" || strings.Contains(key, "${")
+}
+
 // Run serves the Torznab endpoint from the persisted feed snapshot until ctx is
-// cancelled. The endpoint listens immediately (so an arr's caps Test succeeds
-// right away); it serves whatever feed the last compare cycle persisted (empty
-// until the first cycle on a fresh install) and reloads the snapshot when a
-// cycle rewrites it. It owns no health marker - the daemon that runs it does -
-// so a feed failure never flips container health.
+// cancelled. It first warms the feed from the last persisted snapshot (see
+// warmSnapshot) - the one piece of startup work, owned by this lifecycle method
+// rather than by New. The endpoint then listens immediately (so an arr's caps
+// Test succeeds right away); it serves whatever feed the last compare cycle
+// persisted (empty until the first cycle on a fresh install) and reloads the
+// snapshot when a cycle rewrites it. It owns no health marker - the daemon that
+// runs it does - so a feed failure never flips container health.
 func (ix *Indexer) Run(ctx context.Context) error {
 	// Fail closed at the network boundary: config.Validate (validateIndexer)
-	// already rejects a configured feed with an empty feed_api_key on the
-	// daemon path, but any alternate construction of the exported Indexer must
-	// never bind and serve the feed unauthenticated - the AnimeBytes RSS feed
-	// embeds ab_passkey in its download links.
-	if ix.apiKey == "" {
-		return errors.New("indexer: indexer.feed_api_key is empty; refusing to serve the Torznab feed unauthenticated")
+	// already rejects a configured feed with an empty or still-unresolved
+	// feed_api_key on the daemon path, but any alternate construction of the
+	// exported Indexer must never bind and serve the feed with a guessable or
+	// absent gate - the AnimeBytes RSS feed embeds ab_passkey in its download
+	// links. Field-name-only: the rejected value is a credential.
+	if unusableFeedKey(ix.apiKey) {
+		return errors.New("indexer: indexer.feed_api_key is empty or an unresolved ${VAR} reference; refusing to serve the Torznab feed")
 	}
+	// The one piece of startup work, deliberately here and not in New: all
+	// background work begins under the explicit lifecycle method.
+	ix.warmSnapshot()
 	// Bind up front so a port-in-use error surfaces synchronously here and is
 	// returned to the daemon's startIndexer, which logs it. The feed owns no
 	// health marker (the compare loop does), so a bind failure never flips
@@ -261,7 +279,7 @@ func (ix *Indexer) chain() http.Handler {
 func (ix *Indexer) authFailureLimiter() webhttp.Middleware {
 	return webhttp.RateLimiter(authFailBurst, authFailRefill,
 		webhttp.WithRateLimitWhen(func(r *http.Request) bool {
-			return ix.apiKey != "" && !ix.verifyKey.Verify(r.URL.Query().Get("apikey"))
+			return !unusableFeedKey(ix.apiKey) && !ix.verifyKey.Verify(r.URL.Query().Get("apikey"))
 		}),
 		webhttp.WithRateLimitError("too_many_auth_failures", "too many failed apikey attempts"),
 	)
@@ -300,16 +318,18 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 // authorizeRequest applies serve's authentication policy and reports whether
 // the request may proceed; on rejection the response has been written.
 func (ix *Indexer) authorizeRequest(w http.ResponseWriter, r *http.Request, q url.Values) bool {
-	if ix.apiKey == "" {
+	if unusableFeedKey(ix.apiKey) {
 		// Fail closed at the handler too: Run already refuses to bind with an
-		// empty feed_api_key, so this branch is unreachable in production, but
-		// a second independent guard keeps any future construction path from
-		// serving the passkey-bearing feed unauthenticated - and it is what
+		// empty or unresolved feed_api_key, so this branch is unreachable in
+		// production, but a second independent guard keeps any future
+		// construction path from serving the passkey-bearing feed behind an
+		// absent or guessable gate - and it is what
 		// distinguishes "auth not configured" (this 503, an operator problem)
 		// from "wrong key" (the 401 below). The static-token verifier itself
 		// fails CLOSED on an empty configured key, so skipping this guard
 		// could never open the gate; it would just misreport the unconfigured
-		// state as an unauthorized caller.
+		// state as an unauthorized caller - and for an unresolved ${VAR} it
+		// would accept the guessable placeholder as a valid key.
 		ix.log.Error("indexer request rejected", "reason", "feed_api_key not configured", "path", logParam(r.URL.Path))
 		http.Error(w, "service unavailable: feed_api_key not configured", http.StatusServiceUnavailable)
 		return false

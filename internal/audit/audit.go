@@ -436,7 +436,7 @@ func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 			Best:    t.IsBest,
 			// A record that carries a URL the publisher refused is an UPSTREAM
 			// DATA fault, not an obtainability policy decision, and the report is
-			// where an operator can see it and go fix the SeaDex record (l-f88).
+			// where an operator can see it and go fix the SeaDex record.
 			// The live catalogue has one: tracker AB, url "Chihiro" - a
 			// release-group name typed into the url field. Reported distinctly
 			// because "(unobtainable)" would read as "a tracker you cannot use",

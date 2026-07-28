@@ -170,7 +170,7 @@ func newHarvester(log *slog.Logger, now func() time.Time, ups []*upstream) *harv
 func (h *harvester) harvestTitles(ctx context.Context, feeds map[string][]journalItem, titles map[string]string, infoFor EntryInfoFunc, prevCursor string) (stats harvestStats, cursor string) {
 	cp := decodeHarvestCheckpoint(prevCursor)
 	defer func() { stats.pending = syntheticCount(feeds, titles) }()
-	groups, index := pendingHarvest(feeds, titles, infoFor)
+	groups, index, showTitles := pendingHarvest(feeds, titles, infoFor)
 	pruneHarvestPages(cp.Pages, groups)
 	defer func() { cursor = encodeHarvestCheckpoint(cp) }()
 	if len(groups) == 0 || len(h.upstreams) == 0 {
@@ -202,6 +202,7 @@ func (h *harvester) harvestTitles(ctx context.Context, feeds map[string][]journa
 		stats:      &stats,
 		index:      index,
 		titles:     titles,
+		showTitles: showTitles,
 		latches:    newHarvestLatches(len(h.upstreams)),
 	}
 	start := rotationStart(groups, cp.Last)
@@ -214,8 +215,9 @@ func (h *harvester) harvestTitles(ctx context.Context, feeds map[string][]journa
 }
 
 // harvestRun is one harvestTitles run's mutable accounting: the per-rebuild
-// checkpoint, time slice, stats, the identity index and title cache the
-// matcher writes through, and the per-scope latch state. It exists so the
+// checkpoint, time slice, stats, the identity index, title cache and per-key
+// show titles the matcher writes through and ranks with, and the per-scope latch
+// state. It exists so the
 // orchestration loop passes ONE value to the per-group step instead of nine,
 // keeping harvestTitles about setup and ordered iteration.
 type harvestRun struct {
@@ -225,6 +227,7 @@ type harvestRun struct {
 	stats      *harvestStats
 	index      map[string]string
 	titles     map[string]string
+	showTitles map[string]string
 	latches    *harvestLatches
 }
 
@@ -688,7 +691,7 @@ func (h *harvester) harvestShow(ctx context.Context, u *upstream, g harvestGroup
 		if !ok {
 			return failure, page, refused
 		}
-		matched, rejected, pendingRejected := matchHarvest(results, g.scope, r.index, r.titles, meta.Title)
+		matched, rejected, pendingRejected := matchHarvest(results, g.scope, r.index, r.titles, r.showTitles, g.keys)
 		r.stats.matched += matched
 		refused = refused || pendingRejected > 0
 		if rejected > 0 {
@@ -840,11 +843,17 @@ func compareHarvestGroups(a, b harvestGroup) int {
 // pendingHarvest collects the journal items lacking a cached title into
 // per-show, per-tracker groups (sorted for deterministic query order) plus a
 // global identity index (tracker key and info hash forms) mapping a matched
-// Prowlarr result back to the journal key whose title it supplies. Items
+// Prowlarr result back to the journal key whose title it supplies, and the
+// per-journal-key show title the alias policy ranks against. Items
 // whose show has no synthesis title source are left out: there is nothing to
 // query with, and they retry once the library or the AniList memo knows the
 // show.
-func pendingHarvest(feeds map[string][]journalItem, titles map[string]string, infoFor EntryInfoFunc) (groups []harvestGroup, index map[string]string) {
+//
+// showTitles is keyed by journal key rather than being one per query because
+// the index is GLOBAL: a broad result page fetched for show A routinely
+// resolves show B's items too (the opportunistic match), and B's alias choice
+// must be made against B's own vocabulary, not A's.
+func pendingHarvest(feeds map[string][]journalItem, titles map[string]string, infoFor EntryInfoFunc) (groups []harvestGroup, index, showTitles map[string]string) {
 	byShow := make(map[harvestGroupKey][]string)
 	index = make(map[string]string)
 	ambiguous := make(map[string]struct{})
@@ -858,7 +867,14 @@ func pendingHarvest(feeds map[string][]journalItem, titles map[string]string, in
 		groups = append(groups, harvestGroup{keys: keys, scope: k.scope, alID: k.alID})
 	}
 	slices.SortFunc(groups, compareHarvestGroups)
-	return groups, index
+	showTitles = make(map[string]string, len(index))
+	for _, g := range groups {
+		title := strings.TrimSpace(infoFor(g.alID).Title)
+		for _, key := range g.keys {
+			showTitles[key] = title
+		}
+	}
+	return groups, index, showTitles
 }
 
 // harvestable reports whether a journal item is due a harvest query: it still
@@ -924,9 +940,13 @@ const harvestMaxTitleLen = 512
 // acceptScopedKeys). An already-cached key is never overwritten: torrents
 // are immutable, so the first harvested title stands.
 //
-// showTitle is the show title the synthesis already trusts (the arr's own title,
-// or the AniList canonical one), used to pick among ALIASES of the same torrent
-// - see preferredHarvestTitle. Pass "" to keep plain first-wins.
+// showTitles maps each pending journal key to the show title the synthesis
+// already trusts for THAT key's show (the arr's own title, or the AniList
+// canonical one), used to pick among ALIASES of the same torrent - see
+// preferredHarvestTitle. It is keyed per journal key, not per query, because a
+// broad result page fetched for one show routinely resolves another pending
+// show's items too, and that show's alias must be chosen against its OWN
+// vocabulary. A key absent from the map keeps plain first-wins.
 //
 // It reports the matches AND the contradictory rejections, so a result whose
 // own signals disagree is observable. That count is the only report such a
@@ -937,14 +957,15 @@ const harvestMaxTitleLen = 512
 // no key at all and are NOT counted - they are the overwhelming majority and
 // carry no signal.
 //
-// pendingRejected is the subset of those rejections that touched a PENDING
-// identity (pendingHarvestRefusal): the ones that actually refused one of this
-// show's own candidate releases. Only that subset licenses the caller's
-// no-progress inference - a result whose comments and guid disagree with each
-// other names nothing we asked for, and AnimeBytes answers the same broad
-// series-level corpus to every query, so one unrelated malformed item repeating
-// across shows must not read as "this scope harvests nothing".
-func matchHarvest(results []item, scope string, index, titles map[string]string, showTitle string) (matched, rejected, pendingRejected int) {
+// pendingRejected is the subset of those rejections that touched one of THIS
+// group's pending identities (pendingHarvestRefusal, graded against groupKeys):
+// the ones that actually refused one of this show's own candidate releases. Only
+// that subset licenses the caller's no-progress inference - a result whose
+// comments and guid disagree with each other names nothing we asked for, and
+// AnimeBytes answers the same broad series-level corpus to every query, so one
+// unrelated malformed item repeating across shows must not read as "this scope
+// harvests nothing".
+func matchHarvest(results []item, scope string, index, titles, showTitles map[string]string, groupKeys []string) (matched, rejected, pendingRejected int) {
 	// Collect every candidate title per key BEFORE choosing: AnimeBytes lists
 	// one torrent three times (EN / JP / Romaji aliases, distinct ?nh= GUIDs,
 	// the SAME torrent id), so all three resolve to one journal key and the
@@ -963,7 +984,7 @@ func matchHarvest(results []item, scope string, index, titles map[string]string,
 			// release this rebuild is trying to title says the show harvested
 			// nothing.
 			rejected++
-			pendingRejected += pendingHarvestRefusal(&results[i], index)
+			pendingRejected += pendingHarvestRefusal(&results[i], index, groupKeys)
 			continue
 		}
 		if key == "" || !strings.HasPrefix(key, scope+":") {
@@ -978,7 +999,7 @@ func matchHarvest(results []item, scope string, index, titles map[string]string,
 		candidates[key] = append(candidates[key], title)
 	}
 	for _, key := range order {
-		titles[key] = preferredHarvestTitle(candidates[key], showTitle)
+		titles[key] = preferredHarvestTitle(candidates[key], showTitles[key])
 		matched++
 	}
 	return matched, rejected, pendingRejected
@@ -986,9 +1007,9 @@ func matchHarvest(results []item, scope string, index, titles map[string]string,
 
 // pendingHarvestRefusal grades a REFUSED result (resolveHarvestKey reported a
 // contradiction): 1 when any of its identity signals - either page-URL tracker
-// key, or its info hash - names an item in the pending index, 0 when it names
-// none of them. It reports a charge rather than a bool so the caller can add it
-// without a second nesting level.
+// key, or its info hash - names one of THIS group's pending items (groupKeys),
+// 0 when it names none of them. It reports a charge rather than a bool so the
+// caller can add it without a second nesting level.
 //
 // The grade matters because a result whose comments and guid disagree with each
 // other is refused before either signal is looked up, so the refusal alone does
@@ -996,12 +1017,20 @@ func matchHarvest(results []item, scope string, index, titles map[string]string,
 // same broad result page was. Only the former is evidence that this show
 // harvested nothing (matchHarvest's pendingRejected, the caller's no-progress
 // signal).
-func pendingHarvestRefusal(it *item, index map[string]string) int {
+//
+// The group's own keys - not merely the global pending index - are what the
+// grade is measured against, because the caller's inference is group-local: it
+// charges the fruitless run when THIS show matched nothing. AnimeBytes answers
+// the same broad series-level corpus to every query, so one contradictory item
+// belonging to a DIFFERENT pending show repeats across every otherwise ordinary
+// miss and would latch the scope after consecutiveFruitlessLatch clean shows
+// while the fairness cursor still had time and groups to spend.
+func pendingHarvestRefusal(it *item, index map[string]string, groupKeys []string) int {
 	for _, id := range []string{trackerKeyFromURL(it.InfoURL), trackerKeyFromURL(it.GUID), it.InfoHash} {
 		if id == "" {
 			continue
 		}
-		if _, ok := index[id]; ok {
+		if key, ok := index[id]; ok && slices.Contains(groupKeys, key) {
 			return 1
 		}
 	}
@@ -1047,7 +1076,7 @@ func preferredHarvestTitle(candidates []string, showTitle string) string {
 	}
 	if want := titlekey.Normalize(showTitle); want != "" {
 		for _, c := range candidates {
-			if strings.Contains(titlekey.Normalize(c), want) {
+			if candidateContainsTitleKey(c, want) {
 				return c
 			}
 		}
@@ -1059,6 +1088,42 @@ func preferredHarvestTitle(candidates []string, showTitle string) string {
 		}
 	}
 	return best
+}
+
+// candidateContainsTitleKey reports whether the candidate release name carries
+// the show's normalized title key as its own vocabulary.
+//
+// titlekey.Normalize deliberately drops every separator, so a plain normalized
+// substring test has no token-boundary evidence at all. That is harmless for a
+// title key of real length, but a SHORT key (a one- to three-character show
+// title such as "X") occurs inside ordinary release metadata: the "x" in
+// "Remux" or "x265" satisfies it on every alias, so the first alias wins
+// whatever its vocabulary - defeating the very policy the caller documents.
+// A short key therefore requires an EXACT match against a run of the
+// candidate's own alphanumeric tokens, which is the boundary evidence the
+// normalized form threw away; longer keys keep the punctuation-tolerant
+// normalized substring, where an accidental hit is not credible.
+func candidateContainsTitleKey(candidate, want string) bool {
+	if len(want) >= 4 {
+		return strings.Contains(titlekey.Normalize(candidate), want)
+	}
+	tokens := strings.FieldsFunc(strings.ToLower(candidate), func(r rune) bool {
+		return (r < '0' || r > '9') && (r < 'a' || r > 'z')
+	})
+	var joined strings.Builder
+	for start := range tokens {
+		joined.Reset()
+		for _, token := range tokens[start:] {
+			joined.WriteString(token)
+			if joined.Len() >= len(want) {
+				if joined.String() == want {
+					return true
+				}
+				break
+			}
+		}
+	}
+	return false
 }
 
 // asciiAlnums counts the ASCII letters and digits in s - a proxy for how much of

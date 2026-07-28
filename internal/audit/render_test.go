@@ -490,8 +490,8 @@ func TestSanitizersCoverBidiAndSeparatorRunes(t *testing.T) {
 
 // TestRenderMarkdownOmitsNotOnSeaDexClauseWhenZero pins the header's other
 // half: with no not_on_seadex rows the "; N more in your library" clause must
-// be absent entirely (a boundary mutation of the notOnSeaDex > 0 guard would
-// emit "; 0 more in your library that SeaDex does not list").
+// be absent entirely (relaxing the notOnSeaDex > 0 guard would emit
+// "; 0 more in your library that SeaDex does not list").
 func TestRenderMarkdownOmitsNotOnSeaDexClauseWhenZero(t *testing.T) {
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
@@ -581,7 +581,7 @@ func TestRenderJSONNilRowsIsEmptyArray(t *testing.T) {
 }
 
 // TestRenderIncompleteSectionAndCaveat pins the degraded report's rendered
-// shape (test c of mc-degradation-scoping): the Markdown header carries the
+// shape: the Markdown header carries the
 // completeness caveat, the affected entries render under the "incomplete
 // (transient AniList failure)" header with their AniList ids and releases.moe
 // links, and the JSON carries the same list under incomplete_mappings.
@@ -640,8 +640,8 @@ func TestRenderSingularIncompleteCaveat(t *testing.T) {
 }
 
 // TestRenderCompleteReportOmitsIncompleteSection pins the healthy path's
-// unchanged-output contract (test d of mc-degradation-scoping; the package
-// keeps no golden file, so absence is pinned directly): with no incomplete
+// unchanged-output contract (the package keeps no golden file, so absence is
+// pinned directly): with no incomplete
 // mappings the Markdown carries neither the caveat nor the section header and
 // the JSON omits the incomplete_mappings key entirely, so a fully healthy
 // report renders byte-identically to the pre-section format - and a total
@@ -738,8 +738,8 @@ func TestDisplayBestGroupsAnnotatesUnobtainable(t *testing.T) {
 }
 
 // TestRenderUnobtainableBestAnnotatedInBothProjections pins the rendered
-// contract for a SeaDex-listed but unobtainable best (option (b) of review
-// finding h-f15): obtainability keeps controlling the verdict, and BOTH
+// contract for a SeaDex-listed but unobtainable best: obtainability keeps
+// controlling the verdict, and BOTH
 // projections surface the divergence - the Markdown SeaDex-best column
 // carries the "(unobtainable)" annotation and does NOT offer the release as
 // a grab link (the releases.moe link still renders), while the JSON release
@@ -881,11 +881,10 @@ func TestReportLogCanceledMidRowsStopsEmitting(t *testing.T) {
 
 // TestRowsWithVerdict pins the section filter directly: only rows carrying
 // the requested verdict are returned, in their original order, and a verdict
-// with no rows yields nil. The 2026-07-20 gremlins tracker listed the
-// filter's equality check as a solid-gap CONDITIONALS_NEGATION mutant: every
-// existing renderMarkdown assertion is a whole-document Contains, which stays
-// green when the filter inverts (rows merely land under the wrong section),
-// so membership must be pinned here.
+// with no rows yields nil. Pinned directly because every existing
+// renderMarkdown assertion is a whole-document Contains, which stays green
+// when the filter's equality check inverts (rows merely land under the wrong
+// section), so membership must be asserted here.
 func TestRowsWithVerdict(t *testing.T) {
 	rows := []Row{
 		{Title: "a", Verdict: VerdictBest},
@@ -903,10 +902,9 @@ func TestRowsWithVerdict(t *testing.T) {
 
 // TestRenderMarkdownVerdictSectionDescription pins the one-line explanation
 // under a verdict section header: the section renders its verdictDesc text
-// between the heading and the table. The verdictDesc guard's
-// CONDITIONALS_NEGATION mutant LIVED in all 3 gremlins runs because no test
-// asserted any description text, so inverting the guard (never printing a
-// description) stayed green.
+// between the heading and the table. Asserted directly because no other test
+// asserts any description text, so inverting the verdictDesc guard (never
+// printing a description) would otherwise stay green.
 func TestRenderMarkdownVerdictSectionDescription(t *testing.T) {
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
@@ -1068,7 +1066,7 @@ func TestAttrBudgetMirrorsKeyBudget(t *testing.T) {
 }
 
 // TestReleaseNotesDistinguishesURLErrorFromUnobtainable pins the report's
-// upstream-data diagnostic (l-f88). A SeaDex record whose url field carries a
+// upstream-data diagnostic. A SeaDex record whose url field carries a
 // value the publisher refuses used to publish a plausible-looking 404 - the live
 // catalogue has one, tracker AB with url "Chihiro", a release-group name typed
 // into the url field, which became "https://animebytes.tv/Chihiro" - and because

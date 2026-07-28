@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -267,13 +268,7 @@ func (u *upstream) upstreamSecrets() []string {
 		return secrets
 	}
 	if parsed.User != nil {
-		// Userinfo is a credential POSITION by construction; length is
-		// irrelevant there, and mangling an unlucky diagnostic is the safe
-		// direction.
-		secrets = append(secrets, parsed.User.Username())
-		if pw, ok := parsed.User.Password(); ok {
-			secrets = append(secrets, pw)
-		}
+		secrets = append(secrets, userinfoSecrets(parsed.User)...)
 	}
 	for _, pair := range strings.FieldsFunc(parsed.RawQuery, isRawQuerySeparator) {
 		name, value, _ := strings.Cut(pair, "=")
@@ -289,6 +284,23 @@ func (u *upstream) upstreamSecrets() []string {
 		}
 	}
 	return secrets
+}
+
+// userinfoSecrets returns every wire representation of a credential embedded in
+// the configured feed URL's userinfo. Userinfo is a credential POSITION by
+// construction; length is irrelevant there, and mangling an unlucky diagnostic
+// is the safe direction. The plaintext components alone are NOT enough:
+// net/http never transmits them verbatim - it sends
+// "Authorization: Basic base64(user:pass)" - so a hostile upstream reflecting
+// that header (or the bare token) back inside an <error> document would escape
+// an exact-substring scrub that only knows the plaintext. Both encoded forms are
+// registered, longest first, so the full header is replaced before its token
+// substring is.
+func userinfoSecrets(user *url.Userinfo) []string {
+	username := user.Username()
+	password, _ := user.Password()
+	token := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+	return []string{username, password, "Basic " + token, token}
 }
 
 // isRawQuerySeparator reports whether r separates two raw query pairs. ';' is
@@ -597,13 +609,45 @@ func httpNoUserinfoURL(raw string) (*url.URL, bool) {
 }
 
 // sameHTTPOrigin reports whether raw is an absolute http or https URL, free of
-// userinfo, whose scheme and host (including port) match origin's.
+// userinfo, whose ORIGIN matches origin's: scheme and hostname compared
+// case-insensitively, and the EFFECTIVE port compared after defaulting an
+// omitted port to the scheme's (80 for http, 443 for https). Comparing the
+// serialized authority verbatim would read
+// "https://prowlarr.example" and "https://prowlarr.example:443" as different
+// origins, and a reverse proxy or an external-URL setting can legitimately add
+// or drop the default port - which would drop every Prowlarr proxy link and
+// answer the arr a successful EMPTY feed while the upstream held curated
+// releases. A non-default port difference still rejects.
 func sameHTTPOrigin(raw string, origin *url.URL) bool {
 	parsed, ok := httpNoUserinfoURL(raw)
 	if !ok {
 		return false
 	}
-	return strings.EqualFold(parsed.Scheme, origin.Scheme) && strings.EqualFold(parsed.Host, origin.Host)
+	if !strings.EqualFold(parsed.Scheme, origin.Scheme) {
+		return false
+	}
+	if !strings.EqualFold(parsed.Hostname(), origin.Hostname()) {
+		return false
+	}
+	return effectiveHTTPPort(parsed) == effectiveHTTPPort(origin)
+}
+
+// effectiveHTTPPort returns u's explicit port, or its http(s) scheme default
+// when the authority omits one. Any other scheme yields the empty string, which
+// still compares equal to itself - sameHTTPOrigin has already required an
+// http(s) scheme on both sides.
+func effectiveHTTPPort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
 }
 
 // httpDisplayHost admits a raw URL as a browser-destined DISPLAY link and

@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"log/slog"
@@ -441,8 +442,54 @@ func TestUpstreamSearchRedactsAPIKeyInTorznabErrorDoc(t *testing.T) {
 	}
 }
 
-// renderedLogRecords flattens each captured slog record (message + top-level
-// attrs) into one string, so a test can assert a secret never reached ANY
+// TestUpstreamSearchRedactsReflectedBasicAuthorization pins the WIRE
+// representation of a feed-URL userinfo credential (h-f7): net/http never
+// transmits the plaintext username/password - it sends
+// "Authorization: Basic base64(user:pass)" - so an upstream reflecting that
+// header, or the bare token, back inside its <error> document would escape an
+// exact-substring scrub that only knew the plaintext components. Both the
+// username-only shape config permits and a full username:password pair must be
+// unreadable in the returned error and in every log record (CWE-532).
+func TestUpstreamSearchRedactsReflectedBasicAuthorization(t *testing.T) {
+	tests := map[string]*url.Userinfo{
+		"username only":         url.User("secret-userinfo-token"),
+		"username and password": url.UserPassword("secret-user", "secret-password"),
+	}
+	for name, userinfo := range tests {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				auth := r.Header.Get("Authorization")
+				w.Header().Set("Content-Type", "application/rss+xml")
+				_, _ = io.WriteString(w,
+					`<?xml version="1.0" encoding="UTF-8"?><error code="900" description="`+auth+` / `+strings.TrimPrefix(auth, "Basic ")+`"/>`)
+			}))
+			defer srv.Close()
+
+			parsed, err := url.Parse(srv.URL)
+			if err != nil {
+				t.Fatalf("parse test server URL: %v", err)
+			}
+			parsed.User = userinfo
+			password, _ := userinfo.Password()
+			token := base64.StdEncoding.EncodeToString([]byte(userinfo.Username() + ":" + password))
+
+			log, rec := capture.New()
+			u := &upstream{http: srv.Client(), log: log, name: upstreamNyaa, feed: parsed.String()}
+			if _, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}}); err == nil {
+				t.Fatal("search against an error document returned nil error")
+			} else if strings.Contains(err.Error(), token[:8]) {
+				t.Errorf("returned error leaks the transmitted Basic token (or a prefix): %v", err)
+			}
+			for _, line := range renderedLogRecords(rec) {
+				if strings.Contains(line, token[:8]) {
+					t.Errorf("log record leaks the transmitted Basic token (or a prefix): %q", line)
+				}
+			}
+		})
+	}
+}
+
+// renderedLogRecords flattens each captured slog record (message + top-level// attrs) into one string, so a test can assert a secret never reached ANY
 // part of a log line - the error text rides the "error" attr, which
 // Recorder.Contains (messages only) would miss.
 func renderedLogRecords(rec *capture.Recorder) []string {
@@ -838,6 +885,11 @@ func TestSameHTTPOrigin(t *testing.T) {
 		{"http URL on http origin accepted", "http://prowlarr:9696/1/download?link=abc", "http://prowlarr:9696/1/api", true},
 		{"https URL on https origin accepted", "https://prowlarr:9696/1/download?link=abc", "https://prowlarr:9696/1/api", true},
 		{"uppercase scheme and host fold to the origin", "HTTPS://PROWLARR:9696/1/download", "https://prowlarr:9696/1/api", true},
+		{"explicit https default port matches an omitted one", "https://prowlarr:443/1/download", "https://prowlarr/1/api", true},
+		{"omitted https default port matches an explicit one", "https://prowlarr/1/download", "https://prowlarr:443/1/api", true},
+		{"explicit http default port matches an omitted one", "http://prowlarr:80/1/download", "http://prowlarr/1/api", true},
+		{"cross-scheme default ports still rejected", "http://prowlarr:80/1/download", "https://prowlarr:443/1/api", false},
+		{"non-default port against an omitted default rejected", "https://prowlarr:9696/1/download", "https://prowlarr/1/api", false},
 		{"http URL on https origin rejected", "http://prowlarr:9696/1/download", "https://prowlarr:9696/1/api", false},
 		{"https URL on http origin rejected", "https://prowlarr:9696/1/download", "http://prowlarr:9696/1/api", false},
 		{"port mismatch rejected", "https://prowlarr:9697/1/download", "https://prowlarr:9696/1/api", false},

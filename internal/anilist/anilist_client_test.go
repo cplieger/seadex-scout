@@ -825,7 +825,12 @@ func TestRequestMarshalErrorMakesNoAttempt(t *testing.T) {
 // "first record error is surfaced" side of the batch contract: when two
 // chunks each contain a poisoned record, the error returned beside the merged
 // result is the FIRST chunk's record error, not overwritten by the second
-// chunk's, while both chunks' valid records still merge.
+// chunk's, while both chunks' valid records still merge. It also pins the
+// ACCUMULATION of UnverifiedIDs across both poisoned chunks: the matcher reads
+// that slice to tell an untrustworthy absence from a definitive miss, so a
+// regression to last-chunk-only assignment would negative-memoize the first
+// chunk's ids for the memo TTL on the strength of a response that was not
+// trustworthy.
 func TestFetchManyKeepsFirstRecordErrorAcrossChunks(t *testing.T) {
 	var mu sync.Mutex
 	calls := 0
@@ -855,6 +860,13 @@ func TestFetchManyKeepsFirstRecordErrorAcrossChunks(t *testing.T) {
 	}
 	if !errors.Is(err, ErrBatchRecord) {
 		t.Errorf("error = %v, want ErrBatchRecord classification", err)
+	}
+	var batchErr *BatchRecordError
+	if !errors.As(err, &batchErr) {
+		t.Fatalf("error = %T %v, want *BatchRecordError", err, err)
+	}
+	if !slices.Equal(batchErr.UnverifiedIDs, ids) {
+		t.Errorf("UnverifiedIDs = %v, want all requested IDs %v from both poisoned chunks", batchErr.UnverifiedIDs, ids)
 	}
 	if !strings.Contains(err.Error(), "media record 0 missing id") {
 		t.Errorf("error = %q, want the FIRST chunk's record error (missing id), not a later chunk's", err.Error())

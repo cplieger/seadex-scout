@@ -86,9 +86,15 @@ func TestNotifySuppressesExistingAndEmitsNewAndResolved(t *testing.T) {
 	same := testFinding("same", "Frieren")
 	fresh := testFinding("new", "Bocchi")
 	sameKey, freshKey := dedupeKey(&same), dedupeKey(&fresh)
+	// The stale record belongs to a DIFFERENT item, so its absence is a
+	// genuine resolution rather than a re-keyed notification for a condition
+	// this cycle still reports (see
+	// TestNotifySupersedesChangedKeyWithoutResolving).
+	gone := testFinding("old", "Old Title")
+	gone.AniListID = 999
 	prior := map[string]Alerted{
 		sameKey: {AlertedAt: oldTime, Finding: storedTestFinding("Frieren")},
-		"old":   {AlertedAt: oldTime, Finding: storedTestFinding("Old Title")},
+		"old":   {AlertedAt: oldTime, Finding: storedFinding(&gone)},
 	}
 
 	current := notifier.Notify([]compare.Finding{same, fresh}, prior, nil, now)
@@ -736,6 +742,97 @@ func TestNotifySummaryLineCarriesAccountingCounts(t *testing.T) {
 			t.Errorf("summary attr %q = %d, want %d", key, got[key], w)
 		}
 	}
+}
+
+// TestNotifySupersedesChangedKeyWithoutResolving pins the supersede-vs-resolve
+// split on the prior-state reconciliation: the dedupe key deliberately folds
+// the obtainable link set and the torrent identity, so gaining an AnimeBytes
+// source beside an unchanged Nyaa recommendation re-keys the SAME condition.
+// The prior record must then be silently superseded (counted, no resolution
+// line), not reported resolved in the same cycle that re-alerts it.
+func TestNotifySupersedesChangedKeyWithoutResolving(t *testing.T) {
+	notifier, recorder := newCapturedNotifier()
+	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	publicOnly := testFinding("frieren", "Frieren")
+	publicOnly.Links = []compare.ReleaseLink{
+		{Tracker: "Nyaa", URL: "https://nyaa.si/view/frieren"},
+	}
+	withAB := publicOnly
+	withAB.Links = []compare.ReleaseLink{
+		{Tracker: "Nyaa", URL: "https://nyaa.si/view/frieren"},
+		{Tracker: "AB", URL: "https://animebytes.tv/torrents.php?id=1&torrentid=2"},
+	}
+	oldKey, newKey := dedupeKey(&publicOnly), dedupeKey(&withAB)
+	if oldKey == newKey {
+		t.Fatalf("fixture does not re-key: adding an AB source left the dedupe key %q unchanged", oldKey)
+	}
+	prior := map[string]Alerted{oldKey: {AlertedAt: oldTime, Finding: storedFinding(&publicOnly)}}
+
+	current := notifier.Notify([]compare.Finding{withAB}, prior, nil, now)
+
+	if _, ok := current[oldKey]; ok {
+		t.Errorf("superseded prior key still present in current state: %+v", current[oldKey])
+	}
+	if _, ok := current[newKey]; !ok {
+		t.Fatalf("re-keyed finding absent from current state: %+v", current)
+	}
+	if got := recorder.CountExact("better release available"); got != 1 {
+		t.Errorf("re-keyed finding notification count = %d, want 1", got)
+	}
+	if got := recorder.CountExact("finding resolved"); got != 0 {
+		t.Errorf("resolution count = %d, want 0 (the condition is still active)", got)
+	}
+	if got, seen := summaryCounter(t, recorder, "superseded"); !seen || got != 1 {
+		t.Errorf("summary superseded = %d (present %v), want 1", got, seen)
+	}
+	if got, _ := summaryCounter(t, recorder, "resolved"); got != 0 {
+		t.Errorf("summary resolved = %d, want 0", got)
+	}
+}
+
+// TestNotifyResolvesWhenOnlyTheStatusChanges is the sibling of the supersede
+// case: the active index is keyed on item AND status, so an item whose
+// better_release condition ended and now only reports incomplete still gets
+// the old status's resolution line - a supersede keyed on the item alone would
+// swallow it.
+func TestNotifyResolvesWhenOnlyTheStatusChanges(t *testing.T) {
+	notifier, recorder := newCapturedNotifier()
+	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	better := testFinding("better", "Frieren")
+	incomplete := testFinding("incomplete", "Frieren")
+	incomplete.Status = compare.StatusIncomplete
+	prior := map[string]Alerted{
+		dedupeKey(&better): {AlertedAt: oldTime, Finding: storedFinding(&better)},
+	}
+
+	notifier.Notify([]compare.Finding{incomplete}, prior, nil, time.Now())
+
+	if got := recorder.CountExact("finding resolved"); got != 1 {
+		t.Errorf("resolution count = %d, want 1 (the better_release condition ended)", got)
+	}
+	if got, _ := summaryCounter(t, recorder, "superseded"); got != 0 {
+		t.Errorf("summary superseded = %d, want 0 (the status changed)", got)
+	}
+}
+
+// summaryCounter reads one counter off the "findings reported" summary line.
+func summaryCounter(t *testing.T, recorder *capture.Recorder, key string) (int64, bool) {
+	t.Helper()
+	var value int64
+	var seen bool
+	for _, rec := range recorder.Records() {
+		if rec.Message != "findings reported" {
+			continue
+		}
+		rec.Attrs(func(a slog.Attr) bool {
+			if a.Key == key {
+				value, seen = a.Value.Int64(), true
+			}
+			return true
+		})
+	}
+	return value, seen
 }
 
 // TestFindingLineCarriesJoinedRecommendedGroups pins the recommended_groups

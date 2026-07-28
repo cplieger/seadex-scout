@@ -82,11 +82,13 @@ func TestChunkComplete(t *testing.T) {
 	}
 }
 
-// TestAdvanceCursor pins the keyset cursor's fail-closed advance rules: a
-// usable (created, id) pair from the chunk's LAST record becomes the next
+// TestAdvanceCursor pins the keyset cursor's fail-closed advance rules over a
+// whole chunk: every record's (created, id) pair must be usable and sort
+// strictly after its predecessor, and the LAST record becomes the next
 // position, while a missing pair, one carrying filter-unsafe bytes, one longer
-// than maxCursorValueBytes, and a pair
-// identical to the current position (an upstream ignoring the filter) all
+// than maxCursorValueBytes, a pair
+// identical to the current position (an upstream ignoring the filter), a pair
+// that REGRESSES behind it, and within-page disorder all
 // error rather than looping or skipping records.
 func TestAdvanceCursor(t *testing.T) {
 	prev := cursor{created: "2026-01-02 03:04:05.000Z", id: "aaa"}
@@ -98,7 +100,7 @@ func TestAdvanceCursor(t *testing.T) {
 	}{
 		{
 			name:  "last record advances the cursor",
-			items: []pbEntry{{ID: "aaa", Created: prev.created}, {ID: "bbb", Created: "2026-01-03 00:00:00.000Z"}},
+			items: []pbEntry{{ID: "aab", Created: prev.created}, {ID: "bbb", Created: "2026-01-03 00:00:00.000Z"}},
 			want:  cursor{created: "2026-01-03 00:00:00.000Z", id: "bbb"},
 		},
 		{
@@ -112,6 +114,23 @@ func TestAdvanceCursor(t *testing.T) {
 		{name: "backslash in the cursor errors", items: []pbEntry{{ID: `b\b`, Created: prev.created}}, wantErr: true},
 		{name: "control byte in the cursor errors", items: []pbEntry{{ID: "b\nb", Created: prev.created}}, wantErr: true},
 		{name: "unchanged position errors", items: []pbEntry{{ID: prev.id, Created: prev.created}}, wantErr: true},
+		{name: "lower created errors", items: []pbEntry{{ID: "zzz", Created: "2026-01-01 00:00:00.000Z"}}, wantErr: true},
+		{name: "same created with a lower id errors", items: []pbEntry{{ID: "aa", Created: prev.created}}, wantErr: true},
+		{
+			name:    "within-page disorder errors",
+			items:   []pbEntry{{ID: "ccc", Created: prev.created}, {ID: "bbb", Created: prev.created}},
+			wantErr: true,
+		},
+		{
+			name:    "a repeated record within the page errors",
+			items:   []pbEntry{{ID: "ccc", Created: prev.created}, {ID: "ccc", Created: prev.created}},
+			wantErr: true,
+		},
+		{
+			name:    "an unusable pair on a non-final record errors",
+			items:   []pbEntry{{ID: "", Created: prev.created}, {ID: "bbb", Created: "2026-01-03 00:00:00.000Z"}},
+			wantErr: true,
+		},
 		{name: "oversized cursor value errors", items: []pbEntry{{ID: strings.Repeat("x", maxCursorValueBytes+1), Created: prev.created}}, wantErr: true},
 		{
 			name:  "cursor value exactly at the length cap advances",

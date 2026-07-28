@@ -253,7 +253,8 @@ func runReport(cfg *config.Config) (err error) {
 	// The whole generate+write is serialized on an exclusive flock in the
 	// report dir: two report runs finishing within the same UTC second would
 	// target the same report-<timestamp>.{md,json} pair, so a concurrent
-	// second run refuses with ErrReportRunning (exit 1) instead of racing.
+	// second run returns ErrReportRunning instead of racing; dispatchOutcome
+	// treats that designed coalescing result as WARN with exit 0.
 	// The report is read-only on state, so the lock guards only the report dir.
 	release, err := audit.AcquireReportLock(cfg.ReportDir)
 	if err != nil {

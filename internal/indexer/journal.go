@@ -122,19 +122,16 @@ func allIdentities(entries []seadex.Entry) map[string]bool {
 		for j := range entries[i].Torrents {
 			t := &entries[i].Torrents[j]
 			scope := trackerScope(t.Tracker)
-			if scope == "" {
-				// Tail-tracker occurrences never reach the ledger (the same
-				// guard journalIfNew applies on the growth path): AnimeTosho
-				// mirrors Nyaa with the IDENTICAL info hash, so folding it at
-				// baseline would pre-mark a later Nyaa listing of the same
-				// bytes as already seen and deny it RSS exposure forever.
-				continue
-			}
 			if journalKey(t) == "" {
-				// Same rule as journalIfNew's growth path: a torrent with no
-				// journal key is unservable for an upstream DATA reason, so
-				// folding its info hash would deny a later corrected record RSS
-				// exposure forever (the ledger is never pruned).
+				// No journal key - an unsupported tail tracker, or a supported
+				// tracker whose URL fails the ownership gate - so nothing is
+				// folded into the never-pruned ledger (the same rule
+				// journalIfNew applies on the growth path). Two reasons: an
+				// AnimeTosho mirror carries Nyaa's IDENTICAL info hash, so
+				// folding it at baseline would pre-mark a later Nyaa listing of
+				// the same bytes as already seen; and a torrent unservable for
+				// an upstream DATA reason must not deny a later corrected
+				// record its RSS exposure.
 				continue
 			}
 			for _, id := range ledgerSignals(scope, t) {
@@ -475,13 +472,12 @@ func (p *journalPass) refreshCarriedItem(it *journalItem, refs []curatedRef) (jo
 // or its stored info hash is warned under a different tracker key - a warning
 // under another key still retracts the shared bytes) is dropped
 // - unlike a curated-then-replaced torrent, SeaDex's curators now warn
-// against it, so serving it would hand the arrs a Broken/Incomplete release;
-// a pre-journal item with no Key or FirstSeen (unreachable after a baseline,
-// defensive against hand-edited snapshots) and a carried AnimeBytes item whose
-// download link can no longer be built (the passkey was removed - the release
-// is no longer grabbable, so serving it would be dead weight) are dropped; so
-// is a carried item whose Key names the other tracker's scope (only reachable
-// from a corrupted or hand-edited snapshot).
+// against it, so serving it would hand the arrs a Broken/Incomplete release.
+// A pre-journal item with no Key or FirstSeen (unreachable after a baseline,
+// defensive against hand-edited snapshots), an item whose stored GUID no longer
+// proves its Key, or an item whose Key names the other tracker scope is dropped.
+// A missing AB passkey is not a drop: the GUID-only record is carried while the
+// reader suppresses the ungrabbable feed, so the switch remains reversible.
 func (p *journalPass) carryJournal(prevFeed []journalItem, scope string) []journalItem {
 	kept := make([]journalItem, 0, len(prevFeed))
 	for i := range prevFeed {
@@ -533,40 +529,35 @@ func (w *FeedWriter) scopeConfigured(scope string) bool {
 
 // journalIfNew applies growJournal's novelty test to one torrent - folding its
 // identity signals into seen either way - and materializes its journal item
-// when it is genuinely new and servable. Two kinds of occurrence never reach
-// the ledger at all: a tail tracker's, and one with no journal key (see the
-// two guards below).
+// when it is genuinely new and servable. An occurrence with no journal key
+// never reaches the ledger at all (see the guard below).
 func (p *journalPass) journalIfNew(t *seadex.Torrent) (it journalItem, scope string, ok bool) {
 	scope = trackerScope(t.Tracker)
-	if scope == "" {
-		// A tail tracker (AnimeTosho, RuTracker) can never be journaled - and
-		// AnimeTosho is a Nyaa MIRROR carrying the IDENTICAL info hash, so
-		// folding its identity into the seen ledger would, depending on
-		// nothing but catalogue iteration order, mark the Nyaa listing of the
-		// same bytes as already seen and silently deny it RSS exposure
-		// forever. The deliberate fold-though-unservable cases below (an
-		// unconfigured tracker's off switch, a missing AB passkey) are
-		// different: those trackers CAN be enabled later, and their
-		// identities must not backfill then - a tail tracker has no later.
-		return journalItem{}, "", false
-	}
 	if journalKey(t) == "" {
-		// No journal key: this torrent can never be journaled, and the reason
-		// is an upstream DATA defect (a URL that fails the tracker-ownership
-		// gate, or no stable identity at all - a configured AnimeBytes record
-		// whose hash SeaDex redacts lands exactly here), NOT an operator
-		// switch. So NOTHING is folded into the never-pruned ledger: the
-		// deliberate fold-though-unservable cases below are the config ones
-		// (an off tracker, a missing AB passkey), whose identities must not
-		// backfill when the operator flips them, whereas a corrected upstream
-		// record is a legitimate later republish that MUST journal as new -
-		// the same reason the tail-tracker guard above folds nothing, and the
-		// contract TestRebuildRejectsForeignHostTrackerURLs states. Folding
-		// the info hash here also silenced the diagnostic after one cycle: the
-		// next rebuild saw the hash as seen and returned before the count.
-		// For an enabled, supported tracker surface it on the snapshot log
-		// line instead of silently shrinking the feed; unknown tail trackers
-		// and an intentionally disabled AB stay silent.
+		// No journal key: this torrent can never be journaled. Either its
+		// tracker is unsupported - a tail tracker (AnimeTosho, RuTracker),
+		// which trackerKey refuses outright - or the reason is an upstream
+		// DATA defect on a supported tracker (a URL that fails the
+		// tracker-ownership gate, or no stable identity at all - a configured
+		// AnimeBytes record whose hash SeaDex redacts lands exactly here).
+		// Neither is an operator switch, so NOTHING is folded into the
+		// never-pruned ledger: the deliberate fold-though-unservable cases
+		// below are the config ones (an off tracker, a missing AB passkey),
+		// whose identities must not backfill when the operator flips them,
+		// whereas a corrected upstream record is a legitimate later republish
+		// that MUST journal as new - the contract
+		// TestRebuildRejectsForeignHostTrackerURLs states. A tail tracker has
+		// the sharper version of the same rule: AnimeTosho is a Nyaa MIRROR
+		// carrying the IDENTICAL info hash, so folding its identity would,
+		// depending on nothing but catalogue iteration order, mark the Nyaa
+		// listing of the same bytes as already seen and silently deny it RSS
+		// exposure forever - and unlike a disabled tracker, a tail tracker has
+		// no later. Folding the info hash here also silenced the diagnostic
+		// after one cycle: the next rebuild saw the hash as seen and returned
+		// before the count. For an enabled, supported tracker surface it on
+		// the snapshot log line instead of silently shrinking the feed;
+		// unknown tail trackers (scopeConfigured("") is false) and an
+		// intentionally disabled AB stay silent.
 		if p.w.scopeConfigured(scope) {
 			p.js.unresolvable++
 		}

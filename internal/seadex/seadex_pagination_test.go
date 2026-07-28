@@ -234,7 +234,7 @@ func TestFetchEntriesErrorsOnMetadataRegression(t *testing.T) {
 // through different guards, so this is the only oracle for this arm.
 func TestFetchEntriesRejectsNonEmptyCatalogueWithoutReportedTotal(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"totalPages":1,"items":[{"alID":1,"expand":{"trs":[]}}]}`)
+		fmt.Fprint(w, `{"totalPages":1,"items":[{"alID":1,"id":"rec000001","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}}]}`)
 	}))
 	defer server.Close()
 
@@ -369,7 +369,7 @@ func (tr *flakyStatusTransport) RoundTrip(req *http.Request) (*http.Response, er
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     make(http.Header),
-		Body:       io.NopCloser(strings.NewReader(`{"totalItems":1,"totalPages":1,"items":[{"alID":1,"expand":{"trs":[]}}]}`)),
+		Body:       io.NopCloser(strings.NewReader(`{"totalItems":1,"totalPages":1,"items":[{"alID":1,"id":"rec000001","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}}]}`)),
 		Request:    req,
 	}, nil
 }
@@ -427,7 +427,7 @@ func TestFetchEntriesEmptyCatalogueErrors(t *testing.T) {
 // takes over.
 func TestFetchEntriesCountMismatchWarnsButSucceeds(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"totalItems":3,"totalPages":1,"items":[{"alID":1,"expand":{"trs":[]}},{"alID":2,"expand":{"trs":[]}}]}`)
+		fmt.Fprint(w, `{"totalItems":3,"totalPages":1,"items":[{"alID":1,"id":"rec000001","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}},{"alID":2,"id":"rec000002","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}}]}`)
 	}))
 	defer server.Close()
 
@@ -457,7 +457,7 @@ func TestFetchEntriesCountMismatchWarnsButSucceeds(t *testing.T) {
 // shared with the mapping-refresh and library-walk guards.
 func TestFetchEntriesBelowHalfShortfallErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"totalItems":5,"totalPages":1,"items":[{"alID":1,"expand":{"trs":[]}},{"alID":2,"expand":{"trs":[]}}]}`)
+		fmt.Fprint(w, `{"totalItems":5,"totalPages":1,"items":[{"alID":1,"id":"rec000001","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}},{"alID":2,"id":"rec000002","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}}]}`)
 	}))
 	defer server.Close()
 
@@ -489,7 +489,7 @@ func TestFetchEntriesBelowHalfShortfallErrors(t *testing.T) {
 // with the count-mismatch WARN.
 func TestFetchEntriesInconsistentTotalsError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"totalItems":501,"totalPages":1,"items":[{"alID":1,"expand":{"trs":[]}},{"alID":2,"expand":{"trs":[]}}]}`)
+		fmt.Fprint(w, `{"totalItems":501,"totalPages":1,"items":[{"alID":1,"id":"rec000001","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}},{"alID":2,"id":"rec000002","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}}]}`)
 	}))
 	defer server.Close()
 
@@ -512,9 +512,9 @@ func TestFetchEntriesInconsistentTotalsError(t *testing.T) {
 func TestFetchEntriesUnparseableUpdatedWarnsOnce(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{"totalItems":3,"totalPages":1,"items":[`+
-			`{"alID":1,"updated":"not-a-timestamp","expand":{"trs":[]}},`+
-			`{"alID":2,"updated":"31/12/2025","expand":{"trs":[]}},`+
-			`{"alID":3,"updated":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}}]}`)
+			`{"alID":1,"id":"rec000001","created":"2026-01-02 03:04:05.000Z","updated":"not-a-timestamp","expand":{"trs":[]}},`+
+			`{"alID":2,"id":"rec000002","created":"2026-01-02 03:04:05.000Z","updated":"31/12/2025","expand":{"trs":[]}},`+
+			`{"alID":3,"id":"rec000003","created":"2026-01-02 03:04:05.000Z","updated":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}}]}`)
 	}))
 	defer server.Close()
 
@@ -558,11 +558,11 @@ func TestFetchEntriesUnparseableUpdatedWarnsOnce(t *testing.T) {
 func TestFetchEntriesUnusableTorrentURLWarnsOnce(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{"totalItems":2,"totalPages":1,"items":[`+
-			`{"alID":1,"expand":{"trs":[`+
+			`{"alID":1,"id":"rec000001","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[`+
 			`{"tracker":"Nyaa","url":"https://evil.example/view/1"},`+
 			`{"tracker":"SomeRandomTracker","url":"https://example.com/x"},`+
 			`{"tracker":"Nyaa","url":""}]}},`+
-			`{"alID":2,"expand":{"trs":[`+
+			`{"alID":2,"id":"rec000002","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[`+
 			`{"tracker":"Nyaa","url":"https://nyaa.si/view/123"}]}}]}`)
 	}))
 	defer server.Close()
@@ -656,7 +656,7 @@ func TestFetchEntriesSleepsOnlyBetweenPages(t *testing.T) {
 // can never fire on a clean cycle.
 func TestFetchEntriesCleanFetchEmitsNoWarnings(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"totalItems":1,"totalPages":1,"items":[{"alID":1,"updated":"2026-01-02 03:04:05.000Z","expand":{"trs":[{"tracker":"Nyaa","url":"https://nyaa.si/view/1"}]}}]}`)
+		fmt.Fprint(w, `{"totalItems":1,"totalPages":1,"items":[{"alID":1,"id":"rec000001","created":"2026-01-02 03:04:05.000Z","updated":"2026-01-02 03:04:05.000Z","expand":{"trs":[{"tracker":"Nyaa","url":"https://nyaa.si/view/1"}]}}]}`)
 	}))
 	defer server.Close()
 
@@ -773,12 +773,12 @@ func TestFetchEntriesRejectsBrokenEntryIdentities(t *testing.T) {
 	}{
 		{
 			name:  "omitted alID",
-			items: `{"expand":{"trs":[]}},{"alID":2,"expand":{"trs":[]}}`,
+			items: `{"expand":{"trs":[]}},{"alID":2,"id":"rec000002","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}}`,
 			want:  "page 1 item 1 has invalid AniList ID 0",
 		},
 		{
 			name:  "zero alID",
-			items: `{"alID":1,"expand":{"trs":[]}},{"alID":0,"expand":{"trs":[]}}`,
+			items: `{"alID":1,"id":"rec000001","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}},{"alID":0,"expand":{"trs":[]}}`,
 			want:  "page 1 item 2 has invalid AniList ID 0",
 		},
 		{
@@ -871,5 +871,64 @@ func TestFetchEntriesUnusableCursorAborts(t *testing.T) {
 	}
 	if reqs != 1 {
 		t.Errorf("requests = %d, want 1 (the walk aborts instead of re-requesting the same chunk)", reqs)
+	}
+}
+
+// TestFetchEntriesRegressingCursorAborts pins the ordering premise the walk's
+// completeness argument rests on: a short terminal chunk is read as exhaustion
+// only because the filter asked for everything after the cursor under
+// sort=created,id. Here the second chunk is short, carries unique positive
+// AniList IDs, and agrees with the reported total - every count, identity and
+// shortfall guard passes - but its keyset pair sorts BEFORE the position the
+// first chunk established, so the records after that position were never
+// delivered. The walk must refuse it rather than return a count-complete but
+// key-incomplete catalogue that falsely resolves existing findings.
+func TestFetchEntriesRegressingCursorAborts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("filter") == "" {
+			fmt.Fprintf(w, `{"totalItems":%d,"totalPages":2,"items":[%s]}`, perPage+1, fullKeysetChunk(1))
+			return
+		}
+		// A short chunk whose (created, id) pair regresses behind the first
+		// chunk's last record (rec000500): earlier created, unique alID.
+		fmt.Fprintf(w, `{"totalItems":%d,"totalPages":2,"items":[%s]}`, perPage+1,
+			`{"alID":999999,"id":"rec000001","created":"2026-01-01 00:00:00.000Z","expand":{"trs":[]}}`)
+	}))
+	defer server.Close()
+
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	if err == nil {
+		t.Fatalf("FetchEntries = %d entries, want a non-advancing-cursor error", len(entries))
+	}
+	if entries != nil {
+		t.Fatalf("entries = %d items, want nil (a truncated view must never reach the comparison)", len(entries))
+	}
+	if !strings.Contains(err.Error(), "keyset cursor did not advance past") {
+		t.Errorf("error = %q, want the non-advancing-cursor refusal", err.Error())
+	}
+}
+
+// TestFetchEntriesDisorderedShortChunkAborts pins the same validation on a
+// SINGLE short chunk - the terminal-chunk case the walk used to skip entirely,
+// because the cursor was only checked when another request would be issued. The
+// chunk's own records are out of sort order, so the response is not the sorted
+// suffix that was requested and its shortness proves nothing about exhaustion.
+func TestFetchEntriesDisorderedShortChunkAborts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"totalItems":2,"totalPages":1,"items":[`+
+			`{"alID":2,"id":"rec000002","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}},`+
+			`{"alID":1,"id":"rec000001","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}}]}`)
+	}))
+	defer server.Close()
+
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	if err == nil {
+		t.Fatalf("FetchEntries = %d entries, want a disordered-chunk error", len(entries))
+	}
+	if entries != nil {
+		t.Fatalf("entries = %d items, want nil (an unordered chunk proves no exhaustion)", len(entries))
+	}
+	if !strings.Contains(err.Error(), "keyset cursor did not advance past") {
+		t.Errorf("error = %q, want the non-advancing-cursor refusal", err.Error())
 	}
 }

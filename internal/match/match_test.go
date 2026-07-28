@@ -771,3 +771,45 @@ func TestFindByTitleUnknownYearSiblingLeavesSetAmbiguous(t *testing.T) {
 		t.Fatalf("findByTitle matched %+v; want nil: the kept unknown-year sibling leaves the set ambiguous", got)
 	}
 }
+
+// TestMatchIDLessUntypedRecordRoutesByAniListFormat covers the routing repair
+// for an id-less record that is also UNTYPED: recordArr routes every non-MOVIE
+// value (including "") to Sonarr, so without consulting AniList first the title
+// search would be restricted to Sonarr and would either miss the real Radarr
+// movie or bind the same-titled series. AniList is authoritative for the format
+// here, so the resolved MOVIE format must pick Radarr, count coverage there,
+// and type the returned Record so downstream scoping/filtering can read it.
+func TestMatchIDLessUntypedRecordRoutesByAniListFormat(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 1, Title: "Kizumonogatari", TvdbID: 300, Year: 2016},
+		{Arr: library.ArrRadarr, ArrID: 2, Title: "Kizumonogatari", TmdbID: 400, Year: 2016},
+	}}
+	// The record exists but carries neither an arr id nor a type: the split
+	// mapping gap, with no routing evidence of its own.
+	idx := mapping.NewIndex([]mapping.Record{{AniListID: 21403}})
+	fake := fakeAniList{media: map[int]anilist.Media{
+		21403: {Titles: []string{"Kizumonogatari"}, Format: "MOVIE", Year: 2016},
+	}}
+
+	res := NewMatcher(fake, nil).Match(context.Background(), []seadex.Entry{{AniListID: 21403}}, snap, idx, Memo{})
+
+	if len(res.Matches) != 1 {
+		t.Fatalf("matches = %d, want 1", len(res.Matches))
+	}
+	got := res.Matches[0]
+	if !got.InLibrary() || got.Item.Arr != library.ArrRadarr || got.Item.ArrID != 2 {
+		t.Fatalf("match item = %+v, want the Radarr movie the AniList format names", got.Item)
+	}
+	if got.Arr != library.ArrRadarr {
+		t.Errorf("match arr = %q, want %q", got.Arr, library.ArrRadarr)
+	}
+	if !got.Record.IsMovie() {
+		t.Errorf("record type = %q, want the AniList format to type the record as a movie", got.Record.Type)
+	}
+	if res.Coverage.Unmapped[library.ArrRadarr] != 1 {
+		t.Errorf("coverage unmapped[radarr] = %d, want 1 (counted under the resolved arr)", res.Coverage.Unmapped[library.ArrRadarr])
+	}
+	if res.Coverage.Unmapped[library.ArrSonarr] != 0 {
+		t.Errorf("coverage unmapped[sonarr] = %d, want 0 (the untyped record must not be attributed to Sonarr)", res.Coverage.Unmapped[library.ArrSonarr])
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cplieger/atomicfile/v2"
@@ -86,7 +87,7 @@ type snapshotCache struct {
 	// read failure of an unchanged-identity file), so the WARN fires once
 	// per degradation onset instead of on every request; cleared with one
 	// INFO recovery line on the next successful snapshot read, and cleared
-	// SILENTLY when the file goes absent (statSnapshot's ENOENT arm - the
+	// SILENTLY when the file goes absent (openSnapshot's ENOENT arm - the
 	// missing state has its own once-per-disappearance WARN) or when the
 	// stat lands on the memoized malformed file (skipMemoizedMalformed -
 	// access recovered, but nothing was reloaded). The retry itself is NOT
@@ -115,8 +116,8 @@ type snapshotCache struct {
 }
 
 // newSnapshotCache builds the cache for the snapshot file at path. It does not
-// load: the caller decides when the first refresh runs (New does it eagerly so a
-// restart serves the last feed immediately).
+// load: the caller decides when the first refresh runs (Run warms it eagerly so
+// a restart serves the last feed immediately).
 func newSnapshotCache(path, abPasskey string, log *slog.Logger) *snapshotCache {
 	return &snapshotCache{
 		log:        log,
@@ -154,55 +155,65 @@ func (c *snapshotCache) feed(scope string) []journalItem {
 	return nil
 }
 
-// statSnapshot stats the snapshot file and applies refresh's missing/unreadable
-// policy, returning the file info and whether reload should proceed. A missing
-// file after one was loaded warns once (the feed is now stale); any other stat
-// error (EACCES, EIO) warns and freezes the current feed. On the recovery path
-// it clears snapMissing and logs one INFO line.
-func (c *snapshotCache) statSnapshot() (os.FileInfo, bool) {
-	info, err := os.Stat(c.path)
+// openSnapshot opens the snapshot file ONCE and applies refresh's
+// missing/unreadable policy, returning the open descriptor, its info, and
+// whether reload should proceed. The caller owns the returned file and must
+// close it. A missing file after one was loaded warns once (the feed is now
+// stale); any other open error (EACCES, EIO) warns and freezes the current
+// feed. On the recovery path it clears snapMissing and logs one INFO line.
+//
+// One descriptor is the point. The previous shape observed the pathname three
+// separate times - os.Stat, os.Lstat, then atomicfile.ReadBounded's own os.Open
+// - and the app's own writer publishes by atomic rename, so a replacement
+// landing between them let refresh decode one generation's bytes while
+// recording another's FileIdentity (a deterministic failure memoized against
+// the wrong inode), and made every non-regular-file rejection a
+// check-then-open TOCTOU: a FIFO swapped in after the Lstat still blocked
+// ReadBounded's open while this caller held reloadGate, so the asynchronous
+// warm loader leaked and every pre-first-load request parked behind it until
+// its own context expired. Binding validation, identity and bytes to one
+// descriptor closes both: O_NOFOLLOW refuses a final-component symlink at open
+// time (matching the writer's ErrSymlinkTarget contract, which
+// atomicfile.ReadBounded cannot honor because os.Open follows links) and
+// O_NONBLOCK makes a raced FIFO open return immediately so the regular-file
+// check can reject it instead of blocking forever. The gate is the full
+// regular-file predicate rather than a symlink test: a socket, device, or
+// directory left at the path is the same non-regular ingress. Every rejection
+// takes the same arm as any other open fault: warn once per onset, keep the
+// current feed, and mark the snapshot-unavailable state while nothing has
+// loaded.
+func (c *snapshotCache) openSnapshot() (*os.File, os.FileInfo, bool) {
+	f, err := os.OpenFile(c.path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			c.noteSnapshotAbsent()
-			return nil, false
+			return nil, nil, false
 		}
-		// Anything else (EACCES, EIO) silently freezes the served feed, so
-		// make it visible - once per onset, not once per request.
-		c.noteStatFault("indexer feed snapshot stat failed; keeping current feed", "error", err)
-		return nil, false
+		// Anything else (EACCES, EIO, and ELOOP for a symlink at the final
+		// component) silently freezes the served feed, so make it visible -
+		// once per onset, not once per request.
+		c.noteStatFault("indexer feed snapshot open failed; keeping current feed", "error", err)
+		return nil, nil, false
 	}
-	// The snapshot path must be a regular file. atomicfile.ReadBounded opens
-	// it with os.Open, which FOLLOWS symlinks, while the writer's
-	// atomicfile.WriteFile refuses a symlink target outright
-	// (ErrSymlinkTarget, atomicfile's default) - so without this the two ends
-	// of the same /config/feed.json contract disagree about whether the path
-	// may be a link, and the reader would decode whatever the link points at
-	// as the served feed. The gate is the full regular-file predicate rather
-	// than a symlink test: a FIFO, socket, device, or directory left at the
-	// path is the same non-regular ingress, and a FIFO is the worst of them -
-	// os.Open blocks on it before ReadBounded can observe the context, so
-	// New's warm-load timeout would never release startup and the daemon
-	// would neither bind the listener nor start its compare loop. Every
-	// rejection takes the same arm as any other stat fault: warn once per
-	// onset, keep the current feed, and mark the snapshot-unavailable state
-	// while nothing has loaded.
-	link, lerr := os.Lstat(c.path)
-	if lerr != nil {
-		c.noteStatFault("indexer feed snapshot lstat failed; keeping current feed", "error", lerr)
-		return nil, false
+	info, serr := f.Stat()
+	if serr != nil {
+		f.Close()
+		c.noteStatFault("indexer feed snapshot stat failed; keeping current feed", "error", serr)
+		return nil, nil, false
 	}
-	if !link.Mode().IsRegular() {
-		c.noteStatFault("indexer feed snapshot path is not a regular file; refusing to load it", "mode", link.Mode().String())
-		return nil, false
+	if !info.Mode().IsRegular() {
+		f.Close()
+		c.noteStatFault("indexer feed snapshot path is not a regular file; refusing to load it", "mode", info.Mode().String())
+		return nil, nil, false
 	}
 	if c.snapMissing {
 		c.snapMissing = false
 		c.log.Info("indexer feed snapshot reappeared; resuming reloads", "path", c.path)
 	}
-	return info, true
+	return f, info, true
 }
 
-// noteSnapshotAbsent applies the missing-file policy statSnapshot's ErrNotExist
+// noteSnapshotAbsent applies the missing-file policy openSnapshot's ErrNotExist
 // arm carries. A missing file is the normal fresh-install case, but after a
 // snapshot was loaded it means the materialized view can no longer refresh:
 // every request keeps serving the last in-memory feed, so warn once that the
@@ -341,10 +352,11 @@ func (c *snapshotCache) refresh(ctx context.Context) {
 		}
 	}
 	defer c.unlockReload()
-	info, ok := c.statSnapshot()
+	f, info, ok := c.openSnapshot()
 	if !ok {
 		return
 	}
+	defer f.Close()
 	if c.skipMemoizedMalformed(info) {
 		return
 	}
@@ -358,7 +370,7 @@ func (c *snapshotCache) refresh(ctx context.Context) {
 	if c.loadedSnapshotUnchanged(info) && !c.reloadDegraded {
 		return
 	}
-	snap, ok, memoize := c.readSnapshot(ctx)
+	snap, ok, memoize := c.readSnapshot(ctx, f)
 	if !ok {
 		c.recordSnapshotFailure(info, memoize)
 		return
@@ -484,8 +496,10 @@ func (c *snapshotCache) clearSnapshotFailed() {
 	c.snapFailedWarned = false
 }
 
-// readSnapshot is reload's read/decode error policy: it bounded-reads and
-// decodes the persisted feed snapshot, reporting ok=false on any failure so
+// readSnapshot is reload's read/decode error policy: it bounded-reads f - the
+// descriptor openSnapshot already validated, so the bytes decoded here are
+// exactly the ones the recorded FileIdentity describes - and decodes the
+// persisted feed snapshot, reporting ok=false on any failure so
 // the caller keeps the current feed. A shutdown cancellation is silent; an
 // unreadable or malformed file is logged (a bad write must never blank a live
 // feed). The third result means "memoize unchanged bytes": true for every
@@ -495,8 +509,8 @@ func (c *snapshotCache) clearSnapshotFailed() {
 // never shrinks on its own; the writer's classifyPreviousReadError classifies
 // it the same way). A recoverable read failure (EIO, a fixable EACCES) can
 // succeed without changing inode or mtime, so it stays retryable.
-func (c *snapshotCache) readSnapshot(ctx context.Context) (snapshot, bool, bool) {
-	data, err := atomicfile.ReadBounded(ctx, c.path, maxFeedBytes)
+func (c *snapshotCache) readSnapshot(ctx context.Context, f *os.File) (snapshot, bool, bool) {
+	data, err := atomicfile.ReadBoundedFile(ctx, f, maxFeedBytes)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			// A shutdown cancellation is silent and never marks the

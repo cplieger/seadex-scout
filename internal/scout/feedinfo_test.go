@@ -185,26 +185,35 @@ func TestFeedEntryInfoEmptyMemoTitles(t *testing.T) {
 }
 
 // TestFeedEntryInfoEmptyArrTitleFallsBackToMemo pins the documented fallback
-// chain when the library item exists but its Title is empty: an unusable arr
-// title must not short-circuit the chain - the memo's canonical title (the
+// chain when the library item exists but its Title carries no text: an unusable
+// arr title must not short-circuit the chain - the memo's canonical title (the
 // stronger remaining source) is returned, while the record's movie typing and
-// resolved season ride along untouched.
+// resolved season ride along untouched. A whitespace-only title is the same
+// SEMANTIC empty as "": synthesizeTitle trims downstream, so admitting it here
+// would suppress the memo and fall all the way to file-name derivation.
 func TestFeedEntryInfoEmptyArrTitleFallsBackToMemo(t *testing.T) {
-	idx := mapping.NewIndex([]mapping.Record{
-		{AniListID: 1, Type: "TV", TvdbID: 123, SeasonTvdb: 2},
-	})
-	lib := &library.Snapshot{Items: []library.Item{
-		{Arr: library.ArrSonarr, ArrID: 10, TvdbID: 123, Title: "", Year: 2023},
-	}}
-	memo := match.Memo{Entries: map[int]match.MemoEntry{
-		1: {Titles: []string{"Memo Title"}, Year: 2021},
-	}}
-	got := feedEntryInfo(idx, lib, memo)(1)
-	if got.Title != "Memo Title" || got.Year != 2021 {
-		t.Errorf("info(1) = %+v, want the memo title/year when the arr title is empty", got)
-	}
-	if got.Season != 2 || !got.SeasonKnown || got.IsMovie {
-		t.Errorf("info(1) typing = %+v, want the season-2 series resolution intact", got)
+	for name, arrTitle := range map[string]string{
+		"empty":           "",
+		"whitespace only": " \t ",
+	} {
+		t.Run(name, func(t *testing.T) {
+			idx := mapping.NewIndex([]mapping.Record{
+				{AniListID: 1, Type: "TV", TvdbID: 123, SeasonTvdb: 2},
+			})
+			lib := &library.Snapshot{Items: []library.Item{
+				{Arr: library.ArrSonarr, ArrID: 10, TvdbID: 123, Title: arrTitle, Year: 2023},
+			}}
+			memo := match.Memo{Entries: map[int]match.MemoEntry{
+				1: {Titles: []string{"Memo Title"}, Year: 2021},
+			}}
+			got := feedEntryInfo(idx, lib, memo)(1)
+			if got.Title != "Memo Title" || got.Year != 2021 {
+				t.Errorf("info(1) = %+v, want the memo title/year when the arr title is %q", got, arrTitle)
+			}
+			if got.Season != 2 || !got.SeasonKnown || got.IsMovie {
+				t.Errorf("info(1) typing = %+v, want the season-2 series resolution intact", got)
+			}
+		})
 	}
 }
 

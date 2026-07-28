@@ -110,6 +110,10 @@ groups:
       # [Nyaa] label cannot lie); a public release from any other tracker
       # (AnimeTosho, RuTracker) arrives as public_url labelled by public_tracker.
       # The two are mutually exclusive - one public link per finding.
+      # The annotations render alert_title / alert_recommended_group, the
+      # markdown-safe twins of title / recommended_group: an untrusted SeaDex
+      # title cannot become an active link or an @everyone mention in the
+      # Discord/Slack body, while the raw labels stay for search and grouping.
       # The markdown
       # links render in Discord/Slack; simplify the annotation for a plain-text
       # receiver. Note: receivers that echo an alert's labels (a generic footer)
@@ -117,7 +121,7 @@ groups:
       # template if you want just the tag line shown.
       - alert: SeadexScoutBetterReleaseFound
         expr: |
-          sum by (title, al_id, arr, arr_url, nyaa_url, public_url, public_tracker, ab_url, season, recommended_group, seadex_tags) (
+          sum by (title, alert_title, al_id, arr, arr_url, nyaa_url, public_url, public_tracker, ab_url, season, recommended_group, alert_recommended_group, seadex_tags) (
             count_over_time(
               {container="seadex-scout"} | json | msg=`better release available` [1h]
             )
@@ -126,13 +130,13 @@ groups:
         labels:
           severity: info
         annotations:
-          summary: '{{ $labels.title }}: new SeaDex release'
+          summary: '{{ $labels.alert_title }}: new SeaDex release'
           description: >-
             [New release](https://releases.moe/{{ $labels.al_id }}) for
-            {{ $labels.title }}
+            {{ $labels.alert_title }}
             {{- if $labels.arr_url }} ([open in {{ $labels.arr }}]({{ $labels.arr_url }})){{ end }}
             {{- if and $labels.season (ne $labels.season "0") }} Season {{ $labels.season }}{{ end }}
-            ({{ $labels.recommended_group }}).
+            ({{ $labels.alert_recommended_group }}).
             {{ if $labels.nyaa_url }}[Nyaa]({{ $labels.nyaa_url }}){{ end }}
             {{- if $labels.public_url }}{{ if $labels.nyaa_url }} · {{ end }}[{{ $labels.public_tracker }}]({{ $labels.public_url }}){{ end }}
             {{- if $labels.ab_url }}{{ if or $labels.nyaa_url $labels.public_url }} · {{ end }}[AB]({{ $labels.ab_url }}){{ end }}
