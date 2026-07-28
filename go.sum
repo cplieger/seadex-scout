@@ -8,8 +8,8 @@ github.com/cplieger/health v1.4.0 h1:MnLfSZNRnq7wYSMVi1s8Ox0kowk5iPzmqVKQ5JHHsoM
 github.com/cplieger/health v1.4.0/go.mod h1:15Lm3XhPMU3nCEDfIH2hVAz6TXH06Wwiz9tgBi71vEE=
 github.com/cplieger/httpx/v2 v2.6.0 h1:KPBxno0EY/KcwXiB1Vi94bE4NFNaXxFyqnp02XBn9FY=
 github.com/cplieger/httpx/v2 v2.6.0/go.mod h1:Q3ulXhfiO40EGxIVofnz2KdJY1X3MSKZTwYhv/pL9W0=
-github.com/cplieger/httpx/v4 v4.2.0 h1:D6WTZNN7hXeFu/qGCvJ7vtNHn2Qlb5YtnNXzbe9Z/6U=
-github.com/cplieger/httpx/v4 v4.2.0/go.mod h1:bfJDGEQRWEwLu6mlwk49PfDIAETABwhlp+DAWFXo8XE=
+github.com/cplieger/httpx/v4 v4.2.1 h1:KrkuZKrOVWD8EoDXW16DJhvN+68Zm+FbSEVtn4ZNvQg=
+github.com/cplieger/httpx/v4 v4.2.1/go.mod h1:bfJDGEQRWEwLu6mlwk49PfDIAETABwhlp+DAWFXo8XE=
 github.com/cplieger/runesafe v1.2.1 h1:OXBQzu0PMGm5pe0Gn8zRl+MAmu9Iss1pLI3160pJBTw=
 github.com/cplieger/runesafe v1.2.1/go.mod h1:37oz7JJVn1PIWv5UHrJhDhCabmqhMY+eRavwZ6Lp6NI=
 github.com/cplieger/scheduler v1.2.0 h1:f3iOT8KXvakAWvwWkgrlg/cVBXweLgImIBrpoqgOM2o=
