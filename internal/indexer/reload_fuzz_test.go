@@ -17,9 +17,13 @@ import (
 // one a consumer sends elsewhere; and it must stay accepted after that
 // consumer's own parse/re-render round trip, so a vouched link cannot change
 // identity between the gate and the arr UI that renders it as <comments>.
-// A value net/url cannot parse at all is skipped rather than failed: urlform is
-// this gate's parser of record (WHATWG input preprocessing), and a link no
-// net/url consumer can resolve cannot be misrouted.
+// The independent parse reads the VOUCHED spelling the gate returns, which is
+// exactly what sanitizeSnapshotInfoURLs stores (h-f8). There is no
+// unparseable-value skip any more: a form only classifies absolute after
+// net/url parsed it, and a backslash-bearing value is refused outright, so the
+// string the gate vouched IS the string its parser of record resolved - a
+// net/url failure on it would be a real defect, not the browser-vs-net/url
+// divergence the old skip covered.
 func FuzzSnapshotInfoURLAllowed_failsClosedAndKeepsCanonicalLinks(f *testing.F) {
 	f.Add("https://releases.moe/154587")
 	f.Add("http://releases.moe/154587")
@@ -33,26 +37,24 @@ func FuzzSnapshotInfoURLAllowed_failsClosedAndKeepsCanonicalLinks(f *testing.F) 
 	f.Add("https://releases.moe:8443/154587")
 	f.Add("https://evil.example/154587")
 	f.Add("https://releases.moe.evil.example/154587")
+	f.Add("\thttps://releases.moe/154587")
+	f.Add("https://releases.moe/154587\x01")
 	f.Add("")
 	f.Fuzz(func(t *testing.T, raw string) {
-		if snapshotInfoURLAllowed(raw, "") {
+		if _, ok := snapshotInfoURLAllowed(raw, ""); ok {
 			t.Fatalf("snapshotInfoURLAllowed(%q, \"\") = true; an unresolved canonical host must vouch nothing", raw)
 		}
 		host := seadexInfoHost()
-		if !snapshotInfoURLAllowed(raw, host) {
+		cleaned, ok := snapshotInfoURLAllowed(raw, host)
+		if !ok {
 			return
 		}
-		u, err := url.Parse(raw)
+		u, err := url.Parse(cleaned)
 		if err != nil {
-			// net/url refuses the value outright - urlform reads WHATWG input
-			// preprocessing, so whitespace/control padding a browser strips is
-			// vouchable here while net/url rejects it. A value no net/url
-			// consumer can resolve at all cannot be MISROUTED, which is what
-			// the host invariant below guards, so there is nothing to check.
-			return
+			t.Fatalf("vouched form %q of accepted URL %q does not parse with net/url: %v; the gate must never vouch a value its own parser of record cannot resolve", cleaned, raw, err)
 		}
 		if got := strings.ToLower(u.Hostname()); got != host {
-			t.Fatalf("accepted URL %q resolves to host %q under net/url, want the canonical %q; the gate must never vouch a link a consumer sends elsewhere", raw, got, host)
+			t.Fatalf("accepted URL %q (vouched as %q) resolves to host %q under net/url, want the canonical %q; the gate must never vouch a link a consumer sends elsewhere", raw, cleaned, got, host)
 		}
 		if u.Scheme != "http" && u.Scheme != "https" {
 			t.Fatalf("accepted URL %q has scheme %q; only an http(s) link may be published to the arr UI", raw, u.Scheme)
@@ -60,7 +62,7 @@ func FuzzSnapshotInfoURLAllowed_failsClosedAndKeepsCanonicalLinks(f *testing.F) 
 		if u.User != nil {
 			t.Fatalf("accepted URL %q carries userinfo %q; a spoofable authority must never be published", raw, u.User)
 		}
-		if !snapshotInfoURLAllowed(u.String(), host) {
+		if _, ok := snapshotInfoURLAllowed(u.String(), host); !ok {
 			t.Fatalf("accepted URL %q is rejected after its consumer's own re-render (%q)", raw, u.String())
 		}
 	})

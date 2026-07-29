@@ -36,12 +36,12 @@ func TestVouch(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			host, ok := Vouch(tc.raw)
+			host, ok := vouchHost(tc.raw)
 			if ok != tc.vouched {
-				t.Errorf("Vouch(%q) ok = %v, want %v", tc.raw, ok, tc.vouched)
+				t.Errorf("vouchHost(%q) ok = %v, want %v", tc.raw, ok, tc.vouched)
 			}
 			if host != tc.host {
-				t.Errorf("Vouch(%q) host = %q, want %q", tc.raw, host, tc.host)
+				t.Errorf("vouchHost(%q) host = %q, want %q", tc.raw, host, tc.host)
 			}
 		})
 	}
@@ -65,18 +65,18 @@ func FuzzVouch(f *testing.F) {
 	f.Add("https://user:pw@nyaa.si/")
 	f.Add("")
 	f.Fuzz(func(t *testing.T, raw string) {
-		host, ok := Vouch(raw)
+		host, ok := vouchHost(raw)
 		if !ok {
 			if host != "" {
-				t.Fatalf("Vouch(%q) refused the value but returned host %q", raw, host)
+				t.Fatalf("vouchHost(%q) refused the value but returned host %q", raw, host)
 			}
 			return
 		}
 		if host == "" {
-			t.Fatalf("Vouch(%q) vouched the value but returned no host evidence", raw)
+			t.Fatalf("vouchHost(%q) vouched the value but returned no host evidence", raw)
 		}
 		if trimmed := strings.Trim(raw, c0AndSpace); strings.ContainsAny(trimmed, "\\\t\n\r") {
-			t.Fatalf("Vouch(%q) vouched a value carrying a smuggling byte", raw)
+			t.Fatalf("vouchHost(%q) vouched a value carrying a smuggling byte", raw)
 		}
 	})
 }
@@ -124,4 +124,18 @@ func TestVouchSanitizingFormDiffersOnlyOnUserInfo(t *testing.T) {
 			}
 		})
 	}
+}
+
+// vouchHost is the test-local composition the deleted exported Vouch wrapper
+// used to provide: classify once, apply the shared structural legs, and return
+// urlform's ASCII-lowercased host evidence. It lives here because no production
+// caller needs the host-only shape - every gate holds a classified form and
+// calls VouchForm directly - while these assertions are still the ones that pin
+// "a vouched value always yields host evidence, a refused one never does".
+func vouchHost(raw string) (host string, ok bool) {
+	f := urlform.Classify(raw)
+	if !VouchForm(&f) {
+		return "", false
+	}
+	return f.Host, true
 }

@@ -138,3 +138,17 @@ method (*StaleMapError).Unwrap is
 # or routing the call sites through the network-backed Loader, which would stop
 # those tests pinning match/audit/scout behavior against a real index.
 function NewIndex is
+
+#
+# (*sanitizedError).Unwrap — same errors-chain class as the wrappers above.
+# sanitizedError (internal/mapping/mapping.go) exists so a Fribb-refresh failure
+# can reach a log boundary as pre-sanitized, length-bounded text while the
+# original cause stays reachable for classification: Error() returns the safe
+# text, Unwrap() returns the cause. It is constructed in non-test code
+# (mapping.go, wrapping the error through runesafe.SanitizeSingleLineBounded),
+# and Unwrap is reached only through the stdlib's anonymous
+# `interface{ Unwrap() error }`, which no reference search can see. Dropping it
+# would leave a wrapper that hides its cause from every errors.Is/As caller
+# while still replacing the message — the exact shape that makes a shutdown or a
+# typed upstream failure unclassifiable.
+method (*sanitizedError).Unwrap is

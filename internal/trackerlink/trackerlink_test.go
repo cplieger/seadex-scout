@@ -306,6 +306,16 @@ func TestPublishReasonGrades(t *testing.T) {
 		"a query-leading colon is unvouchable":       {"Nyaa", "?x:y", false, RefusalUnvouchableURL},
 		"an unknown tracker beats a bad url shape":   {"beyondhd", "Chihiro", false, RefusalUnknownTracker},
 		"a userinfo authority is an unvouchable url": {"Nyaa", "https://trusted@evil.example/x", false, RefusalUnvouchableURL},
+		// ...but a SMUGGLING-shaped refusal outranks the app-table gap, because
+		// the entry gate above (backslash / tab-newline / userinfo) deliberately
+		// precedes the tracker lookup: those refusals are properties of the URL
+		// value alone and hold whether or not this build carries the tracker.
+		// This row is what pins that ordering - without it nothing stops a later
+		// edit from moving the userinfo check below the lookup and silently
+		// re-grading this input RefusalUnknownTracker. Published output is empty
+		// either way; the grade is what the operator's diagnostic reads (the
+		// audit row's "(url error)" versus the unknown-tracker WARN).
+		"userinfo under an unknown tracker is still unvouchable": {"beyondhd", "https://user@beyondhd.co/t/1", false, RefusalUnvouchableURL},
 		// The userinfo refusal is ONE class-independent gate at the entry
 		// ladder, not a per-arm check, so a credential-bearing authority drops
 		// whichever form carries it: an absolute URL on a canonical host, a

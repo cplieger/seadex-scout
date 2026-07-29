@@ -50,18 +50,6 @@ import (
 	"github.com/cplieger/urlform"
 )
 
-// Vouch classifies raw and reports whether it passes the structural legs shared
-// by every display-publish gate, returning urlform's ASCII-lowercased host
-// evidence for the caller's own host policy. A caller that already holds a
-// classified form calls VouchForm instead.
-func Vouch(raw string) (host string, ok bool) {
-	f := urlform.Classify(raw)
-	if !VouchForm(&f) {
-		return "", false
-	}
-	return f.Host, true
-}
-
 // VouchForm is Vouch over an already-classified form: an absolute http(s) URL,
 // free of a userinfo authority and of the smuggling shapes a browser reads
 // differently from net/url.

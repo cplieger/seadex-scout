@@ -937,11 +937,25 @@ var seadexInfoHost = sync.OnceValue(func() string {
 // caller's to keep - the server's readSnapshot logs the count, while the
 // writer's loadPrevious sanitizes silently (its rebuild re-derives every
 // curated item's InfoURL anyway).
+//
+// A vouched item KEEPS its link, in the cleaned spelling the gate actually
+// judged rather than its persisted one (h-f8).
 func sanitizeSnapshotInfoURLs(feed []journalItem) int {
 	host := seadexInfoHost()
 	blanked := 0
 	for i := range feed {
-		if feed[i].InfoURL == "" || snapshotInfoURLAllowed(feed[i].InfoURL, host) {
+		if feed[i].InfoURL == "" {
+			continue
+		}
+		if cleaned, ok := snapshotInfoURLAllowed(feed[i].InfoURL, host); ok {
+			// Store the VOUCHED spelling, never the original. The gate reads
+			// urlform's WHATWG-preprocessed form, so an edge-padded persisted
+			// value ("\thttps://releases.moe/123") is vouched on the BROWSER's
+			// reading of it - and renderFeed would then hand the arr UI the
+			// padded original as its clickable <comments> link. Classify once,
+			// emit the cleaned form (h-f8). The set of values that pass is
+			// unchanged, so no blanked count moves.
+			feed[i].InfoURL = cleaned
 			continue
 		}
 		feed[i].InfoURL = ""
@@ -951,7 +965,16 @@ func sanitizeSnapshotInfoURLs(feed []journalItem) int {
 }
 
 // snapshotInfoURLAllowed reports whether raw is a userinfo-free absolute
-// http(s) URL, free of smuggling forms, on the canonical SeaDex host.
+// http(s) URL, free of smuggling forms, on the canonical SeaDex host, and
+// returns the VOUCHED spelling of it for the caller to store: urlform's
+// WHATWG-preprocessed reading (Form.Trimmed), the string the gate actually
+// judged. Returning it is the point - the gate vouches the browser's reading of
+// an edge-padded value while the caller used to keep the padded original, which
+// is the same vouch-one-reading / emit-another split h-f8 closed at the search
+// path's id extraction (prowlarr.go's httpDisplayForm, whose shape this
+// mirrors). It changes only WHAT IS STORED on the success path: every
+// structural and host leg below is unchanged, so the set of values that pass is
+// identical.
 //
 // This is a PUBLISH gate on a tamperable boundary - a persisted feed.json
 // InfoURL is vouched here and handed to the arr web UI as a clickable link,
@@ -972,7 +995,7 @@ func sanitizeSnapshotInfoURLs(feed []journalItem) int {
 // but the safety was incidental to releases.moe's letters, not designed, and a
 // hostname change would have reopened it silently (l-f114). Host comparison
 // stays ASCII-fold via urlform.Host with a non-ASCII host refused outright.
-func snapshotInfoURLAllowed(raw, host string) bool {
+func snapshotInfoURLAllowed(raw, host string) (cleaned string, ok bool) {
 	// Lower the expected host ONCE, ASCII-only, before any comparison. Keeping
 	// the fold out of the comparison expression is deliberate: a
 	// strings.EqualFold(f.Host, host) form reads equivalent and is what a linter
@@ -982,17 +1005,22 @@ func snapshotInfoURLAllowed(raw, host string) bool {
 	// expectation makes the comparison a plain byte equality.
 	want := asciiLowerHost(host)
 	if want == "" || !urlform.IsASCIIHost(want) {
-		return false
+		return "", false
 	}
 	// The shared structural legs: absolute, http(s), no userinfo, no smuggling
 	// bytes - publish-or-drop, the same stance trackerlink.Publish takes.
-	vouched, ok := displaylink.Vouch(raw)
-	if !ok {
-		return false
+	// Classified here rather than through displaylink.Vouch because the vouched
+	// FORM is what carries the cleaned string this gate returns.
+	f := urlform.Classify(raw)
+	if !displaylink.VouchForm(&f) {
+		return "", false
 	}
 	// IsASCIIHost refuses a non-ASCII host, so no homograph can fold into the
 	// allowlisted name.
-	return urlform.IsASCIIHost(vouched) && vouched == want
+	if !urlform.IsASCIIHost(f.Host) || f.Host != want {
+		return "", false
+	}
+	return f.Trimmed, true
 }
 
 // asciiLowerHost lowercases ASCII A-Z only, leaving every other byte alone -

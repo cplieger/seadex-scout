@@ -612,6 +612,47 @@ func TestReloadSanitizesSnapshotInfoURLs(t *testing.T) {
 	}
 }
 
+// TestSanitizeSnapshotInfoURLsStoresVouchedSpelling pins the h-f8 half of the
+// load-boundary gate: the value that SURVIVES sanitization is the spelling the
+// gate vouched (urlform's WHATWG-preprocessed reading), not the persisted
+// original. An edge-padded value is vouched on the browser's reading of it, so
+// storing the padded original would render that original into the arr UI's
+// clickable <comments> link - vouch one reading, emit another. Blanking is
+// unchanged: the set of values that pass is identical, so the count only counts
+// what it counted before.
+func TestSanitizeSnapshotInfoURLsStoresVouchedSpelling(t *testing.T) {
+	feed := []journalItem{
+		{item: item{Title: "clean", InfoURL: "https://releases.moe/154587"}},
+		{item: item{Title: "leading tab", InfoURL: "\thttps://releases.moe/123"}},
+		{item: item{Title: "trailing c0", InfoURL: "https://releases.moe/456\x01"}},
+		{item: item{Title: "no link", InfoURL: ""}},
+		{item: item{Title: "foreign host", InfoURL: "https://evil.example/phish"}},
+		{item: item{Title: "userinfo", InfoURL: "https://evil@releases.moe/1"}},
+		{item: item{Title: "non-http", InfoURL: "javascript:alert(1)"}},
+		{item: item{Title: "backslash", InfoURL: "https:\\\\releases.moe\\1"}},
+	}
+	want := map[string]string{
+		"clean":        "https://releases.moe/154587",
+		"leading tab":  "https://releases.moe/123",
+		"trailing c0":  "https://releases.moe/456",
+		"no link":      "",
+		"foreign host": "",
+		"userinfo":     "",
+		"non-http":     "",
+		"backslash":    "",
+	}
+
+	blanked := sanitizeSnapshotInfoURLs(feed)
+	if blanked != 4 {
+		t.Errorf("blanked = %d, want 4 (foreign host, userinfo, non-http, backslash); a cleaned spelling must not move the count", blanked)
+	}
+	for _, it := range feed {
+		if got := it.InfoURL; got != want[it.Title] {
+			t.Errorf("item %q InfoURL = %q, want %q", it.Title, got, want[it.Title])
+		}
+	}
+}
+
 // TestSnapshotInfoURLAllowedRejectsMalformedAndUserinfoURLs pins the
 // fail-closed arms of the persisted-InfoURL display gate: a userinfo-bearing
 // URL on the canonical host, an unparseable URL, a scheme-relative form, and
@@ -654,7 +695,7 @@ func TestSnapshotInfoURLAllowedRejectsMalformedAndUserinfoURLs(t *testing.T) {
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			if got := snapshotInfoURLAllowed(tc.raw, host); got != tc.want {
+			if _, got := snapshotInfoURLAllowed(tc.raw, host); got != tc.want {
 				t.Errorf("snapshotInfoURLAllowed(%q, %q) = %v, want %v", tc.raw, host, got, tc.want)
 			}
 		})

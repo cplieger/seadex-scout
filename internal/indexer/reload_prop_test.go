@@ -38,12 +38,18 @@ func TestSnapshotInfoURLAllowedProperty(t *testing.T) {
 		// that reverts to that fold or drops urlform.IsASCIIHost.
 		canonical := host == seadexInfoHost() || host == strings.ToUpper(seadexInfoHost())
 		want := (scheme == "http" || scheme == "https") && userinfo == "" && canonical
-		got := snapshotInfoURLAllowed(raw, seadexInfoHost())
+		cleaned, got := snapshotInfoURLAllowed(raw, seadexInfoHost())
 		if got != want {
 			t.Fatalf("snapshotInfoURLAllowed(%q) = %v, want %v", raw, got, want)
 		}
 		if !got {
 			return
+		}
+		// The generated values carry no whitespace or smuggling bytes, so the
+		// vouched spelling the gate returns (and the caller stores) is the input
+		// byte-for-byte.
+		if cleaned != raw {
+			t.Fatalf("snapshotInfoURLAllowed(%q) vouched spelling = %q, want the input unchanged", raw, cleaned)
 		}
 
 		u, err := url.Parse(raw)
@@ -59,7 +65,7 @@ func TestSnapshotInfoURLAllowedProperty(t *testing.T) {
 		if gotHost := strings.ToLower(u.Hostname()); gotHost != seadexInfoHost() {
 			t.Fatalf("accepted URL %q resolves to host %q, want %q", raw, gotHost, seadexInfoHost())
 		}
-		if !snapshotInfoURLAllowed(u.String(), seadexInfoHost()) {
+		if _, ok := snapshotInfoURLAllowed(u.String(), seadexInfoHost()); !ok {
 			t.Fatalf("accepted URL %q is rejected after net/url round trip as %q", raw, u.String())
 		}
 	})
