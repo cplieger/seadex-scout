@@ -31,7 +31,7 @@ func TestPublish(t *testing.T) {
 		{name: "idn lookalike host drops", tracker: "Nyaa", url: "https://ny\u0430a.si/view/1", want: ""},
 		{name: "mislabeled cross-tracker canonical host kept", tracker: "Nyaa", url: "https://animebytes.tv/torrents.php?id=9&torrentid=10", want: "https://animebytes.tv/torrents.php?id=9&torrentid=10"},
 		{name: "mislabeled schemeless canonical host recovers", tracker: "Nyaa", url: "animebytes.tv/torrents.php?id=9&torrentid=10", want: "https://animebytes.tv/torrents.php?id=9&torrentid=10"},
-		{name: "schemeless canonical host with userinfo never publishes canonicalized", tracker: "Nyaa", url: "user@animebytes.tv/torrents.php?id=9", want: "https://nyaa.si/user@animebytes.tv/torrents.php?id=9"},
+		{name: "schemeless canonical host with userinfo drops", tracker: "Nyaa", url: "user@animebytes.tv/torrents.php?id=9", want: ""},
 		{name: "animebytes relative", tracker: "AB", url: "/torrents.php?id=1", want: "https://animebytes.tv/torrents.php?id=1"},
 		{name: "mislabeled AB torrent-page relative canonicalizes to AB base", tracker: "Nyaa", url: "/torrents.php?id=1&torrentid=2", want: "https://animebytes.tv/torrents.php?id=1&torrentid=2"},
 		{name: "mislabeled slashless AB torrent-page shape canonicalizes to AB base", tracker: "Nyaa", url: "torrents.php?id=1&torrentid=2", want: "https://animebytes.tv/torrents.php?id=1&torrentid=2"},
@@ -306,6 +306,17 @@ func TestPublishReasonGrades(t *testing.T) {
 		"a query-leading colon is unvouchable":       {"Nyaa", "?x:y", false, RefusalUnvouchableURL},
 		"an unknown tracker beats a bad url shape":   {"beyondhd", "Chihiro", false, RefusalUnknownTracker},
 		"a userinfo authority is an unvouchable url": {"Nyaa", "https://trusted@evil.example/x", false, RefusalUnvouchableURL},
+		// The userinfo refusal is ONE class-independent gate at the entry
+		// ladder, not a per-arm check, so a credential-bearing authority drops
+		// whichever form carries it: an absolute URL on a canonical host, a
+		// schemeless canonical host (previously demoted into a path and
+		// published under the label's base), and a hidden-host quirk form whose
+		// authority the classifier recovered. ClassRelative is deliberately
+		// absent: a rooted relative reference has no authority at all, so
+		// urlform never records HasUserInfo for one ("/user@x/y" is a path).
+		"userinfo on a canonical absolute host drops":   {"Nyaa", "https://user@nyaa.si/view/1", false, RefusalUnvouchableURL},
+		"userinfo on a canonical schemeless host drops": {"Nyaa", "user@animebytes.tv/torrents.php?id=9", false, RefusalUnvouchableURL},
+		"userinfo on a hidden-host form drops":          {"Nyaa", "https:/user@animebytes.tv/torrents.php?id=1", false, RefusalUnvouchableURL},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {

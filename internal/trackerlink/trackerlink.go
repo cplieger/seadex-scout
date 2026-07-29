@@ -106,6 +106,20 @@ func PublishReason(trackerName, rawURL string) (string, Refusal) {
 	if f.HasBackslash || f.HasTabOrNewline {
 		return "", RefusalUnvouchableURL
 	}
+	// A userinfo authority is refused ONCE here, for EVERY class, rather than
+	// per-arm: it is visual spoofing ("https://trusted@evil/") with no
+	// legitimate reading in upstream data, and no publish arm needs one. The
+	// per-arm placement it replaces had two homes for the one policy (the
+	// absolute arm's displaylink.VouchForm, the canonical schemeless arm's own
+	// check) and left the two path-published arms with none, so a
+	// credential-shaped authority ("user@animebytes.tv/torrents.php?id=9") was
+	// demoted into a path and published under a canonical base as a
+	// plausible-looking 404. Gating at the entry makes the output invariant the
+	// property test asserts (every published link parses with a nil User)
+	// structural rather than emergent.
+	if f.HasUserInfo {
+		return "", RefusalUnvouchableURL
+	}
 	// An absent url is graded BEFORE the tracker gate: a record with no link
 	// and an unknown tracker is not an app-vocabulary gap worth reporting -
 	// there is nothing to publish either way, and grading it
@@ -158,17 +172,18 @@ func published(link string) (string, Refusal) {
 // path: base-prefixing it under the LABELED tracker would publish a
 // wrong-tracker link ("https://nyaa.si/animebytes.tv/...") that cannot
 // identify the intended torrent, so it is published on its own recovered
-// host with an https scheme (every canonical tracker is https). The userinfo
-// gate mirrors usableAbsolute: a credential-bearing authority is a spoofing
-// vector and never publishes canonicalized; the recovered authority's port
-// is range-checked the same way (see schemelessPortOK), so a canonicalized
+// host with an https scheme (every canonical tracker is https). A
+// credential-bearing authority never reaches this arm: PublishReason refuses
+// f.HasUserInfo for every class at its entry, so this branch reads only the
+// recovered host. The recovered authority's port is range-checked the same
+// way (see schemelessPortOK), so a canonicalized
 // publish cannot emit an out-of-range port usableAbsolute would reject on
 // the equivalent absolute form. Any other schemeless value keeps
 // the href reading - a tracker-relative path under the labeled tracker's
 // base (or the inferred owner's, for a tracker-specific relative shape) -
 // exactly like Publish's relative form.
 func usableSchemelessHost(f *urlform.Form, baseURL string) string {
-	if _, hostOK := tracker.LookupByHost(f.Host); hostOK && !f.HasUserInfo {
+	if _, hostOK := tracker.LookupByHost(f.Host); hostOK {
 		if !schemelessPortOK(f.Trimmed) || !hostFormTargeted(f) {
 			return ""
 		}
@@ -397,9 +412,10 @@ func httpsCanonical(trimmed, scheme string) string {
 // are internal/displaylink's, the app's one home for that vouch step (h-f13),
 // shared with the indexer's two display gates; what stays here is this
 // publisher's OWN policy: the port rule and the canonical-table host bind.
-// (PublishReason already refuses the smuggling forms for every class before
-// reaching this arm; asking displaylink again is the same answer, from the one
-// place that defines it.)
+// (PublishReason already refuses the smuggling forms AND a userinfo authority
+// for every class before reaching this arm; asking displaylink again is the
+// same answer, from the one place that defines it, and is kept deliberately as
+// redundant defense on that shared gate.)
 func usableAbsolute(f *urlform.Form) bool {
 	if !displaylink.VouchForm(f) {
 		return false
