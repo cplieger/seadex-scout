@@ -9,11 +9,13 @@ import (
 // ID bridge FindByID resolves forward: the set of TVDB, TMDB-movie, and IMDb
 // IDs any kept mapping record references, used to tell a recognized anime
 // from an arbitrary library entry. Both directions of the item<->record
-// pairing rule (a Radarr item is claimed only by a record's TMDB-movie/IMDb
-// ids, a Sonarr item only by its TVDB id) live here beside
-// FindByID/findMovie/arrItem, so a change to the pairing - a new id kind, an
-// id becoming valid for the other arr - cannot drift between the forward and
-// reverse lookups.
+// pairing rule (a Radarr item is claimed by a record's routed TMDB-movie/IMDb
+// ids or by its cross-type movie ids, a Sonarr item only by its TVDB id) live
+// here beside FindByID/findMovie/arrItem, and both read the same two mapping
+// accessors (RoutedIDs for the type-routed set, MovieTMDBIDs for the cross-type
+// movie evidence), so a change to the pairing - a new id kind, an id becoming
+// valid for the other arr - cannot drift between the forward and reverse
+// lookups.
 type Catalogue struct {
 	tvdb map[int]struct{}
 	tmdb map[int]struct{}
@@ -34,16 +36,24 @@ func NewCatalogue(idx *mapping.Index, keep func(mapping.Record) bool) *Catalogue
 		// Insert only the identifiers the record's routed arr consumes
 		// (mapping.Record.RoutedIDs): a MOVIE record must not catalogue a
 		// Sonarr item through a stray TVDB id, nor a series record a Radarr
-		// item through its movie ids.
-		tvdb, tmdbMovies, imdbIDs := r.RoutedIDs()
+		// item through its IMDb id (TVDB reuses a film's IMDb id on the parent
+		// series).
+		tvdb, _, imdbIDs := r.RoutedIDs()
 		// Presence checks over RoutedIDs' already-canonicalized ids: the
 		// usability policy's one home is RoutedIDs (l-f37/l-f109), for the id
 		// slices as much as for the scalar id.
 		if tvdb > 0 {
 			c.tvdb[tvdb] = struct{}{}
-		}
-		for _, id := range tmdbMovies {
-			c.tmdb[id] = struct{}{}
+		} else {
+			// No routed series id: the record's unambiguous movie TMDB ids
+			// claim a Radarr movie whatever its type label says, mirroring
+			// FindByID's secondary movie lookup so the two directions of the
+			// bridge cannot drift (l-f73). For a MOVIE record this IS the
+			// routed set (RoutedIDs' movie arm returns exactly these ids and
+			// zero tvdb), so the two arms stay one rule rather than two.
+			for _, id := range r.MovieTMDBIDs() {
+				c.tmdb[id] = struct{}{}
+			}
 		}
 		for _, im := range imdbIDs {
 			key := imdbKey(im) // a usable id can still be padded; the catalogue key is trimmed

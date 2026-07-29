@@ -21,7 +21,9 @@ import (
 
 	"github.com/cplieger/httpx/v4"
 	"github.com/cplieger/runesafe"
+	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/audit"
+	"github.com/cplieger/seadex-scout/internal/classify"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/degradation"
 	"github.com/cplieger/seadex-scout/internal/indexer"
@@ -31,6 +33,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/notify"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/state"
+	"github.com/cplieger/seadex-scout/internal/trackerlink"
 )
 
 // --- dependency seams + assembly ---
@@ -87,16 +90,23 @@ type MappingSource interface {
 // The concrete Fribb loader must keep satisfying the cycle's seam.
 var _ MappingSource = (*mapping.Loader)(nil)
 
-// Deps are the assembled components a Scout runs a cycle with.
+// Deps are the assembled components a Scout runs a compare CYCLE with. Every
+// field is one the cycle reaches: it compares, notifies, and rebuilds the feed.
+// The read-only one-shot report has its own role struct (ReportDeps, built by
+// NewReporter) because the two entry points need DISJOINT sets - Cycle never
+// audits, and Report never compares, notifies or writes the feed - so the
+// composition root builds only the components the flow it is starting can
+// actually call, instead of one bag whose unused half was prose (l-f149). The
+// runner-up shape was an exported shared core plus per-role extensions; two role
+// structs over one internal union keep each runner reading a single field set.
 type Deps struct {
 	Logger   *slog.Logger
 	Store    StateStore
-	Library  *library.Walker
+	Library  *arrwalk.Walker
 	Mapping  MappingSource
 	SeaDex   SeaDexSource
 	Matcher  *match.Matcher
 	Comparer *compare.Comparer
-	Auditor  *audit.Auditor
 	Notifier *notify.Notifier
 	// AniListStats reports the AniList client's cumulative request counters
 	// (calls, rate-limit waits) for the cycle completion logs. The scout only
@@ -109,6 +119,42 @@ type Deps struct {
 	// SeaDex snapshot. Nil when no Torznab feed is configured (the cycle then
 	// skips all feed work).
 	Feed FeedWriter
+}
+
+// ReportDeps are the assembled components a Scout runs the read-only one-shot
+// report with: it walks the library, loads the mapping cache and AniList memo,
+// fetches SeaDex, matches, and audits. There is deliberately no Comparer,
+// Notifier or Feed field - the report emits no finding, sends no notification
+// and never rewrites the indexer snapshot - so the root's report path builds
+// neither them nor the Prowlarr HTTP client the feed writer carries. Store is
+// still needed (the report READS persisted state; build.go injects the read-only
+// store so the flow cannot write or quarantine state.json).
+type ReportDeps struct {
+	Logger  *slog.Logger
+	Store   StateStore
+	Library *arrwalk.Walker
+	Mapping MappingSource
+	SeaDex  SeaDexSource
+	Matcher *match.Matcher
+	Auditor *audit.Auditor
+}
+
+// components is the union both role structs project into, so each runner reads
+// one field set and no method needs to know which constructor built the Scout.
+// A component the constructing role does not carry stays nil, which is exactly
+// what "this flow cannot reach it" means.
+type components struct {
+	Logger       *slog.Logger
+	Store        StateStore
+	Library      *arrwalk.Walker
+	Mapping      MappingSource
+	SeaDex       SeaDexSource
+	Matcher      *match.Matcher
+	Comparer     *compare.Comparer
+	Auditor      *audit.Auditor
+	Notifier     *notify.Notifier
+	AniListStats func() AniListStats
+	Feed         FeedWriter
 }
 
 // Every persisted degradation streak escalates its single log site from WARN to
@@ -132,7 +178,7 @@ const (
 
 // Scout runs compare cycles from its assembled dependencies.
 type Scout struct {
-	deps Deps
+	deps components
 	log  *slog.Logger
 }
 
@@ -151,13 +197,47 @@ func (s *Scout) cycleDegraded(reason string, attrs ...any) {
 	s.log.Warn("cycle degraded", append([]any{"reason", reason}, attrs...)...)
 }
 
-// New builds a Scout from deps.
+// New builds a Scout for the compare CYCLE from deps. Its Report method is
+// reachable but unwired (no Auditor): a flow that reports must be built by
+// NewReporter.
 func New(deps *Deps) *Scout {
-	log := deps.Logger
+	return newScout(&components{
+		Logger:       deps.Logger,
+		Store:        deps.Store,
+		Library:      deps.Library,
+		Mapping:      deps.Mapping,
+		SeaDex:       deps.SeaDex,
+		Matcher:      deps.Matcher,
+		Comparer:     deps.Comparer,
+		Notifier:     deps.Notifier,
+		AniListStats: deps.AniListStats,
+		Feed:         deps.Feed,
+	})
+}
+
+// NewReporter builds a Scout for the read-only one-shot Report from deps. The
+// compare-cycle components stay nil, so the report flow provably cannot notify,
+// compare or rewrite the indexer feed - and the root never constructs them.
+func NewReporter(deps *ReportDeps) *Scout {
+	return newScout(&components{
+		Logger:  deps.Logger,
+		Store:   deps.Store,
+		Library: deps.Library,
+		Mapping: deps.Mapping,
+		SeaDex:  deps.SeaDex,
+		Matcher: deps.Matcher,
+		Auditor: deps.Auditor,
+	})
+}
+
+// newScout is the shared assembly both role constructors end in: it resolves
+// the logger default once so the two roles cannot drift on it.
+func newScout(c *components) *Scout {
+	log := c.Logger
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Scout{deps: *deps, log: log}
+	return &Scout{deps: *c, log: log}
 }
 
 // --- cycle orchestration ---
@@ -193,6 +273,7 @@ func (s *Scout) Cycle(ctx context.Context) bool {
 	// keeps a notification and what the arrs see in the feed on the same data.
 	mapCache, idx, mapErr := s.loadMapping(ctx, &st)
 	entries, seaErr := s.deps.SeaDex.FetchEntries(ctx)
+	s.warnCatalogueLinkQuality(entries)
 
 	// Rebuild the Torznab feed from the shared snapshot, independent of the arr
 	// walk (see rebuildFeed): a notification and what the arrs see in the feed
@@ -222,6 +303,56 @@ func (s *Scout) Cycle(ctx context.Context) bool {
 		return s.finishInterruptedMatch(ctx, start, startStats, &st, snap, &mapCache, result)
 	}
 	return s.finishCompletedCycle(ctx, start, startStats, &st, snap, &mapCache, entries, result, mapErr)
+}
+
+// warnCatalogueLinkQuality emits the catalogue-wide tracker-link diagnostics
+// for one fetched SeaDex snapshot: how many torrents carry a URL the publisher
+// refuses (omitted/empty, a foreign host under a trusted label, an unknown
+// tracker, a malformed value) as ONE aggregate WARN, so a tracker host
+// migration or schema drift that strips every release link is alertable from
+// Loki instead of silently emptying every finding's release_url; plus a SECOND
+// line for the one cause whose remedy is OURS rather than the record's - a
+// tracker this build's table does not know, where "add the tracker and ship a
+// release" is not something the operator can fix upstream (l-f127). The second
+// line sits BESIDE the aggregate rather than carving a subset out of it, so the
+// aggregate's count and meaning stay exactly as deployed alert rules read them.
+//
+// It lives here, not in internal/seadex where it used to (l-f156): the
+// judgment needs the PUBLISH policy (internal/trackerlink, reached through the
+// classify adapter that keeps the (tracker, rawURL) pairing in one place), and
+// that policy sits a layer above the wire client - which cannot reach the
+// adapter at all, since classify imports seadex. The orchestrator holds the
+// whole catalogue the moment either fetch path returns, so it has the same
+// one-pass view the client had, and both paths (Cycle here, Report below) call
+// it with the same logger the client used, keeping message, level and attrs
+// unchanged. A failed fetch returns no entries, so the counters stay zero and
+// nothing is logged - the client's own success-only gate, preserved.
+//
+// Definition matters as much as placement: the aggregate is deliberately the
+// publisher's own refusal (classify.PublishRefusal), not a weaker
+// is-the-url-field-blank test that would miss a wholesale host drift, and it is
+// the same rule filter.Obtainable acts on downstream.
+func (s *Scout) warnCatalogueLinkQuality(entries []seadex.Entry) {
+	var unusable, unknownTracker int
+	for i := range entries {
+		for j := range entries[i].Torrents {
+			link, refusal := classify.PublishRefusal(&entries[i].Torrents[j])
+			if link == "" {
+				unusable++
+			}
+			if refusal == trackerlink.RefusalUnknownTracker {
+				unknownTracker++
+			}
+		}
+	}
+	if unusable > 0 {
+		s.log.Warn("seadex torrent URLs unusable; affected findings and feed items carry no release link",
+			"count", unusable, "entries", len(entries))
+	}
+	if unknownTracker > 0 {
+		s.log.Warn("seadex trackers unknown to this build; add them to seadex-scout's tracker table to publish their links",
+			"count", unknownTracker, "entries", len(entries))
+	}
 }
 
 // stopAfterWalkFailure logs a failed library walk and reports whether Cycle
@@ -268,14 +399,14 @@ const attrError = "error"
 // *url.Error embedding the full request URL, which may carry configured
 // userinfo credentials, so it must not reach Loki unreduced - plus a bounded
 // `arr` attribute naming the failed side when the walk error carries one
-// (library.WalkErrArr). The side must come from the ORIGINAL error: the
+// (arrwalk.WalkErrArr). The side must come from the ORIGINAL error: the
 // reduction collapses the chain to the *url.Error's underlying cause,
-// discarding library.Walk's textual "walking sonarr/radarr" wrapper, so with
+// discarding arrwalk.Walk's textual "walking sonarr/radarr" wrapper, so with
 // both arrs enabled the reduced error alone would not say which dependency
 // failed.
 func walkFailureAttrs(walkErr error) []any {
 	attrs := []any{attrError, httpx.LogSafeError(walkErr)}
-	if arr := library.WalkErrArr(walkErr); arr != "" {
+	if arr := arrwalk.WalkErrArr(walkErr); arr != "" {
 		attrs = append(attrs, "arr", arr)
 	}
 	return attrs
@@ -537,7 +668,7 @@ func (s *Scout) recordPartialWalk(st *state.State, snap *library.Snapshot) {
 // logCompletedCycle emits the one completion line the deadman alert counts:
 // "cycle complete", or "cycle degraded" with the most severe applicable
 // reason (partial walk, then AniList degradation, then a stale-but-usable
-// map).
+// map, then an arr side emptied by its tag filter).
 func (s *Scout) logCompletedCycle(snap *library.Snapshot, result *match.Result, mapErr error, failedItems map[int]struct{}, aniListStreak int, attrs []any) {
 	switch {
 	case snap.Partial:
@@ -566,21 +697,36 @@ func (s *Scout) logCompletedCycle(snap *library.Snapshot, result *match.Result, 
 		// the cached map, but the cycle is still upstream-degraded, so it must
 		// not read as fully successful.
 		s.cycleDegraded("mapping-stale", attrs...)
+	case snap.FilteredEmpty:
+		// arr_tags filtering kept nothing out of a non-empty arr list on at
+		// least one enabled side, so the cycle watched a library the operator
+		// did not intend: a dead include set (every label renamed, mistyped, or
+		// expanded from an unset ${VAR}) admits nothing, and every prior
+		// finding on that side resolves. The walk itself succeeded, so this
+		// stays the LEAST severe reason and never fails the cycle - the
+		// remedy is a config or arr-side fix, and the walker's WARN names
+		// which side and how many items it listed. Without this arm the
+		// steady state read "cycle complete" forever: the shrink guard fires
+		// for at most one cycle (it then persists the empty snapshot as the
+		// baseline) and not at all on a first-ever boot.
+		s.cycleDegraded("tags-emptied-side", attrs...)
 	default:
 		s.log.Info("cycle complete", attrs...)
 	}
 }
 
-// splitFailedMatches partitions the match set for a partial walk: a match
-// linked to an item whose episode fetch failed is excluded from the compare
-// (its file state is missing, not empty, so comparing would misread every
-// recommendation as unmet), and the failed items' AniList IDs are returned so
-// finding resolution can preserve their prior findings. A clean walk returns
-// the matches untouched and a nil set.
+// splitFailedMatches partitions the match set around the model's placeholder
+// rule (library.Item.Comparable): a match linked to an item whose file data the
+// walk could not establish - a series whose episode fetch failed, a movie
+// Radarr reports a file for without sending its payload - is excluded from the
+// compare (its file state is missing, not empty, so comparing would misread
+// every recommendation as unmet), and those items' AniList IDs are returned so
+// finding resolution can preserve their prior findings. A walk with no
+// placeholders returns the matches untouched and a nil set.
 func splitFailedMatches(matches []match.Match) (clean []match.Match, failedItems map[int]struct{}) {
 	clean = make([]match.Match, 0, len(matches))
 	for i := range matches {
-		if m := &matches[i]; m.InLibrary() && m.Item.Failed {
+		if m := &matches[i]; m.InLibrary() && !m.Item.Comparable() {
 			if failedItems == nil {
 				failedItems = make(map[int]struct{})
 			}
@@ -915,10 +1061,10 @@ func (s *Scout) reportSnapshot(ctx context.Context) (library.Snapshot, error) {
 		// Reduce a transport *url.Error before it crosses the returned-report
 		// boundary (main logs this error at ERROR): the request URL inside it
 		// may carry configured userinfo credentials. The reduction also drops
-		// library.Walk's "walking sonarr/radarr" wrapper, so name the failed
+		// arrwalk.Walk's "walking sonarr/radarr" wrapper, so name the failed
 		// side from the typed walk-side error - the same recovery
 		// walkFailureAttrs performs for the cycle's log boundaries.
-		if arr := library.WalkErrArr(err); arr != "" {
+		if arr := arrwalk.WalkErrArr(err); arr != "" {
 			return library.Snapshot{}, fmt.Errorf("library walk (%s): %w", arr, httpx.LogSafeError(err))
 		}
 		return library.Snapshot{}, fmt.Errorf("library walk: %w", httpx.LogSafeError(err))
@@ -1005,6 +1151,7 @@ func (s *Scout) Report(ctx context.Context) (audit.Report, error) {
 		}
 		return audit.Report{}, fmt.Errorf("seadex fetch: %w", safeErr)
 	}
+	s.warnCatalogueLinkQuality(entries)
 	if len(entries) == 0 {
 		// Defense in depth: FetchEntries errors on an empty completed
 		// catalogue, but a future client regression returning (nil, nil) would

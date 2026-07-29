@@ -107,11 +107,16 @@ groups:
       # "new release available" event has nothing to resolve. Grouped by the
       # finding's identifying labels so
       # each alert names one title with clickable links: the app emits arr_url,
-      # nyaa_url, public_url + public_tracker, ab_url, season and seadex_tags for
+      # nyaa_url, public_url + public_tracker, ab_url + ab_tracker, season and
+      # seadex_tags for
       # exactly this. nyaa_url only ever holds a Nyaa link (so the hardcoded
       # [Nyaa] label cannot lie); a public release from any other tracker
       # (AnimeTosho, RuTracker) arrives as public_url labelled by public_tracker.
       # The two are mutually exclusive - one public link per finding.
+      # ab_url holds the AnimeBytes-or-maybe-AnimeBytes link (the toggle's
+      # fail-closed slot, which trusts SeaDex's tracker label first), labelled by
+      # ab_tracker - so an AB-labelled record whose URL is actually a public
+      # tracker page is offered under that tracker's own name.
       # The annotations render alert_title / alert_recommended_group, the
       # markdown-safe twins of title / recommended_group: an untrusted SeaDex
       # title cannot become an active link or an @everyone mention in the
@@ -123,7 +128,7 @@ groups:
       # template if you want just the tag line shown.
       - alert: SeadexScoutBetterReleaseFound
         expr: |
-          sum by (title, alert_title, al_id, arr, arr_url, nyaa_url, public_url, public_tracker, ab_url, season, recommended_group, alert_recommended_group, seadex_tags) (
+          sum by (title, alert_title, al_id, arr, arr_url, nyaa_url, public_url, public_tracker, ab_url, ab_tracker, season, recommended_group, alert_recommended_group, seadex_tags) (
             count_over_time(
               {container="seadex-scout"} | json | msg=`better release available` [1h]
             )
@@ -141,7 +146,7 @@ groups:
             ({{ $labels.alert_recommended_group }}).
             {{ if $labels.nyaa_url }}[Nyaa]({{ $labels.nyaa_url }}){{ end }}
             {{- if $labels.public_url }}{{ if $labels.nyaa_url }} · {{ end }}[{{ $labels.public_tracker }}]({{ $labels.public_url }}){{ end }}
-            {{- if $labels.ab_url }}{{ if or $labels.nyaa_url $labels.public_url }} · {{ end }}[AB]({{ $labels.ab_url }}){{ end }}
+            {{- if $labels.ab_url }}{{ if or $labels.nyaa_url $labels.public_url }} · {{ end }}[{{ $labels.ab_tracker }}]({{ $labels.ab_url }}){{ end }}
             — {{ $labels.seadex_tags }}
       # Informational: report mode wrote a season-level alignment report. Report
       # mode is a one-shot (docker exec /seadex-scout report, or mode: report),
@@ -166,4 +171,8 @@ groups:
           description: >
             A seadex-scout season-level alignment report was written
             ({{ $labels.anime }} anime). Read the timestamped report-<UTC>.md and
-            .json pair from the report.dir volume.
+            .json pair from the report.dir volume. An empty `markdown` field on
+            the line means only the machine-readable half landed (the JSON
+            rename committed without a durable parent directory, so the run
+            stopped there to keep the pair ordering); the `.json` is complete
+            and re-running produces a fresh full pair.

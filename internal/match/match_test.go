@@ -22,14 +22,14 @@ func (f fakeAniList) Fetch(_ context.Context, id int) (anilist.Media, error) {
 	return anilist.Media{}, anilist.ErrNotFound
 }
 
-func (f fakeAniList) FetchMany(_ context.Context, ids []int) (map[int]anilist.Media, error) {
+func (f fakeAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
 	out := make(map[int]anilist.Media, len(ids))
 	for _, id := range ids {
 		if m, ok := f.media[id]; ok {
 			out[id] = m
 		}
 	}
-	return out, nil
+	return anilist.BatchResult{Media: out, Completed: true}, nil
 }
 
 // TestFindByIDArrConsistency covers the arr-gate: a MOVIE record must resolve
@@ -161,9 +161,9 @@ func (c *countingAniList) Fetch(_ context.Context, _ int) (anilist.Media, error)
 	return anilist.Media{}, anilist.ErrNotFound
 }
 
-func (c *countingAniList) FetchMany(_ context.Context, ids []int) (map[int]anilist.Media, error) {
+func (c *countingAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
 	c.calls++
-	return map[int]anilist.Media{}, nil
+	return anilist.BatchResult{Media: map[int]anilist.Media{}, Completed: true}, nil
 }
 
 // TestMatchNoTitleFallbackWhenRecordHasArrID verifies the AniList title fallback
@@ -216,7 +216,7 @@ func (b *batchCountingAniList) Fetch(_ context.Context, id int) (anilist.Media, 
 	return anilist.Media{}, anilist.ErrNotFound
 }
 
-func (b *batchCountingAniList) FetchMany(_ context.Context, ids []int) (map[int]anilist.Media, error) {
+func (b *batchCountingAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
 	b.batchCalls++
 	b.batchSizes = append(b.batchSizes, len(ids))
 	out := make(map[int]anilist.Media, len(ids))
@@ -225,7 +225,7 @@ func (b *batchCountingAniList) FetchMany(_ context.Context, ids []int) (map[int]
 			out[id] = m
 		}
 	}
-	return out, nil
+	return anilist.BatchResult{Media: out, Completed: true}, nil
 }
 
 // TestMatchBatchesAniListLookups verifies the cold-cycle path: several id-less
@@ -279,8 +279,8 @@ func (degradedAniList) Fetch(context.Context, int) (anilist.Media, error) {
 	return anilist.Media{}, context.DeadlineExceeded
 }
 
-func (degradedAniList) FetchMany(context.Context, []int) (map[int]anilist.Media, error) {
-	return nil, context.DeadlineExceeded
+func (degradedAniList) FetchMany(context.Context, []int) (anilist.BatchResult, error) {
+	return anilist.BatchResult{}, context.DeadlineExceeded
 }
 
 // TestMatchAniListTransientErrorDegrades covers the degraded path: when a needed
@@ -758,14 +758,16 @@ func (p *partialThenPerIDAniList) Fetch(_ context.Context, id int) (anilist.Medi
 	return anilist.Media{}, context.DeadlineExceeded
 }
 
-func (p *partialThenPerIDAniList) FetchMany(_ context.Context, ids []int) (map[int]anilist.Media, error) {
+func (p *partialThenPerIDAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
 	out := make(map[int]anilist.Media)
 	for _, id := range ids {
 		if m, ok := p.media[id]; ok {
 			out[id] = m
 		}
 	}
-	return out, context.DeadlineExceeded
+	// A PARTIAL failure: a chunk completed (so the result is usable) and a
+	// later one did not.
+	return anilist.BatchResult{Media: out, Completed: true}, context.DeadlineExceeded
 }
 
 // TestNewLibIndexNilSnapshot pins the defensive nil-snapshot guard: a nil
@@ -973,5 +975,90 @@ func TestMatchUntypedRecordWithAbsentMovieIDStaysUnmapped(t *testing.T) {
 	}
 	if res.Coverage.Hits[library.ArrRadarr] != 1 {
 		t.Errorf("coverage hits[radarr] = %d, want 1 (the ID mapping resolved even though the library missed)", res.Coverage.Hits[library.ArrRadarr])
+	}
+}
+
+// TestFindByIDResolvesMovieIDOnANonMovieRecord covers FindByID's secondary
+// movie lookup (h-f9): a record whose type label is not MOVIE but which routes
+// no series id still resolves its Radarr movie through its unambiguous movie
+// TMDB ids - the live Fribb shape (non-MOVIE type, no tvdb_id, a positive
+// themoviedb_id.movie) that the type label alone lost. The three negative arms
+// pin how narrow it is: a record that routes a TVDB id keeps series routing, a
+// non-MOVIE record's IMDb id still claims nothing (TVDB reuses a film's IMDb id
+// on the parent series), and an absent movie id resolves nothing.
+func TestFindByIDResolvesMovieIDOnANonMovieRecord(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrRadarr, ArrID: 1, Title: "Heaven's Feel I", TmdbID: 600, ImdbID: "tt888"},
+		{Arr: library.ArrSonarr, ArrID: 2, Title: "Some Series", TvdbID: 700},
+		{Arr: library.ArrRadarr, ArrID: 3, Title: "Other Movie", TmdbID: 800},
+	}}
+	li := NewLibIndex(snap)
+
+	tests := []struct {
+		name   string
+		rec    mapping.Record
+		wantID int
+	}{
+		{"ova record with a movie tmdb id resolves the radarr movie", mapping.Record{Type: "OVA", TmdbMovies: []int{600}}, 1},
+		{"untyped record with a movie tmdb id resolves the radarr movie", mapping.Record{TmdbMovies: []int{600}}, 1},
+		{"a routed tvdb id keeps series routing", mapping.Record{Type: "OVA", TvdbID: 700, TmdbMovies: []int{800}}, 2},
+		{"a non-movie record's imdb id claims nothing", mapping.Record{Type: "OVA", IMDbIDs: []string{"tt888"}}, 0},
+		{"a zero movie tmdb id is not usable evidence", mapping.Record{Type: "OVA", TmdbMovies: []int{0}}, 0},
+		{"an absent movie tmdb id resolves nothing", mapping.Record{Type: "OVA", TmdbMovies: []int{999}}, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := tt.rec
+			got := li.FindByID(&rec)
+			if tt.wantID == 0 {
+				if got != nil {
+					t.Fatalf("FindByID() = %+v, want nil", got)
+				}
+				return
+			}
+			if got == nil || got.ArrID != tt.wantID {
+				t.Fatalf("FindByID() = %+v, want the item with ArrID %d", got, tt.wantID)
+			}
+		})
+	}
+}
+
+// TestMatchNonMovieRecordWithMovieIDResolvesRadarrByID is the same fix seen from
+// the cycle: a SPECIAL-typed record carrying only a movie TMDB id links the
+// operator's Radarr copy by ID, counts as a Radarr coverage hit (not unmapped),
+// and reports the RESOLVED item's arr rather than the type label's Sonarr
+// routing. The AniList fake holds no media at all, so the match also proves the
+// resolution costs no rate-limited lookup - previously this entry spent one and
+// then title-searched Sonarr, where the movie can never be.
+func TestMatchNonMovieRecordWithMovieIDResolvesRadarrByID(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrRadarr, ArrID: 7, Title: "Heaven's Feel III", TmdbID: 400, Year: 2020},
+	}}
+	idx := mapping.NewIndex([]mapping.Record{{AniListID: 102351, Type: "SPECIAL", TmdbMovies: []int{400}}})
+
+	res := NewMatcher(fakeAniList{}, nil).Match(context.Background(), []seadex.Entry{{AniListID: 102351}}, snap, idx, Memo{})
+
+	if len(res.Matches) != 1 {
+		t.Fatalf("matches = %d, want 1", len(res.Matches))
+	}
+	got := res.Matches[0]
+	if !got.InLibrary() || got.Item.ArrID != 7 {
+		t.Fatalf("match item = %+v, want the Radarr movie the record's movie id names", got.Item)
+	}
+	if got.Source != SourceID {
+		t.Errorf("source = %q, want %q", got.Source, SourceID)
+	}
+	if got.Arr != library.ArrRadarr {
+		t.Errorf("match arr = %q, want %q (the resolved item's arr, not the type label's)", got.Arr, library.ArrRadarr)
+	}
+	if res.Coverage.Hits[library.ArrRadarr] != 1 {
+		t.Errorf("coverage hits[radarr] = %d, want 1", res.Coverage.Hits[library.ArrRadarr])
+	}
+	if res.Coverage.Hits[library.ArrSonarr] != 0 || res.Coverage.Unmapped[library.ArrSonarr] != 0 {
+		t.Errorf("coverage attributed to sonarr: hits=%d unmapped=%d, want 0/0",
+			res.Coverage.Hits[library.ArrSonarr], res.Coverage.Unmapped[library.ArrSonarr])
+	}
+	if res.Degraded {
+		t.Error("result degraded: the ID resolution must not consult AniList at all")
 	}
 }

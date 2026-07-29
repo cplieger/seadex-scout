@@ -547,56 +547,6 @@ func TestFetchEntriesUnparseableUpdatedWarnsOnce(t *testing.T) {
 	}
 }
 
-// TestFetchEntriesUnusableTorrentURLWarnsOnce pins the link-drop signal: a
-// torrent whose URL is unusable — omitted/empty, a foreign host under a
-// trusted tracker label, or an unknown tracker — is counted (filter.Obtainable
-// treats every unpublishable-link torrent as unobtainable), and the fetch
-// surfaces ONE aggregate WARN carrying the count - a tracker host migration or
-// schema drift that strips every release link must be alertable from Loki -
-// while the fetch itself still succeeds. A usable canonical-host URL must not
-// count.
-func TestFetchEntriesUnusableTorrentURLWarnsOnce(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"totalItems":2,"totalPages":1,"items":[`+
-			`{"alID":1,"id":"rec000001","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[`+
-			`{"tracker":"Nyaa","url":"https://evil.example/view/1"},`+
-			`{"tracker":"SomeRandomTracker","url":"https://example.com/x"},`+
-			`{"tracker":"Nyaa","url":""}]}},`+
-			`{"alID":2,"id":"rec000002","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[`+
-			`{"tracker":"Nyaa","url":"https://nyaa.si/view/123"}]}}]}`)
-	}))
-	defer server.Close()
-
-	logger, recorder := capture.New()
-	entries, err := NewClient(server.Client(), server.URL, 0, logger).FetchEntries(context.Background())
-	if err != nil {
-		t.Fatalf("FetchEntries returned error: %v (unusable torrent URLs must not fail the fetch)", err)
-	}
-	if len(entries) != 2 {
-		t.Fatalf("entries = %d, want 2", len(entries))
-	}
-	const msg = "seadex torrent URLs unusable; affected findings and feed items carry no release link"
-	if got := recorder.CountExact(msg); got != 1 {
-		t.Errorf("unusable-URL WARN count = %d, want 1 aggregate line", got)
-	}
-	warned := false
-	for _, r := range recorder.Records() {
-		if r.Message != msg {
-			continue
-		}
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "count" && a.Value.Int64() == 3 {
-				warned = true
-				return false
-			}
-			return true
-		})
-	}
-	if !warned {
-		t.Error("unusable-URL WARN does not carry count=3 (the foreign-host, unknown-tracker, and omitted-URL torrents; the usable one must not count)")
-	}
-}
-
 // pagedRecordingTransport serves a two-chunk catalogue (a full chunk, then a
 // short one) and records the virtual time of each chunk request relative to the
 // transport's start.
@@ -648,12 +598,13 @@ func TestFetchEntriesSleepsOnlyBetweenPages(t *testing.T) {
 	})
 }
 
-// TestFetchEntriesCleanFetchEmitsNoWarnings pins the OFF state of the three
-// aggregate degradation gates (count mismatch, unparseable timestamps,
-// unusable torrent URLs): a fully healthy fetch - counts agreeing, a
-// parseable updated timestamp, a usable canonical-host torrent URL - must
-// emit none of the alert-stable WARN lines, so the Loki alerts keyed on them
-// can never fire on a clean cycle.
+// TestFetchEntriesCleanFetchEmitsNoWarnings pins the OFF state of the client's
+// aggregate degradation gates (count mismatch, unparseable timestamps, the
+// cross-fetch shrink signal): a fully healthy fetch - counts agreeing, a
+// parseable updated timestamp - must emit none of the alert-stable WARN lines,
+// so the Loki alerts keyed on them can never fire on a clean cycle. The
+// tracker-link quality lines are internal/scout's (l-f156) and are pinned
+// there.
 func TestFetchEntriesCleanFetchEmitsNoWarnings(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{"totalItems":1,"totalPages":1,"items":[{"alID":1,"id":"rec000001","created":"2026-01-02 03:04:05.000Z","updated":"2026-01-02 03:04:05.000Z","expand":{"trs":[{"tracker":"Nyaa","url":"https://nyaa.si/view/1"}]}}]}`)
@@ -671,11 +622,82 @@ func TestFetchEntriesCleanFetchEmitsNoWarnings(t *testing.T) {
 	for _, msg := range []string{
 		"seadex catalogue count mismatch",
 		"seadex updated timestamps unparseable; feed newest-first ordering degraded",
-		"seadex torrent URLs unusable; affected findings and feed items carry no release link",
+		"seadex catalogue shrank against this process's previous fetch; upstream may be serving a truncated catalogue",
 	} {
 		if got := recorder.CountExact(msg); got != 0 {
 			t.Errorf("clean fetch logged %q %d times, want 0", msg, got)
 		}
+	}
+}
+
+// TestFetchEntriesWarnsWhenCatalogueShrinksAgainstPreviousFetch pins the one
+// completeness signal that is NOT self-attested: every other guard compares the
+// collected count against the totalItems the same responses reported, so an
+// upstream serving a truncated-but-self-consistent catalogue (a partially
+// restored PocketBase, a poisoned CDN response) returns a clean success that
+// would resolve every finding whose entry vanished. A client that already
+// accepted a larger catalogue in this process must WARN on the shrink - and
+// must still return the entries, since the strictness beyond a diagnostic is
+// the operator's call.
+func TestFetchEntriesWarnsWhenCatalogueShrinksAgainstPreviousFetch(t *testing.T) {
+	entryCount := 4
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"totalItems":%d,"totalPages":1,"items":[%s]}`, entryCount, keysetRecords(1, entryCount))
+	}))
+	defer server.Close()
+
+	logger, recorder := capture.New()
+	client := NewClient(server.Client(), server.URL, 0, logger)
+	const msg = "seadex catalogue shrank against this process's previous fetch; upstream may be serving a truncated catalogue"
+
+	if _, err := client.FetchEntries(context.Background()); err != nil {
+		t.Fatalf("first FetchEntries returned error: %v", err)
+	}
+	if got := recorder.CountExact(msg); got != 0 {
+		t.Fatalf("first fetch logged the shrink WARN %d times, want 0 (no baseline yet)", got)
+	}
+
+	entryCount = 1
+	entries, err := client.FetchEntries(context.Background())
+	if err != nil {
+		t.Fatalf("second FetchEntries returned error: %v (a shrunken catalogue is a diagnostic, not a refusal)", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1 (the shrunken catalogue is still returned)", len(entries))
+	}
+	if got := recorder.CountExact(msg); got != 1 {
+		t.Fatalf("shrink WARN count = %d, want 1", got)
+	}
+	if got := recorder.CountExact("seadex catalogue count mismatch"); got != 0 {
+		t.Errorf("self-consistent shrunken catalogue logged the count mismatch %d times, want 0 "+
+			"(the shrink signal exists precisely because the reported total agrees)", got)
+	}
+	var gotCount, gotPrev int64
+	for _, r := range recorder.Records() {
+		if r.Message != msg {
+			continue
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			switch a.Key {
+			case "got":
+				gotCount = a.Value.Int64()
+			case "previous":
+				gotPrev = a.Value.Int64()
+			}
+			return true
+		})
+	}
+	if gotCount != 1 || gotPrev != 4 {
+		t.Errorf("shrink WARN carries got=%d previous=%d, want got=1 previous=4", gotCount, gotPrev)
+	}
+
+	// The baseline adopts the shrunken count, so a legitimate upstream shrink
+	// warns once instead of latching on every later cycle.
+	if _, err := client.FetchEntries(context.Background()); err != nil {
+		t.Fatalf("third FetchEntries returned error: %v", err)
+	}
+	if got := recorder.CountExact(msg); got != 1 {
+		t.Errorf("shrink WARN count after a stable third fetch = %d, want 1 (the baseline must adopt the new count)", got)
 	}
 }
 

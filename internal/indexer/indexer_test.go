@@ -218,7 +218,7 @@ func TestMarkAndDedupe(t *testing.T) {
 		{Title: "not curated", InfoURL: "https://nyaa.si/view/999", GUID: "g3"},
 		{Title: "dup of best", InfoHash: "abcdef1234567890abcdef1234567890abcdef12", GUID: "g1"},
 	}
-	out := markAndDedupe(raw, set, upstreamNyaa)
+	out, _ := markAndDedupe(raw, set, upstreamNyaa)
 	if len(out) != 2 {
 		t.Fatalf("got %d items, want 2 (best + alt, dup dropped, uncurated dropped)", len(out))
 	}
@@ -253,7 +253,7 @@ func TestMarkAndDedupeRejectsConflictingIdentity(t *testing.T) {
 			InfoURL:  "https://nyaa.si/view/999",
 		},
 	}
-	if out := markAndDedupe(raw, set, upstreamNyaa); len(out) != 0 {
+	if out, _ := markAndDedupe(raw, set, upstreamNyaa); len(out) != 0 {
 		t.Fatalf("got %d items, want 0 (conflicting identity signals must drop the item)", len(out))
 	}
 
@@ -271,7 +271,7 @@ func TestMarkAndDedupeRejectsConflictingIdentity(t *testing.T) {
 		InfoURL: "https://nyaa.si/view/100",
 		GUID:    "https://nyaa.si/view/200",
 	}}
-	if out := markAndDedupe(conflicting, bothBest, upstreamNyaa); len(out) != 0 {
+	if out, _ := markAndDedupe(conflicting, bothBest, upstreamNyaa); len(out) != 0 {
 		t.Fatalf("got %d items, want 0 (distinct tracker identities must drop the item even when both are best)", len(out))
 	}
 }
@@ -299,18 +299,18 @@ func TestMarkAndDedupeRejectsCrossTorrentPair(t *testing.T) {
 		Title: "hash and key from one torrent", InfoHash: hashA,
 		InfoURL: "https://nyaa.si/view/100", GUID: "https://nyaa.si/view/100",
 	}}
-	if out := markAndDedupe(matching, set, upstreamNyaa); len(out) != 1 {
+	if out, _ := markAndDedupe(matching, set, upstreamNyaa); len(out) != 1 {
 		t.Fatalf("got %d items, want 1 (a same-torrent hash/key pair must match)", len(out))
 	}
 	crossWired := []item{{
 		Title: "torrent A hash + torrent B key", InfoHash: hashA,
 		InfoURL: "https://nyaa.si/view/200", GUID: "https://nyaa.si/view/200",
 	}}
-	if out := markAndDedupe(crossWired, set, upstreamNyaa); len(out) != 0 {
+	if out, _ := markAndDedupe(crossWired, set, upstreamNyaa); len(out) != 0 {
 		t.Fatalf("got %d items, want 0 (a cross-torrent hash/key pair must not match even when both are best)", len(out))
 	}
 	hashOnly := []item{{Title: "hash only", InfoHash: hashA, GUID: "g1"}}
-	if out := markAndDedupe(hashOnly, set, upstreamNyaa); len(out) != 1 {
+	if out, _ := markAndDedupe(hashOnly, set, upstreamNyaa); len(out) != 1 {
 		t.Fatalf("got %d items, want 1 (a hash-only Nyaa item needs no pair)", len(out))
 	}
 	// A legacy snapshot (nil byPair, persisted before the relation existed)
@@ -319,13 +319,13 @@ func TestMarkAndDedupeRejectsCrossTorrentPair(t *testing.T) {
 	// rewrites the snapshot with the relation; single-signal matching keeps
 	// working through the upgrade window.
 	legacy := &curation{byHash: set.byHash, byKey: set.byKey}
-	if out := markAndDedupe(crossWired, legacy, upstreamNyaa); len(out) != 0 {
+	if out, _ := markAndDedupe(crossWired, legacy, upstreamNyaa); len(out) != 0 {
 		t.Fatalf("got %d items, want 0 (a legacy nil-byPair snapshot must reject an unprovable dual-signal pair)", len(out))
 	}
-	if out := markAndDedupe(matching, legacy, upstreamNyaa); len(out) != 0 {
+	if out, _ := markAndDedupe(matching, legacy, upstreamNyaa); len(out) != 0 {
 		t.Fatalf("got %d items, want 0 (even a same-torrent pair is unprovable against a nil byPair)", len(out))
 	}
-	if out := markAndDedupe(hashOnly, legacy, upstreamNyaa); len(out) != 1 {
+	if out, _ := markAndDedupe(hashOnly, legacy, upstreamNyaa); len(out) != 1 {
 		t.Fatalf("got %d items, want 1 (single-signal matching survives a legacy nil-byPair snapshot)", len(out))
 	}
 }
@@ -345,7 +345,7 @@ func TestMarkAndDedupeKeyOnlyABNeedsNoPair(t *testing.T) {
 		InfoURL: "https://animebytes.tv/torrent/300/group",
 		GUID:    "https://animebytes.tv/torrent/300/group",
 	}}
-	out := markAndDedupe(raw, set, upstreamAB)
+	out, _ := markAndDedupe(raw, set, upstreamAB)
 	if len(out) != 1 {
 		t.Fatalf("got %d items, want 1 (a key-only AB item needs no pair)", len(out))
 	}
@@ -370,26 +370,93 @@ func TestMarkAndDedupeRejectsCrossScopeKey(t *testing.T) {
 		{Title: "nyaa key under ab scope", InfoURL: "https://nyaa.si/view/1143533", GUID: "g1"},
 		{Title: "curated hash only under ab scope", InfoHash: "abcdef1234567890abcdef1234567890abcdef12", GUID: "g2"},
 	}
-	if out := markAndDedupe(raw, set, upstreamAB); len(out) != 0 {
+	if out, _ := markAndDedupe(raw, set, upstreamAB); len(out) != 0 {
 		t.Fatalf("got %d items, want 0 (cross-scope key and hash-only items must not match under /ab)", len(out))
 	}
 	abOnly := []item{{Title: "ab key under nyaa scope", InfoURL: "https://animebytes.tv/torrents.php?id=1&torrentid=1143533", GUID: "g3"}}
-	if out := markAndDedupe(abOnly, set, upstreamNyaa); len(out) != 0 {
+	if out, _ := markAndDedupe(abOnly, set, upstreamNyaa); len(out) != 0 {
 		t.Fatalf("got %d items, want 0 (an AnimeBytes key must not match under /nyaa)", len(out))
 	}
 }
 
 // TestMarkAndDedupeRejectsUncuratedHash pins the miss leg of the curation
 // gate's info-hash arm: an item carrying a structurally valid 40-hex info hash
-// that is NOT in the SeaDex curation set must be dropped, never admitted or marked.
+// that is NOT in the SeaDex curation set is no identity signal, so an item
+// carrying nothing else must be dropped, never admitted or marked - and the
+// drop is an ordinary no-match, not an identity conflict.
 func TestMarkAndDedupeRejectsUncuratedHash(t *testing.T) {
 	set := &curation{
 		byHash: map[string]bool{"abcdef1234567890abcdef1234567890abcdef12": true},
 		byKey:  map[string]bool{},
 	}
 	raw := []item{{Title: "uncurated hash", InfoHash: "0123456789012345678901234567890123456789", GUID: "g1"}}
-	if out := markAndDedupe(raw, set, upstreamNyaa); len(out) != 0 {
+	out, conflicts := markAndDedupe(raw, set, upstreamNyaa)
+	if len(out) != 0 {
 		t.Fatalf("got %d items, want 0 (a valid but uncurated info hash must not match)", len(out))
+	}
+	if conflicts != 0 {
+		t.Errorf("identity conflicts = %d, want 0 (nothing curated was contradicted)", conflicts)
+	}
+}
+
+// TestMarkAndDedupeAdmitsUnknownHashBesideCuratedKey pins the hash-miss leg
+// lookup deliberately does NOT veto on (l-f30): a SeaDex record with no usable
+// info hash registers only its tracker key, while Prowlarr's Nyaa results
+// always carry the real hash - so the curated release arrives with a hash the
+// set has never seen beside its own curated page URL. Reading that miss as
+// "this hash names an uncurated release" made the release invisible to every
+// search. A hash the set DOES know still has to prove co-membership, which the
+// cross-torrent case below re-checks.
+func TestMarkAndDedupeAdmitsUnknownHashBesideCuratedKey(t *testing.T) {
+	set := &curation{
+		byHash: map[string]bool{},
+		byKey:  map[string]bool{"nyaa:1143533": true},
+		byPair: map[string]bool{},
+	}
+	raw := []item{{
+		Title:    "curated key, hash SeaDex never recorded",
+		InfoHash: "0123456789012345678901234567890123456789",
+		InfoURL:  "https://nyaa.si/view/1143533",
+		GUID:     "https://nyaa.si/view/1143533",
+	}}
+	out, conflicts := markAndDedupe(raw, set, upstreamNyaa)
+	if len(out) != 1 {
+		t.Fatalf("got %d items, want 1 (an unknown hash must not veto a curated tracker key)", len(out))
+	}
+	if out[0].DownloadVolumeFactor != dvfBest {
+		t.Errorf("marker = %q, want %q (the key's own best/alt value)", out[0].DownloadVolumeFactor, dvfBest)
+	}
+	if conflicts != 0 {
+		t.Errorf("identity conflicts = %d, want 0 (an admitted item is no conflict)", conflicts)
+	}
+}
+
+// TestMarkAndDedupeCountsIdentityConflicts pins the accounting that keeps the
+// fail-closed class visible: an item whose CURATED signal is contradicted by
+// another signal (here torrent A's curated hash beside torrent B's curated
+// key) is dropped AND counted, so the per-request line distinguishes a
+// tampered or misbehaving upstream from a clean no-match. An item that simply
+// carries nothing curated is not counted.
+func TestMarkAndDedupeCountsIdentityConflicts(t *testing.T) {
+	hashA := "abcdef1234567890abcdef1234567890abcdef12"
+	set := &curation{
+		byHash: map[string]bool{hashA: true},
+		byKey:  map[string]bool{"nyaa:100": true, "nyaa:200": true},
+		byPair: map[string]bool{pairKey(hashA, "nyaa:100"): true},
+	}
+	raw := []item{
+		{
+			Title: "torrent A hash + torrent B key", InfoHash: hashA,
+			InfoURL: "https://nyaa.si/view/200", GUID: "https://nyaa.si/view/200",
+		},
+		{Title: "nothing curated", InfoURL: "https://nyaa.si/view/999", GUID: "g2"},
+	}
+	out, conflicts := markAndDedupe(raw, set, upstreamNyaa)
+	if len(out) != 0 {
+		t.Fatalf("got %d items, want 0", len(out))
+	}
+	if conflicts != 1 {
+		t.Errorf("identity conflicts = %d, want 1 (only the contradicted item counts)", conflicts)
 	}
 }
 
@@ -439,7 +506,7 @@ func TestIndexerEndToEnd(t *testing.T) {
 	}))
 	defer torznabSrv.Close()
 
-	ix := wiredIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: torznabSrv.URL,
 		ProwlarrAPIKey: "prowlarr-key",
 	}}, nil, torznabSrv.Client())
@@ -502,7 +569,7 @@ func TestIndexerEndToEnd(t *testing.T) {
 }
 
 // TestWiredUpstreamDoesNotForwardAPIKeyAcrossHost pins the redirect policy of
-// the client the composition root supplies to WireUpstreams (build.go passes
+// the client the composition root supplies to the constructors (build.go passes
 // httpx.NewClient, so this test wires the production pairing): the Prowlarr API
 // key rides an X-Api-Key header, which net/http forwards across redirects, so a
 // cross-host hop must be refused before the credential can leave the configured
@@ -531,14 +598,14 @@ func TestWiredUpstreamDoesNotForwardAPIKeyAcrossHost(t *testing.T) {
 	}))
 	defer redirector.Close()
 
-	ups := WireUpstreams(httpx.NewClient(UpstreamAttemptTimeout), nil, UpstreamConfig{
+	ups := wireUpstreams(httpx.NewClient(upstreamAttemptTimeout), nil, UpstreamConfig{
 		NyaaTorznabURL: redirector.URL,
 		ProwlarrAPIKey: "prowlarr-key",
 	})
-	if len(ups.ups) != 1 {
-		t.Fatalf("wired %d upstreams, want 1", len(ups.ups))
+	if len(ups) != 1 {
+		t.Fatalf("wired %d upstreams, want 1", len(ups))
 	}
-	_, err := ups.ups[0].fetchAndParse(context.Background(), redirector.URL)
+	_, err := ups[0].fetchAndParse(context.Background(), redirector.URL)
 	if err == nil {
 		t.Fatal("cross-host redirect returned nil, want the wired client to refuse it")
 	}
@@ -557,20 +624,19 @@ func TestWiredUpstreamDoesNotForwardAPIKeyAcrossHost(t *testing.T) {
 	}
 }
 
-// TestZeroUpstreamsProxiesNothing pins the zero-Upstreams contract that replaced
-// the old nil-HTTP fallback: with no wired upstream the server constructs no
-// client of its own, so an enabled tracker still serves its persisted RSS feed
-// while a search makes NO outbound request at all (there is no credential to
-// forward and no default client to pick a redirect policy for it). WireUpstreams
-// with a nil client is the same state, stated at the wiring boundary.
-func TestZeroUpstreamsProxiesNothing(t *testing.T) {
+// TestNilClientProxiesNothing pins the no-client contract that replaced the old
+// nil-HTTP fallback: with no client the server wires no upstream and constructs
+// no client of its own, so an enabled tracker still serves its persisted RSS
+// feed while a search makes NO outbound request at all (there is no credential
+// to forward and no default client to pick a redirect policy for it).
+func TestNilClientProxiesNothing(t *testing.T) {
 	cfg := UpstreamConfig{NyaaTorznabURL: "http://prowlarr.invalid/1/api", ProwlarrAPIKey: "prowlarr-key"}
-	if ups := WireUpstreams(nil, nil, cfg); len(ups.ups) != 0 {
-		t.Errorf("WireUpstreams with a nil client wired %d upstreams, want 0", len(ups.ups))
+	if ups := wireUpstreams(nil, nil, cfg); len(ups) != 0 {
+		t.Errorf("wireUpstreams with a nil client wired %d upstreams, want 0", len(ups))
 	}
-	ix := New(&Config{UpstreamConfig: cfg}, nil, Upstreams{})
+	ix := New(&Config{UpstreamConfig: cfg}, nil, nil)
 	if len(ix.upstreams) != 0 {
-		t.Fatalf("zero Upstreams wired %d upstreams, want 0", len(ix.upstreams))
+		t.Fatalf("a nil client wired %d upstreams, want 0", len(ix.upstreams))
 	}
 	items, fetched, failed := ix.fetchRaw(context.Background(), url.Values{"q": {"anything"}}, upstreamNyaa)
 	if items != nil || fetched != 0 || failed {
@@ -578,24 +644,27 @@ func TestZeroUpstreamsProxiesNothing(t *testing.T) {
 	}
 }
 
-// TestSharedUpstreamsKeepConsumerWarningsIndependent pins ownUpstreams' reason
-// for existing: the per-upstream WARN-onset latches are per-instance, so handing
-// ONE Upstreams value to both exported constructors must still give each consumer
-// its own latch state. Sharing them would let the server's first filter warning
-// arm the writer's latch, silently demoting the writer's independently actionable
+// TestConsumerWarningsStayIndependent pins why each constructor wires its own
+// upstreams: the per-upstream WARN-onset latches are per-instance, so a server
+// and a feed writer built from the SAME client and config must still hold their
+// own latch state. Sharing them would let the server's first filter warning arm
+// the writer's latch, silently demoting the writer's independently actionable
 // onset WARN to Debug.
-func TestSharedUpstreamsKeepConsumerWarningsIndependent(t *testing.T) {
+func TestConsumerWarningsStayIndependent(t *testing.T) {
 	const (
 		droppedMsg = "upstream items dropped: download URL not on the Prowlarr endpoint origin"
 		blankedMsg = "upstream display URLs blanked: not the tracker's own canonical http(s) page URL"
 	)
 	log, rec := capture.New()
 	cfg := UpstreamConfig{NyaaTorznabURL: "http://prowlarr:9696/1/api"}
-	shared := WireUpstreams(&http.Client{}, log, cfg)
-	ix := New(&Config{UpstreamConfig: cfg}, log, shared)
-	writer := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: cfg}, log, shared)
+	client := &http.Client{}
+	ix := New(&Config{UpstreamConfig: cfg}, log, client)
+	writer := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: cfg}, log, client)
 	if len(ix.upstreams) != 1 || len(writer.harvest.upstreams) != 1 {
 		t.Fatalf("consumer upstream counts = (%d, %d), want (1, 1)", len(ix.upstreams), len(writer.harvest.upstreams))
+	}
+	if ix.upstreams[0] == writer.harvest.upstreams[0] {
+		t.Fatal("the two consumers share one upstream instance, so they share its WARN-onset latches")
 	}
 
 	for _, u := range []*upstream{ix.upstreams[0], writer.harvest.upstreams[0]} {
@@ -641,7 +710,7 @@ func TestWedgedWarmLoadFaultsInsteadOfParkingRequests(t *testing.T) {
 	t.Cleanup(func() { warmLoadTimeout = prev })
 
 	log, rec := capture.New()
-	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, log, Upstreams{})
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, log, nil)
 	// The warm loader is wedged inside refresh: it holds the reload gate and has
 	// not published a snapshot.
 	if !ix.cache.tryLockReload() {
@@ -694,7 +763,7 @@ func TestWedgedWarmLoadFaultsInsteadOfParkingRequests(t *testing.T) {
 // writes one the server reloads it on the next request.
 func TestFeedWriterReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, nil, Upstreams{})
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ProwlarrAPIKey: "k"}}, nil, nil)
 
 	// No snapshot yet: the empty-q feed serves nothing.
 	if got, _, _ := ix.query(context.Background(), url.Values{"t": {"search"}}, "nyaa"); len(got) != 0 {
@@ -747,7 +816,7 @@ func TestAnimeBytesMatching(t *testing.T) {
 	// End to end: an AB item (no info hash) matches the SeaDex set by tracker key.
 	set := &curation{byHash: map[string]bool{}, byKey: map[string]bool{"ab:1167293": true}}
 	raw := []item{{Title: "[Momonoki] Frieren S01", InfoURL: prowlarrComments, GUID: prowlarrGUID}}
-	out := markAndDedupe(raw, set, upstreamAB)
+	out, _ := markAndDedupe(raw, set, upstreamAB)
 	if len(out) != 1 || out[0].DownloadVolumeFactor != dvfBest {
 		t.Fatalf("AB item did not match/mark best: %+v", out)
 	}
@@ -986,7 +1055,7 @@ func TestABFeedRequiresPasskey(t *testing.T) {
 		return rec.Body.String()
 	}
 
-	noKey := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, nil, Upstreams{})
+	noKey := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, nil, nil)
 	if body := serve(noKey, "/ab?t=search&apikey=k"); !strings.Contains(body, "<error") || !strings.Contains(body, "passkey") {
 		t.Errorf("ab empty-q without passkey: body = %q, want a Torznab <error> mentioning the passkey", body)
 	}
@@ -994,7 +1063,7 @@ func TestABFeedRequiresPasskey(t *testing.T) {
 		t.Errorf("nyaa empty-q must not error: %q", body)
 	}
 
-	withKey := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "PASSKEY"}}, nil, Upstreams{})
+	withKey := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "PASSKEY"}}, nil, nil)
 	if body := serve(withKey, "/ab?t=search&apikey=k"); strings.Contains(body, "<error") {
 		t.Errorf("ab empty-q with passkey must not error: %q", body)
 	}
@@ -1024,7 +1093,7 @@ func TestServeUnconfiguredABServesNoPasskeyItems(t *testing.T) {
 	}
 
 	t.Run("unconfigured AB serves the empty-feed shape", func(t *testing.T) {
-		off := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABPasskey: "SECRETPASSKEY"}}, nil, Upstreams{})
+		off := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABPasskey: "SECRETPASSKEY"}}, nil, nil)
 		body := serve(off)
 		if strings.Contains(body, "SECRETPASSKEY") {
 			t.Errorf("unconfigured AB response leaks the passkey: %q", body)
@@ -1038,7 +1107,7 @@ func TestServeUnconfiguredABServesNoPasskeyItems(t *testing.T) {
 	})
 
 	t.Run("configured AB serves the same snapshot", func(t *testing.T) {
-		on := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "SECRETPASSKEY"}}, nil, Upstreams{})
+		on := New(&Config{APIKey: "k", SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api", ABPasskey: "SECRETPASSKEY"}}, nil, nil)
 		body := serve(on)
 		if !strings.Contains(body, "<item>") || !strings.Contains(body, "Frieren - S01 (BD Remux 1080p) [PMR]") {
 			t.Errorf("configured AB did not serve the snapshot item: %q", body)
@@ -1084,7 +1153,7 @@ func TestRenderSynthesizedItem(t *testing.T) {
 // missing or wrong apikey before any capabilities document is served, and that a
 // correct key yields the exact caps shape the arrs expect.
 func TestServeRequiresAPIKeyBeforeServingCaps(t *testing.T) {
-	ix := New(&Config{APIKey: "secret"}, nil, Upstreams{})
+	ix := New(&Config{APIKey: "secret"}, nil, nil)
 
 	bad := httptest.NewRecorder()
 	ix.serve(bad, httptest.NewRequest(http.MethodGet, "/nyaa?t=caps&apikey=wrong", nil))
@@ -1371,7 +1440,7 @@ func TestParsePubDate(t *testing.T) {
 // skipping straight to the constant-time compare would OPEN the gate and serve
 // the passkey-bearing feed unauthenticated.
 func TestServeFailsClosedWithoutConfiguredAPIKey(t *testing.T) {
-	ix := New(&Config{}, nil, Upstreams{})
+	ix := New(&Config{}, nil, nil)
 	for _, target := range []string{
 		"/nyaa?t=caps",
 		"/nyaa?t=caps&apikey=",
@@ -1439,7 +1508,7 @@ func TestSearchUsesConfiguredABUpstream(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ix := wiredIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, nil, srv.Client())
+	ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}}, nil, srv.Client())
 
 	items, stats, fault := ix.query(context.Background(), url.Values{"t": {"tvsearch"}, "q": {"Frieren"}}, "ab")
 	if len(items) != 1 {
@@ -1469,7 +1538,7 @@ func TestFeedForUnknownScopeServesNothing(t *testing.T) {
 		NyaaTorznabURL: "http://prowlarr/1/api",
 		ABTorznabURL:   "http://prowlarr/2/api",
 		ABPasskey:      "PK",
-	}}, nil, Upstreams{})
+	}}, nil, nil)
 	ix.cache.mu.Lock()
 	ix.cache.snap.NyaaFeed = []journalItem{
 		{item: item{Title: "n"}},
@@ -1497,7 +1566,7 @@ func TestFeedForUnknownScopeServesNothing(t *testing.T) {
 // unconfigured-tracker empty feed.
 func TestNewCopiesConfig(t *testing.T) {
 	cfg := &Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}
-	ix := New(cfg, nil, Upstreams{})
+	ix := New(cfg, nil, nil)
 
 	// The caller reuses (or clears) its Config after construction.
 	cfg.APIKey = ""
@@ -1525,7 +1594,7 @@ func TestNewCopiesConfig(t *testing.T) {
 // ephemeral-port socket string.
 func TestRejectionLinesNameTheClientIP(t *testing.T) {
 	log, rec := capture.New()
-	ix := wiredIndexer(&Config{
+	ix := New(&Config{
 		APIKey:         "secret",
 		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"},
 	}, log, nil)

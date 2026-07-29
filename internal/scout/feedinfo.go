@@ -3,17 +3,12 @@ package scout
 import (
 	"strings"
 
+	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/indexer"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
 )
-
-// specialSeason is the TVDB season number the arrs file specials under, the
-// season a Fribb-typed special resolves to. align has its own copy for the
-// comparison scope; this one is the feed's, and both are the same immutable
-// TVDB fact rather than a policy either package could change.
-const specialSeason = 0
 
 // feedEntryInfo builds the per-show metadata closure the indexer's feed writer
 // synthesizes RSS titles from. For each AniList id it resolves, in order:
@@ -125,22 +120,20 @@ func applyMemoTyping(memo match.Memo, alID int, info *indexer.EntryInfo) {
 // A movie pins no season at all, mirroring align's Radarr-first scope dispatch:
 // a MOVIE-typed record's season.tvdb is not the season the arr files it under
 // (Radarr has none), so a broken upstream mapping that carries one must not
-// reach a consumer as a resolved season.
+// reach a consumer as a resolved season. That arm is this caller's own because
+// the feed has no arr item to key it on, only the record's type.
 //
-// It reads the same three Record predicates align's scope resolution dispatches on
-// (IsMovie, HasMappedSeason, IsSpecial), and exists so the indexer receives a resolved
-// season instead of raw Fribb fields it would have to re-interpret - the
-// duplication l-f4 named, in a package that deliberately imports neither align
-// nor mapping.
+// The season rule itself is align.RecordSeason - the ONE home of "which season
+// does a Fribb record pin", which align's own scope resolution reads too, so
+// the feed and the comparison scope cannot drift (l-f6/l-f132; the two copies
+// of the dispatch, and of the season-0 constant, are what l-f4 left behind).
+// This function exists so the indexer receives a resolved season instead of raw
+// Fribb fields it would have to re-interpret, in a package that deliberately
+// imports neither align nor mapping.
 func resolvedSeason(rec *mapping.Record) (season int, known bool) {
-	switch {
-	case rec.IsMovie():
-		return 0, false
-	case rec.HasMappedSeason():
-		return rec.SeasonTvdb, true
-	case rec.IsSpecial():
-		return specialSeason, true
-	default:
+	if rec.IsMovie() {
 		return 0, false
 	}
+	kind, season := align.RecordSeason(rec)
+	return season, kind != align.ScopeWholeSeries
 }

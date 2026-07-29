@@ -53,9 +53,11 @@ var errRecordPollHealth = errors.New("record poll health")
 
 // --- Cycle coalescing: the cross-process lock shared by poll and the daemon ---
 
-// dirMode is applied when creating the cycle-lock directory (normally
-// /config, which already exists as the mounted volume holding the config and
-// state files this lock guards).
+// dirMode is applied when creating a lock's parent directory: the cycle-lock
+// dir (normally /config, which already exists as the mounted volume holding the
+// config and state files this lock guards) and the report dir when the report
+// lock creates it (owner-only, matching the report writer's own mode - reports
+// enumerate the operator's library).
 const dirMode = 0o700
 
 // NewExclusive builds the cross-process cycle coalescer shared by every

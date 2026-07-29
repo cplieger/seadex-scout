@@ -59,10 +59,10 @@ func TestJoinedAttrsMarkTruncationWhenBudgetEndsAtSeparator(t *testing.T) {
 	exactURL := urlPrefix + strings.Repeat("u", maxAttrBytes-len(tracker)-len("=")-len(urlPrefix))
 	f := testFinding("exact", "Frieren")
 	f.RecommendedGroups = []string{exactGroup, "dropped-group"}
-	f.Links = []compare.ReleaseLink{
-		{Tracker: tracker, URL: exactURL},
-		{Tracker: "AB", URL: "https://animebytes.tv/torrents.php?id=1"},
-	}
+	f.Links = gradedLinks(
+		compare.ReleaseLink{Tracker: tracker, URL: exactURL},
+		compare.ReleaseLink{Tracker: "AB", URL: "https://animebytes.tv/torrents.php?id=1"},
+	)
 
 	notifier.Notify([]compare.Finding{f}, nil, nil, time.Now())
 
@@ -356,5 +356,36 @@ func TestPreservedRecordBoundsEveryReadBackString(t *testing.T) {
 		if strings.ContainsAny(got, "\u202e") {
 			t.Errorf("preserved %s carries an unsafe rune", name)
 		}
+	}
+}
+
+// TestCapAlertTextAttrNeverEndsInADanglingEscape pins the truncation half of
+// the alert twin: the re-cap cuts the ESCAPED string, so without
+// trimTruncatedEscape the cut can fall between a backslash and the character it
+// escapes and the value ends "\..." - a dangling escape the reader sees and a
+// Markdown sink reads as an escaped '.'. Both input parities are driven, since
+// which side of an escape pair the byte budget lands on depends on the value.
+func TestCapAlertTextAttrNeverEndsInADanglingEscape(t *testing.T) {
+	for name, in := range map[string]string{
+		"even offset": strings.Repeat("*", 2*maxAttrBytes),
+		"odd offset":  "a" + strings.Repeat("*", 2*maxAttrBytes),
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := capAlertTextAttr(in)
+			body, truncated := strings.CutSuffix(got, attrTruncMarker)
+			if !truncated {
+				t.Fatalf("capAlertTextAttr(%d bytes) was not truncated; the case no longer exercises the cut", len(in))
+			}
+			run := 0
+			for i := len(body) - 1; i >= 0 && body[i] == '\\'; i-- {
+				run++
+			}
+			if run%2 == 1 {
+				t.Errorf("truncated value ends in a dangling escape: %q", body[max(0, len(body)-8):]+attrTruncMarker)
+			}
+			if len(got) > maxAttrBytes {
+				t.Errorf("truncated value is %d bytes, want at most %d", len(got), maxAttrBytes)
+			}
+		})
 	}
 }

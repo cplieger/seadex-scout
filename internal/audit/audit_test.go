@@ -545,9 +545,10 @@ func TestRowQualifier(t *testing.T) {
 // TestAuditCurationWarnedReleaseAnnotatedNotCounted pins the report-path
 // curation-warning contract: a warned release stays LISTED (the report
 // enumerates raw SeaDex data) carrying its canonical warning tags, but it
-// counts as neither best nor alt for the verdict - an on-disk group matching
-// only a Broken best reads have_unlisted, never have_best, mirroring the
-// daemon's exclusion - while an unwarned best still classifies as usual.
+// counts as no BEST for the verdict - an on-disk group matching only a Broken
+// best reads have_unlisted, never have_best, mirroring the daemon's exclusion
+// - while it still counts on the descriptive ALT rung, and an unwarned best
+// still classifies as usual.
 func TestAuditCurationWarnedReleaseAnnotatedNotCounted(t *testing.T) {
 	a := NewAuditor(Config{})
 	rowFor := func(t *testing.T, torrents []seadex.Torrent) Row {
@@ -586,13 +587,17 @@ func TestAuditCurationWarnedReleaseAnnotatedNotCounted(t *testing.T) {
 		}
 	})
 
-	t.Run("warned alt does not classify as alt", func(t *testing.T) {
+	t.Run("warned alt still classifies as alt", func(t *testing.T) {
 		row := rowFor(t, []seadex.Torrent{
 			{Tracker: "Nyaa", ReleaseGroup: "PMR", URL: "https://nyaa.si/view/2", Tags: []string{"Incomplete"}},
 			{Tracker: "Nyaa", ReleaseGroup: "SEV", URL: "https://nyaa.si/view/3", IsBest: true},
 		})
-		if row.Verdict != VerdictUnlisted {
-			t.Errorf("verdict = %q, want %q (a warned alt must not count as alt)", row.Verdict, VerdictUnlisted)
+		// The alt rung is descriptive ("is what I have something SeaDex
+		// lists?"), and a curation warning does not change that answer -
+		// have_unlisted would claim SeaDex lists the on-disk group neither
+		// as best nor as alt, which is false here (l-f144).
+		if row.Verdict != VerdictAlt {
+			t.Errorf("verdict = %q, want %q (SeaDex lists the on-disk group as an alt, warned or not)", row.Verdict, VerdictAlt)
 		}
 	})
 
@@ -612,8 +617,8 @@ func TestAuditCurationWarnedReleaseAnnotatedNotCounted(t *testing.T) {
 // TestAuditUnobtainableBestAnnotatedNotCounted pins the report-path
 // obtainability contract: a SeaDex best
 // the daemon's filter.Obtainable rule rejects (here: no usable URL) stays
-// LISTED, carrying an explicit Unobtainable marker, but counts as neither
-// best nor alt for the verdict - an on-disk group matching only an
+// LISTED, carrying an explicit Unobtainable marker, but counts as no best for
+// the verdict - an on-disk group matching only an
 // unobtainable best reads have_unlisted, never have_best, mirroring the
 // daemon's exclusion - so the rendered facts and the decision inputs no
 // longer silently diverge. An obtainable best on the same entry still
@@ -780,9 +785,10 @@ func TestGroupSets(t *testing.T) {
 		{Group: "Erai", Best: false, URL: "https://nyaa.si/view/3"},
 		// An Unobtainable release (the daemon's filter.Obtainable rule
 		// rejected it: no usable link, or a tracker the operator cannot use)
-		// is raw-catalogue visibility only: it must drive neither the best
-		// nor the alt set - the eligibility IS the daemon's obtainability
-		// rule.
+		// forfeits the PRESCRIPTIVE best rung - the eligibility there IS the
+		// daemon's obtainability rule - but still counts on the DESCRIPTIVE
+		// alt rung, which only asks whether SeaDex lists what is on disk
+		// (l-f144).
 		{Group: "LinklessBest", Best: true, Unobtainable: true},
 		{Group: "LinklessAlt", Best: false, Unobtainable: true},
 	}
@@ -790,8 +796,8 @@ func TestGroupSets(t *testing.T) {
 	if !reflect.DeepEqual(best, []string{"subsplease"}) {
 		t.Errorf("best = %v, want [subsplease]", best)
 	}
-	if !reflect.DeepEqual(alt, []string{"erai"}) {
-		t.Errorf("alt = %v, want [erai]", alt)
+	if !reflect.DeepEqual(alt, []string{"erai", "linklessalt"}) {
+		t.Errorf("alt = %v, want [erai linklessalt]", alt)
 	}
 }
 

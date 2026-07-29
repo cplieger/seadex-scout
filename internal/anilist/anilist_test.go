@@ -184,40 +184,87 @@ func TestParseMediaPageErrorFailsBatch(t *testing.T) {
 	}
 }
 
-// TestParseMediaFieldLimits pins the per-field wire limits on the untrusted
-// AniList boundary in BOTH the single and batch parsers: boundary-sized
-// title/format fields are accepted while max+1 values are rejected outright
-// (never truncated, which could forge a normalized-title match), so a hostile
-// near-body-cap payload cannot inflate the memo or state.json.
+// TestParseMediaFieldLimits pins the per-field wire rules on the untrusted
+// AniList boundary in BOTH the single and batch parsers: a boundary-sized title
+// is accepted while a max+1 title is rejected outright (never truncated, which
+// could forge a normalized-title match), so a hostile near-body-cap payload
+// cannot inflate the memo or state.json.
+//
+// A defective FORMAT is deliberately NOT a rejection (l-f140): knownFormat
+// republishes the field as a canonical mediatype token, so an over-long,
+// unrecognized, or unsafe wire value costs the record only its arr hint - the
+// bound on Media.Format is the vocabulary itself, not a byte cap, and the
+// record keeps the usable titles it would otherwise have lost to a permanent
+// negative memo.
 func TestParseMediaFieldLimits(t *testing.T) {
 	okTitle := strings.Repeat("a", maxTitleBytes)
 	bigTitle := strings.Repeat("a", maxTitleBytes+1)
-	okFormat := strings.Repeat("F", maxFormatBytes)
-	bigFormat := strings.Repeat("F", maxFormatBytes+1)
+	bigFormat := strings.Repeat("F", 65)
 
 	tests := []struct {
-		name    string
-		fields  string // media object body, without the enclosing braces
-		wantErr bool
+		name       string
+		fields     string // media object body, without the enclosing braces
+		wantErr    bool
+		wantFormat string // expected Media.Format when the record is accepted
 	}{
 		{name: "boundary-sized romaji accepted", fields: `"title":{"romaji":"` + okTitle + `"}`, wantErr: false},
 		{name: "over-limit romaji rejected", fields: `"title":{"romaji":"` + bigTitle + `"}`, wantErr: true},
 		{name: "over-limit english rejected", fields: `"title":{"romaji":"A","english":"` + bigTitle + `"}`, wantErr: true},
 		{name: "over-limit native rejected", fields: `"title":{"romaji":"A","native":"` + bigTitle + `"}`, wantErr: true},
-		{name: "boundary-sized format accepted", fields: `"format":"` + okFormat + `","title":{"romaji":"A"}`, wantErr: false},
-		{name: "over-limit format rejected", fields: `"format":"` + bigFormat + `","title":{"romaji":"A"}`, wantErr: true},
-		{name: "control rune in format rejected", fields: `"format":"TV\n","title":{"romaji":"A"}`, wantErr: true},
-		{name: "bidi override in format rejected", fields: `"format":"TV\u202e","title":{"romaji":"A"}`, wantErr: true},
+		{name: "known format canonical", fields: `"format":"MOVIE","title":{"romaji":"A"}`, wantFormat: "MOVIE"},
+		{name: "lower-cased format canonicalized", fields: `"format":"tv","title":{"romaji":"A"}`, wantFormat: "TV"},
+		{name: "over-long format collapses to unknown", fields: `"format":"` + bigFormat + `","title":{"romaji":"A"}`, wantFormat: ""},
+		{name: "surrounding whitespace format canonicalized", fields: `"format":"TV\n","title":{"romaji":"A"}`, wantFormat: "TV"},
+		{name: "bidi override in format collapses to unknown", fields: `"format":"TV\u202e","title":{"romaji":"A"}`, wantFormat: ""},
+		{name: "unrecognized format collapses to unknown", fields: `"format":"NOT_A_FORMAT","title":{"romaji":"A"}`, wantFormat: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			single := []byte(`{"data":{"Media":{` + tt.fields + `}}}`)
-			if _, err := parseMedia(single); (err != nil) != tt.wantErr {
+			media, err := parseMedia(single)
+			if (err != nil) != tt.wantErr {
 				t.Errorf("parseMedia err = %v, wantErr %v", err, tt.wantErr)
 			}
+			if err == nil && media.Format != tt.wantFormat {
+				t.Errorf("parseMedia format = %q, want %q", media.Format, tt.wantFormat)
+			}
 			batch := []byte(`{"data":{"Page":{"media":[{"id":1,` + tt.fields + `}]}}}`)
-			if _, err := parseMediaPage(batch); (err != nil) != tt.wantErr {
+			page, err := parseMediaPage(batch)
+			if (err != nil) != tt.wantErr {
 				t.Errorf("parseMediaPage err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err == nil && page[1].Format != tt.wantFormat {
+				t.Errorf("parseMediaPage format = %q, want %q", page[1].Format, tt.wantFormat)
+			}
+		})
+	}
+}
+
+// TestParseMediaKeepsTitlesWhenOnlyFormatIsDefective pins l-f140's whole point
+// at the consumer-visible level: a record whose ONLY defect is its format field
+// must still yield its usable titles, because ErrRecordUnusable is a definitive
+// answer the matcher negative-memoizes - rejecting the record would have cost it
+// every future title match until the memo expired, with an overrides.json entry
+// as the operator's only remedy.
+func TestParseMediaKeepsTitlesWhenOnlyFormatIsDefective(t *testing.T) {
+	defective := map[string]string{
+		"over-long":      strings.Repeat("F", 4096),
+		"control rune":   "TV\\u0007",
+		"bidi override":  "TV\\u202e",
+		"lone surrogate": "\\ud800",
+	}
+	for name, format := range defective {
+		t.Run(name, func(t *testing.T) {
+			raw := []byte(`{"data":{"Media":{"format":"` + format + `","title":{"romaji":"Keeper"}}}}`)
+			media, err := parseMedia(raw)
+			if err != nil {
+				t.Fatalf("parseMedia: %v, want the record accepted with its titles", err)
+			}
+			if !slices.Equal(media.Titles, []string{"Keeper"}) {
+				t.Errorf("titles = %v, want [Keeper]", media.Titles)
+			}
+			if media.Format != "" {
+				t.Errorf("format = %q, want the unknown sentinel", media.Format)
 			}
 		})
 	}
@@ -707,7 +754,7 @@ func TestParseMediaRejectsUnknownFormatAsTypeEvidence(t *testing.T) {
 		want string
 	}{
 		"a real format is preserved verbatim":    {wire: "MOVIE", want: "MOVIE"},
-		"lowercase real format is preserved":     {wire: "movie", want: "movie"},
+		"lowercase real format is canonicalized": {wire: "movie", want: "MOVIE"},
 		"TV_SHORT is a real AniList format":      {wire: "TV_SHORT", want: "TV_SHORT"},
 		"an invented token is discarded":         {wire: "NOT_A_FORMAT", want: ""},
 		"a plausible-but-wrong token is dropped": {wire: "FILM", want: ""},
@@ -743,8 +790,6 @@ func TestParseMediaRejectionsWrapErrRecordUnusable(t *testing.T) {
 	tests := map[string]string{
 		"over-limit title":             `{"data":{"Media":{"format":"TV","title":{"romaji":"` + strings.Repeat("a", maxTitleBytes+1) + `"}}}}`,
 		"unsafe title text":            `{"data":{"Media":{"format":"TV","title":{"romaji":"A\nB","english":"Safe"}}}}`,
-		"over-limit format":            `{"data":{"Media":{"format":"` + strings.Repeat("F", maxFormatBytes+1) + `","title":{"romaji":"A"}}}}`,
-		"unsafe format text":           `{"data":{"Media":{"format":"TV\n","title":{"romaji":"A"}}}}`,
 		"no usable title":              `{"data":{"Media":{"format":"TV","title":{"romaji":" ","english":""}}}}`,
 		"no matchable title key":       `{"data":{"Media":{"format":"TV","title":{"romaji":"!!!"}}}}`,
 		"native-script-only title set": `{"data":{"Media":{"format":"TV","title":{"native":"\u4e16\u754c"}}}}`,

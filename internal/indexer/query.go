@@ -64,44 +64,66 @@ func (m *curationMatch) accept(candidate, ok bool) bool {
 }
 
 // lookup reports whether a release (by its info hash and page URLs) is SeaDex-
-// curated, and if so whether it is the best release. Every structurally valid
-// identity signal the item carries must resolve to curated entries agreeing on
-// the best/alt value; a signal that misses the curation set, or one that
-// contradicts an earlier signal, rejects the whole item. An item carrying BOTH
-// a curated hash and a curated tracker key must additionally prove the exact
-// pair was observed on a single SeaDex torrent (byPair): best/alt agreement
-// alone would still admit torrent A's hash cross-wired with torrent B's key
-// whenever both happen to be best (or both alt). Together these keep an
-// untrusted Torznab item from pairing a curated info hash with the page URL or
-// download link of a different torrent. scope binds tracker
-// identity: a tracker key parsed from the item's URLs must belong to the
-// endpoint being served, so a swapped upstream (or a cross-tracker item) cannot
-// pass /ab an accepted Nyaa key or vice versa.
-func (c *curation) lookup(scope, hash, infoURL, guid string) (isBest, matched bool) {
+// curated, and if so whether it is the best release. Every identity signal the
+// item carries that the curation set KNOWS must agree with the others on the
+// best/alt value; a signal that contradicts an earlier one rejects the whole
+// item. An item carrying BOTH a curated hash and a curated tracker key must
+// additionally prove the exact pair was observed on a single SeaDex torrent
+// (byPair): best/alt agreement alone would still admit torrent A's hash
+// cross-wired with torrent B's key whenever both happen to be best (or both
+// alt). Together these keep an untrusted Torznab item from pairing a curated
+// info hash with the page URL or download link of a different torrent. scope
+// binds tracker identity: a tracker key parsed from the item's URLs must belong
+// to the endpoint being served, so a swapped upstream (or a cross-tracker item)
+// cannot pass /ab an accepted Nyaa key or vice versa.
+//
+// An info hash the curation set does not know is NOT a contradiction and does
+// not veto the item: SeaDex records often carry no usable info hash (empty,
+// short, or non-hex - the shape validInfoHash rejects, and the shape every AB
+// record has), so buildCuration registers only their tracker key, while
+// Prowlarr's Nyaa results always carry the real hash. Reading that miss as
+// "this hash names an uncurated release" vetoed an identity the curated page
+// URL had already proven, and the curated release was invisible to the search
+// with no diagnostic. Corroboration is what the hash is for: it can agree or
+// disagree, but it cannot veto (the same reading the writer's title harvest
+// settled for its own identity match). A hash the set DOES know still has to
+// agree, and still has to prove co-membership with any curated key beside it.
+//
+// conflict reports the rejection kind for the caller's accounting: true when a
+// curated signal was refused by a later identity check (the untrusted-response
+// shapes above), false for an item that simply carries nothing SeaDex curates -
+// which is the overwhelming majority of a proxied search's results and is not
+// worth reporting.
+func (c *curation) lookup(scope, hash, infoURL, guid string) (isBest, matched, conflict bool) {
 	var match curationMatch
 
-	h := validInfoHash(hash)
-	if h != "" {
-		b, ok := c.byHash[h]
-		if !match.accept(b, ok) {
-			return false, false
+	// curatedHash is the hash only once the set has vouched for it; an unknown
+	// hash leaves it empty so the pair relation below has no phantom signal to
+	// prove.
+	var curatedHash string
+	if h := validInfoHash(hash); h != "" {
+		if b, ok := c.byHash[h]; ok {
+			if !match.accept(b, true) {
+				return false, false, match.matched
+			}
+			curatedHash = h
 		}
 	}
 	key, ok := c.acceptScopedKeys(scope, []string{infoURL, guid}, &match)
 	if !ok {
-		return false, false
+		return false, false, match.matched
 	}
 	// AnimeBytes exposes no info hash in Torznab, so a scoped tracker key is
 	// mandatory there; Nyaa may still match a hash-only item.
 	if scope == upstreamAB && key == "" {
-		return false, false
+		return false, false, match.matched
 	}
 	// Both signals present and individually curated: the persisted pair
 	// relation must prove they belong to one release.
-	if !c.acceptsObservedPair(h, key) {
-		return false, false
+	if !c.acceptsObservedPair(curatedHash, key) {
+		return false, false, match.matched
 	}
-	return match.isBest, match.matched
+	return match.isBest, match.matched, false
 }
 
 // acceptsObservedPair applies lookup's dual-signal relation check: an item
@@ -200,6 +222,13 @@ type queryStats struct {
 	upstreamFetched int
 	upstream        int
 	curated         int
+	// identityConflicts counts search results dropped because a curated
+	// identity signal was CONTRADICTED by another signal on the same item (a
+	// cross-torrent hash/key pair, two different tracker ids, an out-of-scope
+	// key), as opposed to the ordinary "not curated by SeaDex" drop that
+	// accounts for nearly every filtered result. Without it a tampered or
+	// misbehaving upstream reads exactly like a clean no-match.
+	identityConflicts int
 }
 
 // query returns the feed items for a request (restricted to scope's tracker),
@@ -256,10 +285,12 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 	} else {
 		raw, fetched, failed := ix.fetchRaw(ctx, upstreamParams(q), scope)
 		set := ix.cache.curation()
-		items = markAndDedupe(raw, &set, scope)
+		var conflicts int
+		items, conflicts = markAndDedupe(raw, &set, scope)
 		stats = queryStats{
 			answered:        true,
 			upstreamFetched: fetched, upstream: len(raw), curated: len(items),
+			identityConflicts: conflicts,
 		}
 		if failed {
 			// A total upstream failure (every queried Prowlarr upstream
@@ -312,9 +343,10 @@ func isFeedRequest(q url.Values) bool { return strings.TrimSpace(q.Get("q")) == 
 // newest-first), so the caps document is honest; the arrs always send an
 // explicit limit, so real consumers are unaffected. An explicit limit behaves
 // as before, an absent or invalid offset leaves the window anchored at the
-// newest item, and the proxied search path forwards these params to Prowlarr
-// instead, so it never pages locally. A present-but-unusable limit or offset is
-// logged at Debug so a misconfigured client is diagnosable.
+// newest item, and the proxied search path pages at the UPSTREAM instead, so
+// it never pages locally (it forwards offset to Prowlarr and always asks for
+// the full decoder window - see upstreamParams). A present-but-unusable limit
+// or offset is logged at Debug so a misconfigured client is diagnosable.
 func applyPaging(log *slog.Logger, items []item, q url.Values) []item {
 	rawOffset := strings.TrimSpace(q.Get("offset"))
 	off, offErr := strconv.Atoi(rawOffset)
@@ -440,14 +472,22 @@ func (ix *Indexer) fetchRaw(ctx context.Context, params url.Values, scope string
 
 // markAndDedupe keeps the curated releases, stamps each with the best/alt
 // marker, and drops intra-upstream duplicates by guid (a torrent listed under
-// several title aliases carries distinct guids and is deliberately kept).
-func markAndDedupe(raw []item, set *curation, scope string) []item {
+// several title aliases carries distinct guids and is deliberately kept). It
+// also reports how many items were dropped by an identity CONTRADICTION rather
+// than by simply not being curated (see lookup's conflict return), so that
+// class - an untrusted Torznab response pairing a curated signal with a
+// foreign one - is visible in the per-request line instead of reading as a
+// clean no-match.
+func markAndDedupe(raw []item, set *curation, scope string) (out []item, conflicts int) {
 	seen := make(map[string]struct{}, len(raw))
-	out := make([]item, 0, len(raw))
+	out = make([]item, 0, len(raw))
 	for i := range raw {
 		it := raw[i]
-		isBest, matched := set.lookup(scope, it.InfoHash, it.InfoURL, it.GUID)
+		isBest, matched, conflict := set.lookup(scope, it.InfoHash, it.InfoURL, it.GUID)
 		if !matched {
+			if conflict {
+				conflicts++
+			}
 			continue
 		}
 		it.DownloadVolumeFactor = dvfAlt
@@ -461,15 +501,35 @@ func markAndDedupe(raw []item, set *curation, scope string) []item {
 		seen[id] = struct{}{}
 		out = append(out, it)
 	}
-	return out
+	return out, conflicts
 }
 
 // upstreamParams selects the Torznab query params to forward to Prowlarr,
 // dropping our own apikey. It defaults the search type to a basic search and
-// clamps the forwarded limit to the maximum the caps document advertises.
+// always asks the upstream for the FULL window the decoder accepts (maxItems).
+//
+// The client's own limit is deliberately NOT forwarded. A Torznab limit
+// describes how many items the CLIENT wants back, and this endpoint filters
+// the upstream page down to the SeaDex-curated releases locally - so
+// forwarding it made the client's page size the upstream's truncation point
+// and dropped every curated release sitting past it. Sonarr's season search
+// arrives as limit=100 while a live AnimeBytes result set for one series runs
+// to ~145 items: a curated torrent at upstream position 100+ was simply
+// invisible, and the arr never paged for it (a handful of curated items looks
+// like a last page for a limit of 100), so the release went missing with no
+// diagnostic (h-f12).
+//
+// maxItems is the right window because it is what both ends of this app
+// already agree on: the caps document advertises max=maxItems and
+// parseTorznab rejects a response above maxUpstreamItems (== maxItems). At
+// real Torznab item sizes a full page is ~1 MiB, well inside
+// upstreamMaxBytes, so the fetch stays a single bounded attempt rather than
+// the bounded-retry-then-Torznab-error an over-contract limit used to cause.
+// offset is still forwarded verbatim: it names where in the upstream's own
+// result list to start, which is not something curation reinterprets.
 func upstreamParams(q url.Values) url.Values {
 	out := url.Values{}
-	for _, k := range []string{"t", "q", "cat", "season", "ep", "limit", "offset"} {
+	for _, k := range []string{"t", "q", "cat", "season", "ep", "offset"} {
 		if v := q.Get(k); v != "" {
 			out.Set(k, v)
 		}
@@ -477,24 +537,7 @@ func upstreamParams(q url.Values) url.Values {
 	if out.Get("t") == "" {
 		out.Set("t", "search")
 	}
-	// Never ask an upstream for more items than the decoder accepts: the caps
-	// document advertises max=maxItems and parseTorznab rejects the whole
-	// response above maxUpstreamItems (== maxItems), so forwarding an
-	// over-contract limit would turn a workable search into a bounded-retry
-	// fetch of up to upstreamMaxBytes per attempt and then a Torznab error. A
-	// compliant client (the arrs send limit=100) is unaffected; a non-numeric
-	// limit is left untouched so the upstream applies its own default (the
-	// feed path instead substitutes defaultCapsLimit - see applyPaging).
-	if raw := strings.TrimSpace(out.Get("limit")); raw != "" {
-		lim, err := strconv.Atoi(raw)
-		// A digit run too large for int (strconv.ErrRange) is an
-		// over-contract limit too: Atoi's error must not let it through
-		// unclamped. A non-numeric value is still left untouched.
-		if (err == nil && lim > maxItems) ||
-			(errors.Is(err, strconv.ErrRange) && !strings.HasPrefix(raw, "-")) {
-			out.Set("limit", strconv.Itoa(maxItems))
-		}
-	}
+	out.Set("limit", strconv.Itoa(maxItems))
 	return out
 }
 

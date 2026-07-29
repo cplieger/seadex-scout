@@ -62,6 +62,40 @@ type scopeResult struct {
 	Approx  bool
 }
 
+// RecordSeason resolves, from a Fribb record ALONE, which season the record
+// pins and which scope kind pins it: ScopeSeason with its positive Fribb TVDB
+// season, ScopeSpecial with the season-0 bucket a Fribb-typed special is filed
+// under (a MAPPED season zero, not an absent one), or ScopeWholeSeries with no
+// season (an absolute-numbered run, a title-only match, or a record with no
+// Fribb typing at all).
+//
+// This is the ONE home of the season-resolution rule: scope's own season and
+// special arms read it, and so does the feed's per-entry metadata
+// (internal/scout), which must hand the indexer a RESOLVED season because that
+// package deliberately imports neither align nor mapping and so has no
+// legitimate way to re-interpret Fribb semantics (l-f4). Held as two copies -
+// with a private specialSeason constant each - the dispatch drifted with no
+// compile error and no test spanning both (l-f6/l-f132).
+//
+// The MOVIE arm is deliberately NOT here, because the two callers answer it
+// from different evidence: scope keys it on the ARR the item lives on (a Radarr
+// item is a movie whatever its record says) while the feed keys it on the
+// record's own type, and folding either rule in here would silently impose it
+// on the other caller. The runner-up home was a mapping.Record method
+// (Record.MappedSeason), declined in the l-f4 wave because it would give
+// internal/indexer a second way to ask the same question; align is the leaf
+// that already owns scope resolution, and both callers sit above it.
+func RecordSeason(rec *mapping.Record) (kind ScopeKind, season int) {
+	switch {
+	case rec.HasMappedSeason():
+		return ScopeSeason, rec.SeasonTvdb
+	case rec.IsSpecial():
+		return ScopeSpecial, specialSeason
+	default:
+		return ScopeWholeSeries, 0
+	}
+}
+
 // scope resolves the comparison scope of a matched entry once, for every
 // consumer: the semantic Kind plus the on-disk release groups, file presence,
 // and approximation flag that go with it. It handles the three single-unit
@@ -74,27 +108,32 @@ type scopeResult struct {
 // Decide resolves it with the conservative per-real-season aggregation, so a
 // consumer cannot silently mis-scope such an item against the specials bucket.
 func scope(item *library.Item, rec *mapping.Record) scopeResult {
-	switch {
-	case item.Arr == library.ArrRadarr:
+	// The ARR decides the movie scope, ahead of anything the record says: a
+	// Radarr item is a movie even when a broken upstream mapping carries a
+	// season for it.
+	if item.Arr == library.ArrRadarr {
 		return scopeResult{Kind: ScopeMovie, Groups: item.Groups, HasFile: item.HasFile}
-	case rec.HasMappedSeason():
+	}
+	switch kind, season := RecordSeason(rec); kind {
+	case ScopeSeason:
 		// Group presence doubles as file presence here and in the specials
 		// branch below: release.Classify falls back to the literal NOGRP
 		// (release.NoGroup) for a group-less file, so a season with any file
 		// on disk always carries at least one group member - possibly the
 		// unknown-evidence sentinel, which the decision layer treats as
 		// unverifiable, never as an identity.
-		g := item.SeasonGroups[rec.SeasonTvdb]
+		g := item.SeasonGroups[season]
 		return scopeResult{Kind: ScopeSeason, Groups: g, HasFile: len(g) > 0}
-	case rec.IsSpecial():
+	case ScopeSpecial:
 		// a special: compare against the season-0 specials bucket
-		g := item.SeasonGroups[specialSeason]
+		g := item.SeasonGroups[season]
 		return scopeResult{Kind: ScopeSpecial, Groups: g, HasFile: len(g) > 0, Approx: len(g) > 1}
 	default:
 		// Everything left is a whole-series comparison (a Sonarr
 		// absolute-numbered run or a title-only match): it has no single-unit
 		// scope, and Decide resolves it with the conservative per-real-season
-		// aggregation.
+		// aggregation. ScopeMovie is unreachable here - RecordSeason never
+		// returns it - and a non-Radarr item could not use it anyway.
 		return scopeResult{Kind: ScopeWholeSeries}
 	}
 }

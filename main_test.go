@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/cplieger/arrapi"
-	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/config"
 	"github.com/cplieger/seadex-scout/internal/cycle"
 	"github.com/cplieger/slogx"
@@ -509,12 +508,12 @@ func TestWriteStarterConfigError(t *testing.T) {
 }
 
 // TestBuildScout pins the composition wiring hermetically: with both arrs
-// disabled the full component graph builds without any network I/O (pingArrs
+// disabled each role's component graph builds without any network I/O (pingArrs
 // is a no-op on nil clients) and cleanup is callable, and an invalid arr URL
 // propagates as a build error instead of being swallowed.
 func TestBuildScout(t *testing.T) {
 	t.Run("disabled arrs build hermetically", func(t *testing.T) {
-		b, err := buildScout(context.Background(), &config.Config{}, false)
+		b, err := buildScout(context.Background(), &config.Config{})
 		if err != nil {
 			t.Fatalf("buildScout(zero config) = %v, want nil", err)
 		}
@@ -523,20 +522,23 @@ func TestBuildScout(t *testing.T) {
 		}
 		b.cleanup()
 	})
-	t.Run("read-only state store builds hermetically", func(t *testing.T) {
-		b, err := buildScout(context.Background(), &config.Config{}, true)
+	t.Run("reporter role builds hermetically", func(t *testing.T) {
+		b, err := buildReporter(context.Background(), &config.Config{})
 		if err != nil {
-			t.Fatalf("buildScout(zero config, read-only state) = %v, want nil", err)
+			t.Fatalf("buildReporter(zero config) = %v, want nil", err)
 		}
 		if b.scout == nil {
-			t.Fatal("scout = nil, want a wired scout")
+			t.Fatal("scout = nil, want a wired reporter")
 		}
 		b.cleanup()
 	})
 	t.Run("invalid sonarr URL propagates", func(t *testing.T) {
 		cfg := &config.Config{SonarrURL: "not-a-url", SonarrAPIKey: "k"}
-		if _, err := buildScout(context.Background(), cfg, false); err == nil {
+		if _, err := buildScout(context.Background(), cfg); err == nil {
 			t.Fatal("buildScout(invalid sonarr URL) = nil, want error")
+		}
+		if _, err := buildReporter(context.Background(), cfg); err == nil {
+			t.Fatal("buildReporter(invalid sonarr URL) = nil, want error")
 		}
 	})
 }
@@ -579,48 +581,6 @@ func TestPingArrs(t *testing.T) {
 	}
 }
 
-// TestLogIndexerStopClassifiesShutdownAndFault pins the indexer feed's stop
-// log contract: during a shutdown, an expired graceful-shutdown budget
-// (DeadlineExceeded from webhttp.Run, meaning in-flight Torznab requests were
-// cut off) gets its own WARN message distinct from the routine clean-shutdown
-// WARN, and any error outside a shutdown stays the ERROR fault line. Serial
-// (swaps slog.Default).
-func TestLogIndexerStopClassifiesShutdownAndFault(t *testing.T) {
-	canceled, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	tests := []struct {
-		name      string
-		ctx       context.Context
-		err       error
-		wantMsg   string
-		wantLevel slog.Level
-	}{
-		{"budget expired during shutdown", canceled, context.DeadlineExceeded, "indexer shutdown budget expired; in-flight requests aborted", slog.LevelWarn},
-		{"clean stop during shutdown", canceled, context.Canceled, "indexer feed stopped during shutdown", slog.LevelWarn},
-		{"fault outside shutdown", context.Background(), errors.New("bind failed"), "indexer feed stopped", slog.LevelError},
-		{"deadline exceeded outside shutdown stays a fault", context.Background(), context.DeadlineExceeded, "indexer feed stopped", slog.LevelError},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rec := capture.Default(t)
-
-			logIndexerStop(tt.ctx, slog.Default().With("component", "indexer"), tt.err)
-
-			records := rec.Records()
-			if len(records) != 1 {
-				t.Fatalf("captured %d records, want 1 (%v)", len(records), rec.Messages())
-			}
-			if records[0].Message != tt.wantMsg {
-				t.Errorf("msg = %q, want %q", records[0].Message, tt.wantMsg)
-			}
-			if records[0].Level != tt.wantLevel {
-				t.Errorf("level = %v, want %v", records[0].Level, tt.wantLevel)
-			}
-		})
-	}
-}
-
 // TestRunReportRefusesWhenLockHeld pins the report concurrency refusal end to
 // end: with another run holding the report lock, runReport returns
 // ErrReportRunning before building any component, so the refusal is
@@ -628,15 +588,54 @@ func TestLogIndexerStopClassifiesShutdownAndFault(t *testing.T) {
 // timestamped filename pair.
 func TestRunReportRefusesWhenLockHeld(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "reports")
-	release, err := audit.AcquireReportLock(dir)
+	release, err := cycle.TryReportLock(dir)
 	if err != nil {
 		t.Fatalf("holding the report lock: %v", err)
 	}
 	defer release()
 
 	err = runReport(&config.Config{ReportDir: dir})
-	if !errors.Is(err, audit.ErrReportRunning) {
+	if !errors.Is(err, cycle.ErrReportRunning) {
 		t.Fatalf("runReport with the lock held = %v, want ErrReportRunning", err)
+	}
+}
+
+// TestRunReportRejectsRelativeReportDir pins the report-path guard on
+// report.dir: every report write goes through an absolute-path-only writer, so a
+// relative value cannot produce either half of the pair - the run now fails
+// before it spends the ~25m walk, instead of after it (l-f213). Config still
+// admits the value at load (a daemon never writes a report), so this is the only
+// place the outcome changes: same failure, minutes earlier, with a reason.
+// Hermetic - the refusal precedes the report lock and every component build -
+// and the error names the key without echoing the secret-capable value.
+func TestRunReportRejectsRelativeReportDir(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		dir     string
+		wantErr bool
+	}{
+		{"relative", "rel-report-dir", true},
+		{"empty", "", true},
+		{"dot-relative", "./reports", true},
+		{"absolute", filepath.Join(t.TempDir(), "reports"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkReportDir(tc.dir)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("checkReportDir(%q) = %v, wantErr %v", tc.dir, err, tc.wantErr)
+			}
+		})
+	}
+
+	err := runReport(&config.Config{ReportDir: "rel-report-dir"})
+	if err == nil {
+		t.Fatal("runReport with a relative report.dir = nil, want an error")
+	}
+	if strings.Contains(err.Error(), "rel-report-dir") {
+		t.Errorf("report.dir error echoes the configured value: %v", err)
+	}
+	if _, statErr := os.Stat("rel-report-dir"); statErr == nil {
+		t.Error("runReport created the relative report dir before refusing")
 	}
 }
 
@@ -667,7 +666,7 @@ func TestLogPingClassifiesShutdownCancellation(t *testing.T) {
 // network I/O).
 func TestDispatchRoutesReportMode(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "reports")
-	release, err := audit.AcquireReportLock(dir)
+	release, err := cycle.TryReportLock(dir)
 	if err != nil {
 		t.Fatalf("holding the report lock: %v", err)
 	}
@@ -679,13 +678,13 @@ func TestDispatchRoutesReportMode(t *testing.T) {
 		ReportDir: dir,
 	}
 	err = dispatch(config.RunModeReport, cfg)
-	if !errors.Is(err, audit.ErrReportRunning) {
+	if !errors.Is(err, cycle.ErrReportRunning) {
 		t.Fatalf("dispatch(report, valid config) = %v, want ErrReportRunning", err)
 	}
 }
 
 // TestRunReportReleasesLockOnBuildFailure pins the deferred lock release: a
-// failed buildScout (invalid sonarr URL, no network I/O) must not leak the
+// failed buildReporter (invalid sonarr URL, no network I/O) must not leak the
 // report lock, or every subsequent report would refuse with ErrReportRunning
 // until restart.
 func TestRunReportReleasesLockOnBuildFailure(t *testing.T) {
@@ -696,11 +695,11 @@ func TestRunReportReleasesLockOnBuildFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("runReport(invalid sonarr URL) = nil, want a build error")
 	}
-	if errors.Is(err, audit.ErrReportRunning) {
+	if errors.Is(err, cycle.ErrReportRunning) {
 		t.Fatalf("err = %v, want a build error, not a lock refusal", err)
 	}
 
-	release, err := audit.AcquireReportLock(dir)
+	release, err := cycle.TryReportLock(dir)
 	if err != nil {
 		t.Fatalf("report lock still held after the failed run: %v", err)
 	}
@@ -830,63 +829,6 @@ func TestRunPollBuildFailure(t *testing.T) {
 	}
 }
 
-// TestRunIndexerPanicShield pins the daemon's feed crash shield (the twin of
-// internal/cycle's compare-cycle panic shield): a panicking feed goroutine is recovered - it must not crash
-// the long-lived daemon - logged as the component=indexer panic ERROR, its
-// clients are still released (cleanup runs on the panic path), and done is
-// closed so startIndexer's stop func cannot deadlock. Serial (capture swaps
-// slog.Default).
-func TestRunIndexerPanicShield(t *testing.T) {
-	rec := capture.Default(t)
-	done := make(chan struct{})
-	cleaned := false
-
-	runIndexer(context.Background(), done,
-		func(context.Context) error { panic("boom") },
-		func() { cleaned = true },
-		slog.Default().With("component", "indexer"))
-	<-done
-
-	const msg = "indexer feed panicked"
-	if got := rec.CountLevel(slog.LevelError, msg); got != 1 {
-		t.Errorf("panic-shield ERROR count = %d, want 1: %v", got, rec.Messages())
-	}
-	if got := rec.CountLevel(slog.LevelWarn, msg); got != 0 {
-		t.Errorf("panic-shield WARN count = %d, want 0: %v", got, rec.Messages())
-	}
-	if !rec.HasAttr(msg, "component", "indexer") {
-		t.Errorf("panic-shield record missing component=indexer: %v", rec.Records())
-	}
-	if !cleaned {
-		t.Error("cleanup not released on the panic path (the Prowlarr transport would leak)")
-	}
-}
-
-// TestLogIndexerStopClassifiesCauseOnlyCancellation pins the sibling terminal
-// boundary: net.ListenConfig.Listen can report a cancelled bind as the
-// cancellation CAUSE rather than context.Canceled, and that stop is still a
-// routine shutdown - it must log the WARN, never the ERROR fault line that
-// fires the cycle-error alert on a redeploy. Serial (swaps slog.Default).
-func TestLogIndexerStopClassifiesCauseOnlyCancellation(t *testing.T) {
-	cause := errors.New("terminated signal received") // deliberately NOT wrapping context.Canceled
-	ctx, cancelCause := context.WithCancelCause(context.Background())
-	cancelCause(cause)
-	rec := capture.Default(t)
-
-	logIndexerStop(ctx, slog.Default().With("component", "indexer"), fmt.Errorf("listen: %w", cause))
-
-	records := rec.Records()
-	if len(records) != 1 {
-		t.Fatalf("captured %d records, want 1 (%v)", len(records), rec.Messages())
-	}
-	if records[0].Message != "indexer feed stopped during shutdown" {
-		t.Errorf("msg = %q, want the routine shutdown WARN", records[0].Message)
-	}
-	if records[0].Level != slog.LevelWarn {
-		t.Errorf("level = %v, want WARN (a cause-only cancellation is not a fault)", records[0].Level)
-	}
-}
-
 // TestDispatchOutcome pins the two operator-visible contracts main derives from
 // a dispatch error: the slog level the cycle-error Loki alert keys on
 // (level=ERROR) and the exit code a scheduler reads. The self-heal rule decides
@@ -901,7 +843,7 @@ func TestDispatchOutcome(t *testing.T) {
 		wantExit  int
 	}{
 		"refused concurrent report": {
-			err:       fmt.Errorf("acquire report lock: %w", audit.ErrReportRunning),
+			err:       fmt.Errorf("acquire report lock: %w", cycle.ErrReportRunning),
 			wantLevel: slog.LevelWarn,
 			wantMsg:   "report skipped; another report is already running",
 			wantExit:  0,
@@ -940,19 +882,38 @@ func TestDispatchOutcome(t *testing.T) {
 	}
 }
 
+// TestReportWriteContext pins the report write's shutdown contract: the write
+// context is detached from the caller's UNCONDITIONALLY (a signal landing during
+// the write - not only before it - must not discard the ~25m artifact), the
+// caller's values survive, and the shutdown gate is deferred rather than lost
+// (the detached context is cancelled reportWriteGrace after the shutdown, with
+// DeadlineExceeded as the CAUSE so detachedWriteError still classifies a
+// grace-exhausted write as a routine shutdown).
 func TestReportWriteContext(t *testing.T) {
-	t.Run("a live context passes through unchanged", func(t *testing.T) {
-		ctx := context.Background()
+	t.Run("a live context is detached and survives the shutdown that follows", func(t *testing.T) {
+		parent := context.WithValue(context.Background(), reportCtxTestKey{}, "report")
+		ctx, cancelParent := context.WithCancel(parent)
+
 		got, cancel := reportWriteContext(ctx)
 		defer cancel()
-		if got != ctx {
-			t.Errorf("reportWriteContext(live) = %v, want the caller's own context", got)
-		}
 		if got.Err() != nil {
-			t.Errorf("Err() = %v, want nil", got.Err())
+			t.Fatalf("Err() = %v, want nil", got.Err())
+		}
+
+		cancelParent()
+		if got.Err() != nil {
+			t.Errorf("Err() = %v right after the signal, want nil (the write gets its grace)", got.Err())
+		}
+		if v, _ := got.Value(reportCtxTestKey{}).(string); v != "report" {
+			t.Errorf("Value = %q, want %q (WithoutCancel keeps values)", v, "report")
+		}
+
+		cancel()
+		if got.Err() == nil {
+			t.Error("cancel() left the detached context live; the caller's defer must release it")
 		}
 	})
-	t.Run("a cancelled context is detached, bounded, and keeps its values", func(t *testing.T) {
+	t.Run("an already-cancelled caller still gets a live write context", func(t *testing.T) {
 		parent := context.WithValue(context.Background(), reportCtxTestKey{}, "report")
 		ctx, cancelParent := context.WithCancel(parent)
 		cancelParent()
@@ -962,21 +923,58 @@ func TestReportWriteContext(t *testing.T) {
 		if got.Err() != nil {
 			t.Fatalf("Err() = %v, want nil (a shutdown must not cost the ~25m report artifact)", got.Err())
 		}
-		deadline, ok := got.Deadline()
-		if !ok {
-			t.Fatal("detached write context has no deadline, want one bounded by reportWriteGrace")
-		}
-		if d := time.Until(deadline); d <= 0 || d > reportWriteGrace {
-			t.Errorf("deadline in %v, want within (0, %v]", d, reportWriteGrace)
-		}
 		if v, _ := got.Value(reportCtxTestKey{}).(string); v != "report" {
 			t.Errorf("Value = %q, want %q (WithoutCancel keeps values)", v, "report")
 		}
-		cancel()
-		if got.Err() == nil {
-			t.Error("cancel() left the detached context live; the caller's defer must release it")
+	})
+	t.Run("the shutdown grace bounds the write and reports the deadline as the cause", func(t *testing.T) {
+		ctx, cancelParent := context.WithCancel(context.Background())
+		got, cancel := reportWriteContextGrace(ctx, time.Millisecond)
+		defer cancel()
+
+		cancelParent()
+		select {
+		case <-got.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatal("the detached write context outlived its shutdown grace")
+		}
+		if !errors.Is(context.Cause(got), context.DeadlineExceeded) {
+			t.Errorf("cause = %v, want context.DeadlineExceeded (detachedWriteError keys on it)", context.Cause(got))
 		}
 	})
+	t.Run("an untouched grace never cancels the write", func(t *testing.T) {
+		got, cancel := reportWriteContextGrace(context.Background(), time.Millisecond)
+		defer cancel()
+		time.Sleep(20 * time.Millisecond)
+		if got.Err() != nil {
+			t.Errorf("Err() = %v, want nil (the grace arms only on a shutdown)", got.Err())
+		}
+	})
+}
+
+// TestHealthMaxAge pins the health probe's freshness lease: external mode arms
+// no deadline, an interval at or above the default keeps the documented
+// three-interval lease (the deployed 3h still restarts a wedged loop at 9h), and
+// a shorter interval is floored at the default's lease - the marker is refreshed
+// only when a cycle COMPLETES, so a tighter deadline would call a slow-but-
+// healthy cold cycle wedged and restart it before it can persist its memo.
+func TestHealthMaxAge(t *testing.T) {
+	for name, tc := range map[string]struct {
+		interval time.Duration
+		want     time.Duration
+	}{
+		"external mode disables the deadline": {0, 0},
+		"a negative interval disables it too": {-time.Hour, 0},
+		"the deployed interval keeps 3x":      {3 * time.Hour, 9 * time.Hour},
+		"a long interval scales":              {12 * time.Hour, 36 * time.Hour},
+		"the clamp floor is lifted":           {time.Hour, 3 * config.DefaultPollInterval},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := healthMaxAge(tc.interval); got != tc.want {
+				t.Errorf("healthMaxAge(%v) = %v, want %v", tc.interval, got, tc.want)
+			}
+		})
+	}
 }
 
 // TestDetachedWriteError pins the alert-facing exit classification of a

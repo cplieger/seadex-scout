@@ -12,6 +12,7 @@ import (
 
 	"github.com/cplieger/arrapi"
 	"github.com/cplieger/seadex-scout/internal/anilist"
+	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
@@ -32,8 +33,8 @@ func (degradedMatcherAniList) Fetch(context.Context, int) (anilist.Media, error)
 	return anilist.Media{}, context.DeadlineExceeded
 }
 
-func (degradedMatcherAniList) FetchMany(context.Context, []int) (map[int]anilist.Media, error) {
-	return nil, context.DeadlineExceeded
+func (degradedMatcherAniList) FetchMany(context.Context, []int) (anilist.BatchResult, error) {
+	return anilist.BatchResult{}, context.DeadlineExceeded
 }
 
 type notFoundAniList struct{}
@@ -42,8 +43,8 @@ func (notFoundAniList) Fetch(context.Context, int) (anilist.Media, error) {
 	return anilist.Media{}, anilist.ErrNotFound
 }
 
-func (notFoundAniList) FetchMany(context.Context, []int) (map[int]anilist.Media, error) {
-	return map[int]anilist.Media{}, nil
+func (notFoundAniList) FetchMany(context.Context, []int) (anilist.BatchResult, error) {
+	return anilist.BatchResult{Media: map[int]anilist.Media{}, Completed: true}, nil
 }
 
 // TestCycleMappingUnusablePreservesFindings pins the unusable-map degrade
@@ -61,7 +62,7 @@ func TestCycleMappingUnusablePreservesFindings(t *testing.T) {
 	s := New(&Deps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping: emptyRecordsMapLoader(t, logger),
 		SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 154587}}},
 	})
@@ -94,7 +95,7 @@ func TestCycleDegradedSavePersistsSanitizedArrURL(t *testing.T) {
 	s := New(&Deps{
 		Logger: logger,
 		Store:  store,
-		Library: library.NewWalker(&library.Config{
+		Library: arrwalk.NewWalker(&arrwalk.Config{
 			Sonarr: sonarr, Logger: logger, SonarrURL: "https://user:pass@sonarr.example",
 		}),
 		Mapping: emptyRecordsMapLoader(t, logger),
@@ -167,7 +168,7 @@ func TestCycleAniListDegradedComparesMajorityAndPreservesAffected(t *testing.T) 
 	s := New(&Deps{
 		Logger:       logger,
 		Store:        store,
-		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: entries},
 		Matcher:      match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
@@ -233,7 +234,7 @@ func TestCycleAniListDegradedColdStartSeedsIncompleteBaseline(t *testing.T) {
 		return &Deps{
 			Logger:       logger,
 			Store:        store,
-			Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+			Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 			Mapping:      fakeMapping{},
 			SeaDex:       &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
 			Matcher:      matcher,
@@ -285,7 +286,7 @@ func TestCycleColdStartBaselinesSilently(t *testing.T) {
 	s := New(&Deps{
 		Logger:       logger,
 		Store:        store,
-		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
@@ -337,7 +338,7 @@ func TestCycleEmptySeaDexEntriesPreservesFindings(t *testing.T) {
 	s := New(&Deps{
 		Logger:       logger,
 		Store:        store,
-		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{},
 		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
@@ -435,7 +436,7 @@ func TestCyclePartialWalkComparesCleanAndPreservesFailedItemsFindings(t *testing
 	s := New(&Deps{
 		Logger:       logger,
 		Store:        store,
-		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: entries},
 		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
@@ -526,7 +527,7 @@ func TestCyclePartialColdStartSeedsIncompleteBaseline(t *testing.T) {
 	s := New(&Deps{
 		Logger:       scoutTestLogger(),
 		Store:        store,
-		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       seaDex,
 		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
@@ -736,7 +737,7 @@ func TestCycleRecoveredWalkResetsShrunkStreak(t *testing.T) {
 	s := New(&Deps{
 		Logger:       logger,
 		Store:        store,
-		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
@@ -784,7 +785,7 @@ func TestCycleSeaDexFailureEscalatesAfterRepeatedFailures(t *testing.T) {
 			s := New(&Deps{
 				Logger:  logger,
 				Store:   store,
-				Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+				Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 				Mapping: fakeMapping{},
 				SeaDex:  &fakeSeaDex{err: errors.New("seadex down")},
 			})
@@ -869,7 +870,7 @@ func TestCycleSuccessfulSeaDexFetchResetsFailureStreak(t *testing.T) {
 	s := New(&Deps{
 		Logger:       logger,
 		Store:        store,
-		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
@@ -904,7 +905,7 @@ func TestCycleZeroEntriesFetchResetsSeaDexFailureStreak(t *testing.T) {
 	s := New(&Deps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{},
 	})
@@ -938,7 +939,7 @@ func TestCycleSteadyStateReportsAndSaves(t *testing.T) {
 	s := New(&Deps{
 		Logger:       logger,
 		Store:        store,
-		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
@@ -996,7 +997,7 @@ func TestCycleCompletedCyclePersistsAniListMemo(t *testing.T) {
 	s := New(&Deps{
 		Logger:       logger,
 		Store:        store,
-		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: entries},
 		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
@@ -1060,7 +1061,7 @@ func TestCycleShutdownDuringWalkWarnsNotErrors(t *testing.T) {
 	s := New(&Deps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: &cancellingSonarr{cancel: cancel}, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &cancellingSonarr{cancel: cancel}, Logger: scoutTestLogger()}),
 	})
 
 	if healthy := s.Cycle(ctx); !healthy {
@@ -1087,9 +1088,9 @@ func (c *ctxCancellingAniList) Fetch(context.Context, int) (anilist.Media, error
 	return anilist.Media{}, context.Canceled
 }
 
-func (c *ctxCancellingAniList) FetchMany(context.Context, []int) (map[int]anilist.Media, error) {
+func (c *ctxCancellingAniList) FetchMany(context.Context, []int) (anilist.BatchResult, error) {
 	c.cancel()
-	return nil, context.Canceled
+	return anilist.BatchResult{}, context.Canceled
 }
 
 // TestCycleShutdownDuringMatchingWarnsShutdownNotAniList pins the mid-matching
@@ -1113,7 +1114,7 @@ func TestCycleShutdownDuringMatchingWarnsShutdownNotAniList(t *testing.T) {
 	s := New(&Deps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
 		Matcher: match.NewMatcher(&ctxCancellingAniList{cancel: cancel}, scoutTestLogger()),
@@ -1175,7 +1176,7 @@ func TestCycleShutdownDuringZeroEntryFetchEmitsNoCompletionLine(t *testing.T) {
 	s := New(&Deps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping: fakeMapping{},
 		SeaDex:  &cancellingEmptySeaDex{cancel: cancel},
 	})
@@ -1214,7 +1215,7 @@ func TestCycleShutdownDuringSeaDexFetchWarnsShutdownNotSeaDex(t *testing.T) {
 	s := New(&Deps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping: fakeMapping{},
 		SeaDex:  &cancellingSeaDex{cancel: cancel},
 	})
@@ -1262,7 +1263,7 @@ func TestCycleCancelledSeaDexFetchLeavesFailureStreakUntouched(t *testing.T) {
 	s := New(&Deps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping: fakeMapping{},
 		SeaDex:  &cancellingSeaDex{cancel: cancel},
 	})
@@ -1300,7 +1301,7 @@ func TestCycleStaleMapStillComparesAndRebuildsFeed(t *testing.T) {
 	s := New(&Deps{
 		Logger:       logger,
 		Store:        store,
-		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:      unreachableMapLoader(t, scoutTestLogger()),
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
@@ -1465,7 +1466,7 @@ func TestCycleDegradedEarlyReturnsEmitCycleDegraded(t *testing.T) {
 				t.Helper()
 				return &Deps{
 					Store:   &fakeStore{},
-					Library: library.NewWalker(&library.Config{Sonarr: sonarrOK(), Logger: scoutTestLogger()}),
+					Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarrOK(), Logger: scoutTestLogger()}),
 					Mapping: emptyRecordsMapLoader(t, scoutTestLogger()),
 					SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 154587}}},
 					Logger:  logger,
@@ -1479,7 +1480,7 @@ func TestCycleDegradedEarlyReturnsEmitCycleDegraded(t *testing.T) {
 				t.Helper()
 				return &Deps{
 					Store:   &fakeStore{st: state.State{Mapping: seasonlessMappingCache()}},
-					Library: library.NewWalker(&library.Config{Sonarr: sonarrOK(), Logger: scoutTestLogger()}),
+					Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarrOK(), Logger: scoutTestLogger()}),
 					Mapping: fakeMapping{},
 					SeaDex:  &fakeSeaDex{err: errors.New("seadex down")},
 					Logger:  logger,
@@ -1493,7 +1494,7 @@ func TestCycleDegradedEarlyReturnsEmitCycleDegraded(t *testing.T) {
 				t.Helper()
 				return &Deps{
 					Store:   &fakeStore{st: state.State{Mapping: seasonlessMappingCache()}},
-					Library: library.NewWalker(&library.Config{Sonarr: sonarrOK(), Logger: scoutTestLogger()}),
+					Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarrOK(), Logger: scoutTestLogger()}),
 					Mapping: fakeMapping{},
 					SeaDex:  &fakeSeaDex{},
 					Logger:  logger,
@@ -1510,7 +1511,7 @@ func TestCycleDegradedEarlyReturnsEmitCycleDegraded(t *testing.T) {
 				// the true early-return gates above.
 				return &Deps{
 					Store:    &fakeStore{st: state.State{Mapping: seasonlessMappingCache()}},
-					Library:  library.NewWalker(&library.Config{Sonarr: sonarrOK(), Logger: scoutTestLogger()}),
+					Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarrOK(), Logger: scoutTestLogger()}),
 					Mapping:  fakeMapping{},
 					SeaDex:   &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
 					Matcher:  match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
@@ -1563,7 +1564,7 @@ func TestCycleUpgradeWithPriorFindingsTakesReportPath(t *testing.T) {
 	s := New(&Deps{
 		Logger:       logger,
 		Store:        store,
-		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
@@ -1657,7 +1658,7 @@ func TestCyclePartialWalkAndAniListDegradedPreservesBothFindingSets(t *testing.T
 	s := New(&Deps{
 		Logger:   logger,
 		Store:    store,
-		Library:  library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:  fakeMapping{},
 		SeaDex:   &fakeSeaDex{entries: entries},
 		Matcher:  match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
@@ -1729,7 +1730,7 @@ func TestCycleShutdownDuringMappingLoadWarnsShutdownNotFribb(t *testing.T) {
 	s := New(&Deps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping: mapping.NewLoader(&http.Client{Transport: cancellingMappingTransport{cancel: cancel}}, "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
 		SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
 	})
@@ -1786,7 +1787,7 @@ func TestCycleCompletionLineCarriesAniListCycleDeltas(t *testing.T) {
 	s := New(&Deps{
 		Logger:       logger,
 		Store:        store,
-		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
@@ -1855,7 +1856,7 @@ func TestCycleCompletionLineCarriesCountsAndCoverage(t *testing.T) {
 	s := New(&Deps{
 		Logger:       logger,
 		Store:        store,
-		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: entries},
 		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
@@ -1910,7 +1911,7 @@ func TestCycleAniListDegradedStreakEscalatesToError(t *testing.T) {
 		return New(&Deps{
 			Logger:       logger,
 			Store:        store,
-			Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+			Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 			Mapping:      fakeMapping{},
 			SeaDex:       &fakeSeaDex{entries: entries},
 			Matcher:      match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
@@ -1984,7 +1985,7 @@ func TestCycleExactlyHalfWalkPassesShrinkGuard(t *testing.T) {
 	s := New(&Deps{
 		Logger:   logger,
 		Store:    store,
-		Library:  library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:  fakeMapping{},
 		SeaDex:   &fakeSeaDex{entries: []seadex.Entry{{AniListID: 1}}},
 		Matcher:  match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
@@ -2032,7 +2033,7 @@ func TestCycleUndegradedCycleResetsAniListDegradedStreak(t *testing.T) {
 	s := New(&Deps{
 		Logger:       logger,
 		Store:        store,
-		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
@@ -2070,7 +2071,7 @@ func TestCycleAniListDegradedWinsMappingStaleCompletionLine(t *testing.T) {
 	s := New(&Deps{
 		Logger:   logger,
 		Store:    store,
-		Library:  library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:  unreachableMapLoader(t, scoutTestLogger()),
 		SeaDex:   &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
 		Matcher:  match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
@@ -2116,7 +2117,7 @@ func TestCycleShutdownAfterShrunkenWalkKeepsWarnOmitsCompletionLine(t *testing.T
 	s := New(&Deps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping: fakeMapping{},
 		SeaDex:  &cancellingSeaDex{cancel: cancel},
 	})
@@ -2204,7 +2205,7 @@ func TestCycleAniListEscalationFiresWhenPartialWalkWinsCompletionLine(t *testing
 	s := New(&Deps{
 		Logger:   logger,
 		Store:    store,
-		Library:  library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:  fakeMapping{},
 		SeaDex:   &fakeSeaDex{entries: []seadex.Entry{{AniListID: 333}}},
 		Matcher:  match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),

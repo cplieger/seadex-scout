@@ -83,7 +83,7 @@ const (
 // A var because queryGateWait is one; it is
 // evaluated once at init, so a test shortening queryGateWait does not shrink
 // the deadline.
-var writeTimeout = queryGateWait + upstreamMaxAttempts*UpstreamAttemptTimeout +
+var writeTimeout = queryGateWait + upstreamMaxAttempts*upstreamAttemptTimeout +
 	(upstreamMaxAttempts-1)*httpx.RetryAfterCap + time.Minute
 
 // queryGateWait is how long an over-limit query waits for a slot before the
@@ -581,7 +581,10 @@ func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Valu
 	// it (a gap between them is that filter dropping items) for a search,
 	// `curated` how many items survived curation/synthesis (pre cat-filter/paging), `returned`
 	// the count actually EMITTED into the rendered document (the render byte
-	// budget can truncate below the post-category-filter count).
+	// budget can truncate below the post-category-filter count), and
+	// `identity_conflicts` how many search results were dropped because their
+	// identity signals contradicted each other (an untrusted-response shape,
+	// distinct from the ordinary not-curated drop).
 	ix.log.Info("indexer request",
 		"scope", scope,
 		"t", logParam(q.Get("t")),
@@ -594,6 +597,7 @@ func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Valu
 		"upstream_fetched", stats.upstreamFetched,
 		"upstream", stats.upstream,
 		"curated", stats.curated,
+		"identity_conflicts", stats.identityConflicts,
 		"returned", rendered)
 }
 

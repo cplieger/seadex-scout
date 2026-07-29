@@ -173,7 +173,7 @@ func TestPublishPortBoundaries(t *testing.T) {
 }
 
 // TestPublishCanonicalizesScheme pins the no-cleartext-publish rule
-// (l-f89). Every canonical tracker base in release.trackerTable is https, and
+// (l-f89). Every canonical tracker base in the internal/tracker table is https, and
 // the schemeless publish branch already prefixes "https://" for that reason -
 // but the ABSOLUTE branch emitted the upstream's scheme verbatim, so a tampered
 // SeaDex record could publish "http://nyaa.si/view/1" as the clickable release
@@ -272,6 +272,59 @@ func TestPublishRequiresATargetBeyondTheHost(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if got := Publish(tc.tracker, tc.url); got != tc.want {
 				t.Errorf("Publish(%q, %q) = %q, want %q", tc.tracker, tc.url, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPublishReasonGrades pins the refusal REASON the diagnostic consumers read
+// (l-f127): the empty string alone cannot distinguish a tracker this build does
+// not carry - whose remedy is a seadex-scout table entry - from an unvouchable
+// url, whose remedy is fixing the SeaDex record, and the audit row marker plus
+// the SeaDex client's catalogue WARN each name one of those remedies. It also
+// pins the invariant both consumers rest on: a non-empty link always grades
+// RefusalNone, and every refusal grade yields an empty link.
+func TestPublishReasonGrades(t *testing.T) {
+	tests := map[string]struct {
+		tracker  string
+		url      string
+		wantLink bool
+		want     Refusal
+	}{
+		"a canonical absolute link publishes":        {"Nyaa", "https://nyaa.si/view/1", true, RefusalNone},
+		"an AB relative shape publishes":             {"AB", "/torrents.php?id=1&torrentid=2", true, RefusalNone},
+		"an omitted url is no url, not an error":     {"Nyaa", "", false, RefusalNoURL},
+		"a whitespace-only url is no url":            {"Nyaa", "   ", false, RefusalNoURL},
+		"an unknown tracker is an app-table gap":     {"beyondhd", "https://beyondhd.co/t/1", false, RefusalUnknownTracker},
+		"an unknown tracker with no url is no url":   {"beyondhd", "", false, RefusalNoURL},
+		"a foreign host is an unvouchable url":       {"Nyaa", "https://evil.example/view/1", false, RefusalUnvouchableURL},
+		"an unsafe scheme is an unvouchable url":     {"Nyaa", "javascript:alert(1)", false, RefusalUnvouchableURL},
+		"a smuggled url is an unvouchable url":       {"Nyaa", "https://nyaa.si/view\\1", false, RefusalUnvouchableURL},
+		"a protocol-relative url is unvouchable":     {"Nyaa", "//evil.example/x", false, RefusalUnvouchableURL},
+		"a structureless token is unvouchable":       {"AB", "Chihiro", false, RefusalUnvouchableURL},
+		"a tracker front page is unvouchable":        {"Nyaa", "https://nyaa.si/", false, RefusalUnvouchableURL},
+		"a query-leading colon is unvouchable":       {"Nyaa", "?x:y", false, RefusalUnvouchableURL},
+		"an unknown tracker beats a bad url shape":   {"beyondhd", "Chihiro", false, RefusalUnknownTracker},
+		"a userinfo authority is an unvouchable url": {"Nyaa", "https://trusted@evil.example/x", false, RefusalUnvouchableURL},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			link, refusal := PublishReason(tc.tracker, tc.url)
+			if (link != "") != tc.wantLink {
+				t.Errorf("PublishReason(%q, %q) link = %q, want non-empty = %v", tc.tracker, tc.url, link, tc.wantLink)
+			}
+			if refusal != tc.want {
+				t.Errorf("PublishReason(%q, %q) refusal = %d, want %d", tc.tracker, tc.url, refusal, tc.want)
+			}
+			// Structural invariant: link presence and RefusalNone are the same
+			// fact, so no consumer can read one and act on the other.
+			if (link != "") != (refusal == RefusalNone) {
+				t.Errorf("PublishReason(%q, %q) = %q/%d: a link must mean RefusalNone and a refusal must mean no link", tc.tracker, tc.url, link, refusal)
+			}
+			// The link-only form stays exactly the reasoned form's string, so
+			// the five link-only call sites cannot drift from the diagnostics.
+			if got := Publish(tc.tracker, tc.url); got != link {
+				t.Errorf("Publish(%q, %q) = %q but PublishReason gave %q", tc.tracker, tc.url, got, link)
 			}
 		})
 	}

@@ -39,10 +39,10 @@ func testFinding(key, title string) compare.Finding {
 		InfoHash:         "hash-" + key,
 		Status:           compare.StatusBetter,
 		AniListID:        154587,
-		Links: []compare.ReleaseLink{
-			{Tracker: "Nyaa", URL: "https://nyaa.si/view/" + key},
-			{Tracker: "AB", URL: "https://animebytes.tv/torrents.php?id=1"},
-		},
+		Links: gradedLinks(
+			compare.ReleaseLink{Tracker: "Nyaa", URL: "https://nyaa.si/view/" + key},
+			compare.ReleaseLink{Tracker: "AB", URL: "https://animebytes.tv/torrents.php?id=1"},
+		),
 		DualAudio: true,
 	}
 }
@@ -523,10 +523,10 @@ func TestFindingLineSanitizesEveryUntrustedAttr(t *testing.T) {
 	finding.Reason = dirty
 	finding.ReleaseURL = dirty
 	finding.InfoHash = dirty
-	finding.Links = []compare.ReleaseLink{
-		{Tracker: dirty, URL: dirty},
-		{Tracker: "Nyaa", URL: "https://nyaa.si/view/a\u009bb\u202ec"},
-	}
+	finding.Links = gradedLinks(
+		compare.ReleaseLink{Tracker: dirty, URL: dirty},
+		compare.ReleaseLink{Tracker: "Nyaa", URL: "https://nyaa.si/view/a\u009bb\u202ec"},
+	)
 
 	notifier.Notify([]compare.Finding{finding}, nil, nil, time.Unix(0, 0))
 
@@ -755,14 +755,14 @@ func TestNotifySupersedesChangedKeyWithoutResolving(t *testing.T) {
 	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	publicOnly := testFinding("frieren", "Frieren")
-	publicOnly.Links = []compare.ReleaseLink{
-		{Tracker: "Nyaa", URL: "https://nyaa.si/view/frieren"},
-	}
+	publicOnly.Links = gradedLinks(
+		compare.ReleaseLink{Tracker: "Nyaa", URL: "https://nyaa.si/view/frieren"},
+	)
 	withAB := publicOnly
-	withAB.Links = []compare.ReleaseLink{
-		{Tracker: "Nyaa", URL: "https://nyaa.si/view/frieren"},
-		{Tracker: "AB", URL: "https://animebytes.tv/torrents.php?id=1&torrentid=2"},
-	}
+	withAB.Links = gradedLinks(
+		compare.ReleaseLink{Tracker: "Nyaa", URL: "https://nyaa.si/view/frieren"},
+		compare.ReleaseLink{Tracker: "AB", URL: "https://animebytes.tv/torrents.php?id=1&torrentid=2"},
+	)
 	oldKey, newKey := dedupeKey(&publicOnly), dedupeKey(&withAB)
 	if oldKey == newKey {
 		t.Fatalf("fixture does not re-key: adding an AB source left the dedupe key %q unchanged", oldKey)

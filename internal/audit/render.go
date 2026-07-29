@@ -19,10 +19,10 @@ import (
 
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/runesafe"
-	"github.com/cplieger/scheduler/v2"
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/logattr"
+	"github.com/cplieger/seadex-scout/internal/tracker"
 )
 
 const (
@@ -119,7 +119,9 @@ const annotationLegend = "Scope annotations: `approx` - the comparison used a co
 	"`theoretical` - SeaDex names only a theoretical best, so there is nothing concrete to compare against; " +
 	"`incomplete` - the SeaDex entry itself is incomplete.\n\n" +
 	"SeaDex best annotations: `(broken)` / `(incomplete)` are SeaDex curation warnings, `(url error)` means " +
-	"the SeaDex record carries a link value that is not a usable tracker URL (report it upstream), and " +
+	"the SeaDex record carries a link value that is not a usable tracker URL (report it upstream), " +
+	"`(unknown tracker)` means the record names a tracker this build does not know, so no link could be " +
+	"built (report it as a seadex-scout gap, not as bad SeaDex data), and " +
 	"`(unobtainable)` means the release has no usable link or sits on a tracker you do not use. An " +
 	"annotated release stays listed but never drives the verdict and is never offered as a link. " +
 	"`(N best hidden: animebytes)` means N of the entry's SeaDex BEST releases were withheld because you " +
@@ -259,7 +261,7 @@ func links(row *Row) string {
 			continue
 		}
 		seen[key] = struct{}{}
-		parts = append(parts, mdLink(orTracker(rel.Tracker), rel.URL))
+		parts = append(parts, mdLink(orTracker(tracker.CanonicalName(rel.Tracker, rel.URL)), rel.URL))
 	}
 	if len(parts) == 0 {
 		return emptyCell
@@ -342,8 +344,9 @@ func foldedGroupKey(group string) [sha256.Size]byte {
 // curation-warning tags, plus "unobtainable" when the daemon's obtainability
 // rule (filter.Obtainable, computed in classifyReleases) rejected it as
 // verdict evidence, plus "url error" when SeaDex's record carries a url the
-// publisher refused. The returned slice is always a fresh allocation, so
-// callers can append without aliasing Release.Warnings.
+// publisher refused, plus "unknown tracker" when the record's tracker is not
+// in this app's canonical table. The returned slice is always a fresh
+// allocation, so callers can append without aliasing Release.Warnings.
 func releaseNotes(rel *Release) []string {
 	notes := append([]string(nil), rel.Warnings...)
 	if rel.URLError {
@@ -351,6 +354,13 @@ func releaseNotes(rel *Release) []string {
 		// actionable of the two: the record itself is wrong upstream, which is
 		// also usually WHY the release reads unobtainable.
 		notes = append(notes, "url error")
+	}
+	if rel.UnknownTracker {
+		// The other refusal, and deliberately NOT spelled as a url error: the
+		// remedy is a seadex-scout tracker-table entry, not a SeaDex record fix
+		// (l-f127). Mutually exclusive with "url error" by construction (one
+		// refusal grade per release), so a row never shows both.
+		notes = append(notes, "unknown tracker")
 	}
 	if rel.Unobtainable {
 		notes = append(notes, "unobtainable")
@@ -364,7 +374,7 @@ func releaseNotes(rel *Release) []string {
 // annotated best, the SeaDex-best column marks it), so a new annotation class
 // added to releaseNotes cannot start leaking into the links cell.
 func annotated(rel *Release) bool {
-	return len(rel.Warnings) > 0 || rel.Unobtainable || rel.URLError
+	return len(rel.Warnings) > 0 || rel.Unobtainable || rel.URLError || rel.UnknownTracker
 }
 
 // rowsWithVerdict returns the rows carrying verdict v, preserving order.
@@ -461,51 +471,11 @@ func interrupted(ctx context.Context, stage string) error {
 	return fmt.Errorf("audit: %s interrupted: %w (cause: %w)", stage, ctx.Err(), context.Cause(ctx))
 }
 
-// --- File persistence + report lock ---
+// --- File persistence ---
 
 // reportStampLayout is the UTC timestamp embedded in report filenames: sortable,
 // filesystem-safe (no colons), second precision.
 const reportStampLayout = "2006-01-02T15-04-05Z"
-
-// reportLockName is the flock target inside the report dir that serializes
-// report runs (see AcquireReportLock).
-const reportLockName = "report.lock"
-
-// ErrReportRunning is returned by AcquireReportLock when another report run
-// already holds the report lock. The report subcommand refuses to run rather
-// than racing the other run onto the same timestamped filename pair.
-var ErrReportRunning = errors.New("another report is already running")
-
-// AcquireReportLock takes an exclusive, non-blocking flock on report.lock in
-// dir (creating dir as needed) and returns a release func. It is held for a
-// report run's whole generate+write, so two concurrent report runs - which
-// could finish within the same UTC second and target the same
-// report-<timestamp>.{md,json} pair - cannot interleave: the second run gets
-// ErrReportRunning and refuses (never blocks or waits). A strictly-sequential
-// same-second rerun does not overwrite either: WriteFiles probes a
-// deterministic -2/-3/... suffix for its pair stem while the lock is held
-// (see reportPairStem). The flock rides scheduler.TryLock: not-acquired is
-// reported without error (mapped to ErrReportRunning here), the kernel
-// releases the lock if the process dies (no stale-lock state), and the lock
-// file is left in place on release (unlinking it would open a window where
-// two runs flock different inodes and both proceed) holding only the current
-// holder's acquisition timestamp.
-// Errors are stage-plus-redacted-cause only (redactPathErr): dir is the
-// secret-capable report.dir config value and these errors reach main's log.
-func AcquireReportLock(dir string) (func(), error) {
-	if err := os.MkdirAll(dir, reportDirMode); err != nil {
-		return nil, fmt.Errorf("audit: create report dir: %w", redactPathErr(dir, err))
-	}
-	path := filepath.Join(dir, reportLockName)
-	lock, ok, err := scheduler.TryLock(path)
-	if err != nil {
-		return nil, fmt.Errorf("audit: report lock %s: %w", reportLockName, redactPathErr(dir, err))
-	}
-	if !ok {
-		return nil, ErrReportRunning
-	}
-	return lock.Unlock, nil
-}
 
 // WriteFiles renders the report and atomically writes a timestamped JSON +
 // Markdown pair into dir (report-<UTC timestamp>.json and .md), creating dir
@@ -515,6 +485,15 @@ func AcquireReportLock(dir string) (func(), error) {
 // -2/-3/... suffix is probed (reportPairStem) so the earlier report is never
 // silently replaced. The caller holds the report lock across the whole
 // generate+write, so the probe cannot race a concurrent writer.
+//
+// Interruption contract: every stage up to and including the JSON write
+// observes ctx, so a shutdown stops the pipeline before it spends the grace
+// period on work it would lose anyway. Publishing the JSON half is the point
+// of no return - after it, the pair's completeness rests on the Markdown write,
+// which therefore runs on a short detached budget (markdownWriteGrace) rather
+// than being abandoned mid-pair. The one remaining half-pair outcome is a
+// non-durable JSON half or a hard Markdown write failure, both of which say so
+// in the log.
 func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) error {
 	// dir is the secret-capable report.dir config value: every slog record
 	// below (including atomicfile's own WithLogger diagnostics) rides the
@@ -523,9 +502,9 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	// error log. Filesystem calls keep the real path.
 	log = redactingLogger(log, dir)
 	// The signal context is one report-wide budget: check it before each
-	// stage (cleanup, stem probing, rendering, the two writes) so a shutdown
+	// stage (cleanup, stem probing, rendering, the JSON write) so a shutdown
 	// stops the pipeline instead of spending its grace period on CPU-bound
-	// work whose final atomic write would fail with context canceled anyway.
+	// work whose atomic write would fail with context canceled anyway.
 	if err := interrupted(ctx, "report write"); err != nil {
 		return err
 	}
@@ -558,13 +537,20 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	// though the state and slog paths strip the same values. Redacting at the
 	// persistence sink covers every caller.
 	safe := redactReportURLs(r)
-	// The JSON half is written FIRST, deliberately: a run interrupted between
-	// the two writes can leave a .json without its .md, but never a dangling
+	// The JSON half is written FIRST, deliberately: whatever goes wrong from
+	// here, the failure modes leave a .json without its .md - never a dangling
 	// .md without its machine-readable pair.
 	data, err := renderJSON(safe)
 	if err != nil {
 		return fmt.Errorf("audit: encode json: %w", err)
 	}
+	// BOTH halves are rendered here, before either is published: rendering is
+	// the only CPU-bound work the Markdown half has, and it must stay behind
+	// the report-wide gate above (that gate exists so a shutdown does not
+	// spend its grace period rendering). Once the JSON rename commits, the
+	// pair's completeness depends on the Markdown WRITE alone, which then runs
+	// on a detached budget - so nothing expensive may be left for it (l-f190).
+	markdown := []byte(renderMarkdown(safe))
 	// The pair ordering only holds when the JSON half's directory entry is
 	// crash-durable: atomicfile reports a successful rename whose parent-dir
 	// fsync failed as Durable=false with a NIL error, so publishing the
@@ -579,17 +565,33 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	if !jsonDurable {
 		log.Warn("report json written but not crash-durable; skipping the markdown half to keep the pair ordering",
 			"json", filepath.Base(jsonPath), "anime", len(r.Rows), "durable", false)
+		// The run published an artifact and returns success, so it still emits
+		// the success record: alerts.yaml's SeadexScoutReportWritten rule keys
+		// on this message, and staying silent here blinded it on a run whose
+		// machine-readable half IS on disk (l-f188). The empty markdown name is
+		// what tells the operator only one half landed - the same reason the
+		// non-durable MARKDOWN path below emits it too rather than going quiet.
+		reportWritten(log, "", jsonPath, len(r.Rows), false)
 		return nil
 	}
-	if interruptErr := interrupted(ctx, "report markdown render"); interruptErr != nil {
-		return interruptErr
-	}
+	// The Markdown half rides a detached, briefly-bounded context: the JSON
+	// rename has committed, so from here a cancellation (a SIGTERM, or the
+	// composition root's reportWriteGrace expiring on a slow fsync) would
+	// half-publish permanently - the next run probes a fresh stem
+	// (reportPairStem needs BOTH halves free), leaving the orphaned .json
+	// without its .md forever. The human-readable half is the product of a
+	// ~25-minute generation and finishing it is milliseconds of I/O on bytes
+	// already rendered above, so the ordering guarantee must not be satisfied
+	// by losing half the artifact. atomicfile re-checks the context itself, so
+	// detaching here is what actually lets the write proceed.
+	mdCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), markdownWriteGrace)
+	defer cancel()
 	// A non-durable Markdown half cannot create a dangling .md (the .json is
 	// already durably committed above), so the pair is complete and the success
 	// record must still be emitted - the alert that watches for it would
 	// otherwise go silent on a run whose files are both on disk. The durable
 	// attribute keeps the line honest about what may not survive a power loss.
-	mdDurable, err := writeReportHalf(ctx, "markdown", dir, mdPath, []byte(renderMarkdown(safe)), log)
+	mdDurable, err := writeReportHalf(mdCtx, "markdown", dir, mdPath, markdown, log)
 	if err != nil {
 		// The JSON half is already durably committed, so this failure publishes
 		// half a pair: name the surviving basename, or the operator reading the
@@ -599,10 +601,31 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 			"json", filepath.Base(jsonPath), "anime", len(r.Rows), "error", err)
 		return err
 	}
-	// Basenames only: the stem is timestamp-derived (never dir-derived), so
-	// the success record stays useful without shipping the directory value.
-	log.Info("report written", "markdown", filepath.Base(mdPath), "json", filepath.Base(jsonPath), "anime", len(r.Rows), "durable", mdDurable)
+	reportWritten(log, mdPath, jsonPath, len(r.Rows), mdDurable)
 	return nil
+}
+
+// markdownWriteGrace bounds the detached Markdown write. It is deliberately
+// short: the bytes are already rendered, so this covers one atomic
+// write+rename+fsync, and it is spent on top of whatever budget the caller
+// still had - main's reportWriteGrace plus this stays inside Docker's default
+// 10s stop grace, so the pair lands before SIGKILL.
+const markdownWriteGrace = 2 * time.Second
+
+// reportWritten emits the report pair's success record. It is the ONE call site
+// of the alert-keyed "report written" message, so every path that publishes an
+// artifact and returns nil announces itself the same way: markdown is the empty
+// string when only the JSON half landed (the json-only degradation), and
+// durable reports whether the LAST published half's directory entry is
+// crash-durable. Basenames only: the stem is timestamp-derived (never
+// dir-derived), so the record stays useful without shipping the secret-capable
+// report.dir value.
+func reportWritten(log *slog.Logger, mdPath, jsonPath string, anime int, durable bool) {
+	markdown := ""
+	if mdPath != "" {
+		markdown = filepath.Base(mdPath)
+	}
+	log.Info("report written", "markdown", markdown, "json", filepath.Base(jsonPath), "anime", anime, "durable", durable)
 }
 
 // redactReportURLs returns a shallow copy of the report whose rows carry
@@ -954,10 +977,16 @@ func orEmpty(s string) string {
 	return s
 }
 
-// orTracker labels a link by tracker, falling back to "link" for an unnamed one.
-func orTracker(tracker string) string {
-	if strings.TrimSpace(tracker) == "" {
+// orTracker labels a link by tracker name, falling back to "link" when the
+// canonical resolution names nothing at all (no known host, no known label,
+// and no host to fall back on). The name itself comes from
+// tracker.CanonicalName, the one home the daemon's alert attributes share, so
+// a Nyaa link whose SeaDex tracker field is blank, an alias, or oddly cased is
+// labelled "Nyaa" in the report exactly as it is in the alert, and a tracker
+// table edit reaches both surfaces.
+func orTracker(name string) string {
+	if strings.TrimSpace(name) == "" {
 		return "link"
 	}
-	return tracker
+	return name
 }

@@ -33,6 +33,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/tracker"
 )
 
 // Status is the comparison outcome for a finding.
@@ -58,12 +59,27 @@ const (
 	StatusUnverifiable Status = "unverifiable"
 )
 
-// ReleaseLink is one obtainable source for a recommended release: the tracker
-// and a human-followable URL. A recommended group present on both a public
-// tracker and AnimeBytes yields two links, so a finding can surface both.
+// ReleaseLink is one obtainable source for a recommended release: the tracker,
+// a human-followable URL, and the AnimeBytes evidence the RAW upstream record
+// carried. A recommended group present on both a public tracker and AnimeBytes
+// yields two links, so a finding can surface both.
 type ReleaseLink struct {
 	Tracker string
 	URL     string
+	// AB is the AnimeBytes grade classify.ABEvidence read from the RAW
+	// upstream (tracker, URL) pair this link was published from. It travels
+	// with the link because the URL here is the PUBLISHED one, and grading
+	// that instead is the mistake internal/classify's raw-URL invariant
+	// exists to prevent: publishing trusts the tracker label and rewrites or
+	// erases the very host evidence the grade reads. Carrying it keeps ONE
+	// grading site for the whole app (compare and audit already read
+	// classify.ABEvidence) and leaves notify owning only slot PRECEDENCE,
+	// which is genuinely its policy (h-f43).
+	//
+	// The zero value is filter.ABNone, so a link assembled without a producer
+	// (a test literal, a future caller) carries no AnimeBytes evidence rather
+	// than a silently re-derived one.
+	AB filter.ABEvidence
 	// Headline reports whether this link belongs to the HEADLINE candidate's
 	// group - the group Finding.RecommendedGroup names. It carries
 	// obtainableLinks' already-computed affinity to the consumer as data,
@@ -387,7 +403,9 @@ type sourcedLink struct {
 func sourcedLinks(pool []candidate, headlineGroup string) []sourcedLink {
 	// Keyed on the link IDENTITY (tracker + URL) only: ReleaseLink.Headline
 	// is producer affinity, not identity, so it must never take part in the
-	// dedupe - obtainableLinks assigns it after this collection runs.
+	// dedupe - obtainableLinks assigns it after this collection runs. The AB
+	// grade is evidence about the record, not identity either, and is merged
+	// (strongest wins) rather than keyed on.
 	type linkKey struct{ tracker, url string }
 	seen := make(map[linkKey]int, len(pool))
 	sources := make([]sourcedLink, 0, len(pool))
@@ -396,7 +414,12 @@ func sourcedLinks(pool []candidate, headlineGroup string) []sourcedLink {
 		if u == "" {
 			continue
 		}
-		link := ReleaseLink{Tracker: pool[i].rel.Tracker, URL: u}
+		link := ReleaseLink{
+			Tracker: pool[i].rel.Tracker,
+			URL:     u,
+			// Graded from the RAW record, never from u: see ReleaseLink.AB.
+			AB: classify.ABEvidence(&pool[i].torrent),
+		}
 		rank := 1
 		if release.NormalizeGroup(pool[i].rel.Group) == headlineGroup {
 			rank = 0
@@ -404,6 +427,12 @@ func sourcedLinks(pool []candidate, headlineGroup string) []sourcedLink {
 		key := linkKey{tracker: link.Tracker, url: link.URL}
 		if idx, dup := seen[key]; dup {
 			sources[idx].rank = min(sources[idx].rank, rank)
+			// Two records can publish the same (tracker, URL) from different
+			// raw values, so the surviving link keeps the STRONGEST AnimeBytes
+			// evidence any of them carried - the same fail-closed direction
+			// the AB gates take, rather than letting record order decide
+			// whether the link is announced as AnimeBytes.
+			sources[idx].link.AB = max(sources[idx].link.AB, link.AB)
 			continue
 		}
 		seen[key] = len(sources)
@@ -474,8 +503,8 @@ func betterCandidate(a, b *candidate, keyA, keyB string) bool {
 	if ra != rb {
 		return ra > rb
 	}
-	aPublic := a.rel.TrackerType == release.TrackerPublic
-	bPublic := b.rel.TrackerType == release.TrackerPublic
+	aPublic := a.rel.TrackerType == tracker.Public
+	bPublic := b.rel.TrackerType == tracker.Public
 	if aPublic != bPublic {
 		return aPublic
 	}

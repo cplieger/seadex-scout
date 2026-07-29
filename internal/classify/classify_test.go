@@ -2,13 +2,13 @@ package classify
 
 import (
 	"fmt"
-	"math"
-	"slices"
 	"testing"
 
 	"github.com/cplieger/seadex-scout/internal/filter"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/tracker"
+	"github.com/cplieger/seadex-scout/internal/trackerlink"
 )
 
 func TestTorrentBuildsSharedReleaseInput(t *testing.T) {
@@ -28,7 +28,7 @@ func TestTorrentBuildsSharedReleaseInput(t *testing.T) {
 	if got.Group != "SubsPlease" {
 		t.Errorf("Torrent() group = %q, want SubsPlease", got.Group)
 	}
-	if got.Tracker != "Nyaa" || got.TrackerType != release.TrackerPublic {
+	if got.Tracker != "Nyaa" || got.TrackerType != tracker.Public {
 		t.Errorf("Torrent() tracker = %q/%q, want Nyaa/public", got.Tracker, got.TrackerType)
 	}
 	if got.Resolution != "1080p" {
@@ -102,66 +102,6 @@ func TestTorrentDualAudioStructuredFieldOnly(t *testing.T) {
 	}
 }
 
-func TestPayloadNamesDropsEmptyNamesPreservesOrder(t *testing.T) {
-	files := []seadex.File{
-		{Name: "episode 01.mkv"},
-		{Name: ""},
-		{Name: "episode 02.mkv"},
-	}
-
-	got := payloadNames(files)
-	want := []string{"episode 01.mkv", "episode 02.mkv"}
-	if !slices.Equal(got, want) {
-		t.Errorf("payloadNames() = %v, want %v", got, want)
-	}
-}
-
-// TestPayloadNamesMaxInt64LengthKeepsOnlyPrimary pins the overflow
-// boundary of the ceil-half threshold: a JSON-valid file length of
-// math.MaxInt64 must not wrap the threshold negative and let a tiny
-// marker-bearing extra survive beside the primary payload. The extra is a
-// type-gate SURVIVOR (a video file with no creditless marker), so the size
-// layer alone must exclude it.
-func TestPayloadNamesMaxInt64LengthKeepsOnlyPrimary(t *testing.T) {
-	files := []seadex.File{
-		{Name: "Show - 01 [1080p][HEVC].mkv", Length: math.MaxInt64},
-		{Name: "Making Of [BDRemux].mkv", Length: 50_000_000},
-	}
-
-	got := payloadNames(files)
-	want := []string{"Show - 01 [1080p][HEVC].mkv"}
-	if !slices.Equal(got, want) {
-		t.Errorf("payloadNames() = %v, want only the primary name %v", got, want)
-	}
-}
-
-// TestPayloadNamesUsesCeilingHalfThreshold pins the ceiling-half (not
-// floor-half) primary-payload threshold at the odd-maximum boundary: with a
-// maximum length of 3 the cutoff is 2, so a length-1 extra is excluded and a
-// length-2 extra is included. A floor-half regression would keep the length-1
-// extra and slip past the existing strictly-below property.
-func TestPayloadNamesUsesCeilingHalfThreshold(t *testing.T) {
-	tests := []struct {
-		name      string
-		extraSize int64
-		want      []string
-	}{
-		{name: "below ceiling half is excluded", extraSize: 1, want: []string{"primary.mkv"}},
-		{name: "at ceiling half is included", extraSize: 2, want: []string{"primary.mkv", "extra.mkv"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			files := []seadex.File{
-				{Name: "primary.mkv", Length: 3},
-				{Name: "extra.mkv", Length: tt.extraSize},
-			}
-			if got := payloadNames(files); !slices.Equal(got, tt.want) {
-				t.Errorf("payloadNames(%+v) = %v, want %v", files, got, tt.want)
-			}
-		})
-	}
-}
-
 // TestTorrentPrimaryPayloadIgnoresSmallExtraMarker pins the primary-payload
 // selection: a best BD encode whose payload is twelve similarly-sized HEVC
 // episodes plus one small BDRemux-named NCED extra must classify from the
@@ -185,34 +125,6 @@ func TestTorrentPrimaryPayloadIgnoresSmallExtraMarker(t *testing.T) {
 	}
 	if got.Resolution != "1080p" {
 		t.Errorf("Torrent() resolution = %q, want 1080p from the primary payload", got.Resolution)
-	}
-}
-
-// TestIsCreditlessExtraCaseFolds pins the marker's strings.ToLower-faithful
-// case classes on the two Unicode folds where Go regexp's (?i) SimpleFold
-// diverges: a Turkish-uppercase CREDİTLESS (U+0130 folds to I/i) is a
-// creditless extra, while a long-s CREDITLEſS (U+017F, which (?i) would have
-// folded onto S) is not.
-func TestIsCreditlessExtraCaseFolds(t *testing.T) {
-	cases := []struct {
-		name string
-		want bool
-	}{
-		{"Show NCOP01.mkv", true},
-		{"show ncop01.mkv", true},
-		{"Show NCED01v2.mkv", true},
-		{"show nced01v2.mkv", true},
-		{"Show NcEd01v2.mkv", true},
-		{"Show creditless ED.mkv", true},
-		{"Show CREDITLESS01v2.mkv", true},
-		{"Show CRED\u0130TLESS01v2.mkv", true},  // Turkish-uppercase İ folds to i under strings.ToLower
-		{"Show CREDITLE\u017FS01v2.mkv", false}, // long s must not fold onto S
-		{"Show - 01 [1080p].mkv", false},
-	}
-	for _, tc := range cases {
-		if got := IsCreditlessExtra(tc.name); got != tc.want {
-			t.Errorf("IsCreditlessExtra(%q) = %t, want %t", tc.name, got, tc.want)
-		}
 	}
 }
 
@@ -252,81 +164,6 @@ func TestTorrentUnderscoreDelimitedCreditlessExtraDoesNotVote(t *testing.T) {
 	got := Torrent(&seadex.Entry{}, torrent)
 	if got.Kind != release.KindEncode {
 		t.Errorf("Torrent() kind = %q, want encode (an underscore-delimited NCED extra must not vote)", got.Kind)
-	}
-}
-
-// TestPayloadNamesLayeredRule pins the combined eligibility rule's layer
-// interplay on the exact cases where the two historical rules (compare/
-// audit's size-only torrentFileNames, the indexer's name-only
-// isContentMediaFile filter) diverged: type gate
-// first, size refinement among the survivors, with the no-lengths and
-// no-content-survivor fallbacks keeping the rule total.
-func TestPayloadNamesLayeredRule(t *testing.T) {
-	cases := []struct {
-		name  string
-		files []seadex.File
-		want  []string
-	}{
-		{
-			// The size-only rule kept a creditless extra >= half the
-			// largest file; the type gate excludes it whatever its size.
-			name: "large creditless extra excluded by type gate",
-			files: []seadex.File{
-				{Name: "Movie [1080p].mkv", Length: 1000},
-				{Name: "Movie NCED01 [BDRemux].mkv", Length: 900},
-			},
-			want: []string{"Movie [1080p].mkv"},
-		},
-		{
-			// The name-only rule saw no video extension and returned no
-			// evidence; the fallback applies the size rule over every named
-			// file, so an unlisted container keeps classifying.
-			name: "unlisted container falls back to size rule",
-			files: []seadex.File{
-				{Name: "Movie [1080p] Remux.iso", Length: 1000},
-				{Name: "Sample.iso", Length: 10},
-			},
-			want: []string{"Movie [1080p] Remux.iso"},
-		},
-		{
-			// The size-only rule kept every name on a lengths-less record
-			// (sidecars included); the type gate filters them.
-			name: "sidecars dropped on a lengths-less record",
-			files: []seadex.File{
-				{Name: "Show - 01 [1080p].mkv"},
-				{Name: "Show - 01.ass"},
-				{Name: "screens.png"},
-			},
-			want: []string{"Show - 01 [1080p].mkv"},
-		},
-		{
-			// Deliberate: in a mixed-resolution batch the small specials do
-			// not vote — the release is headlined by its primary payload.
-			name: "mixed-resolution batch keeps the primary payload's verdict",
-			files: []seadex.File{
-				{Name: "Show - 01 [1080p].mkv", Length: 1_400_000},
-				{Name: "Special - 01 [480p].mkv", Length: 200_000},
-			},
-			want: []string{"Show - 01 [1080p].mkv"},
-		},
-		{
-			// A creditless-only torrent (an NC collection) still classifies
-			// from its own names: zero type survivors falls back to every
-			// named file rather than returning no evidence.
-			name: "creditless-only list falls back to all names",
-			files: []seadex.File{
-				{Name: "NCOP01 [1080p].mkv", Length: 100},
-				{Name: "NCED01 [1080p].mkv", Length: 100},
-			},
-			want: []string{"NCOP01 [1080p].mkv", "NCED01 [1080p].mkv"},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := payloadNames(tc.files); !slices.Equal(got, tc.want) {
-				t.Errorf("payloadNames(%+v) = %v, want %v", tc.files, got, tc.want)
-			}
-		})
 	}
 }
 
@@ -391,7 +228,7 @@ func TestObtainableAdapterPreservesRawURLForCrossCheck(t *testing.T) {
 		Tracker: "Nyaa",
 		URL:     "animebytes.tv/torrents.php?id=1&torrentid=2",
 	}
-	rel := &release.Release{Tracker: "Nyaa", TrackerType: release.TrackerPublic}
+	rel := &release.Release{Tracker: "Nyaa", TrackerType: tracker.Public}
 
 	if got := Obtainable(rel, torrent, false); got {
 		t.Error("Obtainable() = true, want false for a mislabeled schemeless AnimeBytes URL when AnimeBytes is disabled")
@@ -444,90 +281,31 @@ func TestDivergedIncomplete(t *testing.T) {
 	}
 }
 
-// TestPopulationFilesMedianAnchoredFloor pins the census rule against the
-// primary-payload rule. PopulationFiles answers "how many distinct episodes
-// does this torrent span", where a shorter file is a legitimately shorter
-// episode; payloadFiles answers "which names vote on the release's quality",
-// where anything far below the primary is a diluting extra. Anchoring the
-// census floor on the MAXIMUM instead deletes every regular
-// episode of any pack carrying one over-long file, so the pack reads as a single
-// episode. Both rules must still exclude an episode-shaped sample.
-func TestPopulationFilesMedianAnchoredFloor(t *testing.T) {
-	const gib = 1 << 30
-	episodes := func(n int, size int64) []seadex.File {
-		out := make([]seadex.File, 0, n)
-		for e := 1; e <= n; e++ {
-			out = append(out, seadex.File{Name: fmt.Sprintf("Show S01E%02d [1080p].mkv", e), Length: size})
-		}
-		return out
-	}
-	withFirst := func(first seadex.File, rest []seadex.File) []seadex.File {
-		return append([]seadex.File{first}, rest...)
-	}
-
-	tests := map[string]struct {
-		files          []seadex.File
-		wantPopulation int
-		wantPayload    int
+// TestPublishRefusalNamesTheCause pins the adapter that carries the publisher's
+// refusal reason to the two diagnostic consumers (l-f127): the audit row marker
+// and the SeaDex client's catalogue WARN must be able to tell a tracker this
+// build does not carry (remedy: a seadex-scout table entry) from an unvouchable
+// url (remedy: fix the SeaDex record), and the link half stays byte-identical to
+// PublishURL so a consumer reading only the link is unaffected.
+func TestPublishRefusalNamesTheCause(t *testing.T) {
+	tests := []struct {
+		name    string
+		torrent seadex.Torrent
+		want    trackerlink.Refusal
 	}{
-		"double-length premiere keeps every episode": {
-			// The regression case: max 2.5 GiB puts the payload floor at
-			// 1.25 GiB and drops all 11 regular episodes; the median stays on
-			// the episode population.
-			files:          withFirst(seadex.File{Name: "Show S01E01 [1080p].mkv", Length: 5 * gib / 2}, episodes(11, 6*gib/5)),
-			wantPopulation: 12,
-			wantPayload:    1,
-		},
-		"bundled franchise movie keeps every episode": {
-			files:          withFirst(seadex.File{Name: "Show Movie [1080p].mkv", Length: 4 * gib}, episodes(12, 6*gib/5)),
-			wantPopulation: 13,
-			wantPayload:    1,
-		},
-		"episode-shaped sample is still excluded": {
-			// Both rules must drop it: a sample that counted would inflate a
-			// lone episode into a "pack".
-			files:          withFirst(seadex.File{Name: "Show S01E00 Sample [480p].mkv", Length: 200 << 20}, episodes(1, gib)),
-			wantPopulation: 1,
-			wantPayload:    1,
-		},
-		"no positive lengths falls back to the type gate": {
-			files:          []seadex.File{{Name: "Show - 07.mkv"}, {Name: "Show - 08.mkv"}},
-			wantPopulation: 2,
-			wantPayload:    2,
-		},
-		"no type survivor falls back to every named file": {
-			files:          []seadex.File{{Name: "Show S01 remux.iso", Length: 20 * gib}, {Name: "Show S01 remux.nfo", Length: 1 << 10}},
-			wantPopulation: 1,
-			wantPayload:    1,
-		},
-		"MaxInt64 length does not wrap the floor negative": {
-			files:          withFirst(seadex.File{Name: "Show S01E01 [1080p].mkv", Length: math.MaxInt64}, episodes(1, 1)),
-			wantPopulation: 1,
-			wantPayload:    1,
-		},
-		"two-file pack keeps the shorter episode": {
-			// The characterization case for the midpoint anchor: on a two-file
-			// pool the upper-middle statistic IS the maximum, so the old
-			// implementation floored at 1.25 GiB and counted this pack as ONE
-			// episode - the pack then served as "Show S01E01" and Sonarr grabbed
-			// it as a single episode. The property's even-pool bounds
-			// deliberately admit either tie-break, so only this case fails under
-			// the upper middle.
-			files: []seadex.File{
-				{Name: "Show S01E01 [1080p].mkv", Length: gib},
-				{Name: "Show S01E02 [1080p].mkv", Length: 5 * gib / 2},
-			},
-			wantPopulation: 2,
-			wantPayload:    1,
-		},
+		{name: "published", torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}, want: trackerlink.RefusalNone},
+		{name: "no url at all", torrent: seadex.Torrent{Tracker: "Nyaa"}, want: trackerlink.RefusalNoURL},
+		{name: "tracker this build does not carry", torrent: seadex.Torrent{Tracker: "beyondhd", URL: "https://beyondhd.co/t/1"}, want: trackerlink.RefusalUnknownTracker},
+		{name: "foreign host under a trusted label", torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://evil.example/view/1"}, want: trackerlink.RefusalUnvouchableURL},
 	}
-	for name, tt := range tests {
-		t.Run(name, func(t *testing.T) {
-			if got := len(PopulationFiles(tt.files)); got != tt.wantPopulation {
-				t.Errorf("len(PopulationFiles()) = %d, want %d", got, tt.wantPopulation)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			link, refusal := PublishRefusal(&tc.torrent)
+			if refusal != tc.want {
+				t.Errorf("PublishRefusal(%+v) refusal = %d, want %d", tc.torrent, refusal, tc.want)
 			}
-			if got := len(payloadFiles(tt.files)); got != tt.wantPayload {
-				t.Errorf("len(payloadFiles()) = %d, want %d", got, tt.wantPayload)
+			if got := PublishURL(&tc.torrent); got != link {
+				t.Errorf("PublishRefusal link = %q but PublishURL = %q; the two adapters must read one policy", link, got)
 			}
 		})
 	}

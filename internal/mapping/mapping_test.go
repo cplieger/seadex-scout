@@ -102,6 +102,51 @@ func TestRecord_HasArrIdentifier(t *testing.T) {
 	}
 }
 
+// TestRecord_MovieTMDBIDs pins the cross-type movie evidence the ID bridge's
+// two secondary sites share (h-f9/l-f73): a themoviedb_id.movie id is a Radarr
+// id by construction, so it is returned whatever the record's type label says -
+// unlike an IMDb id, which TVDB reuses on the parent series and which this
+// accessor deliberately never exposes. Usability filtering is RoutedIDs' own
+// (non-positive entries drop), so an operator override cannot publish a zero id.
+func TestRecord_MovieTMDBIDs(t *testing.T) {
+	tests := []struct {
+		name string
+		rec  Record
+		want []int
+	}{
+		{"movie record", Record{Type: "MOVIE", TmdbMovies: []int{4}}, []int{4}},
+		{"ova record with a movie id", Record{Type: "OVA", TmdbMovies: []int{4}}, []int{4}},
+		{"untyped record with a movie id", Record{TmdbMovies: []int{4}}, []int{4}},
+		{"series record with a movie id and a tvdb id", Record{Type: "TV", TvdbID: 100, TmdbMovies: []int{4}}, []int{4}},
+		{"non-positive entries drop", Record{Type: "OVA", TmdbMovies: []int{0, -1, 4}}, []int{4}},
+		{"no movie ids", Record{Type: "OVA", TvdbID: 100, IMDbIDs: []string{"tt1"}}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.rec.MovieTMDBIDs(); !slices.Equal(got, tt.want) {
+				t.Errorf("MovieTMDBIDs() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRecord_MovieTMDBIDsDoesNotWidenRouting guards the seam the accessor keeps:
+// exposing cross-type movie evidence must NOT make a non-MOVIE record read as
+// id-ful, because HasArrIdentifier is what gates the AniList title fallback -
+// widening it there would strand such a record with no fallback at all.
+func TestRecord_MovieTMDBIDsDoesNotWidenRouting(t *testing.T) {
+	rec := Record{Type: "OVA", TmdbMovies: []int{4}}
+	if got := rec.MovieTMDBIDs(); len(got) != 1 {
+		t.Fatalf("MovieTMDBIDs() = %v, want the movie id", got)
+	}
+	if rec.HasArrIdentifier() {
+		t.Error("HasArrIdentifier() = true for a non-MOVIE record carrying only movie ids, want false")
+	}
+	if tvdb, movies, imdb := rec.RoutedIDs(); tvdb != 0 || movies != nil || imdb != nil {
+		t.Errorf("RoutedIDs() = (%d, %v, %v), want the empty series routing", tvdb, movies, imdb)
+	}
+}
+
 // TestArrIdentifierCountIgnoresWrongArmIdentifiers pins the refresh coverage
 // guard to the same arr-routed predicate the matcher uses: a TV record
 // carrying only movie ids (or a MOVIE record carrying only a TVDB id) cannot

@@ -15,6 +15,7 @@ import (
 
 	"github.com/cplieger/arrapi"
 	"github.com/cplieger/seadex-scout/internal/anilist"
+	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/indexer"
 	"github.com/cplieger/seadex-scout/internal/library"
@@ -257,7 +258,7 @@ func TestCycleLibraryWalkFailureIsUnhealthy(t *testing.T) {
 	s := New(&Deps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
 	})
 
 	if healthy := s.Cycle(context.Background()); healthy {
@@ -294,7 +295,7 @@ func TestCycleSeaDexFailureIsHealthyAndPreservesFindings(t *testing.T) {
 	s := New(&Deps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{err: errors.New("seadex down")},
 	})
@@ -384,7 +385,7 @@ func TestWalkFailureLogsAndReportErrorAreLogSafe(t *testing.T) {
 	s := New(&Deps{
 		Logger:  logger,
 		Store:   &fakeStore{},
-		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: walkErr}, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: walkErr}, Logger: scoutTestLogger()}),
 	})
 
 	if healthy := s.Cycle(context.Background()); healthy {
@@ -408,7 +409,7 @@ func TestWalkFailureLogsAndReportErrorAreLogSafe(t *testing.T) {
 		Store: &fakeStore{st: state.State{
 			Mapping: frierenMappingCache(),
 		}},
-		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: walkErr}, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: walkErr}, Logger: scoutTestLogger()}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Feed:    &fakeFeed{},
@@ -425,7 +426,14 @@ func TestWalkFailureLogsAndReportErrorAreLogSafe(t *testing.T) {
 		}
 	}
 
-	_, err := s.Report(context.Background())
+	// The report boundary is the reporter role's, so build it that way rather
+	// than calling Report on a cycle Scout.
+	reporter := NewReporter(&ReportDeps{
+		Logger:  scoutTestLogger(),
+		Store:   &fakeStore{},
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: walkErr}, Logger: scoutTestLogger()}),
+	})
+	_, err := reporter.Report(context.Background())
 	if err == nil {
 		t.Fatal("Report returned nil error, want the walk failure")
 	}
@@ -500,7 +508,7 @@ func TestWalkFailureLogsCarryArrIdentity(t *testing.T) {
 		s := New(&Deps{
 			Logger:  logger,
 			Store:   &fakeStore{},
-			Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: transportErr("sonarr.local")}, Logger: scoutTestLogger()}),
+			Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: transportErr("sonarr.local")}, Logger: scoutTestLogger()}),
 		})
 		if healthy := s.Cycle(context.Background()); healthy {
 			t.Fatal("Cycle returned healthy=true, want false when the library walk fails")
@@ -523,7 +531,7 @@ func TestWalkFailureLogsCarryArrIdentity(t *testing.T) {
 			Store: &fakeStore{st: state.State{
 				Mapping: frierenMappingCache(),
 			}},
-			Library: library.NewWalker(&library.Config{Radarr: &fakeRadarr{listErr: transportErr("radarr.local")}, Logger: scoutTestLogger()}),
+			Library: arrwalk.NewWalker(&arrwalk.Config{Radarr: &fakeRadarr{listErr: transportErr("radarr.local")}, Logger: scoutTestLogger()}),
 			Mapping: fakeMapping{},
 			SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 			Feed:    &fakeFeed{},

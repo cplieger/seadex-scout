@@ -142,7 +142,7 @@ func FuzzTrackerKey_keysOnlyTrackerOwnCanonicalURLs(f *testing.F) {
 		// re-assert the divergence the adoption removed.
 		f := urlform.Classify(raw)
 		// A trailing DNS-root dot is the fully-qualified spelling of the same
-		// canonical host: release.LookupTrackerByHost tolerates it and
+		// canonical host: tracker.LookupByHost tolerates it and
 		// isCanonicalTrackerHost trims it, so trackerKey legitimately keys
 		// "https://nyaa.si./view/1". The oracle must normalize the same way or a
 		// legitimate input is reported as a crasher.

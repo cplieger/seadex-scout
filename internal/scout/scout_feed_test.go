@@ -9,6 +9,7 @@ import (
 
 	"github.com/cplieger/arrapi"
 	"github.com/cplieger/seadex-scout/internal/anilist"
+	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/indexer"
 	"github.com/cplieger/seadex-scout/internal/library"
@@ -38,7 +39,7 @@ func TestCycleWalkFailureWithFeedStillRebuildsFeed(t *testing.T) {
 	s := New(&Deps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Feed:    feed,
@@ -78,7 +79,7 @@ func TestCycleWalkFailureWithFeedResetsSeaDexFailureStreak(t *testing.T) {
 	s := New(&Deps{
 		Logger:  scoutTestLogger(),
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Feed:    &fakeFeed{},
@@ -105,7 +106,7 @@ func TestCycleSeaDexFailureSkipsFeedRebuild(t *testing.T) {
 	s := New(&Deps{
 		Logger:  logger,
 		Store:   &fakeStore{st: state.State{Mapping: frierenMappingCache()}},
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{err: errors.New("seadex down")},
 		Feed:    feed,
@@ -131,7 +132,7 @@ func TestCycleUnusableMapSkipsFeedRebuild(t *testing.T) {
 	s := New(&Deps{
 		Logger:  logger,
 		Store:   &fakeStore{},
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		// Empty state + unreachable Fribb: the load fails with nothing stale to
 		// fall back on, so the map is unusable (not a StaleMapError).
 		Mapping: unreachableMapLoader(t, logger),
@@ -166,7 +167,7 @@ func TestCycleFeedRebuildErrorIsNonFatal(t *testing.T) {
 	s := New(&Deps{
 		Logger:       logger,
 		Store:        store,
-		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping:      fakeMapping{},
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
@@ -223,7 +224,7 @@ func TestCycleWalkAndSeaDexBothFailWarnsFeedKept(t *testing.T) {
 			s := New(&Deps{
 				Logger:  logger,
 				Store:   &fakeStore{},
-				Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
+				Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
 				Mapping: unreachableMapLoader(t, scoutTestLogger()),
 				SeaDex:  tc.seadex,
 				Feed:    feed,
@@ -283,7 +284,7 @@ func TestCycleFeedInfoClassifiesViaFribbIndex(t *testing.T) {
 	s := New(&Deps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: logger}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: logger}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Feed:    feed,
@@ -324,7 +325,7 @@ func TestCycleWalkFailShutdownDuringSeaDexFetchStaysSilent(t *testing.T) {
 	s := New(&Deps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
 		Mapping: fakeMapping{},
 		SeaDex:  &cancellingSeaDex{cancel: cancel},
 		Feed:    feed,
@@ -379,7 +380,7 @@ func TestCycleShutdownDuringFeedRebuildStaysSilent(t *testing.T) {
 	s := New(&Deps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
 		Matcher: match.NewMatcher(degradedMatcherAniList{}, scoutTestLogger()),
@@ -431,7 +432,7 @@ func TestCycleUnusableMapWithSeaDexOutageWarnsFeedKept(t *testing.T) {
 			s := New(&Deps{
 				Logger:  logger,
 				Store:   &fakeStore{},
-				Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+				Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 				// Empty state + unreachable Fribb: the load fails with nothing
 				// stale to fall back on, so the map is unusable.
 				Mapping: unreachableMapLoader(t, scoutTestLogger()),
@@ -480,7 +481,7 @@ func TestSeaDexFailureLogCarriesFeedKept(t *testing.T) {
 			s := New(&Deps{
 				Logger:  logger,
 				Store:   &fakeStore{st: state.State{Mapping: frierenMappingCache(), Baselined: true}},
-				Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+				Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 				Mapping: fakeMapping{},
 				SeaDex:  &fakeSeaDex{err: errors.New("seadex down")},
 				Feed:    tc.feed,
@@ -517,7 +518,7 @@ func TestCycleWalkFailureWithFeedPreservesPriorSnapshotAndFindings(t *testing.T)
 	s := New(&Deps{
 		Logger:  scoutTestLogger(),
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Feed:    &fakeFeed{},

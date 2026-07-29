@@ -8,11 +8,14 @@
 // sentinel) and GroupsOverlap, the three-valued group-set comparison in which
 // a NoGroup member is unknown evidence — it can neither prove an overlap nor
 // permit a divergence proof — rather than an identity token. The same
-// single-home rule extends to the canonical tracker table (trackers.go:
-// names, aliases, obtainability class, site base URLs, and the fail-closed
-// host-classification gates) and to the curation-warning tag vocabulary
-// (curation.go), both of which this package owns so they cannot fork
-// across consumers.
+// single-home rule extends to the curation-warning tag vocabulary
+// (curation.go), which this package owns so it cannot fork across consumers.
+// Tracker identity is NOT this package's: the canonical table, the
+// obtainability class, and the fail-closed host/relative-URL gates live in
+// internal/tracker, which this package reads only for a Release's
+// TrackerType — so the pure classifier carries no URL parsing and every
+// tracker consumer reaches the vocabulary without importing the whole
+// classification engine.
 //
 // The remux-vs-encode decision is deliberately name-and-notes based, never a
 // size or bitrate inference: on SeaDex a remux is stated in the release name or
@@ -32,9 +35,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/cplieger/seadex-scout/internal/tracker"
 )
 
-// --- Classification vocabulary: kinds, tracker types, Release/Input ---
+// --- Classification vocabulary: kinds, Release/Input ---
 
 // Kind is the remux-vs-encode classification of a release.
 type Kind string
@@ -49,29 +54,19 @@ const (
 	KindUnknown Kind = "unknown"
 )
 
-// TrackerType is the obtainability class of a release's tracker.
-type TrackerType string
-
-const (
-	// TrackerPublic is an openly accessible tracker (Nyaa).
-	TrackerPublic TrackerType = "public"
-	// TrackerPrivate is a private tracker requiring membership (AnimeBytes).
-	TrackerPrivate TrackerType = "private"
-	// TrackerUnknown is an unrecognized tracker.
-	TrackerUnknown TrackerType = "unknown"
-)
-
 // Release is a normalized release fingerprint. Both a SeaDex torrent and a
 // library file classify into this shape so they compare in the same vocabulary.
+// TrackerType is the obtainability class resolved from the canonical tracker
+// vocabulary (internal/tracker), the one home of tracker identity.
 type Release struct {
-	Group       string      `json:"group,omitempty"`
-	Tracker     string      `json:"tracker,omitempty"`
-	Resolution  string      `json:"resolution,omitempty"`
-	Codec       string      `json:"codec,omitempty"`
-	Kind        Kind        `json:"kind,omitempty"`
-	TrackerType TrackerType `json:"tracker_type,omitempty"`
-	Reason      string      `json:"reason,omitempty"`
-	DualAudio   bool        `json:"dual_audio,omitempty"`
+	Group       string       `json:"group,omitempty"`
+	Tracker     string       `json:"tracker,omitempty"`
+	Resolution  string       `json:"resolution,omitempty"`
+	Codec       string       `json:"codec,omitempty"`
+	Kind        Kind         `json:"kind,omitempty"`
+	TrackerType tracker.Type `json:"tracker_type,omitempty"`
+	Reason      string       `json:"reason,omitempty"`
+	DualAudio   bool         `json:"dual_audio,omitempty"`
 }
 
 // Input is the raw material for Classify. Names are the release/file names to
@@ -96,7 +91,7 @@ type Input struct {
 // resolutionHeights is the single home of the recognized resolution
 // vocabulary. reResolution's alternation and ResolutionRank both derive
 // from it, so a height added to one consumer cannot silently miss the
-// other (the same single-home rule trackerTable applies to the tracker
+// other (the same single-home rule internal/tracker's table applies to the tracker
 // vocabulary). The descending order is presentational only: no two
 // heights can match at the same offset, so detectResolution takes the
 // FIRST height in the evidence text, never the highest present (the
@@ -365,7 +360,7 @@ func Classify(in *Input) Release {
 		Resolution:  resolution,
 		Codec:       codec,
 		Kind:        kind,
-		TrackerType: classifyTracker(in.Tracker),
+		TrackerType: tracker.TypeOf(in.Tracker),
 		Reason:      reason,
 		DualAudio:   in.DualAudio,
 	}
@@ -435,48 +430,6 @@ func canonicalCodec(s string) string {
 	default:
 		return ""
 	}
-}
-
-// --- Tracker classification ---
-
-// classifyTracker maps a tracker name to its obtainability class via the
-// canonical tracker table (LookupTracker).
-func classifyTracker(tracker string) TrackerType {
-	t, ok := LookupTracker(tracker)
-	if !ok {
-		return TrackerUnknown
-	}
-	return t.Type
-}
-
-// IsAnimeBytes reports whether the tracker name is AnimeBytes (SeaDex uses
-// "AB"; "animebytes" is accepted defensively via the table aliases). It is the
-// one private tracker seadex-scout gates behind an opt-in toggle (the operator
-// has an account), so obtainability can single it out from other private
-// trackers.
-func IsAnimeBytes(tracker string) bool {
-	t, ok := LookupTracker(tracker)
-	return ok && t.Name == TrackerNameAnimeBytes
-}
-
-// IsAnimeBytesHost reports whether a URL host (case-insensitively; one
-// DNS-root trailing dot tolerated) is the AnimeBytes site host or one of its
-// dot-delimited subdomains, resolved through the canonical tracker table
-// (LookupTrackerByHost). It is the URL-host twin of IsAnimeBytes (the
-// tracker-name check), so the AB classification rule has one home.
-func IsAnimeBytesHost(host string) bool {
-	t, ok := LookupTrackerByHost(host)
-	return ok && t.Name == TrackerNameAnimeBytes
-}
-
-// IsNyaaHost reports whether a URL host (case-insensitively; one DNS-root
-// trailing dot tolerated) is the Nyaa site host or one of its dot-delimited
-// subdomains, resolved through the canonical tracker table
-// (LookupTrackerByHost), mirroring IsAnimeBytesHost so the
-// host-classification rule has one home.
-func IsNyaaHost(host string) bool {
-	t, ok := LookupTrackerByHost(host)
-	return ok && t.Name == TrackerNameNyaa
 }
 
 // --- Group vocabulary and three-valued overlap ---

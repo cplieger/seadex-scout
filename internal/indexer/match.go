@@ -4,7 +4,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/cplieger/seadex-scout/internal/release"
+	"github.com/cplieger/seadex-scout/internal/tracker"
 	"github.com/cplieger/urlform"
 )
 
@@ -20,30 +20,30 @@ import (
 // trackerScope classifies a tracker name (as SeaDex spells it, "Nyaa" or "AB")
 // into the feed scope it maps to: upstreamNyaa, upstreamAB, or "" for any other
 // tracker (a negligible SeaDex tail). The tracker vocabulary (which aliases
-// denote which tracker) is owned by the canonical release tracker table
-// (release.LookupTracker), so id extraction, key building, download-link
+// denote which tracker) is owned by the canonical tracker table
+// (tracker.Lookup), so id extraction, key building, download-link
 // building, feed routing, and the alert/report path all agree on what counts
 // as AnimeBytes.
-func trackerScope(tracker string) string {
-	t, ok := release.LookupTracker(tracker)
+func trackerScope(trackerName string) string {
+	t, ok := tracker.Lookup(trackerName)
 	if !ok {
 		return ""
 	}
 	switch t.Name {
-	case release.TrackerNameNyaa:
+	case tracker.NameNyaa:
 		return upstreamNyaa
-	case release.TrackerNameAnimeBytes:
+	case tracker.NameAnimeBytes:
 		return upstreamAB
 	}
 	return ""
 }
 
 // scopeOfHost returns the feed scope a URL host belongs to ("" for none):
-// release's canonical host table names the tracker and trackerScope maps that
+// the canonical host table names the tracker and trackerScope maps that
 // name to a scope, so host->scope has one home. Subdomains classify like the
 // Is*Host twins; namespace-exact identity is isCanonicalTrackerHost's job.
 func scopeOfHost(host string) string {
-	t, ok := release.LookupTrackerByHost(host)
+	t, ok := tracker.LookupByHost(host)
 	if !ok {
 		return ""
 	}
@@ -117,8 +117,8 @@ func pathHasDotSegments(p string) bool {
 // the tracker's own (see trackerOwnURL). A gated-out torrent is simply not
 // curated/journaled - the safe direction, surfaced by the journal's
 // unresolvable counter.
-func trackerKey(tracker, sourceURL string) string {
-	scope := trackerScope(tracker)
+func trackerKey(trackerName, sourceURL string) string {
+	scope := trackerScope(trackerName)
 	if scope == "" || !trackerOwnURL(scope, sourceURL) {
 		return ""
 	}
@@ -130,7 +130,7 @@ func trackerKey(tracker, sourceURL string) string {
 
 // trackerOwnURL reports whether a SeaDex source URL belongs to the scope's
 // own tracker: an absolute http(s), userinfo-free URL on the tracker's EXACT
-// canonical host (the shared release.Is*Host predicates reject homograph
+// canonical host (the shared tracker.Is*Host predicates reject homograph
 // labels; the additional canonical-host check rejects subdomains, whose
 // torrent-id databases are independent of the apex site's - see
 // isCanonicalTrackerHost; the scheme/userinfo bar matches trackerKeyFromURL,
@@ -144,7 +144,7 @@ func trackerKey(tracker, sourceURL string) string {
 //
 // Structural facts come from urlform, so this reads a raw SeaDex URL the same
 // way its three sibling consumers do (trackerlink.Publish,
-// internal/filter's AB evidence gate, release.LookupTrackerByRelativeURL). It
+// internal/filter's AB evidence gate, tracker.LookupByRelativeURL). It
 // used to hand-roll the vocabulary with net/url, and the two readings had
 // already diverged in one live shape (l-f162): for a schemeless-host URL
 // ("animebytes.tv/torrents.php?id=1&torrentid=456") urlform reports
@@ -158,7 +158,7 @@ func trackerKey(tracker, sourceURL string) string {
 // canonical-host policy like any other absolute-ish form.
 //
 // The AB relative arm is deliberately ClassRelative (a rooted "/x" path) rather
-// than the narrower release.LookupTrackerByRelativeURL, which additionally
+// than the narrower tracker.LookupByRelativeURL, which additionally
 // demands the "/torrents.php?...torrentid=" shape: keying a relative Prowlarr
 // permalink ("/torrent/123/group") works today and must keep working.
 func trackerOwnURL(scope, sourceURL string) bool {
@@ -185,20 +185,20 @@ func trackerOwnURL(scope, sourceURL string) bool {
 }
 
 // canonicalTrackerHost returns the exact hostname of a scope's tracker site,
-// derived from the canonical release tracker table (release.LookupTracker's
+// derived from the canonical tracker table (tracker.Lookup's
 // BaseURL) so the host vocabulary stays single-homed, or "" for an unknown
 // scope.
 func canonicalTrackerHost(scope string) string {
 	var name string
 	switch scope {
 	case upstreamNyaa:
-		name = release.TrackerNameNyaa
+		name = tracker.NameNyaa
 	case upstreamAB:
-		name = release.TrackerNameAnimeBytes
+		name = tracker.NameAnimeBytes
 	default:
 		return ""
 	}
-	t, ok := release.LookupTracker(name)
+	t, ok := tracker.Lookup(name)
 	if !ok {
 		return ""
 	}
@@ -212,7 +212,7 @@ func canonicalTrackerHost(scope string) string {
 // independent of nyaa.si's, so an id read from a subdomain URL must not
 // mint the apex site's key - nyaa:123 minted from sukebei.nyaa.si/view/123
 // would authorize the UNRELATED nyaa.si torrent 123 as curated and build
-// its download link for the wrong bytes. The shared release.Is*Host
+// its download link for the wrong bytes. The shared tracker.Is*Host
 // predicates accept subdomains, which is right for tracker CLASSIFICATION
 // (obtainability, display) but too broad for identity; callers apply this
 // check after them, so the ASCII/homograph gates have already run - and the
@@ -225,7 +225,7 @@ func isCanonicalTrackerHost(scope, host string) bool {
 	// host comparison (U+017F folds to 's', so a byte-wise foreign host could
 	// match a canonical name) - see snapshotInfoURLAllowed for the same rule.
 	// Both callers already hand us urlform's ASCII-lowercased host behind
-	// release.Is*Host's IsASCIIHost gate, so this is byte equality on every
+	// tracker.Is*Host's IsASCIIHost gate, so this is byte equality on every
 	// reachable input; it simply no longer DEPENDS on that call order.
 	c := asciiLowerHost(canonicalTrackerHost(scope))
 	if c == "" {
@@ -243,7 +243,7 @@ func isCanonicalTrackerHost(scope, host string) bool {
 // of the browser-vs-net/url smuggling shapes, so an odd-scheme, userinfo-bearing
 // or de-smuggled URL never proves an identity the rest of the boundary would
 // refuse to display. Host classification rides the shared host->scope home
-// (scopeOfHost, over release.LookupTrackerByHost), so a non-ASCII
+// (scopeOfHost, over tracker.LookupByHost), so a non-ASCII
 // homograph label or an empty-labeled host under a tracker domain never
 // yields a curation key.
 func trackerKeyFromURL(raw string) string {

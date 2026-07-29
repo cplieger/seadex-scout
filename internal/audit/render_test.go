@@ -354,6 +354,9 @@ func TestLinksDedupesRepeatedBestAndLabelsUnnamedTracker(t *testing.T) {
 		{Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
 		{Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
 		{Best: true, Tracker: "  ", URL: "https://example.org/t"},
+		// Neither a known host, a known label, nor any host at all: the only
+		// shape left with nothing to name it, so the "link" last resort holds.
+		{Best: true, Tracker: "  ", URL: "http://"},
 		// A delimiter-bearing pair: with a string-concatenated dedupe key these
 		// two distinct (tracker, URL) tuples collide ("Nyaa|https://x/a" +
 		// "https://one.example" == "Nyaa" + "https://x/a|https://one.example")
@@ -367,8 +370,14 @@ func TestLinksDedupesRepeatedBestAndLabelsUnnamedTracker(t *testing.T) {
 	if strings.Count(got, "https://nyaa.si/view/1") != 1 {
 		t.Errorf("repeated (tracker, URL) best link must appear once, got %q", got)
 	}
-	if !strings.Contains(got, "[link](https://example.org/t)") {
-		t.Errorf("a blank tracker must fall back to the %q label, got %q", "link", got)
+	// An unlabelled link is named by its own host through tracker.CanonicalName
+	// (the ladder the daemon's alert attributes share), so the report says where
+	// the link goes instead of the anonymous "link".
+	if !strings.Contains(got, "[example.org](https://example.org/t)") {
+		t.Errorf("a blank tracker must be labelled by the URL host, got %q", got)
+	}
+	if !strings.Contains(got, "[link](http://)") {
+		t.Errorf("a link with no nameable tracker must fall back to the %q label, got %q", "link", got)
 	}
 	// Both delimiter-bearing tuples survive as distinct links: the plain URL
 	// as its own destination, and the pipe-bearing URL with the pipe
@@ -1102,6 +1111,14 @@ func TestReleaseNotesDistinguishesURLErrorFromUnobtainable(t *testing.T) {
 			rel:  Release{Warnings: []string{"broken"}, URLError: true},
 			want: []string{"broken", "url error"},
 		},
+		"a tracker this build does not carry is named as such": {
+			rel:  Release{UnknownTracker: true},
+			want: []string{"unknown tracker"},
+		},
+		"an unknown tracker is also unobtainable, in that order": {
+			rel:  Release{UnknownTracker: true, Unobtainable: true},
+			want: []string{"unknown tracker", "unobtainable"},
+		},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -1113,6 +1130,11 @@ func TestReleaseNotesDistinguishesURLErrorFromUnobtainable(t *testing.T) {
 			// links, exactly like the other annotation classes.
 			if tc.rel.URLError && !annotated(&tc.rel) {
 				t.Error("a url-error release is not annotated; it would still drive the verdict and be offered as a link")
+			}
+			// Same for the other refusal class: an unknown tracker yields no
+			// link, so the row must not be offered as one either (l-f127).
+			if tc.rel.UnknownTracker && !annotated(&tc.rel) {
+				t.Error("an unknown-tracker release is not annotated; it would still drive the verdict and be offered as a link")
 			}
 		})
 	}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cplieger/atomicfile/v2"
+	"github.com/cplieger/seadex-scout/internal/displaylink"
 	"github.com/cplieger/urlform"
 )
 
@@ -645,10 +646,12 @@ func (c *snapshotCache) readSnapshot(ctx context.Context, f *os.File) (snapshot,
 		return snapshot{}, false, true
 	}
 	// `null` or `{}` decodes cleanly into a zero value; nil curation maps
-	// and over-limit items identify a structurally invalid snapshot (see
-	// decodeSnapshot). Both are deterministic for unchanged bytes, so they
-	// memoize like malformed JSON; the offending value itself is never
-	// logged (it can be attacker-shaped multi-megabyte text).
+	// identify a structurally invalid snapshot (see decodeSnapshot). That is
+	// deterministic for unchanged bytes, so it memoizes like malformed JSON;
+	// the offending value itself is never logged (it can be attacker-shaped
+	// multi-megabyte text). A defect in ONE journal item is not structural -
+	// decodeSnapshot drops that item and reports the count per feed (see
+	// warnDroppedItems).
 	if reason != "" {
 		c.markSnapshotFailedIfUnloaded()
 		c.log.Warn("indexer feed snapshot malformed; keeping current feed", "path", c.path, "reason", reason)
@@ -671,7 +674,23 @@ func (c *snapshotCache) readSnapshot(ctx context.Context, f *os.File) (snapshot,
 	snap.ABFeed = c.rebuildABDownloadURLs(snap.ABFeed)
 	snap.NyaaFeed = c.rebuildNyaaDownloadURLs(snap.NyaaFeed)
 	c.warnBlankedInfoURLs(scrub)
+	c.warnDroppedItems(scrub)
 	return snap, true, false
+}
+
+// warnDroppedItems reports the per-item prune PER TRACKER, one line per
+// affected feed - the same attribution warnBlankedInfoURLs gives the info-URL
+// scrub, and for the same reason: a hand-edited or partially corrupted
+// feed.json is the only way such an item gets there, and the operator needs to
+// know WHICH journal lost items. The count is the whole message: the dropped
+// item's fields come from a tamperable file (l-f45).
+func (c *snapshotCache) warnDroppedItems(scrub snapshotScrub) {
+	for _, scope := range []string{upstreamNyaa, upstreamAB} {
+		if n := scrub.droppedItems[scope]; n > 0 {
+			c.log.Warn("indexer feed snapshot: invalid journal items dropped",
+				"path", c.path, "tracker", scope, "dropped", n)
+		}
+	}
 }
 
 // warnBlankedInfoURLs reports the info-URL scrub PER TRACKER, one line per
@@ -936,11 +955,13 @@ func sanitizeSnapshotInfoURLs(feed []journalItem) int {
 //
 // This is a PUBLISH gate on a tamperable boundary - a persisted feed.json
 // InfoURL is vouched here and handed to the arr web UI as a clickable link,
-// where the BROWSER is the parser of record - so it reads its structural facts
-// from urlform (the app's own classifier of record for exactly that
-// browser-vs-net/url divergence, already applied at the sibling publish gate
-// trackerlink.Publish) rather than from incidental net/url behavior, and matches
-// host evidence behind urlform.IsASCIIHost.
+// where the BROWSER is the parser of record - so its structural legs are
+// internal/displaylink's, the app's one home for that vouch step (h-f13),
+// shared with the sibling publish gate trackerlink.Publish and with the search
+// path's httpDisplayHost. Those legs read their facts from urlform (the app's
+// own classifier of record for exactly that browser-vs-net/url divergence)
+// rather than from incidental net/url behavior; this gate adds only its own
+// host policy, matched behind urlform.IsASCIIHost.
 //
 // The host gate is the substantive change. It used to be a bare
 // strings.EqualFold, which is the FULL-UNICODE simple fold urlform's ASCII-only
@@ -963,23 +984,15 @@ func snapshotInfoURLAllowed(raw, host string) bool {
 	if want == "" || !urlform.IsASCIIHost(want) {
 		return false
 	}
-	f := urlform.Classify(raw)
-	if f.Class != urlform.ClassAbsolute {
-		return false
-	}
-	if f.HasUserInfo || f.HasBackslash || f.HasTabOrNewline {
-		// Publish-or-drop, the same stance trackerlink.Publish takes: a userinfo
-		// authority is visual spoofing, and a de-smuggled backslash or
-		// tab/newline form is not vouchable - a browser reads it differently
-		// from net/url.
-		return false
-	}
-	if !isHTTPScheme(f.Scheme) {
+	// The shared structural legs: absolute, http(s), no userinfo, no smuggling
+	// bytes - publish-or-drop, the same stance trackerlink.Publish takes.
+	vouched, ok := displaylink.Vouch(raw)
+	if !ok {
 		return false
 	}
 	// IsASCIIHost refuses a non-ASCII host, so no homograph can fold into the
 	// allowlisted name.
-	return urlform.IsASCIIHost(f.Host) && f.Host == want
+	return urlform.IsASCIIHost(vouched) && vouched == want
 }
 
 // asciiLowerHost lowercases ASCII A-Z only, leaving every other byte alone -

@@ -70,6 +70,17 @@ func redactablePath(p string) bool {
 	return len(p) >= minRedactablePath || strings.ContainsRune(p, filepath.Separator)
 }
 
+// RedactReportDirErr wraps err so its rendered text carries no
+// report-dir-derived path, while errors.Is/As classification still walks the
+// original chain. It is this package's report.dir redaction policy, exported for
+// the composition root: the report lock lives in internal/cycle (the one home of
+// exclusive-run coordination) and its errors can carry the configured dir, which
+// config.Load may have expanded from an allowlisted ${SEADEX_SCOUT_*} reference -
+// so a paste typo must not ship a secret to main's error log.
+func RedactReportDirErr(dir string, err error) error {
+	return redactPathErr(dir, err)
+}
+
 // redactPathErr wraps err so its rendered text carries no report-dir-derived
 // path while errors.Is/As classification (context cancellation, fs errnos,
 // sentinel errors) still walks the original chain. An err whose text is

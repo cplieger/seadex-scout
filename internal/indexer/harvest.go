@@ -503,8 +503,8 @@ func harvestCursorKey(g harvestGroup) string {
 // carried into every future snapshot verbatim - a rebuild with no pending
 // group never overwrites it - so a garbage or unbounded value from a
 // hand-edited or corrupted snapshot would persist forever, the hazard the
-// seen-ledger and title-cache caps (seenLedgerWithinLimits /
-// titleCacheWithinLimits) already close for the other verbatim-carried
+// seen-ledger and title-cache limits (seenLedgerWithinLimits /
+// retainValidTitles) already close for the other verbatim-carried
 // fields. Dropping it changes no rotation behavior: rotationStart already
 // treats an unparseable cursor as "start at the head", and a zero or negative
 // id is outside harvestCursorKey's domain, so no honest cursor is rejected.

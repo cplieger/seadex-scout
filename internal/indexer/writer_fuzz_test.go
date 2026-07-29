@@ -19,6 +19,15 @@ func (s snapshotScrub) total() int {
 	return n
 }
 
+// totalDropped is total's twin for the per-item prune (see snapshotScrub).
+func (s snapshotScrub) totalDropped() int {
+	n := 0
+	for _, c := range s.droppedItems {
+		n += c
+	}
+	return n
+}
+
 // FuzzDecodeSnapshot is the coverage-guided complement of the unit tests over
 // the ONE persisted-snapshot decode gate both consumers share (the writer's
 // loadPrevious and the server's readSnapshot): /config/feed.json is a
@@ -55,16 +64,22 @@ func FuzzDecodeSnapshot(f *testing.F) {
 			if n := scrub.total(); n != 0 {
 				t.Errorf("rejected snapshot (reason=%q err=%v) reported %d blanked info URLs, want 0 (nothing was materialized)", reason, err, n)
 			}
+			if n := scrub.totalDropped(); n != 0 {
+				t.Errorf("rejected snapshot (reason=%q err=%v) reported %d dropped items, want 0 (nothing was materialized)", reason, err, n)
+			}
 			return
 		}
 		if snap.ByHash == nil || snap.ByKey == nil {
 			t.Fatal("accepted snapshot carries nil curation maps (both consumers index them unconditionally)")
 		}
-		if !validFeedItems(snap.NyaaFeed, snap.ABFeed) {
-			t.Error("accepted snapshot carries an item past the persisted-item limits")
-		}
 		for name, feed := range map[string][]journalItem{"nyaa_feed": snap.NyaaFeed, "ab_feed": snap.ABFeed} {
 			for i := range feed {
+				if !validPersistedItem(&feed[i]) {
+					t.Errorf("%s[%d] accepted past the persisted-item limits (the per-item prune must have dropped it)", name, i)
+				}
+				if snap.Seen != nil && !validJournalRecord(&feed[i]) {
+					t.Errorf("%s[%d] accepted without journal identity in a post-journal snapshot (the per-item prune must have dropped it)", name, i)
+				}
 				if h := feed[i].InfoHash; h != validInfoHash(h) {
 					t.Errorf("%s[%d] accepted with non-canonical info hash %q (the served infohash attr and the writer's carry gates both read it as identity)", name, i, h)
 				}
@@ -83,6 +98,9 @@ func FuzzDecodeSnapshot(f *testing.F) {
 		}
 		if n := roundScrub.total(); n != 0 {
 			t.Errorf("re-decode blanked %d further info URLs, want 0 (the first pass already produced the canonical form)", n)
+		}
+		if n := roundScrub.totalDropped(); n != 0 {
+			t.Errorf("re-decode dropped %d further items, want 0 (the first pass already pruned every item the gate refuses)", n)
 		}
 		// Compare the canonical encodings rather than the structs: json.Marshal
 		// sorts map keys and renders times canonically, so byte equality pins

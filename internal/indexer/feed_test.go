@@ -91,11 +91,13 @@ func TestRepresentativeFileSkipsCreditlessForAbsolute(t *testing.T) {
 	}
 }
 
-// TestFeedSynthesisIgnoresSubHalfSizeSample pins PopulationFiles'
-// median-anchored census floor: a first-listed, episode-shaped sample below
-// half the population median must neither headline the title nor count as an
-// episode, so the feed cannot disagree with the same torrent's finding or
-// report row.
+// TestFeedSynthesisIgnoresSubHalfSizeSample pins the census's sample guard: a
+// first-listed, episode-shaped sample clip must neither headline the title nor
+// count as an episode, so the feed cannot disagree with the same torrent's
+// finding or report row. The guard is payload's type gate reading the "Sample"
+// marker in the NAME, not the census size floor: a sample's size ratio to its
+// payload overlaps the ratio between two real episodes of unequal length, so
+// the floor deliberately admits it (l-f234 / d-gpt-u3c1-1).
 func TestFeedSynthesisIgnoresSubHalfSizeSample(t *testing.T) {
 	const gib = 1 << 30
 	files := []seadex.File{
@@ -150,6 +152,17 @@ func TestFeedSynthesisCollapsesMixedLengthPack(t *testing.T) {
 			files:    append([]seadex.File{{Name: "Show Movie [1080p].mkv", Length: 4 * gib}}, episodes(1, 12, 6*gib/5)...),
 			wantEps:  12,
 			wantSeen: 12,
+		},
+		"two-episode pack with a 4x finale": {
+			// The two-file shape no size floor could judge (l-f234 /
+			// d-gpt-u3c1-1): the midpoint anchor kept the shorter episode only
+			// while the longer stayed within ~3x of it, so this pack read as
+			// ONE episode and was served under that episode's own SxxExx
+			// marker. The lower-middle anchor counts both, and the sample guard
+			// that the floor used to carry is now the type gate's name check.
+			files:    append(episodes(1, 1, gib), episodes(2, 2, 4*gib)...),
+			wantEps:  2,
+			wantSeen: 2,
 		},
 	}
 	for name, tt := range tests {
@@ -606,10 +619,13 @@ func TestPackSeasonKeysOnLastToken(t *testing.T) {
 // single-episode torrent whose file uses cour-local numbering (S01E07) under an
 // entry resolved to season 3 must synthesize S03E07 - the arr's own numbering -
 // never the file's S01E07, which points at a DIFFERENT episode of the parent
-// series. An absolute "- NN" marker and an entry with no resolved season
-// (SeasonKnown false) pass through unchanged, and a file already on the
-// resolved season is a no-op. A resolved season 0 (the specials bucket) is a
-// real season here, not an absent one, so it relabels to S00.
+// series. An absolute "- NN" marker under a POSITIVE season and an entry with
+// no resolved season (SeasonKnown false) pass through unchanged, and a file
+// already on the resolved season is a no-op. A resolved season 0 (the specials
+// bucket) is a real season here, not an absent one, so it relabels to S00 - and
+// it is the one season an absolute marker IS rewritten under
+// (specialsEpisodeMarker), since a bare "- 07" beside the parent series' title
+// is byte-identical to the parent's regular episode 7.
 func TestEpisodeMarkerRelabelsCourLocalSeason(t *testing.T) {
 	tests := []struct {
 		name string
@@ -623,7 +639,9 @@ func TestEpisodeMarkerRelabelsCourLocalSeason(t *testing.T) {
 		{"episode range keeps its range half", "Show - S01E01-E03 [G].mkv", EntryInfo{Season: 2, SeasonKnown: true}, "S02E01-E03"},
 		{"absolute marker is never relabeled", "Show - 07 (1080p) [G].mkv", EntryInfo{Season: 3, SeasonKnown: true}, "- 07"},
 		{"special relabels cour-local season to S00", "Show - S01E01 (1080p) [G].mkv", EntryInfo{SeasonKnown: true}, "S00E01"},
-		{"absolute-marked special is never relabeled", "Show - 07 (1080p) [G].mkv", EntryInfo{SeasonKnown: true}, "- 07"},
+		{"absolute-marked special becomes a specials token", "Show - 07 (1080p) [G].mkv", EntryInfo{SeasonKnown: true}, "S00E07"},
+		{"absolute-marked special drops its version suffix", "Show - 07v2 (1080p) [G].mkv", EntryInfo{SeasonKnown: true}, "S00E07"},
+		{"marker-less special gains no invented token", "Show Movie [G].mkv", EntryInfo{SeasonKnown: true}, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -699,6 +717,53 @@ func TestDerivedTitleRelabelsCourLocalSeason(t *testing.T) {
 	}
 	if got, want := synthesizeTitle(pack, EntryInfo{SeasonKnown: true}), "Show - S00 (1080p) [G]"; got != want {
 		t.Errorf("fallback special pack = %q, want %q (the special typing outvotes cour-local file seasons, mirroring episodeMarker's pack arm)", got, want)
+	}
+}
+
+// TestDerivedTitleAbsolutePackLabelsResolvedSeason pins the absolute-episode
+// PACK arm of the derived path: collapsing the "- NN" token already claims the
+// whole season, so a pack whose entry resolves a season must SAY which season -
+// the same label the SxxExx arm and episodeMarker's pack arm emit for the same
+// entry. Without a resolved season (and with no SxxExx evidence in the file
+// list) the token still just drops, leaving a bare title.
+func TestDerivedTitleAbsolutePackLabelsResolvedSeason(t *testing.T) {
+	pack := &seadex.Torrent{Files: []seadex.File{
+		{Name: "[Grp] Frieren - 07 (1080p).mkv"},
+		{Name: "[Grp] Frieren - 08 (1080p).mkv"},
+	}}
+	if got, want := derivedTitle(pack, EntryInfo{Season: 1, SeasonKnown: true}), "[Grp] Frieren S01 (1080p)"; got != want {
+		t.Errorf("derivedTitle(absolute pack, resolved season) = %q, want %q", got, want)
+	}
+	if got, want := derivedTitle(pack, EntryInfo{SeasonKnown: true}), "[Grp] Frieren S00 (1080p)"; got != want {
+		t.Errorf("derivedTitle(absolute pack, specials bucket) = %q, want %q", got, want)
+	}
+	if got, want := derivedTitle(pack, EntryInfo{}), "[Grp] Frieren (1080p)"; got != want {
+		t.Errorf("derivedTitle(absolute pack, no season) = %q, want %q (nothing to label)", got, want)
+	}
+}
+
+// TestTitleBasePromotesReleaseNameDirectory pins the derived path's headline
+// pick: when the file's own base name carries no episode evidence but an
+// ancestor directory does AND that directory has text of its own (the top-level
+// directory IS the release name, the files under it are bare "01.mkv"), the
+// directory headlines the title - an unparseable "01"/"video" makes the curated
+// release invisible on RSS. A token-ONLY directory is still not promoted (a
+// bare "S01" with no show name is worse than the basename), which is what
+// TestDerivedTitlePackWithDirectoryOnlyEpisodeTokens pins.
+func TestTitleBasePromotesReleaseNameDirectory(t *testing.T) {
+	pack := &seadex.Torrent{Files: []seadex.File{
+		{Name: "[Grp] Show S01E01-E12 (1080p)/01.mkv"},
+		{Name: "[Grp] Show S01E01-E12 (1080p)/02.mkv"},
+	}}
+	if got, want := derivedTitle(pack, EntryInfo{}), "[Grp] Show S01E01-E12 (1080p)"; got != want {
+		t.Errorf("derivedTitle(directory-named pack) = %q, want %q", got, want)
+	}
+	single := &seadex.Torrent{Files: []seadex.File{{Name: "Show S02E05 [Grp]/video.mkv"}}}
+	if got, want := derivedTitle(single, EntryInfo{}), "Show S02E05 [Grp]"; got != want {
+		t.Errorf("derivedTitle(directory-named single) = %q, want %q", got, want)
+	}
+	if got, want := titleBase("Show S02E05 [Grp]/extras/video.mkv"), "Show S02E05 [Grp]"; got != want {
+		t.Errorf("titleBase = %q, want %q (the NEAREST ancestor carrying episode evidence, skipping evidence-free components)", got, want)
 	}
 }
 

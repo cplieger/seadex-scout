@@ -183,18 +183,21 @@ func journalIdentityMatches(it *journalItem) bool {
 // ascending AniList-ID order, then best-wins on the marker and category union
 // across all of them (a torrent attached to several entries must not render
 // conflicting duplicates). An occurrence is renderable when it yields a
-// grabbable download link, a non-empty synthesized title, a GUID that proves
-// the journal key (journalIdentityMatches), and fields within
+// download target (journalLink - a grabbable link, or an AnimeBytes release
+// awaiting the operator's passkey, journaled GUID-only), a non-empty
+// synthesized title, a GUID that proves the journal key
+// (journalIdentityMatches), and fields within
 // the persisted limits; trying siblings in a deterministic order keeps the
 // render catalogue-order independent while one partial occurrence (no files
 // and no release group on the lowest AniList ID) cannot deny the whole key
 // RSS when a renderable sibling exists. ok is false only when EVERY
-// occurrence is unrenderable: no grabbable download link (an AnimeBytes
-// release without a passkey - reported via noPasskey so the caller can nudge
-// the operator - or an id-less URL, which journalKey already excludes), no
+// occurrence is unrenderable: no download target at all (an id-less URL, which
+// journalKey already excludes, or a foreign host), no
 // parseable title at all (no files and no release group), a page URL whose
 // GUID cannot prove the journal key, or a field over the persisted size
-// limits (validPersistedItem).
+// limits (validPersistedItem). noPasskey reports that at least one AnimeBytes
+// occurrence had no derivable link because no passkey is configured - whether
+// or not the item was journaled - so the caller can nudge the operator.
 func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor EntryInfoFunc) (it journalItem, ok, noPasskey bool) {
 	// Deterministic synthesis order: a torrent attached to several entries
 	// must render the same item regardless of catalogue order (marker and
@@ -224,9 +227,13 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor En
 		)
 	})
 	for _, occ := range ordered {
-		dl, resolved := downloadURL(occ.torrent.Tracker, occ.torrent.URL, w.abPasskey)
+		dl, resolved, linkless := w.journalLink(occ.torrent)
+		if linkless {
+			// Journaled without a grabbable link (AnimeBytes, no passkey):
+			// still report it so the caller can nudge the operator.
+			noPasskey = true
+		}
 		if !resolved {
-			noPasskey = noPasskey || (scopeOfKey(key) == upstreamAB && w.abPasskey == "")
 			continue
 		}
 		it = journalItem{
@@ -268,9 +275,43 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor En
 			// a fully unrenderable key never re-enters the journal as new.
 			continue
 		}
-		return it, true, false
+		return it, true, noPasskey
 	}
 	return journalItem{}, false, noPasskey
+}
+
+// journalLink resolves the download link for one journal render, splitting the
+// AnimeBytes-passkey case out of plain unresolvability. It reports:
+//
+//   - ok with a link: the normal case.
+//   - ok with an EMPTY link plus linkless=true: an AnimeBytes release that is
+//     structurally sound (resolvableForScope) while no indexer.ab_passkey is
+//     configured. The item is journaled anyway, GUID-only.
+//   - not ok: unresolvable for an upstream DATA reason (a foreign host, an
+//     id-less URL, an unknown tracker), which must stay refused.
+//
+// Journaling the link-less AnimeBytes item is what makes the passkey a
+// REVERSIBLE off switch on the GROWTH path too, matching the carry path's
+// existing stance (carryStoredItem / refreshCarriedItem, l-f161). Skipping it
+// lost the release permanently: journalIfNew folds the identity into the
+// never-pruned seen ledger before the render, so a release curated during a
+// passkey-less window could never journal as new afterwards - which made the
+// operator nudge ("set indexer.ab_passkey") promise a recovery that never
+// happened. Nothing unservable escapes: every feed persists GUID-only
+// (stripDownloadURLs) and the reader re-derives each served link from the GUID,
+// clearing the whole AnimeBytes feed while no passkey is configured
+// (rebuildABDownloadURLs). When the passkey arrives the journaled item becomes
+// grabbable on the next load, and it keeps aging out on the normal
+// feedJournalMaxAge window meanwhile.
+func (w *FeedWriter) journalLink(t *seadex.Torrent) (dl string, ok, linkless bool) {
+	if dl, resolved := downloadURL(t.Tracker, t.URL, w.abPasskey); resolved {
+		return dl, true, false
+	}
+	scope := trackerScope(t.Tracker)
+	if scope == upstreamAB && w.abPasskey == "" && resolvableForScope(scope, t.URL) {
+		return "", true, true
+	}
+	return "", false, false
 }
 
 // foldRefs applies the order-independent folds across all of a torrent's
@@ -300,7 +341,11 @@ func foldRefs(it *journalItem, refs []curatedRef, infoFor EntryInfoFunc) {
 // --- Rebuild accounting ---
 
 // journalStats counts one rebuild's journal transitions for the snapshot log
-// line.
+// line. abSkippedNoPasskey counts the AnimeBytes releases journaled without a
+// grabbable link because no indexer.ab_passkey is configured (they ARE in the
+// journal - see journalLink - and become grabbable when the passkey arrives);
+// it keeps its name because the snapshot WARN publishes it as
+// ab_releases_skipped, the attribute an operator's log queries already read.
 type journalStats struct {
 	added              int
 	pruned             int
@@ -451,17 +496,19 @@ func (p *journalPass) refreshCarriedItem(it *journalItem, refs []curatedRef) (jo
 	fresh, ok, noPasskey := p.w.renderJournalItem(it.Key, refs, p.infoFor)
 	if !ok {
 		if noPasskey {
-			// The AB passkey is the SECOND off switch for a tracker (beside
-			// blanking its Torznab URL), and it must be as reversible as the
-			// first: dropping the item here destroyed the AB journal on the
-			// first rebuild after the operator removed the passkey, and because
-			// the seen ledger is never pruned those releases could never return
-			// (l-f161). The only thing a missing passkey costs is the grabbable
-			// LINK, so keep the stored render instead - links are stripped at
-			// rest anyway (stripDownloadURLs) and the reader re-derives them,
-			// clearing the whole AB feed while no passkey is configured
-			// (rebuildABDownloadURLs), so nothing unservable is served. When the
-			// passkey comes back the carried item is renderable again.
+			// An AnimeBytes item whose fresh render failed for a second reason
+			// on every occurrence while no passkey was configured (a title that
+			// no longer synthesizes, an unpublishable page URL). The passkey
+			// itself no longer blocks a render - journalLink journals an
+			// AnimeBytes release GUID-only - so this arm is the residual case,
+			// and it keeps the same stance l-f161 established: the passkey is
+			// the tracker's SECOND off switch and must be as reversible as
+			// blanking its Torznab URL, so keep the stored render rather than
+			// dropping an item the never-pruned seen ledger can never re-admit.
+			// Links are stripped at rest anyway (stripDownloadURLs) and the
+			// reader re-derives them, clearing the whole AB feed while no
+			// passkey is configured (rebuildABDownloadURLs), so nothing
+			// unservable is served.
 			return p.carryStoredItem(it)
 		}
 		// The drop is PERMANENT: the never-pruned seen ledger still holds this
@@ -516,11 +563,11 @@ func (p *journalPass) refreshCarriedItem(it *journalItem, refs []curatedRef) (jo
 // served download link from that GUID). A still-curated item with such a GUID is
 // normally kept: refreshCarriedItem re-renders it and simply does not carry the
 // unproven GUID forward.
-// A missing AB passkey is not a drop either: the GUID-only record is carried while
-// the reader suppresses the ungrabbable feed, so the switch remains reversible. The
-// two combined are the one exception - a still-curated AnimeBytes item with no
-// passkey has no fresh render to fall back on, so refreshCarriedItem hands it to
-// carryStoredItem and the GUID gate drops it there.
+// A missing AB passkey is not a drop either: an AnimeBytes item re-renders
+// GUID-only (journalLink) while the reader suppresses the ungrabbable feed, so the
+// switch remains reversible. The residual exception is an AnimeBytes item whose
+// fresh render fails for a SECOND reason: refreshCarriedItem hands it to
+// carryStoredItem, whose GUID gate may drop it there.
 func (p *journalPass) carryJournal(prevFeed []journalItem, scope string) []journalItem {
 	kept := make([]journalItem, 0, len(prevFeed))
 	for i := range prevFeed {
@@ -538,12 +585,14 @@ func (p *journalPass) carryJournal(prevFeed []journalItem, scope string) []journ
 // when none of its identity signals is in seen - the tracker post date is
 // deliberately not the novelty key, since SeaDex routinely adds old torrents.
 // Every identity signal is recorded in seen whether or not the torrent could
-// be journaled (an AnimeBytes release skipped for a missing passkey, an
-// unconfigured tracker), so the journal only ever grows from curation that is
-// new AT THE TIME it is served; backfill is search's job. A torrent with no
-// journal key is the exception: it is unservable for an upstream DATA reason,
-// so nothing is recorded for it and a corrected record still journals as new
-// (see journalIfNew).
+// be journaled (an unconfigured tracker), so the journal only ever grows from
+// curation that is new AT THE TIME it is served; backfill is search's job. A
+// torrent with no journal key is the exception: it is unservable for an
+// upstream DATA reason, so nothing is recorded for it and a corrected record
+// still journals as new (see journalIfNew). An AnimeBytes release curated
+// while no passkey is configured is NOT such an exception either way: it is
+// journaled GUID-only (journalLink) so the passkey stays a reversible switch,
+// and its identity is recorded like any other journaled release.
 func (p *journalPass) growJournal(entries []seadex.Entry) (nyaa, ab []journalItem) {
 	for i := range entries {
 		for j := range entries[i].Torrents {
@@ -625,8 +674,10 @@ func (p *journalPass) journalIfNew(t *seadex.Torrent) (it journalItem, scope str
 // tracker (Nyaa or AnimeBytes without its Torznab URL) is skipped without
 // persisting anything for it (the README's off switch; its identity is
 // already in seen, so enabling it later starts from current novelty instead
-// of backfilling disabled-era curation), a missing AB passkey
-// counts toward the operator nudge, and an in-scope torrent with no parseable
+// of backfilling disabled-era curation), an AnimeBytes release journaled
+// GUID-only for want of a passkey counts toward the operator nudge (it IS
+// journaled - see journalLink - so the nudge's implied recovery actually
+// happens when the passkey arrives), and an in-scope torrent with no parseable
 // title counts as unresolvable so an upstream data change surfaces on the
 // snapshot log line instead of silently shrinking the feed (unresolvable is
 // counted only for configured scopes; the keyless case is refused and counted

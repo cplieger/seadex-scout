@@ -32,6 +32,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/trackerlink"
 )
 
 // --- Verdict + qualifier vocabulary ---
@@ -98,20 +99,24 @@ type Release struct {
 	// Warnings carries the canonical curation-warning tags (broken,
 	// incomplete) SeaDex curators put on the release, when any. A warned
 	// release stays listed - the report enumerates raw SeaDex data - but it
-	// is excluded from the verdict's best/alt group sets and from the grab
+	// is excluded from the verdict's BEST group set and from the grab
 	// links, rendering with the warning marker instead (see groupSets and
-	// the render layer).
+	// the render layer). It still counts on the descriptive ALT rung: a
+	// warning changes whether you should want the release, not whether
+	// SeaDex lists it.
 	Warnings []string `json:"warnings,omitempty"`
 	Best     bool     `json:"best"`
 	// Unobtainable marks a release the daemon's obtainability rule
 	// (filter.Obtainable) rejects as verdict evidence: no usable link, or a
 	// tracker the operator cannot use. Like a curation-warned release it
 	// stays listed - the report enumerates raw SeaDex data - but it drives
-	// neither the verdict's group sets nor the grab links, rendering with an
-	// "(unobtainable)" annotation instead (see groupSets and the render
-	// layer). Serialized so machine consumers can see WHY a visible best did
-	// not drive the verdict; omitted on the common obtainable release, so a
-	// fully obtainable row's JSON shape is unchanged.
+	// neither the verdict's BEST group set nor the grab links, rendering with
+	// an "(unobtainable)" annotation instead (see groupSets and the render
+	// layer); it does still count on the descriptive ALT rung, which asks
+	// only whether SeaDex lists what is already on disk. Serialized so
+	// machine consumers can see WHY a visible best did not drive the verdict;
+	// omitted on the common obtainable release, so a fully obtainable row's
+	// JSON shape is unchanged.
 	Unobtainable bool `json:"unobtainable,omitempty"`
 	// URLError marks a release whose SeaDex record carries a NON-EMPTY url that
 	// the publisher refused (classify.PublishURL returned ""): a foreign
@@ -126,6 +131,16 @@ type Release struct {
 	// Omitted on the common healthy release, so an ordinary row's JSON shape is
 	// unchanged.
 	URLError bool `json:"url_error,omitempty"`
+	// UnknownTracker marks a release whose record names a tracker this app's
+	// canonical table does not carry (or carries without a base URL), so no
+	// link could be built and the release drives no verdict. It is reported
+	// separately from URLError because the remedy is the OPPOSITE direction:
+	// nothing about the SeaDex record is wrong, and the fix is a seadex-scout
+	// change - add the tracker to internal/tracker's table and ship a release.
+	// Without it every release on a newly-adopted SeaDex tracker would silently
+	// read as an upstream data defect (l-f127). Omitted on the common healthy
+	// release, so an ordinary row's JSON shape is unchanged.
+	UnknownTracker bool `json:"unknown_tracker,omitempty"`
 }
 
 // Row is one anime's alignment record.
@@ -310,8 +325,8 @@ func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[strin
 
 // assess builds one row: classify the entry's releases, resolve the shared
 // comparison decision (align.Decide - the same decision the daemon's compare
-// pass projects, fed here with the SeaDex best and alt group sets minus
-// curation-warned and unobtainable releases - see groupSets), and
+// pass projects, fed here with the SeaDex best set minus curation-warned and
+// unobtainable releases and the full alt set - see groupSets), and
 // render it as the row's verdict and qualifier.
 func (a *Auditor) assess(m *match.Match) Row {
 	releases := a.classifyReleases(&m.Entry)
@@ -435,10 +450,14 @@ func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 			continue
 		}
 		rel := classify.Torrent(entry, t)
-		// One evaluation of the publisher: URL and URLError are two readings of
-		// the same decision, so the "a url error means no link" invariant is
-		// structural rather than a coincidence of two calls agreeing.
-		published := classify.PublishURL(t)
+		// One evaluation of the publisher: URL, URLError and UnknownTracker are
+		// three readings of the same decision, so the "a refusal means no link"
+		// invariant is structural rather than a coincidence of calls agreeing.
+		// The refusal REASON comes from the publisher itself rather than being
+		// re-derived here: an empty result alone cannot tell an upstream data
+		// defect from a tracker this app's table does not carry, and the two
+		// point the operator at different remedies (l-f127).
+		published, refusal := classify.PublishRefusal(t)
 		out = append(out, Release{
 			Tracker: rel.Tracker,
 			Group:   rel.Group,
@@ -451,9 +470,12 @@ func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 			// release-group name typed into the url field. Reported distinctly
 			// because "(unobtainable)" would read as "a tracker you cannot use",
 			// pointing the operator at their own config instead of at the record.
-			URLError:     strings.TrimSpace(t.URL) != "" && published == "",
-			Warnings:     release.CurationWarnings(t.Tags),
-			Unobtainable: !classify.Obtainable(&rel, t, a.includeAnimeBytes),
+			URLError: refusal == trackerlink.RefusalUnvouchableURL,
+			// An unknown tracker is the OTHER refusal, and its remedy is this
+			// app's, not the record's: nothing about the SeaDex data is wrong.
+			UnknownTracker: refusal == trackerlink.RefusalUnknownTracker,
+			Warnings:       release.CurationWarnings(t.Tags),
+			Unobtainable:   !classify.Obtainable(&rel, t, a.includeAnimeBytes),
 		})
 	}
 	return out
@@ -476,26 +498,42 @@ func (a *Auditor) seadexURL(aniListID int) string {
 // --- Group sets + row ordering ---
 
 // groupSets returns the distinct normalized groups among the best and the alt
-// releases. A curation-warned release contributes to neither set: counting it
-// would let a release SeaDex tags Broken/Incomplete drive the verdict (read
-// as a best to have or to want), where the daemon's compare pass excludes it
-// - the two flows must tell one story. An Unobtainable release (one the
-// daemon's filter.Obtainable rule rejects: no usable link, or a tracker the
-// operator cannot use) contributes to neither set for the same reason - the
+// releases. The two rungs answer DIFFERENT questions, so the annotation
+// classes gate only one of them.
+//
+// BEST is prescriptive - "is this the release to have?" - so an annotated
+// release (a curation warning SeaDex's own curators put on it, a url the
+// publisher refused, or the daemon's filter.Obtainable rule rejecting it as
+// unreachable) contributes nothing: counting it would let a Broken/Incomplete
+// or ungettable release read as a best to have or to want, where the daemon's
+// compare pass excludes it - the two flows must tell one story. The
 // eligibility here IS the daemon's filter.Obtainable, computed in
-// classifyReleases, not a mirror of it, so the two flows cannot drift when
-// the tracker table grows. The test IS the render layer's annotated()
-// predicate, so the set of classes that forfeit verdict evidence and the set
-// the SeaDex-best column marks are one list. Both stay visible in the row's
-// release list, annotated (the warning tags / "(url error)" / "(unobtainable)").
+// classifyReleases, not a mirror of it, so the two flows cannot drift when the
+// tracker table grows, and the test IS the render layer's annotated()
+// predicate, so the set of classes that forfeit BEST evidence and the set the
+// SeaDex-best column marks are one list.
+//
+// ALT is DESCRIPTIVE - "is what I already have something SeaDex lists?" - and
+// a curation warning or a broken link does not change that answer. Gating it
+// too made a row whose on-disk group SeaDex lists as a warned or ungettable
+// alt render have_unlisted, whose rendered explanation ("You have a release
+// SeaDex does not list as best or alt") was then false for that row, and the
+// Markdown table has no alt column to correct it from. The daemon-parity
+// argument does not reach this rung either: compare passes alt=nil, so it has
+// no alt concept for the two flows to agree on (l-f144). An annotated alt
+// still never becomes a grab link or a best-column recommendation - that
+// gating lives on the best rung and in the links cell, where the operator
+// acts. Both classes stay visible in the row's release list, annotated (the
+// warning tags / "(url error)" / "(unobtainable)").
 func groupSets(releases []Release) (best, alt []string) {
 	bestSeen, altSeen := map[string]struct{}{}, map[string]struct{}{}
 	for i := range releases {
-		if annotated(&releases[i]) {
-			continue
-		}
-		g := release.NormalizeGroup(releases[i].Group)
-		if releases[i].Best {
+		rel := &releases[i]
+		g := release.NormalizeGroup(rel.Group)
+		if rel.Best {
+			if annotated(rel) {
+				continue
+			}
 			addUnique(bestSeen, &best, g)
 		} else {
 			addUnique(altSeen, &alt, g)

@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cplieger/httpx/v4"
@@ -24,7 +25,6 @@ import (
 	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/degradation"
-	"github.com/cplieger/seadex-scout/internal/trackerlink"
 )
 
 const (
@@ -256,6 +256,12 @@ type Client struct {
 	log       *slog.Logger
 	baseURL   string
 	pageDelay time.Duration
+	// mu guards lastAccepted, the in-process catalogue-size baseline
+	// warnCatalogueShrink compares against. FetchEntries is serialized per
+	// process today (one cycle at a time under cycle.Exclusive), so the mutex
+	// buys a future concurrent caller safety rather than resolving contention.
+	mu           sync.Mutex
+	lastAccepted int
 }
 
 // NewClient returns a SeaDex client for baseURL (e.g. "https://releases.moe")
@@ -361,7 +367,6 @@ type fetchTotals struct {
 	reportedTotal  int
 	reportedPages  int
 	unparsedTimes  int
-	unusableURLs   int
 }
 
 // cursor is the keyset position of the catalogue walk: the (created, id) pair
@@ -579,28 +584,29 @@ func walkBudgetError(parent, walk context.Context, err error, page, fetched int)
 // whose non-empty updated timestamp failed to parse (zeroed, sorting to the
 // feed's tail) are surfaced as one aggregate WARN so an upstream format drift
 // that zeroes the whole catalogue is alertable without per-record noise.
-// Torrents whose URL is unusable (omitted/empty, or a non-empty value the
-// publisher dropped to "": a foreign host under a trusted label, an
-// unknown tracker, a malformed URL) are likewise surfaced as one aggregate
-// WARN — filter.Obtainable treats both cases as unobtainable — so a schema
-// drift that strips every release link is alertable instead of silent.
 //
-// That counter is the ONE reason this client reads a publish policy at all
-// (trackerlink.Publish, itself a pure leaf over the canonical tracker table):
-// the diagnostic is about UPSTREAM DATA QUALITY across the whole catalogue in
-// one pass, which only the client sees, and it is deliberately defined against
-// the same rule filter.Obtainable applies rather than a weaker
-// is-the-field-blank test that would miss a wholesale host drift. The client
-// carries no other link knowledge - the publish policy itself lives in
-// internal/trackerlink beside its hide half (l-f86).
+// The catalogue's TRACKER-LINK quality — how many torrents carry a URL the
+// publisher refuses, and how many of those name a tracker this build does not
+// know — is deliberately NOT diagnosed here: that judgment needs the publish
+// policy, which sits a layer ABOVE this wire client (internal/trackerlink,
+// reached through the classify.PublishURL/PublishRefusal adapter every
+// consumer of the SeaDex model shares). internal/scout owns it instead
+// (warnCatalogueLinkQuality), since it holds the whole catalogue the moment
+// either fetch path returns — the same one-pass view this client has (l-f156).
+// What stays here is what the WIRE contract alone can judge.
 //
 // The guards live in validateFinishedFetch and the diagnostics in
 // logFinishedFetchWarnings, so this function reads validate -> warn -> Debug.
+// One diagnostic stands apart because it is the only one no upstream number
+// vouches for: warnCatalogueShrink compares the accepted catalogue against the
+// previous one this PROCESS accepted, the independent evidence every
+// self-attested guard above lacks.
 func (c *Client) finishFetch(all []Entry, tot fetchTotals) ([]Entry, error) {
 	if err := validateFinishedFetch(len(all), tot); err != nil {
 		return nil, err
 	}
 	c.logFinishedFetchWarnings(len(all), tot)
+	c.warnCatalogueShrink(len(all))
 	c.log.Debug("seadex entries fetched", "entries", len(all),
 		"bytes", tot.bytes, "elements", tot.elements)
 	return all, nil
@@ -645,8 +651,8 @@ func validateFinishedFetch(count int, tot fetchTotals) error {
 
 // logFinishedFetchWarnings emits finishFetch's degradation diagnostics for a
 // catalogue that PASSED validateFinishedFetch: the alert-stable count mismatch,
-// the aggregate unparseable-timestamp and unusable-URL counters, and the
-// budget-mostly-spent capacity warning.
+// the aggregate unparseable-timestamp counter, and the budget-mostly-spent
+// capacity warning.
 func (c *Client) logFinishedFetchWarnings(count int, tot fetchTotals) {
 	// Belt to validateFinishedFetch's no-reported-total arm, which already
 	// errors when the responses never stated a count: a response carrying no
@@ -660,10 +666,6 @@ func (c *Client) logFinishedFetchWarnings(count int, tot fetchTotals) {
 		c.log.Warn("seadex updated timestamps unparseable; feed newest-first ordering degraded",
 			"count", tot.unparsedTimes, "entries", count)
 	}
-	if tot.unusableURLs > 0 {
-		c.log.Warn("seadex torrent URLs unusable; affected findings and feed items carry no release link",
-			"count", tot.unusableURLs, "entries", count)
-	}
 	if tot.bytes*budgetWarnDenominator >= maxTotalBytes*budgetWarnNumerator ||
 		tot.elements*budgetWarnDenominator >= maxTotalElements*budgetWarnNumerator {
 		c.log.Warn("seadex fetch budget mostly spent; raise the caps before the catalogue outgrows them",
@@ -672,9 +674,49 @@ func (c *Client) logFinishedFetchWarnings(count int, tot fetchTotals) {
 	}
 }
 
+// warnCatalogueShrink warns when an ACCEPTED catalogue is a suspicious
+// truncation of the previous one THIS PROCESS accepted, then adopts it as the
+// new baseline.
+//
+// It exists because every other completeness check in this client is
+// SELF-ATTESTED: the below-half shrink guard, chunkComplete's outstanding-items
+// arm and the count mismatch all compare the collected count against the
+// totalItems the SAME responses reported. An upstream that serves 200 entries
+// and reports totalItems=200 - a partially restored PocketBase, a poisoned CDN
+// response, a compromised instance - therefore satisfies every guard and every
+// WARN gate, and FetchEntries returns the truncated catalogue as a CLEAN
+// success: downstream resolves every finding whose entry vanished and rebuilds
+// feed.json from what remains. A count the upstream did not attest to is the
+// only independent evidence available, and the previous accepted count is the
+// cheapest one.
+//
+// It is a diagnostic only, and it adopts the new count whether or not it
+// warned: the catalogue is still returned, so a legitimate upstream shrink
+// warns once and then settles rather than latching forever. The resident
+// daemon holds one client across cycles (build.go wires it once per process),
+// so this is the deployed shape's signal; a one-shot `poll` or `report`
+// process has no previous fetch and stays silent. The runner-up shape -
+// PERSIST the baseline in state.json and REFUSE a shrunken catalogue on a
+// streak, like the mapping-refresh and library-walk guards - was deliberately
+// not taken here: it needs a state field and would newly degrade cycles that
+// succeed today, so how strict this should be is the operator's call rather
+// than a diagnostic's. The trigger is the app-wide shrink fraction
+// (degradation.Shrunk), the same one validateFinishedFetch applies against the
+// reported total, rather than a second threshold of its own.
+func (c *Client) warnCatalogueShrink(count int) {
+	c.mu.Lock()
+	prev := c.lastAccepted
+	c.lastAccepted = count
+	c.mu.Unlock()
+	if prev > 0 && degradation.Shrunk(count, prev) {
+		c.log.Warn("seadex catalogue shrank against this process's previous fetch; upstream may be serving a truncated catalogue",
+			"got", count, "previous", prev)
+	}
+}
+
 // fetchAndAppend fetches one chunk at the walk's cursor, appends its entries,
 // updates the running totals (cumulative bytes and decoded elements, the API's
-// reported item total, and the unparseable-updated and unusable-URL counters),
+// reported item total, and the unparseable-updated counter),
 // enforces the cumulative-byte, cumulative-element, and entry-count caps,
 // validates the chunk's entry identities (validatePageIdentities),
 // advances the cursor past the chunk when the walk continues, and reports
@@ -787,17 +829,15 @@ func validatePageIdentities(items []pbEntry, page int, tot *fetchTotals) error {
 }
 
 // appendPageEntries converts one page's decoded records into public entries,
-// charging the unparseable-updated and unusable-URL counters as it appends.
+// charging the unparseable-updated counter as it appends. The tracker-link
+// counters that used to be charged here moved to internal/scout with the
+// diagnostic itself (see finishFetch, l-f156), which is what lets this client
+// stay a pure releases.moe wire+contract leaf.
 func appendPageEntries(all []Entry, items []pbEntry, tot *fetchTotals) []Entry {
 	for i := range items {
 		entry := items[i].toEntry()
 		if entry.Updated.IsZero() && strings.TrimSpace(items[i].Updated) != "" {
 			tot.unparsedTimes++
-		}
-		for j := range entry.Torrents {
-			if trackerlink.Publish(entry.Torrents[j].Tracker, entry.Torrents[j].URL) == "" {
-				tot.unusableURLs++
-			}
 		}
 		all = append(all, entry)
 	}

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cplieger/seadex-scout/internal/release"
+	"github.com/cplieger/seadex-scout/internal/tracker"
 )
 
 // FuzzPublish fuzzes the unsafe-scheme and host-binding gate over the
@@ -14,8 +14,8 @@ import (
 // result); a non-empty result never carries a non-http(s) scheme (javascript:,
 // data:, file: must never become clickable links in findings/reports/feeds);
 // a non-empty result's host is always bound to a canonical tracker host from
-// the release tracker table (so a regression that drops the
-// release.LookupTrackerByHost gate cannot let https://evil.example/x or a
+// the internal/tracker table (so a regression that drops the
+// tracker.LookupByHost gate cannot let https://evil.example/x or a
 // suffix-confusion host through); an absolute http(s) input that survives the
 // tracker host-binding gate is returned unchanged apart from trimming and the
 // cleartext-to-https scheme upgrade (l-f89); and
@@ -53,14 +53,14 @@ func FuzzPublish(f *testing.F) {
 	f.Add("Chihiro", "AB")
 	f.Add("/view?", "Nyaa")
 	f.Add("torrents.php?id=1&torrentid=2", "Nyaa")
-	f.Fuzz(func(t *testing.T, rawURL, tracker string) {
-		out := Publish(tracker, rawURL)
+	f.Fuzz(func(t *testing.T, rawURL, trackerName string) {
+		out := Publish(trackerName, rawURL)
 		trimmed := strings.TrimSpace(rawURL)
 		// Security invariant: a protocol-relative URL is never usable (it
 		// would resolve against whatever page hosts the link).
 		if strings.HasPrefix(trimmed, "//") {
 			if out != "" {
-				t.Errorf("Publish(%q, tracker %q) = %q, want empty for protocol-relative URL", rawURL, tracker, out)
+				t.Errorf("Publish(%q, tracker %q) = %q, want empty for protocol-relative URL", rawURL, trackerName, out)
 			}
 			return
 		}
@@ -69,25 +69,25 @@ func FuzzPublish(f *testing.F) {
 		}
 		parsed, err := url.Parse(out)
 		if err != nil {
-			t.Errorf("Publish(%q, tracker %q) = %q, not parseable: %v", rawURL, tracker, out, err)
+			t.Errorf("Publish(%q, tracker %q) = %q, not parseable: %v", rawURL, trackerName, out, err)
 			return
 		}
 		// Security invariant: a usable link never retains a userinfo
 		// authority (https://trusted@evil.example/x must be rejected).
 		if parsed.User != nil {
-			t.Errorf("Publish(%q, tracker %q) = %q retains userinfo authority", rawURL, tracker, out)
+			t.Errorf("Publish(%q, tracker %q) = %q retains userinfo authority", rawURL, trackerName, out)
 		}
 		// Security invariant: a usable link's host is always a canonical
 		// tracker host (or a real dot-delimited subdomain of one) - the
 		// host-binding gate a compromised SeaDex response must not bypass.
-		if _, ok := release.LookupTrackerByHost(parsed.Hostname()); !ok {
-			t.Errorf("Publish(%q, tracker %q) = %q has non-canonical host %q", rawURL, tracker, out, parsed.Hostname())
+		if _, ok := tracker.LookupByHost(parsed.Hostname()); !ok {
+			t.Errorf("Publish(%q, tracker %q) = %q has non-canonical host %q", rawURL, trackerName, out, parsed.Hostname())
 		}
 		lower := strings.ToLower(out)
 		// Security invariant: any scheme on the output must be http or https.
 		if i := strings.Index(out, ":"); i >= 0 && !strings.Contains(out[:i], "/") {
 			if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
-				t.Errorf("Publish(%q, tracker %q) = %q carries a non-http(s) scheme", rawURL, tracker, out)
+				t.Errorf("Publish(%q, tracker %q) = %q carries a non-http(s) scheme", rawURL, trackerName, out)
 			}
 		}
 		// Passthrough: an absolute http(s) input comes back unchanged (trimmed),
@@ -108,9 +108,9 @@ func FuzzPublish(f *testing.F) {
 			}
 		}
 		// Idempotence: the output is a fixed point for the same tracker.
-		again := Publish(tracker, out)
+		again := Publish(trackerName, out)
 		if again != out {
-			t.Errorf("Publish not idempotent for tracker %q: %q -> %q -> %q", tracker, rawURL, out, again)
+			t.Errorf("Publish not idempotent for tracker %q: %q -> %q -> %q", trackerName, rawURL, out, again)
 		}
 	})
 }

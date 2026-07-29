@@ -12,6 +12,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/tracker"
 )
 
 // TestCandidateStableKeyBoundsOversizedComponents pins the size bound on the
@@ -23,7 +24,7 @@ import (
 func TestCandidateStableKeyBoundsOversizedComponents(t *testing.T) {
 	oversized := func(tag string) candidate {
 		return candidate{
-			rel: release.Release{Group: "Grp" + tag, Tracker: "Nyaa", Resolution: "1080p", TrackerType: release.TrackerPublic},
+			rel: release.Release{Group: "Grp" + tag, Tracker: "Nyaa", Resolution: "1080p", TrackerType: tracker.Public},
 			torrent: seadex.Torrent{
 				Tracker:  "Nyaa",
 				InfoHash: tag,
@@ -61,7 +62,7 @@ func TestCandidateStableKeyDistinguishesEveryComponent(t *testing.T) {
 	base := candidate{
 		rel: release.Release{
 			Group: "SubsPlease", Tracker: "Nyaa", Resolution: "1080p", Codec: "x265",
-			Kind: release.KindEncode, Reason: "encode from name", TrackerType: release.TrackerPublic,
+			Kind: release.KindEncode, Reason: "encode from name", TrackerType: tracker.Public,
 		},
 		torrent: seadex.Torrent{Tracker: "Nyaa", InfoHash: "aaaa", URL: "https://nyaa.si/view/1"},
 	}
@@ -93,18 +94,18 @@ func TestCandidateStableKeyDistinguishesEveryComponent(t *testing.T) {
 
 func TestRepresentativePrefersResolutionThenPublic(t *testing.T) {
 	higherRes := []candidate{
-		{rel: release.Release{Resolution: "720p", TrackerType: release.TrackerPublic}},
-		{rel: release.Release{Resolution: "1080p", TrackerType: release.TrackerPrivate}},
+		{rel: release.Release{Resolution: "720p", TrackerType: tracker.Public}},
+		{rel: release.Release{Resolution: "1080p", TrackerType: tracker.Private}},
 	}
 	if rep := representative(higherRes); rep.rel.Resolution != "1080p" {
 		t.Errorf("headline resolution = %q, want highest 1080p", rep.rel.Resolution)
 	}
 
 	tie := []candidate{
-		{rel: release.Release{Resolution: "1080p", TrackerType: release.TrackerPrivate}},
-		{rel: release.Release{Resolution: "1080p", TrackerType: release.TrackerPublic}},
+		{rel: release.Release{Resolution: "1080p", TrackerType: tracker.Private}},
+		{rel: release.Release{Resolution: "1080p", TrackerType: tracker.Public}},
 	}
-	if rep := representative(tie); rep.rel.TrackerType != release.TrackerPublic {
+	if rep := representative(tie); rep.rel.TrackerType != tracker.Public {
 		t.Errorf("on a resolution tie the public tracker must win, got %q", rep.rel.TrackerType)
 	}
 
@@ -114,11 +115,11 @@ func TestRepresentativePrefersResolutionThenPublic(t *testing.T) {
 	// duplicate alert plus a false resolution) for an unchanged finding.
 	forward := []candidate{
 		{
-			rel:     release.Release{Group: "GrpA", Resolution: "1080p", TrackerType: release.TrackerPublic},
+			rel:     release.Release{Group: "GrpA", Resolution: "1080p", TrackerType: tracker.Public},
 			torrent: seadex.Torrent{Tracker: "Nyaa", InfoHash: "aaa", URL: "https://nyaa.si/view/1"},
 		},
 		{
-			rel:     release.Release{Group: "GrpB", Resolution: "1080p", TrackerType: release.TrackerPublic},
+			rel:     release.Release{Group: "GrpB", Resolution: "1080p", TrackerType: tracker.Public},
 			torrent: seadex.Torrent{Tracker: "Nyaa", InfoHash: "bbb", URL: "https://nyaa.si/view/2"},
 		},
 	}
@@ -188,6 +189,79 @@ func TestObtainableLinksDedupesAndPrefixesPrivateURL(t *testing.T) {
 	}
 }
 
+// TestObtainableLinksCarriesRawABEvidence pins the producer half of the app's
+// single AnimeBytes grading site (h-f43): every link leaves compare carrying
+// the grade classify.ABEvidence read from the RAW SeaDex record, because
+// notify's alert-slot routing now reads that field instead of re-grading the
+// published URL - which would grade the value publishing rewrote.
+//
+// The two rows that matter are a plain public source (no AB evidence) and a
+// mislabeled one: a record labeled with a public tracker whose url carries the
+// AnimeBytes torrent-page shape publishes as an animebytes.tv link, so it must
+// arrive graded ABDefinite and be routed to the AB slot rather than offered as
+// the clickable public link.
+func TestObtainableLinksCarriesRawABEvidence(t *testing.T) {
+	cands := []candidate{
+		{
+			rel:     release.Release{Tracker: "Nyaa", TrackerType: tracker.Public},
+			torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
+		},
+		{
+			rel:     release.Release{Tracker: "Nyaa", TrackerType: tracker.Public},
+			torrent: seadex.Torrent{Tracker: "Nyaa", URL: "/torrents.php?id=1&torrentid=2"},
+		},
+	}
+
+	links := obtainableLinks(cands, "")
+
+	want := map[string]filter.ABEvidence{
+		"https://nyaa.si/view/1":                              filter.ABNone,
+		"https://animebytes.tv/torrents.php?id=1&torrentid=2": filter.ABDefinite,
+	}
+	if len(links) != len(want) {
+		t.Fatalf("link count = %d, want %d: %+v", len(links), len(want), links)
+	}
+	for i := range links {
+		grade, known := want[links[i].URL]
+		if !known {
+			t.Errorf("unexpected link %+v", links[i])
+			continue
+		}
+		if links[i].AB != grade {
+			t.Errorf("link %q AB = %d, want %d (graded from the raw record, not the published URL)", links[i].URL, links[i].AB, grade)
+		}
+	}
+}
+
+// TestObtainableLinksDuplicateKeepsStrongestABEvidence pins the dedupe's
+// fail-closed merge: two records that publish the SAME (tracker, URL) keep the
+// strongest AnimeBytes evidence either of them carried, so record order cannot
+// decide whether the link is announced as AnimeBytes. In production the
+// classified release's tracker IS the record's own label (classify.Torrent
+// copies it), so the two grades agree and this is a structural guard rather
+// than an observed shape - which is exactly why it is pinned here.
+func TestObtainableLinksDuplicateKeepsStrongestABEvidence(t *testing.T) {
+	cands := []candidate{
+		{
+			rel:     release.Release{Tracker: "Nyaa", TrackerType: tracker.Public},
+			torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
+		},
+		{
+			rel:     release.Release{Tracker: "Nyaa", TrackerType: tracker.Public},
+			torrent: seadex.Torrent{Tracker: "AB", URL: "https://nyaa.si/view/1"},
+		},
+	}
+
+	links := obtainableLinks(cands, "")
+
+	if len(links) != 1 {
+		t.Fatalf("link count = %d, want the duplicate deduped: %+v", len(links), links)
+	}
+	if links[0].AB != filter.ABDefinite {
+		t.Errorf("deduped link AB = %d, want the stronger ABDefinite grade the second record carried", links[0].AB)
+	}
+}
+
 // TestObtainableLinksOrdersHeadlineGroupFirst pins the half of the link-order
 // contract no other test reaches: the headline candidate's OWN sources sort
 // ahead of every other group's, which is what makes notify.trackerURLs fill
@@ -199,11 +273,11 @@ func TestObtainableLinksDedupesAndPrefixesPrivateURL(t *testing.T) {
 func TestObtainableLinksOrdersHeadlineGroupFirst(t *testing.T) {
 	pool := []candidate{
 		{
-			rel:     release.Release{Group: "ZGroup", Resolution: "1080p", Tracker: "Nyaa", TrackerType: release.TrackerPublic},
+			rel:     release.Release{Group: "ZGroup", Resolution: "1080p", Tracker: "Nyaa", TrackerType: tracker.Public},
 			torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/9"},
 		},
 		{
-			rel:     release.Release{Group: "AGroup", Resolution: "720p", Tracker: "Nyaa", TrackerType: release.TrackerPublic},
+			rel:     release.Release{Group: "AGroup", Resolution: "720p", Tracker: "Nyaa", TrackerType: tracker.Public},
 			torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
 		},
 	}

@@ -10,8 +10,8 @@ import (
 
 	"github.com/cplieger/arrapi"
 	"github.com/cplieger/seadex-scout/internal/anilist"
+	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/compare"
-	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/notify"
@@ -63,7 +63,7 @@ func TestCycleEmptyFirstWalkSeedsIncompleteBaseline(t *testing.T) {
 	s := New(&Deps{
 		Logger:       scoutTestLogger(),
 		Store:        store,
-		Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping:      fakeMapping{},
 		SeaDex:       seaDex,
 		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
@@ -162,7 +162,7 @@ func TestCyclePartialWalkEscalatesAfterRepeatedPartialWalks(t *testing.T) {
 			s := New(&Deps{
 				Logger:       logger,
 				Store:        store,
-				Library:      library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+				Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 				Mapping:      fakeMapping{},
 				SeaDex:       &fakeSeaDex{entries: append(seadexFrierenEntry(), secondSeaDexEntry())},
 				Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
@@ -227,7 +227,7 @@ func TestCycleSeaDexFailureSanitizesLoggedErrorAtBothSites(t *testing.T) {
 	s := New(&Deps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{err: errors.New(hostile)},
 	})
@@ -260,5 +260,153 @@ func TestCycleSeaDexFailureSanitizesLoggedErrorAtBothSites(t *testing.T) {
 	}
 	if _, ok := store.st.Findings["prior"]; !ok {
 		t.Errorf("persisted findings = %+v, want the prior finding preserved through the outage", store.st.Findings)
+	}
+}
+
+// TestCycleTagFilterEmptiedSideClosesDegraded pins the completion-line verdict
+// for a side arr_tags filtering emptied: the walk succeeded, so the cycle stays
+// HEALTHY (a config typo must not restart-loop the container), but it closes
+// "cycle degraded" with reason=tags-emptied-side instead of "cycle complete".
+// Without it the steady state was a daemon watching nothing while every cycle
+// read fully successful: the shrink guard fires for at most one cycle (it then
+// persists the empty snapshot as the baseline) and never on a first-ever boot,
+// so the walker's per-cycle WARN was the only signal. A walk whose filter keeps
+// something still closes clean, so the arm cannot invert.
+func TestCycleTagFilterEmptiedSideClosesDegraded(t *testing.T) {
+	newScout := func(logger *slog.Logger, sonarr *fakeSonarr, include []string) *Scout {
+		return New(&Deps{
+			Logger: logger,
+			Store: &fakeStore{st: state.State{
+				Mapping:   twoRecordMappingCache(),
+				Findings:  map[string]notify.Alerted{"prior": priorAlerted("Existing", 154587)},
+				Baselined: true,
+			}},
+			Library: arrwalk.NewWalker(&arrwalk.Config{
+				Sonarr: sonarr, IncludeTags: include, Logger: scoutTestLogger(),
+			}),
+			Mapping:      fakeMapping{},
+			SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
+			Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
+			Comparer:     compare.NewComparer(compare.Config{}),
+			Notifier:     notify.NewNotifier(scoutTestLogger()),
+			AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
+		})
+	}
+	// Sonarr lists a series but carries no tags at all, so the configured
+	// include label resolves to nothing and the side contributes zero items.
+	sonarr := func() *fakeSonarr {
+		return &fakeSonarr{
+			series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
+			files:  map[int][]arrapi.EpisodeFile{7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}}},
+		}
+	}
+
+	logger, recorder := capture.New()
+	if healthy := newScout(logger, sonarr(), []string{"anime"}).Cycle(context.Background()); !healthy {
+		t.Fatal("emptied-side cycle healthy=false, want true (the walk succeeded; a dead filter must not restart-loop the container)")
+	}
+	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "tags-emptied-side" {
+		t.Errorf("degraded reasons = %v, want [tags-emptied-side]", reasons)
+	}
+	if n := recorder.CountExact("cycle complete"); n != 0 {
+		t.Errorf("'cycle complete' count = %d, want 0 (a side watching nothing must not read fully successful)", n)
+	}
+
+	cleanLogger, cleanRecorder := capture.New()
+	if healthy := newScout(cleanLogger, sonarr(), nil).Cycle(context.Background()); !healthy {
+		t.Fatal("unfiltered cycle healthy=false, want true")
+	}
+	if n := cleanRecorder.CountExact("cycle complete"); n != 1 {
+		t.Errorf("unfiltered 'cycle complete' count = %d, want 1 (no filter, nothing emptied); reasons = %v",
+			n, degradedReasons(cleanRecorder))
+	}
+}
+
+// TestWarnCatalogueLinkQuality pins the catalogue-wide tracker-link
+// diagnostics the orchestrator owns (moved here from the seadex client with the
+// diagnostic itself, l-f156): a torrent whose URL the publisher refuses -
+// omitted/empty, a foreign host under a trusted tracker label, or a tracker
+// this build does not know - is counted into ONE aggregate WARN so a tracker
+// host migration or schema drift that strips every release link is alertable
+// from Loki, while the unknown-tracker subset gets its own line naming the
+// remedy only a seadex-scout release can apply. A usable canonical-host URL
+// must count in neither.
+func TestWarnCatalogueLinkQuality(t *testing.T) {
+	entries := []seadex.Entry{
+		{AniListID: 1, Torrents: []seadex.Torrent{
+			{Tracker: "Nyaa", URL: "https://evil.example/view/1"},
+			{Tracker: "SomeRandomTracker", URL: "https://example.com/x"},
+			{Tracker: "Nyaa", URL: ""},
+		}},
+		{AniListID: 2, Torrents: []seadex.Torrent{
+			{Tracker: "Nyaa", URL: "https://nyaa.si/view/123"},
+		}},
+	}
+
+	logger, recorder := capture.New()
+	New(&Deps{Logger: logger}).warnCatalogueLinkQuality(entries)
+
+	const (
+		aggregate = "seadex torrent URLs unusable; affected findings and feed items carry no release link"
+		unknown   = "seadex trackers unknown to this build; add them to seadex-scout's tracker table to publish their links"
+	)
+	for _, tc := range []struct {
+		msg       string
+		wantCount int64
+	}{
+		{aggregate, 3},
+		{unknown, 1},
+	} {
+		if got := recorder.CountExact(tc.msg); got != 1 {
+			t.Errorf("%q logged %d times, want 1 aggregate line", tc.msg, got)
+			continue
+		}
+		var count, entryCount int64
+		for _, r := range recorder.Records() {
+			if r.Message != tc.msg {
+				continue
+			}
+			r.Attrs(func(a slog.Attr) bool {
+				switch a.Key {
+				case "count":
+					count = a.Value.Int64()
+				case "entries":
+					entryCount = a.Value.Int64()
+				}
+				return true
+			})
+		}
+		if count != tc.wantCount || entryCount != 2 {
+			t.Errorf("%q carries count=%d entries=%d, want count=%d entries=2",
+				tc.msg, count, entryCount, tc.wantCount)
+		}
+	}
+}
+
+// TestWarnCatalogueLinkQualitySilentWhenEveryLinkPublishes pins the OFF state
+// of both alert-stable lines: a catalogue whose every torrent publishes - and
+// the empty catalogue a failed fetch returns, which the client used to gate on
+// success - must emit neither, so the Loki alerts keyed on them cannot fire on
+// a clean cycle or on an upstream outage.
+func TestWarnCatalogueLinkQualitySilentWhenEveryLinkPublishes(t *testing.T) {
+	for name, entries := range map[string][]seadex.Entry{
+		"clean": {{AniListID: 1, Torrents: []seadex.Torrent{
+			{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
+			{Tracker: "AB", URL: "/torrents.php?id=1&torrentid=2"},
+		}}},
+		"failed fetch returns no entries": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			logger, recorder := capture.New()
+			New(&Deps{Logger: logger}).warnCatalogueLinkQuality(entries)
+			for _, msg := range []string{
+				"seadex torrent URLs unusable; affected findings and feed items carry no release link",
+				"seadex trackers unknown to this build; add them to seadex-scout's tracker table to publish their links",
+			} {
+				if got := recorder.CountExact(msg); got != 0 {
+					t.Errorf("logged %q %d times, want 0", msg, got)
+				}
+			}
+		})
 	}
 }

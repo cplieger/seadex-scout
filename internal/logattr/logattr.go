@@ -1,8 +1,11 @@
 // Package logattr renders untrusted strings as bounded, sanitized slog
-// attribute values. It is the ONE home for the app's slog-attribute volume
-// policy: the per-attribute byte budget, the "..." truncation marker, the
-// rune-sanitization pass, and the cap-before-sanitize order that makes the
-// budget bound the WORK rather than just the output.
+// attribute values. It is the ONE home for the app's STRUCTURED-attribute
+// volume policy: the MaxBytes per-attribute byte budget, the "..." truncation
+// marker, the rune-sanitization pass that keeps CR/LF (the keepCRLF policy a
+// JSON sink needs), and the cap-before-sanitize order that makes the budget
+// bound the WORK rather than just the output - including the multi-source
+// Joiner, the only shape that bounds a joined aggregate without materializing
+// it first.
 //
 // Every slog emitter of upstream-derived text consumes it - the daemon's
 // notification path (internal/notify), the season report's per-row lines
@@ -12,6 +15,24 @@
 // SeaDex admits up to 512 torrents per entry, each with a multi-MB group name
 // or URL) and a sanitization, invalid-UTF-8, truncation, or allocation-bound
 // fix must not have to be reproduced in four packages.
+//
+// It is NOT the home for the SINGLE-LINE bounded preset. A value that lands
+// inline in one message string (internal/indexer's capLogText over Torznab
+// query params and upstream <error> text, internal/anilist's
+// sanitizeUpstreamMessage over a GraphQL error message) must also lose CR/LF,
+// and it takes a per-site byte budget rather than MaxBytes; that composition
+// lives in the shared runesafe library
+// (runesafe.SanitizeSingleLineBounded), which is where a fix to it belongs,
+// and both app-side helpers are one-line delegates to it. The ORDER difference
+// between the two homes is deliberate on both sides, not drift: runesafe's
+// preset caps the SANITIZED form because its cap must survive
+// sanitization-growth for a value already known to be small, while this
+// package caps first because a multi-MB SeaDex attribute must never walk the
+// sanitizer at all. Runner-up, if the two are ever unified: grow a
+// Line(s string, maxBytes int) here carrying this package's order under the
+// strict single-line policy, and reduce those two helpers to call sites of it -
+// rejected for now because it hand-rolls a second composition beside the
+// library preset and changes what both log sites emit for an oversized value.
 //
 // It is a dependency-free leaf: only runesafe (the shared rune policy) and the
 // stdlib.

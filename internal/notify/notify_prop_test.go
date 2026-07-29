@@ -39,7 +39,8 @@ func TestTrackerURLsRoutingProperty(t *testing.T) {
 			}
 		}
 
-		pub, ab := trackerURLs(links)
+		pub, abLink := trackerURLs(gradedLinks(links...))
+		ab := abLink.url
 
 		find := func(url string) *compare.ReleaseLink {
 			for i := range links {
@@ -52,7 +53,7 @@ func TestTrackerURLsRoutingProperty(t *testing.T) {
 		if pub.url != "" {
 			if l := find(pub.url); l == nil {
 				rt.Fatalf("public = %q is not an input URL", pub.url)
-			} else if filter.ClassifyAB(l.Tracker, l.URL) != filter.ABNone {
+			} else if l.AB != filter.ABNone {
 				rt.Fatalf("public slot carries a link with AnimeBytes evidence %+v", *l)
 			}
 			// The public slot must name the tracker it came from, so the alert
@@ -80,8 +81,14 @@ func TestTrackerURLsRoutingProperty(t *testing.T) {
 		if ab != "" && find(ab) == nil {
 			rt.Fatalf("ab = %q is not an input URL", ab)
 		}
+		// The AB slot must always carry a name to render beside its URL: the
+		// alert labels ab_url with ab_tracker, and an unnameable link falls
+		// back to AnimeBytes (the slot's own meaning) rather than to "".
+		if ab != "" && abLink.abTracker() == "" {
+			rt.Fatalf("ab_url %q carries no ab_tracker to label it", ab)
+		}
 		for i := range links {
-			if filter.ClassifyAB(links[i].Tracker, links[i].URL) == filter.ABDefinite {
+			if links[i].AB == filter.ABDefinite {
 				if ab != links[i].URL {
 					rt.Fatalf("ab = %q, want the first definite AnimeBytes link %q", ab, links[i].URL)
 				}

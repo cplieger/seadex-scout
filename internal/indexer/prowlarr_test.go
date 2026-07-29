@@ -1078,8 +1078,37 @@ func timeoutOnFirstCall(t *testing.T, stallBody bool) (*httptest.Server, func() 
 	}
 }
 
-// TestSearchRetriesAttemptTimeoutAwaitingHeaders pins that the client-owned
-// per-attempt timeout (http.Client.Timeout, wired from UpstreamAttemptTimeout)
+// TestSearchBoundsAttemptWithoutClientTimeout pins that the per-attempt bound
+// is this package's own, not an obligation on whoever built the client: with a
+// client carrying NO http.Client.Timeout at all, a stalled upstream still ends
+// the attempt (fetchAndParse's attempt context) and the search still spends its
+// remaining budget and succeeds. Before the deadline moved in here, the number
+// lived only in an exported constant the composition root had to wire into
+// http.Client.Timeout, so a client built without it made the retry tree - and
+// server.go's writeTimeout, which is sized against it - unbounded in practice.
+func TestSearchBoundsAttemptWithoutClientTimeout(t *testing.T) {
+	srv, calls := timeoutOnFirstCall(t, false)
+	defer srv.Close()
+
+	restore := upstreamAttemptTimeout
+	upstreamAttemptTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { upstreamAttemptTimeout = restore })
+
+	client := srv.Client()
+	client.Timeout = 0 // no transport backstop: the package must bound the attempt
+	u := &upstream{http: client, log: slog.Default(), name: upstreamNyaa, feed: srv.URL}
+	if _, _, err := u.search(context.Background(), url.Values{"t": {"search"}, "q": {"x"}}); err != nil {
+		t.Fatalf("search with a package-bounded attempt = %v, want the retry to succeed", err)
+	}
+	if got := calls(); got != 2 {
+		t.Errorf("upstream requests = %d, want 2 (the package's own attempt deadline fired and was retried)", got)
+	}
+}
+
+// TestSearchRetriesAttemptTimeoutAwaitingHeaders pins that a per-attempt
+// timeout (the package's own attempt deadline, or a client-level
+// http.Client.Timeout backstop - this test drives the latter, which is the
+// cheaper timer to shorten)
 // participates in the bounded retry budget instead of ending the search after
 // one attempt. The timer's error matches context.DeadlineExceeded, which
 // httpx.IsTransient treats as terminal, so an unnormalized attempt timeout

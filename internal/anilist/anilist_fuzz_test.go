@@ -5,6 +5,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/cplieger/seadex-scout/internal/mediatype"
 	"github.com/cplieger/seadex-scout/internal/titlekey"
 )
 
@@ -22,7 +23,8 @@ func FuzzParseMedia(f *testing.F) {
 	f.Add([]byte(`{bad`))
 	f.Add([]byte(`{"data":{"Media":{"format":"MOVIE","startDate":{"year":2020},"title":{"romaji":"A"}}}}`))
 	f.Add([]byte(`{"data":{"Media":{"format":"TV","title":{"romaji":"` + strings.Repeat("a", maxTitleBytes+1) + `"}}}}`))
-	f.Add([]byte(`{"data":{"Media":{"format":"` + strings.Repeat("F", maxFormatBytes+1) + `","title":{"romaji":"A"}}}}`))
+	f.Add([]byte(`{"data":{"Media":{"format":"` + strings.Repeat("F", 65) + `","title":{"romaji":"A"}}}}`))
+	f.Add([]byte(`{"data":{"Media":{"format":"tv\n","title":{"romaji":"A"}}}}`))
 	f.Add([]byte(`{"data":{"Media":null},"errors":[{"message":"Not Found.","status":404}]}`))
 	f.Add([]byte(`{"data":{"Media":{"format":"TV","title":{"romaji":"A"}}},"errors":[{"message":"partial"}]}`))
 	f.Add([]byte(`{"data":{"Media":{"title":{"romaji":" ","english":"\t"}}}}`))
@@ -102,10 +104,13 @@ func FuzzParseMediaPage(f *testing.F) {
 	})
 }
 
-// assertMediaBounded restates the per-field wire limits as a fuzz invariant:
-// an error-free parse must never hand the matcher's memo (and, through it,
-// state.json) a title or format that exceeds the documented byte caps -- the
-// resource-exhaustion defense toMedia exists to enforce.
+// assertMediaBounded restates the per-field wire rules as a fuzz invariant: an
+// error-free parse must never hand the matcher's memo (and, through it,
+// state.json) a title that exceeds the documented byte cap -- the
+// resource-exhaustion defense toMedia exists to enforce -- and its format must
+// be a member of the shared mediatype vocabulary or the unknown sentinel, which
+// is what bounds that field by construction now that a defective format costs
+// only the arr hint (l-f140).
 func assertMediaBounded(t *testing.T, m Media, raw []byte) {
 	t.Helper()
 	for _, title := range m.Titles {
@@ -114,8 +119,8 @@ func assertMediaBounded(t *testing.T, m Media, raw []byte) {
 		}
 		assertWireTextSafe(t, "title", title, raw)
 	}
-	if len(m.Format) > maxFormatBytes {
-		t.Errorf("parsed format of %d bytes exceeds maxFormatBytes (%d) from %q", len(m.Format), maxFormatBytes, raw)
+	if m.Format != "" && !mediatype.Known(m.Format) {
+		t.Errorf("parsed format %q is neither the unknown sentinel nor a canonical mediatype token, from %q", m.Format, raw)
 	}
 	assertWireTextSafe(t, "format", m.Format, raw)
 	// toMedia's year gate as a fuzz invariant, restated here rather than read

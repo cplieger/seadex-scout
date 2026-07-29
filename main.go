@@ -33,9 +33,10 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"runtime/debug"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -144,20 +145,53 @@ func validateInvocation(args []string) error {
 // healthcheck and must not require configuration, so it runs before config
 // load. It reports false when the invocation is not `health` (main continues
 // with normal startup). The probe reads the config best-effort (never failing
-// on absence or parse errors) to derive the freshness deadline: in scheduled
-// mode each cycle refreshes the marker, so a marker older than 3 poll
-// intervals means a wedged compare loop and a restart fixes it. External mode
-// (poll_interval: off) and any config-read failure disable the deadline
-// (WithMaxAge(0) is a no-op): idle-until-poll is healthy. health.RunProbe
-// terminates via os.Exit(0/1), so the true return is reachable only if that
-// contract ever changes - main then fails closed with exit 1.
+// on absence or parse errors) to derive the freshness deadline (healthMaxAge):
+// in scheduled mode each COMPLETED cycle refreshes the marker, so a marker
+// older than the lease means a wedged compare loop and a restart fixes it.
+// External mode (poll_interval: off) and any config-read failure disable the
+// deadline (WithMaxAge(0) is a no-op): idle-until-poll is healthy.
+// health.RunProbe terminates via os.Exit(0/1), so the true return is reachable
+// only if that contract ever changes - main then fails closed with exit 1.
 func runHealthProbe(args []string, configPath string) bool {
 	if len(args) != 1 || args[0] != "health" {
 		return false
 	}
 	health.RunProbe(health.DefaultPath,
-		health.WithMaxAge(3*config.PollIntervalFromFile(configPath)))
+		health.WithMaxAge(healthMaxAge(config.PollIntervalFromFile(configPath))))
 	return true
+}
+
+// healthLeaseFactor is how many poll intervals of silence the health marker
+// tolerates before the probe calls the compare loop wedged.
+const healthLeaseFactor = 3
+
+// healthMaxAge is the marker freshness lease armed by the health subcommand: 0
+// (no deadline) in external mode, else healthLeaseFactor intervals - but never
+// less than that many DEFAULT intervals.
+//
+// The floor exists because the marker is refreshed only when a cycle COMPLETES,
+// and the loop measures its delay AFTER the job returns, so the gap between two
+// refreshes is one cycle plus up to 1.1 intervals (scheduler's 0.10 jitter).
+// A bare healthLeaseFactor*interval therefore calls a HEALTHY daemon wedged as
+// soon as a cycle runs longer than ~1.9 intervals - reachable at the 1h
+// interval floor by a cold first boot on a large library (no state.json, so the
+// AniList memo is built from scratch), and self-defeating: the restart it asks
+// for kills the walk before the memo is saved, so the next cycle is cold again.
+// Flooring the lease at the lease the DEFAULT interval would get keeps the
+// wedge detection the docstring promises for every interval at or above the
+// default (the deployed 3h still restarts at 9h) while a shorter operator
+// interval only makes cycles more frequent, never the wedge deadline tighter.
+// The floor rides config.DefaultPollInterval rather than a new
+// cycle-duration allowance so the app grows no second, invented threshold; the
+// runner-up was refreshing the marker mid-cycle so the lease measures liveness
+// instead of completion, rejected here because that changes what the marker
+// MEANS (internal/cycle publishes a verdict per completed cycle) for a case a
+// floor covers without touching the contract.
+func healthMaxAge(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		return 0
+	}
+	return healthLeaseFactor * max(interval, config.DefaultPollInterval)
 }
 
 // errStarterWritten is returned by loadRuntimeConfig after a first boot
@@ -254,22 +288,32 @@ func runReport(cfg *config.Config) (err error) {
 	defer stop()
 	defer func() { err = cycle.NormalizeShutdownError(ctx, err) }()
 
+	if dirErr := checkReportDir(cfg.ReportDir); dirErr != nil {
+		return dirErr
+	}
+
 	// The whole generate+write is serialized on an exclusive flock in the
 	// report dir: two report runs finishing within the same UTC second would
 	// target the same report-<timestamp>.{md,json} pair, so a concurrent
 	// second run returns ErrReportRunning instead of racing; dispatchOutcome
 	// treats that designed coalescing result as WARN with exit 0.
 	// The report is read-only on state, so the lock guards only the report dir.
-	release, err := audit.AcquireReportLock(cfg.ReportDir)
+	// internal/cycle owns the lock acquisition for every entry point (the daemon
+	// tick, an exec'd poll, this report run); the report.dir redaction that
+	// keeps a secret-capable config value out of main's error log stays with the
+	// package that owns that value.
+	release, err := cycle.TryReportLock(cfg.ReportDir)
 	if err != nil {
-		return err
+		return audit.RedactReportDirErr(cfg.ReportDir, err)
 	}
 	defer release()
 
-	// Read-only state store: the report never saves state, and a corrupt
-	// state.json must be left in place (not quarantined) for the daemon's
-	// own Load to detect and report on the container's log stream.
-	b, err := buildScout(ctx, cfg, true)
+	// The reporter build is deliberately narrower than the daemon's: a
+	// read-only state store (the report never saves state, and a corrupt
+	// state.json must be left in place - not quarantined - for the daemon's
+	// own Load to detect and report on the container's log stream), and none of
+	// the compare-cycle components the report cannot reach.
+	b, err := buildReporter(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -296,43 +340,99 @@ func runReport(cfg *config.Config) (err error) {
 	return logErr
 }
 
+// checkReportDir rejects a report.dir this run cannot write to, before the run
+// spends anything. Every report write goes through atomicfile, whose path gate
+// refuses a non-absolute path outright (ErrUnsafePath "not absolute"), and
+// nothing between here and there absolutizes the configured value - so a
+// relative report.dir used to pass config validation, take the report lock,
+// create a stray directory tree under the process working directory, run the
+// full arr walk plus SeaDex fetch (~25m on a real library), and only THEN fail
+// with neither half of the pair written (l-f213).
+//
+// This is not an acceptance change: such a run already fails, and config
+// deliberately keeps the value warn-only at load (config.warnRelativeReportDir)
+// because a daemon that never writes a report is unaffected. The check belongs
+// on the report path, which is the only entry point that will write one, and in
+// the composition root that owns the subcommand's lifecycle. Field-name-only:
+// report.dir is secret-capable (config.Load may expand an allowlisted
+// ${SEADEX_SCOUT_*} reference into it, which is why internal/audit redacts it),
+// so the error names the key and never echoes the value.
+func checkReportDir(dir string) error {
+	if !filepath.IsAbs(dir) {
+		return errors.New("report.dir must be an absolute path: report files are written " +
+			"through an absolute-path-only writer, so a relative value cannot produce either " +
+			"half of the report pair - use an absolute path under the /config mount")
+	}
+	return nil
+}
+
 // reportWriteGrace bounds the detached report write, mirroring scout's saveGrace:
 // inside Docker's default 10s stop grace, so the pair lands before SIGKILL.
 const reportWriteGrace = 5 * time.Second
 
-// indexerStopWait bounds how long the daemon's shutdown blocks on the feed's
-// graceful drain. The feed's own budget (internal/indexer's shutdownGrace) is
-// the WHOLE Docker default stop grace the public compose example relies on, and
-// a search in flight against a slow Prowlarr holds its connection for minutes
-// (the indexer's writeTimeout is derived from the bounded Prowlarr retry
-// budget), so waiting the drain out leaves no margin for the client cleanup, the
-// marker removal and the completion record that follow - they race SIGKILL and
-// lose. Cap the wait instead: the abandoned goroutine dies with the process,
-// which is exactly what SIGKILL would have done, minus the diagnostics.
-const indexerStopWait = 3 * time.Second
-
 // reportWriteContext returns the context the report's file write runs under -
-// the caller's while it is live, else a detached, briefly-bounded one
-// (context.WithoutCancel keeps the values, drops the cancellation) - plus its
-// cancel func, which the caller must defer either way.
+// always a detached copy of the caller's (context.WithoutCancel keeps the
+// values, drops the cancellation) - plus its cancel func, which the caller must
+// defer.
 //
 // This is the same escape hatch Scout.save already uses for the AniList memo,
 // for the same reason: the write is cheap and its input took tens of minutes to
 // produce, so a shutdown that arrives after generation must not cost the
-// artifact. WriteFiles' own per-stage context gates stay exactly as documented -
-// they exist so a shutdown does not spend the grace period on CPU-bound work -
-// and this decision is made HERE, in the composition root that owns the
-// subcommand's lifecycle, rather than by weakening that contract inside audit.
+// artifact. The detach is unconditional because the shutdown does not have to
+// arrive BEFORE the call to cost the pair: handing the live signal context to
+// WriteFiles left the whole write - including the CPU-bound render of a
+// several-hundred-row report - racing the signal, and a signal landing one
+// instruction after the call aborted the write at audit's next per-stage gate
+// and discarded the artifact, which is exactly the loss this escape hatch
+// exists to prevent.
+//
+// The shutdown gate is not lost, only deferred: the detached context is
+// cancelled reportWriteGrace after the caller's context is done (immediately
+// arming that timer when it is already done, so a shutdown that arrived before
+// the call still bounds the write at the same grace it always did). A write
+// that outlives the grace is cut off exactly as before, so a shutdown never
+// spends more than reportWriteGrace on the write, and WriteFiles' own per-stage
+// context gates stay exactly as documented - this decision is made HERE, in the
+// composition root that owns the subcommand's lifecycle, rather than by
+// weakening that contract inside audit.
 func reportWriteContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	if ctx.Err() == nil {
-		return ctx, func() {}
-	}
-	return context.WithTimeout(context.WithoutCancel(ctx), reportWriteGrace)
+	return reportWriteContextGrace(ctx, reportWriteGrace)
 }
 
-// detachedWriteError re-classifies a report-write failure that happened on the
-// DETACHED write context (reportWriteContext's else branch, taken only because a
-// shutdown had already cancelled the caller). Exhausting that shutdown grace is
+// reportWriteContextGrace is reportWriteContext with an explicit grace, so the
+// arming behaviour is testable without waiting out the production budget.
+func reportWriteContextGrace(ctx context.Context, grace time.Duration) (context.Context, context.CancelFunc) {
+	// WithCancelCause, not WithTimeout: the deadline may not exist yet (it is
+	// armed only once a shutdown lands), and carrying DeadlineExceeded as the
+	// CAUSE keeps detachedWriteError's grace-exhausted classification working -
+	// audit's stage gates wrap both ctx.Err() and context.Cause(ctx).
+	writeCtx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+	released := make(chan struct{})
+	go func() {
+		select {
+		case <-released:
+			return
+		case <-ctx.Done():
+		}
+		select {
+		case <-released:
+		case <-time.After(grace):
+			cancel(context.DeadlineExceeded)
+		}
+	}()
+	var once sync.Once
+	return writeCtx, func() {
+		// The caller's defer may fire after an explicit cancel; closing the
+		// release channel once keeps that idempotent (cancel already is).
+		once.Do(func() { close(released) })
+		cancel(context.Canceled)
+	}
+}
+
+// detachedWriteError re-classifies a report-write failure that happened because
+// the DETACHED write context's shutdown grace ran out (reportWriteContext arms
+// that grace when the caller's context is done, whether the shutdown arrived
+// before the call or during the write). Exhausting that shutdown grace is
 // the shutdown truncating the run - a transient, designed outcome - not the
 // genuine operation timeout that dispatchOutcome's default arm reports at
 // level=ERROR, and alerts.yaml documents a shutdown-interrupted run as excluded
@@ -370,7 +470,7 @@ func runPoll(cfg *config.Config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	b, err := buildScout(ctx, cfg, false)
+	b, err := buildScout(ctx, cfg)
 	if err != nil {
 		if ctx.Err() != nil {
 			// Shutdown cancelled startup (pre-cycle phase of the uniform
@@ -407,7 +507,7 @@ func runPoll(cfg *config.Config) error {
 //   - everything else is a fault the operator must look at.
 func dispatchOutcome(err error) (level slog.Level, msg string, exit int) {
 	switch {
-	case errors.Is(err, audit.ErrReportRunning):
+	case errors.Is(err, cycle.ErrReportRunning):
 		return slog.LevelWarn, "report skipped; another report is already running", 0
 	case errors.Is(err, context.Canceled):
 		return slog.LevelWarn, "seadex-scout interrupted by shutdown", 1
@@ -426,10 +526,11 @@ func run(cfg *config.Config) error {
 
 	// The process-level completion record is registered before the cleanup
 	// defers below, so (defers run LIFO) it logs after the indexer's drain has
-	// been waited out (bounded by indexerStopWait), the client cleanup, and the
-	// health-marker removal. A drain that outruns that bound is reported by
-	// startIndexer's WARN and its goroutine may log after this line, so the WARN
-	// - not the ordering - is what tells Loki the drain did not complete.
+	// been waited out (bounded by the feed's own stop budget), the client
+	// cleanup, and the health-marker removal. A drain that outruns that bound is
+	// reported by the feed's own WARN and its goroutine may log after this line,
+	// so the WARN - not the ordering - is what tells Loki the drain did not
+	// complete.
 	// normalShutdown guards it so a startup-error return does not log a
 	// successful shutdown.
 	normalShutdown := false
@@ -443,7 +544,7 @@ func run(cfg *config.Config) error {
 	marker.Set(false)
 	defer marker.Cleanup()
 
-	b, err := buildScout(ctx, cfg, false)
+	b, err := buildScout(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -489,87 +590,17 @@ func run(cfg *config.Config) error {
 }
 
 // startIndexer launches the Torznab feed in a goroutine when it is configured,
-// returning a func that stops it (cancelling its context) and waits up to
-// indexerStopWait for its graceful shutdown. The goroutine releases its clients itself on every exit path -
-// a Run return or a recovered panic - so the transport is freed immediately
-// even if the daemon keeps running. When no Prowlarr Torznab URL is set it
-// starts nothing - the daemon binds no HTTP port - and returns a no-op.
+// returning the func that stops it and waits for its graceful drain (the feed
+// owns that supervision - the panic shield, the resource release and the drain
+// budget - in internal/indexer.Supervise, beside the timeouts the budget is
+// derived from). When no Prowlarr Torznab URL is set it starts nothing - the
+// daemon binds no HTTP port - and returns a no-op.
 func startIndexer(ctx context.Context, cfg *config.Config) func() {
 	if !cfg.IndexerConfigured() {
 		return func() {}
 	}
-	// The goroutine runs on its own cancellable child context so the
-	// returned stop func can force the feed down even when the parent
-	// signal context is still live (a startup-error return unwinding the
-	// defers before stop() cancels it) - otherwise the wait below would
-	// deadlock the exiting daemon against a still-serving feed.
-	ictx, cancel := context.WithCancel(ctx)
 	bi := buildIndexer(cfg)
-	done := make(chan struct{})
-	// The goroutine's terminal records (a recovered panic, the Run stop
-	// classification) carry the same component=indexer scope the feed's
-	// request and lifecycle logs use (see indexerLogger), so the feed's most
-	// important failure lines stay routable/queryable with the rest of its
-	// stream in Loki.
-	log := indexerLogger(slog.Default())
-	runIndexer(ictx, done, bi.indexer.Run, bi.cleanup, log)
-	return func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(indexerStopWait):
-			log.Warn("indexer feed did not drain within the shutdown budget; continuing shutdown",
-				"wait", indexerStopWait)
-		}
-	}
-}
-
-// runIndexer launches the feed goroutine: it runs the feed until it returns
-// (classifying the stop via logIndexerStop), recovers a panic so a crashing
-// feed cannot take down the long-lived daemon (the twin of internal/cycle's
-// compare-cycle panic shield),
-// releases the feed's clients on every exit path, and closes done last so
-// startIndexer's stop func can wait for a fully-drained goroutine. Extracted
-// from startIndexer so the shield is testable with a fake runner (the
-// cycle.Cycler seam precedent).
-func runIndexer(ctx context.Context, done chan struct{}, run func(context.Context) error, cleanup func(), log *slog.Logger) {
-	go func() {
-		defer close(done)
-		defer cleanup()
-		defer func() {
-			if r := recover(); r != nil {
-				log.Error("indexer feed panicked", "panic", r, "stack", string(debug.Stack()))
-			}
-		}()
-		if err := run(ctx); err != nil {
-			logIndexerStop(ctx, log, err)
-		}
-	}()
-}
-
-// logIndexerStop classifies the indexer feed's Run error for the shared slog
-// stream, emitting through the caller's indexer-scoped logger so the terminal
-// record carries the same component=indexer context as the feed's normal logs.
-// Both shutdown-path cases are routine on a redeploy (WARN, kept off
-// the level=ERROR cycle-error alert, matching the walk/matching/save
-// classification), but they carry distinct messages: webhttp.Run returns
-// DeadlineExceeded specifically when its graceful-shutdown budget expired,
-// meaning in-flight Torznab requests were cut off - information worth its own
-// log line rather than vanishing into the clean-shutdown message. Any error
-// outside a shutdown is a fault and stays ERROR.
-func logIndexerStop(ctx context.Context, log *slog.Logger, err error) {
-	switch {
-	case ctx.Err() != nil && errors.Is(err, context.DeadlineExceeded):
-		log.Warn("indexer shutdown budget expired; in-flight requests aborted", "error", err, "cause", context.Cause(ctx))
-	case cycle.IsShutdownError(ctx, err):
-		// Bind cancelled mid-startup, or a clean graceful drain: routine.
-		// cycle.IsShutdownError also accepts the cause-only form (net.ListenConfig
-		// surfacing context.Cause(ctx) verbatim), which a plain
-		// errors.Is(err, context.Canceled) would misread as a fault.
-		log.Warn("indexer feed stopped during shutdown", "error", err, "cause", context.Cause(ctx))
-	default:
-		log.Error("indexer feed stopped", "error", err)
-	}
+	return bi.indexer.Supervise(ctx, bi.cleanup)
 }
 
 // --- Logging helpers ---

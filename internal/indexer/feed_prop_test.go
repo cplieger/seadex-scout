@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cplieger/seadex-scout/internal/classify"
+	"github.com/cplieger/seadex-scout/internal/payload"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"pgregory.net/rapid"
 )
@@ -24,7 +24,7 @@ func TestDerivedTitle_preservesSingleEpisodesAndCollapsesPacksProperty(t *testin
 				// LAST matching token in a file name, and real fansub names put
 				// the marker after the title, so a token-shaped title is outside
 				// the domain this heuristic (documented best-effort) supports.
-				return !episodeToken.MatchString(s) && !classify.IsCreditlessExtra(s)
+				return !episodeToken.MatchString(s) && !payload.IsCreditlessExtra(s)
 			}).
 			Draw(t, "title")
 		season := rapid.IntRange(1, 99).Draw(t, "season")

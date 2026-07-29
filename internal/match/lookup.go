@@ -15,7 +15,7 @@ import (
 // pre-warm the memo for a whole cycle in a handful of requests.
 type AniListClient interface {
 	Fetch(ctx context.Context, aniListID int) (anilist.Media, error)
-	FetchMany(ctx context.Context, ids []int) (map[int]anilist.Media, error)
+	FetchMany(ctx context.Context, ids []int) (anilist.BatchResult, error)
 }
 
 // The assertion sits at the DECLARATION, not at *anilist.Client's own package as
@@ -74,7 +74,9 @@ type Memo struct {
 // liveEntry returns the memo entry for id when it exists and is unexpired at
 // now: the ONE liveness rule both pendingAniListIDs (skip a non-pending id)
 // and lookupAniList (serve a memo hit) consult, so the batch worklist and the
-// per-entry hit test cannot drift.
+// per-entry hit test cannot drift. An expired entry is not live and is never
+// returned here; serving one as an outage fallback is staleMedia's separate,
+// explicitly expiry-ignoring read.
 func (m *Memo) liveEntry(id int, now time.Time) (MemoEntry, bool) {
 	ent, ok := m.Entries[id]
 	if !ok || ent.expired(now) {
@@ -109,6 +111,21 @@ func (m *Memo) StaleFormat(id int) (format string, ok bool) {
 		return "", false
 	}
 	return ent.Format, true
+}
+
+// staleMedia returns the memoized media for id ignoring expiry: the same
+// expiry-ignoring read StaleTitle and StaleFormat give the indexer feed's
+// title/type tier, widened to the whole title list a match needs. It is the
+// answer of last resort for a lookup the upstream cannot satisfy right now, so
+// ok is false for anything a match could not use: an absent entry, a not-found
+// negative (a definitive answer, not stale evidence), or a positive carrying
+// neither titles nor a format.
+func (m *Memo) staleMedia(id int) (anilist.Media, bool) {
+	ent, cached := m.Entries[id]
+	if !cached || ent.NotFound || (len(ent.Titles) == 0 && ent.Format == "") {
+		return anilist.Media{}, false
+	}
+	return anilist.Media{Titles: ent.Titles, Format: ent.Format, Year: ent.Year}, true
 }
 
 // jitteredTTL draws one uniform random TTL from [minTTL, memoMaxTTL): the
@@ -175,7 +192,8 @@ func (m *Matcher) migrateMemo(memo *Memo, now time.Time) {
 // MATCH this cycle — but Match is not the memo's only reader: Memo.StaleTitle
 // and Memo.StaleFormat deliberately ignore expiry to feed the indexer feed's
 // stale-title/type tier for every entry SeaDex currently curates
-// (scout/feedinfo.go). An entry can leave the match's worklist while staying in
+// (scout/feedinfo.go), and Memo.staleMedia is the match's own outage fallback
+// over the same entries. An entry can leave the match's worklist while staying in
 // that set: an id-less Fribb record that caused an AniList memoization can gain
 // a usable arr id on a later Fribb refresh while the item is still absent from
 // the library, so aniListNeed stops consulting it on a perfectly clean pass.
@@ -248,6 +266,18 @@ func notFoundEntry(expiry time.Time) MemoEntry {
 // an AniList outage) instead returns the pending ids so the per-entry pass
 // fails them fast: every per-id lookup would be doomed against the same outage,
 // and the unbounded futile tail of requests would only stall the cycle.
+//
+// A partial failure that ABORTED the batch is re-batched before that fallback:
+// the ids in the abandoned chunks were never asked, so one more batched pass
+// answers them at ~1 request per 50 ids where the per-id fallback would spend
+// one rate-limited request each. Left to the per-id path, a flake in chunk 2 of
+// 9 turned a handful of batched requests into hundreds of single ones (the
+// ~1700-request, ~2h cold cycle batching was introduced to remove) and, because
+// those per-id fetches SUCCEED against a briefly-flaky upstream,
+// transientFailureCap never trips to stop them. Each pass strictly shrinks the
+// worklist (an abort implies an earlier chunk completed), so the loop is bounded
+// by the chunk count with a no-progress guard as a backstop; whatever remains
+// after it still falls through to the documented per-id Fetch.
 func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *mapping.Index, lib *LibIndex, memo *Memo, now time.Time) map[int]struct{} {
 	if ctx.Err() != nil {
 		// Mirror the per-entry loop's cancellation guard: a batch issued on an
@@ -255,38 +285,82 @@ func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *map
 		// loop below breaks (and flags the cycle degraded) before using it.
 		return nil
 	}
-	ids := pendingAniListIDs(entries, idx, lib, memo, now)
-	if len(ids) == 0 {
+	pending := pendingAniListIDs(entries, idx, lib, memo, now)
+	if len(pending) == 0 {
 		return nil
 	}
-	fetched, err := m.anilist.FetchMany(ctx, ids)
+	for {
+		res := m.prefetchPass(ctx, pending, memo, now)
+		if res.outage != nil {
+			return res.outage
+		}
+		// A shrinking worklist means the pass abandoned chunks it never asked:
+		// re-batch exactly those. A worklist that did NOT shrink means the pass
+		// asked nothing new (an aborting batch always completes at least one
+		// chunk, so this is a backstop against a looping request), and falls
+		// through to the per-id fallback below.
+		if len(res.unrequested) > 0 && len(res.unrequested) < len(pending) {
+			m.log.Warn("anilist batch prefetch aborted; re-batching the ids no request covered",
+				"requested", len(pending), "fetched", res.fetched,
+				"retrying", len(res.unrequested), "error", res.err)
+			pending = res.unrequested
+			continue
+		}
+		if res.err != nil && !errors.Is(res.err, context.Canceled) {
+			m.log.Warn("anilist batch prefetch incomplete; remaining ids fall back to per-id fetch",
+				"requested", len(pending), "fetched", res.fetched, "error", res.err)
+		}
+		return nil
+	}
+}
+
+// prefetchResult is what one batched prefetch pass leaves for the caller to do.
+type prefetchResult struct {
+	err error
+	// outage is non-nil only for a TOTAL failure: no chunk completed, so every
+	// id in the pass fails fast instead of regressing to a doomed per-id Fetch.
+	outage map[int]struct{}
+	// unrequested are the ids the pass abandoned without asking (an aborting
+	// chunk and the ones after it), which the caller re-batches. Ids left
+	// untrustworthy by a chunk that DID answer are absent: re-asking them would
+	// re-fetch the same poisoned record, so they keep the per-id fallback that
+	// isolates it.
+	unrequested []int
+	fetched     int
+}
+
+// prefetchPass issues ONE batched FetchMany over pending and applies prefetch's
+// memoization rules to the answer: every id a completed chunk definitively
+// resolved is memoized (positively, or negatively when absent), and every id
+// whose chunk was not trustworthy is left uncached.
+func (m *Matcher) prefetchPass(ctx context.Context, pending []int, memo *Memo, now time.Time) prefetchResult {
+	res, err := m.anilist.FetchMany(ctx, pending)
+	fetched := res.Media
+	out := prefetchResult{err: err, fetched: len(fetched)}
 	switch {
 	case err == nil:
 	case errors.Is(err, context.Canceled):
 		// A cancellation is not a fault (same contract as Scout.save).
 		m.log.Debug("anilist batch prefetch cancelled",
-			"requested", len(ids), "fetched", len(fetched))
-	case fetched == nil:
-		// TOTAL failure: FetchMany's completion contract returns a nil map
-		// only when NO chunk completed (a request/envelope failure before
-		// any chunk finished). A non-nil-but-EMPTY result is NOT an outage —
-		// at least one chunk completed and simply produced no media (every
-		// id definitively not found, or every record malformed, which is
-		// record-local) — so it falls to the default branch and each absent
-		// id stays uncached for the documented per-id Fetch fallback instead
-		// of being failed fast.
+			"requested", len(pending), "fetched", len(fetched))
+	case !res.Completed:
+		// TOTAL failure: no chunk completed (a request/envelope failure before
+		// any chunk finished). A COMPLETED batch that resolved nothing is NOT
+		// an outage — at least one chunk completed and simply produced no media
+		// (every id definitively not found, or every record malformed, which is
+		// record-local) — so it falls to the default branch and each absent id
+		// stays uncached for the documented per-id Fetch fallback instead of
+		// being failed fast.
 		// Degrade fast: fail the pending ids immediately instead of
 		// regressing to one doomed per-id request each.
 		m.log.Warn("anilist batch prefetch failed; skipping per-id fallback for pending ids",
-			"requested", len(ids), "error", err)
-		outage := make(map[int]struct{}, len(ids))
-		for _, id := range ids {
+			"requested", len(pending), "error", err)
+		outage := make(map[int]struct{}, len(pending))
+		for _, id := range pending {
 			outage[id] = struct{}{}
 		}
-		return outage
-	default:
-		m.log.Warn("anilist batch prefetch incomplete; remaining ids fall back to per-id fetch",
-			"requested", len(ids), "fetched", len(fetched), "error", err)
+		out.outage = outage
+		return out
 	}
 	// unverified holds the ids whose batch chunk reported a record-local
 	// failure: their absence from fetched proves nothing, so only they are
@@ -295,14 +369,15 @@ func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *map
 	// what keeps a single malformed record from dumping the whole pending set
 	// into per-id fallbacks.
 	unverified, scoped := unverifiedBatchIDs(err)
-	for _, id := range ids {
+	for _, id := range pending {
 		if media, ok := fetched[id]; ok {
 			memo.Entries[id] = mediaEntry(media, m.freshExpiry(now))
 			continue
 		}
 		if _, skip := unverified[id]; skip {
 			// This id's chunk was not trustworthy: leave it uncached so
-			// matchEntry retries it via the single Fetch.
+			// matchEntry retries it via the single Fetch, unless it was never
+			// asked at all - the caller re-batches those.
 			continue
 		}
 		if err == nil || scoped {
@@ -314,14 +389,30 @@ func (m *Matcher) prefetch(ctx context.Context, entries []seadex.Entry, idx *map
 		}
 		// Any other error leaves the id uncached for the per-id Fetch.
 	}
-	return nil
+	out.unrequested = unrequestedBatchIDs(err)
+	return out
+}
+
+// unrequestedBatchIDs extracts the ids an aborted batch abandoned without ever
+// requesting them. It is deliberately narrower than unverifiedBatchIDs: a chunk
+// that DID answer untrustworthily is not re-batched (the same poisoned record
+// would come back), while these ids have no answer at all yet and one more
+// batched pass resolves them 50 at a time.
+func unrequestedBatchIDs(err error) []int {
+	var batchErr *anilist.BatchRecordError
+	if !errors.As(err, &batchErr) {
+		return nil
+	}
+	return batchErr.UnrequestedIDs
 }
 
 // unverifiedBatchIDs extracts the ids a record-local batch failure makes
 // untrustworthy, and reports whether err was such a failure at all. A
 // scoped=true with an id absent from the set means the batch definitively
 // answered that id, so its negative is safe to memoize; scoped=false means the
-// error says nothing per-id and no negative may be inferred.
+// error says nothing per-id and no negative may be inferred - which is why this
+// stays keyed on the ERROR rather than on BatchResult.Completed: completion says
+// evidence exists, the error is what scopes which ids it covers.
 func unverifiedBatchIDs(err error) (ids map[int]struct{}, scoped bool) {
 	var batchErr *anilist.BatchRecordError
 	if !errors.As(err, &batchErr) {
@@ -417,6 +508,21 @@ func (g *lookupGate) recordSuccess() { g.streak = 0 }
 // consecutive-transient-failure breaker tripped) fails fast without a per-id
 // request: the same outage would doom it, and the id stays un-memoized so it
 // is retried next cycle.
+//
+// When the upstream that could renew the entry is unreachable - the gate is
+// down for this id, or its fetch just failed transiently - an EXPIRED positive
+// entry is served instead of no answer at all (staleMedia). Expiry governs
+// re-fetch cadence, so during an outage the titles that matched this entry last
+// cycle are better evidence than "unknown": preferring unknown withheld a match
+// the app was holding, which cost the compare pass any NEW finding for that
+// entry and, in the report, could claim a show catalogued through a sibling
+// Fribb record is absent from SeaDex. The stale answer does NOT clear the
+// degradation: markIncomplete still fires, so prior findings stay preserved and
+// the AniList degradation streak still escalates. The runner-up was serving it
+// as a COMPLETE answer (no markIncomplete), which would let stale evidence
+// resolve a prior finding - an operator-visible alerting decision the outage
+// itself does not justify. Same stale-on-error stance as the Fribb mapping
+// cache, and the same expiry-ignoring read the feed's title tier takes.
 func (r *matchRun) lookupAniList(ctx context.Context, aniListID int) (anilist.Media, bool) {
 	if ent, live := r.memo.liveEntry(aniListID, r.now); live {
 		if ent.NotFound {
@@ -429,12 +535,16 @@ func (r *matchRun) lookupAniList(ctx context.Context, aniListID int) (anilist.Me
 		// logged the single outage WARN): the affected entry's prior findings
 		// are preserved rather than the missing match read as resolved.
 		r.markIncomplete(aniListID)
-		return anilist.Media{}, false
+		return r.memo.staleMedia(aniListID)
 	}
 	media, err := r.m.anilist.Fetch(ctx, aniListID)
 	if err != nil {
-		r.handleLookupFailure(aniListID, err)
-		return anilist.Media{}, false
+		if !r.handleLookupFailure(aniListID, err) {
+			// A definitive answer (not-found, or an unusable record): it
+			// supersedes whatever the memo still holds, so no stale fallback.
+			return anilist.Media{}, false
+		}
+		return r.memo.staleMedia(aniListID)
 	}
 	r.gate.recordSuccess()
 	r.memo.Entries[aniListID] = mediaEntry(media, r.entryExpiry())
@@ -445,12 +555,14 @@ func (r *matchRun) lookupAniList(ctx context.Context, aniListID int) (anilist.Me
 // a not-found, or a record whose own content makes it unmatchable
 // (ErrRecordUnusable) - is memoized negatively and resets the breaker streak;
 // anything else marks the cycle incomplete and leaves the id un-memoized so it
-// is retried next cycle.
-func (r *matchRun) handleLookupFailure(aniListID int, err error) {
+// is retried next cycle. It reports whether the failure was that transient
+// class, which is the one where the caller may fall back to an expired memo
+// entry (a definitive answer supersedes the memo instead).
+func (r *matchRun) handleLookupFailure(aniListID int, err error) (transient bool) {
 	if errors.Is(err, anilist.ErrNotFound) {
 		r.gate.recordSuccess()
 		r.memo.Entries[aniListID] = notFoundEntry(r.entryExpiry())
-		return
+		return false
 	}
 	if errors.Is(err, anilist.ErrRecordUnusable) {
 		// The record exists but its own content cannot yield a match key, so
@@ -463,7 +575,7 @@ func (r *matchRun) handleLookupFailure(aniListID int, err error) {
 		r.memo.Entries[aniListID] = notFoundEntry(r.entryExpiry())
 		r.m.log.Warn("anilist record unusable for matching; add an overrides.json entry to map it directly",
 			"al_id", aniListID, "error", err)
-		return
+		return false
 	}
 	// A transient/upstream error (network, context cancellation, rate-limit
 	// exhaustion) means this needed fallback lookup could not be completed.
@@ -476,11 +588,12 @@ func (r *matchRun) handleLookupFailure(aniListID int, err error) {
 		// A cancellation is not a fault (same contract as Scout.save):
 		// log at Debug so a redeploy is not attributed to an AniList outage.
 		r.m.log.Debug("anilist fallback cancelled", "al_id", aniListID)
-		return
+		return true
 	}
 	r.m.log.Warn("anilist fallback failed", "al_id", aniListID, "error", err)
 	if r.gate.recordFailure() {
 		r.m.log.Warn("anilist fallback failing repeatedly; failing remaining lookups fast this cycle",
 			"consecutive_failures", transientFailureCap)
 	}
+	return true
 }

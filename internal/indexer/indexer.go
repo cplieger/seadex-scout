@@ -124,47 +124,39 @@ type Config struct {
 	UpstreamConfig
 }
 
-// Upstreams is the wired set of Prowlarr per-indexer Torznab endpoints, built
-// by WireUpstreams and handed to New (search proxying) or NewFeedWriter (title
-// harvesting). It carries REACHABILITY - the HTTP client, the endpoint URLs, and
-// the Prowlarr API key - and nothing else; which trackers are ENABLED stays
-// Config/FeedWriterConfig policy (see UpstreamConfig), because the server must
-// keep answering for a tracker whose snapshot it still holds.
-//
-// Taking the wired set rather than an *http.Client is what keeps outbound
-// network policy at the composition root: this package never constructs a
-// client, so it can never pick one whose redirect policy would forward the
-// X-Api-Key header to another origin.
-//
-// The zero value is valid and wires nothing: RSS still serves from the
-// persisted snapshot, a search whose scope has no wired upstream returns empty
-// with a WARN (fetchRaw's standing-misconfiguration arm), and the title harvest
-// is disabled (synthesized titles only).
-//
-// ONE wired set per consumer is no longer the caller's job: New and
-// NewFeedWriter each take their own copy of the upstream instances
-// (ownUpstreams), so one wired set may be handed to both. Each upstream's
-// once-per-onset diagnostic latches therefore stay per-consumer, and the
-// server's request path can never suppress the writer's harvest WARNs.
-type Upstreams struct {
-	ups []*upstream
-}
-
-// WireUpstreams builds one upstream per configured Prowlarr per-indexer Torznab
+// wireUpstreams builds one upstream per configured Prowlarr per-indexer Torznab
 // URL, for the server (search proxying) or the feed writer (title harvesting),
 // so both query the exact tracker set the operator configured with the same
 // client, headers, and retry discipline.
+//
+// It is called by New and NewFeedWriter from the SAME UpstreamConfig those
+// constructors read their enablement policy from, which is what binds the two
+// halves to one operator input. That pairing is the point: enablement (which
+// trackers may be served) and reachability (where they are queried) are two
+// readings of one operator input, and a wiring step the caller performed
+// separately let a caller hand a constructor an enablement config and a wired
+// set built from a DIFFERENT one - a server whose gates and wiring disagree,
+// serving an /ab feed with no AB upstream, or wiring an upstream for a scope
+// feedFor refuses (l-f246). The composition root's real constraint is only that
+// it owns the *http.Client, which taking the client here preserves.
 //
 // The caller owns the client and therefore owns the outbound-network policy the
 // Prowlarr API key depends on: the key rides an X-Api-Key header, which
 // net/http forwards across redirects, so the client MUST carry a same-host,
 // no-downgrade redirect policy (httpx.NewClient does). A nil client wires
-// nothing. A nil log falls back to slog.Default().
+// nothing: RSS still serves from the persisted snapshot, a search whose scope
+// has no wired upstream returns empty with a WARN (fetchRaw's
+// standing-misconfiguration arm), and the title harvest is disabled
+// (synthesized titles only).
 //
-// One wired set may be handed to more than one consumer (see Upstreams).
-func WireUpstreams(client *http.Client, log *slog.Logger, cfg UpstreamConfig) Upstreams {
+// Each call produces FRESH upstream instances, which is what makes the
+// once-per-consumer diagnostic rule structural: an upstream's latches
+// (dropWarned / displayWarned) are per-instance, so a server and a feed writer
+// built from the same client can never suppress each other's once-per-onset
+// WARNs.
+func wireUpstreams(client *http.Client, log *slog.Logger, cfg UpstreamConfig) []*upstream {
 	if client == nil {
-		return Upstreams{}
+		return nil
 	}
 	if log == nil {
 		log = slog.Default()
@@ -179,27 +171,7 @@ func WireUpstreams(client *http.Client, log *slog.Logger, cfg UpstreamConfig) Up
 		}
 		ups = append(ups, newUpstream(client, log, scope, cfg.torznabURL(scope), cfg.ProwlarrAPIKey))
 	}
-	return Upstreams{ups: ups}
-}
-
-// ownUpstreams returns this consumer's OWN upstream instances for the wired
-// set, so Upstreams' once-per-consumer rule is structural rather than prose: an
-// upstream's diagnostic latches (dropWarned / displayWarned) are per-instance,
-// and handing one Upstreams value to both New and NewFeedWriter would otherwise
-// let the server's request path and the writer's title harvest suppress each
-// other's once-per-onset WARNs, silently. The client, endpoint, key, and logger
-// are shared by value - reachability stays the caller's (see Upstreams) - and
-// only the latch state is fresh. A whole-struct copy is not an option: the
-// latches are sync/atomic values, which must not be copied.
-func ownUpstreams(ups []*upstream) []*upstream {
-	if len(ups) == 0 {
-		return nil
-	}
-	own := make([]*upstream, 0, len(ups))
-	for _, u := range ups {
-		own = append(own, newUpstream(u.http, u.log, u.name, u.feed, u.apiKey))
-	}
-	return own
+	return ups
 }
 
 // Indexer serves searches by proxying Prowlarr filtered to SeaDex's curation,
@@ -277,15 +249,21 @@ type Indexer struct {
 	verifyKey webhttp.StaticTokenVerifier
 }
 
-// New builds the Torznab feed server from cfg, log, and the wired upstream set.
-// It is pure assembly and starts no work: the persisted feed snapshot named by
-// cfg.SnapshotPath is warmed by Run (cache.warm), so all background work
-// begins under the explicit lifecycle method. A nil log falls back to
-// slog.Default(); a zero ups serves the snapshot without proxying searches
-// (see Upstreams). cfg is the one argument with no nil tolerance - it is
-// dereferenced here, so a nil cfg panics rather than yielding a defaulted
-// server.
-func New(cfg *Config, log *slog.Logger, ups Upstreams) *Indexer {
+// New builds the Torznab feed server from cfg, log, and the HTTP client its
+// Prowlarr search proxy dials with. It is pure assembly and starts no work: the
+// persisted feed snapshot named by cfg.SnapshotPath is warmed by Run
+// (cache.warm), so all background work begins under the explicit lifecycle
+// method. A nil log falls back to slog.Default(); a nil client serves the
+// snapshot without proxying searches. cfg is the one argument with no nil
+// tolerance - it is dereferenced here, so a nil cfg panics rather than yielding
+// a defaulted server.
+//
+// The upstreams are wired HERE, from cfg's own UpstreamConfig (see
+// wireUpstreams), so the server's enablement gates and its reachability can
+// never describe different operator input. The client stays a parameter because
+// this package must never construct one: outbound redirect policy for the
+// X-Api-Key-bearing Prowlarr request belongs to the composition root.
+func New(cfg *Config, log *slog.Logger, client *http.Client) *Indexer {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -301,7 +279,7 @@ func New(cfg *Config, log *slog.Logger, ups Upstreams) *Indexer {
 		cache:     newSnapshotCache(cfg.SnapshotPath, cfg.ABPasskey, log),
 		search:    newQueryPool("search", maxConcurrentQueries),
 		rss:       newQueryPool("rss", maxConcurrentFeeds),
-		upstreams: ownUpstreams(ups.ups),
+		upstreams: wireUpstreams(client, log, cfg.UpstreamConfig),
 		noUpstreamWarned: map[string]*atomic.Bool{
 			upstreamNyaa: new(atomic.Bool),
 			upstreamAB:   new(atomic.Bool),

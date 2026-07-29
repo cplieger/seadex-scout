@@ -9,6 +9,7 @@ package filter
 
 import (
 	"github.com/cplieger/seadex-scout/internal/release"
+	"github.com/cplieger/seadex-scout/internal/tracker"
 	"github.com/cplieger/urlform"
 )
 
@@ -60,10 +61,10 @@ func Obtainable(r *release.Release, rawURL, usableURL string, animeBytes bool) b
 		return false
 	}
 	switch r.TrackerType {
-	case release.TrackerPublic:
+	case tracker.Public:
 		return ABVisible(r.Tracker, rawURL, animeBytes)
-	case release.TrackerPrivate:
-		return release.IsAnimeBytes(r.Tracker) && ABVisible(r.Tracker, rawURL, animeBytes)
+	case tracker.Private:
+		return tracker.IsAnimeBytes(r.Tracker) && ABVisible(r.Tracker, rawURL, animeBytes)
 	default:
 		return false
 	}
@@ -167,15 +168,15 @@ const (
 // labeled "Nyaa" carrying an animebytes.tv URL is AnimeBytes. The URL is read
 // only as SeaDex supplied it, never normalized or rewritten first, so a
 // smuggling form cannot be laundered into clean host evidence before grading.
-func ClassifyAB(tracker, rawURL string) ABEvidence {
-	if release.IsAnimeBytes(tracker) {
+func ClassifyAB(trackerName, rawURL string) ABEvidence {
+	if tracker.IsAnimeBytes(trackerName) {
 		return ABDefinite
 	}
 	// A relative URL carries no host evidence, but the AB torrent-page shape
 	// ("/torrents.php?...&torrentid=..." and its slashless spelling, which the
 	// resolver reads as the same rooted href) is tracker identity in its own
 	// right: a mislabeled entry publishing that shape is AnimeBytes.
-	if inferred, ok := release.LookupTrackerByRelativeURL(rawURL); ok && inferred.Name == release.TrackerNameAnimeBytes {
+	if inferred, ok := tracker.LookupByRelativeURL(rawURL); ok && inferred.Name == tracker.NameAnimeBytes {
 		return ABDefinite
 	}
 	host, ok := hostFromRawURL(rawURL)
@@ -197,7 +198,7 @@ func ClassifyAB(tracker, rawURL string) ABEvidence {
 		// rule; a host that fails it settles nothing either way.
 		return ABAmbiguous
 	}
-	if release.IsAnimeBytesHost(host) {
+	if tracker.IsAnimeBytesHost(host) {
 		return ABDefinite
 	}
 	return ABNone
@@ -214,8 +215,8 @@ func ClassifyAB(tracker, rawURL string) ABEvidence {
 // report's row LISTING deliberately takes the other fail direction and gates on
 // ClassifyAB == ABDefinite instead, so a release with no usable link is annotated
 // unobtainable rather than erased.
-func ABVisible(tracker, rawURL string, animeBytes bool) bool {
-	return animeBytes || ClassifyAB(tracker, rawURL) == ABNone
+func ABVisible(trackerName, rawURL string, animeBytes bool) bool {
+	return animeBytes || ClassifyAB(trackerName, rawURL) == ABNone
 }
 
 // ExcludeSpecial reports whether an entry classified special should be dropped

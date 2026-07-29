@@ -24,6 +24,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/notify"
 	"github.com/cplieger/seadex-scout/internal/release"
+	"github.com/cplieger/seadex-scout/internal/tracker"
 	"github.com/cplieger/slogx/capture"
 )
 
@@ -883,7 +884,7 @@ func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
 					Resolution:  "1080p",
 					Codec:       "x265",
 					Kind:        release.KindRemux,
-					TrackerType: release.TrackerPublic,
+					TrackerType: tracker.Public,
 					Reason:      "name/notes marker: remux",
 					DualAudio:   true,
 				},

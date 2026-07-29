@@ -213,9 +213,13 @@ func TestFetchManyChunksBatchesAndMergesResults(t *testing.T) {
 		ids[i] = i + 1
 	}
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	out, err := c.FetchMany(context.Background(), ids)
+	res, err := c.FetchMany(context.Background(), ids)
+	out := res.Media
 	if err != nil {
 		t.Fatalf("FetchMany: %v", err)
+	}
+	if !res.Completed {
+		t.Error("Completed = false, want true for a fully successful batch")
 	}
 
 	wantBatches := []int{50, 50, 20}
@@ -257,7 +261,8 @@ func TestFetchManyReturnsPartialResultsOnError(t *testing.T) {
 		ids[i] = i + 1
 	}
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	out, err := c.FetchMany(context.Background(), ids)
+	res, err := c.FetchMany(context.Background(), ids)
+	out := res.Media
 	if err == nil {
 		t.Fatal("FetchMany must surface the second chunk's GraphQL error")
 	}
@@ -278,7 +283,8 @@ func TestFetchManyPreservesValidRecordsOnRecordError(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	out, err := c.FetchMany(context.Background(), []int{1, 2})
+	res, err := c.FetchMany(context.Background(), []int{1, 2})
+	out := res.Media
 	if err == nil {
 		t.Fatal("FetchMany must surface the invalid record")
 	}
@@ -317,7 +323,8 @@ func TestFetchManyContinuesAfterRecordError(t *testing.T) {
 		ids[i] = i + 1
 	}
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	out, err := c.FetchMany(context.Background(), ids)
+	res, err := c.FetchMany(context.Background(), ids)
+	out := res.Media
 	if err == nil {
 		t.Fatal("FetchMany must surface the first chunk's record error")
 	}
@@ -344,7 +351,8 @@ func TestFetchManyDropsUnsolicitedID(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	out, err := c.FetchMany(context.Background(), []int{1, 2})
+	res, err := c.FetchMany(context.Background(), []int{1, 2})
+	out := res.Media
 	if err == nil {
 		t.Fatal("FetchMany must surface the unsolicited id as a record error")
 	}
@@ -513,12 +521,15 @@ func TestFetchManyCanceledBeforeReservedSlot(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	out, err := c.FetchMany(ctx, []int{1})
+	res, err := c.FetchMany(ctx, []int{1})
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("FetchMany() error = %v, want context.Canceled", err)
 	}
-	if len(out) != 0 {
-		t.Errorf("FetchMany() result = %v, want empty partial result", out)
+	if len(res.Media) != 0 {
+		t.Errorf("FetchMany() result = %v, want empty partial result", res.Media)
+	}
+	if res.Completed {
+		t.Error("Completed = true, want false when no chunk completed")
 	}
 	if got := c.Stats().Calls; got != 0 {
 		t.Errorf("Stats().Calls = %d, want 0 when canceled before request", got)
@@ -660,12 +671,15 @@ func TestDoTransportErrorPropagatesAndCountsAttempt(t *testing.T) {
 // and a nil error.
 func TestFetchManyNoIDsMakesNoRequests(t *testing.T) {
 	c := NewClient(http.DefaultClient, "http://127.0.0.1:1", 60, nil)
-	out, err := c.FetchMany(context.Background(), nil)
+	res, err := c.FetchMany(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("FetchMany(nil): %v", err)
 	}
-	if len(out) != 0 {
-		t.Errorf("FetchMany(nil) = %v, want empty map", out)
+	if len(res.Media) != 0 {
+		t.Errorf("FetchMany(nil) = %v, want empty map", res.Media)
+	}
+	if !res.Completed {
+		t.Error("Completed = false, want true (nothing failed to complete)")
 	}
 	if got := c.Stats().Calls; got != 0 {
 		t.Errorf("Stats().Calls = %d, want 0 (no ids, no requests)", got)
@@ -686,32 +700,37 @@ func TestDoRejectsUnparseableURL(t *testing.T) {
 	}
 }
 
-// TestFetchManyFirstChunkFailureReturnsNil pins the completion contract's
-// total-failure side: a request/envelope failure before any chunk completes
-// returns a NIL map together with the error — the signal callers use to
-// distinguish a genuine outage from a completed batch that found no media.
-func TestFetchManyFirstChunkFailureReturnsNil(t *testing.T) {
+// TestFetchManyFirstChunkFailureReturnsIncomplete pins the completion
+// contract's total-failure side: a request/envelope failure before any chunk
+// completes returns Completed=false (and no media) together with the error —
+// the signal callers use to distinguish a genuine outage from a completed batch
+// that found no media.
+func TestFetchManyFirstChunkFailureReturnsIncomplete(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{"errors":[{"message":"boom"}]}`)
 	}))
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	out, err := c.FetchMany(context.Background(), []int{1, 2})
+	res, err := c.FetchMany(context.Background(), []int{1, 2})
 	if err == nil {
 		t.Fatal("FetchMany must surface the first chunk's envelope error")
 	}
-	if out != nil {
-		t.Errorf("FetchMany() result = %v, want nil (no chunk completed)", out)
+	if res.Completed {
+		t.Error("Completed = true, want false (no chunk completed)")
+	}
+	if len(res.Media) != 0 {
+		t.Errorf("FetchMany() media = %v, want none (no chunk completed)", res.Media)
 	}
 }
 
-// TestFetchManyAllNotFoundThenFailureReturnsNonNilEmpty pins the completion
+// TestFetchManyAllNotFoundThenFailureReturnsCompletedEmpty pins the completion
 // contract's partial side: a first chunk that completes with every id
 // definitively not found (a valid empty media array) followed by a failed
-// second chunk returns a NON-NIL empty map plus the error, so the caller can
-// tell "a chunk completed and found nothing" apart from a total outage.
-func TestFetchManyAllNotFoundThenFailureReturnsNonNilEmpty(t *testing.T) {
+// second chunk returns Completed=true with an empty map plus the error, so the
+// caller can tell "a chunk completed and found nothing" apart from a total
+// outage.
+func TestFetchManyAllNotFoundThenFailureReturnsCompletedEmpty(t *testing.T) {
 	var mu sync.Mutex
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -732,15 +751,15 @@ func TestFetchManyAllNotFoundThenFailureReturnsNonNilEmpty(t *testing.T) {
 		ids[i] = i + 1
 	}
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	out, err := c.FetchMany(context.Background(), ids)
+	res, err := c.FetchMany(context.Background(), ids)
 	if err == nil {
 		t.Fatal("FetchMany must surface the second chunk's envelope error")
 	}
-	if out == nil {
-		t.Error("FetchMany() result = nil, want a non-nil empty map (the first chunk completed)")
+	if !res.Completed {
+		t.Error("Completed = false, want true (the first chunk completed)")
 	}
-	if len(out) != 0 {
-		t.Errorf("FetchMany() result = %v, want empty (every completed id was not-found)", out)
+	if len(res.Media) != 0 {
+		t.Errorf("FetchMany() result = %v, want empty (every completed id was not-found)", res.Media)
 	}
 }
 
@@ -771,7 +790,7 @@ func TestFetchManyRequestFailureAfterCompletedChunkReturnsPartial(t *testing.T) 
 		ids[i] = i + 1
 	}
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	out, err := c.FetchMany(context.Background(), ids)
+	res, err := c.FetchMany(context.Background(), ids)
 	if err == nil {
 		t.Fatal("FetchMany must surface the second chunk's HTTP failure")
 	}
@@ -797,11 +816,11 @@ func TestFetchManyRequestFailureAfterCompletedChunkReturnsPartial(t *testing.T) 
 			t.Errorf("UnverifiedIDs contains %d, which belongs to the completed first chunk", id)
 		}
 	}
-	if out == nil {
-		t.Fatal("FetchMany() result = nil, want the completed first chunk preserved")
+	if !res.Completed {
+		t.Fatal("Completed = false, want true (the completed first chunk is preserved)")
 	}
-	if got := out[1].Titles; !slices.Equal(got, []string{"t1"}) {
-		t.Errorf("out[1].Titles = %v, want [t1] (completed chunk preserved on a later HTTP failure)", got)
+	if got := res.Media[1].Titles; !slices.Equal(got, []string{"t1"}) {
+		t.Errorf("media[1].Titles = %v, want [t1] (completed chunk preserved on a later HTTP failure)", got)
 	}
 }
 
@@ -857,7 +876,8 @@ func TestFetchManyKeepsFirstRecordErrorAcrossChunks(t *testing.T) {
 		ids[i] = i + 1
 	}
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	out, err := c.FetchMany(context.Background(), ids)
+	res, err := c.FetchMany(context.Background(), ids)
+	out := res.Media
 	if err == nil {
 		t.Fatal("FetchMany must surface a record error")
 	}
@@ -1129,7 +1149,7 @@ func TestFetchManyJoinsEarlierRecordErrorWithLaterAbort(t *testing.T) {
 		ids[i] = i + 1
 	}
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	out, err := c.FetchMany(context.Background(), ids)
+	res, err := c.FetchMany(context.Background(), ids)
 	if err == nil {
 		t.Fatal("FetchMany must surface the aborting chunk's envelope error")
 	}
@@ -1146,8 +1166,8 @@ func TestFetchManyJoinsEarlierRecordErrorWithLaterAbort(t *testing.T) {
 	if !slices.Equal(batchErr.UnverifiedIDs, ids) {
 		t.Errorf("UnverifiedIDs = %v, want every id (the record-local chunk plus the aborting one)", batchErr.UnverifiedIDs)
 	}
-	if got := out[1].Titles; !slices.Equal(got, []string{"t1"}) {
-		t.Errorf("out[1].Titles = %v, want [t1] (the completed chunk's valid record survives)", got)
+	if got := res.Media[1].Titles; !slices.Equal(got, []string{"t1"}) {
+		t.Errorf("media[1].Titles = %v, want [t1] (the completed chunk's valid record survives)", got)
 	}
 }
 

@@ -14,7 +14,10 @@
 // [memoMinTTL, memoMaxTTL) (mean two weeks, ±25% jitter) - so entries written
 // together renew spread out instead of in lockstep. Expiry is lazy: an
 // expired entry is a lookup miss that re-enters the existing batched prefetch
-// (or the per-entry fetch) and is re-stamped on renewal, and entries still
+// (or the per-entry fetch) and is re-stamped on renewal - and when the upstream
+// that would renew it is unreachable, the match serves the expired positive
+// rather than nothing (Memo.staleMedia; the pass still counts as degraded) -
+// and entries still
 // expired when a CLEAN (non-degraded) Match pass ends are pruned from the
 // returned memo, EXCEPT the positives whose AniList id SeaDex still curates -
 // those stay as stale feed-title/type fallback data (Memo.StaleTitle,
@@ -265,10 +268,18 @@ func (r *matchRun) matchMappedEntry(ctx context.Context, e *seadex.Entry, rec *m
 	}
 	// The record carries a usable arr id: the ID mapping resolved, so this
 	// is a coverage hit whether or not the item is in the library.
-	r.cov.Hits[arr]++
 	if item != nil {
+		// The RESOLVED item's arr is authoritative over the type label's
+		// routing: FindByID's secondary movie lookup can resolve a Radarr movie
+		// from a non-MOVIE-typed record carrying an unambiguous movie TMDB id
+		// (h-f9), and arrItem guarantees the item belongs to the arr its id was
+		// looked up in - so for every record the type label already routed
+		// correctly this is the same value recordArr returned.
+		arr = item.Arr
+		r.cov.Hits[arr]++
 		return Match{Item: item, Entry: *e, Record: *rec, Arr: arr, Source: SourceID}
 	}
+	r.cov.Hits[arr]++
 	// A record that carries its arr id but missed FindByID is simply not in
 	// the library and is unmatched directly, with no AniList lookup - this
 	// keeps the fallback off the ~thousands of SeaDex entries the operator
@@ -441,6 +452,17 @@ func (li *LibIndex) addTitle(title string, it *library.Item) {
 // cannot silently link to the same-named Sonarr series. NewLibIndex already
 // indexes each ID map with only the arr that consumes it; the arrItem check
 // restates that invariant at the lookup site as defense in depth.
+//
+// A record that routes NO series id and is not typed MOVIE still gets one more
+// chance, against its unambiguous movie TMDB ids
+// (mapping.Record.MovieTMDBIDs): a TMDB movie id is a Radarr id by
+// construction, and the live Fribb body carries ~300 records shaped non-MOVIE
+// type + no tvdb_id + a positive movie id, whose Radarr copy the type label
+// alone could never resolve (h-f9). It is a SECONDARY lookup on purpose - a
+// record that routes a TVDB id keeps series routing as its authoritative answer,
+// unchanged - and it stays out of HasArrIdentifier, so a miss here still falls
+// through to the AniList title fallback exactly as before rather than reading as
+// "this record has its id, the item is simply absent".
 func (li *LibIndex) FindByID(rec *mapping.Record) *library.Item {
 	if rec.IsMovie() {
 		return li.findMovie(rec)
@@ -454,7 +476,7 @@ func (li *LibIndex) FindByID(rec *mapping.Record) *library.Item {
 	if tvdb > 0 {
 		return arrItem(li.byTvdb[tvdb], library.ArrSonarr)
 	}
-	return nil
+	return li.findMovieByTMDB(rec.MovieTMDBIDs())
 }
 
 // findMovie resolves a MOVIE record to a Radarr movie by TMDB movie id, then by
@@ -463,10 +485,8 @@ func (li *LibIndex) FindByID(rec *mapping.Record) *library.Item {
 // see FindByID).
 func (li *LibIndex) findMovie(rec *mapping.Record) *library.Item {
 	_, tmdbMovies, imdbIDs := rec.RoutedIDs()
-	for _, id := range tmdbMovies { // RoutedIDs returns only usable ids
-		if it := arrItem(li.byTmdb[id], library.ArrRadarr); it != nil {
-			return it
-		}
+	if it := li.findMovieByTMDB(tmdbMovies); it != nil {
+		return it
 	}
 	for _, imdb := range imdbIDs { // RoutedIDs returns only usable ids
 		key := imdbKey(imdb) // a usable id can still be padded; the index key is trimmed
@@ -474,6 +494,18 @@ func (li *LibIndex) findMovie(rec *mapping.Record) *library.Item {
 			continue
 		}
 		if it := arrItem(li.byImdb[key], library.ArrRadarr); it != nil {
+			return it
+		}
+	}
+	return nil
+}
+
+// findMovieByTMDB resolves the first of ids that names an indexed Radarr movie.
+// Shared by findMovie (a MOVIE record's routed ids) and FindByID's secondary
+// cross-type lookup, so the movie-id half of the ID bridge has one lookup.
+func (li *LibIndex) findMovieByTMDB(ids []int) *library.Item {
+	for _, id := range ids { // callers pass only usable (positive) ids
+		if it := arrItem(li.byTmdb[id], library.ArrRadarr); it != nil {
 			return it
 		}
 	}

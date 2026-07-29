@@ -12,15 +12,18 @@ import (
 	"github.com/cplieger/jsonx"
 	"github.com/cplieger/jsonx/bounded"
 	"github.com/cplieger/runesafe"
+	"github.com/cplieger/seadex-scout/internal/mediatype"
 )
 
 // Fribb type strings. MOVIE routes to Radarr (TMDB movie / IMDb); every other
-// type routes to Sonarr (TVDB).
-const typeMovie = "MOVIE"
+// type routes to Sonarr (TVDB). The token vocabulary itself lives in the
+// dependency-free internal/mediatype leaf, shared with the anilist client that
+// ACCEPTS the wire tokens this package then classifies (l-f87).
+const typeMovie = mediatype.Movie
 
 // normalizeType canonicalizes a raw Fribb/AniList type/format string to the
 // upper-cased, trimmed form Record.Type invariants (IsMovie/IsSpecial) rely on.
-func normalizeType(s string) string { return strings.ToUpper(strings.TrimSpace(s)) }
+func normalizeType(s string) string { return mediatype.Normalize(s) }
 
 // RecordFromFormat builds the type-only Record a consumer uses to reuse the
 // arr/season routing decisions (IsMovie/IsSpecial/HasMappedSeason) for an

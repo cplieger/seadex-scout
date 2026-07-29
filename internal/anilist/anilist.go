@@ -30,6 +30,7 @@ import (
 	"github.com/cplieger/jsonx/bounded"
 	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
+	"github.com/cplieger/seadex-scout/internal/mediatype"
 	"github.com/cplieger/seadex-scout/internal/titlekey"
 )
 
@@ -65,9 +66,9 @@ var ErrNotFound = errors.New("anilist: media not found")
 // well-formed batch response (match with errors.Is), distinguishing it from a
 // request/envelope failure so FetchMany keeps fetching later chunks instead of
 // reading one poisoned record as a total outage. FetchMany returns it alongside
-// its partial result; batch COMPLETION is signaled separately by the result map
-// (nil = no chunk completed), so an empty-but-non-nil map beside this error
-// means the chunks completed but every record was malformed — still
+// its partial result; batch COMPLETION is signaled separately by
+// BatchResult.Completed, so a completed result whose Media map is empty beside
+// this error means the chunks completed but every record was malformed — still
 // record-local, per-id fallback applies.
 var ErrBatchRecord = errors.New("anilist: batch response")
 
@@ -94,6 +95,14 @@ type BatchRecordError struct {
 	// chunk after it). Absence of one of these from the result set proves
 	// nothing, so it must not be memoized as not-found.
 	UnverifiedIDs []int
+	// UnrequestedIDs are the subset of UnverifiedIDs whose chunk was never
+	// ASKED: the aborting chunk and every chunk after it, which FetchMany
+	// abandoned. They are untrustworthy for the same reason as the rest, but
+	// for the opposite cause - no answer exists yet, rather than an answer
+	// arriving poisoned - so a caller can still resolve them cheaply by
+	// re-batching, whereas re-batching a record-local chunk would only re-fetch
+	// the same poisoned record. Empty for a purely record-local failure.
+	UnrequestedIDs []int
 }
 
 func (e *BatchRecordError) Error() string { return e.Err.Error() }
@@ -194,9 +203,38 @@ var batchQuery = fmt.Sprintf(`query ($ids: [Int]) { Page(perPage: %d) { media(id
 
 // Media is the subset of an AniList entry used for title matching.
 type Media struct {
+	// Format is a canonical internal/mediatype token (the AniList MediaFormat
+	// member, upper-cased and trimmed) or "" when the type is unknown -
+	// including when the wire value was unrecognized, over-long, or not
+	// single-line-safe. knownFormat enforces that, so every reader (and the
+	// memo that persists it) can treat the field as bounded safe text.
 	Format string
 	Titles []string
 	Year   int
+}
+
+// BatchResult is what FetchMany resolved, with the batch's COMPLETION carried
+// as a field rather than as a convention on the map's nil-ness (l-f135). The
+// three outcomes a caller must tell apart are then all typed: a total failure
+// (Completed false, with an error), a batch that completed but resolved nothing
+// (Completed true, empty Media), and a completed batch carrying record-local
+// failures (Completed true, with a *BatchRecordError naming the untrustworthy
+// ids). Reading the old nil-versus-empty convention backwards was
+// compile-clean and flipped hundreds of ids between "retry per-id" and
+// "negative-memoize for the memo's TTL".
+//
+// The runner-up shape carried the untrustworthy ids here too (an Unverified
+// field). They stay on *BatchRecordError instead: they scope a FAILURE, so they
+// travel with the error that produced them and cannot be read without it.
+type BatchResult struct {
+	// Media holds the media that exist, keyed by AniList id. An id AniList has
+	// no anime for is absent; whether that absence is trustworthy evidence is
+	// what Completed and *BatchRecordError.UnverifiedIDs answer.
+	Media map[int]Media
+	// Completed reports whether the call produced trustworthy absence
+	// evidence: false only when it failed before any chunk completed. It is
+	// true for a fully successful call, including one with no ids to fetch.
+	Completed bool
 }
 
 // Stats is a snapshot of client activity for cycle observability logs.
@@ -300,18 +338,23 @@ func (c *Client) Fetch(ctx context.Context, aniListID int) (Media, error) {
 }
 
 // FetchMany resolves many AniList ids in batched requests (up to batchSize ids
-// each, every batch throttled and retried like Fetch), returning the media that
-// exist keyed by id. An id AniList has no anime for is simply absent from the
-// result (the caller treats an absent id as not-found). The result carries the
-// batch-completion contract: a NIL map with an error means no chunk completed
-// (a total failure); a NON-NIL map with an error means at least one chunk
-// completed — even when the map is empty because every completed chunk
-// definitively found no media — so the caller can fall back to a per-id Fetch
-// for the remainder rather than losing the batch, and can tell an all-not-found
-// chunk apart from a total outage. "The remainder" is named by the returned
-// *BatchRecordError's UnverifiedIDs (the chunks that never completed), so the
-// completed chunks' absences stay usable as definitive evidence. A
-// record-local failure (ErrBatchRecord, a poisoned record inside an otherwise
+// each, every batch throttled and retried like Fetch), returning a BatchResult
+// whose Media holds the media that exist keyed by id. An id AniList has no
+// anime for is simply absent from Media (the caller treats an absent id as
+// not-found).
+//
+// Completion is carried by BatchResult.Completed, not by the map: with an error,
+// Completed=false means NO chunk completed (a total failure) while
+// Completed=true means at least one chunk did — even when Media is empty because
+// every completed chunk definitively found no media — so the caller can fall
+// back to a per-id Fetch for the remainder rather than losing the batch, and can
+// tell an all-not-found chunk apart from a total outage. "The remainder" is
+// named by the returned *BatchRecordError's UnverifiedIDs (the chunks that never
+// completed), so the completed chunks' absences stay usable as definitive
+// evidence. Its UnrequestedIDs narrow that to the ids no request ever covered,
+// which a caller can re-batch instead of falling back one id at a time.
+//
+// A record-local failure (ErrBatchRecord, a poisoned record inside an otherwise
 // well-formed response) does NOT abort the batch: the chunk still counts as
 // completed, later chunks are still fetched,
 // and the first record error is surfaced alongside the merged result, so one
@@ -320,7 +363,7 @@ func (c *Client) Fetch(ctx context.Context, aniListID int) (Media, error) {
 // requested is dropped before the merge (retainRequested) and surfaced like
 // any other record-local failure, so a malformed or compromised response
 // cannot inject an unrelated Media or overwrite an earlier chunk's value.
-func (c *Client) FetchMany(ctx context.Context, ids []int) (map[int]Media, error) {
+func (c *Client) FetchMany(ctx context.Context, ids []int) (BatchResult, error) {
 	out := make(map[int]Media, len(ids))
 	completed := false
 	var firstRecordErr error
@@ -330,7 +373,7 @@ func (c *Client) FetchMany(ctx context.Context, ids []int) (map[int]Media, error
 		page, err := c.fetchBatchChunk(ctx, chunk)
 		maps.Copy(out, page)
 		if err != nil && !errors.Is(err, ErrBatchRecord) {
-			return completedBatch(out, completed, slices.Concat(unverified, ids[answered:]),
+			return completedBatch(out, completed, unverified, ids[answered:],
 				joinRecordErr(firstRecordErr, err))
 		}
 		answered += len(chunk)
@@ -347,9 +390,10 @@ func (c *Client) FetchMany(ctx context.Context, ids []int) (map[int]Media, error
 		}
 	}
 	if firstRecordErr != nil {
-		return out, &BatchRecordError{UnverifiedIDs: unverified, Err: firstRecordErr}
+		return BatchResult{Media: out, Completed: true},
+			&BatchRecordError{UnverifiedIDs: unverified, Err: firstRecordErr}
 	}
-	return out, nil
+	return BatchResult{Media: out, Completed: true}, nil
 }
 
 // fetchBatchChunk fetches and parses one chunk of FetchMany's id list. A
@@ -367,10 +411,11 @@ func (c *Client) fetchBatchChunk(ctx context.Context, chunk []int) (map[int]Medi
 	return page, errors.Join(parseErr, retainRequested(page, chunk))
 }
 
-// completedBatch applies FetchMany's nil-map-versus-partial-map contract to an
-// aborting chunk failure: no chunk completed yet means a total failure (a NIL
-// map with the error), while an earlier completed chunk means the merged
-// partial result rides along so the caller can fall back for the remainder.
+// completedBatch applies FetchMany's completion contract to an aborting chunk
+// failure: no chunk completed yet means a total failure (a zero BatchResult, so
+// Completed reads false), while an earlier completed chunk means the merged
+// partial result rides along with Completed set, so the caller can fall back for
+// the remainder.
 //
 // "The remainder" has to be nameable for the caller to honor it, so a partial
 // abort scopes the error the same way a record-local failure does: unverified
@@ -380,11 +425,20 @@ func (c *Client) fetchBatchChunk(ctx context.Context, chunk []int) (map[int]Medi
 // the scoping an abort in chunk 3 of 9 withdrew the completion evidence of
 // chunks 1-2 as well - the same defect BatchRecordError exists to prevent on
 // the record-local path.
-func completedBatch(out map[int]Media, completed bool, unverified []int, err error) (map[int]Media, error) {
+//
+// unrequested is the abandoned tail on its own (the aborting chunk and the ones
+// after it, never a record-local chunk), carried separately so the caller can
+// re-batch exactly the ids no request has covered yet instead of regressing all
+// of them to one per-id request each.
+func completedBatch(out map[int]Media, completed bool, recordLocal, unrequested []int, err error) (BatchResult, error) {
 	if !completed {
-		return nil, err
+		return BatchResult{}, err
 	}
-	return out, &BatchRecordError{UnverifiedIDs: unverified, Err: err}
+	return BatchResult{Media: out, Completed: true}, &BatchRecordError{
+		UnverifiedIDs:  slices.Concat(recordLocal, unrequested),
+		UnrequestedIDs: unrequested,
+		Err:            err,
+	}
 }
 
 // joinRecordErr preserves an earlier chunk's record-local diagnostic when a
@@ -608,27 +662,52 @@ type gqlMedia struct {
 	SeasonYear int `json:"seasonYear"`
 }
 
-// Per-field wire limits. The 1 MiB body cap bounds each response, but the
-// decoded strings outlive the request in the matcher's memo and state.json, so
-// a compromised upstream could otherwise inflate state and exhaust memory one
-// near-cap title at a time. Over-limit fields are rejected, never truncated —
-// truncation could forge a false normalized-title match.
-const (
-	maxTitleBytes  = 1024
-	maxFormatBytes = 64
-)
+// maxTitleBytes is the per-title wire limit. The 1 MiB body cap bounds each
+// response, but a decoded title outlives the request in the matcher's memo and
+// state.json, so a compromised upstream could otherwise inflate state and
+// exhaust memory one near-cap title at a time. An over-limit title is
+// rejected, never truncated — truncation could forge a false normalized-title
+// match.
+//
+// The format field needs no such cap: knownFormat admits only a member of
+// AniList's own MediaFormat enum and publishes it in mediatype's canonical
+// form, so Media.Format is by construction one of seven short ASCII tokens or
+// the empty unknown sentinel, whatever the wire sent (l-f140).
+const maxTitleBytes = 1024
 
 // toMedia converts the wire shape to a Media, preferring seasonYear and
-// falling back to the start-date year. It rejects a media whose title or
-// format field exceeds the wire limits, or that has no usable (non-blank)
-// title.
+// falling back to the start-date year. It rejects a media whose title field
+// exceeds the wire limit, or that has no usable (non-blank) title.
 //
-// Every rejection here is a function of the RECORD'S OWN CONTENT, so it is
-// permanent: the same upstream record fails identically on every future cycle.
-// They therefore wrap ErrRecordUnusable, which the matcher treats as a
+// A defective FORMAT field is deliberately NOT a rejection: knownFormat already
+// collapses anything that is not a member of AniList's own MediaFormat enum to
+// the unknown sentinel "", so a hostile or garbled format value costs the
+// record only its arr hint and never its usable titles (l-f140). Rejecting the
+// whole record for it was strictly worse, because ErrRecordUnusable is a
+// DEFINITIVE answer the matcher negative-memoizes: a record whose only defect
+// was a stray control rune or an over-long format string could never be
+// title-matched again until the memo expired, with an overrides.json entry as
+// the operator's only remedy - while the neighbouring defect class (an
+// unrecognized token like "NOT_A_FORMAT") kept its titles.
+//
+// Every remaining rejection here is a function of the RECORD'S OWN CONTENT, so
+// it is permanent: the same upstream record fails identically on every future
+// cycle. They therefore wrap ErrRecordUnusable, which the matcher treats as a
 // definitive answer (negative-memoized, like a not-found) instead of a
 // transient outage to retry forever - see that sentinel's doc for why the
 // distinction is load-bearing for alerting.
+//
+// Every gate here is a fact about the WIRE record or about Media's own
+// published contract (its byte cap, its safe-text rule, its unknown sentinels
+// "" and 0, and the shared key domains in internal/mediatype and
+// internal/titlekey that a token/title must fall inside to be usable at all) -
+// deliberately not a consumer's weighting of evidence, and no rule here is
+// stated in terms of a match symbol. The runner-up shape (l-f95) was moving the
+// title/year/format rules out to a consumer-side evidence adapter in match; it
+// was declined because these are normalizations of untrusted input into this
+// package's OWN sentinels, and a consumer-side adapter would have to be applied
+// by every reader of a Media (the matcher, the memo it persists, and the feed's
+// stale-title tier) instead of once at the boundary that produced it.
 func (m *gqlMedia) toMedia() (Media, error) {
 	// One list of the wire title fields, used for both validation and dedupe,
 	// so a future title field cannot be validated in one place and dropped in
@@ -642,18 +721,14 @@ func (m *gqlMedia) toMedia() (Media, error) {
 			return Media{}, fmt.Errorf("%w: media title contains invalid single-line text", ErrRecordUnusable)
 		}
 	}
-	if len(m.Format) > maxFormatBytes {
-		return Media{}, fmt.Errorf("%w: media format exceeds %d bytes", ErrRecordUnusable, maxFormatBytes)
-	}
-	if unsafeWireText(m.Format) {
-		return Media{}, fmt.Errorf("%w: media format contains invalid single-line text", ErrRecordUnusable)
-	}
-	// Both wire year fields are untrusted, and match.findByTitle treats every
-	// nonzero Year as a HARD constraint - so an impossible value (negative, or
-	// outside four digits) cannot match a real library year and turns an
-	// otherwise usable title into a persistent false negative that Memo also
-	// retains as StaleTitle. Map impossible evidence to the existing unknown
-	// sentinel 0 instead, falling back through startDate first.
+	// Both wire year fields are untrusted, and Media.Year's contract is a
+	// four-digit release year with 0 as its documented unknown sentinel - so an
+	// impossible value (negative, or outside four digits) is not usable evidence
+	// for ANY consumer: it cannot match a real library year, and it outlives the
+	// request in the matcher's memo and state.json (Memo.StaleTitle republishes
+	// it to the feed's stale-title tier). Normalizing it to the sentinel at this
+	// one boundary is what keeps every reader from having to re-check it.
+	// Falling back through startDate first.
 	year := m.SeasonYear
 	if !plausibleYear(year) {
 		year = m.StartDate.Year
@@ -676,47 +751,56 @@ func plausibleYear(year int) bool {
 	return year >= 1000 && year <= 9999
 }
 
-// anilistFormats is AniList's MediaFormat enum as it applies to anime (its
-// MANGA/NOVEL/ONE_SHOT members cannot appear on a SeaDex entry). Matched
-// case-insensitively after normalization, mirroring mapping's unexported
-// normalizeType canonical form (upper-cased, trimmed).
-var anilistFormats = map[string]struct{}{
-	"TV": {}, "TV_SHORT": {}, "MOVIE": {}, "SPECIAL": {},
-	"OVA": {}, "ONA": {}, "MUSIC": {},
-}
-
-// knownFormat returns format when it names a real AniList media format, else
-// "" - the value that means "type unknown" to every consumer.
+// knownFormat returns the CANONICAL form of format when it names a real AniList
+// media format, else "" - Media.Format's own documented "type unknown" value.
 //
-// The format is the ONLY arr-routing evidence the AniList fallback carries, and
-// match.formatArr routes it by exclusion: MOVIE goes to Radarr and EVERYTHING
-// else to Sonarr. An unrecognized non-empty token therefore did not read as
-// "unknown", it read as "not a movie" - so a garbled or hostile value like
-// "NOT_A_FORMAT" supplied false Sonarr evidence for an entirely unmapped entry,
-// removed the Radarr candidate that a title+year match would otherwise have
-// left ambiguous, and persisted that wrong match in state.json for the memo's
-// life (l-f12). An empty format has always behaved correctly here, leaving the
-// arr unknown and the cross-arr candidates ambiguous, so collapsing an
+// Returning the canonical token rather than the raw wire string is what makes
+// Media.Format bounded and single-line-safe by construction (l-f140): every
+// value it can carry is one of internal/mediatype's seven short ASCII members
+// or the empty sentinel, so no byte cap and no unsafeWireText gate is needed on
+// the wire field, and a record whose only defect is its format keeps its usable
+// titles instead of being rejected outright.
+//
+// The accepted vocabulary and its canonical form live in the shared
+// internal/mediatype leaf, not in a private copy here (l-f87): the token this
+// function admits is fed verbatim into a mapping Record.Type and classified
+// there, so both halves must agree on the token set AND on the canonical form,
+// and one shared home is what makes that structural instead of two mirrored
+// copies drifting silently.
+//
+// This gate is a wire-shape fact - does the token name a member of AniList's
+// own MediaFormat enum - so it stays at this boundary, and "" is this package's
+// published unknown sentinel, not a consumer's convention. It is load-bearing
+// downstream because arr routing reads the format by exclusion (MOVIE routes to
+// Radarr, everything else to Sonarr), so an unrecognized non-empty token did
+// not read as "unknown", it read as "not a movie" - a garbled or hostile value
+// like "NOT_A_FORMAT" supplied false Sonarr evidence for an entirely unmapped
+// entry, removed the Radarr candidate that a title+year match would otherwise
+// have left ambiguous, and persisted that wrong match in state.json for the
+// memo's life (l-f12). An empty format has always behaved correctly, leaving
+// the arr unknown and the cross-arr candidates ambiguous, so collapsing an
 // unrecognized token onto empty is the fix.
 //
 // Fail direction: a format AniList ADDS in future is unrecognized here and
 // degrades to unknown, which costs a title-fallback match its arr hint rather
-// than routing it wrongly. That is the safe side, and the length/safety gates
-// above still reject a hostile record outright - only the TYPE claim is
-// discarded, never the usable titles.
+// than routing it wrongly. That is the safe side, and only the TYPE claim is
+// ever discarded, never the record's usable titles.
 func knownFormat(format string) string {
-	if _, ok := anilistFormats[strings.ToUpper(strings.TrimSpace(format))]; ok {
-		return format
+	canonical := mediatype.Normalize(format)
+	if mediatype.Known(canonical) {
+		return canonical
 	}
 	return ""
 }
 
-// unsafeWireText reports whether an untrusted AniList string field must be
-// rejected rather than sanitized or memoized. JSON escapes are valid UTF-8
-// wire bytes but may decode to U+FFFD (a lone surrogate), controls, line
-// separators, or bidi controls; titlekey.Normalize would strip those runes
-// into a forged match key, and both titles and format outlive the request in
-// the matcher's memo and state.json, so the two fields share one guard.
+// unsafeWireText reports whether an untrusted AniList TITLE must be rejected
+// rather than sanitized or memoized. JSON escapes are valid UTF-8 wire bytes
+// but may decode to U+FFFD (a lone surrogate), controls, line separators, or
+// bidi controls; titlekey.Normalize would strip those runes into a forged match
+// key, and a title outlives the request in the matcher's memo and state.json.
+// The format field needs no such guard: knownFormat republishes it as a
+// canonical mediatype token, so an unsafe rune can only make the token
+// unrecognized (l-f140).
 func unsafeWireText(s string) bool {
 	return strings.ContainsRune(s, utf8.RuneError) || runesafe.SanitizeSingleLine(s) != s
 }
@@ -778,7 +862,11 @@ type gqlResponse struct {
 // Bidi_Control rune each become a space), and the retained message is capped
 // at 200 bytes on a rune boundary via runesafe.CapBytes (truncated output
 // appends "...", for a 203-byte maximum) so a long message stays valid
-// UTF-8.
+// UTF-8. The composition lives in the library
+// (runesafe.SanitizeSingleLineBounded), shared with internal/indexer's
+// capLogText - a fix to the single-line bounded preset belongs there, not in
+// either app-side wrapper (internal/logattr owns the separate
+// structured-attribute policy; see its package doc for the split).
 func sanitizeUpstreamMessage(s string) string {
 	const maxLen = 200
 	return runesafe.SanitizeSingleLineBounded(s, maxLen)
@@ -1114,13 +1202,13 @@ func dedupeTitles(titles ...string) []string {
 	return out
 }
 
-// hasMatchableTitle reports whether at least one title survives the match
-// package's normalized-title key domain (titlekey.Normalize, the shared
-// implementation of the lowercased [a-z0-9] key). A payload whose every title
-// normalizes to an empty key (punctuation-only, or entirely non-ASCII) would
-// parse into a Media that can never match and would be memoized as a
-// permanent false negative; erroring instead lets the lookup degrade and
-// retry next cycle.
+// hasMatchableTitle reports whether at least one title falls inside the shared
+// normalized-title key domain (internal/titlekey, the dependency-free leaf both
+// this client and the matcher read, holding the lowercased [a-z0-9] key). A
+// payload whose every title normalizes to an empty key (punctuation-only, or
+// entirely non-ASCII) carries no usable title at all: it would parse into a
+// Media that can never key anything and would be memoized as a permanent false
+// negative; erroring instead lets the lookup degrade and retry next cycle.
 func hasMatchableTitle(titles []string) bool {
 	for _, title := range titles {
 		if titlekey.Normalize(title) != "" {

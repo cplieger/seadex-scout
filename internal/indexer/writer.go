@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net/http"
 	"strings"
 	"syscall"
 	"time"
@@ -121,7 +122,7 @@ const (
 	maxSnapshotMapEntries      = 250_000
 	maxSnapshotMapEntriesTotal = 600_000
 	// reasonMalformed is loadPrevious's baseline reason for a structurally invalid
-	// previous snapshot (bad JSON, missing curation maps, or an over-limit item/title).
+	// previous snapshot (bad JSON, missing curation maps, or an invalid seen ledger).
 	reasonMalformed = "malformed"
 	// msgSnapshotMalformed is the one operator-facing malformed-rebaseline
 	// message loadPrevious's three Warn sites share (tests pin the exact text).
@@ -161,23 +162,47 @@ func validPersistedItem(it *journalItem) bool {
 	return true
 }
 
-// validFeedItems reports whether every item in the given feeds respects the
-// shared persisted-item limits (see validPersistedItem).
-func validFeedItems(feeds ...[]journalItem) bool {
-	for _, feed := range feeds {
-		for i := range feed {
-			if !validPersistedItem(&feed[i]) {
-				return false
-			}
+// pruneJournalFeed drops every item one persisted journal feed carries that
+// the shared decode gate refuses, returning the kept items and how many were
+// dropped (the count the reader WARNs per tracker feed, see snapshotScrub).
+// Two per-item invariants are enforced:
+//
+//   - the shared persisted-item limits (validPersistedItem), and
+//   - for a post-journal snapshot, the journal identity fields the schema
+//     guarantees (validJournalRecord).
+//
+// A per-item invariant is enforced per ITEM rather than by refusing the whole
+// snapshot, because on the READER the wholesale verdict discards the curation
+// maps with the journal: readSnapshot reports ok=false and, when nothing was
+// ever loaded (Run's warm-up after a restart, or a resident-idle daemon whose
+// feed has not been rebuilt), the cache stays unavailable and EVERY request -
+// search and RSS alike - answers a Torznab error until a rebuild writes a
+// clean snapshot, which in resident-idle mode only an external `poll`
+// delivers. One hand-edited or partially corrupted item out of thousands
+// would take the whole indexer surface down, where the writer's own policy for
+// the identical shape is to drop just that item (prepareCarriedItem). Dropping
+// closes each hazard as completely as rejecting did - an over-limit field
+// never reaches renderFeed and a timestamp-less item is never served past
+// feedJournalMaxAge - and it is the pattern this file already established for
+// at-rest corrections (sanitizeSnapshotInfoURLs), counted per feed so the
+// operator still learns which journal was touched (l-f45). The writer ignores
+// the counts: its rebuild re-persists the pruned feed.
+func pruneJournalFeed(feed []journalItem, postJournal bool) (kept []journalItem, dropped int) {
+	kept = feed[:0]
+	for i := range feed {
+		if !validPersistedItem(&feed[i]) || (postJournal && !validJournalRecord(&feed[i])) {
+			dropped++
+			continue
 		}
+		kept = append(kept, feed[i])
 	}
-	return true
+	return kept, dropped
 }
 
-// validJournalRecords reports whether every item in the given feeds carries the
-// two journal identity fields the post-journal schema guarantees: a stable Key
-// (the identity the carry gates and the download-URL rebuilds match on) and a
-// nonzero FirstSeen (the age the bounded journal window prunes against).
+// validJournalRecord reports whether one item carries the two journal identity
+// fields the post-journal schema guarantees: a stable Key (the identity the
+// carry gates and the download-URL rebuilds match on) and a nonzero FirstSeen
+// (the age the bounded journal window prunes against).
 //
 // The writer already refuses such a record on its carry path
 // (prepareCarriedItem drops every zero-FirstSeen item, because there is no
@@ -188,15 +213,8 @@ func validFeedItems(feeds ...[]journalItem) bool {
 // mode no rebuild ever follows to apply the writer-only gate, so that item is
 // served to the arrs indefinitely - outside feedJournalMaxAge entirely. Making
 // the invariant part of the shared decode gate is what bounds it (h-f2).
-func validJournalRecords(feeds ...[]journalItem) bool {
-	for _, feed := range feeds {
-		for i := range feed {
-			if feed[i].Key == "" || feed[i].FirstSeen.IsZero() {
-				return false
-			}
-		}
-	}
-	return true
+func validJournalRecord(it *journalItem) bool {
+	return it.Key != "" && !it.FirstSeen.IsZero()
 }
 
 // unmarshalSnapshot decodes persisted snapshot bytes with json.Unmarshal
@@ -216,51 +234,85 @@ func validJournalRecords(feeds ...[]journalItem) bool {
 // behavior: a JSON null leaves a field untouched, an empty object still
 // ALLOCATES its map (nil-ness is the structural / pre-journal-schema sentinel
 // decodeSnapshot and loadPrevious dispatch on, so `"seen": {}` must not decode
-// nil), keys match case-insensitively, unknown fields are token-skipped without
-// materializing, and trailing data is rejected. One deliberate tightening:
-// bounded.Preflight rejects a repeated object key and pathological nesting,
-// which json.Unmarshal would silently resolve to the last occurrence - at this
-// boundary the ambiguity is evidence of tampering, so it fails closed.
+// nil), keys match case-insensitively, an unknown field is consumed without
+// being materialized into a decoded value, a repeated key inside a decoded
+// value keeps Unmarshal's last-occurrence/merge resolution, and trailing data
+// is rejected. One deliberate tightening: a repeated TOP-LEVEL schema field
+// (a second by_key/seen/nyaa_feed/...) fails closed, because at this boundary
+// a document that names the same accumulated map twice is evidence of
+// tampering and Unmarshal would silently resolve it to the last occurrence.
+// The tightening is deliberately limited to the eight schema fields: it costs
+// a fixed eight-entry set, while extending it to every nested object is what
+// bounds the gate's own memory (see the note on the removed whole-document
+// preflight below).
+//
+// No whole-document preflight runs (bounded.Preflight is deliberately NOT
+// used): it holds one fold-canonicalized key set per traversed object, which
+// is unbounded in exactly the dimension this walk exists to bound. A 16 MiB
+// document - what maxFeedBytes and atomicfile.ReadBounded admit - carrying
+// ~1.19M distinct short keys makes that pass alone hold ~91 MiB of live heap
+// and churn ~379 MiB, inside the same 256 MiB container the compare loop
+// shares, and it burned that on EVERY load (the reader's warm-up plus every
+// mtime-change reload, the writer's loadPrevious every cycle) - the OOM
+// crashloop the h-f4 comment above names as the hazard, arriving before a
+// single entry could be charged against maxSnapshotMapEntries (h-f6).
+// Reordering it after the walk would not help: an unknown top-level field's
+// millions of keys are never charged by the schema walk at all.
+//
+// Nesting depth stays bounded without it, by encoding/json's own scanner
+// ceiling (maxNestingDepth, the same 10000 bounded.MaxDepth mirrors): every
+// value this walk consumes goes through Decode, whose scanner enforces it -
+// which is why an unknown field is consumed as a json.RawMessage instead of
+// through the decoder's token-walking Skip. Skip is depth-unbounded (a token
+// walk grows json.Decoder's own container stack per open bracket, so a
+// megabytes-of-'[' unknown field allocates once per byte), and a RawMessage
+// is bounded by the field's own bytes, hence by maxFeedBytes.
 func unmarshalSnapshot(data []byte) (snapshot, error) {
-	if err := bounded.Preflight(bytes.NewReader(data)); err != nil {
-		return snapshot{}, err
-	}
 	var snap snapshot
 	var mapEntries int
+	claimed := make(map[string]struct{}, 8)
 	// The aggregate array budget covers both journal feeds; each feed also
 	// carries its own per-array cap, so neither one feed nor the pair can
 	// multiply past the bound.
 	d := bounded.NewDecoder(bytes.NewReader(data), 2*maxSnapshotFeedItems)
 	err := d.Object(func(key string) error {
-		switch {
-		case strings.EqualFold(key, "by_hash"):
+		field := snapshotField(key)
+		if field == "" {
+			// Unknown field: consumed, never materialized into a decoded
+			// value, and depth-bounded by the scanner (see above).
+			var raw json.RawMessage
+			return d.Decode(&raw)
+		}
+		if err := claimSnapshotField(claimed, field); err != nil {
+			return err
+		}
+		switch field {
+		case "by_hash":
 			set, err := decodeSnapshotMap(d, snap.ByHash, &mapEntries, "by_hash")
 			snap.ByHash = set
 			return err
-		case strings.EqualFold(key, "by_key"):
+		case "by_key":
 			set, err := decodeSnapshotMap(d, snap.ByKey, &mapEntries, "by_key")
 			snap.ByKey = set
 			return err
-		case strings.EqualFold(key, "by_pair"):
+		case "by_pair":
 			set, err := decodeSnapshotMap(d, snap.ByPair, &mapEntries, "by_pair")
 			snap.ByPair = set
 			return err
-		case strings.EqualFold(key, "seen"):
+		case "seen":
 			set, err := decodeSnapshotMap(d, snap.Seen, &mapEntries, "seen")
 			snap.Seen = set
 			return err
-		case strings.EqualFold(key, "titles"):
+		case "titles":
 			titles, err := decodeSnapshotMap(d, snap.Titles, &mapEntries, "titles")
 			snap.Titles = titles
 			return err
-		case strings.EqualFold(key, "harvest_cursor"):
+		case "harvest_cursor":
 			return d.Decode(&snap.HarvestCursor)
-		case strings.EqualFold(key, "nyaa_feed"):
+		case "nyaa_feed":
 			return decodeSnapshotFeed(d, &snap.NyaaFeed, "nyaa_feed")
-		case strings.EqualFold(key, "ab_feed"):
-			return decodeSnapshotFeed(d, &snap.ABFeed, "ab_feed")
 		default:
-			return d.Skip()
+			return decodeSnapshotFeed(d, &snap.ABFeed, "ab_feed")
 		}
 	})
 	if err != nil {
@@ -272,11 +324,40 @@ func unmarshalSnapshot(data []byte) (snapshot, error) {
 	return snap, nil
 }
 
+// snapshotField maps one decoded top-level key to its canonical schema field
+// name, or "" for a field the schema does not know. Matching is
+// case-insensitive because json.Unmarshal matches struct FIELDS
+// case-insensitively too, so "Seen" and "seen" address the same field and are
+// equally a repeat of it.
+func snapshotField(key string) string {
+	for _, field := range []string{"by_hash", "by_key", "by_pair", "seen", "titles", "harvest_cursor", "nyaa_feed", "ab_feed"} {
+		if strings.EqualFold(key, field) {
+			return field
+		}
+	}
+	return ""
+}
+
+// claimSnapshotField records one top-level schema field as decoded, refusing a
+// second occurrence (see unmarshalSnapshot for why the top level fails closed
+// while nested duplicates keep Unmarshal's resolution). The set holds at most
+// the eight schema fields, so it is bounded whatever the document does; an
+// unknown key is never recorded, which is what keeps a key-dense document from
+// growing it. The message names only our own field literal - never the decoded
+// key, which is attacker-shaped text at this boundary.
+func claimSnapshotField(claimed map[string]struct{}, field string) error {
+	if _, dup := claimed[field]; dup {
+		return fmt.Errorf("snapshot: repeated top-level %q field", field)
+	}
+	claimed[field] = struct{}{}
+	return nil
+}
+
 // decodeSnapshotFeed decodes one persisted journal feed under its per-array
 // cardinality cap, so an over-long feed errors before its elements are
 // allocated. Each item still decodes through encoding/json for
-// stdlib-identical field handling; validity (validPersistedItem,
-// validJournalRecords) is decodeSnapshot's separate gate.
+// stdlib-identical field handling; per-item validity (validPersistedItem,
+// validJournalRecord) is decodeSnapshot's separate prune.
 func decodeSnapshotFeed(d *bounded.Decoder, dst *[]journalItem, what string) error {
 	feed, err := bounded.Array(d, *dst, maxSnapshotFeedItems, what, func(it *journalItem) error {
 		// The per-array cap bounds how many ITEMS decode, not what ONE item
@@ -307,7 +388,7 @@ func decodeSnapshotFeed(d *bounded.Decoder, dst *[]journalItem, what string) err
 // budget, and RETURNS the map for the caller to store back. A JSON null leaves
 // the map as it was (Unmarshal's null-into-map); an empty object allocates,
 // because a nil map is the structural sentinel both consumers read. Per-value
-// LENGTH stays loadPrevious's own ingress check (titleCacheWithinLimits): this
+// LENGTH stays loadPrevious's own ingress prune (retainValidTitles): this
 // pass bounds cardinality, which is what json.Unmarshal cannot.
 func decodeSnapshotMap[V bool | string](d *bounded.Decoder, dst map[string]V, entries *int, what string) (map[string]V, error) {
 	open, err := d.Open('{')
@@ -353,15 +434,19 @@ func chargeSnapshotEntry(what string, perMap, entries *int) error {
 
 // decodeSnapshot unmarshals persisted snapshot bytes and applies the
 // structural-validity gate BOTH consumers share (the server's readSnapshot
-// and the writer's loadPrevious): valid JSON, the required curation maps
+// and the writer's loadPrevious): valid JSON and the required curation maps
 // present (the writer always persists both, even empty, so nil maps identify
-// a structurally invalid snapshot without rejecting a valid empty feed), and
-// every feed item within the shared persisted-item limits, and - for a
-// post-journal snapshot - the journal identity invariant every item must carry
-// (validJournalRecords). err reports
-// malformed JSON; a non-empty reason names a structural violation.
-// Consumer-specific ingress checks (the writer's titles-cache cap) stay with
-// their consumer.
+// a structurally invalid snapshot without rejecting a valid empty feed).
+// err reports malformed JSON; a non-empty reason names a structural
+// violation. Consumer-specific ingress checks (the writer's titles-cache and
+// seen-ledger gates) stay with their consumer.
+//
+// A defect in ONE journal item is not a structural violation: the two
+// per-item invariants (the shared persisted-item limits and, for a
+// post-journal snapshot, the journal identity fields) drop just that item and
+// report the count per tracker feed - see pruneJournalFeed for why the
+// wholesale verdict was the wrong blast radius, and snapshotScrub for how the
+// two consumers use the counts.
 //
 // It also canonicalizes each accepted item's non-derived wire fields
 // (normalizeSnapshotItems) HERE rather than in one consumer, because
@@ -398,20 +483,19 @@ func decodeSnapshot(data []byte) (snap snapshot, scrub snapshotScrub, reason str
 	if snap.ByHash == nil || snap.ByKey == nil {
 		return snapshot{}, snapshotScrub{}, "missing required curation maps", nil
 	}
-	if !validFeedItems(snap.NyaaFeed, snap.ABFeed) {
-		return snapshot{}, snapshotScrub{}, "item exceeds persisted-item limits", nil
-	}
 	// The journal identity invariant is schema-scoped: only a post-journal
 	// snapshot (Seen present) promises a Key and a FirstSeen on every item. A
 	// Seen-less document is the retired pre-journal schema, whose feeds
 	// reportTransitionalSchema/loadPrevious deliberately treat as absent - it
 	// stays exempt so a legacy file still yields a usable search curation set
-	// instead of being rejected wholesale. The requirement lives HERE rather
-	// than in validPersistedItem because renderJournalItem validates a
-	// newly-built item before growJournal stamps its FirstSeen.
-	if snap.Seen != nil && !validJournalRecords(snap.NyaaFeed, snap.ABFeed) {
-		return snapshot{}, snapshotScrub{}, "journal item missing identity or first-seen timestamp", nil
-	}
+	// instead of having its items pruned for a promise its schema never made.
+	// The requirement lives HERE rather than in validPersistedItem because
+	// renderJournalItem validates a newly-built item before growJournal stamps
+	// its FirstSeen.
+	postJournal := snap.Seen != nil
+	var nyaaDropped, abDropped int
+	snap.NyaaFeed, nyaaDropped = pruneJournalFeed(snap.NyaaFeed, postJournal)
+	snap.ABFeed, abDropped = pruneJournalFeed(snap.ABFeed, postJournal)
 	normalizeSnapshotItems(snap.NyaaFeed)
 	normalizeSnapshotItems(snap.ABFeed)
 	normalizeSnapshotPubDates(snap.NyaaFeed)
@@ -420,6 +504,10 @@ func decodeSnapshot(data []byte) (snap snapshot, scrub snapshotScrub, reason str
 		blankedInfoURLs: map[string]int{
 			upstreamNyaa: sanitizeSnapshotInfoURLs(snap.NyaaFeed),
 			upstreamAB:   sanitizeSnapshotInfoURLs(snap.ABFeed),
+		},
+		droppedItems: map[string]int{
+			upstreamNyaa: nyaaDropped,
+			upstreamAB:   abDropped,
 		},
 	}
 	return snap, scrub, "", nil
@@ -430,9 +518,13 @@ func decodeSnapshot(data []byte) (snap snapshot, scrub snapshotScrub, reason str
 // whether the Nyaa or the AnimeBytes journal was tampered with, which is the
 // whole diagnostic value of the line (l-f176) - and summing is how the
 // attribution was lost when the shared-gate refactor moved the two calls into
-// one expression (d-u8c3-1).
+// one expression (d-u8c3-1). droppedItems carries the per-item gate's prune
+// count the same way (pruneJournalFeed): the server WARNs once per affected
+// feed, and the writer ignores it because its rebuild re-persists the pruned
+// feed.
 type snapshotScrub struct {
 	blankedInfoURLs map[string]int
+	droppedItems    map[string]int
 }
 
 // normalizeSnapshotPubDates restores the journal's PubDate-mirrors-FirstSeen
@@ -546,10 +638,13 @@ type FeedWriter struct {
 	abConfigured   bool
 }
 
-// NewFeedWriter returns a FeedWriter for cfg. ups carries the wired Prowlarr
-// upstreams the title harvest queries (a zero Upstreams disables harvesting -
-// items then keep their synthesized titles) and log may be nil (falls back to
-// slog.Default).
+// NewFeedWriter returns a FeedWriter for cfg. client is the HTTP client the
+// title harvest queries Prowlarr with (nil disables harvesting - items then
+// keep their synthesized titles) and log may be nil (falls back to
+// slog.Default). The upstreams are wired here from cfg's own UpstreamConfig
+// (see wireUpstreams), so the writer's enablement and its reachability come
+// from one operator input; the client stays a parameter because this package
+// must never construct one.
 //
 // The half-configured AnimeBytes intent (a passkey set for a tracker with no
 // ab_torznab_url - the README's off switch) is NOT reported here. It is one
@@ -561,7 +656,7 @@ type FeedWriter struct {
 // WARN re-fired on every `poll` subcommand run - producing exactly the
 // warn-level noise the owning site's policy exists to avoid (l-f13). No
 // passkey-embedded links are ever persisted for an off tracker regardless.
-func NewFeedWriter(cfg *FeedWriterConfig, log *slog.Logger, ups Upstreams) *FeedWriter {
+func NewFeedWriter(cfg *FeedWriterConfig, log *slog.Logger, client *http.Client) *FeedWriter {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -578,7 +673,8 @@ func NewFeedWriter(cfg *FeedWriterConfig, log *slog.Logger, ups Upstreams) *Feed
 	// AFTER construction (the pacing/time-slice tests drive a fake clock), and
 	// the harvest's pacer read it directly before it became its own component.
 	// Copying time.Now here instead would fork the two clocks silently.
-	w.harvest = newHarvester(log, func() time.Time { return w.now() }, ownUpstreams(ups.ups))
+	w.harvest = newHarvester(log, func() time.Time { return w.now() },
+		wireUpstreams(client, log, cfg.UpstreamConfig))
 	return w
 }
 
@@ -796,16 +892,6 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 		w.log.Warn(msgSnapshotMalformed, "path", w.path, "reason", structReason)
 		return previousJournal{baseline: true, reason: reasonMalformed}, nil
 	}
-	if !titleCacheWithinLimits(snap.Titles) {
-		// The titles cache is an ingress of its own: applyTitles overwrites
-		// carried items' titles AFTER renderJournalItem's creation-time
-		// check, so an over-limit cached title would let a rebuild persist
-		// a snapshot the server's reload rejects. The value itself is never
-		// logged: it can be attacker-shaped multi-megabyte text.
-		w.log.Warn(msgSnapshotMalformed,
-			"path", w.path, "reason", "cached title exceeds persisted-item limits")
-		return previousJournal{baseline: true, reason: reasonMalformed}, nil
-	}
 	if !seenLedgerWithinLimits(snap.Seen) {
 		// The seen ledger is carried forward verbatim and never pruned, so an
 		// over-limit identity key from a hand-edited snapshot would otherwise
@@ -821,11 +907,12 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 	if snap.Seen == nil {
 		return previousJournal{baseline: true, reason: "pre-journal-schema"}, nil
 	}
-	titles := make(map[string]string, len(snap.Titles))
-	for k, t := range snap.Titles {
-		if t != "" {
-			titles[k] = t
-		}
+	titles, droppedTitles := retainValidTitles(snap.Titles)
+	if droppedTitles > 0 {
+		// A count, never the value: a cached title can be attacker-shaped
+		// multi-megabyte text.
+		w.log.Warn("previous feed snapshot dropped over-limit cached titles; the harvest re-earns them",
+			"path", w.path, "dropped", droppedTitles, "max_bytes", maxPersistedFieldBytes)
 	}
 	cursor := snap.HarvestCursor
 	if len(cursor) > maxPersistedCursorBytes {
@@ -919,16 +1006,38 @@ func (w *FeedWriter) classifyPreviousReadError(err error) (previousJournal, erro
 	}
 }
 
-// titleCacheWithinLimits reports whether every harvested-title cache entry
-// (key and title alike) respects maxPersistedFieldBytes (see loadPrevious's
-// ingress check for why the cache is validated separately).
-func titleCacheWithinLimits(titles map[string]string) bool {
+// retainValidTitles copies the harvested-title cache forward, dropping the
+// entries a rebuild must not apply and reporting how many were dropped: an
+// empty title (nothing to upgrade a synthesized one with) and an entry whose
+// key or title exceeds maxPersistedFieldBytes.
+//
+// The over-limit entry is DROPPED rather than re-baselining the whole journal,
+// which is what this ingress used to do. The cache is a derived, re-earnable
+// value: the baseline path replaces titles with an empty map anyway and the
+// harvest re-earns a title within its query budget, so dropping costs one
+// re-harvest. Re-baselining cost the WINDOW - seen is rebuilt from the current
+// catalogue and the journal starts empty, so every release then inside
+// feedJournalMaxAge is marked seen without ever having been served and
+// journalIfNew reports isNew=false for it forever (the ledger is never pruned).
+// That made one corrupted title permanently lose un-grabbed releases, where the
+// sibling verbatim-carried field (harvest_cursor) already took the
+// proportionate route of dropping just itself (l-f60). The cap still matters:
+// applyTitles overwrites a carried item's title AFTER renderJournalItem's
+// creation-time check, so an over-limit title would otherwise let this rebuild
+// persist a snapshot the server's reload prunes.
+func retainValidTitles(titles map[string]string) (kept map[string]string, dropped int) {
+	kept = make(map[string]string, len(titles))
 	for k, title := range titles {
-		if len(k) > maxPersistedFieldBytes || len(title) > maxPersistedFieldBytes {
-			return false
+		if title == "" {
+			continue
 		}
+		if len(k) > maxPersistedFieldBytes || len(title) > maxPersistedFieldBytes {
+			dropped++
+			continue
+		}
+		kept[k] = title
 	}
-	return true
+	return kept, dropped
 }
 
 // --- Curation-warned exclusion ---

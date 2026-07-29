@@ -34,6 +34,8 @@ import (
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/envx/yamlenv"
 	"github.com/cplieger/scheduler/v2"
+	"github.com/cplieger/seadex-scout/internal/credname"
+	"github.com/cplieger/seadex-scout/internal/displaylink"
 	"github.com/cplieger/slogx"
 	"github.com/cplieger/urlform"
 	"go.yaml.in/yaml/v3"
@@ -533,13 +535,18 @@ func (c *Config) warnPublicURLProblems() {
 				"field", pu.name, "error", err)
 		} else if pu.val != "" {
 			// Whether a public_url yields a usable deep-link is decided at publish
-			// time by urlform (library.SafeLogURL), the app's classifier of record
-			// for browser-destined URLs: it refuses a value carrying a backslash or
-			// an embedded tab/newline outright. net/url accepts both anywhere after
-			// the authority, so read the classifier instead of predicting the
-			// verdict with a second taxonomy. Field-name-only, warn-only, matching
-			// every other check here.
-			if f := urlform.Classify(pu.val); f.HasBackslash || f.HasTabOrNewline {
+			// time by library.SafeLogURL, and this warning must not become a second
+			// answer to that question: the refusal legs are read from
+			// internal/displaylink, the one home of this app's structural vouch step
+			// for a browser-destined URL, so the claim "your report deep-links will
+			// be broken" cannot drift away from the rule that admits the link
+			// (l-f208). Reaching this branch means validateHTTPURL already accepted
+			// the value as an absolute http(s) URL with a host, so the only vouch
+			// leg left to fail is the smuggling one - a backslash or an embedded
+			// tab/newline, which net/url accepts anywhere after the authority while
+			// the publisher refuses it outright. Field-name-only, warn-only,
+			// matching every other check here.
+			if f := urlform.Classify(pu.val); !displaylink.VouchSanitizingForm(&f) {
 				slog.Warn("public_url carries a backslash or an embedded tab/newline; "+
 					"the deep-link publisher refuses such a value outright, so report "+
 					"rows carry no arr link at all - use plain forward slashes",
@@ -1021,8 +1028,8 @@ func validateHTTPURL(name, rawURL string) error {
 }
 
 // urlEmbedsCredential reports whether rawURL carries a credential in userinfo
-// or a credential-like query parameter (isCredentialParam owns the name set;
-// it is the single home of that list).
+// or a credential-like query parameter (internal/credname owns the name set,
+// shared with the indexer's broader redaction policy over the same vocabulary).
 // Such a URL survives validation but leaks the credential to
 // upstream-failure logs,
 // which wrap the full request URL; validateIndexer warns on it field-name-only.
@@ -1046,29 +1053,9 @@ func urlEmbedsCredential(rawURL string) bool {
 		return true
 	}
 	for name := range urlform.RawQueryNames(u.RawQuery) {
-		if isCredentialParam(name) {
+		if credname.IsName(name) {
 			return true
 		}
-	}
-	return false
-}
-
-// isCredentialParam reports whether a query-parameter name is credential-like
-// (apikey/api_key and the apitoken/api_token/access_token/auth_token variants,
-// the bare token, passkey/authkey/torrent_pass,
-// password/pass/secret/client_secret/rss_key,
-// case-insensitive) — the single key set urlEmbedsCredential's raw query scan
-// matches against.
-// authkey and torrent_pass are AnimeBytes' own credential parameter names,
-// carried by every AB direct download/announce URL — exactly the paste
-// mistake (a real tracker URL where the Prowlarr per-indexer endpoint
-// belongs) this warning exists to catch.
-func isCredentialParam(name string) bool {
-	switch strings.ToLower(name) {
-	case "apikey", "api_key", "apitoken", "api_token", "access_token", "auth_token",
-		"passkey", "token", "authkey", "torrent_pass",
-		"password", "pass", "secret", "client_secret", "rss_key":
-		return true
 	}
 	return false
 }

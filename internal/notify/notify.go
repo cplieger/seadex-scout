@@ -17,7 +17,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/logattr"
 	"github.com/cplieger/seadex-scout/internal/release"
-	"github.com/cplieger/urlform"
+	"github.com/cplieger/seadex-scout/internal/tracker"
 )
 
 // Alerted is a persisted dedupe record: when the finding was first alerted
@@ -405,7 +405,32 @@ var mdTextEscaper = strings.NewReplacer(
 // of capAttr: the raw capAttr label stays for Loki search and grouping, and
 // this value is what an annotation interpolates.
 func capAlertTextAttr(s string) string {
-	return reboundAttr(mdTextEscaper.Replace(capAttr(s)))
+	return trimTruncatedEscape(reboundAttr(mdTextEscaper.Replace(capAttr(s))))
+}
+
+// trimTruncatedEscape drops a truncation-orphaned trailing backslash. The
+// re-cap in capAlertTextAttr cuts the ESCAPED string, so the cut can fall
+// between a backslash and the character it escapes, leaving a value that ends
+// "\" immediately before the "..." marker - where the reader sees a dangling
+// escape and a Markdown sink reads the marker's first '.' as the escaped
+// character. Only a TRUNCATED value can carry one: mdTextEscaper emits
+// backslashes in pairs (an input backslash becomes two, an escaped
+// metacharacter is preceded by one), so an odd trailing run in the cut prefix is
+// exactly the half-emitted escape, and an honest value that genuinely ends in
+// "..." keeps its even run untouched.
+func trimTruncatedEscape(s string) string {
+	body, truncated := strings.CutSuffix(s, attrTruncMarker)
+	if !truncated {
+		return s
+	}
+	run := 0
+	for i := len(body) - 1; i >= 0 && body[i] == '\\'; i-- {
+		run++
+	}
+	if run%2 == 1 {
+		body = body[:len(body)-1]
+	}
+	return body + attrTruncMarker
 }
 
 // findingKVs builds the structured key-value attributes for a finding line.
@@ -425,7 +450,7 @@ func capAlertTextAttr(s string) string {
 // untrusted aggregate before the cap. Fixed-pattern app values (resolution,
 // codec, kind, season, al_id, arr, status) stay raw.
 func findingKVs(f *compare.Finding) []any {
-	publicLink, abURL := trackerURLs(f.Links)
+	publicLink, abLink := trackerURLs(f.Links)
 	return []any{
 		"title", capAttr(f.Title),
 		// alert_title / alert_recommended_group are the MARKDOWN-safe twins of
@@ -468,7 +493,14 @@ func findingKVs(f *compare.Finding) []any {
 		// passes the escaper byte-identical, so the Loki grouping label
 		// is unchanged.
 		"public_tracker", capAlertTextAttr(publicLink.otherTracker()),
-		"ab_url", capURLAttr(abURL),
+		"ab_url", capURLAttr(abLink.url),
+		// ab_tracker names the ab_url link the way public_tracker names
+		// public_url, and takes the same markup-safe render for the same
+		// reason (it is interpolated INSIDE a Markdown link label). It is
+		// added BESIDE ab_url rather than narrowing that attribute, so a
+		// deployed Loki rule keyed on ab_url keeps working while the label
+		// stops claiming AnimeBytes for a link whose host says otherwise.
+		"ab_tracker", capAlertTextAttr(abLink.abTracker()),
 		"info_hash", capAttr(f.InfoHash),
 		"seadex_tags", seadexTags(f),
 		"status", string(f.Status),
@@ -490,8 +522,14 @@ const (
 // a known Nyaa link is the public Nyaa source, and anything else is a generic
 // public link. The switch is exhaustive over filter.ABEvidence, so the three
 // grades cannot be tested in the wrong order.
+//
+// The grade is READ off the link (compare graded it from the raw upstream URL),
+// never re-derived here from the published one: that grading has a single home
+// in internal/classify, whose invariant is that the evidence must come from the
+// raw value because publishing rewrites or erases the host evidence it reads
+// (h-f43). What stays this package's policy is the slot PRECEDENCE below.
 func classifyTrackerLink(link compare.ReleaseLink) trackerLinkKind {
-	switch filter.ClassifyAB(link.Tracker, link.URL) {
+	switch link.AB {
 	case filter.ABDefinite:
 		return trackerLinkAB
 	case filter.ABAmbiguous:
@@ -511,12 +549,13 @@ func classifyTrackerLink(link compare.ReleaseLink) trackerLinkKind {
 
 // trackerURLs splits a finding's obtainable links into the public and
 // AnimeBytes URLs, so an alert can render a distinct public link and AB link.
-// AB routing is URL-aware, matching the obtainability filter (this package's
-// dedupe key, dedupekey.go, keys the full obtainable URL set
-// label-insensitively instead): a link whose filter.ClassifyAB grade is
+// AB routing reads the evidence the producer graded from each release's RAW
+// upstream URL (compare.ReleaseLink.AB, from classify.ABEvidence), matching
+// the obtainability filter (this package's dedupe key, dedupekey.go, keys the
+// full obtainable URL set label-insensitively instead): a link graded
 // filter.ABDefinite (AB label or animebytes.tv URL host) wins the AB slot
 // outright, ahead of filter.ABAmbiguous's conservative fail-closed fallback.
-// A malformed, unparseable, or non-ASCII-host URL grades ambiguous; such an
+// A malformed, unparseable, or non-ASCII-host raw URL grades ambiguous; such an
 // unclassifiable link only fills the AB slot when no definite AnimeBytes
 // link exists, so an ambiguous link is never rendered as the clickable
 // public URL yet can never displace a genuine AB link either.
@@ -527,21 +566,29 @@ func classifyTrackerLink(link compare.ReleaseLink) trackerLinkKind {
 // `nyaa_url` under a hardcoded `[Nyaa]` label, so a non-Nyaa public URL must
 // arrive as `public_url` + `public_tracker` rather than be mislabeled.
 //
+// The AB slot is returned the same way, and for the mirror-image reason: the
+// grade that fills it reads the untrusted SeaDex tracker LABEL first (that is
+// what makes it a fail-closed HIDE gate), so an `AB`-labeled link carrying a
+// public tracker's page URL lands here legitimately. It is published as
+// `ab_url` + `ab_tracker`, and the alert labels it with the name
+// `abTracker` resolves rather than a hardcoded `[AB]`, so a link whose host is
+// nyaa.si is offered under Nyaa's own name instead of being announced as
+// AnimeBytes (l-f121). Routing is unchanged - fail-closed is still right for
+// the toggle - only the label stops asserting more than the evidence supports.
+//
 // Selection is HEADLINE-first, then Nyaa-first WITHIN each affinity tier.
 // compare.obtainableLinks ranks the headline candidate's own sources first so
 // the rendered link belongs to the group Finding.RecommendedGroup names; a
 // tracker-class-only preference would discard that, letting another
 // recommended group's Nyaa link outrank a headline-group AnimeTosho link and
 // present it as the action for a group it does not belong to.
-func trackerURLs(links []compare.ReleaseLink) (public publicLink, ab string) {
+func trackerURLs(links []compare.ReleaseLink) (public, ab publicLink) {
 	var headlineNyaa, headlinePublic, firstNyaa, firstPublic, firstABFallback publicLink
 	for i := range links {
 		link := publicLink{url: links[i].URL, tracker: links[i].Tracker}
 		switch classifyTrackerLink(links[i]) {
 		case trackerLinkAB:
-			if ab == "" {
-				ab = link.url
-			}
+			ab.setFirst(link)
 		case trackerLinkABFallback:
 			firstABFallback.setFirst(link)
 		case trackerLinkNyaa:
@@ -565,9 +612,7 @@ func trackerURLs(links []compare.ReleaseLink) (public publicLink, ab string) {
 	public.setFirst(headlinePublic)
 	public.setFirst(firstNyaa)
 	public.setFirst(firstPublic)
-	if ab == "" {
-		ab = firstABFallback.url
-	}
+	ab.setFirst(firstABFallback)
 	return public, ab
 }
 
@@ -586,21 +631,13 @@ func (p *publicLink) setFirst(other publicLink) {
 	}
 }
 
-// canonicalTracker resolves the name to label this link with. The URL host is
-// the primary evidence because it is what the reader will actually navigate to;
-// the untrusted SeaDex tracker label (an alias, oddly cased, or empty) is the
-// fallback for a host-less or unrecognized-host link, and the bare host labels a
-// link no table entry claims. Only a link with neither an extractable known host,
-// a known label, nor any host at all yields "".
+// canonicalTracker resolves the name to label this link with, through
+// tracker.CanonicalName - the one home of the label-then-host ladder, so the
+// alert and the season report's links cell name the same link the same way and
+// a tracker-table edit reaches both (l-f117). Empty only for a link with
+// neither a known host, a known label, nor any host at all.
 func (p publicLink) canonicalTracker() string {
-	host := urlform.Classify(p.url).Host
-	if t, known := release.LookupTrackerByHost(host); known {
-		return t.Name
-	}
-	if t, known := release.LookupTracker(p.tracker); known {
-		return t.Name
-	}
-	return host
+	return tracker.CanonicalName(p.tracker, p.url)
 }
 
 // isNyaa reports whether the link is Nyaa's - the one public tracker the shipped
@@ -609,7 +646,7 @@ func (p publicLink) canonicalTracker() string {
 // label at all still reads as Nyaa instead of falling into the generic slot with
 // nothing to name it.
 func (p publicLink) isNyaa() bool {
-	return p.url != "" && p.canonicalTracker() == release.TrackerNameNyaa
+	return p.url != "" && p.canonicalTracker() == tracker.NameNyaa
 }
 
 // nyaaURL returns the URL for the legacy nyaa_url attribute: only ever a Nyaa
@@ -642,6 +679,25 @@ func (p publicLink) otherTracker() string {
 		return ""
 	}
 	return p.canonicalTracker()
+}
+
+// abTracker returns the tracker name accompanying the AB slot's URL, so the
+// alert labels that link with the tracker it actually came from instead of a
+// hardcoded "AB". The slot is filled by a fail-closed grade that trusts the
+// SeaDex tracker LABEL first, so its URL is not always an AnimeBytes one: an
+// `AB`-labeled record carrying a nyaa.si page URL reads as Nyaa here and the
+// alert says so (l-f121). AnimeBytes is the last resort rather than "": the
+// slot's own meaning is "AnimeBytes, or something that might be", so an
+// unclassifiable URL with no nameable host is still announced as the tracker
+// the operator's toggle admitted it under. Empty when there is no AB link.
+func (p publicLink) abTracker() string {
+	if p.url == "" {
+		return ""
+	}
+	if name := p.canonicalTracker(); name != "" {
+		return name
+	}
+	return tracker.NameAnimeBytes
 }
 
 // seadexTags renders a compact descriptive tag line for a finding — the SeaDex

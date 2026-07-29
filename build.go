@@ -9,12 +9,12 @@ import (
 	"github.com/cplieger/arrapi"
 	"github.com/cplieger/httpx/v4"
 	"github.com/cplieger/seadex-scout/internal/anilist"
+	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/config"
 	"github.com/cplieger/seadex-scout/internal/filter"
 	"github.com/cplieger/seadex-scout/internal/indexer"
-	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/notify"
@@ -28,6 +28,13 @@ const (
 	seadexTimeout  = 90 * time.Second  // large paged responses
 	mappingTimeout = 180 * time.Second // multi-MB Fribb file
 	anilistTimeout = 30 * time.Second  // small GraphQL replies
+	// prowlarrTimeout is a transport BACKSTOP on the shared Prowlarr client,
+	// not the per-attempt budget: internal/indexer derives each Torznab
+	// attempt's own deadline and sizes its retry tree and HTTP write deadline
+	// against it, so this only bounds a request the package's own deadline
+	// somehow outlives. It is deliberately generous for that reason - a value
+	// tightened here would silently cut the indexer's attempts short.
+	prowlarrTimeout = 2 * time.Minute
 	// arrMaxAttempts / arrBaseDelay bound arr request retries.
 	arrMaxAttempts = 3
 	arrBaseDelay   = 5 * time.Second
@@ -39,17 +46,32 @@ type built struct {
 	cleanup func()
 }
 
-// buildScout wires config into every component and returns the runnable scout
-// plus a cleanup func that releases the HTTP and arr clients. readOnlyState
-// selects the read-only state store for flows documented never to write (or
-// quarantine) the state file - the one-shot report - so a corrupt state.json
-// is left in place for the daemon's own Load to quarantine and surface.
-func buildScout(ctx context.Context, cfg *config.Config, readOnlyState bool) (built, error) {
+// scoutCore is the wiring BOTH entry points need: the persisted store, the arr
+// walk, the Fribb mapping loader, the SeaDex client and the matcher, plus the
+// cleanup releasing the HTTP and arr clients it opened. Each role builder adds
+// only its own components on top, so the report never constructs the notifier,
+// the comparer, or the feed writer and its Prowlarr client.
+type scoutCore struct {
+	log     *slog.Logger
+	store   scout.StateStore
+	library *arrwalk.Walker
+	mapping scout.MappingSource
+	seadex  scout.SeaDexSource
+	matcher *match.Matcher
+	anilist *anilist.Client
+	cleanup func()
+}
+
+// buildCore wires the shared components from config. readOnlyState selects the
+// read-only state store for flows documented never to write (or quarantine) the
+// state file - the one-shot report - so a corrupt state.json is left in place
+// for the daemon's own Load to quarantine and surface.
+func buildCore(ctx context.Context, cfg *config.Config, readOnlyState bool) (scoutCore, error) {
 	log := slog.Default()
 
 	sonarr, radarr, err := newArrClients(cfg)
 	if err != nil {
-		return built{}, err
+		return scoutCore{}, err
 	}
 
 	seadexHTTP := httpx.NewClient(seadexTimeout)
@@ -58,17 +80,16 @@ func buildScout(ctx context.Context, cfg *config.Config, readOnlyState bool) (bu
 	pingArrs(ctx, sonarr, radarr)
 
 	anilistClient := anilist.NewClient(anilistHTTP, anilist.DefaultURL, anilist.DefaultRate, log)
-	feed, feedCleanup := feedWriter(cfg, log)
 
 	store := state.NewStore(config.DefaultStatePath, log)
 	if readOnlyState {
 		store = state.NewReadOnlyStore(config.DefaultStatePath, log)
 	}
 
-	sc := scout.New(&scout.Deps{
-		Logger: log,
-		Store:  store,
-		Library: library.NewWalker(&library.Config{
+	return scoutCore{
+		log:   log,
+		store: store,
+		library: arrwalk.NewWalker(&arrwalk.Config{
 			Sonarr:      sonarrClient(sonarr),
 			Radarr:      radarrClient(radarr),
 			Logger:      log,
@@ -77,19 +98,48 @@ func buildScout(ctx context.Context, cfg *config.Config, readOnlyState bool) (bu
 			IncludeTags: cfg.IncludeTags,
 			ExcludeTags: cfg.ExcludeTags,
 		}),
-		Mapping: mapping.NewLoader(mappingHTTP, mapping.DefaultURL, config.DefaultMappingOverrides, mapping.DefaultRefresh, log),
-		SeaDex:  seadex.NewClient(seadexHTTP, seadex.DefaultBaseURL, seadex.DefaultPageDelay, log),
-		Matcher: match.NewMatcher(anilistClient, log),
+		mapping: mapping.NewLoader(mappingHTTP, mapping.DefaultURL, config.DefaultMappingOverrides, mapping.DefaultRefresh, log),
+		seadex:  seadex.NewClient(seadexHTTP, seadex.DefaultBaseURL, seadex.DefaultPageDelay, log),
+		matcher: match.NewMatcher(anilistClient, log),
+		anilist: anilistClient,
+		cleanup: func() {
+			seadexHTTP.CloseIdleConnections()
+			mappingHTTP.CloseIdleConnections()
+			anilistHTTP.CloseIdleConnections()
+			if sonarr != nil {
+				sonarr.Close()
+			}
+			if radarr != nil {
+				radarr.Close()
+			}
+		},
+	}, nil
+}
+
+// buildScout wires config into the compare-cycle components and returns the
+// runnable scout plus a cleanup func that releases the HTTP and arr clients -
+// including the feed writer's Prowlarr client when a Torznab feed is configured.
+func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
+	c, err := buildCore(ctx, cfg, false)
+	if err != nil {
+		return built{}, err
+	}
+	anilistClient := c.anilist
+	feed, feedCleanup := feedWriter(cfg, c.log)
+
+	sc := scout.New(&scout.Deps{
+		Logger:  c.log,
+		Store:   c.store,
+		Library: c.library,
+		Mapping: c.mapping,
+		SeaDex:  c.seadex,
+		Matcher: c.matcher,
 		Comparer: compare.NewComparer(compare.Config{
 			Filter:          filterOptions(cfg),
 			ExcludeSpecials: cfg.ExcludeSpecials,
 			AnimeBytes:      cfg.AnimeBytes,
 		}),
-		Auditor: audit.NewAuditor(audit.Config{
-			ExcludeSpecials: cfg.ExcludeSpecials,
-			AnimeBytes:      cfg.AnimeBytes,
-		}),
-		Notifier: notify.NewNotifier(log),
+		Notifier: notify.NewNotifier(c.log),
 		AniListStats: func() scout.AniListStats {
 			st := anilistClient.Stats()
 			return scout.AniListStats{Calls: st.Calls, RateLimitWaits: st.RateLimitWaits}
@@ -98,18 +148,35 @@ func buildScout(ctx context.Context, cfg *config.Config, readOnlyState bool) (bu
 	})
 
 	cleanup := func() {
-		seadexHTTP.CloseIdleConnections()
-		mappingHTTP.CloseIdleConnections()
-		anilistHTTP.CloseIdleConnections()
 		feedCleanup()
-		if sonarr != nil {
-			sonarr.Close()
-		}
-		if radarr != nil {
-			radarr.Close()
-		}
+		c.cleanup()
 	}
 	return built{scout: sc, cleanup: cleanup}, nil
+}
+
+// buildReporter wires config into the read-only one-shot report's components:
+// the shared core plus the auditor. It deliberately builds no comparer, no
+// notifier and no feed writer - the report cannot reach them - so a report run
+// also opens no Prowlarr connection, and it reads state through the read-only
+// store.
+func buildReporter(ctx context.Context, cfg *config.Config) (built, error) {
+	c, err := buildCore(ctx, cfg, true)
+	if err != nil {
+		return built{}, err
+	}
+	sc := scout.NewReporter(&scout.ReportDeps{
+		Logger:  c.log,
+		Store:   c.store,
+		Library: c.library,
+		Mapping: c.mapping,
+		SeaDex:  c.seadex,
+		Matcher: c.matcher,
+		Auditor: audit.NewAuditor(audit.Config{
+			ExcludeSpecials: cfg.ExcludeSpecials,
+			AnimeBytes:      cfg.AnimeBytes,
+		}),
+	})
+	return built{scout: sc, cleanup: c.cleanup}, nil
 }
 
 // upstreamConfig projects the operator config into the indexer's shared
@@ -145,12 +212,12 @@ func feedWriter(cfg *config.Config, log *slog.Logger) (fw scout.FeedWriter, clea
 	if !cfg.IndexerConfigured() {
 		return nil, func() {}
 	}
-	prowlarrHTTP := httpx.NewClient(indexer.UpstreamAttemptTimeout)
+	prowlarrHTTP := httpx.NewClient(prowlarrTimeout)
 	log = indexerLogger(log)
 	writer := indexer.NewFeedWriter(&indexer.FeedWriterConfig{
 		Path:           config.DefaultIndexerFeedPath,
 		UpstreamConfig: upstreamConfig(cfg),
-	}, log, indexer.WireUpstreams(prowlarrHTTP, log, upstreamConfig(cfg)))
+	}, log, prowlarrHTTP)
 	return writer, func() { prowlarrHTTP.CloseIdleConnections() }
 }
 
@@ -169,13 +236,13 @@ type builtIndexer struct {
 // so its lines separate cleanly from the compare findings in a shared slog stream.
 func buildIndexer(cfg *config.Config) builtIndexer {
 	log := indexerLogger(slog.Default())
-	prowlarrHTTP := httpx.NewClient(indexer.UpstreamAttemptTimeout)
+	prowlarrHTTP := httpx.NewClient(prowlarrTimeout)
 
 	ix := indexer.New(&indexer.Config{
 		APIKey:         cfg.IndexerAPIKey,
 		SnapshotPath:   config.DefaultIndexerFeedPath,
 		UpstreamConfig: upstreamConfig(cfg),
-	}, log, indexer.WireUpstreams(prowlarrHTTP, log, upstreamConfig(cfg)))
+	}, log, prowlarrHTTP)
 	cleanup := func() {
 		prowlarrHTTP.CloseIdleConnections()
 	}
@@ -258,18 +325,18 @@ func filterOptions(cfg *config.Config) filter.Options {
 	}
 }
 
-// sonarrClient returns s as a library.SonarrClient, or a nil interface when
+// sonarrClient returns s as a arrwalk.SonarrClient, or a nil interface when
 // Sonarr is disabled (so the walker skips it rather than calling a nil pointer).
-func sonarrClient(s *arrapi.Sonarr) library.SonarrClient {
+func sonarrClient(s *arrapi.Sonarr) arrwalk.SonarrClient {
 	if s == nil {
 		return nil
 	}
 	return s
 }
 
-// radarrClient returns r as a library.RadarrClient, or a nil interface when
+// radarrClient returns r as a arrwalk.RadarrClient, or a nil interface when
 // Radarr is disabled.
-func radarrClient(r *arrapi.Radarr) library.RadarrClient {
+func radarrClient(r *arrapi.Radarr) arrwalk.RadarrClient {
 	if r == nil {
 		return nil
 	}

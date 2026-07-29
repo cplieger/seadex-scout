@@ -324,72 +324,6 @@ func TestWriteFilesSameSecondRerunKeepsBothPairs(t *testing.T) {
 	}
 }
 
-// TestAcquireReportLockRefusesConcurrentRun pins the concurrency refusal: a
-// second acquire while the lock is held returns ErrReportRunning with the
-// exact message the report subcommand surfaces, and never blocks.
-func TestAcquireReportLockRefusesConcurrentRun(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "reports")
-	release, err := AcquireReportLock(dir)
-	if err != nil {
-		t.Fatalf("first AcquireReportLock: %v", err)
-	}
-
-	_, err = AcquireReportLock(dir)
-	if !errors.Is(err, ErrReportRunning) {
-		t.Fatalf("second AcquireReportLock = %v, want ErrReportRunning", err)
-	}
-	if err.Error() != "another report is already running" {
-		t.Errorf("refusal message = %q, want %q", err.Error(), "another report is already running")
-	}
-
-	release()
-	release2, err := AcquireReportLock(dir)
-	if err != nil {
-		t.Fatalf("AcquireReportLock after release = %v, want success", err)
-	}
-	release2()
-}
-
-func TestAcquireReportLockReportsMkdirError(t *testing.T) {
-	parent := t.TempDir()
-	blocker := filepath.Join(parent, "reports")
-	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := AcquireReportLock(filepath.Join(blocker, "sub"))
-
-	if err == nil {
-		t.Fatal("AcquireReportLock must fail when the report dir cannot be created")
-	}
-	if !strings.Contains(err.Error(), "create report dir") {
-		t.Errorf("error = %q, want it wrapped with the create-report-dir context", err)
-	}
-	if errors.Is(err, ErrReportRunning) {
-		t.Error("a mkdir failure must not be reported as a concurrent-run refusal")
-	}
-}
-
-func TestAcquireReportLockReportsOpenError(t *testing.T) {
-	dir := t.TempDir()
-	lockPath := filepath.Join(dir, reportLockName)
-	if err := os.Mkdir(lockPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := AcquireReportLock(dir)
-
-	if err == nil {
-		t.Fatal("AcquireReportLock must fail when report.lock is a directory")
-	}
-	if !strings.Contains(err.Error(), "report lock") {
-		t.Errorf("error = %q, want it wrapped with the report-lock context", err)
-	}
-	if errors.Is(err, ErrReportRunning) {
-		t.Error("an open failure must not be reported as a concurrent-run refusal")
-	}
-}
-
 // TestWriteFilesAlreadyCanceledWritesNothing pins WriteFiles' first
 // cancellation checkpoint: an already-canceled context returns the
 // report-write stage error before the stale-temp cleanup, the stem probe, or
@@ -461,11 +395,11 @@ func TestReportPairStemSkipsMultipleOccupiedSuffixes(t *testing.T) {
 }
 
 // pathExistsCancelCtx is a context whose Err flips to context.Canceled once
-// the watched path exists, deterministically landing a cancellation after the
-// JSON half commits (atomicfile's own ctx polls all happen before the final
-// rename, so the JSON write itself succeeds) but before the Markdown half
-// renders. The checkpoints poll Err via interrupted and never select on
-// Done; context.Cause falls back to Err for a non-cancelCtx context.
+// the watched path exists, deterministically landing a cancellation right
+// after the JSON half commits (atomicfile's own ctx polls all happen before
+// the final rename, so the JSON write itself succeeds). The checkpoints poll
+// Err via interrupted and never select on Done; context.Cause falls back to
+// Err for a non-cancelCtx context.
 type pathExistsCancelCtx struct {
 	context.Context
 	path string
@@ -478,31 +412,30 @@ func (c *pathExistsCancelCtx) Err() error {
 	return nil
 }
 
-// TestWriteFilesCanceledAfterJSONSkipsMarkdown pins the markdown-render
-// cancellation checkpoint (the one mid-pipeline stage no existing test
-// reaches): a cancellation observed after the JSON half is committed stops
-// the pipeline with the markdown-render stage error, leaving the
-// machine-readable .json on disk and never writing the .md - the
-// cancellation arm of the deliberate json-then-md ordering.
-func TestWriteFilesCanceledAfterJSONSkipsMarkdown(t *testing.T) {
+// TestWriteFilesCanceledAfterJSONStillWritesMarkdown pins the point-of-no-return
+// rule: once the JSON half's rename has committed, a cancellation observed from
+// there on must NOT abandon the Markdown half. Abandoning it lost the
+// human-readable product of a ~25-minute generation permanently - reportPairStem
+// requires BOTH halves free, so the next run writes a fresh complete pair and
+// the orphaned .json keeps its stem forever - to save milliseconds of I/O on
+// bytes already rendered. The Markdown write therefore runs on a short detached
+// budget (markdownWriteGrace), and WriteFiles succeeds with a complete pair
+// (l-f190).
+func TestWriteFilesCanceledAfterJSONStillWritesMarkdown(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "report-2026-07-11T15-04-05Z")
 	ctx := &pathExistsCancelCtx{Context: context.Background(), path: base + ".json"}
 	r := &Report{GeneratedAt: time.Date(2026, 7, 11, 15, 4, 5, 0, time.UTC), Totals: map[string]int{}}
 
 	err := r.WriteFiles(ctx, dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
-
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("WriteFiles error = %v, want context.Canceled", err)
-	}
-	if !strings.Contains(err.Error(), "report markdown render interrupted") {
-		t.Errorf("error = %q, want the markdown-render stage context", err)
+	if err != nil {
+		t.Fatalf("WriteFiles = %v, want nil (the pair completes on the detached markdown budget)", err)
 	}
 	if _, statErr := os.Stat(base + ".json"); statErr != nil {
-		t.Errorf("JSON half must be committed before the cancellation checkpoint fires: %v", statErr)
+		t.Errorf("JSON half must be committed: %v", statErr)
 	}
-	if _, statErr := os.Stat(base + ".md"); statErr == nil {
-		t.Error("markdown half must not be written after a post-JSON cancellation")
+	if _, statErr := os.Stat(base + ".md"); statErr != nil {
+		t.Errorf("markdown half must still be published after a post-JSON cancellation: %v", statErr)
 	}
 }
 
@@ -557,9 +490,12 @@ func TestWriteFilesCanceledBeforeJSONRenderWritesNothing(t *testing.T) {
 // fix an fsync - WriteFiles must therefore return nil rather than fail the run.
 // What it must still do is skip the Markdown half, because a recovered .md
 // without its machine-readable pair is exactly the state the JSON-first
-// ordering exists to prevent, and it must not claim "report written". The write
-// seam is a package var because a parent-directory fsync failure cannot be
-// induced on a test filesystem; it runs serially (shared package state).
+// ordering exists to prevent. It must ALSO still announce itself: the run
+// published a machine-readable report and returns success, so suppressing the
+// alert-keyed "report written" record blinded SeadexScoutReportWritten on it
+// (l-f188). The empty markdown name is what says only one half landed. The
+// write seam is a package var because a parent-directory fsync failure cannot
+// be induced on a test filesystem; it runs serially (shared package state).
 func TestWriteFilesNonDurableJSONSkipsMarkdown(t *testing.T) {
 	dir := t.TempDir()
 	var buf strings.Builder
@@ -590,11 +526,18 @@ func TestWriteFilesNonDurableJSONSkipsMarkdown(t *testing.T) {
 	if len(mds) != 0 {
 		t.Errorf("markdown half = %v, want none published after a non-durable json commit", mds)
 	}
-	if strings.Contains(buf.String(), "report written") {
-		t.Errorf("log = %s, want no \"report written\" record for an incomplete pair", buf.String())
-	}
 	if !strings.Contains(buf.String(), "not crash-durable") {
 		t.Errorf("log = %s, want the degradation WARN naming the durability skip", buf.String())
+	}
+	for _, want := range []string{
+		`"msg":"report written"`,
+		`"markdown":""`,
+		`"json":"report-2026-07-11T15-04-05Z.json"`,
+		`"durable":false`,
+	} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("log is missing %s (a published json-only run must stay visible to the alert): %s", want, buf.String())
+		}
 	}
 }
 

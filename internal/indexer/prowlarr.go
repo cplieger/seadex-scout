@@ -13,19 +13,14 @@ import (
 
 	"github.com/cplieger/httpx/v4"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
-	"github.com/cplieger/urlform"
+	"github.com/cplieger/seadex-scout/internal/credname"
+	"github.com/cplieger/seadex-scout/internal/displaylink"
 )
 
 const (
 	// upstreamMaxAttempts / upstreamBaseDelay bound the per-query retry.
 	upstreamMaxAttempts = 3
 	upstreamBaseDelay   = time.Second
-	// UpstreamAttemptTimeout is the per-attempt HTTP client timeout for a
-	// Prowlarr Torznab query. Exported so the composition root (build.go)
-	// wires the shared Prowlarr client from the same constant server.go's
-	// writeTimeout is derived from - one home for the number keeps the
-	// write deadline sized above the whole retry tree by construction.
-	UpstreamAttemptTimeout = 60 * time.Second
 	// upstreamMaxBytes bounds a single Torznab response before decode. 8 MiB
 	// deliberately rejects pathological escape-heavy documents before decode:
 	// 4 MiB of decoded ampersands can require about 20 MiB on the wire. Real
@@ -43,6 +38,23 @@ const (
 	// the shapes config actually warns about.
 	minEmbeddedSecretLen = 16
 )
+
+// upstreamAttemptTimeout bounds ONE Prowlarr Torznab attempt: fetchAndParse
+// derives each attempt's context from it (see there), so the package enforces
+// its own retry arithmetic instead of relying on the composition root to wire
+// an http.Client.Timeout that matches. server.go's writeTimeout is derived
+// from the same value, which keeps the write deadline sized above the whole
+// retry tree by construction. It is package-private for that reason: the root
+// still owns the CLIENT (the X-Api-Key header rides redirects, so the redirect
+// policy must stay there - see wireUpstreams), but it owes this package no
+// knowledge of the per-attempt budget; its client timeout is only a transport
+// backstop above this one.
+//
+// A var, not a const, ONLY so the test that pins this package-owned deadline
+// can exercise it without spending a minute in real time (the same reason
+// queryGateWait is one). writeTimeout is evaluated at init, so shortening it
+// in a test does not shrink the write deadline.
+var upstreamAttemptTimeout = 60 * time.Second
 
 // --- Upstream search and retry classification ---
 
@@ -69,9 +81,8 @@ type upstream struct {
 }
 
 // newUpstream builds one Prowlarr per-indexer Torznab endpoint. It is the ONE
-// construction site for the type, so a field added to upstream cannot be set
-// on the wired original (WireUpstreams) and then silently dropped from the
-// per-consumer copies (ownUpstreams) every consumer actually queries.
+// construction site for the type, and wireUpstreams is its only caller, so
+// every consumer's upstreams are built the same way from the same fields.
 func newUpstream(client *http.Client, log *slog.Logger, name, feed, apiKey string) *upstream {
 	return &upstream{http: client, log: log, name: name, feed: feed, apiKey: apiKey}
 }
@@ -143,7 +154,16 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, int, 
 }
 
 // fetchAndParse performs ONE search attempt: a single bounded HTTP fetch
-// followed by the Torznab decode. Errors the enclosing Do should
+// followed by the Torznab decode. The attempt's own deadline
+// (upstreamAttemptTimeout) is derived HERE, so the per-attempt bound the retry
+// budget is sized against is enforced by the package that owns that budget
+// rather than by an unenforced obligation on whoever built the client; a
+// client-level http.Client.Timeout may still sit above it as a transport
+// backstop. Classification keeps reading the CALLER's context (attemptError
+// takes it, not the attempt context), which is exactly the split it documents:
+// caller context still live means the attempt timer fired, hence retryable.
+//
+// Errors the enclosing Do should
 // retry are marked transient: a 408/429/5xx status (with the response's capped
 // Retry-After carried as the transient error's RetryAfterHint, so the outer
 // loop honors the upstream-requested delay), a garbled/truncated 2xx body,
@@ -161,7 +181,14 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 	// attempt budget single-owner - the enclosing typed Do runs the retries, so
 	// letting GetBytes retry too would multiply the two budgets - which makes
 	// attemptError, not GetBytes, the owner of every retry decision here.
-	body, err := httpx.GetBytes(ctx, u.http, reqURL,
+	//
+	// The attempt context bounds the whole attempt (connect, headers, and the
+	// bounded body read); attemptError below is deliberately handed the CALLER's
+	// ctx so an expired attempt timer stays retryable while an expired caller
+	// context stays terminal.
+	attemptCtx, cancel := context.WithTimeout(ctx, upstreamAttemptTimeout)
+	defer cancel()
+	body, err := httpx.GetBytes(attemptCtx, u.http, reqURL,
 		httpx.WithMaxAttempts(1),
 		httpx.WithHeaders(u.setHeaders),
 		httpx.WithMaxBodyBytes(upstreamMaxBytes),
@@ -202,8 +229,10 @@ func retryableUpstreamStatus(code int) bool {
 //     deliberately does not pair with Transient (the retry decision is the
 //     caller's). Any other status (auth/config 4xx) stays terminal and fails
 //     the search on the first attempt.
-//   - A per-attempt deadline. The shared client carries an http.Client.Timeout
-//     of UpstreamAttemptTimeout, and when that timer fires the error matches
+//   - A per-attempt deadline. fetchAndParse gives every attempt a context
+//     bounded by upstreamAttemptTimeout (and the root's client may carry a
+//     looser http.Client.Timeout as a transport backstop); when either fires
+//     the error matches
 //     context.DeadlineExceeded - which httpx.IsTransient deliberately treats as
 //     TERMINAL before consulting net.Error or the Transient interface, because a
 //     caller's expired context must never be retried. That collapsed the
@@ -211,7 +240,7 @@ func retryableUpstreamStatus(code int) bool {
 //     (not the caller's context) expired: an interactive search failed
 //     immediately and the title harvest latched the tracker scope for the whole
 //     rebuild. The caller's own context is the terminal signal, so the split is
-//     on ctx.Err(): still live means the client-owned attempt timer fired, which
+//     on ctx.Err(): still live means the attempt timer fired, which
 //     is retryable. The replacement error deliberately does NOT wrap
 //     context.DeadlineExceeded (that identity is what IsTransient rejects
 //     first); it carries a fixed log-safe message instead. An actually expired
@@ -329,25 +358,20 @@ func isRawQuerySeparator(r rune) bool {
 
 // credentialParamName reports whether a query-parameter name (possibly
 // percent-encoded) names a credential, so its value is a secret regardless of
-// length. internal/config's isCredentialParam is the canonical NAME LIST for
-// the operator-facing warning, but this package deliberately takes no
-// internal/config dependency (only the composition root imports it), so the
-// rule here is expressed as the credential-word substrings that list is built
-// from - deliberately BROADER, so a name config adds later is already covered
-// here rather than silently unredacted. Over-matching only costs a mangled
-// diagnostic; under-matching writes a credential to Loki (CWE-532).
+// length. The name vocabulary is internal/credname's - the same leaf
+// internal/config's operator warning reads its exact-match list from - and this
+// consumer takes the deliberately BROADER ContainsWord policy over it: a name
+// config adds later is already covered here rather than silently unredacted.
+// Over-matching only costs a mangled diagnostic; under-matching writes a
+// credential to Loki (CWE-532). A shared leaf rather than reaching into
+// internal/config, which this package deliberately does not depend on (only the
+// composition root imports config).
 func credentialParamName(name string) bool {
 	decoded, err := url.QueryUnescape(name)
 	if err != nil {
 		decoded = name
 	}
-	decoded = strings.ToLower(decoded)
-	for _, word := range []string{"key", "token", "pass", "secret", "auth", "cred"} {
-		if strings.Contains(decoded, word) {
-			return true
-		}
-	}
-	return false
+	return credname.ContainsWord(decoded)
 }
 
 // redactSecrets removes every credential this upstream carries from untrusted
@@ -672,31 +696,29 @@ func effectiveHTTPPort(u *url.URL) string {
 // shared admission prefix of BOTH its consumers: sanitizeDisplayURL
 // (search-path display links) and trackerKeyFromURL (match.go, the curation
 // IDENTITY gate), so relaxing it changes what mints a curation key, not only
-// what renders as a clickable link. reload.go's snapshotInfoURLAllowed applies
-// the same rule inline against a fixed expected host rather than calling this.
+// what renders as a clickable link.
 //
-// Structural facts come from urlform, the app's classifier of record for exactly
-// this browser-vs-net/url divergence, already applied at internal/trackerlink's
-// publish gate and internal/filter's evidence gate. The hand-rolled net/url
-// version this replaces was a second taxonomy of the same knowledge, drifting
-// from what the library learns (l-f24): it accepted hidden-host,
-// protocol-relative and backslash-authority forms whose browser reading differs
-// from its own, since it only checked scheme and userinfo. Returned Host is
-// urlform's ASCII-lowercased evidence, so the caller's release.Is*Host lookup
-// (itself gated on urlform.IsASCIIHost) sees the same string a browser would
-// navigate to.
+// The structural legs are internal/displaylink's, the app's one home for that
+// vouch step (h-f13) - shared with internal/trackerlink's publisher and with
+// reload.go's snapshotInfoURLAllowed, each of which keeps only its own host
+// policy on top, exactly as this gate does. Those legs read their facts from
+// urlform, the app's classifier of record for this browser-vs-net/url
+// divergence. The hand-rolled net/url version they replace was a second
+// taxonomy of the same knowledge, drifting from what the library learns
+// (l-f24): it accepted hidden-host, protocol-relative and backslash-authority
+// forms whose browser reading differs from its own, since it only checked
+// scheme and userinfo.
+//
+// The one leg that stays HERE is the non-empty host, because this gate's host
+// is load-bearing: the caller's tracker.Is*Host lookup (itself gated on
+// urlform.IsASCIIHost) must see the same string a browser would navigate to.
+// Returned Host is urlform's ASCII-lowercased evidence.
 func httpDisplayHost(raw string) (host string, ok bool) {
-	f := urlform.Classify(raw)
-	if f.Class != urlform.ClassAbsolute || f.Host == "" {
+	host, ok = displaylink.Vouch(raw)
+	if !ok || host == "" {
 		return "", false
 	}
-	if f.HasUserInfo || f.HasBackslash || f.HasTabOrNewline {
-		return "", false
-	}
-	if !isHTTPScheme(f.Scheme) {
-		return "", false
-	}
-	return f.Host, true
+	return host, true
 }
 
 // sanitizeDisplayURL returns raw when it is a display-admissible URL
@@ -710,7 +732,7 @@ func httpDisplayHost(raw string) (host string, ok bool) {
 // page URLs here, so a foreign-host or userinfo-bearing link (a phishing target
 // a tampered upstream could attach to a curated item) is blanked rather than
 // rendered clickable. The host match is safe against homograph lookalikes
-// because scopeOfHost delegates to release.LookupTrackerByHost, which
+// because scopeOfHost delegates to tracker.LookupByHost, which
 // carries the centralized ASCII/homograph gate (urlform.IsASCIIHost) every
 // host-table match inherits.
 func sanitizeDisplayURL(scope, raw string) string {

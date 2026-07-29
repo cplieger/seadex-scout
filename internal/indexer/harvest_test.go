@@ -107,7 +107,7 @@ func TestHarvestMatchesABByTorrentID(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -157,7 +157,7 @@ func TestHarvestMatchesNyaaByViewID(t *testing.T) {
 	info := func(int) EntryInfo { return EntryInfo{Title: "Frieren", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -201,7 +201,7 @@ func TestHarvestCachePersistsAcrossRebuilds(t *testing.T) {
 	info := func(int) EntryInfo { return EntryInfo{Title: "Frieren", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("first Rebuild: %v", err)
@@ -250,7 +250,7 @@ func TestHarvestTimeSliceEnforced(t *testing.T) {
 	info := func(alID int) EntryInfo { return EntryInfo{Title: fmt.Sprintf("Show %d", alID)} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
 	clock := time.Unix(1700000000, 0)
 	w.now = func() time.Time { return clock }
@@ -297,7 +297,7 @@ func TestHarvestRotationResumesAfterCursor(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedLedgerWithCursor(t, path, "nyaa:1500")
-	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -330,7 +330,7 @@ func TestHarvestQueryFailureKeepsSynthetic(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
 	log, rec := capture.New()
-	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		log, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -378,7 +378,7 @@ func TestHarvestMalformedResponseSkipsOnlyThatShow(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
 	log, rec := capture.New()
-	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		log, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -435,7 +435,7 @@ func TestHarvestRequestErrorSkipsOnlyThatShow(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
 	log, rec := capture.New()
-	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		log, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -473,7 +473,7 @@ func TestHarvestUnconfiguredTrackerNeverQueried(t *testing.T) {
 	info := func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -511,7 +511,7 @@ func TestHarvestPagesNyaaByOffset(t *testing.T) {
 	info := func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -554,7 +554,7 @@ func TestHarvestResumesPagingAcrossRebuilds(t *testing.T) {
 	info := func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
 
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
@@ -601,7 +601,7 @@ func TestHarvestPrunesStalePagesWithNoPendingGroups(t *testing.T) {
 		return torznabBody(torznabItem("Show S01 1080p BluRay [G]", "https://nyaa.si/view/42"))
 	})
 	defer srv.Close()
-	w := wiredWriter(&FeedWriterConfig{
+	w := NewFeedWriter(&FeedWriterConfig{
 		Path:           filepath.Join(t.TempDir(), "feed.json"),
 		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 	}, nil, srv.Client())
@@ -655,7 +655,7 @@ func TestHarvestMatchesNyaaByInfoHash(t *testing.T) {
 	info := func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -687,7 +687,7 @@ func TestHarvestSingleShowPagingStopsAtPageCap(t *testing.T) {
 	info := func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
-	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -829,7 +829,7 @@ func TestHarvestReportsADegradedCheckpoint(t *testing.T) {
 			_, srv := newHarvestMock(func(int) string { return emptyTorznab() })
 			defer srv.Close()
 			log, rec := capture.New()
-			w := wiredWriter(&FeedWriterConfig{
+			w := NewFeedWriter(&FeedWriterConfig{
 				Path:           filepath.Join(t.TempDir(), "feed.json"),
 				UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 			}, log, srv.Client())
@@ -856,7 +856,7 @@ func TestHarvestReportsStrandedReleases(t *testing.T) {
 	})
 	defer srv.Close()
 	log, rec := capture.New()
-	w := wiredWriter(&FeedWriterConfig{
+	w := NewFeedWriter(&FeedWriterConfig{
 		Path:           filepath.Join(t.TempDir(), "feed.json"),
 		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 	}, log, srv.Client())
@@ -978,7 +978,7 @@ func TestHarvestScopeWideFailureSkipsRemainingShows(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyLedger(t, path)
 	log, rec := capture.New()
-	w := wiredWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: countSrv.URL, ProwlarrAPIKey: "k"}},
+	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: countSrv.URL, ProwlarrAPIKey: "k"}},
 		log, countSrv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -1021,7 +1021,7 @@ func TestHarvestCancellationMidQueryIsNotWarnedAsUpstreamFault(t *testing.T) {
 		Path:           filepath.Join(t.TempDir(), "feed.json"),
 		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 	}
-	w := wiredWriter(cfg, log, srv.Client())
+	w := NewFeedWriter(cfg, log, srv.Client())
 	feeds := map[string][]journalItem{
 		upstreamNyaa: {{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7}},
 	}
@@ -1156,7 +1156,7 @@ func TestHarvestMalformedResponsesLatchAtThreshold(t *testing.T) {
 		9: {Title: "Show C"}, 10: {Title: "Show D"},
 	}
 	log, rec := capture.New()
-	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, log, srv.Client())
 	titles := map[string]string{}
@@ -1201,7 +1201,7 @@ func TestHarvestMatchesHashlessRecordAgainstHashBearingResult(t *testing.T) {
 		upstreamNyaa: {{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7}},
 	}
 	log, rec := capture.New()
-	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, log, srv.Client())
 	titles := map[string]string{}
@@ -1245,7 +1245,7 @@ func TestHarvestReportsContradictoryResults(t *testing.T) {
 		},
 	}
 	log, rec := capture.New()
-	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, log, srv.Client())
 	titles := map[string]string{}
@@ -1297,7 +1297,7 @@ func TestHarvestRejectedResponsesLatchAtThreshold(t *testing.T) {
 		9: {Title: "Show C"}, 10: {Title: "Show D"},
 	}
 	log, rec := capture.New()
-	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, log, srv.Client())
 	titles := map[string]string{}
@@ -1350,7 +1350,7 @@ func TestHarvestMalformedResponseRunResetsAfterSuccessfulPage(t *testing.T) {
 		10: {Title: "Show D"}, 11: {Title: "Show E"}, 12: {Title: "Show F"},
 	}
 	log, _ := capture.New()
-	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, log, srv.Client())
 	titles := map[string]string{}
@@ -1389,7 +1389,7 @@ func TestHarvestOpportunisticMatchSkipsSatisfiedGroup(t *testing.T) {
 	}
 	info := map[int]EntryInfo{7: {Title: "Show A"}, 8: {Title: "Show B"}}
 	log, _ := capture.New()
-	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, log, srv.Client())
 	titles := map[string]string{}
@@ -1442,7 +1442,7 @@ func TestHarvestOpportunisticMatchUsesTheOtherShowsVocabulary(t *testing.T) {
 	// B's arr carries the Romaji title; A's does not appear in either alias.
 	info := map[int]EntryInfo{7: {Title: "Show A"}, 8: {Title: "Shou Bii"}}
 	log, _ := capture.New()
-	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, log, srv.Client())
 	titles := map[string]string{}
@@ -1493,7 +1493,7 @@ func TestHarvestRequestRejectionResetsMalformedRun(t *testing.T) {
 		10: {Title: "Show D"}, 11: {Title: "Show E"}, 12: {Title: "Show F"},
 	}
 	log, _ := capture.New()
-	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, log, srv.Client())
 	titles := map[string]string{}
@@ -1525,7 +1525,7 @@ func TestUpdateHarvestScopeState_resetsRejectedRun(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			log, _ := capture.New()
-			w := NewFeedWriter(&FeedWriterConfig{}, log, Upstreams{})
+			w := NewFeedWriter(&FeedWriterConfig{}, log, nil)
 			l := newHarvestLatches(1)
 			w.harvest.updateHarvestScopeState(upstreamNyaa, harvestShowFailed, false, l)
 			w.harvest.updateHarvestScopeState(upstreamNyaa, harvestShowFailed, false, l)
@@ -1652,7 +1652,7 @@ func TestHarvestHTTPStatusFailureScoping(t *testing.T) {
 			}
 			info := map[int]EntryInfo{7: {Title: "Show A"}, 8: {Title: "Show B"}}
 			log, rec := capture.New()
-			w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+			w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
 				NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 			}}, log, srv.Client())
 			titles := map[string]string{}
@@ -2160,7 +2160,7 @@ func TestUpdateHarvestScopeStateLatchesAlternatingFailures(t *testing.T) {
 
 	t.Run("perfectly alternating failures latch", func(t *testing.T) {
 		log, rec := capture.New()
-		w := NewFeedWriter(&FeedWriterConfig{}, log, Upstreams{})
+		w := NewFeedWriter(&FeedWriterConfig{}, log, nil)
 		l := newHarvestLatches(1)
 		alternating := []harvestOutcome{
 			harvestShowMalformed, harvestShowFailed,
@@ -2189,7 +2189,7 @@ func TestUpdateHarvestScopeStateLatchesAlternatingFailures(t *testing.T) {
 
 	t.Run("a success resets the no-progress run", func(t *testing.T) {
 		log, rec := capture.New()
-		w := NewFeedWriter(&FeedWriterConfig{}, log, Upstreams{})
+		w := NewFeedWriter(&FeedWriterConfig{}, log, nil)
 		l := newHarvestLatches(1)
 		// Five alternating failures, a success, then five more: no run of
 		// consecutiveFruitlessLatch ever completes, so the scope keeps working.
@@ -2211,7 +2211,7 @@ func TestUpdateHarvestScopeStateLatchesAlternatingFailures(t *testing.T) {
 
 	t.Run("a homogeneous run still latches on its own diagnostic", func(t *testing.T) {
 		log, rec := capture.New()
-		w := NewFeedWriter(&FeedWriterConfig{}, log, Upstreams{})
+		w := NewFeedWriter(&FeedWriterConfig{}, log, nil)
 		l := newHarvestLatches(1)
 		for range consecutiveMalformedLatch {
 			w.harvest.updateHarvestScopeState(upstreamNyaa, harvestShowMalformed, false, l)
@@ -2240,7 +2240,7 @@ func TestUpdateHarvestScopeStateLatchesAlternatingFailures(t *testing.T) {
 func TestUpdateHarvestScopeStateLatchesContradictedSuccesses(t *testing.T) {
 	const msg = "indexer title harvest: no show made progress; skipping this upstream's remaining shows this rebuild"
 	log, rec := capture.New()
-	w := NewFeedWriter(&FeedWriterConfig{}, log, Upstreams{})
+	w := NewFeedWriter(&FeedWriterConfig{}, log, nil)
 
 	l := newHarvestLatches(1)
 	for i := range consecutiveFruitlessLatch {
@@ -2290,7 +2290,7 @@ func TestUpstreamFailureWarnsOnce(t *testing.T) {
 	defer srv.Close()
 
 	log, rec := capture.New()
-	w := wiredWriter(&FeedWriterConfig{
+	w := NewFeedWriter(&FeedWriterConfig{
 		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
 	}, log, srv.Client())
 
@@ -2340,7 +2340,7 @@ func TestHarvestServesTheArrsVocabularyAlias(t *testing.T) {
 	feeds := map[string][]journalItem{
 		upstreamAB: {{item: item{Title: "Frieren S01"}, Key: "ab:1167293", AniListID: 154587}},
 	}
-	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
 		ABTorznabURL: srv.URL, ABPasskey: "PK", ProwlarrAPIKey: "k",
 	}}, nil, srv.Client())
 	titles := map[string]string{}
@@ -2404,7 +2404,7 @@ func TestHarvestRefusalsThatAreNotThisShowsDoNotLatchTheScope(t *testing.T) {
 				info[7+i] = EntryInfo{Title: name}
 			}
 			log, rec := capture.New()
-			w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+			w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
 				NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 			}}, log, srv.Client())
 			titles := map[string]string{}
@@ -2485,7 +2485,7 @@ func TestHarvestConflictsNamingAlreadyTitledKeysDoNotLatchTheScope(t *testing.T)
 		info[7+i] = EntryInfo{Title: name}
 	}
 	log, rec := capture.New()
-	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, log, srv.Client())
 	titles := map[string]string{}
@@ -2540,7 +2540,7 @@ func TestHarvestPartialProgressDoesNotLatchTheScope(t *testing.T) {
 		info[7+i] = EntryInfo{Title: "Show " + strconv.Itoa(i)}
 	}
 	log, rec := capture.New()
-	w := wiredWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
 		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
 	}}, log, srv.Client())
 	titles := map[string]string{}

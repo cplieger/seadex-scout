@@ -132,8 +132,10 @@ type Decision struct {
 // (internal/audit). The callers deliberately prepare DIFFERENT inputs - the
 // daemon feeds its filtered obtainable recommendations as best with a nil alt
 // (so a unit lacking a recommended group reads unlisted), while the report
-// feeds the SeaDex best and alt sets minus curation-warned and unobtainable
-// releases - and Decide unifies the branch
+// feeds the SeaDex best set minus curation-warned and unobtainable releases
+// plus its full alt set (an annotation changes whether a release should be
+// wanted, not whether SeaDex lists what is already on disk)
+// - and Decide unifies the branch
 // order and decision rules over those inputs, so the two flows cannot drift
 // apart on the same title.
 func Decide(item *library.Item, rec *mapping.Record, best, alt []string) Decision {

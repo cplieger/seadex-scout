@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/cplieger/arrapi"
+	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/audit"
-	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/seadex"
@@ -37,10 +37,10 @@ func TestReportGeneratesRowsAndNeverWritesState(t *testing.T) {
 			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
-	s := New(&Deps{
+	s := NewReporter(&ReportDeps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher: match.NewMatcher(notFoundAniList{}, logger),
@@ -90,10 +90,10 @@ func TestReportSummaryLineCarriesCounts(t *testing.T) {
 	// from library_items (1) and rows (1); its definitive not-found answer
 	// leaves incomplete_mappings at 0.
 	entries := append(seadexFrierenEntry(), seadex.Entry{AniListID: 999})
-	s := New(&Deps{
+	s := NewReporter(&ReportDeps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{entries: entries},
 		Matcher: match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
@@ -135,10 +135,10 @@ func TestReportPartialSnapshotErrors(t *testing.T) {
 		},
 		failEpisodes: map[int]bool{8: true},
 	}
-	s := New(&Deps{
+	s := NewReporter(&ReportDeps{
 		Logger:  logger,
 		Store:   &fakeStore{},
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 	})
 
 	_, err := s.Report(context.Background())
@@ -155,10 +155,10 @@ func TestReportPartialSnapshotErrors(t *testing.T) {
 // to report against).
 func TestReportLibraryWalkFailureErrors(t *testing.T) {
 	logger := scoutTestLogger()
-	s := New(&Deps{
+	s := NewReporter(&ReportDeps{
 		Logger:  logger,
 		Store:   &fakeStore{},
-		Library: library.NewWalker(&library.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: logger}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: logger}),
 	})
 
 	_, err := s.Report(context.Background())
@@ -179,12 +179,12 @@ func TestReportLibraryWalkFailureErrors(t *testing.T) {
 func TestReportZeroSeaDexEntriesErrors(t *testing.T) {
 	logger := scoutTestLogger()
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
-	s := New(&Deps{
+	s := NewReporter(&ReportDeps{
 		Logger: logger,
 		Store: &fakeStore{st: state.State{
 			Mapping: frierenMappingCache(),
 		}},
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{},
 	})
@@ -204,14 +204,14 @@ func TestReportZeroSeaDexEntriesErrors(t *testing.T) {
 func TestReportSeaDexFailureErrors(t *testing.T) {
 	logger := scoutTestLogger()
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
-	s := New(&Deps{
+	s := NewReporter(&ReportDeps{
 		Logger: logger,
 		// A cached mapping keeps the map usable so the report reaches the
 		// SeaDex arm (an unusable map is its own hard error, gated earlier).
 		Store: &fakeStore{st: state.State{
 			Mapping: frierenMappingCache(),
 		}},
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping: fakeMapping{},
 		SeaDex:  &fakeSeaDex{err: errors.New("seadex down")},
 	})
@@ -250,12 +250,12 @@ func TestReportSeaDexCancellationBoundsErrorText(t *testing.T) {
 	defer cancel()
 
 	oversized := strings.Repeat("A", 4*maxLoggedErrorBytes) + "\nsecond line"
-	s := New(&Deps{
+	s := NewReporter(&ReportDeps{
 		Logger: logger,
 		Store: &fakeStore{st: state.State{
 			Mapping: frierenMappingCache(),
 		}},
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping: fakeMapping{},
 		SeaDex: &cancelingSeaDex{
 			cancel: cancel,
@@ -290,12 +290,12 @@ func TestReportSeaDexCancellationBoundsErrorText(t *testing.T) {
 func TestReportMappingUnusableErrors(t *testing.T) {
 	logger := scoutTestLogger()
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
-	s := New(&Deps{
+	s := NewReporter(&ReportDeps{
 		Logger: logger,
 		// Empty state + unreachable Fribb: the load fails with nothing stale
 		// to fall back on, so the map is unusable (not a StaleMapError).
 		Store:   &fakeStore{},
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		Mapping: unreachableMapLoader(t, logger),
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 	})
@@ -328,10 +328,10 @@ func TestReportStaleMapWarnsAndStillAudits(t *testing.T) {
 			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
 		},
 	}
-	s := New(&Deps{
+	s := NewReporter(&ReportDeps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping: unreachableMapLoader(t, scoutTestLogger()),
 		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher: match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
@@ -364,10 +364,10 @@ func TestReportDegradedMatching(t *testing.T) {
 	t.Run("anilist transiently degraded renders incomplete section", func(t *testing.T) {
 		logger, recorder := capture.New()
 		sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
-		s := New(&Deps{
+		s := NewReporter(&ReportDeps{
 			Logger:  logger,
 			Store:   &fakeStore{st: state.State{Mapping: seasonlessMappingCache()}},
-			Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+			Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 			Mapping: fakeMapping{},
 			SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
 			Matcher: match.NewMatcher(degradedMatcherAniList{}, logger),
@@ -398,10 +398,10 @@ func TestReportDegradedMatching(t *testing.T) {
 		defer cancel()
 		logger := scoutTestLogger()
 		sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
-		s := New(&Deps{
+		s := NewReporter(&ReportDeps{
 			Logger:  logger,
 			Store:   &fakeStore{st: state.State{Mapping: seasonlessMappingCache()}},
-			Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: logger}),
+			Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 			Mapping: fakeMapping{},
 			SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 999}}},
 			Matcher: match.NewMatcher(&ctxCancellingAniList{cancel: cancel}, logger),
@@ -431,10 +431,10 @@ func TestReportShutdownDuringMappingLoadNotMisattributed(t *testing.T) {
 		Mapping: mapping.Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []mapping.Record{{AniListID: 111, Type: "TV", TvdbID: 123}}},
 	}}
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
-	s := New(&Deps{
+	s := NewReporter(&ReportDeps{
 		Logger:  logger,
 		Store:   store,
-		Library: library.NewWalker(&library.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 		Mapping: mapping.NewLoader(&http.Client{Transport: cancellingMappingTransport{cancel: cancel}}, "http://unused.invalid/f.json", filepath.Join(t.TempDir(), "ov.json"), time.Hour, scoutTestLogger()),
 		SeaDex:  &cancellingSeaDex{cancel: cancel},
 	})
@@ -461,10 +461,10 @@ func TestReportShutdownDuringMappingLoadNotMisattributed(t *testing.T) {
 func TestReportCanceledBeforeWalkPreservesCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	s := New(&Deps{
+	s := NewReporter(&ReportDeps{
 		Logger:  scoutTestLogger(),
 		Store:   &fakeStore{},
-		Library: library.NewWalker(&library.Config{Logger: scoutTestLogger()}),
+		Library: arrwalk.NewWalker(&arrwalk.Config{Logger: scoutTestLogger()}),
 	})
 
 	_, err := s.Report(ctx)

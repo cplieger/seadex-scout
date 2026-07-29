@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/cplieger/seadex-scout/internal/tracker"
 )
 
 // TestGroupNoGroupFallback covers the NoGroup fallback at the classification
@@ -236,41 +238,29 @@ func TestClassifyCodec(t *testing.T) {
 	}
 }
 
-// TestClassifyTrackerAndAnimeBytes covers classifyTracker's public/private/unknown
-// mapping and IsAnimeBytes (the one private tracker gated behind the opt-in
-// toggle), including case/whitespace insensitivity and the empty-string miss.
-func TestClassifyTrackerAndAnimeBytes(t *testing.T) {
+// TestClassifyTrackerType covers the obtainability class Classify reads from
+// the canonical tracker vocabulary (tracker.TypeOf): public/private/unknown
+// mapping, including case/whitespace insensitivity and the empty-string miss.
+// The vocabulary's own contract (aliases, the AnimeBytes predicate, the host
+// gates) is pinned in internal/tracker; this test pins the wiring.
+func TestClassifyTrackerType(t *testing.T) {
 	trackerTests := []struct {
-		tracker string
-		want    TrackerType
+		label string
+		want  tracker.Type
 	}{
-		{tracker: "Nyaa", want: TrackerPublic},
-		{tracker: "AnimeTosho", want: TrackerPublic},
-		{tracker: "RuTracker", want: TrackerPublic},
-		{tracker: "AB", want: TrackerPrivate},
-		{tracker: "AnimeBytes", want: TrackerPrivate},
-		{tracker: "  ", want: TrackerUnknown},
-		{tracker: "SomeRandomTracker", want: TrackerUnknown},
-		{tracker: "beyondhd", want: TrackerUnknown},
-		{tracker: "ptp", want: TrackerUnknown},
+		{label: "Nyaa", want: tracker.Public},
+		{label: "AnimeTosho", want: tracker.Public},
+		{label: "RuTracker", want: tracker.Public},
+		{label: "AB", want: tracker.Private},
+		{label: "AnimeBytes", want: tracker.Private},
+		{label: "  ", want: tracker.Unknown},
+		{label: "SomeRandomTracker", want: tracker.Unknown},
+		{label: "beyondhd", want: tracker.Unknown},
+		{label: "ptp", want: tracker.Unknown},
 	}
 	for _, tc := range trackerTests {
-		if got := Classify(&Input{Tracker: tc.tracker}).TrackerType; got != tc.want {
-			t.Errorf("TrackerType(%q) = %q, want %q", tc.tracker, got, tc.want)
-		}
-	}
-	abTests := []struct {
-		tracker string
-		want    bool
-	}{
-		{tracker: "AB", want: true},
-		{tracker: " animebytes ", want: true},
-		{tracker: "Nyaa", want: false},
-		{tracker: "", want: false},
-	}
-	for _, tc := range abTests {
-		if got := IsAnimeBytes(tc.tracker); got != tc.want {
-			t.Errorf("IsAnimeBytes(%q) = %v, want %v", tc.tracker, got, tc.want)
+		if got := Classify(&Input{Tracker: tc.label}).TrackerType; got != tc.want {
+			t.Errorf("TrackerType(%q) = %q, want %q", tc.label, got, tc.want)
 		}
 	}
 }
@@ -316,82 +306,6 @@ func TestClassifyUnrecognizedVideoCodecFallsBackToText(t *testing.T) {
 	}
 	if got.Kind != KindUnknown {
 		t.Errorf("Kind = %q, want %q when no codec or remux marker is present", got.Kind, KindUnknown)
-	}
-}
-
-// TestIsAnimeBytesHost pins the AB host gate consumed by the AnimeBytes link
-// hider (filter.ABVisible) and the indexer's tracker-key routing
-// (trackerKeyFromURL): the exact site host, its real dot-delimited
-// subdomains, and the DNS-root trailing-dot form match; a suffix-confusion
-// host, a parent-domain spoof, an empty-labeled host, a non-ASCII homograph
-// label, and any other tracker do not. The gate resolves through the
-// canonical tracker table (LookupTrackerByHost), which folds case, so a
-// mixed-case host matches too.
-func TestIsAnimeBytesHost(t *testing.T) {
-	tests := []struct {
-		host string
-		want bool
-	}{
-		{host: "animebytes.tv", want: true},
-		{host: "www.animebytes.tv", want: true},
-		{host: "tracker.animebytes.tv", want: true},
-		{host: "animebytes.tv.", want: true},
-		{host: "www.animebytes.tv.", want: true},
-		{host: "maliciousanimebytes.tv", want: false},
-		{host: "evil-animebytes.tv", want: false},
-		{host: "animebytes.tv.evil.com", want: false},
-		{host: "animebytes.tv..", want: false},
-		{host: ".animebytes.tv", want: false},
-		{host: "a..animebytes.tv", want: false},
-		{host: "x\u00e9.animebytes.tv", want: false},
-		{host: "nyaa.si", want: false},
-		{host: "AnimeBytes.tv", want: true},
-		{host: "", want: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.host, func(t *testing.T) {
-			if got := IsAnimeBytesHost(tc.host); got != tc.want {
-				t.Errorf("IsAnimeBytesHost(%q) = %v, want %v", tc.host, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestLookupTracker pins the canonical tracker table contract every consumer
-// (classification, seadex link building, indexer feed routing) resolves
-// through: canonical names and aliases resolve case- and whitespace-
-// insensitively to one entry with a non-empty base URL, and empty, unknown,
-// or deliberately-stripped tracker names are not found.
-func TestLookupTracker(t *testing.T) {
-	found := []struct {
-		in       string
-		wantName string
-		wantType TrackerType
-	}{
-		{in: "Nyaa", wantName: TrackerNameNyaa, wantType: TrackerPublic},
-		{in: "nyaa", wantName: TrackerNameNyaa, wantType: TrackerPublic},
-		{in: " AB ", wantName: TrackerNameAnimeBytes, wantType: TrackerPrivate},
-		{in: "animebytes", wantName: TrackerNameAnimeBytes, wantType: TrackerPrivate},
-		{in: "AnimeTosho", wantName: TrackerNameAnimeTosho, wantType: TrackerPublic},
-		{in: "RuTracker", wantName: TrackerNameRuTracker, wantType: TrackerPublic},
-	}
-	for _, tc := range found {
-		got, ok := LookupTracker(tc.in)
-		if !ok {
-			t.Errorf("LookupTracker(%q) not found, want %q", tc.in, tc.wantName)
-			continue
-		}
-		if got.Name != tc.wantName || got.Type != tc.wantType {
-			t.Errorf("LookupTracker(%q) = %q/%q, want %q/%q", tc.in, got.Name, got.Type, tc.wantName, tc.wantType)
-		}
-		if got.BaseURL == "" {
-			t.Errorf("LookupTracker(%q) has an empty BaseURL; every table entry carries one", tc.in)
-		}
-	}
-	for _, in := range []string{"", "   ", "beyondhd", "bhd", "passthepopcorn", "ptp", "broadcasthenet", "btn", "hdbits", "blutopia", "aither", "SomeRandomTracker"} {
-		if _, ok := LookupTracker(in); ok {
-			t.Errorf("LookupTracker(%q) found, want not found", in)
-		}
 	}
 }
 

@@ -846,7 +846,16 @@ func (e *upstreamDocError) Error() string {
 // safety, then a rune-boundary byte cap with the "..." truncation marker).
 // It is the shared emit-boundary policy behind sanitizeUpstreamText and
 // logParam; the composition itself now lives in the library, so the policy
-// cannot drift per consumer.
+// cannot drift per consumer (internal/anilist's sanitizeUpstreamMessage is the
+// same one-line delegate over its own budget).
+//
+// internal/logattr is the SIBLING policy, not a second home for this one: it
+// renders STRUCTURED attributes under one 8 KiB budget, keeps CR/LF for the
+// JSON sink, and caps before sanitizing so a multi-MB SeaDex value never walks
+// the sanitizer. Values here land inline in one message string, must lose
+// CR/LF, and are already bounded by the transport, so the library's
+// sanitize-then-cap preset is the right composition - see logattr's package
+// doc for the full split.
 func capLogText(s string, maxLen int) string {
 	return runesafe.SanitizeSingleLineBounded(s, maxLen)
 }

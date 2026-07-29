@@ -65,7 +65,8 @@ func TestTrackerURLs(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			pub, ab := trackerURLs(tc.links)
+			pub, abLink := trackerURLs(gradedLinks(tc.links...))
+			ab := abLink.url
 			if pub.url != tc.wantNyaa {
 				t.Errorf("public url = %q, want %q", pub.url, tc.wantNyaa)
 			}
@@ -136,11 +137,12 @@ func TestSeadexTags(t *testing.T) {
 // slot (hidden while the toggle is off), never in the public/Nyaa slot, and
 // the genuine Nyaa link still wins the nyaa slot.
 func TestTrackerURLsRoutesMislabeledABURLToABSlot(t *testing.T) {
-	links := []compare.ReleaseLink{
-		{Tracker: "Nyaa", URL: "https://animebytes.tv/torrents.php?id=9"},
-		{Tracker: "Nyaa", URL: "https://nyaa.si/view/9"},
-	}
-	pub, ab := trackerURLs(links)
+	links := gradedLinks(
+		compare.ReleaseLink{Tracker: "Nyaa", URL: "https://animebytes.tv/torrents.php?id=9"},
+		compare.ReleaseLink{Tracker: "Nyaa", URL: "https://nyaa.si/view/9"},
+	)
+	pub, abLink := trackerURLs(links)
+	ab := abLink.url
 	if ab != "https://animebytes.tv/torrents.php?id=9" {
 		t.Errorf("ab = %q, want the mislabeled animebytes.tv URL routed to the AB slot", ab)
 	}
@@ -156,12 +158,13 @@ func TestTrackerURLsRoutesMislabeledABURLToABSlot(t *testing.T) {
 // URL wins it, and the unclassifiable link still never renders as the public
 // URL.
 func TestTrackerURLsDefiniteABWinsOverMalformedFallback(t *testing.T) {
-	links := []compare.ReleaseLink{
-		{Tracker: "Nyaa", URL: "https://animebytes.tv exploit"},
-		{Tracker: "AB", URL: "https://animebytes.tv/torrents.php?id=9&torrentid=10"},
-		{Tracker: "Nyaa", URL: "https://nyaa.si/view/9"},
-	}
-	pub, ab := trackerURLs(links)
+	links := gradedLinks(
+		compare.ReleaseLink{Tracker: "Nyaa", URL: "https://animebytes.tv exploit"},
+		compare.ReleaseLink{Tracker: "AB", URL: "https://animebytes.tv/torrents.php?id=9&torrentid=10"},
+		compare.ReleaseLink{Tracker: "Nyaa", URL: "https://nyaa.si/view/9"},
+	)
+	pub, abLink := trackerURLs(links)
+	ab := abLink.url
 	if ab != "https://animebytes.tv/torrents.php?id=9&torrentid=10" {
 		t.Errorf("ab = %q, want the definite AnimeBytes URL to win the AB slot over the malformed fallback", ab)
 	}
@@ -187,11 +190,12 @@ func TestTrackerURLsMalformedURLFailsClosedToABSlot(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			links := []compare.ReleaseLink{
-				{Tracker: "Nyaa", URL: tc.url},
-				{Tracker: "Nyaa", URL: "https://nyaa.si/view/9"},
-			}
-			pub, ab := trackerURLs(links)
+			links := gradedLinks(
+				compare.ReleaseLink{Tracker: "Nyaa", URL: tc.url},
+				compare.ReleaseLink{Tracker: "Nyaa", URL: "https://nyaa.si/view/9"},
+			)
+			pub, abLink := trackerURLs(links)
+			ab := abLink.url
 			if ab != tc.url {
 				t.Errorf("ab = %q, want the unclassifiable URL %q routed to the AB slot (fail closed)", ab, tc.url)
 			}
@@ -243,7 +247,8 @@ func TestPublicLinkAlertLabel(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			pub, ab := trackerURLs([]compare.ReleaseLink{{Tracker: tc.tracker, URL: tc.url}})
+			pub, abLink := trackerURLs(gradedLinks(compare.ReleaseLink{Tracker: tc.tracker, URL: tc.url}))
+			ab := abLink.url
 			if ab != "" {
 				t.Fatalf("ab = %q, want the link routed to a public slot", ab)
 			}
@@ -270,11 +275,12 @@ func TestPublicLinkAlertLabel(t *testing.T) {
 // decision in classifyTrackerLink) still satisfies them; these assertions
 // fail under either regression.
 func TestTrackerURLsHostOverridesMismatchedLabel(t *testing.T) {
-	links := []compare.ReleaseLink{
-		{Tracker: "Nyaa", URL: "https://animetosho.org/view/1"},
-		{Tracker: "Nyaa", URL: "https://nyaa.si/view/2"},
-	}
-	pub, ab := trackerURLs(links)
+	links := gradedLinks(
+		compare.ReleaseLink{Tracker: "Nyaa", URL: "https://animetosho.org/view/1"},
+		compare.ReleaseLink{Tracker: "Nyaa", URL: "https://nyaa.si/view/2"},
+	)
+	pub, abLink := trackerURLs(links)
+	ab := abLink.url
 	if ab != "" {
 		t.Fatalf("ab = %q, want both public links routed to public slots", ab)
 	}
@@ -291,9 +297,10 @@ func TestTrackerURLsHostOverridesMismatchedLabel(t *testing.T) {
 // "Nyaa" renders as public_url with public_tracker "AnimeTosho", never as
 // nyaa_url.
 func TestTrackerURLsMismatchedLabelAloneRendersItsRealTracker(t *testing.T) {
-	pub, ab := trackerURLs([]compare.ReleaseLink{
-		{Tracker: "Nyaa", URL: "https://animetosho.org/view/1"},
-	})
+	pub, abLink := trackerURLs(gradedLinks(
+		compare.ReleaseLink{Tracker: "Nyaa", URL: "https://animetosho.org/view/1"},
+	))
+	ab := abLink.url
 	if ab != "" {
 		t.Fatalf("ab = %q, want the link routed to a public slot", ab)
 	}
@@ -328,10 +335,11 @@ func TestCapURLAttrPreservesIPv6LiteralHost(t *testing.T) {
 // discard that - presenting another recommended group's Nyaa link as the
 // action for the headline group.
 func TestTrackerURLsPrefersHeadlineGroupOverNyaaTier(t *testing.T) {
-	pub, ab := trackerURLs([]compare.ReleaseLink{
-		{Tracker: "AnimeTosho", URL: "https://animetosho.org/view/1", Headline: true},
-		{Tracker: "Nyaa", URL: "https://nyaa.si/view/2"},
-	})
+	pub, abLink := trackerURLs(gradedLinks(
+		compare.ReleaseLink{Tracker: "AnimeTosho", URL: "https://animetosho.org/view/1", Headline: true},
+		compare.ReleaseLink{Tracker: "Nyaa", URL: "https://nyaa.si/view/2"},
+	))
+	ab := abLink.url
 	if ab != "" {
 		t.Fatalf("ab = %q, want both links routed to public slots", ab)
 	}
@@ -350,14 +358,54 @@ func TestTrackerURLsPrefersHeadlineGroupOverNyaaTier(t *testing.T) {
 // still outranks another public tracker when both belong to the headline
 // candidate, whatever order the link set arrives in.
 func TestTrackerURLsPrefersNyaaWithinTheHeadlineTier(t *testing.T) {
-	pub, _ := trackerURLs([]compare.ReleaseLink{
-		{Tracker: "AnimeTosho", URL: "https://animetosho.org/view/1", Headline: true},
-		{Tracker: "Nyaa", URL: "https://nyaa.si/view/2", Headline: true},
-	})
+	pub, _ := trackerURLs(gradedLinks(
+		compare.ReleaseLink{Tracker: "AnimeTosho", URL: "https://animetosho.org/view/1", Headline: true},
+		compare.ReleaseLink{Tracker: "Nyaa", URL: "https://nyaa.si/view/2", Headline: true},
+	))
 	if got := pub.nyaaURL(); got != "https://nyaa.si/view/2" {
 		t.Errorf("nyaa_url = %q, want the headline Nyaa URL", got)
 	}
 	if got := pub.otherURL(); got != "" {
 		t.Errorf("public_url = %q, want empty (Nyaa wins its tier)", got)
+	}
+}
+
+// TestABSlotTrackerNamesTheRealTracker pins l-f121: the AB slot is filled by a
+// fail-closed grade that reads the untrusted SeaDex tracker LABEL first, so it
+// can legitimately hold a link whose host belongs to a public tracker. The
+// alert must not announce that link as AnimeBytes, so the slot publishes the
+// name resolved from the URL's own host, and only an unnameable link falls back
+// to AnimeBytes (the slot's own meaning).
+func TestABSlotTrackerNamesTheRealTracker(t *testing.T) {
+	cases := map[string]struct {
+		tracker, url, wantURL, wantTracker string
+	}{
+		"genuine AnimeBytes link": {
+			"AB", "https://animebytes.tv/torrents.php?id=1&torrentid=2",
+			"https://animebytes.tv/torrents.php?id=1&torrentid=2", "AnimeBytes",
+		},
+		"AB label over a Nyaa URL is named Nyaa": {
+			"AB", "https://nyaa.si/view/1", "https://nyaa.si/view/1", "Nyaa",
+		},
+		"AB label over an unclaimed host keeps the label": {
+			"AB", "https://example.org/t", "https://example.org/t", "AnimeBytes",
+		},
+		"unnameable ambiguous link falls back to AnimeBytes": {
+			"SomeTracker", "http://[::1", "http://[::1", "AnimeBytes",
+		},
+		"no AB link leaves both empty": {
+			"Nyaa", "https://nyaa.si/view/1", "", "",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, abLink := trackerURLs(gradedLinks(compare.ReleaseLink{Tracker: tc.tracker, URL: tc.url}))
+			if abLink.url != tc.wantURL {
+				t.Errorf("ab_url = %q, want %q", abLink.url, tc.wantURL)
+			}
+			if got := abLink.abTracker(); got != tc.wantTracker {
+				t.Errorf("ab_tracker = %q, want %q", got, tc.wantTracker)
+			}
+		})
 	}
 }

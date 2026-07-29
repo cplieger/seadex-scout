@@ -59,7 +59,7 @@ func TestTrackerKeyRejectsUnknownAndUnparseable(t *testing.T) {
 
 // TestTrackerKeyFromURLRejectsForgedTrackerHosts pins the protection
 // trackerKeyFromURL inherits from the shared tracker predicate
-// (release.LookupTrackerByHost): a non-ASCII homograph label under a tracker
+// (tracker.LookupByHost): a non-ASCII homograph label under a tracker
 // domain and an empty-labeled host must never yield a curation key, so a
 // tracker-controlled URL cannot smuggle an item into the curation match on a
 // host no real tracker page can live on.
@@ -301,7 +301,7 @@ func TestTrackerIDUnknownScopeFailsClosed(t *testing.T) {
 // host evidence and must be a userinfo-free absolute http(s) URL on the exact
 // canonical host, and only a ROOTED relative reference takes the AB relative
 // arm. The relative arm stays ClassRelative rather than the narrower
-// release.LookupTrackerByRelativeURL (which also demands the
+// tracker.LookupByRelativeURL (which also demands the
 // "/torrents.php?...torrentid=" shape), so a relative Prowlarr permalink keeps
 // working.
 func TestTrackerOwnURLReadsOneStructuralVocabulary(t *testing.T) {

@@ -3,6 +3,7 @@ package match
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -507,4 +508,70 @@ func TestMemoExpiryBeyondHorizonRestamped(t *testing.T) {
 	if restamped != 1 {
 		t.Errorf("restamped attribute = %d, want 1 (only the out-of-policy entry is corrected)", restamped)
 	}
+}
+
+// outageAniList models an AniList outage the memo could ride out: every per-id
+// Fetch fails transiently, and the batch prefetch returns an (unscoped) error so
+// nothing is memoized from it and every pending id reaches the per-id path.
+type outageAniList struct{ fetchCalls int }
+
+func (o *outageAniList) Fetch(_ context.Context, _ int) (anilist.Media, error) {
+	o.fetchCalls++
+	return anilist.Media{}, errors.New("anilist: dial tcp: connection refused")
+}
+
+func (o *outageAniList) FetchMany(_ context.Context, _ []int) (anilist.BatchResult, error) {
+	return anilist.BatchResult{Media: map[int]anilist.Media{}, Completed: true},
+		errors.New("anilist: dial tcp: connection refused")
+}
+
+// TestLookupServesExpiredMemoDuringOutage pins the stale-on-error arm of the
+// per-entry lookup: when the upstream that would renew an expired entry is
+// unreachable, the expired POSITIVE is served so the entry still matches,
+// instead of preferring "unknown" over "stale" and dropping a match whose
+// titles the app is holding. The pass still reports the id as incomplete, so
+// prior findings are preserved and the AniList degradation streak still
+// advances - the stale answer adds a match, it does not clear the degradation.
+// An expired NEGATIVE is not stale evidence and is never served that way.
+func TestLookupServesExpiredMemoDuringOutage(t *testing.T) {
+	snap := &library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 5, Title: "Clannad", TvdbID: 700, Year: 2007},
+	}}
+	idx := mapping.NewIndex(nil) // no Fribb record: the entry needs the title fallback
+	expired := memoTestClock.Add(-time.Hour)
+
+	t.Run("expired positive is served", func(t *testing.T) {
+		fake := &outageAniList{}
+		memo := Memo{Entries: map[int]MemoEntry{
+			600: {Titles: []string{"Clannad"}, Format: "TV", Year: 2007, Expiry: expired},
+		}}
+
+		res := expiryMatcher(fake, 0.5).Match(context.Background(),
+			[]seadex.Entry{{AniListID: 600}}, snap, idx, memo)
+
+		if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != SourceTitle {
+			t.Fatalf("matches = %+v, want one title match from the expired memo entry", res.Matches)
+		}
+		if !res.Degraded {
+			t.Error("Degraded = false, want true: a stale-served match does not clear the outage")
+		}
+		if _, incomplete := res.IncompleteIDs[600]; !incomplete {
+			t.Error("IncompleteIDs is missing 600, want the id reported so prior findings are preserved")
+		}
+		if got := res.Memo.Entries[600].Expiry; !got.Equal(expired) {
+			t.Errorf("memo[600].Expiry = %s, want the entry left unrenewed at %s", got, expired)
+		}
+	})
+
+	t.Run("expired negative is not served", func(t *testing.T) {
+		fake := &outageAniList{}
+		memo := Memo{Entries: map[int]MemoEntry{600: {NotFound: true, Expiry: expired}}}
+
+		res := expiryMatcher(fake, 0.5).Match(context.Background(),
+			[]seadex.Entry{{AniListID: 600}}, snap, idx, memo)
+
+		if len(res.Matches) != 1 || res.Matches[0].InLibrary() {
+			t.Errorf("matches = %+v, want the entry unmatched: an expired not-found is not stale evidence", res.Matches)
+		}
+	})
 }

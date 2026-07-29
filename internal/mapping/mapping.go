@@ -28,6 +28,7 @@ import (
 	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/degradation"
+	"github.com/cplieger/seadex-scout/internal/mediatype"
 )
 
 // DefaultURL is the Fribb anime-list-mini.json endpoint - the AniList<->arr
@@ -80,17 +81,25 @@ type Record struct {
 }
 
 // IsMovie reports whether the entry maps to a Radarr movie (Fribb type MOVIE).
-// Every other type (TV, OVA, ONA, SPECIAL, ...) maps to a Sonarr series.
-func (r *Record) IsMovie() bool { return r.Type == typeMovie }
+// Every other type (TV, OVA, ONA, SPECIAL, ...) maps to a Sonarr series. The
+// token classification itself lives in the shared mediatype leaf.
+func (r *Record) IsMovie() bool { return mediatype.IsMovie(r.Type) }
 
 // RoutedIDs returns the identifiers the record's routed arr consumes, per the
 // HasArrIdentifier routing decision: a MOVIE record yields its TMDB-movie and
 // IMDb ids (tvdb zero); every other type yields its TVDB id (movie ids empty).
 // It is the single home of the field-to-arr routing branch, so consumers never
 // re-implement which identifier fields belong to which arr.
+//
+// The TYPE LABEL is what routes here. A record's unambiguous movie TMDB ids are
+// separately reachable through MovieTMDBIDs regardless of that label, which is
+// what lets the ID bridge resolve the ~300 live Fribb records that carry a
+// movie id under a non-MOVIE type (h-f9/l-f73); this function deliberately does
+// not fold that in, so "which fields does my routed arr consume" keeps one
+// answer.
 func (r *Record) RoutedIDs() (tvdbID int, tmdbMovies []int, imdbIDs []string) {
 	if r.IsMovie() {
-		return 0, usableIDs(r.TmdbMovies, func(id int) bool { return id > 0 }),
+		return 0, r.MovieTMDBIDs(),
 			usableIDs(r.IMDbIDs, func(s string) bool { return strings.TrimSpace(s) != "" })
 	}
 	// Zero out a non-usable TVDB id here so the usability rule has ONE home:
@@ -101,6 +110,29 @@ func (r *Record) RoutedIDs() (tvdbID int, tmdbMovies []int, imdbIDs []string) {
 		return 0, nil, nil
 	}
 	return r.TvdbID, nil, nil
+}
+
+// MovieTMDBIDs returns the record's usable themoviedb_id.movie ids REGARDLESS of
+// its type label, for the ID-bridge sites that need cross-type movie evidence.
+//
+// A TMDB *movie* id is a Radarr id by construction: it names a row in TMDB's
+// movie namespace, which is disjoint from the TV namespace RoutedIDs' series arm
+// routes. Fribb's object-form themoviedb_id.movie list is decoded for every
+// record type, and the live upstream body carries ~300 keyed records shaped
+// non-MOVIE type + no tvdb_id + a positive movie id (a split AniList<->arr
+// mapping, common for films/OVAs) - so keying only on the type label lost the
+// operator's Radarr copy in BOTH directions of the bridge (h-f9/l-f73).
+//
+// It is deliberately NOT the IMDb list: TVDB reuses a film's IMDb id on the
+// parent series, so a non-MOVIE record's IMDb id claims nothing - that is the
+// arr-consistency rule RoutedIDs enforces and the collision this narrower
+// evidence does not reopen.
+//
+// Both directions of the bridge read this one method - match's FindByID (the
+// secondary movie lookup) and match's reverse Catalogue - so which ids count as
+// cross-type movie evidence cannot drift between them.
+func (r *Record) MovieTMDBIDs() []int {
+	return usableIDs(r.TmdbMovies, func(id int) bool { return id > 0 })
 }
 
 // usableIDs drops the non-usable values from an id slice, returning the input
@@ -148,15 +180,10 @@ func (r *Record) HasArrIdentifier() bool {
 // turns specials off. A match with no type (an entry that resolved to no arr
 // item, or one whose AniList format was empty) is treated as non-special; the
 // AniList title fallback now sets Type from the AniList format, so a
-// title-matched OVA/ONA/special IS filtered when specials are off.
-func (r *Record) IsSpecial() bool {
-	switch r.Type {
-	case "OVA", "ONA", "SPECIAL", "MUSIC":
-		return true
-	default:
-		return false
-	}
-}
+// title-matched OVA/ONA/special IS filtered when specials are off. The token
+// classification lives in the shared mediatype leaf, so the anilist client
+// cannot admit a token this predicate has never heard of.
+func (r *Record) IsSpecial() bool { return mediatype.IsSpecial(r.Type) }
 
 // HasMappedSeason reports whether the record carries a positive Fribb TVDB
 // season - the predicate align's scope resolution keys season-exact comparison on, and
