@@ -714,7 +714,7 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info E
 
 	var js journalStats
 	var nyaa, ab []journalItem
-	var census map[string]bool
+	var census map[string]packCensus
 	seen, titles := prev.seen, prev.titles
 	if prev.baseline {
 		seen, titles = allIdentities(entries), map[string]string{}
@@ -1049,30 +1049,31 @@ func retainValidTitles(titles map[string]string) (kept map[string]string, droppe
 
 // packDisagreementReporter returns applyTitles' contradiction sink for ONE
 // rebuild: the first harvested title whose season-pack verdict disagrees with
-// its release's file list is warned with its journal key and both verdicts, and
-// the rest of the rebuild stays silent. That onset latch is the shape this
-// package's other per-rebuild diagnostics already take (the harvest's per-scope
-// latches, the snapshot log line's counters): a systematically disagreeing
-// upstream - one Prowlarr indexer definition whose titles all drift, say - must
-// surface once, not once per item.
+// its release's file list is warned with its journal key, both verdicts, and
+// whether the title was corrected, and the rest of the rebuild stays silent.
+// That onset latch is the shape this package's other per-rebuild diagnostics
+// already take (the harvest's per-scope latches, the snapshot log line's
+// counters): a systematically disagreeing upstream - one Prowlarr indexer
+// definition whose titles all drift, say - must surface once, not once per item.
 //
 // The raw title is deliberately NOT logged. It is untrusted tracker text (the
 // Torznab decode tags it runesafe.Untrusted for exactly that reason), and the
-// key plus the two verdicts already name which release to look at.
+// key plus the verdicts already name which release to look at.
 //
-// This reports evidence, not a decision: the harvested title still wins the
-// served title, unchanged. There is no Torznab pack field to carry the verdict
-// on, so letting the census override a disagreeing title would be a new grab
-// policy - one the operator can now choose with evidence in hand.
-func (w *FeedWriter) packDisagreementReporter() func(key string, titlePack, filesPack bool) {
+// corrected=true means the item's own season token was rewritten from the file
+// census (a title claiming a whole season over positively-proven single-episode
+// content, the case that makes Sonarr suppress the season's real episodes);
+// corrected=false means the title was served exactly as harvested and the line
+// is evidence only.
+func (w *FeedWriter) packDisagreementReporter() func(key string, titlePack, filesPack, corrected bool) {
 	warned := false
-	return func(key string, titlePack, filesPack bool) {
+	return func(key string, titlePack, filesPack, corrected bool) {
 		if warned {
 			return
 		}
 		warned = true
 		w.log.Warn("indexer feed title and file list disagree about a season pack",
-			"key", key, "title_pack", titlePack, "files_pack", filesPack)
+			"key", key, "title_pack", titlePack, "files_pack", filesPack, "corrected", corrected)
 	}
 }
 

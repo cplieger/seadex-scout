@@ -535,13 +535,53 @@ func hasNonTokenText(s string) bool {
 	return false
 }
 
+// packEvidence is the three-valued statement a torrent's FILE LIST makes about
+// how many episodes it contains. It exists because a zero episode count is NOT
+// proof of a single episode: it equally covers an absent file list and file
+// naming outside the two recognized token forms. Any policy that acts on "the
+// files say this is not a pack" must be able to tell positive single-episode
+// evidence from no evidence at all, which a bool cannot express.
+type packEvidence int
+
+const (
+	// packEvidenceUnknown is zero recognized episode tokens: absent files, or
+	// naming outside the recognized forms. It proves NOTHING. It is the zero
+	// value, so an absent census reads as no evidence rather than as a verdict.
+	packEvidenceUnknown packEvidence = iota
+	// packEvidenceSingle is EXACTLY one distinct recognized token over a
+	// non-empty content population - positive proof of one episode.
+	packEvidenceSingle
+	// packEvidencePack is more than one distinct recognized episode token.
+	packEvidencePack
+)
+
+// packEvidenceOf grades what a torrent's file list proves about its episode
+// count. Both halves of the single-episode test - the distinct-token count and
+// the population it is counted over - are read from contentPopulation, the SAME
+// population coveredEpisodes counts, so the token count and the
+// is-there-anything-to-count test can never describe different file sets.
+func packEvidenceOf(t *seadex.Torrent) packEvidence {
+	pop := contentPopulation(t.Files)
+	switch n := distinctEpisodes(pop); {
+	case n > 1:
+		return packEvidencePack
+	case n == 1 && len(pop) > 0:
+		return packEvidenceSingle
+	default:
+		return packEvidenceUnknown
+	}
+}
+
 // isPack reports whether a torrent bundles more than one episode (a real season
 // pack) rather than a single episode. SeaDex stores a complete season that was
 // never packed as one torrent per episode - each a single-file release - so the
 // file count is what separates a pack from a lone episode. The file list ships
 // in the SeaDex record, so this needs no torrent fetch.
+//
+// It is exactly the pack arm of packEvidenceOf, so the boolean and the
+// three-valued reading have one source of truth (pinned by a test).
 func isPack(t *seadex.Torrent) bool {
-	return coveredEpisodes(t.Files) > 1
+	return packEvidenceOf(t) == packEvidencePack
 }
 
 // coveredEpisodes counts the distinct episodes a torrent's files span, keying on
@@ -550,18 +590,35 @@ func isPack(t *seadex.Torrent) bool {
 // sidecars carry neither token and are not counted, so an episode bundled with
 // its creditless files still reads as a single episode.
 func coveredEpisodes(files []seadex.File) int {
-	seen := make(map[string]struct{})
-	// Census files only, so an unmarked bonus video far below the real episodes
-	// cannot inflate a lone episode into a "pack" - and a MARKED sample never
-	// reaches the count at all, because payload's type gate drops it by name.
-	// The floor is anchored on the pool's median, not its maximum: a pack whose
-	// premiere runs double length (or that bundles the franchise movie) would
-	// otherwise lose every regular episode and read as a single episode.
+	return distinctEpisodes(contentPopulation(files))
+}
+
+// contentPopulation narrows a file list to the population the episode census
+// counts over: the episode pool, then content media files only.
+//
+// Census files only, so an unmarked bonus video far below the real episodes
+// cannot inflate a lone episode into a "pack" - and a MARKED sample never
+// reaches the count at all, because payload's type gate drops it by name. The
+// floor is anchored on the pool's median, not its maximum: a pack whose
+// premiere runs double length (or that bundles the franchise movie) would
+// otherwise lose every regular episode and read as a single episode.
+func contentPopulation(files []seadex.File) []seadex.File {
 	files = payload.Population(files)
+	kept := make([]seadex.File, 0, len(files))
 	for i := range files {
-		if !isContentMediaFile(files[i].Name) {
-			continue
+		if isContentMediaFile(files[i].Name) {
+			kept = append(kept, files[i])
 		}
+	}
+	return kept
+}
+
+// distinctEpisodes counts the distinct episodes a census population spans. It is
+// coveredEpisodes' counting rule, split out so packEvidenceOf reads the count
+// and the population it came from without counting twice.
+func distinctEpisodes(files []seadex.File) int {
+	seen := make(map[string]struct{})
+	for i := range files {
 		base := episodeKeyBase(files[i].Name)
 		if l := lastSubmatchIndex(episodeToken, base); l != nil {
 			// Key on the LAST token: scene naming puts the episode marker
@@ -585,18 +642,21 @@ func coveredEpisodes(files []seadex.File) int {
 // (Sonarr/src/NzbDrone.Core/Parser/Parser.cs:325), with the anime bracketed
 // variant (Parser.cs:113) folded in as the optional "[" or "(" before the
 // season word: a title, a separator, a season word (Season / Saison / Series /
-// Stagione / S), and the season number in group 1. Sonarr sets
-// result.FullSeason exactly when such a match succeeds, and FullSeason is what
-// ranks a pack above loose episodes in its own grab decision - so this is the
-// parser that ultimately reads whichever title this app serves, which is why
-// the rule is taken from it rather than invented here.
+// Stagione / S), and the season number. Group 1 spans the whole season token
+// (the season word AND its number - the span a correction rewrites), group 2
+// just the number; both END at the same offset, so a reader of the number's end
+// can use either. Sonarr sets result.FullSeason exactly when such a match
+// succeeds, and FullSeason is what ranks a pack above loose episodes in its own
+// grab decision - so this is the parser that ultimately reads whichever title
+// this app serves, which is why the rule is taken from it rather than invented
+// here.
 //
 // Sonarr's trailing negative lookahead (?![-_. ]?\d+) - the part that makes the
 // match season-ONLY, refusing "Show S01 05" - has no RE2 equivalent, so
-// packFromTitle applies it against the text that FOLLOWS group 1 instead
-// (seasonNumberEnds). The season word alternation is ordered longest-first so
-// the bare "S" arm cannot shadow "Season".
-var seasonOnlyTitle = regexp.MustCompile(`(?i)^.+?[-_. ]+[\[(]?(?:Season|Saison|Series|Stagione|S)[-_. ]?(\d{1,2})`)
+// packFromTitle applies it against the text that FOLLOWS the season number
+// instead (seasonNumberEnds). The season word alternation is ordered
+// longest-first so the bare "S" arm cannot shadow "Season".
+var seasonOnlyTitle = regexp.MustCompile(`(?i)^.+?[-_. ]+[\[(]?((?:Season|Saison|Series|Stagione|S)[-_. ]?(\d{1,2}))`)
 
 // seasonPackDisqualifier matches the tokens that cancel a season-pack reading
 // even when the season-only shape matched: EXTRAS and SUBPACK are Sonarr's own
@@ -660,6 +720,68 @@ func seasonNumberEnds(rest string) bool {
 	}
 	next, _ := utf8.DecodeRuneInString(rest)
 	return !unicode.IsDigit(next)
+}
+
+// correctSeasonOnlyTitle rewrites the season-only token inside a harvested
+// tracker title into the season+episode form the file census's own marker names,
+// returning the corrected title and whether the rewrite applied.
+//
+// ONLY the season token is touched: every other byte of the tracker's own
+// release name survives, including the group, resolution and codec text Sonarr
+// reads for its quality and custom-format decisions. Replacing the whole title
+// with the synthesized one would fix the pack claim and throw that text away -
+// strictly worse for matching, which is the stated objective - and dropping the
+// item is forbidden outright. The GUID is untouched, so the item still points at
+// the real torrent page.
+//
+// marker is the census's single-episode token (singleEpisodeMarker): an SxxExx
+// token whose EPISODE half is transplanted onto the season the TITLE claims (the
+// title's season is the tracker's claim about WHICH season; the census names the
+// episode), or the absolute "- NN" form rendered as S<title season>ENN. Reusing
+// seasonLabel keeps the SNN wire format single-homed. ok is false when the title
+// carries no readable season-only token or the marker is neither form; the
+// caller must then serve the title unchanged.
+func correctSeasonOnlyTitle(title, marker string) (string, bool) {
+	m := seasonOnlyTitle.FindStringSubmatchIndex(title)
+	if m == nil {
+		return title, false
+	}
+	season, err := strconv.Atoi(title[m[4]:m[5]])
+	if err != nil {
+		return title, false
+	}
+	episode, ok := episodeSuffix(marker)
+	if !ok {
+		return title, false
+	}
+	// Group 1 is the whole season token; splicing over it leaves the optional
+	// bracket that precedes it (and everything after the number) in place.
+	return title[:m[2]] + seasonLabel(season) + episode + title[m[3]:], true
+}
+
+// episodeSuffix renders the E-half a corrected season token carries, from the
+// census's own single-episode marker: an SxxExx marker's episode text verbatim
+// (so a range token "S01E01-E13" keeps its range rather than naming one
+// episode of it), or the absolute "- NN" form as E%02d. A version suffix is
+// stripped exactly as the census keys it (episodeVersion), so a "v2" marker
+// cannot emit an unparseable token. ok is false for a marker in neither form -
+// including the empty marker, which packEvidenceSingle cannot produce but the
+// caller must still handle rather than assume away.
+func episodeSuffix(marker string) (string, bool) {
+	if l := lastSubmatchIndex(episodeToken, marker); l != nil {
+		// Group 1 is the whole token and group 2 its season half, so the text
+		// between the season half's end and the token's end is the episode half.
+		return episodeVersion.ReplaceAllString(strings.ToUpper(marker[l[5]:l[3]]), ""), true
+	}
+	number, found := strings.CutPrefix(marker, "- ")
+	if !found {
+		return "", false
+	}
+	n, err := strconv.Atoi(episodeVersion.ReplaceAllString(number, ""))
+	if err != nil {
+		return "", false
+	}
+	return fmt.Sprintf("E%02d", n), true
 }
 
 // packVerdict is the ONE season-pack policy this package reads: the title's own

@@ -980,3 +980,105 @@ func TestPackVerdictFallsBackToCensus(t *testing.T) {
 		t.Error("packVerdict(season title, single census) = false, want the title's season-pack verdict")
 	}
 }
+
+// packEvidenceName renders a census grade for a failure message (the production
+// type carries no String method - nothing in the app formats one).
+func packEvidenceName(e packEvidence) string {
+	switch e {
+	case packEvidencePack:
+		return "pack"
+	case packEvidenceSingle:
+		return "single"
+	case packEvidenceUnknown:
+		return "unknown"
+	default:
+		return fmt.Sprintf("packEvidence(%d)", int(e))
+	}
+}
+
+// TestPackEvidenceOf pins the three-valued census: what a torrent's FILE LIST
+// proves about its episode count. The distinction the old boolean could not make
+// is the load-bearing one - zero recognized tokens (absent files, or naming
+// outside the two recognized forms) proves NOTHING about the payload and must
+// never read as positive single-episode evidence, because that is the evidence a
+// served-title correction acts on.
+//
+// It also pins that isPack is EXACTLY the pack arm, for every row: the boolean
+// and the three-valued reading have one source of truth.
+func TestPackEvidenceOf(t *testing.T) {
+	const gib = 1 << 30
+	pack := make([]seadex.File, 0, 12)
+	for e := 1; e <= 12; e++ {
+		pack = append(pack, seadex.File{Name: fmt.Sprintf("Show S01E%02d [1080p].mkv", e), Length: gib})
+	}
+	tests := map[string]struct {
+		files []seadex.File
+		want  packEvidence
+	}{
+		"twelve-episode pack":      {pack, packEvidencePack},
+		"lone SxxExx episode":      {[]seadex.File{{Name: "Show S01E07 [1080p].mkv", Length: gib}}, packEvidenceSingle},
+		"lone absolute episode":    {[]seadex.File{{Name: "[Grp] Show - 07 (1080p).mkv", Length: gib}}, packEvidenceSingle},
+		"empty file list":          {[]seadex.File{}, packEvidenceUnknown},
+		"nil file list":            {nil, packEvidenceUnknown},
+		"unrecognized bare number": {[]seadex.File{{Name: "01.mkv", Length: gib}}, packEvidenceUnknown},
+		"unrecognized 1x01 form":   {[]seadex.File{{Name: "1x01.mkv", Length: gib}}, packEvidenceUnknown},
+		"episode beside a marked sample": {[]seadex.File{
+			{Name: "Show S01E00 Sample [480p].mkv", Length: 200 << 20},
+			{Name: "Show S01E07 [1080p].mkv", Length: gib},
+		}, packEvidenceSingle},
+		"episode beside a token-less extra": {[]seadex.File{
+			{Name: "Show S01E07 [1080p].mkv", Length: gib},
+			{Name: "Show Cast Interview [1080p].mkv", Length: gib},
+		}, packEvidenceSingle},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			tor := &seadex.Torrent{Files: tt.files}
+			got := packEvidenceOf(tor)
+			if got != tt.want {
+				t.Errorf("packEvidenceOf = %s, want %s", packEvidenceName(got), packEvidenceName(tt.want))
+			}
+			if want := got == packEvidencePack; isPack(tor) != want {
+				t.Errorf("isPack = %v, want %v (isPack must be exactly packEvidenceOf's pack arm)", isPack(tor), want)
+			}
+		})
+	}
+}
+
+// TestCorrectSeasonOnlyTitle pins the surgical rewrite: only the title's season
+// token changes, so the group, resolution and codec text Sonarr reads for its
+// quality and custom-format decisions survives byte for byte. The season number
+// stays the TRACKER's claim (the title says which season) while the episode half
+// comes from the file census (the files say which episode), and a marker the
+// rewrite cannot read refuses rather than guessing.
+func TestCorrectSeasonOnlyTitle(t *testing.T) {
+	tests := map[string]struct {
+		title, marker, want string
+		wantOK              bool
+	}{
+		"season token gains the census episode": {"Show - S01 [1080p][x265]-GRP", "S01E07", "Show - S01E07 [1080p][x265]-GRP", true},
+		"season word form":                      {"Show Season 2", "- 07", "Show S02E07", true},
+		"bracketed anime season":                {"[Grp] Show [S01][1080p]", "S01E07", "[Grp] Show [S01E07][1080p]", true},
+		"versioned absolute marker":             {"Show Season 2", "- 07v2", "Show S02E07", true},
+		"range marker keeps its range":          {"Show - S01 [1080p]", "S01E01-E13", "Show - S01E01-E13 [1080p]", true},
+		"empty marker refuses":                  {"Show - S01 [1080p]", "", "Show - S01 [1080p]", false},
+		"unreadable marker refuses":             {"Show - S01 [1080p]", "07", "Show - S01 [1080p]", false},
+		"title without a season token refuses":  {"Show [1080p]", "S01E07", "Show [1080p]", false},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, ok := correctSeasonOnlyTitle(tt.title, tt.marker)
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("correctSeasonOnlyTitle(%q, %q) = (%q, %v), want (%q, %v)", tt.title, tt.marker, got, ok, tt.want, tt.wantOK)
+			}
+			if !ok {
+				return
+			}
+			// The corrected title must no longer claim a whole season to the
+			// parser this app serves - that is the entire point of the rewrite.
+			if pack, known := packFromTitle(got); pack || !known {
+				t.Errorf("packFromTitle(%q) = (%v, %v), want the corrected title to read as one episode", got, pack, known)
+			}
+		})
+	}
+}

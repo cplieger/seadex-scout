@@ -88,6 +88,13 @@ func emptyTorznab() string { return torznabBody() }
 // returned item matched back by the AB torrent id in its permalink page URL
 // (AB exposes no info hash), the real title cached in the snapshot and served
 // on this rebuild's write.
+//
+// The fixture is also the class the title audit CORRECTS end to end: the
+// harvested title claims a whole season while the release ships exactly one
+// proven episode, so the served title keeps every byte of the tracker's own name
+// except its season token, which becomes the season+episode form the file census
+// names (titleAudit.served). The CACHE keeps the harvested title verbatim - the
+// correction is a serving decision, not a rewrite of harvested evidence.
 func TestHarvestMatchesABByTorrentID(t *testing.T) {
 	mock, srv := newHarvestMock(func(int) string {
 		return torznabBody(torznabItem("[PMR] Frieren S01 [BD Remux 1080p]", "https://animebytes.tv/torrent/1167293/group"))
@@ -123,8 +130,8 @@ func TestHarvestMatchesABByTorrentID(t *testing.T) {
 	if len(snap.ABFeed) != 1 {
 		t.Fatalf("ab feed = %d items, want 1", len(snap.ABFeed))
 	}
-	if got, want := snap.ABFeed[0].Title, "[PMR] Frieren S01 [BD Remux 1080p]"; got != want {
-		t.Errorf("served title = %q, want the harvested real title %q", got, want)
+	if got, want := snap.ABFeed[0].Title, "[PMR] Frieren S01E01 [BD Remux 1080p]"; got != want {
+		t.Errorf("served title = %q, want the harvested real title with its provably-wrong season token corrected %q", got, want)
 	}
 	if snap.Titles["ab:1167293"] != "[PMR] Frieren S01 [BD Remux 1080p]" {
 		t.Errorf("title cache = %v, want the harvested title under ab:1167293", snap.Titles)

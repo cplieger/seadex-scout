@@ -1827,9 +1827,10 @@ func TestRebuildFallsBackFromUnpublishableOccurrence(t *testing.T) {
 // carries the journal key and both verdicts, and it never carries the raw
 // title - untrusted tracker text the decode tags runesafe.Untrusted.
 //
-// It also pins the regression this packet must NOT cause: the harvested title
-// still wins the served title, whether or not it agrees with the census. The
-// verdict is evidence, not a grab policy.
+// The disagreement pinned here is the class the audit does NOT correct (the
+// title names an episode, the file census proves a pack): it keeps warning with
+// corrected=false and the harvested title still wins the served title verbatim.
+// The corrected class has its own tests below.
 func TestApplyTitlesReportsPackDisagreementOnce(t *testing.T) {
 	log, rec := capture.New()
 	w := newLoggedTestWriter(filepath.Join(t.TempDir(), "feed.json"), log)
@@ -1840,12 +1841,17 @@ func TestApplyTitlesReportsPackDisagreementOnce(t *testing.T) {
 		{item: item{Title: "Fourth S01E01 [720p]"}, Key: "nyaa:4"},
 	}
 	titles := map[string]string{
-		"nyaa:1": "Show - S01 [1080p]",      // says pack, census says single: reported
-		"nyaa:2": "Other - S01 [1080p]",     // disagrees too, but the latch holds
+		"nyaa:1": "Show - S01E01 [1080p]",   // says episode, census says pack: reported
+		"nyaa:2": "Other - S01E01 [1080p]",  // disagrees too, but the latch holds
 		"nyaa:3": "Third - S01 [1080p]",     // agrees with the census
 		"nyaa:4": "Fourth - S01E01 [1080p]", // agrees the other way
 	}
-	census := map[string]bool{"nyaa:1": false, "nyaa:2": false, "nyaa:3": true, "nyaa:4": false}
+	census := map[string]packCensus{
+		"nyaa:1": {evidence: packEvidencePack},
+		"nyaa:2": {evidence: packEvidencePack},
+		"nyaa:3": {evidence: packEvidencePack},
+		"nyaa:4": {evidence: packEvidenceSingle, marker: "S01E01"},
+	}
 	applyTitles(items, titles, titleAudit{census: census, report: w.packDisagreementReporter()})
 
 	const msg = "indexer feed title and file list disagree about a season pack"
@@ -1855,7 +1861,7 @@ func TestApplyTitlesReportsPackDisagreementOnce(t *testing.T) {
 	if got := rec.CountLevel(slog.LevelWarn, msg); got != 1 {
 		t.Errorf("disagreement warnings at WARN = %d, want 1", got)
 	}
-	for key, want := range map[string]string{"key": "nyaa:1", "title_pack": "true", "files_pack": "false"} {
+	for key, want := range map[string]string{"key": "nyaa:1", "title_pack": "false", "files_pack": "true", "corrected": "false"} {
 		if got, ok := rec.AttrValue(msg, key); !ok || got != want {
 			t.Errorf("warning attr %s = %q (found=%v), want %q", key, got, ok, want)
 		}
@@ -1894,24 +1900,31 @@ func TestApplyTitlesAuditSilentWithoutCensus(t *testing.T) {
 	}
 	titles := map[string]string{"nyaa:1": "Show - S01", "nyaa:2": "some unparseable name"}
 	applyTitles(items, titles, titleAudit{
-		census: map[string]bool{"nyaa:2": true}, // nyaa:1 absent, nyaa:2 unknown title
+		// nyaa:1 absent, nyaa:2's title says nothing about packs.
+		census: map[string]packCensus{"nyaa:2": {evidence: packEvidencePack}},
 		report: w.packDisagreementReporter(),
 	})
 	if rec.Contains("disagree about a season pack") {
 		t.Errorf("diagnostic fired without a comparable verdict pair; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
+	for i := range items {
+		if want := titles[items[i].Key]; items[i].Title != want {
+			t.Errorf("item %s title = %q, want the harvested title %q", items[i].Key, items[i].Title, want)
+		}
+	}
 }
 
 // TestCensusPacksFoldsOccurrences pins the per-key census the audit compares
-// against: it reads packVerdict's census arm per journal key, and folds a key's
-// several curated occurrences with an OR so the result cannot depend on
-// catalogue order.
+// against: it reads the three-valued file evidence per journal key, folds a
+// key's several curated occurrences to the STRONGEST evidence so the result
+// cannot depend on catalogue order, and carries the single-episode marker a
+// correction is built from (only for the single-episode grade).
 func TestCensusPacksFoldsOccurrences(t *testing.T) {
 	packFiles := []seadex.File{
 		{Name: "Show S01E01 [1080p].mkv", Length: 1 << 30},
 		{Name: "Show S01E02 [1080p].mkv", Length: 1 << 30},
 	}
-	singleFiles := []seadex.File{{Name: "Show S01E01 [1080p].mkv", Length: 1 << 30}}
+	singleFiles := []seadex.File{{Name: "Show S01E07 [1080p].mkv", Length: 1 << 30}}
 	entry := &seadex.Entry{AniListID: 7}
 	cur := map[string][]curatedRef{
 		"nyaa:1": {{entry: entry, torrent: &seadex.Torrent{Files: packFiles}}},
@@ -1920,14 +1933,113 @@ func TestCensusPacksFoldsOccurrences(t *testing.T) {
 			{entry: entry, torrent: &seadex.Torrent{Files: singleFiles}},
 			{entry: entry, torrent: &seadex.Torrent{Files: packFiles}},
 		},
+		"nyaa:4": {{entry: entry, torrent: &seadex.Torrent{}}},
 	}
 	got := censusPacks(cur)
-	for key, want := range map[string]bool{"nyaa:1": true, "nyaa:2": false, "nyaa:3": true} {
+	want := map[string]packCensus{
+		"nyaa:1": {evidence: packEvidencePack},
+		"nyaa:2": {evidence: packEvidenceSingle, marker: "S01E07"},
+		"nyaa:3": {evidence: packEvidencePack},
+		"nyaa:4": {evidence: packEvidenceUnknown},
+	}
+	for key, want := range want {
 		if got[key] != want {
-			t.Errorf("censusPacks[%s] = %v, want %v", key, got[key], want)
+			t.Errorf("censusPacks[%s] = %+v, want %+v", key, got[key], want)
 		}
 	}
 	if len(got) != len(cur) {
 		t.Errorf("censusPacks returned %d keys, want %d (one per journal key)", len(got), len(cur))
+	}
+}
+
+// TestApplyTitlesCorrectsProvablyWrongSeasonClaim pins the one intervention the
+// audit makes on a served title: a harvested title claiming a whole SEASON over
+// a file list that positively proves ONE episode has its season token rewritten
+// into the season+episode form the census names. Sonarr parses FullSeason from
+// such a title, ranks it above loose episodes and then treats the season as
+// covered, so the operator silently ends up missing that season's real episodes.
+//
+// The rewrite is surgical on purpose, and this test pins that: the tracker's own
+// group, resolution and codec bytes SURVIVE. Falling back to the synthesized
+// title would fix the pack claim and throw exactly those bytes away - strictly
+// worse for the arr's matching - and dropping the item is forbidden outright.
+func TestApplyTitlesCorrectsProvablyWrongSeasonClaim(t *testing.T) {
+	log, rec := capture.New()
+	w := newLoggedTestWriter(filepath.Join(t.TempDir(), "feed.json"), log)
+	entry := &seadex.Entry{AniListID: 7}
+	cur := map[string][]curatedRef{
+		"nyaa:1": {{entry: entry, torrent: &seadex.Torrent{
+			Files: []seadex.File{{Name: "Show S01E07.mkv", Length: 1 << 30}},
+		}}},
+		"nyaa:2": {{entry: entry, torrent: &seadex.Torrent{
+			Files: []seadex.File{{Name: "Show - 07.mkv", Length: 1 << 30}},
+		}}},
+	}
+	items := []journalItem{
+		{item: item{Title: "Synth 1"}, Key: "nyaa:1"},
+		{item: item{Title: "Synth 2"}, Key: "nyaa:2"},
+	}
+	titles := map[string]string{
+		"nyaa:1": "Show - S01 [1080p][x265]-GRP",
+		"nyaa:2": "Show Season 2",
+	}
+	applyTitles(items, titles, titleAudit{census: censusPacks(cur), report: w.packDisagreementReporter()})
+
+	if got, want := items[0].Title, "Show - S01E07 [1080p][x265]-GRP"; got != want {
+		t.Errorf("served title = %q, want the season token corrected in place %q", got, want)
+	}
+	// Named explicitly: these are the bytes a whole-title replacement would lose.
+	for _, frag := range []string{"[1080p]", "[x265]", "-GRP"} {
+		if !strings.Contains(items[0].Title, frag) {
+			t.Errorf("corrected title %q lost the tracker's own %q text", items[0].Title, frag)
+		}
+	}
+	// The absolute "- NN" census marker renders against the title's own season.
+	if got, want := items[1].Title, "Show S02E07"; got != want {
+		t.Errorf("served title = %q, want the absolute census marker as %q", got, want)
+	}
+
+	const msg = "indexer feed title and file list disagree about a season pack"
+	if got := rec.CountExact(msg); got != 1 {
+		t.Errorf("disagreement warnings = %d, want 1 (onset-latched per rebuild); log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+	}
+	for key, want := range map[string]string{"key": "nyaa:1", "title_pack": "true", "files_pack": "false", "corrected": "true"} {
+		if got, ok := rec.AttrValue(msg, key); !ok || got != want {
+			t.Errorf("warning attr %s = %q (found=%v), want %q", key, got, ok, want)
+		}
+	}
+}
+
+// TestApplyTitlesLeavesUnknownCensusEvidenceAlone pins why the census is
+// three-valued: zero recognized episode tokens - an absent file list, or naming
+// outside the recognized forms - proves NOTHING, so a season-claiming title over
+// it is neither a disagreement nor a correction. It is served verbatim and
+// silently, exactly as before the correction existed. Reading absence as
+// single-episode evidence is the false correction a two-valued census would have
+// introduced.
+func TestApplyTitlesLeavesUnknownCensusEvidenceAlone(t *testing.T) {
+	log, rec := capture.New()
+	w := newLoggedTestWriter(filepath.Join(t.TempDir(), "feed.json"), log)
+	entry := &seadex.Entry{AniListID: 7}
+	cur := map[string][]curatedRef{
+		"nyaa:1": {{entry: entry, torrent: &seadex.Torrent{}}},
+		"nyaa:2": {{entry: entry, torrent: &seadex.Torrent{
+			Files: []seadex.File{{Name: "01.mkv", Length: 1 << 30}},
+		}}},
+	}
+	items := []journalItem{
+		{item: item{Title: "Synth 1"}, Key: "nyaa:1"},
+		{item: item{Title: "Synth 2"}, Key: "nyaa:2"},
+	}
+	titles := map[string]string{"nyaa:1": "Show - S01", "nyaa:2": "Show - S01"}
+	applyTitles(items, titles, titleAudit{census: censusPacks(cur), report: w.packDisagreementReporter()})
+
+	for i := range items {
+		if want := titles[items[i].Key]; items[i].Title != want {
+			t.Errorf("item %s title = %q, want the harvested title untouched %q", items[i].Key, items[i].Title, want)
+		}
+	}
+	if rec.Contains("disagree about a season pack") {
+		t.Errorf("absent episode evidence reported as a disagreement; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }

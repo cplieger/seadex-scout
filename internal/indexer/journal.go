@@ -709,75 +709,146 @@ func (p *journalPass) newJournalItem(t *seadex.Torrent, scope string) (journalIt
 // synthesized title (the permanent fallback). GUIDs never change with the
 // title, so an upgrade cannot re-trigger a grab.
 //
-// The audit is a read-only cross-check on the upgrade: it never influences
-// which title is served (the harvested title wins exactly as it always has),
-// it only reports a title that contradicts the release's own file list.
+// The harvested title still WINS: the audit never falls back to the synthesized
+// title and never drops an item (both forbidden). Its one intervention is a
+// surgical rewrite of a season claim the file list proves wrong - see
+// titleAudit.served.
 func applyTitles(items []journalItem, titles map[string]string, audit titleAudit) {
 	for i := range items {
 		t, ok := titles[items[i].Key]
 		if !ok || t == "" {
 			continue
 		}
-		items[i].Title = t
-		audit.check(items[i].Key, t)
+		items[i].Title = audit.served(items[i].Key, t)
 	}
 }
 
-// titleAudit is applyTitles' title-vs-file-list cross-check: census holds the
-// file-census pack verdict per journal key (censusPacks) and report is the
-// per-rebuild diagnostic sink (FeedWriter.packDisagreementReporter). The zero
-// value disables the check - what a caller with no census to compare against
-// passes (a baselined rebuild, whose journal is empty anyway).
-type titleAudit struct {
-	census map[string]bool
-	report func(key string, titlePack, filesPack bool)
+// packCensus is what ONE journal key's file list proves about its episode count
+// (packEvidenceOf), plus the census's own single-episode marker - the token a
+// correction splices into a title that wrongly claims a whole season. The marker
+// is meaningful only for packEvidenceSingle.
+type packCensus struct {
+	marker   string
+	evidence packEvidence
 }
 
-// check reports one upgraded item whose harvested title disagrees with its file
-// list about being a season pack. It stays silent whenever there is nothing to
-// compare (no sink, no census entry for the key) or the title says nothing about
-// packs (packFromTitle's unknown), so only a genuine contradiction is reported.
+// titleAudit is applyTitles' title-vs-file-list cross-check, and the one place a
+// provably-wrong season-pack claim is corrected: census holds the three-valued
+// file evidence per journal key (censusPacks) and report is the per-rebuild
+// diagnostic sink (FeedWriter.packDisagreementReporter). The zero value disables
+// both - what a caller with no census to compare against passes (a baselined
+// rebuild, whose journal is empty anyway).
+type titleAudit struct {
+	census map[string]packCensus
+	report func(key string, titlePack, filesPack, corrected bool)
+}
+
+// served returns the title to serve for one upgraded item, reporting a
+// disagreement between the harvested title and the release's own file list.
 //
-// There is no Torznab field for pack status (the wire item carries Title, not
-// FullSeason), so the disagreement has exactly one honest use today: telling the
-// operator that the tracker's release name and the torrent's reported contents
-// describe different things. Choosing a winner is a grab-affecting policy this
-// deliberately does NOT take.
-func (a titleAudit) check(key, title string) {
+// A title claiming a whole SEASON over a file list that positively proves ONE
+// episode (packEvidenceSingle) is corrected in place: Sonarr parses FullSeason
+// from such a title, ranks it above loose episodes, and once it grabs it treats
+// that season as covered - so the season's real episodes are suppressed and the
+// operator silently ends up missing them. Rewriting only the season token
+// (correctSeasonOnlyTitle) removes the false claim while keeping every other byte
+// of the tracker's real release name, which is what Sonarr reads for quality and
+// custom-format decisions.
+//
+// Everything else is served verbatim, deliberately:
+//
+//   - packEvidenceUnknown is NOT a disagreement: zero recognized tokens means
+//     absent files or naming outside the recognized forms, which proves nothing
+//     about the payload. Nothing to report, nothing to correct - reading it as
+//     single-episode evidence is exactly the false correction the three-valued
+//     census exists to prevent.
+//   - a title naming an EPISODE over a pack census keeps warning and is NOT
+//     corrected: its consequence is weaker (the release merely loses the pack
+//     ranking) and correcting it would cost the real title.
+func (a titleAudit) served(key, title string) string {
+	c, ok := a.census[key]
+	if !ok {
+		return title
+	}
+	titlePack, known := packFromTitle(title)
+	if !known {
+		return title
+	}
+	switch {
+	case titlePack && c.evidence == packEvidenceSingle:
+		corrected, done := correctedTitle(title, c.marker)
+		a.warn(key, true, false, done)
+		return corrected
+	case !titlePack && c.evidence == packEvidencePack:
+		a.warn(key, false, true, false)
+		return title
+	default:
+		return title
+	}
+}
+
+// warn reports one disagreement through the audit's sink, if it has one.
+func (a titleAudit) warn(key string, titlePack, filesPack, corrected bool) {
 	if a.report == nil {
 		return
 	}
-	filesPack, ok := a.census[key]
-	if !ok {
-		return
-	}
-	titlePack, known := packFromTitle(title)
-	if !known || titlePack == filesPack {
-		return
-	}
-	a.report(key, titlePack, filesPack)
+	a.report(key, titlePack, filesPack, corrected)
 }
 
-// censusPacks reads the file-census season-pack verdict (packVerdict's census
-// arm) for every journal key in the current catalogue, so applyTitles can
-// compare a harvested title's own verdict against the payload the release
-// actually ships. A key's occurrences are the SAME tracker torrent attached to
-// several entries, and the fold across them is an OR so the result cannot depend
-// on catalogue order - the same order-independence renderJournalItem's sort
-// exists to guarantee for the item itself.
-func censusPacks(cur map[string][]curatedRef) map[string]bool {
-	packs := make(map[string]bool, len(cur))
+// correctedTitle applies the season-token rewrite, refusing it when the marker
+// is unreadable - defensively, since packEvidenceSingle guarantees a recognized
+// token - or when the rewritten title would exceed the persisted-field cap: an
+// over-limit title is dropped by the shared decode gate on reload
+// (validPersistedItem), and losing the item entirely is far worse than serving
+// its wrong season claim with a diagnostic that explains it.
+func correctedTitle(title, marker string) (string, bool) {
+	corrected, ok := correctSeasonOnlyTitle(title, marker)
+	if !ok || len(corrected) > maxPersistedFieldBytes {
+		return title, false
+	}
+	return corrected, true
+}
+
+// censusPacks reads the three-valued file-list evidence (packEvidenceOf) for
+// every journal key in the current catalogue, so applyTitles can tell what a
+// harvested title claims from what the release actually ships. A key's
+// occurrences are the SAME tracker torrent attached to several entries, and the
+// fold across them takes the STRONGEST evidence (pack over single over unknown)
+// so the result cannot depend on catalogue order - the same order-independence
+// renderJournalItem's sort exists to guarantee for the item itself.
+func censusPacks(cur map[string][]curatedRef) map[string]packCensus {
+	packs := make(map[string]packCensus, len(cur))
 	for key, refs := range cur {
-		pack := false
+		var c packCensus
 		for _, ref := range refs {
-			if packVerdict("", ref.torrent) {
-				pack = true
-				break
+			if e := packEvidenceOf(ref.torrent); e > c.evidence {
+				c.evidence = e
 			}
 		}
-		packs[key] = pack
+		if c.evidence == packEvidenceSingle {
+			c.marker = censusMarker(refs)
+		}
+		packs[key] = c
 	}
 	return packs
+}
+
+// censusMarker returns the single-episode marker a corrected title is built
+// from: the smallest non-empty marker across the key's occurrences, so the
+// choice cannot depend on catalogue order either (the occurrences are the same
+// tracker torrent, so in practice they all name the same episode).
+func censusMarker(refs []curatedRef) string {
+	best := ""
+	for _, ref := range refs {
+		m := singleEpisodeMarker(ref.torrent.Files)
+		if m == "" {
+			continue
+		}
+		if best == "" || m < best {
+			best = m
+		}
+	}
+	return best
 }
 
 // retainTitles prunes the harvested-title cache to the keys still present in
