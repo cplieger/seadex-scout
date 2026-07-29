@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/cplieger/seadex-scout/internal/compare"
 )
@@ -70,7 +69,7 @@ func TestAlertContractMatchesShippedRules(t *testing.T) {
 	wantMsg, wantLabels := betterReleaseContract(t, raw)
 
 	notifier, recorder := newCapturedNotifier()
-	notifier.Notify([]compare.Finding{testFinding("k1", "Frieren")}, nil, nil, time.Now())
+	notifier.Report([]compare.Finding{testFinding("k1", "Frieren")}, nil)
 
 	keys := map[string]bool{}
 	var found bool

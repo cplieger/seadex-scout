@@ -49,22 +49,14 @@ const maxKeyBytes = 2 * keyenc.MaxComponentBytes
 // instead of being materialized into the key, so hostile bulk SeaDex data
 // (hundreds of oversized URLs per entry) cannot amplify key construction into
 // an out-of-memory failure.
+//
+// It returns ONE key. It used to also return the pre-fold "legacy" form of an
+// oversized key, so the notifier could migrate a record persisted under the
+// older identity format instead of re-alerting it. Nothing persists a key any
+// more (findings are reported as state and held in memory), so a key format
+// change costs one duplicate report on the pass after an upgrade and needs no
+// migration path at all.
 func dedupeKey(f *compare.Finding) string {
-	key, _ := dedupeKeyWithLegacy(f)
-	return key
-}
-
-// dedupeKeyWithLegacy returns the canonical dedupe key plus, when the
-// assembled key crossed the aggregate bound and was folded, the UNFOLDED key
-// the same finding produced before the fold existed ("" otherwise). The
-// aggregate bound is an in-place change to the PERSISTED identity format, so
-// an instance that already stored one of the previously valid 16-64 KiB keys
-// would otherwise re-alert an unchanged finding as new and emit a false
-// resolution for the old key in the same cycle. Notify looks the legacy form
-// up in the prior state and migrates the record onto the canonical key
-// (original alert time preserved, no notification, no resolution line); the
-// legacy key disappears with the next successful state save.
-func dedupeKeyWithLegacy(f *compare.Finding) (canonical, legacy string) {
 	groups := slices.Clone(f.RecommendedGroups)
 	slices.Sort(groups)
 	key := strings.Join([]string{
@@ -80,21 +72,18 @@ func dedupeKeyWithLegacy(f *compare.Finding) (canonical, legacy string) {
 	if len(key) > maxKeyBytes {
 		// Every component is individually bounded, but four escaped
 		// in-bound components still assemble to ~64 KiB, and these keys
-		// are the PERSISTED state map keys: N hostile findings push
-		// state.json toward state's 32 MiB save cap, and a refused save
-		// means ERROR + dedupe not advanced every cycle. Fold an oversized
+		// index the in-memory finding set that is re-emitted on every
+		// pass: N hostile findings would hold N x 64 KiB resident and
+		// walk it once per emission. Fold an oversized
 		// assembled key onto the same fixed-size identity keyenc already
 		// uses for an oversized component. The folded form has three
 		// '|'-separated fields where every unfolded key has at least
 		// five, so the two forms cannot collide. This bounds the KEY
 		// side; the stored VALUE side is bounded separately, at
-		// projection time by notify.capPersisted, so key and payload
-		// together keep the persisted map bounded. The unfolded key
-		// rides back as the legacy form so Notify can migrate a record
-		// persisted before the fold instead of re-alerting it.
-		return strconv.Itoa(f.AniListID) + "|" + string(f.Status) + "|" + keyenc.BoundedPart(key), key
+		// projection time, so key and payload together stay bounded.
+		return strconv.Itoa(f.AniListID) + "|" + string(f.Status) + "|" + keyenc.BoundedPart(key)
 	}
-	return key, ""
+	return key
 }
 
 // currentGroupKey encodes the finding's current-group component for the dedupe

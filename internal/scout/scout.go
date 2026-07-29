@@ -543,22 +543,20 @@ func (s *Scout) finishInterruptedMatch(ctx context.Context, start time.Time, sta
 // Failed-walk items and the entries whose needed AniList lookup failed
 // transiently (match.Result.IncompleteIDs; their entries sit unmapped in the
 // match set, so the compare yields no finding for them and only the
-// preservation set keeps their prior findings from resolving). During the
-// cold-start window a partial or AniList-degraded cycle seeds an incomplete
-// baseline instead (see the gate below). Always healthy.
+// preservation set keeps their prior findings from resolving). Always healthy.
 func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, startStats AniListStats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, result match.Result, mapErr error) bool {
 	cleanMatches, failedItems := splitFailedMatches(result.Matches)
 	findings := s.deps.Comparer.Compare(cleanMatches)
-	// A walk that returned NO items is not evidence a baseline covers the
-	// library: the shrink guard only fires against a populated prior snapshot,
-	// so an empty FIRST walk (an arr with nothing in it yet, or an
-	// arr_tags.include matching nothing) reaches here and would seed a
-	// "complete" empty baseline - then the cycle after the library appears
-	// bursts the whole pre-existing backlog as fresh notifications, exactly
-	// what the baseline exists to prevent. Seed it as incomplete instead.
-	incomplete := snap.Partial || result.Degraded || len(snap.Items) == 0
-	newFindings := s.reconcileFindings(st, findings,
-		unionIDs(failedItems, result.IncompleteIDs), incomplete, time.Now())
+	// Findings are reported as STATE: notify re-emits the whole current set and
+	// a condition that stops being reported resolves when the alert rule's
+	// lookback expires. There is no cold-start baseline and no persisted dedupe
+	// table - see notify.Notifier. The preserve set scopes what replacement may
+	// DELETE: an entry whose walk failed, or whose needed AniList lookup failed
+	// transiently, has incomplete evidence, so its absence from findings is
+	// missing data and its prior rows are carried forward. A single permanently
+	// failing series holds Snapshot.Partial forever, which is what makes that
+	// scoping necessary rather than decorative.
+	s.deps.Notifier.Report(findings, unionIDs(failedItems, result.IncompleteIDs))
 
 	diff := library.DiffSnapshots(&st.Library, &snap)
 	attrs := make([]any, 0, 26)
@@ -577,45 +575,9 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 	s.recordPartialWalk(st, &snap)
 	s.logCompletedCycle(&snap, &result, mapErr, failedItems, st.AniListDegraded, attrs)
 
-	st.Library, st.Mapping, st.Memo, st.Findings = snap, *mapCache, result.Memo, newFindings
+	st.Library, st.Mapping, st.Memo = snap, *mapCache, result.Memo
 	s.save(ctx, st)
 	return true
-}
-
-// reconcileFindings emits (or cold-start baselines) this cycle's findings
-// against the persisted dedupe table, returning the refreshed table. A cold
-// start (a fresh install, or a lost/reset cache) has no dedupe table yet:
-// baseline the current findings silently so the whole pre-existing backlog is
-// not dumped as notifications at once. A partial first walk (or an
-// AniList-degraded first match) seeds the same way but records the baseline
-// as incomplete (state.BaselineIncomplete): the seed covers only the items
-// that walked cleanly and mapped completely, so every following successful
-// cycle keeps seeding silently - the affected items' pre-existing backlog
-// must not burst as fresh notifications when they recover - until the first
-// complete cycle seeds the whole library and clears the flag. Steady-state
-// emission then resumes via Notify. The len(Findings) guard keeps an upgrade
-// of an already-running instance (state predating the flags but already
-// holding findings) on the normal emit path. One cell stays conservative: a
-// state with no findings and no flags set (an upgraded fully-aligned
-// instance, or an install whose first cycles were all degraded) is
-// indistinguishable from a cold start and baselines, preferring a one-cycle
-// silent seed over bursting a whole backlog - a finding first appearing in
-// exactly that cycle is seeded, not emitted. The full list is always
-// available on demand via report mode.
-func (s *Scout) reconcileFindings(st *state.State, findings []compare.Finding, preserve map[int]struct{}, incomplete bool, now time.Time) map[string]notify.Alerted {
-	if st.BaselineIncomplete || (!st.Baselined && len(st.Findings) == 0) {
-		current := s.deps.Notifier.Baseline(findings, now)
-		st.Baselined = true
-		st.BaselineIncomplete = incomplete
-		return current
-	}
-	// Resolution scoping: a prior finding whose entry sits in the preserve
-	// set - a Failed-walk item's AniList id, or an id whose needed AniList
-	// lookup failed transiently this cycle - is carried forward unresolved
-	// (its absence from findings is missing data, not alignment), while
-	// the unaffected majority emits and resolves normally.
-	st.Baselined = true
-	return s.deps.Notifier.Notify(findings, st.Findings, preserve, now)
 }
 
 // recordAniListDegradation advances or resets the persisted AniList

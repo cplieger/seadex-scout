@@ -47,6 +47,16 @@ filters:
   #   broken: [findings, report, feed]
   #   incomplete: [feed]
 
+  # AniList IDs whose findings are never alerted on. Findings are reported
+  # continuously for as long as they are true, so your alerting stack keeps
+  # reminding you until you act — which is what makes a lost notification
+  # recoverable. Put a show here when you have decided NOT to upgrade it and
+  # want the reminders to stop. It suppresses the alert only: the show still
+  # appears in report mode, and the RSS feed is untouched (this app never
+  # withholds a release from Sonarr/Radarr). [] = alert on everything.
+  ignore: []
+  # ignore: [154587, 21519]
+
 arr_tags:
   include: [] # scan only items with one of these tags; [] = all
   exclude: [] # skip items with any of these tags (wins over include)

@@ -1,21 +1,30 @@
 package notify
 
 import (
-	"encoding/json"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/compare"
-	"github.com/cplieger/seadex-scout/internal/keyenc"
 	"github.com/cplieger/slogx/capture"
 )
 
 func newCapturedNotifier() (*Notifier, *capture.Recorder) {
 	logger, recorder := capture.New()
-	return NewNotifier(logger), recorder
+	return NewNotifier(logger, nil), recorder
+}
+
+// newIgnoringNotifier builds a notifier whose emission-suppression set holds
+// the given AniList IDs, the shape config's filters.ignore produces.
+func newIgnoringNotifier(ignored ...int) (*Notifier, *capture.Recorder) {
+	logger, recorder := capture.New()
+	ignore := make(map[int]struct{}, len(ignored))
+	for _, id := range ignored {
+		ignore[id] = struct{}{}
+	}
+	return NewNotifier(logger, ignore), recorder
 }
 
 // testFinding builds a fixture finding whose derived dedupe key is unique per
@@ -47,113 +56,326 @@ func testFinding(key, title string) compare.Finding {
 	}
 }
 
-// storedTestFinding is testFinding projected onto the persisted dedupe
-// record, for building prior-state maps the way a previous cycle would have.
-func storedTestFinding(title string) StoredFinding {
-	f := testFinding("", title)
-	return storedFinding(&f)
+// findingWithID is testFinding with a distinct AniList ID, so a fixture can be
+// addressed by the incompleteIDs / ignore sets (both key on AniListID).
+func findingWithID(key, title string, alID int) compare.Finding {
+	f := testFinding(key, title)
+	f.AniListID = alID
+	return f
 }
 
-func TestNotifierBaselineSeedsWithoutFindingNotification(t *testing.T) {
+// emittedTitles returns the title of every emitted better-release line, in
+// emission order, so a test can assert both the SET and the ORDER of a pass.
+func emittedTitles(recorder *capture.Recorder) []string {
+	var titles []string
+	for _, rec := range recorder.Records() {
+		if rec.Message != "better release available" {
+			continue
+		}
+		rec.Attrs(func(a slog.Attr) bool {
+			if a.Key == "title" {
+				if s, ok := a.Value.Any().(string); ok {
+					titles = append(titles, s)
+				}
+			}
+			return true
+		})
+	}
+	return titles
+}
+
+// titleCount counts the emitted better-release lines carrying title, so a
+// multi-pass test can assert how many passes emitted a given row without
+// swapping the notifier's logger between passes (the accumulated stream is
+// exactly what Loki sees).
+func titleCount(recorder *capture.Recorder, title string) int {
+	n := 0
+	for _, got := range emittedTitles(recorder) {
+		if got == title {
+			n++
+		}
+	}
+	return n
+}
+
+// summaryCounter reads one counter off the "findings reported" summary line.
+// It returns the LAST line's value, so a multi-pass test reads the pass it just
+// ran rather than the one before it.
+func summaryCounter(t *testing.T, recorder *capture.Recorder, key string) (int64, bool) {
+	t.Helper()
+	var value int64
+	var seen bool
+	for _, rec := range recorder.Records() {
+		if rec.Message != "findings reported" {
+			continue
+		}
+		rec.Attrs(func(a slog.Attr) bool {
+			if a.Key == key {
+				value, seen = a.Value.Int64(), true
+			}
+			return true
+		})
+	}
+	return value, seen
+}
+
+// TestReportEmitsEveryRowOnceInDeterministicOrder pins the state contract's
+// first half: Report emits the WHOLE current set, each row exactly once, and
+// the order is stable across two identical passes so an operator (and a diff
+// of two Loki windows) can compare one pass against the next. The second pass
+// deliberately supplies the batch in a different input order: emission order
+// is derived from the dedupe key, not from the caller's slice order.
+func TestReportEmitsEveryRowOnceInDeterministicOrder(t *testing.T) {
 	notifier, recorder := newCapturedNotifier()
-	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	finding := testFinding("same", "Frieren")
+	a := findingWithID("a", "Aria", 1)
+	b := findingWithID("b", "Bocchi", 2)
+	c := findingWithID("c", "Chihayafuru", 3)
 
-	got := notifier.Baseline([]compare.Finding{finding}, now)
+	notifier.Report([]compare.Finding{a, b, c}, nil)
+	// A different input order on the second pass: emission order is derived
+	// from the dedupe key, not from the caller's slice order.
+	notifier.Report([]compare.Finding{c, a, b}, nil)
 
-	alert, ok := got[dedupeKey(&finding)]
-	if !ok {
-		t.Fatalf("Baseline did not store finding under its dedupe key: %+v", got)
+	titles := emittedTitles(recorder)
+	if len(titles) != 6 {
+		t.Fatalf("two passes emitted %d rows (%v), want 6 - three per pass, once each", len(titles), titles)
 	}
-	if !alert.AlertedAt.Equal(now) {
-		t.Errorf("AlertedAt = %s, want %s", alert.AlertedAt, now)
+	first, second := titles[:3], titles[3:]
+	if !slices.Equal(first, second) {
+		t.Errorf("second pass emission order = %v, want the first pass's %v (deterministic order)", second, first)
 	}
-	if alert.Finding.Title != "Frieren" {
-		t.Errorf("stored finding title = %q, want Frieren", alert.Finding.Title)
+	for _, want := range []string{"Aria", "Bocchi", "Chihayafuru"} {
+		if got := titleCount(recorder, want); got != 2 {
+			t.Errorf("row %q emitted %d times, want once per pass", want, got)
+		}
 	}
-	if got := recorder.Count("better release available"); got != 0 {
-		t.Errorf("Baseline emitted %d finding notifications, want 0", got)
-	}
-	if got := recorder.Count("cold start: findings baselined without notifying"); got != 1 {
-		t.Errorf("Baseline cold-start summary count = %d, want 1", got)
+	if total, seen := summaryCounter(t, recorder, "total"); !seen || total != 3 {
+		t.Errorf("summary total = %d (present %v), want 3", total, seen)
 	}
 }
 
-func TestNotifySuppressesExistingAndEmitsNewAndResolved(t *testing.T) {
+// TestReportReemitsUnchangedFindingsEveryPass is the whole point of the STATE
+// shape: an unchanged condition is re-emitted on every pass so the Loki rule
+// keeps firing until it stops being reported. The previous EVENT shape emitted
+// each finding exactly once ever, which is what made a notification lost
+// downstream permanent.
+func TestReportReemitsUnchangedFindingsEveryPass(t *testing.T) {
 	notifier, recorder := newCapturedNotifier()
-	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	same := testFinding("same", "Frieren")
-	fresh := testFinding("new", "Bocchi")
-	sameKey, freshKey := dedupeKey(&same), dedupeKey(&fresh)
-	// The stale record belongs to a DIFFERENT item, so its absence is a
-	// genuine resolution rather than a re-keyed notification for a condition
-	// this cycle still reports (see
-	// TestNotifySupersedesChangedKeyWithoutResolving).
-	gone := testFinding("old", "Old Title")
-	gone.AniListID = 999
-	prior := map[string]Alerted{
-		sameKey: {AlertedAt: oldTime, Finding: storedTestFinding("Frieren")},
-		"old":   {AlertedAt: oldTime, Finding: storedFinding(&gone)},
-	}
+	findings := []compare.Finding{findingWithID("same", "Frieren", 154587)}
 
-	current := notifier.Notify([]compare.Finding{same, fresh}, prior, nil, now)
+	notifier.Report(findings, nil)
+	notifier.Report(findings, nil)
 
-	if !current[sameKey].AlertedAt.Equal(oldTime) {
-		t.Errorf("suppressed finding AlertedAt = %s, want original %s", current[sameKey].AlertedAt, oldTime)
+	if got := recorder.CountExact("better release available"); got != 2 {
+		t.Errorf("emissions across two identical passes = %d, want 2 (state, not events)", got)
 	}
-	if !current[freshKey].AlertedAt.Equal(now) {
-		t.Errorf("new finding AlertedAt = %s, want %s", current[freshKey].AlertedAt, now)
+	if got := recorder.CountExact("findings reported"); got != 2 {
+		t.Errorf("summary lines = %d, want one per pass", got)
 	}
-	if _, ok := current["old"]; ok {
-		t.Errorf("resolved finding still present in current state: %+v", current["old"])
+}
+
+// TestReportDropsFindingAbsentFromTheNextPass pins resolution-by-absence: a
+// condition that stops being reported simply stops being emitted, and nothing
+// emits a resolution line (the alert rule's lookback window owns resolution).
+func TestReportDropsFindingAbsentFromTheNextPass(t *testing.T) {
+	notifier, recorder := newCapturedNotifier()
+	kept := findingWithID("kept", "Kept", 1)
+	gone := findingWithID("gone", "Gone", 2)
+
+	notifier.Report([]compare.Finding{kept, gone}, nil)
+	notifier.Report([]compare.Finding{kept}, nil)
+
+	if got := titleCount(recorder, "Gone"); got != 1 {
+		t.Errorf("the absent row was emitted %d times, want 1 (the first pass only)", got)
 	}
-	// CountExact: this msg is pinned by the Loki better-release alert rule, so
-	// a superstring message must fail here, not false-pass a substring Count.
+	if got := titleCount(recorder, "Kept"); got != 2 {
+		t.Errorf("the still-reported row was emitted %d times, want one per pass", got)
+	}
+	if got := recorder.Count("finding resolved"); got != 0 {
+		t.Errorf("resolution lines = %d, want 0 (resolution is by absence)", got)
+	}
+	if total, _ := summaryCounter(t, recorder, "total"); total != 1 {
+		t.Errorf("summary total = %d, want 1 (the absent row left the set)", total)
+	}
+	if _, ok := notifier.current[dedupeKey(&gone)]; ok {
+		t.Error("the absent finding survived in the current set")
+	}
+}
+
+// TestReportCarriesForwardIncompleteItems pins the ONE scope on replacement's
+// delete half: an item whose evidence was incomplete this pass (a failed
+// episode walk or a degraded AniList lookup) has an ABSENCE that means missing
+// data, not alignment, so its prior rows are carried forward and keep being
+// emitted - and the summary's preserved counter reports how many.
+func TestReportCarriesForwardIncompleteItems(t *testing.T) {
+	notifier, recorder := newCapturedNotifier()
+	const incompleteID = 222
+	carried := findingWithID("carried", "Broken Series", incompleteID)
+	resolvable := findingWithID("clean", "Aligned Now", 333)
+
+	notifier.Report([]compare.Finding{carried, resolvable}, nil)
+	notifier.Report(nil, map[int]struct{}{incompleteID: {}})
+
+	if got := titleCount(recorder, "Broken Series"); got != 2 {
+		t.Errorf("the incomplete item's row was emitted %d times, want one per pass (carried forward)", got)
+	}
+	if got := titleCount(recorder, "Aligned Now"); got != 1 {
+		t.Errorf("the cleanly-compared item's row was emitted %d times, want 1 (it resolved by absence)", got)
+	}
+	if preserved, seen := summaryCounter(t, recorder, "preserved"); !seen || preserved != 1 {
+		t.Errorf("summary preserved = %d (present %v), want 1", preserved, seen)
+	}
+	if total, _ := summaryCounter(t, recorder, "total"); total != 1 {
+		t.Errorf("summary total = %d, want 1 (only the carried row)", total)
+	}
+	if _, ok := notifier.current[dedupeKey(&resolvable)]; ok {
+		t.Error("the cleanly-compared item's row survived, want it dropped")
+	}
+}
+
+// TestReportCarriesForwardOnlyWhileEvidenceIsIncomplete pins the release of
+// the carry-forward: once the item's evidence is complete again and it still
+// produces no finding, the row is dropped like any other resolved condition.
+// Without this a single transient failure would pin a row forever.
+func TestReportCarriesForwardOnlyWhileEvidenceIsIncomplete(t *testing.T) {
+	notifier, recorder := newCapturedNotifier()
+	const incompleteID = 222
+	carried := findingWithID("carried", "Broken Series", incompleteID)
+
+	notifier.Report([]compare.Finding{carried}, nil)
+	notifier.Report(nil, map[int]struct{}{incompleteID: {}})
+	notifier.Report(nil, nil)
+
+	if got := titleCount(recorder, "Broken Series"); got != 2 {
+		t.Errorf("the row was emitted %d times, want 2 (the third pass has complete evidence and no finding)", got)
+	}
+	if total, _ := summaryCounter(t, recorder, "total"); total != 0 {
+		t.Errorf("summary total = %d, want 0", total)
+	}
+	if len(notifier.current) != 0 {
+		t.Errorf("current set = %+v, want empty", notifier.current)
+	}
+}
+
+// TestReportSuppressesIgnoredAniListIDs pins filters.ignore's contract: an
+// ignored show is held in the set and counted (so the operator can still see
+// it is being tracked, and report mode still shows it) but never emitted, so
+// continuous reporting cannot re-notify a show the operator has consciously
+// decided not to upgrade.
+func TestReportSuppressesIgnoredAniListIDs(t *testing.T) {
+	const ignoredID = 999
+	notifier, recorder := newIgnoringNotifier(ignoredID)
+	notifier.Report([]compare.Finding{
+		findingWithID("ignored", "Ignored Show", ignoredID),
+		findingWithID("kept", "Reported Show", 1),
+	}, nil)
+
+	if got := emittedTitles(recorder); !slices.Equal(got, []string{"Reported Show"}) {
+		t.Errorf("emitted %v, want only the non-ignored [Reported Show]", got)
+	}
+	for key, want := range map[string]int64{"total": 2, "emitted": 1, "suppressed": 1} {
+		if got, seen := summaryCounter(t, recorder, key); !seen || got != want {
+			t.Errorf("summary %s = %d (present %v), want %d", key, got, seen, want)
+		}
+	}
+}
+
+// TestReportSummaryLineCarriesEveryCounter pins all four counters on the
+// summary line at once, with a fixture that makes each of them distinct: a
+// zeroed or swapped counter otherwise corrupts the Loki cycle accounting an
+// operator reads while every other test stays green.
+func TestReportSummaryLineCarriesEveryCounter(t *testing.T) {
+	const ignoredID, incompleteID = 999, 222
+	notifier, recorder := newIgnoringNotifier(ignoredID)
+	notifier.Report([]compare.Finding{
+		findingWithID("ignored", "Ignored", ignoredID),
+		findingWithID("carried", "Carried", incompleteID),
+	}, nil)
+
+	notifier.Report([]compare.Finding{
+		findingWithID("ignored", "Ignored", ignoredID),
+		findingWithID("fresh", "Fresh", 1),
+	}, map[int]struct{}{incompleteID: {}})
+
+	// total: ignored + carried + fresh; emitted: carried + fresh;
+	// suppressed: ignored; preserved: carried.
+	want := map[string]int64{"total": 3, "emitted": 2, "suppressed": 1, "preserved": 1}
+	for key, w := range want {
+		if got, seen := summaryCounter(t, recorder, key); !seen || got != w {
+			t.Errorf("summary %s = %d (present %v), want %d", key, got, seen, w)
+		}
+	}
+}
+
+// TestReportCollapsesInBatchDuplicateKeys pins in-batch dedupe: the SeaDex
+// fetcher appends every upstream record and the matcher preserves per-entry
+// cardinality, so one batch can carry the same dedupe key twice. The set
+// collapses them to one row, one line is emitted, and that line carries the
+// batch's LAST payload - the same payload the set retains, so the emitted line
+// and the next pass's re-emission cannot disagree.
+func TestReportCollapsesInBatchDuplicateKeys(t *testing.T) {
+	notifier, recorder := newCapturedNotifier()
+	first := testFinding("duplicate", "Frieren (first copy)")
+	last := testFinding("duplicate", "Frieren (last copy)")
+
+	notifier.Report([]compare.Finding{first, last}, nil)
+
 	if got := recorder.CountExact("better release available"); got != 1 {
-		t.Errorf("new finding notification count = %d, want 1", got)
+		t.Errorf("duplicate-key emissions = %d, want 1", got)
 	}
-	if got := recorder.Count("finding resolved"); got != 1 {
-		t.Errorf("resolved notification count = %d, want 1", got)
+	if got := len(notifier.current); got != 1 {
+		t.Errorf("current set entries = %d, want 1", got)
 	}
-	if got := recorder.Count("findings reported"); got != 1 {
-		t.Errorf("summary count = %d, want 1", got)
+	if got := notifier.current[dedupeKey(&first)].Title; got != last.Title {
+		t.Errorf("retained title = %q, want the last payload's %q", got, last.Title)
+	}
+	if got, _ := recorder.AttrValue("better release available", "title"); got != last.Title {
+		t.Errorf("emitted title = %q, want the last payload's %q", got, last.Title)
+	}
+	if total, _ := summaryCounter(t, recorder, "total"); total != 1 {
+		t.Errorf("summary total = %d, want 1", total)
 	}
 }
 
-// TestNotifyPreservesFailedItemsFindings pins the partial-walk
-// resolution scoping: a prior finding whose AniList ID is in failedItems (its
-// item's episode fetch failed this cycle, so it was excluded from the compare)
-// must be carried forward unresolved - kept in the returned dedupe state with
-// its original alert time and WITHOUT a "finding resolved" line - while a
-// prior finding for a cleanly-compared item that produced no finding is
-// resolved as usual.
-func TestNotifyPreservesFailedItemsFindings(t *testing.T) {
+// TestReportWithNoFindingsEmitsNothing pins the empty pass: a library fully
+// aligned with SeaDex reports nothing but must still close with the summary
+// line, so the operator can tell a clean pass from a cycle that never ran (the
+// cycle deadman rule keys on that).
+func TestReportWithNoFindingsEmitsNothing(t *testing.T) {
 	notifier, recorder := newCapturedNotifier()
-	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	failedFinding := testFinding("failed-item", "Broken Series")
-	failedFinding.AniListID = 222
-	resolvable := testFinding("clean-gone", "Aligned Now")
-	resolvable.AniListID = 333
-	prior := map[string]Alerted{
-		"failed-item": {AlertedAt: oldTime, Finding: storedFinding(&failedFinding)},
-		"clean-gone":  {AlertedAt: oldTime, Finding: storedFinding(&resolvable)},
-	}
 
-	current := notifier.Notify(nil, prior, map[int]struct{}{222: {}}, time.Now())
+	notifier.Report(nil, nil)
 
-	preserved, ok := current["failed-item"]
-	if !ok {
-		t.Fatalf("failed item's prior finding was resolved, want it preserved: %+v", current)
+	if got := recorder.CountExact("better release available"); got != 0 {
+		t.Errorf("emissions on an empty pass = %d, want 0", got)
 	}
-	if !preserved.AlertedAt.Equal(oldTime) {
-		t.Errorf("preserved AlertedAt = %s, want original %s", preserved.AlertedAt, oldTime)
+	if got := recorder.CountExact("findings reported"); got != 1 {
+		t.Errorf("summary lines = %d, want 1", got)
 	}
-	if _, ok := current["clean-gone"]; ok {
-		t.Errorf("clean item's stale finding still present, want it resolved: %+v", current)
+	for key, want := range map[string]int64{"total": 0, "emitted": 0, "suppressed": 0, "preserved": 0} {
+		if got, seen := summaryCounter(t, recorder, key); !seen || got != want {
+			t.Errorf("summary %s = %d (present %v), want %d", key, got, seen, want)
+		}
 	}
-	if got := recorder.CountExact("finding resolved"); got != 1 {
-		t.Errorf("resolved notification count = %d, want 1 (the clean item only)", got)
+	if len(notifier.current) != 0 {
+		t.Errorf("current set = %+v, want empty", notifier.current)
+	}
+}
+
+// TestReportEmptySliceReplacesTheWholeSet pins that an empty (non-nil) batch
+// is a genuine "nothing is true any more" report rather than a no-op: the
+// previous pass's rows are dropped, not retained.
+func TestReportEmptySliceReplacesTheWholeSet(t *testing.T) {
+	notifier, recorder := newCapturedNotifier()
+	notifier.Report([]compare.Finding{testFinding("k", "Frieren")}, nil)
+
+	notifier.Report([]compare.Finding{}, nil)
+
+	if got := titleCount(recorder, "Frieren"); got != 1 {
+		t.Errorf("the row was emitted %d times, want 1 (the empty batch replaced the set)", got)
+	}
+	if total, _ := summaryCounter(t, recorder, "total"); total != 0 {
+		t.Errorf("summary total = %d, want 0", total)
 	}
 }
 
@@ -166,7 +388,7 @@ func TestFindingLogSanitizesArrURL(t *testing.T) {
 	finding := testFinding("cred", "Frieren")
 	finding.ArrURL = "https://user:password@sonarr.example/series/frieren?token=secret#frag"
 
-	notifier.Notify([]compare.Finding{finding}, nil, nil, time.Now())
+	notifier.Report([]compare.Finding{finding}, nil)
 
 	got, _ := recorder.AttrValue("better release available", "arr_url")
 	if got != "https://sonarr.example/series/frieren" {
@@ -174,117 +396,20 @@ func TestFindingLogSanitizesArrURL(t *testing.T) {
 	}
 }
 
-// TestStoredFindingTrimsToResolutionFields pins the dedupe record's
-// persistence contract: the record persists exactly the fields the resolution
-// path reads back (emitResolved's line plus the failed-item preservation
-// keyed on AniListID), so everything else in a Finding - including a
-// credentialed ArrURL, whose on-disk sanitization the trim made moot - never
-// lands in state.json. All three storage sites project identically: a new
-// finding, a suppressed (already-alerted) finding, and a cold-start baseline.
-func TestStoredFindingTrimsToResolutionFields(t *testing.T) {
-	notifier, _ := newCapturedNotifier()
-	finding := testFinding("cred", "Frieren")
-	finding.ArrURL = "https://user:password@sonarr.example/series/frieren?token=secret#frag"
-	finding.Season = 2
-	now := time.Now()
-	want := StoredFinding{
-		Arr:              "sonarr",
-		CurrentGroup:     "erai-raws",
-		RecommendedGroup: "SubsPlease",
-		Title:            "Frieren",
-		Status:           compare.StatusBetter,
-		AniListID:        154587,
-		Season:           2,
-	}
-
-	key := dedupeKey(&finding)
-	current := notifier.Notify([]compare.Finding{finding}, nil, nil, now)
-	if got := current[key].Finding; got != want {
-		t.Errorf("new-finding stored record = %+v, want %+v", got, want)
-	}
-
-	suppressed := notifier.Notify([]compare.Finding{finding}, current, nil, now)
-	if got := suppressed[key].Finding; got != want {
-		t.Errorf("suppressed-finding stored record = %+v, want %+v", got, want)
-	}
-
-	baseline := notifier.Baseline([]compare.Finding{finding}, now)
-	if got := baseline[key].Finding; got != want {
-		t.Errorf("baselined stored record = %+v, want %+v", got, want)
-	}
-}
-
-// TestAlertedDecodesLegacyFullFindingRecord pins the trimmed record's
-// state-file compatibility: a dedupe record persisted BEFORE the trim carries
-// the full sanitized Finding (arr_url, links, dedupe_key, severity, ...), and
-// decoding it into the trimmed StoredFinding must succeed with every
-// read-back field intact and the extra fields ignored - an upgrade keeps
-// dedupe continuity (keys and alert times) without a state reset. A json tag
-// drifting from compare.Finding's would silently blank a resolution field on
-// every upgraded install; this fails instead.
-func TestAlertedDecodesLegacyFullFindingRecord(t *testing.T) {
-	legacy := `{
-		"alerted_at": "2026-01-01T00:00:00Z",
-		"finding": {
-			"kind": "encode",
-			"classification_reason": "encoder marker: x265",
-			"arr": "sonarr",
-			"current_group": "erai-raws",
-			"recommended_group": "SubsPlease",
-			"tracker": "Nyaa",
-			"title": "Frieren",
-			"resolution": "1080p",
-			"severity": "warn",
-			"codec": "x265",
-			"release_url": "https://nyaa.si/view/1",
-			"arr_url": "https://sonarr.example/series/frieren",
-			"info_hash": "hash-1",
-			"dedupe_key": "legacy-key",
-			"status": "better_release",
-			"recommended_groups": ["SubsPlease"],
-			"links": [{"tracker": "Nyaa", "url": "https://nyaa.si/view/1"}],
-			"al_id": 154587,
-			"season": 2,
-			"dual_audio": true
-		}
-	}`
-	var got Alerted
-	if err := json.Unmarshal([]byte(legacy), &got); err != nil {
-		t.Fatalf("decoding a pre-trim dedupe record: %v", err)
-	}
-	want := StoredFinding{
-		Arr:              "sonarr",
-		CurrentGroup:     "erai-raws",
-		RecommendedGroup: "SubsPlease",
-		Title:            "Frieren",
-		Status:           compare.StatusBetter,
-		AniListID:        154587,
-		Season:           2,
-	}
-	if got.Finding != want {
-		t.Errorf("decoded record = %+v, want %+v", got.Finding, want)
-	}
-	if wantAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC); !got.AlertedAt.Equal(wantAt) {
-		t.Errorf("decoded AlertedAt = %s, want %s", got.AlertedAt, wantAt)
-	}
-}
-
 // TestNotifierUnverifiableFindingIsInfoNotBetterRelease pins the alert-rule
 // safety of the unverifiable status: the SeadexScoutBetterReleaseFound Loki
 // rule counts only msg="better release available" warn lines, so an
-// unverifiable finding must emit ONE line at INFO with its own message and
-// contribute zero warn-level better-release lines - and, like every finding,
-// it dedupes across cycles by its key (the second Notify emits nothing new).
+// unverifiable finding must emit at INFO with its own message and contribute
+// zero warn-level better-release lines.
 func TestNotifierUnverifiableFindingIsInfoNotBetterRelease(t *testing.T) {
 	notifier, recorder := newCapturedNotifier()
 	finding := testFinding("unv", "Unknown Evidence")
 	finding.Status = compare.StatusUnverifiable
 
-	prior := notifier.Notify([]compare.Finding{finding}, nil, nil, time.Now())
-	notifier.Notify([]compare.Finding{finding}, prior, nil, time.Now())
+	notifier.Report([]compare.Finding{finding}, nil)
 
 	if got := recorder.CountExact("release group unverifiable, manual review"); got != 1 {
-		t.Errorf("unverifiable notification count across two cycles = %d, want 1 (dedupe by identity)", got)
+		t.Errorf("unverifiable notification count = %d, want 1", got)
 	}
 	if got := recorder.CountExact("better release available"); got != 0 {
 		t.Errorf("better-release line count = %d, want 0 (the alert rule must not fire)", got)
@@ -332,11 +457,11 @@ func TestMessage(t *testing.T) {
 // flipped level would silently break every shipped alert without failing a test.
 func TestNotifierEmitLevelFollowsStatus(t *testing.T) {
 	notifier, recorder := newCapturedNotifier()
-	warn := testFinding("w", "Warn Title") // testFinding status is StatusBetter
-	info := testFinding("i", "Info Title")
+	warn := findingWithID("w", "Warn Title", 1) // testFinding status is StatusBetter
+	info := findingWithID("i", "Info Title", 2)
 	info.Status = compare.StatusIncomplete
 
-	notifier.Notify([]compare.Finding{warn, info}, nil, nil, time.Now())
+	notifier.Report([]compare.Finding{warn, info}, nil)
 
 	sawWarn, sawInfo := false, false
 	for _, rec := range recorder.Records() {
@@ -368,7 +493,7 @@ func TestNotifierEmitLevelFollowsStatus(t *testing.T) {
 // one warn finding, which also gives joinLinks its behavioral assertion.
 func TestFindingLineCarriesDocumentedAttrs(t *testing.T) {
 	notifier, recorder := newCapturedNotifier()
-	notifier.Notify([]compare.Finding{testFinding("k1", "Frieren")}, nil, nil, time.Now())
+	notifier.Report([]compare.Finding{testFinding("k1", "Frieren")}, nil)
 
 	want := map[string]string{
 		"title":                 "Frieren",
@@ -425,11 +550,14 @@ func TestNewNotifierNilLoggerFallsBackToDefault(t *testing.T) {
 	slog.SetDefault(logger)
 	defer slog.SetDefault(prev)
 
-	notifier := NewNotifier(nil)
-	notifier.Baseline([]compare.Finding{testFinding("k", "Frieren")}, time.Now())
+	notifier := NewNotifier(nil, nil)
+	notifier.Report([]compare.Finding{testFinding("k", "Frieren")}, nil)
 
-	if got := recorder.CountExact("cold start: findings baselined without notifying"); got != 1 {
-		t.Errorf("baseline summary on default logger = %d, want 1", got)
+	if got := recorder.CountExact("findings reported"); got != 1 {
+		t.Errorf("summary line on default logger = %d, want 1", got)
+	}
+	if got := recorder.CountExact("better release available"); got != 1 {
+		t.Errorf("finding line on default logger = %d, want 1", got)
 	}
 }
 
@@ -437,10 +565,9 @@ func TestNewNotifierNilLoggerFallsBackToDefault(t *testing.T) {
 // slog-path pin (TestReportLogSanitizesControlAndBidiRunes) against the
 // daemon finding emitter: slog's JSONHandler escapes C0 controls but emits C1
 // controls and bidi controls raw, so every untrusted attribute emitted by
-// emit and emitResolved must ride through runesafe.Sanitize first. A
-// finding whose upstream-derived fields embed a C1 CSI (U+009B), an RLO bidi
-// override (U+202E), and a C0 escape introducer must log spaces in their
-// place on both the finding line and the resolution line.
+// emit must ride through runesafe.Sanitize first. A finding whose
+// upstream-derived fields embed a C1 CSI (U+009B), an RLO bidi override
+// (U+202E), and a C0 escape introducer must log spaces in their place.
 func TestNotifierEmitSanitizesControlAndBidiRunes(t *testing.T) {
 	const dirty = "a\u009bb\u202ec\x1bd" // C1 CSI, RLO override, C0 ESC
 	const clean = "a b c d"
@@ -455,30 +582,21 @@ func TestNotifierEmitSanitizesControlAndBidiRunes(t *testing.T) {
 	finding.ReleaseURL = dirty
 	finding.InfoHash = dirty
 
-	prior := notifier.Notify([]compare.Finding{finding}, nil, nil, time.Now())
-	notifier.Notify(nil, prior, nil, time.Now()) // resolve it via emitResolved
+	notifier.Report([]compare.Finding{finding}, nil)
 
-	want := map[string]map[string]string{
-		"better release available": {
-			"title":             clean,
-			"current_group":     clean,
-			"recommended_group": clean,
-			"release_url":       cleanURL,
-			"info_hash":         clean,
-		},
-		"finding resolved": {
-			"title":             clean,
-			"current_group":     clean,
-			"recommended_group": clean,
-		},
+	want := map[string]string{
+		"title":             clean,
+		"current_group":     clean,
+		"recommended_group": clean,
+		"release_url":       cleanURL,
+		"info_hash":         clean,
 	}
-	seen := map[string]bool{}
+	sawLine := false
 	for _, rec := range recorder.Records() {
-		expected, ok := want[rec.Message]
-		if !ok {
+		if rec.Message != "better release available" {
 			continue
 		}
-		seen[rec.Message] = true
+		sawLine = true
 		rec.Attrs(func(a slog.Attr) bool {
 			s, isStr := a.Value.Any().(string)
 			if !isStr {
@@ -486,19 +604,17 @@ func TestNotifierEmitSanitizesControlAndBidiRunes(t *testing.T) {
 			}
 			for _, bad := range []rune{'\u009b', '\u202e', '\x1b'} {
 				if strings.ContainsRune(s, bad) {
-					t.Errorf("%s attr %q carries raw unsafe rune %U: %q", rec.Message, a.Key, bad, s)
+					t.Errorf("attr %q carries raw unsafe rune %U: %q", a.Key, bad, s)
 				}
 			}
-			if w, pinned := expected[a.Key]; pinned && s != w {
-				t.Errorf("%s attr %q = %q, want %q", rec.Message, a.Key, s, w)
+			if w, pinned := want[a.Key]; pinned && s != w {
+				t.Errorf("attr %q = %q, want %q", a.Key, s, w)
 			}
 			return true
 		})
 	}
-	for msg := range want {
-		if !seen[msg] {
-			t.Errorf("expected a %q line, none emitted", msg)
-		}
+	if !sawLine {
+		t.Error("expected a better-release line, none emitted")
 	}
 }
 
@@ -528,7 +644,7 @@ func TestFindingLineSanitizesEveryUntrustedAttr(t *testing.T) {
 		compare.ReleaseLink{Tracker: "Nyaa", URL: "https://nyaa.si/view/a\u009bb\u202ec"},
 	)
 
-	notifier.Notify([]compare.Finding{finding}, nil, nil, time.Unix(0, 0))
+	notifier.Report([]compare.Finding{finding}, nil)
 
 	want := map[string]string{
 		"title":                 clean,
@@ -555,129 +671,6 @@ func TestFindingLineSanitizesEveryUntrustedAttr(t *testing.T) {
 	}
 }
 
-// TestNotifySuppressesDuplicateCurrentKeys pins in-batch dedupe: the
-// SeaDex fetcher appends every upstream record and the matcher preserves
-// per-entry cardinality, so one current batch can carry the same dedupe key
-// twice. The returned state collapses them to one record, and the emitted
-// notifications must collapse the same way — one line, not one per copy — and
-// that one line must carry the batch's LAST payload, matching the documented
-// last-payload-wins stored state (a first-copy title in the alert would
-// contradict the persisted record and any later resolution line).
-func TestNotifySuppressesDuplicateCurrentKeys(t *testing.T) {
-	notifier, recorder := newCapturedNotifier()
-	first := testFinding("duplicate", "Frieren (first copy)")
-	last := testFinding("duplicate", "Frieren (last copy)")
-
-	current := notifier.Notify([]compare.Finding{first, last}, nil, nil, time.Now())
-
-	if got := recorder.CountExact("better release available"); got != 1 {
-		t.Errorf("duplicate current finding notifications = %d, want 1", got)
-	}
-	if len(current) != 1 {
-		t.Errorf("current dedupe state entries = %d, want 1", len(current))
-	}
-	if got := current[dedupeKey(&first)].Finding.Title; got != last.Title {
-		t.Errorf("stored title = %q, want the last payload's %q", got, last.Title)
-	}
-	emittedTitle, _ := recorder.AttrValue("better release available", "title")
-	if emittedTitle != last.Title {
-		t.Errorf("emitted title = %q, want the last payload's %q (the alert must match the stored state)", emittedTitle, last.Title)
-	}
-}
-
-// TestResolvedLineCarriesDocumentedAttrs pins the resolution line's full
-// attribute contract the way TestFindingLineCarriesDocumentedAttrs pins the
-// finding line: emitResolved reads the trimmed StoredFinding back, and a
-// silently dropped or zeroed key (season, al_id, status) breaks the Loki
-// dashboards without failing any existing test.
-func TestResolvedLineCarriesDocumentedAttrs(t *testing.T) {
-	notifier, recorder := newCapturedNotifier()
-	f := testFinding("gone", "Frieren")
-	f.Season = 2
-	prior := map[string]Alerted{
-		"gone": {AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Finding: storedFinding(&f)},
-	}
-
-	notifier.Notify(nil, prior, nil, time.Now())
-
-	wantStr := map[string]string{
-		"title":             "Frieren",
-		"arr":               "sonarr",
-		"current_group":     "erai-raws",
-		"recommended_group": "SubsPlease",
-		"status":            "better_release",
-	}
-	gotStr := map[string]string{}
-	var alID, season int64
-	sawLine := false
-	for _, rec := range recorder.Records() {
-		if rec.Message != "finding resolved" {
-			continue
-		}
-		sawLine = true
-		rec.Attrs(func(a slog.Attr) bool {
-			switch a.Key {
-			case "al_id":
-				alID = a.Value.Int64()
-			case "season":
-				season = a.Value.Int64()
-			default:
-				if s, ok := a.Value.Any().(string); ok {
-					gotStr[a.Key] = s
-				}
-			}
-			return true
-		})
-	}
-	if !sawLine {
-		t.Fatal("no finding-resolved line emitted")
-	}
-	if alID != 154587 {
-		t.Errorf("al_id = %d, want 154587", alID)
-	}
-	if season != 2 {
-		t.Errorf("season = %d, want 2", season)
-	}
-	for key, w := range wantStr {
-		if gotStr[key] != w {
-			t.Errorf("attr %q = %q, want %q", key, gotStr[key], w)
-		}
-	}
-}
-
-// TestNotifierDuplicateOfPriorFindingKeepsOriginalAlertTime pins the
-// interaction of in-batch dedupe with the prior state: when a batch carries
-// the same dedupe key twice AND that key was already alerted in a prior cycle,
-// no notification is emitted, the original alert time survives the in-batch
-// duplicate branch, and the stored record follows the documented
-// last-payload-wins rule.
-func TestNotifierDuplicateOfPriorFindingKeepsOriginalAlertTime(t *testing.T) {
-	notifier, recorder := newCapturedNotifier()
-	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	f := testFinding("dup-prior", "Frieren")
-	updated := testFinding("dup-prior", "Frieren (retitled)")
-	key := dedupeKey(&f)
-	prior := map[string]Alerted{
-		key: {AlertedAt: oldTime, Finding: storedFinding(&f)},
-	}
-
-	current := notifier.Notify([]compare.Finding{f, updated}, prior, nil, time.Now())
-
-	if got := recorder.CountExact("better release available"); got != 0 {
-		t.Errorf("notifications for an already-alerted duplicated finding = %d, want 0", got)
-	}
-	rec, ok := current[key]
-	if !ok {
-		t.Fatal("finding missing from returned state")
-	}
-	if !rec.AlertedAt.Equal(oldTime) {
-		t.Errorf("AlertedAt = %s, want original %s preserved through the in-batch duplicate", rec.AlertedAt, oldTime)
-	}
-	if rec.Finding.Title != "Frieren (retitled)" {
-		t.Errorf("stored title = %q, want last payload %q", rec.Finding.Title, "Frieren (retitled)")
-	}
-}
-
 // TestFindingLineCarriesSeason pins the season attribute on the finding
 // line: TestFindingLineCarriesDocumentedAttrs collects only string-valued
 // attrs, so the int-valued season was the one documented finding-line key a
@@ -687,152 +680,11 @@ func TestFindingLineCarriesSeason(t *testing.T) {
 	f := testFinding("s2", "Frieren")
 	f.Season = 2
 
-	notifier.Notify([]compare.Finding{f}, nil, nil, time.Now())
+	notifier.Report([]compare.Finding{f}, nil)
 
 	if season, ok := recorder.AttrValue("better release available", "season"); !ok || season != "2" {
 		t.Errorf("finding line season = %q (found %v), want 2", season, ok)
 	}
-}
-
-// TestNotifySummaryLineCarriesAccountingCounts pins the cycle-summary
-// counters on the "findings reported" line: total, new, resolved, preserved,
-// and suppressed. The existing tests only count the line's occurrences, so a
-// mutation swapping or zeroing any counter (e.g. suppressed's len-newCount
-// arithmetic) would pass every test while silently corrupting the Loki cycle
-// accounting the operator reads.
-func TestNotifySummaryLineCarriesAccountingCounts(t *testing.T) {
-	notifier, recorder := newCapturedNotifier()
-	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	kept := testFinding("kept", "Kept")
-	gone := testFinding("gone", "Gone")
-	gone.AniListID = 111
-	preserved := testFinding("preserved", "Preserved")
-	preserved.AniListID = 222
-	prior := map[string]Alerted{
-		dedupeKey(&kept): {AlertedAt: oldTime, Finding: storedFinding(&kept)},
-		"gone":           {AlertedAt: oldTime, Finding: storedFinding(&gone)},
-		"preserved":      {AlertedAt: oldTime, Finding: storedFinding(&preserved)},
-	}
-
-	notifier.Notify([]compare.Finding{
-		testFinding("new", "Brand New"),
-		kept,
-	}, prior, map[int]struct{}{222: {}}, time.Now())
-
-	want := map[string]int64{
-		"total": 2, "new": 1, "resolved": 1, "preserved": 1, "suppressed": 1,
-	}
-	got := map[string]int64{}
-	sawLine := false
-	for _, rec := range recorder.Records() {
-		if rec.Message != "findings reported" {
-			continue
-		}
-		sawLine = true
-		rec.Attrs(func(a slog.Attr) bool {
-			got[a.Key] = a.Value.Int64()
-			return true
-		})
-	}
-	if !sawLine {
-		t.Fatal("no findings-reported summary line emitted")
-	}
-	for key, w := range want {
-		if got[key] != w {
-			t.Errorf("summary attr %q = %d, want %d", key, got[key], w)
-		}
-	}
-}
-
-// TestNotifySupersedesChangedKeyWithoutResolving pins the supersede-vs-resolve
-// split on the prior-state reconciliation: the dedupe key deliberately folds
-// the obtainable link set and the torrent identity, so gaining an AnimeBytes
-// source beside an unchanged Nyaa recommendation re-keys the SAME condition.
-// The prior record must then be silently superseded (counted, no resolution
-// line), not reported resolved in the same cycle that re-alerts it.
-func TestNotifySupersedesChangedKeyWithoutResolving(t *testing.T) {
-	notifier, recorder := newCapturedNotifier()
-	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	publicOnly := testFinding("frieren", "Frieren")
-	publicOnly.Links = gradedLinks(
-		compare.ReleaseLink{Tracker: "Nyaa", URL: "https://nyaa.si/view/frieren"},
-	)
-	withAB := publicOnly
-	withAB.Links = gradedLinks(
-		compare.ReleaseLink{Tracker: "Nyaa", URL: "https://nyaa.si/view/frieren"},
-		compare.ReleaseLink{Tracker: "AB", URL: "https://animebytes.tv/torrents.php?id=1&torrentid=2"},
-	)
-	oldKey, newKey := dedupeKey(&publicOnly), dedupeKey(&withAB)
-	if oldKey == newKey {
-		t.Fatalf("fixture does not re-key: adding an AB source left the dedupe key %q unchanged", oldKey)
-	}
-	prior := map[string]Alerted{oldKey: {AlertedAt: oldTime, Finding: storedFinding(&publicOnly)}}
-
-	current := notifier.Notify([]compare.Finding{withAB}, prior, nil, now)
-
-	if _, ok := current[oldKey]; ok {
-		t.Errorf("superseded prior key still present in current state: %+v", current[oldKey])
-	}
-	if _, ok := current[newKey]; !ok {
-		t.Fatalf("re-keyed finding absent from current state: %+v", current)
-	}
-	if got := recorder.CountExact("better release available"); got != 1 {
-		t.Errorf("re-keyed finding notification count = %d, want 1", got)
-	}
-	if got := recorder.CountExact("finding resolved"); got != 0 {
-		t.Errorf("resolution count = %d, want 0 (the condition is still active)", got)
-	}
-	if got, seen := summaryCounter(t, recorder, "superseded"); !seen || got != 1 {
-		t.Errorf("summary superseded = %d (present %v), want 1", got, seen)
-	}
-	if got, _ := summaryCounter(t, recorder, "resolved"); got != 0 {
-		t.Errorf("summary resolved = %d, want 0", got)
-	}
-}
-
-// TestNotifyResolvesWhenOnlyTheStatusChanges is the sibling of the supersede
-// case: the active index is keyed on item AND status, so an item whose
-// better_release condition ended and now only reports incomplete still gets
-// the old status's resolution line - a supersede keyed on the item alone would
-// swallow it.
-func TestNotifyResolvesWhenOnlyTheStatusChanges(t *testing.T) {
-	notifier, recorder := newCapturedNotifier()
-	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	better := testFinding("better", "Frieren")
-	incomplete := testFinding("incomplete", "Frieren")
-	incomplete.Status = compare.StatusIncomplete
-	prior := map[string]Alerted{
-		dedupeKey(&better): {AlertedAt: oldTime, Finding: storedFinding(&better)},
-	}
-
-	notifier.Notify([]compare.Finding{incomplete}, prior, nil, time.Now())
-
-	if got := recorder.CountExact("finding resolved"); got != 1 {
-		t.Errorf("resolution count = %d, want 1 (the better_release condition ended)", got)
-	}
-	if got, _ := summaryCounter(t, recorder, "superseded"); got != 0 {
-		t.Errorf("summary superseded = %d, want 0 (the status changed)", got)
-	}
-}
-
-// summaryCounter reads one counter off the "findings reported" summary line.
-func summaryCounter(t *testing.T, recorder *capture.Recorder, key string) (int64, bool) {
-	t.Helper()
-	var value int64
-	var seen bool
-	for _, rec := range recorder.Records() {
-		if rec.Message != "findings reported" {
-			continue
-		}
-		rec.Attrs(func(a slog.Attr) bool {
-			if a.Key == key {
-				value, seen = a.Value.Int64(), true
-			}
-			return true
-		})
-	}
-	return value, seen
 }
 
 // TestFindingLineCarriesJoinedRecommendedGroups pins the recommended_groups
@@ -845,7 +697,7 @@ func TestFindingLineCarriesJoinedRecommendedGroups(t *testing.T) {
 	f := testFinding("multi", "Frieren")
 	f.RecommendedGroups = []string{"SubsPlease", "PMR"}
 
-	notifier.Notify([]compare.Finding{f}, nil, nil, time.Now())
+	notifier.Report([]compare.Finding{f}, nil)
 
 	got, seen := recorder.AttrValue("better release available", "recommended_groups")
 	if !seen {
@@ -853,33 +705,6 @@ func TestFindingLineCarriesJoinedRecommendedGroups(t *testing.T) {
 	}
 	if got != "SubsPlease,PMR" {
 		t.Errorf("recommended_groups = %q, want %q", got, "SubsPlease,PMR")
-	}
-}
-
-// TestNotifierBaselineDuplicateKeysLastPayloadWins pins Baseline's in-batch
-// duplicate handling against Notify's documented last-payload-wins rule: when
-// a cold-start batch carries the same dedupe key twice (the SeaDex fetcher
-// appends every upstream record, so duplicates are reachable on the baseline
-// path exactly as on the Notify path), the seeded state collapses to one
-// record carrying the LAST payload, and no finding notification is emitted.
-// A refactor flipping Baseline to first-wins would silently diverge from the
-// contract TestNotifySuppressesDuplicateCurrentKeys pins for Notify.
-func TestNotifierBaselineDuplicateKeysLastPayloadWins(t *testing.T) {
-	notifier, recorder := newCapturedNotifier()
-	first := testFinding("dup-base", "Frieren (first copy)")
-	last := testFinding("dup-base", "Frieren (last copy)")
-	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-
-	got := notifier.Baseline([]compare.Finding{first, last}, now)
-
-	if len(got) != 1 {
-		t.Errorf("baselined state entries = %d, want 1 (duplicate keys collapse)", len(got))
-	}
-	if title := got[dedupeKey(&first)].Finding.Title; title != last.Title {
-		t.Errorf("baselined title = %q, want the last payload's %q (matching Notify's last-payload-wins)", title, last.Title)
-	}
-	if n := recorder.Count("better release available"); n != 0 {
-		t.Errorf("Baseline emitted %d finding notifications, want 0", n)
 	}
 }
 
@@ -896,7 +721,7 @@ func TestFindingAttrVolumeIsBounded(t *testing.T) {
 	f := testFinding("cap", normal)
 	f.ReleaseURL = huge
 
-	notifier.Notify([]compare.Finding{f}, nil, nil, time.Now())
+	notifier.Report([]compare.Finding{f}, nil)
 
 	gotURL, ok := recorder.AttrValue("better release available", "release_url")
 	if !ok {
@@ -932,7 +757,7 @@ func TestAggregateAttrsAreBoundedBeforeJoining(t *testing.T) {
 		f.RecommendedGroups = append(f.RecommendedGroups, "grp\u202e"+huge)
 	}
 
-	notifier.Notify([]compare.Finding{f}, nil, nil, time.Now())
+	notifier.Report([]compare.Finding{f}, nil)
 
 	for _, key := range []string{"release_urls", "recommended_groups"} {
 		got, ok := recorder.AttrValue("better release available", key)
@@ -948,43 +773,5 @@ func TestAggregateAttrsAreBoundedBeforeJoining(t *testing.T) {
 		if strings.ContainsAny(got, "\u009b\u202e") {
 			t.Errorf("%s carries an unsanitized C1/bidi control", key)
 		}
-	}
-}
-
-// TestNotifyMigratesLegacyOversizedDedupeKeyWithoutRealert pins the
-// persisted-identity migration across the aggregate-key fold: a state file
-// written before the fold holds the unfolded 16-64 KiB key, and recognizing it
-// only by exact canonical lookup would re-alert an unchanged finding as new
-// AND emit a false resolution for the legacy key in the same cycle.
-func TestNotifyMigratesLegacyOversizedDedupeKeyWithoutRealert(t *testing.T) {
-	heavy := func(tag string) string {
-		return tag + strings.Repeat(",", keyenc.MaxComponentBytes-len(tag)-1)
-	}
-	f := compare.Finding{
-		AniListID: 42, Status: compare.StatusBetter,
-		Title: "Oversized", RecommendedGroups: []string{heavy("r")},
-		CurrentGroups: []string{heavy("c")}, ReleaseURL: heavy("u"),
-		Links: []compare.ReleaseLink{{Tracker: "Nyaa", URL: heavy("l")}},
-	}
-	currentKey, legacyKey := dedupeKeyWithLegacy(&f)
-	if legacyKey == "" || legacyKey == currentKey {
-		t.Fatal("fixture did not cross the aggregate-key fold")
-	}
-	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	prior := map[string]Alerted{legacyKey: {AlertedAt: oldTime, Finding: storedFinding(&f)}}
-	notifier, recorder := newCapturedNotifier()
-	current := notifier.Notify([]compare.Finding{f}, prior, nil, time.Now())
-	if got := recorder.CountExact("better release available"); got != 0 {
-		t.Errorf("migration emitted %d duplicate alerts, want 0", got)
-	}
-	if got := recorder.CountExact("finding resolved"); got != 0 {
-		t.Errorf("migration emitted %d false resolutions, want 0", got)
-	}
-	alert, ok := current[currentKey]
-	if !ok || !alert.AlertedAt.Equal(oldTime) {
-		t.Errorf("canonical record = %+v (present %v), want original alert time %s", alert, ok, oldTime)
-	}
-	if _, ok := current[legacyKey]; ok {
-		t.Error("legacy key survived migration")
 	}
 }

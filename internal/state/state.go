@@ -1,9 +1,9 @@
 // Package state persists seadex-scout's cross-cycle cache as a single JSON file
 // written atomically: the last library snapshot (for diffing), the cached Fribb
-// map plus its HTTP validators, the AniList fallback memo, the finding dedupe
-// records, and the flags marking that (and how completely) the dedupe table has
-// been seeded. A missing file loads as an empty state (a cold start), never an
-// error.
+// map plus its HTTP validators, the AniList fallback memo, and the degradation
+// streak counters. It holds NO finding state - internal/notify reports findings
+// as STATE and rebuilds its whole set from each pass. A missing file loads as
+// an empty state (a cold start), never an error.
 package state
 
 import (
@@ -26,7 +26,6 @@ import (
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
-	"github.com/cplieger/seadex-scout/internal/notify"
 )
 
 const (
@@ -71,16 +70,19 @@ const (
 // choosing quarantine over preservation.
 const SchemaVersion = 1
 
-// State is the persisted cross-cycle cache. Findings is keyed by dedupe key.
-// Baselined records that the first successful compare has seeded the finding
-// dedupe table, so a cold start (a fresh install or a lost cache) baselines the
-// pre-existing backlog silently instead of alerting on every misaligned title
-// at once.
+// State is the persisted cross-cycle cache.
+//
+// It carries NO finding state. Findings used to persist here as a dedupe table
+// (Findings/Baselined/BaselineIncomplete) so each one was emitted exactly once,
+// ever - which is precisely what made a notification lost anywhere downstream
+// permanent. internal/notify now reports findings as STATE, re-emitting the
+// current set every pass and holding it in memory, refilled by the compare
+// pass that runs at startup. Nothing about a finding survives a restart, and
+// nothing needs to: a completed pass reconstructs the whole set.
 type State struct {
-	Findings map[string]notify.Alerted `json:"findings,omitempty"`
-	Memo     match.Memo                `json:"anilist_memo"`
-	Mapping  mapping.Cache             `json:"mapping"`
-	Library  library.Snapshot          `json:"library"`
+	Memo    match.Memo       `json:"anilist_memo"`
+	Mapping mapping.Cache    `json:"mapping"`
+	Library library.Snapshot `json:"library"`
 	// ShrunkWalks counts consecutive cycles the scout's library shrink guard
 	// rejected a fully-successful walk (an item count below half the prior
 	// snapshot's) in favour of preserving findings. It persists across cycles
@@ -117,11 +119,11 @@ type State struct {
 	// resets to 0 on any completed cycle whose walk was whole, and mirrors
 	// ShrunkWalks/SeadexFailures/AniListDegraded so the scout can escalate its
 	// partial-walk log site after a sustained streak: a single permanently
-	// failing series holds Snapshot.Partial true forever, which preserves that
-	// item's findings in steady state but - on a cold start - keeps
-	// BaselineIncomplete set on every cycle, so the scout re-baselines silently
-	// and never notifies anything at all. Gated and interrupted cycles neither
-	// advance nor reset it: they observed no walk verdict to judge.
+	// failing series holds Snapshot.Partial true forever, which is why
+	// notify.Report carries that item's rows forward rather than dropping them
+	// (its absence from a pass is missing data, not alignment). Gated and
+	// interrupted cycles neither advance nor reset it: they observed no walk
+	// verdict to judge.
 	PartialWalks int `json:"partial_walks,omitempty"`
 	// Version is the persisted envelope's schema version, stamped with
 	// SchemaVersion by every Save (on the shallow copy it writes; the
@@ -132,20 +134,7 @@ type State struct {
 	// the newer-schema file); and a future member move or rename bumps
 	// SchemaVersion so the old shape can be migrated (or refused) explicitly
 	// instead of silently zero-loaded.
-	Version   int  `json:"version,omitempty"`
-	Baselined bool `json:"baselined,omitempty"`
-	// BaselineIncomplete marks a baseline seeded from an incomplete cycle: a
-	// partial walk (Failed placeholder items were excluded from the compare)
-	// or an AniList-degraded match (transiently unresolved entries were
-	// missing from the seed), so the seed covers only the items that walked
-	// cleanly and mapped completely. While set, every successful cycle keeps
-	// seeding silently instead of reporting - otherwise the affected items'
-	// pre-existing backlog would burst as fresh notifications when they recover
-	// - until the first complete cycle seeds the whole library and clears the
-	// flag. It distinguishes an incomplete baseline (both flags set) from a
-	// complete one (Baselined alone) and from a legacy pre-flag state file
-	// (findings present, no flags), which must stay on the normal Report path.
-	BaselineIncomplete bool `json:"baseline_incomplete,omitempty"`
+	Version int `json:"version,omitempty"`
 }
 
 // Store loads and saves the state file at a fixed path.
@@ -326,7 +315,6 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 		"library_items", len(st.Library.Items),
 		"mapping_records", len(st.Mapping.Records),
 		"memo_entries", len(st.Memo.Entries),
-		"findings", len(st.Findings),
 	}
 	if !st.Library.TakenAt.IsZero() {
 		// Surface the persisted snapshot's age: the indexer feed's title

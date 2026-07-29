@@ -7,15 +7,14 @@ import (
 	"time"
 
 	"github.com/cplieger/seadex-scout/internal/match"
-	"github.com/cplieger/seadex-scout/internal/notify"
 	"pgregory.net/rapid"
 )
 
 // TestStoreSaveLoadRoundTripProperty pins the persistence round trip for
-// arbitrary generated states: every persisted field (the findings dedupe map
-// keyed by arbitrary unicode dedupe keys, the AniList memo with its jittered
-// expiry stamps, all three escalation streaks, and both baseline flags) survives
-// Save then Load exactly, and Save stamps SchemaVersion. This is the
+// arbitrary generated states: every persisted field (the AniList memo with its
+// jittered expiry stamps and arbitrary unicode titles, plus all three
+// escalation streaks) survives Save then Load exactly, and Save stamps
+// SchemaVersion. This is the
 // generative net over the json-tag/projection drift the deterministic
 // round-trip tests pin with single sample values.
 func TestStoreSaveLoadRoundTripProperty(t *testing.T) {
@@ -25,21 +24,6 @@ func TestStoreSaveLoadRoundTripProperty(t *testing.T) {
 			nsec := rapid.Int64Range(0, 999999999).Draw(rt, "nsec")
 			return time.Unix(sec, nsec).UTC()
 		})
-		findings := rapid.MapOfN(
-			rapid.String(),
-			rapid.Custom(func(rt *rapid.T) notify.Alerted {
-				return notify.Alerted{
-					AlertedAt: genTime.Draw(rt, "alerted_at"),
-					Finding: notify.StoredFinding{
-						Title:     rapid.String().Draw(rt, "title"),
-						Arr:       rapid.SampledFrom([]string{"sonarr", "radarr"}).Draw(rt, "arr"),
-						AniListID: rapid.IntRange(0, 1<<30).Draw(rt, "al_id"),
-						Season:    rapid.IntRange(0, 99).Draw(rt, "season"),
-					},
-				}
-			}),
-			0, 8,
-		).Draw(rt, "findings")
 		memo := rapid.MapOfN(
 			rapid.IntRange(1, 1<<30),
 			rapid.Custom(func(rt *rapid.T) match.MemoEntry {
@@ -54,13 +38,10 @@ func TestStoreSaveLoadRoundTripProperty(t *testing.T) {
 			0, 8,
 		).Draw(rt, "memo")
 		want := &State{
-			Findings:           findings,
-			Memo:               match.Memo{Entries: memo},
-			ShrunkWalks:        rapid.IntRange(0, 1000).Draw(rt, "shrunk"),
-			SeadexFailures:     rapid.IntRange(0, 1000).Draw(rt, "seadex_failures"),
-			AniListDegraded:    rapid.IntRange(0, 1000).Draw(rt, "anilist_degraded"),
-			Baselined:          rapid.Bool().Draw(rt, "baselined"),
-			BaselineIncomplete: rapid.Bool().Draw(rt, "baseline_incomplete"),
+			Memo:            match.Memo{Entries: memo},
+			ShrunkWalks:     rapid.IntRange(0, 1000).Draw(rt, "shrunk"),
+			SeadexFailures:  rapid.IntRange(0, 1000).Draw(rt, "seadex_failures"),
+			AniListDegraded: rapid.IntRange(0, 1000).Draw(rt, "anilist_degraded"),
 		}
 
 		store := NewStore(filepath.Join(t.TempDir(), "state.json"), testLogger())
@@ -76,21 +57,6 @@ func TestStoreSaveLoadRoundTripProperty(t *testing.T) {
 		}
 		if got.ShrunkWalks != want.ShrunkWalks || got.SeadexFailures != want.SeadexFailures || got.AniListDegraded != want.AniListDegraded {
 			rt.Errorf("streaks = %d/%d/%d, want %d/%d/%d", got.ShrunkWalks, got.SeadexFailures, got.AniListDegraded, want.ShrunkWalks, want.SeadexFailures, want.AniListDegraded)
-		}
-		if got.Baselined != want.Baselined || got.BaselineIncomplete != want.BaselineIncomplete {
-			rt.Errorf("flags = %v/%v, want %v/%v", got.Baselined, got.BaselineIncomplete, want.Baselined, want.BaselineIncomplete)
-		}
-		if len(got.Findings) != len(want.Findings) {
-			rt.Fatalf("findings len = %d, want %d", len(got.Findings), len(want.Findings))
-		}
-		for k, w := range want.Findings {
-			g, ok := got.Findings[k]
-			if !ok {
-				rt.Fatalf("findings key %q lost in round trip", k)
-			}
-			if !g.AlertedAt.Equal(w.AlertedAt) || g.Finding != w.Finding {
-				rt.Errorf("findings[%q] = %+v, want %+v", k, g, w)
-			}
 		}
 		if len(got.Memo.Entries) != len(want.Memo.Entries) {
 			rt.Fatalf("memo len = %d, want %d", len(got.Memo.Entries), len(want.Memo.Entries))

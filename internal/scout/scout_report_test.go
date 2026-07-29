@@ -29,8 +29,7 @@ import (
 func TestReportGeneratesRowsAndNeverWritesState(t *testing.T) {
 	logger := scoutTestLogger()
 	store := &fakeStore{st: state.State{
-		Mapping:   frierenMappingCache(),
-		Baselined: true,
+		Mapping: frierenMappingCache(),
 	}}
 
 	sonarr := &fakeSonarr{
@@ -81,7 +80,7 @@ func TestReportGeneratesRowsAndNeverWritesState(t *testing.T) {
 // add its own not_on_seadex row and move both together.
 func TestReportSummaryLineCarriesCounts(t *testing.T) {
 	logger, recorder := capture.New()
-	store := &fakeStore{st: state.State{Mapping: frierenMappingCache(), Baselined: true}}
+	store := &fakeStore{st: state.State{Mapping: frierenMappingCache()}}
 	sonarr := &fakeSonarr{
 		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
 		files: map[int][]arrapi.EpisodeFile{
@@ -491,8 +490,7 @@ func TestReportSurfacesOverridesRefusalAndMappingDegraded(t *testing.T) {
 	// A stale-but-usable cached map, so the refresh is attempted (and fails at
 	// the transport) rather than skipped as fresh.
 	store := &fakeStore{st: state.State{
-		Mapping:   mapping.Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
-		Baselined: true,
+		Mapping: mapping.Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
 	}}
 	// A directory at the overrides path fails the bounded read with a
 	// non-ErrNotExist error whatever the test user's privileges.

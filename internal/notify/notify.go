@@ -8,8 +8,8 @@ package notify
 import (
 	"context"
 	"log/slog"
+	"sort"
 	"strings"
-	"time"
 
 	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/compare"
@@ -20,280 +20,111 @@ import (
 	"github.com/cplieger/seadex-scout/internal/tracker"
 )
 
-// Alerted is a persisted dedupe record: when the finding was first alerted
-// plus the trimmed subset of it the resolution path reads back, keyed in the
-// state by the finding's dedupe key.
-type Alerted struct {
-	AlertedAt time.Time     `json:"alerted_at"`
-	Finding   StoredFinding `json:"finding"`
-}
+// --- Notifier / state reporting ---
 
-// StoredFinding is the subset of a compare.Finding the dedupe record
-// persists: exactly the fields read back across cycles - emitResolved's
-// resolution line (title, al_id, arr, season, current_group, status,
-// recommended_group) and Notify's failed-item preservation scope, keyed on
-// AniListID. No URL is persisted at all. It is the SOLE declaration of the
-// persisted attribute schema (compare.Finding is a tag-free domain value);
-// the tags below are the same attribute names the legacy full-Finding state
-// files used, so a state file written by an earlier build decodes
-// cleanly (its extra fields are ignored); the dedupe key stays the state
-// map's key, so dedupe continuity and resolution semantics are unchanged.
-type StoredFinding struct {
-	Arr              string         `json:"arr"`
-	CurrentGroup     string         `json:"current_group,omitempty"`
-	RecommendedGroup string         `json:"recommended_group,omitempty"`
-	Title            string         `json:"title"`
-	Status           compare.Status `json:"status"`
-	AniListID        int            `json:"al_id"`
-	Season           int            `json:"season,omitempty"`
-}
-
-// --- Notifier / cross-cycle dedupe ---
-
-// Notifier emits findings as slog events with cross-cycle dedupe.
+// Notifier reports findings as STATE rather than as events: it holds the set
+// of conditions currently true and re-emits the whole set on every pass, so
+// the alerting stack (Loki rule -> Alertmanager) owns notification policy.
+// That is the contract that stack is built for - the Prometheus alerts API
+// expects a client to keep re-sending a firing alert until it resolves - and
+// it is what makes a notification lost anywhere downstream recoverable: the
+// condition is still being reported, so the next rule evaluation re-fires it.
+//
+// The previous shape emitted each finding exactly once, ever, keyed by a
+// persisted dedupe map in state.json. That map is gone: it was the mechanism
+// that made a lost notification permanent. Resolution moves with it - a
+// finding that stops being reported resolves when the rule's lookback window
+// expires, which is why nothing here emits a "resolved" line any more.
+//
+// SINGLE WRITER: every caller runs inside the cycle body, which
+// internal/cycle serializes on /config/cycle.lock, so the set needs no lock.
 type Notifier struct {
 	log *slog.Logger
+	// ignore is the operator's filters.ignore set (AniList IDs). It suppresses
+	// EMISSION only: an ignored finding still enters current, still counts in
+	// the summary line, and still appears in report mode. Continuous reporting
+	// means Alertmanager re-notifies for as long as a condition holds, so a
+	// show the operator has consciously decided not to upgrade would otherwise
+	// be re-notified indefinitely.
+	ignore map[int]struct{}
+	// current is the set of conditions true as of the last completed pass,
+	// keyed by dedupe key. It holds whole compare.Findings, not a trimmed
+	// projection: every field the emitted line carries has to be re-emittable
+	// on the next pass, and nothing here is persisted, so the bounded
+	// projection the old dedupe record needed has no purpose.
+	current map[string]compare.Finding
 }
 
-// storedFinding projects f onto the trimmed record the dedupe state persists
-// (see StoredFinding). The three upstream-controlled strings (title and the
-// two group names) are bounded at projection time by capPersisted: the emit
-// path's per-attribute cap only bounds what is LOGGED, while these values also
-// ride into state.json, where a single multi-MB value could push the encoded
-// state past its 32 MiB write bound and freeze dedupe persistence for every
-// later cycle (CWE-400). Arr is bounded the same way: it is an app-defined
-// vocabulary on the way OUT, but a record read back from state.json is
-// untrusted (see capStored), so nothing foreign or corrupt is re-persisted
-// verbatim. Status is a typed constant and needs no projection-time bound.
-func storedFinding(f *compare.Finding) StoredFinding {
-	return StoredFinding{
-		Arr:              capPersisted(f.Arr),
-		CurrentGroup:     capPersisted(f.CurrentGroup),
-		RecommendedGroup: capPersisted(f.RecommendedGroup),
-		Title:            capPersisted(f.Title),
-		Status:           f.Status,
-		AniListID:        f.AniListID,
-		Season:           f.Season,
-	}
-}
-
-// capPersisted bounds one untrusted string for PERSISTENCE in the dedupe
-// record. It reuses capAttr's sanitize-and-cap pass, then guarantees the
-// result never exceeds maxAttrBytes: capAttr's own output can be
-// maxAttrBytes+len(attrTruncMarker) once the marker is appended, which is fine
-// for a log line but would let the persisted record drift past the budget the
-// state's write bound is sized against. Honest values pass byte-identical, and
-// the helper is idempotent, so re-bounding a record carried forward from legacy
-// state by capStored is a no-op.
-func capPersisted(s string) string {
-	return reboundAttr(capAttr(s))
-}
-
-// capStored re-bounds a record read back from a state file written before
-// storedFinding capped its untrusted strings, in place. capPersisted is
-// idempotent, so a record projected by this build passes through unchanged.
-// It takes a pointer because StoredFinding is heavy enough that a by-value
-// round trip is a needless copy on a per-record path (gocritic hugeParam).
-func capStored(f *StoredFinding) {
-	f.Arr = capPersisted(f.Arr)
-	f.Status = compare.Status(capPersisted(string(f.Status)))
-	f.Title = capPersisted(f.Title)
-	f.CurrentGroup = capPersisted(f.CurrentGroup)
-	f.RecommendedGroup = capPersisted(f.RecommendedGroup)
-}
-
-// NewNotifier builds a Notifier. logger may be nil.
-func NewNotifier(logger *slog.Logger) *Notifier {
+// NewNotifier builds a Notifier. logger may be nil. ignore is the operator's
+// filters.ignore set and may be nil.
+func NewNotifier(logger *slog.Logger, ignore map[int]struct{}) *Notifier {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Notifier{log: logger}
+	return &Notifier{log: logger, ignore: ignore, current: map[string]compare.Finding{}}
 }
 
-// Notify emits new findings, suppresses ones already alerted (carrying their
-// original alert time forward), logs a one-line resolution for any prior finding
-// no longer present, and returns the new dedupe state to persist.
+// Report replaces the current finding set with findings and emits the whole
+// set. It is the only way findings reach the log.
 //
-// failedItems scopes resolution to items whose evidence is incomplete this
-// cycle: a prior finding whose AniList ID is in failedItems belongs to an
-// item with missing data (the caller passes the union of episode-fetch
-// failures and AniList-degraded entries), so its absence from findings is
-// missing data, not evidence of alignment - it is carried forward unresolved
-// (original alert time kept, no "finding resolved" line) instead of being
-// falsely resolved. Pass nil when every item has complete evidence.
+// incompleteIDs scopes what replacement may DELETE. An AniList ID in that set
+// belongs to an item whose evidence was incomplete this pass (the caller
+// passes the union of episode-fetch failures and AniList-degraded entries), so
+// its absence from findings is missing data, not evidence of alignment: its
+// prior rows are carried forward instead of dropped. Pass nil when every item
+// has complete evidence.
 //
-// The "findings reported" summary line's counters are defined in emitted-line
-// terms: total is the input batch size, new the notifications emitted,
-// resolved and preserved the two prior-finding outcomes above, superseded the
-// prior records whose condition (item + status) this cycle still reports under
-// a different dedupe key - a re-keyed notification version, so no resolution
-// line is emitted for them - and suppressed the remainder of the batch
-// (total-new) - every finding that produced no notification, whether because a
-// prior cycle already alerted its key OR because an earlier copy in this same
-// batch carried the same key (in-batch duplicates are reachable; see
-// collectCurrent).
-func (n *Notifier) Notify(findings []compare.Finding, prior map[string]Alerted, failedItems map[int]struct{}, now time.Time) map[string]Alerted {
-	current, migratedPrior, newCount := n.collectCurrent(findings, prior, now)
-
-	active := activeFindings(current)
-	resolved, preserved, superseded := 0, 0, 0
-	for key, a := range prior {
-		if _, ok := current[key]; ok {
-			continue
-		}
-		if _, migrated := migratedPrior[key]; migrated {
-			// This prior record was carried forward under the finding's
-			// canonical (folded) key, so its absence under the legacy key is
-			// the migration itself, not a resolution.
-			continue
-		}
-		if _, failed := failedItems[a.Finding.AniListID]; failed {
-			stored := a.Finding
-			capStored(&stored)
-			current[key] = Alerted{AlertedAt: a.AlertedAt, Finding: stored}
-			preserved++
-			continue
-		}
-		if _, stillActive := active[activeFinding{status: a.Finding.Status, aniListID: a.Finding.AniListID}]; stillActive {
-			// This cycle still reports the same status for the same item under
-			// a different dedupe key (added obtainable source, or a new
-			// torrent inside the recommended group), so the prior record is a
-			// superseded notification VERSION, not a resolved condition.
-			superseded++
-			continue
-		}
-		n.emitResolved(&a.Finding)
-		resolved++
-	}
-
-	n.log.Info("findings reported",
-		"total", len(findings), "new", newCount, "resolved", resolved,
-		"preserved", preserved, "superseded", superseded,
-		"suppressed", len(findings)-newCount)
-	return current
-}
-
-// activeFinding identifies a finding by the condition it reports - the item
-// and its semantic status - independently of the dedupe key's notification
-// version identity (the recommended-group set, the current group, the
-// obtainable link set, and the torrent's info hash all move the key without
-// ending the condition).
-type activeFinding struct {
-	status    compare.Status
-	aniListID int
-}
-
-// activeFindings indexes this cycle's dedupe state by the condition each
-// record reports, so the resolution loop can tell a prior key that was
-// SUPERSEDED by a re-keyed notification for the same still-active condition
-// from one whose condition genuinely ended.
-func activeFindings(current map[string]Alerted) map[activeFinding]struct{} {
-	active := make(map[activeFinding]struct{}, len(current))
-	for _, a := range current {
-		active[activeFinding{status: a.Finding.Status, aniListID: a.Finding.AniListID}] = struct{}{}
-	}
-	return active
-}
-
-// collectCurrent builds this cycle's dedupe state from findings, emitting one
-// notification per key that prior has not already alerted, and returns the
-// state, the set of prior keys whose record was migrated onto a canonical key,
-// and the number of newly emitted findings.
-//
-// Each finding's dedupe key is derived once up front (dedupeKeyWithLegacy: key
-// construction is this notification boundary's own suppression policy;
-// compare hands over semantic findings only). Last-payload-wins with one
-// emission per key: precompute each key's final payload, then process keys in
-// first-occurrence order using that payload — so the single emitted
-// notification carries the same fields the stored record (and any later
-// resolution line) persists, instead of a first-copy title contradicting the
-// last-copy state.
-//
-// A finding whose assembled key crossed the aggregate bound also carries its
-// pre-fold legacy key: when only the legacy key is present in prior, the
-// record is migrated onto the canonical key (alert time preserved, nothing
-// emitted) and the legacy key is reported back so the resolution loop does not
-// read the migration as a resolution.
-func (n *Notifier) collectCurrent(findings []compare.Finding, prior map[string]Alerted, now time.Time) (current map[string]Alerted, migratedPrior map[string]struct{}, newCount int) {
-	current = make(map[string]Alerted, len(findings))
-	migratedPrior = make(map[string]struct{})
-	keys := make([]string, len(findings))
-	latest := make(map[string]*compare.Finding, len(findings))
-	latestLegacy := make(map[string]string)
+// Deleting the rows of an item that was NOT flagged incomplete is correct and
+// is how a resolved condition stops being reported. A row for an item that has
+// left the library entirely is dropped the same way, because a complete pass
+// simply does not produce it.
+func (n *Notifier) Report(findings []compare.Finding, incompleteIDs map[int]struct{}) {
+	next := make(map[string]compare.Finding, len(findings))
+	// Last-payload-wins per key. In-batch duplicate keys are reachable (two
+	// findings can fold onto one key), and the emitted line must carry the
+	// same payload the set retains, so the map write order decides both.
 	for i := range findings {
-		key, legacy := dedupeKeyWithLegacy(&findings[i])
-		keys[i] = key
-		latest[key] = &findings[i]
-		if legacy == "" {
+		next[dedupeKey(&findings[i])] = findings[i]
+	}
+	preserved := 0
+	for key := range n.current {
+		if _, present := next[key]; present {
 			continue
 		}
-		// The pre-fold key is 16-64 KiB of hostile upstream data and is only
-		// ever consulted as a prior lookup, so it is retained for the rest of
-		// the pass ONLY when prior holds it - adoptPrior's two branches both
-		// gate on prior[legacy], so dropping an absent legacy key is
-		// behaviour-identical. Keeping every folded finding's unfolded key
-		// would rebuild the aggregate the fold exists to bound.
-		_, held := prior[legacy]
-		n.log.Debug("dedupe key folded",
-			"al_id", findings[i].AniListID, "legacy_key_in_prior", held)
-		if held {
-			latestLegacy[key] = legacy
+		f := n.current[key]
+		if _, incomplete := incompleteIDs[f.AniListID]; !incomplete {
+			continue
 		}
+		next[key] = f
+		preserved++
 	}
+	n.current = next
+	n.emitAll(preserved)
+}
+
+// emitAll logs every row of the current set, in a deterministic order so a
+// pass is diffable against the one before it, and closes with one summary
+// line. preserved is the count carried forward under incompleteIDs.
+func (n *Notifier) emitAll(preserved int) {
+	keys := make([]string, 0, len(n.current))
+	for key := range n.current {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	emitted, suppressed := 0, 0
 	for _, key := range keys {
-		if _, ok := current[key]; ok {
-			// A later copy of a key this batch already handled: the first
-			// occurrence stored (and, if new, emitted) the final payload.
+		f := n.current[key]
+		if _, ignored := n.ignore[f.AniListID]; ignored {
+			suppressed++
 			continue
 		}
-		f := latest[key]
-		at, alerted := adoptPrior(prior, migratedPrior, key, latestLegacy[key])
-		if !alerted {
-			n.emit(f)
-			newCount++
-			at = now
-		}
-		current[key] = Alerted{AlertedAt: at, Finding: storedFinding(f)}
+		n.emit(&f)
+		emitted++
 	}
-	return current, migratedPrior, newCount
-}
-
-// adoptPrior reports the alert time of an existing prior record for one
-// finding's key — the canonical key first, then its pre-fold legacy key — so a
-// key already alerted stays suppressed with its original alert time. A legacy
-// key present in prior is recorded in migratedPrior either way, so the caller's
-// resolution loop does not read the fold as a resolution.
-func adoptPrior(prior map[string]Alerted, migratedPrior map[string]struct{}, key, legacy string) (time.Time, bool) {
-	if a, ok := prior[key]; ok {
-		if legacy != "" {
-			if _, exists := prior[legacy]; exists {
-				migratedPrior[legacy] = struct{}{}
-			}
-		}
-		return a.AlertedAt, true
-	}
-	if legacy != "" {
-		if a, ok := prior[legacy]; ok {
-			migratedPrior[legacy] = struct{}{}
-			return a.AlertedAt, true
-		}
-	}
-	return time.Time{}, false
-}
-
-// Baseline records every current finding as already-alerted without emitting
-// any, seeding the cross-cycle dedupe table on a cold start (a fresh install or
-// a lost cache) so the pre-existing backlog is not dumped as a burst of
-// notifications. Steady-state emission resumes on the next cycle via Notify;
-// the full current picture is always available on demand through report mode.
-func (n *Notifier) Baseline(findings []compare.Finding, now time.Time) map[string]Alerted {
-	current := make(map[string]Alerted, len(findings))
-	for i := range findings {
-		f := &findings[i]
-		current[dedupeKey(f)] = Alerted{AlertedAt: now, Finding: storedFinding(f)}
-	}
-	n.log.Info("cold start: findings baselined without notifying", "total", len(findings))
-	return current
+	n.log.Info("findings reported",
+		"total", len(n.current), "emitted", emitted,
+		"suppressed", suppressed, "preserved", preserved)
 }
 
 // --- Emission / rendering ---
@@ -302,22 +133,6 @@ func (n *Notifier) Baseline(findings []compare.Finding, now time.Time) map[strin
 // set the dashboard and Loki alert key on.
 func (n *Notifier) emit(f *compare.Finding) {
 	n.log.Log(context.Background(), level(f.Status), message(f.Status), findingKVs(f)...)
-}
-
-// emitResolved logs a single info line when a prior finding no longer applies,
-// reading the trimmed record the dedupe state persisted. Every string rides
-// through capAttr, matching findingKVs' policy: a record read back off disk is
-// untrusted regardless of which vocabulary produced it, so the app-defined arr
-// and status fields are bounded and sanitized like their upstream siblings.
-func (n *Notifier) emitResolved(f *StoredFinding) {
-	n.log.Info("finding resolved",
-		"title", capAttr(f.Title),
-		"al_id", f.AniListID,
-		"arr", capAttr(f.Arr),
-		"season", f.Season,
-		"current_group", capAttr(f.CurrentGroup),
-		"status", capAttr(string(f.Status)),
-		"recommended_group", capAttr(f.RecommendedGroup))
 }
 
 // maxAttrBytes is the per-attribute volume budget the emit path enforces on

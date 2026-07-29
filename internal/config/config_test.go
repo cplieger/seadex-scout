@@ -2468,3 +2468,164 @@ func TestLoadTagFilterFromFile(t *testing.T) {
 		t.Error("an empty exclude_tags map filtered a tag")
 	}
 }
+
+// TestToConfigIgnoreSet pins filters.ignore's flattening onto the runtime
+// emission-suppression set: the absent key and an explicit empty list are
+// indistinguishable and both suppress nothing (one unambiguous spelling of
+// "suppress nothing"), a real list becomes a set, and duplicates collapse
+// because a set is what the notifier wants.
+func TestToConfigIgnoreSet(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  []int
+		want []int
+	}{
+		{name: "absent key", raw: nil},
+		{name: "empty list", raw: []int{}},
+		{name: "single id", raw: []int{154587}, want: []int{154587}},
+		{name: "several ids", raw: []int{154587, 21519}, want: []int{154587, 21519}},
+		{name: "duplicates collapse", raw: []int{7, 7, 7, 9}, want: []int{7, 9}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := defaultFileConfig()
+			fc.Filters.Ignore = tt.raw
+
+			c := fc.toConfig()
+
+			if c.ignoreErr != nil {
+				t.Fatalf("ignoreErr = %v, want nil", c.ignoreErr)
+			}
+			if len(tt.want) == 0 {
+				if c.IgnoreFindings != nil {
+					t.Errorf("IgnoreFindings = %v, want nil (absent and empty must be indistinguishable)", c.IgnoreFindings)
+				}
+				return
+			}
+			if len(c.IgnoreFindings) != len(tt.want) {
+				t.Errorf("IgnoreFindings holds %d ids (%v), want %d", len(c.IgnoreFindings), c.IgnoreFindings, len(tt.want))
+			}
+			for _, id := range tt.want {
+				if _, ok := c.IgnoreFindings[id]; !ok {
+					t.Errorf("IgnoreFindings is missing %d (%v)", id, c.IgnoreFindings)
+				}
+			}
+		})
+	}
+}
+
+// TestToConfigIgnoreRejections pins every filters.ignore input that is a
+// startup error rather than a silent no-op: a list past the bound, and any
+// non-positive AniList ID (SeaDex IDs start at 1, so a 0 or negative entry is a
+// typo that would suppress nothing while the operator believes it suppresses
+// something). A rejected list must leave NO half-built set behind, otherwise a
+// refused config would still suppress an emission.
+func TestToConfigIgnoreRejections(t *testing.T) {
+	many := make([]int, 0, maxIgnoreIDs+1)
+	for i := range maxIgnoreIDs + 1 {
+		many = append(many, i+1)
+	}
+	tests := []struct {
+		name    string
+		raw     []int
+		wantErr string
+	}{
+		{name: "over the bound", raw: many, wantErr: "more than"},
+		{name: "zero id", raw: []int{154587, 0}, wantErr: "non-positive"},
+		{name: "negative id", raw: []int{-1}, wantErr: "non-positive"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := defaultFileConfig()
+			fc.Filters.Ignore = tt.raw
+
+			c := fc.toConfig()
+
+			if c.ignoreErr == nil {
+				t.Fatal("ignoreErr = nil, want an error")
+			}
+			msg := c.ignoreErr.Error()
+			if !strings.Contains(msg, tt.wantErr) {
+				t.Errorf("error %q does not mention %q", msg, tt.wantErr)
+			}
+			if !strings.Contains(msg, "filters.ignore") {
+				t.Errorf("error %q does not name the field", msg)
+			}
+			if c.IgnoreFindings != nil {
+				t.Errorf("IgnoreFindings = %v after a rejected list, want nil", c.IgnoreFindings)
+			}
+		})
+	}
+}
+
+// TestValidateSurfacesIgnoreError pins that a rejected filters.ignore list
+// stops the app at startup rather than degrading into a silently inactive
+// suppression set: the list is parsed once at flatten time, so Validate is the
+// only place that error can surface.
+func TestValidateSurfacesIgnoreError(t *testing.T) {
+	fc := defaultFileConfig()
+	fc.Sonarr = arrFile{Enabled: true, URL: "http://sonarr:8989", APIKey: "k"}
+	fc.Filters.Ignore = []int{0}
+
+	c := fc.toConfig()
+	if err := c.Validate(); err == nil {
+		t.Fatal("Validate() = nil, want the filters.ignore error")
+	} else if !strings.Contains(err.Error(), "filters.ignore") {
+		t.Errorf("Validate() error = %v, want it to name filters.ignore", err)
+	}
+
+	// The same config with a valid list must run.
+	fc.Filters.Ignore = []int{154587}
+	ok := fc.toConfig()
+	if err := ok.Validate(); err != nil {
+		t.Errorf("Validate() with a valid ignore list = %v, want nil", err)
+	}
+	if _, ignored := ok.IgnoreFindings[154587]; !ignored {
+		t.Error("a validated config lost its ignore set")
+	}
+}
+
+// TestLoadIgnoreFromFile pins the whole path from YAML text to the runtime set,
+// including the `ignore: []` spelling config.example.yaml ships (which must
+// load and suppress nothing) and the strict loader's rejection of a
+// wrong-typed value.
+func TestLoadIgnoreFromFile(t *testing.T) {
+	const arrs = "sonarr:\n  enabled: true\n  url: \"http://sonarr:8989\"\n  api_key: \"k\"\n"
+	dir := t.TempDir()
+	write := func(t *testing.T, name, body string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		return path
+	}
+
+	c, err := Load(write(t, "populated.yaml", arrs+"filters:\n  ignore: [154587, 21519]\n"))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	for _, id := range []int{154587, 21519} {
+		if _, ok := c.IgnoreFindings[id]; !ok {
+			t.Errorf("configured ignore id %d missing from %v", id, c.IgnoreFindings)
+		}
+	}
+
+	ec, err := Load(write(t, "empty.yaml", arrs+"filters:\n  ignore: []\n"))
+	if err != nil {
+		t.Fatalf("Load() of the shipped empty spelling error = %v", err)
+	}
+	if err := ec.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if ec.IgnoreFindings != nil {
+		t.Errorf("IgnoreFindings = %v, want nil for an empty list", ec.IgnoreFindings)
+	}
+
+	if _, err := Load(write(t, "typed.yaml", arrs+"filters:\n  ignore: \"154587\"\n")); err == nil {
+		t.Error("Load() of a string filters.ignore = nil error, want the strict decode rejection")
+	}
+}

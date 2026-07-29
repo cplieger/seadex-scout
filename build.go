@@ -140,7 +140,7 @@ func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
 			ExcludeSpecials: cfg.ExcludeSpecials,
 			AnimeBytes:      cfg.AnimeBytes,
 		}),
-		Notifier: notify.NewNotifier(c.log),
+		Notifier: notify.NewNotifier(c.log, cfg.IgnoreFindings),
 		AniListStats: func() scout.AniListStats {
 			st := anilistClient.Stats()
 			return scout.AniListStats{Calls: st.Calls, RateLimitWaits: st.RateLimitWaits}

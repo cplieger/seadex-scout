@@ -46,80 +46,6 @@ func secondSeaDexEntry() seadex.Entry {
 	}
 }
 
-// TestCycleEmptyFirstWalkSeedsIncompleteBaseline pins the empty-walk term of
-// the cold-start baseline's completeness decision: a FIRST successful cycle
-// whose library walk returned zero items (an arr with nothing in it yet, or an
-// arr_tags.include matching nothing) is no evidence a baseline covers the
-// library, so it must seed the baseline as INCOMPLETE. Without that term the
-// cycle after the library appears bursts the whole pre-existing backlog as
-// fresh notifications - the exact inverse of what the baseline exists for.
-// The incomplete window then closes on the first populated walk (whose backlog
-// seeds silently) and normal reporting resumes on the cycle after.
-func TestCycleEmptyFirstWalkSeedsIncompleteBaseline(t *testing.T) {
-	logger, recorder := capture.New()
-	store := &fakeStore{st: state.State{Mapping: twoRecordMappingCache()}}
-	sonarr := &fakeSonarr{}
-	seaDex := &fakeSeaDex{entries: seadexFrierenEntry()}
-	s := New(&Deps{
-		Logger:       scoutTestLogger(),
-		Store:        store,
-		Library:      arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
-		Mapping:      fakeMapping{},
-		SeaDex:       seaDex,
-		Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
-		Comparer:     compare.NewComparer(compare.Config{}),
-		Notifier:     notify.NewNotifier(logger),
-		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
-	})
-
-	// Cycle one: a successful but EMPTY walk. The seed covers nothing, so the
-	// baseline must be recorded incomplete.
-	if healthy := s.Cycle(context.Background()); !healthy {
-		t.Fatal("empty-walk cycle healthy=false, want true (an empty walk is not an ingest fault)")
-	}
-	if !store.st.Baselined || !store.st.BaselineIncomplete {
-		t.Errorf("state after the empty first walk: Baselined=%v BaselineIncomplete=%v, want true/true (an empty walk cannot seed a complete baseline)",
-			store.st.Baselined, store.st.BaselineIncomplete)
-	}
-	if n := recorder.CountExact("better release available"); n != 0 {
-		t.Errorf("empty-walk cycle emitted %d finding notifications, want 0", n)
-	}
-
-	// Cycle two: the library appears, carrying a pre-existing backlog (Frieren
-	// on Erai-raws against SeaDex's best SubsPlease). It must seed silently -
-	// not burst - and close the incomplete window.
-	sonarr.series = []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}
-	sonarr.files = map[int][]arrapi.EpisodeFile{7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}}}
-	if healthy := s.Cycle(context.Background()); !healthy {
-		t.Fatal("populated-walk cycle healthy=false, want true")
-	}
-	if !store.st.Baselined || store.st.BaselineIncomplete {
-		t.Errorf("state after the populated walk: Baselined=%v BaselineIncomplete=%v, want true/false (the first complete walk closes the window)",
-			store.st.Baselined, store.st.BaselineIncomplete)
-	}
-	if len(store.st.Findings) != 1 {
-		t.Errorf("baselined findings after the populated walk = %d, want 1 (the pre-existing backlog seeded)", len(store.st.Findings))
-	}
-	if n := recorder.CountExact("better release available"); n != 0 {
-		t.Errorf("populated walk emitted %d finding notifications, want 0 (the backlog must seed silently)", n)
-	}
-	if n := recorder.CountExact("findings reported"); n != 0 {
-		t.Errorf("populated walk took the Report path %d times, want 0 (still inside the incomplete-baseline window)", n)
-	}
-
-	// Cycle three: steady state. A genuinely new finding notifies normally, so
-	// the silent window is one-shot rather than permanent.
-	sonarr.series = append(sonarr.series, arrapi.Series{ID: 8, Title: "Second Show", TvdbID: 124, Year: 2024})
-	sonarr.files[8] = []arrapi.EpisodeFile{{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}}
-	seaDex.entries = append(seaDex.entries, secondSeaDexEntry())
-	if healthy := s.Cycle(context.Background()); !healthy {
-		t.Fatal("steady-state cycle healthy=false, want true")
-	}
-	if n := recorder.CountExact("better release available"); n != 1 {
-		t.Errorf("steady-state notification count = %d, want 1 (normal reporting resumes once the baseline is complete)", n)
-	}
-}
-
 // TestCyclePartialWalkEscalatesAfterRepeatedPartialWalks pins the persisted
 // partial-walk streak and its escalation: below the threshold a completed
 // partial cycle only advances the counter (the per-cycle "reason=partial-walk"
@@ -142,8 +68,6 @@ func TestCyclePartialWalkEscalatesAfterRepeatedPartialWalks(t *testing.T) {
 			logger, recorder := capture.New()
 			store := &fakeStore{st: state.State{
 				Mapping:      twoRecordMappingCache(),
-				Findings:     map[string]notify.Alerted{"prior": priorAlerted("Existing", 154587)},
-				Baselined:    true,
 				PartialWalks: tc.priorStreak,
 			}}
 			sonarr := &flakySonarr{
@@ -167,7 +91,7 @@ func TestCyclePartialWalkEscalatesAfterRepeatedPartialWalks(t *testing.T) {
 				SeaDex:       &fakeSeaDex{entries: append(seadexFrierenEntry(), secondSeaDexEntry())},
 				Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
 				Comparer:     compare.NewComparer(compare.Config{}),
-				Notifier:     notify.NewNotifier(scoutTestLogger()),
+				Notifier:     notify.NewNotifier(scoutTestLogger(), nil),
 				AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 			})
 
@@ -219,9 +143,7 @@ func TestCycleSeaDexFailureSanitizesLoggedErrorAtBothSites(t *testing.T) {
 	logger, recorder := capture.New()
 	hostile := "upstream said: " + strings.Repeat("A\u0007\u202e", 5000) + "\nrejected id"
 	store := &fakeStore{st: state.State{
-		Mapping:   frierenMappingCache(),
-		Findings:  map[string]notify.Alerted{"prior": priorAlerted("Existing", 154587)},
-		Baselined: true,
+		Mapping: frierenMappingCache(),
 	}}
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
 	s := New(&Deps{
@@ -258,9 +180,6 @@ func TestCycleSeaDexFailureSanitizesLoggedErrorAtBothSites(t *testing.T) {
 			t.Errorf("%s error value lost the honest message prefix (prefix %q)", site.what, got[:min(len(got), 60)])
 		}
 	}
-	if _, ok := store.st.Findings["prior"]; !ok {
-		t.Errorf("persisted findings = %+v, want the prior finding preserved through the outage", store.st.Findings)
-	}
 }
 
 // TestCycleTagFilterEmptiedSideClosesDegraded pins the completion-line verdict
@@ -277,9 +196,7 @@ func TestCycleTagFilterEmptiedSideClosesDegraded(t *testing.T) {
 		return New(&Deps{
 			Logger: logger,
 			Store: &fakeStore{st: state.State{
-				Mapping:   twoRecordMappingCache(),
-				Findings:  map[string]notify.Alerted{"prior": priorAlerted("Existing", 154587)},
-				Baselined: true,
+				Mapping: twoRecordMappingCache(),
 			}},
 			Library: arrwalk.NewWalker(&arrwalk.Config{
 				Sonarr: sonarr, IncludeTags: include, Logger: scoutTestLogger(),
@@ -288,7 +205,7 @@ func TestCycleTagFilterEmptiedSideClosesDegraded(t *testing.T) {
 			SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 			Matcher:      match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
 			Comparer:     compare.NewComparer(compare.Config{}),
-			Notifier:     notify.NewNotifier(scoutTestLogger()),
+			Notifier:     notify.NewNotifier(scoutTestLogger(), nil),
 			AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, scoutTestLogger())),
 		})
 	}

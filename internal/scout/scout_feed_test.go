@@ -172,7 +172,7 @@ func TestCycleFeedRebuildErrorIsNonFatal(t *testing.T) {
 		SeaDex:       &fakeSeaDex{entries: seadexFrierenEntry()},
 		Matcher:      match.NewMatcher(notFoundAniList{}, logger),
 		Comparer:     compare.NewComparer(compare.Config{}),
-		Notifier:     notify.NewNotifier(logger),
+		Notifier:     notify.NewNotifier(logger, nil),
 		AniListStats: aniStatsFn(anilist.NewClient(noNetworkClient(), "http://unused.invalid/gql", 1, logger)),
 		Feed:         feed,
 	})
@@ -183,8 +183,8 @@ func TestCycleFeedRebuildErrorIsNonFatal(t *testing.T) {
 	if feed.calls != 1 {
 		t.Errorf("feed Rebuild calls = %d, want 1", feed.calls)
 	}
-	if !store.st.Baselined {
-		t.Error("state Baselined=false; the compare half must complete despite a feed rebuild failure")
+	if n := recorder.CountExact("findings reported"); n != 1 {
+		t.Errorf("'findings reported' count = %d, want 1; the compare half must complete despite a feed rebuild failure", n)
 	}
 	if n := recorder.CountExact("indexer feed rebuild failed; keeping previous feed"); n != 1 {
 		t.Errorf("feed-rebuild failure log count = %d, want exactly 1", n)
@@ -370,11 +370,8 @@ func TestCycleShutdownDuringFeedRebuildStaysSilent(t *testing.T) {
 	defer cancel()
 	logger, recorder := capture.New()
 	feed := &cancellingFeed{cancel: cancel}
-	prior := priorAlerted("Existing", 154587)
 	store := &fakeStore{st: state.State{
-		Mapping:   seasonlessMappingCache(),
-		Findings:  map[string]notify.Alerted{"prior": prior},
-		Baselined: true,
+		Mapping: seasonlessMappingCache(),
 	}}
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
 	s := New(&Deps{
@@ -395,9 +392,6 @@ func TestCycleShutdownDuringFeedRebuildStaysSilent(t *testing.T) {
 	}
 	if n := recorder.CountExact("cycle interrupted by shutdown during matching"); n != 1 {
 		t.Errorf("shutdown WARN count = %d, want 1", n)
-	}
-	if _, ok := store.st.Findings["prior"]; !ok {
-		t.Errorf("prior finding not preserved on shutdown mid-cycle: %+v", store.st.Findings)
 	}
 }
 
@@ -480,7 +474,7 @@ func TestSeaDexFailureLogCarriesFeedKept(t *testing.T) {
 			sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
 			s := New(&Deps{
 				Logger:  logger,
-				Store:   &fakeStore{st: state.State{Mapping: frierenMappingCache(), Baselined: true}},
+				Store:   &fakeStore{st: state.State{Mapping: frierenMappingCache()}},
 				Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 				Mapping: fakeMapping{},
 				SeaDex:  &fakeSeaDex{err: errors.New("seadex down")},
@@ -498,7 +492,7 @@ func TestSeaDexFailureLogCarriesFeedKept(t *testing.T) {
 	}
 }
 
-// TestCycleWalkFailureWithFeedPreservesPriorSnapshotAndFindings pins the
+// TestCycleWalkFailureWithFeedPreservesPriorSnapshot pins the
 // walk-failed arm's persistence SCOPE: with a feed configured Cycle falls
 // through to handleLibraryGate, which saves ONLY the refreshed mapping cache.
 // Persisting the failed walk's empty snapshot instead would make st.Library
@@ -507,13 +501,10 @@ func TestSeaDexFailureLogCarriesFeedKept(t *testing.T) {
 // arms already pin this (the shrink guard's persisted-prior-4-items assertion,
 // TestHandlePreCompareGateEmptyWalkPreservesPriorSnapshot); the walk-failed arm
 // did not.
-func TestCycleWalkFailureWithFeedPreservesPriorSnapshotAndFindings(t *testing.T) {
-	prior := priorAlerted("Existing", 154587)
+func TestCycleWalkFailureWithFeedPreservesPriorSnapshot(t *testing.T) {
 	store := &fakeStore{st: state.State{
-		Mapping:   frierenMappingCache(),
-		Library:   library.Snapshot{Items: []library.Item{{Arr: library.ArrSonarr, ArrID: 7, Title: "Frieren", TvdbID: 123}}},
-		Findings:  map[string]notify.Alerted{"prior": prior},
-		Baselined: true,
+		Mapping: frierenMappingCache(),
+		Library: library.Snapshot{Items: []library.Item{{Arr: library.ArrSonarr, ArrID: 7, Title: "Frieren", TvdbID: 123}}},
 	}}
 	s := New(&Deps{
 		Logger:  scoutTestLogger(),
@@ -533,9 +524,6 @@ func TestCycleWalkFailureWithFeedPreservesPriorSnapshotAndFindings(t *testing.T)
 	if len(store.st.Library.Items) != 1 || store.st.Library.Items[0].Title != "Frieren" {
 		t.Errorf("persisted library = %+v, want the prior snapshot untouched (a failed walk must never replace it, or the next cycle mass-resolves every finding)", store.st.Library)
 	}
-	if _, ok := store.st.Findings["prior"]; !ok {
-		t.Errorf("persisted findings = %+v, want the prior finding preserved through the failed walk", store.st.Findings)
-	}
 }
 
 // TestHandlePreCompareGateAlertOnlyGatedCycleClaimsNoFeed pins the
@@ -548,7 +536,7 @@ func TestCycleWalkFailureWithFeedPreservesPriorSnapshotAndFindings(t *testing.T)
 // twin, mirroring TestSeaDexFailureLogCarriesFeedKept's feed_kept=false case.
 func TestHandlePreCompareGateAlertOnlyGatedCycleClaimsNoFeed(t *testing.T) {
 	logger, recorder := capture.New()
-	st := state.State{Baselined: true}
+	st := state.State{ShrunkWalks: 1}
 	store := &fakeStore{st: st}
 	s := New(&Deps{Logger: logger, Store: store})
 	mapCache := mapping.Cache{}

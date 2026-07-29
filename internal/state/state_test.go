@@ -18,11 +18,9 @@ import (
 	"time"
 
 	"github.com/cplieger/atomicfile/v2"
-	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
-	"github.com/cplieger/seadex-scout/internal/notify"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/tracker"
 	"github.com/cplieger/slogx/capture"
@@ -30,6 +28,17 @@ import (
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
+}
+
+// paddedMemo builds an AniList memo whose encoded size grows byte-for-byte with
+// n, so a size-bound test can hit an exact on-disk length. The memo is the
+// vehicle because it is a persisted member Save copies verbatim: the library
+// snapshot is rewritten by SanitizedForStorage before encoding, so padding it
+// would measure the sanitizer rather than the bound.
+func paddedMemo(n int) match.Memo {
+	return match.Memo{Entries: map[int]match.MemoEntry{
+		1: {Titles: []string{strings.Repeat("a", n)}},
+	}}
 }
 
 // TestStoreLoadDoesNotBlockOnFifoStatePath pins the other half of readState's
@@ -66,7 +75,7 @@ func TestStoreLoadMissingReturnsEmptyState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load missing state returned error: %v", err)
 	}
-	if st.Baselined || len(st.Library.Items) != 0 || len(st.Mapping.Records) != 0 || len(st.Memo.Entries) != 0 || len(st.Findings) != 0 {
+	if st.ShrunkWalks != 0 || len(st.Library.Items) != 0 || len(st.Mapping.Records) != 0 || len(st.Memo.Entries) != 0 {
 		t.Errorf("Load missing state = %+v, want zero state", st)
 	}
 }
@@ -97,19 +106,9 @@ func TestStoreSaveLoadRoundTrip(t *testing.T) {
 		Memo: match.Memo{Entries: map[int]match.MemoEntry{
 			154587: {Titles: []string{"Frieren"}, Format: "TV", Year: 2023, Expiry: now.Add(300 * time.Hour)},
 		}},
-		Findings: map[string]notify.Alerted{
-			"dedupe": {
-				AlertedAt: now,
-				Finding: notify.StoredFinding{
-					Title:     "Frieren",
-					Arr:       library.ArrSonarr,
-					Status:    compare.StatusBetter,
-					AniListID: 154587,
-				},
-			},
-		},
-		Baselined:          true,
-		BaselineIncomplete: true,
+		ShrunkWalks:     2,
+		SeadexFailures:  5,
+		AniListDegraded: 7,
 	}
 
 	if err := store.Save(context.Background(), want); err != nil {
@@ -119,11 +118,9 @@ func TestStoreSaveLoadRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load after Save returned error: %v", err)
 	}
-	if !got.Baselined {
-		t.Error("Baselined = false, want true")
-	}
-	if !got.BaselineIncomplete {
-		t.Error("BaselineIncomplete = false, want true (the incomplete-baseline window must survive restarts)")
+	if got.ShrunkWalks != 2 || got.SeadexFailures != 5 || got.AniListDegraded != 7 {
+		t.Errorf("degradation streaks round trip = %d/%d/%d, want 2/5/7 (each escalation streak must survive restarts)",
+			got.ShrunkWalks, got.SeadexFailures, got.AniListDegraded)
 	}
 	if len(got.Library.Items) != 1 || got.Library.Items[0].Title != "Frieren" || got.Library.Items[0].SeasonGroups[1][0] != "subsplease" {
 		t.Errorf("Library round trip = %+v, want Frieren with season group", got.Library)
@@ -140,10 +137,6 @@ func TestStoreSaveLoadRoundTrip(t *testing.T) {
 	if want := now.Add(300 * time.Hour); !got.Memo.Entries[154587].Expiry.Equal(want) {
 		t.Errorf("Memo expiry round trip = %s, want %s (the jittered-TTL stamp must survive restarts)",
 			got.Memo.Entries[154587].Expiry, want)
-	}
-	alert, ok := got.Findings["dedupe"]
-	if !ok || alert.Finding.Title != "Frieren" || !alert.AlertedAt.Equal(now) {
-		t.Errorf("Findings round trip = %+v, want preserved dedupe alert", got.Findings)
 	}
 }
 
@@ -245,7 +238,7 @@ func TestReadOnlyStoreLoadCorruptLeavesFileInPlace(t *testing.T) {
 // on a NewReadOnlyStore must refuse and leave no file behind.
 func TestReadOnlyStoreSaveRefused(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	err := NewReadOnlyStore(path, testLogger()).Save(context.Background(), &State{Baselined: true})
+	err := NewReadOnlyStore(path, testLogger()).Save(context.Background(), &State{ShrunkWalks: 1})
 	if err == nil {
 		t.Fatal("Save on a read-only store returned nil error, want refusal")
 	}
@@ -315,7 +308,7 @@ func TestStoreLoadTrailingGarbageAfterValidVersionQuarantines(t *testing.T) {
 		body string
 	}{
 		{"raw trailing bytes", `{"version":99}x`},
-		{"second JSON document", `{"version":99} {"baselined":true}`},
+		{"second JSON document", `{"version":99} {"shrunk_walks":1}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -528,7 +521,7 @@ func TestStoreLoadOversizedReturnsError(t *testing.T) {
 	if _, statErr := os.Stat(path); !errors.Is(statErr, fs.ErrNotExist) {
 		t.Errorf("live state path still present after quarantine (stat err = %v), want renamed away", statErr)
 	}
-	if saveErr := store.Save(context.Background(), &State{Baselined: true}); saveErr != nil {
+	if saveErr := store.Save(context.Background(), &State{ShrunkWalks: 1}); saveErr != nil {
 		t.Errorf("Save after quarantining an oversized file failed: %v (the over-cap classification must clear the unclassified-read-failure block)", saveErr)
 	}
 }
@@ -558,10 +551,10 @@ func TestStoreLoadNonRegularPathIsClassifiedCorruption(t *testing.T) {
 	if _, statErr := os.Stat(path + ".corrupt"); statErr != nil {
 		t.Errorf("non-regular state path was not quarantined (stat err = %v), want %s.corrupt preserved", statErr, path)
 	}
-	if saveErr := store.Save(context.Background(), &State{Baselined: true}); saveErr != nil {
+	if saveErr := store.Save(context.Background(), &State{ShrunkWalks: 1}); saveErr != nil {
 		t.Fatalf("Save after quarantining a non-regular path failed: %v (deterministic corruption must not arm the preservation block)", saveErr)
 	}
-	if got, loadErr := store.Load(context.Background()); loadErr != nil || !got.Baselined {
+	if got, loadErr := store.Load(context.Background()); loadErr != nil || got.ShrunkWalks != 1 {
 		t.Errorf("Load after the recovering Save = (%+v, %v), want the freshly saved state at the live path", got, loadErr)
 	}
 }
@@ -569,7 +562,7 @@ func TestStoreLoadNonRegularPathIsClassifiedCorruption(t *testing.T) {
 // TestStoreLoadUnpreservableCorruptionBlocksSave pins the fail-closed side of
 // the quarantine contract: when preservation cannot happen (a non-empty
 // state.json.corrupt directory blocks the rename), the corrupt live file is
-// the ONLY forensic copy and the only finding-dedupe baseline, so Save must
+// the ONLY forensic copy of the persisted cache, so Save must
 // refuse rather than atomically replace it with a cold envelope.
 func TestStoreLoadUnpreservableCorruptionBlocksSave(t *testing.T) {
 	dir := t.TempDir()
@@ -591,7 +584,7 @@ func TestStoreLoadUnpreservableCorruptionBlocksSave(t *testing.T) {
 	if _, err := store.Load(context.Background()); err == nil {
 		t.Fatal("Load of a corrupt state returned nil error, want the decode failure reported")
 	}
-	saveErr := store.Save(context.Background(), &State{Baselined: true})
+	saveErr := store.Save(context.Background(), &State{ShrunkWalks: 1})
 	if !errors.Is(saveErr, ErrSavePreserved) {
 		t.Fatalf("Save after a FAILED quarantine = %v, want ErrSavePreserved (the corrupt bytes are still the only copy)", saveErr)
 	}
@@ -612,13 +605,11 @@ func TestStoreLoadUnpreservableCorruptionBlocksSave(t *testing.T) {
 func TestStoreSaveOverCapReturnsErrorAndKeepsPreviousFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := NewStore(path, testLogger())
-	if err := store.Save(context.Background(), &State{Baselined: true}); err != nil {
+	if err := store.Save(context.Background(), &State{ShrunkWalks: 1}); err != nil {
 		t.Fatalf("seed valid state: %v", err)
 	}
 
-	huge := &State{Findings: map[string]notify.Alerted{
-		"huge": {Finding: notify.StoredFinding{Title: strings.Repeat("a", maxStateBytes+1)}},
-	}}
+	huge := &State{Memo: paddedMemo(maxStateBytes + 1)}
 	err := store.Save(context.Background(), huge)
 	if err == nil {
 		t.Fatal("Save returned nil error, want over-cap rejection")
@@ -631,7 +622,7 @@ func TestStoreSaveOverCapReturnsErrorAndKeepsPreviousFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load after rejected Save returned error: %v", err)
 	}
-	if !got.Baselined {
+	if got.ShrunkWalks != 1 {
 		t.Error("previous state was not preserved after the rejected over-cap Save")
 	}
 }
@@ -645,19 +636,14 @@ func TestStoreSaveOverCapReturnsErrorAndKeepsPreviousFile(t *testing.T) {
 func TestStoreSaveExactCapBoundaryAccepted(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := NewStore(path, testLogger())
-	if err := store.Save(context.Background(), &State{Baselined: true}); err != nil {
+	if err := store.Save(context.Background(), &State{ShrunkWalks: 1}); err != nil {
 		t.Fatalf("seed valid state: %v", err)
 	}
 
 	padded := func(n int) *State {
 		// Version mirrors the SchemaVersion stamp Save applies to the copy it
 		// writes, so the json.Marshal probe below measures the on-disk shape.
-		return &State{
-			Findings: map[string]notify.Alerted{
-				"huge": {Finding: notify.StoredFinding{Title: strings.Repeat("a", n)}},
-			},
-			Version: SchemaVersion,
-		}
+		return &State{Memo: paddedMemo(n), Version: SchemaVersion}
 	}
 	base, err := json.Marshal(padded(0))
 	if err != nil {
@@ -679,8 +665,8 @@ func TestStoreSaveExactCapBoundaryAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load of the boundary-sized state: %v", err)
 	}
-	if gotLen := len(got.Findings["huge"].Finding.Title); gotLen != maxStateBytes-len(base) {
-		t.Errorf("round-tripped title length = %d, want %d", gotLen, maxStateBytes-len(base))
+	if gotLen := len(got.Memo.Entries[1].Titles[0]); gotLen != maxStateBytes-len(base) {
+		t.Errorf("round-tripped memo title length = %d, want %d", gotLen, maxStateBytes-len(base))
 	}
 }
 
@@ -695,7 +681,7 @@ func TestStoreSaveWriteFailureReturnsError(t *testing.T) {
 	}
 	store := NewStore(filepath.Join(blocker, "state.json"), testLogger())
 
-	err := store.Save(context.Background(), &State{Baselined: true})
+	err := store.Save(context.Background(), &State{ShrunkWalks: 1})
 	if err == nil {
 		t.Fatal("Save returned nil error, want write failure")
 	}
@@ -713,10 +699,10 @@ func TestNewStoreNilLoggerDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load with nil logger returned error: %v", err)
 	}
-	if st.Baselined || len(st.Findings) != 0 {
+	if st.ShrunkWalks != 0 || len(st.Memo.Entries) != 0 {
 		t.Errorf("Load = %+v, want zero state", st)
 	}
-	if err := store.Save(context.Background(), &State{Baselined: true}); err != nil {
+	if err := store.Save(context.Background(), &State{ShrunkWalks: 1}); err != nil {
 		t.Fatalf("Save with nil logger returned error: %v", err)
 	}
 }
@@ -832,7 +818,7 @@ func TestStorePartialWalkStreakPersistsUnderStableWireKey(t *testing.T) {
 }
 
 // TestStoreSaveEnvelopeNestedShape pins the wire shape of the persisted
-// members other packages own (notify.Alerted, match.Memo, library.Snapshot).
+// members other packages own (match.Memo, library.Snapshot).
 // Their json tags define state.json's schema while SchemaVersion, the
 // discriminator that governs a rename, lives here - so a tag moved on the
 // domain side must fail in this package rather than silently zero-load out of
@@ -847,18 +833,6 @@ func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := NewStore(path, testLogger())
 	st := &State{
-		Findings: map[string]notify.Alerted{"k": {
-			AlertedAt: time.Now().UTC(),
-			Finding: notify.StoredFinding{
-				Arr:              "sonarr",
-				CurrentGroup:     "old",
-				RecommendedGroup: "new",
-				Title:            "t",
-				Status:           compare.StatusBetter,
-				AniListID:        1,
-				Season:           2,
-			},
-		}},
 		Memo: match.Memo{Entries: map[int]match.MemoEntry{1: {
 			Expiry:   time.Now().UTC().Add(time.Hour),
 			Format:   "TV",
@@ -908,8 +882,7 @@ func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
 		t.Fatalf("read persisted state: %v", err)
 	}
 	var envelope struct {
-		Findings map[string]map[string]json.RawMessage `json:"findings"`
-		Memo     struct {
+		Memo struct {
 			Entries map[string]map[string]json.RawMessage `json:"entries"`
 		} `json:"anilist_memo"`
 		Library map[string]json.RawMessage `json:"library"`
@@ -944,18 +917,6 @@ func TestStoreSaveEnvelopeNestedShape(t *testing.T) {
 	assertKeySet(t, "library item current", current, []string{
 		"codec", "dual_audio", "group", "kind", "reason", "resolution", "tracker", "tracker_type",
 	})
-	alerted, ok := envelope.Findings["k"]
-	if !ok {
-		t.Fatalf("persisted findings missing key %q (got %v)", "k", slices.Sorted(maps.Keys(envelope.Findings)))
-	}
-	assertKeySet(t, "findings record", alerted, []string{"alerted_at", "finding"})
-	var stored map[string]json.RawMessage
-	if err := json.Unmarshal(alerted["finding"], &stored); err != nil {
-		t.Fatalf("decode persisted findings record finding: %v", err)
-	}
-	assertKeySet(t, "findings record finding", stored, []string{
-		"al_id", "arr", "current_group", "recommended_group", "season", "status", "title",
-	})
 	entry, ok := envelope.Memo.Entries["1"]
 	if !ok {
 		t.Fatalf("persisted anilist_memo.entries missing id 1 (got %v)", slices.Sorted(maps.Keys(envelope.Memo.Entries)))
@@ -986,7 +947,7 @@ func assertKeySet(t *testing.T, what string, got map[string]json.RawMessage, wan
 func TestStoreSaveStampsSchemaVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := NewStore(path, testLogger())
-	st := &State{Baselined: true}
+	st := &State{ShrunkWalks: 1}
 	if err := store.Save(context.Background(), st); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
@@ -1003,15 +964,15 @@ func TestStoreSaveStampsSchemaVersion(t *testing.T) {
 
 	// A legacy envelope written before versioning carries no version field:
 	// it must load cleanly as version zero (tolerated, no migration today).
-	if err := os.WriteFile(path, []byte(`{"baselined":true}`), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(`{"shrunk_walks":3}`), 0o644); err != nil {
 		t.Fatalf("write legacy state: %v", err)
 	}
 	legacy, err := store.Load(context.Background())
 	if err != nil {
 		t.Fatalf("Load of a legacy pre-version file returned error: %v", err)
 	}
-	if legacy.Version != 0 || !legacy.Baselined {
-		t.Errorf("legacy load = Version %d Baselined %v, want 0/true (absent version tolerated)", legacy.Version, legacy.Baselined)
+	if legacy.Version != 0 || legacy.ShrunkWalks != 3 {
+		t.Errorf("legacy load = Version %d ShrunkWalks %d, want 0/3 (absent version tolerated)", legacy.Version, legacy.ShrunkWalks)
 	}
 
 	// A file stamped by a NEWER binary (an image rollback) must be refused,
@@ -1020,7 +981,7 @@ func TestStoreSaveStampsSchemaVersion(t *testing.T) {
 	// and every subsequent Save on this Store is refused — otherwise this
 	// binary would overwrite the newer-schema file with a cold envelope and
 	// rolling forward would silently lose the newer state.
-	newer := fmt.Sprintf(`{"version":%d,"baselined":true}`, SchemaVersion+1)
+	newer := fmt.Sprintf(`{"version":%d,"shrunk_walks":1}`, SchemaVersion+1)
 	if err := os.WriteFile(path, []byte(newer), 0o644); err != nil {
 		t.Fatalf("write newer-version state: %v", err)
 	}
@@ -1102,7 +1063,7 @@ func TestStoreLoadLogsLibrarySnapshotAge(t *testing.T) {
 	// any walk succeeded) must omit the attribute.
 	zeroLogger, zeroRecorder := capture.New()
 	zeroStore := NewStore(filepath.Join(t.TempDir(), "state.json"), zeroLogger)
-	if err := zeroStore.Save(context.Background(), &State{Baselined: true}); err != nil {
+	if err := zeroStore.Save(context.Background(), &State{ShrunkWalks: 1}); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
 	if _, err := zeroStore.Load(context.Background()); err != nil {
@@ -1144,7 +1105,7 @@ func TestStoreSaveCanceledFailsFastWithoutWriting(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := store.Save(ctx, &State{Baselined: true})
+	err := store.Save(ctx, &State{ShrunkWalks: 1})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Save with pre-canceled context error = %v, want context.Canceled", err)
 	}
@@ -1169,7 +1130,7 @@ func TestStoreSaveCommitFailureReturnsError(t *testing.T) {
 	}
 	store := NewStore(target, testLogger())
 
-	err := store.Save(context.Background(), &State{Baselined: true})
+	err := store.Save(context.Background(), &State{ShrunkWalks: 1})
 	if err == nil {
 		t.Fatal("Save returned nil error, want commit failure")
 	}
@@ -1214,7 +1175,7 @@ func TestStoreSaveAppliesOwnerOnlyFileMode(t *testing.T) {
 		t.Fatalf("seed permissive state file: %v", err)
 	}
 	store := NewStore(path, testLogger())
-	if err := store.Save(context.Background(), &State{Baselined: true}); err != nil {
+	if err := store.Save(context.Background(), &State{ShrunkWalks: 1}); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
 	info, err := os.Stat(path)
@@ -1233,7 +1194,7 @@ func TestStoreLoadRecoveryClearsNewerSchemaSaveBlock(t *testing.T) {
 		recover func(t *testing.T, path string)
 	}{
 		{"replaced with supported envelope", func(t *testing.T, path string) {
-			if err := os.WriteFile(path, []byte(`{"version":1,"baselined":true}`), 0o600); err != nil {
+			if err := os.WriteFile(path, []byte(`{"version":1,"shrunk_walks":1}`), 0o600); err != nil {
 				t.Fatalf("write supported state: %v", err)
 			}
 		}},
@@ -1261,7 +1222,7 @@ func TestStoreLoadRecoveryClearsNewerSchemaSaveBlock(t *testing.T) {
 			if _, err := store.Load(context.Background()); err != nil {
 				t.Fatalf("Load after recovery returned error: %v", err)
 			}
-			if err := store.Save(context.Background(), &State{Baselined: true}); err != nil {
+			if err := store.Save(context.Background(), &State{ShrunkWalks: 1}); err != nil {
 				t.Errorf("Save after a recovered Load still blocked: %v (the block must clear once a supported or missing state loads)", err)
 			}
 		})
@@ -1277,11 +1238,7 @@ func TestStoreLoadRecoveryClearsNewerSchemaSaveBlock(t *testing.T) {
 func TestStoreSaveOverCapErrorReportsSizes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := NewStore(path, testLogger())
-	huge := &State{
-		Findings: map[string]notify.Alerted{
-			"huge": {Finding: notify.StoredFinding{Title: strings.Repeat("a", maxStateBytes+1)}},
-		},
-	}
+	huge := &State{Memo: paddedMemo(maxStateBytes + 1)}
 	stamped := *huge
 	stamped.Version = SchemaVersion
 	encoded, err := json.Marshal(&stamped)
@@ -1330,15 +1287,15 @@ func TestStoreLoadCorruptClearsNewerSchemaSaveBlock(t *testing.T) {
 		t.Fatal("Load of corrupt state returned nil error, want decode error")
 	}
 	assertQuarantined(t, path, "null")
-	if err := store.Save(context.Background(), &State{Baselined: true}); err != nil {
+	if err := store.Save(context.Background(), &State{ShrunkWalks: 1}); err != nil {
 		t.Errorf("Save after a corrupt Load still blocked: %v (maybeQuarantine must clear the newer-schema block once the live file is positively classified corrupt)", err)
 	}
 	got, err := store.Load(context.Background())
 	if err != nil {
 		t.Fatalf("Load after unblocked Save returned error: %v", err)
 	}
-	if !got.Baselined {
-		t.Error("re-loaded state lost Baselined, want the unblocked Save persisted")
+	if got.ShrunkWalks != 1 {
+		t.Error("re-loaded state lost ShrunkWalks, want the unblocked Save persisted")
 	}
 }
 
@@ -1418,7 +1375,7 @@ func TestEncodeStateWriteErrorWrapped(t *testing.T) {
 	if err := pf.Cleanup(); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
-	encErr := encodeState(pf, &State{Baselined: true}, path)
+	encErr := encodeState(pf, &State{ShrunkWalks: 1}, path)
 	if encErr == nil {
 		t.Fatal("encodeState on a closed pending temp returned nil error, want write failure")
 	}
@@ -1470,17 +1427,18 @@ func TestStoreLoadMalformedVersionValueQuarantines(t *testing.T) {
 // TestStoreLoadStateFieldTypeMismatchQuarantines pins decode's final gate: a
 // payload that passes the UTF-8, object-envelope, and version-discriminator
 // checks but fails the State unmarshal on a member type mismatch
-// ({"baselined":"yes"} / {"findings":[]}) is corruption Save can never
+// ({"library":"x"} / {"anilist_memo":[]}) is corruption Save can never
 // produce. It must quarantine with the original bytes preserved and the
 // following Save unblocked - the daemon persists a fresh envelope instead of
-// silently re-baselining behind a poisoned file forever.
+// reading a poisoned file forever.
 func TestStoreLoadStateFieldTypeMismatchQuarantines(t *testing.T) {
 	tests := []struct {
 		name string
 		body string
 	}{
-		{"bool member holds a string", `{"baselined":"yes"}`},
-		{"map member holds an array", `{"findings":[]}`},
+		{"bool member holds a string", `{"library":{"partial":"yes"}}`},
+		{"map member holds an array", `{"anilist_memo":[]}`},
+		{"struct member holds a string", `{"library":"not-an-object"}`},
 		{"int member holds an object", `{"shrunk_walks":{}}`},
 	}
 	for _, tt := range tests {
@@ -1514,7 +1472,7 @@ func TestStoreLoadStateFieldTypeMismatchQuarantines(t *testing.T) {
 // in any environment, root included.
 func TestStoreLoadCanceledReadBlocksSaveUntilClassified(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	if err := os.WriteFile(path, []byte(`{"baselined":true}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"shrunk_walks":1}`), 0o600); err != nil {
 		t.Fatalf("write state: %v", err)
 	}
 	store := NewStore(path, testLogger())
@@ -1534,15 +1492,15 @@ func TestStoreLoadCanceledReadBlocksSaveUntilClassified(t *testing.T) {
 		t.Errorf("blocked Save error = %v, want it to name the unclassified read failure", err)
 	}
 	live, readErr := os.ReadFile(path)
-	if readErr != nil || string(live) != `{"baselined":true}` {
+	if readErr != nil || string(live) != `{"shrunk_walks":1}` {
 		t.Errorf("live state after blocked Save = %q (err %v), want the original bytes preserved", live, readErr)
 	}
 	got, loadErr := store.Load(context.Background())
 	if loadErr != nil {
 		t.Fatalf("Load after recovery returned error: %v", loadErr)
 	}
-	if !got.Baselined {
-		t.Error("re-loaded state lost Baselined, want the preserved file read back")
+	if got.ShrunkWalks != 1 {
+		t.Error("re-loaded state lost ShrunkWalks, want the preserved file read back")
 	}
 	if saveErr := store.Save(context.Background(), &got); saveErr != nil {
 		t.Errorf("Save after a classifying Load = %v, want the block cleared", saveErr)
@@ -1560,7 +1518,7 @@ func TestStoreLoadCanceledReadBlocksSaveUntilClassified(t *testing.T) {
 func TestStoreSavePreservationRefusalsMatchErrSavePreserved(t *testing.T) {
 	t.Run("newer-schema block", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "state.json")
-		newer := fmt.Sprintf(`{"version":%d,"baselined":true}`, SchemaVersion+1)
+		newer := fmt.Sprintf(`{"version":%d,"shrunk_walks":1}`, SchemaVersion+1)
 		if err := os.WriteFile(path, []byte(newer), 0o600); err != nil {
 			t.Fatalf("write newer-schema state: %v", err)
 		}
@@ -1576,7 +1534,7 @@ func TestStoreSavePreservationRefusalsMatchErrSavePreserved(t *testing.T) {
 
 	t.Run("unclassified-read-failure block", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "state.json")
-		if err := os.WriteFile(path, []byte(`{"baselined":true}`), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte(`{"shrunk_walks":1}`), 0o600); err != nil {
 			t.Fatalf("write state: %v", err)
 		}
 		store := NewStore(path, testLogger())
@@ -1597,7 +1555,7 @@ func TestStoreSavePreservationRefusalsMatchErrSavePreserved(t *testing.T) {
 			t.Fatalf("create blocker file: %v", err)
 		}
 		store := NewStore(filepath.Join(blocker, "state.json"), testLogger())
-		err := store.Save(context.Background(), &State{Baselined: true})
+		err := store.Save(context.Background(), &State{ShrunkWalks: 1})
 		if err == nil {
 			t.Fatal("Save returned nil error, want a write failure")
 		}
@@ -1617,12 +1575,7 @@ func TestStoreSaveWarnsApproachingSizeLimit(t *testing.T) {
 	padded := func(n int) *State {
 		// Version mirrors the SchemaVersion stamp Save applies to the copy it
 		// writes, so the json.Marshal probe below measures the staged shape.
-		return &State{
-			Findings: map[string]notify.Alerted{
-				"pad": {Finding: notify.StoredFinding{Title: strings.Repeat("a", n)}},
-			},
-			Version: SchemaVersion,
-		}
+		return &State{Memo: paddedMemo(n), Version: SchemaVersion}
 	}
 	base, err := json.Marshal(padded(0))
 	if err != nil {
@@ -1658,13 +1611,13 @@ func TestStoreSaveWarnsApproachingSizeLimit(t *testing.T) {
 // its parent directory, so a state path that resolves OUTSIDE that directory
 // (a symlink planted at /config/state.json) is a read error Load classifies,
 // never a silent load of foreign bytes as the library snapshot, mapping cache,
-// AniList memo and finding-dedupe baseline. The escaping path is a
+// AniList memo and degradation streaks. The escaping path is a
 // DETERMINISTIC failure (no retry makes a foreign inode readable), so Load
 // classifies it as corruption: the link itself is quarantined, its target is
 // left untouched, and Save resumes on the fresh regular file rather than being
 // blocked forever by the recoverable-fault gate.
 func TestStoreLoadRefusesStatePathEscapingItsDirectory(t *testing.T) {
-	const foreign = `{"baselined":true}`
+	const foreign = `{"shrunk_walks":9}`
 	target := filepath.Join(t.TempDir(), "foreign.json")
 	if err := os.WriteFile(target, []byte(foreign), 0o600); err != nil {
 		t.Fatalf("write foreign state: %v", err)
@@ -1679,7 +1632,7 @@ func TestStoreLoadRefusesStatePathEscapingItsDirectory(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Load through an escaping symlink returned nil error and state %+v, want the confinement refusal", got)
 	}
-	if got.Baselined {
+	if got.ShrunkWalks != 0 {
 		t.Error("Load returned the foreign file's state, want the confined open to refuse it")
 	}
 	if !strings.Contains(err.Error(), "state: read") {

@@ -16,7 +16,6 @@ import (
 	"github.com/cplieger/arrapi"
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
-	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/indexer"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
@@ -166,15 +165,6 @@ func scoutTestLogger() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
 }
 
-// priorAlerted returns a persisted prior-finding fixture (alerted 2026-01-01
-// UTC) the preservation tests seed the dedupe table with.
-func priorAlerted(title string, alID int) notify.Alerted {
-	return notify.Alerted{
-		AlertedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Finding:   notify.StoredFinding{Title: title, Status: compare.StatusBetter, AniListID: alID},
-	}
-}
-
 // errTransport fails every request with a plain (non-transient) error, so
 // orchestration tests stay hermetic: the deliberately-unreachable
 // unused.invalid deps fail at the transport instead of issuing a real DNS
@@ -230,14 +220,14 @@ func aniStatsFn(c *anilist.Client) func() AniListStats {
 // reports the shutdown once at WARN.
 func TestLoadStateCanceledContextIsNotAFault(t *testing.T) {
 	logger, recorder := capture.New()
-	store := &fakeStore{st: state.State{Baselined: true}}
+	store := &fakeStore{st: state.State{ShrunkWalks: 1}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	s := New(&Deps{Logger: logger, Store: store})
 	st := s.loadState(ctx)
 
-	if st.Baselined {
+	if st.ShrunkWalks != 0 {
 		t.Error("loadState under a canceled context returned loaded state, want empty state")
 	}
 	if n := recorder.CountExact("state load failed; starting from empty state"); n != 0 {
@@ -278,14 +268,15 @@ func TestCycleLibraryWalkFailureIsUnhealthy(t *testing.T) {
 	}
 }
 
-func TestCycleSeaDexFailureIsHealthyAndPreservesFindings(t *testing.T) {
-	logger := scoutTestLogger()
-	prior := priorAlerted("Existing finding", 154587)
-	store := &fakeStore{st: state.State{
-		Mapping:   frierenMappingCache(),
-		Findings:  map[string]notify.Alerted{"prior": prior},
-		Baselined: true,
-	}}
+// TestCycleSeaDexFailureIsHealthyAndReportsNothing pins the SeaDex-outage
+// gate: the cycle is degraded-but-healthy, still saves the refreshed library
+// snapshot, and never reaches Report. Reporting is what makes not-reporting
+// meaningful, so an outage must leave the notifier's current set standing
+// rather than replace it with an empty one - otherwise a SeaDex hiccup would
+// stop reporting every condition that is still true.
+func TestCycleSeaDexFailureIsHealthyAndReportsNothing(t *testing.T) {
+	logger, recorder := capture.New()
+	store := &fakeStore{st: state.State{Mapping: frierenMappingCache()}}
 	sonarr := &fakeSonarr{
 		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
 		files: map[int][]arrapi.EpisodeFile{
@@ -293,11 +284,12 @@ func TestCycleSeaDexFailureIsHealthyAndPreservesFindings(t *testing.T) {
 		},
 	}
 	s := New(&Deps{
-		Logger:  logger,
-		Store:   store,
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
-		Mapping: fakeMapping{},
-		SeaDex:  &fakeSeaDex{err: errors.New("seadex down")},
+		Logger:   logger,
+		Store:    store,
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping:  fakeMapping{},
+		SeaDex:   &fakeSeaDex{err: errors.New("seadex down")},
+		Notifier: notify.NewNotifier(logger, nil),
 	})
 
 	if healthy := s.Cycle(context.Background()); !healthy {
@@ -307,12 +299,8 @@ func TestCycleSeaDexFailureIsHealthyAndPreservesFindings(t *testing.T) {
 	if len(loaded.Library.Items) != 1 || loaded.Library.Items[0].Title != "Frieren" {
 		t.Errorf("library snapshot after degraded cycle = %+v, want refreshed Frieren snapshot", loaded.Library)
 	}
-	got, ok := loaded.Findings["prior"]
-	if !ok {
-		t.Fatalf("prior finding was not preserved: %+v", loaded.Findings)
-	}
-	if got.Finding.Title != prior.Finding.Title || !got.AlertedAt.Equal(prior.AlertedAt) {
-		t.Errorf("preserved finding = %+v, want %+v", got, prior)
+	if n := recorder.CountExact("findings reported"); n != 0 {
+		t.Errorf("SeaDex-outage cycle reported findings %d times, want 0 (the gate runs no compare)", n)
 	}
 }
 
@@ -342,7 +330,7 @@ func TestSaveRetriesDetachedOnCancelledContext(t *testing.T) {
 	logger := scoutTestLogger()
 	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
 	s := New(&Deps{Logger: logger, Store: store})
-	want := state.State{Baselined: true}
+	want := state.State{ShrunkWalks: 1}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -352,8 +340,8 @@ func TestSaveRetriesDetachedOnCancelledContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() after save with canceled context: %v", err)
 	}
-	if !got.Baselined {
-		t.Errorf("Load().Baselined = false, want true")
+	if got.ShrunkWalks != 1 {
+		t.Errorf("Load().ShrunkWalks = %d, want 1", got.ShrunkWalks)
 	}
 }
 
@@ -578,12 +566,12 @@ func TestSaveGenuineFailureOnLiveContextIsNotRetried(t *testing.T) {
 	store := &failOnceStore{}
 	s := New(&Deps{Logger: logger, Store: store})
 
-	s.save(context.Background(), &state.State{Baselined: true})
+	s.save(context.Background(), &state.State{ShrunkWalks: 1})
 
 	if store.attempts != 1 {
 		t.Errorf("Save attempts = %d, want 1 (only a cancellation takes the detached retry)", store.attempts)
 	}
-	if store.st.Baselined {
+	if store.st.ShrunkWalks != 0 {
 		t.Error("state was persisted by a retry, want the genuinely-failed save left unpersisted")
 	}
 	errCount := recorder.CountLevel(slog.LevelError, "state save failed")
@@ -603,7 +591,7 @@ func TestLoadStateDeadlineExceededIsNotAFault(t *testing.T) {
 
 	st := s.loadState(context.Background())
 
-	if st.Baselined || len(st.Findings) != 0 {
+	if st.ShrunkWalks != 0 || len(st.Memo.Entries) != 0 {
 		t.Errorf("loadState on a deadline-exceeded load = %+v, want empty state", st)
 	}
 	if n := recorder.CountExact("state load failed; starting from empty state"); n != 0 {
@@ -637,7 +625,7 @@ func TestSavePreservationRefusalWarnsInsteadOfErroring(t *testing.T) {
 			refusal := fmt.Errorf("state: save /config/state.json: blocked after an unclassified read failure: %w", state.ErrSavePreserved)
 			s := New(&Deps{Logger: logger, Store: &fakeStore{saveErr: refusal}})
 
-			s.save(tc.ctx(), &state.State{Baselined: true})
+			s.save(tc.ctx(), &state.State{ShrunkWalks: 1})
 
 			if n := recorder.CountLevel(slog.LevelWarn, "state save skipped; on-disk state preserved"); n != 1 {
 				t.Errorf("preservation-refusal WARN count = %d, want exactly 1", n)
@@ -685,7 +673,7 @@ func TestSaveRetryAlwaysGetsTheAnchoredGrace(t *testing.T) {
 	store := &slowCancelStore{spend: spend}
 	s := New(&Deps{Logger: slog.New(slog.DiscardHandler), Store: store})
 
-	s.save(context.Background(), &state.State{Baselined: true})
+	s.save(context.Background(), &state.State{ShrunkWalks: 1})
 
 	if store.attempts != 2 {
 		t.Fatalf("Save attempts = %d, want 2 (the cancellation takes the detached retry)", store.attempts)

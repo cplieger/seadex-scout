@@ -125,6 +125,13 @@ const (
 	maxExcludeTagLen = 64
 )
 
+// maxIgnoreIDs bounds filters.ignore. Findings are reported as STATE, so every
+// entry in this set is consulted once per finding on every emission pass; a
+// generous ceiling keeps a 1 MiB config from turning that into unbounded work,
+// and an operator with more than a few hundred deliberately-declined shows has
+// a different problem than an alert filter can solve (CWE-400).
+const maxIgnoreIDs = 512
+
 // --- On-disk YAML shape and defaults ---
 
 // fileConfig is the on-disk YAML shape: only the user-facing settings.
@@ -134,10 +141,13 @@ type fileConfig struct {
 	Report       reportFile  `yaml:"report"`
 	PollInterval string      `yaml:"poll_interval"`
 	Mode         string      `yaml:"mode"`
-	Filters      filtersFile `yaml:"filters"`
 	Radarr       arrFile     `yaml:"radarr"`
 	Sonarr       arrFile     `yaml:"sonarr"`
 	ArrTags      tagsFile    `yaml:"arr_tags"`
+	// Filters sits after the pointer-bearing members and before AnimeBytes
+	// because filtersFile ends in bools: keeping its non-pointer tail late
+	// shortens the struct's GC-scanned prefix (govet fieldalignment).
+	Filters filtersFile `yaml:"filters"`
 	// AnimeBytes adds AnimeBytes (private tracker) releases and links to findings
 	// and the report; it is a tracker-access toggle (do you have an account?),
 	// not a content filter, so it sits at the top level rather than under filters.
@@ -174,10 +184,17 @@ type filtersFile struct {
 	// excluded from ("findings", "report", "feed"). Absent or empty means
 	// NOTHING is filtered on any surface; see buildTagFilter for the bounds and
 	// the surface vocabulary.
-	ExcludeTags      map[string][]string `yaml:"exclude_tags"`
-	ExcludeRemux     bool                `yaml:"exclude_remux"`
-	RequireDualAudio bool                `yaml:"require_dual_audio"`
-	ExcludeSpecials  bool                `yaml:"exclude_specials"`
+	ExcludeTags map[string][]string `yaml:"exclude_tags"`
+	// Ignore lists AniList IDs whose findings are never emitted. Absent or
+	// empty (the default) reports everything. It suppresses EMISSION only: the
+	// report still shows the row and the RSS feed is untouched, because the
+	// app's standing rule is that a release is never withheld from the arrs -
+	// this withholds an ALERT the operator asked to stop, which is a different
+	// thing. See buildIgnoreSet for the bound.
+	Ignore           []int `yaml:"ignore"`
+	ExcludeRemux     bool  `yaml:"exclude_remux"`
+	RequireDualAudio bool  `yaml:"require_dual_audio"`
+	ExcludeSpecials  bool  `yaml:"exclude_specials"`
 }
 
 type tagsFile struct {
@@ -226,6 +243,12 @@ type Config struct {
 	// release SeaDex tagged Broken reaches the findings, the report and the
 	// feed. It is the one policy all three surfaces read.
 	TagFilter tagfilter.Filter
+	// IgnoreFindings is the filters.ignore policy: AniList IDs whose findings
+	// are never emitted. Nil (the default) reports everything.
+	IgnoreFindings map[int]struct{}
+	// ignoreErr holds a rejected filters.ignore list, recorded at flatten time
+	// and returned by Validate beside tagFilterErr.
+	ignoreErr error
 
 	RunMode   string // "daemon" (default) or "report" (one-shot audit).
 	ReportDir string // directory for timestamped report-<ts>.md / .json pairs.
@@ -370,6 +393,7 @@ func (fc *fileConfig) toConfig() Config {
 	}
 	c.PollInterval, c.PollExternal = parseInterval(fc.PollInterval)
 	c.TagFilter, c.tagFilterErr = buildTagFilter(fc.Filters.ExcludeTags)
+	c.IgnoreFindings, c.ignoreErr = buildIgnoreSet(fc.Filters.Ignore)
 	warnAllBlankTagList("arr_tags.include", fc.ArrTags.Include, c.IncludeTags)
 	warnAllBlankTagList("arr_tags.exclude", fc.ArrTags.Exclude, c.ExcludeTags)
 	return c
@@ -389,6 +413,30 @@ func applyArr(name string, af arrFile) (arrURL, key, publicURL string) {
 			"field", name+".api_key")
 	}
 	return "", "", ""
+}
+
+// buildIgnoreSet turns filters.ignore into the emission-suppression set,
+// rejecting an over-long list and a non-positive AniList ID (SeaDex's own IDs
+// start at 1, so a zero or negative entry is a typo that would silently match
+// nothing). Duplicates are accepted and collapse, since a set is what the
+// caller wants. An empty list yields nil, the same as an absent key: there is
+// one unambiguous way to suppress nothing.
+func buildIgnoreSet(raw []int) (map[int]struct{}, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	if len(raw) > maxIgnoreIDs {
+		return nil, fmt.Errorf("filters.ignore lists more than %d AniList IDs", maxIgnoreIDs)
+	}
+	out := make(map[int]struct{}, len(raw))
+	for _, id := range raw {
+		if id <= 0 {
+			return nil, fmt.Errorf(
+				"filters.ignore holds a non-positive AniList ID (%d); IDs start at 1", id)
+		}
+		out[id] = struct{}{}
+	}
+	return out, nil
 }
 
 // buildTagFilter turns the filters.exclude_tags map into the one tagfilter
@@ -565,10 +613,14 @@ func (c *Config) Validate() error {
 	if err := validateRunMode(c.RunMode); err != nil {
 		return err
 	}
-	// The filters.exclude_tags map is parsed once at flatten time (toConfig);
-	// this is where its rejection becomes the startup error.
+	// The filters.exclude_tags map and filters.ignore list are parsed once at
+	// flatten time (toConfig); this is where a rejection becomes the startup
+	// error.
 	if c.tagFilterErr != nil {
 		return c.tagFilterErr
+	}
+	if c.ignoreErr != nil {
+		return c.ignoreErr
 	}
 	if err := validateArrPair("sonarr", c.SonarrURL, c.SonarrAPIKey); err != nil {
 		return err
