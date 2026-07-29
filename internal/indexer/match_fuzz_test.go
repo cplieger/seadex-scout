@@ -112,14 +112,19 @@ func FuzzTrackerKeyFromURL_neverKeysFromQueryOrFragment(f *testing.F) {
 // from untrusted SeaDex records; the Prowlarr-side twin is
 // FuzzTrackerKeyFromURL_neverKeysFromQueryOrFragment): any non-empty key is
 // scope:<bounded digits> for a supported scope, and under the package's urlform
-// structural vocabulary the source is either an absolute URL on exactly that
-// tracker's canonical host or, for AnimeBytes only, a rooted relative reference,
-// so a tracker label can never authorize an id extracted from a foreign,
-// subdomain, or opaque URL.
+// structural vocabulary the source is either an http(s) URL on exactly that
+// tracker's canonical host - in its absolute or its scheme-free spelling, which
+// name the same page (l-f19) - or, for AnimeBytes only, a rooted relative
+// reference, so a tracker label can never authorize an id extracted from a
+// foreign, subdomain, or opaque URL.
 func FuzzTrackerKey_keysOnlyTrackerOwnCanonicalURLs(f *testing.F) {
 	f.Add("Nyaa", "https://nyaa.si/view/1234567")
 	f.Add("AB", "/torrents.php?id=1&torrentid=456")
 	f.Add("AB", "https://animebytes.tv/torrent/1167293/group")
+	f.Add("AB", "animebytes.tv/torrents.php?id=1&torrentid=456")
+	f.Add("Nyaa", "nyaa.si/view/1234567")
+	f.Add("AB", "evil@animebytes.tv/torrents.php?torrentid=456")
+	f.Add("Nyaa", "//nyaa.si/view/123")
 	f.Add("Nyaa", "https://evil.example/view/123")
 	f.Add("Nyaa", "https://sukebei.nyaa.si/view/123")
 	f.Add("Nyaa", "https://nyaa.si./view/123")
@@ -147,16 +152,20 @@ func FuzzTrackerKey_keysOnlyTrackerOwnCanonicalURLs(f *testing.F) {
 		// "https://nyaa.si./view/1". The oracle must normalize the same way or a
 		// legitimate input is reported as a crasher.
 		host := strings.TrimSuffix(f.Host, ".")
+		// Both spellings of a host-bearing URL are admissible (l-f19); a
+		// schemeless one carries no scheme by construction, so the oracle keys
+		// on the class, not on the scheme text.
+		hostForm := f.Class == urlform.ClassAbsolute || f.Class == urlform.ClassSchemelessHost
 		switch scope {
 		case upstreamNyaa:
-			if f.Class != urlform.ClassAbsolute || host != "nyaa.si" {
-				t.Fatalf("nyaa key %q minted from %q (class %v, host %q), want an absolute URL on exactly nyaa.si",
+			if !hostForm || host != "nyaa.si" {
+				t.Fatalf("nyaa key %q minted from %q (class %v, host %q), want an http(s) URL on exactly nyaa.si",
 					key, raw, f.Class, f.Host)
 			}
 		case upstreamAB:
-			absoluteCanonical := f.Class == urlform.ClassAbsolute && host == "animebytes.tv"
+			hostCanonical := hostForm && host == "animebytes.tv"
 			rootedRelative := f.Class == urlform.ClassRelative && f.Host == ""
-			if !absoluteCanonical && !rootedRelative {
+			if !hostCanonical && !rootedRelative {
 				t.Fatalf("ab key %q minted from %q (class %v, host %q), want the canonical host or a rooted relative reference",
 					key, raw, f.Class, f.Host)
 			}

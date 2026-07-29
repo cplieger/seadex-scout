@@ -122,20 +122,24 @@ func trackerKey(trackerName, sourceURL string) string {
 	if scope == "" {
 		return ""
 	}
-	// Classify ONCE and extract the id from that same reading (Form.Trimmed),
-	// never from the original spelling: see trackerOwnForm.
+	// Classify ONCE and extract the id from that same reading, never from the
+	// original spelling: see trackerOwnForm. The vouched form is normalized to
+	// its canonical absolute spelling first (tracker.CanonicalSourceURL), so the
+	// scheme-free spelling of a tracker page keys identically to the absolute
+	// one instead of losing its route to net/url.
 	f := urlform.Classify(sourceURL)
 	if !trackerOwnForm(scope, &f) {
 		return ""
 	}
-	if id := trackerID(scope, f.Trimmed); id != "" {
+	if id := trackerID(scope, tracker.CanonicalSourceURL(&f)); id != "" {
 		return scope + ":" + id
 	}
 	return ""
 }
 
 // trackerOwnForm reports whether a classified SeaDex source URL belongs to the
-// scope's own tracker: an absolute http(s), userinfo-free URL on the tracker's EXACT
+// scope's own tracker: a userinfo-free absolute http(s) URL - or the same URL
+// spelled without its scheme (see ownableHostForm) - on the tracker's EXACT
 // canonical host (the shared tracker.Is*Host predicates reject homograph
 // labels; the additional canonical-host check rejects subdomains, whose
 // torrent-id databases are independent of the apex site's - see
@@ -160,8 +164,13 @@ func trackerKey(trackerName, sourceURL string) string {
 // "true relative reference" and admitted it here, after which the id extraction
 // found nothing and the indexer silently DROPPED the release. Same string, two
 // structural readings, one app. Under urlform a schemeless-host form is host
-// evidence on both sides: it now takes the host arm and is judged against the
-// canonical-host policy like any other absolute-ish form.
+// evidence on both sides: it takes the host arm and is judged against the
+// canonical-host policy like any other absolute-ish form, and it is ADMITTED
+// there (l-f19) so the divergence closes in the direction that ends the split -
+// the daemon used to alert on such a release with a clickable link while the
+// feed silently omitted it as unresolvable. Admission happens only after every
+// other gate below, and the id extractors stay exactly as strict; what makes it
+// resolvable is tracker.CanonicalSourceURL, which hands them the https spelling.
 //
 // The AB relative arm is deliberately ClassRelative (a rooted "/x" path) rather
 // than the narrower tracker.LookupByRelativeURL, which additionally
@@ -189,9 +198,10 @@ func trackerOwnForm(scope string, f *urlform.Form) bool {
 	}
 	// Host-bearing forms (absolute, protocol-relative, schemeless-host, or a
 	// hidden-host form whose authority urlform recovered) are judged on their
-	// host evidence; only an absolute http(s) form can satisfy the scheme bar.
+	// host evidence; only the two spellings of an http(s) URL on that host can
+	// carry ownership at all (ownableHostForm).
 	if f.Host != "" {
-		if f.Class != urlform.ClassAbsolute || f.HasUserInfo || !isHTTPScheme(f.Scheme) {
+		if !ownableHostForm(f) || f.HasUserInfo {
 			return false
 		}
 		return scope != "" && scopeOfHost(f.Host) == scope &&
@@ -201,6 +211,38 @@ func trackerOwnForm(scope string, f *urlform.Form) bool {
 	// a form whose host could not be recovered (HostUnrecoverable) is a parse
 	// failure for evidence purposes and must not slip through as "relative".
 	return scope == upstreamAB && f.Class == urlform.ClassRelative && !f.HostUnrecoverable
+}
+
+// ownableHostForm reports whether a host-bearing form's CLASS and SCHEME can
+// carry tracker ownership at all, before its host is judged. Exactly two
+// spellings of one thing - an http(s) URL on the tracker's own site - qualify;
+// everything else fails closed.
+//
+// An absolute URL must carry an http(s) scheme, the same bar the display gate
+// applies (httpDisplayForm, used by trackerKeyFromURL), so writer admission and
+// journal identity agree and an odd-scheme SeaDex record is never journaled.
+//
+// A schemeless-host form ("animebytes.tv/torrents.php?id=1&torrentid=456") is a
+// mislabeled absolute URL, and it has NO scheme to bar: urlform only reaches
+// that class when the parse found none, so the test is that the scheme is
+// absent - stated explicitly rather than left to hold by accident. It is
+// scheme-SAFE for the same reason the link publisher can publish it: the value
+// is normalized to https before anything parses it
+// (tracker.CanonicalSourceURL), and every canonical tracker in the table is an
+// https site, so the form cannot smuggle a non-http scheme past this gate.
+//
+// A protocol-relative form ("//animebytes.tv/...") and a recovered hidden-host
+// form ("https:animebytes.tv/...") also carry a host but are neither spelling: a
+// browser and net/url disagree about them, so they must not prove an identity.
+func ownableHostForm(f *urlform.Form) bool {
+	switch f.Class {
+	case urlform.ClassAbsolute:
+		return isHTTPScheme(f.Scheme)
+	case urlform.ClassSchemelessHost:
+		return f.Scheme == ""
+	default:
+		return false
+	}
 }
 
 // canonicalTrackerHost returns the exact hostname of a scope's tracker site,

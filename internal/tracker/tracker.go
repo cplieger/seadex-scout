@@ -122,6 +122,39 @@ func CanonicalName(label, rawURL string) string {
 	return host
 }
 
+// CanonicalSourceURL returns the canonical ABSOLUTE value to parse a tracker
+// URL's own components out of - the torrent-page route and the numeric id in
+// it - for a form the caller has ALREADY vouched as the tracker's own.
+//
+// SeaDex spells the same tracker page two ways. The absolute
+// "https://animebytes.tv/torrents.php?id=1&torrentid=456" is already the value
+// to parse; the scheme-free "animebytes.tv/torrents.php?id=1&torrentid=456" is
+// the same page to a browser (and to urlform, as ClassSchemelessHost, which
+// recovers the authority) but NOT to net/url, which reads "animebytes.tv" as
+// the first path segment - so parsing that spelling directly finds no
+// /torrents.php route and yields no id. Prefixing "https://" is what makes the
+// two spellings parse identically, and it is sound because every canonical
+// tracker in the table above is https; it is also exactly how the link
+// publisher canonicalizes the same form (trackerlink.usableSchemelessHost), so
+// a published link and a value parsed here cannot name different pages.
+//
+// It lives here, beside the host table, because more than one consumer needs
+// the normalized value (internal/indexer builds both its match key and its
+// download target from it). Two hand-rolled prefixes would be a drift trap the
+// moment either side gains a form.
+//
+// It is NOT a gate and vouches nothing: ownership - no smuggling, no userinfo,
+// the exact canonical host, the right tracker - must already be established by
+// the caller. Every other form is returned as the classification read it
+// (Form.Trimmed): an absolute URL needs no rewrite, and the documented rooted
+// relative AB path is parsed as the path it already is.
+func CanonicalSourceURL(f *urlform.Form) string {
+	if f.Class == urlform.ClassSchemelessHost {
+		return "https://" + f.Trimmed
+	}
+	return f.Trimmed
+}
+
 // TypeOf maps a tracker name to its obtainability class via the canonical
 // tracker table (Lookup). An unrecognized name is Unknown, never silently
 // treated as obtainable.

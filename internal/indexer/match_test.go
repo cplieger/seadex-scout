@@ -309,9 +309,10 @@ func TestTrackerIDUnknownScopeFailsClosed(t *testing.T) {
 // structural readings, one app.
 //
 // The gate now reads urlform throughout: a host-bearing form is judged on its
-// host evidence and must be a userinfo-free absolute http(s) URL on the exact
-// canonical host, and only a ROOTED relative reference takes the AB relative
-// arm. The relative arm stays ClassRelative rather than the narrower
+// host evidence and must be a userinfo-free http(s) URL on the exact canonical
+// host, in either of that URL's two spellings (absolute, or the scheme-free
+// form a browser reads the same way - admitted since l-f19), and only a ROOTED
+// relative reference takes the AB relative arm. The relative arm stays ClassRelative rather than the narrower
 // tracker.LookupByRelativeURL (which also demands the
 // "/torrents.php?...torrentid=" shape), so a relative Prowlarr permalink keeps
 // working.
@@ -332,9 +333,20 @@ func TestTrackerOwnURLReadsOneStructuralVocabulary(t *testing.T) {
 		"userinfo authority refused":    {upstreamAB, "https://evil@animebytes.tv/torrents.php?torrentid=1", false},
 		"non-http scheme refused":       {upstreamAB, "javascript:/torrents.php?torrentid=456", false},
 		// The divergent shape: host evidence to urlform, so it takes the HOST
-		// arm and is refused for not being absolute - one honest reading,
-		// instead of being admitted as "relative" and then failing at the id.
-		"schemeless host is host evidence, not relative": {upstreamAB, "animebytes.tv/torrents.php?id=1&torrentid=456", false},
+		// arm and is judged on its host like any other absolute-ish form - and
+		// admitted there (l-f19), which is what stops the daemon alerting on a
+		// release the feed omits. The host policy still decides everything.
+		"schemeless canonical ab host admitted":     {upstreamAB, "animebytes.tv/torrents.php?id=1&torrentid=456", true},
+		"schemeless canonical nyaa host admitted":   {upstreamNyaa, "nyaa.si/view/1234567", true},
+		"schemeless foreign host refused":           {upstreamAB, "evil.example/torrents.php?torrentid=456", false},
+		"schemeless subdomain refused":              {upstreamNyaa, "sukebei.nyaa.si/view/123", false},
+		"schemeless canonical host wrong scope":     {upstreamNyaa, "animebytes.tv/torrents.php?torrentid=456", false},
+		"schemeless userinfo authority refused":     {upstreamAB, "evil@animebytes.tv/torrents.php?torrentid=1", false},
+		"schemeless backslash refused":              {upstreamAB, `animebytes.tv\torrents.php?torrentid=1`, false},
+		"schemeless tab-smuggled host refused":      {upstreamAB, "animeby\ttes.tv/torrents.php?torrentid=1", false},
+		"protocol-relative canonical host refused":  {upstreamAB, "//animebytes.tv/torrents.php?id=1&torrentid=456", false},
+		"hidden-host canonical host refused":        {upstreamAB, "https:animebytes.tv/torrents.php?torrentid=456", false},
+		"schemeless nyaa host under ab scope stays": {upstreamAB, "nyaa.si/view/123", false},
 		// Smuggling forms: a browser and net/url read these differently, so
 		// they must never prove a curation identity.
 		"backslash authority refused": {upstreamAB, "\\torrents.php?torrentid=456", false},
@@ -428,5 +440,109 @@ func TestTrackerKeysReadTheVouchedForm(t *testing.T) {
 				t.Errorf("trackerKeyFromURL(%q) = %q, want %q", tc.sourceURL, got, tc.wantFromURL)
 			}
 		})
+	}
+}
+
+// TestSchemelessHostKeysAsItsAbsoluteSpelling pins l-f19: a SeaDex record may
+// spell a tracker page without its scheme ("animebytes.tv/torrents.php?...").
+// The publisher and the AnimeBytes evidence gate have always read that as host
+// evidence and published a working https link, while this package refused it -
+// so the daemon emitted "better release available" for a release the Torznab
+// feed silently omitted as unresolvable, breaking the invariant that one cycle
+// means an alert and the feed cannot diverge.
+//
+// The two spellings must produce the SAME key, not merely a non-empty one: they
+// name one torrent, so a record that changes spelling (or a catalogue carrying
+// both) must not enter the curation set and the seen ledger twice. That
+// equality is intended same-tracker deduplication, and it is also what makes
+// the journal GUID (the canonical absolute URL) round-trip to the same key.
+func TestSchemelessHostKeysAsItsAbsoluteSpelling(t *testing.T) {
+	pairs := map[string]struct {
+		tracker, schemeless, absolute string
+	}{
+		"ab site form":  {"AB", "animebytes.tv/torrents.php?id=1&torrentid=456", "https://animebytes.tv/torrents.php?id=1&torrentid=456"},
+		"ab permalink":  {"AB", "animebytes.tv/torrent/1167293/group", "https://animebytes.tv/torrent/1167293/group"},
+		"nyaa view":     {"Nyaa", "nyaa.si/view/1234567", "https://nyaa.si/view/1234567"},
+		"nyaa fqdn dot": {"Nyaa", "nyaa.si./view/1234567", "https://nyaa.si./view/1234567"},
+	}
+	for name, tc := range pairs {
+		t.Run(name, func(t *testing.T) {
+			want := trackerKey(tc.tracker, tc.absolute)
+			if want == "" {
+				t.Fatalf("trackerKey(%q, %q) = %q, want the absolute spelling to key (test premise)", tc.tracker, tc.absolute, want)
+			}
+			if got := trackerKey(tc.tracker, tc.schemeless); got != want {
+				t.Errorf("trackerKey(%q, %q) = %q, want the absolute spelling's key %q", tc.tracker, tc.schemeless, got, want)
+			}
+			// The download builder is the second SeaDex-source consumer of the
+			// same normalization; if it drifted, a keyed release would journal
+			// with no grabbable link.
+			wantURL, wantOK := downloadURL(tc.tracker, tc.absolute, "pk")
+			if !wantOK {
+				t.Fatalf("downloadURL(%q, %q) ok=false, want a link (test premise)", tc.tracker, tc.absolute)
+			}
+			gotURL, gotOK := downloadURL(tc.tracker, tc.schemeless, "pk")
+			if !gotOK || gotURL != wantURL {
+				t.Errorf("downloadURL(%q, %q) = %q, ok=%v, want the absolute spelling's %q", tc.tracker, tc.schemeless, gotURL, gotOK, wantURL)
+			}
+		})
+	}
+}
+
+// TestSchemelessHostAdmissionKeepsEveryRefusal is the regression guard for the
+// admission above: it widens exactly one spelling of a canonical-host URL and
+// nothing else. Every refusal a schemeless form could plausibly smuggle through
+// is asserted at the key builders, past the ownership table, because these are
+// the functions whose output authorizes curation and a download link.
+//
+// The strict id extractors are deliberately unchanged, so a schemeless form
+// whose route is not the tracker's own still mints nothing - the normalization
+// hands them a properly-schemed string, it does not relax them.
+func TestSchemelessHostAdmissionKeepsEveryRefusal(t *testing.T) {
+	tests := map[string]struct{ tracker, sourceURL string }{
+		"foreign host":                 {"AB", "evil.example/torrents.php?id=1&torrentid=456"},
+		"foreign host with nyaa route": {"Nyaa", "evil.example/view/123"},
+		"subdomain of canonical host":  {"Nyaa", "sukebei.nyaa.si/view/123"},
+		"canonical host wrong scope":   {"Nyaa", "animebytes.tv/torrents.php?id=1&torrentid=456"},
+		"userinfo authority":           {"AB", "evil@animebytes.tv/torrents.php?torrentid=456"},
+		"backslash authority":          {"AB", `animebytes.tv\torrents.php?torrentid=456`},
+		"embedded tab":                 {"Nyaa", "nyaa\t.si/view/123"},
+		"embedded newline":             {"Nyaa", "nyaa.si/view\n/123"},
+		"protocol-relative":            {"AB", "//animebytes.tv/torrents.php?id=1&torrentid=456"},
+		"hidden host":                  {"AB", "https:animebytes.tv/torrents.php?torrentid=456"},
+		"homograph host":               {"Nyaa", "nyaa.sı/view/123"},
+		"route not the tracker's own":  {"AB", "animebytes.tv/not-a-torrent?torrentid=456"},
+		"nyaa route not anchored":      {"Nyaa", "nyaa.si/redirect/view/123"},
+		"dot segments in the route":    {"Nyaa", "nyaa.si/view/123/../456"},
+		"non-numeric id":               {"AB", "animebytes.tv/torrents.php?torrentid=abc"},
+		"duplicate torrentid":          {"AB", "animebytes.tv/torrents.php?torrentid=1&torrentid=2"},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := trackerKey(tc.tracker, tc.sourceURL); got != "" {
+				t.Errorf("trackerKey(%q, %q) = %q, want empty", tc.tracker, tc.sourceURL, got)
+			}
+			if got, ok := downloadURL(tc.tracker, tc.sourceURL, "pk"); ok {
+				t.Errorf("downloadURL(%q, %q) = %q, ok=true, want refused", tc.tracker, tc.sourceURL, got)
+			}
+		})
+	}
+}
+
+// TestTrackerKeyFromURLStaysAbsoluteOnly pins the deliberate asymmetry between
+// the two key builders. trackerKeyFromURL reads a PROWLARR item's display URL,
+// which is a real absolute link the arr will render and follow, so it keeps the
+// shared display gate (httpDisplayForm) and never accepts the scheme-free
+// spelling - only SeaDex records carry that shape, and only trackerKey and
+// downloadTarget normalize it.
+func TestTrackerKeyFromURLStaysAbsoluteOnly(t *testing.T) {
+	for _, raw := range []string{
+		"animebytes.tv/torrents.php?id=1&torrentid=456",
+		"animebytes.tv/torrent/1167293/group",
+		"nyaa.si/view/1234567",
+	} {
+		if got := trackerKeyFromURL(raw); got != "" {
+			t.Errorf("trackerKeyFromURL(%q) = %q, want empty (display URLs must be absolute)", raw, got)
+		}
 	}
 }

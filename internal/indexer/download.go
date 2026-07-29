@@ -65,14 +65,17 @@ func downloadTarget(scope, sourceURL string) (base, id string, ok bool) {
 	if scope == "" {
 		return "", "", false
 	}
-	// Classify once and extract the id from that same reading (f.Trimmed), so a
-	// URL the ownership gate vouches can never fail id extraction because the
-	// extractor re-parsed the original spelling (h-f8, see trackerOwnForm).
+	// Classify once and extract the id from that same reading, so a URL the
+	// ownership gate vouches can never fail id extraction because the extractor
+	// re-parsed the original spelling (h-f8, see trackerOwnForm). The vouched
+	// form is normalized to its canonical absolute spelling
+	// (tracker.CanonicalSourceURL) - the SAME normalization trackerKey applies,
+	// which is why that rule lives in the tracker package instead of twice here.
 	f := urlform.Classify(sourceURL)
 	if !trackerOwnForm(scope, &f) {
 		return "", "", false
 	}
-	if id = trackerID(scope, f.Trimmed); id == "" {
+	if id = trackerID(scope, tracker.CanonicalSourceURL(&f)); id == "" {
 		return "", "", false
 	}
 	var trackerName string

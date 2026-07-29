@@ -459,3 +459,57 @@ func TestCanonicalName(t *testing.T) {
 		})
 	}
 }
+
+// TestCanonicalSourceURL pins the one normalization two consumers share: a
+// scheme-free tracker page URL parses as its https spelling, and every other
+// vouched form is handed on exactly as the classification read it. The
+// schemeless case is the whole reason the helper exists - net/url reads
+// "animebytes.tv" as the first PATH segment, so without the prefix the
+// torrent-page route is absent and no id can be extracted.
+func TestCanonicalSourceURL(t *testing.T) {
+	cases := map[string]struct {
+		raw, want string
+	}{
+		"schemeless ab page gains https":     {"animebytes.tv/torrents.php?id=1&torrentid=456", "https://animebytes.tv/torrents.php?id=1&torrentid=456"},
+		"schemeless nyaa page gains https":   {"nyaa.si/view/123", "https://nyaa.si/view/123"},
+		"absolute url is unchanged":          {"https://nyaa.si/view/123", "https://nyaa.si/view/123"},
+		"cleartext absolute is not upgraded": {"http://nyaa.si/view/123", "http://nyaa.si/view/123"},
+		"rooted relative ab path is a path":  {"/torrents.php?id=1&torrentid=456", "/torrents.php?id=1&torrentid=456"},
+		"edge padding is already trimmed":    {" \thttps://nyaa.si/view/123 ", "https://nyaa.si/view/123"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := urlform.Classify(tc.raw)
+			if got := CanonicalSourceURL(&f); got != tc.want {
+				t.Errorf("CanonicalSourceURL(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCanonicalSourceURLParsesToTheSameRoute is the property the consumers
+// actually depend on: the schemeless and absolute spellings of one tracker page
+// must parse to the SAME path and query, so an id extracted from either names
+// the same torrent. Asserting the string equality alone would not show that.
+func TestCanonicalSourceURLParsesToTheSameRoute(t *testing.T) {
+	for _, pair := range []struct{ schemeless, absolute string }{
+		{"animebytes.tv/torrents.php?id=1&torrentid=456", "https://animebytes.tv/torrents.php?id=1&torrentid=456"},
+		{"animebytes.tv/torrent/1167293/group", "https://animebytes.tv/torrent/1167293/group"},
+		{"nyaa.si/view/1234567", "https://nyaa.si/view/1234567"},
+	} {
+		fs := urlform.Classify(pair.schemeless)
+		fa := urlform.Classify(pair.absolute)
+		gotURL, err := url.Parse(CanonicalSourceURL(&fs))
+		if err != nil {
+			t.Fatalf("parse normalized %q: %v", pair.schemeless, err)
+		}
+		wantURL, err := url.Parse(CanonicalSourceURL(&fa))
+		if err != nil {
+			t.Fatalf("parse normalized %q: %v", pair.absolute, err)
+		}
+		if gotURL.Path != wantURL.Path || gotURL.RawQuery != wantURL.RawQuery {
+			t.Errorf("normalized %q parses to path %q query %q, want the absolute spelling's %q / %q",
+				pair.schemeless, gotURL.Path, gotURL.RawQuery, wantURL.Path, wantURL.RawQuery)
+		}
+	}
+}
