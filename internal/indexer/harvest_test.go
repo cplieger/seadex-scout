@@ -1101,7 +1101,8 @@ func TestSyntheticCountSkipsKeylessItems(t *testing.T) {
 // Nyaa uses the season form (t=tvsearch, q + season) only for a non-movie
 // with a mapped season - a seasonless show and a movie stay a plain search -
 // while AnimeBytes is always a plain series-level search, and the q value is
-// the trimmed synthesis title.
+// the title candidate it was given (harvestTitleCandidates trims; the ladder
+// varies the title only, never the mode or the season).
 func TestHarvestParams(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1118,7 +1119,7 @@ func TestHarvestParams(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := harvestParams(tc.meta, tc.scope)
+			got := harvestParams(tc.meta, tc.scope, strings.TrimSpace(tc.meta.Title))
 			if got.Get("t") != tc.wantT {
 				t.Errorf("harvestParams(%+v, %q) t = %q, want %q", tc.meta, tc.scope, got.Get("t"), tc.wantT)
 			}
@@ -2562,5 +2563,206 @@ func TestHarvestPartialProgressDoesNotLatchTheScope(t *testing.T) {
 	}
 	if rec.Contains("indexer title harvest: repeated malformed responses; skipping this upstream's remaining shows this rebuild") {
 		t.Error("scope latched on malformed deep pages although every show harvested a real title")
+	}
+}
+
+// TestHarvestTitleCandidates pins the harvest's title ladder on the operator's
+// own library titles: a TRAILING parenthetical qualifier is stripped (the arrs
+// add "(YYYY)" whenever a title collides, and no tracker's release naming
+// carries it - measured, "Frieren (2023)" returns zero AnimeBytes items where
+// "Frieren" returns 145), one whole balanced group at a time, while an interior
+// or leading parenthetical is part of the NAME and is never touched. The as-is
+// title is always first, candidates are deduplicated, and no candidate is empty.
+func TestHarvestTitleCandidates(t *testing.T) {
+	tests := []struct {
+		name  string
+		title string
+		want  []string
+	}{
+		{"trailing year qualifier is stripped", "Hunter x Hunter (2011)", []string{"Hunter x Hunter (2011)", "Hunter x Hunter"}},
+		{"trailing region qualifier is stripped", "The Office (US)", []string{"The Office (US)", "The Office"}},
+		{"interior parenthetical is part of the name", "Evangelion: 1.0 You Are (Not) Alone", []string{"Evangelion: 1.0 You Are (Not) Alone"}},
+		// A trailing parenthetical that IS part of the real name: it is
+		// indistinguishable from a qualifier without a title database, and the
+		// as-is form is tried FIRST, so the stripped candidate is only ever
+		// queried for a show that already harvested nothing. A broader query can
+		// only widen the result set, and identity - the tracker id and info hash
+		// against this show's pending journal keys - is what admits a result, so
+		// a looser title can never mistitle anything.
+		{"trailing parenthetical that is part of the name still ladders", "Manda Bala (Send a Bullet)", []string{"Manda Bala (Send a Bullet)", "Manda Bala"}},
+		{"leading parenthetical is part of the name", "(A)Torsion", []string{"(A)Torsion"}},
+		{"no parenthetical is one candidate", "Frieren", []string{"Frieren"}},
+		{"stacked trailing groups strip one at a time", "A (B) (C)", []string{"A (B) (C)", "A (B)", "A"}},
+		{"a title that is entirely a parenthetical never strips to empty", "(2023)", []string{"(2023)"}},
+		{"a nested trailing group is removed whole", "A (B (C))", []string{"A (B (C))", "A"}},
+		{"the as-is candidate is trimmed", "  Frieren  ", []string{"Frieren"}},
+		{"an empty title yields no candidate", "   ", nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := harvestTitleCandidates(tc.title); !slices.Equal(got, tc.want) {
+				t.Errorf("harvestTitleCandidates(%q) = %v, want %v", tc.title, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHarvestLadderStopsAtTheFirstSatisfyingCandidate pins the ladder's cost
+// floor: a show whose as-is title finds its release spends exactly ONE query,
+// so adding the ladder charges a healthy show nothing.
+func TestHarvestLadderStopsAtTheFirstSatisfyingCandidate(t *testing.T) {
+	mock, srv := newHarvestMock(func(int) string {
+		return torznabBody(torznabItem("Hunter x Hunter S01 1080p [G]", "https://nyaa.si/view/42"))
+	})
+	defer srv.Close()
+
+	feeds := map[string][]journalItem{upstreamNyaa: {
+		{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7},
+	}}
+	log, rec := capture.New()
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
+	}}, log, srv.Client())
+	titles := map[string]string{}
+	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles,
+		func(int) EntryInfo { return EntryInfo{Title: "Hunter x Hunter (2011)", Season: 1, SeasonKnown: true} }, "")
+
+	if stats.queries != 1 {
+		t.Errorf("harvest queries = %d, want 1: a satisfied show must not walk the rest of its ladder", stats.queries)
+	}
+	if got := mock.request(0)["q"]; got != "Hunter x Hunter (2011)" {
+		t.Errorf("first query q = %q, want the title as-is", got)
+	}
+	if titles["nyaa:42"] != "Hunter x Hunter S01 1080p [G]" {
+		t.Errorf("titles = %v, want the harvested real title", titles)
+	}
+	if rec.Contains("indexer title harvest exhausted its title candidates") {
+		t.Error("a satisfied show reported an exhausted ladder")
+	}
+}
+
+// TestHarvestLadderAdvancesToTheStrippedTitle pins the fix itself: a show whose
+// arr title carries a "(YYYY)" qualifier the tracker's naming does not know
+// harvests NOTHING on its as-is title (both trackers answer an unresolvable
+// title with an empty 200, indistinguishable from a real no-match), so the
+// harvest retries on the stripped title and resolves there. The Nyaa season
+// form rides every candidate: the ladder varies the title only.
+func TestHarvestLadderAdvancesToTheStrippedTitle(t *testing.T) {
+	var mock *harvestMock
+	mock, srv := newHarvestMock(func(call int) string {
+		if strings.Contains(mock.request(call)["q"], "(2011)") {
+			return emptyTorznab()
+		}
+		return torznabBody(torznabItem("Hunter x Hunter S01 1080p [G]", "https://nyaa.si/view/42"))
+	})
+	defer srv.Close()
+
+	feeds := map[string][]journalItem{upstreamNyaa: {
+		{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7},
+	}}
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
+	}}, nil, srv.Client())
+	titles := map[string]string{}
+	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles,
+		func(int) EntryInfo { return EntryInfo{Title: "Hunter x Hunter (2011)", Season: 1, SeasonKnown: true} }, "")
+
+	if stats.queries != 2 {
+		t.Fatalf("harvest queries = %d, want 2 (as-is, then the stripped title)", stats.queries)
+	}
+	first, second := mock.request(0), mock.request(1)
+	if first["q"] != "Hunter x Hunter (2011)" || second["q"] != "Hunter x Hunter" {
+		t.Errorf("ladder queries = %q then %q, want the as-is title then the stripped one", first["q"], second["q"])
+	}
+	for i, req := range []map[string]string{first, second} {
+		if req["t"] != "tvsearch" || req["season"] != "1" {
+			t.Errorf("candidate %d params = %v, want the Nyaa season form on every candidate", i, req)
+		}
+	}
+	if titles["nyaa:42"] != "Hunter x Hunter S01 1080p [G]" {
+		t.Errorf("titles = %v, want the second candidate's match to satisfy the show", titles)
+	}
+}
+
+// TestHarvestExhaustedLadderLogsOnceAtDebug pins the diagnostic the ladder
+// replaces a latch with: a show that tried every candidate and resolved nothing
+// says so ONCE, at Debug, with the number of candidates tried. Debug is the
+// honest level - with the query shape fixed, a persistent zero-match is an
+// AnimeBytes deletion between the SeaDex posting and the scan, or a release
+// genuinely absent; neither is a fault.
+func TestHarvestExhaustedLadderLogsOnceAtDebug(t *testing.T) {
+	mock, srv := newHarvestMock(func(int) string { return emptyTorznab() })
+	defer srv.Close()
+
+	feeds := map[string][]journalItem{upstreamNyaa: {
+		{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7},
+	}}
+	log, rec := capture.New()
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
+	}}, log, srv.Client())
+	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, map[string]string{},
+		func(int) EntryInfo { return EntryInfo{Title: "A (B) (C)"} }, "")
+
+	if stats.queries != 3 {
+		t.Errorf("harvest queries = %d, want 3 (one per candidate of \"A (B) (C)\")", stats.queries)
+	}
+	const msg = "indexer title harvest exhausted its title candidates; show keeps its synthesized title this rebuild"
+	if got := rec.CountExact(msg); got != 1 {
+		t.Fatalf("exhausted-ladder lines = %d, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
+	}
+	if rec.CountLevel(slog.LevelDebug, msg) != 1 {
+		t.Errorf("exhausted-ladder line not at Debug: an expected deletion or absence is not a fault")
+	}
+	if got, ok := rec.AttrValue(msg, "candidates"); !ok || got != "3" {
+		t.Errorf("candidates attr = %q (present=%v), want \"3\"", got, ok)
+	}
+	if mock.calls() != 3 {
+		t.Errorf("upstream calls = %d, want 3", mock.calls())
+	}
+}
+
+// TestHarvestCleanZeroMatchesNeverLatchTheScope pins the deliberate hole in the
+// fruitless latch: an upstream answering CLEANLY with zero items charges no
+// latch, however long the run. A zero-match is not evidence about the upstream -
+// when SeaDex carries a link to a tracker the release is on that tracker with
+// ~99% probability, so an empty clean answer is the app's QUESTION being wrong
+// (the ladder's job) or the ~1% deletion, never a broken tracker. So more than
+// consecutiveFruitlessLatch such shows in a row are ALL still queried.
+func TestHarvestCleanZeroMatchesNeverLatchTheScope(t *testing.T) {
+	mock, srv := newHarvestMock(func(int) string { return emptyTorznab() })
+	defer srv.Close()
+
+	shows := consecutiveFruitlessLatch + 1
+	feeds := map[string][]journalItem{upstreamNyaa: {}}
+	info := map[int]EntryInfo{}
+	for i := range shows {
+		feeds[upstreamNyaa] = append(feeds[upstreamNyaa],
+			journalItem{item: item{Title: "Show S01"}, Key: "nyaa:" + strconv.Itoa(100+i), AniListID: 7 + i})
+		// Single-candidate titles, so one query per show: the assertion is
+		// about the latch, not about the ladder's length.
+		info[7+i] = EntryInfo{Title: "Show " + strconv.Itoa(i)}
+	}
+	log, rec := capture.New()
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
+	}}, log, srv.Client())
+	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, map[string]string{},
+		func(alID int) EntryInfo { return info[alID] }, "")
+
+	if stats.queries != shows {
+		t.Errorf("harvest queries = %d, want %d: a clean empty answer must not condemn the scope", stats.queries, shows)
+	}
+	if mock.calls() != shows {
+		t.Errorf("upstream calls = %d, want %d", mock.calls(), shows)
+	}
+	for _, latch := range []string{
+		"indexer title harvest: no show made progress; skipping this upstream's remaining shows this rebuild",
+		"indexer title harvest: repeated malformed responses; skipping this upstream's remaining shows this rebuild",
+		"indexer title harvest: repeated request rejections; skipping this upstream's remaining shows this rebuild",
+	} {
+		if rec.Contains(latch) {
+			t.Errorf("scope latched on clean zero-match shows: %q", latch)
+		}
 	}
 }

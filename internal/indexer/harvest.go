@@ -560,7 +560,9 @@ func rotationStart(groups []harvestGroup, cursor string) int {
 // the run charged), so it states the latches' actual purpose directly
 // ("nothing is working") instead of inferring it per failure kind; why neither
 // per-kind latch can see a mixed failure run is documented once, on
-// consecutiveFruitlessLatch. The
+// consecutiveFruitlessLatch, together with what the run deliberately does NOT
+// charge - a clean zero-match, which is a query-shape or deletion signal and no
+// evidence at all about the upstream's health. The
 // cross-resets STAY, so both existing latches keep their exact documented
 // semantics and thresholds for homogeneous runs - this arm only fires on the
 // mixed runs neither of them can see.
@@ -706,6 +708,21 @@ const consecutiveRejectedLatch = 3
 // own counter, so this fires only on a genuinely mixed sequence - where the
 // evidence for "this upstream is broken" accumulates more slowly and deserves
 // more patience - and it can never preempt the more specific diagnostics.
+//
+// What it does NOT catch, deliberately: an upstream that answers CLEANLY and
+// matches nothing. A plain zero-match charges no latch of any kind, because a
+// zero-match is not evidence about the upstream's health. When SeaDex carries a
+// link to a tracker the release is on that tracker with ~99% probability, so a
+// clean empty answer is the app having asked the wrong QUESTION, not the tracker
+// being broken - and the two are indistinguishable on the wire anyway (both
+// trackers answer an unresolvable title with HTTP 200 and zero items, exactly as
+// they answer a genuine no-match). The query-shape half of that is
+// harvestTitleCandidates' job (a trailing "(YYYY)" zeroes AnimeBytes outright);
+// the residue after the ladder is exhausted is the ~1% - an AnimeBytes deletion
+// between the SeaDex posting and the scan, or a release genuinely absent - which
+// harvestShow REPORTS at Debug rather than charging to any scope. Condemning a
+// scope for it would skip the rest of that tracker's shows on evidence that says
+// nothing about the tracker.
 const consecutiveFruitlessLatch = 2 * consecutiveMalformedLatch
 
 // harvestShow runs one show's query (plus offset pages while its items remain
@@ -743,35 +760,100 @@ const consecutiveFruitlessLatch = 2 * consecutiveMalformedLatch
 // A show that resolved nothing because its candidates were all refused
 // harvested nothing while answering cleanly, which is the caller's no-progress
 // signal; rejections of unrelated items on the same broad result page are not.
+//
+// The query is not one title but a LADDER of them (harvestTitleCandidates):
+// the show's title as-is, then progressively stripped of its trailing
+// parenthetical qualifiers. The next candidate is tried only once the current
+// one's paging has COMPLETED (its short page proved nothing older is left) and
+// the show is still unsatisfied, so a show the first candidate satisfies costs
+// exactly the queries it cost before the ladder existed; a candidate cut off by
+// harvestShowPageCap or the slice checkpoints its own deeper page instead of
+// advancing. Each new candidate starts at page 0 (a different query has its own
+// offset space), and only the title varies - never the season or the search
+// mode. A show that exhausts every candidate unsatisfied gets one Debug line:
+// with the query shape fixed, a persistent zero-match is an AnimeBytes deletion
+// between the SeaDex posting and this scan, or a release genuinely absent from
+// the tracker - expected, and no evidence against the upstream.
 func (h *harvester) harvestShow(ctx context.Context, u *upstream, g harvestGroup, meta EntryInfo, r *harvestRun, startPage int) (outcome harvestOutcome, nextPage int, refused bool) {
-	params := harvestParams(meta, g.scope)
-	page := max(startPage, 0)
-	stranded := 0
+	candidates := harvestTitleCandidates(meta.Title)
+	if len(candidates) == 0 {
+		// Unreachable from the rebuild path (harvestable rejects a show with
+		// no synthesis title before its group is ever collected); keep the
+		// pre-ladder behavior of querying the title as-is rather than
+		// silently harvesting nothing.
+		candidates = []string{strings.TrimSpace(meta.Title)}
+	}
+	st := harvestShowProgress{page: max(startPage, 0)}
+	for _, title := range candidates {
+		candidateOutcome, done := h.harvestCandidate(ctx, u, g, harvestParams(meta, g.scope, title), r, &st)
+		if done {
+			// The candidate stopped short of completing its paging: the slice
+			// ran out, the query failed, or the page cap cut it off. All three
+			// resume THIS candidate at st.page next rebuild rather than moving
+			// the ladder on, or the deep pages the checkpoint exists for are
+			// never reached.
+			return candidateOutcome, st.page, st.refused
+		}
+		if !groupPending(g, r.titles) {
+			return harvestOK, 0, st.refused
+		}
+		// This candidate is fully paged and the show is still unsatisfied:
+		// widen the title. The next query is a different search, so its offset
+		// space starts fresh.
+		st.page = 0
+	}
+	h.log.Debug("indexer title harvest exhausted its title candidates; show keeps its synthesized title this rebuild",
+		"upstream", u.name, "al_id", g.alID, "candidates", len(candidates))
+	return harvestOK, 0, st.refused
+}
+
+// harvestShowProgress is one show's mutable state across its title-candidate
+// ladder: the offset page the next query consumes (advanced within a candidate,
+// reset by harvestShow when the ladder widens), the running stranded count that
+// keeps the could-not-use WARN to one line per show rather than one per page or
+// candidate, and whether any page refused one of this show's own pending
+// releases.
+type harvestShowProgress struct {
+	page     int
+	stranded int
+	refused  bool
+}
+
+// harvestCandidate pages ONE title candidate's results, from st.page up to
+// harvestShowPageCap pages, folding each page's matches into r.titles and its
+// counts into r.stats and st. done reports that this candidate stopped short of
+// completing its paging - the pacer's slice ended, the query failed, or the cap
+// cut it off with deeper offsets unseen - in which case harvestShow must return
+// the returned outcome and st.page as the resume checkpoint instead of
+// advancing the ladder. done false means the candidate is fully paged (its
+// items matched, or a short page proved nothing older is left), the one state
+// in which the ladder may widen.
+func (h *harvester) harvestCandidate(ctx context.Context, u *upstream, g harvestGroup, params url.Values, r *harvestRun, st *harvestShowProgress) (harvestOutcome, bool) {
 	for range harvestShowPageCap {
 		if !r.pacer.next(ctx) {
-			return harvestOK, page, refused
+			return harvestOK, true
 		}
 		r.stats.queries++
-		results, raw, failure, ok := h.searchHarvestPage(ctx, u, g, params, page)
+		results, raw, failure, ok := h.searchHarvestPage(ctx, u, g, params, st.page)
 		if !ok {
-			return failure, page, refused
+			return failure, true
 		}
 		matched, rejected, pendingRejected, unusable := matchHarvest(results, g.scope, r.index, r.titles, r.showTitles, g.keys)
 		r.stats.matched += matched
-		if stranded == 0 && pendingRejected+unusable > 0 {
+		if st.stranded == 0 && pendingRejected+unusable > 0 {
 			// The stranding classes: this show's own release was named by a
 			// result the harvest could not use. The affected releases may
 			// remain on their synthesized titles unless another result - on
 			// this page or a later one - supplies a usable title, and because
 			// the index is rebuilt from the same journal every rebuild an
 			// upstream that never agrees strands them indefinitely. One line
-			// per show per rebuild, never per page.
+			// per show per rebuild, never per page or per candidate.
 			h.log.Warn("indexer title harvest encountered results it could not use for this show's releases",
-				"upstream", u.name, "al_id", g.alID, "page", page,
+				"upstream", u.name, "al_id", g.alID, "page", st.page,
 				"contradictory", pendingRejected, "unusable_title", unusable)
 		}
-		stranded += pendingRejected + unusable
-		refused = refused || pendingRejected > 0
+		st.stranded += pendingRejected + unusable
+		st.refused = st.refused || pendingRejected > 0
 		if rejected > 0 {
 			// A result whose own identity signals contradict each other is an
 			// untrusted upstream response, not an operator fault: it resolves
@@ -781,14 +863,14 @@ func (h *harvester) harvestShow(ctx context.Context, u *upstream, g harvestGroup
 			// stat on the rebuild's summary line.
 			r.stats.rejected += rejected
 			h.log.Debug("indexer title harvest results rejected: contradictory identity signals",
-				"upstream", u.name, "al_id", g.alID, "page", page, "rejected", rejected)
+				"upstream", u.name, "al_id", g.alID, "page", st.page, "rejected", rejected)
 		}
 		if harvestPageComplete(g, r.titles, raw) {
-			return harvestOK, 0, refused
+			return harvestOK, false
 		}
-		page++
+		st.page++
 	}
-	return harvestOK, page, refused
+	return harvestOK, true
 }
 
 // searchHarvestPage runs one harvest page's upstream query and classifies its
@@ -970,23 +1052,96 @@ func harvestable(it *journalItem, titles map[string]string, infoFor EntryInfoFun
 
 // --- Query building ---
 
-// harvestParams builds the one Torznab query for a show on a tracker, from the
-// show's synthesis title source. AnimeBytes search is series-level - a plain
-// q returns the show's whole torrent set - so a basic search suffices. Nyaa is
+// harvestParams builds one Torznab query for a show on a tracker, from ONE of
+// the show's title candidates (harvestTitleCandidates; harvestShow walks them
+// in order). AnimeBytes search is series-level - a plain q returns the show's
+// whole torrent set - so a basic search suffices. Nyaa is
 // a flat search, so a REAL season (a resolved season above the specials bucket)
 // uses the season form (q + season): the season token surfaces both packs
 // (named "... S01 ...") and SxxExx-named episodes (S01 prefixes S01E07), which
 // is what SeaDex curates; offset paging under the indexer's default
 // created/desc ordering then reaches older items. The specials bucket is
 // deliberately excluded - "season=0" is not a search a tracker's episode naming
-// answers.
-func harvestParams(meta EntryInfo, scope string) url.Values {
-	q := url.Values{"t": {"search"}, "q": {strings.TrimSpace(meta.Title)}}
+// answers. The candidate ladder varies the TITLE only: the search mode and the
+// season token are chosen from meta exactly as they were before it existed.
+func harvestParams(meta EntryInfo, scope, title string) url.Values {
+	q := url.Values{"t": {"search"}, "q": {title}}
 	if scope == upstreamNyaa && !meta.IsMovie && meta.SeasonKnown && meta.Season > 0 {
 		q.Set("t", "tvsearch")
 		q.Set("season", strconv.Itoa(meta.Season))
 	}
 	return q
+}
+
+// harvestTitleCandidates returns the ordered, deduplicated titles the harvest
+// queries for one show: the synthesis title as-is first, then the same title
+// with its trailing parenthetical groups stripped one at a time ("A (B) (C)" ->
+// "A (B)" -> "A"). The as-is title is always tried first and harvestShow stops
+// the moment the show is satisfied, so a show the operator's title already
+// finds costs exactly one candidate.
+//
+// The ladder exists because a trailing "(YYYY)" disambiguator - the arrs add
+// one whenever a title collides, and 61 of the operator's 972 Sonarr series
+// carry one - is not part of any tracker's release naming. Measured against
+// the operator's own Prowlarr: "Frieren" returns 145 AnimeBytes items while
+// "Frieren (2023)" returns ZERO, and the Nyaa season form drops from 75 items
+// to 16 ("Hunter x Hunter" 75 -> "Hunter x Hunter (2011)" 10). Those shows
+// harvest nothing at all today and keep their synthesized titles forever, with
+// no diagnostic: a tracker answers an unresolvable title the same way it
+// answers a genuine no-match (HTTP 200, zero items). Only a TRAILING group is
+// stripped, and only as a whole balanced group, because an interior or leading
+// parenthetical is part of the name itself ("Evangelion: 1.0 You Are (Not)
+// Alone", "(A)Torsion"). A candidate is never empty or whitespace-only, so a
+// title that is entirely a parenthetical ("(2023)") yields just the as-is form.
+func harvestTitleCandidates(title string) []string {
+	cur := strings.TrimSpace(title)
+	if cur == "" {
+		return nil
+	}
+	candidates := []string{cur}
+	seen := map[string]struct{}{cur: {}}
+	for {
+		next, ok := trimTrailingParenthetical(cur)
+		if !ok {
+			return candidates
+		}
+		cur = next
+		if _, dup := seen[cur]; dup {
+			return candidates
+		}
+		seen[cur] = struct{}{}
+		candidates = append(candidates, cur)
+	}
+}
+
+// trimTrailingParenthetical removes one whole balanced parenthetical group from
+// the END of title (plus the whitespace before it) and reports whether it did.
+// It reports false when the title does not end in ")", when the closing ")" has
+// no matching opener, or when stripping the group would leave nothing - the
+// cases where the parenthetical is not a trailing qualifier but the name (or
+// all of it). Matching is depth-counted from the right so a nested group
+// ("A (B (C))") is removed whole rather than cut at its inner opener.
+func trimTrailingParenthetical(title string) (string, bool) {
+	if !strings.HasSuffix(title, ")") {
+		return "", false
+	}
+	depth := 0
+	for i := len(title) - 1; i >= 0; i-- {
+		switch title[i] {
+		case ')':
+			depth++
+		case '(':
+			depth--
+			if depth == 0 {
+				stripped := strings.TrimSpace(title[:i])
+				if stripped == "" {
+					return "", false
+				}
+				return stripped, true
+			}
+		}
+	}
+	return "", false
 }
 
 // harvestPage clones the show query with the paging window applied.
