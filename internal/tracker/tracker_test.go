@@ -9,8 +9,9 @@ import (
 
 // TestLookupByHostFailClosed pins the fail-closed guards of the
 // URL-host tracker resolver consumed by the link-safety gate
-// (trackerlink.usableAbsolute) and the host twins
-// (IsAnimeBytesHost/IsNyaaHost): an
+// (trackerlink.usableAbsolute), the indexer's host->scope routing
+// (scopeOfHost) and the exported AnimeBytes host predicate
+// (IsAnimeBytesHost): an
 // empty host, a bare DNS-root dot, whitespace-only input, an empty-labeled
 // host (a leading dot or an inner ".." - no resolvable DNS name has an empty
 // label), and a non-ASCII homograph label never match, and neither a

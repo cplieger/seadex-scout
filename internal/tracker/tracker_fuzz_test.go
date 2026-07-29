@@ -138,17 +138,18 @@ func FuzzIsAnimeBytesHost(f *testing.F) {
 	f.Fuzz(func(t *testing.T, host string) { hostGateInvariants(t, IsAnimeBytesHost, "animebytes.tv", host) })
 }
 
-// FuzzIsNyaaHost fuzzes the Nyaa host classifier (an untrusted-URL-host gate
-// used by indexer routing) with the same metamorphic and bounded-output
-// invariants as its AnimeBytes twin: the canonical host itself (with or
-// without the DNS-root dot) always matches; a valid label on an explicit
-// ".nyaa.si" boundary always matches while an empty label never does; a
-// dotless prefix never bypasses the suffix rule; a DNS-root trailing dot
-// never changes the answer; and a matching host at least ends in "nyaa.si"
-// after the gate's own case/whitespace fold and root-dot trim (the gate
-// resolves through LookupByHost, which folds case and trims
-// whitespace).
-func FuzzIsNyaaHost(f *testing.F) {
+// FuzzNyaaHostResolution fuzzes the canonical-table resolution of an untrusted
+// URL host to the Nyaa tracker - the question the indexer's scopeOfHost asks
+// (LookupByHost, then the resolved tracker's name) and the reason the table
+// tolerates hostile input. It carries the same metamorphic and bounded-output
+// invariants as the exported AnimeBytes host predicate (which survives as an
+// export only because filter's AB evidence gate consumes it): the canonical
+// host itself (with or without the DNS-root dot) always matches; a valid label
+// on an explicit ".nyaa.si" boundary always matches while an empty label never
+// does; a dotless prefix never bypasses the suffix rule; a DNS-root trailing
+// dot never changes the answer; and a matching host at least ends in "nyaa.si"
+// after the resolver's own case/whitespace fold and root-dot trim.
+func FuzzNyaaHostResolution(f *testing.F) {
 	f.Add("nyaa.si")
 	f.Add("www.nyaa.si")
 	f.Add("nyaa.si.")
@@ -160,5 +161,11 @@ func FuzzIsNyaaHost(f *testing.F) {
 	f.Add("NYAA.SI")
 	f.Add("nyaa.si ")
 	f.Add("")
-	f.Fuzz(func(t *testing.T, host string) { hostGateInvariants(t, IsNyaaHost, "nyaa.si", host) })
+	f.Fuzz(func(t *testing.T, host string) {
+		nyaaHost := func(host string) bool {
+			trk, ok := LookupByHost(host)
+			return ok && trk.Name == NameNyaa
+		}
+		hostGateInvariants(t, nyaaHost, "nyaa.si", host)
+	})
 }

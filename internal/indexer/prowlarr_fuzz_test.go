@@ -89,8 +89,12 @@ func FuzzSanitizeDisplayURL_keptURLsAreCanonicalTrackerLinks(f *testing.F) {
 		}
 		switch scope {
 		case upstreamNyaa:
-			if !tracker.IsNyaaHost(u.Hostname()) {
-				t.Fatalf("kept URL %q host %q fails the nyaa tracker predicate", got, u.Hostname())
+			// The Nyaa arm resolves through the canonical table the way
+			// production does (scopeOfHost -> tracker.LookupByHost), since
+			// the package exports no Nyaa host predicate: the AnimeBytes
+			// twin exists only because filter's AB gate consumes it.
+			if trk, ok := tracker.LookupByHost(u.Hostname()); !ok || trk.Name != tracker.NameNyaa {
+				t.Fatalf("kept URL %q host %q does not resolve to the nyaa tracker", got, u.Hostname())
 			}
 		case upstreamAB:
 			if !tracker.IsAnimeBytesHost(u.Hostname()) {

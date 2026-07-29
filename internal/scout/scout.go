@@ -445,9 +445,10 @@ func logSafeUpstreamError(err error) error {
 // acceptance guards have rejected degradation.EscalationThreshold
 // consecutive refreshes: that state re-downloads the ~5.9MB body every cycle
 // against an aging cache and never self-heals without the operator, so it
-// must alert rather than WARN forever. The rejection streak rides on the
-// *StaleMapError (ConsecutiveRejections) so this stays the single log site -
-// no second log line in the mapping package, no double-logging.
+// must alert rather than WARN forever. The rejection streak is read off the
+// returned Cache (RejectedRefreshes) so this stays the single log site -
+// no second log line in the mapping package, no double-logging; a returned
+// *StaleMapError contributes the same streak as an attribute via LogAttrs.
 func (s *Scout) loadMapping(ctx context.Context, st *state.State) (mapping.Cache, *mapping.Index, error) {
 	mapCache, idx, mapErr := s.deps.Mapping.Load(ctx, &st.Mapping)
 	if mapErr != nil && ctx.Err() == nil {

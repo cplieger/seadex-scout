@@ -500,8 +500,8 @@ func TestAcceptRefresh_identifierBudgetFailsClosed(t *testing.T) {
 		if next.RejectedRefreshes != 3 {
 			t.Errorf("budget-breach RejectedRefreshes = %d, want 3 (the prior streak advances)", next.RejectedRefreshes)
 		}
-		if stale.ConsecutiveRejections() != 3 {
-			t.Errorf("budget-breach ConsecutiveRejections = %d, want 3", stale.ConsecutiveRejections())
+		if stale.rejections != 3 {
+			t.Errorf("budget-breach rejections = %d, want 3", stale.rejections)
 		}
 	})
 }

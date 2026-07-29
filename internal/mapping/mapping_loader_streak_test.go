@@ -17,7 +17,7 @@ import (
 // TestLoader_refreshCache_rejectionStreakCountsAndResets pins the
 // consecutive-rejection streak: each acceptance-guard rejection (here the
 // below-half-size shrink guard) advances the persisted Cache.RejectedRefreshes
-// and carries the streak on the *StaleMapError (ConsecutiveRejections), and an
+// and carries the streak on the *StaleMapError (rejections), and an
 // eventually accepted refresh resets the streak to zero.
 func TestLoader_refreshCache_rejectionStreakCountsAndResets(t *testing.T) {
 	var accept atomic.Bool
@@ -50,8 +50,8 @@ func TestLoader_refreshCache_rejectionStreakCountsAndResets(t *testing.T) {
 		if next.RejectedRefreshes != i {
 			t.Fatalf("RejectedRefreshes after %d rejections = %d, want %d", i, next.RejectedRefreshes, i)
 		}
-		if stale.ConsecutiveRejections() != i {
-			t.Fatalf("ConsecutiveRejections after %d rejections = %d, want %d", i, stale.ConsecutiveRejections(), i)
+		if stale.rejections != i {
+			t.Fatalf("streak on the error after %d rejections = %d, want %d", i, stale.rejections, i)
 		}
 		*prev = next
 	}
@@ -116,8 +116,8 @@ func TestLoader_refreshCache_fetchFailureKeepsRejectionStreak(t *testing.T) {
 	if next.RejectedRefreshes != 3 {
 		t.Errorf("fetch-failure RejectedRefreshes = %d, want 3 (outages neither advance nor reset the streak)", next.RejectedRefreshes)
 	}
-	if stale.ConsecutiveRejections() != 0 {
-		t.Errorf("fetch-failure ConsecutiveRejections = %d, want 0 (not a guard rejection)", stale.ConsecutiveRejections())
+	if stale.rejections != 0 {
+		t.Errorf("fetch-failure rejections = %d, want 0 (not a guard rejection)", stale.rejections)
 	}
 }
 
@@ -127,7 +127,7 @@ func TestLoader_refreshCache_fetchFailureKeepsRejectionStreak(t *testing.T) {
 // re-downloads and rejects every cycle, never self-healing), so acceptRefresh
 // must route it through rejectRefresh — the errors.Is-matchable sentinel
 // survives the *StaleMapError wrap, the stale map is kept, and the persisted
-// streak advances so ConsecutiveRejections reaches
+// streak advances so rejections reaches
 // degradation.EscalationThreshold (the scout's WARN→ERROR escalation point)
 // instead of degrading at WARN forever.
 func TestLoader_refreshCache_recordCapBreachAdvancesRejectionStreak(t *testing.T) {
@@ -166,8 +166,8 @@ func TestLoader_refreshCache_recordCapBreachAdvancesRejectionStreak(t *testing.T
 	if next.RejectedRefreshes != degradation.EscalationThreshold {
 		t.Errorf("cap-breach RejectedRefreshes = %d, want %d (a cap breach advances the streak)", next.RejectedRefreshes, degradation.EscalationThreshold)
 	}
-	if stale.ConsecutiveRejections() != degradation.EscalationThreshold {
-		t.Errorf("cap-breach ConsecutiveRejections = %d, want %d (the scout escalates to ERROR at the threshold)", stale.ConsecutiveRejections(), degradation.EscalationThreshold)
+	if stale.rejections != degradation.EscalationThreshold {
+		t.Errorf("cap-breach rejections = %d, want %d (the scout escalates to ERROR at the threshold)", stale.rejections, degradation.EscalationThreshold)
 	}
 }
 
@@ -200,8 +200,8 @@ func TestLoader_refreshCache_transientParseFailureKeepsRejectionStreak(t *testin
 	if next.RejectedRefreshes != 3 {
 		t.Errorf("parse-failure RejectedRefreshes = %d, want 3 (transient parse failures neither advance nor reset the streak)", next.RejectedRefreshes)
 	}
-	if stale.ConsecutiveRejections() != 0 {
-		t.Errorf("parse-failure ConsecutiveRejections = %d, want 0 (not a guard rejection)", stale.ConsecutiveRejections())
+	if stale.rejections != 0 {
+		t.Errorf("parse-failure rejections = %d, want 0 (not a guard rejection)", stale.rejections)
 	}
 }
 
@@ -237,8 +237,8 @@ func TestLoader_refreshCache_overCapBodyAdvancesRejectionStreak(t *testing.T) {
 	if next.RejectedRefreshes != 1 {
 		t.Errorf("RejectedRefreshes = %d, want 1 (an over-cap body never self-heals)", next.RejectedRefreshes)
 	}
-	if stale.ConsecutiveRejections() != 1 {
-		t.Errorf("ConsecutiveRejections = %d, want 1", stale.ConsecutiveRejections())
+	if stale.rejections != 1 {
+		t.Errorf("rejections = %d, want 1", stale.rejections)
 	}
 	if got := stale.LogAttrs(); !attrsContain(got, "stale_reason", "refresh exceeded size cap") {
 		t.Errorf("stale_reason attrs = %v, want the size-cap reason", got)

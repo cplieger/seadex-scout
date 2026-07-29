@@ -1,0 +1,140 @@
+# .punused-ignore - adjudicated punused findings (EU1001 test-only / EU1002 unused)
+#
+# The CI gate scans PER DIRECTORY and then requires every reported symbol to be
+# deleted, wired up, or matched by a literal substring below. Each non-comment
+# line is one such substring, matched against the whole finding line; the " is"
+# suffix anchors it to the end of the symbol name so a future symbol with a
+# longer name cannot be silently swallowed by an entry here.
+#
+# What punused (bep/punused v0.5.0) actually does: for every non-_test.go file
+# matching its glob it asks gopls for textDocument/documentSymbol, then
+# textDocument/references per EXPORTED symbol name, and reports the symbol when
+# the reference set is empty (EU1002) or contains only _test.go files (EU1001).
+# References are syntactic and workspace-scoped, and its own README lists the
+# consequences as caveats: it does not see references from outside the project,
+# nor via reflect, and has "some possible surprises when it comes to interfaces".
+#
+# So three real mechanisms are structurally invisible to it, and every entry
+# below is one of them:
+#   (a) a method the STANDARD LIBRARY calls through an interface the app never
+#       names: encoding/json's json.Unmarshaler, encoding/xml's xml.Unmarshaler,
+#       and errors.Is/As/Unwrap's anonymous interface{ Unwrap() error }.
+#   (b) a method a DEPENDENCY MODULE calls through its own interface; that
+#       module's packages are outside the workspace gopls indexes.
+#   (c) an exported constructor whose only callers are _test.go files in OTHER
+#       packages, and which no non-test caller can replace.
+# (Two further mechanics: the whole punused run shares ONE 30s context, which is
+# why the per-directory invocation above is the only one that does not truncate
+# silently; and a method on an UNEXPORTED type is still reported when the method
+# NAME is exported, which is what most of this file is.)
+#
+# Verified REAL dead code in this pass was DELETED, not listed here:
+# StaleMapError.ConsecutiveRejections (the scout escalates on the persisted
+# Cache.RejectedRefreshes and LogAttrs already publishes the streak as
+# stale_consecutive_rejections, so the accessor had no production reader) and
+# tracker.IsNyaaHost (symmetry-only export with no production caller - its
+# AnimeBytes twin has one in filter's AB evidence gate, while a host->tracker
+# question reads LookupByHost - so the host-resolution fuzz invariants now run
+# against LookupByHost directly).
+#
+# --- (a) json.Unmarshaler ---------------------------------------------------
+# encoding/json type-asserts json.Unmarshaler and calls these; there is no call
+# site to find, only a DECODE site whose target embeds the type.
+# internal/mapping/fribb.go: fribbRecord's fields (Type flexString, IMDbID
+# stringList, TmdbID tmdbID, Season seasonObject) are decoded by
+# decodeFribbRecord's json.Unmarshal(msg, &fr) on the production refresh path
+# (parseFribbForRefresh -> decodeFribbRecords -> decodeNextFribbRecord).
+# internal/anilist/anilist.go: gqlPage.Media (boundedMediaList) is decoded by
+# parseMediaPage's json.Unmarshal(raw, &r) on the FetchMany batch path, and
+# gqlErrors by envelopeErrors' json.Unmarshal plus the errors[] field of the
+# Fetch and batch envelopes. Each of these methods IS the tolerance or the
+# cardinality bound on an untrusted upstream body, so deleting one is a
+# parsing/resource-exhaustion regression.
+method (*seasonObject).UnmarshalJSON is
+method (*flexString).UnmarshalJSON is
+method (*tmdbID).UnmarshalJSON is
+method (*stringList).UnmarshalJSON is
+method (*boundedMediaList).UnmarshalJSON is
+method (*gqlErrors).UnmarshalJSON is
+#
+# --- (a) xml.Unmarshaler ----------------------------------------------------
+# Same shape, encoding/xml side, all in internal/indexer/torznab.go:
+# parseTorznab's xml.Unmarshal decodes feedXML.Channel (channelXML), whose
+# decodeChild runs DecodeElement on an itemXML; parseErrorDocument decodes
+# errorXML. All three carry the shared *xmlx.Budget decode-time bound, and
+# errorXML's method is also what refuses a non-<error> root.
+method (*channelXML).UnmarshalXML is
+method (*itemXML).UnmarshalXML is
+method (*errorXML).UnmarshalXML is
+#
+# --- (b) httpx.Transient (cross-module interface dispatch) ------------------
+# httpx/v4 declares `type Transient interface { IsTransient() bool }` and
+# reaches an implementation with errors.As; the retry loop calls it on every
+# attempt error. Both types are returned from INSIDE an httpx.Do body, so this
+# method IS the retry decision for a 500/408 AniList fault and for a Prowlarr
+# timeout or malformed body. A dependency module's interface can never produce
+# a workspace reference.
+method (*transientStatusError).IsTransient is
+method (*transientUpstreamError).IsTransient is
+#
+# --- (a) errors.Is/As/Unwrap, with a load-bearing non-test consumer ---------
+# The stdlib walks a chain through an anonymous interface{ Unwrap() error }, so
+# no syntactic reference to Unwrap can exist anywhere. These three are reached
+# by a production classification that would change its answer without them:
+#  - *BatchRecordError: match's prefetchPass classifies FetchMany's error with
+#    errors.Is(err, context.Canceled), and a batch cancelled AFTER its first
+#    chunk completed returns exactly this wrapper - without Unwrap a shutdown
+#    is misread as a fault.
+#  - *walkSideError: scout hands the walk error to httpx.LogSafeError, which
+#    does errors.As(&urlErr) to reduce a credential-bearing *url.Error; without
+#    Unwrap the reduction stops finding it and a configured userinfo credential
+#    can reach the log.
+#  - *redactedError: main.go returns it from the report dispatch and render.go
+#    wraps report failures in it, while cycle.NormalizeShutdownError and
+#    dispatchOutcome classify that same error with errors.Is - the redaction
+#    sits UPSTREAM of the classification boundary.
+method (*BatchRecordError).Unwrap is
+method (*walkSideError).Unwrap is
+method (*redactedError).Unwrap is
+#
+# --- (a) errors.Unwrap, traversed but not excavated ------------------------
+# Same invisible mechanism, weaker case, stated plainly: no non-test site reads
+# the wrapped cause of these four. They ARE traversed at runtime - httpx's
+# classifier probes errors.As(&AuthError), errors.As(&RateLimitError) and
+# errors.Is(context.Canceled/DeadlineExceeded) over the whole chain before it
+# checks Transient - and they are kept because a wrapper that hides its cause
+# is a latent correctness bug, not because someone unwraps them today:
+#  - *transientStatusError (internal/anilist/anilist.go) wraps
+#    httpx.CheckHTTPStatus's *httpx.HTTPStatusError.
+#  - *transientUpstreamError (internal/indexer/prowlarr.go, built by
+#    (*upstream).attemptError and classifyParseError) wraps that same status
+#    error, or a *torznabLimitError for a decode-limit breach.
+#  - *torznabLimitError (internal/indexer/torznab.go) wraps xmlx's *LimitError
+#    so errors.Is(err, xmlx.ErrLimit) holds; nothing asks that today (both
+#    consumers use errors.AsType[*torznabLimitError], which matches the type
+#    itself and needs no unwrap), and the tests assert the library's Kind
+#    through the wrap.
+#  - *StaleMapError (internal/mapping/mapping.go, built by staleOrFail) wraps
+#    the refresh failure it degraded on (a fetch/parse error, an
+#    *httpx.ResponseTooLargeError, a sentinel such as errRecordCapExceeded);
+#    every production consumer - scout's mappingDegradedAttrs and mapUsable,
+#    mapping's own rejectRefresh - matches the TYPE via errors.AsType, so only
+#    the mapping tests unwrap it, which is why this one reports EU1001.
+method (*transientStatusError).Unwrap is
+method (*transientUpstreamError).Unwrap is
+method (*torznabLimitError).Unwrap is
+method (*StaleMapError).Unwrap is
+#
+# --- (c) mapping.NewIndex ---------------------------------------------------
+# Production never calls it (Loader.Load builds the served index with
+# buildIndex); it is a two-line wrapper over that same buildIndex, and its ~80
+# callers are _test.go files in internal/audit, internal/match, internal/scout
+# and internal/mapping. It stays because "move it to a test-support package" is
+# not available: Index's only field is the unexported byAniList map, so NO
+# package outside internal/mapping can construct one without an exported
+# constructor in a non-test file (an export_test.go alias would serve only
+# mapping's own test binary, not the three other packages). The alternatives
+# are exporting the map - publishing mutable internal state to every consumer -
+# or routing the call sites through the network-backed Loader, which would stop
+# those tests pinning match/audit/scout behavior against a real index.
+function NewIndex is

@@ -185,15 +185,6 @@ func IsAnimeBytesHost(host string) bool {
 	return ok && t.Name == NameAnimeBytes
 }
 
-// IsNyaaHost reports whether a URL host (case-insensitively; one DNS-root
-// trailing dot tolerated) is the Nyaa site host or a real dot-delimited
-// subdomain of it, via the canonical table (LookupByHost), mirroring
-// IsAnimeBytesHost so the tracker-identity questions share one home.
-func IsNyaaHost(host string) bool {
-	t, ok := LookupByHost(host)
-	return ok && t.Name == NameNyaa
-}
-
 // Host returns the tracker's canonical lowercased site hostname, derived
 // from BaseURL. It is "" when BaseURL does not parse to a hostname, so a
 // malformed table entry fails closed for every consumer.

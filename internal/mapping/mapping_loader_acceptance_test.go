@@ -682,8 +682,8 @@ func TestLoader_refreshCache_wholeMapShrinkGuardKeepsStale(t *testing.T) {
 	if next.RejectedRefreshes != 1 {
 		t.Errorf("below-half refresh RejectedRefreshes = %d, want 1 (the shrink guard is an acceptance-guard rejection)", next.RejectedRefreshes)
 	}
-	if stale.ConsecutiveRejections() != 1 {
-		t.Errorf("ConsecutiveRejections = %d, want 1", stale.ConsecutiveRejections())
+	if stale.rejections != 1 {
+		t.Errorf("rejections = %d, want 1", stale.rejections)
 	}
 	if !strings.Contains(stale.Error(), "refresh shrank below half of previous (returned 40, previous 100)") {
 		t.Errorf("StaleMapError text = %q, want the fixed reason with the shrink counts parenthetical", stale.Error())

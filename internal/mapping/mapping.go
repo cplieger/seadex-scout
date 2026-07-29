@@ -220,7 +220,8 @@ type Cache struct {
 	// stale map. It persists across cycles and restarts, resets
 	// to 0 on any accepted refresh or on a 304 that revalidates a USABLE
 	// cache, and rides on the *StaleMapError
-	// (ConsecutiveRejections) so the scout can escalate its degraded-mapping
+	// (the rejections field, surfaced as stale_consecutive_rejections by
+	// LogAttrs) so the scout can escalate its degraded-mapping
 	// log at degradation.EscalationThreshold.
 	// It advances even when no usable stale cache exists (a first boot whose
 	// every refresh is refused), because the streak describes the upstream, not
@@ -498,14 +499,6 @@ func (e *StaleMapError) LogAttrs() []any {
 	}
 	return attrs
 }
-
-// ConsecutiveRejections reports how many refresh cycles in a row the
-// acceptance guards rejected a fresh 200 body, including this one; 0 when the
-// degradation is a fetch or parse failure rather than a guard rejection. The
-// scout reads it to escalate its existing degraded-mapping log line to ERROR
-// at degradation.EscalationThreshold - carrying the streak here keeps that the
-// single log site instead of adding a second log line in this package.
-func (e *StaleMapError) ConsecutiveRejections() int { return e.rejections }
 
 // staleOrFail returns the stale cache wrapped in a *StaleMapError when prev
 // holds a usable record set (cacheUsable; carrying cause when non-nil),
