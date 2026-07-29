@@ -10,7 +10,7 @@ import (
 // invariants, never a reimplementation of the exact-match rule: the result is
 // always one of the four canonical values (nil, [broken], [incomplete],
 // [broken incomplete]) so raw upstream tag bytes can never leak into reports
-// or log attributes; CurationWarned always agrees with the annotation
+// or log attributes; curationWarned always agrees with the annotation
 // (nil-ness consistency); input tag order never changes the result;
 // duplicating the tag list never changes the result (dedupe); and appending a
 // canonical warning spelling always trips the gate.
@@ -39,8 +39,8 @@ func FuzzCurationWarnings(f *testing.F) {
 			t.Errorf("CurationWarnings(%q) = %q, want one of the four canonical values", tags, warns)
 		}
 
-		if warned := CurationWarned(tags); warned != (warns != nil) {
-			t.Errorf("CurationWarned(%q) = %v, disagrees with CurationWarnings = %q", tags, warned, warns)
+		if warned := curationWarned(tags); warned != (warns != nil) {
+			t.Errorf("curationWarned(%q) = %v, disagrees with CurationWarnings = %q", tags, warned, warns)
 		}
 
 		reversed := []string{c, b, a}
@@ -54,8 +54,8 @@ func FuzzCurationWarnings(f *testing.F) {
 		}
 
 		augmented := []string{a, b, c, " BrOkEn "}
-		if !CurationWarned(augmented) {
-			t.Errorf("CurationWarned(%q) = false after appending a canonical warning spelling", augmented)
+		if !curationWarned(augmented) {
+			t.Errorf("curationWarned(%q) = false after appending a canonical warning spelling", augmented)
 		}
 	})
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/tagfilter"
 	"github.com/cplieger/slogx/capture"
 )
 
@@ -34,6 +35,37 @@ func newTestWriter(path, abPasskey string, abConfigured bool) *FeedWriter {
 func newLoggedTestWriter(path string, log *slog.Logger) *FeedWriter {
 	return NewFeedWriter(&FeedWriterConfig{
 		Path:           path,
+		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"},
+	}, log, nil)
+}
+
+// feedExcludesWarnings is the operator tag policy the feed-exclusion tests
+// configure: SeaDex's own curation-warning vocabulary excluded from the FEED
+// surface. It exists because the shipped default excludes NOTHING (an absent or
+// empty filters.exclude_tags), so every test pinning the identity-wide exclusion
+// machinery must now ask for it explicitly - see
+// TestRebuildKeepsCurationWarnedTorrentsByDefault for the default.
+func feedExcludesWarnings() tagfilter.Filter {
+	return tagfilter.New(map[string][]tagfilter.Surface{
+		"broken":     {tagfilter.SurfaceFeed},
+		"incomplete": {tagfilter.SurfaceFeed},
+	})
+}
+
+// newExcludingTestWriter is newTestWriter with feedExcludesWarnings configured.
+func newExcludingTestWriter(path string) *FeedWriter {
+	return NewFeedWriter(&FeedWriterConfig{
+		Path:           path,
+		TagFilter:      feedExcludesWarnings(),
+		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"},
+	}, nil, nil)
+}
+
+// newLoggedExcludingTestWriter is newExcludingTestWriter with a capture logger.
+func newLoggedExcludingTestWriter(path string, log *slog.Logger) *FeedWriter {
+	return NewFeedWriter(&FeedWriterConfig{
+		Path:           path,
+		TagFilter:      feedExcludesWarnings(),
 		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"},
 	}, log, nil)
 }
@@ -1408,7 +1440,7 @@ func TestRebuildDropsCarriedItemWarnedByStoredHashOnly(t *testing.T) {
 			Files:    []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [W].mkv"}},
 		}},
 	}}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, log, nil).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := newLoggedExcludingTestWriter(path, log).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -1458,7 +1490,7 @@ func TestRebuildDropsCarriedItemWarnedAcrossTrackers(t *testing.T) {
 		},
 	}}
 	log, rec := capture.New()
-	w := newTestWriter(path, "", false)
+	w := newExcludingTestWriter(path)
 	w.log = log
 	if err := w.Rebuild(t.Context(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)

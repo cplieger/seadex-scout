@@ -32,6 +32,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/tagfilter"
 	"github.com/cplieger/seadex-scout/internal/trackerlink"
 )
 
@@ -97,15 +98,24 @@ type Release struct {
 	Group   string `json:"group,omitempty"`
 	URL     string `json:"url,omitempty"`
 	// Warnings carries the canonical curation-warning tags (broken,
-	// incomplete) SeaDex curators put on the release, when any. A warned
-	// release stays listed - the report enumerates raw SeaDex data - but it
-	// is excluded from the verdict's BEST group set and from the grab
-	// links, rendering with the warning marker instead (see groupSets and
-	// the render layer). It still counts on the descriptive ALT rung: a
-	// warning changes whether you should want the release, not whether
-	// SeaDex lists it.
+	// incomplete) SeaDex curators put on the release, when any. It is the
+	// report's DISPLAY vocabulary and nothing else: a warned release is
+	// always listed and always annotated with the warning marker, whether or
+	// not the operator's filters.exclude_tags policy also excludes it (see
+	// Filtered, release.CurationWarnings, and the render layer). The
+	// vocabulary is fixed here on purpose - it names what SeaDex's curators
+	// said, not what the operator chose to filter.
 	Warnings []string `json:"warnings,omitempty"`
 	Best     bool     `json:"best"`
+	// Filtered marks a release the operator's filters.exclude_tags policy
+	// excludes from the REPORT surface (one of its SeaDex tags is listed for
+	// `report`). Such a release stays listed and annotated - the report
+	// enumerates raw SeaDex data - but forfeits the verdict's BEST group set
+	// exactly like an unobtainable one (see groupSets). False by default,
+	// because an absent or empty exclude_tags filters nothing anywhere;
+	// serialized only when set, so an unfiltered row's JSON shape is
+	// unchanged.
+	Filtered bool `json:"filtered,omitempty"`
 	// Unobtainable marks a release the daemon's obtainability rule
 	// (filter.Obtainable) rejects as verdict evidence: no usable link, or a
 	// tracker the operator cannot use. Like a curation-warned release it
@@ -216,12 +226,18 @@ type Report struct {
 
 // Config configures an Auditor.
 type Config struct {
+	// TagFilter is the operator's filters.exclude_tags policy, asked about the
+	// report surface. Its zero value - the default - excludes nothing, so a
+	// release SeaDex tags Broken is listed, annotated, AND counted as best
+	// evidence.
+	TagFilter       tagfilter.Filter
 	ExcludeSpecials bool
 	AnimeBytes      bool
 }
 
 // Auditor builds alignment reports from matches.
 type Auditor struct {
+	tags              tagfilter.Filter
 	excludeSpecials   bool
 	includeAnimeBytes bool
 }
@@ -229,6 +245,7 @@ type Auditor struct {
 // NewAuditor builds an Auditor from cfg.
 func NewAuditor(cfg Config) *Auditor {
 	return &Auditor{
+		tags:              cfg.TagFilter,
 		excludeSpecials:   cfg.ExcludeSpecials,
 		includeAnimeBytes: cfg.AnimeBytes,
 	}
@@ -430,10 +447,13 @@ func rowQualifier(entry *seadex.Entry, d *align.Decision) Qualifier {
 // AB, and the report's contract is that a release with no usable link stays
 // listed with Unobtainable=true so the operator can see why it did not
 // affect the verdict. A curation-warned release (SeaDex tags it
-// Broken/Incomplete) stays listed but annotated: the report enumerates raw
-// SeaDex data by design, so hiding it would misrepresent the entry, while
-// groupSets and the render layer keep it out of the verdict and the grab
-// links. A release the daemon's filter.Obtainable rule rejects (no usable
+// Broken/Incomplete) stays listed AND annotated, and by default also counts:
+// the report enumerates raw SeaDex data by design, and whether a warning
+// removes the release from the verdict is now the operator's
+// filters.exclude_tags call (carried on Release.Filtered, empty by default),
+// not this app's. The grab-links cell stays annotation-driven either way - the
+// report does not offer a one-click grab for a release SeaDex's own curators
+// warn against. A release the daemon's filter.Obtainable rule rejects (no usable
 // link, or a tracker the operator cannot use) gets the same treatment,
 // carried on Release.Unobtainable: listed and annotated, never verdict
 // evidence - so a visible best the verdict ignored is always explained.
@@ -475,7 +495,11 @@ func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 			// app's, not the record's: nothing about the SeaDex data is wrong.
 			UnknownTracker: refusal == trackerlink.RefusalUnknownTracker,
 			Warnings:       release.CurationWarnings(t.Tags),
-			Unobtainable:   !classify.Obtainable(&rel, t, a.includeAnimeBytes),
+			// The FILTER question, distinct from the annotation above: the
+			// operator's configured tag exclusions for this surface. Empty by
+			// default, so a warned release is annotated AND counted.
+			Filtered:     a.tags.Excludes(t.Tags, tagfilter.SurfaceReport),
+			Unobtainable: !classify.Obtainable(&rel, t, a.includeAnimeBytes),
 		})
 	}
 	return out
@@ -498,20 +522,29 @@ func (a *Auditor) seadexURL(aniListID int) string {
 // --- Group sets + row ordering ---
 
 // groupSets returns the distinct normalized groups among the best and the alt
-// releases. The two rungs answer DIFFERENT questions, so the annotation
+// releases. The two rungs answer DIFFERENT questions, so the exclusion
 // classes gate only one of them.
 //
-// BEST is prescriptive - "is this the release to have?" - so an annotated
-// release (a curation warning SeaDex's own curators put on it, a url the
-// publisher refused, or the daemon's filter.Obtainable rule rejecting it as
-// unreachable) contributes nothing: counting it would let a Broken/Incomplete
-// or ungettable release read as a best to have or to want, where the daemon's
-// compare pass excludes it - the two flows must tell one story. The
-// eligibility here IS the daemon's filter.Obtainable, computed in
-// classifyReleases, not a mirror of it, so the two flows cannot drift when the
-// tracker table grows, and the test IS the render layer's annotated()
-// predicate, so the set of classes that forfeit BEST evidence and the set the
-// SeaDex-best column marks are one list.
+// BEST is prescriptive - "is this the release to have?" - so a release that
+// forfeits best evidence (see forfeitsBest: the operator's tag policy excludes
+// it from the report, the publisher refused its url, or the daemon's
+// filter.Obtainable rule rejects it as unreachable) contributes nothing:
+// counting an ungettable release would let it read as a best to have or to
+// want, where the daemon's compare pass excludes it - the two flows must tell
+// one story. The eligibility here IS the daemon's filter.Obtainable, computed
+// in classifyReleases, not a mirror of it, so the two flows cannot drift when
+// the tracker table grows, and the tag half is the SAME tagfilter policy the
+// daemon and the feed read, so all three surfaces answer one configured
+// question.
+//
+// A curation warning alone no longer forfeits best evidence: with the default
+// (empty) filters.exclude_tags, a release SeaDex tags Broken IS counted here,
+// and the operator sees it in the SeaDex-best column with its "(broken)" note
+// in the Notes column. That is the deliberate default - the annotation informs,
+// the config decides - so this set and the render layer's annotated() predicate
+// are no longer one list: annotated() still governs DISPLAY (the note, the
+// clean-before-annotated ordering, and the grab-links affordance), while this
+// rung governs the VERDICT.
 //
 // ALT is DESCRIPTIVE - "is what I already have something SeaDex lists?" - and
 // a curation warning or a broken link does not change that answer. Gating it
@@ -531,7 +564,7 @@ func groupSets(releases []Release) (best, alt []string) {
 		rel := &releases[i]
 		g := release.NormalizeGroup(rel.Group)
 		if rel.Best {
-			if annotated(rel) {
+			if forfeitsBest(rel) {
 				continue
 			}
 			addUnique(bestSeen, &best, g)
@@ -540,6 +573,16 @@ func groupSets(releases []Release) (best, alt []string) {
 		}
 	}
 	return best, alt
+}
+
+// forfeitsBest reports whether a best release contributes no BEST evidence to
+// the verdict: the operator's filters.exclude_tags policy excludes it from the
+// report surface, or it is unreachable (no usable link, an upstream url the
+// publisher refused, a tracker this app cannot resolve). It is deliberately
+// NARROWER than the render layer's annotated(): a curation warning is display,
+// this is policy, and by default no tag is filtered at all.
+func forfeitsBest(rel *Release) bool {
+	return rel.Filtered || rel.Unobtainable || rel.URLError || rel.UnknownTracker
 }
 
 // addUnique appends g to out if not already seen.

@@ -23,10 +23,12 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +38,7 @@ import (
 	"github.com/cplieger/scheduler/v2"
 	"github.com/cplieger/seadex-scout/internal/credname"
 	"github.com/cplieger/seadex-scout/internal/displaylink"
+	"github.com/cplieger/seadex-scout/internal/tagfilter"
 	"github.com/cplieger/slogx"
 	"github.com/cplieger/urlform"
 	"go.yaml.in/yaml/v3"
@@ -111,6 +114,17 @@ const (
 	maxPollInterval = 30 * 24 * time.Hour
 )
 
+// Bounds on the filters.exclude_tags map, the one file key whose KEYS are
+// operator-supplied free text. SeaDex's own curation vocabulary is a handful of
+// short words ("Broken", "Incomplete"), so both bounds are generous ceilings
+// that only a paste error or a hostile file can reach - the point is that the
+// policy map cannot grow unbounded from a 1 MiB config, since every release's
+// tags are matched against it on every surface.
+const (
+	maxExcludeTags   = 32
+	maxExcludeTagLen = 64
+)
+
 // --- On-disk YAML shape and defaults ---
 
 // fileConfig is the on-disk YAML shape: only the user-facing settings.
@@ -120,10 +134,10 @@ type fileConfig struct {
 	Report       reportFile  `yaml:"report"`
 	PollInterval string      `yaml:"poll_interval"`
 	Mode         string      `yaml:"mode"`
+	Filters      filtersFile `yaml:"filters"`
 	Radarr       arrFile     `yaml:"radarr"`
 	Sonarr       arrFile     `yaml:"sonarr"`
 	ArrTags      tagsFile    `yaml:"arr_tags"`
-	Filters      filtersFile `yaml:"filters"`
 	// AnimeBytes adds AnimeBytes (private tracker) releases and links to findings
 	// and the report; it is a tracker-access toggle (do you have an account?),
 	// not a content filter, so it sits at the top level rather than under filters.
@@ -156,9 +170,14 @@ type arrFile struct {
 }
 
 type filtersFile struct {
-	ExcludeRemux     bool `yaml:"exclude_remux"`
-	RequireDualAudio bool `yaml:"require_dual_audio"`
-	ExcludeSpecials  bool `yaml:"exclude_specials"`
+	// ExcludeTags maps a SeaDex tag to the recommendation surfaces it is
+	// excluded from ("findings", "report", "feed"). Absent or empty means
+	// NOTHING is filtered on any surface; see buildTagFilter for the bounds and
+	// the surface vocabulary.
+	ExcludeTags      map[string][]string `yaml:"exclude_tags"`
+	ExcludeRemux     bool                `yaml:"exclude_remux"`
+	RequireDualAudio bool                `yaml:"require_dual_audio"`
+	ExcludeSpecials  bool                `yaml:"exclude_specials"`
 }
 
 type tagsFile struct {
@@ -195,6 +214,19 @@ func defaultFileConfig() fileConfig {
 // the indexer bind address is fixed in internal/indexer. Fields are ordered
 // largest-alignment-first for govet fieldalignment.
 type Config struct {
+	// tagFilterErr holds a rejected filters.exclude_tags map (unknown surface,
+	// blank or over-long tag key, no surfaces, too many tags). It is recorded at
+	// flatten time and returned by Validate, so the single parse happens where
+	// the file shape is still in hand and the startup error still stops the app.
+	// It leads the struct for fieldalignment, not for prominence.
+	tagFilterErr error
+	// TagFilter is the filters.exclude_tags policy: which SeaDex tags exclude a
+	// release from which recommendation surface. The zero value (the default,
+	// and what an absent or empty section yields) filters NOTHING anywhere - a
+	// release SeaDex tagged Broken reaches the findings, the report and the
+	// feed. It is the one policy all three surfaces read.
+	TagFilter tagfilter.Filter
+
 	RunMode   string // "daemon" (default) or "report" (one-shot audit).
 	ReportDir string // directory for timestamped report-<ts>.md / .json pairs.
 
@@ -337,6 +369,7 @@ func (fc *fileConfig) toConfig() Config {
 		c.ReportDir = DefaultReportDir
 	}
 	c.PollInterval, c.PollExternal = parseInterval(fc.PollInterval)
+	c.TagFilter, c.tagFilterErr = buildTagFilter(fc.Filters.ExcludeTags)
 	warnAllBlankTagList("arr_tags.include", fc.ArrTags.Include, c.IncludeTags)
 	warnAllBlankTagList("arr_tags.exclude", fc.ArrTags.Exclude, c.ExcludeTags)
 	return c
@@ -356,6 +389,60 @@ func applyArr(name string, af arrFile) (arrURL, key, publicURL string) {
 			"field", name+".api_key")
 	}
 	return "", "", ""
+}
+
+// buildTagFilter turns the filters.exclude_tags map into the one tagfilter
+// policy every recommendation surface reads, or an error the caller records for
+// Validate to return. An absent or empty map yields the zero Filter, which
+// filters nothing anywhere - the default.
+//
+// Four rejections, all hard errors rather than silent no-ops, because each one
+// is an operator asking for filtering that would not happen: more tags than
+// maxExcludeTags, a blank or over-long tag key, an unknown surface name, and a
+// tag listing NO surfaces. The last is a judgement call: `broken: []` reads as
+// an intent to filter but means nothing, and the file already has one
+// unambiguous way to filter nothing (an empty exclude_tags), so a second,
+// contradictory spelling of it is refused. Diagnostics are field-name-only like
+// every other config error - never the tag key or the rejected surface - since a
+// ${VAR} typo can place an expanded secret in either position.
+func buildTagFilter(raw map[string][]string) (tagfilter.Filter, error) {
+	if len(raw) == 0 {
+		return tagfilter.Filter{}, nil
+	}
+	if len(raw) > maxExcludeTags {
+		return tagfilter.Filter{}, fmt.Errorf(
+			"filters.exclude_tags lists more than %d tags", maxExcludeTags)
+	}
+	valid := strings.Join(tagfilter.SurfaceNames(), ", ")
+	bySurface := make(map[string][]tagfilter.Surface, len(raw))
+	// Sorted keys keep the reported defect deterministic when a map holds more
+	// than one: map iteration order would otherwise pick a different error per
+	// run for the same file.
+	for _, tag := range slices.Sorted(maps.Keys(raw)) {
+		switch key := strings.TrimSpace(tag); {
+		case key == "":
+			return tagfilter.Filter{}, errors.New(
+				"filters.exclude_tags holds a blank tag key")
+		case len(key) > maxExcludeTagLen:
+			return tagfilter.Filter{}, fmt.Errorf(
+				"a filters.exclude_tags tag key is longer than %d characters", maxExcludeTagLen)
+		case len(raw[tag]) == 0:
+			return tagfilter.Filter{}, fmt.Errorf(
+				"a filters.exclude_tags tag lists no surfaces; list at least one of %s, "+
+					"or remove the tag (an empty exclude_tags filters nothing)", valid)
+		}
+		surfaces := make([]tagfilter.Surface, 0, len(raw[tag]))
+		for _, name := range raw[tag] {
+			s, ok := tagfilter.ParseSurface(name)
+			if !ok {
+				return tagfilter.Filter{}, fmt.Errorf(
+					"filters.exclude_tags lists an unknown surface; valid surfaces are %s", valid)
+			}
+			surfaces = append(surfaces, s)
+		}
+		bySurface[tag] = surfaces
+	}
+	return tagfilter.New(bySurface), nil
 }
 
 // parseInterval reads the poll_interval value into a built-in cadence or the
@@ -477,6 +564,11 @@ func (c *Config) IndexerConfigured() bool {
 func (c *Config) Validate() error {
 	if err := validateRunMode(c.RunMode); err != nil {
 		return err
+	}
+	// The filters.exclude_tags map is parsed once at flatten time (toConfig);
+	// this is where its rejection becomes the startup error.
+	if c.tagFilterErr != nil {
+		return c.tagFilterErr
 	}
 	if err := validateArrPair("sonarr", c.SonarrURL, c.SonarrAPIKey); err != nil {
 		return err

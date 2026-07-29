@@ -31,8 +31,8 @@ func TestCurationWarned(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := CurationWarned(tt.tags); got != tt.want {
-				t.Errorf("CurationWarned(%q) = %v, want %v", tt.tags, got, tt.want)
+			if got := curationWarned(tt.tags); got != tt.want {
+				t.Errorf("curationWarned(%q) = %v, want %v", tt.tags, got, tt.want)
 			}
 		})
 	}

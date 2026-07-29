@@ -4,10 +4,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/cplieger/seadex-scout/internal/tagfilter"
 	"github.com/cplieger/slogx"
 	"github.com/cplieger/slogx/capture"
 )
@@ -1108,6 +1110,16 @@ func TestExampleConfigMatchesLoader(t *testing.T) {
 	}
 	if c.ReportDir != DefaultReportDir {
 		t.Errorf("ReportDir = %q, want %q", c.ReportDir, DefaultReportDir)
+	}
+	// The starter ships filters.exclude_tags empty, which must mean NOTHING is
+	// filtered: a release SeaDex tagged Broken reaches all three surfaces until
+	// the operator lists the tag.
+	for _, s := range []tagfilter.Surface{
+		tagfilter.SurfaceFindings, tagfilter.SurfaceReport, tagfilter.SurfaceFeed,
+	} {
+		if c.TagFilter.Excludes([]string{"Broken", "Incomplete"}, s) {
+			t.Errorf("the shipped starter filters a warned release from %s", s)
+		}
 	}
 }
 
@@ -2246,5 +2258,213 @@ func TestValidateWarnsOnReusedIndexerSecret(t *testing.T) {
 				t.Errorf("reused-secret warning echoes the secret: %v", rec.Messages())
 			}
 		})
+	}
+}
+
+// TestToConfigTagFilterDefaultFiltersNothing pins the default the operator gets
+// with no filters.exclude_tags at all, and with an explicit empty map: the two
+// must be indistinguishable, and BOTH must filter nothing on every surface. A
+// release SeaDex tagged Broken therefore reaches the findings, the report and
+// the feed - the deliberate default, not an oversight.
+func TestToConfigTagFilterDefaultFiltersNothing(t *testing.T) {
+	tests := map[string]map[string][]string{
+		"absent section": nil,
+		"empty map":      {},
+	}
+	warned := []string{"Broken", "Incomplete"}
+	for name, raw := range tests {
+		t.Run(name, func(t *testing.T) {
+			fc := defaultFileConfig()
+			fc.Filters.ExcludeTags = raw
+
+			c := fc.toConfig()
+
+			if c.tagFilterErr != nil {
+				t.Fatalf("tagFilterErr = %v, want nil", c.tagFilterErr)
+			}
+			for _, s := range []tagfilter.Surface{
+				tagfilter.SurfaceFindings, tagfilter.SurfaceReport, tagfilter.SurfaceFeed,
+			} {
+				if c.TagFilter.Excludes(warned, s) {
+					t.Errorf("a warned release is excluded from %s by default", s)
+				}
+			}
+		})
+	}
+}
+
+// TestToConfigTagFilterPopulated pins the wiring of a real filters.exclude_tags
+// map onto the runtime policy, including per-surface selectivity and the
+// case-insensitive tag key the file may spell any way.
+func TestToConfigTagFilterPopulated(t *testing.T) {
+	fc := defaultFileConfig()
+	fc.Filters.ExcludeTags = map[string][]string{
+		"BROKEN":     {"findings", "report", "feed"},
+		"incomplete": {" Feed "},
+	}
+
+	c := fc.toConfig()
+
+	if c.tagFilterErr != nil {
+		t.Fatalf("tagFilterErr = %v, want nil", c.tagFilterErr)
+	}
+	tests := []struct {
+		tag     string
+		surface tagfilter.Surface
+		want    bool
+	}{
+		{"broken", tagfilter.SurfaceFindings, true},
+		{"broken", tagfilter.SurfaceReport, true},
+		{"broken", tagfilter.SurfaceFeed, true},
+		{"incomplete", tagfilter.SurfaceFeed, true},
+		{"incomplete", tagfilter.SurfaceFindings, false},
+		{"incomplete", tagfilter.SurfaceReport, false},
+		{"dual-audio", tagfilter.SurfaceFeed, false},
+	}
+	for _, tt := range tests {
+		if got := c.TagFilter.Excludes([]string{tt.tag}, tt.surface); got != tt.want {
+			t.Errorf("Excludes(%q, %s) = %v, want %v", tt.tag, tt.surface, got, tt.want)
+		}
+	}
+}
+
+// TestToConfigTagFilterRejections pins every filters.exclude_tags input that is
+// a startup error rather than a silent no-op, and that each error keeps the
+// config package's field-name-only posture: it names the field and the valid
+// surface set, never the operator's tag key or the rejected surface value
+// (either can hold a ${VAR}-expanded secret placed there by a typo).
+func TestToConfigTagFilterRejections(t *testing.T) {
+	many := make(map[string][]string, maxExcludeTags+1)
+	for i := range maxExcludeTags + 1 {
+		many["tag"+strconv.Itoa(i)] = []string{"feed"}
+	}
+	tests := []struct {
+		name     string
+		raw      map[string][]string
+		wantErr  string
+		wantAway string
+	}{
+		{
+			name:     "unknown surface",
+			raw:      map[string][]string{"broken": {"findings", "alerts-s3cret"}},
+			wantErr:  "unknown surface",
+			wantAway: "alerts-s3cret",
+		},
+		{
+			name:     "no surfaces",
+			raw:      map[string][]string{"broken-s3cret": {}},
+			wantErr:  "lists no surfaces",
+			wantAway: "broken-s3cret",
+		},
+		{
+			name:    "blank tag key",
+			raw:     map[string][]string{"   ": {"feed"}},
+			wantErr: "blank tag key",
+		},
+		{
+			name:     "over-long tag key",
+			raw:      map[string][]string{strings.Repeat("s3cret", 20): {"feed"}},
+			wantErr:  "longer than",
+			wantAway: "s3crets3cret",
+		},
+		{
+			name:    "too many tags",
+			raw:     many,
+			wantErr: "more than",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := defaultFileConfig()
+			fc.Filters.ExcludeTags = tt.raw
+
+			c := fc.toConfig()
+
+			if c.tagFilterErr == nil {
+				t.Fatal("tagFilterErr = nil, want an error")
+			}
+			msg := c.tagFilterErr.Error()
+			if !strings.Contains(msg, tt.wantErr) {
+				t.Errorf("error %q does not mention %q", msg, tt.wantErr)
+			}
+			if !strings.Contains(msg, "filters.exclude_tags") {
+				t.Errorf("error %q does not name the field", msg)
+			}
+			if tt.wantAway != "" && strings.Contains(msg, tt.wantAway) {
+				t.Errorf("error %q echoes the operator-supplied value", msg)
+			}
+			// A rejected map must not leave a half-built policy behind.
+			if c.TagFilter.Excludes([]string{"broken"}, tagfilter.SurfaceFeed) {
+				t.Error("a rejected exclude_tags map still produced exclusions")
+			}
+		})
+	}
+}
+
+// TestValidateSurfacesTagFilterError pins that a rejected filters.exclude_tags
+// map stops the app at startup (Validate), naming the valid surface set so the
+// operator can fix the file without reading the source.
+func TestValidateSurfacesTagFilterError(t *testing.T) {
+	fc := defaultFileConfig()
+	fc.Sonarr = arrFile{Enabled: true, URL: "http://sonarr:8989", APIKey: "k"}
+	fc.Filters.ExcludeTags = map[string][]string{"broken": {"alerts"}}
+
+	c := fc.toConfig()
+
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil, want the exclude_tags error")
+	}
+	for _, want := range []string{"findings", "report", "feed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name the valid surface %q", err, want)
+		}
+	}
+	// The same config with a valid surface list must run.
+	fc.Filters.ExcludeTags = map[string][]string{"broken": {"feed"}}
+	ok := fc.toConfig()
+	if err := ok.Validate(); err != nil {
+		t.Errorf("Validate() with a valid exclude_tags = %v, want nil", err)
+	}
+}
+
+// TestLoadTagFilterFromFile pins the whole path from YAML text to the runtime
+// policy: the nested map decodes, an unknown key inside filters is still
+// rejected by the strict loader, and the empty-map spelling in
+// config.example.yaml loads to a policy that filters nothing.
+func TestLoadTagFilterFromFile(t *testing.T) {
+	dir := t.TempDir()
+	populated := filepath.Join(dir, "populated.yaml")
+	body := "sonarr:\n  enabled: true\n  url: \"http://sonarr:8989\"\n  api_key: \"k\"\n" +
+		"filters:\n  exclude_tags:\n    Broken: [findings, feed]\n"
+	if err := os.WriteFile(populated, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	c, err := Load(populated)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !c.TagFilter.Excludes([]string{"broken"}, tagfilter.SurfaceFindings) {
+		t.Error("configured tag is not excluded from findings")
+	}
+	if c.TagFilter.Excludes([]string{"broken"}, tagfilter.SurfaceReport) {
+		t.Error("an unlisted surface is filtered")
+	}
+
+	empty := filepath.Join(dir, "empty.yaml")
+	emptyBody := "sonarr:\n  enabled: true\n  url: \"http://sonarr:8989\"\n  api_key: \"k\"\n" +
+		"filters:\n  exclude_tags: {}\n"
+	if err := os.WriteFile(empty, []byte(emptyBody), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	ec, err := Load(empty)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if err := ec.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if ec.TagFilter.Excludes([]string{"broken"}, tagfilter.SurfaceFeed) {
+		t.Error("an empty exclude_tags map filtered a tag")
 	}
 }

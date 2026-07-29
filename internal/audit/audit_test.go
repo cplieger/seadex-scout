@@ -10,6 +10,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/tagfilter"
 )
 
 // TestVerdictFor pins the 1:1 rendering of the shared decision core's
@@ -542,48 +543,52 @@ func TestRowQualifier(t *testing.T) {
 	}
 }
 
-// TestAuditCurationWarnedReleaseAnnotatedNotCounted pins the report-path
-// curation-warning contract: a warned release stays LISTED (the report
-// enumerates raw SeaDex data) carrying its canonical warning tags, but it
-// counts as no BEST for the verdict - an on-disk group matching only a Broken
-// best reads have_unlisted, never have_best, mirroring the daemon's exclusion
-// - while it still counts on the descriptive ALT rung, and an unwarned best
-// still classifies as usual.
-func TestAuditCurationWarnedReleaseAnnotatedNotCounted(t *testing.T) {
-	a := NewAuditor(Config{})
-	rowFor := func(t *testing.T, torrents []seadex.Torrent) Row {
-		t.Helper()
-		item := &library.Item{
-			Arr: library.ArrSonarr, ArrID: 1, Title: "Warned", TvdbID: 100,
-			SeasonGroups: map[int][]string{1: {"pmr"}}, Groups: []string{"pmr"}, HasFile: true,
-		}
-		matches := []match.Match{{
-			Item:   item,
-			Arr:    library.ArrSonarr,
-			Source: match.SourceID,
-			Entry:  seadex.Entry{AniListID: 10, Torrents: torrents},
-			Record: mapping.Record{Type: "TV", TvdbID: 100, SeasonTvdb: 1},
-		}}
-		rep := a.Audit(matches, nil, nil, nil)
-		if len(rep.Rows) != 1 {
-			t.Fatalf("rows = %d, want 1", len(rep.Rows))
-		}
-		return rep.Rows[0]
-	}
+// TestAuditBrokenBestCountedAndAnnotatedByDefault pins the report-path DEFAULT
+// after filters.exclude_tags: with no exclusions configured a curation-warned
+// release is LISTED, ANNOTATED with its canonical warning tags, AND counted as
+// BEST evidence - so an on-disk group matching a Broken best reads have_best.
+//
+// This INVERTS the former TestAuditCurationWarnedReleaseAnnotatedNotCounted,
+// whose "warned best neither aligns nor recommends" subtest asserted
+// have_unlisted from the hardcoded exclusion. That expectation now lives in
+// TestAuditExcludedTagBestNotCounted, which configures `broken: [report]`
+// explicitly. The annotation half is unchanged and asserted in both.
+func TestAuditBrokenBestCountedAndAnnotatedByDefault(t *testing.T) {
+	rowFor := auditRowFixture(NewAuditor(Config{}))
 
-	t.Run("warned best neither aligns nor recommends", func(t *testing.T) {
+	t.Run("warned best counts and is annotated", func(t *testing.T) {
 		row := rowFor(t, []seadex.Torrent{{
 			Tracker: "Nyaa", ReleaseGroup: "PMR", URL: "https://nyaa.si/view/1",
 			IsBest: true, Tags: []string{"Broken"},
 		}})
-		if row.Verdict != VerdictUnlisted {
-			t.Errorf("verdict = %q, want %q (a Broken best must not count as best)", row.Verdict, VerdictUnlisted)
+		if row.Verdict != VerdictBest {
+			t.Errorf("verdict = %q, want %q (nothing is filtered by default, so a Broken best counts)", row.Verdict, VerdictBest)
 		}
 		if len(row.Releases) != 1 {
 			t.Fatalf("releases = %d, want 1 (a warned release stays listed)", len(row.Releases))
 		}
-		if got := row.Releases[0].Warnings; !reflect.DeepEqual(got, []string{"broken"}) {
-			t.Errorf("release warnings = %v, want the canonical [broken]", got)
+		rel := row.Releases[0]
+		if !reflect.DeepEqual(rel.Warnings, []string{"broken"}) {
+			t.Errorf("release warnings = %v, want the canonical [broken] (display is not config-driven)", rel.Warnings)
+		}
+		if rel.Filtered {
+			t.Error("release Filtered = true with an empty exclude_tags policy")
+		}
+	})
+
+	t.Run("a feed-only exclusion leaves the report alone", func(t *testing.T) {
+		feedOnly := auditRowFixture(NewAuditor(Config{TagFilter: tagfilter.New(map[string][]tagfilter.Surface{
+			"broken": {tagfilter.SurfaceFeed},
+		})}))
+		row := feedOnly(t, []seadex.Torrent{{
+			Tracker: "Nyaa", ReleaseGroup: "PMR", URL: "https://nyaa.si/view/1",
+			IsBest: true, Tags: []string{"Broken"},
+		}})
+		if row.Verdict != VerdictBest {
+			t.Errorf("verdict = %q, want %q (broken:[feed] must not affect the report)", row.Verdict, VerdictBest)
+		}
+		if row.Releases[0].Filtered {
+			t.Error("release Filtered = true under a feed-only exclusion")
 		}
 	})
 
@@ -612,6 +617,74 @@ func TestAuditCurationWarnedReleaseAnnotatedNotCounted(t *testing.T) {
 			t.Errorf("releases = %+v, want one unwarned release with nil warnings", row.Releases)
 		}
 	})
+}
+
+// TestAuditExcludedTagBestNotCounted pins the report surface under a CONFIGURED
+// exclusion (`broken: [report]`): the excluded best stays LISTED and ANNOTATED
+// (display never depends on the policy) but forfeits BEST evidence, so an
+// on-disk group matching only it reads have_unlisted - the pre-config behaviour,
+// now the operator's choice. Matching stays exact and case-insensitive, so a
+// substring near-miss keeps counting.
+func TestAuditExcludedTagBestNotCounted(t *testing.T) {
+	rowFor := auditRowFixture(NewAuditor(Config{TagFilter: tagfilter.New(map[string][]tagfilter.Surface{
+		"broken": {tagfilter.SurfaceReport},
+	})}))
+
+	t.Run("excluded best is listed, annotated and not counted", func(t *testing.T) {
+		row := rowFor(t, []seadex.Torrent{{
+			Tracker: "Nyaa", ReleaseGroup: "PMR", URL: "https://nyaa.si/view/1",
+			IsBest: true, Tags: []string{"BROKEN"},
+		}})
+		if row.Verdict != VerdictUnlisted {
+			t.Errorf("verdict = %q, want %q (an excluded best must not count as best)", row.Verdict, VerdictUnlisted)
+		}
+		if len(row.Releases) != 1 {
+			t.Fatalf("releases = %d, want 1 (an excluded release stays listed)", len(row.Releases))
+		}
+		rel := row.Releases[0]
+		if !rel.Filtered {
+			t.Error("release Filtered = false, want true under broken:[report]")
+		}
+		if !reflect.DeepEqual(rel.Warnings, []string{"broken"}) {
+			t.Errorf("release warnings = %v, want the canonical [broken] even when filtered", rel.Warnings)
+		}
+	})
+
+	t.Run("a substring near-miss still counts", func(t *testing.T) {
+		row := rowFor(t, []seadex.Torrent{{
+			Tracker: "Nyaa", ReleaseGroup: "PMR", URL: "https://nyaa.si/view/5",
+			IsBest: true, Tags: []string{"brokenish"},
+		}})
+		if row.Verdict != VerdictBest {
+			t.Errorf("verdict = %q, want %q (a tag merely containing an excluded tag is not excluded)", row.Verdict, VerdictBest)
+		}
+	})
+}
+
+// auditRowFixture returns a helper producing the single report Row for one
+// entry's torrents against a fixed on-disk item (Sonarr series, TVDB 100,
+// season 1, group pmr). Shared by the default-behaviour and configured-exclusion
+// tests so both read the same fixture.
+func auditRowFixture(a *Auditor) func(*testing.T, []seadex.Torrent) Row {
+	return func(t *testing.T, torrents []seadex.Torrent) Row {
+		t.Helper()
+		item := &library.Item{
+			Arr: library.ArrSonarr, ArrID: 1, Title: "Warned", TvdbID: 100,
+			SeasonGroups: map[int][]string{1: {"pmr"}}, Groups: []string{"pmr"}, HasFile: true,
+		}
+		matches := []match.Match{{
+			Item:   item,
+			Arr:    library.ArrSonarr,
+			Source: match.SourceID,
+			Entry:  seadex.Entry{AniListID: 10, Torrents: torrents},
+			Record: mapping.Record{Type: "TV", TvdbID: 100, SeasonTvdb: 1},
+		}}
+		rep := a.Audit(matches, nil, nil, nil)
+		if len(rep.Rows) != 1 {
+			t.Fatalf("rows = %d, want 1", len(rep.Rows))
+		}
+		return rep.Rows[0]
+	}
 }
 
 // TestAuditUnobtainableBestAnnotatedNotCounted pins the report-path

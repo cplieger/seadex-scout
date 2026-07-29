@@ -7,7 +7,8 @@
 // internal/align decision core (align.Decide) - the same decision rules the
 // audit report renders, so the two flows cannot drift on shared inputs (they
 // deliberately prepare different ones: the report judges the SeaDex best/alt
-// sets minus only curation-warned and unobtainable releases, while this pass
+// sets minus only the operator's tag exclusions and unobtainable releases,
+// while this pass
 // additionally applies the content filters and keeps best-only): a
 // mapped TVDB season against that season's groups, a special against Sonarr's
 // season-0 bucket, a movie against its groups, and an absolute-numbered or
@@ -33,6 +34,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/tagfilter"
 	"github.com/cplieger/seadex-scout/internal/tracker"
 )
 
@@ -143,6 +145,7 @@ type Finding struct {
 
 // Comparer produces findings from matches under a fixed filter policy.
 type Comparer struct {
+	tags            tagfilter.Filter
 	opts            filter.Options
 	excludeSpecials bool
 	animeBytes      bool
@@ -150,6 +153,10 @@ type Comparer struct {
 
 // Config configures a Comparer.
 type Config struct {
+	// TagFilter is the operator's filters.exclude_tags policy, asked about the
+	// findings surface. Its zero value - the default - excludes nothing, so a
+	// release SeaDex tags Broken produces a finding like any other.
+	TagFilter       tagfilter.Filter
 	Filter          filter.Options
 	ExcludeSpecials bool
 	// AnimeBytes includes AnimeBytes (private tracker) releases in the
@@ -163,6 +170,7 @@ type Config struct {
 // NewComparer builds a Comparer from cfg.
 func NewComparer(cfg Config) *Comparer {
 	return &Comparer{
+		tags:            cfg.TagFilter,
 		opts:            cfg.Filter,
 		excludeSpecials: cfg.ExcludeSpecials,
 		animeBytes:      cfg.AnimeBytes,
@@ -244,8 +252,8 @@ func (c *Comparer) compareOne(m *match.Match) *Finding {
 }
 
 // recommended classifies the entry's SeaDex "best" torrents and returns those
-// the operator could act on: not curation-warned (a torrent SeaDex tags
-// Broken/Incomplete is warned against, never recommended), passing the
+// the operator could act on: not excluded by the operator's tag policy
+// (filters.exclude_tags, which by default excludes nothing), passing the
 // content filters (remux policy, dual-audio) AND obtainable (a public
 // tracker, or AnimeBytes when enabled).
 func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
@@ -255,12 +263,24 @@ func (c *Comparer) recommended(entry *seadex.Entry) []candidate {
 		if !t.IsBest {
 			continue
 		}
-		// A curation-warned release (SeaDex tags it Broken/Incomplete) is
-		// never recommended: the curators themselves warn against grabbing
-		// it, so like an unobtainable release it is absent, never a finding.
-		// An entry whose every best is warned flows through emptyResult (the
+		// The operator's configured tag exclusions for THIS surface, asked
+		// per occurrence: only the torrent whose own tags are excluded drops
+		// out, unlike the feed's identity-wide closure in
+		// internal/indexer's splitCurationWarned. That asymmetry is
+		// deliberate and measured, not an oversight: across the live
+		// catalogue (2806 entries, 9175 torrent records, 254 curation-warned,
+		// measured 2026-07-29) 380 of the identities are shared by more than
+		// one entry and ZERO of them carry differing tag sets, so the two
+		// scopes cannot currently disagree - and an alert names ONE
+		// occurrence the operator looks at, while the feed hands the arrs
+		// bytes that must not be grabbable under any listing.
+		//
+		// Nothing is excluded by default (the zero Filter), so a torrent
+		// SeaDex tags Broken IS recommended and DOES produce a finding unless
+		// the operator lists that tag for the findings surface. An entry whose
+		// every best is excluded flows through emptyResult (the
 		// theoretical/incomplete nudge or silence) unchanged.
-		if release.CurationWarned(t.Tags) {
+		if c.tags.Excludes(t.Tags, tagfilter.SurfaceFindings) {
 			continue
 		}
 		// AB guard before classification; the raw-URL invariant lives in

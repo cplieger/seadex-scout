@@ -296,10 +296,33 @@ verdict, never a confident answer.
 
 The filter keys (`filters.*`, `animebytes`, `arr_tags.*`; see
 [Configuration reference](#configuration-reference)) shape the report/alert
-engine only; the [indexer](#indexer-torznab-feed) feed applies none of them.
+engine only; the [indexer](#indexer-torznab-feed) feed applies none of them,
+with one exception: `filters.exclude_tags` shapes all three surfaces.
 The two content filters (`exclude_remux`, `require_dual_audio`) shape the
 daemon's findings only (the report always lists SeaDex's raw best/alt picks),
 while `exclude_specials` and `animebytes` shape both.
+
+**SeaDex curation tags are not filtered by default.** SeaDex curators tag some
+listed releases `Broken` or `Incomplete`. seadex-scout filters **nothing** on
+those tags unless you say so: with the default empty `filters.exclude_tags`, a
+`Broken`-tagged release is alerted on as a better release available, counts as a
+best in the report, and is served in the Torznab feed. The report annotates it
+`(broken)` regardless, so the warning is always visible — it just is not acted
+on. To exclude such releases, name the tag and the surfaces it should disappear
+from:
+
+```yaml
+filters:
+  exclude_tags:
+    broken: [findings, report, feed]
+    incomplete: [feed]
+```
+
+The surfaces are exactly `findings` (the daemon's alerts), `report`, and `feed`
+(Torznab search + RSS), so a tag can be kept out of the feed while still being
+alerted on. Tag matching is exact and case-insensitive (never a substring), any
+SeaDex tag is filterable, and an unknown surface name — or a tag listing no
+surfaces — is rejected at startup.
 
 ## Configuration reference
 
@@ -324,6 +347,7 @@ unknown or misplaced key is rejected at startup with an error naming it.
 | `filters.exclude_remux` | `false` | Releases classified `remux` never count as a recommendation |
 | `filters.require_dual_audio` | `false` | Only dual-audio releases count |
 | `filters.exclude_specials` | `false` | Drop OVA/ONA/special entries from findings and the report |
+| `filters.exclude_tags` | `{}` | Per-tag, per-surface SeaDex-tag exclusions (`findings`/`report`/`feed`); **empty = nothing is filtered, including `Broken`** |
 | `arr_tags.include` / `arr_tags.exclude` | `[]` | Scan only / never arr items with these tags; an exclude wins |
 | `report.dir` | `/config/reports` | Where timestamped `report-<UTC>.md` + `.json` pairs land |
 | `indexer.feed_api_key` | `""` | Key the arrs must send to the feed |

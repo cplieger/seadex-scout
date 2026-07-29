@@ -12,6 +12,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/tagfilter"
 	"github.com/cplieger/seadex-scout/internal/tracker"
 )
 
@@ -861,40 +862,39 @@ func TestCompareFindingCarriesClassifiedReleaseFields(t *testing.T) {
 	}
 }
 
-// TestCompareCurationWarnedBestExcluded pins the curation-warning gate on the
-// findings path: a SeaDex best tagged Broken/Incomplete (case-insensitive,
-// exact) is never recommended - an entry whose only best is warned emits
-// nothing (or its theoretical-best nudge, unchanged), and a warned best
-// beside an unwarned one recommends only the unwarned release.
-func TestCompareCurationWarnedBestExcluded(t *testing.T) {
+// TestCompareBrokenBestRecommendedByDefault pins the DEFAULT the operator
+// chose when filters.exclude_tags was introduced: nothing is filtered, so a
+// SeaDex best tagged Broken IS recommended and DOES produce a
+// `better release available` finding on the findings surface.
+//
+// This INVERTS the former TestCompareCurationWarnedBestExcluded, whose three
+// subtests asserted the hardcoded {broken,incomplete} exclusion (silence, the
+// theoretical-best fallback, and recommending only the unwarned sibling). Those
+// expectations now live in TestCompareExcludedTagBestNotRecommended, which
+// configures the same exclusion explicitly - the behaviour did not disappear,
+// it became the operator's call.
+func TestCompareBrokenBestRecommendedByDefault(t *testing.T) {
 	newItem := func() *library.Item {
 		return &library.Item{Title: "Warned", Groups: []string{"erai-raws"}, SeasonGroups: map[int][]string{1: {"erai-raws"}}}
 	}
 
-	t.Run("warned-only best is silent", func(t *testing.T) {
+	t.Run("warned-only best produces a better_release finding", func(t *testing.T) {
 		for _, tag := range []string{"Broken", "BROKEN", "Incomplete"} {
 			entry := seadex.Entry{AniListID: 800, Torrents: []seadex.Torrent{
 				{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/800", Tags: []string{"dual", tag}},
 			}}
 			m := match.Match{Item: newItem(), Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
-			if got := comparer(filter.Options{}, false).Compare([]match.Match{m}); len(got) != 0 {
-				t.Errorf("tag %q: a warned-only best must produce no finding, got %+v", tag, got)
+			got := comparer(filter.Options{}, false).Compare([]match.Match{m})
+			if len(got) != 1 || got[0].Status != StatusBetter {
+				t.Fatalf("tag %q: with no exclude_tags configured a warned best must surface as better_release, got %+v", tag, got)
+			}
+			if !reflect.DeepEqual(got[0].RecommendedGroups, []string{"subsplease"}) {
+				t.Errorf("tag %q: RecommendedGroups = %v, want the warned release's [subsplease]", tag, got[0].RecommendedGroups)
 			}
 		}
 	})
 
-	t.Run("warned-only best keeps theoretical fallback", func(t *testing.T) {
-		entry := seadex.Entry{AniListID: 801, TheoreticalBest: "a stated remux", Torrents: []seadex.Torrent{
-			{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/801", Tags: []string{"Broken"}},
-		}}
-		m := match.Match{Item: newItem(), Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
-		got := comparer(filter.Options{}, false).Compare([]match.Match{m})
-		if len(got) != 1 || got[0].Status != StatusTheoretical {
-			t.Fatalf("expected the theoretical_best/info nudge with every best warned, got %+v", got)
-		}
-	})
-
-	t.Run("unwarned best beside a warned one is recommended alone", func(t *testing.T) {
+	t.Run("warned best beside an unwarned one recommends both", func(t *testing.T) {
 		entry := seadex.Entry{AniListID: 802, Torrents: []seadex.Torrent{
 			{IsBest: true, ReleaseGroup: "BrokenGrp", Tracker: "Nyaa", URL: "https://nyaa.si/view/802", Tags: []string{"Broken"}},
 			{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/803"},
@@ -904,11 +904,89 @@ func TestCompareCurationWarnedBestExcluded(t *testing.T) {
 		if len(got) != 1 {
 			t.Fatalf("expected 1 finding, got %d", len(got))
 		}
+		if !reflect.DeepEqual(got[0].RecommendedGroups, []string{"brokengrp", "subsplease"}) {
+			t.Errorf("RecommendedGroups = %v, want both bests (nothing is filtered by default)", got[0].RecommendedGroups)
+		}
+	})
+
+	t.Run("a feed-only exclusion leaves findings alone", func(t *testing.T) {
+		entry := seadex.Entry{AniListID: 804, Torrents: []seadex.Torrent{
+			{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/804", Tags: []string{"Broken"}},
+		}}
+		m := match.Match{Item: newItem(), Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+		feedOnly := NewComparer(Config{TagFilter: tagfilter.New(map[string][]tagfilter.Surface{
+			"broken": {tagfilter.SurfaceFeed},
+		})})
+		got := feedOnly.Compare([]match.Match{m})
+		if len(got) != 1 || got[0].Status != StatusBetter {
+			t.Fatalf("broken:[feed] must not affect the findings surface, got %+v", got)
+		}
+	})
+}
+
+// TestCompareExcludedTagBestNotRecommended pins the findings surface under a
+// CONFIGURED exclusion: with `broken: [findings]` (and `incomplete`) the
+// pre-config behaviour returns exactly - an entry whose only best is excluded
+// emits nothing (or its theoretical-best nudge, unchanged), and an excluded
+// best beside a kept one recommends only the kept release. Matching stays exact
+// and case-insensitive; a substring near-miss is not an exclusion.
+func TestCompareExcludedTagBestNotRecommended(t *testing.T) {
+	newItem := func() *library.Item {
+		return &library.Item{Title: "Warned", Groups: []string{"erai-raws"}, SeasonGroups: map[int][]string{1: {"erai-raws"}}}
+	}
+	excluding := NewComparer(Config{TagFilter: tagfilter.New(map[string][]tagfilter.Surface{
+		"broken":     {tagfilter.SurfaceFindings},
+		"incomplete": {tagfilter.SurfaceFindings},
+	})})
+
+	t.Run("excluded-only best is silent", func(t *testing.T) {
+		for _, tag := range []string{"Broken", "BROKEN", "Incomplete"} {
+			entry := seadex.Entry{AniListID: 800, Torrents: []seadex.Torrent{
+				{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/800", Tags: []string{"dual", tag}},
+			}}
+			m := match.Match{Item: newItem(), Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+			if got := excluding.Compare([]match.Match{m}); len(got) != 0 {
+				t.Errorf("tag %q: an excluded-only best must produce no finding, got %+v", tag, got)
+			}
+		}
+	})
+
+	t.Run("a substring near-miss is not excluded", func(t *testing.T) {
+		entry := seadex.Entry{AniListID: 805, Torrents: []seadex.Torrent{
+			{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/805", Tags: []string{"brokenish"}},
+		}}
+		m := match.Match{Item: newItem(), Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+		if got := excluding.Compare([]match.Match{m}); len(got) != 1 {
+			t.Fatalf("a tag merely containing an excluded tag must not trip the gate, got %+v", got)
+		}
+	})
+
+	t.Run("excluded-only best keeps theoretical fallback", func(t *testing.T) {
+		entry := seadex.Entry{AniListID: 801, TheoreticalBest: "a stated remux", Torrents: []seadex.Torrent{
+			{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/801", Tags: []string{"Broken"}},
+		}}
+		m := match.Match{Item: newItem(), Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+		got := excluding.Compare([]match.Match{m})
+		if len(got) != 1 || got[0].Status != StatusTheoretical {
+			t.Fatalf("expected the theoretical_best/info nudge with every best excluded, got %+v", got)
+		}
+	})
+
+	t.Run("kept best beside an excluded one is recommended alone", func(t *testing.T) {
+		entry := seadex.Entry{AniListID: 802, Torrents: []seadex.Torrent{
+			{IsBest: true, ReleaseGroup: "BrokenGrp", Tracker: "Nyaa", URL: "https://nyaa.si/view/802", Tags: []string{"Broken"}},
+			{IsBest: true, ReleaseGroup: "SubsPlease", Tracker: "Nyaa", URL: "https://nyaa.si/view/803"},
+		}}
+		m := match.Match{Item: newItem(), Arr: library.ArrSonarr, Entry: entry, Record: mapping.Record{SeasonTvdb: 1}}
+		got := excluding.Compare([]match.Match{m})
+		if len(got) != 1 {
+			t.Fatalf("expected 1 finding, got %d", len(got))
+		}
 		if !reflect.DeepEqual(got[0].RecommendedGroups, []string{"subsplease"}) {
-			t.Errorf("RecommendedGroups = %v, want only the unwarned [subsplease]", got[0].RecommendedGroups)
+			t.Errorf("RecommendedGroups = %v, want only the kept [subsplease]", got[0].RecommendedGroups)
 		}
 		if len(got[0].Links) != 1 || got[0].Links[0].URL != "https://nyaa.si/view/803" {
-			t.Errorf("Links = %+v, want only the unwarned release's link", got[0].Links)
+			t.Errorf("Links = %+v, want only the kept release's link", got[0].Links)
 		}
 	})
 

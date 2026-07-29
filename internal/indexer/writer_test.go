@@ -18,6 +18,7 @@ import (
 
 	"github.com/cplieger/jsonx/bounded"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/tagfilter"
 	"github.com/cplieger/slogx/capture"
 )
 
@@ -436,13 +437,18 @@ func TestPersistRejectsOversizedSnapshot(t *testing.T) {
 	}
 }
 
-// TestRebuildExcludesCurationWarnedTorrents pins the feed-side curation gate:
-// a torrent SeaDex tags Broken/Incomplete is excluded from the search
+// TestRebuildExcludesCurationWarnedTorrents pins the feed-side exclusion gate
+// under a CONFIGURED policy (`broken`/`incomplete`: [feed], see
+// feedExcludesWarnings): an excluded torrent is dropped from the search
 // curation set (a Prowlarr result matching it is purged as uncurated), never
 // journaled onto RSS, and deliberately NOT recorded in the seen ledger - so a
-// later rebuild with the warning lifted journals it as newly grabbable
-// curation - while an unwarned sibling flows through untouched and the
+// later rebuild with the tag gone journals it as newly grabbable
+// curation - while a kept sibling flows through untouched and the
 // snapshot log line counts the exclusion.
+//
+// The policy argument is what changed with filters.exclude_tags: the exclusion
+// used to be hardcoded, so this test needed no configuration. The default is now
+// to exclude nothing (TestRebuildKeepsCurationWarnedTorrentsByDefault).
 func TestRebuildExcludesCurationWarnedTorrents(t *testing.T) {
 	log, rec := capture.New()
 	path := filepath.Join(t.TempDir(), "feed.json")
@@ -463,7 +469,7 @@ func TestRebuildExcludesCurationWarnedTorrents(t *testing.T) {
 			},
 		},
 	}}
-	if err := newLoggedTestWriter(path, log).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := newLoggedExcludingTestWriter(path, log).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -486,11 +492,11 @@ func TestRebuildExcludesCurationWarnedTorrents(t *testing.T) {
 		t.Errorf("snapshot log line warned_excluded = %q (found=%v), want \"1\"; log output:\n%s", v, ok, strings.Join(rec.Messages(), "\n"))
 	}
 
-	// The warning is lifted: the torrent was never folded into the seen
+	// The tag is gone upstream: the torrent was never folded into the seen
 	// ledger, so it now journals as NEW - the moment it first became
 	// grabbable curation is when the arrs should see it on RSS.
 	entries[0].Torrents[0].Tags = []string{"dual"}
-	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, nil).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := newExcludingTestWriter(path).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("second Rebuild: %v", err)
 	}
 	snap = readSnapshotFile(t, path)
@@ -506,8 +512,72 @@ func TestRebuildExcludesCurationWarnedTorrents(t *testing.T) {
 	}
 }
 
+// TestRebuildKeepsCurationWarnedTorrentsByDefault pins the feed surface's
+// DEFAULT after filters.exclude_tags: with no exclusions configured (the
+// shipped default, and the operator's explicit choice) a torrent SeaDex tags
+// Broken IS curated, IS journaled onto RSS, and IS recorded in the seen ledger,
+// so Sonarr/Radarr see it and decide for themselves.
+//
+// This INVERTS what TestRebuildExcludesCurationWarnedTorrents used to assert
+// for an unconfigured writer: the exclusion did not disappear, it moved into
+// filters.exclude_tags (that test now configures it). A report-only exclusion is
+// asserted here too, so a `broken: [report]` policy provably leaves the feed
+// alone - the three surfaces are independent.
+func TestRebuildKeepsCurationWarnedTorrentsByDefault(t *testing.T) {
+	warnedEntries := func() []seadex.Entry {
+		return []seadex.Entry{{
+			AniListID: 7,
+			Torrents: []seadex.Torrent{{
+				Tracker: "Nyaa", URL: "https://nyaa.si/view/41", IsBest: true,
+				InfoHash: strings.Repeat("a", 40),
+				Tags:     []string{"dual", "Broken"},
+				Files:    []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [W].mkv"}},
+			}},
+		}}
+	}
+	assertServed := func(t *testing.T, w *FeedWriter, path string) {
+		t.Helper()
+		if err := w.Rebuild(context.Background(), warnedEntries(), nil); err != nil {
+			t.Fatalf("Rebuild: %v", err)
+		}
+		snap := readSnapshotFile(t, path)
+		if _, ok := snap.ByKey["nyaa:41"]; !ok {
+			t.Error("curation set is missing the Broken torrent; searches must serve it when nothing filters the feed")
+		}
+		if _, ok := snap.ByHash[strings.Repeat("a", 40)]; !ok {
+			t.Error("curation set is missing the Broken torrent's info hash")
+		}
+		if len(snap.NyaaFeed) != 1 || snap.NyaaFeed[0].Key != "nyaa:41" {
+			t.Errorf("nyaa feed = %+v, want the Broken torrent journaled onto RSS", snap.NyaaFeed)
+		}
+		if !snap.Seen["nyaa:41"] {
+			t.Errorf("seen ledger = %v, want the served torrent recorded", snap.Seen)
+		}
+	}
+
+	t.Run("no exclude_tags configured", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "feed.json")
+		seedEmptyLedger(t, path)
+		assertServed(t, newTestWriter(path, "", false), path)
+	})
+
+	t.Run("a report-only exclusion leaves the feed alone", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "feed.json")
+		seedEmptyLedger(t, path)
+		w := NewFeedWriter(&FeedWriterConfig{
+			Path: path,
+			TagFilter: tagfilter.New(map[string][]tagfilter.Surface{
+				"broken": {tagfilter.SurfaceReport},
+			}),
+			UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"},
+		}, nil, nil)
+		assertServed(t, w, path)
+	})
+}
+
 // TestRebuildWarnedTorrentIdentityWinsAcrossEntries pins the identity-level
-// warning policy: a torrent attached to several SeaDex entries where only ONE
+// exclusion scope under a CONFIGURED policy (feedExcludesWarnings): a torrent
+// attached to several SeaDex entries where only ONE
 // occurrence carries the Broken/Incomplete tag is excluded everywhere - the
 // search curation set (proxied searches would otherwise serve and mark the
 // unwarned duplicate) and the RSS journal alike (carryJournal consumes the
@@ -553,7 +623,7 @@ func TestRebuildWarnedTorrentIdentityWinsAcrossEntries(t *testing.T) {
 			}},
 		},
 	}
-	if err := newLoggedTestWriter(path, log).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := newLoggedExcludingTestWriter(path, log).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -577,7 +647,8 @@ func TestRebuildWarnedTorrentIdentityWinsAcrossEntries(t *testing.T) {
 	}
 }
 
-// TestRebuildDropsCarriedJournalItemBecomingWarned pins the carry-side gate:
+// TestRebuildDropsCarriedJournalItemBecomingWarned pins the carry-side gate
+// under a CONFIGURED policy (feedExcludesWarnings):
 // a previously journaled item whose torrent has SINCE been tagged
 // Broken/Incomplete is dropped from the journal - unlike a
 // curated-then-replaced torrent, which keeps its stored render - so the arrs
@@ -602,7 +673,7 @@ func TestRebuildDropsCarriedJournalItemBecomingWarned(t *testing.T) {
 			Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}},
 		}},
 	}}
-	if err := newLoggedTestWriter(path, log).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := newLoggedExcludingTestWriter(path, log).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -888,7 +959,7 @@ func TestRebuildWarnedIdentityPropagatesTransitively(t *testing.T) {
 		{AniListID: 2, Torrents: []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/2", InfoHash: h1, IsBest: true, Files: mkv}}},
 		{AniListID: 1, Torrents: []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/1", InfoHash: h1, IsBest: true, Tags: []string{"Broken"}, Files: mkv}}},
 	}
-	if err := newTestWriter(path, "passkey", false).Rebuild(context.Background(), entries, nil); err != nil {
+	if err := newExcludingTestWriter(path).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
@@ -960,7 +1031,7 @@ func TestRebuildCanonicalizesStoredHashBeforeWarningRetraction(t *testing.T) {
 		Tags:  []string{"Broken"},
 		Files: []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [W].mkv"}},
 	}}}}
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, nil)
+	w := newExcludingTestWriter(path)
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -1433,7 +1504,7 @@ func TestSplitCurationWarnedLeavesInputUnmutated(t *testing.T) {
 		{Tracker: "Nyaa", URL: "https://nyaa.si/view/41", IsBest: true, Tags: []string{"Broken"}, Files: mkv},
 		{Tracker: "Nyaa", URL: "https://nyaa.si/view/42", IsBest: true, Files: mkv},
 	}}}
-	kept, ws := splitCurationWarned(entries)
+	kept, ws := splitCurationWarned(entries, feedExcludesWarnings())
 	if len(entries[0].Torrents) != 2 || entries[0].Torrents[0].URL != "https://nyaa.si/view/41" {
 		t.Fatalf("splitCurationWarned mutated the shared input: %+v", entries[0].Torrents)
 	}
@@ -1656,7 +1727,7 @@ func TestCollectWarnedIdentitiesClosesReverseOrderedChain(t *testing.T) {
 		entries = append(entries, seadex.Entry{AniListID: i + 1, Torrents: torrents})
 	}
 
-	keys, all := collectWarnedIdentities(entries)
+	keys, all := collectWarnedIdentities(entries, feedExcludesWarnings())
 	for i := range links {
 		key := "nyaa:" + strconv.Itoa(i)
 		if _, warned := keys[key]; !warned {

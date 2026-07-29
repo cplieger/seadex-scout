@@ -34,6 +34,18 @@ filters:
   exclude_remux: false # true drops remuxes (default keeps them)
   require_dual_audio: false # true drops non-dual-audio releases
   exclude_specials: false # true drops OVA/ONA/specials
+  # Per-tag, per-surface exclusions keyed on SeaDex's own release tags.
+  # EMPTY (the default) MEANS NOTHING IS FILTERED: a release SeaDex tagged
+  # "Broken" is still alerted on as a better release available, still counts as a
+  # best in the report, and is still served in the Torznab feed. The report
+  # annotates it "(broken)" either way. List the tags you want gone, and on which
+  # surfaces — surfaces are exactly findings (the alerts), report, feed (Torznab
+  # search + RSS); an unknown surface name or a tag with no surfaces is a startup
+  # error. Tag matching is exact and case-insensitive.
+  exclude_tags: {}
+  # exclude_tags:
+  #   broken: [findings, report, feed]
+  #   incomplete: [feed]
 
 arr_tags:
   include: [] # scan only items with one of these tags; [] = all

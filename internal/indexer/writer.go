@@ -16,8 +16,8 @@ import (
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/jsonx/bounded"
 	"github.com/cplieger/seadex-scout/internal/degradation"
-	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/tagfilter"
 )
 
 const (
@@ -620,6 +620,11 @@ type snapshot struct {
 // also power the title harvest (see harvest.go).
 type FeedWriterConfig struct {
 	Path string
+	// TagFilter is the operator's filters.exclude_tags policy, asked about the
+	// feed surface. Its zero value - the default - excludes nothing, so a
+	// torrent SeaDex tags Broken is curated, journaled and served like any
+	// other.
+	TagFilter tagfilter.Filter
 	UpstreamConfig
 }
 
@@ -633,6 +638,7 @@ type FeedWriter struct {
 	log            *slog.Logger
 	now            func() time.Time
 	harvest        *harvester
+	tags           tagfilter.Filter
 	path           string
 	abPasskey      string
 	nyaaConfigured bool
@@ -664,6 +670,7 @@ func NewFeedWriter(cfg *FeedWriterConfig, log *slog.Logger, client *http.Client)
 	w := &FeedWriter{
 		log:            log,
 		now:            time.Now,
+		tags:           cfg.TagFilter,
 		path:           cfg.Path,
 		abPasskey:      cfg.ABPasskey,
 		nyaaConfigured: cfg.enabled(upstreamNyaa),
@@ -684,11 +691,13 @@ func NewFeedWriter(cfg *FeedWriterConfig, log *slog.Logger, client *http.Client)
 // Rebuild refreshes the persisted feed snapshot from the SeaDex entries
 // (categorized and titled via info, the per-show metadata closure the cycle
 // builds over its persisted state; nil is valid and falls back to file-name
-// synthesis). Curation-warned torrents (SeaDex tags them Broken/Incomplete)
-// are excluded first - from the search curation set, the seen ledger, and the
-// journal alike - and a previously journaled item whose torrent has since
-// been warned is dropped, so the arrs can never grab a release the curators
-// warn against (see splitCurationWarned). It rebuilds the search curation set
+// synthesis). Torrents the operator's filters.exclude_tags policy excludes
+// from the feed surface are removed first - from the search curation set, the
+// seen ledger, and the journal alike - and a previously journaled item whose
+// torrent has since become excluded is dropped, so the arrs can never grab a
+// release the operator filtered (see splitCurationWarned; the default policy
+// is empty, so by default nothing is excluded and a Broken-tagged release does
+// enter the feed). It rebuilds the search curation set
 // from the whole catalogue, then advances the RSS journal: newly curated
 // torrents (absent from the seen ledger) enter with a first-seen timestamp,
 // carried items re-render from current data, items older than
@@ -709,7 +718,7 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info E
 	if err != nil {
 		return err
 	}
-	entries, ws := splitCurationWarned(entries)
+	entries, ws := splitCurationWarned(entries, w.tags)
 	set := buildCuration(entries)
 	now := w.now()
 
@@ -1080,14 +1089,15 @@ func (w *FeedWriter) packDisagreementReporter() func(key string, titlePack, file
 
 // --- Curation-warned exclusion ---
 
-// warnedSet is the curation-warned exclusion set splitCurationWarned builds
+// warnedSet is the exclusion set splitCurationWarned builds
 // and the carry side consumes as one value: keys holds the excluded journal
-// keys (every directly warned occurrence plus every duplicate removed through
+// keys (every directly excluded occurrence plus every duplicate removed through
 // a shared identity - also the warned_excluded operator count), and ids holds
-// the warned identity-signal set (journal key AND info hash), transitively
+// the excluded identity-signal set (journal key AND info hash), transitively
 // closed over shared identities by collectWarnedIdentities' graph traversal,
 // which retracts uses to drop a previously journaled item whose stored info
-// hash is warned under a DIFFERENT tracker key.
+// hash is excluded under a DIFFERENT tracker key. Both sets are empty under the
+// default (empty) filters.exclude_tags policy.
 type warnedSet struct {
 	keys map[string]struct{}
 	ids  map[string]struct{}
@@ -1109,37 +1119,55 @@ func (ws *warnedSet) retracts(it *journalItem) bool {
 }
 
 // splitCurationWarned partitions the catalogue for the feed: it returns a
-// copy of entries with every curation-warned torrent (release.CurationWarned
-// over the SeaDex tags: Broken/Incomplete) removed, plus the warnedSet the
+// copy of entries with every EXCLUDED torrent removed, plus the warnedSet the
 // carry side consumes (see warnedSet for the two sets it holds and
-// warnedSet.retracts for the retraction decision). The warning wins BY
+// warnedSet.retracts for the retraction decision). Which torrents are excluded
+// is the operator's filters.exclude_tags policy asked about the feed surface
+// (tags), NOT a fixed vocabulary: the default policy is empty, so by default
+// nothing is excluded and even a torrent SeaDex tags Broken is curated,
+// journaled and served. The names here keep the curation-warning vocabulary
+// because that is the motivating case the exclusion exists for.
+//
+// The exclusion wins BY
 // IDENTITY, not per occurrence: a torrent can be attached to several SeaDex
-// entries, and when one occurrence is tagged Broken/Incomplete while a
-// duplicate of the same tracker key is not, keeping the unwarned duplicate
+// entries, and when one occurrence carries an excluded tag while a
+// duplicate of the same tracker key does not, keeping the unexcluded duplicate
 // would let proxied searches serve and mark the release while carryJournal
 // (which consumes the any-occurrence key set) removes it from RSS - the two
 // indexer paths would disagree about whether the release is grabbable. So a
-// first pass collects every warned identity signal - journal key AND info
-// hash (identitySignals, the deliberately CROSS-SCOPE identity form: a warning
-// against the bytes must retract every listing of them, unlike the seen
+// first pass collects every excluded identity signal - journal key AND info
+// hash (identitySignals, the deliberately CROSS-SCOPE identity form: an
+// exclusion of the bytes must retract every listing of them, unlike the seen
 // ledger's per-scope ledgerSignals) - across the
-// whole catalogue, and a second pass removes every occurrence that is warned
-// itself OR shares a warned identity.
+// whole catalogue, and a second pass removes every occurrence that is excluded
+// itself OR shares an excluded identity.
+//
+// This identity-wide scope deliberately DIFFERS from the daemon's
+// per-occurrence check in internal/compare (which drops only the occurrence
+// whose own tags are excluded), and the asymmetry was measured and kept, not
+// missed: across the live catalogue (2806 entries, 9175 torrent records, 254
+// curation-warned, measured 2026-07-29) 380 of the identities are shared by
+// more than one entry and ZERO of them carry differing tag sets, so the two
+// scopes cannot currently disagree. The feed hands the arrs bytes they will
+// GRAB, so it closes over every listing of them; an alert names one occurrence
+// a human then looks at.
+//
 // Filtering at the source keeps every downstream consumer honest at once: the
-// search curation set never marks a warned release (a Prowlarr result
+// search curation set never marks an excluded release (a Prowlarr result
 // matching one is purged as uncurated), the journal never grows one, and the
-// seen ledger never records one - so when a warning is lifted the torrent
-// becomes grabbable curation for the first time and journals as new (a
-// torrent journaled BEFORE it was warned stays in the persisted ledger, so
-// un-warning it never re-broadcasts it). The input is never mutated: the
+// seen ledger never records one - so when the exclusion is lifted (the warning
+// dropped upstream, or the operator's config changed) the torrent becomes
+// grabbable curation for the first time and journals as new (a
+// torrent journaled BEFORE it was excluded stays in the persisted ledger, so
+// un-excluding it never re-broadcasts it). The input is never mutated: the
 // cycle shares the entries slice with the compare pass, so an entry
 // containing a removed torrent gets a fresh filtered Torrents slice.
-func splitCurationWarned(entries []seadex.Entry) (kept []seadex.Entry, ws warnedSet) {
-	ws.keys, ws.ids = collectWarnedIdentities(entries)
+func splitCurationWarned(entries []seadex.Entry, tags tagfilter.Filter) (kept []seadex.Entry, ws warnedSet) {
+	ws.keys, ws.ids = collectWarnedIdentities(entries, tags)
 	kept = make([]seadex.Entry, len(entries))
 	for i := range entries {
 		kept[i] = entries[i]
-		if unwarned, changed := filterWarnedTorrents(entries[i].Torrents, ws.ids); changed {
+		if unwarned, changed := filterWarnedTorrents(entries[i].Torrents, ws.ids, tags); changed {
 			kept[i].Torrents = unwarned
 		}
 	}
@@ -1164,9 +1192,9 @@ func splitCurationWarned(entries []seadex.Entry) (kept []seadex.Entry, ws warned
 // valid upstream input could make one rebuild overrun the poll interval (h-f1).
 // Building the index once and visiting each node and each signal once is linear
 // in torrents plus signals.
-func collectWarnedIdentities(entries []seadex.Entry) (keys, all map[string]struct{}) {
+func collectWarnedIdentities(entries []seadex.Entry, tags tagfilter.Filter) (keys, all map[string]struct{}) {
 	keys, all = make(map[string]struct{}), make(map[string]struct{})
-	nodes, bySignal, pending := indexWarnedIdentities(entries)
+	nodes, bySignal, pending := indexWarnedIdentities(entries, tags)
 	visited := make([]bool, len(nodes))
 	expanded := make(map[string]struct{}, len(bySignal))
 	for len(pending) > 0 {
@@ -1206,8 +1234,10 @@ type warnedNode struct {
 // indexWarnedIdentities builds the warned-identity graph in one catalogue pass:
 // one node per torrent, an index from each identity signal to the nodes carrying
 // it (the graph's edges, since two torrents are adjacent exactly when they share
-// a signal), and the traversal seeds - the directly curation-warned nodes.
-func indexWarnedIdentities(entries []seadex.Entry) (nodes []warnedNode, bySignal map[string][]int, seeds []int) {
+// a signal), and the traversal seeds - the nodes the operator's tag policy
+// excludes from the feed surface. With the default (empty) policy there are no
+// seeds, so the traversal is a no-op and the whole catalogue is kept.
+func indexWarnedIdentities(entries []seadex.Entry, tags tagfilter.Filter) (nodes []warnedNode, bySignal map[string][]int, seeds []int) {
 	total := 0
 	for i := range entries {
 		total += len(entries[i].Torrents)
@@ -1222,7 +1252,7 @@ func indexWarnedIdentities(entries []seadex.Entry) (nodes []warnedNode, bySignal
 			for _, signal := range nodes[idx].signals {
 				bySignal[signal] = append(bySignal[signal], idx)
 			}
-			if release.CurationWarned(t.Tags) {
+			if tags.Excludes(t.Tags, tagfilter.SurfaceFeed) {
 				seeds = append(seeds, idx)
 			}
 		}
@@ -1242,20 +1272,21 @@ func sharesWarnedIdentity(t *seadex.Torrent, all map[string]struct{}) bool {
 }
 
 // filterWarnedTorrents is splitCurationWarned's second pass for one entry's
-// torrents: it drops every occurrence that is warned itself OR shares a
-// warned identity signal (journal key or info hash), reporting whether
+// torrents: it drops every occurrence the operator's tag policy excludes from
+// the feed surface OR that shares an excluded identity signal (journal key or
+// info hash), reporting whether
 // anything was removed (the caller only swaps in the fresh slice then,
 // keeping the shared input unmutated). It is a pure query over the sets
 // collectWarnedIdentities already closed: that traversal marks the journal key of
-// every occurrence sharing a warned identity, so a duplicate excluded only through
-// a warned sibling's info hash is already in the carry-drop set carryJournal
+// every occurrence sharing an excluded identity, so a duplicate excluded only through
+// an excluded sibling's info hash is already in the carry-drop set carryJournal
 // consumes and needs no second fold here.
-func filterWarnedTorrents(ts []seadex.Torrent, warnedIDs map[string]struct{}) ([]seadex.Torrent, bool) {
+func filterWarnedTorrents(ts []seadex.Torrent, warnedIDs map[string]struct{}, tags tagfilter.Filter) ([]seadex.Torrent, bool) {
 	unwarned := make([]seadex.Torrent, 0, len(ts))
 	changed := false
 	for j := range ts {
 		t := &ts[j]
-		if release.CurationWarned(t.Tags) || sharesWarnedIdentity(t, warnedIDs) {
+		if tags.Excludes(t.Tags, tagfilter.SurfaceFeed) || sharesWarnedIdentity(t, warnedIDs) {
 			changed = true
 			continue
 		}

@@ -12,7 +12,7 @@ import (
 // canonical values (nil, [broken], [incomplete], [broken incomplete]) so raw
 // upstream tag bytes can never leak; input tag order never changes the
 // result; and appending a canonical warning tag in any casing always trips
-// both CurationWarnings and the CurationWarned boolean helper (whose full
+// both CurationWarnings and the curationWarned boolean helper (whose full
 // delegated behavior curation_test.go's table pins).
 func TestCurationWarningsProperties(t *testing.T) {
 	tag := rapid.OneOf(
@@ -47,8 +47,8 @@ func TestCurationWarningsProperties(t *testing.T) {
 		}
 
 		augmented := append(slices.Clone(tags), " BrOkEn ")
-		if !CurationWarned(augmented) {
-			t.Fatalf("CurationWarned(%q) = false after appending a canonical warning tag", augmented)
+		if !curationWarned(augmented) {
+			t.Fatalf("curationWarned(%q) = false after appending a canonical warning tag", augmented)
 		}
 		if got := CurationWarnings(augmented); !slices.Contains(got, "broken") {
 			t.Fatalf("CurationWarnings(%q) = %q, want to contain the canonical constant broken", augmented, got)

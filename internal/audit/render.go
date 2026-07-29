@@ -303,9 +303,13 @@ func links(row *Row) string {
 		// A curation-warned or unobtainable best is not offered as a grab
 		// link: the links cell is an action affordance, and either SeaDex's
 		// own curators warn against the release or the daemon's obtainability
-		// rule says the operator cannot get it (it is annotated in the
-		// SeaDex-best column instead; the daemon and the Torznab feed exclude
-		// both the same way).
+		// rule says the operator cannot get it (it is annotated in the Notes
+		// column instead). This gate stays ANNOTATION-driven even though the
+		// verdict's best rung is now the operator's configured tag policy
+		// (audit.go's forfeitsBest): with filtering off a warned release is
+		// counted and displayed, but the report still does not hand out a
+		// one-click grab for something the curators flagged - the releases.moe
+		// link in the same cell is the deliberate route for that.
 		if !rel.Best || rel.URL == "" || annotated(rel) {
 			continue
 		}
@@ -425,6 +429,11 @@ func releaseNotes(rel *Release) []string {
 // predicate behind both render sites (the grab-links cell excludes an
 // annotated best, the SeaDex-best column marks it), so a new annotation class
 // added to releaseNotes cannot start leaking into the links cell.
+//
+// It is DISPLAY only. Whether a release counts toward the verdict's best group
+// set is audit.go's forfeitsBest, which asks the operator's configured
+// filters.exclude_tags policy instead of the warning vocabulary - so a warned
+// release is annotated here while still being counted there (the default).
 func annotated(rel *Release) bool {
 	return len(rel.Warnings) > 0 || rel.Unobtainable || rel.URLError || rel.UnknownTracker
 }

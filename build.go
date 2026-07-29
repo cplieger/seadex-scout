@@ -135,6 +135,7 @@ func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
 		SeaDex:  c.seadex,
 		Matcher: c.matcher,
 		Comparer: compare.NewComparer(compare.Config{
+			TagFilter:       cfg.TagFilter,
 			Filter:          filterOptions(cfg),
 			ExcludeSpecials: cfg.ExcludeSpecials,
 			AnimeBytes:      cfg.AnimeBytes,
@@ -172,6 +173,7 @@ func buildReporter(ctx context.Context, cfg *config.Config) (built, error) {
 		SeaDex:  c.seadex,
 		Matcher: c.matcher,
 		Auditor: audit.NewAuditor(audit.Config{
+			TagFilter:       cfg.TagFilter,
 			ExcludeSpecials: cfg.ExcludeSpecials,
 			AnimeBytes:      cfg.AnimeBytes,
 		}),
@@ -216,6 +218,7 @@ func feedWriter(cfg *config.Config, log *slog.Logger) (fw scout.FeedWriter, clea
 	log = indexerLogger(log)
 	writer := indexer.NewFeedWriter(&indexer.FeedWriterConfig{
 		Path:           config.DefaultIndexerFeedPath,
+		TagFilter:      cfg.TagFilter,
 		UpstreamConfig: upstreamConfig(cfg),
 	}, log, prowlarrHTTP)
 	return writer, func() { prowlarrHTTP.CloseIdleConnections() }
@@ -317,7 +320,10 @@ func logPing(arr string, err error) {
 
 // filterOptions builds the content-filter policy from config. The AnimeBytes
 // tracker toggle is not part of filter.Options; it rides compare.Config and
-// audit.Config directly.
+// audit.Config directly. The filters.exclude_tags policy rides the same three
+// component configs as cfg.TagFilter (one tagfilter.Filter, parsed once in
+// internal/config), so the findings, the report and the feed ask ONE policy
+// instead of each hardcoding a tag vocabulary.
 func filterOptions(cfg *config.Config) filter.Options {
 	return filter.Options{
 		ExcludeRemux:     cfg.ExcludeRemux,
