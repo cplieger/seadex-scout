@@ -34,7 +34,7 @@ func (b *partialBatchAniList) Fetch(_ context.Context, id int) (anilist.Media, e
 	return anilist.Media{}, anilist.ErrNotFound
 }
 
-func (b *partialBatchAniList) FetchMany(_ context.Context, ids []int) (map[int]anilist.Media, error) {
+func (b *partialBatchAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
 	b.batchCalls++
 	out := make(map[int]anilist.Media)
 	for _, id := range ids {
@@ -42,7 +42,7 @@ func (b *partialBatchAniList) FetchMany(_ context.Context, ids []int) (map[int]a
 			out[id] = m
 		}
 	}
-	return out, errors.New("anilist 500")
+	return anilist.BatchResult{Media: out, Completed: true}, errors.New("anilist 500")
 }
 
 // TestMatchMemoizesNotFoundAfterFailedBatch pins the fallback chain behind a
@@ -159,9 +159,10 @@ func (o *totalOutageAniList) Fetch(context.Context, int) (anilist.Media, error) 
 	return anilist.Media{}, errors.New("anilist 500")
 }
 
-func (o *totalOutageAniList) FetchMany(context.Context, []int) (map[int]anilist.Media, error) {
+func (o *totalOutageAniList) FetchMany(context.Context, []int) (anilist.BatchResult, error) {
 	o.batchCalls++
-	return nil, errors.New("anilist 500")
+	// A TOTAL failure: no chunk completed, so Completed stays false.
+	return anilist.BatchResult{}, errors.New("anilist 500")
 }
 
 // TestMatchTotalBatchOutageSkipsPerIDFallback pins the fast-degrade contract:
@@ -218,9 +219,12 @@ func (o *midBatchOutageAniList) Fetch(context.Context, int) (anilist.Media, erro
 	return anilist.Media{}, errors.New("anilist 500")
 }
 
-func (o *midBatchOutageAniList) FetchMany(_ context.Context, ids []int) (map[int]anilist.Media, error) {
+func (o *midBatchOutageAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
 	o.batchCalls++
-	return map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}}, errors.New("anilist 500")
+	return anilist.BatchResult{
+		Media:     map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}},
+		Completed: true,
+	}, errors.New("anilist 500")
 }
 
 // TestMatchMidBatchOutageTripsFastFailBreaker pins the consecutive-failure
@@ -281,8 +285,11 @@ func (a *recoveringAniList) Fetch(_ context.Context, id int) (anilist.Media, err
 	return anilist.Media{}, errors.New("anilist 500")
 }
 
-func (*recoveringAniList) FetchMany(_ context.Context, ids []int) (map[int]anilist.Media, error) {
-	return map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}}, errors.New("anilist 500")
+func (*recoveringAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
+	return anilist.BatchResult{
+		Media:     map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}},
+		Completed: true,
+	}, errors.New("anilist 500")
 }
 
 // TestMatchSuccessfulLookupResetsFailureBreaker pins recordSuccess's streak
@@ -309,9 +316,9 @@ func TestMatchSuccessfulLookupResetsFailureBreaker(t *testing.T) {
 }
 
 // allNotFoundBatchAniList models a batch whose first chunk COMPLETED but found
-// no media before a later chunk failed: FetchMany returns a NON-NIL empty map
-// plus an error (the completion contract's partial side), and every per-id
-// Fetch answers a definitive not-found.
+// no media before a later chunk failed: FetchMany returns a COMPLETED result
+// with an empty Media map plus an error (the completion contract's partial
+// side), and every per-id Fetch answers a definitive not-found.
 type allNotFoundBatchAniList struct {
 	fetchCalls int
 	batchCalls int
@@ -322,18 +329,19 @@ func (o *allNotFoundBatchAniList) Fetch(context.Context, int) (anilist.Media, er
 	return anilist.Media{}, anilist.ErrNotFound
 }
 
-func (o *allNotFoundBatchAniList) FetchMany(context.Context, []int) (map[int]anilist.Media, error) {
+func (o *allNotFoundBatchAniList) FetchMany(context.Context, []int) (anilist.BatchResult, error) {
 	o.batchCalls++
-	return map[int]anilist.Media{}, errors.New("anilist 500 on a later chunk")
+	return anilist.BatchResult{Media: map[int]anilist.Media{}, Completed: true},
+		errors.New("anilist 500 on a later chunk")
 }
 
 // TestMatchEmptyCompletedBatchIsNotAnOutage pins the completion contract at
-// the prefetch outage gate: a NON-NIL empty map plus an error means at least
-// one chunk completed (its ids definitively not found), NOT a total outage —
-// so the fast-fail must not trip, every pending id is retried with one per-id
-// Fetch, each definitive not-found is memoized negatively, and the cycle stays
-// non-degraded. Only a NIL map (no chunk completed) may trip the outage gate,
-// which TestMatchTotalBatchOutageSkipsPerIDFallback pins.
+// the prefetch outage gate: a COMPLETED result with an empty map plus an error
+// means at least one chunk completed (its ids definitively not found), NOT a
+// total outage — so the fast-fail must not trip, every pending id is retried
+// with one per-id Fetch, each definitive not-found is memoized negatively, and
+// the cycle stays non-degraded. Only Completed=false (no chunk completed) may
+// trip the outage gate, which TestMatchTotalBatchOutageSkipsPerIDFallback pins.
 func TestMatchEmptyCompletedBatchIsNotAnOutage(t *testing.T) {
 	snap := &library.Snapshot{}
 	idx := mapping.NewIndex([]mapping.Record{
@@ -378,9 +386,12 @@ func (o *notFoundAmongOutageAniList) Fetch(_ context.Context, id int) (anilist.M
 	return anilist.Media{}, errors.New("anilist 500")
 }
 
-func (o *notFoundAmongOutageAniList) FetchMany(_ context.Context, ids []int) (map[int]anilist.Media, error) {
+func (o *notFoundAmongOutageAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
 	o.batchCalls++
-	return map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}}, errors.New("anilist 500")
+	return anilist.BatchResult{
+		Media:     map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}},
+		Completed: true,
+	}, errors.New("anilist 500")
 }
 
 // TestMatchNotFoundResetsFailureBreaker pins the OTHER half of the breaker's

@@ -48,7 +48,7 @@ report:
 # Served by the daemon whenever a Torznab URL is set (both empty = off, no port).
 # Its curation set + RSS feed rebuild together with the alert loop on poll_interval.
 indexer:
-  feed_api_key: "" # the arrs send this, the feed checks it (openssl rand -hex 16)
+  feed_api_key: "" # the arrs send this, the feed checks it (openssl rand -hex 16); ${SEADEX_SCOUT_FEED_KEY} ref works
   nyaa_torznab_url: "" # Prowlarr Nyaa Torznab URL, e.g. http://prowlarr:9696/1/api ("" = off)
   ab_torznab_url: "" # Prowlarr AnimeBytes Torznab URL ("" = off)
   prowlarr_api_key: "" # Prowlarr API key; secret, never logged (${SEADEX_SCOUT_PROWLARR_KEY} ref works)

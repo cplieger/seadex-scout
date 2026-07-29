@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cplieger/seadex-scout/internal/release"
+	"github.com/cplieger/seadex-scout/internal/tracker"
 )
 
 // FuzzSameHTTPOrigin_acceptedURLTargetsProwlarrOrigin exercises the SSRF gate
@@ -89,11 +89,11 @@ func FuzzSanitizeDisplayURL_keptURLsAreCanonicalTrackerLinks(f *testing.F) {
 		}
 		switch scope {
 		case upstreamNyaa:
-			if !release.IsNyaaHost(u.Hostname()) {
+			if !tracker.IsNyaaHost(u.Hostname()) {
 				t.Fatalf("kept URL %q host %q fails the nyaa tracker predicate", got, u.Hostname())
 			}
 		case upstreamAB:
-			if !release.IsAnimeBytesHost(u.Hostname()) {
+			if !tracker.IsAnimeBytesHost(u.Hostname()) {
 				t.Fatalf("kept URL %q host %q fails the animebytes tracker predicate", got, u.Hostname())
 			}
 		default:

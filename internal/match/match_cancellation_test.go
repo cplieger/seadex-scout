@@ -22,8 +22,8 @@ func (cancelledAniList) Fetch(context.Context, int) (anilist.Media, error) {
 	return anilist.Media{}, context.Canceled
 }
 
-func (cancelledAniList) FetchMany(context.Context, []int) (map[int]anilist.Media, error) {
-	return nil, context.Canceled
+func (cancelledAniList) FetchMany(context.Context, []int) (anilist.BatchResult, error) {
+	return anilist.BatchResult{}, context.Canceled
 }
 
 // TestMatchCancelledLookupsLogDebugNotWarn pins the log-level contract for a
@@ -52,10 +52,10 @@ func TestMatchCancelledLookupsLogDebugNotWarn(t *testing.T) {
 }
 
 // cancelOnFetchAniList models a shutdown landing mid-cycle: the batch
-// prefetch partial-fails (a non-nil empty map plus an error, leaving the ids
-// for the per-id retry), and the single Fetch cancels the run's context while
-// still answering successfully, so the cancellation is first observed by the
-// NEXT entry's loop check.
+// prefetch partial-fails (a COMPLETED result with an empty map plus an error,
+// leaving the ids for the per-id retry), and the single Fetch cancels the run's
+// context while still answering successfully, so the cancellation is first
+// observed by the NEXT entry's loop check.
 type cancelOnFetchAniList struct {
 	cancel     context.CancelFunc
 	fetchCalls int
@@ -67,8 +67,9 @@ func (c *cancelOnFetchAniList) Fetch(_ context.Context, _ int) (anilist.Media, e
 	return anilist.Media{Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020}, nil
 }
 
-func (c *cancelOnFetchAniList) FetchMany(context.Context, []int) (map[int]anilist.Media, error) {
-	return map[int]anilist.Media{}, errors.New("anilist 500 on a later chunk")
+func (c *cancelOnFetchAniList) FetchMany(context.Context, []int) (anilist.BatchResult, error) {
+	return anilist.BatchResult{Media: map[int]anilist.Media{}, Completed: true},
+		errors.New("anilist 500 on a later chunk")
 }
 
 // TestMatchMidRunCancellationRetainsCompletedMatches pins the mid-loop

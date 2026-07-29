@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cplieger/seadex-scout/internal/release"
+	"github.com/cplieger/seadex-scout/internal/tracker"
 	"pgregory.net/rapid"
 )
 
@@ -16,7 +16,7 @@ import (
 // userinfo (the link-safety gate: no javascript:/data:/file:, no
 // protocol-relative form, no bare path, no credential-bearing authority),
 // a non-empty result's host is bound to a canonical tracker host from the
-// release tracker table, and the result is a fixed point (feeding a usable
+// internal/tracker table, and the result is a fixed point (feeding a usable
 // link back in returns it unchanged, so an already-usable link is never
 // re-mangled). The host component is DRAWN from canonical and
 // near-canonical tracker hosts: a random rest never spells a tracker host,
@@ -33,29 +33,29 @@ func TestPublishSafeOutputProperty(t *testing.T) {
 		raw := rapid.SampledFrom(prefixes).Draw(rt, "prefix") +
 			rapid.SampledFrom(hosts).Draw(rt, "host") +
 			rapid.String().Draw(rt, "rest")
-		tracker := rapid.SampledFrom(trackers).Draw(rt, "tracker")
-		out := Publish(tracker, raw)
+		trackerName := rapid.SampledFrom(trackers).Draw(rt, "tracker")
+		out := Publish(trackerName, raw)
 		if out == "" {
 			return
 		}
 		parsed, err := url.Parse(out)
 		if err != nil {
-			rt.Fatalf("Publish(%q, tracker %q) = %q, not parseable: %v", raw, tracker, out, err)
+			rt.Fatalf("Publish(%q, tracker %q) = %q, not parseable: %v", raw, trackerName, out, err)
 		}
 		if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
-			rt.Fatalf("Publish(%q, tracker %q) = %q, scheme %q is not http(s)", raw, tracker, out, parsed.Scheme)
+			rt.Fatalf("Publish(%q, tracker %q) = %q, scheme %q is not http(s)", raw, trackerName, out, parsed.Scheme)
 		}
 		if parsed.Host == "" {
-			rt.Fatalf("Publish(%q, tracker %q) = %q has no host", raw, tracker, out)
+			rt.Fatalf("Publish(%q, tracker %q) = %q has no host", raw, trackerName, out)
 		}
 		if parsed.User != nil {
-			rt.Fatalf("Publish(%q, tracker %q) = %q retains userinfo authority", raw, tracker, out)
+			rt.Fatalf("Publish(%q, tracker %q) = %q retains userinfo authority", raw, trackerName, out)
 		}
-		if _, ok := release.LookupTrackerByHost(parsed.Hostname()); !ok {
-			rt.Fatalf("Publish(%q, tracker %q) = %q has non-canonical host %q", raw, tracker, out, parsed.Hostname())
+		if _, ok := tracker.LookupByHost(parsed.Hostname()); !ok {
+			rt.Fatalf("Publish(%q, tracker %q) = %q has non-canonical host %q", raw, trackerName, out, parsed.Hostname())
 		}
-		if again := Publish(tracker, out); again != out {
-			rt.Fatalf("Publish not a fixed point for tracker %q: %q -> %q -> %q", tracker, raw, out, again)
+		if again := Publish(trackerName, out); again != out {
+			rt.Fatalf("Publish not a fixed point for tracker %q: %q -> %q -> %q", trackerName, raw, out, again)
 		}
 	})
 }

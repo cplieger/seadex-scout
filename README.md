@@ -263,6 +263,10 @@ seadex-scout bridges them:
   `type` (TV vs movie), `tvdb_id`, `themoviedb_id`, and `imdb_id`. It is fetched
   with a conditional GET each cycle and cached, so an unchanged multi-MB file is
   never re-downloaded. The `type` decides which arr and which ID field to use.
+  One exception, because the id is unambiguous: a record with no `tvdb_id` that
+  carries a `themoviedb_id` **movie** id resolves as a Radarr movie whatever its
+  `type` says (upstream labels some films as OVA/special). An `imdb_id` never
+  gets that treatment - TVDB reuses a film's IMDb id on the parent series.
 - **Overrides.** Drop a `/config/overrides.json` (a JSON array of records keyed
   by `anilist_id`) beside the config to pin the entries Fribb misses; it is
   applied on top of Fribb (operator records win). Absent is fine. Fields per
@@ -344,7 +348,8 @@ port (fixed at `:9118`). An alert-only deployment stays socket-less.
   available"`) with `title`, `al_id`, `arr`, `season`, `current_group`,
   `recommended_group`, `tracker`, `resolution`, `kind`, `classification_reason`,
   a headline `release_url`, and `release_urls` (every obtainable source), plus
-  the clickable per-source links (`arr_url`, `nyaa_url`, `ab_url`, plus
+  the clickable per-source links (`arr_url`, `nyaa_url`, `ab_url` +
+  `ab_tracker`, plus
   `public_url` + `public_tracker` when the public source is a tracker other than
   Nyaa) and
   `seadex_tags` an alert template can render directly.

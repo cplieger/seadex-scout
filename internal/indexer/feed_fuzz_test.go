@@ -44,18 +44,35 @@ func FuzzDerivedTitle_boundedAndTrimmed(f *testing.F) {
 
 // FuzzDerivedTitle_singleVideoPreservesName pins the single-video oracle the
 // bounded/trimmed target above cannot: for a torrent holding exactly one
-// recognized video file, the synthesized title is the trimmed base name, so a
-// degenerate implementation that always returns "" cannot pass.
+// recognized video file, the synthesized title is a trimmed COMPONENT of that
+// file's own path - and specifically the trimmed base name whenever the base
+// carries episode evidence - so a degenerate implementation that always returns
+// "" (or one that invents text) cannot pass. The component form (rather than
+// always the base name) is titleBase's headline rule: a base carrying no
+// episode evidence yields to the nearest ancestor directory that has both
+// evidence and text of its own.
 func FuzzDerivedTitle_singleVideoPreservesName(f *testing.F) {
 	f.Add("Show - S01E01 (1080p) [Grp]")
 	f.Add("  Movie Title (2026)  ")
 	f.Add("Season 1/Show - S01E01")
+	f.Add("[Grp] Show S01E01-E12 (1080p)/01")
+	f.Add("S01E01/Movie Cut A")
 	f.Fuzz(func(t *testing.T, base string) {
 		got := derivedTitle(&seadex.Torrent{Files: []seadex.File{{Name: base + ".mkv"}}}, EntryInfo{})
-		want := strings.TrimSpace(base[strings.LastIndex(base, "/")+1:])
-		if got != want {
-			t.Errorf("derivedTitle(single video %q) = %q, want %q", base, got, want)
+		components := strings.Split(base, "/")
+		own := components[len(components)-1]
+		if episodeToken.MatchString(own) || absoluteEpisode.MatchString(own) {
+			if want := strings.TrimSpace(own); got != want {
+				t.Errorf("derivedTitle(single video %q) = %q, want %q (a base name carrying episode evidence headlines)", base, got, want)
+			}
+			return
 		}
+		for _, component := range components {
+			if got == strings.TrimSpace(component) {
+				return
+			}
+		}
+		t.Errorf("derivedTitle(single video %q) = %q, want a trimmed component of the file's own path", base, got)
 	})
 }
 

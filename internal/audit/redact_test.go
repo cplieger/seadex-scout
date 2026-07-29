@@ -3,6 +3,7 @@ package audit
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -67,21 +68,25 @@ func TestReportPathsRedactedFromLogsAndErrors(t *testing.T) {
 	})
 
 	t.Run("lock failure error carries no report path", func(t *testing.T) {
-		// MkdirAll fails on the sentinel-named intermediate component, so the
-		// *os.PathError carries an ancestor of dir rather than dir itself;
-		// the ancestor redaction must still mask it.
+		// The report lock lives in internal/cycle and returns the real path;
+		// RedactReportDirErr is the policy main applies to it. MkdirAll fails on
+		// the sentinel-named intermediate component, so the *os.PathError
+		// carries an ancestor of dir rather than dir itself; the ancestor
+		// redaction must still mask it.
 		blocker := filepath.Join(t.TempDir(), sentinel)
 		if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		dir := filepath.Join(blocker, "reports")
 
-		_, err := AcquireReportLock(filepath.Join(blocker, "reports"))
-
-		if err == nil {
-			t.Fatal("AcquireReportLock(parent is a regular file) = nil, want error")
+		lockErr := os.MkdirAll(dir, 0o700)
+		if lockErr == nil {
+			t.Fatal("MkdirAll(parent is a regular file) = nil, want error")
 		}
+		err := RedactReportDirErr(dir, fmt.Errorf("create report dir: %w", lockErr))
+
 		if strings.Contains(err.Error(), sentinel) {
-			t.Errorf("AcquireReportLock error leaks the report.dir value: %v", err)
+			t.Errorf("redacted lock error leaks the report.dir value: %v", err)
 		}
 	})
 }

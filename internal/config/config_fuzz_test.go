@@ -4,6 +4,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/cplieger/seadex-scout/internal/credname"
 )
 
 // The ${VAR} expansion fuzz coverage moved with the expansion engine to
@@ -72,7 +74,7 @@ func FuzzURLEmbedsCredentialSupersetOfParsedQuery(f *testing.F) {
 			t.Errorf("urlEmbedsCredential(%q) = false, want true for a userinfo-bearing URL", raw)
 		}
 		for name := range u.Query() {
-			if isCredentialParam(name) && !got {
+			if credname.IsName(name) && !got {
 				t.Errorf("urlEmbedsCredential(%q) = false, want true: the parsed query carries credential parameter %q", raw, name)
 			}
 		}

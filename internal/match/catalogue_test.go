@@ -18,9 +18,15 @@ func TestCatalogueHas(t *testing.T) {
 		{AniListID: 2, Type: "MOVIE", TmdbMovies: []int{400}, IMDbIDs: []string{"tt777"}},
 		// Wrong-arm identifiers must not be catalogued (the HasArrIdentifier
 		// contract): a MOVIE record's stray TVDB id must not recognize a
-		// Sonarr item, nor a series record's movie ids a Radarr item.
+		// Sonarr item, nor a series record's IMDb id a Radarr item (TVDB
+		// reuses a film's IMDb id on the parent series). A series-typed
+		// record's unambiguous movie TMDB ids DO claim a Radarr movie when the
+		// record routes no series id (h-f9/l-f73, mirroring FindByID's
+		// secondary movie lookup); a record that routes a TVDB id keeps series
+		// routing as its only claim.
 		{AniListID: 3, Type: "MOVIE", TvdbID: 555},
-		{AniListID: 4, Type: "TV", TmdbMovies: []int{600}, IMDbIDs: []string{"tt888"}},
+		{AniListID: 4, Type: "OVA", TmdbMovies: []int{600}, IMDbIDs: []string{"tt888"}},
+		{AniListID: 5, Type: "TV", TvdbID: 700, TmdbMovies: []int{800}},
 	}), nil)
 	tests := []struct {
 		name string
@@ -36,7 +42,10 @@ func TestCatalogueHas(t *testing.T) {
 		{"radarr neither id matches", library.Item{Arr: library.ArrRadarr, TmdbID: 402, ImdbID: "tt000"}, false},
 		{"radarr no ids is not catalogued", library.Item{Arr: library.ArrRadarr}, false},
 		{"sonarr not catalogued via a movie record's tvdb id", library.Item{Arr: library.ArrSonarr, TvdbID: 555}, false},
-		{"radarr not catalogued via a series record's movie ids", library.Item{Arr: library.ArrRadarr, TmdbID: 600, ImdbID: "tt888"}, false},
+		{"radarr catalogued via a seriesless record's movie tmdb id", library.Item{Arr: library.ArrRadarr, TmdbID: 600}, true},
+		{"radarr not catalogued via a series record's imdb id", library.Item{Arr: library.ArrRadarr, ImdbID: "tt888"}, false},
+		{"radarr not catalogued via a tvdb-routed record's movie tmdb id", library.Item{Arr: library.ArrRadarr, TmdbID: 800}, false},
+		{"sonarr still catalogued by the tvdb-routed record", library.Item{Arr: library.ArrSonarr, TvdbID: 700}, true},
 		{"unknown arr never matches even a catalogued tvdb id", library.Item{Arr: "lidarr", TvdbID: 100}, false},
 	}
 	for _, tt := range tests {

@@ -6,6 +6,7 @@ import (
 
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/tracker"
 	"pgregory.net/rapid"
 )
 
@@ -22,7 +23,7 @@ import (
 // rank ties so the stable-key tie-break is exercised.
 func TestRepresentativePermutationInvariantProperty(t *testing.T) {
 	resolutions := []string{"", "720p", "1080p", "2160p"}
-	trackerTypes := []release.TrackerType{release.TrackerPublic, release.TrackerPrivate, release.TrackerUnknown}
+	trackerTypes := []tracker.Type{tracker.Public, tracker.Private, tracker.Unknown}
 	candGen := rapid.Custom(func(t *rapid.T) candidate {
 		id := rapid.StringOfN(rapid.RuneFrom([]rune{'1', '2', '3'}), 1, 3, -1).Draw(t, "id")
 		return candidate{

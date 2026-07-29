@@ -21,8 +21,11 @@ func (partialOutageAniList) Fetch(context.Context, int) (anilist.Media, error) {
 	return anilist.Media{}, context.DeadlineExceeded
 }
 
-func (partialOutageAniList) FetchMany(_ context.Context, ids []int) (map[int]anilist.Media, error) {
-	return map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}}, context.DeadlineExceeded
+func (partialOutageAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
+	return anilist.BatchResult{
+		Media:     map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}},
+		Completed: true,
+	}, context.DeadlineExceeded
 }
 
 // TestMatchTransientFailuresLogWarn pins the non-cancellation side of the
