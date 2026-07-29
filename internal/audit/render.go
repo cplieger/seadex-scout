@@ -97,8 +97,8 @@ func renderMarkdown(r *Report) string {
 		if desc := verdictDesc[v]; desc != "" {
 			fmt.Fprintf(&b, "%s\n\n", desc)
 		}
-		b.WriteString("| Title | Scope | Your group | SeaDex best | Links |\n")
-		b.WriteString("| --- | --- | --- | --- | --- |\n")
+		b.WriteString("| Title | Scope | Your group | SeaDex best | Notes | Links |\n")
+		b.WriteString("| --- | --- | --- | --- | --- | --- |\n")
 		for i := range rows {
 			writeRow(&b, &rows[i])
 		}
@@ -108,27 +108,31 @@ func renderMarkdown(r *Report) string {
 	return b.String()
 }
 
-// annotationLegend explains the parenthesized annotations the Scope and SeaDex
-// best columns carry, so the report file stays self-explanatory for a reader
-// who has only the file (the same reason each verdict section carries
-// verdictDesc). Without it "S2 (approx, mixed)" and `"PMR" (broken)` are
-// unexplained in both the report and the README. It also explains the quoting
-// that separates upstream group text from this app's annotations.
+// annotationLegend explains the parenthesized annotations the Scope column
+// carries and the Notes column that holds this report's annotations of the
+// listed SeaDex best releases, so the report file stays self-explanatory for a
+// reader who has only the file (the same reason each verdict section carries
+// verdictDesc). Without it "S2 (approx, mixed)" and a bare `broken` in the
+// Notes column are unexplained in both the report and the README. It also
+// explains how a Notes entry associates with a best group.
 const annotationLegend = "Scope annotations: `approx` - the comparison used a coarse bucket " +
 	"(the season-0 specials bucket, or a whole-series aggregate spanning more than one season or group), " +
 	"so the verdict means \"present somewhere in the series\" rather than an exact per-season attribution; " +
 	"`mixed` - the scoped groups span more than one group and none of them is a SeaDex best (a manual review); " +
 	"`theoretical` - SeaDex names only a theoretical best, so there is nothing concrete to compare against; " +
 	"`incomplete` - the SeaDex entry itself is incomplete.\n\n" +
-	"SeaDex best annotations: a release group is printed in double quotes because it is upstream SeaDex " +
-	"text; anything in parentheses AFTER the closing quote is this report speaking. So `\"PMR\" (broken)` is " +
-	"a group named PMR that SeaDex flagged broken, while `\"SEV (broken)\"` is a group literally named " +
-	"`SEV (broken)` upstream and carries no annotation from us. " +
-	"`(broken)` / `(incomplete)` are SeaDex curation warnings, `(url error)` means " +
+	"SeaDex best annotations: the `SeaDex best` column holds ONLY upstream SeaDex group text, and " +
+	"everything this report has to say about those releases is in the `Notes` column - so a release group " +
+	"literally named `SEV (broken)` upstream cannot be read as a warning from us, and a warning from us " +
+	"cannot be mistaken for part of a group's name. A Notes entry associates with a best group BY " +
+	"POSITION: one `;`-separated entry per group listed in the SeaDex best column, in the same order, " +
+	"with `-` for a group we have nothing to say about (a row with no annotations at all shows a single " +
+	"`-`). The note words: " +
+	"`broken` / `incomplete` are SeaDex curation warnings, `url error` means " +
 	"the SeaDex record carries a link value that is not a usable tracker URL (report it upstream), " +
-	"`(unknown tracker)` means the record names a tracker this build does not know, so no link could be " +
+	"`unknown tracker` means the record names a tracker this build does not know, so no link could be " +
 	"built (report it as a seadex-scout gap, not as bad SeaDex data), and " +
-	"`(unobtainable)` means the release has no usable link or sits on a tracker you do not use. An " +
+	"`unobtainable` means the release has no usable link or sits on a tracker you do not use. An " +
 	"annotated release stays listed but never drives the verdict and is never offered as a link. " +
 	"`(N best hidden: animebytes)` means N of the entry's SeaDex BEST releases were withheld because you " +
 	"have `animebytes` off, so an empty best column there means \"not on a tracker you use\", not \"SeaDex " +
@@ -174,11 +178,12 @@ func writeIncompleteSection(b *strings.Builder, incomplete []IncompleteEntry) {
 
 // writeRow writes one Markdown table row for a report row.
 func writeRow(b *strings.Builder, row *Row) {
-	fmt.Fprintf(b, "| %s | %s | %s | %s | %s |\n",
+	fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s |\n",
 		escapeCell(row.Title),
 		scopeCell(row),
 		escapeCell(orEmpty(strings.Join(row.CurrentGroups, ", "))),
 		bestCell(row),
+		notesCell(row),
 		links(row))
 }
 
@@ -193,12 +198,54 @@ func writeRow(b *strings.Builder, row *Row) {
 // Counting hidden ALTS here would make the same claim for an entry SeaDex
 // genuinely lists no best for, so the projection is best-only. The count leaks
 // no AnimeBytes group, tracker, or link.
+//
+// The marker deliberately stays in THIS column rather than moving to the Notes
+// column with the per-release annotations: it counts releases that are NOT
+// listed here, so it annotates the column's completeness, not any group the
+// reader can see. A Notes entry, by contrast, is positionally bound to one
+// listed group, and there is no listed group for a withheld release to bind to.
 func bestCell(row *Row) string {
 	groups := escapeCell(orEmpty(strings.Join(displayBestGroups(row.Releases), ", ")))
 	if row.hiddenAnimeBytesBest == 0 {
 		return groups
 	}
 	return groups + " (" + strconv.Itoa(row.hiddenAnimeBytesBest) + " best hidden: animebytes)"
+}
+
+// notesCell renders the Notes column: this report's annotations of the best
+// releases the SeaDex-best column lists. It is the OTHER half of the l-f192
+// split - upstream group text and this app's annotation vocabulary no longer
+// share one display string, so no upstream group name can be read as a
+// curation warning from us (and quoting, which only moved the forgeable
+// boundary, is gone).
+//
+// Association is POSITIONAL, deliberately: one entry per group the best column
+// lists (same selectBestGroups order), `;`-separated, with emptyCell for a
+// group carrying no note. Naming the group inside the entry would put
+// untrusted group text back into the annotation string - the very seam this
+// change removes - and would then need an escape layer of its own to stay
+// unforgeable. Position needs neither: the group text stays in its own column.
+// A row with nothing to annotate renders the single empty marker the other
+// columns use, so the common case adds no noise.
+func notesCell(row *Row) string {
+	var entries []string
+	annotatedAny := false
+	selectBestGroups(row.Releases, func(rel *Release, isAnnotated bool) bool {
+		if !isAnnotated {
+			entries = append(entries, emptyCell)
+			return true
+		}
+		annotatedAny = true
+		entries = append(entries, strings.Join(releaseNotes(rel), ", "))
+		return true
+	})
+	if !annotatedAny {
+		return emptyCell
+	}
+	// The note words are this app's own canonical vocabulary, never upstream
+	// text; escapeCell is applied anyway so a future note spelling cannot
+	// break the cell.
+	return escapeCell(strings.Join(entries, "; "))
 }
 
 // scopeCell renders the scope for the Markdown table, appending the comparison
@@ -304,26 +351,21 @@ func selectBestGroups(releases []Release, fn func(rel *Release, isAnnotated bool
 }
 
 // displayBestGroups returns the distinct best-release groups in their original
-// case (deduped case-insensitively), for display. The group text is UPSTREAM
-// data and is rendered inside double quotes; an annotated best - one carrying
-// curation warnings, one the daemon's obtainability rule rejected
-// (Release.Unobtainable), or both - renders with its notes OUTSIDE those
-// quotes: `"PMR" (broken)`, `"PMR" (unobtainable)`,
-// `"SEV" (broken, unobtainable)`. The quotes are the boundary between what
-// SeaDex said and what this app is saying about it: a contributor who names a
-// clean release `SEV (broken)` renders `"SEV (broken)"`, which no longer looks
-// like the app's own curation annotation (l-f192). The column stays complete
-// (the report shows raw SeaDex data) while explaining why the verdict did not
-// count the release. Clean bests are collected first and win the dedupe, so a
-// group genuinely available as a clean best never displays annotated.
+// case (deduped case-insensitively), for display. The returned text is UPSTREAM
+// SeaDex data and nothing else: this app's annotations for those releases are
+// rendered by notesCell, in their own column (l-f192). Sharing one display
+// string with them - even with the group quoted - left a forgeable boundary,
+// because the quote character is itself upstream-writable, so a group named
+// `SEV" (broken) "x` still opened with the exact bytes of a genuine curation
+// warning. The column stays complete (the report shows raw SeaDex data) while
+// the Notes column explains why the verdict did not count a release. Clean
+// bests are collected first and win the dedupe, so a group genuinely available
+// as a clean best never displays as the annotated one - which is also what
+// makes the positional Notes association stable.
 func displayBestGroups(releases []Release) []string {
 	var out []string
-	selectBestGroups(releases, func(rel *Release, isAnnotated bool) bool {
-		label := `"` + rel.Group + `"`
-		if isAnnotated {
-			label += " (" + strings.Join(releaseNotes(rel), ", ") + ")"
-		}
-		out = append(out, label)
+	selectBestGroups(releases, func(rel *Release, _ bool) bool {
+		out = append(out, rel.Group)
 		return true
 	})
 	return out
@@ -416,10 +458,10 @@ func rowsWithVerdict(rows []Row, v Verdict) []Row {
 // controls raw, so untrusted titles/groups/tracker strings could otherwise
 // smuggle terminal escapes or visual reordering into raw log/Loki views, and
 // the same values carry no size bound upstream, so each is also capped at the
-// per-attribute volume budget the notify emit path uses. The two aggregate
-// attributes (current_group, seadex_best) apply that same policy through the
-// bounded logattr.Joiner, which never materializes the untrusted aggregate before
-// the cap applies.
+// per-attribute volume budget the notify emit path uses. The three aggregate
+// attributes (current_group, seadex_best, seadex_best_notes) apply that same
+// policy through the bounded logattr.Joiner, which never materializes the
+// untrusted aggregate before the cap applies.
 func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
 	if err := interrupted(ctx, "report log"); err != nil {
 		return err
@@ -452,6 +494,7 @@ func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
 			"hidden_animebytes", row.HiddenAnimeBytes,
 			"current_group", joinGroupsAttr(row.CurrentGroups),
 			"seadex_best", joinBestGroupsAttr(row.Releases),
+			"seadex_best_notes", joinBestNotesAttr(row.Releases),
 			"arr_url", capDisplayText(library.SafeLogURL(row.ArrURL)),
 			"seadex_url", capDisplayText(row.SeaDexURL),
 			"match_source", capDisplayText(row.MatchSource))
@@ -838,7 +881,8 @@ const maxAttrBytes = logattr.MaxBytes
 // A MULTI-SOURCE attribute (a joined group or link list) must never be
 // materialized and handed to capDisplayText - joining first would allocate the
 // whole untrusted aggregate before the bound applies. Those stream through a
-// logattr.Joiner instead (joinGroupsAttr / joinBestGroupsAttr).
+// logattr.Joiner instead (joinGroupsAttr / joinBestGroupsAttr /
+// joinBestNotesAttr).
 func capDisplayText(s string) string { return logattr.Cap(s) }
 
 // joinGroupsAttr renders a row's group list as the comma-separated
@@ -859,39 +903,66 @@ func joinGroupsAttr(groups []string) string {
 
 // joinBestGroupsAttr renders the seadex_best attribute through the same
 // bounded joiner. It streams selectBestGroups - the shared selection rule
-// (clean bests first, case-insensitive dedupe on the original-case group,
-// the upstream group quoted with annotated notes outside the quotes,
-// `"SEV" (broken, unobtainable)`) - rather than calling displayBestGroups,
-// because that helper builds the complete label slice, which is exactly the
-// untrusted aggregate the budget must bound. The quoting matches the Markdown
-// cell deliberately: leaving this attribute unquoted would give one fact two
-// renderings, and a forged group would still masquerade as an app annotation
-// for anyone reading the row in Loki. No shipped alert rule reads seadex_best
-// (it is a report-mode attribute; the finding line does not carry it), so the
-// wire-shape change has no consumer to break.
+// (clean bests first, case-insensitive dedupe on the original-case group) -
+// rather than calling displayBestGroups, because that helper builds the
+// complete group slice, which is exactly the untrusted aggregate the budget
+// must bound.
+//
+// The value carries ONLY upstream group text, matching the Markdown best
+// column: this app's annotations ride the separate seadex_best_notes attribute
+// (joinBestNotesAttr), so a forged group cannot masquerade as an app
+// annotation for anyone reading the row in Loki either, and the two sinks give
+// one fact one rendering. No shipped alert rule reads seadex_best or
+// seadex_best_notes (they are report-mode attributes; the daemon's finding line
+// carries neither), so the wire-shape change has no consumer to break.
 func joinBestGroupsAttr(releases []Release) string {
 	j := logattr.NewJoiner()
 	first := true
-	selectBestGroups(releases, func(rel *Release, isAnnotated bool) bool {
+	selectBestGroups(releases, func(rel *Release, _ bool) bool {
 		if !first && !j.WriteSep(",") {
 			return false
 		}
 		first = false
-		if !j.WriteSep(`"`) || !j.Write(rel.Group) || !j.WriteSep(`"`) {
-			return false
-		}
-		return !isAnnotated || writeNotesAttr(j, releaseNotes(rel))
+		return j.Write(rel.Group)
 	})
 	return j.String()
 }
 
-// writeNotesAttr appends an annotated best's parenthesized note list to j,
-// matching displayBestGroups' `"SEV" (broken, unobtainable)` rendering, and
-// reports whether the joiner can still accept more.
-func writeNotesAttr(j *logattr.Joiner, notes []string) bool {
-	if !j.WriteSep(" (") {
-		return false
+// joinBestNotesAttr renders the seadex_best_notes attribute: the Loki twin of
+// notesCell, under the same bounded joiner (the note words are this app's
+// vocabulary, but the piece COUNT follows an untrusted entry's torrent list, so
+// the budget still has to bound it, and nothing is materialized first).
+//
+// Association is positional exactly as in the Markdown column: one
+// `;`-separated entry per group seadex_best lists, in the same
+// selectBestGroups order, emptyCell for a group with no note. An entry with no
+// annotated best at all emits the empty string rather than a row of
+// placeholders, so a Loki query can test the attribute for emptiness.
+func joinBestNotesAttr(releases []Release) string {
+	j := logattr.NewJoiner()
+	first := true
+	annotatedAny := false
+	selectBestGroups(releases, func(rel *Release, isAnnotated bool) bool {
+		if !first && !j.WriteSep(";") {
+			return false
+		}
+		first = false
+		if !isAnnotated {
+			return j.WriteSep(emptyCell)
+		}
+		annotatedAny = true
+		return writeNotesAttr(j, releaseNotes(rel))
+	})
+	if !annotatedAny {
+		return ""
 	}
+	return j.String()
+}
+
+// writeNotesAttr appends one annotated best's note list to j, matching
+// notesCell's comma-joined spelling, and reports whether the joiner can still
+// accept more.
+func writeNotesAttr(j *logattr.Joiner, notes []string) bool {
 	for i := range notes {
 		if i > 0 && !j.WriteSep(", ") {
 			return false
@@ -900,7 +971,7 @@ func writeNotesAttr(j *logattr.Joiner, notes []string) bool {
 			return false
 		}
 	}
-	return j.WriteSep(")")
+	return true
 }
 
 // sanitizeOutput returns a deep-enough copy of the report with every untrusted

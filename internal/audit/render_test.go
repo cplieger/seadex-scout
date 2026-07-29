@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -63,8 +64,8 @@ func TestDisplayBestGroups(t *testing.T) {
 		{Group: "Erai", Best: false},
 	}
 	got := displayBestGroups(rels)
-	if !reflect.DeepEqual(got, []string{`"SubsPlease"`}) {
-		t.Errorf(`displayBestGroups() = %v, want ["SubsPlease"] (best-only, case-insensitive dedupe, original case, upstream text quoted)`, got)
+	if !reflect.DeepEqual(got, []string{"SubsPlease"}) {
+		t.Errorf(`displayBestGroups() = %v, want [SubsPlease] (best-only, case-insensitive dedupe, original case, upstream text only)`, got)
 	}
 }
 
@@ -340,10 +341,12 @@ func TestReportLogEmitsSummaryAndPerRowLines(t *testing.T) {
 		"scope":         "S1",
 		"approx":        true,
 		"current_group": "subsplease,erai-raws",
-		"seadex_best":   `"SubsPlease"`,
-		"arr_url":       "http://sonarr/series/frieren",
-		"seadex_url":    "https://releases.moe/154587",
-		"match_source":  "id",
+		"seadex_best":   "SubsPlease",
+		// No best carries an annotation, so the notes twin is empty.
+		"seadex_best_notes": "",
+		"arr_url":           "http://sonarr/series/frieren",
+		"seadex_url":        "https://releases.moe/154587",
+		"match_source":      "id",
 	}
 	for k, v := range want {
 		if rAttrs[k] != v {
@@ -756,11 +759,12 @@ func TestRenderJSONSanitizesIncompleteEntries(t *testing.T) {
 	}
 }
 
-// TestDisplayBestGroupsAnnotatesWarned pins the SeaDex-best column's warning
-// marker: a curation-warned best renders annotated with its canonical tags
-// OUTSIDE the quotes that bound the upstream group text, an unwarned best of
-// the same group wins the dedupe (a group genuinely available as best never
-// displays warned), and multiple warnings join in canonical order.
+// TestDisplayBestGroupsAnnotatesWarned pins the SeaDex-best column's contract
+// after the notes split (l-f192): the column carries upstream group text only,
+// an unwarned best of the same group wins the dedupe (a group genuinely
+// available as best never displays as the annotated one), and the warned
+// group's canonical tags are rendered by the Notes column instead, joined in
+// canonical order and positionally aligned with the best column.
 func TestDisplayBestGroupsAnnotatesWarned(t *testing.T) {
 	rels := []Release{
 		{Group: "PMR", Best: true, Warnings: []string{"broken"}},
@@ -768,34 +772,74 @@ func TestDisplayBestGroupsAnnotatesWarned(t *testing.T) {
 		{Group: "SEV", Best: true, Warnings: []string{"broken", "incomplete"}},
 	}
 	got := displayBestGroups(rels)
-	want := []string{`"pmr"`, `"SEV" (broken, incomplete)`}
+	want := []string{"pmr", "SEV"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("displayBestGroups() = %v, want %v", got, want)
 	}
-}
-
-// TestDisplayBestGroupsQuotesForgedAnnotation pins the quoting boundary
-// (l-f192): an upstream contributor who names a clean best "SEV (broken)"
-// must not be able to render it as the app's own curation annotation. The
-// quotes say which text is upstream's, so the forged group and a genuinely
-// annotated release are distinguishable in the Markdown cell.
-func TestDisplayBestGroupsQuotesForgedAnnotation(t *testing.T) {
-	got := displayBestGroups([]Release{
-		{Group: "SEV (broken)", Best: true},
-		{Group: "PMR", Best: true, Warnings: []string{"broken"}},
-	})
-	want := []string{`"SEV (broken)"`, `"PMR" (broken)`}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("displayBestGroups() = %v, want %v", got, want)
+	if got, want := notesCell(&Row{Releases: rels}), "-; broken, incomplete"; got != want {
+		t.Errorf("notesCell() = %q, want %q", got, want)
 	}
 }
 
-// TestDisplayBestGroupsAnnotatesUnobtainable pins the SeaDex-best column's
-// obtainability marker: an unobtainable best renders annotated
-// (`"PMR" (unobtainable)`) so the rendered facts explain why the verdict
-// ignored a visible best, an obtainable best of the same group wins the
-// dedupe, and a best that is both warned and unobtainable joins its notes
-// (`"SEV" (broken, unobtainable)`) without mutating Release.Warnings.
+// TestBestAndNotesColumnsDoNotShareANamespace pins the l-f192 fix at its
+// strongest point: the forgery is dead because the two namespaces no longer
+// share a display string. A clean best named `SEV (broken)` - and its
+// quote-carrying escalation `SEV" (broken) "x`, which defeated the earlier
+// quoting fix by forging the quote boundary itself - both render as plain
+// upstream text in the best column with an EMPTY Notes cell, so neither can
+// produce the rendering of a genuinely broken release (group in the best
+// column, `broken` in Notes).
+func TestBestAndNotesColumnsDoNotShareANamespace(t *testing.T) {
+	forgeries := []string{"SEV (broken)", `SEV" (broken) "x`}
+	for _, group := range forgeries {
+		row := &Row{Releases: []Release{{Group: group, Best: true}}}
+		if got, want := displayBestGroups(row.Releases), []string{group}; !reflect.DeepEqual(got, want) {
+			t.Errorf("displayBestGroups(%q) = %v, want %v (upstream text, verbatim)", group, got, want)
+		}
+		if got := notesCell(row); got != emptyCell {
+			t.Errorf("notesCell(%q) = %q, want %q (a forged group annotates nothing)", group, got, emptyCell)
+		}
+	}
+
+	genuine := &Row{Releases: []Release{{Group: "PMR", Best: true, Warnings: []string{"broken"}}}}
+	if got, want := bestCell(genuine), "PMR"; got != want {
+		t.Errorf("bestCell(genuinely broken) = %q, want %q", got, want)
+	}
+	if got, want := notesCell(genuine), "broken"; got != want {
+		t.Errorf("notesCell(genuinely broken) = %q, want %q", got, want)
+	}
+	for _, group := range forgeries {
+		if got := bestCell(&Row{Releases: []Release{{Group: group, Best: true}}}); got == bestCell(genuine) && notesCell(genuine) == emptyCell {
+			t.Errorf("forged group %q reproduced the genuine rendering", group)
+		}
+	}
+}
+
+// TestNotesCellAssociatesNotesWithTheirGroupByPosition pins the multi-release
+// association the split has to preserve: with two best releases where only one
+// is annotated, the Notes cell carries one `;`-separated entry per listed group
+// in the same order, with the empty marker for the unannotated one - so a
+// reader can tell WHICH group the note belongs to without the group name ever
+// re-entering the annotation string.
+func TestNotesCellAssociatesNotesWithTheirGroupByPosition(t *testing.T) {
+	row := &Row{Releases: []Release{
+		{Group: "SubsPlease", Best: true},
+		{Group: "PMR", Best: true, Warnings: []string{"broken"}, Unobtainable: true},
+	}}
+	if got, want := bestCell(row), "SubsPlease, PMR"; got != want {
+		t.Errorf("bestCell() = %q, want %q", got, want)
+	}
+	if got, want := notesCell(row), "-; broken, unobtainable"; got != want {
+		t.Errorf("notesCell() = %q, want %q", got, want)
+	}
+}
+
+// TestDisplayBestGroupsAnnotatesUnobtainable pins the obtainability marker
+// across the split columns: an unobtainable best keeps its group in the best
+// column and carries "unobtainable" in the Notes column (so the rendered facts
+// explain why the verdict ignored a visible best), an obtainable best of the
+// same group wins the dedupe, and a best that is both warned and unobtainable
+// joins its notes without mutating Release.Warnings.
 func TestDisplayBestGroupsAnnotatesUnobtainable(t *testing.T) {
 	warnings := []string{"broken"}
 	rels := []Release{
@@ -805,9 +849,12 @@ func TestDisplayBestGroupsAnnotatesUnobtainable(t *testing.T) {
 		{Group: "A&C", Best: true, Unobtainable: true},
 	}
 	got := displayBestGroups(rels)
-	want := []string{`"pmr"`, `"SEV" (broken, unobtainable)`, `"A&C" (unobtainable)`}
+	want := []string{"pmr", "SEV", "A&C"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("displayBestGroups() = %v, want %v", got, want)
+	}
+	if got, want := notesCell(&Row{Releases: rels}), "-; broken, unobtainable; unobtainable"; got != want {
+		t.Errorf("notesCell() = %q, want %q", got, want)
 	}
 	if !reflect.DeepEqual(warnings, []string{"broken"}) {
 		t.Errorf("Warnings = %v, want [broken] (annotation must not mutate the release)", warnings)
@@ -845,8 +892,8 @@ func TestRenderUnobtainableBestAnnotatedInBothProjections(t *testing.T) {
 	}
 
 	md := renderMarkdown(rep)
-	if !strings.Contains(md, `| "PMR" (unobtainable) |`) {
-		t.Errorf("markdown lacks the unobtainable-best annotation `| \"PMR\" (unobtainable) |`:\n%s", md)
+	if !strings.Contains(md, `| PMR | unobtainable |`) {
+		t.Errorf("markdown lacks the unobtainable-best annotation `| PMR | unobtainable |`:\n%s", md)
 	}
 	if strings.Contains(md, "https://nyaa.si/view/901") {
 		t.Errorf("markdown offers the unobtainable release as a grab link:\n%s", md)
@@ -868,8 +915,8 @@ func TestRenderUnobtainableBestAnnotatedInBothProjections(t *testing.T) {
 }
 
 // TestRenderMarkdownWarnedBestAnnotatedNotLinked pins the rendered contract
-// for a curation-warned best: the SeaDex-best column carries the warning
-// marker outside the quoted upstream group (`"PMR" (broken)`) so the row stays
+// for a curation-warned best: the group stays in the SeaDex-best column and the
+// warning rides the adjacent Notes column (`| PMR | broken |`) so the row stays
 // complete and self-explanatory, while the links cell does NOT offer the
 // warned release as a grab link (the releases.moe link still renders). The
 // needle carries the cell pipes so it cannot be satisfied by the legend, which
@@ -892,8 +939,8 @@ func TestRenderMarkdownWarnedBestAnnotatedNotLinked(t *testing.T) {
 		}},
 	}
 	md := renderMarkdown(rep)
-	if !strings.Contains(md, `| "PMR" (broken) |`) {
-		t.Errorf("markdown lacks the warned-best annotation `| \"PMR\" (broken) |`:\n%s", md)
+	if !strings.Contains(md, `| PMR | broken |`) {
+		t.Errorf("markdown lacks the warned-best annotation `| PMR | broken |`:\n%s", md)
 	}
 	if strings.Contains(md, "https://nyaa.si/view/900") {
 		t.Errorf("markdown offers the warned release as a grab link:\n%s", md)
@@ -1000,11 +1047,12 @@ func TestRenderMarkdownVerdictSectionDescription(t *testing.T) {
 }
 
 // TestReportLogRendersAnnotatedBestAttribute pins the seadex_best aggregate's
-// clean-first case-insensitive dedupe and its annotation rendering through the
+// clean-first case-insensitive dedupe and the split notes twin through the
 // public Log projection: a clean best wins the dedupe over a differently-cased
-// annotated twin, the upstream group is quoted, and an annotated-only best
-// carries its parenthesized note list outside the quotes. Deleting the note
-// emission or the quoting fails the exact-value assertion.
+// annotated twin, seadex_best carries upstream group text only, and
+// seadex_best_notes carries one positional entry per listed group. Deleting the
+// notes attribute or letting notes leak back into seadex_best fails the exact-
+// value assertions.
 func TestReportLogRendersAnnotatedBestAttribute(t *testing.T) {
 	log, rec := capture.New()
 	r := &Report{
@@ -1023,18 +1071,23 @@ func TestReportLogRendersAnnotatedBestAttribute(t *testing.T) {
 	}
 
 	attrs := recordAttrs(rec.Records()[1])
-	if got, want := attrs["seadex_best"], `"PMR","SEV" (broken, unobtainable)`; got != want {
+	if got, want := attrs["seadex_best"], "PMR,SEV"; got != want {
 		t.Errorf("seadex_best = %q, want %q", got, want)
+	}
+	if got, want := attrs["seadex_best_notes"], "-;broken, unobtainable"; got != want {
+		t.Errorf("seadex_best_notes = %q, want %q", got, want)
 	}
 }
 
-// TestReportLogQuotesForgedBestGroup pins that the slog aggregate quotes
-// upstream group text exactly like the Markdown cell (l-f192): a forged group
-// `SEV (broken)` must not read as this app's annotation in Loki either, and the
-// two renderings must agree - leaving one unquoted would give one fact two
-// spellings. No shipped alert rule reads seadex_best, so the wire shape is
+// TestReportLogSplitsNotesFromForgedBestGroup pins the l-f192 fix on the Loki
+// side (l-f192): a forged group `SEV (broken)` reaches seadex_best as upstream
+// text verbatim and this app adds nothing to that value - no quotes, no
+// parentheses of its own - while the genuine annotation rides
+// seadex_best_notes, positionally aligned with the groups. The Markdown pair
+// renders the identical split, so one fact keeps one rendering across both
+// sinks. No shipped alert rule reads either attribute, so the wire shape is
 // this report's own.
-func TestReportLogQuotesForgedBestGroup(t *testing.T) {
+func TestReportLogSplitsNotesFromForgedBestGroup(t *testing.T) {
 	log, rec := capture.New()
 	releases := []Release{
 		{Group: "SEV (broken)", Best: true},
@@ -1047,28 +1100,67 @@ func TestReportLogQuotesForgedBestGroup(t *testing.T) {
 	}
 
 	attrs := recordAttrs(rec.Records()[1])
-	want := `"SEV (broken)","PMR" (broken)`
-	if got := attrs["seadex_best"]; got != want {
-		t.Errorf("seadex_best = %q, want %q", got, want)
+	wantBest := "SEV (broken),PMR"
+	if got := attrs["seadex_best"]; got != wantBest {
+		t.Errorf("seadex_best = %q, want %q", got, wantBest)
 	}
-	if got, joined := strings.Join(displayBestGroups(releases), ","), want; got != joined {
-		t.Errorf("markdown cell = %q, want %q (both renderings must agree)", got, joined)
+	if got, want := attrs["seadex_best_notes"], "-;broken"; got != want {
+		t.Errorf("seadex_best_notes = %q, want %q", got, want)
+	}
+	// The parentheses in seadex_best are the forged group's own bytes; the app
+	// contributes none of its own to that value, and never a quote.
+	if got, _ := attrs["seadex_best"].(string); strings.ContainsAny(strings.ReplaceAll(got, "SEV (broken)", ""), `"()`) {
+		t.Errorf("seadex_best = %q carries app-added quotes or parentheses", got)
+	}
+	// A clean row's attribute carries neither, at all.
+	clean := &Report{GeneratedAt: time.Unix(0, 0).UTC(), Rows: []Row{{
+		Releases: []Release{{Group: "PMR", Best: true, Warnings: []string{"broken"}}},
+	}}}
+	cleanLog, cleanRec := capture.New()
+	if err := clean.Log(context.Background(), cleanLog); err != nil {
+		t.Fatalf("Log: %v", err)
+	}
+	cleanAttrs := recordAttrs(cleanRec.Records()[1])
+	if got, _ := cleanAttrs["seadex_best"].(string); got != "PMR" || strings.ContainsAny(got, `"()`) {
+		t.Errorf("seadex_best = %q, want %q with no quotes or parentheses", got, "PMR")
+	}
+	if got, want := cleanAttrs["seadex_best_notes"], "broken"; got != want {
+		t.Errorf("seadex_best_notes = %q, want %q", got, want)
+	}
+	// Both renderings agree: the Markdown pair splits the same way.
+	row := &Row{Releases: releases}
+	if got := strings.Join(displayBestGroups(releases), ","); got != wantBest {
+		t.Errorf("markdown best cell = %q, want %q (both renderings must agree)", got, wantBest)
+	}
+	if got, want := notesCell(row), "-; broken"; got != want {
+		t.Errorf("markdown notes cell = %q, want %q", got, want)
 	}
 }
 
 // TestReportLogCapsAggregateAttributes pins the per-attribute volume bound on
-// BOTH aggregates (current_group, seadex_best): an oversized upstream group
-// name is cut on a rune boundary and marked, so one report line cannot balloon
-// past the log pipeline's limit. Removing either cap fails the length or the
-// suffix assertion.
+// ALL THREE aggregates (current_group, seadex_best, seadex_best_notes): an
+// oversized upstream group name is cut on a rune boundary and marked, so one
+// report line cannot balloon past the log pipeline's limit. The notes twin
+// carries only this app's vocabulary, so its unbounded axis is the ENTRY COUNT
+// (an entry admits up to 512 torrents), which the same joiner budget bounds.
+// Removing any cap fails the length or the suffix assertion.
 func TestReportLogCapsAggregateAttributes(t *testing.T) {
 	log, rec := capture.New()
+	// Enough annotated bests that the positional notes list alone exceeds the
+	// budget: each contributes a distinct group plus "broken" and a separator.
+	many := make([]Release, 0, 2048)
+	for i := range 2048 {
+		many = append(many, Release{Group: "g" + strconv.Itoa(i), Best: true, Warnings: []string{"broken"}})
+	}
 	r := &Report{
 		GeneratedAt: time.Unix(0, 0).UTC(),
-		Rows: []Row{{
-			CurrentGroups: []string{strings.Repeat("x", maxAttrBytes+1)},
-			Releases:      []Release{{Group: strings.Repeat("y", maxAttrBytes+1), Best: true}},
-		}},
+		Rows: []Row{
+			{
+				CurrentGroups: []string{strings.Repeat("x", maxAttrBytes+1)},
+				Releases:      []Release{{Group: strings.Repeat("y", maxAttrBytes+1), Best: true}},
+			},
+			{Releases: many},
+		},
 	}
 
 	if err := r.Log(context.Background(), log); err != nil {
@@ -1088,6 +1180,14 @@ func TestReportLogCapsAggregateAttributes(t *testing.T) {
 		if !strings.HasSuffix(got, "...") {
 			t.Errorf("%s = %q, want truncation suffix", key, got)
 		}
+	}
+	notes, ok := recordAttrs(rec.Records()[2])["seadex_best_notes"].(string)
+	if !ok {
+		t.Fatalf("seadex_best_notes = %T, want string", recordAttrs(rec.Records()[2])["seadex_best_notes"])
+	}
+	if len(notes) != maxAttrBytes+3 || !strings.HasSuffix(notes, "...") {
+		t.Errorf("seadex_best_notes len = %d suffix-marked = %t, want %d and true (bounded by entry count)",
+			len(notes), strings.HasSuffix(notes, "..."), maxAttrBytes+3)
 	}
 }
 
@@ -1146,8 +1246,8 @@ func TestBestGroupDedupeIsBoundedAndCaseInsensitive(t *testing.T) {
 	if len(display) != 1 {
 		t.Fatalf("displayBestGroups() returned %d groups, want 1 (case-insensitive dedupe)", len(display))
 	}
-	if display[0] != `"`+huge+`"` {
-		t.Error("displayBestGroups() did not keep the first release's original case inside its quotes")
+	if display[0] != huge {
+		t.Error("displayBestGroups() did not keep the first release's original case")
 	}
 
 	attr := joinBestGroupsAttr(releases)
