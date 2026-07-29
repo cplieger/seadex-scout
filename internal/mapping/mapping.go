@@ -985,7 +985,19 @@ func (l *Loader) conditionalGet(ctx context.Context, prev *Cache) (httpx.Conditi
 		httpx.WithMaxAttempts(maxAttempts),
 		httpx.WithBaseDelay(baseDelay),
 		httpx.WithLabel("mapping"),
-		httpx.WithLogger(l.log))
+		httpx.WithLogger(l.log),
+		// Demote httpx's terminal "http retries exhausted" line to Debug. A
+		// refresh whose retries ran out always surfaces again from the caller
+		// with strictly more context: the daemon's "mapping degraded" WARN
+		// (scout.loadMapping) carries usable_records, the stale-cache reason and
+		// the persisted rejection streak, and escalates to ERROR once that
+		// streak reaches its threshold; report mode publishes the same attribute
+		// set as "report: mapping degraded" (scout.reportMapping). Leaving both
+		// at Warn reports one Fribb outage twice, generic line first. Demoting
+		// rather than dropping the logger keeps the per-attempt retry
+		// diagnostics - the same rule internal/seadex and internal/indexer's
+		// Prowlarr door already apply (l-f20).
+		httpx.WithExhaustedLevel(slog.LevelDebug))
 }
 
 // --- Overrides: the operator overlay file ---

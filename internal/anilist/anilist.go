@@ -319,7 +319,23 @@ func (c *Client) request(ctx context.Context, gql string, variables any) ([]byte
 		httpx.WithBaseDelay(baseDelay),
 		httpx.WithLabel("anilist"),
 		httpx.WithLogger(c.log),
-		httpx.WithRateLimitRetry(maxRetryAfter))
+		httpx.WithRateLimitRetry(maxRetryAfter),
+		// Demote httpx's terminal "http retries exhausted" line to Debug. Every
+		// exhausted request is republished by the matcher with strictly more
+		// context: a total batch outage as "anilist batch prefetch failed;
+		// skipping per-id fallback for pending ids" (match's prefetch, carrying
+		// the pending count) and a per-id miss as "anilist fallback failed"
+		// (carrying al_id, plus the repeated-failure gate line), and a sustained
+		// outage escalates to ERROR with consecutive_anilist_degraded
+		// (scout.recordAniListDegradation). Leaving both at Warn reports one
+		// AniList outage twice, generic line first. request is SHARED by Fetch
+		// (per-id) and FetchMany (batch), so this covers both paths - wider than
+		// the single call path the finding named, and correct, because both
+		// already publish their own contextual record. Demoting rather than
+		// dropping the logger keeps the per-attempt retry diagnostics - the same
+		// rule internal/seadex and internal/indexer's Prowlarr door already
+		// apply (l-f20).
+		httpx.WithExhaustedLevel(slog.LevelDebug))
 }
 
 // Fetch returns the AniList media for the given ID, or ErrNotFound when AniList
