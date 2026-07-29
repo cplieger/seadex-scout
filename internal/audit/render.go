@@ -111,15 +111,20 @@ func renderMarkdown(r *Report) string {
 // annotationLegend explains the parenthesized annotations the Scope and SeaDex
 // best columns carry, so the report file stays self-explanatory for a reader
 // who has only the file (the same reason each verdict section carries
-// verdictDesc). Without it "S2 (approx, mixed)" and "PMR (broken)" are
-// unexplained in both the report and the README.
+// verdictDesc). Without it "S2 (approx, mixed)" and `"PMR" (broken)` are
+// unexplained in both the report and the README. It also explains the quoting
+// that separates upstream group text from this app's annotations.
 const annotationLegend = "Scope annotations: `approx` - the comparison used a coarse bucket " +
 	"(the season-0 specials bucket, or a whole-series aggregate spanning more than one season or group), " +
 	"so the verdict means \"present somewhere in the series\" rather than an exact per-season attribution; " +
 	"`mixed` - the scoped groups span more than one group and none of them is a SeaDex best (a manual review); " +
 	"`theoretical` - SeaDex names only a theoretical best, so there is nothing concrete to compare against; " +
 	"`incomplete` - the SeaDex entry itself is incomplete.\n\n" +
-	"SeaDex best annotations: `(broken)` / `(incomplete)` are SeaDex curation warnings, `(url error)` means " +
+	"SeaDex best annotations: a release group is printed in double quotes because it is upstream SeaDex " +
+	"text; anything in parentheses AFTER the closing quote is this report speaking. So `\"PMR\" (broken)` is " +
+	"a group named PMR that SeaDex flagged broken, while `\"SEV (broken)\"` is a group literally named " +
+	"`SEV (broken)` upstream and carries no annotation from us. " +
+	"`(broken)` / `(incomplete)` are SeaDex curation warnings, `(url error)` means " +
 	"the SeaDex record carries a link value that is not a usable tracker URL (report it upstream), " +
 	"`(unknown tracker)` means the record names a tracker this build does not know, so no link could be " +
 	"built (report it as a seadex-scout gap, not as bad SeaDex data), and " +
@@ -299,18 +304,22 @@ func selectBestGroups(releases []Release, fn func(rel *Release, isAnnotated bool
 }
 
 // displayBestGroups returns the distinct best-release groups in their original
-// case (deduped case-insensitively), for display. An annotated best - one
-// carrying curation warnings, one the daemon's obtainability rule rejected
-// (Release.Unobtainable), or both - renders with its notes: "PMR (broken)",
-// "PMR (unobtainable)", "SEV (broken, unobtainable)". The column stays
-// complete (the report shows raw SeaDex data) while explaining why the
-// verdict did not count the release. Clean bests are collected first and win
-// the dedupe, so a group genuinely available as a clean best never displays
-// annotated.
+// case (deduped case-insensitively), for display. The group text is UPSTREAM
+// data and is rendered inside double quotes; an annotated best - one carrying
+// curation warnings, one the daemon's obtainability rule rejected
+// (Release.Unobtainable), or both - renders with its notes OUTSIDE those
+// quotes: `"PMR" (broken)`, `"PMR" (unobtainable)`,
+// `"SEV" (broken, unobtainable)`. The quotes are the boundary between what
+// SeaDex said and what this app is saying about it: a contributor who names a
+// clean release `SEV (broken)` renders `"SEV (broken)"`, which no longer looks
+// like the app's own curation annotation (l-f192). The column stays complete
+// (the report shows raw SeaDex data) while explaining why the verdict did not
+// count the release. Clean bests are collected first and win the dedupe, so a
+// group genuinely available as a clean best never displays annotated.
 func displayBestGroups(releases []Release) []string {
 	var out []string
 	selectBestGroups(releases, func(rel *Release, isAnnotated bool) bool {
-		label := rel.Group
+		label := `"` + rel.Group + `"`
 		if isAnnotated {
 			label += " (" + strings.Join(releaseNotes(rel), ", ") + ")"
 		}
@@ -851,9 +860,15 @@ func joinGroupsAttr(groups []string) string {
 // joinBestGroupsAttr renders the seadex_best attribute through the same
 // bounded joiner. It streams selectBestGroups - the shared selection rule
 // (clean bests first, case-insensitive dedupe on the original-case group,
-// annotated bests rendered "GRP (broken, unobtainable)") - rather than calling
-// displayBestGroups, because that helper builds the complete label slice,
-// which is exactly the untrusted aggregate the budget must bound.
+// the upstream group quoted with annotated notes outside the quotes,
+// `"SEV" (broken, unobtainable)`) - rather than calling displayBestGroups,
+// because that helper builds the complete label slice, which is exactly the
+// untrusted aggregate the budget must bound. The quoting matches the Markdown
+// cell deliberately: leaving this attribute unquoted would give one fact two
+// renderings, and a forged group would still masquerade as an app annotation
+// for anyone reading the row in Loki. No shipped alert rule reads seadex_best
+// (it is a report-mode attribute; the finding line does not carry it), so the
+// wire-shape change has no consumer to break.
 func joinBestGroupsAttr(releases []Release) string {
 	j := logattr.NewJoiner()
 	first := true
@@ -862,7 +877,7 @@ func joinBestGroupsAttr(releases []Release) string {
 			return false
 		}
 		first = false
-		if !j.Write(rel.Group) {
+		if !j.WriteSep(`"`) || !j.Write(rel.Group) || !j.WriteSep(`"`) {
 			return false
 		}
 		return !isAnnotated || writeNotesAttr(j, releaseNotes(rel))
@@ -871,8 +886,8 @@ func joinBestGroupsAttr(releases []Release) string {
 }
 
 // writeNotesAttr appends an annotated best's parenthesized note list to j,
-// matching displayBestGroups' " (broken, unobtainable)" rendering, and reports
-// whether the joiner can still accept more.
+// matching displayBestGroups' `"SEV" (broken, unobtainable)` rendering, and
+// reports whether the joiner can still accept more.
 func writeNotesAttr(j *logattr.Joiner, notes []string) bool {
 	if !j.WriteSep(" (") {
 		return false

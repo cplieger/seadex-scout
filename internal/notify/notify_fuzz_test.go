@@ -91,17 +91,23 @@ func FuzzJoinLinksAttrBounded(f *testing.F) {
 
 // FuzzCapAlertTextAttrBoundedAndInertMarkup fuzzes the alert-annotation text
 // encoder. alerts.yaml interpolates alert_title / alert_recommended_group into
-// a Discord/Slack annotation BODY, so an untrusted SeaDex title must never
+// a Discord annotation BODY, so an untrusted SeaDex title must never
 // render as a link, a code span, or a receiver mention (CWE-116). The escaper
-// emits every dangerous byte as a two-byte backslash escape and entity-encodes
-// '<' and '>', so walking escape pairs is an exact oracle rather than a second
+// emits every dangerous byte as a two-byte backslash escape, so walking escape
+// pairs is an exact oracle rather than a second
 // copy of the replacer - and it covers the growth re-cap boundary, where a cut
 // can land inside an escape pair, which the value-level table cannot reach.
+//
+// '<' and '>' are deliberately NOT in the live-markup set: this encoder targets
+// Discord, where they are ordinary text (the Slack-mrkdwn entity half was
+// dropped in l-f84), and Discord's `<@id>` mention is neutralized by the '@'
+// escape the walk already checks.
 func FuzzCapAlertTextAttrBoundedAndInertMarkup(f *testing.F) {
 	f.Add("")
 	f.Add("Frieren")
 	f.Add("[security update](https://attacker.example)")
 	f.Add("@everyone <@U123> & co")
+	f.Add("Tiger & Bunny <script> a > b")
 	f.Add(`a\b*c`)
 	f.Add("a\u009bb\u202ec\x1bd")
 	f.Add(strings.Repeat("*", 4<<10))
@@ -120,7 +126,7 @@ func FuzzCapAlertTextAttrBoundedAndInertMarkup(f *testing.F) {
 				i++ // whatever this escape covers is inert
 				continue
 			}
-			if strings.IndexByte("`*_[]()~|@<>", got[i]) >= 0 {
+			if strings.IndexByte("`*_[]()~|@", got[i]) >= 0 {
 				t.Errorf("capAlertTextAttr(%d bytes) leaves live markup byte %q at offset %d", len(raw), got[i], i)
 			}
 		}

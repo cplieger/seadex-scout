@@ -199,7 +199,7 @@ func TestPreservedRecordBoundsReadBackStatus(t *testing.T) {
 // TestCapAlertTextAttrNeutralizesMarkupAndMentions pins the alert-sink output
 // encoding: capAttr bounds and sanitizes a value for the JSON slog sink but
 // performs no markup encoding, and alerts.yaml interpolates alert_title /
-// alert_recommended_group into a Discord/Slack annotation, so an untrusted
+// alert_recommended_group into a Discord annotation, so an untrusted
 // SeaDex title must not be able to render as a link, a code span, or a
 // receiver mention (CWE-116).
 func TestCapAlertTextAttrNeutralizesMarkupAndMentions(t *testing.T) {
@@ -214,8 +214,13 @@ func TestCapAlertTextAttrNeutralizesMarkupAndMentions(t *testing.T) {
 			want: `\[security update\]\(https://attacker.example\)`,
 		},
 		{name: "everyone mention", in: "@everyone", want: `\@everyone`},
-		{name: "slack user mention", in: "<@U123>", want: `&lt;\@U123&gt;`},
-		{name: "ampersand", in: "Fate & Co", want: "Fate &amp; Co"},
+		{name: "here mention", in: "@here", want: `\@here`},
+		// The Discord user-mention form is neutralized by the '@' escape
+		// alone: the angle brackets are not markup for this sink and now
+		// survive as the honest text they are.
+		{name: "discord user mention", in: "<@123>", want: `<\@123>`},
+		{name: "html tag", in: "<script>", want: "<script>"},
+		{name: "ampersand", in: "Tiger & Bunny", want: "Tiger & Bunny"},
 		{name: "emphasis and code", in: "*a*_b_`c`~d~|e|", want: `\*a\*\_b\_` + "\\`c\\`" + `\~d\~\|e\|`},
 		{name: "backslash first", in: `a\b`, want: `a\\b`},
 		{name: "newline", in: "a\n# b", want: "a # b"},
@@ -227,6 +232,33 @@ func TestCapAlertTextAttrNeutralizesMarkupAndMentions(t *testing.T) {
 				t.Errorf("capAlertTextAttr(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestCapAlertTextAttrEmitsNoHTMLEntities pins the single-sink decision
+// (l-f84): the escaper targets Discord only, so the Slack-mrkdwn entity half
+// is gone and an honest '&', '<' or '>' must reach the annotation as itself.
+// A reintroduced entity encoding would make every such title read
+// "Tiger &amp; Bunny" in the Discord receiver the homelab Alertmanager is
+// provisioned with.
+func TestCapAlertTextAttrEmitsNoHTMLEntities(t *testing.T) {
+	corpus := []string{
+		"Tiger & Bunny",
+		"<script>alert(1)</script>",
+		"<@123>",
+		"<!everyone>",
+		"a > b < c & d",
+		"&amp;",
+		"&<>",
+		strings.Repeat("&<>", 4*maxAttrBytes),
+	}
+	for _, in := range corpus {
+		got := capAlertTextAttr(in)
+		for _, entity := range []string{"&amp;", "&lt;", "&gt;"} {
+			if strings.Contains(got, entity) && !strings.Contains(in, entity) {
+				t.Errorf("capAlertTextAttr(%q) = %q, want no %q entity encoding", in, got, entity)
+			}
+		}
 	}
 }
 
