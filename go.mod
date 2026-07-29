@@ -7,12 +7,12 @@ require (
 	github.com/cplieger/atomicfile/v2 v2.4.0
 	github.com/cplieger/health v1.4.0
 	github.com/cplieger/httpx/v2 v2.6.0
-	github.com/cplieger/webhttp v1.19.0
+	github.com/cplieger/webhttp v1.20.0
 )
 
 require go.yaml.in/yaml/v3 v3.0.5
 
-require github.com/cplieger/slogx v1.4.0
+require github.com/cplieger/slogx v1.5.0
 
 require github.com/cplieger/scheduler v1.2.0
 
