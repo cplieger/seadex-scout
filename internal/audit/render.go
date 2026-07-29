@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -20,9 +19,11 @@ import (
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/align"
+	"github.com/cplieger/seadex-scout/internal/displaylink"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/logattr"
 	"github.com/cplieger/seadex-scout/internal/tracker"
+	"github.com/cplieger/urlform"
 )
 
 const (
@@ -758,19 +759,33 @@ func escapeLinkURL(u string) string {
 
 // mdLink builds a Markdown link with a table-cell-safe label and a
 // metacharacter-escaped destination. It emits a link only when the destination
-// parses as an http/https URL; any other scheme (javascript:, data:, …) or an
-// unparseable destination degrades to the escaped label as plain text, so an
-// untrusted tracker URL cannot inject an active non-http link.
+// passes the app's ONE structural vouch step for a browser-destined URL
+// (internal/displaylink, shared with the tracker-link publisher, the indexer's
+// display gate and the snapshot reader): an absolute http(s) URL, free of a
+// userinfo authority and of the backslash / tab-newline smuggling shapes a
+// browser reads differently from net/url. Anything else - another scheme
+// (javascript:, data:), a hidden-host or relative form, an unparseable
+// destination - degrades to the escaped label as plain text, exactly as a
+// rejected destination already did.
+//
+// It used to apply its own gate (TrimSpace + url.Parse + an http/https scheme
+// check), which was a second, weaker vocabulary for the same knowledge: it
+// checked neither the absolute class nor userinfo nor the smuggling shapes, so a
+// hidden-host spelling a browser navigates elsewhere still rendered as an active
+// link (l-f189/h-f8). Reading the shared home means a newly refused smuggling
+// form is learned once, for every gate.
+//
+// The emitted destination is the classified form's Trimmed string - the
+// preprocessed value the vouch step actually judged - so the link a reader
+// clicks is the URL that was vouched, not an original spelling a browser would
+// silently rewrite.
 func mdLink(label, rawURL string) string {
 	safeLabel := escapeCell(label)
-	trimmed := strings.TrimSpace(rawURL)
-	if u, err := url.Parse(trimmed); err == nil {
-		switch strings.ToLower(u.Scheme) {
-		case "http", "https":
-			return "[" + safeLabel + "](" + escapeLinkURL(trimmed) + ")"
-		}
+	f := urlform.Classify(rawURL)
+	if !displaylink.VouchForm(&f) {
+		return safeLabel
 	}
-	return safeLabel
+	return "[" + safeLabel + "](" + escapeLinkURL(f.Trimmed) + ")"
 }
 
 // cellEscaper backs escapeCell; built once, safe for concurrent use.

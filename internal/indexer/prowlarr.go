@@ -15,6 +15,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/credname"
 	"github.com/cplieger/seadex-scout/internal/displaylink"
+	"github.com/cplieger/urlform"
 )
 
 const (
@@ -714,11 +715,25 @@ func effectiveHTTPPort(u *url.URL) string {
 // urlform.IsASCIIHost) must see the same string a browser would navigate to.
 // Returned Host is urlform's ASCII-lowercased evidence.
 func httpDisplayHost(raw string) (host string, ok bool) {
-	host, ok = displaylink.Vouch(raw)
-	if !ok || host == "" {
+	f, ok := httpDisplayForm(raw)
+	if !ok {
 		return "", false
 	}
-	return host, true
+	return f.Host, true
+}
+
+// httpDisplayForm is httpDisplayHost returning the whole classified form, for a
+// caller that must parse the VOUCHED reading of the URL rather than its original
+// spelling (trackerKeyFromURL's id extraction; h-f8). Emitting or re-parsing
+// f.Trimmed is the point: it is the preprocessed string the vouch step actually
+// judged, so admission and the id extraction can no longer read two different
+// strings.
+func httpDisplayForm(raw string) (f urlform.Form, ok bool) {
+	f = urlform.Classify(raw)
+	if !displaylink.VouchForm(&f) || f.Host == "" {
+		return urlform.Form{}, false
+	}
+	return f, true
 }
 
 // sanitizeDisplayURL returns raw when it is a display-admissible URL

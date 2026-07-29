@@ -87,9 +87,15 @@ func isUnsafeForDisplay(r rune) bool {
 // the generic property mostly exercises the plain-label fallback): every
 // dangerous destination character is embedded in random surrounding text, so
 // the active-link destination escaping branch is exercised on every draw.
+//
+// The backslash is deliberately NOT in the dangerous set: it is a
+// browser-vs-net/url smuggling shape the shared structural vouch step refuses
+// outright, so it never reaches the escaper. The trial asserts that refusal
+// separately, which keeps both halves pinned - escaping for a vouched
+// destination, dropping for a de-smuggled one (h-f8/l-f189).
 func TestMdLinkPropertyHTTPDestinationsStayContained(t *testing.T) {
 	plain := rapid.StringOfN(rapid.RuneFrom([]rune("abcXYZ0123456789")), 0, 20, -1)
-	const dangerous = " ()<>|\\`\u0085\u202e\u2028\u2029"
+	const dangerous = " ()<>|`\u0085\u202e\u2028\u2029"
 	rapid.Check(t, func(t *rapid.T) {
 		label := rapid.String().Draw(t, "label")
 		scheme := rapid.SampledFrom([]string{"http", "https", "HTTP", "HTTPS"}).Draw(t, "scheme")
@@ -105,5 +111,12 @@ func TestMdLinkPropertyHTTPDestinationsStayContained(t *testing.T) {
 		}
 		dest := got[idx+2 : len(got)-1]
 		checkMdLinkDestinationInvariants(t, label, rawURL, dest)
+
+		// Same destination with a backslash appended: not vouchable, so no link.
+		smuggled := rawURL + `\`
+		if got := mdLink(label, smuggled); got != escapeCell(label) {
+			t.Errorf("mdLink(%q, %q) = %q, want plain escaped label %q for a backslash-smuggled destination",
+				label, smuggled, got, escapeCell(label))
+		}
 	})
 }

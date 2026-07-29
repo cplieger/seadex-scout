@@ -814,7 +814,7 @@ func validCategories(cats []int) []int {
 // rebuildABDownloadURLs and rebuildNyaaDownloadURLs: it re-derives each feed
 // item's download URL from its non-secret tracker page URL (the GUID) via
 // downloadURLForScope, which enforces the tracker-ownership gate internally
-// (trackerOwnURL, the same fail-closed check writer-side journal admission
+// (trackerOwnForm, the same fail-closed check writer-side journal admission
 // runs through trackerKey). Persisted data crosses a separate trust boundary
 // from writer admission: a tampered but structurally valid feed.json could
 // otherwise carry a foreign (https://evil.example/view/123) or

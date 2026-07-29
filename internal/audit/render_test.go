@@ -102,6 +102,45 @@ func TestMdLinkAllowsOnlyHTTPSchemes(t *testing.T) {
 	}
 }
 
+// TestMdLinkAppliesTheSharedStructuralVouch pins the report renderer against the
+// app's one structural vouch step for a browser-destined URL (internal/displaylink,
+// h-f8/l-f189). The renderer used to apply its own weaker gate - TrimSpace plus
+// url.Parse plus an http/https scheme check - which checked neither the absolute
+// class, nor userinfo, nor the browser-vs-net/url smuggling shapes, so a spelling
+// a browser resolves elsewhere still rendered as an active link a reader clicks.
+//
+// The emitted destination is the vouched form's cleaned string, so a padded URL
+// links to the value that was actually judged rather than to a spelling a browser
+// would silently rewrite.
+func TestMdLinkAppliesTheSharedStructuralVouch(t *testing.T) {
+	tests := map[string]struct{ raw, want string }{
+		"plain absolute":            {"https://nyaa.si/view/1", "[t](https://nyaa.si/view/1)"},
+		"leading tab trimmed":       {"\thttps://nyaa.si/view/1", "[t](https://nyaa.si/view/1)"},
+		"trailing cr trimmed":       {"https://nyaa.si/view/1\r", "[t](https://nyaa.si/view/1)"},
+		"leading nul trimmed":       {"\x00https://nyaa.si/view/1", "[t](https://nyaa.si/view/1)"},
+		"surrounding space trimmed": {"  https://nyaa.si/view/1  ", "[t](https://nyaa.si/view/1)"},
+		// Newly refused: each is a form the old scheme-only gate rendered as an
+		// active link even though a browser resolves it somewhere else.
+		"hidden host refused":    {"https:nyaa.si/view/1", "t"},
+		"one-slash host refused": {"https:/nyaa.si/view/1", "t"},
+		"userinfo refused":       {"https://nyaa.si@evil.example/view/1", "t"},
+		"backslash refused":      {"https:/\\nyaa.si/view/1", "t"},
+		"embedded tab refused":   {"https://nyaa\t.si/view/1", "t"},
+		"empty host refused":     {"http://", "t"},
+		"protocol relative":      {"//nyaa.si/view/1", "t"},
+		"relative refused":       {"/torrents.php?id=1", "t"},
+		"non-http refused":       {"javascript:alert(1)", "t"},
+		"empty refused":          {"", "t"},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := mdLink("t", tc.raw); got != tc.want {
+				t.Errorf("mdLink(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestEscapeLinkURLEncodesWhitespace(t *testing.T) {
 	got := escapeLinkURL("https://x/a\tb\vc\fd e")
 	if strings.ContainsAny(got, "\t\v\f \n\r") {
@@ -119,9 +158,15 @@ func TestEscapeLinkURLEncodesBackslashAndBacktick(t *testing.T) {
 	if want := "https://x/path%5C"; got != want {
 		t.Errorf("escapeLinkURL(trailing backslash) = %q, want %q", got, want)
 	}
+	// The destination is now refused BEFORE escaping: a backslash is one of the
+	// browser-vs-net/url smuggling shapes the shared structural vouch step
+	// (internal/displaylink) drops rather than vouch, so the cell degrades to the
+	// plain label (h-f8/l-f189). The %5C escaping above still guards every
+	// destination that IS vouched and happens to carry a backslash-escaped
+	// percent form.
 	link := mdLink("nyaa", `https://x/path\`)
-	if want := "[nyaa](https://x/path%5C)"; link != want {
-		t.Errorf("mdLink(trailing backslash) = %q, want %q", link, want)
+	if want := "nyaa"; link != want {
+		t.Errorf("mdLink(trailing backslash) = %q, want the plain label %q", link, want)
 	}
 	// A backtick could open a code span across the ']( ' boundary; it must be
 	// percent-encoded in the destination.
@@ -376,8 +421,15 @@ func TestLinksDedupesRepeatedBestAndLabelsUnnamedTracker(t *testing.T) {
 	if !strings.Contains(got, "[example.org](https://example.org/t)") {
 		t.Errorf("a blank tracker must be labelled by the URL host, got %q", got)
 	}
-	if !strings.Contains(got, "[link](http://)") {
+	// The last-resort "link" label still applies, but "http://" carries no host
+	// at all (urlform reads it as a hidden-host form), which the shared
+	// structural vouch step refuses - so the cell is the plain label rather than
+	// an active link to a destination a browser resolves differently (h-f8).
+	if !strings.Contains(got, linkSep+"link"+linkSep) {
 		t.Errorf("a link with no nameable tracker must fall back to the %q label, got %q", "link", got)
+	}
+	if strings.Contains(got, "](http://)") {
+		t.Errorf("an empty-host destination must not render as an active link, got %q", got)
 	}
 	// Both delimiter-bearing tuples survive as distinct links: the plain URL
 	// as its own destination, and the pipe-bearing URL with the pipe

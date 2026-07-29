@@ -437,7 +437,7 @@ func TestReloadRebuildsNyaaDownloadURLsFromGUID(t *testing.T) {
 // mint an apex-tracker download URL from a foreign or independent-subdomain
 // GUID - trackerID's shape-only extraction would otherwise read the numeric
 // id out of https://evil.example/view/123 or sukebei.nyaa.si/view/123 - so
-// only items whose GUID passes the same trackerOwnURL gate writer-side
+// only items whose GUID passes the same trackerOwnForm gate writer-side
 // journal admission applies survive the reload, with their served URLs
 // derived on the expected apex tracker.
 func TestReloadDropsForeignHostSnapshotGUIDs(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"net/url"
 
 	"github.com/cplieger/seadex-scout/internal/tracker"
+	"github.com/cplieger/urlform"
 )
 
 // downloadURL resolves a grabbable .torrent download URL for a SeaDex torrent
@@ -17,7 +18,7 @@ import (
 // AB download URL embeds the passkey, so it is a secret and callers must not
 // log it.
 //
-// The tracker-ownership host gate (trackerOwnURL, the same fail-closed check
+// The tracker-ownership host gate (trackerOwnForm, the same fail-closed check
 // journal admission applies via trackerKey) is enforced HERE, before the
 // shape-only id extraction (trackerID): a caller handing this a raw SeaDex
 // URL cannot mint a download link for an arbitrary tracker torrent id
@@ -61,10 +62,17 @@ func downloadURLForScope(scope, sourceURL, abPasskey string) (string, bool) {
 // shared front half of downloadURLForScope and resolvableForScope, so the two
 // can never disagree about which records are structurally sound.
 func downloadTarget(scope, sourceURL string) (base, id string, ok bool) {
-	if scope == "" || !trackerOwnURL(scope, sourceURL) {
+	if scope == "" {
 		return "", "", false
 	}
-	if id = trackerID(scope, sourceURL); id == "" {
+	// Classify once and extract the id from that same reading (f.Trimmed), so a
+	// URL the ownership gate vouches can never fail id extraction because the
+	// extractor re-parsed the original spelling (h-f8, see trackerOwnForm).
+	f := urlform.Classify(sourceURL)
+	if !trackerOwnForm(scope, &f) {
+		return "", "", false
+	}
+	if id = trackerID(scope, f.Trimmed); id == "" {
 		return "", "", false
 	}
 	var trackerName string

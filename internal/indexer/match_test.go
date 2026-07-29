@@ -3,6 +3,8 @@ package indexer
 import (
 	"strings"
 	"testing"
+
+	"github.com/cplieger/urlform"
 )
 
 // TestTrackerScope pins the two documented contracts of trackerScope that the
@@ -195,7 +197,7 @@ func TestTrackerIDExtractionRejectsNonCanonicalDecimalForms(t *testing.T) {
 }
 
 // TestTrackerKeyRejectsForeignHostURLs pins the SeaDex-side host gate
-// (trackerOwnURL): the record's tracker LABEL alone must never authorize an
+// (trackerOwnForm): the record's tracker LABEL alone must never authorize an
 // id extracted from a foreign URL - a malformed or compromised SeaDex record
 // (Tracker "Nyaa", https://evil.example/view/123) would otherwise mint
 // nyaa:123 as curation authorization for the REAL Nyaa torrent 123. An
@@ -238,7 +240,7 @@ func TestTrackerKeyRejectsForeignHostURLs(t *testing.T) {
 // TestTrackerIDHelpersFailClosedOnUnparseableInput pins the defensive
 // fail-closed arms the current calling paths cannot reach on their own:
 // nyaaID and animeBytesID return "" for a URL url.Parse rejects, and
-// trackerOwnURL answers false for a scope outside the nyaa/ab vocabulary,
+// trackerOwnForm answers false for a scope outside the nyaa/ab vocabulary,
 // so any future caller reaching these helpers directly still fails closed
 // on the curation trust boundary.
 func TestTrackerIDHelpersFailClosedOnUnparseableInput(t *testing.T) {
@@ -248,9 +250,18 @@ func TestTrackerIDHelpersFailClosedOnUnparseableInput(t *testing.T) {
 	if got := animeBytesID("http://[::1"); got != "" {
 		t.Errorf("animeBytesID(unparseable) = %q, want empty", got)
 	}
-	if trackerOwnURL("other", "https://nyaa.si/view/1") {
-		t.Error("trackerOwnURL(unknown scope) = true, want false (fail closed)")
+	if ownURL("other", "https://nyaa.si/view/1") {
+		t.Error("trackerOwnForm(unknown scope) = true, want false (fail closed)")
 	}
+}
+
+// ownURL is the raw-string spelling of trackerOwnForm for the ownership tables:
+// production callers classify once and keep the form (so they can extract the id
+// from the same reading, h-f8), while a table case reads better as the URL text
+// it pins.
+func ownURL(scope, raw string) bool {
+	f := urlform.Classify(raw)
+	return trackerOwnForm(scope, &f)
 }
 
 // TestCanonicalTrackerHost pins the canonical-host vocabulary the identity
@@ -276,7 +287,7 @@ func TestCanonicalTrackerHost(t *testing.T) {
 // a scope outside the nyaa/ab vocabulary extracts no id even from a URL that
 // carries one, so any future caller reaching the dispatcher with an
 // unclassified scope cannot mint identity evidence - the same defensive arm
-// TestTrackerIDHelpersFailClosedOnUnparseableInput pins for trackerOwnURL.
+// TestTrackerIDHelpersFailClosedOnUnparseableInput pins for trackerOwnForm.
 func TestTrackerIDUnknownScopeFailsClosed(t *testing.T) {
 	if got := trackerID("other", "https://nyaa.si/view/123"); got != "" {
 		t.Errorf(`trackerID("other", ...) = %q, want empty (fail closed on an unknown scope)`, got)
@@ -331,8 +342,8 @@ func TestTrackerOwnURLReadsOneStructuralVocabulary(t *testing.T) {
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			if got := trackerOwnURL(tc.scope, tc.raw); got != tc.want {
-				t.Errorf("trackerOwnURL(%q, %q) = %v, want %v", tc.scope, tc.raw, got, tc.want)
+			if got := ownURL(tc.scope, tc.raw); got != tc.want {
+				t.Errorf("trackerOwnForm(%q, %q) = %v, want %v", tc.scope, tc.raw, got, tc.want)
 			}
 		})
 	}
@@ -356,6 +367,65 @@ func TestTrackerKeyRejectsNonHTTPTrackerURLs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := trackerKey(tc.tracker, tc.raw); got != "" {
 				t.Errorf("trackerKey(%q, %q) = %q, want empty for a non-HTTP(S) URL", tc.tracker, tc.raw, got)
+			}
+		})
+	}
+}
+
+// TestTrackerKeysReadTheVouchedForm pins the classify-once contract on both key
+// builders (h-f8). Ownership is decided on urlform's reading of the raw string -
+// which preprocesses edge padding the way a browser does - so the id must be
+// extracted from that same reading (Form.Trimmed). Before the fix the original
+// spelling reached nyaaID/animeBytesID, whose net/url parse kept the padding, so
+// an edge-padded SeaDex or Prowlarr URL passed ownership and then minted no key:
+// the release was silently absent from the curation set and the RSS journal.
+//
+// The strictness of nyaaID/animeBytesID is unchanged; they simply receive a
+// cleaned string. Everything the ownership gate refuses is still refused before
+// an id is read, so edge padding is the ONLY family that newly keys - the
+// refusal rows below are the regression guard for that.
+func TestTrackerKeysReadTheVouchedForm(t *testing.T) {
+	tests := map[string]struct {
+		tracker, sourceURL string
+		// wantKey is the expected key from trackerKey; "" means refused.
+		wantKey string
+		// wantFromURL is the expected key from trackerKeyFromURL (which admits
+		// absolute display URLs only); "" means refused.
+		wantFromURL string
+	}{
+		"nyaa leading tab":      {"Nyaa", "\thttps://nyaa.si/view/123", "nyaa:123", "nyaa:123"},
+		"nyaa leading nul":      {"Nyaa", "\x00https://nyaa.si/view/123", "nyaa:123", "nyaa:123"},
+		"nyaa leading space":    {"Nyaa", " https://nyaa.si/view/123", "nyaa:123", "nyaa:123"},
+		"nyaa trailing cr":      {"Nyaa", "https://nyaa.si/view/123\r", "nyaa:123", "nyaa:123"},
+		"nyaa trailing nul":     {"Nyaa", "https://nyaa.si/view/123\x00", "nyaa:123", "nyaa:123"},
+		"nyaa trailing space":   {"Nyaa", "https://nyaa.si/view/123 ", "nyaa:123", "nyaa:123"},
+		"ab absolute pad":       {"AB", "\x00https://animebytes.tv/torrents.php?id=1&torrentid=456", "ab:456", "ab:456"},
+		"ab permalink pad":      {"AB", " https://animebytes.tv/torrent/456/group\r", "ab:456", "ab:456"},
+		"ab relative pad":       {"AB", " /torrents.php?id=1&torrentid=456", "ab:456", ""},
+		"ab relative pad nul":   {"AB", "/torrents.php?id=1&torrentid=456\x00", "ab:456", ""},
+		"ab relative permalink": {"AB", " /torrent/456/group\n", "ab:456", ""},
+		// Regression guards: every shape the ownership gate refuses stays
+		// refused, so passing the cleaned form downstream cannot widen identity.
+		"embedded tab refused":     {"Nyaa", "https://nyaa\t.si/view/123", "", ""},
+		"embedded lf refused":      {"Nyaa", "https://nyaa.si/view\n/123", "", ""},
+		"backslash refused":        {"Nyaa", "https:/\\nyaa.si/view/123", "", ""},
+		"hidden host refused":      {"Nyaa", "https:nyaa.si/view/123", "", ""},
+		"unparseable refused":      {"Nyaa", "http://[::1", "", ""},
+		"foreign host refused":     {"Nyaa", "https://evil.example/view/123", "", ""},
+		"subdomain refused":        {"Nyaa", "https://sukebei.nyaa.si/view/123", "", ""},
+		"userinfo refused":         {"Nyaa", "https://evil@nyaa.si/view/123", "", ""},
+		"non-http scheme refused":  {"Nyaa", "ftp://nyaa.si/view/123", "", ""},
+		"inner space mints no id":  {"Nyaa", "https://nyaa.si/view/ 123", "", ""},
+		"non-numeric mints no id":  {"Nyaa", "https://nyaa.si/view/abc ", "", ""},
+		"padded label still gated": {"Nyaa", " https://animebytes.tv/torrent/456/group", "", "ab:456"},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := trackerKey(tc.tracker, tc.sourceURL); got != tc.wantKey {
+				t.Errorf("trackerKey(%q, %q) = %q, want %q", tc.tracker, tc.sourceURL, got, tc.wantKey)
+			}
+			if got := trackerKeyFromURL(tc.sourceURL); got != tc.wantFromURL {
+				t.Errorf("trackerKeyFromURL(%q) = %q, want %q", tc.sourceURL, got, tc.wantFromURL)
 			}
 		})
 	}

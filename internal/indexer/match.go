@@ -114,22 +114,28 @@ func pathHasDotSegments(p string) bool {
 // compromised SeaDex record with Tracker "Nyaa" and
 // https://evil.example/view/123 would otherwise mint nyaa:123 and admit the
 // REAL Nyaa torrent 123 as curated), so the id counts only when the URL is
-// the tracker's own (see trackerOwnURL). A gated-out torrent is simply not
+// the tracker's own (see trackerOwnForm). A gated-out torrent is simply not
 // curated/journaled - the safe direction, surfaced by the journal's
 // unresolvable counter.
 func trackerKey(trackerName, sourceURL string) string {
 	scope := trackerScope(trackerName)
-	if scope == "" || !trackerOwnURL(scope, sourceURL) {
+	if scope == "" {
 		return ""
 	}
-	if id := trackerID(scope, sourceURL); id != "" {
+	// Classify ONCE and extract the id from that same reading (Form.Trimmed),
+	// never from the original spelling: see trackerOwnForm.
+	f := urlform.Classify(sourceURL)
+	if !trackerOwnForm(scope, &f) {
+		return ""
+	}
+	if id := trackerID(scope, f.Trimmed); id != "" {
 		return scope + ":" + id
 	}
 	return ""
 }
 
-// trackerOwnURL reports whether a SeaDex source URL belongs to the scope's
-// own tracker: an absolute http(s), userinfo-free URL on the tracker's EXACT
+// trackerOwnForm reports whether a classified SeaDex source URL belongs to the
+// scope's own tracker: an absolute http(s), userinfo-free URL on the tracker's EXACT
 // canonical host (the shared tracker.Is*Host predicates reject homograph
 // labels; the additional canonical-host check rejects subdomains, whose
 // torrent-id databases are independent of the apex site's - see
@@ -161,8 +167,21 @@ func trackerKey(trackerName, sourceURL string) string {
 // than the narrower tracker.LookupByRelativeURL, which additionally
 // demands the "/torrents.php?...torrentid=" shape: keying a relative Prowlarr
 // permalink ("/torrent/123/group") works today and must keep working.
-func trackerOwnURL(scope, sourceURL string) bool {
-	f := urlform.Classify(sourceURL)
+//
+// It takes the CLASSIFIED form rather than the raw string because its callers
+// must parse the same vouched reading for their tracker components. That is what
+// closes the classify-then-reparse split (h-f8): ownership vouched the BROWSER's
+// reading of a padded value ("\thttps://nyaa.si/view/123", which urlform
+// preprocesses the way a browser does) while the id extraction re-parsed the
+// ORIGINAL spelling with net/url, found no id, and silently dropped the release.
+// Every caller now classifies once and extracts from f.Trimmed, so both halves
+// read one string.
+//
+// This is deliberately NOT a loosening of nyaaID/animeBytesID: they stay strict
+// and simply receive an already-preprocessed value. Embedded tab/newline,
+// backslash, and hidden-host forms are still refused HERE, before any id is
+// extracted, so the only family that newly resolves is edge padding.
+func trackerOwnForm(scope string, f *urlform.Form) bool {
 	if f.HasBackslash || f.HasTabOrNewline {
 		// A de-smuggled string is not vouchable: a browser and net/url read it
 		// differently, so it must not prove a curation identity.
@@ -247,21 +266,23 @@ func isCanonicalTrackerHost(scope, host string) bool {
 // homograph label or an empty-labeled host under a tracker domain never
 // yields a curation key.
 func trackerKeyFromURL(raw string) string {
-	host, ok := httpDisplayHost(raw)
+	// Classify once: the id is extracted from the VOUCHED reading (f.Trimmed),
+	// not the original spelling (h-f8, see trackerOwnForm).
+	f, ok := httpDisplayForm(raw)
 	if !ok {
 		return ""
 	}
-	scope := scopeOfHost(host)
+	scope := scopeOfHost(f.Host)
 	if scope == "" {
 		return ""
 	}
 	// Identity is namespace-exact: a subdomain (sukebei.nyaa.si) has its own
 	// torrent-id database, so an id there must not key the apex site (see
 	// isCanonicalTrackerHost). Such an item can still match by info hash.
-	if !isCanonicalTrackerHost(scope, host) {
+	if !isCanonicalTrackerHost(scope, f.Host) {
 		return ""
 	}
-	if id := trackerID(scope, raw); id != "" {
+	if id := trackerID(scope, f.Trimmed); id != "" {
 		return scope + ":" + id
 	}
 	return ""

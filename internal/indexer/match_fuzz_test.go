@@ -134,7 +134,7 @@ func FuzzTrackerKey_keysOnlyTrackerOwnCanonicalURLs(f *testing.F) {
 		if !found || !boundedTrackerID(id) {
 			t.Fatalf("trackerKey(%q, %q) = %q, want scope:<bounded digits>", tracker, raw, key)
 		}
-		// Assert the admitted set in the vocabulary trackerOwnURL now reads
+		// Assert the admitted set in the vocabulary trackerOwnForm now reads
 		// (urlform), not in net/url's: the two disagree on exactly the shape this
 		// oracle used to describe as a "true relative reference" (a schemeless
 		// host like "animebytes.tv/x" is triple-empty to net/url but host
