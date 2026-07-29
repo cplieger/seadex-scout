@@ -91,9 +91,9 @@ func newUpstream(client *http.Client, log *slog.Logger, name, feed, apiKey strin
 // search queries the Torznab endpoint with the forwarded params and returns the
 // parsed items. The Prowlarr API key is sent as the X-Api-Key header (not a
 // query param), so it never appears in a logged request URL. It returns the
-// filtered items plus the RAW parsed-item count of the page (before
-// filterDownloadURLs), so the harvest's paging exit judges page fullness on
-// what the upstream actually returned, not on what survived the origin
+// filtered items plus the RAW parsed-item count of the response (before
+// filterDownloadURLs), so the request log line's upstream_fetched reports what
+// the upstream actually returned, not what survived the origin
 // filter.
 //
 // The retry boundary encloses the WHOLE attempt - transport, status, bounded

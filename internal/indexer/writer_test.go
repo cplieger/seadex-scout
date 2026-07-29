@@ -934,41 +934,6 @@ func TestRebuildBaselinesOversizedSeenLedgerKey(t *testing.T) {
 	}
 }
 
-// TestLoadPreviousPreservesLargeHarvestCheckpoint pins that loadPrevious
-// carries a structurally valid harvest checkpoint through byte-for-byte
-// regardless of its encoded size: harvest_cursor is a Pages map with one
-// entry per still-pending deep show (bounded by age, not count), so a
-// compact honest checkpoint legitimately exceeds maxPersistedFieldBytes at a
-// few hundred live page entries. A byte-length cap here would silently reset
-// accumulated harvest paging progress on every rebuild.
-func TestLoadPreviousPreservesLargeHarvestCheckpoint(t *testing.T) {
-	cp := harvestCheckpoint{Last: "nyaa:1", Pages: make(map[string]int, 300)}
-	for i := range 300 {
-		cp.Pages["nyaa:"+strconv.Itoa(100000+i)] = 2
-	}
-	encoded := encodeHarvestCheckpoint(cp)
-	if len(encoded) <= maxPersistedFieldBytes {
-		t.Fatalf("encoded checkpoint = %d bytes, want > %d (the honest-cursor premise of this regression test)",
-			len(encoded), maxPersistedFieldBytes)
-	}
-	path := filepath.Join(t.TempDir(), "feed.json")
-	writeSnapshotFile(t, path, &snapshot{
-		ByHash:        map[string]bool{},
-		ByKey:         map[string]bool{},
-		Seen:          map[string]bool{},
-		HarvestCursor: encoded,
-	})
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, nil, nil)
-	prev, err := w.loadPrevious(context.Background())
-	if err != nil {
-		t.Fatalf("loadPrevious: %v", err)
-	}
-	if prev.cursor != encoded {
-		t.Errorf("loadPrevious cursor = %d bytes, want the %d-byte checkpoint preserved byte-for-byte (resetting it discards accumulated harvest paging progress)",
-			len(prev.cursor), len(encoded))
-	}
-}
-
 // TestRebuildCanonicalizesStoredHashBeforeWarningRetraction pins that the
 // shared snapshot decode canonicalizes persisted identity fields BEFORE the
 // writer compares them: a carried item whose at-rest InfoHash is uppercase
@@ -1262,9 +1227,8 @@ func TestRebuildNeverLogsABPasskey(t *testing.T) {
 	}
 }
 
-// TestLoadPreviousDropsOversizedHarvestCheckpoint is the sibling of
-// TestLoadPreviousPreservesLargeHarvestCheckpoint: an HONEST checkpoint above
-// maxPersistedFieldBytes survives, but one past maxPersistedCursorBytes is
+// TestLoadPreviousDropsOversizedHarvestCheckpoint pins the cursor's size-cap
+// arm at the load boundary: a cursor past maxPersistedCursorBytes is
 // external corruption and must be reset. The cursor is the one persisted string
 // carried forward verbatim, so without the reset attacker-shaped text rides
 // every future snapshot until persist exceeds maxFeedBytes and wedges every

@@ -82,11 +82,13 @@ const (
 	// item's decode to a few hundred KiB.
 	maxPersistedItemBytes = 8 * 6 * maxPersistedFieldBytes
 	// maxPersistedCursorBytes bounds the persisted harvest checkpoint
-	// (harvest_cursor). It is deliberately far above maxPersistedFieldBytes:
-	// an honest checkpoint carries one Pages entry per still-pending deep
-	// show, so a few hundred live entries legitimately exceed the per-field
-	// cap (see TestLoadPreviousPreservesLargeHarvestCheckpoint), while 64 KiB
-	// still bounds the one persisted string that is carried forward verbatim.
+	// (harvest_cursor). An honest checkpoint is now one "scope:alID" group key
+	// (per-group page state is gone - see the paging-removal note in
+	// harvest.go), so the cap is nowhere near binding; it is kept as the
+	// backstop on the one persisted string carried forward VERBATIM, where an
+	// unbounded hand-edited value would ride every future snapshot until
+	// persist exceeds maxFeedBytes (see
+	// TestLoadPreviousDropsOversizedHarvestCheckpoint).
 	maxPersistedCursorBytes = 64 << 10
 	// maxPersistedSeenBytes bounds the seen ledger IN AGGREGATE - the
 	// ledger's twin of maxPersistedCursorBytes, and for the same reason.
@@ -584,18 +586,17 @@ type snapshot struct {
 	Seen   map[string]bool   `json:"seen"`
 	Titles map[string]string `json:"titles,omitempty"`
 	// HarvestCursor is the title harvest's persisted resumption state: an
-	// encoded harvestCheckpoint (see decodeHarvestCheckpoint), NOT a single
-	// key. It carries the rotation position - the "scope:alID" of the last
+	// encoded harvestCheckpoint (see decodeHarvestCheckpoint). It carries the
+	// rotation position - the "scope:alID" of the last
 	// show group that consumed a harvest query, so the next rebuild resumes
 	// AFTER it instead of restarting at the head (see harvestTitles; a deep
-	// show can then never starve its successors across rebuilds) - plus each
-	// still-paging group's next offset page, so a show cut off by
-	// harvestShowPageCap resumes DEEPER on its next visit instead of
-	// re-querying page zero forever. Backward compatible both ways: a
-	// pages-less checkpoint encodes as the bare legacy "scope:alID" cursor an
-	// older binary reads, an older snapshot without the field starts at the
-	// head, and its size is deliberately NOT capped by
-	// maxPersistedFieldBytes (an honest Pages map legitimately exceeds it).
+	// show can then never starve its successors across rebuilds) - and
+	// nothing else, since per-group offset paging was removed (see the
+	// paging-removal note in harvest.go). Backward compatible both ways: the
+	// checkpoint encodes as the bare "scope:alID" cursor an older binary
+	// reads, an older snapshot without the field starts at the head, and a
+	// snapshot written by a pre-removal binary decodes with its retired
+	// "pages" key ignored.
 	HarvestCursor string        `json:"harvest_cursor,omitempty"`
 	NyaaFeed      []journalItem `json:"nyaa_feed"`
 	ABFeed        []journalItem `json:"ab_feed"`
@@ -931,7 +932,7 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 		// snapshot past maxFeedBytes - wedging persist on every cycle with no
 		// self-heal. Dropping it is the same safe degradation
 		// decodeHarvestCheckpoint already applies to malformed checkpoint
-		// JSON: rotation restarts at the head and paging at zero. The value
+		// JSON: rotation restarts at the head. The value
 		// itself is never logged (it can be attacker-shaped text).
 		w.log.Warn("previous feed snapshot harvest cursor exceeds size cap; restarting the harvest rotation",
 			"path", w.path, "max_bytes", maxPersistedCursorBytes, "cursor_bytes", len(cursor))

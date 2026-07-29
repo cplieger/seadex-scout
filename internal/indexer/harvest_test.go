@@ -176,8 +176,11 @@ func TestHarvestMatchesNyaaByViewID(t *testing.T) {
 	if req["t"] != "tvsearch" || req["q"] != "Frieren" || req["season"] != "1" {
 		t.Errorf("Nyaa harvest params = %v, want the season-form query (t=tvsearch, q, season=1)", req)
 	}
-	if req["limit"] != strconv.Itoa(harvestPageSize) {
-		t.Errorf("limit = %q, want %d", req["limit"], harvestPageSize)
+	if _, ok := req["limit"]; ok {
+		t.Errorf("limit = %q, want no limit sent (AnimeBytes ignores it and Nyaa caps below it)", req["limit"])
+	}
+	if _, ok := req["offset"]; ok {
+		t.Errorf("offset = %q, want no offset sent (neither upstream honours it through Prowlarr)", req["offset"])
 	}
 	snap := readSnapshotFile(t, path)
 	if len(snap.NyaaFeed) != 1 || snap.NyaaFeed[0].Title != "Frieren S01 1080p BluRay [PMR]" {
@@ -497,139 +500,136 @@ func TestHarvestUnconfiguredTrackerNeverQueried(t *testing.T) {
 	}
 }
 
-// TestHarvestPagesNyaaByOffset pins the offset paging that reaches older items
-// under the indexer's default created/desc ordering: a full first page without
-// the target keeps paging (offset advanced by the page size) until the match
-// lands, each page costing budget.
-func TestHarvestPagesNyaaByOffset(t *testing.T) {
-	filler := make([]string, 0, harvestPageSize)
-	for i := range harvestPageSize {
+// TestHarvestSpendsOneQueryPerTitleCandidate pins the post-paging-removal
+// query budget: exactly ONE query per (show, title candidate), whatever the
+// response size. Offset paging was removed because neither upstream honours
+// `offset` through Prowlarr (measured 2026-07-29; see the note in harvest.go),
+// and the cost it left behind was a wasted paced query per unsatisfied
+// AnimeBytes candidate - AB returns the show's whole set in one response, so a
+// full response always read as "there is more". A satisfied show must still
+// cost exactly one query, and an unsatisfied two-candidate ladder must cost
+// exactly two rather than one per candidate per page.
+func TestHarvestSpendsOneQueryPerTitleCandidate(t *testing.T) {
+	// A response at least as large as the retired page stride: under offset
+	// paging this was the shape that kept a show paging, so it is the shape
+	// that must NOT cost a second query now.
+	const fullOldPage = 100
+	filler := make([]string, 0, fullOldPage)
+	for i := range fullOldPage {
 		filler = append(filler, torznabItem(fmt.Sprintf("Other %d", i), "https://nyaa.si/view/"+strconv.Itoa(9000+i)))
 	}
-	mock, srv := newHarvestMock(func(call int) string {
-		if call == 0 {
-			return torznabBody(filler...)
-		}
-		return torznabBody(torznabItem("Show S01 1080p BluRay [G]", "https://nyaa.si/view/42"))
-	})
-	defer srv.Close()
+	tests := map[string]struct {
+		title      string
+		match      bool
+		wantCalls  int
+		wantTitled bool
+	}{
+		"a satisfied single-candidate show costs one query": {
+			title: "Show", match: true, wantCalls: 1, wantTitled: true,
+		},
+		"an unsatisfied two-candidate ladder costs two queries": {
+			title: "Show (2023)", match: false, wantCalls: 2, wantTitled: false,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			mock, srv := newHarvestMock(func(int) string {
+				if tc.match {
+					return torznabBody(torznabItem("Show S01 1080p BluRay [G]", "https://nyaa.si/view/42"))
+				}
+				return torznabBody(filler...)
+			})
+			defer srv.Close()
 
-	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv", "Show - S01E02 (1080p) [G].mkv")}
-	info := func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }
-	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
-		nil, srv.Client())
-	if err := w.Rebuild(context.Background(), entries, info); err != nil {
-		t.Fatalf("Rebuild: %v", err)
-	}
-	if mock.calls() != 2 {
-		t.Fatalf("harvest queries = %d, want 2 (a full page pages on)", mock.calls())
-	}
-	if off := mock.request(0)["offset"]; off != "" {
-		t.Errorf("first page offset = %q, want unset (anchored at the newest items)", off)
-	}
-	if off := mock.request(1)["offset"]; off != strconv.Itoa(harvestPageSize) {
-		t.Errorf("second page offset = %q, want %d", off, harvestPageSize)
-	}
-	snap := readSnapshotFile(t, path)
-	if snap.Titles["nyaa:42"] != "Show S01 1080p BluRay [G]" {
-		t.Errorf("titles = %v, want the second-page match cached", snap.Titles)
+			feeds := map[string][]journalItem{
+				upstreamNyaa: {{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7}},
+			}
+			w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+				NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k",
+			}}, nil, srv.Client())
+			titles := map[string]string{}
+			w.harvest.harvestTitles(t.Context(), feeds, titles,
+				func(int) EntryInfo { return EntryInfo{Title: tc.title, Season: 1, SeasonKnown: true} }, "")
+
+			if got := mock.calls(); got != tc.wantCalls {
+				t.Errorf("harvest queries = %d, want %d (one per title candidate, never a second page)", got, tc.wantCalls)
+			}
+			for i := range mock.calls() {
+				if off, ok := mock.request(i)["offset"]; ok {
+					t.Errorf("query %d sent offset = %q, want no offset at all", i, off)
+				}
+			}
+			if _, titled := titles["nyaa:42"]; titled != tc.wantTitled {
+				t.Errorf("titled = %v, want %v", titled, tc.wantTitled)
+			}
+		})
 	}
 }
 
-// TestHarvestResumesPagingAcrossRebuilds pins the checkpoint's per-group page
-// state (the deep-paging contract): a show whose curated torrent sits beyond
-// the first harvestShowPageCap full pages is cut off at the cap on rebuild
-// one - which must persist the next page in the harvest cursor - and rebuild
-// two must resume that group at the checkpointed offset (300, not a restart
-// at zero) and cache the title, clearing the page state once satisfied.
-func TestHarvestResumesPagingAcrossRebuilds(t *testing.T) {
-	filler := make([]string, 0, harvestPageSize)
-	for i := range harvestPageSize {
-		filler = append(filler, torznabItem(fmt.Sprintf("Other %d", i), "https://nyaa.si/view/"+strconv.Itoa(9000+i)))
+// TestHarvestConsumesTheWholeSingleResponse is the evidence h-f50 was dismissed
+// on: AnimeBytes returns a show's entire torrent set in ONE response (725 items
+// for the largest measured show, well inside maxUpstreamItems), and the app
+// decodes all of it, so an adjacent alias run can never be split across a page
+// boundary - there are no pages. The fixture puts the target torrent's two
+// aliases at the very END of a 725-item response, the position a boundary split
+// would have truncated, and requires the alias the COMPLETE set yields (the
+// arr-vocabulary Romaji one, which loses the most-parseable fallback the
+// English alias alone would win).
+func TestHarvestConsumesTheWholeSingleResponse(t *testing.T) {
+	const (
+		responseItems = 725
+		romaji        = "[PMR] Sousou no Frieren - S01 (BD Remux 1080p)"
+		english       = "[PMR] Frieren Beyond Journeys End Extended Edition - S01 (BD Remux 1080p)"
+	)
+	items := make([]string, 0, responseItems)
+	for i := range responseItems - 2 {
+		items = append(items, torznabItem(fmt.Sprintf("Other %d", i), "https://animebytes.tv/torrent/"+strconv.Itoa(900000+i)+"/group"))
 	}
-	mock, srv := newHarvestMock(func(call int) string {
-		if call < harvestShowPageCap {
-			return torznabBody(filler...)
-		}
-		return torznabBody(torznabItem("Show S01 1080p BluRay [G]", "https://nyaa.si/view/42"))
-	})
+	items = append(items,
+		torznabItem(english, "https://animebytes.tv/torrent/1167293/group?nh=a"),
+		torznabItem(romaji, "https://animebytes.tv/torrent/1167293/group?nh=b"),
+	)
+	mock, srv := newHarvestMock(func(int) string { return torznabBody(items...) })
 	defer srv.Close()
-
-	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv", "Show - S01E02 (1080p) [G].mkv")}
-	info := func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }
-	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
-		nil, srv.Client())
-
-	if err := w.Rebuild(context.Background(), entries, info); err != nil {
-		t.Fatalf("first Rebuild: %v", err)
-	}
-	if mock.calls() != harvestShowPageCap {
-		t.Fatalf("first-rebuild queries = %d, want %d (offsets 0/100/200)", mock.calls(), harvestShowPageCap)
-	}
-	snap := readSnapshotFile(t, path)
-	cp, _ := decodeHarvestCheckpoint(snap.HarvestCursor)
-	if got := cp.Pages["nyaa:7"]; got != harvestShowPageCap {
-		t.Fatalf("checkpointed page = %d (cursor %q), want %d preserved for the cut-off group", got, snap.HarvestCursor, harvestShowPageCap)
-	}
-	if len(snap.Titles) != 0 {
-		t.Fatalf("titles = %v, want empty after the capped first rebuild", snap.Titles)
-	}
-
-	if err := w.Rebuild(context.Background(), entries, info); err != nil {
-		t.Fatalf("second Rebuild: %v", err)
-	}
-	if mock.calls() != harvestShowPageCap+1 {
-		t.Fatalf("total queries = %d, want %d (rebuild two resumes with one deeper page)", mock.calls(), harvestShowPageCap+1)
-	}
-	if off, want := mock.request(harvestShowPageCap)["offset"], strconv.Itoa(harvestShowPageCap*harvestPageSize); off != want {
-		t.Errorf("resumed page offset = %q, want %q (resume deeper, not a restart at zero)", off, want)
-	}
-	snap = readSnapshotFile(t, path)
-	if snap.Titles["nyaa:42"] != "Show S01 1080p BluRay [G]" {
-		t.Errorf("titles = %v, want the deep-page match cached on rebuild two", snap.Titles)
-	}
-	if cp, _ := decodeHarvestCheckpoint(snap.HarvestCursor); len(cp.Pages) != 0 {
-		t.Errorf("checkpoint pages = %v, want empty once the group is satisfied", cp.Pages)
-	}
-}
-
-// TestHarvestPrunesStalePagesWithNoPendingGroups pins checkpoint hygiene on
-// the no-work early return: a persisted checkpoint carrying page state for a
-// group that is no longer pending (its last item was titled or aged out) must
-// be pruned and re-encoded even when a rebuild has NO pending groups at all,
-// so a later curation reusing the same key starts at page zero instead of the
-// stale deep offset.
-func TestHarvestPrunesStalePagesWithNoPendingGroups(t *testing.T) {
-	mock, srv := newHarvestMock(func(int) string {
-		return torznabBody(torznabItem("Show S01 1080p BluRay [G]", "https://nyaa.si/view/42"))
-	})
-	defer srv.Close()
-	w := NewFeedWriter(&FeedWriterConfig{
-		Path:           filepath.Join(t.TempDir(), "feed.json"),
-		UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"},
-	}, nil, srv.Client())
-
-	stale := encodeHarvestCheckpoint(harvestCheckpoint{Pages: map[string]int{"nyaa:7": 3}})
-	_, cursor := w.harvest.harvestTitles(t.Context(), map[string][]journalItem{}, map[string]string{},
-		func(int) EntryInfo { return EntryInfo{} }, stale)
-	if cp, _ := decodeHarvestCheckpoint(cursor); len(cp.Pages) != 0 {
-		t.Fatalf("checkpoint pages = %v, want stale page state pruned on the no-pending rebuild", cp.Pages)
-	}
 
 	feeds := map[string][]journalItem{
-		upstreamNyaa: {{item: item{Title: "Show S01"}, Key: "nyaa:42", AniListID: 7}},
+		upstreamAB: {{item: item{Title: "Frieren S01"}, Key: "ab:1167293", AniListID: 154587}},
 	}
-	w.harvest.harvestTitles(t.Context(), feeds, map[string]string{},
-		func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }, cursor)
-	if mock.calls() == 0 {
-		t.Fatal("no harvest query fired for the re-pending group")
+	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
+		ABTorznabURL: srv.URL, ABPasskey: "PK", ProwlarrAPIKey: "k",
+	}}, nil, srv.Client())
+	titles := map[string]string{}
+	stats, _ := w.harvest.harvestTitles(t.Context(), feeds, titles,
+		func(int) EntryInfo { return EntryInfo{Title: "Sousou no Frieren"} }, "")
+
+	if mock.calls() != 1 || stats.matched != 1 {
+		t.Fatalf("harvest queries = %d, matched = %d; want 1 and 1 (the whole set arrives in one response)", mock.calls(), stats.matched)
 	}
-	if off := mock.request(0)["offset"]; off != "" {
-		t.Errorf("first page offset = %q, want unset (a re-pending group starts at page zero, not the stale offset)", off)
+	if got := titles["ab:1167293"]; got != romaji {
+		t.Errorf("cached title = %q, want %q - the alias the complete trailing run yields", got, romaji)
+	}
+}
+
+// TestHarvestCheckpointCarriesOnlyTheRotationCursor pins the persisted-cursor
+// contract after the paging removal: the checkpoint is the bare rotation cursor
+// and nothing else, and a cursor written by a PRE-removal binary (a JSON object
+// carrying the retired "pages" key) decodes as an ordinary Last-only checkpoint
+// - keeping its rotation position, reporting no degradation, and re-encoding as
+// the bare cursor an older binary also reads.
+func TestHarvestCheckpointCarriesOnlyTheRotationCursor(t *testing.T) {
+	if got := encodeHarvestCheckpoint(harvestCheckpoint{Last: "nyaa:7"}); got != "nyaa:7" {
+		t.Errorf("encode = %q, want the bare rotation cursor", got)
+	}
+	legacy := `{"last":"nyaa:7","pages":{"nyaa:7":3}}`
+	cp, degraded := decodeHarvestCheckpoint(legacy)
+	if cp.Last != "nyaa:7" {
+		t.Errorf("decode(%q).Last = %q, want the rotation position preserved", legacy, cp.Last)
+	}
+	if degraded != "" {
+		t.Errorf("decode(%q) degraded = %q, want no degradation for a leftover pages key", legacy, degraded)
+	}
+	if got := encodeHarvestCheckpoint(cp); got != "nyaa:7" {
+		t.Errorf("re-encode = %q, want the bare cursor (an older binary reads it)", got)
 	}
 }
 
@@ -673,40 +673,6 @@ func TestHarvestMatchesNyaaByInfoHash(t *testing.T) {
 	}
 	if len(snap.NyaaFeed) != 1 || snap.NyaaFeed[0].Title != "Show S01 1080p BluRay [G]" {
 		t.Errorf("feed = %+v, want the harvested title served", snap.NyaaFeed)
-	}
-}
-
-// TestHarvestSingleShowPagingStopsAtPageCap pins the anti-hog bound on the
-// paging leg: ONE show whose Nyaa search keeps returning full, non-matching
-// pages spends exactly harvestShowPageCap offset pages this rebuild and then
-// stops - it can no longer monopolize the rebuild's time slice, the flaw that
-// used to starve every show sorted after it - leaving the item synthetic to
-// page deeper on later rebuilds.
-func TestHarvestSingleShowPagingStopsAtPageCap(t *testing.T) {
-	filler := make([]string, 0, harvestPageSize)
-	for i := range harvestPageSize {
-		filler = append(filler, torznabItem(fmt.Sprintf("Other %d", i), fmt.Sprintf("https://nyaa.si/view/%d", 9000+i)))
-	}
-	mock, srv := newHarvestMock(func(int) string { return torznabBody(filler...) })
-	defer srv.Close()
-
-	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv", "Show - S01E02 (1080p) [G].mkv")}
-	info := func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }
-	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
-	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
-		nil, srv.Client())
-	if err := w.Rebuild(context.Background(), entries, info); err != nil {
-		t.Fatalf("Rebuild: %v", err)
-	}
-	if mock.calls() != harvestShowPageCap {
-		t.Errorf("harvest queries = %d, want the per-show page cap %d (one show must not monopolize the slice)", mock.calls(), harvestShowPageCap)
-	}
-	if got, want := mock.request(harvestShowPageCap - 1)["offset"], strconv.Itoa((harvestShowPageCap-1)*harvestPageSize); got != want {
-		t.Errorf("last page offset = %q, want %q (offset paging advanced page by page)", got, want)
-	}
-	if snap := readSnapshotFile(t, path); len(snap.Titles) != 0 {
-		t.Errorf("titles = %v, want empty (nothing matched)", snap.Titles)
 	}
 }
 
@@ -827,8 +793,12 @@ func TestHarvestReportsADegradedCheckpoint(t *testing.T) {
 	}{
 		{name: "malformed JSON warns", cursor: `{"pages": {"nyaa:7": `, want: true},
 		{name: "unparseable rotation cursor warns", cursor: "bogus:5", want: true},
-		{name: "out-of-range page state warns", cursor: `{"last":"nyaa:7","pages":{"nyaa:7":0}}`, want: true},
-		{name: "clean legacy cursor stays silent", cursor: "nyaa:7", want: false},
+		// A pre-paging-removal snapshot's leftover "pages" key is an unknown
+		// field, not corruption: it is ignored and must not warn, or every
+		// rollforward from such a snapshot reports a rebaseline that did not
+		// happen.
+		{name: "a leftover pages key stays silent", cursor: `{"last":"nyaa:7","pages":{"nyaa:7":3}}`, want: false},
+		{name: "clean bare cursor stays silent", cursor: "nyaa:7", want: false},
 		{name: "absent cursor stays silent", cursor: "", want: false},
 	}
 	for _, tc := range tests {
@@ -855,7 +825,7 @@ func TestHarvestReportsADegradedCheckpoint(t *testing.T) {
 // own still-untitled release whose title cannot enter the cache may strand that
 // release on its synthesized title for the whole journal window, and unusable
 // rides no stat at all, so this line is its only report. One line per show per
-// rebuild, never per page.
+// rebuild, never per candidate.
 func TestHarvestReportsStrandedReleases(t *testing.T) {
 	const warnMsg = "indexer title harvest encountered results it could not use for this show's releases"
 	_, srv := newHarvestMock(func(int) string {
@@ -1813,52 +1783,44 @@ func TestRotationStart(t *testing.T) {
 }
 
 // TestHarvestCheckpointCodec pins the persisted harvest_cursor codec's
-// degradation and compatibility contracts directly: the legacy bare cursor
-// decodes Last-only (with an allocated Pages map callers write into),
-// malformed JSON degrades to the empty checkpoint, a pages-less JSON object
-// still gets a non-nil map, non-positive persisted pages are dropped, a
-// pages-less checkpoint encodes as the bare legacy cursor an older binary
-// reads, and both forms round-trip (the legacy form byte-identical).
+// degradation and compatibility contracts directly: the bare cursor decodes
+// Last-only, malformed JSON degrades to the empty checkpoint, the JSON object
+// form a pre-paging-removal binary persisted still yields its rotation
+// position, an out-of-domain cursor is discarded in both arms, and the
+// checkpoint encodes as the bare cursor an older binary reads (byte-identical
+// round trip).
 func TestHarvestCheckpointCodec(t *testing.T) {
-	t.Run("legacy bare cursor decodes as Last-only", func(t *testing.T) {
-		cp, _ := decodeHarvestCheckpoint("nyaa:1500")
-		if cp.Last != "nyaa:1500" || len(cp.Pages) != 0 {
-			t.Errorf("decode legacy = %+v, want Last-only with empty non-nil Pages", cp)
+	t.Run("bare cursor decodes as Last-only", func(t *testing.T) {
+		cp, degraded := decodeHarvestCheckpoint("nyaa:1500")
+		if cp.Last != "nyaa:1500" {
+			t.Errorf("decode bare cursor = %+v, want Last = nyaa:1500", cp)
 		}
-		if cp.Pages == nil {
-			t.Error("Pages = nil, want an allocated empty map (callers write into it)")
+		if degraded != "" {
+			t.Errorf("degraded reason = %q, want none for an honest cursor", degraded)
 		}
 	})
 	t.Run("malformed JSON degrades to the empty checkpoint", func(t *testing.T) {
 		cp, degraded := decodeHarvestCheckpoint(`{"pages": {"nyaa:7": `)
-		if cp.Last != "" || len(cp.Pages) != 0 || cp.Pages == nil {
-			t.Errorf("decode malformed = %+v, want the empty checkpoint with a non-nil Pages map", cp)
+		if cp.Last != "" {
+			t.Errorf("decode malformed = %+v, want the empty checkpoint", cp)
 		}
 		if degraded == "" {
 			// The rebaseline is only reportable if the decoder says WHY it
-			// happened; a silent one loses every deep-paging show's progress.
+			// happened; a silent one restarts the rotation at the head with
+			// no signal to the operator.
 			t.Error("degraded reason = \"\", want a non-empty reason for a malformed cursor")
 		}
 	})
-	t.Run("JSON object without pages gets a non-nil map", func(t *testing.T) {
-		cp, _ := decodeHarvestCheckpoint(`{"last":"nyaa:7"}`)
-		if cp.Last != "nyaa:7" || cp.Pages == nil || len(cp.Pages) != 0 {
-			t.Errorf("decode pages-less JSON = %+v, want Last kept and an allocated empty Pages", cp)
-		}
-	})
-	t.Run("non-positive persisted pages are dropped", func(t *testing.T) {
-		cp, _ := decodeHarvestCheckpoint(`{"last":"ab:9","pages":{"nyaa:7":0,"ab:3":-2,"nyaa:9":4}}`)
-		if len(cp.Pages) != 1 || cp.Pages["nyaa:9"] != 4 {
-			t.Errorf("decode pages = %v, want only the positive entry kept", cp.Pages)
-		}
-		if cp.Last != "ab:9" {
-			t.Errorf("Last = %q, want %q", cp.Last, "ab:9")
+	t.Run("JSON object form keeps its rotation position", func(t *testing.T) {
+		cp, degraded := decodeHarvestCheckpoint(`{"last":"nyaa:7"}`)
+		if cp.Last != "nyaa:7" || degraded != "" {
+			t.Errorf("decode JSON object = %+v (degraded %q), want Last kept and no degradation", cp, degraded)
 		}
 	})
 	t.Run("non-positive cursor ids are discarded in both arms", func(t *testing.T) {
 		for _, cursor := range []string{"nyaa:0", "nyaa:-1", "ab:0", "ab:-12"} {
 			if cp, _ := decodeHarvestCheckpoint(cursor); cp.Last != "" {
-				t.Errorf("decode legacy %q Last = %q, want it discarded (outside harvestCursorKey's domain)", cursor, cp.Last)
+				t.Errorf("decode bare %q Last = %q, want it discarded (outside harvestCursorKey's domain)", cursor, cp.Last)
 			}
 			cp, _ := decodeHarvestCheckpoint(`{"last":"` + cursor + `"}`)
 			if cp.Last != "" {
@@ -1867,7 +1829,7 @@ func TestHarvestCheckpointCodec(t *testing.T) {
 		}
 		for _, cursor := range []string{"nyaa:1", "ab:154587"} {
 			if cp, _ := decodeHarvestCheckpoint(cursor); cp.Last != cursor {
-				t.Errorf("decode legacy %q Last = %q, want it kept", cursor, cp.Last)
+				t.Errorf("decode bare %q Last = %q, want it kept", cursor, cp.Last)
 			}
 			if cp, _ := decodeHarvestCheckpoint(`{"last":"` + cursor + `"}`); cp.Last != cursor {
 				t.Errorf("decode JSON last %q = %q, want it kept", cursor, cp.Last)
@@ -1880,7 +1842,7 @@ func TestHarvestCheckpointCodec(t *testing.T) {
 		// re-persisted forever; the existing rows only cover the id half.
 		for _, cursor := range []string{"bogus:5", "NYAA:5", "ab :5", ":5", "nyaa"} {
 			if cp, _ := decodeHarvestCheckpoint(cursor); cp.Last != "" {
-				t.Errorf("decode legacy %q Last = %q, want it discarded (no such upstream scope)", cursor, cp.Last)
+				t.Errorf("decode bare %q Last = %q, want it discarded (no such upstream scope)", cursor, cp.Last)
 			}
 			if cp, _ := decodeHarvestCheckpoint(`{"last":"` + cursor + `"}`); cp.Last != "" {
 				t.Errorf("decode JSON last %q = %q, want it discarded (no such upstream scope)", cursor, cp.Last)
@@ -1888,26 +1850,19 @@ func TestHarvestCheckpointCodec(t *testing.T) {
 		}
 		for _, cursor := range []string{"nyaa:5", "ab:154587"} {
 			if cp, _ := decodeHarvestCheckpoint(cursor); cp.Last != cursor {
-				t.Errorf("decode legacy %q Last = %q, want it kept", cursor, cp.Last)
+				t.Errorf("decode bare %q Last = %q, want it kept", cursor, cp.Last)
 			}
 		}
 	})
-	t.Run("pages-less checkpoint encodes as the bare legacy cursor", func(t *testing.T) {
+	t.Run("the checkpoint encodes as the bare cursor", func(t *testing.T) {
 		if got := encodeHarvestCheckpoint(harvestCheckpoint{Last: "nyaa:1500"}); got != "nyaa:1500" {
-			t.Errorf("encode = %q, want the bare legacy cursor", got)
+			t.Errorf("encode = %q, want the bare cursor", got)
 		}
 	})
-	t.Run("checkpoint with pages round-trips through encode and decode", func(t *testing.T) {
-		in := harvestCheckpoint{Last: "nyaa:7", Pages: map[string]int{"nyaa:7": 3}}
-		out, _ := decodeHarvestCheckpoint(encodeHarvestCheckpoint(in))
-		if out.Last != in.Last || len(out.Pages) != 1 || out.Pages["nyaa:7"] != 3 {
-			t.Errorf("round-trip = %+v, want %+v", out, in)
-		}
-	})
-	t.Run("legacy cursor round-trips byte-identical", func(t *testing.T) {
-		legacy, _ := decodeHarvestCheckpoint("nyaa:1500")
-		if got := encodeHarvestCheckpoint(legacy); got != "nyaa:1500" {
-			t.Errorf("legacy round-trip = %q, want byte-identical %q", got, "nyaa:1500")
+	t.Run("cursor round-trips byte-identical", func(t *testing.T) {
+		decoded, _ := decodeHarvestCheckpoint("nyaa:1500")
+		if got := encodeHarvestCheckpoint(decoded); got != "nyaa:1500" {
+			t.Errorf("round-trip = %q, want byte-identical %q", got, "nyaa:1500")
 		}
 	})
 }
@@ -2016,17 +1971,13 @@ func TestPendingHarvestKeepsAnAmbiguousInfoHashRetired(t *testing.T) {
 // forever. The codec's degradation table covers every other arm; the fuzz
 // target's committed seeds are all far below the cap.
 func TestHarvestCheckpointDropsOverCapCursor(t *testing.T) {
-	const payload = `{"last":"nyaa:7","pages":{"nyaa:7":3}}`
-	if cp, _ := decodeHarvestCheckpoint(payload); cp.Last != "nyaa:7" || cp.Pages["nyaa:7"] != 3 {
-		t.Fatalf("decode under-cap checkpoint = %+v, want the cursor and its page kept", cp)
+	const payload = `{"last":"nyaa:7"}`
+	if cp, _ := decodeHarvestCheckpoint(payload); cp.Last != "nyaa:7" {
+		t.Fatalf("decode under-cap checkpoint = %+v, want the cursor kept", cp)
 	}
 	overcap := strings.Repeat(" ", maxPersistedCursorBytes) + payload
-	cp, _ := decodeHarvestCheckpoint(overcap)
-	if cp.Last != "" || len(cp.Pages) != 0 {
+	if cp, _ := decodeHarvestCheckpoint(overcap); cp.Last != "" {
 		t.Errorf("decode over-cap checkpoint (%d bytes) = %+v, want the empty-checkpoint baseline", len(overcap), cp)
-	}
-	if cp.Pages == nil {
-		t.Error("Pages = nil, want an allocated empty map (callers write into it)")
 	}
 }
 
@@ -2512,30 +2463,30 @@ func TestHarvestConflictsNamingAlreadyTitledKeysDoNotLatchTheScope(t *testing.T)
 }
 
 // TestHarvestPartialProgressDoesNotLatchTheScope pins h-f51: a show that cached
-// a real title before a LATER page failed show-locally made progress, so it must
-// not charge a consecutive-failure run. Each of the four shows answers page 0
-// with a full page carrying one of its two keys' titles and page 1 with garbage;
-// charging the malformed run would condemn the scope on the third show and leave
-// the fourth unqueried, even though every show harvested a title.
+// a real title before a LATER query failed show-locally made progress, so it must
+// not charge a consecutive-failure run. Each of the four shows answers its as-is
+// title with one of its two keys' titles, stays pending, and gets garbage for the
+// widened candidate; charging the malformed run would condemn the scope on the
+// third show and leave the fourth unqueried, even though every show harvested a
+// title.
 func TestHarvestPartialProgressDoesNotLatchTheScope(t *testing.T) {
 	const shows = 4
-	filler := make([]string, 0, harvestPageSize-1)
-	for i := range harvestPageSize - 1 {
-		filler = append(filler, torznabItem(fmt.Sprintf("Other %d", i), "https://nyaa.si/view/"+strconv.Itoa(9000+i)))
-	}
 	// Keyed on the REQUEST, not the call index: a malformed body is retried, so
-	// call order says nothing about which page a response answers.
+	// call order says nothing about which candidate a response answers.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/rss+xml")
-		if r.URL.Query().Get("offset") != "" {
-			// The show's deeper page is garbage: show-local malformed.
+		q := r.URL.Query().Get("q")
+		if !strings.HasSuffix(q, ")") {
+			// The widened title candidate is answered with garbage:
+			// show-local malformed, after the show already made progress.
 			_, _ = io.WriteString(w, "this is not torznab xml <<<")
 			return
 		}
-		show := strings.TrimPrefix(r.URL.Query().Get("q"), "Show ")
-		// A FULL page (so the show pages on) carrying one of the show's two keys.
-		items := append(slices.Clone(filler), torznabItem("Real Title "+show, "https://nyaa.si/view/10"+show))
-		_, _ = io.WriteString(w, strings.ReplaceAll(torznabBody(items...), "http://prowlarr:9696", "http://"+r.Host))
+		show := strings.TrimSuffix(strings.TrimPrefix(q, "Show "), " (2020)")
+		// One of the show's TWO keys, so the show stays pending and the ladder
+		// widens onto the failing candidate.
+		body := torznabBody(torznabItem("Real Title "+show, "https://nyaa.si/view/10"+show))
+		_, _ = io.WriteString(w, strings.ReplaceAll(body, "http://prowlarr:9696", "http://"+r.Host))
 	}))
 	defer srv.Close()
 
@@ -2545,7 +2496,7 @@ func TestHarvestPartialProgressDoesNotLatchTheScope(t *testing.T) {
 		feeds[upstreamNyaa] = append(feeds[upstreamNyaa],
 			journalItem{item: item{Title: "Show S01"}, Key: "nyaa:10" + strconv.Itoa(i), AniListID: 7 + i},
 			journalItem{item: item{Title: "Show S01"}, Key: "nyaa:20" + strconv.Itoa(i), AniListID: 7 + i})
-		info[7+i] = EntryInfo{Title: "Show " + strconv.Itoa(i)}
+		info[7+i] = EntryInfo{Title: "Show " + strconv.Itoa(i) + " (2020)"}
 	}
 	log, rec := capture.New()
 	w := NewFeedWriter(&FeedWriterConfig{UpstreamConfig: UpstreamConfig{
@@ -2562,7 +2513,7 @@ func TestHarvestPartialProgressDoesNotLatchTheScope(t *testing.T) {
 		t.Errorf("titles = %v, want one harvested title per show", titles)
 	}
 	if rec.Contains("indexer title harvest: repeated malformed responses; skipping this upstream's remaining shows this rebuild") {
-		t.Error("scope latched on malformed deep pages although every show harvested a real title")
+		t.Error("scope latched on malformed widened-candidate queries although every show harvested a real title")
 	}
 }
 

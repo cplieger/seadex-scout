@@ -949,12 +949,11 @@ func TestFilterDownloadURLsWarnsOnDroppedItems(t *testing.T) {
 }
 
 // TestUpstreamSearchReportsRawPageCount pins search's second return value: the
-// RAW parsed-item count of the page, taken BEFORE the download-URL origin
-// filter. The harvest's paging exit judges page fullness on it
-// (harvestPageComplete's raw < harvestPageSize), so reporting the filtered
-// count instead would make a full page whose foreign-origin items were dropped
-// look short, stop that show's title harvest at the page, and permanently lose
-// the harvested titles that live on later pages.
+// RAW parsed-item count of the response, taken BEFORE the download-URL origin
+// filter. It is what the request log line's upstream_fetched reports, so an
+// operator can tell a small tracker answer from a large one whose
+// foreign-origin items were all dropped; reporting the filtered count instead
+// would silently merge the two.
 func TestUpstreamSearchReportsRawPageCount(t *testing.T) {
 	const feedTmpl = `<rss xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel>
 <item><title>same origin</title><enclosure url="http://HOST/1/download?link=abc" length="1" type="application/x-bittorrent"/></item>
@@ -976,7 +975,7 @@ func TestUpstreamSearchReportsRawPageCount(t *testing.T) {
 		t.Fatalf("filtered items = %d, want 1 (only the same-origin item survives)", len(items))
 	}
 	if raw != 3 {
-		t.Errorf("raw page count = %d, want 3 (the parsed-item count BEFORE the origin filter, so paging still sees a full page)", raw)
+		t.Errorf("raw page count = %d, want 3 (the parsed-item count BEFORE the origin filter)", raw)
 	}
 }
 
