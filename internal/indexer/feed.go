@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/cplieger/seadex-scout/internal/classify"
 	"github.com/cplieger/seadex-scout/internal/payload"
@@ -132,7 +133,10 @@ func synthesizeTitle(t *seadex.Torrent, meta EntryInfo) string {
 //     absolute marker is rewritten into a season-0 token
 //     (specialsEpisodeMarker).
 func episodeMarker(t *seadex.Torrent, meta EntryInfo) string {
-	if !isPack(t) {
+	// The synthesized path has no title to judge yet (it is building one), so
+	// this is the census arm of packVerdict - the one policy function both
+	// title paths and the harvest cross-check now read.
+	if !packVerdict("", t) {
 		marker := singleEpisodeMarker(t.Files)
 		if special := specialsEpisodeMarker(marker, meta); special != "" {
 			return special
@@ -362,7 +366,7 @@ func derivedTitle(t *seadex.Torrent, meta EntryInfo) string {
 		return strings.TrimSpace(t.ReleaseGroup)
 	}
 	base := titleBase(name)
-	if !isPack(t) {
+	if !packVerdict("", t) {
 		// A single episode, movie, or single OVA: the file name is already the
 		// release title the arr should parse (do not collapse its episode) -
 		// with its cour-local season half relabeled when the entry maps one.
@@ -573,6 +577,104 @@ func coveredEpisodes(files []seadex.File) int {
 		}
 	}
 	return len(seen)
+}
+
+// --- Season-pack verdict: title first, file census as the fallback ---
+
+// seasonOnlyTitle matches what Sonarr calls a "season only release"
+// (Sonarr/src/NzbDrone.Core/Parser/Parser.cs:325), with the anime bracketed
+// variant (Parser.cs:113) folded in as the optional "[" or "(" before the
+// season word: a title, a separator, a season word (Season / Saison / Series /
+// Stagione / S), and the season number in group 1. Sonarr sets
+// result.FullSeason exactly when such a match succeeds, and FullSeason is what
+// ranks a pack above loose episodes in its own grab decision - so this is the
+// parser that ultimately reads whichever title this app serves, which is why
+// the rule is taken from it rather than invented here.
+//
+// Sonarr's trailing negative lookahead (?![-_. ]?\d+) - the part that makes the
+// match season-ONLY, refusing "Show S01 05" - has no RE2 equivalent, so
+// packFromTitle applies it against the text that FOLLOWS group 1 instead
+// (seasonNumberEnds). The season word alternation is ordered longest-first so
+// the bare "S" arm cannot shadow "Season".
+var seasonOnlyTitle = regexp.MustCompile(`(?i)^.+?[-_. ]+[\[(]?(?:Season|Saison|Series|Stagione|S)[-_. ]?(\d{1,2})`)
+
+// seasonPackDisqualifier matches the tokens that cancel a season-pack reading
+// even when the season-only shape matched: EXTRAS and SUBPACK are Sonarr's own
+// extras group in the season-only regex (Parser.cs:325 - they set IsSeasonExtra,
+// which Sonarr filters out rather than grabbing as a season), and a special
+// marker cancels FullSeason outright (Parser.cs:753-755). The vocabulary is
+// deliberately minimal; a match only ever moves the verdict to UNKNOWN, which
+// falls back to the file census, so a token this list misses costs nothing that
+// the census does not already answer.
+var seasonPackDisqualifier = regexp.MustCompile(`(?i)(?:^|[^\p{L}\p{N}])(?:EXTRAS|SUBPACK|SPECIALS?|OVA|ONA)(?:[^\p{L}\p{N}]|$)`)
+
+// packFromTitle reports the season-pack verdict a release TITLE carries, and
+// whether the title answered at all. It is the title half of packVerdict; the
+// file census (isPack) is the other half and the fallback.
+//
+// known is false for an empty title, for a title carrying a disqualifying
+// marker (seasonPackDisqualifier), and for any title whose shape the parser
+// cannot read - a title is allowed to say nothing, and saying nothing must cost
+// the caller nothing. Episode evidence answers before the season shape does: a
+// title carrying an SxxExx or absolute "- NN" token names one episode, which is
+// exactly what the season-only lookahead refuses to call a pack.
+func packFromTitle(title string) (pack, known bool) {
+	s := strings.TrimSpace(title)
+	if s == "" {
+		return false, false
+	}
+	if hasEpisodeEvidence(s) {
+		return false, true
+	}
+	if seasonPackDisqualifier.MatchString(s) {
+		return false, false
+	}
+	m := seasonOnlyTitle.FindStringSubmatchIndex(s)
+	if m == nil {
+		return false, false
+	}
+	if !seasonNumberEnds(s[m[3]:]) {
+		return false, false
+	}
+	return true, true
+}
+
+// seasonNumberEnds applies the two boundary conditions Sonarr's season-only
+// regex expresses in its tail, against the text following the season number:
+// the number must end at a non-alphanumeric boundary or the end of the string
+// (Sonarr's "(?:[-_. ]|$)+", widened to the closing bracket the anime variant
+// needs), and it must NOT be followed by another number, optionally separated
+// (Sonarr's "(?![-_. ]?\d+)" negative lookahead). The lookahead is the
+// load-bearing half: without it "Show - S01 05" reads as a whole season when it
+// names episode 5 of it.
+func seasonNumberEnds(rest string) bool {
+	if rest == "" {
+		return true
+	}
+	r, size := utf8.DecodeRuneInString(rest)
+	if unicode.IsLetter(r) || unicode.IsDigit(r) {
+		return false
+	}
+	if strings.ContainsRune("-_. ", r) {
+		rest = rest[size:]
+	}
+	next, _ := utf8.DecodeRuneInString(rest)
+	return !unicode.IsDigit(next)
+}
+
+// packVerdict is the ONE season-pack policy this package reads: the title's own
+// verdict when the title answers (packFromTitle), the file census otherwise
+// (isPack). A harvested real tracker title is the release name the arr parses,
+// so when it states a season it outranks a heuristic over the reported file
+// list; when it states nothing, the file list is the only evidence there is.
+//
+// The synthesized-title path calls it with an EMPTY title (the title it would
+// judge is the one it is about to build), which is exactly the census fallback.
+func packVerdict(title string, t *seadex.Torrent) bool {
+	if pack, known := packFromTitle(title); known {
+		return pack
+	}
+	return isPack(t)
 }
 
 // --- Media-file classification helpers ---

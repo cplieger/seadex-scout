@@ -714,6 +714,7 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info E
 
 	var js journalStats
 	var nyaa, ab []journalItem
+	var census map[string]bool
 	seen, titles := prev.seen, prev.titles
 	if prev.baseline {
 		seen, titles = allIdentities(entries), map[string]string{}
@@ -721,6 +722,10 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info E
 			"reason", prev.reason, "seen", len(seen))
 	} else {
 		pass := &journalPass{w: w, cur: indexCurated(entries), seen: seen, ws: &ws, infoFor: infoFor, js: &js, now: now}
+		// The file-census pack verdict per journal key, read from the same
+		// curation index the items render from, so applyTitles can tell when a
+		// harvested title contradicts the payload it names (titleAudit).
+		census = censusPacks(pass.cur)
 		// Carry BOTH journals regardless of configuration: a tracker's off
 		// switch must be reversible. Blanking a Torznab URL used to skip the
 		// carry, so a single rebuild dropped every journaled item for that
@@ -755,8 +760,10 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info E
 	}
 	feeds := map[string][]journalItem{upstreamNyaa: nyaa, upstreamAB: ab}
 	hs, cursor := w.harvest.harvestTitles(ctx, feeds, titles, infoFor, prev.cursor)
-	applyTitles(nyaa, titles)
-	applyTitles(ab, titles)
+	// ONE audit value across both feeds, so its onset latch is per REBUILD.
+	audit := titleAudit{census: census, report: w.packDisagreementReporter()}
+	applyTitles(nyaa, titles, audit)
+	applyTitles(ab, titles, audit)
 	nyaa, ab = sortFeed(nyaa), sortFeed(ab)
 	titles = retainTitles(titles, nyaa, ab)
 
@@ -1038,6 +1045,35 @@ func retainValidTitles(titles map[string]string) (kept map[string]string, droppe
 		kept[k] = title
 	}
 	return kept, dropped
+}
+
+// packDisagreementReporter returns applyTitles' contradiction sink for ONE
+// rebuild: the first harvested title whose season-pack verdict disagrees with
+// its release's file list is warned with its journal key and both verdicts, and
+// the rest of the rebuild stays silent. That onset latch is the shape this
+// package's other per-rebuild diagnostics already take (the harvest's per-scope
+// latches, the snapshot log line's counters): a systematically disagreeing
+// upstream - one Prowlarr indexer definition whose titles all drift, say - must
+// surface once, not once per item.
+//
+// The raw title is deliberately NOT logged. It is untrusted tracker text (the
+// Torznab decode tags it runesafe.Untrusted for exactly that reason), and the
+// key plus the two verdicts already name which release to look at.
+//
+// This reports evidence, not a decision: the harvested title still wins the
+// served title, unchanged. There is no Torznab pack field to carry the verdict
+// on, so letting the census override a disagreeing title would be a new grab
+// policy - one the operator can now choose with evidence in hand.
+func (w *FeedWriter) packDisagreementReporter() func(key string, titlePack, filesPack bool) {
+	warned := false
+	return func(key string, titlePack, filesPack bool) {
+		if warned {
+			return
+		}
+		warned = true
+		w.log.Warn("indexer feed title and file list disagree about a season pack",
+			"key", key, "title_pack", titlePack, "files_pack", filesPack)
+	}
 }
 
 // --- Curation-warned exclusion ---

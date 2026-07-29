@@ -892,3 +892,91 @@ func TestCoveredEpisodesTreatsAbsoluteVersionRevisionAsOneEpisode(t *testing.T) 
 		t.Errorf("derivedTitle = %q, want %q (the single episode keeps its absolute marker)", got, want)
 	}
 }
+
+// TestPackFromTitle pins the title-based season-pack verdict against the rule
+// Sonarr's own parser applies to whatever title this app serves: a season-only
+// match reads as a pack, an episode token reads as a single episode, and
+// anything else - including Sonarr's own EXTRAS/SUBPACK extras group and a
+// special marker, both of which cancel FullSeason there - answers UNKNOWN so
+// packVerdict falls back to the file census.
+func TestPackFromTitle(t *testing.T) {
+	tests := map[string]struct {
+		title     string
+		wantPack  bool
+		wantKnown bool
+	}{
+		"season only":               {"Show - S01 [1080p]", true, true},
+		"season word":               {"Show Season 2", true, true},
+		"bracketed anime season":    {"[Grp] Show [S01][1080p]", true, true},
+		"french season word":        {"Show Saison 1", true, true},
+		"series season word":        {"Show Series 3", true, true},
+		"italian season word":       {"Show Stagione 2", true, true},
+		"season plus episode":       {"Show - S01E07", false, true},
+		"absolute episode":          {"[Grp] Show - 07 [1080p]", false, true},
+		"episode range":             {"Show S01E01-E12", false, true},
+		"empty":                     {"", false, false},
+		"bare show name":            {"Show", false, false},
+		"unparseable":               {"random text", false, false},
+		"season extras":             {"Show - S01 EXTRAS", false, false},
+		"season subpack":            {"Show - S01 SUBPACK", false, false},
+		"special-marked season":     {"Show - S01 [OVA]", false, false},
+		"season then episode digit": {"Show - S01 05", false, false},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			pack, known := packFromTitle(tt.title)
+			if pack != tt.wantPack || known != tt.wantKnown {
+				t.Errorf("packFromTitle(%q) = (%v, %v), want (%v, %v)", tt.title, pack, known, tt.wantPack, tt.wantKnown)
+			}
+		})
+	}
+}
+
+// TestPackFromTitleRefusesSeasonFollowedByEpisodeNumber pins the load-bearing
+// half of Sonarr's season-only regex separately, because it is the one
+// condition RE2 cannot express and this app therefore reimplements: the
+// negative lookahead after the season number. "Show - S01 05" names episode 5
+// of season 1, so the title must NOT claim a whole season - it answers unknown
+// and the file census decides.
+func TestPackFromTitleRefusesSeasonFollowedByEpisodeNumber(t *testing.T) {
+	for _, title := range []string{"Show - S01 05", "Show S01 5", "Show Season 1 05", "Show.S01.05"} {
+		if pack, _ := packFromTitle(title); pack {
+			t.Errorf("packFromTitle(%q) read as a season pack; the season number is followed by an episode number", title)
+		}
+	}
+}
+
+// TestPackVerdictFallsBackToCensus pins the policy function: the title decides
+// when it answers (in BOTH directions), the file census decides when it does
+// not, and an EMPTY title - the synthesized path's call, which this packet
+// routed through packVerdict - is exactly the census verdict it replaced.
+func TestPackVerdictFallsBackToCensus(t *testing.T) {
+	const gib = 1 << 30
+	pack := &seadex.Torrent{Files: []seadex.File{
+		{Name: "Show S01E01 [1080p].mkv", Length: gib},
+		{Name: "Show S01E02 [1080p].mkv", Length: gib},
+	}}
+	single := &seadex.Torrent{Files: []seadex.File{{Name: "Show S01E01 [1080p].mkv", Length: gib}}}
+
+	// The synthesized path is behaviorally unchanged: no title, census only.
+	if got, want := packVerdict("", pack), isPack(pack); got != want {
+		t.Errorf("packVerdict(\"\", pack) = %v, want the census verdict %v", got, want)
+	}
+	if got, want := packVerdict("", single), isPack(single); got != want {
+		t.Errorf("packVerdict(\"\", single) = %v, want the census verdict %v", got, want)
+	}
+	// An unknown title keeps the census verdict, both directions.
+	if !packVerdict("random text", pack) {
+		t.Error("packVerdict(unknown title, pack) = false, want the census verdict true")
+	}
+	if packVerdict("random text", single) {
+		t.Error("packVerdict(unknown title, single) = true, want the census verdict false")
+	}
+	// A title that answers overrides the census, both directions.
+	if packVerdict("Show - S01E01 [1080p]", pack) {
+		t.Error("packVerdict(episode title, pack census) = true, want the title's single-episode verdict")
+	}
+	if !packVerdict("Show - S01 [1080p]", single) {
+		t.Error("packVerdict(season title, single census) = false, want the title's season-pack verdict")
+	}
+}

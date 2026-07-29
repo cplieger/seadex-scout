@@ -708,12 +708,76 @@ func (p *journalPass) newJournalItem(t *seadex.Torrent, scope string) (journalIt
 // title when the cache holds one; items without a cached title keep their
 // synthesized title (the permanent fallback). GUIDs never change with the
 // title, so an upgrade cannot re-trigger a grab.
-func applyTitles(items []journalItem, titles map[string]string) {
+//
+// The audit is a read-only cross-check on the upgrade: it never influences
+// which title is served (the harvested title wins exactly as it always has),
+// it only reports a title that contradicts the release's own file list.
+func applyTitles(items []journalItem, titles map[string]string, audit titleAudit) {
 	for i := range items {
-		if t, ok := titles[items[i].Key]; ok && t != "" {
-			items[i].Title = t
+		t, ok := titles[items[i].Key]
+		if !ok || t == "" {
+			continue
 		}
+		items[i].Title = t
+		audit.check(items[i].Key, t)
 	}
+}
+
+// titleAudit is applyTitles' title-vs-file-list cross-check: census holds the
+// file-census pack verdict per journal key (censusPacks) and report is the
+// per-rebuild diagnostic sink (FeedWriter.packDisagreementReporter). The zero
+// value disables the check - what a caller with no census to compare against
+// passes (a baselined rebuild, whose journal is empty anyway).
+type titleAudit struct {
+	census map[string]bool
+	report func(key string, titlePack, filesPack bool)
+}
+
+// check reports one upgraded item whose harvested title disagrees with its file
+// list about being a season pack. It stays silent whenever there is nothing to
+// compare (no sink, no census entry for the key) or the title says nothing about
+// packs (packFromTitle's unknown), so only a genuine contradiction is reported.
+//
+// There is no Torznab field for pack status (the wire item carries Title, not
+// FullSeason), so the disagreement has exactly one honest use today: telling the
+// operator that the tracker's release name and the torrent's reported contents
+// describe different things. Choosing a winner is a grab-affecting policy this
+// deliberately does NOT take.
+func (a titleAudit) check(key, title string) {
+	if a.report == nil {
+		return
+	}
+	filesPack, ok := a.census[key]
+	if !ok {
+		return
+	}
+	titlePack, known := packFromTitle(title)
+	if !known || titlePack == filesPack {
+		return
+	}
+	a.report(key, titlePack, filesPack)
+}
+
+// censusPacks reads the file-census season-pack verdict (packVerdict's census
+// arm) for every journal key in the current catalogue, so applyTitles can
+// compare a harvested title's own verdict against the payload the release
+// actually ships. A key's occurrences are the SAME tracker torrent attached to
+// several entries, and the fold across them is an OR so the result cannot depend
+// on catalogue order - the same order-independence renderJournalItem's sort
+// exists to guarantee for the item itself.
+func censusPacks(cur map[string][]curatedRef) map[string]bool {
+	packs := make(map[string]bool, len(cur))
+	for key, refs := range cur {
+		pack := false
+		for _, ref := range refs {
+			if packVerdict("", ref.torrent) {
+				pack = true
+				break
+			}
+		}
+		packs[key] = pack
+	}
+	return packs
 }
 
 // retainTitles prunes the harvested-title cache to the keys still present in
