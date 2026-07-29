@@ -837,6 +837,10 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 		}
 		return next, err
 	}
+	// A first boot (or a cache reset) onto a body that routes nothing to one
+	// arr is accepted, not refused - and reported. See
+	// logAcceptedWithoutBaseline for why refusing it would be wrong.
+	l.logAcceptedWithoutBaseline(prev, records)
 	// previous_records is the baseline the absolute count needs: degradation.Shrunk
 	// rejects only BELOW half, so an accepted refresh may legitimately retain as
 	// little as exactly half of the previous map and would otherwise read like any
@@ -863,6 +867,38 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 		ETag:         res.Validators.ETag,
 		LastModified: res.Validators.LastModified,
 	}, nil
+}
+
+// logAcceptedWithoutBaseline reports an ACCEPTED refresh that carries no
+// resolvable record for one arr while there was no usable baseline to judge it
+// against. It is a diagnostic only: it never refuses the refresh and never
+// touches the rejection streak.
+//
+// Why report rather than refuse: with no usable previous cache
+// validateRefreshedRecords returns nil at its !cacheUsable early return, so
+// every loss-relative guard - populationExtinct included - is skipped, and
+// nothing can prove a LOSS. An unconditional zero-population refusal would
+// make a legitimately one-sided catalogue refuse to refresh to ITSELF, the
+// permanent rejection loop that early return exists to prevent. The harm this
+// closes is the SILENCE, not the acceptance.
+//
+// Scoped to the no-baseline branch on purpose, so it cannot become per-cycle
+// noise: it is reachable only on a first boot or after a cache reset, and once
+// this refresh is accepted the cache is usable, so every later cycle takes the
+// relative path - where 0 -> 0 is silently accepted (nothing changed) and
+// N -> 0 is REFUSED by populationExtinct.
+func (l *Loader) logAcceptedWithoutBaseline(prev *Cache, records []Record) {
+	if cacheUsable(prev.Records) {
+		return
+	}
+	absent := absentRoutingClasses(records)
+	if len(absent) == 0 {
+		return
+	}
+	l.log.Error("mapping: accepted a refresh with no records for an arr; that arr will match nothing this cycle, pin the affected entries in overrides.json",
+		"absent_routing_classes", absent,
+		"records", len(records),
+		"routed_identifiers", arrIdentifierCount(records))
 }
 
 // validateRefreshedRecords is acceptRefresh's acceptance invariant for a fresh
@@ -1085,6 +1121,36 @@ func routingCounts(records []Record) (movies, others int) {
 		}
 	}
 	return movies, others
+}
+
+// absentRoutingClasses names the routing classes a body carries no record for
+// ("movie-routed" / "series-routed"), in a stable order (movie side first). It
+// reads the counts from routingCounts, so a class is present only when at
+// least one record can actually RESOLVE in that arr (HasArrIdentifier) - the
+// same population validateRoutingCoverage guards - rather than merely carrying
+// the type label.
+//
+// It reports a fact and applies no threshold, deliberately: zero records for a
+// routing class means one whole arr can match nothing, which is a statement
+// about the body alone and needs no baseline to read. A NON-zero-but-small
+// count is a different question entirely (whether it SHRANK), and answering it
+// needs the previous cache the loss-relative guards use.
+//
+// Deliberately limited to the two routing classes. Do NOT extend it to the
+// other populations validatePopulation guards (typed, positive-season,
+// special) to "complete the set": a legitimately small or unusual body can
+// carry zero of those - no special, no season-scoped cour, no type label at
+// all - so a zero-guard there would invent policy rather than report a fact.
+func absentRoutingClasses(records []Record) []string {
+	movies, others := routingCounts(records)
+	var absent []string
+	if movies == 0 {
+		absent = append(absent, "movie-routed")
+	}
+	if others == 0 {
+		absent = append(absent, "series-routed")
+	}
+	return absent
 }
 
 // typedRecordCount returns how many records carry a non-empty normalized
