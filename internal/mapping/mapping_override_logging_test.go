@@ -3,6 +3,7 @@ package mapping
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -424,5 +425,87 @@ func TestLoader_Load_oversizedOverrideIDsLogBounded(t *testing.T) {
 	}
 	if !logs.HasAttr("", "max_ids", strconv.Itoa(maxOverrideIDsPerRecord)) {
 		t.Errorf("oversized max_ids logs = %v, want %d", logs.Messages(), maxOverrideIDsPerRecord)
+	}
+}
+
+// TestLoader_Load_overridesFileRefusalLogsError pins l-f69: a file-level
+// overrides refusal is an ERROR, not a WARN. The file is opt-in, so its
+// EXISTENCE means the operator intends those pinned mappings to apply, and both
+// refusal modes persist until they act - the overlay stays inert on every cycle
+// while comparisons silently run on the upstream mapping alone, which a WARN
+// never surfaces through the shipped Loki rules. A MISSING file stays silent
+// (the ordinary no-overrides case) and no arm may touch
+// Cache.RejectedRefreshes: that streak counts UPSTREAM refresh refusals, and
+// folding an operator-config failure into it would make one counter mean two
+// unrelated things.
+func TestLoader_Load_overridesFileRefusalLogsError(t *testing.T) {
+	for name, tc := range map[string]struct {
+		// setup returns the overrides path to configure.
+		setup     func(t *testing.T) string
+		wantError string
+		wantLogs  int
+	}{
+		"unreadable": {
+			setup: func(t *testing.T) string {
+				// A directory at the overrides path fails the bounded read with
+				// a non-ErrNotExist error regardless of the test user's
+				// privileges (a mode-0 file is still readable as root).
+				path := filepath.Join(t.TempDir(), "overrides.json")
+				if err := os.Mkdir(path, 0o750); err != nil {
+					t.Fatalf("mkdir overrides dir: %v", err)
+				}
+				return path
+			},
+			wantError: "mapping: overrides.json unreadable",
+			wantLogs:  1,
+		},
+		"malformed": {
+			setup: func(t *testing.T) string {
+				path := filepath.Join(t.TempDir(), "overrides.json")
+				if err := os.WriteFile(path, []byte(`{"anilist_id":2}`), 0o600); err != nil {
+					t.Fatalf("write overrides: %v", err)
+				}
+				return path
+			},
+			wantError: "mapping: overrides.json malformed",
+			wantLogs:  1,
+		},
+		"missing": {
+			setup: func(t *testing.T) string {
+				return filepath.Join(t.TempDir(), "overrides.json")
+			},
+			wantLogs: 0,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := tc.setup(t)
+			logger, logs := capture.New()
+			l := NewLoader(nil, "http://unused.invalid", path, time.Hour, logger)
+			prev := freshCache()
+			next, idx, err := l.Load(context.Background(), prev)
+			if err != nil {
+				t.Fatalf("Load error: %v (a refused overrides file must never block a cycle)", err)
+			}
+			if n := logs.CountLevel(slog.LevelError, "overrides.json"); n != tc.wantLogs {
+				t.Errorf("overrides ERROR count = %d, want %d; logs = %v", n, tc.wantLogs, logs.Messages())
+			}
+			if n := logs.CountLevel(slog.LevelWarn, "overrides"); n != 0 {
+				t.Errorf("overrides WARN count = %d, want 0 (a file-level refusal is an ERROR); logs = %v", n, logs.Messages())
+			}
+			if tc.wantError != "" && !logs.Contains(tc.wantError) {
+				t.Errorf("logs = %v, want one naming %q and the remedy", logs.Messages(), tc.wantError)
+			}
+			// The overlay applied nothing: the index still holds only the
+			// cached upstream record.
+			if _, ok := idx.Lookup(2); ok {
+				t.Error("a refused overrides file applied a record, want the overlay ignored")
+			}
+			if idx.Len() != 1 {
+				t.Errorf("index size = %d, want 1 (the cached upstream record only)", idx.Len())
+			}
+			if next.RejectedRefreshes != prev.RejectedRefreshes {
+				t.Errorf("RejectedRefreshes = %d, want %d unchanged (the upstream streak is not the overrides signal)", next.RejectedRefreshes, prev.RejectedRefreshes)
+			}
+		})
 	}
 }

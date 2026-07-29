@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -473,5 +475,54 @@ func TestReportCanceledBeforeWalkPreservesCancellation(t *testing.T) {
 	}
 	if !strings.HasPrefix(err.Error(), "library walk: ") {
 		t.Errorf("Report error = %q, want library-walk stage context", err)
+	}
+}
+
+// TestReportSurfacesOverridesRefusalAndMappingDegraded pins that the one-shot
+// report gets the same two mapping diagnostics the daemon cycle does, because
+// both run the same shared loader: the l-f69 overrides-refusal ERROR (an opt-in
+// file the operator's pinned mappings are inert without) and the contextual
+// "report: mapping degraded" record for the failed refresh. The two are
+// independent signals - a broken overrides file is an operator-config fault
+// while a failed refresh is an upstream one - so a run hitting both must emit
+// both.
+func TestReportSurfacesOverridesRefusalAndMappingDegraded(t *testing.T) {
+	logger, recorder := capture.New()
+	// A stale-but-usable cached map, so the refresh is attempted (and fails at
+	// the transport) rather than skipped as fresh.
+	store := &fakeStore{st: state.State{
+		Mapping:   mapping.Cache{FetchedAt: time.Now().Add(-2 * time.Hour), Records: []mapping.Record{{AniListID: 154587, Type: "TV", TvdbID: 123, SeasonTvdb: 1}}},
+		Baselined: true,
+	}}
+	// A directory at the overrides path fails the bounded read with a
+	// non-ErrNotExist error whatever the test user's privileges.
+	overrides := filepath.Join(t.TempDir(), "overrides.json")
+	if err := os.Mkdir(overrides, 0o750); err != nil {
+		t.Fatalf("mkdir overrides dir: %v", err)
+	}
+	sonarr := &fakeSonarr{
+		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+		},
+	}
+	s := NewReporter(&ReportDeps{
+		Logger:  logger,
+		Store:   store,
+		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping: mapping.NewLoader(noNetworkClient(), "http://unused.invalid/f.json", overrides, time.Hour, logger),
+		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
+		Matcher: match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
+		Auditor: audit.NewAuditor(audit.Config{}),
+	})
+
+	if _, err := s.Report(context.Background()); err != nil {
+		t.Fatalf("Report returned error: %v (neither a refused overrides file nor a stale map blocks the report)", err)
+	}
+	if n := recorder.CountLevel(slog.LevelError, "overrides.json unreadable"); n != 1 {
+		t.Errorf("overrides-refusal ERROR count in report mode = %d, want 1; logs = %v", n, recorder.Messages())
+	}
+	if n := recorder.CountExact("report: mapping degraded"); n != 1 {
+		t.Errorf("'report: mapping degraded' fired %d times, want 1 (the failed refresh is still reported); logs = %v", n, recorder.Messages())
 	}
 }

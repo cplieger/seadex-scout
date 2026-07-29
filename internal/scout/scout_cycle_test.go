@@ -2230,3 +2230,59 @@ func TestCycleAniListEscalationFiresWhenPartialWalkWinsCompletionLine(t *testing
 		t.Errorf("persisted AniListDegraded = %d, want %d (the streak must advance and persist under the combined degradation)", got, aniListDegradedEscalationThreshold)
 	}
 }
+
+// TestLoadMappingEscalatesOnTerminalNon2xxStreak pins l-f100 at the operator
+// boundary: a terminal non-2xx on the fixed Fribb URL now advances the
+// persisted rejection streak, so a permanently 404ing (or 410/500ing) upstream
+// escalates the scout's mapping log from WARN to ERROR once the streak reaches
+// mappingRejectionEscalationThreshold consecutive cycles. Before this it warned
+// forever from a frozen zero streak. The below-threshold row is the transient
+// filter the user's deliberate no-status-allowlist decision relies on: a
+// temporary status incident cannot survive that many cycles, so it never
+// reaches ERROR.
+func TestLoadMappingEscalatesOnTerminalNon2xxStreak(t *testing.T) {
+	for name, tc := range map[string]struct {
+		status      int
+		priorStreak int
+		wantError   bool
+	}{
+		"404 below threshold stays WARN": {http.StatusNotFound, mappingRejectionEscalationThreshold - 2, false},
+		"404 at threshold escalates":     {http.StatusNotFound, mappingRejectionEscalationThreshold - 1, true},
+		"410 at threshold escalates":     {http.StatusGone, mappingRejectionEscalationThreshold - 1, true},
+		"500 at threshold escalates":     {http.StatusInternalServerError, mappingRejectionEscalationThreshold - 1, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "boom", tc.status)
+			}))
+			defer ts.Close()
+			logger, recorder := capture.New()
+			st := state.State{Mapping: mapping.Cache{
+				FetchedAt:         time.Now().Add(-2 * time.Hour),
+				Records:           []mapping.Record{{AniListID: 1, Type: "TV", TvdbID: 100}},
+				RejectedRefreshes: tc.priorStreak,
+			}}
+			s := New(&Deps{
+				Logger:  logger,
+				Mapping: mapping.NewLoader(ts.Client(), ts.URL, "", time.Hour, scoutTestLogger()),
+			})
+
+			mapCache, _, mapErr := s.loadMapping(context.Background(), &st)
+			if mapErr == nil {
+				t.Fatal("loadMapping with a terminal non-2xx returned nil error, want the degraded stale map")
+			}
+			if mapCache.RejectedRefreshes != tc.priorStreak+1 {
+				t.Errorf("RejectedRefreshes = %d, want %d (a terminal non-2xx advances the streak)", mapCache.RejectedRefreshes, tc.priorStreak+1)
+			}
+			warns := recorder.CountLevel(slog.LevelWarn, "mapping degraded")
+			errs := recorder.CountLevel(slog.LevelError, "mapping degraded")
+			if tc.wantError {
+				if errs != 1 || warns != 0 {
+					t.Errorf("escalated log counts: ERROR=%d WARN=%d, want exactly one ERROR and no WARN", errs, warns)
+				}
+			} else if warns != 1 || errs != 0 {
+				t.Errorf("below-threshold log counts: WARN=%d ERROR=%d, want exactly one WARN and no ERROR", warns, errs)
+			}
+		})
+	}
+}

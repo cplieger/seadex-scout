@@ -113,8 +113,11 @@ func TestValidateRefreshedRecordsScopeSparsePreviousAccepted(t *testing.T) {
 // 40 still clears the 1% floor of 20 - must be rejected in favour of the
 // stale map. A drop that retains at least half of the previous population is
 // accepted (the guard mirrors the whole-map below-half shrink guard), and a
-// population below the significance gate (under 1% of the previous body) is
-// never guarded, so tiny populations cannot reject noisily.
+// PARTIAL drop of a population below the significance gate (under 1% of the
+// previous body) is never shrink-guarded, so tiny populations cannot reject
+// noisily. Total extinction of such a population IS rejected, by the separate
+// gate-free rule pinned in
+// TestValidateRefreshedRecordsPopulationExtinctionRejected.
 func TestValidateRefreshedRecordsMidBandPopulationCollapseRejected(t *testing.T) {
 	const body = 2000
 	previous := make([]Record, 0, body)
@@ -151,12 +154,79 @@ func TestValidateRefreshedRecordsMidBandPopulationCollapseRejected(t *testing.T)
 	noSpecials := make([]Record, len(sparsePrev))
 	copy(noSpecials, sparsePrev)
 	for i := range noSpecials {
-		if noSpecials[i].Type == "SPECIAL" {
+		// A PARTIAL drop (10 -> 4): below half of the previous population, but
+		// under the significance gate, so neither shrink guard fires. Total
+		// extinction is a different rule with no gate at all
+		// (populationExtinct, pinned by
+		// TestValidateRefreshedRecordsPopulationExtinctionRejected), so this
+		// case deliberately keeps four specials.
+		if noSpecials[i].Type == "SPECIAL" && noSpecials[i].AniListID > 4 {
 			noSpecials[i].Type = "TV"
 		}
 	}
 	if err := validateRefreshedRecords(sparsePrev, noSpecials, len(noSpecials)); err != nil {
-		t.Errorf("sparse-population drop rejected: %v (populations under the significance gate are not guarded)", err)
+		t.Errorf("sparse-population partial drop rejected: %v (populations under the significance gate are not shrink-guarded)", err)
+	}
+}
+
+// TestValidateRefreshedRecordsPopulationExtinctionRejected pins the extinction
+// guard (populationExtinct, l-f68): a population going from N to EXACTLY zero
+// is rejected even when N is far below the 1% significance gate the shrink
+// guards use, because total loss is never a sampling artifact. The partial
+// shrink of the same sparse population stays accepted - that exemption is
+// pinned above by TestValidateRefreshedRecordsMidBandPopulationCollapseRejected.
+func TestValidateRefreshedRecordsPopulationExtinctionRejected(t *testing.T) {
+	const body = 2000 // significance gate = 1% = 20 records
+	base := func(mark func(r *Record, id int)) []Record {
+		records := make([]Record, 0, body)
+		for id := 1; id <= body; id++ {
+			r := Record{AniListID: id, Type: "TV", TvdbID: id}
+			mark(&r, id)
+			records = append(records, r)
+		}
+		return records
+	}
+
+	// A 3-record special population, far below the gate of 20.
+	sparsePrev := base(func(r *Record, id int) {
+		if id <= 3 {
+			r.Type = "SPECIAL"
+		}
+	})
+	extinct := base(func(r *Record, id int) {})
+	// Extinction is a guard refusal like any other, so it needs no extra streak
+	// wiring: validateRefreshedRecords' verdict reaches the streak through
+	// failureValidation, which classifyRefreshFailure grades persistent
+	// (TestClassifyRefreshFailure) - the same route the coverage and shrink
+	// guards already take.
+	if err := validateRefreshedRecords(sparsePrev, extinct, len(extinct)); err == nil {
+		t.Error("a sparse population going 3 -> 0 was accepted, want rejection (extinction needs no significance gate)")
+	}
+
+	// The same population merely shrinking stays accepted.
+	partial := base(func(r *Record, id int) {
+		if id <= 1 {
+			r.Type = "SPECIAL"
+		}
+	})
+	if err := validateRefreshedRecords(sparsePrev, partial, len(partial)); err != nil {
+		t.Errorf("a sparse population going 3 -> 1 was rejected: %v (only extinction bypasses the significance gate)", err)
+	}
+
+	// Extinction is guarded on every population, not just the special one: a
+	// sparse positive-season population zeroed out must reject too.
+	seasonPrev := base(func(r *Record, id int) {
+		if id <= 3 {
+			r.SeasonTvdb = 1
+		}
+	})
+	if err := validateRefreshedRecords(seasonPrev, extinct, len(extinct)); err == nil {
+		t.Error("a sparse season-scoped population going 3 -> 0 was accepted, want rejection")
+	}
+
+	// A population that was already empty is not extinction: nothing was lost.
+	if err := validateRefreshedRecords(extinct, extinct, len(extinct)); err != nil {
+		t.Errorf("an already-empty population rejected: %v (prevCount 0 is not a loss)", err)
 	}
 }
 

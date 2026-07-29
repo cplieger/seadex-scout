@@ -214,10 +214,7 @@ type Cache struct {
 	LastModified string    `json:"last_modified,omitempty"`
 	Records      []Record  `json:"records,omitempty"`
 	// RejectedRefreshes is the persisted streak of consecutive persistent
-	// refresh refusals. A fresh 200 advances it when the acceptance guards
-	// (the validation floor, the below-half-size shrink guard, the parse-time
-	// record cap, the aggregate identifier budget) reject it in favour of the
-	// stale map. It persists across cycles and restarts, resets
+	// refresh refusals. It persists across cycles and restarts, resets
 	// to 0 on any accepted refresh or on a 304 that revalidates a USABLE
 	// cache, and rides on the *StaleMapError
 	// (the rejections field, surfaced as stale_consecutive_rejections by
@@ -228,20 +225,14 @@ type Cache struct {
 	// the cache; the scout therefore reads it off this Cache rather than
 	// depending on a *StaleMapError to carry it.
 	//
-	// A TRANSIENT failure - one that can succeed on the next attempt - neither
-	// advances nor resets it. Four classes are persistent guard refusals that
-	// surface as fetch or parse errors and so DO advance it, because each one
-	// re-downloads the multi-MB body and refuses it every cycle without ever
-	// self-healing: a record-cap breach (errRecordCapExceeded), an aggregate
-	// identifier-budget breach (errIdentifierBudgetExceeded), a body over the
-	// download size cap (httpx.ResponseTooLargeError), and a non-array
-	// top-level document (errNotJSONArray - content-shape evidence, since
-	// truncation cannot change a body's first token). Mid-stream truncation and
-	// every other malformed-body class stays transient. A 304 answered to a
-	// request that carried NO validators also advances it (conditionalGet
-	// suppresses them whenever the cache is unusable, so such a 304 is a
-	// protocol violation that repeats identically every cycle) - which is why
-	// the reset above is scoped to a 304 over a usable cache.
+	// WHICH failures advance it is classifyRefreshFailure's decision and its
+	// doc comment is the single home of that list - every failure arm of
+	// refreshCache reaches this counter through it (degradeRefresh), so the
+	// list and the code cannot drift. In outline: a persistent failure (one
+	// that repeats identically every cycle until the operator acts - a guard
+	// refusal, a moved upstream shape, a terminal non-2xx status) advances it;
+	// a TRANSIENT failure - one that can succeed on the next attempt - neither
+	// advances nor resets it.
 	RejectedRefreshes int `json:"rejected_refreshes,omitempty"`
 }
 
@@ -379,6 +370,19 @@ func coverageFloor(n int) int { return max(1, (n+99)/100) }
 func coverageLost(prevCount, count, previousMinimum, minimum int) bool {
 	return prevCount >= previousMinimum && count < minimum && count < prevCount
 }
+
+// populationExtinct is the per-population EXTINCTION guard, deliberately
+// without the significance gate its siblings carry: the previously accepted
+// cache had a population at all (prevCount > 0) and the candidate has none of
+// it (count == 0). A population going from N to exactly zero is never a
+// sampling artifact, so it needs no threshold and no new constant - which is
+// what makes it the one guard that reaches BELOW previousMinimum. Its siblings
+// (coverageLost, populationCollapsed) stay gated on that 1%-of-the-previous-
+// catalogue share, so a sparse population's PARTIAL shrink keeps its existing
+// exemption; only total loss is refused. Without this, a population under the
+// share could be erased entirely and accepted silently, leaving that class of
+// anime unmapped with no degradation log.
+func populationExtinct(prevCount, count int) bool { return prevCount > 0 && count == 0 }
 
 // populationCollapsed is the per-population shrink guard the type, scope, and
 // routing validators apply beside their loss-relative floors: the previously
@@ -526,11 +530,11 @@ func staleOrFail(prev *Cache, staleMsg string, cause, noCache error) (Cache, err
 // staleOrFail, additionally advancing the persisted consecutive-rejection
 // streak (Cache.RejectedRefreshes) and carrying it on the *StaleMapError so
 // the scout can escalate its degraded-mapping log after
-// degradation.EscalationThreshold consecutive rejections. Fresh-200
-// acceptance-guard rejections and a protocol-violating validator-less 304 over
-// an unusable cache route here; a transient fetch or parse failure does not, so
-// it neither advances the streak (plain staleOrFail) nor resets it. The streak
-// resets only on an accepted refresh or a 304 that revalidates a usable cache.
+// degradation.EscalationThreshold consecutive rejections. It is reached ONLY
+// through degradeRefresh, on a failure classifyRefreshFailure graded
+// refreshPersistent; a transient failure takes plain staleOrFail there, so it
+// neither advances the streak nor resets it. The streak resets only on an
+// accepted refresh or a 304 that revalidates a usable cache.
 //
 // The streak advances even when there is NO usable stale cache to return. It is
 // persisted state about the upstream, not about the cache: on a first boot whose
@@ -548,6 +552,153 @@ func rejectRefresh(prev *Cache, staleMsg string, cause, noCache error) (Cache, e
 	}
 	return next, err
 }
+
+// refreshDisposition is what one FAILED refresh does to the persisted
+// consecutive-rejection streak (Cache.RejectedRefreshes). The third possible
+// outcome of a refresh - accepted, which RESETS the streak to 0 - is not a
+// failure and so has no value here: it is applied by the two success paths
+// that own it (acceptRefresh's fresh Cache literal, and reuseCachedRecords'
+// explicit reset on a 304 that revalidated a usable cache).
+type refreshDisposition int
+
+const (
+	// refreshTransient is a failure that can succeed on the next attempt: it
+	// neither advances nor resets the streak.
+	refreshTransient refreshDisposition = iota
+	// refreshPersistent is a failure that repeats identically every cycle until
+	// the operator acts: it advances the streak.
+	refreshPersistent
+)
+
+// refreshFailureClass names WHICH step of a refresh failed. It is the
+// vocabulary classifyRefreshFailure maps to a disposition, so a call site says
+// what happened and never what the streak should do about it.
+type refreshFailureClass int
+
+const (
+	// failureFetch is a conditional GET that returned no usable response; the
+	// error value decides the disposition.
+	failureFetch refreshFailureClass = iota
+	// failureParse is a 200 body that would not decode; the error value decides
+	// the disposition.
+	failureParse
+	// failureValidation is a decoded body the acceptance invariants refused
+	// (validateRefreshedRecords).
+	failureValidation
+	// failureShrunk is a decoded body the below-half whole-map shrink guard
+	// refused. It carries no cause: the *StaleMapError message shape for this
+	// class is a pinned log contract, and its live counts ride as structured
+	// fields instead.
+	failureShrunk
+	// failureNotModifiedUnusable is a 304 answered to a request that carried no
+	// validators (conditionalGet suppresses them whenever the cache is
+	// unusable).
+	failureNotModifiedUnusable
+)
+
+// classifyRefreshFailure is the ONE home of the transient-vs-persistent refresh
+// classification: every failure arm of refreshCache reaches the streak through
+// it (via degradeRefresh), so the documented persistent set and the code that
+// implements it cannot drift apart the way a per-arm choice between staleOrFail
+// and rejectRefresh could - and did.
+//
+// PERSISTENT (advances Cache.RejectedRefreshes), because each one re-downloads
+// or re-refuses identically every cycle and never self-heals without the
+// operator:
+//
+//   - a parse-time record-cap breach (errRecordCapExceeded);
+//   - an aggregate identifier-budget breach (errIdentifierBudgetExceeded);
+//   - a body over the download size cap (*httpx.ResponseTooLargeError - the cap
+//     is deterministic on upstream SIZE);
+//   - a non-array top-level document (errNotJSONArray - content-shape evidence,
+//     since truncation cannot change a body's first token);
+//   - a 304 answered to a validator-less request (failureNotModifiedUnusable -
+//     a protocol violation, not an outage);
+//   - an acceptance-invariant refusal (failureValidation) or a whole-map
+//     below-half shrink refusal (failureShrunk) - deterministic guard verdicts
+//     on the body the upstream keeps serving;
+//   - a TERMINAL non-2xx status on the fixed Fribb URL (*httpx.HTTPStatusError,
+//     *httpx.AuthError, *httpx.RateLimitError). "Terminal" means the status
+//     survived httpx's retry policy - a status httpx itself retried and
+//     recovered from never reaches here. There is deliberately NO status
+//     allowlist: the streak's own degradation.EscalationThreshold consecutive
+//     cycles IS the transient filter (a temporary 503 cannot survive eight
+//     cycles ~3h apart at the deployed interval), whereas a per-status policy
+//     list would silently drift against upstream behavior.
+//
+// Everything else is TRANSIENT: a transport error, a mid-stream truncation or
+// any other malformed-body class, and a 2xx that carries no usable
+// representation (a 204/206, which is not a non-2xx status). A transient
+// failure neither advances nor resets the streak.
+//
+// Cache.RejectedRefreshes points here rather than restating the list.
+func classifyRefreshFailure(class refreshFailureClass, cause error) refreshDisposition {
+	switch class {
+	case failureValidation, failureShrunk, failureNotModifiedUnusable:
+		return refreshPersistent
+	case failureFetch:
+		if _, ok := errors.AsType[*httpx.ResponseTooLargeError](cause); ok {
+			return refreshPersistent
+		}
+		// Every terminal non-2xx httpx surfaces for a conditional GET: the
+		// status mapping (CheckHTTPStatus) is 401/403 -> *AuthError, 429 ->
+		// *RateLimitError, and every other non-2xx (including a 3xx from a
+		// redirect-refusing client) -> *HTTPStatusError.
+		if _, ok := errors.AsType[*httpx.HTTPStatusError](cause); ok {
+			return refreshPersistent
+		}
+		if _, ok := errors.AsType[*httpx.AuthError](cause); ok {
+			return refreshPersistent
+		}
+		if _, ok := errors.AsType[*httpx.RateLimitError](cause); ok {
+			return refreshPersistent
+		}
+		return refreshTransient
+	case failureParse:
+		if errors.Is(cause, errRecordCapExceeded) || errors.Is(cause, errIdentifierBudgetExceeded) || errors.Is(cause, errNotJSONArray) {
+			return refreshPersistent
+		}
+		return refreshTransient
+	}
+	return refreshTransient
+}
+
+// degradeRefresh is the single exit from every refreshCache failure arm: it
+// degrades to the stale map (or returns noCache when there is no usable one)
+// and lets classifyRefreshFailure - never the call site - decide whether the
+// failure advances the persisted rejection streak. No other code picks
+// staleOrFail or rejectRefresh; a call site names only the failure's class, its
+// fixed stale_reason string, and its two error values.
+func degradeRefresh(prev *Cache, class refreshFailureClass, staleMsg string, cause, noCache error) (Cache, error) {
+	if classifyRefreshFailure(class, cause) == refreshPersistent {
+		return rejectRefresh(prev, staleMsg, cause, noCache)
+	}
+	return staleOrFail(prev, staleMsg, cause, noCache)
+}
+
+// logSafeCause reduces an untrusted-input-derived parse error to log-safe text
+// (single-line, control-stripped, capped at maxLoggedErrorBytes) WITHOUT
+// discarding its wrap chain, so classifyRefreshFailure can still recognize a
+// sentinel class (errNotJSONArray) on the value the caller passes it. Building
+// a plain errors.New from the sanitized text - the earlier form - dropped that
+// chain, which is safe only while the branch that sanitizes also hard-codes the
+// disposition; with one classifier reading the cause it would silently grade a
+// moved upstream schema transient. The rendered text is byte-identical to the
+// errors.New form; only the (never-logged) chain survives.
+func logSafeCause(err error) error {
+	return &sanitizedError{err: err, text: runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedErrorBytes)}
+}
+
+// sanitizedError renders pre-sanitized log-safe text while preserving the
+// wrapped cause for errors.Is/As classification. Only Error() reaches a log
+// boundary, so the untrusted original text stays out of the log stream.
+type sanitizedError struct {
+	err  error
+	text string
+}
+
+func (e *sanitizedError) Error() string { return e.text }
+func (e *sanitizedError) Unwrap() error { return e.err }
 
 // refreshCache decides whether to reuse, re-validate, or re-download the Fribb
 // map and returns the cache to persist. Validator hygiene (the RFC 9110
@@ -578,12 +729,12 @@ func (l *Loader) refreshCache(ctx context.Context, prev *Cache) (Cache, error) {
 	res, err := l.conditionalGet(ctx, prev)
 	if err != nil {
 		if _, ok := errors.AsType[*httpx.ResponseTooLargeError](err); ok {
-			// A persistent guard refusal (Cache.RejectedRefreshes): the cap is
-			// deterministic on upstream SIZE, so it never self-heals.
-			return rejectRefresh(prev, "refresh exceeded size cap", err,
+			// The branch chooses only the stale_reason class; whether it advances
+			// the streak is classifyRefreshFailure's call.
+			return degradeRefresh(prev, failureFetch, "refresh exceeded size cap", err,
 				fmt.Errorf("mapping: refresh exceeded size cap and no cache available: %w", err))
 		}
-		return staleOrFail(prev, "refresh failed", err,
+		return degradeRefresh(prev, failureFetch, "refresh failed", err,
 			fmt.Errorf("mapping: initial fetch failed and no cache available: %w", err))
 	}
 	if res.NotModified {
@@ -601,12 +752,12 @@ func (l *Loader) reuseCachedRecords(prev *Cache) (Cache, error) {
 		// A 304 answered to a request that carried NO validators (conditionalGet
 		// suppresses them whenever the cache is unusable) is an upstream or
 		// intermediary protocol violation, not a transient outage: it repeats
-		// identically every cycle and never self-heals without the operator, so it
-		// advances the streak like the size cap rather than leaving it frozen at 0.
+		// identically every cycle and never self-heals without the operator
+		// (failureNotModifiedUnusable, classified persistent).
 		// The returned error is unchanged - staleOrFail passes noCache through
 		// verbatim for an unusable cache and constructs no *StaleMapError, so no
 		// new stale_reason class enters the log vocabulary.
-		return rejectRefresh(prev, "not modified without a usable cache", nil,
+		return degradeRefresh(prev, failureNotModifiedUnusable, "not modified without a usable cache", nil,
 			errors.New("mapping: not modified but no cache available"))
 	}
 	l.log.Debug("mapping: not modified, reusing cache", "records", indexedRecordCount(prev.Records))
@@ -629,32 +780,33 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 	parsed, err := parseFribbForRefresh(res.Body, l.log)
 	if err != nil {
 		if errors.Is(err, errRecordCapExceeded) {
-			// A persistent guard refusal (Cache.RejectedRefreshes): a
-			// permanently over-cap upstream list never self-heals.
-			return rejectRefresh(prev, "refresh exceeded record cap", err,
+			// The branch chooses only the stale_reason class; the disposition
+			// (persistent - a permanently over-cap upstream list never
+			// self-heals) is classifyRefreshFailure's call.
+			return degradeRefresh(prev, failureParse, "refresh exceeded record cap", err,
 				fmt.Errorf("%w and no cache available", err))
 		}
 		if errors.Is(err, errIdentifierBudgetExceeded) {
-			// A persistent guard refusal (Cache.RejectedRefreshes): the
-			// aggregate identifier budget truncates the tail of the list, so
-			// accepting the prefix would persist a knowably incomplete map
-			// that every count floor still passes.
-			return rejectRefresh(prev, "refresh exceeded identifier budget", err,
+			// Persistent per classifyRefreshFailure: the aggregate identifier
+			// budget truncates the tail of the list, so accepting the prefix
+			// would persist a knowably incomplete map that every count floor
+			// still passes.
+			return degradeRefresh(prev, failureParse, "refresh exceeded identifier budget", err,
 				fmt.Errorf("%w and no cache available", err))
 		}
 		// The no-first-token case (an empty or whitespace-only body) never reaches here:
 		// parseFribbForRefresh classifies it at the source as a transient empty-body parse
 		// failure (fribb.go's io.EOF arm) rather than wrapping errNotJSONArray.
 		if errors.Is(err, errNotJSONArray) {
-			// A persistent guard refusal (Cache.RejectedRefreshes): a moved
-			// top-level shape is content evidence, not transport damage, so it
-			// never self-heals - unlike mid-stream truncation below.
-			err = errors.New(runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedErrorBytes))
-			return rejectRefresh(prev, "refresh not a JSON array", err,
+			// Persistent per classifyRefreshFailure: a moved top-level shape is
+			// content evidence, not transport damage, so it never self-heals -
+			// unlike mid-stream truncation below.
+			err = logSafeCause(err)
+			return degradeRefresh(prev, failureParse, "refresh not a JSON array", err,
 				fmt.Errorf("mapping: %w and no cache available", err))
 		}
-		err = errors.New(runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedErrorBytes))
-		return staleOrFail(prev, "parse failed", err,
+		err = logSafeCause(err)
+		return degradeRefresh(prev, failureParse, "parse failed", err,
 			fmt.Errorf("mapping: parse failed and no cache available: %w", err))
 	}
 	// Collapse duplicate AniList IDs BEFORE any acceptance invariant runs:
@@ -663,7 +815,7 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 	// thousands of times pass every guard and then index to almost nothing.
 	records := deduplicateRecords(parsed.records)
 	if validationErr := validateRefreshedRecords(prev.Records, records, parsed.elements); validationErr != nil {
-		return rejectRefresh(prev, "refresh validation failed", validationErr,
+		return degradeRefresh(prev, failureValidation, "refresh validation failed", validationErr,
 			fmt.Errorf("mapping: %w and no cache available", validationErr))
 	}
 	// A syntactically valid but sharply truncated refresh (e.g. one record
@@ -673,12 +825,12 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 	// invariant and keep the stale map.
 	if prevCount := indexedRecordCount(prev.Records); cacheUsable(prev.Records) && degradation.Shrunk(len(records), prevCount) {
 		// The noCache argument is unreachable here (cacheUsable guarantees the
-		// stale branch); it exists only to satisfy rejectRefresh's signature.
+		// stale branch); it exists only to satisfy degradeRefresh's signature.
 		// The reason string is FIXED (class-queryable in Loki); the live
 		// counts ride as structured fields on the error instead
 		// (stale_returned/stale_previous), set post-construction the same way
 		// rejectRefresh carries the rejection streak.
-		next, err := rejectRefresh(prev, "refresh shrank below half of previous",
+		next, err := degradeRefresh(prev, failureShrunk, "refresh shrank below half of previous",
 			nil, errors.New("mapping: refresh shrank unexpectedly and no cache available"))
 		if stale, ok := errors.AsType[*StaleMapError](err); ok {
 			stale.shrunkReturned, stale.shrunkPrevious = len(records), prevCount
@@ -718,7 +870,8 @@ func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache,
 // arr-identifier, or type coverage floors, and one whose individual
 // populations (typed, season-scoped, special, movie-/series-routed) collapse
 // below half of the previously accepted cache's (populationCollapsed - the
-// mid-band the 1% floors cannot see). The tolerant per-record decoders in
+// mid-band the 1% floors cannot see) or vanish entirely (populationExtinct -
+// the total loss below the 1% significance share those guards cannot see). The tolerant per-record decoders in
 // fribb.go deliberately
 // zero individual odd fields, so a wholesale upstream loss of the arr-ID
 // fields can decode as a full set of otherwise-valid records that no longer
@@ -819,16 +972,19 @@ type acceptanceFloors struct {
 	minimum         int
 }
 
-// validatePopulation applies the shared pair of per-population guards every
-// semantic population (typed, season-scoped, special, movie-routed,
-// series-routed) is checked with: the loss-relative floor (coverageLost) and
-// the below-half shrink guard (populationCollapsed). floorNoun and
-// collapseNoun carry each population's existing error vocabulary so the
-// rejection messages stay byte-identical to the pre-extraction text.
+// validatePopulation applies the shared guards every semantic population
+// (typed, season-scoped, special, movie-routed, series-routed) is checked with:
+// the extinction guard (populationExtinct), the loss-relative floor
+// (coverageLost) and the below-half shrink guard (populationCollapsed).
+// floorNoun and collapseNoun carry each population's existing error vocabulary
+// so the rejection messages stay byte-identical to the pre-extraction text.
 //
 // The three per-refresh floor quantities travel as one acceptanceFloors value
 // rather than a positional int tail every call site restates.
 func validatePopulation(floorNoun, collapseNoun string, prevCount, count int, f acceptanceFloors) error {
+	if populationExtinct(prevCount, count) {
+		return fmt.Errorf("%s records went extinct (previous cache carried %d)", collapseNoun, prevCount)
+	}
 	if coverageLost(prevCount, count, f.previousMinimum, f.minimum) {
 		return fmt.Errorf("%s coverage %d/%d is below minimum %d (previous cache carried %d %s records)", floorNoun, count, f.total, f.minimum, prevCount, collapseNoun)
 	}
@@ -1040,8 +1196,8 @@ const maxLoggedDuplicateIDs = 20
 
 // applyOverrides reads the operator overrides file (if present) and overlays
 // each effective record onto the index, keyed by AniList ID. A missing file is
-// not an error; a malformed file is logged and ignored so a bad override never
-// blocks a cycle.
+// not an error; an unreadable or malformed file is logged at ERROR (see
+// readOverrides) and ignored, so a bad override never blocks a cycle.
 func (l *Loader) applyOverrides(ctx context.Context, idx *Index) {
 	if l.overridesPath == "" {
 		return
@@ -1075,8 +1231,22 @@ func (l *Loader) applyOverrides(ctx context.Context, idx *Index) {
 
 // readOverrides reads and parses the overrides file, returning ok=false for
 // every ignored outcome: a cancelled read, a missing file (silently), an
-// unreadable or malformed file (logged). Unknown keys are diagnosed with a
-// bounded WARN but never reject the file.
+// unreadable or malformed file (logged at ERROR). Unknown keys are diagnosed
+// with a bounded WARN but never reject the file.
+//
+// A file-level refusal is an ERROR, not a WARN: the overrides file is opt-in,
+// so its EXISTENCE means the operator intends those pinned mappings to apply,
+// and every failure mode here except a rare I/O race persists until they act -
+// the overlay stays inert on every cycle while comparisons silently run on the
+// upstream mapping alone. A MISSING file stays silent (the ordinary case: no
+// overrides configured). The message names overrides.json and the remedy the
+// way the scout's mapping ERROR does, because the operator must edit or remove
+// the file for the overlay to come back.
+//
+// Deliberately NOT wired into Cache.RejectedRefreshes: that streak counts
+// UPSTREAM refresh refusals, and folding an operator-config failure into it
+// would make one counter mean two unrelated things. An immediate ERROR needs no
+// persisted state of its own either.
 func (l *Loader) readOverrides(ctx context.Context) (overrideSet, bool) {
 	data, err := atomicfile.ReadBounded(ctx, l.overridesPath, maxOverrideBytes)
 	if err != nil {
@@ -1084,13 +1254,13 @@ func (l *Loader) readOverrides(ctx context.Context) (overrideSet, bool) {
 			return overrideSet{}, false
 		}
 		if !errors.Is(err, fs.ErrNotExist) {
-			l.log.Warn("mapping: overrides unreadable, ignoring", "path", l.overridesPath, "error", err)
+			l.log.Error("mapping: overrides.json unreadable, pinned mappings not applied; fix the file's permissions or contents, or remove it", "path", l.overridesPath, "error", err)
 		}
 		return overrideSet{}, false
 	}
 	set, err := parseOverrides(data)
 	if err != nil {
-		l.log.Warn("mapping: overrides malformed, ignoring", "path", l.overridesPath,
+		l.log.Error("mapping: overrides.json malformed, pinned mappings not applied; fix the file's JSON, or remove it", "path", l.overridesPath,
 			"error", errors.New(runesafe.SanitizeSingleLineBounded(err.Error(), maxLoggedErrorBytes)))
 		return overrideSet{}, false
 	}
