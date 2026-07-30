@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -28,44 +27,15 @@ const (
 	// silenced within a second.
 	authFailBurst  = 10
 	authFailRefill = 6 * time.Second
-	// maxConcurrentQueries bounds simultaneous expensive queries (the search
-	// pool).
-	// The worst-case footprint of ONE in-flight search is roughly one
-	// upstreamMaxBytes body plus the render builder - about 16 MiB, since a
-	// scoped request queries exactly one upstream (fetchRaw takes
-	// upstreamForScope, and serve rejects an unscoped request) - so four
-	// leaves the 256 MiB container ample headroom for
-	// the compare loop that shares the process, while sitting far above what the
-	// arrs actually ask for: Sonarr and Radarr search a season at a time, the
-	// per-episode barrage is skipped entirely (servesQuery), and real Torznab
-	// responses are ~150 KiB rather than the cap. It is a resource bound, not a
-	// rate limit - authFailureLimiter bounds bad-key FLOODS, this bounds the
-	// memory a legitimate burst can hold at once.
-	maxConcurrentQueries = 4
-	// maxConcurrentFeeds bounds simultaneous synthesized-RSS renders (the rss
-	// pool), separately from the search bound. An empty-query RSS check touches no
-	// upstream: it reads the already-loaded snapshot and renders it, holding at
-	// most maxRenderedFeedBytes of builder and no Prowlarr body. Sharing the
-	// search pool let a stalled Prowlarr starve it - one search holds its slot
-	// for the whole bounded retry budget writeTimeout is derived from, so four
-	// slow searches answered every RSS check busy even though the RSS path needs
-	// nothing from Prowlarr. Two renders add at most ~16 MiB on top of the search
-	// bound, and an RSS waiter only ever queues behind other sub-millisecond
-	// renders, so queryGateWait always clears.
-	maxConcurrentFeeds = 2
 )
 
 // writeTimeout bounds a stalled response consumer. net/http arms it when the
 // request headers are read, so it must cover EVERYTHING the handler can spend
-// before the body is written: the admission wait for a concurrency slot
-// (queryGateWait), then the complete bounded Prowlarr retry budget -
+// before the body is written: the complete bounded Prowlarr retry budget -
 // upstreamMaxAttempts full-timeout attempts plus the capped Retry-After waits
-// between them - plus a one-minute render margin. Omitting the admission wait
-// understated the bound, so a legitimate search that queued for a slot could
-// have its rendered feed cut mid-write with the only signal a Debug line
-// blaming the client. Deriving it from the budget's own constants keeps the
-// deadline valid when the retry policy or the per-attempt timeout changes.
-// (Evaluates to 6m5s today.)
+// between them - plus a one-minute render margin. Deriving it from the budget's
+// own constants keeps the deadline valid when the retry policy or the
+// per-attempt timeout changes.
 //
 // One handler segment is deliberately NOT in that sum, because no constant
 // bounds it: query calls cache.refresh, and before the FIRST successful
@@ -77,26 +47,13 @@ const (
 // place. Run's cache.warm (bounded by warmLoadTimeout) plus the warmPending
 // fault keep it off the request path during startup; the residual window is a
 // fresh install whose first snapshot has not been written yet on a slow
-// /config mount, where a queued request can outlive this deadline and take the
-// same cut-mid-write outcome the admission wait above was added to prevent.
+// /config mount, where a queued request can outlive this deadline and have its
+// rendered feed cut mid-write, with the only signal a Debug line blaming the
+// client.
 //
-// A var because queryGateWait is one; it is
-// evaluated once at init, so a test shortening queryGateWait does not shrink
-// the deadline.
-var writeTimeout = queryGateWait + upstreamMaxAttempts*upstreamAttemptTimeout +
+// A var so a test can shorten it; it is evaluated once at init.
+var writeTimeout = upstreamMaxAttempts*upstreamAttemptTimeout +
 	(upstreamMaxAttempts-1)*httpx.RetryAfterCap + time.Minute
-
-// queryGateWait is how long an over-limit query waits for a slot before the
-// feed answers busy. Long enough to absorb a burst of near-simultaneous
-// searches (the arrs fire several as one library scan reaches several series),
-// short enough that a queue cannot grow behind upstreams stuck in their bounded
-// retry trees - waiting the full retry budget would turn one slow Prowlarr into
-// a pile of parked requests. A waiter holds only its request state, not an
-// upstream body, so the wait itself is cheap.
-//
-// A var, not a const, ONLY so the concurrency test can exercise the
-// wait-expired path without spending it in real time.
-var queryGateWait = 5 * time.Second
 
 // listenAddr is the fixed LAN bind address for the Torznab feed server. The
 // port is an internal detail (the container/compose port mapping publishes
@@ -439,107 +396,24 @@ func (ix *Indexer) rejectMissingABPasskey(w http.ResponseWriter, q url.Values, s
 	return true
 }
 
-// queryPool is one admission pool for expensive request work: its slots, its
-// limit, and the name the busy diagnostic reports, held as one value so the
-// limit a request REPORTS can never disagree with the pool it actually holds,
-// and so a third tracker's pool is one newQueryPool call rather than a
-// constant, a field, a make() and a branch that must be edited together.
-//
-// Field order is govet fieldalignment's: the pointer-bearing fields lead and
-// the pointer-free limit is last.
-type queryPool struct {
-	slots chan struct{}
-	name  string
-	limit int
-}
-
-// newQueryPool builds an admission pool of limit slots that reports itself as
-// name in the busy diagnostic.
-func newQueryPool(name string, limit int) queryPool {
-	return queryPool{slots: make(chan struct{}, limit), name: name, limit: limit}
-}
-
-// acquire reserves one of the pool's expensive-work slots, waiting at most
-// queryGateWait for one. It reports false when the wait expired (the caller
-// answers busy) or the request's own context ended first (the client gave up;
-// the caller returns without writing, since there is nobody to write to). The
-// matching release must run on every acquired path.
-func (p queryPool) acquire(ctx context.Context) (acquired, clientGone bool) {
-	select {
-	case p.slots <- struct{}{}:
-		return true, false
-	default:
-	}
-	// Only a genuinely over-limit request pays for a timer.
-	timer := time.NewTimer(queryGateWait)
-	defer timer.Stop()
-	select {
-	case p.slots <- struct{}{}:
-		return true, false
-	case <-ctx.Done():
-		return false, true
-	case <-timer.C:
-		return false, false
-	}
-}
-
-// release returns a slot reserved by acquire.
-func (p queryPool) release() { <-p.slots }
-
 // serveQuery runs the tracker query and renders the feed, translating the
 // two local-fault outcomes (snapshot unavailable, total upstream failure)
 // into Torznab errors, then logs the one INFO line per request.
 //
-// The whole expensive body runs under the admission pool (see queryPool): the
-// upstream fetch, the decode, and the render are what a burst could stack into
-// an OOM, so the slot is held across all three and released before the request
-// returns. A request servesQuery declines is exempt - it performs no snapshot
-// read and no upstream call, so it cannot contribute to the footprint the gate
-// bounds.
+// There is deliberately no in-flight admission gate here. What bounds a
+// request's cost is the cost itself: upstreamMaxBytes caps each proxied
+// Prowlarr body, a synthesized-RSS render reads the SHARED snapshot slice
+// under a read lock and only allocates its own builder, and the api key gates
+// who may ask at all. A concurrency ceiling on top of that bounded only the
+// COUNT of requests, and the count was never the risk - measured against the
+// live catalogue a real Torznab response is ~150 KiB against an 8 MiB cap, so
+// the former four-slot ceiling saved about a megabyte, while the reconcile
+// sharing this process is the actual memory consumer and no gate here touched
+// it. Meanwhile the ceiling could answer a legitimate request busy, and an
+// <error> is a FAILED search to the arr (it counts toward the indexer-failure
+// escalation that disables the indexer, RSS included), so the gate's own worst
+// case was worse than the exhaustion it guarded.
 func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Values, scope string) {
-	// Only a request that will actually do the expensive work takes a slot.
-	// query answers a per-episode query with nothing WITHOUT touching the
-	// snapshot or an upstream (servesQuery), so gating it would answer
-	// Sonarr's per-episode barrage - the highest-volume request class, one
-	// query per episode per scene-title alias - with a Torznab <error>
-	// during a burst instead of the cheap empty feed the skip promises, and
-	// an <error> is a FAILED search to the arr (it counts toward the
-	// indexer-failure escalation that disables the indexer, RSS included).
-	if servesQuery(q) {
-		// A synthesized-RSS check reads only local state, so it takes its own
-		// pool: it must stay servable while every search slot is parked in a
-		// bounded Prowlarr retry tree. The pool's name is what the busy
-		// diagnostic reports: the two have different causes (a stalled Prowlarr
-		// retry tree vs simultaneous local renders) and different operator
-		// actions, and the limit value alone stops distinguishing them the
-		// moment either constant is retuned.
-		pool := ix.search
-		if isFeedRequest(q) {
-			pool = ix.rss
-		}
-		acquired, clientGone := pool.acquire(r.Context())
-		if clientGone {
-			// The arr hung up while waiting; writing a response would only log a
-			// failed write. The access line still records the request.
-			ix.log.Debug("indexer request abandoned while waiting for a query slot", "scope", scope)
-			return
-		}
-		if !acquired {
-			// Busy, not broken: a Torznab <error> (the endpoint's own wire shape,
-			// unlike webhttp's JSON 429 envelope) plus a Retry-After so the arr
-			// backs off rather than treating the feed as failed. WARN, not ERROR:
-			// the condition clears itself as in-flight searches finish, which is
-			// exactly the transient/self-healing side of the level rule.
-			w.Header().Set("Retry-After", strconv.Itoa(int(queryGateWait.Seconds())))
-			ix.log.Warn("indexer at its concurrent-query limit; request answered busy",
-				"scope", scope, "pool", pool.name, "limit", pool.limit, "waited", queryGateWait)
-			ix.rejectTorznab(w, scope, "concurrent query limit reached", errCodeUnknown,
-				"too many concurrent requests in flight; retry shortly")
-			return
-		}
-		defer pool.release()
-	}
-
 	items, stats, fault := ix.query(r.Context(), q, scope)
 	// A request query could not answer with a feed at all (the persisted
 	// snapshot failed to load before any snapshot was installed, or every

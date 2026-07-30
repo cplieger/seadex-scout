@@ -188,28 +188,6 @@ type Indexer struct {
 	// state and nothing on the request path names a lock primitive or a
 	// reload-only flag.
 	cache *snapshotCache
-	// search bounds the number of SIMULTANEOUS expensive requests. Auth,
-	// caps, and the snapshot read are cheap; a SEARCH is not - each one holds
-	// up to one bounded Prowlarr body per upstream (upstreamMaxBytes), the
-	// encoding/xml token allocations to decode them, and up to
-	// maxRenderedFeedBytes of render builder, for as long as the bounded retry
-	// tree runs. net/http starts one goroutine per connection and the
-	// bad-key throttle deliberately exempts a VALID key, so nothing else caps
-	// how many of those run at once: a burst of correct-key searches (an arr's
-	// library-wide search, a retry storm, a misconfigured client) could stack
-	// that footprint until the 256 MiB container is OOM-killed - taking the
-	// compare loop down with it. Buffered token channels (inside queryPool)
-	// rather than a semaphore type for the same reason reloadGate is one: the
-	// wait must be cancellable, so a request whose client has gone away
-	// abandons it instead of parking a handler goroutine behind other
-	// requests' upstream calls.
-	search queryPool
-	// rss bounds simultaneous synthesized-RSS renders (see
-	// maxConcurrentFeeds). Separate from search so a stalled Prowlarr, which
-	// can park every search slot for the whole bounded retry budget, cannot
-	// starve the RSS path - which serves the already-loaded snapshot and never
-	// contacts an upstream.
-	rss queryPool
 	// log is set once in New and read per request without a lock, like apiKey
 	// and enablement below; none of them is ever written after construction
 	// (the same immutable-after-New contract as upstreams and verifyKey).
@@ -277,8 +255,6 @@ func New(cfg *Config, log *slog.Logger, client *http.Client) *Indexer {
 		},
 		verifyKey: webhttp.NewStaticTokenVerifier(cfg.APIKey),
 		cache:     newSnapshotCache(cfg.SnapshotPath, cfg.ABPasskey, log),
-		search:    newQueryPool("search", maxConcurrentQueries),
-		rss:       newQueryPool("rss", maxConcurrentFeeds),
 		upstreams: wireUpstreams(client, log, cfg.UpstreamConfig),
 		noUpstreamWarned: map[string]*atomic.Bool{
 			upstreamNyaa: new(atomic.Bool),
