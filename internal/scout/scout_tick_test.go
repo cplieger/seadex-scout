@@ -11,6 +11,7 @@ import (
 	"github.com/cplieger/arrapi"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/compare"
+	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/notify"
 	"github.com/cplieger/seadex-scout/internal/seadex"
@@ -1240,6 +1241,98 @@ func TestReconcileAnnouncesItselfBeforeDoingWork(t *testing.T) {
 			}
 			if first != 0 {
 				t.Errorf("'reconcile started' was log line %d of %v, want the first thing the pass says", first, msgs)
+			}
+		})
+	}
+}
+
+// revalidatingMapping is a mapping loader that behaves like the REAL one on a
+// 304: same records, same validators, fresh FetchedAt (mapping.go's
+// not-modified arm does exactly this). The default fake returns prev untouched,
+// which is not what production looks like on the ~96% of ticks that revalidate
+// without a body change - and a test built on it cannot see a comparison that
+// wrongly includes the timestamp.
+type revalidatingMapping struct{}
+
+func (revalidatingMapping) Load(_ context.Context, prev *mapping.Cache) (mapping.Cache, *mapping.Index, error) {
+	c := *prev
+	c.FetchedAt = time.Now()
+	return c, mapping.NewIndex(prev.Records), nil
+}
+
+// refreshingMapping is a mapping loader that reports a NEW validator on every
+// call, i.e. an accepted Fribb refresh rather than a 304. It is the real trigger
+// for the write the skip below must not suppress.
+type refreshingMapping struct{ calls int }
+
+func (r *refreshingMapping) Load(_ context.Context, prev *mapping.Cache) (mapping.Cache, *mapping.Index, error) {
+	r.calls++
+	c := *prev
+	c.ETag = "etag-" + strconv.Itoa(r.calls)
+	return c, mapping.NewIndex(prev.Records), nil
+}
+
+// TestProductiveTickSkipsTheStateWriteWhenNothingChanged pins the write skip and
+// the one thing that makes it non-trivial.
+//
+// state.json is a single ~2.5 MB document dominated by the library snapshot, so
+// persisting a tick's few KB of memo and validators rewrites all of it. At ~92
+// productive ticks a day that is ~230 MB/day of writes, and a tick that renewed
+// no AniList entry and got a 304 for the mapping learned nothing worth any of it.
+//
+// The trap: almost every tick DOES get a 304, and the loader returns the cached
+// map with a fresh FetchedAt. Comparing whole cache values would therefore see a
+// change every time and the skip would never fire, so the comparison excludes
+// that timestamp deliberately. This test is what stops a future "compare the
+// whole struct, it is simpler" from silently restoring the 230 MB - and the
+// second case is what stops the skip from swallowing a real refresh.
+func TestProductiveTickSkipsTheStateWriteWhenNothingChanged(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mapping   MappingSource
+		wantSaves bool
+	}{
+		// The default fake hands back the cached records unchanged, which is what
+		// a 304 looks like to the scout, and the window entry needs no AniList
+		// lookup - so this tick fetches, advances and reports while learning
+		// nothing persistable.
+		"a revalidated mapping and no renewal writes nothing": {revalidatingMapping{}, false},
+		"an accepted mapping refresh still writes":            {&refreshingMapping{}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The window carries the MAPPED Frieren entry, so it matches by id
+			// and needs no AniList lookup. An unmapped id would take the title
+			// fallback and memoize its not-found answer, which is a real thing
+			// learned and must be persisted - so it would not exercise the skip.
+			sea := &fakeSeaDex{
+				entries:       seadexFrierenEntry(),
+				windowEntries: seadexFrierenEntry(),
+			}
+			deps, store := tickDeps(scoutTestLogger(), sea, nil, nil, 96)
+			deps.Mapping = tc.mapping
+			s := New(deps)
+
+			if healthy := s.Cycle(context.Background()); !healthy {
+				t.Fatal("reconcile healthy=false, want true")
+			}
+			// The reconcile's own save has happened; from here the tick is on its own.
+			savesAfterReconcile := store.saves
+
+			if healthy := s.Cycle(context.Background()); !healthy {
+				t.Fatal("tick healthy=false, want true")
+			}
+			if _, window := countWindowModes(sea); window != 1 {
+				t.Fatalf("window fetches = %d, want 1 (the tick must have done its work)", window)
+			}
+
+			wrote := store.saves > savesAfterReconcile
+			if wrote != tc.wantSaves {
+				if tc.wantSaves {
+					t.Errorf("saves = %d, want more than %d: a tick that learned something must persist it",
+						store.saves, savesAfterReconcile)
+				} else {
+					t.Errorf("saves = %d, want the reconcile's %d: a tick that renewed nothing and got an "+
+						"unchanged mapping must not rewrite the whole state document", store.saves, savesAfterReconcile)
+				}
 			}
 		})
 	}

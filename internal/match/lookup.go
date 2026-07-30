@@ -65,7 +65,42 @@ func (e *MemoEntry) expired(now time.Time) bool { return !e.Expiry.After(now) }
 // across cycles rather than expiring in lockstep.
 type Memo struct {
 	Entries map[int]MemoEntry `json:"entries,omitempty"`
+	// dirty records whether this pass wrote to the memo at all, so a caller can
+	// decide whether persisting is worth the cost. It is UNEXPORTED, so it never
+	// reaches the wire and a loaded memo always starts clean.
+	//
+	// It exists because state.json is one ~2.5 MB document dominated by the
+	// library snapshot, and a tick rewrites the whole thing to persist this map
+	// plus the mapping cache. On a tick that renewed nothing, that write buys
+	// nothing. Every mutation therefore goes through put/remove rather than
+	// touching Entries directly: a flag that six call sites have to remember to
+	// set is a flag that is eventually wrong, and the failure would be silent
+	// (a renewal computed, not persisted, re-fetched next pass).
+	dirty bool
 }
+
+// put records an entry and marks the memo dirty. Every write goes through here.
+//
+// ent is a pointer purely to satisfy gocritic's hugeParam (MemoEntry is 80
+// bytes); it is copied into the map, never retained.
+func (m *Memo) put(id int, ent *MemoEntry) {
+	if m.Entries == nil {
+		m.Entries = make(map[int]MemoEntry)
+	}
+	m.Entries[id] = *ent
+	m.dirty = true
+}
+
+// remove drops an entry and marks the memo dirty; pruning's only write path.
+func (m *Memo) remove(id int) {
+	delete(m.Entries, id)
+	m.dirty = true
+}
+
+// Changed reports whether this pass wrote to the memo. A caller that persists
+// the memo as part of a larger document uses it to skip a write that would
+// change nothing.
+func (m *Memo) Changed() bool { return m.dirty }
 
 // liveEntry returns the memo entry for id when it exists and is unexpired at
 // now: the ONE liveness rule both pendingAniListIDs (skip a non-pending id)
@@ -162,7 +197,7 @@ func (m *Matcher) restampSkewedExpiries(memo *Memo, now time.Time) {
 		// to a persisted FirstSeen ahead of the clock.
 		ent.Expiry = m.freshExpiry(now)
 		restamped++
-		memo.Entries[id] = ent
+		memo.put(id, &ent)
 	}
 	if restamped > 0 {
 		// One counted line, not one per entry: the cause is a whole-file
@@ -209,7 +244,7 @@ func pruneExpired(memo *Memo, now time.Time, entries []seadex.Entry) {
 		if stillCurated && usefulStale {
 			continue
 		}
-		delete(memo.Entries, id)
+		memo.remove(id)
 	}
 }
 
@@ -360,7 +395,8 @@ func (m *Matcher) prefetchPass(ctx context.Context, pending []int, memo *Memo, n
 	unverified, scoped := unverifiedBatchIDs(err)
 	for _, id := range pending {
 		if media, ok := fetched[id]; ok {
-			memo.Entries[id] = mediaEntry(media, m.freshExpiry(now))
+			entry := mediaEntry(media, m.freshExpiry(now))
+			memo.put(id, &entry)
 			continue
 		}
 		if _, skip := unverified[id]; skip {
@@ -374,7 +410,8 @@ func (m *Matcher) prefetchPass(ctx context.Context, pending []int, memo *Memo, n
 			// media. Memoize the negative so it is not re-fetched this run; the
 			// expiry gives the negative the same lifetime policy as a positive,
 			// so a show created on AniList later is eventually seen.
-			memo.Entries[id] = notFoundEntry(m.freshExpiry(now))
+			entry := notFoundEntry(m.freshExpiry(now))
+			memo.put(id, &entry)
 		}
 		// Any other error leaves the id uncached for the per-id Fetch.
 	}
@@ -536,7 +573,8 @@ func (r *matchRun) lookupAniList(ctx context.Context, aniListID int) (anilist.Me
 		return r.memo.staleMedia(aniListID)
 	}
 	r.gate.recordSuccess()
-	r.memo.Entries[aniListID] = mediaEntry(media, r.entryExpiry())
+	entry := mediaEntry(media, r.entryExpiry())
+	r.memo.put(aniListID, &entry)
 	return media, true
 }
 
@@ -550,7 +588,8 @@ func (r *matchRun) lookupAniList(ctx context.Context, aniListID int) (anilist.Me
 func (r *matchRun) handleLookupFailure(aniListID int, err error) (transient bool) {
 	if errors.Is(err, anilist.ErrNotFound) {
 		r.gate.recordSuccess()
-		r.memo.Entries[aniListID] = notFoundEntry(r.entryExpiry())
+		entry := notFoundEntry(r.entryExpiry())
+		r.memo.put(aniListID, &entry)
 		return false
 	}
 	if errors.Is(err, anilist.ErrRecordUnusable) {
@@ -561,7 +600,8 @@ func (r *matchRun) handleLookupFailure(aniListID int, err error) (transient bool
 		// into a standing ERROR that blames upstream reachability. Say it once,
 		// naming the remedy that actually applies.
 		r.gate.recordSuccess()
-		r.memo.Entries[aniListID] = notFoundEntry(r.entryExpiry())
+		entry := notFoundEntry(r.entryExpiry())
+		r.memo.put(aniListID, &entry)
 		r.m.log.Warn("anilist record unusable for matching; add an overrides.json entry to map it directly",
 			"al_id", aniListID, "error", err)
 		return false

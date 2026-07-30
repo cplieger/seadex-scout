@@ -255,17 +255,50 @@ func (s *Scout) tickChanged(ctx context.Context, since time.Time, count int) boo
 	return true
 }
 
-// saveTick persists what a tick legitimately learned: the refreshed mapping
-// cache and the AniList memo. It never writes the library snapshot - a tick
-// performs no walk, so it has no snapshot to write and must not overwrite the
-// reconcile's with a stale copy.
+// saveTick persists what a tick legitimately learned - the refreshed mapping
+// cache and the AniList memo - and ONLY when it learned something. It never
+// writes the library snapshot: a tick performs no walk, so it has no snapshot to
+// write and must not overwrite the reconcile's with a stale copy.
+//
+// The skip matters because state.json is one ~2.5 MB document dominated by that
+// library snapshot, so persisting a tick's few KB of memo and validators rewrites
+// the whole file. At ~92 productive ticks a day that is ~230 MB/day of writes on
+// a flash-backed volume, and on a tick that renewed nothing it buys nothing.
 //
 // mapCache is taken by pointer for the same reason handlePreCompareGate takes
 // its cache that way: mapping.Cache is heavy enough that a by-value parameter
 // is a gocritic hugeParam. It is read, never retained.
 func (s *Scout) saveTick(ctx context.Context, st *state.State, mapCache *mapping.Cache) {
+	if !st.Memo.Changed() && !mappingWorthPersisting(&st.Mapping, mapCache) {
+		s.log.Debug("tick learned nothing to persist; skipping the state write",
+			"bytes_avoided", "whole state.json")
+		return
+	}
 	st.Mapping = *mapCache
 	s.save(ctx, st)
+}
+
+// mappingWorthPersisting reports whether a refreshed mapping cache differs from
+// the persisted one in a way a future load would miss.
+//
+// FetchedAt is deliberately excluded, and it is the whole reason this function
+// exists: the Fribb body changes about weekly, so almost every tick gets a 304
+// and the loader returns the cached map with a fresh FetchedAt (mapping.go's
+// not-modified arm). Comparing whole Cache values would therefore report a change
+// on every single tick and the skip would never fire. Dropping a FetchedAt update
+// costs nothing: the refresh interval is zero, so the loader revalidates every
+// pass regardless of how old the persisted stamp claims to be.
+//
+// Validators are the real signal. A 200 that changed the records carries a new
+// ETag or Last-Modified, so comparing those plus the record count catches an
+// accepted refresh, and RejectedRefreshes catches a refusal - the streak the
+// mapping-rejection escalation reads, which must survive a restart to mean
+// anything.
+func mappingWorthPersisting(prev, next *mapping.Cache) bool {
+	return prev.ETag != next.ETag ||
+		prev.LastModified != next.LastModified ||
+		len(prev.Records) != len(next.Records) ||
+		prev.RejectedRefreshes != next.RejectedRefreshes
 }
 
 // evaluatedIDs is the tick's deletion-authority set: the AniList IDs this

@@ -186,6 +186,19 @@ groups:
       # info hash, so that one swap cannot be distinguished and re-announces
       # nothing.
       #
+      # `seadex_tags` is in the grouping too, and it is worth knowing WHY rather
+      # than assuming. It is not SeaDex's own tag field - it is derived by the app
+      # from the recommendation's status, kind, resolution and dual-audio (best ·
+      # remux · 1080p · dual-audio), so it moves only when the recommendation
+      # materially differs. That makes it the safety net for the info-hash gap
+      # above: on an AnimeBytes-only release, where there is no hash, a change
+      # from 1080p encode to 2160p remux is otherwise invisible to every label
+      # here. It is also required in this projection for the rule's own
+      # annotations to render it at all, since `sum by` drops what it does not
+      # list. The residual cost is narrow and app-side: if a future release of
+      # this app classifies a release differently, that release re-announces
+      # once.
+      #
       # THE WINDOW MUST EXCEED YOUR poll_interval, with margin. Loki's ruler does
       # NOT support keep_firing_for (its RuleDesc has no such field, so the key
       # parses and the value is discarded), so this lookback is the only thing
