@@ -4,7 +4,6 @@ package trackerlink
 
 import (
 	"net/url"
-	"path"
 	"strconv"
 	"strings"
 
@@ -295,16 +294,45 @@ func pathShaped(rooted string) bool {
 		pathPart = rooted[:i]
 		hasTargetParams = strings.Trim(rooted[i:], "/?#") != ""
 	}
-	segments := 0
-	for seg := range strings.SplitSeq(pathPart, "/") {
-		if seg != "" {
-			segments++
-		}
-	}
+	segments := pathSegments(pathPart)
 	// A query/fragment never substitutes for the path segment itself: a value
 	// with no segment at all publishes the tracker root ("nyaa.si/?id=1"),
 	// which names no torrent page.
 	return segments > 1 || (segments == 1 && hasTargetParams)
+}
+
+// pathSegments counts the non-empty segments of a URL path. It is the ONE
+// reading both shape arms use, so "does this path name anything past the
+// authority" cannot mean two things: an empty path, "/" and "//" all count 0.
+// It deliberately does NOT resolve dot segments - see hostFormTargeted.
+func pathSegments(p string) int {
+	n := 0
+	for seg := range strings.SplitSeq(p, "/") {
+		if seg != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// dotOnlyPath reports whether p has at least one segment and every one of them
+// is a dot segment, so the path names nothing of its own and resolves back to
+// the authority ("/.", "/../", "/./.."). The relative twin refuses these as a
+// single-segment path with no target params; this is the host-form spelling of
+// the same refusal, without resolving dot segments inside a path that DOES
+// name something (see hostFormTargeted).
+func dotOnlyPath(p string) bool {
+	seen := false
+	for seg := range strings.SplitSeq(p, "/") {
+		if seg == "" {
+			continue
+		}
+		if seg != "." && seg != ".." {
+			return false
+		}
+		seen = true
+	}
+	return seen
 }
 
 // hostFormTargeted reports whether a host-bearing value names a target beyond
@@ -351,8 +379,19 @@ func hostFormTargeted(f *urlform.Form) bool {
 	if strings.Trim(u.RawQuery, "/?#") != "" {
 		return true
 	}
-	cleaned := path.Clean(u.Path)
-	return cleaned != "." && cleaned != "/"
+	// The path is read with the same segment counting the relative twin
+	// applies, so a value this arm refuses is one that arm also refuses. It
+	// does NOT resolve dot segments away, deliberately: resolving them made
+	// this arm refuse "/view/.." while pathShaped published it, so a relative
+	// "/view/.." produced an absolute link that would NOT publish if it came
+	// back through - breaking the idempotence the fuzz property requires.
+	// Nothing in the live catalogue carries a dot segment (0 of 9181 tracker
+	// URLs, checked 2026-07), so resolving them guarded no real value and cost
+	// a self-contradiction. What still drops is a path that names nothing of
+	// its own: no segments at all ("", "/", "//"), or only dot segments
+	// ("/.", "/..", and their percent-encoded spellings, read decoded) - those
+	// the relative twin refuses too, so dropping them keeps the arms agreeing.
+	return pathSegments(u.Path) > 0 && !dotOnlyPath(u.Path)
 }
 
 // httpsCanonical rewrites a vouched absolute link's cleartext scheme to https.
