@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/cplieger/seadex-scout/internal/tracker"
 )
@@ -55,7 +56,17 @@ func FuzzPublish(f *testing.F) {
 	f.Add("torrents.php?id=1&torrentid=2", "Nyaa")
 	f.Fuzz(func(t *testing.T, rawURL, trackerName string) {
 		out := Publish(trackerName, rawURL)
-		trimmed := strings.TrimSpace(rawURL)
+		// The publisher's passthrough is "unchanged APART FROM EDGE TRIMMING",
+		// and the trim is urlform's, not strings.TrimSpace's: it strips a C0
+		// control or space (the WHATWG URL preprocessing step) AND Unicode
+		// whitespace, so it removes "\x00".."\x20" plus NBSP and NEL while
+		// keeping DEL. Modelling it as TrimSpace made this property falsifiable
+		// on any value with an edge C0 control ("http://nyaa.si/0\x0f" published
+		// correctly as "https://nyaa.si/0" and the property demanded the control
+		// byte back), which is a defect in the oracle, not in the publisher.
+		trimmed := strings.TrimFunc(rawURL, func(r rune) bool {
+			return r <= 0x20 || unicode.IsSpace(r)
+		})
 		// Security invariant: a protocol-relative URL is never usable (it
 		// would resolve against whatever page hosts the link).
 		if strings.HasPrefix(trimmed, "//") {

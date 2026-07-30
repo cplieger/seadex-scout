@@ -114,8 +114,17 @@ func TestPublishRejectsUnsafeSchemes(t *testing.T) {
 // would emit the tracker root ("https://nyaa.si/?id=1"), which the floor
 // refuses; and a delimiter-only tail ("/view?", "/view#") carries no
 // identifying content, so it resolves to the same page as the bare
-// single-segment path and drops with it (h-f30). The colon-before-slash and
-// leading-slash-normalization rows live in
+// single-segment path and drops with it (h-f30). A FRAGMENT never substitutes
+// for the missing path segment either, however much content it carries
+// ("/view#1" drops): a fragment is resolved client-side, so the browser lands
+// on the single-segment page the floor already refuses and merely scrolls -
+// which is the same reading the host-bearing arm applies, and the reason both
+// arms now share one predicate. Counting a fragment here used to make the arms
+// disagree: ".#0" published, and the absolute link it produced was then
+// refused, so publishing was not idempotent. No live value relies on it - all
+// five fragment-bearing records carry a query as well
+// ("/torrents.php?id=..&torrentid=..#..") and still publish. The
+// colon-before-slash and leading-slash-normalization rows live in
 // TestPublishRejectsUnsafeSchemes and TestPublish.
 func TestPublishRelativeShapeFloor(t *testing.T) {
 	tests := map[string]struct {
@@ -126,7 +135,7 @@ func TestPublishRelativeShapeFloor(t *testing.T) {
 		"bare single-segment token drops":       {raw: "view", want: ""},
 		"rooted single-segment token drops":     {raw: "/Chihiro", want: ""},
 		"single-segment query publishes":        {raw: "/view?id=1", want: "https://nyaa.si/view?id=1"},
-		"single-segment fragment publishes":     {raw: "/view#1", want: "https://nyaa.si/view#1"},
+		"single-segment fragment drops":         {raw: "/view#1", want: ""},
 		"root alone drops":                      {raw: "/", want: ""},
 		"query without a path segment drops":    {raw: "?id=1", want: ""},
 		"fragment without a path segment drops": {raw: "#1167293", want: ""},

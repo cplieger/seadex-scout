@@ -159,12 +159,15 @@ func TestObtainableLinksDedupesAndPrefixesPrivateURL(t *testing.T) {
 		{rel: release.Release{Tracker: "AB"}, torrent: seadex.Torrent{Tracker: "AB", URL: "/torrents.php?id=1"}},
 		{rel: release.Release{Tracker: "Nyaa"}, torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}},
 		// A delimiter-bearing pair: with a string-concatenated dedupe key these
-		// two distinct (tracker, URL) tuples collide ("Nyaa|https://nyaa.si/a"
-		// + "https://nyaa.si/b" == "Nyaa" + "https://nyaa.si/a|https://nyaa.si/b");
-		// the struct key keeps both. Both URLs stay on the tracker's canonical
-		// host so the publisher passes them through.
-		{rel: release.Release{Tracker: "Nyaa|https://nyaa.si/a"}, torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/b"}},
-		{rel: release.Release{Tracker: "Nyaa"}, torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/a|https://nyaa.si/b"}},
+		// two distinct (tracker, URL) tuples collide
+		// ("Nyaa|https://nyaa.si/t/a" + "https://nyaa.si/t/b" == "Nyaa" +
+		// "https://nyaa.si/t/a|https://nyaa.si/t/b"); the struct key keeps
+		// both. Both URLs stay on the tracker's canonical host AND carry a real
+		// two-segment path, so the publisher passes them through - a
+		// single-segment stand-in ("/a") would now be refused by the shape floor
+		// for naming no target, which has nothing to do with what this test pins.
+		{rel: release.Release{Tracker: "Nyaa|https://nyaa.si/t/a"}, torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/t/b"}},
+		{rel: release.Release{Tracker: "Nyaa"}, torrent: seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/t/a|https://nyaa.si/t/b"}},
 	}
 	links := obtainableLinks(cands, "")
 	if len(links) != 4 {
@@ -179,10 +182,10 @@ func TestObtainableLinksDedupesAndPrefixesPrivateURL(t *testing.T) {
 	if links[1] == links[2] {
 		t.Errorf("delimiter-bearing tuples must stay distinct, both = %+v", links[1])
 	}
-	if links[1].URL != "https://nyaa.si/a|https://nyaa.si/b" || links[2].URL != "https://nyaa.si/b" {
+	if links[1].URL != "https://nyaa.si/t/a|https://nyaa.si/t/b" || links[2].URL != "https://nyaa.si/t/b" {
 		t.Errorf("delimiter-bearing tuples mangled: %+v, %+v", links[1], links[2])
 	}
-	if links[2].Tracker != "Nyaa|https://nyaa.si/a" {
+	if links[2].Tracker != "Nyaa|https://nyaa.si/t/a" {
 		t.Errorf("delimiter-bearing tracker mangled: %+v", links[2])
 	}
 	if links[3].URL != "https://nyaa.si/view/1" {

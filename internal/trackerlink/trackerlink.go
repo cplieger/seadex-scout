@@ -286,13 +286,24 @@ func pathShaped(rooted string) bool {
 	pathPart := rooted
 	hasTargetParams := false
 	if i := strings.IndexAny(rooted, "?#"); i >= 0 {
-		// A query or fragment is where both trackers put the torrent id, so it
-		// stands in for the second path segment - but only when it carries
-		// identifying content: a delimiter-only tail ("/view?", "/view#",
-		// "/view?#") resolves to the same page as the bare single-segment path
-		// the floor already refuses.
+		// A QUERY is where both trackers put the torrent id, so it stands in
+		// for the second path segment - but only when it carries identifying
+		// content: a delimiter-only tail ("/view?", "/view#", "/view?#")
+		// resolves to the same page as the bare single-segment path the floor
+		// already refuses. A FRAGMENT never counts: it is resolved client-side,
+		// so it leaves the browser wherever the path landed and cannot identify
+		// a torrent. That is the same reading hostFormTargeted applies, and
+		// counting it here made the two arms disagree - ".#0" published as
+		// "https://animebytes.tv/.#0", which this arm's own host-form twin then
+		// refused, breaking the idempotence the fuzz property requires.
 		pathPart = rooted[:i]
-		hasTargetParams = strings.Trim(rooted[i:], "/?#") != ""
+		if rooted[i] == '?' {
+			query := rooted[i+1:]
+			if j := strings.IndexByte(query, '#'); j >= 0 {
+				query = query[:j]
+			}
+			hasTargetParams = strings.Trim(query, "/?#") != ""
+		}
 	}
 	segments := pathSegments(pathPart)
 	// A query/fragment never substitutes for the path segment itself: a value
@@ -313,26 +324,6 @@ func pathSegments(p string) int {
 		}
 	}
 	return n
-}
-
-// dotOnlyPath reports whether p has at least one segment and every one of them
-// is a dot segment, so the path names nothing of its own and resolves back to
-// the authority ("/.", "/../", "/./.."). The relative twin refuses these as a
-// single-segment path with no target params; this is the host-form spelling of
-// the same refusal, without resolving dot segments inside a path that DOES
-// name something (see hostFormTargeted).
-func dotOnlyPath(p string) bool {
-	seen := false
-	for seg := range strings.SplitSeq(p, "/") {
-		if seg == "" {
-			continue
-		}
-		if seg != "." && seg != ".." {
-			return false
-		}
-		seen = true
-	}
-	return seen
 }
 
 // hostFormTargeted reports whether a host-bearing value names a target beyond
@@ -379,19 +370,29 @@ func hostFormTargeted(f *urlform.Form) bool {
 	if strings.Trim(u.RawQuery, "/?#") != "" {
 		return true
 	}
-	// The path is read with the same segment counting the relative twin
-	// applies, so a value this arm refuses is one that arm also refuses. It
-	// does NOT resolve dot segments away, deliberately: resolving them made
-	// this arm refuse "/view/.." while pathShaped published it, so a relative
-	// "/view/.." produced an absolute link that would NOT publish if it came
-	// back through - breaking the idempotence the fuzz property requires.
-	// Nothing in the live catalogue carries a dot segment (0 of 9181 tracker
-	// URLs, checked 2026-07), so resolving them guarded no real value and cost
-	// a self-contradiction. What still drops is a path that names nothing of
-	// its own: no segments at all ("", "/", "//"), or only dot segments
-	// ("/.", "/..", and their percent-encoded spellings, read decoded) - those
-	// the relative twin refuses too, so dropping them keeps the arms agreeing.
-	return pathSegments(u.Path) > 0 && !dotOnlyPath(u.Path)
+	// The tail past the authority is read by pathShaped, the SAME reading the
+	// relative arm applies, so the two arms cannot disagree about what names a
+	// target - and in particular this arm accepts every value that arm
+	// publishes, which is what makes Publish idempotent. It deliberately does
+	// NOT resolve dot segments away: resolving them made this arm refuse
+	// "/view/.." while the relative arm published it, so a relative "/view/.."
+	// produced an absolute link that would not publish if it came back
+	// through. Nothing in the live catalogue carries a dot segment (0 of 9181
+	// tracker URLs, checked 2026-07), so resolving them guarded no real value
+	// and cost a self-contradiction. A path naming nothing of its own still
+	// drops, because dot segments are not segments the floor counts as a
+	// target on their own.
+	//
+	// The one deliberate difference from the relative arm is above: a root
+	// QUERY is kept here ("nyaa.si/?page=view&tid=1" is a real Nyaa shape)
+	// while the relative arm refuses a query with no path segment at all. That
+	// asymmetry is safe in this direction - the relative arm publishing LESS
+	// can never produce a link this arm then refuses.
+	rooted := u.EscapedPath()
+	if u.Fragment != "" {
+		rooted += "#" + u.EscapedFragment()
+	}
+	return pathShaped(rooted)
 }
 
 // httpsCanonical rewrites a vouched absolute link's cleartext scheme to https.
