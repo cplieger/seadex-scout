@@ -1247,9 +1247,18 @@ const maxLoggedUnknownKeys = 20
 // overrideSet.unknownOverflow.
 const maxRetainedUnknownKeys = maxLoggedUnknownKeys + 1
 
-// maxLoggedKeyBytes bounds one displayed unknown-key name. unknown_key_count
-// is exact unless count_capped is true, in which case it is a lower bound.
+// maxLoggedKeyBytes bounds one displayed unknown-key name — the whole
+// rendered name, keyTruncMarker included, since the marker is charged inside
+// the budget. unknown_key_count is exact unless count_capped is true, in which
+// case it is a lower bound.
 const maxLoggedKeyBytes = 64
+
+// keyTruncMarker is the suffix a byte-capped unknown-key name carries so a
+// reader can tell a truncated name from an honest one. It is charged INSIDE
+// maxLoggedKeyBytes (runesafe's Capped contract), so a displayed name never
+// exceeds that budget; keys_truncated carries the truncation as a fact, which
+// the marker alone cannot prove (a key can end in "..." on its own).
+const keyTruncMarker = "..."
 
 // maxLoggedErrorBytes bounds untrusted-input-derived parse-error text before
 // it reaches a log emit boundary (the anilist sanitizeUpstreamMessage policy).
@@ -1338,22 +1347,26 @@ func (l *Loader) readOverrides(ctx context.Context) (overrideSet, bool) {
 
 // logUnknownKeys emits the bounded unknown-key diagnostic. Full log-bound
 // text policy for an operator-controlled JSON key, not just a length bound:
-// SanitizeSingleLine replaces unsafe C0/C1 controls, bidi controls, DEL, and
-// line separators before the byte cap, so a key carrying such runes cannot
-// smuggle terminal-control or direction-override text into the log stream
-// (the same runesafe policy the indexer's logParam and sanitizeUpstreamText
-// apply at their emit boundaries).
+// SanitizeSingleLineCapped replaces unsafe C0/C1 controls, bidi controls, DEL,
+// and line separators before the byte cap, so a key carrying such runes cannot
+// smuggle terminal-control or direction-override text into the log stream (the
+// same runesafe policy the indexer's logParam and sanitizeUpstreamText apply at
+// their emit boundaries). It also RETURNS the truncation fact, which is what
+// keys_truncated needs: a marker cannot prove a cut (a key can end in "..." on
+// its own), so the fact comes from the primitive rather than from a local
+// re-implementation of the cap. The marker is charged inside
+// maxLoggedKeyBytes, so a displayed name is bounded by that total rather than
+// by the total plus the marker's width; the set of names that count as
+// truncated is unchanged (exactly those whose sanitized form exceeds
+// maxLoggedKeyBytes).
 func (l *Loader) logUnknownKeys(unknown []string, capped bool) {
 	shown := min(len(unknown), maxLoggedUnknownKeys)
 	logged := make([]string, 0, shown)
 	shortened := false
 	for _, k := range unknown[:shown] {
-		k = runesafe.SanitizeSingleLine(k)
-		if len(k) > maxLoggedKeyBytes {
-			k = runesafe.CapBytes(k, maxLoggedKeyBytes) + "..."
-			shortened = true
-		}
-		logged = append(logged, k)
+		safe, cut := runesafe.SanitizeSingleLineCapped(k, maxLoggedKeyBytes, keyTruncMarker)
+		shortened = shortened || cut
+		logged = append(logged, safe)
 	}
 	l.log.Warn("mapping: overrides contain unknown keys, ignored",
 		"keys", logged,

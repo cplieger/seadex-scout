@@ -147,7 +147,10 @@ func TestLoader_Load_unknownOverrideKeysLogBounded(t *testing.T) {
 // TestLoader_Load_unknownOverrideKeyNameTruncated pins the per-key truncation
 // bound on the unknown-key diagnostic: a single unknown key longer than
 // maxLoggedKeyBytes is logged truncated with an ellipsis marker, so one
-// operator-controlled key name cannot balloon the WARN record.
+// operator-controlled key name cannot balloon the WARN record. The marker is
+// charged INSIDE the budget, so the whole rendered name — marker included — is
+// at most maxLoggedKeyBytes bytes (it used to run to maxLoggedKeyBytes plus the
+// marker's width).
 func TestLoader_Load_unknownOverrideKeyNameTruncated(t *testing.T) {
 	overrides := filepath.Join(t.TempDir(), "overrides.json")
 	key := strings.Repeat("k", maxLoggedKeyBytes+1)
@@ -163,7 +166,11 @@ func TestLoader_Load_unknownOverrideKeyNameTruncated(t *testing.T) {
 	if rec.CountExact("mapping: overrides contain unknown keys, ignored") != 1 {
 		t.Fatalf("Load logs = %v, want one unknown-keys warning", rec.Messages())
 	}
-	wantKeys := "[" + key[:maxLoggedKeyBytes] + "...]"
+	shownKey := key[:maxLoggedKeyBytes-len(keyTruncMarker)]
+	if got := len(shownKey + keyTruncMarker); got != maxLoggedKeyBytes {
+		t.Fatalf("rendered key name = %d bytes, want the hard bound %d", got, maxLoggedKeyBytes)
+	}
+	wantKeys := "[" + shownKey + keyTruncMarker + "]"
 	if !unknownKeysAre(rec, wantKeys) {
 		t.Errorf("unknown keys logs = %v, want keys=%s", rec.Messages(), wantKeys)
 	}
