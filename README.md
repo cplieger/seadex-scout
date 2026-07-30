@@ -191,8 +191,10 @@ Prowlarr Torznab URL is configured, and binds no HTTP port otherwise.
 
 **1. Point the feed at Prowlarr.** Add **Nyaa** and **AnimeBytes** as Prowlarr
 indexers if you haven't, and fill the config's `indexer` section: their two
-Torznab URLs, a Prowlarr API key, a `feed_api_key` of your choosing, and (for
-the AB RSS feed) your `ab_passkey`; keys in
+Torznab URLs, a Prowlarr API key, and (for the AB RSS feed) your `ab_passkey`;
+the `feed_api_key` is already filled in — the starter config written on first
+boot generates a fresh 32-character key, so you only need to copy it into the
+arrs. Keys in
 [Configuration reference](#configuration-reference). The one Prowlarr setting
 that matters: leave the Nyaa indexer's **Sort requested from site** at its
 default (created/date, descending); the feed's title lookups depend on that
@@ -353,7 +355,7 @@ unknown or misplaced key is rejected at startup with an error naming it.
 | `filters.ignore` | `[]` | AniList IDs whose findings are never alerted on. Suppresses the **alert only** — the show still appears in report mode and the RSS feed is untouched. Use it for a show you have decided not to upgrade, so the reminders stop. Max 512 entries |
 | `arr_tags.include` / `arr_tags.exclude` | `[]` | Scan only / never arr items with these tags; an exclude wins |
 | `report.dir` | `/config/reports` | Where timestamped `report-<UTC>.md` + `.json` pairs land |
-| `indexer.feed_api_key` | `""` | Key the arrs must send to the feed |
+| `indexer.feed_api_key` | generated | Key the arrs must send to the feed; the first-boot starter generates one |
 | `indexer.nyaa_torznab_url` / `indexer.ab_torznab_url` | `""` | Prowlarr per-indexer Torznab URLs; `""` disables that tracker, any set enables the feed |
 | `indexer.prowlarr_api_key` | `""` | Prowlarr API key (secret, never logged) |
 | `indexer.ab_passkey` | `""` | Builds the AB RSS feed's download links; `""` = AB RSS off (Nyaa needs none) |

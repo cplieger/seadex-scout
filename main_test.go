@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/cycle"
 	"github.com/cplieger/slogx"
 	"github.com/cplieger/slogx/capture"
+	yaml "go.yaml.in/yaml/v3"
 )
 
 // TestResolveMode covers the subcommand-vs-config mode resolution: no argument
@@ -108,8 +111,9 @@ func TestLoadRuntimeConfig(t *testing.T) {
 		if readErr != nil {
 			t.Fatalf("reading starter: %v", readErr)
 		}
-		if !bytes.Equal(got, exampleConfig) {
-			t.Errorf("starter content differs from embedded example (%d vs %d bytes)", len(got), len(exampleConfig))
+		if blanked := feedKeyLine.ReplaceAll(got, []byte(`feed_api_key: ""`)); !bytes.Equal(blanked, exampleConfig) {
+			t.Errorf("starter differs from the embedded example beyond the generated feed_api_key (%d vs %d bytes)",
+				len(blanked), len(exampleConfig))
 		}
 	})
 	t.Run("starter write failure is not the sentinel", func(t *testing.T) {
@@ -204,7 +208,8 @@ func TestLogConfigNeverLogsSecrets(t *testing.T) {
 }
 
 // TestWriteStarterConfig covers the first-boot path: the starter is written at
-// the given path (parent directories created) with the embedded example bytes.
+// the given path (parent directories created), byte-identical to the embedded
+// example EXCEPT for the generated feed_api_key.
 func TestWriteStarterConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "dir", "config.yaml")
 	if err := writeStarterConfig(path); err != nil {
@@ -214,8 +219,92 @@ func TestWriteStarterConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading starter: %v", err)
 	}
-	if !bytes.Equal(got, exampleConfig) {
-		t.Errorf("starter content differs from embedded example (%d vs %d bytes)", len(got), len(exampleConfig))
+	// The only difference from the embedded bytes is the seeded key, so
+	// re-blanking it must reproduce the example exactly. That pins BOTH halves:
+	// nothing else was rewritten, and the key really was substituted.
+	blanked := feedKeyLine.ReplaceAll(got, []byte(`feed_api_key: ""`))
+	if !bytes.Equal(blanked, exampleConfig) {
+		t.Errorf("starter differs from the embedded example beyond feed_api_key (%d vs %d bytes)",
+			len(blanked), len(exampleConfig))
+	}
+}
+
+// feedKeyLine matches the starter's feed_api_key assignment for the tests that
+// need to read or blank the generated value.
+var feedKeyLine = regexp.MustCompile(`feed_api_key: "[^"]*"`)
+
+// TestWriteStarterConfigSeedsAStrongFeedKey pins the reason the starter seeds a
+// key at all: feed_api_key is the one credential in this config the operator
+// invents rather than copies from another service, so a fresh install must not
+// be able to start life with a weak or empty one. It asserts the properties that
+// matter (present, 32 hex characters, and DIFFERENT on every write) rather than
+// any particular value, and that the result still loads - a key the config
+// validator would reject would make first boot unrecoverable.
+func TestWriteStarterConfigSeedsAStrongFeedKey(t *testing.T) {
+	keyOf := func(t *testing.T, path string) string {
+		t.Helper()
+		if err := writeStarterConfig(path); err != nil {
+			t.Fatalf("writeStarterConfig(%q) = %v, want nil", path, err)
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading starter: %v", err)
+		}
+		m := feedKeyLine.FindSubmatch(b)
+		if m == nil {
+			t.Fatalf("starter has no feed_api_key line:\n%s", b)
+		}
+		return strings.Trim(strings.TrimPrefix(string(m[0]), "feed_api_key: "), `"`)
+	}
+
+	dir := t.TempDir()
+	first := keyOf(t, filepath.Join(dir, "a.yaml"))
+	second := keyOf(t, filepath.Join(dir, "b.yaml"))
+
+	if want := feedKeyBytes * 2; len(first) != want {
+		t.Errorf("generated key length = %d, want %d hex characters", len(first), want)
+	}
+	if _, err := hex.DecodeString(first); err != nil {
+		t.Errorf("generated key is not hex: %v", err)
+	}
+	if first == second {
+		t.Error("two starters share a feed_api_key; the key must be generated per write")
+	}
+	// The generated key must satisfy the validator, including the placeholder
+	// refusal and the strength warning's 16-character floor.
+	if strings.Contains(first, "${") {
+		t.Errorf("generated key looks like an env reference: %d chars", len(first))
+	}
+	if len(first) < 16 {
+		t.Errorf("generated key is %d chars, below the strength floor the config warns at", len(first))
+	}
+	// The written file must still be valid YAML with the key readable as a
+	// string: the substitution quotes the value itself, so a quoting mistake
+	// would break the very file first boot tells the operator to edit.
+	raw, err := os.ReadFile(filepath.Join(dir, "a.yaml"))
+	if err != nil {
+		t.Fatalf("reading starter: %v", err)
+	}
+	var doc struct {
+		Indexer struct {
+			FeedAPIKey string `yaml:"feed_api_key"`
+		} `yaml:"indexer"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("seeded starter is not valid YAML: %v", err)
+	}
+	if doc.Indexer.FeedAPIKey != first {
+		t.Errorf("feed_api_key parsed as %q, want the generated %q", doc.Indexer.FeedAPIKey, first)
+	}
+}
+
+// TestSeedFeedAPIKeyFailsWhenTheExampleChanges pins the anchor: seedFeedAPIKey
+// substitutes one exact spelling, so an edit to config.example.yaml that renames
+// or re-quotes that line must fail loudly here rather than silently shipping a
+// starter with no key.
+func TestSeedFeedAPIKeyFailsWhenTheExampleChanges(t *testing.T) {
+	if _, err := seedFeedAPIKey([]byte("indexer:\n  feed_api_key: ''\n")); err == nil {
+		t.Error("seedFeedAPIKey() = nil error for an example missing the anchored line, want an error")
 	}
 }
 
