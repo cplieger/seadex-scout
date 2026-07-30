@@ -474,10 +474,23 @@ again. Two consequences to plan for:
   announcements rather than issues, so the shape that reads best is one
   notification per recommendation and effectively no repeat: group on the
   finding's identity (`al_id`, `season`, `alert_recommended_group`, `info_hash`)
-  and set a `repeat_interval` long enough that nothing recurs. Keep
+  and set a long `repeat_interval`. Keep
   `send_resolved: false` — a "resolved" message when you finally download a
   release tells you something you already know. `filters.ignore` is how you stop
   a show you have consciously declined from being announced at all.
+- **A long `repeat_interval` alone does not stop the repeats, and this one bites
+  silently.** Alertmanager's notification log is what remembers that a group was
+  already notified, and it expires on `--data.retention` (default **120h**, five
+  days). Once the entry is gone the still-firing alert is treated as new and
+  notified again — so the effective repeat is whichever of `repeat_interval` and
+  the retention is _smaller_, and a one-year interval on a default install
+  re-announces everything every five days. Raise the retention alongside the
+  interval and keep the interval under it. On Prometheus Alertmanager that is
+  `--data.retention`; on Grafana Mimir's built-in Alertmanager it is
+  `-alertmanager.storage.retention` (same 120h default). Alertmanager logs a
+  warning when `repeat_interval` exceeds retention — worth reading the startup
+  logs once after changing either. Upstream states the rule in
+  [prometheus/alertmanager#2890](https://github.com/prometheus/alertmanager/issues/2890).
 - **One consequence of not repeating, stated plainly.** The repeat is also the
   redelivery: if Discord is unreachable when an announcement fires and stays
   unreachable past Alertmanager's own retries, that announcement is gone rather
@@ -485,7 +498,9 @@ again. Two consequences to plan for:
   not the automation path — the release is already in the Torznab feed, so
   Sonarr/Radarr see it regardless, and the finding stays in the logs and the
   report. If you would rather have a safety net, a monthly `repeat_interval`
-  reads as "never" to a human while still giving a failed send another chance.
+  reads as "never" to a human while still giving a failed send another chance —
+  and note that a month is already past the 120h default, so it needs the
+  retention raised too.
 
 **Re-copy `alerts.yaml` when you upgrade to this version.** The rules changed
 shape with the two cadences: the stall deadman now matches the tick's completion

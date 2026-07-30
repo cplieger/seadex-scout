@@ -193,6 +193,35 @@ groups:
       # whole open set, so at the 15m default [12h] tolerates a long run of
       # missed or silent iterations; on a 3h interval it is four. Set it too
       # tight and a quiet stretch produces a fire → resolve → re-fire flap.
+      #
+      # ROUTING THIS ONE, since the shape is not obvious and one part of it fails
+      # silently. Treat each recommendation as its own announcement: group the
+      # ROUTE on the finding's identity (alertname, al_id, season,
+      # alert_recommended_group, info_hash) rather than inheriting a coarse
+      # [alertname, severity]. Under a coarse grouping every open finding shares
+      # one notification group, and since a group notification renders all of its
+      # alerts, one new release re-sends every release the reader already dealt
+      # with, unmarked.
+      #
+      # Then a LONG repeat_interval so nothing recurs - and raise the
+      # notification-log retention with it, which is the part that bites. The
+      # nflog entry is what remembers a group was already notified and it expires
+      # on --data.retention (default 120h; -alertmanager.storage.retention on
+      # Mimir's built-in Alertmanager). Once it is gone the still-firing alert
+      # reads as new and notifies again, so the EFFECTIVE repeat is the smaller of
+      # repeat_interval and retention: a one-year interval on a default install
+      # re-announces everything every five days, and the only hint is a startup
+      # warning. Upstream states the rule in
+      # prometheus/alertmanager#2890. Keep send_resolved false (above).
+      #
+      # The cost of not repeating, so it is a choice and not a surprise: repeat is
+      # also redelivery. A notification lost to an unreachable receiver, past
+      # Alertmanager's own retries, is not retried. That is defensible here
+      # because the release is already in the Torznab feed for the arrs and in the
+      # logs and the report - the message is a convenience, not the pipeline. If
+      # it is not defensible for you, a monthly repeat still reads as "never" to a
+      # human while giving a failed send another chance (and still needs the
+      # retention raised, since a month exceeds 120h).
       # Grouped by the
       # finding's identifying labels so
       # each alert names one title with clickable links: the app emits arr_url,
