@@ -11,6 +11,17 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
+// coveredEpisodes counts the distinct episodes a raw file list spans. It is the
+// two-step census rule (narrow to the counted population, then count) spelled as
+// one call, and it lives HERE because production has no use for that spelling:
+// packEvidenceOf grades a torrent and needs both halves separately, so it calls
+// contentPopulation and distinctEpisodes itself. Keeping this in feed.go made it
+// a production function nothing but tests reached, which is what the deadcode
+// gate reports.
+func coveredEpisodes(files []seadex.File) int {
+	return distinctEpisodes(contentPopulation(files))
+}
+
 // TestSortFeedRetainsOverflow pins the journal feed's ordering + retention
 // contract: items are sorted newest-first by first-seen time and NOTHING is
 // evicted by count - the persisted journal is bounded by age alone

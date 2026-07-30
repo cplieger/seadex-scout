@@ -37,26 +37,3 @@ func CurationWarnings(tags []string) []string {
 	}
 	return out
 }
-
-// curationWarned reports whether a release's SeaDex tag list carries a
-// curation warning (see CurationWarnings).
-//
-// It says nothing about whether the release is excluded from anything: the
-// three recommendation surfaces (the daemon's findings, the audit report, the
-// Torznab feed) each ask the operator's filters.exclude_tags policy
-// (internal/tagfilter) instead, which by default excludes NOTHING - so a
-// release SeaDex tags Broken reaches all three.
-//
-// It is retained deliberately with NO production caller: it is the boolean
-// reading of the display vocabulary above, kept as the one place that question
-// is spelled should a display or diagnostic consumer need it, and it is
-// exercised by this package's unit, property and fuzz tests, which cross-check
-// it against CurationWarnings and so pin the vocabulary discipline
-// (exact, case-insensitive, order-independent) the annotation depends on. It is
-// UNEXPORTED for exactly that reason: an exported symbol whose only references
-// are _test.go files is what CI's punused gate reports (EU1001), and an
-// adjudication entry would claim a cross-package consumer that does not exist.
-// Export it again in the same change that gives it one.
-func curationWarned(tags []string) bool {
-	return len(CurationWarnings(tags)) > 0
-}

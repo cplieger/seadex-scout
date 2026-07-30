@@ -584,15 +584,6 @@ func isPack(t *seadex.Torrent) bool {
 	return packEvidenceOf(t) == packEvidencePack
 }
 
-// coveredEpisodes counts the distinct episodes a torrent's files span, keying on
-// the SxxExx token first and the "- NN" absolute-episode form (space- or
-// underscore-delimited) as a fallback. Creditless extras (NCED/NCOP) and other
-// sidecars carry neither token and are not counted, so an episode bundled with
-// its creditless files still reads as a single episode.
-func coveredEpisodes(files []seadex.File) int {
-	return distinctEpisodes(contentPopulation(files))
-}
-
 // contentPopulation narrows a file list to the population the episode census
 // counts over: the episode pool, then content media files only.
 //
@@ -613,9 +604,14 @@ func contentPopulation(files []seadex.File) []seadex.File {
 	return kept
 }
 
-// distinctEpisodes counts the distinct episodes a census population spans. It is
-// coveredEpisodes' counting rule, split out so packEvidenceOf reads the count
-// and the population it came from without counting twice.
+// distinctEpisodes counts the distinct episodes a census population spans,
+// keying on the SxxExx token first and the "- NN" absolute-episode form (space-
+// or underscore-delimited) as a fallback. Creditless extras (NCED/NCOP) and
+// other sidecars carry neither token and are not counted, so an episode bundled
+// with its creditless files still reads as a single episode.
+//
+// It takes the POPULATION rather than a raw file list so packEvidenceOf can read
+// the count and the population it came from without counting twice.
 func distinctEpisodes(files []seadex.File) int {
 	seen := make(map[string]struct{})
 	for i := range files {
