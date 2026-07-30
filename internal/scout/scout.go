@@ -630,13 +630,18 @@ func (s *Scout) loadMapping(ctx context.Context, st *state.State) (mapping.Cache
 // plus StaleMapError's structured degradation fields (stale_reason,
 // stale_age_seconds, stale_records) when the error carries them, so Loki can
 // query the rejection class and stale age without parsing the message text.
-// rejections is the persisted streak off the returned Cache; it is emitted on
-// its own only when no *StaleMapError supplied it (the no-usable-cache path),
-// so the attribute is present on every escalation without being duplicated.
+//
+// rejections is the persisted streak off the returned Cache and is appended
+// UNCONDITIONALLY, because that is the value escalation reads two lines up. It
+// used to come from the error when one was available, and a transient fetch or
+// parse failure produces a *StaleMapError carrying no streak - so the line that
+// escalated on a nonzero persisted streak could print
+// stale_consecutive_rejections=0, the diagnostic contradicting the decision it
+// exists to explain. mapping.Cache.RejectedRefreshes is now the one carrier.
 func mappingDegradedAttrs(mapErr error, usableRecords, rejections int) []any {
 	attrs := []any{attrError, mapErr, "usable_records", usableRecords}
 	if stale, ok := errors.AsType[*mapping.StaleMapError](mapErr); ok {
-		return append(attrs, stale.LogAttrs()...)
+		attrs = append(attrs, stale.LogAttrs()...)
 	}
 	if rejections > 0 {
 		attrs = append(attrs, "stale_consecutive_rejections", rejections)

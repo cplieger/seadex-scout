@@ -60,10 +60,16 @@ func TestStaleMapError_UnwrapExposesCause(t *testing.T) {
 // TestStaleMapError_LogAttrs pins the structured degradation pairs the scout
 // cycle appends to its degraded-cycle log line (scout.go consumes LogAttrs via
 // errors.AsType): key order and value types must stay queryable in Loki.
+//
+// stale_consecutive_rejections is deliberately NOT here. The streak has one
+// carrier, mapping.Cache.RejectedRefreshes, which is what the scout escalates on
+// and appends itself; this type used to hold a second copy that read 0 for a
+// transient fetch or parse failure, so a caller preferring these attrs could log
+// a zero streak in the very line an escalation fired on a nonzero one.
 func TestStaleMapError_LogAttrs(t *testing.T) {
-	e := &StaleMapError{msg: "refresh failed", age: 90 * time.Second, records: 7, rejections: 2}
+	e := &StaleMapError{msg: "refresh failed", age: 90 * time.Second, records: 7}
 	got := e.LogAttrs()
-	want := []any{"stale_reason", "refresh failed", "stale_age_seconds", 90.0, "stale_records", 7, "stale_consecutive_rejections", 2}
+	want := []any{"stale_reason", "refresh failed", "stale_age_seconds", 90.0, "stale_records", 7}
 	if len(got) != len(want) {
 		t.Fatalf("LogAttrs() len = %d, want %d", len(got), len(want))
 	}
@@ -84,7 +90,6 @@ func TestStaleMapError_shrunkFormMessageAndLogAttrs(t *testing.T) {
 		msg:            "refresh shrank below half of previous",
 		age:            90 * time.Second,
 		records:        4,
-		rejections:     2,
 		shrunkReturned: 1,
 		shrunkPrevious: 4,
 	}
@@ -97,7 +102,6 @@ func TestStaleMapError_shrunkFormMessageAndLogAttrs(t *testing.T) {
 		"stale_reason", "refresh shrank below half of previous",
 		"stale_age_seconds", 90.0,
 		"stale_records", 4,
-		"stale_consecutive_rejections", 2,
 		"stale_returned", 1,
 		"stale_previous", 4,
 	}

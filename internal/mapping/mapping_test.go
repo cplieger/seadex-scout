@@ -487,8 +487,7 @@ func TestAcceptRefresh_identifierBudgetFailsClosed(t *testing.T) {
 		}
 		l := &Loader{log: discardLogger()}
 		next, err := l.acceptRefresh(prev, httpx.ConditionalResult{Body: body})
-		stale, ok := errors.AsType[*StaleMapError](err)
-		if !ok {
+		if _, ok := errors.AsType[*StaleMapError](err); !ok {
 			t.Fatalf("budget-breach error = %v, want a *StaleMapError guard rejection", err)
 		}
 		if !errors.Is(err, errIdentifierBudgetExceeded) {
@@ -499,9 +498,6 @@ func TestAcceptRefresh_identifierBudgetFailsClosed(t *testing.T) {
 		}
 		if next.RejectedRefreshes != 3 {
 			t.Errorf("budget-breach RejectedRefreshes = %d, want 3 (the prior streak advances)", next.RejectedRefreshes)
-		}
-		if stale.rejections != 3 {
-			t.Errorf("budget-breach rejections = %d, want 3", stale.rejections)
 		}
 	})
 }

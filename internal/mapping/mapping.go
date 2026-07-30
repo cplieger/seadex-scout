@@ -216,10 +216,12 @@ type Cache struct {
 	// RejectedRefreshes is the persisted streak of consecutive persistent
 	// refresh refusals. It persists across cycles and restarts, resets
 	// to 0 on any accepted refresh or on a 304 that revalidates a USABLE
-	// cache, and rides on the *StaleMapError
-	// (the rejections field, surfaced as stale_consecutive_rejections by
-	// LogAttrs) so the scout can escalate its degraded-mapping
-	// log at degradation.EscalationThreshold.
+	// cache. It is the ONE carrier: the scout escalates its degraded-mapping log
+	// at degradation.EscalationThreshold from this field and logs
+	// stale_consecutive_rejections from it too, so the number an operator reads
+	// is always the number escalation acted on. *StaleMapError used to carry a
+	// second copy, which read 0 for a transient fetch or parse failure and so
+	// could contradict the escalation in the same line.
 	// It advances even when no usable stale cache exists (a first boot whose
 	// every refresh is refused), because the streak describes the upstream, not
 	// the cache; the scout therefore reads it off this Cache rather than
@@ -456,10 +458,6 @@ type StaleMapError struct {
 	age time.Duration
 	// records is the size of the stale-but-usable record set.
 	records int
-	// rejections is the consecutive acceptance-guard rejection streak
-	// (Cache.RejectedRefreshes) including this rejection; 0 when the
-	// degradation is a fetch or parse failure rather than a guard rejection.
-	rejections int
 	// shrunkReturned/shrunkPrevious carry the shrink guard's counts as
 	// structured facts (the stale_returned/stale_previous attrs and the
 	// Error() parenthetical); zero for every other class. Keeping the live
@@ -489,14 +487,21 @@ func (e *StaleMapError) Unwrap() error { return e.cause }
 
 // LogAttrs returns the degradation facts Error() flattens into prose as
 // structured slog key/value pairs (stale_reason, stale_age_seconds,
-// stale_records, stale_consecutive_rejections), so callers can emit a
-// queryable degraded-cycle log line without parsing the message text.
+// stale_records), so callers can emit a queryable degraded-cycle log line
+// without parsing the message text.
+//
+// It deliberately does NOT carry the rejection streak. That streak lives on
+// Cache.RejectedRefreshes, which is what escalation reads, and this type used to
+// carry a second copy: a transient fetch or parse failure produces a
+// *StaleMapError with no streak, so a caller preferring these attrs logged
+// stale_consecutive_rejections=0 in the very line an escalation had fired on a
+// nonzero persisted streak - the diagnostic contradicting the decision it
+// explains. One fact, one owner; the scout appends the cache value itself.
 func (e *StaleMapError) LogAttrs() []any {
 	attrs := []any{
 		"stale_reason", e.msg,
 		"stale_age_seconds", e.age.Seconds(),
 		"stale_records", e.records,
-		"stale_consecutive_rejections", e.rejections,
 	}
 	if e.shrunkPrevious > 0 {
 		attrs = append(attrs, "stale_returned", e.shrunkReturned, "stale_previous", e.shrunkPrevious)
@@ -547,9 +552,6 @@ func staleOrFail(prev *Cache, staleMsg string, cause, noCache error) (Cache, err
 func rejectRefresh(prev *Cache, staleMsg string, cause, noCache error) (Cache, error) {
 	next, err := staleOrFail(prev, staleMsg, cause, noCache)
 	next.RejectedRefreshes = prev.RejectedRefreshes + 1
-	if stale, ok := errors.AsType[*StaleMapError](err); ok {
-		stale.rejections = next.RejectedRefreshes
-	}
 	return next, err
 }
 
