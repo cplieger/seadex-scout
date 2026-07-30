@@ -3,8 +3,8 @@ module github.com/cplieger/seadex-scout
 go 1.26.5
 
 require (
-	github.com/cplieger/arrapi v1.8.3
-	github.com/cplieger/atomicfile/v2 v2.4.0
+	github.com/cplieger/arrapi v1.8.4
+	github.com/cplieger/atomicfile/v2 v2.5.0
 	github.com/cplieger/health v1.4.0
 	github.com/cplieger/httpx/v2 v2.6.0
 	github.com/cplieger/webhttp v1.20.0
@@ -22,5 +22,5 @@ require github.com/cplieger/envx/yamlenv v1.2.1
 
 require (
 	github.com/cplieger/httpx/v4 v4.2.1 // indirect
-	github.com/cplieger/runesafe v1.2.1 // indirect
+	github.com/cplieger/runesafe v1.3.0 // indirect
 )
