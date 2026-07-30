@@ -330,7 +330,8 @@ func TestTickEmptyRunWarnsAtItsLatch(t *testing.T) {
 	}
 
 	const warn = "no SeaDex change seen for a very long run of ticks; " +
-		"if this persists, check this container's clock against the upstream"
+		"if this persists, check this container's clock against the upstream, " +
+		"and that the probe is reaching releases.moe rather than something answering for it"
 	for i := 1; i <= emptyRunLatch+2; i++ {
 		if healthy := s.Cycle(context.Background()); !healthy {
 			t.Fatalf("tick %d healthy=false, want true", i)
