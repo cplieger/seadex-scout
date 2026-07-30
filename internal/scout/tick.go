@@ -89,12 +89,12 @@ func (s *Scout) tick(ctx context.Context) bool {
 		// No complete pass has established the finding set yet (the startup
 		// reconcile failed or was gated, and the retry budget is spent), so
 		// this tick's handful of findings would publish as the app's whole
-		// state. Emit the liveness line and nothing else: an empty set must not
-		// be published either, since "no findings" is a claim this tick cannot
-		// make. The failed reconciles' own degraded lines and their escalation
-		// are what tell the operator why.
-		s.log.Warn("tick degraded", "reason", "awaiting-first-reconcile",
-			"reconcile_attempts", s.reconcileRetries)
+		// state. Emit the liveness line and nothing else: the set is provably
+		// empty here (only a reconcile's Report can fill it, and that is what
+		// sets ready), and an empty "findings reported" line reads as "no
+		// findings" - a claim this tick cannot make. The failed reconciles' own
+		// degraded lines and their escalation are what tell the operator why.
+		s.logTickDegraded("awaiting-first-reconcile", "reconcile_attempts", s.reconcileRetries)
 		return true
 	}
 	since := time.Now().Add(-changeWindow)
@@ -150,8 +150,17 @@ func (s *Scout) tick(ctx context.Context) bool {
 // no walk, and health follows the library ingest.
 func (s *Scout) tickDegraded(reason string, attrs ...any) bool {
 	s.deps.Notifier.Reemit()
-	s.log.Warn("tick degraded", append([]any{"reason", reason}, attrs...)...)
+	s.logTickDegraded(reason, attrs...)
 	return true
+}
+
+// logTickDegraded is the ONE site that emits the degraded-tick line. It is
+// separate from tickDegraded because the not-ready arm needs the line without the
+// re-statement, and this message is pinned by alerts.yaml's stall rule - a second
+// emission site is a string two callers can drift apart, which is the same reason
+// the escalation ERRORs each have exactly one.
+func (s *Scout) logTickDegraded(reason string, attrs ...any) {
+	s.log.Warn("tick degraded", append([]any{"reason", reason}, attrs...)...)
 }
 
 // warnUnreachableUpstream reports a tick that could not read SeaDex and
