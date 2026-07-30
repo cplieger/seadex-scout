@@ -3,24 +3,24 @@ module github.com/cplieger/seadex-scout
 go 1.26.5
 
 require (
-	github.com/cplieger/arrapi v1.8.1
-	github.com/cplieger/atomicfile/v2 v2.4.0
+	github.com/cplieger/arrapi v1.8.4
+	github.com/cplieger/atomicfile/v2 v2.5.0
 	github.com/cplieger/health v1.4.0
-	github.com/cplieger/webhttp v1.16.0
+	github.com/cplieger/webhttp v1.20.0
 )
 
-require go.yaml.in/yaml/v3 v3.0.4
+require go.yaml.in/yaml/v3 v3.0.5
 
-require github.com/cplieger/slogx v1.4.0
+require github.com/cplieger/slogx v1.5.0
 
 require pgregory.net/rapid v1.3.0
 
 require (
-	github.com/cplieger/envx/yamlenv v1.2.0
+	github.com/cplieger/envx/yamlenv v1.2.1
 	github.com/cplieger/scheduler/v2 v2.0.0
 )
 
-require github.com/cplieger/httpx/v4 v4.1.0
+require github.com/cplieger/httpx/v4 v4.2.1
 
 require github.com/cplieger/jsonx v1.3.0
 
