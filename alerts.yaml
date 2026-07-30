@@ -8,6 +8,22 @@
 # Thresholds and the severity labels are starting points; adjust the container
 # selector (or job/service, depending on your log collector) to your deployment
 # and the stall window to your poll_interval.
+#
+# STABLE MESSAGES (the log contract). These five are what the rules below match
+# on, and they are the ONLY log output treated as a contract - they will not be
+# renamed or retyped without a matching change here:
+#
+#   level=ERROR                     any run fault (the rules key on the level, not a message)
+#   msg="better release available"  the better-release finding
+#   msg="report written"            a report was generated
+#   msg="cycle complete|degraded"   \ the loop deadman, matched as
+#   msg="tick complete|degraded"    / "(cycle|tick) (complete|degraded)"
+#   msg="reconcile complete"        the backstop deadman
+#
+# Every OTHER message and attribute this app logs is diagnostic, not contract:
+# it may be reworded, re-levelled, or change attribute type in any release. If
+# you build a rule or dashboard on one of those, pin your own copy of the text -
+# do not assume it survives an upgrade.
 groups:
   - name: seadex-scout
     rules:
