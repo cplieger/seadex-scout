@@ -172,16 +172,10 @@ func (s *Scout) logTickDegraded(reason string, attrs ...any) {
 // keeps firing while the condition holds.
 func (s *Scout) warnUnreachableUpstream(msg string, err error) {
 	s.unreachableRun++
-	attrs := []any{
-		"error", logSafeUpstreamError(err),
-		"consecutive_unreachable_ticks", s.unreachableRun,
-	}
-	if s.unreachableRun >= unreachableRunLatch {
-		s.log.Error("SeaDex has been unreadable on every recent tick; the fast path is blind and only the daily reconcile is refreshing - inspect releases.moe reachability and egress",
-			attrs...)
-		return
-	}
-	s.log.Warn(msg, attrs...)
+	s.escalate(s.unreachableRun, unreachableRunLatch, msg,
+		"SeaDex has been unreadable on every recent tick; the fast path is blind and only the daily reconcile is refreshing - inspect releases.moe reachability and egress",
+		attrError, logSafeUpstreamError(err),
+		"consecutive_unreachable_ticks", s.unreachableRun)
 }
 
 // warnOversizeWindow reports a window too large to fetch, escalating a
@@ -191,16 +185,11 @@ func (s *Scout) warnUnreachableUpstream(msg string, err error) {
 // a real remedy (wait for the reconcile, or check the clock, since a clock
 // running BEHIND widens every window the same way a bulk upstream edit does).
 func (s *Scout) warnOversizeWindow(count int) {
-	attrs := []any{
+	s.escalate(s.oversizeRun, oversizeRunLatch,
+		"SeaDex change window too large to fetch; deferring to the reconcile",
+		"SeaDex change window has been too large to fetch repeatedly; the fast path is frozen and only the daily reconcile is refreshing - check this container's clock, then wait for the reconcile",
 		"window_entries", count, "max", seadex.MaxWindowEntries,
-		"consecutive_oversize_ticks", s.oversizeRun, "window", changeWindow.String(),
-	}
-	if s.oversizeRun >= oversizeRunLatch {
-		s.log.Error("SeaDex change window has been too large to fetch repeatedly; the fast path is frozen and only the daily reconcile is refreshing - check this container's clock, then wait for the reconcile",
-			attrs...)
-		return
-	}
-	s.log.Warn("SeaDex change window too large to fetch; deferring to the reconcile", attrs...)
+		"consecutive_oversize_ticks", s.oversizeRun, "window", changeWindow.String())
 }
 
 // tickChanged runs the tick's work once the probe has said there is something

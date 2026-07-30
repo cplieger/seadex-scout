@@ -736,24 +736,59 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 	return true
 }
 
+// escalate emits a latched degradation at the level its streak has earned: ERROR
+// once the streak has reached threshold, WARN before that, with the SAME attrs
+// either way so a Loki query does not have to know which level it landed at.
+//
+// Four conditions across both kinds of pass share this shape - a failed SeaDex
+// fetch and a shrunken walk on the reconcile, an unreadable upstream and an
+// oversized window on the tick - and the rule they share is the app's alert
+// contract, not a coincidence: WARN is a transient failure or a designed outcome,
+// ERROR is reserved for a condition that will not clear without an operator, and
+// the streak is what tells those two apart. Spelling it four times is four places
+// for the level policy to drift from the one documented above.
+//
+// Both messages are passed in rather than derived: the WARN and the ERROR say
+// different things to the operator (what happened, versus what to go fix), and
+// both are pinned by alerts.yaml and by tests.
+func (s *Scout) escalate(streak, threshold int, warnMsg, errMsg string, attrs ...any) {
+	if streak >= threshold {
+		s.log.Error(errMsg, attrs...)
+		return
+	}
+	s.log.Warn(warnMsg, attrs...)
+}
+
+// advanceStreak advances or resets a persisted degradation streak and reports
+// whether it has reached its escalation threshold.
+//
+// The reset arm is the half that matters and the half that could drift: a streak
+// counts CONSECUTIVE failures, so evidence of success has to zero it, and the two
+// callers (recordAniListDegradation, recordPartialWalk) each advance only on a
+// COMPLETED cycle - a gated or interrupted one observed neither an outage nor a
+// recovery, so it must do neither. Keeping that in one place is why this exists;
+// the callers keep their own names and messages because those are what the log
+// contract pins.
+func advanceStreak(counter *int, degraded bool, threshold int) bool {
+	if !degraded {
+		*counter = 0
+		return false
+	}
+	*counter++
+	return *counter >= threshold
+}
+
 // recordAniListDegradation advances or resets the persisted AniList
-// degradation streak and escalates a sustained outage. The streak
-// advances/resets only on COMPLETED cycles (mirroring how SeadexFailures
-// resets beside the fetch-success check): a gated or interrupted cycle is
-// evidence of neither an outage nor a recovery. It runs before the completion
-// line so the WARN and the escalated ERROR both carry the up-to-date streak,
-// and the persisted value rides the caller's save. The escalation fires on
-// EVERY completed AniList-degraded cycle at the threshold, including one
+// degradation streak and escalates a sustained outage (see advanceStreak for the
+// advance/reset rule this shares with recordPartialWalk). It runs before the
+// completion line so the WARN and the escalated ERROR both carry the up-to-date
+// streak, and the persisted value rides the caller's save. The escalation fires
+// on EVERY completed AniList-degraded cycle at the threshold, including one
 // whose completion line the partial-walk switch arm wins - otherwise a
 // sustained AniList outage that coexists with a persistent partial walk
 // advances the streak forever without ever alerting.
 func (s *Scout) recordAniListDegradation(st *state.State, result *match.Result) {
-	if !result.Degraded {
-		st.AniListDegraded = 0
-		return
-	}
-	st.AniListDegraded++
-	if st.AniListDegraded >= aniListDegradedEscalationThreshold {
+	if advanceStreak(&st.AniListDegraded, result.Degraded, aniListDegradedEscalationThreshold) {
 		s.log.Error("anilist lookups degraded repeatedly; matching incomplete and findings frozen for affected entries - inspect graphql.anilist.co reachability and egress",
 			"incomplete_lookups", len(result.IncompleteIDs),
 			"consecutive_anilist_degraded", st.AniListDegraded)
@@ -761,23 +796,18 @@ func (s *Scout) recordAniListDegradation(st *state.State, result *match.Result) 
 }
 
 // recordPartialWalk advances or resets the persisted partial-walk streak and
-// escalates a sustained partial ingest. It mirrors recordAniListDegradation
-// exactly: the streak advances/resets only on COMPLETED cycles (a gated or
-// interrupted cycle observed no walk verdict), it runs before the completion
-// line so the escalated ERROR precedes the degraded-cycle line it explains,
-// and the persisted value rides the caller's save. Unlike the AniList arm the
-// streak is NOT threaded into logCompletedCycle, so consecutive_partial_walks
-// appears on the escalated ERROR only. Without it a single permanently failing
-// series is signalled only by the per-cycle "reason=partial-walk" WARN forever -
-// and since those items' findings are carried forward on evidence that never
-// refreshes, nothing would ever escalate the silence.
+// escalates a sustained partial ingest. It mirrors recordAniListDegradation, and
+// they now share the advance/reset rule itself (advanceStreak): it runs before
+// the completion line so the escalated ERROR precedes the degraded-cycle line it
+// explains, and the persisted value rides the caller's save. Unlike the AniList
+// arm the streak is NOT threaded into logCompletedCycle, so
+// consecutive_partial_walks appears on the escalated ERROR only. Without it a
+// single permanently failing series is signalled only by the per-cycle
+// "reason=partial-walk" WARN forever - and since those items' findings are
+// carried forward on evidence that never refreshes, nothing would ever escalate
+// the silence.
 func (s *Scout) recordPartialWalk(st *state.State, snap *library.Snapshot) {
-	if !snap.Partial {
-		st.PartialWalks = 0
-		return
-	}
-	st.PartialWalks++
-	if st.PartialWalks >= partialWalkEscalationThreshold {
+	if advanceStreak(&st.PartialWalks, snap.Partial, partialWalkEscalationThreshold) {
 		s.log.Error("library walk partial repeatedly; the failing series never compare and the one-shot report refuses a partial snapshot, so those items' findings are carried forward on evidence that never refreshes - inspect the arrs' episode endpoints for the skipped series",
 			"consecutive_partial_walks", st.PartialWalks)
 	}
@@ -1004,11 +1034,10 @@ func (s *Scout) recordSeaDexFetch(ctx context.Context, st *state.State, seaErr e
 	// Loki can see how long the outage has run.
 	st.SeadexFailures++
 	attrs := []any{attrError, logSafeUpstreamError(seaErr), "consecutive_seadex_failures", st.SeadexFailures, "feed_kept", s.deps.Feed != nil}
-	if st.SeadexFailures >= seadexFailureEscalationThreshold {
-		s.log.Error("seadex fetch failed repeatedly; skipping comparison, findings not re-reported this cycle - inspect SeaDex (releases.moe) reachability and egress", attrs...)
-	} else {
-		s.log.Warn("seadex fetch failed; skipping comparison, findings not re-reported this cycle", attrs...)
-	}
+	s.escalate(st.SeadexFailures, seadexFailureEscalationThreshold,
+		"seadex fetch failed; skipping comparison, findings not re-reported this cycle",
+		"seadex fetch failed repeatedly; skipping comparison, findings not re-reported this cycle - inspect SeaDex (releases.moe) reachability and egress",
+		attrs...)
 }
 
 // handleLibraryGate gates the compare pass on the library ingest. A failed arr
@@ -1085,12 +1114,10 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap lib
 			"prior_items", len(st.Library.Items),
 			"consecutive_shrunk_walks", st.ShrunkWalks,
 		}
-		if st.ShrunkWalks >= shrunkWalkEscalationThreshold {
-			s.log.Error("library walk shrank repeatedly; skipping comparison, findings not re-reported this cycle - inspect the arrs and arr_tags, or remove state.json to accept the smaller library", attrs...)
-		} else {
-			s.log.Warn("library walk shrank below half the prior snapshot; skipping comparison, findings not re-reported this cycle", attrs...)
-		}
-		// A shutdown that landed after the shrunken walk (cancelling the
+		s.escalate(st.ShrunkWalks, shrunkWalkEscalationThreshold,
+			"library walk shrank below half the prior snapshot; skipping comparison, findings not re-reported this cycle",
+			"library walk shrank repeatedly; skipping comparison, findings not re-reported this cycle - inspect the arrs and arr_tags, or remove state.json to accept the smaller library",
+			attrs...) // A shutdown that landed after the shrunken walk (cancelling the
 		// SeaDex fetch or mapping load) keeps the no-completion-line rule,
 		// mirroring the walk-failed arm above: an interrupted cycle did not
 		// complete, degraded or not. The shrink WARN and streak stay - the
