@@ -234,9 +234,14 @@ type cancelingSeaDex struct {
 	err    error
 }
 
-func (c *cancelingSeaDex) FetchEntries(context.Context) ([]seadex.Entry, error) {
+func (c *cancelingSeaDex) FetchEntries(context.Context, seadex.Options) ([]seadex.Entry, error) {
 	c.cancel()
 	return nil, c.err
+}
+
+func (c *cancelingSeaDex) CountWindow(context.Context, time.Time) (int, error) {
+	c.cancel()
+	return 0, c.err
 }
 
 // TestReportSeaDexCancellationBoundsErrorText pins Report's SeaDex arm on the

@@ -264,6 +264,13 @@ func (p *probingFeed) Rebuild(_ context.Context, _ []seadex.Entry, info indexer.
 	return nil
 }
 
+// Advance is unreachable in this fake's tests (they all reconcile) but must
+// exist to satisfy the seam; it records nothing so a misrouted dispatch shows
+// up as an empty got map rather than a plausible-looking one.
+func (p *probingFeed) Advance(context.Context, []seadex.Entry, indexer.EntryInfoFunc) error {
+	return nil
+}
+
 // TestCycleFeedInfoClassifiesViaFribbIndex pins the per-show metadata closure
 // Cycle hands the feed writer: IsMovie must report true for a MOVIE record,
 // false for a TV record, and false for an unmapped id (the safe Anime
@@ -354,6 +361,11 @@ func TestCycleWalkFailShutdownDuringSeaDexFetchStaysSilent(t *testing.T) {
 type cancellingFeed struct{ cancel context.CancelFunc }
 
 func (c *cancellingFeed) Rebuild(context.Context, []seadex.Entry, indexer.EntryInfoFunc) error {
+	c.cancel()
+	return context.Canceled
+}
+
+func (c *cancellingFeed) Advance(context.Context, []seadex.Entry, indexer.EntryInfoFunc) error {
 	c.cancel()
 	return context.Canceled
 }

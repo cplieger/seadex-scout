@@ -165,33 +165,51 @@ func runHealthProbe(args []string, configPath string) bool {
 // tolerates before the probe calls the compare loop wedged.
 const healthLeaseFactor = 3
 
-// healthMaxAge is the marker freshness lease armed by the health subcommand: 0
-// (no deadline) in external mode, else healthLeaseFactor intervals - but never
-// less than that many DEFAULT intervals.
+// coldReconcileAllowance is the floor on the marker freshness lease: the time a
+// FULL pass is allowed to take before the probe may call the loop wedged.
 //
-// The floor exists because the marker is refreshed only when a cycle COMPLETES,
+// It is a measured allowance, not a guess. A cold reconcile - no state.json, so
+// the AniList memo is built from scratch over the whole catalogue - has been
+// measured at ~25 minutes and historically ran to ~2h on a large library. 3h
+// carries that with margin.
+//
+// It exists as its own constant because the thing it has to cover stopped being
+// the same thing as the poll interval. The lease used to floor on
+// config.DefaultPollInterval, which was correct while that default WAS the full
+// cycle's cadence: flooring at 3 x 3h gave a cold cycle 9h. The default is now
+// the TICK interval (15m), so that floor would give a cold reconcile 45 minutes
+// and then ask for the restart that kills the walk before the memo is saved -
+// making the next boot cold again, which is the exact self-defeating loop the
+// old floor was written to prevent. Same failure, same remedy, different
+// number to peg it to.
+const coldReconcileAllowance = 3 * time.Hour
+
+// healthMaxAge is the marker freshness lease armed by the health subcommand: 0
+// (no deadline) in external mode, else healthLeaseFactor intervals, floored at
+// coldReconcileAllowance.
+//
+// The lease exists because the marker is refreshed only when a pass COMPLETES,
 // and the loop measures its delay AFTER the job returns, so the gap between two
-// refreshes is one cycle plus up to 1.1 intervals (scheduler's 0.10 jitter).
-// A bare healthLeaseFactor*interval therefore calls a HEALTHY daemon wedged as
-// soon as a cycle runs longer than ~1.9 intervals - reachable at the 1h
-// interval floor by a cold first boot on a large library (no state.json, so the
-// AniList memo is built from scratch), and self-defeating: the restart it asks
-// for kills the walk before the memo is saved, so the next cycle is cold again.
-// Flooring the lease at the lease the DEFAULT interval would get keeps the
-// wedge detection the docstring promises for every interval at or above the
-// default (the deployed 3h still restarts at 9h) while a shorter operator
-// interval only makes cycles more frequent, never the wedge deadline tighter.
-// The floor rides config.DefaultPollInterval rather than a new
-// cycle-duration allowance so the app grows no second, invented threshold; the
-// runner-up was refreshing the marker mid-cycle so the lease measures liveness
-// instead of completion, rejected here because that changes what the marker
-// MEANS (internal/cycle publishes a verdict per completed cycle) for a case a
-// floor covers without touching the contract.
+// refreshes is one pass plus up to 1.1 intervals (scheduler's 0.10 jitter). In
+// steady state that gap is a TICK - one small request, or one tiny one when
+// nothing changed - so healthLeaseFactor*interval is a tight and honest wedge
+// deadline: 45 minutes at the 15m default, tighter than the 9h it used to be.
+//
+// The floor covers the one pass that is not cheap. Every reconcileEvery-th
+// iteration is a full pass, and the FIRST iteration after any boot is one, so a
+// cold boot has no tick-refreshed marker to lean on. Taking the larger of the
+// two keeps the deployed 3h interval on exactly its old 9h lease while giving a
+// 15m interval 3h rather than 45m.
+//
+// The rejected alternative is still rejected: refreshing the marker mid-pass
+// would make the lease measure liveness rather than completion, which changes
+// what the marker MEANS (internal/cycle publishes a verdict per completed pass)
+// for a case a floor covers without touching the contract.
 func healthMaxAge(interval time.Duration) time.Duration {
 	if interval <= 0 {
 		return 0
 	}
-	return healthLeaseFactor * max(interval, config.DefaultPollInterval)
+	return max(healthLeaseFactor*interval, coldReconcileAllowance)
 }
 
 // errStarterWritten is returned by loadRuntimeConfig after a first boot

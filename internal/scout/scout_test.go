@@ -61,26 +61,86 @@ func (f *flakySonarr) GetEpisodeFiles(ctx context.Context, seriesID int) ([]arra
 // error so orchestration tests drive cycle outcomes directly, without the
 // PocketBase adapter or an httptest server (the seadex package's own suite
 // covers adapter behavior).
+//
+// It serves BOTH halves of the seam. A full fetch answers entries/err; a
+// windowed fetch answers windowEntries/windowErr, so one fake can drive a
+// reconcile and a tick in the same test without either half's scripting
+// leaking into the other. Every call is recorded: opts carries the Options of
+// each FetchEntries in order (which is how a test asserts a reconcile asked
+// for FetchFull and a tick for FetchWindow with a live Since), and countSince
+// carries each CountWindow's since.
 type fakeSeaDex struct {
 	err     error
 	entries []seadex.Entry
+
+	// countFn scripts the tick's probe. Nil reports len(windowEntries), the
+	// consistent reading for a test that only sets a window.
+	countFn       func(ctx context.Context, since time.Time) (int, error)
+	windowEntries []seadex.Entry
+	windowErr     error
+
+	opts       []seadex.Options
+	countSince []time.Time
 }
 
-func (f *fakeSeaDex) FetchEntries(context.Context) ([]seadex.Entry, error) {
+func (f *fakeSeaDex) FetchEntries(_ context.Context, opts seadex.Options) ([]seadex.Entry, error) {
+	f.opts = append(f.opts, opts)
+	if opts.Mode == seadex.FetchWindow {
+		return f.windowEntries, f.windowErr
+	}
 	return f.entries, f.err
 }
 
-// fakeFeed records FeedWriter.Rebuild calls, optionally failing them.
+func (f *fakeSeaDex) CountWindow(ctx context.Context, since time.Time) (int, error) {
+	f.countSince = append(f.countSince, since)
+	if f.countFn != nil {
+		return f.countFn(ctx, since)
+	}
+	return len(f.windowEntries), nil
+}
+
+// fetchModes reports the mode of every FetchEntries call in order, which is
+// what a dispatcher test asserts against.
+func (f *fakeSeaDex) fetchModes() []seadex.FetchMode {
+	modes := make([]seadex.FetchMode, 0, len(f.opts))
+	for _, o := range f.opts {
+		modes = append(modes, o.Mode)
+	}
+	return modes
+}
+
+// fakeFeed records FeedWriter.Rebuild and FeedWriter.Advance calls SEPARATELY,
+// optionally failing either. Keeping the two counts apart is the point: a tick
+// must advance and never rebuild, and a reconcile the reverse, so a shared
+// counter could not tell a correct dispatch from an inverted one.
 type fakeFeed struct {
-	err     error
-	calls   int
-	entries int
+	err        error
+	advanceErr error
+	calls      int
+	entries    int
+
+	advanceCalls   int
+	advanceEntries int
+	// advanceWindows records each Advance window's AniList IDs, so a test can
+	// assert WHICH entries were folded in, not just how many.
+	advanceWindows [][]int
 }
 
 func (f *fakeFeed) Rebuild(_ context.Context, entries []seadex.Entry, _ indexer.EntryInfoFunc) error {
 	f.calls++
 	f.entries = len(entries)
 	return f.err
+}
+
+func (f *fakeFeed) Advance(_ context.Context, window []seadex.Entry, _ indexer.EntryInfoFunc) error {
+	f.advanceCalls++
+	f.advanceEntries = len(window)
+	ids := make([]int, 0, len(window))
+	for i := range window {
+		ids = append(ids, window[i].AniListID)
+	}
+	f.advanceWindows = append(f.advanceWindows, ids)
+	return f.advanceErr
 }
 
 // fakeStore is an in-package StateStore: it holds State in memory so

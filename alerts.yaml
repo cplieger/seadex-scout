@@ -76,21 +76,21 @@ groups:
       # receiver so you are told when the watcher recovers.
       - alert: SeadexScoutScanStalled
         expr: |
-          absent_over_time({container="seadex-scout"} |~ `cycle (complete|degraded)` [7h])
-        for: 1h
+          absent_over_time({container="seadex-scout"} |~ `(cycle (complete|degraded)|tick complete)` [2h])
+        for: 15m
         labels:
           severity: warning
         annotations:
-          summary: "seadex-scout has not completed a cycle in 7h"
+          summary: "seadex-scout has not completed a pass in 2h"
           description: >
-            seadex-scout (daemon mode) closes every cycle with a `cycle complete`
-            line, or a `cycle degraded` line when a failed arr walk, an upstream
-            outage, or a safety guard skipped the comparison; both count here.
-            Neither in 7h while
-            the container is up (about two missed cycles, allowing for jitter)
-            means the poll loop is wedged and better-release findings have
-            silently stopped; restart the container. Adjust the window to your
-            poll_interval. This rule is built for built-in (daemon) mode: in
+            seadex-scout closes every loop iteration with a line: `tick complete`
+            for a cheap recent-changes pass, `cycle complete` for a full
+            reconcile, or `cycle degraded` when a failed arr walk, an upstream
+            outage, or a safety guard skipped the comparison. None of them in 2h
+            while the container is up (about eight missed iterations at the 15m
+            default, allowing for jitter) means the poll loop is wedged and both
+            the RSS feed and better-release findings have silently stopped;
+            restart the container. Adjust the window to your poll_interval. This rule is built for built-in (daemon) mode: in
             resident-idle (poll_interval: off) or report mode each cycle runs
             via a docker exec child, so its completion lines never reach the
             collector — that blinds the count-based rules, but this
@@ -99,6 +99,38 @@ groups:
             the stream that carries the completion lines (your runner's logs,
             if your collector ships them), and alert on the external
             scheduler's job result instead.
+      # The BACKSTOP deadman, and the reason it is separate from the rule above.
+      # Most loop iterations are a cheap tick over a bounded recent-changes
+      # window. A window structurally cannot see a deletion, a de-curation, an
+      # in-place torrent edit, a shared torrent's other parents, an outage
+      # longer than the window, or a clock wrong by more than it — the full
+      # reconcile is the backstop for every one of those, and it is also what
+      # refreshes the library snapshot the ticks compare against. So a reconcile
+      # that silently stopped forever would make all of those gaps permanent
+      # while `tick complete` kept the stall rule above perfectly satisfied.
+      # This watches the reconcile alone. The window is 3x the app's 24h
+      # reconcile interval: two missed reconciles are tolerated, a third is a
+      # fault. Same external-mode caveat as the stall rule.
+      - alert: SeadexScoutReconcileStalled
+        expr: |
+          absent_over_time({container="seadex-scout"} |~ `reconcile complete` [72h])
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "seadex-scout has not completed a full reconcile in 72h"
+          description: >
+            seadex-scout runs a full reconcile (whole catalogue, whole arr walk,
+            whole feed and search-index rebuild) every 24h and closes it with a
+            `reconcile complete` line. It is the backstop for everything the
+            15-minute ticks cannot see: a release removed from SeaDex, a
+            de-curation, an edit that did not bump its entry, an outage longer
+            than the change window, and a badly wrong container clock. It is also
+            what refreshes the Sonarr/Radarr snapshot the ticks compare against,
+            so while it is stopped a finding you have already acted on keeps
+            being reported. None in 72h (two missed reconciles) means the full
+            pass is failing or the loop's cadence is wrong — check for repeated
+            `cycle degraded` or arr-walk errors in the same stream.
       # Informational, not a fault: SeaDex recommends a better release than the
       # one on disk — the app's activity signal; keep it at severity info or drop
       # it, it is not page-worthy.

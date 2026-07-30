@@ -1001,9 +1001,10 @@ func TestParseIntervalBoundsAndFallback(t *testing.T) {
 		wantDur time.Duration
 		wantExt bool
 	}{
-		{"below minimum clamps up to 1h", "30m", minPollInterval, false},
+		{"below minimum clamps up to the floor", "5m", minPollInterval, false},
 		{"above maximum clamps down", "9000h", maxPollInterval, false},
-		{"minimum itself passes unclamped", "1h", minPollInterval, false},
+		{"minimum itself passes unclamped", "15m", minPollInterval, false},
+		{"above the minimum passes unclamped", "30m", 30 * time.Minute, false},
 		{"negative falls back to default", "-5h", DefaultPollInterval, false},
 		{"unparseable falls back to default", "every day", DefaultPollInterval, false},
 	}
@@ -1431,7 +1432,7 @@ func TestPollIntervalFromFile(t *testing.T) {
 		want    time.Duration
 	}{
 		{"scheduled interval is returned", "poll_interval: \"6h\"\n", 6 * time.Hour},
-		{"below-minimum interval is clamped like Load", "poll_interval: \"30m\"\n", minPollInterval},
+		{"below-minimum interval is clamped like Load", "poll_interval: \"5m\"\n", minPollInterval},
 		{"external mode disables the deadline", "poll_interval: \"off\"\n", 0},
 		{"disabled sentinel disables the deadline", "poll_interval: \"disabled\"\n", 0},
 		{"absent key falls back to the default interval", "mode: \"daemon\"\n", DefaultPollInterval},
@@ -2116,7 +2117,7 @@ func TestPollIntervalFromFileDiscardsSchedulerDiagnostics(t *testing.T) {
 		value string
 		want  time.Duration
 	}{
-		{"below-minimum clamp", "30m", minPollInterval},
+		{"below-minimum clamp", "5m", minPollInterval},
 		{"above-maximum clamp", "9000h", maxPollInterval},
 		{"negative falls back", "-5h", DefaultPollInterval},
 		{"unparseable falls back", "every day", DefaultPollInterval},

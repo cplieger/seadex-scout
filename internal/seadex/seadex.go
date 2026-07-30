@@ -10,6 +10,7 @@ package seadex
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -56,6 +57,22 @@ const (
 	// maxPageBytes bounds one page (500 entries with expanded torrents) before
 	// decode, guarding against an oversized or malicious payload.
 	maxPageBytes = 48 << 20
+
+	// MaxWindowEntries is the largest window a caller should fetch in one pass.
+	// It is perPage, so a window at or under it is always ONE request: the
+	// bound exists to keep a bulk upstream edit from turning every tick into a
+	// multi-page walk, which at a 15-minute cadence costs more than the full
+	// pass it was meant to replace. A caller over the bound defers to a full
+	// pass rather than fetching a truncated prefix - and it must, because the
+	// walk sorts on `created`, so the first page of an oversized window holds
+	// the OLDEST records, the opposite of what a freshness pass wants.
+	MaxWindowEntries = perPage
+
+	// maxProbeBytes bounds CountWindow's response. It carries one id and the
+	// list metadata - measured at 88 bytes - so 4 KiB is a generous ceiling
+	// that still refuses a body that is not the shape asked for.
+	maxProbeBytes = 4 << 10
+
 	// maxTotalBytes caps cumulative page bytes across the whole fetch so a
 	// compromised upstream serving few-but-huge items per page (under the
 	// entry-count cap) cannot accumulate maxPages*maxPageBytes of memory.
@@ -395,6 +412,20 @@ func (c cursor) filter() string {
 	return "(created>" + created + "||(created=" + created + "&&id>" + id + "))"
 }
 
+// joinFilters renders the page request's filter: the keyset cursor's
+// strictly-after clause, the window's changed-since clause, or both ANDed. An
+// empty result means an unfiltered first page of a full walk.
+func joinFilters(cur cursor, opts Options) string {
+	parts := make([]string, 0, 2)
+	if cur.set() {
+		parts = append(parts, cur.filter())
+	}
+	if opts.Mode == FetchWindow {
+		parts = append(parts, windowFilter(opts.Since))
+	}
+	return strings.Join(parts, "&&")
+}
+
 // filterQuoteEscaper escapes the two characters that could break out of a
 // double-quoted PocketBase filter literal. Cursor values are upstream data;
 // filterSafe already refuses the shapes that have no business in a PocketBase
@@ -503,6 +534,95 @@ func advanceCursor(items []pbEntry, prev cursor) (cursor, error) {
 	return pos, nil
 }
 
+// FetchMode selects a fetch's COMPLETENESS POLICY. The wire request is the
+// same either way - one filter conjunct apart - but what counts as a valid
+// result is not, and conflating the two is how a windowed fetch would silently
+// inherit guards written for a whole catalogue.
+type FetchMode uint8
+
+const (
+	// FetchFull walks the whole collection. Every completeness guard applies:
+	// SeaDex is never legitimately empty, a walk no reported total vouches for
+	// is refused, and a below-half shortfall is refused.
+	FetchFull FetchMode = iota
+	// FetchWindow walks only the records changed since Options.Since. It is
+	// legitimately EMPTY (measured: 6 of 90 days upstream had no change at
+	// all), so the empty-catalogue and no-reported-total guards must not
+	// apply, and the catalogue-scale shrink comparison is meaningless against
+	// it. Every STRUCTURAL guard still applies - per-page byte and element
+	// budgets, the entry cap, keyset progression, positive AniList IDs,
+	// cross-page identity uniqueness - because those judge the wire response,
+	// not the catalogue.
+	FetchWindow
+)
+
+// Options selects what a fetch retrieves and how its result is judged.
+// The zero value is a full-catalogue walk.
+type Options struct {
+	// Since bounds a FetchWindow to records whose `updated` is strictly after
+	// it. Ignored by FetchFull. A FetchWindow with a zero Since is an error
+	// rather than a silent full fetch: the zero time is also what a failed
+	// timestamp parse yields, so accepting it would turn a malformed value
+	// into a full fetch with the completeness guards switched off.
+	Since time.Time
+	Mode  FetchMode
+}
+
+// windowFilter renders the PocketBase filter conjunct selecting records changed
+// since t. It is ANDed with the keyset cursor's own filter, so the walk pages on
+// the IMMUTABLE (created, id) pair while selecting on the mutable `updated` -
+// sorting on `updated` would let a record edited mid-walk move between chunks
+// and be skipped, which is the class the keyset migration closed.
+func windowFilter(t time.Time) string {
+	return "updated>" + quoteFilterValue(t.UTC().Format("2006-01-02 15:04:05.000Z"))
+}
+
+// CountWindow reports how many records changed since t, without downloading
+// any of them: one request of ~88 bytes (perPage=1, fields=id), read off the
+// response's totalItems.
+//
+// It is the tick's cost bound, and it exists because the alternative is worse.
+// Reading the count off a real page means downloading a page first - up to
+// ~2.9 MiB - so a bulk upstream edit would cost that on every tick for as long
+// as the edit stayed in the window. And a one-page cap cannot substitute: the
+// walk sorts on `created`, so page 1 of an oversized window holds the OLDEST
+// records, which is precisely not what a freshness tick wants.
+//
+// A negative total is an error, not a zero: PocketBase answers `totalItems: -1`
+// when a caller asks it to skip the count, so treating negative as "nothing
+// changed" would read a degenerate response as a clean empty window.
+func (c *Client) CountWindow(ctx context.Context, since time.Time) (int, error) {
+	if since.IsZero() {
+		return 0, errors.New("seadex: CountWindow needs a non-zero since")
+	}
+	q := url.Values{
+		"page":    {"1"},
+		"perPage": {"1"},
+		"fields":  {"id"},
+		"filter":  {windowFilter(since)},
+	}
+	body, err := httpx.GetBytes(ctx, c.http, c.baseURL+entriesPath+"?"+q.Encode(),
+		httpx.WithMaxAttempts(maxAttempts),
+		httpx.WithBaseDelay(baseDelay),
+		httpx.WithMaxBodyBytes(maxProbeBytes),
+		httpx.WithHeaders(setHeaders),
+		httpx.WithLogger(c.log),
+		httpx.WithExhaustedLevel(slog.LevelDebug),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("seadex: count window: %w", err)
+	}
+	var list pbList
+	if err := json.Unmarshal(body, &list); err != nil {
+		return 0, fmt.Errorf("seadex: decode window count: %w", err)
+	}
+	if list.TotalItems < 0 {
+		return 0, fmt.Errorf("seadex: window count reported a negative total (%d); "+
+			"upstream refused to count", list.TotalItems)
+	}
+	return list.TotalItems, nil
+}
+
 // FetchEntries walks the entire entries collection with torrents expanded and
 // returns every entry. The walk is KEYSET-paged on the immutable (created, id)
 // pair (see cursor), so a record deleted from an already-read prefix cannot
@@ -521,7 +641,10 @@ func advanceCursor(items []pbEntry, prev cursor) (cursor, error) {
 // reported totalItems aborts with an error (chunkComplete), since the API
 // itself says entries remain and completing would falsely resolve findings
 // against a truncated view.
-func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
+func (c *Client) FetchEntries(ctx context.Context, opts Options) ([]Entry, error) {
+	if opts.Mode == FetchWindow && opts.Since.IsZero() {
+		return nil, errors.New("seadex: FetchWindow needs a non-zero Since")
+	}
 	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, maxFetchDuration)
 	defer cancel()
@@ -537,7 +660,7 @@ func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 		}
 		var done bool
 		var err error
-		all, done, err = c.fetchAndAppend(ctx, page, all, &tot, &cur)
+		all, done, err = c.fetchAndAppend(ctx, page, all, &tot, &cur, opts)
 		if err != nil {
 			return nil, walkBudgetError(parent, ctx, err, page, len(all))
 		}
@@ -545,7 +668,7 @@ func (c *Client) FetchEntries(ctx context.Context) ([]Entry, error) {
 			"reported_total", tot.reportedTotal, "done", done,
 			"bytes", tot.bytes, "elements", tot.elements)
 		if done {
-			return c.finishFetch(all, tot)
+			return c.finishFetch(all, tot, opts.Mode)
 		}
 	}
 	return nil, fmt.Errorf("seadex: pagination exceeded max %d pages after %d entries fetched "+
@@ -601,12 +724,21 @@ func walkBudgetError(parent, walk context.Context, err error, page, fetched int)
 // vouches for: warnCatalogueShrink compares the accepted catalogue against the
 // previous one this PROCESS accepted, the independent evidence every
 // self-attested guard above lacks.
-func (c *Client) finishFetch(all []Entry, tot fetchTotals) ([]Entry, error) {
-	if err := validateFinishedFetch(len(all), tot); err != nil {
+func (c *Client) finishFetch(all []Entry, tot fetchTotals, mode FetchMode) ([]Entry, error) {
+	if err := validateFinishedFetch(len(all), tot, mode); err != nil {
 		return nil, err
 	}
-	c.logFinishedFetchWarnings(len(all), tot)
-	c.warnCatalogueShrink(len(all))
+	if mode == FetchFull {
+		// Both of these compare the result against a CATALOGUE-scale
+		// expectation: the reported-total mismatch against the API's own count
+		// of the whole collection, and warnCatalogueShrink against the previous
+		// catalogue this process accepted. A window is a small, legitimately
+		// varying subset of that, so running either would emit a shrink
+		// diagnostic on every tick and poison the comparison the next full
+		// walk depends on.
+		c.logFinishedFetchWarnings(len(all), tot)
+		c.warnCatalogueShrink(len(all))
+	}
 	c.log.Debug("seadex entries fetched", "entries", len(all),
 		"bytes", tot.bytes, "elements", tot.elements)
 	return all, nil
@@ -616,7 +748,20 @@ func (c *Client) finishFetch(all []Entry, tot fetchTotals) ([]Entry, error) {
 // empty catalogue, a walk no reported total vouches for, a reported total that
 // cannot fit the reported pages, and a below-half shortfall. Every one of them
 // refuses the catalogue outright (see finishFetch for why each is fail-safe).
-func validateFinishedFetch(count int, tot fetchTotals) error {
+func validateFinishedFetch(count int, tot fetchTotals, mode FetchMode) error {
+	if mode == FetchWindow {
+		// A window legitimately holds nothing (6 of the last 90 days upstream
+		// had no change at all) and its reported total is a count of MATCHING
+		// records, so neither the empty-catalogue arm nor the below-half
+		// shortfall arm describes anything real here. The metadata-consistency
+		// arm is kept: totalItems still cannot exceed what the reported pages
+		// can hold, whatever the filter.
+		if tot.reportedTotal > tot.reportedPages*perPage {
+			return fmt.Errorf("seadex: reported totalItems %d cannot fit the reported %d pages of %d (upstream misbehaving); "+
+				"refusing a window it cannot vouch for", tot.reportedTotal, tot.reportedPages, perPage)
+		}
+		return nil
+	}
 	if count == 0 {
 		return fmt.Errorf("seadex: returned an empty catalogue (totalItems=%d); "+
 			"SeaDex is never legitimately empty, refusing to compare against it", tot.reportedTotal)
@@ -727,12 +872,12 @@ func (c *Client) warnCatalogueShrink(count int) {
 // (fetchPage decodes at most the remaining element allowance, so tot.elements
 // can never exceed maxTotalElements), and the entry-count cap rejects the
 // chunk before any of its items are converted or appended.
-func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, tot *fetchTotals, cur *cursor) (out []Entry, done bool, err error) {
+func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, tot *fetchTotals, cur *cursor, opts Options) (out []Entry, done bool, err error) {
 	pageBytes, pageElems, err := remainingFetchBudgets(*tot)
 	if err != nil {
 		return all, false, fmt.Errorf("%w (page %d, %d entries fetched)", err, page, len(all))
 	}
-	list, n, elems, err := c.fetchPage(ctx, *cur, pageBytes, pageElems)
+	list, n, elems, err := c.fetchPage(ctx, *cur, pageBytes, pageElems, opts)
 	if err != nil {
 		return all, false, pageFetchError(err, page, len(all))
 	}
@@ -905,7 +1050,7 @@ func chunkComplete(page, itemCount, fetched, reportedTotal int) (done bool, err 
 // remaining fetch-wide element budget, so tripping a reduced limit is the
 // cumulative-element cap while tripping the full bound stays a per-page
 // violation.
-func (c *Client) fetchPage(ctx context.Context, cur cursor, wireLimit int64, elemLimit int) (list pbList, bodyBytes, elems int, err error) {
+func (c *Client) fetchPage(ctx context.Context, cur cursor, wireLimit int64, elemLimit int, opts Options) (list pbList, bodyBytes, elems int, err error) {
 	q := url.Values{
 		"expand":  {"trs"},
 		"page":    {"1"},
@@ -915,9 +1060,11 @@ func (c *Client) fetchPage(ctx context.Context, cur cursor, wireLimit int64, ele
 		// cursor filter below pages on.
 		"sort": {"created,id"},
 	}
-	if cur.set() {
-		q.Set("filter", cur.filter())
-	}
+	// The window is one extra conjunct on the filter the keyset cursor already
+	// builds, so a windowed walk and a full walk are the same request, the same
+	// paging, the same budgets and the same decode - only the completeness
+	// policy differs (see FetchMode).
+	q.Set("filter", joinFilters(cur, opts))
 	reqURL := c.baseURL + entriesPath + "?" + q.Encode()
 
 	body, err := httpx.GetBytes(ctx, c.http, reqURL,

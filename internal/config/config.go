@@ -101,16 +101,27 @@ const (
 	// RunModeReport is the one-shot audit: scan once, write the report, exit.
 	RunModeReport = "report"
 
-	// DefaultPollInterval is the gap between cycles (also runs on start). One
-	// cycle drives both halves: the compare/findings pass and, when the Torznab
-	// feed is configured, its curation set + RSS feed rebuild - so a notification
-	// and what the arrs see in the feed come from the same fetch.
-	DefaultPollInterval = 3 * time.Hour
+	// DefaultPollInterval is the loop's own interval. Most iterations are a
+	// cheap TICK - one ~88-byte probe plus, when something changed, one request
+	// of a few tens of KiB - and every 24h worth of them is a full reconcile
+	// (the whole catalogue, the whole arr walk, the whole feed and curation-index
+	// rebuild). So this is the FRESHNESS knob, not the cost knob: the upstream
+	// load it drives is proportional to the change RATE, not to the interval.
+	//
+	// 15m follows the consumer rather than a guess. Sonarr's own RSS Sync
+	// Interval is 10-120 minutes with a default of 15, so fetching faster than
+	// that cannot reach the arrs any sooner. There is no natural knee to pick
+	// instead: measured against 90 days of upstream history, the number of
+	// productive passes per day is nearly flat across the whole range.
+	DefaultPollInterval = 15 * time.Minute
 )
 
-// Clamp bounds for poll_interval, the only file-provided duration.
+// Clamp bounds for poll_interval, the only file-provided duration. The floor is
+// the consumer's own floor for the same reason the default follows its default:
+// below Sonarr's 10-minute minimum, a shorter interval buys freshness no arr can
+// read, while still costing the upstream a probe every time.
 const (
-	minPollInterval = time.Hour
+	minPollInterval = 15 * time.Minute
 	maxPollInterval = 30 * 24 * time.Hour
 )
 

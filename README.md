@@ -50,7 +50,7 @@ seadex-scout closes both gaps and nothing more.
 
 ## What it does
 
-Once on start and then every `poll_interval`, seadex-scout runs one cycle:
+On start, and once a day after that, seadex-scout runs a **full pass**:
 
 1. Walks the Sonarr/Radarr anime library (with arr-side tag include/exclude) and
    fingerprints each item's current release (group, resolution, codec,
@@ -84,9 +84,10 @@ The `mode` setting (or a subcommand) picks the run mode:
 
 The daemon follows the standard `*_INTERVAL` scheduling shape:
 
-- **Built-in** (default): `poll_interval` is a Go duration (`3h` default,
-  clamped to `1h`–`720h`); a cycle runs on start, then every interval. It is
-  the single cadence for both the alert loop and the Torznab feed.
+- **Built-in** (default): `poll_interval` is a Go duration (`15m` default,
+  clamped to `15m`–`720h`). It is the single cadence for both the alert loop and
+  the Torznab feed, and most iterations are a cheap **tick** — see
+  [Freshness](#freshness) below.
 - **External / resident-idle**: set `poll_interval: off` (or `disabled` / `0`).
   There is no internal timer; the container idles healthy and an external
   scheduler drives each cycle via the `poll` subcommand, which runs one cycle,
@@ -342,7 +343,7 @@ unknown or misplaced key is rejected at startup with an error naming it.
 | `sonarr.api_key` / `radarr.api_key` | _none_ | Arr API key; required when enabled |
 | `sonarr.public_url` / `radarr.public_url` | _(unset)_ | Browser-facing base for report deep-links; falls back to `url` |
 | `mode` | `daemon` | `daemon` (scheduled) or `report` (one-shot audit, then exit) |
-| `poll_interval` | `3h` | Cycle cadence for alerts + feed, clamped `1h`–`720h`; `off`/`disabled`/`0` = external trigger via `poll` |
+| `poll_interval` | `15m` | Loop cadence for alerts + feed, clamped `15m`–`720h`. Most iterations are a cheap tick; every 24h worth is a full pass (see [Freshness](#freshness)). `off`/`disabled`/`0` = external trigger via `poll` — schedule that around 24h apart, since every `poll` is a full pass |
 | `animebytes` | `false` | Include AnimeBytes releases and links (private tracker; links are member page URLs, no credentials needed) |
 | `filters.exclude_remux` | `false` | Releases classified `remux` never count as a recommendation |
 | `filters.require_dual_audio` | `false` | Only dual-audio releases count |
@@ -388,6 +389,43 @@ port (fixed at `:9118`). An alert-only deployment stays socket-less.
 - **Health.** The distroless image's Docker `HEALTHCHECK` uses the
   `seadex-scout health` subcommand (a `/tmp/.healthy` file marker), so no shell or
   port is needed; the marker reflects the last cycle's library-ingest outcome.
+
+## Freshness
+
+Most loop iterations are a **tick**, not a full pass. A tick asks SeaDex one
+~88-byte question — _what changed in the last 48 hours?_ — and does nothing else
+when the answer is nothing, which is most of the time. When something did
+change, it fetches just those entries (a few tens of KB), folds any new releases
+into the RSS feed, and reports the findings they produce.
+
+Every 24 hours' worth of iterations, and always on start, one iteration is a
+**full pass** instead: the whole catalogue, a full Sonarr/Radarr walk, the whole
+Torznab search index and feed rebuilt. That pass is the backstop for everything
+a 48-hour window cannot see — a release removed from SeaDex, a de-curation, an
+edit that did not bump its entry, a shared torrent's other entries, an outage
+longer than the window, and a badly wrong container clock. It is also what
+refreshes the library snapshot the ticks compare against.
+
+What that buys, measured against the live catalogue: the feed and the alerts go
+from up to 3 hours stale to about 15 minutes, while **upstream traffic drops by
+roughly 85%** — because a timer-driven full pass spent most of its bandwidth
+discovering that nothing had changed (77% of 3-hour windows contain no SeaDex
+change at all).
+
+Two consequences worth knowing:
+
+- **An upgrade you perform is noticed by the next full pass, not the next
+  tick.** A tick compares against the cached library snapshot, so a finding you
+  have already acted on can keep being reported for up to a day. This is the
+  deliberate trade for not walking your arrs every 15 minutes.
+- **The search index is rebuilt daily, not every 15 minutes.** Search covers
+  SeaDex's long tail, which does not move quickly; the RSS feed is what carries
+  anything new.
+
+Both `SeadexScoutScanStalled` (the loop is alive) and
+`SeadexScoutReconcileStalled` (the backstop still runs) are shipped in
+[`alerts.yaml`](alerts.yaml) — the second matters because a healthy stream of
+ticks would otherwise hide a full pass that had silently stopped.
 
 ## Alerting
 

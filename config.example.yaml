@@ -17,9 +17,21 @@ radarr:
 
 mode: "daemon" # daemon (scheduled) | report (one-shot, exit)
 # One cadence for BOTH the alert engine and the Torznab feed, so a notification
-# and what the arrs grab from the feed come from the same refresh. Runs on start;
-# off/disabled/0 = no internal timer, trigger each cycle with the `poll` subcommand.
-poll_interval: "3h"
+# and what the arrs grab from the feed come from the same refresh.
+#
+# This is the FRESHNESS knob, not the cost knob. Most iterations are a cheap
+# check of what changed upstream recently (one small request, and usually one
+# tiny one when nothing changed); every 24h worth of them is a full pass that
+# re-reads the whole catalogue, re-walks Sonarr/Radarr and rebuilds the search
+# index. So upstream load tracks how often SeaDex actually changes, not how
+# often you poll. 15m matches Sonarr's own default RSS interval — polling faster
+# cannot reach the arrs any sooner. Minimum 15m.
+#
+# Runs on start (the first iteration is always a full pass);
+# off/disabled/0 = no internal timer, trigger each pass with the `poll`
+# subcommand. In that mode every `poll` is a separate process, so schedule it
+# around 24h apart rather than every 15m — each one is a full pass.
+poll_interval: "15m"
 
 log:
   level: "info" # debug | info | warn | error

@@ -954,7 +954,7 @@ func TestReportWriteContext(t *testing.T) {
 
 // TestHealthMaxAge pins the health probe's freshness lease: external mode arms
 // no deadline, an interval at or above the default keeps the documented
-// three-interval lease (the deployed 3h still restarts a wedged loop at 9h), and
+// three-interval lease (a 3h interval still restarts a wedged loop at 9h), and
 // a shorter interval is floored at the default's lease - the marker is refreshed
 // only when a cycle COMPLETES, so a tighter deadline would call a slow-but-
 // healthy cold cycle wedged and restart it before it can persist its memo.
@@ -965,9 +965,18 @@ func TestHealthMaxAge(t *testing.T) {
 	}{
 		"external mode disables the deadline": {0, 0},
 		"a negative interval disables it too": {-time.Hour, 0},
-		"the deployed interval keeps 3x":      {3 * time.Hour, 9 * time.Hour},
-		"a long interval scales":              {12 * time.Hour, 36 * time.Hour},
-		"the clamp floor is lifted":           {time.Hour, 3 * config.DefaultPollInterval},
+		// The deployed 3h interval must keep exactly the 9h lease it had before
+		// the tick/reconcile split: the 3x arm wins there, unchanged.
+		"the deployed interval keeps 3x": {3 * time.Hour, 9 * time.Hour},
+		"a long interval scales":         {12 * time.Hour, 36 * time.Hour},
+		// The cold-reconcile floor wins for every interval at or below one third
+		// of it, which now includes the default: 3x15m is 45 minutes, and a cold
+		// reconcile has been measured well past that. Flooring here is what stops
+		// the probe demanding the restart that makes the next boot cold again.
+		"the default interval takes the floor": {config.DefaultPollInterval, coldReconcileAllowance},
+		"the config floor takes the floor":     {5 * time.Minute, coldReconcileAllowance},
+		"the crossover point":                  {coldReconcileAllowance / healthLeaseFactor, coldReconcileAllowance},
+		"just above the crossover scales":      {coldReconcileAllowance/healthLeaseFactor + time.Minute, coldReconcileAllowance + healthLeaseFactor*time.Minute},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := healthMaxAge(tc.interval); got != tc.want {

@@ -1315,7 +1315,7 @@ func TestLoadPreviousDropsOversizedHarvestCheckpoint(t *testing.T) {
 	})
 	log, rec := capture.New()
 	w := NewFeedWriter(&FeedWriterConfig{Path: path}, log, nil)
-	prev, err := w.loadPrevious(context.Background())
+	_, prev, err := w.loadPrevious(context.Background())
 	if err != nil {
 		t.Fatalf("loadPrevious: %v", err)
 	}

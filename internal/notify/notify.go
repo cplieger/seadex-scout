@@ -92,6 +92,35 @@ func NewNotifier(logger *slog.Logger, ignore map[int]struct{}) *Notifier {
 // left the library entirely is dropped the same way, because a complete pass
 // simply does not produce it.
 func (n *Notifier) Report(findings []compare.Finding, incompleteIDs map[int]struct{}) {
+	n.report(findings, nil, incompleteIDs)
+}
+
+// ReportScoped is Report for a PARTIAL pass: only the rows owned by an AniList
+// ID in comparedIDs may be deleted, and every other row is carried forward
+// untouched.
+//
+// A full pass can delete by omission because it looked at everything, so an
+// absent row is a resolved condition. A partial pass cannot: an entry it never
+// examined is absent for the same reason a resolved one is, and treating the
+// two alike would stop reporting conditions that are still true - then report
+// them again as new on the next full pass. comparedIDs is what tells the two
+// apart, so it is deletion AUTHORITY rather than a filter.
+//
+// incompleteIDs still overrides: an entry this pass DID examine but whose
+// evidence was incomplete keeps its prior rows, exactly as in a full pass.
+func (n *Notifier) ReportScoped(findings []compare.Finding, comparedIDs, incompleteIDs map[int]struct{}) {
+	if comparedIDs == nil {
+		// A nil authority set would read as "delete nothing", which is the safe
+		// direction but hides a caller bug: a scoped pass that computed no
+		// owner set has nothing to say about deletion and should not pretend to.
+		comparedIDs = map[int]struct{}{}
+	}
+	n.report(findings, comparedIDs, incompleteIDs)
+}
+
+// report is the shared body. comparedIDs nil means FULL deletion authority
+// (every row may be deleted by omission); non-nil bounds it to those owners.
+func (n *Notifier) report(findings []compare.Finding, comparedIDs, incompleteIDs map[int]struct{}) {
 	next := make(map[string]compare.Finding, len(findings))
 	// Last-payload-wins per key. In-batch duplicate keys are reachable (two
 	// findings can fold onto one key), and the emitted line must carry the
@@ -102,20 +131,27 @@ func (n *Notifier) Report(findings []compare.Finding, incompleteIDs map[int]stru
 		boundRetained(&retained)
 		next[key] = retained
 	}
-	preserved := 0
+	preserved, carried := 0, 0
 	for key := range n.current {
 		if _, present := next[key]; present {
 			continue
 		}
-		f := n.current[key]
-		if _, incomplete := incompleteIDs[f.AniListID]; !incomplete {
+		owner := n.current[key].AniListID
+		if _, incomplete := incompleteIDs[owner]; incomplete {
+			next[key] = n.current[key]
+			preserved++
 			continue
 		}
-		next[key] = f
-		preserved++
+		if comparedIDs == nil {
+			continue
+		}
+		if _, authorized := comparedIDs[owner]; !authorized {
+			next[key] = n.current[key]
+			carried++
+		}
 	}
 	n.current = next
-	n.emitAll(preserved)
+	n.emitAll(preserved, carried)
 }
 
 // boundRetained caps the untrusted strings of a row about to be RETAINED, in
@@ -169,9 +205,10 @@ func boundRetained(f *compare.Finding) {
 }
 
 // emitAll logs every row of the current set, in a deterministic order so a
-// pass is diffable against the one before it, and closes with one summary
-// line. preserved is the count carried forward under incompleteIDs.
-func (n *Notifier) emitAll(preserved int) {
+// pass is diffable against the one before it, and closes with one summary line.
+// preserved is the count carried forward under incompleteIDs; carried is the
+// count a partial pass left alone for want of deletion authority.
+func (n *Notifier) emitAll(preserved, carried int) {
 	keys := make([]string, 0, len(n.current))
 	for key := range n.current {
 		keys = append(keys, key)
@@ -190,7 +227,7 @@ func (n *Notifier) emitAll(preserved int) {
 	}
 	n.log.Info("findings reported",
 		"total", len(n.current), "emitted", emitted,
-		"suppressed", suppressed, "preserved", preserved)
+		"suppressed", suppressed, "preserved", preserved, "carried", carried)
 }
 
 // --- Emission / rendering ---

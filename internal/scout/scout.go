@@ -49,6 +49,10 @@ import (
 // arr-independent.
 type FeedWriter interface {
 	Rebuild(ctx context.Context, entries []seadex.Entry, info indexer.EntryInfoFunc) error
+	// Advance folds a bounded window of recently-changed entries into the
+	// persisted feed without re-deriving what a window cannot speak for. See
+	// indexer.FeedWriter.Advance for why it is not Rebuild with a flag.
+	Advance(ctx context.Context, window []seadex.Entry, info indexer.EntryInfoFunc) error
 }
 
 // SeaDexSource supplies the SeaDex entries snapshot a cycle compares and
@@ -57,7 +61,10 @@ type FeedWriter interface {
 // tests can drive cycle outcomes with a fake instead of standing up the
 // PocketBase adapter over an httptest server.
 type SeaDexSource interface {
-	FetchEntries(ctx context.Context) ([]seadex.Entry, error)
+	FetchEntries(ctx context.Context, opts seadex.Options) ([]seadex.Entry, error)
+	// CountWindow reports how many records changed since t without downloading
+	// them. It is the tick's cost bound (see Scout.tick).
+	CountWindow(ctx context.Context, t time.Time) (int, error)
 }
 
 // The concrete PocketBase client must keep satisfying the cycle's seam.
@@ -119,6 +126,11 @@ type Deps struct {
 	// SeaDex snapshot. Nil when no Torznab feed is configured (the cycle then
 	// skips all feed work).
 	Feed FeedWriter
+	// PollInterval is the loop's own interval, which decides how many ticks
+	// separate two reconciles (see reconcileEvery). Zero or negative means
+	// every iteration reconciles - the conservative reading, and what an
+	// unwired test gets.
+	PollInterval time.Duration
 }
 
 // ReportDeps are the assembled components a Scout runs the read-only one-shot
@@ -155,6 +167,7 @@ type components struct {
 	Notifier     *notify.Notifier
 	AniListStats func() AniListStats
 	Feed         FeedWriter
+	PollInterval time.Duration
 }
 
 // Every persisted degradation streak escalates its single log site from WARN to
@@ -177,9 +190,99 @@ const (
 )
 
 // Scout runs compare cycles from its assembled dependencies.
+//
+// The three counters below are per-PROCESS and deliberately not persisted.
+// They exist to shape one loop's behaviour, and a restart runs a reconcile
+// (iterations counts zero, so the first iteration reconciles), which is exactly
+// the state a fresh count wants. Persisting them would make a losable value
+// load-bearing for correctness, which is the mistake three earlier revisions of
+// this design made.
 type Scout struct {
-	deps components
 	log  *slog.Logger
+	deps components
+	// iterations counts loop iterations, so every reconcileEvery-th one
+	// reconciles. It lives HERE and not in the loop closure: the scheduler's
+	// Cycler is Cycle(ctx) bool, and a counter in the closure would not advance
+	// on an iteration the cross-process lock skipped - silently losing a
+	// reconcile. Keeping it on the Scout also makes an exec'd `poll` participate
+	// without a flag of its own.
+	iterations int
+	// emptyRun counts consecutive ticks whose window held nothing, and
+	// oversizeRun counts consecutive ticks whose window was too large to fetch.
+	// Both are diagnostics for a wedged fast path (see tick); a productive tick
+	// resets both.
+	emptyRun    int
+	oversizeRun int
+}
+
+// The tick's window and its two wedge diagnostics.
+const (
+	// changeWindow is how far back a tick looks. It is deliberately much wider
+	// than the tick interval: the window is the only thing that recovers a
+	// missed tick, a restart, or a clock skewed by less than this, and a wider
+	// window costs bytes proportional to the upstream's change RATE (measured
+	// at ~2 new entries and ~15 torrent edits a day), not to its size.
+	changeWindow = 48 * time.Hour
+
+	// emptyRunLatch is the consecutive-empty-tick count that WARNs. An empty
+	// 48h window means 48h of upstream silence has already elapsed, so this
+	// threshold is (192 * 15m) = 48h of empty probes ON TOP of that, i.e. ~96h
+	// of total silence. Measured against 90 days of upstream history the
+	// longest genuine silence was 86.6h - which is 154 ticks - so a lower
+	// latch would fire on healthy behaviour. It stays a WARN because it IS
+	// usually healthy.
+	emptyRunLatch = 192
+
+	// oversizeRunLatch is the consecutive-oversize-tick count that ERRORs. This
+	// one pages, and at ERROR rather than WARN, because nothing in this stack
+	// alerts on WARN: an oversize window means the fast path is frozen (no new
+	// RSS items, no new findings) and only the reconcile is still working. 8
+	// ticks is 2h at the default interval, matching the fleet's other
+	// escalation thresholds.
+	oversizeRunLatch = 8
+)
+
+// reconcileInterval is how often a full pass runs. It is a CONSTANT, not a
+// config key: the tick interval is an operator tradeoff (how fresh, how much
+// upstream load), while this is the backstop's own cadence with no reason to
+// tune - and a tunable one admits a 15m full pass, which is 1.67 GiB/day
+// against a community-run upstream.
+const reconcileInterval = 24 * time.Hour
+
+// reconcileEvery reports how many loop iterations separate two reconciles. A
+// zero or negative interval (an unwired test) reconciles every iteration, the
+// conservative reading.
+func (s *Scout) reconcileEvery() int {
+	if s.deps.PollInterval <= 0 {
+		return 1
+	}
+	return max(1, int(reconcileInterval/s.deps.PollInterval))
+}
+
+// Cycle runs ONE loop iteration and reports whether it was healthy. It is the
+// dispatcher over the two kinds of pass:
+//
+//   - a RECONCILE (the full pass: whole catalogue, whole arr walk, whole
+//     compare, whole feed and curation-index rebuild) runs on the FIRST
+//     iteration and every reconcileEvery-th one after it. It is the backstop
+//     for everything a window structurally cannot see - a deletion, an
+//     in-place torrent edit, a shared torrent's other parents, an outage
+//     longer than the window, a clock wrong by more than it - and it is what
+//     refills the notifier's in-memory finding set.
+//   - a TICK (a bounded recent-changes window) runs on every other iteration.
+//     It is what makes the RSS feed and the alerts fresh in minutes rather
+//     than hours, at a fraction of the bytes.
+//
+// The first iteration reconciles because everything downstream assumes a
+// complete pass has happened: the notifier's set is empty until one runs, and
+// the tick compares against a cached library only a walk can populate.
+func (s *Scout) Cycle(ctx context.Context) bool {
+	due := s.iterations%s.reconcileEvery() == 0
+	s.iterations++
+	if due {
+		return s.reconcile(ctx)
+	}
+	return s.tick(ctx)
 }
 
 // cycleDegraded emits the degraded-cycle completion line. Every cycle that
@@ -212,6 +315,7 @@ func New(deps *Deps) *Scout {
 		Notifier:     deps.Notifier,
 		AniListStats: deps.AniListStats,
 		Feed:         deps.Feed,
+		PollInterval: deps.PollInterval,
 	})
 }
 
@@ -242,11 +346,152 @@ func newScout(c *components) *Scout {
 
 // --- cycle orchestration ---
 
-// Cycle runs one full compare cycle and reports whether the run was healthy
+// tick runs one bounded recent-changes pass. It is healthy whenever it
+// completed, including when it found nothing: an empty window is a successful
+// tick, and the marker it commits attests that the loop is alive, not that
+// anything changed.
+//
+// It costs one ~88-byte probe plus, when there is something to fetch, one
+// request of a few tens of KiB. It does NOT walk the arrs (that is ~1k requests
+// and it is what gates container health), does NOT touch the search curation
+// index (a window can only add to it, and an add-only index cannot express a
+// de-curation), and does NOT rebuild the feed - it ADVANCES it (see
+// FeedWriter.Advance).
+func (s *Scout) tick(ctx context.Context) bool {
+	since := time.Now().Add(-changeWindow)
+	count, err := s.deps.SeaDex.CountWindow(ctx, since)
+	if err != nil {
+		// A failed probe is a failed tick and nothing more: it advances neither
+		// wedge counter (they measure upstream STATE, not reachability - the
+		// existing SeadexFailures streak owns unreachability) and reports
+		// nothing, so the last report stands until the alert window expires.
+		s.log.Warn("change probe failed; skipping tick", "error", logSafeUpstreamError(err))
+		return true
+	}
+	switch {
+	case count == 0:
+		s.emptyRun++
+		s.oversizeRun = 0
+		if s.emptyRun == emptyRunLatch {
+			// Usually healthy - the upstream is simply quiet - but a window
+			// that can NEVER hold anything looks identical, and the way that
+			// happens is a container clock running more than changeWindow
+			// ahead, which puts every window in the upstream's future.
+			s.log.Warn("no SeaDex change seen for a very long run of ticks; if this persists, check this container's clock against the upstream",
+				"consecutive_empty_ticks", s.emptyRun, "window", changeWindow.String())
+		}
+		s.log.Debug("tick found no change", "window", changeWindow.String())
+		return true
+	case count >= seadex.MaxWindowEntries:
+		s.oversizeRun++
+		s.emptyRun = 0
+		s.warnOversizeWindow(count)
+		return true
+	}
+	s.emptyRun, s.oversizeRun = 0, 0
+	return s.tickChanged(ctx, since, count)
+}
+
+// warnOversizeWindow reports a window too large to fetch, escalating a
+// sustained run to ERROR. It escalates because nothing in this stack alerts on
+// WARN: while this holds, the fast path is frozen - no new RSS item, no new
+// finding - and only the reconcile is still working, which is a real fault with
+// a real remedy (wait for the reconcile, or check the clock, since a clock
+// running BEHIND widens every window the same way a bulk upstream edit does).
+func (s *Scout) warnOversizeWindow(count int) {
+	attrs := []any{
+		"window_entries", count, "max", seadex.MaxWindowEntries,
+		"consecutive_oversize_ticks", s.oversizeRun, "window", changeWindow.String(),
+	}
+	if s.oversizeRun >= oversizeRunLatch {
+		s.log.Error("SeaDex change window has been too large to fetch repeatedly; the fast path is frozen and only the daily reconcile is refreshing - check this container's clock, then wait for the reconcile",
+			attrs...)
+		return
+	}
+	s.log.Warn("SeaDex change window too large to fetch; deferring to the reconcile", attrs...)
+}
+
+// tickChanged runs the tick's work once the probe has said there is something
+// to do and that it fits: fetch the window, advance the RSS journal from it,
+// and report the findings its entries produce.
+//
+// It compares against the CACHED library snapshot rather than walking the arrs.
+// That is the whole reason a tick is cheap, and it is the source of this
+// design's one accepted regression: an upgrade the operator performs is only
+// noticed by the next reconcile, so a finding they have already acted on keeps
+// being reported for up to reconcileInterval.
+func (s *Scout) tickChanged(ctx context.Context, since time.Time, count int) bool {
+	st := s.loadState(ctx)
+	mapCache, idx, mapErr := s.loadMapping(ctx, &st)
+	entries, err := s.deps.SeaDex.FetchEntries(ctx,
+		seadex.Options{Mode: seadex.FetchWindow, Since: since})
+	if err != nil {
+		s.log.Warn("change window fetch failed; skipping tick",
+			"error", logSafeUpstreamError(err), "window_entries", count)
+		return true
+	}
+	s.advanceFeed(ctx, entries, idx, &st)
+	if mapErr != nil && idx == nil {
+		// No usable mapping means nothing can be matched, so a compare would
+		// produce an empty finding set for entries that may well be
+		// misaligned - and reporting that would stop reporting conditions that
+		// are still true. The feed advance above was already attempted; with no
+		// index it returned early too, since the title synthesis needs one.
+		s.log.Warn("mapping unusable; skipping tick comparison",
+			"error", logSafeUpstreamError(mapErr))
+		s.saveTick(ctx, &st, &mapCache)
+		return true
+	}
+	result := s.deps.Matcher.Match(ctx, entries, &st.Library, idx, st.Memo)
+	if ctx.Err() != nil {
+		s.log.Warn("tick interrupted by shutdown before comparison", "cause", context.Cause(ctx))
+		return true
+	}
+	cleanMatches, failedItems := splitFailedMatches(result.Matches)
+	findings := s.deps.Comparer.Compare(cleanMatches)
+	// The report REPLACES only the rows of the entries this window compared, and
+	// preserves every row whose entry had incomplete evidence. Rows for entries
+	// outside the window are untouched, which is what makes a partial pass safe
+	// here at all.
+	s.deps.Notifier.ReportScoped(findings, entryIDs(entries),
+		unionIDs(failedItems, result.IncompleteIDs))
+	st.Memo = result.Memo
+	s.saveTick(ctx, &st, &mapCache)
+	s.log.Info("tick complete",
+		"seadex_entries", len(entries), "findings", len(findings),
+		"window", changeWindow.String())
+	return true
+}
+
+// saveTick persists what a tick legitimately learned: the refreshed mapping
+// cache and the AniList memo. It never writes the library snapshot - a tick
+// performs no walk, so it has no snapshot to write and must not overwrite the
+// reconcile's with a stale copy.
+//
+// mapCache is taken by pointer for the same reason handlePreCompareGate takes
+// its cache that way: mapping.Cache is heavy enough that a by-value parameter
+// is a gocritic hugeParam. It is read, never retained.
+func (s *Scout) saveTick(ctx context.Context, st *state.State, mapCache *mapping.Cache) {
+	st.Mapping = *mapCache
+	s.save(ctx, st)
+}
+
+// entryIDs is the tick's compared-owner set: exactly the AniList IDs this
+// window carried. It is what bounds the notifier's deletion authority to the
+// entries actually re-evaluated.
+func entryIDs(entries []seadex.Entry) map[int]struct{} {
+	ids := make(map[int]struct{}, len(entries))
+	for i := range entries {
+		ids[entries[i].AniListID] = struct{}{}
+	}
+	return ids
+}
+
+// reconcile runs one FULL compare pass and reports whether the run was healthy
 // (the library ingest succeeded). It never returns an error: a failed ingest
 // returns false, and an upstream (SeaDex/mapping/AniList) failure returns true
-// but degraded.
-func (s *Scout) Cycle(ctx context.Context) bool {
+// but degraded. See Cycle for when it runs rather than a tick.
+func (s *Scout) reconcile(ctx context.Context) bool {
 	start := time.Now()
 	startStats := s.aniStats()
 	st := s.loadState(ctx)
@@ -272,7 +517,7 @@ func (s *Scout) Cycle(ctx context.Context) bool {
 	// (arr-independent) and the compare pass below. Fetching once here is what
 	// keeps a notification and what the arrs see in the feed on the same data.
 	mapCache, idx, mapErr := s.loadMapping(ctx, &st)
-	entries, seaErr := s.deps.SeaDex.FetchEntries(ctx)
+	entries, seaErr := s.deps.SeaDex.FetchEntries(ctx, seadex.Options{Mode: seadex.FetchFull})
 	s.warnCatalogueLinkQuality(entries)
 
 	// Rebuild the Torznab feed from the shared snapshot, independent of the arr
@@ -533,7 +778,7 @@ func (s *Scout) finishInterruptedMatch(ctx context.Context, start time.Time, sta
 }
 
 // finishCompletedCycle runs the compare over the completed match result,
-// emits (or cold-start baselines) the findings, logs the completion line
+// reports the findings, logs the completion line
 // ("cycle complete", or "cycle degraded" for a partial walk, a transient
 // AniList degradation, or a stale-but-usable map), and persists the full
 // refreshed state. On a partial walk the compare runs on the items that walked
@@ -675,6 +920,16 @@ func (s *Scout) logCompletedCycle(snap *library.Snapshot, result *match.Result, 
 		s.cycleDegraded("tags-emptied-side", attrs...)
 	default:
 		s.log.Info("cycle complete", attrs...)
+		// A SECOND line, deliberately, carrying nothing but the fact that a
+		// full pass finished. The shipped deadman counts "cycle complete" or
+		// "cycle degraded", and a tick emits neither - but a tick is a cycle
+		// too, and once most iterations are ticks the deadman can no longer
+		// tell "the loop is alive" from "the backstop still runs". Since the
+		// reconcile IS the backstop for everything a window structurally
+		// cannot see, a reconcile that silently stopped forever would make
+		// every one of those gaps permanent. This line is what a deadman at
+		// 3x reconcileInterval watches.
+		s.log.Info("reconcile complete", "interval", reconcileInterval.String())
 	}
 }
 
@@ -754,6 +1009,20 @@ func (s *Scout) rebuildFeed(ctx context.Context, entries []seadex.Entry, idx *ma
 		// A cancelled rebuild is the shutdown, not a feed fault; the pre-compare
 		// gate logs the interruption (the last-good feed is kept either way).
 		s.log.Warn("indexer feed rebuild failed; keeping previous feed", "error", err)
+	}
+}
+
+// advanceFeed is the tick's half of rebuildFeed: it folds the window into the
+// persisted journal instead of rebuilding it. The gates are the same shape -
+// no feed configured, nothing to fold, or no usable mapping means no work - and
+// a failure keeps the last-good feed rather than degrading the tick.
+func (s *Scout) advanceFeed(ctx context.Context, window []seadex.Entry, idx *mapping.Index, st *state.State) {
+	if s.deps.Feed == nil || len(window) == 0 || idx == nil {
+		return
+	}
+	info := feedEntryInfo(idx, &st.Library, st.Memo)
+	if err := s.deps.Feed.Advance(ctx, window, info); err != nil && ctx.Err() == nil {
+		s.log.Warn("indexer feed advance failed; keeping previous feed", "error", err)
 	}
 }
 
@@ -1100,7 +1369,7 @@ func (s *Scout) Report(ctx context.Context) (audit.Report, error) {
 		return audit.Report{}, err
 	}
 
-	entries, err := s.deps.SeaDex.FetchEntries(ctx)
+	entries, err := s.deps.SeaDex.FetchEntries(ctx, seadex.Options{Mode: seadex.FetchFull})
 	if err != nil {
 		// Every returned error is reduced first: the error text can embed raw
 		// upstream bytes bounded only by the page wire cap, and that guarantee

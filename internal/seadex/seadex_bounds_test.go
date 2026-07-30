@@ -69,7 +69,7 @@ func fetchHostilePage(t *testing.T, page, wantErr string) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background(), Options{})
 	if err == nil {
 		t.Fatalf("FetchEntries returned nil error, want %q error", wantErr)
 	}
@@ -174,7 +174,7 @@ func TestFetchEntriesCumulativeElementCapErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background(), Options{})
 	if !errors.Is(err, errCumulativeElements) {
 		t.Fatalf("FetchEntries error = %v, want errCumulativeElements", err)
 	}
@@ -197,7 +197,7 @@ func TestFetchAndAppendEntryCapBeforeAppend(t *testing.T) {
 	all := make([]Entry, maxEntries)
 	var tot fetchTotals
 	var cur cursor
-	out, done, err := c.fetchAndAppend(context.Background(), 1, all, &tot, &cur)
+	out, done, err := c.fetchAndAppend(context.Background(), 1, all, &tot, &cur, Options{})
 	if err == nil {
 		t.Fatal("fetchAndAppend returned nil error, want entry-cap error")
 	}
@@ -238,7 +238,7 @@ func TestFetchEntriesByteCapErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background(), Options{})
 	if err == nil {
 		t.Fatal("FetchEntries returned nil error, want byte-cap error")
 	}
@@ -261,7 +261,7 @@ func TestFetchAndAppendExhaustedByteBudgetErrors(t *testing.T) {
 	all := []Entry{{AniListID: 1}}
 	var cur cursor
 
-	out, done, err := c.fetchAndAppend(context.Background(), 3, all, &tot, &cur)
+	out, done, err := c.fetchAndAppend(context.Background(), 3, all, &tot, &cur, Options{})
 	if !errors.Is(err, errCumulativeBytes) {
 		t.Fatalf("fetchAndAppend error = %v, want errCumulativeBytes without any upstream request", err)
 	}
@@ -285,7 +285,7 @@ func TestFetchAndAppendExhaustedElementBudgetErrors(t *testing.T) {
 	all := []Entry{{AniListID: 1}}
 	var cur cursor
 
-	out, done, err := c.fetchAndAppend(context.Background(), 3, all, &tot, &cur)
+	out, done, err := c.fetchAndAppend(context.Background(), 3, all, &tot, &cur, Options{})
 	if !errors.Is(err, errCumulativeElements) {
 		t.Fatalf("fetchAndAppend error = %v, want errCumulativeElements without any upstream request", err)
 	}
@@ -314,7 +314,7 @@ func TestFetchEntriesPerPageByteCapErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background(), Options{})
 	if err == nil {
 		t.Fatal("FetchEntries returned nil error, want per-page byte-cap error")
 	}
@@ -348,7 +348,7 @@ func TestFetchEntriesPerPageElementCapErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background())
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background(), Options{})
 	if err == nil {
 		t.Fatal("FetchEntries returned nil error, want per-page element-budget error")
 	}
@@ -401,7 +401,7 @@ func TestFetchAndAppendAcceptsPageExactlyFillingEntryCap(t *testing.T) {
 	all := make([]Entry, maxEntries-1)
 	var tot fetchTotals
 	var cur cursor
-	out, done, err := c.fetchAndAppend(context.Background(), 1, all, &tot, &cur)
+	out, done, err := c.fetchAndAppend(context.Background(), 1, all, &tot, &cur, Options{})
 	if err != nil {
 		t.Fatalf("fetchAndAppend returned error %v, want the exactly-filling page accepted (the cap is a ceiling, not a strict bound)", err)
 	}

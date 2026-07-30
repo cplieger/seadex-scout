@@ -145,7 +145,8 @@ func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
 			st := anilistClient.Stats()
 			return scout.AniListStats{Calls: st.Calls, RateLimitWaits: st.RateLimitWaits}
 		},
-		Feed: feed,
+		Feed:         feed,
+		PollInterval: cfg.PollInterval,
 	})
 
 	cleanup := func() {

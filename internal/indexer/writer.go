@@ -714,7 +714,7 @@ func NewFeedWriter(cfg *FeedWriterConfig, log *slog.Logger, client *http.Client)
 // or the atomic write itself failing.
 func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info EntryInfoFunc) error {
 	infoFor := entryInfoFunc(info)
-	prev, err := w.loadPrevious(ctx)
+	_, prev, err := w.loadPrevious(ctx)
 	if err != nil {
 		return err
 	}
@@ -880,6 +880,12 @@ type previousJournal struct {
 	baseline bool
 }
 
+// loadPrevious reads the snapshot ONCE and returns both the raw decoded form
+// and the journal projection of it. Advance needs the raw form for the three
+// members the projection drops - ByHash, ByKey and ByPair, the search curation
+// index - which it must carry through to persist verbatim; re-reading the file
+// to get them would race a concurrent writer against its own first read.
+//
 // loadPrevious reads the persisted snapshot's journal bookkeeping. A missing
 // file (or a path whose parent is not a directory) is the fresh-install
 // baseline; a decoded snapshot without a seen ledger is the retired
@@ -890,10 +896,11 @@ type previousJournal struct {
 // the journal). Any other read failure (EACCES, EIO) is returned as an error
 // so a TRANSIENT fault cannot blank a live journal: the caller keeps the
 // last-good snapshot and the next cycle retries.
-func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) {
+func (w *FeedWriter) loadPrevious(ctx context.Context) (snapshot, previousJournal, error) {
 	data, err := atomicfile.ReadBounded(ctx, w.path, maxFeedBytes)
 	if err != nil {
-		return w.classifyPreviousReadError(err)
+		prev, cErr := w.classifyPreviousReadError(err)
+		return snapshot{}, prev, cErr
 	}
 	snap, _, structReason, decodeErr := decodeSnapshot(data)
 	if decodeErr != nil {
@@ -901,13 +908,13 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 		// can embed the offending document text, and feed.json is a
 		// tamperable boundary.
 		w.log.Warn(msgSnapshotMalformed, "path", w.path, "error", capLogText(decodeErr.Error(), 256))
-		return previousJournal{baseline: true, reason: reasonMalformed}, nil
+		return snapshot{}, previousJournal{baseline: true, reason: reasonMalformed}, nil
 	}
 	if structReason != "" {
 		// The offending value itself is never logged: it can be
 		// attacker-shaped multi-megabyte text.
 		w.log.Warn(msgSnapshotMalformed, "path", w.path, "reason", structReason)
-		return previousJournal{baseline: true, reason: reasonMalformed}, nil
+		return snapshot{}, previousJournal{baseline: true, reason: reasonMalformed}, nil
 	}
 	if !seenLedgerWithinLimits(snap.Seen) {
 		// The seen ledger is carried forward verbatim and never pruned, so an
@@ -919,10 +926,10 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 		// is never logged.
 		w.log.Warn(msgSnapshotMalformed,
 			"path", w.path, "reason", "seen ledger is invalid or exceeds its size cap")
-		return previousJournal{baseline: true, reason: reasonMalformed}, nil
+		return snapshot{}, previousJournal{baseline: true, reason: reasonMalformed}, nil
 	}
 	if snap.Seen == nil {
-		return previousJournal{baseline: true, reason: "pre-journal-schema"}, nil
+		return snapshot{}, previousJournal{baseline: true, reason: "pre-journal-schema"}, nil
 	}
 	titles, droppedTitles := retainValidTitles(snap.Titles)
 	if droppedTitles > 0 {
@@ -947,7 +954,7 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (previousJournal, error) 
 			"path", w.path, "max_bytes", maxPersistedCursorBytes, "cursor_bytes", len(cursor))
 		cursor = ""
 	}
-	return previousJournal{
+	return snap, previousJournal{
 		nyaaFeed: snap.NyaaFeed,
 		abFeed:   snap.ABFeed,
 		seen:     snap.Seen,

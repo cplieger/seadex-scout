@@ -827,9 +827,18 @@ func TestCycleShutdownDuringMatchingWarnsShutdownNotAniList(t *testing.T) {
 // is in flight.
 type cancellingSeaDex struct{ cancel context.CancelFunc }
 
-func (c *cancellingSeaDex) FetchEntries(context.Context) ([]seadex.Entry, error) {
+func (c *cancellingSeaDex) FetchEntries(context.Context, seadex.Options) ([]seadex.Entry, error) {
 	c.cancel()
 	return nil, context.Canceled
+}
+
+// CountWindow is unreachable here: every test using this fake reconciles, and
+// only a tick probes. It cancels and fails the same way so a misrouted
+// dispatch surfaces as the fetch failure the test already asserts rather than
+// as a silent success.
+func (c *cancellingSeaDex) CountWindow(context.Context, time.Time) (int, error) {
+	c.cancel()
+	return 0, context.Canceled
 }
 
 // cancellingEmptySeaDex cancels the shared cycle context from inside the fetch
@@ -838,9 +847,14 @@ func (c *cancellingSeaDex) FetchEntries(context.Context) ([]seadex.Entry, error)
 // pre-emption (which requires one of them to be non-nil) cannot cover it.
 type cancellingEmptySeaDex struct{ cancel context.CancelFunc }
 
-func (c *cancellingEmptySeaDex) FetchEntries(context.Context) ([]seadex.Entry, error) {
+func (c *cancellingEmptySeaDex) FetchEntries(context.Context, seadex.Options) ([]seadex.Entry, error) {
 	c.cancel()
 	return nil, nil
+}
+
+func (c *cancellingEmptySeaDex) CountWindow(context.Context, time.Time) (int, error) {
+	c.cancel()
+	return 0, nil
 }
 
 // TestCycleShutdownDuringZeroEntryFetchEmitsNoCompletionLine pins the
