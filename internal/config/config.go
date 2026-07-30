@@ -26,7 +26,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -37,6 +36,7 @@ import (
 	"github.com/cplieger/scheduler/v2"
 	"github.com/cplieger/seadex-scout/internal/credname"
 	"github.com/cplieger/seadex-scout/internal/displaylink"
+	"github.com/cplieger/seadex-scout/internal/secretref"
 	"github.com/cplieger/seadex-scout/internal/tagfilter"
 	"github.com/cplieger/slogx"
 	"github.com/cplieger/urlform"
@@ -672,12 +672,6 @@ func (c *Config) warnRelativeReportDir() {
 	}
 }
 
-// envRefRe matches an unexpanded environment-variable reference in either
-// spelling: any braced ${...} form, or the shell-style $NAME. The brace-less
-// arm is upper-case-only (the convention every allowlisted prefix follows), so
-// a hex or base64 secret carrying a stray '$' does not trip the warning.
-var envRefRe = regexp.MustCompile(`\$\{[^}]*\}|\$[A-Z_][A-Z0-9_]*`)
-
 // warnUnexpandedSecretRefs warns when a secret field still holds a literal
 // environment-variable reference. yamlenv expands only the ${VAR} form of an
 // ALLOWLISTED name and reports only allowlisted-but-unset names (naming the
@@ -703,7 +697,7 @@ func (c *Config) warnUnexpandedSecretRefs() {
 		{"indexer.prowlarr_api_key", c.IndexerProwlarrAPIKey},
 		{"indexer.ab_passkey", c.IndexerABPasskey},
 	} {
-		if envRefRe.MatchString(sf.val) {
+		if secretref.Unexpanded(sf.val) {
 			slog.Warn("a secret still holds a literal environment-variable reference; only "+
 				"${VAR} names prefixed SONARR_/RADARR_/SEADEX_SCOUT_ are expanded, so the "+
 				"literal placeholder is sent as the credential and every call to that "+
@@ -856,7 +850,7 @@ func (c *Config) validateIndexerEndpoints() error {
 	// name - so the check is exact whether or not the name is allowlisted, and a
 	// non-allowlisted spelling is left just as literal. Warn (the deployment may
 	// already be running behind it); field-name-only, never echo the key.
-	if strings.HasPrefix(c.IndexerAPIKey, "$") && envRefRe.FindString(c.IndexerAPIKey) == c.IndexerAPIKey {
+	if secretref.IsWholeRef(c.IndexerAPIKey) && !strings.Contains(c.IndexerAPIKey, "${") {
 		slog.Warn("indexer.feed_api_key looks like an unbraced $VAR reference; only the " +
 			"${VAR} form is expanded, so the feed is gated by that literal name - wrap the " +
 			"reference in ${...} or paste the key value")
@@ -943,7 +937,12 @@ func (c *Config) warnABPasskeyConfiguration() {
 	// passkey-free) keep working. Warn at startup so the operator gets a
 	// config-time signal instead of discovering it in downstream arr RSS
 	// failures. Field-name-only; never echoes a secret.
-	if c.IndexerABTorznabURL != "" && c.IndexerABPasskey == "" {
+	//
+	// UNUSABLE, not empty: an unexpanded ${VAR}/$VAR placeholder takes the same
+	// path at the server (internal/indexer's unusableABPasskey, the same
+	// internal/secretref predicate), so describing only the empty case left the
+	// placeholder case with a warning that named the wrong consequence.
+	if c.IndexerABTorznabURL != "" && secretref.Unusable(c.IndexerABPasskey) {
 		slog.Warn("indexer.ab_passkey is empty; AnimeBytes searches still work through Prowlarr, " +
 			"but the /ab RSS feed returns a Torznab error until a passkey is configured")
 	}
@@ -952,7 +951,7 @@ func (c *Config) warnABPasskeyConfiguration() {
 	// journaling nor the /ab feed uses the passkey. Info, mirroring
 	// infoDisabledIndexerKeys: a deliberately parked passkey must not raise
 	// Loki alert noise. Field-name-only; never echoes the secret.
-	if c.IndexerABTorznabURL == "" && c.IndexerABPasskey != "" {
+	if c.IndexerABTorznabURL == "" && !secretref.Unusable(c.IndexerABPasskey) {
 		slog.Info("indexer.ab_passkey is set but indexer.ab_torznab_url is empty; " +
 			"AnimeBytes is disabled and the passkey is unused (set indexer.ab_torznab_url to enable it)")
 	}

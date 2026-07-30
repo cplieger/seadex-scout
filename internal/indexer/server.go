@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cplieger/httpx/v4"
+	"github.com/cplieger/seadex-scout/internal/secretref"
 	"github.com/cplieger/webhttp"
 )
 
@@ -63,34 +64,29 @@ var writeTimeout = upstreamMaxAttempts*upstreamAttemptTimeout +
 // real deployment's :9118.
 var listenAddr = ":9118"
 
-// unresolvedRef reports whether a configured secret still holds a literal ${VAR}
-// reference the config loader could not expand (an unset or non-allowlisted
-// variable name; yamlenv leaves the placeholder in place and, for a
-// non-allowlisted spelling, reports nothing).
-func unresolvedRef(v string) bool { return strings.Contains(v, "${") }
-
 // unusableFeedKey reports whether the configured feed_api_key cannot be trusted
-// as the feed's authentication gate: it is absent, or it still holds a literal
-// ${VAR} reference the config loader could not expand. The second case matters
-// because this key IS the gate - an unexpanded placeholder is a credential a LAN
-// attacker can guess from the public config.example, and the /ab RSS body's
+// as the feed's authentication gate: it is absent, or it still holds an
+// unexpanded environment-variable reference in EITHER spelling. The second case
+// matters because this key IS the gate - an unexpanded placeholder is a
+// credential guessable from the public config.example, and the /ab RSS body's
 // download links carry the operator's AnimeBytes passkey. config's
 // validateIndexerEndpoints rejects both on the daemon path; these guards keep
 // any other construction of Indexer from binding or serving behind them.
-func unusableFeedKey(key string) bool {
-	return key == "" || unresolvedRef(key)
-}
+//
+// The reference test is internal/secretref's, shared with internal/config, so
+// the two cannot disagree about which spellings count. They used to: this
+// package tested only for a brace, so an unbraced $NAME read as usable while
+// config warned about it (see that package's doc).
+func unusableFeedKey(key string) bool { return secretref.Unusable(key) }
 
 // unusableABPasskey reports whether indexer.ab_passkey can build a grabbable
-// AnimeBytes link: it cannot when absent, and it cannot when it still holds a
-// ${VAR} reference - url.PathEscape would mint that placeholder into every AB
-// download link, so every arr grab fails at the tracker while the feed reports
-// success. Both cases take the documented empty-passkey path instead: the AB
-// journal is cleared at load (rebuildABDownloadURLs) and an /ab RSS check
-// answers the Torznab <error> that names the passkey.
-func unusableABPasskey(passkey string) bool {
-	return passkey == "" || unresolvedRef(passkey)
-}
+// AnimeBytes link: it cannot when absent, and it cannot when it still holds an
+// environment-variable reference - url.PathEscape would mint that placeholder
+// into every AB download link, so every arr grab fails at the tracker while the
+// feed reports success. Both cases take the documented empty-passkey path
+// instead: the AB journal is cleared at load (rebuildABDownloadURLs) and an /ab
+// RSS check answers the Torznab <error> that names the passkey.
+func unusableABPasskey(passkey string) bool { return secretref.Unusable(passkey) }
 
 // Run serves the Torznab endpoint from the persisted feed snapshot until ctx is
 // cancelled. It first warms the feed from the last persisted snapshot
@@ -119,10 +115,11 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	// nothing is served for /ab and no error is rendered, so warning there would
 	// be the parked-passkey noise config's INFO policy exists to avoid (l-f13).
 	// Field-name-only: the value is a credential.
-	if ix.enablement.enabled(upstreamAB) && unresolvedRef(ix.enablement.ABPasskey) {
-		ix.log.Warn("indexer.ab_passkey still holds a ${VAR} reference; the variable is unset " +
-			"or not allowlisted (SONARR_/RADARR_/SEADEX_SCOUT_), so no grabbable AnimeBytes link " +
-			"can be derived - the /ab RSS feed answers a Torznab error until it is set")
+	if ix.enablement.enabled(upstreamAB) && secretref.Unexpanded(ix.enablement.ABPasskey) {
+		ix.log.Warn("indexer.ab_passkey still holds an unexpanded environment-variable reference " +
+			"(${VAR} or $VAR); the variable is unset or not allowlisted " +
+			"(SONARR_/RADARR_/SEADEX_SCOUT_), so no grabbable AnimeBytes link can be derived - " +
+			"the /ab RSS feed answers a Torznab error until it is set")
 	}
 	// The one piece of startup work, deliberately here and not in New: all
 	// background work begins under the explicit lifecycle method.

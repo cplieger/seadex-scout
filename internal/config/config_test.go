@@ -2474,3 +2474,36 @@ func TestLoadIgnoreFromFile(t *testing.T) {
 		t.Error("Load() of a string filters.ignore = nil error, want the strict decode rejection")
 	}
 }
+
+// TestABPasskeyUnusableWarnsForBothSpellings pins the cross-package agreement
+// this app's internal/secretref exists to hold. The config warning and the
+// server's usability guard used to test different things: config matched both
+// ${VAR} and the shell-style $VAR, while internal/indexer tested only for a
+// brace. An unbraced $SEADEX_SCOUT_AB_PASSKEY therefore warned at startup and was
+// then treated as a USABLE passkey, minting the literal placeholder into every
+// AnimeBytes download link so each arr grab failed at the tracker while the feed
+// reported success.
+//
+// Both now read secretref.Unusable, so this test asserts the warning fires for
+// every shape the server refuses to serve: absent, braced, and brace-less.
+func TestABPasskeyUnusableWarnsForBothSpellings(t *testing.T) {
+	const warnMsg = "indexer.ab_passkey is empty"
+	for name, tc := range map[string]struct {
+		passkey  string
+		wantWarn bool
+	}{
+		"absent passkey warns":            {"", true},
+		"braced placeholder warns":        {"${SEADEX_SCOUT_AB_PASSKEY}", true},
+		"brace-less placeholder warns":    {"$SEADEX_SCOUT_AB_PASSKEY", true},
+		"a real 32-char passkey is quiet": {"0f1e2d3c4b5a69788796a5b4c3d2e1f0", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := capture.Default(t)
+			c := &Config{IndexerABTorznabURL: "http://prowlarr:9696/2/api", IndexerABPasskey: tc.passkey}
+			c.warnABPasskeyConfiguration()
+			if got := rec.Contains(warnMsg); got != tc.wantWarn {
+				t.Errorf("warnABPasskeyConfiguration() warned = %v, want %v: %v", got, tc.wantWarn, rec.Messages())
+			}
+		})
+	}
+}
