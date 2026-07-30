@@ -417,7 +417,7 @@ func TestHandlePreCompareGateShrunkWalkWithSeaDexOutageWarnsFeedKept(t *testing.
 	if !handled || !healthy {
 		t.Errorf("handlePreCompareGate = (%v, %v), want (true, true)", handled, healthy)
 	}
-	if n := recorder.CountExact("seadex fetch failed; skipping comparison, findings preserved"); n != 1 {
+	if n := recorder.CountExact("seadex fetch failed; skipping comparison, findings not re-reported this cycle"); n != 1 {
 		t.Errorf("seadex failure WARN count = %d, want 1 (a shrink + SeaDex double outage must not read as shrink-only)", n)
 	}
 	if store.st.SeadexFailures != 1 {
@@ -426,7 +426,7 @@ func TestHandlePreCompareGateShrunkWalkWithSeaDexOutageWarnsFeedKept(t *testing.
 	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "library-shrunk" {
 		t.Errorf("degraded reasons = %v, want [library-shrunk]", reasons)
 	}
-	if kept, ok := recordAttr(recorder, "seadex fetch failed; skipping comparison, findings preserved", "feed_kept"); !ok || kept != "true" {
+	if kept, ok := recordAttr(recorder, "seadex fetch failed; skipping comparison, findings not re-reported this cycle", "feed_kept"); !ok || kept != "true" {
 		t.Errorf("seadex-failure WARN feed_kept attr = %q (found=%t), want \"true\" (the configured feed kept its previous snapshot through the outage)", kept, ok)
 	}
 }
@@ -866,7 +866,7 @@ func TestCycleShutdownDuringZeroEntryFetchEmitsNoCompletionLine(t *testing.T) {
 	if healthy := s.Cycle(ctx); !healthy {
 		t.Fatal("Cycle healthy=false, want true (a shutdown is not an ingest failure)")
 	}
-	if n := recorder.CountExact("seadex returned zero entries; skipping comparison, findings preserved"); n != 1 {
+	if n := recorder.CountExact("seadex returned zero entries; skipping comparison, findings not re-reported this cycle"); n != 1 {
 		t.Errorf("zero-entries WARN count = %d, want 1 (the outage evidence stays)", n)
 	}
 	if n := recorder.CountExact("cycle degraded"); n != 0 {
@@ -902,10 +902,10 @@ func TestCycleShutdownDuringSeaDexFetchWarnsShutdownNotSeaDex(t *testing.T) {
 	if healthy := s.Cycle(ctx); !healthy {
 		t.Fatal("Cycle healthy=false, want true (a shutdown during the SeaDex fetch is not an arr failure)")
 	}
-	if n := recorder.CountExact("cycle interrupted by shutdown before comparison; findings preserved"); n != 1 {
+	if n := recorder.CountExact("cycle interrupted by shutdown before comparison; findings not re-reported this cycle"); n != 1 {
 		t.Errorf("shutdown WARN count = %d, want 1", n)
 	}
-	if n := recorder.CountExact("seadex fetch failed; skipping comparison, findings preserved"); n != 0 {
+	if n := recorder.CountExact("seadex fetch failed; skipping comparison, findings not re-reported this cycle"); n != 0 {
 		t.Errorf("shutdown misattributed to a SeaDex outage %d times, want 0", n)
 	}
 	if n := recorder.CountExact("cycle degraded"); n != 0 {
@@ -1431,10 +1431,10 @@ func TestCycleShutdownDuringMappingLoadWarnsShutdownNotFribb(t *testing.T) {
 	if n := recorder.CountExact("mapping degraded"); n != 0 {
 		t.Errorf("'mapping degraded' fired %d times during a shutdown, want 0 (a cancelled load is the shutdown, not a Fribb fault)", n)
 	}
-	if n := recorder.CountExact("mapping unusable; skipping comparison, findings preserved"); n != 0 {
+	if n := recorder.CountExact("mapping unusable; skipping comparison, findings not re-reported this cycle"); n != 0 {
 		t.Errorf("shutdown misattributed to an unusable map %d times, want 0", n)
 	}
-	if n := recorder.CountExact("cycle interrupted by shutdown before comparison; findings preserved"); n != 1 {
+	if n := recorder.CountExact("cycle interrupted by shutdown before comparison; findings not re-reported this cycle"); n != 1 {
 		t.Errorf("shutdown WARN count = %d, want 1", n)
 	}
 	if n := recorder.CountExact("cycle degraded"); n != 0 {
@@ -1805,7 +1805,7 @@ func TestCycleShutdownAfterShrunkenWalkKeepsWarnOmitsCompletionLine(t *testing.T
 	if healthy := s.Cycle(ctx); !healthy {
 		t.Fatal("Cycle healthy=false, want true (a shrunken walk is degraded, not unhealthy)")
 	}
-	if n := recorder.CountExact("library walk shrank below half the prior snapshot; skipping comparison, findings preserved"); n != 1 {
+	if n := recorder.CountExact("library walk shrank below half the prior snapshot; skipping comparison, findings not re-reported this cycle"); n != 1 {
 		t.Errorf("shrink WARN count = %d, want 1 (the shrink evidence comes from the completed walk)", n)
 	}
 	if n := recorder.CountExact("cycle degraded"); n != 0 {

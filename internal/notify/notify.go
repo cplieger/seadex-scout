@@ -8,6 +8,7 @@ package notify
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 
@@ -36,8 +37,11 @@ import (
 // finding that stops being reported resolves when the rule's lookback window
 // expires, which is why nothing here emits a "resolved" line any more.
 //
-// SINGLE WRITER: every caller runs inside the cycle body, which
-// internal/cycle serializes on /config/cycle.lock, so the set needs no lock.
+// SINGLE WRITER: every caller runs inside the cycle body, and one process
+// holds one Notifier, so the set is only ever touched by the goroutine driving
+// the cycle. The /config/cycle.lock file serializes PROCESSES against each
+// other (state.json, feed.json), not accesses to this map - it is the
+// single-goroutine ownership that makes the lack of a mutex correct.
 type Notifier struct {
 	log *slog.Logger
 	// ignore is the operator's filters.ignore set (AniList IDs). It suppresses
@@ -48,10 +52,19 @@ type Notifier struct {
 	// be re-notified indefinitely.
 	ignore map[int]struct{}
 	// current is the set of conditions true as of the last completed pass,
-	// keyed by dedupe key. It holds whole compare.Findings, not a trimmed
-	// projection: every field the emitted line carries has to be re-emittable
-	// on the next pass, and nothing here is persisted, so the bounded
-	// projection the old dedupe record needed has no purpose.
+	// keyed by dedupe key. It holds whole compare.Findings rather than the
+	// trimmed projection the old dedupe record persisted, because every field
+	// the emitted line carries has to be re-emittable on the next pass.
+	//
+	// Its untrusted strings are still BOUNDED at ingest (boundRetained). The
+	// old projection's bound existed because the record was written to
+	// state.json; deleting the persistence does not delete the reason. These
+	// rows are RESIDENT for as long as the condition holds - across every pass,
+	// for the process lifetime - so a hostile catalogue's oversized titles,
+	// group names and link URLs would otherwise sit in a 256 MiB container
+	// bounded only by the fetch's own budget, invisible because the emit path
+	// caps per attribute on the way out and never shrinks what it read from
+	// (CWE-400).
 	current map[string]compare.Finding
 }
 
@@ -84,7 +97,10 @@ func (n *Notifier) Report(findings []compare.Finding, incompleteIDs map[int]stru
 	// findings can fold onto one key), and the emitted line must carry the
 	// same payload the set retains, so the map write order decides both.
 	for i := range findings {
-		next[dedupeKey(&findings[i])] = findings[i]
+		key := dedupeKey(&findings[i])
+		retained := findings[i]
+		boundRetained(&retained)
+		next[key] = retained
 	}
 	preserved := 0
 	for key := range n.current {
@@ -100,6 +116,56 @@ func (n *Notifier) Report(findings []compare.Finding, incompleteIDs map[int]stru
 	}
 	n.current = next
 	n.emitAll(preserved)
+}
+
+// boundRetained caps the untrusted strings of a row about to be RETAINED, in
+// place. Every value here is parsed from SeaDex data or library file names, and
+// a retained row outlives the pass that produced it, so the cap has to happen
+// on the way IN - the emit path's own caps bound only what is written to the
+// log and leave the resident value whole. capAttr is idempotent, so a row
+// carried forward across passes is bounded once and passes through unchanged.
+//
+// Links is the field that most needs it: the old persisted projection carried
+// no URL at all, and one entry can publish many, each an untrusted string.
+// The AB grade and Headline flag are typed values and need no bound.
+//
+// It CLONES the three slices before bounding them. f is a shallow copy of the
+// caller's finding, so the slice headers still point at the caller's backing
+// arrays: bounding in place would mutate the compare result the audit report
+// and the cycle log line also read, turning a retention bound into a silent
+// edit of somebody else's data.
+func boundRetained(f *compare.Finding) {
+	f.RecommendedGroups = slices.Clone(f.RecommendedGroups)
+	f.CurrentGroups = slices.Clone(f.CurrentGroups)
+	f.Links = slices.Clone(f.Links)
+	f.Arr = capAttr(f.Arr)
+	f.Title = capAttr(f.Title)
+	f.Kind = capAttr(f.Kind)
+	f.Reason = capAttr(f.Reason)
+	f.Tracker = capAttr(f.Tracker)
+	f.Resolution = capAttr(f.Resolution)
+	f.Codec = capAttr(f.Codec)
+	f.Scope = capAttr(f.Scope)
+	f.InfoHash = capAttr(f.InfoHash)
+	f.CurrentGroup = capAttr(f.CurrentGroup)
+	f.RecommendedGroup = capAttr(f.RecommendedGroup)
+	f.Status = compare.Status(capAttr(string(f.Status)))
+	// capAttr, NOT capURLAttr: the retention bound is a SIZE bound, while
+	// capURLAttr is the emit path's link-destination ENCODER (it percent-encodes
+	// for a Markdown sink). Encoding here would hand the emit path an
+	// already-encoded value and double-encode every space into %2520.
+	f.ReleaseURL = capAttr(f.ReleaseURL)
+	f.ArrURL = capAttr(f.ArrURL)
+	for i := range f.RecommendedGroups {
+		f.RecommendedGroups[i] = capAttr(f.RecommendedGroups[i])
+	}
+	for i := range f.CurrentGroups {
+		f.CurrentGroups[i] = capAttr(f.CurrentGroups[i])
+	}
+	for i := range f.Links {
+		f.Links[i].Tracker = capAttr(f.Links[i].Tracker)
+		f.Links[i].URL = capAttr(f.Links[i].URL)
+	}
 }
 
 // emitAll logs every row of the current set, in a deterministic order so a

@@ -80,7 +80,7 @@ func dedupeKey(f *compare.Finding) string {
 		// '|'-separated fields where every unfolded key has at least
 		// five, so the two forms cannot collide. This bounds the KEY
 		// side; the stored VALUE side is bounded separately, at
-		// projection time, so key and payload together stay bounded.
+		// ingest by boundRetained, so key and payload together stay bounded.
 		return strconv.Itoa(f.AniListID) + "|" + string(f.Status) + "|" + keyenc.BoundedPart(key)
 	}
 	return key

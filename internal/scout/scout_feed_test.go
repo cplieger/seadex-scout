@@ -209,7 +209,7 @@ func TestCycleWalkAndSeaDexBothFailWarnsFeedKept(t *testing.T) {
 		{
 			name:     "seadex fetch fails",
 			seadex:   &fakeSeaDex{err: errors.New("seadex down")},
-			wantWarn: "seadex fetch failed; skipping comparison, findings preserved",
+			wantWarn: "seadex fetch failed; skipping comparison, findings not re-reported this cycle",
 		},
 		{
 			name:     "seadex returns zero entries",
@@ -337,7 +337,7 @@ func TestCycleWalkFailShutdownDuringSeaDexFetchStaysSilent(t *testing.T) {
 	if feed.calls != 0 {
 		t.Errorf("feed Rebuild calls = %d, want 0 (nothing to rebuild from)", feed.calls)
 	}
-	if n := recorder.CountExact("seadex fetch failed; skipping comparison, findings preserved"); n != 0 {
+	if n := recorder.CountExact("seadex fetch failed; skipping comparison, findings not re-reported this cycle"); n != 0 {
 		t.Errorf("seadex-failure WARN fired %d times during a shutdown, want 0 (recordSeaDexFetch must stay silent on a cancelled fetch)", n)
 	}
 	if n := recorder.CountExact("seadex returned zero entries; indexer feed kept previous feed"); n != 0 {
@@ -410,7 +410,7 @@ func TestCycleUnusableMapWithSeaDexOutageWarnsFeedKept(t *testing.T) {
 		{
 			name:     "seadex fetch fails",
 			seadex:   &fakeSeaDex{err: errors.New("seadex down")},
-			wantWarn: "seadex fetch failed; skipping comparison, findings preserved",
+			wantWarn: "seadex fetch failed; skipping comparison, findings not re-reported this cycle",
 		},
 		{
 			name:     "seadex returns zero entries",
@@ -443,7 +443,7 @@ func TestCycleUnusableMapWithSeaDexOutageWarnsFeedKept(t *testing.T) {
 			if n := recorder.CountExact(tc.wantWarn); n != 1 {
 				t.Errorf("%q count = %d, want 1 (a mapping + SeaDex double outage must not read as mapping-only)", tc.wantWarn, n)
 			}
-			if n := recorder.CountExact("mapping unusable; skipping comparison, findings preserved"); n != 1 {
+			if n := recorder.CountExact("mapping unusable; skipping comparison, findings not re-reported this cycle"); n != 1 {
 				t.Errorf("unusable-map WARN count = %d, want 1", n)
 			}
 			if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "mapping-unusable" {
@@ -484,7 +484,7 @@ func TestSeaDexFailureLogCarriesFeedKept(t *testing.T) {
 			if healthy := s.Cycle(context.Background()); !healthy {
 				t.Fatal("Cycle healthy=false, want true (a SeaDex outage is degraded, not unhealthy)")
 			}
-			got, ok := recordAttr(recorder, "seadex fetch failed; skipping comparison, findings preserved", "feed_kept")
+			got, ok := recordAttr(recorder, "seadex fetch failed; skipping comparison, findings not re-reported this cycle", "feed_kept")
 			if !ok || got != tc.want {
 				t.Errorf("seadex-failure feed_kept = %q (found=%t), want %q", got, ok, tc.want)
 			}
@@ -551,7 +551,7 @@ func TestHandlePreCompareGateAlertOnlyGatedCycleClaimsNoFeed(t *testing.T) {
 	if n := recorder.CountExact("seadex returned zero entries; indexer feed kept previous feed"); n != 0 {
 		t.Errorf("feed-kept WARN count = %d, want 0 in an alert-only deployment (no feed can have kept a previous snapshot)", n)
 	}
-	if n := recorder.CountExact("mapping unusable; skipping comparison, findings preserved"); n != 1 {
+	if n := recorder.CountExact("mapping unusable; skipping comparison, findings not re-reported this cycle"); n != 1 {
 		t.Errorf("unusable-map WARN count = %d, want 1", n)
 	}
 }

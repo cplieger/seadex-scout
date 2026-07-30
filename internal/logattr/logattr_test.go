@@ -118,7 +118,7 @@ func TestJoinerHonestAggregateMatchesJoinThenCap(t *testing.T) {
 // because bytes really were dropped. An HONEST value must be byte-identical
 // under either order - that is the half a regression would break silently, since
 // every emitted attribute (title, groups, tracker, classification_reason, the
-// URLs, info_hash) and emitResolved all ride this primitive.
+// URLs, info_hash) and the retention bound all ride this primitive.
 func TestCapOrderDivergesOnlyForShrinkingHostileValues(t *testing.T) {
 	sanitizeThenCap := func(raw string) string {
 		clean := runesafe.Sanitize(raw)

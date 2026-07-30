@@ -101,10 +101,23 @@ groups:
             scheduler's job result instead.
       # Informational, not a fault: SeaDex recommends a better release than the
       # one on disk — the app's activity signal; keep it at severity info or drop
-      # it, it is not page-worthy. It is a one-time activity event, so route it to
-      # a receiver with `send_resolved: false` — otherwise Alertmanager emits a
-      # phantom RESOLVED ~1h later when the count-over-time window clears, and a
-      # "new release available" event has nothing to resolve. Grouped by the
+      # it, it is not page-worthy.
+      #
+      # THIS IS A STATE SIGNAL, NOT AN EVENT. The app re-emits every open finding
+      # on every cycle for as long as the condition holds, so the alert stays
+      # firing until you upgrade the release (or add the show to filters.ignore)
+      # — which is what makes a notification lost between here and your receiver
+      # recoverable: the next evaluation re-fires it. It is NOT a one-time event
+      # and `send_resolved: false` is no longer the obvious choice: a resolution
+      # here means the condition genuinely ended.
+      #
+      # THE WINDOW MUST EXCEED YOUR poll_interval, with margin. Loki's ruler does
+      # NOT support keep_firing_for (its RuleDesc has no such field, so the key
+      # parses and the value is discarded), so this lookback is the only thing
+      # holding the alert firing between emissions. [12h] tolerates three missed
+      # 3h cycles; at a 15m poll_interval it tolerates far more. Set it too tight
+      # and every cycle produces a fire → resolve → re-fire flap.
+      # Grouped by the
       # finding's identifying labels so
       # each alert names one title with clickable links: the app emits arr_url,
       # nyaa_url, public_url + public_tracker, ab_url + ab_tracker, season and
@@ -130,7 +143,7 @@ groups:
         expr: |
           sum by (title, alert_title, al_id, arr, arr_url, nyaa_url, public_url, public_tracker, ab_url, ab_tracker, season, recommended_group, alert_recommended_group, seadex_tags) (
             count_over_time(
-              {container="seadex-scout"} | json | msg=`better release available` [1h]
+              {container="seadex-scout"} | json | msg=`better release available` [12h]
             )
           ) > 0
         for: 5m

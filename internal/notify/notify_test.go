@@ -775,3 +775,104 @@ func TestAggregateAttrsAreBoundedBeforeJoining(t *testing.T) {
 		}
 	}
 }
+
+// TestReportBoundsRetainedUntrustedStrings pins the RESIDENCY bound on the
+// in-memory set. The old dedupe record persisted a 7-field projection whose
+// untrusted strings were capped because it was written to state.json; deleting
+// the persistence did not delete the reason. These rows stay resident for as
+// long as the condition holds, so an oversized SeaDex title, group name or link
+// URL would otherwise sit in a 256 MiB container bounded only by the fetch's own
+// budget - invisible, because the emit path caps per attribute on the way out
+// and never shrinks what it read from.
+func TestReportBoundsRetainedUntrustedStrings(t *testing.T) {
+	t.Parallel()
+	huge := strings.Repeat("x", 4*maxAttrBytes)
+	n, _ := newCapturedNotifier()
+	n.Report([]compare.Finding{{
+		AniListID:         7,
+		Status:            compare.StatusBetter,
+		Title:             huge,
+		Arr:               huge,
+		CurrentGroup:      huge,
+		RecommendedGroup:  huge,
+		Tracker:           huge,
+		Kind:              huge,
+		Reason:            huge,
+		Resolution:        huge,
+		Codec:             huge,
+		Scope:             huge,
+		InfoHash:          huge,
+		ReleaseURL:        huge,
+		ArrURL:            huge,
+		RecommendedGroups: []string{huge},
+		CurrentGroups:     []string{huge},
+		Links:             []compare.ReleaseLink{{Tracker: huge, URL: huge}},
+	}}, nil)
+
+	if len(n.current) != 1 {
+		t.Fatalf("retained %d rows, want 1", len(n.current))
+	}
+	ceiling := maxAttrBytes + len(attrTruncMarker)
+	for _, got := range n.current {
+		check := func(field, v string) {
+			t.Helper()
+			if len(v) > ceiling {
+				t.Errorf("retained %s is %d bytes, want <= %d", field, len(v), ceiling)
+			}
+		}
+		check("Title", got.Title)
+		check("Arr", got.Arr)
+		check("CurrentGroup", got.CurrentGroup)
+		check("RecommendedGroup", got.RecommendedGroup)
+		check("Tracker", got.Tracker)
+		check("Kind", got.Kind)
+		check("Reason", got.Reason)
+		check("Resolution", got.Resolution)
+		check("Codec", got.Codec)
+		check("Scope", got.Scope)
+		check("InfoHash", got.InfoHash)
+		check("ReleaseURL", got.ReleaseURL)
+		check("ArrURL", got.ArrURL)
+		check("Status", string(got.Status))
+		for _, g := range got.RecommendedGroups {
+			check("RecommendedGroups element", g)
+		}
+		for _, g := range got.CurrentGroups {
+			check("CurrentGroups element", g)
+		}
+		for _, l := range got.Links {
+			check("Links element Tracker", l.Tracker)
+			check("Links element URL", l.URL)
+		}
+	}
+}
+
+// TestReportDoesNotMutateCallerFindings pins the aliasing guard in
+// boundRetained. The retained row is a SHALLOW copy of the caller's finding, so
+// its three slice headers still point at the caller's backing arrays - bounding
+// them in place would silently edit the compare result the audit report and the
+// cycle's own log line also read.
+func TestReportDoesNotMutateCallerFindings(t *testing.T) {
+	t.Parallel()
+	huge := strings.Repeat("y", 4*maxAttrBytes)
+	findings := []compare.Finding{{
+		AniListID:         11,
+		Status:            compare.StatusBetter,
+		Title:             "Frieren",
+		RecommendedGroups: []string{huge},
+		CurrentGroups:     []string{huge},
+		Links:             []compare.ReleaseLink{{Tracker: "Nyaa", URL: huge}},
+	}}
+	n, _ := newCapturedNotifier()
+	n.Report(findings, nil)
+
+	if got := len(findings[0].RecommendedGroups[0]); got != len(huge) {
+		t.Errorf("caller's RecommendedGroups[0] shrank to %d bytes; Report must not mutate it", got)
+	}
+	if got := len(findings[0].CurrentGroups[0]); got != len(huge) {
+		t.Errorf("caller's CurrentGroups[0] shrank to %d bytes; Report must not mutate it", got)
+	}
+	if got := len(findings[0].Links[0].URL); got != len(huge) {
+		t.Errorf("caller's Links[0].URL shrank to %d bytes; Report must not mutate it", got)
+	}
+}

@@ -91,7 +91,7 @@ type State struct {
 	// shrunk-walk log site after a sustained streak.
 	ShrunkWalks int `json:"shrunk_walks,omitempty"`
 	// SeadexFailures counts consecutive cycles whose SeaDex fetch failed (so
-	// the compare was skipped and findings preserved), whichever pre-compare
+	// the compare was skipped, so findings were not re-reported), whichever pre-compare
 	// gate closed the cycle - the scout records the fetch outcome ahead of gate
 	// selection, so a coinciding walk/mapping failure cannot hide the outage
 	// from the streak. It persists across cycles and restarts, resets to 0 on

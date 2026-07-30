@@ -299,7 +299,7 @@ func (s *Scout) Cycle(ctx context.Context) bool {
 		// so comparing it would falsely resolve their findings. Keep the
 		// whole-cycle skip for this one case; a transient AniList degradation
 		// instead carries Result.IncompleteIDs and flows into the compare
-		// below with exactly the affected entries' findings preserved.
+		// below with exactly the affected entries' rows carried forward.
 		return s.finishInterruptedMatch(ctx, start, startStats, &st, snap, &mapCache, result)
 	}
 	return s.finishCompletedCycle(ctx, start, startStats, &st, snap, &mapCache, entries, result, mapErr)
@@ -623,7 +623,7 @@ func (s *Scout) recordPartialWalk(st *state.State, snap *library.Snapshot) {
 	}
 	st.PartialWalks++
 	if st.PartialWalks >= partialWalkEscalationThreshold {
-		s.log.Error("library walk partial repeatedly; the failing series never compare, the one-shot report refuses a partial snapshot, and during the cold-start window no finding is notified at all - inspect the arrs' episode endpoints for the skipped series",
+		s.log.Error("library walk partial repeatedly; the failing series never compare and the one-shot report refuses a partial snapshot, so those items' findings are carried forward on evidence that never refreshes - inspect the arrs' episode endpoints for the skipped series",
 			"consecutive_partial_walks", st.PartialWalks)
 	}
 }
@@ -642,7 +642,7 @@ func (s *Scout) logCompletedCycle(snap *library.Snapshot, result *match.Result, 
 	case result.Degraded:
 		// A transient AniList failure left some entries' needed lookups
 		// incomplete: the compare ran on the unaffected majority with the
-		// affected entries' prior findings preserved, but the cycle must not
+		// affected entries' rows carried forward, but the cycle must not
 		// read as fully successful. Same reason attr as before the scoped
 		// handling, so the deadman and any reason-keyed queries stay stable.
 		// The persisted streak's SUSTAINED-degradation ERROR escalation (the
@@ -836,9 +836,9 @@ func (s *Scout) recordSeaDexFetch(ctx context.Context, st *state.State, seaErr e
 	st.SeadexFailures++
 	attrs := []any{attrError, logSafeUpstreamError(seaErr), "consecutive_seadex_failures", st.SeadexFailures, "feed_kept", s.deps.Feed != nil}
 	if st.SeadexFailures >= seadexFailureEscalationThreshold {
-		s.log.Error("seadex fetch failed repeatedly; skipping comparison, findings preserved - inspect SeaDex (releases.moe) reachability and egress", attrs...)
+		s.log.Error("seadex fetch failed repeatedly; skipping comparison, findings not re-reported this cycle - inspect SeaDex (releases.moe) reachability and egress", attrs...)
 	} else {
-		s.log.Warn("seadex fetch failed; skipping comparison, findings preserved", attrs...)
+		s.log.Warn("seadex fetch failed; skipping comparison, findings not re-reported this cycle", attrs...)
 	}
 }
 
@@ -854,7 +854,7 @@ func (s *Scout) recordSeaDexFetch(ctx context.Context, st *state.State, seaErr e
 // mass-resolve findings (now or a cycle later), and never auto-accepts. A
 // partial snapshot (per-series episode-fetch failures) is NOT gated here: the
 // compare proceeds on the items that walked cleanly, with the Failed items'
-// findings preserved by resolution scoping (see finishCompletedCycle).
+// rows carried forward by replacement scoping (see finishCompletedCycle).
 func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, errs cycleOutcomes) (handled, healthy bool) {
 	if errs.walk != nil {
 		// With a feed configured, Cycle fell through the walk failure so the
@@ -917,9 +917,9 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap lib
 			"consecutive_shrunk_walks", st.ShrunkWalks,
 		}
 		if st.ShrunkWalks >= shrunkWalkEscalationThreshold {
-			s.log.Error("library walk shrank repeatedly; skipping comparison, findings preserved - inspect the arrs and arr_tags, or remove state.json to accept the smaller library", attrs...)
+			s.log.Error("library walk shrank repeatedly; skipping comparison, findings not re-reported this cycle - inspect the arrs and arr_tags, or remove state.json to accept the smaller library", attrs...)
 		} else {
-			s.log.Warn("library walk shrank below half the prior snapshot; skipping comparison, findings preserved", attrs...)
+			s.log.Warn("library walk shrank below half the prior snapshot; skipping comparison, findings not re-reported this cycle", attrs...)
 		}
 		// A shutdown that landed after the shrunken walk (cancelling the
 		// SeaDex fetch or mapping load) keeps the no-completion-line rule,
@@ -963,7 +963,7 @@ func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap li
 		// SeaDex-failure streak is untouched: a cancelled fetch is evidence of
 		// neither an outage nor a recovery.
 		s.degradedSave(ctx, st, snap, mapCache)
-		s.log.Warn("cycle interrupted by shutdown before comparison; findings preserved",
+		s.log.Warn("cycle interrupted by shutdown before comparison; findings not re-reported this cycle",
 			"cause", context.Cause(ctx))
 		return true, true
 	}
@@ -980,7 +980,7 @@ func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap li
 		// which will not categorize every entry as anime), so a configured feed
 		// is serving its previous snapshot. This was the one rebuild-skip cause
 		// with no feed-attributed signal anywhere in the cycle's output.
-		s.log.Warn("mapping unusable; skipping comparison, findings preserved",
+		s.log.Warn("mapping unusable; skipping comparison, findings not re-reported this cycle",
 			"error", errs.mapping, "feed_kept", s.deps.Feed != nil)
 		s.cycleDegraded("mapping-unusable", "error", errs.mapping)
 		return true, true
@@ -998,7 +998,7 @@ func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap li
 		// Same feed_kept signal recordSeaDexFetch attaches to a failed fetch: a
 		// zero-entries response skips the rebuild too (see rebuildFeed), so a
 		// configured feed is serving its previous snapshot.
-		s.log.Warn("seadex returned zero entries; skipping comparison, findings preserved",
+		s.log.Warn("seadex returned zero entries; skipping comparison, findings not re-reported this cycle",
 			"feed_kept", s.deps.Feed != nil)
 		// A shutdown that landed after a nil-error zero-entry fetch keeps the
 		// no-completion-line rule, mirroring the two library-gate arms: the

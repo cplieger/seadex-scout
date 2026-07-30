@@ -348,6 +348,7 @@ unknown or misplaced key is rejected at startup with an error naming it.
 | `filters.require_dual_audio` | `false` | Only dual-audio releases count |
 | `filters.exclude_specials` | `false` | Drop OVA/ONA/special entries from findings and the report |
 | `filters.exclude_tags` | `{}` | Per-tag, per-surface SeaDex-tag exclusions (`findings`/`report`/`feed`); **empty = nothing is filtered, including `Broken`** |
+| `filters.ignore` | `[]` | AniList IDs whose findings are never alerted on. Suppresses the **alert only** — the show still appears in report mode and the RSS feed is untouched. Use it for a show you have decided not to upgrade, so the reminders stop. Max 512 entries |
 | `arr_tags.include` / `arr_tags.exclude` | `[]` | Scan only / never arr items with these tags; an exclude wins |
 | `report.dir` | `/config/reports` | Where timestamped `report-<UTC>.md` + `.json` pairs land |
 | `indexer.feed_api_key` | `""` | Key the arrs must send to the feed |
@@ -401,8 +402,28 @@ deliver through your Alertmanager like any Prometheus metric alert. They cover:
 | --- | --- | --- |
 | `SeadexScoutCycleError` | a cycle logs an error: the Sonarr/Radarr library walk failed, a state write failed, a queued rerun could not record poll health, or a persisted degradation streak (library shrink, mapping refresh, SeaDex fetch, AniList lookups) escalated after 8 consecutive degraded cycles. Routine outcomes stay WARN and never fire it (see `alerts.yaml`) | warning |
 | `SeadexScoutScanStalled` | no cycle completion line (`cycle complete` or `cycle degraded`) in 7h, i.e. the daemon poll loop is wedged | warning |
-| `SeadexScoutBetterReleaseFound` | SeaDex recommended a better release than the one on disk (informational, not a fault) | info |
+| `SeadexScoutBetterReleaseFound` | SeaDex recommends a better release than the one on disk (informational, not a fault). **A state signal, not an event** — see below | info |
 | `SeadexScoutReportWritten` | a report run wrote a season-level alignment report (informational) | info |
+
+**Findings are reported as state, not as events.** Every cycle re-emits every
+finding that is currently true, so `SeadexScoutBetterReleaseFound` keeps firing
+until you upgrade the release (or add the show to `filters.ignore`). That is
+what makes a notification lost between the app and your receiver recoverable:
+the condition is still being reported, so the next rule evaluation fires it
+again. Two consequences to plan for:
+
+- **The rule's lookback window must exceed your `poll_interval`, with margin.**
+  Loki's ruler does not support `keep_firing_for`, so the window is the only
+  thing holding an alert firing between emissions. The shipped `[12h]` tolerates
+  three missed 3h cycles. Set it too tight and every cycle produces a
+  fire → resolve → re-fire flap.
+- **Your Alertmanager route decides how often you are reminded.** A finding that
+  stays true is re-notified every `repeat_interval`. `filters.ignore` is how you
+  stop that for a show you have consciously declined.
+
+Upgrading an existing install re-announces every open finding once, because the
+new model reports what is true rather than what is new. Every one of those lines
+is accurate; put the ones you have already declined in `filters.ignore`.
 
 Thresholds and the `severity` labels are starting points; adjust the
 `container` selector and the stall window to your deployment and
