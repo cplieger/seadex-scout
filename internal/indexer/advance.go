@@ -112,7 +112,8 @@ func (w *FeedWriter) Advance(ctx context.Context, window []seadex.Entry, info En
 		"window_entries", len(window), "curated_entries", len(kept),
 		"nyaa_feed", len(snap.NyaaFeed), "ab_feed", len(snap.ABFeed),
 		"journal_new", js.added, "journal_pruned", js.pruned,
-		"journal_dropped", js.dropped, "skipped_unresolvable", js.unresolvable,
+		"journal_dropped", js.dropped, "journal_rebased", js.rebased,
+		"skipped_unresolvable", js.unresolvable,
 		"seen", len(snap.Seen))
 	return nil
 }
@@ -150,11 +151,28 @@ func filterWindowByTags(window []seadex.Entry, tags tagfilter.Filter) []seadex.E
 // re-rendering them: a scope mismatch or a missing identity is dropped, a
 // future FirstSeen is rebased, an item past feedJournalMaxAge leaves. Nothing
 // here consults the curation set, which is what makes it sound from a window.
+//
+// It applies the same GUID-identity gate both of carryItem's arms apply. Without
+// it, an item whose stored GUID no longer proves its journal identity (a
+// cross-key or foreign-host GUID from a tampered snapshot) would be re-persisted
+// by every tick for its whole 14-day window: the reader refuses it at serve time
+// (reload.go's rebuild*DownloadURLs runs the same check), so nothing unservable
+// escapes, but the full pass drops it and this one should not keep resurrecting
+// it in the file.
 func expireCarried(p *journalPass, feed []journalItem, scope string) []journalItem {
 	kept := make([]journalItem, 0, len(feed))
 	for i := range feed {
 		it := feed[i]
 		if scopeOfKey(it.Key) != scope {
+			p.js.dropped++
+			continue
+		}
+		if !journalIdentityMatches(&it) {
+			// The GUID itself is not logged: it is an attacker-shapeable value
+			// from a tamperable file, and the key is the diagnostic that
+			// identifies the refused record.
+			p.w.log.Debug("indexer journal item refused: stored GUID no longer proves its journal identity",
+				"key", it.Key, "cause", "guid-identity")
 			p.js.dropped++
 			continue
 		}

@@ -46,8 +46,12 @@ func advanceFixture(firstSeen time.Time) *snapshot {
 			FirstSeen: firstSeen,
 			AniListID: 7,
 			item: item{
-				Title:   "Harvested Show S01 [Group]",
-				GUID:    "nyaa:42",
+				Title: "Harvested Show S01 [Group]",
+				// The real journal GUID is the tracker's page URL, and it has to
+				// be: both carry arms and the reader's link rebuild gate a
+				// carried item on trackerKeyFromURL(GUID) == Key. A bare "nyaa:42"
+				// here would be refused by every one of them.
+				GUID:    "https://nyaa.si/view/42",
 				PubDate: firstSeen,
 			},
 		}},
@@ -255,7 +259,13 @@ func TestAdvanceLeavesBothFeedsSortedNewestFirst(t *testing.T) {
 		Key:       "ab:1000",
 		FirstSeen: now.Add(-3 * time.Hour),
 		AniListID: 10,
-		item:      item{Title: "Old AB S01", GUID: "ab:1000", PubDate: now.Add(-3 * time.Hour)},
+		item: item{
+			Title: "Old AB S01",
+			// A real AB journal GUID is the torrent permalink; the carry gates
+			// key off it (see advanceFixture).
+			GUID:    "https://animebytes.tv/torrents.php?id=86576&torrentid=1000",
+			PubDate: now.Add(-3 * time.Hour),
+		},
 	}}
 	fixture.Seen["ab:1000"] = true
 	writeSnapshotFile(t, path, fixture)
@@ -662,4 +672,45 @@ func entryIDsOf(entries []seadex.Entry) string {
 		ids = append(ids, strconv.Itoa(entries[i].AniListID))
 	}
 	return "[" + strings.Join(ids, " ") + "]"
+}
+
+// TestAdvanceRefusesACarriedItemWhoseGUIDLostItsIdentity pins the GUID-identity
+// gate on the carry path, which both of the full pass's carry arms apply and the
+// reader applies again when it rebuilds download links.
+//
+// The GUID is the only thing tying a journal row to a real torrent page, and it
+// comes out of a file an operator (or anything with write access to the volume)
+// can edit. A row whose stored GUID no longer proves its key is refused
+// everywhere else, so a tick that kept re-persisting it would resurrect a record
+// the full pass drops - for the item's whole 14-day window - while the reader
+// served nothing for it.
+func TestAdvanceRefusesACarriedItemWhoseGUIDLostItsIdentity(t *testing.T) {
+	for name, guid := range map[string]string{
+		"a GUID naming another torrent id": "https://nyaa.si/view/9999",
+		"a foreign host":                   "https://evil.example/view/42",
+		"a bare key rather than a URL":     "nyaa:42",
+		"an empty GUID":                    "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "feed.json")
+			now := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
+			fixture := advanceFixture(now.Add(-time.Hour))
+			fixture.NyaaFeed[0].GUID = guid
+			writeSnapshotFile(t, path, fixture)
+
+			// A window carrying an unrelated new release, so the pass persists.
+			window := []seadex.Entry{nyaaEntry(8, 77, true, "New Nyaa - S01E01 (1080p) [G].mkv")}
+			if err := advanceTestWriter(path, now).Advance(context.Background(), window, nil); err != nil {
+				t.Fatalf("Advance: %v", err)
+			}
+
+			keys := feedKeys(readSnapshotFile(t, path).NyaaFeed)
+			if slices.Contains(keys, "nyaa:42") {
+				t.Errorf("nyaa feed = %v, want the tampered nyaa:42 dropped (the full pass drops it and the reader refuses it)", keys)
+			}
+			if !slices.Contains(keys, "nyaa:77") {
+				t.Errorf("nyaa feed = %v, want the untouched new item still admitted", keys)
+			}
+		})
+	}
 }

@@ -430,6 +430,13 @@ Both `SeadexScoutScanStalled` (the loop is alive) and
 [`alerts.yaml`](alerts.yaml) — the second matters because a healthy stream of
 ticks would otherwise hide a full pass that had silently stopped.
 
+**It costs log volume.** Findings are state, so every iteration re-emits the whole
+set — at a 15-minute interval that is roughly ten times the log lines the old
+3-hour cycle produced (order of 18k finding lines a day for a library with ~190
+open findings). Upstream bandwidth drops by ~85%; part of what pays for that is
+Loki ingestion and local disk writes. Worth checking your retention before
+upgrading if it is tight.
+
 ## Alerting
 
 seadex-scout ships no notifier of its own; its operational state is in its logs
