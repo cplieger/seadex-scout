@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/cplieger/arrapi"
+	"github.com/cplieger/health"
 	"github.com/cplieger/seadex-scout/internal/config"
 	"github.com/cplieger/seadex-scout/internal/cycle"
 	"github.com/cplieger/slogx"
@@ -1042,17 +1043,17 @@ func TestReportWriteContext(t *testing.T) {
 }
 
 // TestHealthMaxAge pins the health probe's freshness lease: external mode arms
-// no deadline, an interval at or above the default keeps the documented
+// no watchdog, an interval at or above the default keeps the documented
 // three-interval lease (a 3h interval still restarts a wedged loop at 9h), and
 // a shorter interval is floored at the default's lease - the marker is refreshed
 // only when a cycle COMPLETES, so a tighter deadline would call a slow-but-
 // healthy cold cycle wedged and restart it before it can persist its memo.
-func TestHealthMaxAge(t *testing.T) {
+func TestWatchdogLease(t *testing.T) {
 	for name, tc := range map[string]struct {
 		interval time.Duration
 		want     time.Duration
 	}{
-		"external mode disables the deadline": {0, 0},
+		"external mode disables the watchdog": {0, 0},
 		"a negative interval disables it too": {-time.Hour, 0},
 		// The deployed 3h interval must keep exactly the 9h lease it had before
 		// the tick/reconcile split: the 3x arm wins there, unchanged.
@@ -1061,15 +1062,15 @@ func TestHealthMaxAge(t *testing.T) {
 		// The cold-reconcile floor wins for every interval at or below one third
 		// of it, which now includes the default: 3x15m is 45 minutes, and a cold
 		// reconcile has been measured well past that. Flooring here is what stops
-		// the probe demanding the restart that makes the next boot cold again.
+		// the watchdog demanding the restart that makes the next boot cold again.
 		"the default interval takes the floor": {config.DefaultPollInterval, coldReconcileAllowance},
 		"the config floor takes the floor":     {5 * time.Minute, coldReconcileAllowance},
 		"the crossover point":                  {coldReconcileAllowance / healthLeaseFactor, coldReconcileAllowance},
 		"just above the crossover scales":      {coldReconcileAllowance/healthLeaseFactor + time.Minute, coldReconcileAllowance + healthLeaseFactor*time.Minute},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got := healthMaxAge(tc.interval); got != tc.want {
-				t.Errorf("healthMaxAge(%v) = %v, want %v", tc.interval, got, tc.want)
+			if got := watchdogLease(tc.interval); got != tc.want {
+				t.Errorf("watchdogLease(%v) = %v, want %v", tc.interval, got, tc.want)
 			}
 		})
 	}
@@ -1150,3 +1151,46 @@ func TestDetachedWriteError(t *testing.T) {
 // reportCtxTestKey is the private key TestReportWriteContext threads through
 // the detached write context to prove values survive context.WithoutCancel.
 type reportCtxTestKey struct{}
+
+// TestStartWedgeWatchdog covers the wedge detection that moved out of the health
+// subcommand: the daemon marks itself unhealthy when no pass has completed within
+// the lease, so the probe needs no config and cannot be broken by one.
+//
+// It uses a real marker on a temp path with a tiny lease rather than a clock seam:
+// the behaviour under test is "did it notice a stale mtime", and mtime is the
+// signal, so faking time would test the fake.
+func TestStartWedgeWatchdog(t *testing.T) {
+	t.Run("a zero lease disables it", func(t *testing.T) {
+		stop := startWedgeWatchdog(t.Context(), health.NewMarker(filepath.Join(t.TempDir(), ".healthy")), 0)
+		stop() // must not block: external mode arms no goroutine
+	})
+
+	t.Run("a stale marker is marked unhealthy", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, ".healthy")
+		marker := health.NewMarker(path)
+		marker.Set(true)
+		if !marker.Healthy() {
+			t.Fatal("marker not healthy after Set(true)")
+		}
+		// Backdate the marker past the lease: that is exactly what a wedged loop
+		// looks like from the outside, since only a COMPLETED pass refreshes it.
+		old := time.Now().Add(-time.Hour)
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatalf("backdating the marker: %v", err)
+		}
+		age, err := markerAge(path)
+		if err != nil {
+			t.Fatalf("markerAge: %v", err)
+		}
+		if age < 30*time.Minute {
+			t.Fatalf("markerAge = %v, want the backdated hour", age)
+		}
+	})
+
+	t.Run("markerAge fails on an absent marker", func(t *testing.T) {
+		if _, err := markerAge(filepath.Join(t.TempDir(), "nope")); err == nil {
+			t.Error("markerAge(absent) = nil error, want an error so the watchdog leaves it to the probe")
+		}
+	})
+}

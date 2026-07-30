@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"maps"
 	"net/url"
@@ -41,7 +40,6 @@ import (
 	"github.com/cplieger/seadex-scout/internal/tagfilter"
 	"github.com/cplieger/slogx"
 	"github.com/cplieger/urlform"
-	"go.yaml.in/yaml/v3"
 )
 
 // DefaultConfigDir is the single container mount every seadex-scout file lives
@@ -352,26 +350,6 @@ func Load(path string) (Config, error) {
 	return fc.toConfig(), nil
 }
 
-// loadExpandedDoc reads the bounded config file at path and applies the
-// allowlisted ${VAR} expansion, returning the expanded document node. It
-// serves PollIntervalFromFile's deliberately permissive partial probe on
-// the yamlenv primitives; Load itself rides yamlenv.Load, which owns the
-// strict pipeline internally (including the unresolved-refs diagnostic,
-// which this silent probe deliberately drops).
-func loadExpandedDoc(path string) (*yaml.Node, error) {
-	// Same bounded read + context.Background() rationale as Load above.
-	raw, err := atomicfile.ReadBounded(context.Background(), path, maxConfigBytes)
-	if err != nil {
-		return nil, err
-	}
-	var node yaml.Node
-	if err := yaml.Unmarshal(raw, &node); err != nil {
-		return nil, err
-	}
-	yamlenv.Expand(&node, isAllowedEnvVar)
-	return &node, nil
-}
-
 // --- Flattening to the runtime Config ---
 
 // toConfig flattens the on-disk shape into the runtime Config, applying
@@ -517,11 +495,9 @@ func parseInterval(raw string) (time.Duration, bool) {
 	return parseIntervalWith(raw, slog.Default())
 }
 
-// parseIntervalWith is parseInterval with an explicit logger, so the
-// PollIntervalFromFile probe can discard the fallback/clamp warnings the
-// startup Load path already emitted once. The health subcommand runs this on
-// every Docker healthcheck (30s), and repeating a config diagnostic there
-// tells the operator nothing the daemon's startup log did not.
+// parseIntervalWith is parseInterval with an explicit logger, so a caller that
+// re-parses the interval can discard the fallback/clamp warnings the startup
+// Load path already emitted once.
 func parseIntervalWith(raw string, log *slog.Logger) (time.Duration, bool) {
 	s := scheduler.ParseInterval(raw, DefaultPollInterval,
 		scheduler.WithBounds(minPollInterval, maxPollInterval),
@@ -532,54 +508,6 @@ func parseIntervalWith(raw string, log *slog.Logger) (time.Duration, bool) {
 		return 0, true
 	}
 	return s.Interval, false
-}
-
-// PollIntervalFromFile reads ONLY the poll_interval key from the YAML
-// config at path and returns the effective cycle interval (0 = external
-// mode), applying the same allowlisted ${VAR} expansion and the same
-// parse+clamp rules Load uses (so an env-referenced interval yields the
-// expanded value, not the literal ${VAR}). Every failure (missing file,
-// oversized, invalid YAML) also returns 0: the health probe derives its
-// freshness deadline from this and must never fail because configuration
-// is absent or malformed. An absent file is silent (the legitimate no-config
-// case); any other failure WARNs, because the deadline is being dropped on a
-// config that IS there. The scheduler's own fallback/clamp warnings are
-// discarded (parseIntervalWith): the daemon's startup log already carries them.
-// Unknown keys and extra YAML documents are deliberately tolerated
-// here (no yamlenv.CheckUnknownKeys / yamlenv.CheckSingleDocument):
-// strictness is Load's job.
-func PollIntervalFromFile(path string) time.Duration {
-	doc, err := loadExpandedDoc(path)
-	if err != nil {
-		// An absent file is the legitimate no-config case (first boot, or a
-		// probe run before the starter exists) and stays silent. Anything else
-		// means the file IS there and unusable, and the freshness deadline is
-		// being dropped because of it: say so, or the probe reports healthy
-		// with no wedge detection and nothing anywhere explains why. Path only,
-		// never the parse error - a yaml error can quote an expanded secret.
-		if !errors.Is(err, fs.ErrNotExist) {
-			slog.Warn("cannot read the config file for the health freshness deadline; "+
-				"the marker-age deadline is disabled, so a wedged compare loop will "+
-				"not be restarted", "path", path)
-		}
-		return 0
-	}
-	var probe struct {
-		PollInterval string `yaml:"poll_interval"`
-	}
-	if err := doc.Decode(&probe); err != nil {
-		// Field-name-only for the same reason: the decode error quotes the
-		// offending value.
-		slog.Warn("cannot read poll_interval for the health freshness deadline; "+
-			"the marker-age deadline is disabled, so a wedged compare loop will "+
-			"not be restarted", "field", "poll_interval")
-		return 0
-	}
-	interval, external := parseIntervalWith(probe.PollInterval, slog.New(slog.DiscardHandler))
-	if external {
-		return 0
-	}
-	return interval
 }
 
 // --- Accessors ---

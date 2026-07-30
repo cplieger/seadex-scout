@@ -145,22 +145,32 @@ func validateInvocation(args []string) error {
 }
 
 // runHealthProbe handles the health subcommand, which backs the Docker
-// healthcheck and must not require configuration, so it runs before config
-// load. It reports false when the invocation is not `health` (main continues
-// with normal startup). The probe reads the config best-effort (never failing
-// on absence or parse errors) to derive the freshness deadline (healthMaxAge):
-// in scheduled mode each COMPLETED cycle refreshes the marker, so a marker
-// older than the lease means a wedged compare loop and a restart fixes it.
-// External mode (poll_interval: off) and any config-read failure disable the
-// deadline (WithMaxAge(0) is a no-op): idle-until-poll is healthy.
+// healthcheck. It reads NOTHING but the marker: no config, no arguments, no
+// derived policy.
+//
+// It used to read the config to size a freshness lease (max(3*poll_interval,
+// coldReconcileAllowance)) and arm it with health.WithMaxAge. That coupled the
+// healthcheck to a file it may be unable to read, and the failure was
+// self-defeating: a config the probe cannot parse silently DISABLED the
+// deadline, and said so only into the healthcheck process's own output, which is
+// Docker's health log rather than the stream shipped to Loki. So the one signal
+// explaining why wedge detection had stopped was invisible by construction. It
+// bought little even when it worked: the 3h floor binds for every poll_interval
+// up to an hour, including the 15m default, so for the deployed configuration
+// the config read could not change the answer.
+//
+// The lease now lives where the cadence is already known - the daemon arms
+// watchdogLease against its own interval (see startWedgeWatchdog) and sets the
+// marker unhealthy itself. The probe is a pure marker read, so it cannot be
+// broken by anything the operator writes.
+//
 // health.RunProbe terminates via os.Exit(0/1), so the true return is reachable
 // only if that contract ever changes - main then fails closed with exit 1.
-func runHealthProbe(args []string, configPath string) bool {
+func runHealthProbe(args []string, _ string) bool {
 	if len(args) != 1 || args[0] != "health" {
 		return false
 	}
-	health.RunProbe(health.DefaultPath,
-		health.WithMaxAge(healthMaxAge(config.PollIntervalFromFile(configPath))))
+	health.RunProbe(health.DefaultPath)
 	return true
 }
 
@@ -190,9 +200,12 @@ const healthLeaseFactor = 3
 // number to peg it to.
 const coldReconcileAllowance = 3 * time.Hour
 
-// healthMaxAge is the marker freshness lease armed by the health subcommand: 0
-// (no deadline) in external mode, else healthLeaseFactor intervals, floored at
-// coldReconcileAllowance.
+// watchdogLease is the freshness lease the DAEMON arms against its own interval:
+// 0 (no watchdog) in external mode, else healthLeaseFactor intervals, floored at
+// coldReconcileAllowance. It used to be armed by the health subcommand from a
+// config read; the daemon owns it now because the daemon is what knows the
+// cadence, and a healthcheck must not depend on a file the operator can make
+// unreadable (see runHealthProbe).
 //
 // The lease exists because the marker is refreshed only when a pass COMPLETES,
 // and the loop measures its delay AFTER the job returns, so the gap between two
@@ -214,11 +227,20 @@ const coldReconcileAllowance = 3 * time.Hour
 // this marker expires. The marker's job here is to stop a restart loop, not to
 // be the fastest wedge detector.
 //
+// What moving the lease into the daemon gives up, stated plainly: a probe-side
+// deadline also caught a FULLY HUNG process, because a stale mtime is visible
+// from outside even when nothing inside the container runs, whereas the watchdog
+// goroutine is as wedged as everything else in that case. That case is already
+// owned by the layer that watches it - alerts.yaml's deadman rules fire on log
+// SILENCE, which a hung process produces - while the case this removes (an
+// unreadable config silently disabling wedge detection, reported only into
+// Docker's health log) was live and invisible.
+//
 // The rejected alternative is still rejected: refreshing the marker mid-pass
 // would make the lease measure liveness rather than completion, which changes
 // what the marker MEANS (internal/cycle publishes a verdict per completed pass)
 // for a case a floor covers without touching the contract.
-func healthMaxAge(interval time.Duration) time.Duration {
+func watchdogLease(interval time.Duration) time.Duration {
 	if interval <= 0 {
 		return 0
 	}
@@ -664,9 +686,95 @@ func run(cfg *config.Config) error {
 	marker.Set(true)
 	slog.Info("seadex-scout started", "poll_interval", cfg.PollInterval.String(), "indexer", cfg.IndexerConfigured())
 
+	stopWatchdog := startWedgeWatchdog(ctx, marker, watchdogLease(cfg.PollInterval))
+	defer stopWatchdog()
+
 	cycle.RunLoop(ctx, cfg.PollInterval, ex, b.scout, marker)
 	normalShutdown = true
 	return nil
+}
+
+// watchdogPollDivisor sets how often the watchdog re-checks the marker's age,
+// as a fraction of the lease. Checking at a fraction rather than at the lease
+// itself bounds how long a wedge stays unreported to lease + lease/divisor.
+const watchdogPollDivisor = 6
+
+// startWedgeWatchdog marks the container unhealthy when no pass has completed
+// within lease. It returns a stop function.
+//
+// This is the wedge detection that used to live in the health subcommand as
+// health.WithMaxAge, sized from a config read. It belongs here: the daemon
+// already knows its own cadence, so nothing needs to be re-derived from a file
+// the operator can make unreadable, and the healthcheck collapses to a pure
+// marker read. Every completed pass calls marker.Set(true) (internal/cycle's
+// per-pass verdict), which refreshes the marker's mtime, so "age since the last
+// completed pass" is exactly what this measures - the same signal the probe-side
+// lease measured, read from the inside.
+//
+// A zero lease disables it, which is external mode (poll_interval: off):
+// idle-until-poll is healthy, and there is no cadence to be late against.
+//
+// It only ever sets the marker FALSE. Recovery stays the cycle's job, because
+// the marker's meaning is a completed pass's verdict and a watchdog has not
+// completed a pass - clearing it here would claim progress that did not happen.
+func startWedgeWatchdog(ctx context.Context, marker *health.Marker, lease time.Duration) func() {
+	if lease <= 0 {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watchMarker(ctx, marker, lease)
+	}()
+	return func() { <-done }
+}
+
+// watchMarker is startWedgeWatchdog's loop body: it re-checks the marker's age
+// every lease/watchdogPollDivisor and marks unhealthy once the lease is past.
+func watchMarker(ctx context.Context, marker *health.Marker, lease time.Duration) {
+	tick := time.NewTicker(lease / watchdogPollDivisor)
+	defer tick.Stop()
+	warned := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			warned = checkMarkerAge(marker, lease, warned)
+		}
+	}
+}
+
+// checkMarkerAge marks the container unhealthy when the marker is older than
+// lease, returning the new warned state so the diagnostic is emitted once per
+// wedge rather than once per tick (a wedged loop stays wedged, and this line
+// exists to name the cause, not to count it).
+func checkMarkerAge(marker *health.Marker, lease time.Duration, warned bool) bool {
+	age, err := markerAge(health.DefaultPath)
+	if err != nil {
+		// The marker is absent or unreadable. Absent is what Set(false) looks
+		// like on some failure paths, and either way it is not this goroutine's
+		// to interpret: the probe already reads an absent marker as unhealthy.
+		return warned
+	}
+	if age <= lease {
+		return false
+	}
+	if !warned {
+		slog.Error("no cycle has completed within the health lease; marking unhealthy",
+			"age", age.Round(time.Second), "lease", lease)
+	}
+	marker.Set(false)
+	return true
+}
+
+// markerAge reports how long ago the health marker was last written.
+func markerAge(path string) (time.Duration, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return time.Since(info.ModTime()), nil
 }
 
 // startIndexer launches the Torznab feed in a goroutine when it is configured,
