@@ -384,6 +384,17 @@ func newScout(c *components) *Scout {
 // but degraded. See Cycle for when it runs rather than a tick.
 func (s *Scout) reconcile(ctx context.Context) bool {
 	start := time.Now()
+	// The one line a pass emits BEFORE doing any work, and the reason the scan
+	// deadman can be tight. Every other line that deadman counts is a COMPLETION
+	// line, so between a container start and the first finished pass there is
+	// nothing for it to see - and an absence rule reads that as a wedge. A cold
+	// reconcile (no state.json, so the AniList memo is built from scratch) has
+	// been measured at ~25 minutes and historically ran to ~2h, which is exactly
+	// why the health lease is floored at coldReconcileAllowance; without this
+	// line the deadman would page 15 minutes into every restart while the app
+	// worked normally. A pass that emits this and then never completes IS a
+	// wedge, which is what the deadman should say.
+	s.log.Info("reconcile started", "interval", reconcileInterval.String())
 	startStats := s.aniStats()
 	st := s.loadState(ctx)
 

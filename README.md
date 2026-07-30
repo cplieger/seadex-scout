@@ -449,7 +449,7 @@ deliver through your Alertmanager like any Prometheus metric alert. They cover:
 | Alert | Fires when | Severity |
 | --- | --- | --- |
 | `SeadexScoutCycleError` | a cycle logs an error: the Sonarr/Radarr library walk failed, a state write failed, a queued rerun could not record poll health, or a persisted degradation streak escalated (library shrink, SeaDex fetch, partial walk and AniList lookups after 2 consecutive full reconciles; a rejected mapping refresh or an unreadable SeaDex after 8 ticks). Routine outcomes stay WARN and never fire it (see `alerts.yaml`) | warning |
-| `SeadexScoutScanStalled` | no loop completion line (`tick`/`cycle` `complete` or `degraded`) in 2h, i.e. the daemon poll loop is wedged | warning |
+| `SeadexScoutScanStalled` | no sign of life in 3h — the daemon emits `tick`/`cycle` `complete` or `degraded` on every iteration and `reconcile started` when a full pass begins, so the absence of all of them means the poll loop is wedged | warning |
 | `SeadexScoutReconcileStalled` | no `reconcile complete` line in 72h, i.e. the daily full pass has silently stopped while ticks keep the loop looking alive | warning |
 | `SeadexScoutBetterReleaseFound` | SeaDex recommends a better release than the one on disk (informational, not a fault). **A state signal, not an event** — see below | info |
 | `SeadexScoutReportWritten` | a report run wrote a season-level alignment report (informational) | info |
@@ -474,9 +474,10 @@ again. Two consequences to plan for:
 
 **Re-copy `alerts.yaml` when you upgrade to this version.** The rules changed
 shape with the two cadences: the stall deadman now matches the tick's completion
-lines over a 2h window, and `SeadexScoutReconcileStalled` is new. A previously
-deployed copy that matches only `cycle (complete|degraded)` sees one line a day
-and false-fires for most of every day.
+lines and the full pass's start line over a 3h window, and
+`SeadexScoutReconcileStalled` is new. A previously deployed copy that matches
+only `cycle (complete|degraded)` sees one line a day and false-fires for most of
+every day.
 
 Upgrading an existing install re-announces every open finding once, because the
 new model reports what is true rather than what is new. Every one of those lines

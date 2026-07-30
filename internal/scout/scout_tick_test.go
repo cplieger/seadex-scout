@@ -1195,3 +1195,52 @@ func TestReconcilePrunesTheMemoAndTickDoesNot(t *testing.T) {
 		t.Error("a tick pruned the memo; a 48-hour window has no standing to decide an id it never fetched is no longer curated")
 	}
 }
+
+// TestReconcileAnnouncesItselfBeforeDoingWork pins the one line the scan deadman
+// needs that is not a completion line.
+//
+// Every other line that deadman counts is emitted when a pass FINISHES, so
+// between a container start and the first finished pass an absence rule has
+// nothing to match — and it reads that as a wedged loop. A cold full pass takes
+// ~25 minutes and historically up to 2h, which is why the health marker's lease
+// is floored at three hours; without a start line the deadman would page fifteen
+// minutes into every restart while the app was working normally.
+//
+// It must be emitted BEFORE the walk, not after, and by a gated pass too: a pass
+// that announces itself and then never completes is exactly the wedge the rule
+// should catch, and one that announces itself and then degrades is alive.
+func TestReconcileAnnouncesItselfBeforeDoingWork(t *testing.T) {
+	for name, tc := range map[string]struct {
+		sea *fakeSeaDex
+	}{
+		"a clean reconcile":           {&fakeSeaDex{entries: seadexFrierenEntry()}},
+		"a reconcile gated upstream":  {&fakeSeaDex{err: errors.New("seadex down"), entries: seadexFrierenEntry()}},
+		"a reconcile with no entries": {&fakeSeaDex{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logger, recorder := capture.New()
+			s, _ := newTickScout(logger, tc.sea, nil, nil, 96)
+
+			if healthy := s.Cycle(context.Background()); !healthy {
+				t.Fatal("reconcile healthy=false, want true (an upstream gate is degraded, not unhealthy)")
+			}
+			if n := recorder.CountExact("reconcile started"); n != 1 {
+				t.Errorf("'reconcile started' count = %d, want 1 whatever the outcome; without it the deadman "+
+					"pages 15 minutes into every restart", n)
+			}
+			// Ordering: the announcement has to precede whatever the pass logs
+			// about its own outcome, or it cannot cover a slow pass.
+			msgs := recorder.Messages()
+			first := -1
+			for i, m := range msgs {
+				if m == "reconcile started" {
+					first = i
+					break
+				}
+			}
+			if first != 0 {
+				t.Errorf("'reconcile started' was log line %d of %v, want the first thing the pass says", first, msgs)
+			}
+		})
+	}
+}
