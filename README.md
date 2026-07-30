@@ -469,8 +469,23 @@ again. Two consequences to plan for:
   a long run of missed iterations at the 15m default. Set it too tight and every
   quiet stretch produces a fire → resolve → re-fire flap.
 - **Your Alertmanager route decides how often you are reminded.** A finding that
-  stays true is re-notified every `repeat_interval`. `filters.ignore` is how you
-  stop that for a show you have consciously declined.
+  stays true is re-notified every `repeat_interval`, so that value — not the app —
+  is what makes an open recommendation nag or stay quiet. These are
+  announcements rather than issues, so the shape that reads best is one
+  notification per recommendation and effectively no repeat: group on the
+  finding's identity (`al_id`, `season`, `alert_recommended_group`, `info_hash`)
+  and set a `repeat_interval` long enough that nothing recurs. Keep
+  `send_resolved: false` — a "resolved" message when you finally download a
+  release tells you something you already know. `filters.ignore` is how you stop
+  a show you have consciously declined from being announced at all.
+- **One consequence of not repeating, stated plainly.** The repeat is also the
+  redelivery: if Discord is unreachable when an announcement fires and stays
+  unreachable past Alertmanager's own retries, that announcement is gone rather
+  than retried later. It is an acceptable loss here because the notification is
+  not the automation path — the release is already in the Torznab feed, so
+  Sonarr/Radarr see it regardless, and the finding stays in the logs and the
+  report. If you would rather have a safety net, a monthly `repeat_interval`
+  reads as "never" to a human while still giving a failed send another chance.
 
 **Re-copy `alerts.yaml` when you upgrade to this version.** The rules changed
 shape with the two cadences: the stall deadman now matches the tick's completion

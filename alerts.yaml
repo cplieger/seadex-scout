@@ -167,13 +167,24 @@ groups:
       # one on disk — the app's activity signal; keep it at severity info or drop
       # it, it is not page-worthy.
       #
-      # THIS IS A STATE SIGNAL, NOT AN EVENT. The app re-emits every open finding
-      # on every cycle for as long as the condition holds, so the alert stays
-      # firing until you upgrade the release (or add the show to filters.ignore)
-      # — which is what makes a notification lost between here and your receiver
-      # recoverable: the next evaluation re-fires it. It is NOT a one-time event
-      # and `send_resolved: false` is no longer the obvious choice: a resolution
-      # here means the condition genuinely ended.
+      # THIS IS A STATE SIGNAL, NOT AN EVENT — but it is an ANNOUNCEMENT, not an
+      # issue. The app re-emits every open finding on every iteration for as long
+      # as the condition holds, so the alert stays firing until you upgrade the
+      # release (or add the show to filters.ignore); that is what makes a
+      # notification lost between here and your receiver recoverable, because the
+      # next evaluation re-fires it. What it is NOT is something that wants
+      # closing: keep `send_resolved: false`. "SeaDex has a better release" is a
+      # thing to tell you once, and a "✅ RESOLVED: better release available"
+      # message when you finally download it is noise, not information — you were
+      # the one who acted. The firing/absent distinction is for the pipeline's
+      # benefit, not yours.
+      #
+      # `info_hash` is in the grouping so a SAME-GROUP quality swap is a new
+      # announcement: SeaDex replacing a release with a fresh encode by the same
+      # group is a real change, and every other label in the set is identical
+      # across it. Its limit, stated: a private-tracker-only release publishes no
+      # info hash, so that one swap cannot be distinguished and re-announces
+      # nothing.
       #
       # THE WINDOW MUST EXCEED YOUR poll_interval, with margin. Loki's ruler does
       # NOT support keep_firing_for (its RuleDesc has no such field, so the key
@@ -206,7 +217,7 @@ groups:
       # template if you want just the tag line shown.
       - alert: SeadexScoutBetterReleaseFound
         expr: |
-          sum by (title, alert_title, al_id, arr, arr_url, nyaa_url, public_url, public_tracker, ab_url, ab_tracker, season, recommended_group, alert_recommended_group, seadex_tags) (
+          sum by (title, alert_title, al_id, arr, arr_url, nyaa_url, public_url, public_tracker, ab_url, ab_tracker, season, recommended_group, alert_recommended_group, seadex_tags, info_hash) (
             count_over_time(
               {container="seadex-scout"} | json | msg=`better release available` [12h]
             )
