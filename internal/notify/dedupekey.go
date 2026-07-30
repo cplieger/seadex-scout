@@ -50,12 +50,10 @@ const maxKeyBytes = 2 * keyenc.MaxComponentBytes
 // (hundreds of oversized URLs per entry) cannot amplify key construction into
 // an out-of-memory failure.
 //
-// It returns ONE key. It used to also return the pre-fold "legacy" form of an
-// oversized key, so the notifier could migrate a record persisted under the
-// older identity format instead of re-alerting it. Nothing persists a key any
-// more (findings are reported as state and held in memory), so a key format
-// change costs one duplicate report on the pass after an upgrade and needs no
-// migration path at all.
+// It returns ONE key, and there is no second "legacy" form: nothing persists a
+// key any more (findings are reported as state and held in memory), so a key
+// format change costs one duplicate report on the pass after an upgrade rather
+// than needing a conversion path.
 func dedupeKey(f *compare.Finding) string {
 	groups := slices.Clone(f.RecommendedGroups)
 	slices.Sort(groups)

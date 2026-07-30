@@ -35,12 +35,6 @@ var _ AniListClient = (*anilist.Client)(nil)
 const (
 	memoMinTTL = 252 * time.Hour // 10.5 days (14d − 25%)
 	memoMaxTTL = 420 * time.Hour // 17.5 days (14d + 25%)
-	// memoMinMigration is the migration window's lower bound: a legacy entry
-	// (persisted before the expiry policy, so it loads with a zero Expiry) is
-	// stamped on first load with a TTL in [memoMinMigration, memoMaxTTL),
-	// spreading the whole backlog's first renewal across ~17 days with no
-	// day-one re-fetch stampede.
-	memoMinMigration = 24 * time.Hour
 )
 
 // MemoEntry is a cached AniList lookup (titles/format/year), or a negative
@@ -48,8 +42,9 @@ const (
 // stops being served (stamped at write time with a jittered TTL; see the
 // package comment): an expired entry is a lookup miss, re-fetched and
 // re-stamped on its next use, and pruned when a Match pass ends without
-// renewing it. A zero Expiry marks a legacy entry persisted before the
-// policy; Match stamps it on first load.
+// renewing it. A missing Expiry reads as expired, so an entry written by a
+// build older than the expiry policy is simply re-fetched: this app carries no
+// state migration.
 type MemoEntry struct {
 	Expiry   time.Time `json:"expiry,omitzero"`
 	Format   string    `json:"format,omitempty"`
@@ -59,8 +54,9 @@ type MemoEntry struct {
 }
 
 // expired reports whether the entry's expiry has passed at now. A zero Expiry
-// (a legacy entry) also reads as expired, defensively; Match migrates legacy
-// entries to a real expiry before any lookup consults them.
+// reads as expired too, which is what makes the absence of a migration safe:
+// an entry with no stamp is re-fetched and re-stamped rather than served
+// forever.
 func (e *MemoEntry) expired(now time.Time) bool { return !e.Expiry.After(now) }
 
 // Memo persists AniList fallback lookups across cycles. Entries carry
@@ -143,36 +139,29 @@ func (m *Matcher) freshExpiry(now time.Time) time.Time {
 	return now.Add(m.jitteredTTL(memoMinTTL))
 }
 
-// migrateMemo normalizes every loaded entry whose expiry is outside the policy
-// range. A legacy entry (a zero Expiry, persisted before the expiry policy) is
-// stamped with an expiry drawn from the wider [memoMinMigration,
-// memoMaxTTL) window, so the accumulated backlog's first renewal spreads
-// across the whole window instead of stampeding on one day (or, without any
-// stamp, living forever). A migrated entry is live until its drawn expiry, so
-// migration itself never triggers a fetch. An entry whose expiry sits BEYOND
-// the policy's own horizon is re-stamped like a fresh write.
-func (m *Matcher) migrateMemo(memo *Memo, now time.Time) {
+// restampSkewedExpiries re-stamps every loaded entry whose expiry sits BEYOND
+// anything this policy could have written. It is a clock correction, not a
+// migration: the app carries no old-to-new conversion for a persisted memo, so
+// an entry with no expiry at all simply reads as expired and is re-fetched on
+// its next use.
+func (m *Matcher) restampSkewedExpiries(memo *Memo, now time.Time) {
 	horizon := now.Add(memoMaxTTL)
 	restamped := 0
 	for id, ent := range memo.Entries {
-		switch {
-		case ent.Expiry.IsZero():
-			ent.Expiry = now.Add(m.jitteredTTL(memoMinMigration))
-		case ent.Expiry.After(horizon):
-			// An expiry further out than any this policy can stamp did not
-			// come from this policy: the clock was wrong when the entry was
-			// written (a boot before NTP sync), or state.json was edited.
-			// Left alone it is live for as long as the skew - never renewed,
-			// and never reached by pruneExpired, which only considers expired
-			// entries - so a not-found negative suppresses its entry's
-			// findings permanently with no diagnostic. Re-stamp it like a
-			// fresh write, the same correction rebaseFutureFirstSeen applies
-			// to a persisted FirstSeen ahead of the clock.
-			ent.Expiry = m.freshExpiry(now)
-			restamped++
-		default:
+		if !ent.Expiry.After(horizon) {
 			continue
 		}
+		// An expiry further out than any this policy can stamp did not
+		// come from this policy: the clock was wrong when the entry was
+		// written (a boot before NTP sync), or state.json was edited.
+		// Left alone it is live for as long as the skew - never renewed,
+		// and never reached by pruneExpired, which only considers expired
+		// entries - so a not-found negative suppresses its entry's
+		// findings permanently with no diagnostic. Re-stamp it like a
+		// fresh write, the same correction rebaseFutureFirstSeen applies
+		// to a persisted FirstSeen ahead of the clock.
+		ent.Expiry = m.freshExpiry(now)
+		restamped++
 		memo.Entries[id] = ent
 	}
 	if restamped > 0 {

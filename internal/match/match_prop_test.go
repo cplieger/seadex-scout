@@ -19,9 +19,9 @@ import (
 // pass: no returned entry is immortal (zero expiry) or already expired, a
 // pending id (absent or expired) is re-stamped inside [now+memoMinTTL,
 // now+memoMaxTTL) with the batch answer deciding positive vs negative, a live
-// entry survives untouched with zero AniList traffic for it, and a legacy
-// entry is migrated into [now+memoMinMigration, now+memoMaxTTL) keeping its
-// payload (migration never re-fetches). The model is the drawn state labels,
+// entry survives untouched with zero AniList traffic for it, and an entry with
+// no expiry at all behaves exactly like an expired one (there is no migration,
+// so the two must not diverge). The model is the drawn state labels,
 // so the assertions restate the documented contract, not the implementation.
 func TestMemoExpiryLifecycleProperty(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
@@ -32,7 +32,7 @@ func TestMemoExpiryLifecycleProperty(t *testing.T) {
 			stateAbsent = iota
 			stateLive
 			stateExpired
-			stateLegacy
+			stateUnstamped
 		)
 		entries := make([]seadex.Entry, 0, nIDs)
 		records := make([]mapping.Record, 0, nIDs)
@@ -48,7 +48,7 @@ func TestMemoExpiryLifecycleProperty(t *testing.T) {
 			if rapid.Bool().Draw(rt, "known") {
 				media[id] = anilist.Media{Titles: []string{"Movie"}, Format: "MOVIE", Year: 2020}
 			}
-			st := rapid.IntRange(stateAbsent, stateLegacy).Draw(rt, "state")
+			st := rapid.IntRange(stateAbsent, stateUnstamped).Draw(rt, "state")
 			states[id] = st
 			switch st {
 			case stateLive:
@@ -57,8 +57,12 @@ func TestMemoExpiryLifecycleProperty(t *testing.T) {
 			case stateExpired:
 				age := time.Duration(rapid.Int64Range(0, int64(memoMaxTTL)).Draw(rt, "expiredAge"))
 				memo.Entries[id] = MemoEntry{NotFound: true, Expiry: now.Add(-age)}
-			case stateLegacy:
-				memo.Entries[id] = MemoEntry{Titles: []string{"Legacy"}, Format: "TV", Year: 2018}
+			case stateUnstamped:
+				// Written by a build older than the expiry policy: no expiry
+				// field at all. It must behave as expired, not as a special
+				// case - that equivalence is what lets the app ship no
+				// migration.
+				memo.Entries[id] = MemoEntry{Titles: []string{"Unstamped"}, Format: "TV", Year: 2018}
 			}
 			if ent, ok := memo.Entries[id]; ok {
 				pre[id] = ent
@@ -102,7 +106,7 @@ func TestMemoExpiryLifecycleProperty(t *testing.T) {
 				rt.Fatalf("memo[%d].Expiry = %s is not after now: a clean pass must renew or prune what expired", id, ent.Expiry)
 			}
 			switch st {
-			case stateAbsent, stateExpired:
+			case stateAbsent, stateExpired, stateUnstamped:
 				pending++
 				lo, hi := now.Add(memoMinTTL), now.Add(memoMaxTTL)
 				if ent.Expiry.Before(lo) || !ent.Expiry.Before(hi) {
@@ -114,14 +118,6 @@ func TestMemoExpiryLifecycleProperty(t *testing.T) {
 			case stateLive:
 				if !ent.Expiry.Equal(pre[id].Expiry) || ent.NotFound != pre[id].NotFound {
 					rt.Fatalf("memo[%d] = %+v, want the live pre-state entry untouched (%+v)", id, ent, pre[id])
-				}
-			case stateLegacy:
-				lo, hi := now.Add(memoMinMigration), now.Add(memoMaxTTL)
-				if ent.Expiry.Before(lo) || !ent.Expiry.Before(hi) {
-					rt.Fatalf("memo[%d].Expiry = %s outside the migration window [%s, %s)", id, ent.Expiry, lo, hi)
-				}
-				if len(ent.Titles) != 1 || ent.Titles[0] != "Legacy" {
-					rt.Fatalf("memo[%d] = %+v, want the legacy payload kept (migration never re-fetches)", id, ent)
 				}
 			}
 		}

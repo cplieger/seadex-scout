@@ -22,12 +22,11 @@
 // returned memo, EXCEPT the positives whose AniList id SeaDex still curates -
 // those stay as stale feed-title/type fallback data (Memo.StaleTitle,
 // Memo.StaleFormat), whose readers ignore expiry on purpose. A degraded pass
-// could not renew anything, so it retains every expired entry. Legacy
-// entries persisted before the policy (no expiry field) are stamped on first
-// load from the wider [memoMinMigration, memoMaxTTL) window, spreading the
-// accumulated backlog's first renewal with no day-one stampede. The batched
-// prefetch (up to 50 ids per request) amortizes renewals, so a few expiries
-// per day cost effectively nothing.
+// could not renew anything, so it retains every expired entry. An entry
+// carrying no expiry at all (written by a build older than this policy) reads
+// as expired and is re-fetched: there is no migration, deliberately. The
+// batched prefetch (up to 50 ids per request) amortizes renewals, so a few
+// expiries per day cost effectively nothing.
 package match
 
 import (
@@ -131,9 +130,10 @@ func NewMatcher(anilistClient AniListClient, logger *slog.Logger) *Matcher {
 }
 
 // Match links every entry to a library item (where present), returning the
-// matches, ID-mapping coverage, and the updated memo to persist: legacy
-// entries are migrated onto the expiry policy, renewed lookups are re-stamped,
-// and entries still expired at the end of a clean pass are pruned. Degraded
+// matches, ID-mapping coverage, and the updated memo to persist: an expiry
+// beyond anything this policy could have written is re-stamped, renewed lookups
+// are re-stamped, and entries still expired at the end of a clean pass are
+// pruned. Degraded
 // passes retain expired entries as stale feed-title fallback data. The
 // caller's memo.Entries map is updated in place (Result.Memo aliases it, not
 // a copy), so the pre-call memo is not preserved. Match never fails as a
@@ -146,7 +146,7 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 		memo.Entries = make(map[int]MemoEntry)
 	}
 	now := m.now()
-	m.migrateMemo(&memo, now)
+	m.restampSkewedExpiries(&memo, now)
 	cov := Coverage{Hits: make(map[string]int), Unmapped: make(map[string]int)}
 	outage := m.prefetch(ctx, entries, idx, lib, &memo, now)
 	run := &matchRun{

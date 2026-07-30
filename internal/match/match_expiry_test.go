@@ -260,66 +260,57 @@ func TestMemoPruneKeepsExpiredStaleDataForCuratedEntries(t *testing.T) {
 	}
 }
 
-// TestMemoLegacyEntriesMigratedWithSpread pins the migration: entries
-// persisted before the expiry policy (zero Expiry) are stamped on first load
-// with per-entry draws from the wider [memoMinMigration, memoMaxTTL) window —
-// distinct expiries so the backlog's first renewal spreads out — and a
-// consulted legacy entry stays a memo HIT (zero AniList requests): migration
-// must not turn the whole backlog into a day-one re-fetch stampede. The
-// stamps land in the returned memo, so one successful cycle persists them.
-func TestMemoLegacyEntriesMigratedWithSpread(t *testing.T) {
+// TestMemoEntryWithoutAnExpiryIsRefetchedNotServed pins the absence of a
+// migration, which is a deliberate policy and not an oversight: this app ships
+// no old-to-new conversion for persisted state.
+//
+// An entry written by a build older than the expiry policy carries no expiry at
+// all. Rather than being stamped and served, it reads as expired: consulted, it
+// is re-fetched and re-stamped like any other miss; unconsulted, it is pruned at
+// the end of a clean pass. The cost is a one-time re-fetch of whatever the memo
+// held, which the batched prefetch amortizes; the benefit is that there is no
+// conversion path to carry, test, or get wrong.
+func TestMemoEntryWithoutAnExpiryIsRefetchedNotServed(t *testing.T) {
 	snap := &library.Snapshot{Items: []library.Item{
 		{Arr: library.ArrRadarr, ArrID: 1, Title: "Movie A", TmdbID: 100, Year: 2020},
 	}}
 	idx := mapping.NewIndex([]mapping.Record{{AniListID: 11, Type: "MOVIE"}})
 	fake := &countingAniList{}
-	m := expiryMatcher(fake, 0, 0.5, 0.25)
+	m := expiryMatcher(fake, 0.5)
 	memo := Memo{Entries: map[int]MemoEntry{
-		11: {Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020}, // legacy, consulted this pass
-		12: {NotFound: true},                                           // legacy negative, unconsulted
-		13: {Titles: []string{"Other"}, Format: "TV", Year: 2019},      // legacy positive, unconsulted
+		11: {Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020}, // consulted this pass
+		12: {NotFound: true},                                           // unconsulted negative
+		13: {Titles: []string{"Other"}, Format: "TV", Year: 2019},      // unconsulted positive
 	}}
 
 	res := m.Match(context.Background(), []seadex.Entry{{AniListID: 11}}, snap, idx, memo)
 
-	if fake.calls != 0 {
-		t.Errorf("AniList calls = %d, want 0: migration must not re-fetch the legacy backlog", fake.calls)
+	if fake.calls == 0 {
+		t.Error("AniList calls = 0, want the unstamped entry treated as a miss and re-fetched")
 	}
-	if len(res.Matches) != 1 || !res.Matches[0].InLibrary() || res.Matches[0].Source != SourceTitle {
-		t.Errorf("matches = %+v, want the legacy entry served as a normal memo hit", res.Matches)
+	ent, ok := res.Memo.Entries[11]
+	if !ok {
+		t.Fatalf("memo = %+v, want the consulted entry re-stamped and kept", res.Memo.Entries)
 	}
-	if len(res.Memo.Entries) != 3 {
-		t.Fatalf("memo entries = %d, want all 3 legacy entries kept (migrated, not pruned)", len(res.Memo.Entries))
+	lo, hi := memoTestClock.Add(memoMinTTL), memoTestClock.Add(memoMaxTTL)
+	if ent.Expiry.Before(lo) || !ent.Expiry.Before(hi) {
+		t.Errorf("memo[11].Expiry = %s, want a FRESH stamp inside [%s, %s) - the same window any other write draws from", ent.Expiry, lo, hi)
 	}
-	// Map iteration order randomizes which entry receives which draw, so
-	// assert the SET of stamped expiries equals the scripted draws.
-	want := map[time.Time]bool{
-		memoTestClock.Add(memoMinMigration):                                   false,
-		memoTestClock.Add(memoMinMigration + (memoMaxTTL-memoMinMigration)/2): false,
-		memoTestClock.Add(memoMinMigration + (memoMaxTTL-memoMinMigration)/4): false,
-	}
-	lo, hi := memoTestClock.Add(memoMinMigration), memoTestClock.Add(memoMaxTTL)
-	for id, ent := range res.Memo.Entries {
-		if ent.Expiry.Before(lo) || !ent.Expiry.Before(hi) {
-			t.Errorf("memo[%d].Expiry = %s, want inside [%s, %s)", id, ent.Expiry, lo, hi)
+	// The unconsulted pair was expired at the end of a clean pass and neither id
+	// is curated by this pass's entries, so nothing retains them.
+	for _, id := range []int{12, 13} {
+		if _, kept := res.Memo.Entries[id]; kept {
+			t.Errorf("memo[%d] survived, want an unstamped unconsulted entry pruned like any other expired one", id)
 		}
-		seen, ok := want[ent.Expiry]
-		if !ok {
-			t.Errorf("memo[%d].Expiry = %s, not one of the scripted migration draws", id, ent.Expiry)
-			continue
-		}
-		if seen {
-			t.Errorf("memo[%d].Expiry = %s duplicated: each legacy entry must draw its own stagger", id, ent.Expiry)
-		}
-		want[ent.Expiry] = true
 	}
 }
 
 // TestMemoEntryExpiryWireFormat pins the persisted field contract: Expiry
-// round-trips through JSON under the "expiry" key, a legacy record without
-// the key decodes to a zero Expiry (the migration trigger), and a zero Expiry
-// is omitted on encode (omitzero) so an unmigrated in-memory entry never
-// persists a fake 0001-01-01 stamp.
+// round-trips through JSON under the "expiry" key, a record written before the
+// expiry policy decodes to a zero Expiry (which reads as expired, so it is
+// re-fetched rather than migrated), and a zero Expiry is omitted on encode
+// (omitzero) so an unstamped in-memory entry never persists a fake 0001-01-01
+// stamp.
 func TestMemoEntryExpiryWireFormat(t *testing.T) {
 	expiry := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	out, err := json.Marshal(MemoEntry{NotFound: true, Expiry: expiry})
@@ -337,12 +328,12 @@ func TestMemoEntryExpiryWireFormat(t *testing.T) {
 		t.Errorf("round-tripped entry = %+v, want expiry %s and the negative preserved", back, expiry)
 	}
 
-	var legacy MemoEntry
-	if err := json.Unmarshal([]byte(`{"titles":["Frieren"],"format":"TV","year":2023}`), &legacy); err != nil {
-		t.Fatalf("unmarshal legacy: %v", err)
+	var unstamped MemoEntry
+	if err := json.Unmarshal([]byte(`{"titles":["Frieren"],"format":"TV","year":2023}`), &unstamped); err != nil {
+		t.Fatalf("unmarshal a pre-policy record: %v", err)
 	}
-	if !legacy.Expiry.IsZero() {
-		t.Errorf("legacy Expiry = %s, want zero (the migration trigger)", legacy.Expiry)
+	if !unstamped.Expiry.IsZero() {
+		t.Errorf("Expiry of a record with no expiry key = %s, want zero (which expired() reads as expired)", unstamped.Expiry)
 	}
 	zeroOut, err := json.Marshal(MemoEntry{NotFound: true})
 	if err != nil {
