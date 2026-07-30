@@ -171,7 +171,10 @@ const healthLeaseFactor = 3
 // It is a measured allowance, not a guess. A cold reconcile - no state.json, so
 // the AniList memo is built from scratch over the whole catalogue - has been
 // measured at ~25 minutes and historically ran to ~2h on a large library. 3h
-// carries that with margin.
+// carries that with margin, and
+// TestColdReconcileAllowanceCoversAMeasuredColdReconcile is what pins it: the
+// arithmetic tests state their expectations in terms of this constant, so only a
+// test against the MEASUREMENT can defend the number itself.
 //
 // It exists as its own constant because the thing it has to cover stopped being
 // the same thing as the poll interval. The lease used to floor on
@@ -190,16 +193,23 @@ const coldReconcileAllowance = 3 * time.Hour
 //
 // The lease exists because the marker is refreshed only when a pass COMPLETES,
 // and the loop measures its delay AFTER the job returns, so the gap between two
-// refreshes is one pass plus up to 1.1 intervals (scheduler's 0.10 jitter). In
-// steady state that gap is a TICK - one small request, or one tiny one when
-// nothing changed - so healthLeaseFactor*interval is a tight and honest wedge
-// deadline: 45 minutes at the 15m default, tighter than the 9h it used to be.
+// refreshes is one pass plus up to 1.1 intervals (scheduler's 0.10 jitter).
+//
+// In steady state that gap is a TICK - one small request, or one tiny one when
+// nothing changed - so healthLeaseFactor*interval alone would be a tight wedge
+// deadline. It is not the binding constraint at the default cadence, and the
+// floor is why: 3x15m is 45 minutes, which a cold reconcile plus one interval of
+// loop delay does not fit.
 //
 // The floor covers the one pass that is not cheap. Every reconcileEvery-th
 // iteration is a full pass, and the FIRST iteration after any boot is one, so a
 // cold boot has no tick-refreshed marker to lean on. Taking the larger of the
 // two keeps the deployed 3h interval on exactly its old 9h lease while giving a
-// 15m interval 3h rather than 45m.
+// 15m interval 3h rather than 45m. The consequence to be honest about: at the
+// 15m default the wedge deadline IS the floor, so a genuinely wedged loop is
+// caught by alerts.yaml's stall rule (2h, from the completion lines) well before
+// this marker expires. The marker's job here is to stop a restart loop, not to
+// be the fastest wedge detector.
 //
 // The rejected alternative is still rejected: refreshing the marker mid-pass
 // would make the lease measure liveness rather than completion, which changes

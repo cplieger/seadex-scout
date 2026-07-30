@@ -173,19 +173,36 @@ type components struct {
 // Every persisted degradation streak escalates its single log site from WARN to
 // ERROR (firing the existing SeadexScoutCycleError Loki rule) at the shared
 // fleet-wide threshold, whose policy lives in degradation.EscalationThreshold:
-// tolerate 8 consecutive degraded cycles - about a day at the default 3h
-// cadence - long enough to ride out a transient blip, short enough that a
-// condition which never self-heals alerts instead of WARNing forever. Each
-// owning site documents when its streak advances or resets and what the remedy
-// is: handleLibraryGate (shrunk walk), recordSeaDexFetch (fetch failures),
-// recordAniListDegradation, recordPartialWalk, and loadMapping (refresh
-// rejections, a streak the mapping loader owns and persists - only the
-// log-level policy lives here).
+// tolerate 8 consecutive degraded cycles - long enough to ride out a transient
+// blip, short enough that a condition which never self-heals alerts instead of
+// WARNing forever. Each owning site documents when its streak advances or
+// resets and what the remedy is: handleLibraryGate (shrunk walk),
+// recordSeaDexFetch (fetch failures), recordAniListDegradation,
+// recordPartialWalk, and loadMapping (refresh rejections, a streak the mapping
+// loader owns and persists - only the log-level policy lives here).
+//
+// The count is CADENCE-RELATIVE, so the two cadences this loop now runs need
+// two thresholds. A streak that advances on the RECONCILE advances once a day,
+// so the fleet's 8 would mean 8 days before the ERROR that is the only level
+// this stack alerts on; reconcileEscalationThreshold re-expresses the same
+// policy for that cadence. A streak that advances on the TICK keeps the fleet
+// number, which is ~2h at the default interval.
 const (
-	shrunkWalkEscalationThreshold       = degradation.EscalationThreshold
-	seadexFailureEscalationThreshold    = degradation.EscalationThreshold
-	aniListDegradedEscalationThreshold  = degradation.EscalationThreshold
-	partialWalkEscalationThreshold      = degradation.EscalationThreshold
+	// reconcileEscalationThreshold is the fleet's consecutive-failure policy at
+	// the reconcile's daily cadence. Two consecutive failed full passes is 48h,
+	// the closest whole-run threshold to the ~24h the fleet's 8 used to buy
+	// when every cycle was a full pass on a 3h interval - and one full run of
+	// tolerance is the minimum that can still distinguish a transient failure
+	// from a condition that will not self-heal.
+	reconcileEscalationThreshold = 2
+
+	shrunkWalkEscalationThreshold      = reconcileEscalationThreshold
+	seadexFailureEscalationThreshold   = reconcileEscalationThreshold
+	aniListDegradedEscalationThreshold = reconcileEscalationThreshold
+	partialWalkEscalationThreshold     = reconcileEscalationThreshold
+	// mappingRejectionEscalationThreshold keeps the fleet number: loadMapping
+	// runs on every changed TICK as well as every reconcile, so its streak
+	// advances at tick cadence (~2h at the default interval).
 	mappingRejectionEscalationThreshold = degradation.EscalationThreshold
 )
 
@@ -207,12 +224,23 @@ type Scout struct {
 	// reconcile. Keeping it on the Scout also makes an exec'd `poll` participate
 	// without a flag of its own.
 	iterations int
-	// emptyRun counts consecutive ticks whose window held nothing, and
-	// oversizeRun counts consecutive ticks whose window was too large to fetch.
-	// Both are diagnostics for a wedged fast path (see tick); a productive tick
-	// resets both.
-	emptyRun    int
-	oversizeRun int
+	// emptyRun counts consecutive ticks whose window held nothing,
+	// oversizeRun counts consecutive ticks whose window was too large to fetch,
+	// and unreachableRun counts consecutive ticks that could not read the
+	// upstream at all. All three are diagnostics for a wedged fast path (see
+	// tick); a productive tick resets all three.
+	emptyRun       int
+	oversizeRun    int
+	unreachableRun int
+	// ready reports whether a reconcile has completed and reported a full
+	// finding set since this process started. Until it has, the in-memory set
+	// is empty or partial, so a tick must not publish it as the app's state:
+	// emitting 2 rows where the truth is 190 resolves 188 conditions that are
+	// still true, and an operator cannot tell that set from a genuinely quiet
+	// library. reconcileRetries bounds how hard the loop tries to get there
+	// (see reconcileRetryLatch).
+	ready            bool
+	reconcileRetries int
 }
 
 // The tick's window and its two wedge diagnostics.
@@ -240,7 +268,32 @@ const (
 	// ticks is 2h at the default interval, matching the fleet's other
 	// escalation thresholds.
 	oversizeRunLatch = 8
+
+	// unreachableRunLatch is the consecutive-unreadable-upstream-tick count
+	// that ERRORs, and it is the tick's half of the SeadexFailures streak.
+	// recordSeaDexFetch only runs inside the reconcile, so without this a fast
+	// path that can never read SeaDex - a filter the upstream rejects, an
+	// envelope larger than maxProbeBytes, an egress rule that blocks the
+	// probe's query shape - would WARN every 15 minutes and reach the ERROR
+	// this stack alerts on only after two DAYS. 8 ticks is 2h, the same number
+	// and the same reasoning as the oversize latch.
+	unreachableRunLatch = 8
 )
+
+// reconcileRetryLatch bounds the immediate retry of a reconcile that did not
+// establish a finding set. A failed or gated startup reconcile leaves the
+// notifier empty, so waiting a full reconcileInterval for the next one means up
+// to 24h in which the app knows nothing and says nothing - the dark window.
+// Retrying on the very next iteration makes that window minutes instead.
+//
+// It is BOUNDED because the retry is a full catalogue fetch plus a full arr
+// walk. Retrying forever against a condition that will not clear (a library
+// whose shrink guard keeps gating, an upstream that stays down) would run a
+// full pass every 15 minutes - 1.67 GiB/day against a community-run upstream,
+// which is the traffic this whole design exists to avoid. 4 attempts is ~1h at
+// the default interval; past that the normal cadence resumes and the failure
+// streaks plus the two deadmen own the escalation.
+const reconcileRetryLatch = 4
 
 // reconcileInterval is how often a full pass runs. It is a CONSTANT, not a
 // config key: the tick interval is an operator tradeoff (how fresh, how much
@@ -275,14 +328,30 @@ func (s *Scout) reconcileEvery() int {
 //
 // The first iteration reconciles because everything downstream assumes a
 // complete pass has happened: the notifier's set is empty until one runs, and
-// the tick compares against a cached library only a walk can populate.
+// the tick compares against a cached library only a walk can populate. A
+// reconcile that did NOT establish that set is retried on the next iteration
+// rather than in a day (see reconcileRetryLatch).
 func (s *Scout) Cycle(ctx context.Context) bool {
-	due := s.iterations%s.reconcileEvery() == 0
+	due := s.iterations%s.reconcileEvery() == 0 || s.reconcileRetryDue()
 	s.iterations++
-	if due {
-		return s.reconcile(ctx)
+	if !due {
+		return s.tick(ctx)
 	}
-	return s.tick(ctx)
+	healthy := s.reconcile(ctx)
+	if !s.ready {
+		// The reconcile did not reach finishCompletedCycle, so the finding set
+		// is still empty or stale: charge the attempt against the retry budget.
+		s.reconcileRetries++
+	}
+	return healthy
+}
+
+// reconcileRetryDue reports whether a reconcile should run out of cadence
+// because no complete pass has succeeded yet in this process. It is the bounded
+// retry the in-memory finding set depends on: see reconcileRetryLatch for why
+// it is bounded, and Scout.ready for what it is waiting for.
+func (s *Scout) reconcileRetryDue() bool {
+	return !s.ready && s.reconcileRetries < reconcileRetryLatch
 }
 
 // cycleDegraded emits the degraded-cycle completion line. Every cycle that
@@ -351,6 +420,21 @@ func newScout(c *components) *Scout {
 // tick, and the marker it commits attests that the loop is alive, not that
 // anything changed.
 //
+// EVERY exit emits one completion line and re-states the finding set, because
+// both are what the alerting contract reads:
+//
+//   - "tick complete" (the tick did its whole job, which includes finding
+//     nothing to do) or "tick degraded" (it ran but could not) is what the
+//     scan deadman counts, exactly as "cycle complete"/"cycle degraded" is for
+//     a reconcile. A silent exit is indistinguishable from a wedged loop, and
+//     the measured upstream has quiet runs of 154 consecutive empty ticks - so
+//     a deadman watching only the productive path would page on healthy data
+//     with a restart runbook.
+//   - the finding set is re-emitted (Notifier.Reemit) on every exit that did
+//     not compare, so the rules' lookback keeps seeing standing conditions.
+//     Nothing was learned that could resolve them, and silence longer than the
+//     lookback resolves all of them and then re-fires the whole set.
+//
 // It costs one ~88-byte probe plus, when there is something to fetch, one
 // request of a few tens of KiB. It does NOT walk the arrs (that is ~1k requests
 // and it is what gates container health), does NOT touch the search curation
@@ -358,20 +442,33 @@ func newScout(c *components) *Scout {
 // de-curation), and does NOT rebuild the feed - it ADVANCES it (see
 // FeedWriter.Advance).
 func (s *Scout) tick(ctx context.Context) bool {
+	if !s.ready {
+		// No complete pass has established the finding set yet (the startup
+		// reconcile failed or was gated, and the retry budget is spent), so
+		// this tick's handful of findings would publish as the app's whole
+		// state. Emit the liveness line and nothing else: an empty set must not
+		// be published either, since "no findings" is a claim this tick cannot
+		// make. The failed reconciles' own degraded lines and their escalation
+		// are what tell the operator why.
+		s.log.Warn("tick degraded", "reason", "awaiting-first-reconcile",
+			"reconcile_attempts", s.reconcileRetries)
+		return true
+	}
 	since := time.Now().Add(-changeWindow)
 	count, err := s.deps.SeaDex.CountWindow(ctx, since)
 	if err != nil {
-		// A failed probe is a failed tick and nothing more: it advances neither
-		// wedge counter (they measure upstream STATE, not reachability - the
-		// existing SeadexFailures streak owns unreachability) and reports
-		// nothing, so the last report stands until the alert window expires.
-		s.log.Warn("change probe failed; skipping tick", "error", logSafeUpstreamError(err))
-		return true
+		// A failed probe is a failed tick: it advances neither wedge counter
+		// that measures upstream STATE (emptyRun/oversizeRun), but it does
+		// advance the fast path's own unreachability streak, because
+		// recordSeaDexFetch runs on the reconcile only and would otherwise take
+		// two days to escalate this.
+		s.warnUnreachableUpstream("change probe failed; skipping tick", err)
+		return s.tickDegraded("probe-failed")
 	}
 	switch {
 	case count == 0:
 		s.emptyRun++
-		s.oversizeRun = 0
+		s.oversizeRun, s.unreachableRun = 0, 0
 		if s.emptyRun == emptyRunLatch {
 			// Usually healthy - the upstream is simply quiet - but a window
 			// that can NEVER hold anything looks identical, and the way that
@@ -380,16 +477,53 @@ func (s *Scout) tick(ctx context.Context) bool {
 			s.log.Warn("no SeaDex change seen for a very long run of ticks; if this persists, check this container's clock against the upstream",
 				"consecutive_empty_ticks", s.emptyRun, "window", changeWindow.String())
 		}
-		s.log.Debug("tick found no change", "window", changeWindow.String())
+		// A complete tick: the probe answered, and the answer was "nothing".
+		s.deps.Notifier.Reemit()
+		s.log.Info("tick complete", "seadex_entries", 0, "findings", 0,
+			"window", changeWindow.String())
 		return true
 	case count >= seadex.MaxWindowEntries:
 		s.oversizeRun++
-		s.emptyRun = 0
+		s.emptyRun, s.unreachableRun = 0, 0
 		s.warnOversizeWindow(count)
-		return true
+		return s.tickDegraded("window-oversize", "window_entries", count)
 	}
-	s.emptyRun, s.oversizeRun = 0, 0
+	s.emptyRun, s.oversizeRun, s.unreachableRun = 0, 0, 0
 	return s.tickChanged(ctx, since, count)
+}
+
+// tickDegraded closes a tick that ran but could not do its job: it re-states
+// the finding set (nothing was compared, so nothing resolved) and emits the
+// completion line the scan deadman counts. It mirrors cycleDegraded, in the
+// same vocabulary, for the same reason - the deadman must stay satisfied
+// through an upstream outage and go quiet only when the LOOP stops, which is
+// the only condition its restart runbook fits. Always healthy: a tick performs
+// no walk, and health follows the library ingest.
+func (s *Scout) tickDegraded(reason string, attrs ...any) bool {
+	s.deps.Notifier.Reemit()
+	s.log.Warn("tick degraded", append([]any{"reason", reason}, attrs...)...)
+	return true
+}
+
+// warnUnreachableUpstream reports a tick that could not read SeaDex and
+// escalates a sustained run to ERROR. It is the tick-cadence half of the
+// persisted SeadexFailures streak (see unreachableRunLatch): that streak
+// advances only inside the reconcile, so without this the fast path could stay
+// blind for two days before reaching the level this stack alerts on. Like the
+// oversize latch it re-fires at and above the threshold, so a count-based rule
+// keeps firing while the condition holds.
+func (s *Scout) warnUnreachableUpstream(msg string, err error) {
+	s.unreachableRun++
+	attrs := []any{
+		"error", logSafeUpstreamError(err),
+		"consecutive_unreachable_ticks", s.unreachableRun,
+	}
+	if s.unreachableRun >= unreachableRunLatch {
+		s.log.Error("SeaDex has been unreadable on every recent tick; the fast path is blind and only the daily reconcile is refreshing - inspect releases.moe reachability and egress",
+			attrs...)
+		return
+	}
+	s.log.Warn(msg, attrs...)
 }
 
 // warnOversizeWindow reports a window too large to fetch, escalating a
@@ -426,9 +560,13 @@ func (s *Scout) tickChanged(ctx context.Context, since time.Time, count int) boo
 	entries, err := s.deps.SeaDex.FetchEntries(ctx,
 		seadex.Options{Mode: seadex.FetchWindow, Since: since})
 	if err != nil {
-		s.log.Warn("change window fetch failed; skipping tick",
-			"error", logSafeUpstreamError(err), "window_entries", count)
-		return true
+		s.warnUnreachableUpstream("change window fetch failed; skipping tick", err)
+		// The mapping load above may have accepted a freshly revalidated Fribb
+		// body; discarding it re-downloads ~5.9 MB on the next tick, which
+		// during a SeaDex outage is every 15 minutes. Every gated reconcile
+		// path persists it for the same reason.
+		s.saveTick(ctx, &st, &mapCache)
+		return s.tickDegraded("window-fetch-failed", "window_entries", count)
 	}
 	s.advanceFeed(ctx, entries, idx, &st)
 	if mapErr != nil && idx == nil {
@@ -440,7 +578,7 @@ func (s *Scout) tickChanged(ctx context.Context, since time.Time, count int) boo
 		s.log.Warn("mapping unusable; skipping tick comparison",
 			"error", logSafeUpstreamError(mapErr))
 		s.saveTick(ctx, &st, &mapCache)
-		return true
+		return s.tickDegraded("mapping-unusable")
 	}
 	result := s.deps.Matcher.Match(ctx, entries, &st.Library, idx, st.Memo)
 	if ctx.Err() != nil {
@@ -449,11 +587,11 @@ func (s *Scout) tickChanged(ctx context.Context, since time.Time, count int) boo
 	}
 	cleanMatches, failedItems := splitFailedMatches(result.Matches)
 	findings := s.deps.Comparer.Compare(cleanMatches)
-	// The report REPLACES only the rows of the entries this window compared, and
+	// The report REPLACES only the rows of the entries this window EVALUATED, and
 	// preserves every row whose entry had incomplete evidence. Rows for entries
 	// outside the window are untouched, which is what makes a partial pass safe
 	// here at all.
-	s.deps.Notifier.ReportScoped(findings, entryIDs(entries),
+	s.deps.Notifier.ReportScoped(findings, evaluatedIDs(result.Matches),
 		unionIDs(failedItems, result.IncompleteIDs))
 	st.Memo = result.Memo
 	s.saveTick(ctx, &st, &mapCache)
@@ -476,13 +614,34 @@ func (s *Scout) saveTick(ctx context.Context, st *state.State, mapCache *mapping
 	s.save(ctx, st)
 }
 
-// entryIDs is the tick's compared-owner set: exactly the AniList IDs this
-// window carried. It is what bounds the notifier's deletion authority to the
-// entries actually re-evaluated.
-func entryIDs(entries []seadex.Entry) map[int]struct{} {
-	ids := make(map[int]struct{}, len(entries))
-	for i := range entries {
-		ids[entries[i].AniListID] = struct{}{}
+// evaluatedIDs is the tick's deletion-authority set: the AniList IDs this
+// window actually EVALUATED, which is not the same as the IDs it fetched.
+//
+// Deletion by absence is only sound where absence is evidence. An entry the
+// window carried can end without a finding for two very different reasons: it
+// was compared and is aligned (absence means resolved - authority), or the
+// linkage to a library item was lost (absence means the app can no longer tell -
+// no authority). The second is reachable without any transient failure: a
+// mapping record whose arr id no longer resolves to a cached item, a definitive
+// AniList not-found, an unusable AniList record, a title match with no unique
+// candidate. Every one of those yields match.SourceUnmapped, which is NOT in
+// IncompleteIDs, so granting authority over it would delete the entry's standing
+// rows and silently resolve an alert whose condition still holds.
+//
+// A match linked to an item whose walk failed IS included: it is authorized and
+// simultaneously in the incomplete set, where preservation takes precedence -
+// the same relationship a full pass has.
+//
+// Removal from the library is deliberately NOT in a tick's authority. A tick
+// compares against the cached snapshot it did not walk, so it cannot distinguish
+// a removed item from a mapping that stopped resolving; the reconcile, which
+// walks, is what resolves those rows.
+func evaluatedIDs(matches []match.Match) map[int]struct{} {
+	ids := make(map[int]struct{}, len(matches))
+	for i := range matches {
+		if m := &matches[i]; m.InLibrary() {
+			ids[m.Entry.AniListID] = struct{}{}
+		}
 	}
 	return ids
 }
@@ -802,6 +961,11 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 	// failing series holds Snapshot.Partial forever, which is what makes that
 	// scoping necessary rather than decorative.
 	s.deps.Notifier.Report(findings, unionIDs(failedItems, result.IncompleteIDs))
+	// The in-memory set is now authoritative for the whole catalogue, so ticks
+	// may publish it (see Scout.ready). This is the ONLY site that sets it:
+	// every other reconcile exit either gated before the compare or was
+	// interrupted, and neither establishes a set a tick may speak for.
+	s.ready = true
 
 	diff := library.DiffSnapshots(&st.Library, &snap)
 	attrs := make([]any, 0, 26)
@@ -819,6 +983,21 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 	s.recordAniListDegradation(st, &result)
 	s.recordPartialWalk(st, &snap)
 	s.logCompletedCycle(&snap, &result, mapErr, failedItems, st.AniListDegraded, attrs)
+	// A SECOND line, deliberately, carrying nothing but the fact that a full
+	// pass finished. The scan deadman counts cycle/tick completion lines, and
+	// once most iterations are ticks it can no longer tell "the loop is alive"
+	// from "the backstop still runs". Since the reconcile IS the backstop for
+	// everything a window structurally cannot see, a reconcile that silently
+	// stopped forever would make every one of those gaps permanent. This line
+	// is what a deadman at 3x reconcileInterval watches.
+	//
+	// It is emitted for EVERY reconcile that ran end to end, degraded or not.
+	// The question that deadman asks is "did the backstop run", and a degraded
+	// reconcile still did the whole catalogue fetch, the whole walk and the
+	// whole rebuild; the "cycle degraded" line beside it carries the quality
+	// signal. Emitting it only on the clean path would page after three
+	// degraded days for a backstop that ran every one of them.
+	s.log.Info("reconcile complete", "interval", reconcileInterval.String())
 
 	st.Library, st.Mapping, st.Memo = snap, *mapCache, result.Memo
 	s.save(ctx, st)
@@ -856,11 +1035,10 @@ func (s *Scout) recordAniListDegradation(st *state.State, result *match.Result) 
 // line so the escalated ERROR precedes the degraded-cycle line it explains,
 // and the persisted value rides the caller's save. Unlike the AniList arm the
 // streak is NOT threaded into logCompletedCycle, so consecutive_partial_walks
-// appears on the escalated ERROR only. Without it a single
-// permanently failing series is signalled only by the per-cycle
-// "reason=partial-walk" WARN forever - which in the cold-start window means
-// BaselineIncomplete is re-set every cycle and not one finding is ever
-// notified, the same never-self-healing silence the AniList streak escalates.
+// appears on the escalated ERROR only. Without it a single permanently failing
+// series is signalled only by the per-cycle "reason=partial-walk" WARN forever -
+// and since those items' findings are carried forward on evidence that never
+// refreshes, nothing would ever escalate the silence.
 func (s *Scout) recordPartialWalk(st *state.State, snap *library.Snapshot) {
 	if !snap.Partial {
 		st.PartialWalks = 0
@@ -920,16 +1098,6 @@ func (s *Scout) logCompletedCycle(snap *library.Snapshot, result *match.Result, 
 		s.cycleDegraded("tags-emptied-side", attrs...)
 	default:
 		s.log.Info("cycle complete", attrs...)
-		// A SECOND line, deliberately, carrying nothing but the fact that a
-		// full pass finished. The shipped deadman counts "cycle complete" or
-		// "cycle degraded", and a tick emits neither - but a tick is a cycle
-		// too, and once most iterations are ticks the deadman can no longer
-		// tell "the loop is alive" from "the backstop still runs". Since the
-		// reconcile IS the backstop for everything a window structurally
-		// cannot see, a reconcile that silently stopped forever would make
-		// every one of those gaps permanent. This line is what a deadman at
-		// 3x reconcileInterval watches.
-		s.log.Info("reconcile complete", "interval", reconcileInterval.String())
 	}
 }
 

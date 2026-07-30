@@ -426,6 +426,52 @@ func TestAdvanceHonoursExcludeTags(t *testing.T) {
 	}
 }
 
+// TestAdvanceExcludesAWarnedIdentityWithinTheWindow pins the identity CLOSURE at
+// window scope, which the direct per-torrent filter alone does not give.
+//
+// SeaDex routinely lists one release on two trackers with a shared info hash and
+// the warning tag on one occurrence only. Filtering torrent by torrent admits the
+// untagged twin, journals it, and records its identity in the never-pruned seen
+// ledger - after which the next full pass (whose graph DOES propagate the
+// exclusion) retracts it from the feed and can never re-admit it. That is a
+// permanent omission, which the feed's non-filtering stance exists to rule out.
+//
+// The full pass still owns the exclusion that is only reachable through an entry
+// outside the window; this pins the half a window can compute.
+func TestAdvanceExcludesAWarnedIdentityWithinTheWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	now := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
+	writeSnapshotFile(t, path, advanceFixture(now.Add(-time.Hour)))
+
+	w := newExcludingTestWriter(path)
+	w.now = func() time.Time { return now }
+
+	// One release, two occurrences, one shared info hash. Only the Nyaa
+	// occurrence carries the tag.
+	const sharedHash = "aaaabbbbccccddddeeeeffff00001111222233ff"
+	warned := nyaaEntry(8, 77, true, "Broken Show - S01E01 (1080p) [G].mkv")
+	warned.Torrents[0].Tags = []string{"broken"}
+	warned.Torrents[0].InfoHash = sharedHash
+	twin := nyaaEntry(9, 79, true, "Broken Show - S01E01 (1080p) [G].mkv")
+	twin.Torrents[0].InfoHash = sharedHash
+
+	if err := w.Advance(context.Background(), []seadex.Entry{warned, twin}, nil); err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+
+	snap := readSnapshotFile(t, path)
+	keys := feedKeys(snap.NyaaFeed)
+	for _, key := range []string{"nyaa:77", "nyaa:79"} {
+		if slices.Contains(keys, key) {
+			t.Errorf("%s was journaled: %v; it shares an info hash with a warned occurrence, "+
+				"so the full pass will retract it while the ledger keeps it out forever", key, keys)
+		}
+		if snap.Seen[key] {
+			t.Errorf("%s entered the never-pruned seen ledger: %v", key, snap.Seen)
+		}
+	}
+}
+
 // TestAdvanceDoesNotRerenderCarriedItems pins the deliberate LIMIT of Advance,
 // which is as much a contract as its capabilities.
 //

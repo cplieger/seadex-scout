@@ -420,7 +420,10 @@ Two consequences worth knowing:
   deliberate trade for not walking your arrs every 15 minutes.
 - **The search index is rebuilt daily, not every 15 minutes.** Search covers
   SeaDex's long tail, which does not move quickly; the RSS feed is what carries
-  anything new.
+  anything new. One visible consequence: for up to a day, an alert can name a
+  release that a manual search in Sonarr/Radarr does not return yet. The release
+  is real — it is already in the RSS feed, so the arrs can still grab it, and the
+  next full pass puts it in the search index.
 
 Both `SeadexScoutScanStalled` (the loop is alive) and
 `SeadexScoutReconcileStalled` (the backstop still runs) are shipped in
@@ -438,13 +441,16 @@ deliver through your Alertmanager like any Prometheus metric alert. They cover:
 
 | Alert | Fires when | Severity |
 | --- | --- | --- |
-| `SeadexScoutCycleError` | a cycle logs an error: the Sonarr/Radarr library walk failed, a state write failed, a queued rerun could not record poll health, or a persisted degradation streak (library shrink, mapping refresh, SeaDex fetch, AniList lookups) escalated after 8 consecutive degraded cycles. Routine outcomes stay WARN and never fire it (see `alerts.yaml`) | warning |
-| `SeadexScoutScanStalled` | no cycle completion line (`cycle complete` or `cycle degraded`) in 7h, i.e. the daemon poll loop is wedged | warning |
+| `SeadexScoutCycleError` | a cycle logs an error: the Sonarr/Radarr library walk failed, a state write failed, a queued rerun could not record poll health, or a persisted degradation streak escalated (library shrink, SeaDex fetch, partial walk and AniList lookups after 2 consecutive full reconciles; a rejected mapping refresh or an unreadable SeaDex after 8 ticks). Routine outcomes stay WARN and never fire it (see `alerts.yaml`) | warning |
+| `SeadexScoutScanStalled` | no loop completion line (`tick`/`cycle` `complete` or `degraded`) in 2h, i.e. the daemon poll loop is wedged | warning |
+| `SeadexScoutReconcileStalled` | no `reconcile complete` line in 72h, i.e. the daily full pass has silently stopped while ticks keep the loop looking alive | warning |
 | `SeadexScoutBetterReleaseFound` | SeaDex recommends a better release than the one on disk (informational, not a fault). **A state signal, not an event** — see below | info |
 | `SeadexScoutReportWritten` | a report run wrote a season-level alignment report (informational) | info |
 
-**Findings are reported as state, not as events.** Every cycle re-emits every
-finding that is currently true, so `SeadexScoutBetterReleaseFound` keeps firing
+**Findings are reported as state, not as events.** Every loop iteration re-emits
+every finding that is currently true — including an iteration that found nothing
+to do or could not reach SeaDex, since neither is evidence that a standing
+finding was resolved — so `SeadexScoutBetterReleaseFound` keeps firing
 until you upgrade the release (or add the show to `filters.ignore`). That is
 what makes a notification lost between the app and your receiver recoverable:
 the condition is still being reported, so the next rule evaluation fires it
@@ -453,11 +459,17 @@ again. Two consequences to plan for:
 - **The rule's lookback window must exceed your `poll_interval`, with margin.**
   Loki's ruler does not support `keep_firing_for`, so the window is the only
   thing holding an alert firing between emissions. The shipped `[12h]` tolerates
-  three missed 3h cycles. Set it too tight and every cycle produces a
-  fire → resolve → re-fire flap.
+  a long run of missed iterations at the 15m default. Set it too tight and every
+  quiet stretch produces a fire → resolve → re-fire flap.
 - **Your Alertmanager route decides how often you are reminded.** A finding that
   stays true is re-notified every `repeat_interval`. `filters.ignore` is how you
   stop that for a show you have consciously declined.
+
+**Re-copy `alerts.yaml` when you upgrade to this version.** The rules changed
+shape with the two cadences: the stall deadman now matches the tick's completion
+lines over a 2h window, and `SeadexScoutReconcileStalled` is new. A previously
+deployed copy that matches only `cycle (complete|degraded)` sees one line a day
+and false-fires for most of every day.
 
 Upgrading an existing install re-announces every open finding once, because the
 new model reports what is true rather than what is new. Every one of those lines

@@ -986,6 +986,31 @@ func TestHealthMaxAge(t *testing.T) {
 	}
 }
 
+// TestColdReconcileAllowanceCoversAMeasuredColdReconcile pins the NUMBER, not
+// just the arithmetic around it.
+//
+// TestHealthMaxAge states its expectations in terms of coldReconcileAllowance
+// itself, so it passes for any value large enough to beat the 3x arm - including
+// the 1h the design rejected by name. The whole argument for this constant is
+// that it carries a MEASURED cold pass with margin, so the measurement is what
+// the test has to assert against.
+func TestColdReconcileAllowanceCoversAMeasuredColdReconcile(t *testing.T) {
+	// measuredColdReconcile is the observed worst case on a large library (the
+	// typical cold pass is ~25 minutes). The lease has to survive it plus the
+	// loop's own delay, or the probe restarts the walk before it can persist the
+	// AniList memo - which makes the next boot cold again.
+	const measuredColdReconcile = 2 * time.Hour
+	if coldReconcileAllowance <= measuredColdReconcile {
+		t.Errorf("coldReconcileAllowance = %v, want more than the measured %v cold reconcile it exists to cover",
+			coldReconcileAllowance, measuredColdReconcile)
+	}
+	// And it must actually bind at the default interval, or it is decoration.
+	if lease := healthLeaseFactor * config.DefaultPollInterval; lease >= coldReconcileAllowance {
+		t.Errorf("healthLeaseFactor*DefaultPollInterval = %v >= coldReconcileAllowance %v, so the floor never applies at the default cadence",
+			lease, coldReconcileAllowance)
+	}
+}
+
 // TestDetachedWriteError pins the alert-facing exit classification of a
 // shutdown-truncated report write: it must read as a routine shutdown (WARN,
 // excluded from alerts.yaml's SeadexScoutCycleError rule) while a genuine write

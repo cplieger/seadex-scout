@@ -21,8 +21,10 @@ groups:
       # health. SeaDex, mapping, and AniList outages
       # log at WARN by design (the run stays healthy and keeps prior findings),
       # so this rule does not fire on an upstream blip — but a degradation that
-      # persists escalates: a suspicious library shrink, a rejected mapping
-      # refresh, or a failed SeaDex fetch repeated for 8 consecutive cycles
+      # persists escalates: a suspicious library shrink, a failed SeaDex fetch,
+      # or a partial arr walk repeated for 2 consecutive full reconciles (48h),
+      # a rejected mapping refresh repeated for 8 changed ticks (~2h), or a
+      # SeaDex the fast path could not read on 8 consecutive ticks (~2h)
       # re-logs at ERROR and fires this rule. "An error was logged" is a one-time event, so route it to a
       # `send_resolved: false` receiver — the 15m count window clearing means
       # errors merely stopped, not a real recovery worth announcing as RESOLVED.
@@ -42,9 +44,14 @@ groups:
             failed; cycle unhealthy"), which stops findings from updating; check
             the arr url and api_key and the /config volume. A persistent
             degradation also lands here: a library walk that stays shrunken below
-            half the prior snapshot, or a mapping refresh the acceptance guards
-            keep rejecting, escalates from WARN to ERROR after 8 consecutive
-            cycles; inspect the arrs and arr_tags (or the mapping upstream), or
+            half the prior snapshot, an arr walk that stays partial, or a SeaDex
+            fetch that keeps failing escalates from WARN to ERROR after 2
+            consecutive full reconciles (48h, since the reconcile is the pass
+            that observes them and it runs daily); a mapping refresh the
+            acceptance guards keep rejecting escalates after 8 attempts (~2h,
+            since a changed tick attempts one too), and a SeaDex the cheap tick
+            cannot read at all escalates after 8 consecutive ticks (~2h);
+            inspect the arrs and arr_tags (or the mapping upstream), or
             remove state.json to accept the change if it is legitimate. A
             mapping refresh refused for a reason that cannot self-heal - a body
             over the download size cap, a list over the record cap, an
@@ -61,12 +68,13 @@ groups:
             preserved"), a report skipped because another report holds the lock,
             and a report half written successfully but without a durable parent
             directory - none of those need operator action.
-      # Deadman (daemon mode): the poll loop closes every cycle with a
-      # completion line — `cycle complete` when healthy, `cycle degraded` (with
-      # a reason attribute) when a failed arr walk, an upstream outage, or a
-      # safety guard degraded it — so the absence of BOTH means the watcher is
-      # wedged and silent.
-      # Counting the degraded line too keeps this deadman satisfied through a
+      # Deadman (daemon mode): the poll loop closes every iteration with a
+      # completion line — `tick complete` / `cycle complete` when the pass did
+      # its job, `tick degraded` / `cycle degraded` (with a reason attribute)
+      # when a failed arr walk, an upstream outage, or a safety guard stopped it
+      # short — so the absence of ALL of them means the watcher is wedged and
+      # silent.
+      # Counting the degraded lines too keeps this deadman satisfied through a
       # long arr or upstream outage instead of firing as if the daemon died
       # (the walk failure itself alerts via SeadexScoutCycleError). The
       # for: 1h grace avoids a false fire on first boot, where no cycle has
@@ -76,7 +84,7 @@ groups:
       # receiver so you are told when the watcher recovers.
       - alert: SeadexScoutScanStalled
         expr: |
-          absent_over_time({container="seadex-scout"} |~ `(cycle (complete|degraded)|tick complete)` [2h])
+          absent_over_time({container="seadex-scout"} |~ `(cycle|tick) (complete|degraded)` [2h])
         for: 15m
         labels:
           severity: warning
@@ -84,13 +92,21 @@ groups:
           summary: "seadex-scout has not completed a pass in 2h"
           description: >
             seadex-scout closes every loop iteration with a line: `tick complete`
-            for a cheap recent-changes pass, `cycle complete` for a full
-            reconcile, or `cycle degraded` when a failed arr walk, an upstream
-            outage, or a safety guard skipped the comparison. None of them in 2h
-            while the container is up (about eight missed iterations at the 15m
+            for a cheap recent-changes pass (including one that found nothing to
+            do), `cycle complete` for a full reconcile, or `tick degraded` /
+            `cycle degraded` when a failed arr walk, an upstream outage, or a
+            safety guard stopped that iteration short. None of them in 2h while
+            the container is up (about eight missed iterations at the 15m
             default, allowing for jitter) means the poll loop is wedged and both
             the RSS feed and better-release findings have silently stopped;
-            restart the container. Adjust the window to your poll_interval. This rule is built for built-in (daemon) mode: in
+            restart the container. Matching the degraded lines too is what keeps
+            this deadman quiet during a SeaDex outage or a long quiet stretch
+            upstream — neither is a wedged loop, and neither is fixed by the
+            restart this rule asks for; the outage alerts on its own through
+            SeadexScoutCycleError once the fast path has been blind for 2h.
+            The 2h window assumes a poll_interval of 1h or less (the default is
+            15m); on a longer interval widen it to at least 3x that interval, or
+            the rule fires permanently. This rule is built for built-in (daemon) mode: in
             resident-idle (poll_interval: off) or report mode each cycle runs
             via a docker exec child, so its completion lines never reach the
             collector — that blinds the count-based rules, but this
@@ -122,7 +138,11 @@ groups:
           description: >
             seadex-scout runs a full reconcile (whole catalogue, whole arr walk,
             whole feed and search-index rebuild) every 24h and closes it with a
-            `reconcile complete` line. It is the backstop for everything the
+            `reconcile complete` line — including a reconcile that closed
+            degraded, since the question here is whether the backstop RAN, and a
+            degraded one still did the whole catalogue fetch, the whole walk and
+            the whole rebuild (the `cycle degraded` line beside it carries the
+            quality signal). It is the backstop for everything the
             15-minute ticks cannot see: a release removed from SeaDex, a
             de-curation, an edit that did not bump its entry, an outage longer
             than the change window, and a badly wrong container clock. It is also

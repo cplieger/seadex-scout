@@ -290,10 +290,17 @@ func TestTickEmptyWindowSkipsFetch(t *testing.T) {
 		t.Errorf("saves = %d, want the reconcile's %d (an empty tick learned nothing to persist)",
 			store.saves, savesAfterReconcile)
 	}
-	// The window's cost bound is a probe, not a fetch, and the tick must not
-	// masquerade as a completed pass.
-	if n := recorder.CountExact("tick complete"); n != 0 {
-		t.Errorf("'tick complete' count = %d, want 0 (nothing was fetched or reported)", n)
+	// The window's cost bound is a probe, not a fetch - but the tick DID
+	// complete, so it must say so and it must re-state the finding set. Both are
+	// the alerting contract: a silent iteration is indistinguishable from a
+	// wedged loop for the scan deadman, and an emission gap longer than the
+	// better-release rule's lookback resolves every standing finding and then
+	// re-fires the whole set.
+	if n := recorder.CountExact("tick complete"); n != 1 {
+		t.Errorf("'tick complete' count = %d, want 1 (an empty window is a completed tick, and the deadman counts this line)", n)
+	}
+	if n := recorder.CountExact("findings reported"); n != 2 {
+		t.Errorf("'findings reported' count = %d, want 2 (the reconcile's, then the empty tick's re-statement)", n)
 	}
 }
 
@@ -579,37 +586,49 @@ func TestTickWithNoFeedConfiguredStillReports(t *testing.T) {
 	}
 }
 
-// TestTickReportsWithExactlyTheWindowsAuthority pins the deletion authority the
-// tick hands the notifier, which is the subtlest correctness property of the
-// whole fast path.
+// TestTickDeletesOnlyRowsItEvaluated pins the deletion authority the tick hands
+// the notifier, which is the subtlest correctness property of the whole fast
+// path.
 //
-// A tick compared only the window's entries, so it may only delete rows those
-// entries own. Every other row must be carried: a row whose entry the tick never
-// examined is absent from its finding set for exactly the same reason a resolved
-// one is, and deleting it would clear an alert while the condition still holds,
-// then re-raise it as new on the next reconcile.
+// Authority is the set of entries the tick EVALUATED, not the set it fetched.
+// Both halves matter:
+//
+//   - a row whose entry the tick never carried must be carried forward: it is
+//     absent from the finding set for exactly the same reason a resolved one is,
+//     and deleting it would clear an alert while the condition still holds, then
+//     re-raise it as new on the next reconcile;
+//   - a row whose entry the tick DID carry but could not link to a library item
+//     must ALSO be carried. An entry whose mapping record no longer resolves, or
+//     whose AniList lookup definitively found nothing, produces no finding
+//     because the app lost track of the item - not because the condition was
+//     fixed. That case is not in IncompleteIDs, so nothing else protects it.
 //
 // The set is asserted through the notifier's own behaviour rather than by
 // intercepting the call: three rows are seeded, the window carries two of their
-// owners, and only those two may go.
-func TestTickReportsWithExactlyTheWindowsAuthority(t *testing.T) {
+// owners, and only the one that resolves to a library item may go.
+func TestTickDeletesOnlyRowsItEvaluated(t *testing.T) {
 	logger, recorder := capture.New()
 	notifier := notify.NewNotifier(logger, nil)
-	// Seed three standing rows under three different owners.
-	notifier.Report([]compare.Finding{
-		tickFinding(1001, 501),
-		tickFinding(1002, 502),
-		tickFinding(1003, 503),
-	}, nil)
+	// Seed three standing rows: the mapped in-library owner, an owner the window
+	// never carries, and an owner the window carries but cannot resolve.
+	seed := func() {
+		notifier.Report([]compare.Finding{
+			tickFinding(154587, 501),
+			tickFinding(1002, 502),
+			tickFinding(1003, 503),
+		}, nil)
+	}
+	seed()
 	if total, _ := lastSummaryCounter(t, recorder, "total"); total != 3 {
 		t.Fatalf("seeded finding set = %d rows, want 3", total)
 	}
 
-	// The window carries owners 1001 and 1003 only, and neither produces a
-	// finding (nothing in the test library maps to them).
+	// The window carries 154587 (mapped to the walked Frieren series, so the
+	// tick evaluates it and it produces no finding) and 1003 (nothing in the
+	// test library maps to it, so the tick cannot evaluate it at all).
 	sea := &fakeSeaDex{
 		entries:       seadexFrierenEntry(),
-		windowEntries: []seadex.Entry{windowEntry(1001, 501), windowEntry(1003, 503)},
+		windowEntries: append(seadexFrierenEntry(), windowEntry(1003, 503)),
 	}
 	s, _ := newTickScout(logger, sea, nil, notifier, 96)
 	if healthy := s.Cycle(context.Background()); !healthy {
@@ -617,11 +636,7 @@ func TestTickReportsWithExactlyTheWindowsAuthority(t *testing.T) {
 	}
 	// The reconcile re-reported with FULL authority, so re-seed the standing
 	// rows it deleted by omission before the tick runs.
-	notifier.Report([]compare.Finding{
-		tickFinding(1001, 501),
-		tickFinding(1002, 502),
-		tickFinding(1003, 503),
-	}, nil)
+	seed()
 
 	if healthy := s.Cycle(context.Background()); !healthy {
 		t.Fatal("tick healthy=false, want true")
@@ -631,12 +646,12 @@ func TestTickReportsWithExactlyTheWindowsAuthority(t *testing.T) {
 	if !seen {
 		t.Fatal("the tick emitted no 'findings reported' summary line")
 	}
-	if total != 1 {
-		t.Errorf("finding set after the tick = %d rows, want 1 (only 1002, whose owner the window never examined)", total)
+	if total != 2 {
+		t.Errorf("finding set after the tick = %d rows, want 2 (1002, never carried, and 1003, carried but unresolvable)", total)
 	}
 	carried, _ := lastSummaryCounter(t, recorder, "carried")
-	if carried != 1 {
-		t.Errorf("carried = %d, want 1 (the row outside the window's authority)", carried)
+	if carried != 2 {
+		t.Errorf("carried = %d, want 2 (the row outside the window plus the row the tick could not evaluate)", carried)
 	}
 	// Nothing was preserved for incompleteness: with a definitive-not-found
 	// AniList no match is transiently incomplete, so the survival above is
@@ -706,18 +721,23 @@ func TestTickNeverWritesTheLibrarySnapshot(t *testing.T) {
 
 // TestTickUpstreamFailuresAreHealthyAndReportNothing pins both of the tick's
 // failure arms together, because they share one rule: a tick that could not
-// establish what changed says NOTHING rather than something wrong.
+// establish what changed CHANGES nothing, and says so.
 //
-// Reporting an empty set would clear every standing alert (the notifier deletes
-// by omission within its authority), and the correct behaviour on an unreachable
-// upstream is to let the last report stand until the alert's own lookback window
-// expires. Neither failure is unhealthy either - container health follows the
-// library ingest, and a restart cannot fix an upstream outage.
+// It re-states the finding set unchanged rather than replacing it. Replacing it
+// with an empty set would clear every standing alert (the notifier deletes by
+// omission within its authority), and staying silent instead would let those
+// alerts expire out of their own lookback window and then re-fire as a burst -
+// so the correct behaviour is to keep reporting exactly what was already true,
+// which costs nothing upstream. It also emits the degraded completion line the
+// scan deadman counts, because a silent iteration is indistinguishable from a
+// wedged loop and only the loop's death fits that alert's restart runbook.
+// Neither failure is unhealthy either - container health follows the library
+// ingest, and a restart cannot fix an upstream outage.
 //
-// The wedge counters must not move on either: they measure upstream STATE, not
-// reachability, which the existing SeadexFailures streak already owns. A probe
-// failure counted as an empty window would latch the clock-skew WARN during an
-// ordinary outage.
+// The two STATE wedge counters must not move on either: they measure what the
+// upstream contains, not whether it answered, and a probe failure counted as an
+// empty window would latch the clock-skew WARN during an ordinary outage. The
+// unreachability streak is the one that does advance.
 func TestTickUpstreamFailuresAreHealthyAndReportNothing(t *testing.T) {
 	boom := errors.New("upstream boom")
 	tests := map[string]struct {
@@ -780,12 +800,15 @@ func TestTickUpstreamFailuresAreHealthyAndReportNothing(t *testing.T) {
 			if _, window := countWindowModes(sea); window != tc.wantFtch {
 				t.Errorf("window fetches = %d, want %d", window, tc.wantFtch)
 			}
-			if got := recorder.CountExact("findings reported"); got != summariesBefore {
-				t.Errorf("the failed tick emitted a report (summary lines %d, want the pre-tick %d); "+
-					"an empty report would clear every standing alert", got, summariesBefore)
+			if got := recorder.CountExact("findings reported"); got != summariesBefore+1 {
+				t.Errorf("report summary lines = %d, want the pre-tick %d plus the failed tick's re-statement; "+
+					"silence lets every standing alert expire out of its lookback window", got, summariesBefore+1)
 			}
 			if total, _ := lastSummaryCounter(t, recorder, "total"); total != 1 {
 				t.Errorf("finding set = %d rows, want the standing 1 left untouched", total)
+			}
+			if carried, _ := lastSummaryCounter(t, recorder, "carried"); carried != 1 {
+				t.Errorf("carried = %d, want 1 (a re-statement compares nothing, so every row is carried)", carried)
 			}
 			if feed.advanceCalls != 0 {
 				t.Errorf("Advance calls = %d, want 0 (nothing was fetched)", feed.advanceCalls)
@@ -794,8 +817,15 @@ func TestTickUpstreamFailuresAreHealthyAndReportNothing(t *testing.T) {
 				t.Errorf("wedge counters = empty %d / oversize %d, want 0/0 (they measure upstream state, not reachability)",
 					s.emptyRun, s.oversizeRun)
 			}
+			if s.unreachableRun != 1 {
+				t.Errorf("unreachableRun = %d, want 1 (the fast path's own SeaDex-unreachable streak, which the reconcile-only SeadexFailures cannot see)",
+					s.unreachableRun)
+			}
 			if n := recorder.CountExact("tick complete"); n != 0 {
 				t.Errorf("'tick complete' count = %d, want 0 (the tick did not complete its work)", n)
+			}
+			if n := recorder.CountExact("tick degraded"); n != 1 {
+				t.Errorf("'tick degraded' count = %d, want 1 (the deadman must see the loop is alive)", n)
 			}
 		})
 	}
@@ -832,5 +862,286 @@ func TestTickWindowIsWiderThanTheInterval(t *testing.T) {
 	if changeWindow <= s.deps.PollInterval {
 		t.Errorf("changeWindow %v is not wider than the poll interval %v; a missed tick would be unrecoverable",
 			changeWindow, s.deps.PollInterval)
+	}
+}
+
+// TestEveryTickExitEmitsALineTheDeadmanCounts is the alerting contract, pinned
+// as one table over every way a tick can end.
+//
+// SeadexScoutScanStalled fires when NO `(cycle|tick) (complete|degraded)` line
+// appears within its window, and its remedy is "restart the container". So every
+// exit a healthy or merely-degraded tick can take must emit one of those lines,
+// or the rule pages for a wedged loop that is not wedged. Two of these exits are
+// measured-normal behaviour rather than faults: the upstream had 154 consecutive
+// empty windows in 90 days of history, and any SeaDex outage longer than the
+// rule's window walks the failed-probe arm every 15 minutes.
+//
+// The same exits must re-state the finding set, because emission is what holds a
+// better-release alert firing: a quiet run longer than that rule's lookback
+// would otherwise resolve every standing finding and re-fire the whole set as
+// new when the upstream next moved.
+func TestEveryTickExitEmitsALineTheDeadmanCounts(t *testing.T) {
+	boom := errors.New("upstream boom")
+	// deadmanVocabulary is the log-message set alerts.yaml's stall rule matches.
+	deadmanVocabulary := []string{"tick complete", "tick degraded"}
+	tests := map[string]struct {
+		sea  func() *fakeSeaDex
+		want string
+	}{
+		"an empty window completes": {
+			sea: func() *fakeSeaDex {
+				return &fakeSeaDex{
+					entries: seadexFrierenEntry(),
+					countFn: func(context.Context, time.Time) (int, error) { return 0, nil },
+				}
+			},
+			want: "tick complete",
+		},
+		"a productive window completes": {
+			sea: func() *fakeSeaDex {
+				return &fakeSeaDex{
+					entries:       seadexFrierenEntry(),
+					windowEntries: []seadex.Entry{windowEntry(1001, 501)},
+				}
+			},
+			want: "tick complete",
+		},
+		"a failed probe degrades": {
+			sea: func() *fakeSeaDex {
+				return &fakeSeaDex{
+					entries: seadexFrierenEntry(),
+					countFn: func(context.Context, time.Time) (int, error) { return 0, boom },
+				}
+			},
+			want: "tick degraded",
+		},
+		"a failed window fetch degrades": {
+			sea: func() *fakeSeaDex {
+				return &fakeSeaDex{
+					entries:   seadexFrierenEntry(),
+					windowErr: boom,
+					countFn:   func(context.Context, time.Time) (int, error) { return 3, nil },
+				}
+			},
+			want: "tick degraded",
+		},
+		"an oversized window degrades": {
+			sea: func() *fakeSeaDex {
+				return &fakeSeaDex{
+					entries: seadexFrierenEntry(),
+					countFn: func(context.Context, time.Time) (int, error) {
+						return seadex.MaxWindowEntries, nil
+					},
+				}
+			},
+			want: "tick degraded",
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			logger, recorder := capture.New()
+			notifier := notify.NewNotifier(logger, nil)
+			deps, _ := tickDeps(logger, tc.sea(), &fakeFeed{}, notifier, 96)
+			s := New(deps)
+
+			if healthy := s.Cycle(context.Background()); !healthy {
+				t.Fatal("reconcile healthy=false, want true")
+			}
+			// Seed a standing row AFTER the reconcile so the tick's own
+			// re-statement is the only thing that can keep it alive.
+			notifier.Report([]compare.Finding{tickFinding(1002, 502)}, nil)
+			summariesBefore := recorder.CountExact("findings reported")
+
+			if healthy := s.Cycle(context.Background()); !healthy {
+				t.Fatal("tick healthy=false, want true (no tick exit is unhealthy: health follows the arr walk)")
+			}
+
+			emitted := map[string]int{}
+			for _, msg := range deadmanVocabulary {
+				emitted[msg] = recorder.CountExact(msg)
+			}
+			if emitted[tc.want] != 1 {
+				t.Errorf("%q count = %d, want 1; deadman lines seen = %v. A tick exit with no completion line "+
+					"makes SeadexScoutScanStalled fire with a restart runbook for a loop that is running", tc.want, emitted[tc.want], emitted)
+			}
+			if got := recorder.CountExact("findings reported"); got != summariesBefore+1 {
+				t.Errorf("report summary lines = %d, want %d (every tick exit must re-state the finding set, "+
+					"or a quiet run resolves every standing alert)", got, summariesBefore+1)
+			}
+			if total, _ := lastSummaryCounter(t, recorder, "total"); total < 1 {
+				t.Errorf("finding set after the tick = %d rows, want the standing row still present", total)
+			}
+		})
+	}
+}
+
+// TestCycleRetriesReconcileUntilReadyThenGivesUp pins the readiness gate and its
+// bounded retry, which together are the whole mitigation for a false all-clear.
+//
+// The in-memory finding set is empty until a reconcile fills it, so a tick that
+// published before then would emit its handful of window findings as the app's
+// entire state - resolving every other standing condition. Two rules follow:
+// while no reconcile has succeeded the loop RETRIES the reconcile instead of
+// ticking (the dark window is minutes, not a day), and a tick that does run in
+// that state publishes nothing.
+//
+// The retry is bounded because it is a full catalogue fetch plus a full arr
+// walk: retrying forever against a condition that will not clear would run a
+// full pass every 15 minutes against a community-run upstream, which is the
+// traffic this design exists to remove.
+func TestCycleRetriesReconcileUntilReadyThenGivesUp(t *testing.T) {
+	logger, recorder := capture.New()
+	// A SeaDex fetch failure gates the reconcile before it can report: healthy,
+	// degraded, and no finding set established.
+	sea := &fakeSeaDex{
+		err:           errors.New("seadex boom"),
+		entries:       seadexFrierenEntry(),
+		windowEntries: []seadex.Entry{windowEntry(1001, 501)},
+	}
+	// An every wide enough that the retries are visibly OUT of cadence (only
+	// iteration 0 is due), and narrow enough that the test can then walk to the
+	// next scheduled reconcile.
+	const every = reconcileRetryLatch + 4
+	s, _ := newTickScout(logger, sea, &fakeFeed{}, nil, every)
+
+	for i := 1; i <= reconcileRetryLatch; i++ {
+		if healthy := s.Cycle(context.Background()); !healthy {
+			t.Fatalf("iteration %d healthy=false, want true (a gated upstream is degraded, not unhealthy)", i)
+		}
+		if s.ready {
+			t.Fatalf("ready=true after %d gated reconciles, want false (none of them reported a finding set)", i)
+		}
+		if full, _ := countWindowModes(sea); full != i {
+			t.Errorf("after %d iterations full fetches = %d, want %d (a reconcile that established nothing must be retried, not deferred a day)", i, full, i)
+		}
+	}
+
+	// The budget is spent: the loop stops retrying out of cadence and ticks
+	// instead, and that tick publishes nothing.
+	summariesBefore := recorder.CountExact("findings reported")
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("post-budget iteration healthy=false, want true")
+	}
+	if full, _ := countWindowModes(sea); full != reconcileRetryLatch {
+		t.Errorf("full fetches = %d, want %d (the retry must be bounded: an unbounded one runs a full pass every interval)", full, reconcileRetryLatch)
+	}
+	if _, window := countWindowModes(sea); window != 0 {
+		t.Errorf("window fetches = %d, want 0 (a tick with no established finding set must not compare, let alone publish)", window)
+	}
+	if got := recorder.CountExact("findings reported"); got != summariesBefore {
+		t.Errorf("report summary lines = %d, want the pre-tick %d (publishing a window's findings as the whole state resolves everything else)", got, summariesBefore)
+	}
+	if n := recorder.CountExact("tick degraded"); n != 1 {
+		t.Errorf("'tick degraded' count = %d, want 1 (the suppressed tick must still tell the deadman the loop is alive)", n)
+	}
+	if reasons := tickDegradedReasons(recorder); len(reasons) != 1 || reasons[0] != "awaiting-first-reconcile" {
+		t.Errorf("tick degraded reasons = %v, want [awaiting-first-reconcile]", reasons)
+	}
+
+	// A reconcile that DOES report flips the gate. It arrives on the normal
+	// cadence rather than immediately, which is the bound's whole point.
+	sea.err = nil
+	for range every {
+		if s.ready {
+			break
+		}
+		if healthy := s.Cycle(context.Background()); !healthy {
+			t.Fatal("recovering iteration healthy=false, want true")
+		}
+	}
+	if !s.ready {
+		t.Fatalf("ready=false after %d further iterations, want true (the scheduled reconcile must still run and open the gate)", every)
+	}
+}
+
+// TestCycleReadyGateOpensOnlyOnAReconcileThatReported pins which reconcile exit
+// counts as readiness: only the one that reached the compare and reported a
+// whole-catalogue finding set. A gated exit returns healthy and leaves the set
+// empty, so treating it as ready is exactly the false all-clear the gate exists
+// to prevent.
+func TestCycleReadyGateOpensOnlyOnAReconcileThatReported(t *testing.T) {
+	logger := scoutTestLogger()
+	sea := &fakeSeaDex{entries: seadexFrierenEntry(), windowEntries: []seadex.Entry{windowEntry(1001, 501)}}
+	s, _ := newTickScout(logger, sea, nil, nil, 96)
+	if s.ready {
+		t.Fatal("ready=true before any cycle ran, want false")
+	}
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("reconcile healthy=false, want true")
+	}
+	if !s.ready {
+		t.Error("ready=false after a completed reconcile, want true (its Report established the whole-catalogue set)")
+	}
+	if s.reconcileRetries != 0 {
+		t.Errorf("reconcileRetries = %d, want 0 (a reconcile that reported spends no retry budget)", s.reconcileRetries)
+	}
+}
+
+// tickDegradedReasons reports the reason attribute of every "tick degraded"
+// line, the tick-side twin of degradedReasons.
+func tickDegradedReasons(recorder *capture.Recorder) []string {
+	var reasons []string
+	for _, rec := range recorder.Records() {
+		if rec.Message != "tick degraded" {
+			continue
+		}
+		rec.Attrs(func(a slog.Attr) bool {
+			if a.Key == "reason" {
+				reasons = append(reasons, a.Value.String())
+			}
+			return true
+		})
+	}
+	return reasons
+}
+
+// TestReconcileCompleteIsEmittedByADegradedReconcile pins the other half of that
+// signal's contract: the backstop deadman asks whether the full pass RAN, not
+// whether it was clean.
+//
+// A partial arr walk closes the cycle as degraded, and it still fetched the whole
+// catalogue, walked the whole library it could reach, and rebuilt the whole feed
+// and search index - every gap the 48h window cannot see was covered. Emitting
+// the marker only on the clean path would page SeadexScoutReconcileStalled after
+// three degraded days for a backstop that ran on all three, while the operator
+// already has the `cycle degraded` line telling them about the quality problem.
+func TestReconcileCompleteIsEmittedByADegradedReconcile(t *testing.T) {
+	logger, recorder := capture.New()
+	sonarr := &flakySonarr{
+		fakeSonarr: fakeSonarr{
+			series: []arrapi.Series{
+				{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023},
+				{ID: 8, Title: "Second Show", TvdbID: 124, Year: 2024},
+			},
+			files: map[int][]arrapi.EpisodeFile{
+				7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+				8: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+			},
+		},
+		failEpisodes: map[int]bool{8: true},
+	}
+	s := New(&Deps{
+		Logger:   logger,
+		Store:    &fakeStore{st: state.State{Mapping: twoRecordMappingCache()}},
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping:  fakeMapping{},
+		SeaDex:   &fakeSeaDex{entries: seadexFrierenEntry()},
+		Matcher:  match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
+		Comparer: compare.NewComparer(compare.Config{}),
+		Notifier: notify.NewNotifier(scoutTestLogger(), nil),
+	})
+
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("partial-walk reconcile healthy=false, want true (a partial walk is degraded, not unhealthy)")
+	}
+	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "partial-walk" {
+		t.Fatalf("degraded reasons = %v, want [partial-walk] (this test needs a DEGRADED completed reconcile)", reasons)
+	}
+	if n := recorder.CountExact("cycle complete"); n != 0 {
+		t.Errorf("'cycle complete' count = %d, want 0 (the cycle was degraded)", n)
+	}
+	if n := recorder.CountExact("reconcile complete"); n != 1 {
+		t.Errorf("'reconcile complete' count = %d, want 1; the backstop ran end to end, and withholding the marker "+
+			"makes SeadexScoutReconcileStalled fire for a reconcile that never stopped", n)
 	}
 }

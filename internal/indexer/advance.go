@@ -33,8 +33,13 @@ import (
 // It is deliberately NOT the whole of Rebuild's behaviour. A carried item is not
 // re-rendered (so a title, size or marker corrected upstream keeps its stored
 // form until the next full pass), an item whose curation or tags changed in
-// place is not reconsidered, and a de-curated item is not dropped. All three are
-// the full pass's job, and the full pass runs daily.
+// place is not reconsidered, and a de-curated item is not dropped. A NEW item's
+// marker and categories are folded over the window's refs only, so a torrent
+// shared with an entry that was NOT bumped into this window renders without that
+// entry's vote - the weaker freeleech marker, or a category set missing the arr
+// the other parent routes to (4.4% of torrents are shared, and a mis-routed
+// category is invisible to that arr's RSS until the reconcile re-folds it). All
+// of those are the full pass's job, and the full pass runs daily.
 func (w *FeedWriter) Advance(ctx context.Context, window []seadex.Entry, info EntryInfoFunc) error {
 	infoFor := entryInfoFunc(info)
 	snap, prev, err := w.loadPrevious(ctx)
@@ -54,8 +59,13 @@ func (w *FeedWriter) Advance(ctx context.Context, window []seadex.Entry, info En
 	// growth in Rebuild. Skipping them would journal a release the operator
 	// excluded - servable for up to a full reconcile interval - and burn its
 	// identity into the ledger, so a later un-exclusion could never restore it.
-	// Only the direct per-torrent filter is applied: the cross-catalogue warned
-	// identity graph needs the whole catalogue and belongs to the full pass.
+	// The identity closure is computed over the WINDOW, which is narrower than
+	// Rebuild's catalogue-wide graph but not empty: two occurrences of the same
+	// release sharing an info hash, one of them warned, routinely sit inside a
+	// single window entry, and admitting the unwarned one would burn exactly the
+	// identity Rebuild refuses to record. The cross-catalogue half - an
+	// exclusion reachable only through an entry outside the window - still
+	// belongs to the full pass.
 	kept := filterWindowByTags(window, w.tags)
 
 	var js journalStats
@@ -81,14 +91,17 @@ func (w *FeedWriter) Advance(ctx context.Context, window []seadex.Entry, info En
 	snap.NyaaFeed, snap.ABFeed = sortFeed(nyaaFeed), sortFeed(abFeed)
 	snap.Seen = pass.seen
 
-	if !seenLedgerWithinLimits(snap.Seen) {
-		// Growth is the only way a loaded ledger can cross the cap (the decode
-		// refuses an over-cap one before loadPrevious returns), and the remedy
-		// is a rebuild from the whole catalogue - which is the full pass, not
-		// this one. Persisting an over-cap ledger would have the reader refuse
-		// the snapshot and serve nothing.
+	if !seenLedgerWithinLimits(snap.Seen) || len(snap.Seen) > maxSnapshotMapEntries {
+		// Growth is the only way a loaded ledger can cross either cap (the
+		// decode refuses an over-cap one before loadPrevious returns), and the
+		// remedy is a rebuild from the whole catalogue - which is the full pass,
+		// not this one. Persisting an over-cap ledger would have the reader
+		// refuse the snapshot and serve nothing. Both caps are checked because
+		// neither implies the other: a short tracker-key entry serializes in
+		// ~20 bytes, so the byte budget admits ~419k entries against the
+		// decode's 250k cardinality cap.
 		w.log.Warn("indexer seen ledger crossed its cap while advancing; deferring to the next full rebuild",
-			"entries", len(snap.Seen))
+			"entries", len(snap.Seen), "max_entries", maxSnapshotMapEntries)
 		return nil
 	}
 
@@ -106,13 +119,24 @@ func (w *FeedWriter) Advance(ctx context.Context, window []seadex.Entry, info En
 
 // filterWindowByTags drops the torrents the operator's tag policy excludes from
 // the feed surface, entry by entry. It is the window-scoped half of
-// splitCurationWarned: the direct per-torrent decision, without the
-// cross-catalogue identity propagation that needs a whole catalogue to compute.
+// splitCurationWarned: the same per-torrent decision AND the same identity
+// closure, computed over the window rather than the catalogue.
+//
+// The closure matters even at window scope. Warning identity is transitive
+// across occurrences, and SeaDex routinely lists one release on two trackers
+// with a shared info hash and the `broken` tag on one occurrence only. Filtering
+// each torrent in isolation would admit the untagged twin, journal it, and record
+// its identity in the never-pruned seen ledger - after which the next full pass
+// retracts it from the feed but can never re-admit it, which is the permanent
+// omission the feed's non-filtering stance exists to avoid. What stays out of
+// reach here is only the exclusion reachable through an entry the window did not
+// carry; that one is the full pass's.
 func filterWindowByTags(window []seadex.Entry, tags tagfilter.Filter) []seadex.Entry {
+	_, warnedIDs := collectWarnedIdentities(window, tags)
 	out := make([]seadex.Entry, 0, len(window))
 	for i := range window {
 		e := window[i]
-		ts, _ := filterWarnedTorrents(e.Torrents, nil, tags)
+		ts, _ := filterWarnedTorrents(e.Torrents, warnedIDs, tags)
 		if len(ts) == 0 {
 			continue
 		}

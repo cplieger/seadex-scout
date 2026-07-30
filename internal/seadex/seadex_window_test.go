@@ -161,15 +161,58 @@ func TestFetchWindowBelowHalfShortfallSucceeds(t *testing.T) {
 	}
 	// The catalogue-scale diagnostics are skipped too, not merely downgraded: a
 	// count-mismatch WARN on every tick would poison the signal for the full
-	// walk that actually means it.
-	for _, msg := range recorder.Messages() {
-		if strings.Contains(msg, "shrunk") || strings.Contains(msg, "fewer entries") {
-			t.Errorf("windowed fetch emitted a catalogue-scale diagnostic: %q", msg)
+	// walk that actually means it. Asserted against the EXACT messages the
+	// client emits - an approximate substring here is how a mode-guard
+	// regression passes unnoticed.
+	for _, msg := range []string{
+		"seadex catalogue count mismatch",
+		"seadex catalogue shrank against this process's previous fetch; upstream may be serving a truncated catalogue",
+	} {
+		if n := recorder.CountExact(msg); n != 0 {
+			t.Errorf("windowed fetch emitted the catalogue-scale diagnostic %q %d times, want 0", msg, n)
 		}
 	}
 
 	if _, err := client.FetchEntries(context.Background(), Options{}); err == nil {
 		t.Error("full FetchEntries returned nil error on a below-half shortfall, want the truncated-catalogue refusal")
+	}
+}
+
+// TestFetchWindowDoesNotPoisonTheShrinkComparison pins the other half of the
+// mode guard: warnCatalogueShrink compares against the previous catalogue THIS
+// PROCESS accepted, and a window is not a catalogue. Were a window's count
+// recorded there, the sequence full -> window -> full would read as a catalogue
+// collapse and then a recovery - a false shrink WARN, and a poisoned baseline
+// for the one comparison in the client that no upstream number vouches for.
+func TestFetchWindowDoesNotPoisonTheShrinkComparison(t *testing.T) {
+	// The full walk delivers a small but complete catalogue; the window delivers
+	// a single entry. If the window updated lastAccepted, the second full walk
+	// would compare 8 against 1 and the first would have compared 1 against 8.
+	const fullCount = 8
+	var windowMode bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.RawQuery, "updated%3E") || strings.Contains(r.URL.Query().Get("filter"), "updated>") {
+			windowMode = true
+			fmt.Fprintf(w, `{"totalItems":1,"totalPages":1,"items":[%s]}`, keysetRecords(1, 1))
+			return
+		}
+		fmt.Fprintf(w, `{"totalItems":%d,"totalPages":1,"items":[%s]}`, fullCount, keysetRecords(1, fullCount))
+	}))
+	defer server.Close()
+
+	logger, recorder := capture.New()
+	client := NewClient(server.Client(), server.URL, 0, logger)
+	for i, opts := range []Options{{}, windowOptions(), {}} {
+		if _, err := client.FetchEntries(context.Background(), opts); err != nil {
+			t.Fatalf("fetch %d (mode %v) returned error: %v", i, opts.Mode, err)
+		}
+	}
+	if !windowMode {
+		t.Fatal("the window fetch never sent its filter, so this test proved nothing")
+	}
+	const shrinkMsg = "seadex catalogue shrank against this process's previous fetch; upstream may be serving a truncated catalogue"
+	if n := recorder.CountExact(shrinkMsg); n != 0 {
+		t.Errorf("shrink WARN count = %d, want 0 (a window between two identical full walks must be invisible to the comparison)", n)
 	}
 }
 

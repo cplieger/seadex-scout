@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -108,8 +109,9 @@ func TestCyclePartialWalkEscalatesAfterRepeatedPartialWalks(t *testing.T) {
 			if !tc.wantError && errCount != 0 {
 				t.Errorf("below-threshold ERROR count = %d, want 0 (a partial blip must not alert)", errCount)
 			}
-			if got, ok := recorder.AttrValue("library walk partial repeatedly", "consecutive_partial_walks"); tc.wantError && (!ok || got != "8") {
-				t.Errorf("escalation streak attr = %q ok=%v, want \"8\" (the ERROR must carry the up-to-date streak)", got, ok)
+			wantStreak := strconv.Itoa(partialWalkEscalationThreshold)
+			if got, ok := recorder.AttrValue("library walk partial repeatedly", "consecutive_partial_walks"); tc.wantError && (!ok || got != wantStreak) {
+				t.Errorf("escalation streak attr = %q ok=%v, want %q (the ERROR must carry the up-to-date streak)", got, ok, wantStreak)
 			}
 			if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "partial-walk" {
 				t.Errorf("degraded reasons = %v, want [partial-walk]", reasons)

@@ -118,6 +118,23 @@ func (n *Notifier) ReportScoped(findings []compare.Finding, comparedIDs, incompl
 	n.report(findings, comparedIDs, incompleteIDs)
 }
 
+// Reemit re-emits the current finding set unchanged, comparing nothing.
+//
+// It exists because findings are STATE, not events: the alert rules read a
+// lookback window over the emitted lines, so a condition stops being reported
+// only when the app stops emitting it. A pass that could not compare anything -
+// an empty change window, an upstream the probe could not reach - has learned
+// nothing that would resolve a standing finding, and staying silent for longer
+// than the rules' lookback would resolve every one of them and then re-fire the
+// whole set as new. Re-emission costs zero upstream bytes and is the whole
+// mechanism that makes "a lost notification recovers" true between full passes.
+//
+// Every row is reported as carried, which is what it is: nothing was
+// re-evaluated, so nothing was eligible for deletion.
+func (n *Notifier) Reemit() {
+	n.emitAll(0, len(n.current))
+}
+
 // report is the shared body. comparedIDs nil means FULL deletion authority
 // (every row may be deleted by omission); non-nil bounds it to those owners.
 func (n *Notifier) report(findings []compare.Finding, comparedIDs, incompleteIDs map[int]struct{}) {
