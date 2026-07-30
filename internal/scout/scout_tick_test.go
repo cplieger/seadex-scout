@@ -1146,3 +1146,52 @@ func TestReconcileCompleteIsEmittedByADegradedReconcile(t *testing.T) {
 			"makes SeadexScoutReconcileStalled fire for a reconcile that never stopped", n)
 	}
 }
+
+// TestReconcilePrunesTheMemoAndTickDoesNot pins which pass may garbage-collect
+// the AniList memo, which is the whole reason pruning is an explicit call rather
+// than something the match does on its way out.
+//
+// Pruning keeps an expired entry only when SeaDex still lists its AniList id, so
+// the judgement is only sound against a WHOLE catalogue. A tick sees a 48-hour
+// window, so if it pruned it would delete nearly every expired entry in the memo
+// - including the positives the Torznab feed's stale-title tier reads, which
+// silently downgrades those items' RSS titles to the file-name derivation and
+// their category to the default, sending a movie to Sonarr instead of Radarr.
+//
+// The test is also the guard on the failure this shape introduces: pruning now
+// depends on a caller remembering to ask for it, and forgetting means the memo
+// accumulates entries for shows SeaDex no longer carries, forever.
+func TestReconcilePrunesTheMemoAndTickDoesNot(t *testing.T) {
+	logger := scoutTestLogger()
+	sea := &fakeSeaDex{
+		entries:       seadexFrierenEntry(),
+		windowEntries: []seadex.Entry{windowEntry(1001, 501)},
+	}
+	deps, store := tickDeps(logger, sea, nil, nil, 96)
+	// An expired entry for an id NEITHER the catalogue nor the window carries:
+	// dead cache data, and the reconcile must collect it.
+	const deadID = 424242
+	store.st.Memo = match.Memo{Entries: map[int]match.MemoEntry{
+		deadID: {NotFound: true, Expiry: time.Now().Add(-time.Hour)},
+	}}
+	s := New(deps)
+
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("reconcile healthy=false, want true")
+	}
+	if _, kept := store.st.Memo.Entries[deadID]; kept {
+		t.Error("the reconcile left a dead memo entry behind; nothing else collects it, so it would persist forever")
+	}
+
+	// Re-seed and run a TICK: its window cannot speak for the catalogue, so the
+	// same entry must survive even though it is expired and unlisted.
+	store.st.Memo = match.Memo{Entries: map[int]match.MemoEntry{
+		deadID: {NotFound: true, Expiry: time.Now().Add(-time.Hour)},
+	}}
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("tick healthy=false, want true")
+	}
+	if _, kept := store.st.Memo.Entries[deadID]; !kept {
+		t.Error("a tick pruned the memo; a 48-hour window has no standing to decide an id it never fetched is no longer curated")
+	}
+}

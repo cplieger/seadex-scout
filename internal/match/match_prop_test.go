@@ -88,6 +88,10 @@ func TestMemoExpiryLifecycleProperty(t *testing.T) {
 		m := expiryMatcher(fake, draws...)
 
 		res := m.Match(context.Background(), entries, &library.Snapshot{}, mapping.NewIndex(records), memo)
+		// entries IS the whole catalogue in this model, which is the only thing
+		// PruneMemo may be handed; the property covers the pruning half of the
+		// lifecycle, so it runs the call the reconcile runs.
+		m.PruneMemo(&res, entries)
 
 		if res.Degraded {
 			rt.Fatalf("Degraded = true, want false on a clean pass")

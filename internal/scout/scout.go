@@ -429,6 +429,14 @@ func (s *Scout) reconcile(ctx context.Context) bool {
 	}
 
 	result := s.deps.Matcher.Match(ctx, entries, &snap, idx, st.Memo)
+	// The reconcile is the ONE pass holding a whole catalogue, so it is the one
+	// that may garbage-collect the memo. Match no longer does this itself (see
+	// PruneMemo): it is also called with a bounded window by the tick, whose 48
+	// hours would delete nearly every expired entry - including the ones the
+	// feed's stale-title tier still reads. Safe before the cancellation check,
+	// because PruneMemo declines on a degraded result and a cancelled match is
+	// one.
+	s.deps.Matcher.PruneMemo(&result, entries)
 	if ctx.Err() != nil {
 		// A shutdown arrived during or right after matching. The match set may
 		// be truncated (entries after the cancellation were never attempted),

@@ -186,13 +186,15 @@ func TestMemoUnexpiredEntryServedWithoutRefetch(t *testing.T) {
 }
 
 // TestMemoPruneDropsExpiredUnrenewedKeepsLive pins the save-side hygiene: an
-// already-expired entry this pass neither consulted nor renewed is dropped
-// from the returned memo (it is a miss either way; next cycle's batch
-// re-fetches it if it is ever needed again), while a live unconsulted entry
-// survives untouched. The catalogue is empty here, so nothing is held back for
-// the feed's stale tier (that retention is
-// TestMemoPruneKeepsExpiredStaleDataForCuratedEntries). Pruning itself spends
-// no AniList requests.
+// already-expired entry the pass neither consulted nor renewed is dropped from
+// the memo (it is a miss either way; the next batch re-fetches it if it is ever
+// needed again), while a live unconsulted entry survives untouched. The
+// catalogue is empty here, so nothing is held back for the feed's stale tier
+// (that retention is TestMemoPruneKeepsExpiredStaleDataForCuratedEntries).
+// Pruning itself spends no AniList requests.
+//
+// It is an EXPLICIT call by the pass that holds a catalogue, not something Match
+// does on the way out - see PruneMemo.
 func TestMemoPruneDropsExpiredUnrenewedKeepsLive(t *testing.T) {
 	fake := &countingAniList{}
 	m := expiryMatcher(fake, 0.5)
@@ -204,6 +206,7 @@ func TestMemoPruneDropsExpiredUnrenewedKeepsLive(t *testing.T) {
 	}}
 
 	res := m.Match(context.Background(), nil, &library.Snapshot{}, mapping.NewIndex(nil), memo)
+	m.PruneMemo(&res, nil)
 
 	if _, ok := res.Memo.Entries[901]; ok {
 		t.Error("expired unrenewed entry 901 survived the pass, want it pruned from the persisted memo")
@@ -283,7 +286,9 @@ func TestMemoEntryWithoutAnExpiryIsRefetchedNotServed(t *testing.T) {
 		13: {Titles: []string{"Other"}, Format: "TV", Year: 2019},      // unconsulted positive
 	}}
 
-	res := m.Match(context.Background(), []seadex.Entry{{AniListID: 11}}, snap, idx, memo)
+	entries := []seadex.Entry{{AniListID: 11}}
+	res := m.Match(context.Background(), entries, snap, idx, memo)
+	m.PruneMemo(&res, entries)
 
 	if fake.calls == 0 {
 		t.Error("AniList calls = 0, want the unstamped entry treated as a miss and re-fetched")

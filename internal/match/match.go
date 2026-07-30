@@ -178,17 +178,39 @@ func (m *Matcher) Match(ctx context.Context, entries []seadex.Entry, snap *libra
 	if ctx.Err() != nil {
 		run.degraded = true
 	}
-	if !run.degraded {
-		// A degraded pass (outage, tripped breaker, shutdown) could not renew
-		// what expired; keep those entries so the feed's stale-title tier
-		// (scout/feedinfo.go) still serves them - they stay pending for next
-		// cycle's batch either way, so retention costs no AniList traffic. A
-		// clean pass still keeps the expired positives that tier reads for
-		// entries SeaDex currently curates, which is why the catalogue is
-		// passed in (pruneExpired).
-		pruneExpired(&memo, now, entries)
-	}
+	// Match does NOT prune the memo. Pruning is garbage collection against the
+	// WHOLE catalogue, and Match is called with a bounded window too (the tick),
+	// which has no standing to decide that an id it never fetched is no longer
+	// curated. The caller that holds a catalogue calls PruneMemo.
 	return Result{Coverage: cov, Memo: memo, Matches: matches, Degraded: run.degraded, IncompleteIDs: run.incomplete}
+}
+
+// PruneMemo garbage-collects res.Memo against the WHOLE SeaDex catalogue,
+// in place.
+//
+// It takes the Result rather than the memo because both of its preconditions are
+// non-negotiable and both live there. A DEGRADED pass could not renew what
+// expired, so pruning it would drop entries the next pass would have refreshed.
+// And a PARTIAL catalogue cannot judge what is still curated: pruning keeps an
+// expired positive precisely when SeaDex still lists its id, so handing this a
+// 48-hour window would delete almost every expired entry in the memo - including
+// the ones the feed's stale-title tier reads (scout/feedinfo.go), which silently
+// downgrades those items' RSS titles to the file-name derivation and their
+// category to the default. That is why the parameter is named catalogue: passing
+// anything less is a defect, not a scoped variant, which is why there is no
+// scoped door onto this operation.
+//
+// It lives on the Matcher for the clock (m.now), so a caller needs no clock seam
+// of its own to test it.
+func (m *Matcher) PruneMemo(res *Result, catalogue []seadex.Entry) {
+	if res.Degraded {
+		// A degraded pass (outage, tripped breaker, shutdown) could not renew
+		// what expired; keep those entries so the feed's stale-title tier still
+		// serves them - they stay pending for the next batch either way, so
+		// retention costs no AniList traffic.
+		return
+	}
+	pruneExpired(&res.Memo, m.now(), catalogue)
 }
 
 // matchRun carries one Match call's shared state so the per-entry helpers do
