@@ -1,7 +1,6 @@
 package release
 
 import (
-	"regexp"
 	"strings"
 	"testing"
 
@@ -174,7 +173,7 @@ func TestClassifyKind(t *testing.T) {
 		{name: "underscore-delimited crf", in: Input{Names: []string{"Show_CRF18"}}, wantKind: KindEncode, wantReason: "encoder marker: crf"},
 		{name: "underscore-delimited bitrate", in: Input{Names: []string{"Show_4500_kbps"}}, wantKind: KindEncode, wantReason: "encoder marker: bitrate"},
 		{name: "underscore-delimited bdrip", in: Input{Names: []string{"Show_1080p_BDRip"}}, wantKind: KindEncode, wantReason: "encoder marker: encode"},
-		// The Unicode rows pin lowerLiteralPattern's ToLower-faithful folding
+		// The Unicode rows pin nametoken.Literal's ToLower-faithful folding
 		// against regexp's SimpleFold: U+0130 (İ) lowercases to ASCII i (a
 		// word rune SimpleFold misses), U+212A (KELVIN SIGN) lowercases to k,
 		// and U+017F (ſ) is a delimiter (ToLower never folds it onto s,
@@ -524,35 +523,54 @@ func TestResolutionVocabularySingleHome(t *testing.T) {
 	}
 }
 
-// TestLowerLiteralPatternFoldsUppercaseTokens pins lowerLiteralPattern's
-// documented uppercase-token rule: a token spelled in uppercase must render
-// the same ToLower-faithful case class its lowercase spelling does, so a
-// marker token added to a vocabulary list in uppercase keeps matching every
-// real-world spelling. Every token in the current lists is already lowercase,
-// so the ASCII-uppercase fold at the top of the loop is exercised by nothing:
-// dropping it renders a case-SENSITIVE literal, and that whole marker family
-// silently stops classifying.
-func TestLowerLiteralPatternFoldsUppercaseTokens(t *testing.T) {
-	for _, token := range []string{"CRF", "BDRip", "X265", "H.264", "KBPS"} {
-		t.Run(token, func(t *testing.T) {
-			re := regexp.MustCompile(lowerLiteralPattern(token))
-			for _, spelling := range []string{
-				strings.ToLower(token), strings.ToUpper(token), token,
-			} {
-				if !re.MatchString(spelling) {
-					t.Errorf("lowerLiteralPattern(%q) does not match %q; an uppercase token must render the same case class its lowercase spelling does", token, spelling)
-				}
+// TestClassifyReadsTheSharedNameVocabulary is the release-side half of the
+// convergence pinned across both name parsers (the indexer's season/episode
+// tokenizer carries the other half): the marker edges and case classes come
+// from internal/nametoken, so dot and hyphen END a token, underscore ends one
+// too, and the two homographs read as strings.ToLower reads them - U+0130 and
+// U+212A CONTINUE a word while U+017F does not fold onto s. These rows are the
+// table form of the Unicode rows in TestClassifyKind: they state the shared
+// rule directly at the boundary, where a regression would otherwise only show
+// up as a misclassified kind.
+func TestClassifyReadsTheSharedNameVocabulary(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		in         string
+		wantKind   Kind
+		wantRes    string
+		wantReason string
+	}{
+		// Dot and hyphen are token edges on BOTH sides of a marker, and are
+		// also accepted as the marker's own internal separator.
+		{name: "dot-bounded crf tag", in: "Show.CRF18.1080p", wantKind: KindEncode, wantRes: "1080p", wantReason: "encoder marker: crf"},
+		{name: "dot-separated crf tag", in: "Show.CRF.18.1080p", wantKind: KindEncode, wantRes: "1080p", wantReason: "encoder marker: crf"},
+		{name: "hyphen-bounded remux token", in: "Show-Remux-1080p", wantKind: KindRemux, wantRes: "1080p", wantReason: "name/notes marker: remux"},
+		{name: "hyphen-separated bd remux", in: "Show BD-Remux 1080p", wantKind: KindRemux, wantRes: "1080p", wantReason: "name/notes marker: remux"},
+		{name: "dot-separated bd remux", in: "Show.BD.Remux.1080p", wantKind: KindRemux, wantRes: "1080p", wantReason: "name/notes marker: remux"},
+		{name: "hyphen-separated bitrate", in: "Show 4500-kbps", wantKind: KindEncode, wantReason: "encoder marker: bitrate"},
+		{name: "underscore-bounded crf tag", in: "Show_CRF18_1080p", wantKind: KindEncode, wantRes: "1080p", wantReason: "encoder marker: crf"},
+		{name: "dot-terminated resolution", in: "Show.1080p.WEB", wantKind: KindUnknown, wantRes: "1080p", wantReason: "no remux or encode marker"},
+		// A word rune on either side of a marker is NOT an edge, so the
+		// marker does not fire.
+		{name: "letter-glued remux is no marker", in: "Show Remuxing 1080p", wantKind: KindUnknown, wantRes: "1080p", wantReason: "no remux or encode marker"},
+		{name: "letter-glued resolution height", in: "Show 1080px WEB", wantKind: KindUnknown, wantReason: "no remux or encode marker"},
+		// The homographs: U+0130 and U+212A are word runes (they block an
+		// edge), U+017F is a delimiter and never an s.
+		{name: "U+0130 blocks the remux right edge", in: "Show Remux\u0130 1080p", wantKind: KindUnknown, wantRes: "1080p", wantReason: "no remux or encode marker"},
+		{name: "U+212A blocks the remux right edge", in: "Show Remux\u212a 1080p", wantKind: KindUnknown, wantRes: "1080p", wantReason: "no remux or encode marker"},
+		{name: "U+017F is an edge, so the remux token stands", in: "Show Remux\u017f 1080p", wantKind: KindRemux, wantRes: "1080p", wantReason: "name/notes marker: remux"},
+		{name: "U+017F never folds onto the mandatory s of kbps", in: "Show 4500 kbp\u017f", wantKind: KindUnknown, wantReason: "no remux or encode marker"},
+		{name: "U+017F is an edge after the optional s of bdrips", in: "Show BDRip\u017f", wantKind: KindEncode, wantReason: "encoder marker: encode"},
+		{name: "U+0130 folds onto the i of bdrip", in: "Show BDR\u0130P", wantKind: KindEncode, wantReason: "encoder marker: encode"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Classify(&Input{Names: []string{tc.in}})
+			if got.Kind != tc.wantKind || got.Reason != tc.wantReason {
+				t.Errorf("Classify(%+q) kind = %q (%q), want %q (%q)", tc.in, got.Kind, got.Reason, tc.wantKind, tc.wantReason)
+			}
+			if got.Resolution != tc.wantRes {
+				t.Errorf("Classify(%+q) resolution = %q, want %q", tc.in, got.Resolution, tc.wantRes)
 			}
 		})
-	}
-	// The Unicode class members ride the fold too: an uppercase token's i and
-	// k classes must still admit the two runes strings.ToLower maps onto ASCII.
-	re := regexp.MustCompile(lowerLiteralPattern("KBPS"))
-	if !re.MatchString("\u212abps") {
-		t.Error("uppercase token KBPS does not admit U+212A KELVIN SIGN; the k class was lost with the fold")
-	}
-	re = regexp.MustCompile(lowerLiteralPattern("BDRIP"))
-	if !re.MatchString("bdr\u0130p") {
-		t.Error("uppercase token BDRIP does not admit U+0130; the i class was lost with the fold")
 	}
 }

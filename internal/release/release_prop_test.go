@@ -141,8 +141,9 @@ func TestClassifyPlantedMarkerProperties(t *testing.T) {
 // TestClassifyToLowerFaithfulness pins the in-place matcher's central design
 // claim directly: classifying raw evidence text must decide every
 // text-derived field (Kind, Reason, Codec, Resolution) exactly as classifying
-// its strings.ToLower image, which is what lowerLiteralPattern's hand-built
-// case classes and the evidenceWordClass edges exist to guarantee. Any
+// its strings.ToLower image, which is what the shared case classes
+// (nametoken.Literal) and the shared word-alphabet edges
+// (nametoken.NonWordEdge) exist to guarantee. Any
 // boundary or case-class regression - a (?i) rewrite (SimpleFold matches
 // U+017F but misses U+0130), a dropped U+0130/U+212A class member, or an
 // edge class that is not fold-invariant - breaks this equivalence on some

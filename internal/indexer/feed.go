@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cplieger/seadex-scout/internal/classify"
+	"github.com/cplieger/seadex-scout/internal/nametoken"
 	"github.com/cplieger/seadex-scout/internal/payload"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
@@ -280,15 +281,30 @@ func releaseFlags(t *seadex.Torrent) []string {
 // S01E15v2), captured in group 1 with its season half in group 2. Collapsing
 // its episode half to just the season turns a season pack's per-episode file
 // name into a whole-season release title, so the arr grabs the pack rather
-// than treating it as a single episode. The token must end at a
-// non-alphanumeric boundary (underscore included - underscore-delimited
+// than treating it as a single episode. The token must end at a token
+// boundary (nametoken.NonWordEdge, underscore included - underscore-delimited
 // names use "_" everywhere a space would sit) or the end of the string:
 // without it, the E-less range arm swallowed a dash-joined resolution
 // ("S01E07-1080p" tokenized as the bogus range "S01E07-1080", corrupting
 // both the single-episode marker and the pack collapse, which left a stray
 // "p" in the title). Consumers read the SUBMATCH (group 1), never the full
 // match, which may include the terminator character.
-var episodeToken = regexp.MustCompile(`(?i)((S\d{1,2})E\d{1,4}(?:-E?\d{1,4})?(?:v\d+)?)(?:[^0-9a-z]|$)`)
+//
+// The letters and the boundary come from internal/nametoken, the one home of
+// this app's release-name lexical rules, instead of a global (?i) beside a
+// [^0-9a-z] class. That pairing was case folding by unicode.SimpleFold, which
+// disagrees with the strings.ToLower reading internal/release classifies by, so
+// the same name tokenized two ways in one binary: (?i)S also accepted U+017F
+// (ſ), inventing a season token in "ſ01E01" where the classifier sees no
+// marker, and the folded class read U+0130 (İ) as a delimiter that could END a
+// token while the classifier reads it as a word rune (strings.ToLower folds it
+// onto the letter i). Those two runes are the whole behaviour change; every
+// ASCII spelling matches exactly as before (see TestEpisodeTokenBoundary and
+// the convergence test beside it).
+var episodeToken = regexp.MustCompile(
+	`((` + nametoken.Literal("S") + `\d{1,2})` + nametoken.Literal("E") + `\d{1,4}` +
+		`(?:-` + nametoken.Literal("E") + `?\d{1,4})?(?:` + nametoken.Literal("v") + `\d+)?)` +
+		`(?:` + nametoken.NonWordEdge + `|$)`)
 
 // absoluteEpisode matches an absolute episode number in the fansub "- 07" form
 // (optional version suffix), with the episode number captured in group 1. The
@@ -297,11 +313,22 @@ var episodeToken = regexp.MustCompile(`(?i)((S\d{1,2})E\d{1,4}(?:-E?\d{1,4})?(?:
 // space-dash form made such packs read as a single episode. Used to keep a
 // multi-file pack from reading as episode 7 when there is no SxxExx token to
 // collapse, and to extract a single absolute episode's number for synthesis.
+//
+// [\s_] is deliberately NARROWER than the shared token boundary
+// (nametoken.NonWordEdge) and is this pattern's own policy, not a second
+// vocabulary: dot and hyphen are token boundaries everywhere in this app, but
+// they may not stand in for the delimiters of THIS form, where the dash is the
+// marker itself. Widening the trailing delimiter would newly match a
+// dot-abutting number ("Show - 07.1080p", "Show - 07.mkv"), which is why
+// representativeFile runs this pattern on stripExt'd names instead.
 var absoluteEpisode = regexp.MustCompile(`[\s_]-[\s_](\d{1,4}(?:v\d+)?)(?:[\s_]|$)`)
 
 // episodeVersion strips a trailing vN revision from an episode token so a v2
-// replacement of the same episode never counts as a second episode.
-var episodeVersion = regexp.MustCompile(`(?i)v\d+$`)
+// replacement of the same episode never counts as a second episode. The v is
+// the shared case class (nametoken.Literal), which for a letter with no
+// non-ASCII fold is exactly what (?i)v was - it reads from the one home rather
+// than restating the rule.
+var episodeVersion = regexp.MustCompile(nametoken.Literal("v") + `\d+$`)
 
 // multiSpace collapses runs of whitespace left after removing a token.
 var multiSpace = regexp.MustCompile(`\s{2,}`)
@@ -652,6 +679,13 @@ func distinctEpisodes(files []seadex.File) int {
 // packFromTitle applies it against the text that FOLLOWS the season number
 // instead (seasonNumberEnds). The season word alternation is ordered
 // longest-first so the bare "S" arm cannot shadow "Season".
+//
+// This pattern and seasonPackDisqualifier deliberately keep the global (?i) and
+// their own delimiter/boundary classes rather than reading internal/nametoken:
+// the vocabulary being mirrored is .NET's, not this app's. Their job is to
+// answer what SONARR'S parser will make of a title, so a divergence from
+// Sonarr's own casing and boundary reading is the defect here - the opposite of
+// the episode tokens above, which state what THIS app believes a name says.
 var seasonOnlyTitle = regexp.MustCompile(`(?i)^.+?[-_. ]+[\[(]?((?:Season|Saison|Series|Stagione|S)[-_. ]?(\d{1,2}))`)
 
 // seasonPackDisqualifier matches the tokens that cancel a season-pack reading

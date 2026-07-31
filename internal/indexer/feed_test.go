@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
@@ -1089,6 +1090,101 @@ func TestCorrectSeasonOnlyTitle(t *testing.T) {
 			// parser this app serves - that is the entire point of the rewrite.
 			if pack, known := packFromTitle(got); pack || !known {
 				t.Errorf("packFromTitle(%q) = (%v, %v), want the corrected title to read as one episode", got, pack, known)
+			}
+		})
+	}
+}
+
+// TestEpisodeTokenBoundary pins where the season/episode tokenizer decides a
+// token ENDS, now that the boundary is the shared release-name word alphabet
+// (nametoken.NonWordEdge) rather than a case-folded [^0-9a-z] class. Dot and
+// hyphen are the rows that matter: both are ordinary token boundaries here (a
+// dot-delimited scene name and a dash-joined resolution must both yield the bare
+// SxxExx), while the ABSOLUTE form's own delimiters deliberately stay narrower
+// than the shared edge - "Show.-.07" is not an absolute episode, which is why
+// representativeFile strips the extension before running that pattern. A table
+// so the two rules are read side by side; conflating them is how the dialects
+// drifted apart in the first place.
+func TestEpisodeTokenBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		file string
+		want string
+	}{
+		// SxxExx: every non-word rune ends the token, underscore included.
+		{"dot ends the token", "Show.S01E01.1080p.mkv", "S01E01"},
+		{"hyphen ends the token", "Show - S01E07-1080p [G].mkv", "S01E07"},
+		{"underscore ends the token", "_Show_S02E05_1080p_.mkv", "S02E05"},
+		{"end of name ends the token", "Show S01E01.mkv", "S01E01"},
+		{"bracket ends the token", "Show [S01E01][1080p].mkv", "S01E01"},
+		{"a letter does not end the token", "Show S01E01p.mkv", ""},
+		{"a digit does not end the token", "Show - S01E01-13 [G].mkv", "S01E01-13"},
+		// The absolute "- NN" form: space and underscore only, by policy.
+		{"space-delimited absolute episode", "Show - 07.mkv", "- 07"},
+		{"underscore-delimited absolute episode", "[Grp]_Show_-_07_(1080p).mkv", "- 07"},
+		{"dot-delimited absolute episode is not one", "Show.-.07.mkv", ""},
+		{"hyphen-delimited absolute episode is not one", "Show---07.mkv", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := singleEpisodeMarker([]seadex.File{{Name: tc.file}}); got != tc.want {
+				t.Errorf("singleEpisodeMarker(%q) = %q, want %q", tc.file, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHomographVocabularyAgreesWithTheReleaseClassifier is the convergence pin:
+// the season/episode tokenizer here and the marker engine in internal/release now
+// read ONE name vocabulary (internal/nametoken), so a name carrying U+017F (ſ) or
+// U+0130 (İ) means the same thing to both. It used to not: this package folded
+// case with a global (?i) (unicode.SimpleFold) while the classifier folded with
+// strings.ToLower, so "ſ01E01" was a season-1 token here - ToUpper even rendered
+// the served marker as a confident "S01E01" - and no marker at all there, and
+// U+0130 ended a token here while continuing a word there.
+//
+// Each row states the shared rule, the marker this side reads, and the kind the
+// classifier reads from the SAME name. Rows 1-3 are the two-sided ones; row 4
+// records the one half only the classifier can observe (its markers contain the
+// letters i and k, the episode tokens do not), so a reader does not mistake the
+// silence for disagreement.
+func TestHomographVocabularyAgreesWithTheReleaseClassifier(t *testing.T) {
+	for _, tc := range []struct {
+		rule       string
+		file       string
+		wantMarker string
+		wantKind   release.Kind
+	}{
+		{
+			rule:       "U+017F is not the letter s: no season token here, no kbps marker there",
+			file:       "Show - \u017f01E01 4500 kbp\u017f [G].mkv",
+			wantMarker: "",
+			wantKind:   release.KindUnknown,
+		},
+		{
+			rule:       "U+017F ends a token on both sides: the SxxExx stands, the remux marker stands",
+			file:       "Show - S01E01\u017f Remux\u017f [G].mkv",
+			wantMarker: "S01E01",
+			wantKind:   release.KindRemux,
+		},
+		{
+			rule:       "U+0130 continues a word on both sides: neither token can end there",
+			file:       "Show - S01E01\u0130 Remux\u0130 [G].mkv",
+			wantMarker: "",
+			wantKind:   release.KindUnknown,
+		},
+		{
+			rule:       "U+0130 folds onto i for the classifier; the episode tokens carry no i to fold",
+			file:       "Show - S01E01 BDR\u0130P [G].mkv",
+			wantMarker: "S01E01",
+			wantKind:   release.KindEncode,
+		},
+	} {
+		t.Run(tc.rule, func(t *testing.T) {
+			if got := singleEpisodeMarker([]seadex.File{{Name: tc.file}}); got != tc.wantMarker {
+				t.Errorf("singleEpisodeMarker(%+q) = %q, want %q", tc.file, got, tc.wantMarker)
+			}
+			if got := release.Classify(&release.Input{Names: []string{tc.file}}); got.Kind != tc.wantKind {
+				t.Errorf("release.Classify(%+q).Kind = %q (%s), want %q", tc.file, got.Kind, got.Reason, tc.wantKind)
 			}
 		})
 	}

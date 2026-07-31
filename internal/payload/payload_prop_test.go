@@ -214,14 +214,16 @@ func TestNamesProperty(t *testing.T) {
 // TestTypeGateASCIICaseInsensitiveProperty pins the file-eligibility type
 // gate's case contract over generated marker-bearing names: swapping the ASCII
 // case of every letter must change neither IsMediaFile, IsCreditlessExtra,
-// IsSampleExtra, nor ContentMediaFile. The creditless marker spells out 30
-// explicit case classes (a global (?i) is unusable - Go regexp's SimpleFold
-// diverges from strings.ToLower on U+0130 and U+017F), the sample marker
-// spells out six for the same reason, and the unit tables only exercise a few
-// spellings of each token, so a single dropped alternative - [Nn] typed as
-// [N] - would leave a lowercase "nced" extra voting as content evidence. Only ASCII letters are swapped: a non-ASCII fold can legitimately
-// change the [^[:alnum:]] boundary (U+212A lowercases onto ASCII 'k', turning a
-// delimiter into a word character), so it is outside the invariant.
+// IsSampleExtra, nor ContentMediaFile. Both markers render their letters
+// through the shared strings.ToLower-faithful case classes (nametoken.Literal -
+// a global (?i) is unusable, since Go regexp's SimpleFold diverges from
+// strings.ToLower on U+0130 and U+017F), and the unit tables only exercise a
+// few spellings of each token, so a marker rebuilt with a case-SENSITIVE
+// fragment - a hand-typed [N] where the shared class renders [nN] - would leave
+// a lowercase "nced" extra voting as content evidence. Only ASCII letters are
+// swapped: a non-ASCII fold can legitimately change the extraMarkerEdge
+// boundary (U+212A lowercases onto ASCII 'k' but is not ASCII-alphanumeric), so
+// it is outside the invariant.
 func TestTypeGateASCIICaseInsensitiveProperty(t *testing.T) {
 	tokenGen := rapid.SampledFrom([]string{
 		"ncop", "NCOP", "NcOp", "nced", "NCED", "creditless", "CREDITLESS",
