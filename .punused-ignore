@@ -1,0 +1,57 @@
+# punused findings adjudicated as false positives. One literal substring per
+# line, matched against punused's output line; full-line `#` comments carry the
+# reason. Invalid-by-construction classes: `.kiro/steering/tools.md`.
+#
+# Every entry below is an interface method the runtime dispatches through, or a
+# constructor other packages' tests own. punused resolves explicit call sites
+# only, so a method reached by interface satisfaction reads as unreferenced no
+# matter how load-bearing it is. Cross-checked with `deadcode -test ./...`,
+# which reports none of them. Upstream: bep/punused#3.
+#
+# encoding/json contract. Each of these is the UnmarshalJSON the decoder calls
+# through the json.Unmarshaler interface while parsing a Fribb mapping record,
+# and each exists because the upstream feed types a field loosely: offsetPair
+# and flexString/flexInt absorb number-or-string, tmdbID absorbs a scalar or an
+# array, stringList absorbs a string or a list. Deleting any one does not remove
+# a call site, it silently changes how that field decodes -- a real-data parse
+# failure, not a cleanup. Their tests are the only EXPLICIT callers because the
+# production path goes through json.Unmarshal.
+method (*offsetPair).UnmarshalJSON
+method (*flexString).UnmarshalJSON
+method (*tmdbID).UnmarshalJSON
+method (*flexInt).UnmarshalJSON
+method (*stringList).UnmarshalJSON
+#
+# error + httpx retry contracts. rateLimitedError.Error satisfies `error`, so it
+# is what every log line and wrap of an AniList 429 prints; IsTransient and
+# RetryAfterHint are the two optional interfaces httpx probes on a returned
+# error to decide whether to retry and how long to wait. All three are reached
+# by interface assertion inside the library, never by a call this module writes,
+# so removing them would not break a build -- it would silently turn a
+# rate-limited AniList response into a permanent failure with no backoff.
+method (*rateLimitedError).Error
+method (*rateLimitedError).IsTransient
+method (*rateLimitedError).RetryAfterHint
+#
+# StaleMapError.Error satisfies `error` and Unwrap upholds the
+# errors.Is/errors.As traversal the type documents; both are runtime dispatch
+# gopls cannot resolve to a reference.
+method (*StaleMapError).Error
+method (*StaleMapError).Unwrap
+#
+# NewIndex (mapping.go:161) is the package's exported constructor over the
+# unexported buildIndex production uses (mapping.go:186, via Loader.Load). Its
+# callers are four other packages' test suites (mapping, audit, match), which is
+# what it is for: an Index built from a literal record slice, with no loader, no
+# cache and no network. Deleting it would leave those packages unable to
+# construct the type they consume.
+function NewIndex
+#
+# Torrent.Tags is a decode target on the SeaDex DTO, populated by encoding/json
+# from the API's `tags` array. EU1002 (no reference at all) is accurate on this
+# branch and the field is still not dead: it carries the release's curation tags
+# from the wire, and the consumer that reads them is the audit path's curation
+# warnings, which lands with the in-flight review branch (where the same field
+# is read at internal/audit and bounded during decode). Dropping it here would
+# discard data already on the wire and have to be re-added.
+field Tags
