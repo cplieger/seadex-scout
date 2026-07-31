@@ -54,9 +54,6 @@ direction (leaves have no internal imports):
 - `internal/degradation`: the shared degradation-policy constants (the
   persisted degradation-streak threshold that escalates repeated degraded
   cycles from WARN to ERROR), consumed by both `mapping` and `scout`.
-- `internal/keyenc`: the bounded, injective encoding of untrusted string
-  components into a single key, shared by `notify`'s persisted dedupe keys and
-  `compare`'s headline tie-break key.
 - `internal/titlekey`: the normalized-title key algorithm shared by the
   matcher's title index and the AniList payload gate.
 - `internal/seadex`: the releases.moe PocketBase client (paged entries with the

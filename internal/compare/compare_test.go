@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cplieger/keyenc"
 	"github.com/cplieger/seadex-scout/internal/filter"
-	"github.com/cplieger/seadex-scout/internal/keyenc"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"

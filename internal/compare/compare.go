@@ -27,10 +27,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cplieger/keyenc"
 	"github.com/cplieger/seadex-scout/internal/align"
 	"github.com/cplieger/seadex-scout/internal/classify"
 	"github.com/cplieger/seadex-scout/internal/filter"
-	"github.com/cplieger/seadex-scout/internal/keyenc"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
@@ -534,17 +534,17 @@ func betterCandidate(a, b *candidate, keyA, keyB string) bool {
 // candidateStableKey is the deterministic content identity that breaks
 // equal-rank headline ties independently of upstream order: the same
 // candidate set always selects the same representative, whatever order
-// PocketBase returned the torrents relation in. Delimiters are escaped
-// element-wise so a field containing the join delimiter cannot make two
-// distinct candidates compare equal, and the component set is size-bounded
-// (keyenc.BoundedJoinParts, the same encoding notify's dedupe keys use):
-// representative memoizes each candidate's key, but the components are still
-// attacker-controlled URLs across up to 512 torrents per entry, so an
-// unbounded escaped join would recreate the memory amplification the
-// bounding removed (CWE-400). Components within the bound keep the exact
-// escaped representation, so ordinary headline selection is unchanged.
+// PocketBase returned the torrents relation in. The components are assembled
+// with keyenc, so a field containing the separator cannot make two distinct
+// candidates compare equal, and the component set is size-bounded (the same
+// encoding notify's dedupe keys use): representative memoizes each candidate's
+// key, but the components are still attacker-controlled URLs across up to 512
+// torrents per entry, so an unbounded escaped join would recreate the memory
+// amplification the bounding removed (CWE-400). Components free of the
+// reserved characters keep their exact plain representation, so ordinary
+// headline selection is unchanged.
 func candidateStableKey(c *candidate) string {
-	return keyenc.BoundedJoinParts([]string{
+	return keyenc.Join(
 		release.NormalizeGroup(c.rel.Group),
 		strings.ToLower(strings.TrimSpace(c.rel.Tracker)),
 		strings.ToLower(strings.TrimSpace(c.rel.Resolution)),
@@ -554,7 +554,7 @@ func candidateStableKey(c *candidate) string {
 		strings.TrimSpace(c.torrent.InfoHash),
 		strings.TrimSpace(classify.PublishURL(&c.torrent)),
 		strconv.FormatBool(c.rel.DualAudio),
-	})
+	)
 }
 
 // groupSet returns the sorted distinct normalized groups of the given releases.

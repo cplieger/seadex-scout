@@ -5,8 +5,8 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/cplieger/keyenc"
 	"github.com/cplieger/runesafe"
-	"github.com/cplieger/seadex-scout/internal/keyenc"
 )
 
 // TestMaxBytesMirrorsKeyencBudget pins the equality logattr's doc comment

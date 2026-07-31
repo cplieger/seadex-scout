@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cplieger/keyenc"
 	"github.com/cplieger/seadex-scout/internal/compare"
-	"github.com/cplieger/seadex-scout/internal/keyenc"
 )
 
 func TestDedupeKey(t *testing.T) {
@@ -20,7 +20,7 @@ func TestDedupeKey(t *testing.T) {
 		InfoHash:          h1,
 	}
 	got := dedupeKey(f)
-	want := `42|better_release|a,b|x|hash:` + h1
+	want := `42:better_release:a\:b:x:hash\:` + h1
 	if got != want {
 		t.Errorf("dedupeKey() = %q, want %q", got, want)
 	}
@@ -38,7 +38,7 @@ func TestDedupeKey(t *testing.T) {
 	garbage := *f
 	garbage.InfoHash = "hash1"
 	garbage.ReleaseURL = "https://nyaa.si/view/7"
-	if k := dedupeKey(&garbage); !strings.Contains(k, "|url:https://nyaa.si/view/7") {
+	if k := dedupeKey(&garbage); !strings.Contains(k, `:url\:https\\\://nyaa.si/view/7`) {
 		t.Errorf("invalid-hash dedupeKey() = %q, want the url: fallback identity", k)
 	}
 	bareHexURL := *f
@@ -97,74 +97,89 @@ func TestDedupeKey(t *testing.T) {
 	// link-set component. (This encoding deliberately invalidates pre-change
 	// persisted keys - a benign one-time re-alert burst, the accepted cost of
 	// the validated, domain-separated identity and the full-source coverage.)
-	if k := dedupeKey(&publicOnly); k != want+"|links=https://nyaa.si/view/1" {
-		t.Errorf("public-only dedupeKey() = %q, want %q", k, want+"|links=https://nyaa.si/view/1")
+	links := `:links:https\\\://nyaa.si/view/1`
+	if k := dedupeKey(&publicOnly); k != want+links {
+		t.Errorf("public-only dedupeKey() = %q, want %q", k, want+links)
 	}
 }
 
 // TestDedupeKeyEscapesDelimiters pins the collision-proofing: an untrusted
-// component containing the key grammar's ',' or '|' delimiters (or the '\'
-// escape itself) cannot make two distinct findings share a key, which would
-// suppress the second as already alerted.
+// component containing the key grammar's ':' separator (or the '\' escape
+// itself) cannot make two distinct findings share a key, which would suppress
+// the second as already alerted. keyenc owns the encoding; these cases pin
+// that THIS key's component layout actually inherits its injectivity - every
+// level of the assembly goes through keyenc, so a separator inside a group
+// name cannot be read as an outer field boundary.
 func TestDedupeKeyEscapesDelimiters(t *testing.T) {
 	base := compare.Finding{AniListID: 42, Status: compare.StatusBetter, InfoHash: "hash1"}
 
-	// One group named "a,b" vs two groups "a" and "b": identical naive join.
+	// One group named "a:b" vs two groups "a" and "b": identical naive join.
 	oneGroup := base
-	oneGroup.RecommendedGroups = []string{"a,b"}
+	oneGroup.RecommendedGroups = []string{"a:b"}
 	twoGroups := base
 	twoGroups.RecommendedGroups = []string{"a", "b"}
 	if dedupeKey(&oneGroup) == dedupeKey(&twoGroups) {
-		t.Error(`group "a,b" and groups "a","b" must not share a dedupe key`)
+		t.Error(`group "a:b" and groups "a","b" must not share a dedupe key`)
 	}
 
-	// A '|' inside a component must not shift the field boundary: group "x"
-	// with identity URL "h|y" naively joins identically to group "x|h" with
+	// A ':' inside a component must not shift the field boundary: group "x"
+	// with identity URL "h:y" naively joins identically to group "x:h" with
 	// identity URL "y".
-	pipeInURL := base
-	pipeInURL.CurrentGroup = "x"
-	pipeInURL.ReleaseURL = "h|y"
-	pipeInGroup := base
-	pipeInGroup.CurrentGroup = "x|h"
-	pipeInGroup.ReleaseURL = "y"
-	if dedupeKey(&pipeInURL) == dedupeKey(&pipeInGroup) {
-		t.Error(`("x", "h|y") and ("x|h", "y") must not share a dedupe key`)
+	sepInURL := base
+	sepInURL.CurrentGroup = "x"
+	sepInURL.ReleaseURL = "h:y"
+	sepInGroup := base
+	sepInGroup.CurrentGroup = "x:h"
+	sepInGroup.ReleaseURL = "y"
+	if dedupeKey(&sepInURL) == dedupeKey(&sepInGroup) {
+		t.Error(`("x", "h:y") and ("x:h", "y") must not share a dedupe key`)
 	}
 
 	// The escape character itself must be escaped or the mapping is not
-	// injective: with delimiter-only escaping, ("x\", "y") and ("x", "|y")
-	// both join to x\|y.
+	// injective: with separator-only escaping, ("x\", "y") and ("x", ":y")
+	// both join to x\:y.
 	trailingBackslash := base
 	trailingBackslash.CurrentGroup = `x\`
 	trailingBackslash.ReleaseURL = "y"
-	leadingPipe := base
-	leadingPipe.CurrentGroup = "x"
-	leadingPipe.ReleaseURL = "|y"
-	if dedupeKey(&trailingBackslash) == dedupeKey(&leadingPipe) {
-		t.Error(`("x\", "y") and ("x", "|y") must not share a dedupe key (backslash must be escaped)`)
+	leadingSep := base
+	leadingSep.CurrentGroup = "x"
+	leadingSep.ReleaseURL = ":y"
+	if dedupeKey(&trailingBackslash) == dedupeKey(&leadingSep) {
+		t.Error(`("x\", "y") and ("x", ":y") must not share a dedupe key (backslash must be escaped)`)
 	}
 
 	// The structured current-group set must survive flattening: distinct
-	// two-group states ["a,b","c"] and ["a","b,c"] share the display join
-	// "a,b,c", and a two-group ["A","B"] shares it with the one-group literal
-	// ["A,B"]; the element-wise escaped encoding keeps their keys distinct.
+	// two-group states ["a:b","c"] and ["a","b:c"] share the display join
+	// "a:b:c", and a two-group ["A","B"] shares it with the one-group literal
+	// ["A:B"]; the element-wise escaped encoding keeps their keys distinct.
 	splitAB := base
-	splitAB.CurrentGroups = []string{"a,b", "c"}
-	splitAB.CurrentGroup = "a,b,c"
+	splitAB.CurrentGroups = []string{"a:b", "c"}
+	splitAB.CurrentGroup = "a:b:c"
 	splitBC := base
-	splitBC.CurrentGroups = []string{"a", "b,c"}
-	splitBC.CurrentGroup = "a,b,c"
+	splitBC.CurrentGroups = []string{"a", "b:c"}
+	splitBC.CurrentGroup = "a:b:c"
 	if dedupeKey(&splitAB) == dedupeKey(&splitBC) {
-		t.Error(`current groups ["a,b","c"] and ["a","b,c"] must not share a dedupe key`)
+		t.Error(`current groups ["a:b","c"] and ["a","b:c"] must not share a dedupe key`)
 	}
 	oneLiteral := base
-	oneLiteral.CurrentGroups = []string{"A,B"}
-	oneLiteral.CurrentGroup = "A,B"
+	oneLiteral.CurrentGroups = []string{"A:B"}
+	oneLiteral.CurrentGroup = "A:B"
 	twoGroupsCur := base
 	twoGroupsCur.CurrentGroups = []string{"A", "B"}
-	twoGroupsCur.CurrentGroup = "A,B"
+	twoGroupsCur.CurrentGroup = "A:B"
 	if dedupeKey(&oneLiteral) == dedupeKey(&twoGroupsCur) {
-		t.Error(`current group literal ["A,B"] and groups ["A","B"] must not share a dedupe key`)
+		t.Error(`current group literal ["A:B"] and groups ["A","B"] must not share a dedupe key`)
+	}
+	// The flattened fallback must also stay distinct from the structured set
+	// that spells it: both branches of currentGroupKey encode through keyenc
+	// precisely so ["A","B"] and the literal "A:B" cannot alias once the
+	// outer assembly escapes them.
+	flatLiteral := base
+	flatLiteral.CurrentGroup = "A:B"
+	structured := base
+	structured.CurrentGroups = []string{"A", "B"}
+	if dedupeKey(&flatLiteral) == dedupeKey(&structured) {
+		t.Error(`flattened "A:B" and structured ["A","B"] must not share a dedupe key`)
 	}
 }
 
@@ -200,19 +215,21 @@ func TestDedupeKeyBoundsOversizedComponents(t *testing.T) {
 	}
 }
 
-// TestDedupeKeyBoundsAssembledKey pins the AGGREGATE bound: keyenc bounds each
-// component against its RAW size, so four delimiter-heavy components that each
-// pass the per-component check still assemble into a ~64 KiB key once escaping
-// doubles them. Those keys are the persisted state.json map keys, so an
-// unbounded aggregate lets hostile-but-in-bound SeaDex data inflate the state
-// file past its save cap (every Save then fails and dedupe stops advancing).
-// Distinct findings must still key distinctly across the fold.
+// TestDedupeKeyBoundsAssembledKey pins the AGGREGATE bound. keyenc bounds a
+// component SET against its raw size, so several separator-heavy components
+// that each pass on their own would assemble into a ~64 KiB key once escaping
+// doubles them. Routing the OUTER assembly through keyenc too is what bounds
+// the assembled key rather than only its parts: the outer set trips the same
+// threshold and reduces to a fixed-size identity. These keys index the
+// in-memory finding set that is re-emitted on every pass, so N hostile
+// findings would otherwise hold N x 64 KiB resident and be walked once per
+// emission. Distinct findings must still key distinctly across the reduction.
 func TestDedupeKeyBoundsAssembledKey(t *testing.T) {
-	// Just under the per-component raw bound and all delimiters, so escaping
-	// doubles each component: every one passes keyenc's per-component check
-	// while the assembled key blows past the aggregate bound.
+	// Just under the raw bound and all separators, so escaping doubles each
+	// component: every one encodes on its own while the assembled set blows
+	// past the bound.
 	heavy := func(tag string) string {
-		return tag + strings.Repeat(",", keyenc.MaxComponentBytes-len(tag)-1)
+		return tag + strings.Repeat(string(keyenc.Separator), keyenc.MaxComponentBytes-len(tag)-1)
 	}
 	build := func(tag string) *compare.Finding {
 		return &compare.Finding{
@@ -224,12 +241,19 @@ func TestDedupeKeyBoundsAssembledKey(t *testing.T) {
 			Links:             []compare.ReleaseLink{{Tracker: "Nyaa", URL: heavy(tag + "l")}},
 		}
 	}
+	// The ceiling keyenc guarantees: an in-bound set escapes to at most twice
+	// its raw size, and anything over the bound collapses to the fixed-size
+	// identity. Either way the assembled key cannot exceed this.
+	const ceiling = 2 * keyenc.MaxComponentBytes
 	keyA := dedupeKey(build("a"))
-	if len(keyA) > maxKeyBytes {
-		t.Errorf("assembled dedupe key over four in-bound delimiter-heavy components = %d bytes, want <= %d", len(keyA), maxKeyBytes)
+	if len(keyA) > ceiling {
+		t.Errorf("assembled dedupe key over several in-bound separator-heavy components = %d bytes, want <= %d", len(keyA), ceiling)
+	}
+	if !keyenc.IsHashed(keyA) {
+		t.Errorf("an oversized assembled component set must reduce to a hashed identity, got %d bytes", len(keyA))
 	}
 	if keyB := dedupeKey(build("b")); keyB == keyA {
-		t.Error("distinct findings must not share a dedupe key after the assembled-key fold")
+		t.Error("distinct findings must not share a dedupe key after the reduction")
 	}
 }
 

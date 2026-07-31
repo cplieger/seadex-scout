@@ -29,3 +29,5 @@ require github.com/cplieger/runesafe v1.3.0
 require github.com/cplieger/urlform v1.2.0
 
 require github.com/cplieger/xmlx v1.0.0
+
+require github.com/cplieger/keyenc v1.0.0
