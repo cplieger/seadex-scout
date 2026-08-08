@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/httpx/v2"
+	"github.com/cplieger/httpx/v4"
 )
 
 // TestDoCapsHostileRetryAfterAndPenalizesThrottle proves a pathological
