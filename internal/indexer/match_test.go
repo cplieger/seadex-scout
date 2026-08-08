@@ -453,7 +453,7 @@ func TestTrackerKeysReadTheVouchedForm(t *testing.T) {
 //
 // The two spellings must produce the SAME key, not merely a non-empty one: they
 // name one torrent, so a record that changes spelling (or a catalogue carrying
-// both) must not enter the curation set and the seen ledger twice. That
+// both) must not enter the curation set and the publication log twice. That
 // equality is intended same-tracker deduplication, and it is also what makes
 // the journal GUID (the canonical absolute URL) round-trip to the same key.
 func TestSchemelessHostKeysAsItsAbsoluteSpelling(t *testing.T) {

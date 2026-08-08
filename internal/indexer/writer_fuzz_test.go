@@ -44,14 +44,14 @@ func (s snapshotScrub) totalDropped() int {
 // canonical re-encoding is byte-identical, so no field, map entry, item, or
 // ordering shifts on the second pass and nothing further is blanked).
 func FuzzDecodeSnapshot(f *testing.F) {
-	f.Add([]byte(emptyLedgerJSON))
+	f.Add([]byte(emptyFeedJSON))
 	f.Add([]byte(`null`))
 	f.Add([]byte(`{}`))
-	f.Add([]byte(`{"by_hash":{},"by_key":{}}`))
-	f.Add([]byte(`{"by_hash":{"ABCDEF1234567890abcdef1234567890abcdef12":true},"by_key":{"nyaa:1":true},"seen":{},"nyaa_feed":[{"Title":"Show - S01","GUID":"https://nyaa.si/view/1","InfoHash":"ABCDEF1234567890ABCDEF1234567890ABCDEF12","Key":"nyaa:1","Categories":[5070]}]}`))
-	f.Add([]byte(`{"by_hash":{},"by_key":{},"seen":{},"ab_feed":[{"Title":"x","Size":-1}]}`))
-	f.Add([]byte(`{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Title":"x","Categories":[0]}]}`))
-	f.Add([]byte(`{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Title":"x","Key":"nyaa:1","GUID":"https://nyaa.si/view/1","DownloadVolumeFactor":"0"}]}`))
+	f.Add([]byte(`{"version":2,"owners":{},"published":{}}`))
+	f.Add([]byte(`{"version":2,"owners":{"1":[{"key":"nyaa:1","hash":"ABCDEF1234567890abcdef1234567890abcdef12","best":true}]},"published":{},"nyaa_feed":[{"Title":"Show - S01","GUID":"https://nyaa.si/view/1","InfoHash":"ABCDEF1234567890ABCDEF1234567890ABCDEF12","Key":"nyaa:1","Categories":[5070]}]}`))
+	f.Add([]byte(`{"version":2,"owners":{},"published":{},"ab_feed":[{"Title":"x","Size":-1}]}`))
+	f.Add([]byte(`{"version":2,"owners":{},"published":{},"nyaa_feed":[{"Title":"x","Categories":[0]}]}`))
+	f.Add([]byte(`{"version":2,"owners":{},"published":{},"nyaa_feed":[{"Title":"x","Key":"nyaa:1","GUID":"https://nyaa.si/view/1","DownloadVolumeFactor":"0"}]}`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		snap, scrub, reason, err := decodeSnapshot(data)
 		if err != nil || reason != "" {
@@ -69,7 +69,7 @@ func FuzzDecodeSnapshot(f *testing.F) {
 			}
 			return
 		}
-		if snap.ByHash == nil || snap.ByKey == nil {
+		if byHashOf(&snap) == nil || byKeyOf(&snap) == nil {
 			t.Fatal("accepted snapshot carries nil curation maps (both consumers index them unconditionally)")
 		}
 		for name, feed := range map[string][]journalItem{"nyaa_feed": snap.NyaaFeed, "ab_feed": snap.ABFeed} {
@@ -77,7 +77,7 @@ func FuzzDecodeSnapshot(f *testing.F) {
 				if !validPersistedItem(&feed[i]) {
 					t.Errorf("%s[%d] accepted past the persisted-item limits (the per-item prune must have dropped it)", name, i)
 				}
-				if snap.Seen != nil && !validJournalRecord(&feed[i]) {
+				if snap.Published != nil && !validJournalRecord(&feed[i]) {
 					t.Errorf("%s[%d] accepted without journal identity in a post-journal snapshot (the per-item prune must have dropped it)", name, i)
 				}
 				if h := feed[i].InfoHash; h != validInfoHash(h) {

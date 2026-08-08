@@ -29,7 +29,7 @@ import (
 // falls back to the weaker legacy per-signal gate.
 func TestRebuildPersistsPairRelation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	entries := []seadex.Entry{{
 		AniListID: 9,
 		Torrents: []seadex.Torrent{{
@@ -42,11 +42,11 @@ func TestRebuildPersistsPairRelation(t *testing.T) {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
-	if snap.ByPair == nil {
+	if byPairOf(&snap) == nil {
 		t.Fatal("by_pair missing from the persisted snapshot (readers would fall back to the legacy per-signal gate)")
 	}
-	if !snap.ByPair[pairKey("abcdef1234567890abcdef1234567890abcdef12", "nyaa:42")] {
-		t.Errorf("by_pair missing the same-torrent hash/key pair: %v", snap.ByPair)
+	if !byPairOf(&snap)[pairKey("abcdef1234567890abcdef1234567890abcdef12", "nyaa:42")] {
+		t.Errorf("by_pair missing the same-torrent hash/key pair: %v", byPairOf(&snap))
 	}
 }
 
@@ -61,7 +61,7 @@ func TestRebuildPersistsPairRelation(t *testing.T) {
 func TestRebuildWarnsWhenABPasskeyMissing(t *testing.T) {
 	log, rec := capture.New()
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	entries := []seadex.Entry{{
 		AniListID: 9,
 		Torrents: []seadex.Torrent{
@@ -98,7 +98,7 @@ func TestRebuildWarnsWhenABPasskeyMissing(t *testing.T) {
 func TestRebuildNoPasskeyWarnWithoutABIntent(t *testing.T) {
 	log, rec := capture.New()
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	entries := []seadex.Entry{{
 		AniListID: 9,
 		Torrents: []seadex.Torrent{{
@@ -125,7 +125,7 @@ func TestRebuildNoPasskeyWarnWithoutABIntent(t *testing.T) {
 func TestRebuildUnconfiguredABPersistsNoABFeed(t *testing.T) {
 	log, rec := capture.New()
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	entries := []seadex.Entry{{
 		AniListID: 9,
 		Torrents: []seadex.Torrent{
@@ -156,11 +156,11 @@ func TestRebuildUnconfiguredABPersistsNoABFeed(t *testing.T) {
 	if len(snap.NyaaFeed) != 1 {
 		t.Errorf("nyaa_feed = %d items, want 1 (the configured tracker is unaffected)", len(snap.NyaaFeed))
 	}
-	if len(snap.ByKey) == 0 {
+	if len(byKeyOf(&snap)) == 0 {
 		t.Error("curation set empty: the search index must still cover AB releases (search rides Prowlarr, no passkey)")
 	}
-	if !snap.Seen["ab:123"] {
-		t.Errorf("seen ledger missing the skipped AB identity (it must not journal later as new): %v", snap.Seen)
+	if !snap.Published["ab:123"] {
+		t.Errorf("publication log missing the skipped AB identity (it must not journal later as new): %v", snap.Published)
 	}
 	// The half-configured AB intent is internal/config's diagnostic, not the
 	// writer's: config validation runs in every mode and deliberately reports it
@@ -186,7 +186,7 @@ func TestRebuildUnconfiguredABPersistsNoABFeed(t *testing.T) {
 func TestRebuildPersistsABItemsGUIDOnly(t *testing.T) {
 	const passkey = "SUPERSECRETPASSKEY123"
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	entries := []seadex.Entry{{
 		AniListID: 154587,
 		Torrents: []seadex.Torrent{
@@ -253,9 +253,8 @@ func TestRebuildPersistScrubsABScopedItemCarriedInNyaaFeed(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	first := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{"ab:1167293": true},
+		Owners:    owns(),
+		Published: map[string]bool{"ab:1167293": true},
 		// The ab:-scoped item sits in the WRONG feed slice (nyaa_feed), the
 		// scope/feed mismatch loadPrevious does not validate.
 		NyaaFeed: []journalItem{
@@ -323,15 +322,21 @@ func TestRebuildFailsOnUnreadablePreviousSnapshot(t *testing.T) {
 }
 
 // TestRebuildDropsOversizedItem pins the shared persisted-item limits at the
-// creation choke point (h-f10): a torrent whose synthesized field blows
-// maxPersistedFieldBytes (here a file-less torrent whose feed title falls
-// back to an oversized release group) is dropped as unresolvable instead of
-// being persisted - one such value could otherwise pass the whole-snapshot
-// size bound and OOM the reader's XML render - while its identity is still
-// recorded in the seen ledger so it can never re-enter the journal as new.
+// creation choke point (h-f10), and its ledger claim is INVERTED from what it
+// used to assert.
+//
+// A torrent whose synthesized field blows maxPersistedFieldBytes (here a
+// file-less torrent whose feed title falls back to an oversized release group) is
+// dropped as unresolvable instead of being persisted - one such value could
+// otherwise pass the whole-snapshot size bound and OOM the reader's XML render.
+//
+// Nothing was published, so nothing is recorded. An over-limit field is an
+// upstream DATA property, and the publication log is never pruned, so recording
+// it would deny the corrected record its RSS exposure forever - the permanent
+// omission settled feed-rss-filtering rules out.
 func TestRebuildDropsOversizedItem(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	entries := []seadex.Entry{{
 		AniListID: 9,
 		Torrents: []seadex.Torrent{{
@@ -346,8 +351,9 @@ func TestRebuildDropsOversizedItem(t *testing.T) {
 	if len(snap.NyaaFeed) != 0 {
 		t.Errorf("nyaa_feed has %d items, want the oversized item dropped as unresolvable", len(snap.NyaaFeed))
 	}
-	if !snap.Seen["nyaa:42"] {
-		t.Error("seen ledger missing the dropped torrent's identity; it could re-enter the journal as new")
+	if snap.Published["nyaa:42"] {
+		t.Errorf("publication log recorded the dropped torrent though nothing was served: %v; "+
+			"a corrected upstream record must still be able to journal as new", snap.Published)
 	}
 }
 
@@ -366,10 +372,9 @@ func TestRebuildDropsOversizedCachedTitle(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	t0 := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
 	prev := snapshot{
-		ByHash: map[string]bool{}, ByKey: map[string]bool{"nyaa:42": true},
-		ByPair: map[string]bool{},
-		Seen:   map[string]bool{"nyaa:42": true},
-		Titles: map[string]string{"nyaa:42": strings.Repeat("a", maxPersistedFieldBytes+1)},
+		Owners:    owns(keyed("nyaa:42", true)),
+		Published: map[string]bool{"nyaa:42": true},
+		Titles:    map[string]string{"nyaa:42": strings.Repeat("a", maxPersistedFieldBytes+1)},
 		NyaaFeed: []journalItem{
 			{item: item{PubDate: t0, Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42"}, FirstSeen: t0, Key: "nyaa:42"},
 		},
@@ -392,8 +397,8 @@ func TestRebuildDropsOversizedCachedTitle(t *testing.T) {
 	if len(snap.Titles) != 0 {
 		t.Errorf("titles after the drop = %v, want empty", snap.Titles)
 	}
-	if !snap.Seen["nyaa:42"] {
-		t.Errorf("seen ledger missing the curated identity: %v", snap.Seen)
+	if !snap.Published["nyaa:42"] {
+		t.Errorf("publication log missing the curated identity: %v", snap.Published)
 	}
 	if rec.Contains(msgSnapshotMalformed) {
 		t.Errorf("oversized cached title re-baselined the journal; log output:\n%s", strings.Join(rec.Messages(), "\n"))
@@ -410,15 +415,15 @@ func TestRebuildDropsOversizedCachedTitle(t *testing.T) {
 // Exercised on persist directly: since renderJournalItem drops over-limit items
 // at creation (TestRebuildDropsOversizedItem), no single item can inflate a
 // rebuilt snapshot past the bound anymore - the bound now guards aggregate
-// growth (e.g. an enormous seen ledger or title cache).
+// growth (e.g. an enormous publication log or title cache).
 func TestPersistRejectsOversizedSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	previous := []byte(`{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[],"ab_feed":[]}`)
+	previous := []byte(`{"version":2,"owners":{},"published":{},"nyaa_feed":[],"ab_feed":[]}`)
 	if err := os.WriteFile(path, previous, 0o600); err != nil {
 		t.Fatalf("seed previous snapshot: %v", err)
 	}
 	snap := &snapshot{
-		ByHash: map[string]bool{}, ByKey: map[string]bool{}, Seen: map[string]bool{},
+		Owners: owns(), Published: map[string]bool{},
 		Titles: map[string]string{"nyaa:42": strings.Repeat("a", maxFeedBytes+1)},
 	}
 	err := NewFeedWriter(&FeedWriterConfig{Path: path}, nil, nil).persist(context.Background(), snap)
@@ -441,7 +446,7 @@ func TestPersistRejectsOversizedSnapshot(t *testing.T) {
 // under a CONFIGURED policy (`broken`/`incomplete`: [feed], see
 // feedExcludesWarnings): an excluded torrent is dropped from the search
 // curation set (a Prowlarr result matching it is purged as uncurated), never
-// journaled onto RSS, and deliberately NOT recorded in the seen ledger - so a
+// journaled onto RSS, and deliberately NOT recorded in the publication log - so a
 // later rebuild with the tag gone journals it as newly grabbable
 // curation - while a kept sibling flows through untouched and the
 // snapshot log line counts the exclusion.
@@ -452,7 +457,7 @@ func TestPersistRejectsOversizedSnapshot(t *testing.T) {
 func TestRebuildExcludesCurationWarnedTorrents(t *testing.T) {
 	log, rec := capture.New()
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	warnedTorrent := seadex.Torrent{
 		Tracker: "Nyaa", URL: "https://nyaa.si/view/41", IsBest: true,
 		InfoHash: strings.Repeat("a", 40),
@@ -473,20 +478,20 @@ func TestRebuildExcludesCurationWarnedTorrents(t *testing.T) {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
-	if _, ok := snap.ByKey["nyaa:41"]; ok {
+	if _, ok := byKeyOf(&snap)["nyaa:41"]; ok {
 		t.Error("curation set contains the warned torrent's key (searches would serve it)")
 	}
-	if _, ok := snap.ByHash[warnedTorrent.InfoHash]; ok {
+	if _, ok := byHashOf(&snap)[warnedTorrent.InfoHash]; ok {
 		t.Error("curation set contains the warned torrent's info hash (searches would serve it)")
 	}
-	if _, ok := snap.ByKey["nyaa:42"]; !ok {
+	if _, ok := byKeyOf(&snap)["nyaa:42"]; !ok {
 		t.Error("curation set lost the unwarned sibling")
 	}
 	if len(snap.NyaaFeed) != 1 || snap.NyaaFeed[0].Key != "nyaa:42" {
 		t.Errorf("nyaa feed = %+v, want only the unwarned nyaa:42", snap.NyaaFeed)
 	}
-	if snap.Seen["nyaa:41"] || snap.Seen[warnedTorrent.InfoHash] {
-		t.Errorf("seen ledger recorded the warned torrent (un-warning could never journal it): %v", snap.Seen)
+	if snap.Published["nyaa:41"] || snap.Published[warnedTorrent.InfoHash] {
+		t.Errorf("publication log recorded the warned torrent (un-warning could never journal it): %v", snap.Published)
 	}
 	if v, ok := rec.AttrValue("indexer feed snapshot written", "warned_excluded"); !ok || v != "1" {
 		t.Errorf("snapshot log line warned_excluded = %q (found=%v), want \"1\"; log output:\n%s", v, ok, strings.Join(rec.Messages(), "\n"))
@@ -500,7 +505,7 @@ func TestRebuildExcludesCurationWarnedTorrents(t *testing.T) {
 		t.Fatalf("second Rebuild: %v", err)
 	}
 	snap = readSnapshotFile(t, path)
-	if _, ok := snap.ByKey["nyaa:41"]; !ok {
+	if _, ok := byKeyOf(&snap)["nyaa:41"]; !ok {
 		t.Error("curation set missing the un-warned torrent after the warning lifted")
 	}
 	keys := make([]string, 0, len(snap.NyaaFeed))
@@ -515,7 +520,7 @@ func TestRebuildExcludesCurationWarnedTorrents(t *testing.T) {
 // TestRebuildKeepsCurationWarnedTorrentsByDefault pins the feed surface's
 // DEFAULT after filters.exclude_tags: with no exclusions configured (the
 // shipped default, and the operator's explicit choice) a torrent SeaDex tags
-// Broken IS curated, IS journaled onto RSS, and IS recorded in the seen ledger,
+// Broken IS curated, IS journaled onto RSS, and IS recorded in the publication log,
 // so Sonarr/Radarr see it and decide for themselves.
 //
 // This INVERTS what TestRebuildExcludesCurationWarnedTorrents used to assert
@@ -541,29 +546,29 @@ func TestRebuildKeepsCurationWarnedTorrentsByDefault(t *testing.T) {
 			t.Fatalf("Rebuild: %v", err)
 		}
 		snap := readSnapshotFile(t, path)
-		if _, ok := snap.ByKey["nyaa:41"]; !ok {
+		if _, ok := byKeyOf(&snap)["nyaa:41"]; !ok {
 			t.Error("curation set is missing the Broken torrent; searches must serve it when nothing filters the feed")
 		}
-		if _, ok := snap.ByHash[strings.Repeat("a", 40)]; !ok {
+		if _, ok := byHashOf(&snap)[strings.Repeat("a", 40)]; !ok {
 			t.Error("curation set is missing the Broken torrent's info hash")
 		}
 		if len(snap.NyaaFeed) != 1 || snap.NyaaFeed[0].Key != "nyaa:41" {
 			t.Errorf("nyaa feed = %+v, want the Broken torrent journaled onto RSS", snap.NyaaFeed)
 		}
-		if !snap.Seen["nyaa:41"] {
-			t.Errorf("seen ledger = %v, want the served torrent recorded", snap.Seen)
+		if !snap.Published["nyaa:41"] {
+			t.Errorf("publication log = %v, want the served torrent recorded", snap.Published)
 		}
 	}
 
 	t.Run("no exclude_tags configured", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "feed.json")
-		seedEmptyLedger(t, path)
+		seedEmptyFeed(t, path)
 		assertServed(t, newTestWriter(path, "", false), path)
 	})
 
 	t.Run("a report-only exclusion leaves the feed alone", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "feed.json")
-		seedEmptyLedger(t, path)
+		seedEmptyFeed(t, path)
 		w := NewFeedWriter(&FeedWriterConfig{
 			Path: path,
 			TagFilter: tagfilter.New(map[string][]tagfilter.Surface{
@@ -599,9 +604,8 @@ func TestRebuildWarnedTorrentIdentityWinsAcrossEntries(t *testing.T) {
 	// its carried item must be retracted through the carry-drop key set even
 	// though its own occurrence never carries the Broken tag.
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{"nyaa:99": true},
-		Seen:   map[string]bool{},
+		Owners:    owns(keyed("nyaa:99", true)),
+		Published: map[string]bool{},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "Show - S01 (1080p) [W]", GUID: duplicateURL, DownloadURL: "https://nyaa.si/download/99.torrent", PubDate: time.Now().UTC()}, Key: "nyaa:99", AniListID: 8, FirstSeen: time.Now().UTC()},
 		},
@@ -627,20 +631,20 @@ func TestRebuildWarnedTorrentIdentityWinsAcrossEntries(t *testing.T) {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
-	if _, ok := snap.ByKey["nyaa:41"]; ok {
+	if _, ok := byKeyOf(&snap)["nyaa:41"]; ok {
 		t.Error("curation set marks the warned identity via its unwarned duplicate (searches would serve it)")
 	}
-	if _, ok := snap.ByKey["nyaa:99"]; ok {
+	if _, ok := byKeyOf(&snap)["nyaa:99"]; ok {
 		t.Error("curation set marks the warned bytes through a different-key duplicate")
 	}
-	if _, ok := snap.ByHash[hash]; ok {
+	if _, ok := byHashOf(&snap)[hash]; ok {
 		t.Error("curation set marks the warned identity's info hash via its unwarned duplicate")
 	}
 	if len(snap.NyaaFeed) != 0 {
 		t.Errorf("nyaa feed = %+v, want empty (a warned identity must not journal, and the carried duplicate must be retracted)", snap.NyaaFeed)
 	}
-	if snap.Seen["nyaa:41"] || snap.Seen["nyaa:99"] || snap.Seen[hash] {
-		t.Errorf("seen ledger recorded the warned identity (un-warning could never journal it): %v", snap.Seen)
+	if snap.Published["nyaa:41"] || snap.Published["nyaa:99"] || snap.Published[hash] {
+		t.Errorf("publication log recorded the warned identity (un-warning could never journal it): %v", snap.Published)
 	}
 	if v, ok := rec.AttrValue("indexer feed snapshot written", "journal_warned_dropped"); !ok || v != "1" {
 		t.Errorf("snapshot log line journal_warned_dropped = %q (found=%v), want \"1\" (the carried duplicate); log output:\n%s", v, ok, strings.Join(rec.Messages(), "\n"))
@@ -658,9 +662,8 @@ func TestRebuildDropsCarriedJournalItemBecomingWarned(t *testing.T) {
 	log, rec := capture.New()
 	path := filepath.Join(t.TempDir(), "feed.json")
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{"nyaa:42": true},
-		Seen:   map[string]bool{"nyaa:42": true},
+		Owners:    owns(keyed("nyaa:42", true)),
+		Published: map[string]bool{"nyaa:42": true},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: time.Now().UTC()}, Key: "nyaa:42", AniListID: 7, FirstSeen: time.Now().UTC()},
 		},
@@ -680,7 +683,7 @@ func TestRebuildDropsCarriedJournalItemBecomingWarned(t *testing.T) {
 	if len(snap.NyaaFeed) != 0 {
 		t.Errorf("nyaa feed = %+v, want empty (the carried item's torrent is now warned)", snap.NyaaFeed)
 	}
-	if _, ok := snap.ByKey["nyaa:42"]; ok {
+	if _, ok := byKeyOf(&snap)["nyaa:42"]; ok {
 		t.Error("curation set still marks the now-warned torrent")
 	}
 	if v, ok := rec.AttrValue("indexer feed snapshot written", "journal_warned_dropped"); !ok || v != "1" {
@@ -688,16 +691,17 @@ func TestRebuildDropsCarriedJournalItemBecomingWarned(t *testing.T) {
 	}
 }
 
-// TestRebuildBaselinesSnapshotMissingCurationMaps pins loadPrevious's
-// structural-validity gate: a previous snapshot that decodes cleanly and even
-// carries a seen ledger, but is missing the required by_hash/by_key curation
-// maps (a hand-edited or corrupted file - the writer always persists both,
-// even empty), must warn and re-baseline rather than trust the ledger: the
-// seen set rebuilds from the current catalogue and the journal starts empty.
-func TestRebuildBaselinesSnapshotMissingCurationMaps(t *testing.T) {
+// TestRebuildBaselinesSnapshotMissingAFact pins loadPrevious's
+// structural-validity gate on the new contract: a previous snapshot that decodes
+// cleanly at the CURRENT version and even carries a publication log, but is
+// missing the curation ownership fact (a hand-edited or corrupted file - the
+// writer always persists both, even empty), must warn and re-baseline rather than
+// trust the log. The two facts ARE the contract, so one without the other is not
+// a partial snapshot to salvage.
+func TestRebuildBaselinesSnapshotMissingAFact(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	if err := os.WriteFile(path, []byte(`{"seen":{"nyaa:41":true},"nyaa_feed":[],"ab_feed":[]}`), 0o600); err != nil {
-		t.Fatalf("seed mapless snapshot: %v", err)
+	if err := os.WriteFile(path, []byte(`{"version":2,"published":{"nyaa:41":true},"nyaa_feed":[],"ab_feed":[]}`), 0o600); err != nil {
+		t.Fatalf("seed factless snapshot: %v", err)
 	}
 	log, rec := capture.New()
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
@@ -707,13 +711,13 @@ func TestRebuildBaselinesSnapshotMissingCurationMaps(t *testing.T) {
 	}
 	snap := readSnapshotFile(t, path)
 	if len(snap.NyaaFeed) != 0 {
-		t.Errorf("feed = %d items, want 0 (a mapless snapshot must re-baseline, not journal against its stale seen ledger)", len(snap.NyaaFeed))
+		t.Errorf("feed = %d items, want 0 (a factless snapshot must re-baseline, not journal against its stale publication log)", len(snap.NyaaFeed))
 	}
-	if !snap.Seen["nyaa:42"] {
-		t.Errorf("seen ledger missing the current catalogue after re-baseline: %v", snap.Seen)
+	if !snap.Published["nyaa:42"] {
+		t.Errorf("publication log missing the forfeited catalogue after re-baseline: %v", snap.Published)
 	}
 	if !rec.Contains("previous feed snapshot malformed; re-baselining the feed journal") {
-		t.Errorf("mapless snapshot not warned as malformed; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+		t.Errorf("factless snapshot not warned as malformed; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }
 
@@ -730,9 +734,8 @@ func TestRebuildDropsOversizedFeedItem(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	t0 := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{}, ByKey: map[string]bool{"nyaa:42": true, "nyaa:43": true},
-		ByPair: map[string]bool{},
-		Seen:   map[string]bool{"nyaa:42": true, "nyaa:43": true},
+		Owners:    owns(keyed("nyaa:42", true), keyed("nyaa:43", true)),
+		Published: map[string]bool{"nyaa:42": true, "nyaa:43": true},
 		NyaaFeed: []journalItem{
 			{item: item{PubDate: t0, Title: strings.Repeat("a", maxPersistedFieldBytes+1), GUID: "https://nyaa.si/view/42"}, FirstSeen: t0, Key: "nyaa:42"},
 			{item: item{PubDate: t0, Title: "Sibling - S01 (1080p) [G]", GUID: "https://nyaa.si/view/43"}, FirstSeen: t0, Key: "nyaa:43"},
@@ -753,8 +756,8 @@ func TestRebuildDropsOversizedFeedItem(t *testing.T) {
 	if !slices.Equal(keys, []string{"nyaa:43"}) {
 		t.Errorf("feed keys = %v, want only the bounded sibling nyaa:43 (the over-limit item is dropped, the journal is kept)", keys)
 	}
-	if !snap.Seen["nyaa:42"] || !snap.Seen["nyaa:43"] {
-		t.Errorf("seen ledger lost a carried identity: %v", snap.Seen)
+	if !snap.Published["nyaa:42"] || !snap.Published["nyaa:43"] {
+		t.Errorf("publication log lost a carried identity: %v", snap.Published)
 	}
 	if rec.Contains(msgSnapshotMalformed) {
 		t.Errorf("an over-limit journal item re-baselined the whole journal; log output:\n%s", strings.Join(rec.Messages(), "\n"))
@@ -798,8 +801,8 @@ func TestRebuildOversizedSnapshotRebaselines(t *testing.T) {
 	if fi.Size() > maxFeedBytes {
 		t.Errorf("rewritten snapshot = %d bytes, want under the cap (persist must replace the oversized file)", fi.Size())
 	}
-	if snap := readSnapshotFile(t, path); snap.Seen == nil {
-		t.Error("rewritten snapshot carries no seen ledger, want a baselined journal schema")
+	if snap := readSnapshotFile(t, path); snap.Published == nil {
+		t.Error("rewritten snapshot carries no publication log, want a baselined journal schema")
 	}
 }
 
@@ -944,9 +947,8 @@ func TestRebuildWarnedIdentityPropagatesTransitively(t *testing.T) {
 	h2 := strings.Repeat("b", 40)
 	now := time.Now().UTC().Truncate(time.Second)
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{"nyaa:9": true, h2: true},
+		Owners:    owns(),
+		Published: map[string]bool{"nyaa:9": true, h2: true},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/9", InfoHash: h2, PubDate: now}, Key: "nyaa:9", AniListID: 5, FirstSeen: now},
 		},
@@ -966,15 +968,15 @@ func TestRebuildWarnedIdentityPropagatesTransitively(t *testing.T) {
 	if len(snap.NyaaFeed) != 0 {
 		t.Errorf("nyaa feed = %+v, want empty (the carried nyaa:9 item stores hash %s, warned only through the key-then-hash chain)", snap.NyaaFeed, h2)
 	}
-	if _, ok := snap.ByHash[h2]; ok {
+	if _, ok := byHashOf(&snap)[h2]; ok {
 		t.Error("curation set marks the transitively warned hash (searches would serve it)")
 	}
-	if _, ok := snap.ByKey["nyaa:2"]; ok {
+	if _, ok := byKeyOf(&snap)["nyaa:2"]; ok {
 		t.Error("curation set marks the transitively warned key")
 	}
 }
 
-// TestRebuildBaselinesOversizedSeenLedgerKey pins the seen-ledger ingress of
+// TestRebuildBaselinesOversizedSeenLedgerKey pins the publication-log ingress of
 // the shared persisted-item limits: the ledger is carried forward verbatim
 // and never pruned, so an over-limit identity key from a hand-edited
 // snapshot must warn and re-baseline as malformed rather than persist in
@@ -983,9 +985,8 @@ func TestRebuildBaselinesOversizedSeenLedgerKey(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	oversized := strings.Repeat("k", maxPersistedFieldBytes+1)
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{oversized: true},
+		Owners:    owns(),
+		Published: map[string]bool{oversized: true},
 	})
 	log, rec := capture.New()
 	w := newLoggedTestWriter(path, log)
@@ -994,14 +995,14 @@ func TestRebuildBaselinesOversizedSeenLedgerKey(t *testing.T) {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
-	if snap.Seen[oversized] {
-		t.Error("oversized seen-ledger key survived the rebuild (it would persist in every future snapshot)")
+	if snap.Published[oversized] {
+		t.Error("oversized publication-log key survived the rebuild (it would persist in every future snapshot)")
 	}
-	if !snap.Seen["nyaa:42"] {
-		t.Errorf("seen ledger missing the curated identity after re-baseline: %v", snap.Seen)
+	if !snap.Published["nyaa:42"] {
+		t.Errorf("publication log missing the curated identity after re-baseline: %v", snap.Published)
 	}
 	if !rec.Contains(msgSnapshotMalformed) {
-		t.Errorf("oversized seen-ledger key not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+		t.Errorf("oversized publication-log key not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }
 
@@ -1016,9 +1017,8 @@ func TestRebuildCanonicalizesStoredHashBeforeWarningRetraction(t *testing.T) {
 	hash := strings.Repeat("a", 40)
 	now := time.Now().UTC().Truncate(time.Second)
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{"nyaa:99": true},
-		Seen:   map[string]bool{"nyaa:99": true},
+		Owners:    owns(keyed("nyaa:99", true)),
+		Published: map[string]bool{"nyaa:99": true},
 		NyaaFeed: []journalItem{{
 			item:      item{Title: "Show - S01 (1080p) [W]", GUID: "https://nyaa.si/view/99", InfoHash: strings.ToUpper(hash), PubDate: now},
 			Key:       "nyaa:99",
@@ -1079,9 +1079,8 @@ func TestRebuildDropsOversizedABFeedItem(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	now := time.Now().UTC().Truncate(time.Second)
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{}, ByKey: map[string]bool{"ab:123": true},
-		ByPair: map[string]bool{},
-		Seen:   map[string]bool{"ab:123": true},
+		Owners:    owns(keyed("ab:123", true)),
+		Published: map[string]bool{"ab:123": true},
 		ABFeed: []journalItem{{
 			item: item{
 				Title:   strings.Repeat("a", maxPersistedFieldBytes+1),
@@ -1111,8 +1110,8 @@ func TestRebuildDropsOversizedABFeedItem(t *testing.T) {
 	if len(snap.ABFeed) != 0 {
 		t.Errorf("ab_feed = %d items, want 0 (an over-limit ab_feed item must be dropped, not carried)", len(snap.ABFeed))
 	}
-	if !snap.Seen["ab:123"] {
-		t.Errorf("seen ledger missing the curated AB identity: %v", snap.Seen)
+	if !snap.Published["ab:123"] {
+		t.Errorf("publication log missing the curated AB identity: %v", snap.Published)
 	}
 	if rec.Contains(msgSnapshotMalformed) {
 		t.Errorf("an over-limit ab_feed item re-baselined the whole journal; log output:\n%s", strings.Join(rec.Messages(), "\n"))
@@ -1168,7 +1167,7 @@ func TestRetainValidTitlesDropsOverLimitEntries(t *testing.T) {
 }
 
 // TestSeenLedgerWithinLimitsBoundary pins the inclusive endpoint of the
-// seen-ledger key cap: the documented contract rejects only keys PAST
+// publication-log key cap: the documented contract rejects only keys PAST
 // maxPersistedFieldBytes, so an exactly-at-limit key must stay accepted. The
 // end-to-end re-baseline test covers only the over-limit side, leaving a
 // boundary slip (a `>=` comparison) undetected - it would re-baseline the
@@ -1176,11 +1175,11 @@ func TestRetainValidTitlesDropsOverLimitEntries(t *testing.T) {
 // discarding accumulated novelty state.
 func TestSeenLedgerWithinLimitsBoundary(t *testing.T) {
 	atLimit := strings.Repeat("k", maxPersistedFieldBytes)
-	if !seenLedgerWithinLimits(map[string]bool{atLimit: true}) {
-		t.Errorf("seenLedgerWithinLimits(key %d bytes) = false, want true", len(atLimit))
+	if !publicationLogWithinLimits(map[string]bool{atLimit: true}) {
+		t.Errorf("publicationLogWithinLimits(key %d bytes) = false, want true", len(atLimit))
 	}
-	if seenLedgerWithinLimits(map[string]bool{atLimit + "k": true}) {
-		t.Errorf("seenLedgerWithinLimits(key %d bytes) = true, want false", len(atLimit)+1)
+	if publicationLogWithinLimits(map[string]bool{atLimit + "k": true}) {
+		t.Errorf("publicationLogWithinLimits(key %d bytes) = true, want false", len(atLimit)+1)
 	}
 }
 
@@ -1188,7 +1187,7 @@ func TestSeenLedgerWithinLimitsBoundary(t *testing.T) {
 // charged against the SERIALIZED ledger cost, not the decoded key bytes.
 // encoding/json escapes the HTML-sensitive set, so every '<' costs six bytes
 // (\u003c) in the file persist writes: a ledger of escape-heavy keys whose
-// decoded length sits comfortably under maxPersistedSeenBytes still pushes the
+// decoded length sits comfortably under maxPublicationLogBytes still pushes the
 // rebuilt snapshot past maxFeedBytes, which is exactly the persist-wedges-
 // forever case the aggregate cap exists to prevent. The test asserts the
 // decoded approximation would have ACCEPTED this ledger, so it fails if the
@@ -1205,12 +1204,12 @@ func TestSeenLedgerWithinLimitsChargesJSONEscaping(t *testing.T) {
 		seen[k] = true
 		decoded += len(k) + 8
 	}
-	if decoded > maxPersistedSeenBytes {
-		t.Fatalf("decoded ledger cost %d exceeds cap %d; the fixture no longer isolates the escaping charge", decoded, maxPersistedSeenBytes)
+	if decoded > maxPublicationLogBytes {
+		t.Fatalf("decoded ledger cost %d exceeds cap %d; the fixture no longer isolates the escaping charge", decoded, maxPublicationLogBytes)
 	}
-	if seenLedgerWithinLimits(seen) {
-		t.Errorf("seenLedgerWithinLimits(%d escape-heavy keys) = true, want false (encoded cost ~%d bytes exceeds cap %d)",
-			keys, keys*(6*keyRunes+10), maxPersistedSeenBytes)
+	if publicationLogWithinLimits(seen) {
+		t.Errorf("publicationLogWithinLimits(%d escape-heavy keys) = true, want false (encoded cost ~%d bytes exceeds cap %d)",
+			keys, keys*(6*keyRunes+10), maxPublicationLogBytes)
 	}
 }
 
@@ -1225,9 +1224,8 @@ func TestRebuildBlanksCarriedForeignInfoURL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	now := time.Now().UTC().Truncate(time.Second)
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{}, ByKey: map[string]bool{"nyaa:42": true},
-		ByPair: map[string]bool{},
-		Seen:   map[string]bool{"nyaa:42": true},
+		Owners:    owns(keyed("nyaa:42", true)),
+		Published: map[string]bool{"nyaa:42": true},
 		NyaaFeed: []journalItem{{
 			item: item{
 				Title:   "Show S01 1080p [Grp]",
@@ -1263,7 +1261,7 @@ func TestRebuildNeverLogsABPasskey(t *testing.T) {
 	const passkey = "SUPERSECRETPASSKEY123"
 	log, rec := capture.New()
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	entries := []seadex.Entry{{
 		AniListID: 154587,
 		Torrents: []seadex.Torrent{{
@@ -1308,14 +1306,13 @@ func TestLoadPreviousDropsOversizedHarvestCheckpoint(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	cursor := strings.Repeat("x", maxPersistedCursorBytes+1)
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash:        map[string]bool{},
-		ByKey:         map[string]bool{},
-		Seen:          map[string]bool{"nyaa:42": true},
+		Owners:        owns(),
+		Published:     map[string]bool{"nyaa:42": true},
 		HarvestCursor: cursor,
 	})
 	log, rec := capture.New()
 	w := NewFeedWriter(&FeedWriterConfig{Path: path}, log, nil)
-	_, prev, err := w.loadPrevious(context.Background())
+	prev, err := w.loadPrevious(context.Background())
 	if err != nil {
 		t.Fatalf("loadPrevious: %v", err)
 	}
@@ -1325,15 +1322,15 @@ func TestLoadPreviousDropsOversizedHarvestCheckpoint(t *testing.T) {
 	if prev.cursor != "" {
 		t.Errorf("loadPrevious cursor = %d bytes, want empty after exceeding the %d-byte cap", len(prev.cursor), maxPersistedCursorBytes)
 	}
-	if !prev.seen["nyaa:42"] {
-		t.Errorf("loadPrevious discarded the valid seen ledger while resetting the cursor: %v", prev.seen)
+	if !prev.published["nyaa:42"] {
+		t.Errorf("loadPrevious discarded the valid publication log while resetting the cursor: %v", prev.published)
 	}
 	if !rec.Contains("previous feed snapshot harvest cursor exceeds size cap; restarting the harvest rotation") {
 		t.Errorf("oversized harvest cursor warning not logged; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }
 
-// TestRebuildBaselinesFalseSeenLedgerValue pins the seen ledger's producer
+// TestRebuildBaselinesFalseSeenLedgerValue pins the publication log's producer
 // invariant at ingress: the writer only ever records true membership, so a
 // false value can only come from corruption or hand-editing. Because
 // journalIfNew reads the VALUE, carrying one forward would re-broadcast an
@@ -1343,9 +1340,8 @@ func TestLoadPreviousDropsOversizedHarvestCheckpoint(t *testing.T) {
 func TestRebuildBaselinesFalseSeenLedgerValue(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{"nyaa:42": false},
+		Owners:    owns(),
+		Published: map[string]bool{"nyaa:42": false},
 	})
 	log, rec := capture.New()
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
@@ -1354,20 +1350,20 @@ func TestRebuildBaselinesFalseSeenLedgerValue(t *testing.T) {
 	}
 	snap := readSnapshotFile(t, path)
 	if len(snap.NyaaFeed) != 0 {
-		t.Errorf("feed = %d items, want 0: a false seen-ledger value must re-baseline instead of re-broadcasting", len(snap.NyaaFeed))
+		t.Errorf("feed = %d items, want 0: a false publication-log value must re-baseline instead of re-broadcasting", len(snap.NyaaFeed))
 	}
-	if !snap.Seen["nyaa:42"] {
-		t.Errorf("seen ledger was not rebuilt from current curation: %v", snap.Seen)
+	if !snap.Published["nyaa:42"] {
+		t.Errorf("publication log was not rebuilt from current curation: %v", snap.Published)
 	}
 	if !rec.Contains(msgSnapshotMalformed) {
-		t.Errorf("false seen-ledger value not warned as malformed; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+		t.Errorf("false publication-log value not warned as malformed; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }
 
 // TestRebuildOffTrackerJournalSurvivesAndReturns pins the reversibility of a
 // tracker's off switch (l-f161). Blanking a Torznab URL used to skip the carry,
 // so ONE rebuild dropped every journaled item for that scope - while the
-// never-pruned seen ledger kept their identities, so journalIfNew reported
+// never-pruned publication log kept their identities, so journalIfNew reported
 // isNew=false forever and those releases could never reach RSS again. An
 // operator disabling AnimeBytes for a few days permanently lost the un-grabbed
 // part of its journal window.
@@ -1386,7 +1382,7 @@ func TestRebuildOffTrackerJournalSurvivesAndReturns(t *testing.T) {
 		}},
 	}}
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 
 	// Tracker ON: the release journals.
 	if err := newTestWriter(path, "passkey", true).Rebuild(context.Background(), entries, nil); err != nil {
@@ -1405,8 +1401,8 @@ func TestRebuildOffTrackerJournalSurvivesAndReturns(t *testing.T) {
 		t.Errorf("ab_feed = %d items while the tracker is off, want the journal carried (1): %+v",
 			len(off.ABFeed), off.ABFeed)
 	}
-	if !off.Seen["ab:123"] {
-		t.Error("seen ledger lost the AB identity while the tracker was off")
+	if !off.Published["ab:123"] {
+		t.Error("publication log lost the AB identity while the tracker was off")
 	}
 
 	// Tracker BACK ON: the item is still there, so it can be served again.
@@ -1443,7 +1439,7 @@ func TestRebuildOffTrackerJournalDoesNotGrow(t *testing.T) {
 	})
 
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	if err := newTestWriter(path, "passkey", true).Rebuild(context.Background(), first, nil); err != nil {
 		t.Fatalf("Rebuild (AB on): %v", err)
 	}
@@ -1455,18 +1451,27 @@ func TestRebuildOffTrackerJournalDoesNotGrow(t *testing.T) {
 	if len(off.ABFeed) != 1 {
 		t.Errorf("ab_feed = %d items, want only the carried one: an off tracker's journal must not grow", len(off.ABFeed))
 	}
-	// The new identity is still recorded, so it is not treated as new later -
-	// backfill is search's job, exactly as growJournal documents.
-	if !off.Seen["ab:456"] {
-		t.Error("seen ledger missing the release curated while the tracker was off")
+	// The new identity is still recorded, so it is not treated as new later.
+	// This is the ONE write to the publication log that is not a publication,
+	// and it is deliberate: a disabled tracker is opted out, not refused, so
+	// re-enabling it must not journal that tracker's whole curated catalogue as
+	// newly curated in one pass (see growJournal).
+	if !off.Published["ab:456"] {
+		t.Error("publication log missing the release curated while the tracker was off; re-enabling AB would re-broadcast its whole catalogue")
 	}
 }
 
-// TestBuildCurationBestWinsAcrossDuplicateOccurrences pins the OR fold in the
-// search curation index: one SeaDex torrent can be attached to several
+// TestCurationProjectionBestWinsAcrossDuplicateOccurrences pins the OR fold in
+// the search curation index: one SeaDex torrent can be attached to several
 // entries, and search marks a matched Prowlarr result best-or-alt from these
 // maps, so the fold must be best-wins in BOTH scan orders.
-func TestBuildCurationBestWinsAcrossDuplicateOccurrences(t *testing.T) {
+//
+// The fold now runs at PROJECTION time over per-owner votes rather than being
+// accumulated destructively into a persisted map, which is what makes it
+// recomputable - and therefore what makes a best-to-alt demotion expressible at
+// all (see TestPerOwnerVotesMakeADemotionRepresentable). The order-independence
+// this test pins is unchanged.
+func TestCurationProjectionBestWinsAcrossDuplicateOccurrences(t *testing.T) {
 	const hash = "abcdef1234567890abcdef1234567890abcdef12"
 	mkv := []seadex.File{{Length: 1, Name: "Show - S01E01 (1080p) [G].mkv"}}
 	entries := []seadex.Entry{
@@ -1479,7 +1484,7 @@ func TestBuildCurationBestWinsAcrossDuplicateOccurrences(t *testing.T) {
 	}
 	for _, order := range []string{"alt first", "best first"} {
 		t.Run(order, func(t *testing.T) {
-			set := buildCuration(entries)
+			set := projectCuration(ownershipOf(entries))
 			if !set.byHash[hash] {
 				t.Errorf("by_hash[%s] = false, want true (best-wins across occurrences)", hash)
 			}
@@ -1524,33 +1529,31 @@ func TestSplitCurationWarnedLeavesInputUnmutated(t *testing.T) {
 // carry gate drops that shape, but in resident-idle mode no rebuild ever runs it
 // - so the item escapes the bounded journal window entirely. Dropping rather
 // than refusing the whole snapshot is what keeps one corrupted item from taking
-// the entire Torznab surface down on a cold start (l-f45): the curation maps and
-// the rest of the journal survive. A pre-journal snapshot (no seen ledger) stays
-// exempt, since its schema never promised the two fields.
+// the entire Torznab surface down on a cold start (l-f45): the curation ownership
+// fact and the rest of the journal survive. There is no schema-scoped exemption
+// any more: the version envelope means every snapshot this decode accepts was
+// written by THIS schema, so there is no retired shape whose items must be
+// excused from a promise it never made.
 func TestDecodeSnapshotDropsJournalItemWithoutIdentity(t *testing.T) {
 	tests := map[string]struct {
 		doc      string
 		wantKept int
 	}{
-		"post-journal item without FirstSeen dropped": {
-			doc:      `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Key":"nyaa:1","Title":"x","GUID":"https://nyaa.si/view/1"}],"ab_feed":[]}`,
+		"item without FirstSeen dropped": {
+			doc:      `{"version":2,"owners":{},"published":{},"nyaa_feed":[{"Key":"nyaa:1","Title":"x","GUID":"https://nyaa.si/view/1"}],"ab_feed":[]}`,
 			wantKept: 0,
 		},
-		"post-journal item without Key dropped": {
-			doc:      `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Title":"x","GUID":"https://nyaa.si/view/1"}],"ab_feed":[]}`,
+		"item without Key dropped": {
+			doc:      `{"version":2,"owners":{},"published":{},"nyaa_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Title":"x","GUID":"https://nyaa.si/view/1"}],"ab_feed":[]}`,
 			wantKept: 0,
 		},
 		"bookkeeping-less item dropped, sibling kept": {
-			doc: `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Title":"orphan","GUID":"https://nyaa.si/view/1"},` +
+			doc: `{"version":2,"owners":{},"published":{},"nyaa_feed":[{"Title":"orphan","GUID":"https://nyaa.si/view/1"},` +
 				`{"FirstSeen":"2026-07-01T00:00:00Z","Key":"nyaa:2","Title":"kept","GUID":"https://nyaa.si/view/2"}],"ab_feed":[]}`,
 			wantKept: 1,
 		},
-		"post-journal item with both accepted": {
-			doc:      `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Key":"nyaa:1","Title":"x","GUID":"https://nyaa.si/view/1"}],"ab_feed":[]}`,
-			wantKept: 1,
-		},
-		"pre-journal snapshot exempt": {
-			doc:      `{"by_hash":{},"by_key":{},"nyaa_feed":[{"Title":"x","GUID":"https://nyaa.si/view/1"}],"ab_feed":[]}`,
+		"item with both accepted": {
+			doc:      `{"version":2,"owners":{},"published":{},"nyaa_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Key":"nyaa:1","Title":"x","GUID":"https://nyaa.si/view/1"}],"ab_feed":[]}`,
 			wantKept: 1,
 		},
 	}
@@ -1569,7 +1572,7 @@ func TestDecodeSnapshotDropsJournalItemWithoutIdentity(t *testing.T) {
 			if got, want := scrub.droppedItems[upstreamNyaa], strings.Count(tc.doc, "GUID")-tc.wantKept; got != want {
 				t.Errorf("droppedItems[nyaa] = %d, want %d (the reader WARNs per tracker feed)", got, want)
 			}
-			if snap.ByHash == nil || snap.ByKey == nil {
+			if byHashOf(&snap) == nil || byKeyOf(&snap) == nil {
 				t.Error("curation maps discarded; a per-item defect must not cost the search curation set")
 			}
 		})
@@ -1590,17 +1593,17 @@ func TestDecodeSnapshotDropsJournalItemWithoutIdentity(t *testing.T) {
 // failing the key-set shape by a wide margin.
 func TestDecodeSnapshotStructuralGateIsBounded(t *testing.T) {
 	t.Run("repeated top-level schema field rejected", func(t *testing.T) {
-		// The accumulated maps are the ambiguity that matters: Unmarshal would
-		// silently resolve a second "seen" to the last occurrence, and at a
+		// The accumulated facts are the ambiguity that matters: Unmarshal would
+		// silently resolve a second "published" to the last occurrence, and at a
 		// tamperable boundary that is evidence, not a value to pick.
-		doc := `{"by_hash":{},"by_key":{},"seen":{"nyaa:1":true},"seen":{},"nyaa_feed":[],"ab_feed":[]}`
+		doc := `{"version":2,"owners":{},"published":{"nyaa:1":true},"published":{},"nyaa_feed":[],"ab_feed":[]}`
 		if _, _, _, err := decodeSnapshot([]byte(doc)); err == nil {
-			t.Error("decodeSnapshot accepted a repeated top-level \"seen\" field, want it refused as tampering")
+			t.Error("decodeSnapshot accepted a repeated top-level \"published\" field, want it refused as tampering")
 		}
 		// Case-insensitively too, since Unmarshal matches struct fields that way.
-		mixed := `{"by_hash":{},"by_key":{},"seen":{},"Seen":{},"nyaa_feed":[],"ab_feed":[]}`
+		mixed := `{"version":2,"owners":{},"published":{},"Published":{},"nyaa_feed":[],"ab_feed":[]}`
 		if _, _, _, err := decodeSnapshot([]byte(mixed)); err == nil {
-			t.Error("decodeSnapshot accepted \"seen\" repeated under a different case, want it refused")
+			t.Error("decodeSnapshot accepted \"published\" repeated under a different case, want it refused")
 		}
 	})
 
@@ -1608,7 +1611,7 @@ func TestDecodeSnapshotStructuralGateIsBounded(t *testing.T) {
 		// Deliberately NOT rejected: only the top-level schema fields fail
 		// closed, so the persisted-file contract stays json.Unmarshal's
 		// everywhere the ambiguity cannot swap one accumulated map for another.
-		doc := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"Key":"nyaa:1","Title":"first","Title":"second",` +
+		doc := `{"version":2,"owners":{},"published":{},"nyaa_feed":[{"Key":"nyaa:1","Title":"first","Title":"second",` +
 			`"GUID":"https://nyaa.si/view/1","FirstSeen":"2026-07-01T00:00:00Z"}],"ab_feed":[]}`
 		snap, _, reason, err := decodeSnapshot([]byte(doc))
 		if err != nil || reason != "" {
@@ -1624,7 +1627,7 @@ func TestDecodeSnapshotStructuralGateIsBounded(t *testing.T) {
 		// scanner ceiling: an unknown field is consumed through Decode, never a
 		// token walk that would grow a container stack per open bracket.
 		const depth = bounded.MaxDepth + 1
-		doc := `{"by_hash":{},"by_key":{},"unknown":` + strings.Repeat("[", depth) + strings.Repeat("]", depth) + `}`
+		doc := `{"version":2,"owners":{},"published":{},"unknown":` + strings.Repeat("[", depth) + strings.Repeat("]", depth) + `}`
 		if _, _, _, err := decodeSnapshot([]byte(doc)); err == nil {
 			t.Errorf("decodeSnapshot accepted an unknown field nested %d deep, want the scanner's depth ceiling to refuse it", depth)
 		}
@@ -1633,7 +1636,7 @@ func TestDecodeSnapshotStructuralGateIsBounded(t *testing.T) {
 	t.Run("key-dense unknown field costs a small multiple of its bytes", func(t *testing.T) {
 		const keys = 300_000
 		var doc strings.Builder
-		doc.WriteString(`{"by_hash":{},"by_key":{"nyaa:1":true},"seen":{},"nyaa_feed":[],"ab_feed":[],"unknown":{`)
+		doc.WriteString(`{"version":2,"owners":{"1":[{"key":"nyaa:1","best":true}]},"published":{},"nyaa_feed":[],"ab_feed":[],"unknown":{`)
 		for i := range keys {
 			if i > 0 {
 				doc.WriteByte(',')
@@ -1655,7 +1658,7 @@ func TestDecodeSnapshotStructuralGateIsBounded(t *testing.T) {
 		if err != nil || reason != "" {
 			t.Fatalf("decodeSnapshot(key-dense unknown field) reason=%q err=%v, want it accepted (unknown fields are skipped)", reason, err)
 		}
-		if !snap.ByKey["nyaa:1"] {
+		if !byKeyOf(&snap)["nyaa:1"] {
 			t.Error("schema fields did not decode past the unknown field")
 		}
 		if allocated, budget := after.TotalAlloc-before.TotalAlloc, uint64(8*len(data)); allocated > budget {
@@ -1673,7 +1676,7 @@ func TestDecodeSnapshotStructuralGateIsBounded(t *testing.T) {
 // container budget before any per-item validation could reject it. Both
 // documents here stay well under maxFeedBytes and must still be refused.
 func TestDecodeSnapshotBoundsCardinality(t *testing.T) {
-	feed := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[` +
+	feed := `{"version":2,"owners":{},"published":{},"nyaa_feed":[` +
 		strings.TrimSuffix(strings.Repeat("{},", maxSnapshotFeedItems+1), ",") + `],"ab_feed":[]}`
 	if len(feed) > maxFeedBytes {
 		t.Fatalf("over-cardinality feed document = %d bytes, want it under the %d byte cap", len(feed), maxFeedBytes)
@@ -1683,7 +1686,7 @@ func TestDecodeSnapshotBoundsCardinality(t *testing.T) {
 	}
 
 	var ledger strings.Builder
-	ledger.WriteString(`{"by_hash":{},"by_key":{},"nyaa_feed":[],"ab_feed":[],"seen":{`)
+	ledger.WriteString(`{"version":2,"owners":{},"nyaa_feed":[],"ab_feed":[],"published":{`)
 	for i := range maxSnapshotMapEntries + 1 {
 		if i > 0 {
 			ledger.WriteByte(',')
@@ -1697,7 +1700,7 @@ func TestDecodeSnapshotBoundsCardinality(t *testing.T) {
 		t.Fatalf("over-cardinality ledger document = %d bytes, want it under the %d byte cap", ledger.Len(), maxFeedBytes)
 	}
 	if _, _, _, err := decodeSnapshot([]byte(ledger.String())); err == nil {
-		t.Error("decodeSnapshot accepted a seen ledger past its entry cap, want a bounded-decode error")
+		t.Error("decodeSnapshot accepted a publication log past its entry cap, want a bounded-decode error")
 	}
 }
 
@@ -1743,25 +1746,26 @@ func TestCollectWarnedIdentitiesClosesReverseOrderedChain(t *testing.T) {
 // the bounded snapshot walk: an unknown object key is token-skipped (and its
 // nested value never materialized) rather than failing the snapshot, so a
 // feed.json written by a NEWER binary still loads after an image rollback -
-// the file carries no schema version precisely because unknown fields are
-// dropped silently. A regression here (an error on an unrecognized key, or a
-// Skip that mis-advances the token stream) makes the older binary classify the
-// snapshot as malformed and re-baseline: the whole RSS journal window is lost
-// and every current release is marked seen without being served. The known
-// fields must still decode, and an empty "seen" object must allocate (a nil
-// ledger is the pre-journal-schema sentinel loadPrevious re-baselines on).
+// so a member this binary does not know is not by itself a reason to refuse the
+// file (the schema VERSION is what decides that). A regression here (an error on
+// an unrecognized key, or a Skip that mis-advances the token stream) makes the
+// binary classify the snapshot as malformed and re-baseline: the whole RSS
+// journal window is lost and every current release is recorded without being
+// served. The known members must still decode, and an empty "published" object
+// must ALLOCATE - nil is the structural sentinel decodeSnapshot refuses on, so an
+// honestly empty log must round-trip as {} rather than reading as a missing fact.
 func TestDecodeSnapshotSkipsUnknownFields(t *testing.T) {
-	const doc = `{"by_hash":{},"by_key":{"nyaa:42":true},"seen":{},"nyaa_feed":[],"ab_feed":[],` +
+	const doc = `{"version":2,"owners":{"1":[{"key":"nyaa:42","best":true}]},"published":{},"nyaa_feed":[],"ab_feed":[],` +
 		`"future_field":{"nested":[1,2,{"deep":"value"}],"n":null},"another":"scalar"}`
 	snap, _, reason, err := decodeSnapshot([]byte(doc))
 	if err != nil || reason != "" {
 		t.Fatalf("decodeSnapshot rejected a snapshot carrying unknown fields (reason=%q err=%v); a newer binary's snapshot must still load", reason, err)
 	}
-	if !snap.ByKey["nyaa:42"] {
-		t.Errorf("by_key = %v, want the known field decoded alongside the unknown ones", snap.ByKey)
+	if !byKeyOf(&snap)["nyaa:42"] {
+		t.Errorf("by_key = %v, want the known field decoded alongside the unknown ones", byKeyOf(&snap))
 	}
-	if snap.Seen == nil {
-		t.Error("seen decoded nil, want the empty ledger allocated (nil is the pre-journal-schema sentinel that re-baselines the journal)")
+	if snap.Published == nil {
+		t.Error("published decoded nil, want the empty log allocated (nil is the missing-fact sentinel the structural gate refuses on)")
 	}
 }
 
@@ -1777,10 +1781,18 @@ func TestDecodeSnapshotSkipsUnknownFields(t *testing.T) {
 // either.
 func TestDecodeSnapshotBoundsAggregateMapEntries(t *testing.T) {
 	var b strings.Builder
-	b.WriteString(`{"nyaa_feed":[],"ab_feed":[]`)
-	for _, name := range []string{"by_hash", "by_key", "seen"} {
+	b.WriteString(`{"version":2,"nyaa_feed":[],"ab_feed":[]`)
+	// Three DIFFERENT members, each exactly at maxSnapshotMapEntries and each
+	// individually legal: the publication log (bool values), the harvested-title
+	// cache (string values) and the ownership fact (array values, one empty array
+	// per owner so each owner costs exactly one charged entry).
+	for _, m := range []struct{ name, value string }{
+		{"published", `:true`},
+		{"titles", `:"t"`},
+		{"owners", `:[]`},
+	} {
 		b.WriteString(`,"`)
-		b.WriteString(name)
+		b.WriteString(m.name)
 		b.WriteString(`":{`)
 		for i := range maxSnapshotMapEntries {
 			if i > 0 {
@@ -1788,7 +1800,8 @@ func TestDecodeSnapshotBoundsAggregateMapEntries(t *testing.T) {
 			}
 			b.WriteString(`"`)
 			b.WriteString(strconv.Itoa(i))
-			b.WriteString(`":true`)
+			b.WriteString(`"`)
+			b.WriteString(m.value)
 		}
 		b.WriteString(`}`)
 	}

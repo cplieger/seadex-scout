@@ -86,4 +86,4 @@ indexer:
   nyaa_torznab_url: "" # Prowlarr Nyaa Torznab URL, e.g. http://prowlarr:9696/1/api ("" = off)
   ab_torznab_url: "" # Prowlarr AnimeBytes Torznab URL ("" = off)
   prowlarr_api_key: "" # Prowlarr API key; secret, never logged (${SEADEX_SCOUT_PROWLARR_KEY} ref works)
-  ab_passkey: "" # AnimeBytes passkey for AB RSS download links ("" = AB RSS off); ${SEADEX_SCOUT_AB_PASSKEY} ref works
+  ab_passkey: "" # AnimeBytes passkey for AB RSS download links ("" = AB RSS off); 32/48/56 chars; ${SEADEX_SCOUT_AB_PASSKEY} ref works

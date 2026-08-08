@@ -288,7 +288,7 @@ func TestServeStartupSnapshotFailureRendersTorznabError(t *testing.T) {
 	// malformed file's inode within the filesystem's mtime granularity, so
 	// bump the mtime or matchesFailedFile would skip the reread (production
 	// writes are atomic renames, which install a new inode instead).
-	writeSnapshotFile(t, path, &snapshot{ByHash: map[string]bool{}, ByKey: map[string]bool{}, Seen: map[string]bool{}})
+	writeSnapshotFile(t, path, &snapshot{Owners: owns(), Published: map[string]bool{}})
 	bumpMtime(t, path)
 	rec = httptest.NewRecorder()
 	ix.serve(rec, httptest.NewRequest(http.MethodGet, "/nyaa?apikey=k", nil))
@@ -739,7 +739,7 @@ func TestServeQueryWarnsOnRenderTruncation(t *testing.T) {
 		}
 	}
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{}, ByKey: map[string]bool{}, Seen: map[string]bool{},
+		Owners: owns(), Published: map[string]bool{},
 		NyaaFeed: feed,
 	})
 	log, rec := capture.New()

@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,29 +16,26 @@ import (
 )
 
 // advanceFixture is the seed snapshot the Advance tests start from: a
-// journal-schema snapshot (Seen non-nil, so loadPrevious does not baseline)
-// carrying a POPULATED search curation index, one already-seen journal item,
-// a harvested title and a harvest cursor.
+// current-schema snapshot (so loadPrevious does not baseline) carrying a
+// POPULATED per-entry curation ownership fact, one already-published journal
+// item, a harvested title and a harvest cursor.
 //
-// Every member is non-empty on purpose. Advance's whole reason for existing is
-// that it must not re-derive from a window what only a whole catalogue can
-// speak for, and a fixture whose curation index were empty could not tell a
-// correct carry-through from a blanking.
+// Every member is non-empty on purpose. The window pass must not act on absence
+// from its own input, and a fixture whose ownership fact were empty could not
+// tell a correct carry-through from a blanking.
+//
+// The ownership is attributed to THREE different AniList entries, because that
+// is what the upsert rule is about: a window that evaluates entry 7 must replace
+// entry 7's contribution and leave entries 8 and 9 alone.
 func advanceFixture(firstSeen time.Time) *snapshot {
 	return &snapshot{
-		ByHash: map[string]bool{
-			strings.Repeat("a", 40): true,
-			strings.Repeat("b", 40): false,
-		},
-		ByKey: map[string]bool{
-			"nyaa:42": true,
-			"ab:1000": false,
-			"nyaa:99": true,
-		},
-		ByPair: map[string]bool{
-			strings.Repeat("a", 40) + "|nyaa:42": true,
-		},
-		Seen:          map[string]bool{"nyaa:42": true},
+		Version: currentFeedVersion,
+		Owners: mergeOwners(
+			ownsBy(7, hashed("nyaa:42", strings.Repeat("a", 40), true)),
+			ownsBy(8, ownedRelease{Hash: strings.Repeat("b", 40)}),
+			ownsBy(9, keyed("ab:1000", false), keyed("nyaa:99", true)),
+		),
+		Published:     map[string]bool{"nyaa:42": true},
 		Titles:        map[string]string{"nyaa:42": "Harvested Show S01 [Group]"},
 		HarvestCursor: "nyaa:7",
 		NyaaFeed: []journalItem{{
@@ -83,52 +80,124 @@ func advanceTestWriter(path string, now time.Time) *FeedWriter {
 	return w
 }
 
-// TestAdvancePreservesSearchCurationIndexVerbatim is the most load-bearing
-// assertion in this file.
+// TestAdvanceUpsertsWindowCurationWithoutDisturbingTheRest is the most
+// load-bearing assertion in this file, and it INVERTS what it used to assert.
 //
-// Rebuild REPLACES the search curation index from its argument (buildCuration),
-// which is correct only against a COMPLETE catalogue. Advance is handed a
-// window - a handful of recently-changed entries - so if it went anywhere near
-// that code path the index would shrink from the whole catalogue (~8700
-// identities) to the window's few, and every Prowlarr search would stop
-// matching until the next full pass up to a reconcile interval later. The
-// failure would be invisible in the RSS feed, which is the surface these tests
-// mostly watch.
+// It used to demand that a window leave the search curation index byte-identical,
+// because the index was a persisted whole-catalogue map whose only write was a
+// wholesale replacement - so a window touching it would have shrunk ~8700
+// identities to a handful. The index is now a PROJECTION of a per-entry
+// ownership fact, and the fact is written by upsert-what-you-evaluated at either
+// scope. So the correct contract is a SUPERSET one:
 //
-// The comparison is on the RAW persisted bytes of by_hash, by_key and by_pair,
-// not on decoded maps: nothing here should touch those members at all, so the
-// strictest available assertion is the right one.
-func TestAdvancePreservesSearchCurationIndexVerbatim(t *testing.T) {
+//   - the entries this window evaluated have their contribution replaced, so a
+//     release curated this tick is searchable within one tick instead of within
+//     one reconcile interval (which is what made a proxied search answer
+//     empty-and-no-fault, indistinguishable to an arr from "SeaDex curates
+//     nothing for this show");
+//   - every entry the window did NOT evaluate keeps its stored contribution
+//     exactly, because absence from a window is not evidence.
+func TestAdvanceUpsertsWindowCurationWithoutDisturbingTheRest(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	now := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
 	writeSnapshotFile(t, path, advanceFixture(now.Add(-time.Hour)))
-	before := rawSnapshotMembers(t, path)
+	before := readSnapshotFile(t, path)
 
-	// A window carrying an entirely different identity: were the index rebuilt
-	// from it, by_key would become {"nyaa:77": true} and both other members
-	// would empty.
-	window := []seadex.Entry{nyaaEntry(8, 77, true, "New Show - S01E01 (1080p) [G].mkv")}
+	// A window carrying an entirely new entry and identity.
+	window := []seadex.Entry{nyaaEntry(88, 77, true, "New Show - S01E01 (1080p) [G].mkv")}
 	if err := advanceTestWriter(path, now).Advance(context.Background(), window, nil); err != nil {
 		t.Fatalf("Advance: %v", err)
 	}
 
-	after := rawSnapshotMembers(t, path)
-	for _, member := range []string{"by_hash", "by_key", "by_pair"} {
-		if !json.Valid(after[member]) || len(after[member]) == 0 {
-			t.Fatalf("%s missing from the advanced snapshot; Advance must carry the curation index through", member)
+	after := readSnapshotFile(t, path)
+	// Every previously-owned entry survives with its contribution intact.
+	for id, want := range before.Owners {
+		got, still := after.Owners[id]
+		if !still {
+			t.Errorf("entry %s lost its curation ownership across a window pass; absence from a window is not evidence", id)
+			continue
 		}
-		if string(after[member]) != string(before[member]) {
-			t.Errorf("%s changed across Advance:\n before %s\n  after %s\n"+
-				"a window cannot speak for the whole curation index; only a full Rebuild may rewrite it",
-				member, before[member], after[member])
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("entry %s contribution changed across a window pass:\n before %v\n  after %v", id, want, got)
 		}
 	}
+	// And the derived index still answers for every pre-existing identity.
+	for key, wantBest := range byKeyOf(&before) {
+		gotBest, ok := byKeyOf(&after)[key]
+		if !ok {
+			t.Errorf("search key %q disappeared across a window pass", key)
+			continue
+		}
+		if gotBest != wantBest {
+			t.Errorf("search key %q best marker = %v, want the stored %v (a window must never lower a marker it cannot speak for)", key, gotBest, wantBest)
+		}
+	}
+	for hash, wantBest := range byHashOf(&before) {
+		if gotBest, ok := byHashOf(&after)[hash]; !ok || gotBest != wantBest {
+			t.Errorf("search hash %q = (%v, present=%v), want the stored %v", hash, gotBest, ok, wantBest)
+		}
+	}
+	for pair := range byPairOf(&before) {
+		if !byPairOf(&after)[pair] {
+			t.Errorf("pair relation %q disappeared across a window pass", pair)
+		}
+	}
+	// The window's OWN curation is now searchable, which is the whole point.
+	if _, ok := byKeyOf(&after)["nyaa:77"]; !ok {
+		t.Errorf("the window's own release nyaa:77 is not searchable: %v", byKeyOf(&after))
+	}
+	if _, owned := after.Owners[ownerKey(88)]; !owned {
+		t.Errorf("the window's own entry 88 did not gain a curation owner: %v", after.Owners)
+	}
 
-	// The advance must still have DONE its job, or the assertions above would
-	// also hold for a no-op.
-	snap := readSnapshotFile(t, path)
-	if len(snap.NyaaFeed) != 2 {
-		t.Errorf("nyaa feed = %d items, want 2 (the carried item plus the new one)", len(snap.NyaaFeed))
+	// The advance must still have DONE its journal job, or the assertions above
+	// would also hold for a no-op.
+	if len(after.NyaaFeed) != 2 {
+		t.Errorf("nyaa feed = %d items, want 2 (the carried item plus the new one)", len(after.NyaaFeed))
+	}
+}
+
+// TestAdvanceRefusesSearchAdmissionUnderATagPolicy closes the one genuine
+// regression risk in windowing the search index.
+//
+// The catalogue pass filters catalogue-wide (splitCurationWarned closing over
+// shared info hashes) BEFORE building the index; a window closes only over
+// itself, so a warned identity reachable only through an entry OUTSIDE the window
+// is invisible to it. Admitting window keys on that evidence would mark a release
+// the operator explicitly excluded as curated for up to one reconcile interval.
+//
+// The gate is complete rather than mitigating: with any tag exclusion configured
+// the window writes NO ownership at all (the reconcile stays the only writer of
+// it, which is exactly the pre-rewrite behaviour), and with the default empty
+// policy nothing is warned anywhere so the window admits freely.
+func TestAdvanceRefusesSearchAdmissionUnderATagPolicy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	now := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
+	writeSnapshotFile(t, path, advanceFixture(now.Add(-time.Hour)))
+	before := readSnapshotFile(t, path)
+
+	w := newExcludingTestWriter(path)
+	w.now = func() time.Time { return now }
+
+	// Nothing in this window is tagged, so a per-torrent filter would admit it.
+	// It is refused anyway, because the window cannot prove the identity is not
+	// warned through an entry it never saw.
+	window := []seadex.Entry{nyaaEntry(88, 77, true, "Clean Show - S01E01 (1080p) [G].mkv")}
+	if err := w.Advance(context.Background(), window, nil); err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+
+	after := readSnapshotFile(t, path)
+	if !reflect.DeepEqual(after.Owners, before.Owners) {
+		t.Errorf("a window pass wrote curation ownership under a tag policy:\n before %v\n  after %v", before.Owners, after.Owners)
+	}
+	if _, ok := byKeyOf(&after)["nyaa:77"]; ok {
+		t.Error("the window admitted a key into the search index while a tag policy was configured; its warned closure is only window-wide")
+	}
+	// The RSS half still ran: the journal is not gated on the tag closure being
+	// complete, because a warned torrent IN the window is filtered directly.
+	if !slices.Contains(feedKeys(after.NyaaFeed), "nyaa:77") {
+		t.Errorf("nyaa feed = %v, want the release still journaled", feedKeys(after.NyaaFeed))
 	}
 }
 
@@ -165,7 +234,7 @@ func TestAdvancePreservesTitlesAndHarvestCursorVerbatim(t *testing.T) {
 // journal transitions in one pass, because they are one decision: what the
 // window may change.
 //
-//   - a genuinely new torrent (absent from the seen ledger) is admitted,
+//   - a genuinely new torrent (absent from the publication log) is admitted,
 //     stamped now, and its identity recorded;
 //   - a torrent already in the ledger is NOT re-admitted, however the window
 //     presents it - the ledger is never pruned, so a re-admission would
@@ -185,7 +254,7 @@ func TestAdvanceJournalsNewExpiresOldAndNeverReadmits(t *testing.T) {
 		AniListID: 9,
 		item:      item{Title: "Aged Out S01", GUID: "nyaa:99", PubDate: now.Add(-feedJournalMaxAge - time.Minute)},
 	})
-	fixture.Seen["nyaa:99"] = true
+	fixture.Published["nyaa:99"] = true
 	writeSnapshotFile(t, path, fixture)
 
 	// The window re-presents the already-seen nyaa:42 AND a genuinely new
@@ -216,13 +285,13 @@ func TestAdvanceJournalsNewExpiresOldAndNeverReadmits(t *testing.T) {
 	if counts["nyaa:99"] != 0 {
 		t.Errorf("nyaa:99 is still journaled, want it expired past feedJournalMaxAge")
 	}
-	if !snap.Seen["nyaa:77"] {
-		t.Errorf("seen ledger missing nyaa:77 after admission: %v", snap.Seen)
+	if !snap.Published["nyaa:77"] {
+		t.Errorf("publication log missing nyaa:77 after admission: %v", snap.Published)
 	}
 	// An expired item's identity stays in the ledger; that is what stops it
 	// ever re-entering as new.
-	if !snap.Seen["nyaa:99"] {
-		t.Errorf("seen ledger dropped the expired nyaa:99: %v (it could then re-enter as new)", snap.Seen)
+	if !snap.Published["nyaa:99"] {
+		t.Errorf("publication log dropped the expired nyaa:99: %v (it could then re-enter as new)", snap.Published)
 	}
 	for i := range snap.NyaaFeed {
 		if snap.NyaaFeed[i].Key != "nyaa:77" {
@@ -267,7 +336,7 @@ func TestAdvanceLeavesBothFeedsSortedNewestFirst(t *testing.T) {
 			PubDate: now.Add(-3 * time.Hour),
 		},
 	}}
-	fixture.Seen["ab:1000"] = true
+	fixture.Published["ab:1000"] = true
 	writeSnapshotFile(t, path, fixture)
 
 	// AnimeBytes must be configured AND passkeyed for its journal to grow.
@@ -323,7 +392,7 @@ func TestAdvanceLeavesBothFeedsSortedNewestFirst(t *testing.T) {
 // while changing nothing.
 //
 // Baselining from a window would be the damaging alternative. The baseline path
-// records "everything currently curated" in the seen ledger, and that ledger is
+// records "everything currently curated" in the publication log, and that ledger is
 // never pruned - so from a window it would burn the window's identities as
 // already-served (they could then never appear on RSS) and discard the entire
 // journal in the same write.
@@ -342,7 +411,7 @@ func TestAdvanceDefersOverUnusableSnapshot(t *testing.T) {
 		"malformed snapshot": {
 			seed: func(t *testing.T, path string) string {
 				t.Helper()
-				const bad = `{"seen":`
+				const bad = `{"published":`
 				if err := os.WriteFile(path, []byte(bad), 0o600); err != nil {
 					t.Fatalf("write malformed snapshot: %v", err)
 				}
@@ -350,15 +419,15 @@ func TestAdvanceDefersOverUnusableSnapshot(t *testing.T) {
 			},
 			wantWarn: true,
 		},
-		"pre-journal-schema snapshot": {
-			// A snapshot with no seen ledger is the retired schema, which
-			// loadPrevious also reports as baseline: the window must not
-			// migrate it either.
+		"unsupported schema version": {
+			// A snapshot at any other version re-baselines (settled
+			// no-rollback-no-migration), which loadPrevious also reports as
+			// baseline: the window must not migrate it either.
 			seed: func(t *testing.T, path string) string {
 				t.Helper()
-				const old = `{"by_hash":{},"by_key":{},"nyaa_feed":[],"ab_feed":[]}`
+				const old = `{"version":1,"owners":{},"published":{},"nyaa_feed":[],"ab_feed":[]}`
 				if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
-					t.Fatalf("write legacy snapshot: %v", err)
+					t.Fatalf("write foreign-version snapshot: %v", err)
 				}
 				return old
 			},
@@ -403,7 +472,7 @@ func TestAdvanceDefersOverUnusableSnapshot(t *testing.T) {
 // The feed one is obvious: an excluded release must not be journaled, or it is
 // servable to the arrs for up to a full reconcile interval. The ledger one is
 // the reason this test is not just a count assertion - folding an excluded
-// identity into the never-pruned seen ledger would make the exclusion
+// identity into the never-pruned publication log would make the exclusion
 // PERMANENT, so an operator who later removed the tag from filters.exclude_tags
 // could never get that release back on RSS.
 func TestAdvanceHonoursExcludeTags(t *testing.T) {
@@ -430,9 +499,9 @@ func TestAdvanceHonoursExcludeTags(t *testing.T) {
 	if !slices.Contains(keys, "nyaa:78") {
 		t.Errorf("nyaa feed = %v, want the unexcluded nyaa:78 admitted (the exclusion must be per-torrent, not per-window)", keys)
 	}
-	if snap.Seen["nyaa:77"] {
-		t.Errorf("excluded release nyaa:77 entered the never-pruned seen ledger: %v; "+
-			"un-excluding the tag could then never restore it", snap.Seen)
+	if snap.Published["nyaa:77"] {
+		t.Errorf("excluded release nyaa:77 entered the never-pruned publication log: %v; "+
+			"un-excluding the tag could then never restore it", snap.Published)
 	}
 }
 
@@ -476,8 +545,8 @@ func TestAdvanceExcludesAWarnedIdentityWithinTheWindow(t *testing.T) {
 			t.Errorf("%s was journaled: %v; it shares an info hash with a warned occurrence, "+
 				"so the full pass will retract it while the ledger keeps it out forever", key, keys)
 		}
-		if snap.Seen[key] {
-			t.Errorf("%s entered the never-pruned seen ledger: %v", key, snap.Seen)
+		if snap.Published[key] {
+			t.Errorf("%s entered the never-pruned publication log: %v", key, snap.Published)
 		}
 	}
 }
@@ -536,7 +605,7 @@ func TestAdvanceEmptyWindowIsANoOpWrite(t *testing.T) {
 	}
 
 	after := rawSnapshotMembers(t, path)
-	for _, member := range []string{"by_hash", "by_key", "by_pair", "seen", "titles", "harvest_cursor", "nyaa_feed"} {
+	for _, member := range []string{"owners", "published", "titles", "harvest_cursor", "nyaa_feed"} {
 		if string(after[member]) != string(before[member]) {
 			t.Errorf("%s changed across an empty Advance:\n before %s\n  after %s", member, before[member], after[member])
 		}
@@ -617,74 +686,24 @@ func feedKeys(feed []journalItem) []string {
 	return keys
 }
 
-// TestFilterWindowByTagsDropsEmptiedEntries pins the unit under
-// TestAdvanceHonoursExcludeTags: an entry whose every torrent is excluded
-// leaves the window entirely (rather than surviving with an empty torrent
-// list, which would make the entry count lie), while a partially-excluded
-// entry survives carrying only its kept torrents.
-func TestFilterWindowByTagsDropsEmptiedEntries(t *testing.T) {
-	t.Parallel()
-	tagged := func(alID, viewID int, tags ...string) seadex.Entry {
-		e := nyaaEntry(alID, viewID, true, "Show - S01E01 (1080p) [G].mkv")
-		e.Torrents[0].Tags = tags
-		return e
-	}
-	// One entry with two torrents, only one of them excluded.
-	mixed := tagged(3, 30, "broken")
-	mixed.Torrents = append(mixed.Torrents, seadex.Torrent{
-		Tracker: "Nyaa", URL: "https://nyaa.si/view/31", IsBest: true,
-		Files: []seadex.File{{Name: "Show - S01E02 (1080p) [G].mkv", Length: 1}},
-	})
-
-	window := []seadex.Entry{
-		tagged(1, 10),           // untagged, kept whole
-		tagged(2, 20, "broken"), // wholly excluded, dropped
-		mixed,                   // partially excluded, kept narrowed
-	}
-	got := filterWindowByTags(window, feedExcludesWarnings())
-
-	wantIDs := []int{1, 3}
-	if len(got) != len(wantIDs) {
-		t.Fatalf("filterWindowByTags returned %d entries, want %d (%v)", len(got), len(wantIDs), entryIDsOf(got))
-	}
-	for i, want := range wantIDs {
-		if got[i].AniListID != want {
-			t.Errorf("entry %d AniList ID = %d, want %d", i, got[i].AniListID, want)
-		}
-	}
-	if n := len(got[1].Torrents); n != 1 {
-		t.Errorf("partially-excluded entry kept %d torrents, want 1", n)
-	}
-	if len(got[1].Torrents) == 1 && !strings.HasSuffix(got[1].Torrents[0].URL, "/31") {
-		t.Errorf("kept torrent URL = %q, want the unexcluded /31", got[1].Torrents[0].URL)
-	}
-	// The caller's slice must be untouched: Advance uses window's own length in
-	// its log line and the tick reports on it too.
-	if n := len(window[2].Torrents); n != 2 {
-		t.Errorf("filterWindowByTags mutated the caller's entry (torrents = %d, want 2)", n)
-	}
-}
-
-// entryIDsOf renders a window's AniList IDs for a failure message.
-func entryIDsOf(entries []seadex.Entry) string {
-	ids := make([]string, 0, len(entries))
-	for i := range entries {
-		ids = append(ids, strconv.Itoa(entries[i].AniListID))
-	}
-	return "[" + strings.Join(ids, " ") + "]"
-}
-
-// TestAdvanceRefusesACarriedItemWhoseGUIDLostItsIdentity pins the GUID-identity
-// gate on the carry path, which both of the full pass's carry arms apply and the
-// reader applies again when it rebuilds download links.
+// TestAdvanceKeepsACarriedItemWhoseGUIDLostItsIdentity pins the resolution of a
+// genuine DISAGREEMENT between the two passes, and it inverts what the tick used
+// to do.
 //
-// The GUID is the only thing tying a journal row to a real torrent page, and it
-// comes out of a file an operator (or anything with write access to the volume)
-// can edit. A row whose stored GUID no longer proves its key is refused
-// everywhere else, so a tick that kept re-persisting it would resurrect a record
-// the full pass drops - for the item's whole 14-day window - while the reader
-// served nothing for it.
-func TestAdvanceRefusesACarriedItemWhoseGUIDLostItsIdentity(t *testing.T) {
+// The tick applied the GUID-identity gate to every carried item and DROPPED on
+// failure, while the catalogue pass routed a still-curated item with an unproven
+// GUID to a fresh render that SELF-HEALS the GUID. Under a never-pruned
+// publication log the tick's verdict was the irreversible one, so a tick
+// permanently discarded an item the reconcile would have repaired - reachable
+// from a legacy, hand-edited or corrupt GUID.
+//
+// Only the reconcile holds the evidence to repair it (a fresh render needs every
+// occurrence of the key), so the sound window verdict is to leave it alone. That
+// costs nothing at the serve surface: the reader applies the same GUID-to-Key
+// invariant when it rebuilds download links, so an item with an unproven GUID is
+// not served whatever the file holds - and the reconcile decides within one
+// reconcile interval.
+func TestAdvanceKeepsACarriedItemWhoseGUIDLostItsIdentity(t *testing.T) {
 	for name, guid := range map[string]string{
 		"a GUID naming another torrent id": "https://nyaa.si/view/9999",
 		"a foreign host":                   "https://evil.example/view/42",
@@ -699,14 +718,23 @@ func TestAdvanceRefusesACarriedItemWhoseGUIDLostItsIdentity(t *testing.T) {
 			writeSnapshotFile(t, path, fixture)
 
 			// A window carrying an unrelated new release, so the pass persists.
-			window := []seadex.Entry{nyaaEntry(8, 77, true, "New Nyaa - S01E01 (1080p) [G].mkv")}
+			window := []seadex.Entry{nyaaEntry(88, 77, true, "New Nyaa - S01E01 (1080p) [G].mkv")}
 			if err := advanceTestWriter(path, now).Advance(context.Background(), window, nil); err != nil {
 				t.Fatalf("Advance: %v", err)
 			}
 
 			keys := feedKeys(readSnapshotFile(t, path).NyaaFeed)
-			if slices.Contains(keys, "nyaa:42") {
-				t.Errorf("nyaa feed = %v, want the tampered nyaa:42 dropped (the full pass drops it and the reader refuses it)", keys)
+			if guid == "" {
+				// An empty GUID is refused by the shared DECODE gate, not by the
+				// carry path: validJournalRecord requires a Key and a FirstSeen,
+				// and the item's own GUID-less render is dropped at load by
+				// pruneJournalFeed only when it also fails those. It survives
+				// here for the same reason - the reconcile will re-render it.
+				_ = keys
+			}
+			if !slices.Contains(keys, "nyaa:42") {
+				t.Errorf("nyaa feed = %v, want the unproven-GUID nyaa:42 KEPT: only the reconcile can re-render and self-heal it, "+
+					"and a window drop is permanent under the never-pruned publication log", keys)
 			}
 			if !slices.Contains(keys, "nyaa:77") {
 				t.Errorf("nyaa feed = %v, want the untouched new item still admitted", keys)

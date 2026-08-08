@@ -352,12 +352,12 @@ func harvestCursorKey(g harvestGroup) string {
 // the rotation at the head) for anything else. The cursor is carried into every
 // future snapshot verbatim - a rebuild with no pending group never overwrites
 // it - so a garbage or unbounded value from a hand-edited or corrupted snapshot
-// would persist forever, the hazard the seen-ledger and title-cache limits
-// (seenLedgerWithinLimits / retainValidTitles) already close for the other
+// would persist forever, the hazard the publication-log and title-cache limits
+// (publicationLogWithinLimits / retainValidTitles) already close for the other
 // verbatim-carried fields.
 //
 // The second return names WHY the value was dropped ("" when nothing was), so
-// the caller can report a rebaselined cursor the way the seen ledger and the
+// the caller can report a rebaselined cursor the way the publication log and the
 // info-URL scrub already report a tampered persisted field: a silent rebaseline
 // restarts the rotation at the head, and because the value is re-persisted each
 // rebuild a recurring corruption never self-heals.

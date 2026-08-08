@@ -80,7 +80,11 @@ type snapshotCache struct {
 	log       *slog.Logger
 	path      string
 	abPasskey string
-	snap      snapshot
+	// cur is the search index PROJECTED from snap.Owners at install time (see
+	// curation). It is derived rather than persisted, so it is stored beside the
+	// snapshot rather than inside it: nothing can install one without the other.
+	cur  curation
+	snap snapshot
 	// mu guards the published snapshot fields read per request: snap,
 	// snapID, snapFailed, and snapFailedWarned (see the per-field comments).
 	mu sync.RWMutex
@@ -221,14 +225,18 @@ func (c *snapshotCache) warmPending() bool {
 	}
 }
 
-// curation returns the three curation maps a search filters against. The maps
-// are safe to read after the lock is released: refresh installs a fresh snapshot
-// and never mutates the loaded maps in place (the same invariant feed documents
-// for the journal slices).
+// curation returns the three curation maps a search filters against. They are a
+// PROJECTION of the persisted per-entry ownership fact, derived once per install
+// (installSnapshot) rather than read out of the file - so a tampered snapshot
+// cannot carry a search index that disagrees with the ownership it claims to
+// derive from, and there is no separate index for a rebuild to forget to update.
+// The maps are safe to read after the lock is released: installSnapshot installs
+// a freshly derived set and never mutates a published one in place (the same
+// invariant feed documents for the journal slices).
 func (c *snapshotCache) curation() curation {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return curation{byHash: c.snap.ByHash, byKey: c.snap.ByKey, byPair: c.snap.ByPair}
+	return c.cur
 }
 
 // feed returns the loaded journal for a tracker scope, or nil for an unknown
@@ -492,7 +500,8 @@ func (c *snapshotCache) refresh(ctx context.Context) {
 		return
 	}
 	c.log.Info("indexer feed snapshot loaded",
-		"path", c.path, "hashes", len(snap.ByHash), "keys", len(snap.ByKey),
+		"path", c.path, "owners", len(snap.Owners),
+		"hashes", len(c.curation().byHash), "keys", len(c.curation().byKey),
 		"nyaa_feed", len(snap.NyaaFeed), "ab_feed", len(snap.ABFeed))
 }
 
@@ -575,6 +584,7 @@ func (c *snapshotCache) installSnapshot(info os.FileInfo, snap *snapshot) bool {
 		return false
 	}
 	c.snap = *snap
+	c.cur = projectCuration(snap.Owners)
 	c.snapID = atomicfile.Identify(info)
 	// A successful install ends any startup snapshot-unavailable state and
 	// re-arms its per-onset WARN (see snapFailed).
@@ -657,7 +667,7 @@ func (c *snapshotCache) readSnapshot(ctx context.Context, f *os.File) (snapshot,
 		c.log.Warn("indexer feed snapshot malformed; keeping current feed", "path", c.path, "reason", reason)
 		return snapshot{}, false, true
 	}
-	reportTransitionalSchema(c.log, c.path, &snap)
+	reportUnsupportedVersion(c.log, c.path, &snap)
 	// A persisted FirstSeen ahead of the wall clock is repaired on the writer's
 	// carry path (prepareCarriedItem), but the reader installs the decoded feed
 	// directly: without the same correction a restored future-skewed or
@@ -709,40 +719,28 @@ func (c *snapshotCache) warnBlankedInfoURLs(scrub snapshotScrub) {
 	}
 }
 
-// reportTransitionalSchema reports (and where needed neutralizes) a loaded
-// snapshot written by an older binary. Both arms are one INFO per load: the
-// state is real but transitional, it clears on the next cycle's snapshot
-// rewrite, and neither is an operator fault.
+// reportUnsupportedVersion reports a loaded snapshot written at a schema version
+// this binary does not read, and NEUTRALIZES it: every member is zeroed, so
+// searches answer no-match and both RSS feeds serve empty until the next cycle
+// rewrites the file. One INFO per load - the state is real but transitional, it
+// clears on the next cycle's snapshot rewrite, and it is not an operator fault.
 //
-//   - Seen == nil is the retired pre-journal schema. The journal contract (see
-//     loadPrevious) treats its feeds as absent, so the curation maps are kept
-//     (searches work) while the RSS feeds are dropped: an upgrade must never
-//     re-broadcast the whole legacy catalogue as newly curated releases.
-//   - ByPair == nil beside a non-empty ByHash is the pre-relation schema, and a
-//     REACHABLE upgrade window: a released binary persisted no by_pair key, so
-//     the first server start after this branch ships loads a snapshot whose
-//     ByPair decodes nil. lookup then fails closed for every dual-signal item -
-//     and a healthy Prowlarr Nyaa result carries BOTH an info hash and a
-//     nyaa.si/view/{id} guid, so EVERY Nyaa search answers an empty 200 feed,
-//     indistinguishable to the arr from "SeaDex curates nothing for this show".
-//     Fail-closed is correct (absence of the co-membership relation is not
-//     permission to fall back to the weaker per-signal checks), so the serving
-//     decision is unchanged; what was missing is any way for an operator to tell
-//     this local schema fault from a genuine no-match, since the only evidence
-//     was curated=0 on the request line (l-f170). An EMPTY curation set carries
-//     no signal (a fresh install curates nothing yet) and stays silent.
-func reportTransitionalSchema(log *slog.Logger, path string, snap *snapshot) {
-	if snap.Seen == nil {
-		if len(snap.NyaaFeed) > 0 || len(snap.ABFeed) > 0 {
-			log.Info("indexer feed snapshot is pre-journal schema; serving empty RSS feeds until the next cycle re-baselines",
-				"path", path)
-		}
-		snap.NyaaFeed, snap.ABFeed = nil, nil
+// Re-baselining is the right answer rather than refusing (which would answer a
+// Torznab error) because this file is a MATERIALIZED VIEW: the cost is one
+// empty-RSS window, and the next pass re-derives the catalogue half of it from
+// SeaDex. Reading it instead would be worse than either: the members that cannot
+// be re-derived - the permanent publication log, the journals' FirstSeen and
+// harvested titles - are exactly the ones a differently-versioned binary may
+// have written in a shape this one misreads.
+func reportUnsupportedVersion(log *slog.Logger, path string, snap *snapshot) {
+	if snap.supportedVersion() {
+		return
 	}
-	if len(snap.ByHash) > 0 && snap.ByPair == nil {
-		log.Info("indexer feed snapshot predates the pair relation; searches match single-signal items only until the next cycle rewrites it",
-			"path", path, "curated_hashes", len(snap.ByHash))
-	}
+	// The version is a small integer from our own schema field, so it is safe
+	// to log verbatim.
+	log.Info("indexer feed snapshot has an unsupported schema version; serving an empty feed until the next cycle rewrites it",
+		"path", path, "version", snap.Version, "supported", currentFeedVersion)
+	*snap = snapshot{}
 }
 
 // normalizeSnapshotItems re-canonicalizes each persisted item's non-derived

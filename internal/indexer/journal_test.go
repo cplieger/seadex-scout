@@ -70,26 +70,26 @@ func newLoggedExcludingTestWriter(path string, log *slog.Logger) *FeedWriter {
 	}, log, nil)
 }
 
-// emptyLedgerJSON is the minimal journal-schema snapshot (an empty but PRESENT
-// seen ledger), the seed that bypasses the first-run baseline in tests.
-const emptyLedgerJSON = `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[],"ab_feed":[]}`
+// emptyFeedJSON is the minimal journal-schema snapshot (an empty but PRESENT
+// publication log), the seed that bypasses the first-run baseline in tests.
+const emptyFeedJSON = `{"version":2,"owners":{},"published":{},"nyaa_feed":[],"ab_feed":[]}`
 
-// seedEmptyLedger writes a journal-schema snapshot with an EMPTY seen ledger
+// seedEmptyFeed writes a journal-schema snapshot with an EMPTY publication log
 // at path, so the next Rebuild treats every curated torrent as newly curated -
 // bypassing the first-run baseline (which would record everything as seen and
 // serve an empty journal).
-func seedEmptyLedger(t *testing.T, path string) {
+func seedEmptyFeed(t *testing.T, path string) {
 	t.Helper()
-	if err := os.WriteFile(path, []byte(emptyLedgerJSON), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(emptyFeedJSON), 0o600); err != nil {
 		t.Fatalf("seed empty ledger: %v", err)
 	}
 }
 
-// seedLedgerWithCursor is seedEmptyLedger plus a persisted harvest rotation
+// seedLedgerWithCursor is seedEmptyFeed plus a persisted harvest rotation
 // cursor, for tests pinning where the next rebuild's title harvest resumes.
 func seedLedgerWithCursor(t *testing.T, path, cursor string) {
 	t.Helper()
-	snap := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[],"ab_feed":[],"harvest_cursor":` + strconv.Quote(cursor) + `}`
+	snap := `{"version":2,"owners":{},"published":{},"nyaa_feed":[],"ab_feed":[],"harvest_cursor":` + strconv.Quote(cursor) + `}`
 	if err := os.WriteFile(path, []byte(snap), 0o600); err != nil {
 		t.Fatalf("seed ledger with cursor: %v", err)
 	}
@@ -109,22 +109,33 @@ func readSnapshotFile(t *testing.T, path string) snapshot {
 	return snap
 }
 
-// writeSnapshotFile persists a hand-built snapshot for tests that seed journal
+// writeSnapshotFile persists a hand-built snapshot for tests that seed feed
 // state directly (titles, first-seen times).
 //
-// A post-journal snapshot (Seen non-nil) must satisfy the shared decode gate's
-// journal-record invariant - every feed item carries a Key and a nonzero
-// FirstSeen (validJournalRecord, h-f2) - or that item is dropped at decode.
-// Fixtures that do not care about the timestamp therefore get one stamped here,
-// so each test keeps expressing only the property it is about; a fixture that
-// sets FirstSeen itself (a skewed or aged clock) is left alone, and a
-// deliberately keyless item stays keyless.
+// It stamps the CURRENT schema version when a fixture leaves it zero, so each
+// test keeps expressing only the property it is about; a fixture testing the
+// version envelope itself sets Version explicitly and is left alone. It also
+// allocates the two required facts a fixture omitted, since a document naming
+// neither is structurally invalid by design.
+//
+// Every feed item must satisfy the shared decode gate's journal-record
+// invariant - a Key and a nonzero FirstSeen (validJournalRecord, h-f2) - or that
+// item is dropped at decode. Fixtures that do not care about the timestamp get
+// one stamped here; a fixture that sets FirstSeen itself (a skewed or aged
+// clock) is left alone, and a deliberately keyless item stays keyless.
 func writeSnapshotFile(t *testing.T, path string, snap *snapshot) {
 	t.Helper()
-	if snap.Seen != nil {
-		stampFixtureFirstSeen(snap.NyaaFeed)
-		stampFixtureFirstSeen(snap.ABFeed)
+	if snap.Version == 0 {
+		snap.Version = currentFeedVersion
 	}
+	if snap.Owners == nil {
+		snap.Owners = map[string][]ownedRelease{}
+	}
+	if snap.Published == nil {
+		snap.Published = map[string]bool{}
+	}
+	stampFixtureFirstSeen(snap.NyaaFeed)
+	stampFixtureFirstSeen(snap.ABFeed)
 	data, err := json.Marshal(snap)
 	if err != nil {
 		t.Fatalf("marshal snapshot: %v", err)
@@ -178,11 +189,11 @@ func TestRebuildBaselinesFreshInstall(t *testing.T) {
 	if len(snap.NyaaFeed) != 0 || len(snap.ABFeed) != 0 {
 		t.Errorf("baseline feeds = nyaa %d / ab %d items, want both empty", len(snap.NyaaFeed), len(snap.ABFeed))
 	}
-	if !snap.Seen["nyaa:42"] {
-		t.Errorf("seen ledger missing nyaa:42 after baseline: %v", snap.Seen)
+	if !snap.Published["nyaa:42"] {
+		t.Errorf("publication log missing nyaa:42 after baseline: %v", snap.Published)
 	}
-	if len(snap.ByKey) != 1 {
-		t.Errorf("search curation keys = %d, want 1 (search must still cover the whole catalogue)", len(snap.ByKey))
+	if len(byKeyOf(&snap)) != 1 {
+		t.Errorf("search curation keys = %d, want 1 (search must still cover the whole catalogue)", len(byKeyOf(&snap)))
 	}
 
 	// A second rebuild over the same catalogue stays empty: nothing is new.
@@ -195,7 +206,7 @@ func TestRebuildBaselinesFreshInstall(t *testing.T) {
 }
 
 // TestRebuildBaselinesPreJournalSchema pins the schema migration: a previous
-// snapshot without a seen ledger (the retired whole-catalogue window model) is
+// snapshot without a publication log (the retired whole-catalogue window model) is
 // treated as absent - the journal baselines empty even though the old snapshot
 // carried feed items, and the old items never re-enter.
 func TestRebuildBaselinesPreJournalSchema(t *testing.T) {
@@ -213,8 +224,8 @@ func TestRebuildBaselinesPreJournalSchema(t *testing.T) {
 	if len(snap.NyaaFeed) != 0 {
 		t.Errorf("feed after old-schema migration = %d items, want 0 (baseline-empty)", len(snap.NyaaFeed))
 	}
-	if !snap.Seen["nyaa:42"] {
-		t.Errorf("seen ledger missing the migrated catalogue: %v", snap.Seen)
+	if !snap.Published["nyaa:42"] {
+		t.Errorf("publication log missing the migrated catalogue: %v", snap.Published)
 	}
 	if !rec.Contains("indexer feed journal baselined") {
 		t.Errorf("baseline not logged; log output:\n%s", strings.Join(rec.Messages(), "\n"))
@@ -235,8 +246,8 @@ func TestRebuildBaselinesMalformedSnapshot(t *testing.T) {
 	if err := NewFeedWriter(&FeedWriterConfig{Path: path}, log, nil).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
-	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 || !snap.Seen["nyaa:42"] {
-		t.Errorf("malformed snapshot did not re-baseline: feed=%d seen=%v", len(snap.NyaaFeed), snap.Seen)
+	if snap := readSnapshotFile(t, path); len(snap.NyaaFeed) != 0 || !snap.Published["nyaa:42"] {
+		t.Errorf("malformed snapshot did not re-baseline: feed=%d seen=%v", len(snap.NyaaFeed), snap.Published)
 	}
 	if !rec.Contains("previous feed snapshot malformed; re-baselining the feed journal") {
 		t.Errorf("malformed snapshot not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
@@ -244,7 +255,7 @@ func TestRebuildBaselinesMalformedSnapshot(t *testing.T) {
 }
 
 // TestRebuildJournalsNewlyCurated pins the journal growth contract: a torrent
-// newly present in the curation set (absent from the seen ledger) enters the
+// newly present in the curation set (absent from the publication log) enters the
 // feed ONCE with its first-seen timestamp (PubDate mirrors it), stays in the
 // journal on following rebuilds with FirstSeen unchanged, and an item already
 // baselined never enters.
@@ -300,14 +311,14 @@ func TestRebuildJournalsNewlyCurated(t *testing.T) {
 
 // TestRebuildPrunesAgedItemsAndTitles pins the prune contract: an item older
 // than feedJournalMaxAge leaves the journal AND drops its cached harvested
-// title, while the seen ledger keeps its identity - so the pruned item can
+// title, while the publication log keeps its identity - so the pruned item can
 // never re-enter the journal as new even though SeaDex still curates it.
 func TestRebuildPrunesAgedItemsAndTitles(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	w := newTestWriter(path, "", false)
 	t0 := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
 	w.now = func() time.Time { return t0 }
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -336,7 +347,7 @@ func TestRebuildPrunesAgedItemsAndTitles(t *testing.T) {
 	}
 
 	// Past the window the item ages out, its title cache entry goes with it,
-	// and the seen ledger keeps the identity.
+	// and the publication log keeps the identity.
 	t2 := t0.Add(feedJournalMaxAge + time.Hour)
 	w.now = func() time.Time { return t2 }
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
@@ -349,8 +360,8 @@ func TestRebuildPrunesAgedItemsAndTitles(t *testing.T) {
 	if len(snap.Titles) != 0 {
 		t.Errorf("titles after prune = %v, want empty (the aged-out item drops its cached title)", snap.Titles)
 	}
-	if !snap.Seen["nyaa:42"] {
-		t.Errorf("seen ledger lost the pruned identity: %v", snap.Seen)
+	if !snap.Published["nyaa:42"] {
+		t.Errorf("publication log lost the pruned identity: %v", snap.Published)
 	}
 
 	// The torrent is still curated: it must never resurrect as new.
@@ -385,7 +396,7 @@ func TestRebuildSharedTorrentMergesBestWins(t *testing.T) {
 		return EntryInfo{IsMovie: alID == 2}
 	}
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, info); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -515,7 +526,7 @@ func TestRenderJournalItemSortsCategoryUnion(t *testing.T) {
 // admit the REAL Nyaa torrent 111 into the search curation set and serve a
 // canonical nyaa.si download link for it on RSS). The gated torrents surface
 // on the unresolvable counter instead of vanishing silently, and their
-// identities stay OUT of the seen ledger, so the same torrent republished
+// identities stay OUT of the publication log, so the same torrent republished
 // with its real tracker URL still journals as new.
 func TestRebuildRejectsForeignHostTrackerURLs(t *testing.T) {
 	entries := []seadex.Entry{{
@@ -532,7 +543,7 @@ func TestRebuildRejectsForeignHostTrackerURLs(t *testing.T) {
 		},
 	}}
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	log, rec := capture.New()
 	w := newTestWriter(path, "", false)
 	w.log = log
@@ -543,11 +554,11 @@ func TestRebuildRejectsForeignHostTrackerURLs(t *testing.T) {
 	if len(snap.NyaaFeed) != 0 {
 		t.Errorf("feed = %d items, want 0 (foreign-host URLs must not journal)", len(snap.NyaaFeed))
 	}
-	if len(snap.ByKey) != 0 || len(snap.ByHash) != 0 {
-		t.Errorf("curation set = %d keys / %d hashes, want empty (no authorization from a foreign URL)", len(snap.ByKey), len(snap.ByHash))
+	if len(byKeyOf(&snap)) != 0 || len(byHashOf(&snap)) != 0 {
+		t.Errorf("curation set = %d keys / %d hashes, want empty (no authorization from a foreign URL)", len(byKeyOf(&snap)), len(byHashOf(&snap)))
 	}
-	if len(snap.Seen) != 0 {
-		t.Errorf("seen ledger = %v, want empty (a later legitimate republish must journal as new)", snap.Seen)
+	if len(snap.Published) != 0 {
+		t.Errorf("publication log = %v, want empty (a later legitimate republish must journal as new)", snap.Published)
 	}
 	if !rec.Contains("indexer feed snapshot written") {
 		t.Fatalf("no snapshot log line; log output:\n%s", strings.Join(rec.Messages(), "\n"))
@@ -580,7 +591,7 @@ func TestRebuildKeepsHashedForeignHostTorrentOutOfLedger(t *testing.T) {
 		}},
 	}}
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -588,8 +599,8 @@ func TestRebuildKeepsHashedForeignHostTorrentOutOfLedger(t *testing.T) {
 	if len(snap.NyaaFeed) != 0 {
 		t.Errorf("feed = %d items, want 0 (a foreign-host URL must not journal)", len(snap.NyaaFeed))
 	}
-	if len(snap.Seen) != 0 {
-		t.Errorf("seen ledger = %v, want empty (an unjournalable torrent's hash must not consume novelty)", snap.Seen)
+	if len(snap.Published) != 0 {
+		t.Errorf("publication log = %v, want empty (an unjournalable torrent's hash must not consume novelty)", snap.Published)
 	}
 }
 
@@ -615,7 +626,7 @@ func TestRebuildJournalsReleaseAfterTrackerURLCorrected(t *testing.T) {
 		}},
 	}}
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	w := newTestWriter(path, "", false)
 	if err := w.Rebuild(context.Background(), gated, nil); err != nil {
 		t.Fatalf("Rebuild (gated URL): %v", err)
@@ -633,10 +644,10 @@ func TestRebuildJournalsReleaseAfterTrackerURLCorrected(t *testing.T) {
 }
 
 // TestRebuildBaselineKeylessTorrentDoesNotConsumeNovelty pins the same keyless
-// guard on the OTHER entry point: the fresh-install baseline (allIdentities),
+// guard on the OTHER entry point: the fresh-install baseline (baselinePublications),
 // which runs before any ledger exists and so bypasses journalIfNew entirely. A
 // supported-tracker record whose URL is foreign or unparseable has no key, so its
-// info hash must NOT enter the never-pruned seen ledger - otherwise the record
+// info hash must NOT enter the never-pruned publication log - otherwise the record
 // can never journal after SeaDex corrects the URL and the arr never sees the
 // release on RSS.
 func TestRebuildBaselineKeylessTorrentDoesNotConsumeNovelty(t *testing.T) {
@@ -682,7 +693,7 @@ func TestRebuildDropsUnknownTracker(t *testing.T) {
 		}},
 	}}
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	log, rec := capture.New()
 	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: "http://prowlarr/2/api"}}, log, nil).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -712,7 +723,7 @@ func TestRebuildIdlessABNotCountedAsPasskeySkip(t *testing.T) {
 		}},
 	}}
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	log, rec := capture.New()
 	if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABTorznabURL: "http://prowlarr/2/api"}}, log, nil).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
@@ -741,7 +752,7 @@ func TestRebuildUnpackedSeasonListsPerEpisode(t *testing.T) {
 		},
 	}}
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -795,7 +806,7 @@ func TestRebuildJournalItemShape(t *testing.T) {
 		return EntryInfo{Title: "Frieren: Beyond Journey's End", Season: 1, SeasonKnown: true}
 	}
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api", ABPasskey: "PASSKEY123", ABTorznabURL: "http://prowlarr/2/api"}}, nil, nil)
 	now := time.Date(2026, time.July, 2, 9, 0, 0, 0, time.UTC)
 	w.now = func() time.Time { return now }
@@ -885,9 +896,8 @@ func TestRebuildCarriesUncuratedItemStoredRender(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	first := time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Second)
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{"nyaa:42": true},
+		Owners:    owns(),
+		Published: map[string]bool{"nyaa:42": true},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "Stored Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: first}, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
 		},
@@ -932,9 +942,8 @@ func TestRebuildCarriedGUIDKeptOnlyForSameIdentity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "feed.json")
 			writeSnapshotFile(t, path, &snapshot{
-				ByHash: map[string]bool{},
-				ByKey:  map[string]bool{},
-				Seen:   map[string]bool{"nyaa:42": true},
+				Owners:    owns(),
+				Published: map[string]bool{"nyaa:42": true},
 				NyaaFeed: []journalItem{
 					{item: item{Title: "Show - S01 (1080p) [G]", GUID: tc.stored, PubDate: first}, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
 				},
@@ -968,9 +977,8 @@ func TestRebuildCarriesABItemWhenPasskeyRemoved(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	first := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{"ab:1167293": true},
+		Owners:    owns(),
+		Published: map[string]bool{"ab:1167293": true},
 		ABFeed: []journalItem{
 			{item: item{Title: "Frieren - S01 (BD Remux 1080p) [PMR]", GUID: "https://animebytes.tv/torrents.php?id=86576&torrentid=1167293", PubDate: first}, Key: "ab:1167293", AniListID: 154587, FirstSeen: first},
 		},
@@ -1000,9 +1008,8 @@ func TestRebuildCarriesNonCuratedABItemWhenPasskeyRemoved(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	first := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{"ab:1167293": true},
+		Owners:    owns(),
+		Published: map[string]bool{"ab:1167293": true},
 		ABFeed: []journalItem{
 			{item: item{Title: "Frieren - S01 (BD Remux 1080p) [PMR]", GUID: "https://animebytes.tv/torrents.php?id=86576&torrentid=1167293", PubDate: first}, Key: "ab:1167293", AniListID: 154587, FirstSeen: first},
 		},
@@ -1024,7 +1031,7 @@ func TestRebuildCarriesNonCuratedABItemWhenPasskeyRemoved(t *testing.T) {
 // release group, so no title synthesizes) while no indexer.ab_passkey is
 // configured keeps its STORED render instead of being dropped.
 //
-// The drop would be permanent. The never-pruned seen ledger still holds the
+// The drop would be permanent. The never-pruned publication log still holds the
 // identity, so growJournal can never re-admit the release afterwards - which is
 // exactly the irreversible second off switch l-f161 closed for the passkey, and
 // it is invisible in every count assertion that only watches a renderable item.
@@ -1034,9 +1041,8 @@ func TestRebuildCarriesCuratedABItemWhenRenderFailsWithoutPasskey(t *testing.T) 
 	const guid = "https://animebytes.tv/torrents.php?id=86576&torrentid=1000"
 	const stored = "Stored AB Show - S01 (1080p) [G]"
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{}, ByKey: map[string]bool{"ab:1000": true},
-		ByPair: map[string]bool{},
-		Seen:   map[string]bool{"ab:1000": true},
+		Owners:    owns(keyed("ab:1000", true)),
+		Published: map[string]bool{"ab:1000": true},
 		ABFeed: []journalItem{{
 			item: item{Title: stored, GUID: guid, PubDate: first},
 			Key:  "ab:1000", AniListID: 11, FirstSeen: first,
@@ -1058,7 +1064,7 @@ func TestRebuildCarriesCuratedABItemWhenRenderFailsWithoutPasskey(t *testing.T) 
 	}
 	snap := readSnapshotFile(t, path)
 	if len(snap.ABFeed) != 1 {
-		t.Fatalf("ab_feed = %d items, want the stored item carried (a drop is permanent: the seen ledger keeps the identity): %+v",
+		t.Fatalf("ab_feed = %d items, want the stored item carried (a drop is permanent: the publication log keeps the identity): %+v",
 			len(snap.ABFeed), snap.ABFeed)
 	}
 	got := snap.ABFeed[0]
@@ -1077,7 +1083,7 @@ func TestRebuildCarriesCuratedABItemWhenRenderFailsWithoutPasskey(t *testing.T) 
 // AB-passkey reversibility the two carry tests above pin: a release SeaDex
 // curates while ab_passkey is unset must still ENTER the journal, GUID-only.
 // It used to be skipped after journalIfNew had already folded its identity into
-// the never-pruned seen ledger, so it was never new again and the release was
+// the never-pruned publication log, so it was never new again and the release was
 // lost from RSS permanently - which made the rebuild's own nudge ("set
 // indexer.ab_passkey to serve AnimeBytes releases") promise a recovery that
 // could not happen. Nothing unservable escapes: the item persists GUID-only
@@ -1086,7 +1092,7 @@ func TestRebuildCarriesCuratedABItemWhenRenderFailsWithoutPasskey(t *testing.T) 
 // passkey arrives. The nudge still fires and still counts it.
 func TestRebuildJournalsNewABItemWhenPasskeyMissing(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	log, rec := capture.New()
 	entries := []seadex.Entry{{
 		AniListID: 154587,
@@ -1131,9 +1137,8 @@ func TestRebuildRebasesFutureFirstSeenCarriedItem(t *testing.T) {
 	w.now = func() time.Time { return t0 }
 	future := t0.Add(72 * time.Hour)
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{"nyaa:42": true},
+		Owners:    owns(),
+		Published: map[string]bool{"nyaa:42": true},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: future}, Key: "nyaa:42", AniListID: 7, FirstSeen: future},
 		},
@@ -1154,7 +1159,7 @@ func TestRebuildRebasesFutureFirstSeenCarriedItem(t *testing.T) {
 }
 
 // TestRebuildDropsKeylessSeededItem pins where a journal-bookkeeping-less item
-// is now refused: a post-journal snapshot (seen ledger present) whose feed
+// is now refused: a post-journal snapshot (publication log present) whose feed
 // carries an item with no Key or no FirstSeen violates the shared decode gate's
 // journal-record invariant (validJournalRecord, h-f2), so THAT item is dropped
 // at decode and never carried - the reason the reader can no longer serve such
@@ -1164,7 +1169,7 @@ func TestRebuildRebasesFutureFirstSeenCarriedItem(t *testing.T) {
 // as defense in depth for any snapshot that reaches them.
 func TestRebuildDropsKeylessSeededItem(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	const seeded = `{"by_hash":{},"by_key":{},"seen":{"nyaa:11":true},"nyaa_feed":[{"Title":"orphan","GUID":"https://nyaa.si/view/9"},` +
+	const seeded = `{"version":2,"owners":{},"published":{"nyaa:11":true},"nyaa_feed":[{"Title":"orphan","GUID":"https://nyaa.si/view/9"},` +
 		`{"Title":"no first seen","GUID":"https://nyaa.si/view/10","Key":"nyaa:10"},` +
 		`{"Title":"kept","GUID":"https://nyaa.si/view/11","Key":"nyaa:11","FirstSeen":"2026-07-01T00:00:00Z","PubDate":"2026-07-01T00:00:00Z"}],"ab_feed":[]}`
 	if err := os.WriteFile(path, []byte(seeded), 0o600); err != nil {
@@ -1222,15 +1227,25 @@ func TestPrepareCarriedItemDropsBookkeepinglessItem(t *testing.T) {
 }
 
 // TestRebuildSkipsTitlelessTorrentAsUnresolvable pins the unresolvable
-// accounting: a newly curated torrent with a parseable tracker key but no
-// files and no release group synthesizes no title at all, so it is excluded
-// from the journal (an arr cannot parse a title-less item), counted on the
-// snapshot log line as skipped_unresolvable (the signal that an upstream
-// data-shape change is shrinking the feed), and its identity still enters the
-// seen ledger so it can never later re-enter as new.
+// accounting AND the publication rule it turns on, and the second half INVERTS
+// what this test used to assert.
+//
+// A newly curated torrent with a parseable tracker key but no files and no
+// release group synthesizes no title at all, so it is excluded from the journal
+// (an arr cannot parse a title-less item) and counted on the pass log line as
+// skipped_unresolvable - the signal that an upstream data-shape change is
+// shrinking the feed.
+//
+// Its identity must NOT be recorded. Nothing was published, and the log is never
+// pruned, so recording here is what used to make the loss PERMANENT: the reason
+// the render failed is an upstream DATA property (SeaDex published the record
+// with an empty file list), and a curator adding the files an hour later is a
+// legitimate later republish that must journal as new. The two operator switches
+// are the deliberate exceptions and they are elsewhere (an off tracker baselines
+// its scope; a missing AB passkey journals GUID-only, so it publishes).
 func TestRebuildSkipsTitlelessTorrentAsUnresolvable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	entries := []seadex.Entry{{
 		AniListID: 7,
 		Torrents:  []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/7", IsBest: true}},
@@ -1243,8 +1258,9 @@ func TestRebuildSkipsTitlelessTorrentAsUnresolvable(t *testing.T) {
 	if len(snap.NyaaFeed) != 0 {
 		t.Errorf("feed = %+v, want empty (a title-less item cannot be parsed by an arr)", snap.NyaaFeed)
 	}
-	if !snap.Seen["nyaa:7"] {
-		t.Errorf("seen ledger missing nyaa:7: %v", snap.Seen)
+	if snap.Published["nyaa:7"] {
+		t.Errorf("publication log recorded nyaa:7 though nothing was published: %v; "+
+			"the log is never pruned, so the corrected upstream record could never journal as new", snap.Published)
 	}
 	if got, ok := rec.AttrValue("indexer feed snapshot written", "skipped_unresolvable"); !ok || got != "1" {
 		t.Errorf("skipped_unresolvable = %q (found=%v), want 1; log:\n%s", got, ok, strings.Join(rec.Messages(), "\n"))
@@ -1277,7 +1293,7 @@ func TestRebuildCountsIdentitylessABTorrentAsUnresolvable(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "feed.json")
-			seedEmptyLedger(t, path)
+			seedEmptyFeed(t, path)
 			log, rec := capture.New()
 			if err := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: tc.cfg}, log, nil).Rebuild(context.Background(), entries, nil); err != nil {
 				t.Fatalf("Rebuild: %v", err)
@@ -1297,14 +1313,14 @@ func TestRebuildCountsIdentitylessABTorrentAsUnresolvable(t *testing.T) {
 // guard for a torrent that DOES carry a stable identity: an
 // AnimeTosho/RuTracker release with a valid info hash is silently ignored -
 // never counted unresolvable, since the tail is expected - and contributes
-// NOTHING to the seen ledger: AnimeTosho is a Nyaa mirror carrying the
+// NOTHING to the publication log: AnimeTosho is a Nyaa mirror carrying the
 // identical info hash, so folding it would let catalogue order decide
 // whether the Nyaa listing of the same bytes ever journals (see
 // TestRebuildMirrorTrackerCannotSuppressNyaaJournal).
 func TestRebuildUnknownTrackerWithHashSilentlyIgnored(t *testing.T) {
 	const hash = "143ed15e5e3df072ae91adaeb149973a887590dd"
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	entries := []seadex.Entry{{
 		AniListID: 5,
 		Torrents: []seadex.Torrent{{
@@ -1320,8 +1336,8 @@ func TestRebuildUnknownTrackerWithHashSilentlyIgnored(t *testing.T) {
 	if len(snap.NyaaFeed) != 0 || len(snap.ABFeed) != 0 {
 		t.Errorf("unknown tracker leaked into a feed: nyaa=%d ab=%d", len(snap.NyaaFeed), len(snap.ABFeed))
 	}
-	if snap.Seen[hash] {
-		t.Errorf("tail-tracker hash folded into the seen ledger, want absent (a mirror's hash must not pre-mark the Nyaa listing): %v", snap.Seen)
+	if snap.Published[hash] {
+		t.Errorf("tail-tracker hash folded into the publication log, want absent (a mirror's hash must not pre-mark the Nyaa listing): %v", snap.Published)
 	}
 	if got, ok := rec.AttrValue("indexer feed snapshot written", "skipped_unresolvable"); !ok || got != "0" {
 		t.Errorf("skipped_unresolvable = %q (found=%v), want 0 (the tail is silently ignored, not an upstream fault signal)", got, ok)
@@ -1333,7 +1349,7 @@ func TestRebuildUnknownTrackerWithHashSilentlyIgnored(t *testing.T) {
 // journaled torrent whose current SeaDex record has lost its files and release
 // group synthesizes no title, so the carried item keeps its STORED render
 // rather than being dropped - a drop would be permanent, since the never-pruned
-// seen ledger stops growJournal re-admitting the release once the upstream
+// publication log stops growJournal re-admitting the release once the upstream
 // record is corrected, which is the omission settled feed-rss-filtering
 // forbids. Nothing is counted as journal_dropped, and nothing is counted as an
 // AB passkey skip either.
@@ -1341,9 +1357,8 @@ func TestRebuildKeepsCarriedItemBecomingUnresolvable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	first := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{"nyaa:42": true},
-		Seen:   map[string]bool{"nyaa:42": true},
+		Owners:    owns(keyed("nyaa:42", true)),
+		Published: map[string]bool{"nyaa:42": true},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: first}, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
 		},
@@ -1363,8 +1378,8 @@ func TestRebuildKeepsCarriedItemBecomingUnresolvable(t *testing.T) {
 	if got := snap.NyaaFeed[0].Title; got != "Show - S01 (1080p) [G]" {
 		t.Errorf("carried title = %q, want the STORED render preserved", got)
 	}
-	if !snap.Seen["nyaa:42"] {
-		t.Errorf("seen ledger lost the carried identity: %v", snap.Seen)
+	if !snap.Published["nyaa:42"] {
+		t.Errorf("publication log lost the carried identity: %v", snap.Published)
 	}
 	if got, ok := rec.AttrValue("indexer feed snapshot written", "journal_dropped"); !ok || got != "0" {
 		t.Errorf("journal_dropped = %q (found=%v), want 0; log:\n%s", got, ok, strings.Join(rec.Messages(), "\n"))
@@ -1489,9 +1504,8 @@ func TestRebuildDropsCarriedItemWarnedByStoredHashOnly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	hash := strings.Repeat("a", 40)
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{"nyaa:99": true},
-		Seen:   map[string]bool{"nyaa:99": true},
+		Owners:    owns(keyed("nyaa:99", true)),
+		Published: map[string]bool{"nyaa:99": true},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "Show - S01 (1080p) [W]", GUID: "https://nyaa.si/view/99", DownloadURL: "https://nyaa.si/download/99.torrent", InfoHash: hash, PubDate: time.Now().UTC()}, Key: "nyaa:99", AniListID: 8, FirstSeen: time.Now().UTC()},
 		},
@@ -1520,8 +1534,8 @@ func TestRebuildDropsCarriedItemWarnedByStoredHashOnly(t *testing.T) {
 // TestRebuildDropsCarriedItemWarnedAcrossTrackers pins the CROSS-SCOPE half of
 // the warned-identity rule identitySignals documents ("a curator warning
 // against the bytes must retract every tracker listing of them", which is why
-// its info hash stays un-namespaced while the seen ledger's is scope-qualified
-// in ledgerSignals): the same release cross-posted to Nyaa and AnimeBytes is
+// its info hash stays un-namespaced while the publication log's is scope-qualified
+// in publicationSignals): the same release cross-posted to Nyaa and AnimeBytes is
 // one set of bytes, so an AnimeBytes occurrence tagged Broken must retract the
 // carried Nyaa item storing that hash AND keep the un-warned Nyaa occurrence
 // out of the search curation set. The three sibling warned tests all warn and
@@ -1533,9 +1547,8 @@ func TestRebuildDropsCarriedItemWarnedAcrossTrackers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	first := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{"nyaa:42": true, "nyaa:h:" + sharedHash: true},
+		Owners:    owns(),
+		Published: map[string]bool{"nyaa:42": true, "nyaa:h:" + sharedHash: true},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", InfoHash: sharedHash, PubDate: first}, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
 		},
@@ -1564,8 +1577,8 @@ func TestRebuildDropsCarriedItemWarnedAcrossTrackers(t *testing.T) {
 	if len(snap.NyaaFeed) != 0 {
 		t.Errorf("nyaa feed = %+v, want empty (a warning against the bytes must retract every tracker's listing of them)", snap.NyaaFeed)
 	}
-	if snap.ByKey["nyaa:42"] || snap.ByHash[sharedHash] {
-		t.Errorf("curation set still marks the cross-posted listing: keys = %v, hashes = %v", snap.ByKey, snap.ByHash)
+	if byKeyOf(&snap)["nyaa:42"] || byHashOf(&snap)[sharedHash] {
+		t.Errorf("curation set still marks the cross-posted listing: keys = %v, hashes = %v", byKeyOf(&snap), byHashOf(&snap))
 	}
 	if got, ok := rec.AttrValue("indexer feed snapshot written", "journal_warned_dropped"); !ok || got != "1" {
 		t.Errorf("journal_warned_dropped = %q (found=%v), want 1; log:\n%s", got, ok, strings.Join(rec.Messages(), "\n"))
@@ -1573,13 +1586,13 @@ func TestRebuildDropsCarriedItemWarnedAcrossTrackers(t *testing.T) {
 }
 
 // TestRebuildHashVetoesNoveltyAcrossKeyChange pins the multi-signal novelty
-// contract ledgerSignals documents ("novelty detection survives one signal
+// contract publicationSignals documents ("novelty detection survives one signal
 // going missing - a URL-shape change upstream"): a torrent whose info hash is
-// already in the seen ledger (under its tracker scope) must NOT re-enter the journal as new when its
+// already in the publication log (under its tracker scope) must NOT re-enter the journal as new when its
 // tracker URL changes shape (a new /view id, i.e. a new journal key). Novelty
 // is judged across ALL identity signals, so a re-upload or upstream URL change
 // keeping the same bytes never re-broadcasts old curation, while both the new
-// key and the hash fold into the seen ledger.
+// key and the hash fold into the publication log.
 func TestRebuildHashVetoesNoveltyAcrossKeyChange(t *testing.T) {
 	const hash = "143ed15e5e3df072ae91adaeb149973a887590dd"
 	path := filepath.Join(t.TempDir(), "feed.json")
@@ -1613,17 +1626,17 @@ func TestRebuildHashVetoesNoveltyAcrossKeyChange(t *testing.T) {
 	if len(snap.NyaaFeed) != 0 {
 		t.Errorf("feed = %d items, want 0 (a seen hash under a new key must veto novelty)", len(snap.NyaaFeed))
 	}
-	if !snap.Seen["nyaa:9042"] || !snap.Seen["nyaa:h:"+hash] {
-		t.Errorf("seen ledger missing the new key or the carried hash: %v", snap.Seen)
+	if !snap.Published["nyaa:9042"] || !snap.Published["nyaa:h:"+hash] {
+		t.Errorf("publication log missing the new key or the carried hash: %v", snap.Published)
 	}
 }
 
 // TestRebuildKeyVetoesNoveltyAcrossHashChange pins the mirror image of
 // TestRebuildHashVetoesNoveltyAcrossKeyChange: a torrent whose journal KEY is
-// already in the seen ledger must not re-enter the journal as new when its
+// already in the publication log must not re-enter the journal as new when its
 // info hash changes (SeaDex correcting a hash, or a same-view-id in-place
 // replacement). Novelty is vetoed by ANY seen identity signal - not just the
-// hash - and the NEW hash still folds into the seen ledger even though the
+// hash - and the NEW hash still folds into the publication log even though the
 // torrent is not new.
 func TestRebuildKeyVetoesNoveltyAcrossHashChange(t *testing.T) {
 	const hashA = "143ed15e5e3df072ae91adaeb149973a887590dd"
@@ -1653,8 +1666,8 @@ func TestRebuildKeyVetoesNoveltyAcrossHashChange(t *testing.T) {
 	if len(snap.NyaaFeed) != 0 {
 		t.Errorf("feed = %d items, want 0 (a seen key under a new hash must veto novelty)", len(snap.NyaaFeed))
 	}
-	if !snap.Seen["nyaa:h:"+hashB] || !snap.Seen["nyaa:42"] {
-		t.Errorf("seen ledger missing the new hash or the key (every signal must fold even when not new): %v", snap.Seen)
+	if !snap.Published["nyaa:h:"+hashB] || !snap.Published["nyaa:42"] {
+		t.Errorf("publication log missing the new hash or the key (every signal must fold even when not new): %v", snap.Published)
 	}
 }
 
@@ -1683,7 +1696,7 @@ func TestRebuildJournalsSameHashIndependentlyPerTracker(t *testing.T) {
 		},
 	}}
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	if err := newTestWriter(path, "PK", true).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -1692,8 +1705,8 @@ func TestRebuildJournalsSameHashIndependentlyPerTracker(t *testing.T) {
 		t.Errorf("feeds = nyaa %d / ab %d items, want 1 each (one tracker's listing must not suppress the other's)",
 			len(snap.NyaaFeed), len(snap.ABFeed))
 	}
-	if !snap.Seen["nyaa:h:"+hash] || !snap.Seen["ab:h:"+hash] {
-		t.Errorf("seen ledger = %v, want both scope-namespaced hash entries", snap.Seen)
+	if !snap.Published["nyaa:h:"+hash] || !snap.Published["ab:h:"+hash] {
+		t.Errorf("publication log = %v, want both scope-namespaced hash entries", snap.Published)
 	}
 }
 
@@ -1708,9 +1721,8 @@ func TestRebuildKeepsItemAtExactMaxAgeBoundary(t *testing.T) {
 	first := t0.Add(-feedJournalMaxAge) // age == feedJournalMaxAge exactly
 	w.now = func() time.Time { return t0 }
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{"nyaa:42": true},
+		Owners:    owns(),
+		Published: map[string]bool{"nyaa:42": true},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "Show - S01 (1080p) [G]", GUID: "https://nyaa.si/view/42", DownloadURL: "https://nyaa.si/download/42.torrent", PubDate: first}, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
 		},
@@ -1759,8 +1771,8 @@ func TestApplyTitlesSkipsEmptyCachedTitle(t *testing.T) {
 }
 
 // TestRebuildMirrorTrackerCannotSuppressNyaaJournal pins the tail-tracker
-// seen-ledger guard: AnimeTosho is a Nyaa mirror carrying the IDENTICAL info
-// hash, and folding its (never-journalable) occurrence into the seen ledger
+// publication-log guard: AnimeTosho is a Nyaa mirror carrying the IDENTICAL info
+// hash, and folding its (never-journalable) occurrence into the publication log
 // first - purely a catalogue-order accident - used to mark the Nyaa listing
 // of the same bytes as already seen, silently denying it RSS exposure
 // forever. A tail-tracker occurrence must contribute nothing to the ledger.
@@ -1781,7 +1793,7 @@ func TestRebuildMirrorTrackerCannotSuppressNyaaJournal(t *testing.T) {
 		},
 	}}
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -1795,9 +1807,9 @@ func TestRebuildMirrorTrackerCannotSuppressNyaaJournal(t *testing.T) {
 }
 
 // TestRebuildBaselineTailTrackerCannotSuppressLaterNyaa pins the fresh-install
-// baseline arm of the tail-tracker guard (allIdentities): an AnimeTosho/
+// baseline arm of the tail-tracker guard (baselinePublications): an AnimeTosho/
 // RuTracker occurrence in the FIRST catalogue must not seed its shared info
-// hash into the baseline seen ledger, or the later supported Nyaa listing of
+// hash into the baseline publication log, or the later supported Nyaa listing of
 // the same bytes would be silently denied RSS exposure forever. The growth
 // arm is pinned by TestRebuildMirrorTrackerCannotSuppressNyaaJournal; this
 // covers baseline construction.
@@ -1819,7 +1831,7 @@ func TestRebuildBaselineTailTrackerCannotSuppressLaterNyaa(t *testing.T) {
 	if err := w.Rebuild(context.Background(), []seadex.Entry{tail}, nil); err != nil {
 		t.Fatalf("baseline Rebuild: %v", err)
 	}
-	if snap := readSnapshotFile(t, path); snap.Seen[hash] {
+	if snap := readSnapshotFile(t, path); snap.Published[hash] {
 		t.Fatalf("fresh baseline recorded tail-tracker hash %q; a mirror must not suppress a later Nyaa listing", hash)
 	}
 
@@ -1861,9 +1873,8 @@ func TestRebuildDropsNonCuratedCarriedItemWithBadGUID(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "feed.json")
 			first := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 			writeSnapshotFile(t, path, &snapshot{
-				ByHash: map[string]bool{},
-				ByKey:  map[string]bool{},
-				Seen:   map[string]bool{"nyaa:42": true},
+				Owners:    owns(),
+				Published: map[string]bool{"nyaa:42": true},
 				NyaaFeed: []journalItem{
 					{item: item{Title: "Show - S01 (1080p) [G]", GUID: tc.guid, PubDate: first}, Key: "nyaa:42", AniListID: 7, FirstSeen: first},
 				},
@@ -1893,7 +1904,7 @@ func TestRebuildDropsNonCuratedCarriedItemWithBadGUID(t *testing.T) {
 // the publishable sibling.
 func TestRebuildFallsBackFromUnpublishableOccurrence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	entries := []seadex.Entry{
 		{AniListID: 1, Torrents: []seadex.Torrent{{
 			Tracker: "Nyaa", URL: "https://nyaa.si:65536/view/77",
@@ -2182,5 +2193,76 @@ func TestApplyTitlesLeavesUnknownCensusEvidenceAlone(t *testing.T) {
 	}
 	if rec.Contains("disagree about a season pack") {
 		t.Errorf("absent episode evidence reported as a disagreement; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+}
+
+// TestCorrectedUpstreamRecordJournalsAsNew is the central behavioural claim of
+// the publication-log rewrite, and the class of loss it recovers.
+//
+// The ledger write used to sit on the novelty TEST rather than on the journal
+// ADMISSION, so every keyed torrent the pass merely LOOKED AT was recorded -
+// before anything decided whether it was servable. SeaDex publishing a record
+// with an empty file list therefore burned that release's novelty permanently
+// (the log is never pruned) with nothing published, and a curator adding the file
+// list an hour later could never get it onto RSS. Search still found it, which is
+// exactly why the loss was silent: the app looked healthy.
+//
+// Recording on publication instead makes the second pass admit it.
+func TestCorrectedUpstreamRecordJournalsAsNew(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyFeed(t, path)
+
+	// Pass 1: the record has a parseable tracker key but no files and no release
+	// group, so no title synthesizes and nothing is journaled.
+	defective := []seadex.Entry{{
+		AniListID: 7,
+		Torrents:  []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/7", IsBest: true}},
+	}}
+	w := newTestWriter(path, "", false)
+	if err := w.Rebuild(context.Background(), defective, nil); err != nil {
+		t.Fatalf("Rebuild (defective record): %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 0 {
+		t.Fatalf("nyaa feed = %+v, want empty: a title-less item cannot be journaled", snap.NyaaFeed)
+	}
+	if snap.Published["nyaa:7"] {
+		t.Fatalf("publication log recorded nyaa:7 though nothing was served: %v", snap.Published)
+	}
+
+	// Pass 2: the curator adds the file list. This is a legitimate later
+	// republish and must journal as new.
+	corrected := []seadex.Entry{nyaaEntry(7, 7, true, "Show - S01E01 (1080p) [G].mkv")}
+	if err := newTestWriter(path, "", false).Rebuild(context.Background(), corrected, nil); err != nil {
+		t.Fatalf("Rebuild (corrected record): %v", err)
+	}
+	snap = readSnapshotFile(t, path)
+	if len(snap.NyaaFeed) != 1 {
+		t.Fatalf("nyaa feed = %+v, want the corrected record journaled as new", snap.NyaaFeed)
+	}
+	if !snap.Published["nyaa:7"] {
+		t.Errorf("publication log missing nyaa:7 after it was actually served: %v", snap.Published)
+	}
+}
+
+// TestPublishedReleaseIsNeverReadmitted is the other half of the same rule, and
+// the property that must survive the change: recording on publication must not
+// weaken the guard against a catalogue RE-BROADCAST. A release that was served
+// once stays recorded forever - you cannot un-serve something - so a later pass
+// carries it rather than journaling it again.
+func TestPublishedReleaseIsNeverReadmitted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	seedEmptyFeed(t, path)
+	entries := []seadex.Entry{nyaaEntry(7, 7, true, "Show - S01E01 (1080p) [G].mkv")}
+
+	for pass := 1; pass <= 3; pass++ {
+		if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
+			t.Fatalf("Rebuild (pass %d): %v", pass, err)
+		}
+		snap := readSnapshotFile(t, path)
+		if len(snap.NyaaFeed) != 1 {
+			t.Fatalf("pass %d: nyaa feed = %d items, want exactly 1 (journaled once, carried thereafter): %v",
+				pass, len(snap.NyaaFeed), feedKeys(snap.NyaaFeed))
+		}
 	}
 }

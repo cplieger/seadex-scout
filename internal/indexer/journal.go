@@ -33,8 +33,8 @@ type journalItem struct {
 // so 14 days is generous - it survives a week-long arr outage with margin -
 // while keeping the feed a recent-additions journal rather than a catalogue
 // re-broadcast. An aged-out item leaves the journal AND drops its cached
-// harvested title; its identity stays in the never-pruned seen ledger, so it
-// can never re-enter the journal as new.
+// harvested title; its identity stays in the never-pruned publication log, so
+// it can never re-enter the journal as new.
 const feedJournalMaxAge = 14 * 24 * time.Hour
 
 // curatedRef points at one occurrence of a curated torrent. A torrent can be
@@ -45,22 +45,30 @@ type curatedRef struct {
 	torrent *seadex.Torrent
 }
 
-// journalPass owns one rebuild's journal-scoped collaborators: the current
-// catalogue index, the seen ledger, the curation-warned exclusion set, the
-// entry-info lookup, the transition counters, and the rebuild clock. It exists
-// so a new pass-scoped collaborator is one field rather than an edit to every
-// signature on the carry/grow path, and so the journal pass is exercisable
-// without a live writer. The writer itself stays a field: renderJournalItem and
-// the grow path read its held UpstreamConfig (the passkey and the per-tracker
-// on switches), which is writer state rather than pass state.
+// journalPass owns one pass's journal-scoped collaborators: the curation
+// EVIDENCE this pass holds (see curationEvidence - a catalogue pass and a
+// windowed pass hold different types, so the windowed one cannot be handed a
+// catalogue-wide warned set), the loaded publication log, this pass's own
+// publications, the entry-info lookup, the transition counters, and the pass
+// clock. It exists so a new pass-scoped collaborator is one field rather than an
+// edit to every signature on the carry/grow path, and so the journal pass is
+// exercisable without a live writer. The writer itself stays a field:
+// renderJournalItem and the grow path read its held UpstreamConfig (the passkey
+// and the per-tracker on switches), which is writer state rather than pass
+// state.
+//
+// published and publish are deliberately two maps, not one mutated in place: the
+// publication log's rule is APPEND, and separating what was already recorded
+// from what THIS pass published is what lets the rule be applied at the persist
+// boundary (appendPublished) instead of by whoever happened to hold the map.
 type journalPass struct {
-	w       *FeedWriter
-	cur     map[string][]curatedRef
-	seen    map[string]bool
-	ws      *warnedSet
-	infoFor EntryInfoFunc
-	js      *journalStats
-	now     time.Time
+	w         *FeedWriter
+	ev        curationEvidence
+	published map[string]bool
+	publish   map[string]bool
+	infoFor   EntryInfoFunc
+	js        *journalStats
+	now       time.Time
 }
 
 // --- Journal identity ---
@@ -77,8 +85,8 @@ func journalKey(t *seadex.Torrent) string { return trackerKey(t.Tracker, t.URL) 
 // curation-warned exclusion graph is built over (splitCurationWarned /
 // sharesWarnedIdentity), where a warning against the bytes must retract every
 // tracker listing of them - so the hash deliberately stays un-namespaced.
-// RSS novelty is NOT decided here: the never-pruned seen ledger uses
-// ledgerSignals, whose hash is scope-qualified so the same bytes listed on
+// RSS novelty is NOT decided here: the never-pruned publication log uses
+// publicationSignals, whose hash is scope-qualified so the same bytes listed on
 // two trackers stay two separately journalable releases.
 func identitySignals(t *seadex.Torrent) []string {
 	var ids []string
@@ -91,10 +99,10 @@ func identitySignals(t *seadex.Torrent) []string {
 	return ids
 }
 
-// ledgerSignals returns the identity forms the never-pruned seen ledger
+// publicationSignals returns the identity forms the never-pruned publication log
 // records for one curated torrent: its tracker key (already
 // scope-namespaced) and its info hash NAMESPACED BY SCOPE. The hash is
-// scope-qualified here and only here, because the ledger decides RSS novelty
+// scope-qualified here and only here, because the log decides RSS novelty
 // PER TRACKER FEED: two tracker records carrying the identical bytes (a
 // release cross-posted to Nyaa and AnimeBytes) are two separately journalable
 // releases, and folding a bare shared hash lets catalogue iteration order
@@ -102,7 +110,7 @@ func identitySignals(t *seadex.Torrent) []string {
 // tail-tracker guard prevents one namespace up. The warned-identity graph
 // deliberately keeps the bare, cross-scope hash (identitySignals): a curator
 // warning against the bytes must retract every listing of them.
-func ledgerSignals(scope string, t *seadex.Torrent) []string {
+func publicationSignals(scope string, t *seadex.Torrent) []string {
 	var ids []string
 	if k := journalKey(t); k != "" {
 		ids = append(ids, k)
@@ -113,11 +121,17 @@ func ledgerSignals(scope string, t *seadex.Torrent) []string {
 	return ids
 }
 
-// allIdentities collects every identity signal in the current curation set:
-// the seen ledger a baseline records, so the journal only grows from curation
-// genuinely newer than the baseline.
-func allIdentities(entries []seadex.Entry) map[string]bool {
-	seen := make(map[string]bool)
+// baselinePublications collects every identity signal in the current curation
+// set: what a BASELINE forfeits into the publication log so the journal only
+// grows from curation genuinely newer than the baseline.
+//
+// A baseline is the one write to the log that is not a publication, and it is
+// honest about that: it FORFEITS the current catalogue rather than claiming it
+// was served. The alternative - starting with an empty log - would broadcast the
+// whole catalogue as newly curated, which is the catalogue re-broadcast the log
+// exists to prevent. Backfill is search's job.
+func baselinePublications(entries []seadex.Entry) map[string]bool {
+	published := make(map[string]bool)
 	for i := range entries {
 		for j := range entries[i].Torrents {
 			t := &entries[i].Torrents[j]
@@ -125,21 +139,19 @@ func allIdentities(entries []seadex.Entry) map[string]bool {
 			if journalKey(t) == "" {
 				// No journal key - an unsupported tail tracker, or a supported
 				// tracker whose URL fails the ownership gate - so nothing is
-				// folded into the never-pruned ledger (the same rule
-				// journalIfNew applies on the growth path). Two reasons: an
-				// AnimeTosho mirror carries Nyaa's IDENTICAL info hash, so
-				// folding it at baseline would pre-mark a later Nyaa listing of
-				// the same bytes as already seen; and a torrent unservable for
-				// an upstream DATA reason must not deny a later corrected
-				// record its RSS exposure.
+				// forfeited. Two reasons: an AnimeTosho mirror carries Nyaa's
+				// IDENTICAL info hash, so forfeiting it would pre-mark a later
+				// Nyaa listing of the same bytes as already published; and a
+				// torrent unservable for an upstream DATA reason must not deny a
+				// later corrected record its RSS exposure.
 				continue
 			}
-			for _, id := range ledgerSignals(scope, t) {
-				seen[id] = true
+			for _, id := range publicationSignals(scope, t) {
+				published[id] = true
 			}
 		}
 	}
-	return seen
+	return published
 }
 
 // indexCurated groups the current catalogue's torrents by journal key, so the
@@ -178,17 +190,16 @@ func journalIdentityMatches(it *journalItem) bool {
 
 // refusesUnprovenGUID reports whether a carried item fails the journal's
 // GUID-to-Key invariant, logging and counting the refusal. ONE home for the
-// gate both carry paths apply - the reconcile's non-curated arm
-// (carryStoredItem, which has no fresh render to self-heal from) and the
-// tick's expireCarried (which has no curation set at all) - so the
-// operator-facing cause attribute behind the snapshot line's aggregate
-// journal_dropped count cannot drift between them. It reports the refusal and
-// nothing more: each caller keeps its own exit shape, because the two passes
-// are deliberately different (Advance reaches prepareCarriedItem through
-// expireCarried precisely because carryItem's other arms need the full
-// curation set). The GUID itself is never logged: it is an attacker-shapeable
-// value from a tamperable file, and the key is the diagnostic that identifies
-// the refused record.
+// gate, applied by the one arm that has both the standing to refuse and no
+// fresh render to self-heal from: the DE-CURATED arm (carryStoredItem), which
+// only a catalogue pass can reach. It reports the refusal and nothing more, so
+// the caller keeps its own exit shape. The GUID itself is never logged: it is an
+// attacker-shapeable value from a tamperable file, and the key is the diagnostic
+// that identifies the refused record.
+//
+// A window pass deliberately does NOT apply it (see carryUnevaluatedItem): it
+// cannot re-render, so refusing there would make a repair the catalogue pass
+// would have performed permanently impossible.
 func (p *journalPass) refusesUnprovenGUID(it *journalItem) bool {
 	if journalIdentityMatches(it) {
 		return false
@@ -293,9 +304,9 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor En
 			// An oversized external value (a SeaDex filename synthesized into
 			// the title, an over-long URL) is unservable: renderFeed's XML
 			// escaping could amplify it well past the container memory budget
-			// (see maxPersistedFieldBytes). Try the next occurrence - the
-			// caller has already folded the identity into the seen ledger, so
-			// a fully unrenderable key never re-enters the journal as new.
+			// (see maxPersistedFieldBytes). Try the next occurrence - and if
+			// EVERY occurrence fails nothing is published, so nothing is
+			// recorded and a corrected upstream record still journals as new.
 			continue
 		}
 		return it, true, noPasskey
@@ -319,7 +330,7 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor En
 // REVERSIBLE off switch on the GROWTH path too, matching the carry path's
 // existing stance (carryStoredItem / refreshCarriedItem, l-f161). Skipping it
 // lost the release permanently: journalIfNew folds the identity into the
-// never-pruned seen ledger before the render, so a release curated during a
+// never-pruned publication log before the render, so a release curated during a
 // passkey-less window could never journal as new afterwards - which made the
 // operator nudge ("set indexer.ab_passkey") promise a recovery that never
 // happened. Nothing unservable escapes: every feed persists GUID-only
@@ -329,22 +340,21 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor En
 // grabbable on the next load, and it keeps aging out on the normal
 // feedJournalMaxAge window meanwhile.
 func (w *FeedWriter) journalLink(t *seadex.Torrent) (dl string, ok, linkless bool) {
-	// unusableABPasskey is the app's ONE home for "can this passkey build a
-	// grabbable AnimeBytes link" (server.go, over internal/secretref): an
-	// unexpanded ${VAR} or $VAR reference is not a passkey, and passing it
-	// through mints the literal placeholder into the link while reporting the
-	// release as fully resolved. Normalize it to the empty passkey so both arms
-	// below take the documented no-passkey path - the same path the reader
-	// already takes (rebuildABDownloadURLs clears the whole AB feed).
-	passkey := w.enablement.ABPasskey
-	if unusableABPasskey(passkey) {
-		passkey = ""
-	}
+	// Both arms read unusableABPasskey - the app's ONE home for "can this
+	// passkey build a grabbable AnimeBytes link" (server.go, over
+	// internal/secretref), applied inside downloadURLForScope for the first arm
+	// - so neither carries its own emptiness test. An unexpanded ${VAR} or $VAR
+	// reference is not a passkey, and it takes the documented no-passkey path
+	// here, exactly as the reader already does (rebuildABDownloadURLs clears the
+	// whole AB feed). On the daemon path config's validateABPasskey has already
+	// refused a configured-but-malformed passkey, so in a running deployment
+	// this predicate distinguishes the off switch; it stays fail-closed for any
+	// other construction of the writer.
 	scope := trackerScope(t.Tracker)
-	if dl, resolved := downloadURLForScope(scope, t.URL, passkey); resolved {
+	if dl, resolved := downloadURLForScope(scope, t.URL, w.enablement.ABPasskey); resolved {
 		return dl, true, false
 	}
-	if scope == upstreamAB && passkey == "" && resolvableForScope(scope, t.URL) {
+	if scope == upstreamAB && unusableABPasskey(w.enablement.ABPasskey) && resolvableForScope(scope, t.URL) {
 		return "", true, true
 	}
 	return "", false, false
@@ -376,13 +386,16 @@ func foldRefs(it *journalItem, refs []curatedRef, infoFor EntryInfoFunc) {
 
 // --- Rebuild accounting ---
 
-// journalStats counts one rebuild's journal transitions for the snapshot log
+// journalStats counts one pass's journal transitions for the pass log
 // line. abSkippedNoPasskey counts the AnimeBytes releases journaled without a
 // grabbable link because no indexer.ab_passkey is configured (they ARE in the
 // journal - see journalLink - and become grabbable when the passkey arrives);
-// it keeps its name because the snapshot WARN publishes it as
+// it keeps its name because the pass WARN publishes it as
 // ab_releases_skipped, the attribute an operator's log queries already read.
+// harvest carries the title harvest's own counters, zero at window scope where
+// the harvest deliberately does not run (see pass.go's catalogue-only steps).
 type journalStats struct {
+	harvest            harvestStats
 	added              int
 	pruned             int
 	dropped            int
@@ -396,13 +409,22 @@ type journalStats struct {
 
 // carryItem re-renders or prunes one carried journal item, updating js, and
 // reports whether it survives into the rebuilt journal: the top-down
-// dispatcher over the three cohesive carry phases - validation/clock/expiry
-// (prepareCarriedItem), the warned-set retraction, and the
-// curated-vs-uncurated carry policy (refreshCarriedItem / carryStoredItem).
-// ws is the curation-warned exclusion set splitCurationWarned built; a
-// carried item it retracts (its key is excluded, or its stored info hash is
-// warned under a DIFFERENT tracker key) is dropped (RSS must never keep
-// serving bytes search suppresses).
+// dispatcher over the cohesive carry phases - validation/clock/expiry
+// (prepareCarriedItem), the warned retraction, and the carry policy
+// (refreshCarriedItem / carryStoredItem / carryUnevaluatedItem).
+//
+// EVERY arm acts on evidence this pass HOLDS. The age-out reads the item's own
+// FirstSeen; the retraction reads a positive exclusion the pass evaluated; the
+// de-curated arm reads absence from the input and is therefore reachable ONLY at
+// catalogue scope (curationEvidence.decurated is always false for a window).
+// That is the structural form of the distinction the two carry paths used to
+// encode as two functions: carryStoredItem was the reconcile's arm and
+// expireCarried was the tick's, and the two DISAGREED - the tick dropped an item
+// whose stored GUID no longer proved its key while the reconcile kept it and
+// self-healed the GUID from the fresh render. Under a never-pruned publication
+// log the tick's verdict was the irreversible one, so a tick permanently
+// discarded an item the reconcile would have repaired. The scope parameter keeps
+// the distinction and removes the disagreement.
 func (p *journalPass) carryItem(it *journalItem, scope string) (journalItem, bool) {
 	if !p.prepareCarriedItem(it) {
 		return journalItem{}, false
@@ -414,26 +436,48 @@ func (p *journalPass) carryItem(it *journalItem, scope string) (journalItem, boo
 		// download link, consume a rate-paced harvest query against the wrong
 		// upstream, and be dropped again by every reader load
 		// (rebuild*DownloadURLs) for the item's whole journal window. Drop it
-		// here instead.
+		// here instead - the criterion is the item's own Key, so this is sound
+		// at either pass scope.
 		p.w.log.Debug("indexer journal item refused: key names another tracker scope",
 			"key", it.Key, "feed_scope", scope, "cause", "scope-mismatch")
 		p.js.dropped++
 		return journalItem{}, false
 	}
-	if p.ws.retracts(it) {
+	if p.ev.retracts(it) {
 		p.js.warned++
 		return journalItem{}, false
 	}
-	refs, curated := p.cur[it.Key]
-	if !curated {
+	switch policy, refs := p.ev.carryPolicy(it.Key); policy {
+	case carryRefreshed:
+		return p.refreshCarriedItem(it, refs)
+	case carryDeCurated:
 		return p.carryStoredItem(it)
+	default:
+		return p.carryUnevaluatedItem(it)
 	}
-	return p.refreshCarriedItem(it, refs)
+}
+
+// carryUnevaluatedItem is the WINDOW's arm, and its ONLY arm: this pass holds no
+// evidence it may act on for this item, so the stored item is carried VERBATIM -
+// no de-curation verdict, no re-render, and deliberately no GUID gate.
+//
+// Skipping the GUID gate here is the fix for a real disagreement, not a
+// weakening. The tick used to apply the gate and DROP on failure while the
+// reconcile routed the same item to a fresh render that self-heals its GUID, so
+// a tick permanently discarded (the publication log is never pruned) an item the
+// reconcile would have repaired. Since only the reconcile holds the evidence to
+// repair it, the sound window verdict is to leave it alone and let the reconcile
+// decide within one reconcile interval. Nothing unservable escapes meanwhile:
+// the reader applies the same GUID-to-Key invariant at serve time
+// (rebuild*DownloadURLs), so an item with an unproven GUID is not served
+// regardless of what the file holds.
+func (p *journalPass) carryUnevaluatedItem(it *journalItem) (journalItem, bool) {
+	return *it, true
 }
 
 // prepareCarriedItem applies carryItem's validation, clock-correction, and
-// expiry phase, reporting whether the item is still carryable: a pre-journal
-// item with no Key or FirstSeen is dropped, a future FirstSeen is rebased,
+// expiry phase, reporting whether the item is still carryable: an item with no
+// Key or FirstSeen is dropped, a future FirstSeen is rebased,
 // and an item older than feedJournalMaxAge is pruned.
 func (p *journalPass) prepareCarriedItem(it *journalItem) bool {
 	if it.Key == "" || it.FirstSeen.IsZero() {
@@ -494,13 +538,13 @@ func rebaseFutureFeed(feed []journalItem, now time.Time) int {
 	return rebased
 }
 
-// carryStoredItem applies carryItem's non-curated carry policy: an item whose
-// torrent has left the curation set keeps its stored render, subject to the
-// GUID-identity gate.
+// carryStoredItem applies carryItem's DE-CURATED carry policy: an item whose
+// torrent has left the curation set - which only a CATALOGUE pass can establish
+// - keeps its stored render, subject to the GUID-identity gate.
 //
 // A missing AB passkey is deliberately NOT a drop here. It used to be, which
 // made removing `ab_passkey` a second irreversible off switch: one rebuild
-// dropped every carried AB item and the never-pruned seen ledger stopped them
+// dropped every carried AB item and the never-pruned publication log stopped them
 // ever returning (l-f161). A passkey only supplies the grabbable LINK - items
 // persist GUID-only (stripDownloadURLs) and the reader clears the entire AB feed
 // while no passkey is configured (rebuildABDownloadURLs) - so carrying them
@@ -524,7 +568,7 @@ func (p *journalPass) carryStoredItem(it *journalItem) (journalItem, bool) {
 // render from current data with the item's FirstSeen (and, when identity
 // still holds, its GUID) preserved. When the fresh render fails - for either
 // reason - the item keeps its STORED render (carryStoredItem) rather than being
-// dropped, since the never-pruned seen ledger makes a drop permanent.
+// dropped, since the never-pruned publication log makes a drop permanent.
 func (p *journalPass) refreshCarriedItem(it *journalItem, refs []curatedRef) (journalItem, bool) {
 	fresh, ok, noPasskey := p.w.renderJournalItem(it.Key, refs, p.infoFor)
 	if !ok {
@@ -533,15 +577,16 @@ func (p *journalPass) refreshCarriedItem(it *journalItem, refs []curatedRef) (jo
 			// occurrence (a title that no longer synthesizes, an unpublishable
 			// page URL, an over-limit field). It keeps the STORED render for the
 			// same reason the passkey case does: dropping is PERMANENT, since
-			// the never-pruned seen ledger stops growJournal ever re-admitting
-			// the release, so a transient upstream data defect used to cost a
-			// curated release its RSS exposure forever - the omission settled
-			// feed-rss-filtering forbids ("a release is never omitted because
-			// the app cannot parse or route it"). Nothing unservable escapes:
-			// the stored item was rendered from valid data, is canonicalized at
-			// decode, has its download link re-derived by the reader, and ages
-			// out on the normal window - and the DE-CURATED arm already keeps a
-			// stored render for a torrent with strictly less standing.
+			// the never-pruned publication log stops the growth path ever
+			// re-admitting the release, so a transient upstream data defect used
+			// to cost a curated release its RSS exposure forever - the omission
+			// settled feed-rss-filtering forbids ("a release is never omitted
+			// because the app cannot parse or route it"). Nothing unservable
+			// escapes: the stored item was rendered from valid data, is
+			// canonicalized at decode, has its download link re-derived by the
+			// reader, and ages out on the normal window - and the DE-CURATED arm
+			// already keeps a stored render for a torrent with strictly less
+			// standing.
 			p.w.log.Debug("indexer journal item kept on its stored render: still curated but no longer renderable",
 				"key", it.Key, "cause", "render-unresolvable")
 		}
@@ -574,34 +619,40 @@ func (p *journalPass) refreshCarriedItem(it *journalItem, refs []curatedRef) (jo
 	return fresh, true
 }
 
-// carryJournal re-renders one scope's previous journal items against the
-// current catalogue and prunes aged-out ones. A carried item whose torrent is
-// still curated is re-synthesized from current data (its title, size, marker,
-// and categories refresh; the harvested-title cache is applied by the caller
-// after the harvest) with its FirstSeen preserved; one whose torrent left the
-// curation set keeps its stored render (a curated-then-replaced torrent is
-// still a valid release). An item older than feedJournalMaxAge leaves the
-// journal (its cached title is dropped by the caller's retainTitles); an item
-// whose torrent has become curation-warned (ws.retracts: its key is excluded,
-// or its stored info hash is warned under a different tracker key - a warning
-// under another key still retracts the shared bytes) is dropped
-// - unlike a curated-then-replaced torrent, SeaDex's curators now warn
-// against it, so serving it would hand the arrs a Broken/Incomplete release.
-// A pre-journal item with no Key or FirstSeen (unreachable after a baseline,
-// defensive against hand-edited snapshots), or an item whose Key names the other
-// tracker scope, is dropped; so is a NON-curated item whose stored GUID no longer
-// proves its Key (there is no fresh render to self-heal from, and reload derives the
-// served download link from that GUID). A still-curated item with such a GUID is
-// normally kept: refreshCarriedItem re-renders it and simply does not carry the
-// unproven GUID forward.
-// A missing AB passkey is not a drop either: an AnimeBytes item re-renders
-// GUID-only (journalLink) while the reader suppresses the ungrabbable feed, so the
-// switch remains reversible. Neither is a fresh render that fails outright: a
+// carryJournal re-renders or prunes one scope's previous journal items against
+// this pass's evidence. It is the same function at both pass scopes, and every
+// verdict it can reach is one the pass has evidence for:
+//
+//   - an item past feedJournalMaxAge leaves, and a future FirstSeen is rebased
+//     (prepareCarriedItem) - the criterion is the item's OWN timestamp, so this
+//     is sound at any scope;
+//   - an item with no Key or FirstSeen, or one whose Key names the
+//     other tracker scope, is dropped - again on the item's own fields;
+//   - an item whose torrent has become curation-warned is dropped (ws.retracts:
+//     its key is excluded, or its stored info hash is warned under a different
+//     tracker key). Unlike a curated-then-replaced torrent, SeaDex's curators now
+//     warn against it, so serving it would hand the arrs a Broken/Incomplete
+//     release. This acts on a POSITIVE exclusion, so a window may do it too;
+//   - a still-EVALUATED item is re-synthesized from current data (title, size,
+//     marker and categories refresh; the harvested-title cache is applied by the
+//     caller) with its FirstSeen preserved. Only a CATALOGUE pass reaches this
+//     arm: the render folds the marker and categories across every occurrence of
+//     the key, so a window's fold would drop an out-of-window parent's vote (see
+//     windowEvidence.carryPolicy);
+//   - an item the CATALOGUE pass finds absent has genuinely left the curation set
+//     and keeps its stored render (a curated-then-replaced torrent is still a
+//     valid release), subject to the GUID gate - there is no fresh render to
+//     self-heal from, and reload derives the served download link from that GUID;
+//   - a WINDOW pass carries every item verbatim, because it holds no evidence it
+//     may act on (carryUnevaluatedItem).
+//
+// A missing AB passkey is not a drop: an AnimeBytes item re-renders GUID-only
+// (journalLink) while the reader suppresses the ungrabbable feed, so the switch
+// remains reversible. Neither is a fresh render that fails outright: a
 // still-curated item whose current data no longer renders falls back to its
-// STORED render (refreshCarriedItem hands it to carryStoredItem, whose GUID gate
-// may drop it there), because dropping it would be permanent - the never-pruned
-// seen ledger stops growJournal re-admitting the release once the upstream record
-// is corrected.
+// STORED render, because dropping it would be permanent - the never-pruned
+// publication log stops the growth path re-admitting the release once the
+// upstream record is corrected.
 func (p *journalPass) carryJournal(prevFeed []journalItem, scope string) []journalItem {
 	kept := make([]journalItem, 0, len(prevFeed))
 	for i := range prevFeed {
@@ -614,19 +665,28 @@ func (p *journalPass) carryJournal(prevFeed []journalItem, scope string) []journ
 
 // --- Growing the journal ---
 
-// growJournal adds the newly curated torrents to the per-scope journals and
-// folds every current identity into the seen ledger. A torrent is NEW only
-// when none of its identity signals is in seen - the tracker post date is
-// deliberately not the novelty key, since SeaDex routinely adds old torrents.
-// Every identity signal is recorded in seen whether or not the torrent could
-// be journaled (an unconfigured tracker), so the journal only ever grows from
-// curation that is new AT THE TIME it is served; backfill is search's job. A
-// torrent with no journal key is the exception: it is unservable for an
-// upstream DATA reason, so nothing is recorded for it and a corrected record
-// still journals as new (see journalIfNew). An AnimeBytes release curated
-// while no passkey is configured is NOT such an exception either way: it is
-// journaled GUID-only (journalLink) so the passkey stays a reversible switch,
-// and its identity is recorded like any other journaled release.
+// growJournal adds the newly published torrents to the per-scope journals.
+//
+// THE LEDGER WRITE IS ON PUBLICATION, NOT EXAMINATION, and that is the whole of
+// this half of the rewrite. A torrent is NEW only when none of its identity
+// signals is already in the publication log - the tracker post date is
+// deliberately not the novelty key, since SeaDex routinely adds old torrents -
+// and its identity is recorded when it ENTERS a feed, never on refusal. The log
+// therefore answers "what was SERVED", which is the only question a permanent,
+// never-pruned record may answer: an unconfigured scope, a failed render, or a
+// tag-excluded release admitted by a narrow window can no longer burn an
+// identity with nothing published, so a corrected upstream record journals as
+// new instead of being permanently invisible to RSS.
+//
+// The one write that is not a publication is the OFF-TRACKER case, and it is
+// deliberate rather than an exemption to the rule above. A tracker with no
+// Torznab URL is opted out, not refused: nothing was examined and nothing was
+// judged unservable, the operator simply turned the surface off. Recording its
+// identities is what keeps "re-broadcast stays impossible" true - without it,
+// enabling a tracker after a period of disuse would journal that tracker's
+// entire curated catalogue as newly curated in one pass, which is exactly the
+// catalogue re-broadcast the log exists to prevent. It is baselining that scope,
+// not logging a publication, and growJournal says so at the site.
 func (p *journalPass) growJournal(entries []seadex.Entry) (nyaa, ab []journalItem) {
 	for i := range entries {
 		for j := range entries[i].Torrents {
@@ -646,77 +706,100 @@ func (p *journalPass) growJournal(entries []seadex.Entry) (nyaa, ab []journalIte
 	return nyaa, ab
 }
 
-// journalIfNew applies growJournal's novelty test to one torrent - folding its
-// identity signals into seen either way - and materializes its journal item
-// when it is genuinely new and servable. An occurrence with no journal key
-// never reaches the ledger at all (see the guard below).
+// alreadyPublished reports whether any of a torrent's identity signals is
+// already in the publication log - either from a previous pass or from earlier
+// in THIS one, so two catalogue records naming the same release cannot both
+// journal it.
+func (p *journalPass) alreadyPublished(ids []string) bool {
+	for _, id := range ids {
+		if p.published[id] || p.publish[id] {
+			return true
+		}
+	}
+	return false
+}
+
+// record appends a torrent's identity signals to this pass's publication set.
+// APPEND is the log's only rule: nothing here ever removes an entry, because you
+// cannot un-serve something.
+func (p *journalPass) record(ids []string) {
+	for _, id := range ids {
+		p.publish[id] = true
+	}
+}
+
+// journalIfNew applies growJournal's novelty test to one torrent and
+// materializes its journal item when it is genuinely new and servable. It is
+// the ONE site that decides what enters the publication log, and every arm below
+// says which of the three things it is doing: publishing, baselining a
+// disabled scope, or recording nothing at all.
 func (p *journalPass) journalIfNew(t *seadex.Torrent) (it journalItem, scope string, ok bool) {
 	scope = trackerScope(t.Tracker)
-	if journalKey(t) == "" {
+	key := journalKey(t)
+	if key == "" {
 		// No journal key: this torrent can never be journaled. Either its
 		// tracker is unsupported - a tail tracker (AnimeTosho, RuTracker),
 		// which trackerKey refuses outright - or the reason is an upstream
 		// DATA defect on a supported tracker (a URL that fails the
 		// tracker-ownership gate, or no stable identity at all - a configured
 		// AnimeBytes record whose hash SeaDex redacts lands exactly here).
-		// Neither is an operator switch, so NOTHING is folded into the
-		// never-pruned ledger: the deliberate fold-though-unservable cases
-		// below are the config ones (an off tracker, a missing AB passkey),
-		// whose identities must not backfill when the operator flips them,
-		// whereas a corrected upstream record is a legitimate later republish
-		// that MUST journal as new - the contract
-		// TestRebuildRejectsForeignHostTrackerURLs states. A tail tracker has
-		// the sharper version of the same rule: AnimeTosho is a Nyaa MIRROR
-		// carrying the IDENTICAL info hash, so folding its identity would,
+		// NOTHING is recorded, which is now simply the general rule (nothing was
+		// published) rather than a special guard bolted on ahead of the fold. A
+		// tail tracker shows why it must be so: AnimeTosho is a Nyaa MIRROR
+		// carrying the IDENTICAL info hash, so recording its identity would,
 		// depending on nothing but catalogue iteration order, mark the Nyaa
-		// listing of the same bytes as already seen and silently deny it RSS
-		// exposure forever - and unlike a disabled tracker, a tail tracker has
-		// no later. Folding the info hash here also silenced the diagnostic
-		// after one cycle: the next rebuild saw the hash as seen and returned
-		// before the count. For an enabled, supported tracker surface it on
-		// the snapshot log line instead of silently shrinking the feed;
-		// unknown tail trackers (enabled("") is false) and an intentionally
-		// disabled AB stay silent.
+		// listing of the same bytes as already published and silently deny it
+		// RSS exposure forever. For an enabled, supported tracker surface it on
+		// the pass log line instead of silently shrinking the feed; unknown tail
+		// trackers (enabled("") is false) and an intentionally disabled AB stay
+		// silent.
 		if p.w.enablement.enabled(scope) {
 			p.js.unresolvable++
 		}
 		return journalItem{}, "", false
 	}
-	ids := ledgerSignals(scope, t)
-	isNew := true
-	for _, id := range ids {
-		if p.seen[id] {
-			isNew = false
-		}
-		p.seen[id] = true
-	}
-	if !isNew {
+	ids := publicationSignals(scope, t)
+	if p.alreadyPublished(ids) {
+		// Already served, so not new. Re-record every signal: a record that has
+		// since gained a second identity form (an info hash SeaDex used to
+		// redact) must be matched by either one next pass, and adding a signal
+		// to an existing record is an APPEND like any other.
+		p.record(ids)
 		return journalItem{}, "", false
 	}
-	return p.newJournalItem(t, scope)
+	if !p.w.enablement.enabled(scope) {
+		// BASELINING a disabled scope, not recording a refusal - see
+		// growJournal's doc for why this write is the one that keeps
+		// re-enabling a tracker from re-broadcasting its whole catalogue. The
+		// README's off switch: nothing is persisted for the release itself.
+		p.record(ids)
+		return journalItem{}, "", false
+	}
+	it, ok = p.newJournalItem(key)
+	if !ok {
+		// The render failed for an upstream DATA reason on a tracker the
+		// operator has ENABLED (no parseable title, an unpublishable page URL,
+		// a field over the persisted limits). Record NOTHING: the log is never
+		// pruned, so recording an identity that was never served would deny the
+		// corrected record its RSS exposure forever.
+		return journalItem{}, "", false
+	}
+	p.record(ids)
+	return it, scope, true
 }
 
-// newJournalItem resolves one newly curated torrent into its journal item and
-// scope, updating the skip counters when it cannot be served: an unconfigured
-// tracker (Nyaa or AnimeBytes without its Torznab URL) is skipped without
-// persisting anything for it (the README's off switch; its identity is
-// already in seen, so enabling it later starts from current novelty instead
-// of backfilling disabled-era curation), an AnimeBytes release journaled
-// GUID-only for want of a passkey counts toward the operator nudge (it IS
-// journaled - see journalLink - so the nudge's implied recovery actually
+// newJournalItem renders one newly curated torrent into its journal item,
+// updating the skip counters when it cannot be served: an AnimeBytes release
+// journaled GUID-only for want of a passkey counts toward the operator nudge (it
+// IS journaled - see journalLink - so the nudge's implied recovery actually
 // happens when the passkey arrives), and an in-scope torrent with no parseable
-// title counts as unresolvable so an upstream data change surfaces on the
-// snapshot log line instead of silently shrinking the feed (unresolvable is
-// counted only for configured scopes; the keyless case is refused and counted
-// one level up, in journalIfNew).
-func (p *journalPass) newJournalItem(t *seadex.Torrent, scope string) (journalItem, string, bool) {
-	if !p.w.enablement.enabled(scope) {
-		return journalItem{}, "", false
-	}
-	// journalIfNew's keyless guard already refused and counted a torrent with
-	// no journal key, so the key is non-empty by construction here.
-	key := journalKey(t)
-	it, ok, noPasskey := p.w.renderJournalItem(key, p.cur[key], p.infoFor)
+// title counts as unresolvable so an upstream data change surfaces on the pass
+// log line instead of silently shrinking the feed. The tracker's enablement and
+// the keyless case are decided and counted one level up, in journalIfNew, which
+// is also where the publication decision lives - so this function only renders.
+func (p *journalPass) newJournalItem(key string) (journalItem, bool) {
+	refs, _ := p.ev.refs(key)
+	it, ok, noPasskey := p.w.renderJournalItem(key, refs, p.infoFor)
 	if noPasskey {
 		p.js.abSkippedNoPasskey++
 	}
@@ -724,9 +807,9 @@ func (p *journalPass) newJournalItem(t *seadex.Torrent, scope string) (journalIt
 		if !noPasskey {
 			p.js.unresolvable++
 		}
-		return journalItem{}, "", false
+		return journalItem{}, false
 	}
-	return it, scope, true
+	return it, true
 }
 
 // --- Harvested-title cache ---
@@ -880,7 +963,7 @@ func censusMarker(refs []curatedRef) string {
 
 // retainTitles prunes the harvested-title cache to the keys still present in
 // the journal feeds, so an aged-out or dropped item's cached title leaves with
-// it (its seen-ledger identity guarantees it can never return to need it).
+// it (its publication record guarantees it can never return to need it).
 func retainTitles(titles map[string]string, feeds ...[]journalItem) map[string]string {
 	kept := make(map[string]string, len(titles))
 	for _, feed := range feeds {

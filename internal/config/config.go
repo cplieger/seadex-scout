@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/envx/yamlenv"
@@ -84,7 +85,7 @@ const (
 	DefaultCycleLockDir = DefaultConfigDir
 	// DefaultIndexerFeedPath is the atomic JSON file the compare cycle writes the
 	// indexer's materialized feed to (the search curation set, the synthesized
-	// per-tracker RSS journals with their seen ledger, and the harvested-title
+	// per-tracker RSS journals with their publication log, and the harvested-title
 	// cache) and the indexer HTTP server reads. One
 	// data engine (the cycle) produces both the findings and this feed, and
 	// persisting it lets a cycle run by the `poll` subcommand refresh a resident
@@ -678,8 +679,11 @@ func (c *Config) warnRelativeReportDir() {
 // link, so each arr grab fails at AnimeBytes while this app logs a served
 // feed. indexer.feed_api_key is deliberately NOT in this list: it is the inbound
 // gate rather than an outbound credential, so this message would misstate its
-// failure - validateIndexerEndpoints owns both its spellings (a braced
-// placeholder is an error, an unbraced one a warning naming the real risk).
+// failure - validateFeedAPIKey owns it, with one format gate that refuses every
+// spelling outright. For a CONFIGURED indexer this warning is a breadcrumb
+// ahead of that gate and validateABPasskey's: both fail the config for a
+// malformed credential. It still carries a config with no indexer section,
+// where neither gate runs and a parked placeholder would otherwise be silent.
 // Warn-only (no real arr/Prowlarr/AnimeBytes credential takes a shape
 // containing an env reference, but a false positive must not stop the daemon)
 // and field-name-only; never echoes the value.
@@ -812,41 +816,75 @@ func (c *Config) torznabEndpoints() []torznabEndpoint {
 	}
 }
 
-// validateIndexerEndpoints enforces the feed's authentication requirement and
-// validates the two upstream Torznab URLs, in the original diagnostic order.
+// validateIndexerEndpoints enforces the feed's authentication requirement,
+// gates the two indexer credentials on their FORMAT, and validates the two
+// upstream Torznab URLs, in the original diagnostic order.
+//
+// The two credential gates are where an operator-supplied string stops being
+// untrusted text and becomes a value the app may use as a credential: it
+// happens ONCE, here at the config boundary, so no downstream site has to ask
+// again (parse, don't validate). Both are POSITIVE format checks - "is this the
+// shape a credential takes" - rather than a catalogue of the ways a paste can
+// go wrong, because a catalogue is open-ended: the app used to grade three
+// spellings of one unexpanded reference three different ways (a braced ${VAR}
+// an error, an unbraced $VAR a warning, a reference embedded in a longer value
+// nothing at all) while internal/indexer refused to serve behind all three, so
+// a config could validate clean, start, and then never serve the feed. A
+// configured-but-unusable credential is now a HARD startup error, matching what
+// the runtime refuses (unusableFeedKey / unusableABPasskey).
+//
+// Reference recognition survives only as a HINT inside the error message: it
+// never decides pass or fail, so no regex has to model every spelling an
+// operator can leave behind (including the unterminated "${NAME" paste that
+// matches none of them).
 func (c *Config) validateIndexerEndpoints() error {
+	if err := c.validateFeedAPIKey(); err != nil {
+		return err
+	}
+	if err := c.validateABPasskey(); err != nil {
+		return err
+	}
+	for _, endpoint := range c.torznabEndpoints() {
+		if err := validateHTTPURL(endpoint.name, endpoint.val); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateFeedAPIKey is the ONE gate on indexer.feed_api_key. The key is
+// required (it is the only authentication on the feed, whose /ab RSS body
+// embeds the operator's AnimeBytes passkey in every download link), and it must
+// look like a credential: one run of printable characters with no whitespace,
+// no control rune, and no '$'.
+//
+// The '$' rule is a charset rule, not placeholder pattern-matching, and it is
+// the app's to make: this is seadex-scout's OWN key, generated the way the
+// README says (openssl rand -hex 16), and no hex or base64 output contains a
+// dollar sign. Refusing it therefore refuses every unexpanded-reference
+// spelling at once - ${VAR}, $VAR, a reference embedded in a longer value, and
+// the unterminated "${NAME" paste that no reference regex matches - without the
+// app having to enumerate them, and it makes the config's acceptance set a
+// SUBSET of what internal/indexer will serve behind (unusableFeedKey), which is
+// the safe direction for two gates on one credential. The cost is a hand-typed
+// passphrase containing '$' being refused with a message that says to generate
+// a key instead; that is the intended trade for a gate on a LAN-reachable feed.
+//
+// Field-name-only on every arm: the key value never rides the error or the log.
+func (c *Config) validateFeedAPIKey() error {
 	if c.IndexerAPIKey == "" {
 		return errors.New("indexer.feed_api_key is required when indexer.nyaa_torznab_url or indexer.ab_torznab_url is set")
 	}
-	// An unexpanded ${VAR} is the INVERSE of the usual unresolved-ref failure:
-	// every other secret field fails closed (the upstream rejects the literal),
-	// but this key IS the gate, so the literal placeholder becomes a valid
-	// credential - and it is guessable from the public README/config.example.
-	// Load's unresolved-ref WARN does not cover the non-allowlisted spelling
-	// (yamlenv leaves ${FEED_KEY} literal and reports nothing), and the length
-	// check below passes any placeholder. That is a credential a LAN attacker
-	// can GUESS on the AnimeBytes-passkey-bearing feed, so it fails the config
-	// rather than warning: an operator who meant to interpolate a key never
-	// wanted the placeholder serving as one. Field-name-only (never echo the
-	// key).
-	if strings.Contains(c.IndexerAPIKey, "${") {
-		return errors.New("indexer.feed_api_key still holds a ${VAR} reference; the variable is " +
-			"unset or not allowlisted (SONARR_/RADARR_/SEADEX_SCOUT_), so the feed would be gated " +
-			"by that literal placeholder - a guessable key on the " +
-			"AnimeBytes-passkey-bearing feed")
-	}
-	// Only the braced form is expanded (yamlenv.Expand's refRe recognizes
-	// ${VAR} alone), so an unbraced $NAME is left literal too and reaches the
-	// gate as a key derived from a variable name. The whole value must BE the
-	// reference (envRefRe matching end to end): a generated key cannot take that
-	// shape - no hex/base64 output starts with '$' followed by an upper-case
-	// name - so the check is exact whether or not the name is allowlisted, and a
-	// non-allowlisted spelling is left just as literal. Warn (the deployment may
-	// already be running behind it); field-name-only, never echo the key.
-	if secretref.IsWholeRef(c.IndexerAPIKey) && !strings.Contains(c.IndexerAPIKey, "${") {
-		slog.Warn("indexer.feed_api_key looks like an unbraced $VAR reference; only the " +
-			"${VAR} form is expanded, so the feed is gated by that literal name - wrap the " +
-			"reference in ${...} or paste the key value")
+	if !wellFormedFeedKey(c.IndexerAPIKey) {
+		msg := "indexer.feed_api_key is not a usable key: it must be one run of printable " +
+			"characters with no spaces and no '$' - generate one with openssl rand -hex 16"
+		if secretref.Unexpanded(c.IndexerAPIKey) || strings.ContainsRune(c.IndexerAPIKey, '$') {
+			msg += "; it looks like an environment-variable reference left unexpanded, so the " +
+				"variable is unset or not allowlisted (SONARR_/RADARR_/SEADEX_SCOUT_) and the feed " +
+				"would be gated by that literal placeholder - a key guessable from the public " +
+				"README and config.example"
+		}
+		return errors.New(msg)
 	}
 	// Presence is required above; strength is warn-only defense-in-depth. The
 	// key is the only gate on the passkey-bearing /ab feed, so a trivially
@@ -856,12 +894,74 @@ func (c *Config) validateIndexerEndpoints() error {
 		slog.Warn("indexer.feed_api_key is shorter than 16 characters; it gates the " +
 			"AnimeBytes-passkey-bearing feed - generate a strong key (openssl rand -hex 16)")
 	}
-	for _, endpoint := range c.torznabEndpoints() {
-		if err := validateHTTPURL(endpoint.name, endpoint.val); err != nil {
-			return err
+	return nil
+}
+
+// validateABPasskey is the ONE gate on indexer.ab_passkey. An empty passkey is
+// the documented off state (AnimeBytes searches still work through Prowlarr;
+// the /ab RSS feed answers a Torznab error), so it passes. A CONFIGURED passkey
+// must be the shape AnimeBytes issues, or the config fails: every AB download
+// link is built from it, so a malformed value means each arr grab fails at the
+// tracker while this app reports a served feed.
+//
+// The shape is length plus the absence of whitespace, and the lengths are
+// upstream authority rather than an invention here: Jackett's AnimeBytes
+// indexer rejects a passkey with "expected length: 32, 48, or 56" and
+// Prowlarr's AnimeBytesSettingsValidator asserts the same three lengths, and
+// both send the value as scrape.php's torrent_pass exactly as this app does.
+// NEITHER constrains the charset, so this app must not either - no 32-hex
+// assumption, and no Gazelle passkey convention (AnimeBytes is not
+// Gazelle-based; it runs its own codebase with a chihaya fork as its tracker).
+//
+// The app validates SHAPE, never CORRECTNESS: a well-shaped but wrong passkey
+// is the operator's to fix and must surface as a runtime auth failure at
+// AnimeBytes, not as a config error. Field-name-only; never echoes the secret.
+func (c *Config) validateABPasskey() error {
+	if c.IndexerABPasskey == "" || wellFormedABPasskey(c.IndexerABPasskey) {
+		return nil
+	}
+	msg := "indexer.ab_passkey is not a usable AnimeBytes passkey: it must be 32, 48, or 56 " +
+		"characters with no spaces (the lengths AnimeBytes issues, and the ones Jackett and " +
+		"Prowlarr accept for the same credential) - copy it from your AnimeBytes profile, or " +
+		"leave it empty to serve the feed without AnimeBytes download links"
+	if secretref.Unexpanded(c.IndexerABPasskey) {
+		msg += "; it looks like an environment-variable reference left unexpanded, so the variable " +
+			"is unset or not allowlisted (SONARR_/RADARR_/SEADEX_SCOUT_)"
+	}
+	return errors.New(msg)
+}
+
+// wellFormedFeedKey reports whether v is the shape a generated feed key takes:
+// non-empty, and one run of printable characters with no whitespace, no control
+// rune and no '$'. See validateFeedAPIKey for why '$' is excluded.
+func wellFormedFeedKey(v string) bool {
+	if v == "" {
+		return false
+	}
+	for _, r := range v {
+		if r == '$' || unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
 		}
 	}
-	return nil
+	return true
+}
+
+// wellFormedABPasskey reports whether v is the shape an AnimeBytes passkey
+// takes: one of the three lengths AnimeBytes issues, carrying no whitespace or
+// control rune. The charset is deliberately unconstrained beyond that (see
+// validateABPasskey).
+func wellFormedABPasskey(v string) bool {
+	switch len(v) {
+	case 32, 48, 56:
+	default:
+		return false
+	}
+	for _, r := range v {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // warnIndexerEndpointProblems emits the warn/info diagnostics for suspicious
@@ -931,11 +1031,12 @@ func (c *Config) warnABPasskeyConfiguration() {
 	// config-time signal instead of discovering it in downstream arr RSS
 	// failures. Field-name-only; never echoes a secret.
 	//
-	// UNUSABLE, not empty: an unexpanded ${VAR}/$VAR placeholder takes the same
-	// path at the server (internal/indexer's unusableABPasskey, the same
-	// internal/secretref predicate), so describing only the empty case left the
-	// placeholder case with a warning that named the wrong consequence.
-	if c.IndexerABTorznabURL != "" && secretref.Unusable(c.IndexerABPasskey) {
+	// EMPTY, not "unusable": validateIndexerEndpoints has already failed the
+	// config for a configured-but-malformed passkey (validateABPasskey, the one
+	// format gate), so the only unusable state that can reach this diagnostic is
+	// the documented off switch. Testing for a placeholder here too would be a
+	// second spelling of a rule that already decided.
+	if c.IndexerABTorznabURL != "" && c.IndexerABPasskey == "" {
 		slog.Warn("indexer.ab_passkey is empty; AnimeBytes searches still work through Prowlarr, " +
 			"but the /ab RSS feed returns a Torznab error until a passkey is configured")
 	}
@@ -944,7 +1045,7 @@ func (c *Config) warnABPasskeyConfiguration() {
 	// journaling nor the /ab feed uses the passkey. Info, mirroring
 	// infoDisabledIndexerKeys: a deliberately parked passkey must not raise
 	// Loki alert noise. Field-name-only; never echoes the secret.
-	if c.IndexerABTorznabURL == "" && !secretref.Unusable(c.IndexerABPasskey) {
+	if c.IndexerABTorznabURL == "" && c.IndexerABPasskey != "" {
 		slog.Info("indexer.ab_passkey is set but indexer.ab_torznab_url is empty; " +
 			"AnimeBytes is disabled and the passkey is unused (set indexer.ab_torznab_url to enable it)")
 	}

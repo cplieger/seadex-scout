@@ -55,39 +55,3 @@ func TestUnusableIsAbsentOrUnexpanded(t *testing.T) {
 		})
 	}
 }
-
-// TestIsWholeRefRequiresTheEntireValue separates the stricter reading a gate
-// uses (the whole value IS the reference, so naming it in an error cannot
-// misdescribe a partially-expanded value) from the broad diagnostic one.
-func TestIsWholeRefRequiresTheEntireValue(t *testing.T) {
-	for name, tc := range map[string]struct {
-		val  string
-		want bool
-	}{
-		"whole braced ref":     {"${SEADEX_SCOUT_FEED_KEY}", true},
-		"whole brace-less ref": {"$SEADEX_SCOUT_FEED_KEY", true},
-		"ref with a prefix":    {"key-${SEADEX_SCOUT_FEED_KEY}", false},
-		"ref with a suffix":    {"${SEADEX_SCOUT_FEED_KEY}-key", false},
-		"not a ref":            {"0f1e2d3c4b5a6978", false},
-		"empty":                {"", false},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if got := IsWholeRef(tc.val); got != tc.want {
-				t.Errorf("IsWholeRef(%q) = %v, want %v", tc.val, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestUnexpandedIsASupersetOfIsWholeRef pins the containment the two policies
-// rely on: anything that IS entirely a reference also CONTAINS one, so a gate
-// can never accept a value the diagnostic would warn about.
-func TestUnexpandedIsASupersetOfIsWholeRef(t *testing.T) {
-	for _, v := range []string{
-		"${SEADEX_SCOUT_AB_PASSKEY}", "$SEADEX_SCOUT_AB_PASSKEY", "${}", "$X",
-	} {
-		if IsWholeRef(v) && !Unexpanded(v) {
-			t.Errorf("IsWholeRef(%q) is true but Unexpanded is false; the broad policy must be a superset", v)
-		}
-	}
-}

@@ -990,7 +990,7 @@ func validInfoHash(h string) string {
 // journal is deliberately bounded by AGE alone (feedJournalMaxAge,
 // journal.go), never by count: growJournal marks every new identity seen
 // before this runs, so evicting an item here would permanently deny it RSS
-// exposure (the seen ledger can never re-admit it). Size caps apply only at
+// exposure (the publication log can never re-admit it). Size caps apply only at
 // render/serve time (applyPaging + maxItems, query.go), evicting from the
 // rendered view, and maxFeedBytes bounds the persisted snapshot as a whole.
 func sortFeed(items []journalItem) []journalItem {

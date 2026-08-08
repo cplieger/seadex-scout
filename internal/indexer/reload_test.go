@@ -23,9 +23,8 @@ import (
 func TestReloadWarnsOnceOnMissingSnapshotAndRecovers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{},
+		Owners:    owns(),
+		Published: map[string]bool{},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}, Key: "nyaa:1"},
 		},
@@ -50,9 +49,8 @@ func TestReloadWarnsOnceOnMissingSnapshotAndRecovers(t *testing.T) {
 	}
 
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{},
+		Owners:    owns(),
+		Published: map[string]bool{},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "second", GUID: "https://nyaa.si/view/2"}, Key: "nyaa:2"},
 		},
@@ -108,9 +106,8 @@ func TestReloadRecoversDegradationOnUnchangedSnapshot(t *testing.T) {
 	}
 	path := filepath.Join(sub, "feed.json")
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{},
+		Owners:    owns(),
+		Published: map[string]bool{},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}, Key: "nyaa:1"},
 		},
@@ -164,9 +161,8 @@ func TestReloadMemoizedMalformedSnapshotClearsDegradation(t *testing.T) {
 	}
 	path := filepath.Join(sub, "feed.json")
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{},
+		Owners:    owns(),
+		Published: map[string]bool{},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}, Key: "nyaa:1"},
 		},
@@ -288,7 +284,7 @@ func TestReloadReassertsFailedStateWhenMalformedSnapshotReappears(t *testing.T) 
 func TestReloadWarnsWhenTheSameMalformedSnapshotReappears(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	if err := newTestWriter(path, "", false).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -341,9 +337,8 @@ func TestReloadWarnsWhenTheSameMalformedSnapshotReappears(t *testing.T) {
 func TestReloadDropsOversizedItemOnReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{},
+		Owners:    owns(),
+		Published: map[string]bool{},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}, Key: "nyaa:1"},
 		},
@@ -355,9 +350,8 @@ func TestReloadDropsOversizedItemOnReload(t *testing.T) {
 	}
 
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{},
+		Owners:    owns(),
+		Published: map[string]bool{},
 		NyaaFeed: []journalItem{
 			{item: item{Title: strings.Repeat("a", maxPersistedFieldBytes+1), GUID: "https://nyaa.si/view/2"}},
 		},
@@ -379,39 +373,50 @@ func TestReloadDropsOversizedItemOnReload(t *testing.T) {
 	}
 }
 
-// TestReloadPreJournalSnapshotServesEmptyFeeds pins readSnapshot's pre-journal
-// schema gate: a legacy snapshot with NO "seen" key (the retired
-// whole-catalogue schema; loadPrevious re-baselines on the same sentinel) must
-// not serve its persisted feeds as the RSS journal - an upgrade must never
-// re-broadcast the whole legacy catalogue as newly curated releases - while
-// the curation maps are kept so searches still match.
-func TestReloadPreJournalSnapshotServesEmptyFeeds(t *testing.T) {
+// TestReloadKeepsFeedOnAnUnidentifiableSnapshot replaces the pre-journal-schema
+// gate this file used to carry, and it is the twin of
+// TestReloadReBaselinesAnUnsupportedSchemaVersion: a version SKEW and CORRUPTION
+// get opposite treatment, and the difference is whether the document identifies
+// itself.
+//
+// A file carrying no version at all - a retired pre-version snapshot, a truncated
+// write, `{}` - is unidentifiable, so the reader keeps its last-good feed rather
+// than installing an empty one. That is a strictly better posture than the retired
+// gate's: the old pre-journal arm INSTALLED the legacy snapshot's curation maps
+// while dropping its feeds, which meant an upgrade served a search index written
+// by another schema.
+func TestReloadKeepsFeedOnAnUnidentifiableSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
+	writeSnapshotFile(t, path, &snapshot{
+		Owners:    owns(hashed("nyaa:1", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", true)),
+		Published: map[string]bool{"nyaa:1": true},
+		NyaaFeed: []journalItem{
+			{item: item{Title: "live", GUID: "https://nyaa.si/view/1"}, Key: "nyaa:1"},
+		},
+	})
+	log, rec := capture.New()
+	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{
+		NyaaTorznabURL: "http://prowlarr/1/api",
+	}}, log, nil)
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+		t.Fatalf("initial feed = %d items, want 1", len(got))
+	}
+
+	// A versionless document replaces it: the retired whole-catalogue shape.
 	legacy := `{"by_hash":{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":true},"by_key":{"nyaa:1":true},` +
 		`"nyaa_feed":[{"Title":"legacy nyaa","GUID":"https://nyaa.si/view/1"}],` +
 		`"ab_feed":[{"Title":"legacy ab","GUID":"https://animebytes.tv/torrents.php?id=1&torrentid=2"}]}`
 	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
 		t.Fatalf("write legacy snapshot: %v", err)
 	}
-	log, rec := capture.New()
-	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{
-		NyaaTorznabURL: "http://prowlarr/1/api",
-		ABTorznabURL:   "http://prowlarr/2/api",
-		ABPasskey:      "PASSKEY",
-	}}, log, nil)
-	if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
-		t.Errorf("nyaa feed from a pre-journal snapshot = %d items, want 0 (the legacy catalogue must not re-broadcast)", len(got))
+	bumpMtime(t, path)
+	ix.cache.refresh(context.Background())
+
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 || got[0].Title != "live" {
+		t.Errorf("feed after an unidentifiable rewrite = %+v, want the last-good feed kept", got)
 	}
-	if got := ix.feedFor(upstreamAB); len(got) != 0 {
-		t.Errorf("ab feed from a pre-journal snapshot = %d items, want 0 (the legacy catalogue must not re-broadcast)", len(got))
-	}
-	if got := rec.Count("indexer feed snapshot is pre-journal schema; serving empty RSS feeds until the next cycle re-baselines"); got != 1 {
-		t.Errorf("pre-journal INFO logged %d times, want 1; log output:\n%s", got, strings.Join(rec.Messages(), "\n"))
-	}
-	set := ix.cache.curation()
-	curated := set.byHash["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] && set.byKey["nyaa:1"]
-	if !curated {
-		t.Error("curation maps dropped from a pre-journal snapshot; searches must still match against them")
+	if !rec.Contains("indexer feed snapshot malformed; keeping current feed") {
+		t.Errorf("unidentifiable snapshot not reported as malformed; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }
 
@@ -456,9 +461,8 @@ func TestSnapshotUnavailableRecoveredBetweenLocksAnswersFresh(t *testing.T) {
 func TestReloadRebuildsNyaaDownloadURLsFromGUID(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{},
+		Owners:    owns(),
+		Published: map[string]bool{},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "valid", GUID: "https://nyaa.si/view/42", DownloadURL: "https://attacker.example/poison.torrent"}, Key: "nyaa:42"},
 			{item: item{Title: "invalid", GUID: "https://nyaa.si/view/not-a-number", DownloadURL: "https://attacker.example/invalid.torrent"}, Key: "nyaa:invalid"},
@@ -521,7 +525,7 @@ func TestReloadDropsForeignHostSnapshotGUIDs(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "feed.json")
-			snap := &snapshot{ByHash: map[string]bool{}, ByKey: map[string]bool{}, Seen: map[string]bool{}}
+			snap := &snapshot{Owners: owns(), Published: map[string]bool{}}
 			if tc.scope == upstreamNyaa {
 				snap.NyaaFeed = tc.feed
 			} else {
@@ -581,7 +585,7 @@ func TestReloadDropsCrossKeySnapshotGUIDs(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "feed.json")
-			snap := &snapshot{ByHash: map[string]bool{}, ByKey: map[string]bool{}, Seen: map[string]bool{}}
+			snap := &snapshot{Owners: owns(), Published: map[string]bool{}}
 			if tc.scope == upstreamNyaa {
 				snap.NyaaFeed = tc.feed
 			} else {
@@ -615,9 +619,8 @@ func TestReloadDropsCrossKeySnapshotGUIDs(t *testing.T) {
 func TestReloadSanitizesSnapshotInfoURLs(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{},
+		Owners:    owns(),
+		Published: map[string]bool{},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "canonical", GUID: "https://nyaa.si/view/42", InfoURL: "https://releases.moe/154587"}, Key: "nyaa:42"},
 			{item: item{Title: "scheme", GUID: "https://nyaa.si/view/43", InfoURL: "javascript:alert(1)"}, Key: "nyaa:43"},
@@ -780,7 +783,7 @@ func TestReloadDropsCrossTrackerSnapshotItems(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "feed.json")
-			snap := &snapshot{ByHash: map[string]bool{}, ByKey: map[string]bool{}, Seen: map[string]bool{}}
+			snap := &snapshot{Owners: owns(), Published: map[string]bool{}}
 			if tc.scope == upstreamNyaa {
 				snap.NyaaFeed = []journalItem{tc.planted}
 			} else {
@@ -814,7 +817,7 @@ func TestReloadDropsCrossTrackerSnapshotItems(t *testing.T) {
 func TestReloadDropsUserinfoBearingSnapshotGUID(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{}, ByKey: map[string]bool{}, Seen: map[string]bool{},
+		Owners: owns(), Published: map[string]bool{},
 		NyaaFeed: []journalItem{{
 			item: item{Title: "planted", GUID: "https://evil@nyaa.si/view/42"},
 			Key:  "nyaa:42",
@@ -914,7 +917,7 @@ func TestReloadCoalescingLoserWaitAbandonsOnCancelledContext(t *testing.T) {
 // non-atomically only in the failure case; the server must not serve an empty feed then.
 func TestReloadKeepsFeedOnMalformedSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	if err := newTestWriter(path, "", false).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -945,7 +948,7 @@ func TestReloadKeepsFeedOnZeroSnapshot(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "feed.json")
-			seedEmptyLedger(t, path)
+			seedEmptyFeed(t, path)
 			if err := newTestWriter(path, "", false).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
 				t.Fatalf("Rebuild: %v", err)
 			}
@@ -984,7 +987,7 @@ func TestReloadRebuildsABDownloadURLsFromCurrentPasskey(t *testing.T) {
 		}},
 	}}
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	if err := newTestWriter(path, "OLD_PASSKEY", true).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -1013,7 +1016,7 @@ func TestReloadRebuildsABDownloadURLsFromCurrentPasskey(t *testing.T) {
 
 	// An AB item whose page URL yields no torrent id cannot have its URL
 	// re-derived: it is dropped rather than served with the stale credential.
-	noID := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[],"ab_feed":[{"Title":"no id","GUID":"https://animebytes.tv/torrents.php?id=1","DownloadURL":"https://animebytes.tv/torrent/1/download/OLD_PASSKEY"}]}`
+	noID := `{"version":2,"owners":{},"published":{},"nyaa_feed":[],"ab_feed":[{"Title":"no id","GUID":"https://animebytes.tv/torrents.php?id=1","DownloadURL":"https://animebytes.tv/torrent/1/download/OLD_PASSKEY"}]}`
 	noIDPath := filepath.Join(t.TempDir(), "feed.json")
 	if err := os.WriteFile(noIDPath, []byte(noID), 0o600); err != nil {
 		t.Fatalf("write no-id snapshot: %v", err)
@@ -1180,7 +1183,7 @@ func TestReloadInstallsOlderMtimeSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	oldTime := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	newerTime := oldTime.Add(time.Hour)
-	restoredJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Key":"nyaa:7","Title":"restored","GUID":"https://nyaa.si/view/7","DownloadURL":"restored"}],"ab_feed":[]}`
+	restoredJSON := `{"version":2,"owners":{},"published":{},"nyaa_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Key":"nyaa:7","Title":"restored","GUID":"https://nyaa.si/view/7","DownloadURL":"restored"}],"ab_feed":[]}`
 	if err := os.WriteFile(path, []byte(restoredJSON), 0o600); err != nil {
 		t.Fatalf("write restored snapshot: %v", err)
 	}
@@ -1200,8 +1203,7 @@ func TestReloadInstallsOlderMtimeSnapshot(t *testing.T) {
 	// holding the write lock exactly as reload's install path does.
 	ix.cache.mu.Lock()
 	ix.cache.snap = snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
+		Owners: owns(),
 		NyaaFeed: []journalItem{
 			{item: item{Title: "stale", GUID: "stale", DownloadURL: "stale"}},
 		},
@@ -1232,7 +1234,7 @@ func TestReloadInstallsOlderMtimeSnapshot(t *testing.T) {
 func TestReloadSkipsUnchangedMtime(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	when := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
-	firstJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Key":"nyaa:1","Title":"first","GUID":"https://nyaa.si/view/1","DownloadURL":"first"}],"ab_feed":[]}`
+	firstJSON := `{"version":2,"owners":{},"published":{},"nyaa_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Key":"nyaa:1","Title":"first","GUID":"https://nyaa.si/view/1","DownloadURL":"first"}],"ab_feed":[]}`
 	if err := os.WriteFile(path, []byte(firstJSON), 0o600); err != nil {
 		t.Fatalf("write first snapshot: %v", err)
 	}
@@ -1243,7 +1245,7 @@ func TestReloadSkipsUnchangedMtime(t *testing.T) {
 	}
 
 	// Rewrite the content but restore the identical mtime: reload must skip.
-	secondJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Key":"nyaa:2","Title":"second","GUID":"https://nyaa.si/view/2","DownloadURL":"second"}],"ab_feed":[]}`
+	secondJSON := `{"version":2,"owners":{},"published":{},"nyaa_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Key":"nyaa:2","Title":"second","GUID":"https://nyaa.si/view/2","DownloadURL":"second"}],"ab_feed":[]}`
 	if err := os.WriteFile(path, []byte(secondJSON), 0o600); err != nil {
 		t.Fatalf("write second snapshot: %v", err)
 	}
@@ -1265,7 +1267,7 @@ func TestReloadSkipsUnchangedMtime(t *testing.T) {
 // TestReloadCoalescingLoserDefersToWinnerOnFreshInstall.)
 func TestReloadCoalescesConcurrentRefreshes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	firstJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Key":"nyaa:1","Title":"first","GUID":"https://nyaa.si/view/1","DownloadURL":"first"}],"ab_feed":[]}`
+	firstJSON := `{"version":2,"owners":{},"published":{},"nyaa_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Key":"nyaa:1","Title":"first","GUID":"https://nyaa.si/view/1","DownloadURL":"first"}],"ab_feed":[]}`
 	if err := os.WriteFile(path, []byte(firstJSON), 0o600); err != nil {
 		t.Fatalf("write first snapshot: %v", err)
 	}
@@ -1279,7 +1281,7 @@ func TestReloadCoalescesConcurrentRefreshes(t *testing.T) {
 	// mtime granularity, so bump the mtime past the loaded snapshot's or
 	// loadedSnapshotUnchanged would skip the reload (production writes are
 	// atomic renames, which install a new inode instead).
-	newJSON := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Key":"nyaa:3","Title":"new","GUID":"https://nyaa.si/view/3","DownloadURL":"new"}],"ab_feed":[]}`
+	newJSON := `{"version":2,"owners":{},"published":{},"nyaa_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Key":"nyaa:3","Title":"new","GUID":"https://nyaa.si/view/3","DownloadURL":"new"}],"ab_feed":[]}`
 	if err := os.WriteFile(path, []byte(newJSON), 0o600); err != nil {
 		t.Fatalf("write new snapshot: %v", err)
 	}
@@ -1366,9 +1368,8 @@ func TestReloadRebasesFutureSnapshotTimestamps(t *testing.T) {
 	future := time.Date(9999, time.January, 1, 0, 0, 0, 0, time.UTC)
 	past := time.Now().UTC().Add(-time.Hour)
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{},
+		Owners:    owns(),
+		Published: map[string]bool{},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "skewed", GUID: "https://nyaa.si/view/42"}, Key: "nyaa:42", FirstSeen: future},
 			{item: item{Title: "honest", GUID: "https://nyaa.si/view/43"}, Key: "nyaa:43", FirstSeen: past},
@@ -1410,9 +1411,8 @@ func TestReloadRebasesFutureSnapshotTimestamps(t *testing.T) {
 func TestReloadMemoizesOversizedSnapshotFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{},
+		Owners:    owns(),
+		Published: map[string]bool{},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "first", GUID: "https://nyaa.si/view/1"}, Key: "nyaa:1"},
 		},
@@ -1439,9 +1439,8 @@ func TestReloadMemoizesOversizedSnapshotFile(t *testing.T) {
 
 	// A replacement file is a different inode: it must be retried, not skipped.
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{},
+		Owners:    owns(),
+		Published: map[string]bool{},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "repaired", GUID: "https://nyaa.si/view/2"}, Key: "nyaa:2"},
 		},
@@ -1453,67 +1452,78 @@ func TestReloadMemoizesOversizedSnapshotFile(t *testing.T) {
 	}
 }
 
-// TestReloadReportsPreRelationSnapshot pins the diagnostic for the pre-relation
-// upgrade window (l-f170). The released binary persisted no by_pair key, so the
-// first server start after this branch ships loads a snapshot whose ByPair
-// decodes nil - and because a healthy Prowlarr Nyaa result carries BOTH an info
-// hash and a view-page guid, lookup's fail-closed dual-signal arm then answers
-// EVERY Nyaa search with an empty 200 feed, which an arr cannot distinguish from
-// "SeaDex curates nothing for this show". The fail-closed serving decision is
-// deliberately unchanged; what must not happen is that a local schema fault
-// looks exactly like a genuine no-match, with only curated=0 on the request line
-// as evidence. A relation-bearing snapshot must stay silent.
-func TestReloadReportsPreRelationSnapshot(t *testing.T) {
-	const msg = "indexer feed snapshot predates the pair relation"
+// TestReloadReBaselinesAnUnsupportedSchemaVersion replaces the two transitional
+// schema diagnostics this file used to carry, both of which the version envelope
+// makes unreachable.
+//
+// The pre-relation one is worth recording because it is the argument for deriving
+// the search index rather than persisting it: a released binary wrote no by_pair
+// key, so the first start after the relation shipped loaded a nil map, lookup's
+// dual-signal arm failed closed, and EVERY Nyaa search answered an empty 200 feed
+// - indistinguishable to an arr from "SeaDex curates nothing for this show", with
+// only curated=0 on the request line as evidence (l-f170). The relation is now
+// projected from the ownership fact (projectCuration), so it cannot be absent
+// while the fact is present, and that whole upgrade window no longer exists.
+//
+// What remains is ONE arm: a snapshot at a version this binary does not read is
+// re-baselined, not refused. Re-baselining is right because feed.json is a
+// materialized view - the cost is one empty-RSS window, which is the intended
+// fresh-install behaviour - while reading it would risk misinterpreting exactly
+// the members that cannot be re-derived (the permanent publication log, the
+// journals' FirstSeen and harvested titles). Refusing would be worse still: the
+// cache would answer a Torznab error for every request including a search.
+func TestReloadReBaselinesAnUnsupportedSchemaVersion(t *testing.T) {
+	const msg = "indexer feed snapshot has an unsupported schema version"
 	const hash = "143ed15e5e3df072ae91adaeb149973a887590dd"
 
-	load := func(t *testing.T, snap *snapshot) *capture.Recorder {
+	load := func(t *testing.T, snap *snapshot) (*Indexer, *capture.Recorder) {
 		t.Helper()
 		path := filepath.Join(t.TempDir(), "feed.json")
 		writeSnapshotFile(t, path, snap)
 		log, rec := capture.New()
-		New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{
+		ix := New(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{
 			NyaaTorznabURL: "http://prowlarr/1/api",
-		}}, log, nil).cache.refresh(context.Background())
-		return rec
+		}}, log, nil)
+		ix.cache.refresh(context.Background())
+		return ix, rec
 	}
 
-	t.Run("a pre-relation snapshot is reported once", func(t *testing.T) {
-		rec := load(t, &snapshot{
-			ByHash: map[string]bool{hash: true},
-			ByKey:  map[string]bool{"nyaa:42": true},
-			Seen:   map[string]bool{"nyaa:42": true},
-			// ByPair omitted: the shape the released binary wrote.
-		})
+	current := func() *snapshot {
+		return &snapshot{
+			Owners:    owns(hashed("nyaa:42", hash, true)),
+			Published: map[string]bool{"nyaa:42": true},
+			NyaaFeed: []journalItem{
+				{item: item{Title: "current", GUID: "https://nyaa.si/view/42"}, Key: "nyaa:42"},
+			},
+		}
+	}
+
+	t.Run("a foreign version is reported and serves nothing", func(t *testing.T) {
+		snap := current()
+		snap.Version = currentFeedVersion + 1
+		ix, rec := load(t, snap)
 		if !rec.Contains(msg) {
-			t.Errorf("pre-relation snapshot not reported; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+			t.Errorf("unsupported version not reported; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+		}
+		if got := ix.cache.curation(); len(got.byKey) != 0 || len(got.byHash) != 0 {
+			t.Errorf("curation = %+v, want empty: a version this binary cannot read must not be served", got)
+		}
+		if got := ix.feedFor(upstreamNyaa); len(got) != 0 {
+			t.Errorf("nyaa feed = %+v, want empty for one window", got)
 		}
 	})
 
-	t.Run("a relation-bearing snapshot stays silent", func(t *testing.T) {
-		rec := load(t, &snapshot{
-			ByHash: map[string]bool{hash: true},
-			ByKey:  map[string]bool{"nyaa:42": true},
-			ByPair: map[string]bool{pairKey(hash, "nyaa:42"): true},
-			Seen:   map[string]bool{"nyaa:42": true},
-		})
+	t.Run("the current version loads and stays silent", func(t *testing.T) {
+		ix, rec := load(t, current())
 		if rec.Contains(msg) {
-			t.Errorf("current-schema snapshot wrongly reported as pre-relation; log output:\n%s",
-				strings.Join(rec.Messages(), "\n"))
+			t.Errorf("current-schema snapshot wrongly reported; log output:\n%s", strings.Join(rec.Messages(), "\n"))
 		}
-	})
-
-	t.Run("an empty curation set is not a schema fault", func(t *testing.T) {
-		// A fresh install curates nothing yet; nil ByPair there carries no
-		// signal and must not warn the operator about an upgrade window.
-		rec := load(t, &snapshot{
-			ByHash: map[string]bool{},
-			ByKey:  map[string]bool{},
-			Seen:   map[string]bool{},
-		})
-		if rec.Contains(msg) {
-			t.Errorf("empty snapshot wrongly reported as pre-relation; log output:\n%s",
-				strings.Join(rec.Messages(), "\n"))
+		set := ix.cache.curation()
+		if !set.byKey["nyaa:42"] || !set.byHash[hash] {
+			t.Errorf("curation = %+v, want the ownership fact projected", set)
+		}
+		if !set.byPair[pairKey(hash, "nyaa:42")] {
+			t.Error("the pair relation was not derived; a derived relation can never be absent")
 		}
 	})
 }
@@ -1530,9 +1540,8 @@ func TestReloadReportsPreRelationSnapshot(t *testing.T) {
 func TestReloadBlanksOutOfVocabularyDownloadVolumeFactor(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{},
+		Owners:    owns(),
+		Published: map[string]bool{},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "tampered", GUID: "https://nyaa.si/view/42", DownloadVolumeFactor: "0"}, Key: "nyaa:42"},
 			{item: item{Title: "marker", GUID: "https://nyaa.si/view/43", DownloadVolumeFactor: dvfBest}, Key: "nyaa:43"},
@@ -1571,9 +1580,8 @@ func TestReloadBlanksOutOfVocabularyDownloadVolumeFactor(t *testing.T) {
 func TestReloadDropsOutOfVocabularyCategories(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	writeSnapshotFile(t, path, &snapshot{
-		ByHash: map[string]bool{},
-		ByKey:  map[string]bool{},
-		Seen:   map[string]bool{},
+		Owners:    owns(),
+		Published: map[string]bool{},
 		NyaaFeed: []journalItem{
 			{item: item{Title: "tampered", GUID: "https://nyaa.si/view/42", Categories: []int{5030, catAnime, 2040}}, Key: "nyaa:42"},
 			{item: item{Title: "clean", GUID: "https://nyaa.si/view/43", Categories: []int{catMovies}}, Key: "nyaa:43"},

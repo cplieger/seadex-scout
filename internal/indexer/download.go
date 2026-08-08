@@ -41,7 +41,18 @@ func downloadURLForScope(scope, sourceURL, abPasskey string) (string, bool) {
 	case upstreamNyaa:
 		return base + "/download/" + id + ".torrent", true
 	case upstreamAB:
-		if abPasskey == "" {
+		// unusableABPasskey is this package's ONE home for "can this passkey
+		// build a grabbable AnimeBytes link" (server.go, over
+		// internal/secretref), so every site that decides on the passkey reads
+		// it rather than spelling out its own emptiness test: minting a
+		// non-credential into the link would report the release as fully
+		// resolved while every arr grab failed at the tracker. config's
+		// validateABPasskey is the format gate that keeps a malformed value from
+		// reaching any of them on the daemon path; this is the same fail-closed
+		// answer for any other construction, and it keeps the writer's
+		// ab_releases_skipped count and the reader's AB-feed clear
+		// (rebuildABDownloadURLs) in agreement.
+		if unusableABPasskey(abPasskey) {
 			return "", false
 		}
 		return base + "/torrent/" + id + "/download/" + url.PathEscape(abPasskey), true
@@ -87,7 +98,8 @@ func downloadTarget(scope, sourceURL string) (base, id string, ok bool) {
 // every gate downloadURLForScope applies except the passkey itself.
 //
 // It exists for the one case where a release is sound but its link is not yet
-// derivable - an AnimeBytes torrent while indexer.ab_passkey is unset - which
+// derivable - an AnimeBytes torrent while no usable indexer.ab_passkey is
+// configured (absent, or a value that is not a credential at all) - which
 // the journal admits GUID-only rather than refusing (see journal.go's
 // journalLink). It deliberately does NOT report a release that is unresolvable
 // for an upstream DATA reason (a foreign host, an id-less URL): such a record

@@ -20,6 +20,14 @@ import (
 // policy plus the Load-level wiring (expansion, the unresolved-refs warning,
 // keys-stay-literal, and the secret-redaction posture).
 
+// testABPasskey is a well-shaped AnimeBytes passkey for the configs that only
+// need a passkey PRESENT: 32 characters, the shortest of the three lengths
+// validateABPasskey accepts. The gate is a shape gate, so any 32-character run
+// with no whitespace passes - a fixture does not have to be a real credential,
+// and it is assembled rather than written out so no secret scanner has to
+// decide whether this line is one.
+var testABPasskey = strings.Repeat("0f1e2d3c", 4)
+
 func TestIsAllowedEnvVar(t *testing.T) {
 	tests := []struct {
 		key  string
@@ -842,7 +850,7 @@ func TestValidateIndexerParkedABPasskeyInfo(t *testing.T) {
 		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api",
 		IndexerAPIKey:         strings.Repeat("a", 32),
 		IndexerProwlarrAPIKey: "pk",
-		IndexerABPasskey:      "passkey",
+		IndexerABPasskey:      testABPasskey,
 	}
 
 	t.Run("passkey without ab url logs info", func(t *testing.T) {
@@ -899,7 +907,7 @@ func TestValidateIndexerWarnsOnIdenticalTorznabURLs(t *testing.T) {
 	const upstream = "http://prowlarr:9696/22/api"
 	cfg := Config{
 		RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k",
-		IndexerAPIKey: strings.Repeat("a", 16), IndexerProwlarrAPIKey: "pk", IndexerABPasskey: "passkey",
+		IndexerAPIKey: strings.Repeat("a", 16), IndexerProwlarrAPIKey: "pk", IndexerABPasskey: testABPasskey,
 		IndexerNyaaTorznabURL: upstream, IndexerABTorznabURL: upstream,
 	}
 
@@ -918,7 +926,7 @@ func TestValidateIndexerDistinctTorznabURLsStaySilent(t *testing.T) {
 	rec := capture.Default(t)
 	cfg := Config{
 		RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k",
-		IndexerAPIKey: strings.Repeat("a", 16), IndexerProwlarrAPIKey: "pk", IndexerABPasskey: "passkey",
+		IndexerAPIKey: strings.Repeat("a", 16), IndexerProwlarrAPIKey: "pk", IndexerABPasskey: testABPasskey,
 		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api",
 		IndexerABTorznabURL:   "http://prowlarr:9696/2/api",
 	}
@@ -990,45 +998,60 @@ func TestValidateIndexerShortFeedKeyWarning(t *testing.T) {
 	})
 }
 
-// TestValidateIndexerUnbracedFeedKeyWarns pins the feed gate's BRACE-LESS arm.
-// yamlenv expands only the ${VAR} form, so a shell-style $NAME survives into the
-// running config and gates the AnimeBytes-passkey-bearing feed with a literal
-// derived from a PUBLISHED variable name (the README documents the
-// SEADEX_SCOUT_ prefix), which is a credential a LAN attacker can guess. The
-// braced spelling is a hard error and is already pinned above; this arm only
-// WARNs, so nothing else would notice if it stopped firing - and it is the same
-// two-spelling divergence internal/secretref was extracted to close, whose
-// ab_passkey half already asserts both spellings
-// (TestABPasskeyUnusableWarnsForBothSpellings). Field-name-only on every arm:
-// the key value never rides the log record.
-func TestValidateIndexerUnbracedFeedKeyWarns(t *testing.T) {
-	const warnMsg = "feed_api_key looks like an unbraced $VAR reference"
+// TestValidateIndexerRejectsMalformedFeedKey pins the config boundary's ONE
+// gate on indexer.feed_api_key (validateFeedAPIKey). This key IS the feed's
+// authentication, and the /ab RSS body embeds the operator's AnimeBytes passkey
+// in every download link, so a key that is not a key is refused at startup
+// rather than warned about: internal/indexer refuses to bind behind an
+// unexpanded reference (unusableFeedKey), and the app must not validate clean
+// and then never serve the feed.
+//
+// The gate is POSITIVE - one run of printable characters, no whitespace, no
+// '$' - so it refuses every unexpanded-reference spelling at once, including
+// the unterminated "${NAME" paste no reference regex models. That makes config's
+// acceptance set a SUBSET of what the runtime will serve behind, which is the
+// safe direction for two gates on one credential. The cost, pinned here
+// deliberately: a hand-typed key containing '$' is refused too, and the message
+// says to generate one instead.
+//
+// Field-name-only on every arm: the key value never rides the error or the log.
+func TestValidateIndexerRejectsMalformedFeedKey(t *testing.T) {
 	base := Config{
 		RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k",
 		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api", IndexerProwlarrAPIKey: "pk",
 	}
 	for name, tc := range map[string]struct {
-		key      string
-		wantWarn bool
+		key       string
+		wantError bool
 	}{
-		// The whole value must BE the reference, whether or not the name is
-		// allowlisted: yamlenv leaves a non-allowlisted spelling just as literal.
-		"brace-less allowlisted reference warns":     {"$SEADEX_SCOUT_FEED_API_KEY", true},
-		"brace-less non-allowlisted reference warns": {"$PROWLARR_FEED_API_KEY", true},
-		// A generated key cannot take that shape, so neither of these may warn.
-		"a real 32-char key is quiet":             {strings.Repeat("a", 32), false},
-		"a key merely carrying a dollar is quiet": {"abc$def-0f1e2d3c4b5a6978", false},
+		// Every spelling an operator can leave behind, whether or not the name
+		// is allowlisted: yamlenv leaves a non-allowlisted name just as literal.
+		"braced reference is refused":                {"${SEADEX_SCOUT_FEED_API_KEY}", true},
+		"brace-less reference is refused":            {"$SEADEX_SCOUT_FEED_API_KEY", true},
+		"brace-less non-allowlisted ref is refused":  {"$PROWLARR_FEED_API_KEY", true},
+		"unterminated braced paste is refused":       {"${SEADEX_SCOUT_FEED_API_KEY", true},
+		"a reference inside a longer value refused":  {"pre$SEADEX_SCOUT_FEED_API_KEY", true},
+		"a key merely carrying a dollar is refused":  {"abc$def-0f1e2d3c4b5a6978", true},
+		"an embedded space is refused":               {"0f1e2d3c4b5a6978 8796a5b4c3d2", true},
+		"a real 32-char key passes":                  {strings.Repeat("a", 32), false},
+		"a short key passes the gate and warns only": {"hunter2", false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			rec := capture.Default(t)
 			c := base
 			c.IndexerAPIKey = tc.key
-			if err := c.Validate(); err != nil {
-				t.Fatalf("Validate: %v", err)
+			err := c.Validate()
+			if (err != nil) != tc.wantError {
+				t.Fatalf("Validate() error = %v, want an error: %v", err, tc.wantError)
 			}
-			if got := rec.Contains(warnMsg); got != tc.wantWarn {
-				t.Errorf("Validate() warned about a brace-less feed_api_key = %v, want %v: %v",
-					got, tc.wantWarn, rec.Messages())
+			if err != nil {
+				if !strings.Contains(err.Error(), "indexer.feed_api_key") {
+					t.Errorf("Validate() error = %v, want it to name indexer.feed_api_key", err)
+				}
+				if strings.Contains(err.Error(), tc.key) {
+					t.Errorf("Validate() error echoes the configured feed_api_key: %v", err)
+				}
+				return
 			}
 			if corpus := strings.Join(rec.Messages(), "\n"); strings.Contains(corpus, tc.key) ||
 				rec.AttrContains("", "", tc.key) {
@@ -1923,7 +1946,7 @@ func TestValidateIndexerEmptyABPasskeyWarning(t *testing.T) {
 	t.Run("ab url with passkey stays silent", func(t *testing.T) {
 		rec := capture.Default(t)
 		c := base
-		c.IndexerABPasskey = "passkey"
+		c.IndexerABPasskey = testABPasskey
 		if err := c.Validate(); err != nil {
 			t.Fatalf("Validate: %v", err)
 		}
@@ -2078,7 +2101,7 @@ func TestValidateWarnsOnNonTorznabABEndpoint(t *testing.T) {
 		RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: "k",
 		IndexerAPIKey:         strings.Repeat("a", 32),
 		IndexerProwlarrAPIKey: "pk",
-		IndexerABPasskey:      "passkey",
+		IndexerABPasskey:      testABPasskey,
 		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api",
 	}
 	tests := []struct {
@@ -2560,35 +2583,91 @@ func TestLoadIgnoreFromFile(t *testing.T) {
 	}
 }
 
-// TestABPasskeyUnusableWarnsForBothSpellings pins the cross-package agreement
-// this app's internal/secretref exists to hold. The config warning and the
-// server's usability guard used to test different things: config matched both
-// ${VAR} and the shell-style $VAR, while internal/indexer tested only for a
-// brace. An unbraced $SEADEX_SCOUT_AB_PASSKEY therefore warned at startup and was
-// then treated as a USABLE passkey, minting the literal placeholder into every
-// AnimeBytes download link so each arr grab failed at the tracker while the feed
-// reported success.
+// TestValidateRejectsUnusableABPasskey pins the config boundary's ONE format
+// gate on indexer.ab_passkey (validateABPasskey). A configured passkey that is
+// not the shape AnimeBytes issues cannot build a grabbable download link, so it
+// is a HARD startup error rather than a warning: the alternative is a daemon
+// that validates clean, starts, and then hands every arr a link that fails at
+// the tracker. Empty stays the documented off state.
 //
-// Both now read secretref.Unusable, so this test asserts the warning fires for
-// every shape the server refuses to serve: absent, braced, and brace-less.
-func TestABPasskeyUnusableWarnsForBothSpellings(t *testing.T) {
-	const warnMsg = "indexer.ab_passkey is empty"
+// The gate is POSITIVE - length plus no whitespace - which is why no case here
+// is about a placeholder SPELLING. Every unexpanded reference is refused by the
+// same rule that refuses a truncated paste, including the unterminated "${NAME"
+// form no reference regex matches. Reference recognition survives only as a
+// hint inside the message, so it never decides pass/fail.
+//
+// The lengths are upstream authority, not an invention: Jackett's AnimeBytes
+// indexer rejects a passkey with "expected length: 32, 48, or 56" and
+// Prowlarr's AnimeBytesSettingsValidator asserts the same three. Neither
+// constrains the CHARSET, so a well-shaped non-hex value must pass - the app
+// validates shape, never correctness.
+func TestValidateRejectsUnusableABPasskey(t *testing.T) {
+	base := Config{
+		RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k",
+		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api",
+		IndexerABTorznabURL:   "http://prowlarr:9696/2/api",
+		IndexerAPIKey:         strings.Repeat("a", 32),
+		IndexerProwlarrAPIKey: "pk",
+	}
 	for name, tc := range map[string]struct {
-		passkey  string
-		wantWarn bool
+		passkey   string
+		wantError bool
 	}{
-		"absent passkey warns":            {"", true},
-		"braced placeholder warns":        {"${SEADEX_SCOUT_AB_PASSKEY}", true},
-		"brace-less placeholder warns":    {"$SEADEX_SCOUT_AB_PASSKEY", true},
-		"a real 32-char passkey is quiet": {"0f1e2d3c4b5a69788796a5b4c3d2e1f0", false},
+		"empty is the documented off state":               {"", false},
+		"braced reference is refused":                     {"${SEADEX_SCOUT_AB_PASSKEY}", true},
+		"brace-less reference is refused":                 {"$SEADEX_SCOUT_AB_PASSKEY", true},
+		"unterminated braced paste is refused":            {"${SEADEX_SCOUT_AB_PASSKEY", true},
+		"a reference inside a value is refused":           {"pre${SEADEX_SCOUT_AB_PASSKEY}post", true},
+		"a short hand-typed value is refused":             {"0f1e2d3c4b5a6978", true},
+		"a 32-character passkey passes":                   {"0f1e2d3c4b5a69788796a5b4c3d2e1f0", false},
+		"a 48-character passkey passes":                   {strings.Repeat("b", 48), false},
+		"a 56-character passkey passes":                   {strings.Repeat("c", 56), false},
+		"31 characters is refused":                        {strings.Repeat("d", 31), true},
+		"a non-hex charset is not the app's to constrain": {strings.Repeat("Zz+/=!", 5) + "aa", false},
+		"an embedded space is refused":                    {strings.Repeat("e", 20) + " " + strings.Repeat("f", 11), true},
+		"an embedded newline is refused":                  {strings.Repeat("g", 20) + "\n" + strings.Repeat("h", 11), true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			rec := capture.Default(t)
-			c := &Config{IndexerABTorznabURL: "http://prowlarr:9696/2/api", IndexerABPasskey: tc.passkey}
-			c.warnABPasskeyConfiguration()
-			if got := rec.Contains(warnMsg); got != tc.wantWarn {
-				t.Errorf("warnABPasskeyConfiguration() warned = %v, want %v: %v", got, tc.wantWarn, rec.Messages())
+			c := base
+			c.IndexerABPasskey = tc.passkey
+			err := c.Validate()
+			if (err != nil) != tc.wantError {
+				t.Fatalf("Validate() error = %v, want an error: %v", err, tc.wantError)
+			}
+			if err == nil {
+				return
+			}
+			if !strings.Contains(err.Error(), "indexer.ab_passkey") {
+				t.Errorf("Validate() error = %v, want it to name indexer.ab_passkey", err)
+			}
+			// Field-name-only: the passkey is a credential and must never ride
+			// the error a startup failure prints.
+			if strings.Contains(err.Error(), tc.passkey) {
+				t.Errorf("Validate() error echoes the configured passkey: %v", err)
 			}
 		})
+	}
+}
+
+// TestValidateABPasskeyGateIsShapeNotCorrectness documents the one thing the
+// gate deliberately does NOT do: a value that HAPPENS to be a 32-character
+// environment-variable reference passes, because correctness is the operator's
+// and surfaces as an AnimeBytes auth failure rather than as a config error.
+// Pinned so a future cycle does not "fix" it by re-adding the placeholder
+// heuristic the one positive gate replaced.
+func TestValidateABPasskeyGateIsShapeNotCorrectness(t *testing.T) {
+	const wellShapedRef = "${SEADEX_SCOUT_AB_PASSKEY_NAMES}"
+	if len(wellShapedRef) != 32 {
+		t.Fatalf("fixture length = %d, want 32", len(wellShapedRef))
+	}
+	c := Config{
+		RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k",
+		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api",
+		IndexerAPIKey:         strings.Repeat("a", 32),
+		IndexerProwlarrAPIKey: "pk",
+		IndexerABPasskey:      wellShapedRef,
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want a well-shaped passkey to pass the SHAPE gate", err)
 	}
 }

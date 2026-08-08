@@ -80,7 +80,7 @@ func (m *curationMatch) accept(candidate, ok bool) bool {
 // An info hash the curation set does not know is NOT a contradiction and does
 // not veto the item: SeaDex records often carry no usable info hash (empty,
 // short, or non-hex - the shape validInfoHash rejects, and the shape every AB
-// record has), so buildCuration registers only their tracker key, while
+// record has), so the ownership fact registers only their tracker key, while
 // Prowlarr's Nyaa results always carry the real hash. Reading that miss as
 // "this hash names an uncurated release" vetoed an identity the curated page
 // URL had already proven, and the curated release was invisible to the search

@@ -488,7 +488,7 @@ func TestIndexerEndToEnd(t *testing.T) {
 	// The ledger is seeded empty so the pack journals (a fresh install would
 	// baseline and serve an empty journal).
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	if err := newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -701,7 +701,7 @@ func TestConsumerWarningsStayIndependent(t *testing.T) {
 // reload gate, which is exactly what the real loader does across its syscalls.
 func TestWedgedWarmLoadFaultsInsteadOfParkingRequests(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	if err := newTestWriter(path, "", false).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -773,7 +773,7 @@ func TestFeedWriterReload(t *testing.T) {
 	// A cycle (here, the writer) persists a snapshot; the next request reloads
 	// it. The pre-write empty-feed assertion above doubles as the fresh-install
 	// journal shape, so the ledger is seeded empty for the rebuild to journal.
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	entries := []seadex.Entry{{
 		AniListID: 7,
 		Torrents: []seadex.Torrent{{
@@ -1081,7 +1081,7 @@ func TestABFeedRequiresPasskey(t *testing.T) {
 func TestServeUnconfiguredABServesNoPasskeyItems(t *testing.T) {
 	// A stale snapshot written before the operator blanked ab_torznab_url: its
 	// AB feed carries a credential-bearing download link.
-	stale := `{"by_hash":{},"by_key":{},"seen":{},"nyaa_feed":[],"ab_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Key":"ab:1167293","Title":"Frieren - S01 (BD Remux 1080p) [PMR]","GUID":"https://animebytes.tv/torrents.php?id=86576&torrentid=1167293","DownloadURL":"https://animebytes.tv/torrent/1167293/download/SECRETPASSKEY"}]}`
+	stale := `{"version":2,"owners":{},"published":{},"nyaa_feed":[],"ab_feed":[{"FirstSeen":"2026-07-01T00:00:00Z","Key":"ab:1167293","Title":"Frieren - S01 (BD Remux 1080p) [PMR]","GUID":"https://animebytes.tv/torrents.php?id=86576&torrentid=1167293","DownloadURL":"https://animebytes.tv/torrent/1167293/download/SECRETPASSKEY"}]}`
 	path := filepath.Join(t.TempDir(), "feed.json")
 	if err := os.WriteFile(path, []byte(stale), 0o600); err != nil {
 		t.Fatalf("write stale snapshot: %v", err)
@@ -1260,7 +1260,7 @@ func nyaaTestEntries(n int) []seadex.Entry {
 // seed followed by one Rebuild, so every entry lands in the feed (the reload
 // tests need populated snapshots, not the first-run baseline).
 func seedRebuild(path string, entries []seadex.Entry) error {
-	if err := os.WriteFile(path, []byte(emptyLedgerJSON), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(emptyFeedJSON), 0o600); err != nil {
 		return err
 	}
 	return newTestWriter(path, "", false).Rebuild(context.Background(), entries, nil)

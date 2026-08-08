@@ -113,7 +113,7 @@ func TestHarvestMatchesABByTorrentID(t *testing.T) {
 		return EntryInfo{Title: "Frieren: Beyond Journey's End", Season: 1, SeasonKnown: true}
 	}
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
@@ -163,7 +163,7 @@ func TestHarvestMatchesNyaaByViewID(t *testing.T) {
 	}}
 	info := func(int) EntryInfo { return EntryInfo{Title: "Frieren", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
@@ -210,7 +210,7 @@ func TestHarvestCachePersistsAcrossRebuilds(t *testing.T) {
 	}}
 	info := func(int) EntryInfo { return EntryInfo{Title: "Frieren", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
@@ -265,7 +265,7 @@ func TestHarvestTimeSliceEnforced(t *testing.T) {
 	}
 	info := func(alID int) EntryInfo { return EntryInfo{Title: fmt.Sprintf("Show %d", alID)} }
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
 	clock := time.Unix(1700000000, 0)
@@ -344,7 +344,7 @@ func TestHarvestQueryFailureKeepsSynthetic(t *testing.T) {
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv", "Show - S01E02 (1080p) [G].mkv")}
 	info := func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	log, rec := capture.New()
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		log, srv.Client())
@@ -392,7 +392,7 @@ func TestHarvestMalformedResponseSkipsOnlyThatShow(t *testing.T) {
 		return EntryInfo{Title: "Show B", Season: 1, SeasonKnown: true}
 	}
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	log, rec := capture.New()
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		log, srv.Client())
@@ -449,7 +449,7 @@ func TestHarvestRequestErrorSkipsOnlyThatShow(t *testing.T) {
 		return EntryInfo{Title: "Show B", Season: 1, SeasonKnown: true}
 	}
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	log, rec := capture.New()
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		log, srv.Client())
@@ -477,7 +477,7 @@ func TestHarvestRequestErrorSkipsOnlyThatShow(t *testing.T) {
 // TestHarvestUnconfiguredTrackerNeverQueried pins the tracker gate: a tracker
 // with no configured Prowlarr upstream journals nothing (its Torznab URL is
 // the off switch, so no items ever pend for it) and no harvest query leaves
-// the process for it - while its identities still fold into the seen ledger,
+// the process for it - while its identities still fold into the publication log,
 // so enabling the tracker later starts from current novelty.
 func TestHarvestUnconfiguredTrackerNeverQueried(t *testing.T) {
 	mock, srv := newHarvestMock(func(int) string { return emptyTorznab() })
@@ -488,7 +488,7 @@ func TestHarvestUnconfiguredTrackerNeverQueried(t *testing.T) {
 	entries := []seadex.Entry{nyaaEntry(7, 42, true, "Show - S01E01 (1080p) [G].mkv")}
 	info := func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{ABPasskey: "PK", ABTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
@@ -501,8 +501,8 @@ func TestHarvestUnconfiguredTrackerNeverQueried(t *testing.T) {
 	if len(snap.NyaaFeed) != 0 {
 		t.Errorf("feed = %+v, want empty (an unconfigured tracker journals nothing)", snap.NyaaFeed)
 	}
-	if !snap.Seen["nyaa:42"] {
-		t.Errorf("seen ledger missing the skipped Nyaa identity (it must not journal later as new): %v", snap.Seen)
+	if !snap.Published["nyaa:42"] {
+		t.Errorf("publication log missing the skipped Nyaa identity (it must not journal later as new): %v", snap.Published)
 	}
 }
 
@@ -644,7 +644,7 @@ func TestHarvestMatchesNyaaByInfoHash(t *testing.T) {
 	}}
 	info := func(int) EntryInfo { return EntryInfo{Title: "Show", Season: 1, SeasonKnown: true} }
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "k"}},
 		nil, srv.Client())
 	if err := w.Rebuild(context.Background(), entries, info); err != nil {
@@ -935,7 +935,7 @@ func TestHarvestScopeWideFailureSkipsRemainingShows(t *testing.T) {
 		}
 	}
 	path := filepath.Join(t.TempDir(), "feed.json")
-	seedEmptyLedger(t, path)
+	seedEmptyFeed(t, path)
 	log, rec := capture.New()
 	w := NewFeedWriter(&FeedWriterConfig{Path: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: countSrv.URL, ProwlarrAPIKey: "k"}},
 		log, countSrv.Client())

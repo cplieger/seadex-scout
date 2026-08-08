@@ -43,7 +43,7 @@ const (
 	// corrupted/hand-edited file OOMs the process inside Run's warm-up reload -
 	// before the listener serves, and again on every restart, crashlooping the
 	// compare loop with it. The whole current SeaDex catalogue plus the
-	// never-pruned seen ledger and a 14-day journal serialize to a few MB, so
+	// never-pruned publication log and a 14-day journal serialize to a few MB, so
 	// 16 MiB leaves ample headroom for years of growth while bounding the
 	// decoded blow-up.
 	maxFeedBytes = 16 << 20
@@ -90,25 +90,25 @@ const (
 	// persist exceeds maxFeedBytes (see
 	// TestLoadPreviousDropsOversizedHarvestCheckpoint).
 	maxPersistedCursorBytes = 64 << 10
-	// maxPersistedSeenBytes bounds the seen ledger IN AGGREGATE - the
-	// ledger's twin of maxPersistedCursorBytes, and for the same reason.
-	// Seen is the other map carried forward VERBATIM and it is never pruned
-	// (growJournal only ever adds; allIdentities replaces it only on a
-	// baseline), so a hand-edited or corrupted ledger that is itself under
+	// maxPublicationLogBytes bounds the publication log IN AGGREGATE - the
+	// log's twin of maxPersistedCursorBytes, and for the same reason.
+	// It is the other map carried forward VERBATIM and it is never pruned
+	// (growJournal only ever appends; baselinePublications replaces it only on a
+	// baseline), so a hand-edited or corrupted log that is itself under
 	// maxFeedBytes yet large enough that the REBUILT snapshot (the carried
-	// ledger plus this cycle's new identities) crosses maxFeedBytes makes
+	// log plus this cycle's new publications) crosses maxFeedBytes makes
 	// persist fail ErrFileTooLarge on every cycle with no self-heal: the
 	// file never shrinks, and loadPrevious keeps accepting it because every
 	// individual key is within maxPersistedFieldBytes. Re-baselining
-	// instead rebuilds the ledger from the current catalogue, which is
+	// instead rebuilds the log from the current catalogue, which is
 	// exactly what it should hold, and persist then atomically replaces the
 	// offending file. The whole live SeaDex catalogue's identity signals
 	// serialize to ~1 MB, so 8 MiB leaves years of headroom while staying
 	// well inside maxFeedBytes.
-	maxPersistedSeenBytes = 8 << 20
+	maxPublicationLogBytes = 8 << 20
 	// maxSnapshotFeedItems caps ONE persisted journal feed's item count at
 	// decode time, and maxSnapshotMapEntries / maxSnapshotMapEntriesTotal cap
-	// one curation/ledger map and all of them together. maxFeedBytes bounds
+	// one persisted map and all of them together. maxFeedBytes bounds
 	// the SERIALIZED file, which is not the same bound: a 16 MiB document can
 	// encode millions of compact elements ("{}" is three bytes, `"a":true`
 	// ten) while each decoded journalItem or map entry costs tens of bytes of
@@ -116,7 +116,7 @@ const (
 	// 256 MiB container limit - BEFORE any per-item validation could reject it
 	// (CWE-400). The bounded decoder enforces these before an element is
 	// allocated. Sizing: the live catalogue is ~9k torrents contributing ~2
-	// identity signals each (~20k ledger entries) and a 14-day journal holds
+	// identity signals each (~20k log entries) and a 14-day journal holds
 	// the newly curated slice of that, so both caps leave more than an order of
 	// magnitude of growth headroom while keeping the worst accepted decode a
 	// few tens of MB.
@@ -124,8 +124,13 @@ const (
 	maxSnapshotMapEntries      = 250_000
 	maxSnapshotMapEntriesTotal = 600_000
 	// reasonMalformed is loadPrevious's baseline reason for a structurally invalid
-	// previous snapshot (bad JSON, missing curation maps, or an invalid seen ledger).
+	// previous snapshot (bad JSON, a missing fact, or an invalid publication log).
 	reasonMalformed = "malformed"
+	// reasonSchemaVersion is loadPrevious's baseline reason for a snapshot at a
+	// version this binary does not read. It is deliberately distinct from
+	// reasonMalformed: the file was not corrupt, and an operator reading the
+	// line needs to see a version skew rather than a fault.
+	reasonSchemaVersion = "schema-version"
 	// msgSnapshotMalformed is the one operator-facing malformed-rebaseline
 	// message loadPrevious's three Warn sites share (tests pin the exact text).
 	msgSnapshotMalformed = "previous feed snapshot malformed; re-baselining the feed journal"
@@ -170,8 +175,11 @@ func validPersistedItem(it *journalItem) bool {
 // Two per-item invariants are enforced:
 //
 //   - the shared persisted-item limits (validPersistedItem), and
-//   - for a post-journal snapshot, the journal identity fields the schema
-//     guarantees (validJournalRecord).
+//   - the journal identity fields the schema guarantees (validJournalRecord).
+//
+// Both apply unconditionally now: the version envelope means every snapshot
+// this decode accepts was written by THIS schema, so there is no retired shape
+// whose items must be exempted from a promise it never made.
 //
 // A per-item invariant is enforced per ITEM rather than by refusing the whole
 // snapshot, because on the READER the wholesale verdict discards the curation
@@ -189,10 +197,10 @@ func validPersistedItem(it *journalItem) bool {
 // at-rest corrections (sanitizeSnapshotInfoURLs), counted per feed so the
 // operator still learns which journal was touched (l-f45). The writer ignores
 // the counts: its rebuild re-persists the pruned feed.
-func pruneJournalFeed(feed []journalItem, postJournal bool) (kept []journalItem, dropped int) {
+func pruneJournalFeed(feed []journalItem) (kept []journalItem, dropped int) {
 	kept = feed[:0]
 	for i := range feed {
-		if !validPersistedItem(&feed[i]) || (postJournal && !validJournalRecord(&feed[i])) {
+		if !validPersistedItem(&feed[i]) || !validJournalRecord(&feed[i]) {
 			dropped++
 			continue
 		}
@@ -202,7 +210,7 @@ func pruneJournalFeed(feed []journalItem, postJournal bool) (kept []journalItem,
 }
 
 // validJournalRecord reports whether one item carries the two journal identity
-// fields the post-journal schema guarantees: a stable Key (the identity the
+// fields the schema guarantees: a stable Key (the identity the
 // carry gates and the download-URL rebuilds match on) and a nonzero FirstSeen
 // (the age the bounded journal window prunes against).
 //
@@ -234,17 +242,17 @@ func validJournalRecord(it *journalItem) bool {
 //
 // Semantics stay json.Unmarshal's so both consumers keep their documented
 // behavior: a JSON null leaves a field untouched, an empty object still
-// ALLOCATES its map (nil-ness is the structural / pre-journal-schema sentinel
+// ALLOCATES its map (nil-ness is the structural missing-fact sentinel
 // decodeSnapshot and loadPrevious dispatch on, so `"seen": {}` must not decode
 // nil), keys match case-insensitively, an unknown field is consumed without
 // being materialized into a decoded value, a repeated key inside a decoded
 // value keeps Unmarshal's last-occurrence/merge resolution, and trailing data
 // is rejected. One deliberate tightening: a repeated TOP-LEVEL schema field
-// (a second by_key/seen/nyaa_feed/...) fails closed, because at this boundary
+// (a second owners/published/nyaa_feed/...) fails closed, because at this boundary
 // a document that names the same accumulated map twice is evidence of
 // tampering and Unmarshal would silently resolve it to the last occurrence.
-// The tightening is deliberately limited to the eight schema fields: it costs
-// a fixed eight-entry set, while extending it to every nested object is what
+// is deliberately limited to the schema members: it costs a fixed
+// small set, while extending it to every nested object is what
 // bounds the gate's own memory (see the note on the removed whole-document
 // preflight below).
 //
@@ -272,49 +280,43 @@ func validJournalRecord(it *journalItem) bool {
 func unmarshalSnapshot(data []byte) (snapshot, error) {
 	var snap snapshot
 	var mapEntries int
-	claimed := make(map[string]struct{}, 8)
+	claimed := make(map[snapshotMember]struct{}, len(allSnapshotMembers))
 	// The aggregate array budget covers both journal feeds; each feed also
 	// carries its own per-array cap, so neither one feed nor the pair can
 	// multiply past the bound.
 	d := bounded.NewDecoder(bytes.NewReader(data), 2*maxSnapshotFeedItems)
 	err := d.Object(func(key string) error {
-		field := snapshotField(key)
-		if field == "" {
+		member := snapshotField(key)
+		if member == "" {
 			// Unknown field: consumed, never materialized into a decoded
 			// value, and depth-bounded by the scanner (see above).
 			var raw json.RawMessage
 			return d.Decode(&raw)
 		}
-		if err := claimSnapshotField(claimed, field); err != nil {
+		if err := claimSnapshotField(claimed, member); err != nil {
 			return err
 		}
-		switch field {
-		case "by_hash":
-			set, err := decodeSnapshotMap(d, snap.ByHash, &mapEntries, "by_hash")
-			snap.ByHash = set
+		switch member {
+		case memberVersion:
+			return d.Decode(&snap.Version)
+		case memberOwners:
+			owners, err := decodeSnapshotOwners(d, snap.Owners, &mapEntries)
+			snap.Owners = owners
 			return err
-		case "by_key":
-			set, err := decodeSnapshotMap(d, snap.ByKey, &mapEntries, "by_key")
-			snap.ByKey = set
+		case memberPublished:
+			set, err := decodeSnapshotMap(d, snap.Published, &mapEntries, string(memberPublished))
+			snap.Published = set
 			return err
-		case "by_pair":
-			set, err := decodeSnapshotMap(d, snap.ByPair, &mapEntries, "by_pair")
-			snap.ByPair = set
-			return err
-		case "seen":
-			set, err := decodeSnapshotMap(d, snap.Seen, &mapEntries, "seen")
-			snap.Seen = set
-			return err
-		case "titles":
-			titles, err := decodeSnapshotMap(d, snap.Titles, &mapEntries, "titles")
+		case memberTitles:
+			titles, err := decodeSnapshotMap(d, snap.Titles, &mapEntries, string(memberTitles))
 			snap.Titles = titles
 			return err
-		case "harvest_cursor":
+		case memberHarvestCursor:
 			return d.Decode(&snap.HarvestCursor)
-		case "nyaa_feed":
-			return decodeSnapshotFeed(d, &snap.NyaaFeed, "nyaa_feed")
+		case memberNyaaFeed:
+			return decodeSnapshotFeed(d, &snap.NyaaFeed, string(memberNyaaFeed))
 		default:
-			return decodeSnapshotFeed(d, &snap.ABFeed, "ab_feed")
+			return decodeSnapshotFeed(d, &snap.ABFeed, string(memberABFeed))
 		}
 	})
 	if err != nil {
@@ -326,33 +328,71 @@ func unmarshalSnapshot(data []byte) (snapshot, error) {
 	return snap, nil
 }
 
-// snapshotField maps one decoded top-level key to its canonical schema field
-// name, or "" for a field the schema does not know. Matching is
+// snapshotField maps one decoded top-level key to its canonical persisted
+// MEMBER, or "" for a key the schema does not know. Matching is
 // case-insensitive because json.Unmarshal matches struct FIELDS
-// case-insensitively too, so "Seen" and "seen" address the same field and are
-// equally a repeat of it.
-func snapshotField(key string) string {
-	for _, field := range []string{"by_hash", "by_key", "by_pair", "seen", "titles", "harvest_cursor", "nyaa_feed", "ab_feed"} {
-		if strings.EqualFold(key, field) {
-			return field
+// case-insensitively too, so "Owners" and "owners" address the same member and
+// are equally a repeat of it. The vocabulary is allSnapshotMembers, so the
+// decoder and the rule table cannot drift.
+func snapshotField(key string) snapshotMember {
+	for _, member := range allSnapshotMembers {
+		if strings.EqualFold(key, string(member)) {
+			return member
 		}
 	}
 	return ""
 }
 
-// claimSnapshotField records one top-level schema field as decoded, refusing a
+// claimSnapshotField records one top-level member as decoded, refusing a
 // second occurrence (see unmarshalSnapshot for why the top level fails closed
 // while nested duplicates keep Unmarshal's resolution). The set holds at most
-// the eight schema fields, so it is bounded whatever the document does; an
-// unknown key is never recorded, which is what keeps a key-dense document from
-// growing it. The message names only our own field literal - never the decoded
-// key, which is attacker-shaped text at this boundary.
-func claimSnapshotField(claimed map[string]struct{}, field string) error {
-	if _, dup := claimed[field]; dup {
-		return fmt.Errorf("snapshot: repeated top-level %q field", field)
+// the members of allSnapshotMembers, so it is bounded whatever the document
+// does; an unknown key is never recorded, which is what keeps a key-dense
+// document from growing it. The message names only our own member literal -
+// never the decoded key, which is attacker-shaped text at this boundary.
+func claimSnapshotField(claimed map[snapshotMember]struct{}, member snapshotMember) error {
+	if _, dup := claimed[member]; dup {
+		return fmt.Errorf("snapshot: repeated top-level %q field", member)
 	}
-	claimed[field] = struct{}{}
+	claimed[member] = struct{}{}
 	return nil
+}
+
+// decodeSnapshotOwners decodes the per-entry curation ownership fact under the
+// shared entry budget. BOTH dimensions are charged - the outer owner keys and
+// every release inside them - because the fact is a map of arrays and either
+// dimension alone can carry hostile cardinality: a million owners with one
+// release each and one owner with a million releases cost the same heap.
+func decodeSnapshotOwners(d *bounded.Decoder, dst map[string][]ownedRelease, entries *int) (map[string][]ownedRelease, error) {
+	const what = string(memberOwners)
+	open, err := d.Open('{')
+	if err != nil || !open {
+		return dst, err
+	}
+	if dst == nil {
+		dst = make(map[string][]ownedRelease)
+	}
+	perMap := 0
+	for d.More() {
+		key, keyErr := d.Key()
+		if keyErr != nil {
+			return dst, keyErr
+		}
+		if chargeErr := chargeSnapshotEntry(what, &perMap, entries); chargeErr != nil {
+			return dst, chargeErr
+		}
+		releases, arrErr := bounded.Array(d, []ownedRelease(nil), maxSnapshotMapEntries, what, func(r *ownedRelease) error {
+			if chargeErr := chargeSnapshotEntry(what, &perMap, entries); chargeErr != nil {
+				return chargeErr
+			}
+			return d.Decode(r)
+		})
+		if arrErr != nil {
+			return dst, arrErr
+		}
+		dst[key] = releases
+	}
+	return dst, d.Close()
 }
 
 // decodeSnapshotFeed decodes one persisted journal feed under its per-array
@@ -386,7 +426,7 @@ func decodeSnapshotFeed(d *bounded.Decoder, dst *[]journalItem, what string) err
 }
 
 // decodeSnapshotMap decodes one persisted map field (a curation index, the seen
-// ledger, or the harvested-title cache) entry by entry under the shared entry
+// publication log, or the harvested-title cache) entry by entry under the shared entry
 // budget, and RETURNS the map for the caller to store back. A JSON null leaves
 // the map as it was (Unmarshal's null-into-map); an empty object allocates,
 // because a nil map is the structural sentinel both consumers read. Per-value
@@ -434,21 +474,24 @@ func chargeSnapshotEntry(what string, perMap, entries *int) error {
 	return nil
 }
 
-// decodeSnapshot unmarshals persisted snapshot bytes and applies the
-// structural-validity gate BOTH consumers share (the server's readSnapshot
-// and the writer's loadPrevious): valid JSON and the required curation maps
-// present (the writer always persists both, even empty, so nil maps identify
-// a structurally invalid snapshot without rejecting a valid empty feed).
-// err reports malformed JSON; a non-empty reason names a structural
-// violation. Consumer-specific ingress checks (the writer's titles-cache and
-// seen-ledger gates) stay with their consumer.
+// decodeSnapshot unmarshals persisted snapshot bytes and applies the gate BOTH
+// consumers share (the server's readSnapshot and the writer's loadPrevious):
+// valid JSON, a PRESENT and SUPPORTED schema version, and the two required facts -
+// the curation ownership map and the publication log (the writer always
+// persists both, even empty, so nil identifies a structurally invalid snapshot
+// without rejecting a valid empty feed). err reports malformed JSON; a
+// non-empty reason names a structural violation (including an ABSENT version -
+// an unidentifiable document is corruption); a PRESENT but unsupported Version is
+// neither, and is returned as a zero snapshot carrying only that Version so each
+// consumer applies its own re-baseline (see currentFeedVersion).
+// Consumer-specific ingress checks (the writer's titles-cache and
+// publication-log gates) stay with their consumer.
 //
-// A defect in ONE journal item is not a structural violation: the two
-// per-item invariants (the shared persisted-item limits and, for a
-// post-journal snapshot, the journal identity fields) drop just that item and
-// report the count per tracker feed - see pruneJournalFeed for why the
-// wholesale verdict was the wrong blast radius, and snapshotScrub for how the
-// two consumers use the counts.
+// A defect in ONE journal item is not a structural violation: the two per-item
+// invariants (the shared persisted-item limits and the journal identity fields)
+// drop just that item and report the count per tracker feed - see
+// pruneJournalFeed for why the wholesale verdict was the wrong blast radius,
+// and snapshotScrub for how the two consumers use the counts.
 //
 // It also canonicalizes each accepted item's non-derived wire fields
 // (normalizeSnapshotItems) HERE rather than in one consumer, because
@@ -482,22 +525,33 @@ func decodeSnapshot(data []byte) (snap snapshot, scrub snapshotScrub, reason str
 	if err != nil {
 		return snapshot{}, snapshotScrub{}, "", err
 	}
-	if snap.ByHash == nil || snap.ByKey == nil {
-		return snapshot{}, snapshotScrub{}, "missing required curation maps", nil
+	if snap.Version == 0 {
+		// A document that does not IDENTIFY itself is corruption, not a version
+		// skew, and the two must not be conflated: `null`, `{}`, a truncated
+		// write and a retired pre-version file all land here. Reporting it
+		// structural is what keeps the READER from blanking a live feed over an
+		// unidentifiable file - it keeps the last-good snapshot instead - while
+		// the writer treats it exactly like malformed JSON and re-baselines.
+		return snapshot{}, snapshotScrub{}, "missing schema version", nil
 	}
-	// The journal identity invariant is schema-scoped: only a post-journal
-	// snapshot (Seen present) promises a Key and a FirstSeen on every item. A
-	// Seen-less document is the retired pre-journal schema, whose feeds
-	// reportTransitionalSchema/loadPrevious deliberately treat as absent - it
-	// stays exempt so a legacy file still yields a usable search curation set
-	// instead of having its items pruned for a promise its schema never made.
-	// The requirement lives HERE rather than in validPersistedItem because
-	// renderJournalItem validates a newly-built item before growJournal stamps
-	// its FirstSeen.
-	postJournal := snap.Seen != nil
+	if snap.Version != currentFeedVersion {
+		// A document that DOES identify itself is trusted about that much, so a
+		// foreign version RE-BASELINES rather than being refused. The members
+		// that cannot be re-derived from the catalogue (the permanent
+		// publication log, the journals' FirstSeen and harvested titles) are
+		// exactly the ones a differently-versioned binary may have written in a
+		// shape this one misreads, so reading them is worse than starting over -
+		// and this app supports no migration by settled decision. Both consumers
+		// dispatch on the reported version: the writer baselines, the reader
+		// serves an empty feed for one window.
+		return snapshot{Version: snap.Version}, snapshotScrub{}, "", nil
+	}
+	if snap.Owners == nil || snap.Published == nil {
+		return snapshot{}, snapshotScrub{}, "missing required curation ownership or publication log", nil
+	}
 	var nyaaDropped, abDropped int
-	snap.NyaaFeed, nyaaDropped = pruneJournalFeed(snap.NyaaFeed, postJournal)
-	snap.ABFeed, abDropped = pruneJournalFeed(snap.ABFeed, postJournal)
+	snap.NyaaFeed, nyaaDropped = pruneJournalFeed(snap.NyaaFeed)
+	snap.ABFeed, abDropped = pruneJournalFeed(snap.ABFeed)
 	normalizeSnapshotItems(snap.NyaaFeed)
 	normalizeSnapshotItems(snap.ABFeed)
 	normalizeSnapshotPubDates(snap.NyaaFeed)
@@ -559,32 +613,33 @@ func normalizeSnapshotPubDates(feed []journalItem) {
 }
 
 // snapshot is the materialized feed a cycle produces and the server serves:
-// the search curation index (info hash / tracker key -> isBest, matched
-// against Prowlarr results), the two synthesized per-tracker RSS journals
-// (NyaaFeed/ABFeed: the newly-curated releases of the last feedJournalMaxAge,
-// each item carrying its journal bookkeeping - see journal.go), the
-// never-pruned seen ledger novelty is judged against, and the harvested-title
-// cache. Persisting it is what lets one data engine (the compare cycle) feed
-// both the findings and the Torznab feed from a single SeaDex fetch, and lets
-// a cycle run by the `poll` subcommand refresh a resident daemon's feed
-// across the process boundary. Field names are the on-disk JSON keys; a
-// snapshot without a seen ledger is the retired pre-journal schema and
-// re-baselines (see loadPrevious).
+// ONE store holding TWO FACTS (per-entry curation ownership and the
+// append-only publication log) plus the two materialized RSS journals and the
+// harvested-title cache. The search index is a PROJECTION of the ownership
+// fact, derived in memory on load rather than persisted (see members.go for
+// the whole contract and the per-member rule table).
+//
+// Persisting it is what lets one data engine (the compare cycle) feed both the
+// findings and the Torznab feed from a single SeaDex fetch, and lets a cycle
+// run by the `poll` subcommand refresh a resident daemon's feed across the
+// process boundary. Field names are the on-disk JSON keys, and every one of
+// them has exactly one write rule in snapshotRules; a snapshot at any other
+// Version re-baselines (see loadPrevious).
 type snapshot struct {
-	ByHash map[string]bool `json:"by_hash"`
-	ByKey  map[string]bool `json:"by_key"`
-	// ByPair is the hash/key pair relation (pairKey of an info hash and a
-	// tracker key observed on the same SeaDex torrent) lookup's cross-torrent
-	// gate reads. Persisted without omitempty so a freshly written snapshot
-	// always carries the map (even empty) and only a genuinely legacy
-	// snapshot decodes it nil.
-	ByPair map[string]bool `json:"by_pair"`
-	// Seen is persisted without omitempty for the same reason as ByPair: its
-	// nil-ness is loadPrevious's pre-journal-schema sentinel, so an honestly
-	// empty ledger must round-trip as {} rather than aliasing the retired
-	// schema and re-baselining every cycle (see loadPrevious).
-	Seen   map[string]bool   `json:"seen"`
-	Titles map[string]string `json:"titles,omitempty"`
+	// Owners is FACT 1, the PRESENT: per-entry curation ownership, an AniList
+	// id (ownerKey) mapped to the set of releases that entry contributes. The
+	// three search maps are DERIVED from it on load (projectCuration) and are
+	// deliberately not persisted, so the projection cannot drift from the fact
+	// and a best-to-alt demotion stays representable. Persisted without
+	// omitempty: nil is the structural sentinel decodeSnapshot refuses on.
+	Owners map[string][]ownedRelease `json:"owners"`
+	// Published is FACT 2, the PAST: the append-only publication log, recorded
+	// at the moment an item ENTERS a feed and never on refusal. It is what
+	// novelty is judged against, and it is never pruned - so it must record
+	// only what was actually served. Persisted without omitempty for the same
+	// reason as Owners.
+	Published map[string]bool   `json:"published"`
+	Titles    map[string]string `json:"titles,omitempty"`
 	// HarvestCursor is the title harvest's persisted resumption state: the bare
 	// "<scope>:<alID>" rotation cursor (see decodeHarvestCursor). It carries the
 	// rotation position - the "scope:alID" of the last
@@ -598,7 +653,19 @@ type snapshot struct {
 	HarvestCursor string        `json:"harvest_cursor,omitempty"`
 	NyaaFeed      []journalItem `json:"nyaa_feed"`
 	ABFeed        []journalItem `json:"ab_feed"`
+	// Version is the schema envelope (currentFeedVersion). Any other value
+	// re-baselines rather than being refused - see currentFeedVersion for why
+	// the key exists at all and why re-baseline is the right answer. It sits
+	// last only to satisfy fieldalignment; its position in the encoded document
+	// is not part of the contract (the decoder matches on the key).
+	Version int `json:"version"`
 }
+
+// supportedVersion reports whether a decoded snapshot is one this binary may
+// read. It is the ONE home of that test, so the writer's baseline decision and
+// the reader's serve-empty decision cannot disagree about which files are
+// readable.
+func (s *snapshot) supportedVersion() bool { return s.Version == currentFeedVersion }
 
 // --- Writer construction ---
 
@@ -692,130 +759,37 @@ func NewFeedWriter(cfg *FeedWriterConfig, log *slog.Logger, client *http.Client)
 	return w
 }
 
-// --- Rebuild and persistence ---
+// --- The two passes and persistence ---
 
-// Rebuild refreshes the persisted feed snapshot from the SeaDex entries
+// Rebuild refreshes the persisted feed from the WHOLE SeaDex catalogue
 // (categorized and titled via info, the per-show metadata closure the cycle
 // builds over its persisted state; nil is valid and falls back to file-name
-// synthesis). Torrents the operator's filters.exclude_tags policy excludes
-// from the feed surface are removed first - from the search curation set, the
-// seen ledger, and the journal alike - and a previously journaled item whose
-// torrent has since become excluded is dropped, so the arrs can never grab a
-// release the operator filtered (see splitCurationWarned; the default policy
-// is empty, so by default nothing is excluded and a Broken-tagged release does
-// enter the feed). It rebuilds the search curation set
-// from the whole catalogue, then advances the RSS journal: newly curated
-// torrents (absent from the seen ledger) enter with a first-seen timestamp,
-// carried items re-render from current data, items older than
-// feedJournalMaxAge age out, and the title harvest upgrades synthesized
-// titles to real tracker titles within its query budget (a harvest failure
-// degrades to synthesized titles, never fails the rebuild). On the first run,
-// after a schema upgrade, or over a malformed previous snapshot it baselines:
-// the entire current curation set is recorded as seen and the journal starts
-// empty, growing only from genuinely new curation (backfill is search's job).
+// synthesis). It is the pass at catalogue scope, and that is its ONLY
+// difference from Advance - see run for the shared body and pass.go for the
+// three steps that are genuinely catalogue-only.
+//
+// Being at catalogue scope is what authorizes the two things a window may not
+// do: DELETE a curation owner (absence from the whole catalogue genuinely is
+// absence from SeaDex) and take the BASELINE path over a missing or malformed
+// snapshot (which forfeits the current curation set into the never-pruned
+// publication log). It is also the only pass that computes the catalogue-wide
+// warned-identity closure, runs the Prowlarr title harvest, and prunes the
+// harvested-title cache.
+//
+// Torrents the operator's filters.exclude_tags policy excludes from the feed
+// surface are removed first - from the curation ownership fact, the publication
+// log, and the journal alike - and a previously journaled item whose torrent has
+// since become excluded is dropped, so the arrs can never grab a release the
+// operator filtered (see splitCurationWarned; the default policy is empty, so by
+// default nothing is excluded and a Broken-tagged release does enter the feed).
+//
 // The caller skips a failed SeaDex fetch, so this errors only on a
 // previous-snapshot read failure (transient; the last-good feed stays served)
 // or on the persist side: an encode failure, a snapshot exceeding
 // maxFeedBytes (kept out so the reader never rejects what a rebuild wrote),
 // or the atomic write itself failing.
 func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info EntryInfoFunc) error {
-	infoFor := entryInfoFunc(info)
-	_, prev, err := w.loadPrevious(ctx)
-	if err != nil {
-		return err
-	}
-	entries, ws := splitCurationWarned(entries, w.tags)
-	set := buildCuration(entries)
-	now := w.now()
-
-	var js journalStats
-	var nyaa, ab []journalItem
-	var census map[string]packCensus
-	seen, titles := prev.seen, prev.titles
-	if prev.baseline {
-		seen, titles = allIdentities(entries), map[string]string{}
-		w.log.Info("indexer feed journal baselined; RSS feed starts empty and grows from newly curated releases",
-			"reason", prev.reason, "seen", len(seen))
-	} else {
-		pass := &journalPass{w: w, cur: indexCurated(entries), seen: seen, ws: &ws, infoFor: infoFor, js: &js, now: now}
-		// The file-census pack verdict per journal key, read from the same
-		// curation index the items render from, so applyTitles can tell when a
-		// harvested title contradicts the payload it names (titleAudit).
-		census = censusPacks(pass.cur)
-		// Carry BOTH journals regardless of configuration: a tracker's off
-		// switch must be reversible. Blanking a Torznab URL used to skip the
-		// carry, so a single rebuild dropped every journaled item for that
-		// scope - while the never-pruned seen ledger kept their identities, so
-		// journalIfNew reported isNew=false forever and those releases could
-		// never reach RSS again. An operator disabling AnimeBytes for a few days
-		// permanently lost the un-grabbed part of its journal window (l-f161).
-		// Carrying costs nothing at rest (both feeds are stored GUID-only, see
-		// stripDownloadURLs) and nothing on the wire (feedFor serves an
-		// unconfigured scope nothing, and its comment already anticipates
-		// exactly this stale-snapshot case).
-		//
-		// Carried items keep AGING OUT on the normal feedJournalMaxAge window
-		// rather than freezing (prepareCarriedItem prunes them), so an off
-		// tracker's journal stays bounded and a disable longer than the window
-		// converges on empty - the operator has effectively opted out of that
-		// window - instead of thawing weeks-old releases as "recent" on
-		// re-enable.
-		//
-		// The AB passkey is the tracker's SECOND off switch and is now reversible
-		// the same way: carryStoredItem and refreshCarriedItem keep a carried AB
-		// item through a passkey-less window instead of dropping it (see those
-		// two), since a passkey only supplies the grabbable link.
-		nyaa = pass.carryJournal(prev.nyaaFeed, upstreamNyaa)
-		ab = pass.carryJournal(prev.abFeed, upstreamAB)
-		// Growth stays gated per scope: journalIfNew -> newJournalItem returns
-		// early for an unconfigured tracker, so an off tracker's journal shrinks
-		// but never grows.
-		newNyaa, newAB := pass.growJournal(entries)
-		nyaa = append(nyaa, newNyaa...)
-		ab = append(ab, newAB...)
-	}
-	feeds := map[string][]journalItem{upstreamNyaa: nyaa, upstreamAB: ab}
-	hs, cursor := w.harvest.harvestTitles(ctx, feeds, titles, infoFor, prev.cursor)
-	// ONE audit value across both feeds, so its onset latch is per REBUILD.
-	audit := titleAudit{census: census, report: w.packDisagreementReporter()}
-	applyTitles(nyaa, titles, audit)
-	applyTitles(ab, titles, audit)
-	nyaa, ab = sortFeed(nyaa), sortFeed(ab)
-	titles = retainTitles(titles, nyaa, ab)
-
-	if len(seen) > maxSnapshotMapEntries {
-		// Mirror of the read-side cardinality cap: persist enforces only
-		// maxFeedBytes, so an over-cardinality ledger would be written and then
-		// refused by the shared decode - the reader serves nothing until the next
-		// rebuild and this journal window is lost. The ledger's byte guard
-		// (maxPersistedSeenBytes) cannot imply the cardinality one: a short
-		// tracker-key entry serializes in ~20 bytes, so 8 MiB admits ~419k
-		// entries. Rebuilding it from the current catalogue is exactly the remedy
-		// seenLedgerWithinLimits already prescribes for the byte cap, and it keeps
-		// the journal intact (every journaled item is in the catalogue).
-		w.log.Warn("indexer seen ledger exceeded its decode cardinality cap; rebuilt from the current catalogue",
-			"entries", len(seen), "max_entries", maxSnapshotMapEntries)
-		seen = allIdentities(entries)
-	}
-	snap := snapshot{ByHash: set.byHash, ByKey: set.byKey, ByPair: set.byPair, Seen: seen, Titles: titles, NyaaFeed: nyaa, ABFeed: ab, HarvestCursor: cursor}
-	if err := w.persist(ctx, &snap); err != nil {
-		return err
-	}
-	w.log.Info("indexer feed snapshot written",
-		"entries", len(entries), "hashes", len(snap.ByHash), "keys", len(snap.ByKey),
-		"nyaa_feed", len(snap.NyaaFeed), "ab_feed", len(snap.ABFeed),
-		"warned_excluded", len(ws.keys),
-		"journal_new", js.added, "journal_pruned", js.pruned, "journal_dropped", js.dropped,
-		"journal_warned_dropped", js.warned,
-		"journal_clock_rebased", js.rebased,
-		"skipped_unresolvable", js.unresolvable,
-		"harvest_queries", hs.queries, "harvest_matched", hs.matched,
-		"harvest_rejected", hs.rejected, "harvest_pending", hs.pending)
-	if js.abSkippedNoPasskey > 0 && w.enablement.enabled(upstreamAB) {
-		w.log.Warn("ab RSS feed empty of grabbable links: set indexer.ab_passkey to serve AnimeBytes releases",
-			"ab_releases_skipped", js.abSkippedNoPasskey)
-	}
-	return nil
+	return w.run(ctx, entries, info, scopeCatalogue)
 }
 
 // persist atomically writes the snapshot, mirroring the reader's size bound
@@ -871,42 +845,43 @@ func stripDownloadURLs(feed []journalItem) {
 
 // --- Previous-snapshot loading ---
 
-// previousJournal is the journal bookkeeping loaded from the previous
-// snapshot: the seen ledger, the harvested-title cache, and the two persisted
-// journal feeds. baseline marks that no usable previous journal exists
-// (reason: fresh-install, the retired pre-journal schema, or a malformed
-// file) and the rebuild must baseline instead of growing.
-type previousJournal struct {
-	reason   string
-	cursor   string
-	seen     map[string]bool
-	titles   map[string]string
-	nyaaFeed []journalItem
-	abFeed   []journalItem
-	baseline bool
+// feedState is the loaded feed, VALIDATED - and it is the ONLY view of it.
+// There used to be two (the raw decoded struct beside this projection), which
+// is how the tick came to re-persist values the loader had already refused:
+// whoever held the raw form silently inherited every member the projection
+// gates. One value means a member with an ingress gate cannot be read past it.
+//
+// owners and published are the two persisted FACTS (see members.go); nyaaFeed
+// and abFeed the materialized renders; titles and cursor the two members whose
+// loaded form is ingress-pruned (titles by retainValidTitles, cursor by the
+// size cap). baseline marks that no usable previous feed exists (reason:
+// fresh-install, an unsupported schema version, or a malformed file) and the
+// pass must baseline instead of growing.
+type feedState struct {
+	reason    string
+	cursor    string
+	owners    map[string][]ownedRelease
+	published map[string]bool
+	titles    map[string]string
+	nyaaFeed  []journalItem
+	abFeed    []journalItem
+	baseline  bool
 }
 
-// loadPrevious reads the snapshot ONCE and returns both the raw decoded form
-// and the journal projection of it. Advance needs the raw form for the three
-// members the projection drops - ByHash, ByKey and ByPair, the search curation
-// index - which it must carry through to persist verbatim; re-reading the file
-// to get them would race a concurrent writer against its own first read.
-//
-// loadPrevious reads the persisted snapshot's journal bookkeeping. A missing
-// file (or a path whose parent is not a directory) is the fresh-install
-// baseline; a decoded snapshot without a seen ledger is the retired
-// whole-catalogue schema and re-baselines (the journal contract: treat it as
-// absent); malformed JSON and an over-cap file warn and re-baseline
-// (self-healing - both are deterministic for unchanged bytes, and the seen
-// ledger is rebuilt from the current catalogue, so nothing old can re-enter
-// the journal). Any other read failure (EACCES, EIO) is returned as an error
-// so a TRANSIENT fault cannot blank a live journal: the caller keeps the
-// last-good snapshot and the next cycle retries.
-func (w *FeedWriter) loadPrevious(ctx context.Context) (snapshot, previousJournal, error) {
+// loadPrevious reads the persisted feed ONCE and returns the one validated view
+// of it. A missing file (or a path whose parent is not a directory) is the
+// fresh-install baseline; a snapshot at an unsupported schema version
+// re-baselines (settled no-rollback-no-migration - see currentFeedVersion);
+// malformed JSON and an over-cap file warn and re-baseline (self-healing - both
+// are deterministic for unchanged bytes, and the publication log is rebuilt
+// from the current catalogue, so nothing old can re-enter the journal). Any
+// other read failure (EACCES, EIO) is returned as an error so a TRANSIENT fault
+// cannot blank a live journal: the caller keeps the last-good snapshot and the
+// next cycle retries.
+func (w *FeedWriter) loadPrevious(ctx context.Context) (feedState, error) {
 	data, err := atomicfile.ReadBounded(ctx, w.path, maxFeedBytes)
 	if err != nil {
-		prev, cErr := w.classifyPreviousReadError(err)
-		return snapshot{}, prev, cErr
+		return w.classifyPreviousReadError(err)
 	}
 	snap, _, structReason, decodeErr := decodeSnapshot(data)
 	if decodeErr != nil {
@@ -914,28 +889,34 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (snapshot, previousJourna
 		// can embed the offending document text, and feed.json is a
 		// tamperable boundary.
 		w.log.Warn(msgSnapshotMalformed, "path", w.path, "error", capLogText(decodeErr.Error(), 256))
-		return snapshot{}, previousJournal{baseline: true, reason: reasonMalformed}, nil
+		return feedState{baseline: true, reason: reasonMalformed}, nil
 	}
 	if structReason != "" {
 		// The offending value itself is never logged: it can be
 		// attacker-shaped multi-megabyte text.
 		w.log.Warn(msgSnapshotMalformed, "path", w.path, "reason", structReason)
-		return snapshot{}, previousJournal{baseline: true, reason: reasonMalformed}, nil
+		return feedState{baseline: true, reason: reasonMalformed}, nil
 	}
-	if !seenLedgerWithinLimits(snap.Seen) {
-		// The seen ledger is carried forward verbatim and never pruned, so an
-		// over-limit identity key from a hand-edited snapshot would otherwise
-		// persist in every future snapshot, and a false membership value (which
-		// the writer never emits) would make journalIfNew re-broadcast an
-		// already-baselined release. An over-aggregate ledger wedges persist
-		// on every cycle instead (see maxPersistedSeenBytes). The value itself
-		// is never logged.
+	if !snap.supportedVersion() {
+		// Not a fault: this app supports no migration, so a foreign version
+		// starts over rather than being read or converted. The version number
+		// IS safe to log - it is a small integer from our own schema field,
+		// not attacker-shaped text.
+		w.log.Info("previous feed snapshot has an unsupported schema version; re-baselining the feed",
+			"path", w.path, "version", snap.Version, "supported", currentFeedVersion)
+		return feedState{baseline: true, reason: reasonSchemaVersion}, nil
+	}
+	if !publicationLogWithinLimits(snap.Published) {
+		// The publication log is carried forward verbatim and never pruned, so
+		// an over-limit identity key from a hand-edited snapshot would
+		// otherwise persist in every future snapshot, and a false membership
+		// value (which the writer never emits) would make the novelty test
+		// re-broadcast an already-recorded release. An over-aggregate log
+		// wedges persist on every cycle instead (see maxPublicationLogBytes).
+		// The value itself is never logged.
 		w.log.Warn(msgSnapshotMalformed,
-			"path", w.path, "reason", "seen ledger is invalid or exceeds its size cap")
-		return snapshot{}, previousJournal{baseline: true, reason: reasonMalformed}, nil
-	}
-	if snap.Seen == nil {
-		return snapshot{}, previousJournal{baseline: true, reason: "pre-journal-schema"}, nil
+			"path", w.path, "reason", "publication log is invalid or exceeds its size cap")
+		return feedState{baseline: true, reason: reasonMalformed}, nil
 	}
 	titles, droppedTitles := retainValidTitles(snap.Titles)
 	if droppedTitles > 0 {
@@ -959,35 +940,34 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (snapshot, previousJourna
 			"path", w.path, "max_bytes", maxPersistedCursorBytes, "cursor_bytes", len(cursor))
 		cursor = ""
 	}
-	return snap, previousJournal{
-		nyaaFeed: snap.NyaaFeed,
-		abFeed:   snap.ABFeed,
-		seen:     snap.Seen,
-		titles:   titles,
-		cursor:   cursor,
+	return feedState{
+		owners:    snap.Owners,
+		published: snap.Published,
+		nyaaFeed:  snap.NyaaFeed,
+		abFeed:    snap.ABFeed,
+		titles:    titles,
+		cursor:    cursor,
 	}, nil
 }
 
-// seenLedgerWithinLimits reports whether every seen-ledger entry respects the
-// producer contract: a bounded identity key mapped to true membership, and the
-// ledger as a WHOLE within maxPersistedSeenBytes. Honest
-// keys are tracker keys ("scope:digits") and scope-namespaced info hashes
-// ("scope:h:<40hex>", plus bare 40-hex hashes still carried in a ledger
-// written before ledgerSignals namespaced them), orders of
-// magnitude under the bound; see loadPrevious's ingress checks for why the
-// ledger is validated separately (it is the one map the writer carries forward
-// verbatim). A false value is only reachable by external corruption or
-// hand-editing - the writer only ever records true - and journalIfNew reads
-// the VALUE, so carrying one forward would re-broadcast an already-baselined
-// release as newly curated. The aggregate cap exists because the per-entry
-// bound cannot catch a ledger of per-entry-valid keys that is large enough to
-// push the REBUILT snapshot past maxFeedBytes (see maxPersistedSeenBytes):
-// that wedges persist on every cycle with no self-heal, so an over-aggregate
-// ledger re-baselines instead.
-func seenLedgerWithinLimits(seen map[string]bool) bool {
+// publicationLogWithinLimits reports whether every publication-log entry
+// respects the producer contract: a bounded identity key mapped to true
+// membership, and the log as a WHOLE within maxPublicationLogBytes. Honest keys
+// are tracker keys ("scope:digits") and scope-namespaced info hashes
+// ("scope:h:<40hex>"), orders of magnitude under the bound; see loadPrevious's
+// ingress checks for why the log is validated separately (it is the one map the
+// writer carries forward verbatim, and the one it may never prune). A false
+// value is only reachable by external corruption or hand-editing - the writer
+// only ever records true - and the novelty test reads the VALUE, so carrying
+// one forward would re-broadcast an already-recorded release as newly curated.
+// The aggregate cap exists because the per-entry bound cannot catch a log of
+// per-entry-valid keys that is large enough to push the REBUILT snapshot past
+// maxFeedBytes (see maxPublicationLogBytes): that wedges persist on every cycle
+// with no self-heal, so an over-aggregate log re-baselines instead.
+func publicationLogWithinLimits(published map[string]bool) bool {
 	total := 0
-	for k, wasSeen := range seen {
-		if len(k) > maxPersistedFieldBytes || !wasSeen {
+	for k, wasPublished := range published {
+		if len(k) > maxPersistedFieldBytes || !wasPublished {
 			return false
 		}
 		// Charge the EXACT serialized cost, not the decoded key length:
@@ -995,7 +975,7 @@ func seenLedgerWithinLimits(seen map[string]bool) bool {
 		// escapes quotes, backslashes, control bytes and the
 		// HTML-sensitive set (every '<' becomes the six-byte \u003c). A
 		// decoded-byte approximation therefore lets an escape-heavy
-		// ledger pass this cap and still push the REBUILT snapshot past
+		// log pass this cap and still push the REBUILT snapshot past
 		// maxFeedBytes - the very wedge the aggregate cap exists to
 		// prevent. json.Marshal on the key applies the same escaping
 		// policy persist's json.Marshal(snap) will.
@@ -1006,7 +986,7 @@ func seenLedgerWithinLimits(seen map[string]bool) bool {
 		// argument-type change could add one).
 		encodedKey, _ := json.Marshal(k)
 		total += len(encodedKey) + len(`:true,`)
-		if total > maxPersistedSeenBytes {
+		if total > maxPublicationLogBytes {
 			return false
 		}
 	}
@@ -1024,16 +1004,16 @@ func seenLedgerWithinLimits(seen map[string]bool) bool {
 // oversized file, so the state self-heals. Any other read failure (EACCES,
 // EIO) is returned as an error so a TRANSIENT fault cannot blank a live
 // journal.
-func (w *FeedWriter) classifyPreviousReadError(err error) (previousJournal, error) {
+func (w *FeedWriter) classifyPreviousReadError(err error) (feedState, error) {
 	switch {
 	case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):
-		return previousJournal{baseline: true, reason: "fresh-install"}, nil
+		return feedState{baseline: true, reason: "fresh-install"}, nil
 	case errors.Is(err, atomicfile.ErrFileTooLarge):
 		w.log.Warn("previous feed snapshot exceeds size cap; re-baselining the feed journal",
 			"path", w.path, "max_bytes", int64(maxFeedBytes), "error", err)
-		return previousJournal{baseline: true, reason: "oversized"}, nil
+		return feedState{baseline: true, reason: "oversized"}, nil
 	default:
-		return previousJournal{}, fmt.Errorf("indexer: read previous feed snapshot %s: %w", w.path, err)
+		return feedState{}, fmt.Errorf("indexer: read previous feed snapshot %s: %w", w.path, err)
 	}
 }
 
@@ -1049,7 +1029,7 @@ func (w *FeedWriter) classifyPreviousReadError(err error) (previousJournal, erro
 // re-harvest. Re-baselining cost the WINDOW - seen is rebuilt from the current
 // catalogue and the journal starts empty, so every release then inside
 // feedJournalMaxAge is marked seen without ever having been served and
-// journalIfNew reports isNew=false for it forever (the ledger is never pruned).
+// journalIfNew reports isNew=false for it forever (the log is never pruned).
 // That made one corrupted title permanently lose un-grabbed releases, where the
 // sibling verbatim-carried field (harvest_cursor) already took the
 // proportionate route of dropping just itself (l-f60). The cap still matters:
@@ -1152,7 +1132,7 @@ func (ws *warnedSet) retracts(it *journalItem) bool {
 // first pass collects every excluded identity signal - journal key AND info
 // hash (identitySignals, the deliberately CROSS-SCOPE identity form: an
 // exclusion of the bytes must retract every listing of them, unlike the seen
-// ledger's per-scope ledgerSignals) - across the
+// log's per-scope publicationSignals) - across the
 // whole catalogue, and a second pass removes every occurrence that is excluded
 // itself OR shares an excluded identity.
 //
@@ -1169,10 +1149,10 @@ func (ws *warnedSet) retracts(it *journalItem) bool {
 // Filtering at the source keeps every downstream consumer honest at once: the
 // search curation set never marks an excluded release (a Prowlarr result
 // matching one is purged as uncurated), the journal never grows one, and the
-// seen ledger never records one - so when the exclusion is lifted (the warning
+// publication log never records one - so when the exclusion is lifted (the warning
 // dropped upstream, or the operator's config changed) the torrent becomes
 // grabbable curation for the first time and journals as new (a
-// torrent journaled BEFORE it was excluded stays in the persisted ledger, so
+// torrent journaled BEFORE it was excluded stays in the persisted log, so
 // un-excluding it never re-broadcasts it). The input is never mutated: the
 // cycle shares the entries slice with the compare pass, so an entry
 // containing a removed torrent gets a fresh filtered Torrents slice.
@@ -1310,31 +1290,11 @@ func filterWarnedTorrents(ts []seadex.Torrent, warnedIDs map[string]struct{}, ta
 }
 
 // --- Search curation index ---
-
-// buildCuration builds the search curation index over the whole SeaDex
-// catalogue: every torrent's info hash and tracker key mapped to whether any
-// entry marks that release best (OR-accumulated for a torrent attached to
-// several entries), plus the pair relation - which hash/key combinations
-// were observed on one and the same torrent - that lookup's cross-torrent
-// gate reads. Searches match Prowlarr results against it; unlike the
-// RSS journal it always reflects the full current curation set.
-func buildCuration(entries []seadex.Entry) curation {
-	set := curation{byHash: make(map[string]bool), byKey: make(map[string]bool), byPair: make(map[string]bool)}
-	for i := range entries {
-		for j := range entries[i].Torrents {
-			t := &entries[i].Torrents[j]
-			h := validInfoHash(t.InfoHash)
-			k := trackerKey(t.Tracker, t.URL)
-			if h != "" {
-				set.byHash[h] = set.byHash[h] || t.IsBest
-			}
-			if k != "" {
-				set.byKey[k] = set.byKey[k] || t.IsBest
-			}
-			if h != "" && k != "" {
-				set.byPair[pairKey(h, k)] = true
-			}
-		}
-	}
-	return set
-}
+//
+// There is no buildCuration any more, and its absence is the point. The three
+// search maps used to be built here from the whole catalogue and PERSISTED, so
+// the only way an entry ever left them was wholesale replacement by the
+// reconcile - which is why a window could not touch them at all. They are now a
+// PROJECTION of the persisted per-entry ownership fact (projectCuration over
+// snapshot.Owners, derived in memory on load), and the fact itself is written by
+// the same upsert-what-you-evaluated rule at either scope. See members.go.

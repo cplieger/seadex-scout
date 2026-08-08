@@ -44,12 +44,6 @@ var refRe = regexp.MustCompile(`\$\{[^}]*\}|\$[A-Z_][A-Z0-9_]*`)
 // sent as the credential.
 func Unexpanded(v string) bool { return refRe.MatchString(v) }
 
-// IsWholeRef reports whether v is ENTIRELY one environment-variable reference.
-// It is the stricter reading a gate uses when the whole value must be the
-// reference for the diagnostic to be honest: a generated credential cannot take
-// that shape, since no hex or base64 output is a single $NAME or ${NAME}.
-func IsWholeRef(v string) bool { return refRe.FindString(v) == v && v != "" }
-
 // Unusable reports whether a configured secret cannot be used at all: it is
 // absent, or it still holds a placeholder in either spelling. Callers that must
 // fail closed on an unusable credential read this rather than testing for a
