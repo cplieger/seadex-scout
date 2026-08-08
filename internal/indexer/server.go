@@ -21,13 +21,6 @@ const (
 	readHeaderTimeout = 15 * time.Second
 	readTimeout       = 30 * time.Second
 	idleTimeout       = 120 * time.Second
-	// authFailBurst/authFailRefill tune the failed-auth throttle
-	// (authFailureLimiter): 10 free wrong-key attempts, then one accrued
-	// every 6s (10/min) - enough headroom for an operator fixing a
-	// misconfigured arr, tight enough that a flooding LAN client is
-	// silenced within a second.
-	authFailBurst  = 10
-	authFailRefill = 6 * time.Second
 )
 
 // writeTimeout bounds a stalled response consumer. net/http arms it when the
@@ -259,16 +252,23 @@ func (ix *Indexer) chain() http.Handler {
 	)
 }
 
-// authFailureLimiter rate-limits bad-apikey requests through a shared
-// webhttp.RateLimiter token bucket (burst authFailBurst, one token accrued
-// per authFailRefill). Requests presenting a correct key never consume a
-// token - the predicate verifies with the same pre-hashed constant-time
-// verifier serve uses - so the arrs' happy path can never be throttled, not
-// even mid-flood; over-budget bad-key requests get a 429 (with a computed
-// Retry-After hint) before reaching the logger or the handler. The
-// empty-configured-key guard keeps serve's fail-closed 503 diagnostic
-// reachable for alternate constructions (Run refuses to bind in that state,
-// so it is test-only).
+// authFailureLimiter rate-limits bad-apikey requests through webhttp's
+// failed-auth preset (webhttp.FailedAuthRateLimit), which owns the tuning: a
+// shared token bucket of burst 10 with one token accrued every 6s, and a 429
+// envelope of code "too_many_auth_failures". Those numbers used to be local
+// constants here, hand-copied byte-identically by the sibling services guarding
+// the same shape; one home is what stops them drifting apart. The human message
+// stays caller-owned, because the credential differs per service and naming it
+// (an apikey here) is what makes the refusal legible to whoever configured it.
+//
+// The predicate is passed THROUGH the limiter, so the middleware sees every
+// request and only a failed credential draws a token - it verifies with the same
+// pre-hashed constant-time verifier serve uses - so the arrs' happy path can
+// never be throttled, not even mid-flood; over-budget bad-key requests get a
+// 429 (with a computed Retry-After hint) before reaching the logger or the
+// handler. The empty-configured-key guard keeps serve's fail-closed 503
+// diagnostic reachable for alternate constructions (Run refuses to bind in that
+// state, so it is test-only).
 //
 // Wire-speed key guessing remains answerable in principle (a correct guess
 // is never throttled, so 200-vs-429 is an oracle); that residue is an
@@ -278,12 +278,9 @@ func (ix *Indexer) chain() http.Handler {
 // threats are the log flood and misconfigured-client spam, both bounded
 // here.
 func (ix *Indexer) authFailureLimiter() webhttp.Middleware {
-	return webhttp.RateLimiter(authFailBurst, authFailRefill,
-		webhttp.WithRateLimitWhen(func(r *http.Request) bool {
-			return !unusableFeedKey(ix.apiKey) && !ix.verifyKey.Verify(r.URL.Query().Get("apikey"))
-		}),
-		webhttp.WithRateLimitError("too_many_auth_failures", "too many failed apikey attempts"),
-	)
+	return webhttp.FailedAuthRateLimit(func(r *http.Request) bool {
+		return !unusableFeedKey(ix.apiKey) && !ix.verifyKey.Verify(r.URL.Query().Get("apikey"))
+	}, "too many failed apikey attempts")
 }
 
 // serve handles the Torznab endpoint. Every request must address a specific

@@ -6,7 +6,7 @@ require (
 	github.com/cplieger/arrapi v1.8.5
 	github.com/cplieger/atomicfile/v2 v2.7.0
 	github.com/cplieger/health v1.4.0
-	github.com/cplieger/webhttp v1.21.0
+	github.com/cplieger/webhttp v1.22.0
 )
 
 require go.yaml.in/yaml/v3 v3.0.5
