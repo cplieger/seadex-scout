@@ -42,6 +42,10 @@ const (
 	// promoting it to a divergence verdict would assert a bucket the evidence
 	// does not support. Read this standing as "the verdict cannot be
 	// determined", not as "nothing about the comparison is known".
+	//
+	// It also covers an item whose file state could not be READ at all
+	// (library.Item.Comparable is false): a placeholder carries no file data, so
+	// its alignment is undetermined rather than absent.
 	StandingUnverified
 	// StandingBest means a known best group is proven present on the scoped
 	// unit.
@@ -147,7 +151,20 @@ func Decide(item *library.Item, rec *mapping.Record, best, alt []string) Decisio
 		// other scope leaves it 0.
 		d.Season = rec.SeasonTvdb
 	}
-	if scoped.Kind == ScopeWholeSeries {
+	switch {
+	case !item.Comparable():
+		// A placeholder's file state is MISSING, not empty (library.Item.Failed: a
+		// series whose episode fetch failed, or a movie Radarr reports a file for
+		// while sending no MovieFile payload). No groups were read, so no group
+		// comparison exists: the standing is unverified - "the verdict cannot be
+		// determined" - never StandingNoFile, which asserts the unit has nothing on
+		// disk and is exactly the false claim library.Item.Comparable exists to stop.
+		// Decision.Groups stays nil for the same reason. The daemon's compare pass
+		// drops these matches before Decide (scout.splitFailedMatches), so in
+		// practice this arm is the audit report's: it enumerates everything and must
+		// render a degraded item as degraded rather than as an on-disk fact.
+		d.Standing = StandingUnverified
+	case scoped.Kind == ScopeWholeSeries:
 		// An absolute-numbered run / title-only match has no per-season Fribb
 		// mapping: its single whole-series recommendation is judged against
 		// every real season on disk, conservatively - best only when every
@@ -158,7 +175,7 @@ func Decide(item *library.Item, rec *mapping.Record, best, alt []string) Decisio
 		s := summarizeWholeSeries(item, best, alt)
 		d.Groups, d.Approx = s.Groups, s.Approx
 		d.Standing = wholeSeriesStanding(s)
-	} else {
+	default:
 		// Cloned at the edge: scope() takes the single-unit groups verbatim from
 		// the library snapshot a concurrent daemon cycle owns and rebuilds, so
 		// the exported Decision must not be a window into it. The whole-series

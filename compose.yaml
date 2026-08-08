@@ -4,19 +4,23 @@ services:
     image: ghcr.io/cplieger/seadex-scout:latest
     container_name: seadex-scout
     restart: unless-stopped
-    # Override with PUID/PGID in .env; defaults to 1000:1000.
-    user: "${PUID:-1000}:${PGID:-1000}"  # match your host user; create ./config host-owned before first start
+    # PUID/PGID come from .env; ./config must ALREADY be owned by this uid, or the
+    # first-boot starter write fails and unless-stopped retries the failure forever.
+    user: "${PUID:-1000}:${PGID:-1000}"
 
-    # See README "Configuration reference"; config.yaml expands these .env-backed secret variables.
+    # Secret refs for config.yaml; see README "Configuration reference". Key-only, so
+    # a value set in .env is passed through and a variable you never set stays unset -
+    # the daemon's startup warning can then name it instead of seeing "". The three
+    # SEADEX_SCOUT_* keys serve the Torznab feed, which binds :9118 once a Torznab
+    # URL is set - share a network with the arrs, or publish it on a LAN address only
+    # ("10.0.0.5:9118:9118"): /ab links embed your AnimeBytes passkey. See README
+    # "Security".
     environment:
-      SONARR_API_KEY: "${SONARR_API_KEY:-}"
-      RADARR_API_KEY: "${RADARR_API_KEY:-}"
-      # Indexer feed only. Setting a Torznab URL in config.yaml makes the daemon bind
-      # :9118, which the arrs must reach - publish the port or share a network with them.
-      SEADEX_SCOUT_FEED_KEY: "${SEADEX_SCOUT_FEED_KEY:-}"
-      SEADEX_SCOUT_PROWLARR_KEY: "${SEADEX_SCOUT_PROWLARR_KEY:-}"
-      SEADEX_SCOUT_AB_PASSKEY: "${SEADEX_SCOUT_AB_PASSKEY:-}"
+      - SONARR_API_KEY
+      - RADARR_API_KEY
+      - SEADEX_SCOUT_FEED_KEY
+      - SEADEX_SCOUT_PROWLARR_KEY
+      - SEADEX_SCOUT_AB_PASSKEY
     volumes:
-      # No config.yaml: writes a starter, exits, and unless-stopped retries.
-      # Edit the host-owned starter; the next retry starts automatically.
-      - "./config:/config"  # holds config.yaml, state, and the reports dir
+      # First boot writes a starter config and exits; edit it and the next retry starts.
+      - "./config:/config"  # config.yaml, state, and the reports dir

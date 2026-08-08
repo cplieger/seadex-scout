@@ -272,19 +272,6 @@ func IsCreditlessExtra(name string) bool {
 	return creditlessExtra.MatchString(name)
 }
 
-// extraMarkerEdge is the token boundary the two extra markers below use: any
-// non-ASCII-alphanumeric rune. It is deliberately NARROWER than the shared
-// nametoken.NonWordEdge, which treats U+0130 and U+212A as word runes because
-// strings.ToLower folds them onto ASCII letters. Keeping the ASCII reading
-// preserves this package's exact behaviour: widening it would change how a name
-// carrying one of those two runes ABUTTING a marker classifies (a U+0130
-// immediately before "NCED01" would stop reading as creditless), which is a
-// behaviour change of its own rather than part of adopting the shared case
-// classes. The narrowing is a deliberate one-line difference from the shared
-// edge, not a second vocabulary: the letters inside the markers come from the
-// one home either way.
-const extraMarkerEdge = `[^[:alnum:]]`
-
 // creditlessExtra matches bonus OP/ED files that may carry absolute-looking
 // numbers ("NCED01v2") which must not read as episodes or classification
 // evidence. The marker letters are the shared strings.ToLower-faithful case
@@ -292,14 +279,18 @@ const extraMarkerEdge = `[^[:alnum:]]`
 // because Go regexp's SimpleFold diverges from ToLower on U+0130 (İ, which must
 // match as I/i) and U+017F (ſ, which must NOT match as S/s), and this marker
 // feeds the same classification pipeline internal/release does - the two must
-// read one vocabulary. Explicit boundaries instead of \b: underscore is a
-// regexp word character, but the rest of the classification stack treats it as
-// a scene delimiter, so an underscore-delimited extra ("NCED_01",
-// "creditless_OP") must still read as creditless.
+// read one vocabulary. Boundaries are the shared release-name token edge
+// (nametoken.NonWordEdge), not \b: underscore is a regexp word character while
+// the rest of the classification stack treats it as a scene delimiter (so an
+// underscore-delimited extra - "NCED_01", "creditless_OP" - must still read as
+// creditless), and the shared edge is what keeps this marker's letters and its
+// boundaries reading ONE alphabet - a name carrying U+0130 or U+212A abutting a
+// marker continues the token, exactly as internal/release reads the same
+// construct.
 var creditlessExtra = regexp.MustCompile(
-	`(?:^|` + extraMarkerEdge + `)(?:` +
+	`(?:^|` + nametoken.NonWordEdge + `)(?:` +
 		nametoken.Alternation([]string{"ncop", "nced", "creditless"}) +
-		`)\d*(?:` + nametoken.Literal("v") + `\d+)?(?:$|` + extraMarkerEdge + `)`,
+		`)\d*(?:` + nametoken.Literal("v") + `\d+)?(?:$|` + nametoken.NonWordEdge + `)`,
 )
 
 // IsSampleExtra reports whether name marks a SAMPLE clip (the near-universal
@@ -327,14 +318,18 @@ func IsSampleExtra(name string) bool {
 }
 
 // sampleExtra matches sample clips ("sample", "Sample01", a "Sample/"
-// directory). Shared case classes instead of a global (?i) and explicit
-// boundaries instead of \b, for the same two reasons creditlessExtra spells
-// out: Go regexp's SimpleFold diverges from strings.ToLower on the Unicode
-// folds this classification pipeline cares about, and underscore is a regexp
-// word character while the rest of the stack treats it as a scene delimiter
-// (so "Show_sample_01.mkv" must still read as a sample).
+// directory). Shared case classes instead of a global (?i) and the shared
+// release-name token edge (nametoken.NonWordEdge) instead of \b, for the same
+// two reasons creditlessExtra spells out: Go regexp's SimpleFold diverges from
+// strings.ToLower on the Unicode folds this classification pipeline cares about,
+// and underscore is a regexp word character while the rest of the stack treats
+// it as a scene delimiter (so "Show_sample_01.mkv" must still read as a
+// sample). Reading the shared edge is what keeps this marker's letters and its
+// boundaries reading ONE alphabet - a name carrying U+0130 or U+212A abutting
+// the marker continues the token, exactly as internal/release reads the same
+// construct.
 var sampleExtra = regexp.MustCompile(
-	`(?:^|` + extraMarkerEdge + `)` + nametoken.Literal("sample") + `\d*(?:$|` + extraMarkerEdge + `)`,
+	`(?:^|` + nametoken.NonWordEdge + `)` + nametoken.Literal("sample") + `\d*(?:$|` + nametoken.NonWordEdge + `)`,
 )
 
 // mediaExts are the video container extensions used to tell an episode/movie

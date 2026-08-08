@@ -1,4 +1,4 @@
-package seadex
+package seadexapi
 
 import (
 	"context"
@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"unsafe"
+
+	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
 // repeatJSON joins n copies of one JSON element with commas, for building
@@ -183,36 +185,6 @@ func TestFetchEntriesCumulativeElementCapErrors(t *testing.T) {
 	}
 }
 
-// TestFetchAndAppendEntryCapBeforeAppend pins the relocated total-entry guard:
-// a page whose items would push the accumulated catalogue past maxEntries is
-// rejected BEFORE any of its items are converted or appended, so the decoded
-// page never amplifies into public Entry structs once the budget is spent.
-func TestFetchAndAppendEntryCapBeforeAppend(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"totalPages":1,"items":[{"alID":1,"expand":{"trs":[]}}]}`)
-	}))
-	defer server.Close()
-
-	c := NewClient(server.Client(), server.URL, 0, nil)
-	all := make([]Entry, maxEntries)
-	var tot fetchTotals
-	var cur cursor
-	out, done, err := c.fetchAndAppend(context.Background(), 1, all, &tot, &cur, Options{})
-	if err == nil {
-		t.Fatal("fetchAndAppend returned nil error, want entry-cap error")
-	}
-	if done {
-		t.Error("fetchAndAppend done = true, want false on cap error")
-	}
-	if len(out) != maxEntries {
-		t.Errorf("out = %d entries, want the untouched %d (nothing appended past the cap)", len(out), maxEntries)
-	}
-	want := fmt.Sprintf("entry count exceeded cap %d", maxEntries)
-	if !strings.Contains(err.Error(), want) {
-		t.Errorf("error = %q, want substring %q", err.Error(), want)
-	}
-}
-
 // TestFetchEntriesByteCapErrors pins the cumulative-byte bound the entry cap
 // cannot cover: pages holding FEW but HUGE items (far under the entry-count
 // cap, each page under the per-page byte cap) must trip the total-byte cap
@@ -258,7 +230,7 @@ func TestFetchEntriesByteCapErrors(t *testing.T) {
 func TestFetchAndAppendExhaustedByteBudgetErrors(t *testing.T) {
 	c := NewClient(&http.Client{}, "http://unreachable.invalid", 0, nil)
 	tot := fetchTotals{bytes: maxTotalBytes}
-	all := []Entry{{AniListID: 1}}
+	all := []seadex.Entry{{AniListID: 1}}
 	var cur cursor
 
 	out, done, err := c.fetchAndAppend(context.Background(), 3, all, &tot, &cur, Options{})
@@ -282,7 +254,7 @@ func TestFetchAndAppendExhaustedByteBudgetErrors(t *testing.T) {
 func TestFetchAndAppendExhaustedElementBudgetErrors(t *testing.T) {
 	c := NewClient(&http.Client{}, "http://unreachable.invalid", 0, nil)
 	tot := fetchTotals{elements: maxTotalElements}
-	all := []Entry{{AniListID: 1}}
+	all := []seadex.Entry{{AniListID: 1}}
 	var cur cursor
 
 	out, done, err := c.fetchAndAppend(context.Background(), 3, all, &tot, &cur, Options{})
@@ -379,7 +351,7 @@ func TestFetchEntriesPerPageElementCapErrors(t *testing.T) {
 // OOM-killing the process.
 func TestSeadexWorkingSetBudget(t *testing.T) {
 	const ceiling = 192 << 20 // 256 MiB container minus 64 MiB headroom
-	workingSet := maxTotalBytes + maxPageBytes + maxTotalElements*int(unsafe.Sizeof(Torrent{}))
+	workingSet := maxTotalBytes + maxPageBytes + maxTotalElements*int(unsafe.Sizeof(seadex.Torrent{}))
 	if workingSet >= ceiling {
 		t.Errorf("conservative SeaDex working set = %d bytes (%d MiB), want under the %d MiB ceiling; "+
 			"resize maxTotalBytes/maxPageBytes/maxTotalElements jointly",
@@ -387,31 +359,39 @@ func TestSeadexWorkingSetBudget(t *testing.T) {
 	}
 }
 
-// TestFetchAndAppendAcceptsPageExactlyFillingEntryCap pins the entry-cap
-// boundary: a page whose items land the accumulated catalogue EXACTLY on
-// maxEntries is legal (the cap is a ceiling, not a strict bound) and must be
-// appended and complete pagination, not rejected as upstream misbehavior.
-func TestFetchAndAppendAcceptsPageExactlyFillingEntryCap(t *testing.T) {
+// TestFetchEntriesBoundsDecodeFailureDiagnostic pins the diagnostic budget on
+// the page-DECODE failure, the twin of the keyset-cursor bound
+// TestAdvanceCursorBoundsRejectedValueInDiagnostic pins. Stdlib json renders a
+// rejected NUMBER literal verbatim ("cannot unmarshal number <literal> into Go
+// value of type int"), so a page whose totalItems is a megabyte of digits
+// yields a megabyte-long error - bounded only by maxPageBytes otherwise. It
+// crosses the log boundary on BOTH fetch paths and only the daemon's is reduced
+// downstream, so the cap has to hold here or one hostile page balloons a Loki
+// record.
+func TestFetchEntriesBoundsDecodeFailureDiagnostic(t *testing.T) {
+	huge := strings.Repeat("9", 64<<10)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"totalItems":1,"totalPages":1,"items":[{"alID":7,"id":"rec000007","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}}]}`)
+		fmt.Fprintf(w, `{"totalItems":%s,"totalPages":1,"items":[]}`, huge)
 	}))
 	defer server.Close()
 
-	c := NewClient(server.Client(), server.URL, 0, nil)
-	all := make([]Entry, maxEntries-1)
-	var tot fetchTotals
-	var cur cursor
-	out, done, err := c.fetchAndAppend(context.Background(), 1, all, &tot, &cur, Options{})
-	if err != nil {
-		t.Fatalf("fetchAndAppend returned error %v, want the exactly-filling page accepted (the cap is a ceiling, not a strict bound)", err)
+	entries, err := NewClient(server.Client(), server.URL, 0, nil).FetchEntries(context.Background(), Options{})
+	if err == nil {
+		t.Fatalf("FetchEntries = %d entries, want a page-decode error", len(entries))
 	}
-	if !done {
-		t.Error("fetchAndAppend done = false, want true (single-page catalogue)")
+	if entries != nil {
+		t.Fatalf("entries = %d items, want nil on a decode error", len(entries))
 	}
-	if len(out) != maxEntries {
-		t.Fatalf("out = %d entries, want exactly maxEntries (%d)", len(out), maxEntries)
+	msg := err.Error()
+	if strings.Contains(msg, huge) {
+		t.Error("the diagnostic must not carry the whole rejected upstream literal")
 	}
-	if out[maxEntries-1].AniListID != 7 {
-		t.Errorf("last entry alID = %d, want the appended 7", out[maxEntries-1].AniListID)
+	if !strings.Contains(msg, "...") {
+		t.Errorf("the diagnostic must mark the value as truncated, got %q", msg)
+	}
+	// Fixed prose plus one bounded value; a few hundred bytes of headroom keeps
+	// this pinned to the budget rather than to the exact wording.
+	if len(msg) > 4*maxLoggedDecodeBytes {
+		t.Errorf("the diagnostic is %d bytes, want it bounded by the logged-decode cap", len(msg))
 	}
 }

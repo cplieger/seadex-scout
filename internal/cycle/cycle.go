@@ -14,9 +14,12 @@
 //
 // The interruption contract is the other half: a shutdown cancellation observed
 // at any point makes the invocation report an interruption rather than a result,
-// and IsShutdownError / NormalizeShutdownError are how the root's other terminal
-// boundaries (the report subcommand, the indexer goroutine) classify the same
-// condition, so one vocabulary decides WARN-vs-ERROR everywhere.
+// and the vocabulary that decides it - shutdown.Interrupted /
+// shutdown.IsShutdownError / shutdown.NormalizeShutdownError - lives in the
+// stdlib-only internal/shutdown leaf, which the root's other terminal
+// boundaries (the report subcommand, the indexer goroutine) read directly, so
+// one vocabulary decides WARN-vs-ERROR everywhere without every consumer
+// inheriting this package's coalescing dependencies.
 //
 // It lives here rather than in the composition root because it is a coordination
 // concept with its own state machine and its own tests, not construction: main
@@ -34,6 +37,7 @@ import (
 
 	"github.com/cplieger/health"
 	"github.com/cplieger/scheduler/v2"
+	"github.com/cplieger/seadex-scout/internal/shutdown"
 )
 
 // msgCoordErrorAfterRun is the WARN message for a coordination-bookkeeping
@@ -79,64 +83,6 @@ func NewExclusive(ctx context.Context, dir string) (*scheduler.Exclusive, error)
 		scheduler.WithGate(func() bool { return ctx.Err() == nil })), nil
 }
 
-// Interrupted wraps the stable ctx.Err() (always context.Canceled here) with
-// the uniform interruption message every entry point shares, so the root
-// classifies it as a routine-shutdown WARN and the contract reads identically
-// from every phase. The message keeps poll's historical wording because it is
-// what an operator greps for. The message speaks only of THIS INVOCATION's result, not of the
-// marker: an interruption leaves the marker untouched whenever no verdict was
-// published before the cancellation was observed - including a cycle that
-// completed healthy and was then interrupted at the recording boundary, whose
-// verdict recordRunHealth deliberately withholds because an interrupted run's
-// outcome is not a trustworthy health verdict. What the
-// interruption never does is reach BACK: a verdict already published inside the
-// cycle lock - an earlier run of this invocation, or a daemon tick's - stands,
-// because a completed cycle's health is not this process's to withdraw.
-// The daemon tick deliberately differs in the boundary case: RunLoop publishes
-// a healthy verdict even when the cancellation is already visible, withholding
-// only an UNHEALTHY interrupted cycle. The cancellation cause rides along as a
-// second %w so the message still names the signal ("terminated signal
-// received"), never as the classification token: a cause is whatever the
-// cancelling site passed to context.WithCancelCause, so only ctx.Err() is
-// guaranteed to be context.Canceled. (signal.NotifyContext's own signalError
-// does satisfy errors.Is(_, context.Canceled) - golang/go#77639, backported to
-// Go 1.26 in #79499 - which is what keeps the net/http errors this app
-// classifies classifiable at all, since net/http reports a cancelled request as
-// context.Cause(ctx).)
-func Interrupted(ctx context.Context) error {
-	return fmt.Errorf("poll interrupted: %w (cause: %w)", ctx.Err(), context.Cause(ctx))
-}
-
-// IsShutdownError reports whether err is the observable form of THIS context's
-// cancellation, so a terminal boundary can classify it as a routine shutdown
-// (WARN) instead of a fault (the level=ERROR cycle-error alert). It proves the
-// match rather than assuming it: a cancelled context alone is not enough
-// (an unrelated coincident fault must still read as a fault), so err must
-// carry either the stable ctx.Err() or the cancellation cause. Matching the
-// cause is what keeps a dependency that surfaces context.Cause(ctx) verbatim
-// (net/http does, and a WithCancelCause cause need not wrap context.Canceled)
-// classifiable at all.
-func IsShutdownError(ctx context.Context, err error) bool {
-	if ctx.Err() == nil || err == nil {
-		return false
-	}
-	return errors.Is(err, ctx.Err()) || errors.Is(err, context.Cause(ctx))
-}
-
-// NormalizeShutdownError adds the stable ctx.Err() as the classification token
-// to an error that IS this context's cancellation but does not carry
-// context.Canceled itself (a cause-only form), so the root's single
-// errors.Is(err, context.Canceled) check classifies it as a routine shutdown.
-// Anything else - a nil error, one that already carries ctx.Err(), or a
-// genuine fault that merely happened to land while the context was cancelled -
-// is returned untouched.
-func NormalizeShutdownError(ctx context.Context, err error) error {
-	if err == nil || errors.Is(err, ctx.Err()) || !IsShutdownError(ctx, err) {
-		return err
-	}
-	return fmt.Errorf("%w (cause: %w): %w", ctx.Err(), context.Cause(ctx), err)
-}
-
 // runOnce is one execution of RunOnce's cycle body under the cycle lock: run the
 // cycle and apply the interruption contract (a cancellation observed at any
 // point - even when the cycle still managed to complete healthy, e.g. the
@@ -151,7 +97,7 @@ func NormalizeShutdownError(ctx context.Context, err error) error {
 func runOnce(ctx context.Context, sc Cycler) (healthy bool, err error) {
 	healthy, panicked := runCycle(ctx, sc)
 	if ctx.Err() != nil {
-		return healthy, Interrupted(ctx)
+		return healthy, shutdown.Interrupted(ctx)
 	}
 	if !healthy {
 		if panicked {
@@ -209,7 +155,7 @@ func executeRuns(ctx context.Context, ex *scheduler.Exclusive, sc Cycler, marker
 // healthy before the cancellation was observed here: a result the shutdown
 // reached first is not one this process publishes, so the marker keeps whatever
 // the last published verdict was. The cancellation check is on the CONTEXT, not
-// only on the cycle error: IsShutdownError deliberately answers false for a nil
+// only on the cycle error: shutdown.IsShutdownError deliberately answers false for a nil
 // error, so a cancellation that lands after runOnce returned a healthy nil
 // result but before this recording boundary would otherwise go unobserved here
 // and publish a healthy marker that RunOnce then reports as an interruption. A
@@ -225,10 +171,10 @@ func executeRuns(ctx context.Context, ex *scheduler.Exclusive, sc Cycler, marker
 // it is logged and the run's own error is returned unchanged.
 func recordRunHealth(ctx context.Context, marker *health.Marker, healthy bool, runs int, cycleErr error) error {
 	if ctx.Err() != nil {
-		if IsShutdownError(ctx, cycleErr) {
+		if shutdown.IsShutdownError(ctx, cycleErr) {
 			return cycleErr
 		}
-		return Interrupted(ctx)
+		return shutdown.Interrupted(ctx)
 	}
 	err := marker.SetChecked(healthy)
 	if err == nil {
@@ -286,7 +232,7 @@ func nonRunResult(ctx context.Context, outcome scheduler.Outcome, exErr error) (
 		slog.Info(msg, "outcome", outcome.String())
 		return true, nil
 	case scheduler.OutcomeGated:
-		return true, Interrupted(ctx)
+		return true, shutdown.Interrupted(ctx)
 	default:
 		return false, nil
 	}
@@ -329,7 +275,7 @@ func RunOnce(ctx context.Context, ex *scheduler.Exclusive, sc Cycler, marker *he
 	// success, adding work after shutdown was signalled. The uniform
 	// interruption contract applies instead (exit non-zero, marker untouched).
 	if ctx.Err() != nil {
-		return Interrupted(ctx)
+		return shutdown.Interrupted(ctx)
 	}
 	outcome, runs, own, exErr := executeRuns(ctx, ex, sc, marker)
 	if ctx.Err() != nil {
@@ -365,7 +311,7 @@ func RunOnce(ctx context.Context, ex *scheduler.Exclusive, sc Cycler, marker *he
 			}
 			slog.Warn("own cycle reported an error before shutdown", "error", own)
 		}
-		return Interrupted(ctx)
+		return shutdown.Interrupted(ctx)
 	}
 	if handled, err := nonRunResult(ctx, outcome, exErr); handled {
 		return err

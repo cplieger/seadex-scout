@@ -1,11 +1,19 @@
-// Package seadex is a read client for the SeaDex (releases.moe) PocketBase API.
+// Package seadexapi is the read client for the SeaDex (releases.moe) PocketBase
+// API.
 //
-// SeaDex curates the best available release per anime, keyed by AniList ID. The
-// client pages through the entries collection with the torrents relation
-// expanded, is polite to the Cloudflare-fronted community service (a
-// descriptive User-Agent and a configurable inter-page delay), and bounds every
-// response before decoding. It is read-only and never authenticates.
-package seadex
+// It pages through the entries collection with the torrents relation expanded,
+// is polite to the Cloudflare-fronted community service (a descriptive
+// User-Agent and a configurable inter-page delay), and bounds every response
+// before decoding. It is read-only and never authenticates.
+//
+// It is the volatile half of what used to be one package: the wire shape, the
+// paging pipeline and the decode budgets change with the releases.moe API,
+// while the MODEL they produce (internal/seadex - Entry, Torrent, File,
+// ValidInfoHash, EntryURL) changes with this app's comparison rules. The model
+// lives in that pure leaf so the packages that consume only the vocabulary do
+// not reach it through this package's httpx/jsonx closure; only the cycle
+// orchestrator and the composition root depend on this client.
+package seadexapi
 
 import (
 	"bytes"
@@ -26,6 +34,7 @@ import (
 	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 	"github.com/cplieger/seadex-scout/internal/degradation"
+	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
 const (
@@ -43,16 +52,14 @@ const (
 	// maxPages caps pagination so a misbehaving API cannot loop forever
 	// (~6 pages expected at perPage=500).
 	maxPages = 200
-	// maxEntries caps total accumulated entries so a compromised or misbehaving
-	// upstream cannot accumulate unbounded memory across maxPages pages
-	// (~a few thousand entries expected). It is deliberately slack: the
+	// maxEntries is the ceiling a whole fetch's accumulated entries must stay
+	// under. It is not enforced at runtime, because it cannot be crossed: the
 	// per-page items cap (decodeList rejects a page carrying more than perPage
-	// records, merged duplicates included) already bounds a whole fetch at
-	// maxPages*perPage = 100_000 entries, so this guard is belt-and-braces and
-	// unreachable through FetchEntries today - fetchAndAppend's own test
-	// reaches it only by pre-filling the accumulator. Raising maxPages or
-	// perPage past that product is what would make it load-bearing; resize it
-	// together with them.
+	// records, merged duplicates included) and the maxPages loop bound cap a
+	// walk at maxPages*perPage = 100_000 entries. The compile-time guard below
+	// is what keeps that true: raising maxPages or perPage past this product
+	// fails the build instead of silently making a count bound load-bearing
+	// again (the memory bounds are maxTotalBytes and maxTotalElements).
 	maxEntries = 200_000
 	// maxPageBytes bounds one page (500 entries with expanded torrents) before
 	// decode, guarding against an oversized or malicious payload.
@@ -182,6 +189,11 @@ const (
 const (
 	_ = uint(maxTotalBytes - maxPageBytes)
 	_ = uint(maxTotalElements - maxPageElements)
+	// The walk's structural entry ceiling (maxPages pages of at most perPage
+	// items) must stay under maxEntries, which is why no runtime entry count
+	// guard is needed; a negative difference fails the build rather than
+	// letting a raised maxPages/perPage exceed the documented ceiling.
+	_ = uint(maxEntries - maxPages*perPage)
 )
 
 // budgetWarnNumerator/budgetWarnDenominator express the fraction of a
@@ -215,57 +227,6 @@ var errCumulativeElements = fmt.Errorf("seadex: decoded elements exceeded the re
 // jsonx/bounded's ErrElementBudget sentinel: the full per-page bound is a
 // per-page violation, while a budget-reduced limit is the fetch-wide
 // cumulative cap (errCumulativeElements).
-
-// File is one file inside a SeaDex torrent (its name and byte length).
-type File struct {
-	Name   string `json:"name"`
-	Length int64  `json:"length"`
-}
-
-// Torrent is a single release SeaDex tracks for an entry.
-type Torrent struct {
-	ReleaseGroup string   `json:"releaseGroup"`
-	Tracker      string   `json:"tracker"`
-	InfoHash     string   `json:"infoHash"`
-	URL          string   `json:"url"`
-	Files        []File   `json:"files"`
-	Tags         []string `json:"tags"`
-	IsBest       bool     `json:"isBest"`
-	DualAudio    bool     `json:"dualAudio"`
-}
-
-// ValidInfoHash returns h lowercased when it is a 40-char SHA-1 hex info hash,
-// else "" (covers the releases.moe "<redacted>" placeholder and any other
-// junk value).
-func ValidInfoHash(h string) string {
-	h = strings.ToLower(strings.TrimSpace(h))
-	if len(h) != 40 {
-		return ""
-	}
-	for i := range len(h) {
-		c := h[i]
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return ""
-		}
-	}
-	return h
-}
-
-// Entry is a SeaDex entry: one anime (by AniList ID) and its tracked releases.
-type Entry struct {
-	Updated         time.Time
-	Notes           string
-	TheoreticalBest string
-	Torrents        []Torrent
-	AniListID       int
-	Incomplete      bool
-}
-
-// HasTheoreticalBest reports whether the entry names a theoretical-best release
-// that is not yet muxed (nothing concrete to grab). Like the package's other
-// predicates over untrusted PocketBase text, surrounding whitespace is not a
-// name: a whitespace-only value reports false.
-func (e *Entry) HasTheoreticalBest() bool { return strings.TrimSpace(e.TheoreticalBest) != "" }
 
 // Client fetches entries from a SeaDex PocketBase instance.
 type Client struct {
@@ -322,12 +283,12 @@ type pbEntry struct {
 
 // pbExpand holds the expanded torrents relation (?expand=trs).
 type pbExpand struct {
-	Trs []Torrent `json:"trs"`
+	Trs []seadex.Torrent `json:"trs"`
 }
 
 // toEntry converts a decoded PocketBase record into a public Entry.
-func (r *pbEntry) toEntry() Entry {
-	return Entry{
+func (r *pbEntry) toEntry() seadex.Entry {
+	return seadex.Entry{
 		Torrents:        r.Expand.Trs,
 		Notes:           r.Notes,
 		TheoreticalBest: r.TheoreticalBest,
@@ -641,14 +602,14 @@ func (c *Client) CountWindow(ctx context.Context, since time.Time) (int, error) 
 // reported totalItems aborts with an error (chunkComplete), since the API
 // itself says entries remain and completing would falsely resolve findings
 // against a truncated view.
-func (c *Client) FetchEntries(ctx context.Context, opts Options) ([]Entry, error) {
+func (c *Client) FetchEntries(ctx context.Context, opts Options) ([]seadex.Entry, error) {
 	if opts.Mode == FetchWindow && opts.Since.IsZero() {
 		return nil, errors.New("seadex: FetchWindow needs a non-zero Since")
 	}
 	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, maxFetchDuration)
 	defer cancel()
-	var all []Entry
+	var all []seadex.Entry
 	var tot fetchTotals
 	var cur cursor
 	for page := 1; page <= maxPages; page++ {
@@ -683,7 +644,7 @@ func (c *Client) FetchEntries(ctx context.Context, opts Options) ([]Entry, error
 // per-request client timeout (build.go seadexTimeout - a transient upstream
 // stall a later cycle recovers from) and names no remedy. The CALLER's context
 // is checked first, so a shutdown or a caller-imposed deadline keeps its own
-// error untouched and stays classifiable as one (cycle.IsShutdownError).
+// error untouched and stays classifiable as one (shutdown.IsShutdownError).
 func walkBudgetError(parent, walk context.Context, err error, page, fetched int) error {
 	if parent.Err() != nil || !errors.Is(walk.Err(), context.DeadlineExceeded) {
 		return err
@@ -724,7 +685,7 @@ func walkBudgetError(parent, walk context.Context, err error, page, fetched int)
 // vouches for: warnCatalogueShrink compares the accepted catalogue against the
 // previous one this PROCESS accepted, the independent evidence every
 // self-attested guard above lacks.
-func (c *Client) finishFetch(all []Entry, tot fetchTotals, mode FetchMode) ([]Entry, error) {
+func (c *Client) finishFetch(all []seadex.Entry, tot fetchTotals, mode FetchMode) ([]seadex.Entry, error) {
 	if err := validateFinishedFetch(len(all), tot, mode); err != nil {
 		return nil, err
 	}
@@ -862,17 +823,16 @@ func (c *Client) warnCatalogueShrink(count int) {
 // fetchAndAppend fetches one chunk at the walk's cursor, appends its entries,
 // updates the running totals (cumulative bytes and decoded elements, the API's
 // reported item total, and the unparseable-updated counter),
-// enforces the cumulative-byte, cumulative-element, and entry-count caps,
+// enforces the cumulative-byte and cumulative-element caps,
 // validates the chunk's entry identities (validatePageIdentities),
 // advances the cursor past the chunk when the walk continues, and reports
 // whether pagination is complete. All caps run BEFORE allocation scales with
 // the hostile input: the cumulative-byte budget caps the wire read itself
 // (fetchPage downloads at most the remaining budget, so tot.bytes can never
-// exceed maxTotalBytes), the cumulative-element budget caps the decode
+// exceed maxTotalBytes), and the cumulative-element budget caps the decode
 // (fetchPage decodes at most the remaining element allowance, so tot.elements
-// can never exceed maxTotalElements), and the entry-count cap rejects the
-// chunk before any of its items are converted or appended.
-func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, tot *fetchTotals, cur *cursor, opts Options) (out []Entry, done bool, err error) {
+// can never exceed maxTotalElements).
+func (c *Client) fetchAndAppend(ctx context.Context, page int, all []seadex.Entry, tot *fetchTotals, cur *cursor, opts Options) (out []seadex.Entry, done bool, err error) {
 	pageBytes, pageElems, err := remainingFetchBudgets(*tot)
 	if err != nil {
 		return all, false, fmt.Errorf("%w (page %d, %d entries fetched)", err, page, len(all))
@@ -885,10 +845,6 @@ func (c *Client) fetchAndAppend(ctx context.Context, page int, all []Entry, tot 
 	tot.elements += elems
 	tot.reportedTotal = max(tot.reportedTotal, list.TotalItems)
 	tot.reportedPages = max(tot.reportedPages, list.TotalPages)
-	if len(list.Items) > maxEntries-len(all) {
-		return all, false, fmt.Errorf("seadex: entry count exceeded cap %d on page %d (%d already fetched, %d received; upstream misbehaving)",
-			maxEntries, page, len(all), len(list.Items))
-	}
 	if verr := validatePageIdentities(list.Items, page, tot); verr != nil {
 		return all, false, verr
 	}
@@ -978,7 +934,7 @@ func validatePageIdentities(items []pbEntry, page int, tot *fetchTotals) error {
 // counters that used to be charged here moved to internal/scout with the
 // diagnostic itself (see finishFetch, l-f156), which is what lets this client
 // stay a pure releases.moe wire+contract leaf.
-func appendPageEntries(all []Entry, items []pbEntry, tot *fetchTotals) []Entry {
+func appendPageEntries(all []seadex.Entry, items []pbEntry, tot *fetchTotals) []seadex.Entry {
 	for i := range items {
 		entry := items[i].toEntry()
 		if entry.Updated.IsZero() && strings.TrimSpace(items[i].Updated) != "" {
@@ -1214,7 +1170,7 @@ func decodeExpand(d *bounded.Decoder, ex *pbExpand) error {
 		if strings.EqualFold(k, "trs") {
 			var err error
 			ex.Trs, err = bounded.Array(d, ex.Trs, maxTorrentsPerEntry, "torrents per entry",
-				func(t *Torrent) error { return decodeTorrent(d, t) })
+				func(t *seadex.Torrent) error { return decodeTorrent(d, t) })
 			return err
 		}
 		return d.Skip()
@@ -1223,7 +1179,7 @@ func decodeExpand(d *bounded.Decoder, ex *pbExpand) error {
 
 // decodeTorrent decodes one torrent record field-wise into t (see
 // decodeEntry for the duplicate-key semantics the Object walk provides).
-func decodeTorrent(d *bounded.Decoder, t *Torrent) error {
+func decodeTorrent(d *bounded.Decoder, t *seadex.Torrent) error {
 	return d.Object(func(k string) error { return decodeTorrentField(d, t, k) })
 }
 
@@ -1231,7 +1187,7 @@ func decodeTorrent(d *bounded.Decoder, t *Torrent) error {
 // key). The files and tags arrays are capped per torrent; a File is flat
 // (two scalar fields), so per-element json.Decoder.Decode cannot amplify
 // beyond the already-capped raw bytes.
-func decodeTorrentField(d *bounded.Decoder, t *Torrent, key string) error {
+func decodeTorrentField(d *bounded.Decoder, t *seadex.Torrent, key string) error {
 	switch {
 	case strings.EqualFold(key, "releaseGroup"):
 		return d.Decode(&t.ReleaseGroup)
@@ -1248,7 +1204,7 @@ func decodeTorrentField(d *bounded.Decoder, t *Torrent, key string) error {
 	case strings.EqualFold(key, "files"):
 		var err error
 		t.Files, err = bounded.Array(d, t.Files, maxFilesPerTorrent, "files per torrent",
-			func(f *File) error { return d.Decode(f) })
+			func(f *seadex.File) error { return d.Decode(f) })
 		return err
 	case strings.EqualFold(key, "tags"):
 		var err error

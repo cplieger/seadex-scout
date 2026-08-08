@@ -48,6 +48,7 @@ package indexer
 import (
 	"log/slog"
 	"net/http"
+	"slices"
 	"sync/atomic"
 
 	"github.com/cplieger/webhttp"
@@ -65,6 +66,25 @@ const (
 	upstreamNyaa = "nyaa"
 	upstreamAB   = "ab"
 )
+
+// feedScopes is the closed, ordered set of tracker scopes the feed serves.
+// It is the ONE enumeration: every site that iterates the scopes, tests
+// membership, or keys a per-scope map reads it, so adding SeaDex's third
+// tracker is one entry here plus one arm in each per-scope FIELD switch -
+// never a search for hand-written pairs the compiler cannot cross-check.
+var feedScopes = []string{upstreamNyaa, upstreamAB}
+
+// validScope reports whether s is one of the feed's tracker scopes.
+func validScope(s string) bool { return slices.Contains(feedScopes, s) }
+
+// newScopeLatches builds one once-per-process WARN latch per feed scope.
+func newScopeLatches() map[string]*atomic.Bool {
+	m := make(map[string]*atomic.Bool, len(feedScopes))
+	for _, scope := range feedScopes {
+		m[scope] = new(atomic.Bool)
+	}
+	return m
+}
 
 // UpstreamConfig is the Prowlarr upstream wiring shared by the feed server
 // (search proxying) and the feed writer (title harvesting) - the one home for
@@ -165,7 +185,7 @@ func wireUpstreams(client *http.Client, log *slog.Logger, cfg UpstreamConfig) []
 	// means that tracker is off, so it is simply not wired and the feed never
 	// queries it.
 	var ups []*upstream
-	for _, scope := range []string{upstreamNyaa, upstreamAB} {
+	for _, scope := range feedScopes {
 		if !cfg.enabled(scope) {
 			continue
 		}
@@ -188,15 +208,17 @@ type Indexer struct {
 	// state and nothing on the request path names a lock primitive or a
 	// reload-only flag.
 	cache *snapshotCache
-	// log is set once in New and read per request without a lock, like apiKey
-	// and enablement below; none of them is ever written after construction
-	// (the same immutable-after-New contract as upstreams and verifyKey).
+	// log is set once in New and read per request without a lock, like
+	// enablement and keyUnusable below; none of them is ever written after
+	// construction (the same immutable-after-New contract as upstreams and
+	// verifyKey).
 	log *slog.Logger
 	// The field order below is govet fieldalignment's: the pointer-only fields
 	// lead, then the string/slice/struct fields whose trailing words carry no
-	// pointer, and finally the one pointer-free value (verifyKey) - last
-	// because it is a byte-array-plus-bool with no alignment requirement, so
-	// any 8-aligned field after it would pay for its padding.
+	// pointer, and finally the pointer-free values (verifyKey, keyUnusable) -
+	// last because a byte-array-plus-bool and a bare bool have no alignment
+	// requirement, so any 8-aligned field after them would pay for their
+	// padding.
 	//
 	// noUpstreamWarned bounds fetchRaw's standing-misconfiguration WARN to one
 	// per scope per process. The condition is config-derived (a search reached
@@ -215,16 +237,21 @@ type Indexer struct {
 	// single-homed (see UpstreamConfig.torznabURL); ProwlarrAPIKey is
 	// deliberately left unset here.
 	enablement UpstreamConfig
-	// apiKey is the feed's own gate (a secret, never logged). The serving path
-	// reads it only to answer "is a key configured at all"; verification of a
-	// presented value goes through verifyKey.
-	apiKey string
 	// upstreams is wired once in New; immutable afterwards.
 	upstreams []*upstream
 	// verifyKey is the pre-hashed feed_api_key verifier, built once in New so
 	// per-request verification hashes only the presented value (see
 	// webhttp.NewStaticTokenVerifier). Immutable after New.
 	verifyKey webhttp.StaticTokenVerifier
+	// keyUnusable is the precomputed answer to the only question the serving
+	// path asks about indexer.feed_api_key - is the gate usable at all
+	// (unusableFeedKey) - decided once in New from the cfg value. The plaintext
+	// key is deliberately NOT retained, the same process-lifetime hygiene the
+	// enablement field applies to ProwlarrAPIKey: verification of a presented
+	// value goes through verifyKey, which holds only a digest. Immutable after
+	// New, so it needs no lock. Last field: a bare bool has no alignment
+	// requirement, so it sits in the trailing pointer-free band with verifyKey.
+	keyUnusable bool
 }
 
 // New builds the Torznab feed server from cfg, log, and the HTTP client its
@@ -246,20 +273,17 @@ func New(cfg *Config, log *slog.Logger, client *http.Client) *Indexer {
 		log = slog.Default()
 	}
 	ix := &Indexer{
-		log:    log,
-		apiKey: cfg.APIKey,
+		log: log,
 		enablement: UpstreamConfig{
 			NyaaTorznabURL: cfg.NyaaTorznabURL,
 			ABTorznabURL:   cfg.ABTorznabURL,
 			ABPasskey:      cfg.ABPasskey,
 		},
-		verifyKey: webhttp.NewStaticTokenVerifier(cfg.APIKey),
-		cache:     newSnapshotCache(cfg.SnapshotPath, cfg.ABPasskey, log),
-		upstreams: wireUpstreams(client, log, cfg.UpstreamConfig),
-		noUpstreamWarned: map[string]*atomic.Bool{
-			upstreamNyaa: new(atomic.Bool),
-			upstreamAB:   new(atomic.Bool),
-		},
+		verifyKey:        webhttp.NewStaticTokenVerifier(cfg.APIKey),
+		keyUnusable:      unusableFeedKey(cfg.APIKey),
+		cache:            newSnapshotCache(cfg.SnapshotPath, cfg.ABPasskey, log),
+		upstreams:        wireUpstreams(client, log, cfg.UpstreamConfig),
+		noUpstreamWarned: newScopeLatches(),
 	}
 	return ix
 }

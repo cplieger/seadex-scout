@@ -777,3 +777,38 @@ func TestRecordFromFormat_normalizesRoutingType(t *testing.T) {
 		})
 	}
 }
+
+// TestParseFribb_approachingIdentifierBudgetWarns pins the aggregate
+// identifier budget's advance warning, the sibling of the record cap's
+// (TestParseFribb_approachingRecordCapWarns): a breach of
+// maxFribbIdentifiersTotal is a whole-document refusal that never self-heals -
+// every cycle re-downloads the multi-MB body, rejects it, and the map stays
+// frozen stale while the persisted rejection streak escalates to ERROR - so
+// the three-quarter warning is the operator's only heads-up while refreshes
+// still succeed. It drives logFribbParseDiagnostics directly because reaching
+// the threshold through a real body needs ~786k retained identifiers (~12k
+// records at the 64-per-record cap), and the threshold arithmetic is what is
+// under test, not the decode that feeds it.
+func TestParseFribb_approachingIdentifierBudgetWarns(t *testing.T) {
+	const threshold = maxFribbIdentifiersTotal / 4 * 3
+
+	logger, rec := capture.New()
+	at := fribbDecodeCounts{identifiers: threshold}
+	logFribbParseDiagnostics(logger, &at)
+	if n := rec.CountLevel(slog.LevelWarn, "Fribb identifiers approaching budget"); n != 1 {
+		t.Errorf("identifiers at the threshold warned %d times, want 1 (the guard is inclusive): %v", n, rec.Messages())
+	}
+	if !rec.HasAttr("", "identifiers", strconv.Itoa(threshold)) {
+		t.Errorf("advance-warning attrs = %v, want identifiers=%d", rec.Messages(), threshold)
+	}
+	if !rec.HasAttr("", "cap", strconv.Itoa(maxFribbIdentifiersTotal)) {
+		t.Errorf("advance-warning attrs = %v, want cap=%d", rec.Messages(), maxFribbIdentifiersTotal)
+	}
+
+	loggerBelow, recBelow := capture.New()
+	below := fribbDecodeCounts{identifiers: threshold - 1}
+	logFribbParseDiagnostics(loggerBelow, &below)
+	if n := recBelow.CountExact("mapping: Fribb identifiers approaching budget"); n != 0 {
+		t.Errorf("identifiers one below the threshold warned %d times, want 0: %v", n, recBelow.Messages())
+	}
+}

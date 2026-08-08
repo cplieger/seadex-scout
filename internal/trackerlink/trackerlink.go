@@ -37,7 +37,7 @@ import (
 // ambient scheme and navigates off-site.
 //
 // The (tracker, rawURL) argument order mirrors filter.ABVisible and
-// filter.ClassifyAB, the hide half of the same concern.
+// tracker.ClassifyAB, the hide half of the same concern.
 //
 // A value that carries only a canonical host ("nyaa.si", "https://nyaa.si/")
 // drops like every other unvouchable form: the tracker's front page identifies
@@ -186,7 +186,7 @@ func usableSchemelessHost(f *urlform.Form, baseURL string) string {
 		if !schemelessPortOK(f.Trimmed) || !hostFormTargeted(f) {
 			return ""
 		}
-		return "https://" + f.Trimmed
+		return tracker.CanonicalSourceURL(f)
 	}
 	return publishRelative(f.Trimmed, baseURL)
 }
@@ -350,13 +350,12 @@ func pathSegments(p string) int {
 // the front page. An unparsable value names no target either (this
 // publisher drops what it cannot vouch for).
 func hostFormTargeted(f *urlform.Form) bool {
-	trimmed := f.Trimmed
-	if f.Scheme == "" {
-		// A schemeless value's authority is only recoverable by net/url once
-		// it carries a scheme; every canonical tracker is https, which is the
-		// scheme the schemeless branch publishes on.
-		trimmed = "https://" + trimmed
-	}
+	// A schemeless value's authority is only recoverable by net/url once it
+	// carries a scheme. tracker.CanonicalSourceURL is the one home of that
+	// rule (every canonical tracker is https) and is what the published value
+	// goes through too, so this parse target and that link cannot name
+	// different pages.
+	trimmed := tracker.CanonicalSourceURL(f)
 	u, err := url.Parse(trimmed)
 	if err != nil {
 		return false

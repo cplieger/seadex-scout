@@ -11,7 +11,7 @@ import (
 // from an arbitrary library entry. Both directions of the item<->record
 // pairing rule (a Radarr item is claimed by a record's routed TMDB-movie/IMDb
 // ids or by its cross-type movie ids, a Sonarr item only by its TVDB id) live
-// here beside FindByID/findMovie/arrItem, and both read the same two mapping
+// here beside FindByID/findMovie, and both read the same two mapping
 // accessors (RoutedIDs for the type-routed set, MovieTMDBIDs for the cross-type
 // movie evidence), so a change to the pairing - a new id kind, an id becoming
 // valid for the other arr - cannot drift between the forward and reverse
@@ -56,11 +56,9 @@ func NewCatalogue(idx *mapping.Index, keep func(mapping.Record) bool) *Catalogue
 			}
 		}
 		for _, im := range imdbIDs {
-			key := imdbKey(im) // a usable id can still be padded; the catalogue key is trimmed
-			if key == "" {
-				continue
-			}
-			c.imdb[key] = struct{}{}
+			// RoutedIDs judges usability on the TRIMMED value, so a returned id is
+			// non-blank once trimmed; the trim is here for the padded-override case.
+			c.imdb[imdbKey(im)] = struct{}{}
 		}
 	})
 	return c
@@ -69,9 +67,9 @@ func NewCatalogue(idx *mapping.Index, keep func(mapping.Record) bool) *Catalogue
 // Has reports whether a library item corresponds to any kept mapping record:
 // a Radarr movie by its TMDB or IMDb id, a Sonarr series by its TVDB id. The
 // switch is exhaustive over the known arr values and answers false for any
-// other Arr, mirroring the forward side (indexIDs/arrItem require an exact
-// Sonarr or Radarr match), so an unknown or future arr value can never be
-// misclassified through the Sonarr TVDB branch.
+// other Arr, mirroring the forward side (indexIDs indexes each ID map with only
+// the items of the arr that consumes it), so an unknown or future arr value can
+// never be misclassified through the Sonarr TVDB branch.
 func (c *Catalogue) Has(it *library.Item) bool {
 	switch it.Arr {
 	case library.ArrRadarr:

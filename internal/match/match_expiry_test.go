@@ -357,14 +357,23 @@ func TestMemoEntryExpiryWireFormat(t *testing.T) {
 func TestMemoDegradedPassRetainsExpiredEntries(t *testing.T) {
 	idx := mapping.NewIndex([]mapping.Record{{AniListID: 11, Type: "MOVIE"}}) // id-less: needs the lookup
 	m := expiryMatcher(degradedAniList{}, 0.5)
+	expired := memoTestClock.Add(-time.Hour)
 	memo := Memo{Entries: map[int]MemoEntry{
-		11: {Titles: []string{"Stale Title"}, Format: "MOVIE", Year: 2020, Expiry: memoTestClock.Add(-time.Hour)},
+		11: {Titles: []string{"Stale Title"}, Format: "MOVIE", Year: 2020, Expiry: expired},
+		99: {NotFound: true, Expiry: expired}, // expired, and absent from the catalogue below
 	}}
+	catalogue := []seadex.Entry{{AniListID: 11}}
 
-	res := m.Match(context.Background(), []seadex.Entry{{AniListID: 11}}, &library.Snapshot{}, idx, memo)
+	res := m.Match(context.Background(), catalogue, &library.Snapshot{}, idx, memo)
+	// The guard under test lives in PruneMemo, which Match never calls: the
+	// reconcile calls it explicitly (scout/scout.go:450), so the test must too.
+	m.PruneMemo(&res, catalogue)
 
 	if !res.Degraded {
 		t.Fatal("Degraded = false, want true on a total AniList outage")
+	}
+	if _, ok := res.Memo.Entries[99]; !ok {
+		t.Error("expired entry 99 was pruned on a degraded pass; PruneMemo must decline the whole prune, not just spare the curated entries")
 	}
 	ent, ok := res.Memo.Entries[11]
 	if !ok {
@@ -372,6 +381,57 @@ func TestMemoDegradedPassRetainsExpiredEntries(t *testing.T) {
 	}
 	if len(ent.Titles) != 1 || ent.Titles[0] != "Stale Title" {
 		t.Errorf("memo[11] = %+v, want the stale entry retained verbatim", ent)
+	}
+}
+
+// TestMemoChangedTracksEveryWriteAndNothingElse pins the memo's dirty
+// contract, which scout.saveTick reads to decide whether a tick rewrites the
+// whole ~2.5 MB state.json: every write goes through put/remove and marks the
+// memo changed, a loaded memo starts clean (dirty is unexported, so it never
+// decodes), and a pass that only served live memo hits reports unchanged.
+// Nothing else asserts Changed() anywhere in the repo, so a put that forgot the
+// flag would silently drop a renewal - computed, not persisted, re-fetched from
+// a rate-limited upstream every pass - and PruneMemo's deletions with it.
+func TestMemoChangedTracksEveryWriteAndNothingElse(t *testing.T) {
+	live := MemoEntry{Titles: []string{"Frieren"}, Format: "TV", Year: 2023, Expiry: memoTestClock.Add(48 * time.Hour)}
+
+	var fresh Memo
+	if fresh.Changed() {
+		t.Error("a zero Memo reports Changed() = true, want false before any write")
+	}
+	fresh.put(11, &live)
+	if !fresh.Changed() {
+		t.Error("put on a nil-Entries memo reports Changed() = false, want true")
+	}
+	if got, ok := fresh.Entries[11]; !ok || len(got.Titles) != 1 || got.Titles[0] != "Frieren" {
+		t.Errorf("put on a nil-Entries memo stored %+v (present=%v), want the entry", got, ok)
+	}
+
+	loaded := Memo{Entries: map[int]MemoEntry{11: live}}
+	if loaded.Changed() {
+		t.Error("a loaded memo reports Changed() = true, want false (dirty is unexported and never decoded)")
+	}
+	loaded.remove(11)
+	if !loaded.Changed() {
+		t.Error("remove reports Changed() = false, want true")
+	}
+
+	fake := &countingAniList{}
+	m := expiryMatcher(fake, 0.5)
+	idx := mapping.NewIndex([]mapping.Record{{AniListID: 11, Type: "MOVIE"}})
+	served := m.Match(context.Background(), []seadex.Entry{{AniListID: 11}},
+		&library.Snapshot{}, idx, Memo{Entries: map[int]MemoEntry{11: live}})
+	if served.Memo.Changed() {
+		t.Error("a pass served entirely from live memo hits reports Changed() = true, want false")
+	}
+	if fake.calls != 0 {
+		t.Errorf("AniList calls = %d, want 0 (a live memo hit must not fetch)", fake.calls)
+	}
+
+	renewed := m.Match(context.Background(), []seadex.Entry{{AniListID: 11}},
+		&library.Snapshot{}, idx, Memo{Entries: map[int]MemoEntry{11: {NotFound: true, Expiry: memoTestClock.Add(-time.Hour)}}})
+	if !renewed.Memo.Changed() {
+		t.Error("a pass that renewed an expired entry reports Changed() = false, want true")
 	}
 }
 
@@ -516,8 +576,12 @@ func (o *outageAniList) Fetch(_ context.Context, _ int) (anilist.Media, error) {
 	return anilist.Media{}, errors.New("anilist: dial tcp: connection refused")
 }
 
-func (o *outageAniList) FetchMany(_ context.Context, _ []int) (anilist.BatchResult, error) {
-	return anilist.BatchResult{Media: map[int]anilist.Media{}, Completed: true},
+func (o *outageAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
+	media := map[int]anilist.Media{}
+	return anilist.BatchResult{
+			Media:    media,
+			Verdicts: batchVerdictsAbsentAs(ids, media, anilist.VerdictUnverified),
+		},
 		errors.New("anilist: dial tcp: connection refused")
 }
 

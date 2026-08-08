@@ -153,7 +153,7 @@ func TestTrackerURLsRoutesMislabeledABURLToABSlot(t *testing.T) {
 
 // TestTrackerURLsDefiniteABWinsOverMalformedFallback pins the precedence of
 // definite AnimeBytes evidence over the fail-closed fallback: a malformed
-// Nyaa-labeled URL (unclassifiable, so filter.ABAmbiguous) appearing BEFORE a
+// Nyaa-labeled URL (unclassifiable, so tracker.ABAmbiguous) appearing BEFORE a
 // genuine AnimeBytes link must not occupy the AB slot - the later definite AB
 // URL wins it, and the unclassifiable link still never renders as the public
 // URL.

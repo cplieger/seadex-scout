@@ -10,10 +10,11 @@
 // up by key, anilist pre-rejects payloads whose every title normalizes to an
 // empty key, and the indexer's title harvest tests a candidate release name
 // for CONTAINMENT of a show's key. The containment consumer is the one
-// sensitive to the stripped separators (a short key occurs inside ordinary
-// release metadata, which is why ContainsKey falls back to exact token
-// matching below four characters), so a change to the character set must be
-// reviewed against it too.
+// sensitive to the stripped separators (a key of ANY length occurs inside
+// ordinary release metadata - "x" inside "Remux", "gate" inside "Propagate" -
+// which is why ContainsKey matches a run of the candidate's own tokens exactly
+// rather than testing a normalized substring), so a change to the character set
+// must be reviewed against it too.
 package titlekey
 
 import (
@@ -33,20 +34,20 @@ func Normalize(s string) string {
 }
 
 // ContainsKey reports whether candidate carries want - a key produced by
-// Normalize - as its own vocabulary.
+// Normalize - as its own vocabulary: an EXACT match against a run of the
+// candidate's own alphanumeric tokens, split on the SAME character class
+// Normalize strips, which is why this comparison lives beside it.
 //
 // Normalize deliberately drops every separator, so a plain normalized
-// substring test has no token-boundary evidence at all. That is harmless for
-// a key of real length, but a SHORT key (a one- to three-character show title
-// such as "X") occurs inside ordinary release metadata: the "x" in "Remux" or
-// "x265" satisfies it. A short key therefore requires an EXACT match against a
-// run of the candidate's own alphanumeric tokens - the boundary evidence the
-// normalized form threw away - split on the SAME character class Normalize
-// strips, which is why this comparison lives beside it.
+// substring test has no token-boundary evidence at all, at ANY key length: the
+// "x" of a one-character title is satisfied by "Remux" or "x265", and a real
+// four-to-six-character title is satisfied just as blindly ("gate" inside
+// "Propagate", "bleach" inside "Unbleached", "zero" inside "ReZero"). Requiring
+// the key to equal a run of whole tokens restores the boundary evidence for
+// every length while still ignoring the decoration a release name carries: a
+// multi-token key matches across the separators inside it, because Normalize
+// stripped exactly the characters FieldsFunc splits on.
 func ContainsKey(candidate, want string) bool {
-	if len(want) >= 4 {
-		return strings.Contains(Normalize(candidate), want)
-	}
 	tokens := strings.FieldsFunc(strings.ToLower(candidate), func(r rune) bool {
 		return (r < '0' || r > '9') && (r < 'a' || r > 'z')
 	})

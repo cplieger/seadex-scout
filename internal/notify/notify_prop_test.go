@@ -5,13 +5,13 @@ import (
 	"testing"
 
 	"github.com/cplieger/seadex-scout/internal/compare"
-	"github.com/cplieger/seadex-scout/internal/filter"
+	"github.com/cplieger/seadex-scout/internal/tracker"
 	"github.com/cplieger/urlform"
 	"pgregory.net/rapid"
 )
 
 // TestTrackerURLsRoutingProperty pins trackerURLs' routing invariants under
-// randomized link sets, with filter's own classifiers as the oracle (never a
+// randomized link sets, with tracker's own classifiers as the oracle (never a
 // reimplementation of the switch): every returned slot is one of the input
 // URLs or empty; the public/nyaa slot never carries an AB-gated
 // (unclassifiable or AnimeBytes) link, so an ambiguous URL can never render
@@ -53,7 +53,7 @@ func TestTrackerURLsRoutingProperty(t *testing.T) {
 		if pub.url != "" {
 			if l := find(pub.url); l == nil {
 				rt.Fatalf("public = %q is not an input URL", pub.url)
-			} else if l.AB != filter.ABNone {
+			} else if l.AB != tracker.ABNone {
 				rt.Fatalf("public slot carries a link with AnimeBytes evidence %+v", *l)
 			}
 			// The public slot must name the tracker it came from, so the alert
@@ -88,7 +88,7 @@ func TestTrackerURLsRoutingProperty(t *testing.T) {
 			rt.Fatalf("ab_url %q carries no ab_tracker to label it", ab)
 		}
 		for i := range links {
-			if links[i].AB == filter.ABDefinite {
+			if links[i].AB == tracker.ABDefinite {
 				if ab != links[i].URL {
 					rt.Fatalf("ab = %q, want the first definite AnimeBytes link %q", ab, links[i].URL)
 				}

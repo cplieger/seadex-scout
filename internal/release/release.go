@@ -508,10 +508,12 @@ func ResolutionRank(res string) int {
 	if !slices.Contains(resolutionHeights, r) {
 		return 0
 	}
-	n, err := strconv.Atoi(strings.TrimSuffix(r, "p"))
-	if err != nil {
-		return 0
-	}
+	// r is one of resolutionHeights (the gate above), every entry of which is
+	// "<digits>p", so the parse cannot fail - and Atoi returns 0 with its error
+	// anyway, so a check here could only re-return the value below. The
+	// vocabulary's rankability is enforced at build time instead, by
+	// TestResolutionVocabularySingleHome.
+	n, _ := strconv.Atoi(strings.TrimSuffix(r, "p"))
 	return n
 }
 

@@ -10,7 +10,7 @@ import (
 // TestTrackerScope pins the two documented contracts of trackerScope that the
 // other indexer tests only exercise indirectly: the defensive "animebytes"
 // alias for the "AB" spelling, and the tail-drop default (any unknown tracker
-// maps to "") that makes the journal/downloadURL exclude those releases from
+// maps to "") that makes the journal/downloadURLForScope exclude those releases from
 // the synthesized feed. Nyaa/AB spellings are normalized case- and
 // whitespace-insensitively.
 func TestTrackerScope(t *testing.T) {
@@ -477,13 +477,13 @@ func TestSchemelessHostKeysAsItsAbsoluteSpelling(t *testing.T) {
 			// The download builder is the second SeaDex-source consumer of the
 			// same normalization; if it drifted, a keyed release would journal
 			// with no grabbable link.
-			wantURL, wantOK := downloadURL(tc.tracker, tc.absolute, "pk")
+			wantURL, wantOK := downloadURLForScope(trackerScope(tc.tracker), tc.absolute, "pk")
 			if !wantOK {
-				t.Fatalf("downloadURL(%q, %q) ok=false, want a link (test premise)", tc.tracker, tc.absolute)
+				t.Fatalf("downloadURLForScope(%q, %q) ok=false, want a link (test premise)", tc.tracker, tc.absolute)
 			}
-			gotURL, gotOK := downloadURL(tc.tracker, tc.schemeless, "pk")
+			gotURL, gotOK := downloadURLForScope(trackerScope(tc.tracker), tc.schemeless, "pk")
 			if !gotOK || gotURL != wantURL {
-				t.Errorf("downloadURL(%q, %q) = %q, ok=%v, want the absolute spelling's %q", tc.tracker, tc.schemeless, gotURL, gotOK, wantURL)
+				t.Errorf("downloadURLForScope(%q, %q) = %q, ok=%v, want the absolute spelling's %q", tc.tracker, tc.schemeless, gotURL, gotOK, wantURL)
 			}
 		})
 	}
@@ -522,8 +522,8 @@ func TestSchemelessHostAdmissionKeepsEveryRefusal(t *testing.T) {
 			if got := trackerKey(tc.tracker, tc.sourceURL); got != "" {
 				t.Errorf("trackerKey(%q, %q) = %q, want empty", tc.tracker, tc.sourceURL, got)
 			}
-			if got, ok := downloadURL(tc.tracker, tc.sourceURL, "pk"); ok {
-				t.Errorf("downloadURL(%q, %q) = %q, ok=true, want refused", tc.tracker, tc.sourceURL, got)
+			if got, ok := downloadURLForScope(trackerScope(tc.tracker), tc.sourceURL, "pk"); ok {
+				t.Errorf("downloadURLForScope(%q, %q) = %q, ok=true, want refused", tc.tracker, tc.sourceURL, got)
 			}
 		})
 	}

@@ -19,9 +19,8 @@ import (
 )
 
 const (
-	// upstreamMaxAttempts / upstreamBaseDelay bound the per-query retry.
+	// upstreamMaxAttempts bounds the per-query retry.
 	upstreamMaxAttempts = 3
-	upstreamBaseDelay   = time.Second
 	// upstreamMaxBytes bounds a single Torznab response before decode. 8 MiB
 	// deliberately rejects pathological escape-heavy documents before decode:
 	// 4 MiB of decoded ampersands can require about 20 MiB on the wire. Real
@@ -40,8 +39,8 @@ const (
 	minEmbeddedSecretLen = 16
 )
 
-// upstreamAttemptTimeout bounds ONE Prowlarr Torznab attempt: fetchAndParse
-// derives each attempt's context from it (see there), so the package enforces
+// upstreamAttemptTimeout bounds ONE Prowlarr Torznab attempt: search passes it
+// to the retry loop (httpx.WithAttemptTimeout), so the package enforces
 // its own retry arithmetic instead of relying on the composition root to wire
 // an http.Client.Timeout that matches. server.go's writeTimeout is derived
 // from the same value, which keeps the write deadline sized above the whole
@@ -53,9 +52,16 @@ const (
 //
 // A var, not a const, ONLY so the test that pins this package-owned deadline
 // can exercise it without spending a minute in real time (the same reason
-// queryGateWait is one). writeTimeout is evaluated at init, so shortening it
-// in a test does not shrink the write deadline.
+// reload.go's warmLoadTimeout is one). writeTimeout is evaluated at init, so
+// shortening it in a test does not shrink the write deadline.
 var upstreamAttemptTimeout = 60 * time.Second
+
+// upstreamBaseDelay bounds the per-query retry's backoff. A var, not a const,
+// for the same reason upstreamAttemptTimeout is one: the package's retry-
+// exhaustion tests would otherwise spend the real backoff in wall-clock time
+// (TestMain shortens it, exactly as it does the harvest's politeness gap).
+// Production reads the unchanged one-second value.
+var upstreamBaseDelay = time.Second
 
 // --- Upstream search and retry classification ---
 
@@ -147,7 +153,14 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, int, 
 		// exactly the incident the once-per-onset cadence exists to keep
 		// readable. Demoting rather than dropping the logger keeps the
 		// per-attempt retry diagnostics, which are the half worth having here.
-		httpx.WithExhaustedLevel(slog.LevelDebug))
+		httpx.WithExhaustedLevel(slog.LevelDebug),
+		// The per-attempt bound is the loop's, not a context this callback
+		// derives: WithAttemptTimeout installs it AND marks its expiry
+		// retryable (httpx.AttemptTimeout), which IsTransient consults ahead
+		// of its caller-context rejection. The package still owns the number
+		// (upstreamAttemptTimeout), so writeTimeout's derivation is unchanged
+		// and the root's http.Client.Timeout stays a transport backstop.
+		httpx.WithAttemptTimeout(upstreamAttemptTimeout))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -156,13 +169,14 @@ func (u *upstream) search(ctx context.Context, params url.Values) ([]item, int, 
 
 // fetchAndParse performs ONE search attempt: a single bounded HTTP fetch
 // followed by the Torznab decode. The attempt's own deadline
-// (upstreamAttemptTimeout) is derived HERE, so the per-attempt bound the retry
+// (upstreamAttemptTimeout) is installed by the enclosing retry loop
+// (httpx.WithAttemptTimeout in search), so the per-attempt bound the retry
 // budget is sized against is enforced by the package that owns that budget
 // rather than by an unenforced obligation on whoever built the client; a
 // client-level http.Client.Timeout may still sit above it as a transport
-// backstop. Classification keeps reading the CALLER's context (attemptError
-// takes it, not the attempt context), which is exactly the split it documents:
-// caller context still live means the attempt timer fired, hence retryable.
+// backstop. Classification no longer reads a context at all: the loop is the
+// only layer that can tell its own attempt's deadline from the caller's, and it
+// marks the expiry (httpx.AttemptTimeout) so IsTransient sees it.
 //
 // Errors the enclosing Do should
 // retry are marked transient: a 408/429/5xx status (with the response's capped
@@ -183,19 +197,17 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 	// letting GetBytes retry too would multiply the two budgets - which makes
 	// attemptError, not GetBytes, the owner of every retry decision here.
 	//
-	// The attempt context bounds the whole attempt (connect, headers, and the
-	// bounded body read); attemptError below is deliberately handed the CALLER's
-	// ctx so an expired attempt timer stays retryable while an expired caller
-	// context stays terminal.
-	attemptCtx, cancel := context.WithTimeout(ctx, upstreamAttemptTimeout)
-	defer cancel()
-	body, err := httpx.GetBytes(attemptCtx, u.http, reqURL,
+	// ctx is the loop's per-attempt context (WithAttemptTimeout in search),
+	// already bounded by upstreamAttemptTimeout and cancelled when this
+	// callback returns - so the whole attempt (connect, headers, bounded
+	// body read) is inside it and the body is fully read here.
+	body, err := httpx.GetBytes(ctx, u.http, reqURL,
 		httpx.WithMaxAttempts(1),
 		httpx.WithHeaders(u.setHeaders),
 		httpx.WithMaxBodyBytes(upstreamMaxBytes),
 		httpx.WithLogger(u.log))
 	if err != nil {
-		return nil, u.attemptError(ctx, err)
+		return nil, u.attemptError(err)
 	}
 	items, err := parseTorznab(body)
 	if err != nil {
@@ -204,67 +216,55 @@ func (u *upstream) fetchAndParse(ctx context.Context, reqURL string) ([]item, er
 	return items, nil
 }
 
-// retryableUpstreamStatus reports whether an upstream status is worth another
-// attempt from the enclosing Do. It mirrors GetBytes's own retryable set
-// (408/429/5xx); the app restates it because GetBytes deliberately does not mark
-// its exhaustion error Transient - after WithMaxAttempts(1) that decision is the
-// caller's policy, and only this loop knows the budget it owns.
-func retryableUpstreamStatus(code int) bool {
-	return code == http.StatusRequestTimeout ||
-		code == http.StatusTooManyRequests ||
-		(code >= 500 && code < 600)
-}
-
 // attemptError maps a GetBytes failure onto the retry taxonomy the enclosing
 // Do reads. GetBytes runs with WithMaxAttempts(1), so its every failure exit
 // arrives here and this function alone decides whether the search spends
 // another of its upstreamMaxAttempts.
 //
-// Three classes:
+// Two classes:
 //
 //   - A non-2xx surfaces as *httpx.StatusError. A self-healing status
-//     (retryableUpstreamStatus) becomes transient, carrying the response's
+//     (httpx.IsRetryableStatus) becomes transient, carrying the response's
 //     already-capped Retry-After forward so Do waits the upstream-requested
 //     delay instead of its jittered backoff; GetBytes exposes that hint on its
 //     exhaustion error via the httpx.RetryAfterHint interface, which it
 //     deliberately does not pair with Transient (the retry decision is the
 //     caller's). Any other status (auth/config 4xx) stays terminal and fails
 //     the search on the first attempt.
-//   - A per-attempt deadline. fetchAndParse gives every attempt a context
-//     bounded by upstreamAttemptTimeout (and the root's client may carry a
-//     looser http.Client.Timeout as a transport backstop); when either fires
-//     the error matches
-//     context.DeadlineExceeded - which httpx.IsTransient deliberately treats as
-//     TERMINAL before consulting net.Error or the Transient interface, because a
-//     caller's expired context must never be retried. That collapsed the
-//     documented three-attempt budget to one attempt whenever the attempt timer
-//     (not the caller's context) expired: an interactive search failed
-//     immediately and the title harvest latched the tracker scope for the whole
-//     rebuild. The caller's own context is the terminal signal, so the split is
-//     on ctx.Err(): still live means the attempt timer fired, which
-//     is retryable. The replacement error deliberately does NOT wrap
-//     context.DeadlineExceeded (that identity is what IsTransient rejects
-//     first); it carries a fixed log-safe message instead. An actually expired
-//     caller context falls through unchanged and stays single-attempt.
-//   - Everything else (transport resets, DNS, an over-cap body) passes through
-//     unchanged for httpx.IsTransient to classify through the error chain.
+//   - Everything else (a per-attempt deadline, transport resets, DNS, an
+//     over-cap body) passes through unchanged for httpx.IsTransient to classify
+//     through the error chain. The per-attempt deadline is deliberately NOT
+//     classified here: the enclosing Do installs the bound
+//     (httpx.WithAttemptTimeout) and marks its expiry, which is the only place
+//     that can tell the attempt's deadline from the caller's - a
+//     context.DeadlineExceeded value is identical either way, and net/http's own
+//     timeout matches it without carrying it. IsTransient consults the mark
+//     ahead of its caller-context rejection, so a marked attempt timeout is
+//     retryable while an expired CALLER context stays terminal and
+//     single-attempt.
 //
 // No app-side URL scrub is needed on any path: httpx's redactor drops the whole
 // userinfo component and REDACTs every query value, so the username-only
 // Prowlarr token that validateHTTPURL accepts cannot reach a log line through
 // *StatusError (CWE-532).
-func (u *upstream) attemptError(ctx context.Context, err error) error {
+func (u *upstream) attemptError(err error) error {
 	if statusErr, ok := errors.AsType[*httpx.StatusError](err); ok {
-		if !retryableUpstreamStatus(statusErr.Code) {
+		// httpx.IsRetryableStatus is the SAME rule GetBytes's own attempt
+		// function applies, not a restatement of it, so this caller's verdict
+		// and the door's cannot disagree - which is why the library exports it
+		// for exactly this WithMaxAttempts(1)-under-an-outer-Do composition.
+		if !httpx.IsRetryableStatus(statusErr.Code) {
 			return statusErr
 		}
 		// Unwrap to the status itself: GetBytes's "retries exhausted after 0s"
 		// prefix is noise for a budget the app deliberately set to one attempt.
 		return &transientUpstreamError{err: statusErr, retryAfter: retryAfterHint(err)}
 	}
-	if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
-		return &transientUpstreamError{err: errors.New("upstream request timed out")}
-	}
+	// A per-attempt deadline is NOT classified here: the enclosing Do
+	// installed the bound (WithAttemptTimeout) and marks its expiry, which
+	// is the only place that can tell the attempt's deadline from the
+	// caller's. LogSafeError has already reduced the *url.Error, so the
+	// deadline reaches the mark log-safe and with its real cause intact.
 	return httpx.LogSafeError(err)
 }
 

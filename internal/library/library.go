@@ -4,12 +4,13 @@
 // fingerprint), the Snapshot one walk produces, and the diff between two
 // snapshots.
 //
-// It is a pure leaf over internal/release and the stdlib. The arr INGEST that
-// produces a Snapshot - the arrapi clients, tag resolution, the bounded episode
-// fan-out and its failure budget - lives in internal/arrwalk, so the six
-// packages that consume only this vocabulary (align, compare, match, audit,
-// state, notify) do not carry the arr wire client in their compile closure and
-// the model can change with the comparison rules rather than with the arr APIs.
+// It is a pure leaf over internal/release, keyenc, and the stdlib. The arr
+// INGEST that produces a Snapshot - the arrapi clients, tag resolution, the
+// bounded episode fan-out and its failure budget - lives in internal/arrwalk,
+// so the six packages that consume only this vocabulary (align, compare, match,
+// audit, state, notify) do not carry the arr wire client in their compile
+// closure and the model can change with the comparison rules rather than with
+// the arr APIs.
 //
 // An item whose file data is MISSING rather than empty (an episode fetch that
 // failed, a movie Radarr reports a file for but sends no file payload) is kept
@@ -24,6 +25,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/cplieger/keyenc"
 	"github.com/cplieger/seadex-scout/internal/release"
 )
 
@@ -68,7 +70,12 @@ type Item struct {
 // (indexByKey) and the audit's covered-item map both key on it, so the
 // identity rule is written once here in the package that owns Item.
 func (it *Item) Key() string {
-	return it.Arr + ":" + strconv.Itoa(it.ArrID)
+	// Assembled through keyenc rather than concatenated: `:` is keyenc's own
+	// separator, and Join makes the split unforgeable by construction instead of
+	// by the accident that the decimal ArrID sits last. Both components are
+	// reserved-char-free today, so the encoding is byte-identical to the old form
+	// (keyenc emits such a component verbatim) and nothing re-keys.
+	return keyenc.Join(it.Arr, strconv.Itoa(it.ArrID))
 }
 
 // Comparable reports whether the item's file state may be compared against a

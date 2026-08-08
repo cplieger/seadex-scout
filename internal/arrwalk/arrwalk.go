@@ -270,7 +270,7 @@ func episodeFetchError(ctx context.Context, kept, failed int) error {
 		return err
 	}
 	if failed >= episodeFailureBudget {
-		return fmt.Errorf("episode fetches: %d series failed, hitting the walk failure budget of %d", failed, episodeFailureBudget)
+		return fmt.Errorf("episode fetches: %d of %d kept series failed, hitting the walk failure budget of %d", failed, kept, episodeFailureBudget)
 	}
 	// Sub-budget total failure: every kept series' episode fetch failed. The
 	// budget above is an absolute count a library with fewer kept series can

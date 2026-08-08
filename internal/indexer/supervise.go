@@ -7,7 +7,7 @@ import (
 	"runtime/debug"
 	"time"
 
-	"github.com/cplieger/seadex-scout/internal/cycle"
+	"github.com/cplieger/seadex-scout/internal/shutdown"
 )
 
 // stopWait bounds how long Stop blocks on the feed's graceful drain. The feed's
@@ -82,15 +82,15 @@ func supervise(ctx context.Context, done chan struct{}, run func(context.Context
 // when its graceful-shutdown budget expired, meaning in-flight Torznab requests
 // were cut off - information worth its own log line rather than vanishing into
 // the clean-shutdown message. Any error outside a shutdown is a fault and stays
-// ERROR. The WARN-vs-ERROR vocabulary is internal/cycle's, so this terminal
+// ERROR. The WARN-vs-ERROR vocabulary is internal/shutdown's, so this terminal
 // boundary reads the same rule the report subcommand and the compare cycle do.
 func logStop(ctx context.Context, log *slog.Logger, err error) {
 	switch {
 	case ctx.Err() != nil && errors.Is(err, context.DeadlineExceeded):
 		log.Warn("indexer shutdown budget expired; in-flight requests aborted", "error", err, "cause", context.Cause(ctx))
-	case cycle.IsShutdownError(ctx, err):
+	case shutdown.IsShutdownError(ctx, err):
 		// Bind cancelled mid-startup, or a clean graceful drain: routine.
-		// cycle.IsShutdownError also accepts the cause-only form
+		// shutdown.IsShutdownError also accepts the cause-only form
 		// (net.ListenConfig surfacing context.Cause(ctx) verbatim), which a
 		// plain errors.Is(err, context.Canceled) would misread as a fault.
 		log.Warn("indexer feed stopped during shutdown", "error", err, "cause", context.Cause(ctx))

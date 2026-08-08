@@ -70,10 +70,10 @@ func TestMatchNoRecordEntryRidesBatchPrefetch(t *testing.T) {
 	}
 }
 
-// batchRecordErrAniList fails every batch record-locally: FetchMany returns a
-// COMPLETED result with an EMPTY map plus anilist.ErrBatchRecord (the completed
-// chunks held only malformed records), while single Fetch still resolves from
-// the canned map.
+// batchRecordErrAniList fails every batch record-locally: FetchMany returns
+// per-id verdicts marking every id UNVERIFIED plus anilist.ErrBatchRecord (the
+// completed chunks held only malformed records), while single Fetch still
+// resolves from the canned map.
 type batchRecordErrAniList struct {
 	batchCountingAniList
 }
@@ -81,13 +81,17 @@ type batchRecordErrAniList struct {
 func (b *batchRecordErrAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
 	b.batchCalls++
 	b.batchSizes = append(b.batchSizes, len(ids))
-	return anilist.BatchResult{Media: map[int]anilist.Media{}, Completed: true},
+	media := map[int]anilist.Media{}
+	return anilist.BatchResult{
+			Media:    media,
+			Verdicts: batchVerdictsAbsentAs(ids, media, anilist.VerdictUnverified),
+		},
 		fmt.Errorf("%w media record 0 missing id", anilist.ErrBatchRecord)
 }
 
 // TestPrefetchEmptyRecordLocalBatchFallsBackPerID pins the outage
-// classification boundary: an empty batch result plus ErrBatchRecord is a
-// record-local failure (the chunks completed; every record was malformed),
+// classification boundary: an all-unverified batch result plus ErrBatchRecord is
+// a record-local failure (the chunks completed; every record was malformed),
 // NOT a total AniList outage, so prefetch must leave the pending ids uncached
 // for the documented per-id Fetch fallback instead of failing them fast - the
 // entry still title-matches through the single Fetch.
@@ -114,9 +118,8 @@ func TestPrefetchEmptyRecordLocalBatchFallsBackPerID(t *testing.T) {
 }
 
 // scopedBatchRecordAniList models a CHUNK-SCOPED record-local batch failure:
-// FetchMany answers id 11, names id 22's chunk untrustworthy through
-// *anilist.BatchRecordError, and leaves id 33 unanswered by a chunk that
-// completed cleanly.
+// FetchMany answers id 11, marks id 22 UNVERIFIED (its chunk answered
+// untrustworthily), and marks id 33 ABSENT from a chunk that completed cleanly.
 type scopedBatchRecordAniList struct {
 	fetchedIDs []int
 	batchCalls int
@@ -130,20 +133,23 @@ func (s *scopedBatchRecordAniList) Fetch(_ context.Context, id int) (anilist.Med
 func (s *scopedBatchRecordAniList) FetchMany(_ context.Context, _ []int) (anilist.BatchResult, error) {
 	s.batchCalls++
 	return anilist.BatchResult{
-			Media:     map[int]anilist.Media{11: {Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020}},
-			Completed: true,
+			Media: map[int]anilist.Media{11: {Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020}},
+			Verdicts: map[int]anilist.Verdict{
+				11: anilist.VerdictFound,
+				22: anilist.VerdictUnverified,
+				33: anilist.VerdictAbsent,
+			},
 		},
 		&anilist.BatchRecordError{
-			Err:           fmt.Errorf("%w: media record 0 missing id", anilist.ErrBatchRecord),
-			UnverifiedIDs: []int{22},
+			Err: fmt.Errorf("%w: media record 0 missing id", anilist.ErrBatchRecord),
 		}
 }
 
 // TestPrefetchScopesNegativeMemoToVerifiedChunks pins the chunk-scoping half of
-// the prefetch negative-memo rule (unverifiedBatchIDs): a *BatchRecordError
-// names only the ids whose chunk is untrustworthy, so those stay uncached for
-// the per-id retry while every OTHER requested-but-absent id was definitively
-// answered by a clean chunk and IS memoized negatively. Both directions matter:
+// the prefetch negative-memo rule: VerdictUnverified names the ids whose chunk
+// is untrustworthy, so those stay uncached for the per-id retry while every
+// OTHER requested-but-absent id was definitively answered by a clean chunk
+// (VerdictAbsent) and IS memoized negatively. Both directions matter:
 // memoizing an unverified id would cache a malformed record as not-found for a
 // whole TTL, and refusing to memoize the verified ones dumps the entire pending
 // set into rate-limited per-id fetches.
@@ -181,9 +187,8 @@ func TestPrefetchScopesNegativeMemoToVerifiedChunks(t *testing.T) {
 
 // abortingBatchAniList models an ABORTED batch: its first FetchMany answers
 // every id except an abandoned tail - the chunk that aborted and the ones after
-// it, which the client never requested - named through
-// *anilist.BatchRecordError.UnrequestedIDs. A second call answers everything it
-// is asked, so a re-batch of the tail succeeds.
+// it, which the client never requested - marked VerdictUnrequested. A second
+// call answers everything it is asked, so a re-batch of the tail succeeds.
 type abortingBatchAniList struct {
 	media      map[int]anilist.Media
 	abandoned  []int
@@ -214,13 +219,17 @@ func (a *abortingBatchAniList) FetchMany(_ context.Context, ids []int) (anilist.
 		}
 	}
 	if aborted {
-		return anilist.BatchResult{Media: out, Completed: true}, &anilist.BatchRecordError{
-			Err:            errors.New("anilist: 503 service unavailable"),
-			UnverifiedIDs:  a.abandoned,
-			UnrequestedIDs: a.abandoned,
+		verdicts := batchVerdicts(ids, out)
+		for _, id := range a.abandoned {
+			if _, requested := verdicts[id]; requested {
+				verdicts[id] = anilist.VerdictUnrequested
+			}
+		}
+		return anilist.BatchResult{Media: out, Verdicts: verdicts}, &anilist.BatchRecordError{
+			Err: errors.New("anilist: 503 service unavailable"),
 		}
 	}
-	return anilist.BatchResult{Media: out, Completed: true}, nil
+	return anilist.BatchResult{Media: out, Verdicts: batchVerdicts(ids, out)}, nil
 }
 
 // TestPrefetchReBatchesUnrequestedIDs pins the abort-recovery half of prefetch:

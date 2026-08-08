@@ -3,11 +3,10 @@ package cycle
 import (
 	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"path/filepath"
 
 	"github.com/cplieger/scheduler/v2"
+	"github.com/cplieger/seadex-scout/internal/reportfs"
 )
 
 // reportLockName is the flock target inside the report dir that serializes
@@ -44,11 +43,10 @@ var ErrReportRunning = errors.New("another report is already running")
 // dependency).
 //
 // The returned errors carry the real dir: it is the secret-capable report.dir
-// config value, and the caller applies the report package's redaction policy
-// (audit.RedactReportDirErr) before the error reaches a log. That direction was
-// chosen over injecting a redaction func here, so the policy stays with the
-// package that owns report.dir instead of being re-stated by a coordination
-// leaf.
+// config value, and the caller applies internal/pathredact with the report.dir
+// marker before the error reaches a log. That direction was chosen over
+// injecting a redaction func here, so a coordination leaf does not re-state a
+// masking rule that has one home of its own.
 func TryReportLock(dir string) (func(), error) {
 	if err := makeReportDir(dir); err != nil {
 		return nil, fmt.Errorf("create report dir: %w", err)
@@ -64,31 +62,8 @@ func TryReportLock(dir string) (func(), error) {
 	return lock.Unlock, nil
 }
 
-// makeReportDir creates dir owner-only, with the mode set EXPLICITLY rather
-// than left to whatever os.MkdirAll's perm argument survives: MkdirAll's mode
-// is filtered by the process umask and, on a filesystem carrying a default ACL
-// on the parent, by the inherited ACL mask - which is how a dir requested at
-// 0700 lands at 0770 (observed on this repo's own volume, where a t.TempDir()
-// under it produces a group-readable dir). A report dir holds enumerations of
-// the operator's whole library plus private-tracker page links, so the created
-// mode is pinned with an explicit Chmod that no umask or inherited ACL can
-// widen (least privilege, CWE-732).
-//
-// A PRE-EXISTING dir is deliberately left alone: /config/reports may be an
-// operator-created directory (or a bind-mounted volume) whose mode is theirs to
-// choose - possibly deliberately group-readable so another container can ship
-// the reports - and silently narrowing it on every report run would break that
-// deployment. So only the dir this call creates gets its mode pinned.
-func makeReportDir(dir string) error {
-	if err := os.MkdirAll(filepath.Dir(dir), dirMode); err != nil {
-		return err
-	}
-	switch err := os.Mkdir(dir, dirMode); {
-	case err == nil:
-		return os.Chmod(dir, dirMode)
-	case errors.Is(err, fs.ErrExist):
-		return nil
-	default:
-		return err
-	}
-}
+// makeReportDir creates dir owner-only with its mode pinned. The rule (and the
+// reason MkdirAll's perm argument alone is not enough: a umask or an inherited
+// default ACL filters it) has ONE home, internal/reportfs, because the report
+// writer creates the same directory on its own path.
+func makeReportDir(dir string) error { return reportfs.MakeDir(dir) }

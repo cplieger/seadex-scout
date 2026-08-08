@@ -10,29 +10,36 @@ import (
 	"github.com/cplieger/seadex-scout/internal/seadex"
 )
 
-// This file owns the finding dedupe-key policy: WHEN a finding should
-// re-surface across cycles is a notification/suppression concern, so the key is
-// derived here at the start of Notify from the semantic Finding the compare
-// package produces. The key format is pinned byte-for-byte by TestDedupeKey:
-// any format change re-alerts the whole backlog as a one-time burst, so change
-// it only deliberately (the 2026-07 validated-identity/link-set hardening
-// accepted exactly that burst).
+// This file owns the finding-set IDENTITY policy: what makes two findings the
+// same standing condition is a notification concern, so the key is derived
+// here - in report, before a row enters the in-memory set - from the semantic
+// Finding the compare package produces. It is the key of that set, not a
+// fire-once token: a row present in a pass is emitted, and a row absent from a
+// pass with authority over its owner resolves. The key format is pinned
+// byte-for-byte by TestDedupeKey: any format change retires every current row
+// and re-announces its replacement as new, a one-time burst, so change it only
+// deliberately (the 2026-07 validated-identity/link-set hardening accepted
+// exactly that burst).
 
 // dedupeKey keys a finding by AniList ID, status, recommended-group set, current
 // group, release identity, and the full obtainable-source link set, so a
 // same-group quality swap (new identity), a changed library state, or ANY
-// change to the recommended sources re-surfaces while an unchanged finding is
-// suppressed. The link-set component covers what the headline identity alone
-// cannot: a NON-headline candidate's torrent replacement (a new tracker page
-// URL) and an AnimeBytes toggle flip (AB links joining or leaving the set)
-// both change the key, where previously only the headline candidate and the
-// AB subset were keyed and a replaced secondary public source stayed
-// suppressed forever.
+// change to the recommended sources becomes a DIFFERENT row - the old one
+// resolves and the new one is announced - while an unchanged finding keeps
+// its row and is re-emitted unchanged. The link-set component covers what the
+// headline identity alone cannot: a NON-headline candidate's torrent
+// replacement (a new tracker page URL) and an AnimeBytes toggle flip (AB links
+// joining or leaving the set) both change the key, where previously only the
+// headline candidate and the AB subset were keyed and a replaced secondary
+// public source stayed suppressed forever.
 //
 // Every level of the key - the outer component list, the group sets nested
 // inside it, and the link set - is assembled with keyenc, so no component's
 // content can forge a different component split and collide two distinct
-// findings onto one key (which would suppress the second as already alerted).
+// findings onto one key. A collision is not a suppression, it is a LOSS:
+// report's map write is last-payload-wins, so one of the two still-true
+// conditions stops being reported altogether and the surviving row's later
+// resolution is attributed to whichever payload won.
 // The untrusted components are group names, the current group, the release
 // identity and the link URLs, all parsed from SeaDex data or library file
 // names. Nesting is composition: an inner keyenc value is escaped again as it

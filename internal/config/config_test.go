@@ -770,12 +770,23 @@ func TestValidateIndexerHalfConfiguredInfo(t *testing.T) {
 	t.Run("keys without torznab url log info", func(t *testing.T) {
 		rec := capture.Default(t)
 		c := base
-		c.IndexerAPIKey = "fk"
+		c.IndexerProwlarrAPIKey = "pk"
 		if err := c.Validate(); err != nil {
 			t.Fatalf("Validate: %v", err)
 		}
 		if !rec.Contains("indexer keys are set but no torznab url is configured") {
 			t.Errorf("Validate() log = %v, want the half-configured indexer info", rec.Messages())
+		}
+	})
+	t.Run("a starter-seeded feed key alone stays silent", func(t *testing.T) {
+		rec := capture.Default(t)
+		c := base
+		c.IndexerAPIKey = strings.Repeat("a", 32) // what seedFeedAPIKey writes
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if rec.Contains("indexer keys are set but no torznab url is configured") {
+			t.Errorf("Validate() log = %v, want no half-configured indexer info", rec.Messages())
 		}
 	})
 	t.Run("empty indexer section stays silent", func(t *testing.T) {
@@ -853,6 +864,32 @@ func TestValidateIndexerParkedABPasskeyInfo(t *testing.T) {
 		}
 		if rec.Contains("indexer.ab_passkey is set but indexer.ab_torznab_url is empty") {
 			t.Errorf("Validate() log = %v, want no parked-passkey info", rec.Messages())
+		}
+	})
+	// The third AB half-configuration: the indexer's AB endpoint configured
+	// while the top-level animebytes toggle stays at its false default. The feed
+	// then serves AnimeBytes releases the findings and the report both drop.
+	t.Run("ab url with animebytes false logs info", func(t *testing.T) {
+		rec := capture.Default(t)
+		c := base
+		c.IndexerABTorznabURL = "http://prowlarr:9696/2/api"
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if !rec.Contains("indexer.ab_torznab_url is set but animebytes is false") {
+			t.Errorf("Validate() log = %v, want the animebytes-off info", rec.Messages())
+		}
+	})
+	t.Run("ab url with animebytes true stays silent", func(t *testing.T) {
+		rec := capture.Default(t)
+		c := base
+		c.IndexerABTorznabURL = "http://prowlarr:9696/2/api"
+		c.AnimeBytes = true
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if rec.Contains("indexer.ab_torznab_url is set but animebytes is false") {
+			t.Errorf("Validate() log = %v, want no animebytes-off info", rec.Messages())
 		}
 	})
 }
@@ -951,6 +988,54 @@ func TestValidateIndexerShortFeedKeyWarning(t *testing.T) {
 			t.Errorf("Validate() error echoes the configured value: %v", err)
 		}
 	})
+}
+
+// TestValidateIndexerUnbracedFeedKeyWarns pins the feed gate's BRACE-LESS arm.
+// yamlenv expands only the ${VAR} form, so a shell-style $NAME survives into the
+// running config and gates the AnimeBytes-passkey-bearing feed with a literal
+// derived from a PUBLISHED variable name (the README documents the
+// SEADEX_SCOUT_ prefix), which is a credential a LAN attacker can guess. The
+// braced spelling is a hard error and is already pinned above; this arm only
+// WARNs, so nothing else would notice if it stopped firing - and it is the same
+// two-spelling divergence internal/secretref was extracted to close, whose
+// ab_passkey half already asserts both spellings
+// (TestABPasskeyUnusableWarnsForBothSpellings). Field-name-only on every arm:
+// the key value never rides the log record.
+func TestValidateIndexerUnbracedFeedKeyWarns(t *testing.T) {
+	const warnMsg = "feed_api_key looks like an unbraced $VAR reference"
+	base := Config{
+		RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k",
+		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api", IndexerProwlarrAPIKey: "pk",
+	}
+	for name, tc := range map[string]struct {
+		key      string
+		wantWarn bool
+	}{
+		// The whole value must BE the reference, whether or not the name is
+		// allowlisted: yamlenv leaves a non-allowlisted spelling just as literal.
+		"brace-less allowlisted reference warns":     {"$SEADEX_SCOUT_FEED_API_KEY", true},
+		"brace-less non-allowlisted reference warns": {"$PROWLARR_FEED_API_KEY", true},
+		// A generated key cannot take that shape, so neither of these may warn.
+		"a real 32-char key is quiet":             {strings.Repeat("a", 32), false},
+		"a key merely carrying a dollar is quiet": {"abc$def-0f1e2d3c4b5a6978", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := capture.Default(t)
+			c := base
+			c.IndexerAPIKey = tc.key
+			if err := c.Validate(); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			if got := rec.Contains(warnMsg); got != tc.wantWarn {
+				t.Errorf("Validate() warned about a brace-less feed_api_key = %v, want %v: %v",
+					got, tc.wantWarn, rec.Messages())
+			}
+			if corpus := strings.Join(rec.Messages(), "\n"); strings.Contains(corpus, tc.key) ||
+				rec.AttrContains("", "", tc.key) {
+				t.Errorf("Validate() log leaks the configured feed_api_key value: %v", rec.Messages())
+			}
+		})
+	}
 }
 
 // TestValidateIndexerWarnsOnNonTorznabEndpoint pins the endpoint-shape

@@ -24,12 +24,9 @@
 package main
 
 import (
-	"bytes"
 	"cmp"
 	"context"
-	"crypto/rand"
 	_ "embed"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -39,15 +36,14 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"syscall"
-	"time"
 
 	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/health"
-	"github.com/cplieger/seadex-scout/internal/audit"
 	"github.com/cplieger/seadex-scout/internal/config"
 	"github.com/cplieger/seadex-scout/internal/cycle"
+	"github.com/cplieger/seadex-scout/internal/pathredact"
+	"github.com/cplieger/seadex-scout/internal/shutdown"
 )
 
 // exampleConfig is the starter written to CONFIG_PATH on first boot; it is also
@@ -96,7 +92,7 @@ func main() {
 	}
 
 	configPath := cmp.Or(strings.TrimSpace(os.Getenv("CONFIG_PATH")), config.DefaultConfigPath)
-	if runHealthProbe(args, configPath) {
+	if runHealthProbe(args) {
 		// health.RunProbe terminates via os.Exit(0/1); if it ever returns
 		// (a contract change in the separately versioned health dependency),
 		// fail closed: report unhealthy rather than a silently-green probe -
@@ -166,85 +162,12 @@ func validateInvocation(args []string) error {
 //
 // health.RunProbe terminates via os.Exit(0/1), so the true return is reachable
 // only if that contract ever changes - main then fails closed with exit 1.
-func runHealthProbe(args []string, _ string) bool {
+func runHealthProbe(args []string) bool {
 	if len(args) != 1 || args[0] != "health" {
 		return false
 	}
 	health.RunProbe(health.DefaultPath)
 	return true
-}
-
-// healthLeaseFactor is how many poll intervals of silence the health marker
-// tolerates before the probe calls the compare loop wedged.
-const healthLeaseFactor = 3
-
-// coldReconcileAllowance is the floor on the marker freshness lease: the time a
-// FULL pass is allowed to take before the probe may call the loop wedged.
-//
-// It is a measured allowance, not a guess. A cold reconcile - no state.json, so
-// the AniList memo is built from scratch over the whole catalogue - has been
-// measured at ~25 minutes and historically ran to ~2h on a large library. 3h
-// carries that with margin, and
-// TestColdReconcileAllowanceCoversAMeasuredColdReconcile is what pins it: the
-// arithmetic tests state their expectations in terms of this constant, so only a
-// test against the MEASUREMENT can defend the number itself.
-//
-// It exists as its own constant because the thing it has to cover stopped being
-// the same thing as the poll interval. The lease used to floor on
-// config.DefaultPollInterval, which was correct while that default WAS the full
-// cycle's cadence: flooring at 3 x 3h gave a cold cycle 9h. The default is now
-// the TICK interval (15m), so that floor would give a cold reconcile 45 minutes
-// and then ask for the restart that kills the walk before the memo is saved -
-// making the next boot cold again, which is the exact self-defeating loop the
-// old floor was written to prevent. Same failure, same remedy, different
-// number to peg it to.
-const coldReconcileAllowance = 3 * time.Hour
-
-// watchdogLease is the freshness lease the DAEMON arms against its own interval:
-// 0 (no watchdog) in external mode, else healthLeaseFactor intervals, floored at
-// coldReconcileAllowance. It used to be armed by the health subcommand from a
-// config read; the daemon owns it now because the daemon is what knows the
-// cadence, and a healthcheck must not depend on a file the operator can make
-// unreadable (see runHealthProbe).
-//
-// The lease exists because the marker is refreshed only when a pass COMPLETES,
-// and the loop measures its delay AFTER the job returns, so the gap between two
-// refreshes is one pass plus up to 1.1 intervals (scheduler's 0.10 jitter).
-//
-// In steady state that gap is a TICK - one small request, or one tiny one when
-// nothing changed - so healthLeaseFactor*interval alone would be a tight wedge
-// deadline. It is not the binding constraint at the default cadence, and the
-// floor is why: 3x15m is 45 minutes, which a cold reconcile plus one interval of
-// loop delay does not fit.
-//
-// The floor covers the one pass that is not cheap. Every reconcileEvery-th
-// iteration is a full pass, and the FIRST iteration after any boot is one, so a
-// cold boot has no tick-refreshed marker to lean on. Taking the larger of the
-// two keeps the deployed 3h interval on exactly its old 9h lease while giving a
-// 15m interval 3h rather than 45m. The consequence to be honest about: at the
-// 15m default the wedge deadline IS the floor, so a genuinely wedged loop is
-// caught by alerts.yaml's stall rule (2h, from the completion lines) well before
-// this marker expires. The marker's job here is to stop a restart loop, not to
-// be the fastest wedge detector.
-//
-// What moving the lease into the daemon gives up, stated plainly: a probe-side
-// deadline also caught a FULLY HUNG process, because a stale mtime is visible
-// from outside even when nothing inside the container runs, whereas the watchdog
-// goroutine is as wedged as everything else in that case. That case is already
-// owned by the layer that watches it - alerts.yaml's deadman rules fire on log
-// SILENCE, which a hung process produces - while the case this removes (an
-// unreadable config silently disabling wedge detection, reported only into
-// Docker's health log) was live and invisible.
-//
-// The rejected alternative is still rejected: refreshing the marker mid-pass
-// would make the lease measure liveness rather than completion, which changes
-// what the marker MEANS (internal/cycle publishes a verdict per completed pass)
-// for a case a floor covers without touching the contract.
-func watchdogLease(interval time.Duration) time.Duration {
-	if interval <= 0 {
-		return 0
-	}
-	return max(healthLeaseFactor*interval, coldReconcileAllowance)
 }
 
 // errStarterWritten is returned by loadRuntimeConfig after a first boot
@@ -262,6 +185,18 @@ func loadRuntimeConfig(configPath string) (config.Config, error) {
 	//nolint:gosec // G703: CONFIG_PATH is an operator-supplied path, not user input
 	if _, err := os.Stat(configPath); errors.Is(err, fs.ErrNotExist) {
 		if werr := writeStarterConfig(configPath); werr != nil {
+			// The one first-boot failure an operator cannot read their way out
+			// of: a bind-mount directory Docker created is root-owned, while
+			// the compose example runs the process as PUID:PGID. The raw
+			// writer error names a temp path and "permission denied" and
+			// nothing else, and the container exits 1 into a restart loop, so
+			// the remedy has to be in this line - together with the uid:gid it
+			// is talking about, which is not visible from outside.
+			if errors.Is(werr, fs.ErrPermission) {
+				slog.Error("no config found and could not write a starter: the config directory is not writable by this container's user - chown it on the host to this uid:gid (compose sets it via user: \"${PUID:-1000}:${PGID:-1000}\") and restart",
+					"path", configPath, "uid", os.Getuid(), "gid", os.Getgid(), "error", werr)
+				return config.Config{}, werr
+			}
 			slog.Error("no config found and could not write a starter", "path", configPath, "error", werr)
 			return config.Config{}, werr
 		}
@@ -296,9 +231,9 @@ func dispatch(mode string, cfg *config.Config) error {
 
 // writeStarterConfig writes the embedded example config to path, creating the
 // parent directory, so a fresh deployment gets an editable starter — with a
-// freshly generated feed_api_key already in place (see seedFeedAPIKey).
+// freshly generated feed_api_key already in place (see config.SeedStarter).
 func writeStarterConfig(path string) error {
-	starter, err := seedFeedAPIKey(exampleConfig)
+	starter, err := config.SeedStarter(exampleConfig)
 	if err != nil {
 		return err
 	}
@@ -312,50 +247,6 @@ func writeStarterConfig(path string) error {
 		return fmt.Errorf("write starter config: %w", err)
 	}
 	return nil
-}
-
-// feedKeyBytes is the entropy behind a generated feed_api_key: 16 bytes renders
-// as 32 hex characters, the shape the config comment has always recommended
-// (`openssl rand -hex 16`) and twice the length the strength warning asks for.
-const feedKeyBytes = 16
-
-// seedFeedAPIKey returns the starter config with a freshly generated
-// feed_api_key substituted for the example's empty one.
-//
-// The key gates the Torznab feed, whose /ab responses embed the operator's
-// AnimeBytes passkey in every download link - so it protects a tracker
-// credential. It is also the ONE credential in this config the operator invents
-// rather than copies (the Prowlarr key and the AB passkey are generated by those
-// services at a fixed length), which is exactly why it was the one that could be
-// weak. Generating it here removes that possibility at the only moment the app
-// authors this file, instead of trying to measure it afterwards: a length rule
-// would reject a sound short random key and accept a long guessable phrase, and
-// the genuinely guessable value - the unexpanded ${VAR} placeholder, readable
-// from the public README - already fails config validation outright.
-//
-// Deliberately scoped to the starter write and nowhere else. An empty key on a
-// configured feed stays the hard validation error it is: this app reads its
-// config once and never rewrites it, so silently filling a field in a file the
-// operator is already running would be a surprise, and a key that appeared
-// without them seeing it could not be pasted into Sonarr.
-//
-// The committed config.example.yaml keeps its empty value, so no key is ever
-// published; the substitution happens only in the bytes written to disk.
-func seedFeedAPIKey(example []byte) ([]byte, error) {
-	buf := make([]byte, feedKeyBytes)
-	if _, err := rand.Read(buf); err != nil {
-		return nil, fmt.Errorf("generate feed_api_key for the starter config: %w", err)
-	}
-	// Anchored on the example's exact empty-value spelling and applied once, so
-	// a future edit that changes that line fails the starter test rather than
-	// silently writing an unkeyed config.
-	const placeholder = `feed_api_key: ""`
-	replacement := fmt.Sprintf("feed_api_key: %q", hex.EncodeToString(buf))
-	seeded := bytes.Replace(example, []byte(placeholder), []byte(replacement), 1)
-	if bytes.Equal(seeded, example) {
-		return nil, fmt.Errorf("starter config no longer contains %s; cannot seed a feed_api_key", placeholder)
-	}
-	return seeded, nil
 }
 
 // resolveMode decides the run mode from the optional subcommand
@@ -380,7 +271,7 @@ func resolveMode(args []string, cfg *config.Config) (mode string, err error) {
 // emit it to slog, and write the JSON + Markdown files. It never writes state,
 // so a one-shot report cannot clobber a running daemon's cache.
 //
-// Every stage's error passes through cycle.NormalizeShutdownError on the way out, so
+// Every stage's error passes through shutdown.NormalizeShutdownError on the way out, so
 // a stage that reports the cancellation CAUSE rather than context.Canceled (an
 // early library walk or SeaDex request cut off by SIGTERM) still reaches main
 // as a routine-shutdown WARN instead of the level=ERROR fault line that trips
@@ -388,7 +279,7 @@ func resolveMode(args []string, cfg *config.Config) (mode string, err error) {
 func runReport(cfg *config.Config) (err error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	defer func() { err = cycle.NormalizeShutdownError(ctx, err) }()
+	defer func() { err = shutdown.NormalizeShutdownError(ctx, err) }()
 
 	if dirErr := checkReportDir(cfg.ReportDir); dirErr != nil {
 		return dirErr
@@ -402,11 +293,11 @@ func runReport(cfg *config.Config) (err error) {
 	// The report is read-only on state, so the lock guards only the report dir.
 	// internal/cycle owns the lock acquisition for every entry point (the daemon
 	// tick, an exec'd poll, this report run); the report.dir redaction that
-	// keeps a secret-capable config value out of main's error log stays with the
-	// package that owns that value.
+	// keeps a secret-capable config value out of main's error log is applied
+	// here, from the shared internal/pathredact leaf.
 	release, err := cycle.TryReportLock(cfg.ReportDir)
 	if err != nil {
-		return audit.RedactReportDirErr(cfg.ReportDir, err)
+		return pathredact.Err(cfg.ReportDir, pathredact.ReportDirMarker, err)
 	}
 	defer release()
 
@@ -421,7 +312,7 @@ func runReport(cfg *config.Config) (err error) {
 	}
 	defer b.cleanup()
 
-	rep, err := b.scout.Report(ctx)
+	rep, err := b.reporter.Report(ctx)
 	if err != nil {
 		return err
 	}
@@ -434,10 +325,10 @@ func runReport(cfg *config.Config) (err error) {
 	// diagnostics, the pair is the product. The row error is still reported when
 	// the write itself succeeds, so an interrupted run keeps its non-zero exit.
 	logErr := rep.Log(ctx, slog.Default())
-	writeCtx, cancel := reportWriteContext(ctx)
+	writeCtx, cancel := cycle.DetachedWriteContext(ctx)
 	defer cancel()
 	if werr := rep.WriteFiles(writeCtx, cfg.ReportDir, slog.Default()); werr != nil {
-		return detachedWriteError(ctx, werr)
+		return cycle.DetachedWriteError(ctx, werr)
 	}
 	return logErr
 }
@@ -468,88 +359,6 @@ func checkReportDir(dir string) error {
 	return nil
 }
 
-// reportWriteGrace bounds the detached report write, mirroring scout's saveGrace:
-// inside Docker's default 10s stop grace, so the pair lands before SIGKILL.
-const reportWriteGrace = 5 * time.Second
-
-// reportWriteContext returns the context the report's file write runs under -
-// always a detached copy of the caller's (context.WithoutCancel keeps the
-// values, drops the cancellation) - plus its cancel func, which the caller must
-// defer.
-//
-// This is the same escape hatch Scout.save already uses for the AniList memo,
-// for the same reason: the write is cheap and its input took tens of minutes to
-// produce, so a shutdown that arrives after generation must not cost the
-// artifact. The detach is unconditional because the shutdown does not have to
-// arrive BEFORE the call to cost the pair: handing the live signal context to
-// WriteFiles left the whole write - including the CPU-bound render of a
-// several-hundred-row report - racing the signal, and a signal landing one
-// instruction after the call aborted the write at audit's next per-stage gate
-// and discarded the artifact, which is exactly the loss this escape hatch
-// exists to prevent.
-//
-// The shutdown gate is not lost, only deferred: the detached context is
-// cancelled reportWriteGrace after the caller's context is done (immediately
-// arming that timer when it is already done, so a shutdown that arrived before
-// the call still bounds the write at the same grace it always did). A write
-// that outlives the grace is cut off exactly as before, so a shutdown never
-// spends more than reportWriteGrace on the write, and WriteFiles' own per-stage
-// context gates stay exactly as documented - this decision is made HERE, in the
-// composition root that owns the subcommand's lifecycle, rather than by
-// weakening that contract inside audit.
-func reportWriteContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return reportWriteContextGrace(ctx, reportWriteGrace)
-}
-
-// reportWriteContextGrace is reportWriteContext with an explicit grace, so the
-// arming behaviour is testable without waiting out the production budget.
-func reportWriteContextGrace(ctx context.Context, grace time.Duration) (context.Context, context.CancelFunc) {
-	// WithCancelCause, not WithTimeout: the deadline may not exist yet (it is
-	// armed only once a shutdown lands), and carrying DeadlineExceeded as the
-	// CAUSE keeps detachedWriteError's grace-exhausted classification working -
-	// audit's stage gates wrap both ctx.Err() and context.Cause(ctx).
-	writeCtx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
-	released := make(chan struct{})
-	go func() {
-		select {
-		case <-released:
-			return
-		case <-ctx.Done():
-		}
-		select {
-		case <-released:
-		case <-time.After(grace):
-			cancel(context.DeadlineExceeded)
-		}
-	}()
-	var once sync.Once
-	return writeCtx, func() {
-		// The caller's defer may fire after an explicit cancel; closing the
-		// release channel once keeps that idempotent (cancel already is).
-		once.Do(func() { close(released) })
-		cancel(context.Canceled)
-	}
-}
-
-// detachedWriteError re-classifies a report-write failure that happened because
-// the DETACHED write context's shutdown grace ran out (reportWriteContext arms
-// that grace when the caller's context is done, whether the shutdown arrived
-// before the call or during the write). Exhausting that shutdown grace is
-// the shutdown truncating the run - a transient, designed outcome - not the
-// genuine operation timeout that dispatchOutcome's default arm reports at
-// level=ERROR, and alerts.yaml documents a shutdown-interrupted run as excluded
-// from the level=ERROR cycle-error rule. Adding the caller's ctx.Err() makes
-// main's single errors.Is(err, context.Canceled) check classify it WARN
-// (still exit 1: the pair did not land). Any other write failure - ENOSPC,
-// EACCES, an encode error - is a genuine fault and passes through untouched.
-func detachedWriteError(ctx context.Context, err error) error {
-	if ctx.Err() == nil || !errors.Is(err, context.DeadlineExceeded) {
-		return err
-	}
-	return fmt.Errorf("report write cut short by shutdown: %w (cause: %w): %w",
-		ctx.Err(), context.Cause(ctx), err)
-}
-
 // runPoll runs one compare cycle for an external scheduler (poll_interval: off).
 // It updates the health marker to the cycle's outcome, leaving it in place (no
 // Cleanup) so the container healthcheck reads the last poll, and exits non-zero
@@ -567,7 +376,7 @@ func detachedWriteError(ctx context.Context, err error) error {
 // invocation-scoped: an interruption before or during the cycle leaves it
 // untouched (nothing completed), but one observed after the cycle body does not
 // withdraw the verdict that cycle already committed from inside the cycle lock -
-// see cycle.RunOnce and cycle.Interrupted, which own that rule.
+// see cycle.RunOnce and shutdown.Interrupted, which own that rule.
 func runPoll(cfg *config.Config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -578,7 +387,7 @@ func runPoll(cfg *config.Config) error {
 			// Shutdown cancelled startup (pre-cycle phase of the uniform
 			// interruption contract): wrap the cancellation cause so main
 			// classifies it WARN, and never touch the marker.
-			return cycle.Interrupted(ctx)
+			return shutdown.Interrupted(ctx)
 		}
 		return err
 	}
@@ -686,95 +495,12 @@ func run(cfg *config.Config) error {
 	marker.Set(true)
 	slog.Info("seadex-scout started", "poll_interval", cfg.PollInterval.String(), "indexer", cfg.IndexerConfigured())
 
-	stopWatchdog := startWedgeWatchdog(ctx, marker, watchdogLease(cfg.PollInterval))
+	stopWatchdog := cycle.StartWedgeWatchdog(ctx, marker, health.DefaultPath, cycle.WatchdogLease(cfg.PollInterval))
 	defer stopWatchdog()
 
 	cycle.RunLoop(ctx, cfg.PollInterval, ex, b.scout, marker)
 	normalShutdown = true
 	return nil
-}
-
-// watchdogPollDivisor sets how often the watchdog re-checks the marker's age,
-// as a fraction of the lease. Checking at a fraction rather than at the lease
-// itself bounds how long a wedge stays unreported to lease + lease/divisor.
-const watchdogPollDivisor = 6
-
-// startWedgeWatchdog marks the container unhealthy when no pass has completed
-// within lease. It returns a stop function.
-//
-// This is the wedge detection that used to live in the health subcommand as
-// health.WithMaxAge, sized from a config read. It belongs here: the daemon
-// already knows its own cadence, so nothing needs to be re-derived from a file
-// the operator can make unreadable, and the healthcheck collapses to a pure
-// marker read. Every completed pass calls marker.Set(true) (internal/cycle's
-// per-pass verdict), which refreshes the marker's mtime, so "age since the last
-// completed pass" is exactly what this measures - the same signal the probe-side
-// lease measured, read from the inside.
-//
-// A zero lease disables it, which is external mode (poll_interval: off):
-// idle-until-poll is healthy, and there is no cadence to be late against.
-//
-// It only ever sets the marker FALSE. Recovery stays the cycle's job, because
-// the marker's meaning is a completed pass's verdict and a watchdog has not
-// completed a pass - clearing it here would claim progress that did not happen.
-func startWedgeWatchdog(ctx context.Context, marker *health.Marker, lease time.Duration) func() {
-	if lease <= 0 {
-		return func() {}
-	}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		watchMarker(ctx, marker, lease)
-	}()
-	return func() { <-done }
-}
-
-// watchMarker is startWedgeWatchdog's loop body: it re-checks the marker's age
-// every lease/watchdogPollDivisor and marks unhealthy once the lease is past.
-func watchMarker(ctx context.Context, marker *health.Marker, lease time.Duration) {
-	tick := time.NewTicker(lease / watchdogPollDivisor)
-	defer tick.Stop()
-	warned := false
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-tick.C:
-			warned = checkMarkerAge(marker, lease, warned)
-		}
-	}
-}
-
-// checkMarkerAge marks the container unhealthy when the marker is older than
-// lease, returning the new warned state so the diagnostic is emitted once per
-// wedge rather than once per tick (a wedged loop stays wedged, and this line
-// exists to name the cause, not to count it).
-func checkMarkerAge(marker *health.Marker, lease time.Duration, warned bool) bool {
-	age, err := markerAge(health.DefaultPath)
-	if err != nil {
-		// The marker is absent or unreadable. Absent is what Set(false) looks
-		// like on some failure paths, and either way it is not this goroutine's
-		// to interpret: the probe already reads an absent marker as unhealthy.
-		return warned
-	}
-	if age <= lease {
-		return false
-	}
-	if !warned {
-		slog.Error("no cycle has completed within the health lease; marking unhealthy",
-			"age", age.Round(time.Second), "lease", lease)
-	}
-	marker.Set(false)
-	return true
-}
-
-// markerAge reports how long ago the health marker was last written.
-func markerAge(path string) (time.Duration, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return 0, err
-	}
-	return time.Since(info.ModTime()), nil
 }
 
 // startIndexer launches the Torznab feed in a goroutine when it is configured,
@@ -820,6 +546,8 @@ func logConfig(cfg *config.Config, mode string) {
 		"animebytes", cfg.AnimeBytes,
 		"include_tags", len(cfg.IncludeTags),
 		"exclude_tags", len(cfg.ExcludeTags),
+		"tag_exclusions", cfg.TagFilter.Len(),
+		"ignored_findings", len(cfg.IgnoreFindings),
 		"run_mode", runMode)
 }
 

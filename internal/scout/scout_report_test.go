@@ -15,9 +15,11 @@ import (
 	"github.com/cplieger/arrapi"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/audit"
+	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/seadexapi"
 	"github.com/cplieger/seadex-scout/internal/state"
 	"github.com/cplieger/slogx/capture"
 )
@@ -234,7 +236,7 @@ type cancelingSeaDex struct {
 	err    error
 }
 
-func (c *cancelingSeaDex) FetchEntries(context.Context, seadex.Options) ([]seadex.Entry, error) {
+func (c *cancelingSeaDex) FetchEntries(context.Context, seadexapi.Options) ([]seadex.Entry, error) {
 	c.cancel()
 	return nil, c.err
 }
@@ -527,5 +529,85 @@ func TestReportSurfacesOverridesRefusalAndMappingDegraded(t *testing.T) {
 	}
 	if n := recorder.CountExact("report: mapping degraded"); n != 1 {
 		t.Errorf("'report: mapping degraded' fired %d times, want 1 (the failed refresh is still reported); logs = %v", n, recorder.Messages())
+	}
+}
+
+// TestReportWarnsWhenTheWalkShrankBelowHalf pins the one-shot report's shrink
+// disclosure, which is the only thing that stops a silently-incomplete artifact.
+//
+// The daemon GATES its whole compare on this exact shape (handleLibraryGate's
+// shrink guard): a non-failed walk retaining under half the last persisted
+// snapshot is a suspicious truncation, not a real change. The report cannot
+// gate - it is read-only and it is the operator's fallback view while the cycle
+// is stuck - so it renders and must SAY so instead. Without the line the
+// timestamped report omits every missing series and reads as authoritative,
+// which is the same incompleteness reportSnapshot refuses a partial snapshot
+// over. The complementary case matters as much: a prior-snapshot-less run (a
+// report-only deployment never persists one) has no baseline and must stay
+// quiet rather than guess.
+func TestReportWarnsWhenTheWalkShrankBelowHalf(t *testing.T) {
+	const shrinkWarn = "report: library walk shrank below half the last persisted snapshot; " +
+		"the audit covers the smaller library - inspect the arrs and arr_tags"
+	// priorItems is the persisted baseline; the walk below returns ONE series,
+	// so 1*2 < 4 trips degradation.Shrunk while 1*2 >= 2 does not.
+	priorItems := func(n int) []library.Item {
+		items := make([]library.Item, 0, n)
+		for i := range n {
+			items = append(items, library.Item{Arr: library.ArrSonarr, ArrID: i + 1, TvdbID: 900 + i})
+		}
+		return items
+	}
+	for name, tc := range map[string]struct {
+		prior    []library.Item
+		wantWarn int
+	}{
+		"a walk retaining under half the prior snapshot discloses it": {priorItems(4), 1},
+		"a walk retaining half or more stays quiet":                   {priorItems(2), 0},
+		"no prior snapshot means no baseline to compare against":      {nil, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logger, recorder := capture.New()
+			store := &fakeStore{st: state.State{
+				Mapping: frierenMappingCache(),
+				Library: library.Snapshot{Items: tc.prior},
+			}}
+			sonarr := &fakeSonarr{
+				series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
+				files: map[int][]arrapi.EpisodeFile{
+					7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+				},
+			}
+			s := NewReporter(&ReportDeps{
+				Logger:  logger,
+				Store:   store,
+				Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+				Mapping: fakeMapping{},
+				SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
+				Matcher: match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
+				Auditor: audit.NewAuditor(audit.Config{}),
+			})
+
+			rep, err := s.Report(context.Background())
+			if err != nil {
+				t.Fatalf("Report returned error: %v", err)
+			}
+			// The report must still be PRODUCED either way: it is the fallback
+			// view, so disclosing the shrink must never become a refusal.
+			if len(rep.Rows) == 0 {
+				t.Error("Report produced 0 rows; a disclosed shrink must not withhold the artifact")
+			}
+			if n := recorder.CountExact(shrinkWarn); n != tc.wantWarn {
+				t.Errorf("shrink WARN count = %d, want %d: %v", n, tc.wantWarn, recorder.Messages())
+			}
+			if tc.wantWarn == 0 {
+				return
+			}
+			for key, want := range map[string]string{"items": "1", "prior_items": "4"} {
+				if got, ok := recordAttr(recorder, shrinkWarn, key); !ok || got != want {
+					t.Errorf("shrink WARN %s = %q (found=%t), want %q; the operator sizes the gap from these two counts",
+						key, got, ok, want)
+				}
+			}
+		})
 	}
 }

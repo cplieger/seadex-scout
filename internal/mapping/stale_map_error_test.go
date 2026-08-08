@@ -10,10 +10,12 @@ import (
 )
 
 // TestStaleMapError_ErrorMessage pins the documented message-text contract of
-// both Error() branches: with a wrapped cause the message carries the cause
-// text, and the shrunk-refresh guard's cause-less form omits the trailing
-// colon-cause segment. The message shape is a pinned log contract (see the
-// Error doc comment), so log content depends on this exact shape.
+// Error()'s WRAPPED-CAUSE branch: the message carries the cause text after the
+// stale-map parenthetical. The message shape is a pinned log contract (see the
+// Error doc comment), so log content depends on this exact shape. The
+// cause-less shrunk-guard branch is pinned by
+// TestStaleMapError_shrunkFormMessageAndLogAttrs, whose exact-string assertion
+// already rejects a leaked ": <nil>".
 func TestStaleMapError_ErrorMessage(t *testing.T) {
 	withCause := &StaleMapError{
 		cause:   errors.New("boom"),
@@ -24,21 +26,6 @@ func TestStaleMapError_ErrorMessage(t *testing.T) {
 	want := "mapping: refresh failed, using stale map (3 records, fetched 1m30s ago): boom"
 	if got := withCause.Error(); got != want {
 		t.Errorf("Error() with cause = %q, want %q", got, want)
-	}
-
-	noCause := &StaleMapError{
-		msg:            "refresh shrank below half of previous",
-		age:            time.Hour,
-		records:        4,
-		shrunkReturned: 1,
-		shrunkPrevious: 4,
-	}
-	wantNoCause := "mapping: refresh shrank below half of previous (returned 1, previous 4), using stale map (4 records, fetched 1h0m0s ago)"
-	if got := noCause.Error(); got != wantNoCause {
-		t.Errorf("Error() without cause = %q, want %q", got, wantNoCause)
-	}
-	if strings.Contains(noCause.Error(), ": <nil>") {
-		t.Errorf("Error() without cause leaked a nil cause: %q", noCause.Error())
 	}
 }
 

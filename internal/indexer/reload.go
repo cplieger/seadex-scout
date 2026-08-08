@@ -197,7 +197,7 @@ func (c *snapshotCache) warm(ctx context.Context) {
 		c.log.Debug("feed snapshot warm load abandoned; shutting down",
 			"cause", context.Cause(ctx))
 	case <-warmTimer.C:
-		c.log.Warn("feed snapshot warm load still running; serving requests without it",
+		c.log.Warn("feed snapshot warm load still running; answering search and RSS requests with a Torznab error until it returns",
 			"timeout", warmLoadTimeout)
 	}
 }
@@ -685,7 +685,7 @@ func (c *snapshotCache) readSnapshot(ctx context.Context, f *os.File) (snapshot,
 // know WHICH journal lost items. The count is the whole message: the dropped
 // item's fields come from a tamperable file (l-f45).
 func (c *snapshotCache) warnDroppedItems(scrub snapshotScrub) {
-	for _, scope := range []string{upstreamNyaa, upstreamAB} {
+	for _, scope := range feedScopes {
 		if n := scrub.droppedItems[scope]; n > 0 {
 			c.log.Warn("indexer feed snapshot: invalid journal items dropped",
 				"path", c.path, "tracker", scope, "dropped", n)
@@ -700,7 +700,7 @@ func (c *snapshotCache) warnDroppedItems(scrub snapshotScrub) {
 // iterated in a fixed order so the lines are deterministic for a test to pin and
 // for a human to diff across reloads.
 func (c *snapshotCache) warnBlankedInfoURLs(scrub snapshotScrub) {
-	for _, scope := range []string{upstreamNyaa, upstreamAB} {
+	for _, scope := range feedScopes {
 		if n := scrub.blankedInfoURLs[scope]; n > 0 {
 			// Counts only; the rejected value can be attacker-shaped text.
 			c.log.Warn("indexer feed snapshot: non-SeaDex info URLs blanked",
@@ -921,7 +921,9 @@ var seadexInfoHost = sync.OnceValue(func() string {
 	// strings.ToLower here is the full-Unicode fold snapshotInfoURLAllowed
 	// exists to keep out of the expected host, and IsASCIIHost is the only
 	// thing that currently stops a folded rune from reaching the allowlist.
-	return asciiLowerHost(u.Hostname())
+	// urlform.FoldHostASCII IS the fold urlform applies to Form.Host, so the
+	// expected host and the value it is compared against cannot disagree.
+	return urlform.FoldHostASCII(u.Hostname())
 })
 
 // sanitizeSnapshotInfoURLs blanks any persisted item's InfoURL that is not a
@@ -995,16 +997,19 @@ func sanitizeSnapshotInfoURLs(feed []journalItem) int {
 // but the safety was incidental to releases.moe's letters, not designed, and a
 // hostname change would have reopened it silently (l-f114). Host comparison
 // stays ASCII-fold via urlform.Host with a non-ASCII host refused outright.
+//
+// host is the EXPECTED canonical hostname and must already be ASCII-lowercased;
+// seadexInfoHost, its only producer, owns that fold. The gate deliberately does
+// not re-apply it (Meyer's Non-Redundancy Principle: one side owns a
+// precondition), and it never reaches for strings.EqualFold to compensate -
+// that full-Unicode fold is the l-f114 bug itself.
 func snapshotInfoURLAllowed(raw, host string) (cleaned string, ok bool) {
-	// Lower the expected host ONCE, ASCII-only, before any comparison. Keeping
-	// the fold out of the comparison expression is deliberate: a
-	// strings.EqualFold(f.Host, host) form reads equivalent and is what a linter
-	// suggests, but EqualFold is the full-Unicode simple fold this gate exists to
-	// avoid (U+017F folds to 's', so a byte-wise foreign host could match the
-	// allowlist). urlform.Host is already ASCII-lowercased, so an ASCII-lowered
-	// expectation makes the comparison a plain byte equality.
-	want := asciiLowerHost(host)
-	if want == "" || !urlform.IsASCIIHost(want) {
+	// An unresolved expected host vouches NOTHING, and this is the leg that says
+	// so: displaylink.VouchForm has no non-empty-host requirement of its own (its
+	// package doc assigns that leg to httpDisplayHost), so an absolute
+	// "http:///path" would otherwise byte-equal an empty expectation. Pinned by
+	// FuzzSnapshotInfoURL's empty-host case.
+	if host == "" {
 		return "", false
 	}
 	// The shared structural legs: absolute, http(s), no userinfo, no smuggling
@@ -1016,24 +1021,13 @@ func snapshotInfoURLAllowed(raw, host string) (cleaned string, ok bool) {
 		return "", false
 	}
 	// IsASCIIHost refuses a non-ASCII host, so no homograph can fold into the
-	// allowlisted name.
-	if !urlform.IsASCIIHost(f.Host) || f.Host != want {
+	// allowlisted name - and it is why the EXPECTED host needs no ASCII check of
+	// its own: an ASCII f.Host can never byte-equal a non-ASCII expectation, so a
+	// non-ASCII `host` refuses everything here rather than admitting anything.
+	if !urlform.IsASCIIHost(f.Host) || f.Host != host {
 		return "", false
 	}
 	return f.Trimmed, true
-}
-
-// asciiLowerHost lowercases ASCII A-Z only, leaving every other byte alone -
-// the same fold urlform applies to Form.Host, and deliberately NOT a Unicode
-// fold (which would launder homograph runes into ASCII).
-func asciiLowerHost(host string) string {
-	b := []byte(host)
-	for i := range b {
-		if b[i] >= 'A' && b[i] <= 'Z' {
-			b[i] += 'a' - 'A'
-		}
-	}
-	return string(b)
 }
 
 // snapshotUnavailableGate is a test seam (see harvestWait for the pattern)

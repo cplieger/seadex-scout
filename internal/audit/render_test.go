@@ -661,7 +661,7 @@ func TestRenderIncompleteSectionAndCaveat(t *testing.T) {
 	}
 
 	md := renderMarkdown(r)
-	if !strings.Contains(md, "**Caveat: this report is incomplete.** 2 SeaDex entries could not be mapped") {
+	if !strings.Contains(md, "**Caveat: this report is incomplete.** 2 SeaDex entries could not be resolved against AniList") {
 		t.Errorf("markdown header is missing the completeness caveat:\n%s", md[:400])
 	}
 	if !strings.Contains(md, "## incomplete (transient AniList failure) (2)") {
@@ -698,7 +698,7 @@ func TestRenderSingularIncompleteCaveat(t *testing.T) {
 		Incomplete:  []IncompleteEntry{{SeaDexURL: "https://releases.moe/7", AniListID: 7}},
 	}
 	md := renderMarkdown(r)
-	if !strings.Contains(md, "1 SeaDex entry could not be mapped") {
+	if !strings.Contains(md, "1 SeaDex entry could not be resolved against AniList") {
 		t.Errorf("markdown caveat missing the singular form:\n%s", md[:300])
 	}
 }

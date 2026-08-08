@@ -492,18 +492,11 @@ func buildTagFilter(raw map[string][]string) (tagfilter.Filter, error) {
 // field-name-only, because an expanded ${VAR} secret placed in poll_interval
 // by a config typo must never reach the startup log.
 func parseInterval(raw string) (time.Duration, bool) {
-	return parseIntervalWith(raw, slog.Default())
-}
-
-// parseIntervalWith is parseInterval with an explicit logger, so a caller that
-// re-parses the interval can discard the fallback/clamp warnings the startup
-// Load path already emitted once.
-func parseIntervalWith(raw string, log *slog.Logger) (time.Duration, bool) {
 	s := scheduler.ParseInterval(raw, DefaultPollInterval,
 		scheduler.WithBounds(minPollInterval, maxPollInterval),
 		scheduler.WithName("poll_interval"),
 		scheduler.WithRedactedValue(),
-		scheduler.WithIntervalLogger(log))
+		scheduler.WithIntervalLogger(slog.Default()))
 	if s.Mode == scheduler.ModeExternal {
 		return 0, true
 	}
@@ -928,7 +921,7 @@ func (c *Config) warnNonPerIndexerEndpoints() {
 	}
 }
 
-// warnABPasskeyConfiguration emits the two AB-passkey half-configuration
+// warnABPasskeyConfiguration emits the three AB half-configuration
 // diagnostics. Field-name-only; never echoes a secret.
 func (c *Config) warnABPasskeyConfiguration() {
 	// The /ab RSS feed builds its download links from indexer.ab_passkey; a
@@ -954,6 +947,23 @@ func (c *Config) warnABPasskeyConfiguration() {
 	if c.IndexerABTorznabURL == "" && !secretref.Unusable(c.IndexerABPasskey) {
 		slog.Info("indexer.ab_passkey is set but indexer.ab_torznab_url is empty; " +
 			"AnimeBytes is disabled and the passkey is unused (set indexer.ab_torznab_url to enable it)")
+	}
+	// The third AB half-configuration, and the only one that narrows the
+	// MONITORING half: the top-level animebytes toggle and the indexer's AB
+	// endpoint are separate surfaces (the README states the feed applies none of
+	// the filter keys) sitting in different config sections, so configuring AB
+	// for the feed while leaving animebytes at its false default is a plausible
+	// miss. The feed then hands the arrs grabbable AnimeBytes releases while
+	// compare and audit drop every AB release and link (classify.ABVisible /
+	// filter.Obtainable), so a show whose only best release is on AB is never
+	// alerted on and never appears in the report. Info, mirroring the other
+	// half-configuration signals: the split is legitimate (an operator may want
+	// arr-side grabs without AB alerts), so it must not raise Loki alert noise.
+	// Field-name-only; echoes no value.
+	if c.IndexerABTorznabURL != "" && !c.AnimeBytes {
+		slog.Info("indexer.ab_torznab_url is set but animebytes is false; the Torznab feed " +
+			"serves AnimeBytes releases while findings and the report drop every AB release " +
+			"and link - set animebytes: true to alert on them too")
 	}
 }
 
@@ -998,11 +1008,21 @@ func (c *Config) warnMissingProwlarrKey() {
 
 // infoDisabledIndexerKeys emits the half-configuration signal for indexer
 // secrets set with no torznab URL, mirroring the disabled-arr-with-key Info
-// in toConfig: indexer secrets are always operator-written, so keys without a
-// torznab URL almost always mean the operator expected the feed to start.
+// in toConfig: the Prowlarr key and the AB passkey are always
+// operator-written, so either one without a torznab URL almost always means
+// the operator expected the feed to start.
 // Info, not Warn - deliberately parked keys must not raise Loki alert noise.
 func (c *Config) infoDisabledIndexerKeys() {
-	if c.IndexerAPIKey != "" || c.IndexerProwlarrAPIKey != "" || c.IndexerABPasskey != "" {
+	// indexer.feed_api_key is deliberately NOT a trigger, unlike the other two:
+	// the first-boot starter this app writes SEEDS it with a generated key
+	// (seedFeedAPIKey), so every default no-indexer deployment carries one.
+	// Including it made the signal fire on the correct default configuration at
+	// every start, telling an operator who never asked for the feed to go
+	// configure a torznab url - and destroyed the only thing the signal is for,
+	// distinguishing an operator who wrote indexer secrets and expected the feed
+	// from a stock install. The Prowlarr key and the AB passkey are still
+	// operator-written and still trigger it.
+	if c.IndexerProwlarrAPIKey != "" || c.IndexerABPasskey != "" {
 		slog.Info("indexer keys are set but no torznab url is configured; " +
 			"the Torznab feed will not start (set indexer.nyaa_torznab_url and/or indexer.ab_torznab_url)")
 	}

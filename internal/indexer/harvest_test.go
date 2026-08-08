@@ -231,13 +231,19 @@ func TestHarvestCachePersistsAcrossRebuilds(t *testing.T) {
 	}
 }
 
-// TestMain replaces the harvest's politeness sleep for the whole package: the
-// pacing gap is wall-clock politeness toward the trackers, not logic under
-// test, and the suite must not spend 2s per simulated query. Tests that
-// exercise the pacer's deadline install their own clock-advancing harvestWait
-// (serially - nothing here runs t.Parallel).
+// TestMain replaces the two wall-clock waits the whole package would otherwise
+// spend in real time. The harvest's pacing gap is politeness toward the
+// trackers, not logic under test, and the suite must not spend 2s per simulated
+// query. The Prowlarr retry backoff is the same kind of value, and the
+// retry-exhaustion tests pay it two attempts deep per failed query - about 50s
+// of this package's wall clock, re-paid by every PR run and by every gremlins
+// mutant that re-executes it. Tests that assert on the retry BUDGET (attempt
+// counts, Retry-After hints) are unaffected: none of them measures elapsed
+// time. Tests that exercise the pacer's deadline install their own
+// clock-advancing harvestWait (serially - nothing here runs t.Parallel).
 func TestMain(m *testing.M) {
 	harvestWait = func(context.Context, time.Duration) error { return nil }
+	upstreamBaseDelay = time.Millisecond
 	os.Exit(m.Run())
 }
 
@@ -610,29 +616,6 @@ func TestHarvestConsumesTheWholeSingleResponse(t *testing.T) {
 	}
 }
 
-// TestHarvestCheckpointCarriesOnlyTheRotationCursor pins the persisted-cursor
-// contract after the paging removal: the checkpoint is the bare rotation cursor
-// and nothing else, and a cursor written by a PRE-removal binary (a JSON object
-// carrying the retired "pages" key) decodes as an ordinary Last-only checkpoint
-// - keeping its rotation position, reporting no degradation, and re-encoding as
-// the bare cursor an older binary also reads.
-func TestHarvestCheckpointCarriesOnlyTheRotationCursor(t *testing.T) {
-	if got := encodeHarvestCheckpoint(harvestCheckpoint{Last: "nyaa:7"}); got != "nyaa:7" {
-		t.Errorf("encode = %q, want the bare rotation cursor", got)
-	}
-	legacy := `{"last":"nyaa:7","pages":{"nyaa:7":3}}`
-	cp, degraded := decodeHarvestCheckpoint(legacy)
-	if cp.Last != "nyaa:7" {
-		t.Errorf("decode(%q).Last = %q, want the rotation position preserved", legacy, cp.Last)
-	}
-	if degraded != "" {
-		t.Errorf("decode(%q) degraded = %q, want no degradation for a leftover pages key", legacy, degraded)
-	}
-	if got := encodeHarvestCheckpoint(cp); got != "nyaa:7" {
-		t.Errorf("re-encode = %q, want the bare cursor (an older binary reads it)", got)
-	}
-}
-
 // TestHarvestMatchesNyaaByInfoHash pins the info-hash arm of the harvest
 // match (the documented secondary identity): a Prowlarr result whose page
 // URLs identify no tracker (a mirror/foreign host) still matches the pending
@@ -781,7 +764,7 @@ func TestMatchHarvestCountsUnusableTitlesNamingThisGroup(t *testing.T) {
 }
 
 // TestHarvestReportsADegradedCheckpoint pins the operator-facing half of the
-// checkpoint rebaseline: decodeHarvestCheckpoint reporting WHY it degraded only
+// cursor rebaseline: decodeHarvestCursor reporting WHY it degraded only
 // helps if harvestTitles actually says so, and a clean cursor must stay silent
 // so the signal is not noise on every rebuild.
 func TestHarvestReportsADegradedCheckpoint(t *testing.T) {
@@ -791,13 +774,12 @@ func TestHarvestReportsADegradedCheckpoint(t *testing.T) {
 		cursor string
 		want   bool
 	}{
-		{name: "malformed JSON warns", cursor: `{"pages": {"nyaa:7": `, want: true},
+		{name: "truncated JSON warns", cursor: `{"pages": {"nyaa:7": `, want: true},
 		{name: "unparseable rotation cursor warns", cursor: "bogus:5", want: true},
-		// A pre-paging-removal snapshot's leftover "pages" key is an unknown
-		// field, not corruption: it is ignored and must not warn, or every
-		// rollforward from such a snapshot reports a rebaseline that did not
-		// happen.
-		{name: "a leftover pages key stays silent", cursor: `{"last":"nyaa:7","pages":{"nyaa:7":3}}`, want: false},
+		// The JSON object form no released binary can write is now simply an
+		// invalid rotation cursor, so it rebaselines and says so rather than
+		// being read as a cursor.
+		{name: "a JSON cursor warns", cursor: `{"last":"nyaa:7","pages":{"nyaa:7":3}}`, want: true},
 		{name: "clean bare cursor stays silent", cursor: "nyaa:7", want: false},
 		{name: "absent cursor stays silent", cursor: "", want: false},
 	}
@@ -1782,27 +1764,26 @@ func TestRotationStart(t *testing.T) {
 	}
 }
 
-// TestHarvestCheckpointCodec pins the persisted harvest_cursor codec's
-// degradation and compatibility contracts directly: the bare cursor decodes
-// Last-only, malformed JSON degrades to the empty checkpoint, the JSON object
-// form a pre-paging-removal binary persisted still yields its rotation
-// position, an out-of-domain cursor is discarded in both arms, and the
-// checkpoint encodes as the bare cursor an older binary reads (byte-identical
-// round trip).
+// TestHarvestCheckpointCodec pins the persisted harvest_cursor decoder's
+// degradation contract directly: an honest rotation cursor survives verbatim,
+// and anything else - a JSON object no released binary can write, an
+// out-of-domain id, an unknown tracker scope - is dropped to the baseline with a
+// reason, so a garbage value can never be carried forward into every future
+// snapshot.
 func TestHarvestCheckpointCodec(t *testing.T) {
-	t.Run("bare cursor decodes as Last-only", func(t *testing.T) {
-		cp, degraded := decodeHarvestCheckpoint("nyaa:1500")
-		if cp.Last != "nyaa:1500" {
-			t.Errorf("decode bare cursor = %+v, want Last = nyaa:1500", cp)
+	t.Run("bare cursor survives verbatim", func(t *testing.T) {
+		cursor, degraded := decodeHarvestCursor("nyaa:1500")
+		if cursor != "nyaa:1500" {
+			t.Errorf("decode bare cursor = %q, want nyaa:1500", cursor)
 		}
 		if degraded != "" {
 			t.Errorf("degraded reason = %q, want none for an honest cursor", degraded)
 		}
 	})
-	t.Run("malformed JSON degrades to the empty checkpoint", func(t *testing.T) {
-		cp, degraded := decodeHarvestCheckpoint(`{"pages": {"nyaa:7": `)
-		if cp.Last != "" {
-			t.Errorf("decode malformed = %+v, want the empty checkpoint", cp)
+	t.Run("truncated JSON degrades to the baseline", func(t *testing.T) {
+		cursor, degraded := decodeHarvestCursor(`{"pages": {"nyaa:7": `)
+		if cursor != "" {
+			t.Errorf("decode malformed = %q, want the empty baseline", cursor)
 		}
 		if degraded == "" {
 			// The rebaseline is only reportable if the decoder says WHY it
@@ -1811,58 +1792,45 @@ func TestHarvestCheckpointCodec(t *testing.T) {
 			t.Error("degraded reason = \"\", want a non-empty reason for a malformed cursor")
 		}
 	})
-	t.Run("JSON object form keeps its rotation position", func(t *testing.T) {
-		cp, degraded := decodeHarvestCheckpoint(`{"last":"nyaa:7"}`)
-		if cp.Last != "nyaa:7" || degraded != "" {
-			t.Errorf("decode JSON object = %+v (degraded %q), want Last kept and no degradation", cp, degraded)
+	t.Run("the JSON object form is not a cursor", func(t *testing.T) {
+		// No released binary can write it (the writer has only ever emitted the
+		// bare cursor), so it is an invalid rotation cursor like any other.
+		cursor, degraded := decodeHarvestCursor(`{"last":"nyaa:7"}`)
+		if cursor != "" || degraded == "" {
+			t.Errorf("decode JSON object = %q (degraded %q), want the baseline with a reason", cursor, degraded)
 		}
 	})
-	t.Run("non-positive cursor ids are discarded in both arms", func(t *testing.T) {
-		for _, cursor := range []string{"nyaa:0", "nyaa:-1", "ab:0", "ab:-12"} {
-			if cp, _ := decodeHarvestCheckpoint(cursor); cp.Last != "" {
-				t.Errorf("decode bare %q Last = %q, want it discarded (outside harvestCursorKey's domain)", cursor, cp.Last)
-			}
-			cp, _ := decodeHarvestCheckpoint(`{"last":"` + cursor + `"}`)
-			if cp.Last != "" {
-				t.Errorf("decode JSON last %q = %q, want it discarded", cursor, cp.Last)
+	t.Run("non-positive cursor ids are discarded", func(t *testing.T) {
+		for _, raw := range []string{"nyaa:0", "nyaa:-1", "ab:0", "ab:-12"} {
+			if cursor, _ := decodeHarvestCursor(raw); cursor != "" {
+				t.Errorf("decode %q = %q, want it discarded (outside harvestCursorKey's domain)", raw, cursor)
 			}
 		}
-		for _, cursor := range []string{"nyaa:1", "ab:154587"} {
-			if cp, _ := decodeHarvestCheckpoint(cursor); cp.Last != cursor {
-				t.Errorf("decode bare %q Last = %q, want it kept", cursor, cp.Last)
-			}
-			if cp, _ := decodeHarvestCheckpoint(`{"last":"` + cursor + `"}`); cp.Last != cursor {
-				t.Errorf("decode JSON last %q = %q, want it kept", cursor, cp.Last)
+		for _, raw := range []string{"nyaa:1", "ab:154587"} {
+			if cursor, _ := decodeHarvestCursor(raw); cursor != raw {
+				t.Errorf("decode %q = %q, want it kept", raw, cursor)
 			}
 		}
 	})
-	t.Run("a cursor naming no known tracker scope is discarded in both arms", func(t *testing.T) {
+	t.Run("a cursor naming no known tracker scope is discarded", func(t *testing.T) {
 		// The cursor is carried into every future snapshot verbatim, so a
 		// scope no upstream serves must be dropped at decode rather than
 		// re-persisted forever; the existing rows only cover the id half.
-		for _, cursor := range []string{"bogus:5", "NYAA:5", "ab :5", ":5", "nyaa"} {
-			if cp, _ := decodeHarvestCheckpoint(cursor); cp.Last != "" {
-				t.Errorf("decode bare %q Last = %q, want it discarded (no such upstream scope)", cursor, cp.Last)
-			}
-			if cp, _ := decodeHarvestCheckpoint(`{"last":"` + cursor + `"}`); cp.Last != "" {
-				t.Errorf("decode JSON last %q = %q, want it discarded (no such upstream scope)", cursor, cp.Last)
+		for _, raw := range []string{"bogus:5", "NYAA:5", "ab :5", ":5", "nyaa"} {
+			if cursor, _ := decodeHarvestCursor(raw); cursor != "" {
+				t.Errorf("decode %q = %q, want it discarded (no such upstream scope)", raw, cursor)
 			}
 		}
-		for _, cursor := range []string{"nyaa:5", "ab:154587"} {
-			if cp, _ := decodeHarvestCheckpoint(cursor); cp.Last != cursor {
-				t.Errorf("decode bare %q Last = %q, want it kept", cursor, cp.Last)
+		for _, raw := range []string{"nyaa:5", "ab:154587"} {
+			if cursor, _ := decodeHarvestCursor(raw); cursor != raw {
+				t.Errorf("decode %q = %q, want it kept", raw, cursor)
 			}
 		}
 	})
-	t.Run("the checkpoint encodes as the bare cursor", func(t *testing.T) {
-		if got := encodeHarvestCheckpoint(harvestCheckpoint{Last: "nyaa:1500"}); got != "nyaa:1500" {
-			t.Errorf("encode = %q, want the bare cursor", got)
-		}
-	})
-	t.Run("cursor round-trips byte-identical", func(t *testing.T) {
-		decoded, _ := decodeHarvestCheckpoint("nyaa:1500")
-		if got := encodeHarvestCheckpoint(decoded); got != "nyaa:1500" {
-			t.Errorf("round-trip = %q, want byte-identical %q", got, "nyaa:1500")
+	t.Run("decode is its own fixpoint", func(t *testing.T) {
+		cursor, _ := decodeHarvestCursor("nyaa:1500")
+		if again, _ := decodeHarvestCursor(cursor); again != "nyaa:1500" {
+			t.Errorf("re-decode = %q, want byte-identical %q", again, "nyaa:1500")
 		}
 	})
 }
@@ -1965,19 +1933,19 @@ func TestPendingHarvestKeepsAnAmbiguousInfoHashRetired(t *testing.T) {
 }
 
 // TestHarvestCheckpointDropsOverCapCursor pins the size-cap arm of the
-// persisted harvest_cursor codec: a cursor longer than maxPersistedCursorBytes
+// persisted harvest_cursor decoder: a cursor longer than maxPersistedCursorBytes
 // cannot come from this writer, so it is external corruption and must degrade
-// to the empty-checkpoint baseline instead of being decoded and re-persisted
-// forever. The codec's degradation table covers every other arm; the fuzz
+// to the baseline instead of being kept and re-persisted
+// forever. The decoder's degradation table covers every other arm; the fuzz
 // target's committed seeds are all far below the cap.
 func TestHarvestCheckpointDropsOverCapCursor(t *testing.T) {
-	const payload = `{"last":"nyaa:7"}`
-	if cp, _ := decodeHarvestCheckpoint(payload); cp.Last != "nyaa:7" {
-		t.Fatalf("decode under-cap checkpoint = %+v, want the cursor kept", cp)
+	const payload = "nyaa:7"
+	if cursor, _ := decodeHarvestCursor(payload); cursor != payload {
+		t.Fatalf("decode under-cap cursor = %q, want the cursor kept", cursor)
 	}
 	overcap := strings.Repeat(" ", maxPersistedCursorBytes) + payload
-	if cp, _ := decodeHarvestCheckpoint(overcap); cp.Last != "" {
-		t.Errorf("decode over-cap checkpoint (%d bytes) = %+v, want the empty-checkpoint baseline", len(overcap), cp)
+	if cursor, _ := decodeHarvestCursor(overcap); cursor != "" {
+		t.Errorf("decode over-cap cursor (%d bytes) = %q, want the empty baseline", len(overcap), cursor)
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/notify"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/seadexapi"
 	"github.com/cplieger/seadex-scout/internal/state"
 	"github.com/cplieger/slogx/capture"
 )
@@ -43,8 +44,12 @@ func (notFoundAniList) Fetch(context.Context, int) (anilist.Media, error) {
 	return anilist.Media{}, anilist.ErrNotFound
 }
 
-func (notFoundAniList) FetchMany(context.Context, []int) (anilist.BatchResult, error) {
-	return anilist.BatchResult{Media: map[int]anilist.Media{}, Completed: true}, nil
+func (notFoundAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
+	verdicts := make(map[int]anilist.Verdict, len(ids))
+	for _, id := range ids {
+		verdicts[id] = anilist.VerdictAbsent
+	}
+	return anilist.BatchResult{Media: map[int]anilist.Media{}, Verdicts: verdicts}, nil
 }
 
 // TestCycleMappingUnusableReportsNothing pins the unusable-map degrade
@@ -70,8 +75,15 @@ func TestCycleMappingUnusableReportsNothing(t *testing.T) {
 		t.Fatal("Cycle healthy=false, want true when the map is unusable (degraded, not unhealthy)")
 	}
 	loaded := store.st
-	if n := recorder.CountExact("findings reported"); n != 0 {
-		t.Errorf("unusable-map cycle reported findings %d times, want 0 (the gate runs no compare, so it must report nothing)", n)
+	// The gate compares nothing, so no finding ROW may be emitted - but the
+	// alerting contract's other half still runs: cycleGateDegraded re-states the
+	// set (Notifier.Reemit), which logs the summary once with an empty set, so a
+	// quiet stretch cannot expire the alert rules' lookback.
+	if n := recorder.CountExact("findings reported"); n != 1 {
+		t.Errorf("unusable-map cycle emitted the findings summary %d times, want 1 (the gate compares nothing but re-states the set)", n)
+	}
+	if n := recorder.Contains("better release available"); n {
+		t.Error("unusable-map cycle emitted a finding row, want none (the gate runs no compare)")
 	}
 	if len(loaded.Library.Items) != 1 || loaded.Library.Items[0].Title != "Frieren" {
 		t.Errorf("library snapshot not refreshed: %+v", loaded.Library)
@@ -99,6 +111,10 @@ func TestCycleDegradedSavePersistsSanitizedArrURL(t *testing.T) {
 		}),
 		Mapping: emptyRecordsMapLoader(t, logger),
 		SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 154587}}},
+		// A gated reconcile re-states the finding set (cycleGateDegraded ->
+		// Notifier.Reemit), so Cycle needs the notifier every deployment wires
+		// even on a path that compares nothing.
+		Notifier: notify.NewNotifier(logger, nil),
 	})
 
 	if healthy := s.Cycle(context.Background()); !healthy {
@@ -227,8 +243,8 @@ func TestCycleEmptySeaDexEntriesReportsNothing(t *testing.T) {
 	if n := recorder.CountExact("better release available"); n != 0 {
 		t.Errorf("empty-SeaDex cycle emitted %d finding lines, want 0", n)
 	}
-	if n := recorder.CountExact("findings reported"); n != 0 {
-		t.Errorf("empty-SeaDex cycle ran Notifier.Report %d times, want 0", n)
+	if n := recorder.CountExact("findings reported"); n != 1 {
+		t.Errorf("empty-SeaDex cycle emitted the findings summary %d times, want 1 (Reemit re-states the set; Report never runs)", n)
 	}
 }
 
@@ -240,7 +256,7 @@ func TestHandlePreCompareGateEmptyWalkPreservesPriorSnapshot(t *testing.T) {
 	logger := scoutTestLogger()
 	st := state.State{Library: library.Snapshot{Items: []library.Item{{ArrID: 7, Title: "Frieren"}}}}
 	store := &fakeStore{st: st}
-	s := New(&Deps{Logger: logger, Store: store})
+	s := New(&Deps{Logger: logger, Store: store, Notifier: notify.NewNotifier(logger, nil)})
 	handled, healthy := s.handlePreCompareGate(context.Background(), &st, library.Snapshot{}, &mapping.Cache{}, []seadex.Entry{{AniListID: 1}}, cycleOutcomes{})
 	if !handled || !healthy {
 		t.Errorf("handlePreCompareGate = (%v, %v), want (true, true)", handled, healthy)
@@ -354,7 +370,7 @@ func TestHandlePreCompareGateShrunkWalkEscalatesAfterRepeatedShrinks(t *testing.
 				ShrunkWalks: tc.priorStreak,
 			}
 			store := &fakeStore{st: st}
-			s := New(&Deps{Logger: logger, Store: store})
+			s := New(&Deps{Logger: logger, Store: store, Notifier: notify.NewNotifier(logger, nil)})
 			// 1 item against a prior of 4: 1*2 < 4 trips the shrink guard.
 			snap := library.Snapshot{Items: []library.Item{{ArrID: 1, Title: "A"}}}
 			mapCache := mapping.Cache{Records: []mapping.Record{{AniListID: 154587, TvdbID: 123}}}
@@ -409,7 +425,7 @@ func TestHandlePreCompareGateShrunkWalkWithSeaDexOutageWarnsFeedKept(t *testing.
 		}},
 	}
 	store := &fakeStore{st: st}
-	s := New(&Deps{Logger: logger, Store: store, Feed: feed})
+	s := New(&Deps{Logger: logger, Store: store, Feed: feed, Notifier: notify.NewNotifier(logger, nil)})
 	snap := library.Snapshot{Items: []library.Item{{ArrID: 1, Title: "A"}}}
 	mapCache := mapping.Cache{}
 
@@ -417,7 +433,7 @@ func TestHandlePreCompareGateShrunkWalkWithSeaDexOutageWarnsFeedKept(t *testing.
 	if !handled || !healthy {
 		t.Errorf("handlePreCompareGate = (%v, %v), want (true, true)", handled, healthy)
 	}
-	if n := recorder.CountExact("seadex fetch failed; skipping comparison, findings not re-reported this cycle"); n != 1 {
+	if n := recorder.CountExact("seadex fetch failed; skipping comparison, findings re-stated unchanged this cycle"); n != 1 {
 		t.Errorf("seadex failure WARN count = %d, want 1 (a shrink + SeaDex double outage must not read as shrink-only)", n)
 	}
 	if store.st.SeadexFailures != 1 {
@@ -426,7 +442,7 @@ func TestHandlePreCompareGateShrunkWalkWithSeaDexOutageWarnsFeedKept(t *testing.
 	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "library-shrunk" {
 		t.Errorf("degraded reasons = %v, want [library-shrunk]", reasons)
 	}
-	if kept, ok := recordAttr(recorder, "seadex fetch failed; skipping comparison, findings not re-reported this cycle", "feed_kept"); !ok || kept != "true" {
+	if kept, ok := recordAttr(recorder, "seadex fetch failed; skipping comparison, findings re-stated unchanged this cycle", "feed_kept"); !ok || kept != "true" {
 		t.Errorf("seadex-failure WARN feed_kept attr = %q (found=%t), want \"true\" (the configured feed kept its previous snapshot through the outage)", kept, ok)
 	}
 }
@@ -494,11 +510,12 @@ func TestCycleSeaDexFailureEscalatesAfterRepeatedFailures(t *testing.T) {
 			}}
 			sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
 			s := New(&Deps{
-				Logger:  logger,
-				Store:   store,
-				Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
-				Mapping: fakeMapping{},
-				SeaDex:  &fakeSeaDex{err: errors.New("seadex down")},
+				Notifier: notify.NewNotifier(logger, nil),
+				Logger:   logger,
+				Store:    store,
+				Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+				Mapping:  fakeMapping{},
+				SeaDex:   &fakeSeaDex{err: errors.New("seadex down")},
 			})
 
 			if healthy := s.Cycle(context.Background()); !healthy {
@@ -538,7 +555,7 @@ func TestHandlePreCompareGateSeaDexEscalatesBehindWinningMappingGate(t *testing.
 	logger, recorder := capture.New()
 	st := state.State{SeadexFailures: seadexFailureEscalationThreshold - 1}
 	store := &fakeStore{st: st}
-	s := New(&Deps{Logger: logger, Store: store, Feed: &fakeFeed{}})
+	s := New(&Deps{Logger: logger, Store: store, Feed: &fakeFeed{}, Notifier: notify.NewNotifier(logger, nil)})
 	mapCache := mapping.Cache{}
 
 	handled, healthy := s.handlePreCompareGate(context.Background(), &st, library.Snapshot{}, &mapCache, nil,
@@ -609,11 +626,12 @@ func TestCycleZeroEntriesFetchResetsSeaDexFailureStreak(t *testing.T) {
 	}}
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
 	s := New(&Deps{
-		Logger:  logger,
-		Store:   store,
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
-		Mapping: fakeMapping{},
-		SeaDex:  &fakeSeaDex{},
+		Notifier: notify.NewNotifier(logger, nil),
+		Logger:   logger,
+		Store:    store,
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
+		Mapping:  fakeMapping{},
+		SeaDex:   &fakeSeaDex{},
 	})
 
 	if healthy := s.Cycle(context.Background()); !healthy {
@@ -827,7 +845,7 @@ func TestCycleShutdownDuringMatchingWarnsShutdownNotAniList(t *testing.T) {
 // is in flight.
 type cancellingSeaDex struct{ cancel context.CancelFunc }
 
-func (c *cancellingSeaDex) FetchEntries(context.Context, seadex.Options) ([]seadex.Entry, error) {
+func (c *cancellingSeaDex) FetchEntries(context.Context, seadexapi.Options) ([]seadex.Entry, error) {
 	c.cancel()
 	return nil, context.Canceled
 }
@@ -847,7 +865,7 @@ func (c *cancellingSeaDex) CountWindow(context.Context, time.Time) (int, error) 
 // pre-emption (which requires one of them to be non-nil) cannot cover it.
 type cancellingEmptySeaDex struct{ cancel context.CancelFunc }
 
-func (c *cancellingEmptySeaDex) FetchEntries(context.Context, seadex.Options) ([]seadex.Entry, error) {
+func (c *cancellingEmptySeaDex) FetchEntries(context.Context, seadexapi.Options) ([]seadex.Entry, error) {
 	c.cancel()
 	return nil, nil
 }
@@ -880,7 +898,7 @@ func TestCycleShutdownDuringZeroEntryFetchEmitsNoCompletionLine(t *testing.T) {
 	if healthy := s.Cycle(ctx); !healthy {
 		t.Fatal("Cycle healthy=false, want true (a shutdown is not an ingest failure)")
 	}
-	if n := recorder.CountExact("seadex returned zero entries; skipping comparison, findings not re-reported this cycle"); n != 1 {
+	if n := recorder.CountExact("seadex returned zero entries; skipping comparison, findings re-stated unchanged this cycle"); n != 1 {
 		t.Errorf("zero-entries WARN count = %d, want 1 (the outage evidence stays)", n)
 	}
 	if n := recorder.CountExact("cycle degraded"); n != 0 {
@@ -919,7 +937,7 @@ func TestCycleShutdownDuringSeaDexFetchWarnsShutdownNotSeaDex(t *testing.T) {
 	if n := recorder.CountExact("cycle interrupted by shutdown before comparison; findings not re-reported this cycle"); n != 1 {
 		t.Errorf("shutdown WARN count = %d, want 1", n)
 	}
-	if n := recorder.CountExact("seadex fetch failed; skipping comparison, findings not re-reported this cycle"); n != 0 {
+	if n := recorder.CountExact("seadex fetch failed; skipping comparison, findings re-stated unchanged this cycle"); n != 0 {
 		t.Errorf("shutdown misattributed to a SeaDex outage %d times, want 0", n)
 	}
 	if n := recorder.CountExact("cycle degraded"); n != 0 {
@@ -1034,7 +1052,7 @@ func TestCycleStaleMapStillComparesAndRebuildsFeed(t *testing.T) {
 func TestSaveGenuineFailureLogsError(t *testing.T) {
 	logger, recorder := capture.New()
 	store := &fakeStore{saveErr: errors.New("disk full")}
-	s := New(&Deps{Logger: logger, Store: store})
+	s := New(&Deps{Logger: logger, Store: store, Notifier: notify.NewNotifier(logger, nil)})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -1153,11 +1171,12 @@ func TestCycleDegradedEarlyReturnsEmitCycleDegraded(t *testing.T) {
 			deps: func(t *testing.T, logger *slog.Logger) *Deps {
 				t.Helper()
 				return &Deps{
-					Store:   &fakeStore{},
-					Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarrOK(), Logger: scoutTestLogger()}),
-					Mapping: emptyRecordsMapLoader(t, scoutTestLogger()),
-					SeaDex:  &fakeSeaDex{entries: []seadex.Entry{{AniListID: 154587}}},
-					Logger:  logger,
+					Store:    &fakeStore{},
+					Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarrOK(), Logger: scoutTestLogger()}),
+					Mapping:  emptyRecordsMapLoader(t, scoutTestLogger()),
+					SeaDex:   &fakeSeaDex{entries: []seadex.Entry{{AniListID: 154587}}},
+					Logger:   logger,
+					Notifier: notify.NewNotifier(logger, nil),
 				}
 			},
 		},
@@ -1167,11 +1186,12 @@ func TestCycleDegradedEarlyReturnsEmitCycleDegraded(t *testing.T) {
 			deps: func(t *testing.T, logger *slog.Logger) *Deps {
 				t.Helper()
 				return &Deps{
-					Store:   &fakeStore{st: state.State{Mapping: seasonlessMappingCache()}},
-					Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarrOK(), Logger: scoutTestLogger()}),
-					Mapping: fakeMapping{},
-					SeaDex:  &fakeSeaDex{err: errors.New("seadex down")},
-					Logger:  logger,
+					Store:    &fakeStore{st: state.State{Mapping: seasonlessMappingCache()}},
+					Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarrOK(), Logger: scoutTestLogger()}),
+					Mapping:  fakeMapping{},
+					SeaDex:   &fakeSeaDex{err: errors.New("seadex down")},
+					Logger:   logger,
+					Notifier: notify.NewNotifier(logger, nil),
 				}
 			},
 		},
@@ -1181,11 +1201,12 @@ func TestCycleDegradedEarlyReturnsEmitCycleDegraded(t *testing.T) {
 			deps: func(t *testing.T, logger *slog.Logger) *Deps {
 				t.Helper()
 				return &Deps{
-					Store:   &fakeStore{st: state.State{Mapping: seasonlessMappingCache()}},
-					Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarrOK(), Logger: scoutTestLogger()}),
-					Mapping: fakeMapping{},
-					SeaDex:  &fakeSeaDex{},
-					Logger:  logger,
+					Store:    &fakeStore{st: state.State{Mapping: seasonlessMappingCache()}},
+					Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarrOK(), Logger: scoutTestLogger()}),
+					Mapping:  fakeMapping{},
+					SeaDex:   &fakeSeaDex{},
+					Logger:   logger,
+					Notifier: notify.NewNotifier(logger, nil),
 				}
 			},
 		},
@@ -1243,10 +1264,12 @@ func (titledAniList) Fetch(context.Context, int) (anilist.Media, error) {
 
 func (titledAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
 	media := make(map[int]anilist.Media, len(ids))
+	verdicts := make(map[int]anilist.Verdict, len(ids))
 	for _, id := range ids {
 		media[id] = idlessShowMedia()
+		verdicts[id] = anilist.VerdictFound
 	}
-	return anilist.BatchResult{Media: media, Completed: true}, nil
+	return anilist.BatchResult{Media: media, Verdicts: verdicts}, nil
 }
 
 func idlessShowMedia() anilist.Media {
@@ -1445,7 +1468,7 @@ func TestCycleShutdownDuringMappingLoadWarnsShutdownNotFribb(t *testing.T) {
 	if n := recorder.CountExact("mapping degraded"); n != 0 {
 		t.Errorf("'mapping degraded' fired %d times during a shutdown, want 0 (a cancelled load is the shutdown, not a Fribb fault)", n)
 	}
-	if n := recorder.CountExact("mapping unusable; skipping comparison, findings not re-reported this cycle"); n != 0 {
+	if n := recorder.CountExact("mapping unusable; skipping comparison, findings re-stated unchanged this cycle"); n != 0 {
 		t.Errorf("shutdown misattributed to an unusable map %d times, want 0", n)
 	}
 	if n := recorder.CountExact("cycle interrupted by shutdown before comparison; findings not re-reported this cycle"); n != 1 {
@@ -1819,7 +1842,7 @@ func TestCycleShutdownAfterShrunkenWalkKeepsWarnOmitsCompletionLine(t *testing.T
 	if healthy := s.Cycle(ctx); !healthy {
 		t.Fatal("Cycle healthy=false, want true (a shrunken walk is degraded, not unhealthy)")
 	}
-	if n := recorder.CountExact("library walk shrank below half the prior snapshot; skipping comparison, findings not re-reported this cycle"); n != 1 {
+	if n := recorder.CountExact("library walk shrank below half the prior snapshot; skipping comparison, findings re-stated unchanged this cycle"); n != 1 {
 		t.Errorf("shrink WARN count = %d, want 1 (the shrink evidence comes from the completed walk)", n)
 	}
 	if n := recorder.CountExact("cycle degraded"); n != 0 {
@@ -1846,7 +1869,7 @@ func TestHandlePreCompareGateShrunkWalkSavePersistsSeaDexStreakReset(t *testing.
 		SeadexFailures: 3,
 	}
 	store := &fakeStore{st: st}
-	s := New(&Deps{Logger: logger, Store: store})
+	s := New(&Deps{Logger: logger, Store: store, Notifier: notify.NewNotifier(logger, nil)})
 	// 1 item against a prior of 4 trips the shrink guard; the nil seaErr
 	// models the successful fetch whose reset must ride the shrink save.
 	snap := library.Snapshot{Items: []library.Item{{ArrID: 1, Title: "A"}}}

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -21,6 +22,18 @@ const (
 	readHeaderTimeout = 15 * time.Second
 	readTimeout       = 30 * time.Second
 	idleTimeout       = 120 * time.Second
+	// maxHeaderBytes bounds the request line plus headers, the pre-auth
+	// allocation gate this endpoint's shape allows and webhttp deliberately
+	// leaves to the app (its defaultMaxHeaderBytes restates net/http's 1 MiB
+	// because a browser-facing consumer may need it; this one is machine-only).
+	// A Torznab GET is a short path, a handful of query params (t, q, season,
+	// ep, cat, apikey) and the arr's own headers - well under 1 KiB - so 16 KiB
+	// is ~30x margin while refusing the megabyte-query shape at the network
+	// boundary, before net/http buffers it and before the two url.Values parses
+	// on the pre-auth path (authFailureLimiter's predicate, then serve) turn it
+	// into a map with hundreds of thousands of entries. Over-cap requests get
+	// net/http's own 431 and never reach a handler.
+	maxHeaderBytes = 16 << 10
 )
 
 // writeTimeout bounds a stalled response consumer. net/http arms it when the
@@ -96,7 +109,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	// exported Indexer must never bind and serve the feed with a guessable or
 	// absent gate - the AnimeBytes RSS feed embeds ab_passkey in its download
 	// links. Field-name-only: the rejected value is a credential.
-	if unusableFeedKey(ix.apiKey) {
+	if ix.keyUnusable {
 		return errors.New("indexer: indexer.feed_api_key is empty or an unresolved ${VAR} reference; refusing to serve the Torznab feed")
 	}
 	// An unexpanded ${VAR} passkey cannot build a grabbable AB link, so a feed
@@ -132,12 +145,16 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	// set (see writeTimeout): this endpoint only emits finite XML and the
 	// upstream Prowlarr retry tree has a calculable upper bound, so the
 	// deadline bounds stalled response consumers while leaving the bounded
-	// retry budget intact.
+	// retry budget intact. MaxHeaderBytes is the fifth limit of the same set
+	// (see maxHeaderBytes): a size bound beside the four deadlines, refusing an
+	// oversized request line or header block before any handler - and before
+	// the pre-auth query parses - can allocate against it.
 	srv := webhttp.NewServer(ix.chain(),
 		webhttp.WithReadHeaderTimeout(readHeaderTimeout),
 		webhttp.WithReadTimeout(readTimeout),
 		webhttp.WithIdleTimeout(idleTimeout),
 		webhttp.WithWriteTimeout(writeTimeout),
+		webhttp.WithMaxHeaderBytes(maxHeaderBytes),
 	)
 
 	ix.log.Info("seadex-scout indexer listening",
@@ -203,6 +220,13 @@ func (ix *Indexer) handler() http.Handler {
 
 // chain assembles the middleware stack Run serves. Order (outermost first):
 //
+//   - SecurityHeaders: the OUTERMOST baseline (nosniff, X-Frame-Options:
+//     DENY, Referrer-Policy, Content-Security-Policy), set before anything
+//     else runs so every response carries it - a recovered panic's 500 AND
+//     authFailureLimiter's 429, which short-circuits its own response and
+//     would skip the headers entirely from any inner position. Defense in
+//     depth for the credential-bearing /ab feed opened in a browser; the arrs
+//     ignore all of them.
 //   - authFailureLimiter: rejects over-budget bad-apikey requests BEFORE the
 //     access logger, so a flooding or brute-forcing LAN client cannot fill
 //     the slog/Loki stream at wire speed - suppressing that flood is the
@@ -231,24 +255,19 @@ func (ix *Indexer) handler() http.Handler {
 //     connection close, and not webhttp's default JSON envelope, which is
 //     the wrong wire shape for this XML endpoint. It sits inside Logging so
 //     a recovered panic logs as its 500.
-//   - SecurityHeaders: the innermost baseline (nosniff, X-Frame-Options:
-//     DENY, Referrer-Policy, Content-Security-Policy), set before the handler
-//     runs so every response - including a recovered panic's 500 - carries
-//     it. Defense in depth for the credential-bearing /ab feed opened in a
-//     browser; the arrs ignore all of them.
 func (ix *Indexer) chain() http.Handler {
 	return webhttp.Chain(ix.handler(),
+		// default-src 'none' is the whole policy this endpoint needs: every
+		// response is a self-contained XML or plain-text document with no
+		// subresources, so an inert document is the correct browser reading of
+		// the credential-bearing /ab feed. The arrs ignore the header.
+		webhttp.SecurityHeaders(webhttp.WithCSP("default-src 'none'")),
 		ix.authFailureLimiter(),
 		webhttp.Logging(webhttp.WithLogger(ix.log), webhttp.WithClientIP()),
 		webhttp.Recoverer(
 			webhttp.WithRecoverLogger(ix.log),
 			webhttp.WithRecoverResponder(torznabErrorResponder),
 		),
-		// default-src 'none' is the whole policy this endpoint needs: every
-		// response is a self-contained XML or plain-text document with no
-		// subresources, so an inert document is the correct browser reading of
-		// the credential-bearing /ab feed. The arrs ignore the header.
-		webhttp.SecurityHeaders(webhttp.WithCSP("default-src 'none'")),
 	)
 }
 
@@ -279,7 +298,7 @@ func (ix *Indexer) chain() http.Handler {
 // here.
 func (ix *Indexer) authFailureLimiter() webhttp.Middleware {
 	return webhttp.FailedAuthRateLimit(func(r *http.Request) bool {
-		return !unusableFeedKey(ix.apiKey) && !ix.verifyKey.Verify(r.URL.Query().Get("apikey"))
+		return !ix.keyUnusable && !ix.verifyKey.Verify(r.URL.Query().Get("apikey"))
 	}, "too many failed apikey attempts")
 }
 
@@ -316,7 +335,7 @@ func (ix *Indexer) serve(w http.ResponseWriter, r *http.Request) {
 // authorizeRequest applies serve's authentication policy and reports whether
 // the request may proceed; on rejection the response has been written.
 func (ix *Indexer) authorizeRequest(w http.ResponseWriter, r *http.Request, q url.Values) bool {
-	if unusableFeedKey(ix.apiKey) {
+	if ix.keyUnusable {
 		// Fail closed at the handler too: Run already refuses to bind with an
 		// empty or unresolved feed_api_key, so this branch is unreachable in
 		// production, but a second independent guard keeps any future
@@ -426,8 +445,22 @@ func (ix *Indexer) serveQuery(w http.ResponseWriter, r *http.Request, q url.Valu
 		// request log's `returned` count below describes what was RENDERED,
 		// not what the arr received, so record the partial delivery. Debug,
 		// not Warn - an arr cancelling a slow search is routine.
-		ix.log.Debug("indexer feed write failed; client received a partial feed",
-			"scope", scope, "rendered_items", rendered, "error", err)
+		//
+		// os.ErrDeadlineExceeded is this server's OWN WriteTimeout firing
+		// mid-body (see writeTimeout's residual-window note): a local fault
+		// the operator can act on - a slow /config mount delaying the first
+		// snapshot, or a deadline too tight for the retry tree - not the
+		// routine client cancellation the Debug line describes. The arr sees
+		// an unparseable body either way, so the level is what tells the two
+		// apart in Loki.
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			ix.log.Warn("indexer feed write deadline expired mid-body; the arr received a partial feed",
+				"scope", scope, "rendered_items", rendered,
+				"write_timeout", writeTimeout, "error", err)
+		} else {
+			ix.log.Debug("indexer feed write failed; client received a partial feed",
+				"scope", scope, "rendered_items", rendered, "error", err)
+		}
 	}
 	if rendered < len(items) {
 		// renderFeed degraded to a truncated-but-valid document (the byte
@@ -521,11 +554,8 @@ func scopeFromHost(host string) string {
 // scopeFromToken maps a lowercased tracker token (a path segment or DNS
 // label) to its feed scope, or "" for any non-tracker token.
 func scopeFromToken(s string) string {
-	switch s {
-	case upstreamNyaa:
-		return upstreamNyaa
-	case upstreamAB:
-		return upstreamAB
+	if validScope(s) {
+		return s
 	}
 	return ""
 }

@@ -168,7 +168,12 @@ func TestLookupByHostRejectsClassifiedHomographs(t *testing.T) {
 // "/animebytes.tv/torrents.php", not the AB page path. Everything else fails
 // closed: an absolute URL (tracker identity must then come from the host gate,
 // never this shape), a protocol-relative form, a different relative path, a
-// torrentid-less torrents.php query, and the empty string.
+// torrentid-less torrents.php query, and the empty string. Two rows are the
+// cross-library homograph acceptance pins (cf.
+// TestLookupByHostRejectsClassifiedHomographs): urlform.EqualASCIIFold's
+// ASCII-only fold is what keeps U+017F in the path and U+0130 in the query
+// name from laundering onto the ASCII protocol tokens a full Unicode fold
+// would accept, so this gate must refuse both.
 func TestLookupByRelativeURL(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -181,6 +186,7 @@ func TestLookupByRelativeURL(t *testing.T) {
 		{name: "slashless href reading of the AB page shape", raw: "torrents.php?id=1&torrentid=2", wantOK: true},
 		{name: "backslash-rooted AB torrent page resolves", raw: `\torrents.php?id=1&torrentid=2`, wantOK: true},
 		{name: "Unicode long-s is not ASCII path case", raw: "/torrent\u017f.php?torrentid=1", wantOK: false},
+		{name: "Unicode dotted-I is not ASCII query-name case", raw: "/torrents.php?torrent\u0130d=1", wantOK: false},
 		{name: "surrounding whitespace tolerated", raw: "  /torrents.php?torrentid=1  ", wantOK: true},
 		{name: "missing torrentid", raw: "/torrents.php?id=12345", wantOK: false},
 		{name: "no query at all", raw: "/torrents.php", wantOK: false},
@@ -259,40 +265,6 @@ func TestTrackerHost(t *testing.T) {
 				t.Errorf("Tracker{BaseURL: %q}.Host() = %q, want %q", tc.baseURL, got, tc.want)
 			}
 		})
-	}
-}
-
-// TestEqualASCIIFold pins the ASCII-only case fold the AB relative-page shape
-// check rests on: the fold is symmetric across both operands (either side may
-// carry the uppercase spelling), a length mismatch never compares equal, and a
-// non-ASCII lookalike never equals an ASCII protocol token - U+0130 (which
-// strings.ToLower folds onto ASCII i) and U+017F (which regexp's SimpleFold
-// folds onto ASCII s) must both stay unequal, since this comparison is the
-// byte-wise gate that keeps a Unicode-laundered path or query name from
-// classifying as the AnimeBytes torrent page.
-func TestEqualASCIIFold(t *testing.T) {
-	tests := []struct {
-		a    string
-		b    string
-		want bool
-	}{
-		{a: "/torrents.php", b: "/torrents.php", want: true},
-		{a: "/TORRENTS.PHP", b: "/torrents.php", want: true},
-		{a: "/torrents.php", b: "/TORRENTS.PHP", want: true},
-		{a: "TorrentID", b: "torrentid", want: true},
-		{a: "torrentid", b: "TORRENTID", want: true},
-		{a: "", b: "", want: true},
-		{a: "torrentid", b: "torrentids", want: false},
-		{a: "torrentid", b: "", want: false},
-		{a: "torrentid", b: "torrentix", want: false},
-		{a: "torrent\u0130", b: "torrentid", want: false},
-		{a: "torrentid", b: "torrent\u0130", want: false},
-		{a: "torrent\u017f", b: "torrents", want: false},
-	}
-	for _, tc := range tests {
-		if got := equalASCIIFold(tc.a, tc.b); got != tc.want {
-			t.Errorf("equalASCIIFold(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
-		}
 	}
 }
 

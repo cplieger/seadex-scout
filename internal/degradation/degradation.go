@@ -1,8 +1,7 @@
 // Package degradation is the neutral home of the application-wide
-// degradation policy constants shared across domains: the escalation
-// threshold the persisted degradation streaks (mapping refresh rejections,
-// shrunk library walks, partial library walks, SeaDex fetch failures, AniList
-// degradation) escalate their log sites at, the shrink guards' trigger
+// degradation policy constants shared across domains: the tick-cadence
+// escalation threshold the mapping loader's refresh-rejection streak
+// escalates its log site at, the shrink guards' trigger
 // fraction, applied through Shrunk (mapping refresh + library walk + SeaDex
 // catalogue walk), and the pre-cliff warning fraction the persisted-file byte
 // caps warn at (state.json, the indexer feed snapshot).
@@ -10,18 +9,22 @@
 // one policy without either domain owning cross-domain operational policy.
 package degradation
 
-// EscalationThreshold is the consecutive-degraded-cycle streak at which a
-// persisted degradation streak escalates its single log site from WARN to
-// ERROR (firing the existing SeadexScoutCycleError Loki rule): tolerate 8
-// consecutive degraded cycles, about a day at the default 3h cadence, before
-// escalating - long enough to ride out a transient upstream or arr oddity,
-// short enough that a persistent fault alerts instead of degrading silently
-// forever. Shared by the mapping loader's refresh-rejection streak
-// (mapping.Cache.RejectedRefreshes), the scout's shrunk-walk streak
-// (state.State.ShrunkWalks), the scout's partial-walk streak
-// (state.State.PartialWalks), the scout's SeaDex fetch-failure streak
-// (state.State.SeadexFailures), and the scout's AniList-degradation streak
-// (state.State.AniListDegraded).
+// EscalationThreshold is the TICK-cadence consecutive-degraded-cycle streak at
+// which a persisted degradation streak escalates its single log site from WARN
+// to ERROR (firing the existing SeadexScoutCycleError Loki rule): tolerate 8
+// consecutive degraded passes - about 2h at the default 15m poll_interval -
+// long enough to ride out a transient upstream or arr oddity, short enough
+// that a persistent fault alerts instead of degrading silently forever.
+//
+// Its one consumer is the mapping loader's refresh-rejection streak
+// (mapping.Cache.RejectedRefreshes, read as scout's
+// mappingRejectionEscalationThreshold), because loadMapping runs on every
+// changed tick as well as every reconcile. The streaks that advance only on a
+// RECONCILE - state.State.ShrunkWalks, PartialWalks, SeadexFailures and
+// AniListDegraded - escalate at scout's reconcileEscalationThreshold (2, i.e.
+// 48h) instead: the count is cadence-relative, so 8 daily reconciles would be
+// 8 days. Keep this constant's cadence claim and consumer list in step with
+// that block in internal/scout/scout.go.
 const EscalationThreshold = 8
 
 // shrinkGuardFactor is the shrink guards' trigger fraction, applied only

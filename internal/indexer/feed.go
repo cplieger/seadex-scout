@@ -134,10 +134,13 @@ func synthesizeTitle(t *seadex.Torrent, meta EntryInfo) string {
 //     absolute marker is rewritten into a season-0 token
 //     (specialsEpisodeMarker).
 func episodeMarker(t *seadex.Torrent, meta EntryInfo) string {
-	// The synthesized path has no title to judge yet (it is building one), so
-	// this is the census arm of packVerdict - the one policy function both
-	// title paths and the harvest cross-check now read.
-	if !packVerdict("", t) {
+	// The synthesized path has no title to judge: it is BUILDING one, so the
+	// file census is the only evidence there is. The harvested-title
+	// cross-check is a SEPARATE policy over richer inputs (journal.go's
+	// titleAudit.served, which reads packFromTitle's three-way answer beside
+	// the three-valued packEvidenceOf), so it cannot collapse into a shared
+	// boolean with this path.
+	if !isPack(t) {
 		marker := singleEpisodeMarker(t.Files)
 		if special := specialsEpisodeMarker(marker, meta); special != "" {
 			return special
@@ -393,7 +396,7 @@ func derivedTitle(t *seadex.Torrent, meta EntryInfo) string {
 		return strings.TrimSpace(t.ReleaseGroup)
 	}
 	base := titleBase(name)
-	if !packVerdict("", t) {
+	if !isPack(t) {
 		// A single episode, movie, or single OVA: the file name is already the
 		// release title the arr should parse (do not collapse its episode) -
 		// with its cour-local season half relabeled when the entry maps one.
@@ -541,8 +544,31 @@ func titleBase(name string) string {
 	if hasEpisodeEvidence(base) {
 		return base
 	}
-	for dir := path.Dir(name); dir != "." && dir != "/" && dir != ""; dir = path.Dir(dir) {
-		if component := path.Base(dir); hasEpisodeEvidence(component) && hasNonTokenText(component) {
+	// Walk the ancestors nearest-first over ONE cleaned prefix instead of
+	// re-deriving it on every step. path.Dir Cleans its whole argument, so a
+	// repeated-Dir walk costs O(len) per component and is QUADRATIC in the
+	// name's length - and SeaDex caps a page at 48 MiB but no individual file
+	// name (the same uncapped producer lastSubmatchIndex above is written
+	// against). Measured: a 512 KiB name of slash-separated components took
+	// 87s, 4x per doubling, so a multi-MiB name wedges the feed rebuild for
+	// hours (CWE-407) - and renderJournalItem's sort comparator pays it once
+	// per comparison. Splitting the already-cleaned prefix visits exactly the
+	// same components in the same order, in O(len) total.
+	rest := path.Dir(name)
+	if rest == "." || rest == "/" {
+		return base
+	}
+	for rest != "" {
+		component := rest
+		if i := strings.LastIndexByte(rest, '/'); i >= 0 {
+			component, rest = rest[i+1:], rest[:i]
+		} else {
+			rest = ""
+		}
+		if component == "" {
+			continue
+		}
+		if hasEpisodeEvidence(component) && hasNonTokenText(component) {
 			return component
 		}
 	}
@@ -698,9 +724,31 @@ var seasonOnlyTitle = regexp.MustCompile(`(?i)^.+?[-_. ]+[\[(]?((?:Season|Saison
 // the census does not already answer.
 var seasonPackDisqualifier = regexp.MustCompile(`(?i)(?:^|[^\p{L}\p{N}])(?:EXTRAS|SUBPACK|SPECIALS?|OVA|ONA)(?:[^\p{L}\p{N}]|$)`)
 
+// sonarrSimpleNoise mirrors the quality tokens Sonarr DELETES from a release name
+// before its season/episode patterns ever run (Parser.cs SimpleTitleRegex, applied in
+// ParseTitle to build simpleTitle): the resolution, the codec, DD5.1, the WxH
+// dimensions and the bit-depth markers. It belongs beside seasonOnlyTitle and
+// seasonPackDisqualifier for the same reason they keep their own (?i) and delimiter
+// classes - the vocabulary being mirrored is .NET's, and the job is to answer what
+// SONARR will make of a title, not what this app believes a name says.
+//
+// Without it the season-only reading judged a string Sonarr never parses. Sonarr's
+// trailing (?![-_. ]?\d+) lookahead is what makes a match season-ONLY, and on a raw
+// title the digits it sees are the RESOLUTION's ("Show S01 1080p"), so this app read
+// known=false - no correction, no diagnostic - while Sonarr, reading the cleaned
+// "Show S01", set FullSeason and grabbed the release as a whole season. That is the
+// episode-suppression case titleAudit.served exists to correct, and a resolution token
+// sits in essentially every real tracker title. The two shapes that happened to work
+// are the ones where a bracket separates the season number from the resolution
+// ("[Grp] Show (S01) (1080p)").
+var sonarrSimpleNoise = regexp.MustCompile(
+	`(?i)(?:(?:480|540|576|720|1080|2160)[ip]|[xh][\W_]?26[45]|DD\W?5\W1` +
+		`|848x480|1280x720|1920x1080|3840x2160|4096x2160|10-bit)\s*`)
+
 // packFromTitle reports the season-pack verdict a release TITLE carries, and
-// whether the title answered at all. It is the title half of packVerdict; the
-// file census (isPack) is the other half and the fallback.
+// whether the title answered at all. It is the title half of the harvest's
+// title-vs-census cross-check (journal.go's titleAudit.served); the file
+// census (isPack) is the other half and the fallback.
 //
 // known is false for an empty title, for a title carrying a disqualifying
 // marker (seasonPackDisqualifier), and for any title whose shape the parser
@@ -723,7 +771,11 @@ func packFromTitle(title string) (pack, known bool) {
 	if m == nil {
 		return false, false
 	}
-	if !seasonNumberEnds(s[m[3]:]) {
+	// Sonarr applies its lookahead to the CLEANED title (SimpleTitleRegex runs before
+	// ReportTitleRegex), so strip the same quality tokens from the tail before reading
+	// it. Only the tail is normalized, never the string the offsets index, so
+	// correctSeasonOnlyTitle's own match on the raw title still lines up.
+	if !seasonNumberEnds(sonarrSimpleNoise.ReplaceAllString(s[m[3]:], "")) {
 		return false, false
 	}
 	return true, true
@@ -812,21 +864,6 @@ func episodeSuffix(marker string) (string, bool) {
 		return "", false
 	}
 	return fmt.Sprintf("E%02d", n), true
-}
-
-// packVerdict is the ONE season-pack policy this package reads: the title's own
-// verdict when the title answers (packFromTitle), the file census otherwise
-// (isPack). A harvested real tracker title is the release name the arr parses,
-// so when it states a season it outranks a heuristic over the reported file
-// list; when it states nothing, the file list is the only evidence there is.
-//
-// The synthesized-title path calls it with an EMPTY title (the title it would
-// judge is the one it is about to build), which is exactly the census fallback.
-func packVerdict(title string, t *seadex.Torrent) bool {
-	if pack, known := packFromTitle(title); known {
-		return pack
-	}
-	return isPack(t)
 }
 
 // --- Media-file classification helpers ---

@@ -1,5 +1,7 @@
-// Package notify emits findings as structured slog events with cross-cycle
-// dedupe - the daemon's NOTIFICATION path (Loki alerting rides these lines).
+// Package notify emits the current finding SET as structured slog events,
+// re-stating every row on every pass - the daemon's NOTIFICATION path (Loki
+// alerting rides these lines). Nothing is persisted and nothing is deduped
+// across cycles; see Notifier for why.
 // Observability is slog-only; there is no metrics endpoint. It is distinct
 // from the user-facing report FEATURE (the `report` subcommand's season-level
 // audit), which lives in internal/audit.
@@ -14,7 +16,6 @@ import (
 
 	"github.com/cplieger/runesafe"
 	"github.com/cplieger/seadex-scout/internal/compare"
-	"github.com/cplieger/seadex-scout/internal/filter"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/logattr"
 	"github.com/cplieger/seadex-scout/internal/release"
@@ -110,9 +111,13 @@ func (n *Notifier) Report(findings []compare.Finding, incompleteIDs map[int]stru
 // evidence was incomplete keeps its prior rows, exactly as in a full pass.
 func (n *Notifier) ReportScoped(findings []compare.Finding, comparedIDs, incompleteIDs map[int]struct{}) {
 	if comparedIDs == nil {
-		// A nil authority set would read as "delete nothing", which is the safe
-		// direction but hides a caller bug: a scoped pass that computed no
-		// owner set has nothing to say about deletion and should not pretend to.
+		// Load-bearing, not a formality: report overloads a nil set as FULL
+		// deletion authority, so forwarding nil would make this partial pass
+		// delete every row absent from its window - a mass-resolve of the whole
+		// standing set, re-fired as new on the next reconcile. The empty set is
+		// the safe reading for a scoped pass that computed no owner set: it has
+		// nothing to say about deletion, so it deletes nothing. Pinned by
+		// TestReportScopedNilAuthorityDeletesNothing.
 		comparedIDs = map[int]struct{}{}
 	}
 	n.report(findings, comparedIDs, incompleteIDs)
@@ -171,6 +176,32 @@ func (n *Notifier) report(findings []compare.Finding, comparedIDs, incompleteIDs
 	n.emitAll(preserved, carried)
 }
 
+// maxRetainedListItems bounds how many elements of a retained row's untrusted
+// SLICES survive retention. capAttr bounds one STRING; it does not bound the
+// ROW, and these slices carry UPSTREAM cardinality: one SeaDex entry admits 512
+// torrents (internal/seadex's maxTorrentsPerEntry), so a row can retain 512
+// links plus 512 recommended groups - about 8.4 MB (512 x 2 x maxAttrBytes)
+// held for the process lifetime, where the emit path can never render more
+// than one logattr.MaxBytes joiner budget of either. Honest data carries a
+// handful of obtainable best releases per entry, so 64 is far above every real
+// row and keeps the worst case in the low hundreds of KiB.
+const maxRetainedListItems = 64
+
+// capRetainedList clones the retained PREFIX of an untrusted slice, dropping
+// anything past maxRetainedListItems. Cloning is what keeps boundRetained's
+// aliasing guard (f is a shallow copy, so the header still points at the
+// compare result the audit report and the cycle log line also read); cloning
+// the PREFIX additionally releases the caller's oversized backing array. The
+// dedupe key is derived from the FULL row before retention (report calls
+// dedupeKey first), so truncation here can never change a key, resolve a row,
+// or re-alert a backlog.
+func capRetainedList[T any](s []T) []T {
+	if len(s) > maxRetainedListItems {
+		s = s[:maxRetainedListItems]
+	}
+	return slices.Clone(s)
+}
+
 // boundRetained caps the untrusted strings of a row about to be RETAINED, in
 // place. Every value here is parsed from SeaDex data or library file names, and
 // a retained row outlives the pass that produced it, so the cap has to happen
@@ -188,9 +219,9 @@ func (n *Notifier) report(findings []compare.Finding, comparedIDs, incompleteIDs
 // and the cycle log line also read, turning a retention bound into a silent
 // edit of somebody else's data.
 func boundRetained(f *compare.Finding) {
-	f.RecommendedGroups = slices.Clone(f.RecommendedGroups)
-	f.CurrentGroups = slices.Clone(f.CurrentGroups)
-	f.Links = slices.Clone(f.Links)
+	f.RecommendedGroups = capRetainedList(f.RecommendedGroups)
+	f.CurrentGroups = capRetainedList(f.CurrentGroups)
+	f.Links = capRetainedList(f.Links)
 	f.Arr = capAttr(f.Arr)
 	f.Title = capAttr(f.Title)
 	f.Kind = capAttr(f.Kind)
@@ -260,11 +291,23 @@ func (n *Notifier) emit(f *compare.Finding) {
 // marker, the rune sanitization, and the cap-before-sanitize order) lives in
 // internal/logattr, shared with the report's slog path so the two emitters
 // cannot drift; this alias keeps the package's own bound readable and pins the
-// value the persisted-record cap is sized against.
+// value the retained-row bound (boundRetained) is sized against.
 const maxAttrBytes = logattr.MaxBytes
 
-// attrTruncMarker is the suffix a capped attribute (or persisted string)
-// carries so a reader can tell a truncated value from an honest one.
+// maxAlertTextBytes is the budget for an ALERT-destined text attribute, and it
+// is deliberately far below maxAttrBytes: that budget is sized for the Loki LOG
+// LINE, while these values are interpolated into the Discord annotation
+// alerts.yaml renders. Alertmanager's Discord notifier truncates the embed
+// title at 256 runes and the description at 4096 runes (Discord's embed
+// limits), and alerts.yaml puts alert_title first and the clickable tracker
+// links last - so an oversized title cuts the actionable half of the
+// notification off. 512 bytes is well above every honest value (an anime title,
+// a release group, a tracker name, including a CJK title at 3 bytes per rune)
+// and well under the annotation budget even after markup escaping doubles it.
+const maxAlertTextBytes = 512
+
+// attrTruncMarker is the suffix a capped attribute carries so a reader can
+// tell a truncated value from an honest one.
 const attrTruncMarker = logattr.TruncMarker
 
 // capAttr renders one untrusted single-value attribute for the JSON slog
@@ -282,11 +325,24 @@ func capAttr(s string) string { return logattr.Cap(s) }
 // Markdown escapers expand the value they walk. An in-budget value passes
 // through unchanged, so an honest value stays byte-identical, and the
 // marker arithmetic has one home.
-func reboundAttr(s string) string {
-	if len(s) <= maxAttrBytes {
-		return s
-	}
-	return runesafe.CapBytes(s, maxAttrBytes-len(attrTruncMarker)) + attrTruncMarker
+func reboundAttr(s string) string { return reboundTo(s, maxAttrBytes) }
+
+// reboundTo re-applies a byte budget to a value a post-cap transform may have
+// grown, cutting on a rune boundary and marking the cut. An in-budget value
+// passes through unchanged, so an honest value stays byte-identical.
+//
+// runesafe.SanitizeCapped is exactly this contract (the cut is on a rune
+// boundary with the marker charged INSIDE the budget, and the cut comes back as
+// a fact), and its doc states that arithmetic is single-homed in the library's
+// Budget engine so there is one copy of it rather than one per bound - which is
+// the drift a local copy reintroduces. The extra Sanitize pass it performs is a
+// no-op at every call site here: each one feeds a value that already went
+// through capAttr, and both escapers remove or percent-encode the runes that
+// would otherwise be rewritten (Sanitize is idempotent, under the same
+// keepCRLF=true policy capAttr applies).
+func reboundTo(s string, budget int) string {
+	text, _ := runesafe.SanitizeCapped(s, budget, attrTruncMarker)
+	return text
 }
 
 // capURLAttr renders one untrusted URL attribute: capAttr's bounded,
@@ -351,7 +407,8 @@ var mdTextEscaper = strings.NewReplacer(
 // of capAttr: the raw capAttr label stays for Loki search and grouping, and
 // this value is what an annotation interpolates.
 func capAlertTextAttr(s string) string {
-	return trimTruncatedEscape(reboundAttr(mdTextEscaper.Replace(capAttr(s))))
+	capped := reboundTo(capAttr(s), maxAlertTextBytes)
+	return trimTruncatedEscape(reboundTo(mdTextEscaper.Replace(capped), maxAlertTextBytes))
 }
 
 // trimTruncatedEscape drops a truncation-orphaned trailing backslash. The
@@ -467,7 +524,7 @@ const (
 // classifyTrackerLink maps a link to its slot kind: definite AnimeBytes
 // evidence wins outright, ambiguous evidence is the conservative AB fallback,
 // a known Nyaa link is the public Nyaa source, and anything else is a generic
-// public link. The switch is exhaustive over filter.ABEvidence, so the three
+// public link. The switch is exhaustive over tracker.ABEvidence, so the three
 // grades cannot be tested in the wrong order.
 //
 // The grade is READ off the link (compare graded it from the raw upstream URL),
@@ -477,11 +534,11 @@ const (
 // (h-f43). What stays this package's policy is the slot PRECEDENCE below.
 func classifyTrackerLink(link compare.ReleaseLink) trackerLinkKind {
 	switch link.AB {
-	case filter.ABDefinite:
+	case tracker.ABDefinite:
 		return trackerLinkAB
-	case filter.ABAmbiguous:
+	case tracker.ABAmbiguous:
 		return trackerLinkABFallback
-	case filter.ABNone:
+	case tracker.ABNone:
 		if (publicLink{url: link.URL, tracker: link.Tracker}).isNyaa() {
 			return trackerLinkNyaa
 		}
@@ -500,8 +557,8 @@ func classifyTrackerLink(link compare.ReleaseLink) trackerLinkKind {
 // upstream URL (compare.ReleaseLink.AB, from classify.ABEvidence), matching
 // the obtainability filter (this package's dedupe key, dedupekey.go, keys the
 // full obtainable URL set label-insensitively instead): a link graded
-// filter.ABDefinite (AB label or animebytes.tv URL host) wins the AB slot
-// outright, ahead of filter.ABAmbiguous's conservative fail-closed fallback.
+// tracker.ABDefinite (AB label or animebytes.tv URL host) wins the AB slot
+// outright, ahead of tracker.ABAmbiguous's conservative fail-closed fallback.
 // A malformed, unparseable, or non-ASCII-host raw URL grades ambiguous; such an
 // unclassifiable link only fills the AB slot when no definite AnimeBytes
 // link exists, so an ambiguous link is never rendered as the clickable

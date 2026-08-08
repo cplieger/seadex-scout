@@ -149,11 +149,12 @@ func TestCycleSeaDexFailureSanitizesLoggedErrorAtBothSites(t *testing.T) {
 	}}
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
 	s := New(&Deps{
-		Logger:  logger,
-		Store:   store,
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
-		Mapping: fakeMapping{},
-		SeaDex:  &fakeSeaDex{err: errors.New(hostile)},
+		Notifier: notify.NewNotifier(logger, nil),
+		Logger:   logger,
+		Store:    store,
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping:  fakeMapping{},
+		SeaDex:   &fakeSeaDex{err: errors.New(hostile)},
 	})
 
 	if healthy := s.Cycle(context.Background()); !healthy {

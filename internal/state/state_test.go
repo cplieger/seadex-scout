@@ -1339,12 +1339,18 @@ func TestStoreLoadReapsStaleTempsAndReadOnlySkips(t *testing.T) {
 	})
 }
 
-// TestStoreLoadStaleTempCleanupFailureWarnsAndContinues pins Load's
-// degraded-maintenance contract: when the stale-temp sweep cannot read the
-// state directory (the "directory" is a regular file, a root-safe injection),
-// the failure is logged at Warn exactly once and Load still proceeds to the
-// read (surfacing the read error), never aborting on the maintenance failure.
-func TestStoreLoadStaleTempCleanupFailureWarnsAndContinues(t *testing.T) {
+// TestStoreLoadNonDirectoryStateDirSurfacesAsReadError pins Load's handling of
+// a state directory that is not a directory at all (the "directory" is a
+// regular file, a root-safe injection): the confined open fails, so Load
+// reports it as a classified read error rather than a cold start, and the
+// stale-temp sweep - which now runs THROUGH that root - never runs at all.
+//
+// It no longer asserts a cleanup-failure WARN: the ambient sweep this test was
+// written against ran BEFORE the root was opened and could fail its own readdir
+// on a non-directory. The sweep is now pinned to the same root the
+// read/classify/preserve decision uses, so an unopenable state directory leaves
+// nothing for it to attempt and there is no maintenance failure to report.
+func TestStoreLoadNonDirectoryStateDirSurfacesAsReadError(t *testing.T) {
 	blocker := filepath.Join(t.TempDir(), "blocker")
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
 		t.Fatalf("create blocker file: %v", err)
@@ -1355,10 +1361,10 @@ func TestStoreLoadStaleTempCleanupFailureWarnsAndContinues(t *testing.T) {
 		t.Fatal("Load with an unreadable state dir returned nil error, want read error")
 	}
 	if !strings.Contains(err.Error(), "state: read") {
-		t.Errorf("error = %q, want 'state: read' context (cleanup failure must not become the returned error)", err.Error())
+		t.Errorf("error = %q, want 'state: read' context (an unopenable state directory is a read failure, not a cold start)", err.Error())
 	}
-	if got := recorder.CountExact("could not clean stale atomic-write temp files"); got != 1 {
-		t.Errorf("cleanup-failure WARN count = %d, want 1", got)
+	if got := recorder.CountExact("could not clean stale atomic-write temp files"); got != 0 {
+		t.Errorf("cleanup-failure WARN count = %d, want 0 (the sweep is pinned to a root that could not be opened, so it never ran)", got)
 	}
 }
 

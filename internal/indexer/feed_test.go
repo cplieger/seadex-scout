@@ -958,41 +958,6 @@ func TestPackFromTitleRefusesSeasonFollowedByEpisodeNumber(t *testing.T) {
 	}
 }
 
-// TestPackVerdictFallsBackToCensus pins the policy function: the title decides
-// when it answers (in BOTH directions), the file census decides when it does
-// not, and an EMPTY title - the synthesized path's call, which this packet
-// routed through packVerdict - is exactly the census verdict it replaced.
-func TestPackVerdictFallsBackToCensus(t *testing.T) {
-	const gib = 1 << 30
-	pack := &seadex.Torrent{Files: []seadex.File{
-		{Name: "Show S01E01 [1080p].mkv", Length: gib},
-		{Name: "Show S01E02 [1080p].mkv", Length: gib},
-	}}
-	single := &seadex.Torrent{Files: []seadex.File{{Name: "Show S01E01 [1080p].mkv", Length: gib}}}
-
-	// The synthesized path is behaviorally unchanged: no title, census only.
-	if got, want := packVerdict("", pack), isPack(pack); got != want {
-		t.Errorf("packVerdict(\"\", pack) = %v, want the census verdict %v", got, want)
-	}
-	if got, want := packVerdict("", single), isPack(single); got != want {
-		t.Errorf("packVerdict(\"\", single) = %v, want the census verdict %v", got, want)
-	}
-	// An unknown title keeps the census verdict, both directions.
-	if !packVerdict("random text", pack) {
-		t.Error("packVerdict(unknown title, pack) = false, want the census verdict true")
-	}
-	if packVerdict("random text", single) {
-		t.Error("packVerdict(unknown title, single) = true, want the census verdict false")
-	}
-	// A title that answers overrides the census, both directions.
-	if packVerdict("Show - S01E01 [1080p]", pack) {
-		t.Error("packVerdict(episode title, pack census) = true, want the title's single-episode verdict")
-	}
-	if !packVerdict("Show - S01 [1080p]", single) {
-		t.Error("packVerdict(season title, single census) = false, want the title's season-pack verdict")
-	}
-}
-
 // packEvidenceName renders a census grade for a failure message (the production
 // type carries no String method - nothing in the app formats one).
 func packEvidenceName(e packEvidence) string {

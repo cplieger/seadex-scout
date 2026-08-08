@@ -18,6 +18,22 @@ import (
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 )
 
+// verdictName renders a Verdict for a failure message; a bare uint8 tells the
+// reader nothing about which of the four answers the batch produced.
+func verdictName(v Verdict) string {
+	switch v {
+	case VerdictUnrequested:
+		return "VerdictUnrequested"
+	case VerdictFound:
+		return "VerdictFound"
+	case VerdictAbsent:
+		return "VerdictAbsent"
+	case VerdictUnverified:
+		return "VerdictUnverified"
+	}
+	return fmt.Sprintf("Verdict(%d)", uint8(v))
+}
+
 // TestDoCapsHostileRetryAfterAndPenalizesThrottle proves a pathological
 // server-supplied Retry-After cannot stall the fallback: the 429 becomes a
 // *httpx.RateLimitError whose RetryAfter hint is capped at maxRetryAfter (the
@@ -97,7 +113,7 @@ func TestDoHonorsValidRetryAfterHeader(t *testing.T) {
 
 // TestDo429WithoutRetryAfterUsesResetHeader pins the reset-window fallback: a
 // 429 that omits Retry-After but carries a future X-RateLimit-Reset must wait
-// until that reset (not the blind 5s default), so the bounded attempts do not
+// until that reset (not the no-evidence default), so the bounded attempts do not
 // all land inside the same rate window.
 func TestDo429WithoutRetryAfterUsesResetHeader(t *testing.T) {
 	reset := time.Now().Add(30 * time.Second).Unix()
@@ -115,7 +131,7 @@ func TestDo429WithoutRetryAfterUsesResetHeader(t *testing.T) {
 		t.Fatalf("do() err = %v, want *httpx.RateLimitError", err)
 	}
 	hint := rle.RetryAfter
-	if hint <= defaultRetryAfter || hint > 31*time.Second {
+	if hint < 25*time.Second || hint > 31*time.Second {
 		t.Errorf("RetryAfter = %v, want ~30s from X-RateLimit-Reset (not the %v default)", hint, defaultRetryAfter)
 	}
 }
@@ -218,8 +234,10 @@ func TestFetchManyChunksBatchesAndMergesResults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchMany: %v", err)
 	}
-	if !res.Completed {
-		t.Error("Completed = false, want true for a fully successful batch")
+	for _, id := range ids {
+		if got := res.Verdicts[id]; got != VerdictFound {
+			t.Errorf("Verdicts[%d] = %s, want VerdictFound for a fully successful batch", id, verdictName(got))
+		}
 	}
 
 	wantBatches := []int{50, 50, 20}
@@ -528,8 +546,8 @@ func TestFetchManyCanceledBeforeReservedSlot(t *testing.T) {
 	if len(res.Media) != 0 {
 		t.Errorf("FetchMany() result = %v, want empty partial result", res.Media)
 	}
-	if res.Completed {
-		t.Error("Completed = true, want false when no chunk completed")
+	if len(res.Verdicts) != 0 {
+		t.Errorf("Verdicts = %v, want none when no chunk completed (every id reads VerdictUnrequested)", res.Verdicts)
 	}
 	if got := c.Stats().Calls; got != 0 {
 		t.Errorf("Stats().Calls = %d, want 0 when canceled before request", got)
@@ -678,8 +696,8 @@ func TestFetchManyNoIDsMakesNoRequests(t *testing.T) {
 	if len(res.Media) != 0 {
 		t.Errorf("FetchMany(nil) = %v, want empty map", res.Media)
 	}
-	if !res.Completed {
-		t.Error("Completed = false, want true (nothing failed to complete)")
+	if len(res.Verdicts) != 0 {
+		t.Errorf("Verdicts = %v, want none (no ids were requested)", res.Verdicts)
 	}
 	if got := c.Stats().Calls; got != 0 {
 		t.Errorf("Stats().Calls = %d, want 0 (no ids, no requests)", got)
@@ -700,11 +718,11 @@ func TestDoRejectsUnparseableURL(t *testing.T) {
 	}
 }
 
-// TestFetchManyFirstChunkFailureReturnsIncomplete pins the completion
-// contract's total-failure side: a request/envelope failure before any chunk
-// completes returns Completed=false (and no media) together with the error —
-// the signal callers use to distinguish a genuine outage from a completed batch
-// that found no media.
+// TestFetchManyFirstChunkFailureReturnsIncomplete pins the verdict contract's
+// total-failure side: a request/envelope failure before any chunk completes
+// returns NO verdicts (and no media) together with the error, so every id reads
+// VerdictUnrequested — the signal callers use to distinguish a genuine outage
+// from a completed batch that found no media.
 func TestFetchManyFirstChunkFailureReturnsIncomplete(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{"errors":[{"message":"boom"}]}`)
@@ -716,20 +734,22 @@ func TestFetchManyFirstChunkFailureReturnsIncomplete(t *testing.T) {
 	if err == nil {
 		t.Fatal("FetchMany must surface the first chunk's envelope error")
 	}
-	if res.Completed {
-		t.Error("Completed = true, want false (no chunk completed)")
+	for _, id := range []int{1, 2} {
+		if got := res.Verdicts[id]; got != VerdictUnrequested {
+			t.Errorf("Verdicts[%d] = %s, want VerdictUnrequested (no chunk completed)", id, verdictName(got))
+		}
 	}
 	if len(res.Media) != 0 {
 		t.Errorf("FetchMany() media = %v, want none (no chunk completed)", res.Media)
 	}
 }
 
-// TestFetchManyAllNotFoundThenFailureReturnsCompletedEmpty pins the completion
+// TestFetchManyAllNotFoundThenFailureReturnsCompletedEmpty pins the verdict
 // contract's partial side: a first chunk that completes with every id
 // definitively not found (a valid empty media array) followed by a failed
-// second chunk returns Completed=true with an empty map plus the error, so the
-// caller can tell "a chunk completed and found nothing" apart from a total
-// outage.
+// second chunk returns VerdictAbsent for the first chunk's ids and
+// VerdictUnrequested for the abandoned second, plus the error - so the caller
+// can tell "a chunk completed and found nothing" apart from a total outage.
 func TestFetchManyAllNotFoundThenFailureReturnsCompletedEmpty(t *testing.T) {
 	var mu sync.Mutex
 	calls := 0
@@ -755,8 +775,15 @@ func TestFetchManyAllNotFoundThenFailureReturnsCompletedEmpty(t *testing.T) {
 	if err == nil {
 		t.Fatal("FetchMany must surface the second chunk's envelope error")
 	}
-	if !res.Completed {
-		t.Error("Completed = false, want true (the first chunk completed)")
+	for _, id := range ids[:batchSize] {
+		if got := res.Verdicts[id]; got != VerdictAbsent {
+			t.Errorf("Verdicts[%d] = %s, want VerdictAbsent (the first chunk completed all-not-found)", id, verdictName(got))
+		}
+	}
+	for _, id := range ids[batchSize:] {
+		if got := res.Verdicts[id]; got != VerdictUnrequested {
+			t.Errorf("Verdicts[%d] = %s, want VerdictUnrequested (the second chunk aborted)", id, verdictName(got))
+		}
 	}
 	if len(res.Media) != 0 {
 		t.Errorf("FetchMany() result = %v, want empty (every completed id was not-found)", res.Media)
@@ -799,25 +826,27 @@ func TestFetchManyRequestFailureAfterCompletedChunkReturnsPartial(t *testing.T) 
 		t.Errorf("error = %v, want *httpx.HTTPStatusError from the failed chunk", err)
 	}
 	// The abort path's own contract: the aborting chunk and every chunk after it
-	// are UNVERIFIED, while the completed chunk's absences stay memoizable
+	// are UNREQUESTED, while the completed chunk's absences stay memoizable
 	// negatives. If the scoping regressed to include the completed chunk's ids,
 	// match.prefetch would stop negative-memoizing ids it legitimately proved
 	// absent; if it regressed to exclude the aborting chunk's, it would
 	// negative-memoize ids whose chunk never ran.
 	var batchErr *BatchRecordError
 	if !errors.As(err, &batchErr) {
-		t.Fatalf("error = %v, want *BatchRecordError scoping the abort to its chunks", err)
+		t.Fatalf("error = %v, want *BatchRecordError diagnosing the abort", err)
 	}
-	if got, want := len(batchErr.UnverifiedIDs), len(ids)-batchSize; got != want {
-		t.Errorf("UnverifiedIDs = %d ids, want %d (only the aborting second chunk)", got, want)
-	}
-	for _, id := range batchErr.UnverifiedIDs {
-		if id <= batchSize {
-			t.Errorf("UnverifiedIDs contains %d, which belongs to the completed first chunk", id)
+	for _, id := range ids[batchSize:] {
+		if got := res.Verdicts[id]; got != VerdictUnrequested {
+			t.Errorf("Verdicts[%d] = %s, want VerdictUnrequested (the aborting second chunk)", id, verdictName(got))
 		}
 	}
-	if !res.Completed {
-		t.Fatal("Completed = false, want true (the completed first chunk is preserved)")
+	for _, id := range ids[1:batchSize] {
+		if got := res.Verdicts[id]; got != VerdictAbsent {
+			t.Errorf("Verdicts[%d] = %s, want VerdictAbsent: it belongs to the completed first chunk", id, verdictName(got))
+		}
+	}
+	if got := res.Verdicts[1]; got != VerdictFound {
+		t.Fatalf("Verdicts[1] = %s, want VerdictFound (the completed first chunk is preserved)", verdictName(got))
 	}
 	if got := res.Media[1].Titles; !slices.Equal(got, []string{"t1"}) {
 		t.Errorf("media[1].Titles = %v, want [t1] (completed chunk preserved on a later HTTP failure)", got)
@@ -848,9 +877,9 @@ func TestRequestMarshalErrorMakesNoAttempt(t *testing.T) {
 // chunks each contain a poisoned record, the error returned beside the merged
 // result is the FIRST chunk's record error, not overwritten by the second
 // chunk's, while both chunks' valid records still merge. It also pins the
-// ACCUMULATION of UnverifiedIDs across both poisoned chunks: the matcher reads
-// that slice to tell an untrustworthy absence from a definitive miss, so a
-// regression to last-chunk-only assignment would negative-memoize the first
+// ACCUMULATION of VerdictUnverified across both poisoned chunks: the matcher
+// reads the verdict to tell an untrustworthy absence from a definitive miss, so
+// a regression to last-chunk-only marking would negative-memoize the first
 // chunk's ids for the memo TTL on the strength of a response that was not
 // trustworthy.
 func TestFetchManyKeepsFirstRecordErrorAcrossChunks(t *testing.T) {
@@ -888,8 +917,15 @@ func TestFetchManyKeepsFirstRecordErrorAcrossChunks(t *testing.T) {
 	if !errors.As(err, &batchErr) {
 		t.Fatalf("error = %T %v, want *BatchRecordError", err, err)
 	}
-	if !slices.Equal(batchErr.UnverifiedIDs, ids) {
-		t.Errorf("UnverifiedIDs = %v, want all requested IDs %v from both poisoned chunks", batchErr.UnverifiedIDs, ids)
+	for _, id := range ids {
+		want := VerdictUnverified
+		if _, found := out[id]; found {
+			want = VerdictFound
+		}
+		if got := res.Verdicts[id]; got != want {
+			t.Errorf("Verdicts[%d] = %s, want %s: BOTH chunks were poisoned, so no absence is definitive",
+				id, verdictName(got), verdictName(want))
+		}
 	}
 	if !strings.Contains(err.Error(), "media record 0 missing id") {
 		t.Errorf("error = %q, want the FIRST chunk's record error (missing id), not a later chunk's", err.Error())
@@ -1008,12 +1044,12 @@ func TestTransientEnvelopeStatusRetries(t *testing.T) {
 	}
 }
 
-// TestFetchManyScopesRecordErrorToItsChunk pins the batch error's SCOPE. A
+// TestFetchManyScopesRecordErrorToItsChunk pins the batch verdicts' SCOPE. A
 // record-local defect in one chunk must not withdraw the completion evidence of
-// the others: the returned BatchRecordError names only the offending chunk's
-// ids, so a caller can still memoize the negatives the clean chunks
-// definitively answered. Without the scoping, one malformed record dumped every
-// pending id into a rate-limited per-id fallback.
+// the others: only the offending chunk's ids read VerdictUnverified, so a caller
+// can still memoize the negatives the clean chunks definitively answered.
+// Without the scoping, one malformed record dumped every pending id into a
+// rate-limited per-id fallback.
 func TestFetchManyScopesRecordErrorToItsChunk(t *testing.T) {
 	// Two chunks: the first carries a record with no usable title (record-local),
 	// the second is clean and answers nothing (its ids are definitively absent).
@@ -1034,7 +1070,7 @@ func TestFetchManyScopesRecordErrorToItsChunk(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL, 100000, nil)
-	_, err := c.FetchMany(context.Background(), ids)
+	res, err := c.FetchMany(context.Background(), ids)
 
 	var batchErr *BatchRecordError
 	if !errors.As(err, &batchErr) {
@@ -1043,12 +1079,14 @@ func TestFetchManyScopesRecordErrorToItsChunk(t *testing.T) {
 	if !errors.Is(err, ErrBatchRecord) {
 		t.Errorf("errors.Is(err, ErrBatchRecord) = false, want true (the sentinel must survive)")
 	}
-	if len(batchErr.UnverifiedIDs) != batchSize {
-		t.Errorf("UnverifiedIDs = %d ids, want %d (only the failing chunk)", len(batchErr.UnverifiedIDs), batchSize)
+	for _, id := range ids[:batchSize] {
+		if got := res.Verdicts[id]; got != VerdictUnverified {
+			t.Errorf("Verdicts[%d] = %s, want VerdictUnverified (the failing chunk)", id, verdictName(got))
+		}
 	}
-	for _, id := range batchErr.UnverifiedIDs {
-		if id > batchSize {
-			t.Errorf("UnverifiedIDs contains %d, which belongs to the clean second chunk", id)
+	for _, id := range ids[batchSize:] {
+		if got := res.Verdicts[id]; got != VerdictAbsent {
+			t.Errorf("Verdicts[%d] = %s, want VerdictAbsent: it belongs to the clean second chunk", id, verdictName(got))
 		}
 	}
 }
@@ -1118,13 +1156,13 @@ func TestEnvelopeRateLimitCountsOneWait(t *testing.T) {
 	}
 }
 
-// TestFetchManyJoinsEarlierRecordErrorWithLaterAbort pins joinRecordErr's
+// TestFetchManyJoinsEarlierRecordErrorWithLaterAbort pins the error-join
 // preservation rule on the one path that reaches it: a record-local defect in
 // an earlier chunk followed by an ABORTING envelope failure in a later one. The
 // abort must lead (it is the classification every caller reads first) while the
 // poisoned record the scoping design exists to surface stays in the joined
-// error, and the aborting chunk's ids join the earlier record chunk's in
-// UnverifiedIDs so nothing untrustworthy is negative-memoized.
+// error, and no id reads a definitive verdict, so nothing untrustworthy is
+// negative-memoized.
 func TestFetchManyJoinsEarlierRecordErrorWithLaterAbort(t *testing.T) {
 	var mu sync.Mutex
 	calls := 0
@@ -1161,10 +1199,20 @@ func TestFetchManyJoinsEarlierRecordErrorWithLaterAbort(t *testing.T) {
 	}
 	var batchErr *BatchRecordError
 	if !errors.As(err, &batchErr) {
-		t.Fatalf("error = %T %v, want *BatchRecordError scoping the unverified ids", err, err)
+		t.Fatalf("error = %T %v, want *BatchRecordError diagnosing the abort", err, err)
 	}
-	if !slices.Equal(batchErr.UnverifiedIDs, ids) {
-		t.Errorf("UnverifiedIDs = %v, want every id (the record-local chunk plus the aborting one)", batchErr.UnverifiedIDs)
+	if got := res.Verdicts[1]; got != VerdictFound {
+		t.Errorf("Verdicts[1] = %s, want VerdictFound (the poisoned chunk's valid record is still valid)", verdictName(got))
+	}
+	for _, id := range ids[1:batchSize] {
+		if got := res.Verdicts[id]; got != VerdictUnverified {
+			t.Errorf("Verdicts[%d] = %s, want VerdictUnverified (its chunk answered poisoned)", id, verdictName(got))
+		}
+	}
+	for _, id := range ids[batchSize:] {
+		if got := res.Verdicts[id]; got != VerdictUnrequested {
+			t.Errorf("Verdicts[%d] = %s, want VerdictUnrequested (the aborting chunk)", id, verdictName(got))
+		}
 	}
 	if got := res.Media[1].Titles; !slices.Equal(got, []string{"t1"}) {
 		t.Errorf("media[1].Titles = %v, want [t1] (the completed chunk's valid record survives)", got)
@@ -1194,5 +1242,70 @@ func TestDoObservesRateHeadersOnErrorStatus(t *testing.T) {
 	}
 	if wait := c.throttle.reserve(); wait <= 0 {
 		t.Errorf("throttle wait after the low-budget 400 = %v, want the reset window", wait)
+	}
+}
+
+// TestFetchManyScopesUnrequestedIDsToTheAbandonedTail pins the PRODUCER half of
+// the VerdictUnrequested contract. VerdictUnverified says "do not memoize this
+// absence"; VerdictUnrequested says the strictly narrower "no request ever
+// covered this id, so re-batch it 50 at a time" - and match.prefetch switches on
+// exactly that verdict to avoid regressing an abandoned tail into one
+// rate-limited per-id Fetch each. The consumer's own test builds its verdict map
+// by hand, so nothing in the tree fails if FetchMany stops distinguishing the
+// two. Three chunks are needed to tell them apart: chunk 1 completes with a
+// record-local defect (unverified but ANSWERED, so never re-batched), chunk 2
+// aborts, and chunk 3 is never requested.
+func TestFetchManyScopesUnrequestedIDsToTheAbandonedTail(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if n == 1 {
+			// Chunk 1: a missing-id record (record-local) beside a valid sibling.
+			_, _ = io.WriteString(w, `{"data":{"Page":{"media":[{"id":0,"title":{"romaji":"poisoned"}},{"id":1,"format":"TV","seasonYear":2020,"title":{"romaji":"t1"}}]}}}`)
+			return
+		}
+		// Chunk 2: a GraphQL-level envelope error, which aborts the batch.
+		_, _ = io.WriteString(w, `{"errors":[{"message":"boom"}]}`)
+	}))
+	defer srv.Close()
+
+	ids := make([]int, 3*batchSize) // record-local, aborting, never requested
+	for i := range ids {
+		ids[i] = i + 1
+	}
+	c := NewClient(srv.Client(), srv.URL, 100000, nil)
+	res, err := c.FetchMany(context.Background(), ids)
+	if err == nil {
+		t.Fatal("FetchMany must surface the aborting chunk's envelope error")
+	}
+	mu.Lock()
+	gotCalls := calls
+	mu.Unlock()
+	if gotCalls != 2 {
+		t.Errorf("batch calls = %d, want 2 (the third chunk must never be requested after an abort)", gotCalls)
+	}
+	var batchErr *BatchRecordError
+	if !errors.As(err, &batchErr) {
+		t.Fatalf("error = %T %v, want *BatchRecordError", err, err)
+	}
+	for _, id := range ids[batchSize:] {
+		if got := res.Verdicts[id]; got != VerdictUnrequested {
+			t.Errorf("Verdicts[%d] = %s, want VerdictUnrequested: the abandoned tail is the aborting chunk plus every chunk after it, never the answered record-local chunk",
+				id, verdictName(got))
+		}
+	}
+	for _, id := range ids[1:batchSize] {
+		if got := res.Verdicts[id]; got != VerdictUnverified {
+			t.Errorf("Verdicts[%d] = %s, want VerdictUnverified: the record-local chunk ANSWERED, so re-batching it would only re-fetch the same poisoned record",
+				id, verdictName(got))
+		}
+	}
+	if got := res.Verdicts[1]; got != VerdictFound {
+		t.Errorf("Verdicts[1] = %s, want VerdictFound (the first chunk completed)", verdictName(got))
 	}
 }

@@ -3,13 +3,13 @@ package indexer
 import "testing"
 
 func TestDownloadURLEscapesAnimeBytesPasskey(t *testing.T) {
-	got, ok := downloadURL("AB", "/torrents.php?id=1&torrentid=1167293", "a/b?c#d %")
+	got, ok := downloadURLForScope(trackerScope("AB"), "/torrents.php?id=1&torrentid=1167293", "a/b?c#d %")
 	if !ok {
-		t.Fatal("downloadURL returned ok=false, want a grabbable AnimeBytes URL")
+		t.Fatal("downloadURLForScope returned ok=false, want a grabbable AnimeBytes URL")
 	}
 	const want = "https://animebytes.tv/torrent/1167293/download/a%2Fb%3Fc%23d%20%25"
 	if got != want {
-		t.Errorf("downloadURL with reserved passkey bytes = %q, want %q", got, want)
+		t.Errorf("downloadURLForScope with reserved passkey bytes = %q, want %q", got, want)
 	}
 }
 
@@ -49,18 +49,18 @@ func TestDownloadURLBuildsFromTheVouchedForm(t *testing.T) {
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			got, ok := downloadURL(tc.tracker, tc.sourceURL, passkey)
+			got, ok := downloadURLForScope(trackerScope(tc.tracker), tc.sourceURL, passkey)
 			if tc.want == "" {
 				if ok {
-					t.Errorf("downloadURL(%q, %q) = %q, ok=true, want refused", tc.tracker, tc.sourceURL, got)
+					t.Errorf("downloadURLForScope(%q, %q) = %q, ok=true, want refused", tc.tracker, tc.sourceURL, got)
 				}
 				return
 			}
 			if !ok {
-				t.Fatalf("downloadURL(%q, %q) ok=false, want %q", tc.tracker, tc.sourceURL, tc.want)
+				t.Fatalf("downloadURLForScope(%q, %q) ok=false, want %q", tc.tracker, tc.sourceURL, tc.want)
 			}
 			if got != tc.want {
-				t.Errorf("downloadURL(%q, %q) = %q, want %q", tc.tracker, tc.sourceURL, got, tc.want)
+				t.Errorf("downloadURLForScope(%q, %q) = %q, want %q", tc.tracker, tc.sourceURL, got, tc.want)
 			}
 		})
 	}

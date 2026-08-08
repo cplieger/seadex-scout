@@ -836,3 +836,39 @@ func TestGqlErrorsBoundsEnvelopeCardinality(t *testing.T) {
 		t.Errorf("list = %v after a failed decode, want nil", over)
 	}
 }
+
+// TestRetainRequestedReportsUnsolicitedMagnitude pins the magnitude signal on
+// the identity-set violation, the sibling of the one
+// TestParseMediaPageDuplicateIDExcluded already pins for parsePageRecords ("3 of
+// 4 records rejected"). retainRequested names only the FIRST unsolicited id, so
+// without the count an operator cannot tell one stray id apart from an upstream
+// that answered with a wholesale foreign identity set - and the existing
+// coverage exercises the count without asserting it, so deleting the branch
+// leaves the suite green.
+func TestRetainRequestedReportsUnsolicitedMagnitude(t *testing.T) {
+	chunk := []int{1, 2}
+
+	single := map[int]Media{1: {Titles: []string{"t1"}}, 99: {Titles: []string{"injected"}}}
+	err := retainRequested(single, chunk)
+	if err == nil {
+		t.Fatal("retainRequested with one unsolicited id = nil error, want a record-local error")
+	}
+	if !strings.Contains(err.Error(), "unexpected media id 99") {
+		t.Errorf("error = %q, want the offending id named", err)
+	}
+	if strings.Contains(err.Error(), "unsolicited ids dropped") {
+		t.Errorf("error = %q, want no magnitude suffix for a single stray id", err)
+	}
+
+	many := map[int]Media{1: {Titles: []string{"t1"}}, 97: {}, 98: {}, 99: {}}
+	err = retainRequested(many, chunk)
+	if err == nil {
+		t.Fatal("retainRequested with three unsolicited ids = nil error, want a record-local error")
+	}
+	if want := "(3 unsolicited ids dropped)"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want magnitude %q so a wholesale identity-set violation reads differently from one stray id", err, want)
+	}
+	if len(many) != 1 {
+		t.Errorf("page retained %d records, want only the requested id 1", len(many))
+	}
+}

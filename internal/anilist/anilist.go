@@ -49,8 +49,15 @@ const (
 	// lowRemaining is the X-RateLimit-Remaining threshold at or below which
 	// the client proactively waits for the window reset to avoid a 429.
 	lowRemaining = 2
-	// defaultRetryAfter is used when a 429 carries no Retry-After header.
-	defaultRetryAfter = 5 * time.Second
+	// defaultRetryAfter is the wait applied when a 429 carries neither a usable
+	// Retry-After nor a future X-RateLimit-Reset. AniList's budget is per-minute,
+	// so with no upstream evidence the client sits out a whole window: a shorter
+	// value puts every one of maxAttempts attempts AND the shared throttle penalty
+	// inside the same window, which is the failure rateLimitError's reset-window
+	// branch exists to avoid. It is also observeRateHeaders' fallback when a
+	// low-budget response omits the reset header, so both no-evidence paths sit
+	// out one window instead of disagreeing by 12x.
+	defaultRetryAfter = time.Minute
 	// maxRetryAfter caps a server-supplied Retry-After (or reset-window) wait so a
 	// pathological/hostile header cannot stall the AniList fallback and, via penalize,
 	// every subsequent lookup. It doubles as the WithRateLimitRetry ceiling on
@@ -63,46 +70,29 @@ const (
 var ErrNotFound = errors.New("anilist: media not found")
 
 // ErrBatchRecord marks a record-local validation failure inside an otherwise
-// well-formed batch response (match with errors.Is), distinguishing it from a
-// request/envelope failure so FetchMany keeps fetching later chunks instead of
-// reading one poisoned record as a total outage. FetchMany returns it alongside
-// its partial result; batch COMPLETION is signaled separately by
-// BatchResult.Completed, so a completed result whose Media map is empty beside
-// this error means the chunks completed but every record was malformed — still
-// record-local, per-id fallback applies.
+// well-formed batch response, distinguishing it from a request/envelope failure
+// so FetchMany keeps fetching later chunks instead of reading one poisoned
+// record as a total outage. It is FetchMany's own internal classification: what
+// a CALLER reads is BatchResult.Verdicts, which already says per id whether the
+// answer is trustworthy, so no production caller matches on this sentinel.
 var ErrBatchRecord = errors.New("anilist: batch response")
 
-// BatchRecordError names the ids whose CHUNK is not trustworthy as evidence of
-// absence: either the chunk reported a record-local failure, or it never
-// completed at all (FetchMany aborted at or before it). Err is whichever
-// failure produced that scoping - a record-local error wrapping
-// ErrBatchRecord, or an aborting envelope/request error that does NOT wrap it
-// (joined with an earlier chunk's record error when there was one). So
-// errors.Is(err, ErrBatchRecord) classifies the FAILURE and must not be read
-// as "a *BatchRecordError was returned"; use errors.As for that.
+// BatchRecordError is FetchMany's diagnostic for a batch that did not run
+// cleanly end to end. Err is whichever failure produced it - a record-local
+// error wrapping ErrBatchRecord, or an aborting envelope/request error that
+// does NOT wrap it (joined with an earlier chunk's record error when there was
+// one). So errors.Is(err, ErrBatchRecord) classifies the FAILURE and must not
+// be read as "a *BatchRecordError was returned"; use errors.As for that.
 //
-// The scoping is the point. A record-local defect is confined to the chunk it
-// arrived in: the other chunks completed cleanly and their absent ids ARE
-// definitively answered. Returning one undifferentiated error for the whole call
-// made a single malformed record in chunk 1 of 9 withdraw the completion
-// evidence of the other eight, so ~450 already-answered ids each fell through to
-// a rate-limited per-id Fetch - the ~1700-request cold cycle batching exists to
-// avoid. Callers memoize negatives for every requested id EXCEPT UnverifiedIDs.
+// It carries NO id sets. Which ids a failure makes untrustworthy is
+// BatchResult.Verdicts' job (VerdictUnverified for a chunk that answered
+// poisoned, VerdictUnrequested for one never asked), so a caller never joins an
+// error's id lists against the media map to work out what it may memoize.
+// Getting that join wrong was compile-clean and cost ~450 already-answered ids
+// a rate-limited per-id Fetch each - the ~1700-request cold cycle batching
+// exists to avoid.
 type BatchRecordError struct {
 	Err error
-	// UnverifiedIDs are the ids belonging to chunks that reported a
-	// record-local failure OR that never completed (the aborting chunk and every
-	// chunk after it). Absence of one of these from the result set proves
-	// nothing, so it must not be memoized as not-found.
-	UnverifiedIDs []int
-	// UnrequestedIDs are the subset of UnverifiedIDs whose chunk was never
-	// ASKED: the aborting chunk and every chunk after it, which FetchMany
-	// abandoned. They are untrustworthy for the same reason as the rest, but
-	// for the opposite cause - no answer exists yet, rather than an answer
-	// arriving poisoned - so a caller can still resolve them cheaply by
-	// re-batching, whereas re-batching a record-local chunk would only re-fetch
-	// the same poisoned record. Empty for a purely record-local failure.
-	UnrequestedIDs []int
 }
 
 func (e *BatchRecordError) Error() string { return e.Err.Error() }
@@ -110,21 +100,6 @@ func (e *BatchRecordError) Error() string { return e.Err.Error() }
 func (e *BatchRecordError) Unwrap() error { return e.Err }
 
 // --- upstream failure classification ---
-
-// transientStatusError marks an upstream failure this client considers
-// self-healing even though httpx's shared policy does not. httpx's
-// *HTTPStatusError is transient for 502/503/504 only, which leaves a plain 500
-// (AniList's generic GraphQL server fault) and a 408 terminal after a single
-// attempt, and leaves a server-side failure delivered inside a 200 GraphQL
-// envelope invisible to the retrier entirely. Both classes clear on their own,
-// and the queries are idempotent, so they belong inside the bounded budget.
-type transientStatusError struct{ err error }
-
-func (e *transientStatusError) Error() string { return e.err.Error() }
-
-func (e *transientStatusError) Unwrap() error { return e.err }
-
-func (e *transientStatusError) IsTransient() bool { return true }
 
 // retryableUpstreamStatus reports whether an upstream status is a self-healing
 // server-side failure worth another attempt. It covers every 5xx (not just
@@ -162,8 +137,8 @@ func envelopeErrors(raw []byte) gqlErrors {
 func transientEnvelopeError(raw []byte) error {
 	for _, e := range envelopeErrors(raw) {
 		if retryableUpstreamStatus(e.Status) {
-			return &transientStatusError{err: fmt.Errorf("anilist: upstream reported status %d: %s",
-				e.Status, sanitizeUpstreamMessage(e.Message))}
+			return httpx.MarkTransient(fmt.Errorf("anilist: upstream reported status %d: %s",
+				e.Status, sanitizeUpstreamMessage(e.Message)))
 		}
 	}
 	return nil
@@ -213,28 +188,47 @@ type Media struct {
 	Year   int
 }
 
-// BatchResult is what FetchMany resolved, with the batch's COMPLETION carried
-// as a field rather than as a convention on the map's nil-ness (l-f135). The
-// three outcomes a caller must tell apart are then all typed: a total failure
-// (Completed false, with an error), a batch that completed but resolved nothing
-// (Completed true, empty Media), and a completed batch carrying record-local
-// failures (Completed true, with a *BatchRecordError naming the untrustworthy
-// ids). Reading the old nil-versus-empty convention backwards was
-// compile-clean and flipped hundreds of ids between "retry per-id" and
-// "negative-memoize for the memo's TTL".
-//
-// The runner-up shape carried the untrustworthy ids here too (an Unverified
-// field). They stay on *BatchRecordError instead: they scope a FAILURE, so they
-// travel with the error that produced them and cannot be read without it.
+// Verdict is what the batch learned about ONE requested id. It replaces the
+// Completed / UnverifiedIDs / UnrequestedIDs join a caller used to compute from
+// three separate channels: the caller reads one verdict per id and never
+// reasons about chunks.
+type Verdict uint8
+
+const (
+	// VerdictUnrequested means no request ever covered this id (the batch
+	// aborted at or before its chunk). No answer exists yet, so the caller may
+	// re-batch. It is the ZERO value deliberately - an id missing from the map,
+	// or a nil map after a total failure, must read as "no answer" rather than
+	// as an answer nobody produced.
+	VerdictUnrequested Verdict = iota
+	// VerdictFound means BatchResult.Media holds the media for this id.
+	VerdictFound
+	// VerdictAbsent means a completed chunk answered definitively - AniList has
+	// no such anime. Safe to memoize negatively.
+	VerdictAbsent
+	// VerdictUnverified means this id's chunk answered, but not trustworthily (a
+	// record-local defect). Absence proves nothing; re-asking returns the same
+	// poisoned record, so the caller falls back per id.
+	VerdictUnverified
+)
+
+// BatchResult is what FetchMany resolved, answered PER REQUESTED ID rather than
+// through a set of mechanism-shaped channels the caller had to join (l-f5,
+// l-f135). The outcomes a caller must tell apart are then all one value: media
+// exists, absence is definitive, absence proves nothing, or no request covered
+// the id at all. Reading the old nil-versus-empty convention (and later the
+// Completed / UnverifiedIDs / UnrequestedIDs join) backwards was compile-clean
+// and flipped hundreds of ids between "retry per-id" and "negative-memoize for
+// the memo's TTL".
 type BatchResult struct {
 	// Media holds the media that exist, keyed by AniList id. An id AniList has
 	// no anime for is absent; whether that absence is trustworthy evidence is
-	// what Completed and *BatchRecordError.UnverifiedIDs answer.
+	// what Verdicts answers.
 	Media map[int]Media
-	// Completed reports whether the call produced trustworthy absence
-	// evidence: false only when it failed before any chunk completed. It is
-	// true for a fully successful call, including one with no ids to fetch.
-	Completed bool
+	// Verdicts carries exactly one entry per id passed to FetchMany, except
+	// after a TOTAL failure (no chunk completed at all), where it is empty and
+	// every id therefore reads VerdictUnrequested from the zero value.
+	Verdicts map[int]Verdict
 }
 
 // Stats is a snapshot of client activity for cycle observability logs.
@@ -355,20 +349,17 @@ func (c *Client) Fetch(ctx context.Context, aniListID int) (Media, error) {
 
 // FetchMany resolves many AniList ids in batched requests (up to batchSize ids
 // each, every batch throttled and retried like Fetch), returning a BatchResult
-// whose Media holds the media that exist keyed by id. An id AniList has no
-// anime for is simply absent from Media (the caller treats an absent id as
-// not-found).
+// whose Media holds the media that exist keyed by id and whose Verdicts answers,
+// per REQUESTED id, what the batch learned about it.
 //
-// Completion is carried by BatchResult.Completed, not by the map: with an error,
-// Completed=false means NO chunk completed (a total failure) while
-// Completed=true means at least one chunk did — even when Media is empty because
-// every completed chunk definitively found no media — so the caller can fall
-// back to a per-id Fetch for the remainder rather than losing the batch, and can
-// tell an all-not-found chunk apart from a total outage. "The remainder" is
-// named by the returned *BatchRecordError's UnverifiedIDs (the chunks that never
-// completed), so the completed chunks' absences stay usable as definitive
-// evidence. Its UnrequestedIDs narrow that to the ids no request ever covered,
-// which a caller can re-batch instead of falling back one id at a time.
+// Verdicts is the whole caller contract: VerdictFound and VerdictAbsent are the
+// definitive answers a completed chunk produced, VerdictUnverified marks an id
+// whose chunk answered untrustworthily, and VerdictUnrequested marks one no
+// request ever covered - the aborting chunk and every chunk after it - which a
+// caller can re-batch instead of falling back one id at a time. A TOTAL failure
+// (no chunk completed) returns a zero BatchResult with the error, so every id
+// reads VerdictUnrequested and the caller can tell an all-not-found batch apart
+// from an outage without a completion flag.
 //
 // A record-local failure (ErrBatchRecord, a poisoned record inside an otherwise
 // well-formed response) does NOT abort the batch: the chunk still counts as
@@ -381,35 +372,66 @@ func (c *Client) Fetch(ctx context.Context, aniListID int) (Media, error) {
 // cannot inject an unrelated Media or overwrite an earlier chunk's value.
 func (c *Client) FetchMany(ctx context.Context, ids []int) (BatchResult, error) {
 	out := make(map[int]Media, len(ids))
+	verdicts := make(map[int]Verdict, len(ids))
 	completed := false
 	var firstRecordErr error
-	var unverified []int
-	answered := 0
 	for chunk := range slices.Chunk(ids, batchSize) {
 		page, err := c.fetchBatchChunk(ctx, chunk)
 		maps.Copy(out, page)
 		if err != nil && !errors.Is(err, ErrBatchRecord) {
-			return completedBatch(out, completed, unverified, ids[answered:],
-				joinRecordErr(firstRecordErr, err))
+			return abortedBatch(out, verdicts, completed, err, firstRecordErr)
 		}
-		answered += len(chunk)
 		completed = true
+		// A record-local chunk's ABSENCES prove nothing, but the records it did
+		// return are still valid - so a found id is VerdictFound whichever kind
+		// of chunk answered it, and only the absences differ.
+		absent := VerdictAbsent
 		if err != nil {
-			// Record-local: this CHUNK's absences prove nothing, but every
-			// other chunk still completed cleanly and its absences do. Collect
-			// the untrustworthy ids rather than failing the whole call, so the
-			// caller can still memoize the negatives it legitimately learned.
-			unverified = append(unverified, chunk...)
+			absent = VerdictUnverified
 			if firstRecordErr == nil {
 				firstRecordErr = err
 			}
 		}
+		recordChunkVerdicts(verdicts, chunk, page, absent)
 	}
 	if firstRecordErr != nil {
-		return BatchResult{Media: out, Completed: true},
-			&BatchRecordError{UnverifiedIDs: unverified, Err: firstRecordErr}
+		return BatchResult{Media: out, Verdicts: verdicts}, &BatchRecordError{Err: firstRecordErr}
 	}
-	return BatchResult{Media: out, Completed: true}, nil
+	return BatchResult{Media: out, Verdicts: verdicts}, nil
+}
+
+// abortedBatch builds FetchMany's answer for a chunk failure that ABORTS the
+// batch. The aborting chunk and every chunk after it keep their
+// VerdictUnrequested zero value, so the ids no request covered are nameable
+// without a second id list. With nothing completed yet the whole call is a total
+// failure; otherwise the completed chunks' verdicts ride along so their absences
+// stay definitive evidence. An earlier chunk's record diagnostic is preserved
+// with the abort leading, since the abort is the classification a caller reads
+// first.
+func abortedBatch(
+	out map[int]Media, verdicts map[int]Verdict, completed bool, err, firstRecordErr error,
+) (BatchResult, error) {
+	if firstRecordErr != nil {
+		err = errors.Join(err, firstRecordErr)
+	}
+	if !completed {
+		return BatchResult{}, err
+	}
+	return BatchResult{Media: out, Verdicts: verdicts}, &BatchRecordError{Err: err}
+}
+
+// recordChunkVerdicts records one completed chunk's per-id verdicts: an id the
+// page answered is VerdictFound, and every other requested id takes the absent
+// verdict the chunk's trustworthiness selected (VerdictAbsent for a clean chunk,
+// VerdictUnverified for a record-local failure).
+func recordChunkVerdicts(verdicts map[int]Verdict, chunk []int, page map[int]Media, absent Verdict) {
+	for _, id := range chunk {
+		if _, ok := page[id]; ok {
+			verdicts[id] = VerdictFound
+			continue
+		}
+		verdicts[id] = absent
+	}
 }
 
 // fetchBatchChunk fetches and parses one chunk of FetchMany's id list. A
@@ -425,49 +447,6 @@ func (c *Client) fetchBatchChunk(ctx context.Context, chunk []int) (map[int]Medi
 	}
 	page, parseErr := parseMediaPage(raw)
 	return page, errors.Join(parseErr, retainRequested(page, chunk))
-}
-
-// completedBatch applies FetchMany's completion contract to an aborting chunk
-// failure: no chunk completed yet means a total failure (a zero BatchResult, so
-// Completed reads false), while an earlier completed chunk means the merged
-// partial result rides along with Completed set, so the caller can fall back for
-// the remainder.
-//
-// "The remainder" has to be nameable for the caller to honor it, so a partial
-// abort scopes the error the same way a record-local failure does: unverified
-// carries every id whose chunk did NOT complete (the aborting chunk and every
-// chunk after it, plus any earlier record-local chunk), and the completed
-// chunks' absences stay definitive evidence the caller may memoize. Without
-// the scoping an abort in chunk 3 of 9 withdrew the completion evidence of
-// chunks 1-2 as well - the same defect BatchRecordError exists to prevent on
-// the record-local path.
-//
-// unrequested is the abandoned tail on its own (the aborting chunk and the ones
-// after it, never a record-local chunk), carried separately so the caller can
-// re-batch exactly the ids no request has covered yet instead of regressing all
-// of them to one per-id request each.
-func completedBatch(out map[int]Media, completed bool, recordLocal, unrequested []int, err error) (BatchResult, error) {
-	if !completed {
-		return BatchResult{}, err
-	}
-	return BatchResult{Media: out, Completed: true}, &BatchRecordError{
-		UnverifiedIDs:  slices.Concat(recordLocal, unrequested),
-		UnrequestedIDs: unrequested,
-		Err:            err,
-	}
-}
-
-// joinRecordErr preserves an earlier chunk's record-local diagnostic when a
-// later chunk aborts the batch. The aborting error leads, so the abort stays
-// the classification every caller reads first, while the poisoned record that
-// the record-scoping design exists to surface is no longer silently dropped.
-// The ids of that earlier chunk are already inside completedBatch's unverified
-// set, so carrying the diagnostic never widens what the caller may memoize.
-func joinRecordErr(recordErr, abortErr error) error {
-	if recordErr == nil {
-		return abortErr
-	}
-	return errors.Join(abortErr, recordErr)
 }
 
 // retainRequested enforces FetchMany's identity-set invariant on one parsed
@@ -550,7 +529,7 @@ func (c *Client) do(ctx context.Context, body []byte) ([]byte, error) {
 			statusErr = fmt.Errorf("anilist: unexpected status %d", resp.StatusCode)
 		}
 		if retryableUpstreamStatus(resp.StatusCode) {
-			return nil, &transientStatusError{err: statusErr}
+			return nil, httpx.MarkTransient(statusErr)
 		}
 		return nil, statusErr
 	}
@@ -650,7 +629,7 @@ func (c *Client) observeRateHeaders(resp *http.Response) {
 	}
 	wait := resetWait(resp)
 	if wait <= 0 {
-		wait = time.Minute
+		wait = defaultRetryAfter
 	}
 	upstream := wait
 	wait = c.backOff(wait)
@@ -844,11 +823,13 @@ type gqlErrors []gqlError
 // existing policy: transientEnvelopeError already treats an undecodable body
 // as "no envelope error" and the parsers already surface it as a plain
 // retryable error.
+//
+// A JSON null needs no pre-check here: bounded.Array reports it through
+// Decoder.Open (ok=false, no error) and yields a nil slice, which is exactly
+// this field's null contract — unlike boundedMediaList, which must read null as
+// UNSET and therefore keeps its own pre-check.
 func (l *gqlErrors) UnmarshalJSON(data []byte) error {
 	*l = nil
-	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
-		return nil
-	}
 	dec := bounded.NewDecoder(bytes.NewReader(data), 0)
 	records, err := bounded.Array(dec, nil, maxEnvelopeErrors, "errors",
 		func(e *gqlError) error { return dec.Decode(e) })
@@ -956,9 +937,10 @@ func validateResponse(raw []byte) error {
 // GraphQL failure, a mixed error envelope, a partial response (non-null Media
 // alongside field-resolution errors), or a malformed envelope must surface as
 // a plain error (degraded, retried next cycle) rather than permanently
-// suppressing the id. When expectedID is positive it also enforces the
-// single-response identity invariant: a decoded Media whose id differs from
-// the requested id is rejected as a plain (transient, non-memoized) error —
+// suppressing the id. It also enforces the single-response identity invariant
+// unconditionally: a decoded Media whose id differs from expectedID is
+// rejected as a plain (transient, non-memoized) error, so a caller passing 0
+// asserts the record carries no id —
 // the batch path's retainRequested equivalent for the per-id fallback, so a
 // malformed or compromised endpoint cannot answer a request for one id with
 // a valid Media for another and have it memoized under the wrong key.
@@ -978,7 +960,7 @@ func parseMediaForID(raw []byte, expectedID int) (Media, error) {
 	if err = json.Unmarshal(mediaRaw, &media); err != nil {
 		return Media{}, fmt.Errorf("anilist: decode Media: %s", sanitizeUpstreamMessage(err.Error()))
 	}
-	if expectedID > 0 && media.ID != expectedID {
+	if media.ID != expectedID {
 		return Media{}, fmt.Errorf("anilist: response media id %d does not match requested id %d", media.ID, expectedID)
 	}
 	parsed, err := media.toMedia()

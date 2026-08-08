@@ -105,6 +105,14 @@ func (w *FeedWriter) Advance(ctx context.Context, window []seadex.Entry, info En
 		return nil
 	}
 
+	// The two accumulating members a window cannot re-derive must be carried in
+	// the form loadPrevious already VOUCHED, not the raw decoded one: snap holds
+	// the file as it decoded, so re-persisting snap.Titles / snap.HarvestCursor
+	// rides an over-limit cached title or an over-cap rotation cursor into every
+	// tick's snapshot - loadPrevious drops both and warns, but only Rebuild
+	// consumes that verdict. For an honest snapshot the two are byte-identical
+	// (TestAdvancePreservesTitlesAndHarvestCursorVerbatim still holds).
+	snap.Titles, snap.HarvestCursor = prev.titles, prev.cursor
 	if err := w.persist(ctx, &snap); err != nil {
 		return err
 	}
@@ -114,7 +122,16 @@ func (w *FeedWriter) Advance(ctx context.Context, window []seadex.Entry, info En
 		"journal_new", js.added, "journal_pruned", js.pruned,
 		"journal_dropped", js.dropped, "journal_rebased", js.rebased,
 		"skipped_unresolvable", js.unresolvable,
+		"ab_releases_skipped", js.abSkippedNoPasskey,
 		"seen", len(snap.Seen))
+	if js.abSkippedNoPasskey > 0 && w.enablement.enabled(upstreamAB) {
+		// The same nudge Rebuild emits, on the path that actually admits most new
+		// curation. It cannot be deferred to the reconcile: this tick folds the
+		// release's identity into the never-pruned ledger, so the next full pass
+		// reports isNew=false for it and counts zero.
+		w.log.Warn("ab RSS feed empty of grabbable links: set indexer.ab_passkey to serve AnimeBytes releases",
+			"ab_releases_skipped", js.abSkippedNoPasskey)
+	}
 	return nil
 }
 
@@ -167,13 +184,7 @@ func expireCarried(p *journalPass, feed []journalItem, scope string) []journalIt
 			p.js.dropped++
 			continue
 		}
-		if !journalIdentityMatches(&it) {
-			// The GUID itself is not logged: it is an attacker-shapeable value
-			// from a tamperable file, and the key is the diagnostic that
-			// identifies the refused record.
-			p.w.log.Debug("indexer journal item refused: stored GUID no longer proves its journal identity",
-				"key", it.Key, "cause", "guid-identity")
-			p.js.dropped++
+		if p.refusesUnprovenGUID(&it) {
 			continue
 		}
 		if !p.prepareCarriedItem(&it) {

@@ -2,7 +2,6 @@ package audit
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -19,6 +18,10 @@ import (
 // returned errors (logged by main) may carry the configured directory value.
 // Filesystem calls keep the real path — the report pair is still written to
 // the configured directory — only the diagnostics are redacted.
+//
+// The masking MECHANISM is exercised in internal/pathredact (Text/Err/Logger
+// and their guard branches); what these cases pin is this package's use of it:
+// the marker it spells, and every pipeline surface it must be applied at.
 func TestReportPathsRedactedFromLogsAndErrors(t *testing.T) {
 	const sentinel = "sekret-passkey-sentinel"
 
@@ -69,7 +72,8 @@ func TestReportPathsRedactedFromLogsAndErrors(t *testing.T) {
 
 	t.Run("lock failure error carries no report path", func(t *testing.T) {
 		// The report lock lives in internal/cycle and returns the real path;
-		// RedactReportDirErr is the policy main applies to it. MkdirAll fails on
+		// redactPathErr is the report-dir policy applied to it (main spells
+		// the same policy through internal/pathredact). MkdirAll fails on
 		// the sentinel-named intermediate component, so the *os.PathError
 		// carries an ancestor of dir rather than dir itself; the ancestor
 		// redaction must still mask it.
@@ -83,77 +87,10 @@ func TestReportPathsRedactedFromLogsAndErrors(t *testing.T) {
 		if lockErr == nil {
 			t.Fatal("MkdirAll(parent is a regular file) = nil, want error")
 		}
-		err := RedactReportDirErr(dir, fmt.Errorf("create report dir: %w", lockErr))
+		err := redactPathErr(dir, fmt.Errorf("create report dir: %w", lockErr))
 
 		if strings.Contains(err.Error(), sentinel) {
 			t.Errorf("redacted lock error leaks the report.dir value: %v", err)
 		}
 	})
-}
-
-// TestRedactPathErrRedactsMessageAndPreservesCause pins redactPathErr's
-// documented errors.Is/As contract, not just its rendered text: the redacted
-// wrapper must keep the original cause reachable so shutdown/errno
-// classification survives the masking. A future simplification that preserves
-// the redacted message but drops the cause would keep the rendered-text
-// redaction tests green while silently breaking errors.Is(os.ErrPermission)
-// and errors.As(*os.PathError) for every report consumer.
-func TestRedactPathErrRedactsMessageAndPreservesCause(t *testing.T) {
-	const dir = "/config/sekret-passkey/reports"
-	cause := &os.PathError{Op: "open", Path: dir + "/report.json", Err: os.ErrPermission}
-
-	got := redactPathErr(dir, cause)
-
-	if got == nil {
-		t.Fatal("redactPathErr() = nil, want a wrapped error")
-	}
-	if strings.Contains(got.Error(), "sekret-passkey") {
-		t.Errorf("redactPathErr() leaked report.dir in %q", got)
-	}
-	if !strings.Contains(got.Error(), redactedPath) {
-		t.Errorf("redactPathErr() = %q, want the %q marker", got, redactedPath)
-	}
-	if !errors.Is(got, os.ErrPermission) {
-		t.Errorf("errors.Is(redactPathErr(), os.ErrPermission) = false")
-	}
-	var pathErr *os.PathError
-	if !errors.As(got, &pathErr) || pathErr != cause {
-		t.Errorf("errors.As(redactPathErr(), *os.PathError) = %v, want original cause %v", pathErr, cause)
-	}
-	if redactPathErr(dir, nil) != nil {
-		t.Error("redactPathErr(nil) must remain nil")
-	}
-	clean := errors.New("clean diagnostic")
-	if unchanged := redactPathErr(dir, clean); unchanged != clean {
-		t.Errorf("redactPathErr(clean error) = %v, want the original error identity", unchanged)
-	}
-}
-
-// TestRedactPathTextGuards pins redactPathText's documented guard branches:
-// an empty configured dir redacts nothing (there is no value to mask), a
-// degenerate dir ("." or "/") skips redaction entirely (replacing it would
-// rewrite every dot or slash in the diagnostic text), and a real dir is
-// masked along with its path-prefix ancestors (an os.PathError for a failed
-// intermediate MkdirAll component carries an ancestor, not the full dir).
-func TestRedactPathTextGuards(t *testing.T) {
-	tests := []struct {
-		name string
-		dir  string
-		in   string
-		want string
-	}{
-		{"empty dir redacts nothing", "", "open /config/reports/report.json: denied", "open /config/reports/report.json: denied"},
-		{"degenerate dot dir leaves dots alone", ".", "read report.json: unexpected EOF", "read report.json: unexpected EOF"},
-		{"degenerate root dir leaves slashes alone", "/", "mkdir /config/reports: denied", "mkdir /config/reports: denied"},
-		{"unclean degenerate dir is still skipped", "//", "mkdir /config/reports: denied", "mkdir /config/reports: denied"},
-		{"configured dir is masked", "/config/sekret/reports", "open /config/sekret/reports/report.json: denied", "open " + redactedPath + "/report.json: denied"},
-		{"ancestor of the dir is masked", "/config/sekret/reports", "mkdir /config/sekret: denied", "mkdir " + redactedPath + ": denied"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := redactPathText(tt.dir, tt.in); got != tt.want {
-				t.Errorf("redactPathText(%q, %q) = %q, want %q", tt.dir, tt.in, got, tt.want)
-			}
-		})
-	}
 }

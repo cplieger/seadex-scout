@@ -29,7 +29,31 @@ func (f fakeAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResul
 			out[id] = m
 		}
 	}
-	return anilist.BatchResult{Media: out, Completed: true}, nil
+	return anilist.BatchResult{Media: out, Verdicts: batchVerdicts(ids, out)}, nil
+}
+
+// batchVerdicts builds the per-id verdicts a CLEAN batch over ids produces:
+// VerdictFound for every id media answered, VerdictAbsent for the rest (a
+// completed chunk said AniList has no such anime).
+func batchVerdicts(ids []int, media map[int]anilist.Media) map[int]anilist.Verdict {
+	return batchVerdictsAbsentAs(ids, media, anilist.VerdictAbsent)
+}
+
+// batchVerdictsAbsentAs is batchVerdicts with the verdict an UNANSWERED id gets
+// spelled out, for a fake modelling a chunk whose absences prove nothing
+// (VerdictUnverified) or ids no request ever covered (VerdictUnrequested). A
+// found id is VerdictFound either way: a poisoned chunk's valid records are
+// still valid.
+func batchVerdictsAbsentAs(ids []int, media map[int]anilist.Media, absent anilist.Verdict) map[int]anilist.Verdict {
+	verdicts := make(map[int]anilist.Verdict, len(ids))
+	for _, id := range ids {
+		if _, ok := media[id]; ok {
+			verdicts[id] = anilist.VerdictFound
+			continue
+		}
+		verdicts[id] = absent
+	}
+	return verdicts
 }
 
 // TestFindByIDArrConsistency covers the arr-gate: a MOVIE record must resolve
@@ -163,7 +187,8 @@ func (c *countingAniList) Fetch(_ context.Context, _ int) (anilist.Media, error)
 
 func (c *countingAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
 	c.calls++
-	return anilist.BatchResult{Media: map[int]anilist.Media{}, Completed: true}, nil
+	media := map[int]anilist.Media{}
+	return anilist.BatchResult{Media: media, Verdicts: batchVerdicts(ids, media)}, nil
 }
 
 // TestMatchNoTitleFallbackWhenRecordHasArrID verifies the AniList title fallback
@@ -225,7 +250,7 @@ func (b *batchCountingAniList) FetchMany(_ context.Context, ids []int) (anilist.
 			out[id] = m
 		}
 	}
-	return anilist.BatchResult{Media: out, Completed: true}, nil
+	return anilist.BatchResult{Media: out, Verdicts: batchVerdicts(ids, out)}, nil
 }
 
 // TestMatchBatchesAniListLookups verifies the cold-cycle path: several id-less
@@ -766,8 +791,12 @@ func (p *partialThenPerIDAniList) FetchMany(_ context.Context, ids []int) (anili
 		}
 	}
 	// A PARTIAL failure: a chunk completed (so the result is usable) and a
-	// later one did not.
-	return anilist.BatchResult{Media: out, Completed: true}, context.DeadlineExceeded
+	// later one did not, so an id this batch did not answer proves nothing and
+	// keeps the per-id fallback.
+	return anilist.BatchResult{
+		Media:    out,
+		Verdicts: batchVerdictsAbsentAs(ids, out, anilist.VerdictUnverified),
+	}, context.DeadlineExceeded
 }
 
 // TestNewLibIndexNilSnapshot pins the defensive nil-snapshot guard: a nil

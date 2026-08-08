@@ -348,16 +348,25 @@ func TestValidateRefreshedRecordsPreviousPopulationAtSignificanceGateRejected(t 
 	candidate := make([]Record, 0, body)
 	for id := 1; id <= body; id++ {
 		p := Record{AniListID: id, TvdbID: id}
+		c := Record{AniListID: id, TvdbID: id}
 		if id <= 2 {
 			p.Type = "TV" // typed population == coverageFloor(200) == 2
 		}
+		if id <= 1 {
+			c.Type = "TV" // one survivor: below the candidate floor, not extinct
+		}
 		previous = append(previous, p)
-		candidate = append(candidate, Record{AniListID: id, TvdbID: id})
+		candidate = append(candidate, c)
 	}
 	if got, want := typedRecordCount(previous), coverageFloor(len(previous)); got != want {
 		t.Fatalf("previous typed population = %d, want exactly the significance gate %d", got, want)
 	}
-	if err := validateRefreshedRecords(previous, candidate, len(candidate)); err == nil {
-		t.Error("typed collapse against a previous population exactly at the significance gate returned nil error, want rejection")
+	err := validateRefreshedRecords(previous, candidate, len(candidate))
+	if err == nil {
+		t.Fatal("typed loss against a previous population exactly at the significance gate returned nil error, want rejection")
+	}
+	const wantMsg = "type coverage 1/200 is below minimum 2 (previous cache carried 2 typed records)"
+	if err.Error() != wantMsg {
+		t.Errorf("rejection = %q, want the loss-relative coverage floor %q (an extinction message means the gate is still unexercised)", err, wantMsg)
 	}
 }

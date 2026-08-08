@@ -15,6 +15,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/notify"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/seadexapi"
 	"github.com/cplieger/seadex-scout/internal/state"
 	"github.com/cplieger/slogx/capture"
 )
@@ -84,7 +85,7 @@ func windowEntry(alID, viewID int) seadex.Entry {
 // the call log.
 func countWindowModes(sea *fakeSeaDex) (full, window int) {
 	for _, mode := range sea.fetchModes() {
-		if mode == seadex.FetchWindow {
+		if mode == seadexapi.FetchWindow {
 			window++
 			continue
 		}
@@ -324,25 +325,30 @@ func TestTickEmptyRunWarnsAtItsLatch(t *testing.T) {
 		entries: seadexFrierenEntry(),
 		countFn: func(context.Context, time.Time) (int, error) { return 0, nil },
 	}
-	// A reconcile every 1000 iterations, so the whole run below is ticks.
-	s, _ := newTickScout(logger, sea, nil, nil, 1000)
+	// A 15-minute cadence (the default): the empty-run latch derives to 192
+	// ticks there. That tolerance is 48h of wall clock, which is TWO reconcile
+	// periods by construction, so a reconcile necessarily intervenes in a run
+	// this long - drive the counter itself rather than the iteration index. A
+	// reconcile leaves emptyRun untouched; only a productive tick resets it.
+	s, _ := newTickScout(logger, sea, nil, nil, 96)
 	if healthy := s.Cycle(context.Background()); !healthy {
 		t.Fatal("reconcile healthy=false, want true")
 	}
 
+	latch := s.latchTicks(emptyRunSilence)
 	const warn = "no SeaDex change seen for a very long run of ticks; " +
 		"if this persists, check this container's clock against the upstream, " +
 		"and that the probe is reaching releases.moe rather than something answering for it"
-	for i := 1; i <= emptyRunLatch+2; i++ {
+	for i := 1; s.emptyRun <= latch+1; i++ {
 		if healthy := s.Cycle(context.Background()); !healthy {
-			t.Fatalf("tick %d healthy=false, want true", i)
+			t.Fatalf("iteration %d healthy=false, want true", i)
 		}
 		want := 0
-		if i >= emptyRunLatch {
+		if s.emptyRun >= latch {
 			want = 1
 		}
 		if got := recorder.CountExact(warn); got != want {
-			t.Fatalf("after %d consecutive empty ticks the latch WARN count = %d, want %d", i, got, want)
+			t.Fatalf("after %d consecutive empty ticks the latch WARN count = %d, want %d", s.emptyRun, got, want)
 		}
 	}
 	if got := recorder.CountLevel(slog.LevelError, "no SeaDex change seen"); got != 0 {
@@ -367,18 +373,22 @@ func TestTickOversizeWindowSkipsFetchAndEscalates(t *testing.T) {
 		entries:       seadexFrierenEntry(),
 		windowEntries: []seadex.Entry{windowEntry(1001, 501)},
 		countFn: func(context.Context, time.Time) (int, error) {
-			return seadex.MaxWindowEntries, nil
+			return seadexapi.MaxWindowEntries, nil
 		},
 	}
 	feed := &fakeFeed{}
-	s, _ := newTickScout(logger, sea, feed, nil, 1000)
+	// A 15-minute cadence (the default), where the frozen-fast-path tolerance
+	// derives to 8 ticks - well inside one reconcile period, so the whole run
+	// below is ticks.
+	s, _ := newTickScout(logger, sea, feed, nil, 96)
 	if healthy := s.Cycle(context.Background()); !healthy {
 		t.Fatal("reconcile healthy=false, want true")
 	}
 
+	latch := s.latchTicks(frozenFastPathTolerance)
 	const warnMsg = "SeaDex change window too large to fetch; deferring to the reconcile"
 	const errSub = "SeaDex change window has been too large to fetch repeatedly"
-	for i := 1; i <= oversizeRunLatch; i++ {
+	for i := 1; i <= latch; i++ {
 		if healthy := s.Cycle(context.Background()); !healthy {
 			t.Fatalf("oversize tick %d healthy=false, want true (it is degraded, not unhealthy)", i)
 		}
@@ -386,7 +396,7 @@ func TestTickOversizeWindowSkipsFetchAndEscalates(t *testing.T) {
 			t.Errorf("after %d oversize ticks oversizeRun = %d, want %d", i, s.oversizeRun, i)
 		}
 		wantWarns, wantErrors := i, 0
-		if i >= oversizeRunLatch {
+		if i >= latch {
 			// The latch tick escalates INSTEAD of warning, so the WARN count
 			// stops one short of the tick count.
 			wantWarns, wantErrors = i-1, 1
@@ -421,9 +431,9 @@ func TestTickOversizeBoundIsInclusive(t *testing.T) {
 		wantFetch  bool
 		wantWarned bool
 	}{
-		"one below the bound fetches": {seadex.MaxWindowEntries - 1, true, false},
-		"exactly the bound defers":    {seadex.MaxWindowEntries, false, true},
-		"above the bound defers":      {seadex.MaxWindowEntries + 1, false, true},
+		"one below the bound fetches": {seadexapi.MaxWindowEntries - 1, true, false},
+		"exactly the bound defers":    {seadexapi.MaxWindowEntries, false, true},
+		"above the bound defers":      {seadexapi.MaxWindowEntries + 1, false, true},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -464,10 +474,10 @@ func TestTickOversizeBoundIsInclusive(t *testing.T) {
 // about the reset and not about a counter that never moved.
 func TestTickProductiveResetsBothRuns(t *testing.T) {
 	tests := map[string]struct {
-		empty, oversize int
+		primeEmpty bool
 	}{
-		"after a long empty run":    {emptyRunLatch - 1, 0},
-		"after a long oversize run": {0, oversizeRunLatch - 1},
+		"after a long empty run":    {primeEmpty: true},
+		"after a long oversize run": {primeEmpty: false},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -480,7 +490,14 @@ func TestTickProductiveResetsBothRuns(t *testing.T) {
 			if healthy := s.Cycle(context.Background()); !healthy {
 				t.Fatal("reconcile healthy=false, want true")
 			}
-			s.emptyRun, s.oversizeRun = tc.empty, tc.oversize
+			// Both counters are latched against a wall-clock tolerance
+			// converted at this loop's interval, so prime from the derived
+			// value rather than a literal count.
+			if tc.primeEmpty {
+				s.emptyRun = s.latchTicks(emptyRunSilence) - 1
+			} else {
+				s.oversizeRun = s.latchTicks(frozenFastPathTolerance) - 1
+			}
 
 			if healthy := s.Cycle(context.Background()); !healthy {
 				t.Fatal("productive tick healthy=false, want true")
@@ -861,9 +878,9 @@ func TestTickWindowIsWiderThanTheInterval(t *testing.T) {
 	if age < changeWindow-time.Minute || age > changeWindow+time.Minute {
 		t.Errorf("probe since = %v before now, want ~%v (changeWindow)", age, changeWindow)
 	}
-	if changeWindow <= s.deps.PollInterval {
+	if changeWindow <= s.pollInterval {
 		t.Errorf("changeWindow %v is not wider than the poll interval %v; a missed tick would be unrecoverable",
-			changeWindow, s.deps.PollInterval)
+			changeWindow, s.pollInterval)
 	}
 }
 
@@ -932,7 +949,7 @@ func TestEveryTickExitEmitsALineTheDeadmanCounts(t *testing.T) {
 				return &fakeSeaDex{
 					entries: seadexFrierenEntry(),
 					countFn: func(context.Context, time.Time) (int, error) {
-						return seadex.MaxWindowEntries, nil
+						return seadexapi.MaxWindowEntries, nil
 					},
 				}
 			},

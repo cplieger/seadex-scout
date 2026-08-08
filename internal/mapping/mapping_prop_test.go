@@ -64,10 +64,18 @@ func TestDeduplicateRecordsIndexOracle(t *testing.T) {
 			}
 			seen[r.AniListID] = struct{}{}
 			// buildIndex is the last-write-wins oracle: the survivor must be
-			// the WHOLE last occurrence, every field intact.
+			// the WHOLE last occurrence, every field intact. buildIndex also
+			// canonicalizes on insertion (h-f25 moved the id-usability rule to
+			// that boundary), so the comparison is against the canonical form of
+			// the survivor - canonicalize allocates fresh slices, so this cannot
+			// disturb the deduplicated set.
 			got, ok := rawIdx.Lookup(r.AniListID)
-			if !ok || !reflect.DeepEqual(got, r) {
-				t.Fatalf("raw index disagrees for ID %d: index %+v ok=%v, deduplicated %+v", r.AniListID, got, ok, r)
+			want := r
+			want.TmdbMovies = slices.Clone(r.TmdbMovies)
+			want.IMDbIDs = slices.Clone(r.IMDbIDs)
+			want.canonicalize()
+			if !ok || !reflect.DeepEqual(got, want) {
+				t.Fatalf("raw index disagrees for ID %d: index %+v ok=%v, deduplicated %+v", r.AniListID, got, ok, want)
 			}
 		}
 		again := deduplicateRecords(out)

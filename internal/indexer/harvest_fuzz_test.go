@@ -7,16 +7,16 @@ import (
 )
 
 // FuzzHarvestCheckpointCodec exercises the persisted harvest_cursor decoder
-// on arbitrary snapshot strings (the codec's own contract covers hand-edited
+// on arbitrary snapshot strings (the decoder's own contract covers hand-edited
 // or corrupted snapshots). Invariants: decode never panics, the surviving
 // rotation cursor is always either empty or exactly the "<scope>:<alID>" shape
 // harvestCursorKey produces (a garbage value must never be carried forward
-// verbatim into every future snapshot), the encoded cursor never exceeds
+// verbatim into every future snapshot), it never exceeds
 // maxPersistedCursorBytes (the reader discards an over-cap cursor whole), and
-// one decode/encode round is a fixpoint - unconditionally now that the
-// checkpoint is the bare cursor and can no longer render the JSON object form.
-// A leftover "pages" key from a pre-paging-removal snapshot is part of the
-// seed corpus: it must decode as an ordinary Last-only checkpoint.
+// decode is its own fixpoint now that the persisted form is the bare cursor.
+// The JSON object forms a pre-paging-removal binary could persist stay in the
+// seed corpus: no released binary can write them, so they must now decode to
+// the empty baseline rather than being carried forward.
 func FuzzHarvestCheckpointCodec(f *testing.F) {
 	f.Add("")
 	f.Add("nyaa:1500")
@@ -27,17 +27,18 @@ func FuzzHarvestCheckpointCodec(f *testing.F) {
 	f.Add(`{"pages":{"nyaa:7":92233720368547758}}`)
 	f.Add("  {not json")
 	f.Fuzz(func(t *testing.T, raw string) {
-		cp, _ := decodeHarvestCheckpoint(raw)
-		if cp.Last != "" && validRotationCursor(cp.Last) != cp.Last {
-			t.Fatalf("decodeHarvestCheckpoint(%q).Last = %q, want empty or a valid rotation cursor", raw, cp.Last)
+		cursor, _ := decodeHarvestCursor(raw)
+		if cursor != "" {
+			if _, _, ok := parseRotationCursor(cursor); !ok {
+				t.Fatalf("decodeHarvestCursor(%q) = %q, want empty or a valid rotation cursor", raw, cursor)
+			}
 		}
-		encoded := encodeHarvestCheckpoint(cp)
-		if len(encoded) > maxPersistedCursorBytes {
-			t.Fatalf("encodeHarvestCheckpoint produced %d bytes, want <= %d (the reader discards an over-cap cursor whole)",
-				len(encoded), maxPersistedCursorBytes)
+		if len(cursor) > maxPersistedCursorBytes {
+			t.Fatalf("decodeHarvestCursor kept %d bytes, want <= %d (the reader discards an over-cap cursor whole)",
+				len(cursor), maxPersistedCursorBytes)
 		}
-		if again, _ := decodeHarvestCheckpoint(encoded); again != cp {
-			t.Fatalf("codec not a fixpoint: decode(%q) = %+v, re-round-trip gives %+v", raw, cp, again)
+		if again, _ := decodeHarvestCursor(cursor); again != cursor {
+			t.Fatalf("decode not a fixpoint: decode(%q) = %q, re-decode gives %q", raw, cursor, again)
 		}
 	})
 }

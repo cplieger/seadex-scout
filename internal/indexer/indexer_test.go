@@ -77,7 +77,7 @@ func TestParseTorznab(t *testing.T) {
 		t.Errorf("categories = %v, want [5070]", it.Categories)
 	}
 	if it.DownloadURL != "http://prowlarr:9696/1/download?apikey=x&link=abc" {
-		t.Errorf("downloadURL = %q", it.DownloadURL)
+		t.Errorf("downloadURLForScope = %q", it.DownloadURL)
 	}
 	if it.PubDate.IsZero() {
 		t.Error("pubDate not parsed")
@@ -1299,9 +1299,9 @@ func TestDownloadURL(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			gotURL, gotOK := downloadURL(tc.tracker, tc.src, tc.passkey)
+			gotURL, gotOK := downloadURLForScope(trackerScope(tc.tracker), tc.src, tc.passkey)
 			if gotURL != tc.wantURL || gotOK != tc.wantOK {
-				t.Errorf("downloadURL(%q, %q, passkey) = (%q, %v), want (%q, %v)", tc.tracker, tc.src, gotURL, gotOK, tc.wantURL, tc.wantOK)
+				t.Errorf("downloadURLForScope(%q, %q, passkey) = (%q, %v), want (%q, %v)", tc.tracker, tc.src, gotURL, gotOK, tc.wantURL, tc.wantOK)
 			}
 		})
 	}

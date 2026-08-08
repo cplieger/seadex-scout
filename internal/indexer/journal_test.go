@@ -320,14 +320,18 @@ func TestRebuildPrunesAgedItemsAndTitles(t *testing.T) {
 	snap.Titles = map[string]string{"nyaa:42": "Show S01 1080p BluRay [G]"}
 	writeSnapshotFile(t, path, &snap)
 
-	// Within the window the cached title is served.
+	// Within the window the cached title is served. The harvested title claims a
+	// whole season ("S01") over a file list that proves ONE episode, so the
+	// pack-claim correction rewrites its season token in place before serving -
+	// the corrected form is still the HARVESTED text (group + BluRay), which is
+	// what distinguishes it from the synthesized "Show - S01E01 (1080p) [G]".
 	t1 := t0.Add(24 * time.Hour)
 	w.now = func() time.Time { return t1 }
 	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
 		t.Fatalf("within-window Rebuild: %v", err)
 	}
 	snap = readSnapshotFile(t, path)
-	if len(snap.NyaaFeed) != 1 || snap.NyaaFeed[0].Title != "Show S01 1080p BluRay [G]" {
+	if len(snap.NyaaFeed) != 1 || snap.NyaaFeed[0].Title != "Show S01E01 1080p BluRay [G]" {
 		t.Fatalf("within-window feed = %+v, want the cached harvested title served", snap.NyaaFeed)
 	}
 
@@ -1014,6 +1018,61 @@ func TestRebuildCarriesNonCuratedABItemWhenPasskeyRemoved(t *testing.T) {
 	}
 }
 
+// TestRebuildCarriesCuratedABItemWhenRenderFailsWithoutPasskey pins
+// refreshCarriedItem's residual AnimeBytes arm: an item still IN the curation
+// set whose fresh render fails on every occurrence (here no files and no
+// release group, so no title synthesizes) while no indexer.ab_passkey is
+// configured keeps its STORED render instead of being dropped.
+//
+// The drop would be permanent. The never-pruned seen ledger still holds the
+// identity, so growJournal can never re-admit the release afterwards - which is
+// exactly the irreversible second off switch l-f161 closed for the passkey, and
+// it is invisible in every count assertion that only watches a renderable item.
+func TestRebuildCarriesCuratedABItemWhenRenderFailsWithoutPasskey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.json")
+	first := time.Date(2026, time.July, 1, 12, 0, 0, 0, time.UTC)
+	const guid = "https://animebytes.tv/torrents.php?id=86576&torrentid=1000"
+	const stored = "Stored AB Show - S01 (1080p) [G]"
+	writeSnapshotFile(t, path, &snapshot{
+		ByHash: map[string]bool{}, ByKey: map[string]bool{"ab:1000": true},
+		ByPair: map[string]bool{},
+		Seen:   map[string]bool{"ab:1000": true},
+		ABFeed: []journalItem{{
+			item: item{Title: stored, GUID: guid, PubDate: first},
+			Key:  "ab:1000", AniListID: 11, FirstSeen: first,
+		}},
+	})
+	// AnimeBytes configured (its Torznab URL is set) with the passkey REMOVED.
+	w := newTestWriter(path, "", true)
+	w.now = func() time.Time { return first.Add(time.Hour) }
+	// The same torrent, still curated, but unrenderable: no files and no release
+	// group, so synthesizeTitle yields nothing for every occurrence.
+	entries := []seadex.Entry{{
+		AniListID: 11,
+		Torrents: []seadex.Torrent{{
+			Tracker: "AB", URL: "/torrents.php?id=86576&torrentid=1000", IsBest: true,
+		}},
+	}}
+	if err := w.Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	snap := readSnapshotFile(t, path)
+	if len(snap.ABFeed) != 1 {
+		t.Fatalf("ab_feed = %d items, want the stored item carried (a drop is permanent: the seen ledger keeps the identity): %+v",
+			len(snap.ABFeed), snap.ABFeed)
+	}
+	got := snap.ABFeed[0]
+	if got.Title != stored {
+		t.Errorf("carried title = %q, want the stored render %q", got.Title, stored)
+	}
+	if !got.FirstSeen.Equal(first) {
+		t.Errorf("carried FirstSeen = %v, want the stored %v", got.FirstSeen, first)
+	}
+	if got.GUID != guid {
+		t.Errorf("carried GUID = %q, want the stored %q", got.GUID, guid)
+	}
+}
+
 // TestRebuildJournalsNewABItemWhenPasskeyMissing pins the GROWTH half of the
 // AB-passkey reversibility the two carry tests above pin: a release SeaDex
 // curates while ab_passkey is unset must still ENTER the journal, GUID-only.
@@ -1269,13 +1328,16 @@ func TestRebuildUnknownTrackerWithHashSilentlyIgnored(t *testing.T) {
 	}
 }
 
-// TestRebuildDropsCarriedItemBecomingUnresolvable pins carryJournal's drop
-// accounting for a still-curated item that can no longer render: a journaled
-// torrent whose current SeaDex record has lost its files and release group
-// synthesizes no title, so the carried item is dropped as a genuine drop -
-// counted as journal_dropped on the snapshot log line, never as an AB passkey
-// skip - while the seen ledger keeps its identity so it can never re-enter.
-func TestRebuildDropsCarriedItemBecomingUnresolvable(t *testing.T) {
+// TestRebuildKeepsCarriedItemBecomingUnresolvable pins carryJournal's
+// stored-render fallback for a still-curated item that can no longer render: a
+// journaled torrent whose current SeaDex record has lost its files and release
+// group synthesizes no title, so the carried item keeps its STORED render
+// rather than being dropped - a drop would be permanent, since the never-pruned
+// seen ledger stops growJournal re-admitting the release once the upstream
+// record is corrected, which is the omission settled feed-rss-filtering
+// forbids. Nothing is counted as journal_dropped, and nothing is counted as an
+// AB passkey skip either.
+func TestRebuildKeepsCarriedItemBecomingUnresolvable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	first := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	writeSnapshotFile(t, path, &snapshot{
@@ -1295,17 +1357,20 @@ func TestRebuildDropsCarriedItemBecomingUnresolvable(t *testing.T) {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
-	if len(snap.NyaaFeed) != 0 {
-		t.Errorf("nyaa feed = %+v, want empty (the carried item can no longer render a title)", snap.NyaaFeed)
+	if len(snap.NyaaFeed) != 1 {
+		t.Fatalf("nyaa feed = %+v, want the carried item kept on its stored render", snap.NyaaFeed)
+	}
+	if got := snap.NyaaFeed[0].Title; got != "Show - S01 (1080p) [G]" {
+		t.Errorf("carried title = %q, want the STORED render preserved", got)
 	}
 	if !snap.Seen["nyaa:42"] {
-		t.Errorf("seen ledger lost the dropped identity: %v", snap.Seen)
+		t.Errorf("seen ledger lost the carried identity: %v", snap.Seen)
 	}
-	if got, ok := rec.AttrValue("indexer feed snapshot written", "journal_dropped"); !ok || got != "1" {
-		t.Errorf("journal_dropped = %q (found=%v), want 1; log:\n%s", got, ok, strings.Join(rec.Messages(), "\n"))
+	if got, ok := rec.AttrValue("indexer feed snapshot written", "journal_dropped"); !ok || got != "0" {
+		t.Errorf("journal_dropped = %q (found=%v), want 0; log:\n%s", got, ok, strings.Join(rec.Messages(), "\n"))
 	}
 	if rec.Contains("ab RSS feed empty of grabbable links") {
-		t.Errorf("the genuine drop was counted as an AB passkey skip; log:\n%s", strings.Join(rec.Messages(), "\n"))
+		t.Errorf("the unresolvable render was counted as an AB passkey skip; log:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }
 
@@ -2039,6 +2104,50 @@ func TestApplyTitlesCorrectsProvablyWrongSeasonClaim(t *testing.T) {
 		if got, ok := rec.AttrValue(msg, key); !ok || got != want {
 			t.Errorf("warning attr %s = %q (found=%v), want %q", key, got, ok, want)
 		}
+	}
+}
+
+// TestTitleAuditRefusesACorrectionThatOverflowsThePersistedCap pins
+// correctedTitle's size gate. Splicing the census's episode half over a title's
+// season token GROWS the title, and an over-cap title is pruned by the shared
+// decode gate on the next load (validPersistedItem) - so the release would
+// vanish from RSS entirely rather than merely carrying a wrong season claim.
+// Serving the wrong claim with a diagnostic is the lesser loss, so a correction
+// that would not fit is refused and the harvested title is served verbatim.
+func TestTitleAuditRefusesACorrectionThatOverflowsThePersistedCap(t *testing.T) {
+	// A season-only title (no SxxExx token, so packFromTitle reads a whole
+	// season) sized to exactly the persisted cap: splicing "E05" over its "S01"
+	// token would push it three bytes past.
+	const tail = " - S01"
+	title := strings.Repeat("A", maxPersistedFieldBytes-len(tail)) + tail
+	if len(title) != maxPersistedFieldBytes {
+		t.Fatalf("fixture title = %d bytes, want exactly the %d-byte cap", len(title), maxPersistedFieldBytes)
+	}
+	var calls int
+	var gotKey string
+	var gotTitlePack, gotFilesPack, gotCorrected bool
+	audit := titleAudit{
+		census: map[string]packCensus{"nyaa:42": {marker: "S01E05", evidence: packEvidenceSingle}},
+		report: func(key string, titlePack, filesPack, corrected bool) {
+			calls++
+			gotKey, gotTitlePack, gotFilesPack, gotCorrected = key, titlePack, filesPack, corrected
+		},
+	}
+
+	if served := audit.served("nyaa:42", title); served != title {
+		t.Errorf("served title = %d bytes, want the %d-byte harvested title unchanged; an over-cap correction loses the whole item at reload",
+			len(served), len(title))
+	}
+	if calls != 1 || gotKey != "nyaa:42" || !gotTitlePack || gotFilesPack || gotCorrected {
+		t.Errorf("report = (calls %d, key %q, titlePack %v, filesPack %v, corrected %v), want (1, nyaa:42, true, false, false)",
+			calls, gotKey, gotTitlePack, gotFilesPack, gotCorrected)
+	}
+
+	// The same title three bytes shorter IS corrected, so the refusal above pins
+	// the cap rather than a rewrite that never happens.
+	shorter := strings.Repeat("A", maxPersistedFieldBytes-len(tail)-len("E05")) + tail
+	if served := audit.served("nyaa:42", shorter); served == shorter {
+		t.Errorf("served title = %q unchanged, want the season token corrected when the rewrite fits the cap", served)
 	}
 }
 

@@ -22,20 +22,12 @@ import (
 	"github.com/cplieger/seadex-scout/internal/displaylink"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/logattr"
+	"github.com/cplieger/seadex-scout/internal/reportfs"
 	"github.com/cplieger/seadex-scout/internal/tracker"
 	"github.com/cplieger/urlform"
 )
 
 const (
-	// Reports enumerate the operator's library and can carry private-tracker
-	// page links, so newly created report directories and every written
-	// report pair are owner-only (least privilege, CWE-732): another local
-	// account able to traverse the bind-mounted config tree must not read the
-	// inventory. Neither MkdirAll nor an atomic replacement retightens what
-	// already exists on disk - the README's upgrade note covers historical
-	// reports (`chmod -R go-rwx /config/reports`).
-	reportDirMode  = 0o700
-	reportFileMode = 0o600
 	// linkSep joins the links within a table cell (a middle dot, not an em dash).
 	linkSep = " \u00b7 "
 	// emptyCell is shown for a column with no value.
@@ -48,7 +40,7 @@ const (
 var verdictDesc = map[Verdict]string{
 	VerdictUnlisted:    "You have a release SeaDex does not list as best or alt.",
 	VerdictAlt:         "You have a listed alt; SeaDex marks a different release best.",
-	VerdictUnverified:  "The release-group evidence is unknown on one side (an unidentifiable file or an untagged SeaDex release), so alignment could not be verified.",
+	VerdictUnverified:  "The release-group evidence is unknown on one side (an unidentifiable file or an untagged SeaDex release), or the library walk could not read this item's file data at all, so alignment could not be verified.",
 	VerdictNoFile:      "The mapped season, movie, or specials bucket has no file on disk, or a whole-series comparison found no real season with files.",
 	VerdictBest:        "You already have SeaDex's best release.",
 	VerdictNotOnSeaDex: "In your library and recognized as anime (Fribb-mapped) but SeaDex lists no entry, so there is no recommendation to compare against.",
@@ -131,7 +123,9 @@ const annotationLegend = "Scope annotations: `approx` - the comparison used a co
 	"`broken` / `incomplete` are SeaDex curation warnings, `url error` means " +
 	"the SeaDex record carries a link value that is not a usable tracker URL (report it upstream), " +
 	"`unknown tracker` means the record names a tracker this build does not know, so no link could be " +
-	"built (report it as a seadex-scout gap, not as bad SeaDex data), and " +
+	"built (report it as a seadex-scout gap, not as bad SeaDex data), " +
+	"`filtered` means one of the release's SeaDex tags is listed for the `report` " +
+	"surface in your `filters.exclude_tags`, so you asked for it not to count, and " +
 	"`unobtainable` means the release has no usable link or sits on a tracker you do not use. An " +
 	"annotated release stays listed but never drives the verdict and is never offered as a link. " +
 	"`(N best hidden: animebytes)` means N of the entry's SeaDex BEST releases were withheld because you " +
@@ -154,7 +148,7 @@ func writeIncompleteCaveat(b *strings.Builder, n int) {
 	if n == 1 {
 		noun = "entry"
 	}
-	fmt.Fprintf(b, "**Caveat: this report is incomplete.** %d SeaDex %s could not be mapped to the library this run because of a transient AniList failure; the affected rows may be missing or misfiled. See the %q section below.\n\n",
+	fmt.Fprintf(b, "**Caveat: this report is incomplete.** %d SeaDex %s could not be resolved against AniList this run because of a transient failure; each was either left unmapped or mapped from a stale cached title, so the affected rows may be missing, misfiled, or resting on stale evidence. See the %q section below.\n\n",
 		n, noun, incompleteHeader)
 }
 
@@ -168,7 +162,7 @@ func writeIncompleteSection(b *strings.Builder, incomplete []IncompleteEntry) {
 		return
 	}
 	fmt.Fprintf(b, "## %s (%d)\n\n", incompleteHeader, len(incomplete))
-	b.WriteString("These SeaDex entries could not be mapped to the library this run: the AniList lookup that would link them failed transiently. Whether they align is unknown; re-run the report once AniList recovers.\n\n")
+	b.WriteString("The AniList lookup that would link these SeaDex entries to the library failed transiently this run. Where a cached answer still existed the entry was mapped from it, so a row for it may appear above with a verdict resting on stale titles; otherwise it has no row at all. Either way its alignment is unconfirmed; re-run the report once AniList recovers.\n\n")
 	b.WriteString("| AniList ID | SeaDex |\n| --- | --- |\n")
 	for i := range incomplete {
 		fmt.Fprintf(b, "| %d | %s |\n", incomplete[i].AniListID, mdLink("seadex", incomplete[i].SeaDexURL))
@@ -421,6 +415,15 @@ func releaseNotes(rel *Release) []string {
 	if rel.Unobtainable {
 		notes = append(notes, "unobtainable")
 	}
+	if rel.Filtered {
+		// The operator's own filters.exclude_tags policy excluded this release
+		// from the report surface, which forfeits its BEST evidence
+		// (audit.go's forfeitsBest). Without a note the row self-contradicts
+		// whenever the excluded tag is not a curation warning: the best column
+		// lists the group, the verdict says the on-disk copy of that same group
+		// is unlisted, and nothing explains why.
+		notes = append(notes, "filtered")
+	}
 	return notes
 }
 
@@ -435,7 +438,7 @@ func releaseNotes(rel *Release) []string {
 // filters.exclude_tags policy instead of the warning vocabulary - so a warned
 // release is annotated here while still being counted there (the default).
 func annotated(rel *Release) bool {
-	return len(rel.Warnings) > 0 || rel.Unobtainable || rel.URLError || rel.UnknownTracker
+	return len(rel.Warnings) > 0 || rel.Unobtainable || rel.URLError || rel.UnknownTracker || rel.Filtered
 }
 
 // rowsWithVerdict returns the rows carrying verdict v, preserving order.
@@ -577,10 +580,10 @@ func (r *Report) WriteFiles(ctx context.Context, dir string, log *slog.Logger) e
 	// matches only the exact temp-name convention - never a report file.
 	// WithLogger keeps the library's own diagnostics (including its one
 	// removed-stale-temps INFO) on the report logger; only the top-level
-	// readdir failure is unlogged by the library, so that WARN stays here (a
-	// not-yet-created dir is skipped silently: WriteFiles creates it at write
-	// time and it holds no temps to reap).
-	if _, err := atomicfile.CleanupStaleTemps(dir, time.Hour, atomicfile.WithLogger(log)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	// readdir failure is unlogged by the library, so that WARN stays here. A
+	// missing dir is not an error at all (atomicfile's documented contract), and
+	// cycle.TryReportLock has already created it before this runs.
+	if _, err := atomicfile.CleanupStaleTemps(dir, time.Hour, atomicfile.WithLogger(log)); err != nil {
 		// No dir attribute: the redacting logger would mask it anyway, and
 		// the fixed message already identifies the location as report.dir.
 		log.Warn("stale report temp cleanup failed", "error", err)
@@ -748,15 +751,27 @@ func reportPairStem(ctx context.Context, dir string, generatedAt time.Time) (str
 var atomicWriteFile = atomicfile.WriteFile
 
 // writeAtomic writes data to path atomically under the report pair's fixed
-// option set (the report logger, owner-only dir and file modes) and returns
+// option set (the report logger, the owner-only file mode) and returns
 // atomicfile's whole Result rather than just an error, because the caller gates
 // the pair ORDERING on Result.Durable. writeReportHalf owns that policy and
 // documents the Durable=false-with-a-nil-error contract it turns on.
+//
+// Reports enumerate the operator's library and can carry private-tracker page
+// links, so the directory and every written half are owner-only (least
+// privilege, CWE-732): another local account able to traverse the bind-mounted
+// config tree must not read the inventory. Neither MkdirAll nor an atomic
+// replacement retightens what already exists on disk - the README's upgrade
+// note covers historical reports (`chmod -R go-rwx /config/reports`).
 func writeAtomic(ctx context.Context, path string, data []byte, log *slog.Logger) (atomicfile.Result, error) {
+	// The directory's privacy rule has one home (internal/reportfs): atomicfile's
+	// WithMkdirMode goes through MkdirAll's perm argument, which a umask or an
+	// inherited default ACL filters, so the mode is pinned here instead.
+	if err := reportfs.MakeDir(filepath.Dir(path)); err != nil {
+		return atomicfile.Result{}, err
+	}
 	return atomicWriteFile(ctx, path, data,
 		atomicfile.WithLogger(log),
-		atomicfile.WithMkdirMode(reportDirMode),
-		atomicfile.WithMode(reportFileMode))
+		atomicfile.WithMode(reportfs.FileMode))
 }
 
 // writeReportHalf persists one report half and applies the two policies both

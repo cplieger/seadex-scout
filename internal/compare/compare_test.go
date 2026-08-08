@@ -218,9 +218,9 @@ func TestObtainableLinksCarriesRawABEvidence(t *testing.T) {
 
 	links := obtainableLinks(cands, "")
 
-	want := map[string]filter.ABEvidence{
-		"https://nyaa.si/view/1":                              filter.ABNone,
-		"https://animebytes.tv/torrents.php?id=1&torrentid=2": filter.ABDefinite,
+	want := map[string]tracker.ABEvidence{
+		"https://nyaa.si/view/1":                              tracker.ABNone,
+		"https://animebytes.tv/torrents.php?id=1&torrentid=2": tracker.ABDefinite,
 	}
 	if len(links) != len(want) {
 		t.Fatalf("link count = %d, want %d: %+v", len(links), len(want), links)
@@ -261,7 +261,7 @@ func TestObtainableLinksDuplicateKeepsStrongestABEvidence(t *testing.T) {
 	if len(links) != 1 {
 		t.Fatalf("link count = %d, want the duplicate deduped: %+v", len(links), links)
 	}
-	if links[0].AB != filter.ABDefinite {
+	if links[0].AB != tracker.ABDefinite {
 		t.Errorf("deduped link AB = %d, want the stronger ABDefinite grade the second record carried", links[0].AB)
 	}
 }

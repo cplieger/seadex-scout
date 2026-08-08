@@ -294,9 +294,9 @@ func (r *matchRun) matchMappedEntry(ctx context.Context, e *seadex.Entry, rec *m
 		// The RESOLVED item's arr is authoritative over the type label's
 		// routing: FindByID's secondary movie lookup can resolve a Radarr movie
 		// from a non-MOVIE-typed record carrying an unambiguous movie TMDB id
-		// (h-f9), and arrItem guarantees the item belongs to the arr its id was
-		// looked up in - so for every record the type label already routed
-		// correctly this is the same value recordArr returned.
+		// (h-f9), and the per-arr index split guarantees the item belongs to the
+		// arr its id was looked up in - so for every record the type label
+		// already routed correctly this is the same value recordArr returned.
 		arr = item.Arr
 		r.cov.Hits[arr]++
 		return Match{Item: item, Entry: *e, Record: *rec, Arr: arr, Source: SourceID}
@@ -471,9 +471,11 @@ func (li *LibIndex) addTitle(title string, it *library.Item) {
 // match must be arr-consistent: a MOVIE record resolves only to a Radarr movie
 // and a series record only to a Sonarr series, so a movie whose Fribb record
 // carries a TV themoviedb_id (or an IMDb id TVDB reuses for the parent series)
-// cannot silently link to the same-named Sonarr series. NewLibIndex already
-// indexes each ID map with only the arr that consumes it; the arrItem check
-// restates that invariant at the lookup site as defense in depth.
+// cannot silently link to the same-named Sonarr series. The rule is enforced
+// structurally, in two places and no others: RoutedIDs returns only the ids the
+// record's own arr consumes, and NewLibIndex indexes each ID map with only the
+// items of the arr that consumes it - so a wrong-arr item is never a candidate
+// and a map miss is the arr gate.
 //
 // A record that routes NO series id and is not typed MOVIE still gets one more
 // chance, against its unambiguous movie TMDB ids
@@ -496,7 +498,9 @@ func (li *LibIndex) FindByID(rec *mapping.Record) *library.Item {
 	// > 0 form deliberately, so it reads the same way as its slice siblings'
 	// presence checks below and in catalogue.go.
 	if tvdb > 0 {
-		return arrItem(li.byTvdb[tvdb], library.ArrSonarr)
+		// byTvdb is populated only with Sonarr items (indexIDs' arr switch),
+		// so the map miss IS the arr gate.
+		return li.byTvdb[tvdb]
 	}
 	return li.findMovieByTMDB(rec.MovieTMDBIDs())
 }
@@ -511,11 +515,10 @@ func (li *LibIndex) findMovie(rec *mapping.Record) *library.Item {
 		return it
 	}
 	for _, imdb := range imdbIDs { // RoutedIDs returns only usable ids
-		key := imdbKey(imdb) // a usable id can still be padded; the index key is trimmed
-		if key == "" {
-			continue
-		}
-		if it := arrItem(li.byImdb[key], library.ArrRadarr); it != nil {
+		// RoutedIDs judges usability on the TRIMMED value, so a returned id is
+		// non-blank once trimmed; the trim is here for the padded-override case.
+		key := imdbKey(imdb)
+		if it := li.byImdb[key]; it != nil { // byImdb holds only Radarr items
 			return it
 		}
 	}
@@ -527,7 +530,7 @@ func (li *LibIndex) findMovie(rec *mapping.Record) *library.Item {
 // cross-type lookup, so the movie-id half of the ID bridge has one lookup.
 func (li *LibIndex) findMovieByTMDB(ids []int) *library.Item {
 	for _, id := range ids { // callers pass only usable (positive) ids
-		if it := arrItem(li.byTmdb[id], library.ArrRadarr); it != nil {
+		if it := li.byTmdb[id]; it != nil { // byTmdb holds only Radarr items
 			return it
 		}
 	}
@@ -538,17 +541,9 @@ func (li *LibIndex) findMovieByTMDB(ids []int) *library.Item {
 // judges usability on the TRIMMED value, so the key must be trimmed too: a
 // padded override id ("  tt0123456") otherwise reads as usable (suppressing the
 // AniList title fallback) while never matching the item indexed under its own
-// value. A blank or whitespace-only id yields "", which every caller skips.
+// value. A blank or whitespace-only id yields "", which the two callers reading a
+// library Item's own ImdbID skip; the RoutedIDs-fed callers cannot see one.
 func imdbKey(id string) string { return strings.TrimSpace(id) }
-
-// arrItem returns it only when it is non-nil and belongs to arr, enforcing
-// arr-consistency on an ID lookup.
-func arrItem(it *library.Item, arr string) *library.Item {
-	if it != nil && it.Arr == arr {
-		return it
-	}
-	return nil
-}
 
 // narrowByYear applies the AniList year constraint to a title-fallback
 // candidate set, returning the set unchanged when the year is unknown. When the

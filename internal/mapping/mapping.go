@@ -18,6 +18,8 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -52,6 +54,19 @@ const (
 
 	// maxMapBytes bounds the Fribb download before decode (~2.7x the real ~5.9MB body).
 	maxMapBytes = 16 << 20
+	// mapSizeWarnBytes is maxMapBytes' pre-cliff warning threshold (80%, the
+	// app-wide degradation fraction). A body past the cap is a PERSISTENT
+	// refresh refusal (classifyRefreshFailure grades
+	// *httpx.ResponseTooLargeError refreshPersistent), so it never self-heals:
+	// every cycle re-downloads the body, re-refuses it, and the map stays
+	// frozen stale until an operator ships a raised cap. That is the same class
+	// as the record cap and the aggregate identifier budget, which
+	// logFribbParseDiagnostics warns about at three quarters for exactly this
+	// reason - so warn here too, while refreshes still succeed. It cannot be
+	// folded into that warning: body size and record count move independently,
+	// so a schema revision that widens every record reaches this cliff with the
+	// element count still far below the record-cap threshold.
+	mapSizeWarnBytes = maxMapBytes / degradation.SizeWarnDenominator * degradation.SizeWarnNumerator
 	// maxOverrideBytes bounds the local overrides file.
 	maxOverrideBytes = 4 << 20
 	maxAttempts      = 3
@@ -99,13 +114,12 @@ func (r *Record) IsMovie() bool { return mediatype.IsMovie(r.Type) }
 // answer.
 func (r *Record) RoutedIDs() (tvdbID int, tmdbMovies []int, imdbIDs []string) {
 	if r.IsMovie() {
-		return 0, r.MovieTMDBIDs(),
-			usableIDs(r.IMDbIDs, func(s string) bool { return strings.TrimSpace(s) != "" })
+		return 0, r.MovieTMDBIDs(), r.IMDbIDs
 	}
 	// Zero out a non-usable TVDB id here so the usability rule has ONE home:
-	// callers do a presence check, never a policy check. An operator override
-	// decodes through plain encoding/json, so a negative tvdb_id can reach a
-	// hand-built Record even though both producers canonicalize.
+	// callers do a presence check, never a policy check. The test itself is the
+	// deliberate presence check (d-gpt-u12c3-1), kept as the scalar's spelling of
+	// the canonical form the index already guarantees.
 	if r.TvdbID <= 0 {
 		return 0, nil, nil
 	}
@@ -132,30 +146,7 @@ func (r *Record) RoutedIDs() (tvdbID int, tmdbMovies []int, imdbIDs []string) {
 // secondary movie lookup) and match's reverse Catalogue - so which ids count as
 // cross-type movie evidence cannot drift between them.
 func (r *Record) MovieTMDBIDs() []int {
-	return usableIDs(r.TmdbMovies, func(id int) bool { return id > 0 })
-}
-
-// usableIDs drops the non-usable values from an id slice, returning the input
-// unchanged when every value is usable (the overwhelmingly common case: both
-// Fribb decoders already canonicalize, and only an operator override can carry
-// a zero/blank entry). It keeps the usability POLICY in this one place, so
-// RoutedIDs' documented "callers do a presence check, never a policy check"
-// contract holds for the slices exactly as it already does for the scalar.
-func usableIDs[T any](in []T, usable func(T) bool) []T {
-	for i, v := range in {
-		if usable(v) {
-			continue
-		}
-		out := make([]T, 0, len(in)-1)
-		out = append(out, in[:i]...)
-		for _, rest := range in[i+1:] {
-			if usable(rest) {
-				out = append(out, rest)
-			}
-		}
-		return out
-	}
-	return in
+	return r.TmdbMovies
 }
 
 // HasArrIdentifier reports whether the record carries a USABLE identifier
@@ -163,14 +154,12 @@ func usableIDs[T any](in []T, usable func(T) bool) []T {
 // for series. It is the canonical arr-routing predicate shared by the refresh
 // acceptance guard, the matcher, and the report's reverse catalogue, so all
 // three agree on which identifier fields are meaningful for a record's routed
-// arr. Usability is checked per value by RoutedIDs, not per field shape: the
-// Fribb decoders guarantee positive/non-blank ids, but operator overrides
-// construct Record through plain encoding/json, so a negative tvdb_id, a zero
-// tmdb_movies entry, or a blank imdb id must read as id-less — otherwise it
-// would suppress the AniList title fallback while FindByID can never match it.
+// arr. Usability is a Record INVARIANT, not a per-read check: canonicalize() is
+// applied by both producers and again on insertion into the index, so this is a
+// presence check over already-canonical ids.
 func (r *Record) HasArrIdentifier() bool {
 	tvdb, tmdbMovies, imdbIDs := r.RoutedIDs()
-	// RoutedIDs canonicalizes every id kind it returns, so this is a presence
+	// The ids RoutedIDs returns are already canonical, so this is a presence
 	// check over usable ids, never a second copy of the usability policy.
 	return tvdb > 0 || len(tmdbMovies) > 0 || len(imdbIDs) > 0
 }
@@ -315,6 +304,12 @@ func buildIndex(records []Record) *Index {
 	byAniList := make(map[int]Record, len(records))
 	for _, r := range records {
 		if r.AniListID > 0 {
+			// Canonical form is an INDEX invariant, applied once here rather
+			// than re-checked by every accessor: both producers already
+			// canonicalize, but a cache read back from state.json reaches
+			// buildIndex through plain encoding/json on the 304 and
+			// stale-on-error paths. canonicalize is idempotent.
+			r.canonicalize()
 			byAniList[r.AniListID] = r
 		}
 	}
@@ -779,6 +774,10 @@ func (l *Loader) reuseCachedRecords(prev *Cache) (Cache, error) {
 // and the shrink guard), degrading to the stale map when any step rejects the
 // refresh.
 func (l *Loader) acceptRefresh(prev *Cache, res httpx.ConditionalResult) (Cache, error) {
+	if n := len(res.Body); n >= mapSizeWarnBytes {
+		l.log.Warn("mapping: Fribb body approaching the download size cap; a body past it refuses every refresh and freezes the map stale",
+			"bytes", n, "cap", maxMapBytes)
+	}
 	parsed, err := parseFribbForRefresh(res.Body, l.log)
 	if err != nil {
 		if errors.Is(err, errRecordCapExceeded) {
@@ -904,7 +903,7 @@ func (l *Loader) logAcceptedWithoutBaseline(prev *Cache, records []Record) {
 }
 
 // validateRefreshedRecords is acceptRefresh's acceptance invariant for a fresh
-// 200 body: it rejects a zero-record refresh, one below the AniList-key,
+// 200 body: it rejects a refresh below the AniList-key,
 // arr-identifier, or type coverage floors, and one whose individual
 // populations (typed, season-scoped, special, movie-/series-routed) collapse
 // below half of the previously accepted cache's (populationCollapsed - the
@@ -938,9 +937,8 @@ func (l *Loader) logAcceptedWithoutBaseline(prev *Cache, records []Record) {
 // instead of passing as a "healthy" 1/1 map — the case the previous-relative
 // shrink guard cannot catch when there is no previous cache.
 func validateRefreshedRecords(previous, records []Record, sourceElements int) error {
-	if len(records) == 0 {
-		return errors.New("refresh returned zero records")
-	}
+	// No zero-record special case: coverageFloor is >= 1 for every input, so
+	// the AniList-key floor below refuses an empty candidate on its own.
 	keyMinimum := coverageFloor(sourceElements)
 	if len(records) < keyMinimum {
 		return fmt.Errorf("AniList-key coverage %d/%d is below minimum %d", len(records), sourceElements, keyMinimum)
@@ -1306,6 +1304,32 @@ func (l *Loader) applyOverrides(ctx context.Context, idx *Index) {
 	}
 }
 
+// readOverridesFile reads the overrides file through an os.Root over its own
+// directory, so the read can neither be redirected out of /config nor block:
+// atomicfile.ReadBoundedInRoot opens through the root with O_NONBLOCK and
+// refuses a directory, FIFO, device node or socket with ErrNotRegular, where
+// atomicfile.ReadBounded's own os.Open follows a symlink and blocks
+// indefinitely on a FIFO with no writer - past its only context check, so a
+// cancelled cycle cannot unwind it. internal/state.readState and
+// internal/indexer.openSnapshot already read their /config files this way, for
+// this reason. A missing file or a missing /config surfaces as fs.ErrNotExist
+// on either path, so the silent no-overrides case is unchanged; a non-regular
+// inode or an escaping symlink now takes readOverrides' existing unreadable
+// ERROR instead of hanging the cycle.
+func (l *Loader) readOverridesFile(ctx context.Context) ([]byte, error) {
+	dir := filepath.Dir(l.overridesPath)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if clErr := root.Close(); clErr != nil {
+			l.log.Warn("mapping: could not close overrides directory handle", "dir", dir, "error", clErr)
+		}
+	}()
+	return atomicfile.ReadBoundedInRoot(ctx, root, filepath.Base(l.overridesPath), maxOverrideBytes)
+}
+
 // readOverrides reads and parses the overrides file, returning ok=false for
 // every ignored outcome: a cancelled read, a missing file (silently), an
 // unreadable or malformed file (logged at ERROR). Unknown keys are diagnosed
@@ -1325,7 +1349,7 @@ func (l *Loader) applyOverrides(ctx context.Context, idx *Index) {
 // would make one counter mean two unrelated things. An immediate ERROR needs no
 // persisted state of its own either.
 func (l *Loader) readOverrides(ctx context.Context) (overrideSet, bool) {
-	data, err := atomicfile.ReadBounded(ctx, l.overridesPath, maxOverrideBytes)
+	data, err := l.readOverridesFile(ctx)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return overrideSet{}, false

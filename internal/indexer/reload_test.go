@@ -277,6 +277,57 @@ func TestReloadReassertsFailedStateWhenMalformedSnapshotReappears(t *testing.T) 
 	}
 }
 
+// TestReloadWarnsWhenTheSameMalformedSnapshotReappears pins openSnapshot's
+// recovery-line choice. A snapshot that vanished and came BACK as the same
+// deterministically-bad generation (an unmount/remount, or a rename away and
+// back - inode and mtime unchanged, so the memoized malformed identity still
+// matches) reloads nothing: skipMemoizedMalformed returns before the read and
+// the served feed stays frozen on the last-good snapshot. Announcing "resuming
+// reloads" there would be the last line the operator sees and it would be
+// false, so the reappearance warns instead.
+func TestReloadWarnsWhenTheSameMalformedSnapshotReappears(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "feed.json")
+	seedEmptyLedger(t, path)
+	if err := newTestWriter(path, "", false).Rebuild(context.Background(), nyaaTestEntries(1), nil); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	log, rec := capture.New()
+	ix := warmedIndexer(&Config{SnapshotPath: path, UpstreamConfig: UpstreamConfig{NyaaTorznabURL: "http://prowlarr/1/api"}}, log, nil)
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+		t.Fatalf("initial feed = %d items, want 1", len(got))
+	}
+
+	// Memoize the malformed generation.
+	if err := os.WriteFile(path, []byte("{not valid json"), 0o600); err != nil {
+		t.Fatalf("corrupt write: %v", err)
+	}
+	bumpMtime(t, path)
+	ix.cache.refresh(context.Background())
+
+	// It disappears, then the SAME file (same inode, same mtime) comes back.
+	aside := filepath.Join(dir, "feed.json.aside")
+	if err := os.Rename(path, aside); err != nil {
+		t.Fatalf("rename the snapshot away: %v", err)
+	}
+	ix.cache.refresh(context.Background())
+	if err := os.Rename(aside, path); err != nil {
+		t.Fatalf("rename the snapshot back: %v", err)
+	}
+	ix.cache.refresh(context.Background())
+
+	if !rec.Contains("indexer feed snapshot reappeared but is the same malformed file; still serving the last loaded feed") {
+		t.Errorf("reappearance of the memoized malformed file was not warned; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+	}
+	if rec.Contains("indexer feed snapshot reappeared; resuming reloads") {
+		t.Errorf("announced resumed reloads while the reappeared file is still the memoized malformed one; log output:\n%s",
+			strings.Join(rec.Messages(), "\n"))
+	}
+	if got := ix.feedFor(upstreamNyaa); len(got) != 1 {
+		t.Errorf("feed = %d items, want the last-good 1 still served", len(got))
+	}
+}
+
 // TestReloadDropsOversizedItemOnReload pins readSnapshot's persisted-item limit
 // gate: a snapshot whose curation maps are valid but whose feed carries an item
 // past maxPersistedFieldBytes installs WITHOUT that item, warning once per
@@ -432,7 +483,7 @@ func TestReloadRebuildsNyaaDownloadURLsFromGUID(t *testing.T) {
 }
 
 // TestReloadDropsForeignHostSnapshotGUIDs pins the load-boundary trust gate
-// (downloadURL's internal tracker-ownership check): a tampered but
+// (downloadTarget's tracker-ownership check): a tampered but
 // structurally valid feed.json cannot
 // mint an apex-tracker download URL from a foreign or independent-subdomain
 // GUID - trackerID's shape-only extraction would otherwise read the numeric
@@ -705,7 +756,7 @@ func TestSnapshotInfoURLAllowedRejectsMalformedAndUserinfoURLs(t *testing.T) {
 // TestReloadDropsCrossTrackerSnapshotItems pins rebuildDownloadURLs' second
 // drop gate: a SELF-CONSISTENT item (Key matches its GUID, so the journal
 // identity check passes) planted in the WRONG tracker's feed must be dropped
-// by downloadURL's tracker-ownership gate, never served - a tampered
+// by downloadTarget's tracker-ownership gate, never served - a tampered
 // feed.json could otherwise route a Nyaa torrent through the AB feed (or
 // vice versa) and have the load boundary mint it a download link on the
 // wrong tracker's endpoint shape.

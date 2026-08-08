@@ -2,7 +2,7 @@ package notify
 
 import (
 	"github.com/cplieger/seadex-scout/internal/compare"
-	"github.com/cplieger/seadex-scout/internal/filter"
+	"github.com/cplieger/seadex-scout/internal/tracker"
 )
 
 // gradedLinks returns links the way compare's producer emits them: each
@@ -17,7 +17,7 @@ import (
 // URL is asserted where the divergence lives, in compare's producer test.
 func gradedLinks(links ...compare.ReleaseLink) []compare.ReleaseLink {
 	for i := range links {
-		links[i].AB = filter.ClassifyAB(links[i].Tracker, links[i].URL)
+		links[i].AB = tracker.ClassifyAB(links[i].Tracker, links[i].URL)
 	}
 	return links
 }

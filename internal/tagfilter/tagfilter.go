@@ -16,11 +16,7 @@
 // tag that merely contains a configured tag cannot trip a gate.
 package tagfilter
 
-import (
-	"maps"
-	"slices"
-	"strings"
-)
+import "strings"
 
 // Surface is one recommendation surface a tag can be excluded from. The zero
 // value is deliberately not a surface, so an unset field cannot silently mean
@@ -112,12 +108,15 @@ type Filter struct {
 // release's blank tag. An empty or nil map yields the zero Filter.
 func New(bySurface map[string][]Surface) Filter {
 	var excluded map[key]struct{}
-	for _, tag := range slices.Sorted(maps.Keys(bySurface)) {
+	// Insertion order is irrelevant: excluded is a set, so any iteration
+	// order yields the same policy (which is also what unions two case
+	// variants of one tag instead of letting one overwrite the other).
+	for tag, surfaces := range bySurface {
 		canon := canonical(tag)
 		if canon == "" {
 			continue
 		}
-		for _, s := range bySurface[tag] {
+		for _, s := range surfaces {
 			if _, ok := surfaceNames[s]; !ok {
 				continue
 			}
@@ -149,6 +148,11 @@ func (f Filter) Excludes(tags []string, s Surface) bool {
 	}
 	return false
 }
+
+// Len reports how many (tag, surface) exclusions the policy holds; zero is the
+// zero Filter, which excludes nothing on every surface. It exists so the
+// composition root can echo the configured policy at startup.
+func (f Filter) Len() int { return len(f.excluded) }
 
 // canonical is the one normalization both sides of a match go through:
 // trimmed and lowercased, so matching is exact and case-insensitive.

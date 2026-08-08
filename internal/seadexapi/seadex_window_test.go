@@ -1,4 +1,4 @@
-package seadex
+package seadexapi
 
 import (
 	"context"
@@ -487,5 +487,53 @@ func TestMaxWindowEntriesIsOnePage(t *testing.T) {
 	if MaxWindowEntries != perPage {
 		t.Errorf("MaxWindowEntries = %d, want perPage %d (the bound is one request, by construction)",
 			MaxWindowEntries, perPage)
+	}
+}
+
+// TestCountWindowUpstreamFailureErrors pins the probe's FAILURE propagation,
+// the arm the negative-total guard cannot cover. internal/scout's tick branches
+// on this error (a failed probe degrades the tick and advances the fast path's
+// own unreachability streak, which is the only thing that escalates an
+// unreachable upstream between reconciles), so a swallowed transport failure
+// answers (0, nil) and reads as a QUIET window instead: emptyRun climbs, every
+// tick reports completion, and nothing escalates while SeaDex is unreachable.
+// Both shapes the probe must refuse are here - a non-retryable status, and a
+// body over maxProbeBytes, since the probe asks for one id and the honest
+// answer is ~88 bytes, so an oversized body is not the shape it asked for.
+func TestCountWindowUpstreamFailureErrors(t *testing.T) {
+	tests := map[string]struct {
+		handler http.HandlerFunc
+		wantErr string
+	}{
+		"non-retryable status": {
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "gone", http.StatusNotFound)
+			},
+			wantErr: "count window",
+		},
+		"body over the probe cap": {
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprintf(w, `{"totalItems":1,"pad":%q}`, strings.Repeat("x", maxProbeBytes))
+			},
+			wantErr: "count window",
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(tc.handler)
+			defer server.Close()
+
+			n, err := NewClient(server.Client(), server.URL, 0, nil).
+				CountWindow(context.Background(), windowSince)
+			if err == nil {
+				t.Fatalf("CountWindow = %d, want an error (a failed probe must never read as a quiet window)", n)
+			}
+			if n != 0 {
+				t.Errorf("CountWindow = %d, want 0 alongside the error", n)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %q, want substring %q", err.Error(), tc.wantErr)
+			}
+		})
 	}
 }

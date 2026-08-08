@@ -53,7 +53,7 @@ func scopeOfHost(host string) string {
 // trackerID extracts the tracker's numeric torrent id from a SeaDex source
 // URL for a scope: Nyaa's /view/{id}, AnimeBytes' torrentid=/permalink forms.
 // It is the single home of the scope->id-extraction pairing, shared by
-// trackerKey, trackerKeyFromURL, and downloadURL.
+// trackerKey, trackerKeyFromURL, and downloadTarget.
 func trackerID(scope, sourceURL string) string {
 	switch scope {
 	case upstreamNyaa:
@@ -245,11 +245,13 @@ func ownableHostForm(f *urlform.Form) bool {
 	}
 }
 
-// canonicalTrackerHost returns the exact hostname of a scope's tracker site,
-// derived from the canonical tracker table (tracker.Lookup's
-// BaseURL) so the host vocabulary stays single-homed, or "" for an unknown
-// scope.
-func canonicalTrackerHost(scope string) string {
+// scopeTracker resolves a feed scope to its canonical tracker table entry - the
+// scope->tracker half of the vocabulary bridge trackerScope owns the other half
+// of. It is the ONE place a scope is turned into a table entry, so a tracker the
+// indexer serves is named once rather than in every consumer that needs a field
+// of its entry (the host for identity keying, the base URL for download links).
+// An unknown scope, or a malformed table entry, fails closed.
+func scopeTracker(scope string) (tracker.Tracker, bool) {
 	var name string
 	switch scope {
 	case upstreamNyaa:
@@ -257,9 +259,17 @@ func canonicalTrackerHost(scope string) string {
 	case upstreamAB:
 		name = tracker.NameAnimeBytes
 	default:
-		return ""
+		return tracker.Tracker{}, false
 	}
-	t, ok := tracker.Lookup(name)
+	return tracker.Lookup(name)
+}
+
+// canonicalTrackerHost returns the exact hostname of a scope's tracker site,
+// derived from the canonical tracker table (scopeTracker) so the host vocabulary
+// stays single-homed, or "" for an unknown scope or a table entry whose BaseURL
+// yields no hostname.
+func canonicalTrackerHost(scope string) string {
+	t, ok := scopeTracker(scope)
 	if !ok {
 		return ""
 	}
@@ -277,22 +287,22 @@ func canonicalTrackerHost(scope string) string {
 // predicates accept subdomains, which is right for tracker CLASSIFICATION
 // (obtainability, display) but too broad for identity; callers apply this
 // check after them, so the ASCII/homograph gates have already run - and the
-// fold here is ASCII-only regardless (asciiLowerHost), so the predicate does
-// not depend on that call order. Cross-site matching still works for
+// fold here is ASCII-only regardless (urlform.EqualASCIIFold), so the predicate
+// does not depend on that call order. Cross-site matching still works for
 // mirrors through the info hash, which names the bytes themselves.
 func isCanonicalTrackerHost(scope, host string) bool {
 	// ASCII-only fold, deliberately NOT strings.EqualFold: that is the
-	// full-Unicode simple fold asciiLowerHost was extracted to keep out of a
+	// full-Unicode simple fold urlform.EqualASCIIFold exists to keep out of a
 	// host comparison (U+017F folds to 's', so a byte-wise foreign host could
 	// match a canonical name) - see snapshotInfoURLAllowed for the same rule.
 	// Both callers already hand us urlform's ASCII-lowercased host behind
 	// tracker.Is*Host's IsASCIIHost gate, so this is byte equality on every
 	// reachable input; it simply no longer DEPENDS on that call order.
-	c := asciiLowerHost(canonicalTrackerHost(scope))
+	c := canonicalTrackerHost(scope)
 	if c == "" {
 		return false
 	}
-	return asciiLowerHost(strings.TrimSuffix(host, ".")) == c
+	return urlform.EqualASCIIFold(strings.TrimSuffix(host, "."), c)
 }
 
 // --- Match-key building ---
@@ -402,10 +412,10 @@ const maxTrackerIDDigits = 20
 // ("?next=/view/123") mint the torrent id - the smuggling both callers anchor
 // against by extracting from u.EscapedPath() only.
 func extractID(path, needle string) string {
-	_, after, found := strings.Cut(path, needle)
-	if !found {
-		return ""
-	}
+	// A needle the path does not carry yields an empty token, which
+	// validTrackerID refuses like any other non-id: no separate
+	// not-found arm.
+	_, after, _ := strings.Cut(path, needle)
 	if cut := strings.IndexAny(after, "?#/&"); cut >= 0 {
 		after = after[:cut]
 	}
@@ -417,7 +427,9 @@ func extractID(path, needle string) string {
 // run of ASCII digits no longer than maxTrackerIDDigits in the CANONICAL
 // decimal form (no leading zero), and "" otherwise.
 func validTrackerID(id string) string {
-	if id == "" || len(id) > maxTrackerIDDigits || !isAllDigits(id) {
+	// isAllDigits carries the non-empty half of the charset rule
+	// (it ends in s != ""), so emptiness has ONE home.
+	if len(id) > maxTrackerIDDigits || !isAllDigits(id) {
 		return ""
 	}
 	if len(id) > 1 && id[0] == '0' {

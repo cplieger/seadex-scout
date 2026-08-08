@@ -734,11 +734,6 @@ type attrXML struct {
 // same shape renderError emits on the serving side. Decoding is custom (see
 // UnmarshalXML) so every attribute is bounded BEFORE assignment.
 type errorXML struct {
-	// budget is the decoded-text allowance this document charges, created on the
-	// UnmarshalXML call. The <error> fallback re-parses the SAME body the feed
-	// parse just walked, so it gets its own fresh allowance rather than a
-	// half-spent one.
-	budget      *xmlx.Budget
 	Code        string
 	Description string
 }
@@ -754,11 +749,16 @@ func (e *errorXML) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	if start.Name.Local != "error" {
 		return fmt.Errorf("expected torznab error element, got %s", start.Name.Local)
 	}
-	if e.budget == nil {
-		e.budget = newUpstreamBudget()
-	}
+	// One allowance per document, scoped to this call: xml.Unmarshal decodes
+	// only a document's FIRST element, so unlike channelXML - which
+	// encoding/xml re-invokes for each <channel> sibling on the same value -
+	// this decoder runs exactly once and needs no field to carry the budget
+	// across invocations. The <error> fallback re-parses the SAME body the
+	// feed parse just walked, so it gets a fresh allowance rather than a
+	// half-spent one either way.
+	budget := newUpstreamBudget()
 	for _, attr := range start.Attr {
-		if err := asLimitError(e.budget.Charge(attr.Value)); err != nil {
+		if err := asLimitError(budget.Charge(attr.Value)); err != nil {
 			return err
 		}
 		switch attr.Name.Local {

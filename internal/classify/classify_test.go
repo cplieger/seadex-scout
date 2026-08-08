@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/cplieger/seadex-scout/internal/filter"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/tracker"
@@ -248,14 +247,14 @@ func TestABEvidenceAdapterReadsRawEvidence(t *testing.T) {
 	tests := []struct {
 		name    string
 		torrent seadex.Torrent
-		want    filter.ABEvidence
+		want    tracker.ABEvidence
 	}{
-		{"AB label is definitive", seadex.Torrent{Tracker: "AB", URL: "/torrents.php?id=1&torrentid=2"}, filter.ABDefinite},
-		{"absolute AB URL under a public label is definitive", seadex.Torrent{Tracker: "Nyaa", URL: "https://animebytes.tv/torrents.php?id=1"}, filter.ABDefinite},
-		{"schemeless AB URL under a public label is definitive", seadex.Torrent{Tracker: "Nyaa", URL: "animebytes.tv/torrents.php?id=1"}, filter.ABDefinite},
-		{"hidden-host form settles nothing", seadex.Torrent{Tracker: "Nyaa", URL: "animebytes.tv:443/torrents.php?id=1"}, filter.ABAmbiguous},
-		{"public tracker with public URL is not AB", seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}, filter.ABNone},
-		{"empty URL carries no host evidence", seadex.Torrent{Tracker: "Nyaa", URL: ""}, filter.ABNone},
+		{"AB label is definitive", seadex.Torrent{Tracker: "AB", URL: "/torrents.php?id=1&torrentid=2"}, tracker.ABDefinite},
+		{"absolute AB URL under a public label is definitive", seadex.Torrent{Tracker: "Nyaa", URL: "https://animebytes.tv/torrents.php?id=1"}, tracker.ABDefinite},
+		{"schemeless AB URL under a public label is definitive", seadex.Torrent{Tracker: "Nyaa", URL: "animebytes.tv/torrents.php?id=1"}, tracker.ABDefinite},
+		{"hidden-host form settles nothing", seadex.Torrent{Tracker: "Nyaa", URL: "animebytes.tv:443/torrents.php?id=1"}, tracker.ABAmbiguous},
+		{"public tracker with public URL is not AB", seadex.Torrent{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}, tracker.ABNone},
+		{"empty URL carries no host evidence", seadex.Torrent{Tracker: "Nyaa", URL: ""}, tracker.ABNone},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

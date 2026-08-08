@@ -142,3 +142,32 @@ func TestSuperviseStopWaitsForDrain(t *testing.T) {
 		t.Error("cleanup did not run before done was closed")
 	}
 }
+
+// TestSuperviseStopForcesTheFeedDownUnderALiveParent pins the exported stop
+// contract the unexported-supervise cases cannot reach: Supervise runs the feed
+// on its OWN cancellable child of ctx, so the returned stop func brings a
+// SERVING feed down while the parent context is still live (a daemon unwinding
+// its defers after a startup error), and it returns only once the goroutine has
+// drained and released the Prowlarr transport - not after waiting out stopWait.
+func TestSuperviseStopForcesTheFeedDownUnderALiveParent(t *testing.T) {
+	orig := listenAddr
+	listenAddr = "127.0.0.1:0"
+	t.Cleanup(func() { listenAddr = orig })
+	log, rec := capture.New()
+	cleaned := make(chan struct{})
+
+	// context.Background() is never cancelled, so only the child context
+	// Supervise derives can stop the feed.
+	stop := New(&Config{APIKey: "k"}, log, nil).Supervise(context.Background(), func() { close(cleaned) })
+	stop()
+
+	select {
+	case <-cleaned:
+	default:
+		t.Error("stop returned before the feed goroutine released its resources (the Prowlarr transport would leak)")
+	}
+	const drainWarn = "indexer feed did not drain within the shutdown budget; continuing shutdown"
+	if got := rec.CountLevel(slog.LevelWarn, drainWarn); got != 0 {
+		t.Errorf("stop waited out the %v drain budget instead of stopping the feed: %v", stopWait, rec.Messages())
+	}
+}

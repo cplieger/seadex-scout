@@ -47,9 +47,12 @@ const (
 	stateSizeWarnBytes = maxStateBytes / degradation.SizeWarnDenominator * degradation.SizeWarnNumerator
 	// dirMode / fileMode are applied to the created state directory and file.
 	// The file holds the operator's library inventory and finding history, so
-	// it stays owner-only (least privilege); the directory mode is the broader
-	// config-directory contract and is unchanged.
-	dirMode  = 0o755
+	// it stays owner-only (least privilege). dirMode matches every other
+	// creator of this same directory - it is config.DefaultConfigDir, also
+	// created by main.go's starter-config write, cycle.NewExclusive's cycle
+	// lock and the indexer feed snapshot, all at 0o700 - so which writer
+	// reaches a fresh volume first cannot change the mode /config lands at.
+	dirMode  = 0o700
 	fileMode = 0o600
 )
 
@@ -138,6 +141,16 @@ type State struct {
 }
 
 // Store loads and saves the state file at a fixed path.
+//
+// A Store is NOT safe for concurrent use. Load and Save communicate through
+// unsynchronized fields (unsupportedVersion, loadFailed) that carry one call's
+// classification of the on-disk file into the next, and those fields exist to
+// make Save REFUSE: a Save racing a Load can read a stale verdict and
+// overwrite bytes the Load meant to preserve (an unclassified read failure's
+// possibly-recoverable state, or a newer-schema envelope an image rollback
+// must leave intact). Confine each Store to one goroutine - the cycle body,
+// which the cross-process cycle lock already serializes - the same contract
+// atomicfile.PendingFile states for its own lifecycle state.
 type Store struct {
 	log  *slog.Logger
 	path string
@@ -260,18 +273,6 @@ func schemaVersion(data []byte) (version int, found bool, err error) {
 // newer image finds its state intact instead of a freshly-overwritten older
 // envelope.
 func (s *Store) Load(ctx context.Context) (State, error) {
-	// CleanupStaleTemps maps a missing dir to (0, nil) and logs its own
-	// removal summary at Info through the supplied logger, so Load only
-	// surfaces a readdir failure. Read-only stores (the one-shot report) skip
-	// state-directory maintenance entirely: the report's state access is
-	// documented read-only and holds only report.lock, so removing files here
-	// would both break that contract and risk unlinking a stalled concurrent
-	// daemon Save's still-open temp.
-	if !s.readOnly {
-		if _, cleanErr := atomicfile.CleanupStaleTemps(filepath.Dir(s.path), staleTempMaxAge, atomicfile.WithLogger(s.log)); cleanErr != nil {
-			s.log.Warn("could not clean stale atomic-write temp files", "dir", filepath.Dir(s.path), "error", cleanErr)
-		}
-	}
 	// ONE os.Root spans the whole read -> classify -> preserve decision.
 	// os.Root only confines what happens after the OpenRoot, so reopening the
 	// directory by AMBIENT PATH once the read has already failed would leave a
@@ -293,6 +294,30 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 				s.log.Warn("could not close state directory handle", "dir", filepath.Dir(s.path), "error", clErr)
 			}
 		}()
+	}
+	// Sweep stale temps through the SAME root the read -> classify -> preserve
+	// decision is pinned to. The ambient CleanupStaleTemps rebuilds each
+	// candidate path with filepath.Join and unlinks it with os.Remove, which
+	// atomicfile documents as unsafe for a directory a co-mounting writer can
+	// modify underneath - the very threat model this root exists for, and the
+	// only unpinned filesystem write Load performed. A missing state directory
+	// needs no special case any more: OpenRoot already reported it as
+	// fs.ErrNotExist and classifyReadFailure treats it as the cold start it is.
+	// Read-only stores (the one-shot report) still skip state-directory
+	// maintenance entirely: that flow is documented read-only, and removing
+	// files here would also risk unlinking a stalled concurrent daemon Save's
+	// still-open temp.
+	if err == nil && !s.readOnly {
+		// Unlike the ambient variant this reports counts instead of logging its
+		// own Info summary, so Load narrates the reclaim itself.
+		sweep, cleanErr := atomicfile.CleanupStaleTempsInRoot(ctx, root, staleTempMaxAge, atomicfile.WithLogger(s.log))
+		if cleanErr != nil {
+			s.log.Warn("could not clean stale atomic-write temp files", "dir", filepath.Dir(s.path), "error", cleanErr)
+		}
+		if sweep.Removed > 0 || sweep.Failed > 0 {
+			s.log.Info("reclaimed stale atomic-write temp files", "dir", filepath.Dir(s.path),
+				"removed", sweep.Removed, "failed", sweep.Failed)
+		}
 	}
 	var data []byte
 	if err == nil {

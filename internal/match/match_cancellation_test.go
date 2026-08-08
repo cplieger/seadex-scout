@@ -67,8 +67,12 @@ func (c *cancelOnFetchAniList) Fetch(_ context.Context, _ int) (anilist.Media, e
 	return anilist.Media{Titles: []string{"Movie A"}, Format: "MOVIE", Year: 2020}, nil
 }
 
-func (c *cancelOnFetchAniList) FetchMany(context.Context, []int) (anilist.BatchResult, error) {
-	return anilist.BatchResult{Media: map[int]anilist.Media{}, Completed: true},
+func (c *cancelOnFetchAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
+	media := map[int]anilist.Media{}
+	return anilist.BatchResult{
+			Media:    media,
+			Verdicts: batchVerdictsAbsentAs(ids, media, anilist.VerdictUnverified),
+		},
 		errors.New("anilist 500 on a later chunk")
 }
 

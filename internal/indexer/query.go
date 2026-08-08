@@ -109,9 +109,9 @@ func (c *curation) lookup(scope, hash, infoURL, guid string) (isBest, matched, c
 			curatedHash = h
 		}
 	}
-	key, ok := c.acceptScopedKeys(scope, []string{infoURL, guid}, &match)
+	key, ok, keyConflict := c.acceptScopedKeys(scope, []string{infoURL, guid}, &match)
 	if !ok {
-		return false, false, match.matched
+		return false, false, match.matched || keyConflict
 	}
 	// AnimeBytes exposes no info hash in Torznab, so a scoped tracker key is
 	// mandatory there; Nyaa may still match a hash-only item.
@@ -146,16 +146,19 @@ func (c *curation) acceptsObservedPair(hash, key string) bool {
 }
 
 // acceptScopedKeys applies lookup's tracker-key arm: every tracker key parsed
-// from the given page URLs must belong to scope (a key for a different
-// tracker rejects the item outright), must agree with every other parsed key
-// on the SAME release identity (healthy Prowlarr emits the same tracker id in
-// comments and guid, so two URLs naming different curated torrents are an
-// invalid untrusted response and fail closed - even when both ids happen to
-// share a best/alt value), and must pass m.accept (curated, agreeing on
-// best/alt). It reports the resolved scoped key (key - "" when the URLs
-// carried none; lookup's AB rule and hash/key pair check need it) and whether
-// the item survives (ok).
-func (c *curation) acceptScopedKeys(scope string, urls []string, m *curationMatch) (key string, ok bool) {
+// from the given page URLs must belong to scope (a key for a different tracker
+// rejects the item outright, and is reported as an identity conflict), must
+// agree with every other parsed key on the SAME release identity (healthy
+// Prowlarr emits the same tracker id in comments and guid, so two URLs naming
+// different curated torrents are an invalid untrusted response and fail closed
+// - even when both ids happen to share a best/alt value), and must pass
+// m.accept (curated, agreeing on best/alt). It reports the resolved scoped key
+// (key - "" when the URLs carried none; lookup's AB rule and hash/key pair
+// check need it), whether the item survives (ok), and whether the rejection was
+// a STRUCTURAL one (conflict) the request line must count as an identity
+// conflict on its own evidence rather than only when some earlier signal was
+// already curated.
+func (c *curation) acceptScopedKeys(scope string, urls []string, m *curationMatch) (key string, ok, conflict bool) {
 	var identity string
 	for _, raw := range urls {
 		k := trackerKeyFromURL(raw)
@@ -163,18 +166,26 @@ func (c *curation) acceptScopedKeys(scope string, urls []string, m *curationMatc
 			continue
 		}
 		if scopeOfKey(k) != scope {
-			return identity, false
+			// A key naming ANOTHER tracker is an untrusted-response shape, not
+			// an uncurated release, and it must be reported as one WITHOUT
+			// depending on a curated hash having been accepted first: the
+			// likeliest producer is an upstream Torznab URL wired to the wrong
+			// Prowlarr indexer, where every result is out of scope and no other
+			// signal is curated - so keying the conflict on m.matched made that
+			// standing misconfiguration read as a clean no-match on every
+			// search.
+			return identity, false, true
 		}
 		if identity != "" && k != identity {
-			return identity, false
+			return identity, false, true
 		}
 		identity = k
 		b, curated := c.byKey[k]
 		if !m.accept(b, curated) {
-			return identity, false
+			return identity, false, false
 		}
 	}
-	return identity, true
+	return identity, true, false
 }
 
 // --- Request dispatch and accounting ---
@@ -330,9 +341,11 @@ func (ix *Indexer) query(ctx context.Context, q url.Values, scope string) ([]ite
 }
 
 // isFeedRequest reports whether a request is the empty-query periodic RSS check
-// served from the synthesized journal rather than a proxied search. It is the
-// one home for that test so the concurrency pool serveQuery picks cannot drift
-// from the path query actually takes.
+// served from the synthesized journal rather than a proxied search - the
+// condition query dispatches on. server.go's rejectMissingABPasskey applies the
+// same emptiness test inline, earlier in the same request, so the two readings
+// must agree: the AnimeBytes passkey error is rendered for exactly the requests
+// this predicate selects.
 func isFeedRequest(q url.Values) bool { return strings.TrimSpace(q.Get("q")) == "" }
 
 // --- Serving the synthesized feed ---
@@ -643,7 +656,11 @@ func categoryMatch(itemCats []int, want map[int]bool) bool {
 		return true
 	}
 	for _, c := range itemCats {
-		if want[c] || (c >= 1000 && want[c-c%1000]) {
+		// The parent leg needs no domain guard: parseCats admits only positive
+		// ids, so want[0] is always false, and c - c%1000 is 0 for every c <= 0
+		// and every 0 < c < 1000 - the ids a `c >= 1000` guard would exclude are
+		// already refused by the lookup itself.
+		if want[c] || want[c-c%1000] {
 			return true
 		}
 	}

@@ -356,7 +356,8 @@ type prefetchResult struct {
 // prefetchPass issues ONE batched FetchMany over pending and applies prefetch's
 // memoization rules to the answer: every id a completed chunk definitively
 // resolved is memoized (positively, or negatively when absent), and every id
-// whose chunk was not trustworthy is left uncached.
+// whose chunk was not trustworthy is left uncached. The rules read one verdict
+// per id, so this pass knows nothing about the batch's chunking.
 func (m *Matcher) prefetchPass(ctx context.Context, pending []int, memo *Memo, now time.Time) prefetchResult {
 	res, err := m.anilist.FetchMany(ctx, pending)
 	fetched := res.Media
@@ -367,14 +368,14 @@ func (m *Matcher) prefetchPass(ctx context.Context, pending []int, memo *Memo, n
 		// A cancellation is not a fault (same contract as Scout.save).
 		m.log.Debug("anilist batch prefetch cancelled",
 			"requested", len(pending), "fetched", len(fetched))
-	case !res.Completed:
-		// TOTAL failure: no chunk completed (a request/envelope failure before
-		// any chunk finished). A COMPLETED batch that resolved nothing is NOT
-		// an outage — at least one chunk completed and simply produced no media
-		// (every id definitively not found, or every record malformed, which is
-		// record-local) — so it falls to the default branch and each absent id
-		// stays uncached for the documented per-id Fetch fallback instead of
-		// being failed fast.
+	case len(res.Verdicts) == 0:
+		// TOTAL failure: not one chunk completed (a request/envelope failure
+		// before any chunk finished), so no id carries an answer at all. A
+		// COMPLETED batch that resolved nothing is NOT an outage — at least one
+		// chunk completed and simply produced no media (every id definitively
+		// not found, or every record malformed, which is record-local) — so it
+		// falls to the loop below and each absent id is memoized or left for the
+		// documented per-id Fetch fallback instead of being failed fast.
 		// Degrade fast: fail the pending ids immediately instead of
 		// regressing to one doomed per-id request each.
 		m.log.Warn("anilist batch prefetch failed; skipping per-id fallback for pending ids",
@@ -386,69 +387,31 @@ func (m *Matcher) prefetchPass(ctx context.Context, pending []int, memo *Memo, n
 		out.outage = outage
 		return out
 	}
-	// unverified holds the ids whose batch chunk reported a record-local
-	// failure: their absence from fetched proves nothing, so only they are
-	// exempt from the negative memo below. Every other requested id was
-	// definitively answered by a clean chunk, and memoizing those negatives is
-	// what keeps a single malformed record from dumping the whole pending set
-	// into per-id fallbacks.
-	unverified, scoped := unverifiedBatchIDs(err)
 	for _, id := range pending {
-		if media, ok := fetched[id]; ok {
-			entry := mediaEntry(media, m.freshExpiry(now))
+		switch res.Verdicts[id] {
+		case anilist.VerdictFound:
+			entry := mediaEntry(fetched[id], m.freshExpiry(now))
 			memo.put(id, &entry)
-			continue
-		}
-		if _, skip := unverified[id]; skip {
-			// This id's chunk was not trustworthy: leave it uncached so
-			// matchEntry retries it via the single Fetch, unless it was never
-			// asked at all - the caller re-batches those.
-			continue
-		}
-		if err == nil || scoped {
+		case anilist.VerdictAbsent:
 			// The batch definitively answered this id and AniList has no such
 			// media. Memoize the negative so it is not re-fetched this run; the
 			// expiry gives the negative the same lifetime policy as a positive,
-			// so a show created on AniList later is eventually seen.
+			// so a show created on AniList later is eventually seen. Memoizing
+			// these is what keeps a single malformed record from dumping the
+			// whole pending set into per-id fallbacks.
 			entry := notFoundEntry(m.freshExpiry(now))
 			memo.put(id, &entry)
+		case anilist.VerdictUnverified:
+			// This id's chunk was not trustworthy: leave it uncached so
+			// matchEntry retries it via the single Fetch. Re-batching would
+			// only re-fetch the same poisoned record.
+		case anilist.VerdictUnrequested:
+			// Never asked at all, so no answer exists yet - the caller
+			// re-batches these 50 at a time.
+			out.unrequested = append(out.unrequested, id)
 		}
-		// Any other error leaves the id uncached for the per-id Fetch.
 	}
-	out.unrequested = unrequestedBatchIDs(err)
 	return out
-}
-
-// unrequestedBatchIDs extracts the ids an aborted batch abandoned without ever
-// requesting them. It is deliberately narrower than unverifiedBatchIDs: a chunk
-// that DID answer untrustworthily is not re-batched (the same poisoned record
-// would come back), while these ids have no answer at all yet and one more
-// batched pass resolves them 50 at a time.
-func unrequestedBatchIDs(err error) []int {
-	var batchErr *anilist.BatchRecordError
-	if !errors.As(err, &batchErr) {
-		return nil
-	}
-	return batchErr.UnrequestedIDs
-}
-
-// unverifiedBatchIDs extracts the ids a record-local batch failure makes
-// untrustworthy, and reports whether err was such a failure at all. A
-// scoped=true with an id absent from the set means the batch definitively
-// answered that id, so its negative is safe to memoize; scoped=false means the
-// error says nothing per-id and no negative may be inferred - which is why this
-// stays keyed on the ERROR rather than on BatchResult.Completed: completion says
-// evidence exists, the error is what scopes which ids it covers.
-func unverifiedBatchIDs(err error) (ids map[int]struct{}, scoped bool) {
-	var batchErr *anilist.BatchRecordError
-	if !errors.As(err, &batchErr) {
-		return nil, false
-	}
-	ids = make(map[int]struct{}, len(batchErr.UnverifiedIDs))
-	for _, id := range batchErr.UnverifiedIDs {
-		ids[id] = struct{}{}
-	}
-	return ids, true
 }
 
 // pendingAniListIDs returns the distinct AniList ids the match will look up but
@@ -586,24 +549,24 @@ func (r *matchRun) lookupAniList(ctx context.Context, aniListID int) (anilist.Me
 // class, which is the one where the caller may fall back to an expired memo
 // entry (a definitive answer supersedes the memo instead).
 func (r *matchRun) handleLookupFailure(aniListID int, err error) (transient bool) {
-	if errors.Is(err, anilist.ErrNotFound) {
+	// A DEFINITIVE answer, in one arm because the handling is one decision: AniList
+	// has no such media, or the record exists but its own content cannot yield a
+	// match key. Either way the answer is cacheable and the upstream is proven to be
+	// responding, so memoize the negative and reset the breaker streak. Retrying an
+	// unusable record would re-fetch the same doomed record every cycle and hold the
+	// pass degraded, escalating the AniList degradation streak into a standing ERROR
+	// that blames upstream reachability.
+	unusable := errors.Is(err, anilist.ErrRecordUnusable)
+	if unusable || errors.Is(err, anilist.ErrNotFound) {
 		r.gate.recordSuccess()
 		entry := notFoundEntry(r.entryExpiry())
 		r.memo.put(aniListID, &entry)
-		return false
-	}
-	if errors.Is(err, anilist.ErrRecordUnusable) {
-		// The record exists but its own content cannot yield a match key, so
-		// this is a definitive answer, not an outage: memoize it like a
-		// not-found. Retrying would re-fetch the same doomed record every cycle
-		// and hold the pass degraded, escalating the AniList degradation streak
-		// into a standing ERROR that blames upstream reachability. Say it once,
-		// naming the remedy that actually applies.
-		r.gate.recordSuccess()
-		entry := notFoundEntry(r.entryExpiry())
-		r.memo.put(aniListID, &entry)
-		r.m.log.Warn("anilist record unusable for matching; add an overrides.json entry to map it directly",
-			"al_id", aniListID, "error", err)
+		if unusable {
+			// Say it once, naming the remedy that actually applies; a routine
+			// not-found stays silent.
+			r.m.log.Warn("anilist record unusable for matching; add an overrides.json entry to map it directly",
+				"al_id", aniListID, "error", err)
+		}
 		return false
 	}
 	// A transient/upstream error (network, context cancellation, rate-limit

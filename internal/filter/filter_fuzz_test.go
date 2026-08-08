@@ -74,16 +74,16 @@ func FuzzABVisible(f *testing.F) {
 		// definite-is-a-subset-of-gated property is structural now (one value
 		// cannot be two grades), so what is worth fuzzing is that the policy
 		// function and the grader never disagree.
-		if want := ClassifyAB(trackerName, rawURL) == ABNone; off != want {
-			t.Errorf("ABVisible(%q, %q, false) = %v but ClassifyAB = %d; the gate must be exactly the ABNone comparison", trackerName, rawURL, off, ClassifyAB(trackerName, rawURL))
+		if want := tracker.ClassifyAB(trackerName, rawURL) == tracker.ABNone; off != want {
+			t.Errorf("ABVisible(%q, %q, false) = %v but tracker.ClassifyAB = %d; the gate must be exactly the ABNone comparison", trackerName, rawURL, off, tracker.ClassifyAB(trackerName, rawURL))
 		}
 		// Totality: every input lands in one of the three named grades, so an
 		// exhaustive consumer switch (notify.classifyTrackerLink) cannot fall
 		// through to its unreachable default.
-		switch g := ClassifyAB(trackerName, rawURL); g {
-		case ABNone, ABAmbiguous, ABDefinite:
+		switch g := tracker.ClassifyAB(trackerName, rawURL); g {
+		case tracker.ABNone, tracker.ABAmbiguous, tracker.ABDefinite:
 		default:
-			t.Errorf("ClassifyAB(%q, %q) = %d, outside the three named grades", trackerName, rawURL, g)
+			t.Errorf("tracker.ClassifyAB(%q, %q) = %d, outside the three named grades", trackerName, rawURL, g)
 		}
 		// Security: no fuzzer-built subdomain of the AB host may surface while
 		// the toggle is off, and a lookalike suffix host must not be hidden as
@@ -101,12 +101,13 @@ func FuzzABVisible(f *testing.F) {
 // FuzzABToggleNeverPublishesAnimeBytes pins the COMPOSED toggle invariant this
 // package owns only half of: with the operator's animebytes toggle off, no
 // release the daemon's obtainability gate admits - and no row the audit report
-// keeps (its gate is ClassifyAB != ABDefinite) - may carry a published
-// animebytes.tv link. The hide half lives here (ClassifyAB/ABVisible) and the
-// publish half in trackerlink.Publish; the two agree today only because every
-// publish path that can emit an AnimeBytes base (an AB label, an AB URL host,
-// the AB torrent-page relative shape) is also a grade-ABDefinite path. Nothing
-// asserted that, so a change to either ladder could open a leak silently.
+// keeps (its gate is tracker.ClassifyAB != tracker.ABDefinite) - may carry a
+// published animebytes.tv link. The hide half is this package's toggle policy
+// (ABVisible) over internal/tracker's grade (tracker.ClassifyAB) and the publish
+// half is trackerlink.Publish; the two agree today only because every publish
+// path that can emit an AnimeBytes base (an AB label, an AB URL host, the AB
+// torrent-page relative shape) also grades tracker.ABDefinite. Nothing asserted
+// that, so a change to either ladder could open a leak silently.
 func FuzzABToggleNeverPublishesAnimeBytes(f *testing.F) {
 	for _, seed := range [][2]string{
 		{"Nyaa", "https://nyaa.si/view/1"},
@@ -140,8 +141,8 @@ func FuzzABToggleNeverPublishesAnimeBytes(f *testing.F) {
 		// The report direction (fail open on listing, but never on identity):
 		// a row the audit keeps with the toggle off must not carry an
 		// AnimeBytes link, so an AB-publishing pair must grade ABDefinite.
-		if g := ClassifyAB(trackerName, rawURL); g != ABDefinite {
-			t.Errorf("ClassifyAB(%q, %q) = %d but the pair publishes AnimeBytes link %q; the audit report would keep the row", trackerName, rawURL, g, published)
+		if g := tracker.ClassifyAB(trackerName, rawURL); g != tracker.ABDefinite {
+			t.Errorf("tracker.ClassifyAB(%q, %q) = %d but the pair publishes AnimeBytes link %q; the audit report would keep the row", trackerName, rawURL, g, published)
 		}
 	})
 }

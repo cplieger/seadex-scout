@@ -7,11 +7,15 @@ import (
 	"github.com/cplieger/urlform"
 )
 
-// downloadURL resolves a grabbable .torrent download URL for a SeaDex torrent
-// from its tracker and SeaDex source URL. It reports ok=false when the release
-// cannot be turned into a download the arr can fetch: an unknown tracker, a
-// source URL missing the expected id, an AnimeBytes release with no passkey,
-// or a tracker table entry without a usable site base.
+// downloadURLForScope resolves a grabbable .torrent download URL for one curated
+// release, keyed on the indexer's own feed scope (upstreamNyaa / upstreamAB). A
+// caller holding a seadex.Torrent's tracker name converts it with trackerScope
+// first; both journal admission and the snapshot reader already hold the scope.
+//
+// It reports ok=false when the release cannot be turned into a download the arr
+// can fetch: an unknown scope, a source URL that is not the tracker's own or is
+// missing the expected id, an AnimeBytes release with no passkey, or a tracker
+// table entry without a usable site base.
 //
 // Only the two trackers that carry ~all of SeaDex are resolved: public Nyaa
 // (no credential) and private AnimeBytes (needs the operator's passkey). The
@@ -19,21 +23,12 @@ import (
 // log it.
 //
 // The tracker-ownership host gate (trackerOwnForm, the same fail-closed check
-// journal admission applies via trackerKey) is enforced HERE, before the
-// shape-only id extraction (trackerID): a caller handing this a raw SeaDex
-// URL cannot mint a download link for an arbitrary tracker torrent id
-// smuggled in a foreign host's /view/{id} path. Inputs that already passed
-// the gate (every journaled torrent) re-pass it unchanged; anything else
-// fails closed with ok=false.
-func downloadURL(trackerName, sourceURL, abPasskey string) (string, bool) {
-	return downloadURLForScope(trackerScope(trackerName), sourceURL, abPasskey)
-}
-
-// downloadURLForScope is downloadURL keyed on the indexer's own feed scope
-// (upstreamNyaa / upstreamAB), for callers that already know it - the
-// snapshot reader rebuilds each per-scope feed, so it never needs to detour
-// through the SeaDex tracker-name vocabulary. downloadURL remains the bridge
-// for callers holding a seadex.Torrent's tracker name.
+// journal admission applies via trackerKey) is enforced in downloadTarget
+// BEFORE the shape-only id extraction (trackerID): a caller handing this a raw
+// SeaDex URL cannot mint a download link for an arbitrary tracker torrent id
+// smuggled in a foreign host's /view/{id} path. Inputs that already passed the
+// gate (every journaled torrent) re-pass it unchanged; anything else fails
+// closed with ok=false.
 func downloadURLForScope(scope, sourceURL, abPasskey string) (string, bool) {
 	base, id, ok := downloadTarget(scope, sourceURL)
 	if !ok {
@@ -57,10 +52,10 @@ func downloadURLForScope(scope, sourceURL, abPasskey string) (string, bool) {
 
 // downloadTarget applies every PASSKEY-INDEPENDENT gate a download link must
 // pass - the tracker-ownership host gate, the shape-only id extraction, and
-// the canonical tracker table lookup with its fail-closed found/BaseURL
-// validation - and returns the site base plus the extracted id. It is the
-// shared front half of downloadURLForScope and resolvableForScope, so the two
-// can never disagree about which records are structurally sound.
+// the canonical tracker table lookup (scopeTracker) with its fail-closed
+// found/BaseURL validation - and returns the site base plus the extracted id.
+// It is the shared front half of downloadURLForScope and resolvableForScope, so
+// the two can never disagree about which records are structurally sound.
 func downloadTarget(scope, sourceURL string) (base, id string, ok bool) {
 	if scope == "" {
 		return "", "", false
@@ -78,16 +73,9 @@ func downloadTarget(scope, sourceURL string) (base, id string, ok bool) {
 	if id = trackerID(scope, tracker.CanonicalSourceURL(&f)); id == "" {
 		return "", "", false
 	}
-	var trackerName string
-	switch scope {
-	case upstreamNyaa:
-		trackerName = tracker.NameNyaa
-	case upstreamAB:
-		trackerName = tracker.NameAnimeBytes
-	default:
-		return "", "", false
-	}
-	tr, found := tracker.Lookup(trackerName)
+	// The scope->tracker step is match.go's scopeTracker (the one home of that
+	// correspondence); only the base-URL requirement is this caller's own.
+	tr, found := scopeTracker(scope)
 	if !found || tr.BaseURL == "" {
 		return "", "", false
 	}

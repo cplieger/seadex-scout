@@ -21,6 +21,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/notify"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/seadexapi"
 	"github.com/cplieger/seadex-scout/internal/state"
 	"github.com/cplieger/slogx/capture"
 )
@@ -79,13 +80,13 @@ type fakeSeaDex struct {
 	windowEntries []seadex.Entry
 	windowErr     error
 
-	opts       []seadex.Options
+	opts       []seadexapi.Options
 	countSince []time.Time
 }
 
-func (f *fakeSeaDex) FetchEntries(_ context.Context, opts seadex.Options) ([]seadex.Entry, error) {
+func (f *fakeSeaDex) FetchEntries(_ context.Context, opts seadexapi.Options) ([]seadex.Entry, error) {
 	f.opts = append(f.opts, opts)
-	if opts.Mode == seadex.FetchWindow {
+	if opts.Mode == seadexapi.FetchWindow {
 		return f.windowEntries, f.windowErr
 	}
 	return f.entries, f.err
@@ -101,8 +102,8 @@ func (f *fakeSeaDex) CountWindow(ctx context.Context, since time.Time) (int, err
 
 // fetchModes reports the mode of every FetchEntries call in order, which is
 // what a dispatcher test asserts against.
-func (f *fakeSeaDex) fetchModes() []seadex.FetchMode {
-	modes := make([]seadex.FetchMode, 0, len(f.opts))
+func (f *fakeSeaDex) fetchModes() []seadexapi.FetchMode {
+	modes := make([]seadexapi.FetchMode, 0, len(f.opts))
 	for _, o := range f.opts {
 		modes = append(modes, o.Mode)
 	}
@@ -284,7 +285,7 @@ func TestLoadStateCanceledContextIsNotAFault(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	s := New(&Deps{Logger: logger, Store: store})
+	s := New(&Deps{Logger: logger, Store: store, Notifier: notify.NewNotifier(logger, nil)})
 	st := s.loadState(ctx)
 
 	if st.ShrunkWalks != 0 {
@@ -306,9 +307,10 @@ func TestCycleLibraryWalkFailureIsUnhealthy(t *testing.T) {
 	logger, recorder := capture.New()
 	store := &fakeStore{}
 	s := New(&Deps{
-		Logger:  logger,
-		Store:   store,
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
+		Notifier: notify.NewNotifier(logger, nil),
+		Logger:   logger,
+		Store:    store,
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
 	})
 
 	if healthy := s.Cycle(context.Background()); healthy {
@@ -330,10 +332,11 @@ func TestCycleLibraryWalkFailureIsUnhealthy(t *testing.T) {
 
 // TestCycleSeaDexFailureIsHealthyAndReportsNothing pins the SeaDex-outage
 // gate: the cycle is degraded-but-healthy, still saves the refreshed library
-// snapshot, and never reaches Report. Reporting is what makes not-reporting
-// meaningful, so an outage must leave the notifier's current set standing
-// rather than replace it with an empty one - otherwise a SeaDex hiccup would
-// stop reporting every condition that is still true.
+// snapshot, and never reaches Report - it re-states the standing set instead
+// (cycleGateDegraded -> Notifier.Reemit). Reporting is what makes
+// not-reporting meaningful, so an outage must leave the notifier's current set
+// standing rather than replace it with an empty one - otherwise a SeaDex
+// hiccup would stop reporting every condition that is still true.
 func TestCycleSeaDexFailureIsHealthyAndReportsNothing(t *testing.T) {
 	logger, recorder := capture.New()
 	store := &fakeStore{st: state.State{Mapping: frierenMappingCache()}}
@@ -359,8 +362,11 @@ func TestCycleSeaDexFailureIsHealthyAndReportsNothing(t *testing.T) {
 	if len(loaded.Library.Items) != 1 || loaded.Library.Items[0].Title != "Frieren" {
 		t.Errorf("library snapshot after degraded cycle = %+v, want refreshed Frieren snapshot", loaded.Library)
 	}
-	if n := recorder.CountExact("findings reported"); n != 0 {
-		t.Errorf("SeaDex-outage cycle reported findings %d times, want 0 (the gate runs no compare)", n)
+	if n := recorder.CountExact("findings reported"); n != 1 {
+		t.Errorf("SeaDex-outage cycle emitted the findings summary %d times, want 1 (the gate runs no compare but re-states the set)", n)
+	}
+	if n := recorder.Contains("better release available"); n {
+		t.Error("SeaDex-outage cycle emitted a finding row, want none (the notifier's set is empty here)")
 	}
 }
 
@@ -389,7 +395,7 @@ func TestSaveRetriesDetachedOnCancelledContext(t *testing.T) {
 
 	logger := scoutTestLogger()
 	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
-	s := New(&Deps{Logger: logger, Store: store})
+	s := New(&Deps{Logger: logger, Store: store, Notifier: notify.NewNotifier(logger, nil)})
 	want := state.State{ShrunkWalks: 1}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -431,9 +437,10 @@ func TestWalkFailureLogsAndReportErrorAreLogSafe(t *testing.T) {
 
 	logger, recorder := capture.New()
 	s := New(&Deps{
-		Logger:  logger,
-		Store:   &fakeStore{},
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: walkErr}, Logger: scoutTestLogger()}),
+		Notifier: notify.NewNotifier(logger, nil),
+		Logger:   logger,
+		Store:    &fakeStore{},
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: walkErr}, Logger: scoutTestLogger()}),
 	})
 
 	if healthy := s.Cycle(context.Background()); healthy {
@@ -453,7 +460,8 @@ func TestWalkFailureLogsAndReportErrorAreLogSafe(t *testing.T) {
 	// must stay credential-free as well.
 	feedLogger, feedRecorder := capture.New()
 	sFeed := New(&Deps{
-		Logger: feedLogger,
+		Notifier: notify.NewNotifier(feedLogger, nil),
+		Logger:   feedLogger,
 		Store: &fakeStore{st: state.State{
 			Mapping: frierenMappingCache(),
 		}},
@@ -554,9 +562,10 @@ func TestWalkFailureLogsCarryArrIdentity(t *testing.T) {
 	t.Run("sonarr alert-only", func(t *testing.T) {
 		logger, recorder := capture.New()
 		s := New(&Deps{
-			Logger:  logger,
-			Store:   &fakeStore{},
-			Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: transportErr("sonarr.local")}, Logger: scoutTestLogger()}),
+			Notifier: notify.NewNotifier(logger, nil),
+			Logger:   logger,
+			Store:    &fakeStore{},
+			Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: transportErr("sonarr.local")}, Logger: scoutTestLogger()}),
 		})
 		if healthy := s.Cycle(context.Background()); healthy {
 			t.Fatal("Cycle returned healthy=true, want false when the library walk fails")
@@ -575,7 +584,8 @@ func TestWalkFailureLogsCarryArrIdentity(t *testing.T) {
 	t.Run("radarr with feed", func(t *testing.T) {
 		logger, recorder := capture.New()
 		s := New(&Deps{
-			Logger: logger,
+			Notifier: notify.NewNotifier(logger, nil),
+			Logger:   logger,
 			Store: &fakeStore{st: state.State{
 				Mapping: frierenMappingCache(),
 			}},
@@ -624,7 +634,7 @@ func (f *failOnceStore) Save(_ context.Context, st *state.State) error {
 func TestSaveGenuineFailureOnLiveContextIsNotRetried(t *testing.T) {
 	logger, recorder := capture.New()
 	store := &failOnceStore{}
-	s := New(&Deps{Logger: logger, Store: store})
+	s := New(&Deps{Logger: logger, Store: store, Notifier: notify.NewNotifier(logger, nil)})
 
 	s.save(context.Background(), &state.State{ShrunkWalks: 1})
 

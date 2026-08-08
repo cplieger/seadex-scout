@@ -89,9 +89,7 @@ func TestRecord_HasArrIdentifier(t *testing.T) {
 		{"movie with only tvdb", Record{Type: "MOVIE", TvdbID: 100}, false},
 		{"no ids", Record{Type: "TV"}, false},
 		{"series with negative tvdb", Record{Type: "TV", TvdbID: -1}, false},
-		{"movie with zero tmdb entry", Record{Type: "MOVIE", TmdbMovies: []int{0}}, false},
-		{"movie with blank imdb entry", Record{Type: "MOVIE", IMDbIDs: []string{"  "}}, false},
-		{"movie with zero then valid tmdb", Record{Type: "MOVIE", TmdbMovies: []int{0, 4}}, true},
+		{"movie with a canonicalized tmdb list", Record{Type: "MOVIE", TmdbMovies: []int{4}}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -106,8 +104,9 @@ func TestRecord_HasArrIdentifier(t *testing.T) {
 // two secondary sites share (h-f9/l-f73): a themoviedb_id.movie id is a Radarr
 // id by construction, so it is returned whatever the record's type label says -
 // unlike an IMDb id, which TVDB reuses on the parent series and which this
-// accessor deliberately never exposes. Usability filtering is RoutedIDs' own
-// (non-positive entries drop), so an operator override cannot publish a zero id.
+// accessor deliberately never exposes. Usability is a Record invariant applied by
+// canonicalize (both producers, and again on insertion into the index), so this
+// accessor returns the already-canonical list rather than re-filtering it.
 func TestRecord_MovieTMDBIDs(t *testing.T) {
 	tests := []struct {
 		name string
@@ -118,7 +117,6 @@ func TestRecord_MovieTMDBIDs(t *testing.T) {
 		{"ova record with a movie id", Record{Type: "OVA", TmdbMovies: []int{4}}, []int{4}},
 		{"untyped record with a movie id", Record{TmdbMovies: []int{4}}, []int{4}},
 		{"series record with a movie id and a tvdb id", Record{Type: "TV", TvdbID: 100, TmdbMovies: []int{4}}, []int{4}},
-		{"non-positive entries drop", Record{Type: "OVA", TmdbMovies: []int{0, -1, 4}}, []int{4}},
 		{"no movie ids", Record{Type: "OVA", TvdbID: 100, IMDbIDs: []string{"tt1"}}, nil},
 	}
 	for _, tt := range tests {
@@ -367,13 +365,13 @@ func TestParseOverrides_overCapArrayDrainErrorPropagates(t *testing.T) {
 	}
 }
 
-// TestRecord_RoutedIDsReturnsOnlyUsableIDsForSelectedArr pins the exported
-// output contract internal/match's matcher and catalogue consume. The existing
-// HasArrIdentifier test only observes a boolean, so it stays green whenever ONE
-// usable id survives - it cannot see a zero/negative/blank id leaking beside a
-// valid one (a phantom catalogue key and a futile matcher lookup), nor ids
-// escaping from the wrong arr arm.
-func TestRecord_RoutedIDsReturnsOnlyUsableIDsForSelectedArr(t *testing.T) {
+// TestRecord_RoutedIDsRoutesToTheSelectedArrArm pins the exported output
+// contract internal/match's matcher and catalogue consume. The existing
+// HasArrIdentifier test only observes a boolean, so it cannot see ids escaping
+// from the wrong arr arm. Usability is NOT re-checked here: canonicalize owns it
+// at both producers and again on insertion into the index, so the movie arm
+// returns the record's own already-canonical lists.
+func TestRecord_RoutedIDsRoutesToTheSelectedArrArm(t *testing.T) {
 	tests := []struct {
 		name        string
 		record      Record
@@ -382,8 +380,8 @@ func TestRecord_RoutedIDsReturnsOnlyUsableIDsForSelectedArr(t *testing.T) {
 		wantIMDbIDs []string
 	}{
 		{
-			name:        "movie filters unusable ids and ignores the series arm",
-			record:      Record{Type: "MOVIE", TvdbID: 100, TmdbMovies: []int{0, -1, 42}, IMDbIDs: []string{"", "  ", "tt1"}},
+			name:        "movie returns its canonical id lists and ignores the series arm",
+			record:      Record{Type: "MOVIE", TvdbID: 100, TmdbMovies: []int{42}, IMDbIDs: []string{"tt1"}},
 			wantTMDB:    []int{42},
 			wantIMDbIDs: []string{"tt1"},
 		},
@@ -404,6 +402,38 @@ func TestRecord_RoutedIDsReturnsOnlyUsableIDsForSelectedArr(t *testing.T) {
 				t.Errorf("RoutedIDs() = (%d, %v, %v), want (%d, %v, %v)", gotTVDB, gotTMDB, gotIMDbIDs, tt.wantTVDB, tt.wantTMDB, tt.wantIMDbIDs)
 			}
 		})
+	}
+}
+
+// TestBuildIndexCanonicalizesRecords pins the boundary that now OWNS the
+// id-usability rule (h-f25): the accessors no longer filter on read, so a record
+// reaching buildIndex through plain encoding/json - the persisted mapping cache
+// replayed on the 304 and stale-on-error paths - must be canonicalized on
+// insertion, which is what makes RoutedIDs' presence check sound.
+func TestBuildIndexCanonicalizesRecords(t *testing.T) {
+	idx := NewIndex([]Record{{
+		AniListID:  7,
+		Type:       "movie",
+		TvdbID:     -3,
+		SeasonTvdb: -1,
+		TmdbMovies: []int{0, -1, 42},
+		IMDbIDs:    []string{"", "  ", " tt1 "},
+	}})
+	rec, ok := idx.Lookup(7)
+	if !ok {
+		t.Fatal("Lookup(7) = not found, want the indexed record")
+	}
+	if !slices.Equal(rec.TmdbMovies, []int{42}) {
+		t.Errorf("TmdbMovies = %v, want [42] (canonicalized on insertion)", rec.TmdbMovies)
+	}
+	if !slices.Equal(rec.IMDbIDs, []string{"tt1"}) {
+		t.Errorf("IMDbIDs = %v, want [tt1] (canonicalized on insertion)", rec.IMDbIDs)
+	}
+	if rec.TvdbID != 0 || rec.SeasonTvdb != 0 {
+		t.Errorf("TvdbID/SeasonTvdb = %d/%d, want 0/0 (canonicalized on insertion)", rec.TvdbID, rec.SeasonTvdb)
+	}
+	if _, tmdb, imdb := rec.RoutedIDs(); !slices.Equal(tmdb, []int{42}) || !slices.Equal(imdb, []string{"tt1"}) {
+		t.Errorf("RoutedIDs() = (_, %v, %v), want ([42], [tt1]) over the canonical record", tmdb, imdb)
 	}
 }
 

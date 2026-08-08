@@ -3,7 +3,6 @@ package indexer
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -14,7 +13,6 @@ import (
 	"time"
 
 	"github.com/cplieger/httpx/v4"
-	"github.com/cplieger/jsonx/bounded"
 	"github.com/cplieger/seadex-scout/internal/titlekey"
 )
 
@@ -170,9 +168,9 @@ func newHarvester(log *slog.Logger, now func() time.Time, ups []*upstream) *harv
 // last group - the last group that consumed a query last rebuild - and the
 // returned cursor carries that fairness forward, so a never-matching deep
 // show can only delay its successors within one rebuild, never starve them
-// across rebuilds. The persisted cursor is a harvestCheckpoint (see
-// decodeHarvestCheckpoint), which records that rotation position and nothing
-// else. Failures warn and never fail the rebuild; a show
+// across rebuilds. The persisted cursor is the bare "<scope>:<alID>" rotation
+// cursor (see decodeHarvestCursor), which records that rotation position and
+// nothing else. Failures warn and never fail the rebuild; a show
 // with no known title, no configured upstream, or no remaining slice stays
 // synthetic and retries next cycle. A SCOPE-WIDE query failure
 // (status/transport - see harvestShow) skips the scope's remaining shows
@@ -185,9 +183,9 @@ func newHarvester(log *slog.Logger, now func() time.Time, ups []*upstream) *harv
 // rejecting every query shape is upstream-wide breakage that would otherwise
 // burn the whole time slice with zero progress.
 func (h *harvester) harvestTitles(ctx context.Context, feeds map[string][]journalItem, titles map[string]string, infoFor EntryInfoFunc, prevCursor string) (stats harvestStats, cursor string) {
-	cp, degraded := decodeHarvestCheckpoint(prevCursor)
+	last, degraded := decodeHarvestCursor(prevCursor)
 	if degraded != "" {
-		// The persisted checkpoint is the harvest's only memory of WHERE the
+		// The persisted cursor is the harvest's only memory of WHERE the
 		// rotation stopped. Silently rebaselining it restarts the rotation at
 		// the head, so the groups after the cursor lose their turn,
 		// and because the value is re-persisted each rebuild a
@@ -199,7 +197,7 @@ func (h *harvester) harvestTitles(ctx context.Context, feeds map[string][]journa
 	}
 	defer func() { stats.pending = syntheticCount(feeds, titles) }()
 	groups, index, showTitles := pendingHarvest(feeds, titles, infoFor)
-	defer func() { cursor = encodeHarvestCheckpoint(cp) }()
+	defer func() { cursor = last }()
 	if len(groups) == 0 || len(h.upstreams) == 0 {
 		return stats, cursor
 	}
@@ -219,7 +217,7 @@ func (h *harvester) harvestTitles(ctx context.Context, feeds map[string][]journa
 	defer cancelHarvest()
 	run := &harvestRun{
 		infoFor:    infoFor,
-		checkpoint: &cp,
+		cursor:     &last,
 		pacer:      &harvestPacer{now: h.now, deadline: h.now().Add(harvestTimeBudget)},
 		stats:      &stats,
 		index:      index,
@@ -227,7 +225,7 @@ func (h *harvester) harvestTitles(ctx context.Context, feeds map[string][]journa
 		showTitles: showTitles,
 		latches:    newHarvestLatches(len(h.upstreams)),
 	}
-	start := rotationStart(groups, cp.Last)
+	start := rotationStart(groups, last)
 	for i := range groups {
 		if !h.processHarvestGroup(harvestCtx, groups[(start+i)%len(groups)], run) {
 			break
@@ -237,14 +235,17 @@ func (h *harvester) harvestTitles(ctx context.Context, feeds map[string][]journa
 }
 
 // harvestRun is one harvestTitles run's mutable accounting: the per-rebuild
-// checkpoint, time slice, stats, the identity index, title cache and per-key
-// show titles the matcher writes through and ranks with, and the per-scope
-// latch state. It exists so the orchestration loop passes ONE value to the
-// per-group step instead of one argument per field, keeping harvestTitles about
-// setup and ordered iteration.
+// rotation cursor, time slice, stats, the identity index, title cache and
+// per-key show titles the matcher writes through and ranks with, and the
+// per-scope latch state. It exists so the orchestration loop passes ONE value
+// to the per-group step instead of one argument per field, keeping harvestTitles
+// about setup and ordered iteration.
 type harvestRun struct {
-	infoFor    EntryInfoFunc
-	checkpoint *harvestCheckpoint
+	infoFor EntryInfoFunc
+	// cursor is the rotation position this rebuild will persist: the
+	// "scope:alID" of the last group that consumed a query (harvestCursorKey),
+	// carried forward verbatim when no group did.
+	cursor     *string
 	pacer      *harvestPacer
 	stats      *harvestStats
 	index      map[string]string
@@ -334,88 +335,10 @@ func (h *harvester) processHarvestGroup(ctx context.Context, g harvestGroup, r *
 		// The cursor tracks the last group that CONSUMED a query - not
 		// merely one dispatched after the slice ran out - so the next
 		// rebuild resumes exactly where real work stopped.
-		r.checkpoint.Last = key
+		*r.cursor = key
 	}
 	h.updateHarvestScopeState(g.scope, outcome, contradicted, r.latches)
 	return true
-}
-
-// harvestCheckpoint is the harvest's persisted resumption state, encoded into
-// the snapshot's harvest_cursor string. Last is the rotation cursor (the
-// "scope:alID" of the last group that consumed a query) and is the ONLY field:
-// per-group offset paging was removed (see the paging-removal note at the top
-// of this file), so there is no per-show page state left to carry.
-// The encoding is backward compatible both ways: the checkpoint always encodes
-// as the bare "scope:alID" cursor an older binary reads, and
-// decodeHarvestCheckpoint still reads the JSON object form a previous binary
-// may have persisted, ignoring its leftover "pages" key.
-type harvestCheckpoint struct {
-	Last string `json:"last,omitempty"`
-}
-
-// decodeHarvestCheckpoint reads a persisted harvest_cursor string: the bare
-// "scope:alID" rotation cursor (any non-JSON string) becomes a Last-only
-// checkpoint, a JSON object decodes its "last" field (any other key - notably
-// the retired "pages" state a pre-removal binary persisted - is ignored, so a
-// rollforward from such a snapshot keeps its rotation position and reports
-// nothing), and malformed JSON - a hand-edited or corrupted snapshot -
-// degrades to an empty checkpoint (start at the head: the safe baseline). The
-// rotation cursor is validated in both
-// arms (validRotationCursor): only the "<scope>:<alID>" shape harvestCursorKey
-// produces survives, so a garbage value cannot be carried forward verbatim
-// forever. A cursor over maxPersistedCursorBytes (writer.go, the one home of
-// the persisted-snapshot size caps, enforced first at loadPrevious) is
-// external corruption and takes the same empty-checkpoint baseline before any
-// decoding.
-//
-// The second return names WHY the decode degraded ("" when nothing was
-// dropped), so the caller can report a rebaselined checkpoint the way the seen
-// ledger and the info-URL scrub already report a tampered persisted field: a
-// silent rebaseline restarts the rotation at the head, and because the
-// value is re-persisted each rebuild a recurring corruption never self-heals.
-func decodeHarvestCheckpoint(raw string) (checkpoint harvestCheckpoint, degradedReason string) {
-	if len(raw) > maxPersistedCursorBytes {
-		// An over-cap cursor cannot come from this writer (a cursor is one
-		// group key), so it is external corruption: degrade to the same safe
-		// baseline malformed JSON takes (start at the head) instead
-		// of decoding it and re-persisting it forever.
-		return harvestCheckpoint{}, "exceeds size cap"
-	}
-	if !strings.HasPrefix(strings.TrimSpace(raw), "{") {
-		last := validRotationCursor(raw)
-		reason := ""
-		if last == "" && strings.TrimSpace(raw) != "" {
-			reason = "invalid rotation cursor"
-		}
-		return harvestCheckpoint{Last: last}, reason
-	}
-	if err := bounded.Preflight(strings.NewReader(raw)); err != nil {
-		// A duplicate key or pathological nesting is tampering evidence, not
-		// an honest cursor this writer produced, so take the same
-		// empty-checkpoint baseline malformed JSON takes. Same boundary rule
-		// unmarshalSnapshot applies to the enclosing file (writer.go).
-		return harvestCheckpoint{}, "malformed checkpoint JSON"
-	}
-	var cp harvestCheckpoint
-	if err := json.Unmarshal([]byte(raw), &cp); err != nil {
-		return harvestCheckpoint{}, "malformed checkpoint JSON"
-	}
-	decodedLast := cp.Last
-	cp.Last = validRotationCursor(cp.Last)
-	if cp.Last == "" && decodedLast != "" {
-		return cp, "invalid rotation cursor"
-	}
-	return cp, ""
-}
-
-// encodeHarvestCheckpoint renders the checkpoint back into the persisted
-// harvest_cursor string: the bare "scope:alID" rotation cursor, which is the
-// whole checkpoint now that page state is gone. It stays a named function
-// rather than a field read so the persisted form has one documented home on
-// both sides of the round trip, and because an older binary reads exactly this
-// value.
-func encodeHarvestCheckpoint(cp harvestCheckpoint) string {
-	return cp.Last
 }
 
 // harvestCursorKey renders a group's rotation-cursor identity, the
@@ -424,27 +347,56 @@ func harvestCursorKey(g harvestGroup) string {
 	return g.scope + ":" + strconv.Itoa(g.alID)
 }
 
-// validRotationCursor returns cursor unchanged when it has the rotation-key
-// shape harvestCursorKey produces ("<scope>:<alID>", with a POSITIVE AniList
-// id - the only ids a pending group carries), else "". The cursor is
-// carried into every future snapshot verbatim - a rebuild with no pending
-// group never overwrites it - so a garbage or unbounded value from a
-// hand-edited or corrupted snapshot would persist forever, the hazard the
-// seen-ledger and title-cache limits (seenLedgerWithinLimits /
-// retainValidTitles) already close for the other verbatim-carried
-// fields. Dropping it changes no rotation behavior: rotationStart already
-// treats an unparseable cursor as "start at the head", and a zero or negative
-// id is outside harvestCursorKey's domain, so no honest cursor is rejected.
-func validRotationCursor(cursor string) string {
+// decodeHarvestCursor reads the persisted harvest_cursor string: the
+// "<scope>:<alID>" rotation cursor harvestCursorKey produces, or "" (restart
+// the rotation at the head) for anything else. The cursor is carried into every
+// future snapshot verbatim - a rebuild with no pending group never overwrites
+// it - so a garbage or unbounded value from a hand-edited or corrupted snapshot
+// would persist forever, the hazard the seen-ledger and title-cache limits
+// (seenLedgerWithinLimits / retainValidTitles) already close for the other
+// verbatim-carried fields.
+//
+// The second return names WHY the value was dropped ("" when nothing was), so
+// the caller can report a rebaselined cursor the way the seen ledger and the
+// info-URL scrub already report a tampered persisted field: a silent rebaseline
+// restarts the rotation at the head, and because the value is re-persisted each
+// rebuild a recurring corruption never self-heals.
+//
+// A cursor over maxPersistedCursorBytes (writer.go, the one home of the
+// persisted-snapshot size caps, enforced first at loadPrevious) cannot come
+// from this writer - a cursor is one group key - so it is external corruption
+// and takes the same baseline.
+func decodeHarvestCursor(raw string) (cursor, degradedReason string) {
+	if len(raw) > maxPersistedCursorBytes {
+		return "", "exceeds size cap"
+	}
+	if _, _, ok := parseRotationCursor(raw); ok {
+		return raw, ""
+	}
+	if strings.TrimSpace(raw) != "" {
+		return "", "invalid rotation cursor"
+	}
+	return "", ""
+}
+
+// parseRotationCursor is the ONE reader of the persisted rotation-cursor
+// format: it splits the "<scope>:<alID>" form harvestCursorKey produces into
+// a known tracker scope and a POSITIVE AniList id, reporting false for
+// anything else. Both consumers go through it - decodeHarvestCursor at the
+// decode boundary and rotationStart when it places this rebuild's starting
+// group - so the gate deciding whether a persisted cursor may be carried
+// forward and the reader resolving where the rotation resumes agree by
+// construction rather than by both re-implementing Cut + Atoi.
+func parseRotationCursor(cursor string) (scope string, alID int, ok bool) {
 	scope, idStr, ok := strings.Cut(cursor, ":")
-	if !ok || (scope != upstreamNyaa && scope != upstreamAB) {
-		return ""
+	if !ok || !validScope(scope) {
+		return "", 0, false
 	}
 	alID, err := strconv.Atoi(idStr)
 	if err != nil || alID <= 0 {
-		return ""
+		return "", 0, false
 	}
-	return cursor
+	return scope, alID, true
 }
 
 // rotationStart resolves where this rebuild's group iteration begins: the
@@ -454,12 +406,8 @@ func validRotationCursor(cursor string) string {
 // snapshot - starts at the head; a cursor whose group is gone (titled or
 // aged out) still lands on its order-successor.
 func rotationStart(groups []harvestGroup, cursor string) int {
-	scope, idStr, ok := strings.Cut(cursor, ":")
+	scope, alID, ok := parseRotationCursor(cursor)
 	if !ok {
-		return 0
-	}
-	alID, err := strconv.Atoi(idStr)
-	if err != nil {
 		return 0
 	}
 	after := harvestGroup{scope: scope, alID: alID}
@@ -697,13 +645,6 @@ const consecutiveFruitlessLatch = 2 * consecutiveMalformedLatch
 // the tracker - expected, and no evidence against the upstream.
 func (h *harvester) harvestShow(ctx context.Context, u *upstream, g harvestGroup, meta EntryInfo, r *harvestRun) (outcome harvestOutcome, refused bool) {
 	candidates := harvestTitleCandidates(meta.Title)
-	if len(candidates) == 0 {
-		// Unreachable from the rebuild path (harvestable rejects a show with
-		// no synthesis title before its group is ever collected); keep the
-		// pre-ladder behavior of querying the title as-is rather than
-		// silently harvesting nothing.
-		candidates = []string{strings.TrimSpace(meta.Title)}
-	}
 	var st harvestShowProgress
 	for _, title := range candidates {
 		candidateOutcome, done := h.harvestCandidate(ctx, u, g, harvestParams(meta, g.scope, title), r, &st)
@@ -725,13 +666,12 @@ func (h *harvester) harvestShow(ctx context.Context, u *upstream, g harvestGroup
 }
 
 // harvestShowProgress is one show's mutable state across its title-candidate
-// ladder: the running stranded count that
-// keeps the could-not-use WARN to one line per show rather than one per
-// candidate, and whether any query refused one of this show's own pending
-// releases.
+// ladder: whether the could-not-use WARN has already fired, which keeps it to
+// one line per show rather than one per candidate, and whether any query
+// refused one of this show's own pending releases.
 type harvestShowProgress struct {
-	stranded int
-	refused  bool
+	strandWarned bool
+	refused      bool
 }
 
 // harvestCandidate runs ONE title candidate's single query, folding its matches
@@ -753,7 +693,7 @@ func (h *harvester) harvestCandidate(ctx context.Context, u *upstream, g harvest
 	}
 	matched, rejected, pendingRejected, unusable := matchHarvest(results, g.scope, r.index, r.titles, r.showTitles, g.keys)
 	r.stats.matched += matched
-	if st.stranded == 0 && pendingRejected+unusable > 0 {
+	if !st.strandWarned && pendingRejected+unusable > 0 {
 		// The stranding classes: this show's own release was named by a
 		// result the harvest could not use. The affected releases may
 		// remain on their synthesized titles unless another result - from
@@ -765,7 +705,7 @@ func (h *harvester) harvestCandidate(ctx context.Context, u *upstream, g harvest
 			"upstream", u.name, "al_id", g.alID,
 			"contradictory", pendingRejected, "unusable_title", unusable)
 	}
-	st.stranded += pendingRejected + unusable
+	st.strandWarned = st.strandWarned || pendingRejected+unusable > 0
 	st.refused = st.refused || pendingRejected > 0
 	if rejected > 0 {
 		// A result whose own identity signals contradict each other is an
@@ -845,6 +785,19 @@ type harvestGroupKey struct {
 	alID  int
 }
 
+// keyInScope reports whether a journal key belongs to the tracker feed scope:
+// it must carry the canonical "<scope>:<id>" form, the id included. It is the
+// ONE scope test on both sides of the harvest - the index build
+// (indexHarvestItem) and the match (matchHarvest) - because they must admit
+// exactly the same key set: a key the index accepts but the match rejects is
+// queried on every rebuild and can never be titled, burning one paced query
+// slot forever. scopeOfKey alone is not that test - for a key with no ":" at
+// all it returns the whole key, so a corrupted "nyaa" key passed the index
+// side and failed the match side.
+func keyInScope(key, scope string) bool {
+	return strings.HasPrefix(key, scope+":")
+}
+
 // indexHarvestItem records one harvestable journal item: it appends the
 // item's key to its show's per-tracker group and registers the item's
 // identity forms (tracker key and info hash) in the global index that maps a
@@ -854,7 +807,7 @@ func indexHarvestItem(it *journalItem, scope string, titles map[string]string, i
 	if !harvestable(it, titles, infoFor) {
 		return
 	}
-	if scopeOfKey(it.Key) != scope {
+	if !keyInScope(it.Key, scope) {
 		// A hand-edited or corrupted snapshot can hold an item whose journal
 		// key names a DIFFERENT tracker than the feed it sits in. Its key can
 		// never satisfy matchHarvest's scope binding, so querying for it
@@ -1124,7 +1077,7 @@ func matchHarvest(results []item, scope string, index, titles, showTitles map[st
 			pendingRejected += pendingHarvestRefusal(&results[i], index, titles, groupKeys)
 			continue
 		}
-		if key == "" || !strings.HasPrefix(key, scope+":") {
+		if key == "" || !keyInScope(key, scope) {
 			continue
 		}
 		if _, done := titles[key]; done {

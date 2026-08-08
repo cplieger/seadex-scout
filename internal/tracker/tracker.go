@@ -1,9 +1,12 @@
 // Package tracker is the single home of the canonical SeaDex tracker
 // vocabulary: canonical names and accepted aliases, the obtainability class
 // (public/private/unknown), the site base URLs, and the fail-closed
-// name/host/relative-URL identity gates every consumer keys on. A tracker
-// addition lands here and nowhere else, so it cannot reach one consumer's map
-// and silently miss the others.
+// name/host/relative-URL identity gates every consumer keys on - including the
+// composed rules over them, tracker.CanonicalName (the label to render a link
+// with) and tracker.ClassifyAB (how strongly an untrusted (label, URL) pair
+// identifies AnimeBytes; the operator's toggle POLICY over that grade stays in
+// internal/filter). A tracker addition lands here and nowhere else, so it cannot
+// reach one consumer's map and silently miss the others.
 //
 // It is a leaf over urlform: it knows tracker identity and the URL SHAPES that
 // carry it, and nothing about release names, findings, or links. Its consumers
@@ -134,9 +137,10 @@ func CanonicalName(label, rawURL string) string {
 // the first path segment - so parsing that spelling directly finds no
 // /torrents.php route and yields no id. Prefixing "https://" is what makes the
 // two spellings parse identically, and it is sound because every canonical
-// tracker in the table above is https; it is also exactly how the link
-// publisher canonicalizes the same form (trackerlink.usableSchemelessHost), so
-// a published link and a value parsed here cannot name different pages.
+// tracker in the table above is https. The link publisher
+// (trackerlink.usableSchemelessHost) and its parse target
+// (trackerlink.hostFormTargeted) are CALLERS of this function, so a published
+// link and a value parsed here cannot name different pages.
 //
 // It lives here, beside the host table, because more than one consumer needs
 // the normalized value (internal/indexer builds both its match key and its
@@ -276,7 +280,7 @@ func LookupByRelativeURL(raw string) (Tracker, bool) {
 		return Tracker{}, false
 	}
 	u, err := url.Parse(rooted)
-	if err != nil || !equalASCIIFold(u.Path, "/torrents.php") || !rawQueryHasKeyFold(u.RawQuery, "torrentid") {
+	if err != nil || !urlform.EqualASCIIFold(u.Path, "/torrents.php") || !rawQueryHasKeyFold(u.RawQuery, "torrentid") {
 		return Tracker{}, false
 	}
 	return Lookup(NameAnimeBytes)
@@ -327,38 +331,19 @@ func hrefSlashes(trimmed string) string {
 	return strings.ReplaceAll(trimmed[:stop], `\`, "/") + trimmed[stop:]
 }
 
-// equalASCIIFold reports whether a and b are equal under ASCII case folding.
-// Non-ASCII bytes can never compare equal to an ASCII protocol token.
-func equalASCIIFold(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range len(a) {
-		ca, cb := a[i], b[i]
-		if ca >= 'A' && ca <= 'Z' {
-			ca += 'a' - 'A'
-		}
-		if cb >= 'A' && cb <= 'Z' {
-			cb += 'a' - 'A'
-		}
-		if ca != cb {
-			return false
-		}
-	}
-	return true
-}
-
 // rawQueryHasKeyFold reports whether the RAW query carries key under ASCII
 // case folding. The raw reading (urlform.RawQueryNames: split on both '&' and
 // ';', percent-decode each name) is a strict superset of the parsed u.Query()
 // view, which drops a malformed pair wholesale - so a semicolon-smuggled pair
 // ("?torrentid=1;x") cannot evade the AB torrent-page shape check. The fold
-// stays here rather than in the library because the two consumers of that walk
-// need opposite fail directions: this gate matches only the one name it
-// recognizes, while internal/config's credential warning matches broadly.
+// itself is urlform.EqualASCIIFold (the library owns that byte rule, beside
+// FoldHostASCII); what stays here is the match POLICY, because the two
+// consumers of that walk need opposite fail directions: this gate matches only
+// the one name it recognizes, while internal/config's credential warning
+// matches broadly.
 func rawQueryHasKeyFold(rawQuery, key string) bool {
 	for name := range urlform.RawQueryNames(rawQuery) {
-		if equalASCIIFold(name, key) {
+		if urlform.EqualASCIIFold(name, key) {
 			return true
 		}
 	}

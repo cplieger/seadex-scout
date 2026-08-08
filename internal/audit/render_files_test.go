@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cplieger/atomicfile/v2"
+	"github.com/cplieger/seadex-scout/internal/reportfs"
 )
 
 // TestWriteFilesWritesTimestampedPair pins the on-disk report contract the
@@ -55,11 +56,11 @@ func TestWriteFilesWritesTimestampedPair(t *testing.T) {
 // TestWriteFilesReportPairIsOwnerOnly pins the report pair's least-privilege
 // file mode: a report enumerates the operator's whole library and carries
 // private-tracker page links, and atomicfile's DEFAULT mode is 0o644, so a
-// dropped WithMode(reportFileMode) would publish every report to any local
+// dropped WithMode(reportfs.FileMode) would publish every report to any local
 // account able to traverse the bind-mounted /config tree with nothing failing.
 // Only the FILE mode is asserted: a default ACL on the parent (containers,
 // group-writable bind mounts) can widen a freshly created directory beyond
-// MkdirAll's reportDirMode, so a directory-mode assertion would fail on an
+// reportfs.DirMode, so a directory-mode assertion would fail on an
 // honest tree.
 func TestWriteFilesReportPairIsOwnerOnly(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "reports")
@@ -74,8 +75,8 @@ func TestWriteFilesReportPairIsOwnerOnly(t *testing.T) {
 		if err != nil {
 			t.Fatalf("stat %s half: %v", ext, err)
 		}
-		if got := fi.Mode().Perm(); got != reportFileMode {
-			t.Errorf("%s half mode = %v, want %v (owner-only report pair)", ext, got, os.FileMode(reportFileMode))
+		if got := fi.Mode().Perm(); got != reportfs.FileMode {
+			t.Errorf("%s half mode = %v, want %v (owner-only report pair)", ext, got, os.FileMode(reportfs.FileMode))
 		}
 	}
 }

@@ -42,7 +42,12 @@ func (b *partialBatchAniList) FetchMany(_ context.Context, ids []int) (anilist.B
 			out[id] = m
 		}
 	}
-	return anilist.BatchResult{Media: out, Completed: true}, errors.New("anilist 500")
+	return anilist.BatchResult{
+		Media: out,
+		// The failed later chunk answered nothing trustworthily, so an
+		// unreturned id is left uncached for the per-id Fetch.
+		Verdicts: batchVerdictsAbsentAs(ids, out, anilist.VerdictUnverified),
+	}, errors.New("anilist 500")
 }
 
 // TestMatchMemoizesNotFoundAfterFailedBatch pins the fallback chain behind a
@@ -161,7 +166,8 @@ func (o *totalOutageAniList) Fetch(context.Context, int) (anilist.Media, error) 
 
 func (o *totalOutageAniList) FetchMany(context.Context, []int) (anilist.BatchResult, error) {
 	o.batchCalls++
-	// A TOTAL failure: no chunk completed, so Completed stays false.
+	// A TOTAL failure: no chunk completed, so no id carries a verdict at all
+	// and every one of them reads VerdictUnrequested from the zero value.
 	return anilist.BatchResult{}, errors.New("anilist 500")
 }
 
@@ -221,9 +227,10 @@ func (o *midBatchOutageAniList) Fetch(context.Context, int) (anilist.Media, erro
 
 func (o *midBatchOutageAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
 	o.batchCalls++
+	media := map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}}
 	return anilist.BatchResult{
-		Media:     map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}},
-		Completed: true,
+		Media:    media,
+		Verdicts: batchVerdictsAbsentAs(ids, media, anilist.VerdictUnverified),
 	}, errors.New("anilist 500")
 }
 
@@ -286,9 +293,10 @@ func (a *recoveringAniList) Fetch(_ context.Context, id int) (anilist.Media, err
 }
 
 func (*recoveringAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
+	media := map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}}
 	return anilist.BatchResult{
-		Media:     map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}},
-		Completed: true,
+		Media:    media,
+		Verdicts: batchVerdictsAbsentAs(ids, media, anilist.VerdictUnverified),
 	}, errors.New("anilist 500")
 }
 
@@ -316,9 +324,9 @@ func TestMatchSuccessfulLookupResetsFailureBreaker(t *testing.T) {
 }
 
 // allNotFoundBatchAniList models a batch whose first chunk COMPLETED but found
-// no media before a later chunk failed: FetchMany returns a COMPLETED result
-// with an empty Media map plus an error (the completion contract's partial
-// side), and every per-id Fetch answers a definitive not-found.
+// no media before a later chunk failed: FetchMany returns per-id verdicts plus
+// an error (the partial side of the contract), and every per-id Fetch answers a
+// definitive not-found.
 type allNotFoundBatchAniList struct {
 	fetchCalls int
 	batchCalls int
@@ -329,18 +337,22 @@ func (o *allNotFoundBatchAniList) Fetch(context.Context, int) (anilist.Media, er
 	return anilist.Media{}, anilist.ErrNotFound
 }
 
-func (o *allNotFoundBatchAniList) FetchMany(context.Context, []int) (anilist.BatchResult, error) {
+func (o *allNotFoundBatchAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
 	o.batchCalls++
-	return anilist.BatchResult{Media: map[int]anilist.Media{}, Completed: true},
+	media := map[int]anilist.Media{}
+	return anilist.BatchResult{
+			Media:    media,
+			Verdicts: batchVerdictsAbsentAs(ids, media, anilist.VerdictUnverified),
+		},
 		errors.New("anilist 500 on a later chunk")
 }
 
 // TestMatchEmptyCompletedBatchIsNotAnOutage pins the completion contract at
-// the prefetch outage gate: a COMPLETED result with an empty map plus an error
-// means at least one chunk completed (its ids definitively not found), NOT a
-// total outage — so the fast-fail must not trip, every pending id is retried
-// with one per-id Fetch, each definitive not-found is memoized negatively, and
-// the cycle stays non-degraded. Only Completed=false (no chunk completed) may
+// the prefetch outage gate: a result carrying per-id verdicts plus an error
+// means at least one chunk completed, NOT a total outage — so the fast-fail
+// must not trip, every pending id is retried with one per-id Fetch, each
+// definitive not-found is memoized negatively, and the cycle stays
+// non-degraded. Only a result with NO verdicts at all (no chunk completed) may
 // trip the outage gate, which TestMatchTotalBatchOutageSkipsPerIDFallback pins.
 func TestMatchEmptyCompletedBatchIsNotAnOutage(t *testing.T) {
 	snap := &library.Snapshot{}
@@ -388,9 +400,10 @@ func (o *notFoundAmongOutageAniList) Fetch(_ context.Context, id int) (anilist.M
 
 func (o *notFoundAmongOutageAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
 	o.batchCalls++
+	media := map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}}
 	return anilist.BatchResult{
-		Media:     map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}},
-		Completed: true,
+		Media:    media,
+		Verdicts: batchVerdictsAbsentAs(ids, media, anilist.VerdictUnverified),
 	}, errors.New("anilist 500")
 }
 

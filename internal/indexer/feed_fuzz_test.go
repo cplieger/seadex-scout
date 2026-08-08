@@ -140,3 +140,53 @@ func FuzzSynthesizeTitle_titledAndTrimmed(f *testing.F) {
 		}
 	})
 }
+
+// FuzzCorrectSeasonOnlyTitle_everySeasonClaimIsCorrectable pins the pairing
+// journal.go's titleAudit.served depends on, over arbitrary tracker-supplied
+// titles: when packFromTitle reads a whole-season claim, correctSeasonOnlyTitle
+// must be able to rewrite that claim away, and the rewritten title must no
+// longer read as a season pack. When the two disagree, served() reports the
+// disagreement and then serves the false FullSeason claim unchanged - Sonarr
+// ranks such a title above the season's loose episodes, grabs it, and treats the
+// season as covered, so the real episodes are silently suppressed. The refusal
+// contract is the other half: a correction that cannot be applied must return
+// the title byte-for-byte, never a partial rewrite.
+//
+// The domain is the TRIMMED title, which is what production supplies (the
+// harvest caches strings.TrimSpace of the Prowlarr item title): packFromTitle
+// trims before reading while correctSeasonOnlyTitle matches the raw string, so
+// an untrimmed value is outside the contract the two share.
+//
+// The corrected title is asserted NOT to read as a pack, deliberately without
+// also demanding that it read as a KNOWN single episode: a corrected token can
+// land in text the parser declines to read at all ("0 S001080p" corrects to
+// "0 S00E071080p", which packFromTitle answers unknown), and an unknown title
+// is exactly what packVerdict routes to the file census - it carries no false
+// FullSeason claim, which is the whole defect this target exists to catch.
+func FuzzCorrectSeasonOnlyTitle_everySeasonClaimIsCorrectable(f *testing.F) {
+	f.Add("Show - S01 [1080p][x265]-GRP", "S01E07")
+	f.Add("Show Season 2", "- 07")
+	f.Add("[Grp] Show [S01][1080p]", "S01E01-E13")
+	f.Add("Show - S01 05", "S01E07")
+	f.Add("Show - S01 EXTRAS", "S01E15v2")
+	f.Add("Show - S01E07 [1080p]", "S01E07")
+	f.Add("Show - S01v2 [1080p]", "- 07v2")
+	f.Add("Show Stagione 2", "07")
+	f.Add("", "")
+	f.Fuzz(func(t *testing.T, rawTitle, marker string) {
+		title := strings.TrimSpace(rawTitle)
+		if got, ok := correctSeasonOnlyTitle(title, marker); !ok && got != title {
+			t.Fatalf("correctSeasonOnlyTitle(%q, %q) refused but returned %q, want the title unchanged", title, marker, got)
+		}
+		if pack, _ := packFromTitle(title); !pack {
+			return
+		}
+		corrected, ok := correctSeasonOnlyTitle(title, "S01E07")
+		if !ok {
+			t.Fatalf("packFromTitle(%q) claims a whole season, but correctSeasonOnlyTitle cannot rewrite that claim", title)
+		}
+		if pack, _ := packFromTitle(corrected); pack {
+			t.Fatalf("correctSeasonOnlyTitle(%q) = %q, which still reads as a whole-season claim", title, corrected)
+		}
+	})
+}

@@ -585,18 +585,16 @@ type snapshot struct {
 	// schema and re-baselining every cycle (see loadPrevious).
 	Seen   map[string]bool   `json:"seen"`
 	Titles map[string]string `json:"titles,omitempty"`
-	// HarvestCursor is the title harvest's persisted resumption state: an
-	// encoded harvestCheckpoint (see decodeHarvestCheckpoint). It carries the
+	// HarvestCursor is the title harvest's persisted resumption state: the bare
+	// "<scope>:<alID>" rotation cursor (see decodeHarvestCursor). It carries the
 	// rotation position - the "scope:alID" of the last
 	// show group that consumed a harvest query, so the next rebuild resumes
 	// AFTER it instead of restarting at the head (see harvestTitles; a deep
 	// show can then never starve its successors across rebuilds) - and
 	// nothing else, since per-group offset paging was removed (see the
-	// paging-removal note in harvest.go). Backward compatible both ways: the
-	// checkpoint encodes as the bare "scope:alID" cursor an older binary
-	// reads, an older snapshot without the field starts at the head, and a
-	// snapshot written by a pre-removal binary decodes with its retired
-	// "pages" key ignored.
+	// paging-removal note in harvest.go). An older snapshot without the field
+	// starts at the head, and any value outside the rotation-cursor shape is
+	// dropped to that same baseline.
 	HarvestCursor string        `json:"harvest_cursor,omitempty"`
 	NyaaFeed      []journalItem `json:"nyaa_feed"`
 	ABFeed        []journalItem `json:"ab_feed"`
@@ -635,14 +633,20 @@ type FeedWriterConfig struct {
 // component (harvester, see harvest.go), held here as a single collaborator
 // because Rebuild is where it runs.
 type FeedWriter struct {
-	log            *slog.Logger
-	now            func() time.Time
-	harvest        *harvester
-	tags           tagfilter.Filter
-	path           string
-	abPasskey      string
-	nyaaConfigured bool
-	abConfigured   bool
+	log     *slog.Logger
+	now     func() time.Time
+	harvest *harvester
+	tags    tagfilter.Filter
+	path    string
+	// enablement is the operator's per-tracker input, held whole rather than
+	// flattened into derived booleans, mirroring Indexer.enablement:
+	// enabled(scope) is the package's one home for the scope-to-config
+	// dispatch (see UpstreamConfig.torznabURL), so the writer evaluates the
+	// same expression the server's gates do and a third tracker stays one
+	// case. ProwlarrAPIKey is deliberately left unset - the same narrowing the
+	// server applies - because it is reachability, consumed only inside the
+	// wired upstreams.
+	enablement UpstreamConfig
 }
 
 // NewFeedWriter returns a FeedWriter for cfg. client is the HTTP client the
@@ -668,13 +672,15 @@ func NewFeedWriter(cfg *FeedWriterConfig, log *slog.Logger, client *http.Client)
 		log = slog.Default()
 	}
 	w := &FeedWriter{
-		log:            log,
-		now:            time.Now,
-		tags:           cfg.TagFilter,
-		path:           cfg.Path,
-		abPasskey:      cfg.ABPasskey,
-		nyaaConfigured: cfg.enabled(upstreamNyaa),
-		abConfigured:   cfg.enabled(upstreamAB),
+		log:  log,
+		now:  time.Now,
+		tags: cfg.TagFilter,
+		path: cfg.Path,
+		enablement: UpstreamConfig{
+			NyaaTorznabURL: cfg.NyaaTorznabURL,
+			ABTorznabURL:   cfg.ABTorznabURL,
+			ABPasskey:      cfg.ABPasskey,
+		},
 	}
 	// The harvest reads the writer's clock through a closure over w rather than
 	// a copy of the func value: w.now is a live field the test suite replaces
@@ -805,7 +811,7 @@ func (w *FeedWriter) Rebuild(ctx context.Context, entries []seadex.Entry, info E
 		"skipped_unresolvable", js.unresolvable,
 		"harvest_queries", hs.queries, "harvest_matched", hs.matched,
 		"harvest_rejected", hs.rejected, "harvest_pending", hs.pending)
-	if js.abSkippedNoPasskey > 0 && w.abConfigured {
+	if js.abSkippedNoPasskey > 0 && w.enablement.enabled(upstreamAB) {
 		w.log.Warn("ab RSS feed empty of grabbable links: set indexer.ab_passkey to serve AnimeBytes releases",
 			"ab_releases_skipped", js.abSkippedNoPasskey)
 	}
@@ -941,14 +947,13 @@ func (w *FeedWriter) loadPrevious(ctx context.Context) (snapshot, previousJourna
 	cursor := snap.HarvestCursor
 	if len(cursor) > maxPersistedCursorBytes {
 		// The harvest cursor is the one persisted string carried forward
-		// VERBATIM: decodeHarvestCheckpoint keeps an unparseable value as
-		// Last and encodeHarvestCheckpoint re-emits it unchanged whenever no
-		// group consumed a query this rebuild, so a hand-edited multi-MiB
+		// VERBATIM: harvestTitles re-emits the loaded value unchanged whenever
+		// no group consumed a query this rebuild, so a hand-edited multi-MiB
 		// value rides in every future snapshot and can push the rebuilt
 		// snapshot past maxFeedBytes - wedging persist on every cycle with no
 		// self-heal. Dropping it is the same safe degradation
-		// decodeHarvestCheckpoint already applies to malformed checkpoint
-		// JSON: rotation restarts at the head. The value
+		// decodeHarvestCursor applies to any value outside the rotation-cursor
+		// shape: rotation restarts at the head. The value
 		// itself is never logged (it can be attacker-shaped text).
 		w.log.Warn("previous feed snapshot harvest cursor exceeds size cap; restarting the harvest rotation",
 			"path", w.path, "max_bytes", maxPersistedCursorBytes, "cursor_bytes", len(cursor))
@@ -994,10 +999,12 @@ func seenLedgerWithinLimits(seen map[string]bool) bool {
 		// maxFeedBytes - the very wedge the aggregate cap exists to
 		// prevent. json.Marshal on the key applies the same escaping
 		// policy persist's json.Marshal(snap) will.
-		encodedKey, err := json.Marshal(k)
-		if err != nil {
-			return false
-		}
+		//
+		// json.Marshal cannot fail for a string: invalid UTF-8, control
+		// bytes and the HTML-sensitive set are all escaped rather than
+		// rejected, so there is no failure mode to branch on (only an
+		// argument-type change could add one).
+		encodedKey, _ := json.Marshal(k)
 		total += len(encodedKey) + len(`:true,`)
 		if total > maxPersistedSeenBytes {
 			return false

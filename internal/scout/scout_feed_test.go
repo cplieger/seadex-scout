@@ -37,12 +37,13 @@ func TestCycleWalkFailureWithFeedStillRebuildsFeed(t *testing.T) {
 		Mapping: frierenMappingCache(),
 	}}
 	s := New(&Deps{
-		Logger:  logger,
-		Store:   store,
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
-		Mapping: fakeMapping{},
-		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
-		Feed:    feed,
+		Notifier: notify.NewNotifier(logger, nil),
+		Logger:   logger,
+		Store:    store,
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
+		Mapping:  fakeMapping{},
+		SeaDex:   &fakeSeaDex{entries: seadexFrierenEntry()},
+		Feed:     feed,
 	})
 
 	if healthy := s.Cycle(context.Background()); healthy {
@@ -77,12 +78,13 @@ func TestCycleWalkFailureWithFeedResetsSeaDexFailureStreak(t *testing.T) {
 		Mapping:        frierenMappingCache(),
 	}}
 	s := New(&Deps{
-		Logger:  scoutTestLogger(),
-		Store:   store,
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
-		Mapping: fakeMapping{},
-		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
-		Feed:    &fakeFeed{},
+		Notifier: notify.NewNotifier(scoutTestLogger(), nil),
+		Logger:   scoutTestLogger(),
+		Store:    store,
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
+		Mapping:  fakeMapping{},
+		SeaDex:   &fakeSeaDex{entries: seadexFrierenEntry()},
+		Feed:     &fakeFeed{},
 	})
 
 	if healthy := s.Cycle(context.Background()); healthy {
@@ -104,12 +106,13 @@ func TestCycleSeaDexFailureSkipsFeedRebuild(t *testing.T) {
 	// skipped is the failed fetch (the unusable-map arm is
 	// TestCycleUnusableMapSkipsFeedRebuild's).
 	s := New(&Deps{
-		Logger:  logger,
-		Store:   &fakeStore{st: state.State{Mapping: frierenMappingCache()}},
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
-		Mapping: fakeMapping{},
-		SeaDex:  &fakeSeaDex{err: errors.New("seadex down")},
-		Feed:    feed,
+		Notifier: notify.NewNotifier(logger, nil),
+		Logger:   logger,
+		Store:    &fakeStore{st: state.State{Mapping: frierenMappingCache()}},
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
+		Mapping:  fakeMapping{},
+		SeaDex:   &fakeSeaDex{err: errors.New("seadex down")},
+		Feed:     feed,
 	})
 
 	if healthy := s.Cycle(context.Background()); !healthy {
@@ -130,9 +133,10 @@ func TestCycleUnusableMapSkipsFeedRebuild(t *testing.T) {
 	feed := &fakeFeed{}
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
 	s := New(&Deps{
-		Logger:  logger,
-		Store:   &fakeStore{},
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
+		Notifier: notify.NewNotifier(logger, nil),
+		Logger:   logger,
+		Store:    &fakeStore{},
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: logger}),
 		// Empty state + unreachable Fribb: the load fails with nothing stale to
 		// fall back on, so the map is unusable (not a StaleMapError).
 		Mapping: unreachableMapLoader(t, logger),
@@ -197,9 +201,9 @@ func TestCycleFeedRebuildErrorIsNonFatal(t *testing.T) {
 
 // TestCycleWalkAndSeaDexBothFailWarnsFeedKept pins the multi-dependency-outage
 // visibility arm of the pre-compare gate: with a feed configured and the arr
-// walk failed, a SeaDex failure (or an empty fetch) that silently kept the
-// previous feed must still be surfaced with its own WARN, so a double outage
-// does not read as arr-only in Loki.
+// walk failed, a SeaDex failure that silently kept the previous feed must still
+// be surfaced with its own WARN, so a double outage does not read as arr-only
+// in Loki.
 func TestCycleWalkAndSeaDexBothFailWarnsFeedKept(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -209,12 +213,7 @@ func TestCycleWalkAndSeaDexBothFailWarnsFeedKept(t *testing.T) {
 		{
 			name:     "seadex fetch fails",
 			seadex:   &fakeSeaDex{err: errors.New("seadex down")},
-			wantWarn: "seadex fetch failed; skipping comparison, findings not re-reported this cycle",
-		},
-		{
-			name:     "seadex returns zero entries",
-			seadex:   &fakeSeaDex{},
-			wantWarn: "seadex returned zero entries; indexer feed kept previous feed",
+			wantWarn: "seadex fetch failed; skipping comparison, findings re-stated unchanged this cycle",
 		},
 	}
 	for _, tc := range tests {
@@ -222,12 +221,13 @@ func TestCycleWalkAndSeaDexBothFailWarnsFeedKept(t *testing.T) {
 			logger, recorder := capture.New()
 			feed := &fakeFeed{}
 			s := New(&Deps{
-				Logger:  logger,
-				Store:   &fakeStore{},
-				Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
-				Mapping: unreachableMapLoader(t, scoutTestLogger()),
-				SeaDex:  tc.seadex,
-				Feed:    feed,
+				Notifier: notify.NewNotifier(logger, nil),
+				Logger:   logger,
+				Store:    &fakeStore{},
+				Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
+				Mapping:  unreachableMapLoader(t, scoutTestLogger()),
+				SeaDex:   tc.seadex,
+				Feed:     feed,
 			})
 
 			if healthy := s.Cycle(context.Background()); healthy {
@@ -289,12 +289,13 @@ func TestCycleFeedInfoClassifiesViaFribbIndex(t *testing.T) {
 		}},
 	}}
 	s := New(&Deps{
-		Logger:  logger,
-		Store:   store,
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: logger}),
-		Mapping: fakeMapping{},
-		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
-		Feed:    feed,
+		Notifier: notify.NewNotifier(logger, nil),
+		Logger:   logger,
+		Store:    store,
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: logger}),
+		Mapping:  fakeMapping{},
+		SeaDex:   &fakeSeaDex{entries: seadexFrierenEntry()},
+		Feed:     feed,
 	})
 
 	if healthy := s.Cycle(context.Background()); healthy {
@@ -314,9 +315,9 @@ func TestCycleFeedInfoClassifiesViaFribbIndex(t *testing.T) {
 }
 
 // TestCycleWalkFailShutdownDuringSeaDexFetchStaysSilent pins the shutdown arm
-// of logFeedOutageOnGatedCycle: when the arr walk genuinely failed but the
+// of the walk-failed gate: when the arr walk genuinely failed but the
 // SeaDex "failure" is the cycle context being cancelled mid-fetch (a
-// redeploy), the feed-kept WARN must NOT fire - blaming SeaDex would
+// redeploy), the SeaDex WARN must NOT fire - blaming SeaDex would
 // misattribute a routine shutdown to an upstream outage (the genuine double
 // outage keeps its WARN via TestCycleWalkAndSeaDexBothFailWarnsFeedKept).
 func TestCycleWalkFailShutdownDuringSeaDexFetchStaysSilent(t *testing.T) {
@@ -344,11 +345,8 @@ func TestCycleWalkFailShutdownDuringSeaDexFetchStaysSilent(t *testing.T) {
 	if feed.calls != 0 {
 		t.Errorf("feed Rebuild calls = %d, want 0 (nothing to rebuild from)", feed.calls)
 	}
-	if n := recorder.CountExact("seadex fetch failed; skipping comparison, findings not re-reported this cycle"); n != 0 {
+	if n := recorder.CountExact("seadex fetch failed; skipping comparison, findings re-stated unchanged this cycle"); n != 0 {
 		t.Errorf("seadex-failure WARN fired %d times during a shutdown, want 0 (recordSeaDexFetch must stay silent on a cancelled fetch)", n)
-	}
-	if n := recorder.CountExact("seadex returned zero entries; indexer feed kept previous feed"); n != 0 {
-		t.Errorf("feed-kept WARN fired %d times during a shutdown, want 0", n)
 	}
 	if n := recorder.CountExact("cycle degraded"); n != 0 {
 		t.Errorf("'cycle degraded' count = %d, want 0 (a shutdown after the walk failure interrupted the cycle; no completion line)", n)
@@ -409,10 +407,10 @@ func TestCycleShutdownDuringFeedRebuildStaysSilent(t *testing.T) {
 
 // TestCycleUnusableMapWithSeaDexOutageWarnsFeedKept pins the mapping-unusable
 // arm's feed-outage contract: with a feed configured, a cycle whose map is
-// unusable AND whose SeaDex fetch failed (or returned zero entries) silently
-// kept the previous feed - the feed-kept WARN must still fire so the double
-// outage does not read as mapping-only in Loki, while the unusable-map gate's
-// own WARN, degraded completion line, and no-rebuild behavior are unchanged.
+// unusable AND whose SeaDex fetch failed silently kept the previous feed - the
+// SeaDex WARN must still fire so the double outage does not read as
+// mapping-only in Loki, while the unusable-map gate's own WARN, degraded
+// completion line, and no-rebuild behavior are unchanged.
 func TestCycleUnusableMapWithSeaDexOutageWarnsFeedKept(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -422,12 +420,7 @@ func TestCycleUnusableMapWithSeaDexOutageWarnsFeedKept(t *testing.T) {
 		{
 			name:     "seadex fetch fails",
 			seadex:   &fakeSeaDex{err: errors.New("seadex down")},
-			wantWarn: "seadex fetch failed; skipping comparison, findings not re-reported this cycle",
-		},
-		{
-			name:     "seadex returns zero entries",
-			seadex:   &fakeSeaDex{},
-			wantWarn: "seadex returned zero entries; indexer feed kept previous feed",
+			wantWarn: "seadex fetch failed; skipping comparison, findings re-stated unchanged this cycle",
 		},
 	}
 	for _, tc := range tests {
@@ -436,9 +429,10 @@ func TestCycleUnusableMapWithSeaDexOutageWarnsFeedKept(t *testing.T) {
 			feed := &fakeFeed{}
 			sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
 			s := New(&Deps{
-				Logger:  logger,
-				Store:   &fakeStore{},
-				Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+				Notifier: notify.NewNotifier(logger, nil),
+				Logger:   logger,
+				Store:    &fakeStore{},
+				Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
 				// Empty state + unreachable Fribb: the load fails with nothing
 				// stale to fall back on, so the map is unusable.
 				Mapping: unreachableMapLoader(t, scoutTestLogger()),
@@ -455,7 +449,7 @@ func TestCycleUnusableMapWithSeaDexOutageWarnsFeedKept(t *testing.T) {
 			if n := recorder.CountExact(tc.wantWarn); n != 1 {
 				t.Errorf("%q count = %d, want 1 (a mapping + SeaDex double outage must not read as mapping-only)", tc.wantWarn, n)
 			}
-			if n := recorder.CountExact("mapping unusable; skipping comparison, findings not re-reported this cycle"); n != 1 {
+			if n := recorder.CountExact("mapping unusable; skipping comparison, findings re-stated unchanged this cycle"); n != 1 {
 				t.Errorf("unusable-map WARN count = %d, want 1", n)
 			}
 			if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "mapping-unusable" {
@@ -485,18 +479,19 @@ func TestSeaDexFailureLogCarriesFeedKept(t *testing.T) {
 			logger, recorder := capture.New()
 			sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}}}
 			s := New(&Deps{
-				Logger:  logger,
-				Store:   &fakeStore{st: state.State{Mapping: frierenMappingCache()}},
-				Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
-				Mapping: fakeMapping{},
-				SeaDex:  &fakeSeaDex{err: errors.New("seadex down")},
-				Feed:    tc.feed,
+				Notifier: notify.NewNotifier(logger, nil),
+				Logger:   logger,
+				Store:    &fakeStore{st: state.State{Mapping: frierenMappingCache()}},
+				Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+				Mapping:  fakeMapping{},
+				SeaDex:   &fakeSeaDex{err: errors.New("seadex down")},
+				Feed:     tc.feed,
 			})
 
 			if healthy := s.Cycle(context.Background()); !healthy {
 				t.Fatal("Cycle healthy=false, want true (a SeaDex outage is degraded, not unhealthy)")
 			}
-			got, ok := recordAttr(recorder, "seadex fetch failed; skipping comparison, findings not re-reported this cycle", "feed_kept")
+			got, ok := recordAttr(recorder, "seadex fetch failed; skipping comparison, findings re-stated unchanged this cycle", "feed_kept")
 			if !ok || got != tc.want {
 				t.Errorf("seadex-failure feed_kept = %q (found=%t), want %q", got, ok, tc.want)
 			}
@@ -519,12 +514,13 @@ func TestCycleWalkFailureWithFeedPreservesPriorSnapshot(t *testing.T) {
 		Library: library.Snapshot{Items: []library.Item{{Arr: library.ArrSonarr, ArrID: 7, Title: "Frieren", TvdbID: 123}}},
 	}}
 	s := New(&Deps{
-		Logger:  scoutTestLogger(),
-		Store:   store,
-		Library: arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
-		Mapping: fakeMapping{},
-		SeaDex:  &fakeSeaDex{entries: seadexFrierenEntry()},
-		Feed:    &fakeFeed{},
+		Notifier: notify.NewNotifier(scoutTestLogger(), nil),
+		Logger:   scoutTestLogger(),
+		Store:    store,
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{listErr: errors.New("sonarr down")}, Logger: scoutTestLogger()}),
+		Mapping:  fakeMapping{},
+		SeaDex:   &fakeSeaDex{entries: seadexFrierenEntry()},
+		Feed:     &fakeFeed{},
 	})
 
 	if healthy := s.Cycle(context.Background()); healthy {
@@ -535,35 +531,5 @@ func TestCycleWalkFailureWithFeedPreservesPriorSnapshot(t *testing.T) {
 	}
 	if len(store.st.Library.Items) != 1 || store.st.Library.Items[0].Title != "Frieren" {
 		t.Errorf("persisted library = %+v, want the prior snapshot untouched (a failed walk must never replace it, or the next cycle mass-resolves every finding)", store.st.Library)
-	}
-}
-
-// TestHandlePreCompareGateAlertOnlyGatedCycleClaimsNoFeed pins the
-// alert-only side of logFeedOutageOnGatedCycle's guard: a deployment with no
-// Torznab feed configured must never emit the "indexer feed kept previous
-// feed" WARN, because there is no feed that could have kept anything - an
-// operator reading it would triage a stale feed that does not exist. The
-// feed-configured direction is pinned by
-// TestCycleUnusableMapWithSeaDexOutageWarnsFeedKept; this is its nil-Feed
-// twin, mirroring TestSeaDexFailureLogCarriesFeedKept's feed_kept=false case.
-func TestHandlePreCompareGateAlertOnlyGatedCycleClaimsNoFeed(t *testing.T) {
-	logger, recorder := capture.New()
-	st := state.State{ShrunkWalks: 1}
-	store := &fakeStore{st: st}
-	s := New(&Deps{Logger: logger, Store: store})
-	mapCache := mapping.Cache{}
-
-	// Unusable map + a successful-but-empty SeaDex fetch, no feed wired: the
-	// mapping gate closes the cycle and must stay silent about any feed.
-	handled, healthy := s.handlePreCompareGate(context.Background(), &st, library.Snapshot{}, &mapCache, nil,
-		cycleOutcomes{mapping: errors.New("fribb down")})
-	if !handled || !healthy {
-		t.Errorf("handlePreCompareGate = (%v, %v), want (true, true)", handled, healthy)
-	}
-	if n := recorder.CountExact("seadex returned zero entries; indexer feed kept previous feed"); n != 0 {
-		t.Errorf("feed-kept WARN count = %d, want 0 in an alert-only deployment (no feed can have kept a previous snapshot)", n)
-	}
-	if n := recorder.CountExact("mapping unusable; skipping comparison, findings not re-reported this cycle"); n != 1 {
-		t.Errorf("unusable-map WARN count = %d, want 1", n)
 	}
 }

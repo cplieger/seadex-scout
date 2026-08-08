@@ -6,7 +6,7 @@ import (
 
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
-	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/seadexapi"
 	"github.com/cplieger/seadex-scout/internal/state"
 )
 
@@ -24,39 +24,54 @@ const (
 	// at ~2 new entries and ~15 torrent edits a day), not to its size.
 	changeWindow = 48 * time.Hour
 
-	// emptyRunLatch is the consecutive-empty-tick count that WARNs. An empty
-	// 48h window means 48h of upstream silence has already elapsed, so this
-	// threshold is (192 * 15m) = 48h of empty probes ON TOP of that, i.e. ~96h
-	// of total silence. Measured against 90 days of upstream history the
-	// longest genuine silence was 86.6h - which is 154 ticks - so a lower
-	// latch would fire on healthy behaviour. It stays a WARN because it IS
-	// usually healthy.
+	// emptyRunSilence is the wall-clock run of consecutive empty ticks that
+	// WARNs. An empty 48h window means 48h of upstream silence has already
+	// elapsed, so this tolerance is 48h of empty probes ON TOP of that, i.e.
+	// ~96h of total silence. Measured against 90 days of upstream history the
+	// longest genuine silence was 86.6h - so a shorter tolerance would fire on
+	// healthy behaviour. It stays a WARN because it IS usually healthy.
 	//
 	// It fires ONCE, at ==, while the two latches below re-fire at >=. The
 	// asymmetry is deliberate in both directions: this one is usually a healthy
 	// upstream and per-tick WARN spam would be noise, while those two are faults
 	// whose ERROR must keep the count-based Loki rule firing for as long as the
 	// condition holds.
-	emptyRunLatch = 192
+	emptyRunSilence = changeWindow
 
-	// oversizeRunLatch is the consecutive-oversize-tick count that ERRORs. This
-	// one pages, and at ERROR rather than WARN, because nothing in this stack
-	// alerts on WARN: an oversize window means the fast path is frozen (no new
-	// RSS items, no new findings) and only the reconcile is still working. 8
-	// ticks is 2h at the default interval, matching the fleet's other
-	// escalation thresholds.
-	oversizeRunLatch = 8
+	// frozenFastPathTolerance is how long the fast path may stay frozen before
+	// the diagnostic ERRORs. It pages, and at ERROR rather than WARN, because
+	// nothing in this stack alerts on WARN: an oversize window or an unreadable
+	// upstream means the fast path is frozen (no new RSS items, no new findings)
+	// and only the reconcile is still working. 2h matches the fleet's other
+	// escalation thresholds, and it is the tolerance BOTH the oversize latch and
+	// the unreachable latch use - the unreachable one is the tick's half of the
+	// persisted SeadexFailures streak (recordSeaDexFetch only runs inside the
+	// reconcile), so without it a fast path that can never read SeaDex - a filter
+	// the upstream rejects, an envelope larger than maxProbeBytes, an egress rule
+	// that blocks the probe's query shape - would WARN indefinitely and reach the
+	// ERROR this stack alerts on only after days.
+	frozenFastPathTolerance = 2 * time.Hour
 
-	// unreachableRunLatch is the consecutive-unreadable-upstream-tick count
-	// that ERRORs, and it is the tick's half of the SeadexFailures streak.
-	// recordSeaDexFetch only runs inside the reconcile, so without this a fast
-	// path that can never read SeaDex - a filter the upstream rejects, an
-	// envelope larger than maxProbeBytes, an egress rule that blocks the
-	// probe's query shape - would WARN every 15 minutes and reach the ERROR
-	// this stack alerts on only after two DAYS. 8 ticks is 2h, the same number
-	// and the same reasoning as the oversize latch.
-	unreachableRunLatch = 8
+	// minLatchTicks is the floor latchTicks applies, so one blip is always
+	// tolerated however long the interval is.
+	minLatchTicks = 2
 )
+
+// latchTicks converts a wall-clock tolerance into the number of CONSECUTIVE
+// ticks that spans at this loop's own interval, floored at minLatchTicks so one
+// blip is always tolerated. The latches used to be raw iteration counts, which
+// only meant what their comments claimed at the 15m default: poll_interval is
+// accepted up to 30 days, so an 8-tick "2h" escalation is 24h at the deployed
+// 3h interval and a 192-tick "48h of empty probes" is 24 days - the same
+// cadence-relative drift reconcileEscalationThreshold was re-expressed for.
+// A zero or negative interval (external mode, an unwired test) runs no ticks at
+// all, so the floor is the whole answer there.
+func (s *Scout) latchTicks(d time.Duration) int {
+	if s.pollInterval <= 0 {
+		return minLatchTicks
+	}
+	return max(minLatchTicks, int(d/s.pollInterval))
+}
 
 // tick runs one bounded recent-changes pass. It is healthy whenever it
 // completed, including when it found nothing: an empty window is a successful
@@ -98,7 +113,7 @@ func (s *Scout) tick(ctx context.Context) bool {
 		return true
 	}
 	since := time.Now().Add(-changeWindow)
-	count, err := s.deps.SeaDex.CountWindow(ctx, since)
+	count, err := s.seadex.CountWindow(ctx, since)
 	if err != nil {
 		// A failed probe is a failed tick: it advances neither wedge counter
 		// that measures upstream STATE (emptyRun/oversizeRun), but it does
@@ -112,7 +127,7 @@ func (s *Scout) tick(ctx context.Context) bool {
 	case count == 0:
 		s.emptyRun++
 		s.oversizeRun, s.unreachableRun = 0, 0
-		if s.emptyRun == emptyRunLatch {
+		if s.emptyRun == s.latchTicks(emptyRunSilence) {
 			// Usually healthy - the upstream is simply quiet - but a window
 			// that can NEVER hold anything looks identical, and there are two
 			// ways that happens: a container clock running more than
@@ -127,11 +142,11 @@ func (s *Scout) tick(ctx context.Context) bool {
 				"consecutive_empty_ticks", s.emptyRun, "window", changeWindow.String())
 		}
 		// A complete tick: the probe answered, and the answer was "nothing".
-		s.deps.Notifier.Reemit()
+		s.notifier.Reemit()
 		s.log.Info("tick complete", "seadex_entries", 0, "findings", 0,
 			"window", changeWindow.String())
 		return true
-	case count >= seadex.MaxWindowEntries:
+	case count >= seadexapi.MaxWindowEntries:
 		s.oversizeRun++
 		s.emptyRun, s.unreachableRun = 0, 0
 		s.warnOversizeWindow(count)
@@ -149,7 +164,7 @@ func (s *Scout) tick(ctx context.Context) bool {
 // the only condition its restart runbook fits. Always healthy: a tick performs
 // no walk, and health follows the library ingest.
 func (s *Scout) tickDegraded(reason string, attrs ...any) bool {
-	s.deps.Notifier.Reemit()
+	s.notifier.Reemit()
 	s.logTickDegraded(reason, attrs...)
 	return true
 }
@@ -165,14 +180,14 @@ func (s *Scout) logTickDegraded(reason string, attrs ...any) {
 
 // warnUnreachableUpstream reports a tick that could not read SeaDex and
 // escalates a sustained run to ERROR. It is the tick-cadence half of the
-// persisted SeadexFailures streak (see unreachableRunLatch): that streak
+// persisted SeadexFailures streak (see frozenFastPathTolerance): that streak
 // advances only inside the reconcile, so without this the fast path could stay
 // blind for two days before reaching the level this stack alerts on. Like the
 // oversize latch it re-fires at and above the threshold, so a count-based rule
 // keeps firing while the condition holds.
 func (s *Scout) warnUnreachableUpstream(msg string, err error) {
 	s.unreachableRun++
-	s.escalate(s.unreachableRun, unreachableRunLatch, msg,
+	s.escalate(s.unreachableRun, s.latchTicks(frozenFastPathTolerance), msg,
 		"SeaDex has been unreadable on every recent tick; the fast path is blind and only the daily reconcile is refreshing - inspect releases.moe reachability and egress",
 		attrError, logSafeUpstreamError(err),
 		"consecutive_unreachable_ticks", s.unreachableRun)
@@ -185,10 +200,10 @@ func (s *Scout) warnUnreachableUpstream(msg string, err error) {
 // a real remedy (wait for the reconcile, or check the clock, since a clock
 // running BEHIND widens every window the same way a bulk upstream edit does).
 func (s *Scout) warnOversizeWindow(count int) {
-	s.escalate(s.oversizeRun, oversizeRunLatch,
+	s.escalate(s.oversizeRun, s.latchTicks(frozenFastPathTolerance),
 		"SeaDex change window too large to fetch; deferring to the reconcile",
 		"SeaDex change window has been too large to fetch repeatedly; the fast path is frozen and only the daily reconcile is refreshing - check this container's clock, then wait for the reconcile",
-		"window_entries", count, "max", seadex.MaxWindowEntries,
+		"window_entries", count, "max", seadexapi.MaxWindowEntries,
 		"consecutive_oversize_ticks", s.oversizeRun, "window", changeWindow.String())
 }
 
@@ -211,8 +226,8 @@ func (s *Scout) warnOversizeWindow(count int) {
 func (s *Scout) tickChanged(ctx context.Context, since time.Time, count int) bool {
 	st := s.loadState(ctx)
 	mapCache, idx, mapErr := s.loadMapping(ctx, &st)
-	entries, err := s.deps.SeaDex.FetchEntries(ctx,
-		seadex.Options{Mode: seadex.FetchWindow, Since: since})
+	entries, err := s.seadex.FetchEntries(ctx,
+		seadexapi.Options{Mode: seadexapi.FetchWindow, Since: since})
 	if err != nil {
 		s.warnUnreachableUpstream("change window fetch failed; skipping tick", err)
 		// The mapping load above may have accepted a freshly revalidated Fribb
@@ -222,30 +237,34 @@ func (s *Scout) tickChanged(ctx context.Context, since time.Time, count int) boo
 		s.saveTick(ctx, &st, &mapCache)
 		return s.tickDegraded("window-fetch-failed", "window_entries", count)
 	}
-	s.advanceFeed(ctx, entries, idx, &st)
-	if mapErr != nil && idx == nil {
+	if !mapUsable(mapErr) {
 		// No usable mapping means nothing can be matched, so a compare would
 		// produce an empty finding set for entries that may well be
 		// misaligned - and reporting that would stop reporting conditions that
-		// are still true. The feed advance above was already attempted; with no
-		// index it returned early too, since the title synthesis needs one.
+		// are still true. The feed advance is skipped for the same reason
+		// rebuildFeed skips it (an unusable map types every entry as anime and
+		// drops SeaDex movies from Radarr's RSS view), so the gate runs BEFORE
+		// it. mapUsable is the one home of this question, shared with the
+		// reconcile: a stale-but-usable map (*mapping.StaleMapError, which
+		// carries a usable cached index) still advances.
 		s.log.Warn("mapping unusable; skipping tick comparison",
 			"error", logSafeUpstreamError(mapErr))
 		s.saveTick(ctx, &st, &mapCache)
 		return s.tickDegraded("mapping-unusable")
 	}
-	result := s.deps.Matcher.Match(ctx, entries, &st.Library, idx, st.Memo)
+	s.advanceFeed(ctx, entries, idx, &st)
+	result := s.matcher.Match(ctx, entries, &st.Library, idx, st.Memo)
 	if ctx.Err() != nil {
 		s.log.Warn("tick interrupted by shutdown before comparison", "cause", context.Cause(ctx))
 		return true
 	}
 	cleanMatches, failedItems := splitFailedMatches(result.Matches)
-	findings := s.deps.Comparer.Compare(cleanMatches)
+	findings := s.comparer.Compare(cleanMatches)
 	// The report REPLACES only the rows of the entries this window EVALUATED, and
 	// preserves every row whose entry had incomplete evidence. Rows for entries
 	// outside the window are untouched, which is what makes a partial pass safe
 	// here at all.
-	s.deps.Notifier.ReportScoped(findings, evaluatedIDs(result.Matches),
+	s.notifier.ReportScoped(findings, evaluatedIDs(result.Matches),
 		unionIDs(failedItems, result.IncompleteIDs))
 	st.Memo = result.Memo
 	s.saveTick(ctx, &st, &mapCache)

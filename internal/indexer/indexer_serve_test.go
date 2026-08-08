@@ -829,3 +829,116 @@ func TestServeAppliesLogParamToRequestControlledValues(t *testing.T) {
 		t.Errorf("logged host = %q, want control characters flattened", host)
 	}
 }
+
+// TestServeSummaryLineReportsTheUpstreamFilterLadder pins the ATTRIBUTE
+// semantics of serve's one INFO line per request - the feed's only per-request
+// diagnostic - on the search path, the one path where the three counts differ.
+// A mock Prowlarr returns two items, one of which carries an off-origin
+// download URL, against an empty curation set: upstream_fetched is the raw page
+// count, upstream the origin-filter survivors, curated the post-curation
+// result, and returned what was actually rendered. The gap between the first
+// two is the only standing signal that the origin filter is dropping items
+// (its own WARN fires once per onset), so an operator reads this line to tell
+// "the tracker returned nothing" from "everything was dropped".
+func TestServeSummaryLineReportsTheUpstreamFilterLadder(t *testing.T) {
+	const feed = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <title>Nyaa.si</title>
+    <item>
+      <title>[G] Kept S01 [BD 1080p]</title>
+      <guid>https://nyaa.si/view/42</guid>
+      <comments>https://nyaa.si/view/42</comments>
+      <size>1</size>
+      <enclosure url="ORIGIN/1/download?link=kept" length="1" type="application/x-bittorrent"/>
+      <torznab:attr name="seeders" value="3"/>
+    </item>
+    <item>
+      <title>[G] Dropped S01 [BD 1080p]</title>
+      <guid>https://nyaa.si/view/43</guid>
+      <comments>https://nyaa.si/view/43</comments>
+      <size>1</size>
+      <enclosure url="http://elsewhere.example/evil.torrent" length="1" type="application/x-bittorrent"/>
+      <torznab:attr name="seeders" value="3"/>
+    </item>
+  </channel>
+</rss>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		// A healthy Prowlarr hands out download links on the queried
+		// endpoint's own origin; the second item deliberately does not.
+		_, _ = io.WriteString(w, strings.ReplaceAll(feed, "ORIGIN", "http://"+r.Host))
+	}))
+	defer srv.Close()
+
+	log, rec := capture.New()
+	ix := New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{NyaaTorznabURL: srv.URL, ProwlarrAPIKey: "pk"}},
+		log, srv.Client())
+
+	w := httptest.NewRecorder()
+	ix.serve(w, httptest.NewRequest(http.MethodGet, "/nyaa?t=tvsearch&q=Kept&apikey=k", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("search status = %d, want 200", w.Code)
+	}
+
+	for _, want := range []struct{ key, value string }{
+		{"scope", "nyaa"},
+		{"answered", "true"},
+		{"feed", "false"},
+		{"upstream_fetched", "2"},
+		{"upstream", "1"},
+		{"curated", "0"},
+		{"identity_conflicts", "0"},
+		{"returned", "0"},
+	} {
+		if !rec.HasAttr("indexer request", want.key, want.value) {
+			got, _ := rec.AttrValue("indexer request", want.key)
+			t.Errorf("request summary %s = %q, want %q", want.key, got, want.value)
+		}
+	}
+}
+
+// TestRunWarnsOnUnexpandedABPasskeyWithoutLoggingIt pins both halves of Run's
+// ab_passkey startup diagnostic. An unexpanded ${VAR} passkey cannot build a
+// grabbable AnimeBytes link, so a CONFIGURED AB tracker says so once at
+// startup - field-name-only, because the rejected value is a credential
+// (CWE-532), which is why the WARN carries no attributes at all. And the gate
+// stays scoped to an ENABLED tracker: with ab_torznab_url blank (the README's
+// off switch) nothing is served for /ab, so warning there would be exactly the
+// parked-credential noise l-f13 removed.
+func TestRunWarnsOnUnexpandedABPasskeyWithoutLoggingIt(t *testing.T) {
+	orig := listenAddr
+	listenAddr = "127.0.0.1:0"
+	t.Cleanup(func() { listenAddr = orig })
+	const ref = "${SEADEX_SCOUT_AB_PASSKEY}"
+	const warnMsg = "indexer.ab_passkey still holds an unexpanded environment-variable reference"
+	// A cancelled context guarantees the test cannot serve: the guards run
+	// before the bind, and the ephemeral listenAddr keeps a bind that does
+	// happen off any real deployment's port.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	log, rec := capture.New()
+	_ = New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{
+		ABTorznabURL: "http://prowlarr:9696/2/api",
+		ABPasskey:    ref,
+	}}, log, nil).Run(ctx)
+
+	if !rec.Contains(warnMsg) {
+		t.Fatalf("configured AB tracker with an unexpanded passkey did not warn: %v", rec.Messages())
+	}
+	for _, r := range rec.Records() {
+		if strings.Contains(r.Message, ref) {
+			t.Errorf("the unexpanded passkey reference reached a log message: %q", r.Message)
+		}
+		if strings.Contains(r.Message, warnMsg) && r.NumAttrs() != 0 {
+			t.Errorf("the passkey WARN carries %d attributes, want none (field-name-only: the value is a credential)", r.NumAttrs())
+		}
+	}
+
+	offLog, offRec := capture.New()
+	_ = New(&Config{APIKey: "k", UpstreamConfig: UpstreamConfig{ABPasskey: ref}}, offLog, nil).Run(ctx)
+	if offRec.Contains(warnMsg) {
+		t.Errorf("warned about a parked passkey for a tracker with no ab_torznab_url: %v", offRec.Messages())
+	}
+}

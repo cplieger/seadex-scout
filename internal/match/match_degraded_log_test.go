@@ -22,9 +22,12 @@ func (partialOutageAniList) Fetch(context.Context, int) (anilist.Media, error) {
 }
 
 func (partialOutageAniList) FetchMany(_ context.Context, ids []int) (anilist.BatchResult, error) {
+	media := map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}}
 	return anilist.BatchResult{
-		Media:     map[int]anilist.Media{ids[0]: {Titles: []string{"Returned"}, Format: "TV"}},
-		Completed: true,
+		Media: media,
+		// The later chunk never answered trustworthily, so every id but the
+		// first keeps the per-id fallback.
+		Verdicts: batchVerdictsAbsentAs(ids, media, anilist.VerdictUnverified),
 	}, context.DeadlineExceeded
 }
 

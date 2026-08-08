@@ -17,6 +17,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/payload"
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/tracker"
 	"github.com/cplieger/seadex-scout/internal/trackerlink"
 )
 
@@ -74,8 +75,8 @@ func Obtainable(rel *release.Release, t *seadex.Torrent, animeBytes bool) bool {
 // toggle off, while an ambiguous public-labeled row stays listed, annotated
 // unobtainable), where ABVisible stays the fail-closed verdict-eligibility gate
 // shared with compare.
-func ABEvidence(t *seadex.Torrent) filter.ABEvidence {
-	return filter.ClassifyAB(t.Tracker, t.URL)
+func ABEvidence(t *seadex.Torrent) tracker.ABEvidence {
+	return tracker.ClassifyAB(t.Tracker, t.URL)
 }
 
 // --- Torrent classification ---

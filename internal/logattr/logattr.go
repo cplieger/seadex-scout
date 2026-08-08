@@ -4,14 +4,14 @@
 // marker, the rune-sanitization pass that keeps CR/LF (the keepCRLF policy a
 // JSON sink needs), and the cap-before-sanitize order that makes the budget
 // bound the WORK rather than just the output - including the multi-source
-// Joiner, the only shape that bounds a joined aggregate without materializing
-// it first.
+// Joiner, which streams a joined aggregate under that bound without
+// materializing it first.
 //
 // Every slog emitter of upstream-derived text consumes it - the daemon's
 // notification path (internal/notify), the season report's per-row lines
 // (internal/audit), the matcher's ambiguous-title-fallback line
 // (internal/match) and the walker's per-series failure warning
-// (internal/library) - because the primitive is security-sensitive (CWE-400:
+// (internal/arrwalk) - because the primitive is security-sensitive (CWE-400:
 // SeaDex admits up to 512 torrents per entry, each with a multi-MB group name
 // or URL) and a sanitization, invalid-UTF-8, truncation, or allocation-bound
 // fix must not have to be reproduced in four packages.
@@ -51,12 +51,13 @@ import (
 //
 // The bound is PER ATTRIBUTE, not per record: a record's worst case is its
 // untrusted-attribute count times this budget plus one TruncMarker each
-// (notify.findingKVs emits 16 such attributes, so ~128 KiB of attribute
-// VALUES), and the JSON sink can double that on the wire - Sanitize keeps CR
-// and LF (the keepCRLF policy a JSON encoder needs) and slog's
-// appendEscapedJSONString expands each CR, LF, '"' and '\\' into two bytes,
-// so a control-dense value emits at up to twice its capped size (~256 KiB per
-// record). Adding an untrusted attribute therefore raises the record ceiling,
+// (notify.findingKVs emits 17 such attributes - 6 capAttr, 4
+// capAlertTextAttr, 5 capURLAttr and 2 full-budget Joiners - so ~139 KiB of
+// attribute VALUES), and the JSON sink can double that on the wire -
+// Sanitize keeps CR and LF (the keepCRLF policy a JSON encoder needs) and
+// slog's appendEscapedJSONString expands each CR, LF, '"' and '\\' into two
+// bytes, so a control-dense value emits at up to twice its capped size
+// (~278 KiB per record). Adding an untrusted attribute therefore raises the record ceiling,
 // and past the log pipeline's line limit the WHOLE record is dropped -
 // suppressing the very finding an alert keys on. Check the record budget when
 // adding one.
@@ -115,13 +116,13 @@ func EscapeLinkDestination(s string) string { return linkDestEscaper.Replace(s) 
 // joined-then-capped form: runesafe.Sanitize is a per-rune map, so sanitizing
 // each piece and writing the ASCII separators raw yields the same bytes.
 type Joiner struct {
-	b         strings.Builder
-	remaining int
-	truncated bool
+	b *runesafe.Budget
 }
 
-// NewJoiner returns a joiner with the full per-attribute budget.
-func NewJoiner() *Joiner { return &Joiner{remaining: MaxBytes} }
+// NewJoiner returns a joiner with the full per-attribute budget. The
+// cap-before-sanitize engine is runesafe.Budget's; the marker is charged
+// OUTSIDE the budget here (see String), which is this package's own contract.
+func NewJoiner() *Joiner { return &Joiner{b: runesafe.NewBudget(MaxBytes, "")} }
 
 // Write appends the sanitized prefix of raw that still fits the budget and
 // reports whether the joiner can still accept more. The pre-sanitize cap keeps
@@ -142,24 +143,7 @@ func NewJoiner() *Joiner { return &Joiner{remaining: MaxBytes} }
 // needs an oversized value that is mostly control/bidi runes, i.e. exactly the
 // hostile shape the bound exists for; an honest value (valid UTF-8, no unsafe
 // runes) is byte-identical under either order. Both sides are pinned by test.
-func (j *Joiner) Write(raw string) bool {
-	if j.truncated || j.remaining <= 0 {
-		j.truncated = j.truncated || raw != ""
-		return false
-	}
-	chunk := runesafe.CapBytes(raw, j.remaining)
-	if len(chunk) < len(raw) {
-		j.truncated = true
-	}
-	clean := runesafe.Sanitize(chunk)
-	if len(clean) > j.remaining {
-		clean = runesafe.CapBytes(clean, j.remaining)
-		j.truncated = true
-	}
-	j.b.WriteString(clean)
-	j.remaining -= len(clean)
-	return !j.truncated
-}
+func (j *Joiner) Write(raw string) bool { return j.b.Write(raw) }
 
 // WriteSep appends a fixed ASCII separator (never untrusted data) against the
 // same budget, so a hostile piece count cannot grow the attribute past it
@@ -169,8 +153,9 @@ func (j *Joiner) WriteSep(sep string) bool { return j.Write(sep) }
 // String returns the joined attribute, marked with TruncMarker when any source
 // was cut - the same truncation signal a single capped value carries.
 func (j *Joiner) String() string {
-	if j.truncated {
-		return j.b.String() + TruncMarker
+	text, cut := j.b.Result()
+	if cut {
+		return text + TruncMarker
 	}
-	return j.b.String()
+	return text
 }

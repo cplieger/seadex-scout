@@ -17,9 +17,9 @@ import (
 	"time"
 
 	"github.com/cplieger/arrapi"
-	"github.com/cplieger/health"
 	"github.com/cplieger/seadex-scout/internal/config"
 	"github.com/cplieger/seadex-scout/internal/cycle"
+	"github.com/cplieger/seadex-scout/internal/shutdown"
 	"github.com/cplieger/slogx"
 	"github.com/cplieger/slogx/capture"
 	yaml "go.yaml.in/yaml/v3"
@@ -91,7 +91,7 @@ func TestValidateInvocation(t *testing.T) {
 // is extracted and pinned separately.
 func TestRunHealthProbeNotApplicable(t *testing.T) {
 	for _, args := range [][]string{nil, {"poll"}, {"report"}, {"daemon"}, {"health", "typo"}} {
-		if runHealthProbe(args, filepath.Join(t.TempDir(), "config.yaml")) {
+		if runHealthProbe(args) {
 			t.Errorf("runHealthProbe(%v) = true, want false (not the health subcommand)", args)
 		}
 	}
@@ -262,9 +262,9 @@ func TestWriteStarterConfigSeedsAStrongFeedKey(t *testing.T) {
 	first := keyOf(t, filepath.Join(dir, "a.yaml"))
 	second := keyOf(t, filepath.Join(dir, "b.yaml"))
 
-	if want := feedKeyBytes * 2; len(first) != want {
-		t.Errorf("generated key length = %d, want %d hex characters", len(first), want)
-	}
+	// The key's own shape (feedKeyBytes rendered as hex, regenerated per call)
+	// is pinned beside config.SeedStarter, which owns the generation; what the
+	// root owns is that the WRITTEN file carries a usable one.
 	if _, err := hex.DecodeString(first); err != nil {
 		t.Errorf("generated key is not hex: %v", err)
 	}
@@ -296,16 +296,6 @@ func TestWriteStarterConfigSeedsAStrongFeedKey(t *testing.T) {
 	}
 	if doc.Indexer.FeedAPIKey != first {
 		t.Errorf("feed_api_key parsed as %q, want the generated %q", doc.Indexer.FeedAPIKey, first)
-	}
-}
-
-// TestSeedFeedAPIKeyFailsWhenTheExampleChanges pins the anchor: seedFeedAPIKey
-// substitutes one exact spelling, so an edit to config.example.yaml that renames
-// or re-quotes that line must fail loudly here rather than silently shipping a
-// starter with no key.
-func TestSeedFeedAPIKeyFailsWhenTheExampleChanges(t *testing.T) {
-	if _, err := seedFeedAPIKey([]byte("indexer:\n  feed_api_key: ''\n")); err == nil {
-		t.Error("seedFeedAPIKey() = nil error for an example missing the anchored line, want an error")
 	}
 }
 
@@ -617,8 +607,8 @@ func TestBuildScout(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildReporter(zero config) = %v, want nil", err)
 		}
-		if b.scout == nil {
-			t.Fatal("scout = nil, want a wired reporter")
+		if b.reporter == nil {
+			t.Fatal("reporter = nil, want a wired reporter")
 		}
 		b.cleanup()
 	})
@@ -972,142 +962,33 @@ func TestDispatchOutcome(t *testing.T) {
 	}
 }
 
-// TestReportWriteContext pins the report write's shutdown contract: the write
-// context is detached from the caller's UNCONDITIONALLY (a signal landing during
-// the write - not only before it - must not discard the ~25m artifact), the
-// caller's values survive, and the shutdown gate is deferred rather than lost
-// (the detached context is cancelled reportWriteGrace after the shutdown, with
-// DeadlineExceeded as the CAUSE so detachedWriteError still classifies a
-// grace-exhausted write as a routine shutdown).
-func TestReportWriteContext(t *testing.T) {
-	t.Run("a live context is detached and survives the shutdown that follows", func(t *testing.T) {
-		parent := context.WithValue(context.Background(), reportCtxTestKey{}, "report")
-		ctx, cancelParent := context.WithCancel(parent)
-
-		got, cancel := reportWriteContext(ctx)
-		defer cancel()
-		if got.Err() != nil {
-			t.Fatalf("Err() = %v, want nil", got.Err())
-		}
-
-		cancelParent()
-		if got.Err() != nil {
-			t.Errorf("Err() = %v right after the signal, want nil (the write gets its grace)", got.Err())
-		}
-		if v, _ := got.Value(reportCtxTestKey{}).(string); v != "report" {
-			t.Errorf("Value = %q, want %q (WithoutCancel keeps values)", v, "report")
-		}
-
-		cancel()
-		if got.Err() == nil {
-			t.Error("cancel() left the detached context live; the caller's defer must release it")
-		}
-	})
-	t.Run("an already-cancelled caller still gets a live write context", func(t *testing.T) {
-		parent := context.WithValue(context.Background(), reportCtxTestKey{}, "report")
-		ctx, cancelParent := context.WithCancel(parent)
-		cancelParent()
-
-		got, cancel := reportWriteContext(ctx)
-		defer cancel()
-		if got.Err() != nil {
-			t.Fatalf("Err() = %v, want nil (a shutdown must not cost the ~25m report artifact)", got.Err())
-		}
-		if v, _ := got.Value(reportCtxTestKey{}).(string); v != "report" {
-			t.Errorf("Value = %q, want %q (WithoutCancel keeps values)", v, "report")
-		}
-	})
-	t.Run("the shutdown grace bounds the write and reports the deadline as the cause", func(t *testing.T) {
-		ctx, cancelParent := context.WithCancel(context.Background())
-		got, cancel := reportWriteContextGrace(ctx, time.Millisecond)
-		defer cancel()
-
-		cancelParent()
-		select {
-		case <-got.Done():
-		case <-time.After(5 * time.Second):
-			t.Fatal("the detached write context outlived its shutdown grace")
-		}
-		if !errors.Is(context.Cause(got), context.DeadlineExceeded) {
-			t.Errorf("cause = %v, want context.DeadlineExceeded (detachedWriteError keys on it)", context.Cause(got))
-		}
-	})
-	t.Run("an untouched grace never cancels the write", func(t *testing.T) {
-		got, cancel := reportWriteContextGrace(context.Background(), time.Millisecond)
-		defer cancel()
-		time.Sleep(20 * time.Millisecond)
-		if got.Err() != nil {
-			t.Errorf("Err() = %v, want nil (the grace arms only on a shutdown)", got.Err())
-		}
-	})
-}
-
-// TestHealthMaxAge pins the health probe's freshness lease: external mode arms
-// no watchdog, an interval at or above the default keeps the documented
-// three-interval lease (a 3h interval still restarts a wedged loop at 9h), and
-// a shorter interval is floored at the default's lease - the marker is refreshed
-// only when a cycle COMPLETES, so a tighter deadline would call a slow-but-
-// healthy cold cycle wedged and restart it before it can persist its memo.
-func TestWatchdogLease(t *testing.T) {
-	for name, tc := range map[string]struct {
-		interval time.Duration
-		want     time.Duration
-	}{
-		"external mode disables the watchdog": {0, 0},
-		"a negative interval disables it too": {-time.Hour, 0},
-		// The deployed 3h interval must keep exactly the 9h lease it had before
-		// the tick/reconcile split: the 3x arm wins there, unchanged.
-		"the deployed interval keeps 3x": {3 * time.Hour, 9 * time.Hour},
-		"a long interval scales":         {12 * time.Hour, 36 * time.Hour},
-		// The cold-reconcile floor wins for every interval at or below one third
-		// of it, which now includes the default: 3x15m is 45 minutes, and a cold
-		// reconcile has been measured well past that. Flooring here is what stops
-		// the watchdog demanding the restart that makes the next boot cold again.
-		"the default interval takes the floor": {config.DefaultPollInterval, coldReconcileAllowance},
-		"the config floor takes the floor":     {5 * time.Minute, coldReconcileAllowance},
-		"the crossover point":                  {coldReconcileAllowance / healthLeaseFactor, coldReconcileAllowance},
-		"just above the crossover scales":      {coldReconcileAllowance/healthLeaseFactor + time.Minute, coldReconcileAllowance + healthLeaseFactor*time.Minute},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if got := watchdogLease(tc.interval); got != tc.want {
-				t.Errorf("watchdogLease(%v) = %v, want %v", tc.interval, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestColdReconcileAllowanceCoversAMeasuredColdReconcile pins the NUMBER, not
-// just the arithmetic around it.
-//
-// TestHealthMaxAge states its expectations in terms of coldReconcileAllowance
-// itself, so it passes for any value large enough to beat the 3x arm - including
-// the 1h the design rejected by name. The whole argument for this constant is
-// that it carries a MEASURED cold pass with margin, so the measurement is what
-// the test has to assert against.
-func TestColdReconcileAllowanceCoversAMeasuredColdReconcile(t *testing.T) {
+// TestWatchdogLeaseCoversAColdReconcileAtTheShippedCadence pins the one half of
+// the wedge lease that is the ROOT's: run() arms it from cfg.PollInterval, so
+// the app's own default cadence has to yield a lease a cold reconcile can finish
+// inside. The lease arithmetic and the floor's measured value are pinned beside
+// the mechanism, in internal/cycle's watchdog tests.
+func TestWatchdogLeaseCoversAColdReconcileAtTheShippedCadence(t *testing.T) {
 	// measuredColdReconcile is the observed worst case on a large library (the
-	// typical cold pass is ~25 minutes). The lease has to survive it plus the
-	// loop's own delay, or the probe restarts the walk before it can persist the
-	// AniList memo - which makes the next boot cold again.
+	// typical cold pass is ~25 minutes). At the shipped default the lease has to
+	// survive it, or the watchdog demands the restart that kills the walk before
+	// it can persist the AniList memo - which makes the next boot cold again.
 	const measuredColdReconcile = 2 * time.Hour
-	if coldReconcileAllowance <= measuredColdReconcile {
-		t.Errorf("coldReconcileAllowance = %v, want more than the measured %v cold reconcile it exists to cover",
-			coldReconcileAllowance, measuredColdReconcile)
-	}
-	// And it must actually bind at the default interval, or it is decoration.
-	if lease := healthLeaseFactor * config.DefaultPollInterval; lease >= coldReconcileAllowance {
-		t.Errorf("healthLeaseFactor*DefaultPollInterval = %v >= coldReconcileAllowance %v, so the floor never applies at the default cadence",
-			lease, coldReconcileAllowance)
+	if got := cycle.WatchdogLease(config.DefaultPollInterval); got <= measuredColdReconcile {
+		t.Errorf("cycle.WatchdogLease(DefaultPollInterval=%v) = %v, want more than the measured %v cold reconcile",
+			config.DefaultPollInterval, got, measuredColdReconcile)
 	}
 }
 
 // TestDetachedWriteError pins the alert-facing exit classification of a
 // shutdown-truncated report write: it must read as a routine shutdown (WARN,
 // excluded from alerts.yaml's SeadexScoutCycleError rule) while a genuine write
-// fault keeps its ERROR classification. Three non-obvious properties carry it -
-// the multi-%w wrap surviving (fmt drops ALL wrapping on a nil %w operand), the
-// guard's asymmetry, and cycle.NormalizeShutdownError leaving an
-// already-classified error alone rather than wrapping it twice.
+// fault keeps its ERROR classification. It stays in the root even though
+// cycle.DetachedWriteError is the mechanism, because what it pins is the
+// coupling to dispatchOutcome - the root's own exit-code/level contract. Three
+// non-obvious properties carry it - the multi-%w wrap surviving (fmt drops ALL
+// wrapping on a nil %w operand), the guard's asymmetry, and
+// shutdown.NormalizeShutdownError leaving an already-classified error alone rather
+// than wrapping it twice.
 func TestDetachedWriteError(t *testing.T) {
 	cancelled := func() context.Context {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -1118,7 +999,7 @@ func TestDetachedWriteError(t *testing.T) {
 	t.Run("a shutdown-truncated detached write classifies as a routine shutdown", func(t *testing.T) {
 		ctx := cancelled()
 		werr := fmt.Errorf("write report pair: %w", context.DeadlineExceeded)
-		got := detachedWriteError(ctx, werr)
+		got := cycle.DetachedWriteError(ctx, werr)
 		if !errors.Is(got, context.Canceled) {
 			t.Errorf("errors.Is(err, context.Canceled) = false, want true (the multi-%%w wrap must survive; otherwise the redeploy ERROR alert returns): %v", got)
 		}
@@ -1128,69 +1009,22 @@ func TestDetachedWriteError(t *testing.T) {
 		if level, _, _ := dispatchOutcome(got); level != slog.LevelWarn {
 			t.Errorf("dispatchOutcome level = %v, want WARN (a shutdown-truncated report must not trip SeadexScoutCycleError)", level)
 		}
-		// cycle.NormalizeShutdownError runs deferred over the same ctx and must
+		// shutdown.NormalizeShutdownError runs deferred over the same ctx and must
 		// leave an already-classified error alone rather than wrapping it twice.
-		if again := cycle.NormalizeShutdownError(ctx, got); again != got {
+		if again := shutdown.NormalizeShutdownError(ctx, got); again != got {
 			t.Errorf("NormalizeShutdownError re-wrapped the classified error: %v", again)
 		}
 	})
 	t.Run("a genuine write failure keeps its fault classification", func(t *testing.T) {
 		werr := errors.New("write report pair: no space left on device")
-		if got := detachedWriteError(cancelled(), werr); got != werr {
-			t.Errorf("detachedWriteError(cancelled, non-timeout) = %v, want the error unchanged", got)
+		if got := cycle.DetachedWriteError(cancelled(), werr); got != werr {
+			t.Errorf("cycle.DetachedWriteError(cancelled, non-timeout) = %v, want the error unchanged", got)
 		}
 	})
 	t.Run("a live context never reclassifies", func(t *testing.T) {
 		werr := fmt.Errorf("write report pair: %w", context.DeadlineExceeded)
-		if got := detachedWriteError(context.Background(), werr); got != werr {
-			t.Errorf("detachedWriteError(live, timeout) = %v, want the error unchanged", got)
-		}
-	})
-}
-
-// reportCtxTestKey is the private key TestReportWriteContext threads through
-// the detached write context to prove values survive context.WithoutCancel.
-type reportCtxTestKey struct{}
-
-// TestStartWedgeWatchdog covers the wedge detection that moved out of the health
-// subcommand: the daemon marks itself unhealthy when no pass has completed within
-// the lease, so the probe needs no config and cannot be broken by one.
-//
-// It uses a real marker on a temp path with a tiny lease rather than a clock seam:
-// the behaviour under test is "did it notice a stale mtime", and mtime is the
-// signal, so faking time would test the fake.
-func TestStartWedgeWatchdog(t *testing.T) {
-	t.Run("a zero lease disables it", func(t *testing.T) {
-		stop := startWedgeWatchdog(t.Context(), health.NewMarker(filepath.Join(t.TempDir(), ".healthy")), 0)
-		stop() // must not block: external mode arms no goroutine
-	})
-
-	t.Run("a stale marker is marked unhealthy", func(t *testing.T) {
-		dir := t.TempDir()
-		path := filepath.Join(dir, ".healthy")
-		marker := health.NewMarker(path)
-		marker.Set(true)
-		if !marker.Healthy() {
-			t.Fatal("marker not healthy after Set(true)")
-		}
-		// Backdate the marker past the lease: that is exactly what a wedged loop
-		// looks like from the outside, since only a COMPLETED pass refreshes it.
-		old := time.Now().Add(-time.Hour)
-		if err := os.Chtimes(path, old, old); err != nil {
-			t.Fatalf("backdating the marker: %v", err)
-		}
-		age, err := markerAge(path)
-		if err != nil {
-			t.Fatalf("markerAge: %v", err)
-		}
-		if age < 30*time.Minute {
-			t.Fatalf("markerAge = %v, want the backdated hour", age)
-		}
-	})
-
-	t.Run("markerAge fails on an absent marker", func(t *testing.T) {
-		if _, err := markerAge(filepath.Join(t.TempDir(), "nope")); err == nil {
-			t.Error("markerAge(absent) = nil error, want an error so the watchdog leaves it to the probe")
+		if got := cycle.DetachedWriteError(context.Background(), werr); got != werr {
+			t.Errorf("cycle.DetachedWriteError(live, timeout) = %v, want the error unchanged", got)
 		}
 	})
 }

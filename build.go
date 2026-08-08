@@ -20,6 +20,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/notify"
 	"github.com/cplieger/seadex-scout/internal/scout"
 	"github.com/cplieger/seadex-scout/internal/seadex"
+	"github.com/cplieger/seadex-scout/internal/seadexapi"
 	"github.com/cplieger/seadex-scout/internal/state"
 )
 
@@ -40,10 +41,19 @@ const (
 	arrBaseDelay   = 5 * time.Second
 )
 
-// built holds the assembled runtime and the resources to release on shutdown.
+// built holds the assembled compare-cycle runtime and the resources to release
+// on shutdown.
 type built struct {
 	scout   *scout.Scout
 	cleanup func()
+}
+
+// builtReporter is built's read-only twin: the one-shot report runs a
+// *scout.Reporter, which carries neither the comparer, the notifier nor the feed
+// writer, so the two entry points cannot be handed each other's runtime.
+type builtReporter struct {
+	reporter *scout.Reporter
+	cleanup  func()
 }
 
 // scoutCore is the wiring BOTH entry points need: the persisted store, the arr
@@ -99,7 +109,7 @@ func buildCore(ctx context.Context, cfg *config.Config, readOnlyState bool) (sco
 			ExcludeTags: cfg.ExcludeTags,
 		}),
 		mapping: mapping.NewLoader(mappingHTTP, mapping.DefaultURL, config.DefaultMappingOverrides, mapping.DefaultRefresh, log),
-		seadex:  seadex.NewClient(seadexHTTP, seadex.DefaultBaseURL, seadex.DefaultPageDelay, log),
+		seadex:  seadexapi.NewClient(seadexHTTP, seadex.DefaultBaseURL, seadexapi.DefaultPageDelay, log),
 		matcher: match.NewMatcher(anilistClient, log),
 		anilist: anilistClient,
 		cleanup: func() {
@@ -161,10 +171,10 @@ func buildScout(ctx context.Context, cfg *config.Config) (built, error) {
 // notifier and no feed writer - the report cannot reach them - so a report run
 // also opens no Prowlarr connection, and it reads state through the read-only
 // store.
-func buildReporter(ctx context.Context, cfg *config.Config) (built, error) {
+func buildReporter(ctx context.Context, cfg *config.Config) (builtReporter, error) {
 	c, err := buildCore(ctx, cfg, true)
 	if err != nil {
-		return built{}, err
+		return builtReporter{}, err
 	}
 	sc := scout.NewReporter(&scout.ReportDeps{
 		Logger:  c.log,
@@ -179,7 +189,7 @@ func buildReporter(ctx context.Context, cfg *config.Config) (built, error) {
 			AnimeBytes:      cfg.AnimeBytes,
 		}),
 	})
-	return built{scout: sc, cleanup: c.cleanup}, nil
+	return builtReporter{reporter: sc, cleanup: c.cleanup}, nil
 }
 
 // upstreamConfig projects the operator config into the indexer's shared

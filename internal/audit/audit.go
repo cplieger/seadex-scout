@@ -33,6 +33,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/release"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/tagfilter"
+	"github.com/cplieger/seadex-scout/internal/tracker"
 	"github.com/cplieger/seadex-scout/internal/trackerlink"
 )
 
@@ -56,6 +57,10 @@ const (
 	// release with no group tag - both carried as the release.NoGroup
 	// sentinel) and could hide the very match being tested, so neither
 	// have_best/have_alt nor a divergence can honestly be claimed.
+	//
+	// It also covers an item whose file state the library walk could not
+	// establish (a library placeholder), where alignment is undetermined
+	// because the file data is missing rather than absent.
 	VerdictUnverified Verdict = "unverified"
 	// VerdictNotOnSeaDex means the item is in the library and recognized as anime
 	// (present in the Fribb map) but SeaDex lists no entry for it, so there is no
@@ -198,11 +203,12 @@ type Row struct {
 	hiddenAnimeBytesBest int
 }
 
-// IncompleteEntry is one SeaDex entry whose library mapping could not be
-// resolved this run: the AniList lookup that would link it to a library item
-// failed transiently, so whether (and where) it maps into the library is
-// unknown. It renders in the report's incomplete-mapping section; a row for it
-// may be missing from (or misfiled in) the verdict sections.
+// IncompleteEntry is one SeaDex entry whose AniList lookup failed transiently
+// this run, so its library mapping is unconfirmed: it was either left unmapped
+// or resolved from an expired memo entry (match.Memo.staleMedia), which still
+// counts as degraded. It renders in the report's incomplete-mapping section; a
+// row for it may be missing from the verdict sections, misfiled in them, or
+// present with a verdict that rests on stale titles.
 type IncompleteEntry struct {
 	SeaDexURL string `json:"seadex_url"`
 	AniListID int    `json:"al_id"`
@@ -292,7 +298,7 @@ func (a *Auditor) incompleteEntries(ids map[int]struct{}) []IncompleteEntry {
 	}
 	out := make([]IncompleteEntry, 0, len(ids))
 	for id := range ids {
-		out = append(out, IncompleteEntry{AniListID: id, SeaDexURL: a.seadexURL(id)})
+		out = append(out, IncompleteEntry{AniListID: id, SeaDexURL: seadex.EntryURL(id)})
 	}
 	slices.SortFunc(out, func(x, y IncompleteEntry) int { return cmp.Compare(x.AniListID, y.AniListID) })
 	return out
@@ -354,7 +360,7 @@ func (a *Auditor) assess(m *match.Match) Row {
 		Title:       m.Item.Title,
 		Arr:         m.Arr,
 		ArrURL:      m.Item.ArrURL,
-		SeaDexURL:   a.seadexURL(m.Entry.AniListID),
+		SeaDexURL:   seadex.EntryURL(m.Entry.AniListID),
 		MatchSource: string(m.Source),
 		AniListID:   m.Entry.AniListID,
 		Special:     m.Record.IsSpecial(),
@@ -371,11 +377,11 @@ func (a *Auditor) assess(m *match.Match) Row {
 	d := align.Decide(m.Item, &m.Record, best, alt)
 	row.scope = d.Kind
 	row.Season = d.Season
-	// Cloned, not aliased: for a single-unit scope align.Decide returns the
-	// library snapshot's own slice, and the report must not hand a caller a
-	// window into the snapshot a concurrent daemon cycle owns (compare's
-	// baseFinding clones for the same reason).
-	row.CurrentGroups, row.Approx = slices.Clone(d.Groups), d.Approx
+	// align.Decision.Groups is caller-owned on every branch (align.Decide clones
+	// the single-unit set at the edge and builds the whole-series union fresh), so
+	// the row can take it directly - the report still never holds a window into the
+	// snapshot a concurrent daemon cycle owns.
+	row.CurrentGroups, row.Approx = d.Groups, d.Approx
 	row.Verdict = verdictFor(d.Standing)
 	row.Qualifier = rowQualifier(&m.Entry, &d)
 	return row
@@ -509,14 +515,7 @@ func (a *Auditor) classifyReleases(entry *seadex.Entry) []Release {
 // t from the report. It is the ONE expression of that gate, so the per-row
 // hidden count cannot drift from the drop it accounts for.
 func (a *Auditor) hiddenByABToggle(t *seadex.Torrent) bool {
-	return !a.includeAnimeBytes && classify.ABEvidence(t) == filter.ABDefinite
-}
-
-// seadexURL builds the releases.moe entry link for an AniList ID. The URL
-// rule is the shared releases.moe contract in internal/seadex; this is a
-// thin delegate.
-func (a *Auditor) seadexURL(aniListID int) string {
-	return seadex.EntryURL(aniListID)
+	return !a.includeAnimeBytes && classify.ABEvidence(t) == tracker.ABDefinite
 }
 
 // --- Group sets + row ordering ---

@@ -51,12 +51,13 @@ func staleMappingState() state.State {
 // internal/mapping's own test pins.
 func TestMappingExhaustionWarnsOnceWithAppContext(t *testing.T) {
 	cases := map[string]struct {
-		load    func(t *testing.T, s *Scout, st *state.State)
+		load    func(t *testing.T, logger *slog.Logger, loader *mapping.Loader, st *state.State)
 		wantMsg string
 	}{
 		"cycle": {
-			load: func(t *testing.T, s *Scout, st *state.State) {
+			load: func(t *testing.T, logger *slog.Logger, loader *mapping.Loader, st *state.State) {
 				t.Helper()
+				s := New(&Deps{Logger: logger, Mapping: loader})
 				if _, _, err := s.loadMapping(t.Context(), st); err == nil {
 					t.Fatal("loadMapping against a permanently-503 Fribb upstream = nil error, want a degraded error")
 				}
@@ -64,9 +65,13 @@ func TestMappingExhaustionWarnsOnceWithAppContext(t *testing.T) {
 			wantMsg: "mapping degraded",
 		},
 		"report": {
-			load: func(t *testing.T, s *Scout, st *state.State) {
+			// The report half is the REPORTER role's, so build it that way
+			// rather than reaching for the method on a cycle Scout - it no
+			// longer has one.
+			load: func(t *testing.T, logger *slog.Logger, loader *mapping.Loader, st *state.State) {
 				t.Helper()
-				if _, err := s.reportMapping(t.Context(), st); err != nil {
+				r := NewReporter(&ReportDeps{Logger: logger, Mapping: loader})
+				if _, err := r.reportMapping(t.Context(), st); err != nil {
 					t.Fatalf("reportMapping on a stale-but-usable map = %v, want nil (degraded, not failed)", err)
 				}
 			},
@@ -79,9 +84,8 @@ func TestMappingExhaustionWarnsOnceWithAppContext(t *testing.T) {
 			// One logger for both layers: the library's verdict and the app's
 			// land in the same recorder, which is what an operator's Loki
 			// stream sees.
-			s := New(&Deps{Logger: logger, Mapping: exhaustingMapLoader(t, logger)})
 			st := staleMappingState()
-			tc.load(t, s, &st)
+			tc.load(t, logger, exhaustingMapLoader(t, logger), &st)
 
 			if n := recorder.CountLevel(slog.LevelWarn, "retries exhausted"); n != 0 {
 				t.Errorf("httpx generic terminal line logged at WARN %d times, want 0 (the app's record is the one that warns): %v", n, recorder.Messages())
