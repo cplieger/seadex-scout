@@ -428,8 +428,32 @@ func NewLoader(httpClient *http.Client, url, overridesPath string, refresh time.
 // (match with errors.As) so the caller can log a degraded cycle while still
 // comparing against the last good map; any other non-nil error means no
 // usable map was returned at all.
+//
+// The persisted records are canonicalized at this INPUT boundary, on a private
+// copy, before any refresh decision reads them. A cache read back from
+// state.json arrives through plain encoding/json, so it can hold a non-canonical
+// record (Type unnormalized, a blank IMDb id, a zero movie id) that
+// HasArrIdentifier - and therefore cacheUsable, the validator choice, the 304
+// reuse, the stale fallback and the previous-population validators - would judge
+// usable while the served Index judges the same record unusable. That
+// disagreement froze a non-canonical cache indefinitely: the usable verdict sent
+// a conditional request whose 304 revalidated the cache instead of obtaining a
+// replacement 200 (h-f25). Canonicalizing here makes every one of those
+// decisions, the returned Cache and the served Index read ONE representation;
+// buildIndex keeps its own idempotent pass for the NewIndex callers that never
+// come through Load, and the copy keeps the caller's State untouched. A nil prev
+// (the first-boot fetch) has nothing to canonicalize and is passed through.
 func (l *Loader) Load(ctx context.Context, prev *Cache) (Cache, *Index, error) {
-	next, err := l.refreshCache(ctx, prev)
+	canonicalPrev := prev
+	if prev != nil {
+		clone := *prev
+		clone.Records = slices.Clone(prev.Records)
+		for i := range clone.Records {
+			clone.Records[i].canonicalize()
+		}
+		canonicalPrev = &clone
+	}
+	next, err := l.refreshCache(ctx, canonicalPrev)
 	// Build from whatever records survived (fresh, refreshed, or stale prev).
 	idx := buildIndex(next.Records)
 	l.applyOverrides(ctx, idx)

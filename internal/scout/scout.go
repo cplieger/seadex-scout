@@ -382,8 +382,17 @@ func (s *Scout) cycleDegraded(reason string, attrs ...any) {
 // window is documented against "every iteration re-emits the whole open set").
 // Only the pre-compare exits use it: the completed-compare paths reached
 // Notifier.Report already, so re-stating there would double-emit the set.
+//
+// The re-statement is gated on readiness, exactly as the tick's not-ready arm is
+// (see tick): before a reconcile has reported the whole catalogue the set is
+// provably empty and NOT authoritative, and Reemit always writes a "findings
+// reported" summary - an empty one reads as "no findings", a claim a gated
+// startup pass cannot make. The degraded completion line still fires on every
+// gate, at every stage of startup, because that is what feeds the deadman.
 func (s *Scout) cycleGateDegraded(reason string, attrs ...any) {
-	s.notifier.Reemit()
+	if s.ready {
+		s.notifier.Reemit()
+	}
 	s.cycleDegraded(reason, attrs...)
 }
 

@@ -72,6 +72,10 @@ for dockerfile in "$@"; do
   # unambiguous in a file that carries several pins.
   awk -v dep="$dep" '
 		/^#[[:space:]]*repin:/ {
+			if (pending_dep != "") {
+				printf "repin: marker at %s:%d is not followed by an ARG assignment\n", FILENAME, pending_line > "/dev/stderr"
+				exit 3
+			}
 			d = ""; u = ""
 			for (i = 1; i <= NF; i++) {
 				if ($i ~ /^dep=/) { d = substr($i, 5) }
@@ -97,6 +101,12 @@ for dockerfile in "$@"; do
 			}
 			pending_dep = ""
 			next
+		}
+		END {
+			if (pending_dep != "") {
+				printf "repin: marker at %s:%d is not followed by an ARG assignment\n", FILENAME, pending_line > "/dev/stderr"
+				exit 3
+			}
 		}
 	' "$dockerfile" >"$tmp/pins" || exit $?
 

@@ -897,12 +897,13 @@ func (c *Config) validateFeedAPIKey() error {
 	return nil
 }
 
-// validateABPasskey is the ONE gate on indexer.ab_passkey. An empty passkey is
-// the documented off state (AnimeBytes searches still work through Prowlarr;
-// the /ab RSS feed answers a Torznab error), so it passes. A CONFIGURED passkey
-// must be the shape AnimeBytes issues, or the config fails: every AB download
-// link is built from it, so a malformed value means each arr grab fails at the
-// tracker while this app reports a served feed.
+// validateABPasskey is the ONE gate on indexer.ab_passkey. AnimeBytes is off at
+// EITHER half - an empty passkey, or an empty indexer.ab_torznab_url - and both
+// off states pass (AnimeBytes searches still work through Prowlarr; the /ab RSS
+// feed answers a Torznab error). A passkey configured BESIDE an AB endpoint must
+// be the shape AnimeBytes issues, or the config fails: every AB download link is
+// built from it, so a malformed value means each arr grab fails at the tracker
+// while this app reports a served feed.
 //
 // The shape is length plus the absence of whitespace, and the lengths are
 // upstream authority rather than an invention here: Jackett's AnimeBytes
@@ -917,7 +918,17 @@ func (c *Config) validateFeedAPIKey() error {
 // is the operator's to fix and must surface as a runtime auth failure at
 // AnimeBytes, not as a config error. Field-name-only; never echoes the secret.
 func (c *Config) validateABPasskey() error {
-	if c.IndexerABPasskey == "" || wellFormedABPasskey(c.IndexerABPasskey) {
+	// AnimeBytes is OFF at EITHER half: an empty passkey, or an empty
+	// ab_torznab_url (README: "" = AB RSS off). With no AB endpoint nothing
+	// builds an AB download link from this value, so a parked passkey - an
+	// unexpanded ${VAR} this deployment never sets, or a truncated paste - must
+	// not block the daemon the ALWAYS-ON compare loop rides in. This gate runs
+	// for a nyaa-only feed too (IndexerConfigured is either URL), and the reason
+	// it fails the config - every AB link is built from the passkey - does not
+	// hold there. warnABPasskeyConfiguration's parked-passkey INFO is the signal
+	// for that state.
+	if c.IndexerABTorznabURL == "" || c.IndexerABPasskey == "" ||
+		wellFormedABPasskey(c.IndexerABPasskey) {
 		return nil
 	}
 	msg := "indexer.ab_passkey is not a usable AnimeBytes passkey: it must be 32, 48, or 56 " +

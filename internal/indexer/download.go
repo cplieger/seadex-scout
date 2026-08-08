@@ -100,7 +100,8 @@ func downloadTarget(scope, sourceURL string) (base, id string, ok bool) {
 // It exists for the one case where a release is sound but its link is not yet
 // derivable - an AnimeBytes torrent while no usable indexer.ab_passkey is
 // configured (absent, or a value that is not a credential at all) - which
-// the journal admits GUID-only rather than refusing (see journal.go's
+// journal admission refuses WITHOUT recording a publication, so it journals as
+// new once the passkey arrives (see journal.go's
 // journalLink). It deliberately does NOT report a release that is unresolvable
 // for an upstream DATA reason (a foreign host, an id-less URL): such a record
 // must stay refused so a corrected one still journals as new.

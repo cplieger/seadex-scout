@@ -2649,6 +2649,27 @@ func TestValidateRejectsUnusableABPasskey(t *testing.T) {
 	}
 }
 
+// TestValidateAllowsParkedMalformedABPasskeyWithABOff pins the other half of the
+// documented off switch: with ab_torznab_url empty no AB download link is built
+// from the passkey, so a parked or unexpanded value must not stop the daemon the
+// ALWAYS-ON compare loop rides in. The gate runs for a nyaa-only feed too
+// (IndexerConfigured is either URL), and its reason for failing the config -
+// every AB link is built from the passkey - does not hold with AB off.
+func TestValidateAllowsParkedMalformedABPasskeyWithABOff(t *testing.T) {
+	for _, passkey := range []string{"${SEADEX_SCOUT_AB_PASSKEY}", "passkey", "0f1e2d3c"} {
+		c := Config{
+			RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k",
+			IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api",
+			IndexerAPIKey:         strings.Repeat("a", 32),
+			IndexerProwlarrAPIKey: "pk",
+			IndexerABPasskey:      passkey,
+		}
+		if err := c.Validate(); err != nil {
+			t.Errorf("Validate() with ab_torznab_url empty and ab_passkey %q = %v, want nil", passkey, err)
+		}
+	}
+}
+
 // TestValidateABPasskeyGateIsShapeNotCorrectness documents the one thing the
 // gate deliberately does NOT do: a value that HAPPENS to be a 32-character
 // environment-variable reference passes, because correctness is the operator's
@@ -2663,6 +2684,10 @@ func TestValidateABPasskeyGateIsShapeNotCorrectness(t *testing.T) {
 	c := Config{
 		RunMode: RunModeDaemon, SonarrURL: "http://s", SonarrAPIKey: "k",
 		IndexerNyaaTorznabURL: "http://prowlarr:9696/22/api",
+		// AB must be ENABLED here or the gate returns early on the off switch
+		// and this test would pass for the wrong reason (see
+		// TestValidateAllowsParkedMalformedABPasskeyWithABOff).
+		IndexerABTorznabURL:   "http://prowlarr:9696/2/api",
 		IndexerAPIKey:         strings.Repeat("a", 32),
 		IndexerProwlarrAPIKey: "pk",
 		IndexerABPasskey:      wellShapedRef,

@@ -1079,18 +1079,16 @@ func TestRebuildCarriesCuratedABItemWhenRenderFailsWithoutPasskey(t *testing.T) 
 	}
 }
 
-// TestRebuildJournalsNewABItemWhenPasskeyMissing pins the GROWTH half of the
-// AB-passkey reversibility the two carry tests above pin: a release SeaDex
-// curates while ab_passkey is unset must still ENTER the journal, GUID-only.
-// It used to be skipped after journalIfNew had already folded its identity into
-// the never-pruned publication log, so it was never new again and the release was
-// lost from RSS permanently - which made the rebuild's own nudge ("set
-// indexer.ab_passkey to serve AnimeBytes releases") promise a recovery that
-// could not happen. Nothing unservable escapes: the item persists GUID-only
-// (stripDownloadURLs) and a reader with no passkey clears the whole AB feed
-// (rebuildABDownloadURLs), so the release becomes grabbable exactly when the
-// passkey arrives. The nudge still fires and still counts it.
-func TestRebuildJournalsNewABItemWhenPasskeyMissing(t *testing.T) {
+// TestRebuildDefersNewABItemUntilPasskeyArrives pins the GROWTH half of the
+// AB-passkey reversibility the two carry tests above pin, in the shape the
+// publication log makes possible: a release SeaDex curates while ab_passkey is
+// unset is NOT journaled and NOT published, so it journals as new - with a
+// grabbable link - on the first rebuild after the passkey arrives. The older
+// shape journaled it GUID-only because journalIfNew folded its identity into the
+// never-pruned log BEFORE the render; with the log written on PUBLICATION the
+// general rule (a failed render is retryable, never terminal) covers the case at
+// the root, so that exemption is gone. The nudge still fires and still counts it.
+func TestRebuildDefersNewABItemUntilPasskeyArrives(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feed.json")
 	seedEmptyFeed(t, path)
 	log, rec := capture.New()
@@ -1107,18 +1105,30 @@ func TestRebuildJournalsNewABItemWhenPasskeyMissing(t *testing.T) {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	snap := readSnapshotFile(t, path)
-	if len(snap.ABFeed) != 1 {
-		t.Fatalf("ab feed = %+v, want the new release journaled GUID-only despite the missing passkey", snap.ABFeed)
+	if len(snap.ABFeed) != 0 {
+		t.Fatalf("ab feed = %+v, want nothing journaled while no passkey can build a grabbable link", snap.ABFeed)
 	}
-	got := snap.ABFeed[0]
-	if got.Key != "ab:1167293" || got.GUID == "" {
-		t.Errorf("journaled item = %+v, want the AB key and its tracker page URL as GUID", got)
-	}
-	if got.DownloadURL != "" {
-		t.Errorf("journaled DownloadURL = %q, want empty (the reader derives every link from the GUID)", got.DownloadURL)
+	if snap.Published["ab:1167293"] {
+		t.Error("publication log recorded ab:1167293 although nothing was served; the log is never pruned, so the release could never journal as new")
 	}
 	if v, ok := rec.AttrValue("ab RSS feed empty of grabbable links", "ab_releases_skipped"); !ok || v != "1" {
 		t.Errorf("operator nudge missing or miscounted (got %q, found=%v); log output:\n%s", v, ok, strings.Join(rec.Messages(), "\n"))
+	}
+	// The nudge's promise, which only an unwritten log can keep: setting the
+	// passkey journals the release, with a grabbable link.
+	withKey := newTestWriter(path, strings.Repeat("a", 32), true)
+	if err := withKey.Rebuild(context.Background(), entries, nil); err != nil {
+		t.Fatalf("Rebuild with a passkey configured: %v", err)
+	}
+	snap = readSnapshotFile(t, path)
+	if len(snap.ABFeed) != 1 {
+		t.Fatalf("ab feed = %+v, want the release journaled once the passkey arrives", snap.ABFeed)
+	}
+	if got := snap.ABFeed[0]; got.Key != "ab:1167293" || got.GUID == "" {
+		t.Errorf("journaled item = %+v, want the AB key and its tracker page URL as GUID", got)
+	}
+	if !snap.Published["ab:1167293"] {
+		t.Error("publication log missing ab:1167293 after the release entered the served feed")
 	}
 }
 

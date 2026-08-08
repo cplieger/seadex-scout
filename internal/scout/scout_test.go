@@ -16,9 +16,11 @@ import (
 	"github.com/cplieger/arrapi"
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
+	"github.com/cplieger/seadex-scout/internal/compare"
 	"github.com/cplieger/seadex-scout/internal/indexer"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
+	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/notify"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/seadexapi"
@@ -362,11 +364,69 @@ func TestCycleSeaDexFailureIsHealthyAndReportsNothing(t *testing.T) {
 	if len(loaded.Library.Items) != 1 || loaded.Library.Items[0].Title != "Frieren" {
 		t.Errorf("library snapshot after degraded cycle = %+v, want refreshed Frieren snapshot", loaded.Library)
 	}
-	if n := recorder.CountExact("findings reported"); n != 1 {
-		t.Errorf("SeaDex-outage cycle emitted the findings summary %d times, want 1 (the gate runs no compare but re-states the set)", n)
+	if n := recorder.CountExact("findings reported"); n != 0 {
+		t.Errorf("SeaDex-outage startup cycle emitted the findings summary %d times, want 0 (the set is empty and not yet authoritative)", n)
 	}
 	if n := recorder.Contains("better release available"); n {
 		t.Error("SeaDex-outage cycle emitted a finding row, want none (the notifier's set is empty here)")
+	}
+}
+
+// TestCycleGateReemitsAStandingSetAfterReadiness pins the OTHER half of the
+// alerting contract, and the readiness boundary between the two halves: once a
+// reconcile has reported a whole-catalogue set, a later pre-compare gate must
+// RE-STATE that set (notify.Reemit) rather than fall silent, or the alert rules'
+// lookback expires every open row during an upstream outage and then re-fires
+// the whole set as new. Before readiness the same gate publishes nothing (see
+// TestCycleSeaDexFailureIsHealthyAndReportsNothing): an empty summary would
+// claim "no findings" for a set no pass has established.
+func TestCycleGateReemitsAStandingSetAfterReadiness(t *testing.T) {
+	logger, recorder := capture.New()
+	store := &fakeStore{st: state.State{Mapping: frierenMappingCache()}}
+	sonarr := &fakeSonarr{
+		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
+		files: map[int][]arrapi.EpisodeFile{
+			7: {{SeasonNumber: 1, ReleaseGroup: "Erai-raws"}},
+		},
+	}
+	sea := &fakeSeaDex{entries: seadexFrierenEntry()}
+	s := New(&Deps{
+		Logger:   logger,
+		Store:    store,
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: sonarr, Logger: scoutTestLogger()}),
+		Mapping:  fakeMapping{},
+		SeaDex:   sea,
+		Matcher:  match.NewMatcher(notFoundAniList{}, scoutTestLogger()),
+		Comparer: compare.NewComparer(compare.Config{}),
+		Notifier: notify.NewNotifier(logger, nil),
+	})
+
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("establishing cycle healthy=false, want true")
+	}
+	if !s.ready {
+		t.Fatal("ready=false after a completed reconcile, want true (its Report established the set)")
+	}
+	rowsAfterReport := recorder.CountExact("better release available")
+	if rowsAfterReport == 0 {
+		t.Fatal("establishing cycle emitted no finding row; the test needs a NON-EMPTY standing set")
+	}
+	summariesAfterReport := recorder.CountExact("findings reported")
+
+	// Now gate the next pass before the compare. The set stands, so it must be
+	// re-stated unchanged: the same rows again plus exactly one more summary.
+	sea.err = errors.New("seadex down")
+	if healthy := s.Cycle(context.Background()); !healthy {
+		t.Fatal("gated cycle healthy=false, want true (a SeaDex outage is degraded, not unhealthy)")
+	}
+	if got, want := recorder.CountExact("findings reported"), summariesAfterReport+1; got != want {
+		t.Errorf("findings summaries = %d, want %d (a gate after readiness re-states the set exactly once)", got, want)
+	}
+	if got, want := recorder.CountExact("better release available"), 2*rowsAfterReport; got != want {
+		t.Errorf("finding rows = %d, want %d (the standing rows must be re-emitted unchanged)", got, want)
+	}
+	if n := recorder.CountExact("cycle degraded"); n != 1 {
+		t.Errorf("'cycle degraded' count = %d, want 1 (the gate still feeds the deadman)", n)
 	}
 }
 

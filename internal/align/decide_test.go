@@ -8,6 +8,49 @@ import (
 	"github.com/cplieger/seadex-scout/internal/mapping"
 )
 
+// TestDecidePlaceholderItemIsUnverifiedNotNoFile pins the placeholder branch
+// h-f5 added: a library.Item whose file state could not be READ
+// (library.Item.Failed - a series whose episode fetch failed, or a movie Radarr
+// reports a file for while sending no MovieFile payload) has no group evidence at
+// all, so the standing is unverified and Groups stays nil. StandingNoFile would
+// assert the unit has nothing on disk, which is the false claim Comparable exists
+// to stop - and it is what the report rendered before the fix.
+//
+// It is pinned HERE, on Decide, because the audit report is the consumer that
+// relies on Decide handling the placeholder (the daemon's compare pass drops
+// these matches beforehand via scout.splitFailedMatches), and no other align
+// test passes a Failed item to Decide: deleting the branch restored the
+// no_file verdict with the whole suite still green.
+func TestDecidePlaceholderItemIsUnverifiedNotNoFile(t *testing.T) {
+	movieRec := mapping.Record{Type: "MOVIE"}
+	for name, item := range map[string]library.Item{
+		"failed movie":                   {Arr: library.ArrRadarr, Failed: true},
+		"failed movie Radarr filed":      {Arr: library.ArrRadarr, Failed: true, HasFile: true},
+		"failed series with no groups":   {Arr: library.ArrSonarr, Failed: true},
+		"failed series with read groups": {Arr: library.ArrSonarr, Failed: true, SeasonGroups: map[int][]string{1: {"sam"}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := movieRec
+			if item.Arr == library.ArrSonarr {
+				rec = mapping.Record{Type: "TV", SeasonTvdb: 1}
+			}
+			d := align.Decide(&item, &rec, []string{"sam"}, nil)
+			if d.Standing != align.StandingUnverified {
+				t.Errorf("Standing = %v, want %v (a placeholder's file state is MISSING, not empty)", d.Standing, align.StandingUnverified)
+			}
+			if d.Outcome != align.OutcomeUnverifiable {
+				t.Errorf("Outcome = %v, want %v", d.Outcome, align.OutcomeUnverifiable)
+			}
+			if len(d.Groups) != 0 {
+				t.Errorf("Groups = %v, want empty (no groups were read, so none may be reported)", d.Groups)
+			}
+			if d.NoBest {
+				t.Error("NoBest = true, want false (the best set is non-empty)")
+			}
+		})
+	}
+}
+
 // TestDecideSingleUnit pins the file-first group ladder and the outcome
 // linearization for the single-unit scopes (ported from the audit's former
 // verdict table, which the shared core replaced): no file wins over

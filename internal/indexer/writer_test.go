@@ -50,13 +50,13 @@ func TestRebuildPersistsPairRelation(t *testing.T) {
 	}
 }
 
-// TestRebuildWarnsWhenABPasskeyMissing pins the operator nudge: a rebuild
-// journaling AnimeBytes releases with no configured passkey still writes the
-// snapshot (Nyaa unaffected) and logs ONE warning carrying the count of AB
-// releases journaled without a grabbable link, so the operator learns why the
-// AB RSS feed has nothing grabbable. The releases themselves are journaled
-// GUID-only (see TestRebuildJournalsNewABItemWhenPasskeyMissing), which is what
-// makes the nudge's implied recovery real. The logger is
+// TestRebuildWarnsWhenABPasskeyMissing pins the operator nudge: a rebuild that
+// meets AnimeBytes releases with no configured passkey still writes the snapshot
+// (Nyaa unaffected) and logs ONE warning carrying the count of AB releases it
+// could not turn into a grabbable link, so the operator learns why the AB RSS
+// feed is empty. Those releases are neither journaled nor published (see
+// TestRebuildDefersNewABItemUntilPasskeyArrives), which is what makes the
+// nudge's implied recovery real. The logger is
 // injected via NewFeedWriter, so no slog.Default swap is needed.
 func TestRebuildWarnsWhenABPasskeyMissing(t *testing.T) {
 	log, rec := capture.New()

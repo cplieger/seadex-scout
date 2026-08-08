@@ -1273,6 +1273,31 @@ func TestAttrBudgetMirrorsKeyBudget(t *testing.T) {
 	}
 }
 
+// TestFilteredReleaseIsAnnotatedAndNotLinked isolates the Filtered annotation
+// leg h-f7 added to releaseNotes and annotated. The fixture deliberately carries
+// NO Warnings: TestAuditExcludedTagBestNotCounted exercises the Broken tag, which
+// populates Warnings and so made annotated return true even before the fix - it
+// cannot fail if either Filtered check is removed. Here both user-visible
+// corrections are the only thing keeping the assertions true: the "filtered"
+// note that stops the row self-contradicting (best column lists the group while
+// the verdict calls the on-disk copy unlisted), and the suppression of the grab
+// link for a release the operator's own filters.exclude_tags policy excluded.
+func TestFilteredReleaseIsAnnotatedAndNotLinked(t *testing.T) {
+	rel := Release{Group: "PMR", Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1", Filtered: true}
+	if len(rel.Warnings) != 0 {
+		t.Fatal("fixture carries warnings; the Filtered leg would not be the reason the assertions hold")
+	}
+	if got := releaseNotes(&rel); !slices.Equal(got, []string{"filtered"}) {
+		t.Errorf("releaseNotes() = %v, want [filtered]", got)
+	}
+	if !annotated(&rel) {
+		t.Error("a filtered release is not annotated; it would be offered as a grab link and read as unexplained in the report")
+	}
+	if got := links(&Row{Releases: []Release{rel}}); got != emptyCell {
+		t.Errorf("links() = %q, want %q (an excluded best must not be offered as a one-click grab)", got, emptyCell)
+	}
+}
+
 // TestReleaseNotesDistinguishesURLErrorFromUnobtainable pins the report's
 // upstream-data diagnostic. A SeaDex record whose url field carries a
 // value the publisher refuses used to publish a plausible-looking 404 - the live

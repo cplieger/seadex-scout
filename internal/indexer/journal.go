@@ -217,8 +217,9 @@ func (p *journalPass) refusesUnprovenGUID(it *journalItem) bool {
 // ascending AniList-ID order, then best-wins on the marker and category union
 // across all of them (a torrent attached to several entries must not render
 // conflicting duplicates). An occurrence is renderable when it yields a
-// download target (journalLink - a grabbable link, or an AnimeBytes release
-// awaiting the operator's passkey, journaled GUID-only), a non-empty
+// download target (journalLink - a grabbable link; an AnimeBytes release with
+// no usable passkey is NOT renderable and nothing is published for it), a
+// non-empty
 // synthesized title, a GUID that proves the journal key
 // (journalIdentityMatches), and fields within
 // the persisted limits; trying siblings in a deterministic order keeps the
@@ -263,8 +264,10 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor En
 	for _, occ := range ordered {
 		dl, resolved, linkless := w.journalLink(occ.torrent)
 		if linkless {
-			// Journaled without a grabbable link (AnimeBytes, no passkey):
-			// still report it so the caller can nudge the operator.
+			// Not journaled for want of a grabbable link (AnimeBytes, no
+			// passkey): report it so the caller can nudge the operator. Nothing
+			// is published, so the release journals as new once the passkey
+			// arrives (see journalLink).
 			noPasskey = true
 		}
 		if !resolved {
@@ -318,27 +321,25 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor En
 // AnimeBytes-passkey case out of plain unresolvability. It reports:
 //
 //   - ok with a link: the normal case.
-//   - ok with an EMPTY link plus linkless=true: an AnimeBytes release that is
-//     structurally sound (resolvableForScope) while no USABLE indexer.ab_passkey
-//     is configured - absent, or an unexpanded ${VAR}/$VAR reference that is not
-//     a credential at all (unusableABPasskey). The item is journaled anyway,
-//     GUID-only.
-//   - not ok: unresolvable for an upstream DATA reason (a foreign host, an
-//     id-less URL, an unknown tracker), which must stay refused.
+//   - not ok with linkless=true: an AnimeBytes release that is structurally
+//     sound (resolvableForScope) while no USABLE indexer.ab_passkey is
+//     configured - absent, or an unexpanded ${VAR}/$VAR reference that is not a
+//     credential at all (unusableABPasskey). NOTHING is journaled and nothing is
+//     published; the flag exists only so the caller can nudge the operator.
+//   - not ok with linkless=false: unresolvable for an upstream DATA reason (a
+//     foreign host, an id-less URL, an unknown tracker), which must stay
+//     refused.
 //
-// Journaling the link-less AnimeBytes item is what makes the passkey a
-// REVERSIBLE off switch on the GROWTH path too, matching the carry path's
-// existing stance (carryStoredItem / refreshCarriedItem, l-f161). Skipping it
-// lost the release permanently: journalIfNew folds the identity into the
-// never-pruned publication log before the render, so a release curated during a
-// passkey-less window could never journal as new afterwards - which made the
-// operator nudge ("set indexer.ab_passkey") promise a recovery that never
-// happened. Nothing unservable escapes: every feed persists GUID-only
-// (stripDownloadURLs) and the reader re-derives each served link from the GUID,
-// clearing the whole AnimeBytes feed while no passkey is configured
-// (rebuildABDownloadURLs). When the passkey arrives the journaled item becomes
-// grabbable on the next load, and it keeps aging out on the normal
-// feedJournalMaxAge window meanwhile.
+// Refusing the render is what makes the passkey a REVERSIBLE off switch now that
+// the publication log records what was SERVED rather than what was examined: a
+// release the app could not hand an arr was never published, so nothing is
+// recorded for it and it journals as new the first pass after the passkey
+// arrives. This deliberately REPLACES the older exemption that journaled the
+// item GUID-only (l-f161): that shape only dodged the permanence of a ledger
+// written on examination, and with the log written on publication the general
+// rule - a failed render is retryable, never terminal - covers the case at the
+// root. The operator nudge still fires (newJournalItem counts
+// abSkippedNoPasskey), and it now promises a recovery the log actually allows.
 func (w *FeedWriter) journalLink(t *seadex.Torrent) (dl string, ok, linkless bool) {
 	// Both arms read unusableABPasskey - the app's ONE home for "can this
 	// passkey build a grabbable AnimeBytes link" (server.go, over
@@ -347,15 +348,15 @@ func (w *FeedWriter) journalLink(t *seadex.Torrent) (dl string, ok, linkless boo
 	// reference is not a passkey, and it takes the documented no-passkey path
 	// here, exactly as the reader already does (rebuildABDownloadURLs clears the
 	// whole AB feed). On the daemon path config's validateABPasskey has already
-	// refused a configured-but-malformed passkey, so in a running deployment
-	// this predicate distinguishes the off switch; it stays fail-closed for any
-	// other construction of the writer.
+	// refused a configured-but-malformed passkey on an ENABLED AB feed, so in a
+	// running deployment this predicate distinguishes the off switch; it stays
+	// fail-closed for any other construction of the writer.
 	scope := trackerScope(t.Tracker)
 	if dl, resolved := downloadURLForScope(scope, t.URL, w.enablement.ABPasskey); resolved {
 		return dl, true, false
 	}
 	if scope == upstreamAB && unusableABPasskey(w.enablement.ABPasskey) && resolvableForScope(scope, t.URL) {
-		return "", true, true
+		return "", false, true
 	}
 	return "", false, false
 }
@@ -387,10 +388,11 @@ func foldRefs(it *journalItem, refs []curatedRef, infoFor EntryInfoFunc) {
 // --- Rebuild accounting ---
 
 // journalStats counts one pass's journal transitions for the pass log
-// line. abSkippedNoPasskey counts the AnimeBytes releases journaled without a
-// grabbable link because no indexer.ab_passkey is configured (they ARE in the
-// journal - see journalLink - and become grabbable when the passkey arrives);
-// it keeps its name because the pass WARN publishes it as
+// line. abSkippedNoPasskey counts the AnimeBytes releases this pass could not
+// turn into a grabbable link because no indexer.ab_passkey is configured (they
+// are NOT journaled and nothing is published for them - see journalLink - so
+// they journal as new once the passkey arrives); it keeps its name because the
+// pass WARN publishes it as
 // ab_releases_skipped, the attribute an operator's log queries already read.
 // harvest carries the title harvest's own counters, zero at window scope where
 // the harvest deliberately does not run (see pass.go's catalogue-only steps).
@@ -592,11 +594,11 @@ func (p *journalPass) refreshCarriedItem(it *journalItem, refs []curatedRef) (jo
 		}
 		// Both failure reasons take the l-f161 stance: keep the stored render,
 		// subject to carryStoredItem's GUID-identity gate. The passkey arm is
-		// the residual AnimeBytes case (journalLink already journals an AB
-		// release GUID-only, so the passkey itself no longer blocks a render)
-		// and it must be as reversible as blanking the tracker's Torznab URL;
-		// links are stripped at rest (stripDownloadURLs) and the reader
-		// re-derives them, clearing the whole AB feed while no passkey is
+		// the residual AnimeBytes case (a fresh render cannot produce a
+		// grabbable link while no usable passkey is configured, so journalLink
+		// refuses it) and it must be as reversible as blanking the tracker's
+		// Torznab URL; links are stripped at rest (stripDownloadURLs) and the
+		// reader re-derives them, clearing the whole AB feed while no passkey is
 		// configured (rebuildABDownloadURLs).
 		return p.carryStoredItem(it)
 	}
@@ -646,9 +648,11 @@ func (p *journalPass) refreshCarriedItem(it *journalItem, refs []curatedRef) (jo
 //   - a WINDOW pass carries every item verbatim, because it holds no evidence it
 //     may act on (carryUnevaluatedItem).
 //
-// A missing AB passkey is not a drop: an AnimeBytes item re-renders GUID-only
-// (journalLink) while the reader suppresses the ungrabbable feed, so the switch
-// remains reversible. Neither is a fresh render that fails outright: a
+// A missing AB passkey is not a drop for an ALREADY-JOURNALED item: its fresh
+// render cannot produce a grabbable link (journalLink refuses it), so it falls
+// back to its stored render while the reader suppresses the ungrabbable feed,
+// and the switch remains reversible. Neither is a fresh render that fails
+// outright: a
 // still-curated item whose current data no longer renders falls back to its
 // STORED render, because dropping it would be permanent - the never-pruned
 // publication log stops the growth path re-admitting the release once the
@@ -789,14 +793,15 @@ func (p *journalPass) journalIfNew(t *seadex.Torrent) (it journalItem, scope str
 }
 
 // newJournalItem renders one newly curated torrent into its journal item,
-// updating the skip counters when it cannot be served: an AnimeBytes release
-// journaled GUID-only for want of a passkey counts toward the operator nudge (it
-// IS journaled - see journalLink - so the nudge's implied recovery actually
-// happens when the passkey arrives), and an in-scope torrent with no parseable
-// title counts as unresolvable so an upstream data change surfaces on the pass
-// log line instead of silently shrinking the feed. The tracker's enablement and
-// the keyless case are decided and counted one level up, in journalIfNew, which
-// is also where the publication decision lives - so this function only renders.
+// updating the skip counters when it cannot be served: an AnimeBytes release the
+// app cannot hand an arr for want of a passkey counts toward the operator nudge
+// (nothing is journaled and nothing published - see journalLink - so the nudge's
+// implied recovery actually happens when the passkey arrives), and an in-scope
+// torrent with no parseable title counts as unresolvable so an upstream data
+// change surfaces on the pass log line instead of silently shrinking the feed.
+// The tracker's enablement and the keyless case are decided and counted one
+// level up, in journalIfNew, which is also where the publication decision lives
+// - so this function only renders.
 func (p *journalPass) newJournalItem(key string) (journalItem, bool) {
 	refs, _ := p.ev.refs(key)
 	it, ok, noPasskey := p.w.renderJournalItem(key, refs, p.infoFor)

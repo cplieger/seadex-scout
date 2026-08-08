@@ -75,12 +75,14 @@ func TestCycleMappingUnusableReportsNothing(t *testing.T) {
 		t.Fatal("Cycle healthy=false, want true when the map is unusable (degraded, not unhealthy)")
 	}
 	loaded := store.st
-	// The gate compares nothing, so no finding ROW may be emitted - but the
-	// alerting contract's other half still runs: cycleGateDegraded re-states the
-	// set (Notifier.Reemit), which logs the summary once with an empty set, so a
-	// quiet stretch cannot expire the alert rules' lookback.
-	if n := recorder.CountExact("findings reported"); n != 1 {
-		t.Errorf("unusable-map cycle emitted the findings summary %d times, want 1 (the gate compares nothing but re-states the set)", n)
+	// The gate compares nothing, so no finding ROW may be emitted - and at
+	// STARTUP no summary either: no reconcile has established the set, so it is
+	// empty and non-authoritative, and an empty "findings reported" line reads
+	// as "no findings" (same rule as the tick's not-ready arm). The re-statement
+	// half of the alerting contract starts once a reconcile has reported - see
+	// TestCycleGateReemitsAStandingSetAfterReadiness.
+	if n := recorder.CountExact("findings reported"); n != 0 {
+		t.Errorf("unusable-map startup cycle emitted the findings summary %d times, want 0 (the set is not established yet)", n)
 	}
 	if n := recorder.Contains("better release available"); n {
 		t.Error("unusable-map cycle emitted a finding row, want none (the gate runs no compare)")
@@ -243,8 +245,8 @@ func TestCycleEmptySeaDexEntriesReportsNothing(t *testing.T) {
 	if n := recorder.CountExact("better release available"); n != 0 {
 		t.Errorf("empty-SeaDex cycle emitted %d finding lines, want 0", n)
 	}
-	if n := recorder.CountExact("findings reported"); n != 1 {
-		t.Errorf("empty-SeaDex cycle emitted the findings summary %d times, want 1 (Reemit re-states the set; Report never runs)", n)
+	if n := recorder.CountExact("findings reported"); n != 0 {
+		t.Errorf("empty-SeaDex startup cycle emitted the findings summary %d times, want 0 (no reconcile has established the set, so an empty summary would claim \"no findings\")", n)
 	}
 }
 

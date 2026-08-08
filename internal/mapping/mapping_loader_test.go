@@ -118,6 +118,54 @@ func TestLoader_Load_nilCacheFetches(t *testing.T) {
 	}
 }
 
+// TestLoader_Load_canonicalizesPersistedCacheBeforeTheRefreshDecision pins the
+// input-boundary canonicalization (h-f25): a persisted cache whose only record
+// carries non-canonical ids - a MOVIE with tmdb_movies [0] and a blank imdb id -
+// holds NO usable arr identifier, so it is not a usable cache and its validators
+// must not be sent. Without the boundary pass the raw record answered
+// HasArrIdentifier true (the zero and the blank survive an un-normalized read)
+// while the served index answered false, so the refresh sent If-None-Match and a
+// 304 revalidated the unusable cache indefinitely instead of obtaining a
+// replacement 200. It also pins that the caller's own Cache is never mutated.
+func TestLoader_Load_canonicalizesPersistedCacheBeforeTheRefreshDecision(t *testing.T) {
+	var sentValidators atomic.Bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "" {
+			sentValidators.Store(true)
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		_, _ = w.Write([]byte(`[{"anilist_id":42,"type":"tv","tvdb_id":100}]`))
+	}))
+	defer ts.Close()
+	prev := &Cache{
+		FetchedAt:    time.Now().Add(-2 * time.Hour),
+		ETag:         "v1",
+		LastModified: "Wed, 01 Jul 2026 12:00:00 GMT",
+		Records:      []Record{{AniListID: 7, Type: "MOVIE", TmdbMovies: []int{0}, IMDbIDs: []string{"  "}}},
+	}
+	l := NewLoader(ts.Client(), ts.URL, "", time.Hour, discardLogger())
+	next, idx, err := l.Load(context.Background(), prev)
+	if err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if sentValidators.Load() {
+		t.Error("refresh sent cache validators for an unusable cache; a 304 would freeze the non-canonical records indefinitely")
+	}
+	if len(next.Records) != 1 || next.Records[0].AniListID != 42 {
+		t.Fatalf("returned cache records = %+v, want the full 200 replacement (one record id 42)", next.Records)
+	}
+	if rec, ok := idx.Lookup(42); !ok || rec.TvdbID != 100 {
+		t.Errorf("index Lookup(42) = %+v ok=%v, want the replacement record", rec, ok)
+	}
+	// The canonicalization runs on a private copy: the caller's State is the
+	// persisted cache and must be left exactly as it was handed over.
+	if len(prev.Records[0].TmdbMovies) != 1 || prev.Records[0].TmdbMovies[0] != 0 ||
+		len(prev.Records[0].IMDbIDs) != 1 || prev.Records[0].Type != "MOVIE" {
+		t.Errorf("Load mutated the caller's cache: %+v", prev.Records[0])
+	}
+}
+
 func TestLoader_Load_overrideWinsOverFribb(t *testing.T) {
 	dir := t.TempDir()
 	overrides := filepath.Join(dir, "overrides.json")

@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/tagfilter"
@@ -352,8 +353,8 @@ func (w *FeedWriter) run(ctx context.Context, entries []seadex.Entry, info Entry
 	if err != nil {
 		return err
 	}
-	if !w.publicationLogPersistable(&snap, ev, scope) {
-		return nil
+	if err := w.publicationLogPersistable(&snap, scope); err != nil {
+		return err
 	}
 	if err := w.persist(ctx, &snap); err != nil {
 		return err
@@ -363,33 +364,31 @@ func (w *FeedWriter) run(ctx context.Context, entries []seadex.Entry, info Entry
 }
 
 // publicationLogPersistable applies the publication log's caps to the snapshot
-// this pass built, and reports whether it may be written. Growth is the only
-// way the log can cross either cap (the decode refuses an over-cap one before
-// loadPrevious returns), and the REMEDY is the one thing that differs by scope:
+// this pass built, and reports an error when it may NOT be written. Growth is
+// the only way the log can cross either cap (the decode refuses an over-cap one
+// before loadPrevious returns), and the answer is the same at BOTH scopes: keep
+// the last-good feed.json and fail the pass so the cycle reports degradation.
 //
-//   - a catalogue pass re-derives the log from the whole catalogue in place,
-//     which is exactly the remedy the byte cap already prescribes and keeps the
-//     journal intact (every journaled item is in the catalogue);
-//   - a window pass has no whole-catalogue input to re-derive from, so it
-//     defers to the next reconcile rather than persisting an over-cap log the
-//     reader would refuse - which would have it serve nothing.
+// It deliberately does NOT re-derive the log from the current catalogue. The log
+// is a fact about the PAST - what this app actually served - so it is append-only
+// and never rewritten: replacing it with the live catalogue's identities deletes
+// every publication whose release has since left SeaDex, and a release that
+// later returns then reads as new and is broadcast to the arrs a second time,
+// which is the re-grab the log exists to prevent. Recovery from an over-cap log
+// is an explicit operator re-baseline (remove feed.json, whose loss is one empty
+// RSS window), never an automatic rewrite of history.
 //
 // Both caps are checked because neither implies the other: a short tracker-key
 // entry serializes in ~20 bytes, so the byte budget admits ~419k entries
 // against the decode's 250k cardinality cap.
-func (w *FeedWriter) publicationLogPersistable(snap *snapshot, ev curationEvidence, scope passScope) bool {
+func (w *FeedWriter) publicationLogPersistable(snap *snapshot, scope passScope) error {
 	if publicationLogWithinLimits(snap.Published) && len(snap.Published) <= maxSnapshotMapEntries {
-		return true
+		return nil
 	}
-	if scope == scopeCatalogue {
-		w.log.Warn("indexer publication log exceeded its decode caps; rebuilt from the current catalogue",
-			"entries", len(snap.Published), "max_entries", maxSnapshotMapEntries)
-		snap.Published = baselinePublications(ev.entries())
-		return true
-	}
-	w.log.Warn("indexer publication log crossed its cap while advancing; deferring to the next full rebuild",
-		"entries", len(snap.Published), "max_entries", maxSnapshotMapEntries)
-	return false
+	w.log.Warn("indexer publication log crossed its decode caps; the last-good feed snapshot is kept unchanged - remove feed.json to re-baseline",
+		"scope", scope.String(), "entries", len(snap.Published), "max_entries", maxSnapshotMapEntries)
+	return fmt.Errorf("indexer: publication log exceeds its decode caps (%d entries, max %d): snapshot not written",
+		len(snap.Published), maxSnapshotMapEntries)
 }
 
 // logPass emits the one completion line both scopes share. The scope attribute
@@ -412,11 +411,12 @@ func (w *FeedWriter) logPass(snap *snapshot, ev curationEvidence, js *journalSta
 		"harvest_queries", js.harvest.queries, "harvest_matched", js.harvest.matched,
 		"harvest_rejected", js.harvest.rejected, "harvest_pending", js.harvest.pending)
 	if js.abSkippedNoPasskey > 0 && w.enablement.enabled(upstreamAB) {
-		// The nudge fires on BOTH paths. It cannot be deferred to the
-		// reconcile: a tick that journals a link-less AnimeBytes release
-		// records its identity in the never-pruned publication log, so the next
-		// full pass reports isNew=false for it and counts zero - which made the
-		// counter unrecoverable rather than merely unlogged.
+		// The nudge fires on BOTH paths so the operator learns why the AB feed
+		// is empty from the pass that actually met the releases, rather than up
+		// to a reconcile interval later. Nothing is published for a release the
+		// app could not hand an arr, so the count is recoverable: the next pass
+		// over the same window counts it again, and the releases journal as new
+		// once the passkey arrives.
 		w.log.Warn("ab RSS feed empty of grabbable links: set indexer.ab_passkey to serve AnimeBytes releases",
 			"ab_releases_skipped", js.abSkippedNoPasskey)
 	}

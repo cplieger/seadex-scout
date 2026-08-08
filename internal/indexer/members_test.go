@@ -2,7 +2,9 @@ package indexer
 
 import (
 	"encoding/json"
+	"fmt"
 	"maps"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -96,6 +98,48 @@ func TestPublicationLogIsNeverDeletable(t *testing.T) {
 	}
 	if snapshotRules[memberPublished].reversibility != permanent {
 		t.Error("publication log is not recorded as permanent; the risk model must not be unified with the search index's")
+	}
+}
+
+// TestPublicationLogCapRefusesTheWriteAndKeepsThePast pins the append-only rule
+// where TestPublicationLogIsNeverDeletable cannot reach it: the rule table
+// declares the log non-deletable, and the CAP path used to violate that
+// declaration directly by assigning baselinePublications(current catalogue) over
+// snap.Published at catalogue scope. That deleted every publication whose
+// release had since left SeaDex, so a release that later returned read as new
+// and was broadcast to the arrs a second time - the re-grab the permanent log
+// exists to prevent.
+//
+// The contract now: an over-cap log fails the pass at BOTH scopes, the built
+// snapshot is left untouched (so the last-good feed.json survives - run returns
+// this error before persist), and recovery is an explicit operator re-baseline.
+func TestPublicationLogCapRefusesTheWriteAndKeepsThePast(t *testing.T) {
+	// One past publication that is NOT in any current catalogue, plus enough
+	// per-entry-valid bulk to cross the aggregate byte cap (the only cap a test
+	// can cross without materializing 250k entries).
+	const pastIdentity = "nyaa:h:0f1e2d3c4b5a69788796a5b4c3d2e1f001020304"
+	published := map[string]bool{pastIdentity: true}
+	bulk := strings.Repeat("k", maxPersistedFieldBytes-8)
+	for i := 0; len(published) < 1+(maxPublicationLogBytes/maxPersistedFieldBytes)+2; i++ {
+		published[fmt.Sprintf("%s%05d", bulk, i)] = true
+	}
+	if publicationLogWithinLimits(published) {
+		t.Fatalf("fixture publication log of %d entries is still within its caps; the cap path is unreachable", len(published))
+	}
+	for _, scope := range []passScope{scopeCatalogue, scopeWindow} {
+		t.Run(scope.String(), func(t *testing.T) {
+			snap := snapshot{Owners: owns(), Published: maps.Clone(published)}
+			w := NewFeedWriter(&FeedWriterConfig{Path: filepath.Join(t.TempDir(), "feed.json")}, nil, nil)
+			if err := w.publicationLogPersistable(&snap, scope); err == nil {
+				t.Fatal("publicationLogPersistable = nil, want an error: an over-cap log must fail the pass rather than be rewritten")
+			}
+			if !snap.Published[pastIdentity] {
+				t.Error("the cap path deleted a past publication; the log is a fact about what was SERVED and may never be rewritten")
+			}
+			if !maps.Equal(snap.Published, published) {
+				t.Errorf("publication log mutated by the cap check: %d entries, want the %d it was handed", len(snap.Published), len(published))
+			}
+		})
 	}
 }
 
