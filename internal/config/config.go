@@ -567,6 +567,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	c.warnPublicURLProblems()
+	if err := c.validateProwlarrAPIKey(); err != nil {
+		return err
+	}
 	c.warnUnexpandedSecretRefs()
 	c.warnRelativeReportDir()
 	c.warnOverlappingTags()
@@ -666,40 +669,42 @@ func (c *Config) warnRelativeReportDir() {
 	}
 }
 
-// warnUnexpandedSecretRefs warns when a secret field still holds a literal
+// warnUnexpandedSecretRefs warns when indexer.ab_passkey still holds a literal
 // environment-variable reference. yamlenv expands only the ${VAR} form of an
 // ALLOWLISTED name and reports only allowlisted-but-unset names (naming the
 // VARIABLE, never the field holding it), so two operator spellings reach the
 // runtime verbatim with no diagnostic anywhere: a non-allowlisted name
 // (${AB_PASSKEY} instead of ${SEADEX_SCOUT_AB_PASSKEY}) and the brace-less
 // shell form ($SEADEX_SCOUT_AB_PASSKEY, which docker compose itself accepts,
-// making it a plausible paste). The literal placeholder is then sent as the
-// credential and the operator sees only a downstream 401/403 - or, for
-// indexer.ab_passkey, nothing at all: it is baked into every /ab RSS download
-// link, so each arr grab fails at AnimeBytes while this app logs a served
-// feed. indexer.feed_api_key is deliberately NOT in this list: it is the inbound
-// gate rather than an outbound credential, so this message would misstate its
-// failure - validateFeedAPIKey owns it, with one format gate that refuses every
-// spelling outright. For a CONFIGURED indexer this warning is a breadcrumb
-// ahead of that gate and validateABPasskey's: both fail the config for a
-// malformed credential. It still carries a config with no indexer section,
-// where neither gate runs and a parked placeholder would otherwise be silent.
-// Warn-only (no real arr/Prowlarr/AnimeBytes credential takes a shape
-// containing an env reference, but a false positive must not stop the daemon)
-// and field-name-only; never echoes the value.
+// making it a plausible paste). The literal placeholder is then baked into every
+// /ab RSS download link, so each arr grab fails at AnimeBytes while this app logs
+// a served feed.
+//
+// The passkey is the ONLY field left here, and the reason is that it is the only
+// credential in this config with no charset gate. sonarr.api_key,
+// radarr.api_key, indexer.prowlarr_api_key and indexer.feed_api_key are all
+// refused outright for containing a '$' (wellFormedCredential, reached through
+// checkAPIKeyShape / validateFeedAPIKey), and each of those gates runs BEFORE
+// this function on every config shape - so an entry for any of them here could
+// never fire. The passkey keeps its charset unconstrained on purpose: AnimeBytes
+// constrains only the length, so this app must not invent a charset for a
+// credential it does not issue (validateABPasskey). That leaves this warning as
+// the only thing that can see a placeholder in it.
+//
+// This is a warning rather than an error because validateABPasskey - the passkey's
+// own gate - deliberately passes a PARKED value: with no ab_torznab_url nothing
+// builds an AB link, and a placeholder there must not stop the daemon the
+// always-on compare loop rides in. So on a nyaa-only or indexer-less config this
+// line is the whole diagnostic; on a config with AB configured it is a breadcrumb
+// ahead of the hard error validateABPasskey raises.
+//
+// Field-name-only; never echoes the value.
 func (c *Config) warnUnexpandedSecretRefs() {
-	for _, sf := range []struct{ name, val string }{
-		{"sonarr.api_key", c.SonarrAPIKey},
-		{"radarr.api_key", c.RadarrAPIKey},
-		{"indexer.prowlarr_api_key", c.IndexerProwlarrAPIKey},
-		{"indexer.ab_passkey", c.IndexerABPasskey},
-	} {
-		if secretref.Unexpanded(sf.val) {
-			slog.Warn("a secret still holds a literal environment-variable reference; only "+
-				"${VAR} names prefixed SONARR_/RADARR_/SEADEX_SCOUT_ are expanded, so the "+
-				"literal placeholder is sent as the credential and every call to that "+
-				"upstream fails to authenticate", "field", sf.name)
-		}
+	if secretref.Unexpanded(c.IndexerABPasskey) {
+		slog.Warn("a secret still holds a literal environment-variable reference; only "+
+			"${VAR} names prefixed SONARR_/RADARR_/SEADEX_SCOUT_ are expanded, so the "+
+			"literal placeholder is sent as the credential and every call to that "+
+			"upstream fails to authenticate", "field", "indexer.ab_passkey")
 	}
 }
 
@@ -817,26 +822,32 @@ func (c *Config) torznabEndpoints() []torznabEndpoint {
 }
 
 // validateIndexerEndpoints enforces the feed's authentication requirement,
-// gates the two indexer credentials on their FORMAT, and validates the two
+// gates the two indexer-owned credentials on their FORMAT, and validates the two
 // upstream Torznab URLs, in the original diagnostic order.
 //
-// The two credential gates are where an operator-supplied string stops being
-// untrusted text and becomes a value the app may use as a credential: it
-// happens ONCE, here at the config boundary, so no downstream site has to ask
-// again (parse, don't validate). Both are POSITIVE format checks - "is this the
-// shape a credential takes" - rather than a catalogue of the ways a paste can
-// go wrong, because a catalogue is open-ended: the app used to grade three
-// spellings of one unexpanded reference three different ways (a braced ${VAR}
-// an error, an unbraced $VAR a warning, a reference embedded in a longer value
-// nothing at all) while internal/indexer refused to serve behind all three, so
-// a config could validate clean, start, and then never serve the feed. A
-// configured-but-unusable credential is now a HARD startup error, matching what
-// the runtime refuses (unusableFeedKey / unusableABPasskey).
+// The two gated here are indexer.feed_api_key and indexer.ab_passkey - the two
+// whose meaning depends on the feed being configured at all. The third indexer
+// credential, indexer.prowlarr_api_key, is gated UNCONDITIONALLY from Validate
+// (validateProwlarrAPIKey) precisely because this function does not always run;
+// the arr keys are gated in validateArrPair. All four share one shape rule,
+// wellFormedCredential.
 //
-// Reference recognition survives only as a HINT inside the error message: it
+// A credential gate is where an operator-supplied string stops being untrusted
+// text and becomes a value the app may use as a credential: it happens ONCE, at
+// the config boundary, so no downstream site has to ask again (parse, don't
+// validate). They are POSITIVE format checks - "is this the shape a credential
+// takes" - rather than a catalogue of the ways a paste can go wrong, because a
+// catalogue is open-ended: the app used to grade three spellings of one
+// unexpanded reference three different ways (a braced ${VAR} an error, an
+// unbraced $VAR a warning, a reference embedded in a longer value nothing at all)
+// while internal/indexer refused to serve behind all three, so a config could
+// validate clean, start, and then never serve the feed. A configured-but-unusable
+// credential is now a HARD startup error, matching what the runtime refuses
+// (unusableFeedKey / unusableABPasskey).
+//
+// Reference recognition survives only as a HINT inside an error message: it
 // never decides pass or fail, so no regex has to model every spelling an
-// operator can leave behind (including the unterminated "${NAME" paste that
-// matches none of them).
+// operator can leave behind (including the unterminated "${NAME" paste).
 func (c *Config) validateIndexerEndpoints() error {
 	if err := c.validateFeedAPIKey(); err != nil {
 		return err
@@ -858,27 +869,29 @@ func (c *Config) validateIndexerEndpoints() error {
 // look like a credential: one run of printable characters with no whitespace,
 // no control rune, and no '$'.
 //
-// The '$' rule is a charset rule, not placeholder pattern-matching, and it is
-// the app's to make: this is seadex-scout's OWN key, generated the way the
-// README says (openssl rand -hex 16), and no hex or base64 output contains a
-// dollar sign. Refusing it therefore refuses every unexpanded-reference
-// spelling at once - ${VAR}, $VAR, a reference embedded in a longer value, and
-// the unterminated "${NAME" paste that no reference regex matches - without the
-// app having to enumerate them, and it makes the config's acceptance set a
-// SUBSET of what internal/indexer will serve behind (unusableFeedKey), which is
-// the safe direction for two gates on one credential. The cost is a hand-typed
-// passphrase containing '$' being refused with a message that says to generate
-// a key instead; that is the intended trade for a gate on a LAN-reachable feed.
+// The shape rule itself is wellFormedCredential, shared with the arr and
+// Prowlarr key gates - including the reasoning for '$', which is a charset rule
+// rather than placeholder pattern-matching. What is specific here is how CHEAP
+// the rule is: this is seadex-scout's OWN key, generated the way the README says
+// (openssl rand -hex 16), and no hex or base64 output contains a dollar sign. The
+// only cost is a hand-typed passphrase containing '$' being refused with a
+// message that says to generate a key instead; that is the intended trade for
+// the one gate on a LAN-reachable feed.
 //
 // Field-name-only on every arm: the key value never rides the error or the log.
 func (c *Config) validateFeedAPIKey() error {
 	if c.IndexerAPIKey == "" {
 		return errors.New("indexer.feed_api_key is required when indexer.nyaa_torznab_url or indexer.ab_torznab_url is set")
 	}
-	if !wellFormedFeedKey(c.IndexerAPIKey) {
+	if !wellFormedCredential(c.IndexerAPIKey) {
 		msg := "indexer.feed_api_key is not a usable key: it must be one run of printable " +
 			"characters with no spaces and no '$' - generate one with openssl rand -hex 16"
-		if secretref.Unexpanded(c.IndexerAPIKey) || strings.ContainsRune(c.IndexerAPIKey, '$') {
+		// Keyed on the CHARACTER, not on secretref.Unexpanded: the charset rule is
+		// what refused the value, so the hint is read from the same fact. Every
+		// reference spelling contains a '$', which makes the regex test a strict
+		// subset of this one - a second, weaker spelling of a rule that already
+		// decided.
+		if strings.ContainsRune(c.IndexerAPIKey, '$') {
 			msg += "; it looks like an environment-variable reference left unexpanded, so the " +
 				"variable is unset or not allowlisted (SONARR_/RADARR_/SEADEX_SCOUT_) and the feed " +
 				"would be gated by that literal placeholder - a key guessable from the public " +
@@ -894,6 +907,42 @@ func (c *Config) validateFeedAPIKey() error {
 		slog.Warn("indexer.feed_api_key is shorter than 16 characters; it gates the " +
 			"AnimeBytes-passkey-bearing feed - generate a strong key (openssl rand -hex 16)")
 	}
+	return nil
+}
+
+// validateProwlarrAPIKey is the ONE gate on indexer.prowlarr_api_key. An EMPTY
+// key passes (it is valid when Prowlarr has auth "Disabled for Local Addresses";
+// warnMissingProwlarrKey is the signal for the common misconfiguration), but a
+// key that is SET must be a well-formed credential or the config fails - it is
+// sent as the X-Api-Key header on every proxied search, so a placeholder means
+// Prowlarr 401s and every search answers the arr with a Torznab
+// <error code="900"> instead of results.
+//
+// It runs UNCONDITIONALLY, from Validate rather than from validateIndexer, and
+// that placement is the point: validateIndexer only runs when a Torznab URL is
+// configured, so a gate inside it would leave a placeholder in this field silent
+// on exactly the config where nothing else looks at it. Running it always is also
+// what makes indexer.prowlarr_api_key's removal from warnUnexpandedSecretRefs
+// safe rather than a lost diagnostic - the hard error is now strictly stronger
+// than the warning it replaces, on every config shape.
+//
+// Accepted cost: a deliberately PARKED key holding an unexpanded ${VAR} this
+// deployment never sets now refuses to start instead of warning. That is
+// deliberate and it differs from indexer.ab_passkey, which keeps the warn-only
+// posture: AnimeBytes has a documented off switch (an empty ab_torznab_url) and
+// is opt-in, whereas a written Prowlarr key already means "I expected the feed to
+// start" (see infoDisabledIndexerKeys). The remedy the error names is to set the
+// variable or clear the key.
+//
+// Field-name-only; never echoes the key.
+func (c *Config) validateProwlarrAPIKey() error {
+	if c.IndexerProwlarrAPIKey == "" {
+		return nil
+	}
+	if err := checkAPIKeyShape("indexer.prowlarr_api_key", c.IndexerProwlarrAPIKey); err != nil {
+		return err
+	}
+	warnUnexpectedAPIKeyShape("indexer.prowlarr_api_key", c.IndexerProwlarrAPIKey)
 	return nil
 }
 
@@ -942,10 +991,34 @@ func (c *Config) validateABPasskey() error {
 	return errors.New(msg)
 }
 
-// wellFormedFeedKey reports whether v is the shape a generated feed key takes:
-// non-empty, and one run of printable characters with no whitespace, no control
-// rune and no '$'. See validateFeedAPIKey for why '$' is excluded.
-func wellFormedFeedKey(v string) bool {
+// wellFormedCredential reports whether v is the shape a machine-generated
+// credential takes: non-empty, and one run of printable characters with no
+// whitespace, no control rune and no '$'. It is the ONE shape rule every
+// credential field in this config is gated on - sonarr.api_key, radarr.api_key,
+// indexer.prowlarr_api_key and indexer.feed_api_key - so a paste that cannot
+// possibly authenticate is refused once, at the config boundary, in the same
+// vocabulary everywhere.
+//
+// The '$' rule is a charset rule, not placeholder pattern-matching, and it is
+// what makes the gate closed rather than a catalogue: every unexpanded-reference
+// spelling contains a dollar sign - ${VAR}, $VAR, a reference embedded in a
+// longer value, and the unterminated "${NAME" paste that no reference regex
+// matches - so refusing the character refuses all of them without this app
+// enumerating them, and it makes each gate's acceptance set a SUBSET of what the
+// runtime will serve behind (internal/indexer's unusableFeedKey /
+// unusableABPasskey). Subset is the safe direction for two gates on one
+// credential: the config can only ever refuse more than the runtime, never less.
+//
+// The cost differs per field and is stated at each call site. It is smallest for
+// indexer.feed_api_key (this app's own key, generated by the starter) and
+// largest for an arr key, where an operator who deliberately set a custom
+// SONARR__AUTH__APIKEY containing a dollar sign is refused even though Sonarr
+// itself would accept it - see validateArrPair for why that trade is taken.
+//
+// indexer.ab_passkey is deliberately NOT gated on this rule: AnimeBytes
+// constrains only the length, so wellFormedABPasskey stops there rather than
+// inventing a charset (validateABPasskey).
+func wellFormedCredential(v string) bool {
 	if v == "" {
 		return false
 	}
@@ -955,6 +1028,82 @@ func wellFormedFeedKey(v string) bool {
 		}
 	}
 	return true
+}
+
+// generatedAPIKeyLen is the length of the key Sonarr, Radarr and Prowlarr
+// generate: a .NET Guid in its default "D" format with the hyphens stripped, so
+// 32 lower-case hex characters. See generatedArrAPIKey.
+const generatedAPIKeyLen = 32
+
+// generatedArrAPIKey reports whether v is exactly the shape Sonarr, Radarr and
+// Prowlarr GENERATE: 32 lower-case hex characters.
+//
+// All three carry the identical generator in
+// src/NzbDrone.Core/Configuration/ConfigFileProvider.cs -
+// Guid.NewGuid().ToString().Replace("-", "") - and .NET's default Guid "D"
+// format is lower-case xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx, so stripping the
+// hyphens yields 32 lower-case hex characters and nothing else.
+//
+// It is a GENERATOR, not a VALIDATOR, which is the whole reason nothing fails
+// the config on it. The same property reads _authOptions.ApiKey FIRST - the
+// SONARR__AUTH__APIKEY / RADARR__AUTH__APIKEY / PROWLARR__AUTH__APIKEY
+// environment variable - and the only check applied to that value is
+// IsNullOrWhiteSpace, so an operator-supplied key of ANY shape is a working key
+// against a real arr. Contrast indexer.ab_passkey, where Jackett's AnimeBytes
+// indexer AND Prowlarr's AnimeBytesSettingsValidator both REJECT a wrong length:
+// that is upstream authority, which is why validateABPasskey is entitled to
+// hard-fail on shape and this predicate is not. Do NOT "tighten" this into a
+// refusal.
+func generatedArrAPIKey(v string) bool {
+	if len(v) != generatedAPIKeyLen {
+		return false
+	}
+	for _, r := range v {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// checkAPIKeyShape is the HARD gate every arr/Prowlarr API key passes: the value
+// must be a well-formed credential (wellFormedCredential), or the config fails
+// with a field-name-only error naming the real remedy. A value carrying a '$'
+// gets the unexpanded-reference hint on top, keyed on the CHARACTER rather than
+// on a reference regex: the charset rule is what decided the refusal, so the
+// hint must be read from the same fact, and no regex has to model every spelling
+// an operator can leave behind.
+//
+// Field-name-only on every arm: the key value never rides the error or the log.
+func checkAPIKeyShape(field, v string) error {
+	if wellFormedCredential(v) {
+		return nil
+	}
+	msg := field + " is not a usable API key: it must be one run of printable characters " +
+		"with no spaces and no '$' - Sonarr, Radarr and Prowlarr generate a " +
+		"32-character hex key, shown under Settings -> General -> API Key"
+	if strings.ContainsRune(v, '$') {
+		msg += "; it looks like an environment-variable reference left unexpanded, so the " +
+			"variable is unset or not allowlisted (SONARR_/RADARR_/SEADEX_SCOUT_) and that " +
+			"literal placeholder would be sent as the credential"
+	}
+	return errors.New(msg)
+}
+
+// warnUnexpectedAPIKeyShape warns when a key that PASSED checkAPIKeyShape is not
+// the 32-lower-case-hex shape all three upstreams generate. It is a warn and
+// never an error, because the upstreams accept an operator-supplied key of any
+// shape (generatedArrAPIKey): the likely cause is a truncated or mistyped paste,
+// but a deliberately custom key is legitimate and must not be refused.
+// Field-name-only; never echoes the key.
+func warnUnexpectedAPIKeyShape(field, v string) {
+	if v == "" || generatedArrAPIKey(v) {
+		return
+	}
+	slog.Warn("api key is not the shape Sonarr/Radarr/Prowlarr generate "+
+		"(32 hex characters); it is accepted, but a truncated or mistyped paste looks "+
+		"exactly like this and every call to that upstream would fail to authenticate",
+		"field", field)
 }
 
 // wellFormedABPasskey reports whether v is the shape an AnimeBytes passkey
@@ -1110,6 +1259,9 @@ func (c *Config) warnReusedIndexerSecrets() {
 // each one to the arr as a Torznab <error code="900"> document (upstream
 // query failed) rather than results. Warn so the operator gets a config-time
 // signal without breaking the legitimate no-auth deployment.
+//
+// EMPTY only: a key that is SET but malformed has already failed the config in
+// validateProwlarrAPIKey, so this diagnostic never has to reason about shape.
 func (c *Config) warnMissingProwlarrKey() {
 	if c.IndexerProwlarrAPIKey == "" {
 		slog.Warn("indexer.prowlarr_api_key is empty; searches proxy Prowlarr with no API key - " +
@@ -1159,7 +1311,25 @@ func (c *Config) warnTorznabURLCredentials() {
 }
 
 // validateArrPair rejects a half-configured enabled arr (a URL with no key or a
-// URL that is not an absolute http(s) URL with a host).
+// URL that is not an absolute http(s) URL with a host), and gates the arr's API
+// key on its FORMAT.
+//
+// The key gate is where an operator-supplied string stops being untrusted text
+// and becomes a value this app may send as a credential; it happens ONCE, here at
+// the config boundary, so no downstream site has to ask again (parse, don't
+// validate). It is the shared wellFormedCredential rule via checkAPIKeyShape,
+// then a warn-only note when the value is not the 32-hex shape the arrs generate
+// (generatedArrAPIKey).
+//
+// The accepted cost, stated honestly because it is larger here than for this
+// app's own feed key: an operator who DELIBERATELY set a custom arr key
+// containing a dollar sign is refused, even though Sonarr and Radarr would accept
+// it (their only check on an operator-supplied SONARR__AUTH__APIKEY is
+// IsNullOrWhiteSpace). That trade is taken because a '$' in an arr key is
+// overwhelmingly an unexpanded ${VAR}, and the alternative failure mode is far
+// worse and points at the wrong thing: every arr call 401s, the library walk
+// fails, cycle health flips and the container goes unhealthy - loud, but naming
+// the arr rather than the config typo that caused it.
 func validateArrPair(name, rawURL, key string) error {
 	switch {
 	case rawURL == "" && key == "":
@@ -1169,6 +1339,10 @@ func validateArrPair(name, rawURL, key string) error {
 	case key == "":
 		return fmt.Errorf("%s.url is set but %s.api_key is empty", name, name)
 	}
+	if err := checkAPIKeyShape(name+".api_key", key); err != nil {
+		return err
+	}
+	warnUnexpectedAPIKeyShape(name+".api_key", key)
 	if err := validateHTTPURL(name+".url", rawURL); err != nil {
 		return err
 	}

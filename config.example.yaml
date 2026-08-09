@@ -4,10 +4,16 @@
 # Connections & schedule
 # ----------------------------------------------------------------------------
 # At least one arr must be enabled with a url + api_key.
+#
+# api_key shape: the arrs generate a 32-character hex key (Settings -> General ->
+# API Key). Any other shape is accepted with a startup warning naming the field -
+# they honour whatever key you set - but a value containing a '$' is REFUSED,
+# because it means a ${VAR} reference that was never expanded and starting with
+# the literal placeholder would 401 every call.
 sonarr:
   enabled: true
   url: "http://sonarr:8989" # where seadex-scout reaches Sonarr (internal is fine)
-  api_key: "" # required when enabled; a ${SONARR_API_KEY}-style env ref works too (see README)
+  api_key: "" # required when enabled; 32 hex chars, or a ${SONARR_API_KEY}-style env ref (see README)
   public_url: "" # browser base for the report's deep-links; empty = use url
 radarr:
   enabled: false
@@ -82,8 +88,8 @@ report:
 # Served by the daemon whenever a Torznab URL is set (both empty = off, no port).
 # Its curation set + RSS feed rebuild together with the alert loop on poll_interval.
 indexer:
-  feed_api_key: "" # the arrs send this, the feed checks it; the first-boot starter fills this with a generated key (${SEADEX_SCOUT_FEED_KEY} ref also works)
+  feed_api_key: "" # the arrs send this, the feed checks it; no spaces and no '$'; the first-boot starter fills this with a generated key (${SEADEX_SCOUT_FEED_KEY} ref also works)
   nyaa_torznab_url: "" # Prowlarr Nyaa Torznab URL, e.g. http://prowlarr:9696/1/api ("" = off)
   ab_torznab_url: "" # Prowlarr AnimeBytes Torznab URL ("" = off)
-  prowlarr_api_key: "" # Prowlarr API key; secret, never logged (${SEADEX_SCOUT_PROWLARR_KEY} ref works)
+  prowlarr_api_key: "" # Prowlarr API key; secret, never logged; "" is valid with Prowlarr auth disabled for local addresses, otherwise 32 hex chars (same shape rule as the arr keys) (${SEADEX_SCOUT_PROWLARR_KEY} ref works)
   ab_passkey: "" # AnimeBytes passkey for AB RSS download links ("" = AB RSS off); 32/48/56 chars; ${SEADEX_SCOUT_AB_PASSKEY} ref works

@@ -28,6 +28,14 @@ import (
 // decide whether this line is one.
 var testABPasskey = strings.Repeat("0f1e2d3c", 4)
 
+// testArrAPIKey is exactly the shape Sonarr, Radarr and Prowlarr GENERATE: 32
+// lower-case hex characters (a .NET Guid with its hyphens stripped). Configs
+// that must validate AND log nothing about their key shape use it, so a test
+// asserting an exact warn set is not perturbed by the generated-shape warning.
+// Assembled rather than written out so no secret scanner has to decide whether
+// this line is a credential.
+var testArrAPIKey = strings.Repeat("4b5a6978", 4)
+
 func TestIsAllowedEnvVar(t *testing.T) {
 	tests := []struct {
 		key  string
@@ -2130,38 +2138,86 @@ func TestValidateWarnsOnNonTorznabABEndpoint(t *testing.T) {
 	}
 }
 
-// TestValidateWarnsOnUnexpandedSecretRef pins warnUnexpandedSecretRefs: a secret
-// still holding a literal environment-variable reference warns in both spellings
-// yamlenv leaves alone (a non-allowlisted braced name and the brace-less shell
-// form), a plain secret stays silent, and the warning names the field while
-// never echoing the value.
+// TestValidateWarnsOnUnexpandedSecretRef pins warnUnexpandedSecretRefs after it
+// narrowed to its one remaining field. indexer.ab_passkey is the only credential
+// in this config with no charset gate (AnimeBytes constrains only the length, so
+// the app must not invent a charset), which makes this warning the only thing
+// that can see a placeholder in it. All three env-reference spellings warn -
+// including the unterminated "${NAME" form, which reached the runtime silently
+// until secretref's braced arm made its closing brace optional - a plain passkey
+// stays silent, and the warning names the field while never echoing the value.
 func TestValidateWarnsOnUnexpandedSecretRef(t *testing.T) {
 	const msg = "still holds a literal environment-variable reference"
 	tests := []struct {
 		name     string
-		apiKey   string
+		passkey  string
 		wantWarn bool
 	}{
 		{"non-allowlisted braced ref warns", "${AB_PASSKEY}", true},
-		{"brace-less shell ref warns", "$SEADEX_SCOUT_SONARR_KEY", true},
-		// A plain key is built rather than written as a literal: a 16-hex
-		// literal beside the word "key" reads as a real credential to the
-		// gitleaks generic-api-key rule the CI secret scan runs, and the test
-		// only needs a value carrying no environment-variable reference.
-		{"plain key stays silent", strings.Repeat("a", 16), false},
+		{"brace-less shell ref warns", "$SEADEX_SCOUT_AB_PASSKEY", true},
+		{"unterminated braced ref warns", "${SEADEX_SCOUT_AB_PASSKEY", true},
+		{"plain passkey stays silent", testABPasskey, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := capture.Default(t)
-			c := Config{RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: tt.apiKey}
+			// No torznab URL: validateABPasskey deliberately passes a PARKED
+			// passkey, so this warning is the whole diagnostic on this config
+			// shape - which is exactly the state it exists for.
+			c := Config{
+				RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989",
+				SonarrAPIKey: testArrAPIKey, IndexerABPasskey: tt.passkey,
+			}
 			if err := c.Validate(); err != nil {
 				t.Fatalf("Validate: %v", err)
 			}
-			if got := rec.AttrContains(msg, "field", "sonarr.api_key"); got != tt.wantWarn {
+			if got := rec.AttrContains(msg, "field", "indexer.ab_passkey"); got != tt.wantWarn {
 				t.Errorf("env-ref warning present = %v, want %v (messages %v)", got, tt.wantWarn, rec.Messages())
 			}
-			if rec.AttrContains(msg, "", tt.apiKey) {
+			if rec.AttrContains(msg, "", tt.passkey) {
 				t.Errorf("env-ref warning echoes the configured value: %v", rec.Messages())
+			}
+		})
+	}
+}
+
+// TestValidateSecretRefWarningUnreachableForGatedKeys pins the reason the other
+// three fields left warnUnexpandedSecretRefs rather than being kept "just in
+// case": each is now refused outright for containing a '$', by a gate that runs
+// BEFORE the warning on every config shape, so an entry for it could never fire.
+// A warning that cannot be reached is worse than no warning - it reads as live
+// coverage. If any of these ever stops erroring, this test fails and the field
+// must go back into warnUnexpandedSecretRefs.
+func TestValidateSecretRefWarningUnreachableForGatedKeys(t *testing.T) {
+	const ref = "${SEADEX_SCOUT_MISSING}"
+	tests := map[string]Config{
+		"sonarr.api_key": {
+			RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989", SonarrAPIKey: ref,
+		},
+		"radarr.api_key": {
+			RunMode: RunModeDaemon, RadarrURL: "http://radarr:7878", RadarrAPIKey: ref,
+		},
+		// Deliberately WITHOUT a torznab url: the Prowlarr gate is unconditional
+		// precisely so this shape cannot slip through, since validateIndexer
+		// never runs here.
+		"indexer.prowlarr_api_key": {
+			RunMode: RunModeDaemon, SonarrURL: "http://sonarr:8989",
+			SonarrAPIKey: testArrAPIKey, IndexerProwlarrAPIKey: ref,
+		},
+	}
+	for field, cfg := range tests {
+		t.Run(field, func(t *testing.T) {
+			rec := capture.Default(t)
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatalf("Validate() = nil, want a hard error for a placeholder in %s", field)
+			}
+			if !strings.Contains(err.Error(), field) {
+				t.Errorf("Validate() error = %q, want it to name %s", err, field)
+			}
+			if rec.Contains("still holds a literal environment-variable reference") {
+				t.Errorf("the narrowed warning fired for %s; the hard gate is supposed to have "+
+					"decided already: %v", field, rec.Messages())
 			}
 		})
 	}

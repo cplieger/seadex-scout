@@ -339,11 +339,24 @@ variables with `${VAR}`, so secrets can stay out of the file; API keys are
 never logged. At least one arr must be enabled with a `url` + `api_key`, and an
 unknown or misplaced key is rejected at startup with an error naming it.
 
+**API keys are shape-checked at startup.** Sonarr, Radarr and Prowlarr all
+generate a 32-character hex key (copy it from that app's Settings → General →
+API Key). Any other shape still works — they accept whatever key you set — but
+seadex-scout logs a warning naming the field, because a truncated or mistyped
+paste looks exactly like that. A value containing a `$` is **refused**: it means
+a `${VAR}` reference that was never expanded (the variable is unset, or its name
+is not one of the allowlisted `SONARR_*` / `RADARR_*` / `SEADEX_SCOUT_*`
+prefixes), and starting with the literal placeholder as your key would 401 every
+call to that upstream. The same rule gates `indexer.feed_api_key`. The one
+credential exempt from it is `indexer.ab_passkey`, which is length-checked
+instead (AnimeBytes constrains only the length, so this app does not invent a
+charset for it).
+
 | Key | Default | Description |
 | --- | --- | --- |
 | `sonarr.enabled` / `radarr.enabled` | `false` | Enable that arr; at least one required |
 | `sonarr.url` / `radarr.url` | `http://sonarr:8989` / `http://radarr:7878` | Arr base URL; used only when that arr is enabled |
-| `sonarr.api_key` / `radarr.api_key` | _none_ | Arr API key; required when enabled |
+| `sonarr.api_key` / `radarr.api_key` | _none_ | Arr API key; required when enabled. 32 hex characters as the arr generates it; another shape is accepted with a warning, and a value containing `$` is refused as an unexpanded `${VAR}` |
 | `sonarr.public_url` / `radarr.public_url` | _(unset)_ | Browser-facing base for report deep-links; falls back to `url` |
 | `mode` | `daemon` | `daemon` (scheduled) or `report` (one-shot audit, then exit) |
 | `poll_interval` | `15m` | Loop cadence for alerts + feed, clamped `15m`–`720h`. Most iterations are a cheap tick; every 24h worth is a full pass (see [Freshness](#freshness)). `off`/`disabled`/`0` = external trigger via `poll` — schedule that around 24h apart, since every `poll` is a full pass |
@@ -355,9 +368,9 @@ unknown or misplaced key is rejected at startup with an error naming it.
 | `filters.ignore` | `[]` | AniList IDs whose findings are never alerted on. Suppresses the **alert only** — the show still appears in report mode and the RSS feed is untouched. Use it for a show you have decided not to upgrade, so the reminders stop. Max 512 entries |
 | `arr_tags.include` / `arr_tags.exclude` | `[]` | Scan only / never arr items with these tags; an exclude wins |
 | `report.dir` | `/config/reports` | Where timestamped `report-<UTC>.md` + `.json` pairs land |
-| `indexer.feed_api_key` | generated | Key the arrs must send to the feed; the first-boot starter generates one |
+| `indexer.feed_api_key` | generated | Key the arrs must send to the feed; the first-boot starter generates one. Same shape rule as the arr keys: no spaces and no `$` |
 | `indexer.nyaa_torznab_url` / `indexer.ab_torznab_url` | `""` | Prowlarr per-indexer Torznab URLs; `""` disables that tracker, any set enables the feed |
-| `indexer.prowlarr_api_key` | `""` | Prowlarr API key (secret, never logged) |
+| `indexer.prowlarr_api_key` | `""` | Prowlarr API key (secret, never logged). `""` is valid when Prowlarr auth is disabled for local addresses; a value that is set follows the same shape rule as the arr keys above |
 | `indexer.ab_passkey` | `""` | Builds the AB RSS feed's download links; `""` = AB RSS off (Nyaa needs none) |
 | `log.level` / `log.format` | `info` / `json` | `debug`\|`info`\|`warn`\|`error`; `json`\|`text` |
 
