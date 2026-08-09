@@ -58,12 +58,51 @@ const (
 	// low-budget response omits the reset header, so both no-evidence paths sit
 	// out one window instead of disagreeing by 12x.
 	defaultRetryAfter = time.Minute
-	// maxRetryAfter caps a server-supplied Retry-After (or reset-window) wait so a
-	// pathological/hostile header cannot stall the AniList fallback and, via penalize,
-	// every subsequent lookup. It doubles as the WithRateLimitRetry ceiling on
-	// request's retry loop; the throttle consumes the wait verbatim, so the cap
-	// must be applied here before penalize.
+	// maxRetryAfter is the PER-ATTEMPT ceiling: the longest one lookup's retry
+	// loop will wait for a rate-limit hint, passed to httpx.WithRateLimitRetry so
+	// a pathological header cannot stall a single request. httpx enforces it
+	// itself (it waits min(hint, maxWait)), so nothing in this package needs to
+	// clamp the retry path.
 	maxRetryAfter = time.Minute
+	// maxThrottlePenalty is the POLITENESS ceiling: the longest the shared
+	// process-wide throttle will sit out an upstream-stated window, applied in
+	// backOff before penalize.
+	//
+	// It is a SEPARATE number from maxRetryAfter because the two waits answer
+	// different questions, and one number serving both was the defect (l-f7).
+	// The per-attempt ceiling keeps a single lookup responsive; this one decides
+	// how strictly the client honours an upstream that has told it to stop. Held
+	// at a minute, a stated window longer than that was honoured for 60s and then
+	// discarded - the throttle handed out slots again at the ordinary spacing and
+	// the client resumed spending budget inside a window AniList had explicitly
+	// closed, so a cold reconcile's remaining prefetch chunks re-probed a
+	// rate-limited community index once a minute and every probe returned another
+	// 429. This app is deliberately polite to its upstreams everywhere else (a
+	// fixed page delay, a User-Agent, a header-adaptive throttle); that was the
+	// one place it argued with one.
+	//
+	// Derived rather than invented (the app's convention for a second threshold):
+	// five times the per-attempt ceiling. The cost is bounded and small - the
+	// AniList half of a cold reconcile is ~9 batched requests inside a ~25-minute
+	// pass, against a 3h health-marker lease - so a few minutes is noise against
+	// the deadline while a minute was not enough to honour a real window.
+	//
+	// Still a CLAMP rather than a plausibility gate, deliberately. Treating an
+	// implausible value as absent (falling back to defaultRetryAfter) is the
+	// publish-or-drop stance this repo takes for untrusted input elsewhere, and it
+	// is the wrong answer here: for a window a little past the ceiling - the
+	// likely case - clamping waits the ceiling and is partially rude, while
+	// falling back to one minute is MORE rude for the remainder. The clamp is the
+	// politer reading near the boundary. What the clamp must not do is hide an
+	// absurd value, which is why backOff diagnoses one (see implausibleWindow).
+	maxThrottlePenalty = 5 * maxRetryAfter
+	// implausibleWindow is when an upstream-stated wait stops being a window this
+	// client is merely unwilling to honour in full and becomes evidence the header
+	// is wrong: AniList's budget is per-minute, so a stated wait an order of
+	// magnitude past the politeness ceiling is a bug or a hostile intermediary,
+	// not a rate-limit window. Clamping it silently would render a 24h header as a
+	// few minutes and leave no trace of the upstream defect.
+	implausibleWindow = 10 * maxThrottlePenalty
 )
 
 // ErrNotFound reports that AniList has no media for the requested ID.
@@ -287,10 +326,14 @@ func (c *Client) Stats() Stats {
 // after only the backoff delay, exceeding the configured requests-per-minute
 // ceiling. WithRateLimitRetry makes the 429's *httpx.RateLimitError retryable
 // (httpx classifies it non-transient by default) and bounds its wait at
-// maxRetryAfter; rateLimitError caps the hint to the same ceiling before
-// throttle.penalize, so the retry wait and the penalty converge on one value —
-// the extra per-attempt wait is effectively zero once the hint expires, while
-// later callers retain the penalty.
+// maxRetryAfter — the PER-ATTEMPT ceiling, so one lookup can never stall on a
+// long hint. rateLimitError clamps the hint it carries to the longer
+// maxThrottlePenalty instead, because that value also becomes the shared
+// throttle's penalty, and how long the client honours a stated window is a
+// different question from how long one attempt may block (l-f7). httpx waits
+// min(hint, maxRetryAfter), so the two ceilings compose without either needing
+// to know the other: the attempt waits a minute at most, while later callers
+// retain the full penalty.
 func (c *Client) request(ctx context.Context, gql string, variables any) ([]byte, error) {
 	body, err := json.Marshal(map[string]any{"query": gql, "variables": variables})
 	if err != nil {
@@ -595,7 +638,16 @@ func resetWait(resp *http.Response) time.Duration {
 // and returns the *httpx.RateLimitError carrying that wait as its RetryAfter
 // hint, which request's WithRateLimitRetry mode retries.
 func (c *Client) rateLimitError(resp *http.Response) error {
-	wait := httpx.ParseRetryAfter(resp.Header.Get("Retry-After"))
+	// ParseRetryAfterResponse, not ParseRetryAfter: the latter caps at
+	// httpx.RetryAfterCap (60s) INSIDE the library, so it could never deliver a
+	// longer stated window to the politeness ceiling at all - the Retry-After path
+	// would stay truncated at a minute while the X-RateLimit-Reset path honoured
+	// the full window, and the two 429 shapes would disagree for no reason the
+	// upstream expressed. The library documents this accessor for exactly this
+	// choice ("preserves the raw duration so callers can make their own
+	// decisions"); backOff applies the app's own ceiling, and httpx still caps the
+	// per-ATTEMPT wait independently via WithRateLimitRetry (l-f7).
+	wait := httpx.ParseRetryAfterResponse(resp)
 	if wait <= 0 {
 		// A 429 without a usable Retry-After often still carries the
 		// window end in X-RateLimit-Reset; waiting for that instead of a
@@ -614,12 +666,26 @@ func (c *Client) rateLimitError(resp *http.Response) error {
 	return &httpx.RateLimitError{Msg: "anilist: rate limited (429)", RetryAfter: wait}
 }
 
-// backOff caps an upstream-supplied wait at maxRetryAfter, counts it, and
-// penalizes the throttle, returning the capped value the caller logs. It is
-// the one place the ceiling is applied, so no back-off path can hand
-// throttle.penalize an unbounded upstream duration.
+// backOff caps an upstream-supplied wait at the POLITENESS ceiling
+// (maxThrottlePenalty), counts it, and penalizes the shared throttle, returning
+// the capped value the caller logs. It is the one place that ceiling is applied,
+// so no back-off path can hand throttle.penalize an unbounded upstream duration.
+//
+// It is deliberately NOT maxRetryAfter: that is the per-attempt ceiling and
+// httpx enforces it inside the retry loop on its own, so clamping to it here only
+// ever shortened how long the client honoured a window every LATER lookup shares
+// (l-f7).
+//
+// An absurd value is clamped like any other but also reported, because silently
+// rendering a 24h header as a few minutes leaves no trace of an upstream defect.
+// Warn, not error: a bogus header is the upstream's problem and the clamp already
+// contains it, so it needs no operator action here.
 func (c *Client) backOff(wait time.Duration) time.Duration {
-	wait = min(wait, maxRetryAfter)
+	if wait >= implausibleWindow {
+		slog.Warn("anilist stated a rate-limit window too long to be one; honouring the politeness ceiling instead",
+			"stated", wait, "ceiling", maxThrottlePenalty)
+	}
+	wait = min(wait, maxThrottlePenalty)
 	c.rlWaits.Add(1)
 	c.throttle.penalize(wait)
 	return wait

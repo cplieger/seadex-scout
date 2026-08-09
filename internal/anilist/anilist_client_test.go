@@ -16,6 +16,7 @@ import (
 
 	"github.com/cplieger/httpx/v4"
 	"github.com/cplieger/seadex-scout/internal/appinfo"
+	"github.com/cplieger/slogx/capture"
 )
 
 // verdictName renders a Verdict for a failure message; a bare uint8 tells the
@@ -35,11 +36,19 @@ func verdictName(v Verdict) string {
 }
 
 // TestDoCapsHostileRetryAfterAndPenalizesThrottle proves a pathological
-// server-supplied Retry-After cannot stall the fallback: the 429 becomes a
-// *httpx.RateLimitError whose RetryAfter hint is capped at maxRetryAfter (the
-// same ceiling request's WithRateLimitRetry applies), and the throttle is
-// penalized so subsequent lookups wait the capped window too.
+// server-supplied Retry-After cannot stall the client: the 429 becomes a
+// *httpx.RateLimitError whose hint is clamped, and the shared throttle is
+// penalized so subsequent lookups wait the clamped window too.
+//
+// The ceiling is maxThrottlePenalty, the POLITENESS one (l-f7). Note what this
+// test would silently stop proving if the app went back to httpx.ParseRetryAfter:
+// that helper caps at httpx.RetryAfterCap (60s) inside the library, so a hostile
+// header would never reach the app's own ceiling and this assertion would pass
+// for the wrong reason - the two 429 shapes (Retry-After here, X-RateLimit-Reset
+// in TestDo429WithHostileResetHeaderIsCapped) would disagree by 5x on the same
+// stated window. Both now clamp at the same number, which is the point.
 func TestDoCapsHostileRetryAfterAndPenalizesThrottle(t *testing.T) {
+	rec := capture.Default(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Retry-After", "86400") // a hostile day-long stall
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -53,14 +62,17 @@ func TestDoCapsHostileRetryAfterAndPenalizesThrottle(t *testing.T) {
 	if !errors.As(err, &rle) {
 		t.Fatalf("do() err = %v, want *httpx.RateLimitError", err)
 	}
-	if rle.RetryAfter != maxRetryAfter {
-		t.Errorf("RetryAfter = %v, want capped at %v", rle.RetryAfter, maxRetryAfter)
+	if rle.RetryAfter != maxThrottlePenalty {
+		t.Errorf("RetryAfter = %v, want clamped at %v", rle.RetryAfter, maxThrottlePenalty)
 	}
-	if wait := c.throttle.reserve(); wait < maxRetryAfter-2*time.Second {
-		t.Errorf("throttle wait after the 429 = %v, want pushed out to ~%v", wait, maxRetryAfter)
+	if wait := c.throttle.reserve(); wait < maxThrottlePenalty-2*time.Second {
+		t.Errorf("throttle wait after the 429 = %v, want pushed out to ~%v", wait, maxThrottlePenalty)
 	}
 	if got := c.Stats(); got.RateLimitWaits != 1 {
 		t.Errorf("Stats().RateLimitWaits = %d, want 1", got.RateLimitWaits)
+	}
+	if !rec.Contains("anilist stated a rate-limit window too long to be one; honouring the politeness ceiling instead") {
+		t.Errorf("a 24h Retry-After was clamped silently; an absurd header must leave a trace. log:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }
 
@@ -635,11 +647,21 @@ func TestFetchErrorStatusClassification(t *testing.T) {
 	}
 }
 
-// TestDo429WithHostileResetHeaderIsCapped pins the app-level maxRetryAfter
-// cap on the reset-window fallback: a 429 that omits Retry-After but carries a
-// pathological far-future X-RateLimit-Reset must not stall the fallback - the
-// hint and the throttle penalty are both capped at maxRetryAfter.
+// TestDo429WithHostileResetHeaderIsCapped pins the app-level ceilings on the
+// reset-window fallback: a 429 that omits Retry-After but carries a pathological
+// far-future X-RateLimit-Reset must not stall anything unboundedly.
+//
+// The two ceilings are DIFFERENT numbers and this pins both (l-f7): the hint the
+// retry loop waits on is bounded by maxRetryAfter (per-attempt responsiveness),
+// while the shared throttle penalty is bounded by the longer
+// maxThrottlePenalty (politeness - how long the client honours a stated window
+// for every LATER lookup). Collapsing them is what made a real window longer than
+// a minute get honoured for 60s and then discarded.
+//
+// A 24h header is also absurd rather than merely long, so it must leave a trace:
+// clamping it silently would hide an upstream defect.
 func TestDo429WithHostileResetHeaderIsCapped(t *testing.T) {
+	rec := capture.Default(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(24*time.Hour).Unix()))
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -653,11 +675,20 @@ func TestDo429WithHostileResetHeaderIsCapped(t *testing.T) {
 	if !errors.As(err, &rle) {
 		t.Fatalf("do() err = %v, want *httpx.RateLimitError", err)
 	}
-	if rle.RetryAfter != maxRetryAfter {
-		t.Errorf("RetryAfter = %v, want capped at %v (a hostile reset window must not stall the fallback)", rle.RetryAfter, maxRetryAfter)
+	if rle.RetryAfter != maxThrottlePenalty {
+		t.Errorf("RetryAfter = %v, want the clamped %v", rle.RetryAfter, maxThrottlePenalty)
 	}
-	if wait := c.throttle.reserve(); wait > maxRetryAfter {
-		t.Errorf("throttle wait after the 429 = %v, want capped at %v", wait, maxRetryAfter)
+	if wait := c.throttle.reserve(); wait > maxThrottlePenalty {
+		t.Errorf("throttle wait after the 429 = %v, want capped at the politeness ceiling %v", wait, maxThrottlePenalty)
+	}
+	// httpx enforces the per-attempt ceiling itself (it waits min(hint, maxWait)),
+	// so a hint above maxRetryAfter cannot stall one attempt regardless.
+	if maxRetryAfter >= maxThrottlePenalty {
+		t.Errorf("maxRetryAfter (%v) must stay BELOW maxThrottlePenalty (%v), or the two ceilings have collapsed back into one",
+			maxRetryAfter, maxThrottlePenalty)
+	}
+	if !rec.Contains("anilist stated a rate-limit window too long to be one; honouring the politeness ceiling instead") {
+		t.Errorf("a 24h window was clamped silently; an absurd header must leave a trace. log:\n%s", strings.Join(rec.Messages(), "\n"))
 	}
 }
 

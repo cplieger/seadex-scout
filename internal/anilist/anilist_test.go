@@ -407,6 +407,10 @@ func TestParseMediaPageBoundsMediaCardinality(t *testing.T) {
 	}
 }
 
+// TestObserveRateHeadersCapsResetWindow pins the proactive (pre-429) path's
+// ceiling. It is the POLITENESS ceiling, not the per-attempt one: this path
+// penalizes the shared throttle without any retry loop involved, so
+// maxRetryAfter would be the wrong bound here (l-f7).
 func TestObserveRateHeadersCapsResetWindow(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		client := NewClient(http.DefaultClient, "https://example.invalid/graphql", 30, nil)
@@ -416,8 +420,34 @@ func TestObserveRateHeadersCapsResetWindow(t *testing.T) {
 
 		client.observeRateHeaders(resp)
 
-		if wait := client.throttle.reserve(); wait != maxRetryAfter {
-			t.Errorf("low-budget reset wait = %v, want exactly the %v cap", wait, maxRetryAfter)
+		if wait := client.throttle.reserve(); wait != maxThrottlePenalty {
+			t.Errorf("low-budget reset wait = %v, want exactly the %v politeness ceiling", wait, maxThrottlePenalty)
+		}
+	})
+}
+
+// TestObserveRateHeadersHonoursARealWindowBeyondAMinute is the case the single
+// ceiling got wrong: a window AniList actually states, longer than a minute but
+// nowhere near absurd, must be honoured in FULL rather than truncated to 60s and
+// then discarded - which is what left the client probing a rate-limited upstream
+// once a minute for the rest of the real window.
+func TestObserveRateHeadersHonoursARealWindowBeyondAMinute(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const stated = 3 * time.Minute // > maxRetryAfter, < maxThrottlePenalty
+		client := NewClient(http.DefaultClient, "https://example.invalid/graphql", 30, nil)
+		resp := &http.Response{Header: make(http.Header)}
+		resp.Header.Set("X-RateLimit-Remaining", "1")
+		resp.Header.Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(stated).Unix(), 10))
+
+		client.observeRateHeaders(resp)
+
+		wait := client.throttle.reserve()
+		if wait <= maxRetryAfter {
+			t.Errorf("wait = %v, want the full stated window (~%v); truncating at the per-attempt ceiling %v is the defect",
+				wait, stated, maxRetryAfter)
+		}
+		if wait > stated {
+			t.Errorf("wait = %v, want no more than the stated %v", wait, stated)
 		}
 	})
 }
