@@ -205,12 +205,17 @@ func TestParseMediaFieldLimits(t *testing.T) {
 		name       string
 		fields     string // media object body, without the enclosing braces
 		wantErr    bool
-		wantFormat string // expected Media.Format when the record is accepted
+		wantFormat string   // expected Media.Format when the record is accepted
+		wantTitles []string // expected Media.Titles when the record is accepted (nil = unchecked)
 	}{
 		{name: "boundary-sized romaji accepted", fields: `"title":{"romaji":"` + okTitle + `"}`, wantErr: false},
 		{name: "over-limit romaji rejected", fields: `"title":{"romaji":"` + bigTitle + `"}`, wantErr: true},
-		{name: "over-limit english rejected", fields: `"title":{"romaji":"A","english":"` + bigTitle + `"}`, wantErr: true},
-		{name: "over-limit native rejected", fields: `"title":{"romaji":"A","native":"` + bigTitle + `"}`, wantErr: true},
+		// An over-limit SIBLING costs the record that title and nothing else
+		// (h-f1): the three titles are independent facts, each memoized and
+		// republished on its own, so one over-cap alias must not take the usable
+		// ones with it into a permanent negative memo.
+		{name: "over-limit english drops only that title", fields: `"title":{"romaji":"A","english":"` + bigTitle + `"}`, wantTitles: []string{"A"}},
+		{name: "over-limit native drops only that title", fields: `"title":{"romaji":"A","native":"` + bigTitle + `"}`, wantTitles: []string{"A"}},
 		{name: "known format canonical", fields: `"format":"MOVIE","title":{"romaji":"A"}`, wantFormat: "MOVIE"},
 		{name: "lower-cased format canonicalized", fields: `"format":"tv","title":{"romaji":"A"}`, wantFormat: "TV"},
 		{name: "over-long format collapses to unknown", fields: `"format":"` + bigFormat + `","title":{"romaji":"A"}`, wantFormat: ""},
@@ -228,6 +233,10 @@ func TestParseMediaFieldLimits(t *testing.T) {
 			if err == nil && media.Format != tt.wantFormat {
 				t.Errorf("parseMedia format = %q, want %q", media.Format, tt.wantFormat)
 			}
+			if err == nil && tt.wantTitles != nil && !slices.Equal(media.Titles, tt.wantTitles) {
+				t.Errorf("parseMedia titles = %v, want %v (the defective title dropped, its siblings kept)",
+					media.Titles, tt.wantTitles)
+			}
 			batch := []byte(`{"data":{"Page":{"media":[{"id":1,` + tt.fields + `}]}}}`)
 			page, err := parseMediaPage(batch)
 			if (err != nil) != tt.wantErr {
@@ -235,6 +244,9 @@ func TestParseMediaFieldLimits(t *testing.T) {
 			}
 			if err == nil && page[1].Format != tt.wantFormat {
 				t.Errorf("parseMediaPage format = %q, want %q", page[1].Format, tt.wantFormat)
+			}
+			if err == nil && tt.wantTitles != nil && !slices.Equal(page[1].Titles, tt.wantTitles) {
+				t.Errorf("parseMediaPage titles = %v, want %v", page[1].Titles, tt.wantTitles)
 			}
 		})
 	}
@@ -270,24 +282,53 @@ func TestParseMediaKeepsTitlesWhenOnlyFormatIsDefective(t *testing.T) {
 	}
 }
 
-// TestParseMediaRejectsUnsafeTitleText pins the title single-line guard on its
-// own: each payload carries ONE unsafe title field plus a safe sibling, so the
-// media still has a usable title and the only reason to reject it is the
-// runesafe.SanitizeSingleLine check in toMedia. Without these cases, dropping
-// that guard leaves the suite green whenever a safe sibling title remains.
-func TestParseMediaRejectsUnsafeTitleText(t *testing.T) {
-	tests := map[string]string{
-		"romaji newline with safe sibling":        `{"data":{"Media":{"title":{"romaji":"A\nB","english":"Safe"}}}}`,
-		"english C1 control with safe sibling":    `{"data":{"Media":{"title":{"romaji":"Safe","english":"A\u009bB"}}}}`,
-		"native line separator with safe sibling": `{"data":{"Media":{"title":{"romaji":"Safe","native":"A\u2028B"}}}}`,
-		"romaji bidi override with safe sibling":  `{"data":{"Media":{"title":{"romaji":"A\u202eB","english":"Safe"}}}}`,
+// TestParseMediaDropsUnsafeTitleTextKeepingSiblings pins the title single-line
+// guard on its own: each payload carries ONE unsafe title field plus a safe
+// sibling, so the ONLY thing that can produce the expected result is the
+// runesafe.SanitizeSingleLine check in toMedia running and dropping exactly that
+// member.
+//
+// This assertion is STRONGER than the "record rejected" one it replaces (h-f1
+// stopped a defective alias from killing its siblings, which made rejection the
+// wrong expectation). Rejection could be produced by any record-wide failure;
+// "the unsafe member is absent AND the safe member is present" can only be
+// produced by the per-title guard. So dropping the guard still fails here, which
+// is what this test exists for.
+func TestParseMediaDropsUnsafeTitleTextKeepingSiblings(t *testing.T) {
+	tests := map[string]struct {
+		raw    string
+		unsafe string
+	}{
+		"romaji newline with safe sibling":        {`{"data":{"Media":{"title":{"romaji":"A\nB","english":"Safe"}}}}`, "A\nB"},
+		"english C1 control with safe sibling":    {`{"data":{"Media":{"title":{"romaji":"Safe","english":"A\u009bB"}}}}`, "A\u009bB"},
+		"native line separator with safe sibling": {`{"data":{"Media":{"title":{"romaji":"Safe","native":"A\u2028B"}}}}`, "A\u2028B"},
+		"romaji bidi override with safe sibling":  {`{"data":{"Media":{"title":{"romaji":"A\u202eB","english":"Safe"}}}}`, "A\u202eB"},
 	}
-	for name, raw := range tests {
+	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			if _, err := parseMedia([]byte(raw)); err == nil {
-				t.Errorf("parseMedia(%s) = nil error, want unsafe title text rejected", raw)
+			media, err := parseMedia([]byte(tc.raw))
+			if err != nil {
+				t.Fatalf("parseMedia(%s) = %v, want the record accepted with its safe sibling", tc.raw, err)
+			}
+			if slices.Contains(media.Titles, tc.unsafe) {
+				t.Errorf("titles = %v, want the unsafe member %q DROPPED - it must never reach the memo",
+					media.Titles, tc.unsafe)
+			}
+			if !slices.Contains(media.Titles, "Safe") {
+				t.Errorf("titles = %v, want the safe sibling kept", media.Titles)
 			}
 		})
+	}
+}
+
+// TestParseMediaRejectsARecordWhoseEveryTitleIsUnsafe pins the other side of the
+// same guard: dropping members is not a licence to accept a record with nothing
+// left. An all-unsafe title set has no survivor, so it is still the permanent
+// ErrRecordUnusable a definitive negative memo is built on.
+func TestParseMediaRejectsARecordWhoseEveryTitleIsUnsafe(t *testing.T) {
+	raw := `{"data":{"Media":{"title":{"romaji":"A\nB","english":"C\u009bD","native":"E\u2028F"}}}}`
+	if _, err := parseMedia([]byte(raw)); !errors.Is(err, ErrRecordUnusable) {
+		t.Errorf("parseMedia = %v, want ErrRecordUnusable when no title survives the per-title guard", err)
 	}
 }
 
@@ -789,7 +830,7 @@ func TestParseMediaRejectsUnknownFormatAsTypeEvidence(t *testing.T) {
 func TestParseMediaRejectionsWrapErrRecordUnusable(t *testing.T) {
 	tests := map[string]string{
 		"over-limit title":             `{"data":{"Media":{"format":"TV","title":{"romaji":"` + strings.Repeat("a", maxTitleBytes+1) + `"}}}}`,
-		"unsafe title text":            `{"data":{"Media":{"format":"TV","title":{"romaji":"A\nB","english":"Safe"}}}}`,
+		"every title unsafe":           `{"data":{"Media":{"format":"TV","title":{"romaji":"A\nB","english":"C\u009bD"}}}}`,
 		"no usable title":              `{"data":{"Media":{"format":"TV","title":{"romaji":" ","english":""}}}}`,
 		"no matchable title key":       `{"data":{"Media":{"format":"TV","title":{"romaji":"!!!"}}}}`,
 		"native-script-only title set": `{"data":{"Media":{"format":"TV","title":{"native":"\u4e16\u754c"}}}}`,

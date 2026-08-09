@@ -145,11 +145,16 @@ func transientEnvelopeError(raw []byte) error {
 }
 
 // ErrRecordUnusable marks a rejection determined entirely by the upstream
-// record's OWN CONTENT: no title that normalizes to a usable match key (a
-// CJK-only or symbol-only title set), an over-cap title or format field, or
-// text that is unsafe to memoize. It is PERMANENT - the same record fails
-// identically on every future cycle - so it is not an outage and must not be
-// classified as one.
+// record's OWN CONTENT: after every individually defective title has been
+// dropped, no title remains that normalizes to a usable match key (a CJK-only
+// or symbol-only title set, or a set whose every member was over-cap or unsafe
+// to memoize). It is PERMANENT - the same record fails identically on every
+// future cycle - so it is not an outage and must not be classified as one.
+//
+// It is deliberately NOT raised for a defective FORMAT field (knownFormat
+// collapses that to the unknown sentinel, l-f140) and no longer for an
+// individually defective TITLE either: a bad title costs the record that title,
+// not its usable siblings (h-f1). Only an EMPTY survivor set reaches here.
 //
 // The distinction is load-bearing for alerting. Treated as transient, such a
 // record is re-fetched every cycle forever, keeps Result.Degraded true, and
@@ -660,9 +665,11 @@ type gqlMedia struct {
 // maxTitleBytes is the per-title wire limit. The 1 MiB body cap bounds each
 // response, but a decoded title outlives the request in the matcher's memo and
 // state.json, so a compromised upstream could otherwise inflate state and
-// exhaust memory one near-cap title at a time. An over-limit title is
-// rejected, never truncated — truncation could forge a false normalized-title
-// match.
+// exhaust memory one near-cap title at a time. An over-limit title is DROPPED
+// from the record's title set, never truncated — truncation could forge a false
+// normalized-title match — and never fatal to the record, whose three titles are
+// independent facts (see toMedia, h-f1). The cap still does its job: it bounds
+// what any single title can contribute to the memo.
 //
 // The format field needs no such cap: knownFormat admits only a member of
 // AniList's own MediaFormat enum and publishes it in mediatype's canonical
@@ -671,8 +678,9 @@ type gqlMedia struct {
 const maxTitleBytes = 1024
 
 // toMedia converts the wire shape to a Media, preferring seasonYear and
-// falling back to the start-date year. It rejects a media whose title field
-// exceeds the wire limit, or that has no usable (non-blank) title.
+// falling back to the start-date year. It DROPS an individual title that
+// exceeds the wire limit or is unsafe to memoize, and rejects the record only
+// when no usable (non-blank, matchable) title survives.
 //
 // A defective FORMAT field is deliberately NOT a rejection: knownFormat already
 // collapses anything that is not a member of AniList's own MediaFormat enum to
@@ -707,14 +715,27 @@ func (m *gqlMedia) toMedia() (Media, error) {
 	// One list of the wire title fields, used for both validation and dedupe,
 	// so a future title field cannot be validated in one place and dropped in
 	// the other.
-	wireTitles := []string{m.Title.Romaji, m.Title.English, m.Title.Native}
-	for _, t := range wireTitles {
-		if len(t) > maxTitleBytes {
-			return Media{}, fmt.Errorf("%w: media title exceeds %d bytes", ErrRecordUnusable, maxTitleBytes)
+	//
+	// A defective title costs the record THAT TITLE, not its siblings. Each of
+	// the three is an independent fact: each is memoized and republished on its
+	// own, and the byte cap exists so no SINGLE title can inflate state.json -
+	// so nothing about one bad alias requires the other two to die with it. This
+	// is the rule knownFormat already states for the neighbouring field ("only
+	// the TYPE claim is ever discarded, never the record's usable titles"), and
+	// rejecting the whole record broke it: an English title AniList happened to
+	// serve with a stray control rune made an anime permanently unmatchable -
+	// negative-memoized, no finding, and a movie routed to Sonarr for want of a
+	// format hint - with an overrides.json entry as the operator's only remedy
+	// (h-f1). The failure was silent, which is what made it worth closing.
+	//
+	// The 3 x maxTitleBytes raw bound is unchanged: dropping members can only
+	// shrink the survivor set, never grow it.
+	wireTitles := make([]string, 0, 3)
+	for _, t := range []string{m.Title.Romaji, m.Title.English, m.Title.Native} {
+		if len(t) > maxTitleBytes || unsafeWireText(t) {
+			continue
 		}
-		if unsafeWireText(t) {
-			return Media{}, fmt.Errorf("%w: media title contains invalid single-line text", ErrRecordUnusable)
-		}
+		wireTitles = append(wireTitles, t)
 	}
 	// Both wire year fields are untrusted, and Media.Year's contract is a
 	// four-digit release year with 0 as its documented unknown sentinel - so an
