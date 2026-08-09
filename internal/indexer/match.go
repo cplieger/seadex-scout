@@ -97,6 +97,22 @@ func nyaaID(rawURL string) string {
 // The DECODED path (url.URL.Path) is deliberately the input, so a
 // percent-encoded dot segment ("/view/123/%2e%2e/456", which clients also
 // normalize) is covered by the same check.
+//
+// This deliberately does NOT adopt urlform.Form.NormalizedPath, and the reason
+// is a semantic delta rather than inertia (l-f68, declined 2026-08). That
+// function resolves dot segments against the DECODED path, so it treats %2F as a
+// separator where a browser keeps it inside one segment: "/a%2f../view/456"
+// normalizes to "/view/456" for the library while the real destination is not a
+// /view page at all, which would mint a tracker identity for a torrent the URL
+// does not name. That is worse than the omission adopting it would fix, because
+// the never-pruned publication log KEYS on this identity - a wrong key marks the
+// wrong torrent as already served, permanently.
+//
+// And the omission it would fix does not occur: across the whole live catalogue
+// (2821 entries / 9208 torrents, measured 2026-08) exactly ZERO URLs carry a dot
+// segment and zero carry an escaped slash. Revisit if urlform grows a path
+// reading whose escaped-separator semantics match a browser's, which would make
+// the adoption strictly better rather than a trade.
 func pathHasDotSegments(p string) bool {
 	for seg := range strings.SplitSeq(p, "/") {
 		if seg == "." || seg == ".." {

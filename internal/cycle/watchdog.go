@@ -3,7 +3,6 @@ package cycle
 import (
 	"context"
 	"log/slog"
-	"os"
 	"time"
 
 	"github.com/cplieger/health"
@@ -137,30 +136,32 @@ func watchMarker(ctx context.Context, marker *health.Marker, path string, lease 
 // lease, returning the new warned state so the diagnostic is emitted once per
 // wedge rather than once per tick (a wedged loop stays wedged, and this line
 // exists to name the cause, not to count it).
+//
+// The reading is health.Inspect's, not a local stat: the library computes the
+// age and classifies the marker for its own probe, and re-deriving that here was
+// a second implementation of one decision (health v1.5.0 exposes it for exactly
+// this caller). What this function keeps is the POLICY - which state is a wedge,
+// what to log, and that only the cycle may clear the marker.
+//
+// Only MarkerStale is a wedge. Absent, unreadable and degraded are deliberately
+// not this goroutine's to interpret: an absent marker is what Set(false) looks
+// like on some failure paths, the probe already reads all three, and treating
+// absence as a wedge would call a cold start one. That distinction is the reason
+// this reads Inspect rather than ProbeCheck, whose 0-or-1 cannot express it.
 func checkMarkerAge(marker *health.Marker, path string, lease time.Duration, warned bool) bool {
-	age, err := markerAge(path)
-	if err != nil {
-		// The marker is absent or unreadable. Absent is what Set(false) looks
-		// like on some failure paths, and either way it is not this goroutine's
-		// to interpret: the probe already reads an absent marker as unhealthy.
+	f := health.Inspect(path, health.WithMaxAge(lease))
+	switch f.State {
+	case health.MarkerFresh:
+		return false
+	case health.MarkerStale:
+		if !warned {
+			slog.Error("no cycle has completed within the health lease; marking unhealthy",
+				"age", f.Age.Round(time.Second), "lease", f.MaxAge)
+		}
+		marker.Set(false)
+		return true
+	case health.MarkerAbsent, health.MarkerUnreadable, health.MarkerDirUnavailable:
 		return warned
 	}
-	if age <= lease {
-		return false
-	}
-	if !warned {
-		slog.Error("no cycle has completed within the health lease; marking unhealthy",
-			"age", age.Round(time.Second), "lease", lease)
-	}
-	marker.Set(false)
-	return true
-}
-
-// markerAge reports how long ago the health marker was last written.
-func markerAge(path string) (time.Duration, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return 0, err
-	}
-	return time.Since(info.ModTime()), nil
+	return warned
 }

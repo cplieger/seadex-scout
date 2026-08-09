@@ -4,8 +4,8 @@ github.com/cplieger/atomicfile/v2 v2.7.0 h1:ZsagNRGXyfkncPfaE/rTI5LOe6oNFgG1moQj
 github.com/cplieger/atomicfile/v2 v2.7.0/go.mod h1:jgwJ7oU3qahL4NwiF+1iBIzPRpR8LwXnicSalGoJeVA=
 github.com/cplieger/envx/yamlenv v1.2.1 h1:EzLTghpO16rFdf9RImru1t2wMR2QNGpRIvQw7M4jSZA=
 github.com/cplieger/envx/yamlenv v1.2.1/go.mod h1:Ur9/Rynk/DCB6QkqPpg/DEHCr5GhiAXpTGqinBqGNlI=
-github.com/cplieger/health v1.4.0 h1:MnLfSZNRnq7wYSMVi1s8Ox0kowk5iPzmqVKQ5JHHsoM=
-github.com/cplieger/health v1.4.0/go.mod h1:15Lm3XhPMU3nCEDfIH2hVAz6TXH06Wwiz9tgBi71vEE=
+github.com/cplieger/health v1.5.0 h1:UoKuXvSK7MWioKGR8cYAFhhqM9L5a/ubUT9IUtglHIw=
+github.com/cplieger/health v1.5.0/go.mod h1:15Lm3XhPMU3nCEDfIH2hVAz6TXH06Wwiz9tgBi71vEE=
 github.com/cplieger/httpx/v4 v4.3.0 h1:L81rPl89hhDnancLYMZEScwAsil7PRIaV60c9jbt8C0=
 github.com/cplieger/httpx/v4 v4.3.0/go.mod h1:bfJDGEQRWEwLu6mlwk49PfDIAETABwhlp+DAWFXo8XE=
 github.com/cplieger/jsonx v1.3.0 h1:m6rpdqXD2nZ74CguFaFXHmaS+V9Em9YVwsPN/X8FPWo=
@@ -18,8 +18,6 @@ github.com/cplieger/scheduler/v2 v2.0.0 h1:SuMKuywcxAGdlBIvMEoGK7debBWnYwbpPlkw3
 github.com/cplieger/scheduler/v2 v2.0.0/go.mod h1:+uGxZnD7/hftimflPJgOmNY3jqShKFhUZuBEpNgc1dA=
 github.com/cplieger/slogx v1.6.0 h1:ctcE3EqHz0VxmHYGWwcAGpexIWtZrB427UoDa3umpGk=
 github.com/cplieger/slogx v1.6.0/go.mod h1:15KA2NVx725imQe/PYXUmd3oM2oMpYpqwU+hdHtz7Fc=
-github.com/cplieger/urlform v1.2.0 h1:3q4Zu4pLeVP4mEV6WMh41NB6kQ+7Dh6QSFNQjWVpaws=
-github.com/cplieger/urlform v1.2.0/go.mod h1:UjT7v9kMA+KmC5FcGv4fvEP4G7Jd1p/elPmvjtEBMXc=
 github.com/cplieger/urlform v1.3.0 h1:8gNEzEjtxpek/yfKRTBfit/9cDFB8d7Q9Ev12LRAk68=
 github.com/cplieger/urlform v1.3.0/go.mod h1:UjT7v9kMA+KmC5FcGv4fvEP4G7Jd1p/elPmvjtEBMXc=
 github.com/cplieger/webhttp v1.22.0 h1:NBchhZTm7dXlKZF+kKWkj9Js7bWW3hGjU+1NQKk/aE4=

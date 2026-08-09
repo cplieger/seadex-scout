@@ -153,18 +153,35 @@ func TestStartWedgeWatchdog(t *testing.T) {
 		}
 	})
 
-	t.Run("an unreadable marker is left to the probe", func(t *testing.T) {
+	t.Run("a marker the watchdog cannot age is left to the probe", func(t *testing.T) {
 		rec := capture.Default(t)
-		path := filepath.Join(t.TempDir(), "nope")
-		marker := health.NewMarker(path)
-
-		for _, warned := range []bool{false, true} {
-			if got := checkMarkerAge(marker, path, time.Minute, warned); got != warned {
-				t.Errorf("checkMarkerAge(absent, warned=%t) = %t, want %t (an absent marker is not this goroutine's to interpret)", warned, got, warned)
-			}
+		// Two distinct states the new reading tells apart and the old age-or-error
+		// helper could not: ABSENT and UNREADABLE. Neither is a wedge - an absent
+		// marker is what Set(false) looks like on some failure paths, and the probe
+		// already reads both as unhealthy - so the watchdog must pass its latch
+		// through untouched and stay silent for each.
+		dir := t.TempDir()
+		loop := filepath.Join(dir, "loop")
+		if err := os.Symlink(loop, loop); err != nil {
+			t.Logf("symlink loop unsupported here (%v); covering the absent case only", err)
+			loop = ""
+		}
+		paths := map[string]string{"absent": filepath.Join(dir, "nope")}
+		if loop != "" {
+			paths["unreadable"] = loop
+		}
+		for state, path := range paths {
+			t.Run(state, func(t *testing.T) {
+				marker := health.NewMarker(path)
+				for _, warned := range []bool{false, true} {
+					if got := checkMarkerAge(marker, path, time.Minute, warned); got != warned {
+						t.Errorf("checkMarkerAge(%s, warned=%t) = %t, want %t (not this goroutine's to interpret)", state, warned, got, warned)
+					}
+				}
+			})
 		}
 		if n := rec.Count(wedgeMsg); n != 0 {
-			t.Errorf("wedge ERROR count = %d, want 0; an absent marker already probes unhealthy and must not be reported as a wedge", n)
+			t.Errorf("wedge ERROR count = %d, want 0; a marker that cannot be aged already probes unhealthy and must not be reported as a wedge", n)
 		}
 	})
 
@@ -186,11 +203,5 @@ func TestStartWedgeWatchdog(t *testing.T) {
 		}
 		cancel()
 		stop() // must return: the loop exits on ctx.Done
-	})
-
-	t.Run("markerAge fails on an absent marker", func(t *testing.T) {
-		if _, err := markerAge(filepath.Join(t.TempDir(), "nope")); err == nil {
-			t.Error("markerAge(absent) = nil error, want an error so the watchdog leaves it to the probe")
-		}
 	})
 }
