@@ -184,8 +184,33 @@ func (n *Notifier) report(findings []compare.Finding, comparedIDs, incompleteIDs
 // held for the process lifetime, where the emit path can never render more
 // than one logattr.MaxBytes joiner budget of either. Honest data carries a
 // handful of obtainable best releases per entry, so 64 is far above every real
-// row and keeps the worst case in the low hundreds of KiB.
+// row - MEASURED against the whole live catalogue (2821 entries, 2026-08): the
+// most recommended groups any entry produces is 3 (p99: 2) and the most links is
+// 25 (p99: 4), against 28 torrents on the largest entry. So this cap is ~2.5x
+// the worst real cardinality and no live entry comes near it; it exists for a
+// hostile or corrupted upstream, not for honest data.
 const maxRetainedListItems = 64
+
+// maxRetainedElemBytes bounds one ELEMENT of a retained slice, and it is what
+// makes the row bound real. maxRetainedListItems bounds the COUNT, while
+// capAttr's logattr.MaxBytes budget is sized for a whole Loki LOG LINE - so
+// using that per element left the row's worst case at 64x8K + 64x8K +
+// 64x(8K+8K) = 2 MiB, against a 256 MiB container that also runs the compare
+// loop, held for the process lifetime. The comment above used to claim "low
+// hundreds of KiB", which was wrong by an order of magnitude.
+//
+// 256 is measured, not chosen. Across the whole live catalogue the largest
+// element of any of the three slices is a 101-byte release-group name (p99: 14),
+// with tracker names topping out at 10 bytes and published URLs at 96 (p99: 61)
+// - so this is ~2.5x the worst real element. CurrentGroups comes from library
+// FILE NAMES rather than SeaDex, and a group parsed out of a filename is bounded
+// well below this too.
+//
+// The row bound is therefore 64 x 256 x 4 = 64 KiB, a 32x reduction, and it is
+// pinned by a test rather than left to this comment. Truncating here cannot
+// resolve or re-alert anything: the dedupe key is derived from the FULL row
+// before retention (see capRetainedList).
+const maxRetainedElemBytes = 256
 
 // capRetainedList clones the retained PREFIX of an untrusted slice, dropping
 // anything past maxRetainedListItems. Cloning is what keeps boundRetained's
@@ -240,17 +265,27 @@ func boundRetained(f *compare.Finding) {
 	// already-encoded value and double-encode every space into %2520.
 	f.ReleaseURL = capAttr(f.ReleaseURL)
 	f.ArrURL = capAttr(f.ArrURL)
+	// The three untrusted SLICES are bounded per ELEMENT on the measured
+	// maxRetainedElemBytes rather than the Loki log-line budget capAttr carries:
+	// the count cap alone left the row at 2 MiB (see maxRetainedElemBytes).
 	for i := range f.RecommendedGroups {
-		f.RecommendedGroups[i] = capAttr(f.RecommendedGroups[i])
+		f.RecommendedGroups[i] = capRetainedElem(f.RecommendedGroups[i])
 	}
 	for i := range f.CurrentGroups {
-		f.CurrentGroups[i] = capAttr(f.CurrentGroups[i])
+		f.CurrentGroups[i] = capRetainedElem(f.CurrentGroups[i])
 	}
 	for i := range f.Links {
-		f.Links[i].Tracker = capAttr(f.Links[i].Tracker)
-		f.Links[i].URL = capAttr(f.Links[i].URL)
+		f.Links[i].Tracker = capRetainedElem(f.Links[i].Tracker)
+		f.Links[i].URL = capRetainedElem(f.Links[i].URL)
 	}
 }
+
+// capRetainedElem bounds one element of a retained slice. capAttr runs first so
+// the value is rune-sanitized under the same policy every other retained field
+// gets, then the element budget applies; an in-budget value passes through
+// byte-identical, which is what keeps an honest row unchanged across passes
+// (capAttr is idempotent and so is a re-cap of an already-short value).
+func capRetainedElem(s string) string { return reboundTo(capAttr(s), maxRetainedElemBytes) }
 
 // emitAll logs every row of the current set, in a deterministic order so a
 // pass is diffable against the one before it, and closes with one summary line.
