@@ -32,6 +32,9 @@ const (
 	linkSep = " \u00b7 "
 	// emptyCell is shown for a column with no value.
 	emptyCell = "-"
+	// unknownCell marks a column whose fact was never established, as distinct
+	// from emptyCell's positive "there is nothing here".
+	unknownCell = "unknown"
 )
 
 // --- Markdown + JSON rendering ---
@@ -175,10 +178,22 @@ func writeRow(b *strings.Builder, row *Row) {
 	fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s |\n",
 		escapeCell(row.Title),
 		scopeCell(row),
-		escapeCell(orEmpty(strings.Join(row.CurrentGroups, ", "))),
+		groupsCell(row),
 		bestCell(row),
 		notesCell(row),
 		links(row))
+}
+
+// groupsCell renders the on-disk groups column. A row whose group evidence was
+// never established (Row.GroupsUnknown) renders "unknown" rather than the empty
+// marker, because the two mean opposite things to the operator: emptyCell is the
+// positive claim "nothing identifiable is on disk", which is the false reading
+// this column used to give a degraded item.
+func groupsCell(row *Row) string {
+	if row.GroupsUnknown {
+		return unknownCell
+	}
+	return escapeCell(orEmpty(strings.Join(row.CurrentGroups, ", ")))
 }
 
 // bestCell renders the SeaDex best column: the displayed best groups, plus the
@@ -263,14 +278,17 @@ func scopeCell(row *Row) string {
 // scopeLabel renders the comparison scope recorded on the row at build time:
 // "movie", "special", the TVDB season ("S2"), or "series" for a whole-series
 // comparison (an absolute-numbered run, a title-only match, or a not-on-SeaDex
-// library item). It is a pure reader of Row.scope — the classification itself
+// library item). It is a pure reader of Row.Scope — the classification itself
 // is the align.Decide scope decision recorded on the Row, so the label cannot drift
-// from the comparison actually performed.
+// from the comparison actually performed. The JSON renderer publishes the same
+// value through align.ScopeKind.MarshalJSON, which is why this composes the season
+// number into a display label here rather than storing the composed string: the
+// wire keeps the kind and the number separable.
 func scopeLabel(row *Row) string {
-	if row.scope == align.ScopeSeason {
+	if row.Scope == align.ScopeSeason {
 		return "S" + strconv.Itoa(row.Season)
 	}
-	return row.scope.String()
+	return row.Scope.String()
 }
 
 // releaseLinkKey is the structural dedupe identity for a links-cell entry.
@@ -505,6 +523,7 @@ func (r *Report) Log(ctx context.Context, log *slog.Logger) error {
 			"approx", row.Approx,
 			"hidden_animebytes", row.HiddenAnimeBytes,
 			"current_group", joinGroupsAttr(row.CurrentGroups),
+			"groups_unknown", row.GroupsUnknown,
 			"seadex_best", joinBestGroupsAttr(row.Releases),
 			"seadex_best_notes", joinBestNotesAttr(row.Releases),
 			"arr_url", capDisplayText(library.SafeLogURL(row.ArrURL)),

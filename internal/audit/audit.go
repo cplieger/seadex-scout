@@ -173,14 +173,31 @@ type Row struct {
 	Releases      []Release `json:"releases,omitempty"`
 	AniListID     int       `json:"al_id"`
 	Season        int       `json:"season,omitempty"`
-	// scope is the comparison scope the shared decision resolved
-	// (align.ScopeKind via align.Decide), recorded at build time and read by
-	// the renderer
-	// (align.ScopeWholeSeries, the zero value, renders as "series").
-	// Unexported: in-process only, absent from the JSON wire shape.
-	scope      align.ScopeKind
-	Special    bool `json:"special,omitempty"`
-	Incomplete bool `json:"incomplete,omitempty"`
+	// Scope is the comparison scope resolved for the row: the shared decision's
+	// kind on a matched row (align.Decide), align.ItemKind on an uncovered one.
+	// align.ScopeWholeSeries, the zero value, encodes and renders as "series".
+	//
+	// Published, not in-process only. Every renderer projects this struct, so a
+	// fact only two of the three can reach is a fact the JSON's consumer has to
+	// re-derive - and the derivation IS align's dispatch (movie vs mapped season
+	// vs special vs whole-series fallback), re-implemented outside the package
+	// that owns it, which is how internal/indexer once drifted from the season
+	// rule (l-f4). align.ScopeKind.MarshalJSON keeps the wire vocabulary
+	// identical to the Markdown's and the log's; Season carries the number the
+	// Markdown composes into its "S02" label.
+	Scope      align.ScopeKind `json:"scope"`
+	Special    bool            `json:"special,omitempty"`
+	Incomplete bool            `json:"incomplete,omitempty"`
+	// GroupsUnknown marks CurrentGroups as MISSING rather than empty: the library
+	// walk could not establish this item's file data (library.Item.Failed), so no
+	// group was ever read. Without it an empty groups cell is indistinguishable
+	// from an item genuinely carrying no identifiable group - the
+	// placeholder-read-as-fact that library.Item.Comparable exists to stop
+	// (d-u2-2). A matched row also states it in its verdict column (align.Decide
+	// answers a placeholder with StandingUnverified), but the not_on_seadex rows
+	// uncoveredRows builds never reach Decide and their verdict stays true, so
+	// this is the only place they can say it.
+	GroupsUnknown bool `json:"groups_unknown,omitempty"`
 	// Approx marks a coarse comparison: the season-0 specials bucket held more
 	// than one group, or the whole-series fallback compared more than one real
 	// season, so the verdict reflects "this group is present somewhere in the
@@ -340,7 +357,8 @@ func uncoveredRows(snap *library.Snapshot, idx *mapping.Index, covered map[strin
 			ArrURL:        it.ArrURL,
 			Verdict:       VerdictNotOnSeaDex,
 			CurrentGroups: slices.Clone(it.Groups),
-			scope:         align.ItemKind(it),
+			GroupsUnknown: !it.Comparable(),
+			Scope:         align.ItemKind(it),
 		})
 	}
 	return rows
@@ -375,8 +393,12 @@ func (a *Auditor) assess(m *match.Match) Row {
 		}
 	}
 	d := align.Decide(m.Item, &m.Record, best, alt)
-	row.scope = d.Kind
+	row.Scope = d.Kind
 	row.Season = d.Season
+	// Both row producers ask library.Item.Comparable - the one shared predicate for
+	// "was this item's file data ever established" - rather than each reading
+	// Item.Failed and deciding what it means.
+	row.GroupsUnknown = !m.Item.Comparable()
 	// align.Decision.Groups is caller-owned on every branch (align.Decide clones
 	// the single-unit set at the edge and builds the whole-series union fresh), so
 	// the row can take it directly - the report still never holds a window into the

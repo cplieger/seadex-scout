@@ -27,10 +27,10 @@ func TestScopeLabel(t *testing.T) {
 		want string
 		row  Row
 	}{
-		{"movie", "movie", Row{scope: align.ScopeMovie}},
-		{"special", "special", Row{scope: align.ScopeSpecial}},
-		{"numbered season", "S2", Row{scope: align.ScopeSeason, Season: 2}},
-		{"whole series", "series", Row{scope: align.ScopeWholeSeries}},
+		{"movie", "movie", Row{Scope: align.ScopeMovie}},
+		{"special", "special", Row{Scope: align.ScopeSpecial}},
+		{"numbered season", "S2", Row{Scope: align.ScopeSeason, Season: 2}},
+		{"whole series", "series", Row{Scope: align.ScopeWholeSeries}},
 		{"zero value defaults to series", "series", Row{}},
 	}
 	for _, tt := range tests {
@@ -43,16 +43,16 @@ func TestScopeLabel(t *testing.T) {
 }
 
 func TestScopeCellMarksApproxAndQualifier(t *testing.T) {
-	if got := scopeCell(&Row{scope: align.ScopeSeason, Season: 2, Approx: true}); got != "S2 (approx)" {
+	if got := scopeCell(&Row{Scope: align.ScopeSeason, Season: 2, Approx: true}); got != "S2 (approx)" {
 		t.Errorf("scopeCell() = %q, want \"S2 (approx)\"", got)
 	}
-	if got := scopeCell(&Row{scope: align.ScopeSeason, Season: 2}); got != "S2" {
+	if got := scopeCell(&Row{Scope: align.ScopeSeason, Season: 2}); got != "S2" {
 		t.Errorf("scopeCell() = %q, want \"S2\"", got)
 	}
-	if got := scopeCell(&Row{scope: align.ScopeSeason, Season: 2, Qualifier: QualifierMixed}); got != "S2 (mixed)" {
+	if got := scopeCell(&Row{Scope: align.ScopeSeason, Season: 2, Qualifier: QualifierMixed}); got != "S2 (mixed)" {
 		t.Errorf("scopeCell() = %q, want \"S2 (mixed)\"", got)
 	}
-	if got := scopeCell(&Row{scope: align.ScopeSeason, Season: 2, Approx: true, Qualifier: QualifierTheoretical}); got != "S2 (approx, theoretical)" {
+	if got := scopeCell(&Row{Scope: align.ScopeSeason, Season: 2, Approx: true, Qualifier: QualifierTheoretical}); got != "S2 (approx, theoretical)" {
 		t.Errorf("scopeCell() = %q, want \"S2 (approx, theoretical)\"", got)
 	}
 }
@@ -304,7 +304,7 @@ func TestReportLogEmitsSummaryAndPerRowLines(t *testing.T) {
 		Rows: []Row{{
 			Title: "Frieren", Arr: library.ArrSonarr, Verdict: VerdictBest, AniListID: 154587,
 			Qualifier: QualifierMixed,
-			Season:    1, scope: align.ScopeSeason, Approx: true, CurrentGroups: []string{"subsplease", "erai-raws"},
+			Season:    1, Scope: align.ScopeSeason, Approx: true, CurrentGroups: []string{"subsplease", "erai-raws"},
 			Releases:    []Release{{Group: "SubsPlease", Best: true, Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}},
 			ArrURL:      "http://sonarr/series/frieren",
 			SeaDexURL:   "https://releases.moe/154587",
