@@ -1034,7 +1034,7 @@ func (c *Client) fetchPage(ctx context.Context, cur cursor, wireLimit int64, ele
 		// that same failure with strictly more context
 		// (scout.recordSeaDexFetch's "seadex fetch failed" WARN carries the
 		// consecutive-failure streak and whether the feed was kept, and escalates
-		// to ERROR at degradation.EscalationThreshold), so leaving both at Warn
+		// to ERROR at degradation.TickEscalationThreshold), so leaving both at Warn
 		// reports one outage twice per cycle. Demoting rather than dropping the
 		// logger keeps the per-attempt retry diagnostics - the same rule
 		// internal/indexer's Prowlarr door already applies (l-f20).

@@ -182,7 +182,7 @@ func newCore(log *slog.Logger, store StateStore, lib *arrwalk.Walker, mapSrc Map
 
 // Every persisted degradation streak escalates its single log site from WARN to
 // ERROR (firing the existing SeadexScoutCycleError Loki rule) at the shared
-// fleet-wide threshold, whose policy lives in degradation.EscalationThreshold:
+// fleet-wide threshold, whose policy lives in degradation.TickEscalationThreshold:
 // tolerate 8 consecutive degraded cycles - long enough to ride out a transient
 // blip, short enough that a condition which never self-heals alerts instead of
 // WARNing forever. Each owning site documents when its streak advances or
@@ -191,49 +191,14 @@ func newCore(log *slog.Logger, store StateStore, lib *arrwalk.Walker, mapSrc Map
 // recordPartialWalk, and loadMapping (refresh rejections, a streak the mapping
 // loader owns and persists - only the log-level policy lives here).
 //
-// The count is CADENCE-RELATIVE, so the two cadences this loop now runs need
-// two thresholds. A streak that advances on the RECONCILE advances once a day,
-// so the fleet's 8 would mean 8 days before the ERROR that is the only level
-// this stack alerts on; reconcileEscalationThreshold re-expresses the same
-// policy for that cadence. A streak that advances on the TICK keeps the fleet
-// number, which is ~2h at the default interval.
-const (
-	// reconcileEscalationThreshold is the fleet's consecutive-failure policy at
-	// the reconcile's daily cadence. Two consecutive failed full passes is 48h,
-	// the closest whole-run threshold to the ~24h the fleet's 8 used to buy
-	// when every cycle was a full pass on a 3h interval - and one full run of
-	// tolerance is the minimum that can still distinguish a transient failure
-	// from a condition that will not self-heal.
-	reconcileEscalationThreshold = 2
-
-	shrunkWalkEscalationThreshold      = reconcileEscalationThreshold
-	seadexFailureEscalationThreshold   = reconcileEscalationThreshold
-	aniListDegradedEscalationThreshold = reconcileEscalationThreshold
-	partialWalkEscalationThreshold     = reconcileEscalationThreshold
-	// shrunkWalkAcceptThreshold is when the shrink guard gives up and accepts
-	// the smaller library as the new shape. Derived from the escalation
-	// threshold rather than invented (the same derivation shape as the
-	// harvest's fruitless latch): three times it is 6 consecutive reconciles,
-	// and since the arr walk runs ONLY on a reconcile and reconcileInterval is
-	// a 24h constant, a streak here counts DAYS with none of the cadence traps
-	// that bit the tick streaks. So the operator gets a WARN on day 1, an ERROR
-	// from day 2, and four further days of loud alerting before the app stops
-	// withholding.
-	//
-	// This REVERSES the guard's former "never auto-accepted" stance,
-	// deliberately and narrowly (the user's call, 2026-08): a smaller library
-	// is a legitimate end state the app can serve correctly, so waiting forever
-	// for an operator freezes real work over a state that may be intended. Its
-	// sibling guard - the mapping-collapse rejection streak - keeps
-	// no-auto-accept, because an unusable map is NOT a legitimate end state:
-	// accepting it would produce wrong findings indefinitely. Do not "unify"
-	// the two.
-	shrunkWalkAcceptThreshold = 3 * shrunkWalkEscalationThreshold
-	// mappingRejectionEscalationThreshold keeps the fleet number: loadMapping
-	// runs on every changed TICK as well as every reconcile, so its streak
-	// advances at tick cadence (~2h at the default interval).
-	mappingRejectionEscalationThreshold = degradation.EscalationThreshold
-)
+// The THRESHOLDS themselves are not here. They live in internal/degradation
+// beside each other, named for their cadence
+// (degradation.TickEscalationThreshold, ReconcileEscalationThreshold,
+// ShrunkWalkAcceptThreshold), because the count is CADENCE-RELATIVE and the
+// mistake worth preventing is an author reaching for whichever number the file
+// they opened contained: the same integer means ~2h on the tick and 8 days on
+// the reconcile. This file holds only which streak advances WHERE and what its
+// log line says (h-f23).
 
 // Scout runs compare cycles from its assembled dependencies. It carries the
 // compare-cycle components only: the one-shot audit is *Reporter's (report.go),
@@ -655,7 +620,7 @@ func logSafeUpstreamError(err error) error {
 // pre-compare gate logs the interruption instead (same rule as the
 // walk/matching paths). The degraded log is WARN, escalating to ERROR (which
 // fires the existing SeadexScoutCycleError Loki rule) once the loader's
-// acceptance guards have rejected degradation.EscalationThreshold
+// acceptance guards have rejected degradation.TickEscalationThreshold
 // consecutive refreshes: that state re-downloads the ~5.9MB body every cycle
 // against an aging cache and never self-heals without the operator, so it
 // must alert rather than WARN forever. The rejection streak is read off the
@@ -672,7 +637,7 @@ func (s *Scout) loadMapping(ctx context.Context, st *state.State) (mapping.Cache
 		// degrades with a plain error rather than a *StaleMapError, and that
 		// condition never self-heals either - reading the streak off the cache
 		// covers both shapes with one rule.
-		if mapCache.RejectedRefreshes >= mappingRejectionEscalationThreshold {
+		if mapCache.RejectedRefreshes >= degradation.TickEscalationThreshold {
 			// The attrs carry the streak (stale_consecutive_rejections) and,
 			// when a stale map was returned, the rejecting guard (stale_reason).
 			s.log.Error("mapping degraded: refresh rejected repeatedly; inspect upstream, or remove state.json to cold-start if the change is legitimate", attrs...)
@@ -848,25 +813,6 @@ func (s *Scout) escalate(streak, threshold int, warnMsg, errMsg string, attrs ..
 	s.log.Warn(warnMsg, attrs...)
 }
 
-// advanceStreak advances or resets a persisted degradation streak and reports
-// whether it has reached its escalation threshold.
-//
-// The reset arm is the half that matters and the half that could drift: a streak
-// counts CONSECUTIVE failures, so evidence of success has to zero it, and the two
-// callers (recordAniListDegradation, recordPartialWalk) each advance only on a
-// COMPLETED cycle - a gated or interrupted one observed neither an outage nor a
-// recovery, so it must do neither. Keeping that in one place is why this exists;
-// the callers keep their own names and messages because those are what the log
-// contract pins.
-func advanceStreak(counter *int, degraded bool, threshold int) bool {
-	if !degraded {
-		*counter = 0
-		return false
-	}
-	*counter++
-	return *counter >= threshold
-}
-
 // recordAniListDegradation advances or resets the persisted AniList
 // degradation streak and escalates a sustained outage (see advanceStreak for the
 // advance/reset rule this shares with recordPartialWalk). It runs before the
@@ -877,7 +823,7 @@ func advanceStreak(counter *int, degraded bool, threshold int) bool {
 // sustained AniList outage that coexists with a persistent partial walk
 // advances the streak forever without ever alerting.
 func (s *Scout) recordAniListDegradation(st *state.State, result *match.Result) {
-	if advanceStreak(&st.AniListDegraded, result.Degraded, aniListDegradedEscalationThreshold) {
+	if degradation.Advance(&st.AniListDegraded, result.Degraded, degradation.ReconcileEscalationThreshold) {
 		s.log.Error("anilist lookups degraded repeatedly; matching incomplete and findings frozen for affected entries - inspect graphql.anilist.co reachability and egress",
 			"incomplete_lookups", len(result.IncompleteIDs),
 			"consecutive_anilist_degraded", st.AniListDegraded)
@@ -896,7 +842,7 @@ func (s *Scout) recordAniListDegradation(st *state.State, result *match.Result) 
 // carried forward on evidence that never refreshes, nothing would ever escalate
 // the silence.
 func (s *Scout) recordPartialWalk(st *state.State, snap *library.Snapshot) {
-	if advanceStreak(&st.PartialWalks, snap.Partial, partialWalkEscalationThreshold) {
+	if degradation.Advance(&st.PartialWalks, snap.Partial, degradation.ReconcileEscalationThreshold) {
 		s.log.Error("library walk partial repeatedly; the failing series never compare and the one-shot report refuses a partial snapshot, so those items' findings are carried forward on evidence that never refreshes - inspect the arrs' episode endpoints for the skipped series",
 			"consecutive_partial_walks", st.PartialWalks)
 	}
@@ -956,7 +902,7 @@ func (s *Scout) logCompletedCycle(snap *library.Snapshot, result *match.Result, 
 		// remedy is a config or arr-side fix, and the walker's WARN names
 		// which side and how many items it listed. This arm still matters
 		// even though the shrink guard now holds a side for
-		// shrunkWalkAcceptThreshold reconciles: once the guard ACCEPTS the
+		// degradation.ShrunkWalkAcceptThreshold reconciles: once the guard ACCEPTS the
 		// smaller library the shrink reason stops firing, and on a first-ever
 		// boot there is no prior count for it to fire against at all - so
 		// without this arm the steady state would read "cycle complete"
@@ -1116,7 +1062,7 @@ func (s *Scout) handlePreCompareGate(ctx context.Context, st *state.State, snap 
 // closes the cycle: every exit from here saves state - the failed-walk arm, the
 // upstream arms' degradedSave, and the completion paths - so a double outage
 // still advances the streak and still escalates to ERROR at
-// seadexFailureEscalationThreshold instead of WARNing forever behind a
+// degradation.ReconcileEscalationThreshold instead of WARNing forever behind a
 // higher-precedence gate. A successful fetch resets the streak (the
 // documented "resets to 0 on any successful fetch" contract); a cancelled fetch
 // (a shutdown) is evidence of neither an outage nor a recovery, so it leaves the
@@ -1133,12 +1079,12 @@ func (s *Scout) recordSeaDexFetch(ctx context.Context, st *state.State, seaErr e
 	}
 	// The persisted streak escalates this single log site to ERROR (the
 	// SeadexScoutCycleError rule) once the outage has spanned
-	// seadexFailureEscalationThreshold consecutive cycles; below it the WARN
+	// degradation.ReconcileEscalationThreshold consecutive cycles; below it the WARN
 	// keeps an upstream blip off the alert. Both levels carry the streak so
 	// Loki can see how long the outage has run.
 	st.SeadexFailures++
 	attrs := []any{attrError, logSafeUpstreamError(seaErr), "consecutive_seadex_failures", st.SeadexFailures, "feed_kept", s.feed != nil}
-	s.escalate(st.SeadexFailures, seadexFailureEscalationThreshold,
+	s.escalate(st.SeadexFailures, degradation.ReconcileEscalationThreshold,
 		"seadex fetch failed; skipping comparison, findings re-stated unchanged this cycle",
 		"seadex fetch failed repeatedly; skipping comparison, findings re-stated unchanged this cycle - inspect SeaDex (releases.moe) reachability and egress",
 		attrs...)
@@ -1219,7 +1165,7 @@ func countItemsByArr(items []library.Item) map[string]int {
 // next cycle - there is no one-cycle ratchet, which is the reason the former
 // arm refused to persist anything at all.
 //
-// A side whose streak REACHES shrunkWalkAcceptThreshold is ACCEPTED instead:
+// A side whose streak REACHES degradation.ShrunkWalkAcceptThreshold is ACCEPTED instead:
 // its fresh items stand, its streak resets, the compare resolves its stale
 // findings normally, and one loud WARN says so. A side that PASSES the test
 // resets its own streak and nothing else, so one arr recovering never clears
@@ -1249,7 +1195,7 @@ func (s *Scout) mergeShrunkSides(st *state.State, snap *library.Snapshot) []stri
 		}
 		streak := st.ShrunkWalksByArr[arr] + 1
 		attrs := shrunkWalkAttrs(arr, current[arr], prior[arr], streak)
-		if streak >= shrunkWalkAcceptThreshold {
+		if streak >= degradation.ShrunkWalkAcceptThreshold {
 			// The guard has withheld this side for its whole tolerance, so it
 			// accepts. WARN, not ERROR: the app's self-heal-vs-operator rule
 			// reserves ERROR for a condition that will not clear without an
@@ -1272,7 +1218,7 @@ func (s *Scout) mergeShrunkSides(st *state.State, snap *library.Snapshot) []stri
 		// consecutive daily passes remain before acceptance, and the remedy -
 		// including that removing state.json accepts the smaller library
 		// immediately, which the WARN used to leave unsaid.
-		s.escalate(streak, shrunkWalkEscalationThreshold,
+		s.escalate(streak, degradation.ReconcileEscalationThreshold,
 			"library walk shrank below half this arr's prior snapshot; carrying that arr's prior items forward, so its findings are recomputed from them and not resolved - inspect that arr and arr_tags, or remove state.json to accept the smaller library immediately; passes_before_accept more consecutive shrunken reconciles and the app accepts it on its own",
 			"library walk shrank repeatedly for this arr; still carrying that arr's prior items forward, so its findings are recomputed from them and not resolved - inspect that arr and arr_tags, or remove state.json to accept the smaller library immediately; passes_before_accept more consecutive shrunken reconciles and the app accepts it on its own",
 			attrs...)
@@ -1295,7 +1241,7 @@ func shrunkWalkAttrs(arr string, items, priorItems, streak int) []any {
 		"items", items,
 		"prior_items", priorItems,
 		"consecutive_shrunk_walks", streak,
-		"passes_before_accept", max(shrunkWalkAcceptThreshold-streak, 0),
+		"passes_before_accept", max(degradation.ShrunkWalkAcceptThreshold-streak, 0),
 	}
 }
 

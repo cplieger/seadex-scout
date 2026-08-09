@@ -206,7 +206,7 @@ type Cache struct {
 	// refresh refusals. It persists across cycles and restarts, resets
 	// to 0 on any accepted refresh or on a 304 that revalidates a USABLE
 	// cache. It is the ONE carrier: the scout escalates its degraded-mapping log
-	// at degradation.EscalationThreshold from this field and logs
+	// at degradation.TickEscalationThreshold from this field and logs
 	// stale_consecutive_rejections from it too, so the number an operator reads
 	// is always the number escalation acted on. *StaleMapError used to carry a
 	// second copy, which read 0 for a transient fetch or parse failure and so
@@ -554,7 +554,7 @@ func staleOrFail(prev *Cache, staleMsg string, cause, noCache error) (Cache, err
 // staleOrFail, additionally advancing the persisted consecutive-rejection
 // streak (Cache.RejectedRefreshes) and carrying it on the *StaleMapError so
 // the scout can escalate its degraded-mapping log after
-// degradation.EscalationThreshold consecutive rejections. It is reached ONLY
+// degradation.TickEscalationThreshold consecutive rejections. It is reached ONLY
 // through degradeRefresh, on a failure classifyRefreshFailure graded
 // refreshPersistent; a transient failure takes plain staleOrFail there, so it
 // neither advances the streak nor resets it. The streak resets only on an
@@ -642,7 +642,7 @@ const (
 //     *httpx.AuthError, *httpx.RateLimitError). "Terminal" means the status
 //     survived httpx's retry policy - a status httpx itself retried and
 //     recovered from never reaches here. There is deliberately NO status
-//     allowlist: the streak's own degradation.EscalationThreshold consecutive
+//     allowlist: the streak's own degradation.TickEscalationThreshold consecutive
 //     cycles IS the transient filter (a temporary 503 cannot survive eight
 //     cycles ~3h apart at the deployed interval), whereas a per-status policy
 //     list would silently drift against upstream behavior.

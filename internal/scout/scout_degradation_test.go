@@ -13,6 +13,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/compare"
+	"github.com/cplieger/seadex-scout/internal/degradation"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"github.com/cplieger/seadex-scout/internal/notify"
@@ -61,8 +62,8 @@ func TestCyclePartialWalkEscalatesAfterRepeatedPartialWalks(t *testing.T) {
 		priorStreak int
 		wantError   bool
 	}{
-		{name: "below threshold does not escalate", priorStreak: partialWalkEscalationThreshold - 2, wantError: false},
-		{name: "at threshold escalates to ERROR", priorStreak: partialWalkEscalationThreshold - 1, wantError: true},
+		{name: "below threshold does not escalate", priorStreak: degradation.ReconcileEscalationThreshold - 2, wantError: false},
+		{name: "at threshold escalates to ERROR", priorStreak: degradation.ReconcileEscalationThreshold - 1, wantError: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -109,7 +110,7 @@ func TestCyclePartialWalkEscalatesAfterRepeatedPartialWalks(t *testing.T) {
 			if !tc.wantError && errCount != 0 {
 				t.Errorf("below-threshold ERROR count = %d, want 0 (a partial blip must not alert)", errCount)
 			}
-			wantStreak := strconv.Itoa(partialWalkEscalationThreshold)
+			wantStreak := strconv.Itoa(degradation.ReconcileEscalationThreshold)
 			if got, ok := recorder.AttrValue("library walk partial repeatedly", "consecutive_partial_walks"); tc.wantError && (!ok || got != wantStreak) {
 				t.Errorf("escalation streak attr = %q ok=%v, want %q (the ERROR must carry the up-to-date streak)", got, ok, wantStreak)
 			}

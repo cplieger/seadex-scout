@@ -14,6 +14,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/compare"
+	"github.com/cplieger/seadex-scout/internal/degradation"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
@@ -469,7 +470,7 @@ func TestCycleRecoveredWalkResetsShrunkStreak(t *testing.T) {
 // escalation of the single seadex-fetch-failed log site (mirroring the
 // shrunk-walk and mapping guards'): below the threshold a failed SeaDex fetch
 // logs at WARN; on the 8th consecutive failure (the persisted streak reaching
-// seadexFailureEscalationThreshold) the same site logs at ERROR (firing the
+// degradation.ReconcileEscalationThreshold) the same site logs at ERROR (firing the
 // existing SeadexScoutCycleError Loki rule) - exactly one line either way,
 // with the streak persisted, prior findings preserved, and the "cycle
 // degraded" completion line unchanged.
@@ -479,8 +480,8 @@ func TestCycleSeaDexFailureEscalatesAfterRepeatedFailures(t *testing.T) {
 		priorStreak int
 		wantError   bool
 	}{
-		{name: "below threshold stays WARN", priorStreak: seadexFailureEscalationThreshold - 2, wantError: false},
-		{name: "8th consecutive failure escalates to ERROR", priorStreak: seadexFailureEscalationThreshold - 1, wantError: true},
+		{name: "below threshold stays WARN", priorStreak: degradation.ReconcileEscalationThreshold - 2, wantError: false},
+		{name: "8th consecutive failure escalates to ERROR", priorStreak: degradation.ReconcileEscalationThreshold - 1, wantError: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -534,7 +535,7 @@ func TestCycleSeaDexFailureEscalatesAfterRepeatedFailures(t *testing.T) {
 // upstreams down could WARN forever and never alert.
 func TestHandlePreCompareGateSeaDexEscalatesBehindWinningMappingGate(t *testing.T) {
 	logger, recorder := capture.New()
-	st := state.State{SeadexFailures: seadexFailureEscalationThreshold - 1}
+	st := state.State{SeadexFailures: degradation.ReconcileEscalationThreshold - 1}
 	store := &fakeStore{st: st}
 	s := New(&Deps{
 		Logger:   logger,
@@ -554,8 +555,8 @@ func TestHandlePreCompareGateSeaDexEscalatesBehindWinningMappingGate(t *testing.
 	if len(shrunkArrs) != 0 {
 		t.Errorf("shrunk arrs = %v, want none (there is no prior snapshot to have shrunk from)", shrunkArrs)
 	}
-	if store.st.SeadexFailures != seadexFailureEscalationThreshold {
-		t.Errorf("persisted SeadexFailures = %d, want %d (a winning gate must not freeze the streak)", store.st.SeadexFailures, seadexFailureEscalationThreshold)
+	if store.st.SeadexFailures != degradation.ReconcileEscalationThreshold {
+		t.Errorf("persisted SeadexFailures = %d, want %d (a winning gate must not freeze the streak)", store.st.SeadexFailures, degradation.ReconcileEscalationThreshold)
 	}
 	if errs := recorder.CountLevel(slog.LevelError, "seadex fetch failed"); errs != 1 {
 		t.Errorf("seadex ERROR count = %d, want 1 (the threshold must fire behind the mapping gate)", errs)
@@ -1061,7 +1062,7 @@ func TestSaveGenuineFailureLogsError(t *testing.T) {
 // TestLoadMappingEscalatesAfterRepeatedRejections pins the WARN-to-ERROR
 // escalation of the single degraded-mapping log site: below the threshold a
 // guard-rejected refresh logs "mapping degraded" at WARN; once the persisted
-// streak reaches mappingRejectionEscalationThreshold the same site logs at
+// streak reaches degradation.TickEscalationThreshold the same site logs at
 // ERROR (firing the existing SeadexScoutCycleError Loki rule) with the remedy
 // in the message and the streak/guard in the structured attrs - exactly one
 // line either way (no double-logging), still returning the stale cache.
@@ -1071,8 +1072,8 @@ func TestLoadMappingEscalatesAfterRepeatedRejections(t *testing.T) {
 		priorStreak int
 		wantError   bool
 	}{
-		{name: "below threshold stays WARN", priorStreak: mappingRejectionEscalationThreshold - 2, wantError: false},
-		{name: "at threshold escalates to ERROR", priorStreak: mappingRejectionEscalationThreshold - 1, wantError: true},
+		{name: "below threshold stays WARN", priorStreak: degradation.TickEscalationThreshold - 2, wantError: false},
+		{name: "at threshold escalates to ERROR", priorStreak: degradation.TickEscalationThreshold - 1, wantError: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1636,15 +1637,15 @@ func TestCycleAniListDegradedStreakEscalatesToError(t *testing.T) {
 
 	// One cycle below the threshold: streak advances, no ERROR.
 	store := &fakeStore{st: state.State{
-		AniListDegraded: aniListDegradedEscalationThreshold - 2,
+		AniListDegraded: degradation.ReconcileEscalationThreshold - 2,
 		Mapping:         mapping.Cache{FetchedAt: time.Now(), Records: []mapping.Record{{AniListID: 222, Type: "TV"}}},
 	}}
 	s, recorder := newScout(store)
 	if healthy := s.Cycle(context.Background()); !healthy {
 		t.Fatal("Cycle healthy=false, want true (degraded, not failed)")
 	}
-	if got := store.st.AniListDegraded; got != aniListDegradedEscalationThreshold-1 {
-		t.Errorf("persisted streak = %d, want %d", got, aniListDegradedEscalationThreshold-1)
+	if got := store.st.AniListDegraded; got != degradation.ReconcileEscalationThreshold-1 {
+		t.Errorf("persisted streak = %d, want %d", got, degradation.ReconcileEscalationThreshold-1)
 	}
 	if n := recorder.CountExact("anilist lookups degraded repeatedly; matching incomplete and findings frozen for affected entries - inspect graphql.anilist.co reachability and egress"); n != 0 {
 		t.Errorf("escalation ERROR count below threshold = %d, want 0", n)
@@ -1655,8 +1656,8 @@ func TestCycleAniListDegradedStreakEscalatesToError(t *testing.T) {
 	if healthy := s.Cycle(context.Background()); !healthy {
 		t.Fatal("threshold Cycle healthy=false, want true")
 	}
-	if got := store.st.AniListDegraded; got != aniListDegradedEscalationThreshold {
-		t.Errorf("persisted streak = %d, want %d", got, aniListDegradedEscalationThreshold)
+	if got := store.st.AniListDegraded; got != degradation.ReconcileEscalationThreshold {
+		t.Errorf("persisted streak = %d, want %d", got, degradation.ReconcileEscalationThreshold)
 	}
 	if n := recorder.CountExact("anilist lookups degraded repeatedly; matching incomplete and findings frozen for affected entries - inspect graphql.anilist.co reachability and egress"); n != 1 {
 		t.Errorf("escalation ERROR count at threshold = %d, want 1", n)
@@ -1723,7 +1724,7 @@ func TestCycleExactlyHalfWalkPassesShrinkGuard(t *testing.T) {
 
 // TestCycleUndegradedCycleResetsAniListDegradedStreak pins the AniList
 // degradation streak's recovery rule (documented on
-// aniListDegradedEscalationThreshold: "the first undegraded completed cycle
+// degradation.ReconcileEscalationThreshold: "the first undegraded completed cycle
 // resets the streak"): a completed cycle whose matching needed no degraded
 // lookups must reset the persisted streak to zero, exactly like its
 // shrunk-walk and SeaDex-failure siblings, so a later transient blip starts
@@ -1864,7 +1865,7 @@ func TestCycleAniListEscalationFiresWhenPartialWalkWinsCompletionLine(t *testing
 			// fails transiently this cycle, so result.Degraded is true.
 			{AniListID: 333, Type: "TV"},
 		}},
-		AniListDegraded: aniListDegradedEscalationThreshold - 1,
+		AniListDegraded: degradation.ReconcileEscalationThreshold - 1,
 	}}
 	sonarr := &flakySonarr{
 		fakeSonarr: fakeSonarr{
@@ -1902,8 +1903,8 @@ func TestCycleAniListEscalationFiresWhenPartialWalkWinsCompletionLine(t *testing
 	if n := recorder.CountLevel(slog.LevelError, escalationMsg); n != 1 {
 		t.Errorf("escalation ERROR count = %d, want 1 (the operator-alert contract requires ERROR, not a same-message downgrade)", n)
 	}
-	if got := store.st.AniListDegraded; got != aniListDegradedEscalationThreshold {
-		t.Errorf("persisted AniListDegraded = %d, want %d (the streak must advance and persist under the combined degradation)", got, aniListDegradedEscalationThreshold)
+	if got := store.st.AniListDegraded; got != degradation.ReconcileEscalationThreshold {
+		t.Errorf("persisted AniListDegraded = %d, want %d (the streak must advance and persist under the combined degradation)", got, degradation.ReconcileEscalationThreshold)
 	}
 }
 
@@ -1911,7 +1912,7 @@ func TestCycleAniListEscalationFiresWhenPartialWalkWinsCompletionLine(t *testing
 // boundary: a terminal non-2xx on the fixed Fribb URL now advances the
 // persisted rejection streak, so a permanently 404ing (or 410/500ing) upstream
 // escalates the scout's mapping log from WARN to ERROR once the streak reaches
-// mappingRejectionEscalationThreshold consecutive cycles. Before this it warned
+// degradation.TickEscalationThreshold consecutive cycles. Before this it warned
 // forever from a frozen zero streak. The below-threshold row is the transient
 // filter the user's deliberate no-status-allowlist decision relies on: a
 // temporary status incident cannot survive that many cycles, so it never
@@ -1922,10 +1923,10 @@ func TestLoadMappingEscalatesOnTerminalNon2xxStreak(t *testing.T) {
 		priorStreak int
 		wantError   bool
 	}{
-		"404 below threshold stays WARN": {http.StatusNotFound, mappingRejectionEscalationThreshold - 2, false},
-		"404 at threshold escalates":     {http.StatusNotFound, mappingRejectionEscalationThreshold - 1, true},
-		"410 at threshold escalates":     {http.StatusGone, mappingRejectionEscalationThreshold - 1, true},
-		"500 at threshold escalates":     {http.StatusInternalServerError, mappingRejectionEscalationThreshold - 1, true},
+		"404 below threshold stays WARN": {http.StatusNotFound, degradation.TickEscalationThreshold - 2, false},
+		"404 at threshold escalates":     {http.StatusNotFound, degradation.TickEscalationThreshold - 1, true},
+		"410 at threshold escalates":     {http.StatusGone, degradation.TickEscalationThreshold - 1, true},
+		"500 at threshold escalates":     {http.StatusInternalServerError, degradation.TickEscalationThreshold - 1, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

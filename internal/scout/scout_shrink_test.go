@@ -11,6 +11,7 @@ import (
 	"github.com/cplieger/seadex-scout/internal/anilist"
 	"github.com/cplieger/seadex-scout/internal/arrwalk"
 	"github.com/cplieger/seadex-scout/internal/compare"
+	"github.com/cplieger/seadex-scout/internal/degradation"
 	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/mapping"
 	"github.com/cplieger/seadex-scout/internal/match"
@@ -251,10 +252,10 @@ func TestCycleShrunkSideDoesNotRatchetPriorCount(t *testing.T) {
 // --- the streak: escalation, then bounded acceptance ---
 
 // TestCycleShrunkSideEscalatesThenAcceptsAtThreshold pins the whole ladder of
-// the single shrink log site, per arr: below shrunkWalkEscalationThreshold a
+// the single shrink log site, per arr: below degradation.ReconcileEscalationThreshold a
 // shrunken side WARNs, at that threshold the SAME site logs ERROR (firing the
 // SeadexScoutCycleError Loki rule) while still withholding the side, and at
-// shrunkWalkAcceptThreshold the guard ACCEPTS the smaller library - one loud
+// degradation.ShrunkWalkAcceptThreshold the guard ACCEPTS the smaller library - one loud
 // WARN, not an ERROR, because acceptance is a designed outcome rather than a
 // condition needing an operator.
 //
@@ -270,19 +271,19 @@ func TestCycleShrunkSideEscalatesThenAcceptsAtThreshold(t *testing.T) {
 		wantAccepted bool
 	}{
 		"below the escalation threshold WARNs and withholds": {
-			priorStreak: shrunkWalkEscalationThreshold - 2,
+			priorStreak: degradation.ReconcileEscalationThreshold - 2,
 			wantLevel:   slog.LevelWarn,
 		},
 		"at the escalation threshold ERRORs and still withholds": {
-			priorStreak: shrunkWalkEscalationThreshold - 1,
+			priorStreak: degradation.ReconcileEscalationThreshold - 1,
 			wantLevel:   slog.LevelError,
 		},
 		"one pass before the accept threshold still withholds": {
-			priorStreak: shrunkWalkAcceptThreshold - 2,
+			priorStreak: degradation.ShrunkWalkAcceptThreshold - 2,
 			wantLevel:   slog.LevelError,
 		},
 		"at the accept threshold the smaller library is accepted": {
-			priorStreak:  shrunkWalkAcceptThreshold - 1,
+			priorStreak:  degradation.ShrunkWalkAcceptThreshold - 1,
 			wantLevel:    slog.LevelWarn,
 			wantAccepted: true,
 		},

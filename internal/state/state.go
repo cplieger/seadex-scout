@@ -83,18 +83,24 @@ const SchemaVersion = 1
 // pass that runs at startup. Nothing about a finding survives a restart, and
 // nothing needs to: a completed pass reconstructs the whole set.
 type State struct {
+	// The four streak counters below are persisted DATA, not policy. Their
+	// thresholds and the advance/reset rule live in internal/degradation
+	// (TickEscalationThreshold, ReconcileEscalationThreshold,
+	// ShrunkWalkAcceptThreshold, Advance), and each streak's OWNING site in
+	// internal/scout documents when it advances, resets, and what the remedy
+	// is. This envelope deliberately does not restate that lifecycle: it cannot
+	// enforce it, and a copy of a rule the persistence layer has no say over is
+	// exactly the drift h-f23 was raised about. What belongs here is the wire
+	// shape and anything about the FIELD a reader of state.json needs.
 	Memo    match.Memo    `json:"anilist_memo"`
 	Mapping mapping.Cache `json:"mapping"`
 	// ShrunkWalksByArr counts, PER ARR, consecutive reconciles the scout's
 	// library shrink guard judged that arr's fresh item count a suspicious
 	// truncation (below half its OWN prior count, degradation.Shrunk) and
-	// carried that side's prior items forward instead of accepting them. It
-	// persists across cycles and restarts, mirrors
-	// mapping.Cache.RejectedRefreshes so the scout can escalate its single
-	// shrunk-walk log site after a sustained streak, and is keyed by the
-	// library.Arr name ("sonarr"/"radarr"). A side whose walk passes the guard
-	// has its entry DELETED (a passing side costs no bytes), and so does a
-	// side whose streak reaches scout's shrunkWalkAcceptThreshold, where the
+	// carried that side's prior items forward instead of accepting them. Keyed
+	// by the library.Arr name ("sonarr"/"radarr"). A side whose walk passes the
+	// guard has its entry DELETED (a passing side costs no bytes), and so does a
+	// side whose streak reaches degradation.ShrunkWalkAcceptThreshold, where the
 	// smaller library is accepted as the new shape - so an entry is bounded by
 	// that threshold rather than growing forever.
 	//
@@ -113,40 +119,22 @@ type State struct {
 	// no-rollback-no-migration decision covers.
 	ShrunkWalksByArr map[string]int   `json:"shrunk_walks_by_arr,omitempty"`
 	Library          library.Snapshot `json:"library"`
-	// SeadexFailures counts consecutive cycles whose SeaDex fetch failed (so
-	// the compare was skipped, so findings were not re-reported), whichever pre-compare
-	// gate closed the cycle - the scout records the fetch outcome ahead of gate
-	// selection, so a coinciding walk/mapping failure cannot hide the outage
-	// from the streak. It persists across cycles and restarts, resets to 0 on
-	// any successful fetch, and mirrors ShrunkWalksByArr (and
-	// mapping.Cache.RejectedRefreshes) so the scout can escalate its single
-	// seadex-fetch-failed log site after a sustained outage instead of
-	// degrading at WARN forever.
+	// SeadexFailures counts consecutive cycles whose SeaDex fetch failed (so the
+	// compare was skipped, so findings were not re-reported), whichever
+	// pre-compare gate closed the cycle - the scout records the fetch outcome
+	// ahead of gate selection, so a coinciding walk/mapping failure cannot hide
+	// the outage from the streak. Owner: recordSeaDexFetch.
 	SeadexFailures int `json:"seadex_failures,omitempty"`
-	// AniListDegraded counts consecutive COMPLETED cycles whose matching
-	// left AniList lookups incomplete (match.Result.Degraded), preserving the
-	// affected entries' prior findings. It persists across cycles and
-	// restarts, resets to 0 on any completed cycle whose matching ran
-	// undegraded, and mirrors ShrunkWalksByArr/SeadexFailures (and
-	// mapping.Cache.RejectedRefreshes) so the scout can escalate its single
-	// anilist-degraded log site after a sustained streak - a permanently
-	// broken egress to graphql.anilist.co must alert instead of WARNing
-	// forever (and, on a cold start, silently freezing the incomplete
-	// baseline path indefinitely). Gated cycles (walk failure, upstream
-	// outage, shutdown) neither advance nor reset it: they are evidence of
-	// neither an AniList outage nor a recovery.
+	// AniListDegraded counts consecutive COMPLETED cycles whose matching left
+	// AniList lookups incomplete (match.Result.Degraded), preserving the
+	// affected entries' prior findings. Owner: recordAniListDegradation.
 	AniListDegraded int `json:"anilist_degraded,omitempty"`
 	// PartialWalks counts consecutive COMPLETED cycles whose library walk came
 	// back partial (per-series episode-fetch failures left Failed placeholder
-	// items the compare excluded). It persists across cycles and restarts,
-	// resets to 0 on any completed cycle whose walk was whole, and mirrors
-	// ShrunkWalksByArr/SeadexFailures/AniListDegraded so the scout can escalate its
-	// partial-walk log site after a sustained streak: a single permanently
-	// failing series holds Snapshot.Partial true forever, which is why
-	// notify.Report carries that item's rows forward rather than dropping them
-	// (its absence from a pass is missing data, not alignment). Gated and
-	// interrupted cycles neither advance nor reset it: they observed no walk
-	// verdict to judge.
+	// items the compare excluded). A single permanently failing series holds
+	// Snapshot.Partial true forever, which is why notify.Report carries that
+	// item's rows forward rather than dropping them (its absence from a pass is
+	// missing data, not alignment). Owner: recordPartialWalk.
 	PartialWalks int `json:"partial_walks,omitempty"`
 	// Version is the persisted envelope's schema version, stamped with
 	// SchemaVersion by every Save (on the shallow copy it writes; the
