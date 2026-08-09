@@ -176,6 +176,27 @@ func (w *Walker) Walk(ctx context.Context) (library.Snapshot, error) {
 	}, nil
 }
 
+// EnabledArrs reports the arr sides this walker ingests, in a stable order
+// (Sonarr then Radarr). A side is enabled exactly when its client is wired,
+// which is the same fact Walk branches on - so the walker stays the ONE home
+// of "which arrs does this deployment have", and a consumer never re-derives
+// it from a config pair the walker was built from.
+//
+// Its consumer is the scout's per-arr library shrink guard: a side the
+// deployment does not have contributes no items, and a side the operator just
+// DISABLED legitimately loses all of its items, so neither may be judged a
+// suspicious truncation of its prior count.
+func (w *Walker) EnabledArrs() []string {
+	arrs := make([]string, 0, 2)
+	if w.sonarr != nil {
+		arrs = append(arrs, library.ArrSonarr)
+	}
+	if w.radarr != nil {
+		arrs = append(arrs, library.ArrRadarr)
+	}
+	return arrs
+}
+
 // walkSideError wraps a per-side walk failure with the failed arr's identity.
 // Error preserves the exact "walking <arr>: <cause>" text the previous plain
 // fmt.Errorf wrapper produced (report-mode CLI output reads it unchanged) and

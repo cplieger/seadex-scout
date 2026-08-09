@@ -16,6 +16,8 @@ import (
 	"errors"
 	"log/slog"
 	"maps"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/cplieger/httpx/v4"
@@ -184,7 +186,7 @@ func newCore(log *slog.Logger, store StateStore, lib *arrwalk.Walker, mapSrc Map
 // tolerate 8 consecutive degraded cycles - long enough to ride out a transient
 // blip, short enough that a condition which never self-heals alerts instead of
 // WARNing forever. Each owning site documents when its streak advances or
-// resets and what the remedy is: handleLibraryGate (shrunk walk),
+// resets and what the remedy is: mergeShrunkSides (shrunk walk, per arr),
 // recordSeaDexFetch (fetch failures), recordAniListDegradation,
 // recordPartialWalk, and loadMapping (refresh rejections, a streak the mapping
 // loader owns and persists - only the log-level policy lives here).
@@ -208,6 +210,25 @@ const (
 	seadexFailureEscalationThreshold   = reconcileEscalationThreshold
 	aniListDegradedEscalationThreshold = reconcileEscalationThreshold
 	partialWalkEscalationThreshold     = reconcileEscalationThreshold
+	// shrunkWalkAcceptThreshold is when the shrink guard gives up and accepts
+	// the smaller library as the new shape. Derived from the escalation
+	// threshold rather than invented (the same derivation shape as the
+	// harvest's fruitless latch): three times it is 6 consecutive reconciles,
+	// and since the arr walk runs ONLY on a reconcile and reconcileInterval is
+	// a 24h constant, a streak here counts DAYS with none of the cadence traps
+	// that bit the tick streaks. So the operator gets a WARN on day 1, an ERROR
+	// from day 2, and four further days of loud alerting before the app stops
+	// withholding.
+	//
+	// This REVERSES the guard's former "never auto-accepted" stance,
+	// deliberately and narrowly (the user's call, 2026-08): a smaller library
+	// is a legitimate end state the app can serve correctly, so waiting forever
+	// for an operator freezes real work over a state that may be intended. Its
+	// sibling guard - the mapping-collapse rejection streak - keeps
+	// no-auto-accept, because an unusable map is NOT a legitimate end state:
+	// accepting it would produce wrong findings indefinitely. Do not "unify"
+	// the two.
+	shrunkWalkAcceptThreshold = 3 * shrunkWalkEscalationThreshold
 	// mappingRejectionEscalationThreshold keeps the fleet number: loadMapping
 	// runs on every changed TICK as well as every reconcile, so its streak
 	// advances at tick cadence (~2h at the default interval).
@@ -467,8 +488,12 @@ func (s *Scout) reconcile(ctx context.Context) bool {
 	// mapping cache is persisted), while the feed above was still refreshed. The
 	// pre-compare degradation gate (failed walk, unusable map, failed/empty
 	// SeaDex fetch) is factored into a helper so Cycle reads as the top-down
-	// happy path.
-	if handled, healthy := s.handlePreCompareGate(ctx, &st, snap, &mapCache, entries, errs); handled {
+	// happy path. It also applies the per-arr library shrink guard, which MERGES
+	// a suspect arr's prior items into snap rather than skipping the comparison
+	// (see mergeShrunkSides) and names the sides left suspect - the completion
+	// line reports the cycle degraded for exactly those.
+	handled, healthy, shrunkArrs := s.handlePreCompareGate(ctx, &st, &snap, &mapCache, entries, errs)
+	if handled {
 		return healthy
 	}
 
@@ -490,7 +515,7 @@ func (s *Scout) reconcile(ctx context.Context) bool {
 		// below with exactly the affected entries' rows carried forward.
 		return s.finishInterruptedMatch(ctx, start, startStats, &st, snap, &mapCache, result)
 	}
-	return s.finishCompletedCycle(ctx, start, startStats, &st, snap, &mapCache, entries, result, mapErr)
+	return s.finishCompletedCycle(ctx, start, startStats, &st, snap, &mapCache, entries, result, mapErr, shrunkArrs)
 }
 
 // warnCatalogueLinkQuality emits the catalogue-wide tracker-link diagnostics
@@ -727,17 +752,24 @@ func (s *Scout) finishInterruptedMatch(ctx context.Context, start time.Time, sta
 
 // finishCompletedCycle runs the compare over the completed match result,
 // reports the findings, logs the completion line
-// ("cycle complete", or "cycle degraded" for a partial walk, a transient
-// AniList degradation, or a stale-but-usable map), and persists the full
-// refreshed state. On a partial walk the compare runs on the items that walked
-// cleanly only: matches linked to Failed items are excluded (their file state
-// is missing, not empty). Finding resolution is scoped so that degraded
-// items' prior findings are preserved rather than falsely resolved - both the
-// Failed-walk items and the entries whose needed AniList lookup failed
+// ("cycle complete", or "cycle degraded" for a shrink-guarded arr, a partial
+// walk, a transient AniList degradation, or a stale-but-usable map), and
+// persists the full refreshed state. On a partial walk the compare runs on the
+// items that walked cleanly only: matches linked to Failed items are excluded
+// (their file state is missing, not empty). Finding resolution is scoped so that
+// degraded items' prior findings are preserved rather than falsely resolved -
+// both the Failed-walk items and the entries whose needed AniList lookup failed
 // transiently (match.Result.IncompleteIDs; their entries sit unmapped in the
 // match set, so the compare yields no finding for them and only the
-// preservation set keeps their prior findings from resolving). Always healthy.
-func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, startStats AniListStats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, result match.Result, mapErr error) bool {
+// preservation set keeps their prior findings from resolving).
+//
+// shrunkArrs are the arrs the shrink guard left suspect, whose PRIOR items snap
+// already carries (mergeShrunkSides). It needs no preservation scoping and no
+// authority narrowing: the snapshot is a complete library model, so those
+// entries' findings are recomputed from the carried items and re-reported by the
+// same full-authority Report call every clean cycle uses. It only decides the
+// completion line's severity. Always healthy.
+func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, startStats AniListStats, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, result match.Result, mapErr error, shrunkArrs []string) bool {
 	cleanMatches, failedItems := splitFailedMatches(result.Matches)
 	findings := s.comparer.Compare(cleanMatches)
 	// Findings are reported as STATE: notify re-emits the whole current set and
@@ -771,7 +803,7 @@ func (s *Scout) finishCompletedCycle(ctx context.Context, start time.Time, start
 		"duration", time.Since(start).Round(time.Millisecond).String())
 	s.recordAniListDegradation(st, &result)
 	s.recordPartialWalk(st, &snap)
-	s.logCompletedCycle(&snap, &result, mapErr, failedItems, st.AniListDegraded, attrs)
+	s.logCompletedCycle(&snap, &result, mapErr, failedItems, st.AniListDegraded, shrunkArrs, attrs)
 	// A SECOND line, deliberately, carrying nothing but the fact that a full
 	// pass finished. The scan deadman counts cycle/tick completion lines, and
 	// once most iterations are ticks it can no longer tell "the loop is alive"
@@ -872,10 +904,22 @@ func (s *Scout) recordPartialWalk(st *state.State, snap *library.Snapshot) {
 
 // logCompletedCycle emits the one completion line the deadman alert counts:
 // "cycle complete", or "cycle degraded" with the most severe applicable
-// reason (partial walk, then AniList degradation, then a stale-but-usable
-// map, then an arr side emptied by its tag filter).
-func (s *Scout) logCompletedCycle(snap *library.Snapshot, result *match.Result, mapErr error, failedItems map[int]struct{}, aniListStreak int, attrs []any) {
+// reason (a shrink-guarded arr, then a partial walk, then AniList degradation,
+// then a stale-but-usable map, then an arr side emptied by its tag filter).
+func (s *Scout) logCompletedCycle(snap *library.Snapshot, result *match.Result, mapErr error, failedItems map[int]struct{}, aniListStreak int, shrunkArrs []string, attrs []any) {
 	switch {
+	case len(shrunkArrs) > 0:
+		// An arr's walk shrank suspiciously, so the compare ran against that
+		// side's PRIOR items (mergeShrunkSides): the pass did its whole job and
+		// reported at full authority, but part of the library model is one
+		// reconcile stale, so it must not read as fully successful. The reason
+		// keeps its deployed spelling, and the arrs attr says which sides are
+		// withheld - the escalating shrink diagnostic beside it carries the
+		// counts, the streak, and the remedy. This is the MOST severe reason:
+		// a whole arr side's evidence is stale, where every reason below
+		// degrades a subset of entries.
+		s.cycleDegraded("library-shrunk",
+			append([]any{"shrunk_arrs", strings.Join(shrunkArrs, ",")}, attrs...)...)
 	case snap.Partial:
 		// A partial walk compared only the clean items, so the cycle closed
 		// degraded: report the degraded coverage on the completion line the
@@ -910,10 +954,13 @@ func (s *Scout) logCompletedCycle(snap *library.Snapshot, result *match.Result, 
 		// finding on that side resolves. The walk itself succeeded, so this
 		// stays the LEAST severe reason and never fails the cycle - the
 		// remedy is a config or arr-side fix, and the walker's WARN names
-		// which side and how many items it listed. Without this arm the
-		// steady state read "cycle complete" forever: the shrink guard fires
-		// for at most one cycle (it then persists the empty snapshot as the
-		// baseline) and not at all on a first-ever boot.
+		// which side and how many items it listed. This arm still matters
+		// even though the shrink guard now holds a side for
+		// shrunkWalkAcceptThreshold reconciles: once the guard ACCEPTS the
+		// smaller library the shrink reason stops firing, and on a first-ever
+		// boot there is no prior count for it to fire against at all - so
+		// without this arm the steady state would read "cycle complete"
+		// forever while the app watched nothing.
 		s.cycleDegraded("tags-emptied-side", attrs...)
 	default:
 		s.log.Info("cycle complete", attrs...)
@@ -1027,22 +1074,38 @@ type cycleOutcomes struct {
 }
 
 // handlePreCompareGate applies the pre-compare degradation gate: it reports
-// whether the cycle should stop before the compare pass (handled) and, when it
-// should, the health outcome to return. The library gate (failed walk,
-// suspicious shrunken walk) runs first, then the upstream gate
+// whether the cycle should stop before the compare pass (handled), the health
+// outcome to return when it should, and the arrs the per-arr shrink guard left
+// SUSPECT (whose prior items the snapshot now carries - see mergeShrunkSides),
+// which is what makes the completion line read degraded. The library gate (a
+// failed walk) runs first, then the shrink guard, then the upstream gate
 // (shutdown cancellation, unusable map, failed/empty SeaDex fetch); see each
 // helper for the per-branch policy. A stale-but-usable map (errs.mapping matches
 // mapping.StaleMapError) is degraded-but-comparable and flows into the normal
 // compare path (handled=false).
-func (s *Scout) handlePreCompareGate(ctx context.Context, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, errs cycleOutcomes) (handled, healthy bool) {
+//
+// snap is taken by POINTER because the shrink guard MERGES into it: a suspect
+// side's prior items replace its fresh ones, so every later reader of this
+// cycle's snapshot - the compare, the diff, the closing save, and a degraded
+// save on the way out of the upstream gate - sees the same complete library.
+func (s *Scout) handlePreCompareGate(ctx context.Context, st *state.State, snap *library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, errs cycleOutcomes) (handled, healthy bool, shrunkArrs []string) {
 	// Record the SeaDex fetch outcome (and log a failure) exactly once, before
 	// the mutually exclusive gates below pick a winner: gate precedence must
 	// not decide whether an observed SeaDex outage exists in persisted state.
 	s.recordSeaDexFetch(ctx, st, errs.seadex)
-	if handled, healthy := s.handleLibraryGate(ctx, st, snap, mapCache, errs); handled {
-		return true, healthy
+	if walkHandled, walkHealthy := s.handleLibraryGate(ctx, st, mapCache, errs); walkHandled {
+		return true, walkHealthy, nil
 	}
-	return s.handleUpstreamGate(ctx, st, snap, mapCache, entries, errs)
+	// The shrink guard runs BEFORE the upstream gate, and that order is
+	// load-bearing: the upstream arms persist this snapshot (degradedSave), so
+	// running the merge afterwards would let an unusable map or a failed fetch
+	// write a shrunken side through as the new baseline - the one-cycle ratchet,
+	// which then mass-resolves that side's findings on the next pass however
+	// long the guard holds.
+	shrunkArrs = s.mergeShrunkSides(st, snap)
+	// Every upstream arm is degraded but HEALTHY (a restart cannot fix an
+	// upstream outage), so only the library gate above can report unhealthy.
+	return s.handleUpstreamGate(ctx, st, snap, mapCache, entries, errs), true, shrunkArrs
 }
 
 // recordSeaDexFetch records the cycle's SeaDex fetch outcome in the persisted
@@ -1050,10 +1113,11 @@ func (s *Scout) handlePreCompareGate(ctx context.Context, st *state.State, snap 
 // exclusive pre-compare gates run, the same way recordAniListDegradation is
 // applied ahead of the completion-line precedence. Centralizing it here is
 // what makes the streak (state.State.SeadexFailures) independent of which gate
-// closes the cycle: the failed-walk, shrunk-walk, and mapping-unusable arms all
-// save state, so a double outage still advances the streak and still escalates
-// to ERROR at seadexFailureEscalationThreshold instead of WARNing forever
-// behind a higher-precedence gate. A successful fetch resets the streak (the
+// closes the cycle: every exit from here saves state - the failed-walk arm, the
+// upstream arms' degradedSave, and the completion paths - so a double outage
+// still advances the streak and still escalates to ERROR at
+// seadexFailureEscalationThreshold instead of WARNing forever behind a
+// higher-precedence gate. A successful fetch resets the streak (the
 // documented "resets to 0 on any successful fetch" contract); a cancelled fetch
 // (a shutdown) is evidence of neither an outage nor a recovery, so it leaves the
 // streak untouched and stays silent - the gate that owns the interruption logs
@@ -1082,24 +1146,20 @@ func (s *Scout) recordSeaDexFetch(ctx context.Context, st *state.State, seaErr e
 
 // handleLibraryGate gates the compare pass on the library ingest. A failed arr
 // walk is unhealthy and persists only the refreshed mapping cache (findings,
-// memo, and the prior library snapshot ride along untouched). A non-failed
-// walk (partial included - Failed placeholders keep the item count, so a
-// shrink means the arr's series list itself shrank) that shrank below half
-// the prior snapshot's items (degradation.Shrunk, the shared below-half
-// policy home; zero items is the extreme case) is degraded but healthy: it
-// persists ONLY the refreshed mapping cache plus the consecutive shrunk-walk
-// streak, so a shrunken snapshot can never replace st.Library and
-// mass-resolve findings (now or a cycle later), and never auto-accepts. A
-// partial snapshot (per-series episode-fetch failures) is NOT gated here: the
-// compare proceeds on the items that walked cleanly, with the Failed items'
-// rows carried forward by replacement scoping (see finishCompletedCycle).
-func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, errs cycleOutcomes) (handled, healthy bool) {
+// memo, and the prior library snapshot ride along untouched). It is the ONLY
+// arm that stops the cycle here: a walk that succeeded but shrank suspiciously
+// no longer skips the comparison - mergeShrunkSides carries the suspect side's
+// prior items into the snapshot instead, so the compare runs on a complete
+// library model. A partial snapshot (per-series episode-fetch failures) is NOT
+// gated here either: the compare proceeds on the items that walked cleanly,
+// with the Failed items' rows carried forward by replacement scoping (see
+// finishCompletedCycle).
+func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, mapCache *mapping.Cache, errs cycleOutcomes) (handled, healthy bool) {
 	if errs.walk != nil {
-		// Persist only the refreshed mapping cache, like the shrunk-walk arm
-		// below: discarding it re-downloads an updated Fribb body next cycle.
-		// Findings, memo, and the prior library snapshot ride along untouched
-		// (an unusable-map load returns the prior cache, making this persist a
-		// no-op then).
+		// Persist only the refreshed mapping cache: discarding it re-downloads
+		// an updated Fribb body next cycle. Findings, memo, and the prior
+		// library snapshot ride along untouched (an unusable-map load returns
+		// the prior cache, making this persist a no-op then).
 		st.Mapping = *mapCache
 		s.save(ctx, st)
 		// The cycle ran to its degraded end (the feed refresh above was the
@@ -1118,58 +1178,158 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap lib
 		}
 		return true, false
 	}
-	if len(st.Library.Items) > 0 && degradation.Shrunk(len(snap.Items), len(st.Library.Items)) {
-		// A non-failed walk that shrank far below the prior snapshot
-		// (zero items, or a misconfigured arr_tags.include leaving a handful)
-		// would mass-resolve most findings. Do NOT degradedSave here:
-		// persisting the shrunken snapshot would make this a one-cycle ratchet
-		// (next cycle the prior snapshot is shrunken too and the mass-resolve
-		// happens anyway). Persist only the refreshed mapping cache plus the
-		// consecutive-shrunk streak: the ratchet danger is the shrunken
-		// snapshot, not the map, and dropping the cache re-downloads an
-		// updated Fribb body next cycle. The single log site below escalates
-		// to ERROR (the SeadexScoutCycleError rule) once the persisted streak
-		// reaches shrunkWalkEscalationThreshold - a shrink that persists for a
-		// day is a misconfiguration, not a blip, and must alert rather than
-		// WARN forever. Never auto-accepted: recovery is a genuinely recovered
-		// walk, or the operator removing state.json.
-		st.ShrunkWalks++
-		st.Mapping = *mapCache
-		s.save(ctx, st)
-		attrs := []any{
-			"items", len(snap.Items),
-			"prior_items", len(st.Library.Items),
-			"consecutive_shrunk_walks", st.ShrunkWalks,
-		}
-		s.escalate(st.ShrunkWalks, shrunkWalkEscalationThreshold,
-			"library walk shrank below half the prior snapshot; skipping comparison, findings re-stated unchanged this cycle",
-			"library walk shrank repeatedly; skipping comparison, findings re-stated unchanged this cycle - inspect the arrs and arr_tags, or remove state.json to accept the smaller library",
-			attrs...)
-		// A shutdown that landed after the shrunken walk (cancelling the
-		// SeaDex fetch or mapping load) keeps the no-completion-line rule,
-		// mirroring the walk-failed arm above: an interrupted cycle did not
-		// complete, degraded or not. The shrink WARN and streak stay - the
-		// shrink evidence comes from the completed walk.
-		if ctx.Err() == nil {
-			s.cycleGateDegraded("library-shrunk", attrs...)
-		}
-		return true, true
-	}
-	// The walk passed the shrink guard: any shrunk-walk streak ends here (a
-	// recovered walk resumes normal resolution), persisted by whichever save
-	// closes this cycle.
-	st.ShrunkWalks = 0
 	return false, true
 }
 
+// countItemsByArr tallies a snapshot's items per arr. The per-arr counts the
+// shrink guard compares need no new persisted field: library.Item already
+// carries the arr that produced it, so both sides of the comparison are
+// derivable from the snapshots themselves.
+func countItemsByArr(items []library.Item) map[string]int {
+	counts := make(map[string]int, 2)
+	for i := range items {
+		counts[items[i].Arr]++
+	}
+	return counts
+}
+
+// mergeShrunkSides applies the library shrink guard PER ARR and returns the
+// arrs it left suspect. For every arr the deployment has ENABLED whose fresh
+// item count is a suspicious truncation of its OWN prior count
+// (degradation.Shrunk, the shared below-half policy home; zero items is the
+// extreme case), it substitutes that side's PRIOR items for its fresh ones in
+// snap, advances that side's persisted streak, and emits the escalating
+// diagnostic. Every other side's fresh items pass through untouched.
+//
+// Per-arr detection REPLACES the former aggregate item-count test, which was
+// blind to the deployment that motivated this guard: in a two-arr deployment
+// one arr can successfully return ZERO items (a database restored empty, a
+// container recreated without its volume, a url repointed at a fresh instance)
+// while the other keeps the total above half - so the aggregate guard never
+// fired, the compare ran against a library missing that whole side, and every
+// finding for it silently resolved. It is strictly more sensitive, which is the
+// point: Sonarr halving while Radarr doubles fires even though the total grew.
+//
+// MERGING is what replaced the former skip-the-comparison arm. Because the
+// merged snapshot is a COMPLETE library model, the compare runs as usual on
+// full authority (nothing about notify.Report changes): the suspect side's
+// findings are recomputed from its carried prior items, which IS carrying them
+// forward, while the healthy side updates normally. And because the persisted
+// snapshot keeps the suspect side's PRIOR count, the shrink test still fires
+// next cycle - there is no one-cycle ratchet, which is the reason the former
+// arm refused to persist anything at all.
+//
+// A side whose streak REACHES shrunkWalkAcceptThreshold is ACCEPTED instead:
+// its fresh items stand, its streak resets, the compare resolves its stale
+// findings normally, and one loud WARN says so. A side that PASSES the test
+// resets its own streak and nothing else, so one arr recovering never clears
+// the other's evidence. A side whose prior count is ZERO is never suspect - a
+// legitimately empty new library must not be gated - and neither is a side the
+// deployment does not have enabled (see arrwalk.Walker.EnabledArrs).
+//
+// It does not save: the streak rides whichever save closes this cycle, the
+// same way recordAniListDegradation and recordPartialWalk do.
+//
+// One honest limitation of merging: the merged snapshot keeps the FRESH walk's
+// Snapshot.TakenAt, so state.Load's library_age diagnostic understates the age
+// of a withheld side's items. That attribute is a breadcrumb for a stale
+// synthesized feed title, and the escalating line below names the withheld arr
+// and its streak precisely - so paying one diagnostic's precision for a
+// complete library model is the right trade, but it is a trade.
+func (s *Scout) mergeShrunkSides(st *state.State, snap *library.Snapshot) []string {
+	prior, current := countItemsByArr(st.Library.Items), countItemsByArr(snap.Items)
+	var suspect []string
+	for _, arr := range s.library.EnabledArrs() {
+		if prior[arr] == 0 || !degradation.Shrunk(current[arr], prior[arr]) {
+			// A recovered (or never-tripped) side ends its OWN streak; deleting
+			// rather than zeroing keeps the persisted map to the sides that
+			// actually have evidence against them.
+			delete(st.ShrunkWalksByArr, arr)
+			continue
+		}
+		streak := st.ShrunkWalksByArr[arr] + 1
+		attrs := shrunkWalkAttrs(arr, current[arr], prior[arr], streak)
+		if streak >= shrunkWalkAcceptThreshold {
+			// The guard has withheld this side for its whole tolerance, so it
+			// accepts. WARN, not ERROR: the app's self-heal-vs-operator rule
+			// reserves ERROR for a condition that will not clear without an
+			// operator, and this is a DESIGNED outcome. But it can never be
+			// SILENT - a mass-resolve nobody was told about is the very thing
+			// the guard exists to prevent; what makes it acceptable is that it
+			// is deliberate, logged, and time-bounded.
+			delete(st.ShrunkWalksByArr, arr)
+			s.log.Warn("library walk stayed shrunken for the whole tolerated streak; accepting the smaller library for this arr as the new shape, so its stale findings resolve this cycle - if that is not intended, fix that arr and arr_tags and the next walk re-establishes the larger library", attrs...)
+			continue
+		}
+		if st.ShrunkWalksByArr == nil {
+			st.ShrunkWalksByArr = make(map[string]int, 2)
+		}
+		st.ShrunkWalksByArr[arr] = streak
+		suspect = append(suspect, arr)
+		// One log site, escalating: a shrink that persists for a day is a
+		// misconfiguration rather than a blip and must alert instead of WARNing
+		// forever. Both arms name the arr, both counts, the streak, how many
+		// consecutive daily passes remain before acceptance, and the remedy -
+		// including that removing state.json accepts the smaller library
+		// immediately, which the WARN used to leave unsaid.
+		s.escalate(streak, shrunkWalkEscalationThreshold,
+			"library walk shrank below half this arr's prior snapshot; carrying that arr's prior items forward, so its findings are recomputed from them and not resolved - inspect that arr and arr_tags, or remove state.json to accept the smaller library immediately; passes_before_accept more consecutive shrunken reconciles and the app accepts it on its own",
+			"library walk shrank repeatedly for this arr; still carrying that arr's prior items forward, so its findings are recomputed from them and not resolved - inspect that arr and arr_tags, or remove state.json to accept the smaller library immediately; passes_before_accept more consecutive shrunken reconciles and the app accepts it on its own",
+			attrs...)
+	}
+	if len(suspect) > 0 {
+		snap.Items = carryPriorItems(snap.Items, st.Library.Items, suspect)
+	}
+	return suspect
+}
+
+// shrunkWalkAttrs is the attribute set every shrink-guard log site carries, so
+// a Loki query reads the same fields whichever arm it landed on: the arr, both
+// counts, the streak, and how many further consecutive shrunken reconciles
+// remain before the guard accepts the smaller library (zero on the arm that
+// just accepted it). Field names only, and no URL or credential - the shrink is
+// described entirely by counts the app produced itself.
+func shrunkWalkAttrs(arr string, items, priorItems, streak int) []any {
+	return []any{
+		"arr", arr,
+		"items", items,
+		"prior_items", priorItems,
+		"consecutive_shrunk_walks", streak,
+		"passes_before_accept", max(shrunkWalkAcceptThreshold-streak, 0),
+	}
+}
+
+// carryPriorItems merges one walk's items with the prior snapshot's: every
+// healthy side's FRESH items, then every suspect side's PRIOR ones. The result
+// is a complete library model, which is what lets the compare run at full
+// authority while a suspect side is withheld (see mergeShrunkSides).
+func carryPriorItems(fresh, prior []library.Item, suspect []string) []library.Item {
+	merged := make([]library.Item, 0, len(fresh)+len(prior))
+	for i := range fresh {
+		if !slices.Contains(suspect, fresh[i].Arr) {
+			merged = append(merged, fresh[i])
+		}
+	}
+	for i := range prior {
+		if slices.Contains(suspect, prior[i].Arr) {
+			merged = append(merged, prior[i])
+		}
+	}
+	return merged
+}
+
 // handleUpstreamGate gates the compare pass on the map's usability and the
-// SeaDex fetch. An unusable map (no stale cache either - a load error that is
+// SeaDex fetch, and reports whether the cycle stopped here. An unusable map (no
+// stale cache either - a load error that is
 // NOT a mapping.StaleMapError; the loader owns that discrimination, so a
 // handful of operator overrides overlaid on an empty index cannot defeat the
 // gate and let the compare pass falsely resolve findings against an
 // overrides-only map), a failed SeaDex fetch, or a successful-but-empty fetch
-// are each degraded but healthy: they preserve prior findings and save only
-// the refreshed library snapshot/map (degradedSave) so a transient upstream
+// are each degraded but healthy - which is why the health verdict is the
+// CALLER's constant rather than a result here: no arm below can report
+// unhealthy. They preserve prior findings and save only
+// the refreshed library snapshot/map (degradedSave, over the snapshot the
+// shrink guard already merged) so a transient upstream
 // outage does not falsely resolve live findings. The failed-fetch arm's
 // persisted consecutive-failure streak (state.State.SeadexFailures) and its
 // single WARN/ERROR log site live in recordSeaDexFetch, applied ahead of gate
@@ -1177,7 +1337,7 @@ func (s *Scout) handleLibraryGate(ctx context.Context, st *state.State, snap lib
 // this arm only saves, emits the completion line, and returns. A shutdown
 // cancellation during the load or fetch is attributed to the shutdown, not
 // the upstream.
-func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, errs cycleOutcomes) (handled, healthy bool) {
+func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap *library.Snapshot, mapCache *mapping.Cache, entries []seadex.Entry, errs cycleOutcomes) (handled bool) {
 	if ctx.Err() != nil && (errs.mapping != nil || errs.seadex != nil) {
 		// A shutdown/redeploy cancelled the cycle during the mapping load or
 		// SeaDex fetch: the errors are the cancellation, not an upstream fault.
@@ -1189,7 +1349,7 @@ func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap li
 		s.degradedSave(ctx, st, snap, mapCache)
 		s.log.Warn("cycle interrupted by shutdown before comparison; findings not re-reported this cycle",
 			"cause", context.Cause(ctx))
-		return true, true
+		return true
 	}
 	if !mapUsable(errs.mapping) {
 		s.degradedSave(ctx, st, snap, mapCache)
@@ -1201,7 +1361,7 @@ func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap li
 		s.log.Warn("mapping unusable; skipping comparison, findings re-stated unchanged this cycle",
 			"error", errs.mapping, "feed_kept", s.feed != nil)
 		s.cycleGateDegraded("mapping-unusable", "error", errs.mapping)
-		return true, true
+		return true
 	}
 	if errs.seadex != nil {
 		// The failure was already recorded and logged once by
@@ -1209,7 +1369,7 @@ func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap li
 		// the degraded save, the completion line, and the verdict.
 		s.degradedSave(ctx, st, snap, mapCache)
 		s.cycleGateDegraded("seadex-fetch-failed", "error", logSafeUpstreamError(errs.seadex))
-		return true, true
+		return true
 	}
 	if len(entries) == 0 {
 		s.degradedSave(ctx, st, snap, mapCache)
@@ -1225,9 +1385,9 @@ func (s *Scout) handleUpstreamGate(ctx context.Context, st *state.State, snap li
 		if ctx.Err() == nil {
 			s.cycleGateDegraded("seadex-zero-entries")
 		}
-		return true, true
+		return true
 	}
-	return false, true
+	return false
 }
 
 // --- state + stats helpers ---
@@ -1263,8 +1423,8 @@ func (c *core) loadState(ctx context.Context) state.State {
 // skipped (library snapshot and map), leaving the AniList memo and finding
 // dedupe untouched so a degraded upstream (unusable map, failed or empty
 // SeaDex fetch) or a shutdown mid-cycle cannot falsely resolve live findings.
-func (s *Scout) degradedSave(ctx context.Context, st *state.State, snap library.Snapshot, mapCache *mapping.Cache) {
-	st.Library = snap
+func (s *Scout) degradedSave(ctx context.Context, st *state.State, snap *library.Snapshot, mapCache *mapping.Cache) {
+	st.Library = *snap
 	st.Mapping = *mapCache
 	s.save(ctx, st)
 }

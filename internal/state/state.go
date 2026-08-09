@@ -83,22 +83,42 @@ const SchemaVersion = 1
 // pass that runs at startup. Nothing about a finding survives a restart, and
 // nothing needs to: a completed pass reconstructs the whole set.
 type State struct {
-	Memo    match.Memo       `json:"anilist_memo"`
-	Mapping mapping.Cache    `json:"mapping"`
-	Library library.Snapshot `json:"library"`
-	// ShrunkWalks counts consecutive cycles the scout's library shrink guard
-	// rejected a fully-successful walk (an item count below half the prior
-	// snapshot's) in favour of preserving findings. It persists across cycles
-	// and restarts, resets to 0 on any walk that passes the guard, and mirrors
+	Memo    match.Memo    `json:"anilist_memo"`
+	Mapping mapping.Cache `json:"mapping"`
+	// ShrunkWalksByArr counts, PER ARR, consecutive reconciles the scout's
+	// library shrink guard judged that arr's fresh item count a suspicious
+	// truncation (below half its OWN prior count, degradation.Shrunk) and
+	// carried that side's prior items forward instead of accepting them. It
+	// persists across cycles and restarts, mirrors
 	// mapping.Cache.RejectedRefreshes so the scout can escalate its single
-	// shrunk-walk log site after a sustained streak.
-	ShrunkWalks int `json:"shrunk_walks,omitempty"`
+	// shrunk-walk log site after a sustained streak, and is keyed by the
+	// library.Arr name ("sonarr"/"radarr"). A side whose walk passes the guard
+	// has its entry DELETED (a passing side costs no bytes), and so does a
+	// side whose streak reaches scout's shrunkWalkAcceptThreshold, where the
+	// smaller library is accepted as the new shape - so an entry is bounded by
+	// that threshold rather than growing forever.
+	//
+	// It is per-arr because the aggregate count it replaced could not see one
+	// arr emptying while the other kept the total above half: the guard never
+	// fired, the compare ran against a library missing that whole side, and
+	// every finding for it silently resolved.
+	//
+	// It is also a NEW key rather than a re-typed `shrunk_walks`, deliberately.
+	// Load decodes with json.Unmarshal, which FAILS on a scalar-into-map type
+	// mismatch, and a decode error there quarantines the live file and discards
+	// the operator's AniList memo (a measured ~25-minute cold reconcile). An
+	// unknown key is ignored instead, so an older file's scalar `shrunk_walks`
+	// is dropped silently - it is a transient counter, so the cost is at most
+	// one extra cycle of tolerance, which is exactly what the app's
+	// no-rollback-no-migration decision covers.
+	ShrunkWalksByArr map[string]int   `json:"shrunk_walks_by_arr,omitempty"`
+	Library          library.Snapshot `json:"library"`
 	// SeadexFailures counts consecutive cycles whose SeaDex fetch failed (so
 	// the compare was skipped, so findings were not re-reported), whichever pre-compare
 	// gate closed the cycle - the scout records the fetch outcome ahead of gate
 	// selection, so a coinciding walk/mapping failure cannot hide the outage
 	// from the streak. It persists across cycles and restarts, resets to 0 on
-	// any successful fetch, and mirrors ShrunkWalks (and
+	// any successful fetch, and mirrors ShrunkWalksByArr (and
 	// mapping.Cache.RejectedRefreshes) so the scout can escalate its single
 	// seadex-fetch-failed log site after a sustained outage instead of
 	// degrading at WARN forever.
@@ -107,7 +127,7 @@ type State struct {
 	// left AniList lookups incomplete (match.Result.Degraded), preserving the
 	// affected entries' prior findings. It persists across cycles and
 	// restarts, resets to 0 on any completed cycle whose matching ran
-	// undegraded, and mirrors ShrunkWalks/SeadexFailures (and
+	// undegraded, and mirrors ShrunkWalksByArr/SeadexFailures (and
 	// mapping.Cache.RejectedRefreshes) so the scout can escalate its single
 	// anilist-degraded log site after a sustained streak - a permanently
 	// broken egress to graphql.anilist.co must alert instead of WARNing
@@ -120,7 +140,7 @@ type State struct {
 	// back partial (per-series episode-fetch failures left Failed placeholder
 	// items the compare excluded). It persists across cycles and restarts,
 	// resets to 0 on any completed cycle whose walk was whole, and mirrors
-	// ShrunkWalks/SeadexFailures/AniListDegraded so the scout can escalate its
+	// ShrunkWalksByArr/SeadexFailures/AniListDegraded so the scout can escalate its
 	// partial-walk log site after a sustained streak: a single permanently
 	// failing series holds Snapshot.Partial true forever, which is why
 	// notify.Report carries that item's rows forward rather than dropping them

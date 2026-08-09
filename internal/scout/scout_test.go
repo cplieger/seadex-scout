@@ -283,14 +283,14 @@ func aniStatsFn(c *anilist.Client) func() AniListStats {
 // reports the shutdown once at WARN.
 func TestLoadStateCanceledContextIsNotAFault(t *testing.T) {
 	logger, recorder := capture.New()
-	store := &fakeStore{st: state.State{ShrunkWalks: 1}}
+	store := &fakeStore{st: state.State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	s := New(&Deps{Logger: logger, Store: store, Notifier: notify.NewNotifier(logger, nil)})
 	st := s.loadState(ctx)
 
-	if st.ShrunkWalks != 0 {
+	if len(st.ShrunkWalksByArr) != 0 {
 		t.Error("loadState under a canceled context returned loaded state, want empty state")
 	}
 	if n := recorder.CountExact("state load failed; starting from empty state"); n != 0 {
@@ -456,7 +456,7 @@ func TestSaveRetriesDetachedOnCancelledContext(t *testing.T) {
 	logger := scoutTestLogger()
 	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
 	s := New(&Deps{Logger: logger, Store: store, Notifier: notify.NewNotifier(logger, nil)})
-	want := state.State{ShrunkWalks: 1}
+	want := state.State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -466,8 +466,8 @@ func TestSaveRetriesDetachedOnCancelledContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() after save with canceled context: %v", err)
 	}
-	if got.ShrunkWalks != 1 {
-		t.Errorf("Load().ShrunkWalks = %d, want 1", got.ShrunkWalks)
+	if got.ShrunkWalksByArr[library.ArrSonarr] != 1 {
+		t.Errorf("Load().ShrunkWalksByArr = %v, want {sonarr: 1}", got.ShrunkWalksByArr)
 	}
 }
 
@@ -696,12 +696,12 @@ func TestSaveGenuineFailureOnLiveContextIsNotRetried(t *testing.T) {
 	store := &failOnceStore{}
 	s := New(&Deps{Logger: logger, Store: store, Notifier: notify.NewNotifier(logger, nil)})
 
-	s.save(context.Background(), &state.State{ShrunkWalks: 1})
+	s.save(context.Background(), &state.State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}})
 
 	if store.attempts != 1 {
 		t.Errorf("Save attempts = %d, want 1 (only a cancellation takes the detached retry)", store.attempts)
 	}
-	if store.st.ShrunkWalks != 0 {
+	if len(store.st.ShrunkWalksByArr) != 0 {
 		t.Error("state was persisted by a retry, want the genuinely-failed save left unpersisted")
 	}
 	errCount := recorder.CountLevel(slog.LevelError, "state save failed")
@@ -721,7 +721,7 @@ func TestLoadStateDeadlineExceededIsNotAFault(t *testing.T) {
 
 	st := s.loadState(context.Background())
 
-	if st.ShrunkWalks != 0 || len(st.Memo.Entries) != 0 {
+	if len(st.ShrunkWalksByArr) != 0 || len(st.Memo.Entries) != 0 {
 		t.Errorf("loadState on a deadline-exceeded load = %+v, want empty state", st)
 	}
 	if n := recorder.CountExact("state load failed; starting from empty state"); n != 0 {
@@ -755,7 +755,7 @@ func TestSavePreservationRefusalWarnsInsteadOfErroring(t *testing.T) {
 			refusal := fmt.Errorf("state: save /config/state.json: blocked after an unclassified read failure: %w", state.ErrSavePreserved)
 			s := New(&Deps{Logger: logger, Store: &fakeStore{saveErr: refusal}})
 
-			s.save(tc.ctx(), &state.State{ShrunkWalks: 1})
+			s.save(tc.ctx(), &state.State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}})
 
 			if n := recorder.CountLevel(slog.LevelWarn, "state save skipped; on-disk state preserved"); n != 1 {
 				t.Errorf("preservation-refusal WARN count = %d, want exactly 1", n)
@@ -803,7 +803,7 @@ func TestSaveRetryAlwaysGetsTheAnchoredGrace(t *testing.T) {
 	store := &slowCancelStore{spend: spend}
 	s := New(&Deps{Logger: slog.New(slog.DiscardHandler), Store: store})
 
-	s.save(context.Background(), &state.State{ShrunkWalks: 1})
+	s.save(context.Background(), &state.State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}})
 
 	if store.attempts != 2 {
 		t.Fatalf("Save attempts = %d, want 2 (the cancellation takes the detached retry)", store.attempts)

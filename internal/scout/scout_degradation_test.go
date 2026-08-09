@@ -190,9 +190,10 @@ func TestCycleSeaDexFailureSanitizesLoggedErrorAtBothSites(t *testing.T) {
 // HEALTHY (a config typo must not restart-loop the container), but it closes
 // "cycle degraded" with reason=tags-emptied-side instead of "cycle complete".
 // Without it the steady state was a daemon watching nothing while every cycle
-// read fully successful: the shrink guard fires for at most one cycle (it then
-// persists the empty snapshot as the baseline) and never on a first-ever boot,
-// so the walker's per-cycle WARN was the only signal. A walk whose filter keeps
+// read fully successful: the shrink guard cannot cover this on a first-ever boot
+// (there is no prior count to have shrunk from) and stops covering it once the
+// guard's bounded tolerance accepts the smaller library, so the walker's
+// per-cycle WARN was the only lasting signal. A walk whose filter keeps
 // something still closes clean, so the arm cannot invert.
 func TestCycleTagFilterEmptiedSideClosesDegraded(t *testing.T) {
 	newScout := func(logger *slog.Logger, sonarr *fakeSonarr, include []string) *Scout {

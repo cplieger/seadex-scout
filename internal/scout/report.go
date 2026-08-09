@@ -107,16 +107,20 @@ func (r *Reporter) Report(ctx context.Context) (audit.Report, error) {
 		return audit.Report{}, err
 	}
 	if len(st.Library.Items) > 0 && degradation.Shrunk(len(snap.Items), len(st.Library.Items)) {
-		// The daemon gates its whole compare on exactly this shape
-		// (handleLibraryGate's shrink guard): a non-failed walk retaining under
+		// The daemon applies the same below-half test per ARR, on that arr's own
+		// prior count (mergeShrunkSides): a non-failed walk retaining under
 		// half the last persisted snapshot is a suspicious truncation, not a
-		// real change. The report still renders - it is read-only, cannot clear
-		// the daemon's gate, and is the operator's fallback view when the cycle
-		// is stuck - but it must SAY so, or the timestamped artifact silently
-		// omits every missing series, exactly the incompleteness reportSnapshot
-		// refuses a partial snapshot over. No prior snapshot (report-only
-		// deployments never persist one) means no baseline, so the check
-		// no-ops there rather than guessing.
+		// real change. There the suspect side's prior items are carried into
+		// the compare until the guard's tolerance expires; here the report
+		// still renders - it is read-only, cannot influence the daemon's guard,
+		// and is the operator's fallback view when a side is withheld - but it
+		// must SAY so, or the timestamped artifact silently omits every missing
+		// series, exactly the incompleteness reportSnapshot refuses a partial
+		// snapshot over. The aggregate reading is deliberate for this WARN: the
+		// report covers whatever this walk returned, whole-library, and a
+		// read-only path carries no per-arr streak and withholds nothing. No
+		// prior snapshot (report-only deployments never persist one) means no
+		// baseline, so the check no-ops there rather than guessing.
 		r.log.Warn("report: library walk shrank below half the last persisted snapshot; the audit covers the smaller library - inspect the arrs and arr_tags",
 			"items", len(snap.Items), "prior_items", len(st.Library.Items))
 	}

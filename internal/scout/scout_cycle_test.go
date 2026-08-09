@@ -101,7 +101,7 @@ func TestCycleMappingUnusableReportsNothing(t *testing.T) {
 func TestCycleDegradedSavePersistsSanitizedArrURL(t *testing.T) {
 	logger := scoutTestLogger()
 	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"), logger)
-	if err := store.Save(context.Background(), &state.State{ShrunkWalks: 1}); err != nil {
+	if err := store.Save(context.Background(), &state.State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}}); err != nil {
 		t.Fatalf("seed state: %v", err)
 	}
 	sonarr := &fakeSonarr{series: []arrapi.Series{{ID: 7, Title: "Frieren", TitleSlug: "frieren", TvdbID: 123, Year: 2023}}}
@@ -250,25 +250,46 @@ func TestCycleEmptySeaDexEntriesReportsNothing(t *testing.T) {
 	}
 }
 
-// TestHandlePreCompareGateEmptyWalkPreservesPriorSnapshot pins the successful-
-// but-empty library-walk gate: a walk returning zero items while the prior
-// snapshot had items must stop the compare (mass-resolve guard) without
-// persisting the empty snapshot (the one-cycle ratchet).
-func TestHandlePreCompareGateEmptyWalkPreservesPriorSnapshot(t *testing.T) {
+// TestHandlePreCompareGateEmptyArrCarriesPriorItemsInsteadOfSkipping pins the
+// gate boundary of the per-arr shrink guard: an enabled arr whose walk returns
+// zero items while its prior count was non-zero must NOT stop the cycle (the
+// comparison runs on a merged snapshot) and must NOT let the empty snapshot
+// through - the gate hands back a snapshot carrying that side's prior items and
+// names it suspect, and it saves nothing of its own (the streak rides whichever
+// save closes the cycle).
+//
+// This is the shape the guard's whole design turns on, so it is pinned at the
+// gate as well as end-to-end (see scout_shrink_test.go): the arm it replaced
+// returned handled=true and skipped the comparison entirely.
+func TestHandlePreCompareGateEmptyArrCarriesPriorItemsInsteadOfSkipping(t *testing.T) {
 	logger := scoutTestLogger()
-	st := state.State{Library: library.Snapshot{Items: []library.Item{{ArrID: 7, Title: "Frieren"}}}}
+	st := state.State{Library: library.Snapshot{Items: []library.Item{
+		{Arr: library.ArrSonarr, ArrID: 7, Title: "Frieren"},
+	}}}
 	store := &fakeStore{st: st}
-	s := New(&Deps{Logger: logger, Store: store, Notifier: notify.NewNotifier(logger, nil)})
-	handled, healthy := s.handlePreCompareGate(context.Background(), &st, library.Snapshot{}, &mapping.Cache{}, []seadex.Entry{{AniListID: 1}}, cycleOutcomes{})
-	if !handled || !healthy {
-		t.Errorf("handlePreCompareGate = (%v, %v), want (true, true)", handled, healthy)
+	s := New(&Deps{
+		Logger:   logger,
+		Store:    store,
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{}, Logger: logger}),
+		Notifier: notify.NewNotifier(logger, nil),
+	})
+	snap := library.Snapshot{}
+
+	handled, healthy, shrunkArrs := s.handlePreCompareGate(context.Background(), &st, &snap, &mapping.Cache{}, []seadex.Entry{{AniListID: 1}}, cycleOutcomes{})
+	if handled || !healthy {
+		t.Errorf("handlePreCompareGate = (%v, %v), want (false, true) (the compare runs on the merged snapshot)", handled, healthy)
 	}
-	if store.saves != 1 {
-		t.Fatalf("saves = %d, want 1 (the gate persists the refreshed mapping cache)", store.saves)
+	if len(shrunkArrs) != 1 || shrunkArrs[0] != library.ArrSonarr {
+		t.Errorf("shrunk arrs = %v, want [sonarr]", shrunkArrs)
 	}
-	loaded := store.st
-	if len(loaded.Library.Items) != 1 || loaded.Library.Items[0].Title != "Frieren" {
-		t.Errorf("persisted library = %+v, want prior non-empty snapshot", loaded.Library)
+	if len(snap.Items) != 1 || snap.Items[0].Title != "Frieren" {
+		t.Errorf("merged snapshot = %+v, want the prior item carried forward", snap.Items)
+	}
+	if st.ShrunkWalksByArr[library.ArrSonarr] != 1 {
+		t.Errorf("ShrunkWalksByArr = %v, want {sonarr: 1}", st.ShrunkWalksByArr)
+	}
+	if store.saves != 0 {
+		t.Errorf("saves = %d, want 0 (the shrink guard saves nothing itself; the streak rides the cycle's closing save)", store.saves)
 	}
 }
 
@@ -346,94 +367,45 @@ func TestCyclePartialWalkComparesCleanSubset(t *testing.T) {
 	}
 }
 
-// TestHandlePreCompareGateShrunkWalkEscalatesAfterRepeatedShrinks pins the
-// WARN-to-ERROR escalation of the single shrunk-walk log site (mirroring the
-// mapping guard's): below the threshold a below-half walk logs at WARN; once
-// the persisted streak reaches shrunkWalkEscalationThreshold the same site
-// logs at ERROR (firing the existing SeadexScoutCycleError Loki rule) -
-// exactly one line either way, never auto-accepting, with the prior snapshot
-// and findings preserved and the streak persisted.
-func TestHandlePreCompareGateShrunkWalkEscalatesAfterRepeatedShrinks(t *testing.T) {
-	tests := []struct {
-		name        string
-		priorStreak int
-		wantError   bool
-	}{
-		{name: "below threshold stays WARN", priorStreak: shrunkWalkEscalationThreshold - 2, wantError: false},
-		{name: "at threshold escalates to ERROR", priorStreak: shrunkWalkEscalationThreshold - 1, wantError: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			logger, recorder := capture.New()
-			st := state.State{
-				Library: library.Snapshot{Items: []library.Item{
-					{ArrID: 1, Title: "A"}, {ArrID: 2, Title: "B"}, {ArrID: 3, Title: "C"}, {ArrID: 4, Title: "D"},
-				}},
-				ShrunkWalks: tc.priorStreak,
-			}
-			store := &fakeStore{st: st}
-			s := New(&Deps{Logger: logger, Store: store, Notifier: notify.NewNotifier(logger, nil)})
-			// 1 item against a prior of 4: 1*2 < 4 trips the shrink guard.
-			snap := library.Snapshot{Items: []library.Item{{ArrID: 1, Title: "A"}}}
-			mapCache := mapping.Cache{Records: []mapping.Record{{AniListID: 154587, TvdbID: 123}}}
-
-			handled, healthy := s.handlePreCompareGate(context.Background(), &st, snap, &mapCache, []seadex.Entry{{AniListID: 154587}}, cycleOutcomes{})
-			if !handled || !healthy {
-				t.Errorf("handlePreCompareGate = (%v, %v), want (true, true)", handled, healthy)
-			}
-			if store.saves != 1 {
-				t.Fatalf("saves = %d, want 1 (the guard persists the mapping cache and the streak)", store.saves)
-			}
-			loaded := store.st
-			if loaded.ShrunkWalks != tc.priorStreak+1 {
-				t.Errorf("persisted ShrunkWalks = %d, want %d", loaded.ShrunkWalks, tc.priorStreak+1)
-			}
-			if len(loaded.Library.Items) != 4 {
-				t.Errorf("persisted library = %d items, want the prior 4 (a shrunken walk is never auto-accepted)", len(loaded.Library.Items))
-			}
-			warns := recorder.CountLevel(slog.LevelWarn, "library walk shrank")
-			errs := recorder.CountLevel(slog.LevelError, "library walk shrank")
-			if tc.wantError {
-				if errs != 1 || warns != 0 {
-					t.Errorf("escalated log counts: ERROR=%d WARN=%d, want exactly one ERROR and no WARN (single log site)", errs, warns)
-				}
-			} else if warns != 1 || errs != 0 {
-				t.Errorf("below-threshold log counts: WARN=%d ERROR=%d, want exactly one WARN and no ERROR", warns, errs)
-			}
-			if n := recorder.CountExact("cycle degraded"); n != 1 {
-				t.Errorf("'cycle degraded' count = %d, want 1 (the shrink guard's completion line)", n)
-			}
-			if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "library-shrunk" {
-				t.Errorf("degraded reasons = %v, want [library-shrunk]", reasons)
-			}
-		})
-	}
-}
-
 // TestHandlePreCompareGateShrunkWalkWithSeaDexOutageWarnsFeedKept pins the
-// shrink-guard arm's feed-outage contract: a library-shrink + SeaDex double
-// outage with a feed configured must still surface the SeaDex failure (its
-// standard log line, recorded ahead of gate selection, carrying feed_kept) and
-// still advance the persisted streak, so the outage does not read as
-// shrink-only in Loki and cannot escape escalation behind a winning gate, while
-// the shrink guard's own degraded completion line and no-rebuild behavior are
-// unchanged.
+// shrink guard's feed-outage contract: a library-shrink + SeaDex double outage
+// with a feed configured must still surface the SeaDex failure (its standard log
+// line, recorded ahead of gate selection, carrying feed_kept) and still advance
+// the persisted per-arr shrink streak, so the outage does not read as
+// shrink-only in Loki and cannot escape escalation behind a winning gate.
+//
+// The completion line is the SeaDex gate's now, not the shrink's: the shrink no
+// longer stops the cycle (it merges and lets the compare run), so the pass that
+// closes early here closes because SeaDex is down. The shrink evidence stands
+// beside it in its own escalating line and in the persisted streak.
 func TestHandlePreCompareGateShrunkWalkWithSeaDexOutageWarnsFeedKept(t *testing.T) {
 	logger, recorder := capture.New()
 	feed := &fakeFeed{}
 	st := state.State{
 		Library: library.Snapshot{Items: []library.Item{
-			{ArrID: 1, Title: "A"}, {ArrID: 2, Title: "B"}, {ArrID: 3, Title: "C"}, {ArrID: 4, Title: "D"},
+			{Arr: library.ArrSonarr, ArrID: 1, Title: "A"},
+			{Arr: library.ArrSonarr, ArrID: 2, Title: "B"},
+			{Arr: library.ArrSonarr, ArrID: 3, Title: "C"},
+			{Arr: library.ArrSonarr, ArrID: 4, Title: "D"},
 		}},
 	}
 	store := &fakeStore{st: st}
-	s := New(&Deps{Logger: logger, Store: store, Feed: feed, Notifier: notify.NewNotifier(logger, nil)})
-	snap := library.Snapshot{Items: []library.Item{{ArrID: 1, Title: "A"}}}
+	s := New(&Deps{
+		Logger:   logger,
+		Store:    store,
+		Feed:     feed,
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{}, Logger: scoutTestLogger()}),
+		Notifier: notify.NewNotifier(logger, nil),
+	})
+	snap := library.Snapshot{Items: []library.Item{{Arr: library.ArrSonarr, ArrID: 1, Title: "A"}}}
 	mapCache := mapping.Cache{}
 
-	handled, healthy := s.handlePreCompareGate(context.Background(), &st, snap, &mapCache, nil, cycleOutcomes{seadex: errors.New("seadex down")})
+	handled, healthy, shrunkArrs := s.handlePreCompareGate(context.Background(), &st, &snap, &mapCache, nil, cycleOutcomes{seadex: errors.New("seadex down")})
 	if !handled || !healthy {
-		t.Errorf("handlePreCompareGate = (%v, %v), want (true, true)", handled, healthy)
+		t.Errorf("handlePreCompareGate = (%v, %v), want (true, true) (the SeaDex outage closes the cycle)", handled, healthy)
+	}
+	if len(shrunkArrs) != 1 || shrunkArrs[0] != library.ArrSonarr {
+		t.Errorf("shrunk arrs = %v, want [sonarr] (the shrink is still observed under the outage)", shrunkArrs)
 	}
 	if n := recorder.CountExact("seadex fetch failed; skipping comparison, findings re-stated unchanged this cycle"); n != 1 {
 		t.Errorf("seadex failure WARN count = %d, want 1 (a shrink + SeaDex double outage must not read as shrink-only)", n)
@@ -441,8 +413,14 @@ func TestHandlePreCompareGateShrunkWalkWithSeaDexOutageWarnsFeedKept(t *testing.
 	if store.st.SeadexFailures != 1 {
 		t.Errorf("persisted SeadexFailures = %d, want 1 (the streak advances, and persists, whichever gate closes the cycle)", store.st.SeadexFailures)
 	}
-	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "library-shrunk" {
-		t.Errorf("degraded reasons = %v, want [library-shrunk]", reasons)
+	if store.st.ShrunkWalksByArr[library.ArrSonarr] != 1 {
+		t.Errorf("persisted ShrunkWalksByArr = %v, want {sonarr: 1} (the shrink streak rides the degraded save)", store.st.ShrunkWalksByArr)
+	}
+	if counts := countItemsByArr(store.st.Library.Items); counts[library.ArrSonarr] != 4 {
+		t.Errorf("persisted sonarr items = %d, want the prior 4 (the degraded save must persist the MERGED snapshot, or the shrink ratchets)", counts[library.ArrSonarr])
+	}
+	if reasons := degradedReasons(recorder); len(reasons) != 1 || reasons[0] != "seadex-fetch-failed" {
+		t.Errorf("degraded reasons = %v, want [seadex-fetch-failed] (the gate that stopped the cycle owns the completion line)", reasons)
 	}
 	if kept, ok := recordAttr(recorder, "seadex fetch failed; skipping comparison, findings re-stated unchanged this cycle", "feed_kept"); !ok || kept != "true" {
 		t.Errorf("seadex-failure WARN feed_kept attr = %q (found=%t), want \"true\" (the configured feed kept its previous snapshot through the outage)", kept, ok)
@@ -450,15 +428,16 @@ func TestHandlePreCompareGateShrunkWalkWithSeaDexOutageWarnsFeedKept(t *testing.
 }
 
 // TestCycleRecoveredWalkResetsShrunkStreak pins the shrink guard's recovery
-// rule: a fully-successful walk that passes the guard resets the persisted
-// consecutive-shrunk-walk streak to zero, so normal resolution resumes and a
-// later shrink starts a fresh streak.
+// rule: a walk that passes the guard for an arr ends THAT arr's persisted
+// consecutive-shrunk-walk streak (the entry is deleted, so a passing side costs
+// no persisted bytes), so normal resolution resumes and a later shrink starts a
+// fresh streak.
 func TestCycleRecoveredWalkResetsShrunkStreak(t *testing.T) {
 	logger := scoutTestLogger()
 	store := &fakeStore{st: state.State{
-		Mapping:     frierenMappingCache(),
-		Library:     library.Snapshot{Items: []library.Item{{Arr: library.ArrSonarr, ArrID: 7, Title: "Frieren", TvdbID: 123}}},
-		ShrunkWalks: 3,
+		Mapping:          frierenMappingCache(),
+		Library:          library.Snapshot{Items: []library.Item{{Arr: library.ArrSonarr, ArrID: 7, Title: "Frieren", TvdbID: 123}}},
+		ShrunkWalksByArr: map[string]int{library.ArrSonarr: 3},
 	}}
 	sonarr := &fakeSonarr{
 		series: []arrapi.Series{{ID: 7, Title: "Frieren", TvdbID: 123, Year: 2023}},
@@ -481,8 +460,8 @@ func TestCycleRecoveredWalkResetsShrunkStreak(t *testing.T) {
 	if healthy := s.Cycle(context.Background()); !healthy {
 		t.Fatal("Cycle healthy=false, want true on a recovered walk")
 	}
-	if store.st.ShrunkWalks != 0 {
-		t.Errorf("persisted ShrunkWalks = %d, want 0 after a walk that passes the guard", store.st.ShrunkWalks)
+	if len(store.st.ShrunkWalksByArr) != 0 {
+		t.Errorf("persisted ShrunkWalksByArr = %v, want empty after a walk that passes the guard", store.st.ShrunkWalksByArr)
 	}
 }
 
@@ -551,19 +530,29 @@ func TestCycleSeaDexFailureEscalatesAfterRepeatedFailures(t *testing.T) {
 // the streak still advances and the single seadex-fetch-failed site still
 // escalates to ERROR at the threshold (firing SeadexScoutCycleError). Before the
 // fetch outcome was recorded ahead of gate selection, a coinciding
-// mapping/walk/shrink gate left the streak frozen, so a first boot with both
+// mapping or walk gate left the streak frozen, so a first boot with both
 // upstreams down could WARN forever and never alert.
 func TestHandlePreCompareGateSeaDexEscalatesBehindWinningMappingGate(t *testing.T) {
 	logger, recorder := capture.New()
 	st := state.State{SeadexFailures: seadexFailureEscalationThreshold - 1}
 	store := &fakeStore{st: st}
-	s := New(&Deps{Logger: logger, Store: store, Feed: &fakeFeed{}, Notifier: notify.NewNotifier(logger, nil)})
+	s := New(&Deps{
+		Logger:   logger,
+		Store:    store,
+		Feed:     &fakeFeed{},
+		Library:  arrwalk.NewWalker(&arrwalk.Config{Sonarr: &fakeSonarr{}, Logger: scoutTestLogger()}),
+		Notifier: notify.NewNotifier(logger, nil),
+	})
 	mapCache := mapping.Cache{}
+	snap := library.Snapshot{}
 
-	handled, healthy := s.handlePreCompareGate(context.Background(), &st, library.Snapshot{}, &mapCache, nil,
+	handled, healthy, shrunkArrs := s.handlePreCompareGate(context.Background(), &st, &snap, &mapCache, nil,
 		cycleOutcomes{mapping: errors.New("fribb down"), seadex: errors.New("seadex down")})
 	if !handled || !healthy {
 		t.Errorf("handlePreCompareGate = (%v, %v), want (true, true)", handled, healthy)
+	}
+	if len(shrunkArrs) != 0 {
+		t.Errorf("shrunk arrs = %v, want none (there is no prior snapshot to have shrunk from)", shrunkArrs)
 	}
 	if store.st.SeadexFailures != seadexFailureEscalationThreshold {
 		t.Errorf("persisted SeadexFailures = %d, want %d (a winning gate must not freeze the streak)", store.st.SeadexFailures, seadexFailureEscalationThreshold)
@@ -1058,7 +1047,7 @@ func TestSaveGenuineFailureLogsError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	s.save(ctx, &state.State{ShrunkWalks: 1})
+	s.save(ctx, &state.State{ShrunkWalksByArr: map[string]int{library.ArrSonarr: 1}})
 
 	if store.saves != 0 {
 		t.Errorf("saves = %d, want 0 (every attempt failed)", store.saves)
@@ -1679,9 +1668,9 @@ func TestCycleAniListDegradedStreakEscalatesToError(t *testing.T) {
 
 // TestCycleExactlyHalfWalkPassesShrinkGuard pins the shrink guard's exact
 // boundary through the public cycle: the policy
-// (degradation.Shrunk) is "fewer than 1/factor of the prior items"
-// - strictly BELOW half at the default 2 - so a walk returning exactly half
-// the prior snapshot's items must pass the guard. The externally meaningful
+// (degradation.Shrunk) is "fewer than 1/factor of the prior items for that arr"
+// - strictly BELOW half at the default 2 - so a walk returning exactly half of
+// the arr's prior items must pass the guard. The externally meaningful
 // consequences are asserted, not the orchestration decomposition: the halved
 // walk is persisted as the new snapshot, the shrunk-walk streak resets, the
 // cycle stays healthy, and it closes with the completion (not the degraded)
@@ -1693,12 +1682,12 @@ func TestCycleExactlyHalfWalkPassesShrinkGuard(t *testing.T) {
 			{AniListID: 1, Type: "TV", TvdbID: 101, SeasonTvdb: 1},
 		}},
 		Library: library.Snapshot{Items: []library.Item{
-			{ArrID: 1, Title: "A"},
-			{ArrID: 2, Title: "B"},
-			{ArrID: 3, Title: "C"},
-			{ArrID: 4, Title: "D"},
+			{Arr: library.ArrSonarr, ArrID: 1, Title: "A"},
+			{Arr: library.ArrSonarr, ArrID: 2, Title: "B"},
+			{Arr: library.ArrSonarr, ArrID: 3, Title: "C"},
+			{Arr: library.ArrSonarr, ArrID: 4, Title: "D"},
 		}},
-		ShrunkWalks: 3,
+		ShrunkWalksByArr: map[string]int{library.ArrSonarr: 3},
 	}}
 	sonarr := &fakeSonarr{series: []arrapi.Series{
 		{ID: 1, Title: "A", TvdbID: 101},
@@ -1721,8 +1710,8 @@ func TestCycleExactlyHalfWalkPassesShrinkGuard(t *testing.T) {
 	if got := len(store.st.Library.Items); got != 2 {
 		t.Errorf("persisted library items = %d, want 2 (exactly half must pass the shrink guard)", got)
 	}
-	if store.st.ShrunkWalks != 0 {
-		t.Errorf("persisted ShrunkWalks = %d, want 0 after the boundary walk completed", store.st.ShrunkWalks)
+	if len(store.st.ShrunkWalksByArr) != 0 {
+		t.Errorf("persisted ShrunkWalksByArr = %v, want empty after the boundary walk completed", store.st.ShrunkWalksByArr)
 	}
 	if n := recorder.CountExact("cycle degraded"); n != 0 {
 		t.Errorf("cycle degraded count = %d, want 0 at the non-shrinking boundary", n)
@@ -1826,7 +1815,10 @@ func TestCycleShutdownAfterShrunkenWalkKeepsWarnOmitsCompletionLine(t *testing.T
 	store := &fakeStore{st: state.State{
 		Mapping: frierenMappingCache(),
 		Library: library.Snapshot{Items: []library.Item{
-			{ArrID: 1, Title: "A"}, {ArrID: 2, Title: "B"}, {ArrID: 3, Title: "C"}, {ArrID: 4, Title: "D"},
+			{Arr: library.ArrSonarr, ArrID: 1, Title: "A"},
+			{Arr: library.ArrSonarr, ArrID: 2, Title: "B"},
+			{Arr: library.ArrSonarr, ArrID: 3, Title: "C"},
+			{Arr: library.ArrSonarr, ArrID: 4, Title: "D"},
 		}},
 	}}
 	// 1 series against a prior of 4 trips the shrink guard; the SeaDex fetch
@@ -1844,47 +1836,14 @@ func TestCycleShutdownAfterShrunkenWalkKeepsWarnOmitsCompletionLine(t *testing.T
 	if healthy := s.Cycle(ctx); !healthy {
 		t.Fatal("Cycle healthy=false, want true (a shrunken walk is degraded, not unhealthy)")
 	}
-	if n := recorder.CountExact("library walk shrank below half the prior snapshot; skipping comparison, findings re-stated unchanged this cycle"); n != 1 {
+	if n := recorder.CountLevel(slog.LevelWarn, "library walk shrank below half this arr's prior snapshot"); n != 1 {
 		t.Errorf("shrink WARN count = %d, want 1 (the shrink evidence comes from the completed walk)", n)
 	}
 	if n := recorder.CountExact("cycle degraded"); n != 0 {
 		t.Errorf("'cycle degraded' count = %d, want 0 (a shutdown after the shrunken walk interrupted the cycle; no completion line)", n)
 	}
-	if store.st.ShrunkWalks != 1 {
-		t.Errorf("persisted ShrunkWalks = %d, want 1 (the streak persists across the shutdown)", store.st.ShrunkWalks)
-	}
-}
-
-// TestHandlePreCompareGateShrunkWalkSavePersistsSeaDexStreakReset pins the
-// reset arm of the documented SeadexFailures contract ("resets to 0 on any
-// successful fetch") on the shrink-guard arm: that arm saves state and
-// returns before the upstream gate, so a successful fetch's reset must ride
-// the shrink save - mirroring the walk-failed-with-feed sibling - or a
-// recovery during a persistent shrink would leave a stale streak frozen in
-// state.json and falsely escalate the first later blip to ERROR.
-func TestHandlePreCompareGateShrunkWalkSavePersistsSeaDexStreakReset(t *testing.T) {
-	logger := scoutTestLogger()
-	st := state.State{
-		Library: library.Snapshot{Items: []library.Item{
-			{ArrID: 1, Title: "A"}, {ArrID: 2, Title: "B"}, {ArrID: 3, Title: "C"}, {ArrID: 4, Title: "D"},
-		}},
-		SeadexFailures: 3,
-	}
-	store := &fakeStore{st: st}
-	s := New(&Deps{Logger: logger, Store: store, Notifier: notify.NewNotifier(logger, nil)})
-	// 1 item against a prior of 4 trips the shrink guard; the nil seaErr
-	// models the successful fetch whose reset must ride the shrink save.
-	snap := library.Snapshot{Items: []library.Item{{ArrID: 1, Title: "A"}}}
-
-	handled, healthy := s.handlePreCompareGate(context.Background(), &st, snap, &mapping.Cache{}, []seadex.Entry{{AniListID: 1}}, cycleOutcomes{})
-	if !handled || !healthy {
-		t.Errorf("handlePreCompareGate = (%v, %v), want (true, true)", handled, healthy)
-	}
-	if store.st.SeadexFailures != 0 {
-		t.Errorf("persisted SeadexFailures = %d, want 0 (the successful fetch's reset must ride the shrink-guard save)", store.st.SeadexFailures)
-	}
-	if store.st.ShrunkWalks != 1 {
-		t.Errorf("persisted ShrunkWalks = %d, want 1", store.st.ShrunkWalks)
+	if store.st.ShrunkWalksByArr[library.ArrSonarr] != 1 {
+		t.Errorf("persisted ShrunkWalksByArr = %v, want {sonarr: 1} (the streak persists across the shutdown)", store.st.ShrunkWalksByArr)
 	}
 }
 

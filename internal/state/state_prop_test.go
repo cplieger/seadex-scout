@@ -2,18 +2,21 @@ package state
 
 import (
 	"context"
+	"maps"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/cplieger/seadex-scout/internal/library"
 	"github.com/cplieger/seadex-scout/internal/match"
 	"pgregory.net/rapid"
 )
 
 // TestStoreSaveLoadRoundTripProperty pins the persistence round trip for
 // arbitrary generated states: every persisted field (the AniList memo with its
-// jittered expiry stamps and arbitrary unicode titles, plus all three
-// escalation streaks) survives Save then Load exactly, and Save stamps
+// jittered expiry stamps and arbitrary unicode titles, plus the per-arr shrink
+// streak map and the two scalar escalation streaks) survives Save then Load
+// exactly, and Save stamps
 // SchemaVersion. This is the
 // generative net over the json-tag/projection drift the deterministic
 // round-trip tests pin with single sample values.
@@ -38,8 +41,11 @@ func TestStoreSaveLoadRoundTripProperty(t *testing.T) {
 			0, 8,
 		).Draw(rt, "memo")
 		want := &State{
-			Memo:            match.Memo{Entries: memo},
-			ShrunkWalks:     rapid.IntRange(0, 1000).Draw(rt, "shrunk"),
+			Memo: match.Memo{Entries: memo},
+			ShrunkWalksByArr: rapid.MapOfN(
+				rapid.SampledFrom([]string{library.ArrSonarr, library.ArrRadarr}),
+				rapid.IntRange(0, 1000), 0, 2,
+			).Draw(rt, "shrunk_walks_by_arr"),
 			SeadexFailures:  rapid.IntRange(0, 1000).Draw(rt, "seadex_failures"),
 			AniListDegraded: rapid.IntRange(0, 1000).Draw(rt, "anilist_degraded"),
 		}
@@ -55,8 +61,11 @@ func TestStoreSaveLoadRoundTripProperty(t *testing.T) {
 		if got.Version != SchemaVersion {
 			rt.Errorf("Version = %d, want stamped %d", got.Version, SchemaVersion)
 		}
-		if got.ShrunkWalks != want.ShrunkWalks || got.SeadexFailures != want.SeadexFailures || got.AniListDegraded != want.AniListDegraded {
-			rt.Errorf("streaks = %d/%d/%d, want %d/%d/%d", got.ShrunkWalks, got.SeadexFailures, got.AniListDegraded, want.ShrunkWalks, want.SeadexFailures, want.AniListDegraded)
+		if !maps.Equal(got.ShrunkWalksByArr, want.ShrunkWalksByArr) {
+			rt.Errorf("ShrunkWalksByArr = %v, want %v", got.ShrunkWalksByArr, want.ShrunkWalksByArr)
+		}
+		if got.SeadexFailures != want.SeadexFailures || got.AniListDegraded != want.AniListDegraded {
+			rt.Errorf("streaks = %d/%d, want %d/%d", got.SeadexFailures, got.AniListDegraded, want.SeadexFailures, want.AniListDegraded)
 		}
 		if len(got.Memo.Entries) != len(want.Memo.Entries) {
 			rt.Fatalf("memo len = %d, want %d", len(got.Memo.Entries), len(want.Memo.Entries))
