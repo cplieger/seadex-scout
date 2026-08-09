@@ -9,6 +9,8 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -879,7 +881,7 @@ type feedState struct {
 // cannot blank a live journal: the caller keeps the last-good snapshot and the
 // next cycle retries.
 func (w *FeedWriter) loadPrevious(ctx context.Context) (feedState, error) {
-	data, err := atomicfile.ReadBounded(ctx, w.path, maxFeedBytes)
+	data, err := w.readPrevious(ctx)
 	if err != nil {
 		return w.classifyPreviousReadError(err)
 	}
@@ -1004,6 +1006,60 @@ func publicationLogWithinLimits(published map[string]bool) bool {
 // oversized file, so the state self-heals. Any other read failure (EACCES,
 // EIO) is returned as an error so a TRANSIENT fault cannot blank a live
 // journal.
+// readPrevious reads the persisted snapshot CONFINED to its own directory, the
+// same shape h-f24 applied to the mapping loader's overrides read, which named
+// this call site as the sibling that should be swept with it.
+//
+// The threat is the INODE, not the content, which is why the settled
+// `feed-json-bounded-decode` decline does not answer it: that line rests on the
+// snapshot being self-produced, and a FIFO carries no content at all - it never
+// reaches the decoder. An unconfined ReadBounded blocks in open(2) on a FIFO
+// with no writer, and MEASURED against atomicfile v2.4.0, a context deadline
+// does NOT rescue it: the block is in the kernel before any Go-level context
+// check runs. That call sits inside the compare pass, which holds the
+// cross-process cycle lock, so a planted FIFO wedges the pass, starves the
+// health marker (refreshed only on a COMPLETED pass), fails the container
+// healthcheck, and hangs again on restart - a loop no timeout breaks. A symlink
+// escaping the directory is the smaller half: its target's bytes reach the
+// bounded decoder-error WARN.
+//
+// ReadBoundedInRoot closes both: it opens O_NONBLOCK and stats the OPEN HANDLE,
+// refusing anything that is not a regular file with ErrNotRegular, and os.Root
+// refuses a path that escapes the directory. Either lands in
+// classifyPreviousReadError's default arm, so the caller keeps the last-good
+// snapshot and the next cycle retries - the behaviour a transient EACCES/EIO
+// already gets, and strictly better than a hang.
+//
+// Deliberately NOT gated on the deployment: the compose file bind-mounts a HOST
+// directory at /config, which is exactly the case `feed-json-bounded-decode`'s
+// own deployment-specific tag excludes from its premise.
+func (w *FeedWriter) readPrevious(ctx context.Context) ([]byte, error) {
+	dir := filepath.Dir(w.path)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		// A parent that cannot hold a snapshot at all reads as ABSENT, which is
+		// what the unconfined read did: it returned ENOTDIR and
+		// classifyPreviousReadError mapped that to fresh-install, letting the
+		// real failure surface at the WRITE - the right place for a deployment
+		// error of that shape. os.OpenRoot reports "not a directory" as a
+		// *fs.PathError whose Err does NOT satisfy errors.Is(err,
+		// syscall.ENOTDIR) (verified on this toolchain), so re-express it rather
+		// than matching the message text. A MISSING parent already arrives as
+		// fs.ErrNotExist, which that arm catches directly.
+		if fi, statErr := os.Stat(dir); statErr == nil && !fi.IsDir() {
+			return nil, fmt.Errorf("%w: feed snapshot parent %s", syscall.ENOTDIR, dir)
+		}
+		return nil, err
+	}
+	defer func() {
+		if clErr := root.Close(); clErr != nil {
+			w.log.Warn("indexer: could not close feed snapshot directory handle",
+				"dir", dir, "error", clErr)
+		}
+	}()
+	return atomicfile.ReadBoundedInRoot(ctx, root, filepath.Base(w.path), maxFeedBytes)
+}
+
 func (w *FeedWriter) classifyPreviousReadError(err error) (feedState, error) {
 	switch {
 	case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):

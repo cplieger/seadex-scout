@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -13,9 +14,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/jsonx/bounded"
 	"github.com/cplieger/seadex-scout/internal/seadex"
 	"github.com/cplieger/seadex-scout/internal/tagfilter"
@@ -1816,5 +1819,77 @@ func TestDecodeSnapshotBoundsAggregateMapEntries(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "budget exceeded") {
 		t.Errorf("error = %q, want the aggregate map-entry budget error", err)
+	}
+}
+
+// TestLoadPreviousRefusesANonRegularSnapshot pins the defence the confined read
+// exists for, and it is a HANG this test would otherwise reproduce rather than a
+// wrong answer.
+//
+// An unconfined read blocks in open(2) on a FIFO with no writer, and a context
+// deadline does not rescue it: the block is in the kernel before any Go-level
+// context check runs. That read sits inside the compare pass, which holds the
+// cross-process cycle lock, so a planted FIFO wedges the pass, starves the
+// health marker (refreshed only on a COMPLETED pass), fails the container
+// healthcheck, and hangs again after the restart. ReadBoundedInRoot opens
+// O_NONBLOCK and stats the OPEN handle, so a FIFO is refused as ErrNotRegular
+// and lands in classifyPreviousReadError's transient arm: the rebuild fails, the
+// last-good snapshot stands, and the next cycle retries.
+//
+// The whole test body runs under a deadline BECAUSE a regression here does not
+// fail an assertion - it hangs the suite.
+func TestLoadPreviousRefusesANonRegularSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "feed.json")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Skipf("mkfifo unsupported here: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- NewFeedWriter(&FeedWriterConfig{Path: path}, nil, nil).Rebuild(ctx, nil, nil)
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Rebuild over a FIFO snapshot returned nil; a non-regular snapshot must fail the pass, never be accepted")
+		}
+		if !errors.Is(err, atomicfile.ErrNotRegular) {
+			t.Errorf("error = %v, want it to wrap atomicfile.ErrNotRegular so the refusal is the inode-type gate rather than an incidental decode failure", err)
+		}
+		if !strings.Contains(err.Error(), path) {
+			t.Errorf("error = %q, want it to name the snapshot path %q", err, path)
+		}
+	case <-ctx.Done():
+		t.Fatal("Rebuild BLOCKED on a FIFO snapshot: the confined read regressed to an ambient one, and a planted FIFO can wedge the compare pass while it holds the cycle lock")
+	}
+}
+
+// TestLoadPreviousRefusesASnapshotSymlinkEscapingItsDirectory pins the other
+// half of the confinement: the snapshot name is resolved INSIDE its own
+// directory, so a symlink pointing out of it is refused rather than followed.
+// Following it fed the target's bytes to the decoder, whose error message is
+// logged (bounded), which is a small read-anything channel out of a directory
+// the app is not meant to leave.
+func TestLoadPreviousRefusesASnapshotSymlinkEscapingItsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	const secret = "SUPER-SECRET-VALUE-THAT-MUST-NOT-BE-READ"
+	if err := os.WriteFile(outside, []byte(secret), 0o600); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	path := filepath.Join(dir, "feed.json")
+	if err := os.Symlink(outside, path); err != nil {
+		t.Skipf("symlink unsupported here: %v", err)
+	}
+
+	err := NewFeedWriter(&FeedWriterConfig{Path: path}, nil, nil).Rebuild(context.Background(), nil, nil)
+	if err == nil {
+		t.Fatal("Rebuild over an escaping symlink returned nil, want a refusal")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("the outside file's CONTENT reached the error path: %q", err)
 	}
 }
