@@ -342,8 +342,19 @@ type passWrites struct {
 	// evaluated is the ownership contribution of every entry this pass
 	// evaluated, keyed by ownerKey.
 	evaluated map[string][]ownedRelease
-	// published is the identities that ENTERED a feed on this pass (plus, at
-	// baseline, the forfeited catalogue). Append-only.
+	// published is the identities that ENTERED a feed on this pass, plus the two
+	// deliberate FORFEITURES that write it without publishing anything: the
+	// fresh-journal baseline (the whole currently-curated catalogue, so a new
+	// install starts quiet instead of broadcasting everything SeaDex already
+	// lists), and a DISABLED scope, whose curated releases are forfeited as they
+	// are seen (journalIfNew) so re-enabling a tracker cannot re-broadcast its
+	// catalogue. Both are the operator's own switch acting, which is why they are
+	// forfeitures rather than refusals - contrast a failed render on an ENABLED
+	// tracker, which records nothing so a corrected upstream record can still
+	// publish. The member's name is therefore narrower than its contents, and
+	// that is settled rather than accidental: see `off-tracker-rss-backfill` in
+	// this app's steering doc for the user's ruling and the reasoning.
+	// Append-only.
 	published map[string]bool
 	// titles is the validated harvested-title cache, advanced by whatever this
 	// pass's harvest earned.
