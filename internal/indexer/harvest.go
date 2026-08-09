@@ -537,6 +537,47 @@ const (
 // encoded query is itself unacceptable. Auth/account document codes
 // (100-199) and auth/config/availability statuses (401/403/404/408/429/5xx)
 // stay scope-wide: they fail every show's query identically.
+// permanentUpstreamCredentialError reports whether an upstream rejection is the
+// one terminal class an OPERATOR must clear: the credential or the endpoint is
+// wrong, so no amount of retrying, waiting, or restarting fixes it.
+//
+// It exists because the retry taxonomy answers "retry or not", which is a
+// different question from "will this clear on its own". A wrong or revoked
+// indexer.prowlarr_api_key is terminal AND operator-actionable; Prowlarr being
+// briefly unreachable is terminal-for-this-attempt and self-healing. Both used
+// to reach the same WARN, and the app's own unified rule reserves ERROR for the
+// first kind: "ERROR is reserved for a condition that will NOT clear without an
+// operator; WARN covers a transient failure or a designed outcome".
+//
+// Why that matters more here than a level usually does: the same rejection on the
+// SEARCH path makes every query answer the arr a Torznab <error>, and an arr
+// counts those toward its own indexer-failure threshold - which disables the
+// indexer, RSS included. So a bad credential can take the whole feed down while
+// the container stays healthy and the compare loop keeps logging cycle complete.
+// Nothing else in the app surfaces that.
+//
+// Deliberately NARROW. 401/403 are the authorization statuses; document codes
+// 100-199 are Torznab's own auth/credential band (100 incorrect user or password,
+// 101 account suspended, 102 insufficient privileges, 103 registration denied,
+// 105 invalid registration, 106/107 invalid or unsupported API key). 200-299 is
+// the REQUEST band (a malformed or unsupported query), which stays
+// requestScopedHarvestError's show-scoped WARN, and 400/414/422 stay there too.
+// A 404 stays a plain scope WARN: an endpoint that answers not-found may be a
+// Prowlarr indexer that was removed, which is a config question but not provably
+// a credential one, and TestHarvestQueryFailureKeepsSynthetic pins that reading.
+func permanentUpstreamCredentialError(err error) bool {
+	if docErr, ok := errors.AsType[*upstreamDocError](err); ok {
+		return docErr.codeNum >= 100 && docErr.codeNum < 200
+	}
+	if statusErr, ok := errors.AsType[*httpx.StatusError](err); ok {
+		switch statusErr.Code {
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return true
+		}
+	}
+	return false
+}
+
 func requestScopedHarvestError(err error) bool {
 	if docErr, ok := errors.AsType[*upstreamDocError](err); ok {
 		return docErr.codeNum >= 200 && docErr.codeNum < 300
@@ -769,6 +810,18 @@ func (h *harvester) classifyHarvestError(err error, u *upstream, alID int, query
 		h.log.Warn("indexer title harvest request rejected; show keeps its synthesized title this rebuild",
 			"upstream", u.name, "al_id", alID, "query_type", queryType, "error", err)
 		return harvestShowFailed
+	}
+	// The credentials class is ERROR, not WARN: it cannot clear without the
+	// operator, and left at WARN it takes the whole feed down silently (see
+	// permanentUpstreamCredentialError). Bounded to one line per scope per
+	// rebuild by the harvestScopeFailed latch this returns, so a broken
+	// credential does not spam the alert it fires.
+	if permanentUpstreamCredentialError(err) {
+		h.log.Error("indexer title harvest rejected the credentials; this upstream is unusable until an operator fixes it, "+
+			"and the same rejection on the search path makes every query answer an error the arr counts toward disabling this indexer - "+
+			"check indexer.prowlarr_api_key and the per-tracker Torznab URL",
+			"upstream", u.name, "al_id", alID, "query_type", queryType, "error", err)
+		return harvestScopeFailed
 	}
 	h.log.Warn("indexer title harvest query failed; skipping this upstream's remaining shows this rebuild",
 		"upstream", u.name, "al_id", alID, "query_type", queryType, "error", err)

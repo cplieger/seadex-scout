@@ -464,7 +464,7 @@ deliver through your Alertmanager like any Prometheus metric alert. They cover:
 
 | Alert | Fires when | Severity |
 | --- | --- | --- |
-| `SeadexScoutCycleError` | a cycle logs an error: the Sonarr/Radarr library walk failed, a state write failed, a queued rerun could not record poll health, or a persisted degradation streak escalated (library shrink, SeaDex fetch, partial walk and AniList lookups after 2 consecutive full reconciles; a rejected mapping refresh or an unreadable SeaDex after 8 ticks). Routine outcomes stay WARN and never fire it (see `alerts.yaml`) | warning |
+| `SeadexScoutCycleError` | a cycle logs an error: the Sonarr/Radarr library walk failed, a state write failed, a queued rerun could not record poll health, a persisted degradation streak escalated (library shrink, SeaDex fetch, partial walk and AniList lookups after 2 consecutive full reconciles; a rejected mapping refresh or an unreadable SeaDex after 8 ticks), or an upstream rejected the Prowlarr credentials (401/403, or a Torznab error code in the 100-199 band — one line per upstream per rebuild). Routine outcomes stay WARN and never fire it (see `alerts.yaml`) | warning |
 | `SeadexScoutScanStalled` | no sign of life in 3h — the daemon emits `tick`/`cycle` `complete` or `degraded` on every iteration and `reconcile started` when a full pass begins, so the absence of all of them means the poll loop is wedged | warning |
 | `SeadexScoutReconcileStalled` | no `reconcile complete` line in 72h, i.e. the daily full pass has silently stopped while ticks keep the loop looking alive | warning |
 | `SeadexScoutBetterReleaseFound` | SeaDex recommends a better release than the one on disk (informational, not a fault). **A state signal, not an event** — see below | info |

@@ -1578,18 +1578,33 @@ func TestRequestScopedClassificationSurvivesKeyRedaction(t *testing.T) {
 // requestScopedHarvestError, a single title whose encoded query the upstream
 // rejects with 400 would condemn every later healthy show on the tracker to
 // synthesized titles.
+//
+// The scope-latching rows additionally pin the LEVEL split (l-f75): 401/403 are
+// the credentials class and log at ERROR naming the remedy, because they cannot
+// clear without an operator and the same rejection on the search path makes an
+// arr disable this indexer. A 404 stays a WARN - an endpoint answering not-found
+// may be a removed Prowlarr indexer, which is a config question but not provably
+// a credential one. Scoping is identical for all three; only the level differs.
 func TestHarvestHTTPStatusFailureScoping(t *testing.T) {
+	const (
+		showLocalMsg   = "indexer title harvest request rejected; show keeps its synthesized title this rebuild"
+		scopeWarnMsg   = "indexer title harvest query failed; skipping this upstream's remaining shows this rebuild"
+		credentialsMsg = "indexer title harvest rejected the credentials; this upstream is unusable until an operator fixes it, " +
+			"and the same rejection on the search path makes every query answer an error the arr counts toward disabling this indexer - " +
+			"check indexer.prowlarr_api_key and the per-tracker Torznab URL"
+	)
 	tests := []struct {
 		name      string
+		wantMsg   string
 		status    int
 		showLocal bool
 	}{
-		{"400 bad request stays show-local", http.StatusBadRequest, true},
-		{"414 URI too long stays show-local", http.StatusRequestURITooLong, true},
-		{"422 unprocessable entity stays show-local", http.StatusUnprocessableEntity, true},
-		{"401 unauthorized latches the scope", http.StatusUnauthorized, false},
-		{"403 forbidden latches the scope", http.StatusForbidden, false},
-		{"404 not found latches the scope", http.StatusNotFound, false},
+		{name: "400 bad request stays show-local", status: http.StatusBadRequest, showLocal: true, wantMsg: showLocalMsg},
+		{name: "414 URI too long stays show-local", status: http.StatusRequestURITooLong, showLocal: true, wantMsg: showLocalMsg},
+		{name: "422 unprocessable entity stays show-local", status: http.StatusUnprocessableEntity, showLocal: true, wantMsg: showLocalMsg},
+		{name: "401 unauthorized latches the scope at ERROR", status: http.StatusUnauthorized, wantMsg: credentialsMsg},
+		{name: "403 forbidden latches the scope at ERROR", status: http.StatusForbidden, wantMsg: credentialsMsg},
+		{name: "404 not found latches the scope at WARN", status: http.StatusNotFound, wantMsg: scopeWarnMsg},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1628,9 +1643,6 @@ func TestHarvestHTTPStatusFailureScoping(t *testing.T) {
 				if titles["nyaa:43"] != "Show B S01 1080p BluRay [G]" {
 					t.Errorf("titles = %v, want the later show on the same upstream still harvested (nyaa:43)", titles)
 				}
-				if !rec.Contains("indexer title harvest request rejected; show keeps its synthesized title this rebuild") {
-					t.Errorf("request-specific status not warned as a show-local rejection; log output:\n%s", strings.Join(rec.Messages(), "\n"))
-				}
 			} else {
 				if stats.queries != 1 {
 					t.Errorf("harvest queries = %d, want 1 (an auth/config status must latch the scope)", stats.queries)
@@ -1638,8 +1650,17 @@ func TestHarvestHTTPStatusFailureScoping(t *testing.T) {
 				if len(titles) != 0 {
 					t.Errorf("titles = %v, want empty (no show harvested after the scope latched)", titles)
 				}
-				if !rec.Contains("indexer title harvest query failed; skipping this upstream's remaining shows this rebuild") {
-					t.Errorf("scope-wide status not warned as such; log output:\n%s", strings.Join(rec.Messages(), "\n"))
+			}
+			if !rec.Contains(tc.wantMsg) {
+				t.Errorf("expected diagnostic not emitted for status %d; want %q; log output:\n%s",
+					tc.status, tc.wantMsg, strings.Join(rec.Messages(), "\n"))
+			}
+			// The three scope-latching statuses must not share one message: a
+			// credentials rejection needs an operator, a 404 may not, and
+			// collapsing them is what left a dead feed un-alerted.
+			for _, other := range []string{showLocalMsg, scopeWarnMsg, credentialsMsg} {
+				if other != tc.wantMsg && rec.Contains(other) {
+					t.Errorf("status %d also logged %q; the classes must stay distinct", tc.status, other)
 				}
 			}
 		})

@@ -477,6 +477,20 @@ func (ix *Indexer) fetchRaw(ctx context.Context, params url.Values, scope string
 				"upstream", u.name, "scope", scope)
 			return nil, 0, false
 		}
+		// The credentials class is ERROR here for the same reason as on the
+		// harvest path (permanentUpstreamCredentialError): it cannot clear
+		// without the operator, and this is the site whose consequence
+		// escalates - every rejected search answers the arr a Torznab <error>,
+		// which counts toward the arr disabling this indexer, RSS included. One
+		// answer covers both sites, so the level split lives with the predicate
+		// rather than being re-decided here.
+		if permanentUpstreamCredentialError(err) {
+			ix.log.Error("upstream rejected the credentials; searches will keep failing until an operator fixes it, "+
+				"and an arr counts these failures toward disabling this indexer (RSS included) - "+
+				"check indexer.prowlarr_api_key and the per-tracker Torznab URL",
+				"upstream", u.name, "error", err)
+			return nil, 0, true
+		}
 		ix.log.Warn("upstream query failed", "upstream", u.name, "error", err)
 		return nil, 0, true
 	}
