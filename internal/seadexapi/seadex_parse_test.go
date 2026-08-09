@@ -5,37 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 )
-
-// TestParsePBTime pins the tolerant PocketBase timestamp parsing: both
-// space-separated layouts (with and without fractional seconds) and RFC3339
-// parse, while empty, whitespace, and garbage values fall to the zero time
-// (which sorts oldest, so an unparseable record lands at the feed's tail
-// instead of erroring the fetch).
-func TestParsePBTime(t *testing.T) {
-	tests := []struct {
-		want time.Time
-		name string
-		in   string
-	}{
-		{name: "fractional space layout", in: "2026-01-02 03:04:05.000Z", want: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
-		{name: "whole-second space layout", in: "2026-01-02 03:04:05Z", want: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
-		{name: "rfc3339", in: "2026-01-02T03:04:05Z", want: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
-		{name: "surrounding whitespace trimmed", in: "  2026-01-02 03:04:05Z  ", want: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
-		{name: "empty is zero", in: "", want: time.Time{}},
-		{name: "whitespace only is zero", in: "   ", want: time.Time{}},
-		{name: "garbage is zero", in: "not a timestamp", want: time.Time{}},
-		{name: "unsupported layout is zero", in: "02/01/2026 03:04", want: time.Time{}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := parsePBTime(tc.in); !got.Equal(tc.want) {
-				t.Errorf("parsePBTime(%q) = %s, want %s", tc.in, got, tc.want)
-			}
-		})
-	}
-}
 
 // TestChunkComplete pins the keyset walk's completeness decision table,
 // including the arms the HTTP-level tests never reach in-package: a FULL chunk

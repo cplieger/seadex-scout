@@ -275,7 +275,6 @@ type pbEntry struct {
 	Created         string   `json:"created"`
 	Notes           string   `json:"notes"`
 	TheoreticalBest string   `json:"theoreticalBest"`
-	Updated         string   `json:"updated"`
 	Expand          pbExpand `json:"expand"`
 	AlID            int      `json:"alID"`
 	Incomplete      bool     `json:"incomplete"`
@@ -292,32 +291,9 @@ func (r *pbEntry) toEntry() seadex.Entry {
 		Torrents:        r.Expand.Trs,
 		Notes:           r.Notes,
 		TheoreticalBest: r.TheoreticalBest,
-		Updated:         parsePBTime(r.Updated),
 		AniListID:       r.AlID,
 		Incomplete:      r.Incomplete,
 	}
-}
-
-// pbTimeLayouts are the PocketBase datetime formats seen on the `updated`
-// field (space-separated or RFC3339). time.Parse accepts a fractional
-// second after the seconds field even when the layout omits it, so the
-// space-separated layout covers both the whole-second and the ".000"
-// fractional wire forms (any fraction length).
-var pbTimeLayouts = []string{"2006-01-02 15:04:05Z", time.RFC3339}
-
-// parsePBTime parses a PocketBase timestamp, returning the zero time on failure
-// (which sorts oldest, so an unparseable record just falls to the feed's tail).
-func parsePBTime(s string) time.Time {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return time.Time{}
-	}
-	for _, layout := range pbTimeLayouts {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t
-		}
-	}
-	return time.Time{}
 }
 
 // fetchTotals accumulates the cross-page counters of one FetchEntries run.
@@ -344,7 +320,12 @@ type fetchTotals struct {
 	elements       int
 	reportedTotal  int
 	reportedPages  int
-	unparsedTimes  int
+	// chunks counts the walk's delivered chunks. A ONE-chunk walk is the only
+	// shape whose delivered count and the totalItems that counts them arrive in
+	// the SAME response, so they cannot legitimately disagree - which is what
+	// makes the window shortfall in logFinishedFetchWarnings a sound signal at
+	// window scope, where the catalogue-scale checks deliberately do not run.
+	chunks int
 }
 
 // cursor is the keyset position of the catalogue walk: the (created, id) pair
@@ -699,10 +680,49 @@ func (c *Client) finishFetch(all []seadex.Entry, tot fetchTotals, mode FetchMode
 		// walk depends on.
 		c.logFinishedFetchWarnings(len(all), tot)
 		c.warnCatalogueShrink(len(all))
+	} else {
+		c.warnWindowShortfall(len(all), tot)
 	}
 	c.log.Debug("seadex entries fetched", "entries", len(all),
 		"bytes", tot.bytes, "elements", tot.elements)
 	return all, nil
+}
+
+// warnWindowShortfall reports a ONE-CHUNK window that delivered fewer entries
+// than the same response claimed to be selecting. It is the freshness half of
+// the product going silently missing: a probe reports 300 changed records, the
+// window fetches one page, three arrive, and the tick logs `tick complete
+// seadex_entries=3` with nothing to distinguish it from a complete pass.
+//
+// It is deliberately its OWN message rather than a reuse of the catalogue-count
+// mismatch, which is a CATALOGUE-scale comparison the window must not run (a
+// window is a legitimately varying subset, so reusing that signal would fire on
+// ordinary ticks and poison the alert the next full walk depends on) - and
+// TestFetchWindowBelowHalfShortfallSucceeds pins that separation.
+//
+// Gated on ONE chunk, which is both the sound case and the intended shape. In a
+// one-chunk walk the delivered items and the totalItems that counts them arrive
+// in the SAME response, so a well-behaved page cannot legitimately disagree;
+// across MULTIPLE chunks it can, because a record edited between chunks newly
+// matches `updated > since` while the immutable keyset cursor has already paged
+// past its `created`. And one chunk is the normal shape rather than a corner:
+// the caller defers to a full pass at MaxWindowEntries, which IS perPage, so
+// every productive window is one request.
+//
+// A WARN rather than a refusal, for two reasons. The tick's design already
+// bounds the damage - the journal only prepends and ages out, and the finding
+// set's deletion authority is what the pass EVALUATED - so a short window cannot
+// falsely resolve anything; and a single response does not prove PocketBase
+// counted and selected rows in one database snapshot, so a concurrent mutation
+// remains a benign explanation. Refusing would discard the freshness the
+// response did deliver.
+func (c *Client) warnWindowShortfall(count int, tot fetchTotals) {
+	if tot.chunks != 1 || tot.reportedTotal <= 0 || count >= tot.reportedTotal {
+		return
+	}
+	c.log.Warn("seadex change window delivered fewer entries than it reported selecting; "+
+		"this tick's freshness is incomplete and the next reconcile is the backstop",
+		"got", count, "want", tot.reportedTotal)
 }
 
 // validateFinishedFetch holds finishFetch's completeness guards, in order: an
@@ -765,12 +785,15 @@ func (c *Client) logFinishedFetchWarnings(count int, tot fetchTotals) {
 	// totalItems (omitted decodes to zero) stated no count to disagree with, so
 	// should that arm ever be relaxed this WARN must still not fire the
 	// alert-stable mismatch with want=0 on every cycle.
-	if tot.reportedTotal > 0 && count != tot.reportedTotal {
+	// No reportedTotal > 0 conjunct: this runs only after validateFinishedFetch,
+	// which already fails a FULL fetch whose reported total is not positive, so
+	// the guard could never change an operator-visible result. Its own comment
+	// defended it as a belt against a future relaxation of that refusal - which
+	// is the case Go answers with the test that pins the refusal
+	// (TestFetchEntriesRejectsNonEmptyCatalogueWithoutReportedTotal), not with an
+	// unreachable runtime branch (l-f139).
+	if count != tot.reportedTotal {
 		c.log.Warn("seadex catalogue count mismatch", "got", count, "want", tot.reportedTotal)
-	}
-	if tot.unparsedTimes > 0 {
-		c.log.Warn("seadex updated timestamps unparseable; feed newest-first ordering degraded",
-			"count", tot.unparsedTimes, "entries", count)
 	}
 	if tot.bytes*budgetWarnDenominator >= maxTotalBytes*budgetWarnNumerator ||
 		tot.elements*budgetWarnDenominator >= maxTotalElements*budgetWarnNumerator {
@@ -843,6 +866,7 @@ func (c *Client) fetchAndAppend(ctx context.Context, page int, all []seadex.Entr
 	}
 	tot.bytes += n
 	tot.elements += elems
+	tot.chunks++
 	tot.reportedTotal = max(tot.reportedTotal, list.TotalItems)
 	tot.reportedPages = max(tot.reportedPages, list.TotalPages)
 	if verr := validatePageIdentities(list.Items, page, tot); verr != nil {
@@ -860,7 +884,7 @@ func (c *Client) fetchAndAppend(ctx context.Context, page int, all []seadex.Entr
 			return all, false, cerr
 		}
 	}
-	all = appendPageEntries(all, list.Items, tot)
+	all = appendPageEntries(all, list.Items)
 	done, err = chunkComplete(page, len(list.Items), len(all), tot.reportedTotal)
 	if err != nil {
 		return all, false, err
@@ -929,18 +953,13 @@ func validatePageIdentities(items []pbEntry, page int, tot *fetchTotals) error {
 	return nil
 }
 
-// appendPageEntries converts one page's decoded records into public entries,
-// charging the unparseable-updated counter as it appends. The tracker-link
-// counters that used to be charged here moved to internal/scout with the
-// diagnostic itself (see finishFetch, l-f156), which is what lets this client
-// stay a pure releases.moe wire+contract leaf.
-func appendPageEntries(all []seadex.Entry, items []pbEntry, tot *fetchTotals) []seadex.Entry {
+// appendPageEntries converts one page's decoded records into public entries.
+// The tracker-link counters that used to be charged here moved to
+// internal/scout with the diagnostic itself (see finishFetch, l-f156), which is
+// what lets this client stay a pure releases.moe wire+contract leaf.
+func appendPageEntries(all []seadex.Entry, items []pbEntry) []seadex.Entry {
 	for i := range items {
-		entry := items[i].toEntry()
-		if entry.Updated.IsZero() && strings.TrimSpace(items[i].Updated) != "" {
-			tot.unparsedTimes++
-		}
-		all = append(all, entry)
+		all = append(all, items[i].toEntry())
 	}
 	return all
 }
@@ -1141,8 +1160,6 @@ func decodeEntryField(d *bounded.Decoder, e *pbEntry, key string) error {
 		return d.Decode(&e.Notes)
 	case strings.EqualFold(key, "theoreticalBest"):
 		return d.Decode(&e.TheoreticalBest)
-	case strings.EqualFold(key, "updated"):
-		return d.Decode(&e.Updated)
 	case strings.EqualFold(key, "id"):
 		return d.Decode(&e.ID)
 	case strings.EqualFold(key, "created"):

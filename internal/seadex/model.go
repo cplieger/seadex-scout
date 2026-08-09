@@ -13,7 +13,6 @@ package seadex
 
 import (
 	"strings"
-	"time"
 )
 
 // File is one file inside a SeaDex torrent (its name and byte length).
@@ -53,7 +52,6 @@ func ValidInfoHash(h string) string {
 
 // Entry is a SeaDex entry: one anime (by AniList ID) and its tracked releases.
 type Entry struct {
-	Updated         time.Time
 	Notes           string
 	TheoreticalBest string
 	Torrents        []Torrent

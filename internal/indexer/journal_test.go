@@ -784,7 +784,6 @@ func TestRebuildUnpackedSeasonListsPerEpisode(t *testing.T) {
 // the synthesized title from the show metadata, and PubDate mirroring
 // FirstSeen (not the SeaDex entry update).
 func TestRebuildJournalItemShape(t *testing.T) {
-	updated := time.Date(2025, 7, 26, 15, 5, 59, 0, time.UTC)
 	pmrFiles := []seadex.File{
 		{Length: 400_000_000, Name: "NCED 01 (BD Remux 1080p AVC FLAC) [PMR].mkv"},
 		{Length: 7_500_699_108, Name: "Frieren Beyond Journey's End - S01E01 (BD Remux 1080p AVC FLAC AAC) [Dual Audio] [PMR].mkv"},
@@ -792,7 +791,6 @@ func TestRebuildJournalItemShape(t *testing.T) {
 	}
 	entries := []seadex.Entry{{
 		AniListID: 154587,
-		Updated:   updated,
 		Torrents: []seadex.Torrent{
 			{Tracker: "Nyaa", URL: "https://nyaa.si/view/1961373", InfoHash: "143ed15e5e3df072ae91adaeb149973a887590dd", IsBest: true, ReleaseGroup: "PMR", DualAudio: true, Files: pmrFiles},
 			{Tracker: "AB", URL: "/torrents.php?id=86576&torrentid=1167293", InfoHash: "<redacted>", IsBest: true, ReleaseGroup: "PMR", DualAudio: true, Files: pmrFiles},

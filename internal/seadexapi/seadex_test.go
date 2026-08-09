@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/cplieger/seadex-scout/internal/appinfo"
 )
@@ -68,10 +67,6 @@ func TestFetchEntriesPaginatesAndDecodes(t *testing.T) {
 	}
 	if entries[0].AniListID != 154587 || !entries[0].Incomplete {
 		t.Errorf("first entry identity = alID %d incomplete %v, want 154587 true", entries[0].AniListID, entries[0].Incomplete)
-	}
-	wantUpdated := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	if !entries[0].Updated.Equal(wantUpdated) {
-		t.Errorf("updated = %s, want %s", entries[0].Updated, wantUpdated)
 	}
 	if len(entries[0].Torrents) != 1 {
 		t.Fatalf("torrents = %d, want 1", len(entries[0].Torrents))

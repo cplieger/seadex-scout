@@ -537,3 +537,138 @@ func TestCountWindowUpstreamFailureErrors(t *testing.T) {
 		})
 	}
 }
+
+// TestFetchWindowWarnsOnAOneChunkShortfall pins the diagnostic l-f142 added, and
+// the scenario is the measured one: a probe reports 300 changed records, the
+// window fetches its single page, THREE arrive, and before this the tick logged
+// `tick complete seadex_entries=3` with nothing to distinguish it from a
+// complete pass. The freshness half of the product went missing silently.
+//
+// Note what makes the signal sound: in a ONE-chunk walk the delivered items and
+// the totalItems that counts them arrive in the SAME response, so a well-behaved
+// page cannot legitimately disagree. Across multiple chunks it can, which is why
+// the guard is gated on the chunk count (see TestFetchWindowDoesNotWarnAcrossChunks).
+func TestFetchWindowWarnsOnAOneChunkShortfall(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"totalItems":300,"totalPages":1,"items":[`+
+			`{"alID":1,"id":"rec000001","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}},`+
+			`{"alID":2,"id":"rec000002","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}},`+
+			`{"alID":3,"id":"rec000003","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}}]}`)
+	}))
+	defer server.Close()
+
+	logger, recorder := capture.New()
+	entries, err := NewClient(server.Client(), server.URL, 0, logger).
+		FetchEntries(context.Background(), Options{Mode: FetchWindow, Since: time.Now().Add(-48 * time.Hour)})
+	if err != nil {
+		t.Fatalf("FetchEntries returned error: %v (a short window must keep the freshness it DID deliver)", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("entries = %d, want the 3 delivered", len(entries))
+	}
+	const msg = "seadex change window delivered fewer entries than it reported selecting; " +
+		"this tick's freshness is incomplete and the next reconcile is the backstop"
+	if got := recorder.CountExact(msg); got != 1 {
+		t.Errorf("window-shortfall WARN count = %d, want exactly 1", got)
+	}
+	// It must NOT borrow the catalogue-scale signal: that one is a whole-collection
+	// comparison a window legitimately fails, so reusing it would fire on ordinary
+	// ticks and poison the alert the next full walk depends on.
+	if got := recorder.CountExact("seadex catalogue count mismatch"); got != 0 {
+		t.Errorf("window logged the catalogue-scale mismatch %d times, want 0", got)
+	}
+}
+
+// TestFetchWindowDoesNotWarnOnACompleteWindow is the OFF state: a window that
+// delivered everything it claimed must be silent, or the WARN is worthless as an
+// alert.
+func TestFetchWindowDoesNotWarnOnACompleteWindow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"totalItems":2,"totalPages":1,"items":[`+
+			`{"alID":1,"id":"rec000001","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}},`+
+			`{"alID":2,"id":"rec000002","created":"2026-01-02 03:04:05.000Z","expand":{"trs":[]}}]}`)
+	}))
+	defer server.Close()
+
+	logger, recorder := capture.New()
+	if _, err := NewClient(server.Client(), server.URL, 0, logger).
+		FetchEntries(context.Background(), Options{Mode: FetchWindow, Since: time.Now().Add(-48 * time.Hour)}); err != nil {
+		t.Fatalf("FetchEntries returned error: %v", err)
+	}
+	for _, msg := range []string{
+		"seadex change window delivered fewer entries than it reported selecting; this tick's freshness is incomplete and the next reconcile is the backstop",
+		"seadex catalogue count mismatch",
+	} {
+		if got := recorder.CountExact(msg); got != 0 {
+			t.Errorf("complete window logged %q %d times, want 0", msg, got)
+		}
+	}
+}
+
+// TestFetchWindowEmptyWindowDoesNotWarn guards the most common shape of all: the
+// measured upstream has runs of 154 consecutive empty ticks, and an empty window
+// reports totalItems 0, so a shortfall test keyed on a non-positive total would
+// have fired on nearly every tick.
+func TestFetchWindowEmptyWindowDoesNotWarn(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"totalItems":0,"totalPages":1,"items":[]}`)
+	}))
+	defer server.Close()
+
+	logger, recorder := capture.New()
+	entries, err := NewClient(server.Client(), server.URL, 0, logger).
+		FetchEntries(context.Background(), Options{Mode: FetchWindow, Since: time.Now().Add(-48 * time.Hour)})
+	if err != nil {
+		t.Fatalf("FetchEntries returned error: %v (an empty window is a completed tick)", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("entries = %d, want 0", len(entries))
+	}
+	if got := recorder.CountExact("seadex change window delivered fewer entries than it reported selecting; this tick's freshness is incomplete and the next reconcile is the backstop"); got != 0 {
+		t.Errorf("empty window logged the shortfall WARN %d times, want 0", got)
+	}
+}
+
+// TestFetchWindowDoesNotWarnAcrossChunks pins the SOUNDNESS boundary of the
+// shortfall guard, and it is the reason that guard is gated on the chunk count
+// rather than applied to every window.
+//
+// Across MULTIPLE chunks a shortfall is legitimately explainable: a record
+// edited between chunk requests newly matches `updated > since` while the
+// immutable keyset cursor has already paged past its `created`, so the reported
+// total can honestly exceed what the walk delivers. Warning there would fire on
+// benign upstream activity. Within ONE chunk the delivered items and the
+// totalItems that counts them arrive in the same response, which is what makes
+// the disagreement evidence rather than a race.
+//
+// Here a full chunk plus a short one delivers perPage+1 against a reported
+// perPage+9, a real shortfall - and it must stay silent.
+func TestFetchWindowDoesNotWarnAcrossChunks(t *testing.T) {
+	var reqs int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reqs++
+		total := perPage + 9
+		if reqs == 1 {
+			fmt.Fprintf(w, `{"totalItems":%d,"totalPages":2,"items":[%s]}`, total, fullKeysetChunk(1))
+			return
+		}
+		fmt.Fprintf(w, `{"totalItems":%d,"totalPages":2,"items":[%s]}`, total, keysetRecords(perPage+1, 1))
+	}))
+	defer server.Close()
+
+	logger, recorder := capture.New()
+	entries, err := NewClient(server.Client(), server.URL, 0, logger).
+		FetchEntries(context.Background(), Options{Mode: FetchWindow, Since: time.Now().Add(-48 * time.Hour)})
+	if err != nil {
+		t.Fatalf("FetchEntries returned error: %v", err)
+	}
+	if len(entries) != perPage+1 {
+		t.Fatalf("entries = %d, want %d across two chunks", len(entries), perPage+1)
+	}
+	if reqs < 2 {
+		t.Fatalf("the walk made %d request(s); the fixture is vacuous unless it spans two chunks", reqs)
+	}
+	if got := recorder.CountExact("seadex change window delivered fewer entries than it reported selecting; this tick's freshness is incomplete and the next reconcile is the backstop"); got != 0 {
+		t.Errorf("multi-chunk window logged the shortfall WARN %d times, want 0: a record edited between chunks explains the gap honestly", got)
+	}
+}
