@@ -294,7 +294,7 @@ func (n *Notifier) emit(f *compare.Finding) {
 // value the retained-row bound (boundRetained) is sized against.
 const maxAttrBytes = logattr.MaxBytes
 
-// maxAlertTextBytes is the budget for an ALERT-destined text attribute, and it
+// maxAlertTextBytes is the budget for an ALERT-destined TEXT attribute, and it
 // is deliberately far below maxAttrBytes: that budget is sized for the Loki LOG
 // LINE, while these values are interpolated into the Discord annotation
 // alerts.yaml renders. Alertmanager's Discord notifier truncates the embed
@@ -305,6 +305,32 @@ const maxAttrBytes = logattr.MaxBytes
 // a release group, a tracker name, including a CJK title at 3 bytes per rune)
 // and well under the annotation budget even after markup escaping doubles it.
 const maxAlertTextBytes = 512
+
+// maxAlertURLBytes is the same budget for an ALERT-destined URL attribute, and
+// it is MEASURED rather than chosen. Across the whole live SeaDex catalogue
+// (2821 entries / 9208 torrents, measured 2026-08) the longest URL the publisher
+// can emit is 96 bytes; per tracker the maxima are AnimeTosho 96 (its path
+// carries a release-name slug, the only variable-length form), AnimeBytes 67,
+// RuTracker 51, Nyaa 28, with p99 61 and mean 42.5. The four canonical bases are
+// 15-22 bytes and the app builds the Nyaa and AnimeBytes paths itself from
+// digit-validated ids, so only the AnimeTosho slug and the arr deep link vary at
+// all - and the arr link is the operator's OWN base plus a TVDB title slug,
+// which 256 covers with room for a reverse-proxy path prefix.
+//
+// 256 is therefore ~2.7x the measured worst case, and choosing it rather than
+// reusing maxAttrBytes is what makes the WHOLE annotation provably fit: nine
+// interpolated values at 4 x maxAlertTextBytes + 5 x maxAlertURLBytes = 3328
+// bytes, inside Discord's 4096-rune description limit. On the Loki-log-line
+// budget the five URLs alone could reach ~40 KB, and alerts.yaml renders the
+// clickable links LAST, so an oversized earlier value deleted exactly the half
+// of the notification the operator acts on.
+//
+// A URL longer than this is by construction not one of the four standard forms.
+// That is an upstream DATA defect, and the app already has a vocabulary for it
+// (trackerlink's publish-or-drop refusal, surfaced by the report as
+// Release.URLError); truncating here is the log path's last resort, not the
+// place that decision belongs.
+const maxAlertURLBytes = 256
 
 // attrTruncMarker is the suffix a capped attribute carries so a reader can
 // tell a truncated value from an honest one.
@@ -318,14 +344,6 @@ const attrTruncMarker = logattr.TruncMarker
 // suppression) or amplify memory. A MULTI-SOURCE attribute renders through
 // joinGroupsAttr / joinLinksAttr instead (see findingKVs).
 func capAttr(s string) string { return logattr.Cap(s) }
-
-// reboundAttr re-applies the per-attribute byte budget to a value a
-// post-cap transform may have grown: capAttr's own output can be
-// maxAttrBytes+len(attrTruncMarker) once the marker is appended, and both
-// Markdown escapers expand the value they walk. An in-budget value passes
-// through unchanged, so an honest value stays byte-identical, and the
-// marker arithmetic has one home.
-func reboundAttr(s string) string { return reboundTo(s, maxAttrBytes) }
 
 // reboundTo re-applies a byte budget to a value a post-cap transform may have
 // grown, cutting on a rune boundary and marking the cut. An in-budget value
@@ -356,8 +374,13 @@ func reboundTo(s string, budget int) string {
 // Discord/Slack, so a ')' (or a space runesafe.Sanitize substituted for a
 // hostile rune) would close the destination early and the remainder of the
 // value would render as attacker-authored markdown.
+//
+// The re-cap uses maxAlertURLBytes, not maxAttrBytes: every consumer of this
+// function is an alert-destined attribute (findingKVs' five URL fields), so the
+// bound that applies is the annotation's, not the Loki log line's. See
+// maxAlertURLBytes for the measurement behind the number.
 func capURLAttr(s string) string {
-	return reboundAttr(logattr.EscapeLinkDestination(capAttr(s)))
+	return reboundTo(logattr.EscapeLinkDestination(capAttr(s)), maxAlertURLBytes)
 }
 
 // mdTextEscaper neutralizes the characters an untrusted TEXT value must not
