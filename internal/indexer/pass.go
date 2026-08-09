@@ -216,9 +216,22 @@ func (e *windowEvidence) ownership() map[string][]ownedRelease {
 // makes the cross-owner isBest fold recomputable (projectCuration ORs them) and
 // a demotion representable.
 //
-// Records sharing an AniList id are UNIONED rather than overwriting each other:
-// the contribution of entry X is everything the pass evaluated for X, and
-// SeaDex can return two catalogue records carrying the same alID.
+// Occurrences under one AniList id are UNIONED rather than overwriting each
+// other, and the reachable reason is a duplicated `trs` relation row on ONE
+// record (upstream data the app does not control), not two catalogue records
+// sharing an alID. That second shape CANNOT arrive through the real client:
+// seadexapi.validatePageIdentities enforces one-positive-unique-alID across the
+// whole walk and fails the entire fetch on a repeat, at window scope exactly as
+// at catalogue scope. So one alID is one record, which is what makes replacing
+// an evaluated owner's contribution wholesale both PRECISE (it is one entry, not
+// a tree of them) and COMPLETE (a window delivers that record with its whole
+// expanded torrent list, so the replacement is fresh from the source).
+//
+// The union is kept anyway, because it is the safe fail direction for the one
+// caller the invariant does not cover: Advance is exported and takes entries
+// directly, so a hand-fed caller (a fake, a future in-process producer) can
+// present duplicates the client would have refused. Unioning them loses nothing;
+// overwriting would lose a contribution.
 func ownershipOf(entries []seadex.Entry) map[string][]ownedRelease {
 	out := make(map[string][]ownedRelease, len(entries))
 	for i := range entries {

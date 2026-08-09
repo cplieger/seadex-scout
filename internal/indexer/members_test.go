@@ -412,26 +412,46 @@ func assertStructural(t *testing.T, cases map[string]string) {
 	}
 }
 
-// TestOwnershipOfUnionsRecordsSharingAnAniListID: the contribution of entry X is
-// everything the pass evaluated for X, and SeaDex can return two catalogue
-// records carrying the same alID - so the second must not overwrite the first.
-func TestOwnershipOfUnionsRecordsSharingAnAniListID(t *testing.T) {
-	entries := []seadex.Entry{
-		{AniListID: 5, Torrents: []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}}},
-		{AniListID: 5, Torrents: []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/2"}}},
-	}
-	got := ownershipOf(entries)
-	if len(got[ownerKey(5)]) != 2 {
-		t.Fatalf("entry 5 owns %d releases, want 2 (the two records unioned): %v", len(got[ownerKey(5)]), got)
-	}
-	set := projectCuration(got)
-	if !set.byKey["nyaa:1"] == false && !set.byKey["nyaa:2"] == false {
-		t.Error("both records' keys must project")
-	}
-	for _, key := range []string{"nyaa:1", "nyaa:2"} {
-		if _, ok := set.byKey[key]; !ok {
-			t.Errorf("key %q missing from the projection", key)
-		}
+// TestOwnershipOfUnionsDuplicateRelationRows: the contribution of entry X is
+// everything the pass evaluated for X, so two occurrences under one AniList id
+// must union rather than the second overwriting the first.
+//
+// The reachable duplicate is a repeated `trs` relation row on ONE record, which
+// is upstream data this app does not control. Two catalogue RECORDS sharing an
+// alID is deliberately NOT the case under test, because it cannot arrive:
+// seadexapi.validatePageIdentities fails the whole fetch on a repeated alID at
+// window scope exactly as at catalogue scope (see its own tests). The union is
+// still the safe fail direction for a hand-fed Advance caller, which the second
+// case below covers without claiming the client can produce it.
+func TestOwnershipOfUnionsDuplicateRelationRows(t *testing.T) {
+	t.Parallel()
+	for name, entries := range map[string][]seadex.Entry{
+		"one record, duplicated relation row": {{
+			AniListID: 5,
+			Torrents: []seadex.Torrent{
+				{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"},
+				{Tracker: "Nyaa", URL: "https://nyaa.si/view/2"},
+			},
+		}},
+		"hand-fed duplicate records (not reachable through the client)": {
+			{AniListID: 5, Torrents: []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/1"}}},
+			{AniListID: 5, Torrents: []seadex.Torrent{{Tracker: "Nyaa", URL: "https://nyaa.si/view/2"}}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got := ownershipOf(entries)
+			if len(got[ownerKey(5)]) != 2 {
+				t.Errorf("entry 5 owns %d releases, want 2 (both occurrences unioned): %v",
+					len(got[ownerKey(5)]), got)
+			}
+			set := projectCuration(got)
+			for _, key := range []string{"nyaa:1", "nyaa:2"} {
+				if _, ok := set.byKey[key]; !ok {
+					t.Errorf("key %q missing from the projection", key)
+				}
+			}
+		})
 	}
 }
 

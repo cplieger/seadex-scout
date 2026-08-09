@@ -239,13 +239,14 @@ func (w *FeedWriter) renderJournalItem(key string, refs []curatedRef, infoFor En
 	// categories are already order-independent folds below).
 	ordered := slices.Clone(refs)
 	// The order must be TOTAL, not just AniList-ascending: two occurrences of
-	// one journal key can share an AniList id (a duplicated trs relation row,
-	// or two catalogue records carrying the same alID), and a stable sort then
-	// leaves catalogue order deciding which one is synthesized - the exact
-	// dependency this sort exists to remove. URL, info hash and tracker break
-	// the tie on the torrent's own identity; the synthesized title and summed
-	// size close it on the remaining first-occurrence output, so two refs that
-	// still compare equal render byte-identical items (a duplicated relation
+	// one journal key can share an AniList id (a duplicated trs relation row on
+	// one record - NOT two catalogue records sharing an alID, which
+	// seadexapi.validatePageIdentities refuses outright at either scope), and a
+	// stable sort then leaves catalogue order deciding which one is synthesized -
+	// the exact dependency this sort exists to remove. URL, info hash and tracker
+	// break the tie on the torrent's own identity; the synthesized title and
+	// summed size close it on the remaining first-occurrence output, so two refs
+	// that still compare equal render byte-identical items (a duplicated relation
 	// row can repeat the id, URL and hash while carrying different Files or
 	// ReleaseGroup values).
 	slices.SortStableFunc(ordered, func(a, b curatedRef) int {
@@ -712,8 +713,10 @@ func (p *journalPass) growJournal(entries []seadex.Entry) (nyaa, ab []journalIte
 
 // alreadyPublished reports whether any of a torrent's identity signals is
 // already in the publication log - either from a previous pass or from earlier
-// in THIS one, so two catalogue records naming the same release cannot both
-// journal it.
+// in THIS one, so two ENTRIES naming the same release cannot both journal it.
+// That is the reachable duplicate: ~4.4% of torrents are attached to several
+// entries, each a DIFFERENT AniList id. Two records under ONE alID is a
+// different thing and cannot arrive (seadexapi.validatePageIdentities).
 func (p *journalPass) alreadyPublished(ids []string) bool {
 	for _, id := range ids {
 		if p.published[id] || p.publish[id] {
